@@ -1,0 +1,12 @@
+/* 浮层根：铺满应用根元素，自身不接收指针，免得空白处挡住页面；直接子元素（各个浮层）恢复接收。 */
+.root {
+  position: absolute;
+  inset: 0;
+  z-index: var(--sk-z-overlay);
+  pointer-events: none;
+  isolation: isolate;
+}
+
+.root > * {
+  pointer-events: auto;
+}
