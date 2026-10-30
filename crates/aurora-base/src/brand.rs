@@ -1,8 +1,8 @@
-//! 产品名的唯一定义点（docs/design/sakura/10-naming.md 第七节）。
+//! 产品名的唯一定义点。
 //!
 //! 取值以宏给出，是为了能放进 `concat!`：崩溃规则表、User-Agent、元数据目录名都是
 //! `&'static str` 常量，只能在编译期拼接。前端在 `app/src/lib/app-info.ts` 另有一份，两边取值必须一致。
-//! crate 名、Rust 标识符、IPC 事件名里的 `aurora` 是内部代号，不随产品名改（同文第八节 C 层）。
+//! crate 名、Rust 标识符、IPC 事件名里的 `aurora` 是内部代号，不随产品名改。
 
 /// 中文名：界面文案、崩溃建议里指代产品，与相邻汉字之间不加空格。
 #[macro_export]
@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn slug_is_lowercase_english_name() {
-        // 落盘命名一律取全小写的英文名（10-naming.md 7.2 规则 2），两者不得各改各的。
+        // 落盘命名一律取全小写的英文名，两者不得各改各的。
         assert_eq!(APP_SLUG, APP_NAME_EN.to_lowercase());
         assert!(
             APP_SLUG
