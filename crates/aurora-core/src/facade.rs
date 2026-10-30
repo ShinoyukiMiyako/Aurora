@@ -288,6 +288,11 @@ impl Aurora {
         }
     }
 
+    /// 长任务快照上挂的取消令牌；给不经下载池、自己在阻塞线程里跑的步骤（解压整合包）观察。
+    pub(crate) fn cancel_token(&self) -> Option<&CancellationToken> {
+        self.cancel.as_ref()
+    }
+
     /// 微软登录链的端点表。
     pub(crate) fn msa_endpoints(&self) -> &MsaEndpoints {
         &self.msa_endpoints

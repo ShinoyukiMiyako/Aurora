@@ -347,6 +347,7 @@ dependencies = [
  "aurora-instance",
  "aurora-java",
  "aurora-launch",
+ "aurora-modpack",
  "aurora-modplatform",
  "aurora-version",
  "fastrand",

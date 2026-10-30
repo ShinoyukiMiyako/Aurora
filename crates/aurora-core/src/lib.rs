@@ -29,6 +29,7 @@ pub mod facade;
 pub mod install;
 pub mod java;
 pub mod launch;
+pub mod modpack;
 pub mod mods;
 pub mod resources;
 pub mod search;
@@ -42,6 +43,10 @@ pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::LaunchOptions;
+pub use modpack::{
+    INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
+    ModpackPreview, ModpackSource, read_instance_modpack, validate_instance_name,
+};
 pub use mods::ModInstallOutcome;
 pub use resources::{ResourceInstallOutcome, ResourceTarget};
 
@@ -82,5 +87,7 @@ pub use aurora_install::Error as InstallError;
 pub use aurora_instance::Error as InstanceError;
 pub use aurora_java::Error as JavaError;
 pub use aurora_launch::LaunchError;
+pub use aurora_modpack::Error as ModpackError;
+pub use aurora_modpack::{PackFormat, PackLoader, PackLoaderKind, PathValidationError};
 pub use aurora_modplatform::Error as ModPlatformError;
 pub use aurora_version::Error as VersionError;

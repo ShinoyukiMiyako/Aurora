@@ -36,6 +36,9 @@ pub enum CoreError {
     /// Mod 平台错误（Modrinth/CurseForge 客户端、本地模组扫描与启禁）。
     #[error(transparent)]
     ModPlatform(#[from] aurora_modplatform::Error),
+    /// 整合包文件错误（格式、清单、路径安全、解压）。
+    #[error(transparent)]
+    Modpack(#[from] aurora_modpack::Error),
 
     /// 读取配置文件失败。
     #[error("读取配置文件 {path} 失败")]
@@ -101,6 +104,25 @@ pub enum CoreError {
     /// CurseForge 作者禁止第三方分发，这些文件拿不到下载地址，只能去网页手动下载。
     #[error("这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}", files.join("、"))]
     FileDistributionBlocked { files: Vec<String> },
+    /// 新实例的名字不可用。
+    #[error("实例名 {name} 不可用：{}", rule.describe())]
+    InstanceNameInvalid {
+        name: String,
+        rule: crate::modpack::InstanceNameRule,
+    },
+    /// 启动器写在实例里的 JSON 文件（整合包信息、未完成标记、版本 JSON）读不懂。
+    #[error("读不懂 {path}")]
+    JsonFileInvalid {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// 序列化启动器自己的 JSON 文件失败。
+    #[error("序列化 JSON 失败")]
+    JsonSerialize(#[source] serde_json::Error),
+    /// 系统时钟早于 1970 年，记不了导入时间。
+    #[error("系统时钟早于 1970 年")]
+    SystemClock(#[source] std::time::SystemTimeError),
 }
 
 impl CoreError {
@@ -111,6 +133,7 @@ impl CoreError {
             CoreError::Download(err) => err.is_cancelled(),
             CoreError::Install(aurora_install::Error::Download(err)) => err.is_cancelled(),
             CoreError::Java(err) => err.is_cancelled(),
+            CoreError::Modpack(aurora_modpack::Error::Cancelled) => true,
             _ => false,
         }
     }
@@ -133,6 +156,7 @@ mod tests {
             .is_cancelled()
         );
         assert!(CoreError::Java(aurora_java::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Modpack(aurora_modpack::Error::Cancelled).is_cancelled());
 
         // 真正的失败不能被当成取消。
         assert!(!CoreError::NoJava { major: 17 }.is_cancelled());

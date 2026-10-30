@@ -12,6 +12,7 @@ aurora-download = { path = "../aurora-download" }
 aurora-instance = { path = "../aurora-instance" }
 aurora-install = { path = "../aurora-install" }
 aurora-modplatform = { path = "../aurora-modplatform" }
+aurora-modpack = { path = "../aurora-modpack" }
 aurora-launch = { path = "../aurora-launch" }
 # 仅用于在门面结构里持有由 aurora-base 工厂构建的 reqwest::Client 并克隆分发；本 crate 不直接调
 # reqwest 的方法，TLS/json 等特性由 aurora-base 统一开启（default-features=false 规避 native-tls）。
