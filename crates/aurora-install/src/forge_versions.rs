@@ -13,6 +13,7 @@ use std::cmp::Ordering;
 
 use aurora_base::retry::RetryPolicy;
 use aurora_download::SourcePlan;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::fabric::is_prerelease;
@@ -31,8 +32,8 @@ pub const NEOFORGE_LEGACY_MAVEN_METADATA: &str =
 /// NeoForge 1.20.1 构建的版本号前缀（Forge 47 分支）。现代 NeoForge 的版本号不会以 47 开头。
 pub(crate) const NEOFORGE_LEGACY_PREFIX: &str = "47.";
 
-/// 一个可安装的加载器构建。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 一个可安装的加载器构建。可序列化，供上层把列表缓存到磁盘、离线时沿用。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoaderBuild {
     /// 对应的游戏版本，与版本清单里的 id 同形。
     pub mc_version: String,
