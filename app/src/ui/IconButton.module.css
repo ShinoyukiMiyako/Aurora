@@ -1,0 +1,99 @@
+.button {
+  --icon-button-size: 36px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--icon-button-size);
+  height: var(--icon-button-size);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--sk-r-sm);
+  background: transparent;
+  color: var(--sk-text-2);
+  cursor: pointer;
+  outline: none;
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.button[data-size="sm"] {
+  --icon-button-size: 30px;
+}
+
+.button[data-size="lg"] {
+  --icon-button-size: 44px;
+  border-radius: var(--sk-r);
+}
+
+/* ---- 幽灵（默认） ---- */
+.button[data-variant="ghost"]:hover:not(:disabled) {
+  background: var(--sk-bg-2);
+  color: var(--sk-text);
+}
+
+/* ---- 次 ---- */
+.button[data-variant="secondary"] {
+  background: var(--sk-surface);
+  border-color: var(--sk-line);
+  box-shadow: var(--sk-shadow-sm);
+}
+
+.button[data-variant="secondary"]:hover:not(:disabled) {
+  border-color: var(--sk-line-2);
+  color: var(--sk-text);
+}
+
+/* ---- 危险 ---- */
+.button[data-variant="danger"]:hover:not(:disabled) {
+  background: var(--sk-danger-soft);
+  color: var(--sk-danger);
+}
+
+/* ---- 开（切换型按下）与菜单展开中 ---- */
+.button[aria-pressed="true"],
+.button[data-open] {
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.button[aria-pressed="true"]:hover:not(:disabled),
+.button[data-open]:hover:not(:disabled) {
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.button:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.button[data-variant="secondary"]:focus-visible {
+  box-shadow: var(--sk-focus), var(--sk-shadow-sm);
+}
+
+.button:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+:global([data-sk-reduced]) .button:active:not(:disabled) {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
+}
+
+.button:disabled {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.badge {
+  position: absolute;
+  top: calc(var(--sk-space-4) * -1);
+  right: calc(var(--sk-space-4) * -1);
+  pointer-events: none;
+}
