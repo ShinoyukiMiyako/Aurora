@@ -14,9 +14,10 @@ mod logging;
 mod tasks;
 mod window;
 
-use aurora_core::Aurora;
+use aurora_core::{Aurora, ServerMonitor};
 use tauri::Manager;
 
+use crate::commands::updater::{UpdaterState, UpdaterSupport};
 use crate::facade::Facade;
 use crate::tasks::{TaskJournal, TaskRegistry};
 
@@ -31,23 +32,40 @@ pub fn run() {
         "{} 启动",
         aurora_base::brand::APP_NAME_EN
     );
+    log_data_dir();
 
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let updater_support = commands::updater::detect_support(
+        context.config().plugins.0.get("updater"),
+        cfg!(debug_assertions),
+    );
+    tracing::info!(?updater_support, "自更新");
+
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         // 更改游戏目录、导入本地整合包要拿磁盘绝对路径，只能走系统对话框。
         .plugin(tauri_plugin_dialog::init())
         // 自更新装完后重启进程。
-        .plugin(tauri_plugin_process::init())
-        .setup(|app| {
+        .plugin(tauri_plugin_process::init());
+    // 插件配置里 pubkey 是必填项，缺了插件初始化就失败、整个应用起不来，所以只在支持时注册。
+    if updater_support == UpdaterSupport::Supported {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
+        .setup(move |app| {
             // Aurora::load() 是异步，而 setup 是同步闭包；用 Tauri 运行时 block_on 构造后放进 state。
             // 构造失败（配置损坏等）直接冒泡终止启动，避免带着半初始化的门面继续跑。
             let aurora = tauri::async_runtime::block_on(Aurora::load())?;
+            let server_monitor = ServerMonitor::new(aurora.data_dir());
             app.manage(Facade::new(aurora));
             // -- tasks --
             app.manage(TaskRegistry::default());
             app.manage(TaskJournal::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
+            // -- system --
+            app.manage(server_monitor);
+            app.manage(UpdaterState::new(updater_support));
             window::setup_main_window(app)?;
             Ok(())
         })
@@ -63,6 +81,11 @@ pub fn run() {
             commands::config::get_config,
             commands::config::update_config,
             commands::config::set_game_directory,
+            commands::config::list_game_directories,
+            commands::config::discover_game_directories,
+            commands::config::add_game_directory,
+            commands::config::remove_game_directory,
+            commands::config::inspect_game_directory,
             // -- java --
             commands::java::detect_java,
             commands::java::install_java,
@@ -87,9 +110,43 @@ pub fn run() {
             // -- discover --
             commands::discover::search_resources,
             commands::discover::install_mod,
+            // -- system --
+            commands::system::memory_advice,
+            commands::system::is_first_run,
+            commands::system::complete_first_run,
+            commands::servers::list_pinned_servers,
+            commands::servers::set_pinned_servers,
+            commands::servers::list_known_servers,
+            commands::servers::ping_servers,
+            commands::news::list_news,
+            commands::updater::updater_info,
+            commands::updater::check_update,
+            commands::updater::download_update,
+            commands::updater::install_update,
+            commands::updater::set_install_on_exit,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(context)
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                commands::updater::install_on_exit(app);
+            }
+        });
+}
+
+/// 数据目录在日志装好之前就定位了（日志文件就落在里面），走了哪条路、为什么、花了多久在这里补记。
+fn log_data_dir() {
+    match aurora_base::fs::resolve_data_dir() {
+        Ok(resolved) => tracing::info!(
+            path = ?resolved.path,
+            portable = resolved.portable,
+            fallback_reason = ?resolved.fallback_reason,
+            elapsed_ms = resolved.elapsed.as_millis() as u64,
+            "数据目录"
+        ),
+        // 这里只记录；随后的 Aurora::load 会以同一个错误终止启动。
+        Err(err) => tracing::error!(error = %err, "定位数据目录失败"),
+    }
 }
 
 #[cfg(test)]
