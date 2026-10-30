@@ -8,8 +8,11 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 
-/// 统一 User-Agent，形如 `Petalfall/0.1.0`。取 crate 版本作为默认值，
-/// 前端最终可通过 [`HttpConfig::user_agent`] 覆盖为整机应用版本。
+/// 兜底 User-Agent，形如 `Petalfall/0.1.0`。
+///
+/// 版本段取的是 aurora-base 自己的 crate 版本，不随应用发版变化，只适合测试与命令行工具。
+/// 应用层应以 [`HttpConfig::for_app_version`] 带上真实的应用版本构建客户端：镜像站按 UA 统计
+/// 与限流，报出一个永远不变的版本号会让对方无从区分新旧客户端。
 pub const USER_AGENT: &str = concat!(crate::app_name_en!(), "/", env!("CARGO_PKG_VERSION"));
 
 /// HTTP 客户端构建参数。
@@ -28,6 +31,16 @@ pub struct HttpConfig {
     pub total_timeout: Option<Duration>,
     /// 每个 host 的空闲连接池上限。
     pub pool_idle_per_host: usize,
+}
+
+impl HttpConfig {
+    /// 默认参数，User-Agent 换成 `Petalfall/<应用版本>`。
+    pub fn for_app_version(version: &str) -> Self {
+        Self {
+            user_agent: format!("{}/{version}", crate::brand::APP_NAME_EN),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for HttpConfig {
@@ -73,6 +86,17 @@ mod tests {
         let version = USER_AGENT.trim_start_matches("Petalfall/");
         assert!(!version.is_empty());
         assert!(version.contains('.'));
+    }
+
+    #[test]
+    fn app_version_config_only_replaces_user_agent() {
+        let config = HttpConfig::for_app_version("2.3.0-beta.1");
+        assert_eq!(config.user_agent, "Petalfall/2.3.0-beta.1");
+        let default = HttpConfig::default();
+        assert_eq!(config.connect_timeout, default.connect_timeout);
+        assert_eq!(config.read_timeout, default.read_timeout);
+        assert_eq!(config.total_timeout, default.total_timeout);
+        assert_eq!(config.pool_idle_per_host, default.pool_idle_per_host);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
