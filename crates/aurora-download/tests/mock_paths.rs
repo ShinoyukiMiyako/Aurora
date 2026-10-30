@@ -784,10 +784,177 @@ async fn pool_downloads_batch_and_reports_progress() {
     let final_progress = *rx.borrow();
     assert_eq!(final_progress.total, 3);
     assert_eq!(final_progress.finished, 3);
-    assert!(final_progress.bytes > 0, "应累计到实际传输字节");
+    let content: u64 = bodies.iter().map(|b| b.len() as u64).sum();
+    assert_eq!(
+        final_progress.bytes, content,
+        "无失败时有效字节等于内容总量"
+    );
 
     for (i, body) in bodies.iter().enumerate() {
         let dest = dir.path().join(format!("f{i}.txt"));
         assert_eq!(tokio::fs::read(&dest).await.unwrap(), body.as_bytes());
     }
+}
+
+/// 内容损坏触发重下时，进度字节不能把同一个文件计两遍。
+///
+/// 这是「100% · 1.06 GB / 1.04 GB」的根因复现：字节完整传下来了，只是 sha1 不对，整个文件重下。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupted_retry_does_not_double_count_progress_bytes() {
+    let server = MockServer::start().await;
+    let good = "the-authentic-payload";
+    let bad = "the-corrupted-payload"; // 与 good 等长，只有 sha1 拦得住它
+    assert_eq!(good.len(), bad.len());
+    let sha1 = sha1_of(good.as_bytes()).await;
+    let size = good.len() as u64;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .respond_with(move |_req: &Request| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_string(bad)
+            } else {
+                // 重下那一遍故意慢一点，留出窗口观察两次尝试之间的进度。
+                ResponseTemplate::new(200)
+                    .set_body_string(good)
+                    .set_delay(Duration::from_millis(400))
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("payload.bin");
+    let task = DownloadTask::new(format!("{}/file", server.uri()), &dest)
+        .with_sha1(&sha1)
+        .with_size(size);
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let pool = DownloadPool::new(downloader, 1).with_sample_interval(Duration::from_millis(10));
+    let (tx, rx) = watch::channel(DownloadProgress::default());
+    let download = tokio::spawn(async move { pool.download_all(vec![task], Some(tx)).await });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while hits.load(Ordering::SeqCst) < 2 {
+        assert!(std::time::Instant::now() < deadline, "等不到重下请求");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        rx.borrow().bytes,
+        0,
+        "坏的那一遍作废后，进度应立即退回，而不是带着它等重下"
+    );
+
+    let report = download
+        .await
+        .expect("下载任务不应 panic")
+        .expect("不应 panic");
+
+    assert!(report.is_success(), "重下后应成功: {:?}", report.failures);
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), good.as_bytes());
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "首次拿到坏内容并触发一次重下"
+    );
+    let snap = *rx.borrow();
+    assert_eq!(snap.bytes, size, "坏的那一遍要被退回，进度字节恰为文件大小");
+    assert_eq!(snap.total_bytes, Some(size));
+}
+
+/// 本就完整的文件计入进度：补全类批次里大部分文件都已在盘上，不计入的话进度会停在 0。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn already_complete_files_count_towards_progress_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/missing"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("fresh"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let present = dir.path().join("present.bin");
+    tokio::fs::write(&present, b"already-here").await.unwrap();
+    let tasks = vec![
+        DownloadTask::new(format!("{}/present", server.uri()), &present)
+            .with_sha1(sha1_of(b"already-here").await)
+            .with_size(12),
+        DownloadTask::new(
+            format!("{}/missing", server.uri()),
+            dir.path().join("missing.bin"),
+        )
+        .with_size(5),
+    ];
+
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let (tx, rx) = watch::channel(DownloadProgress::default());
+    let report = DownloadPool::new(downloader, 2)
+        .download_all(tasks, Some(tx))
+        .await
+        .unwrap();
+
+    assert!(report.is_success());
+    let requested: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect();
+    assert_eq!(requested, vec!["/missing"], "完整的文件不该再发请求");
+    let snap = *rx.borrow();
+    assert_eq!(snap.bytes, 17, "跳过的 12 字节加新下的 5 字节");
+    assert_eq!(snap.total_bytes, Some(17));
+}
+
+/// 并发为 1 时请求顺序即派发顺序：大文件先开工，大小未知的最后。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pool_dispatches_largest_files_first() {
+    let server = MockServer::start().await;
+    let files = [
+        ("/small", 3usize),
+        ("/unknown", 4),
+        ("/large", 9),
+        ("/mid", 6),
+    ];
+    for (route, len) in files {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(len)))
+            .mount(&server)
+            .await;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tasks: Vec<DownloadTask> = files
+        .iter()
+        .map(|(route, len)| {
+            let task = DownloadTask::new(
+                format!("{}{route}", server.uri()),
+                dir.path().join(route.trim_start_matches('/')),
+            );
+            if *route == "/unknown" {
+                task
+            } else {
+                task.with_size(*len as u64)
+            }
+        })
+        .collect();
+
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let report = DownloadPool::new(downloader, 1)
+        .download_all(tasks, None)
+        .await
+        .unwrap();
+
+    assert!(report.is_success());
+    let order: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect();
+    assert_eq!(order, vec!["/large", "/mid", "/small", "/unknown"]);
 }

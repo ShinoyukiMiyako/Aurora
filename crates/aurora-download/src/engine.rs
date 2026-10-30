@@ -29,7 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::chunk::{Chunk, ChunkConfig, ChunkPlan};
 use crate::error::{Error, Result};
 use crate::health::{SourceHealth, is_host_fault};
-use crate::progress::ProgressReporter;
+use crate::progress::{FileProgress, ProgressReporter};
 use crate::source::SourcePlan;
 use crate::task::DownloadTask;
 
@@ -104,11 +104,29 @@ impl Downloader {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
-        if self.already_complete(task).await? {
+        let file = FileProgress::new(progress);
+        if let Some(len) = self.already_complete(task).await? {
             tracing::debug!(dest = %task.dest.display(), "目标文件已存在且校验通过，跳过下载");
+            // 本就完整的文件也是这一批里已就绪的字节，不计入的话补全类批次的进度会停在 0。
+            file.settle(len);
             return Ok(());
         }
+        let result = self.fetch(task, &file, cancel).await;
+        // 落定该文件对进度的贡献：成功按实际大小，失败（含取消）清零。
+        match &result {
+            Ok(len) => file.settle(*len),
+            Err(_) => file.settle(0),
+        }
+        result.map(|_| ())
+    }
 
+    /// 逐源下载，返回落盘文件的实际大小。
+    async fn fetch(
+        &self,
+        task: &DownloadTask,
+        file: &FileProgress,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<u64> {
         // 已被判定不通的主机沉底再试：几千个小文件时，每个文件各自重新发现「这个源不通」的
         // 重试与退避能浪费十几分钟。
         let candidates = self
@@ -116,10 +134,10 @@ impl Downloader {
             .prioritize(self.config.sources.candidates(&task.url)?);
         let mut last_err: Option<Error> = None;
         for (index, url) in candidates.iter().enumerate() {
-            match self.fetch_from(url, task, progress, cancel).await {
-                Ok(()) => {
+            match self.fetch_from(url, task, file, cancel).await {
+                Ok(len) => {
                     self.health.record_success(url);
-                    return Ok(());
+                    return Ok(len);
                 }
                 Err(Error::Cancelled) => {
                     // 尝试已完整返回，此刻没有进行中的文件操作，清理不会与落盘赛跑。
@@ -168,15 +186,15 @@ impl Downloader {
         &self,
         url: &str,
         task: &DownloadTask,
-        progress: Option<&ProgressReporter>,
+        file: &FileProgress,
         cancel: Option<&CancellationToken>,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let transfer = transfer_for(&self.config.chunk, url, task.size);
         if transfer == Transfer::Whole {
-            return self.retry_on(url, task, progress, cancel, transfer).await;
+            return self.retry_on(url, task, file, cancel, transfer).await;
         }
-        let chunk_err = match self.retry_on(url, task, progress, cancel, transfer).await {
-            Ok(()) => return Ok(()),
+        let chunk_err = match self.retry_on(url, task, file, cancel, transfer).await {
+            Ok(len) => return Ok(len),
             Err(err) if err.is_cancelled() => return Err(err),
             Err(err) => err,
         };
@@ -187,13 +205,13 @@ impl Downloader {
             "分片路径失败，回退整文件单请求重下"
         );
         match self
-            .retry_on(url, task, progress, cancel, Transfer::Whole)
+            .retry_on(url, task, file, cancel, Transfer::Whole)
             .await
         {
-            Ok(()) => {
+            Ok(len) => {
                 // 分片路径已放弃，残留分片不会再被续传复用，留着只是长期占盘。
                 self.remove_parts(task).await;
-                Ok(())
+                Ok(len)
             }
             Err(err) if err.is_cancelled() => Err(err),
             Err(fallback_err) => {
@@ -221,11 +239,11 @@ impl Downloader {
         &self,
         url: &str,
         task: &DownloadTask,
-        progress: Option<&ProgressReporter>,
+        file: &FileProgress,
         cancel: Option<&CancellationToken>,
         transfer: Transfer,
-    ) -> Result<()> {
-        let attempt = || self.attempt(url, task, progress, cancel, transfer);
+    ) -> Result<u64> {
+        let attempt = || self.attempt(url, task, file, cancel, transfer);
         match cancel {
             // 退避等待里观察到取消即视为取消；进行中的尝试自己在网络等待点上响应。
             Some(token) => retry_async_until(&self.config.retry, token.cancelled(), attempt)
@@ -238,17 +256,20 @@ impl Downloader {
     /// 针对一个具体 URL 的一次完整下载尝试：下载 -> 合并临时文件 -> 校验 -> 原子落位。
     ///
     /// 传输方式由调用方决定而非此处推导：回退路径要在同一个 URL 上强制走整文件单请求。
+    /// 成功时返回落盘文件的实际大小。
     async fn attempt(
         &self,
         url: &str,
         task: &DownloadTask,
-        progress: Option<&ProgressReporter>,
+        file: &FileProgress,
         cancel: Option<&CancellationToken>,
         transfer: Transfer,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
+        // 上一次尝试（重试、回退或换源前那一轮）写下的字节都作废：本次复用的分片会重新计入。
+        file.reset();
         if let Some(parent) = task.dest.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -260,11 +281,11 @@ impl Downloader {
         let temp = temp_path(&task.dest);
         let parts = match transfer {
             Transfer::Chunked { total } => {
-                self.download_chunked(url, task, total, &temp, progress, cancel)
+                self.download_chunked(url, task, total, &temp, file, cancel)
                     .await?
             }
             Transfer::Whole => {
-                self.download_stream(url, &temp, progress, cancel).await?;
+                self.download_stream(url, &temp, file, cancel).await?;
                 Vec::new()
             }
         };
@@ -277,7 +298,7 @@ impl Downloader {
         &self,
         url: &str,
         temp: &Path,
-        progress: Option<&ProgressReporter>,
+        file: &FileProgress,
         cancel: Option<&CancellationToken>,
     ) -> Result<()> {
         let resp = until_cancelled(cancel, self.client.get(url).send())
@@ -293,7 +314,7 @@ impl Downloader {
                 status: status.as_u16(),
             });
         }
-        if let Err(err) = stream_to_file(resp, temp, progress, cancel).await {
+        if let Err(err) = stream_to_file(resp, temp, file, cancel).await {
             // 单流不做续传，失败即清掉半截临时文件，下次从头再来。
             let _ = tokio::fs::remove_file(temp).await;
             return Err(err);
@@ -308,7 +329,7 @@ impl Downloader {
         task: &DownloadTask,
         total: u64,
         temp: &Path,
-        progress: Option<&ProgressReporter>,
+        file: &FileProgress,
         cancel: Option<&CancellationToken>,
     ) -> Result<Vec<PathBuf>> {
         let final_url = match probe_final_url(&self.client, url, cancel).await {
@@ -337,7 +358,7 @@ impl Downloader {
         }
 
         let result = self
-            .fetch_chunks(&final_url, task, total, temp, progress, cancel)
+            .fetch_chunks(&final_url, task, total, temp, file, cancel)
             .await;
         if let Err(err) = &result
             && !err.is_cancelled()
@@ -365,7 +386,7 @@ impl Downloader {
         task: &DownloadTask,
         total: u64,
         temp: &Path,
-        progress: Option<&ProgressReporter>,
+        file: &FileProgress,
         cancel: Option<&CancellationToken>,
     ) -> Result<Vec<PathBuf>> {
         let plan = ChunkPlan::compute(
@@ -379,7 +400,7 @@ impl Downloader {
         let resp0 = ranged_get(&self.client, url, first.start, first.end, cancel).await?;
         if resp0.status() == reqwest::StatusCode::OK {
             // 服务器忽略了 Range、返回整体 200：此响应即完整文件，直接落到合并临时文件。
-            if let Err(err) = stream_to_file(resp0, temp, progress, cancel).await {
+            if let Err(err) = stream_to_file(resp0, temp, file, cancel).await {
                 let _ = tokio::fs::remove_file(temp).await;
                 return Err(err);
             }
@@ -388,7 +409,7 @@ impl Downloader {
 
         // 206：写首片。首片每次尝试都重下（一个块尺寸，代价可忽略），确保 Range 支持性判定可靠。
         let part0 = part_path(&task.dest, first.index);
-        let written0 = stream_to_file(resp0, &part0, progress, cancel).await?;
+        let written0 = stream_to_file(resp0, &part0, file, cancel).await?;
         if written0 != first.byte_len() {
             let _ = tokio::fs::remove_file(&part0).await;
             return Err(Error::IncompleteBody {
@@ -400,13 +421,13 @@ impl Downloader {
 
         // 其余分片并发下载，已完成的分片（尺寸吻合）跳过——这是断点续传的落点。
         let semaphore = Arc::new(Semaphore::new(self.config.chunk.chunk_concurrency.max(1)));
-        let owned_progress = progress.cloned();
         let owned_cancel = cancel.cloned();
         let mut set: JoinSet<Result<()>> = JoinSet::new();
         let mut first_err: Option<Error> = None;
         for chunk in plan.chunks.iter().skip(1).copied() {
             let part = part_path(&task.dest, chunk.index);
             if part_complete(&part, chunk.byte_len()).await {
+                file.reused(chunk.byte_len());
                 continue;
             }
             // 信号量从不关闭；真关了也不能直接返回，已派出的分片要等它们写完再交给外层清理。
@@ -418,11 +439,11 @@ impl Downloader {
             };
             let client = self.client.clone();
             let url = url.to_owned();
-            let prog = owned_progress.clone();
+            let chunk_file = file.clone();
             let token = owned_cancel.clone();
             set.spawn(async move {
                 let _permit = permit;
-                download_one_chunk(&client, &url, chunk, &part, prog.as_ref(), token.as_ref()).await
+                download_one_chunk(&client, &url, chunk, &part, &chunk_file, token.as_ref()).await
             });
         }
 
@@ -454,20 +475,22 @@ impl Downloader {
             .collect())
     }
 
-    /// 合并后校验并原子落位。大小/哈希不符视为损坏：清掉临时文件与分片，让外层重下。
-    async fn finalize(&self, temp: &Path, task: &DownloadTask, parts: &[PathBuf]) -> Result<()> {
-        if let Some(expected) = task.size {
-            let meta = tokio::fs::metadata(temp)
-                .await
-                .map_err(|source| io_error(temp, source))?;
-            if meta.len() != expected {
-                cleanup(temp, parts).await;
-                return Err(Error::SizeMismatch {
-                    url: task.url.clone(),
-                    expected,
-                    actual: meta.len(),
-                });
-            }
+    /// 合并后校验并原子落位，返回文件实际大小。大小/哈希不符视为损坏：清掉临时文件与分片，
+    /// 让外层重下。
+    async fn finalize(&self, temp: &Path, task: &DownloadTask, parts: &[PathBuf]) -> Result<u64> {
+        let len = tokio::fs::metadata(temp)
+            .await
+            .map_err(|source| io_error(temp, source))?
+            .len();
+        if let Some(expected) = task.size
+            && len != expected
+        {
+            cleanup(temp, parts).await;
+            return Err(Error::SizeMismatch {
+                url: task.url.clone(),
+                expected,
+                actual: len,
+            });
         }
         if let Some(sha1) = &task.sha1
             && let Err(err) = aurora_base::fs::verify_sha1(temp, sha1).await
@@ -482,7 +505,7 @@ impl Downloader {
         for part in parts {
             let _ = tokio::fs::remove_file(part).await;
         }
-        Ok(())
+        Ok(len)
     }
 
     /// 取消后清掉该文件的全部中间产物：合并临时文件与按分块计划能推出的所有分片。
@@ -510,22 +533,24 @@ impl Downloader {
     }
 
     /// 目标是否已存在且满足完整性契约（有 sha1 校 sha1，否则有大小校大小，都没有则不认为完整）。
-    async fn already_complete(&self, task: &DownloadTask) -> Result<bool> {
+    /// 完整时返回文件大小，供进度计入。
+    async fn already_complete(&self, task: &DownloadTask) -> Result<Option<u64>> {
         match tokio::fs::metadata(&task.dest).await {
             Ok(meta) => {
+                let len = meta.len();
                 if let Some(sha1) = &task.sha1 {
                     match aurora_base::fs::verify_sha1(&task.dest, sha1).await {
-                        Ok(()) => Ok(true),
-                        Err(aurora_base::Error::HashMismatch { .. }) => Ok(false),
+                        Ok(()) => Ok(Some(len)),
+                        Err(aurora_base::Error::HashMismatch { .. }) => Ok(None),
                         Err(err) => Err(err.into()),
                     }
                 } else if let Some(size) = task.size {
-                    Ok(meta.len() == size)
+                    Ok((len == size).then_some(len))
                 } else {
-                    Ok(false)
+                    Ok(None)
                 }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(source) => Err(io_error(&task.dest, source)),
         }
     }
@@ -651,7 +676,7 @@ async fn download_one_chunk(
     url: &str,
     chunk: Chunk,
     part: &Path,
-    progress: Option<&ProgressReporter>,
+    file: &FileProgress,
     cancel: Option<&CancellationToken>,
 ) -> Result<()> {
     let resp = ranged_get(client, url, chunk.start, chunk.end, cancel).await?;
@@ -661,7 +686,7 @@ async fn download_one_chunk(
             url: url.to_owned(),
         });
     }
-    let written = stream_to_file(resp, part, progress, cancel).await?;
+    let written = stream_to_file(resp, part, file, cancel).await?;
     if written != chunk.byte_len() {
         let _ = tokio::fs::remove_file(part).await;
         return Err(Error::IncompleteBody {
@@ -680,7 +705,7 @@ async fn download_one_chunk(
 async fn stream_to_file(
     mut resp: reqwest::Response,
     path: &Path,
-    progress: Option<&ProgressReporter>,
+    progress: &FileProgress,
     cancel: Option<&CancellationToken>,
 ) -> Result<u64> {
     let url = resp.url().as_str().to_owned();
@@ -695,9 +720,7 @@ async fn stream_to_file(
                     .await
                     .map_err(|source| io_error(path, source))?;
                 written += bytes.len() as u64;
-                if let Some(reporter) = progress {
-                    reporter.add_bytes(bytes.len() as u64);
-                }
+                progress.transferred(bytes.len() as u64);
             }
             Ok(None) => break,
             Err(source) => return Err(Error::Request { url, source }),
