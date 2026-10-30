@@ -1,0 +1,1163 @@
+//! 实例管理：列表、设置、内容、工作目录、删除、改名与侧栏固定。
+//!
+//! 实例就是游戏目录 `versions/` 下的一个版本目录，目录名即实例 id。这里的操作只碰本地文件，
+//! 安装与补全在 [`crate::instance_install`]。id 来自前端，是不可信输入，拼进任何路径之前都先过
+//! [`is_safe_instance_id`]。
+//!
+//! 改名与删除会牵连两类引用：别的实例经 `inheritsFrom` 依赖它（传统布局的加载器版本），这种情况
+//! 直接拒绝；配置里的侧栏固定与当前选中由调用方拿到写锁后经 [`Aurora::rename_instance_refs`] /
+//! [`Aurora::forget_instance`] 同步再落盘，文件操作本身在快照上做，不占门面锁。
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use aurora_instance::{
+    AURORA_META_DIR, BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker,
+    InstanceContent, MarkerStore, PinsViolation, ResolvedIsolation, VersionProbe, VersionScan,
+    VersionSettings, VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files,
+    dir_footprint, discover_versions, is_safe_instance_id, list_version_dirs, list_worlds,
+    probe_version, read_instance_content, resolve_isolation,
+};
+use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
+use crate::InstanceError;
+use crate::error::{CoreError, Result};
+use crate::facade::Aurora;
+
+/// 侧栏最多固定的实例数。
+pub const MAX_SIDEBAR_PINS: usize = 5;
+
+/// 版本 JSON 没有声明 `javaVersion` 时用的 Java 主版本：只有 1.6 之前的老版本不带这个字段，
+/// 它们都跑在 Java 8 上，官方启动器与启动流程取的是同一个值。
+pub const LEGACY_JAVA_MAJOR: u32 = 8;
+
+/// 列表阶段同时读取实例附属文件（设置、标记、mods 目录）的路数。
+const LIST_CONCURRENCY: usize = 8;
+
+/// 继承链最多追几层；正常数据只有一两层，上限只是防环。
+const MAX_INHERIT_DEPTH: usize = 16;
+
+/// 改名时旧版本 JSON 先挪到这个后缀的文件，新 JSON 写成功、其余文件也改完才删，失败时据此还原。
+const RENAME_STAGED_SUFFIX: &str = concat!(".", aurora_base::app_slug!(), "-rename");
+
+/// 一个附属文件的读取结果。读不出来时带原因，不让一个坏文件拖垮整张列表，也不假装它是默认值。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Readable<T> {
+    Read(T),
+    Unreadable(String),
+}
+
+/// 列表里的一个实例。
+#[derive(Debug, Clone, PartialEq)]
+pub struct InstanceSummary {
+    pub id: String,
+    /// 实例目录 `versions/<id>`。
+    pub dir: PathBuf,
+    /// 版本 JSON 解析出的信息，或解析不了的原因。
+    pub version: InstanceVersion,
+    /// 实例设置（介绍、封面、隔离覆盖等）。
+    pub settings: Readable<VersionSettings>,
+    /// 未完成标记；`None` 表示文件齐全（或至少没有中断过的安装与修复）。
+    pub incomplete: Option<Readable<IncompleteMarker>>,
+    /// 实例目录的创建时刻（Unix 毫秒）；文件系统不记录创建时间时为 `None`。
+    pub created_at: Option<u64>,
+}
+
+/// 实例的版本状态。
+#[derive(Debug, Clone, PartialEq)]
+pub enum InstanceVersion {
+    Ready(ReadyVersion),
+    Broken(BrokenReason),
+}
+
+/// 版本 JSON 可用的实例。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadyVersion {
+    /// 原版版本号；识别不出时为 `None`。
+    pub mc_version: Option<String>,
+    pub loaders: Vec<LoaderInfo>,
+    /// 版本 JSON 的 `type`（release / snapshot / old_beta / old_alpha）。
+    pub release_type: Option<String>,
+    pub is_release: bool,
+    /// 需要的 Java 主版本；继承链断了（父版本不在）时为 `None`。
+    pub java_major: Option<u32>,
+    /// 工作目录 `mods/` 下的 Mod 文件数；设置文件读不出、定不了工作目录时为 `None`。
+    pub mod_count: Option<u32>,
+}
+
+/// 删除前的预览：会一起删掉的存档、占用空间与依赖它的实例。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeletionPreview {
+    pub id: String,
+    pub dir: PathBuf,
+    /// 实例目录里的存档（隔离的存档随实例删除；共用 `.minecraft/saves` 的不受影响，不在这里）。
+    pub worlds: Vec<WorldEntry>,
+    pub size_bytes: u64,
+    pub file_count: u64,
+    /// 经 `inheritsFrom` 依赖它的实例；非空时删除会被拒绝。
+    pub dependents: Vec<String>,
+}
+
+impl Aurora {
+    /// 实例目录路径；id 不能安全拼进路径时报 [`InstanceError::InvalidId`]。不检查目录是否存在。
+    pub fn instance_dir(&self, id: &str) -> Result<PathBuf> {
+        if !is_safe_instance_id(id) {
+            return Err(InstanceError::InvalidId { id: id.to_owned() }.into());
+        }
+        Ok(self.layout().version_dir(id))
+    }
+
+    /// 已存在的实例目录；不存在报 [`CoreError::VersionNotInstalled`]。
+    pub async fn existing_instance_dir(&self, id: &str) -> Result<PathBuf> {
+        let dir = self.instance_dir(id)?;
+        match tokio::fs::metadata(&dir).await {
+            Ok(meta) if meta.is_dir() => Ok(dir),
+            Ok(_) => Err(not_installed(id)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(not_installed(id)),
+            Err(source) => Err(aurora_base::Error::Io { path: dir, source }.into()),
+        }
+    }
+
+    /// `versions/` 下全部实例目录名（含版本 JSON 损坏的），按名升序。
+    pub async fn instance_names(&self) -> Result<Vec<String>> {
+        Ok(list_version_dirs(self.game_dir())
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// 列出全部实例：版本信息、设置、未完成标记、Mod 文件数与创建时间一次给齐。
+    ///
+    /// Mod 数只数 `mods/` 下的文件，不解析 jar；版本 JSON 解析走进程内缓存，文件没变就不重读。
+    pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
+        let scan = discover_versions(self.game_dir()).await?;
+        let javas = java_majors(&scan);
+        let mut entries: Vec<Entry> = scan
+            .versions
+            .into_iter()
+            .map(|version| {
+                let java = javas.get(&version.id).copied().flatten();
+                Entry::Found(Box::new(version), java)
+            })
+            .chain(scan.broken.into_iter().map(Entry::Broken))
+            .collect();
+        entries.sort_by_cached_key(|entry| entry.id().to_lowercase());
+
+        let game_dir = self.game_dir().to_path_buf();
+        let policy = self.config().isolation_policy;
+        let permits = Arc::new(Semaphore::new(LIST_CONCURRENCY));
+        let total = entries.len();
+        let mut set = JoinSet::new();
+        for (index, entry) in entries.into_iter().enumerate() {
+            let permits = permits.clone();
+            let game_dir = game_dir.clone();
+            set.spawn(async move {
+                let _permit = permits.acquire_owned().await.expect("列表的信号量从不关闭");
+                (index, summarize(&game_dir, policy, entry).await)
+            });
+        }
+        let mut slots: Vec<Option<InstanceSummary>> = vec![None; total];
+        while let Some(joined) = set.join_next().await {
+            let (index, summary) = joined?;
+            slots[index] = Some(summary?);
+        }
+        Ok(slots
+            .into_iter()
+            .map(|slot| slot.expect("每个实例都有一份结果"))
+            .collect())
+    }
+
+    /// 读取实例设置；没有自定义过时为默认值。
+    pub async fn instance_settings(&self, id: &str) -> Result<VersionSettings> {
+        let dir = self.existing_instance_dir(id).await?;
+        Ok(VersionSettingsStore::for_version_dir(&dir).load().await?)
+    }
+
+    /// 整份写入实例设置；任一字段不合法报 [`InstanceError::InvalidSettings`]，不改动文件。
+    pub async fn set_instance_settings(&self, id: &str, settings: &VersionSettings) -> Result<()> {
+        settings
+            .validate()
+            .map_err(|violation| InstanceError::InvalidSettings {
+                field: violation.field,
+                reason: violation.reason,
+            })?;
+        let dir = self.existing_instance_dir(id).await?;
+        VersionSettingsStore::for_version_dir(&dir)
+            .save(settings)
+            .await?;
+        Ok(())
+    }
+
+    /// 版本 JSON 可用的实例；目录不在报未安装，JSON 缺失或损坏报 [`InstanceError::Broken`]。
+    pub async fn instance_version(&self, id: &str) -> Result<DiscoveredVersion> {
+        let dir = self.existing_instance_dir(id).await?;
+        match probe_version(self.game_dir(), id).await? {
+            VersionProbe::Found(version) => Ok(*version),
+            VersionProbe::Broken(broken) => {
+                tracing::warn!(id, dir = %dir.display(), reason = ?broken.reason, "实例版本 JSON 不可用");
+                Err(InstanceError::Broken {
+                    id: id.to_owned(),
+                    reason: broken_reason_text(&broken.reason),
+                }
+                .into())
+            }
+        }
+    }
+
+    /// 实例运行时的工作目录：全局隔离档位、实例自己的隔离覆盖与「已有 mods/saves 强制隔离」综合判定。
+    ///
+    /// 启动、Mod 管理、打开文件夹都要用同一个结果，不然会出现「启动用的是隔离目录，Mod 却装进了公共目录」。
+    pub async fn resolve_working_dir(&self, id: &str) -> Result<ResolvedIsolation> {
+        let version = self.instance_version(id).await?;
+        let settings = VersionSettingsStore::for_version_dir(&version.dir)
+            .load()
+            .await?;
+        Ok(resolve_isolation(
+            self.game_dir(),
+            id,
+            self.config().isolation_policy,
+            settings.isolation,
+            version.has_mod_loader(),
+            version.is_release(),
+        )
+        .await?)
+    }
+
+    /// 实例的资源包、光影包与存档（从它的工作目录读）。
+    pub async fn instance_content(&self, id: &str) -> Result<InstanceContent> {
+        let resolved = self.resolve_working_dir(id).await?;
+        Ok(read_instance_content(&resolved.working_dir).await?)
+    }
+
+    /// 删除前的预览。实例不存在报未安装。
+    pub async fn deletion_preview(&self, id: &str) -> Result<DeletionPreview> {
+        let dir = self.existing_instance_dir(id).await?;
+        let worlds = list_worlds(&dir.join("saves")).await?;
+        let (size_bytes, file_count) = dir_footprint(&dir).await?;
+        let scan = discover_versions(self.game_dir()).await?;
+        Ok(DeletionPreview {
+            id: id.to_owned(),
+            dir,
+            worlds,
+            size_bytes,
+            file_count,
+            dependents: dependents_in(&scan, id),
+        })
+    }
+
+    /// 把实例目录交给 `disposer`（生产是系统回收站）。返回目录原先是否存在：不存在时什么都不做，
+    /// 重复删除是幂等的。有别的实例依赖它时报 [`InstanceError::HasDependents`]。
+    ///
+    /// 只处理文件；配置里的引用由调用方随后经 [`Aurora::forget_instance`] 清掉。
+    pub async fn delete_instance_files(
+        &self,
+        id: &str,
+        disposer: impl Disposer + 'static,
+    ) -> Result<bool> {
+        let dir = self.instance_dir(id)?;
+        match tokio::fs::metadata(&dir).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Err(not_installed(id)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
+        }
+        let scan = discover_versions(self.game_dir()).await?;
+        ensure_no_dependents(&scan, id)?;
+        tracing::info!(id, dir = %dir.display(), "删除实例：移入回收站");
+        tokio::task::spawn_blocking(move || disposer.dispose(&dir)).await??;
+        Ok(true)
+    }
+
+    /// 从配置里去掉对实例 `id` 的引用（侧栏固定、当前选中）。返回配置是否有变化，有变化时调用方落盘。
+    pub fn forget_instance(&mut self, id: &str) -> bool {
+        let pins = &self.config().sidebar_pins;
+        let kept: Vec<String> = pins.iter().filter(|pin| *pin != id).cloned().collect();
+        let pins_changed = kept.len() != pins.len();
+        if pins_changed {
+            self.set_sidebar_pins(kept);
+        }
+        let was_selected = self.config().selected_version.as_deref() == Some(id);
+        if was_selected {
+            self.set_selected_version(None);
+        }
+        pins_changed || was_selected
+    }
+
+    /// 改名：实例目录、版本 JSON（文件名与其中的 `id`）、客户端 jar 与 natives 目录一起改。
+    ///
+    /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝。中途失败时把已经改掉的
+    /// 逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Aurora::rename_instance_refs`] 同步。
+    pub async fn rename_instance_files(&self, old: &str, new: &str) -> Result<()> {
+        let old_dir = self.existing_instance_dir(old).await?;
+        let names = self.instance_names().await?;
+        check_instance_name(new, names.iter().map(String::as_str), Some(old)).map_err(
+            |violation| InstanceError::InvalidName {
+                name: new.to_owned(),
+                violation,
+            },
+        )?;
+        if old == new {
+            return Ok(());
+        }
+        let scan = discover_versions(self.game_dir()).await?;
+        ensure_no_dependents(&scan, old)?;
+        let new_dir = self.instance_dir(new)?;
+        let (old, new) = (old.to_owned(), new.to_owned());
+        tracing::info!(%old, %new, "实例改名");
+        tokio::task::spawn_blocking(move || rename_blocking(&old_dir, &new_dir, &old, &new))
+            .await??;
+        Ok(())
+    }
+
+    /// 把配置里对 `old` 的引用改成 `new`（侧栏固定保持原位，当前选中跟着走）。返回配置是否有变化。
+    pub fn rename_instance_refs(&mut self, old: &str, new: &str) -> bool {
+        let pins = &self.config().sidebar_pins;
+        let renamed: Vec<String> = pins
+            .iter()
+            .map(|pin| {
+                if pin == old {
+                    new.to_owned()
+                } else {
+                    pin.clone()
+                }
+            })
+            .collect();
+        let pins_changed = renamed != *pins;
+        if pins_changed {
+            self.set_sidebar_pins(renamed);
+        }
+        let was_selected = self.config().selected_version.as_deref() == Some(old);
+        if was_selected {
+            self.set_selected_version(Some(new.to_owned()));
+        }
+        pins_changed || was_selected
+    }
+
+    /// 配置里固定的实例中当前仍然存在的那些，保持顺序。
+    pub async fn existing_sidebar_pins(&self) -> Result<Vec<String>> {
+        let names: HashSet<String> = self.instance_names().await?.into_iter().collect();
+        Ok(self
+            .config()
+            .sidebar_pins
+            .iter()
+            .filter(|pin| names.contains(*pin))
+            .cloned()
+            .collect())
+    }
+
+    /// 校验一份侧栏固定列表：不超过 [`MAX_SIDEBAR_PINS`] 个、不重复、每个都是现有实例。
+    pub async fn validate_sidebar_pins(&self, pins: &[String]) -> Result<()> {
+        if pins.len() > MAX_SIDEBAR_PINS {
+            return Err(InstanceError::InvalidPins {
+                reason: PinsViolation::TooMany,
+                id: None,
+            }
+            .into());
+        }
+        let mut seen = HashSet::new();
+        if let Some(dup) = pins.iter().find(|pin| !seen.insert(pin.as_str())) {
+            return Err(InstanceError::InvalidPins {
+                reason: PinsViolation::Duplicate,
+                id: Some(dup.clone()),
+            }
+            .into());
+        }
+        let names: HashSet<String> = self.instance_names().await?.into_iter().collect();
+        if let Some(missing) = pins.iter().find(|pin| !names.contains(*pin)) {
+            return Err(InstanceError::InvalidPins {
+                reason: PinsViolation::NotFound,
+                id: Some(missing.clone()),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// 新建实例时的名称校验：命名规则 + 不分大小写不与现有实例重名。
+    pub async fn check_new_instance_name(&self, name: &str) -> Result<()> {
+        let names = self.instance_names().await?;
+        check_instance_name(name, names.iter().map(String::as_str), None).map_err(|violation| {
+            InstanceError::InvalidName {
+                name: name.to_owned(),
+                violation,
+            }
+        })?;
+        Ok(())
+    }
+}
+
+fn not_installed(id: &str) -> CoreError {
+    CoreError::VersionNotInstalled { id: id.to_owned() }
+}
+
+/// 损坏原因的人类可读说明（列表、错误信息共用）。
+pub fn broken_reason_text(reason: &BrokenReason) -> String {
+    match reason {
+        BrokenReason::MissingJson => "缺少版本 JSON".to_owned(),
+        BrokenReason::Parse(detail) => format!("版本 JSON 损坏：{detail}"),
+    }
+}
+
+enum Entry {
+    Found(Box<DiscoveredVersion>, Option<u32>),
+    Broken(BrokenVersion),
+}
+
+impl Entry {
+    fn id(&self) -> &str {
+        match self {
+            Entry::Found(version, _) => &version.id,
+            Entry::Broken(broken) => &broken.id,
+        }
+    }
+}
+
+async fn summarize(
+    game_dir: &Path,
+    policy: aurora_instance::IsolationPolicy,
+    entry: Entry,
+) -> Result<InstanceSummary> {
+    let (id, dir) = match &entry {
+        Entry::Found(version, _) => (version.id.clone(), version.dir.clone()),
+        Entry::Broken(broken) => (broken.id.clone(), broken.dir.clone()),
+    };
+    let settings = match VersionSettingsStore::for_version_dir(&dir).load().await {
+        Ok(settings) => Readable::Read(settings),
+        Err(err) => {
+            tracing::warn!(id, error = %err, "实例设置读不出来");
+            Readable::Unreadable(err.to_string())
+        }
+    };
+    let incomplete = match MarkerStore::for_version_dir(&dir).load().await {
+        Ok(marker) => marker.map(Readable::Read),
+        Err(err) => {
+            tracing::warn!(id, error = %err, "未完成标记读不出来");
+            Some(Readable::Unreadable(err.to_string()))
+        }
+    };
+    let meta = tokio::fs::metadata(&dir)
+        .await
+        .map_err(|source| aurora_base::Error::Io {
+            path: dir.clone(),
+            source,
+        })?;
+    // created() 报错只意味着这个文件系统不记录创建时间。
+    let created_at = meta.created().ok().and_then(unix_millis);
+
+    let version = match entry {
+        Entry::Broken(broken) => InstanceVersion::Broken(broken.reason),
+        Entry::Found(version, java_major) => {
+            let mod_count = match &settings {
+                Readable::Read(settings) => {
+                    let resolved = resolve_isolation(
+                        game_dir,
+                        &id,
+                        policy,
+                        settings.isolation,
+                        version.has_mod_loader(),
+                        version.is_release(),
+                    )
+                    .await?;
+                    Some(count_mod_files(&resolved.working_dir.join("mods")).await?)
+                }
+                Readable::Unreadable(_) => None,
+            };
+            InstanceVersion::Ready(ReadyVersion {
+                mc_version: identify_mc_version(&version.json).value,
+                is_release: version.is_release(),
+                release_type: version.json.release_type.clone(),
+                loaders: version.loaders,
+                java_major,
+                mod_count,
+            })
+        }
+    };
+    Ok(InstanceSummary {
+        id,
+        dir,
+        version,
+        settings,
+        incomplete,
+        created_at,
+    })
+}
+
+fn unix_millis(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+}
+
+/// 每个版本需要的 Java 主版本：沿继承链找第一个声明了 `javaVersion` 的，链到头都没有取
+/// [`LEGACY_JAVA_MAJOR`]；父版本不在扫描结果里（链断了）为 `None`。
+fn java_majors(scan: &VersionScan) -> HashMap<String, Option<u32>> {
+    let by_id: HashMap<&str, &VersionJson> = scan
+        .versions
+        .iter()
+        .map(|v| (v.id.as_str(), &v.json))
+        .collect();
+    scan.versions
+        .iter()
+        .map(|v| (v.id.clone(), declared_java(&v.json, &by_id)))
+        .collect()
+}
+
+fn declared_java(json: &VersionJson, by_id: &HashMap<&str, &VersionJson>) -> Option<u32> {
+    let mut current = json;
+    for _ in 0..MAX_INHERIT_DEPTH {
+        if let Some(java) = &current.java_version {
+            return Some(java.major_version);
+        }
+        match current.inherits_from.as_deref() {
+            Some(parent) => current = by_id.get(parent)?,
+            None => return Some(LEGACY_JAVA_MAJOR),
+        }
+    }
+    None
+}
+
+/// 继承链的根版本 id：客户端 jar 与 natives 所在的版本。没有 inheritsFrom 时就是自己。
+pub(crate) fn inheritance_root(scan: &VersionScan, id: &str) -> String {
+    let by_id: HashMap<&str, &VersionJson> = scan
+        .versions
+        .iter()
+        .map(|v| (v.id.as_str(), &v.json))
+        .collect();
+    let mut current = id;
+    for _ in 0..MAX_INHERIT_DEPTH {
+        match by_id.get(current).and_then(|v| v.inherits_from.as_deref()) {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    current.to_owned()
+}
+
+/// 经 `inheritsFrom` 直接依赖 `id` 的实例。
+fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
+    scan.versions
+        .iter()
+        .filter(|v| v.id != id && v.json.inherits_from.as_deref() == Some(id))
+        .map(|v| v.id.clone())
+        .collect()
+}
+
+fn ensure_no_dependents(scan: &VersionScan, id: &str) -> Result<()> {
+    let dependents = dependents_in(scan, id);
+    if dependents.is_empty() {
+        return Ok(());
+    }
+    Err(InstanceError::HasDependents {
+        id: id.to_owned(),
+        dependents,
+    }
+    .into())
+}
+
+/// 改名中已经完成的一步，失败时按相反顺序撤销。
+enum Undo {
+    Renamed { from: PathBuf, to: PathBuf },
+    Created(PathBuf),
+}
+
+fn rename_blocking(old_dir: &Path, new_dir: &Path, old: &str, new: &str) -> Result<()> {
+    let mut done = Vec::new();
+    let outcome = rename_steps(old_dir, new_dir, old, new, &mut done);
+    match outcome {
+        Ok(staged) => {
+            if let Some(staged) = staged {
+                std::fs::remove_file(&staged).map_err(|source| io_error(&staged, source))?;
+            }
+            Ok(())
+        }
+        Err(err) => {
+            for step in done.into_iter().rev() {
+                let undone = match &step {
+                    Undo::Renamed { from, to } => std::fs::rename(to, from),
+                    Undo::Created(path) => std::fs::remove_file(path),
+                };
+                if let Err(undo_err) = undone {
+                    tracing::warn!(error = %undo_err, "改名失败后还原其中一步也失败了，需要手动检查实例目录");
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+/// 依次改目录、版本 JSON、jar、natives。返回旧 JSON 暂存文件的路径（全部成功后由调用方删除）。
+fn rename_steps(
+    old_dir: &Path,
+    new_dir: &Path,
+    old: &str,
+    new: &str,
+    done: &mut Vec<Undo>,
+) -> Result<Option<PathBuf>> {
+    rename_path(old_dir, new_dir, done)?;
+
+    let old_json = new_dir.join(format!("{old}.json"));
+    let staged = if old_json.is_file() {
+        let bytes = std::fs::read(&old_json).map_err(|source| io_error(&old_json, source))?;
+        let rewritten = rewrite_version_id(&bytes, new, &old_json)?;
+        // 只改大小写时新旧文件名在 Windows 上指向同一个文件，先挪开旧文件再写新文件才不会互相覆盖。
+        let staged = new_dir
+            .join(AURORA_META_DIR)
+            .join(format!("{old}.json{RENAME_STAGED_SUFFIX}"));
+        if let Some(parent) = staged.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+        }
+        rename_path(&old_json, &staged, done)?;
+        let new_json = new_dir.join(format!("{new}.json"));
+        std::fs::write(&new_json, rewritten).map_err(|source| io_error(&new_json, source))?;
+        done.push(Undo::Created(new_json));
+        Some(staged)
+    } else {
+        None
+    };
+
+    for (from, to) in [
+        (format!("{old}.jar"), format!("{new}.jar")),
+        (format!("{old}-natives"), format!("{new}-natives")),
+    ] {
+        let from = new_dir.join(from);
+        if from.exists() {
+            rename_path(&from, &new_dir.join(to), done)?;
+        }
+    }
+    Ok(staged)
+}
+
+fn rename_path(from: &Path, to: &Path, done: &mut Vec<Undo>) -> Result<()> {
+    std::fs::rename(from, to).map_err(|source| io_error(from, source))?;
+    done.push(Undo::Renamed {
+        from: from.to_path_buf(),
+        to: to.to_path_buf(),
+    });
+    Ok(())
+}
+
+fn io_error(path: &Path, source: std::io::Error) -> CoreError {
+    aurora_base::Error::Io {
+        path: path.to_path_buf(),
+        source,
+    }
+    .into()
+}
+
+/// 把版本 JSON 的 `id` 改成新名字，其余字段原样保留（含本项目没有建模的字段）。
+///
+/// 原版实例原先靠 id 本身就是版本号（`1.21.1`）认出 MC 版本，改名后就认不出了，所以没有
+/// `inheritsFrom` 与 `clientVersion` 时把识别出的版本号写进 `clientVersion`。
+fn rewrite_version_id(bytes: &[u8], new_id: &str, path: &Path) -> Result<Vec<u8>> {
+    let json_error = |source| InstanceError::Json {
+        context: "版本 JSON",
+        path: path.to_path_buf(),
+        source,
+    };
+    let parsed: VersionJson = serde_json::from_slice(bytes).map_err(json_error)?;
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).map_err(json_error)?;
+    let object = value.as_object_mut().ok_or_else(|| InstanceError::Broken {
+        id: parsed.id.clone(),
+        reason: "版本 JSON 顶层不是对象".to_owned(),
+    })?;
+    if !object.contains_key("inheritsFrom") && !object.contains_key("clientVersion") {
+        let mc = identify_mc_version(&parsed);
+        if let (true, Some(version)) = (mc.reliable, mc.value) {
+            object.insert(
+                "clientVersion".to_owned(),
+                serde_json::Value::String(version),
+            );
+        }
+    }
+    object.insert(
+        "id".to_owned(),
+        serde_json::Value::String(new_id.to_owned()),
+    );
+    serde_json::to_vec_pretty(&value).map_err(|source| json_error(source).into())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::config::AuroraConfig;
+    use aurora_instance::{
+        IncompleteKind, IncompleteOutcome, InstallSpec, IsolationOverride, IsolationPolicy,
+        NameViolation,
+    };
+    use std::sync::Mutex;
+
+    pub(crate) fn aurora_at(root: &Path) -> Aurora {
+        Aurora::for_test(
+            AuroraConfig::default(),
+            root.to_path_buf(),
+            root.join(".minecraft"),
+        )
+    }
+
+    pub(crate) fn write_version(game_dir: &Path, id: &str, json: &str) -> PathBuf {
+        let dir = game_dir.join("versions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+        dir
+    }
+
+    pub(crate) fn vanilla_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","mainClass":"net.minecraft.client.main.Main",
+                "javaVersion":{{"component":"java-runtime-delta","majorVersion":21}}}}"#
+        )
+    }
+
+    fn fabric_json(id: &str, parent: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","inheritsFrom":"{parent}","type":"release",
+                "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.16.10"}}]}}"#
+        )
+    }
+
+    /// 记下要处理的目录，然后真的删掉（测试里不往用户回收站里塞东西）。
+    #[derive(Clone, Default)]
+    struct RecordingDisposer(Arc<Mutex<Vec<PathBuf>>>);
+
+    impl Disposer for RecordingDisposer {
+        fn dispose(&self, dir: &Path) -> aurora_instance::Result<()> {
+            self.0.lock().unwrap().push(dir.to_path_buf());
+            std::fs::remove_dir_all(dir).map_err(|source| InstanceError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn list_instances_reports_versions_broken_entries_settings_and_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let modded = write_version(&game, "模组", &fabric_json("模组", "1.21.1"));
+        std::fs::create_dir_all(modded.join("mods")).unwrap();
+        for name in ["a.jar", "b.jar.disabled", "notes.txt"] {
+            std::fs::write(modded.join("mods").join(name), b"x").unwrap();
+        }
+        VersionSettingsStore::for_version_dir(&modded)
+            .save(&VersionSettings {
+                description: Some("周末一起玩".into()),
+                cover: Some("cherry_planks".into()),
+                ..VersionSettings::default()
+            })
+            .await
+            .unwrap();
+        let broken = game.join("versions").join("Broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        MarkerStore::for_version_dir(&broken)
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Install {
+                    spec: InstallSpec {
+                        mc_version: "1.20.1".into(),
+                        loader: None,
+                        loader_version: None,
+                    },
+                },
+                42,
+            ))
+            .await
+            .unwrap();
+
+        let list = aurora.list_instances().await.unwrap();
+        let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["1.21.1", "Broken", "模组"]);
+
+        let InstanceVersion::Ready(vanilla) = &list[0].version else {
+            panic!("原版应可用：{:?}", list[0].version);
+        };
+        assert_eq!(vanilla.mc_version.as_deref(), Some("1.21.1"));
+        assert_eq!(vanilla.java_major, Some(21));
+        assert!(vanilla.loaders.is_empty());
+        // 原版正式版按默认档位不隔离，数的是公共 mods 目录（不存在为 0）。
+        assert_eq!(vanilla.mod_count, Some(0));
+        assert!(list[0].incomplete.is_none());
+
+        assert_eq!(
+            list[1].version,
+            InstanceVersion::Broken(BrokenReason::MissingJson)
+        );
+        let Some(Readable::Read(marker)) = &list[1].incomplete else {
+            panic!("应带未完成标记：{:?}", list[1].incomplete);
+        };
+        assert_eq!(marker.outcome, IncompleteOutcome::Pending);
+        assert_eq!(marker.started_at, 42);
+
+        let InstanceVersion::Ready(fabric) = &list[2].version else {
+            panic!("模组实例应可用");
+        };
+        assert_eq!(fabric.mc_version.as_deref(), Some("1.21.1"));
+        assert_eq!(fabric.java_major, Some(21), "沿继承链取原版声明的 Java");
+        assert_eq!(fabric.loaders[0].kind, aurora_version::LoaderKind::Fabric);
+        assert_eq!(fabric.mod_count, Some(2), "只数 .jar 与 .jar.disabled");
+        let Readable::Read(settings) = &list[2].settings else {
+            panic!("设置应可读");
+        };
+        assert_eq!(settings.description.as_deref(), Some("周末一起玩"));
+        assert!(list.iter().all(|i| i.created_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn corrupt_settings_are_reported_per_instance_instead_of_failing_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let dir = write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        std::fs::create_dir_all(dir.join(AURORA_META_DIR)).unwrap();
+        std::fs::write(dir.join(AURORA_META_DIR).join("settings.json"), b"{oops").unwrap();
+
+        let list = aurora.list_instances().await.unwrap();
+        assert!(matches!(list[0].settings, Readable::Unreadable(_)));
+        let InstanceVersion::Ready(ready) = &list[0].version else {
+            panic!("版本 JSON 本身是好的");
+        };
+        assert_eq!(ready.mod_count, None, "定不了工作目录就不数");
+    }
+
+    #[test]
+    fn java_major_is_none_when_the_parent_version_is_missing() {
+        let child: VersionJson = serde_json::from_str(&fabric_json("f", "1.21.1")).unwrap();
+        let old: VersionJson = serde_json::from_str(r#"{"id":"1.5.2","type":"release"}"#).unwrap();
+        let by_id: HashMap<&str, &VersionJson> = HashMap::from([("1.5.2", &old)]);
+        assert_eq!(declared_java(&child, &by_id), None);
+        assert_eq!(declared_java(&old, &by_id), Some(LEGACY_JAVA_MAJOR));
+    }
+
+    #[tokio::test]
+    async fn settings_roundtrip_and_invalid_values_are_rejected_without_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+
+        let wanted = VersionSettings {
+            memory_mb: Some(6144),
+            isolation: IsolationOverride::Enabled,
+            ..VersionSettings::default()
+        };
+        aurora
+            .set_instance_settings("1.21.1", &wanted)
+            .await
+            .unwrap();
+        assert_eq!(aurora.instance_settings("1.21.1").await.unwrap(), wanted);
+
+        let bad = VersionSettings {
+            memory_mb: Some(1000),
+            ..VersionSettings::default()
+        };
+        let err = aurora
+            .set_instance_settings("1.21.1", &bad)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::Instance(InstanceError::InvalidSettings {
+                    field: "memory_mb",
+                    ..
+                })
+            ),
+            "实际：{err:?}"
+        );
+        assert_eq!(aurora.instance_settings("1.21.1").await.unwrap(), wanted);
+
+        let missing = aurora.instance_settings("nope").await.unwrap_err();
+        assert!(matches!(missing, CoreError::VersionNotInstalled { .. }));
+        let unsafe_id = aurora.instance_settings("../x").await.unwrap_err();
+        assert!(matches!(
+            unsafe_id,
+            CoreError::Instance(InstanceError::InvalidId { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn working_dir_follows_the_instance_isolation_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        aurora.set_isolation_policy(IsolationPolicy::Disabled);
+        write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        let shared = aurora.resolve_working_dir("1.21.1").await.unwrap();
+        assert_eq!(shared.working_dir, aurora.game_dir());
+
+        aurora
+            .set_instance_settings(
+                "1.21.1",
+                &VersionSettings {
+                    isolation: IsolationOverride::Enabled,
+                    ..VersionSettings::default()
+                },
+            )
+            .await
+            .unwrap();
+        let isolated = aurora.resolve_working_dir("1.21.1").await.unwrap();
+        assert!(isolated.isolated);
+        assert_eq!(
+            isolated.working_dir,
+            aurora.game_dir().join("versions").join("1.21.1")
+        );
+
+        let broken_dir = aurora.game_dir().join("versions").join("坏的");
+        std::fs::create_dir_all(&broken_dir).unwrap();
+        let err = aurora.resolve_working_dir("坏的").await.unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Instance(InstanceError::Broken { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_moves_the_directory_out_and_forget_prunes_pins_and_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        let dir = write_version(aurora.game_dir(), "旧世界", &vanilla_json("1.21.1"));
+        std::fs::create_dir_all(dir.join("saves").join("w")).unwrap();
+        write_version(aurora.game_dir(), "1.20.1", &vanilla_json("1.20.1"));
+        aurora.set_sidebar_pins(vec!["1.20.1".into(), "旧世界".into()]);
+        aurora.set_selected_version(Some("旧世界".into()));
+
+        let preview = aurora.deletion_preview("旧世界").await.unwrap();
+        assert_eq!(preview.worlds.len(), 1);
+        assert_eq!(preview.worlds[0].dir_name, "w");
+        assert!(preview.size_bytes > 0);
+        assert!(preview.dependents.is_empty());
+
+        let disposer = RecordingDisposer::default();
+        assert!(
+            aurora
+                .delete_instance_files("旧世界", disposer.clone())
+                .await
+                .unwrap()
+        );
+        assert!(!dir.exists());
+        assert_eq!(*disposer.0.lock().unwrap(), vec![dir.clone()]);
+        assert!(aurora.forget_instance("旧世界"));
+        assert_eq!(aurora.config().sidebar_pins, vec!["1.20.1".to_owned()]);
+        assert_eq!(aurora.config().selected_version, None);
+
+        // 再删一次是幂等的空操作，配置也不再变化。
+        assert!(
+            !aurora
+                .delete_instance_files("旧世界", disposer.clone())
+                .await
+                .unwrap()
+        );
+        assert!(!aurora.forget_instance("旧世界"));
+        assert_eq!(disposer.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_and_rename_are_refused_while_another_instance_inherits_from_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let parent = write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        write_version(aurora.game_dir(), "fab", &fabric_json("fab", "1.21.1"));
+
+        let preview = aurora.deletion_preview("1.21.1").await.unwrap();
+        assert_eq!(preview.dependents, vec!["fab".to_owned()]);
+        let err = aurora
+            .delete_instance_files("1.21.1", RecordingDisposer::default())
+            .await
+            .unwrap_err();
+        match err {
+            CoreError::Instance(InstanceError::HasDependents { id, dependents }) => {
+                assert_eq!(id, "1.21.1");
+                assert_eq!(dependents, vec!["fab".to_owned()]);
+            }
+            other => panic!("应报有依赖，实际：{other:?}"),
+        }
+        assert!(parent.exists());
+        let err = aurora
+            .rename_instance_files("1.21.1", "原版")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Instance(InstanceError::HasDependents { .. })
+        ));
+        assert!(parent.exists());
+    }
+
+    #[tokio::test]
+    async fn rename_moves_directory_json_jar_and_natives_and_keeps_the_mc_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        let old_dir = write_version(
+            aurora.game_dir(),
+            "1.21.1",
+            r#"{"id":"1.21.1","type":"release","mainClass":"M","x-unmodelled":{"keep":true}}"#,
+        );
+        std::fs::write(old_dir.join("1.21.1.jar"), b"jar").unwrap();
+        std::fs::create_dir_all(old_dir.join("1.21.1-natives")).unwrap();
+        std::fs::create_dir_all(old_dir.join("saves").join("w")).unwrap();
+        aurora.set_sidebar_pins(vec!["a".into(), "1.21.1".into()]);
+        aurora.set_selected_version(Some("1.21.1".into()));
+
+        aurora
+            .rename_instance_files("1.21.1", "生存服")
+            .await
+            .unwrap();
+        assert!(aurora.rename_instance_refs("1.21.1", "生存服"));
+
+        let new_dir = aurora.game_dir().join("versions").join("生存服");
+        assert!(!old_dir.exists());
+        assert_eq!(std::fs::read(new_dir.join("生存服.jar")).unwrap(), b"jar");
+        assert!(new_dir.join("生存服-natives").is_dir());
+        assert!(new_dir.join("saves").join("w").is_dir());
+        assert!(!new_dir.join("1.21.1.json").exists());
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(new_dir.join("生存服.json")).unwrap()).unwrap();
+        assert_eq!(json["id"], "生存服");
+        assert_eq!(json["clientVersion"], "1.21.1");
+        assert_eq!(json["x-unmodelled"]["keep"], true, "未建模字段原样保留");
+        let leftovers: Vec<_> = walk(&new_dir)
+            .into_iter()
+            .filter(|p| p.to_string_lossy().contains(RENAME_STAGED_SUFFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "暂存文件应已删除：{leftovers:?}");
+
+        assert_eq!(
+            aurora.config().sidebar_pins,
+            vec!["a".to_owned(), "生存服".to_owned()]
+        );
+        assert_eq!(aurora.config().selected_version.as_deref(), Some("生存服"));
+
+        let list = aurora.list_instances().await.unwrap();
+        let InstanceVersion::Ready(ready) = &list[0].version else {
+            panic!("改名后的实例应可用");
+        };
+        assert_eq!(list[0].id, "生存服");
+        assert_eq!(ready.mc_version.as_deref(), Some("1.21.1"));
+    }
+
+    #[tokio::test]
+    async fn rename_only_changing_case_keeps_the_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        write_version(aurora.game_dir(), "survival", &vanilla_json("1.21.1"));
+        aurora
+            .rename_instance_files("survival", "Survival")
+            .await
+            .unwrap();
+        let dir = aurora.game_dir().join("versions").join("Survival");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("Survival.json")).unwrap()).unwrap();
+        assert_eq!(json["id"], "Survival");
+        let names = aurora.instance_names().await.unwrap();
+        assert_eq!(names, vec!["Survival".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn rename_validates_the_new_name_and_rolls_back_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let dir = write_version(aurora.game_dir(), "a", &vanilla_json("1.21.1"));
+        write_version(aurora.game_dir(), "B", &vanilla_json("1.20.1"));
+
+        for (name, expected) in [
+            ("b", NameViolation::Duplicate),
+            ("CON", NameViolation::ReservedByWindows),
+            ("x ", NameViolation::ReservedByWindows),
+            ("a/b", NameViolation::IllegalChar),
+        ] {
+            let err = aurora.rename_instance_files("a", name).await.unwrap_err();
+            match err {
+                CoreError::Instance(InstanceError::InvalidName { violation, .. }) => {
+                    assert_eq!(violation, expected, "{name:?}")
+                }
+                other => panic!("{name:?} 应报名称不合法，实际：{other:?}"),
+            }
+        }
+        assert!(dir.join("a.json").is_file());
+
+        // 版本 JSON 损坏：改写 id 失败，目录改名要还原。
+        std::fs::write(dir.join("a.json"), b"{broken").unwrap();
+        let err = aurora.rename_instance_files("a", "c").await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::Instance(InstanceError::Json { .. })),
+            "实际：{err:?}"
+        );
+        assert!(dir.join("a.json").is_file(), "失败后目录与 JSON 应还原");
+        assert!(!aurora.game_dir().join("versions").join("c").exists());
+    }
+
+    #[tokio::test]
+    async fn sidebar_pins_reject_overflow_duplicates_and_unknown_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        let ids: Vec<String> = (1..=6).map(|i| format!("i{i}")).collect();
+        for id in &ids {
+            write_version(aurora.game_dir(), id, &vanilla_json("1.21.1"));
+        }
+        aurora
+            .validate_sidebar_pins(&ids[..MAX_SIDEBAR_PINS])
+            .await
+            .unwrap();
+
+        let pins_err = |err: CoreError| match err {
+            CoreError::Instance(InstanceError::InvalidPins { reason, id }) => (reason, id),
+            other => panic!("应报固定列表不合法，实际：{other:?}"),
+        };
+        let too_many = aurora.validate_sidebar_pins(&ids).await.unwrap_err();
+        assert_eq!(pins_err(too_many), (PinsViolation::TooMany, None));
+        let dup = aurora
+            .validate_sidebar_pins(&["i1".into(), "i2".into(), "i1".into()])
+            .await
+            .unwrap_err();
+        assert_eq!(pins_err(dup), (PinsViolation::Duplicate, Some("i1".into())));
+        let missing = aurora
+            .validate_sidebar_pins(&["i1".into(), "ghost".into()])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            pins_err(missing),
+            (PinsViolation::NotFound, Some("ghost".into()))
+        );
+
+        aurora.set_sidebar_pins(vec!["i2".into(), "gone".into(), "i1".into()]);
+        assert_eq!(
+            aurora.existing_sidebar_pins().await.unwrap(),
+            vec!["i2".to_owned(), "i1".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn new_instance_names_are_checked_against_existing_ones_case_insensitively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        aurora.check_new_instance_name("全新").await.unwrap();
+        write_version(aurora.game_dir(), "Survival", &vanilla_json("1.21.1"));
+        let err = aurora
+            .check_new_instance_name("survival")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Instance(InstanceError::InvalidName {
+                violation: NameViolation::Duplicate,
+                ..
+            })
+        ));
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path.clone());
+                }
+                out.push(path);
+            }
+        }
+        out
+    }
+}

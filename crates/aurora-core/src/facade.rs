@@ -211,6 +211,11 @@ impl Aurora {
         self.config.selected_version = id;
     }
 
+    /// 设置侧栏固定的实例列表。不做校验：校验要扫盘，由 [`Aurora::validate_sidebar_pins`] 在快照上做完再写。
+    pub fn set_sidebar_pins(&mut self, pins: Vec<String>) {
+        self.config.sidebar_pins = pins;
+    }
+
     // ---- 内部共享装配 ----
 
     /// 共享 HTTP 客户端（克隆廉价：内部 `Arc`）。
