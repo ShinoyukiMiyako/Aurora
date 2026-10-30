@@ -1,0 +1,24 @@
+.art {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+
+.base {
+  fill: var(--sk-bg-2);
+}
+
+.glyph {
+  fill: none;
+  stroke: var(--sk-text-3);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.art[data-category="error"] .base {
+  fill: var(--sk-danger-soft);
+}
+
+.art[data-category="error"] .glyph {
+  stroke: var(--sk-danger);
+}

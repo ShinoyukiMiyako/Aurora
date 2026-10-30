@@ -1,0 +1,83 @@
+.tile {
+  --tile-size: 40px;
+  --tile-radius: 12px;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--tile-size);
+  height: var(--tile-size);
+  /* 标识类容器的比例圆角 round(边长 × 0.3)：46 -> 14、44 -> 13、40 -> 12 */
+  border-radius: var(--tile-radius);
+}
+
+/* ---- 加载器：底为识别色与表面色混合，夜樱提高到 20% 才看得出色相 ---- */
+.tile[data-shape="loader"] {
+  --tile-size: 46px;
+  --tile-radius: 14px;
+  --tile-mix: 14%;
+  background: color-mix(in srgb, var(--tile-color) var(--tile-mix), var(--sk-surface));
+  color: var(--tile-color);
+}
+
+:global(:root[data-sk-mode="night"]) .tile[data-shape="loader"] {
+  --tile-mix: 20%;
+}
+
+.tile[data-loader="vanilla"] {
+  --tile-color: var(--sk-loader-vanilla);
+}
+
+.tile[data-loader="fabric"] {
+  --tile-color: var(--sk-loader-fabric);
+}
+
+.tile[data-loader="quilt"] {
+  --tile-color: var(--sk-loader-quilt);
+}
+
+.tile[data-loader="forge"] {
+  --tile-color: var(--sk-loader-forge);
+}
+
+.tile[data-loader="neoforge"] {
+  --tile-color: var(--sk-loader-neoforge);
+}
+
+/* ---- 存档模式 ---- */
+.tile[data-shape="world"] {
+  --tile-size: 44px;
+  --tile-radius: 13px;
+}
+
+.tile[data-mode="survival"] {
+  background: var(--sk-ok-soft);
+  color: var(--sk-ok);
+}
+
+.tile[data-mode="creative"] {
+  background: var(--sk-info-soft);
+  color: var(--sk-info);
+}
+
+.tile[data-mode="hardcore"] {
+  background: var(--sk-danger-soft);
+  color: var(--sk-danger);
+}
+
+.tile[data-mode="adventure"] {
+  background: var(--sk-warn-soft);
+  color: var(--sk-warn);
+}
+
+/* ---- 资源与未知 ---- */
+.tile[data-shape="kind"] {
+  --tile-size: 40px;
+  --tile-radius: 12px;
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+}
+
+.tile[data-kind="unknown"] {
+  color: var(--sk-text-3);
+}
