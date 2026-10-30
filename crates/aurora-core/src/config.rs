@@ -65,15 +65,6 @@ impl DownloadSourcePolicy {
     pub fn rewrite_primary(self, url: &str) -> Result<String> {
         Ok(mirror::rewrite(url, self.primary_mirror())?)
     }
-
-    /// 中文显示名。
-    pub fn display_name(self) -> &'static str {
-        match self {
-            DownloadSourcePolicy::Auto => "自动测速",
-            DownloadSourcePolicy::OfficialFirst => "尽量官方",
-            DownloadSourcePolicy::MirrorFirst => "尽量镜像",
-        }
-    }
 }
 
 /// 内存分配设置。
