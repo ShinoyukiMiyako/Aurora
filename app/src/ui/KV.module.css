@@ -1,0 +1,47 @@
+.kv {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--sk-space-8) var(--sk-space-18);
+  min-width: 0;
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+/* 每对键值不生成自己的盒子，直接参与外层两列网格 */
+.pair {
+  display: contents;
+}
+
+.key {
+  color: var(--sk-text-2);
+  white-space: nowrap;
+}
+
+.value {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  margin: 0;
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 可复制的值放开选中；带复制按钮的行比文字高，按钮向上下吃掉行距，不把行撑高 */
+.value[data-copyable] .text {
+  user-select: text;
+}
+
+.value[data-copyable] {
+  margin: calc((var(--sk-lh-small) - 30px) / 2) 0;
+}
