@@ -8,11 +8,13 @@
 //! （可重试），于是一次损坏下载会自动重新拉取，而不是把坏文件留在盘上。
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use aurora_base::mirror::{self, MirrorSource};
 use aurora_base::retry::{RetryPolicy, retry_async};
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{Error, Result};
 use crate::version::JavaVersion;
@@ -118,6 +120,7 @@ pub struct JavaRuntimeInstaller {
     manifest_url: String,
     source: MirrorSource,
     policy: RetryPolicy,
+    cancel: Option<CancellationToken>,
 }
 
 impl JavaRuntimeInstaller {
@@ -128,7 +131,16 @@ impl JavaRuntimeInstaller {
             manifest_url: MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             source: MirrorSource::default(),
             policy: RetryPolicy::default(),
+            cancel: None,
         }
+    }
+
+    /// 挂取消令牌：每个文件开始前检查，网络等待中触发即放弃该请求，以 [`Error::Cancelled`] 返回。
+    ///
+    /// 文件内容先整份读进内存、校验通过后才原子落盘，丢弃进行中的请求不会留下半截文件。
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 
     /// 覆盖清单地址（测试指向 mock，或改用其它 gamecore 入口）。
@@ -205,6 +217,13 @@ impl JavaRuntimeInstaller {
     /// 逐个文件下载落盘：目录建目录、文件校验后原子写、链接建符号链接。
     async fn download_files(&self, files: &ComponentFiles, install_dir: &Path) -> Result<()> {
         for (rel, entry) in &files.files {
+            if self
+                .cancel
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+            {
+                return Err(Error::Cancelled);
+            }
             let target = install_dir.join(rel_to_path(rel));
             match entry {
                 FileEntry::Directory => {
@@ -232,10 +251,21 @@ impl JavaRuntimeInstaller {
         Ok(())
     }
 
+    /// 在取消令牌下等待一次网络读取；令牌先触发即返回 [`Error::Cancelled`]。
+    async fn until_cancelled<T>(&self, fut: impl Future<Output = Result<T>>) -> Result<T> {
+        match &self.cancel {
+            Some(token) => token
+                .run_until_cancelled(fut)
+                .await
+                .unwrap_or(Err(Error::Cancelled)),
+            None => fut.await,
+        }
+    }
+
     /// 带重试地 GET 一个 URL 的响应体（不校验哈希，用于 all.json 这类无预置哈希的清单）。
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let client = &self.client;
-        retry_async(&self.policy, move || async move {
+        let fetch = retry_async(&self.policy, move || async move {
             let resp = client
                 .get(url)
                 .send()
@@ -253,14 +283,14 @@ impl JavaRuntimeInstaller {
                 source,
             })?;
             Ok::<Vec<u8>, Error>(bytes.to_vec())
-        })
-        .await
+        });
+        self.until_cancelled(fetch).await
     }
 
     /// 带重试地 GET 并做 sha1 校验；校验不符冒泡为可重试的 `HashMismatch`，从而自动重下。
     async fn get_verified_bytes(&self, url: &str, expected_sha1: &str) -> Result<Vec<u8>> {
         let client = &self.client;
-        retry_async(&self.policy, move || async move {
+        let fetch = retry_async(&self.policy, move || async move {
             let resp = client
                 .get(url)
                 .send()
@@ -283,8 +313,8 @@ impl JavaRuntimeInstaller {
                 .to_vec();
             verify_bytes_sha1(&bytes, expected_sha1)?;
             Ok::<Vec<u8>, Error>(bytes)
-        })
-        .await
+        });
+        self.until_cancelled(fetch).await
     }
 }
 
@@ -604,6 +634,71 @@ mod tests {
             std::fs::read(dir.path().join("lib").join("rt")).unwrap(),
             gamma_lib
         );
+    }
+
+    /// 组件文件下载卡住时取消：1000 ms 内以 Cancelled 返回，卡住的那个文件不落盘。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_during_slow_file_returns_cancelled_quickly() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let java = b"MZ-slow-java".to_vec();
+        let manifest = format!(
+            r#"{{"files":{{
+                "bin/java.exe":{{"type":"file","executable":true,"downloads":{{"raw":{{"sha1":"{}","size":{},"url":"{}/objects/slow-java"}}}}}}
+            }}}}"#,
+            sha1_hex(&java),
+            java.len(),
+            base,
+        );
+        let all_json = format!(
+            r#"{{"windows-x64":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{}","size":{},"url":"{}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
+            sha1_hex(manifest.as_bytes()),
+            manifest.len(),
+            base,
+        );
+        mount_get(&server, "/all.json", all_json).await;
+        mount_get(&server, "/gamma.json", manifest).await;
+        Mock::given(method("GET"))
+            .and(match_path("/objects/slow-java"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(java)
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+
+        let token = CancellationToken::new();
+        let client = aurora_base::http::build_client().expect("客户端应构建成功");
+        let installer = fast_installer(client, &base).with_cancel(token.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().to_path_buf();
+        let install = tokio::spawn(async move {
+            installer
+                .install_for_platform(17, "windows-x64", &install_dir)
+                .await
+        });
+
+        // 等到卡住的那个对象请求已经发出，再取消。
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let requests = server.received_requests().await.unwrap_or_default();
+            if requests
+                .iter()
+                .any(|r| r.url.path() == "/objects/slow-java")
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "对象请求未发出");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let cancelled_at = std::time::Instant::now();
+        token.cancel();
+        let err = install.await.unwrap().unwrap_err();
+
+        assert!(err.is_cancelled(), "应为取消，实际：{err:?}");
+        assert!(cancelled_at.elapsed() < Duration::from_millis(1000));
+        assert!(!dir.path().join("bin").join("java.exe").exists());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

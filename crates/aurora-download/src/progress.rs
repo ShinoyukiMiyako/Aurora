@@ -4,8 +4,9 @@
 //! 累加器（原子计数 + 采样器），通过 [`tokio::sync::watch`] 把快照推给观察者。
 //!
 //! 字节计数记录「实际传输字节」——重试会重复累加，因此 `bytes` 反映真实网络吞吐而非「已完成
-//! 目标的字节」；整体完成度以文件计数 `finished/total` 表达，两者互不矛盾。速度由独立采样任务
-//! 按固定间隔对字节增量做 EWMA 平滑得到。
+//! 目标的字节」；整体完成度以文件计数 `finished/total` 表达，两者互不矛盾。`total_bytes` 是这一批
+//! 任务声明大小之和，只在每个任务都声明了大小时才有值；拿 `bytes / total_bytes` 画进度条时要封顶到 1，
+//! 因为重传会让 `bytes` 超过它。速度由独立采样任务按固定间隔对字节增量做 EWMA 平滑得到。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,8 @@ pub struct DownloadProgress {
     pub finished: u64,
     /// 累计已传输字节数（含重试重复传输）。
     pub bytes: u64,
+    /// 本批任务声明大小之和；有任一任务大小未知时为 `None`（总量无从得知，不能拿部分和冒充）。
+    pub total_bytes: Option<u64>,
     /// 瞬时速度，字节/秒（EWMA 平滑）。
     pub speed: u64,
 }
@@ -35,6 +38,7 @@ pub(crate) struct ProgressReporter {
 
 struct ReporterInner {
     total: u64,
+    total_bytes: Option<u64>,
     finished: AtomicU64,
     bytes: AtomicU64,
     speed: AtomicU64,
@@ -47,6 +51,7 @@ impl ReporterInner {
             total: self.total,
             finished: self.finished.load(Ordering::Relaxed),
             bytes: self.bytes.load(Ordering::Relaxed),
+            total_bytes: self.total_bytes,
             speed: self.speed.load(Ordering::Relaxed),
         }
     }
@@ -61,10 +66,15 @@ impl ReporterInner {
 
 impl ProgressReporter {
     /// 新建累加器。`sender` 为 `None` 时所有 publish 皆为空操作（无观察者、不起采样器）。
-    pub(crate) fn new(total: u64, sender: Option<watch::Sender<DownloadProgress>>) -> Self {
+    pub(crate) fn new(
+        total: u64,
+        total_bytes: Option<u64>,
+        sender: Option<watch::Sender<DownloadProgress>>,
+    ) -> Self {
         Self {
             inner: Arc::new(ReporterInner {
                 total,
+                total_bytes,
                 finished: AtomicU64::new(0),
                 bytes: AtomicU64::new(0),
                 speed: AtomicU64::new(0),
@@ -134,7 +144,7 @@ mod tests {
     #[test]
     fn snapshot_reflects_counters() {
         let (tx, rx) = watch::channel(DownloadProgress::default());
-        let reporter = ProgressReporter::new(3, Some(tx));
+        let reporter = ProgressReporter::new(3, Some(4096), Some(tx));
         reporter.add_bytes(100);
         reporter.add_bytes(50);
         reporter.finish_file();
@@ -142,11 +152,12 @@ mod tests {
         assert_eq!(snap.total, 3);
         assert_eq!(snap.finished, 1);
         assert_eq!(snap.bytes, 150);
+        assert_eq!(snap.total_bytes, Some(4096));
     }
 
     #[test]
     fn reporter_without_sender_is_silent() {
-        let reporter = ProgressReporter::new(2, None);
+        let reporter = ProgressReporter::new(2, None, None);
         reporter.add_bytes(10);
         reporter.finish_file();
         // 无 sender 不 panic、无 publish；仅内部计数推进。
@@ -156,7 +167,7 @@ mod tests {
     #[test]
     fn finalize_zeroes_speed_and_publishes_final_counts() {
         let (tx, rx) = watch::channel(DownloadProgress::default());
-        let reporter = ProgressReporter::new(1, Some(tx));
+        let reporter = ProgressReporter::new(1, None, Some(tx));
         reporter.add_bytes(4096);
         reporter.finish_file();
         reporter.finalize();

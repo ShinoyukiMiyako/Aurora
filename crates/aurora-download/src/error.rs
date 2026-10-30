@@ -59,6 +59,17 @@ pub enum Error {
         #[source]
         last: Box<Error>,
     },
+
+    /// 调用方经取消令牌放弃了本次下载；返回前已清掉该文件的临时文件与分片。
+    #[error("下载已取消")]
+    Cancelled,
+}
+
+impl Error {
+    /// 是否为取消。上层据此把取消与真正的失败分开呈现。
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Cancelled)
+    }
 }
 
 /// crate 级 `Result` 别名。
@@ -81,6 +92,8 @@ impl RetryableError for Error {
             Error::RangeUnsupported { .. }
             | Error::ChunkTaskJoin(_)
             | Error::AllSourcesExhausted { .. } => false,
+            // 取消是调用方的决定，重试或换源都违背它。
+            Error::Cancelled => false,
         }
     }
 }
@@ -156,6 +169,17 @@ mod tests {
         };
         assert!(!range.is_retryable());
         assert!(!exhausted.is_retryable());
+    }
+
+    #[test]
+    fn cancelled_is_terminal_and_recognised() {
+        assert!(!Error::Cancelled.is_retryable());
+        assert!(Error::Cancelled.is_cancelled());
+        let other = Error::Status {
+            url: "http://x/a".into(),
+            status: 503,
+        };
+        assert!(!other.is_cancelled());
     }
 
     #[test]

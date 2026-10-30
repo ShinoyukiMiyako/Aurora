@@ -7,14 +7,20 @@
 //! 4. 已知大小且达阈值的大文件走 Range 分块并发下载，分片落 `.petalfall-partN`；网络中断保留已完成
 //!    分片供下次断点续传，损坏（哈希不符）则清分片重下。
 //! 5. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。
+//!
+//! 取消是协作式的：令牌只在文件开始前、网络等待点（发请求、读响应体）与退避等待里被观察，
+//! 观察到就让当前尝试正常返回 [`Error::Cancelled`]，再由 [`Downloader::run`] 统一清掉该文件的
+//! 临时文件与分片。不在落盘中途丢弃 future，否则进行中的阻塞文件操作会在清理之后才落地。
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aurora_base::retry::{RetryPolicy, retry_async};
+use aurora_base::retry::{RetryPolicy, retry_async, retry_async_until};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::chunk::{Chunk, ChunkConfig, ChunkPlan};
 use crate::error::{Error, Result};
@@ -61,15 +67,20 @@ impl Downloader {
 
     /// 下载单个文件（无进度上报）。完成即目标文件已就绪并通过完整性校验。
     pub async fn download(&self, task: &DownloadTask) -> Result<()> {
-        self.run(task, None).await
+        self.run(task, None, None).await
     }
 
-    /// 下载单个文件，可选挂接进度累加器。这是引擎的总入口，负责换源编排。
+    /// 下载单个文件，可选挂接进度累加器与取消令牌。这是引擎的总入口，负责换源编排。
     pub(crate) async fn run(
         &self,
         task: &DownloadTask,
         progress: Option<&ProgressReporter>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<()> {
+        // 文件粒度的取消检查：还没开始的文件直接放弃，不碰磁盘。
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(Error::Cancelled);
+        }
         if self.already_complete(task).await? {
             tracing::debug!(dest = %task.dest.display(), "目标文件已存在且校验通过，跳过下载");
             return Ok(());
@@ -78,10 +89,22 @@ impl Downloader {
         let candidates = self.config.sources.candidates(&task.url)?;
         let mut last_err: Option<Error> = None;
         for (index, url) in candidates.iter().enumerate() {
-            // 每个源独立退避重试：retry_async 的 op 每次生成新 future，携带当前源的 URL。
-            let result = retry_async(&self.config.retry, || self.attempt(url, task, progress)).await;
+            // 每个源独立退避重试：op 每次生成新 future，携带当前源的 URL。
+            let attempt = || self.attempt(url, task, progress, cancel);
+            let result = match cancel {
+                // 退避等待里观察到取消即视为取消；进行中的尝试自己在网络等待点上响应。
+                Some(token) => retry_async_until(&self.config.retry, token.cancelled(), attempt)
+                    .await
+                    .unwrap_or(Err(Error::Cancelled)),
+                None => retry_async(&self.config.retry, attempt).await,
+            };
             match result {
                 Ok(()) => return Ok(()),
+                Err(Error::Cancelled) => {
+                    // 尝试已完整返回，此刻没有进行中的文件操作，清理不会与落盘赛跑。
+                    self.discard_leftovers(task).await;
+                    return Err(Error::Cancelled);
+                }
                 Err(err) => {
                     tracing::debug!(
                         source_index = index,
@@ -105,7 +128,11 @@ impl Downloader {
         url: &str,
         task: &DownloadTask,
         progress: Option<&ProgressReporter>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<()> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(Error::Cancelled);
+        }
         if let Some(parent) = task.dest.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -122,9 +149,10 @@ impl Downloader {
             && !self.config.chunk.is_host_excluded(url);
 
         let parts = if want_chunk {
-            self.download_chunked(url, task, &temp, progress).await?
+            self.download_chunked(url, task, &temp, progress, cancel)
+                .await?
         } else {
-            self.download_stream(url, &temp, progress).await?;
+            self.download_stream(url, &temp, progress, cancel).await?;
             Vec::new()
         };
 
@@ -137,12 +165,10 @@ impl Downloader {
         url: &str,
         temp: &Path,
         progress: Option<&ProgressReporter>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<()> {
-        let resp = self
-            .client
-            .get(url)
-            .send()
-            .await
+        let resp = until_cancelled(cancel, self.client.get(url).send())
+            .await?
             .map_err(|source| Error::Request {
                 url: url.to_owned(),
                 source,
@@ -154,7 +180,7 @@ impl Downloader {
                 status: status.as_u16(),
             });
         }
-        if let Err(err) = stream_to_file(resp, temp, progress).await {
+        if let Err(err) = stream_to_file(resp, temp, progress, cancel).await {
             // 单流不做续传，失败即清掉半截临时文件，下次从头再来。
             let _ = tokio::fs::remove_file(temp).await;
             return Err(err);
@@ -169,6 +195,7 @@ impl Downloader {
         task: &DownloadTask,
         temp: &Path,
         progress: Option<&ProgressReporter>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<Vec<PathBuf>> {
         let total = task.size.expect("分块下载路径要求已知文件大小");
         let plan = ChunkPlan::compute(
@@ -179,10 +206,10 @@ impl Downloader {
         let first = plan.chunks[0];
 
         // 首块兼任「探测该源是否支持 Range」之责。
-        let resp0 = ranged_get(&self.client, url, first.start, first.end).await?;
+        let resp0 = ranged_get(&self.client, url, first.start, first.end, cancel).await?;
         if resp0.status() == reqwest::StatusCode::OK {
             // 服务器忽略了 Range、返回整体 200：此响应即完整文件，直接落到合并临时文件。
-            if let Err(err) = stream_to_file(resp0, temp, progress).await {
+            if let Err(err) = stream_to_file(resp0, temp, progress, cancel).await {
                 let _ = tokio::fs::remove_file(temp).await;
                 return Err(err);
             }
@@ -191,7 +218,7 @@ impl Downloader {
 
         // 206：写首片。首片每次尝试都重下（一个块尺寸，代价可忽略），确保 Range 支持性判定可靠。
         let part0 = part_path(&task.dest, first.index);
-        let written0 = stream_to_file(resp0, &part0, progress).await?;
+        let written0 = stream_to_file(resp0, &part0, progress, cancel).await?;
         if written0 != first.byte_len() {
             let _ = tokio::fs::remove_file(&part0).await;
             return Err(Error::IncompleteBody {
@@ -204,6 +231,7 @@ impl Downloader {
         // 其余分片并发下载，已完成的分片（尺寸吻合）跳过——这是断点续传的落点。
         let semaphore = Arc::new(Semaphore::new(self.config.chunk.chunk_concurrency.max(1)));
         let owned_progress = progress.cloned();
+        let owned_cancel = cancel.cloned();
         let mut set: JoinSet<Result<()>> = JoinSet::new();
         for chunk in plan.chunks.iter().skip(1).copied() {
             let part = part_path(&task.dest, chunk.index);
@@ -218,9 +246,10 @@ impl Downloader {
             let client = self.client.clone();
             let url = url.to_owned();
             let prog = owned_progress.clone();
+            let token = owned_cancel.clone();
             set.spawn(async move {
                 let _permit = permit;
-                download_one_chunk(&client, &url, chunk, &part, prog.as_ref()).await
+                download_one_chunk(&client, &url, chunk, &part, prog.as_ref(), token.as_ref()).await
             });
         }
 
@@ -284,6 +313,24 @@ impl Downloader {
         Ok(())
     }
 
+    /// 取消后清掉该文件的全部中间产物：合并临时文件与按分块计划能推出的所有分片。
+    ///
+    /// 分片计划由「大小 + 分块配置」确定性算出，无需记账即可定位每个分片；大小未知的任务
+    /// 从不走分块，只有临时文件。取消意味着放弃，断点续传用的分片也一并删掉。
+    async fn discard_leftovers(&self, task: &DownloadTask) {
+        remove_if_present(&temp_path(&task.dest)).await;
+        if let Some(total) = task.size {
+            let plan = ChunkPlan::compute(
+                total,
+                self.config.chunk.chunk_size,
+                self.config.chunk.max_chunks,
+            );
+            for chunk in &plan.chunks {
+                remove_if_present(&part_path(&task.dest, chunk.index)).await;
+            }
+        }
+    }
+
     /// 目标是否已存在且满足完整性契约（有 sha1 校 sha1，否则有大小校大小，都没有则不认为完整）。
     async fn already_complete(&self, task: &DownloadTask) -> Result<bool> {
         match tokio::fs::metadata(&task.dest).await {
@@ -306,19 +353,43 @@ impl Downloader {
     }
 }
 
+/// 在取消令牌下等待一个网络 future：令牌先触发即返回 [`Error::Cancelled`]。
+///
+/// 只用于发请求、读响应体这类无落盘副作用的等待，丢弃它们不会留下半截文件。
+async fn until_cancelled<F: Future>(
+    cancel: Option<&CancellationToken>,
+    fut: F,
+) -> Result<F::Output> {
+    match cancel {
+        Some(token) => token.run_until_cancelled(fut).await.ok_or(Error::Cancelled),
+        None => Ok(fut.await),
+    }
+}
+
+/// 删除一个可能不存在的中间文件。不存在是常态（该分片还没开始）；其余失败记日志，
+/// 不让清理失败盖过「已取消」这个结果。
+async fn remove_if_present(path: &Path) {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => tracing::debug!(path = %path.display(), "已清理取消下载的中间文件"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "清理取消下载的中间文件失败")
+        }
+    }
+}
+
 /// 发起一次 Range 请求。仅放行 206（分块命中）与 200（服务器忽略 Range 的整体响应）两种成功形态。
 async fn ranged_get(
     client: &reqwest::Client,
     url: &str,
     start: u64,
     end: u64,
+    cancel: Option<&CancellationToken>,
 ) -> Result<reqwest::Response> {
     let value = format!("bytes={start}-{end}");
-    let resp = client
-        .get(url)
-        .header(reqwest::header::RANGE, value)
-        .send()
-        .await
+    let send = client.get(url).header(reqwest::header::RANGE, value).send();
+    let resp = until_cancelled(cancel, send)
+        .await?
         .map_err(|source| Error::Request {
             url: url.to_owned(),
             source,
@@ -341,15 +412,16 @@ async fn download_one_chunk(
     chunk: Chunk,
     part: &Path,
     progress: Option<&ProgressReporter>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<()> {
-    let resp = ranged_get(client, url, chunk.start, chunk.end).await?;
+    let resp = ranged_get(client, url, chunk.start, chunk.end, cancel).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         // 非零起始的分片却收到 200，意味着该源不支持 Range：上抛以触发换源，而非把整文件塞进某一分片。
         return Err(Error::RangeUnsupported {
             url: url.to_owned(),
         });
     }
-    let written = stream_to_file(resp, part, progress).await?;
+    let written = stream_to_file(resp, part, progress, cancel).await?;
     if written != chunk.byte_len() {
         let _ = tokio::fs::remove_file(part).await;
         return Err(Error::IncompleteBody {
@@ -362,10 +434,14 @@ async fn download_one_chunk(
 }
 
 /// 流式把响应体写入文件（覆盖），逐段累加进度，写完 fsync。返回写入字节数。
+///
+/// 取消只在读下一段响应体时观察：写盘那一步总是完整等完，返回 [`Error::Cancelled`] 时
+/// 文件句柄随之关闭，半截文件交给 [`Downloader::run`] 统一清理。
 async fn stream_to_file(
     mut resp: reqwest::Response,
     path: &Path,
     progress: Option<&ProgressReporter>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<u64> {
     let url = resp.url().as_str().to_owned();
     let mut file = tokio::fs::File::create(path)
@@ -373,7 +449,7 @@ async fn stream_to_file(
         .map_err(|source| io_error(path, source))?;
     let mut written = 0u64;
     loop {
-        match resp.chunk().await {
+        match until_cancelled(cancel, resp.chunk()).await? {
             Ok(Some(bytes)) => {
                 file.write_all(&bytes)
                     .await
@@ -457,6 +533,61 @@ fn part_path(dest: &Path, index: usize) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 取消后的清理按分块计划推出每个分片：已完成的分片（续传用）与临时文件一并删掉，
+    /// 计划之外的同目录文件不受影响。
+    #[tokio::test]
+    async fn discard_leftovers_removes_temp_and_every_planned_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("big.jar");
+        let config = DownloadConfig {
+            chunk: ChunkConfig {
+                enabled: true,
+                min_split_size: 10,
+                chunk_size: 100,
+                max_chunks: 4,
+                chunk_concurrency: 2,
+                excluded_hosts: Vec::new(),
+            },
+            ..DownloadConfig::default()
+        };
+        let downloader = Downloader::new(reqwest::Client::new(), config);
+        let task = DownloadTask::new("http://127.0.0.1/big.jar", &dest).with_size(350);
+        // 350 字节按 100 一块切成 4 块：part0..part3。
+        tokio::fs::write(temp_path(&dest), b"partial")
+            .await
+            .unwrap();
+        for index in [0usize, 1, 3] {
+            tokio::fs::write(part_path(&dest, index), b"chunk")
+                .await
+                .unwrap();
+        }
+        let bystander = dir.path().join("other.jar");
+        tokio::fs::write(&bystander, b"keep").await.unwrap();
+
+        downloader.discard_leftovers(&task).await;
+
+        assert!(!temp_path(&dest).exists());
+        for index in 0..4 {
+            assert!(!part_path(&dest, index).exists(), "part{index} 应被清理");
+        }
+        assert_eq!(tokio::fs::read(&bystander).await.unwrap(), b"keep");
+    }
+
+    /// 已取消的令牌在文件开始前就挡住：不发请求、不建任何文件。
+    #[tokio::test]
+    async fn run_with_cancelled_token_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("never.jar");
+        let downloader = Downloader::with_defaults(reqwest::Client::new());
+        let task = DownloadTask::new("http://127.0.0.1:9/never.jar", &dest);
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let err = downloader.run(&task, None, Some(&token)).await.unwrap_err();
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn part_and_temp_paths_are_siblings_of_dest() {

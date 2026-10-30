@@ -69,24 +69,44 @@ impl RetryPolicy {
 ///
 /// `op` 每次被调用生成一个新 future（因此可携带重定向后的 URL、切换后的镜像源等状态）。
 /// 成功即返回；失败时仅当错误可重试且尚有剩余次数才退避后再来一轮，否则原样上抛最后一次错误。
-pub async fn retry_async<T, E, Op, Fut>(
-    policy: &RetryPolicy,
-    mut op: Op,
-) -> std::result::Result<T, E>
+pub async fn retry_async<T, E, Op, Fut>(policy: &RetryPolicy, op: Op) -> std::result::Result<T, E>
 where
     E: RetryableError,
     Op: FnMut() -> Fut,
     Fut: Future<Output = std::result::Result<T, E>>,
 {
+    match retry_async_until(policy, std::future::pending::<()>(), op).await {
+        Some(result) => result,
+        None => unreachable!("pending() 永不完成，退避等待不可能被它打断"),
+    }
+}
+
+/// 与 [`retry_async`] 相同，但两次尝试之间的退避等待可被 `stop` 打断：`stop` 先完成即返回 `None`。
+///
+/// `stop` 只在退避等待里被观察，进行中的那次尝试不会被中途丢弃——尝试内部常有落盘副作用
+/// （临时文件、分片），半途丢弃 future 会让清理无从进行；尝试自己负责尽快响应停止信号。
+/// 用于可取消的长任务：取消若恰好落在一次长退避里，不必等满退避时长才返回。
+pub async fn retry_async_until<T, E, Op, Fut, Stop>(
+    policy: &RetryPolicy,
+    stop: Stop,
+    mut op: Op,
+) -> Option<std::result::Result<T, E>>
+where
+    E: RetryableError,
+    Op: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+    Stop: Future<Output = ()>,
+{
+    let mut stop = std::pin::pin!(stop);
     let max = policy.max_attempts.max(1);
     let mut attempt: u32 = 0;
     loop {
         match op().await {
-            Ok(value) => return Ok(value),
+            Ok(value) => return Some(Ok(value)),
             Err(err) => {
                 let is_last = attempt + 1 >= max;
                 if is_last || !err.is_retryable() {
-                    return Err(err);
+                    return Some(Err(err));
                 }
                 let delay = policy.actual_delay(attempt);
                 tracing::debug!(
@@ -95,7 +115,10 @@ where
                     delay_ms = delay.as_millis() as u64,
                     "操作失败，退避后重试"
                 );
-                tokio::time::sleep(delay).await;
+                // timeout 内 stop 先完成即视为被打断；超时（Err）才是正常等满退避。
+                if tokio::time::timeout(delay, stop.as_mut()).await.is_ok() {
+                    return None;
+                }
                 attempt += 1;
             }
         }
@@ -231,6 +254,69 @@ mod tests {
         assert!(result.is_err());
         // 不可重试错误应只尝试一次。
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 退避 10 s 的策略下，stop 在 50 ms 后触发：必须远早于退避时长返回 None，且只尝试过一次。
+    #[tokio::test]
+    async fn stop_interrupts_backoff_without_waiting_it_out() {
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            initial_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(10),
+            multiplier: 1.0,
+            jitter: false,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let started = tokio::time::Instant::now();
+        let result: Option<Result<u32, TestError>> = retry_async_until(
+            &policy,
+            tokio::time::sleep(Duration::from_millis(50)),
+            move || {
+                let c = c.clone();
+                async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Err(TestError { retryable: true })
+                }
+            },
+        )
+        .await;
+        assert!(result.is_none(), "退避期间被打断应返回 None");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "不应等满 10 s 退避"
+        );
+    }
+
+    /// stop 只在退避里观察：首次尝试即成功时，哪怕 stop 已经就绪也照常返回结果。
+    #[tokio::test]
+    async fn stop_is_not_observed_while_an_attempt_succeeds() {
+        let result: Option<Result<u32, TestError>> =
+            retry_async_until(&fast_policy(3), std::future::ready(()), || async { Ok(9) }).await;
+        assert_eq!(result.map(|r| r.unwrap()), Some(9));
+    }
+
+    /// stop 永不完成时与 retry_async 等价：重试到成功。
+    #[tokio::test]
+    async fn until_with_pending_stop_retries_like_retry_async() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let result: Option<Result<u32, TestError>> =
+            retry_async_until(&fast_policy(4), std::future::pending::<()>(), move || {
+                let c = c.clone();
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst) + 1;
+                    if n < 3 {
+                        Err(TestError { retryable: true })
+                    } else {
+                        Ok(5)
+                    }
+                }
+            })
+            .await;
+        assert_eq!(result.map(|r| r.unwrap()), Some(5));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
