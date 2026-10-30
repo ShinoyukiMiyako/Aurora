@@ -1,0 +1,149 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(var(--tile-columns), minmax(0, 1fr));
+  gap: var(--sk-space-10);
+}
+
+/* compact 档最多两列 */
+:global([data-sk-tier="compact"]) .grid[data-columns="3"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tile {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-12);
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--sk-space-12) var(--sk-space-14);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.tile:hover:not(:disabled) {
+  border-color: var(--sk-accent-line);
+}
+
+.tile[aria-checked="true"] {
+  border-color: var(--sk-accent-line);
+  background: color-mix(in srgb, var(--sk-accent) 6%, var(--sk-surface));
+  box-shadow: 0 0 0 3px var(--sk-accent-soft);
+}
+
+.tile:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.tile[aria-checked="true"]:focus-visible {
+  box-shadow: var(--sk-focus), 0 0 0 3px var(--sk-accent-soft);
+}
+
+.tile:disabled {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+/* 与单选组同款圆点；顶边对齐标题行 */
+.dot {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  margin-top: var(--sk-space-2);
+  border: 1.5px solid var(--sk-line-strong);
+  border-radius: 50%;
+  background: var(--sk-surface);
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  border-radius: 50%;
+  background: var(--sk-accent);
+  transform: scale(0);
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.tile:hover:not(:disabled) .dot {
+  border-color: var(--sk-accent-line);
+}
+
+.tile[aria-checked="true"] .dot {
+  border-color: var(--sk-accent);
+}
+
+.tile[aria-checked="true"] .dot::after {
+  transform: scale(1);
+}
+
+:global([data-sk-reduced]) .dot::after {
+  transition: none;
+}
+
+/* 34 见方的图标底座，圆角按标识类比例 round(34 × 0.3) = 10 */
+.iconBase {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.tile[aria-checked="true"] .iconBase {
+  background: var(--sk-accent-soft-2);
+  color: var(--sk-accent-strong);
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.title {
+  font-size: var(--sk-fs-body);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-body);
+}
+
+.description {
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: 1.5;
+}
+
+.note {
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  font-weight: var(--sk-w-mono);
+  line-height: var(--sk-lh-mono-sm);
+  font-variant-ligatures: no-contextual;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}

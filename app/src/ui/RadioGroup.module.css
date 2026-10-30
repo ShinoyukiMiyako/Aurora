@@ -1,0 +1,84 @@
+.group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sk-space-10);
+}
+
+.group[data-orientation="horizontal"] {
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: var(--sk-space-10) var(--sk-space-20);
+}
+
+.option {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+/* 圆点：外圈 1.5px 描边，选中后内圆从 0 缩放出现 */
+.dot {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--sk-line-strong);
+  border-radius: 50%;
+  background: var(--sk-surface);
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  border-radius: 50%;
+  background: var(--sk-accent);
+  transform: scale(0);
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.option:hover:not(:disabled) .dot {
+  border-color: var(--sk-accent-line);
+}
+
+.option[aria-checked="true"] .dot {
+  border-color: var(--sk-accent);
+}
+
+.option[aria-checked="true"] .dot::after {
+  transform: scale(1);
+}
+
+:global([data-sk-reduced]) .dot::after {
+  transition: none;
+}
+
+.option:focus-visible .dot {
+  box-shadow: var(--sk-focus);
+}
+
+.label {
+  min-width: 0;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+}
+
+.option:disabled {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
