@@ -249,6 +249,12 @@ pub fn auth_code(err: &AuthError) -> &'static str {
         AuthError::CredentialSerialize(_) => "CredentialSerialize",
         AuthError::CredentialDeserialize(_) => "CredentialDeserialize",
         AuthError::Dpapi { .. } => "Dpapi",
+        // 取消在 From<CoreError> 里已先行转成 cancelled，这里与之保持一致。
+        AuthError::Cancelled => code::CANCELLED,
+        AuthError::YggdrasilNoProfile => "YggdrasilNoProfile",
+        AuthError::NotYggdrasilServer { .. } => "NotYggdrasilServer",
+        AuthError::OfflineStoreSerialize(_) => "OfflineStoreSerialize",
+        AuthError::OfflineStoreDeserialize { .. } => "OfflineStoreDeserialize",
     }
 }
 
@@ -287,6 +293,12 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
                 }
                 AuthError::AccountNotFound(uuid) => {
                     detail.insert("uuid".to_owned(), json!(uuid));
+                }
+                AuthError::NotYggdrasilServer { url, .. } => {
+                    detail.insert("url".to_owned(), json!(url));
+                }
+                AuthError::OfflineStoreDeserialize { path, .. } => {
+                    detail.insert("path".to_owned(), json!(path.display().to_string()));
                 }
                 _ => {}
             }
@@ -365,6 +377,37 @@ mod tests {
         .into();
         assert_eq!(oauth.code, "OAuth");
         assert_eq!(oauth.detail.unwrap()["description"], json!("AADSTS700016"));
+    }
+
+    #[test]
+    fn new_auth_variants_map_to_variant_names_with_parameters() {
+        let cancelled: CommandError = AuthError::Cancelled.into();
+        assert_eq!(cancelled.code, code::CANCELLED);
+        assert_eq!(auth_code(&AuthError::Cancelled), code::CANCELLED);
+
+        let no_profile: CommandError = AuthError::YggdrasilNoProfile.into();
+        assert_eq!(no_profile.code, "YggdrasilNoProfile");
+
+        let not_server: CommandError = AuthError::NotYggdrasilServer {
+            url: "https://example.com/".into(),
+            detail: "缺少 meta".into(),
+        }
+        .into();
+        assert_eq!(not_server.code, "NotYggdrasilServer");
+        assert_eq!(
+            not_server.detail.unwrap()["url"],
+            json!("https://example.com/")
+        );
+
+        let broken: CommandError = AuthError::OfflineStoreDeserialize {
+            path: PathBuf::from("C:/data/offline_accounts.json"),
+            source: serde_json::from_str::<Value>("{").unwrap_err(),
+        }
+        .into();
+        assert_eq!(broken.code, "OfflineStoreDeserialize");
+        let detail = broken.detail.unwrap();
+        assert_eq!(detail["path"], json!("C:/data/offline_accounts.json"));
+        assert_eq!(detail["causes"].as_array().unwrap().len(), 1);
     }
 
     #[test]

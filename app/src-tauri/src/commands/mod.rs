@@ -8,6 +8,7 @@
 
 pub mod accounts;
 pub mod appearance;
+pub mod art;
 pub mod config;
 pub mod discover;
 pub mod error;
