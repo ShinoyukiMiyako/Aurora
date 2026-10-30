@@ -5,13 +5,17 @@
 //! `(major, minor, security, build)` 用于比较排序，`major` 即 `javaVersion.majorVersion`
 //! 匹配所依据的主版本号。
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 
 /// 归一后的 Java 版本号。
 ///
 /// `major` 是对外匹配用的主版本（8 / 11 / 17 / 21…）；其余三段用于同一主版本内的排序，
 /// 使得更新的补丁/构建号排在前面。`raw` 保留原始字符串以便展示与排序兜底。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 可序列化是为了把探测结果落进探测缓存，下次启动免去再跑一次 `java -version`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JavaVersion {
     /// 主版本号：旧式取 `1.X` 的 X，新式取首段。
     pub major: u32,
