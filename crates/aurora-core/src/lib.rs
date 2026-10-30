@@ -20,6 +20,7 @@
 //! # }
 //! ```
 
+pub mod appearance;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -33,6 +34,7 @@ pub mod search;
 pub mod versions;
 
 // ---- 门面自身的公开类型 ----
+pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
 pub use config::{AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings};
 pub use error::{CoreError, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
@@ -59,3 +61,19 @@ pub use aurora_modplatform::{
     ResourceType, SearchHit, SearchQuery, SortField,
 };
 pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifest};
+
+// 微软登录端点表（集成测试经 [`Aurora::with_msa_endpoints`] 注入本地 mock）与取消令牌
+// （长任务快照经 [`Aurora::with_cancel`] 挂上，命令层用同一类型登记与触发取消）。
+pub use aurora_auth::MsaEndpoints;
+pub use aurora_download::CancellationToken;
+
+// 各下层 crate 的错误类型：上层（命令边界）要把每一种都映射成稳定的错误码，故全部透传。
+pub use aurora_auth::AuthError;
+pub use aurora_base::Error as BaseError;
+pub use aurora_download::Error as DownloadError;
+pub use aurora_install::Error as InstallError;
+pub use aurora_instance::Error as InstanceError;
+pub use aurora_java::Error as JavaError;
+pub use aurora_launch::LaunchError;
+pub use aurora_modplatform::Error as ModPlatformError;
+pub use aurora_version::Error as VersionError;

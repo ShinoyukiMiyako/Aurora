@@ -54,6 +54,17 @@ pub enum Error {
     /// 选中的组件文件清单里找不到 java 可执行文件条目，安装结果无从指认。
     #[error("Java 运行时组件清单缺少 java 可执行文件条目")]
     MissingJavaExecutable,
+
+    /// 调用方经取消令牌放弃了本次运行时下载。
+    #[error("Java 运行时下载已取消")]
+    Cancelled,
+}
+
+impl Error {
+    /// 是否为取消。
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Cancelled)
+    }
 }
 
 /// crate 级 `Result` 别名。
@@ -73,6 +84,8 @@ impl RetryableError for Error {
             | Error::UnsupportedPlatform(_)
             | Error::NoRuntimeForMajor { .. }
             | Error::MissingJavaExecutable => false,
+            // 取消是调用方的决定，重试违背它。
+            Error::Cancelled => false,
         }
     }
 }

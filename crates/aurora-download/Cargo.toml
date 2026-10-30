@@ -12,6 +12,9 @@ tokio = { version = "1", default-features = false, features = ["rt", "sync", "fs
 reqwest = { version = "0.13", default-features = false }
 thiserror = "2"
 tracing = "0.1"
+# 取消令牌：长任务（安装、装 Mod、启动前补文件）由上层发出取消，引擎在文件粒度与网络等待点上观察它。
+# 只用 sync 模块里的 CancellationToken，它不受任何特性门控。
+tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 # 集成测试用 wiremock（需真正后台运行时），故补 macros/rt-multi-thread，并显式带上 sync/time 便于用 watch/timeout。

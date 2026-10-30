@@ -13,12 +13,21 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Petalfall",
         "width": 1120,
         "height": 720,
-        "minWidth": 940,
-        "minHeight": 600,
-        "decorations": false
+        "minWidth": 960,
+        "minHeight": 720,
+        "decorations": false,
+        "shadow": true,
+        "transparent": false,
+        "resizable": true,
+        "maximizable": true,
+        "center": true,
+        "visible": false,
+        "backgroundColor": "#FBF7F9",
+        "zoomHotkeysEnabled": false
       }
     ],
     "security": {

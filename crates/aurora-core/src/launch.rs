@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use aurora_auth::Account;
 use aurora_instance::{IsolationOverride, discover_versions};
-use aurora_java::{DetectSource, JavaInstallation, JavaRuntimeInstaller, detect_all, select_for_major};
+use aurora_java::{DetectSource, JavaInstallation, detect_all, select_for_major};
 use aurora_launch::{
     AuthValues, CheckStatus, CommandBuilder, GamePaths, GameSession, LaunchCommand, LogLine,
     MemoryConfig, PreLaunchInput, precheck, resolve_game_directory, spawn,
@@ -221,9 +221,7 @@ impl Aurora {
             events,
             CoreEvent::stage(format!("本地未找到 Java {required_major}，开始下载 Mojang 运行时")),
         );
-        let installer = JavaRuntimeInstaller::new(self.http())
-            .with_manifest_url(self.java_runtime_url())
-            .with_source(self.config().download_source.primary_mirror());
+        let installer = self.java_installer(self.java_runtime_url());
         let install_dir = self
             .data_dir()
             .join("runtime")
