@@ -194,6 +194,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::PrecheckFailed(_) => code::PRECHECK_FAILED,
         CoreError::TaskJoin(_) => code::INTERNAL,
         CoreError::PlatformUnsupported => code::PLATFORM_UNSUPPORTED,
+        CoreError::InvalidProjectId { .. } => code::INVALID_ARGUMENT,
     }
 }
 
@@ -305,6 +306,13 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("platform".to_owned(), json!(platform));
             detail.insert("project_id".to_owned(), json!(project_id));
             detail.insert("version_id".to_owned(), json!(version_id));
+        }
+        CoreError::InvalidProjectId {
+            platform,
+            project_id,
+        } => {
+            detail.insert("platform".to_owned(), json!(platform));
+            detail.insert("project_id".to_owned(), json!(project_id));
         }
         CoreError::ConfigIo { path, .. } | CoreError::ConfigParse { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));

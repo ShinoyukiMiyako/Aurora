@@ -11,7 +11,10 @@ use aurora_download::DownloadTask;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::model::{DependencyKind, Platform, ResourceType, SearchHit, SearchQuery};
+use crate::model::{
+    DependencyKind, ModLoader, Platform, ResourceType, SearchHit, SearchQuery, SortField,
+    hue_from_rgb,
+};
 use crate::net::send_json;
 use crate::version::{ModDependency, ModVersionInfo, ReleaseChannel, parse_loader_name};
 
@@ -56,7 +59,7 @@ impl ModrinthClient {
             params.push(("query", text.clone()));
         }
         params.push(("facets", facets));
-        params.push(("index", query.sort.modrinth_index().to_string()));
+        params.push(("index", search_index(query).to_string()));
         params.push(("offset", query.offset.to_string()));
         params.push(("limit", query.limit.to_string()));
 
@@ -73,6 +76,72 @@ impl ModrinthClient {
         send_json(&self.retry, "modrinth.project", || self.http.get(url.as_str())).await
     }
 
+    /// 批量取工程详情（一次请求）；不存在的 id 不出现在结果里。空批次不发请求。
+    pub async fn projects(&self, ids: &[String]) -> Result<Vec<ModrinthProject>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = json_array(
+            &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "modrinth project ids",
+        )?;
+        let url = format!("{}/projects", self.base_url);
+        send_json(&self.retry, "modrinth.projects", || {
+            self.http.get(url.as_str()).query(&[("ids", ids.as_str())])
+        })
+        .await
+    }
+
+    /// 工程成员列表（作者名取自这里：工程对象只带团队 id）。
+    pub async fn project_members(&self, id_or_slug: &str) -> Result<Vec<ModrinthTeamMember>> {
+        let url = format!("{}/project/{}/members", self.base_url, id_or_slug);
+        send_json(&self.retry, "modrinth.project_members", || {
+            self.http.get(url.as_str())
+        })
+        .await
+    }
+
+    /// 批量取多个团队的成员（一次请求），结果与 `team_ids` 不保证同序，按成员的 `team_id` 对回。
+    pub async fn teams(&self, team_ids: &[String]) -> Result<Vec<Vec<ModrinthTeamMember>>> {
+        if team_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = json_array(
+            &team_ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "modrinth team ids",
+        )?;
+        let url = format!("{}/teams", self.base_url);
+        send_json(&self.retry, "modrinth.teams", || {
+            self.http.get(url.as_str()).query(&[("ids", ids.as_str())])
+        })
+        .await
+    }
+
+    /// 批量按版本 id 取版本（一次请求）。空批次不发请求。
+    pub async fn versions_by_ids(&self, ids: &[String]) -> Result<Vec<ModrinthVersion>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = json_array(
+            &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "modrinth version ids",
+        )?;
+        let url = format!("{}/versions", self.base_url);
+        send_json(&self.retry, "modrinth.versions_by_ids", || {
+            self.http.get(url.as_str()).query(&[("ids", ids.as_str())])
+        })
+        .await
+    }
+
+    /// 按版本 id 取单个版本。
+    pub async fn version(&self, version_id: &str) -> Result<ModrinthVersion> {
+        let url = format!("{}/version/{}", self.base_url, version_id);
+        send_json(&self.retry, "modrinth.version", || {
+            self.http.get(url.as_str())
+        })
+        .await
+    }
+
     /// 列出工程的版本，可按加载器与游戏版本过滤。
     pub async fn versions(
         &self,
@@ -80,7 +149,8 @@ impl ModrinthClient {
         loaders: &[crate::model::ModLoader],
         game_versions: &[&str],
     ) -> Result<Vec<ModrinthVersion>> {
-        let mut params: Vec<(&str, String)> = Vec::new();
+        // 版本对象里没有字段读更新日志；大工程上千个版本，带上日志要多传几百 KB。
+        let mut params: Vec<(&str, String)> = vec![("include_changelog", "false".to_string())];
         if !loaders.is_empty() {
             let arr: Vec<&str> = loaders.iter().map(|l| l.modrinth_facet()).collect();
             params.push(("loaders", json_array(&arr, "modrinth loaders")?));
@@ -180,14 +250,66 @@ impl ModrinthClient {
     }
 }
 
+/// Modrinth 的加载器标签（`/v2/tag/loader`）。搜索命中的 `categories` 把加载器与分类混在一起，
+/// 分类标签只该显示真正的分类，靠这张表把加载器摘出去。
+const MODRINTH_LOADER_TAGS: &[&str] = &[
+    "babric",
+    "bta-babric",
+    "bukkit",
+    "bungeecord",
+    "canvas",
+    "datapack",
+    "fabric",
+    "folia",
+    "forge",
+    "geyser",
+    "iris",
+    "java-agent",
+    "legacy-fabric",
+    "liteloader",
+    "minecraft",
+    "modloader",
+    "neoforge",
+    "nilloader",
+    "optifine",
+    "ornithe",
+    "paper",
+    "purpur",
+    "quilt",
+    "rift",
+    "spigot",
+    "sponge",
+    "vanilla",
+    "velocity",
+    "waterfall",
+];
+
+/// 搜索排序索引。没有搜索词时相关度无从谈起，按下载量给出热门结果（与 CurseForge 侧的
+/// Popularity 对齐），界面上的排序名不变。
+fn search_index(query: &SearchQuery) -> &'static str {
+    let no_text = query.query.as_deref().is_none_or(|q| q.trim().is_empty());
+    if no_text && query.sort == SortField::Relevance {
+        SortField::Downloads.modrinth_index()
+    } else {
+        query.sort.modrinth_index()
+    }
+}
+
 /// 构造 Modrinth `facets` 查询串：形如 `[["project_type:mod"],["categories:fabric"],["versions:1.20.1"]]`。
-/// 组内为「或」、组间为「与」。加载器归入 `categories` facet（Modrinth 搜索约定）。
+/// 组内为「或」、组间为「与」。加载器与分类都归入 `categories` facet（Modrinth 搜索约定），
+/// 但分别成组：分类条件与加载器条件是「与」的关系。
 fn build_facets(query: &SearchQuery) -> Result<String> {
     let mut groups: Vec<Vec<String>> = Vec::new();
-    groups.push(vec![format!(
-        "project_type:{}",
-        query.resource_type.modrinth_project_type()
-    )]);
+    groups.push(
+        query
+            .effective_types()
+            .iter()
+            .map(|t| format!("project_type:{}", t.modrinth_project_type()))
+            .collect(),
+    );
+    if let Some(category) = &query.category {
+        groups.push(vec![format!("categories:{category}")]);
+    }
     if !query.loaders.is_empty() {
         groups.push(
             query
@@ -262,31 +384,127 @@ pub struct ModrinthHit {
     pub author: String,
     /// 更新时间（ISO-8601）。
     pub date_modified: String,
+    /// 工程同时属于的全部类型。数据包工程的 `project_type` 写的是 `mod`，只有这里带 `datapack`。
+    #[serde(default)]
+    pub all_project_types: Vec<String>,
+    /// 精选图库图。
+    #[serde(default)]
+    pub featured_gallery: Option<String>,
+    /// 图库图。
+    #[serde(default)]
+    pub gallery: Vec<String>,
+    /// 平台为工程取的主色（`0xRRGGBB`）。
+    #[serde(default)]
+    pub color: Option<u32>,
 }
 
-impl From<&ModrinthHit> for SearchHit {
-    fn from(hit: &ModrinthHit) -> Self {
-        let resource_type = ResourceType::from_modrinth_project_type(&hit.project_type);
-        let page_url = hit
-            .slug
-            .as_ref()
-            .map(|slug| format!("https://modrinth.com/{}/{}", hit.project_type, slug));
+impl ModrinthHit {
+    /// 转成统一命中。`requested` 是本次搜索的类型：工程同时属于多种类型时（常见于同时发布为
+    /// Mod 与数据包的工程），取其中被请求的那一种，免得在「数据包」搜索里显示成 Mod。
+    pub fn to_search_hit(&self, requested: &[ResourceType]) -> SearchHit {
+        let primary = ResourceType::from_modrinth_project_type(&self.project_type);
+        let resource_type = if requested.contains(&primary) {
+            primary
+        } else {
+            requested
+                .iter()
+                .copied()
+                .find(|t| {
+                    self.all_project_types
+                        .iter()
+                        .any(|p| p == t.modrinth_project_type())
+                })
+                .unwrap_or(primary)
+        };
+        let page_url = self.slug.as_ref().map(|slug| {
+            format!(
+                "https://modrinth.com/{}/{}",
+                resource_type.modrinth_project_type(),
+                slug
+            )
+        });
+        let (loaders, categories) = split_modrinth_tags(&self.categories);
         SearchHit {
             platform: Platform::Modrinth,
-            project_id: hit.project_id.clone(),
-            slug: hit.slug.clone(),
-            title: hit.title.clone(),
-            description: hit.description.clone(),
-            author: Some(hit.author.clone()),
-            downloads: hit.downloads,
-            follows: Some(hit.follows),
-            icon_url: hit.icon_url.clone(),
-            categories: hit.categories.clone(),
+            project_id: self.project_id.clone(),
+            slug: self.slug.clone(),
+            title: self.title.clone(),
+            description: self.description.clone(),
+            author: Some(self.author.clone()).filter(|a| !a.trim().is_empty()),
+            downloads: self.downloads,
+            follows: Some(self.follows),
+            icon_url: self.icon_url.clone(),
+            gallery_url: self
+                .featured_gallery
+                .clone()
+                .or_else(|| self.gallery.first().cloned()),
+            hue: self.color.and_then(hue_from_rgb),
+            categories,
+            loaders,
             resource_type,
-            date_modified: Some(hit.date_modified.clone()),
+            date_modified: Some(self.date_modified.clone()),
             page_url,
         }
     }
+}
+
+/// 把 Modrinth 的 `categories` 拆成（能认出的加载器，真正的分类）。
+pub(crate) fn split_modrinth_tags(tags: &[String]) -> (Vec<ModLoader>, Vec<String>) {
+    let mut loaders = Vec::new();
+    let mut categories = Vec::new();
+    for tag in tags {
+        if MODRINTH_LOADER_TAGS.contains(&tag.as_str()) {
+            if let Some(loader) = parse_loader_name(tag)
+                && !loaders.contains(&loader)
+            {
+                loaders.push(loader);
+            }
+        } else {
+            categories.push(tag.clone());
+        }
+    }
+    (loaders, categories)
+}
+
+/// 团队成员。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModrinthTeamMember {
+    /// 所属团队 id。
+    pub team_id: String,
+    /// 用户。
+    pub user: ModrinthUser,
+    /// 角色名（Owner / Member / 自定义）。
+    #[serde(default)]
+    pub role: String,
+    /// 排序位次，越小越靠前。
+    #[serde(default)]
+    pub ordering: i64,
+}
+
+/// 用户。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModrinthUser {
+    /// 用户名。
+    pub username: String,
+}
+
+/// 从团队成员里挑出展示用的作者：角色为 Owner 者优先，否则取排序最前的成员。
+pub fn primary_author(members: &[ModrinthTeamMember]) -> Option<String> {
+    members
+        .iter()
+        .find(|m| m.role.eq_ignore_ascii_case("owner"))
+        .or_else(|| members.iter().min_by_key(|m| m.ordering))
+        .map(|m| m.user.username.clone())
+}
+
+/// 图库图。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModrinthGalleryImage {
+    /// 图片 URL（平台压缩后的版本）。
+    pub url: String,
+    /// 是否精选。
+    #[serde(default)]
+    pub featured: bool,
 }
 
 /// 工程详情。
@@ -329,6 +547,42 @@ pub struct ModrinthProject {
     /// 发布时间。
     #[serde(default)]
     pub published: Option<String>,
+    /// 介绍正文（Markdown）。
+    #[serde(default)]
+    pub body: Option<String>,
+    /// 团队 id。
+    #[serde(default)]
+    pub team: Option<String>,
+    /// 图库。
+    #[serde(default)]
+    pub gallery: Vec<ModrinthGalleryImage>,
+    /// 主色（`0xRRGGBB`）。
+    #[serde(default)]
+    pub color: Option<u32>,
+    /// 源码地址。
+    #[serde(default)]
+    pub source_url: Option<String>,
+    /// 问题反馈地址。
+    #[serde(default)]
+    pub issues_url: Option<String>,
+    /// 维基地址。
+    #[serde(default)]
+    pub wiki_url: Option<String>,
+}
+
+impl ModrinthProject {
+    /// 工程的资源类型。Modrinth 把数据包工程记为 `mod`，只能从加载器只有 `datapack` 认出来。
+    pub fn resource_type(&self) -> ResourceType {
+        let primary = ResourceType::from_modrinth_project_type(&self.project_type);
+        if primary == ResourceType::Mod
+            && !self.loaders.is_empty()
+            && self.loaders.iter().all(|l| l == "datapack")
+        {
+            ResourceType::DataPack
+        } else {
+            primary
+        }
+    }
 }
 
 /// 版本。
@@ -558,15 +812,123 @@ mod tests {
         assert_eq!(hit.downloads, 12_345_678);
         assert_eq!(hit.follows, 4321);
 
-        // 统一模型转换。
-        let unified: SearchHit = hit.into();
+        // 统一模型转换：加载器从分类里摘出去。
+        let unified = hit.to_search_hit(&[ResourceType::Mod]);
         assert_eq!(unified.platform, Platform::Modrinth);
         assert_eq!(unified.resource_type, ResourceType::Mod);
         assert_eq!(unified.follows, Some(4321));
+        assert_eq!(unified.categories, vec!["optimization".to_string()]);
+        assert_eq!(unified.loaders, vec![ModLoader::Fabric]);
+        assert_eq!(unified.hue, None);
+        assert_eq!(unified.gallery_url, None);
         assert_eq!(
             unified.page_url.as_deref(),
             Some("https://modrinth.com/mod/sodium")
         );
+    }
+
+    #[test]
+    fn facets_carry_multiple_types_and_category_as_separate_groups() {
+        let query = SearchQuery::default()
+            .with_resource_types(vec![ResourceType::Mod, ResourceType::DataPack])
+            .with_category("worldgen")
+            .with_loader(ModLoader::Fabric);
+        assert_eq!(
+            build_facets(&query).unwrap(),
+            r#"[["project_type:mod","project_type:datapack"],["categories:worldgen"],["categories:fabric"]]"#
+        );
+        let all = SearchQuery::default().with_resource_types(Vec::new());
+        assert_eq!(
+            build_facets(&all).unwrap(),
+            r#"[["project_type:mod","project_type:modpack","project_type:resourcepack","project_type:shader","project_type:datapack"]]"#
+        );
+    }
+
+    #[test]
+    fn empty_query_with_relevance_sorts_by_downloads() {
+        assert_eq!(search_index(&SearchQuery::default()), "downloads");
+        assert_eq!(search_index(&SearchQuery::new("  ")), "downloads");
+        assert_eq!(search_index(&SearchQuery::new("sodium")), "relevance");
+        assert_eq!(
+            search_index(&SearchQuery::default().with_sort(SortField::Updated)),
+            "updated"
+        );
+    }
+
+    fn hit_json(project_type: &str, all: &[&str]) -> ModrinthHit {
+        serde_json::from_value(serde_json::json!({
+            "project_id": "8oi3bsk5", "slug": "terralith", "title": "Terralith",
+            "description": "d", "categories": ["datapack", "fabric", "worldgen", "neoforge"],
+            "project_type": project_type, "all_project_types": all,
+            "downloads": 10, "follows": 2, "author": "Starmute",
+            "date_modified": "2026-10-01T00:00:00Z",
+            "gallery": ["https://cdn.modrinth.com/g1.webp", "https://cdn.modrinth.com/g2.webp"],
+            "featured_gallery": null, "color": 4996660
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn datapack_hit_takes_requested_type_from_all_project_types() {
+        let hit = hit_json("mod", &["datapack", "mod"]);
+        let as_datapack = hit.to_search_hit(&[ResourceType::DataPack]);
+        assert_eq!(as_datapack.resource_type, ResourceType::DataPack);
+        assert_eq!(
+            as_datapack.page_url.as_deref(),
+            Some("https://modrinth.com/datapack/terralith")
+        );
+        // 同时请求了 Mod 时按工程自报的主类型。
+        let mixed = hit.to_search_hit(&[ResourceType::Mod, ResourceType::DataPack]);
+        assert_eq!(mixed.resource_type, ResourceType::Mod);
+        // datapack 是加载器标签，不进分类；能认出的加载器按出现顺序列出。
+        assert_eq!(mixed.categories, vec!["worldgen".to_string()]);
+        assert_eq!(mixed.loaders, vec![ModLoader::Fabric, ModLoader::NeoForge]);
+        assert_eq!(
+            mixed.gallery_url.as_deref(),
+            Some("https://cdn.modrinth.com/g1.webp")
+        );
+        assert_eq!(mixed.hue, Some(25));
+    }
+
+    #[test]
+    fn primary_author_prefers_owner_then_ordering() {
+        let member = |name: &str, role: &str, ordering: i64| ModrinthTeamMember {
+            team_id: "t".into(),
+            user: ModrinthUser {
+                username: name.into(),
+            },
+            role: role.into(),
+            ordering,
+        };
+        assert_eq!(
+            primary_author(&[member("a", "Member", 0), member("b", "Owner", 5)]).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            primary_author(&[member("a", "Member", 3), member("c", "Member", 1)]).as_deref(),
+            Some("c")
+        );
+        assert_eq!(primary_author(&[]), None);
+    }
+
+    #[test]
+    fn project_with_only_datapack_loader_is_a_datapack() {
+        let project = |loaders: &[&str]| -> ModrinthProject {
+            serde_json::from_value(serde_json::json!({
+                "id": "p", "title": "t", "description": "d", "project_type": "mod",
+                "downloads": 1, "loaders": loaders
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            project(&["datapack"]).resource_type(),
+            ResourceType::DataPack
+        );
+        assert_eq!(
+            project(&["datapack", "fabric"]).resource_type(),
+            ResourceType::Mod
+        );
+        assert_eq!(project(&[]).resource_type(), ResourceType::Mod);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

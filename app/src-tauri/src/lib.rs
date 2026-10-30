@@ -86,6 +86,7 @@ pub fn run() {
             commands::mods::set_mod_enabled,
             // -- discover --
             commands::discover::search_resources,
+            commands::discover::project_detail,
             commands::discover::install_mod,
         ])
         .run(tauri::generate_context!())

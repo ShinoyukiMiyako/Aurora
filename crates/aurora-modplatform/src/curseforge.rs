@@ -1,8 +1,9 @@
 //! CurseForge v1 客户端（api.curseforge.com/v1）。
 //!
 //! 覆盖搜索、工程详情、文件列表、按指纹匹配、取文件下载直链。CurseForge 强制 `x-api-key` 头，
-//! key 经构造函数或环境变量 `AURORA_CURSEFORGE_API_KEY` 注入；缺失时构造直接失败
-//! （[`Error::CurseForgeKeyMissing`]），该源被明确禁用而非静默降级。远端地址经 `base_url` 注入以走 mock。
+//! key 经构造函数注入，或由 [`CurseForgeClient::from_env`] 依次取运行期环境变量与构建期内嵌的
+//! `AURORA_CURSEFORGE_API_KEY`；都没有时构造直接失败（[`Error::CurseForgeKeyMissing`]），该源被明确
+//! 禁用而非静默降级。远端地址经 `base_url` 注入以走 mock。
 
 use std::path::PathBuf;
 
@@ -44,10 +45,14 @@ impl CurseForgeClient {
         }
     }
 
-    /// 从环境变量 `AURORA_CURSEFORGE_API_KEY` 读取 key 构造；缺失或空白返回
-    /// [`Error::CurseForgeKeyMissing`]。
+    /// 取 key 构造：运行期环境变量 `AURORA_CURSEFORGE_API_KEY` 优先（开发与自行构建时用），
+    /// 其次是构建时经同名环境变量内嵌进二进制的 key（发行版用户机器上没有这个变量，只能靠内嵌）。
+    /// 两处都缺失或空白返回 [`Error::CurseForgeKeyMissing`]。
     pub fn from_env(http: reqwest::Client) -> Result<Self> {
-        let key = key_from_env_value(std::env::var(API_KEY_ENV).ok())?;
+        let key = resolve_api_key(
+            std::env::var(API_KEY_ENV).ok(),
+            option_env!("AURORA_CURSEFORGE_API_KEY"),
+        )?;
         Ok(Self::new(http, key))
     }
 
@@ -71,9 +76,16 @@ impl CurseForgeClient {
         self.http.post(url).header("x-api-key", self.api_key.as_str())
     }
 
-    /// 搜索工程。CurseForge 单次仅支持一个加载器与一个游戏版本，故取查询列表首项。
-    pub async fn search(&self, query: &SearchQuery) -> Result<CurseForgeSearchResponse> {
-        let params = build_search_params(query);
+    /// 按 [`search_plan`] 搜索工程。CurseForge 单次仅支持一个加载器与一个游戏版本，故取查询列表首项。
+    ///
+    /// 多类型搜索不带 classId，CurseForge 会把世界、附加包等发现页不收的 class 一并返回，这里不筛，
+    /// 由调用方按 [`CurseForgeSearchPlan::accepts`] 过滤（被筛掉的条目仍计入分页偏移）。
+    pub async fn search(
+        &self,
+        query: &SearchQuery,
+        plan: &CurseForgeSearchPlan,
+    ) -> Result<CurseForgeSearchResponse> {
+        let params = build_search_params(query, plan);
         let url = format!("{}/v1/mods/search", self.base_url);
         send_json(&self.retry, "curseforge.search", || {
             self.get(url.as_str()).query(&params)
@@ -86,6 +98,68 @@ impl CurseForgeClient {
         let url = format!("{}/v1/mods/{}", self.base_url, mod_id);
         let envelope: Envelope<CurseForgeMod> =
             send_json(&self.retry, "curseforge.get_mod", || self.get(url.as_str())).await?;
+        Ok(envelope.data)
+    }
+
+    /// 批量取工程详情（一次请求）。空批次不发请求。
+    pub async fn get_mods(&self, mod_ids: &[u32]) -> Result<Vec<CurseForgeMod>> {
+        if mod_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            mod_ids: &'a [u32],
+        }
+        let body = Body { mod_ids };
+        let url = format!("{}/v1/mods", self.base_url);
+        let envelope: ListEnvelope<CurseForgeMod> =
+            send_json(&self.retry, "curseforge.get_mods", || {
+                self.post(url.as_str()).json(&body)
+            })
+            .await?;
+        Ok(envelope.data)
+    }
+
+    /// 工程介绍正文（HTML）。
+    pub async fn mod_description(&self, mod_id: u32) -> Result<String> {
+        let url = format!("{}/v1/mods/{}/description", self.base_url, mod_id);
+        let envelope: Envelope<String> =
+            send_json(&self.retry, "curseforge.mod_description", || {
+                self.get(url.as_str())
+            })
+            .await?;
+        Ok(envelope.data)
+    }
+
+    /// 取单个文件。
+    pub async fn mod_file(&self, mod_id: u32, file_id: u32) -> Result<CurseForgeFile> {
+        let url = format!("{}/v1/mods/{}/files/{}", self.base_url, mod_id, file_id);
+        let envelope: Envelope<CurseForgeFile> =
+            send_json(&self.retry, "curseforge.mod_file", || {
+                self.get(url.as_str())
+            })
+            .await?;
+        Ok(envelope.data)
+    }
+
+    /// 批量按文件 id 取文件（一次请求）；整合包清单只给文件 id，下载地址与大小要靠它补全。
+    pub async fn get_files(&self, file_ids: &[u32]) -> Result<Vec<CurseForgeFile>> {
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Body<'a> {
+            file_ids: &'a [u32],
+        }
+        let body = Body { file_ids };
+        let url = format!("{}/v1/mods/files", self.base_url);
+        let envelope: ListEnvelope<CurseForgeFile> =
+            send_json(&self.retry, "curseforge.get_files", || {
+                self.post(url.as_str()).json(&body)
+            })
+            .await?;
         Ok(envelope.data)
     }
 
@@ -151,18 +225,79 @@ fn key_from_env_value(value: Option<String>) -> Result<String> {
     }
 }
 
+/// 运行期的值优先，构建期内嵌的值兜底；两者都缺失或空白即未配置。
+fn resolve_api_key(runtime: Option<String>, embedded: Option<&str>) -> Result<String> {
+    key_from_env_value(runtime).or_else(|_| key_from_env_value(embedded.map(str::to_owned)))
+}
+
+/// CurseForge 单次搜索请求的分类参数。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurseForgeSearchPlan {
+    /// 只搜一种类型时带上它的 classId；多类型时不带（CurseForge 只收单个 classId）。
+    pub class_id: Option<u32>,
+    /// 分类条件换算出的分类 id（每个 id 只属于一个 class）。
+    pub category_ids: Vec<u32>,
+    /// 本次请求的类型对应的全部 classId，用于筛掉多类型搜索混进来的其他 class。
+    pub accepted_classes: Vec<u32>,
+}
+
+impl CurseForgeSearchPlan {
+    /// 该命中的 class 是否属于本次请求的类型。
+    pub fn accepts(&self, class_id: Option<u32>) -> bool {
+        class_id.is_some_and(|id| self.accepted_classes.contains(&id))
+    }
+}
+
+/// 把统一查询换算成 CurseForge 的分类参数；分类条件在这些类型下都没有同义分类时返回 `None`，
+/// 表示该次搜索不该发往 CurseForge（发出去只会得到不带分类过滤的无关结果）。
+pub fn search_plan(query: &SearchQuery) -> Option<CurseForgeSearchPlan> {
+    let types = query.effective_types();
+    let category_ids = match &query.category {
+        Some(key) => {
+            let ids = crate::category_map::curseforge_categories(&types, key);
+            if ids.is_empty() {
+                return None;
+            }
+            ids
+        }
+        None => Vec::new(),
+    };
+    let class_id = match types.as_slice() {
+        [only] => Some(only.curseforge_class_id()),
+        _ => None,
+    };
+    Some(CurseForgeSearchPlan {
+        class_id,
+        category_ids,
+        accepted_classes: types.iter().map(|t| t.curseforge_class_id()).collect(),
+    })
+}
+
 /// 组装 `/v1/mods/search` 查询参数。
-fn build_search_params(query: &SearchQuery) -> Vec<(&'static str, String)> {
+fn build_search_params(
+    query: &SearchQuery,
+    plan: &CurseForgeSearchPlan,
+) -> Vec<(&'static str, String)> {
     let mut params: Vec<(&'static str, String)> = vec![
         ("gameId", MINECRAFT_GAME_ID.to_string()),
-        ("classId", query.resource_type.curseforge_class_id().to_string()),
         ("sortField", query.sort.curseforge_sort_field().to_string()),
         ("sortOrder", "desc".to_string()),
         ("index", query.offset.to_string()),
         ("pageSize", query.limit.to_string()),
     ];
-    if let Some(text) = &query.query {
-        params.push(("searchFilter", text.clone()));
+    if let Some(class_id) = plan.class_id {
+        params.push(("classId", class_id.to_string()));
+    }
+    match plan.category_ids.as_slice() {
+        [] => {}
+        [only] => params.push(("categoryId", only.to_string())),
+        many => {
+            let list: Vec<String> = many.iter().map(u32::to_string).collect();
+            params.push(("categoryIds", format!("[{}]", list.join(","))));
+        }
+    }
+    if let Some(text) = query.query.as_deref().filter(|t| !t.trim().is_empty()) {
+        params.push(("searchFilter", text.to_string()));
     }
     if let Some(version) = query.game_versions.first() {
         params.push(("gameVersion", version.clone()));
@@ -236,9 +371,15 @@ pub struct CurseForgeMod {
     /// logo 资源。
     #[serde(default)]
     pub logo: Option<CurseForgeAsset>,
+    /// 截图（图库）。
+    #[serde(default)]
+    pub screenshots: Vec<CurseForgeAsset>,
     /// 最新文件。
     #[serde(default)]
     pub latest_files: Vec<CurseForgeFile>,
+    /// 每个（游戏版本，加载器）组合的最新文件索引；加载器与支持版本从这里汇总。
+    #[serde(default)]
+    pub latest_files_indexes: Vec<CurseForgeFileIndex>,
     /// 相关链接。
     #[serde(default)]
     pub links: Option<CurseForgeLinks>,
@@ -248,6 +389,37 @@ pub struct CurseForgeMod {
     /// 创建时间。
     #[serde(default)]
     pub date_created: Option<String>,
+    /// 作者是否允许第三方启动器分发文件；为 `false` 时文件没有下载地址，只能去网页手动下载。
+    #[serde(default)]
+    pub allow_mod_distribution: Option<bool>,
+}
+
+impl CurseForgeMod {
+    /// 汇总最新文件索引里出现过的加载器（去重，按首次出现顺序）。
+    pub fn loaders(&self) -> Vec<ModLoader> {
+        let mut loaders = Vec::new();
+        for index in &self.latest_files_indexes {
+            if let Some(loader) = index
+                .mod_loader
+                .and_then(ModLoader::from_curseforge_loader_type)
+                && !loaders.contains(&loader)
+            {
+                loaders.push(loader);
+            }
+        }
+        loaders
+    }
+
+    /// 汇总最新文件索引里出现过的 MC 版本（去重，按首次出现顺序）。
+    pub fn game_versions(&self) -> Vec<String> {
+        let mut versions: Vec<String> = Vec::new();
+        for index in &self.latest_files_indexes {
+            if !versions.contains(&index.game_version) {
+                versions.push(index.game_version.clone());
+            }
+        }
+        versions
+    }
 }
 
 impl From<&CurseForgeMod> for SearchHit {
@@ -263,12 +435,35 @@ impl From<&CurseForgeMod> for SearchHit {
             // CurseForge 无「关注数」概念。
             follows: None,
             icon_url: item.logo.as_ref().map(|logo| logo.url.clone()),
+            gallery_url: item.screenshots.first().map(|s| s.url.clone()),
+            // CurseForge 不给工程主色。
+            hue: None,
             categories: item.categories.iter().map(|c| c.name.clone()).collect(),
+            loaders: item.loaders(),
             resource_type: ResourceType::from_curseforge_class_id(item.class_id),
             date_modified: item.date_modified.clone(),
             page_url: item.links.as_ref().and_then(|l| l.website_url.clone()),
         }
     }
+}
+
+/// 最新文件索引项。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurseForgeFileIndex {
+    /// 游戏版本。
+    pub game_version: String,
+    /// 文件 id。
+    pub file_id: u32,
+    /// 文件名。
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// 发布通道编码。
+    #[serde(default)]
+    pub release_type: Option<u8>,
+    /// 加载器编码；不区分加载器的资源（资源包、光影）为空。
+    #[serde(default)]
+    pub mod_loader: Option<u8>,
 }
 
 /// 分类标签。
@@ -306,6 +501,12 @@ pub struct CurseForgeLinks {
     /// 源码地址。
     #[serde(default)]
     pub source_url: Option<String>,
+    /// 问题反馈地址。
+    #[serde(default)]
+    pub issues_url: Option<String>,
+    /// 维基地址。
+    #[serde(default)]
+    pub wiki_url: Option<String>,
 }
 
 /// 文件。
@@ -522,7 +723,8 @@ mod tests {
             .with_game_version("1.20.1")
             .with_sort(SortField::Downloads)
             .with_paging(30, 60);
-        let params = build_search_params(&query);
+        let plan = search_plan(&query).unwrap();
+        let params = build_search_params(&query, &plan);
         let get = |key: &str| {
             params
                 .iter()
@@ -538,6 +740,107 @@ mod tests {
         assert_eq!(get("searchFilter"), Some("jei"));
         assert_eq!(get("gameVersion"), Some("1.20.1"));
         assert_eq!(get("modLoaderType"), Some("1"));
+        assert_eq!(get("categoryId"), None);
+        assert_eq!(get("categoryIds"), None);
+    }
+
+    fn params_of(query: &SearchQuery) -> Option<Vec<(&'static str, String)>> {
+        search_plan(query).map(|plan| build_search_params(query, &plan))
+    }
+
+    fn param<'a>(params: &'a [(&'static str, String)], key: &str) -> Option<&'a str> {
+        params
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn single_type_with_category_sends_class_and_category_id() {
+        let query = SearchQuery::default()
+            .with_resource_type(ResourceType::Shader)
+            .with_category("fantasy");
+        let params = params_of(&query).unwrap();
+        assert_eq!(param(&params, "classId"), Some("6552"));
+        assert_eq!(param(&params, "categoryId"), Some("6554"));
+        assert_eq!(param(&params, "categoryIds"), None);
+        // 没有搜索词时不带 searchFilter，空白搜索词同样不带。
+        assert_eq!(param(&params, "searchFilter"), None);
+        let blank = params_of(&SearchQuery::new("   ")).unwrap();
+        assert_eq!(param(&blank, "searchFilter"), None);
+    }
+
+    #[test]
+    fn all_types_drop_class_and_union_category_ids() {
+        let query = SearchQuery::default()
+            .with_resource_types(Vec::new())
+            .with_category("technology");
+        let plan = search_plan(&query).unwrap();
+        assert_eq!(plan.class_id, None);
+        assert_eq!(plan.category_ids, vec![412, 4472, 6951]);
+        assert_eq!(plan.accepted_classes, vec![6, 4471, 12, 6552, 6945]);
+        let params = build_search_params(&query, &plan);
+        assert_eq!(param(&params, "classId"), None);
+        assert_eq!(param(&params, "categoryIds"), Some("[412,4472,6951]"));
+        assert_eq!(param(&params, "categoryId"), None);
+        // 世界（17）与插件（5）不在「全部」里。
+        assert!(plan.accepts(Some(6945)));
+        assert!(!plan.accepts(Some(17)));
+        assert!(!plan.accepts(Some(5)));
+        assert!(!plan.accepts(None));
+    }
+
+    #[test]
+    fn unmapped_category_means_curseforge_is_skipped() {
+        let query = SearchQuery::default()
+            .with_resource_type(ResourceType::ResourcePack)
+            .with_category("gui");
+        assert_eq!(search_plan(&query), None);
+        let unknown = SearchQuery::default().with_category("not-a-category");
+        assert_eq!(search_plan(&unknown), None);
+    }
+
+    #[test]
+    fn runtime_key_wins_and_embedded_key_is_the_fallback() {
+        assert_eq!(
+            resolve_api_key(Some("runtime".into()), Some("embedded")).unwrap(),
+            "runtime"
+        );
+        assert_eq!(
+            resolve_api_key(Some("  ".into()), Some("embedded")).unwrap(),
+            "embedded"
+        );
+        assert_eq!(resolve_api_key(None, Some("embedded")).unwrap(), "embedded");
+        assert!(matches!(
+            resolve_api_key(None, Some(" ")),
+            Err(Error::CurseForgeKeyMissing)
+        ));
+        assert!(matches!(
+            resolve_api_key(None, None),
+            Err(Error::CurseForgeKeyMissing)
+        ));
+    }
+
+    #[test]
+    fn mod_summarizes_loaders_and_versions_from_file_indexes() {
+        let item: CurseForgeMod = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "n", "slug": "s", "summary": "",
+            "latestFilesIndexes": [
+                {"gameVersion": "1.20.1", "fileId": 10, "modLoader": 1},
+                {"gameVersion": "1.20.1", "fileId": 11, "modLoader": 6},
+                {"gameVersion": "1.21.1", "fileId": 12, "modLoader": 6},
+                {"gameVersion": "1.21.1", "fileId": 13, "modLoader": null},
+                {"gameVersion": "1.19.2", "fileId": 14, "modLoader": 0}
+            ],
+            "screenshots": [{"url": "https://cf/shot1.png"}, {"url": "https://cf/shot2.png"}]
+        }))
+        .unwrap();
+        assert_eq!(item.loaders(), vec![ModLoader::Forge, ModLoader::NeoForge]);
+        assert_eq!(item.game_versions(), vec!["1.20.1", "1.21.1", "1.19.2"]);
+        let hit = SearchHit::from(&item);
+        assert_eq!(hit.gallery_url.as_deref(), Some("https://cf/shot1.png"));
+        assert_eq!(hit.loaders, vec![ModLoader::Forge, ModLoader::NeoForge]);
+        assert_eq!(hit.hue, None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -569,8 +872,9 @@ mod tests {
             .mount(&server)
             .await;
 
+        let query = SearchQuery::new("jei");
         let resp = client(&server)
-            .search(&SearchQuery::new("jei"))
+            .search(&query, &search_plan(&query).unwrap())
             .await
             .unwrap();
         assert_eq!(resp.data.len(), 1);

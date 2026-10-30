@@ -80,6 +80,12 @@ pub enum CoreError {
     /// 该操作在当前平台不受支持（微软登录凭据加密仅限 Windows）。
     #[error("该操作在当前平台不受支持（微软登录的凭据加密仅限 Windows）")]
     PlatformUnsupported,
+    /// 工程 id 的格式不符合该平台的约定（CurseForge 的工程与文件 id 都是十进制数字）。
+    #[error("{platform} 的工程 id 格式不对：{project_id}")]
+    InvalidProjectId {
+        platform: &'static str,
+        project_id: String,
+    },
 }
 
 impl CoreError {

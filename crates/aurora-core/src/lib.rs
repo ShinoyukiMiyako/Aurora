@@ -60,6 +60,11 @@ pub use aurora_modplatform::{
     AggregateResult, InstalledMod, MetadataFormat, ModLoader, ModMetadata, Platform, PlatformError,
     ResourceType, SearchHit, SearchQuery, SortField,
 };
+// 发现页：聚合搜索的合并结果与翻页游标、工程详情。
+pub use aurora_modplatform::{
+    BodyFormat, DependencyProject, HitSource, ModDependency, ModVersionInfo, PlatformCursor,
+    ProjectDetail, ReleaseChannel, SearchCursor, SearchEntry, SkipReason, SkippedPlatform,
+};
 pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifest};
 
 // 微软登录端点表（集成测试经 [`Aurora::with_msa_endpoints`] 注入本地 mock）与取消令牌
