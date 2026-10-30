@@ -1,0 +1,136 @@
+/*
+ * 弹窗层铺满浮层根，四周留 24px：实际宽 = min(档位宽, 内容区宽 − 48)，最大高 = 内容区高 − 48，
+ * 超出时主体在内部滚动，头部与底栏固定。
+ */
+.layer {
+  position: absolute;
+  inset: 0;
+  z-index: var(--sk-z-modal);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: var(--sk-space-24);
+}
+
+.layer[data-exiting] {
+  pointer-events: none;
+}
+
+/* 遮罩不加模糊：背后主页的花瓣逐帧更新，模糊会逐帧重算 */
+.scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--sk-scrim);
+}
+
+.layer[data-stacked] .scrim {
+  background: transparent;
+}
+
+.dialog {
+  --modal-width: 560px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: var(--modal-width);
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-xl);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow-lg);
+  color: var(--sk-text);
+  outline: none;
+}
+
+.dialog[data-size="sm"] {
+  --modal-width: 420px;
+}
+
+.dialog[data-size="lg"] {
+  --modal-width: 760px;
+}
+
+.dialog[data-size="xl"] {
+  --modal-width: 940px;
+}
+
+.head {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: var(--sk-space-14);
+  padding: var(--sk-space-22) var(--sk-space-22) var(--sk-space-6) var(--sk-space-24);
+}
+
+/* 38 见方的图标底座，圆角按标识类比例 round(38 × 0.3) = 11 */
+.iconBase {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.headText {
+  flex: 1;
+  min-width: 0;
+  /* 标题行与 36 高的关闭按钮垂直居中 */
+  padding-top: var(--sk-space-6);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--sk-fs-heading);
+  font-weight: var(--sk-w-title);
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.subtitle {
+  margin: 3px 0 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+.close {
+  flex: none;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.body[data-padded] {
+  padding: var(--sk-space-14) var(--sk-space-24) var(--sk-space-20);
+}
+
+/* 底栏按钮右对齐、间距 10；左侧辅助动作推到最左 */
+.footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-14) var(--sk-space-20) var(--sk-space-18);
+  border-top: 1px solid var(--sk-line);
+  background: color-mix(in srgb, var(--sk-bg) 60%, var(--sk-surface));
+}
+
+.footerStart {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  margin-right: auto;
+}

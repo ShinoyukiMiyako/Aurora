@@ -1,0 +1,18 @@
+/* 38 见方的危险图标底座，圆角按标识类比例 round(38 × 0.3) = 11 */
+.dangerBase {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--sk-danger-soft);
+  color: var(--sk-danger);
+}
+
+.body {
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-body);
+  line-height: 1.6;
+}
