@@ -21,6 +21,7 @@
 //! ```
 
 pub mod appearance;
+pub mod art;
 pub mod auth;
 pub mod config;
 pub mod error;
@@ -45,6 +46,7 @@ pub use mods::ModInstallOutcome;
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
+pub use art::{ArtStatus, SkinInfo, TexResponse, TextureService, ThumbError};
 pub use auth::{AuthServerInfo, AuthlibLogin, AuthlibPending};
 
 // ---- 透传下层类型，让上层只依赖本 crate ----

@@ -34,12 +34,13 @@ fastrand = "2"
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # 皮肤帽层判定要读 PNG 像素；只开 png 解码，其余格式用不到。
 image = { version = "0.25", default-features = false, features = ["png"] }
+# 原版材质服务：校验客户端 jar 与全景对象的哈希、给远程皮肤与缩略图按地址取缓存键。
+sha1 = "0.11"
 
 [dev-dependencies]
 # 网络逻辑用 wiremock 本地 mock 验证（需真正后台运行时，multi_thread flavor）。
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 wiremock = "0.6"
 tempfile = "3"
-sha1 = "0.11"
 # 外置登录测试要造 Base64 编码的 textures 属性夹具。
 base64 = "0.22"
