@@ -114,6 +114,14 @@ impl Aurora {
         self
     }
 
+    /// 挂着的取消令牌是否已触发；常驻门面上恒为 `false`。供不经下载池、却必须在某一点前响应取消的
+    /// 流程（如启动在拉起进程前的最后检查）使用。
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+    }
+
     /// 当前外观偏好。
     pub fn appearance(&self) -> Appearance {
         self.config.appearance

@@ -81,6 +81,12 @@ pub fn run() {
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
+            commands::launch::play_stats,
+            // -- diagnostics --
+            commands::diagnostics::last_crash,
+            commands::diagnostics::diagnose_crash,
+            commands::diagnostics::last_launch_log,
+            commands::diagnostics::log_diagnostic,
             // -- mods --
             commands::mods::list_mods,
             commands::mods::set_mod_enabled,

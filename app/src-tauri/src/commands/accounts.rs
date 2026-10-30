@@ -222,25 +222,6 @@ pub(crate) fn find_account(_aurora: &Aurora, _uuid: &str) -> Result<Account, Com
     Err(aurora_core::CoreError::PlatformUnsupported.into())
 }
 
-/// 启动前静默续期：微软账户缓存的 Minecraft 令牌过期时用 refresh_token 换新并回写；其它账户原样返回。
-/// refresh_token 也失效时冒泡账户错误（如 `ReloginRequired`），由前端引导重新登录。
-#[cfg(windows)]
-pub(crate) async fn ensure_fresh(
-    aurora: &Aurora,
-    account: &Account,
-) -> Result<Account, CommandError> {
-    Ok(aurora.ensure_microsoft_fresh(account).await?)
-}
-
-#[cfg(not(windows))]
-pub(crate) async fn ensure_fresh(
-    _aurora: &Aurora,
-    account: &Account,
-) -> Result<Account, CommandError> {
-    // 非 Windows 无账户库，此路径实际到不了（find_account 已先行报错）；原样返回以保证跨平台编译。
-    Ok(account.clone())
-}
-
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;

@@ -22,7 +22,9 @@
 
 pub mod appearance;
 pub mod auth;
+mod authlib;
 pub mod config;
+pub mod crashdiag;
 pub mod error;
 pub mod event;
 pub mod facade;
@@ -30,18 +32,30 @@ pub mod install;
 pub mod java;
 pub mod launch;
 pub mod mods;
+pub mod playtime;
 pub mod search;
+pub mod session;
 pub mod versions;
+mod workdir;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
 pub use config::{AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings};
+pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use error::{CoreError, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
 pub use install::{InstallOutcome, LoaderChoice};
-pub use launch::LaunchOptions;
+pub use launch::{
+    FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
+    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
+    resolve_memory,
+};
 pub use mods::ModInstallOutcome;
+pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
+pub use session::{
+    Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
+};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -53,8 +67,9 @@ pub use aurora_instance::{
 };
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use aurora_launch::{
-    CrashCategory, CrashDiagnosis, ExitReport, GameSession, LogLine, LogStream, analyze,
-    detect_crash,
+    CrashCategory, CrashDiagnosis, ExitReport, KillSwitch, LauncherLevel, LogBatchSink, LogEntry,
+    LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, SessionEnded, SessionOutcome,
+    SystemMemory, analyze, detect_crash, game_line_level,
 };
 pub use aurora_modplatform::{
     AggregateResult, InstalledMod, MetadataFormat, ModLoader, ModMetadata, Platform, PlatformError,

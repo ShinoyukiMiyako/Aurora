@@ -1,25 +1,33 @@
-//! 游戏进程管理：spawn、stdout/stderr 流式捕获、退出码回报、崩溃触发判定。
+//! 游戏进程管理：spawn、stdout/stderr 捕获、日志落盘与批量转发、结束游戏、退出报告与崩溃判定。
 //!
-//! 用 `java.exe`（而非 `javaw.exe`，规避已知的输出重定向 Bug）启动，把 Java bin 目录塞进子进程 PATH 头部
-//! （某些 natives 靠系统查找同目录 DLL），并把 stdout/stderr 逐行捕获：一路投递给上层的实时消费者
-//! （用于日志窗口/加载进度估算），一路进一个固定容量的环形缓冲，供进程退出后的崩溃分析取用最后若干行。
+//! 用 `java.exe`（而非 `javaw.exe`，规避已知的输出重定向问题）启动，把 Java bin 目录塞进子进程 PATH
+//! 头部（某些 natives 靠系统查找同目录 DLL）。两条输出流各由一个读取任务按字节逐行读出，汇入同一个
+//! 无界通道；单个汇流任务负责三件事：写会话日志、留最近若干行供崩溃判定、按时间窗批量转发给上层。
+//!
+//! 读取任务绝不等待下游：管道一旦不被及时读空，JVM 的日志线程就会卡在写 stdout 上，游戏随之卡死。
+//! 所以读取端只往无界通道里塞，慢的是写盘还是界面都只会让内存里多攒几行，不会反压到游戏。
 
 use std::collections::VecDeque;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
+use crate::logfile::{LogSource, SessionClock, SessionLog};
 
-/// 崩溃分析缓存的最近日志行数（对齐 PCL 的 500 行）。
+/// 崩溃判定缓存的最近游戏输出行数。
 pub const RECENT_LINE_CAPACITY: usize = 500;
+/// 批量转发的时间窗：带 Mod 的游戏启动期每秒上千行，逐行推给界面就是一场事件风暴。
+pub const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(100);
+/// 时间窗内攒满这么多行就提前发出，免得单批过大。
+pub const LOG_BATCH_MAX_LINES: usize = 200;
 
 /// 日志来源流。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,12 +37,17 @@ pub enum LogStream {
     Stderr,
 }
 
-/// 一行进程输出。
+/// 一行游戏输出。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogLine {
+    /// 读到这一行时的 Unix 毫秒。
+    pub at: u64,
     pub stream: LogStream,
     pub text: String,
 }
+
+/// 批量转发的接收端：每次收到按时间顺序的一批行。
+pub type LogBatchSink = mpsc::UnboundedSender<Vec<LogLine>>;
 
 /// 进程结束报告。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,15 +56,48 @@ pub struct ExitReport {
     pub code: Option<i32>,
     /// 是否正常退出（退出码 0）。
     pub success: bool,
-    /// 退出时缓存的最近若干行输出（供崩溃分析）。
+    /// 退出时缓存的最近若干行游戏输出。
     pub recent_lines: Vec<String>,
+    /// 是否由启动器主动结束（经 [`KillSwitch`] 发出过结束请求）。主动结束的退出一律不算崩溃。
+    #[serde(default)]
+    pub terminated_by_launcher: bool,
+}
+
+/// 会话结束的全部产物：退出报告，以及尚未关闭的会话日志（调用方还要追加收尾行再关闭）。
+pub struct SessionEnd {
+    pub report: ExitReport,
+    pub log: Option<SessionLog>,
+}
+
+/// 结束请求：附一条回执，让请求方拿到结束动作的真实成败。
+type KillRequest = oneshot::Sender<Result<()>>;
+
+/// 结束游戏的句柄，可克隆、可跨任务持有。会话本体留在等待退出的那一方手里。
+#[derive(Clone)]
+pub struct KillSwitch(mpsc::UnboundedSender<KillRequest>);
+
+impl KillSwitch {
+    /// 请求结束进程并等结束动作执行完毕。返回 `false` 表示会话已经结束，没有可结束的进程。
+    pub async fn kill(&self) -> Result<bool> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if self.0.send(ack_tx).is_err() {
+            return Ok(false);
+        }
+        match ack_rx.await {
+            Ok(result) => result.map(|()| true),
+            // 等待方在收到请求后、回执前收尾离开，说明进程已经自己退出了。
+            Err(_) => Ok(false),
+        }
+    }
 }
 
 /// 一次已启动的游戏会话。
 pub struct GameSession {
     child: Child,
-    recent: Arc<Mutex<VecDeque<String>>>,
     readers: Vec<JoinHandle<()>>,
+    pump: JoinHandle<PumpOutcome>,
+    kill_tx: mpsc::UnboundedSender<KillRequest>,
+    kill_rx: mpsc::UnboundedReceiver<KillRequest>,
 }
 
 impl GameSession {
@@ -60,40 +106,63 @@ impl GameSession {
         self.child.id()
     }
 
-    /// 当前缓存的最近输出行快照。
-    pub fn recent_lines(&self) -> Vec<String> {
-        recent_snapshot(&self.recent)
+    /// 结束游戏的句柄。
+    pub fn kill_switch(&self) -> KillSwitch {
+        KillSwitch(self.kill_tx.clone())
     }
 
-    /// 强制结束进程（对应「取消启动」）。
-    pub async fn kill(&mut self) -> Result<()> {
-        self.child.kill().await.map_err(LaunchError::Wait)
-    }
-
-    /// 等待进程结束，回收读取任务，产出退出报告。
-    pub async fn wait(mut self) -> Result<ExitReport> {
-        // stdout/stderr 已被 take 走，wait 不会因未排空管道而死锁。
-        let status = self.child.wait().await.map_err(LaunchError::Wait)?;
-        for reader in self.readers.drain(..) {
-            // 读取任务在管道关闭后自然结束；join 失败（panic）不应掩盖退出码，仅记调试日志。
-            if let Err(err) = reader.await {
-                tracing::debug!(error = %err, "日志读取任务异常结束");
+    /// 等待进程退出，期间随时响应 [`KillSwitch`] 的结束请求；回收读取与汇流任务，产出退出报告。
+    pub async fn wait(mut self) -> Result<SessionEnd> {
+        let mut terminated_by_launcher = false;
+        let status = loop {
+            tokio::select! {
+                status = self.child.wait() => break status.map_err(LaunchError::Wait)?,
+                Some(ack) = self.kill_rx.recv() => {
+                    // 先置位再结束：即便结束动作本身失败，这次意图也已记录，退出不会被误判成崩溃。
+                    terminated_by_launcher = true;
+                    let result = kill_child(&mut self.child);
+                    // 回执发不出去只说明请求方不等了，不改变已经执行的事实。
+                    let _ = ack.send(result);
+                }
             }
+        };
+        for reader in self.readers.drain(..) {
+            reader.await.map_err(LaunchError::Join)?;
         }
-        Ok(ExitReport {
-            code: status.code(),
-            success: status.success(),
-            recent_lines: recent_snapshot(&self.recent),
+        let outcome = self.pump.await.map_err(LaunchError::Join)?;
+        Ok(SessionEnd {
+            report: ExitReport {
+                code: status.code(),
+                success: status.success(),
+                recent_lines: outcome.recent.into_iter().collect(),
+                terminated_by_launcher,
+            },
+            log: outcome.log,
         })
     }
 }
 
-/// 启动游戏进程。`log_tx` 为可选的实时日志接收端（每行输出投递一条 [`LogLine`]）。
-pub fn spawn(command: &LaunchCommand, log_tx: Option<mpsc::Sender<LogLine>>) -> Result<GameSession> {
+/// 发出结束信号。进程恰好已经自己退出时，系统会拒绝结束一个已退出的进程，这不是失败。
+fn kill_child(child: &mut Child) -> Result<()> {
+    match child.start_kill() {
+        Ok(()) => Ok(()),
+        Err(err) => match child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            _ => Err(LaunchError::Kill(err)),
+        },
+    }
+}
+
+/// 启动游戏进程。`log` 为本次会话日志（打不开时传 `None`，游戏照常启动），`forward` 接收批量转发的行。
+pub fn spawn(
+    command: &LaunchCommand,
+    clock: SessionClock,
+    log: Option<SessionLog>,
+    forward: Option<LogBatchSink>,
+) -> Result<GameSession> {
     let mut cmd = Command::new(&command.program);
     cmd.args(&command.args);
     cmd.current_dir(&command.working_dir);
-    // Java bin 目录进 PATH 头部：便于运行期定位与 java 同目录的运行时 DLL。
     if let Some(bin_dir) = command.program.parent() {
         cmd.env("PATH", prepend_path(bin_dir));
     }
@@ -101,64 +170,102 @@ pub fn spawn(command: &LaunchCommand, log_tx: Option<mpsc::Sender<LogLine>>) -> 
     cmd.stderr(Stdio::piped());
     // 不继承 stdin：游戏不读控制台输入，避免子进程挂在管道上。
     cmd.stdin(Stdio::null());
+    configure_no_window(&mut cmd);
 
     let mut child = cmd.spawn().map_err(|source| LaunchError::Spawn {
         program: command.program.clone(),
         source,
     })?;
 
-    let recent = Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_LINE_CAPACITY)));
+    let (line_tx, line_rx) = mpsc::unbounded_channel::<LogLine>();
     let mut readers = Vec::new();
     if let Some(stdout) = child.stdout.take() {
-        readers.push(spawn_reader(stdout, LogStream::Stdout, recent.clone(), log_tx.clone()));
+        readers.push(spawn_reader(
+            stdout,
+            LogStream::Stdout,
+            clock,
+            line_tx.clone(),
+        ));
     }
     if let Some(stderr) = child.stderr.take() {
-        readers.push(spawn_reader(stderr, LogStream::Stderr, recent.clone(), log_tx));
+        readers.push(spawn_reader(stderr, LogStream::Stderr, clock, line_tx));
     }
+    let pump = tokio::spawn(pump(line_rx, log, forward));
+    let (kill_tx, kill_rx) = mpsc::unbounded_channel();
 
     Ok(GameSession {
         child,
-        recent,
         readers,
+        pump,
+        kill_tx,
+        kill_rx,
     })
 }
 
-/// 崩溃触发判定：非零退出（或无退出码，多半是被杀/崩溃）即视为崩溃；即便退出码为 0，只要输出里出现明确的
-/// 崩溃标记也判为崩溃（部分崩溃会正常退出但已生成崩溃报告）。
-pub fn detect_crash(report: &ExitReport) -> bool {
-    if crate::crash::has_crash_marker(&report.recent_lines.join("\n")) {
-        return true;
-    }
-    !matches!(report.code, Some(0))
+/// 抑制子进程的控制台窗口：java.exe 是控制台程序，即便三条流都已重定向，Windows 仍会给它开一个
+/// 黑框。输出本就走管道与会话日志，那个窗口不承载任何信息。
+#[cfg(windows)]
+fn configure_no_window(cmd: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
-/// 起一个逐行读取任务：写入环形缓冲，并（若有）投递给实时消费者。
+#[cfg(not(windows))]
+fn configure_no_window(_cmd: &mut Command) {}
+
+/// 崩溃判定：启动器主动结束的一律不算；日志里有明确的崩溃标记算；否则看退出码，非 0 或拿不到退出码都算。
+///
+/// 主动结束先行短路：Windows 上强制结束留下非 0 退出码、Unix 上被信号结束则没有退出码，两种表现
+/// 都会命中后面的规则，而玩家点「结束游戏」不该收到一次崩溃指认。
+pub fn detect_crash(report: &ExitReport) -> bool {
+    if report.terminated_by_launcher {
+        return false;
+    }
+    if report
+        .recent_lines
+        .iter()
+        .any(|line| crate::crash::has_crash_marker(line))
+    {
+        return true;
+    }
+    report.code != Some(0)
+}
+
+/// 逐行读一条输出流。按字节读、有损解码：JVM 的本地层（如致命错误头）按系统代码页输出，
+/// 一个非 UTF-8 字节就会让按字符串读的读取端报错退出，从此没人读这条管道，游戏随之卡死。
 fn spawn_reader<R>(
     reader: R,
     stream: LogStream,
-    recent: Arc<Mutex<VecDeque<String>>>,
-    log_tx: Option<mpsc::Sender<LogLine>>,
+    clock: SessionClock,
+    tx: mpsc::UnboundedSender<LogLine>,
 ) -> JoinHandle<()>
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        // 转发端可能中途被上层丢弃；此时停止转发但继续填充环形缓冲（崩溃分析仍需最后若干行）。
-        let mut log_tx = log_tx;
-        let mut lines = BufReader::new(reader).lines();
+        let mut reader = BufReader::new(reader);
+        let mut buf = Vec::new();
         loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    push_recent(&recent, &line);
-                    if let Some(tx) = &log_tx
-                        && tx.send(LogLine { stream, text: line }).await.is_err()
-                    {
-                        log_tx = None;
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                        buf.pop();
+                    }
+                    let line = LogLine {
+                        at: clock.now(),
+                        stream,
+                        text: String::from_utf8_lossy(&buf).into_owned(),
+                    };
+                    // 汇流任务只会在两个读取端都结束后才退出，这里发送失败说明它异常死掉了；
+                    // 继续读空管道，至少别让游戏卡住。
+                    if tx.send(line).is_err() {
+                        tracing::warn!(?stream, "游戏输出汇流任务已退出，丢弃后续输出");
                     }
                 }
-                Ok(None) => break, // 管道关闭（进程退出）。
                 Err(err) => {
-                    tracing::debug!(error = %err, "读取游戏进程输出出错，停止该流的读取");
+                    tracing::warn!(error = %err, ?stream, "读取游戏输出失败，停止读取这条流");
                     break;
                 }
             }
@@ -166,30 +273,67 @@ where
     })
 }
 
-/// 把一行写入固定容量环形缓冲，超出容量丢最旧的。
-fn push_recent(recent: &Arc<Mutex<VecDeque<String>>>, line: &str) {
-    let mut buf = recent.lock().expect("环形缓冲锁未被毒化");
-    if buf.len() == RECENT_LINE_CAPACITY {
-        buf.pop_front();
-    }
-    buf.push_back(line.to_owned());
+struct PumpOutcome {
+    recent: VecDeque<String>,
+    log: Option<SessionLog>,
 }
 
-/// 取环形缓冲的当前快照。
-fn recent_snapshot(recent: &Arc<Mutex<VecDeque<String>>>) -> Vec<String> {
-    recent
-        .lock()
-        .expect("环形缓冲锁未被毒化")
-        .iter()
-        .cloned()
-        .collect()
+/// 汇流：写会话日志、留最近若干行、按时间窗批量转发。两条输出流都关闭（进程退出）后结束。
+async fn pump(
+    mut rx: mpsc::UnboundedReceiver<LogLine>,
+    mut log: Option<SessionLog>,
+    mut forward: Option<LogBatchSink>,
+) -> PumpOutcome {
+    let mut recent = VecDeque::with_capacity(RECENT_LINE_CAPACITY);
+    let mut batch: Vec<LogLine> = Vec::new();
+    let mut ticker = tokio::time::interval(LOG_BATCH_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            line = rx.recv() => {
+                let Some(line) = line else { break };
+                if let Some(writer) = log.as_mut()
+                    && let Err(err) = writer.write(line.at, LogSource::Game, None, &line.text).await
+                {
+                    // 磁盘满之类的问题不该打断游戏；这份日志从此不完整，停写并留一条告警。
+                    tracing::warn!(error = %err, "会话日志写入失败，本次会话停止写日志");
+                    log = None;
+                }
+                if recent.len() == RECENT_LINE_CAPACITY {
+                    recent.pop_front();
+                }
+                recent.push_back(line.text.clone());
+                if forward.is_some() {
+                    batch.push(line);
+                    if batch.len() >= LOG_BATCH_MAX_LINES {
+                        flush_batch(&mut forward, &mut batch);
+                    }
+                }
+            }
+            _ = ticker.tick() => flush_batch(&mut forward, &mut batch),
+        }
+    }
+    flush_batch(&mut forward, &mut batch);
+    PumpOutcome { recent, log }
+}
+
+fn flush_batch(forward: &mut Option<LogBatchSink>, batch: &mut Vec<LogLine>) {
+    if batch.is_empty() {
+        return;
+    }
+    let lines = std::mem::take(batch);
+    if let Some(tx) = forward
+        && tx.send(lines).is_err()
+    {
+        // 上层不再关心实时日志（窗口已关），之后只写日志文件。
+        *forward = None;
+    }
 }
 
 /// 把 `bin_dir` 拼到现有 PATH 头部。
 fn prepend_path(bin_dir: &Path) -> std::ffi::OsString {
     let mut combined = bin_dir.as_os_str().to_owned();
     if let Some(existing) = std::env::var_os("PATH") {
-        // Windows PATH 分隔符是 ';'（std::env::join_paths 会按平台处理，这里直接手拼头部一段）。
         let sep = if cfg!(windows) { ";" } else { ":" };
         combined.push(sep);
         combined.push(existing);
@@ -201,93 +345,206 @@ fn prepend_path(bin_dir: &Path) -> std::ffi::OsString {
 mod tests {
     use super::*;
 
+    fn report(code: Option<i32>, lines: &[&str], terminated_by_launcher: bool) -> ExitReport {
+        ExitReport {
+            code,
+            success: code == Some(0),
+            recent_lines: lines.iter().map(|l| (*l).to_owned()).collect(),
+            terminated_by_launcher,
+        }
+    }
+
     #[test]
     fn detect_crash_by_exit_code() {
-        let ok = ExitReport {
-            code: Some(0),
-            success: true,
-            recent_lines: vec!["Stopping!".to_owned()],
-        };
-        assert!(!detect_crash(&ok));
-
-        let nonzero = ExitReport {
-            code: Some(1),
-            success: false,
-            recent_lines: vec!["some output".to_owned()],
-        };
-        assert!(detect_crash(&nonzero));
-
-        let killed = ExitReport {
-            code: None,
-            success: false,
-            recent_lines: vec![],
-        };
-        assert!(detect_crash(&killed));
+        assert!(!detect_crash(&report(Some(0), &["Stopping!"], false)));
+        assert!(detect_crash(&report(Some(1), &["some output"], false)));
+        assert!(detect_crash(&report(Some(-1), &[], false)));
+        assert!(detect_crash(&report(None, &[], false)));
     }
 
     #[test]
     fn detect_crash_by_marker_even_on_clean_exit() {
-        let report = ExitReport {
-            code: Some(0),
-            success: true,
-            recent_lines: vec!["---- Minecraft Crash Report ----".to_owned()],
-        };
-        assert!(detect_crash(&report));
+        assert!(detect_crash(&report(
+            Some(0),
+            &["---- Minecraft Crash Report ----"],
+            false
+        )));
     }
 
     #[test]
-    fn ring_buffer_keeps_last_n_lines() {
-        let recent = Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_LINE_CAPACITY)));
-        for i in 0..(RECENT_LINE_CAPACITY + 5) {
-            push_recent(&recent, &format!("line {i}"));
-        }
-        let snapshot = recent_snapshot(&recent);
-        assert_eq!(snapshot.len(), RECENT_LINE_CAPACITY);
-        // 最旧的 5 行被挤掉，首行应为 "line 5"，末行为最后写入的那行。
-        assert_eq!(snapshot.first().unwrap(), "line 5");
-        assert_eq!(
-            snapshot.last().unwrap(),
-            &format!("line {}", RECENT_LINE_CAPACITY + 4)
-        );
+    fn launcher_termination_is_never_a_crash() {
+        // Windows 上强制结束留下非 0 退出码，Unix 上被信号结束没有退出码。
+        assert!(!detect_crash(&report(Some(1), &[], true)));
+        assert!(!detect_crash(&report(None, &[], true)));
+    }
+
+    #[test]
+    fn launcher_termination_outranks_crash_marker() {
+        assert!(!detect_crash(&report(
+            Some(1),
+            &["---- Minecraft Crash Report ----"],
+            true
+        )));
+    }
+
+    #[test]
+    fn exit_report_without_termination_field_deserializes_as_not_terminated() {
+        let parsed: ExitReport =
+            serde_json::from_str(r#"{"code":1,"success":false,"recent_lines":[]}"#).unwrap();
+        assert!(!parsed.terminated_by_launcher);
     }
 
     #[test]
     fn prepend_path_puts_bin_first() {
-        // 无论现有 PATH 如何，结果都以 bin 目录开头。
         let combined = prepend_path(Path::new("C:/java/bin"));
-        let s = combined.to_string_lossy();
-        assert!(s.starts_with("C:/java/bin"));
+        assert!(combined.to_string_lossy().starts_with("C:/java/bin"));
     }
 
-    // 真实 spawn 冒烟：Windows 上用 cmd 打印一行并以指定码退出，验证捕获与退出码回报。
-    #[cfg(windows)]
     #[tokio::test]
-    async fn spawn_captures_output_and_exit_code() {
-        let command = LaunchCommand {
-            program: std::path::PathBuf::from("cmd"),
-            args: vec![
-                "/C".to_owned(),
-                "echo AURORA_HELLO & exit 3".to_owned(),
-            ],
-            working_dir: std::env::temp_dir(),
-        };
-        let (tx, mut rx) = mpsc::channel(16);
-        let session = spawn(&command, Some(tx)).unwrap();
-        let report = session.wait().await.unwrap();
+    async fn pump_batches_lines_and_keeps_last_recent() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (fwd_tx, mut fwd_rx) = mpsc::unbounded_channel();
+        let total = RECENT_LINE_CAPACITY + LOG_BATCH_MAX_LINES + 7;
+        for i in 0..total {
+            tx.send(LogLine {
+                at: i as u64,
+                stream: LogStream::Stdout,
+                text: format!("line {i}"),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        let outcome = pump(rx, None, Some(fwd_tx)).await;
 
-        assert_eq!(report.code, Some(3));
-        assert!(!report.success);
-        assert!(
-            report.recent_lines.iter().any(|l| l.contains("AURORA_HELLO")),
-            "环形缓冲应含打印的行，实得 {:?}",
-            report.recent_lines
+        // 环形缓冲只留最后 500 行。
+        assert_eq!(outcome.recent.len(), RECENT_LINE_CAPACITY);
+        assert_eq!(
+            outcome.recent.front().unwrap(),
+            &format!("line {}", total - RECENT_LINE_CAPACITY)
+        );
+        assert_eq!(
+            outcome.recent.back().unwrap(),
+            &format!("line {}", total - 1)
         );
 
-        // 实时通道也应至少收到那一行。
-        let mut streamed = Vec::new();
-        while let Ok(line) = rx.try_recv() {
-            streamed.push(line.text);
+        // 转发按批到达、每批不超过上限、全部行按顺序一行不少。
+        let mut batches = Vec::new();
+        while let Ok(batch) = fwd_rx.try_recv() {
+            batches.push(batch);
         }
-        assert!(streamed.iter().any(|l| l.contains("AURORA_HELLO")));
+        assert!(batches.len() >= 2, "应拆成多批：{}", batches.len());
+        assert!(
+            batches
+                .iter()
+                .all(|b| !b.is_empty() && b.len() <= LOG_BATCH_MAX_LINES)
+        );
+        let all: Vec<u64> = batches.iter().flatten().map(|l| l.at).collect();
+        assert_eq!(all, (0..total as u64).collect::<Vec<_>>());
+    }
+
+    #[cfg(windows)]
+    fn command(program: &str, args: &[&str]) -> LaunchCommand {
+        LaunchCommand {
+            program: std::path::PathBuf::from(program),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+            working_dir: std::env::temp_dir(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn cmd(script: &str) -> LaunchCommand {
+        command("cmd", &["/C", script])
+    }
+
+    // 真实子进程：打印一行并以 3 退出，验证落盘、转发、退出码与崩溃判定。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn spawn_captures_output_logs_it_and_reports_exit_code() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(tmp.path(), "t", clock.started_at())
+            .await
+            .unwrap();
+        let (fwd_tx, mut fwd_rx) = mpsc::unbounded_channel();
+        let session = spawn(
+            &cmd("echo PETAL_HELLO & exit 3"),
+            clock,
+            Some(log),
+            Some(fwd_tx),
+        )
+        .unwrap();
+        let end = session.wait().await.unwrap();
+
+        assert_eq!(end.report.code, Some(3));
+        assert!(!end.report.success);
+        assert!(!end.report.terminated_by_launcher);
+        assert!(detect_crash(&end.report));
+        assert!(
+            end.report
+                .recent_lines
+                .iter()
+                .any(|l| l.contains("PETAL_HELLO"))
+        );
+
+        let mut streamed = Vec::new();
+        while let Ok(batch) = fwd_rx.try_recv() {
+            streamed.extend(batch.into_iter().map(|l| l.text));
+        }
+        assert!(streamed.iter().any(|l| l.contains("PETAL_HELLO")));
+
+        let log = end.log.expect("日志应保持打开交还调用方");
+        assert_eq!(log.lines(), 1);
+        let path = log
+            .finish(clock.now(), crate::logfile::SessionOutcome::Crashed)
+            .await
+            .unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("[game] PETAL_HELLO"), "{content}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn kill_switch_ends_process_and_marks_termination() {
+        let clock = SessionClock::start().unwrap();
+        // ping 自身 30 次约 30 秒，足够在它退出前发出结束请求。
+        let session = spawn(
+            &command("ping", &["-n", "30", "127.0.0.1"]),
+            clock,
+            None,
+            None,
+        )
+        .unwrap();
+        let switch = session.kill_switch();
+        let waiter = tokio::spawn(session.wait());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            switch.kill().await.unwrap(),
+            "进程仍在运行时结束请求应被执行"
+        );
+        let end = tokio::time::timeout(Duration::from_secs(10), waiter)
+            .await
+            .expect("结束后应很快退出")
+            .unwrap()
+            .unwrap();
+        assert!(end.report.terminated_by_launcher);
+        assert!(!detect_crash(&end.report));
+        // 会话结束后句柄还能用，只是报告没有可结束的进程。
+        assert!(!switch.kill().await.unwrap());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn invalid_utf8_output_does_not_stop_the_reader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("bytes.bin");
+        // 一行 GBK 编码的「中文」，后面跟一行 ASCII：第二行必须照样读到。
+        std::fs::write(&script, b"\xd6\xd0\xce\xc4\r\nAFTER_BAD_BYTES\r\n").unwrap();
+        let clock = SessionClock::start().unwrap();
+        let path = script.display().to_string();
+        let session = spawn(&command("cmd", &["/C", "type", &path]), clock, None, None).unwrap();
+        let end = session.wait().await.unwrap();
+        assert_eq!(end.report.recent_lines.len(), 2);
+        assert!(end.report.recent_lines[0].contains('\u{FFFD}'));
+        assert_eq!(end.report.recent_lines[1], "AFTER_BAD_BYTES");
     }
 }

@@ -1,10 +1,12 @@
 //! 崩溃基础检测：从日志/输出用规则表识别常见崩溃类型，产出结构化中文诊断。
 //!
-//! 规则按优先级从上到下排列，逐条以「小写子串命中」判定，命中后可选地用正则从原文提取附加信息
-//! （缺失的前置 Mod、要求的 Java 版本、冲突的 mixin 等）。这是「高优先级精准匹配」那批高频规则的一个子集
-//! （8 条），每条都在测试里配了正反日志夹具。更长尾的堆栈反查、兜底规则留待后续。
+//! 规则按优先级从上到下排列，逐行以「不区分大小写的子串命中」判定，命中后可选地用正则从原文提取附加
+//! 信息（缺失的前置 Mod、要求的 Java 版本、冲突的 mixin 等）。每条诊断记下命中的是第几行，上层据此
+//! 给出行号与上下文。规则表里的正则在第一次使用时一次编译、之后复用；写错的正则会在单测里直接失败。
 
-use regex::Regex;
+use std::sync::LazyLock;
+
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 /// 崩溃类别。
@@ -42,6 +44,8 @@ pub struct CrashDiagnosis {
     pub detail: Option<String>,
     /// 命中的原始日志行（已裁剪长度）。
     pub matched: String,
+    /// 命中行在输入行序列里的下标（从 0 起）。
+    pub line: usize,
 }
 
 /// 一条规则的静态定义。
@@ -63,7 +67,7 @@ const RULES: &[Rule] = &[
             "has been compiled by a more recent version of the java runtime",
             "class file version",
         ],
-        extract: Some(r"(?i)class file version (\d+(?:\.\d+)?)"),
+        extract: Some(r"(?i)(class file version \d+)"),
         summary: "Java 版本与游戏或 Mod 不匹配",
         advice: concat!(
             "改用目标版本要求的 Java：较新的 Minecraft 需要 Java 17 或 21，1.16 及更早需要 Java 8。可在设置中切换，或让",
@@ -167,57 +171,138 @@ const RULES: &[Rule] = &[
     },
 ];
 
-/// 扫描日志，返回全部命中的诊断（按规则优先级顺序）。
+/// 编译好的规则：命中判定与附加信息提取各一条正则。
+struct CompiledRule {
+    rule: &'static Rule,
+    matcher: Regex,
+    extract: Option<Regex>,
+}
+
+/// 由子串集合构造不区分大小写的命中正则。子串按字面量转义，不是正则。
+fn literal_alternation(patterns: &[&str]) -> Regex {
+    let alternation = patterns
+        .iter()
+        .map(|p| regex::escape(p))
+        .collect::<Vec<_>>()
+        .join("|");
+    RegexBuilder::new(&alternation)
+        .case_insensitive(true)
+        .build()
+        .expect("由字面量转义拼成的正则必定可编译")
+}
+
+static COMPILED: LazyLock<Vec<CompiledRule>> = LazyLock::new(|| {
+    RULES
+        .iter()
+        .map(|rule| CompiledRule {
+            rule,
+            matcher: literal_alternation(rule.patterns),
+            extract: rule
+                .extract
+                .map(|pattern| Regex::new(pattern).expect("内置提取正则必须可编译")),
+        })
+        .collect()
+});
+
+/// 崩溃标记：崩溃报告头、JVM 致命错误头、主线程未捕获异常。
+static CRASH_MARKER: LazyLock<Regex> = LazyLock::new(|| {
+    literal_alternation(&[
+        "---- minecraft crash report ----",
+        "# a fatal error has been detected",
+        "exception in thread \"main\"",
+    ])
+});
+
+/// 扫描整段日志文本，返回全部命中的诊断（按规则优先级顺序）。
 pub fn analyze(log: &str) -> Vec<CrashDiagnosis> {
-    let lower = log.to_lowercase();
+    let lines: Vec<&str> = log.lines().collect();
+    analyze_lines(&lines)
+}
+
+/// 扫描按行切好的日志，返回全部命中的诊断（按规则优先级顺序），`line` 是命中行的下标。
+///
+/// 每条规则取第一条命中的行；附加信息从命中行起往后找第一处能提取的地方（同一条报错的细节常常
+/// 在下一行，例如 Fabric 的依赖报错先说「Incompatible mod set」再逐条列出缺的是谁）。
+pub fn analyze_lines(lines: &[&str]) -> Vec<CrashDiagnosis> {
     let mut out = Vec::new();
-    for rule in RULES {
-        let Some(pattern) = rule.patterns.iter().copied().find(|p| lower.contains(p)) else {
+    for compiled in COMPILED.iter() {
+        let Some(index) = lines
+            .iter()
+            .position(|line| compiled.matcher.is_match(line))
+        else {
             continue;
         };
-        let matched = matching_line(log, pattern).unwrap_or_else(|| pattern.to_owned());
-        let detail = rule.extract.and_then(|re| capture_first(re, log));
+        let detail = compiled.extract.as_ref().and_then(|re| {
+            lines[index..].iter().find_map(|line| {
+                re.captures(line)
+                    .and_then(|caps| caps.get(1))
+                    .map(|m| m.as_str().trim().to_owned())
+            })
+        });
         out.push(CrashDiagnosis {
-            category: rule.category,
-            summary: rule.summary.to_owned(),
-            advice: rule.advice.to_owned(),
+            category: compiled.rule.category,
+            summary: compiled.rule.summary.to_owned(),
+            advice: compiled.rule.advice.to_owned(),
             detail,
-            matched,
+            matched: truncate(lines[index].trim(), 240),
+            line: index,
         });
     }
     out
 }
 
-/// 最高优先级的崩溃原因（无命中返回 `None`）。
-pub fn primary_cause(log: &str) -> Option<CrashDiagnosis> {
-    analyze(log).into_iter().next()
-}
-
 /// 日志里是否出现明确的崩溃标记（崩溃报告头、JVM 致命错误、主线程未捕获异常）。
 pub fn has_crash_marker(log: &str) -> bool {
-    let lower = log.to_lowercase();
-    [
-        "---- minecraft crash report ----",
-        "# a fatal error has been detected",
-        "exception in thread \"main\"",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    CRASH_MARKER.is_match(log)
 }
 
-/// 找到首个（原文）含该小写子串的日志行，裁剪长度后返回。
-fn matching_line(log: &str, lower_pattern: &str) -> Option<String> {
-    log.lines()
-        .find(|line| line.to_lowercase().contains(lower_pattern))
-        .map(|line| truncate(line.trim(), 240))
-}
+/// 「重复 Mod」正则遇上 "Duplicate mods found: ..." 这类措辞时会把后面的普通英文词当 id 捕出来。
+/// 指着一个不存在的 Mod 让玩家去动，比少报一条线索糟糕得多，故把这几个词挡掉。
+const NON_MOD_TOKENS: &[&str] = &["found", "version", "missing", "loaded", "installed"];
 
-/// 用正则从原文取第 1 个捕获组。
-fn capture_first(pattern: &str, text: &str) -> Option<String> {
-    let re = Regex::new(pattern).ok()?;
-    re.captures(text)
-        .and_then(|caps| caps.get(1))
-        .map(|m| m.as_str().trim().to_owned())
+/// 点名 Mod 的正则：复用「缺少前置」「重复 Mod」两条规则的提取式（它们捕获的正是 mod id），另补两种
+/// 崩溃日志的通用写法：Fabric/Quilt 依赖报错的 `Mod 'Sodium' (sodium) 0.5.3`（括号内才是 id），以及
+/// mixin 报错尾部的 `from mod sodium`。mixin 规则自带的提取式捕获的是 `*.mixins.json` 配置文件名而
+/// 非 mod id，故不在复用之列。
+static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    RULES
+        .iter()
+        .filter(|rule| {
+            matches!(
+                rule.category,
+                CrashCategory::MissingDependency | CrashCategory::DuplicateMod
+            )
+        })
+        .filter_map(|rule| rule.extract)
+        .chain([
+            r"(?i)\bmod '[^']+' \(([a-z0-9_\-]+)\)",
+            r"(?i)\bfrom mod ([a-z0-9_\-]+)",
+        ])
+        .map(|pattern| Regex::new(pattern).expect("内置 mod id 提取正则必须可编译"))
+        .collect()
+});
+
+/// 从日志里提取被点名的 mod id，按首次出现位置排序并去重，一律转小写。
+pub fn extract_mod_ids(log: &str) -> Vec<String> {
+    let mut hits: Vec<(usize, String)> = Vec::new();
+    for re in MOD_ID_PATTERNS.iter() {
+        for caps in re.captures_iter(log) {
+            let group = caps.get(1).expect("提取正则的第 1 组是必选捕获组");
+            let id = group.as_str().trim().to_ascii_lowercase();
+            if id.is_empty() || NON_MOD_TOKENS.contains(&id.as_str()) {
+                continue;
+            }
+            hits.push((group.start(), id));
+        }
+    }
+    hits.sort_by_key(|(at, _)| *at);
+    let mut out: Vec<String> = Vec::new();
+    for (_, id) in hits {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 /// 按字符数裁剪，超长追加省略标记（ASCII，避免任何非文本符号）。
@@ -235,7 +320,10 @@ mod tests {
 
     /// 断言某日志的首要诊断类别，并返回该诊断供进一步检查。
     fn primary(log: &str, expected: CrashCategory) -> CrashDiagnosis {
-        let diag = primary_cause(log).unwrap_or_else(|| panic!("应识别出崩溃原因：{log}"));
+        let diag = analyze(log)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("应识别出崩溃原因：{log}"));
         assert_eq!(diag.category, expected, "日志：{log}");
         diag
     }
@@ -252,7 +340,7 @@ mod tests {
     fn java_version_mismatch_positive_and_negative() {
         let log = "java.lang.UnsupportedClassVersionError: com/x/Main has been compiled by a more recent version of the Java Runtime (class file version 61.0), this version of the Java Runtime only recognizes class file versions up to 52.0";
         let diag = primary(log, CrashCategory::JavaVersionMismatch);
-        assert_eq!(diag.detail.as_deref(), Some("61.0"));
+        assert_eq!(diag.detail.as_deref(), Some("class file version 61"));
 
         assert_absent("[main] Setting user: Steve", CrashCategory::JavaVersionMismatch);
     }
@@ -345,6 +433,65 @@ mod tests {
 
     #[test]
     fn clean_log_yields_no_diagnosis() {
-        assert!(primary_cause("[main] Setting user: Steve\n[main] Backend library: LWJGL 3.3.3").is_none());
+        assert!(
+            analyze("[main] Setting user: Steve\n[main] Backend library: LWJGL 3.3.3").is_empty()
+        );
+    }
+
+    #[test]
+    fn every_builtin_pattern_compiles() {
+        assert_eq!(COMPILED.len(), RULES.len());
+        for compiled in COMPILED.iter() {
+            assert_eq!(compiled.extract.is_some(), compiled.rule.extract.is_some());
+        }
+        assert_eq!(MOD_ID_PATTERNS.len(), 4);
+        assert!(!has_crash_marker("Stopping!"));
+    }
+
+    #[test]
+    fn diagnosis_records_line_index_and_matches_case_insensitively() {
+        let lines = [
+            "[19:04:10] [main/INFO]: Loading 120 mods",
+            "[19:04:11] [Render thread/WARN]: low memory",
+            "[19:04:12] [Render thread/ERROR]: JAVA.LANG.OUTOFMEMORYERROR: Java heap space",
+            "Exception in thread \"Render thread\"",
+        ];
+        let diags = analyze_lines(&lines);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].category, CrashCategory::OutOfMemory);
+        assert_eq!(diags[0].line, 2);
+        assert_eq!(diags[0].matched, lines[2]);
+    }
+
+    #[test]
+    fn detail_is_taken_from_the_matched_line_onwards() {
+        // 规则在第 1 行命中（incompatible mod set），缺的是谁写在第 2 行。
+        let lines = [
+            "[main/ERROR]: Incompatible mod set!",
+            "\t - Mod 'Sodium' (sodium) 0.5.3 requires version 0.90.0 or later of fabric-api, which is missing!",
+        ];
+        let diags = analyze_lines(&lines);
+        assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+        assert_eq!(diags[0].line, 0);
+        assert_eq!(diags[0].detail.as_deref(), Some("fabric-api"));
+    }
+
+    #[test]
+    fn extract_mod_ids_orders_by_first_appearance_and_dedups() {
+        let log = "Exception in thread \"main\" java.lang.RuntimeException: Mod resolution failed\n\
+             \t - Mod 'Sodium' (sodium) 0.5.3 requires version 0.90.0 or later of fabric-api, which is missing!\n\
+             [Sodium] Mixin apply failed sodium.mixins.json:features.MixinChunk from mod sodium";
+        // sodium 在 fabric-api 之前出现，且出现两次只报一次；捕获的是括号里的 id 而不是引号里的显示名。
+        assert_eq!(
+            extract_mod_ids(log),
+            vec!["sodium".to_owned(), "fabric-api".to_owned()]
+        );
+        assert_eq!(
+            extract_mod_ids("FormattedException: Found a duplicate mod jei with version 11.6.0"),
+            vec!["jei".to_owned()]
+        );
+        // 同一条正则在这种措辞下会捕到 found，必须被挡掉。
+        assert!(extract_mod_ids("Duplicate mods found: see log for details").is_empty());
+        assert!(extract_mod_ids("[main/INFO]: Setting user: Steve").is_empty());
     }
 }
