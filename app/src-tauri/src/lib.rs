@@ -46,6 +46,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // -- appearance --
+            commands::appearance::get_appearance,
+            commands::appearance::set_appearance,
             // -- tasks --
             commands::tasks::cancel_task,
             commands::tasks::save_task_journal,

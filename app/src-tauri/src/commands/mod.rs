@@ -7,6 +7,7 @@
 //!   [`crate::events::CoreEventForwarder`] 推送并带上 `task_id`。
 
 pub mod accounts;
+pub mod appearance;
 pub mod config;
 pub mod discover;
 pub mod error;
