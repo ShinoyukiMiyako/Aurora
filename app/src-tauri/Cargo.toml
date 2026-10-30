@@ -18,13 +18,15 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# 下面三个插件的次版本锁定与前端 @tauri-apps/plugin-* 一致：tauri 构建会比对 JS 包与 crate 的
+# 主次版本，不一致直接报错；放开成 "2" 的话一次 cargo update 就会打破配对。
 # 系统选择文件夹 / 文件对话框：更改游戏目录、导入本地整合包都要拿磁盘绝对路径，
 # 而 WebView 里的 <input type="file"> 出于安全拿不到路径。
-tauri-plugin-dialog = "2"
+tauri-plugin-dialog = "~2.7"
 # 启动器自更新：检查、下载、安装新版本；安装包由发布环境用私钥签名，客户端以内置公钥校验。
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "~2.10"
 # 更新装完要重启进程才能生效，重启走 process 插件。
-tauri-plugin-process = "2"
+tauri-plugin-process = "~2.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 门面：前端全部能力经此 crate 暴露，业务调用不直接依赖任何下层 crate。
