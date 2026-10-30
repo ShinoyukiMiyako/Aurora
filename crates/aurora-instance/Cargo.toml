@@ -9,9 +9,9 @@ aurora-version = { path = "../aurora-version" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
-# 目录扫描、版本 JSON 读取、配置原子落盘都是本地异步 IO；沿用 workspace 的 tokio。仅需 fs 特性，
-# 原子写复用 aurora-base（其自带 io-util/rt），本 crate 不直接依赖那些特性。
-tokio = { version = "1", default-features = false, features = ["fs"] }
+# 目录扫描、版本 JSON 读取、配置原子落盘都是本地 IO；版本 JSON 的读取与反序列化放到阻塞线程池上
+# 有界并发执行（rt 提供 spawn_blocking 与 JoinSet）。原子写复用 aurora-base。
+tokio = { version = "1", default-features = false, features = ["fs", "rt"] }
 
 [dev-dependencies]
 # 目录/文件 IO 测试需要真正的运行时；tempfile 提供隔离的临时游戏目录。

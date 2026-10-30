@@ -6,7 +6,7 @@
 //!
 //! 模块划分：
 //! - [`folder`]：官方启动器的游戏目录位置。
-//! - [`discovery`]：`versions/` 扫描与版本发现（含加载器探测与出错版本单列）。
+//! - [`discovery`]：`versions/` 扫描与单版本读取（含加载器探测、出错版本单列与解析缓存）。
 //! - [`settings`]：版本级设置（描述 / 图标 / 收藏 / 分类 / 隔离覆盖）持久化。
 //! - [`isolation`]：版本隔离档位、版本级覆盖、已有 mods/saves 强制隔离与工作目录产出。
 //!
@@ -30,7 +30,10 @@ pub const AURORA_META_DIR: &str = concat!(".", aurora_base::app_slug!());
 
 pub use folder::official_minecraft_dir;
 
-pub use discovery::{BrokenReason, BrokenVersion, DiscoveredVersion, VersionScan, discover_versions};
+pub use discovery::{
+    BrokenReason, BrokenVersion, DiscoveredVersion, VersionProbe, VersionScan, discover_version,
+    discover_versions, list_version_dirs, probe_version,
+};
 
 pub use settings::{VersionSettings, VersionSettingsStore};
 
