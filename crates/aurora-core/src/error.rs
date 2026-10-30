@@ -80,6 +80,72 @@ pub enum CoreError {
     /// 该操作在当前平台不受支持（微软登录凭据加密仅限 Windows）。
     #[error("该操作在当前平台不受支持（微软登录的凭据加密仅限 Windows）")]
     PlatformUnsupported,
+
+    /// 请求远端内容源（资讯等）失败：连不上、超时或非 2xx。
+    #[error("请求 {url} 失败")]
+    Fetch {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    /// 远端内容源返回的内容不是预期的格式。
+    #[error("解析 {url} 的内容失败")]
+    FeedParse {
+        url: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// 服务器地址写法不合法。
+    #[error("服务器地址「{address}」不合法：{reason}")]
+    InvalidServerAddress {
+        address: String,
+        reason: &'static str,
+    },
+    /// 游戏目录不能用作当前目录。
+    #[error("游戏目录 {path} 不能用：{problem}")]
+    InvalidGameDirectory {
+        path: PathBuf,
+        problem: GameDirProblem,
+    },
+    /// 读不到本机物理内存信息。
+    #[error("读不到本机内存信息")]
+    MemoryUnavailable,
+}
+
+/// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameDirProblem {
+    /// 路径为空。
+    Empty,
+    /// 不是绝对路径。
+    NotAbsolute,
+    /// 路径含 `!`：Java 的类路径会把 `!` 当成 jar 内路径分隔，读不出里面的游戏文件。
+    ContainsBang,
+    /// 位置此刻访问不到（盘没插、网络断开）或不是目录。
+    Unavailable,
+}
+
+impl GameDirProblem {
+    /// 稳定的 snake_case 码。
+    pub fn code(self) -> &'static str {
+        match self {
+            GameDirProblem::Empty => "empty",
+            GameDirProblem::NotAbsolute => "not_absolute",
+            GameDirProblem::ContainsBang => "contains_bang",
+            GameDirProblem::Unavailable => "unavailable",
+        }
+    }
+}
+
+impl std::fmt::Display for GameDirProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GameDirProblem::Empty => "路径为空",
+            GameDirProblem::NotAbsolute => "不是绝对路径",
+            GameDirProblem::ContainsBang => "路径里有「!」，Java 会读不出里面的游戏文件",
+            GameDirProblem::Unavailable => "这个位置现在访问不到",
+        })
+    }
 }
 
 impl CoreError {

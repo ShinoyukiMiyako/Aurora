@@ -2,7 +2,8 @@
 //!
 //! 门面持有一份可读写的全局配置：下载源与版本列表源各自的三档策略（对应功能矩阵「文件下载源 /
 //! 版本列表源」两项独立三档设置）、下载并发、默认内存、版本隔离档位、微软 client_id、可选自定义
-//! 游戏/缓存目录。凭据不进这里（归 aurora-auth 的加密存储）。
+//! 游戏/缓存目录，以及启动后窗口行为、默认 Java、主页固定的服务器、并存的游戏目录、首次启动
+//! 是否完成与启动器更新的检查偏好。凭据不进这里（归 aurora-auth 的加密存储）。
 //!
 //! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值，损坏则冒泡
 //! 报错而非静默用默认覆盖（避免用户改坏的配置被无声吞掉）。
@@ -79,10 +80,14 @@ impl DownloadSourcePolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemorySettings {
-    /// 最大堆 `-Xmx`（MB）。
+    /// 最大堆 `-Xmx`（MB）。`auto` 为真时不参与启动，但原样保留：
+    /// 关掉自动分配应回到用户上次亲手设的值，而不是被自动算出的数悄悄覆盖。
     pub max_mb: u32,
     /// 最小堆 `-Xms`（MB）；`None` 表示不显式设置。
     pub min_mb: Option<u32>,
+    /// 是否按实例档位与当时的空闲内存自动决定最大堆。默认开：新装的启动器不该要求玩家先懂
+    /// 「给游戏多少内存」才能玩。
+    pub auto: bool,
 }
 
 impl Default for MemorySettings {
@@ -91,8 +96,38 @@ impl Default for MemorySettings {
         Self {
             max_mb: 4096,
             min_mb: None,
+            auto: true,
         }
     }
+}
+
+/// 游戏启动后启动器窗口的去留。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterLaunch {
+    /// 留在原处，方便看日志。
+    Keep,
+    /// 游戏窗口出现后缩到任务栏，游戏结束再弹回来（默认）。
+    #[default]
+    Minimize,
+    /// 退出启动器；有下载任务进行中时由前端降级为最小化。
+    Close,
+}
+
+/// 主页固定的一台服务器。地址就是身份：同一地址只固定一次。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedServer {
+    /// 显示名。
+    pub name: String,
+    /// `host` 或 `host:port`（IPv6 写成 `[addr]:port`）。
+    pub address: String,
+}
+
+/// 一条带名字的目录。名字是给人看的（「PCL2」「官方启动器」），路径才是身份。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamedDirectory {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 /// 全局配置。
@@ -121,6 +156,25 @@ pub struct AuroraConfig {
     pub auto_download_java: bool,
     /// 外观偏好（明暗、强调色、花瓣、全景、减少动画）。
     pub appearance: Appearance,
+    /// 游戏启动后启动器窗口的去留。
+    pub after_launch: AfterLaunch,
+    /// 是否在打开启动器时与运行期间定时检查启动器更新。
+    pub check_updates: bool,
+    /// 全局默认 Java：`None` 为按版本自动选择，否则固定用这个 java 可执行文件。
+    pub default_java: Option<PathBuf>,
+    /// 主页固定的服务器，按固定的先后排列。
+    pub pinned_servers: Vec<PinnedServer>,
+    /// 与当前游戏目录并存的其它游戏目录（不含当前目录）。
+    ///
+    /// 首次启动扫到别的启动器的 `.minecraft` 时不改当前目录，而是记在这里，让玩家随时切过去——
+    /// 他在别处攒的存档不该因为换了个启动器就得搬家。
+    pub extra_game_directories: Vec<NamedDirectory>,
+    /// 首次启动向导的第一步是否已提交。之后中途关掉窗口，下次打开也不再进向导。
+    pub first_run_completed: bool,
+    /// 用户选择跳过的启动器版本；自动检查不再为它提示，出现更高版本时自然失效。
+    pub skipped_update_version: Option<String>,
+    /// 自动检查已经弹过提示的启动器版本，同一版本只提示一次。
+    pub notified_update_version: Option<String>,
 }
 
 impl Default for AuroraConfig {
@@ -137,6 +191,14 @@ impl Default for AuroraConfig {
             cache_directory: None,
             auto_download_java: true,
             appearance: Appearance::default(),
+            after_launch: AfterLaunch::default(),
+            check_updates: true,
+            default_java: None,
+            pinned_servers: Vec::new(),
+            extra_game_directories: Vec::new(),
+            first_run_completed: false,
+            skipped_update_version: None,
+            notified_update_version: None,
         }
     }
 }
@@ -192,8 +254,63 @@ mod tests {
         assert_eq!(c.download_concurrency, 64);
         assert_eq!(c.memory.max_mb, 4096);
         assert!(c.memory.min_mb.is_none());
+        assert!(c.memory.auto, "自动分配内存默认开");
         assert!(c.auto_download_java);
         assert_eq!(c.isolation_policy, IsolationPolicy::ModLoadersAndNonRelease);
+        assert_eq!(c.after_launch, AfterLaunch::Minimize);
+        assert!(c.check_updates);
+        assert!(c.default_java.is_none(), "默认 Java 默认为自动选择");
+        assert!(c.pinned_servers.is_empty());
+        assert!(c.extra_game_directories.is_empty());
+        assert!(!c.first_run_completed, "新配置必须进首次启动向导");
+        assert!(c.skipped_update_version.is_none());
+        assert!(c.notified_update_version.is_none());
+    }
+
+    /// 出参枚举的序列化名就是 IPC 与 config.json 里的写法，改名即破坏已有配置。
+    #[test]
+    fn after_launch_serializes_snake_case() {
+        for (value, name) in [
+            (AfterLaunch::Keep, "keep"),
+            (AfterLaunch::Minimize, "minimize"),
+            (AfterLaunch::Close, "close"),
+        ] {
+            assert_eq!(serde_json::to_value(value).unwrap(), name);
+            let parsed: AfterLaunch = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(parsed, value);
+        }
+        assert!(serde_json::from_value::<AfterLaunch>(serde_json::json!("hide")).is_err());
+    }
+
+    #[tokio::test]
+    async fn system_settings_roundtrip_through_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let config = AuroraConfig {
+            memory: MemorySettings {
+                max_mb: 6144,
+                min_mb: None,
+                auto: false,
+            },
+            after_launch: AfterLaunch::Close,
+            check_updates: false,
+            default_java: Some(PathBuf::from("C:/Java/jdk-21/bin/java.exe")),
+            pinned_servers: vec![PinnedServer {
+                name: "Hypixel".to_owned(),
+                address: "mc.hypixel.net".to_owned(),
+            }],
+            extra_game_directories: vec![NamedDirectory {
+                name: "PCL2".to_owned(),
+                path: PathBuf::from("D:/PCL2/.minecraft"),
+            }],
+            first_run_completed: true,
+            skipped_update_version: Some("0.2.0".to_owned()),
+            notified_update_version: Some("0.2.1".to_owned()),
+            ..AuroraConfig::default()
+        };
+        ConfigStore::at(&path).save(&config).await.unwrap();
+        let reloaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(reloaded, config);
     }
 
     #[test]
@@ -267,6 +384,7 @@ mod tests {
             memory: MemorySettings {
                 max_mb: 8192,
                 min_mb: Some(1024),
+                auto: false,
             },
             msa_client_id: Some("client-abc".to_owned()),
             ..AuroraConfig::default()

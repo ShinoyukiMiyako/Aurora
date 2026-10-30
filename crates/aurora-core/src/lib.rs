@@ -26,22 +26,33 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod facade;
+pub mod folders;
 pub mod install;
 pub mod java;
 pub mod launch;
+pub mod memory;
 pub mod mods;
+pub mod news;
 pub mod search;
+pub mod servers;
 pub mod versions;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
-pub use config::{AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings};
-pub use error::{CoreError, Result};
+pub use config::{
+    AfterLaunch, AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings, NamedDirectory,
+    PinnedServer,
+};
+pub use error::{CoreError, GameDirProblem, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::LaunchOptions;
 pub use mods::ModInstallOutcome;
+pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
+pub use memory::{MemoryAdvice, SystemMemory};
+pub use news::{NewsFeed, NewsItem, NewsTag};
+pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -52,6 +63,7 @@ pub use aurora_instance::{
     BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,
 };
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
+pub use aurora_launch::MemoryTier;
 pub use aurora_launch::{
     CrashCategory, CrashDiagnosis, ExitReport, GameSession, LogLine, LogStream, analyze,
     detect_crash,
