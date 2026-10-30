@@ -51,6 +51,9 @@ pub struct Aurora {
     msa_endpoints: MsaEndpoints,
     /// 长任务快照上挂的取消令牌；常驻门面上恒为 `None`。
     cancel: Option<CancellationToken>,
+    /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
+    /// 各自新建的门面（含测试）互不串用。
+    pub(crate) mod_versions: crate::modversions::SharedVersionCache,
 }
 
 impl Aurora {
@@ -90,6 +93,7 @@ impl Aurora {
             java_runtime_url: aurora_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
+            mod_versions: Default::default(),
         })
     }
 
@@ -347,6 +351,7 @@ impl Aurora {
             java_runtime_url: aurora_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
+            mod_versions: Default::default(),
         }
     }
 

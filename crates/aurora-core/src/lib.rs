@@ -22,26 +22,40 @@
 
 pub mod appearance;
 pub mod auth;
+pub mod compat;
 pub mod config;
+pub mod deps;
 pub mod error;
 pub mod event;
 pub mod facade;
+pub mod history;
 pub mod install;
 pub mod java;
 pub mod launch;
+pub mod ledger;
+mod modfs;
 pub mod mods;
+pub mod modversions;
 pub mod search;
+pub mod updates;
 pub mod versions;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
+pub use compat::{Compatibility, InstalledCopy, InstanceMatch, MatchState};
 pub use config::{AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings};
+pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
+pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::LaunchOptions;
-pub use mods::ModInstallOutcome;
+pub use ledger::{Ledger, LedgerEntry, LedgerStore};
+pub use modfs::is_mod_file_busy;
+pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
+pub use modversions::ProjectInfo;
+pub use updates::UpdateCandidate;
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -57,8 +71,9 @@ pub use aurora_launch::{
     detect_crash,
 };
 pub use aurora_modplatform::{
-    AggregateResult, InstalledMod, MetadataFormat, ModLoader, ModMetadata, Platform, PlatformError,
-    ResourceType, SearchHit, SearchQuery, SortField,
+    AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,
+    ModMetadata, ModVersionInfo, Platform, PlatformError, ReleaseChannel, ResourceType, SearchHit,
+    SearchQuery, SortField,
 };
 pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifest};
 
