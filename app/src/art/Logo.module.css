@@ -1,0 +1,49 @@
+.mark {
+  flex: none;
+  display: block;
+}
+
+.stopTip {
+  stop-color: var(--sk-accent-2);
+}
+
+.stopBase {
+  stop-color: var(--sk-accent);
+}
+
+.flat {
+  fill: var(--sk-accent);
+}
+
+.current {
+  fill: currentColor;
+}
+
+.heart {
+  fill: var(--sk-blossom-heart);
+  opacity: 0.92;
+}
+
+.pixelHeart {
+  fill: var(--sk-blossom-heart);
+}
+
+.stamen {
+  fill: var(--sk-accent-strong);
+  opacity: 0.8;
+}
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 字标：产品英文名，Outfit 标题字重，字距收紧到 -0.02em，行高 1 */
+.wordmark {
+  font-family: var(--sk-font);
+  font-weight: var(--sk-w-title);
+  letter-spacing: -0.02em;
+  line-height: 1;
+  color: var(--sk-text);
+  white-space: nowrap;
+}

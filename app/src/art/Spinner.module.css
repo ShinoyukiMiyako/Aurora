@@ -1,0 +1,37 @@
+.spinner {
+  display: inline-flex;
+  flex: none;
+  color: var(--sk-accent);
+  animation: spin var(--sk-loop-spin) linear infinite;
+  will-change: transform;
+}
+
+.spinner[data-tone="on-accent"] {
+  color: var(--sk-accent-ink);
+}
+
+.spinner[data-tone="current"] {
+  color: inherit;
+}
+
+/* 减少动画：不旋转，改为 1 与 0.45 之间的透明度脉冲 */
+:global([data-sk-reduced]) .spinner {
+  animation: pulse var(--sk-loop-pulse) var(--sk-ease-breath) infinite;
+  will-change: opacity;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
