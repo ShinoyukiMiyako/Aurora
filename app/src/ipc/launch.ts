@@ -4,6 +4,8 @@ import { invoke, listen, type UnlistenFn } from "./bridge";
 
 /** 不需要的项显式传 null / false / 空数组，由调用方决定，桥不替它补默认值。 */
 export interface LaunchArgs {
+  /** 只作取消句柄：启动的 core-event 不带 task_id，一律归启动会话。 */
+  taskId: string;
   versionId: string;
   accountUuid: string | null;
   offlineName: string | null;
@@ -12,6 +14,7 @@ export interface LaunchArgs {
   fullscreen: boolean;
   extraJvmArgs: string[];
   extraGameArgs: string[];
+  /** [宽, 高]。 */
   resolution: [number, number] | null;
   demo: boolean;
 }

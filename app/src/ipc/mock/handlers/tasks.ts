@@ -1,3 +1,4 @@
+import { IpcError } from "../../errors";
 import type { TaskRecordDto } from "../../tasks";
 import type { MockHandlers } from "../types";
 
@@ -28,26 +29,55 @@ function seedJournal(): TaskRecordDto[] {
 }
 
 let journal: TaskRecordDto[] = seedJournal();
+const running = new Set<string>();
+// 与后端一样，取消先于登记到达时也记下 id：同 id 随后登记就是已取消状态。
 const cancelled = new Set<string>();
 
-/** 其他领域的 mock 在模拟长任务时用它检查自己是否已被取消。 */
+/**
+ * 长任务 mock 在开始时登记自己，与后端 TaskRegistry::register 同样拒绝空 id 与重复 id。
+ * 结束（成功、失败或取消）时必须调 endMockTask。
+ */
+export function beginMockTask(taskId: string): void {
+  if (taskId.trim() === "") throw new IpcError("invalid_argument", "task_id 不能为空");
+  if (running.has(taskId)) throw new IpcError("task_conflict", `任务 ${taskId} 已在运行`, { task_id: taskId });
+  running.add(taskId);
+}
+
+export function endMockTask(taskId: string): void {
+  running.delete(taskId);
+}
+
+/** 长任务 mock 用它检查自己是否已被取消；被取消的长任务应以 IpcError("cancelled") 拒绝。 */
 export function isMockTaskCancelled(taskId: string): boolean {
   return cancelled.has(taskId);
+}
+
+function validateJournal(tasks: unknown[]): TaskRecordDto[] {
+  const seen = new Set<string>();
+  tasks.forEach((task, index) => {
+    const id = typeof task === "object" && task !== null ? (task as Record<string, unknown>).id : undefined;
+    if (typeof id !== "string" || id === "") throw new IpcError("invalid_argument", `任务日志第 ${index} 项缺少字符串 id`);
+    if (seen.has(id)) throw new IpcError("invalid_argument", `任务日志里 id ${id} 出现了不止一次`);
+    seen.add(id);
+  });
+  return tasks as TaskRecordDto[];
 }
 
 export const handlers: MockHandlers = {
   cancel_task: (args) => {
     if (typeof args.taskId !== "string") throw new Error("cancel_task 缺少 taskId");
     cancelled.add(args.taskId);
+    return running.has(args.taskId);
   },
   save_task_journal: (args) => {
     if (!Array.isArray(args.tasks)) throw new Error("save_task_journal 缺少 tasks 数组");
-    journal = args.tasks as TaskRecordDto[];
+    journal = validateJournal(args.tasks);
   },
   load_task_journal: () => journal,
 };
 
 export function reset(): void {
   journal = seedJournal();
+  running.clear();
   cancelled.clear();
 }

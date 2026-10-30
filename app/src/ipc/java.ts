@@ -26,5 +26,6 @@ export interface InstalledRuntimeDto {
 
 export const detectJava = (): Promise<JavaInstallationDto[]> => invoke<JavaInstallationDto[]>("detect_java");
 
-export const installJava = (requiredMajor: number): Promise<InstalledRuntimeDto> =>
-  invoke<InstalledRuntimeDto>("install_java", { requiredMajor });
+/** 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。 */
+export const installJava = (taskId: string, requiredMajor: number): Promise<InstalledRuntimeDto> =>
+  invoke<InstalledRuntimeDto>("install_java", { taskId, requiredMajor });

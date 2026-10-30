@@ -90,7 +90,10 @@ export type TaskKind = (typeof TASK_KINDS)[number];
 export const TASK_STATUSES = ["queued", "running", "done", "failed", "cancelled"] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
 
-/** 重试与重启后恢复所需的完整入参：重新调用 command，参数为 args 加上本任务的 taskId。 */
+/**
+ * 重试与重启后恢复所需的完整入参：重新调用 command，参数为 args 加上这一次调用专用的 taskId。
+ * 每次尝试都要换新的 taskId：后端会记住「取消时不在运行」的 id，同 id 再登记会直接是已取消状态。
+ */
 export interface TaskSpec {
   command: string;
   args: Record<string, unknown>;

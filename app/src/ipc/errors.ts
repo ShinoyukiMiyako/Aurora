@@ -1,5 +1,5 @@
 // 命令错误的统一形状。后端在命令边界把错误转成 { code, message, detail? }；
-// 尚未改造的旧命令仍以纯字符串返回错误，这里统一包成 code "unknown"，
+// Tauri 自己产生的错误（参数反序列化失败、命令未授权）仍是纯字符串，这里统一包成 code "unknown"，
 // 让界面层只需按 code 分支（取消、失败码、登录错误），message 原样进 Toast 正文。
 
 export class IpcError extends Error {
@@ -15,7 +15,7 @@ export class IpcError extends Error {
   }
 }
 
-/** 旧命令以字符串报错时使用的错误码。 */
+/** 错误以纯字符串到达（Tauri 自身的参数或权限错误）时使用的错误码。 */
 export const UNKNOWN_ERROR_CODE = "unknown";
 /** 长任务被 cancel_task 取消时后端返回的错误码。 */
 export const CANCELLED_ERROR_CODE = "cancelled";

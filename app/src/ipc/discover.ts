@@ -48,9 +48,11 @@ export interface ModInstallOutcomeDto {
 export const searchResources = (args: SearchArgs): Promise<SearchResultDto> =>
   invoke<SearchResultDto>("search_resources", { ...args });
 
+/** 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。 */
 export const installMod = (
+  taskId: string,
   versionId: string,
   platform: PlatformId,
   projectId: string,
   modVersionId: string,
-): Promise<ModInstallOutcomeDto> => invoke<ModInstallOutcomeDto>("install_mod", { versionId, platform, projectId, modVersionId });
+): Promise<ModInstallOutcomeDto> => invoke<ModInstallOutcomeDto>("install_mod", { taskId, versionId, platform, projectId, modVersionId });

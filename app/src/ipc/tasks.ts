@@ -13,15 +13,15 @@ export type CoreEvent =
   | {
       kind: "download";
       task_id: string | null;
-      /** 文件总数。 */
+      /** 本批文件数。一次安装会连跑多批（版本 JSON、库、资源），每批 finished 都从 0 重新计起。 */
       total: number;
-      /** 已完成文件数。 */
+      /** 本批已结束文件数（成功与最终失败都计入）。 */
       finished: number;
-      /** 已下载字节。 */
+      /** 本批实际传输字节，含重传，可能超过 total_bytes：画进度时要封顶到 1。 */
       bytes: number;
-      /** 总字节；清单里拿不到大小时为 null。 */
+      /** 本批声明大小之和；有任一文件大小未知时为 null。 */
       total_bytes: number | null;
-      /** 当前速度，字节每秒。 */
+      /** 瞬时速度，字节每秒。 */
       speed: number;
     };
 
@@ -55,14 +55,18 @@ export interface TaskRecordDto {
   spec: TaskSpecDto;
 }
 
-/** 取消进行中的任务；对应命令随后以 { code: "cancelled" } 返回。 */
-export const cancelTask = (taskId: string): Promise<void> => invoke<void>("cancel_task", { taskId });
+/**
+ * 取消任务，返回它此刻是否在运行。不在运行（已结束，或取消先于命令登记到达）不是错误：
+ * 后端会记住这个 id，同 id 随后登记时直接拿到已取消状态，所以每次调用长命令（含重试）都要用新 id。
+ * 在运行的命令在 1000 ms 内以 { code: "cancelled" } 拒绝。
+ */
+export const cancelTask = (taskId: string): Promise<boolean> => invoke<boolean>("cancel_task", { taskId });
 
-/** 整表写入任务日志（含已结束的最近若干条）。 */
+/** 整表写入任务日志（含已结束的最近若干条）。每条的 id 须非空且互不重复，否则整次拒绝、不落盘。 */
 export const saveTaskJournal = (tasks: TaskRecordDto[]): Promise<void> =>
   invoke<void>("save_task_journal", { tasks });
 
-/** 读取上次写入的任务日志；从未写过时为空数组。 */
+/** 读取上次写入的任务日志；从未写过时为空数组，文件损坏或版本不符时以 task_journal_invalid 拒绝。 */
 export const loadTaskJournal = (): Promise<TaskRecordDto[]> => invoke<TaskRecordDto[]>("load_task_journal");
 
 export const onCoreEvent = (handler: (event: CoreEvent) => void): Promise<UnlistenFn> =>
