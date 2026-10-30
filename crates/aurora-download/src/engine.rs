@@ -6,9 +6,11 @@
 //!    逐源尝试。
 //! 3. 每个源用 [`retry_async`] 做指数退避重试；耗尽后切换下一个源（即「n 次后切换镜像」），
 //!    成败记回健康表，后面的文件不再为同一个坏源重复付出整轮重试。
-//! 4. 已知大小且达阈值的大文件走 Range 分块并发下载，分片落 `.petalfall-partN`；网络中断保留已完成
-//!    分片供下次断点续传，损坏（哈希不符）则清分片重下。
-//! 5. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。
+//! 4. 已知大小且达阈值的大文件走 Range 分块并发下载：先用 [`probe_final_url`] 把跳转解到终点，
+//!    再对终点地址发 Range，分片落 `.petalfall-partN`；网络中断保留已完成分片供下次断点续传，
+//!    损坏（哈希不符）则清分片重下；没有 sha1 的任务换源前先清掉本源残留分片。
+//! 5. 分片路径在某个源上彻底失败后自动回退为整文件单请求，宁可失去并行加速也要把文件装上。
+//! 6. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。
 //!
 //! 取消是协作式的：令牌只在文件开始前、网络等待点（发请求、读响应体）与退避等待里被观察，
 //! 观察到就让当前尝试正常返回 [`Error::Cancelled`]，再由 [`Downloader::run`] 统一清掉该文件的
@@ -114,16 +116,7 @@ impl Downloader {
             .prioritize(self.config.sources.candidates(&task.url)?);
         let mut last_err: Option<Error> = None;
         for (index, url) in candidates.iter().enumerate() {
-            // 每个源独立退避重试：op 每次生成新 future，携带当前源的 URL。
-            let attempt = || self.attempt(url, task, progress, cancel);
-            let result = match cancel {
-                // 退避等待里观察到取消即视为取消；进行中的尝试自己在网络等待点上响应。
-                Some(token) => retry_async_until(&self.config.retry, token.cancelled(), attempt)
-                    .await
-                    .unwrap_or(Err(Error::Cancelled)),
-                None => retry_async(&self.config.retry, attempt).await,
-            };
-            match result {
+            match self.fetch_from(url, task, progress, cancel).await {
                 Ok(()) => {
                     self.health.record_success(url);
                     return Ok(());
@@ -138,6 +131,14 @@ impl Downloader {
                     // 4xx 只说明「这个源没有这个文件」，换源即可，不能记在主机头上。
                     self.health
                         .record_failure(url, is_host_fault(err.http_status()));
+                    // 换源前的分片纪律：分片只按「字节数吻合」判定已完成，与是哪个源写的无关。
+                    // 带 sha1 的任务即使跨源拼出坏文件也会在 finalize 被抓住并连分片一起清掉；
+                    // 没有 sha1 的任务只校验总大小，那层兜底不存在，必须在换源前清掉本源残留的
+                    // 分片，否则下一个源会把上一个源写的字节当成已完成直接拼进去。
+                    // 只在还有下一个源时清：最后一个源上留着分片，是给下次重跑用的断点。
+                    if task.sha1.is_none() && index + 1 < candidates.len() {
+                        self.remove_parts(task).await;
+                    }
                     tracing::warn!(
                         source_index = index,
                         file = %task.dest.display(),
@@ -150,19 +151,100 @@ impl Downloader {
                 }
             }
         }
+        // 候选列表由 SourcePlan::candidates 保证非空，走到这里说明那条保证被破坏了。
+        let last = last_err.ok_or(Error::Internal {
+            what: "候选下载源列表为空",
+        })?;
         Err(Error::AllSourcesExhausted {
             url: task.url.clone(),
-            last: Box::new(last_err.expect("候选源列表非空，循环必产生至少一个错误")),
+            last: Box::new(last),
         })
     }
 
+    /// 在一个源上完成下载。分片路径在本源上彻底失败时，退回整文件单请求再试一轮：分片依赖
+    /// Range，而 Range 恰是最容易被 CDN 前端搞坏的一环（见 [`probe_final_url`]），宁可失去并行
+    /// 加速，也不能因此判定文件装不上。
+    async fn fetch_from(
+        &self,
+        url: &str,
+        task: &DownloadTask,
+        progress: Option<&ProgressReporter>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<()> {
+        let transfer = transfer_for(&self.config.chunk, url, task.size);
+        if transfer == Transfer::Whole {
+            return self.retry_on(url, task, progress, cancel, transfer).await;
+        }
+        let chunk_err = match self.retry_on(url, task, progress, cancel, transfer).await {
+            Ok(()) => return Ok(()),
+            Err(err) if err.is_cancelled() => return Err(err),
+            Err(err) => err,
+        };
+        tracing::info!(
+            file = %task.dest.display(),
+            %url,
+            error = %chunk_err,
+            "分片路径失败，回退整文件单请求重下"
+        );
+        match self
+            .retry_on(url, task, progress, cancel, Transfer::Whole)
+            .await
+        {
+            Ok(()) => {
+                // 分片路径已放弃，残留分片不会再被续传复用，留着只是长期占盘。
+                self.remove_parts(task).await;
+                Ok(())
+            }
+            Err(err) if err.is_cancelled() => Err(err),
+            Err(fallback_err) => {
+                tracing::warn!(
+                    stage = "fallback",
+                    file = %task.dest.display(),
+                    %url,
+                    http_status = ?fallback_err.http_status(),
+                    // 两个阶段的拒绝理由往往不同（典型是分片 404、回退 503），单列一格免得看丢。
+                    chunked_status = ?chunk_err.http_status(),
+                    error = %fallback_err,
+                    "整文件回退同样失败"
+                );
+                Err(Error::ChunkedFallbackFailed {
+                    url: url.to_owned(),
+                    chunked: Box::new(chunk_err),
+                    fallback: Box::new(fallback_err),
+                })
+            }
+        }
+    }
+
+    /// 在一个源上按指定传输方式做指数退避重试：op 每次生成新 future，携带当前源的 URL。
+    async fn retry_on(
+        &self,
+        url: &str,
+        task: &DownloadTask,
+        progress: Option<&ProgressReporter>,
+        cancel: Option<&CancellationToken>,
+        transfer: Transfer,
+    ) -> Result<()> {
+        let attempt = || self.attempt(url, task, progress, cancel, transfer);
+        match cancel {
+            // 退避等待里观察到取消即视为取消；进行中的尝试自己在网络等待点上响应。
+            Some(token) => retry_async_until(&self.config.retry, token.cancelled(), attempt)
+                .await
+                .unwrap_or(Err(Error::Cancelled)),
+            None => retry_async(&self.config.retry, attempt).await,
+        }
+    }
+
     /// 针对一个具体 URL 的一次完整下载尝试：下载 -> 合并临时文件 -> 校验 -> 原子落位。
+    ///
+    /// 传输方式由调用方决定而非此处推导：回退路径要在同一个 URL 上强制走整文件单请求。
     async fn attempt(
         &self,
         url: &str,
         task: &DownloadTask,
         progress: Option<&ProgressReporter>,
         cancel: Option<&CancellationToken>,
+        transfer: Transfer,
     ) -> Result<()> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
@@ -176,18 +258,15 @@ impl Downloader {
         }
 
         let temp = temp_path(&task.dest);
-        let want_chunk = self.config.chunk.enabled
-            && task
-                .size
-                .is_some_and(|size| size >= self.config.chunk.min_split_size)
-            && !self.config.chunk.is_host_excluded(url);
-
-        let parts = if want_chunk {
-            self.download_chunked(url, task, &temp, progress, cancel)
-                .await?
-        } else {
-            self.download_stream(url, &temp, progress, cancel).await?;
-            Vec::new()
+        let parts = match transfer {
+            Transfer::Chunked { total } => {
+                self.download_chunked(url, task, total, &temp, progress, cancel)
+                    .await?
+            }
+            Transfer::Whole => {
+                self.download_stream(url, &temp, progress, cancel).await?;
+                Vec::new()
+            }
         };
 
         self.finalize(&temp, task, &parts).await
@@ -222,16 +301,73 @@ impl Downloader {
         Ok(())
     }
 
-    /// 分块并发下载。返回本次涉及的分片文件列表（供合并后清理）；整体返回时临时文件已是完整合并结果。
+    /// 分块下载的入口：先把跳转解干净，再对最终地址发 Range，失败按阶段落日志。
     async fn download_chunked(
         &self,
         url: &str,
         task: &DownloadTask,
+        total: u64,
         temp: &Path,
         progress: Option<&ProgressReporter>,
         cancel: Option<&CancellationToken>,
     ) -> Result<Vec<PathBuf>> {
-        let total = task.size.expect("分块下载路径要求已知文件大小");
+        let final_url = match probe_final_url(&self.client, url, cancel).await {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                if !err.is_cancelled() {
+                    tracing::warn!(
+                        stage = "probe",
+                        file = %task.dest.display(),
+                        %url,
+                        http_status = ?err.http_status(),
+                        error = %err,
+                        "探测最终下载地址失败"
+                    );
+                }
+                return Err(err);
+            }
+        };
+        if final_url != url {
+            tracing::debug!(
+                file = %task.dest.display(),
+                %url,
+                %final_url,
+                "下载地址存在跳转，分片请求改打最终地址"
+            );
+        }
+
+        let result = self
+            .fetch_chunks(&final_url, task, total, temp, progress, cancel)
+            .await;
+        if let Err(err) = &result
+            && !err.is_cancelled()
+        {
+            tracing::warn!(
+                stage = "chunk",
+                file = %task.dest.display(),
+                %url,
+                %final_url,
+                http_status = ?err.http_status(),
+                error = %err,
+                "分片下载失败"
+            );
+        }
+        result
+    }
+
+    /// 分块并发下载。返回本次涉及的分片文件列表（供合并后清理）；整体返回时临时文件已是完整合并结果。
+    ///
+    /// `url` 必须是 [`probe_final_url`] 解出的最终地址：所有 Range 请求都直接打在源站上，
+    /// 不再经过任何跳转。
+    async fn fetch_chunks(
+        &self,
+        url: &str,
+        task: &DownloadTask,
+        total: u64,
+        temp: &Path,
+        progress: Option<&ProgressReporter>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<PathBuf>> {
         let plan = ChunkPlan::compute(
             total,
             self.config.chunk.chunk_size,
@@ -267,16 +403,19 @@ impl Downloader {
         let owned_progress = progress.cloned();
         let owned_cancel = cancel.cloned();
         let mut set: JoinSet<Result<()>> = JoinSet::new();
+        let mut first_err: Option<Error> = None;
         for chunk in plan.chunks.iter().skip(1).copied() {
             let part = part_path(&task.dest, chunk.index);
             if part_complete(&part, chunk.byte_len()).await {
                 continue;
             }
-            let permit = semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("分块信号量未关闭");
+            // 信号量从不关闭；真关了也不能直接返回，已派出的分片要等它们写完再交给外层清理。
+            let Ok(permit) = semaphore.clone().acquire_owned().await else {
+                first_err = Some(Error::Internal {
+                    what: "分块信号量已关闭",
+                });
+                break;
+            };
             let client = self.client.clone();
             let url = url.to_owned();
             let prog = owned_progress.clone();
@@ -287,7 +426,6 @@ impl Downloader {
             });
         }
 
-        let mut first_err: Option<Error> = None;
         while let Some(joined) = set.join_next().await {
             match joined {
                 Ok(Ok(())) => {}
@@ -298,7 +436,7 @@ impl Downloader {
                 }
                 Err(join) => {
                     if first_err.is_none() {
-                        first_err = Some(Error::ChunkTaskJoin(join));
+                        first_err = Some(Error::TaskJoin(join));
                     }
                 }
             }
@@ -353,15 +491,21 @@ impl Downloader {
     /// 从不走分块，只有临时文件。取消意味着放弃，断点续传用的分片也一并删掉。
     async fn discard_leftovers(&self, task: &DownloadTask) {
         remove_if_present(&temp_path(&task.dest)).await;
-        if let Some(total) = task.size {
-            let plan = ChunkPlan::compute(
-                total,
-                self.config.chunk.chunk_size,
-                self.config.chunk.max_chunks,
-            );
-            for chunk in &plan.chunks {
-                remove_if_present(&part_path(&task.dest, chunk.index)).await;
-            }
+        self.remove_parts(task).await;
+    }
+
+    /// 删掉该任务按分块计划能推出的全部分片。用于取消、放弃分片路径与换源前的清理。
+    async fn remove_parts(&self, task: &DownloadTask) {
+        let Some(total) = task.size else {
+            return;
+        };
+        let plan = ChunkPlan::compute(
+            total,
+            self.config.chunk.chunk_size,
+            self.config.chunk.max_chunks,
+        );
+        for chunk in &plan.chunks {
+            remove_if_present(&part_path(&task.dest, chunk.index)).await;
         }
     }
 
@@ -401,15 +545,77 @@ async fn until_cancelled<F: Future>(
 }
 
 /// 删除一个可能不存在的中间文件。不存在是常态（该分片还没开始）；其余失败记日志，
-/// 不让清理失败盖过「已取消」这个结果。
+/// 不让清理失败盖过本来要返回的结果（已取消、换源、回退成功）。
 async fn remove_if_present(path: &Path) {
     match tokio::fs::remove_file(path).await {
-        Ok(()) => tracing::debug!(path = %path.display(), "已清理取消下载的中间文件"),
+        Ok(()) => tracing::debug!(path = %path.display(), "已清理下载中间文件"),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => {
-            tracing::warn!(path = %path.display(), error = %err, "清理取消下载的中间文件失败")
+            tracing::warn!(path = %path.display(), error = %err, "清理下载中间文件失败")
         }
     }
+}
+
+/// 一次下载尝试的传输方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Transfer {
+    /// 整文件单请求。
+    Whole,
+    /// Range 分片并发，`total` 为声明的文件大小。
+    Chunked { total: u64 },
+}
+
+/// 该 URL 上的这个任务走哪种传输：分块总开关打开、大小已知且达到拆分阈值、host 不在禁用名单里，
+/// 三者齐备才分片。
+fn transfer_for(config: &ChunkConfig, url: &str, size: Option<u64>) -> Transfer {
+    match size {
+        Some(total)
+            if config.enabled
+                && total >= config.min_split_size
+                && !config.is_host_excluded(url) =>
+        {
+            Transfer::Chunked { total }
+        }
+        _ => Transfer::Whole,
+    }
+}
+
+/// 探测最终下载地址：发一次不带 Range 的 GET，跟随重定向后取响应的最终 URL。
+///
+/// 为什么必须先探测：CurseForge 的 `edge.forgecdn.net` 把请求 302 到真正存放文件的
+/// `mediafilez.forgecdn.net`；跟着这条 302 走的 Range 请求会拿到 404，而直接对终点发 Range
+/// 却是正常的 206。坏的是「跟随跳转的 Range 请求」这个组合，因此先把跳转解干净、让所有分片
+/// 都打在终点上。多一次往返，换来对任何会跳转的 CDN 都成立。
+///
+/// 为什么探测本身不带 Range：探测的职责是走通跳转链，而 Range 恰是会在跳转上出事的那个头。
+/// 若某台 CDN 只对带 Range 的请求跳转，探测解出的就是原地址、分片仍会撞上跳转——那一路由
+/// 整文件回退兜住（见 `Downloader::fetch_from`），文件照样装得上。
+///
+/// 为什么不会把整个文件拉下来：响应体是惰性流，`send()` 返回时只读完了状态行与响应头；
+/// 取到最终 URL 后立即丢弃响应，底层传输随之取消。不用 HEAD 是因为部分 CDN 对 HEAD 直接回
+/// 403/405，会把好源误判成坏源。
+async fn probe_final_url(
+    client: &reqwest::Client,
+    url: &str,
+    cancel: Option<&CancellationToken>,
+) -> Result<String> {
+    let resp = until_cancelled(cancel, client.get(url).send())
+        .await?
+        .map_err(|source| Error::Request {
+            url: url.to_owned(),
+            source,
+        })?;
+    let status = resp.status();
+    let final_url = resp.url().as_str().to_owned();
+    drop(resp);
+    if !status.is_success() {
+        // 报最终地址而非原地址：跳转链末端才是真正拒绝请求的那一台。
+        return Err(Error::Status {
+            url: final_url,
+            status: status.as_u16(),
+        });
+    }
+    Ok(final_url)
 }
 
 /// 发起一次 Range 请求。仅放行 206（分块命中）与 200（服务器忽略 Range 的整体响应）两种成功形态。
@@ -621,6 +827,52 @@ mod tests {
         let err = downloader.run(&task, None, Some(&token)).await.unwrap_err();
         assert!(err.is_cancelled(), "实际：{err:?}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    fn split_config() -> ChunkConfig {
+        ChunkConfig {
+            enabled: true,
+            min_split_size: 1024,
+            ..ChunkConfig::default()
+        }
+    }
+
+    #[test]
+    fn chunking_requires_known_size_at_or_above_threshold() {
+        let config = split_config();
+        let url = "https://edge.forgecdn.net/files/1/2/big.jar";
+        assert_eq!(transfer_for(&config, url, None), Transfer::Whole);
+        // 差 1 字节到阈值不切；恰好达到阈值就切。
+        assert_eq!(transfer_for(&config, url, Some(1023)), Transfer::Whole);
+        assert_eq!(
+            transfer_for(&config, url, Some(1024)),
+            Transfer::Chunked { total: 1024 }
+        );
+    }
+
+    #[test]
+    fn chunking_respects_switch_and_host_exclusion() {
+        let disabled = ChunkConfig {
+            enabled: false,
+            ..split_config()
+        };
+        assert_eq!(
+            transfer_for(&disabled, "https://cdn.modrinth.com/a.jar", Some(1 << 20)),
+            Transfer::Whole
+        );
+
+        let excluded = ChunkConfig {
+            excluded_hosts: vec!["edge.forgecdn.net".into()],
+            ..split_config()
+        };
+        assert_eq!(
+            transfer_for(&excluded, "https://edge.forgecdn.net/b.jar", Some(1 << 20)),
+            Transfer::Whole
+        );
+        assert_eq!(
+            transfer_for(&excluded, "https://cdn.modrinth.com/a.jar", Some(1 << 20)),
+            Transfer::Chunked { total: 1 << 20 }
+        );
     }
 
     #[test]

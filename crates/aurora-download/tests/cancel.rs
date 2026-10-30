@@ -84,8 +84,12 @@ fn stall_after_prefix(mut stream: TcpStream) {
 }
 
 /// 支持 Range：起点为 0 的分片完整返回，其余分片只发一半就卡住。分片长 1000 字节。
+/// 不带 Range 的请求是分片前的解跳转探测，只回响应头即关连接（引擎不读探测的响应体）。
 fn ranged_stall(mut stream: TcpStream) {
     let Some(start) = read_request(&mut stream) else {
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 4000\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.flush();
         return;
     };
     let head = format!(

@@ -94,7 +94,8 @@ impl DownloadPool {
     /// [`with_progress`](Self::with_progress) 挂的观察者。
     ///
     /// 返回汇总报告：即便有文件失败也返回 `Ok(report)`，失败明细在 `report.failures`。返回 `Err`
-    /// 只有两种情况：某个下载任务本身 panic（而非下载失败），或取消令牌在本批完成前触发。
+    /// 只有三种情况：某个下载任务本身 panic（而非下载失败）、引擎内部不变量被破坏，或取消令牌在
+    /// 本批完成前触发。无论哪种，都先等已派发的文件全部收尾再返回。
     /// 调用方务必检查 [`BatchReport::is_success`]。
     pub async fn download_all(
         &self,
@@ -119,18 +120,26 @@ impl DownloadPool {
         let semaphore = Arc::new(Semaphore::new(self.file_concurrency));
         let mut set: JoinSet<(usize, Result<()>)> = JoinSet::new();
         let mut dispatched = 0usize;
+        // 让整批失败的错误（任务 panic、内部错误）。记下后继续收完已派发的文件，再统一返回。
+        let mut fatal: Option<Error> = None;
         for (index, task) in tasks.iter().cloned().enumerate() {
             // 先取信号量再 spawn：并发满时在此自然阻塞，起到「文件级并发上限」的节流作用。
             // 等信号量期间取消即停止派发：没开始的文件不产生任何临时文件，无需清理。
             let acquire = semaphore.clone().acquire_owned();
-            let permit = match &self.cancel {
+            let acquired = match &self.cancel {
                 Some(token) => match token.run_until_cancelled(acquire).await {
-                    Some(permit) => permit,
+                    Some(acquired) => acquired,
                     None => break,
                 },
                 None => acquire.await,
-            }
-            .expect("文件信号量未关闭");
+            };
+            // 信号量是本函数的局部变量且从不关闭。
+            let Ok(permit) = acquired else {
+                fatal = Some(Error::Internal {
+                    what: "文件信号量已关闭",
+                });
+                break;
+            };
             let downloader = self.downloader.clone();
             let reporter = reporter.clone();
             let cancel = self.cancel.clone();
@@ -156,10 +165,17 @@ impl DownloadPool {
                     task: tasks[index].clone(),
                     error: err,
                 }),
-                Err(join) => return Err(Error::ChunkTaskJoin(join)),
+                Err(join) => {
+                    if fatal.is_none() {
+                        fatal = Some(Error::TaskJoin(join));
+                    }
+                }
             }
         }
         reporter.finalize();
+        if let Some(err) = fatal {
+            return Err(err);
+        }
 
         if dispatched < total || failures.iter().any(|f| f.error.is_cancelled()) {
             tracing::debug!(total, dispatched, succeeded, "批量下载已取消");
