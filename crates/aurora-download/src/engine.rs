@@ -1,7 +1,7 @@
 //! 单文件下载引擎：探测、分块/单流下载、断点续传、合并、校验、退避重试与换源。
 //!
 //! [`Downloader::download`] 的一次调用完整覆盖：
-//! 1. 若目标已存在且 sha1/大小校验通过则直接跳过（可重入、幂等安装）。
+//! 1. 若目标已存在且大小、sha1 校验通过则直接跳过（可重入、幂等安装）；大小不符时不再算哈希。
 //! 2. 把官方 URL 经 [`SourcePlan`] 展开为候选源列表，已被 [`SourceHealth`] 判定不通的主机沉底，
 //!    逐源尝试。
 //! 3. 每个源用 [`retry_async`] 做指数退避重试；耗尽后切换下一个源（即「n 次后切换镜像」），
@@ -10,7 +10,8 @@
 //!    再对终点地址发 Range，分片落 `.petalfall-partN`；网络中断保留已完成分片供下次断点续传，
 //!    损坏（哈希不符）则清分片重下；没有 sha1 的任务换源前先清掉本源残留分片。
 //! 5. 分片路径在某个源上彻底失败后自动回退为整文件单请求，宁可失去并行加速也要把文件装上。
-//! 6. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。
+//! 6. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。sha1 在写盘的同时算好，
+//!    不把刚写完的文件再读一遍；落盘是否 fsync 见 [`Landing`]。
 //!
 //! 取消是协作式的：令牌只在文件开始前、网络等待点（发请求、读响应体）与退避等待里被观察，
 //! 观察到就让当前尝试正常返回 [`Error::Cancelled`]，再由 [`Downloader::run`] 统一清掉该文件的
@@ -20,8 +21,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aurora_base::fs::Sha1Hasher;
 use aurora_base::retry::{RetryPolicy, retry_async, retry_async_until};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -278,29 +280,34 @@ impl Downloader {
                 .map_err(|source| io_error(parent, source))?;
         }
 
-        let temp = temp_path(&task.dest);
-        let parts = match transfer {
+        // 每次尝试从空摘要开始：上一次尝试喂进去的字节已作废。
+        let mut landing = Landing::for_task(task);
+        let assembled = match transfer {
             Transfer::Chunked { total } => {
-                self.download_chunked(url, task, total, &temp, file, cancel)
+                self.download_chunked(url, task, total, file, cancel, &mut landing)
                     .await?
             }
-            Transfer::Whole => {
-                self.download_stream(url, &temp, file, cancel).await?;
-                Vec::new()
-            }
+            Transfer::Whole => Assembled {
+                len: self
+                    .download_stream(url, task, file, cancel, &mut landing)
+                    .await?,
+                parts: Vec::new(),
+            },
         };
 
-        self.finalize(&temp, task, &parts).await
+        self.finalize(task, assembled, landing).await
     }
 
-    /// 单流下载：一次 GET 流式落到临时文件。用于小文件或大小未知的文件。
+    /// 单流下载：一次 GET 流式落到临时文件，返回写入字节数。用于小文件或大小未知的文件。
     async fn download_stream(
         &self,
         url: &str,
-        temp: &Path,
+        task: &DownloadTask,
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
-    ) -> Result<()> {
+        landing: &mut Landing<'_>,
+    ) -> Result<u64> {
+        let temp = temp_path(&task.dest);
         let resp = until_cancelled(cancel, self.client.get(url).send())
             .await?
             .map_err(|source| Error::Request {
@@ -314,12 +321,15 @@ impl Downloader {
                 status: status.as_u16(),
             });
         }
-        if let Err(err) = stream_to_file(resp, temp, file, cancel).await {
-            // 单流不做续传，失败即清掉半截临时文件，下次从头再来。
-            let _ = tokio::fs::remove_file(temp).await;
-            return Err(err);
+        let durable = landing.durable();
+        match stream_to_file(resp, &temp, file, cancel, landing.hasher(), durable).await {
+            Ok(len) => Ok(len),
+            Err(err) => {
+                // 单流不做续传，失败即清掉半截临时文件，下次从头再来。
+                let _ = tokio::fs::remove_file(&temp).await;
+                Err(err)
+            }
         }
-        Ok(())
     }
 
     /// 分块下载的入口：先把跳转解干净，再对最终地址发 Range，失败按阶段落日志。
@@ -328,10 +338,10 @@ impl Downloader {
         url: &str,
         task: &DownloadTask,
         total: u64,
-        temp: &Path,
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
-    ) -> Result<Vec<PathBuf>> {
+        landing: &mut Landing<'_>,
+    ) -> Result<Assembled> {
         let final_url = match probe_final_url(&self.client, url, cancel).await {
             Ok(resolved) => resolved,
             Err(err) => {
@@ -358,7 +368,7 @@ impl Downloader {
         }
 
         let result = self
-            .fetch_chunks(&final_url, task, total, temp, file, cancel)
+            .fetch_chunks(&final_url, task, total, file, cancel, landing)
             .await;
         if let Err(err) = &result
             && !err.is_cancelled()
@@ -376,7 +386,7 @@ impl Downloader {
         result
     }
 
-    /// 分块并发下载。返回本次涉及的分片文件列表（供合并后清理）；整体返回时临时文件已是完整合并结果。
+    /// 分块并发下载。整体返回时临时文件已是完整合并结果，并带回本次涉及的分片（供落位后清理）。
     ///
     /// `url` 必须是 [`probe_final_url`] 解出的最终地址：所有 Range 请求都直接打在源站上，
     /// 不再经过任何跳转。
@@ -385,10 +395,12 @@ impl Downloader {
         url: &str,
         task: &DownloadTask,
         total: u64,
-        temp: &Path,
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
-    ) -> Result<Vec<PathBuf>> {
+        landing: &mut Landing<'_>,
+    ) -> Result<Assembled> {
+        let temp = temp_path(&task.dest);
+        let durable = landing.durable();
         let plan = ChunkPlan::compute(
             total,
             self.config.chunk.chunk_size,
@@ -400,16 +412,23 @@ impl Downloader {
         let resp0 = ranged_get(&self.client, url, first.start, first.end, cancel).await?;
         if resp0.status() == reqwest::StatusCode::OK {
             // 服务器忽略了 Range、返回整体 200：此响应即完整文件，直接落到合并临时文件。
-            if let Err(err) = stream_to_file(resp0, temp, file, cancel).await {
-                let _ = tokio::fs::remove_file(temp).await;
-                return Err(err);
-            }
-            return Ok(Vec::new());
+            return match stream_to_file(resp0, &temp, file, cancel, landing.hasher(), durable).await
+            {
+                Ok(len) => Ok(Assembled {
+                    len,
+                    parts: Vec::new(),
+                }),
+                Err(err) => {
+                    let _ = tokio::fs::remove_file(&temp).await;
+                    Err(err)
+                }
+            };
         }
 
         // 206：写首片。首片每次尝试都重下（一个块尺寸，代价可忽略），确保 Range 支持性判定可靠。
+        // 分片不算摘要：合并时按序读回来一次性算，乱序到达的分片没法边写边算。
         let part0 = part_path(&task.dest, first.index);
-        let written0 = stream_to_file(resp0, &part0, file, cancel).await?;
+        let written0 = stream_to_file(resp0, &part0, file, cancel, None, durable).await?;
         if written0 != first.byte_len() {
             let _ = tokio::fs::remove_file(&part0).await;
             return Err(Error::IncompleteBody {
@@ -443,7 +462,16 @@ impl Downloader {
             let token = owned_cancel.clone();
             set.spawn(async move {
                 let _permit = permit;
-                download_one_chunk(&client, &url, chunk, &part, &chunk_file, token.as_ref()).await
+                download_one_chunk(
+                    &client,
+                    &url,
+                    chunk,
+                    &part,
+                    &chunk_file,
+                    token.as_ref(),
+                    durable,
+                )
+                .await
             });
         }
 
@@ -467,42 +495,46 @@ impl Downloader {
             return Err(err);
         }
 
-        concat_parts(&plan, &task.dest, temp).await?;
-        Ok(plan
-            .chunks
-            .iter()
-            .map(|chunk| part_path(&task.dest, chunk.index))
-            .collect())
+        let len = concat_parts(&plan, &task.dest, &temp, landing.hasher(), durable).await?;
+        Ok(Assembled {
+            len,
+            parts: plan
+                .chunks
+                .iter()
+                .map(|chunk| part_path(&task.dest, chunk.index))
+                .collect(),
+        })
     }
 
     /// 合并后校验并原子落位，返回文件实际大小。大小/哈希不符视为损坏：清掉临时文件与分片，
     /// 让外层重下。
-    async fn finalize(&self, temp: &Path, task: &DownloadTask, parts: &[PathBuf]) -> Result<u64> {
-        let len = tokio::fs::metadata(temp)
-            .await
-            .map_err(|source| io_error(temp, source))?
-            .len();
+    async fn finalize(
+        &self,
+        task: &DownloadTask,
+        assembled: Assembled,
+        landing: Landing<'_>,
+    ) -> Result<u64> {
+        let temp = temp_path(&task.dest);
+        let Assembled { len, parts } = assembled;
         if let Some(expected) = task.size
             && len != expected
         {
-            cleanup(temp, parts).await;
+            cleanup(&temp, &parts).await;
             return Err(Error::SizeMismatch {
                 url: task.url.clone(),
                 expected,
                 actual: len,
             });
         }
-        if let Some(sha1) = &task.sha1
-            && let Err(err) = aurora_base::fs::verify_sha1(temp, sha1).await
-        {
+        if let Err(err) = landing.verify() {
             // 哈希不符 -> 分片产出了错误内容，必须删除分片，否则续传会一直复用坏数据。
-            cleanup(temp, parts).await;
+            cleanup(&temp, &parts).await;
             return Err(err.into());
         }
-        tokio::fs::rename(temp, &task.dest)
+        tokio::fs::rename(&temp, &task.dest)
             .await
             .map_err(|source| io_error(&task.dest, source))?;
-        for part in parts {
+        for part in &parts {
             let _ = tokio::fs::remove_file(part).await;
         }
         Ok(len)
@@ -532,26 +564,74 @@ impl Downloader {
         }
     }
 
-    /// 目标是否已存在且满足完整性契约（有 sha1 校 sha1，否则有大小校大小，都没有则不认为完整）。
-    /// 完整时返回文件大小，供进度计入。
+    /// 目标是否已存在且满足完整性契约：声明了大小先比大小，有 sha1 再校 sha1，两者都没有则不认为
+    /// 完整。完整时返回文件大小，供进度计入。
+    ///
+    /// 先比大小是为了省哈希：补全与修复要对成千个已存在的资源对象逐个判定，大小不符的必然不完整，
+    /// 不必再把它整份读一遍。
     async fn already_complete(&self, task: &DownloadTask) -> Result<Option<u64>> {
-        match tokio::fs::metadata(&task.dest).await {
-            Ok(meta) => {
-                let len = meta.len();
-                if let Some(sha1) = &task.sha1 {
-                    match aurora_base::fs::verify_sha1(&task.dest, sha1).await {
-                        Ok(()) => Ok(Some(len)),
-                        Err(aurora_base::Error::HashMismatch { .. }) => Ok(None),
-                        Err(err) => Err(err.into()),
-                    }
-                } else if let Some(size) = task.size {
-                    Ok((len == size).then_some(len))
-                } else {
-                    Ok(None)
-                }
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(io_error(&task.dest, source)),
+        let len = match tokio::fs::metadata(&task.dest).await {
+            Ok(meta) => meta.len(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(io_error(&task.dest, source)),
+        };
+        if task.size.is_some_and(|size| size != len) {
+            return Ok(None);
+        }
+        match &task.sha1 {
+            Some(sha1) => match aurora_base::fs::verify_sha1(&task.dest, sha1).await {
+                Ok(()) => Ok(Some(len)),
+                Err(aurora_base::Error::HashMismatch { .. }) => Ok(None),
+                Err(err) => Err(err.into()),
+            },
+            None => Ok(task.size.map(|_| len)),
+        }
+    }
+}
+
+/// 一次尝试落到临时文件的结果。
+struct Assembled {
+    /// 临时文件的字节数（写入时计数，不再回头 stat）。
+    len: u64,
+    /// 本次涉及的分片，落位后清理；整文件路径为空。
+    parts: Vec<PathBuf>,
+}
+
+/// 一次尝试的落盘约定，由任务有没有 sha1 决定。
+///
+/// 带 sha1：边写边算摘要，合并后直接比对，不再把刚写完的文件整份读回来；也不 fsync——掉电后
+/// 留下的残缺文件会在下次 `already_complete` 的 sha1 校验里被识破并重下，不依赖掉电一致性。
+/// 没有 sha1：只能靠大小判定完整，掉电留下「大小对、内容是空洞」的文件识别不出来，必须 fsync。
+/// SSD 上实测逐个 fsync 每个小文件多约 0.28 ms，资源对象几千个时累计接近一秒。
+struct Landing<'a> {
+    sha1: Option<(&'a str, Sha1Hasher)>,
+}
+
+impl<'a> Landing<'a> {
+    fn for_task(task: &'a DownloadTask) -> Self {
+        Self {
+            sha1: task
+                .sha1
+                .as_deref()
+                .map(|expected| (expected, Sha1Hasher::new())),
+        }
+    }
+
+    /// 落盘后是否需要 fsync。
+    fn durable(&self) -> bool {
+        self.sha1.is_none()
+    }
+
+    /// 写入临时文件的字节要喂给的摘要；任务没有 sha1 时为 `None`。
+    fn hasher(&mut self) -> Option<&mut Sha1Hasher> {
+        self.sha1.as_mut().map(|(_, hasher)| hasher)
+    }
+
+    /// 比对摘要；任务没有 sha1 时无可比对。
+    fn verify(self) -> aurora_base::Result<()> {
+        match self.sha1 {
+            Some((expected, hasher)) => hasher.verify(expected),
+            None => Ok(()),
         }
     }
 }
@@ -678,6 +758,7 @@ async fn download_one_chunk(
     part: &Path,
     file: &FileProgress,
     cancel: Option<&CancellationToken>,
+    durable: bool,
 ) -> Result<()> {
     let resp = ranged_get(client, url, chunk.start, chunk.end, cancel).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
@@ -686,7 +767,7 @@ async fn download_one_chunk(
             url: url.to_owned(),
         });
     }
-    let written = stream_to_file(resp, part, file, cancel).await?;
+    let written = stream_to_file(resp, part, file, cancel, None, durable).await?;
     if written != chunk.byte_len() {
         let _ = tokio::fs::remove_file(part).await;
         return Err(Error::IncompleteBody {
@@ -698,58 +779,139 @@ async fn download_one_chunk(
     Ok(())
 }
 
-/// 流式把响应体写入文件（覆盖），逐段累加进度，写完 fsync。返回写入字节数。
+/// 每个写入流前面的缓冲。tokio 的 File 每次写都要交给阻塞线程池走一趟，响应体按十几 KiB 一段到达，
+/// 不攒一攒的话一个百来 KiB 的资源对象就是十来趟；攒满再写，多数资源对象一趟落盘。
+const WRITE_BUFFER: usize = 128 * 1024;
+
+/// 流式把响应体写入文件（覆盖），逐段累加进度；`hasher` 提供时同时喂给摘要，`durable` 时写完 fsync。
+/// 返回写入字节数。
 ///
-/// 取消只在读下一段响应体时观察：写盘那一步总是完整等完，返回 [`Error::Cancelled`] 时
-/// 文件句柄随之关闭，半截文件交给 [`Downloader::run`] 统一清理。
+/// 取消只在读下一段响应体时观察；返回任何错误前都先等在途的写完成，半截文件交给调用方清理时
+/// 不会与那次写赛跑。
 async fn stream_to_file(
     mut resp: reqwest::Response,
     path: &Path,
     progress: &FileProgress,
     cancel: Option<&CancellationToken>,
+    mut hasher: Option<&mut Sha1Hasher>,
+    durable: bool,
 ) -> Result<u64> {
     let url = resp.url().as_str().to_owned();
-    let mut file = tokio::fs::File::create(path)
+    let file = tokio::fs::File::create(path)
         .await
         .map_err(|source| io_error(path, source))?;
+    let mut writer = BufWriter::with_capacity(WRITE_BUFFER, file);
     let mut written = 0u64;
-    loop {
-        match until_cancelled(cancel, resp.chunk()).await? {
-            Ok(Some(bytes)) => {
-                file.write_all(&bytes)
-                    .await
-                    .map_err(|source| io_error(path, source))?;
-                written += bytes.len() as u64;
-                progress.transferred(bytes.len() as u64);
+    let pumped: Result<()> = async {
+        loop {
+            match until_cancelled(cancel, resp.chunk()).await? {
+                Ok(Some(bytes)) => {
+                    writer
+                        .write_all(&bytes)
+                        .await
+                        .map_err(|source| io_error(path, source))?;
+                    if let Some(hasher) = &mut hasher {
+                        hasher.update(&bytes);
+                    }
+                    written += bytes.len() as u64;
+                    progress.transferred(bytes.len() as u64);
+                }
+                Ok(None) => break,
+                Err(source) => {
+                    return Err(Error::Request {
+                        url: url.clone(),
+                        source,
+                    });
+                }
             }
-            Ok(None) => break,
-            Err(source) => return Err(Error::Request { url, source }),
         }
+        flush_all(&mut writer, path).await
     }
-    file.sync_all()
-        .await
-        .map_err(|source| io_error(path, source))?;
+    .await;
+    if let Err(err) = pumped {
+        abandon(writer).await;
+        return Err(err);
+    }
+    if durable {
+        sync_to_disk(writer.get_ref(), path).await?;
+    }
     Ok(written)
 }
 
-/// 按序号顺序把分片拼接进合并临时文件，写完 fsync。
-async fn concat_parts(plan: &ChunkPlan, dest: &Path, temp: &Path) -> Result<()> {
-    let mut out = tokio::fs::File::create(temp)
+/// 按序号顺序把分片拼接进合并临时文件，同时喂给摘要；`durable` 时写完 fsync。返回合并后的字节数。
+async fn concat_parts(
+    plan: &ChunkPlan,
+    dest: &Path,
+    temp: &Path,
+    mut hasher: Option<&mut Sha1Hasher>,
+    durable: bool,
+) -> Result<u64> {
+    let out = tokio::fs::File::create(temp)
         .await
         .map_err(|source| io_error(temp, source))?;
-    for chunk in &plan.chunks {
-        let part = part_path(dest, chunk.index);
-        let mut input = tokio::fs::File::open(&part)
-            .await
-            .map_err(|source| io_error(&part, source))?;
-        tokio::io::copy(&mut input, &mut out)
-            .await
-            .map_err(|source| io_error(&part, source))?;
+    let mut writer = BufWriter::with_capacity(WRITE_BUFFER, out);
+    let mut buf = vec![0u8; WRITE_BUFFER];
+    let mut written = 0u64;
+    let copied: Result<()> = async {
+        for chunk in &plan.chunks {
+            let part = part_path(dest, chunk.index);
+            let mut input = tokio::fs::File::open(&part)
+                .await
+                .map_err(|source| io_error(&part, source))?;
+            loop {
+                let read = input
+                    .read(&mut buf)
+                    .await
+                    .map_err(|source| io_error(&part, source))?;
+                if read == 0 {
+                    break;
+                }
+                writer
+                    .write_all(&buf[..read])
+                    .await
+                    .map_err(|source| io_error(temp, source))?;
+                if let Some(hasher) = &mut hasher {
+                    hasher.update(&buf[..read]);
+                }
+                written += read as u64;
+            }
+        }
+        flush_all(&mut writer, temp).await
     }
-    out.sync_all()
+    .await;
+    if let Err(err) = copied {
+        abandon(writer).await;
+        return Err(err);
+    }
+    if durable {
+        sync_to_disk(writer.get_ref(), temp).await?;
+    }
+    Ok(written)
+}
+
+/// 把缓冲写下去并等在途的写完成。tokio 的 File 把最后一次写的错误推迟到 flush 才报，
+/// 不 flush 就关闭会把磁盘写满之类的失败吞掉。
+async fn flush_all(writer: &mut BufWriter<tokio::fs::File>, path: &Path) -> Result<()> {
+    writer
+        .flush()
         .await
-        .map_err(|source| io_error(temp, source))?;
-    Ok(())
+        .map_err(|source| io_error(path, source))
+}
+
+/// fsync：让 rename 之前数据已真正落盘。
+async fn sync_to_disk(file: &tokio::fs::File, path: &Path) -> Result<()> {
+    file.sync_all()
+        .await
+        .map_err(|source| io_error(path, source))
+}
+
+/// 放弃写了一半的文件：丢掉缓冲里还没写下去的数据，只等在途的那次写结束。
+///
+/// tokio 的 File 把写交给阻塞线程池，不等它结束就去删文件，删除会与那次写赛跑。
+async fn abandon(writer: BufWriter<tokio::fs::File>) {
+    let mut file = writer.into_inner();
+    // 文件随即被删除或覆盖，在途写成功与否都不改变结果，这里只需要它结束。
+    let _ = file.flush().await;
 }
 
 /// 分片是否已完整下载：文件存在且尺寸恰等于该分块应有长度。
@@ -850,6 +1012,40 @@ mod tests {
         let err = downloader.run(&task, None, Some(&token)).await.unwrap_err();
         assert!(err.is_cancelled(), "实际：{err:?}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// 完整性判定：大小不符直接判不完整（即便 sha1 对得上，说明没有走到哈希那一步），
+    /// 大小对上才看 sha1；只有大小时以大小为准，两者都没有则不认。
+    #[tokio::test]
+    async fn already_complete_rejects_size_mismatch_before_hashing() {
+        const ABC_SHA1: &str = "a9993e364706816aba3e25717850c26c9cd0d89d";
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("abc.bin");
+        tokio::fs::write(&dest, b"abc").await.unwrap();
+        let downloader = Downloader::with_defaults(reqwest::Client::new());
+        let task = |size: Option<u64>, sha1: Option<&str>| {
+            let mut task = DownloadTask::new("http://127.0.0.1:9/abc.bin", &dest);
+            task.size = size;
+            task.sha1 = sha1.map(str::to_owned);
+            task
+        };
+        let check = |task: DownloadTask| {
+            let downloader = downloader.clone();
+            async move { downloader.already_complete(&task).await.unwrap() }
+        };
+
+        assert_eq!(check(task(Some(5), Some(ABC_SHA1))).await, None);
+        assert_eq!(check(task(Some(2), None)).await, None);
+        assert_eq!(check(task(Some(3), Some(ABC_SHA1))).await, Some(3));
+        assert_eq!(check(task(None, Some(ABC_SHA1))).await, Some(3));
+        assert_eq!(check(task(Some(3), Some(&"0".repeat(40)))).await, None);
+        assert_eq!(check(task(Some(3), None)).await, Some(3));
+        assert_eq!(check(task(None, None)).await, None);
+
+        let missing = DownloadTask::new("http://127.0.0.1:9/x", dir.path().join("missing.bin"))
+            .with_size(3)
+            .with_sha1(ABC_SHA1);
+        assert_eq!(check(missing).await, None);
     }
 
     fn split_config() -> ChunkConfig {

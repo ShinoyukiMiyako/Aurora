@@ -72,37 +72,55 @@ fn serve(handle: fn(TcpStream)) -> SocketAddr {
     addr
 }
 
-/// 声明 1 MB，只发 64 KiB 就卡住。
+/// 引擎写盘前会先攒一段缓冲（百来 KiB）。卡住前发出的前缀与等待的落盘量都远大于它，
+/// 「半截数据已经真正写到盘上」的现场才造得出来。
+const ON_DISK: u64 = 256 * 1024;
+
+/// 单流卡住前发出的前缀。
+const STREAM_PREFIX: usize = 1024 * 1024;
+
+/// 分片长度；首片完整返回，其余分片只发一半。
+const CHUNK: u64 = 1024 * 1024;
+
+/// 分块下载的文件总长：正好切成 4 片。
+const CHUNKED_TOTAL: u64 = 4 * CHUNK;
+
+/// 声明 4 MiB，只发前缀就卡住。
 fn stall_after_prefix(mut stream: TcpStream) {
     read_request(&mut stream);
     // Connection: close 让客户端不复用这条卡住的连接去发下一个请求。
-    let head = "HTTP/1.1 200 OK\r\nContent-Length: 1048576\r\nConnection: close\r\n\r\n";
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        4 * STREAM_PREFIX
+    );
     let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(&vec![b'x'; 64 * 1024]);
+    let _ = stream.write_all(&vec![b'x'; STREAM_PREFIX]);
     let _ = stream.flush();
     std::thread::sleep(STALL);
 }
 
-/// 支持 Range：起点为 0 的分片完整返回，其余分片只发一半就卡住。分片长 1000 字节。
+/// 支持 Range：起点为 0 的分片完整返回，其余分片只发一半就卡住。
 /// 不带 Range 的请求是分片前的解跳转探测，只回响应头即关连接（引擎不读探测的响应体）。
 fn ranged_stall(mut stream: TcpStream) {
     let Some(start) = read_request(&mut stream) else {
-        let head = "HTTP/1.1 200 OK\r\nContent-Length: 4000\r\nConnection: close\r\n\r\n";
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {CHUNKED_TOTAL}\r\nConnection: close\r\n\r\n"
+        );
         let _ = stream.write_all(head.as_bytes());
         let _ = stream.flush();
         return;
     };
     let head = format!(
-        "HTTP/1.1 206 Partial Content\r\nContent-Length: 1000\r\nContent-Range: bytes {start}-{}/4000\r\nConnection: close\r\n\r\n",
-        start + 999
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: {CHUNK}\r\nContent-Range: bytes {start}-{}/{CHUNKED_TOTAL}\r\nConnection: close\r\n\r\n",
+        start + CHUNK - 1
     );
     let _ = stream.write_all(head.as_bytes());
     if start == 0 {
         // 首片完整发完即关连接，客户端按正常路径读完它。
-        let _ = stream.write_all(&[b'y'; 1000]);
+        let _ = stream.write_all(&vec![b'y'; CHUNK as usize]);
         let _ = stream.flush();
     } else {
-        let _ = stream.write_all(&[b'y'; 500]);
+        let _ = stream.write_all(&vec![b'y'; (CHUNK / 2) as usize]);
         let _ = stream.flush();
         std::thread::sleep(STALL);
     }
@@ -140,7 +158,7 @@ async fn cancel_mid_stream_returns_quickly_and_removes_temp_file() {
 
     let temp = temp_of(&dest);
     wait_until("临时文件写入前缀", || {
-        std::fs::metadata(&temp).is_ok_and(|m| m.len() >= 64 * 1024)
+        std::fs::metadata(&temp).is_ok_and(|m| m.len() >= ON_DISK)
     })
     .await;
 
@@ -162,11 +180,12 @@ async fn cancel_mid_chunked_download_removes_every_part() {
     let addr = serve(ranged_stall);
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("assets.bin");
-    let task = DownloadTask::new(format!("http://{addr}/assets.bin"), &dest).with_size(4000);
+    let task =
+        DownloadTask::new(format!("http://{addr}/assets.bin"), &dest).with_size(CHUNKED_TOTAL);
     let chunk = ChunkConfig {
         enabled: true,
         min_split_size: 100,
-        chunk_size: 1000,
+        chunk_size: CHUNK,
         max_chunks: 4,
         chunk_concurrency: 3,
         excluded_hosts: Vec::new(),
@@ -178,8 +197,9 @@ async fn cancel_mid_chunked_download_removes_every_part() {
     let download = tokio::spawn(async move { pool.download_all(vec![task], None).await });
 
     wait_until("首片完整、后续分片各写了一半", || {
-        std::fs::metadata(part_of(&dest, 0)).is_ok_and(|m| m.len() == 1000)
-            && (1..4).all(|i| std::fs::metadata(part_of(&dest, i)).is_ok_and(|m| m.len() == 500))
+        std::fs::metadata(part_of(&dest, 0)).is_ok_and(|m| m.len() == CHUNK)
+            && (1..4)
+                .all(|i| std::fs::metadata(part_of(&dest, i)).is_ok_and(|m| m.len() >= ON_DISK))
     })
     .await;
 
