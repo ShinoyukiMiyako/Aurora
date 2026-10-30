@@ -1,0 +1,763 @@
+import { IpcError } from "../../errors";
+import {
+  checkInstanceName,
+  LOADER_CHOICES,
+  type DeletionPreviewDto,
+  type FolderTarget,
+  type IncompleteDto,
+  type InstallResultDto,
+  type InstanceActivity,
+  type InstanceContentDto,
+  type InstanceDto,
+  type InstanceSettingsDto,
+  type LoaderChoice,
+  type LoaderVersionDto,
+  type ManifestDto,
+  type ManifestVersionDto,
+  type NameRule,
+  type RepairResultDto,
+} from "../../instances";
+import { emitMockEvent } from "../events";
+import type { MockArgs, MockHandlers } from "../types";
+import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
+
+// ipc/ 只能以类型方式引用别的模块，事件名与上限在这里按后端各写一份。
+const CORE_EVENT = "aurora://core-event";
+const SIDEBAR_PIN_MAX = 5;
+const FOLDER_TARGETS: readonly FolderTarget[] = [
+  "game_dir",
+  "instance",
+  "mods",
+  "saves",
+  "resourcepacks",
+  "shaderpacks",
+  "logs",
+  "screenshots",
+  "world",
+];
+
+/** 假安装、假补全每一步之间的间隔，测试用假时钟按它推进。 */
+export const MOCK_STEP_MS = 300;
+/** 假安装的步数（每步推一次进度）。 */
+export const MOCK_INSTALL_STEPS = 5;
+
+const DAY = 86_400_000;
+const MB = 1_048_576;
+
+const NAME_MESSAGES: Record<NameRule, string> = {
+  empty: "先给实例起个名字",
+  too_long: "名称最多 32 个字",
+  illegal_char: '名称里不能有 \\ / : * ? " < > | 这些字符',
+  reserved: "这个名字 Windows 不允许用作文件夹名",
+  leading_dot: "名称不能以 . 开头",
+  duplicate: "已经有同名的实例了，换一个吧",
+};
+
+const LOADER_NAMES: Record<LoaderChoice, string> = {
+  fabric: "Fabric",
+  quilt: "Quilt",
+  forge: "Forge",
+  neoforge: "NeoForge",
+};
+
+// ---------------------------------------------------------------- 假数据
+
+interface MockInstance {
+  dto: Omit<InstanceDto, "activity" | "description" | "cover">;
+  settings: InstanceSettingsDto;
+  /** 传统布局的加载器版本经 inheritsFrom 指向的原版实例。 */
+  inheritsFrom: string | null;
+  content: InstanceContentDto;
+  sizeBytes: number;
+  fileCount: number;
+}
+
+function defaultSettings(): InstanceSettingsDto {
+  return {
+    description: null,
+    cover: null,
+    isolation: "follow_global",
+    memory_mb: null,
+    java: "auto",
+    jvm_args: "",
+    resolution: { width: 1280, height: 720 },
+    fullscreen: false,
+  };
+}
+
+function emptyContent(): InstanceContentDto {
+  return { resource_packs: [], shader_packs: [], worlds: [] };
+}
+
+function readyDto(
+  id: string,
+  mc: string,
+  loaders: InstanceDto["loaders"],
+  javaMajor: number,
+  modCount: number,
+  createdAt: number | null,
+): MockInstance["dto"] {
+  return {
+    id,
+    status: "ready",
+    broken_reason: null,
+    mc_version: mc,
+    loaders,
+    release_type: "release",
+    is_release: true,
+    java_major: javaMajor,
+    mod_count: modCount,
+    settings_error: null,
+    incomplete: null,
+    created_at: createdAt,
+  };
+}
+
+function seedInstances(): MockInstance[] {
+  const now = Date.now();
+  return [
+    {
+      dto: readyDto("1.21.1", "1.21.1", [], 21, 0, now - 40 * DAY),
+      settings: defaultSettings(),
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 31 * MB,
+      fileCount: 4,
+    },
+    {
+      dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, 12, now - 12 * DAY),
+      settings: { ...defaultSettings(), description: "和朋友的周末服务器", cover: "cherry_planks", memory_mb: 6144 },
+      inheritsFrom: null,
+      content: {
+        resource_packs: [
+          { file_name: "Faithful 32x.zip", is_dir: false, size_bytes: 24 * MB, modified_at: now - 10 * DAY, load_order: 1 },
+          { file_name: "旧材质", is_dir: true, size_bytes: 3 * MB, modified_at: now - 30 * DAY, load_order: null },
+        ],
+        shader_packs: [
+          { file_name: "ComplementaryReimagined_r5.3.zip", is_dir: false, size_bytes: 2 * MB, modified_at: now - 9 * DAY, active: true },
+        ],
+        worlds: [
+          {
+            dir_name: "New World",
+            level_status: "ok",
+            level_error: null,
+            name: "樱花谷",
+            mode: "survival",
+            last_played: now - DAY,
+            size_bytes: 180 * MB,
+            modified_at: now - DAY,
+          },
+          {
+            dir_name: "坏档",
+            level_status: "unreadable",
+            level_error: "level.dat 不是有效的 gzip 数据",
+            name: null,
+            mode: null,
+            last_played: null,
+            size_bytes: 2 * MB,
+            modified_at: now - 20 * DAY,
+          },
+        ],
+      },
+      sizeBytes: 420 * MB,
+      fileCount: 1830,
+    },
+    {
+      dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, 182, now - 90 * DAY),
+      settings: { ...defaultSettings(), memory_mb: 8192, isolation: "enabled" },
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 1300 * MB,
+      fileCount: 9200,
+    },
+    {
+      dto: {
+        id: "没装完",
+        status: "broken",
+        broken_reason: "缺少版本 JSON",
+        mc_version: null,
+        loaders: [],
+        release_type: null,
+        is_release: false,
+        java_major: null,
+        mod_count: null,
+        settings_error: null,
+        incomplete: {
+          kind: "install",
+          outcome: "failed",
+          started_at: now - 2 * DAY,
+          spec: { mc_version: "1.20.1", loader: "neoforge", loader_version: "47.1.106" },
+          error: { code: "download_failed", message: "库 阶段有 3/41 个文件下载失败" },
+        },
+        created_at: now - 2 * DAY,
+      },
+      settings: defaultSettings(),
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 12 * MB,
+      fileCount: 3,
+    },
+  ];
+}
+
+interface ManifestSeed {
+  id: string;
+  type: string;
+  loaders: LoaderChoice[];
+  java: number;
+}
+
+const MANIFEST: ManifestSeed[] = [
+  { id: "1.21.1", type: "release", loaders: ["fabric", "quilt", "forge", "neoforge"], java: 21 },
+  { id: "24w14a", type: "snapshot", loaders: ["fabric"], java: 21 },
+  { id: "1.20.1", type: "release", loaders: ["fabric", "quilt", "forge", "neoforge"], java: 17 },
+  { id: "1.12.2", type: "release", loaders: ["forge"], java: 8 },
+  { id: "1.5.2", type: "release", loaders: [], java: 8 },
+];
+
+const LOADER_VERSIONS: Partial<Record<`${LoaderChoice}:${string}`, LoaderVersionDto[]>> = {
+  "fabric:1.21.1": [
+    { version: "0.16.10", stable: true },
+    { version: "0.16.9", stable: true },
+    { version: "0.16.8-beta", stable: false },
+  ],
+  "fabric:24w14a": [{ version: "0.16.10", stable: true }],
+  "fabric:1.20.1": [{ version: "0.16.10", stable: true }],
+  "quilt:1.21.1": [
+    { version: "0.27.1", stable: true },
+    { version: "0.27.2-beta.1", stable: false },
+  ],
+  "quilt:1.20.1": [{ version: "0.27.1", stable: true }],
+  "forge:1.21.1": [
+    { version: "52.0.20", stable: true },
+    { version: "52.0.2", stable: true },
+  ],
+  "forge:1.20.1": [
+    { version: "47.3.0", stable: true },
+    { version: "47.2.0", stable: true },
+  ],
+  "forge:1.12.2": [{ version: "14.23.5.2860", stable: true }],
+  "neoforge:1.21.1": [
+    { version: "21.1.77", stable: true },
+    { version: "21.1.9-beta", stable: false },
+  ],
+  "neoforge:1.20.1": [{ version: "47.1.106", stable: true }],
+};
+
+let instances: MockInstance[] = seedInstances();
+let pins: string[] = ["樱花生存", "1.21.1"];
+// 键不分大小写，与后端 InstanceLocks 一致。
+const activities = new Map<string, InstanceActivity>();
+
+// ---------------------------------------------------------------- 共用
+
+function str(args: MockArgs, key: string): string {
+  const value = args[key];
+  if (typeof value !== "string") throw new Error(`mock：${key} 应为字符串`);
+  return value;
+}
+
+function optStr(args: MockArgs, key: string): string | null {
+  const value = args[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string") throw new Error(`mock：${key} 应为字符串或 null`);
+  return value;
+}
+
+function invalid(field: string, reason: string, message: string, extra: Record<string, unknown> = {}): IpcError {
+  return new IpcError("invalid_argument", message, { field, reason, ...extra });
+}
+
+function isSafeId(id: string): boolean {
+  return id !== "" && !id.startsWith(".") && !/[\\/:\0]/.test(id);
+}
+
+function find(id: string): MockInstance | undefined {
+  return instances.find((i) => i.dto.id === id);
+}
+
+/** 与后端一样：id 不能安全拼进路径报 invalid_argument，不存在报 version_not_installed。 */
+function requireInstance(id: string): MockInstance {
+  if (!isSafeId(id)) throw invalid("id", "unsafe_id", `实例 id 不合法：${JSON.stringify(id)}`, { id });
+  const found = find(id);
+  if (!found) throw new IpcError("version_not_installed", `本地未安装版本 ${id}`, { id });
+  return found;
+}
+
+function nameError(name: string, rule: NameRule): IpcError {
+  return new IpcError("invalid_argument", `实例名称「${name}」不可用：${NAME_MESSAGES[rule]}`, { field: "name", rule, name });
+}
+
+function checkName(name: string, current: string | null): void {
+  const rule = checkInstanceName(
+    name,
+    instances.map((i) => i.dto.id),
+    current,
+  );
+  if (rule) throw nameError(name, rule);
+}
+
+function activityOf(id: string): InstanceActivity | null {
+  return activities.get(id.toLowerCase()) ?? null;
+}
+
+const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
+  installing: "安装",
+  repairing: "补全文件",
+  renaming: "改名",
+  deleting: "删除",
+  launching: "启动",
+  running: "运行",
+};
+
+function acquire(id: string, activity: InstanceActivity): () => void {
+  const current = activityOf(id);
+  if (current) {
+    throw new IpcError("instance_busy", `实例 ${id} 正在${ACTIVITY_LABELS[current]}，请稍后再试`, { id, activity: current });
+  }
+  const key = id.toLowerCase();
+  activities.set(key, activity);
+  return () => {
+    activities.delete(key);
+  };
+}
+
+function dependentsOf(id: string): string[] {
+  return instances.filter((i) => i.inheritsFrom === id).map((i) => i.dto.id);
+}
+
+function ensureNoDependents(id: string): void {
+  const dependents = dependentsOf(id);
+  if (dependents.length > 0) {
+    throw new IpcError("instance_has_dependents", `实例 ${id} 被 ${dependents.join("、")} 依赖，不能改名或删除`, { id, dependents });
+  }
+}
+
+function toDto(instance: MockInstance): InstanceDto {
+  return {
+    ...instance.dto,
+    description: instance.settings.description,
+    cover: instance.settings.cover,
+    activity: activityOf(instance.dto.id),
+  };
+}
+
+function loaderChoice(raw: string): LoaderChoice {
+  const choice = LOADER_CHOICES.find((c) => c === raw);
+  if (choice === undefined) throw invalid("loader", "unknown", `未知加载器 ${raw}（支持 fabric/quilt/forge/neoforge）`);
+  return choice;
+}
+
+function parseLoader(raw: string | null): LoaderChoice | null {
+  return raw === null ? null : loaderChoice(raw);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function stage(taskId: string, message: string): void {
+  emitMockEvent(CORE_EVENT, { kind: "stage", task_id: taskId, message });
+}
+
+/** 一段假下载：逐步推进度，期间被取消即以 cancelled 拒绝。 */
+async function fakeDownload(taskId: string, files: number, bytesPerFile: number): Promise<void> {
+  for (let step = 1; step <= MOCK_INSTALL_STEPS; step++) {
+    await sleep(MOCK_STEP_MS);
+    if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+    const finished = Math.round((files * step) / MOCK_INSTALL_STEPS);
+    emitMockEvent(CORE_EVENT, {
+      kind: "download",
+      task_id: taskId,
+      total: files,
+      finished,
+      bytes: finished * bytesPerFile,
+      total_bytes: files * bytesPerFile,
+      speed: Math.round((files * bytesPerFile) / ((MOCK_INSTALL_STEPS * MOCK_STEP_MS) / 1000)),
+    });
+  }
+}
+
+// ---------------------------------------------------------------- 设置校验（与后端逐项一致）
+
+const SETTINGS_KEYS = ["description", "cover", "isolation", "memory_mb", "java", "jvm_args", "resolution", "fullscreen"] as const;
+
+function malformed(message: string): IpcError {
+  return invalid("settings", "malformed", `实例设置格式不对：${message}`);
+}
+
+function parseSettings(raw: unknown): InstanceSettingsDto {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw malformed("应为对象");
+  const s = raw as Record<string, unknown>;
+  const unknown = Object.keys(s).find((k) => !(SETTINGS_KEYS as readonly string[]).includes(k));
+  if (unknown !== undefined) throw malformed(`不认识的字段 ${unknown}`);
+  const nullableString = (key: string): string | null => {
+    const v = s[key];
+    if (v === null || v === undefined) return null;
+    if (typeof v !== "string") throw malformed(`${key} 应为字符串或 null`);
+    return v;
+  };
+  const isolation = s.isolation;
+  if (isolation !== "follow_global" && isolation !== "enabled" && isolation !== "disabled") throw malformed("isolation 取值不对");
+  const memory = s.memory_mb;
+  if (memory !== null && memory !== undefined && (typeof memory !== "number" || !Number.isInteger(memory) || memory < 0)) {
+    throw malformed("memory_mb 应为非负整数或 null");
+  }
+  if (typeof s.java !== "string") throw malformed("缺少 java");
+  if (typeof s.jvm_args !== "string") throw malformed("缺少 jvm_args");
+  if (typeof s.fullscreen !== "boolean") throw malformed("缺少 fullscreen");
+  const resolution = s.resolution as Record<string, unknown> | null | undefined;
+  if (
+    typeof resolution !== "object" ||
+    resolution === null ||
+    !Number.isInteger(resolution.width) ||
+    !Number.isInteger(resolution.height) ||
+    (resolution.width as number) < 0 ||
+    (resolution.height as number) < 0
+  ) {
+    throw malformed("resolution 应为 { width, height } 非负整数");
+  }
+  return {
+    description: nullableString("description"),
+    cover: nullableString("cover"),
+    isolation,
+    // 与后端 serde 一致：Option 字段缺省即 null。
+    memory_mb: typeof memory === "number" ? memory : null,
+    java: s.java,
+    jvm_args: s.jvm_args,
+    resolution: { width: resolution.width as number, height: resolution.height as number },
+    fullscreen: s.fullscreen,
+  };
+}
+
+function validateSettings(s: InstanceSettingsDto): void {
+  const violation = (field: string, reason: string) =>
+    new IpcError("invalid_argument", `实例设置的 ${field} 不合法：${reason}`, { field, reason });
+  if (s.description !== null && s.description.trim() === "") throw violation("description", "没有介绍时应为 null，而不是空字符串");
+  if (s.cover !== null && !/^[a-z0-9_]{1,64}$/.test(s.cover)) {
+    throw violation("cover", `封面预设 id 只能由小写字母、数字与下划线组成（1 到 64 个）：${JSON.stringify(s.cover)}`);
+  }
+  if (s.memory_mb !== null && (s.memory_mb < 1024 || s.memory_mb % 512 !== 0)) {
+    throw violation("memory_mb", `内存至少 1024 MB 且为 512 的整数倍，收到 ${s.memory_mb}`);
+  }
+  if (s.java !== "auto" && !/^([A-Za-z]:[\\/]|\\\\)/.test(s.java)) {
+    throw violation("java", `Java 应为 "auto" 或 java 可执行文件的绝对路径，收到 ${s.java}`);
+  }
+  const { width, height } = s.resolution;
+  if (width < 320 || width > 7680 || height < 240 || height > 4320) {
+    throw violation("resolution", `宽应在 320-7680、高应在 240-4320 之间，收到 ${width}×${height}`);
+  }
+}
+
+// ---------------------------------------------------------------- 命令
+
+function manifestDto(): ManifestDto {
+  const versions: ManifestVersionDto[] = MANIFEST.map((v, i) => ({
+    id: v.id,
+    release_type: v.type,
+    release_time: new Date(Date.UTC(2024, 7, 8) - i * 90 * DAY).toISOString(),
+    loaders: [...v.loaders],
+  }));
+  return {
+    latest: { release: "1.21.1", snapshot: "24w14a" },
+    versions,
+    loader_errors: [],
+    stale_since: null,
+    fetch_error: null,
+  };
+}
+
+async function installVersion(args: MockArgs): Promise<InstallResultDto> {
+  const taskId = str(args, "taskId");
+  const mcVersion = str(args, "id");
+  const loader = parseLoader(optStr(args, "loader"));
+  const loaderVersionArg = optStr(args, "loaderVersion");
+  const name = str(args, "targetName");
+  if ((loader === "forge" || loader === "neoforge") && loaderVersionArg === null) {
+    throw new IpcError("loader_version_not_found", `${LOADER_NAMES[loader]} 没有适用于 ${mcVersion} 的可用 loader 版本`);
+  }
+  checkName(name, null);
+  const release = acquire(name, "installing");
+  try {
+    beginMockTask(taskId);
+  } catch (error) {
+    release();
+    throw error;
+  }
+  const createdAt = Date.now();
+  const incomplete: IncompleteDto = {
+    kind: "install",
+    outcome: "pending",
+    started_at: createdAt,
+    spec: { mc_version: mcVersion, loader, loader_version: loaderVersionArg },
+    error: null,
+  };
+  const instance: MockInstance = {
+    dto: {
+      id: name,
+      status: "broken",
+      broken_reason: "缺少版本 JSON",
+      mc_version: null,
+      loaders: [],
+      release_type: null,
+      is_release: false,
+      java_major: null,
+      mod_count: null,
+      settings_error: null,
+      incomplete,
+      created_at: createdAt,
+    },
+    settings: defaultSettings(),
+    inheritsFrom: null,
+    content: emptyContent(),
+    sizeBytes: 0,
+    fileCount: 0,
+  };
+  instances.push(instance);
+  try {
+    if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+    stage(taskId, `查找原版 ${mcVersion}`);
+    await sleep(MOCK_STEP_MS);
+    const entry = MANIFEST.find((v) => v.id === mcVersion);
+    if (!entry) throw new IpcError("install_failed", `installer jar 内缺少条目: 版本清单中的 ${mcVersion}`);
+    let loaderVersion: string | null = null;
+    if (loader) {
+      const available = LOADER_VERSIONS[`${loader}:${mcVersion}`] ?? [];
+      // 没给版本号时与后端一样取推荐版：最新稳定版，没有稳定版取最新的。
+      const recommended = available.find((v) => v.stable) ?? available[0];
+      loaderVersion = loaderVersionArg !== null ? loaderVersionArg : recommended ? recommended.version : null;
+      if (loaderVersion === null || !available.some((v) => v.version === loaderVersion)) {
+        throw new IpcError("loader_version_not_found", `${LOADER_NAMES[loader]} 没有适用于 ${mcVersion} 的可用 loader 版本`);
+      }
+      stage(taskId, `获取 ${LOADER_NAMES[loader]} 加载器信息`);
+    }
+    stage(taskId, "补全库、资源与 natives");
+    await fakeDownload(taskId, 40, 512 * 1024);
+    instance.dto = {
+      ...readyDto(name, mcVersion, loader && loaderVersion ? [{ kind: loader, version: loaderVersion }] : [], entry.java, 0, createdAt),
+      release_type: entry.type,
+      is_release: entry.type === "release",
+    };
+    instance.sizeBytes = 40 * 512 * 1024;
+    instance.fileCount = 40;
+    stage(taskId, `实例 ${name} 安装完成：库 40 / 资源 0 / natives 0`);
+    return {
+      id: name,
+      mc_version: mcVersion,
+      loader: loader && loaderVersion ? { kind: loader, version: loaderVersion } : null,
+      libraries: 40,
+      assets: 0,
+      natives: 0,
+    };
+  } catch (error) {
+    if (error instanceof IpcError && error.code === "cancelled") {
+      instances = instances.filter((i) => i !== instance);
+    } else if (error instanceof IpcError) {
+      instance.dto.incomplete = { ...incomplete, outcome: "failed", error: { code: error.code, message: error.message } };
+    }
+    throw error;
+  } finally {
+    endMockTask(taskId);
+    release();
+  }
+}
+
+async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
+  const taskId = str(args, "taskId");
+  const id = str(args, "id");
+  const instance = requireInstance(id);
+  const release = acquire(id, "repairing");
+  try {
+    beginMockTask(taskId);
+  } catch (error) {
+    release();
+    throw error;
+  }
+  try {
+    const spec = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
+    if (instance.dto.status === "broken" && spec === null) {
+      const reason = `${instance.dto.broken_reason ?? "版本 JSON 不可用"}，也没有记下当初装的是什么`;
+      throw new IpcError("instance_failed", `实例 ${id} 无法补全：${reason}`, { id, reason });
+    }
+    const startedAt = Date.now();
+    instance.dto.incomplete = spec
+      ? { kind: "install", outcome: "pending", started_at: startedAt, spec, error: null }
+      : { kind: "repair", outcome: "pending", started_at: startedAt, spec: null, error: null };
+    stage(taskId, `补全实例 ${id} 的文件`);
+    try {
+      await fakeDownload(taskId, 12, 256 * 1024);
+    } catch (error) {
+      if (error instanceof IpcError && instance.dto.incomplete) {
+        const cancelled = error.code === "cancelled";
+        instance.dto.incomplete = {
+          ...instance.dto.incomplete,
+          outcome: cancelled ? "cancelled" : "failed",
+          error: cancelled ? null : { code: error.code, message: error.message },
+        };
+      }
+      throw error;
+    }
+    if (spec) {
+      const entry = MANIFEST.find((v) => v.id === spec.mc_version);
+      if (!entry) {
+        const error = new IpcError("install_failed", `installer jar 内缺少条目: 版本清单中的 ${spec.mc_version}`);
+        instance.dto.incomplete = { kind: "install", outcome: "failed", started_at: startedAt, spec, error: { code: error.code, message: error.message } };
+        throw error;
+      }
+      const loaders = spec.loader && spec.loader_version ? [{ kind: spec.loader, version: spec.loader_version }] : [];
+      instance.dto = readyDto(id, spec.mc_version, loaders, entry.java, 0, instance.dto.created_at);
+    }
+    instance.dto.incomplete = null;
+    return { reinstalled: spec !== null, libraries: 12, assets: 0, natives: 0 };
+  } finally {
+    endMockTask(taskId);
+    release();
+  }
+}
+
+export const handlers: MockHandlers = {
+  // 与后端一样按小写 id 的码位顺序排，不按语言区域排序。
+  list_instances: () =>
+    instances.map(toDto).sort((a, b) => {
+      const [x, y] = [a.id.toLowerCase(), b.id.toLowerCase()];
+      return x < y ? -1 : x > y ? 1 : 0;
+    }),
+
+  get_instance_settings: (args) => requireInstance(str(args, "id")).settings,
+
+  set_instance_settings: (args) => {
+    const id = str(args, "id");
+    const settings = parseSettings(args.settings);
+    validateSettings(settings);
+    const instance = requireInstance(id);
+    instance.settings = settings;
+    return settings;
+  },
+
+  list_instance_content: (args) => {
+    const id = str(args, "id");
+    const instance = requireInstance(id);
+    if (instance.dto.status === "broken") {
+      const reason = instance.dto.broken_reason ?? "版本 JSON 不可用";
+      throw new IpcError("instance_failed", `实例 ${id} 的版本 JSON 不可用：${reason}`, { id, reason });
+    }
+    return instance.content;
+  },
+
+  get_sidebar_pins: () => pins.filter((pin) => find(pin) !== undefined),
+
+  set_sidebar_pins: (args) => {
+    const next = args.pins;
+    if (!Array.isArray(next) || next.some((p) => typeof p !== "string")) throw new Error("mock：pins 应为字符串数组");
+    const list = next as string[];
+    const pinsError = (reason: string, message: string, id: string | null) =>
+      new IpcError("invalid_argument", `侧栏固定列表不合法：${message}`, { field: "pins", reason, id });
+    if (list.length > SIDEBAR_PIN_MAX) throw pinsError("too_many", "侧栏最多固定 5 个实例", null);
+    const dup = list.find((pin, i) => list.indexOf(pin) !== i);
+    if (dup !== undefined) throw pinsError("duplicate", "同一个实例重复固定", dup);
+    const missing = list.find((pin) => find(pin) === undefined);
+    if (missing !== undefined) throw pinsError("not_found", "要固定的实例不存在", missing);
+    pins = [...list];
+    return pins;
+  },
+
+  install_version: installVersion,
+
+  repair_instance: repairInstance,
+
+  preview_instance_deletion: (args): DeletionPreviewDto => {
+    const id = str(args, "id");
+    const instance = requireInstance(id);
+    return {
+      id,
+      worlds: instance.content.worlds,
+      size_bytes: instance.sizeBytes,
+      file_count: instance.fileCount,
+      dependents: dependentsOf(id),
+      activity: activityOf(id),
+    };
+  },
+
+  delete_instance: (args) => {
+    const id = str(args, "id");
+    if (!isSafeId(id)) throw invalid("id", "unsafe_id", `实例 id 不合法：${JSON.stringify(id)}`, { id });
+    const release = acquire(id, "deleting");
+    try {
+      const existed = find(id) !== undefined;
+      if (existed) {
+        ensureNoDependents(id);
+        instances = instances.filter((i) => i.dto.id !== id);
+      }
+      pins = pins.filter((pin) => pin !== id);
+      return { existed };
+    } finally {
+      release();
+    }
+  },
+
+  rename_instance: (args) => {
+    const id = str(args, "id");
+    const newName = str(args, "newName");
+    const releaseOld = acquire(id, "renaming");
+    const sameKey = id.toLowerCase() === newName.toLowerCase();
+    let releaseNew: () => void = () => {};
+    try {
+      if (!sameKey) releaseNew = acquire(newName, "renaming");
+      const instance = requireInstance(id);
+      checkName(newName, id);
+      if (id === newName) return { id };
+      ensureNoDependents(id);
+      instance.dto = { ...instance.dto, id: newName };
+      pins = pins.map((pin) => (pin === id ? newName : pin));
+      return { id: newName };
+    } finally {
+      releaseNew();
+      releaseOld();
+    }
+  },
+
+  list_manifest: () => manifestDto(),
+
+  list_loader_versions: (args) => {
+    const loader = loaderChoice(str(args, "loader"));
+    const mcVersion = str(args, "mcVersion");
+    // 表里没有即该加载器不支持这个版本：与后端一样返回空列表。
+    return LOADER_VERSIONS[`${loader}:${mcVersion}`] ?? [];
+  },
+
+  required_java: (args) => {
+    const mcVersion = str(args, "mcVersion");
+    const entry = MANIFEST.find((v) => v.id === mcVersion);
+    if (!entry) throw new IpcError("install_failed", `installer jar 内缺少条目: 版本清单中的 ${mcVersion}`);
+    return entry.java;
+  },
+
+  open_folder: (args) => {
+    const target = str(args, "target");
+    const id = optStr(args, "id");
+    const world = optStr(args, "world");
+    if (!(FOLDER_TARGETS as readonly string[]).includes(target)) throw invalid("target", "unknown", `不认识的文件夹类型 ${target}`);
+    if (target === "game_dir") return;
+    if (id === null) throw invalid("id", "missing", `打开 ${target} 需要实例 id`);
+    if (target === "world") {
+      if (world === null) throw invalid("world", "missing", "打开存档需要存档文件夹名");
+      if (!isSafeId(world)) throw invalid("world", "unsafe", `存档文件夹名不合法：${JSON.stringify(world)}`);
+    }
+    const instance = requireInstance(id);
+    // 工作目录要从版本 JSON 推出来，版本 JSON 坏了的实例只能打开实例目录本身。
+    if (target !== "instance" && instance.dto.status === "broken") {
+      const reason = instance.dto.broken_reason ?? "版本 JSON 不可用";
+      throw new IpcError("instance_failed", `实例 ${id} 的版本 JSON 不可用：${reason}`, { id, reason });
+    }
+    if (target === "world" && !instance.content.worlds.some((w) => w.dir_name === world)) {
+      throw invalid("world", "not_found", `存档 ${world} 不存在`);
+    }
+    // 浏览器里没有文件管理器可开，校验通过即视为已打开。
+  },
+};
+
+export function reset(): void {
+  instances = seedInstances();
+  pins = ["樱花生存", "1.21.1"];
+  activities.clear();
+}
