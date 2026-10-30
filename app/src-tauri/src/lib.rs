@@ -46,6 +46,8 @@ pub fn run() {
             // -- tasks --
             app.manage(TaskRegistry::default());
             app.manage(TaskJournal::default());
+            // -- instances --
+            app.manage(commands::instances::InstanceLocks::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
             window::setup_main_window(app)?;
@@ -75,9 +77,21 @@ pub fn run() {
             commands::accounts::set_current_account,
             commands::accounts::remove_account,
             // -- instances --
-            commands::instances::list_installed,
-            commands::instances::list_manifest,
+            commands::instances::list_instances,
+            commands::instances::get_instance_settings,
+            commands::instances::set_instance_settings,
+            commands::instances::list_instance_content,
+            commands::instances::get_sidebar_pins,
+            commands::instances::set_sidebar_pins,
             commands::instances::install_version,
+            commands::instances::repair_instance,
+            commands::instances::preview_instance_deletion,
+            commands::instances::delete_instance,
+            commands::instances::rename_instance,
+            commands::instances::list_manifest,
+            commands::instances::list_loader_versions,
+            commands::instances::required_java,
+            commands::instances::open_folder,
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
