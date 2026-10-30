@@ -3,6 +3,7 @@
 
 import { NavLink } from "react-router-dom";
 import { motion } from "framer-motion";
+import { APP_NAME_EN } from "../lib/app-info";
 import { springs } from "../lib/motion";
 import { SparkleIcon } from "./icons";
 
@@ -66,7 +67,7 @@ export function Sidebar() {
       <div className="mb-[6px] flex items-start gap-3">
         <SparkleIcon size={30} className="mt-[3px] text-ink" />
         <div>
-          <div className="text-[27px] leading-none font-extrabold tracking-[-0.015em]">Aurora</div>
+          <div className="text-[27px] leading-none font-extrabold tracking-[-0.015em]">{APP_NAME_EN}</div>
           <div className="mt-[7px] text-[10.5px] font-semibold tracking-[0.28em] text-ink/40">
             MINECRAFT 启动器
           </div>

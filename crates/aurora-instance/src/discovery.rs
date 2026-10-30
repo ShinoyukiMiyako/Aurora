@@ -167,7 +167,7 @@ async fn collect_version_dir_names(versions_dir: &Path) -> Result<Option<Vec<Str
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        // 点开头是 aurora 自身元数据目录（.aurora）等，非游戏版本。
+        // 点开头是启动器自身元数据目录（.petalfall）等，非游戏版本。
         if name.starts_with('.') {
             continue;
         }
@@ -280,8 +280,8 @@ mod tests {
     async fn dot_directories_are_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
-        // aurora 元数据目录不应被当成版本。
-        tokio::fs::create_dir_all(mc.join("versions").join(".aurora"))
+        // 启动器元数据目录不应被当成版本。
+        tokio::fs::create_dir_all(mc.join("versions").join(crate::AURORA_META_DIR))
             .await
             .unwrap();
         put_version(

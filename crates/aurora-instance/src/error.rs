@@ -103,7 +103,7 @@ mod tests {
     fn json_and_version_errors_are_terminal() {
         let json_err = Error::Json {
             context: "版本设置",
-            path: PathBuf::from(".aurora/settings.json"),
+            path: PathBuf::from(crate::AURORA_META_DIR).join("settings.json"),
             source: serde_json::from_str::<serde_json::Value>("{bad").unwrap_err(),
         };
         assert!(!json_err.is_retryable());

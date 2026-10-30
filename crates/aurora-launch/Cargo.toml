@@ -8,6 +8,8 @@ aurora-auth = { path = "../aurora-auth" }
 aurora-version = { path = "../aurora-version" }
 aurora-java = { path = "../aurora-java" }
 aurora-instance = { path = "../aurora-instance" }
+# 产品名常量（启动品牌、崩溃建议与预检文案）取自 aurora-base 的 brand 模块。
+aurora-base = { path = "../aurora-base" }
 # 进程管理需要 process（spawn 子进程）+ io-util（BufReader 逐行读输出）+ rt（spawn 读取任务）
 # + sync（mpsc 把日志行实时投递给上层）。运行时风格（单/多线程）交由上层选择，不强制 rt-multi-thread。
 tokio = { version = "1", default-features = false, features = ["process", "io-util", "rt", "sync"] }

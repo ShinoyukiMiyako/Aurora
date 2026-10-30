@@ -4,7 +4,7 @@
 //! 1. 若目标已存在且 sha1/大小校验通过则直接跳过（可重入、幂等安装）。
 //! 2. 把官方 URL 经 [`SourcePlan`] 展开为候选源列表，逐源尝试。
 //! 3. 每个源用 [`retry_async`] 做指数退避重试；耗尽后切换下一个源（即「n 次后切换镜像」）。
-//! 4. 已知大小且达阈值的大文件走 Range 分块并发下载，分片落 `.aurora-partN`；网络中断保留已完成
+//! 4. 已知大小且达阈值的大文件走 Range 分块并发下载，分片落 `.petalfall-partN`；网络中断保留已完成
 //!    分片供下次断点续传，损坏（哈希不符）则清分片重下。
 //! 5. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。
 
@@ -441,14 +441,17 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
-/// 合并临时文件路径：`<dest>.aurora-tmp`。
+/// 合并临时文件路径：`<dest>.petalfall-tmp`。
 fn temp_path(dest: &Path) -> PathBuf {
-    append_suffix(dest, ".aurora-tmp")
+    append_suffix(dest, concat!(".", aurora_base::app_slug!(), "-tmp"))
 }
 
-/// 分片文件路径：`<dest>.aurora-partN`（确定性命名，供断点续传定位）。
+/// 分片文件路径：`<dest>.petalfall-partN`（确定性命名，供断点续传定位）。
 fn part_path(dest: &Path, index: usize) -> PathBuf {
-    append_suffix(dest, &format!(".aurora-part{index}"))
+    append_suffix(
+        dest,
+        &format!(".{}-part{index}", aurora_base::brand::APP_SLUG),
+    )
 }
 
 #[cfg(test)]
@@ -458,10 +461,13 @@ mod tests {
     #[test]
     fn part_and_temp_paths_are_siblings_of_dest() {
         let dest = Path::new("C:/data/lib.jar");
-        assert_eq!(temp_path(dest), PathBuf::from("C:/data/lib.jar.aurora-tmp"));
+        assert_eq!(
+            temp_path(dest),
+            PathBuf::from("C:/data/lib.jar.petalfall-tmp")
+        );
         assert_eq!(
             part_path(dest, 3),
-            PathBuf::from("C:/data/lib.jar.aurora-part3")
+            PathBuf::from("C:/data/lib.jar.petalfall-part3")
         );
     }
 }

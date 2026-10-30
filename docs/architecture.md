@@ -39,7 +39,7 @@ aurora/
 - 异步运行时 tokio（full 特性按需裁剪），HTTP 统一 reqwest + rustls（禁用默认 native-tls，规避 schannel 差异）。
 - 序列化 serde + serde_json；日志 tracing（库内只发事件，不配置 subscriber，subscriber 归 CLI/前端）。
 - 所有第三方 crate 的 API 用法必须先经 Context7 MCP 查当前版本文档，严禁凭记忆编写（CLAUDE.md 强制条款）。
-- HTTP 客户端由 aurora-base 的工厂统一构建（UA：`Aurora/<version>`，超时、重试策略集中管理）。所有访问远端的模块必须支持注入 base_url，保证单元测试可用本地 mock（wiremock 或 httpmock，由实现者查文档后定夺其一并全 workspace 统一）。
+- HTTP 客户端由 aurora-base 的工厂统一构建（UA：`Petalfall/<version>`，超时、重试策略集中管理）。所有访问远端的模块必须支持注入 base_url，保证单元测试可用本地 mock（wiremock 或 httpmock，由实现者查文档后定夺其一并全 workspace 统一）。
 - 单元测试断言具体业务结果（拼出的参数串、解析出的字段值、状态码分支），禁止 is-not-none 式弱校验；测试数据含边界值。
 - 注释只解释"为什么"；全库零 Emoji；零 TODO/空壳。
 
@@ -54,7 +54,7 @@ aurora/
 
 职责：登录状态机（微软正版 / 离线 / Authlib-Injector 三种；Nide8 不做）。
 - 微软链：设备码流（login.microsoftonline.com/consumers devicecode+token，scope `XboxLive.signin offline_access`）-> XBL（user.auth.xboxlive.com）-> XSTS（xsts.auth.xboxlive.com，RelyingParty rp://api.minecraftservices.com/）-> login_with_xbox（api.minecraftservices.com）-> profile。XSTS 错误码 2148916227/2148916233/2148916235/2148916236/2148916237/2148916238 逐一映射为带中文说明的错误变体。refresh token 轮换回写；刷新失败区分"需重登"与"网络失败"。client_id 通过配置注入（无内置默认，调试环境变量 AURORA_MSA_CLIENT_ID）。
-- 凭据存储：trait CredentialStore；Windows 实现用 DPAPI(CurrentUser) 加密整个令牌缓存 JSON 后写单文件（%LOCALAPPDATA%\Aurora\credentials.bin）。DPAPI 经 windows crate 调 CryptProtectData/CryptUnprotectData，具体签名查 Context7。
+- 凭据存储：trait CredentialStore；Windows 实现用 DPAPI(CurrentUser) 加密整个令牌缓存 JSON 后写单文件（%LOCALAPPDATA%\Petalfall\credentials.bin）。DPAPI 经 windows crate 调 CryptProtectData/CryptUnprotectData，具体签名查 Context7。
 - 多账户：账户列表（uuid、名称、类型、令牌引用）增删改查与当前账户切换。
 - 离线：用户名合法性校验（非空、无引号，1.20.3+ 提示 16 字符限制）、按用户名生成稳定离线 UUID（md5 "OfflinePlayer:"+name，与原版一致）。
 - Authlib-Injector：Yggdrasil authenticate/refresh/validate 客户端 + 服务器元数据预取（ALI 头 Base64），注入参数的拼装归 aurora-launch。

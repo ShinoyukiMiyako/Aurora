@@ -3,7 +3,7 @@
 
 import type { Transition, Variants } from "framer-motion";
 
-export type SpringPreset = "tap" | "settle" | "pop" | "soft" | "morph" | "aurora";
+export type SpringPreset = "tap" | "settle" | "pop" | "soft" | "morph" | "base";
 
 export const springs: Record<SpringPreset, Transition> = {
   tap: { type: "spring", duration: 0.22, bounce: 0 },
@@ -11,8 +11,8 @@ export const springs: Record<SpringPreset, Transition> = {
   pop: { type: "spring", duration: 0.32, bounce: 0.2 },
   soft: { type: "spring", duration: 0.34, bounce: 0.12 },
   morph: { type: "spring", duration: 0.35, bounce: 0.14 },
-  // 默认 aurora 弹簧：过冲最明显，用于强调性入场/切换。
-  aurora: { type: "spring", duration: 0.3, bounce: 0.35 },
+  // 默认 base 弹簧：过冲最明显，用于强调性入场/切换。原名 aurora，预设名不再带产品名。
+  base: { type: "spring", duration: 0.3, bounce: 0.35 },
 };
 
 // 页面容器：对直接子级 motion 元素做轻微 stagger（子级用 pageItem 变体即自动排队上滑）。

@@ -1,4 +1,4 @@
-//! Aurora 调试 CLI：端到端冒烟的载体。
+//! Petalfall 调试 CLI：端到端冒烟的载体。
 //!
 //! 子命令覆盖 architecture.md 约定的验收路径：列版本清单 / 安装（原版 + Fabric/Quilt）/ 微软登录与
 //! 账户状态 / 离线启动 / 资源搜索。所有业务逻辑在 aurora-core，本层只做参数解析、tracing subscriber
@@ -15,9 +15,9 @@ use aurora_core::{
 use clap::{Parser, Subcommand, ValueEnum};
 use tokio::sync::mpsc;
 
-/// Aurora Minecraft 启动器调试命令行。
+/// Petalfall 调试命令行。命令名 `aurora` 与日志过滤目标绑定 crate 名，属内部代号，不随产品名改。
 #[derive(Debug, Parser)]
-#[command(name = "aurora", version, about = "Aurora Minecraft 启动器调试 CLI")]
+#[command(name = "aurora", version, about = concat!(aurora_base::app_name_en!(), " 调试 CLI"))]
 struct Cli {
     /// 游戏目录（.minecraft），覆盖配置默认值。
     #[arg(long, global = true)]

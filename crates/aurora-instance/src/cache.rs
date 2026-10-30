@@ -4,7 +4,7 @@
 //! 下的文件夹名，对排序后的名单算 sha1；与上次持久化的哈希一致就复用上次的版本列表，仅当名单变动或
 //! 强制刷新时才重新全量解析。哈希用 sha1（跨进程稳定），故不能用 `DefaultHasher`（其稳定性无保证）。
 //!
-//! 缓存文件落在游戏目录内的 `<mc_dir>/.aurora/version-list-cache.json`，随该 `.minecraft` 走。
+//! 缓存文件落在游戏目录内的 `<mc_dir>/.petalfall/version-list-cache.json`，随该 `.minecraft` 走。
 
 use std::path::{Path, PathBuf};
 
@@ -109,7 +109,7 @@ pub struct VersionCacheStore {
 }
 
 impl VersionCacheStore {
-    /// 默认路径：`mc_dir/.aurora/version-list-cache.json`。
+    /// 默认路径：`mc_dir/.petalfall/version-list-cache.json`。
     pub fn new(mc_dir: &Path) -> Self {
         Self {
             path: mc_dir.join(AURORA_META_DIR).join(CACHE_FILE),
@@ -216,7 +216,7 @@ mod tests {
         let versions = tmp.path().join("versions");
         tokio::fs::create_dir_all(versions.join("1.21")).await.unwrap();
         tokio::fs::create_dir_all(versions.join("1.20.1")).await.unwrap();
-        tokio::fs::create_dir_all(versions.join(".aurora")).await.unwrap();
+        tokio::fs::create_dir_all(versions.join(AURORA_META_DIR)).await.unwrap();
         // 一个普通文件不应计入。
         tokio::fs::write(versions.join("readme.txt"), b"x").await.unwrap();
 
@@ -236,7 +236,9 @@ mod tests {
         let store = VersionCacheStore::new(tmp.path());
         assert_eq!(
             store.path(),
-            tmp.path().join(".aurora").join("version-list-cache.json")
+            tmp.path()
+                .join(".petalfall")
+                .join("version-list-cache.json")
         );
 
         // 缺失 -> None。

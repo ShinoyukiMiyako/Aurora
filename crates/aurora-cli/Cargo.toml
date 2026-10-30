@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 aurora-core = { path = "../aurora-core" }
+# --help 里的产品名取自 aurora-base 的 brand 模块。
+aurora-base = { path = "../aurora-base" }
 # 子命令解析（derive API）。
 clap = { version = "4", features = ["derive"] }
 # 端到端异步驱动 + 事件/日志 channel。

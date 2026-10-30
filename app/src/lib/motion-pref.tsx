@@ -4,6 +4,7 @@
 
 import { createContext, useContext, useState, type ReactNode } from "react";
 import { MotionConfig } from "framer-motion";
+import { APP_SLUG } from "./app-info";
 
 interface MotionPref {
   reduceMotion: boolean;
@@ -11,7 +12,7 @@ interface MotionPref {
 }
 
 const MotionPrefContext = createContext<MotionPref | null>(null);
-const STORAGE_KEY = "aurora:reduce-motion";
+const STORAGE_KEY = `${APP_SLUG}:reduce-motion`;
 
 export function MotionPrefProvider({ children }: { children: ReactNode }) {
   const [reduceMotion, setState] = useState<boolean>(() => localStorage.getItem(STORAGE_KEY) === "1");

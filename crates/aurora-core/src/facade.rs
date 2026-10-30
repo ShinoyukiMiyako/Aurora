@@ -81,7 +81,7 @@ impl Aurora {
         &self.game_dir
     }
 
-    /// 数据目录（`%LOCALAPPDATA%\Aurora`）。
+    /// 数据目录（`%LOCALAPPDATA%\Petalfall`）。
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
     }

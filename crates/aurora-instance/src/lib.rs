@@ -28,8 +28,9 @@ pub use error::{Error, Result};
 pub const MINECRAFT_DIR_NAME: &str = ".minecraft";
 /// 版本目录名（游戏目录下存放各版本的子目录）。
 pub const VERSIONS_DIR: &str = "versions";
-/// aurora 在游戏/版本目录内落自身元数据（版本列表缓存、版本设置）的子目录名。
-pub const AURORA_META_DIR: &str = ".aurora";
+/// 启动器在游戏/版本目录内落自身元数据（版本列表缓存、版本设置）的子目录名，形如 `.petalfall`。
+/// 常量名里的 aurora 是内部代号，取值跟随产品 slug。
+pub const AURORA_META_DIR: &str = concat!(".", aurora_base::app_slug!());
 
 pub use folder::{
     CustomDirectory, FolderScanner, GameDirectory, GameDirectorySource, current_minecraft_dir,
