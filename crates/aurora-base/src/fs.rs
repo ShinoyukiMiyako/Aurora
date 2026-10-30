@@ -3,11 +3,13 @@
 //! - 流式 sha1/sha256：分块读取，不把整文件读进内存；CPU 侧计算丢进 `spawn_blocking`，
 //!   避免阻塞异步 worker。
 //! - 原子写入：同目录临时文件写完 fsync 后 rename 覆盖目标，杜绝写一半留下损坏文件。
-//! - 目录定位：数据/缓存目录挂在 `%LOCALAPPDATA%\Petalfall` 下，经 [`DirectoryProvider`]
-//!   trait 留出跨平台缝（当前只实现 Windows 语义）。
+//! - 目录定位：数据目录便携优先——可执行文件所在目录可写就用它，否则挂在
+//!   `%LOCALAPPDATA%\Petalfall` 下；经 [`DirectoryProvider`] trait 留出跨平台缝（当前只实现 Windows 语义）。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -191,9 +193,97 @@ impl DirectoryProvider for RootedDirs {
     }
 }
 
-/// 默认（Windows 系统）数据目录：`%LOCALAPPDATA%\Petalfall`。
+/// 便携优先：可执行文件所在目录可写就用它，否则回落 [`SystemDirs`]。
+///
+/// 按用户安装时安装目录本就在 `%LOCALAPPDATA%\Petalfall`，两者重合；解压即用的绿色版放在哪，
+/// 数据就在哪旁边，整个目录搬走就是搬走了全部数据。装进 Program Files 这类写不了的位置时才回落。
+/// 便携模式下数据根就是 exe 所在目录本身，不再往下套一层产品名目录。
+pub struct PortableFirstDirs;
+
+impl DirectoryProvider for PortableFirstDirs {
+    fn data_dir(&self) -> Result<PathBuf> {
+        Ok(resolve_data_dir()?.path)
+    }
+}
+
+/// 一次数据目录定位的结果，供启动日志记录走了哪条路、花了多久。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataDirResolution {
+    /// 数据目录。
+    pub path: PathBuf,
+    /// 是否为便携模式（exe 所在目录）。
+    pub portable: bool,
+    /// 没走便携模式的原因；便携模式下为 `None`。
+    pub fallback_reason: Option<String>,
+    /// 定位耗时（含可写探针）。
+    pub elapsed: Duration,
+}
+
+/// 写入探针的文件名：真写一个再删掉，用来判定 exe 所在目录是否可写。
+const WRITE_PROBE: &str = concat!(".", crate::app_slug!(), "-write-probe");
+
+static RESOLVED: OnceLock<DataDirResolution> = OnceLock::new();
+
+/// 定位数据目录，进程内只探测一次。
+///
+/// 定位在日志装好之前就会发生（日志文件本身就落在数据目录里），所以结果连同原因与耗时一起留下，
+/// 由上层在日志就绪后补记一条。
+pub fn resolve_data_dir() -> Result<DataDirResolution> {
+    if let Some(resolved) = RESOLVED.get() {
+        return Ok(resolved.clone());
+    }
+    let started = Instant::now();
+    let resolved = match writable_exe_dir() {
+        Ok(dir) => DataDirResolution {
+            path: dir,
+            portable: true,
+            fallback_reason: None,
+            elapsed: started.elapsed(),
+        },
+        Err(reason) => DataDirResolution {
+            path: SystemDirs.data_dir()?,
+            portable: false,
+            fallback_reason: Some(reason),
+            elapsed: started.elapsed(),
+        },
+    };
+    Ok(RESOLVED.get_or_init(|| resolved).clone())
+}
+
+/// 可执行文件所在目录，且确认真的能写；不能用时给出原因。
+///
+/// 判据是实际写一个探针文件再删掉，而不是查权限位：网络驱动器、只读介质、组策略重定向都可能让
+/// 权限位看着没问题却写不进去，那种失败要等到下载游戏文件时才炸。
+///
+/// debug 构建一律不走便携：开发时 exe 在 `target/debug` 下，便携判定会把配置、账户凭据和整个
+/// `.minecraft` 全写进构建产物目录，一次 `cargo clean` 就全没了。
+fn writable_exe_dir() -> std::result::Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        return Err("debug 构建不使用便携模式".to_owned());
+    }
+    let exe = std::env::current_exe().map_err(|err| format!("取不到可执行文件路径：{err}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| format!("可执行文件路径没有上级目录：{}", exe.display()))?
+        .to_path_buf();
+    probe_writable(&dir)?;
+    Ok(dir)
+}
+
+/// 在 `dir` 里写一个探针文件再删掉；写不进去返回原因。
+fn probe_writable(dir: &Path) -> std::result::Result<(), String> {
+    let probe = dir.join(WRITE_PROBE);
+    std::fs::write(&probe, b"").map_err(|err| format!("{} 不可写：{err}", dir.display()))?;
+    // 探针删不掉不影响结论（已经证明可写），留个日志即可。
+    if let Err(err) = std::fs::remove_file(&probe) {
+        tracing::debug!(path = %probe.display(), error = %err, "清理写入探针失败");
+    }
+    Ok(())
+}
+
+/// 默认数据目录：便携优先，回落 `%LOCALAPPDATA%\Petalfall`。
 pub fn data_dir() -> Result<PathBuf> {
-    SystemDirs.data_dir()
+    PortableFirstDirs.data_dir()
 }
 
 /// 默认（Windows 系统）缓存目录：`%LOCALAPPDATA%\Petalfall\cache`。
@@ -331,6 +421,37 @@ mod tests {
         let nested = dir.path().join("a").join("b").join("c.txt");
         atomic_write(&nested, b"deep").await.unwrap();
         assert_eq!(tokio::fs::read(&nested).await.unwrap(), b"deep");
+    }
+
+    /// 测试进程是 debug 构建，便携探测按约定短路，数据目录必然回落系统目录。
+    /// 去掉那个短路，这里会拿到 target/debug 而不是 %LOCALAPPDATA%\Petalfall。
+    #[test]
+    fn debug_builds_fall_back_to_system_dir_with_reason() {
+        let resolved = resolve_data_dir().unwrap();
+        assert!(!resolved.portable);
+        assert_eq!(resolved.path, SystemDirs.data_dir().unwrap());
+        assert!(
+            resolved
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("debug"))
+        );
+        assert_eq!(data_dir().unwrap(), resolved.path);
+        assert_eq!(resolve_data_dir().unwrap(), resolved, "进程内只定位一次");
+    }
+
+    /// 可写判据真写真删：可写目录通过且不留探针；指向文件（写不进子路径）的给出原因。
+    #[test]
+    fn write_probe_detects_writability_and_leaves_no_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        probe_writable(dir.path()).unwrap();
+        assert!(!dir.path().join(WRITE_PROBE).exists());
+        assert_eq!(WRITE_PROBE, ".petalfall-write-probe");
+
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let reason = probe_writable(&file).unwrap_err();
+        assert!(reason.contains("不可写"), "实际：{reason}");
     }
 
     #[test]
