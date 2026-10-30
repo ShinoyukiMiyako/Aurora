@@ -13,6 +13,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 use crate::model::{DependencyKind, Platform, ResourceType, SearchHit, SearchQuery};
 use crate::net::send_json;
+use crate::version::{ModDependency, ModVersionInfo, ReleaseChannel, parse_loader_name};
 
 /// Modrinth v2 API 根地址。
 pub const MODRINTH_BASE: &str = "https://api.modrinth.com/v2";
@@ -140,6 +141,42 @@ impl ModrinthClient {
             Err(Error::Status { status: 404, .. }) => Ok(None),
             Err(err) => Err(err),
         }
+    }
+
+    /// 按一批 SHA-1 查各自在指定加载器/游戏版本下的最新版本，返回 `哈希 -> 版本` 映射。
+    ///
+    /// 未收录或已是最新的哈希不会出现在结果里，故缺键即「无更新」，不是错误。
+    ///
+    /// 存在的意义是替掉「对每个文件调一次 [`Self::latest_version_by_hash`]」：一个实例几十个 Mod
+    /// 就是几十次请求，几个实例一起查立刻撞上 Modrinth 限流（HTTP 429）。这里一次请求覆盖整批。
+    pub async fn latest_versions_by_hashes(
+        &self,
+        sha1s: &[String],
+        loaders: &[crate::model::ModLoader],
+        game_versions: &[&str],
+    ) -> Result<std::collections::HashMap<String, ModrinthVersion>> {
+        // 空批次不该白打一次网络请求，也避免服务端对空 hashes 的行为差异。
+        if sha1s.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        #[derive(serde::Serialize)]
+        struct UpdateBody<'a> {
+            hashes: &'a [String],
+            algorithm: &'a str,
+            loaders: Vec<&'a str>,
+            game_versions: Vec<&'a str>,
+        }
+        let body = UpdateBody {
+            hashes: sha1s,
+            algorithm: "sha1",
+            loaders: loaders.iter().map(|l| l.modrinth_facet()).collect(),
+            game_versions: game_versions.to_vec(),
+        };
+        let url = format!("{}/version_files/update", self.base_url);
+        send_json(&self.retry, "modrinth.version_files.update", || {
+            self.http.post(url.as_str()).json(&body)
+        })
+        .await
     }
 }
 
@@ -336,6 +373,39 @@ impl ModrinthVersion {
             .find(|f| f.primary)
             .or_else(|| self.files.first())
     }
+
+    /// 转成跨平台统一版本视图。
+    ///
+    /// 一个文件都没有的版本装不了（Modrinth 上确实存在 `files` 为空的历史版本），返回 `None` 让上层
+    /// 显式跳过，而不是塞个空文件名往下传——空文件名会一路污染卷宗与磁盘 join。
+    pub fn to_version_info(&self) -> Option<ModVersionInfo> {
+        let file = self.primary_file()?;
+        Some(ModVersionInfo {
+            version_id: self.id.clone(),
+            project_id: self.project_id.clone(),
+            platform: Platform::Modrinth,
+            name: self.name.clone(),
+            version_number: self.version_number.clone(),
+            // 认不出的通道按最不稳定处理：把没见过的通道当正式版推给玩家，比多打一个 alpha 标签危险得多。
+            release_channel: ReleaseChannel::from_modrinth(&self.version_type)
+                .unwrap_or(ReleaseChannel::Alpha),
+            game_versions: self.game_versions.clone(),
+            loaders: self
+                .loaders
+                .iter()
+                .filter_map(|name| parse_loader_name(name))
+                .collect(),
+            file_name: file.filename.clone(),
+            file_size: Some(file.size),
+            sha1: file.hashes.sha1.clone(),
+            date_published: self.date_published.clone(),
+            dependencies: self
+                .dependencies
+                .iter()
+                .filter_map(|dep| dep.to_mod_dependency())
+                .collect(),
+        })
+    }
 }
 
 /// 版本依赖。
@@ -358,6 +428,16 @@ impl ModrinthDependency {
     /// 依赖关系（统一模型）；未知类型返回 `None`。
     pub fn kind(&self) -> Option<DependencyKind> {
         DependencyKind::from_modrinth(&self.dependency_type)
+    }
+
+    /// 转成跨平台依赖项；未知 `dependency_type` 返回 `None`——判不出是必需还是不兼容时，
+    /// 宁可不呈现也不能猜成必需去自动装。
+    pub fn to_mod_dependency(&self) -> Option<ModDependency> {
+        Some(ModDependency {
+            project_id: self.project_id.clone(),
+            version_id: self.version_id.clone(),
+            kind: self.kind()?,
+        })
     }
 }
 
@@ -546,5 +626,154 @@ mod tests {
         assert_eq!(task.url, "https://cdn/sodium.jar");
         assert_eq!(task.sha1.as_deref(), Some("ddeeff"));
         assert_eq!(task.size, Some(204800));
+    }
+
+    /// 批量查更新：一次请求带走整批哈希，响应是 哈希 -> 版本 的映射，
+    /// 没更新的哈希不出现在结果里（缺键即无更新，不是错误）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_versions_by_hashes_posts_batch_and_maps_by_hash() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "hash-a": {
+                "id": "newA",
+                "project_id": "AANobbMI",
+                "name": "Sodium 0.6.5",
+                "version_number": "mc1.21.1-0.6.5",
+                "dependencies": [],
+                "game_versions": ["1.21.1"],
+                "version_type": "release",
+                "loaders": ["fabric"],
+                "featured": true,
+                "date_published": "2026-03-04T05:06:07Z",
+                "downloads": 1,
+                "files": [{ "hashes": {"sha1": "n1"}, "url": "https://cdn/a.jar", "filename": "a.jar", "primary": true, "size": 1 }]
+            }
+        });
+        Mock::given(method("POST"))
+            .and(path("/version_files/update"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let hashes = vec!["hash-a".to_owned(), "hash-b".to_owned()];
+        let got = client(&server)
+            .latest_versions_by_hashes(&hashes, &[crate::model::ModLoader::Fabric], &["1.21.1"])
+            .await
+            .unwrap();
+
+        assert_eq!(got.len(), 1);
+        assert_eq!(got["hash-a"].version_number, "mc1.21.1-0.6.5");
+        // hash-b 服务端没返回，视为「无更新」而不是查询失败。
+        assert!(!got.contains_key("hash-b"));
+    }
+
+    /// 空批次直接短路，不打网络请求——mock server 没挂任何路由，真发请求会 404 失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_versions_by_hashes_skips_request_when_empty() {
+        let server = MockServer::start().await;
+        let got = client(&server)
+            .latest_versions_by_hashes(&[], &[crate::model::ModLoader::Fabric], &["1.21.1"])
+            .await
+            .unwrap();
+        assert!(got.is_empty());
+    }
+
+    /// 造一个版本裸模型，便于各转换用例改单个字段。
+    fn version_json(
+        version_type: &str,
+        loaders: serde_json::Value,
+        files: serde_json::Value,
+    ) -> ModrinthVersion {
+        serde_json::from_value(serde_json::json!({
+            "id": "IZskiJmZ",
+            "project_id": "AANobbMI",
+            "name": "Sodium 0.5.3",
+            "version_number": "mc1.20.1-0.5.3",
+            "dependencies": [
+                {"project_id": "P7dR8mSH", "dependency_type": "required"},
+                {"project_id": "aaa", "version_id": "bbb", "dependency_type": "optional"},
+                {"project_id": "ccc", "dependency_type": "外星依赖类型"}
+            ],
+            "game_versions": ["1.20.1", "1.20.2"],
+            "version_type": version_type,
+            "loaders": loaders,
+            "date_published": "2026-01-02T03:04:05Z",
+            "files": files
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn version_info_maps_channel_loaders_and_primary_file() {
+        let version = version_json(
+            "beta",
+            serde_json::json!(["fabric", "quilt", "rift"]),
+            serde_json::json!([
+                { "hashes": {"sha1": "aabbcc"}, "url": "https://cdn/other.jar", "filename": "other.jar", "primary": false, "size": 10 },
+                { "hashes": {"sha1": "ddeeff"}, "url": "https://cdn/sodium.jar", "filename": "sodium.jar", "primary": true, "size": 204800 }
+            ]),
+        );
+        let info = version.to_version_info().expect("有文件应能转换");
+        assert_eq!(info.version_id, "IZskiJmZ");
+        assert_eq!(info.project_id, "AANobbMI");
+        assert_eq!(info.platform, Platform::Modrinth);
+        assert_eq!(info.version_number, "mc1.20.1-0.5.3");
+        assert_eq!(info.release_channel, ReleaseChannel::Beta);
+        assert_eq!(info.game_versions, vec!["1.20.1", "1.20.2"]);
+        // "rift" 认不出，丢弃而非报错。
+        assert_eq!(info.loaders, vec![ModLoader::Fabric, ModLoader::Quilt]);
+        assert_eq!(info.file_name, "sodium.jar");
+        assert_eq!(info.file_size, Some(204_800));
+        assert_eq!(info.sha1.as_deref(), Some("ddeeff"));
+        assert_eq!(info.date_published, "2026-01-02T03:04:05Z");
+
+        // 三条依赖里未知类型那条被丢，剩两条保留原样。
+        assert_eq!(info.dependencies.len(), 2);
+        assert_eq!(info.dependencies[0].project_id.as_deref(), Some("P7dR8mSH"));
+        assert_eq!(info.dependencies[0].version_id, None);
+        assert_eq!(info.dependencies[0].kind, DependencyKind::Required);
+        assert_eq!(info.dependencies[1].version_id.as_deref(), Some("bbb"));
+        assert_eq!(info.dependencies[1].kind, DependencyKind::Optional);
+    }
+
+    #[test]
+    fn version_info_falls_back_to_alpha_for_unknown_channel() {
+        let version = version_json(
+            "某种新通道",
+            serde_json::json!(["forge"]),
+            serde_json::json!([
+                { "hashes": {"sha1": "aa"}, "url": "https://cdn/a.jar", "filename": "a.jar", "primary": true, "size": 1 }
+            ]),
+        );
+        let info = version.to_version_info().unwrap();
+        assert_eq!(info.release_channel, ReleaseChannel::Alpha);
+        assert_eq!(info.loaders, vec![ModLoader::Forge]);
+    }
+
+    #[test]
+    fn version_without_files_has_no_version_info() {
+        let version = version_json(
+            "release",
+            serde_json::json!(["fabric"]),
+            serde_json::json!([]),
+        );
+        assert!(version.to_version_info().is_none());
+    }
+
+    #[test]
+    fn version_info_without_primary_flag_takes_first_file() {
+        let version = version_json(
+            "release",
+            serde_json::json!(["fabric"]),
+            serde_json::json!([
+                { "hashes": {}, "url": "https://cdn/first.jar", "filename": "first.jar", "size": 7 },
+                { "hashes": {"sha1": "zz"}, "url": "https://cdn/second.jar", "filename": "second.jar", "size": 8 }
+            ]),
+        );
+        let info = version.to_version_info().unwrap();
+        assert_eq!(info.file_name, "first.jar");
+        assert_eq!(info.file_size, Some(7));
+        // 该文件没给 sha1，不能伪造一个空串。
+        assert_eq!(info.sha1, None);
     }
 }

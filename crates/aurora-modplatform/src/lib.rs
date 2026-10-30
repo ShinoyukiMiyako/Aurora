@@ -8,9 +8,11 @@
 //!   缺失时明确禁用（[`Error::CurseForgeKeyMissing`]）而非静默降级。
 //! - [`aggregate`]：双源并行聚合搜索，统一 [`SearchHit`] 模型，按 slug 去重（优先 Modrinth）、下载量排序，
 //!   单平台失败不影响另一平台结果。
-//! - [`local`]：`mods/` 目录扫描、三格式（fabric.mod.json / mods.toml / neoforge.mods.toml）元数据解析、
-//!   `.disabled` 后缀启禁切换。
+//! - [`local`]：`mods/` 目录扫描、四格式（fabric.mod.json / quilt.mod.json / mods.toml /
+//!   neoforge.mods.toml）元数据解析、`.disabled` 后缀启禁切换。
 //! - [`hash`]：Modrinth SHA-1 与 CurseForge MurmurHash2 指纹双通道，供已装模组的联网匹配与更新检测。
+//! - [`version`]：跨平台统一版本模型 [`ModVersionInfo`]——两个平台形状迥异的版本/文件对象归一到
+//!   同一份视图，兼容判定、依赖解析、更新检查都只面向它。
 //!
 //! 所有访问远端的客户端都支持注入 `base_url`，单元测试走本地 mock。错误统一归口到 [`Error`]，
 //! 可重试性由 [`aurora_base::retry::RetryableError`] 分级。整合包安装本轮不做。
@@ -22,6 +24,7 @@ pub mod hash;
 pub mod local;
 pub mod model;
 pub mod modrinth;
+pub mod version;
 
 mod net;
 
@@ -30,6 +33,8 @@ pub use error::{Error, Result};
 pub use model::{
     DependencyKind, ModLoader, Platform, ResourceType, SearchHit, SearchQuery, SortField,
 };
+
+pub use version::{ModDependency, ModVersionInfo, ReleaseChannel, parse_loader_name};
 
 pub use aggregate::{AggregateResult, PlatformError, aggregate_search};
 
@@ -41,7 +46,7 @@ pub use modrinth::{
 pub use curseforge::{
     API_KEY_ENV, CURSEFORGE_BASE, CurseForgeClient, CurseForgeFile, CurseForgeFileDependency,
     CurseForgeFileHash, CurseForgeFingerprintMatch, CurseForgeMod, CurseForgeSearchResponse,
-    MINECRAFT_GAME_ID,
+    MINECRAFT_GAME_ID, normalize_curseforge_game_versions,
 };
 
 pub use local::{

@@ -21,9 +21,11 @@ pub fn murmur2(data: &[u8], seed: u32) -> u32 {
     const R: u32 = 24;
 
     let mut hash = seed ^ (data.len() as u32);
-    let mut chunks = data.chunks_exact(4);
-    for chunk in &mut chunks {
-        let mut k = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    // as_chunks::<4>() 而非 chunks_exact(4)：块长在编译期已知，省掉运行期的长度判定，
+    // 尾部也由同一次调用直接给出。clippy 的 chunks_exact_to_as_chunks 会对后者报错。
+    let (chunks, tail) = data.as_chunks::<4>();
+    for chunk in chunks {
+        let mut k = u32::from_le_bytes(*chunk);
         k = k.wrapping_mul(M);
         k ^= k >> R;
         k = k.wrapping_mul(M);
@@ -31,7 +33,6 @@ pub fn murmur2(data: &[u8], seed: u32) -> u32 {
         hash ^= k;
     }
 
-    let tail = chunks.remainder();
     if !tail.is_empty() {
         let mut k = 0u32;
         for (i, &b) in tail.iter().enumerate() {

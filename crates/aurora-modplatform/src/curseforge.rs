@@ -11,8 +11,9 @@ use aurora_download::DownloadTask;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
-use crate::model::{DependencyKind, Platform, ResourceType, SearchHit, SearchQuery};
+use crate::model::{DependencyKind, ModLoader, Platform, ResourceType, SearchHit, SearchQuery};
 use crate::net::send_json;
+use crate::version::{ModDependency, ModVersionInfo, ReleaseChannel, parse_loader_name};
 
 /// CurseForge v1 API 根地址（路径含 `/v1` 段，由各方法拼接）。
 pub const CURSEFORGE_BASE: &str = "https://api.curseforge.com";
@@ -319,6 +320,9 @@ pub struct CurseForgeFile {
     pub display_name: String,
     /// 实际文件名。
     pub file_name: String,
+    /// 发布通道编码：1=Release，2=Beta，3=Alpha。老接口/裁剪响应里可能缺失。
+    #[serde(default)]
+    pub release_type: Option<u8>,
     /// 哈希列表（sha1/md5）。
     #[serde(default)]
     pub hashes: Vec<CurseForgeFileHash>,
@@ -352,6 +356,39 @@ impl CurseForgeFile {
             .iter()
             .find(|h| h.algo == 1)
             .map(|h| h.value.as_str())
+    }
+
+    /// 转成跨平台统一版本视图。
+    ///
+    /// `fileName` 是必填字段，因此这里恒能转换成功（与 Modrinth 侧可能返回 `None` 不同）。
+    pub fn to_version_info(&self) -> ModVersionInfo {
+        let (game_versions, loaders) = normalize_curseforge_game_versions(&self.game_versions);
+        ModVersionInfo {
+            version_id: self.id.to_string(),
+            project_id: self.mod_id.to_string(),
+            platform: Platform::CurseForge,
+            name: self.display_name.clone(),
+            // CurseForge 的文件模型没有独立的版本号字段：displayName 是给人看的标题，
+            // fileName 才是带版本号的技术串，与 Modrinth 的 version_number 定位一致。
+            version_number: self.file_name.clone(),
+            // 认不出的通道按最不稳定处理，理由同 Modrinth 侧。
+            release_channel: self
+                .release_type
+                .and_then(ReleaseChannel::from_curseforge)
+                .unwrap_or(ReleaseChannel::Alpha),
+            game_versions,
+            loaders,
+            file_name: self.file_name.clone(),
+            file_size: self.file_length,
+            sha1: self.sha1().map(|value| value.to_string()),
+            // 契约规定缺失为空串：发布时间只用于排序与展示，不参与任何兼容判定。
+            date_published: self.file_date.clone().unwrap_or_default(),
+            dependencies: self
+                .dependencies
+                .iter()
+                .filter_map(|dep| dep.to_mod_dependency())
+                .collect(),
+        }
     }
 
     /// 转成下载任务；`downloadUrl` 为空时返回 `None`（需先走 [`CurseForgeClient::file_download_url`]）。
@@ -392,6 +429,44 @@ impl CurseForgeFileDependency {
     pub fn kind(&self) -> Option<DependencyKind> {
         DependencyKind::from_curseforge(self.relation_type)
     }
+
+    /// 转成跨平台依赖项；未知 `relationType` 返回 `None`——判不出关系就不呈现，不能猜成必需。
+    pub fn to_mod_dependency(&self) -> Option<ModDependency> {
+        Some(ModDependency {
+            project_id: Some(self.mod_id.to_string()),
+            // CurseForge 的依赖只指到工程，不指定具体文件，版本由依赖解析自行择优。
+            version_id: None,
+            kind: self.kind()?,
+        })
+    }
+}
+
+/// 把 CurseForge 的 `gameVersions` 拆成「MC 版本」与「加载器」两份。
+///
+/// CurseForge 把加载器名、客户端/服务端标记、Java 版本全塞进同一个字符串数组，典型形如
+/// `["1.20.1", "Forge", "Client", "Java 17"]`。判据分三步：能认出加载器名的归加载器；否则首字符是
+/// 数字的归 MC 版本（正式版 `1.20.1`、快照 `24w14a` 都满足，而 `Client` / `Java 17` 都不满足）；
+/// 剩下的一律丢弃。加载器结果去重——同一个加载器可能以不同大小写重复出现，去重后 UI 才不会
+/// 显示「Forge, Forge」；MC 版本保持原样原序，那是平台给的事实。
+pub fn normalize_curseforge_game_versions(raw: &[String]) -> (Vec<String>, Vec<ModLoader>) {
+    let mut game_versions = Vec::new();
+    let mut loaders: Vec<ModLoader> = Vec::new();
+    for tag in raw {
+        let tag = tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+        if let Some(loader) = parse_loader_name(tag) {
+            if !loaders.contains(&loader) {
+                loaders.push(loader);
+            }
+            continue;
+        }
+        if tag.starts_with(|c: char| c.is_ascii_digit()) {
+            game_versions.push(tag.to_string());
+        }
+    }
+    (game_versions, loaders)
 }
 
 /// 指纹匹配结果体。
@@ -574,5 +649,157 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(url, "https://cf/edge/jei.jar");
+    }
+
+    /// 把 `&str` 数组转成归一化函数要的 `Vec<String>`。
+    fn tags(values: &[&str]) -> Vec<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn normalizes_real_world_mixed_game_versions() {
+        let (versions, loaders) =
+            normalize_curseforge_game_versions(&tags(&["1.20.1", "Forge", "Client", "Java 17"]));
+        assert_eq!(versions, vec!["1.20.1".to_string()]);
+        assert_eq!(loaders, vec![ModLoader::Forge]);
+    }
+
+    #[test]
+    fn normalizes_loader_only_and_version_only_arrays() {
+        let (versions, loaders) = normalize_curseforge_game_versions(&tags(&["Fabric", "Quilt"]));
+        assert!(versions.is_empty());
+        assert_eq!(loaders, vec![ModLoader::Fabric, ModLoader::Quilt]);
+
+        let (versions, loaders) =
+            normalize_curseforge_game_versions(&tags(&["1.21", "1.21.1", "1.21.2"]));
+        assert_eq!(versions, vec!["1.21", "1.21.1", "1.21.2"]);
+        assert!(loaders.is_empty());
+    }
+
+    #[test]
+    fn normalizes_snapshot_versions_and_dedups_loaders() {
+        // 快照号 24w14a 首字符是数字，必须当版本收下；Forge 大小写重复只留一个。
+        let (versions, loaders) = normalize_curseforge_game_versions(&tags(&[
+            "24w14a",
+            "Forge",
+            "forge",
+            "NeoForge",
+            "1.20.5-pre1",
+        ]));
+        assert_eq!(versions, vec!["24w14a", "1.20.5-pre1"]);
+        assert_eq!(loaders, vec![ModLoader::Forge, ModLoader::NeoForge]);
+    }
+
+    #[test]
+    fn normalizes_drops_noise_and_empty_tags() {
+        let (versions, loaders) = normalize_curseforge_game_versions(&tags(&[
+            "", "   ", "Client", "Server", "Java 21", "Addons", " 1.19.2 ",
+        ]));
+        // 只剩下被空白包着的那个版本号，且已 trim。
+        assert_eq!(versions, vec!["1.19.2".to_string()]);
+        assert!(loaders.is_empty());
+
+        assert_eq!(
+            normalize_curseforge_game_versions(&[]),
+            (Vec::<String>::new(), Vec::<ModLoader>::new())
+        );
+    }
+
+    /// 造一个文件裸模型，便于各转换用例改单个字段。
+    fn file_json(release_type: serde_json::Value, extra_game_versions: &[&str]) -> CurseForgeFile {
+        let mut game_versions = vec!["1.20.1".to_string(), "Forge".to_string()];
+        game_versions.extend(extra_game_versions.iter().map(|v| v.to_string()));
+        serde_json::from_value(serde_json::json!({
+            "id": 5000,
+            "modId": 238222,
+            "displayName": "JEI 15.2.0.27",
+            "fileName": "jei-1.20.1-15.2.0.27.jar",
+            "releaseType": release_type,
+            "hashes": [{"value": "abc123", "algo": 1}, {"value": "md5here", "algo": 2}],
+            "fileDate": "2026-01-02T03:04:05Z",
+            "fileLength": 1048576,
+            "downloadUrl": "https://cf/jei.jar",
+            "gameVersions": game_versions,
+            "dependencies": [
+                {"modId": 100, "relationType": 3},
+                {"modId": 200, "relationType": 2},
+                {"modId": 300, "relationType": 99}
+            ],
+            "fileFingerprint": 123456789u64
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn file_version_info_maps_all_fields() {
+        let info = file_json(serde_json::json!(2), &["Client", "Java 17"]).to_version_info();
+        assert_eq!(info.version_id, "5000");
+        assert_eq!(info.project_id, "238222");
+        assert_eq!(info.platform, Platform::CurseForge);
+        assert_eq!(info.name, "JEI 15.2.0.27");
+        assert_eq!(info.version_number, "jei-1.20.1-15.2.0.27.jar");
+        assert_eq!(info.release_channel, ReleaseChannel::Beta);
+        assert_eq!(info.game_versions, vec!["1.20.1".to_string()]);
+        assert_eq!(info.loaders, vec![ModLoader::Forge]);
+        assert_eq!(info.file_name, "jei-1.20.1-15.2.0.27.jar");
+        assert_eq!(info.file_size, Some(1_048_576));
+        assert_eq!(info.sha1.as_deref(), Some("abc123"));
+        assert_eq!(info.date_published, "2026-01-02T03:04:05Z");
+
+        // relationType 99 认不出，丢弃；必需与可选各留一条，project_id 用十进制串。
+        assert_eq!(info.dependencies.len(), 2);
+        assert_eq!(info.dependencies[0].project_id.as_deref(), Some("100"));
+        assert_eq!(info.dependencies[0].version_id, None);
+        assert_eq!(info.dependencies[0].kind, DependencyKind::Required);
+        assert_eq!(info.dependencies[1].project_id.as_deref(), Some("200"));
+        assert_eq!(info.dependencies[1].kind, DependencyKind::Optional);
+    }
+
+    #[test]
+    fn file_version_info_falls_back_to_alpha_without_release_type() {
+        let missing = file_json(serde_json::json!(null), &[]).to_version_info();
+        assert_eq!(missing.release_channel, ReleaseChannel::Alpha);
+
+        let unknown = file_json(serde_json::json!(42), &[]).to_version_info();
+        assert_eq!(unknown.release_channel, ReleaseChannel::Alpha);
+
+        let release = file_json(serde_json::json!(1), &[]).to_version_info();
+        assert_eq!(release.release_channel, ReleaseChannel::Release);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_files_parses_release_type_for_version_info() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "data": [{
+                "id": 5001,
+                "modId": 238222,
+                "displayName": "JEI 15.3.0.4",
+                "fileName": "jei-1.21-15.3.0.4.jar",
+                "releaseType": 1,
+                "hashes": [{"value": "ffee00", "algo": 1}],
+                "fileDate": "2026-02-03T04:05:06Z",
+                "fileLength": 2048,
+                "gameVersions": ["1.21", "NeoForge", "Server"],
+                "dependencies": []
+            }],
+            "pagination": {"index": 0, "pageSize": 50, "resultCount": 1, "totalCount": 1}
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(header("x-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+
+        let files = client(&server).mod_files(238222, None, None).await.unwrap();
+        assert_eq!(files.len(), 1);
+        let info = files[0].to_version_info();
+        assert_eq!(info.version_id, "5001");
+        assert_eq!(info.release_channel, ReleaseChannel::Release);
+        assert_eq!(info.game_versions, vec!["1.21".to_string()]);
+        assert_eq!(info.loaders, vec![ModLoader::NeoForge]);
+        assert_eq!(info.file_size, Some(2048));
+        assert!(info.dependencies.is_empty());
     }
 }
