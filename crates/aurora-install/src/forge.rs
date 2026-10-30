@@ -271,8 +271,14 @@ pub fn forge_installer_url(mc_version: &str, forge_version: &str) -> String {
     )
 }
 
-/// 构造 NeoForge 官方 installer 的下载 URL（现代 net.neoforged:neoforge 坐标）。
+/// 构造 NeoForge 官方 installer 的下载 URL。1.20.1 的构建（47.x）沿用 Forge 坐标
+/// `net.neoforged:forge:1.20.1-<版本>`，其余走 `net.neoforged:neoforge:<版本>`。
 pub fn neoforge_installer_url(neoforge_version: &str) -> String {
+    if neoforge_version.starts_with(crate::forge_versions::NEOFORGE_LEGACY_PREFIX) {
+        return format!(
+            "https://maven.neoforged.net/releases/net/neoforged/forge/1.20.1-{neoforge_version}/forge-1.20.1-{neoforge_version}-installer.jar"
+        );
+    }
     format!(
         "https://maven.neoforged.net/releases/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"
     )
@@ -837,6 +843,10 @@ mod tests {
         assert_eq!(
             neoforge_installer_url("21.0.167"),
             "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.0.167/neoforge-21.0.167-installer.jar"
+        );
+        assert_eq!(
+            neoforge_installer_url("47.1.106"),
+            "https://maven.neoforged.net/releases/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-installer.jar"
         );
     }
 
