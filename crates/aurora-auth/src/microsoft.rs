@@ -4,11 +4,14 @@
 //! XSTS（xsts.auth.xboxlive.com，RelyingParty `rp://api.minecraftservices.com/`）->
 //! `login_with_xbox`（api.minecraftservices.com）-> `minecraft/profile`。
 //!
-//! - `client_id` 由配置注入，无内置默认（调试可用环境变量 `AURORA_MSA_CLIENT_ID`，读取归上层）。
+//! - `client_id` 由上层注入（默认值与环境变量覆盖的取舍归上层）。
 //! - 各端点 URL 通过 [`MsaEndpoints`] 可注入，便于本地 mock 测试；默认指向微软生产地址。
 //! - XSTS 六个错误码逐一映射为带中文说明的错误变体（见 [`map_xerr`]）。
 //! - 令牌刷新失败区分“需重登”（[`AuthError::ReloginRequired`]，`invalid_grant`）与瞬时网络失败
 //!   （[`AuthError::Http`]，交由 `retry_async` 重试）。
+//! - 挂上取消令牌（[`MicrosoftAuth::with_cancel`]）后，设备码请求、轮询与令牌链任一步都会在令牌
+//!   触发时立刻以 [`AuthError::Cancelled`] 返回；设备码有效期长达十几分钟，用户关掉登录弹窗时
+//!   不能让后台继续轮询到过期。
 
 use std::time::{Duration, Instant};
 
@@ -16,14 +19,17 @@ use aurora_base::retry::{RetryPolicy, retry_async};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio_util::sync::CancellationToken;
 
-use crate::account::GameProfile;
+use crate::account::{GameProfile, SkinModel, SkinRef};
 use crate::error::{AuthError, Result};
 
 /// 设备码流请求的 OAuth scope。
 const SCOPE: &str = "XboxLive.signin offline_access";
 /// 设备码授权的 grant_type。
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// 轮询间隔下限。服务端给 0 时若照办，循环会退化成不停打令牌端点的紧循环。
+const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 微软登录链各端点地址。默认指向生产环境；测试可整体替换为本地 mock 服务。
 #[derive(Debug, Clone)]
@@ -55,6 +61,7 @@ pub struct MicrosoftAuth {
     client_id: String,
     endpoints: MsaEndpoints,
     retry: RetryPolicy,
+    cancel: Option<CancellationToken>,
 }
 
 /// 设备码请求响应（供 UI 展示 user_code / 验证网址）。
@@ -92,6 +99,10 @@ pub struct MicrosoftSession {
     pub minecraft_expires_at: u64,
     /// 轮换后的 refresh token（须回写覆盖旧值）。
     pub refresh_token: String,
+    /// 档案里当前启用的皮肤；档案没有可识别的启用皮肤时为 None。
+    pub skin: Option<SkinRef>,
+    /// XSTS 声明里的 Xbox 用户 id（`xid`）；响应没带时为 None。
+    pub xuid: Option<String>,
 }
 
 /// 单次轮询设备码令牌的结果。
@@ -112,7 +123,14 @@ impl MicrosoftAuth {
             client_id: client_id.into(),
             endpoints: MsaEndpoints::default(),
             retry: RetryPolicy::default(),
+            cancel: None,
         }
+    }
+
+    /// 挂上取消令牌：之后的每个联网步骤都会在令牌触发时立刻以 [`AuthError::Cancelled`] 返回。
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 
     /// 覆盖端点表（测试注入 mock 地址）。
@@ -127,8 +145,25 @@ impl MicrosoftAuth {
         self
     }
 
+    /// 在取消令牌之下运行一步：令牌触发时丢弃这一步的 future 并报取消。
+    ///
+    /// 被丢弃的只有 HTTP 请求与计时等待，它们没有落盘副作用，半途丢弃是安全的。
+    async fn cancellable<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
+        match &self.cancel {
+            None => step.await,
+            Some(token) => match token.run_until_cancelled(step).await {
+                Some(result) => result,
+                None => Err(AuthError::Cancelled),
+            },
+        }
+    }
+
     /// 发起设备码请求（第一步，返回 user_code 等供 UI 展示）。
     pub async fn begin_device_code(&self) -> Result<DeviceCodeResponse> {
+        self.cancellable(self.begin_device_code_inner()).await
+    }
+
+    async fn begin_device_code_inner(&self) -> Result<DeviceCodeResponse> {
         let url = format!("{}/devicecode", self.endpoints.oauth_base);
         let params = [("client_id", self.client_id.as_str()), ("scope", SCOPE)];
         retry_async(&self.retry, || async {
@@ -145,13 +180,17 @@ impl MicrosoftAuth {
         .await
     }
 
-    /// 轮询令牌端点直至用户完成授权、拒绝或设备码过期。
+    /// 轮询令牌端点直至用户完成授权、拒绝、设备码过期或被取消。
     ///
-    /// 循环自身按 `interval` 计时；仅瞬时网络故障交由 `retry_async` 重试，`authorization_pending`
-    /// 属正常等待（非错误），不触发退避。
+    /// 循环自身按 `interval` 计时（下限 [`MIN_POLL_INTERVAL`]）；仅瞬时网络故障交由 `retry_async`
+    /// 重试，`authorization_pending` 属正常等待（非错误），不触发退避。
     pub async fn poll_device_code(&self, device: &DeviceCodeResponse) -> Result<MsaToken> {
+        self.cancellable(self.poll_device_code_inner(device)).await
+    }
+
+    async fn poll_device_code_inner(&self, device: &DeviceCodeResponse) -> Result<MsaToken> {
         let deadline = Instant::now() + Duration::from_secs(device.expires_in);
-        let mut interval = Duration::from_secs(device.interval);
+        let mut interval = Duration::from_secs(device.interval).max(MIN_POLL_INTERVAL);
         loop {
             if Instant::now() >= deadline {
                 return Err(AuthError::DeviceCodeExpired);
@@ -195,6 +234,10 @@ impl MicrosoftAuth {
 
     /// 用 refresh token 换取新令牌（轮换）。`invalid_grant` 判定为需重登。
     pub async fn refresh(&self, refresh_token: &str) -> Result<MsaToken> {
+        self.cancellable(self.refresh_inner(refresh_token)).await
+    }
+
+    async fn refresh_inner(&self, refresh_token: &str) -> Result<MsaToken> {
         let url = format!("{}/token", self.endpoints.oauth_base);
         let params = [
             ("client_id", self.client_id.as_str()),
@@ -223,23 +266,33 @@ impl MicrosoftAuth {
 
     /// 从微软 OAuth 令牌走完 XBL/XSTS/Minecraft/profile，得到完整会话。
     pub async fn complete_login(&self, msa: &MsaToken) -> Result<MicrosoftSession> {
+        self.cancellable(self.complete_login_inner(msa)).await
+    }
+
+    async fn complete_login_inner(&self, msa: &MsaToken) -> Result<MicrosoftSession> {
         let xbl = retry_async(&self.retry, || self.xbl_authenticate(&msa.access_token)).await?;
         let xsts = retry_async(&self.retry, || self.xsts_authorize(&xbl.token)).await?;
         let minecraft =
             retry_async(&self.retry, || self.login_with_xbox(&xsts.uhs, &xsts.token)).await?;
-        let profile = retry_async(&self.retry, || self.fetch_profile(&minecraft.access_token)).await?;
+        let (profile, skin) =
+            retry_async(&self.retry, || self.fetch_profile(&minecraft.access_token)).await?;
         Ok(MicrosoftSession {
             profile,
             minecraft_expires_at: now_unix().saturating_add(minecraft.expires_in),
             minecraft_token: minecraft.access_token,
             refresh_token: msa.refresh_token.clone(),
+            skin,
+            xuid: xsts.xid,
         })
     }
 
     /// 刷新令牌并走完令牌链，得到可直接启动的会话（含轮换后的 refresh token）。
     pub async fn refresh_session(&self, refresh_token: &str) -> Result<MicrosoftSession> {
-        let msa = self.refresh(refresh_token).await?;
-        self.complete_login(&msa).await
+        self.cancellable(async {
+            let msa = self.refresh_inner(refresh_token).await?;
+            self.complete_login_inner(&msa).await
+        })
+        .await
     }
 
     async fn xbl_authenticate(&self, msa_access_token: &str) -> Result<XblToken> {
@@ -292,9 +345,15 @@ impl MicrosoftAuth {
         }
         let parsed: XboxAuthResponse = parse(&text, "XSTS 授权")?;
         let uhs = parsed.first_uhs("XSTS 授权")?;
+        let xid = parsed
+            .display_claims
+            .xui
+            .first()
+            .and_then(|x| x.xid.clone());
         Ok(XstsToken {
             token: parsed.token,
             uhs,
+            xid,
         })
     }
 
@@ -317,7 +376,7 @@ impl MicrosoftAuth {
         })
     }
 
-    async fn fetch_profile(&self, minecraft_token: &str) -> Result<GameProfile> {
+    async fn fetch_profile(&self, minecraft_token: &str) -> Result<(GameProfile, Option<SkinRef>)> {
         let url = format!("{}/minecraft/profile", self.endpoints.minecraft_base);
         let resp = self
             .client
@@ -345,10 +404,14 @@ impl MicrosoftAuth {
             });
         }
         let body: ProfileBody = parse(&text, "获取游戏档案")?;
-        Ok(GameProfile {
-            id: body.id,
-            name: body.name,
-        })
+        let skin = active_skin(&body.skins);
+        Ok((
+            GameProfile {
+                id: body.id,
+                name: body.name,
+            },
+            skin,
+        ))
     }
 
     async fn send_form(
@@ -406,6 +469,26 @@ fn map_xerr(xerr: i64) -> AuthError {
     }
 }
 
+/// 从档案皮肤列表里取当前启用（`state == "ACTIVE"`）的一张。
+///
+/// 模型名只认 `CLASSIC` 与 `SLIM`；认不出的模型按「没有可用皮肤」处理并记 warn，
+/// 界面随之回落，而不是猜一个体型画错。
+fn active_skin(skins: &[SkinBody]) -> Option<SkinRef> {
+    let active = skins.iter().find(|s| s.state == "ACTIVE")?;
+    let model = match active.variant.as_deref() {
+        Some(v) if v.eq_ignore_ascii_case("CLASSIC") => SkinModel::Wide,
+        Some(v) if v.eq_ignore_ascii_case("SLIM") => SkinModel::Slim,
+        other => {
+            tracing::warn!(variant = ?other, url = %active.url, "档案皮肤的模型名无法识别，不使用这张皮肤");
+            return None;
+        }
+    };
+    Some(SkinRef {
+        url: active.url.clone(),
+        model,
+    })
+}
+
 /// 当前 Unix 秒。
 fn now_unix() -> u64 {
     // duration_since 仅在系统时钟早于 1970 时出错（不可能场景）；退化为 0 会使令牌被视为已过期，
@@ -429,6 +512,7 @@ struct XblToken {
 struct XstsToken {
     token: String,
     uhs: String,
+    xid: Option<String>,
 }
 
 struct MinecraftToken {
@@ -497,6 +581,8 @@ struct DisplayClaims {
 #[derive(serde::Deserialize)]
 struct Xui {
     uhs: String,
+    #[serde(default)]
+    xid: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -521,6 +607,16 @@ struct MinecraftTokenBody {
 struct ProfileBody {
     id: String,
     name: String,
+    #[serde(default)]
+    skins: Vec<SkinBody>,
+}
+
+#[derive(serde::Deserialize)]
+struct SkinBody {
+    state: String,
+    url: String,
+    #[serde(default)]
+    variant: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -615,16 +711,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn poll_returns_token_after_pending() {
         let server = MockServer::start().await;
-        // 成功响应先挂（作为兜底）；pending 后挂且限一次——wiremock 后挂优先，故首次得 pending。
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "AT",
-                "refresh_token": "RT",
-                "expires_in": 3600
-            })))
-            .mount(&server)
-            .await;
+        // wiremock 按挂载顺序取第一个仍能匹配的 mock：限一次的 pending 先挂，成功响应后挂作兜底，
+        // 于是第一次轮询得 pending、第二次得令牌。
         Mock::given(method("POST"))
             .and(path("/token"))
             .respond_with(ResponseTemplate::new(400).set_body_json(json!({
@@ -634,15 +722,69 @@ mod tests {
             .up_to_n_times(1)
             .mount(&server)
             .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT",
+                "refresh_token": "RT",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
 
-        // interval=0：pending 后立即再轮询，测试不引入真实等待。
+        // interval=0：间隔按下限 1 s 计，pending 之后至少等满 1 s 才发第二次轮询，
+        // 不会退化成紧循环。删掉下限，这里的耗时断言即挂。
+        let started = Instant::now();
         let token = auth_for(&server)
             .poll_device_code(&device(900, 0))
             .await
             .unwrap();
+        assert!(
+            started.elapsed() >= MIN_POLL_INTERVAL,
+            "两次轮询之间只隔了 {:?}",
+            started.elapsed()
+        );
         assert_eq!(token.access_token, "AT");
         assert_eq!(token.refresh_token, "RT");
         assert_eq!(token.expires_in, 3600);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_during_polling_returns_cancelled_promptly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "authorization_pending",
+                "error_description": "等待用户授权"
+            })))
+            .mount(&server)
+            .await;
+
+        let token = CancellationToken::new();
+        let auth = auth_for(&server).with_cancel(token.clone());
+        let trigger = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            trigger.cancel();
+        });
+
+        // 间隔 5 s：若取消没有打断等待，至少要 5 s 才会返回。
+        let started = Instant::now();
+        let err = auth.poll_device_code(&device(900, 5)).await.unwrap_err();
+        assert!(matches!(err, AuthError::Cancelled), "得到 {err:?}");
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "取消后过了 {:?} 才返回",
+            started.elapsed()
+        );
+
+        // 已取消的令牌：后续任何一步都不再发请求。
+        let before = server.received_requests().await.unwrap().len();
+        let err = auth.begin_device_code().await.unwrap_err();
+        assert!(matches!(err, AuthError::Cancelled));
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -719,7 +861,12 @@ mod tests {
             .and(header("authorization", "Bearer MC-TOKEN"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "0123456789abcdef0123456789abcdef",
-                "name": "AuroraPlayer"
+                "name": "AuroraPlayer",
+                "skins": [
+                    { "id": "old", "state": "INACTIVE", "url": "http://textures.minecraft.net/texture/old", "variant": "CLASSIC" },
+                    { "id": "new", "state": "ACTIVE", "url": "http://textures.minecraft.net/texture/new", "variant": "SLIM" }
+                ],
+                "capes": []
             })))
             .mount(&server)
             .await;
@@ -736,6 +883,86 @@ mod tests {
         assert_eq!(session.refresh_token, "rotated-refresh");
         // 到期时间应落在未来（now + 86400 附近）。
         assert!(session.minecraft_expires_at >= now_unix() + 86000);
+        // 只取启用中的那张皮肤，模型 SLIM 映射为细臂。
+        assert_eq!(
+            session.skin,
+            Some(SkinRef {
+                url: "http://textures.minecraft.net/texture/new".into(),
+                model: SkinModel::Slim,
+            })
+        );
+        // 这个 XSTS 响应没有 xid：xuid 如实为 None，而不是空串。
+        assert_eq!(session.xuid, None);
+    }
+
+    #[test]
+    fn active_skin_maps_models_and_rejects_unknown_variants() {
+        let skin = |state: &str, variant: Option<&str>| SkinBody {
+            state: state.into(),
+            url: format!("http://t/{state}"),
+            variant: variant.map(Into::into),
+        };
+        assert_eq!(
+            active_skin(&[skin("ACTIVE", Some("CLASSIC"))])
+                .unwrap()
+                .model,
+            SkinModel::Wide
+        );
+        assert_eq!(
+            active_skin(&[skin("ACTIVE", Some("slim"))]).unwrap().model,
+            SkinModel::Slim
+        );
+        assert_eq!(active_skin(&[skin("INACTIVE", Some("SLIM"))]), None);
+        assert_eq!(active_skin(&[skin("ACTIVE", Some("GIANT"))]), None);
+        assert_eq!(active_skin(&[skin("ACTIVE", None)]), None);
+        assert_eq!(active_skin(&[]), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xsts_xid_is_carried_into_the_session() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xbl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xbl-token",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xsts-tok",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs", "xid": "2535400000000001" } ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "MC-TOKEN",
+                "expires_in": 86400
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "0123456789abcdef0123456789abcdef",
+                "name": "AuroraPlayer"
+            })))
+            .mount(&server)
+            .await;
+
+        let msa = MsaToken {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: 3600,
+        };
+        let session = auth_for(&server).complete_login(&msa).await.unwrap();
+        assert_eq!(session.xuid.as_deref(), Some("2535400000000001"));
+        // 档案没有 skins 字段：没有皮肤，不报错。
+        assert_eq!(session.skin, None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

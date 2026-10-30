@@ -282,6 +282,11 @@ impl Aurora {
         &self.msa_endpoints
     }
 
+    /// 快照上挂的取消令牌（常驻门面为 `None`）；不走下载池的长流程（如设备码登录）据此响应取消。
+    pub(crate) fn cancel_token(&self) -> Option<&CancellationToken> {
+        self.cancel.as_ref()
+    }
+
     /// 元数据抓取的退避重试策略。
     pub(crate) fn retry_policy(&self) -> RetryPolicy {
         RetryPolicy::default()
