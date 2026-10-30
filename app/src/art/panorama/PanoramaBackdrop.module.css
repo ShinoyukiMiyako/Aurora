@@ -1,0 +1,32 @@
+.backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.image {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* 罩层用底色渐变实现，不对图片加 filter：上浅下深，卡片之外的文字也有足够对比度 */
+.scrim {
+  --scrim-top: 62%;
+  --scrim-bottom: 82%;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--sk-bg) var(--scrim-top), transparent) 0%,
+    color-mix(in srgb, var(--sk-bg) var(--scrim-bottom), transparent) 100%
+  );
+}
+
+:global(:root[data-sk-mode="night"]) .scrim {
+  --scrim-top: 45%;
+  --scrim-bottom: 70%;
+}
