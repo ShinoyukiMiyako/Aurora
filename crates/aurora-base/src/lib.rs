@@ -6,7 +6,7 @@
 //! 五个子模块：
 //! - [`brand`]：产品名常量（中文名、英文名、slug）的唯一定义点。
 //! - [`http`]：reqwest + rustls 客户端工厂，统一 User-Agent 与超时策略。
-//! - [`mirror`]：官方下载域名到 BMCLAPI 镜像域名的 URL 改写（architecture.md 五节速查表）。
+//! - [`mirror`]：官方下载域名到 BMCLAPI 镜像域名的 URL 改写。
 //! - [`fs`]：流式 sha1/sha256 校验、临时文件 + rename 的原子写入、数据/缓存目录定位。
 //! - [`retry`]：指数退避重试包装。
 //!

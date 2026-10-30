@@ -1,7 +1,7 @@
 //! 下载镜像源与官方 -> BMCLAPI 的 URL 改写。
 //!
 //! 中国大陆直连 Mojang/Forge/Fabric 官方源常年不稳，BMCLAPI（bmclapi2.bangbang93.com）
-//! 是社区事实标准镜像。本模块把官方下载 URL 按 architecture.md 五节速查表改写到对应镜像路径。
+//! 是社区事实标准镜像。本模块把官方下载 URL 改写到 BMCLAPI 上的对应路径。
 //!
 //! 映射为表驱动（[`MIRROR_TABLE`]），无对应镜像的域名（Modrinth/CurseForge 等）原样透传。
 
@@ -32,7 +32,7 @@ impl MirrorSource {
 
 /// 官方 host -> BMCLAPI 路径前缀的映射表。前缀为空串表示「仅换主机名、路径原样保留」。
 ///
-/// 覆盖 architecture.md 五节速查表全部行：
+/// 覆盖安装与启动用到的全部官方下载域名：
 /// - 版本清单 / Java 清单：piston-meta.mojang.com（meta 家族，根路径）
 /// - assets 对象：resources.download.minecraft.net -> /assets
 /// - libraries：libraries.minecraft.net -> /maven
@@ -42,7 +42,7 @@ impl MirrorSource {
 ///
 /// 另附三个 meta 家族的兄弟域名：客户端 jar、服务端 jar、Java runtime 实体文件实际由
 /// piston-data / launcher / launchermeta 派发，BMCLAPI 同样以根路径镜像；缺了它们，
-/// 速查表里「版本清单/Java 清单」指向的产物就没法走镜像下载，故一并纳入。
+/// 版本清单与 Java 清单指向的产物就没法走镜像下载，故一并纳入。
 const MIRROR_TABLE: &[(&str, &str)] = &[
     ("piston-meta.mojang.com", ""),
     ("piston-data.mojang.com", ""),
@@ -112,8 +112,8 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_covers_feature_matrix_table() {
-        // (输入官方 URL, 期望 BMCLAPI URL)，逐条对应五节速查表。
+    fn rewrite_covers_every_mirrored_host() {
+        // (输入官方 URL, 期望 BMCLAPI URL)，逐条覆盖 MIRROR_TABLE 的每一行。
         let cases = [
             (
                 "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
