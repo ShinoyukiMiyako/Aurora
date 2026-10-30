@@ -1,0 +1,34 @@
+/*
+ * 浮层面板：白底、细描边、大阴影。内容超出窗口内容区高度时在面板内部滚动；
+ * 圆角由 overflow 裁切，内容贴边时也不会盖住圆角。
+ */
+.panel {
+  --popover-min-width: 160px;
+  --popover-max-width: 360px;
+  position: absolute;
+  z-index: var(--sk-z-popover);
+  box-sizing: border-box;
+  min-width: var(--popover-min-width);
+  max-width: var(--popover-max-width);
+  max-height: calc(100% - var(--sk-space-8) * 2);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow-lg);
+  color: var(--sk-text);
+  outline: none;
+}
+
+/* 下拉选择：宽度至少与触发器一致；触发器比默认最大宽还宽时以触发器为准 */
+.panel[data-match-width] {
+  min-width: max(var(--popover-min-width), var(--popover-anchor-width));
+  max-width: max(var(--popover-max-width), var(--popover-anchor-width));
+}
+
+/* 退场中的面板不再接收指针：重新打开时新面板已在它之上挂载 */
+.panel[data-exiting] {
+  pointer-events: none;
+}
