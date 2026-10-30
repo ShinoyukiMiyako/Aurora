@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::VERSIONS_DIR;
 use crate::error::{Error, Result};
 
-/// 全局版本隔离档位。对应 PCL2 设置里的五个选项，整数码 0..4 用于从旧配置迁移。
+/// 全局版本隔离档位，五档与 PCL2 设置里的选项一一对应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationPolicy {
@@ -35,29 +35,6 @@ pub enum IsolationPolicy {
 }
 
 impl IsolationPolicy {
-    /// 从 PCL2 的整数档位迁移（0=关闭,1=仅Mod,2=仅非正式版,3=两者,4=全部）。越界回退到默认档位。
-    pub fn from_pcl_code(code: i64) -> Self {
-        match code {
-            0 => IsolationPolicy::Disabled,
-            1 => IsolationPolicy::ModLoadersOnly,
-            2 => IsolationPolicy::NonReleaseOnly,
-            3 => IsolationPolicy::ModLoadersAndNonRelease,
-            4 => IsolationPolicy::All,
-            _ => IsolationPolicy::default(),
-        }
-    }
-
-    /// 回写为 PCL2 的整数档位。
-    pub fn to_pcl_code(self) -> i64 {
-        match self {
-            IsolationPolicy::Disabled => 0,
-            IsolationPolicy::ModLoadersOnly => 1,
-            IsolationPolicy::NonReleaseOnly => 2,
-            IsolationPolicy::ModLoadersAndNonRelease => 3,
-            IsolationPolicy::All => 4,
-        }
-    }
-
     /// 档位的中文显示名。
     pub fn display_name(self) -> &'static str {
         match self {
@@ -200,24 +177,6 @@ pub async fn resolve_isolation(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pcl_code_round_trips_and_falls_back() {
-        for policy in [
-            IsolationPolicy::Disabled,
-            IsolationPolicy::ModLoadersOnly,
-            IsolationPolicy::NonReleaseOnly,
-            IsolationPolicy::ModLoadersAndNonRelease,
-            IsolationPolicy::All,
-        ] {
-            assert_eq!(IsolationPolicy::from_pcl_code(policy.to_pcl_code()), policy);
-        }
-        assert_eq!(IsolationPolicy::from_pcl_code(0), IsolationPolicy::Disabled);
-        assert_eq!(IsolationPolicy::from_pcl_code(4), IsolationPolicy::All);
-        // 越界回退默认档位。
-        assert_eq!(IsolationPolicy::from_pcl_code(99), IsolationPolicy::default());
-        assert_eq!(IsolationPolicy::from_pcl_code(-1), IsolationPolicy::default());
-    }
 
     /// 决策真值表：手工给出每行的期望，覆盖全部档位 × 覆盖项 × 事实组合的代表点与边界。
     #[test]

@@ -27,7 +27,7 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// 本 crate 自管的配置文件（launcher_profiles / 版本设置 / 版本列表缓存）序列化或解析失败。
+    /// 本 crate 自管的配置文件（版本设置）序列化或解析失败。
     #[error("解析 {context} 失败: {path}")]
     Json {
         context: &'static str,
