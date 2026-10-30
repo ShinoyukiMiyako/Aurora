@@ -35,6 +35,7 @@ pub mod mods;
 pub mod news;
 pub mod search;
 pub mod servers;
+pub mod updates;
 pub mod versions;
 
 // ---- 门面自身的公开类型 ----
@@ -53,6 +54,7 @@ pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use memory::{MemoryAdvice, SystemMemory};
 pub use news::{NewsFeed, NewsItem, NewsTag};
 pub use servers::{KnownServer, ServerMonitor, ServerStatus};
+pub use updates::{UpdateSource, order_update_sources};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
