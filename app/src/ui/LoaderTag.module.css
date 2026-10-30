@@ -1,0 +1,42 @@
+.dot {
+  --loader-dot: 7px;
+  display: inline-block;
+  flex: none;
+  width: var(--loader-dot);
+  height: var(--loader-dot);
+  border-radius: var(--sk-r-pill);
+}
+
+.dot[data-size="6"] {
+  --loader-dot: 6px;
+}
+
+.dot[data-loader="vanilla"] {
+  background: var(--sk-loader-vanilla);
+}
+
+.dot[data-loader="fabric"] {
+  background: var(--sk-loader-fabric);
+}
+
+.dot[data-loader="quilt"] {
+  background: var(--sk-loader-quilt);
+}
+
+.dot[data-loader="forge"] {
+  background: var(--sk-loader-forge);
+}
+
+.dot[data-loader="neoforge"] {
+  background: var(--sk-loader-neoforge);
+}
+
+/* 名称用正文色、版本退到次级色，两者在描边标签里才分得出主次 */
+.name {
+  color: var(--sk-text);
+}
+
+.version {
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
