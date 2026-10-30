@@ -4,19 +4,28 @@
 //! `natives-<os>` 条目）下载下来是 jar，启动前须把其中的动态库解压到版本隔离的 natives 目录。
 //! 解压尊重库自带的 `extract.exclude` 前缀规则（Mojang 通常排除 `META-INF/`）。zip 读取是同步、
 //! CPU/IO 混合操作，故整段解压丢进 `spawn_blocking`，不阻塞异步 worker。
+//!
+//! 每次补全都会走到这里。解压完在 natives 目录里留一份戳记：参与解压的 jar（以版本 JSON 声明的
+//! sha1 标识，没有声明时用文件大小与修改时间）与解出的文件清单。下次戳记一致、清单里的文件都还在，
+//! 就不再重新解压。
 
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use aurora_version::{Library, RuntimeContext, VersionJson, select_libraries};
+use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, io_err, zip_err};
+use crate::error::{Error, Result, io_err, zip_err};
 use crate::layout::GameLayout;
 use crate::maven;
 
 /// 无显式 exclude 时的默认排除前缀：签名/清单目录不属于运行时动态库。
 const DEFAULT_EXCLUDES: &[&str] = &["META-INF/"];
+
+/// natives 目录里的解压戳记文件名。点开头、带产品 slug，不会与 jar 里的动态库重名。
+const STAMP_FILE: &str = concat!(".", aurora_base::app_slug!(), "-natives.json");
 
 /// 判断一个归档条目是否应被解压：目录一律跳过，命中任一 exclude 前缀也跳过。
 fn should_extract(entry_name: &str, excludes: &[String]) -> bool {
@@ -26,11 +35,25 @@ fn should_extract(entry_name: &str, excludes: &[String]) -> bool {
     !excludes.iter().any(|prefix| entry_name.starts_with(prefix.as_str()))
 }
 
+/// 一个待解压的 native jar。
+struct NativeJob {
+    jar: PathBuf,
+    excludes: Vec<String>,
+    /// 版本 JSON 为这个 jar 声明的 sha1；maven 简写式的库没有。
+    sha1: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Stamp {
+    fingerprint: Vec<String>,
+    files: Vec<String>,
+}
+
 /// 把版本里当前平台适用的全部 natives 解压到 `versions/<target_id>/<target_id>-natives`。
 ///
 /// `target_id` 是 natives 的落点版本（原版安装即版本自身；加载器版本则复用其原版的 natives 目录）。
-/// 返回解压出的文件总数。任一 native jar 缺失或损坏都会冒泡（natives 缺失会直接导致游戏崩溃，
-/// 不容静默跳过）。
+/// 返回 natives 目录里由本函数管理的文件数。任一 native jar 缺失或损坏都会冒泡（natives 缺失会
+/// 直接导致游戏崩溃，不容静默跳过）。
 pub async fn extract_all_natives(
     version: &VersionJson,
     ctx: &RuntimeContext,
@@ -39,7 +62,7 @@ pub async fn extract_all_natives(
 ) -> Result<u32> {
     // 先在异步上下文里把「哪些 jar、排除什么、解到哪」算清楚，再把纯同步解压交给阻塞线程池。
     let dest = layout.natives_dir(target_id);
-    let mut jobs: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut jobs: Vec<NativeJob> = Vec::new();
     for lib in select_libraries(version, ctx) {
         if !lib.is_native() {
             continue;
@@ -47,23 +70,97 @@ pub async fn extract_all_natives(
         let Some(rel) = native_jar_relpath(lib, ctx) else {
             continue;
         };
-        jobs.push((layout.library_path(&rel), effective_excludes(lib)));
+        jobs.push(NativeJob {
+            jar: layout.library_path(&rel),
+            excludes: effective_excludes(lib),
+            sha1: native_jar_sha1(lib, ctx),
+        });
+    }
+    if jobs.is_empty() {
+        return Ok(0);
     }
 
-    tokio::task::spawn_blocking(move || {
-        let mut count = 0u32;
-        for (jar, excludes) in &jobs {
-            count += extract_jar(jar, &dest, excludes)?;
+    tokio::task::spawn_blocking(move || extract_with_stamp(&jobs, &dest))
+        .await
+        .map_err(|join| {
+            io_err(
+                PathBuf::from("<natives>"),
+                io::Error::other(format!("natives 解压任务异常终止: {join}")),
+            )
+        })?
+}
+
+/// 戳记一致且解出的文件都在时直接沿用，否则重新解压并刷新戳记。
+fn extract_with_stamp(jobs: &[NativeJob], dest: &Path) -> Result<u32> {
+    let fingerprint = fingerprint(jobs)?;
+    let stamp_path = dest.join(STAMP_FILE);
+    if let Some(stamp) = read_stamp(&stamp_path)?
+        && stamp.fingerprint == fingerprint
+        && stamp.files.iter().all(|f| dest.join(f).is_file())
+    {
+        return Ok(stamp.files.len() as u32);
+    }
+
+    let mut files = Vec::new();
+    for job in jobs {
+        for rel in extract_jar(&job.jar, dest, &job.excludes)? {
+            files.push(rel.to_string_lossy().replace('\\', "/"));
         }
-        Ok(count)
-    })
-    .await
-    .map_err(|join| {
-        io_err(
-            PathBuf::from("<natives>"),
-            io::Error::other(format!("natives 解压任务异常终止: {join}")),
-        )
-    })?
+    }
+    let stamp = Stamp { fingerprint, files };
+    let bytes = serde_json::to_vec(&stamp).map_err(|source| Error::Json {
+        context: "natives 戳记".to_owned(),
+        source,
+    })?;
+    std::fs::create_dir_all(dest).map_err(|source| io_err(dest, source))?;
+    std::fs::write(&stamp_path, bytes).map_err(|source| io_err(&stamp_path, source))?;
+    Ok(stamp.files.len() as u32)
+}
+
+/// 戳记是可重建的缓存：不存在或读不懂都按「没有戳记」处理，重新解压一遍即可恢复。
+fn read_stamp(path: &Path) -> Result<Option<Stamp>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_err(path, source)),
+    }
+}
+
+/// 每个 jar 一行：路径、标识（声明的 sha1，或文件大小与修改时间）、exclude 规则。
+fn fingerprint(jobs: &[NativeJob]) -> Result<Vec<String>> {
+    jobs.iter()
+        .map(|job| {
+            let identity = match &job.sha1 {
+                Some(sha1) => format!("sha1:{sha1}"),
+                None => {
+                    let meta =
+                        std::fs::metadata(&job.jar).map_err(|source| io_err(&job.jar, source))?;
+                    let modified = meta
+                        .modified()
+                        .map_err(|source| io_err(&job.jar, source))?
+                        .duration_since(UNIX_EPOCH)
+                        .map_or(0, |d| d.as_nanos());
+                    format!("meta:{}:{modified}", meta.len())
+                }
+            };
+            Ok(format!(
+                "{}|{identity}|{}",
+                job.jar.display(),
+                job.excludes.join(",")
+            ))
+        })
+        .collect()
+}
+
+/// 版本 JSON 为某 native 库当前平台 jar 声明的 sha1。
+fn native_jar_sha1(lib: &Library, ctx: &RuntimeContext) -> Option<String> {
+    if lib.natives.is_some() {
+        return lib.native_artifact(ctx).map(|a| a.sha1.clone());
+    }
+    lib.downloads
+        .as_ref()
+        .and_then(|d| d.artifact.as_ref())
+        .map(|a| a.sha1.clone())
 }
 
 /// 某 native 库当前平台对应 jar 的相对仓库路径。
@@ -99,11 +196,12 @@ fn effective_excludes(lib: &Library) -> Vec<String> {
 }
 
 /// 同步解压单个 jar 里未被排除的条目到 `dest`，保留其内部相对结构（用 enclosed_name 防目录穿越）。
-fn extract_jar(jar: &Path, dest: &Path, excludes: &[String]) -> Result<u32> {
+/// 返回解出文件相对 `dest` 的路径。
+fn extract_jar(jar: &Path, dest: &Path, excludes: &[String]) -> Result<Vec<PathBuf>> {
     let file = File::open(jar).map_err(|source| io_err(jar, source))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|source| zip_err(jar, source))?;
 
-    let mut count = 0u32;
+    let mut extracted = Vec::new();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|source| zip_err(jar, source))?;
         if entry.is_dir() || !should_extract(entry.name(), excludes) {
@@ -119,9 +217,9 @@ fn extract_jar(jar: &Path, dest: &Path, excludes: &[String]) -> Result<u32> {
         }
         let mut out = File::create(&target).map_err(|source| io_err(&target, source))?;
         io::copy(&mut entry, &mut out).map_err(|source| io_err(&target, source))?;
-        count += 1;
+        extracted.push(rel);
     }
-    Ok(count)
+    Ok(extracted)
 }
 
 #[cfg(test)]
@@ -180,36 +278,83 @@ mod tests {
         build_test_jar(&jar);
         let dest = dir.path().join("out-natives");
 
-        let count = extract_jar(&jar, &dest, &["META-INF/".to_string()]).unwrap();
-        assert_eq!(count, 1, "只应解压 dll");
+        let extracted = extract_jar(&jar, &dest, &["META-INF/".to_string()]).unwrap();
+        assert_eq!(extracted, vec![PathBuf::from("lwjgl.dll")], "只应解压 dll");
         assert_eq!(std::fs::read(dest.join("lwjgl.dll")).unwrap(), b"fake-dll-bytes");
         assert!(!dest.join("META-INF").exists(), "META-INF 应被排除");
+    }
+
+    fn new_style_version(sha1: &str) -> VersionJson {
+        VersionJson::from_json_str(&format!(
+            r#"{{"id":"1.21","libraries":[
+                {{"name":"org.lwjgl:lwjgl:3.3.3:natives-windows",
+                 "downloads":{{"artifact":{{"path":"org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar","sha1":"{sha1}","size":1,"url":"u"}}}}}}
+            ]}}"#
+        ))
+        .unwrap()
+    }
+
+    fn put_native_jar(layout: &GameLayout) {
+        let jar_path = layout.library_path("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar");
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        build_test_jar(&jar_path);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn extract_all_natives_pulls_from_new_style_library() {
         let dir = tempfile::tempdir().unwrap();
         let layout = GameLayout::new(dir.path());
-        // 造出库落点上的 native jar。
-        let rel = "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar";
-        let jar_path = layout.library_path(rel);
-        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
-        build_test_jar(&jar_path);
-
-        let version = VersionJson::from_json_str(
-            r#"{"id":"1.21","libraries":[
-                {"name":"org.lwjgl:lwjgl:3.3.3:natives-windows",
-                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar","sha1":"x","size":1,"url":"u"}}}
-            ]}"#,
-        )
-        .unwrap();
+        put_native_jar(&layout);
         let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
 
-        let count = extract_all_natives(&version, &ctx, &layout, "1.21").await.unwrap();
+        let count = extract_all_natives(&new_style_version("x"), &ctx, &layout, "1.21")
+            .await
+            .unwrap();
         assert_eq!(count, 1);
         assert_eq!(
             std::fs::read(layout.natives_dir("1.21").join("lwjgl.dll")).unwrap(),
             b"fake-dll-bytes"
+        );
+    }
+
+    /// 第二次补全命中戳记：被改写的 dll 不会被覆盖回 jar 里的内容；jar 的 sha1 变了、
+    /// 或解出的文件被删，就重新解压。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stamp_skips_re_extraction_until_jar_or_files_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        put_native_jar(&layout);
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let dll = layout.natives_dir("1.21").join("lwjgl.dll");
+        let (ctx, layout) = (&ctx, &layout);
+        let run = |sha1: &'static str| async move {
+            extract_all_natives(&new_style_version(sha1), ctx, layout, "1.21")
+                .await
+                .unwrap()
+        };
+
+        assert_eq!(run("aaa").await, 1);
+        std::fs::write(&dll, b"touched").unwrap();
+        assert_eq!(run("aaa").await, 1);
+        assert_eq!(
+            std::fs::read(&dll).unwrap(),
+            b"touched",
+            "戳记一致时不应重新解压"
+        );
+
+        assert_eq!(run("bbb").await, 1);
+        assert_eq!(
+            std::fs::read(&dll).unwrap(),
+            b"fake-dll-bytes",
+            "jar 变了应重新解压"
+        );
+
+        std::fs::remove_file(&dll).unwrap();
+        assert_eq!(run("bbb").await, 1);
+        assert_eq!(
+            std::fs::read(&dll).unwrap(),
+            b"fake-dll-bytes",
+            "解出的文件缺了应重新解压"
         );
     }
 }
