@@ -9,6 +9,8 @@
 //! 3. 进度/事件走一条固定范式：命令内建一个 `tokio::mpsc` 通道作为门面的 [`EventSink`]，另起一个
 //!    转发任务把 [`CoreEvent`] 逐条 `emit` 成 Tauri 事件推给前端（见 `create_offline_account`）。
 
+mod logging;
+
 use std::path::PathBuf;
 
 use aurora_core::{
@@ -1097,6 +1099,16 @@ async fn set_mod_enabled(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 先装 subscriber 再做任何事：配置载入、数据目录探测这些最容易出问题的动作都在下面，
+    // 晚一步初始化，恰恰是最想看的那几行日志就丢了。
+    let log_path = logging::init();
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        log = ?log_path,
+        "{} 启动",
+        aurora_base::brand::APP_NAME_EN
+    );
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
