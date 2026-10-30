@@ -1,0 +1,322 @@
+/*
+ * 全项目唯一写令牌字面值的文件。所有 --sk-* 令牌只在 :root（<html>）上声明：
+ * 派生令牌（color-mix 一类）在声明它的元素上求值，若在后代上覆盖基础令牌，后代拿到的派生值仍是根上的旧值，
+ * 所以任何 --sk-* 都不允许在 :root 之外覆盖。
+ *
+ * 选择器顺序有意义：[data-sk-accent] 与 [data-sk-mode] 特异性相同，夜樱块必须写在日樱强调色块之后，
+ * 「夜樱 + 樱粉」才能盖掉日樱紫水晶 / 青苔的值；双属性块特异性更高，放在最后。
+ *
+ * 外观属性只挂在 <html>：data-sk-mode = day | night，data-sk-accent = sakura | amethyst | moss，
+ * data-sk-tier = compact | regular | wide，data-sk-reduced（存在即生效）。
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- 中性色（日樱） ---- */
+  --sk-bg: #FBF7F9;
+  --sk-bg-2: #F5EDF1;
+  --sk-bg-3: #EFE4EA;
+  --sk-surface: #FFFFFF;
+  --sk-card: rgba(255, 255, 255, 0.86);
+  --sk-card-hover: #FFFFFF;
+  --sk-line: #F1E6EB;
+  --sk-line-2: #E6D6DE;
+  --sk-line-strong: #8D7F88;
+  --sk-text: #2A2229;
+  --sk-text-2: #70646C;
+  --sk-text-3: #B8ACB4;
+
+  /* ---- 强调色（日樱 · 樱粉） ---- */
+  --sk-accent: #CF3080;
+  --sk-accent-2: #F7B6D2;
+  --sk-accent-strong: #B0296D;
+  --sk-accent-ink: #FFFFFF;
+
+  /* ---- 状态色（日樱） ---- */
+  --sk-ok: #336B3A;
+  --sk-warn: #845613;
+  --sk-danger: #BA2434;
+  --sk-info: #305BC0;
+  --sk-ok-soft: color-mix(in srgb, var(--sk-ok) 12%, transparent);
+  --sk-warn-soft: color-mix(in srgb, var(--sk-warn) 12%, transparent);
+  --sk-danger-soft: color-mix(in srgb, var(--sk-danger) 10%, transparent);
+  --sk-info-soft: color-mix(in srgb, var(--sk-info) 11%, transparent);
+  --sk-ok-ink: #FFFFFF;
+  --sk-warn-ink: #FFFFFF;
+  --sk-danger-ink: #FFFFFF;
+  --sk-info-ink: #FFFFFF;
+
+  /* ---- 遮罩与状态层（日樱） ---- */
+  --sk-scrim: rgba(52, 30, 44, 0.24);
+  --sk-fill-hover: rgba(30, 16, 26, 0.08);
+  --sk-fill-press: rgba(30, 16, 26, 0.14);
+
+  /* ---- 阴影（日樱用樱木色，暖调阴影不会在浅樱底上发灰） ---- */
+  --sk-shadow-sm: 0 1px 2px rgba(110, 50, 80, 0.06), 0 2px 8px -2px rgba(110, 50, 80, 0.06);
+  --sk-shadow: 0 1px 2px rgba(110, 50, 80, 0.05), 0 8px 24px -10px rgba(110, 50, 80, 0.18);
+  --sk-shadow-lg: 0 2px 6px rgba(110, 50, 80, 0.06), 0 24px 60px -18px rgba(110, 50, 80, 0.32);
+
+  /* ---- 渐变、晕染、热力（日樱形式） ---- */
+  --sk-accent-grad: linear-gradient(140deg, color-mix(in srgb, var(--sk-accent-2) 35%, var(--sk-accent)) 0%, var(--sk-accent) 30%, var(--sk-accent) 100%);
+  --sk-ambience:
+    radial-gradient(60% 50% at 92% -8%, color-mix(in srgb, var(--sk-accent-2) 38%, transparent), transparent 70%),
+    radial-gradient(50% 45% at 18% 108%, color-mix(in srgb, var(--sk-leaf) 14%, transparent), transparent 70%);
+  --sk-heat-1: color-mix(in srgb, var(--sk-accent) 20%, var(--sk-bg-2));
+  --sk-heat-2: color-mix(in srgb, var(--sk-accent) 42%, var(--sk-bg-2));
+  --sk-heat-3: color-mix(in srgb, var(--sk-accent) 68%, var(--sk-bg-2));
+  --sk-heat-4: var(--sk-accent);
+  --sk-tex-dim: 0;
+
+  /* ---- 色相底座分量（日樱） ---- */
+  --sk-hue-s: 55%;
+  --sk-hue-l: 95%;
+  --sk-hue-edge-s: 40%;
+  --sk-hue-edge-l: 88%;
+  --sk-hue-glyph-s: 45%;
+  --sk-hue-glyph-l: 31%;
+
+  /* ---- 派生令牌：只在这里声明一次，自动跟随明暗与强调色 ---- */
+  --sk-accent-soft: color-mix(in srgb, var(--sk-accent) 11%, transparent);
+  --sk-accent-soft-2: color-mix(in srgb, var(--sk-accent) 20%, transparent);
+  --sk-accent-line: color-mix(in srgb, var(--sk-accent) 38%, transparent);
+  --sk-accent-glow: 0 6px 18px -6px color-mix(in srgb, var(--sk-accent) 60%, transparent);
+  --sk-focus: 0 0 0 2px var(--sk-surface), 0 0 0 4px var(--sk-accent);
+  --sk-focus-danger: 0 0 0 2px var(--sk-surface), 0 0 0 4px var(--sk-danger);
+  --sk-ok-tint: color-mix(in srgb, var(--sk-ok) 10%, var(--sk-surface));
+  --sk-warn-tint: color-mix(in srgb, var(--sk-warn) 10%, var(--sk-surface));
+  --sk-danger-tint: color-mix(in srgb, var(--sk-danger) 10%, var(--sk-surface));
+  --sk-info-tint: color-mix(in srgb, var(--sk-info) 10%, var(--sk-surface));
+  --sk-selection: var(--sk-accent-soft-2);
+  --sk-scroll-thumb: color-mix(in srgb, var(--sk-text-2) 28%, transparent);
+  --sk-scroll-thumb-hover: color-mix(in srgb, var(--sk-text-2) 45%, transparent);
+
+  /* ---- 花瓣五阶：与白色混合而不是与底色混合，夜樱下花瓣仍然发亮 ---- */
+  --sk-petal-0: color-mix(in srgb, var(--sk-accent) 24%, #ffffff);
+  --sk-petal-1: color-mix(in srgb, var(--sk-accent) 42%, #ffffff);
+  --sk-petal-2: color-mix(in srgb, var(--sk-accent) 62%, #ffffff);
+  --sk-petal-3: color-mix(in srgb, var(--sk-accent) 82%, #ffffff);
+  --sk-petal-4: var(--sk-accent);
+  /* 樱花徽记与插画的花心：日夜相同的白，不随强调色变化 */
+  --sk-blossom-heart: #FFFFFF;
+
+  /* ---- 主题无关：插画、识别色、媒体、窗口关闭键 ---- */
+  --sk-gloss: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  --sk-wood: #A8546A;
+  --sk-leaf: #7DBA6A;
+  --sk-loader-vanilla: #6FA85E;
+  --sk-loader-fabric: #B79A6E;
+  --sk-loader-quilt: #8D6CC9;
+  --sk-loader-forge: #5E6E88;
+  --sk-loader-neoforge: #D9822B;
+  --sk-media-ink: #1E101A;
+  --sk-on-media: #FFFFFF;
+  --sk-on-media-2: rgba(255, 255, 255, 0.9);
+  --sk-media-text-shadow: 0 1px 2px rgba(30, 16, 26, 0.35), 0 2px 14px rgba(30, 16, 26, 0.35);
+  --sk-shade-bottom: linear-gradient(180deg, rgba(30, 16, 26, 0) 20%, rgba(30, 16, 26, 0.62) 58%, rgba(30, 16, 26, 0.72) 100%);
+  --sk-shade-left: linear-gradient(90deg, rgba(30, 16, 26, 0.72) 0%, rgba(30, 16, 26, 0.62) 55%, rgba(30, 16, 26, 0) 100%);
+  --sk-shade-soft: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(30, 16, 26, 0.22));
+  --sk-win-close: #E5484D;
+  --sk-win-close-active: #C9373C;
+  --sk-win-close-ink: #FFFFFF;
+  --sk-disabled: 0.5;
+  --sk-scrollbar-size: 10px;
+
+  /* ---- 字体与字重 ---- */
+  --sk-font: "Outfit Variable", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --sk-mono: "JetBrains Mono Variable", "Microsoft YaHei UI", "Microsoft YaHei", monospace;
+  --sk-w-body: 450;
+  --sk-w-medium: 500;
+  --sk-w-title: 650;
+  --sk-w-mono: 400;
+
+  /* ---- 字阶：字号 / 行高 / 字距（只有给出字距的角色才有 ls） ---- */
+  --sk-fs-display: 32px;
+  --sk-lh-display: 38px;
+  --sk-ls-display: -0.015em;
+  --sk-fs-hero: 28px;
+  --sk-lh-hero: 34px;
+  --sk-ls-hero: -0.015em;
+  --sk-fs-title: 24px;
+  --sk-lh-title: 30px;
+  --sk-ls-title: -0.01em;
+  --sk-fs-lead: 20px;
+  --sk-lh-lead: 26px;
+  --sk-fs-heading: 18px;
+  --sk-lh-heading: 24px;
+  --sk-fs-section: 15px;
+  --sk-lh-section: 22px;
+  --sk-fs-body: 14px;
+  --sk-lh-body: 22px;
+  --sk-fs-small: 13px;
+  --sk-lh-small: 20px;
+  --sk-fs-caption: 12px;
+  --sk-lh-caption: 18px;
+  --sk-fs-micro: 11px;
+  --sk-lh-micro: 14px;
+  --sk-fs-mono: 12px;
+  --sk-lh-mono: 19px;
+  --sk-fs-mono-sm: 11px;
+  --sk-lh-mono-sm: 17px;
+  --sk-fs-mono-lg: 28px;
+  --sk-lh-mono-lg: 34px;
+  --sk-ls-mono-lg: 0.06em;
+
+  /* ---- 间距刻度（令牌名即像素值，刻度本身永不改值）与语义间距 ---- */
+  --sk-space-2: 2px;
+  --sk-space-4: 4px;
+  --sk-space-6: 6px;
+  --sk-space-8: 8px;
+  --sk-space-10: 10px;
+  --sk-space-12: 12px;
+  --sk-space-14: 14px;
+  --sk-space-16: 16px;
+  --sk-space-18: 18px;
+  --sk-space-20: 20px;
+  --sk-space-22: 22px;
+  --sk-space-24: 24px;
+  --sk-space-28: 28px;
+  --sk-space-32: 32px;
+  --sk-space-40: 40px;
+  --sk-space-48: 48px;
+  --sk-space-64: 64px;
+  --sk-gap: 14px;
+  --sk-page-gap: 18px;
+  --sk-page-pad-top: 6px;
+  --sk-page-pad-right: 22px;
+  --sk-page-pad-bottom: 24px;
+  --sk-page-pad-left: 8px;
+  --sk-page-narrow: 920px;
+  --sk-page-max: 1830px;
+
+  /* ---- 圆角 ---- */
+  --sk-r-xs: 7px;
+  --sk-r-sm: 10px;
+  --sk-r: 14px;
+  --sk-r-lg: 18px;
+  --sk-r-xl: 22px;
+  --sk-r-pill: 999px;
+
+  /* ---- 层级：根元素内 / 浮层根内 ---- */
+  --sk-z-backdrop: 0;
+  --sk-z-petals: 0;
+  --sk-z-page: 1;
+  --sk-z-main: 2;
+  --sk-z-sidebar: 3;
+  --sk-z-overlay: 50;
+  --sk-z-modal: 10;
+  --sk-z-palette: 20;
+  --sk-z-popover: 30;
+  --sk-z-toast: 40;
+  --sk-z-tooltip: 50;
+
+  /* ---- 动效：曲线、补间时长、弹簧的 CSS 近似、循环周期 ---- */
+  --sk-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --sk-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --sk-ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --sk-ease-breath: cubic-bezier(0.45, 0, 0.55, 1);
+  --sk-dur-out: 120ms;
+  --sk-dur-hover: 150ms;
+  --sk-dur-in: 200ms;
+  --sk-dur-reveal: 300ms;
+  /* 弹簧近似由两参弹簧的解析解等时采样得到，motion 测试按同一算法校验这里的每个采样点 */
+  --sk-spring-tap: linear(0, 0.047, 0.151, 0.275, 0.398, 0.511, 0.609, 0.691, 0.759, 0.813, 0.856, 0.89, 0.916, 0.937, 0.952, 0.964, 0.973, 0.98, 0.985, 0.989, 0.992, 0.994, 0.995, 0.997, 0.998, 1);
+  --sk-spring-tap-dur: 300ms;
+  --sk-spring-settle: linear(0, 0.035, 0.118, 0.223, 0.336, 0.446, 0.547, 0.636, 0.713, 0.777, 0.829, 0.872, 0.905, 0.931, 0.951, 0.966, 0.977, 0.985, 0.991, 0.995, 0.998, 1);
+  --sk-spring-settle-dur: 250ms;
+  --sk-spring-pop: linear(0, 0.025, 0.087, 0.172, 0.269, 0.369, 0.467, 0.558, 0.642, 0.715, 0.779, 0.833, 0.878, 0.914, 0.943, 0.965, 0.982, 0.994, 1.003, 1.009, 1.013, 1.015, 1.015, 1.015, 1.014, 1.013, 1.011, 1.01, 1.008, 1.007, 1.006, 1.004, 1.003, 1.003, 1);
+  --sk-spring-pop-dur: 410ms;
+  --sk-loop-spin: 1600ms;
+  --sk-loop-pulse: 1600ms;
+  --sk-loop-shimmer: 1300ms;
+  --sk-loop-indet: 1200ms;
+  --sk-loop-breath: 2800ms;
+}
+
+:root[data-sk-accent="amethyst"] {
+  --sk-accent: #8953DF;
+  --sk-accent-2: #CDB6F5;
+  --sk-accent-strong: #793BDB;
+  --sk-accent-ink: #FFFFFF;
+}
+
+:root[data-sk-accent="moss"] {
+  --sk-accent: #3F7D49;
+  --sk-accent-2: #B9DDB0;
+  --sk-accent-strong: #376D3F;
+  --sk-accent-ink: #FFFFFF;
+}
+
+:root[data-sk-mode="night"] {
+  color-scheme: dark;
+
+  --sk-bg: #1B1620;
+  --sk-bg-2: #241D2B;
+  --sk-bg-3: #2D2535;
+  --sk-surface: #262030;
+  --sk-card: rgba(38, 32, 48, 0.84);
+  --sk-card-hover: #2B2436;
+  --sk-line: #352C3F;
+  --sk-line-2: #43384E;
+  --sk-line-strong: #7F6C81;
+  --sk-text: #F3EAF1;
+  --sk-text-2: #A797A8;
+  --sk-text-3: #6F6275;
+
+  /* 夜樱 · 樱粉：accent-2 取紫水晶色是有意为之，夜樱渐变从紫过渡到粉；实心强调底改深墨字 */
+  --sk-accent: #F06AAE;
+  --sk-accent-2: #B98CF0;
+  --sk-accent-strong: #FF8CC4;
+  --sk-accent-ink: #1B1620;
+
+  --sk-ok: #6CC777;
+  --sk-warn: #E8A948;
+  --sk-danger: #F17481;
+  --sk-info: #8AA6EF;
+  --sk-ok-soft: color-mix(in srgb, var(--sk-ok) 14%, transparent);
+  --sk-warn-soft: color-mix(in srgb, var(--sk-warn) 14%, transparent);
+  --sk-danger-soft: color-mix(in srgb, var(--sk-danger) 13%, transparent);
+  --sk-info-soft: color-mix(in srgb, var(--sk-info) 14%, transparent);
+  --sk-ok-ink: #1B1620;
+  --sk-warn-ink: #1B1620;
+  --sk-danger-ink: #1B1620;
+  --sk-info-ink: #1B1620;
+
+  --sk-scrim: rgba(8, 4, 12, 0.5);
+  --sk-fill-hover: rgba(255, 255, 255, 0.10);
+  --sk-fill-press: rgba(255, 255, 255, 0.16);
+
+  --sk-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --sk-shadow: 0 1px 2px rgba(0, 0, 0, 0.25), 0 10px 28px -12px rgba(0, 0, 0, 0.6);
+  --sk-shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.3), 0 28px 64px -18px rgba(0, 0, 0, 0.75);
+
+  --sk-accent-grad: linear-gradient(140deg, var(--sk-accent-2) -30%, var(--sk-accent) 70%);
+  --sk-ambience:
+    radial-gradient(60% 50% at 92% -8%, color-mix(in srgb, var(--sk-accent-2) 16%, transparent), transparent 70%),
+    radial-gradient(50% 45% at 18% 108%, color-mix(in srgb, var(--sk-accent) 10%, transparent), transparent 70%);
+  --sk-heat-1: color-mix(in srgb, var(--sk-accent) 18%, var(--sk-bg-2));
+  --sk-heat-2: color-mix(in srgb, var(--sk-accent) 34%, var(--sk-bg-2));
+  --sk-heat-3: color-mix(in srgb, var(--sk-accent) 50%, var(--sk-bg-2));
+  --sk-tex-dim: 0.12;
+
+  --sk-hue-s: 20%;
+  --sk-hue-l: 21%;
+  --sk-hue-edge-s: 18%;
+  --sk-hue-edge-l: 30%;
+  --sk-hue-glyph-s: 45%;
+  --sk-hue-glyph-l: 78%;
+}
+
+:root[data-sk-mode="night"][data-sk-accent="amethyst"] {
+  --sk-accent: #B08CF5;
+  --sk-accent-2: #E2D3FF;
+  --sk-accent-strong: #C7AAFC;
+  --sk-accent-ink: #1B1620;
+}
+
+:root[data-sk-mode="night"][data-sk-accent="moss"] {
+  --sk-accent: #78C287;
+  --sk-accent-2: #C9E9C0;
+  --sk-accent-strong: #93D6A0;
+  --sk-accent-ink: #1B1620;
+}

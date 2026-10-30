@@ -1,0 +1,179 @@
+@import "tailwindcss";
+@import "./tokens.css";
+@import "./base.css";
+
+/* 清空默认主题：页面无从写出令牌之外的颜色、圆角、阴影、字体、字号与视口断点。
+ * 数字间距（按 --spacing 倍数算的 p-4 一类）不清空，由守卫在页面、流程、外壳目录禁止。 */
+@theme {
+  --color-*: initial;
+  --radius-*: initial;
+  --shadow-*: initial;
+  --font-*: initial;
+  --font-weight-*: initial;
+  --text-*: initial;
+  --leading-*: initial;
+  --tracking-*: initial;
+  --breakpoint-*: initial;
+}
+
+/* inline：工具类直接产出 var(--sk-*)，不经过中间变量，外观切换只改 <html> 上的令牌即可生效。 */
+@theme inline {
+  /* 颜色 */
+  --color-sk-bg: var(--sk-bg);
+  --color-sk-bg-2: var(--sk-bg-2);
+  --color-sk-bg-3: var(--sk-bg-3);
+  --color-sk-surface: var(--sk-surface);
+  --color-sk-card: var(--sk-card);
+  --color-sk-card-hover: var(--sk-card-hover);
+  --color-sk-line: var(--sk-line);
+  --color-sk-line-2: var(--sk-line-2);
+  --color-sk-line-strong: var(--sk-line-strong);
+  --color-sk-text: var(--sk-text);
+  --color-sk-text-2: var(--sk-text-2);
+  --color-sk-text-3: var(--sk-text-3);
+  --color-sk-accent: var(--sk-accent);
+  --color-sk-accent-2: var(--sk-accent-2);
+  --color-sk-accent-strong: var(--sk-accent-strong);
+  --color-sk-accent-ink: var(--sk-accent-ink);
+  --color-sk-accent-soft: var(--sk-accent-soft);
+  --color-sk-accent-soft-2: var(--sk-accent-soft-2);
+  --color-sk-accent-line: var(--sk-accent-line);
+  --color-sk-ok: var(--sk-ok);
+  --color-sk-warn: var(--sk-warn);
+  --color-sk-danger: var(--sk-danger);
+  --color-sk-info: var(--sk-info);
+  --color-sk-ok-soft: var(--sk-ok-soft);
+  --color-sk-warn-soft: var(--sk-warn-soft);
+  --color-sk-danger-soft: var(--sk-danger-soft);
+  --color-sk-info-soft: var(--sk-info-soft);
+  --color-sk-ok-tint: var(--sk-ok-tint);
+  --color-sk-warn-tint: var(--sk-warn-tint);
+  --color-sk-danger-tint: var(--sk-danger-tint);
+  --color-sk-info-tint: var(--sk-info-tint);
+  --color-sk-ok-ink: var(--sk-ok-ink);
+  --color-sk-warn-ink: var(--sk-warn-ink);
+  --color-sk-danger-ink: var(--sk-danger-ink);
+  --color-sk-info-ink: var(--sk-info-ink);
+  --color-sk-scrim: var(--sk-scrim);
+  --color-sk-fill-hover: var(--sk-fill-hover);
+  --color-sk-fill-press: var(--sk-fill-press);
+  --color-sk-selection: var(--sk-selection);
+  --color-sk-scroll-thumb: var(--sk-scroll-thumb);
+  --color-sk-scroll-thumb-hover: var(--sk-scroll-thumb-hover);
+  --color-sk-heat-1: var(--sk-heat-1);
+  --color-sk-heat-2: var(--sk-heat-2);
+  --color-sk-heat-3: var(--sk-heat-3);
+  --color-sk-heat-4: var(--sk-heat-4);
+  --color-sk-petal-0: var(--sk-petal-0);
+  --color-sk-petal-1: var(--sk-petal-1);
+  --color-sk-petal-2: var(--sk-petal-2);
+  --color-sk-petal-3: var(--sk-petal-3);
+  --color-sk-petal-4: var(--sk-petal-4);
+  --color-sk-blossom-heart: var(--sk-blossom-heart);
+  --color-sk-wood: var(--sk-wood);
+  --color-sk-leaf: var(--sk-leaf);
+  --color-sk-loader-vanilla: var(--sk-loader-vanilla);
+  --color-sk-loader-fabric: var(--sk-loader-fabric);
+  --color-sk-loader-quilt: var(--sk-loader-quilt);
+  --color-sk-loader-forge: var(--sk-loader-forge);
+  --color-sk-loader-neoforge: var(--sk-loader-neoforge);
+  --color-sk-media-ink: var(--sk-media-ink);
+  --color-sk-on-media: var(--sk-on-media);
+  --color-sk-on-media-2: var(--sk-on-media-2);
+  --color-sk-win-close: var(--sk-win-close);
+  --color-sk-win-close-active: var(--sk-win-close-active);
+  --color-sk-win-close-ink: var(--sk-win-close-ink);
+
+  /* 圆角 */
+  --radius-sk-xs: var(--sk-r-xs);
+  --radius-sk-sm: var(--sk-r-sm);
+  --radius-sk: var(--sk-r);
+  --radius-sk-lg: var(--sk-r-lg);
+  --radius-sk-xl: var(--sk-r-xl);
+  --radius-sk-pill: var(--sk-r-pill);
+
+  /* 阴影 */
+  --shadow-sk-sm: var(--sk-shadow-sm);
+  --shadow-sk: var(--sk-shadow);
+  --shadow-sk-lg: var(--sk-shadow-lg);
+
+  /* 字体与字重 */
+  --font-sans: var(--sk-font);
+  --font-mono: var(--sk-mono);
+  --font-weight-sk-body: var(--sk-w-body);
+  --font-weight-sk-medium: var(--sk-w-medium);
+  --font-weight-sk-title: var(--sk-w-title);
+  --font-weight-sk-mono: var(--sk-w-mono);
+
+  /* 字阶：每个角色字号 + 行高，有字距的角色再加字距 */
+  --text-sk-display: var(--sk-fs-display);
+  --text-sk-display--line-height: var(--sk-lh-display);
+  --text-sk-display--letter-spacing: var(--sk-ls-display);
+  --text-sk-hero: var(--sk-fs-hero);
+  --text-sk-hero--line-height: var(--sk-lh-hero);
+  --text-sk-hero--letter-spacing: var(--sk-ls-hero);
+  --text-sk-title: var(--sk-fs-title);
+  --text-sk-title--line-height: var(--sk-lh-title);
+  --text-sk-title--letter-spacing: var(--sk-ls-title);
+  --text-sk-lead: var(--sk-fs-lead);
+  --text-sk-lead--line-height: var(--sk-lh-lead);
+  --text-sk-heading: var(--sk-fs-heading);
+  --text-sk-heading--line-height: var(--sk-lh-heading);
+  --text-sk-section: var(--sk-fs-section);
+  --text-sk-section--line-height: var(--sk-lh-section);
+  --text-sk-body: var(--sk-fs-body);
+  --text-sk-body--line-height: var(--sk-lh-body);
+  --text-sk-small: var(--sk-fs-small);
+  --text-sk-small--line-height: var(--sk-lh-small);
+  --text-sk-caption: var(--sk-fs-caption);
+  --text-sk-caption--line-height: var(--sk-lh-caption);
+  --text-sk-micro: var(--sk-fs-micro);
+  --text-sk-micro--line-height: var(--sk-lh-micro);
+  --text-sk-mono: var(--sk-fs-mono);
+  --text-sk-mono--line-height: var(--sk-lh-mono);
+  --text-sk-mono-sm: var(--sk-fs-mono-sm);
+  --text-sk-mono-sm--line-height: var(--sk-lh-mono-sm);
+  --text-sk-mono-lg: var(--sk-fs-mono-lg);
+  --text-sk-mono-lg--line-height: var(--sk-lh-mono-lg);
+  --text-sk-mono-lg--letter-spacing: var(--sk-ls-mono-lg);
+
+  /* 缓动 */
+  --ease-sk: var(--sk-ease);
+  --ease-sk-out: var(--sk-ease-out);
+  --ease-sk-in: var(--sk-ease-in);
+  --ease-sk-breath: var(--sk-ease-breath);
+
+  /* 间距：刻度与语义间距 */
+  --spacing-sk-2: var(--sk-space-2);
+  --spacing-sk-4: var(--sk-space-4);
+  --spacing-sk-6: var(--sk-space-6);
+  --spacing-sk-8: var(--sk-space-8);
+  --spacing-sk-10: var(--sk-space-10);
+  --spacing-sk-12: var(--sk-space-12);
+  --spacing-sk-14: var(--sk-space-14);
+  --spacing-sk-16: var(--sk-space-16);
+  --spacing-sk-18: var(--sk-space-18);
+  --spacing-sk-20: var(--sk-space-20);
+  --spacing-sk-22: var(--sk-space-22);
+  --spacing-sk-24: var(--sk-space-24);
+  --spacing-sk-28: var(--sk-space-28);
+  --spacing-sk-32: var(--sk-space-32);
+  --spacing-sk-40: var(--sk-space-40);
+  --spacing-sk-48: var(--sk-space-48);
+  --spacing-sk-64: var(--sk-space-64);
+  --spacing-sk-gap: var(--sk-gap);
+  --spacing-sk-page-gap: var(--sk-page-gap);
+  --spacing-sk-page-pad-top: var(--sk-page-pad-top);
+  --spacing-sk-page-pad-right: var(--sk-page-pad-right);
+  --spacing-sk-page-pad-bottom: var(--sk-page-pad-bottom);
+  --spacing-sk-page-pad-left: var(--sk-page-pad-left);
+  --spacing-sk-page-narrow: var(--sk-page-narrow);
+  --spacing-sk-page-max: var(--sk-page-max);
+}
+
+/* 尺寸分档、明暗与减少动画的变体：属性只挂在 <html> 上，变体按祖先匹配。 */
+@custom-variant compact (&:where([data-sk-tier="compact"], [data-sk-tier="compact"] *));
+@custom-variant regular (&:where([data-sk-tier="regular"], [data-sk-tier="regular"] *));
+@custom-variant wide (&:where([data-sk-tier="wide"], [data-sk-tier="wide"] *));
+@custom-variant night (&:where([data-sk-mode="night"], [data-sk-mode="night"] *));
+@custom-variant reduced (&:where([data-sk-reduced], [data-sk-reduced] *));
