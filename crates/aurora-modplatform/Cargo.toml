@@ -22,7 +22,8 @@ thiserror = "2.0.18"
 tracing = "0.1"
 # 目录扫描(fs)、把 zip 阻塞读放进 spawn_blocking(rt)、聚合搜索并发用 tokio::join!(macros)。
 # 运行时风格由上层选择，不强制 rt-multi-thread。
-tokio = { version = "1", default-features = false, features = ["fs", "rt", "macros"] }
+# 元数据请求的全局令牌桶节流闸要异步锁(sync)与等待(time)。
+tokio = { version = "1", default-features = false, features = ["fs", "rt", "macros", "sync", "time"] }
 
 [dev-dependencies]
 # wiremock 需真正后台运行时，测试用 multi_thread flavor，故补 macros/rt-multi-thread，并带 fs 便于建临时模组目录。
