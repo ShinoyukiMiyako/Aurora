@@ -84,6 +84,17 @@ pub fn run() {
             // -- mods --
             commands::mods::list_mods,
             commands::mods::set_mod_enabled,
+            commands::mods::remove_mod,
+            commands::mods::check_updates,
+            commands::mods::update_mod,
+            commands::mods::list_mod_versions,
+            commands::mods::match_instances,
+            commands::mods::plan_install,
+            // -- history --
+            commands::history::list_history,
+            commands::history::rollback_checks,
+            commands::history::rollback,
+            commands::history::backup_size,
             // -- discover --
             commands::discover::search_resources,
             commands::discover::install_mod,

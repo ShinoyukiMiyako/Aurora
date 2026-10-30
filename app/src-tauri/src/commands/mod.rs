@@ -11,6 +11,7 @@ pub mod appearance;
 pub mod config;
 pub mod discover;
 pub mod error;
+pub mod history;
 pub mod instances;
 pub mod java;
 pub mod launch;
