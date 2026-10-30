@@ -539,11 +539,9 @@ mod tests {
         assert!(!registry.is_running("rp#1"));
         let delivered = delivered.lock().unwrap();
         assert!(!delivered.is_empty());
-        assert!(
-            delivered
-                .iter()
-                .all(|p| p.task_id.as_deref() == Some("rp#1"))
-        );
+        assert!(delivered
+            .iter()
+            .all(|p| p.task_id.as_deref() == Some("rp#1")));
     }
 
     #[tokio::test]
@@ -644,13 +642,11 @@ mod tests {
             let err = parse_search(SearchArgs { limit, ..args() }).unwrap_err();
             assert_eq!(err.code, code::INVALID_ARGUMENT, "limit {limit}");
         }
-        assert!(
-            parse_search(SearchArgs {
-                limit: 50,
-                ..args()
-            })
-            .is_ok()
-        );
+        assert!(parse_search(SearchArgs {
+            limit: 50,
+            ..args()
+        })
+        .is_ok());
         assert!(parse_search(SearchArgs { limit: 1, ..args() }).is_ok());
         for category in ["", "Optimization", "a b", "x\"]\"", &"a".repeat(65)] {
             let err = parse_search(SearchArgs {
