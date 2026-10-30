@@ -70,6 +70,18 @@ impl Error {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Error::Cancelled)
     }
+
+    /// 取该错误链上最贴近真相的 HTTP 状态码，供源健康记账与日志字段使用。
+    ///
+    /// 组合型错误自身没有状态码，递归到它承载的最后一次真实失败：排查时关心的是
+    /// 「最终那次请求被服务器怎么拒了」。
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Error::Status { status, .. } => Some(*status),
+            Error::AllSourcesExhausted { last, .. } => last.http_status(),
+            _ => None,
+        }
+    }
 }
 
 /// crate 级 `Result` 别名。
@@ -200,5 +212,23 @@ mod tests {
             status: 503,
         };
         assert_eq!(err.to_string(), "HTTP 状态码 503: http://host/path");
+    }
+
+    #[test]
+    fn http_status_digs_through_exhausted_sources() {
+        let exhausted = Error::AllSourcesExhausted {
+            url: "http://x/a".into(),
+            last: Box::new(Error::Status {
+                url: "http://mirror/a".into(),
+                status: 502,
+            }),
+        };
+        assert_eq!(exhausted.http_status(), Some(502));
+        let transport = Error::IncompleteBody {
+            url: "http://x/a".into(),
+            expected: 10,
+            actual: 3,
+        };
+        assert_eq!(transport.http_status(), None, "传输层失败没有状态码");
     }
 }

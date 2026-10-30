@@ -2,8 +2,10 @@
 //!
 //! [`Downloader::download`] 的一次调用完整覆盖：
 //! 1. 若目标已存在且 sha1/大小校验通过则直接跳过（可重入、幂等安装）。
-//! 2. 把官方 URL 经 [`SourcePlan`] 展开为候选源列表，逐源尝试。
-//! 3. 每个源用 [`retry_async`] 做指数退避重试；耗尽后切换下一个源（即「n 次后切换镜像」）。
+//! 2. 把官方 URL 经 [`SourcePlan`] 展开为候选源列表，已被 [`SourceHealth`] 判定不通的主机沉底，
+//!    逐源尝试。
+//! 3. 每个源用 [`retry_async`] 做指数退避重试；耗尽后切换下一个源（即「n 次后切换镜像」），
+//!    成败记回健康表，后面的文件不再为同一个坏源重复付出整轮重试。
 //! 4. 已知大小且达阈值的大文件走 Range 分块并发下载，分片落 `.petalfall-partN`；网络中断保留已完成
 //!    分片供下次断点续传，损坏（哈希不符）则清分片重下。
 //! 5. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。
@@ -24,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::chunk::{Chunk, ChunkConfig, ChunkPlan};
 use crate::error::{Error, Result};
+use crate::health::{SourceHealth, is_host_fault};
 use crate::progress::ProgressReporter;
 use crate::source::SourcePlan;
 use crate::task::DownloadTask;
@@ -44,15 +47,33 @@ pub struct DownloadConfig {
 pub struct Downloader {
     client: reqwest::Client,
     config: Arc<DownloadConfig>,
+    /// 跨任务共享的源健康表：克隆出的引擎共用同一份，一个文件学到的教训整批受用。
+    health: Arc<SourceHealth>,
 }
 
 impl Downloader {
     /// 用给定客户端与配置构造。客户端应由 [`aurora_base::http::build_client`] 统一构建。
     pub fn new(client: reqwest::Client, config: DownloadConfig) -> Self {
+        Self::with_health(client, config, Arc::new(SourceHealth::new()))
+    }
+
+    /// 复用外部的源健康表构造。多个引擎实例（如一次安装里先后装配的几个池）想共享同一份
+    /// 「哪个源不通」的结论时用它。
+    pub fn with_health(
+        client: reqwest::Client,
+        config: DownloadConfig,
+        health: Arc<SourceHealth>,
+    ) -> Self {
         Self {
             client,
             config: Arc::new(config),
+            health,
         }
+    }
+
+    /// 只读访问源健康表。
+    pub fn health(&self) -> &Arc<SourceHealth> {
+        &self.health
     }
 
     /// 用默认配置构造。
@@ -86,7 +107,11 @@ impl Downloader {
             return Ok(());
         }
 
-        let candidates = self.config.sources.candidates(&task.url)?;
+        // 已被判定不通的主机沉底再试：几千个小文件时，每个文件各自重新发现「这个源不通」的
+        // 重试与退避能浪费十几分钟。
+        let candidates = self
+            .health
+            .prioritize(self.config.sources.candidates(&task.url)?);
         let mut last_err: Option<Error> = None;
         for (index, url) in candidates.iter().enumerate() {
             // 每个源独立退避重试：op 每次生成新 future，携带当前源的 URL。
@@ -99,16 +124,25 @@ impl Downloader {
                 None => retry_async(&self.config.retry, attempt).await,
             };
             match result {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.health.record_success(url);
+                    return Ok(());
+                }
                 Err(Error::Cancelled) => {
                     // 尝试已完整返回，此刻没有进行中的文件操作，清理不会与落盘赛跑。
+                    // 取消是调用方的决定，不说明源的好坏，不记账。
                     self.discard_leftovers(task).await;
                     return Err(Error::Cancelled);
                 }
                 Err(err) => {
-                    tracing::debug!(
+                    // 4xx 只说明「这个源没有这个文件」，换源即可，不能记在主机头上。
+                    self.health
+                        .record_failure(url, is_host_fault(err.http_status()));
+                    tracing::warn!(
                         source_index = index,
+                        file = %task.dest.display(),
                         %url,
+                        http_status = ?err.http_status(),
                         error = %err,
                         "该下载源尝试耗尽，切换下一个源"
                     );
