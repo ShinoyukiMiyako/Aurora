@@ -453,6 +453,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-modpack"
+version = "0.1.0"
+dependencies = [
+ "aurora-instance",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+ "zip 8.6.0",
+]
+
+[[package]]
 name = "aurora-modplatform"
 version = "0.1.0"
 dependencies = [
