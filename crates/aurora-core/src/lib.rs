@@ -69,7 +69,7 @@ pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVers
 pub use aurora_launch::{
     CrashCategory, CrashDiagnosis, ExitReport, KillSwitch, LauncherLevel, LogBatchSink, LogEntry,
     LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, SessionEnded, SessionOutcome,
-    SystemMemory, analyze, detect_crash, game_line_level,
+    SystemMemory, analyze, detect_crash, game_line_level, probe_system_memory,
 };
 pub use aurora_modplatform::{
     AggregateResult, InstalledMod, MetadataFormat, ModLoader, ModMetadata, Platform, PlatformError,
