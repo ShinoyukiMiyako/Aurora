@@ -1,8 +1,8 @@
 //! Petalfall 的 Tauri 外壳。
 //!
-//! 本文件只做装配：日志、插件、managed state 与命令注册。命令实现按领域分在 [`commands`] 下；
-//! 各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、事件转发 [`events`]——
-//! 各自成模块。
+//! 本文件只做装配：日志、插件、managed state、主窗口兜底与命令注册。命令实现按领域分在
+//! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
+//! 事件转发 [`events`]、主窗口启动期处理 [`window`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -12,6 +12,7 @@ mod events;
 mod facade;
 mod logging;
 mod tasks;
+mod window;
 
 use aurora_core::Aurora;
 use tauri::Manager;
@@ -33,6 +34,10 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 更改游戏目录、导入本地整合包要拿磁盘绝对路径，只能走系统对话框。
+        .plugin(tauri_plugin_dialog::init())
+        // 自更新装完后重启进程。
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Aurora::load() 是异步，而 setup 是同步闭包；用 Tauri 运行时 block_on 构造后放进 state。
             // 构造失败（配置损坏等）直接冒泡终止启动，避免带着半初始化的门面继续跑。
@@ -43,6 +48,7 @@ pub fn run() {
             app.manage(TaskJournal::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
+            window::setup_main_window(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
