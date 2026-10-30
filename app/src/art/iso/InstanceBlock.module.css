@@ -1,0 +1,18 @@
+.block {
+  position: relative;
+  display: block;
+  flex: none;
+  pointer-events: none;
+}
+
+/*
+ * 在可点宿主内悬停时方块上浮 2 px（Tap）。宿主是链接、按钮、role=button，或用 data-sk-hover-host
+ * 标记的卡片（卡内有其他控件、整卡不能是按钮时）。减少动画时没有悬停变化。
+ */
+:global(:root:not([data-sk-reduced])) .lift {
+  transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
+}
+
+:global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .lift {
+  transform: translateY(-2px);
+}

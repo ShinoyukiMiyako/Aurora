@@ -1,0 +1,33 @@
+.avatar {
+  --avatar-edge: transparent;
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  box-sizing: border-box;
+  box-shadow: inset 0 0 0 1px var(--avatar-edge);
+}
+
+/* 色相底座：饱和度与明度取色相底座令牌（日夜各一组），色相由实例封面决定 */
+.avatar[data-base="hue"] {
+  /* sk-guard-allow T1: 色相底座公式，分量全部来自令牌 */
+  --avatar-edge: hsl(var(--hue) var(--sk-hue-edge-s) var(--sk-hue-edge-l));
+  /* sk-guard-allow T1: 色相底座公式，分量全部来自令牌 */
+  background: hsl(var(--hue) var(--sk-hue-s) var(--sk-hue-l));
+}
+
+.avatar[data-base="neutral"] {
+  background: var(--sk-bg-2);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+:global(:is(a, button, [role="button"], [data-sk-hover-host]):hover) .avatar[data-base="neutral"] {
+  background: var(--sk-bg-3);
+}
+
+.avatar[data-selected] {
+  box-shadow:
+    inset 0 0 0 1px var(--avatar-edge),
+    0 0 0 2px var(--sk-surface),
+    0 0 0 4px var(--sk-accent);
+}
