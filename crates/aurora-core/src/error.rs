@@ -82,5 +82,45 @@ pub enum CoreError {
     PlatformUnsupported,
 }
 
+impl CoreError {
+    /// 是否由取消令牌引起。取消可能从下载引擎、安装器或 Java 下载任一层冒上来，
+    /// 上层据此把它与真正的失败分开（前端不弹错误、任务记为已取消）。
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            CoreError::Download(err) => err.is_cancelled(),
+            CoreError::Install(aurora_install::Error::Download(err)) => err.is_cancelled(),
+            CoreError::Java(err) => err.is_cancelled(),
+            _ => false,
+        }
+    }
+}
+
 /// 门面层 `Result` 别名，下游用 `#[from] aurora_core::CoreError` 冒泡。
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_is_recognised_at_every_layer_it_can_surface_from() {
+        assert!(CoreError::Download(aurora_download::Error::Cancelled).is_cancelled());
+        assert!(
+            CoreError::Install(aurora_install::Error::Download(
+                aurora_download::Error::Cancelled
+            ))
+            .is_cancelled()
+        );
+        assert!(CoreError::Java(aurora_java::Error::Cancelled).is_cancelled());
+
+        // 真正的失败不能被当成取消。
+        assert!(!CoreError::NoJava { major: 17 }.is_cancelled());
+        assert!(
+            !CoreError::Download(aurora_download::Error::Status {
+                url: "http://x".into(),
+                status: 404,
+            })
+            .is_cancelled()
+        );
+    }
+}

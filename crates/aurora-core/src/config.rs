@@ -14,6 +14,7 @@ use aurora_download::SourcePlan;
 use aurora_instance::IsolationPolicy;
 use serde::{Deserialize, Serialize};
 
+use crate::appearance::Appearance;
 use crate::error::{CoreError, Result};
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
@@ -118,6 +119,8 @@ pub struct AuroraConfig {
     pub cache_directory: Option<PathBuf>,
     /// 找不到匹配 Java 时是否自动下载 Mojang 运行时。
     pub auto_download_java: bool,
+    /// 外观偏好（明暗、强调色、花瓣、全景、减少动画）。
+    pub appearance: Appearance,
 }
 
 impl Default for AuroraConfig {
@@ -133,6 +136,7 @@ impl Default for AuroraConfig {
             selected_version: None,
             cache_directory: None,
             auto_download_java: true,
+            appearance: Appearance::default(),
         }
     }
 }
@@ -285,6 +289,48 @@ mod tests {
         assert_eq!(loaded.download_concurrency, 8);
         assert_eq!(loaded.download_source, DownloadSourcePolicy::Auto);
         assert_eq!(loaded.memory.max_mb, 4096);
+    }
+
+    #[tokio::test]
+    async fn appearance_roundtrips_through_store_and_defaults_when_absent() {
+        use crate::appearance::{AccentColor, AppearanceMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // 旧配置没有 appearance 段：载入后应为日樱、樱粉、花瓣开、全景关、不减少动画。
+        tokio::fs::write(&path, br#"{"download_concurrency": 16}"#)
+            .await
+            .unwrap();
+        let loaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(loaded.appearance, Appearance::default());
+
+        let config = AuroraConfig {
+            appearance: Appearance {
+                mode: AppearanceMode::Night,
+                accent: AccentColor::Amethyst,
+                petals: false,
+                panorama: true,
+                reduce_motion: true,
+            },
+            ..AuroraConfig::default()
+        };
+        ConfigStore::at(&path).save(&config).await.unwrap();
+        let reloaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(reloaded.appearance, config.appearance);
+    }
+
+    #[tokio::test]
+    async fn invalid_appearance_value_fails_config_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(&path, br#"{"appearance": {"accent": "pink"}}"#)
+            .await
+            .unwrap();
+        let err = ConfigStore::at(&path).load().await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::ConfigParse { .. }),
+            "实际：{err:?}"
+        );
     }
 
     #[tokio::test]

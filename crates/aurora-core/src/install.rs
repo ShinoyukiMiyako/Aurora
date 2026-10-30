@@ -61,7 +61,7 @@ impl Aurora {
         events: Option<&EventSink>,
     ) -> Result<InstallOutcome> {
         let layout = self.layout();
-        let pool = self.download_pool();
+        let pool = self.download_pool_reporting(events);
         let policy = self.retry_policy();
         let http = self.http();
         let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);

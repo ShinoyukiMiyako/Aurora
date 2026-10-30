@@ -166,7 +166,8 @@ impl Aurora {
         on_code: impl FnOnce(&DeviceCodeResponse),
     ) -> Result<Account> {
         let client_id = self.msa_client_id()?;
-        let auth = MicrosoftAuth::new(self.http(), client_id);
+        let auth =
+            MicrosoftAuth::new(self.http(), client_id).with_endpoints(self.msa_endpoints().clone());
         let mut manager = self.open_accounts()?;
         perform_microsoft_login(&auth, &mut manager, on_code).await
     }
@@ -188,7 +189,8 @@ impl Aurora {
             return Ok(account.clone());
         }
         let client_id = self.msa_client_id()?;
-        let auth = MicrosoftAuth::new(self.http(), client_id);
+        let auth =
+            MicrosoftAuth::new(self.http(), client_id).with_endpoints(self.msa_endpoints().clone());
         let mut manager = self.open_accounts()?;
         perform_microsoft_refresh(&auth, &mut manager, &creds.refresh_token).await
     }

@@ -64,7 +64,10 @@ impl Aurora {
         let dest = task.dest.clone();
         emit(events, CoreEvent::stage(format!("开始下载模组 {file_name}")));
 
-        let report = self.download_pool().download_all(vec![task], None).await?;
+        let report = self
+            .download_pool_reporting(events)
+            .download_all(vec![task], None)
+            .await?;
         // 单文件批量：有失败即冒泡其最终错误（重试换源后仍失败），绝不当作成功。
         if let Some(failure) = report.failures.into_iter().next() {
             return Err(failure.error.into());

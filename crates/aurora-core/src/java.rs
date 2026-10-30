@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_java::{InstalledRuntime, JavaInstallation, JavaRuntimeInstaller, detect_all};
+use aurora_java::{InstalledRuntime, JavaInstallation, detect_all};
 
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink, emit};
@@ -62,9 +62,7 @@ impl Aurora {
                 install_dir.display()
             )),
         );
-        let installer = JavaRuntimeInstaller::new(self.http())
-            .with_manifest_url(manifest_url)
-            .with_source(self.config().download_source.primary_mirror());
+        let installer = self.java_installer(&manifest_url);
         let runtime = installer.install(required_major, &install_dir).await?;
         emit(
             events,
