@@ -1,0 +1,201 @@
+/*
+ * 所有变体都带 1px 描边（非次按钮为透明），左右内边距里的奇数值是「偶数刻度减 1px 描边」的补偿，
+ * 保证四种变体同尺寸时外框完全一致。
+ */
+.button {
+  --button-height: 36px;
+  --button-min-width: 72px;
+  position: relative;
+  /* 悬停叠层用 z-index: -1 垫在文字之下、底色之上，需要按钮自成层叠上下文 */
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--sk-space-8) - 1px);
+  box-sizing: border-box;
+  height: var(--button-height);
+  min-width: var(--button-min-width);
+  padding: 0 var(--sk-space-14);
+  border: 1px solid transparent;
+  border-radius: var(--sk-r-sm);
+  font-family: inherit;
+  font-size: var(--sk-fs-body);
+  font-weight: var(--sk-w-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.button[data-has-icon] {
+  padding-left: var(--sk-space-12);
+}
+
+.button[data-size="sm"] {
+  --button-height: 30px;
+  --button-min-width: 56px;
+  gap: calc(var(--sk-space-6) - 1px);
+  padding: 0 calc(var(--sk-space-12) - 1px);
+  font-size: var(--sk-fs-small);
+}
+
+.button[data-size="sm"][data-has-icon] {
+  padding-left: calc(var(--sk-space-10) - 1px);
+}
+
+.button[data-size="lg"] {
+  --button-height: 44px;
+  --button-min-width: 96px;
+  gap: calc(var(--sk-space-10) - 1px);
+  padding: 0 var(--sk-space-20);
+  border-radius: var(--sk-r);
+  font-size: var(--sk-fs-section);
+}
+
+.button[data-size="lg"][data-has-icon] {
+  padding-left: var(--sk-space-18);
+}
+
+.button[data-block] {
+  display: flex;
+  width: 100%;
+}
+
+.label {
+  min-width: 0;
+}
+
+/* ---- 主：全站唯一的渐变填充 + 强调投影 + 顶边高光 ---- */
+.button[data-variant="primary"] {
+  background: var(--sk-accent-grad);
+  color: var(--sk-accent-ink);
+  font-weight: var(--sk-w-title);
+  box-shadow: var(--sk-accent-glow), var(--sk-gloss);
+}
+
+.button[data-variant="primary"]:focus-visible {
+  box-shadow: var(--sk-focus), var(--sk-accent-glow), var(--sk-gloss);
+}
+
+/* ---- 次 ---- */
+.button[data-variant="secondary"] {
+  background: var(--sk-surface);
+  border-color: var(--sk-line-2);
+  color: var(--sk-text);
+  box-shadow: var(--sk-shadow-sm);
+}
+
+.button[data-variant="secondary"]:hover:not(:disabled, [aria-disabled="true"]) {
+  border-color: var(--sk-accent-line);
+}
+
+.button[data-variant="secondary"]:focus-visible {
+  box-shadow: var(--sk-focus), var(--sk-shadow-sm);
+}
+
+/* ---- 幽灵 ---- */
+.button[data-variant="ghost"] {
+  background: transparent;
+  color: var(--sk-text-2);
+}
+
+.button[data-variant="ghost"]:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--sk-bg-2);
+  color: var(--sk-text);
+}
+
+.button[data-variant="ghost"]:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+/* ---- 危险 ---- */
+.button[data-variant="danger"] {
+  --button-danger-glow: 0 6px 16px -8px color-mix(in srgb, var(--sk-danger) 70%, transparent);
+  background: var(--sk-danger);
+  color: var(--sk-danger-ink);
+  box-shadow: var(--button-danger-glow);
+}
+
+.button[data-variant="danger"]:focus-visible {
+  box-shadow: var(--sk-focus), var(--button-danger-glow);
+}
+
+/*
+ * 实心变体的悬停与按下：只朝提高文字对比度的方向叠一层（日樱叠暗、夜樱叠亮），叠层做透明度过渡。
+ * 不用 filter: brightness()：它会把强调底上的字压回 4.5:1 以下。
+ */
+.button[data-variant="primary"]::before,
+.button[data-variant="danger"]::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--sk-fill-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.button[data-variant="primary"]:hover:not(:disabled, [aria-disabled="true"])::before,
+.button[data-variant="danger"]:hover:not(:disabled, [aria-disabled="true"])::before {
+  opacity: 1;
+}
+
+.button[data-variant="primary"]:active:not(:disabled, [aria-disabled="true"])::before,
+.button[data-variant="danger"]:active:not(:disabled, [aria-disabled="true"])::before {
+  background: var(--sk-fill-press);
+  opacity: 1;
+}
+
+/* ---- 按下 ---- */
+.button:active:not(:disabled, [aria-disabled="true"]) {
+  transform: scale(0.97);
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .button:active:not(:disabled, [aria-disabled="true"]) {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
+}
+
+/* ---- 禁用：原生禁用与带原因的禁用外观一致；加载中不降不透明度，与禁用区分 ---- */
+.button:disabled,
+.button[data-disabled] {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.button[data-variant="primary"]:disabled,
+.button[data-variant="primary"][data-disabled] {
+  box-shadow: var(--sk-gloss);
+}
+
+.button[data-variant="danger"]:disabled,
+.button[data-variant="danger"][data-disabled] {
+  box-shadow: none;
+}
+
+.button[data-loading] {
+  cursor: progress;
+}
+
+/* 无前置图标的加载态：指示居中叠在按钮上，文字隐去但保留占位，按钮宽度不变 */
+.button[data-loading]:not([data-has-icon]) .label {
+  visibility: hidden;
+}
+
+.centerSpinner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}

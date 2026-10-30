@@ -1,0 +1,4 @@
+.bar {
+  /* expect T0 */ /* sk-guard-allow T8: */
+  transition: width 120ms linear; /* expect T8 */
+}

@@ -1,0 +1,35 @@
+.combo {
+  /* 键帽之间 3px：比最小刻度 4 少 1px，让组合键读作一个整体 */
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--sk-space-4) - 1px);
+  vertical-align: middle;
+}
+
+.key {
+  --key-size: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: var(--key-size);
+  min-width: var(--key-size);
+  /* 左右 5px：6 减去 1px 描边补偿 */
+  padding: 0 calc(var(--sk-space-6) - 1px);
+  border: 1px solid var(--sk-line-2);
+  border-bottom-width: 2px;
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-surface);
+  color: var(--sk-text-2);
+  font-family: var(--sk-font);
+  font-size: var(--sk-fs-micro);
+  font-weight: var(--sk-w-medium);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.combo[data-tone="inverse"] .key {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--sk-bg) 35%, transparent);
+  color: var(--sk-bg);
+}

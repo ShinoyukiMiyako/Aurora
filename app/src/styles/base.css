@@ -1,0 +1,61 @@
+/* 全局基底：在 Tailwind 预检之上补应用根的字体、底色、选区、滚动条与聚焦兜底。
+ * <html> 字号保持浏览器默认 16px：Tailwind 的 rem 间距以它为基准，改了会让全部间距错位。 */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sk-font);
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-body);
+  color: var(--sk-text);
+  background: var(--sk-bg);
+  /* 桌面应用的界面文字默认不可选；输入框、日志、路径等由各自组件放开 */
+  user-select: none;
+  overflow: hidden;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text;
+}
+
+::selection {
+  background: var(--sk-selection);
+}
+
+/* 组件自己画聚焦环时会 outline: none；没有单独定义的元素走这里的兜底，视觉上与 --sk-focus 等价 */
+:focus-visible {
+  outline: 2px solid var(--sk-accent);
+  outline-offset: 2px;
+}
+
+/* 滚动条：宽高 10px，拇指以 3px 透明边框内缩、全圆角，轨道透明。
+ * 不写 scrollbar-color / scrollbar-width：Chromium 一旦见到这两个标准属性就忽略下面的伪元素样式。 */
+::-webkit-scrollbar {
+  width: var(--sk-scrollbar-size);
+  height: var(--sk-scrollbar-size);
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--sk-scroll-thumb);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: var(--sk-r-pill);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--sk-scroll-thumb-hover);
+  background-clip: padding-box;
+}

@@ -1,0 +1,38 @@
+/* 包裹层不参与布局，只用来接住指针与焦点事件 */
+.host {
+  display: contents;
+}
+
+/* 气泡：反色（文字色作底、底色作字），夜樱下自然成为浅底深字；无箭头 */
+.bubble {
+  --tooltip-wrap-max: 260px;
+  position: absolute;
+  z-index: var(--sk-z-tooltip);
+  box-sizing: border-box;
+  /* 7 / 11：8 与 12 各减 1px，让单行气泡高度落在整数像素 */
+  padding: calc(var(--sk-space-8) - 1px) calc(var(--sk-space-12) - 1px);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-text);
+  color: var(--sk-bg);
+  box-shadow: var(--sk-shadow);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: 1.35;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.bubble[data-wrap] {
+  max-width: var(--tooltip-wrap-max);
+  white-space: normal;
+}
+
+.sub {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  margin-top: var(--sk-space-2);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-body);
+  opacity: 0.72;
+}

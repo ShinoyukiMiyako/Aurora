@@ -1,0 +1,25 @@
+/* 陈列行：每行一组状态，左侧是状态名 */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-12);
+}
+
+.label {
+  --gallery-label-width: 88px;
+  flex: none;
+  width: var(--gallery-label-width);
+  font-size: var(--sk-fs-caption);
+  color: var(--sk-text-2);
+}
+
+.swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sk-space-12);
+  border-radius: var(--sk-r);
+  background: var(--sk-accent);
+  color: var(--sk-accent-ink);
+}

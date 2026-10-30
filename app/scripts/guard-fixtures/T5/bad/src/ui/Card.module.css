@@ -1,0 +1,7 @@
+@media (min-width: 900px) { /* expect T5 */
+  .card {
+    display: none;
+  }
+}
+@media (max-height: 700px) { /* expect T5 */
+}

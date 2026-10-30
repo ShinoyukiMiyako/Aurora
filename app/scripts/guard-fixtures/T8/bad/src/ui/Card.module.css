@@ -1,0 +1,6 @@
+.card {
+  transition: opacity 120ms ease; /* expect T8 */
+  animation:
+    fade 0.2s linear; /* expect T8 */
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1); /* expect T8 */
+}

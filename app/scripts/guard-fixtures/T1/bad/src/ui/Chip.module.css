@@ -1,0 +1,5 @@
+.chip {
+  color: #ff00aa; /* expect T1 */
+  background: rgba(0, 0, 0, 0.5); /* expect T1 */
+  border-color: #FFF; /* expect T1 */
+}
