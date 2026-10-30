@@ -405,11 +405,14 @@ version = "0.1.0"
 dependencies = [
  "aurora-base",
  "aurora-version",
+ "flate2",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

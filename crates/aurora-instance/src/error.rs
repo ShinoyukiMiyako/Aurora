@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use aurora_base::retry::RetryableError;
 
+use crate::naming::NameViolation;
+
 /// aurora-instance 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -27,7 +29,7 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// 本 crate 自管的配置文件（版本设置）序列化或解析失败。
+    /// 本 crate 自管的文件（版本设置、未完成标记）或游戏自己的配置序列化、解析失败。
     #[error("解析 {context} 失败: {path}")]
     Json {
         context: &'static str,
@@ -35,6 +37,72 @@ pub enum Error {
         #[source]
         source: serde_json::Error,
     },
+
+    /// 实例 id 不能安全地拼进 `versions/` 下的路径（含分隔符、`..`、以点开头等）。
+    #[error("实例 id 不合法：{id:?}")]
+    InvalidId { id: String },
+
+    /// 实例名称不满足命名规则。
+    #[error("实例名称「{name}」不可用：{}", .violation.message())]
+    InvalidName {
+        name: String,
+        violation: NameViolation,
+    },
+
+    /// 实例设置里有不合法的字段。
+    #[error("实例设置的 {field} 不合法：{reason}")]
+    InvalidSettings { field: &'static str, reason: String },
+
+    /// 侧栏固定列表不合法。
+    #[error("侧栏固定列表不合法：{reason}")]
+    InvalidPins {
+        reason: PinsViolation,
+        /// 触发问题的实例 id（重复或不存在时）。
+        id: Option<String>,
+    },
+
+    /// 有别的实例经 inheritsFrom 依赖这个实例，改名或删除会让它们坏掉。
+    #[error("实例 {id} 被 {} 依赖，不能改名或删除", .dependents.join("、"))]
+    HasDependents { id: String, dependents: Vec<String> },
+
+    /// 实例缺少可用的版本 JSON，也没有记下当初的安装内容，无从补全。
+    #[error("实例 {id} 无法补全：{reason}")]
+    NotRepairable { id: String, reason: String },
+
+    /// 移入回收站失败。
+    #[error("移入回收站失败：{path}（{reason}）")]
+    Recycle { path: PathBuf, reason: String },
+}
+
+/// 侧栏固定列表的问题。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinsViolation {
+    /// 超过上限。
+    TooMany,
+    /// 同一个实例出现了不止一次。
+    Duplicate,
+    /// 列表里有不存在的实例。
+    NotFound,
+}
+
+impl PinsViolation {
+    pub fn code(self) -> &'static str {
+        match self {
+            PinsViolation::TooMany => "too_many",
+            PinsViolation::Duplicate => "duplicate",
+            PinsViolation::NotFound => "not_found",
+        }
+    }
+}
+
+impl std::fmt::Display for PinsViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PinsViolation::TooMany => "侧栏最多固定 5 个实例",
+            PinsViolation::Duplicate => "同一个实例重复固定",
+            PinsViolation::NotFound => "要固定的实例不存在",
+        })
+    }
 }
 
 /// crate 级 `Result` 别名。
@@ -47,8 +115,16 @@ impl RetryableError for Error {
             Error::Base(e) => e.is_retryable(),
             // 本地 IO 抖动可再试；NotFound / 权限类是终态。
             Error::Io { source, .. } => is_transient_io(source.kind()),
-            // 解析类错误重试也是同样结果。
-            Error::Version(_) | Error::Json { .. } => false,
+            // 解析类与参数类错误重试也是同样结果。
+            Error::Version(_)
+            | Error::Json { .. }
+            | Error::InvalidId { .. }
+            | Error::InvalidName { .. }
+            | Error::InvalidSettings { .. }
+            | Error::InvalidPins { .. }
+            | Error::HasDependents { .. }
+            | Error::NotRepairable { .. }
+            | Error::Recycle { .. } => false,
         }
     }
 }

@@ -12,6 +12,13 @@ thiserror = "2.0.18"
 # 目录扫描、版本 JSON 读取、配置原子落盘都是本地 IO；版本 JSON 的读取与反序列化放到阻塞线程池上
 # 有界并发执行（rt 提供 spawn_blocking 与 JoinSet）。原子写复用 aurora-base。
 tokio = { version = "1", default-features = false, features = ["fs", "rt"] }
+# 存档的 level.dat 是 gzip 压缩的 NBT；flate2 已经在工作区里（zip 的 deflate 后端），用它的纯 Rust 后端。
+flate2 = "1"
+tracing = "0.1"
+
+# 删除实例时移入回收站（SHFileOperationW）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell"] }
 
 [dev-dependencies]
 # 目录/文件 IO 测试需要真正的运行时；tempfile 提供隔离的临时游戏目录。
