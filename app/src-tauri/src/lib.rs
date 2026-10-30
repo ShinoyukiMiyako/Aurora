@@ -89,6 +89,9 @@ pub fn run() {
             commands::discover::project_detail,
             commands::discover::install_mod,
             commands::discover::install_resource,
+            // -- modpack --
+            commands::modpack::preview_modpack,
+            commands::modpack::install_modpack,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

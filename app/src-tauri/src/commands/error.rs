@@ -13,7 +13,7 @@ use std::error::Error as StdError;
 
 use aurora_core::{
     AuthError, BaseError, CoreError, DownloadError, InstallError, InstanceError, JavaError,
-    LaunchError, ModPlatformError, VersionError,
+    LaunchError, ModPlatformError, ModpackError, VersionError,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -82,6 +82,22 @@ pub mod code {
     pub const UNSAFE_FILE_NAME: &str = "unsafe_file_name";
     /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载（detail.files）。
     pub const DISTRIBUTION_BLOCKED: &str = "distribution_blocked";
+    /// 选的文件扩展名既不是 .mrpack 也不是 .zip（detail.path）。
+    pub const MODPACK_UNSUPPORTED_EXTENSION: &str = "modpack_unsupported_extension";
+    /// 压缩包根目录没有整合包清单（detail.path）。
+    pub const MODPACK_MANIFEST_MISSING: &str = "modpack_manifest_missing";
+    /// 整合包清单读不懂或有重复落点（detail.document、reason，或 detail.path）。
+    pub const MODPACK_MANIFEST_INVALID: &str = "modpack_manifest_invalid";
+    /// 整合包文件不完整或已损坏（detail.path）。
+    pub const MODPACK_CORRUPT: &str = "modpack_corrupt";
+    /// 整合包里有越出实例目录、写进启动器元数据目录或符号链接的条目（detail.path）。
+    pub const MODPACK_UNSAFE_PATH: &str = "modpack_unsafe_path";
+    /// 新实例名不可用（detail.name、rule：empty / too_long / illegal_char / reserved / duplicate）。
+    pub const INSTANCE_NAME_INVALID: &str = "instance_name_invalid";
+    /// 启动器写在实例里的 JSON 文件读不懂（detail.path）。
+    pub const JSON_FILE_INVALID: &str = "json_file_invalid";
+    /// 系统时钟早于 1970 年。
+    pub const SYSTEM_CLOCK: &str = "system_clock";
 }
 
 /// 序列化给前端的命令错误。
@@ -205,6 +221,27 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::WorldNotFound { .. } => code::WORLD_NOT_FOUND,
         CoreError::UnsafeFileName { .. } => code::UNSAFE_FILE_NAME,
         CoreError::FileDistributionBlocked { .. } => code::DISTRIBUTION_BLOCKED,
+        CoreError::Modpack(e) => modpack_code(e),
+        CoreError::InstanceNameInvalid { .. } => code::INSTANCE_NAME_INVALID,
+        CoreError::JsonFileInvalid { .. } => code::JSON_FILE_INVALID,
+        CoreError::JsonSerialize(_) => code::INTERNAL,
+        CoreError::SystemClock(_) => code::SYSTEM_CLOCK,
+    }
+}
+
+fn modpack_code(err: &ModpackError) -> &'static str {
+    match err {
+        ModpackError::UnsupportedExtension { .. } => code::MODPACK_UNSUPPORTED_EXTENSION,
+        ModpackError::ManifestMissing { .. } => code::MODPACK_MANIFEST_MISSING,
+        ModpackError::ManifestInvalid { .. } | ModpackError::DuplicatePath { .. } => {
+            code::MODPACK_MANIFEST_INVALID
+        }
+        ModpackError::Corrupt { .. } => code::MODPACK_CORRUPT,
+        ModpackError::UnsafePath { .. } | ModpackError::SymlinkEntry { .. } => {
+            code::MODPACK_UNSAFE_PATH
+        }
+        ModpackError::Io { .. } => code::IO,
+        ModpackError::Cancelled => code::CANCELLED,
     }
 }
 
@@ -338,6 +375,31 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::FileDistributionBlocked { files } => {
             detail.insert("files".to_owned(), json!(files));
         }
+        CoreError::InstanceNameInvalid { name, rule } => {
+            detail.insert("name".to_owned(), json!(name));
+            detail.insert("rule".to_owned(), json!(rule));
+        }
+        CoreError::JsonFileInvalid { path, .. } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+        }
+        CoreError::Modpack(modpack) => match modpack {
+            ModpackError::UnsupportedExtension { path }
+            | ModpackError::ManifestMissing { path }
+            | ModpackError::Corrupt { path, .. }
+            | ModpackError::Io { path, .. } => {
+                detail.insert("path".to_owned(), json!(path.display().to_string()));
+            }
+            ModpackError::ManifestInvalid { document, reason } => {
+                detail.insert("document".to_owned(), json!(document));
+                detail.insert("reason".to_owned(), json!(reason));
+            }
+            ModpackError::UnsafePath { path, .. }
+            | ModpackError::SymlinkEntry { path }
+            | ModpackError::DuplicatePath { path } => {
+                detail.insert("path".to_owned(), json!(path));
+            }
+            ModpackError::Cancelled => {}
+        },
         CoreError::ConfigIo { path, .. } | CoreError::ConfigParse { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
@@ -458,6 +520,59 @@ mod tests {
         .into();
         assert_eq!(project.code, code::INVALID_ARGUMENT);
         assert_eq!(project.detail.unwrap()["project_id"], json!("jei"));
+    }
+
+    #[test]
+    fn modpack_errors_map_to_codes_with_parameters() {
+        let name: CommandError = CoreError::InstanceNameInvalid {
+            name: "CON".into(),
+            rule: aurora_core::InstanceNameRule::Reserved,
+        }
+        .into();
+        assert_eq!(name.code, code::INSTANCE_NAME_INVALID);
+        let detail = name.detail.unwrap();
+        assert_eq!(detail["name"], json!("CON"));
+        assert_eq!(detail["rule"], json!("reserved"));
+
+        let unsafe_path: CommandError = CoreError::from(ModpackError::UnsafePath {
+            path: "overrides/../evil.txt".into(),
+            source: aurora_core::PathValidationError::ParentTraversal,
+        })
+        .into();
+        assert_eq!(unsafe_path.code, code::MODPACK_UNSAFE_PATH);
+        let detail = unsafe_path.detail.unwrap();
+        assert_eq!(detail["path"], json!("overrides/../evil.txt"));
+        assert_eq!(detail["causes"], json!(["路径含父目录组件 '..'"]));
+
+        let invalid: CommandError = CoreError::from(ModpackError::ManifestInvalid {
+            document: "manifest.json",
+            reason: "加载器 rift-1.0 不支持".into(),
+        })
+        .into();
+        assert_eq!(invalid.code, code::MODPACK_MANIFEST_INVALID);
+        assert_eq!(invalid.detail.unwrap()["document"], json!("manifest.json"));
+
+        let duplicate: CommandError = CoreError::from(ModpackError::DuplicatePath {
+            path: "mods/a.jar".into(),
+        })
+        .into();
+        assert_eq!(duplicate.code, code::MODPACK_MANIFEST_INVALID);
+
+        let link: CommandError = CoreError::from(ModpackError::SymlinkEntry {
+            path: "overrides/config".into(),
+        })
+        .into();
+        assert_eq!(link.code, code::MODPACK_UNSAFE_PATH);
+
+        let missing: CommandError = CoreError::from(ModpackError::ManifestMissing {
+            path: PathBuf::from("D:/a.zip"),
+        })
+        .into();
+        assert_eq!(missing.code, code::MODPACK_MANIFEST_MISSING);
+        assert_eq!(missing.detail.unwrap()["path"], json!("D:/a.zip"));
+
+        let cancelled: CommandError = CoreError::from(ModpackError::Cancelled).into();
+        assert!(cancelled.is_cancelled());
     }
 
     #[test]
