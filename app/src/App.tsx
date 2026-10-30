@@ -1,27 +1,21 @@
-// 路由与外壳装配。用 HashRouter：Tauri 生产环境从静态文件加载，hash 路由不依赖服务端处理深链接。
-// 加新页 = 在 AppShell 子路由下加一条 <Route>，并在 Sidebar 的 TOP/BOTTOM 里加对应导航项。
+// 应用装配。外壳尚未接入之前，开发构建只渲染组件陈列；生产构建如实显示「外壳未接入」的错误页，
+// 不渲染空白。陈列模块以动态 import 引入：生产构建里 import.meta.env.DEV 为常量 false，整段被摇树移除。
 
-import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
-import { AppShell } from "./components/AppShell";
-import { Home } from "./pages/Home";
-import { Account } from "./pages/Account";
-import { Versions } from "./pages/Versions";
-import { Resources } from "./pages/Resources";
-import { Settings } from "./pages/Settings";
+import { lazy, Suspense } from "react";
+import { SHELL_MISSING_COPY } from "./copy/flows";
+import { ErrorScreen } from "./shell/ErrorScreen";
+
+const Gallery = import.meta.env.DEV ? lazy(() => import("./dev/Gallery")) : null;
 
 export default function App() {
+  if (Gallery === null) {
+    return (
+      <ErrorScreen title={SHELL_MISSING_COPY.title} body={SHELL_MISSING_COPY.body} error={new Error("App.tsx 尚未装配外壳")} />
+    );
+  }
   return (
-    <HashRouter>
-      <Routes>
-        <Route element={<AppShell />}>
-          <Route index element={<Home />} />
-          <Route path="account" element={<Account />} />
-          <Route path="versions" element={<Versions />} />
-          <Route path="resources" element={<Resources />} />
-          <Route path="settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
-    </HashRouter>
+    <Suspense fallback={null}>
+      <Gallery />
+    </Suspense>
   );
 }
