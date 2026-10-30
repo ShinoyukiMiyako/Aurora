@@ -1,0 +1,63 @@
+.textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 84px;
+  max-height: 240px;
+  padding: var(--sk-space-10) var(--sk-space-12);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font-family: inherit;
+  font-size: var(--sk-fs-body);
+  font-weight: var(--sk-w-body);
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.textarea::placeholder {
+  color: var(--sk-text-2);
+  opacity: 1;
+}
+
+.textarea:hover:not(:disabled, :read-only, :focus) {
+  border-color: color-mix(in srgb, var(--sk-accent) 25%, var(--sk-line-2));
+}
+
+.textarea:focus {
+  border-color: var(--sk-accent);
+  box-shadow: var(--sk-focus);
+}
+
+.textarea[aria-invalid="true"] {
+  border-color: var(--sk-danger);
+}
+
+.textarea[aria-invalid="true"]:focus {
+  box-shadow: var(--sk-focus-danger);
+}
+
+.textarea:read-only {
+  border-color: var(--sk-line);
+  background: var(--sk-bg-2);
+}
+
+.textarea:read-only:focus {
+  border-color: var(--sk-line);
+}
+
+.textarea:disabled {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+/* 等宽：日志与参数里的 -> != >= 必须显示原字符，关掉 JetBrains Mono 的上下文连字 */
+.textarea[data-mono] {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  font-weight: var(--sk-w-mono);
+  font-variant-ligatures: no-contextual;
+}
