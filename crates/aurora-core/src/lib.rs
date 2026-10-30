@@ -72,10 +72,11 @@ pub use aurora_download::CancellationToken;
 
 // 实例管理：列表、设置、内容、删除、改名、侧栏固定；按实例名新建与补全；加载器版本与版本清单概览。
 pub use aurora_instance::{
-    GameMode, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec, InstanceContent,
-    IsolationOverride, JavaSelection, LevelInfo, LevelSummary, MarkerError, NameViolation,
-    PackEntry, PinsViolation, RecycleBin, Resolution, ResolvedIsolation, ResourcePackEntry,
-    SettingsViolation, ShaderPackEntry, VersionSettings, WorldEntry,
+    Disposer, GameMode, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec,
+    InstanceContent, IsolationOverride, JavaSelection, LevelInfo, LevelSummary, MarkerError,
+    NameViolation, PackEntry, PinsViolation, RecycleBin, Resolution, ResolvedIsolation,
+    ResourcePackEntry, SettingsViolation, ShaderPackEntry, VersionSettings, WorldEntry,
+    is_safe_instance_id,
 };
 pub use instance_install::{
     InstalledLoader, InstanceInstallOutcome, InstanceRequest, MarkerSettlement, RepairOutcome,
