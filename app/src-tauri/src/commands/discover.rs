@@ -170,3 +170,61 @@ fn parse_sort_field(name: &str) -> Result<SortField, CommandError> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::error::code;
+
+    // 前端会把出参里的枚举值原样回传（搜索结果的平台、已装 Mod 的加载器），入参解析必须认得
+    // 出参的序列化名，两边任何一处改名都要让这条测试挂掉。
+    #[test]
+    fn parsers_accept_every_serialized_name() {
+        for loader in [
+            ModLoader::Fabric,
+            ModLoader::Quilt,
+            ModLoader::Forge,
+            ModLoader::NeoForge,
+            ModLoader::LiteLoader,
+        ] {
+            let name = serde_json::to_value(loader).unwrap();
+            assert_eq!(parse_mod_loader(name.as_str().unwrap()).unwrap(), loader);
+        }
+        for platform in [Platform::Modrinth, Platform::CurseForge] {
+            let name = serde_json::to_value(platform).unwrap();
+            assert_eq!(parse_platform(name.as_str().unwrap()).unwrap(), platform);
+        }
+        for resource_type in [
+            ResourceType::Mod,
+            ResourceType::Modpack,
+            ResourceType::ResourcePack,
+            ResourceType::Shader,
+            ResourceType::DataPack,
+            ResourceType::Plugin,
+        ] {
+            let name = serde_json::to_value(resource_type).unwrap();
+            assert_eq!(
+                parse_resource_type(name.as_str().unwrap()).unwrap(),
+                resource_type
+            );
+        }
+        for sort in [
+            SortField::Relevance,
+            SortField::Downloads,
+            SortField::Follows,
+            SortField::Newest,
+            SortField::Updated,
+        ] {
+            let name = serde_json::to_value(sort).unwrap();
+            assert_eq!(parse_sort_field(name.as_str().unwrap()).unwrap(), sort);
+        }
+        assert_eq!(
+            parse_mod_loader("neo_forge").unwrap_err().code,
+            code::INVALID_ARGUMENT
+        );
+        assert_eq!(
+            parse_platform("curse_forge").unwrap_err().code,
+            code::INVALID_ARGUMENT
+        );
+    }
+}

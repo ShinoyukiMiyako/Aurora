@@ -97,6 +97,9 @@ impl ResourceType {
 }
 
 /// Mod 加载器。
+///
+/// 序列化名与 IPC 入参、Modrinth facet 用同一套小写连写名（neoforge / liteloader）：snake_case
+/// 默认会把 NeoForge 写成 neo_forge，前端拿出参原样回传搜索或安装时就会被拒。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModLoader {
@@ -107,8 +110,10 @@ pub enum ModLoader {
     /// Forge。
     Forge,
     /// NeoForge。
+    #[serde(rename = "neoforge")]
     NeoForge,
     /// LiteLoader（远古加载器）。
+    #[serde(rename = "liteloader")]
     LiteLoader,
 }
 
@@ -367,6 +372,25 @@ mod tests {
         assert_eq!(ModLoader::NeoForge.curseforge_loader_type(), 6);
         assert_eq!(ModLoader::Forge.curseforge_loader_type(), 1);
         assert_eq!(ModLoader::Quilt.curseforge_loader_type(), 5);
+    }
+
+    #[test]
+    fn loader_serde_names_match_modrinth_facets() {
+        for (loader, name) in [
+            (ModLoader::Fabric, "fabric"),
+            (ModLoader::Quilt, "quilt"),
+            (ModLoader::Forge, "forge"),
+            (ModLoader::NeoForge, "neoforge"),
+            (ModLoader::LiteLoader, "liteloader"),
+        ] {
+            assert_eq!(serde_json::to_value(loader).unwrap(), name);
+            assert_eq!(loader.modrinth_facet(), name);
+            assert_eq!(
+                serde_json::from_value::<ModLoader>(serde_json::json!(name)).unwrap(),
+                loader
+            );
+        }
+        assert!(serde_json::from_value::<ModLoader>(serde_json::json!("neo_forge")).is_err());
     }
 
     #[test]
