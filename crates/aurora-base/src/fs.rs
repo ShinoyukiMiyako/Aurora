@@ -2,6 +2,7 @@
 //!
 //! - 流式 sha1：分块读取，不把整文件读进内存；CPU 侧计算丢进 `spawn_blocking`，
 //!   避免阻塞异步 worker。
+//! - 增量 sha1（[`Sha1Hasher`]）：数据边到边算，供下载引擎在写盘的同时校验，省掉写完再读一遍。
 //! - 原子写入：同目录临时文件写完 fsync 后 rename 覆盖目标，杜绝写一半留下损坏文件。
 //! - 目录定位：数据目录挂在 `%LOCALAPPDATA%\Petalfall` 下。
 
@@ -27,6 +28,36 @@ pub async fn sha1_hex(path: impl AsRef<Path>) -> Result<String> {
 pub async fn verify_sha1(path: impl AsRef<Path>, expected: &str) -> Result<()> {
     let actual = sha1_hex(path).await?;
     ensure_match("SHA-1", expected, &actual)
+}
+
+/// 增量 SHA-1：数据一段段喂进来，最后与期望值比对。
+///
+/// 下载时每读到一段响应体就喂一次，写完即可校验，不必再把刚落盘的文件整份读回来重算。
+/// 单段几十 KiB 的摘要计算在微秒级，直接在异步任务里做，不值得为它切到阻塞线程池。
+pub struct Sha1Hasher(Sha1);
+
+impl Sha1Hasher {
+    /// 空摘要状态。
+    pub fn new() -> Self {
+        Self(Sha1::new())
+    }
+
+    /// 追加一段数据。
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// 与 `expected` 比对（大小写不敏感）。不符返回 [`Error::HashMismatch`]。
+    pub fn verify(self, expected: &str) -> Result<()> {
+        let actual = base16ct::lower::encode_string(&self.0.finalize());
+        ensure_match("SHA-1", expected, &actual)
+    }
+}
+
+impl Default for Sha1Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// 原子写入：先写同目录临时文件并 fsync，再 rename 覆盖目标。
@@ -203,6 +234,42 @@ mod tests {
         verify_sha1(&file, ABC_SHA1).await.unwrap();
         // 大写期望值也应通过。
         verify_sha1(&file, &ABC_SHA1.to_uppercase()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incremental_hasher_matches_file_hash_across_split_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("payload.bin");
+        let payload: Vec<u8> = (0..HASH_CHUNK * 2 + 77).map(|i| (i % 251) as u8).collect();
+        tokio::fs::write(&file, &payload).await.unwrap();
+        let expected = sha1_hex(&file).await.unwrap();
+
+        // 切分点含 0 长度段与跨越整块的段：结果只取决于字节序列本身。
+        for split in [0usize, 1, HASH_CHUNK, payload.len()] {
+            let mut hasher = Sha1Hasher::new();
+            hasher.update(&payload[..split]);
+            hasher.update(&[]);
+            hasher.update(&payload[split..]);
+            hasher.verify(&expected.to_uppercase()).unwrap();
+        }
+    }
+
+    #[test]
+    fn incremental_hasher_reports_mismatch_with_both_digests() {
+        let mut hasher = Sha1Hasher::default();
+        hasher.update(b"abc");
+        match hasher.verify("0000000000000000000000000000000000000000") {
+            Err(Error::HashMismatch {
+                algorithm,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(algorithm, "SHA-1");
+                assert_eq!(expected, "0000000000000000000000000000000000000000");
+                assert_eq!(actual, ABC_SHA1);
+            }
+            other => panic!("期望 HashMismatch，得到 {other:?}"),
+        }
     }
 
     #[tokio::test]
