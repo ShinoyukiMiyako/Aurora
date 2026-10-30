@@ -33,8 +33,9 @@ describe("浏览器与测试环境走 mock", () => {
     expect(tauriInvoke).not.toHaveBeenCalled();
   });
 
-  it("mock 只登记基础层负责的五条命令", () => {
-    expect(mockCommands()).toEqual(["cancel_task", "get_appearance", "load_task_journal", "save_task_journal", "set_appearance"]);
+  // 各领域的 mock 各自登记命令，这里只钉住基础层负责的五条。
+  it("mock 登记了基础层负责的五条命令", () => {
+    expect(mockCommands()).toEqual(expect.arrayContaining(["cancel_task", "get_appearance", "load_task_journal", "save_task_journal", "set_appearance"]));
   });
 
   it("未实现的命令直接抛错，不返回空值", async () => {
