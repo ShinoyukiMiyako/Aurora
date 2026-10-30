@@ -86,6 +86,21 @@ pub enum CoreError {
         platform: &'static str,
         project_id: String,
     },
+    /// 资源安装的目标不成立（数据包没指明存档、非数据包却给了存档、整合包当单个资源装等）。
+    #[error("安装目标不对：{0}")]
+    InvalidResourceTarget(String),
+    /// 数据包要装进的存档在该实例里不存在。
+    #[error("实例 {version_id} 里没有存档 {world}")]
+    WorldNotFound { version_id: String, world: String },
+    /// 平台给出的文件名不能安全地落盘（含路径分隔符、`..` 等）。
+    #[error("{platform} 给出的文件名不安全：{file_name}")]
+    UnsafeFileName {
+        platform: &'static str,
+        file_name: String,
+    },
+    /// CurseForge 作者禁止第三方分发，这些文件拿不到下载地址，只能去网页手动下载。
+    #[error("这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}", files.join("、"))]
+    FileDistributionBlocked { files: Vec<String> },
 }
 
 impl CoreError {

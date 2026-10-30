@@ -76,6 +76,12 @@ pub mod code {
     pub const PLATFORM_UNSUPPORTED: &str = "platform_unsupported";
     /// 后台任务异常结束，属于程序缺陷。
     pub const INTERNAL: &str = "internal";
+    /// 数据包要装进的存档不存在（detail.version_id、world）。
+    pub const WORLD_NOT_FOUND: &str = "world_not_found";
+    /// 平台给出的文件名不能安全落盘（detail.platform、file_name）。
+    pub const UNSAFE_FILE_NAME: &str = "unsafe_file_name";
+    /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载（detail.files）。
+    pub const DISTRIBUTION_BLOCKED: &str = "distribution_blocked";
 }
 
 /// 序列化给前端的命令错误。
@@ -195,6 +201,10 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::TaskJoin(_) => code::INTERNAL,
         CoreError::PlatformUnsupported => code::PLATFORM_UNSUPPORTED,
         CoreError::InvalidProjectId { .. } => code::INVALID_ARGUMENT,
+        CoreError::InvalidResourceTarget(_) => code::INVALID_ARGUMENT,
+        CoreError::WorldNotFound { .. } => code::WORLD_NOT_FOUND,
+        CoreError::UnsafeFileName { .. } => code::UNSAFE_FILE_NAME,
+        CoreError::FileDistributionBlocked { .. } => code::DISTRIBUTION_BLOCKED,
     }
 }
 
@@ -314,6 +324,20 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("platform".to_owned(), json!(platform));
             detail.insert("project_id".to_owned(), json!(project_id));
         }
+        CoreError::WorldNotFound { version_id, world } => {
+            detail.insert("version_id".to_owned(), json!(version_id));
+            detail.insert("world".to_owned(), json!(world));
+        }
+        CoreError::UnsafeFileName {
+            platform,
+            file_name,
+        } => {
+            detail.insert("platform".to_owned(), json!(platform));
+            detail.insert("file_name".to_owned(), json!(file_name));
+        }
+        CoreError::FileDistributionBlocked { files } => {
+            detail.insert("files".to_owned(), json!(files));
+        }
         CoreError::ConfigIo { path, .. } | CoreError::ConfigParse { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
@@ -394,6 +418,46 @@ mod tests {
         }
         .into();
         assert_eq!(loader.code, code::LOADER_VERSION_NOT_FOUND);
+    }
+
+    #[test]
+    fn discover_errors_map_to_codes_with_parameters() {
+        let world: CommandError = CoreError::WorldNotFound {
+            version_id: "生存".into(),
+            world: "新的世界".into(),
+        }
+        .into();
+        assert_eq!(world.code, code::WORLD_NOT_FOUND);
+        let detail = world.detail.unwrap();
+        assert_eq!(detail["version_id"], json!("生存"));
+        assert_eq!(detail["world"], json!("新的世界"));
+
+        let blocked: CommandError = CoreError::FileDistributionBlocked {
+            files: vec!["a.jar".into(), "b.jar".into()],
+        }
+        .into();
+        assert_eq!(blocked.code, code::DISTRIBUTION_BLOCKED);
+        assert_eq!(blocked.detail.unwrap()["files"], json!(["a.jar", "b.jar"]));
+
+        let unsafe_name: CommandError = CoreError::UnsafeFileName {
+            platform: "Modrinth",
+            file_name: "../x.jar".into(),
+        }
+        .into();
+        assert_eq!(unsafe_name.code, code::UNSAFE_FILE_NAME);
+        assert_eq!(unsafe_name.detail.unwrap()["file_name"], json!("../x.jar"));
+
+        let target: CommandError =
+            CoreError::InvalidResourceTarget("数据包要指明存档".into()).into();
+        assert_eq!(target.code, code::INVALID_ARGUMENT);
+
+        let project: CommandError = CoreError::InvalidProjectId {
+            platform: "CurseForge",
+            project_id: "jei".into(),
+        }
+        .into();
+        assert_eq!(project.code, code::INVALID_ARGUMENT);
+        assert_eq!(project.detail.unwrap()["project_id"], json!("jei"));
     }
 
     #[test]

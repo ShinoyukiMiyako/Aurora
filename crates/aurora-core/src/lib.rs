@@ -30,6 +30,7 @@ pub mod install;
 pub mod java;
 pub mod launch;
 pub mod mods;
+pub mod resources;
 pub mod search;
 pub mod versions;
 
@@ -42,6 +43,7 @@ pub use facade::Aurora;
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::LaunchOptions;
 pub use mods::ModInstallOutcome;
+pub use resources::{ResourceInstallOutcome, ResourceTarget};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 

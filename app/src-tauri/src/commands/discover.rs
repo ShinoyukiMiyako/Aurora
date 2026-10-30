@@ -1,8 +1,9 @@
 //! 发现与安装：聚合搜索 Modrinth + CurseForge、工程详情，把平台上的 Mod 版本装进实例。
 
 use aurora_core::{
-    AggregateResult, ModLoader, Platform, ProjectDetail, ResourceType, SearchCursor, SearchEntry,
-    SearchQuery, SkippedPlatform, SortField,
+    AggregateResult, EventSink, ModLoader, Platform, ProjectDetail, ResourceInstallOutcome,
+    ResourceTarget, ResourceType, SearchCursor, SearchEntry, SearchQuery, SkippedPlatform,
+    SortField,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -243,6 +244,115 @@ pub async fn install_mod(
     })
 }
 
+/// 一次资源安装结果 DTO。
+#[derive(Debug, Serialize)]
+pub struct ResourceInstallOutcomeDto {
+    pub file_name: String,
+    pub path: String,
+    pub platform: Platform,
+    pub resource_type: ResourceType,
+    /// 数据包装进的存档；其余类型为 null。
+    pub world: Option<String>,
+}
+
+fn resource_outcome_dto(outcome: ResourceInstallOutcome) -> ResourceInstallOutcomeDto {
+    ResourceInstallOutcomeDto {
+        file_name: outcome.file_name,
+        path: outcome.path.display().to_string(),
+        platform: outcome.platform,
+        resource_type: outcome.resource_type,
+        world: outcome.world,
+    }
+}
+
+/// 把平台上的资源包、光影、数据包或 Mod 的一个版本装进实例里该类型的目录。长任务：进度经
+/// core-event 推送并带 `task_id`，可经 `cancel_task(taskId)` 取消。
+///
+/// `world` 只对数据包有意义且必填（存档目录名）；`fileVersionId` 为 Modrinth 版本 id 或
+/// CurseForge 文件 id。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn install_resource(
+    app: AppHandle,
+    task_id: String,
+    version_id: String,
+    resource_type: String,
+    world: Option<String>,
+    platform: String,
+    project_id: String,
+    file_version_id: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+) -> Result<ResourceInstallOutcomeDto, CommandError> {
+    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let outcome = install_resource_with(
+        &facade,
+        &tasks,
+        &task_id,
+        InstallResourceArgs {
+            version_id: &version_id,
+            resource_type: &resource_type,
+            world: world.as_deref(),
+            platform: &platform,
+            project_id: &project_id,
+            file_version_id: &file_version_id,
+        },
+        events.sink(),
+    )
+    .await;
+    events.finish().await;
+    outcome
+}
+
+/// [`install_resource`] 的入参（字符串枚举尚未解析）。
+pub(crate) struct InstallResourceArgs<'a> {
+    pub version_id: &'a str,
+    pub resource_type: &'a str,
+    pub world: Option<&'a str>,
+    pub platform: &'a str,
+    pub project_id: &'a str,
+    pub file_version_id: &'a str,
+}
+
+pub(crate) async fn install_resource_with(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    task_id: &str,
+    args: InstallResourceArgs<'_>,
+    events: &EventSink,
+) -> Result<ResourceInstallOutcomeDto, CommandError> {
+    // 先解析全部入参再登记任务：参数非法不该占用任务 id。
+    let resource_type = parse_resource_type(args.resource_type)?;
+    if matches!(resource_type, ResourceType::Modpack | ResourceType::Plugin) {
+        return Err(CommandError::invalid_argument(format!(
+            "{} 不能作为单个资源装进实例",
+            args.resource_type
+        )));
+    }
+    let platform = parse_platform(args.platform)?;
+    let task = tasks.register(task_id)?;
+    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let target = ResourceTarget {
+        version_id: args.version_id,
+        resource_type,
+        world: args.world,
+    };
+    let outcome = task
+        .run(async {
+            Ok(aurora
+                .install_resource(
+                    target,
+                    platform,
+                    args.project_id,
+                    args.file_version_id,
+                    Some(events),
+                )
+                .await?)
+        })
+        .await?;
+    Ok(resource_outcome_dto(outcome))
+}
+
 // 字符串取值统一用核心类型 serde 的 snake_case 表示，与出参 DTO 同一套命名。
 
 pub(crate) fn parse_platform(name: &str) -> Result<Platform, CommandError> {
@@ -350,6 +460,118 @@ mod tests {
             parse_platform("curse_forge").unwrap_err().code,
             code::INVALID_ARGUMENT
         );
+    }
+
+    fn facade_in(dir: &std::path::Path, base: &str) -> Facade {
+        let config = aurora_core::AuroraConfig {
+            game_directory: Some(dir.join(".minecraft")),
+            isolation_policy: aurora_core::IsolationPolicy::All,
+            ..aurora_core::AuroraConfig::default()
+        };
+        let aurora = aurora_core::Aurora::open(config, dir.to_path_buf(), dir.join("config.json"))
+            .unwrap()
+            .with_platform_bases(base, base);
+        Facade::new(aurora)
+    }
+
+    /// 端到端：资源包经命令装进实例的 resourcepacks/，事件都带本任务 id，任务随之注销。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_resource_lands_pack_and_tags_events_with_task_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/rp1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "rp1", "project_id": "faithful", "name": "32x", "version_number": "1.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {}, "url": format!("{}/Faithful.zip", server.uri()),
+                           "filename": "Faithful.zip", "primary": true, "size": 4}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Faithful.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"pack".to_vec()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mc = dir.path().join(".minecraft");
+        let version_dir = mc.join("versions").join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = facade_in(dir.path(), &server.uri());
+        let registry = TaskRegistry::default();
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = delivered.clone();
+        let forwarder =
+            CoreEventForwarder::spawn(Some("rp#1".into()), move |p| log.lock().unwrap().push(p));
+
+        let outcome = install_resource_with(
+            &facade,
+            &registry,
+            "rp#1",
+            InstallResourceArgs {
+                version_id: "生存",
+                resource_type: "resource_pack",
+                world: None,
+                platform: "modrinth",
+                project_id: "faithful",
+                file_version_id: "rp1",
+            },
+            forwarder.sink(),
+        )
+        .await
+        .unwrap();
+        forwarder.finish().await;
+
+        assert_eq!(outcome.file_name, "Faithful.zip");
+        assert_eq!(outcome.resource_type, ResourceType::ResourcePack);
+        let landed = version_dir.join("resourcepacks").join("Faithful.zip");
+        assert_eq!(std::path::PathBuf::from(&outcome.path), landed);
+        assert_eq!(std::fs::read(&landed).unwrap(), b"pack");
+        assert!(!registry.is_running("rp#1"));
+        let delivered = delivered.lock().unwrap();
+        assert!(!delivered.is_empty());
+        assert!(
+            delivered
+                .iter()
+                .all(|p| p.task_id.as_deref() == Some("rp#1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn install_resource_rejects_bad_type_before_registering() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let registry = TaskRegistry::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        for resource_type in ["modpack", "plugin", "world"] {
+            let err = install_resource_with(
+                &facade,
+                &registry,
+                "t",
+                InstallResourceArgs {
+                    version_id: "x",
+                    resource_type,
+                    world: None,
+                    platform: "modrinth",
+                    project_id: "p",
+                    file_version_id: "v",
+                },
+                &sink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "{resource_type}");
+            assert!(!registry.is_running("t"));
+        }
     }
 
     fn args() -> SearchArgs {
