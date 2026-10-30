@@ -70,9 +70,11 @@ pub fn check_name_format(name: &str) -> Result<(), NameViolation> {
     if name.chars().any(|c| ILLEGAL_NAME_CHARS.contains(&c)) {
         return Err(NameViolation::IllegalChar);
     }
+    // 带扩展名的设备名（`CON.txt`、`nul.tar.gz`）在 Windows 上同样指向设备，按第一个点之前的部分判断。
+    let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
     let reserved = RESERVED_NAMES
         .iter()
-        .any(|reserved| reserved.eq_ignore_ascii_case(name));
+        .any(|reserved| reserved.eq_ignore_ascii_case(stem));
     if name.ends_with('.') || name.ends_with(' ') || reserved || name.chars().any(char::is_control)
     {
         return Err(NameViolation::ReservedByWindows);
@@ -164,7 +166,20 @@ mod tests {
     #[test]
     fn windows_reserved_names_and_trailing_dot_or_space_are_rejected() {
         for name in [
-            "CON", "con", "Prn", "aux", "NUL", "COM1", "com1", "COM9", "lpt1", "LPT9",
+            "CON",
+            "con",
+            "Prn",
+            "aux",
+            "NUL",
+            "COM1",
+            "com1",
+            "COM9",
+            "lpt1",
+            "LPT9",
+            "CON.txt",
+            "nul.tar.gz",
+            "com1.zip",
+            "AUX .x",
         ] {
             assert_eq!(check(name), Err(NameViolation::ReservedByWindows), "{name}");
         }
@@ -176,7 +191,15 @@ mod tests {
             );
         }
         // 只是以保留名开头、或 COM0/COM10 这类不在清单里的，不拦。
-        for name in ["CONSOLE", "COM10", "COM0", "NULL", "1.21 生存"] {
+        for name in [
+            "CONSOLE",
+            "COM10",
+            "COM0",
+            "NULL",
+            "1.21 生存",
+            "CONSOLE.txt",
+            "生存.CON",
+        ] {
             assert_eq!(check(name), Ok(()), "{name}");
         }
     }

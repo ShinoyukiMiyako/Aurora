@@ -72,6 +72,10 @@ pub enum Error {
     /// 移入回收站失败。
     #[error("移入回收站失败：{path}（{reason}）")]
     Recycle { path: PathBuf, reason: String },
+
+    /// 实例目录在，但版本 JSON 缺失或损坏，读不出它是什么版本、该用哪个目录运行。
+    #[error("实例 {id} 的版本 JSON 不可用：{reason}")]
+    Broken { id: String, reason: String },
 }
 
 /// 侧栏固定列表的问题。
@@ -124,7 +128,8 @@ impl RetryableError for Error {
             | Error::InvalidPins { .. }
             | Error::HasDependents { .. }
             | Error::NotRepairable { .. }
-            | Error::Recycle { .. } => false,
+            | Error::Recycle { .. }
+            | Error::Broken { .. } => false,
         }
     }
 }
