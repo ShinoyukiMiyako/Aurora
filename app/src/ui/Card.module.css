@@ -1,0 +1,167 @@
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-card);
+  box-shadow: var(--sk-shadow-sm);
+}
+
+.card[data-pad="sm"] {
+  padding: var(--sk-space-12);
+}
+
+.card[data-pad="md"] {
+  padding: var(--sk-space-16) var(--sk-space-18);
+}
+
+.card[data-pad="lg"] {
+  padding: var(--sk-space-22) var(--sk-space-24);
+}
+
+.card[data-clip] {
+  overflow: hidden;
+}
+
+/* 跨列与跨行按 <html data-sk-tier> 取对应档的值，组件不需要在脚本里知道当前档位 */
+.card[data-span] {
+  grid-column: span var(--card-span-compact);
+}
+
+.card[data-rows] {
+  grid-row: span var(--card-rows-compact);
+}
+
+:global([data-sk-tier="regular"]) .card[data-span] {
+  grid-column: span var(--card-span-regular);
+}
+
+:global([data-sk-tier="regular"]) .card[data-rows] {
+  grid-row: span var(--card-rows-regular);
+}
+
+:global([data-sk-tier="wide"]) .card[data-span] {
+  grid-column: span var(--card-span-wide);
+}
+
+:global([data-sk-tier="wide"]) .card[data-rows] {
+  grid-row: span var(--card-rows-wide);
+}
+
+/*
+ * 可点卡片（整卡按钮或带标题按钮）。悬停位移用独立的 translate / scale 属性：
+ * 页面入场动画写的是 transform，两者叠加，入场结束后的 transform 不会盖掉悬停位移。
+ * 悬停阴影放在 ::after 叠层上淡入，不对 box-shadow 本身做过渡。
+ */
+.card[data-interactive],
+.card:has(.titleButton) {
+  transition:
+    translate var(--sk-spring-settle-dur) var(--sk-spring-settle),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.card[data-interactive] {
+  cursor: pointer;
+  outline: none;
+}
+
+/* 标题按钮的覆盖层与浮起的内部控件只在卡片内部比较层级，不与页面上的其他层抢 */
+.card:has(.titleButton) {
+  isolation: isolate;
+}
+
+.card[data-interactive]::after,
+.card:has(.titleButton)::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: var(--sk-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.card[data-interactive]:hover,
+.card:has(.titleButton):hover {
+  translate: 0 -2px;
+  border-color: var(--sk-line-2);
+  background: var(--sk-card-hover);
+}
+
+.card[data-interactive]:hover::after,
+.card:has(.titleButton):hover::after {
+  opacity: 1;
+}
+
+.card[data-interactive]:active,
+.card:has(.titleButton:active) {
+  scale: 0.995;
+}
+
+.card[data-interactive]:focus-visible {
+  box-shadow: var(--sk-focus), var(--sk-shadow);
+}
+
+.card[data-selected],
+.card[data-selected]:hover {
+  border-color: var(--sk-accent-line);
+  box-shadow: 0 0 0 3px var(--sk-accent-soft), var(--sk-shadow-sm);
+}
+
+.card[data-selected][data-interactive]:focus-visible {
+  box-shadow: var(--sk-focus), var(--sk-shadow);
+}
+
+/* 减少动画：只保留阴影叠层与底色变化；按下不缩放，瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .card[data-interactive]:hover,
+:global([data-sk-reduced]) .card:has(.titleButton):hover {
+  translate: none;
+}
+
+:global([data-sk-reduced]) .card[data-interactive]:active,
+:global([data-sk-reduced]) .card:has(.titleButton:active) {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
+}
+
+/* ---- 标题按钮：外观同普通标题文字，伪元素覆盖整卡 ---- */
+.titleButton {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  outline: none;
+}
+
+.titleButton::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: var(--sk-r-lg);
+}
+
+.titleButton:focus-visible::after {
+  box-shadow: var(--sk-focus), var(--sk-shadow);
+}
+
+/* 卡内其他控件浮在覆盖层之上；零特异性，控件自己的定位规则照常生效 */
+:where(.card:has(.titleButton) :is(button, a[href], input, select, textarea, label, [tabindex]):not(.titleButton)) {
+  position: relative;
+  z-index: 1;
+}

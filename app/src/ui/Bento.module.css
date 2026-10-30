@@ -1,0 +1,12 @@
+/* dense：跨列不等的卡片之间留下的空格由后面放得下的卡片补上 */
+.bento {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-auto-flow: row dense;
+  gap: var(--sk-gap);
+  min-width: 0;
+}
+
+.bento[data-fixed-rows] {
+  grid-auto-rows: var(--bento-row);
+}
