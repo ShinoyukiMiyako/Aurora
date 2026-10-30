@@ -4,7 +4,7 @@
 //! 版本列表源」两项独立三档设置）、下载并发、默认内存、版本隔离档位、微软 client_id、可选自定义
 //! 游戏/缓存目录。凭据不进这里（归 aurora-auth 的加密存储）。
 //!
-//! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Aurora\config.json`）。缺失时用全默认值，损坏则冒泡
+//! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值，损坏则冒泡
 //! 报错而非静默用默认覆盖（避免用户改坏的配置被无声吞掉）。
 
 use std::path::{Path, PathBuf};

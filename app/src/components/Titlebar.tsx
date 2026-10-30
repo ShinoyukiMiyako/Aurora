@@ -5,6 +5,7 @@
 
 import type { ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { APP_NAME_EN } from "../lib/app-info";
 import { SparkleIcon, WinMinIcon, WinMaxIcon, WinCloseIcon } from "./icons";
 
 function WinButton({
@@ -39,7 +40,7 @@ export function Titlebar() {
     <header className="flex h-[46px] shrink-0 select-none items-center border-b border-ink/9 pr-3 pl-[18px]">
       <div data-tauri-drag-region className="flex h-full items-center gap-[9px]">
         <SparkleIcon size={14} className="text-ink" />
-        <span className="pl-px text-[12px] font-extrabold tracking-[0.34em] text-ink/80">AURORA</span>
+        <span className="pl-px text-[12px] font-extrabold tracking-[0.34em] text-ink/80">{APP_NAME_EN}</span>
         <span className="ml-[14px] border-l border-ink/16 pl-[14px] font-mono text-[10.5px] tracking-[0.14em] text-ink/40 tabular-nums">
           第 01 期 · 2026.07
         </span>

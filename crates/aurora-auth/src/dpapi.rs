@@ -1,7 +1,7 @@
 //! 基于 Windows DPAPI(CurrentUser) 的凭据存储实现。
 //!
 //! 把整份凭据明文交给 `CryptProtectData` 加密（绑定当前用户），密文经原子写入落到单文件
-//! `%LOCALAPPDATA%\Aurora\credentials.bin`；读回时 `CryptUnprotectData` 还原。加密密钥由 Windows
+//! `%LOCALAPPDATA%\Petalfall\credentials.bin`；读回时 `CryptUnprotectData` 还原。加密密钥由 Windows
 //! 按当前用户管理，其它用户或拷走文件都无法解密。
 
 use core::ffi::c_void;
@@ -29,7 +29,7 @@ pub struct DpapiCredentialStore {
 }
 
 impl DpapiCredentialStore {
-    /// 默认位置：`%LOCALAPPDATA%\Aurora\credentials.bin`。
+    /// 默认位置：`%LOCALAPPDATA%\Petalfall\credentials.bin`。
     pub fn new() -> Result<Self> {
         let path = aurora_base::fs::data_dir()?.join(CREDENTIAL_FILE);
         Ok(Self { path })

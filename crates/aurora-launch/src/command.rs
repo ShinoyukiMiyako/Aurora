@@ -106,7 +106,7 @@ pub struct CommandBuilder<'a> {
 impl<'a> CommandBuilder<'a> {
     /// 用最少的必需输入构造：合并后的版本 JSON、运行环境、java 可执行文件、路径布局、游戏工作目录、鉴权值。
     ///
-    /// 默认最大堆 2048MB、无 GC 覆盖（用版本 jvm 参数自带的）、启动器名 `Aurora`、版本名取版本 id、
+    /// 默认最大堆 2048MB、无 GC 覆盖（用版本 jvm 参数自带的）、启动器名取英文产品名（`Petalfall`）、版本名取版本 id、
     /// Java 主版本取版本 JSON 的 `javaVersion.majorVersion`。
     pub fn new(
         version: &'a VersionJson,
@@ -127,7 +127,7 @@ impl<'a> CommandBuilder<'a> {
             gc: None,
             java_major: version.java_version.as_ref().map(|j| j.major_version),
             authlib: None,
-            launcher_name: "Aurora".to_owned(),
+            launcher_name: aurora_base::brand::APP_NAME_EN.to_owned(),
             launcher_version: env!("CARGO_PKG_VERSION").to_owned(),
             version_name: version.id.clone(),
             resolution: None,

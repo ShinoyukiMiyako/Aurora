@@ -1,4 +1,4 @@
-//! Aurora Tauri 外壳的 IPC 层。
+//! Petalfall Tauri 外壳的 IPC 层。
 //!
 //! 只承担一件事：把 aurora-core 门面（[`Aurora`]）经 `#[tauri::command]` 暴露给 React 前端。
 //! 三条纪律贯穿全文件：
@@ -43,7 +43,7 @@ const GAME_LOG_EVENT: &str = "aurora://game-log";
 struct ConfigDto {
     /// 当前游戏目录（`.minecraft`）绝对路径。
     game_dir: String,
-    /// 数据目录（`%LOCALAPPDATA%\Aurora`）绝对路径。
+    /// 数据目录（`%LOCALAPPDATA%\Petalfall`）绝对路径。
     data_dir: String,
     /// 文件下载源策略。
     download_source: DownloadSourcePolicy,
@@ -1133,4 +1133,37 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use aurora_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
+
+    // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，
+    // 由这条测试钉住它们与 aurora-base 的 brand 模块一致。identifier 发布后即成兼容契约，单独写死。
+    #[test]
+    fn product_name_is_consistent_across_config_html_and_frontend() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json 应是合法 JSON");
+        assert_eq!(conf["productName"], APP_NAME_EN);
+        assert_eq!(conf["mainBinaryName"], APP_NAME_EN);
+        assert_eq!(conf["app"]["windows"][0]["title"], APP_NAME_EN);
+        assert_eq!(conf["identifier"], "org.petalfall.launcher");
+
+        let title = format!("<title>{APP_NAME_EN}</title>");
+        assert!(
+            include_str!("../../index.html").contains(&title),
+            "index.html 缺少 {title}"
+        );
+
+        let app_info = include_str!("../../src/lib/app-info.ts");
+        for (name, value) in [
+            ("APP_NAME", APP_NAME),
+            ("APP_NAME_EN", APP_NAME_EN),
+            ("APP_SLUG", APP_SLUG),
+        ] {
+            let decl = format!("export const {name} = \"{value}\";");
+            assert!(app_info.contains(&decl), "app-info.ts 缺少 {decl}");
+        }
+    }
 }

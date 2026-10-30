@@ -102,10 +102,10 @@ async fn chunked_download_assembles_and_verifies() {
     let got = tokio::fs::read(&dest).await.unwrap();
     assert_eq!(got, payload, "合并结果应与原始负载逐字节一致");
     // 分片与临时文件应清理干净。
-    let tmp = format!("{}.aurora-tmp", dest.display());
+    let tmp = format!("{}.petalfall-tmp", dest.display());
     assert!(!std::path::Path::new(&tmp).exists(), "合并临时文件未清理");
     for i in 0..plan.chunks.len() {
-        let part = format!("{}.aurora-part{}", dest.display(), i);
+        let part = format!("{}.petalfall-part{}", dest.display(), i);
         assert!(!std::path::Path::new(&part).exists(), "分片 {i} 未清理");
     }
 }
@@ -177,7 +177,7 @@ async fn sha1_mismatch_triggers_redownload() {
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), good.as_bytes());
     assert_eq!(hits.load(Ordering::SeqCst), 2, "首次损坏、第二次正确，共两次");
     // 校验失败路径应已清掉临时文件。
-    let tmp = format!("{}.aurora-tmp", dest.display());
+    let tmp = format!("{}.petalfall-tmp", dest.display());
     assert!(!std::path::Path::new(&tmp).exists(), "损坏重下后临时文件未清理");
 }
 
@@ -332,7 +332,7 @@ async fn resume_skips_already_completed_chunk() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("resume.bin");
     // 预置已完成的中间分片，字节与其区间严格一致。
-    let part_path = format!("{}.aurora-part{}", dest.display(), resumed.index);
+    let part_path = format!("{}.petalfall-part{}", dest.display(), resumed.index);
     tokio::fs::write(
         &part_path,
         &payload[resumed.start as usize..=resumed.end as usize],

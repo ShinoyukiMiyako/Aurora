@@ -409,6 +409,7 @@ dependencies = [
 name = "aurora-cli"
 version = "0.1.0"
 dependencies = [
+ "aurora-base",
  "aurora-core",
  "clap",
  "tokio",
@@ -512,6 +513,7 @@ name = "aurora-launch"
 version = "0.1.0"
 dependencies = [
  "aurora-auth",
+ "aurora-base",
  "aurora-instance",
  "aurora-java",
  "aurora-version",
@@ -545,6 +547,7 @@ dependencies = [
 name = "aurora-tauri"
 version = "0.1.0"
 dependencies = [
+ "aurora-base",
  "aurora-core",
  "serde",
  "serde_json",

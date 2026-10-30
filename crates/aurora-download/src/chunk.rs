@@ -2,12 +2,12 @@
 //!
 //! [`ChunkPlan::compute`] 是纯函数：给定总大小与目标分块尺寸，切出连续、无重叠、恰好覆盖
 //! `[0, total)` 的字节区间。把余数均摊到前若干块，避免最后一块畸大。分块粒度即断点续传粒度
-//! （每块一个 `.aurora-partN` 文件，已完成的块跨尝试复用）。
+//! （每块一个 `.petalfall-partN` 文件，已完成的块跨尝试复用）。
 
 /// 一个左闭右闭的字节区间 `[start, end]`，对应一次 `Range: bytes=start-end` 请求。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chunk {
-    /// 分块序号，从 0 起，决定 `.aurora-partN` 文件名与拼接顺序。
+    /// 分块序号，从 0 起，决定 `.petalfall-partN` 文件名与拼接顺序。
     pub index: usize,
     /// 起始字节偏移（含）。
     pub start: u64,

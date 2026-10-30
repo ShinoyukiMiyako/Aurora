@@ -1,8 +1,8 @@
 [package]
 name = "aurora-tauri"
 version = "0.1.0"
-description = "Aurora 启动器的 Tauri 外壳：把 aurora-core 门面通过 IPC 暴露给 React 前端"
-authors = ["Aurora"]
+description = "Petalfall 的 Tauri 外壳：把 aurora-core 门面通过 IPC 暴露给 React 前端"
+authors = ["Petalfall"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -25,3 +25,7 @@ aurora-core = { path = "../../crates/aurora-core" }
 # managed state 用 tokio::sync::Mutex（Aurora 兼有 &self async 与 &mut self 方法）；
 # 事件转发用 mpsc + spawn，故需 rt-multi-thread/macros/sync。
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+# 产品名一致性测试要读 aurora-base 的品牌常量；只在测试期依赖，运行时仍只经 aurora-core。
+aurora-base = { path = "../../crates/aurora-base" }

@@ -65,7 +65,11 @@ const RULES: &[Rule] = &[
         ],
         extract: Some(r"(?i)class file version (\d+(?:\.\d+)?)"),
         summary: "Java 版本与游戏或 Mod 不匹配",
-        advice: "改用目标版本要求的 Java：较新的 Minecraft 需要 Java 17 或 21，1.16 及更早需要 Java 8。可在设置中切换，或让 Aurora 自动下载匹配的运行时。",
+        advice: concat!(
+            "改用目标版本要求的 Java：较新的 Minecraft 需要 Java 17 或 21，1.16 及更早需要 Java 8。可在设置中切换，或让",
+            aurora_base::app_name!(),
+            "自动下载匹配的运行时。"
+        ),
     },
     Rule {
         category: CrashCategory::OutOfMemory,
@@ -126,7 +130,11 @@ const RULES: &[Rule] = &[
         ],
         extract: None,
         summary: "本地库（natives）缺失或加载失败",
-        advice: "重新补全该版本的 natives（Aurora 可重新解压），并确认游戏路径不含特殊字符或过深。",
+        advice: concat!(
+            "重新补全该版本的 natives（",
+            aurora_base::app_name!(),
+            "可重新解压），并确认游戏路径不含特殊字符或过深。"
+        ),
     },
     Rule {
         category: CrashCategory::GraphicsDriver,
@@ -151,7 +159,11 @@ const RULES: &[Rule] = &[
         ],
         extract: None,
         summary: "游戏或库文件损坏（jar 不完整或被修改）",
-        advice: "让 Aurora 重新校验并补全文件，或删除损坏的 jar 后重新下载。",
+        advice: concat!(
+            "让",
+            aurora_base::app_name!(),
+            "重新校验并补全文件，或删除损坏的 jar 后重新下载。"
+        ),
     },
 ];
 

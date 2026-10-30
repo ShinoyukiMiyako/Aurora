@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use crate::error::{Error, Result};
 
-/// 统一 User-Agent，形如 `Aurora/0.1.0`。取 crate 版本作为默认值，
+/// 统一 User-Agent，形如 `Petalfall/0.1.0`。取 crate 版本作为默认值，
 /// 前端最终可通过 [`HttpConfig::user_agent`] 覆盖为整机应用版本。
-pub const USER_AGENT: &str = concat!("Aurora/", env!("CARGO_PKG_VERSION"));
+pub const USER_AGENT: &str = concat!(crate::app_name_en!(), "/", env!("CARGO_PKG_VERSION"));
 
 /// HTTP 客户端构建参数。
 ///
@@ -67,10 +67,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn default_user_agent_has_aurora_prefix() {
-        assert!(USER_AGENT.starts_with("Aurora/"));
-        // 版本号段应非空（形如 Aurora/0.1.0）
-        let version = USER_AGENT.trim_start_matches("Aurora/");
+    fn default_user_agent_has_brand_prefix() {
+        assert!(USER_AGENT.starts_with("Petalfall/"));
+        // 版本号段应非空（形如 Petalfall/0.1.0）
+        let version = USER_AGENT.trim_start_matches("Petalfall/");
         assert!(!version.is_empty());
         assert!(version.contains('.'));
     }
@@ -99,7 +99,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn custom_user_agent_is_applied() {
         let server = MockServer::start().await;
-        let ua = "Aurora/9.9.9-test";
+        let ua = "Petalfall/9.9.9-test";
         Mock::given(method("GET"))
             .and(path("/who"))
             .and(header("user-agent", ua))

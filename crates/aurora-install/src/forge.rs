@@ -300,7 +300,7 @@ impl<'a> ForgeInstaller<'a> {
             .cx
             .layout
             .root()
-            .join(".aurora-cache")
+            .join(concat!(".", aurora_base::app_slug!(), "-cache"))
             .join(file_name);
         self.cx
             .run_batch(
@@ -368,7 +368,7 @@ impl<'a> ForgeInstaller<'a> {
             .cx
             .layout
             .version_dir(&version_id)
-            .join(".aurora-forge-tmp");
+            .join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
         let extracted =
             extract_data_files(installer, &profile.data, &self.side, &tmp_dir).await?;
 

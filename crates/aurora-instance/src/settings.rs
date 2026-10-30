@@ -1,6 +1,6 @@
 //! 版本级设置持久化（描述 / 图标 / 收藏 / 分类 / 隔离覆盖）。
 //!
-//! 每个版本可以有一份用户覆盖自动识别结果的设置，落在 `versions/<id>/.aurora/settings.json`，随版本目录
+//! 每个版本可以有一份用户覆盖自动识别结果的设置，落在 `versions/<id>/.petalfall/settings.json`，随版本目录
 //! 走（隔离开启时该文件天然位于版本自己的工作目录内）。缺文件表示「未自定义」，返回默认值；文件存在但
 //! 损坏则冒泡为错误（不静默重置，以免悄悄丢失用户的收藏/描述）。
 
@@ -46,7 +46,7 @@ pub struct VersionSettingsStore {
 }
 
 impl VersionSettingsStore {
-    /// 默认路径：`version_dir/.aurora/settings.json`（`version_dir` 即 `versions/<id>`）。
+    /// 默认路径：`version_dir/.petalfall/settings.json`（`version_dir` 即 `versions/<id>`）。
     pub fn for_version_dir(version_dir: &Path) -> Self {
         Self {
             path: version_dir.join(AURORA_META_DIR).join(SETTINGS_FILE),
@@ -127,7 +127,7 @@ mod tests {
         let store = VersionSettingsStore::for_version_dir(tmp.path());
         assert_eq!(
             store.path(),
-            tmp.path().join(".aurora").join("settings.json")
+            tmp.path().join(".petalfall").join("settings.json")
         );
         assert_eq!(store.load().await.unwrap(), VersionSettings::default());
     }

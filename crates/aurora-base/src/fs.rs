@@ -3,7 +3,7 @@
 //! - 流式 sha1/sha256：分块读取，不把整文件读进内存；CPU 侧计算丢进 `spawn_blocking`，
 //!   避免阻塞异步 worker。
 //! - 原子写入：同目录临时文件写完 fsync 后 rename 覆盖目标，杜绝写一半留下损坏文件。
-//! - 目录定位：数据/缓存目录挂在 `%LOCALAPPDATA%\Aurora` 下，经 [`DirectoryProvider`]
+//! - 目录定位：数据/缓存目录挂在 `%LOCALAPPDATA%\Petalfall` 下，经 [`DirectoryProvider`]
 //!   trait 留出跨平台缝（当前只实现 Windows 语义）。
 
 use std::io::Read;
@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
-/// 数据目录挂载的应用名，最终形如 `%LOCALAPPDATA%\Aurora`。
-pub const APP_DIR_NAME: &str = "Aurora";
+/// 数据目录挂载的应用名，取英文产品名，最终形如 `%LOCALAPPDATA%\Petalfall`。
+pub const APP_DIR_NAME: &str = crate::brand::APP_NAME_EN;
 
 /// 分块读取缓冲区大小（64 KiB），在 syscall 次数与内存占用之间取平衡。
 const HASH_CHUNK: usize = 64 * 1024;
@@ -110,7 +110,7 @@ async fn write_and_sync(tmp: &Path, bytes: &[u8]) -> Result<()> {
 fn temp_stem(path: &Path) -> &str {
     path.file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("aurora")
+        .unwrap_or(crate::brand::APP_SLUG)
 }
 
 /// 把 CPU 密集的哈希计算丢到阻塞线程池，避免占用异步 worker。
@@ -168,7 +168,7 @@ pub trait DirectoryProvider {
     }
 }
 
-/// Windows 系统目录：`%LOCALAPPDATA%\Aurora`。
+/// Windows 系统目录：`%LOCALAPPDATA%\Petalfall`。
 pub struct SystemDirs;
 
 impl DirectoryProvider for SystemDirs {
@@ -181,7 +181,7 @@ impl DirectoryProvider for SystemDirs {
 /// 显式根目录 provider：既是跨平台缝的通用实现，也让测试能注入确定路径，
 /// 绕开进程级环境变量（edition 2024 下 `set_var` 已是 unsafe，不宜在测试里改全局）。
 pub struct RootedDirs {
-    /// 应用目录将挂在 `root/Aurora` 下。
+    /// 应用目录将挂在 `root/Petalfall` 下。
     pub root: PathBuf,
 }
 
@@ -191,12 +191,12 @@ impl DirectoryProvider for RootedDirs {
     }
 }
 
-/// 默认（Windows 系统）数据目录：`%LOCALAPPDATA%\Aurora`。
+/// 默认（Windows 系统）数据目录：`%LOCALAPPDATA%\Petalfall`。
 pub fn data_dir() -> Result<PathBuf> {
     SystemDirs.data_dir()
 }
 
-/// 默认（Windows 系统）缓存目录：`%LOCALAPPDATA%\Aurora\cache`。
+/// 默认（Windows 系统）缓存目录：`%LOCALAPPDATA%\Petalfall\cache`。
 pub fn cache_dir() -> Result<PathBuf> {
     SystemDirs.cache_dir()
 }
@@ -338,10 +338,13 @@ mod tests {
         let dirs = RootedDirs {
             root: PathBuf::from("D:\\data"),
         };
-        assert_eq!(dirs.data_dir().unwrap(), PathBuf::from("D:\\data\\Aurora"));
+        assert_eq!(
+            dirs.data_dir().unwrap(),
+            PathBuf::from("D:\\data\\Petalfall")
+        );
         assert_eq!(
             dirs.cache_dir().unwrap(),
-            PathBuf::from("D:\\data\\Aurora\\cache")
+            PathBuf::from("D:\\data\\Petalfall\\cache")
         );
     }
 }

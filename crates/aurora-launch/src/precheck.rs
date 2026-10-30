@@ -147,7 +147,10 @@ pub fn check_java(required_major: u32, installations: &[JavaInstallation]) -> Ch
         None => CheckItem::new(
             NAME,
             CheckStatus::Fail,
-            format!("未找到 Java {required_major}，请安装或让 Aurora 自动下载对应运行时"),
+            format!(
+                "未找到 Java {required_major}，请安装或让{}自动下载对应运行时",
+                aurora_base::brand::APP_NAME
+            ),
         ),
     }
 }
