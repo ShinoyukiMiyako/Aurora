@@ -405,6 +405,8 @@ describe("发现页：整合包", () => {
     const installs = callsOf(ipc, "install_modpack");
     expect(installs).toHaveLength(1);
     expect(installs[0]).toMatchObject({ source: { kind: "platform", platform: "modrinth", project_id: "M1", version_id: "mp-1" }, name: "生存 2" });
+    // 平台版本没声明包含的工程：不知道 Mod 数，任务详情只写版本，不写「0 个 Mod」
+    expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 生存", "2.0.0"]]);
     expect(openDialogs()).toHaveLength(1);
     expect(buttonByText("查看实例", dialog())).toBeDefined();
   });
@@ -454,6 +456,8 @@ describe("发现页：整合包", () => {
     const installs = callsOf(ipc, "install_modpack");
     expect(installs).toHaveLength(1);
     expect(installs[0]).toMatchObject({ source: { kind: "file", path: "D:\Downloads\pack.mrpack" }, name: "创造 2" });
+    // 120 个待下载文件不等于 120 个 Mod：任务详情不写 Mod 数
+    expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号"]]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已开始导入「创造 2」");
     expect(openDialogs()).toHaveLength(0);
   });

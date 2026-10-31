@@ -173,8 +173,8 @@ function ImportConfirm({ path, preview, online, footerHost, onBack, onDone }: Im
           cover: cover.block,
           packName: preview.name,
           packVersion: preview.version === null ? IMPORT_COPY.unversioned : preview.version,
-          // 状态层要一个数字；清单里待下载的远程文件数是导入前能拿到的最接近 Mod 数的量
-          modCount: preview.remote_files,
+          // 清单里待下载的远程文件不只是 Mod（还有资源包、光影），当不了 Mod 数：导入前不知道
+          modCount: null,
           mcVersion: preview.minecraft,
           loader: facts.loader,
           loaderVersion: preview.loader === null ? null : preview.loader.version,

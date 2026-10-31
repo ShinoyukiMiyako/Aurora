@@ -155,7 +155,8 @@ export interface InstallModpackSpec {
   /** 整合包自己的名字与版本（任务标题与详情用）。 */
   packName: string;
   packVersion: string;
-  modCount: number;
+  /** 整合包含的 Mod 数；导入前拿不到（平台版本没声明包含的工程、本地包的清单不区分 Mod）时为 null，任务详情与完成通知省略这一段。 */
+  modCount: number | null;
   mcVersion: string;
   loader: LoaderKind;
   loaderVersion: string | null;

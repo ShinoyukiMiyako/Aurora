@@ -467,7 +467,7 @@ export const TASK_TEXT = {
   createTitle: (mcVersion: string, loader: LoaderKind, loaderVersion: string | null) => `安装 ${versionWithLoader(mcVersion, loader, loaderVersion, " + ")}`,
   createDetail: (name: string) => `新实例「${name}」`,
   modpackTitle: (name: string) => `导入整合包 ${name}`,
-  modpackDetail: (version: string, modCount: number) => `${version} · ${modCount} 个 Mod`,
+  modpackDetail: (version: string, modCount: number | null) => (modCount === null ? version : `${version} · ${modCount} 个 Mod`),
   repairTitle: (name: string) => `补全「${name}」的游戏文件`,
   repairDetail: (mcVersion: string, loader: LoaderKind, loaderVersion: string | null) => versionWithLoader(mcVersion, loader, loaderVersion, " · "),
   /** 损坏到连游戏版本都读不出来的实例。 */

@@ -136,7 +136,7 @@ export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHo
           cover: cover.block,
           packName: detail.title,
           packVersion: version.version_number,
-          modCount: declaredModCount(version),
+          modCount: modCountOf(version),
           mcVersion: mc,
           loader: facts.loader,
           loaderVersion: null,
@@ -255,13 +255,5 @@ export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHo
 /** 平台版本声明了包含的工程时，它们的个数就是 Mod 数；没声明时不知道。 */
 function modCountOf(version: ModVersionInfo | null): number | null {
   if (version === null || version.dependencies.length === 0) return null;
-  return version.dependencies.length;
-}
-
-/**
- * 交给导入任务的 Mod 数（任务详情与完成通知的「含 n 个 Mod」）。状态层的入参只收数字，
- * 平台没声明包含的工程时只能如实给 0；导入完成后实例的 Mod 数以扫描结果为准。
- */
-function declaredModCount(version: ModVersionInfo): number {
   return version.dependencies.length;
 }
