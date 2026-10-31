@@ -397,7 +397,7 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
   deleting: "删除",
   launching: "启动",
   running: "运行",
-  modifying: "改动 Mod 与资源",
+  modifying: "改动 Mod、资源或设置",
 };
 
 function acquire(id: string, activity: InstanceActivity): () => void {
