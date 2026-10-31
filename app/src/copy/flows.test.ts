@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { FAILURE_CODES, type FailureCode } from "../domain/types";
-import { failureCopy, TOAST_COPY, type FailureContext } from "./flows";
+import { APP_NAME } from "../lib/app-info";
+import { failureCopy, microsoftLoginFailure, TOAST_COPY, type FailureContext } from "./flows";
 
 /** 文案禁用词：语气词、客套、错别字与旧称。 */
 const BANNED = [
@@ -111,5 +112,44 @@ describe("启动失败：账户验证暂时不可用", () => {
     );
     const toast = TOAST_COPY.offlineLaunched("生存");
     expect(bannedIn([...texts, toast.title, toast.body])).toEqual([]);
+  });
+});
+
+describe("微软登录失败：服务故障与应用未获批准", () => {
+  it("ServiceUnavailable：说明是微软一侧的故障，主按钮重试", () => {
+    expect(microsoftLoginFailure("ServiceUnavailable", "微软登录服务暂时不可用（XSTS 授权：HTTP 503）", { step: "XSTS 授权", status: 503 })).toEqual({
+      title: "微软登录服务暂时不可用",
+      body: "微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。",
+      primary: { kind: "retry", label: "重试" },
+      secondary: null,
+      closeOnly: false,
+    });
+  });
+
+  it("ServiceUnavailable 的文案不随 detail 变：429 或缺 detail 时相同", () => {
+    const base = microsoftLoginFailure("ServiceUnavailable", "x", { step: "Minecraft 登录", status: 503 });
+    expect(microsoftLoginFailure("ServiceUnavailable", "y", { step: "刷新令牌", status: 429 })).toEqual(base);
+    expect(microsoftLoginFailure("ServiceUnavailable", "z", undefined)).toEqual(base);
+  });
+
+  it("AppNotApproved：说明是应用的审批问题，主按钮打开设置、次按钮复制错误信息，不给重试", () => {
+    const copy = microsoftLoginFailure("AppNotApproved", "使用的微软应用未获准访问 Minecraft 服务（Invalid app registration）", undefined);
+    expect(copy).toEqual({
+      title: "登录应用未获批准",
+      body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+      primary: { kind: "open_client_id_settings", label: "打开设置" },
+      secondary: { kind: "copy_error", label: "复制错误信息" },
+      closeOnly: false,
+    });
+    expect([copy.primary?.kind, copy.secondary?.kind]).not.toContain("retry");
+  });
+
+  it("新增的登录失败文案不含禁用词", () => {
+    const texts = (["ServiceUnavailable", "AppNotApproved"] as const).flatMap((code) => {
+      const copy = microsoftLoginFailure(code, "x", undefined);
+      return [copy.title, copy.body, copy.primary === null ? null : copy.primary.label, copy.secondary === null ? null : copy.secondary.label];
+    });
+    expect(texts).toHaveLength(8);
+    expect(bannedIn(texts)).toEqual([]);
   });
 });

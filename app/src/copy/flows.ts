@@ -755,7 +755,7 @@ export const MICROSOFT_LOGIN_COPY = {
 /** 前端判定的失败：发起登录后 15 s 内没收到设备码。 */
 export const DEVICE_CODE_TIMEOUT_CODE = "device_code_timeout";
 
-export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close";
+export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close" | "open_client_id_settings";
 
 export interface LoginFailureAction {
   kind: LoginFailureActionKind;
@@ -821,6 +821,16 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
         "没有找到 Minecraft Java 版的购买记录或游戏档案。买过的话，先在官方启动器里创建一次档案。",
         LOGIN_RETRY,
         { kind: "use_offline", label: "改用离线账户" },
+      );
+    case "ServiceUnavailable":
+      return plain("微软登录服务暂时不可用", "微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。", LOGIN_RETRY);
+    // 不给「重试」：同一个 client_id 重试只会得到同样的结果
+    case "AppNotApproved":
+      return plain(
+        "登录应用未获批准",
+        `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+        { kind: "open_client_id_settings", label: "打开设置" },
+        { kind: "copy_error", label: "复制错误信息" },
       );
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });

@@ -12,7 +12,7 @@ import { ACTION_ERROR, MICROSOFT_LOGIN_COPY, microsoftLoginFailure, type LoginFa
 import type { Account } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { fade, springs } from "../../lib/motion";
-import { useShell } from "../../shell/shell";
+import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorDetailOf } from "../../state/errors";
 import { useLauncherActions, useNow } from "../../state/launcher";
@@ -53,6 +53,7 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
   const actions = useLauncherActions();
   const run = useRunner();
   const { copyText } = useShell();
+  const { go } = useNav();
   const device = login.device;
   const now = useNow(1000);
   const totalMs = useCodeLifetime(device);
@@ -137,6 +138,13 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
             return;
           case "close":
             close();
+            return;
+          case "open_client_id_settings":
+            // client_id 在常规分区的高级卡片里；先关弹窗，免得它盖在设置页上面
+            void run(async () => {
+              await actions.closeLogin();
+              go({ page: "settings", section: "general" });
+            }, ACTION_ERROR.cancelLogin);
             return;
         }
       };
