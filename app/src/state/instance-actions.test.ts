@@ -62,6 +62,60 @@ describe("改实例设置后按需重扫实例列表", () => {
   });
 });
 
+describe("同一实例的设置读改写按调用顺序串行", () => {
+  const initial = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  let disk: Record<string, Record<string, unknown>>;
+
+  beforeEach(() => {
+    disk = { 生存: { ...initial }, 创造: { ...initial } };
+    ipc.overrides.set("get_instance_settings", (args) => ({ ...disk[String(args.id)] }));
+    ipc.overrides.set("set_instance_settings", (args) => {
+      disk[String(args.id)] = args.settings as Record<string, unknown>;
+      return args.settings;
+    });
+  });
+
+  it("连着改两项（全屏、JVM 参数）：两次都落盘，后一次不按改前读到的值把前一次冲掉", async () => {
+    const [first, second] = await Promise.all([
+      store.actions.updateInstanceSettings("生存", { fullscreen: true }),
+      store.actions.updateInstanceSettings("生存", { jvmArgs: "-Xss2m" }),
+    ]);
+    expect(disk["生存"]).toMatchObject({ fullscreen: true, jvm_args: "-Xss2m" });
+    expect(first).toMatchObject({ fullscreen: true, jvmArgs: "" });
+    expect(second).toMatchObject({ fullscreen: true, jvmArgs: "-Xss2m" });
+  });
+
+  it("前一次写入失败不挡后面排着的那次，失败原样交给它自己的调用方", async () => {
+    let failNext = true;
+    ipc.overrides.set("set_instance_settings", (args) => {
+      if (failNext) {
+        failNext = false;
+        throw new IpcError("invalid_argument", "分辨率不合法", { field: "resolution" });
+      }
+      disk[String(args.id)] = args.settings as Record<string, unknown>;
+      return args.settings;
+    });
+    const results = await Promise.allSettled([
+      store.actions.updateInstanceSettings("生存", { resolution: { width: 0, height: 0 } }),
+      store.actions.updateInstanceSettings("生存", { memoryMb: 4096 }),
+    ]);
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "invalid_argument" } });
+    expect(results[1].status).toBe("fulfilled");
+    expect(disk["生存"]).toMatchObject({ memory_mb: 4096, resolution: { width: 854, height: 480 } });
+  });
+
+  it("不同实例之间不互相等：「创造」的写入不排在「生存」还没回来的那次后面", async () => {
+    const held = deferred<unknown>();
+    ipc.overrides.set("get_instance_settings", (args) => (args.id === "生存" ? held.promise : { ...disk[String(args.id)] }));
+    const slow = store.actions.updateInstanceSettings("生存", { fullscreen: true });
+    await store.actions.updateInstanceSettings("创造", { fullscreen: true });
+    expect(disk["创造"]).toMatchObject({ fullscreen: true });
+    held.resolve({ ...initial });
+    await slow;
+    expect(disk["生存"]).toMatchObject({ fullscreen: true });
+  });
+});
+
 describe("改名迁移启动会话", () => {
   it("启动失败的会话随改名换成新 id：重试按新名字启动，查看日志也落到新名字", async () => {
     ipc.overrides.set("launch_game", () => {

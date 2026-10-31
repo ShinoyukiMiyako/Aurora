@@ -924,6 +924,11 @@ export class LauncherStore {
    * 两次固定、或装好的新实例落地自动固定撞上用户取消固定，后写的会把先写的那一项冲掉。
    */
   private sidebarPinChain: Promise<void> = Promise.resolve();
+  /**
+   * 实例设置只能整份写入，改一项要先读出整份再写回。设置页连着改两项（或装好的 Java 落地固定、崩溃页一键调内存撞上
+   * 用户在改设置）时，两次都读到改前的那份，后写的会把先写的那一项冲回去。所以同一实例（键不分大小写）的读改写排成一条链。
+   */
+  private readonly settingsChains = new Map<string, Promise<void>>();
 
   readonly actions: LauncherActions;
   private readonly net: NetworkMonitor;
@@ -1593,8 +1598,10 @@ export class LauncherStore {
   /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。重扫结果与撤下占位项在同一次更新里。 */
   private async settleNewInstance(taskId: string, id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
-      const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
-      await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
+      await this.queueInstanceSettings(id, async () => {
+        const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
+        await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
+      });
     }
     if (pin) {
       await this.queueSidebarPins(async () => {
@@ -1613,6 +1620,25 @@ export class LauncherStore {
       () => undefined,
       () => undefined,
     );
+    return run;
+  }
+
+  /**
+   * 排进这个实例的设置读改写链（见 settingsChains）：前一次落定后才开始；这一次的结果与失败照常交给调用方，不挡后面排着的。
+   * 链在排空时撤掉，不随用过的实例 id 越积越多。
+   */
+  private queueInstanceSettings<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const key = id.toLowerCase();
+    const previous = this.settingsChains.get(key);
+    const run = (previous === undefined ? Promise.resolve() : previous).then(work);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.settingsChains.set(key, settled);
+    void settled.then(() => {
+      if (this.settingsChains.get(key) === settled) this.settingsChains.delete(key);
+    });
     return run;
   }
 
@@ -2149,8 +2175,10 @@ export class LauncherStore {
         return newId;
       },
       async updateInstanceSettings(id, patch) {
-        const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
-        const saved = instanceSettingsFromDto(await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, ...patch })));
+        const saved = await store.queueInstanceSettings(id, async () => {
+          const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
+          return instanceSettingsFromDto(await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, ...patch })));
+        });
         invalidateResources(`settings:${id}`);
         if (LISTED_INSTANCE_SETTINGS.some((key) => key in patch)) await store.fetchInstances();
         return saved;
