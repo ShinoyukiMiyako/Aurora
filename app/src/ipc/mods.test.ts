@@ -244,7 +244,7 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       ["RLCraft", "incompatible"],
     ]);
     expect(matrix[0].best_version?.version_id).toBe("sodium-121");
-    expect(matrix[2].installed).toEqual({ file_name: "AANobbMI-0.5.3.jar", version_id: "sodium-053", version_number: "0.5.3" });
+    expect(matrix[2].installed).toEqual({ file_name: "AANobbMI-0.5.3.jar", version_id: "sodium-053", version_number: "0.5.3", world: null });
     expect(matrix[2].best_version?.version_id).toBe("sodium-060");
     expect(matrix[3].compatibility).toEqual({ kind: "mismatch", reason: "需要 Fabric/NeoForge，该实例装的是 Forge" });
     expect(matrix[4].compatibility).toEqual({ kind: "mismatch", reason: "该实例未安装 Mod 加载器" });

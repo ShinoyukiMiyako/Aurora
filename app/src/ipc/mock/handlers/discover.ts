@@ -23,7 +23,7 @@ import type { ModLoader } from "../../mods";
 import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { findMockSource, findMockVersion, mockProjects, newestFirst, sourceVersions, sourcesGameVersions, sourcesLoaders, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { mockInstanceWorlds, recordMockPack } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -327,6 +327,42 @@ const RESOURCE_DIRS: Record<Exclude<InstallableResourceType, "mod">, string> = {
   data_pack: "datapacks",
 };
 
+/** 装进实例的资源包、光影、数据包文件。后端的落位矩阵读游戏目录里的文件认已装，这里记下装过的同一批文件。 */
+export interface MockPackFile {
+  type: Exclude<InstallableResourceType, "mod">;
+  /** 数据包所在的存档；其余类型为 null。 */
+  world: string | null;
+  file_name: string;
+  size: number;
+}
+
+let packFiles = new Map<string, MockPackFile[]>();
+
+/** 实例里装过的资源包、光影、数据包；一个都没装过为空。 */
+export function mockPackFiles(versionId: string): readonly MockPackFile[] {
+  const known = packFiles.get(versionId);
+  return known === undefined ? [] : known;
+}
+
+/** 同一目录下同名文件覆盖旧的那份，与落盘时一致。 */
+function recordPackFile(versionId: string, file: MockPackFile): void {
+  const kept = mockPackFiles(versionId).filter((f) => !(f.type === file.type && f.world === file.world && f.file_name === file.file_name));
+  packFiles.set(versionId, [...kept, file]);
+}
+
+/** 实例改名时资源文件跟着走（它们就在实例目录里）。 */
+export function renameMockPackFiles(from: string, to: string): void {
+  const known = packFiles.get(from);
+  if (known === undefined) return;
+  packFiles.delete(from);
+  packFiles.set(to, known);
+}
+
+/** 实例删除时一并忘掉，免得同名新实例凭空带着旧的资源包。 */
+export function forgetMockPackFiles(versionId: string): void {
+  packFiles.delete(versionId);
+}
+
 function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
   const read = argReader("install_resource", args);
   const taskId = read.string("taskId");
@@ -356,6 +392,7 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
     await simulateDownload(taskId, file_name, file_size);
     // 数据包装进存档，实例内容里没有它的列表
     if (resourceType !== "data_pack") recordMockPack(versionId, resourceType, file_name, file_size);
+    recordPackFile(versionId, { type: resourceType, world, file_name, size: file_size });
     const dir = world === null ? RESOURCE_DIRS[resourceType] : `saves/${world}/${RESOURCE_DIRS[resourceType]}`;
     return {
       file_name,
@@ -371,4 +408,16 @@ export const handlers: MockHandlers = {
   search_resources: searchResources,
   project_detail: projectDetail,
   install_resource: installResource,
+};
+
+export function reset(): void {
+  packFiles = new Map();
+}
+
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: () => [...packFiles.entries()],
+  restore: (data) => {
+    packFiles = new Map(data as [string, MockPackFile[]][]);
+  },
 };

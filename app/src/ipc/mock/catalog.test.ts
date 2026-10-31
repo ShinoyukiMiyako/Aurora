@@ -2,11 +2,12 @@
 // 浏览器预览里点开任何一张卡都不会撞上 404。
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installMod, installResource, projectDetail, searchResources, type SearchArgs } from "../discover";
-import { listInstances } from "../instances";
+import { deleteInstance, listInstances, renameInstance } from "../instances";
 import { installModpack, summarizePlatformModpack } from "../modpack";
 import { listMods, listModVersions, matchInstances, planInstall } from "../mods";
 import { mockInvoke, resetMocks } from "./index";
 import { clearMockEventListeners } from "./events";
+import { addMockInstance } from "./handlers/instances";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -165,6 +166,45 @@ describe("工程目录：搜得到就打得开、装得上", () => {
       fileVersionId: await pick("modrinth", "8oi3bsk5", "data_pack", "1.21.1-Fabric"),
     });
     expect(dp.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/saves/生存/datapacks/8oi3bsk5-2.5.4.zip");
+  });
+
+  it("装进去的资源包、光影、数据包在落位矩阵里认作已装：数据包带上存档，指定版本时也认得出装着的别的版本", async () => {
+    const row = async (platform: "modrinth" | "curseforge", projectId: string, type: "resource_pack" | "shader" | "data_pack", pinned: string | null, instance: string) => {
+      const found = (await matchInstances(platform, projectId, type, pinned)).find((m) => m.version_id === instance);
+      if (found === undefined) throw new Error(`矩阵里没有 ${instance}`);
+      return found;
+    };
+    expect((await row("modrinth", "faithful-32x", "resource_pack", null, "1.21.1-Fabric")).state).toBe("compatible");
+
+    const base = { versionId: "1.21.1-Fabric", world: null };
+    await installResource({ ...base, taskId: "t-rp", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: "f32-1211" });
+    await installResource({ ...base, taskId: "t-sh", resourceType: "shader", platform: "curseforge", projectId: "627557", fileVersionId: "5701234" });
+    await installResource({ ...base, taskId: "t-dp", world: "生存", resourceType: "data_pack", platform: "modrinth", projectId: "8oi3bsk5", fileVersionId: "tl-254" });
+    // 旧版装进原版 1.21.1：之后按新版查矩阵，仍要认出装着的旧版。
+    await installResource({ versionId: "1.21.1", world: null, taskId: "t-old", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: "f32-1201" });
+
+    expect(await row("modrinth", "faithful-32x", "resource_pack", null, "1.21.1-Fabric")).toMatchObject({
+      state: "installed",
+      installed: { file_name: "faithful-32x-1.21.1-r2.zip", version_id: "f32-1211", version_number: "1.21.1-r2", world: null },
+    });
+    expect((await row("modrinth", "faithful-32x", "resource_pack", null, "樱花生存")).state).toBe("compatible");
+    expect(await row("curseforge", "627557", "shader", null, "1.21.1-Fabric")).toMatchObject({ state: "installed", installed: { version_id: "5701234", world: null } });
+    // 同一个光影在另一个平台上是另一个工程，文件名也不同：不算装了它。
+    expect((await row("modrinth", "HVnmMxH1", "shader", null, "1.21.1-Fabric")).state).toBe("compatible");
+    expect(await row("modrinth", "8oi3bsk5", "data_pack", null, "1.21.1-Fabric")).toMatchObject({
+      state: "installed",
+      installed: { file_name: "8oi3bsk5-2.5.4.zip", version_id: "tl-254", version_number: "2.5.4", world: "生存" },
+    });
+
+    const pinned = await row("modrinth", "faithful-32x", "resource_pack", "f32-1211", "1.21.1");
+    expect(pinned).toMatchObject({ state: "installed", installed: { version_id: "f32-1201", version_number: "1.20.1-r5" }, best_version: { version_id: "f32-1211" } });
+
+    // 资源文件在实例目录里：改名跟着走，删掉实例后同名新实例不带着它。
+    await renameInstance("1.21.1", "原版二周目");
+    expect((await row("modrinth", "faithful-32x", "resource_pack", null, "原版二周目")).installed?.version_id).toBe("f32-1201");
+    await deleteInstance("原版二周目");
+    addMockInstance("原版二周目", "1.21.1", null, null);
+    expect((await row("modrinth", "faithful-32x", "resource_pack", null, "原版二周目")).state).toBe("compatible");
   });
 
   it("每个平台整合包的最新版本都能读摘要并导入；导入的实例带整合包来源，mods/ 里是清单里的 Mod", async () => {

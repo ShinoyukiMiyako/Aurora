@@ -109,10 +109,13 @@ export type Compatibility =
 /** 落位矩阵的四态：兼容 / 可能可行 / 已安装 / 不兼容。数组已按这个顺序排好。 */
 export type MatchState = "compatible" | "maybe" | "installed" | "incompatible";
 
+/** 已装在实例里的那份。资源包、光影、数据包没有卷宗，后端按盘上文件的文件名与大小对平台版本认出来。 */
 export interface InstalledCopy {
   file_name: string;
   version_id: string;
   version_number: string | null;
+  /** 数据包装在哪个存档（存档目录名，几个存档都有时取名字排在最前的）；其余类型为 null。 */
+  world: string | null;
 }
 
 export interface InstanceMatch {
