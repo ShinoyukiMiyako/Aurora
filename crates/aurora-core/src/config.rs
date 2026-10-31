@@ -194,6 +194,9 @@ pub struct AuroraConfig {
     pub notified_update_version: Option<String>,
     /// 界面语言。旧配置没有这一项时取默认的简体中文。
     pub language: UiLanguage,
+    /// 新实例是否沿用默认设置（数据目录里的模板）。关掉时新建与整合包导入一律不套模板；
+    /// 旧配置没有这一项时按开着处理：没有模板时套用本来就什么也不做。
+    pub new_instance_template: bool,
 }
 
 impl Default for AuroraConfig {
@@ -220,6 +223,7 @@ impl Default for AuroraConfig {
             skipped_update_version: None,
             notified_update_version: None,
             language: UiLanguage::default(),
+            new_instance_template: true,
         }
     }
 }
@@ -515,6 +519,43 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["language"], "en-US");
         assert_eq!(store.load().await.unwrap().language, UiLanguage::EnUs);
+    }
+
+    /// 旧配置没有 new_instance_template 时按开着载入；写成 false 的读出 false，整份落盘再读回不变。
+    #[tokio::test]
+    async fn new_instance_template_defaults_on_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+
+        tokio::fs::write(&path, br#"{"download_concurrency": 12}"#)
+            .await
+            .unwrap();
+        let old = store.load().await.unwrap();
+        assert!(old.new_instance_template);
+        assert_eq!(old.download_concurrency, 12);
+
+        tokio::fs::write(
+            &path,
+            br#"{"new_instance_template": false, "check_updates": false}"#,
+        )
+        .await
+        .unwrap();
+        let off = store.load().await.unwrap();
+        assert!(!off.new_instance_template);
+        assert!(!off.check_updates);
+
+        let config = AuroraConfig {
+            new_instance_template: false,
+            download_concurrency: 7,
+            language: UiLanguage::EnUs,
+            ..AuroraConfig::default()
+        };
+        store.save(&config).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["new_instance_template"], false);
+        assert_eq!(store.load().await.unwrap(), config);
     }
 
     /// 不认识的语言（新版本才有的译文）不让整份配置失败：语言退回简体中文，其余照常。
