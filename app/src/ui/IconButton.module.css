@@ -32,7 +32,7 @@
 }
 
 /* ---- 幽灵（默认） ---- */
-.button[data-variant="ghost"]:hover:not(:disabled) {
+.button[data-variant="ghost"]:hover:not(:disabled, [data-disabled]) {
   background: var(--sk-bg-2);
   color: var(--sk-text);
 }
@@ -44,13 +44,13 @@
   box-shadow: var(--sk-shadow-sm);
 }
 
-.button[data-variant="secondary"]:hover:not(:disabled) {
+.button[data-variant="secondary"]:hover:not(:disabled, [data-disabled]) {
   border-color: var(--sk-line-2);
   color: var(--sk-text);
 }
 
 /* ---- 危险 ---- */
-.button[data-variant="danger"]:hover:not(:disabled) {
+.button[data-variant="danger"]:hover:not(:disabled, [data-disabled]) {
   background: var(--sk-danger-soft);
   color: var(--sk-danger);
 }
@@ -76,17 +76,18 @@
   box-shadow: var(--sk-focus), var(--sk-shadow-sm);
 }
 
-.button:active:not(:disabled) {
+.button:active:not(:disabled, [data-disabled]) {
   transform: scale(0.94);
 }
 
-:global([data-sk-reduced]) .button:active:not(:disabled) {
+:global([data-sk-reduced]) .button:active:not(:disabled, [data-disabled]) {
   transform: none;
   opacity: 0.85;
   transition: none;
 }
 
-.button:disabled {
+.button:disabled,
+.button[data-disabled] {
   opacity: var(--sk-disabled);
   cursor: not-allowed;
 }
