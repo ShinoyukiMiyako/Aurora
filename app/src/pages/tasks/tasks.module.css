@@ -1,0 +1,397 @@
+/* 下载任务页：总览（吞吐卡 + 并行通道）、状态筛选、分组任务列表。尺寸分档读 <html data-sk-tier>。 */
+
+.overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: var(--sk-gap);
+}
+
+:root[data-sk-tier="wide"] .overview {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+}
+
+/* ---------------------------------------------------------------- 吞吐卡 */
+
+.flow {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 188px;
+}
+
+/* 文字压在贴底的曲线之上 */
+.flowTop {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-18);
+}
+
+.flowText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.flowLabel,
+.flowSub {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.flowSub {
+  font-variant-numeric: tabular-nums;
+}
+
+.flowSpeed {
+  font-size: var(--sk-fs-hero);
+  line-height: var(--sk-lh-hero);
+  letter-spacing: var(--sk-ls-hero);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text);
+}
+
+.flowStats {
+  display: flex;
+  gap: var(--sk-space-22);
+  margin: 0 0 0 auto;
+  padding: 0 var(--sk-space-4) 0 0;
+}
+
+/* compact 档卡片太窄，两枚小统计让位给速度 */
+:root[data-sk-tier="compact"] .flowStats {
+  display: none;
+}
+
+.miniStat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sk-space-2);
+}
+
+.miniValue {
+  font-size: var(--sk-fs-lead);
+  line-height: var(--sk-lh-lead);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text);
+}
+
+.miniLabel {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.chart {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 86px;
+  pointer-events: none;
+}
+
+.chartStopTop {
+  stop-color: var(--sk-accent);
+  stop-opacity: 0.26;
+}
+
+.chartStopBottom {
+  stop-color: var(--sk-accent);
+  stop-opacity: 0;
+}
+
+/* 视图按 preserveAspectRatio="none" 横向拉伸，描边不随之变形 */
+.chartLine {
+  fill: none;
+  stroke: var(--sk-accent);
+  stroke-width: 1.75;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.chartIdle {
+  position: absolute;
+  bottom: var(--sk-space-14);
+  left: var(--sk-space-18);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+/* ---------------------------------------------------------------- 并行通道 */
+
+.lanes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lane {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--sk-space-10);
+  min-height: 38px;
+}
+
+.laneNo {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-bg-2);
+  font-size: var(--sk-fs-micro);
+  line-height: var(--sk-lh-micro);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text-3);
+}
+
+.lane[data-busy] .laneNo {
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.laneBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+.laneTitle {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+.laneName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lanePct {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text-2);
+}
+
+.laneIdle {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 var(--sk-space-10);
+  border: 1.5px dashed var(--sk-line-2);
+  border-radius: var(--sk-r-sm);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+}
+
+.queueLine {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  margin: var(--sk-space-4) 0 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.queueDots {
+  display: inline-flex;
+  flex: none;
+  gap: var(--sk-space-4);
+}
+
+.queueDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-text-3);
+}
+
+/* ---------------------------------------------------------------- 筛选与列表 */
+
+.listHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-12);
+}
+
+.groupLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  margin: 0;
+  padding: var(--sk-space-12) var(--sk-space-18) var(--sk-space-4);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.groupLabel::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--sk-line);
+}
+
+/* 任务行比标准大号行多一行元信息，行的上下内边距加在列表项上 */
+.rowItem {
+  padding-block: var(--sk-space-12);
+}
+
+.titleLine {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.titleLine > * {
+  flex: none;
+}
+
+.titleLine > .titleText {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 已完成与已取消的任务退到次级色，失败的保持正文色好让人看见 */
+.rowMuted .titleText {
+  color: var(--sk-text-2);
+}
+
+.rowFoot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+}
+
+.rowMeta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sk-space-12);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text-2);
+}
+
+.rowMetaLeft {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMetaLeft[data-danger] {
+  color: var(--sk-danger);
+}
+
+.rowMetaRight {
+  flex: none;
+  white-space: nowrap;
+}
+
+.tile {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  /* sk-guard-allow T2: 标识类图标底座按边长 × 0.3 取比例圆角（44 得 13），这是令牌之外唯一允许的圆角 */
+  border-radius: 13px;
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+}
+
+.tile[data-active] {
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+/* 结局角标压在底座右下角，外描一圈卡面色与底座分开 */
+.badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--sk-r-pill);
+  outline: 2px solid var(--sk-surface);
+  color: var(--sk-surface);
+}
+
+.badge[data-tone="ok"] {
+  background: var(--sk-ok);
+}
+
+.badge[data-tone="danger"] {
+  background: var(--sk-danger);
+}
+
+.badge[data-tone="muted"] {
+  background: var(--sk-text-3);
+}
+
+.side {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
+.pct {
+  min-width: 44px;
+  text-align: right;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text);
+}
+
+/* ---------------------------------------------------------------- 空状态与错误 */
+
+.emptyActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sk-space-8);
+}
+
+.errorLine {
+  display: block;
+}
+
+/* 错误原文可以选中复制 */
+.errorDetail {
+  display: block;
+  user-select: text;
+}
