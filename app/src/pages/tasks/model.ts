@@ -268,8 +268,8 @@ export interface Overview {
   /** 总量已知的活动任务：已下字节之和与总字节之和。总量未知的任务两边都不计，避免进度超过 100%。 */
   downloaded: number;
   total: number;
-  /** 0-1；没有总量已知的活动任务时为 0。 */
-  fraction: number;
+  /** 0-1；没有总量已知的活动任务时为 null（进度环圆心写「--」，而不是一个没有意义的 0%）。 */
+  fraction: number | null;
 }
 
 export function overviewOf(b: TaskBuckets): Overview {
@@ -283,7 +283,7 @@ export function overviewOf(b: TaskBuckets): Overview {
   }
   const speed = b.running.reduce((sum, t) => sum + t.speedBps, 0);
   const label: OverviewLabel = b.running.length > 0 ? "running" : active.length > 0 ? "waiting" : "idle";
-  return { label, speed, downloaded, total, fraction: total > 0 ? downloaded / total : 0 };
+  return { label, speed, downloaded, total, fraction: total > 0 ? downloaded / total : null };
 }
 
 /** 总览副行：剩余字节与剩余时间；没有任何下载流量时写「等待数据」。 */

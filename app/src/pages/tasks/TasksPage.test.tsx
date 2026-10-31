@@ -97,6 +97,13 @@ const radio = (label: string) => {
 
 const headings = () => [...page().querySelectorAll("section > h2")].map((h) => h.textContent);
 
+/** 吞吐卡的总进度环。 */
+function totalRing(): HTMLElement {
+  const el = page().querySelector<HTMLElement>('[role="progressbar"][aria-label="全部活动任务的总进度"]');
+  if (el === null) throw new Error("吞吐卡没有总进度环");
+  return el;
+}
+
 function record(id: string, status: TaskRecordDto["status"], overrides: Partial<TaskRecordDto> = {}): TaskRecordDto {
   return {
     id,
@@ -206,6 +213,13 @@ describe("下载任务页：历史", () => {
     expect(hasButton(cancelled, "重试")).toBe(false);
     // 新建被取消，实例已经不在了
     expect(hasButton(cancelled, "查看实例")).toBe(false);
+
+    // 没有活动任务：总进度环是 84 档的空环，圆心写「--」，不报一个没有意义的百分数
+    expect(totalRing().dataset.size).toBe("84");
+    expect(totalRing().dataset.tone).toBe("muted");
+    expect(totalRing().getAttribute("aria-valuetext")).toBe("--");
+    expect(totalRing().hasAttribute("aria-valuenow")).toBe(false);
+    expect(totalRing().textContent).toBe("--");
 
     const done = row("下载 Java done-java");
     expect(done.textContent).toContain("50.0 MB · 用时 1 分钟");
@@ -335,6 +349,10 @@ describe("下载任务页：进行中", () => {
     expect(row("Java 8").textContent).toContain("20%");
     expect(page().textContent).toContain("当前总速度");
     expect(page().textContent).toContain("剩余 492 MB · 约 45 秒");
+    // 只有这一个任务报了总量：总进度就是它的 120 / 612
+    expect(totalRing().dataset.tone).toBe("accent");
+    expect(totalRing().getAttribute("aria-valuenow")).toBe("20");
+    expect(totalRing().hasAttribute("aria-valuetext")).toBe(false);
     expect(page().textContent).not.toContain("最近 48 秒没有下载流量");
   });
 

@@ -230,8 +230,11 @@ describe("吞吐采样与总览", () => {
     expect(overviewRemaining(o, 0)).toBe("剩余 700 B · 约 10 秒");
     expect(overviewRemaining(o, 10)).toBe("剩余 700 B · 约 2 分钟");
     expect(overviewRemaining({ ...o, speed: 0 }, 0)).toBe("剩余 700 B · 等待数据");
-    expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: 0 });
-    expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })])).label).toBe("idle");
+    // 只有总量未知的排队任务、或没有任何活动任务：没有可显示的进度，而不是 0%
+    expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: null });
+    expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })]))).toEqual({ label: "idle", speed: 0, downloaded: 0, total: 0, fraction: null });
+    // 边界：总量已知但一个字节都还没下，是真实的 0
+    expect(overviewOf(bucketTasks([task("r0", { status: "running", bytes: 0, totalBytes: 1 })])).fraction).toBe(0);
   });
 
   it("曲线：不足 48 个采样左侧补 0；纵轴上限至少 4 MB/s，超过时按样本最大值", () => {
