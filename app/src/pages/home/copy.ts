@@ -136,4 +136,5 @@ export const NEWS_TAG_LABEL: Readonly<Record<NewsTag, string>> = {
   release: "正式版",
   snapshot: "快照",
   event: "活动",
+  launcher: "启动器",
 };

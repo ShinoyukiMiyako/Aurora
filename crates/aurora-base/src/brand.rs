@@ -32,6 +32,9 @@ pub const APP_NAME: &str = app_name!();
 pub const APP_NAME_EN: &str = app_name_en!();
 pub const APP_SLUG: &str = app_slug!();
 
+/// 源代码仓库；启动器资讯读它的 GitHub Releases。不进 `concat!`，不需要宏形式。
+pub const REPO_URL: &str = "https://github.com/ShinoyukiMiyako/Aurora";
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -256,6 +256,15 @@ const NEWS: NewsItemDto[] = [
     game_version: "26.4-snapshot-6",
   },
   {
+    id: "launcher-300",
+    title: "v0.2.0",
+    summary: "主页资讯加入启动器自己的发布。",
+    date: Date.UTC(2026, 9, 20, 8, 0, 0),
+    tag: "launcher",
+    thumbnail_url: null,
+    game_version: null,
+  },
+  {
     id: "java-26-3",
     title: "Minecraft Java Edition 26.3",
     summary: "正式版更新：新的方块、生物与性能改进。",
@@ -276,7 +285,7 @@ const NEWS: NewsItemDto[] = [
 ];
 
 function listNews(): NewsFeedDto {
-  return { items: NEWS, fetched_at: Date.now(), offline: false };
+  return { items: NEWS, fetched_at: Date.now(), offline: false, launcher_error: null };
 }
 
 // ---- 自更新 ----

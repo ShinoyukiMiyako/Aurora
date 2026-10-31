@@ -29,7 +29,7 @@ import { NEWS_HERO_HEIGHT, SKELETON_SIZE } from "./layout";
 import { NEWS_COUNT, latestNews, newsAction, type NewsAction } from "./news";
 import s from "./home.module.css";
 
-const NEWS_TAG_TONE: Readonly<Record<NewsTag, TagTone>> = { release: "ok", snapshot: "warn", event: "info" };
+const NEWS_TAG_TONE: Readonly<Record<NewsTag, TagTone>> = { release: "ok", snapshot: "warn", event: "info", launcher: "accent" };
 
 export function NewsCard({ span }: { span: ResponsiveValue }) {
   const { tier } = useShell();
