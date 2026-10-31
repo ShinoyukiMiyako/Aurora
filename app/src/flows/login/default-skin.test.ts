@@ -68,6 +68,31 @@ describe("默认皮肤的选取", () => {
     expect(defaultSkin(uuid)).toEqual({ kind: "default", path, model });
   });
 
+  // 原版客户端 1.20.1 的 DefaultPlayerSkin 对固定种子随机 UUID 的实际输出：每个下标一条，哈希正负交替。
+  // 与上面的合成向量不同，这组不经过本实现的推导，直接钉住游戏里的结果。
+  it.each([
+    ["1c8d7b0d-84b6-8b9a-0dfc-ba7b668da3e0", "entity/player/slim/alex", "slim"],
+    ["6eaa7b86-d4ae-e15e-8578-599326c3ee04", "entity/player/slim/ari", "slim"],
+    ["ca9b54bd-467b-8b6f-bd28-eb64ed924f74", "entity/player/slim/efe", "slim"],
+    ["a8567abc-11d3-421c-3360-e9dbd4909684", "entity/player/slim/kai", "slim"],
+    ["6a3ca7c8-6cbc-813a-8c75-9f7177b96927", "entity/player/slim/makena", "slim"],
+    ["68f480c2-db19-898b-f0d9-4a89341afa65", "entity/player/slim/noor", "slim"],
+    ["7e9cdd8a-9ecb-dbea-9144-4563f5c9c6c7", "entity/player/slim/steve", "slim"],
+    ["6ee6e6fe-8274-b03a-a6e8-02877d3129b2", "entity/player/slim/sunny", "slim"],
+    ["c2bcc84d-76ca-d69c-502e-882370ed7b24", "entity/player/slim/zuri", "slim"],
+    ["ba870b27-51f5-bfbf-af02-f02822262271", "entity/player/wide/alex", "wide"],
+    ["4637278c-8e1f-e7fa-5c81-fadd69fa1f29", "entity/player/wide/ari", "wide"],
+    ["ef59f59a-e647-9213-a0be-f8379ed25c95", "entity/player/wide/efe", "wide"],
+    ["2385e2d5-db30-9fad-d2da-b43fbf489539", "entity/player/wide/kai", "wide"],
+    ["cb1bdd27-c509-3706-cf89-4645fdda28c3", "entity/player/wide/makena", "wide"],
+    ["b5093f23-b04e-9fc2-8920-712f403ec050", "entity/player/wide/noor", "wide"],
+    ["4059ff13-38a1-0302-f365-2e739b0fd277", "entity/player/wide/steve", "wide"],
+    ["dd65f65c-9448-2c9f-1c44-7d2ed65c3369", "entity/player/wide/sunny", "wide"],
+    ["06f83a78-c14d-33c9-b17e-1bef3f6e7275", "entity/player/wide/zuri", "wide"],
+  ])("与原版客户端的实际输出一致：%s -> %s", (uuid, path, model) => {
+    expect(defaultSkin(uuid)).toEqual({ kind: "default", path, model });
+  });
+
   it.each([
     ["Steve", "5627dd98-e6be-3c21-b8a8-e92344183641", "entity/player/wide/efe"],
     ["Alex", "36532b5e-c442-3dbb-a24c-c7e55d0f979a", "entity/player/slim/makena"],

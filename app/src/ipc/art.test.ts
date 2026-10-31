@@ -7,7 +7,7 @@ import { createOfflineAccount } from "./accounts";
 import { IpcError } from "./errors";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { setMockArtStatus } from "./mock/handlers/art";
+import { defaultSkin as mockDefaultSkin, setMockArtStatus } from "./mock/handlers/art";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -84,6 +84,39 @@ describe("材质 mock", () => {
     if (skin === null || skin.kind !== "default") throw new Error(`离线账户应有默认皮肤：${JSON.stringify(skin)}`);
     expect(skin).toEqual(defaultSkin(account.uuid));
     expect(SKIN_TEXTURES).toContain(skin.path);
+  });
+
+  // mock 为了不跨层引用另写了一份选取规则，而 mock 生成的离线 UUID 只落在少数下标上，经 skin_info 碰不到全部 18 套；
+  // 直接拿原版客户端 1.20.1 的 DefaultPlayerSkin 对随机 UUID 的实际输出逐个核对（与前端、后端测试同一组）。
+  it.each([
+    ["1c8d7b0d-84b6-8b9a-0dfc-ba7b668da3e0", "entity/player/slim/alex", "slim"],
+    ["6eaa7b86-d4ae-e15e-8578-599326c3ee04", "entity/player/slim/ari", "slim"],
+    ["ca9b54bd-467b-8b6f-bd28-eb64ed924f74", "entity/player/slim/efe", "slim"],
+    ["a8567abc-11d3-421c-3360-e9dbd4909684", "entity/player/slim/kai", "slim"],
+    ["6a3ca7c8-6cbc-813a-8c75-9f7177b96927", "entity/player/slim/makena", "slim"],
+    ["68f480c2-db19-898b-f0d9-4a89341afa65", "entity/player/slim/noor", "slim"],
+    ["7e9cdd8a-9ecb-dbea-9144-4563f5c9c6c7", "entity/player/slim/steve", "slim"],
+    ["6ee6e6fe-8274-b03a-a6e8-02877d3129b2", "entity/player/slim/sunny", "slim"],
+    ["c2bcc84d-76ca-d69c-502e-882370ed7b24", "entity/player/slim/zuri", "slim"],
+    ["ba870b27-51f5-bfbf-af02-f02822262271", "entity/player/wide/alex", "wide"],
+    ["4637278c-8e1f-e7fa-5c81-fadd69fa1f29", "entity/player/wide/ari", "wide"],
+    ["ef59f59a-e647-9213-a0be-f8379ed25c95", "entity/player/wide/efe", "wide"],
+    ["2385e2d5-db30-9fad-d2da-b43fbf489539", "entity/player/wide/kai", "wide"],
+    ["cb1bdd27-c509-3706-cf89-4645fdda28c3", "entity/player/wide/makena", "wide"],
+    ["b5093f23-b04e-9fc2-8920-712f403ec050", "entity/player/wide/noor", "wide"],
+    ["4059ff13-38a1-0302-f365-2e739b0fd277", "entity/player/wide/steve", "wide"],
+    ["dd65f65c-9448-2c9f-1c44-7d2ed65c3369", "entity/player/wide/sunny", "wide"],
+    ["06f83a78-c14d-33c9-b17e-1bef3f6e7275", "entity/player/wide/zuri", "wide"],
+  ])("皮肤：mock 的默认皮肤规则与原版客户端的实际输出一致：%s -> %s", (uuid, path, model) => {
+    expect(mockDefaultSkin(uuid)).toEqual({ kind: "default", path, model });
+    expect(mockDefaultSkin(uuid.replace(/-/g, "").toUpperCase())).toEqual({ kind: "default", path, model });
+  });
+
+  it("皮肤：mock 拿到不是 32 位十六进制的 UUID 按内部错误抛出", () => {
+    for (const bad of ["", "1c8d7b0d-84b6", "zz8d7b0d84b68b9a0dfcba7b668da3e0", "1c8d7b0d84b68b9a0dfcba7b668da3e00"]) {
+      expect(() => mockDefaultSkin(bad), bad).toThrow(IpcError);
+      expect(() => mockDefaultSkin(bad), bad).toThrow("不是 32 位十六进制");
+    }
   });
 
   it("缩略图：名单内主机返回地址的 SHA-1 作键", async () => {
