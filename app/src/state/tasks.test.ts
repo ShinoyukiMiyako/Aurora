@@ -198,6 +198,34 @@ describe("下载队列：状态容器", () => {
     store.stop();
   });
 
+  it("下载 Java 时指定了实例：装好后把它的 Java 固定为新装的运行时，通知写明", async () => {
+    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    const store = await startedStore();
+    await store.actions.installJava(21, { pinFor: "生存" });
+    await settle();
+    const [t] = store.getState().tasks;
+    runs.get(`${t.id}#1`)?.resolve(runtime("21.0.5"));
+    await settle();
+    const saved = callsOf(ipc, "set_instance_settings");
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ id: "生存", settings: { java: "C:/java.exe", memory_mb: null } });
+    expect(store.getState().toasts.filter((x) => x.tone === "success").map((x) => [x.title, x.body])).toEqual([["Java 21 已就绪", "「生存」下次启动会用它"]]);
+    store.stop();
+  });
+
+  it("没指定实例的 Java 下载不改任何实例设置", async () => {
+    const store = await startedStore();
+    await store.actions.installJava(21);
+    await settle();
+    runs.get(`${store.getState().tasks[0].id}#1`)?.resolve(runtime("21.0.5"));
+    await settle();
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    expect(store.getState().toasts.at(-1)).toMatchObject({ title: "Java 21 已就绪", body: "需要它的实例会自动使用" });
+    store.stop();
+  });
+
   it("同一件事重复入队只提示，不加任务", async () => {
     const store = await startedStore();
     await store.actions.installJava(21);

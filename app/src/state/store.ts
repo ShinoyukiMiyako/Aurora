@@ -201,7 +201,8 @@ type TaskMeta =
       loaderVersion: string | null;
     }
   | { type: "repair"; launchAfter: boolean }
-  | { type: "java"; major: number; launchAfter: string | null }
+  /** pinFor：下载完把这个实例的 Java 固定为新装的运行时（崩溃诊断「下载 Java N」）。 */
+  | { type: "java"; major: number; launchAfter: string | null; pinFor: string | null }
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
@@ -311,7 +312,8 @@ export interface LauncherActions {
   removeMod(instanceId: string, fileName: string, name: string): Promise<void>;
   installResource(spec: InstallResourceSpec): Promise<void>;
   rollback(instanceId: string, eventId: string): Promise<void>;
-  installJava(major: number, opts?: { launchAfter?: string }): Promise<void>;
+  /** launchAfter：装好后通知带「启动」这个实例；pinFor：装好后把这个实例的 Java 固定为新装的运行时。 */
+  installJava(major: number, opts?: { launchAfter?: string; pinFor?: string }): Promise<void>;
   // 下载任务
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
@@ -433,7 +435,7 @@ function metaFromSpec(task: Task): TaskMeta | null {
     case "install_java": {
       const major = args.requiredMajor;
       if (typeof major !== "number") throw new Error("任务 install_java 缺少 requiredMajor");
-      return { type: "java", major, launchAfter: null };
+      return { type: "java", major, launchAfter: null, pinFor: null };
     }
     case "install_mods": {
       const items = modItems(args);
@@ -1226,7 +1228,8 @@ export class LauncherStore {
         this.set((raw) => ({ tasks: raw.tasks.map((t) => (t.id === task.id ? { ...t, detail: TASK_TEXT.javaDetail(runtime.version.raw) } : t)) }));
         this.scheduleJournal();
         invalidateResources("java");
-        const copy = TASK_TOAST.java(meta.major);
+        if (meta.pinFor !== null) await this.actions.updateInstanceSettings(meta.pinFor, { java: runtime.java_executable });
+        const copy = meta.pinFor === null ? TASK_TOAST.java(meta.major) : TASK_TOAST.javaPinned(meta.major, meta.pinFor);
         this.pushToast("success", copy.title, copy.body, meta.launchAfter === null ? undefined : this.launchAction(meta.launchAfter));
         return;
       }
@@ -1880,7 +1883,12 @@ export class LauncherStore {
             instanceId: null,
             spec: { command: "install_java", args: { requiredMajor: major } },
           },
-          { type: "java", major, launchAfter: opts.launchAfter === undefined ? null : opts.launchAfter },
+          {
+            type: "java",
+            major,
+            launchAfter: opts.launchAfter === undefined ? null : opts.launchAfter,
+            pinFor: opts.pinFor === undefined ? null : opts.pinFor,
+          },
           `Java ${major}`,
         );
       },

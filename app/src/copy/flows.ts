@@ -556,6 +556,8 @@ export const TASK_TOAST = {
     body: world === null ? "这个实例还没有存档，创建新世界时在「数据包」里选择它" : `已放入存档「${world}」`,
   }),
   java: (major: number) => ({ title: `Java ${major} 已就绪`, body: "需要它的实例会自动使用" }),
+  /** 下载完已固定给某个实例（崩溃诊断里的「下载 Java N」）。 */
+  javaPinned: (major: number, instance: string) => ({ title: `Java ${major} 已就绪`, body: `「${instance}」下次启动会用它` }),
   /** 从任务日志恢复后重试成功、已没有入队时上下文的任务。 */
   finished: (title: string) => ({ title: `已完成：${title}` }),
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
