@@ -5,7 +5,7 @@ import { useState, type ReactNode } from "react";
 import { Icon, type IconName } from "../../art/Icon";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
-import { LOADER_NAME } from "../../copy/flows";
+import { coverLabel, LOADER_NAME } from "../../copy/flows";
 import { SIDEBAR_PIN_LIMIT } from "../../domain/limits";
 import type { LoaderKind } from "../../domain/types";
 import { useLauncher } from "../../state/launcher";
@@ -16,7 +16,7 @@ import { Popover } from "../../ui/Popover";
 import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
 import { useRovingGroup } from "../../ui/roving";
-import { coverName, MODPACK_COPY } from "./copy";
+import { MODPACK_COPY } from "./copy";
 import styles from "./pack.module.css";
 
 function presetOf(block: string): InstanceCover {
@@ -59,7 +59,7 @@ function CoverPicker({ seed, value, onChange }: { seed: string; value: InstanceC
                 type="button"
                 role="radio"
                 aria-checked={on}
-                aria-label={MODPACK_COPY.coverOption(coverName(cover.block))}
+                aria-label={MODPACK_COPY.coverOption(coverLabel(cover.block))}
                 className={styles.coverCell}
                 onClick={() => {
                   onChange(cover);
@@ -67,7 +67,7 @@ function CoverPicker({ seed, value, onChange }: { seed: string; value: InstanceC
                 }}
               >
                 <InstanceAvatarBase instanceId={seed} cover={cover} size={56} selected={on} />
-                <span className={styles.coverName}>{coverName(cover.block)}</span>
+                <span className={styles.coverName}>{coverLabel(cover.block)}</span>
                 {on && (
                   <span className={styles.coverCheck} aria-hidden="true">
                     <Icon name="check" size={12} />

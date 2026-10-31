@@ -6,7 +6,7 @@ import { Icon } from "../../art/Icon";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { LoaderTile } from "../../art/illustrations/FeatureTile";
-import { LOADER_NAME } from "../../copy/flows";
+import { coverLabel, LOADER_NAME } from "../../copy/flows";
 import type { Settings } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
 import { describeError } from "../../state/errors";
@@ -28,7 +28,7 @@ import { SearchInput } from "../../ui/SearchInput";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
-import { coverLabel, CREATE_COPY, LOADER_DESCRIPTION, RELEASE_TYPE_LABEL } from "./copy";
+import { CREATE_COPY, LOADER_DESCRIPTION, RELEASE_TYPE_LABEL } from "./copy";
 import styles from "./create.module.css";
 import { instancePath, loaderOptions, type GameVersion, type VersionFilter } from "./model";
 

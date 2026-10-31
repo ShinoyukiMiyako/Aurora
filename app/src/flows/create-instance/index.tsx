@@ -12,7 +12,7 @@ import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "
 import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { DEFAULT_COVER, type InstanceCover } from "../../art/iso/covers";
 import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
-import { ACTION_ERROR, LOADER_NAME } from "../../copy/flows";
+import { ACTION_ERROR, coverLabel, LOADER_NAME } from "../../copy/flows";
 import { instanceNameError } from "../../domain/rules";
 import type { LoaderKind } from "../../domain/types";
 import { fade, springs } from "../../lib/motion";
@@ -26,7 +26,7 @@ import { canPinMore } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
 import { Modal } from "../../ui/Modal";
-import { coverLabel, CREATE_COPY } from "./copy";
+import { CREATE_COPY } from "./copy";
 import styles from "./create.module.css";
 import {
   DISCARD_CONFIRM_THRESHOLD,

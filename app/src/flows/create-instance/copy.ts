@@ -29,31 +29,6 @@ export const LOADER_DESCRIPTION: Readonly<Record<LoaderKind, string>> = {
   neoforge: "Forge 的继任者，新版本大型模组的主力",
 };
 
-/** 封面预设的中文名，键为封面预设 id；漏配时直接抛，免得界面上出现 id 原文。 */
-const COVER_LABEL: Readonly<Record<string, string>> = {
-  cherry_planks: "樱花木板",
-  cherry_leaves: "樱花树叶",
-  grass_block: "草方块",
-  moss_block: "苔藓块",
-  honeycomb_block: "蜜脾块",
-  amethyst_block: "紫水晶块",
-  copper_block: "铜块",
-  prismarine_bricks: "海晶石砖",
-  deepslate_tiles: "深板岩瓦",
-  purpur_block: "紫珀块",
-  mossy_cobblestone: "苔石",
-  red_wool: "红色羊毛",
-  blue_ice: "蓝冰",
-  oxidized_copper: "氧化的铜",
-  netherrack: "下界岩",
-  end_stone_bricks: "末地石砖",
-};
-
-export function coverLabel(block: string): string {
-  if (!Object.hasOwn(COVER_LABEL, block)) throw new Error(`封面 ${block} 没有配中文名`);
-  return COVER_LABEL[block];
-}
-
 const listNames = (loaders: readonly LoaderKind[]) => loaders.map((k) => LOADER_NAME[k]).join("、");
 
 export const CREATE_COPY = {

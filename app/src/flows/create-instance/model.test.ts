@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ManifestDto } from "../../state/queries/catalog";
-import { coverLabel, CREATE_COPY } from "./copy";
+import { coverLabel } from "../../copy/flows";
+import { CREATE_COPY } from "./copy";
 import {
   effectiveLoaderVersion,
   filledCount,

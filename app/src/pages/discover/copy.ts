@@ -32,31 +32,6 @@ export const SORT_LABEL: Readonly<Record<SortField, string>> = {
   updated: "最近更新",
 };
 
-/** 封面预设的中文名，按封面白名单的 id。 */
-export const COVER_NAME: Readonly<Record<string, string>> = {
-  cherry_planks: "樱花木板",
-  cherry_leaves: "樱花树叶",
-  grass_block: "草方块",
-  moss_block: "苔藓块",
-  honeycomb_block: "蜜脾块",
-  amethyst_block: "紫水晶块",
-  copper_block: "铜块",
-  prismarine_bricks: "海晶石砖",
-  deepslate_tiles: "深板岩瓦",
-  purpur_block: "紫珀块",
-  mossy_cobblestone: "苔石",
-  red_wool: "红色羊毛",
-  blue_ice: "蓝冰",
-  oxidized_copper: "氧化的铜",
-  netherrack: "下界岩",
-  end_stone_bricks: "末地石砖",
-};
-
-export function coverName(block: string): string {
-  if (!Object.hasOwn(COVER_NAME, block)) throw new Error(`封面预设 ${block} 没有中文名`);
-  return COVER_NAME[block];
-}
-
 export const SEARCH_COPY = {
   eyebrow: "Modrinth · CurseForge",
   importButton: "导入整合包文件",
