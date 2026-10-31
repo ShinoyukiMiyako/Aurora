@@ -96,3 +96,19 @@ describe("登录成功后皮肤缓存作废", () => {
     expect(await skin()).toBe(2);
   });
 });
+
+describe("打开外部网址", () => {
+  it("http(s) 网址交给 opener 插件的命令；其余协议直接拒绝，不发命令；打开失败原样抛出", async () => {
+    ipc.overrides.set("plugin:opener|open_url", () => null);
+    await store.actions.openExternal("https://www.microsoft.com/link");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url: "https://www.microsoft.com/link" }]);
+
+    await expect(store.actions.openExternal("file:///C:/Windows/System32/calc.exe")).rejects.toThrow("只能打开 http(s) 网址");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toHaveLength(1);
+
+    ipc.overrides.set("plugin:opener|open_url", () => {
+      throw "url not allowed on the configured scope: https://evil.example";
+    });
+    await expect(store.actions.openExternal("https://evil.example")).rejects.toMatchObject({ code: "unknown" });
+  });
+});

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { act } from "react";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
 import { validateOfflineName } from "../../domain/rules";
@@ -43,7 +43,6 @@ let view: Rendered | undefined;
 let launcher: LauncherApi;
 let writeText: ReturnType<typeof vi.fn>;
 let opened: string[];
-let anchorClick: MockInstance<HTMLAnchorElement["click"]>;
 
 function Host() {
   launcher = useLauncher();
@@ -98,14 +97,14 @@ beforeEach(() => {
   writeText = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   opened = [];
-  anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function click(this: HTMLAnchorElement) {
-    opened.push(`${this.target} ${this.href}`);
+  ipc.overrides.set("plugin:opener|open_url", (args) => {
+    opened.push(String(args.url));
+    return null;
   });
 });
 afterEach(() => {
   view?.unmount();
   view = undefined;
-  anchorClick.mockRestore();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -183,7 +182,7 @@ describe("微软设备码弹窗", () => {
     act(() => button(MICROSOFT_LOGIN_COPY.copyAndOpen).click());
     await flush();
     expect(writeText).toHaveBeenCalledWith("PF7Q-X2LM");
-    expect(opened).toEqual(["_blank https://www.microsoft.com/link"]);
+    expect(opened).toEqual(["https://www.microsoft.com/link"]);
   });
 
   it("复制失败就不打开网页，并报「复制失败」", async () => {
@@ -226,7 +225,7 @@ describe("微软设备码弹窗", () => {
     expect(dialog()?.textContent).toContain("还没有 Xbox 档案");
     act(() => button("打开 xbox.com").click());
     await flush();
-    expect(opened).toEqual(["_blank https://www.xbox.com/"]);
+    expect(opened).toEqual(["https://www.xbox.com/"]);
   });
 });
 

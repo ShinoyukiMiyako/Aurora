@@ -24,9 +24,11 @@ import { Modal } from "../../ui/Modal";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Skeleton } from "../../ui/Skeleton";
 import { DEVICE_DIALOG_COPY, LOGIN_ERROR } from "../../copy/login";
-import { XBOX_URL, openExternal } from "./external";
 import styles from "./login.module.css";
 import { useLoginSkin } from "./skin";
+
+/** 没有 Xbox 档案时引导去建档案的网址。 */
+const XBOX_URL = "https://www.xbox.com";
 
 /** 代码格子逐个弹出的间隔（秒）。 */
 const CELL_STAGGER_S = 0.05;
@@ -99,7 +101,7 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
             data-autofocus=""
             onClick={() =>
               void copyText(device.userCode).then((copied) => {
-                if (copied) void run(() => openExternal(device.verificationUri), LOGIN_ERROR.openPage);
+                if (copied) void run(() => actions.openExternal(device.verificationUri), LOGIN_ERROR.openPage);
               })
             }
           >
@@ -125,7 +127,7 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
             restart();
             return;
           case "open_xbox":
-            void run(() => openExternal(XBOX_URL), LOGIN_ERROR.openPage);
+            void run(() => actions.openExternal(XBOX_URL), LOGIN_ERROR.openPage);
             return;
           case "use_offline":
             void run(() => actions.openLogin("offline", login.intent), ACTION_ERROR.addOffline);

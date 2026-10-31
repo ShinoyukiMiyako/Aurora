@@ -298,6 +298,8 @@ export interface LauncherActions {
   updateInstanceSettings(id: string, patch: Partial<InstanceSettings>): Promise<InstanceSettings>;
   repairInstance(id: string, opts?: { launchAfter?: boolean }): Promise<void>;
   openFolder(target: FolderTarget, id?: string | null, world?: string | null): Promise<void>;
+  /** 用系统默认浏览器打开一个 http(s) 网址；别的协议直接抛错。打开失败原样抛出。 */
+  openExternal(url: string): Promise<void>;
   refreshInstances(): Promise<void>;
   // 启动会话
   launch(id: string): Promise<void>;
@@ -357,6 +359,9 @@ const TASK_COMMANDS = new Set([
 ]);
 
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
+
+/** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
+const OPEN_URL_COMMAND = "plugin:opener|open_url";
 
 /** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
@@ -1858,6 +1863,12 @@ export class LauncherStore {
       },
       async openFolder(target, id = null, world = null) {
         await instancesIpc.openFolder(target, id, world);
+      },
+      async openExternal(url) {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error(`只能打开 http(s) 网址：${url}`);
+        // 交给 opener 插件的命令而不是 target="_blank" 的链接：注入脚本接管链接点击时不等结果，打开失败就悄悄没了
+        await invoke<void>(OPEN_URL_COMMAND, { url: parsed.href });
       },
       async refreshInstances() {
         await store.fetchInstances();
