@@ -122,7 +122,7 @@ beforeEach(() => {
     const range = args.range as { from: string; to: string };
     return { from: range.from, to: range.to, days: PLAY_DAYS, total_minutes: 300, instances: [] };
   });
-  ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW, offline: false }));
+  ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW, offline: false, launcher_error: null }));
   ipc.overrides.set("list_pinned_servers", () => pinned);
   ipc.overrides.set("set_pinned_servers", (args: IpcArgs) => {
     pinned = args.servers as PinnedServerDto[];
@@ -400,8 +400,28 @@ describe("主页：资讯", () => {
     expect(callsOf(ipc, "list_news")).toHaveLength(before + 1);
   });
 
+  it("只有启动器资讯没拉下来：官方资讯照常列出，底部轻提示原因，重试再拉一次；拉下来后提示消失", async () => {
+    let launcherError: { code: string; message: string; detail?: unknown } | null = { code: "network_failed", message: "GitHub 限流", detail: { url: "https://api.github.com/x", status: 403 } };
+    ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW, offline: false, launcher_error: launcherError }));
+    await mount();
+    expect(text()).toContain("Minecraft 1.21.1");
+    // 「资讯暂时没拉下来」只出现在启动器资讯的提示里一次：整张卡没有切成错误态
+    expect(text().split("资讯暂时没拉下来")).toHaveLength(2);
+    expect(text()).not.toContain("离线中");
+    const note = document.querySelector<HTMLElement>('[role="note"]');
+    if (note === null) throw new Error("没有启动器资讯的提示");
+    expect(note.textContent).toBe("启动器资讯暂时没拉下来：GitHub 限流（403）重试");
+    const before = callsOf(ipc, "list_news").length;
+    launcherError = null;
+    click(buttonByText("重试", note));
+    await flush();
+    expect(callsOf(ipc, "list_news")).toHaveLength(before + 1);
+    expect(document.querySelector('[role="note"]')).toBeNull();
+    expect(text()).toContain("Minecraft 1.21.1");
+  });
+
   it("后端给的是缓存：副标题注明离线中", async () => {
-    ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW - DAY, offline: true }));
+    ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW - DAY, offline: true, launcher_error: null }));
     await mount();
     expect(text()).toContain("游戏更新与官方活动 · 离线中");
   });
@@ -410,7 +430,7 @@ describe("主页：资讯", () => {
     let reachable = false;
     ipc.overrides.set("list_news", () => {
       if (!reachable) throw new IpcError("network_failed", "dns lookup failed");
-      return { items: NEWS, fetched_at: NOW, offline: false };
+      return { items: NEWS, fetched_at: NOW, offline: false, launcher_error: null };
     });
     vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
     await mount();

@@ -95,6 +95,7 @@ export const HOME_COPY = {
   offline: "离线中",
   withOffline: (subtitle: string) => `${subtitle} · 离线中`,
   newsError: "资讯暂时没拉下来",
+  launcherNewsError: "启动器资讯暂时没拉下来",
   newsNeedsNetwork: "需要联网获取",
   newsEmpty: "暂时没有新资讯",
   newsOpen: (name: string) => `打开「${name}」`,

@@ -1,7 +1,7 @@
 // 错误进通知正文时的写法：后端原文原样给出，带错误码（XErr、HTTP 状态）时在末尾用全角括号附上。
 // 「复制错误信息」要的是完整的一份：错误名与错误码、原文、后端给的原因链与其余结构化细节，贴进反馈里就能定位。
 
-import { isIpcError, UNKNOWN_ERROR_CODE } from "../ipc/errors";
+import { IpcError, isIpcError, UNKNOWN_ERROR_CODE } from "../ipc/errors";
 
 function numericDetail(detail: unknown, key: string): number | null {
   if (typeof detail !== "object" || detail === null) return null;
@@ -17,6 +17,11 @@ export function describeError(error: unknown): string {
   const status = numericDetail(error.detail, "status");
   if (status !== null) return `${error.message}（${status}）`;
   return error.message;
+}
+
+/** 命令返回值里内嵌的错误（与命令错误同形状，例如资讯里某一来源的失败），按 describeError 的规则写成一句。 */
+export function describeErrorRecord(record: { code: string; message: string; detail?: unknown }): string {
+  return describeError(new IpcError(record.code, record.message, record.detail));
 }
 
 /** 任务失败记录用的 { code, message }：前端自身的 Error 没有错误码，记为 unknown。 */

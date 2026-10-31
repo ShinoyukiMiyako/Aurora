@@ -608,6 +608,17 @@ button.bar:hover .barTrack {
   margin-top: var(--sk-space-10);
 }
 
+.newsNote {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-8);
+  margin-top: var(--sk-space-10);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
 .newsMeta {
   display: flex;
   flex-direction: column;

@@ -1,6 +1,7 @@
 // 资讯：官方内容源的最近几条，点开看详情。详情弹窗按资讯对应的游戏版本给主按钮：已有该版本的实例就打开它，
 // 没有就带版本预设新建；没有版本的资讯只有「关闭」。拉取失败或断网时有上次缓存就照常显示缓存，副标题注明离线；
 // 断网又没有缓存时说「需要联网获取」，而不是笼统的拉取失败。恢复联网后，手里只有缓存或错误的这张卡自动重取一次。
+// 启动器资讯是另一个来源：只有它没拉下来时官方资讯照常列出，卡片底部轻提示一句并给重试，不切成整卡错误态。
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
@@ -10,7 +11,7 @@ import { formatDate, formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
-import { describeError } from "../../state/errors";
+import { describeError, describeErrorRecord } from "../../state/errors";
 import { useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import { useNews, type NewsItemDto, type NewsTag } from "../../state/queries/home";
@@ -116,6 +117,16 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
     <Card span={span}>
       <CardHeader level={2} title={HOME_COPY.newsTitle} subtitle={subtitle} icon="news" />
       {body()}
+      {feed !== undefined && feed.launcher_error !== null && (
+        <p className={s.newsNote} role="note">
+          <span>
+            {HOME_COPY.launcherNewsError}：{describeErrorRecord(feed.launcher_error)}
+          </span>
+          <Button variant="ghost" size="sm" icon="refresh" onClick={news.reload}>
+            {HOME_COPY.retry}
+          </Button>
+        </p>
+      )}
       {current !== null && <NewsModal item={current} open={open} onClose={() => setOpen(false)} />}
     </Card>
   );
