@@ -39,10 +39,14 @@ describe("服务器行", () => {
   ];
 
   it("按地址对位：连通的给信号与在线人数，连不上的记得上次在线，还没测的是测速中", () => {
-    const rows = serverRows(pinned, [
-      status("town.example:25570", { reachable: false, latency_ms: null, online: null, max: null, last_seen_at: 500, last_online: 9 }),
-      status("play.example", { latency_ms: 186 }),
-    ]);
+    const rows = serverRows(
+      pinned,
+      [
+        status("town.example:25570", { reachable: false, latency_ms: null, online: null, max: null, last_seen_at: 500, last_online: 9 }),
+        status("play.example", { latency_ms: 186 }),
+      ],
+      true,
+    );
     expect(rows.map((r) => r.name)).toEqual(["晨星", "小镇", "新加的"]);
     expect(rows[0].signal).toEqual({ kind: "online", latencyMs: 186, bars: 2, quality: "fair" });
     expect(rows[0].population).toEqual({ kind: "online", online: 25_000, max: 200_000 });
@@ -53,19 +57,36 @@ describe("服务器行", () => {
   });
 
   it("状态还没回来时全部测速中", () => {
-    expect(serverRows(pinned, undefined).map((r) => r.signal.kind)).toEqual(["pending", "pending", "pending"]);
+    expect(serverRows(pinned, undefined, true).map((r) => r.signal.kind)).toEqual(["pending", "pending", "pending"]);
+  });
+
+  // 单台测速分不出本机断网与服务器宕机：本机离线时一律不下结论，不把每台都标成连不上
+  it("本机离线：每台都是暂停测速，连没测过的也不显示测速中；在线人数与上次在线照旧取上次的结果", () => {
+    const statuses = [
+      status("town.example:25570", { reachable: false, latency_ms: null, online: null, max: null, last_seen_at: 500, last_online: 9 }),
+      status("play.example", { latency_ms: 38 }),
+    ];
+    const rows = serverRows(pinned, statuses, false);
+    expect(rows.map((r) => r.signal)).toEqual([{ kind: "paused" }, { kind: "paused" }, { kind: "paused" }]);
+    expect(rows.map((r) => r.population)).toEqual([{ kind: "online", online: 25_000, max: 200_000 }, { kind: "last-seen", at: 500, online: 9 }, { kind: "none" }]);
+    expect(rows[0].versionName).toBe("Paper 1.21.4");
+    expect(serverRows(pinned, undefined, false).map((r) => r.signal.kind)).toEqual(["paused", "paused", "paused"]);
+    // 恢复联网后同一份结果照常判定
+    expect(serverRows(pinned, statuses, true).map((r) => r.signal.kind)).toEqual(["online", "unreachable", "pending"]);
   });
 
   it("连不上且从没连通过、或连通但没报人数时不写在线人数", () => {
-    const rows = serverRows(pinned.slice(0, 2), [
-      status("play.example", { online: null, max: null }),
-      status("town.example:25570", { reachable: false, latency_ms: null, last_seen_at: null, last_online: null }),
-    ]);
+    const rows = serverRows(
+      pinned.slice(0, 2),
+      [status("play.example", { online: null, max: null }), status("town.example:25570", { reachable: false, latency_ms: null, last_seen_at: null, last_online: null })],
+      true,
+    );
     expect(rows.map((r) => r.population.kind)).toEqual(["none", "none"]);
   });
 
-  it("标为连通却没有延迟是契约破坏，直接抛错", () => {
-    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })])).toThrow("没有延迟");
+  it("标为连通却没有延迟是契约破坏，直接抛错；离线时也照样检查", () => {
+    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], true)).toThrow("没有延迟");
+    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], false)).toThrow("没有延迟");
   });
 });
 

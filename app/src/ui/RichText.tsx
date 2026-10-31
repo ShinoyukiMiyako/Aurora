@@ -1,10 +1,11 @@
 // 受限富文本的渲染：只画 richtext-parse.ts 节点树里的几种节点，不注入原始 HTML。资源介绍正文与启动器更新说明共用。
-// 链接以 target="_blank" 打开：桌面端由系统浏览器接管（opener 插件拦下这类点击），不在启动器窗口里跳转。
+// 链接的点击（含中键）一律拦下，交给外壳注入的打开方式：打开外部网址只有一个出口，打开失败有提示。
 // 配图与平台图标走同一条远程取图路径（经外壳登记、解码成位图画进 Canvas）：WebView 不直接请求图床，动图只显示首帧。
 
-import { useLayoutEffect, useRef, type ReactNode } from "react";
+import { useLayoutEffect, useRef, type MouseEvent, type ReactNode } from "react";
 import { prepareDisplayCanvas, useDevicePixelRatio } from "../art/illustrations/canvas";
 import { cx } from "../lib/util";
+import { useExternalLinkOpener, type ExternalLinkOpener } from "./external-link";
 import { useNearViewport, useRemoteImage } from "./remote-image";
 import type { Block, Inline } from "./richtext-parse";
 import styles from "./RichText.module.css";
@@ -45,16 +46,33 @@ function RichImage({ src, alt }: { src: string; alt: string }) {
   );
 }
 
-function renderInline(nodes: readonly Inline[], prefix: string): ReactNode[] {
+/** 中键点击在浏览器里是「新窗口打开」，同样算打开；右键是上下文菜单，不拦。 */
+const MIDDLE_BUTTON = 1;
+
+function linkHandlers(href: string, open: ExternalLinkOpener) {
+  return {
+    onClick(event: MouseEvent<HTMLAnchorElement>) {
+      event.preventDefault();
+      open(href);
+    },
+    onAuxClick(event: MouseEvent<HTMLAnchorElement>) {
+      if (event.button !== MIDDLE_BUTTON) return;
+      event.preventDefault();
+      open(href);
+    },
+  };
+}
+
+function renderInline(nodes: readonly Inline[], prefix: string, open: ExternalLinkOpener): ReactNode[] {
   return nodes.map((node, i) => {
     const key = `${prefix}${i}`;
     switch (node.t) {
       case "text":
         return node.v;
       case "strong":
-        return <strong key={key}>{renderInline(node.c, `${key}.`)}</strong>;
+        return <strong key={key}>{renderInline(node.c, `${key}.`, open)}</strong>;
       case "em":
-        return <em key={key}>{renderInline(node.c, `${key}.`)}</em>;
+        return <em key={key}>{renderInline(node.c, `${key}.`, open)}</em>;
       case "code":
         return (
           <code key={key} className={styles.inlineCode}>
@@ -62,9 +80,10 @@ function renderInline(nodes: readonly Inline[], prefix: string): ReactNode[] {
           </code>
         );
       case "link":
+        // target 只作兜底：万一有绕过点击的打开途径，也交给系统浏览器而不是在启动器窗口里跳走
         return (
-          <a key={key} className={styles.link} href={node.href} target="_blank" rel="noreferrer noopener">
-            {renderInline(node.c, `${key}.`)}
+          <a key={key} className={styles.link} href={node.href} target="_blank" rel="noreferrer noopener" {...linkHandlers(node.href, open)}>
+            {renderInline(node.c, `${key}.`, open)}
           </a>
         );
       case "image":
@@ -75,20 +94,20 @@ function renderInline(nodes: readonly Inline[], prefix: string): ReactNode[] {
   });
 }
 
-function renderBlocks(blocks: readonly Block[], prefix: string): ReactNode[] {
+function renderBlocks(blocks: readonly Block[], prefix: string, open: ExternalLinkOpener): ReactNode[] {
   return blocks.map((block, i) => {
     const key = `${prefix}${i}`;
     switch (block.t) {
       case "heading":
         return (
           <h4 key={key} className={styles.heading}>
-            {renderInline(block.c, `${key}.`)}
+            {renderInline(block.c, `${key}.`, open)}
           </h4>
         );
       case "p":
         return (
           <p key={key} className={styles.paragraph}>
-            {renderInline(block.c, `${key}.`)}
+            {renderInline(block.c, `${key}.`, open)}
           </p>
         );
       case "code":
@@ -98,7 +117,7 @@ function renderBlocks(blocks: readonly Block[], prefix: string): ReactNode[] {
           </pre>
         );
       case "list": {
-        const items = block.items.map((item, j) => <li key={`${key}.${j}`}>{renderBlocks(item, `${key}.${j}.`)}</li>);
+        const items = block.items.map((item, j) => <li key={`${key}.${j}`}>{renderBlocks(item, `${key}.${j}.`, open)}</li>);
         return block.ordered ? (
           <ol key={key} className={styles.list}>
             {items}
@@ -120,5 +139,6 @@ export interface RichTextProps {
 }
 
 export function RichText({ blocks, className }: RichTextProps) {
-  return <div className={cx(styles.body, className)}>{renderBlocks(blocks, "b")}</div>;
+  const open = useExternalLinkOpener();
+  return <div className={cx(styles.body, className)}>{renderBlocks(blocks, "b", open)}</div>;
 }

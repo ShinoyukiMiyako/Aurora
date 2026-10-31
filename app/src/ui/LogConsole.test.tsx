@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LogLine } from "../domain/types";
 import { APP_NAME } from "../lib/app-info";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { focusByKeyboard, keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
 import {
   countLogLevels,
   ERROR_ANNOUNCE_INTERVAL_MS,
@@ -288,6 +288,23 @@ describe("复制", () => {
     mount({ lines: lines(1), onOpenFolder });
     act(() => document.querySelector<HTMLButtonElement>('button[aria-label="打开日志文件夹"]')?.click());
     expect(onOpenFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it("给了 openFolderDisabledReason：文件夹按钮置灰但可聚焦，点了不打开，聚焦时写明原因", () => {
+    const onOpenFolder = vi.fn();
+    mount({ lines: lines(1), onOpenFolder, openFolderDisabledReason: "安装进行中，暂时不能打开" });
+    const folder = document.querySelector<HTMLButtonElement>('button[aria-label="打开日志文件夹"]') as HTMLButtonElement;
+    expect(folder.disabled).toBe(false);
+    expect(folder.getAttribute("aria-disabled")).toBe("true");
+    act(() => folder.click());
+    expect(onOpenFolder).not.toHaveBeenCalled();
+    focusByKeyboard(folder);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("安装进行中，暂时不能打开");
+  });
+
+  it("没有文件夹入口却给了原因：直接报装配错误", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(() => mount({ lines: lines(1), openFolderDisabledReason: "安装进行中，暂时不能打开" })).toThrow("要与 onOpenFolder 一起给");
   });
 });
 

@@ -84,39 +84,63 @@ export interface ImportModpackDialogProps {
   online: boolean;
 }
 
+/** 一次「开始读这个文件」：每次开始都是新对象，同一个文件连着读两次也分得清。 */
+interface FreshRead {
+  file: string;
+}
+
 export function ImportModpackDialog({ request, onClose, online }: ImportModpackDialogProps) {
   const [input, setInput] = useState("");
   const [path, setPath] = useState<string | null>(null);
+  // 预览缓存里可能还留着这个文件上次的结果：读失败的错误（文件当时没下载完）、文件换过之前的清单。
+  // 所以每次开始读一个文件都重新发起请求，这一轮请求发出之前不看缓存里的旧结果
+  const [fresh, setFresh] = useState<FreshRead | null>(null);
+  const refreshed = useRef<FreshRead | null>(null);
   const [footerHost, setFooterHost] = useState<HTMLElement | null>(null);
   const preview = useModpackPreview(path);
+
+  const startRead = (file: string | null) => {
+    setPath(file);
+    setFresh(file === null ? null : { file });
+  };
 
   // 新的打开请求：带着文件就直接进入读取，否则从选文件开始
   const [handled, setHandled] = useState<ImportRequest | null>(null);
   if (request !== handled) {
     setHandled(request);
     if (request !== null) {
-      setPath(request.file);
+      startRead(request.file);
       setInput(request.file === null ? "" : request.file);
     }
   }
 
+  const { status: previewStatus, reload: reloadPreview } = preview;
+  useEffect(() => {
+    // 开发构建的严格模式会把同一次 effect 再跑一遍：同一轮读取只重取一次
+    if (fresh === null || refreshed.current === fresh) return;
+    refreshed.current = fresh;
+    // 缓存里没有这个文件时，订阅本身就会发出请求；留着旧结果时才需要重取
+    if (previewStatus !== "loading") reloadPreview();
+    setFresh(null);
+  }, [fresh, previewStatus, reloadPreview]);
+
   const openFile = (file: string) => {
     setInput(file);
-    // 同一个文件上次读失败了：再读一次（文件可能已经换过或下载完整了）
-    if (file === path && preview.status === "error") preview.reload();
-    else setPath(file);
+    startRead(file);
   };
   const read = () => {
     const next = input.trim();
     if (next !== "") openFile(next);
   };
   const close = () => {
-    setPath(null);
+    startRead(null);
     setInput("");
     onClose();
   };
 
-  const confirming = path !== null && preview.status === "ready";
+  // 重取已读成功的文件时缓存保留旧清单并标记 refreshing：这期间同样算读取中，确认页等新结果出来再画
+  const reading = path !== null && (fresh !== null || preview.status === "loading" || preview.refreshing);
+  const confirming = path !== null && !reading && preview.status === "ready";
   return (
     <Modal
       open={request !== null}
@@ -128,7 +152,7 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
     >
       {confirming ? (
         <ImportConfirm key={path} path={path} preview={preview.data} online={online} footerHost={footerHost} onBack={() => setPath(null)} onDone={close} />
-      ) : path !== null && preview.status === "loading" ? (
+      ) : path !== null && reading ? (
         <div className={styles.dropZone} data-state="reading" aria-busy="true">
           <Spinner size={24} />
           <span className={styles.dropTitle}>{IMPORT_COPY.reading(fileName(path))}</span>

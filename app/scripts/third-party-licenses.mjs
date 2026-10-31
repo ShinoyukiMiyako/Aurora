@@ -1,5 +1,5 @@
 // 第三方许可清单：随应用分发的前端依赖（含字体包）与 Rust 依赖的名称、版本与许可证，构建时从依赖树现取，不手写。
-// 由 vite.config.ts 的虚拟模块在被引入时生成一次；关于页按需加载。
+// 由 vite.config.ts 的插件调用：构建时作为静态文件写进产物，开发服务器上请求到时现生成；关于页按需 fetch。
 //
 // - 前端：从 package.json 的 dependencies 出发，沿各包的 dependencies 与已安装的 optionalDependencies 走完闭包；
 //   devDependencies 只参与构建，不随应用分发。目录按 Node 的解析规则逐级向上找，pnpm 的软链接取真实路径后再找。

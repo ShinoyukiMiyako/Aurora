@@ -181,9 +181,54 @@ describe("IconButton", () => {
     expect(document.querySelector('[role="tooltip"]')).toBeNull();
   });
 
+  it("disabledReason：保持可聚焦、点击无效，聚焦时提示以 label 开头、第二行写原因", () => {
+    const onClick = vi.fn();
+    const button = mount(<IconButton icon="folder" label="打开日志文件夹" disabledReason="安装进行中，暂时不能打开" onClick={onClick} />);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.dataset.disabled).toBe("true");
+    expect(button.getAttribute("aria-label")).toBe("打开日志文件夹");
+
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true });
+    act(() => {
+      button.dispatchEvent(event);
+    });
+    expect(onClick).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(true);
+
+    focusByKeyboard(button);
+    const tip = document.querySelector('[role="tooltip"]');
+    expect(tip?.textContent).toBe("打开日志文件夹安装进行中，暂时不能打开");
+    expect(tip?.lastElementChild?.textContent).toBe("安装进行中，暂时不能打开");
+    expect(button.getAttribute("aria-describedby")).toBe(tip?.id);
+  });
+
+  it("disabledReason 配 tooltip={false}：提示只写原因，原因不会无处可看", () => {
+    const button = mount(<IconButton icon="x" label="移除" tooltip={false} disabledReason="游戏运行中不能修改" />);
+    focusByKeyboard(button);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("游戏运行中不能修改");
+  });
+
+  it("disabled 优先于 disabledReason：原生禁用，不进带原因的禁用态", () => {
+    const button = mount(<IconButton icon="folder" label="打开文件夹" disabled disabledReason="不会显示" />);
+    expect(button.disabled).toBe(true);
+    expect(button.dataset.disabled).toBeUndefined();
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("没有 disabledReason 时照常点击，调用方自己给的 aria-disabled 原样保留", () => {
+    const onClick = vi.fn();
+    const button = mount(<IconButton icon="pin" label="固定" aria-disabled onClick={onClick} />);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.dataset.disabled).toBeUndefined();
+    click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
   it("空 label 与带切换态的危险按钮直接抛错", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => render(withOverlay(<IconButton icon="x" label="  " />))).toThrow("label 不能为空");
     expect(() => render(withOverlay(<IconButton icon="trash" label="删除" variant="danger" pressed />))).toThrow("危险图标按钮没有切换态");
+    expect(() => render(withOverlay(<IconButton icon="folder" label="打开文件夹" disabledReason=" " />))).toThrow("disabledReason 不能为空");
   });
 });

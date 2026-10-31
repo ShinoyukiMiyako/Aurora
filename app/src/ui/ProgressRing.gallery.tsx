@@ -43,9 +43,9 @@ export const gallery: GalleryEntry = {
         <ProgressRing value={0.02} size={24} label="刚开始" />
       </GalleryRow>
       <GalleryRow label="无进度">
-        <ProgressRing value={null} size={84} tone="muted" label="没有活动任务" />
-        <ProgressRing value={null} size={48} tone="muted" label="没有活动任务" />
-        <ProgressRing value={null} size={24} tone="muted" label="没有活动任务" />
+        <ProgressRing value={null} size={84} tone="muted" label="下载总进度" emptyText="没有进行中的下载" />
+        <ProgressRing value={null} size={48} tone="muted" label="下载总进度" />
+        <ProgressRing value={null} size={24} tone="muted" label="下载总进度" />
       </GalleryRow>
       <Live />
     </>

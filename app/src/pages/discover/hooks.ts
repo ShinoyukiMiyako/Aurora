@@ -1,17 +1,6 @@
-// 发现页自用的几个小 hook：超时、防抖、滚动容器。加载态的出现与停留走全站统一的 lib/loading-gate。
+// 发现页自用的几个小 hook：防抖、滚动容器。加载态的出现、停留、慢提示与超时的计时都走全站统一的 lib/loading-gate。
 
 import { useCallback, useEffect, useLayoutEffect, useState, type RefObject } from "react";
-
-/** active 连续成立超过 ms 后为 true；key 变化时重新计时（同一状态下换了一次请求）。 */
-export function useElapsed(active: boolean, ms: number, key: string): boolean {
-  const [elapsed, setElapsed] = useState<string | null>(null);
-  useEffect(() => {
-    if (!active) return;
-    const timer = setTimeout(() => setElapsed(key), ms);
-    return () => clearTimeout(timer);
-  }, [active, ms, key]);
-  return active && elapsed === key;
-}
 
 /** 输入停止 ms 之后才跟上的值；flush 立即跟上（回车、清空）。 */
 export function useDebounced(value: string, ms: number): { value: string; flush: (next: string) => void } {

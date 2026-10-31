@@ -3,7 +3,7 @@ import { MotionConfig, type MotionValue } from "framer-motion";
 import { afterEach, describe, expect, it } from "vitest";
 import { render, type Rendered } from "../test/dom";
 import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress, visibleProgress } from "./ProgressBar";
-import { ProgressRing, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
+import { ProgressRing, RING_EMPTY_TEXT, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -214,19 +214,58 @@ describe("ProgressRing", () => {
     expect(ring().getAttribute("data-size")).toBe("84");
   });
 
-  it("没有可显示的进度（null）：只画轨道，圆心写占位，读屏不报数值", () => {
+  const emptyRing = () => {
+    const el = view?.container.querySelector<HTMLElement>('[data-empty]');
+    if (!el) throw new Error("没有渲染占位的进度环");
+    return el;
+  };
+
+  // 没有 aria-valuenow 的 progressbar 会被读屏当成不定进度（「忙」），念不出「眼下没有进度」
+  it("没有可显示的进度（null）：只画轨道，圆心写占位；读屏念名称加一句可读的说明，不当作进度条", () => {
     view = render(<ProgressRing value={null} size={84} tone="muted" label="下载总进度" />);
-    expect(ring().querySelectorAll("circle")).toHaveLength(1);
+    expect(view.container.querySelector('[role="progressbar"]')).toBeNull();
+    const el = emptyRing();
+    expect(el.querySelectorAll("circle")).toHaveLength(1);
     expect(RING_PLACEHOLDER).toBe("--");
-    expect(ring().textContent).toBe("--");
-    expect(ring().hasAttribute("aria-valuenow")).toBe(false);
-    expect(ring().getAttribute("aria-valuetext")).toBe("--");
-    expect(ring().hasAttribute("data-empty")).toBe(true);
+    expect(el.textContent).toBe("--");
+    expect(el.getAttribute("role")).toBe("img");
+    expect(RING_EMPTY_TEXT).toBe("暂无进度");
+    expect(el.getAttribute("aria-label")).toBe("下载总进度：暂无进度");
+    for (const attr of ["aria-valuenow", "aria-valuetext", "aria-valuemin", "aria-valuemax"]) expect(el.hasAttribute(attr)).toBe(false);
+  });
+
+  it("占位说明可由调用方按场合给出；名称经 labelledBy 引用时，说明接在被引用的名称之后", () => {
+    view = render(<ProgressRing value={null} size={84} label="下载总进度" emptyText="没有进行中的下载" />);
+    expect(emptyRing().getAttribute("aria-label")).toBe("下载总进度：没有进行中的下载");
+    view.unmount();
+    view = render(
+      <>
+        <span id="ring-name">吞吐</span>
+        <ProgressRing value={null} size={48} labelledBy="ring-name" emptyText="没有进行中的下载" />
+      </>,
+    );
+    const el = emptyRing();
+    const ids = (el.getAttribute("aria-labelledby") ?? "").split(" ");
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toBe("ring-name");
+    expect(document.getElementById(ids[1])?.textContent).toBe("没有进行中的下载");
+    expect(el.hasAttribute("aria-label")).toBe(false);
+  });
+
+  it("有进度时不带占位说明：名称原样，读屏报数值", () => {
+    view = render(<ProgressRing value={0.25} size={84} label="下载总进度" emptyText="没有进行中的下载" />);
+    expect(ring().getAttribute("aria-label")).toBe("下载总进度");
+    expect(ring().getAttribute("aria-valuenow")).toBe("25");
+    expect(ring().getAttribute("aria-valuemin")).toBe("0");
+    expect(ring().getAttribute("aria-valuemax")).toBe("100");
+    expect(ring().textContent).not.toContain("没有进行中的下载");
   });
 
   it("从占位换成真实进度：画出填充、读屏报出目标值，圆心改为（平滑中的）百分数；小档位占位时圆心仍为空", () => {
     view = render(<ProgressRing value={null} size={84} label="下载总进度" />);
     view.rerender(<ProgressRing value={0.4} size={84} label="下载总进度" />);
+    expect(ring().getAttribute("role")).toBe("progressbar");
+    expect(ring().getAttribute("aria-label")).toBe("下载总进度");
     expect(ring().querySelectorAll("circle")).toHaveLength(2);
     expect(ring().getAttribute("aria-valuenow")).toBe("40");
     expect(ring().hasAttribute("aria-valuetext")).toBe(false);
@@ -234,8 +273,8 @@ describe("ProgressRing", () => {
     expect(ring().hasAttribute("data-empty")).toBe(false);
     view.unmount();
     view = render(<ProgressRing value={null} size={24} label="下载" />);
-    expect(ring().textContent).toBe("");
-    expect(ring().querySelectorAll("circle")).toHaveLength(1);
+    expect(emptyRing().textContent).toBe("");
+    expect(emptyRing().querySelectorAll("circle")).toHaveLength(1);
   });
 
   it("没有名称时抛错", () => {

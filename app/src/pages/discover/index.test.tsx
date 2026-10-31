@@ -388,6 +388,91 @@ describe("发现页：加载态的时机", () => {
     expect(document.body.textContent).toContain("请求超时");
     expect(document.body.textContent).toContain("资源平台 20 秒内没有回应。");
   });
+
+  it("超时后点重试：重新开始一轮加载，超时说明立即收起；新一轮照样 10 s 提示慢、20 s 超时", async () => {
+    let call = 0;
+    pages = () => {
+      call += 1;
+      // 第一次一直不回；重试那次 25 s 才回，足够再超时一次
+      if (call === 1) return new Promise<SearchResultDto>(() => {}) as never;
+      return new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 25_000)) as never;
+    };
+    await mount();
+    // 分两步走到 20 s：慢提示在 10 s 那一刻渲染出来，超时接在它后面计
+    await advance(10_000);
+    await advance(10_000);
+    expect(document.body.textContent).toContain("请求超时");
+
+    act(() => buttonByText("重试").click());
+    await flush();
+    expect(searchCalls()).toHaveLength(2);
+    expect(document.body.textContent).not.toContain("请求超时");
+    expect(document.body.textContent).toContain("搜索中…");
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    await advance(1);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+    // 超时之后结果才到：照常换成结果
+    await advance(5_000);
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+    expect(document.body.textContent).not.toContain("请求超时");
+  });
+
+  // 慢提示与超时同属加载门的一轮：加载中途换了条件不另起一轮，两者不会一个重来一个不重来
+  it("首页加载中途换关键词：慢提示与超时按同一轮计时，都从这一轮开始的时刻算", async () => {
+    pages = () => new Promise<SearchResultDto>(() => {}) as never;
+    await mount();
+    await advance(10_000);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(2_000);
+    typeInto(searchInput(), "换一个");
+    act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    expect(searchCalls()).toHaveLength(2);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(7_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+  });
+
+  it("下一页 10 s 还没回来才在列表尾写「比平时慢」，回来后收起", async () => {
+    let resolveNext: ((r: SearchResultDto) => void) | undefined;
+    pages = (args) =>
+      args.cursor === null
+        ? result([entry("A"), entry("B")], { total: 57, next_cursor: CURSOR })
+        : (new Promise<SearchResultDto>((resolve) => {
+            resolveNext = resolve;
+          }) as never);
+    await mount();
+    const near = observers.find((o) => o.options !== undefined && o.options.rootMargin === "0px 0px 600px 0px" && o.targets.length > 0);
+    if (near === undefined) throw new Error("没有观察列表尾");
+    await act(async () => {
+      near.callback([{ isIntersecting: true, target: near.targets[0] } as unknown as IntersectionObserverEntry], {} as IntersectionObserver);
+      await settle();
+    });
+    expect(searchCalls()).toHaveLength(2);
+    const foot = () => document.querySelector('section[aria-label="搜索资源"]')?.textContent as string;
+    expect(foot()).toContain("搜索中…");
+    await advance(9_999);
+    expect(foot()).not.toContain("比平时慢一些");
+    await advance(1);
+    expect(foot()).toContain("比平时慢一些");
+    const finish = resolveNext;
+    if (finish === undefined) throw new Error("下一页请求没有发出");
+    await act(async () => {
+      finish(result([entry("C")], { total: 57, next_cursor: null }));
+      await settle();
+    });
+    expect(foot()).not.toContain("比平时慢一些");
+    expect(cardTitles()).toEqual(["资源 A，查看详情", "资源 B，查看详情", "资源 C，查看详情"]);
+  });
 });
 
 describe("发现页：失败与离线", () => {
@@ -812,6 +897,76 @@ describe("发现页：本地整合包的三种入口", () => {
     expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
     expect(nameValue()).toBe("生存包");
     expect(nav.route).toEqual({ page: "discover", query: "钠" });
+  });
+
+  const closeDialog = () =>
+    act(async () => {
+      const close = dialog().querySelector<HTMLButtonElement>('button[aria-label="关闭"]');
+      if (close === null) throw new Error("弹窗没有关闭按钮");
+      close.click();
+      await settle();
+    });
+
+  /** 第一次读失败（文件没下载完），之后读得出来：模拟用户等下载完成后再带入同一个文件。 */
+  async function failOnceThenRead() {
+    const { IpcError } = await import("../../ipc/errors");
+    let calls = 0;
+    ipc.overrides.set("preview_modpack", (args) => {
+      calls += 1;
+      if (calls === 1) throw new IpcError("modpack_corrupt", "unexpected end of archive");
+      return preview(String(args.path));
+    });
+  }
+
+  it("读失败后关掉弹窗，外壳再带入同一个文件：重新读取，不直接显示上次的错误", async () => {
+    await failOnceThenRead();
+    await mount({ page: "discover", importFile: PACK });
+    expect(dialog().textContent).toContain("文件不完整或已损坏，重新下载一份再试");
+    await closeDialog();
+    expect(openDialogs()).toHaveLength(0);
+
+    act(() => nav.go({ page: "discover", importFile: PACK }));
+    // 请求发出到结果回来之间显示读取中，而不是缓存里那条旧错误
+    expect(dialog().textContent).toContain("正在读取 生存.mrpack");
+    expect(dialog().textContent).not.toContain("文件不完整或已损坏");
+    await flush();
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }, { path: PACK }]);
+    expect(dialog().textContent).not.toContain("文件不完整或已损坏");
+    expect(nameValue()).toBe("生存包");
+  });
+
+  it("读失败后关掉弹窗，重新打开再把同一个文件拖进投放区：同样重新读取", async () => {
+    await failOnceThenRead();
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    expect(dialog().textContent).toContain("文件不完整或已损坏，重新下载一份再试");
+    await closeDialog();
+
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    // 重新打开是从选文件开始，不带着上次的错误
+    expect(dialog().textContent).not.toContain("文件不完整或已损坏");
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }, { path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+  });
+
+  it("读成功过的文件关掉后再带入：也重新读取，显示文件现在的内容", async () => {
+    let version = "1.2.0";
+    ipc.overrides.set("preview_modpack", (args) => ({ ...preview(String(args.path)), version }));
+    await mount({ page: "discover", importFile: PACK });
+    expect(dialog().textContent).toContain("版本 1.2.0");
+    await closeDialog();
+
+    version = "1.3.0";
+    act(() => nav.go({ page: "discover", importFile: PACK }));
+    expect(dialog().textContent).toContain("正在读取 生存.mrpack");
+    await flush();
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }, { path: PACK }]);
+    expect(dialog().textContent).toContain("版本 1.3.0");
+    expect(dialog().textContent).not.toContain("版本 1.2.0");
   });
 
   it("拖进来的都不是整合包：照样交给后端读，按错误码说明只认哪两种文件", async () => {

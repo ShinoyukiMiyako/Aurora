@@ -1,10 +1,11 @@
 // 固定的服务器：在线人数、版本与延迟信号。右上角的加号从游戏的多人服务器列表里挑服务器固定；
 // 主页可见期间每 60 秒重测一次（后端单台限时 3 秒、结果缓存 60 秒）。
-// 断网时不再重测（单台测速分不出是本机断网还是服务器宕机，重测只会把每台都刷成连不上），
-// 列表保留上一次的结果、副标题注明离线；恢复联网立即重测一次。
+// 单台测速分不出是本机断网还是服务器宕机，后端也不另给字段，由全应用的联网状态来分：
+// 本机离线时整张卡在副标题注明「本机离线」并暂停测速，每台的信号都不下结论（不标连不上），
+// 在线人数与上次在线照旧取上一次的结果；恢复联网立即重测一次。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
 import { ACTION_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
@@ -43,6 +44,9 @@ import s from "./home.module.css";
 export const SERVER_REFRESH_MS = 60_000;
 /** 骨架行数：固定列表还没读出来时不知道有几台，按两行占位。 */
 const SKELETON_ROWS = 2;
+
+/** 挑选弹窗底栏的「关闭」：列表挑空之后焦点交给它。 */
+const PICKER_CLOSE_ATTR = "data-picker-close";
 
 /** 只作说明的禁用项：菜单不会执行禁用项，真被执行说明菜单的禁用判定坏了。 */
 function inert(): never {
@@ -99,7 +103,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 
   const count = pinned.status === "ready" ? pinned.data.length : 0;
   const countLine = count > 0 ? HOME_COPY.serversSubtitle(count) : HOME_COPY.serversSubtitleEmpty;
-  const subtitle = pinned.status !== "ready" ? undefined : count > 0 && !online ? HOME_COPY.withOffline(countLine) : countLine;
+  const subtitle = pinned.status !== "ready" ? undefined : count > 0 && !online ? HOME_COPY.serversOffline(countLine) : countLine;
 
   const body = () => {
     if (pinned.status === "loading" || gate.view === "skeleton") {
@@ -131,7 +135,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
       );
     }
     if (pinned.data.length === 0) return <EmptyState scene="compass" compact title={HOME_COPY.serversEmptyTitle} body={HOME_COPY.serversEmptyBody} />;
-    const rows = serverRows(pinned.data, status.data);
+    const rows = serverRows(pinned.data, status.data, online);
     return (
       <>
         <ul className={s.serverList}>
@@ -196,7 +200,24 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
   // 点过的立即从列表里拿掉，不等多人列表重读：固定是「切换」，同一行连点两下会先固定再取消。
   // 固定失败（已经报告过）再放回来，可以重试
   const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set());
-  const pick = (server: PinnedServerDto) => {
+  // 点过的那一行连同焦点一起从 DOM 里拿掉，焦点会掉到 body，连续固定时每次都得从头找位置。
+  // 记下它在列表里的位置，渲染后把焦点交给原位置上的下一行；它是最后一行就交给上一行，列表空了交给「关闭」
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const refocusAt = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const index = refocusAt.current;
+    if (index === null) return;
+    refocusAt.current = null;
+    const root = bodyRef.current;
+    if (root === null) throw new Error("服务器挑选弹窗的列表尚未挂载");
+    // 整行可点的列表行渲染为 li 里的按钮
+    const rows = [...root.querySelectorAll<HTMLElement>("li > button")];
+    const target = rows.length > 0 ? rows[Math.min(index, rows.length - 1)] : root.closest('[role="dialog"]')?.querySelector<HTMLElement>(`[${PICKER_CLOSE_ATTR}]`);
+    if (target === null || target === undefined) throw new Error("服务器挑选弹窗里找不到接手焦点的控件");
+    target.focus();
+  });
+  const pick = (server: PinnedServerDto, index: number) => {
+    refocusAt.current = index;
     setPicked((prev) => new Set(prev).add(server.address));
     void onPin(server).then((ok) => {
       if (ok) return;
@@ -218,14 +239,14 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
     if (candidates.length === 0) return <EmptyState icon="check-circle" compact title={HOME_COPY.allPinned} />;
     return (
       <List>
-        {candidates.map((server) => (
+        {candidates.map((server, index) => (
           <ListRow
             key={server.address}
             leading={<Icon name="pin" size={18} />}
             title={server.name}
             meta={server.address}
             ariaLabel={HOME_COPY.pickerPin(server.name)}
-            onClick={() => pick(server)}
+            onClick={() => pick(server, index)}
           />
         ))}
       </List>
@@ -240,12 +261,12 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
       title={HOME_COPY.pickerTitle}
       subtitle={HOME_COPY.pickerSubtitle}
       footer={
-        <Button variant="secondary" onClick={onClose}>
+        <Button variant="secondary" onClick={onClose} {...{ [PICKER_CLOSE_ATTR]: "" }}>
           {HOME_COPY.close}
         </Button>
       }
     >
-      {body()}
+      <div ref={bodyRef}>{body()}</div>
     </Modal>
   );
 }
@@ -295,9 +316,12 @@ function ServerRowView({ row, onUnpin }: { row: ServerRow; onUnpin: () => void }
             <span key={i} className={s.signalBar} data-level={i + 1} data-on={i < lit || undefined} />
           ))}
         </span>
-        <span className={s.ping} data-state={signal.kind}>
-          {signal.kind === "online" ? HOME_COPY.latency(signal.latencyMs) : signal.kind === "unreachable" ? HOME_COPY.unreachable : HOME_COPY.pinging}
-        </span>
+        {/* 暂停测速时不逐台写字：副标题已经整体说明本机离线 */}
+        {signal.kind !== "paused" && (
+          <span className={s.ping} data-state={signal.kind}>
+            {signal.kind === "online" ? HOME_COPY.latency(signal.latencyMs) : signal.kind === "unreachable" ? HOME_COPY.unreachable : HOME_COPY.pinging}
+          </span>
+        )}
       </span>
       <MoreMenu
         size="sm"

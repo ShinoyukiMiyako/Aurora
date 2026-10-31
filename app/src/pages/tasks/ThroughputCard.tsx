@@ -23,7 +23,13 @@ export function ThroughputCard({ overview, history }: ThroughputCardProps) {
   return (
     <Card clip className={styles.flow}>
       <div className={styles.flowTop}>
-        <ProgressRing value={overview.fraction} size={84} tone={active ? "accent" : "muted"} label={TASKS_COPY.flow.ringLabel} />
+        <ProgressRing
+          value={overview.fraction}
+          size={84}
+          tone={active ? "accent" : "muted"}
+          label={TASKS_COPY.flow.ringLabel}
+          emptyText={active ? TASKS_COPY.flow.ringEmpty.unknown : TASKS_COPY.flow.ringEmpty.idle}
+        />
         <div className={styles.flowText}>
           <span className={styles.flowLabel}>{TASKS_COPY.flow[overview.label]}</span>
           <span className={styles.flowSpeed}>{formatSpeed(overview.speed)}</span>

@@ -3,6 +3,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { render, stubMatchMedia, type Rendered } from "../test/dom";
+import { ExternalLinkProvider, useExternalLinkOpener } from "./external-link";
 import { RemoteImageProvider } from "./remote-image";
 import { parseHtml, parseMarkdown, type Block } from "./richtext-parse";
 import { RICH_IMAGE_MAX_WIDTH, richImageSize, RichText } from "./RichText";
@@ -10,12 +11,14 @@ import { RICH_IMAGE_MAX_WIDTH, richImageSize, RichText } from "./RichText";
 let view: Rendered | undefined;
 let observers: { callback: IntersectionObserverCallback; targets: Element[] }[];
 let resolved: string[];
+let opened: string[];
 
 beforeEach(() => {
   stubMatchMedia(false);
   stubCanvas();
   observers = [];
   resolved = [];
+  opened = [];
   vi.stubGlobal(
     "IntersectionObserver",
     class {
@@ -53,7 +56,9 @@ function mount(blocks: readonly Block[]) {
         return `asset://${url}`;
       }}
     >
-      <RichText blocks={blocks} />
+      <ExternalLinkProvider open={(url) => opened.push(url)}>
+        <RichText blocks={blocks} />
+      </ExternalLinkProvider>
     </RemoteImageProvider>,
   );
   return view.container;
@@ -90,7 +95,7 @@ describe("RichText", () => {
     expect(body.querySelectorAll("b, img, script")).toHaveLength(0);
   });
 
-  it("链接交给系统浏览器打开，不带来源信息；非 http(s) 的链接只剩文字", () => {
+  it("链接不在启动器窗口里跳转、不带来源信息；非 http(s) 的链接只剩文字", () => {
     mount(parseMarkdown("见 [文档](https://docs.io/a) 与 https://wiki.io/b，还有 [坏链接](javascript:alert(1))"));
     const links = [...document.querySelectorAll("a")];
     expect(links.map((a) => [a.getAttribute("href"), a.getAttribute("target"), a.getAttribute("rel")])).toEqual([
@@ -98,6 +103,45 @@ describe("RichText", () => {
       ["https://wiki.io/b", "_blank", "noreferrer noopener"],
     ]);
     expect(document.body.textContent).toContain("坏链接");
+  });
+
+  // 打开外部网址只有一个出口（外壳注入，失败经统一错误处理提示）；链接自己的默认行为一律拦下
+  it("点击与中键点击都交给外壳注入的打开方式，每次一条、地址原样，默认行为被拦下", () => {
+    mount(parseMarkdown("见 [文档](https://docs.io/a?x=1#h) 与 https://wiki.io/b"));
+    const [docs, wiki] = [...document.querySelectorAll("a")];
+    const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    act(() => {
+      docs.dispatchEvent(click);
+    });
+    expect(click.defaultPrevented).toBe(true);
+    expect(opened).toEqual(["https://docs.io/a?x=1#h"]);
+
+    const middle = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 1 });
+    act(() => {
+      wiki.dispatchEvent(middle);
+    });
+    expect(middle.defaultPrevented).toBe(true);
+    expect(opened).toEqual(["https://docs.io/a?x=1#h", "https://wiki.io/b"]);
+
+    // 右键是上下文菜单，不是打开
+    const right = new MouseEvent("auxclick", { bubbles: true, cancelable: true, button: 2 });
+    act(() => {
+      wiki.dispatchEvent(right);
+    });
+    expect(right.defaultPrevented).toBe(false);
+    expect(opened).toHaveLength(2);
+  });
+
+  it("不在 ExternalLinkProvider 里打开链接是装配错误，直接抛，不悄悄退回别的打开方式", () => {
+    let open: ((url: string) => void) | undefined;
+    function Probe() {
+      open = useExternalLinkOpener();
+      return null;
+    }
+    view = render(<Probe />);
+    if (open === undefined) throw new Error("探针没有渲染");
+    const call = open;
+    expect(() => call("https://docs.io/a")).toThrow("ExternalLinkProvider");
   });
 
   it("HTML 正文同样只画受限节点", () => {

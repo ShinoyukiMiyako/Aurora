@@ -11,7 +11,9 @@ import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../te
 import type { IpcRecorder } from "../test/fake-bridge";
 import { GAME_LOG_EVENT } from "../ipc/launch";
 import { CORE_EVENT } from "../ipc/tasks";
-import { bootOverrides, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { RichText } from "../ui/RichText";
+import { parseMarkdown } from "../ui/richtext-parse";
 import { AppShell, PAGE_PRELOAD_DELAY_MS, type AppShellProps, type ShellFlows } from "./AppShell";
 import { DROP_COPY, PAGE_ERROR_COPY, SHELL_ACTION_ERROR, SHELL_DEFECT_COPY } from "../copy/shell";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -304,6 +306,51 @@ describe("外壳布局", () => {
     await flush();
     expect(shell.createInstance.open).toBe(false);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("外部链接", () => {
+  const DOC_URL = "https://docs.example.org/guide";
+  const OPEN_URL = "plugin:opener|open_url";
+
+  function LinkPage() {
+    return (
+      <div data-page="home">
+        <RichText blocks={parseMarkdown(`见[安装说明](${DOC_URL})`)} />
+      </div>
+    );
+  }
+
+  const clickLink = () =>
+    act(() => {
+      document.querySelector(`a[href="${DOC_URL}"]`)?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+  beforeEach(async () => {
+    registry = createPageRegistry({ ...pageTable(loads, broken), home: async () => ({ default: LinkPage }) });
+    await registry.load("home");
+  });
+
+  it("页面里富文本的链接经外壳交给打开外部网址的命令，地址原样、每次一条", async () => {
+    ipc.overrides.set(OPEN_URL, () => undefined);
+    await mount();
+    clickLink();
+    await flush();
+    expect(callsOf(ipc, OPEN_URL)).toEqual([{ url: DOC_URL }]);
+    expect(launcher.state.toasts.filter((t) => t.title === SHELL_ACTION_ERROR.openLink)).toEqual([]);
+  });
+
+  it("打开失败经外层统一错误处理弹通知，标题说清是链接没打开", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ipc.overrides.set(OPEN_URL, () => {
+      throw new Error("没有可用的浏览器");
+    });
+    await mount();
+    clickLink();
+    await flush();
+    expect(callsOf(ipc, OPEN_URL)).toEqual([{ url: DOC_URL }]);
+    expect(launcher.state.toasts.filter((t) => t.title === SHELL_ACTION_ERROR.openLink).map((t) => [t.tone, t.body])).toEqual([["error", "没有可用的浏览器"]]);
+    error.mockRestore();
   });
 });
 

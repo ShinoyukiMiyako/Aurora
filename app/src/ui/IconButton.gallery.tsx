@@ -37,6 +37,12 @@ export const gallery: GalleryEntry = {
           <IconButton key={variant} icon="folder" label="打开文件夹" variant={variant} disabled />
         ))}
       </GalleryRow>
+      <GalleryRow label="禁用并写明原因（可聚焦，悬停或聚焦看原因）">
+        {VARIANTS.map((variant) => (
+          <IconButton key={variant} icon="folder" label="打开文件夹" variant={variant} disabledReason="安装进行中，暂时不能打开" />
+        ))}
+        <IconButton icon="x" label="移除" size="sm" tooltip={false} disabledReason="游戏运行中不能修改" />
+      </GalleryRow>
       <GalleryRow label="无提示">
         <IconButton icon="x" label="关闭通知" size="sm" tooltip={false} />
       </GalleryRow>
