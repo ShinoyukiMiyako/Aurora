@@ -39,6 +39,7 @@ use crate::modfs::{
     MODS_DIR, ensure_not_held, is_plain_file_name, ledger_key, lock_mods_dir, now_unix,
     numbered_backup_name, present, refuse, try_exists,
 };
+use crate::resources::curseforge_download_url;
 
 /// 暂存区目录名，位于 `<工作目录>/<元数据目录>/staging`。每次安装在其下另开一个独立子目录。
 ///
@@ -494,7 +495,8 @@ impl Aurora {
     }
 
     /// 版本自带直链为空时的兜底直链。只有 CurseForge 会走到这里（禁止第三方分发的工程不在文件对象里
-    /// 给直链）；Modrinth 版本没有文件时根本不会进入版本列表。
+    /// 给直链）；Modrinth 版本没有文件时根本不会进入版本列表。端点拒绝或给空串时报
+    /// [`CoreError::FileDistributionBlocked`]，与整合包导入、资源安装同一口径。
     async fn fallback_download_url(&self, version: &ModVersionInfo) -> Result<String> {
         let not_found = || CoreError::ModVersionNotFound {
             platform: version.platform.display_name(),
@@ -505,10 +507,13 @@ impl Aurora {
             Platform::CurseForge => {
                 let mod_id: u32 = version.project_id.parse().map_err(|_| not_found())?;
                 let file_id: u32 = version.version_id.parse().map_err(|_| not_found())?;
-                Ok(self
-                    .curseforge_client()?
-                    .file_download_url(mod_id, file_id)
-                    .await?)
+                curseforge_download_url(
+                    &self.curseforge_client()?,
+                    mod_id,
+                    file_id,
+                    &version.file_name,
+                )
+                .await
             }
             Platform::Modrinth => Err(not_found()),
         }
@@ -1371,6 +1376,71 @@ mod tests {
                 assert_eq!(version_id, "nope");
             }
             other => panic!("期望 ModVersionNotFound，得到 {other:?}"),
+        }
+    }
+
+    /// 挂一个 CurseForge 文件：文件对象里的直链取 `download_url`，download-url 端点按 `fallback` 应答。
+    async fn mount_curseforge_file(
+        server: &MockServer,
+        download_url: serde_json::Value,
+        fallback: ResponseTemplate,
+    ) {
+        let file = serde_json::json!({
+            "id": 5000, "modId": 238222, "displayName": "JEI", "fileName": "jei-1.21.jar",
+            "releaseType": 1, "hashes": [], "fileDate": "2026-01-01T00:00:00Z", "fileLength": 4,
+            "downloadUrl": download_url, "gameVersions": ["1.21"], "dependencies": []
+        });
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/5000"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": file})),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/5000/download-url"))
+            .respond_with(fallback)
+            .mount(server)
+            .await;
+    }
+
+    /// 作者禁止第三方分发的 CurseForge 文件：文件对象不给直链，download-url 端点拒绝或给空串。
+    /// 装 Mod 要与整合包导入一样报「需要到网页手动下载」并带上文件名，而不是一句笼统的 HTTP 失败；
+    /// 什么都不落进 mods 目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_file_blocked_from_distribution_is_reported_as_such() {
+        let cases = [
+            (serde_json::Value::Null, ResponseTemplate::new(403)),
+            (serde_json::json!(""), ResponseTemplate::new(404)),
+            (
+                serde_json::Value::Null,
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": ""})),
+            ),
+        ];
+        for (download_url, fallback) in cases {
+            let server = MockServer::start().await;
+            mount_curseforge_file(&server, download_url.clone(), fallback).await;
+            let tmp = tempfile::tempdir().unwrap();
+            put_version(tmp.path(), "1.21").await;
+            let aurora = isolated_aurora(tmp.path(), server.uri())
+                .with_curseforge_base(server.uri())
+                .with_curseforge_key("test-key");
+
+            let err = aurora
+                .install_mod("1.21", Platform::CurseForge, "238222", "5000", None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, CoreError::FileDistributionBlocked { files } if files == &["jei-1.21.jar"]),
+                "直链 {download_url}：期望 FileDistributionBlocked，得到 {err:?}"
+            );
+            let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+            assert!(!try_exists(&mods_dir.join("jei-1.21.jar")).await.unwrap());
         }
     }
 

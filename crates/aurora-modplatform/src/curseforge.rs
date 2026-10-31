@@ -653,9 +653,13 @@ impl CurseForgeFile {
             .map(|h| h.value.as_str())
     }
 
-    /// 转成下载任务；`downloadUrl` 为空时返回 `None`（需先走 [`CurseForgeClient::file_download_url`]）。
+    /// 转成下载任务；`downloadUrl` 缺失或为空白时返回 `None`（需先走 [`CurseForgeClient::file_download_url`]）。
     pub fn to_download_task(&self, dest: impl Into<PathBuf>) -> Option<DownloadTask> {
-        let url = self.download_url.as_ref()?;
+        // 与 to_version_info 同一口径：禁止第三方分发的工程把直链写成空串，也会写成缺失。
+        let url = self
+            .download_url
+            .as_ref()
+            .filter(|url| !url.trim().is_empty())?;
         let mut task = DownloadTask::new(url.clone(), dest);
         if let Some(size) = self.file_length {
             task = task.with_size(size);
@@ -1244,6 +1248,23 @@ mod tests {
         assert_eq!(file.to_version_info().download_url, None);
         file.download_url = None;
         assert_eq!(file.to_version_info().download_url, None);
+    }
+
+    /// 整合包导入与资源安装直接拿文件对象生成下载任务：空白直链必须同缺失一样交给 download-url
+    /// 端点兜底，否则下载引擎拿着空地址失败，玩家看不到「需要到网页手动下载」。
+    #[test]
+    fn download_task_treats_blank_download_url_as_missing() {
+        let mut file = file_json(serde_json::json!(1), &[]);
+        for blank in ["", "   "] {
+            file.download_url = Some(blank.to_owned());
+            assert!(
+                file.to_download_task("C:/mods/x.jar").is_none(),
+                "{blank:?}"
+            );
+        }
+        file.download_url = Some("https://cf/jei.jar".to_owned());
+        let task = file.to_download_task("C:/mods/x.jar").expect("有直链");
+        assert_eq!(task.url, "https://cf/jei.jar");
     }
 
     #[test]

@@ -266,6 +266,8 @@ struct Lane {
     carried: Vec<(usize, String)>,
     /// 本次被合并吸收的窗内下标。
     absorbed: HashSet<usize>,
+    /// 这一页没取到窗（请求失败）时，先前游标里记下的吸收项：偏移没动，它们仍排在偏移之后。
+    kept: Vec<String>,
 }
 
 impl Lane {
@@ -278,6 +280,7 @@ impl Lane {
             total: cursor.total,
             carried: Vec::new(),
             absorbed: HashSet::new(),
+            kept: Vec::new(),
         }
     }
 
@@ -323,6 +326,7 @@ impl Lane {
             .iter()
             .filter(|(i, _)| *i >= self.pos)
             .map(|(_, id)| id.clone())
+            .chain(self.kept.iter().cloned())
             .collect();
         absorbed.extend(
             (self.pos..self.items.len())
@@ -507,8 +511,9 @@ fn build_lane(
     match result {
         None => lane,
         Some(Err(error)) => {
-            // 失败不能当成到底：游标原地不动，下一页（或重试）会再问一次。
+            // 失败不能当成到底：游标原地不动，下一页（或重试）会再问一次，先前记下的吸收项也照旧记着。
             lane.ends_after_window = false;
+            lane.kept.clone_from(&cursor.absorbed);
             errors.push(PlatformError { platform, error });
             lane
         }
@@ -1007,6 +1012,79 @@ mod tests {
         assert_eq!(cursor.modrinth.offset, 0);
         assert!(!cursor.modrinth.exhausted);
         assert!(cursor.curseforge.exhausted);
+    }
+
+    /// 平台这一页失败时游标原地不动，先前记下的吸收项也得原样续记：丢了它，重试那一页时已经并进
+    /// 合并卡的工程会再单独出现一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn failed_platform_keeps_absorbed_ids_so_merged_entries_do_not_reappear() {
+        let server = MockServer::start().await;
+        mount_modrinth_page(
+            &server,
+            2,
+            modrinth_hits(&[("m3", "Iris", "coderbot", 700)]),
+            3,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/search"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        mount_curseforge_page(
+            &server,
+            2,
+            curseforge_mods(&[
+                (4, "Botania", "Vazkii", 70, 6),
+                (3, "lithium", "JellySquid3", 50, 6),
+            ]),
+            4,
+        )
+        .await;
+
+        let (modrinth, curseforge) = clients(&server);
+        let query = SearchQuery::new("perf").with_paging(4, 0);
+        // 上一页 CurseForge 的 3 号已经并进 Modrinth 的 Lithium，排在偏移 2 之后，记在游标里。
+        let cursor = SearchCursor {
+            modrinth: PlatformCursor {
+                offset: 2,
+                exhausted: false,
+                total: Some(3),
+                absorbed: Vec::new(),
+            },
+            curseforge: PlatformCursor {
+                offset: 2,
+                exhausted: false,
+                total: Some(4),
+                absorbed: vec!["3".to_string()],
+            },
+        };
+
+        let failed = aggregate_search(
+            Some(&modrinth),
+            CurseForgeSource::Enabled(&curseforge),
+            &query,
+            Some(&cursor),
+        )
+        .await;
+        assert_eq!(failed.errors.len(), 1);
+        assert_eq!(failed.errors[0].platform, Platform::CurseForge);
+        assert_eq!(ids(&failed), vec!["m3"]);
+        let retry = failed.next_cursor.expect("失败的平台不算到底");
+        assert_eq!(retry.curseforge.offset, 2);
+        assert_eq!(retry.curseforge.absorbed, vec!["3".to_string()]);
+
+        let recovered = aggregate_search(
+            Some(&modrinth),
+            CurseForgeSource::Enabled(&curseforge),
+            &query,
+            Some(&retry),
+        )
+        .await;
+        assert!(recovered.is_complete());
+        assert_eq!(ids(&recovered), vec!["4"], "3 号已并进合并卡，不再单独出现");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
