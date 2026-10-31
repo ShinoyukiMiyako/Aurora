@@ -10,7 +10,7 @@ import App, { prepareApp } from "./App";
 import { stubCanvas } from "./art/illustrations/test-canvas";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL, SETTINGS_SECTION_LABEL } from "./copy/flows";
 import { DEVICE_DIALOG_COPY } from "./flows/login/copy";
-import { STEP_COPY } from "./flows/onboarding/copy";
+import { FOOTER_COPY, STEP_COPY } from "./flows/onboarding/copy";
 import { resetMocks } from "./ipc/mock";
 import { ACCOUNT_COPY, PAGE_ERROR_COPY, SIDEBAR_COPY } from "./shell/copy";
 import { DEFAULT_APPEARANCE } from "./state/appearance";
@@ -230,15 +230,28 @@ describe("应用冒烟：浏览器假后端", () => {
     expectNoFailures();
   }, 60_000);
 
-  it("首次启动：整窗是向导，没有侧栏", async () => {
-    ipc.overrides.set("is_first_run", () => true);
+  it("首次启动：整窗是向导、没有侧栏；第二步「直接开始」收尾后，向导退场再换成主界面", async () => {
+    // 不改写 is_first_run：假后端初始就是首次启动，complete_first_run 之后才变成 false
     await prepareApp();
     mount();
-    await vi.waitFor(() => {
-      expect(document.body.textContent).toContain(STEP_COPY.gameDir.title);
-    }, WAIT);
+    await vi.waitFor(() => expect(document.body.textContent).toContain(STEP_COPY.gameDir.title), WAIT);
     expect(document.querySelector("[data-sidebar-item]")).toBeNull();
-    expect(ipc.calls.filter((c) => c.cmd === "complete_first_run")).toEqual([]);
+
+    // 游戏目录预填了默认位置，第一步直接下一步
+    await vi.waitFor(() => expect(buttonIn(document, FOOTER_COPY.next).disabled).toBe(false), WAIT);
+    click(buttonIn(document, FOOTER_COPY.next));
+    await vi.waitFor(() => expect(document.body.textContent).toContain(STEP_COPY.java.title), WAIT);
+    click(buttonIn(document, FOOTER_COPY.startNow));
+
+    await expectPage("home", null);
+    expect(document.body.textContent).not.toContain(STEP_COPY.gameDir.title);
+    expect(document.querySelector("[data-sidebar-item='home']")).not.toBeNull();
+    // 只提交一次：默认游戏目录，加上探测到的其他启动器文件夹（向导默认全收）
+    const finished = ipc.calls.filter((c) => c.cmd === "complete_first_run");
+    expect(finished).toHaveLength(1);
+    const { mockInvoke } = await import("./ipc/mock");
+    const config = await mockInvoke<{ game_dir: string }>("get_config");
+    expect(finished[0].args.gameDir).toBe(config.game_dir);
     expectNoFailures();
   }, 60_000);
 });
