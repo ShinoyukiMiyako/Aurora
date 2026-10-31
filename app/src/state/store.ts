@@ -392,6 +392,9 @@ const RELOGIN_REQUIRED_CODE = "ReloginRequired";
 /** load_task_journal 在日志文件损坏或版本不符时的错误码。 */
 const TASK_JOURNAL_INVALID_CODE = "task_journal_invalid";
 
+/** 账户列表与当前账户对不上时最多连读几次。只有另一路的增删恰好夹在两条读命令之间才会对不上，重读一次就该对上。 */
+const ACCOUNT_READ_ATTEMPTS = 3;
+
 const RESOURCE_KIND: Readonly<Record<InstallableResourceType, TaskKind>> = {
   mod: "mod",
   resource_pack: "resourcepack",
@@ -897,6 +900,9 @@ export class LauncherStore {
   /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
   private scanIssued = 0;
   private scanApplied = 0;
+  /** 账户读取的发出序号与已采纳的最晚序号（见 fetchAccounts）。 */
+  private accountsIssued = 0;
+  private accountsApplied = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
   /**
@@ -1060,9 +1066,24 @@ export class LauncherStore {
     this.set({ settings: settingsFromDto(await configIpc.getConfig()) });
   }
 
+  /**
+   * 读账户列表与当前账户。两条命令各自进后端的账户库锁，中间夹着另一路的增删时，读出的当前账户可能不在读出的列表里
+   * （activeAccount 据此抛错，账户页与标题栏渲染失败）：对不上就重读，连着几次都对不上才报错。几处会同时发起读取
+   * （启动加载、账户动作落定），先发出的那次可能后回来，所以与实例重扫一样只采纳比已采纳的那次更晚发出的结果。
+   */
   private async fetchAccounts(): Promise<void> {
-    const [list, current] = await Promise.all([accountsIpc.listAccounts(), accountsIpc.currentAccount()]);
-    this.set({ accounts: list.map(accountFromDto), currentAccountId: current === null ? null : current.uuid });
+    const seq = ++this.accountsIssued;
+    for (let attempt = 1; ; attempt += 1) {
+      const [list, current] = await Promise.all([accountsIpc.listAccounts(), accountsIpc.currentAccount()]);
+      if (current === null || list.some((a) => a.uuid === current.uuid)) {
+        if (seq > this.accountsApplied) {
+          this.accountsApplied = seq;
+          this.set({ accounts: list.map(accountFromDto), currentAccountId: current === null ? null : current.uuid });
+        }
+        return;
+      }
+      if (attempt === ACCOUNT_READ_ATTEMPTS) throw new Error(`当前账户 ${current.uuid} 不在账户列表里，连读 ${ACCOUNT_READ_ATTEMPTS} 次都对不上`);
+    }
   }
 
   /**
