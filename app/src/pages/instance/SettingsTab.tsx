@@ -7,7 +7,7 @@ import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flow
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
-import { needsReimport } from "../../domain/rules";
+import { needsReimport, runtimeComplete } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -48,7 +48,6 @@ import {
   presetFlags,
   RESOLUTION_LIMITS,
   RESOLUTION_PRESETS,
-  runtimeComplete,
   toggleFlags,
   ZGC_MIN_JAVA,
 } from "./model";

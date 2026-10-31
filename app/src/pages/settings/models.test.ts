@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { instanceFromDto } from "../../domain/adapt";
+import { runtimeComplete } from "../../domain/rules";
 import type { GpuAdapterDto, JavaInstallationDto } from "../../state/queries/catalog";
 import { instanceDto } from "../../test/launcher";
 import { dirName, hasBang, normalizePath, overAvailable, samePath, unrecorded } from "./game-model";
 import {
   gpuSummary,
   hasManaged,
-  isComplete,
   javaNotes,
   joinMajors,
   majorsInUse,
@@ -79,8 +79,8 @@ describe("Java 分区推导", () => {
   it("不完整的运行时：不算已有的主版本、不算装了托管的，只有当前默认值才能留在可选里", () => {
     const broken = runtime("C:/rt/21/bin/java.exe", 21, { source: "managed", missing_files: ["release", "lib/modules"] });
     const complete = runtime("C:/jdk8/bin/java.exe", 8);
-    expect(isComplete(broken)).toBe(false);
-    expect(isComplete(complete)).toBe(true);
+    expect(runtimeComplete(broken)).toBe(false);
+    expect(runtimeComplete(complete)).toBe(true);
     expect(missingMajors(instances, [broken, complete])).toEqual([25, 21]);
     expect(javaNotes("auto", [broken, complete], instances, true)).toEqual([{ kind: "missing", majors: [25, 21], autoDownload: true }]);
     expect(hasManaged([broken], 21)).toBe(false);

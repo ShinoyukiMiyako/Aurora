@@ -3,6 +3,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { JAVA_AUTO, type InstanceSummary } from "../../../domain/adapt";
+import { runtimeComplete } from "../../../domain/rules";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
@@ -27,7 +28,6 @@ import {
   gpuSummary,
   hasManaged,
   instancesNeeding,
-  isComplete,
   javaNotes,
   joinMajors,
   majorsInUse,
@@ -54,7 +54,7 @@ function RuntimeTitle({ runtime }: { runtime: JavaInstallationDto }) {
         {runtime.is_64bit ? JAVA_COPY.bits64 : JAVA_COPY.bits32}
       </Tag>
       <Tag size="sm">{JAVA_SOURCE_LABEL[runtime.source]}</Tag>
-      {!isComplete(runtime) && (
+      {!runtimeComplete(runtime) && (
         <Tag size="sm" tone="warn">
           {JAVA_COPY.incomplete}
         </Tag>
@@ -68,7 +68,7 @@ function RuntimeDetail({ runtime, instances }: { runtime: JavaInstallationDto; i
   return (
     <span className={s.runtimeDetail}>
       <span className={s.monoLine}>{runtime.path}</span>
-      {!isComplete(runtime) && <span className={s.warnLine}>{JAVA_COPY.missingFiles(runtime.missing_files)}</span>}
+      {!runtimeComplete(runtime) && <span className={s.warnLine}>{JAVA_COPY.missingFiles(runtime.missing_files)}</span>}
       <span className={s.usersLine}>
         {users.length > 0 ? (
           <>
@@ -198,7 +198,7 @@ function ManualRow({ entry }: { entry: ManualJava }) {
         ) : (
           <span className={s.manualMeta}>
             {JAVA_COPY.manualDetail(runtime.version.major, runtime.vendor, runtime.version.raw)}
-            {!isComplete(runtime) && (
+            {!runtimeComplete(runtime) && (
               <Tag size="sm" tone="warn">
                 {JAVA_COPY.incomplete}
               </Tag>

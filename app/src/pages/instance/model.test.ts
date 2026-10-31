@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { bestLocalRuntime, runtimeComplete } from "../../domain/rules";
 import type { Task } from "../../domain/types";
 import type { LaunchView } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
@@ -8,7 +9,6 @@ import { newTask } from "../../state/tasks";
 import { LOGS_COPY } from "./copy";
 import {
   autoJavaPick,
-  bestLocalRuntime,
   crashFixes,
   creationRef,
   creationRefEqual,
@@ -41,7 +41,6 @@ import {
   presetFlags,
   RESOLUTION_LIMITS,
   removalRelations,
-  runtimeComplete,
   sortWorlds,
   toggleFlags,
   updateTaskFiles,

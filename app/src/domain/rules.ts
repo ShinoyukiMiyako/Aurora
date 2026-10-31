@@ -1,7 +1,9 @@
-// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、整合包没导入完。纯函数，页面、启动入口与状态层共用同一份。
+// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、本机 Java 的自动挑选、整合包没导入完。
+// 纯函数，页面、流程、启动入口与状态层共用同一份。
 
 import { INSTANCE_NAME_ERROR, OFFLINE_NAME_COPY } from "../copy/flows";
 import { checkInstanceName } from "../ipc/instances";
+import type { JavaInstallationDto } from "../ipc/java";
 import type { InstanceSummary } from "./adapt";
 
 // ---------------------------------------------------------------- 实例名
@@ -96,6 +98,28 @@ export function javaMajorFromClassVersion(detail: string | null): number | null 
   const match = CLASS_FILE_VERSION.exec(detail);
   if (match === null) return null;
   return Number(match[1]) - CLASS_FILE_VERSION_OFFSET;
+}
+
+// ---------------------------------------------------------------- 本机 Java 的自动挑选
+
+function compareJavaVersion(a: JavaInstallationDto["version"], b: JavaInstallationDto["version"]): number {
+  return a.major - b.major || a.minor - b.minor || a.security - b.security || a.build - b.build;
+}
+
+/** 运行时文件齐全。后端挑选先滤掉不完整的，前端推断「自动会选哪个、缺哪个主版本、托管的装没装」时同样跳过它们，两边才说得一致。 */
+export function runtimeComplete(runtime: JavaInstallationDto): boolean {
+  return runtime.missing_files.length === 0;
+}
+
+/** 与后端 select_for_major 同一条规则：主版本相等、文件齐全的候选里先挑 64 位、再挑版本号最高的；一个都没有为 null。 */
+export function bestLocalRuntime(runtimes: readonly JavaInstallationDto[], major: number): JavaInstallationDto | null {
+  return runtimes
+    .filter((r) => r.version.major === major && runtimeComplete(r))
+    .reduce<JavaInstallationDto | null>((acc, r) => {
+      if (acc === null) return r;
+      if (r.is_64bit !== acc.is_64bit) return r.is_64bit ? r : acc;
+      return compareJavaVersion(r.version, acc.version) > 0 ? r : acc;
+    }, null);
 }
 
 // ---------------------------------------------------------------- 整合包没导入完

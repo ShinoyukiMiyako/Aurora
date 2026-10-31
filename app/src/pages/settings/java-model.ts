@@ -3,16 +3,9 @@
 
 import type { InstanceSummary } from "../../domain/adapt";
 import { JAVA_AUTO } from "../../domain/adapt";
+import { runtimeComplete } from "../../domain/rules";
 import type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto } from "../../state/queries/catalog";
 import { samePath } from "./game-model";
-
-/**
- * 运行时文件齐全。后端挑选（select_for_major）先滤掉不完整的，前端推断「自动会选哪个、缺哪个主版本、托管的装没装」
- * 时同样跳过它们，两边才说得一致。
- */
-export function isComplete(runtime: JavaInstallationDto): boolean {
-  return runtime.missing_files.length === 0;
-}
 
 export type JavaNote =
   | { kind: "pinned" }
@@ -43,18 +36,18 @@ export function instancesNeeding(instances: readonly InstanceSummary[], major: n
 
 /** 有实例要、本机一个完整的都没有的主版本。 */
 export function missingMajors(instances: readonly InstanceSummary[], runtimes: readonly JavaInstallationDto[]): number[] {
-  const present = new Set(runtimes.filter(isComplete).map((r) => r.version.major));
+  const present = new Set(runtimes.filter(runtimeComplete).map((r) => r.version.major));
   return majorsInUse(instances).filter((m) => !present.has(m));
 }
 
 /** 已有完整的托管运行时；不完整的不算装了，重新下载就是修复。 */
 export function hasManaged(runtimes: readonly JavaInstallationDto[], major: number): boolean {
-  return runtimes.some((r) => r.source === "managed" && r.version.major === major && isComplete(r));
+  return runtimes.some((r) => r.source === "managed" && r.version.major === major && runtimeComplete(r));
 }
 
 /** 不完整的运行时不能选作默认 Java；已经是当前默认值的除外，照常显示为选中，让人看清现状。 */
 export function selectableAsDefault(runtime: JavaInstallationDto, current: string): boolean {
-  return isComplete(runtime) || runtime.path === current;
+  return runtimeComplete(runtime) || runtime.path === current;
 }
 
 export interface ManualJava {
