@@ -781,6 +781,7 @@ pub(crate) mod tests {
                         mc_version: "1.20.1".into(),
                         loader: None,
                         loader_version: None,
+                        use_template: false,
                     },
                 },
                 42,
