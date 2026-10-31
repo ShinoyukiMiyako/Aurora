@@ -1,8 +1,10 @@
 // 环形进度：空间紧凑处的进度（标题栏下载入口、行内安装进度、主页最近游玩的启动中），以及下载任务页的总进度环（84 档）。
 // 从 12 点方向顺时针填充；不支持不定进度（那种场合用加载指示）。实例头像上的进度环属于实例头像，不是它。
 // value 为 null 表示眼下没有可显示的进度（例如没有活动任务）：只画轨道，带圆心文字的档位写「--」。
+// 这时不再是进度条：没有当前值的 progressbar 会被读屏当成不定进度念「忙」，所以改为图形，名称后接一句可读的说明。
 
 import { motion, useTransform } from "framer-motion";
+import { useId } from "react";
 import { percent } from "../domain/format";
 import { cx } from "../lib/util";
 import type { ProgressTone } from "./ProgressBar";
@@ -16,6 +18,9 @@ export const RING_STROKE = { 16: 2, 20: 2, 24: 2.5, 36: 3.5, 48: 4, 84: 7 } as c
 
 /** 没有可显示的进度时圆心的占位。 */
 export const RING_PLACEHOLDER = "--";
+
+/** 没有可显示的进度时读屏接在名称后的说明；调用方能说清是哪种「没有」时用 emptyText 换掉它。 */
+export const RING_EMPTY_TEXT = "暂无进度";
 
 export function ringHasLabel(size: ProgressRingSize): boolean {
   return size >= 36;
@@ -32,12 +37,15 @@ export interface ProgressRingProps {
   capAt99?: boolean;
   label?: string;
   labelledBy?: string;
+  /** value 为 null 时读屏接在名称后的说明，例如「没有进行中的下载」。 */
+  emptyText?: string;
   className?: string;
 }
 
-export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99 = false, label, labelledBy, className }: ProgressRingProps) {
+export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99 = false, label, labelledBy, emptyText = RING_EMPTY_TEXT, className }: ProgressRingProps) {
   if (label === undefined && labelledBy === undefined) throw new Error("ProgressRing 需要 label 或 labelledBy 作为可访问名称");
   const empty = value === null;
+  const emptyTextId = useId();
   // 占位时不画填充、不写百分数；交给平滑的 0 只是占位，推演规则与 track 一致
   const { smooth, target } = useSmoothProgress(empty ? 0 : value, track);
   const stroke = RING_STROKE[size];
@@ -53,14 +61,19 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
       data-tone={tone}
       data-size={size}
       data-empty={empty || undefined}
-      role="progressbar"
-      aria-label={label}
-      aria-labelledby={labelledBy}
-      aria-valuemin={0}
-      aria-valuemax={100}
+      role={empty ? "img" : "progressbar"}
+      aria-label={label !== undefined && empty ? `${label}：${emptyText}` : label}
+      aria-labelledby={labelledBy !== undefined && empty ? `${labelledBy} ${emptyTextId}` : labelledBy}
+      aria-valuemin={empty ? undefined : 0}
+      aria-valuemax={empty ? undefined : 100}
       aria-valuenow={empty ? undefined : Math.round(target * 100)}
-      aria-valuetext={empty ? RING_PLACEHOLDER : undefined}
     >
+      {/* 名称经 labelledBy 引用时说明也只能经引用接上；被直接引用的隐藏节点照样计入名称 */}
+      {empty && labelledBy !== undefined && (
+        <span id={emptyTextId} hidden>
+          {emptyText}
+        </span>
+      )}
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true" focusable="false">
         <circle className={styles.track} cx={center} cy={center} r={radius} fill="none" strokeWidth={stroke} />
         {/* 进度为 0 时不画填充：圆头描边在零长度时仍会画出一个点 */}
