@@ -120,6 +120,16 @@ pub mod code {
     pub const UPDATE_NOT_READY: &str = "update_not_ready";
     /// 启动安装程序失败。
     pub const UPDATE_INSTALL_FAILED: &str = "update_install_failed";
+    /// 已有游戏在加载或运行，同一时间只跑一个游戏。detail：`{ version_id, phase: loading | running }`。
+    pub const BUSY: &str = "busy";
+    /// 实例正在安装、补全、改名、删除、启动或运行，暂时不能做这件事。detail：`{ id, activity }`。
+    pub const INSTANCE_BUSY: &str = "instance_busy";
+    /// 有别的实例经 inheritsFrom 依赖它，不能改名或删除。detail：`{ id, dependents }`。
+    pub const INSTANCE_HAS_DEPENDENTS: &str = "instance_has_dependents";
+    /// 系统没能打开文件夹。detail：`{ path }`。
+    pub const OPEN_FAILED: &str = "open_failed";
+    /// 要改动的 Mod 文件正被占用（游戏运行中）。detail：`{ path }`，为被占用的文件。
+    pub const MOD_FILE_BUSY: &str = "mod_file_busy";
 }
 
 /// 序列化给前端的命令错误。

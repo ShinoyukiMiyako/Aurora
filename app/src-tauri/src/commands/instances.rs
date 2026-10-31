@@ -26,15 +26,8 @@ use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
 use crate::tasks::TaskRegistry;
 
-/// 本领域新增的错误码。
-pub mod code {
-    /// 实例正在安装、补全、改名、删除、启动或运行，暂时不能做这件事。detail：`{ id, activity }`。
-    pub const INSTANCE_BUSY: &str = "instance_busy";
-    /// 有别的实例经 inheritsFrom 依赖它，不能改名或删除。detail：`{ id, dependents }`。
-    pub const INSTANCE_HAS_DEPENDENTS: &str = "instance_has_dependents";
-    /// 系统没能打开文件夹。detail：`{ path }`。
-    pub const OPEN_FAILED: &str = "open_failed";
-}
+// 本领域的 instance_busy、instance_has_dependents、open_failed 与通用码一起登记在 error::code。
+use crate::commands::error::code;
 
 // ---------------------------------------------------------------- 实例互斥
 

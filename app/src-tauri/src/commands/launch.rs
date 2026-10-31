@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 
 use crate::commands::accounts::find_account;
+use crate::commands::error::code::BUSY;
 use crate::commands::instances::{InstanceActivity, InstanceGuard, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::{self, GAME_LOG_EVENT};
@@ -33,9 +34,6 @@ pub const LAUNCH_PHASE_EVENT: &str = "aurora://launch-phase";
 
 /// 游戏进程退出（收尾记账已写完）。
 pub const GAME_EXIT_EVENT: &str = "aurora://game-exit";
-
-/// 已有游戏在加载或运行。
-pub const BUSY: &str = "busy";
 
 /// 运行中游戏的占用槽。与门面分列两个 managed state：会话生命周期独立于门面，启动后门面锁应立即可用。
 #[derive(Default)]
@@ -595,7 +593,7 @@ mod tests {
         // 实例正在安装：报 instance_busy，占用槽的预留随之放开，别的实例照常能启动。
         let installing = locks.acquire("生存", InstanceActivity::Installing).unwrap();
         let err = reserve_launch(&running, &locks, "生存").err().unwrap();
-        assert_eq!(err.code, crate::commands::instances::code::INSTANCE_BUSY);
+        assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
         assert_eq!(err.detail.unwrap()["activity"], json!("installing"));
         drop(installing);
 

@@ -12,13 +12,11 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
+use crate::commands::error::code::MOD_FILE_BUSY;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
 use crate::tasks::TaskRegistry;
-
-/// 要改动的 Mod 文件正被占用（游戏运行中）。`detail.path` 为被占用的文件。
-pub const MOD_FILE_BUSY: &str = "mod_file_busy";
 
 /// 一次 Mod 更新的结果 DTO。
 #[derive(Debug, Serialize)]
