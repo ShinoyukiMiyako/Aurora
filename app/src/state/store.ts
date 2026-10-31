@@ -359,6 +359,7 @@ const TASK_COMMANDS = new Set([
   "update_mods",
 ]);
 
+/** 写整个实例目录的任务：期间实例算「安装中」。其余挂在实例上的任务（装、更新 Mod 与资源）只改动其中的 Mod 与资源，算 modifying。 */
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
 
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
@@ -606,6 +607,16 @@ function countUnseen(tasks: readonly Task[], unseen: readonly string[]): number 
   return tasks.filter((t) => t.status === "failed" && ids.has(attemptTaskId(t))).length;
 }
 
+/** 活动任务对一个已扫描实例的影响：整个目录在写（安装中），或者只在改动 Mod 与资源。 */
+type TaskEffect = "installing" | "modifying" | null;
+
+function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEffect): InstanceSummary {
+  if (effect === "installing") return { ...base, pinned, status: "installing", brokenReason: null };
+  // 列表是任务开始前扫的，后端那时还没记下占用；后端报的活动（例如运行中）比前端推断的更准，留着它。
+  if (effect === "modifying") return { ...base, pinned, activity: base.activity === null ? "modifying" : base.activity };
+  return { ...base, pinned };
+}
+
 /** 实例列表与侧栏固定列表：只随扫描结果、固定列表、入队上下文与活动任务的集合变，下载进度与会话日志不影响它们。 */
 interface InstancesView {
   instances: InstanceSummary[];
@@ -650,12 +661,12 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
  * 每次都会换掉原始状态；如果每次都重建实例对象，按 state.instances 做依赖或做选择的组件就跟着每秒重渲染十次。
  *
  * - 实例列表：扫描结果、固定列表、入队上下文都是同一份引用，活动任务的集合（id 与所挂实例）也没变时，整份复用上一次的。
- * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、安装中与否都没变，就复用上一次的那个对象。
+ * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、活动任务带来的状态（安装中或改动中）都没变，就复用上一次的那个对象。
  */
 class StateDeriver {
   private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; activeKey: string } | null = null;
   private lastView: InstancesView | null = null;
-  private scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; installing: boolean; value: InstanceSummary }>();
+  private scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; value: InstanceSummary }>();
   private placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
 
   derive(raw: RawState): LauncherState {
@@ -682,7 +693,7 @@ class StateDeriver {
 
   private instancesView(raw: RawState): InstancesView {
     const active = raw.tasks.filter(isActiveTask);
-    const activeKey = active.map((t) => `${t.id}|${t.instanceId === null ? "" : t.instanceId}`).join("\n");
+    const activeKey = active.map((t) => `${t.id}|${t.spec.command}|${t.instanceId === null ? "" : t.instanceId}`).join("\n");
     const last = this.lastInputs;
     if (
       this.lastView !== null &&
@@ -709,18 +720,23 @@ class StateDeriver {
   }
 
   private compute(raw: RawState, active: readonly Task[]): InstancesView {
-    const busy = new Set<string>();
-    for (const t of active) if (t.instanceId !== null) busy.add(t.instanceId.toLowerCase());
-    const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; installing: boolean; value: InstanceSummary }>();
+    const installing = new Set<string>();
+    const modifying = new Set<string>();
+    for (const t of active) {
+      if (t.instanceId === null) continue;
+      (INSTANCE_TASKS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
+    }
+    const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; value: InstanceSummary }>();
     const instances: InstanceSummary[] = raw.scanned.map((base) => {
-      const installing = busy.has(base.id.toLowerCase());
+      const key = base.id.toLowerCase();
+      const effect: TaskEffect = installing.has(key) ? "installing" : modifying.has(key) ? "modifying" : null;
       const pinned = raw.pins.includes(base.id);
       const cached = this.scannedCache.get(base.id);
       const value =
-        cached !== undefined && cached.base === base && cached.pinned === pinned && cached.installing === installing
+        cached !== undefined && cached.base === base && cached.pinned === pinned && cached.effect === effect
           ? cached.value
-          : { ...base, pinned, status: installing ? "installing" : base.status, brokenReason: installing ? null : base.brokenReason };
-      scannedCache.set(base.id, { base, pinned, installing, value });
+          : applyTaskEffect(base, pinned, effect);
+      scannedCache.set(base.id, { base, pinned, effect, value });
       return value;
     });
     this.scannedCache = scannedCache;

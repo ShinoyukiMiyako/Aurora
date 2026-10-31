@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
 import type { InstallPlan, ModVersionInfo, UpdateCandidate } from "../ipc/mods";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, resetRecorder, settle, startedStore } from "../test/launcher";
+import { bootOverrides, callsOf, deferred, resetRecorder, settle, startedStore } from "../test/launcher";
 import { resources } from "./resource";
 import type { LauncherStore } from "./store";
 
@@ -123,6 +123,39 @@ describe("Mod 集合变化后发现页的落位矩阵失效", () => {
 function candidate(projectId: string, current: string, latest: string): UpdateCandidate {
   return { file_name: `${projectId}-${current}.jar`, title: projectId, current_version_id: current, current_version_number: current, latest: version(projectId, latest) };
 }
+
+describe("装 Mod 期间实例的状态", () => {
+  const inst = (id: string) => store.getState().instances.find((i) => i.id === id);
+
+  it("Mod 与资源任务只把实例记为改动中，照常可启动；补全这类写整个目录的任务才算安装中", async () => {
+    const install = deferred<unknown>();
+    ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }));
+    ipc.overrides.set("install_mod", () => install.promise);
+    await store.actions.installResource({
+      resourceType: "mod",
+      platform: "modrinth",
+      projectId: "sodium",
+      name: "Sodium",
+      targets: [{ instanceId: "生存", fileVersionId: "v2", world: null }],
+    });
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.spec.command, t.status])).toEqual([["install_mods", "running"]]);
+    expect(inst("生存")).toMatchObject({ status: "ready", activity: "modifying", brokenReason: null });
+    expect(inst("创造")).toMatchObject({ status: "ready", activity: null });
+
+    install.resolve(null);
+    await settle();
+    expect(inst("生存")).toMatchObject({ status: "ready", activity: null });
+
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(inst("生存")).toMatchObject({ status: "installing" });
+    repair.resolve(null);
+    await settle();
+  });
+});
 
 describe("全部更新", () => {
   it("多个可更新合成一个任务：标题写个数，逐个调 update_mod 并共用 taskId，完成只弹一条通知", async () => {

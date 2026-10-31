@@ -97,17 +97,11 @@ afterEach(() => {
 
 describe("按片订阅：高频的下载进度与游戏日志不让无关的组件重渲染", () => {
   it("20 次下载进度 + 20 批游戏日志：整份订阅重渲染 40 次；实例列表、侧栏、活动任务数、安装中的实例 0 次", async () => {
-    const install = deferred<unknown>();
-    ipc.overrides.set("install_resource", () => install.promise);
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
     await act(async () => {
-      await launcher.actions.installResource({
-        resourceType: "resource_pack",
-        platform: "modrinth",
-        projectId: "faithful",
-        name: "Faithful",
-        targets: [{ instanceId: "生存", fileVersionId: "f1", world: null }],
-      });
+      await launcher.actions.repairInstance("生存");
       await launcher.actions.launch("创造");
       await settle();
     });
@@ -157,9 +151,10 @@ describe("按片订阅：高频的下载进度与游戏日志不让无关的组�
       await settle();
     });
     const during = launcher.state.instances;
-    expect(during.map((i) => [i.id, i.status])).toEqual([
-      ["生存", "installing"],
-      ["创造", "ready"],
+    // 装资源只改动实例里的文件，不算安装中：实例照常可启动，只是占用记为 modifying
+    expect(during.map((i) => [i.id, i.status, i.activity])).toEqual([
+      ["生存", "ready", "modifying"],
+      ["创造", "ready", null],
     ]);
     const before = { ...renders };
     await act(async () => {
@@ -168,9 +163,9 @@ describe("按片订阅：高频的下载进度与游戏日志不让无关的组�
     });
     const after = launcher.state.instances;
     expect(after).not.toBe(during);
-    expect(after.map((i) => [i.id, i.status])).toEqual([
-      ["生存", "ready"],
-      ["创造", "ready"],
+    expect(after.map((i) => [i.id, i.status, i.activity])).toEqual([
+      ["生存", "ready", null],
+      ["创造", "ready", null],
     ]);
     expect(after[1]).toBe(during[1]);
     expect(renders["实例列表"] - before["实例列表"]).toBe(1);
