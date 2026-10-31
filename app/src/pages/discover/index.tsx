@@ -241,9 +241,10 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
     if (online) setTimedOutKey(null);
   }
   const timedOut = pages.loadingFirst && timedOutKey === requestKey;
-  // 首页的骨架与「比平时慢」、下一页列表尾的「比平时慢」都走全站统一的加载门
-  const gate = useLoadingGate(pages.loadingFirst && !timedOut);
-  const slowNext = useLoadingGate(pages.loadingNext).slow;
+  // 首页的骨架与「比平时慢」、下一页列表尾的「比平时慢」都走全站统一的加载门；以请求为一轮，
+  // 加载中换了条件时慢提示（与接在它后面的超时）按新请求从头计时
+  const gate = useLoadingGate(pages.loadingFirst && !timedOut, requestKey);
+  const slowNext = useLoadingGate(pages.loadingNext, requestKey).slow;
 
   // 加载门没有超时：超时接在它的「慢」后面计，与慢提示同一轮、同一个起点，加载门换轮时一起重来
   const latestKey = useRef(requestKey);

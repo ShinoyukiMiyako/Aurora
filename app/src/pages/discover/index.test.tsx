@@ -511,8 +511,9 @@ describe("发现页：加载态的时机", () => {
     expect(cardTitles()).toEqual(["资源 A，查看详情"]);
   });
 
-  // 慢提示与超时同属加载门的一轮：加载中途换了条件不另起一轮，两者不会一个重来一个不重来
-  it("首页加载中途换关键词：慢提示与超时按同一轮计时，都从这一轮开始的时刻算", async () => {
+  // 慢提示与超时说的是眼前这次请求：加载中途换了条件，两者一起按新请求从头计时，不会一个重来一个不重来；
+  // 骨架一直在，不因换了请求再多等一个出现延迟
+  it("首页加载中途换关键词：慢提示与超时按新请求从头计时", async () => {
     pages = () => new Promise<SearchResultDto>(() => {}) as never;
     await mount();
     await advance(10_000);
@@ -522,8 +523,17 @@ describe("发现页：加载态的时机", () => {
     act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     await flush();
     expect(searchCalls()).toHaveLength(2);
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    expect(skeletonCards()).toBe(24);
+    // 旧请求本该超时的时刻（开始后 20 s）过去了，新请求才等了 8 s
+    await advance(8_000);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1_999);
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    // 分两步走到新请求的 20 s：慢提示在 10 s 那一刻渲染出来，超时接在它后面计
+    await advance(1);
     expect(document.body.textContent).toContain("比平时慢一些");
-    await advance(7_999);
+    await advance(9_999);
     expect(document.body.textContent).not.toContain("请求超时");
     await advance(1);
     expect(document.body.textContent).toContain("请求超时");
