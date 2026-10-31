@@ -50,7 +50,10 @@ export default function InstancePage({ route }: PageProps<"instance">) {
   const view = launchView(state, inst);
   const crash = useLastCrash(queryId);
   const updates = useModUpdates(modded ? queryId : null);
-  const crashActive = crash.status === "ready" && crash.data !== null && isCrashActive(crash.data.at, inst.lastPlayedAt, view.kind);
+  // 头图与标签条只靠实例列表就能画：崩溃时刻先取列表里的，不等崩溃报告；报告到了且更新（列表还没重扫）时以报告为准
+  const reportAt = crash.status === "ready" && crash.data !== null ? crash.data.at : null;
+  const crashAt = inst.lastCrashAt === null ? reportAt : reportAt === null ? inst.lastCrashAt : Math.max(inst.lastCrashAt, reportAt);
+  const crashActive = isCrashActive(crashAt, inst.lastPlayedAt, view.kind);
   const live = state.session !== null && state.session.instanceId === inst.id && isSessionActive(state.session);
 
   const onTab = (tab: InstanceTab) => replace({ page: "instance", id: inst.id, tab });

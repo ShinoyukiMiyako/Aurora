@@ -13,7 +13,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey, type InstanceTab } from "../../state/route";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -453,6 +453,19 @@ describe("实例详情：概览", () => {
     await open("overview");
     expect(text()).toContain("自动 · Java 21 · 要求 21");
     expect(text()).toContain("4 GB · 跟随全局");
+  });
+
+  it("头图的「上次崩溃」按实例列表里的崩溃时刻先画出来，不等崩溃报告", async () => {
+    const pending = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => pending.promise);
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - DAY, last_played_at: NOW - DAY } : i));
+    await open("settings");
+    expect(document.querySelector("section")?.textContent).toContain("上次崩溃");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - 2 * DAY, last_played_at: NOW - DAY } : i));
+    resetRecorderKeepOverrides();
+    await open("settings");
+    expect(document.querySelector("section")?.textContent).not.toContain("上次崩溃");
   });
 
   it("崩溃之后没再玩过：危险横幅与头图「上次崩溃」；之后正常玩过就不再提示", async () => {
