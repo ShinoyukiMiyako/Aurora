@@ -308,7 +308,8 @@ fn instance_code(err: &InstanceError) -> &'static str {
         InstanceError::InvalidId { .. }
         | InstanceError::InvalidName { .. }
         | InstanceError::InvalidSettings { .. }
-        | InstanceError::InvalidPins { .. } => code::INVALID_ARGUMENT,
+        | InstanceError::InvalidPins { .. }
+        | InstanceError::InvalidBackupArgument { .. } => code::INVALID_ARGUMENT,
         InstanceError::BackupArchive { .. }
         | InstanceError::BackupEntryUnsafe { .. }
         | InstanceError::BackupLevelUnreadable { .. } => code::WORLD_BACKUP_CORRUPT,
@@ -455,7 +456,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("rule".to_owned(), json!(violation.code()));
             detail.insert("name".to_owned(), json!(name));
         }
-        CoreError::Instance(InstanceError::InvalidSettings { field, reason }) => {
+        CoreError::Instance(
+            InstanceError::InvalidSettings { field, reason }
+            | InstanceError::InvalidBackupArgument { field, reason },
+        ) => {
             detail.insert("field".to_owned(), json!(field));
             detail.insert("reason".to_owned(), json!(reason));
         }
@@ -1053,6 +1057,17 @@ mod tests {
         let detail = incomplete.detail.unwrap();
         assert_eq!(detail["path"], json!("D:/g/saves/w"));
         assert_eq!(detail["staged"], json!("D:/g/saves/w.petalfall-restore"));
+
+        let dest: CommandError = InstanceError::InvalidBackupArgument {
+            field: "dest",
+            reason: "导出位置不能在存档文件夹里面".into(),
+        }
+        .into();
+        assert_eq!(dest.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            dest.detail,
+            Some(json!({ "field": "dest", "reason": "导出位置不能在存档文件夹里面" }))
+        );
 
         let cancelled: CommandError = InstanceError::Cancelled.into();
         assert_eq!(cancelled, CommandError::cancelled());
