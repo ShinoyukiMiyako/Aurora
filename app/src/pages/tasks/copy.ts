@@ -12,6 +12,8 @@ export const TASKS_COPY = {
 
   flow: {
     ringLabel: "全部活动任务的总进度",
+    /** 总进度环没有可算的进度时，读屏接在名称后的说明：区分「没有任务」与「有任务但大小还不知道」。 */
+    ringEmpty: { idle: "没有进行中的下载", unknown: "任务大小还不知道，暂无总进度" },
     running: "当前总速度",
     waiting: "等待开始",
     idle: "全部下载已完成",

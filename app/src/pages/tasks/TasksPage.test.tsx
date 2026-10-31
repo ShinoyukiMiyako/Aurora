@@ -97,9 +97,9 @@ const radio = (label: string) => {
 
 const headings = () => [...page().querySelectorAll("section > h2")].map((h) => h.textContent);
 
-/** 吞吐卡的总进度环。 */
+/** 吞吐卡的总进度环：有进度时是 progressbar，没有可算的进度时是带说明的图形，名称都以 ringLabel 开头。 */
 function totalRing(): HTMLElement {
-  const el = page().querySelector<HTMLElement>('[role="progressbar"][aria-label="全部活动任务的总进度"]');
+  const el = page().querySelector<HTMLElement>('[data-size="84"][aria-label^="全部活动任务的总进度"]');
   if (el === null) throw new Error("吞吐卡没有总进度环");
   return el;
 }
@@ -223,10 +223,13 @@ describe("下载任务页：历史", () => {
     // 新建被取消，实例已经不在了
     expect(hasButton(cancelled, "查看实例")).toBe(false);
 
-    // 没有活动任务：总进度环是 84 档的空环，圆心写「--」，不报一个没有意义的百分数
+    // 没有活动任务：总进度环是 84 档的空环，圆心写「--」，不报一个没有意义的百分数；
+    // 读屏不把它当成不定进度，念名称加一句「没有进行中的下载」
     expect(totalRing().dataset.size).toBe("84");
     expect(totalRing().dataset.tone).toBe("muted");
-    expect(totalRing().getAttribute("aria-valuetext")).toBe("--");
+    expect(totalRing().getAttribute("role")).toBe("img");
+    expect(totalRing().getAttribute("aria-label")).toBe("全部活动任务的总进度：没有进行中的下载");
+    expect(totalRing().hasAttribute("aria-valuetext")).toBe(false);
     expect(totalRing().hasAttribute("aria-valuenow")).toBe(false);
     expect(totalRing().textContent).toBe("--");
 
@@ -348,6 +351,9 @@ describe("下载任务页：进行中", () => {
     expect(row("Java 25").textContent).toContain("大小待定");
     expect(headings()).toEqual(["进行中 · 4"]);
     expect(radio("进行中").getAttribute("aria-label")).toBe("进行中，4 个");
+    // 有活动任务、但还没有一个报了总量：说明换成「大小还不知道」，不说成没有下载
+    expect(totalRing().getAttribute("role")).toBe("img");
+    expect(totalRing().getAttribute("aria-label")).toBe("全部活动任务的总进度：任务大小还不知道，暂无总进度");
 
     act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 2, bytes: 120 * MB, total_bytes: 612 * MB, speed: 12 * MB }));
     // 剩余时间按最近 5 秒的平均速度：等窗口里全是这个速度
@@ -360,6 +366,8 @@ describe("下载任务页：进行中", () => {
     expect(page().textContent).toContain("剩余 492 MB · 约 45 秒");
     // 只有这一个任务报了总量：总进度就是它的 120 / 612
     expect(totalRing().dataset.tone).toBe("accent");
+    expect(totalRing().getAttribute("role")).toBe("progressbar");
+    expect(totalRing().getAttribute("aria-label")).toBe("全部活动任务的总进度");
     expect(totalRing().getAttribute("aria-valuenow")).toBe("20");
     expect(totalRing().hasAttribute("aria-valuetext")).toBe(false);
     expect(page().textContent).not.toContain("最近 48 秒没有下载流量");
