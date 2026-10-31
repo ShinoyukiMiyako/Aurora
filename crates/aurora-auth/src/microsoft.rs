@@ -1107,6 +1107,66 @@ mod tests {
         );
     }
 
+    /// 令牌端点忙（`temporarily_unavailable`）是瞬时状况，微软给的处理办法是稍等后重试：
+    /// 刷新与设备码轮询都该按退避策略再来一次，而不是把一次服务端抖动报成登录失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporarily_unavailable_token_endpoint_is_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": "temporarily_unavailable",
+                "error_description": "AADSTS90033: 服务暂时不可用"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "RT2", "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        let two_attempts = RetryPolicy {
+            max_attempts: 2,
+            ..no_retry()
+        };
+
+        let token = auth_for(&server)
+            .with_retry(two_attempts.clone())
+            .refresh("r")
+            .await
+            .unwrap();
+        assert_eq!(token.refresh_token, "RT2");
+
+        // 轮询途中撞上一次同样的抖动，登录照常完成。
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": "temporarily_unavailable",
+                "error_description": "AADSTS90033"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "RT3", "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        let token = auth_for(&server)
+            .with_retry(two_attempts)
+            .poll_device_code(&device(900, 1))
+            .await
+            .unwrap();
+        assert_eq!(token.refresh_token, "RT3");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
     #[test]
     fn xerr_table_covers_all_six_codes() {
         assert!(matches!(map_xerr(2148916227), AuthError::XstsBanned));
