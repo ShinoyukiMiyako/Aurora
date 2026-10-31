@@ -6,6 +6,8 @@
 // - 骨架停留期间又开始了新一轮加载：骨架继续显示、不重新计时，免得先消失再出现；
 //   最短停留仍从骨架第一次出现的时刻算起。
 // - 同一轮加载持续超过 SLOW_HINT_MS：slow 为真，调用方在加载态下方追加「比平时慢一些」；新一轮加载重新计时。
+// - 加载中换了请求（加载状态一直为真，round 变了）也是新一轮：慢提示清掉、从换轮那一刻重新计时，
+//   调用方接在慢提示后面的超时随之重来；骨架的出现与停留不受影响，玩家一直在等，不因换了请求再多等一个延迟。
 
 import { useLayoutEffect, useState } from "react";
 import { LOADING_DELAY_MS, SLOW_HINT_MS } from "../domain/limits";
@@ -24,20 +26,31 @@ export interface LoadingGate {
 
 interface GateState {
   loading: boolean;
+  round: string | undefined;
   /** 本轮加载（或本轮空闲）开始的时刻。 */
   since: number;
+  /** 慢提示的计时起点：加载开始或加载中换轮的时刻。 */
+  slowFrom: number;
   /** 骨架出现的时刻；骨架没出现或已收起为 null。 */
   shownAt: number | null;
   slow: boolean;
 }
 
-export function useLoadingGate(loading: boolean): LoadingGate {
-  const [gate, setGate] = useState<GateState>(() => ({ loading, since: Date.now(), shownAt: null, slow: false }));
+/** round 标识一轮加载（例如请求参数的序列化）；不传时只按加载状态的变化换轮。 */
+export function useLoadingGate(loading: boolean, round?: string): LoadingGate {
+  const [gate, setGate] = useState<GateState>(() => {
+    const now = Date.now();
+    return { loading, round, since: now, slowFrom: now, shownAt: null, slow: false };
+  });
 
   // 加载状态变化在渲染期同步换轮次：加载开始的这一帧就不能再画旧内容（数据已不在）
   let current = gate;
   if (gate.loading !== loading) {
-    current = { loading, since: Date.now(), shownAt: gate.shownAt, slow: false };
+    const now = Date.now();
+    current = { loading, round, since: now, slowFrom: now, shownAt: gate.shownAt, slow: false };
+    setGate(current);
+  } else if (gate.round !== round) {
+    current = { ...gate, round, slowFrom: Date.now(), slow: false };
     setGate(current);
   }
 
@@ -54,7 +67,10 @@ export function useLoadingGate(loading: boolean): LoadingGate {
         timers.push(setTimeout(show, Math.max(0, LOADING_DELAY_MS - elapsed)));
       }
       if (!current.slow) {
-        timers.push(setTimeout(() => setGate((g) => (g.loading ? { ...g, slow: true } : g)), Math.max(0, SLOW_HINT_MS - elapsed)));
+        // 只标记定时器所属的那一轮：换轮后旧定时器即使赶在清理之前到点，也不能把新一轮说成慢
+        const from = current.slowFrom;
+        const markSlow = () => setGate((g) => (g.loading && g.slowFrom === from ? { ...g, slow: true } : g));
+        timers.push(setTimeout(markSlow, Math.max(0, SLOW_HINT_MS - (Date.now() - from))));
       }
       return () => timers.forEach(clearTimeout);
     }
@@ -67,7 +83,7 @@ export function useLoadingGate(loading: boolean): LoadingGate {
     }
     const timer = setTimeout(hide, remaining);
     return () => clearTimeout(timer);
-  }, [current.loading, current.since, current.shownAt, current.slow]);
+  }, [current.loading, current.since, current.slowFrom, current.shownAt, current.slow]);
 
   if (current.loading) return { view: current.shownAt === null ? "pending" : "skeleton", slow: current.slow };
   return { view: current.shownAt === null ? "content" : "skeleton", slow: false };

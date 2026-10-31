@@ -109,6 +109,66 @@ describe("键盘", () => {
     expect(highlighted()).toBe("删除实例");
   });
 
+  // 原因只挂在指针悬停上时，键盘与读屏用户只看到一项变灰、不知道为什么，也没有别的地方能看到原因
+  it("写明原因的禁用项键盘能高亮到：高亮时提示气泡写出原因并关联到该项，Enter 不执行也不关菜单；没写原因的禁用项照旧跳过", () => {
+    const spy = vi.fn();
+    mount(
+      <MoreMenu
+        items={[
+          { label: "打开实例文件夹", onSelect: () => spy("folder") },
+          { label: "导出整合包", disabled: true, onSelect: () => spy("export") },
+          { label: "重命名", disabled: true, disabledReason: "游戏正在运行，先结束游戏", onSelect: () => spy("rename") },
+          { label: "固定到侧栏", onSelect: () => spy("pin") },
+        ]}
+      />,
+    );
+    openMenu(0);
+    expect(highlighted()).toBe("打开实例文件夹");
+    press("ArrowDown");
+    expect(highlighted()).toBe("重命名");
+    const item = document.getElementById(menu()?.getAttribute("aria-activedescendant") ?? "") as HTMLElement;
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    const tip = document.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(tip?.textContent).toBe("游戏正在运行，先结束游戏");
+    expect(item.getAttribute("aria-describedby")).toBe(tip?.id);
+
+    press("Enter");
+    press(" ");
+    expect(spy).not.toHaveBeenCalled();
+    expect(trigger().getAttribute("aria-expanded")).toBe("true");
+
+    press("ArrowDown");
+    expect(highlighted()).toBe("固定到侧栏");
+    expect(item.hasAttribute("aria-describedby")).toBe(false);
+    press("ArrowUp");
+    expect(highlighted()).toBe("重命名");
+    press("ArrowUp");
+    expect(highlighted()).toBe("打开实例文件夹");
+    press("重");
+    expect(highlighted()).toBe("重命名");
+    press("导");
+    expect(highlighted()).toBe("重命名");
+  });
+
+  it("写明原因的禁用项排在首尾时，键盘打开与 Home / End 也停在它上面", () => {
+    mount(
+      <MoreMenu
+        items={[
+          { label: "重命名", disabled: true, disabledReason: "游戏正在运行，先结束游戏", onSelect: () => undefined },
+          { label: "固定到侧栏", onSelect: () => undefined },
+          { label: "导出整合包", disabled: true, onSelect: () => undefined },
+        ]}
+      />,
+    );
+    openMenu(0);
+    expect(highlighted()).toBe("重命名");
+    press("End");
+    expect(highlighted()).toBe("固定到侧栏");
+    press("Home");
+    expect(highlighted()).toBe("重命名");
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("游戏正在运行，先结束游戏");
+  });
+
   it("Enter 先关闭菜单再执行动作，焦点回到触发器", () => {
     const spy = vi.fn();
     mount(<MoreMenu items={entries(spy)} />);

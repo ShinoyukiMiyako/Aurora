@@ -2,9 +2,10 @@
 // 右键菜单用同一个 Menu（锚点传指针位置），内容与该对象的 MoreMenu 完全一致。
 //
 // 焦点停在菜单容器上，高亮项由 aria-activedescendant 指出：键盘打开时高亮第一项，指针打开时不高亮。
-// ↑↓ 循环移动（跳过分隔线、分组标题与禁用项），Home / End 到首尾，Enter / Space 执行，键入字符按首字跳转；
+// ↑↓ 循环移动（跳过分隔线、分组标题与没写原因的禁用项），Home / End 到首尾，Enter / Space 执行，键入字符按首字跳转；
 // Esc 关闭并把焦点还给触发器（Esc 栈），Tab 关闭后焦点按文档顺序前进。执行顺序：先关闭菜单再执行动作。
-// 禁用原因不显而易见的项（「游戏运行中不能修改」）给出 disabledReason：指针停在该项上时以提示气泡写明原因。
+// 禁用原因不显而易见的项（「游戏运行中不能修改」）给出 disabledReason：指针停在该项上、或键盘高亮到它时，以提示气泡写明原因。
+// 这类项与带原因禁用的按钮一样保持可达：跳过它们的话，键盘与读屏用户只知道少了一项，看不到原因；Enter / Space 与点击对它们无效。
 
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon, type IconName } from "../art/Icon";
@@ -91,8 +92,9 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
   const base = useId();
   const optionId = (i: number) => `${base}-item-${i}`;
   const actionable = items.map((e) => isItem(e) && e.disabled !== true);
-  const first = actionable.indexOf(true);
-  const last = actionable.lastIndexOf(true);
+  const reachable = items.map((e, i) => actionable[i] || (isItem(e) && e.disabledReason !== undefined));
+  const first = reachable.indexOf(true);
+  const last = reachable.lastIndexOf(true);
   const [highlight, setHighlight] = useState(() => (openedBy === "keyboard" ? first : openedBy === "keyboard-last" ? last : -1));
   const pushTypeahead = useTypeahead();
 
@@ -105,7 +107,7 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
     const from = highlight < 0 ? (delta === 1 ? -1 : n) : highlight;
     for (let k = 1; k <= n; k++) {
       const i = (((from + delta * k) % n) + n) % n;
-      if (actionable[i]) {
+      if (reachable[i]) {
         setHighlight(i);
         return;
       }
@@ -146,7 +148,7 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
     }
     if (isTypeaheadKey(event)) {
       const labels = items.map((e) => (isItem(e) ? e.label : ""));
-      const hit = matchTypeahead(labels, actionable.map((a) => !a), pushTypeahead(event.key), highlight);
+      const hit = matchTypeahead(labels, reachable.map((a) => !a), pushTypeahead(event.key), highlight);
       if (hit >= 0) setHighlight(hit);
     }
   };
@@ -197,7 +199,7 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
         );
         if (entry.disabled !== true || entry.disabledReason === undefined) return item;
         return (
-          <Tooltip key={i} content={entry.disabledReason} side="right" wrap>
+          <Tooltip key={i} content={entry.disabledReason} side="right" wrap open={highlight === i}>
             {item}
           </Tooltip>
         );
