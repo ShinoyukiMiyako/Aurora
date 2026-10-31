@@ -1,9 +1,10 @@
 // 首次启动向导：四步交代游戏目录、Java、账户与外观。只有第一步必填，后三步都能跳过，
 // 第二、三步还能「直接开始」用默认值收尾；每步的默认值就是推荐值，一路「下一步」就能得到可用的启动器。
 //
-// 何时落盘：首次启动标记由 completeFirstRun 一次写下，写下后状态层把 firstRun 置为 false、外壳随即卸载向导。
-// 所以它只在收尾时调用；第二到四步的开关与外观在各步里即时写入，不受影响。收尾时后端拒绝了游戏目录，
-// 回到第一步把原因写在输入框下。
+// 何时落盘：离开第一步时就把游戏目录、收下的文件夹与「向导已走过」一次写下（commitFirstRun），之后中途关掉窗口，
+// 下次打开直接进主界面，不会再从头走一遍；向导仍挂着，接着走后面几步。回到第一步改了目录或勾选再离开时重新提交，
+// 没改不重复提交。收尾只把向导卸载（finishFirstRun）。第二到四步的开关与外观在各步里即时写入。
+// 后端拒绝了游戏目录时停在（或回到）第一步，把原因写在输入框下。
 
 import { AnimatePresence, motion, useIsPresent, type Variants } from "framer-motion";
 import { useState, type ReactNode } from "react";
@@ -122,6 +123,9 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const [deselected, setDeselected] = useState<ReadonlySet<string>>(new Set());
   const [dirError, setDirError] = useState<string | null>(null);
   const [finishing, setFinishing] = useState<FinishVia | null>(null);
+  const [committing, setCommitting] = useState(false);
+  // 上次提交给后端的第一步内容；与此刻一样就不再提交
+  const [committed, setCommitted] = useState<string | null>(null);
 
   const settings = state.settings;
   const settingsStatus = state.status.settings;
@@ -146,31 +150,48 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
     return false;
   };
 
-  const next = () => {
-    if (wizard.index === 0 && !dirAccepted()) return;
+  /** 把第一步写下：本地校验不过或后端拒绝时回到第一步、写明原因，返回 false。 */
+  const commitStepOne = async (): Promise<boolean> => {
+    if (!dirAccepted()) {
+      setWizard(backToStart);
+      return false;
+    }
+    const gameDir = currentPath().trim();
+    // 探测结果还没回来时用户也就没见过它们，不替用户收下
+    const extras = discovered.status === "ready" ? pickedExtras(extraCandidates(discovered.data, gameDir), deselected) : [];
+    const key = JSON.stringify([gameDir, extras]);
+    if (committed === key) return true;
+    setCommitting(true);
+    const result = await run(() => actions.commitFirstRun(gameDir, extras), FOOTER_COPY.finishFailed);
+    setCommitting(false);
+    if (result.ok) {
+      setCommitted(key);
+      return true;
+    }
+    if (errorCode(result.error) === INVALID_GAME_DIRECTORY) setDirError(describeError(result.error));
+    setWizard(backToStart);
+    return false;
+  };
+
+  const next = async () => {
+    if (wizard.index === 0 && !(await commitStepOne())) return;
     setWizard((w) => advance(w, "next"));
   };
 
-  const jump = (index: number) => {
-    if (wizard.index === 0 && !dirAccepted()) return;
+  const jump = async (index: number) => {
+    if (wizard.index === 0 && index !== 0 && !(await commitStepOne())) return;
     setWizard((w) => jumpTo(w, index));
   };
 
   const finish = async (via: FinishVia) => {
-    if (!dirAccepted()) {
-      setWizard(backToStart);
+    setFinishing(via);
+    // 通常离开第一步时已经提交过；这里兜住改了第一步又从别处直接收尾的情形
+    if (!(await commitStepOne())) {
+      setFinishing(null);
       return;
     }
-    setFinishing(via);
-    const gameDir = currentPath().trim();
-    // 探测结果还没回来时用户也就没见过它们，不替用户收下
-    const extras = discovered.status === "ready" ? pickedExtras(extraCandidates(discovered.data, gameDir), deselected) : [];
-    const result = await run(() => actions.completeFirstRun(gameDir, extras), FOOTER_COPY.finishFailed);
-    // 成功时 firstRun 变为 false，外壳卸载向导；这里只处理失败
-    if (result.ok) return;
-    setFinishing(null);
-    if (errorCode(result.error) === INVALID_GAME_DIRECTORY) setDirError(describeError(result.error));
-    setWizard(backToStart);
+    // 成功后 firstRun 变为 false，外壳卸载向导
+    await run(() => actions.finishFirstRun(), FOOTER_COPY.finishFailed);
   };
 
   let body: ReactNode;
@@ -215,7 +236,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
             return nextSet;
           })
         }
-        onSubmit={next}
+        onSubmit={() => void next()}
       />
     );
   } else if (id === "java") {
@@ -227,7 +248,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   }
 
   const ready = settings !== null;
-  const busy = finishing !== null;
+  const busy = finishing !== null || committing;
   const last = wizard.index === LAST_STEP;
 
   return (
@@ -236,7 +257,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
       <div className={s.panel} role="group" aria-label={WIZARD_LABEL}>
         <aside className={s.side}>
           <BlossomBranch width={SIDE_WIDTH[tier]} height={BRANCH_HEIGHT} />
-          <StepRail wizard={wizard} onJump={jump} />
+          <StepRail wizard={wizard} onJump={(index) => void jump(index)} />
         </aside>
         <section className={s.main}>
           <div className={s.stage}>
@@ -280,7 +301,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
                   {finishing === "finish" ? FOOTER_COPY.preparing : FOOTER_COPY.finish}
                 </Button>
               ) : (
-                <Button variant="primary" disabled={!ready || busy} onClick={next}>
+                <Button variant="primary" loading={committing} disabled={!ready || (busy && !committing)} onClick={() => void next()}>
                   {FOOTER_COPY.next}
                 </Button>
               )}

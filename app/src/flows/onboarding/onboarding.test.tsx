@@ -2,7 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { resetMocks } from "../../ipc/mock";
+import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
@@ -200,18 +200,40 @@ describe("首次启动向导：推进与收尾", () => {
     expect(document.querySelector("h1")).toBeNull();
   });
 
-  it("后端拒绝游戏目录：回到第一步并把原因写在输入框下", async () => {
+  it("后端拒绝游戏目录：停在第一步并把原因写在输入框下", async () => {
     await mount();
     await typePath("games");
     await click(button("下一步"));
-    await click(button("下一步"));
-    await click(button("下一步"));
-    expect(title()).toBe("挑一个你喜欢的样子");
-    await click(button("开始使用"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual(["games"]);
     expect(title()).toBe("游戏文件放在哪");
     expect(text()).toContain("游戏目录 games 不能用：不是绝对路径");
     expect(launcher.state.firstRun).toBe(true);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("首次设置没有保存");
+  });
+
+  it("离开第一步就写下首次设置：向导接着走，下次启动不再进向导；第一步没改不重复提交，改了再离开重新提交", async () => {
+    await mount();
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual([DEFAULT_DIR]);
+    expect(title()).toBe("看看这台电脑上的 Java");
+    expect(launcher.state.firstRun).toBe(true);
+    // 此刻关掉窗口再打开：后端已记下向导走过
+    expect(await mockInvoke<boolean>("is_first_run")).toBe(false);
+
+    await click(button("上一步"));
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
+
+    await click(button("上一步"));
+    await typePath("D:\\Games\\Petal");
+    await click(railItem("Java"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual([DEFAULT_DIR, "D:\\Games\\Petal"]);
+    expect(title()).toBe("看看这台电脑上的 Java");
+
+    await click(button("直接开始"));
+    expect(callsOf(ipc, "complete_first_run")).toHaveLength(2);
+    expect(launcher.state.firstRun).toBe(false);
+    expect(document.querySelector("h1")).toBeNull();
   });
 
   it("第四步：明暗立即作用于整个窗口并写后端，「开始使用」收尾", async () => {
