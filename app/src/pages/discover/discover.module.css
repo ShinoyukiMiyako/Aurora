@@ -1,0 +1,354 @@
+/* ---- 头图：左侧搜索与热门分类，右下角花枝 ---- */
+.heroCard {
+  overflow: hidden;
+}
+
+.hero {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sk-space-24);
+  min-width: 0;
+}
+
+.heroMain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-14);
+  min-width: 0;
+}
+
+.eyebrowRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-8);
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-accent);
+}
+
+.heroTitle {
+  margin: 0;
+  font-size: var(--sk-fs-hero);
+  line-height: var(--sk-lh-hero);
+  letter-spacing: var(--sk-ls-hero);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+:global(:root[data-sk-tier="compact"]) .heroTitle {
+  font-size: var(--sk-fs-title);
+  line-height: var(--sk-lh-title);
+  letter-spacing: var(--sk-ls-title);
+}
+
+.heroSearch {
+  max-width: 680px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
+.chipsLabel {
+  margin-right: var(--sk-space-4);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+}
+
+/* 花枝只是装饰：不接收指针，悬停摆动的支点在枝条根部（右下角） */
+.heroArt {
+  flex: none;
+  align-self: flex-end;
+  pointer-events: none;
+  transform-origin: 100% 100%;
+}
+
+/* ---- 结果区：吸顶工具条 + 结果 ---- */
+.results {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-gap);
+  min-width: 0;
+}
+
+/* 吸顶判定的哨兵：贴在结果区顶边，不占版面 */
+.stickSentinel {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 1px;
+  pointer-events: none;
+}
+
+/* 吸顶后底色向两侧多铺一点，卡片从下面滚过时不露边 */
+.toolbarWrap {
+  position: sticky;
+  top: 0;
+  z-index: var(--sk-z-main);
+  margin-inline: calc(var(--sk-space-8) * -1);
+  padding: var(--sk-space-8);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-bg);
+}
+
+.toolbarWrap[data-stuck] {
+  border-radius: 0 0 var(--sk-r-lg) var(--sk-r-lg);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow-sm);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-12);
+  min-width: 0;
+}
+
+.toolbarRight {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.fitSelect {
+  min-width: 168px;
+  max-width: 260px;
+}
+
+.filterLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
+.filterPanel {
+  width: 320px;
+}
+
+.filterBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-14);
+  padding: var(--sk-space-14) var(--sk-space-16);
+}
+
+.filterRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sk-space-6);
+}
+
+.filterRowLabel {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.filterFoot {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--sk-space-8);
+  border-top: 1px solid var(--sk-line);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-gap);
+  min-width: 0;
+}
+
+/* ---- 结果说明行 ---- */
+.infoLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-4) var(--sk-space-8);
+  min-height: 30px;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.infoCount {
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.infoPart:not(:first-child)::before {
+  content: "·";
+  margin-right: var(--sk-space-8);
+  color: var(--sk-text-3);
+}
+
+/* ---- 结果网格：2 / 3 / 4 列 ---- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sk-gap);
+}
+
+:global(:root[data-sk-tier="regular"]) .grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+:global(:root[data-sk-tier="wide"]) .grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.band {
+  position: relative;
+  flex: none;
+}
+
+.kindTag {
+  position: absolute;
+  top: var(--sk-space-10);
+  left: var(--sk-space-10);
+  z-index: 2;
+}
+
+.installedTag {
+  position: absolute;
+  top: var(--sk-space-10);
+  right: var(--sk-space-10);
+  z-index: 2;
+}
+
+/* 图标压在色带下沿，一半落进正文 */
+.cardIcon {
+  position: absolute;
+  bottom: calc(var(--sk-space-32) * -1);
+  left: var(--sk-space-14);
+  z-index: 2;
+  display: flex;
+}
+
+.cardBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+  padding: var(--sk-space-40) var(--sk-space-14) var(--sk-space-14);
+}
+
+.cardName {
+  overflow: hidden;
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardAuthor {
+  overflow: hidden;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 摘要固定两行高，同一行的卡片底栏对齐 */
+.cardSummary {
+  display: -webkit-box;
+  min-height: calc(var(--sk-lh-small) * 2);
+  margin: var(--sk-space-4) 0 0;
+  overflow: hidden;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.cardFoot {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+  margin-top: auto;
+  padding-top: var(--sk-space-10);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+}
+
+.metric {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.loaderDots {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  margin-left: auto;
+}
+
+.skeletonBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  padding: var(--sk-space-16) var(--sk-space-14);
+}
+
+/* ---- 列表尾：加载下一页、到底、出错 ---- */
+.listFoot {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sk-space-10);
+  min-height: 1px;
+}
+
+.listNote {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sk-space-8);
+  margin: 0;
+  padding-block: var(--sk-space-8);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-3);
+}
+
+/* 后端给的错误原文：可选中复制，多平台的原因逐行列出 */
+.selectable {
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  user-select: text;
+}
