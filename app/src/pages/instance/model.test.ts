@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import type { Task } from "../../domain/types";
 import type { LaunchView } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
-import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, WorldDto } from "../../state/queries/instance";
+import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { applyPhase, sessionLaunched, startSession } from "../../state/session";
 import { newTask } from "../../state/tasks";
 import { LOGS_COPY } from "./copy";
 import {
+  adjustModSort,
   autoJavaPick,
   crashFixes,
   creationRef,
@@ -21,6 +22,7 @@ import {
   historyItems,
   installStage,
   instanceFolderPath,
+  isNewMod,
   instanceLocks,
   isCrashActive,
   isolationByPolicy,
@@ -40,6 +42,7 @@ import {
   presetFlags,
   RESOLUTION_LIMITS,
   removalRelations,
+  sortRows,
   sortWorlds,
   toggleFlags,
   updateTaskFiles,
@@ -506,6 +509,64 @@ describe("Mod 列表", () => {
     expect(enabledFileName("a.jar.disabled")).toBe("a.jar");
     expect(disabledFileName("a.jar")).toBe("a.jar.disabled");
     expect(disabledFileName("a.jar.disabled")).toBe("a.jar.disabled");
+  });
+});
+
+describe("Mod 安装时间与新增标注", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const NOW = 1_790_000_000_000;
+  const source = (projectId: string, installedAt: number, hold: UpdateHold | null = null, dependencyOf: string | null = null) => ({
+    platform: "modrinth" as const,
+    project_id: projectId,
+    version_id: `${projectId}-v1`,
+    version_number: "1.0",
+    title: null,
+    dependency_of: dependencyOf,
+    installed_at: installedAt,
+    update_hold: hold,
+  });
+  const named = (fileName: string, name: string, over: Partial<InstalledMod> = {}) => mod(fileName, over, { name });
+
+  it("装进实例的时刻：有来源取卷宗里的秒数换成毫秒，本地文件取文件修改时刻", () => {
+    const rows = modRows(
+      [named("a.jar", "Alpha", { source: source("pa", 1_789_000_000), modified_ms: 5 }), named("b.jar", "Beta", { modified_ms: 1_789_500_000_123 })],
+      null,
+    );
+    expect(rows.map((r) => [r.name, r.addedAt])).toEqual([
+      ["Alpha", 1_789_000_000_000],
+      ["Beta", 1_789_500_000_123],
+    ]);
+  });
+
+  it("按安装时间排序：首次点按新到旧，同一时刻按名称，本地文件按修改时刻参与；再点翻转为旧到新", () => {
+    const rows = modRows(
+      [
+        named("c.jar", "Charlie", { source: source("pc", 1_789_000_000) }),
+        named("b.jar", "Bravo", { source: source("pb", 1_789_000_000) }),
+        named("local.jar", "Local", { modified_ms: 1_789_000_000_500 }),
+        named("old.jar", "Oldest", { source: source("po", 1_700_000_000) }),
+        named("a.jar", "Alpha", { source: source("pa", 1_789_000_000) }),
+      ],
+      null,
+    );
+    const first = adjustModSort({ key: "mod", direction: "asc" }, { key: "installed", direction: "asc" });
+    expect(first).toEqual({ key: "installed", direction: "desc" });
+    expect(sortRows(rows, first).map((r) => r.name)).toEqual(["Local", "Alpha", "Bravo", "Charlie", "Oldest"]);
+    // 再点同一列由表格翻转方向，adjustModSort 不再干预；同一时刻仍按名称升序
+    const flipped = adjustModSort(first, { key: "installed", direction: "asc" });
+    expect(flipped).toEqual({ key: "installed", direction: "asc" });
+    expect(sortRows(rows, flipped).map((r) => r.name)).toEqual(["Oldest", "Alpha", "Bravo", "Charlie", "Local"]);
+    // 别的列照表格给的方向
+    expect(adjustModSort(first, { key: "mod", direction: "asc" })).toEqual({ key: "mod", direction: "asc" });
+    expect(sortRows(rows, { key: "mod", direction: "desc" }).map((r) => r.name)).toEqual(["Oldest", "Local", "Charlie", "Bravo", "Alpha"]);
+  });
+
+  it("新增：不满 7 天为真，恰好 7 天为假，时刻在将来按刚装上算", () => {
+    expect(isNewMod({ addedAt: NOW - 7 * DAY + 1 }, NOW)).toBe(true);
+    expect(isNewMod({ addedAt: NOW - 7 * DAY }, NOW)).toBe(false);
+    expect(isNewMod({ addedAt: NOW - 30 * DAY }, NOW)).toBe(false);
+    expect(isNewMod({ addedAt: NOW }, NOW)).toBe(true);
+    expect(isNewMod({ addedAt: NOW + DAY }, NOW)).toBe(true);
   });
 });
 

@@ -228,6 +228,9 @@ export const MODS_COPY = {
   removeDependents: (names: readonly string[]) => `${names.join("、")} 把它作为前置，移除后可能无法加载。`,
   removeBroughtIn: (names: readonly string[]) => `它带进来的前置 ${names.join("、")} 会保留，如果不再需要可以单独移除。`,
   removeConfirm: "移除",
+
+  colInstalled: "安装时间",
+  newTag: "新增",
 } as const;
 
 export const SOURCE_LABEL = { modrinth: "Modrinth", curseforge: "CurseForge" } as const;

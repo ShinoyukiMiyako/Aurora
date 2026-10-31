@@ -5,10 +5,11 @@ import { useEffect, useRef, useState } from "react";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
+import { formatDate } from "../../domain/format";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
-import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useInstanceMods, type UpdateCandidate } from "../../state/queries/instance";
 import { invalidate, type ResourceResult } from "../../state/resource";
 import { progressTrack } from "../../state/tasks";
@@ -29,7 +30,22 @@ import { Toggle } from "../../ui/Toggle";
 import { Tooltip } from "../../ui/Tooltip";
 import { MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
-import { disabledFileName, enabledFileName, filterMods, MOD_UPDATE_COMMANDS, modCounts, modRows, modTotals, removalRelations, updateTaskFiles, type ModFilter, type ModRow } from "./model";
+import {
+  adjustModSort,
+  disabledFileName,
+  enabledFileName,
+  filterMods,
+  isNewMod,
+  MOD_UPDATE_COMMANDS,
+  modCounts,
+  modRows,
+  modTotals,
+  removalRelations,
+  sortRows,
+  updateTaskFiles,
+  type ModFilter,
+  type ModRow,
+} from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -42,6 +58,8 @@ export interface ModsTabProps {
 
 const SKELETON_ROWS = 6;
 const NETWORK_FAILED = "network_failed";
+/** 「新增」标签按小时刷新就够：边界在第 7 天，差一小时没人在意。 */
+const NEW_TAG_TICK_MS = 60 * 60 * 1000;
 
 export function ModsTab({ inst, queryId, ops, updates }: ModsTabProps) {
   if (inst.loader === "vanilla") return <VanillaMods inst={inst} />;
@@ -72,6 +90,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const { tier, confirm, registerFind } = useShell();
   const { go } = useNav();
   const run = useRunner();
+  const now = useNow(NEW_TAG_TICK_MS);
   const mods = useInstanceMods(queryId);
   const load = useModuleView(mods);
   const [query, setQuery] = useState("");
@@ -193,7 +212,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
   const checkLoading = checking || updates.status === "loading" || updates.refreshing;
   const compact = tier === "compact";
-  const columns = modColumns({ compact, lock, isUpdating, toggle, update, remove });
+  const columns = modColumns({ compact, lock, now, isUpdating, toggle, update, remove });
 
   return (
     <div className={styles.stack}>
@@ -301,7 +320,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
             rowKey={(r) => r.fileName}
             density={compact ? "compact" : "regular"}
             sort={sort}
-            onSortChange={setSort}
+            onSortChange={(next) => setSort((prev) => adjustModSort(prev, next))}
             isInactive={(r) => !r.enabled}
             className={styles.modTable}
             empty={
@@ -324,19 +343,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   );
 }
 
-function sortRows(rows: ModRow[], sort: TableSort): ModRow[] {
-  const dir = sort.direction === "asc" ? 1 : -1;
-  const key = (r: ModRow): string => {
-    if (sort.key === "source") return r.platform === null ? "~" : r.platform;
-    if (sort.key === "enabled") return r.enabled ? "0" : "1";
-    return r.name;
-  };
-  return [...rows].sort((a, b) => dir * key(a).localeCompare(key(b), "zh-CN") || a.name.localeCompare(b.name, "zh-CN"));
-}
-
 interface ColumnDeps {
   compact: boolean;
   lock: string | undefined;
+  now: number;
   isUpdating(r: ModRow): boolean;
   toggle(r: ModRow): void;
   update(r: ModRow): void;
@@ -357,7 +367,7 @@ function SourceTag({ row }: { row: ModRow }) {
   );
 }
 
-function modColumns({ compact, lock, isUpdating, toggle, update, remove }: ColumnDeps): TableColumn<ModRow>[] {
+function modColumns({ compact, lock, now, isUpdating, toggle, update, remove }: ColumnDeps): TableColumn<ModRow>[] {
   return [
     {
       key: "mod",
@@ -378,6 +388,11 @@ function modColumns({ compact, lock, isUpdating, toggle, update, remove }: Colum
               {compact && r.update !== null && (
                 <Tag size="sm" tone="accent" icon="sparkle">
                   {MODS_COPY.updateTo(r.update.latest.version_number)}
+                </Tag>
+              )}
+              {isNewMod(r, now) && (
+                <Tag size="sm" tone="info">
+                  {MODS_COPY.newTag}
                 </Tag>
               )}
               {r.dependencyOf !== null && (
@@ -408,6 +423,14 @@ function modColumns({ compact, lock, isUpdating, toggle, update, remove }: Colum
       ),
     },
     { key: "source", header: MODS_COPY.colSource, width: 120, tiers: ["regular", "wide"], sortable: true, cell: (r) => <SourceTag row={r} /> },
+    {
+      key: "installed",
+      header: MODS_COPY.colInstalled,
+      width: 104,
+      tiers: ["regular", "wide"],
+      sortable: true,
+      cell: (r) => <span className={styles.modInstalled}>{formatDate(r.addedAt)}</span>,
+    },
     { key: "author", header: MODS_COPY.colAuthor, width: 140, tiers: ["wide"], cell: (r) => (r.author === null ? "" : r.author) },
     {
       key: "enabled",

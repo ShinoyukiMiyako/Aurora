@@ -8,6 +8,7 @@ import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
 import { isActiveTask } from "../../state/tasks";
+import type { TableSort } from "../../ui/Table";
 
 // ---------------------------------------------------------------- 上次崩溃
 
@@ -432,6 +433,8 @@ export interface ModRow {
   update: UpdateCandidate | null;
   size: number;
   modId: string | null;
+  /** 装进实例的时刻（毫秒）：有来源记录取卷宗里的原值，本地文件取文件修改时刻。 */
+  addedAt: number;
 }
 
 export function modName(mod: InstalledMod): string {
@@ -467,6 +470,7 @@ export function modRows(mods: readonly InstalledMod[], updates: readonly UpdateC
       update: update === undefined ? null : update,
       size: m.size,
       modId: meta === null ? null : meta.mod_id,
+      addedAt: source === null ? m.modified_ms : source.installed_at * 1000,
     };
   });
   return rows.sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName));
@@ -507,6 +511,32 @@ export function removalRelations(row: ModRow, rows: readonly ModRow[]): { brough
   const broughtIn = row.projectId === null ? [] : rows.filter((r) => r.dependencyOfProject === row.projectId && r.fileName !== row.fileName).map((r) => r.name);
   const dependents = row.dependencyOf === null ? [] : [row.dependencyOf];
   return { broughtIn, dependents };
+}
+
+const NEW_MOD_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 装进实例不满 7 天算新增；恰好满 7 天起不再算。时刻在将来（本机时钟被往回调过）也按刚装上算。 */
+export function isNewMod(row: Pick<ModRow, "addedAt">, now: number): boolean {
+  return now - row.addedAt < NEW_MOD_MS;
+}
+
+/** 表头点到「安装时间」时第一次按新到旧：想看的是最近装了什么；再点由表格照常翻转。 */
+export function adjustModSort(previous: TableSort, next: TableSort): TableSort {
+  if (next.key === "installed" && previous.key !== "installed") return { key: "installed", direction: "desc" };
+  return next;
+}
+
+/** 列表排序：名称、来源、启用状态按文本比，同值按名称；安装时间按时刻比，同一时刻按名称（再按文件名）升序。 */
+export function sortRows(rows: readonly ModRow[], sort: TableSort): ModRow[] {
+  const dir = sort.direction === "asc" ? 1 : -1;
+  const byName = (a: ModRow, b: ModRow) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName);
+  if (sort.key === "installed") return [...rows].sort((a, b) => dir * (a.addedAt - b.addedAt) || byName(a, b));
+  const key = (r: ModRow): string => {
+    if (sort.key === "source") return r.platform === null ? "~" : r.platform;
+    if (sort.key === "enabled") return r.enabled ? "0" : "1";
+    return r.name;
+  };
+  return [...rows].sort((a, b) => dir * key(a).localeCompare(key(b), "zh-CN") || a.name.localeCompare(b.name, "zh-CN"));
 }
 
 // ---------------------------------------------------------------- Mod 速览

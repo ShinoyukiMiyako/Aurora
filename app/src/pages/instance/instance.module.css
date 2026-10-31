@@ -516,6 +516,14 @@
   min-width: 0;
 }
 
+.modInstalled {
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 /* ---------------------------------------------------------------- 设置 */
 
 .settingsGrid {
