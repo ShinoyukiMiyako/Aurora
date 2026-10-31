@@ -5,6 +5,7 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { INSTANCE_NAME_ERROR } from "../../copy/flows";
 // 版本清单、加载器版本、Java 这几条查询落到假后端。静态引入让假后端在首个查询之前就加载完：
 // 几条查询同时触发桥里的动态引入时，后到的会拿到还没执行完的模块。
+import type { JavaInstallationDto } from "../../ipc/java";
 import { resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -244,6 +245,41 @@ describe("新建实例：完整走一遍", () => {
     expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.21.1", loader: null, loaderVersion: null, targetName: "原版生存" }]);
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(nav.route).toEqual({ page: "home" });
+  });
+
+  const java21 = (vendor: string, security: number, missing: string[]): JavaInstallationDto => ({
+    path: `C:/Java/${vendor}-21.0.${security}/bin/java.exe`,
+    version: { major: 21, minor: 0, security, build: 0, raw: `21.0.${security}` },
+    is_64bit: true,
+    vendor,
+    source: "registry",
+    missing_files: missing,
+  });
+
+  async function confirmJavaText(): Promise<string> {
+    await mount();
+    await fillName("原版生存");
+    await next();
+    await next();
+    await next();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+    const text = dialog().textContent;
+    if (text === null) throw new Error("确认步没有文字");
+    return text;
+  }
+
+  it("确认步的 Java 跳过缺运行时文件的：同主版本另有完整的就写完整的那个，哪怕版本更低", async () => {
+    ipc.overrides.set("detect_java", () => [java21("Eclipse Adoptium", 9, ["release", "lib/modules"]), java21("Microsoft", 3, [])]);
+    const text = await confirmJavaText();
+    expect(text).toContain("Java 21 · 已安装（Microsoft）");
+    expect(text).not.toContain("Eclipse Adoptium");
+  });
+
+  it("确认步的 Java：同主版本只有不完整的，按要下载写", async () => {
+    ipc.overrides.set("detect_java", () => [java21("Eclipse Adoptium", 9, ["lib/modules"])]);
+    const text = await confirmJavaText();
+    expect(text).toContain("需要 Java 21，会自动下载");
+    expect(text).not.toContain("已安装");
   });
 
   it("版本清单没给全下载体积时确认步不写预计下载", async () => {

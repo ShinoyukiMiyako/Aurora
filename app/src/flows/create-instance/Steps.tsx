@@ -9,6 +9,7 @@ import { LoaderTile } from "../../art/illustrations/FeatureTile";
 import { coverLabel, LOADER_NAME } from "../../copy/flows";
 import type { Settings } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
+import { bestLocalRuntime } from "../../pages/instance/model";
 import { describeError } from "../../state/errors";
 import { useJavaRuntimes, type LoaderVersionDto, type VersionRequirementsDto } from "../../state/queries/catalog";
 import type { ResourceResult } from "../../state/resource";
@@ -552,7 +553,7 @@ function JavaValue({ requirements, autoDownload }: { requirements: ResourceResul
   if (runtimes.status === "error") return <>{c.javaUnknown(describeError(runtimes.error))}</>;
   if (requirements.status === "loading" || runtimes.status === "loading") return <Skeleton shape="text" width={180} />;
   const major = requirements.data.java_major;
-  const installed = runtimes.data.find((j) => j.version.major === major);
-  if (installed !== undefined) return <>{c.javaInstalled(major, installed.vendor)}</>;
+  const installed = bestLocalRuntime(runtimes.data, major);
+  if (installed !== null) return <>{c.javaInstalled(major, installed.vendor)}</>;
   return <>{autoDownload ? c.javaAuto(major) : c.javaManual(major)}</>;
 }
