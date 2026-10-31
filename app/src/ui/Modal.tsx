@@ -63,11 +63,15 @@ export function Modal(props: ModalProps) {
   if (title === undefined && ariaLabel === undefined) throw new Error("Modal 没有标题时必须传 ariaLabel");
   const root = useOverlayRoot();
   const generation = useOpenGeneration(open);
+  // 父级 AnimatePresence 正在退场时，内部 AnimatePresence 已把弹窗算作退场中；此时若照常传入同 key 的弹窗，
+  // 退场期间每次重渲染都会把「退场中的旧弹窗」与「仍在场的新弹窗」并排渲染成两个同 key 的子元素。
+  // 父级退场即视同关闭，只留退场中的那一份。没有父级 AnimatePresence 时 useIsPresent 恒为 true。
+  const parentPresent = useIsPresent();
   useEscapeLayer(open, onClose, { kind: "modal", dismissible });
   return (
     <>
       <FocusReturnPoint active={open} />
-      {root && createPortal(<AnimatePresence propagate>{open && <ModalFrame key={generation} {...props} />}</AnimatePresence>, root)}
+      {root && createPortal(<AnimatePresence propagate>{open && parentPresent && <ModalFrame key={generation} {...props} />}</AnimatePresence>, root)}
     </>
   );
 }

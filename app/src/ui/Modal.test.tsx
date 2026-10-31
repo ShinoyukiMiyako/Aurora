@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { AnimatePresence } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
@@ -290,5 +291,37 @@ describe("ConfirmDialog", () => {
     expect(() => mount(<ConfirmDialog open title="删除账户 Alex？" confirmLabel="确定" tone="danger" onConfirm={() => undefined} onClose={() => undefined} />)).toThrow(
       "确认键要写出动作",
     );
+  });
+});
+
+describe("Modal 随父级退场", () => {
+  it("父级 AnimatePresence 退场期间弹窗还在重渲染：始终只有一份弹窗、不报重复 key，退场播完后卸载", async () => {
+    const error = vi.spyOn(console, "error");
+    const handles: { tick?: () => void; hide?: () => void } = {};
+    function Flow() {
+      const [renders, setRenders] = useState(0);
+      handles.tick = () => setRenders((n) => n + 1);
+      return (
+        <Modal open title={`新建实例 ${renders}`} onClose={() => undefined}>
+          正文
+        </Modal>
+      );
+    }
+    function Host() {
+      const [shown, setShown] = useState(true);
+      handles.hide = () => setShown(false);
+      return <AnimatePresence>{shown && <Flow key="flow" />}</AnimatePresence>;
+    }
+    mount(<Host />);
+    expect(dialogs()).toHaveLength(1);
+
+    act(() => handles.hide?.());
+    // 退场期间流程自己的状态还在变（查询返回、计时器到点），弹窗跟着重渲染
+    act(() => handles.tick?.());
+    act(() => handles.tick?.());
+    expect(dialogs()).toHaveLength(1);
+    expect(error).not.toHaveBeenCalled();
+
+    await vi.waitFor(() => expect(dialogs()).toHaveLength(0), { timeout: 3000, interval: 20 });
   });
 });
