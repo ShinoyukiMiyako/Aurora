@@ -614,6 +614,8 @@ async fn mod_file_keys(mods_dir: &Path) -> Result<HashSet<String>> {
 ///
 /// 没有卷宗，只能拿平台给的文件名比对：同名且大小对得上才算（同名的别家文件、解压开的同名目录都不是它）。
 /// 几个版本共用同一个文件名与大小时再算 sha1 分辨，都对不上就不认。玩家改过名的文件认不出来，按没装处理。
+/// 换版本时旧文件没删、几个版本同时在目录里的，认 `known` 里排在最前（发布最新）的那个：目录项的先后
+/// 随文件系统而变，拿它决定会把装着最新版的实例报成旧版。
 async fn find_pack_in<'v>(
     dir: &Path,
     known: &'v [ModVersionInfo],
@@ -630,11 +632,14 @@ async fn find_pack_in<'v>(
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(io(source)),
     };
+    let mut newest: Option<usize> = None;
     while let Some(entry) = entries.next_entry().await.map_err(io)? {
         let name = entry.file_name();
         // 平台给的文件名都是 UTF-8，转不过来的一定不是它。
         let Some(name) = name.to_str() else { continue };
-        let named: Vec<&ModVersionInfo> = known.iter().filter(|v| v.file_name == name).collect();
+        let named: Vec<usize> = (0..known.len())
+            .filter(|&i| known[i].file_name == name)
+            .collect();
         if named.is_empty() {
             continue;
         }
@@ -642,27 +647,28 @@ async fn find_pack_in<'v>(
         if !meta.is_file() {
             continue;
         }
-        let sized: Vec<&ModVersionInfo> = named
+        let sized: Vec<usize> = named
             .into_iter()
-            .filter(|v| v.file_size.is_none_or(|size| size == meta.len()))
+            .filter(|&i| known[i].file_size.is_none_or(|size| size == meta.len()))
             .collect();
-        match sized.as_slice() {
-            [] => {}
-            [only] => return Ok(Some(only)),
+        let hit = match sized.as_slice() {
+            [] => None,
+            [only] => Some(*only),
             several => {
                 let actual = aurora_base::fs::sha1_hex(entry.path()).await?;
-                let hit = several.iter().find(|v| {
-                    v.sha1
+                several.iter().copied().find(|&i| {
+                    known[i]
+                        .sha1
                         .as_deref()
                         .is_some_and(|sha1| sha1.eq_ignore_ascii_case(&actual))
-                });
-                if let Some(hit) = hit {
-                    return Ok(Some(hit));
-                }
+                })
             }
+        };
+        if let Some(hit) = hit {
+            newest = Some(newest.map_or(hit, |best| best.min(hit)));
         }
     }
-    Ok(None)
+    Ok(newest.map(|i| &known[i]))
 }
 
 /// 数据包按存档生效：任一存档的 `datapacks/` 里有它即算已装，结果带上是哪个存档。几个存档都有时
@@ -1846,6 +1852,46 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    /// 同一工程的几个版本同时留在目录里（换版本时旧文件没删）：认最新发布的那份，与目录项的先后无关；
+    /// 否则装着最新版也会被报成旧版，前端据此给出一个点了也没用的「可更新」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn several_installed_versions_resolve_to_the_newest_published() {
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let count = rng.usize(2..8);
+        // known 按发布时间倒序：下标 0 最新。文件名的字典序与发布先后相反，目录按名字列出时旧版在前。
+        let known: Vec<ModVersionInfo> = (0..count)
+            .map(|i| ModVersionInfo {
+                version_id: format!("v{i}"),
+                file_name: format!("pack-{}.zip", count - i),
+                file_size: Some(u64::try_from(i).unwrap() + 1),
+                ..version(&[], &["1.20.1"])
+            })
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("resourcepacks");
+        for (i, info) in known.iter().enumerate() {
+            put_file(dir.join(&info.file_name), &vec![b'p'; i + 1]).await;
+        }
+        let hit = find_pack_in(&dir, &known).await.unwrap();
+        assert_eq!(
+            hit.map(|v| v.version_id.as_str()),
+            Some("v0"),
+            "seed {seed}"
+        );
+
+        // 最新版不在：认留下的里面最新的那个。
+        tokio::fs::remove_file(dir.join(&known[0].file_name))
+            .await
+            .unwrap();
+        let hit = find_pack_in(&dir, &known).await.unwrap();
+        assert_eq!(
+            hit.map(|v| v.version_id.as_str()),
+            Some("v1"),
+            "seed {seed}"
         );
     }
 
