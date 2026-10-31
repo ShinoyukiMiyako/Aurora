@@ -71,6 +71,34 @@ export function findDuplicate(tasks: readonly Task[], spec: TaskSpec): Task | un
   return tasks.find((t) => isActiveTask(t) && taskDedupeKey(t.spec) === key);
 }
 
+/**
+ * 一个实例（不分大小写，与后端的锁键一致）上活动中的 Mod 更新任务正在换的文件名，单个与组合任务都算；组合任务跑完之前
+ * 它入队时的几项都在内。去重键分单个与组合两种、互不相撞，所以「全部更新」要靠这份名单剔掉已经在换的文件，
+ * 否则两个任务会同时换同一个文件和卷宗。
+ */
+export function modFilesBeingUpdated(tasks: readonly Task[], instanceId: string): Set<string> {
+  const key = instanceId.toLowerCase();
+  const files = new Set<string>();
+  const fileNameOf = (command: string, value: unknown): string => {
+    if (typeof value !== "string") throw new Error(`${command} 任务的 fileName 不是字符串：${String(value)}`);
+    return value;
+  };
+  for (const task of tasks) {
+    if (!isActiveTask(task) || task.instanceId === null || task.instanceId.toLowerCase() !== key) continue;
+    const { command, args } = task.spec;
+    if (command === "update_mod") {
+      files.add(fileNameOf(command, args.fileName));
+    } else if (command === "update_mods") {
+      if (!Array.isArray(args.items)) throw new Error("update_mods 任务缺少 items");
+      for (const item of args.items as unknown[]) {
+        if (typeof item !== "object" || item === null || !("fileName" in item)) throw new Error("update_mods 任务的一项缺少 fileName");
+        files.add(fileNameOf(command, item.fileName));
+      }
+    }
+  }
+  return files;
+}
+
 export function newTask(draft: TaskDraft, now: number): Task {
   return {
     ...draft,

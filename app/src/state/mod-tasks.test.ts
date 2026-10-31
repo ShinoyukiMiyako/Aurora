@@ -234,6 +234,48 @@ describe("全部更新", () => {
 
   const successes = () => store.getState().toasts.filter((t) => t.tone === "success").map((t) => [t.title, t.body]);
 
+  it("单个 Mod 的更新还在跑时，全部更新跳过它，只把其余的合成一个任务", async () => {
+    const sodium = deferred<unknown>();
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => (args.fileName === "sodium-s1.jar" ? sodium.promise : { file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    await store.actions.updateMod("生存", "sodium-s1.jar");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.spec.command, t.status])).toEqual([["update_mod", "running"]]);
+
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [, all] = store.getState().tasks;
+    expect(all).toMatchObject({ title: "更新 2 个 Mod", spec: { command: "update_mods" }, status: "done" });
+    expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["sodium-s1.jar", "lithium-l1.jar", "iris-i1.jar"]);
+    sodium.resolve({ file_name: "sodium-s1.jar", path: "", platform: "modrinth" });
+    await settle();
+  });
+
+  it("组合更新还在跑时又多出一个可更新：只把多出的那个单独排上；都在更新了就提示已在队列里", async () => {
+    const pending = deferred<unknown>();
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2")]);
+    ipc.overrides.set("update_mod", () => pending.promise);
+    await store.actions.updateAllMods("生存");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.spec.command, t.status])).toEqual([["update_mods", "running"]]);
+
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    await store.actions.updateAllMods("生存");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.title, t.spec.command])).toEqual([
+      ["更新 2 个 Mod", "update_mods"],
+      ["更新 iris", "update_mod"],
+    ]);
+    expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["sodium-s1.jar", "iris-i1.jar"]);
+
+    await store.actions.updateAllMods("生存");
+    await settle();
+    expect(store.getState().tasks).toHaveLength(2);
+    expect(store.getState().toasts.filter((t) => t.tone === "info").map((t) => t.title)).toEqual(["更新 3 个 Mod 已在下载队列里"]);
+    pending.resolve({ file_name: "sodium-s1.jar", path: "", platform: "modrinth" });
+    await settle();
+  });
+
   it("重试时上次已经全部换好：这次一个都没更新，提示都已是最新，不报「已更新 3 个」", async () => {
     const id = await failOnIris();
     ipc.overrides.set("check_updates", () => []);

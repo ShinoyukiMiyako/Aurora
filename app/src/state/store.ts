@@ -107,6 +107,7 @@ import {
   markDone,
   markFailed,
   markRunning,
+  modFilesBeingUpdated,
   newTask,
   restoreJournal,
   retryTask,
@@ -2281,9 +2282,18 @@ export class LauncherStore {
       },
       async updateAllMods(instanceId) {
         store.assertModsEditable(instanceId);
-        const candidates = await modsIpc.checkUpdates(instanceId);
-        if (candidates.length === 0) {
+        const found = await modsIpc.checkUpdates(instanceId);
+        if (found.length === 0) {
           store.pushToast("info", TOAST_COPY.allModsLatest);
+          return;
+        }
+        // 已有更新任务在换的文件这次不排：检查更新照样会报它们，两个任务同时换同一个文件和卷宗，后跑的那个按旧文件名再换一遍
+        const busy = modFilesBeingUpdated(store.raw.tasks, instanceId);
+        const candidates = found.filter((c) => !busy.has(c.file_name));
+        if (candidates.length === 0) {
+          const only = found.length === 1 ? found[0] : null;
+          const subject = only === null ? TASK_TEXT.updateAllTitle(found.length) : only.title === null ? only.file_name : only.title;
+          store.pushToast("info", TASK_TOAST.duplicate(subject).title);
           return;
         }
         // 只有一个可更新时就是单个 Mod 的更新，标题与通知写 Mod 名；多个合成一个任务、一条通知

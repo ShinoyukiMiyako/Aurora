@@ -12,6 +12,7 @@ import {
   compositeProgress,
   completeCompositeStep,
   findDuplicate,
+  modFilesBeingUpdated,
   newTask,
   progressTrack,
   queuePosition,
@@ -305,6 +306,21 @@ describe("下载队列：纯函数", () => {
   it("重试清掉上一次尝试的开始时刻与累计字节", () => {
     const failed = task("t1", { status: "failed", startedAt: T0 + 5, doneBytes: 4096, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
     expect(retryTask([failed], "t1")[0]).toMatchObject({ status: "queued", startedAt: null, doneBytes: 0 });
+  });
+
+  it("正在更新的 Mod 文件：单个与组合任务都算，实例 id 不分大小写，已结束的与别的实例不算", () => {
+    const update = (id: string, instanceId: string, args: Record<string, unknown>, command = "update_mod", status: Task["status"] = "running") =>
+      task(id, { kind: "mod", instanceId, status, spec: { command, args: { versionId: instanceId, ...args } } });
+    const tasks = [
+      update("a", "Survival", { fileName: "sodium-1.jar" }),
+      update("b", "survival", { items: [{ fileName: "lithium-1.jar" }, { fileName: "iris-1.jar" }] }, "update_mods", "queued"),
+      update("c", "SURVIVAL", { fileName: "old-1.jar" }, "update_mod", "done"),
+      update("d", "Creative", { fileName: "jei-1.jar" }),
+      task("e", { kind: "mod", instanceId: "Survival", status: "running", spec: { command: "install_mod", args: { versionId: "Survival" } } }),
+    ];
+    expect([...modFilesBeingUpdated(tasks, "SURVIVAL")].sort()).toEqual(["iris-1.jar", "lithium-1.jar", "sodium-1.jar"]);
+    expect([...modFilesBeingUpdated(tasks, "Nether")]).toEqual([]);
+    expect(() => modFilesBeingUpdated([update("f", "Survival", { items: [{ title: "x" }] }, "update_mods")], "Survival")).toThrow("update_mods 任务的一项缺少 fileName");
   });
 });
 
