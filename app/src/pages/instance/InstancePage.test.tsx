@@ -2,7 +2,7 @@
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import type { CrashReportDto } from "../../ipc/diagnostics";
+import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import type { HistoryEvent } from "../../ipc/history";
 import type { InstanceContentDto, InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
@@ -259,6 +259,7 @@ afterEach(() => {
   view = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("实例详情：头图与标签", () => {
@@ -496,6 +497,37 @@ describe("实例详情：日志与历史", () => {
     await open("logs");
     expect(text()).toContain("还没有日志");
     expect(text()).toContain("还没有启动记录");
+  });
+
+  it("最近一次启动的日志：无关的状态变化不重建日志行，计数照常", async () => {
+    const at = NOW - DAY;
+    const lines: LaunchLogDto["lines"] = Array.from({ length: 40 }, (_, i) => ({
+      at: at + i * 1000,
+      level: i === 0 ? "error" : i % 4 === 0 ? "warn" : "info",
+      source: i % 2 === 0 ? "game" : "launcher",
+      text: `第 ${i} 行`,
+    }));
+    ipc.overrides.set("last_launch_log", (): LaunchLogDto => ({ path: "latest.log", started_at: at, lines, omitted: 0, ended: { at: at + 60_000, outcome: "exited" } }));
+    // jsdom 不做布局：给日志区一个视口高，虚拟列表才会画出行
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
+      return this.getAttribute("role") === "log" ? 220 : 0;
+    });
+    await open("logs");
+    const row = () => document.querySelector('[role="log"] [data-index="0"]');
+    const first = row();
+    expect(first?.textContent).toContain("第 0 行");
+    expect(byRole("radio", /^警告及以上/).textContent).toBe("警告及以上10");
+    act(() => {
+      launcher.actions.toast("info", "无关的通知");
+    });
+    await flush();
+    expect(row()).toBe(first);
+    expect(byRole("radio", /^错误/).textContent).toBe("错误1");
+    // 唯一的错误行来自游戏：只看启动器的错误时一行不剩，说明写在日志区里
+    click(byRole("radio", "启动器"));
+    expect(byRole("radio", /^错误/).textContent).toBe("错误0");
+    click(byRole("radio", /^错误/));
+    expect(document.querySelector('[role="log"]')?.textContent).toContain("当前筛选下没有日志行");
   });
 });
 
