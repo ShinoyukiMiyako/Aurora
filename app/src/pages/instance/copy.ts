@@ -268,6 +268,8 @@ export const SETTINGS_COPY = {
   fitHigherBody: "新版 Java 多数情况下能跑，但旧版 Forge 与部分 Mod 会直接报错。",
   fitLower: (major: number) => `低于要求的 Java ${major}，游戏无法启动`,
   fitLowerBody: "换成自动选择，或装一个对应版本的 Java。",
+  fitIncomplete: (files: readonly string[]) => `这个 Java 缺少 ${files.join("、")}，可能没装完整`,
+  fitIncompleteBody: "启动时照常用它；启动失败的话换一个 Java，或把它重装一遍。",
   fitDownload: (major: number) => `启动时会自动下载 Java ${major}`,
   fitDownloadBody: `${APP_NAME}会把它放进托管目录，不影响系统里的 Java。`,
   fitNoDownload: (major: number) => `本机没有 Java ${major}，自动下载已关闭`,

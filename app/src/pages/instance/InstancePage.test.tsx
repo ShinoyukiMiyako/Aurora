@@ -1247,7 +1247,7 @@ describe("实例详情：设置", () => {
 
   it("Java 下拉：实例已经固定成不完整的 Java 时照常显示为当前值", async () => {
     settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
-    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["lib/modules"] })]);
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] })]);
     await open("settings");
     expect(textOf(byRole("combobox", "Java 运行时"))).toBe("Java 21 · Microsoft");
     click(byRole("combobox", "Java 运行时"));
@@ -1255,6 +1255,26 @@ describe("实例详情：设置", () => {
     const current = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => textOf(o).startsWith("Java 21"));
     expect(current?.getAttribute("aria-disabled")).toBeNull();
     expect(current?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("固定成不完整的 Java：说明块提示缺哪些文件而不是「匹配」，「改用自动」把实例改回自动选择", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] })]);
+    await open("settings");
+    expect(text()).toContain("这个 Java 缺少 release、lib/modules，可能没装完整");
+    expect(text()).toContain("启动时照常用它；启动失败的话换一个 Java，或把它重装一遍。");
+    expect(text()).not.toContain("与要求的 Java 21 匹配");
+    click(button("改用自动"));
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings").map((a) => (a.settings as InstanceSettingsDto).java)).toEqual(["auto"]);
+  });
+
+  it("固定成版本过低又不完整的 Java：先报版本过低", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-17/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-17/bin/java.exe", 17, { missing_files: ["release"] })]);
+    await open("settings");
+    expect(text()).toContain("低于要求的 Java 21，游戏无法启动");
+    expect(text()).not.toContain("可能没装完整");
   });
 
   it("分代 ZGC 按实际生效的 Java：自动挑到 21 时带 ZGenerational", async () => {
