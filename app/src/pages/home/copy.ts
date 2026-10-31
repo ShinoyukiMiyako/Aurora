@@ -145,7 +145,8 @@ export const HOME_COPY = {
   forgetJoinInstance: "不再记住实例",
   joinEmptyTitle: "没有能加入服务器的实例",
   joinEmptyBody: "新建一个 1.6 以后的实例再来加入。",
-  saveJoinError: "无法保存服务器设置",
+  /** 与外层统一错误标题的「……没有保存」同一句式，和同卡固定失败的「服务器列表没有保存」并列。 */
+  saveJoinError: "加入用的实例没有保存",
 
   // ---- 共用
   worldsError: "存档列表读不出来",

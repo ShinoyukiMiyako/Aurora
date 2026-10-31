@@ -868,7 +868,7 @@ describe("主页：固定服务器的「加入」", () => {
     expect(callsOf(ipc, "launch_game").map((a) => [a.versionId, a.quickPlay])).toEqual([["创造", SERVER]]);
   });
 
-  it("保存选择失败：报「无法保存服务器设置」加原因，并且不启动", async () => {
+  it("保存选择失败：报「加入用的实例没有保存」加原因，并且不启动", async () => {
     ipc.overrides.set("set_pinned_server_instance", () => {
       throw new IpcError("config_write_failed", "配置写入失败");
     });
@@ -884,7 +884,7 @@ describe("主页：固定服务器的「加入」", () => {
     await flush();
     expect(callsOf(ipc, "set_pinned_server_instance")).toHaveLength(1);
     expect(callsOf(ipc, "launch_game")).toHaveLength(0);
-    expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body])).toEqual([["无法保存服务器设置", "配置写入失败"]]);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body])).toEqual([["加入用的实例没有保存", "配置写入失败"]]);
   });
 
   it("记住的实例已经不在：按没记住处理，点「加入」弹实例选择", async () => {
