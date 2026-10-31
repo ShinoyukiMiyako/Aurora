@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "./bridge";
 import { lastCrash, lastLaunchLog } from "./diagnostics";
@@ -9,15 +10,18 @@ import {
   onGameExit,
   onGameLog,
   onLaunchPhase,
+  onWorldBackup,
   playStats,
   stopGame,
+  WORLD_BACKUP_EVENT,
   type GameExitEvent,
   type GameLogEvent,
   type LaunchArgs,
   type LaunchPhaseEvent,
+  type WorldBackupEvent,
 } from "./launch";
 import { resetMocks } from "./mock";
-import { clearMockEventListeners } from "./mock/events";
+import { clearMockEventListeners, emitMockWorldBackup } from "./mock/events";
 import { endMockGame, failNextMockLaunch } from "./mock/handlers/launch";
 import { cancelTask } from "./tasks";
 
@@ -230,9 +234,38 @@ describe("游玩统计 mock", () => {
   });
 });
 
+describe("自动备份事件", () => {
+  const payload: WorldBackupEvent = {
+    instance_id: "樱花生存",
+    backed_up: ["New World"],
+    failed: [{ world: "坏档", error: { code: "world_in_use", message: "这个存档正被游戏打开，退出游戏后再试", detail: { path: "D:/saves/坏档" } } }],
+  };
+
+  it("mock 推的自动备份结果原样送到 onWorldBackup，退订后不再收到", async () => {
+    const got: WorldBackupEvent[] = [];
+    const off = await onWorldBackup((e) => got.push(e));
+    emitMockWorldBackup(payload);
+    expect(got).toEqual([payload]);
+    off();
+    emitMockWorldBackup({ ...payload, backed_up: [] });
+    expect(got).toHaveLength(1);
+  });
+});
+
 describe("Tauri 窗口里", () => {
   beforeEach(() => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+  });
+
+  it("onWorldBackup 订阅 aurora://world-backup，只把负载交给处理函数", async () => {
+    vi.mocked(tauriListen).mockImplementationOnce(async (_event, handler) => {
+      handler({ event: WORLD_BACKUP_EVENT, id: 1, payload: { instance_id: "a", backed_up: ["w"], failed: [] } });
+      return () => undefined;
+    });
+    const got: WorldBackupEvent[] = [];
+    await onWorldBackup((e) => got.push(e));
+    expect(vi.mocked(tauriListen).mock.calls[0][0]).toBe("aurora://world-backup");
+    expect(got).toEqual([{ instance_id: "a", backed_up: ["w"], failed: [] }]);
   });
 
   it("launchGame 只传实例、账户与取消句柄；playStats 传 range 对象", async () => {

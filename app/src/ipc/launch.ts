@@ -9,6 +9,8 @@ export const LAUNCH_PHASE_EVENT = "aurora://launch-phase";
 export const GAME_EXIT_EVENT = "aurora://game-exit";
 /** 启动器日志与游戏输出，成批推送。 */
 export const GAME_LOG_EVENT = "aurora://game-log";
+/** 游戏退出后的自动备份做完；没有存档要备份（都没玩过，或自动备份关着）时不推送。 */
+export const WORLD_BACKUP_EVENT = "aurora://world-backup";
 
 /** 已有游戏在加载或运行时 launchGame 的错误码，detail 为 BusyDetail。同一时间只运行一个游戏。 */
 export const BUSY_ERROR_CODE = "busy";
@@ -84,6 +86,19 @@ export interface GameExitEvent {
   duration_ms: number;
 }
 
+export interface WorldBackupFailureDto {
+  /** 存档文件夹名；整次自动备份没能开始（例如工作目录解析失败）时为 "*"。 */
+  world: string;
+  error: { code: string; message: string; detail?: unknown };
+}
+
+export interface WorldBackupEvent {
+  instance_id: string;
+  /** 备份成了的存档文件夹名。 */
+  backed_up: string[];
+  failed: WorldBackupFailureDto[];
+}
+
 /** 两端都含的本地日期 YYYY-MM-DD，起点不晚于终点。 */
 export interface PlayRangeArgs {
   from: string;
@@ -130,5 +145,7 @@ export const playStats = (range: PlayRangeArgs): Promise<PlayStatsDto> => invoke
 export const onLaunchPhase = (handler: (event: LaunchPhaseEvent) => void): Promise<UnlistenFn> => listen<LaunchPhaseEvent>(LAUNCH_PHASE_EVENT, handler);
 
 export const onGameExit = (handler: (event: GameExitEvent) => void): Promise<UnlistenFn> => listen<GameExitEvent>(GAME_EXIT_EVENT, handler);
+
+export const onWorldBackup = (handler: (event: WorldBackupEvent) => void): Promise<UnlistenFn> => listen<WorldBackupEvent>(WORLD_BACKUP_EVENT, handler);
 
 export const onGameLog = (handler: (event: GameLogEvent) => void): Promise<UnlistenFn> => listen<GameLogEvent>(GAME_LOG_EVENT, handler);

@@ -170,6 +170,56 @@ export const OVERVIEW_COPY = {
   packsError: "读不到资源包与光影",
 } as const;
 
+// ---------------------------------------------------------------- 存档备份
+
+/** 备份、导出、恢复被实例上的哪件事挡住时，「正在<活动>」里的说法。 */
+export const WORLD_BLOCKER_LABEL = {
+  installing: "安装",
+  repairing: "修复",
+  renaming: "改名",
+  deleting: "删除",
+  backing_up: "备份或恢复存档",
+} as const;
+
+export const WORLD_BACKUP_COPY = {
+  rowMenu: (world: string) => `「${world}」的更多操作`,
+  backup: "备份存档",
+  viewBackups: "查看备份",
+  export: "导出存档",
+
+  /** 启动中或游戏中：游戏开着会边写边打包，退出时又会自动备份一份。 */
+  runningBackup: "游戏退出后再备份，退出时会自动备份一份",
+  runningRestore: "游戏退出后再恢复",
+  blocked: (instance: string, activity: string) => `「${instance}」正在${activity}，完成后再试`,
+  worldBusy: "这个存档正在备份或恢复",
+
+  exportDialogTitle: (world: string) => `导出「${world}」`,
+  exportFilter: "存档压缩包",
+
+  modalTitle: (world: string) => `「${world}」的备份`,
+  modalSubtitle: (count: number, bytes: number) => `${count} 份 · 共 ${formatBytes(bytes)}`,
+  modalSubtitleEmpty: "还没有备份",
+  sharedSuffix: " · 所有共用存档的实例看到的是同一份",
+  kindLabel: { auto: "自动", manual: "手动" },
+  /** 备份时刻：绝对日期到分钟 + 相对时间。 */
+  moment: (absolute: string, relative: string) => `${absolute} · ${relative}`,
+  formerName: (levelName: string) => `当时名为「${levelName}」`,
+  restore: "恢复",
+  restoreLabel: (moment: string) => `恢复 ${moment} 的备份`,
+  remove: "删除",
+  removeLabel: (moment: string) => `删除 ${moment} 的备份`,
+  autoOnNote: (keep: number) => `退出游戏后会自动备份玩过的存档，每个存档保留 ${keep} 份自动备份。`,
+  autoOffNote: "自动备份已关闭，可以在设置 · 游戏里打开。",
+  goSettings: "去设置",
+  openFolder: "打开备份文件夹",
+  /** 一份备份都还没写过时备份目录还不存在，文件管理器打不开它。 */
+  noFolderYet: "还没有备份，备份目录还没建出来",
+  loadError: "读不到备份列表",
+  retry: "重试",
+  emptyTitle: "还没有备份",
+  emptyBody: "退出游戏时会自动备份玩过的存档，也可以现在备份一份。",
+} as const;
+
 // ---------------------------------------------------------------- Mod 管理
 
 export const MODS_COPY = {

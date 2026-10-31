@@ -1,7 +1,7 @@
-// 游戏：全局内存（推荐值全部来自后端的内存建议）、版本隔离档位、游戏目录与其他文件夹。
+// 游戏：全局内存（推荐值全部来自后端的内存建议）、版本隔离档位、游戏目录与其他文件夹、存档备份。
 
-import { useState } from "react";
-import type { InstanceSummary, Settings } from "../../../domain/adapt";
+import { useState, type ReactNode } from "react";
+import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { useShell } from "../../../shell/shell";
@@ -25,7 +25,18 @@ import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { Tooltip } from "../../../ui/Tooltip";
 import { useSettingsCommands } from "../commands";
-import { GAME_DIR_COPY, ISOLATION_COPY, ISOLATION_OPTIONS, LOAD_COPY, MEMORY_COPY, MEMORY_TIER_LABEL, RECOMMENDED_ISOLATION } from "../copy";
+import {
+  GAME_DIR_COPY,
+  ISOLATION_COPY,
+  ISOLATION_OPTIONS,
+  KEEP_PER_WORLD_OPTIONS,
+  LOAD_COPY,
+  MAX_TOTAL_GB_OPTIONS,
+  MEMORY_COPY,
+  MEMORY_TIER_LABEL,
+  RECOMMENDED_ISOLATION,
+  WORLD_BACKUP_COPY,
+} from "../copy";
 import { dirName, hasBang, overAvailable, samePath, unrecorded } from "../game-model";
 import { InstanceStack } from "../InstanceStack";
 import { useLoadedSettings } from "../SettingsGate";
@@ -359,12 +370,82 @@ function GameDirectoryCard() {
   );
 }
 
+// ---------------------------------------------------------------- 存档备份
+
+/** 下拉的取值：常用几档，加上配置里不在其中的当前值，从小到大。 */
+function countOptions(presets: readonly number[], current: number, label: (n: number) => string): { value: string; label: string }[] {
+  const values = presets.includes(current) ? [...presets] : [...presets, current].sort((a, b) => a - b);
+  return values.map((n) => ({ value: String(n), label: label(n) }));
+}
+
+/** 禁用的下拉没有 disabledReason：外面包一层可聚焦的宿主，悬停与聚焦时说明原因。 */
+function ReasonHost({ reason, children }: { reason: string | undefined; children: ReactNode }) {
+  if (reason === undefined) return children;
+  return (
+    <Tooltip content={reason}>
+      <span className={s.tagHost} tabIndex={0}>
+        {children}
+      </span>
+    </Tooltip>
+  );
+}
+
+function WorldBackupCard() {
+  const settings = useLoadedSettings();
+  const actions = useLauncherActions();
+  const c = WORLD_BACKUP_COPY;
+  const committed = settings.worldBackup;
+  // 后端要求三项一起写：每次写入以三个控件此刻显示的值为底，连续改两项时后一次不会把前一次还没落盘的改动写回去
+  let shown: WorldBackup = committed;
+  const write = (patch: Partial<WorldBackup>) => actions.updateSettings({ worldBackup: { ...shown, ...patch } });
+  const auto = useSettingWrite(committed.auto, c.auto, (value: boolean) => write({ auto: value }));
+  const keep = useSettingWrite(committed.keepPerWorld, c.keep, (value: number) => write({ keepPerWorld: value }));
+  const total = useSettingWrite(committed.maxTotalGb, c.total, (value: number) => write({ maxTotalGb: value }));
+  shown = { auto: auto.value, keepPerWorld: keep.value, maxTotalGb: total.value };
+  const pruneReason = auto.value ? undefined : c.pruneOff;
+  return (
+    <Card>
+      <CardHeader title={c.title} subtitle={c.subtitle} icon="drive" />
+      <SettingRow title={c.auto} description={c.autoDesc}>
+        <Toggle checked={auto.value} onChange={auto.set} ariaLabel={c.auto} />
+      </SettingRow>
+      <SettingRow title={c.keep} description={c.keepDesc}>
+        <ReasonHost reason={pruneReason}>
+          <Select<string>
+            className={s.select}
+            size="sm"
+            ariaLabel={c.keep}
+            value={String(keep.value)}
+            disabled={!auto.value}
+            onChange={(value) => keep.set(Number(value))}
+            options={countOptions(KEEP_PER_WORLD_OPTIONS, keep.value, c.keepOption)}
+          />
+        </ReasonHost>
+      </SettingRow>
+      <SettingRow title={c.total} description={c.totalDesc}>
+        <ReasonHost reason={pruneReason}>
+          <Select<string>
+            className={s.select}
+            size="sm"
+            ariaLabel={c.total}
+            value={String(total.value)}
+            disabled={!auto.value}
+            onChange={(value) => total.set(Number(value))}
+            options={countOptions(MAX_TOTAL_GB_OPTIONS, total.value, c.totalOption)}
+          />
+        </ReasonHost>
+      </SettingRow>
+    </Card>
+  );
+}
+
 export function GameSection() {
   return (
     <>
       <MemoryCard />
       <IsolationCard />
       <GameDirectoryCard />
+      <WorldBackupCard />
     </>
   );
 }

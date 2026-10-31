@@ -65,7 +65,16 @@ import { installMod, type InstallableResourceType, type ResourceInstallOutcomeDt
 import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/errors";
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
 import * as instancesIpc from "../ipc/instances";
-import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
+import type {
+  BackupResultDto,
+  DeletionPreviewDto,
+  ExportResultDto,
+  FolderTarget,
+  InstallResultDto,
+  InstanceDto,
+  RestoreResultDto,
+  WorldBackupListDto,
+} from "../ipc/instances";
 import type { InstalledRuntimeDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
 import type { ModpackInstallOutcomeDto, ModpackSource } from "../ipc/modpack";
@@ -78,6 +87,7 @@ import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type 
 import { network as appNetwork, type NetworkMonitor } from "./online";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
+import { WORLD_TASK_COMMANDS } from "./selectors";
 import {
   appendSessionLogs,
   applyPhase,
@@ -214,7 +224,18 @@ type TaskMeta =
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
-  | { type: "updates"; instanceId: string };
+  | { type: "updates"; instanceId: string }
+  /** 备份、导出、恢复存档。world 是存档文件夹名，name 是任务标题与通知里写的存档名。 */
+  | { type: "world"; instanceId: string; world: string; name: string; op: "backup" | "restore" | "export" };
+
+export type { WorldBackupDto, WorldBackupListDto } from "../ipc/instances";
+
+/** 存档备份列表的查询 key：world-backups:<实例 id>:<存档文件夹名>。共用存档的几个实例看到同一份，失效时按前缀整个失效。 */
+export const WORLD_BACKUPS_RESOURCE = "world-backups";
+
+export function worldBackupsKey(instanceId: string, world: string): string {
+  return `${WORLD_BACKUPS_RESOURCE}:${instanceId}:${world}`;
+}
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -331,6 +352,18 @@ export interface LauncherActions {
   rollback(instanceId: string, eventId: string): Promise<void>;
   /** launchAfter：装好后通知带「启动」这个实例；pinFor：装好后把这个实例的 Java 固定为新装的运行时。 */
   installJava(major: number, opts?: { launchAfter?: string; pinFor?: string }): Promise<void>;
+  // 存档备份（world 是存档文件夹名，name 是界面上显示的存档名）
+  /** 入队一个手动备份任务；同一件事已在队列里时只提示重复。 */
+  backupWorld(instanceId: string, world: string, name: string): Promise<void>;
+  /** 入队一个恢复任务：用 file 这份备份替换现在的存档。调用前由界面确认。 */
+  restoreWorldBackup(instanceId: string, world: string, name: string, file: string): Promise<void>;
+  /** 入队一个导出任务：把存档打包到 dest（系统保存对话框选定的 .zip）。 */
+  exportWorld(instanceId: string, world: string, name: string, dest: string): Promise<void>;
+  /** 把一份备份移入回收站（不经任务队列，不确认）。 */
+  deleteWorldBackup(instanceId: string, world: string, file: string): Promise<void>;
+  listWorldBackups(instanceId: string, world: string): Promise<WorldBackupListDto>;
+  /** 在系统文件管理器里定位到这个文件或文件夹；打开失败原样抛出。 */
+  revealPath(path: string): Promise<void>;
   // 下载任务
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
@@ -370,6 +403,7 @@ const TASK_COMMANDS = new Set([
   "install_resource",
   "update_mod",
   "update_mods",
+  ...WORLD_TASK_COMMANDS,
 ]);
 
 /**
@@ -386,6 +420,12 @@ const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
 
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
+
+/**
+ * opener 插件在文件管理器里定位文件或文件夹的命令（opener:default 含 allow-reveal-item-in-dir）。备份目录、导出的文件
+ * 不属于 open_folder 能按实例解析的那几种目标，路径由后端在列表与结果里给出。
+ */
+const REVEAL_COMMAND = "plugin:opener|reveal_item_in_dir";
 
 /** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
@@ -484,6 +524,14 @@ function metaFromSpec(task: Task): TaskMeta | null {
     }
     case "update_mods":
       return { type: "updates", instanceId: strArg(args, "versionId", command) };
+    // 任务日志只记了文件夹名，恢复出来的任务按文件夹名称呼存档
+    case "backup_world":
+    case "export_world":
+    case "restore_world_backup": {
+      const world = strArg(args, "world", command);
+      const op = command === "backup_world" ? "backup" : command === "export_world" ? "export" : "restore";
+      return { type: "world", instanceId: strArg(args, "id", command), world, name: world, op };
+    }
     default:
       return null;
   }
@@ -613,6 +661,9 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
   install_resource: "versionId",
   update_mod: "versionId",
   update_mods: "versionId",
+  backup_world: "id",
+  export_world: "id",
+  restore_world_backup: "id",
 };
 
 /**
@@ -637,6 +688,7 @@ const GAME_DIR_SCOPED_RESOURCES = [
   "memory-advice",
   "play-stats",
   "servers:known",
+  WORLD_BACKUPS_RESOURCE,
 ] as const;
 
 /**
@@ -645,7 +697,7 @@ const GAME_DIR_SCOPED_RESOURCES = [
  * 所以 id 一落到新实例上就丢掉它们。不在改名当时丢原 id 的：改名发起的页面那一刻还订阅着原 id，失效会让它按已经不在的
  * 实例重取、在缓存里留下一条报错。
  */
-const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice"] as const;
+const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice", WORLD_BACKUPS_RESOURCE] as const;
 
 /**
  * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
@@ -656,7 +708,23 @@ function playRecordsLag(err: unknown): IpcError {
   throw err;
 }
 
-/** play_records_failed 的 detail.renamed_to：改名已落盘后的新 id。缺了就是契约被破坏。 */
+/**
+ * 改名只差游玩记录或存档备份没跟上时命令以这两个码之一拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再分别提示。
+ * 两样都没跟上时后端报的是游玩记录那一个。其余错误照常冒泡。
+ */
+function renameLag(err: unknown): IpcError {
+  if (isIpcError(err) && (err.code === instancesIpc.PLAY_RECORDS_FAILED_ERROR_CODE || err.code === instancesIpc.WORLD_BACKUPS_NOT_MOVED_ERROR_CODE)) return err;
+  throw err;
+}
+
+/** world_backups_not_moved 的 detail.path：留在旧名下的备份目录。缺了就是契约被破坏。 */
+function strandedBackups(err: IpcError): string {
+  const detail = err.detail;
+  if (typeof detail === "object" && detail !== null && "path" in detail && typeof detail.path === "string") return detail.path;
+  throw new Error(`改名报 ${err.code} 却没给出 detail.path：${err.message}`);
+}
+
+/** 改名报 play_records_failed 或 world_backups_not_moved 时的 detail.renamed_to：改名已落盘后的新 id。缺了就是契约被破坏。 */
 function renamedTo(err: IpcError): string {
   const detail = err.detail;
   if (typeof detail === "object" && detail !== null && "renamed_to" in detail && typeof detail.renamed_to === "string") return detail.renamed_to;
@@ -678,6 +746,7 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "resource":
     case "update":
     case "updates":
+    case "world":
       return meta.instanceId === from ? { ...meta, instanceId: to } : meta;
     case "java":
       return meta.launchAfter === from || meta.pinFor === from ? { ...meta, launchAfter: swap(meta.launchAfter), pinFor: swap(meta.pinFor) } : meta;
@@ -977,6 +1046,7 @@ export class LauncherStore {
       launchIpc.onLaunchPhase((e) => this.onLaunchPhase(e)),
       launchIpc.onGameLog((e) => this.onGameLog(e)),
       launchIpc.onGameExit((e) => this.onGameExit(e)),
+      launchIpc.onWorldBackup((e) => this.onWorldBackup(e)),
     ];
     for (const sub of subscriptions) {
       sub.then(
@@ -1176,6 +1246,14 @@ export class LauncherStore {
     invalidateResources("installed-sources");
   }
 
+  /** 改名已照成功落地，只差存档备份没挪过来：原因留在控制台，提示备份还在哪里，给出打开那个文件夹。 */
+  private backupsLagged(name: string, err: IpcError): void {
+    const path = strandedBackups(err);
+    console.warn(err.message, err.detail);
+    const copy = TOAST_COPY.backupsNotMoved(name, path);
+    this.pushToast("warning", copy.title, copy.body, { label: TOAST_COPY.openFolderAction, run: () => this.actions.revealPath(path), errorTitle: ACTION_ERROR.openFolder });
+  }
+
   /** 改名、删除已照成功落地，只差游玩记录：原因留在控制台，提示玩家记录之后会补上。 */
   private playRecordsLagged(name: string, err: IpcError): void {
     console.warn(err.message, err.detail);
@@ -1270,6 +1348,23 @@ export class LauncherStore {
     invalidateResources("play-stats");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
+  }
+
+  /**
+   * 游戏退出后的自动备份做完了：备份列表与实例的活动（后端在备份期间记着 backing_up）都要重读。
+   * 有存档没备份成时发一条 error 通知，正文是第一个失败存档的原文，「复制错误原文」带上全部失败与结构化详情。
+   */
+  private onWorldBackup(event: launchIpc.WorldBackupEvent): void {
+    invalidateResources(WORLD_BACKUPS_RESOURCE);
+    this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    const first = event.failed[0];
+    if (first === undefined) return;
+    for (const failure of event.failed) console.error(`「${event.instance_id}」的存档 ${failure.world} 自动备份没有完成`, failure.error);
+    const raw = event.failed
+      .map((f) => `${f.world}：${f.error.message}${f.error.detail === undefined ? "" : `\n${JSON.stringify(f.error.detail)}`}`)
+      .join("\n");
+    const copy = TOAST_COPY.autoBackupFailed(event.instance_id, first.error.message);
+    this.pushToast("error", copy.title, copy.body, { label: TOAST_COPY.copyErrorAction, run: () => navigator.clipboard.writeText(raw), errorTitle: TOAST_COPY.copyFailed });
   }
 
   /** 读崩溃报告的主线索，写进会话并发崩溃通知。读不出时会话标为 unavailable，错误照常抛出。 */
@@ -1532,9 +1627,16 @@ export class LauncherStore {
         unseenFailures: [...raw.unseenFailures, attemptTaskId(before)],
         ...landing(raw),
       }));
-      this.failureToast(before, taskFailureReason(record));
+      if (WORLD_TASK_COMMANDS.has(before.spec.command)) this.worldFailureToast(before, taskFailureReason(record));
+      else this.failureToast(before, taskFailureReason(record));
     }
     this.tasksChanged();
+    // 恢复没做完时原来的存档可能已经进了回收站；备份失败也可能清掉了半截的临时文件。列表、存档与实例的活动都按盘上重读
+    if (WORLD_TASK_COMMANDS.has(before.spec.command) && before.instanceId !== null) {
+      invalidateResources(WORLD_BACKUPS_RESOURCE);
+      invalidateResources(`content:${before.instanceId}`);
+      this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    }
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫。占位项与重扫结果在同一次
     // 更新里交接：盘上留了目录就由扫描项接替，没留就移除
     if (INSTANCE_TASKS.has(before.spec.command)) {
@@ -1548,6 +1650,12 @@ export class LauncherStore {
       this.modsChanged(before.instanceId);
       this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     }
+  }
+
+  /** 备份、导出、恢复存档失败：各自一条，不并进下载失败的合并通知（它们不是下载）。 */
+  private worldFailureToast(task: Task, reason: string): void {
+    const copy = TASK_TOAST.worldFailed(task.title, reason);
+    this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install });
   }
 
   /** 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。 */
@@ -1714,6 +1822,28 @@ export class LauncherStore {
         const only = updated.length === 1 ? updated[0].title : null;
         const copy = only === null ? TASK_TOAST.modsUpdated(updated.length, meta.instanceId) : TASK_TOAST.modUpdated(only, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        return;
+      }
+      case "world": {
+        // 共用存档的几个实例看到同一份备份表，整个前缀一起失效；恢复换掉了存档，存档列表跟着重读
+        invalidateResources(WORLD_BACKUPS_RESOURCE);
+        invalidateResources(`content:${meta.instanceId}`);
+        await this.fetchInstances();
+        if (meta.op === "backup") {
+          const outcome = result as BackupResultDto;
+          const copy = TASK_TOAST.worldBackedUp(meta.name, outcome.backup.size_bytes, outcome.pruned);
+          this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.viewBackupsAction, to: { page: "instance", id: meta.instanceId, tab: "overview" } });
+          return;
+        }
+        if (meta.op === "export") {
+          const outcome = result as ExportResultDto;
+          const copy = TASK_TOAST.worldExported(meta.name, outcome.path);
+          this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.openContainingAction, run: () => this.actions.revealPath(outcome.path), errorTitle: ACTION_ERROR.openFolder });
+          return;
+        }
+        const outcome = result as RestoreResultDto;
+        const copy = TASK_TOAST.worldRestored(meta.name, outcome.previous_in_recycle_bin);
+        this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined);
         return;
       }
     }
@@ -2108,7 +2238,7 @@ export class LauncherStore {
         const { newId, lagged } = await instancesIpc.renameInstance(id, name).then(
           (outcome): { newId: string; lagged: IpcError | null } => ({ newId: outcome.id, lagged: null }),
           (err: unknown) => {
-            const lag = playRecordsLag(err);
+            const lag = renameLag(err);
             return { newId: renamedTo(lag), lagged: lag };
           },
         );
@@ -2134,7 +2264,8 @@ export class LauncherStore {
                 },
         }));
         store.scheduleJournal();
-        if (lagged !== null) store.playRecordsLagged(newId, lagged);
+        if (lagged !== null && lagged.code === instancesIpc.WORLD_BACKUPS_NOT_MOVED_ERROR_CODE) store.backupsLagged(newId, lagged);
+        else if (lagged !== null) store.playRecordsLagged(newId, lagged);
         return newId;
       },
       async updateInstanceSettings(id, patch) {
@@ -2150,6 +2281,9 @@ export class LauncherStore {
       },
       async openFolder(target, id = null, world = null) {
         await instancesIpc.openFolder(target, id, world);
+      },
+      async revealPath(path) {
+        await invoke<void>(REVEAL_COMMAND, { paths: [path] });
       },
       async openExternal(url) {
         const parsed = new URL(url);
@@ -2378,6 +2512,31 @@ export class LauncherStore {
         );
       },
 
+      // ---- 存档备份
+      async backupWorld(instanceId, world, name) {
+        if (store.sessionActiveFor(instanceId)) throw new Error(`「${instanceId}」的游戏正在运行，退出后再备份`);
+        const task = store.enqueueWorld(instanceId, world, name, "backup", { command: "backup_world", args: { id: instanceId, world } });
+        if (task === null) return;
+        const copy = TASK_TOAST.backupStarted(name);
+        store.pushToast("info", copy.title, copy.body);
+      },
+      async restoreWorldBackup(instanceId, world, name, file) {
+        if (store.sessionActiveFor(instanceId)) throw new Error(`「${instanceId}」的游戏正在运行，退出后再恢复`);
+        store.enqueueWorld(instanceId, world, name, "restore", { command: "restore_world_backup", args: { id: instanceId, world, file } });
+      },
+      async exportWorld(instanceId, world, name, dest) {
+        if (store.sessionActiveFor(instanceId)) throw new Error(`「${instanceId}」的游戏正在运行，退出后再导出`);
+        store.enqueueWorld(instanceId, world, name, "export", { command: "export_world", args: { id: instanceId, world, dest } });
+      },
+      async deleteWorldBackup(instanceId, world, file) {
+        await instancesIpc.deleteWorldBackup(instanceId, world, file);
+        invalidateResources(WORLD_BACKUPS_RESOURCE);
+        store.pushToast("info", TOAST_COPY.backupDeleted.title, TOAST_COPY.backupDeleted.body);
+      },
+      async listWorldBackups(instanceId, world) {
+        return instancesIpc.listWorldBackups(instanceId, world);
+      },
+
       // ---- 下载任务
       async cancelTask(id) {
         const task = store.findTask(id);
@@ -2529,6 +2688,16 @@ export class LauncherStore {
     this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
     this.tasksChanged();
     return true;
+  }
+
+  /** 排一个备份、导出或恢复任务；导出与备份同是打包，都记作 world_backup。同一件事已在队列里时提示重复并返回 null。 */
+  private enqueueWorld(instanceId: string, world: string, name: string, op: "backup" | "restore" | "export", spec: Task["spec"]): Task | null {
+    const title = op === "backup" ? TASK_TEXT.backupTitle(name) : op === "export" ? TASK_TEXT.exportTitle(name) : TASK_TEXT.restoreTitle(name);
+    return this.enqueue(
+      { kind: op === "restore" ? "world_restore" : "world_backup", title, detail: TASK_TEXT.backupDetail(instanceId), instanceId, spec },
+      { type: "world", instanceId, world, name, op },
+      title,
+    );
   }
 
   private enqueueUpdate(instanceId: string, candidate: modsIpc.UpdateCandidate): void {

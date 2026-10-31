@@ -335,6 +335,14 @@ export interface Settings {
   skippedUpdateVersion: string | null;
   notifiedUpdateVersion: string | null;
   language: UiLanguage;
+  /** 存档备份：退出游戏后是否自动备份，自动备份每个存档留几份、全部备份的总量上限（GB）。 */
+  worldBackup: WorldBackup;
+}
+
+export interface WorldBackup {
+  auto: boolean;
+  keepPerWorld: number;
+  maxTotalGb: number;
 }
 
 const SOURCES: readonly DownloadSourcePolicy[] = ["auto", "official_first", "mirror_first"];
@@ -361,6 +369,7 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     skippedUpdateVersion: dto.skipped_update_version,
     notifiedUpdateVersion: dto.notified_update_version,
     language: oneOf(dto.language, UI_LANGUAGES, "界面语言"),
+    worldBackup: { auto: dto.world_backup.auto, keepPerWorld: dto.world_backup.keep_per_world, maxTotalGb: dto.world_backup.max_total_gb },
   };
 }
 
@@ -380,12 +389,15 @@ export interface SettingsPatch {
   skippedUpdateVersion?: string;
   notifiedUpdateVersion?: string;
   language?: UiLanguage;
+  /** 三项一起写：后端要求一次给全。 */
+  worldBackup?: WorldBackup;
 }
 
 export function settingsPatchToConfig(patch: SettingsPatch): ConfigPatch {
-  const { memory, ...rest } = patch;
+  const { memory, worldBackup, ...rest } = patch;
   const out: ConfigPatch = { ...rest };
   if (memory !== undefined) out.memory = { max_mb: memory.maxMb, min_mb: memory.minMb, auto: memory.auto };
+  if (worldBackup !== undefined) out.worldBackup = { auto: worldBackup.auto, keep_per_world: worldBackup.keepPerWorld, max_total_gb: worldBackup.maxTotalGb };
   return out;
 }
 

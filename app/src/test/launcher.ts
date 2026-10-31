@@ -114,6 +114,7 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     skipped_update_version: null,
     notified_update_version: null,
     language: "zh-CN",
+    world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
     ...overrides,
   };
 }
