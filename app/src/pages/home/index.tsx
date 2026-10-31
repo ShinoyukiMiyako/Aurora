@@ -9,6 +9,7 @@ import { useLauncher, useNow } from "../../state/launcher";
 import { usePlayStats } from "../../state/queries/home";
 import type { PageProps } from "../../state/route";
 import { Bento } from "../../ui/Bento";
+import type { ResponsiveValue } from "../../ui/Card";
 import { monthOf } from "../../ui/CalendarHeatmap";
 import { Page } from "../../ui/Page";
 import { buildActivity, localDateKey, playSignature, statsRange } from "./activity";
@@ -61,7 +62,7 @@ export default function HomePage(_props: PageProps<"home">) {
 
   const target = state.status.instances.kind === "ready" ? continueTarget(state.instances, state.selectedInstanceId) : null;
 
-  const insights = (span: number, className?: string) => (
+  const insights = (span: ResponsiveValue, className?: string) => (
     <InsightsCard span={span} play={play} today={today} selected={selected} onPickDay={pickDay} className={className} />
   );
 
@@ -70,7 +71,8 @@ export default function HomePage(_props: PageProps<"home">) {
       <Bento>
         <GreetingCard span={{ compact: 4, wide: 3 }} play={play} />
         <ContinueCard span={{ compact: 8, wide: 6 }} target={target} />
-        {wide && insights(3, s.rowOne)}
+        {/* 只在 wide 档挂载，但跨列值逐档校验，窄档也得填合法值 */}
+        {wide && insights({ compact: 4, wide: 3 }, s.rowOne)}
       </Bento>
       <RecentStrip currentId={target === null ? null : target.id} />
       <Bento>

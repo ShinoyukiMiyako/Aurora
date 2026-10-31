@@ -258,6 +258,17 @@ describe("主页：游玩日历与洞察", () => {
     expect(statLabel("累计时长")).toBe("累计时长 43 小时，4 个实例");
   });
 
+  it("wide 档：洞察并进第一排，与问候、继续游玩同排，跨 3 列", async () => {
+    vi.stubGlobal("innerWidth", 1440);
+    await mount();
+    const insights = document.querySelector('[aria-label="近 7 天每日游玩时长"]')?.closest<HTMLElement>("[data-span]");
+    const greeting = document.querySelector("h1")?.closest<HTMLElement>("[data-span]");
+    if (!insights || !greeting) throw new Error("找不到洞察卡或问候卡");
+    expect(insights.parentElement).toBe(greeting.parentElement);
+    expect(insights.style.getPropertyValue("--card-span-wide")).toBe("3");
+    expect(document.querySelector("h2")?.textContent).toBe("生存");
+  });
+
   it("点柱子在日历里选中那天：实例已删除与没玩的日子各有说明", async () => {
     await mount();
     click(bar("10月28日"));
