@@ -22,9 +22,10 @@ use aurora_instance::{
 use aurora_java::{DetectSource, JavaInstallation, select_for_major};
 use aurora_launch::logfile::{SessionOutcome, logs_dir};
 use aurora_launch::{
-    AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, LaunchCommand,
-    LauncherLevel, LogBatchSink, LogSource, MemoryConfig, SessionClock, SessionLog,
-    game_path_warning, recommended_max_mb, required_java_major,
+    AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
+    LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, SessionClock, SessionLog,
+    SyncProvider, game_path_warning, jvm_memory_issue, long_player_name, recommended_max_mb,
+    required_java_major, sync_folder, sync_roots_from_env,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
 use serde::Serialize;
@@ -120,6 +121,18 @@ pub type LaunchEventSink = mpsc::UnboundedSender<LaunchEvent>;
 pub enum LaunchWarning {
     /// 游戏路径含非 ASCII 或 `!`。
     GamePath,
+    /// 工作目录在 OneDrive 同步的文件夹里。
+    OnedriveFolder,
+    /// 工作目录在 iCloud 同步的文件夹里。
+    IcloudFolder,
+    /// 角色名超过 16 个字符，而游戏版本是 1.20.3 或更新。
+    LongPlayerName,
+    /// 自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法 Java 不认。
+    JvmMemoryUnit,
+    /// 生效的最小堆大于最大堆。
+    JvmMinOverMax,
+    /// 生效的最大堆低于 512 MB。
+    JvmMaxTooLow,
 }
 
 /// 用哪个账户启动。
@@ -324,6 +337,28 @@ pub fn resolve_memory(
     match min_mb {
         Some(min) if min <= max => config.with_min(min),
         _ => config,
+    }
+}
+
+/// 自定义 JVM 参数的内存问题对应的提醒与启动器日志原文。
+fn memory_warning(issue: JvmMemoryIssue) -> (LaunchWarning, String) {
+    match issue {
+        JvmMemoryIssue::BadUnit { arg } => (
+            LaunchWarning::JvmMemoryUnit,
+            format!(
+                "自定义 JVM 参数 {arg} 的写法 Java 不认，内存单位只能是 k、m、g、t，例如 -Xmx4g"
+            ),
+        ),
+        JvmMemoryIssue::MinOverMax { min_mb, max_mb } => (
+            LaunchWarning::JvmMinOverMax,
+            format!(
+                "自定义 JVM 参数让最小内存（{min_mb} MB）大于最大内存（{max_mb} MB），Java 会拒绝启动"
+            ),
+        ),
+        JvmMemoryIssue::MaxTooLow { max_mb } => (
+            LaunchWarning::JvmMaxTooLow,
+            format!("最大内存只有 {max_mb} MB，低于 512 MB，游戏多半进不了主界面"),
+        ),
     }
 }
 
@@ -564,6 +599,18 @@ impl Aurora {
             settings.java = JavaChoice::Path(path.clone());
         }
         let (account, auth) = self.launch_identity(account, reporter).await?;
+        let mut warnings = Vec::new();
+        // 离线名与正版名本来就不超过 16 个字符，超长的只会来自外置登录的皮肤站，但对谁都查一遍不费事。
+        if long_player_name(&account.name, &mc_version) {
+            warnings.push(LaunchWarning::LongPlayerName);
+            reporter
+                .warn(format!(
+                    "角色名 {} 有 {} 个字符，Minecraft 1.20.3 及更新的版本只认 16 个以内，进入存档或服务器时会被拒绝",
+                    account.name,
+                    account.name.encode_utf16().count()
+                ))
+                .await;
+        }
         let required_major = required_java_major(merged);
         let java_plan = self
             .plan_java(required_major, &settings.java, &mc_version, reporter)
@@ -586,10 +633,22 @@ impl Aurora {
                 path: working_dir.clone(),
                 source,
             })?;
-        let mut warnings = Vec::new();
         if let Some(text) = game_path_warning(&working_dir) {
             warnings.push(LaunchWarning::GamePath);
             reporter.warn(text).await;
+        }
+        if let Some(provider) = sync_folder(&working_dir, &sync_roots_from_env()) {
+            let (warning, name) = match provider {
+                SyncProvider::OneDrive => (LaunchWarning::OnedriveFolder, "OneDrive"),
+                SyncProvider::ICloud => (LaunchWarning::IcloudFolder, "iCloud"),
+            };
+            warnings.push(warning);
+            reporter
+                .warn(format!(
+                    "游戏目录在 {name} 同步的文件夹里（{}），同步时文件可能被占用或替换，建议换一个不在 {name} 里的游戏目录",
+                    working_dir.display()
+                ))
+                .await;
         }
         if merged.main_class.is_none() {
             return Err(LaunchFailure::new(
@@ -694,6 +753,11 @@ impl Aurora {
             None
         };
         let memory = resolve_memory(settings.memory_mb, global_memory, auto_mb);
+        if let Some(issue) = jvm_memory_issue(&settings.jvm_args, memory) {
+            let (warning, text) = memory_warning(issue);
+            warnings.push(warning);
+            reporter.warn(text).await;
+        }
         let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         let command = assemble_command(
             merged,
@@ -1697,6 +1761,142 @@ mod tests {
                 .await
                 .unwrap()
                 .contains_key(VERSION)
+        );
+    }
+
+    #[test]
+    fn launch_warning_codes_keep_their_wire_names() {
+        let all = [
+            LaunchWarning::GamePath,
+            LaunchWarning::OnedriveFolder,
+            LaunchWarning::IcloudFolder,
+            LaunchWarning::LongPlayerName,
+            LaunchWarning::JvmMemoryUnit,
+            LaunchWarning::JvmMinOverMax,
+            LaunchWarning::JvmMaxTooLow,
+        ];
+        let json = serde_json::to_value(all).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                "game_path",
+                "onedrive_folder",
+                "icloud_folder",
+                "long_player_name",
+                "jvm_memory_unit",
+                "jvm_min_over_max",
+                "jvm_max_too_low"
+            ])
+        );
+        let back: Vec<LaunchWarning> = serde_json::from_value(json).unwrap();
+        assert_eq!(back, all);
+    }
+
+    #[test]
+    fn memory_issues_map_to_their_warning_and_log_text() {
+        assert_eq!(
+            memory_warning(aurora_launch::JvmMemoryIssue::BadUnit {
+                arg: "-Xmx4GB".into()
+            }),
+            (
+                LaunchWarning::JvmMemoryUnit,
+                "自定义 JVM 参数 -Xmx4GB 的写法 Java 不认，内存单位只能是 k、m、g、t，例如 -Xmx4g"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            memory_warning(aurora_launch::JvmMemoryIssue::MinOverMax {
+                min_mb: 4096,
+                max_mb: 2048
+            }),
+            (
+                LaunchWarning::JvmMinOverMax,
+                "自定义 JVM 参数让最小内存（4096 MB）大于最大内存（2048 MB），Java 会拒绝启动"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            memory_warning(aurora_launch::JvmMemoryIssue::MaxTooLow { max_mb: 256 }),
+            (
+                LaunchWarning::JvmMaxTooLow,
+                "最大内存只有 256 MB，低于 512 MB，游戏多半进不了主界面".to_owned()
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_folder_and_bad_jvm_memory_are_warned_in_their_stages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("OneDrive").join("games");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = AuroraConfig {
+            memory: MemorySettings {
+                auto: false,
+                ..MemorySettings::default()
+            },
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::for_test(config, root.clone(), root.join(".minecraft"));
+        install_version(&root.join(".minecraft"), 17, true);
+        aurora_instance::VersionSettingsStore::for_version_dir(
+            &root.join(".minecraft").join(VERSIONS_DIR).join(VERSION),
+        )
+        .save(&VersionSettings {
+            jvm_args: "-XX:+UseG1GC -Xmx4GB".into(),
+            ..VersionSettings::default()
+        })
+        .await
+        .unwrap();
+        let java = fake_java(&root, 17, 3);
+
+        let (result, events) = launch(&aurora, java).await;
+        let run = match result {
+            Ok(run) => run,
+            Err(err) => panic!("提醒不阻断启动：{err:?}"),
+        };
+        // 每条提醒记下它出现在哪个阶段。
+        let mut stage = None;
+        let mut warns = Vec::new();
+        for event in &events {
+            match event {
+                LaunchEvent::Stage(s) => stage = Some(s.index()),
+                LaunchEvent::Log {
+                    level: LauncherLevel::Warn,
+                    text,
+                    ..
+                } => warns.push((stage, text.clone())),
+                _ => {}
+            }
+        }
+        assert_eq!(warns.len(), 2, "{warns:?}");
+        assert_eq!(warns[0].0, Some(1));
+        assert!(
+            warns[0]
+                .1
+                .starts_with("游戏目录在 OneDrive 同步的文件夹里（")
+                && warns[0].1.ends_with("建议换一个不在 OneDrive 里的游戏目录"),
+            "{}",
+            warns[0].1
+        );
+        assert_eq!(
+            warns[1],
+            (
+                Some(5),
+                "自定义 JVM 参数 -Xmx4GB 的写法 Java 不认，内存单位只能是 k、m、g、t，例如 -Xmx4g"
+                    .to_owned()
+            )
+        );
+
+        let finished = run.finish().await.unwrap();
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        let crash = aurora
+            .last_crash(VERSION)
+            .await
+            .unwrap()
+            .expect("崩溃应落盘");
+        assert_eq!(
+            crash.warnings,
+            vec![LaunchWarning::OnedriveFolder, LaunchWarning::JvmMemoryUnit]
         );
     }
 
