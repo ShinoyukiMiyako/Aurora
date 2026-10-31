@@ -8,7 +8,7 @@ import { ACTION_ERROR, CONFIRM_COPY } from "../copy/flows";
 import { formatSpeed, percent } from "../domain/format";
 import type { Task } from "../domain/types";
 import type { ConfirmOptions } from "../launch/host";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import type { LauncherState } from "../state/store";
 import { attemptTaskId, isActiveTask, isFinishedTask } from "../state/tasks";
@@ -47,7 +47,7 @@ export function peekRows(tasks: readonly Task[]): Task[] {
  * 取消一个任务前要不要确认：排队中的直接取消；运行中的新建与导入取消后实例会被删除，
  * 修复取消后实例停在文件不完整的状态，这两类要确认；其余直接取消。
  */
-export function cancelTaskConfirm(state: LauncherState, task: Task): ConfirmOptions | null {
+export function cancelTaskConfirm(state: Pick<LauncherState, "instances">, task: Task): ConfirmOptions | null {
   if (task.status !== "running") return null;
   if (task.kind !== "game" && task.kind !== "modpack" && task.kind !== "repair") return null;
   if (task.instanceId === null) throw new Error(`任务 ${task.id}（${task.kind}）没有目标实例`);
@@ -59,16 +59,18 @@ export function cancelTaskConfirm(state: LauncherState, task: Task): ConfirmOpti
 }
 
 export function DownloadPeek() {
-  const { state, actions } = useLauncher();
+  // 任务表本身就是这里要显示的高频切片；会话日志与别的变化不让快览重渲染
+  const tasks = useLauncherSelector((s) => s.tasks);
+  const unseen = useLauncherSelector((s) => s.unseenFailures);
+  const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
   const { confirm } = useShell();
   const { go } = useNav();
   const run = useRunner();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
 
-  const tasks = state.tasks;
   const active = tasks.filter(isActiveTask);
-  const unseen = state.unseenFailures;
 
   // 快览开着的时候，失败即被看到（包括开着期间新出现的）
   useEffect(() => {
@@ -82,7 +84,7 @@ export function DownloadPeek() {
   };
   const cancel = (task: Task) =>
     void run(async () => {
-      const options = cancelTaskConfirm(state, task);
+      const options = cancelTaskConfirm({ instances }, task);
       if (options !== null && !(await confirm(options))) return;
       await actions.cancelTask(task.id);
     }, ACTION_ERROR.cancelTask);

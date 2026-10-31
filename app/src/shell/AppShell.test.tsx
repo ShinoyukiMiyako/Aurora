@@ -9,7 +9,9 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launch
 import { PAGE_IDS, type PageId, type Route } from "../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { GAME_LOG_EVENT } from "../ipc/launch";
+import { CORE_EVENT } from "../ipc/tasks";
+import { bootOverrides, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { AppShell, PAGE_PRELOAD_DELAY_MS, type AppShellProps, type ShellFlows } from "./AppShell";
 import { DROP_COPY, PAGE_ERROR_COPY, SHELL_ACTION_ERROR, SHELL_DEFECT_COPY } from "../copy/shell";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -22,10 +24,14 @@ import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowP
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
+/** 各页面组件渲染的次数。 */
+const pageRenders: Partial<Record<PageId, number>> = {};
+
 /** 每个页面渲染一个带页面名的标记；在 broken 里的页面每次渲染都抛错（React 会同步重试一次，只抛一次接不住）。 */
 function pageTable(loads: PageId[], broken: Set<PageId>): PageTable {
   const entries = PAGE_IDS.map((page) => {
     function Page({ route }: { route: Route }) {
+      pageRenders[page] = (pageRenders[page] === undefined ? 0 : pageRenders[page]) + 1;
       if (broken.has(page)) {
         throw new Error(`${page} 页渲染出错`);
       }
@@ -298,6 +304,37 @@ describe("外壳布局", () => {
     await flush();
     expect(shell.createInstance.open).toBe(false);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("按片订阅", () => {
+  // 下载进度每个任务约 100 ms 一次、游戏日志每 100 ms 一批：外壳根与主框架若整份订阅状态，当前页面就跟着每秒重渲染十次
+  it("20 次下载进度加 20 批游戏日志：页面一次都不重渲染", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("创造")] });
+    await mount();
+    expect(pageShown()).toBe("home");
+    await act(async () => {
+      await launcher.actions.repairInstance("生存");
+      await launcher.actions.launch("创造");
+      await settle();
+    });
+    const [task] = launcher.state.tasks;
+    expect(task.status).toBe("running");
+    expect(launcher.state.session).toMatchObject({ instanceId: "创造", phase: "running" });
+    const before = pageRenders.home;
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 20, finished: i, bytes: i * 1000, total_bytes: 20_000, speed: 1_000_000 });
+      });
+      act(() => {
+        emit(GAME_LOG_EVENT, { version_id: "创造", lines: [{ level: "info", source: "game", text: `第 ${i} 行` }] });
+      });
+    }
+    expect(launcher.state.tasks[0].progress).toBe(1);
+    expect(launcher.state.session?.logs).toHaveLength(20);
+    expect(pageRenders.home).toBe(before);
   });
 });
 

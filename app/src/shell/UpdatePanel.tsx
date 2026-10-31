@@ -6,7 +6,7 @@ import { SakuraMark } from "../art/Logo";
 import { Spinner } from "../art/Spinner";
 import { UPDATE_COPY } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { busyInstanceId } from "../state/selectors";
 import { downloadFraction, hasPanel, phaseUpdate, type UpdaterPhase } from "../state/updater/machine";
@@ -56,7 +56,8 @@ export interface UpdatePanelProps {
 }
 
 export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
-  const { state, actions } = useLauncher();
+  const actions = useLauncherActions();
+  const gameRunning = useLauncherSelector((s) => busyInstanceId(s) !== null);
   const { installUpdate } = useShell();
   const run = useRunner();
   const online = useOnline();
@@ -65,7 +66,6 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
   const update = phaseUpdate(phase);
   if (update === null) return null;
 
-  const gameRunning = busyInstanceId(state) !== null;
   const installReason = gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
   const offlineReason = online ? undefined : UPDATE_COPY.offlineReason;
   const download = () => void run(() => updater.download(), UPDATE_COPY.downloadStartFailed);

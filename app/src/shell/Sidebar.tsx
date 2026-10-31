@@ -16,14 +16,13 @@ import { ACTION_ERROR, AVATAR_LINE, LAUNCH_COPY, PAGE_LABEL, STOPPED_LABEL } fro
 import type { InstanceSummary } from "../domain/adapt";
 import { percent } from "../domain/format";
 import { InstanceAvatar } from "../launch/InstanceAvatar";
-import { brokenAction, launchView, type LaunchView } from "../launch/launchView";
+import { brokenAction, launchView, launchViewEqual, type LaunchView } from "../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
 import { TOOLTIP_TIMING, fade, springs } from "../lib/motion";
 import { clamp, isImeComposing } from "../lib/util";
-import { useLauncher, useLauncherSelector, useNow } from "../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../state/launcher";
 import { sameRoute, type Route } from "../state/route";
 import { findInstance, pinnedInstances } from "../state/selectors";
-import type { LauncherState } from "../state/store";
 import { showsUpdateDot } from "../state/updater/machine";
 import { useUpdater } from "../state/updater/useUpdater";
 import { Menu, type MenuEntry, type MenuItem, type MenuOpenedBy } from "../ui/Menu";
@@ -145,7 +144,9 @@ interface MenuState {
 }
 
 export function Sidebar() {
-  const { state, actions } = useLauncher();
+  // 只订阅固定实例这一片：下载进度、游戏日志不让侧栏重渲染（各固定项的启动入口另按自己的视图订阅）
+  const pins = useLauncherSelector(pinnedInstances, shallowArrayEqual);
+  const actions = useLauncherActions();
   const { route, go } = useNav();
   const { openCreateInstance } = useShell();
   const chrome = useChrome();
@@ -154,7 +155,6 @@ export function Sidebar() {
   const navRef = useRef<HTMLElement>(null);
   const capsuleRef = useRef<HTMLDivElement>(null);
 
-  const pins = pinnedInstances(state);
   const pinIds = pins.map((p) => p.id);
   const selection = sidebarSelection(route, pinIds);
   const tabStop: SidebarKey = selection === null ? "home" : selection;
@@ -289,7 +289,7 @@ export function Sidebar() {
   };
   const closeMenu = useCallback(() => setMenu((m) => (m === null || !m.open ? m : { ...m, open: false })), []);
   const menuOpen = menu !== null && menu.open;
-  const menuInstance = menu === null ? undefined : findInstance(state, menu.id);
+  const menuInstance = useLauncherSelector((s) => (menu === null ? undefined : findInstance(s, menu.id)));
 
   // ---- 导航
   const activate = (target: Route) => {
@@ -352,7 +352,6 @@ export function Sidebar() {
                 key={inst.id}
                 instance={inst}
                 index={index}
-                state={state}
                 selected={selection === pinKey(inst.id)}
                 tabStop={tabStop === pinKey(inst.id)}
                 dragging={dragging === inst.id}
@@ -508,7 +507,6 @@ function PinList({ count, children }: { count: number; children: ReactNode }) {
 interface PinItemProps extends ItemBaseProps {
   instance: InstanceSummary;
   index: number;
-  state: LauncherState;
   dragging: boolean;
   register(id: string, handle: PinHandle | null): void;
   onPointerDown(event: ReactPointerEvent<HTMLButtonElement>, id: string, index: number): void;
@@ -519,9 +517,10 @@ interface PinItemProps extends ItemBaseProps {
   onMenu(target: HTMLElement, openedBy: MenuOpenedBy): void;
 }
 
-function PinItem({ instance, index, state, selected = false, tabStop, tooltipsOff, dragging, register, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onActivate, onMenu }: PinItemProps) {
+function PinItem({ instance, index, selected = false, tabStop, tooltipsOff, dragging, register, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onActivate, onMenu }: PinItemProps) {
   const y = useMotionValue(0);
-  const view = launchView(state, instance);
+  // 每个固定项只随自己的启动视图变：别的实例的下载进度、这一局的游戏日志不让它重渲染
+  const view = useLauncherSelector((s) => launchView(s, instance), launchViewEqual);
   const id = instance.id;
   const ref = useCallback(
     (el: HTMLLIElement | null) => {
@@ -614,7 +613,7 @@ export function pinLaunchItem(entry: Pick<LaunchEntry, "view" | "launch" | "canc
 
 function PinMenu({ menu, instance, pinIds, onClose, onReorder }: { menu: MenuState; instance: InstanceSummary; pinIds: readonly string[]; onClose: () => void; onReorder: (ids: string[]) => void }) {
   const entry = useLaunch(instance.id);
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const { go } = useNav();
   const run = useRunner();
   const index = pinIds.indexOf(instance.id);

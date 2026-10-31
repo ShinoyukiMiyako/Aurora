@@ -16,7 +16,7 @@ import { instanceCover } from "../launch/cover";
 import { useLaunchHost } from "../launch/host";
 import { sessionDetail, sessionPhaseLabel } from "../launch/launchView";
 import { fade, shake, springs } from "../lib/motion";
-import { useLauncher, useNow } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { isLoadingPhase, type SessionState } from "../state/session";
 import { Button } from "../ui/Button";
@@ -79,8 +79,9 @@ export function islandSecondText(second: IslandSecond): string {
 }
 
 export function StatusIsland() {
-  const { state } = useLauncher();
-  return <AnimatePresence>{state.session !== null && <Island key="island" session={state.session} />}</AnimatePresence>;
+  // 只随会话变（含展开时显示的日志），下载进度不让状态岛重渲染
+  const session = useLauncherSelector((s) => s.session);
+  return <AnimatePresence>{session !== null && <Island key="island" session={session} />}</AnimatePresence>;
 }
 
 const shakeVariants: Variants = {
@@ -89,7 +90,8 @@ const shakeVariants: Variants = {
 };
 
 function Island({ session }: { session: SessionState }) {
-  const { state, actions } = useLauncher();
+  const actions = useLauncherActions();
+  const instance = useLauncherSelector((s) => findInstance(s, session.instanceId));
   const { tier } = useShell();
   const host = useLaunchHost();
   const now = useNow(1000);
@@ -99,7 +101,6 @@ function Island({ session }: { session: SessionState }) {
   // 「正在结束」是纯界面态：确认结束或点了取消、IPC 还没返回的这段时间；超时由动作本身以错误结束
   const [stopping, setStopping] = useState(false);
   const close = useCallback(() => setOpen(false), []);
-  const instance = findInstance(state, session.instanceId);
   const name = instance === undefined ? session.instanceId : instance.name;
   const tone = islandTone(session);
   const second = islandSecond(session, tier, now, stopping);

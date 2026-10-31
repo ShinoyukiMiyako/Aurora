@@ -6,7 +6,7 @@
 // 内容区按路由键挂载页面：同一实例换分页、设置换分区不重新挂载；每个页面各有一层错误边界。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import { PanoramaBackdrop } from "../art/panorama/PanoramaBackdrop";
 import { PetalCanvas } from "../art/petals/PetalCanvas";
 import type { PetalDowngrade } from "../art/petals/engine";
@@ -16,7 +16,7 @@ import { logDiagnostic } from "../ipc/diagnostics";
 import { createThumbResolver } from "../mc/art";
 import { useAppearance } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
-import { useLauncher } from "../state/launcher";
+import { useLauncherSelector } from "../state/launcher";
 import { routeKey, type Route } from "../state/route";
 import { RemoteImageProvider } from "../ui/remote-image";
 import styles from "./AppShell.module.css";
@@ -63,12 +63,14 @@ export const PAGE_PRELOAD_DELAY_MS = 800;
 const resolveRemoteImage = createThumbResolver(thumbRegister);
 
 export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
-  const { state } = useLauncher();
+  // 按片订阅：外壳根只随「是否首次启动」变，下载进度与游戏日志不让整棵树跟着重渲染
+  const firstRunKnown = useLauncherSelector((s) => s.status.firstRun.kind !== "loading");
+  const firstRun = useLauncherSelector((s) => s.firstRun);
   const { bindRoot, bindPageScroll, fileDropHint } = useShell();
   const { appearance, reduced } = useAppearance();
   const run = useRunner();
 
-  useRevealWindow(state.status.firstRun.kind !== "loading");
+  useRevealWindow(firstRunKnown);
   useCloseGuard();
   useAfterLaunch();
   useBackgroundAttention();
@@ -79,8 +81,8 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
     return () => window.clearTimeout(timer);
   }, [pages, run]);
 
-  if (state.firstRun === true && flows.onboarding === null) throw new Error(SHELL_DEFECT_COPY.missingOnboarding);
-  const onboarding = state.firstRun === true ? flows.onboarding : null;
+  if (firstRun === true && flows.onboarding === null) throw new Error(SHELL_DEFECT_COPY.missingOnboarding);
+  const onboarding = firstRun === true ? flows.onboarding : null;
 
   // 内容区滚动容器：交给外壳核心记录滚动位置，也给侧栏与命令面板用
   const scrollEl = useRef<HTMLDivElement | null>(null);
@@ -133,7 +135,8 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
 /** 主界面的两列各自淡入（它们是网格的直接子项，不能再包一层）；应用启动时由外层 initial={false} 跳过。 */
 const MAIN_ENTER = { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in } } as const;
 
-function MainFrame({ pages, bindScroll }: { pages: PageRegistry; bindScroll: (el: HTMLDivElement | null) => void }) {
+/** 只随路由、分档与外观重渲染：父级（外壳根、AnimatePresence）重渲染时 props 不变就跳过。 */
+const MainFrame = memo(function MainFrame({ pages, bindScroll }: { pages: PageRegistry; bindScroll: (el: HTMLDivElement | null) => void }) {
   const { route } = useNav();
   const { tier, petalsPaused } = useShell();
   const { appearance, reduced } = useAppearance();
@@ -175,10 +178,10 @@ function MainFrame({ pages, bindScroll }: { pages: PageRegistry; bindScroll: (el
       </motion.div>
     </>
   );
-}
+});
 
-/** 一次挂载内固定用同一个组件：挂载时已加载的页面直接渲染，没加载的经 lazy 挂起。 */
-function PageView({ route, pages }: { route: Route; pages: PageRegistry }) {
+/** 一次挂载内固定用同一个组件：挂载时已加载的页面直接渲染，没加载的经 lazy 挂起。路由不变时不重渲染。 */
+const PageView = memo(function PageView({ route, pages }: { route: Route; pages: PageRegistry }) {
   const [Page] = useState<AnyPage>(() => {
     const resolved = pages.resolved(route.page);
     return resolved === null ? pages.lazy(route.page) : resolved;
@@ -188,7 +191,7 @@ function PageView({ route, pages }: { route: Route; pages: PageRegistry }) {
       <Page route={route} />
     </Suspense>
   );
-}
+});
 
 function OnboardingFrame({ Flow }: { Flow: ComponentType<FlowProps<"onboarding">> }) {
   const frame = useReportedWindowFrame();
@@ -208,8 +211,7 @@ function OnboardingFrame({ Flow }: { Flow: ComponentType<FlowProps<"onboarding">
 }
 
 function LoginMount({ Flow }: { Flow: ComponentType<FlowProps<"login">> }) {
-  const { state } = useLauncher();
-  const login = state.login;
+  const login = useLauncherSelector((s) => s.login);
   return <AnimatePresence>{login !== null && <Flow key={login.kind} login={login} />}</AnimatePresence>;
 }
 

@@ -7,7 +7,7 @@
 import { useCallback } from "react";
 import { Icon } from "../art/Icon";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL } from "../copy/flows";
-import { useLauncher } from "../state/launcher";
+import { useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { IconButton } from "../ui/IconButton";
 import { KeyHint } from "../ui/KeyHint";
@@ -64,10 +64,9 @@ function HistoryButtons() {
 /** 页面标题；实例页是「实例库 / 实例名 / 分页名」面包屑，概览分页不写分页名。 */
 export function PageTitle() {
   const { route, go } = useNav();
-  const { state } = useLauncher();
+  const inst = useLauncherSelector((s) => (route.page === "instance" ? findInstance(s, route.id) : undefined));
   if (route.page !== "instance") return <span className={styles.title}>{PAGE_LABEL[route.page]}</span>;
   // 当前路由指向的实例由外壳保证存在（失效路由在渲染前就落到实例库），这里查不到就是外壳状态坏了
-  const inst = findInstance(state, route.id);
   if (inst === undefined) throw new Error(`标题栏找不到当前路由的实例 ${route.id}`);
   const tab = route.tab === "overview" ? null : INSTANCE_TAB_LABEL[route.tab];
   return (

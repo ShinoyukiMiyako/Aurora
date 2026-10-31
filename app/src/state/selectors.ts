@@ -23,7 +23,7 @@ export function activeTasks(state: LauncherState): Task[] {
   return state.tasks.filter(isActiveTask);
 }
 
-export function findInstance(state: LauncherState, id: string): InstanceSummary | undefined {
+export function findInstance(state: Pick<LauncherState, "instances">, id: string): InstanceSummary | undefined {
   return state.instances.find((i) => i.id === id);
 }
 

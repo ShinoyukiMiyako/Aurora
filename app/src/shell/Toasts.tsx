@@ -6,7 +6,7 @@
 import { AnimatePresence } from "framer-motion";
 import { useRef } from "react";
 import { createPortal } from "react-dom";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { toastCountdown, type Toast as ToastState } from "../state/toasts";
 import { Toast } from "../ui/Toast";
 import { TOASTS_COPY } from "../copy/shell";
@@ -15,7 +15,8 @@ import { useShell } from "./shell";
 import styles from "./Toasts.module.css";
 
 export function Toasts() {
-  const { state, actions } = useLauncher();
+  const toasts = useLauncherSelector((s) => s.toasts);
+  const actions = useLauncherActions();
   const hovering = useRef(false);
   const focusedWithin = useRef(false);
   const root = useOverlayRoot();
@@ -50,7 +51,7 @@ export function Toasts() {
       }}
     >
       <AnimatePresence initial={false}>
-        {state.toasts.map((toast) => (
+        {toasts.map((toast) => (
           <ToastItem key={toast.id} toast={toast} onClose={() => actions.dismissToast(toast.id)} />
         ))}
       </AnimatePresence>

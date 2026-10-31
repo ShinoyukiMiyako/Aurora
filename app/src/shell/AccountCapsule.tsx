@@ -11,7 +11,7 @@ import { AccountAvatar } from "../art/skin/AccountAvatar";
 import { ACTION_ERROR, NEXT_LAUNCH_SUFFIX, TOAST_COPY, accountKindLabel } from "../copy/flows";
 import type { Account } from "../domain/adapt";
 import { isImeComposing } from "../lib/util";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useSkinInfo } from "../state/queries/home";
 import { activeAccount, busyInstanceId } from "../state/selectors";
 import { Popover } from "../ui/Popover";
@@ -40,11 +40,13 @@ export function accountLine(account: Account): string {
 
 /** 切换当前账户：成功后弹一条通知，游戏占着进程时说明只影响下一次启动。选中的已是当前账户时什么都不做。 */
 export function useSwitchAccount(): (account: Account) => void {
-  const { state, actions } = useLauncher();
+  const actions = useLauncherActions();
+  const currentId = useLauncherSelector((s) => s.currentAccountId);
+  const gameBusy = useLauncherSelector((s) => busyInstanceId(s) !== null);
   const run = useRunner();
   return (account) => {
-    if (account.uuid === state.currentAccountId) return;
-    const body = `${accountKindLabel(account.kind, account.authServer)}${busyInstanceId(state) === null ? "" : NEXT_LAUNCH_SUFFIX}`;
+    if (account.uuid === currentId) return;
+    const body = `${accountKindLabel(account.kind, account.authServer)}${gameBusy ? NEXT_LAUNCH_SUFFIX : ""}`;
     void run(() => actions.selectAccount(account.uuid), ACTION_ERROR.selectAccount).then((result) => {
       if (result.ok) actions.toast("success", TOAST_COPY.accountSwitched(account.name), body);
     });
@@ -52,13 +54,13 @@ export function useSwitchAccount(): (account: Account) => void {
 }
 
 export function AccountCapsule() {
-  const { state } = useLauncher();
+  const current = useLauncherSelector(activeAccount);
+  const accounts = useLauncherSelector((s) => s.accounts);
   const { tier } = useShell();
   const { route, go } = useNav();
   const switchTo = useSwitchAccount();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
-  const current = activeAccount(state);
   const onAccountsPage = route.page === "accounts";
 
   if (current === null) {
@@ -122,7 +124,7 @@ export function AccountCapsule() {
         )}
       </button>
       <Popover open={open} anchor={anchor} onClose={close} placement="bottom-end" role="presentation">
-        <AccountMenu accounts={state.accounts} currentId={current.uuid} onPick={pick} onManage={manage} />
+        <AccountMenu accounts={accounts} currentId={current.uuid} onPick={pick} onManage={manage} />
       </Popover>
     </>
   );
