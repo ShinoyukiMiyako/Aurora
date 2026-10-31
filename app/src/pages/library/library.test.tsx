@@ -388,6 +388,28 @@ describe("实例库：动作", () => {
     expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.pendingTask);
   });
 
+  it("「崩溃诊断」只给崩溃过的实例；之后没再正常玩过才提示「上次崩溃」", async () => {
+    instances = instances.map((i) => {
+      if (i.id === "樱花生存") return { ...i, last_crash_at: NOW - HOUR, last_played_at: NOW - HOUR };
+      if (i.id === "机械动力") return { ...i, last_crash_at: NOW - 72 * HOUR };
+      return i;
+    });
+    await mount();
+    const items = () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((el) => el.textContent);
+    click(byLabel("「樱花生存」的更多操作"));
+    expect(items()).toContain(LIBRARY_COPY.menu.crash + LIBRARY_COPY.menu.crashActive);
+    click(menuItem(LIBRARY_COPY.menu.crash + LIBRARY_COPY.menu.crashActive));
+    expect(nav.route).toEqual({ page: "instance", id: "樱花生存", tab: "crash" });
+    act(() => nav.go({ page: "library" }));
+    await afterMotion();
+    click(byLabel("「机械动力」的更多操作"));
+    expect(items()).toContain(LIBRARY_COPY.menu.crash);
+    keydown(document, "Escape");
+    await afterMotion();
+    click(byLabel("「原版」的更多操作"));
+    expect(items().some((t) => t !== null && t.startsWith(LIBRARY_COPY.menu.crash))).toBe(false);
+  });
+
   it("取消删除确认不删", async () => {
     ipc.overrides.set("preview_instance_deletion", (args) => ({ id: args.id, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
     await mount();

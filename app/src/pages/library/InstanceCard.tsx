@@ -28,7 +28,7 @@ import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { Tooltip } from "../../ui/Tooltip";
 import { useDeleteInstance } from "../instance/delete";
-import { instanceLocks } from "../instance/model";
+import { instanceLocks, isCrashActive } from "../instance/model";
 import { lockReason } from "../instance/ops";
 import { CardStatus } from "./CardStatus";
 import { LIBRARY_COPY } from "./copy";
@@ -57,7 +57,12 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const deleteReason = lockReason(instanceLocks(busy, inst.status === "installing", inst.activity === "modifying").delete, "delete");
   const pinAllowed = inst.pinned || canPinMore(state);
   const cover = instanceCover(inst);
-  const crashed = live && launchView(state, inst).kind === "crashed";
+  // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
+  // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
+  const viewKind = live ? launchView(state, inst).kind : null;
+  const justCrashed = viewKind === "crashed";
+  const hasCrash = justCrashed || inst.lastCrashAt !== null || inst.lastCrashError !== null;
+  const crashActive = justCrashed || (viewKind !== null && isCrashActive(inst.lastCrashAt, inst.lastPlayedAt, viewKind));
 
   const open = (tab: "overview" | "mods" | "settings" | "logs" | "crash" = "overview") => go({ page: "instance", id, tab });
 
@@ -111,7 +116,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
         ]),
     { label: LIBRARY_COPY.menu.settings, icon: "sliders", onSelect: () => open("settings") },
     { label: LIBRARY_COPY.menu.logs, icon: "terminal", onSelect: () => open("logs") },
-    { label: LIBRARY_COPY.menu.crash, icon: "bug", hint: crashed ? LIBRARY_COPY.menu.crashActive : undefined, onSelect: () => open("crash") },
+    ...(hasCrash ? [{ label: LIBRARY_COPY.menu.crash, icon: "bug" as const, hint: crashActive ? LIBRARY_COPY.menu.crashActive : undefined, onSelect: () => open("crash") }] : []),
     { kind: "separator" },
     {
       label: LIBRARY_COPY.menu.remove,
