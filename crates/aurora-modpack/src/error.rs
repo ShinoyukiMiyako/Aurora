@@ -42,6 +42,10 @@ pub enum Error {
         method: u16,
     },
 
+    /// 调用方要跳过的文件不是这个整合包里的可选文件。
+    #[error("不能跳过 {path}：它不是这个整合包里的可选文件")]
+    NotOptional { path: String },
+
     /// 包里的某条路径不能安全落到实例目录里。
     #[error("整合包里的路径不安全：{path}")]
     UnsafePath {
