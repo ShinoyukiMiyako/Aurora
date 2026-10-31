@@ -16,6 +16,7 @@ import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } fr
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { invalidate } from "../../state/resource";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 import { InstallStageTab } from "./InstallStage";
@@ -857,6 +858,18 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
   });
 
+  it("补全进行中：Mod 标签的「检查更新」带原因禁用，点了不再查", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
+    await open("mods");
+    // 检查更新会把反查到的身份回写卷宗，后端照改动 Mod 占住实例，与补全互斥
+    const asked = callsOf(ipc, "check_updates").length;
+    const check = button("检查更新");
+    await expectLockedWith(check, "安装任务正在写这个实例的文件夹，完成后才能检查更新");
+    click(check);
+    await flush();
+    expect(callsOf(ipc, "check_updates")).toHaveLength(asked);
+  });
+
   it("崩溃诊断：补全进行中改实例设置的一键尝试带原因禁用", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
     await open("crash");
@@ -1172,6 +1185,114 @@ describe("实例详情：Mod 管理", () => {
     expect(search.value).toBe("");
   });
 
+  it("停用后列表还没重扫回来又点回启用：按盘上已改好的文件名调后端，不对着旧名空转", async () => {
+    ipc.overrides.set("set_mod_enabled", (args) => {
+      const fileName = String(args.fileName);
+      return args.enabled === true ? fileName.replace(/\.disabled$/, "") : `${fileName}.disabled`;
+    });
+    await open("mods");
+    // 扫 mods 目录要读每个 jar 的元数据，大实例要好一阵：重扫期间行还是旧的 sodium.jar，开关是乐观值
+    const rescan = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => rescan.promise);
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    click(byRole("switch", "启用 Sodium"));
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toEqual([
+      { versionId: ID, fileName: "sodium.jar", enabled: false },
+      { versionId: ID, fileName: "sodium.jar.disabled", enabled: true },
+    ]);
+    expect(toastTitles()).toEqual(expect.arrayContaining(["已停用 Sodium", "已启用 Sodium"]));
+  });
+
+  it("停用后列表还没重扫回来就移除：确认框与后端都用盘上改好的文件名", async () => {
+    await open("mods");
+    const rescan = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => rescan.promise);
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    click(button("移除 Sodium"));
+    await flush();
+    expect(dialog().textContent).toContain("会删除 sodium.jar.disabled（1.2 MB），这一步不能回滚。");
+    click(button("移除", dialog()));
+    await flush();
+    expect(callsOf(ipc, "remove_mod")).toEqual([{ versionId: ID, fileName: "sodium.jar.disabled" }]);
+  });
+
+  it("停用请求还没回来时开关带原因禁用：第二下不发命令", async () => {
+    await open("mods");
+    const pending = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => pending.promise);
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    const toggle = byRole("switch", "启用 Sodium");
+    expect(toggle.getAttribute("aria-disabled")).toBe("true");
+    click(toggle);
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toHaveLength(1);
+    await act(async () => {
+      pending.resolve("sodium.jar.disabled");
+      await settle(20);
+    });
+    expect(byRole("switch", "启用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
+
+  describe("单个 Mod 的更新还在跑", () => {
+    const candidate = (fileName: string, title: string, projectId: string, from: string, to: string): UpdateCandidate => ({
+      file_name: fileName,
+      title,
+      current_version_id: from,
+      current_version_number: null,
+      latest: {
+        version_id: to,
+        project_id: projectId,
+        platform: "modrinth",
+        name: to,
+        version_number: to,
+        release_channel: "release",
+        game_versions: [],
+        loaders: [],
+        file_name: `${to}-${fileName}`,
+        file_size: 1000,
+        sha1: null,
+        download_url: null,
+        date_published: "",
+        dependencies: [],
+      },
+    });
+
+    beforeEach(() => {
+      vi.stubGlobal("innerWidth", 1440);
+      updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "v1", "v9"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "v2", "v8")];
+      ipc.overrides.set("update_mod", () => new Promise(() => undefined));
+    });
+
+    it("Mod 标签的「全部更新」转圈，点了不把同一个文件再排进组合任务", async () => {
+      await open("mods");
+      click(button("更新 Sodium"));
+      await flush();
+      expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mod").map((t) => t.status)).toEqual(["running"]);
+      const all = button("全部更新 · 2");
+      expect(all.getAttribute("aria-busy")).toBe("true");
+      click(all);
+      await flush();
+      expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mods")).toEqual([]);
+    });
+
+    it("概览 Mod 速览里的「全部更新」同样转圈，点了不入队", async () => {
+      await open("mods");
+      click(button("更新 Sodium"));
+      await flush();
+      click(byRole("tab", "概览"));
+      await flush();
+      const all = button("全部更新");
+      expect(all.getAttribute("aria-busy")).toBe("true");
+      click(all);
+      await flush();
+      expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mods")).toEqual([]);
+    });
+  });
+
   it("自建实例的列表就是全部：摘要数与列表对不上时以列表为准，不说「其余由整合包统一管理」", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: 12 } : i));
     await open("mods");
@@ -1219,6 +1340,18 @@ describe("实例详情：设置", () => {
     expect(saved).toHaveLength(1);
     expect((saved[0].settings as InstanceSettingsDto).jvm_args).toBe("-Xmx8G -XX:+UseG1GC");
     expect(toastTitles()).toContain("JVM 参数已保存");
+  });
+
+  it("盘上的 JVM 参数带首尾空白（手改过 settings.json）：读进来不算未保存，保存按钮不亮", async () => {
+    settings = { ...settings, jvm_args: " -Xmx4G\n" };
+    await open("settings");
+    expect(text()).not.toContain("未保存");
+    expect(button("保存参数").disabled).toBe(true);
+    const area = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="JVM 参数"]');
+    if (area === null) throw new Error("没有 JVM 参数框");
+    typeInto(area, "-Xmx4G -XX:+UseG1GC");
+    expect(text()).toContain("未保存");
+    expect(button("保存参数").disabled).toBe(false);
   });
 
   it("分代 ZGC 按实际生效的 Java：自动挑到 21 时带 ZGenerational", async () => {
@@ -1435,6 +1568,56 @@ describe("实例详情：崩溃诊断", () => {
     expect(callsOf(ipc, "set_mod_enabled")).toEqual([{ versionId: ID, fileName: "sodium.jar", enabled: false }]);
     const toast = launcher.state.toasts.find((t) => t.title === "已停用 Sodium");
     expect(toast?.body).toBe("再启动一次，看看问题是否还在");
+  });
+
+  it("停在诊断页时又崩了一次：一键尝试按新报告重新推，不留着上一份的完成态", async () => {
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    await open("crash");
+    click(button("调到 6 GB"));
+    await flush();
+    expect(text()).toContain("已调到 6 GB，下次启动生效");
+    crash = report([{ category: "mixin_failure", detail: "sodium" }], NOW);
+    await act(async () => {
+      invalidate(`crash:${ID}`);
+      await settle(20);
+    });
+    expect(text()).toContain("找到 1 条线索，日志指向 Mixin 注入失败");
+    expect(button("停用 Sodium").textContent).toBe("停用 Sodium");
+    expect(text()).not.toContain("已调到 6 GB");
+    expect(() => button("撤销")).toThrow();
+  });
+
+  it("版本要求的 Java 读不出来：一键尝试原位报错并能重试，不一直停在骨架", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, java_major: null } : i));
+    let fail = true;
+    ipc.overrides.set("required_java", () => {
+      if (fail) throw new IpcError("network_failed", "版本清单下载失败");
+      return 21;
+    });
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    await open("crash");
+    expect(text()).toContain("版本清单下载失败");
+    fail = false;
+    click(button("重试"));
+    await flush();
+    expect(text()).not.toContain("版本清单下载失败");
+    expect(button("调到 6 GB").textContent).toBe("调到 6 GB");
+  });
+
+  it("Mod 列表读不出来：一键尝试与日志指向的 Mod 都原位报错，不一直停在骨架", async () => {
+    let fail = true;
+    ipc.overrides.set("list_mods", () => {
+      if (fail) throw new IpcError("io", "mods 目录读不出来");
+      return mods;
+    });
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    await open("crash");
+    expect(text().split("mods 目录读不出来").length - 1).toBe(2);
+    fail = false;
+    click(button("重试"));
+    await flush();
+    expect(text()).not.toContain("mods 目录读不出来");
+    expect(button("调到 6 GB").textContent).toBe("调到 6 GB");
   });
 });
 

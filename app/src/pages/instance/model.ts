@@ -390,6 +390,14 @@ export function disabledFileName(fileName: string): string {
 export const MOD_UPDATE_COMMANDS: ReadonlySet<string> = new Set(["update_mod", "update_mods"]);
 
 /**
+ * 这个实例上排队或进行中的 Mod 更新任务。有它在时「全部更新」不能再点：检查更新还会把正在换的文件列进去，
+ * 组合任务按旧文件名再换一遍，同一个文件被两个任务同时改。
+ */
+export function isPendingModUpdate(task: Task, instanceId: string): boolean {
+  return task.instanceId === instanceId && MOD_UPDATE_COMMANDS.has(task.spec.command) && isActiveTask(task);
+}
+
+/**
  * 一个更新任务要换掉的 Mod（启用态文件名）：单个更新是它那一个，组合任务是入队时的全部几项。
  * 组合任务跑完之前这几行都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败。
  */

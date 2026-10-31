@@ -116,7 +116,18 @@ function ReportView({
           ))}
         </div>
         <div className={styles.stack}>
-          <FixesCard inst={inst} queryId={queryId} ops={ops} report={report} mods={modList} modsReady={!modded || mods.status === "ready"} onTab={onTab} />
+          {/* 推一次就定住的一键尝试只属于这一份报告：停在本页时又崩了一次，按新报告从头推，上一份的完成态与撤销不再适用 */}
+          <FixesCard
+            key={report.at}
+            inst={inst}
+            queryId={queryId}
+            ops={ops}
+            report={report}
+            mods={modList}
+            modsReady={!modded || mods.status === "ready"}
+            modsError={modded && mods.status === "error" ? mods : null}
+            onTab={onTab}
+          />
           {modded && <SuspectsCard inst={inst} ops={ops} report={report} mods={mods} />}
         </div>
       </div>
@@ -272,6 +283,7 @@ function FixesCard({
   report,
   mods,
   modsReady,
+  modsError,
   onTab,
 }: {
   inst: InstanceSummary;
@@ -280,6 +292,8 @@ function FixesCard({
   report: CrashReportDto;
   mods: readonly InstalledMod[];
   modsReady: boolean;
+  /** Mod 列表读不出来（原版实例不读，为 null）：一键尝试要按已装 Mod 推，读不出就推不了。 */
+  modsError: ResourceResult<InstalledMod[]> | null;
   onTab(tab: InstanceTab): void;
 }) {
   const settings = useInstanceSettings(queryId);
@@ -306,7 +320,17 @@ function FixesCard({
     );
   }, [frozen, memory, mods, ready, report, required, runtimes]);
 
-  const error = settings.status === "error" ? settings : memory.status === "error" ? memory : runtimes.status === "error" ? runtimes : null;
+  // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上
+  const error =
+    settings.status === "error"
+      ? settings
+      : memory.status === "error"
+        ? memory
+        : runtimes.status === "error"
+          ? runtimes
+          : required.status === "error"
+            ? required
+            : modsError;
 
   return (
     <Card padding="lg">

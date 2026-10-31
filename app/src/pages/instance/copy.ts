@@ -68,6 +68,11 @@ export const LOCK_REASON = {
       renaming: "正在重命名这个实例，完成后才能改设置",
       deleting: "正在删除这个实例",
     },
+    checkUpdates: {
+      installing: "安装任务正在写这个实例的文件夹，完成后才能检查更新",
+      renaming: "正在重命名这个实例，完成后才能检查更新",
+      deleting: "正在删除这个实例",
+    },
   },
 } as const;
 
@@ -203,6 +208,7 @@ export const MODS_COPY = {
   updateLabel: (name: string) => `更新 ${name}`,
   toggleLabel: (name: string, enabled: boolean) => (enabled ? `停用 ${name}` : `启用 ${name}`),
   toggleTip: (enabled: boolean) => (enabled ? "停用" : "启用"),
+  togglePending: "上一次启停还没完成",
   remove: (name: string) => `移除 ${name}`,
   versionUnknown: "版本未知",
   disabledToast: (name: string) => `已停用 ${name}`,
