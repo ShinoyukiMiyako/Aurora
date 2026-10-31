@@ -479,7 +479,7 @@ describe("mock：新实例的默认设置", () => {
 
   it("新建时沿用：隔离的 Fabric 实例补上模板里的文件；原版正式版不隔离、跳过；没请求为 null；模板为空时跳过", async () => {
     await saveInstanceAsTemplate("1.21");
-    expect((await install("模组生存", "1.21.1", "fabric", true)).template).toEqual({ status: "applied", copied: ["options.txt", "servers.dat"], kept: [] });
+    expect((await install("Fabric 生存", "1.21.1", "fabric", true)).template).toEqual({ status: "applied", copied: ["options.txt", "servers.dat"], kept: [] });
     expect((await install("原版生存", "1.21.1", null, true)).template).toEqual({ status: "skipped", reason: "shared_working_dir" });
     expect((await install("不沿用", "1.21.1", "fabric", false)).template).toBeNull();
     expect((await install("旧任务", "1.21.1", "fabric", undefined)).template).toBeNull();
