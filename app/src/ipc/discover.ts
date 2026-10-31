@@ -2,7 +2,10 @@
 
 import type { Platform } from "../domain/types";
 import { invoke } from "./bridge";
-import type { ModLoader } from "./mods";
+import type { ModLoader, ModVersionInfo } from "./mods";
+
+// 版本视图在 Mod 管理与发现两侧是同一个后端类型，只在 mods 定义一份，免得两边字段漂移。
+export type { DependencyKind, ModDependency, ModVersionInfo, ReleaseChannel } from "./mods";
 
 export type PlatformId = Platform;
 export type ResourceType = "mod" | "modpack" | "resource_pack" | "shader" | "data_pack" | "plugin";
@@ -13,8 +16,6 @@ export type InstallableResourceType = "mod" | "resource_pack" | "shader" | "data
 export type SortField = "relevance" | "downloads" | "follows" | "newest" | "updated";
 /** 某平台没参与本次搜索的原因：只搜了另一个平台 / 没有 CurseForge API key / 该分类在 CurseForge 没有对应。 */
 export type SkipReason = "filtered" | "key_missing" | "category_unmapped";
-export type ReleaseChannel = "release" | "beta" | "alpha";
-export type DependencyKind = "required" | "optional" | "incompatible" | "embedded" | "tool";
 export type BodyFormat = "markdown" | "html";
 
 /** 合并卡里某一个平台的那份工程。 */
@@ -94,28 +95,6 @@ export interface SearchArgs {
   limit: number;
   /** 首页传 null。 */
   cursor: SearchCursor | null;
-}
-
-export interface ModDependency {
-  project_id: string | null;
-  version_id: string | null;
-  kind: DependencyKind;
-}
-
-export interface ModVersionInfo {
-  version_id: string;
-  project_id: string;
-  platform: PlatformId;
-  name: string;
-  version_number: string;
-  release_channel: ReleaseChannel;
-  game_versions: string[];
-  loaders: ModLoader[];
-  file_name: string;
-  file_size: number | null;
-  sha1: string | null;
-  date_published: string;
-  dependencies: ModDependency[];
 }
 
 /** 详情页「必需前置」里的一项。 */

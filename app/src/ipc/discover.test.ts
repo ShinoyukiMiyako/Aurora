@@ -144,6 +144,9 @@ describe("发现 mock", () => {
     expect(modrinth).toMatchObject({ title: "Sodium", body_format: "markdown", downloads: 98_000_000, distribution_allowed: true });
     const curseforge = await projectDetail("curseforge", "394468");
     expect(curseforge).toMatchObject({ project_id: "394468", body_format: "html", downloads: 41_000_000, follows: null });
+    // 安装直接用版本视图里的直链建下载任务，mock 也得带上，否则 Tauri 外跑不出安装路径。
+    expect(modrinth.latest_version?.download_url).toBe("https://cdn.modrinth.com/data/AANobbMI/sodium-1.0.0.jar");
+    expect(curseforge.latest_version?.download_url).toBe("https://edge.forgecdn.net/files/1/2/sodium-1.0.0.jar");
     const missing = await projectDetail("modrinth", "nope").catch((e: unknown) => e);
     expect(missing).toMatchObject({ code: "mod_platform_failed" });
   });

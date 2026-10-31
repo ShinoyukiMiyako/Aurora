@@ -358,6 +358,7 @@ function projectDetail(args: MockArgs): ProjectDetail {
   const { entry } = found;
   const own = entry.sources.find((s) => s.platform === platform);
   if (!own) throw new Error("findCatalogueItem 返回了不含该平台的条目");
+  const fileName = `${own.slug === null ? own.project_id : own.slug}-1.0.0.${entry.resource_type === "mod" ? "jar" : "zip"}`;
   return {
     platform,
     project_id: own.project_id,
@@ -391,9 +392,13 @@ function projectDetail(args: MockArgs): ProjectDetail {
       release_channel: "release",
       game_versions: found.gameVersions,
       loaders: entry.loaders,
-      file_name: `${own.slug === null ? own.project_id : own.slug}-1.0.0.${entry.resource_type === "mod" ? "jar" : "zip"}`,
+      file_name: fileName,
       file_size: 1_048_576,
       sha1: null,
+      download_url:
+        platform === "modrinth"
+          ? `https://cdn.modrinth.com/data/${own.project_id}/${fileName}`
+          : `https://edge.forgecdn.net/files/1/2/${fileName}`,
       date_published: entry.date_modified === null ? found.datePublished : entry.date_modified,
       dependencies: [],
     },
