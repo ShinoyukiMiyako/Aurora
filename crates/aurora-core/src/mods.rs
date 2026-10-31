@@ -22,13 +22,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use aurora_download::DownloadTask;
-use aurora_instance::{AURORA_META_DIR, DiscoveredVersion, VERSIONS_DIR, VersionSettingsStore};
-use aurora_launch::resolve_game_directory;
+use aurora_instance::{AURORA_META_DIR, DiscoveredVersion, VersionSettingsStore, discover_version};
 use aurora_modplatform::{
     DISABLED_SUFFIX, InstalledMod, ModVersionInfo, Platform, disable_mod, enable_mod,
     parse_mod_metadata, scan_mods_dir_cached,
 };
-use aurora_version::{VersionJson, detect_loaders};
 use serde::Serialize;
 
 use crate::deps::PlannedItem;
@@ -332,15 +330,14 @@ impl Aurora {
         let settings = VersionSettingsStore::for_version_dir(&version.dir)
             .load()
             .await?;
-        let resolved = resolve_game_directory(
-            self.game_dir(),
-            &version.id,
-            self.config().isolation_policy,
-            settings.isolation,
-            version.has_mod_loader(),
-            version.is_release(),
-        )
-        .await?;
+        let resolved = self
+            .resolve_working_dir_from(
+                &version.id,
+                settings.isolation,
+                version.has_mod_loader(),
+                version.is_release(),
+            )
+            .await?;
         let working_dir = resolved.working_dir;
         Ok(InstanceDirs {
             mods_dir: working_dir.join(MODS_DIR),
@@ -706,8 +703,8 @@ impl Aurora {
     }
 }
 
-/// 只读一个版本目录，语义与「全量扫描后按 id 查找」逐字一致：目录不存在、缺 JSON、JSON 不是合法
-/// UTF-8 或解析失败一律当作未安装（损坏版本本就不在已安装列表里）；只有真实 IO 故障冒泡。
+/// 只读一个版本目录：目录不存在、缺 JSON、JSON 损坏一律当作未安装（损坏版本本就不在已安装列表里）；
+/// 只有真实 IO 故障冒泡。id 带路径成分直接判为未安装，拼出的卷宗、历史、mods 路径才逃不出 `versions/`。
 async fn probe_installed_version(
     game_dir: &Path,
     version_id: &str,
@@ -715,41 +712,7 @@ async fn probe_installed_version(
     if !is_plain_file_name(version_id) {
         return Ok(None);
     }
-    let dir = game_dir.join(VERSIONS_DIR).join(version_id);
-    let json_path = dir.join(format!("{version_id}.json"));
-    let bytes = match tokio::fs::read(&json_path).await {
-        Ok(bytes) => bytes,
-        Err(err)
-            if matches!(
-                err.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-            ) =>
-        {
-            return Ok(None);
-        }
-        Err(source) => {
-            return Err(aurora_base::Error::Io {
-                path: json_path,
-                source,
-            }
-            .into());
-        }
-    };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Ok(None);
-    };
-    let Ok(json) = VersionJson::from_json_str(text) else {
-        return Ok(None);
-    };
-    let loaders = detect_loaders(&json);
-    Ok(Some(DiscoveredVersion {
-        id: version_id.to_owned(),
-        jar_path: dir.join(format!("{version_id}.jar")),
-        dir,
-        json_path,
-        json,
-        loaders,
-    }))
+    Ok(discover_version(game_dir, version_id).await?)
 }
 
 /// 扫描实例的 mods 目录（走元数据缓存）；目录还不存在返回空列表。
