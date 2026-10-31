@@ -50,6 +50,8 @@ pub mod code {
     pub const INSTANCE_FAILED: &str = "instance_failed";
     /// Java 探测或运行时下载失败。
     pub const JAVA_FAILED: &str = "java_failed";
+    /// 读不到本机显卡信息（DXGI 枚举失败）。detail：`{ hresult: "0x%08X", causes }`。
+    pub const GPU_QUERY_FAILED: &str = "gpu_query_failed";
     /// 启动链路失败（命令拼装、进程拉起）。
     pub const LAUNCH_FAILED: &str = "launch_failed";
     /// 未配置 CurseForge API 密钥。
@@ -281,6 +283,8 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+        // 写注册表失败本质是一次读写失败；它只在启动链路里转成警告，到了命令边界与其余读写失败同码。
+        CoreError::GpuPreferenceWrite { .. } => code::IO,
     }
 }
 
@@ -501,7 +505,8 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::ConfigIo { path, .. } | CoreError::ConfigParse { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
-        CoreError::Base(BaseError::Io { path, .. }) => {
+        CoreError::Base(BaseError::Io { path, .. })
+        | CoreError::GpuPreferenceWrite { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::Fetch { url, .. } | CoreError::FeedParse { url, .. } => {
@@ -919,6 +924,20 @@ mod tests {
         let detail = rejected.detail.unwrap();
         assert!(detail.get("network").is_none(), "{detail}");
         assert_eq!(detail["causes"], json!([format!("HTTP 状态码 404: {url}")]));
+    }
+
+    #[test]
+    fn gpu_preference_write_maps_to_io_with_the_program_path() {
+        let err: CommandError = CoreError::GpuPreferenceWrite {
+            path: PathBuf::from("D:/jdk-17/bin/java.exe"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问"),
+        }
+        .into();
+        assert_eq!(err.code, code::IO);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "path": "D:/jdk-17/bin/java.exe", "causes": ["拒绝访问"] }))
+        );
     }
 
     #[test]

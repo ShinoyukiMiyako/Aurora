@@ -1,9 +1,11 @@
-//! Java：探测本机运行时与下载 Mojang 运行时。
+//! Java：探测本机运行时、下载 Mojang 运行时，以及启动时选显卡要用的本机显卡信息。
 
-use aurora_core::{DetectSource, JavaInstallation, JavaVersion};
+use aurora_core::{CoreError, DetectSource, JavaInstallation, JavaVersion};
 use serde::Serialize;
+use serde_json::json;
 use tauri::{AppHandle, State};
 
+use crate::commands::error::code;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -36,6 +38,57 @@ pub struct InstalledRuntimeDto {
     pub component: String,
     pub version: JavaVersionDto,
     pub java_executable: String,
+}
+
+/// 一块硬件显卡的 DTO。
+#[derive(Debug, Serialize)]
+pub struct GpuAdapterDto {
+    pub name: String,
+    pub vendor_id: u32,
+    pub dedicated_video_memory_mb: u64,
+    /// Windows 按「高性能」偏好挑出的那一块。
+    pub high_performance: bool,
+    /// Windows 按「省电」偏好挑出的那一块。
+    pub power_saving: bool,
+}
+
+/// 本机显卡概况 DTO。
+#[derive(Debug, Serialize)]
+pub struct GpuAdaptersDto {
+    /// 按高性能偏好的顺序排列。
+    pub adapters: Vec<GpuAdapterDto>,
+    /// 有两块能切换的显卡：两种偏好挑出的不是同一块。
+    pub switchable: bool,
+}
+
+fn gpu_adapters_dto(summary: crate::gpu::GpuAdapters) -> GpuAdaptersDto {
+    GpuAdaptersDto {
+        adapters: summary
+            .adapters
+            .into_iter()
+            .map(|adapter| GpuAdapterDto {
+                name: adapter.name,
+                vendor_id: adapter.vendor_id,
+                dedicated_video_memory_mb: adapter.dedicated_video_memory_mb,
+                high_performance: adapter.high_performance,
+                power_saving: adapter.power_saving,
+            })
+            .collect(),
+        switchable: summary.switchable,
+    }
+}
+
+fn gpu_query_failed(err: &crate::gpu::GpuQueryError) -> CommandError {
+    let error = CommandError::new(
+        code::GPU_QUERY_FAILED,
+        format!("读不到显卡信息：{}", err.message),
+    )
+    .with_detail(json!({
+        "hresult": format!("0x{:08X}", err.hresult as u32),
+        "causes": [err.to_string()],
+    }));
+    tracing::warn!(code = error.code, message = %error.message, hresult = err.hresult, "命令失败");
+    error
 }
 
 fn java_version_dto(version: &JavaVersion) -> JavaVersionDto {
@@ -100,6 +153,16 @@ pub async fn install_java(
     })
 }
 
+/// 列出本机显卡，并看出 Windows 按高性能与省电偏好各挑哪一块。一次系统查询，不碰实例与配置。
+#[tauri::command]
+pub async fn gpu_adapters() -> Result<GpuAdaptersDto, CommandError> {
+    let summary = tokio::task::spawn_blocking(crate::gpu::enumerate)
+        .await
+        .map_err(CoreError::from)?
+        .map_err(|err| gpu_query_failed(&err))?;
+    Ok(gpu_adapters_dto(summary))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,5 +178,47 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(source).unwrap(), name);
         }
+    }
+
+    /// 枚举失败报 gpu_query_failed，detail.hresult 是八位十六进制写法，原文进 causes。
+    #[test]
+    fn gpu_query_failure_carries_hresult() {
+        let err = gpu_query_failed(&crate::gpu::GpuQueryError {
+            hresult: 0x887A_0001_u32 as i32,
+            message: "调用无效".into(),
+        });
+        assert_eq!(err.code, code::GPU_QUERY_FAILED);
+        assert_eq!(err.message, "读不到显卡信息：调用无效");
+        assert_eq!(
+            err.detail,
+            Some(json!({ "hresult": "0x887A0001", "causes": ["调用无效（0x887A0001）"] }))
+        );
+    }
+
+    #[test]
+    fn gpu_summary_maps_to_dto_fields() {
+        let dto = gpu_adapters_dto(crate::gpu::GpuAdapters {
+            adapters: vec![crate::gpu::GpuAdapter {
+                name: "NVIDIA GeForce RTX 4060 Laptop GPU".into(),
+                vendor_id: 0x10DE,
+                dedicated_video_memory_mb: 8188,
+                high_performance: true,
+                power_saving: false,
+            }],
+            switchable: true,
+        });
+        assert_eq!(
+            serde_json::to_value(dto).unwrap(),
+            json!({
+                "adapters": [{
+                    "name": "NVIDIA GeForce RTX 4060 Laptop GPU",
+                    "vendor_id": 4318,
+                    "dedicated_video_memory_mb": 8188,
+                    "high_performance": true,
+                    "power_saving": false
+                }],
+                "switchable": true
+            })
+        );
     }
 }
