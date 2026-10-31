@@ -33,8 +33,21 @@ describe("浏览器与测试环境走 mock", () => {
     expect(tauriInvoke).not.toHaveBeenCalled();
   });
 
-  it("mock 只登记基础层负责的五条命令", () => {
-    expect(mockCommands()).toEqual(["cancel_task", "get_appearance", "load_task_journal", "save_task_journal", "set_appearance"]);
+  it("mock 登记的命令与已实现领域的处理函数一一对应", () => {
+    expect(mockCommands()).toEqual([
+      "cancel_task",
+      "diagnose_crash",
+      "get_appearance",
+      "last_crash",
+      "last_launch_log",
+      "launch_game",
+      "load_task_journal",
+      "log_diagnostic",
+      "play_stats",
+      "save_task_journal",
+      "set_appearance",
+      "stop_game",
+    ]);
   });
 
   it("未实现的命令直接抛错，不返回空值", async () => {
@@ -150,39 +163,12 @@ describe("Tauri 窗口里走真命令", () => {
     await installJava("t-java", 21);
     await installVersion("t-ver", "1.21.1", "fabric", "0.16.9");
     await installMod("t-mod", "1.21.1-fabric", "modrinth", "AANobbMI", "mv1");
-    await launchGame({
-      taskId: "t-run",
-      versionId: "1.21.1",
-      accountUuid: null,
-      offlineName: "Steve",
-      maxMemoryMb: 4096,
-      minMemoryMb: null,
-      fullscreen: false,
-      extraJvmArgs: [],
-      extraGameArgs: [],
-      resolution: [854, 480],
-      demo: false,
-    });
+    await launchGame({ taskId: "t-run", versionId: "1.21.1", accountUuid: null, offlineName: "Steve" });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["install_java", { taskId: "t-java", requiredMajor: 21 }],
       ["install_version", { taskId: "t-ver", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9" }],
       ["install_mod", { taskId: "t-mod", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1" }],
-      [
-        "launch_game",
-        {
-          taskId: "t-run",
-          versionId: "1.21.1",
-          accountUuid: null,
-          offlineName: "Steve",
-          maxMemoryMb: 4096,
-          minMemoryMb: null,
-          fullscreen: false,
-          extraJvmArgs: [],
-          extraGameArgs: [],
-          resolution: [854, 480],
-          demo: false,
-        },
-      ],
+      ["launch_game", { taskId: "t-run", versionId: "1.21.1", accountUuid: null, offlineName: "Steve" }],
     ]);
   });
 

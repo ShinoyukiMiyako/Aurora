@@ -1,7 +1,7 @@
-//! 启动命令拼装：把版本 JSON、路径、账户、内存、GC、Authlib-Injector 组合成完整的
+//! 启动命令拼装：把版本 JSON、路径、账户、内存、Authlib-Injector 组合成完整的
 //! `java <jvm 参数...> <主类> <游戏参数...>` 与工作目录。
 //!
-//! 这是本 crate 的门面：JVM 段（安全/编码/GC/内存/authlib + 版本 jvm 参数或旧版基座 + 日志参数）与
+//! 这是本 crate 的门面：JVM 段（安全/编码/内存/authlib + 版本 jvm 参数或旧版基座 + 日志参数）与
 //! 游戏段（新式 `arguments.game` 或旧式 `minecraftArguments`）分别拼成模板序列，再统一过一遍 `${}` 占位符
 //! 替换。占位符全表（natives/library/game_directory/assets/auth_*/version_type/classpath…）在这里一次性算好。
 
@@ -11,7 +11,7 @@ use aurora_version::{RuntimeContext, VersionJson};
 use serde::Serialize;
 
 use crate::account::{AuthValues, AuthlibInjector};
-use crate::args::{self, GcPolicy};
+use crate::args;
 use crate::classpath;
 use crate::error::{LaunchError, Result};
 use crate::memory::MemoryConfig;
@@ -91,8 +91,6 @@ pub struct CommandBuilder<'a> {
     game_dir: PathBuf,
     auth: AuthValues,
     memory: MemoryConfig,
-    gc: Option<GcPolicy>,
-    java_major: Option<u32>,
     authlib: Option<AuthlibInjector>,
     launcher_name: String,
     launcher_version: String,
@@ -104,10 +102,11 @@ pub struct CommandBuilder<'a> {
 }
 
 impl<'a> CommandBuilder<'a> {
-    /// 用最少的必需输入构造：合并后的版本 JSON、运行环境、java 可执行文件、路径布局、游戏工作目录、鉴权值。
+    /// 用必需输入构造：合并后的版本 JSON、运行环境、java 可执行文件、路径布局、游戏工作目录、鉴权值，
+    /// 以及写进 `${launcher_version}` 的启动器版本号。
     ///
-    /// 默认最大堆 2048MB、无 GC 覆盖（用版本 jvm 参数自带的）、启动器名取英文产品名（`Petalfall`）、版本名取版本 id、
-    /// Java 主版本取版本 JSON 的 `javaVersion.majorVersion`。
+    /// 启动器版本号由调用方传入应用自身的版本：游戏与服务器统计启动器分布时读的是它，取本 crate 的
+    /// 版本号就会永远报一个与发布版脱钩的数。默认最大堆 2048MB、启动器名取英文产品名、版本名取版本 id。
     pub fn new(
         version: &'a VersionJson,
         ctx: RuntimeContext,
@@ -115,6 +114,7 @@ impl<'a> CommandBuilder<'a> {
         paths: GamePaths,
         game_dir: impl Into<PathBuf>,
         auth: AuthValues,
+        launcher_version: impl Into<String>,
     ) -> Self {
         Self {
             version,
@@ -124,11 +124,9 @@ impl<'a> CommandBuilder<'a> {
             game_dir: game_dir.into(),
             auth,
             memory: MemoryConfig::fixed(2048),
-            gc: None,
-            java_major: version.java_version.as_ref().map(|j| j.major_version),
             authlib: None,
             launcher_name: aurora_base::brand::APP_NAME_EN.to_owned(),
-            launcher_version: env!("CARGO_PKG_VERSION").to_owned(),
+            launcher_version: launcher_version.into(),
             version_name: version.id.clone(),
             resolution: None,
             fullscreen: false,
@@ -143,28 +141,9 @@ impl<'a> CommandBuilder<'a> {
         self
     }
 
-    /// 设置 GC 策略（覆盖，追加到版本 jvm 参数之外）。
-    pub fn with_gc(mut self, gc: GcPolicy) -> Self {
-        self.gc = Some(gc);
-        self
-    }
-
-    /// 显式指定用于 GC 决策的 Java 主版本（默认取自版本 JSON）。
-    pub fn with_java_major(mut self, major: u32) -> Self {
-        self.java_major = Some(major);
-        self
-    }
-
     /// 启用 Authlib-Injector 注入。
     pub fn with_authlib(mut self, authlib: AuthlibInjector) -> Self {
         self.authlib = Some(authlib);
-        self
-    }
-
-    /// 覆盖启动器名与版本（对应 `${launcher_name}` / `${launcher_version}`）。
-    pub fn with_launcher(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
-        self.launcher_name = name.into();
-        self.launcher_version = version.into();
         self
     }
 
@@ -282,13 +261,10 @@ impl<'a> CommandBuilder<'a> {
             ph.insert("resolution_height", height.to_string());
         }
 
-        // JVM 段模板：先注入的安全/编码/GC/内存/authlib，再叠版本 jvm 参数（或旧版基座），最后日志参数。
+        // JVM 段模板：先注入的安全/编码/内存/authlib，再叠版本 jvm 参数（或旧版基座），最后日志参数。
         let mut jvm_templates: Vec<String> = Vec::new();
         jvm_templates.extend(args::security_args());
         jvm_templates.extend(args::encoding_args());
-        if let Some(gc) = self.gc {
-            jvm_templates.extend(args::gc_args(gc, self.java_major.unwrap_or(0)));
-        }
         jvm_templates.extend(self.memory.jvm_args());
         if let Some(authlib) = &self.authlib {
             jvm_templates.extend(authlib.jvm_args());
@@ -309,6 +285,10 @@ impl<'a> CommandBuilder<'a> {
         let mut jvm_args: Vec<String> = jvm_templates.iter().map(|t| ph.substitute(t)).collect();
         if !self.extra_jvm_args.is_empty() {
             jvm_args.extend(self.extra_jvm_args.clone());
+        }
+        // 放在合并自定义 JVM 参数之后：玩家若自带一条 -DignoreList，同样要按真实 jar 名补齐。
+        if let Some(name) = self.paths.client_jar.file_name().and_then(|n| n.to_str()) {
+            args::ensure_client_jar_ignored(&mut jvm_args, name);
         }
         let jvm_args = args::dedup_jvm_args(jvm_args);
 
@@ -399,6 +379,7 @@ mod tests {
             paths,
             "/mc",
             AuthValues::offline("Steve", "uuid"),
+            "1.0.0",
         )
         .build()
         .unwrap_err();

@@ -4,10 +4,13 @@
 use std::path::PathBuf;
 
 use aurora_launch::{
-    AuthValues, CommandBuilder, GamePaths, GcPolicy, MemoryConfig, classpath_entries,
-    classpath_separator, classpath_string,
+    AuthValues, CommandBuilder, GamePaths, MemoryConfig, classpath_entries, classpath_separator,
+    classpath_string,
 };
 use aurora_version::{OsName, RuntimeContext, VersionJson};
+
+/// 调用方传入的应用版本号；断言它原样进入 `${launcher_version}`。
+const LAUNCHER_VERSION: &str = "2.3.4";
 
 /// 便捷：`&str -> String`。
 fn s(value: &str) -> String {
@@ -102,6 +105,7 @@ fn legacy_1_12_2_full_command_line() {
         paths.clone(),
         &game_dir,
         AuthValues::offline("Steve", UUID),
+        LAUNCHER_VERSION,
     )
     .with_memory(MemoryConfig::fixed(2048))
     .build()
@@ -113,7 +117,6 @@ fn legacy_1_12_2_full_command_line() {
     // 逐 token 构造期望值：路径相关的片段用与被测代码同源的公开 helper / PathBuf 运算得到，
     // 从而跨平台路径分隔符一致，断言聚焦「拼装顺序、条件筛选、占位符替换」这三件事。
     let natives = paths.natives_dir.display().to_string();
-    let launcher_version = env!("CARGO_PKG_VERSION");
     let classpath = classpath_string(
         &classpath_entries(&version, &ctx, &paths.libraries_dir, &paths.client_jar).unwrap(),
         classpath_separator(OsName::Windows),
@@ -133,7 +136,7 @@ fn legacy_1_12_2_full_command_line() {
         s("-Xmx2048m"),
         format!("-Djava.library.path={natives}"),
         s("-Dminecraft.launcher.brand=Petalfall"),
-        format!("-Dminecraft.launcher.version={launcher_version}"),
+        format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}"),
         s("-cp"),
         classpath.clone(),
         format!("-Dlog4j.configurationFile={log_config}"),
@@ -185,15 +188,15 @@ fn modern_1_21_full_command_line() {
         paths.clone(),
         &game_dir,
         AuthValues::offline("Steve", UUID),
+        LAUNCHER_VERSION,
     )
     .with_memory(MemoryConfig::fixed(4096))
-    .with_gc(GcPolicy::GenerationalZgc)
+    .add_jvm_args([s("-XX:+UseZGC"), s("-XX:+ZGenerational")])
     .with_resolution(1280, 720)
     .build()
     .unwrap();
 
     let natives = paths.natives_dir.display().to_string();
-    let launcher_version = env!("CARGO_PKG_VERSION");
     let classpath = classpath_string(
         &classpath_entries(&version, &ctx, &paths.libraries_dir, &paths.client_jar).unwrap(),
         classpath_separator(OsName::Windows),
@@ -211,9 +214,6 @@ fn modern_1_21_full_command_line() {
         s("-Dfile.encoding=UTF-8"),
         s("-Dstdout.encoding=UTF-8"),
         s("-Dstderr.encoding=UTF-8"),
-        // 分代 ZGC（Java 21）。
-        s("-XX:+UseZGC"),
-        s("-XX:+ZGenerational"),
         // 内存。
         s("-Xmx4096m"),
         // 版本 arguments.jvm：osx 条件被排除；windows 与 ^10\. 命中；x86 arch 被排除。
@@ -225,11 +225,14 @@ fn modern_1_21_full_command_line() {
         format!("-Dorg.lwjgl.system.SharedLibraryExtractPath={natives}"),
         format!("-Dio.netty.native.workdir={natives}"),
         s("-Dminecraft.launcher.brand=Petalfall"),
-        format!("-Dminecraft.launcher.version={launcher_version}"),
+        format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}"),
         s("-cp"),
         classpath.clone(),
         // 日志参数。
         format!("-Dlog4j.configurationFile={log_config}"),
+        // 实例 JVM 参数（这里是分代 ZGC 预设）追加在默认参数之后。
+        s("-XX:+UseZGC"),
+        s("-XX:+ZGenerational"),
         // 主类。
         s("net.minecraft.client.main.Main"),
         // 游戏参数：demo 被排除；custom_resolution 命中。
@@ -282,6 +285,7 @@ fn authlib_injector_agent_is_injected() {
         paths,
         PathBuf::from("D:/mc/.minecraft"),
         AuthValues::offline("Steve", UUID),
+        LAUNCHER_VERSION,
     )
     .with_authlib(
         aurora_launch::AuthlibInjector::new(
@@ -316,6 +320,7 @@ fn custom_args_merge_into_command() {
         paths,
         PathBuf::from("D:/mc/.minecraft"),
         AuthValues::offline("Steve", UUID),
+        LAUNCHER_VERSION,
     )
     // 重复的安全参数应被去重；新增的 -Dcustom 保留。
     .add_jvm_args([s("-Dlog4j2.formatMsgNoLookups=true"), s("-Dcustom=1")])

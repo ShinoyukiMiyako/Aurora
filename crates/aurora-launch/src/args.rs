@@ -1,13 +1,12 @@
-//! JVM / 游戏参数拼装的构件：安全与编码防御参数、GC 策略、旧版固定 JVM 基座、新式条件参数展开、
-//! 旧式参数切分，以及带引号感知的自定义参数分割与去重/覆盖合并。
+//! JVM / 游戏参数拼装的构件：安全与编码防御参数、旧版固定 JVM 基座、新式条件参数展开、
+//! 旧式参数切分、客户端 jar 的 ignoreList 补齐，以及带引号感知的自定义参数分割与去重/覆盖合并。
 //!
 //! 这些都是纯函数，输出仍含 `${}` 占位符（由 [`crate::placeholder`] 后置替换），便于对「拼出的模板序列」
-//! 做表驱动断言。
+//! 做表驱动断言。GC 选择不在这里：它是玩家在实例 JVM 参数里自己加的片段，随自定义参数一起进来。
 
 use std::collections::HashSet;
 
 use aurora_version::{Argument, RuntimeContext, evaluate_rules};
-use serde::{Deserialize, Serialize};
 
 /// 强制安全参数：缓解 Log4Shell（CVE-2021-44228）。必须默认注入，与用户设置无关。
 pub fn security_args() -> Vec<String> {
@@ -23,48 +22,6 @@ pub fn encoding_args() -> Vec<String> {
         "-Dstdout.encoding=UTF-8".to_owned(),
         "-Dstderr.encoding=UTF-8".to_owned(),
     ]
-}
-
-/// GC 策略。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GcPolicy {
-    /// Mojang 官启同款 G1GC 基础组合。
-    G1,
-    /// 「优化的 G1GC」：在 G1 基础上关掉自适应大小策略、补齐若干调优项，追求更稳的帧时间。
-    OptimizedG1,
-    /// 分代 ZGC（Java 21+）。低于 21 时自动回退到 [`GcPolicy::OptimizedG1`]。
-    GenerationalZgc,
-}
-
-/// 按 GC 策略与 Java 主版本产出 GC 相关参数。
-pub fn gc_args(policy: GcPolicy, java_major: u32) -> Vec<String> {
-    match policy {
-        GcPolicy::G1 => vec![
-            "-XX:+UseG1GC".to_owned(),
-            "-XX:G1NewSizePercent=20".to_owned(),
-            "-XX:G1ReservePercent=20".to_owned(),
-            "-XX:MaxGCPauseMillis=50".to_owned(),
-            "-XX:G1HeapRegionSize=16M".to_owned(),
-        ],
-        GcPolicy::OptimizedG1 => vec![
-            "-XX:+UseG1GC".to_owned(),
-            "-XX:-UseAdaptiveSizePolicy".to_owned(),
-            "-XX:-OmitStackTraceInFastThrow".to_owned(),
-            "-XX:G1NewSizePercent=20".to_owned(),
-            "-XX:G1ReservePercent=20".to_owned(),
-            "-XX:MaxGCPauseMillis=50".to_owned(),
-            "-XX:G1HeapRegionSize=32M".to_owned(),
-        ],
-        GcPolicy::GenerationalZgc => {
-            if java_major >= 21 {
-                vec!["-XX:+UseZGC".to_owned(), "-XX:+ZGenerational".to_owned()]
-            } else {
-                // 该 Java 不支持分代 ZGC，回退到优化 G1，避免启动即报无法识别的 GC 选项。
-                gc_args(GcPolicy::OptimizedG1, java_major)
-            }
-        }
-    }
 }
 
 /// 旧版（无 `arguments.jvm`）的固定 JVM 基础参数集，模板形式。
@@ -146,6 +103,38 @@ pub fn split_args(input: &str) -> Vec<String> {
         out.push(current);
     }
     out
+}
+
+/// `-DignoreList` 的前缀，Forge/NeoForge 的 bootstraplauncher 用它划分 classpath 与模块路径。
+const IGNORE_LIST_PREFIX: &str = "-DignoreList=";
+
+/// 把客户端主 jar 的真实文件名补进每一条 `-DignoreList`，让它留在传统 classpath 而不被升格成模块。
+///
+/// Forge/NeoForge 的主类是 bootstraplauncher，它把 classpath 上的每个 jar 按 `文件名.startsWith(条目)`
+/// 与 ignoreList 逐项比对，命中的留在 classpath，没命中的一律变成模块塞进模块层。版本 JSON 里写的是
+/// `${version_name}.jar`，前提是客户端 jar 与被启动的版本同名；而这里加载器版本共用继承根版本目录里
+/// 的那份 jar（见 [`crate::command::GamePaths`]），`1.20.1-forge-47.4.16.jar` 对不上真实的 `1.20.1.jar`，
+/// 原版 jar 被升格为自动模块，与 Forge 自己的 minecraft 模块导出同一个包，JVM 抛 `ResolutionException`
+/// 直接退出。这个失败发生在 log4j 接管之前，游戏日志与崩溃报告都不会生成，只在 stderr 上留一句。
+///
+/// 「是否已覆盖」按 bootstraplauncher 的原样判定（含空串条目命中一切），免得两边结论不同而重复追加。
+/// JVM 对同名 `-D` 取最后一条生效，所以每一条都要修，只修第一条等于没修。
+pub fn ensure_client_jar_ignored(args: &mut [String], client_jar_name: &str) {
+    if client_jar_name.is_empty() {
+        return;
+    }
+    for arg in args.iter_mut() {
+        let covered = match arg.strip_prefix(IGNORE_LIST_PREFIX) {
+            Some(list) => list
+                .split(',')
+                .any(|entry| client_jar_name.starts_with(entry)),
+            None => continue,
+        };
+        if !covered {
+            arg.push(',');
+            arg.push_str(client_jar_name);
+        }
+    }
 }
 
 /// JVM 参数去重：保序保留首个，丢弃**完全相同**的项。
@@ -271,19 +260,6 @@ mod tests {
     fn security_and_encoding_are_fixed() {
         assert_eq!(security_args(), vec!["-Dlog4j2.formatMsgNoLookups=true"]);
         assert!(encoding_args().contains(&"-Dfile.encoding=UTF-8".to_string()));
-    }
-
-    #[test]
-    fn gc_zgc_falls_back_below_java21() {
-        assert_eq!(
-            gc_args(GcPolicy::GenerationalZgc, 21),
-            vec!["-XX:+UseZGC", "-XX:+ZGenerational"]
-        );
-        // Java 17 上分代 ZGC 不可用，回退到优化 G1。
-        assert_eq!(
-            gc_args(GcPolicy::GenerationalZgc, 17),
-            gc_args(GcPolicy::OptimizedG1, 17)
-        );
     }
 
     #[test]
@@ -417,5 +393,64 @@ mod tests {
         // 负数值不应被当成新键；--height 的值被覆盖为 -100。
         let extra = vec!["--height".to_string(), "-100".to_string()];
         assert_eq!(merge_game_args(base, extra), vec!["--height", "-100"]);
+    }
+
+    /// Forge 47.4.16 的 ignoreList 写死 `${version_name}.jar`，而加载器版本共用继承根的 `1.20.1.jar`。
+    #[test]
+    fn client_jar_name_appended_when_ignore_list_misses_it() {
+        let mut args = vec![
+            "-DignoreList=bootstraplauncher,securejarhandler,client-extra,forge-,1.20.1-forge-47.4.16.jar"
+                .to_string(),
+        ];
+        ensure_client_jar_ignored(&mut args, "1.20.1.jar");
+        assert_eq!(
+            args[0],
+            "-DignoreList=bootstraplauncher,securejarhandler,client-extra,forge-,1.20.1-forge-47.4.16.jar,1.20.1.jar"
+        );
+    }
+
+    #[test]
+    fn already_covered_ignore_list_is_left_alone() {
+        let mut args = vec!["-DignoreList=client-extra,1.20.1.jar".to_string()];
+        ensure_client_jar_ignored(&mut args, "1.20.1.jar");
+        assert_eq!(args[0], "-DignoreList=client-extra,1.20.1.jar");
+    }
+
+    #[test]
+    fn coverage_uses_prefix_matching_like_bootstraplauncher() {
+        // 条目 `1.20.1` 已经能命中 `1.20.1.jar`。
+        let mut args = vec!["-DignoreList=forge-,1.20.1".to_string()];
+        ensure_client_jar_ignored(&mut args, "1.20.1.jar");
+        assert_eq!(args[0], "-DignoreList=forge-,1.20.1");
+
+        // 反向不成立：条目比文件名长，前缀匹配失败，必须补。
+        let mut longer = vec!["-DignoreList=1.20.1.jar.bak".to_string()];
+        ensure_client_jar_ignored(&mut longer, "1.20.1.jar");
+        assert_eq!(longer[0], "-DignoreList=1.20.1.jar.bak,1.20.1.jar");
+    }
+
+    #[test]
+    fn non_ignore_list_args_are_untouched() {
+        let mut args = vec![
+            "-Xmx4096m".to_string(),
+            "-Dmy.ignoreList=whatever".to_string(),
+            "-cp".to_string(),
+            "a.jar;1.20.1.jar".to_string(),
+        ];
+        let before = args.clone();
+        ensure_client_jar_ignored(&mut args, "1.20.1.jar");
+        assert_eq!(args, before);
+    }
+
+    #[test]
+    fn every_ignore_list_occurrence_is_repaired() {
+        let mut args = vec![
+            "-DignoreList=forge-".to_string(),
+            "-Xmx2g".to_string(),
+            "-DignoreList=client-extra".to_string(),
+        ];
+        ensure_client_jar_ignored(&mut args, "1.20.1.jar");
+        assert_eq!(args[0], "-DignoreList=forge-,1.20.1.jar");
+        assert_eq!(args[2], "-DignoreList=client-extra,1.20.1.jar");
     }
 }

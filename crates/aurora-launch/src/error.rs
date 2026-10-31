@@ -44,6 +44,30 @@ pub enum LaunchError {
     #[error("等待游戏进程结束失败")]
     Wait(#[source] std::io::Error),
 
+    /// 结束游戏进程失败（进程仍在运行）。
+    #[error("无法结束游戏进程")]
+    Kill(#[source] std::io::Error),
+
+    /// 读取游戏输出或写会话日志的后台任务异常结束，属于程序缺陷。
+    #[error("游戏会话的后台任务异常结束")]
+    Join(#[source] tokio::task::JoinError),
+
+    /// 会话日志读写失败。
+    #[error("读写会话日志 {path} 失败")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// 会话日志不是本启动器写出的格式（头部不对，或第 `line` 行无法解析；`line` 为 0 指头部）。
+    #[error("会话日志 {path} 第 {line} 行格式不对")]
+    LogFormat { path: PathBuf, line: u64 },
+
+    /// 系统时钟早于 1970 年：时间戳无从谈起。
+    #[error("系统时钟早于 1970 年，请校正系统时间")]
+    ClockBeforeEpoch,
+
     /// 隔离解析（探盘 mods/saves）冒泡上来的实例层错误。
     #[error(transparent)]
     Instance(#[from] aurora_instance::Error),

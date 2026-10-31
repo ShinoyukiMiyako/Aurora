@@ -12,8 +12,8 @@ aurora-instance = { path = "../aurora-instance" }
 aurora-base = { path = "../aurora-base" }
 # 进程管理需要 process（spawn 子进程）+ io-util（BufReader 逐行读输出）+ rt（spawn 读取任务）
 # + sync（mpsc 把日志行实时投递给上层）。运行时风格（单/多线程）交由上层选择，不强制 rt-multi-thread。
-# 日志归档与崩溃报告落盘另需 fs。
-tokio = { version = "1", default-features = false, features = ["process", "io-util", "rt", "sync", "fs"] }
+# 会话日志读写另需 fs；游戏输出按时间窗批量转发要 time；等进程退出的同时响应结束请求要 macros（select!）。
+tokio = { version = "1", default-features = false, features = ["process", "io-util", "rt", "sync", "fs", "time", "macros"] }
 # 崩溃诊断规则库从日志正则提取附加信息（缺失 Mod id、要求的 Java 版本等）。与 aurora-version 同选 regex 1。
 regex = "1"
 # 诊断结果 / 检查报告 / 退出码等面向前端的结构体需可序列化。
@@ -27,3 +27,5 @@ sysinfo = { version = "0.39.6", default-features = false, features = ["system"] 
 # 进程 spawn 与隔离解析的异步测试需要真正的运行时；tempfile 提供隔离的临时游戏目录。
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "process", "io-util", "rt", "sync"] }
 tempfile = "3"
+# 序列化形状的断言。
+serde_json = "1"

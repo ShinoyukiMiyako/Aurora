@@ -1,8 +1,9 @@
-//! 内存配置：自动分配、手动滑块换算，产出 `-Xmx` / `-Xms`。
+//! 内存配置：本机内存探测、自动分配与推荐值，产出 `-Xmx` / `-Xms`。
 //!
-//! 自动分配按「版本档位」（原版 / 装 Mod / 大型整合）设不同的上限与下限，并按可用物理内存做分段递减
+//! 自动分配按「实例档位」（原版 / 装 Mod / 大型整合）设不同的上限与下限，并按可用物理内存做分段递减
 //! 供给：可用内存越多，愿意划给游戏的比例越低（给系统与其它进程留头绪），最后按档位夹逼并对齐到 128MB。
-//! PCL 未开源其真实曲线，这里用一条可解释、可测的分段折线代替（数值都在下方常量里，便于调参）。
+//! 推荐值在此之上再封顶物理内存的一半：设置页的推荐标记、启动时的自动分配与崩溃诊断里「调大内存」的
+//! 上限都以这条线为界，三处必须是同一个数，所以只在这里算。
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,83 @@ impl MemoryTier {
             MemoryTier::LargeModpack => 8192,
         }
     }
+
+    /// 由实例的两条事实推出档位。设置页显示「自动会给多少」与启动时真的分配多少必须是同一个档位，
+    /// 所以判定只此一份，事实由调用方各自提供。
+    pub fn resolve(is_modpack: bool, has_mod_loader: bool) -> Self {
+        if is_modpack {
+            MemoryTier::LargeModpack
+        } else if has_mod_loader {
+            MemoryTier::Modded
+        } else {
+            MemoryTier::Vanilla
+        }
+    }
+}
+
+/// 本机物理内存快照（MB）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemMemory {
+    /// 物理内存总量。
+    pub total_mb: u32,
+    /// 此刻可用量。
+    pub available_mb: u32,
+}
+
+impl SystemMemory {
+    /// 物理内存的一半，向下取整到 1024 MB。推荐值与崩溃后「调大内存」的目标都不越过这条线。
+    pub fn half_cap_mb(self) -> u32 {
+        self.total_mb / 2 / 1024 * 1024
+    }
+}
+
+/// 探测本机物理内存。只刷 RAM 一项：全量刷新会连进程表、CPU、磁盘一起拉，开销是几十毫秒级。
+pub fn probe_system_memory() -> SystemMemory {
+    let system = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::nothing()
+            .with_memory(sysinfo::MemoryRefreshKind::nothing().with_ram()),
+    );
+    SystemMemory {
+        total_mb: bytes_to_mb(system.total_memory()),
+        available_mb: bytes_to_mb(system.available_memory()),
+    }
+}
+
+/// 字节换 MB；超过 u32 能表示的量（4 PB）按上限算，不 panic。
+fn bytes_to_mb(bytes: u64) -> u32 {
+    u32::try_from(bytes / (1024 * 1024)).unwrap_or(u32::MAX)
+}
+
+/// 某档位此刻的推荐最大堆（MB）：按可用内存自动分配，再封顶物理内存的一半。
+///
+/// 封顶优先于档位下限：一台 2 GB 的机器给大型整合包 2 GB 堆只会让系统先卡死。物理内存的一半不足
+/// 1024 MB 的机器（虚拟机、容器）退到 512 MB，那是 JVM 能把原版跑起来的最低值。
+pub fn recommended_max_mb(system: SystemMemory, tier: MemoryTier) -> u32 {
+    let cap = system.half_cap_mb().max(MIN_HEAP_MB);
+    auto_allocate(system.available_mb, tier).min(cap)
+}
+
+/// 任何情况下给出的最大堆都不低于这个值。
+const MIN_HEAP_MB: u32 = 512;
+
+/// 设置页与启动共用的一份内存建议。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryAdvice {
+    pub total_mb: u32,
+    pub available_mb: u32,
+    pub tier: MemoryTier,
+    pub recommended_mb: u32,
+}
+
+impl MemoryAdvice {
+    pub fn new(system: SystemMemory, tier: MemoryTier) -> Self {
+        Self {
+            total_mb: system.total_mb,
+            available_mb: system.available_mb,
+            tier,
+            recommended_mb: recommended_max_mb(system, tier),
+        }
+    }
 }
 
 /// 一次内存配置：最大堆（必给）+ 可选最小堆。
@@ -60,11 +138,6 @@ impl MemoryConfig {
     pub fn with_min(mut self, min_mb: u32) -> Self {
         self.min_mb = Some(min_mb);
         self
-    }
-
-    /// 按可用物理内存与版本档位自动分配最大堆。
-    pub fn automatic(free_mb: u32, tier: MemoryTier) -> Self {
-        Self::fixed(auto_allocate(free_mb, tier))
     }
 
     /// 产出内存相关的 JVM 参数。设了最小堆则 `-Xms` 在前、`-Xmx` 在后。
@@ -93,17 +166,6 @@ pub fn auto_allocate(free_mb: u32, tier: MemoryTier) -> u32 {
 
     let aligned = (raw as u32) / ALIGN_MB * ALIGN_MB;
     aligned.clamp(tier.min_mb(), tier.cap_mb())
-}
-
-/// 手动内存滑块整数值 -> 实际分配 MB。分段线性，各段斜率不同：低内存区细粒度、高内存区粗粒度，
-/// 让滑块在常用区间（2~8G）更好调。滑块 0 对应 0（不建议，但保留），随刻度递增。
-pub fn slider_to_mb(slider: u32) -> u32 {
-    match slider {
-        0..=8 => slider * 256,                    // 0 .. 2048，斜率 256（每格 0.25G）
-        9..=16 => 2048 + (slider - 8) * 512,      // 2560 .. 6144，斜率 512（每格 0.5G）
-        17..=24 => 6144 + (slider - 16) * 1024,   // 7168 .. 14336，斜率 1024（每格 1G）
-        _ => 14336 + (slider - 24) * 2048,        // 斜率 2048（每格 2G）
-    }
 }
 
 #[cfg(test)]
@@ -145,13 +207,65 @@ mod tests {
     }
 
     #[test]
-    fn slider_segments_have_distinct_slopes() {
-        assert_eq!(slider_to_mb(0), 0);
-        assert_eq!(slider_to_mb(8), 2048);
-        assert_eq!(slider_to_mb(9), 2560); // 进入 512 斜率段
-        assert_eq!(slider_to_mb(16), 6144);
-        assert_eq!(slider_to_mb(17), 7168); // 进入 1024 斜率段
-        assert_eq!(slider_to_mb(24), 14336);
-        assert_eq!(slider_to_mb(25), 16384); // 进入 2048 斜率段
+    fn tier_resolution_prefers_modpack_then_loader() {
+        assert_eq!(MemoryTier::resolve(true, true), MemoryTier::LargeModpack);
+        assert_eq!(MemoryTier::resolve(true, false), MemoryTier::LargeModpack);
+        assert_eq!(MemoryTier::resolve(false, true), MemoryTier::Modded);
+        assert_eq!(MemoryTier::resolve(false, false), MemoryTier::Vanilla);
+    }
+
+    #[test]
+    fn recommendation_never_exceeds_half_of_physical_memory() {
+        // 32G 总量、32G 可用：大型整合自动分配 7296，低于一半 16384，不封顶。
+        let roomy = SystemMemory {
+            total_mb: 32768,
+            available_mb: 32768,
+        };
+        assert_eq!(recommended_max_mb(roomy, MemoryTier::LargeModpack), 7296);
+        // 6G 总量：一半是 3072；按可用 6000 算得 2809.6，对齐 2688，在下限 2048 与封顶 3072 之间。
+        let small = SystemMemory {
+            total_mb: 6144,
+            available_mb: 6000,
+        };
+        assert_eq!(recommended_max_mb(small, MemoryTier::LargeModpack), 2688);
+        // 3G 总量：一半向下取整到 1024；大型整合的 2048 下限被封顶压下来。
+        let tiny = SystemMemory {
+            total_mb: 3072,
+            available_mb: 3000,
+        };
+        assert_eq!(tiny.half_cap_mb(), 1024);
+        assert_eq!(recommended_max_mb(tiny, MemoryTier::LargeModpack), 1024);
+        // 1G 总量：一半不足 1024，退到 512。
+        let vm = SystemMemory {
+            total_mb: 1024,
+            available_mb: 900,
+        };
+        assert_eq!(recommended_max_mb(vm, MemoryTier::Vanilla), 512);
+    }
+
+    #[test]
+    fn advice_carries_the_same_recommendation() {
+        let system = SystemMemory {
+            total_mb: 16384,
+            available_mb: 9000,
+        };
+        let advice = MemoryAdvice::new(system, MemoryTier::Modded);
+        assert_eq!(advice.total_mb, 16384);
+        assert_eq!(advice.available_mb, 9000);
+        assert_eq!(
+            advice.recommended_mb,
+            recommended_max_mb(system, MemoryTier::Modded)
+        );
+        assert_eq!(
+            serde_json::to_value(advice).unwrap()["tier"],
+            serde_json::json!("modded")
+        );
+    }
+
+    #[test]
+    fn probing_reports_plausible_memory() {
+        let system = probe_system_memory();
+        assert!(system.total_mb >= 256, "{system:?}");
+        assert!(system.available_mb <= system.total_mb, "{system:?}");
     }
 }

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use aurora_core::{
-    Aurora, CoreEvent, EventSink, LaunchOptions, LoaderChoice, LogLine, LogStream, ModLoader,
-    SearchQuery, analyze, detect_crash,
+    Aurora, CoreEvent, EventSink, LaunchAccount, LaunchEvent, LaunchFailed, LaunchRequest,
+    LoaderChoice, LogLine, LogStream, MemorySettings, ModLoader, SearchQuery,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use tokio::sync::mpsc;
@@ -65,9 +65,6 @@ enum Command {
         /// 最大堆（MB），覆盖配置默认。
         #[arg(long)]
         max_memory: Option<u32>,
-        /// 全屏启动。
-        #[arg(long)]
-        fullscreen: bool,
     },
     /// 搜索 Mod / 资源（Modrinth + CurseForge）。
     Search {
@@ -146,7 +143,7 @@ async fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("错误：{err}");
-            let mut source = std::error::Error::source(&err);
+            let mut source = err.source();
             while let Some(cause) = source {
                 eprintln!("  originated from: {cause}");
                 source = cause.source();
@@ -171,7 +168,7 @@ fn init_tracing(verbose: bool) {
         .init();
 }
 
-async fn run(cli: Cli) -> aurora_core::Result<()> {
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut aurora = Aurora::load().await?;
     if let Some(game_dir) = &cli.game_dir {
         aurora.set_game_dir(game_dir.clone());
@@ -181,26 +178,26 @@ async fn run(cli: Cli) -> aurora_core::Result<()> {
     }
 
     match cli.command {
-        Command::Versions { action } => versions(&aurora, action).await,
+        Command::Versions { action } => versions(&aurora, action).await?,
         Command::Install {
             id,
             loader,
             loader_version,
-        } => install(&aurora, &id, loader, loader_version.as_deref()).await,
-        Command::Auth { action } => auth(&aurora, action).await,
+        } => install(&aurora, &id, loader, loader_version.as_deref()).await?,
+        Command::Auth { action } => auth(&aurora, action).await?,
         Command::Launch {
             version,
             offline,
             max_memory,
-            fullscreen,
-        } => launch(&aurora, &version, &offline, max_memory, fullscreen).await,
+        } => launch(&aurora, &version, &offline, max_memory).await?,
         Command::Search {
             query,
             loader,
             game_version,
             limit,
-        } => search(&aurora, &query, loader, game_version.as_deref(), limit).await,
+        } => search(&aurora, &query, loader, game_version.as_deref(), limit).await?,
     }
+    Ok(())
 }
 
 async fn versions(aurora: &Aurora, action: VersionsAction) -> aurora_core::Result<()> {
@@ -348,52 +345,99 @@ fn auth_status(_aurora: &Aurora) -> aurora_core::Result<()> {
     Ok(())
 }
 
+/// 以离线账户启动。内存、Java、JVM 参数与分辨率按实例设置与全局设置解析；`--max-memory` 只覆盖
+/// 这一次运行的全局最大堆，不写回配置。
 async fn launch(
     aurora: &Aurora,
     version: &str,
     offline: &str,
     max_memory: Option<u32>,
-    fullscreen: bool,
-) -> aurora_core::Result<()> {
-    let options = LaunchOptions {
-        max_memory_mb: max_memory,
-        min_memory_mb: None,
-        fullscreen,
-        ..Default::default()
-    };
+) -> Result<(), LaunchFailed> {
+    let mut aurora = aurora.clone();
+    if let Some(max_mb) = max_memory {
+        let min_mb = aurora.config().memory.min_mb;
+        aurora.set_memory(MemorySettings { max_mb, min_mb });
+    }
 
-    let (sink, printer) = spawn_event_printer();
-    let (log_tx, mut log_rx) = mpsc::channel::<LogLine>(256);
+    let (events, mut event_rx) = mpsc::unbounded_channel::<LaunchEvent>();
+    let printer = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                LaunchEvent::Stage(stage) => println!("[阶段 {}] {stage:?}", stage.index()),
+                LaunchEvent::Download(progress) => eprintln!(
+                    "[下载] {}/{} 文件，{} KiB，{} KiB/s",
+                    progress.finished,
+                    progress.total,
+                    progress.bytes / 1024,
+                    progress.speed / 1024
+                ),
+                LaunchEvent::Log { level, text, .. } => eprintln!("[{level:?}] {text}"),
+            }
+        }
+    });
+    let (log_tx, mut log_rx) = mpsc::unbounded_channel::<Vec<LogLine>>();
     let log_printer = tokio::spawn(async move {
-        while let Some(line) = log_rx.recv().await {
-            match line.stream {
-                LogStream::Stderr => eprintln!("{}", line.text),
-                LogStream::Stdout => println!("{}", line.text),
+        while let Some(batch) = log_rx.recv().await {
+            for line in batch {
+                match line.stream {
+                    LogStream::Stderr => eprintln!("{}", line.text),
+                    LogStream::Stdout => println!("{}", line.text),
+                }
             }
         }
     });
 
-    let session = aurora
-        .launch_offline(version, offline, &options, Some(log_tx), Some(&sink))
-        .await;
-    drop(sink);
+    let request = LaunchRequest {
+        version_id: version.to_owned(),
+        account: LaunchAccount::Offline {
+            name: offline.to_owned(),
+        },
+        launcher_version: env!("CARGO_PKG_VERSION").to_owned(),
+        game_log: Some(log_tx),
+    };
+    let launched = aurora.launch(request, &events).await;
+    drop(events);
     let _ = printer.await;
-    let session = session?;
+    let run = match launched {
+        Ok(run) => run,
+        Err(LaunchFailed::Failure(failure)) => {
+            eprintln!("启动失败 [{}]：{}", failure.code.as_str(), failure.message);
+            for (key, value) in &failure.params {
+                eprintln!("  {key} = {value}");
+            }
+            return Err(LaunchFailed::Failure(failure));
+        }
+        Err(err) => return Err(err),
+    };
 
-    println!("游戏已启动（pid {:?}），等待退出……", session.id());
-    let report = session.wait().await?;
+    println!("游戏已启动（pid {:?}），等待退出……", run.pid());
+    let finished = run.finish().await?;
     let _ = log_printer.await;
+    for problem in &finished.problems {
+        eprintln!("[收尾] {problem}");
+    }
 
-    println!("游戏退出，退出码 {:?}", report.code);
-    if detect_crash(&report) {
+    let exit = finished.exit;
+    println!(
+        "游戏退出，退出码 {:?}，运行 {} 秒",
+        exit.exit_code,
+        exit.duration_ms / 1000
+    );
+    if exit.crashed {
         println!("检测到崩溃，诊断如下：");
-        let diagnoses = analyze(&report.recent_lines.join("\n"));
-        if diagnoses.is_empty() {
+        let Some(report) = aurora.last_crash(version).await? else {
+            println!("  崩溃报告没有保存下来，原因见上方的收尾问题。");
+            return Ok(());
+        };
+        if report.diagnoses.is_empty() {
             println!("  未匹配到已知崩溃规则，请查看上方日志。");
         }
-        for d in diagnoses {
-            println!("  - [{:?}] {}", d.category, d.summary);
-            println!("    建议：{}", d.advice);
+        for clue in report.diagnoses {
+            println!(
+                "  - [{:?}] 第 {} 行：{}",
+                clue.category, clue.line, clue.summary
+            );
+            println!("    建议：{}", clue.advice);
         }
     }
     Ok(())
