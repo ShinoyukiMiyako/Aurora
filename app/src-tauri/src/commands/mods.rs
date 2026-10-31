@@ -109,6 +109,7 @@ pub async fn check_updates(
 /// 可经 `cancel_task(taskId)` 取消（只能打断下载阶段，落位一旦开始就走完）。旧文件改名为 `.old`
 /// 保留，变更历史里可回滚。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn update_mod(
     app: AppHandle,
     task_id: String,
