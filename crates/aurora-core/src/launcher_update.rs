@@ -182,48 +182,64 @@ mod tests {
         Aurora::for_test(config, dir.clone(), dir.join(".minecraft"))
     }
 
-    /// 自动档真去探测：慢的那个源排到后面；换成镜像优先就不再探测。
+    /// 自动档真去探测：等不到响应的源排到后面，两个方向各测一次；换成镜像优先就不再探测。
+    /// 慢的一方让它拖过探测时限，而不是只慢几百毫秒：机器满载时几百毫秒的差值会被调度抖动吃掉，
+    /// 快慢颠倒，测试随负载时过时不过。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_policy_measures_and_puts_faster_source_first() {
+        let stall = UPDATE_PROBE_TIMEOUT + Duration::from_secs(1);
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/primary/latest.json"))
-            .respond_with(ResponseTemplate::new(206).set_delay(Duration::from_millis(400)))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/mirror/latest.json"))
-            .respond_with(ResponseTemplate::new(206))
-            .mount(&server)
-            .await;
-        let primary = format!("{}/primary/latest.json", server.uri());
-        let mirror = format!("{}/mirror/latest.json", server.uri());
+        for (route, delay) in [
+            ("/stalled/latest.json", stall),
+            ("/fast/latest.json", Duration::ZERO),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(206).set_delay(delay))
+                .mount(&server)
+                .await;
+        }
+        let stalled = format!("{}/stalled/latest.json", server.uri());
+        let fast = format!("{}/fast/latest.json", server.uri());
 
         let ordered = aurora_with(DownloadSourcePolicy::Auto)
-            .update_endpoints(&primary, Some(&mirror))
+            .update_endpoints(&stalled, Some(&fast))
             .await;
-        assert_eq!(ordered, vec![mirror.clone(), primary.clone()]);
+        assert_eq!(
+            ordered,
+            vec![fast.clone(), stalled.clone()],
+            "主源等不到，镜像在前"
+        );
+        // 反过来：只有真测出了主源的时延才会把它排到前面（两边都测不出时是镜像在前）
+        let ordered = aurora_with(DownloadSourcePolicy::Auto)
+            .update_endpoints(&fast, Some(&stalled))
+            .await;
+        assert_eq!(
+            ordered,
+            vec![fast.clone(), stalled.clone()],
+            "镜像等不到，主源在前"
+        );
         let probes = server.received_requests().await.unwrap();
-        assert_eq!(probes.len(), 2);
+        assert_eq!(probes.len(), 4);
         assert!(probes.iter().all(|r| r.headers.get("range").is_some()));
 
         let fixed = aurora_with(DownloadSourcePolicy::OfficialFirst)
-            .update_endpoints(&primary, Some(&mirror))
+            .update_endpoints(&stalled, Some(&fast))
             .await;
-        assert_eq!(fixed, vec![primary.clone(), mirror]);
+        assert_eq!(fixed, vec![stalled.clone(), fast]);
         assert_eq!(
             server.received_requests().await.unwrap().len(),
-            2,
+            4,
             "非自动档不探测"
         );
 
         let only = aurora_with(DownloadSourcePolicy::Auto)
-            .update_endpoints(&primary, None)
+            .update_endpoints(&stalled, None)
             .await;
-        assert_eq!(only, vec![primary]);
+        assert_eq!(only, vec![stalled]);
         assert_eq!(
             server.received_requests().await.unwrap().len(),
-            2,
+            4,
             "只有主源时不探测"
         );
     }
