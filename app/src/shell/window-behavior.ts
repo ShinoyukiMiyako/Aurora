@@ -102,6 +102,7 @@ export function afterLaunchMove(setting: AfterLaunch, activeTaskCount: number): 
 
 /**
  * 进入运行时按设置最小化或退出；因此最小化过的窗口在这个会话的进程退出时恢复，好让用户看到结束或崩溃。
+ * 恢复不激活窗口：游戏退出时用户可能已在别的窗口里打字，焦点不该被启动器抢走。
  * 「关闭启动器」的自动退出不弹关闭确认。设置还没读到时按「保持打开」处理。
  */
 export function useAfterLaunch(): void {
@@ -138,7 +139,7 @@ export function useAfterLaunch(): void {
     if (stillRunning) return;
     minimizedFor.current = null;
     void run(async () => {
-      if (await port.isMinimized()) await port.unminimize();
+      if (await port.isMinimized()) await port.restoreWithoutFocus();
     }, SHELL_ACTION_ERROR.restore);
   }, [actions, activeCount, port, run, setting, step]);
 }
@@ -214,7 +215,7 @@ export function useBackgroundAttention(): void {
     void run(async () => {
       const [focused, minimized] = await Promise.all([port.isFocused(), port.isMinimized()]);
       if (focused && !minimized) return;
-      if (restore && minimized) await port.unminimize();
+      if (restore && minimized) await port.restoreWithoutFocus();
       await port.requestAttention();
     }, SHELL_ACTION_ERROR.attention);
   }, [port, run, state]);

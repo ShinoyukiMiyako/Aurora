@@ -169,7 +169,8 @@ mod tests {
 
     /// 前端要用到的窗口与插件权限都在能力文件里；少一条，对应的 API 调用会在运行时被拒。
     /// opener 的两条给它注入的外链脚本用（target="_blank" 的链接交给系统浏览器）。前端用不到的
-    /// 不授予：自更新后的重启在 Rust 侧，WebView 不需要 process 插件的权限。
+    /// 不授予：自更新后的重启在 Rust 侧，WebView 不需要 process 插件的权限；恢复最小化的窗口走
+    /// 不激活窗口的后端命令，WebView 不需要会激活窗口的 unminimize。
     #[test]
     fn capability_grants_every_window_api_the_shell_uses() {
         let cap: serde_json::Value =
@@ -189,7 +190,6 @@ mod tests {
             "core:window:allow-destroy",
             "core:window:allow-start-dragging",
             "core:window:allow-show",
-            "core:window:allow-unminimize",
             "core:window:allow-request-user-attention",
             "opener:default",
             "opener:allow-open-url",
@@ -200,6 +200,10 @@ mod tests {
         assert!(
             !granted.iter().any(|p| p.starts_with("process:")),
             "WebView 不该拿到 process 插件的权限"
+        );
+        assert!(
+            !granted.contains(&"core:window:allow-unminimize"),
+            "WebView 不该拿到会激活窗口的 unminimize"
         );
     }
 }

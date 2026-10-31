@@ -7,6 +7,7 @@
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { createContext, createElement, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { inTauri } from "../ipc/bridge";
+import { restoreWindowWithoutFocus } from "../ipc/window";
 import { onWindowDrop, type DropContentDto, type WindowDropEventDto } from "../ipc/window-drop";
 
 /** 关闭请求：挡住默认关闭后由外壳裁决，确认后再销毁窗口。 */
@@ -30,7 +31,8 @@ export interface WindowPort {
   readonly native: boolean;
   show(): Promise<void>;
   minimize(): Promise<void>;
-  unminimize(): Promise<void>;
+  /** 恢复最小化的窗口但不激活它，不从用户正在用的窗口抢走焦点；没有最小化时什么都不做。 */
+  restoreWithoutFocus(): Promise<void>;
   toggleMaximize(): Promise<void>;
   /** 请求关闭：与 Alt+F4、任务栏关闭一样进入关闭请求处理器。 */
   close(): Promise<void>;
@@ -53,7 +55,8 @@ export function tauriWindowPort(): WindowPort {
     native: true,
     show: () => win.show(),
     minimize: () => win.minimize(),
-    unminimize: () => win.unminimize(),
+    // Tauri 的 unminimize 在 Windows 上会激活窗口，不激活的恢复只能由后端直接调系统接口
+    restoreWithoutFocus: () => restoreWindowWithoutFocus(),
     toggleMaximize: () => win.toggleMaximize(),
     close: () => win.close(),
     destroy: () => win.destroy(),
@@ -80,7 +83,7 @@ export function browserWindowPort(): WindowPort {
     native: false,
     show: () => Promise.resolve(),
     minimize: () => inapplicable("最小化"),
-    unminimize: () => inapplicable("恢复窗口"),
+    restoreWithoutFocus: () => inapplicable("恢复窗口"),
     toggleMaximize: () => inapplicable("切换最大化"),
     close: async () => {
       let prevented = false;

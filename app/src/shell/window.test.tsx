@@ -2,7 +2,15 @@
 import { StrictMode, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, type Rendered } from "../test/dom";
-import { RevealWindow, useRevealWindow, WindowPortProvider, type WindowPort } from "./window";
+import type { IpcRecorder } from "../test/fake-bridge";
+import { RevealWindow, tauriWindowPort, useRevealWindow, WindowPortProvider, type WindowPort } from "./window";
+
+const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
+vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+/** Tauri 的当前窗口替身：只记恢复窗口会不会落到它会激活窗口的 unminimize 上。 */
+const tauriWindow = vi.hoisted(() => ({ unminimize: vi.fn(async () => {}) }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => tauriWindow, UserAttentionType: { Critical: 1, Informational: 2 } }));
 
 let view: Rendered | undefined;
 let frames: Map<number, FrameRequestCallback>;
@@ -40,7 +48,7 @@ function fakePort(): WindowPort & { show: ReturnType<typeof vi.fn> } {
     native: true,
     show: vi.fn(async () => {}),
     minimize: noop,
-    unminimize: noop,
+    restoreWithoutFocus: noop,
     toggleMaximize: noop,
     close: noop,
     destroy: noop,
@@ -110,5 +118,18 @@ describe("useRevealWindow", () => {
     view = undefined;
     flushFrames();
     expect(port.show).not.toHaveBeenCalled();
+  });
+});
+
+describe("tauriWindowPort", () => {
+  beforeEach(() => {
+    ipc.calls.length = 0;
+    tauriWindow.unminimize.mockClear();
+  });
+
+  it("恢复窗口走后端不激活窗口的命令，不调 Tauri 会激活窗口的 unminimize", async () => {
+    await tauriWindowPort().restoreWithoutFocus();
+    expect(ipc.calls).toEqual([{ cmd: "restore_window_without_focus", args: {} }]);
+    expect(tauriWindow.unminimize).not.toHaveBeenCalled();
   });
 });
