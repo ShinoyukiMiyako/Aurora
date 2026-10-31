@@ -1,0 +1,350 @@
+/* 账户页：聚光卡、账户卡网格、添加卡与舞台。尺寸按档位写在 :root[data-sk-tier] 下。 */
+
+/* ---------------------------------------------------------------- 聚光卡 */
+
+/*
+ * 外框在通用卡片「选中」描边的基础上把圆角放大一档、外圈加宽到 4、叠强调光晕。
+ * 选择器带上卡片自己的属性，特异性高于卡片样式表里的选中规则（含悬停），不依赖样式表的加载顺序。
+ */
+.spot[data-selected][data-pad][data-clip] {
+  border-radius: var(--sk-r-xl);
+  box-shadow: 0 0 0 calc(var(--sk-space-4)) var(--sk-accent-soft), var(--sk-accent-glow), var(--sk-shadow-sm);
+}
+
+.spotGrid {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+}
+
+:global(:root[data-sk-tier="regular"]) .spotGrid,
+:global(:root[data-sk-tier="wide"]) .spotGrid {
+  grid-template-columns: 250px minmax(0, 1fr);
+}
+
+.spotInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  padding: var(--sk-space-24) var(--sk-space-24) var(--sk-space-22) var(--sk-space-18);
+}
+
+.tagRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sk-space-6);
+}
+
+.spotName {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sk-fs-title);
+  line-height: var(--sk-lh-title);
+  letter-spacing: var(--sk-ls-title);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+:global(:root[data-sk-tier="regular"]) .spotName,
+:global(:root[data-sk-tier="wide"]) .spotName {
+  font-size: var(--sk-fs-hero);
+  line-height: var(--sk-lh-hero);
+  letter-spacing: var(--sk-ls-hero);
+}
+
+.kindLine {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.kindLine[data-tone="ok"] {
+  color: var(--sk-ok);
+}
+
+.kindLine[data-tone="warn"] {
+  color: var(--sk-warn);
+}
+
+/* UUID 胶囊：可选中复制，右侧是复制按钮 */
+.uuid {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  align-self: flex-start;
+  max-width: 100%;
+  padding: var(--sk-space-2) var(--sk-space-4) var(--sk-space-2) var(--sk-space-10);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+}
+
+.uuidText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  font-weight: var(--sk-w-mono);
+  font-variant-ligatures: no-contextual;
+  color: var(--sk-text-2);
+  user-select: text;
+}
+
+.spotKv {
+  margin-top: var(--sk-space-2);
+}
+
+.spotActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+  margin-top: auto;
+}
+
+/* ---------------------------------------------------------------- 舞台 */
+
+.stage {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.stage[data-variant="spot"] {
+  min-height: 262px;
+}
+
+.stage[data-variant="card"] {
+  height: 156px;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--sk-bg-2);
+}
+
+/* 聚光卡舞台的右缘 40% 渐隐进卡底，舞台与信息区不留硬边 */
+.stage[data-variant="spot"] .backdrop {
+  mask-image: linear-gradient(to right, black 60%, transparent);
+}
+
+.branch {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.stage[data-variant="card"] .branch {
+  right: 0;
+  left: auto;
+}
+
+.pedestal {
+  position: absolute;
+  left: 50%;
+  translate: -50% 0;
+  fill: var(--sk-scrim);
+  filter: blur(3px);
+}
+
+.stage[data-variant="spot"] .pedestal {
+  bottom: var(--sk-space-18);
+}
+
+.stage[data-variant="card"] .pedestal {
+  bottom: var(--sk-space-10);
+}
+
+/* 立绘脚底落在投影的中线上 */
+.figure {
+  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.stage[data-variant="spot"] .figure {
+  margin-bottom: var(--sk-space-28);
+}
+
+.stage[data-variant="card"] .figure {
+  margin-bottom: var(--sk-space-16);
+}
+
+.spot:hover .figure {
+  translate: 0 -4px;
+}
+
+.stageTag {
+  position: absolute;
+  top: var(--sk-space-10);
+  left: var(--sk-space-10);
+}
+
+.stageMenu {
+  position: absolute;
+  top: var(--sk-space-8);
+  right: var(--sk-space-8);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-surface);
+}
+
+/* ---------------------------------------------------------------- 账户卡网格 */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+  min-width: 0;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sk-gap);
+}
+
+:global(:root[data-sk-tier="wide"]) .grid {
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+
+.accountCard {
+  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.accountCard:hover {
+  translate: 0 -2px;
+}
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  padding: var(--sk-space-12) var(--sk-space-14) var(--sk-space-14);
+}
+
+.cardName {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+.cardKind {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.cardFoot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+  margin-top: var(--sk-space-8);
+}
+
+/* ---------------------------------------------------------------- 添加卡 */
+
+.addCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  box-sizing: border-box;
+  min-height: 236px;
+  padding: var(--sk-space-14);
+  border: 1.5px dashed var(--sk-line-2);
+  border-radius: var(--sk-r-lg);
+}
+
+.addTitle {
+  margin: 0;
+  padding: var(--sk-space-2) var(--sk-space-4) var(--sk-space-4);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.addIcon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+}
+
+.addIcon[data-kind="microsoft"] {
+  background: var(--sk-ok-soft);
+  color: var(--sk-ok);
+}
+
+.addIcon[data-kind="authlib"] {
+  background: var(--sk-info-soft);
+  color: var(--sk-info);
+}
+
+.addName {
+  font-weight: var(--sk-w-title);
+}
+
+/* 说明在窄卡里折行而不是省略：三档下卡宽都放不下一整行 */
+.addDescription {
+  white-space: normal;
+}
+
+/* ---------------------------------------------------------------- 空、错、加载 */
+
+.emptyActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sk-space-8);
+}
+
+.errorTitle {
+  display: block;
+  font-weight: var(--sk-w-title);
+}
+
+.errorDetail {
+  display: block;
+  user-select: text;
+}
+
+.loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-page-gap);
+}
+
+/* ---------------------------------------------------------------- 减少动画：没有悬停位移 */
+
+:global([data-sk-reduced]) .figure,
+:global([data-sk-reduced]) .accountCard {
+  transition: none;
+}
+
+:global([data-sk-reduced]) .spot:hover .figure,
+:global([data-sk-reduced]) .accountCard:hover {
+  translate: none;
+}
