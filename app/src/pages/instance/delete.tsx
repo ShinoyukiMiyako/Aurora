@@ -62,10 +62,23 @@ export function useDeleteInstance(): (inst: InstanceSummary) => Promise<void> {
   };
 }
 
+function KeptBackupsLine({ lead, dir }: { lead: string; dir: string }) {
+  return (
+    <p>
+      {lead}
+      <span className={instanceStyles.path} title={dir}>
+        {middleEllipsis(dir, PATH_INLINE_MAX)}
+      </span>
+      {DELETE_INSTANCE_COPY.backupsKeptTail}
+    </p>
+  );
+}
+
 /** backups 为 null：还没扫到目录的占位项，没问过后端（这时也没有存档）。 */
 function DeleteBody({ worlds, backups, pendingTask }: { worlds: readonly WorldDto[]; backups: KeptBackups | null; pendingTask: boolean }) {
   const c = DELETE_INSTANCE_COPY;
   const bytes = worlds.reduce((sum, w) => sum + w.size_bytes, 0);
+  const kept = backups !== null && backups.count > 0 ? backups : null;
   return (
     <div className={styles.body}>
       {worlds.length > 0 ? (
@@ -80,20 +93,14 @@ function DeleteBody({ worlds, backups, pendingTask }: { worlds: readonly WorldDt
               <li key={w.dir_name}>{worldName(w)}</li>
             ))}
           </ul>
-          {backups !== null && backups.count > 0 ? (
-            <p>
-              {c.backupsKeptLead(backups.count)}
-              <span className={instanceStyles.path} title={backups.dir}>
-                {middleEllipsis(backups.dir, PATH_INLINE_MAX)}
-              </span>
-              {c.backupsKeptTail}
-            </p>
-          ) : (
-            <p>{c.backupHint}</p>
-          )}
+          {kept !== null ? <KeptBackupsLine lead={c.backupsKeptLead(kept.count)} dir={kept.dir} /> : <p>{c.backupHint}</p>}
         </>
       ) : (
-        <p>{c.noWorlds}</p>
+        <>
+          <p>{c.noWorlds}</p>
+          {/* 存档已经删光或挪走，备份还留在游戏目录里：同样说明它们在哪，不随实例删除 */}
+          {kept !== null && <KeptBackupsLine lead={c.backupsLeftLead(kept.count)} dir={kept.dir} />}
+        </>
       )}
       {pendingTask && <p>{c.pendingTask}</p>}
     </div>

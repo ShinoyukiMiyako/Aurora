@@ -933,6 +933,8 @@ export const DELETE_INSTANCE_COPY = {
   /** 已有备份时的末句，分三段：前半句、备份目录（等宽、可选中）、后半句。 */
   backupsKeptLead: (count: number) => `这些存档已有 ${count} 份备份，保留在 `,
   backupsKeptTail: "，不会随实例删除。",
+  /** 实例已经没有存档、游戏目录里还留着它以前的存档备份时，接在 noWorlds 之后，同样分三段。 */
+  backupsLeftLead: (count: number) => `这个实例以前的存档还有 ${count} 份备份，保留在 `,
   noWorlds: "这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。",
   /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
   pendingTask: "正在进行的安装任务会先取消。",

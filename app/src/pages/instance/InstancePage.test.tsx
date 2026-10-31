@@ -1818,5 +1818,23 @@ describe("实例详情：存档备份", () => {
     expect(textOf(shown).startsWith("D:/Users/player/Games/")).toBe(true);
     expect(textOf(shown).endsWith(`instances/${ID}`)).toBe(true);
     expect(textOf(shown)).toContain("…");
+    click(button("取消", dialog()));
+    await flush();
+
+    // 实例已经没有存档，备份还在：照常说明备份留在哪，不提「先备份」
+    ipc.overrides.set("preview_instance_deletion", () => ({ ...preview(3)(), worlds: [] }));
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("这个实例没有存档。");
+    expect(dialog().textContent).toContain(`这个实例以前的存档还有 3 份备份，保留在 D:/Games/.minecraft/.petalfall/backups/instances/${ID}，不会随实例删除。`);
+    expect(dialog().textContent).not.toContain("想留着存档的话");
+    click(button("取消", dialog()));
+    await flush();
+
+    ipc.overrides.set("preview_instance_deletion", () => ({ ...preview(0)(), worlds: [] }));
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("这个实例没有存档。");
+    expect(dialog().textContent).not.toContain("份备份");
   });
 });
