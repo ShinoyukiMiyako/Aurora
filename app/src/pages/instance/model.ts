@@ -38,7 +38,7 @@ export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "wo
 export type InstanceLock = "running" | "installing" | "modifying" | "backing_up";
 
 /** 后端占着实例、又不挡 Mod 操作的两种活动。 */
-export type HeldActivity = "modifying" | "backing_up";
+type HeldActivity = "modifying" | "backing_up";
 
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
@@ -53,19 +53,15 @@ export interface InstanceLocks {
 /**
  * busy：本实例的会话在准备、下载、启动或运行中（JVM 占着 Mod 文件，Windows 下改名、替换、删除都会失败）。
  * installing：安装或补全任务正在写这个实例的目录。
- * held：后端报告的活动里，占着实例但与 Mod 改动兼容的那两种。modifying 是在改动 Mod、资源或设置；backing_up
- * 是在备份、恢复或导出存档（游戏退出后的自动备份也算）。两者都不锁 Mod 操作，但与改名、删除、补全互斥，
- * 不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
+ * modifying：后端正占着实例改动 Mod、资源或设置。backingUp：后端正在备份、恢复或导出存档（游戏退出后的
+ * 自动备份也算）。两者都与 Mod 改动兼容，所以不锁 Mod 操作；但与改名、删除、补全互斥，不提前禁用的话
+ * 只能等后端以 instance_busy 拒绝后再报错。后端只报告一种活动，两者不会同时为真。
  */
-export function instanceLocks(busy: boolean, installing: boolean, held: HeldActivity | null): InstanceLocks {
+export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean, backingUp = false): InstanceLocks {
+  const held: HeldActivity | null = backingUp ? "backing_up" : modifying ? "modifying" : null;
   const fileLock = busy ? "running" : installing ? "installing" : null;
   const dirLock = fileLock !== null ? fileLock : held;
   return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : held };
-}
-
-/** 后端报告的活动里属于 held 的那部分（见 instanceLocks）。 */
-export function heldActivity(activity: InstanceSummary["activity"]): HeldActivity | null {
-  return activity === "modifying" || activity === "backing_up" ? activity : null;
 }
 
 /** 打开工作子目录与写实例设置被什么挡住。 */
