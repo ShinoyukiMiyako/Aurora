@@ -750,17 +750,12 @@ impl Aurora {
         Ok((account, auth))
     }
 
-    #[cfg(windows)]
+    /// 微软令牌过期就续期，外置令牌先校验、无效再刷新，离线原样返回。凭据被判定失效时账户库里
+    /// 同时落为 `expired`，账户页据此提示重新登录。
     async fn refresh_for_launch(&self, account: Account) -> Result<Account, LaunchFailed> {
-        self.ensure_microsoft_fresh(&account)
+        self.ensure_account_fresh(&account)
             .await
             .map_err(|err| classify_refresh(err, &account.name))
-    }
-
-    /// 非 Windows 没有账户库，账户库里的账户到不了这里；原样使用以保证跨平台编译。
-    #[cfg(not(windows))]
-    async fn refresh_for_launch(&self, account: Account) -> Result<Account, LaunchFailed> {
-        Ok(account)
     }
 
     async fn plan_java(
@@ -1081,19 +1076,23 @@ impl Aurora {
         reporter: &mut Reporter<'_>,
     ) -> Result<AuthlibInjector, LaunchFailed> {
         let agent = self.ensure_authlib_agent(reporter).await?;
-        let metadata = aurora_auth::yggdrasil::prefetch_metadata(&self.http(), api_root)
-            .await
-            .map_err(|err| -> LaunchFailed {
-                let code = if matches!(err, aurora_auth::AuthError::Http { .. }) {
-                    FailureCode::AccountRefreshNetwork
-                } else {
-                    FailureCode::AccountRelogin
-                };
-                LaunchFailure::new(code, format!("读取验证服务器 {api_root} 的信息失败：{err}"))
-                    .param("server", api_root)
-                    .caused_by(err)
-                    .into()
-            })?;
+        let metadata = aurora_auth::yggdrasil::prefetch_metadata(
+            &self.http(),
+            api_root,
+            crate::auth::AUTH_SERVER_TIMEOUT,
+        )
+        .await
+        .map_err(|err| -> LaunchFailed {
+            let code = if matches!(err, aurora_auth::AuthError::Http { .. }) {
+                FailureCode::AccountRefreshNetwork
+            } else {
+                FailureCode::AccountRelogin
+            };
+            LaunchFailure::new(code, format!("读取验证服务器 {api_root} 的信息失败：{err}"))
+                .param("server", api_root)
+                .caused_by(err)
+                .into()
+        })?;
         Ok(AuthlibInjector::new(agent, metadata.api_root).with_prefetched(metadata.prefetched))
     }
 
@@ -1243,7 +1242,6 @@ fn spawn_game(
     })
 }
 
-#[cfg(windows)]
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
         CoreError::Auth(aurora_auth::AuthError::Http { .. }) => LaunchFailure::new(

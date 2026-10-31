@@ -26,7 +26,8 @@ pub struct AuthValues {
     pub access_token: String,
     /// 账户类型（`${user_type}`）：微软走 `msa`，离线走 `legacy`。
     pub user_type: String,
-    /// Xbox 用户 id（`${auth_xuid}`）。当前账户模型未持有，默认空串，可由调用方补。
+    /// Xbox 用户 id（`${auth_xuid}`）。微软账户取登录链给出的值；离线、外置账户与登录链没给出时
+    /// 为空值：版本模板里 `--xuid` 后面必须跟一个参数位，游戏侧把空值当作「没有 Xbox 身份」。
     pub xuid: String,
     /// 启动器 client id（`${clientid}`）。默认空串，可由调用方补。
     pub client_id: String,
@@ -72,7 +73,10 @@ impl AuthValues {
             uuid: account.uuid.clone(),
             access_token,
             user_type,
-            xuid: String::new(),
+            xuid: match &account.xuid {
+                Some(xuid) => xuid.clone(),
+                None => String::new(),
+            },
             client_id: String::new(),
             user_properties: "{}".to_owned(),
         })
@@ -172,6 +176,15 @@ mod tests {
         let values = AuthValues::from_account(&account).unwrap();
         assert_eq!(values.access_token, "mc-token");
         assert_eq!(values.user_type, "msa");
+        // 登录链没给出 Xbox id：参数位留空值。
+        assert_eq!(values.xuid, "");
+
+        let with_xuid = Account {
+            xuid: Some("2535400000000001".into()),
+            ..account
+        };
+        let values = AuthValues::from_account(&with_xuid).unwrap();
+        assert_eq!(values.xuid, "2535400000000001");
     }
 
     #[test]
