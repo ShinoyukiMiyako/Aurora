@@ -126,6 +126,28 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
     expect(toasts().some((t) => t.includes("装上 5 个 Mod"))).toBe(false);
   });
 
+  it("新建失败、盘上留下目录：重试改排补全，补全好了照样接着装当初勾的开局 Mod", async () => {
+    // 第一次安装在下载前失败（加载器版本对不上），假后端与后端一样留下带安装标记的目录
+    ipc.overrides.set("install_version", (args) => mockInvoke("install_version", { ...args, loaderVersion: "0.0.0-missing" }));
+    const picks = (await fabricPicks()).slice(0, 2);
+    await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass", useTemplate: false, starterMods: picks });
+    await runTasks();
+    const [failed] = tasksOf("install_version");
+    expect(failed.status).toBe("failed");
+    expect(callsOf(ipc, "install_mod")).toEqual([]);
+
+    store.actions.retryTask(failed.id);
+    await runTasks();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual([NAME]);
+    expect(tasksOf("repair_instance").map((t) => t.status)).toEqual(["done"]);
+    expect(tasksOf("install_mods").map((t) => [t.title, t.status])).toEqual([["装上 2 个开局 Mod", "done"]]);
+    expect(installed(callsOf(ipc, "install_mod"))).toEqual([
+      [NAME, "P7dR8mSH", "fapi-0115", 0],
+      [NAME, "AANobbMI", "sodium-121", 1],
+    ]);
+    expect(toasts()).toContain(`success:已给「${NAME}」装上 2 个 Mod`);
+  });
+
   it("没勾开局 Mod、也没勾沿用默认设置：只有新建任务，不调装 Mod，也不补提示", async () => {
     await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass" });
     expect(callsOf(ipc, "install_version")[0].useTemplate).toBe(false);

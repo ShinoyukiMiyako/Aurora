@@ -224,7 +224,8 @@ type TaskMeta =
       loader: LoaderKind;
       loaderVersion: string | null;
     }
-  | { type: "repair"; launchAfter: boolean }
+  /** starter：失败的新建改排补全时接过来的开局 Mod，补全好了照样接着装；别的补全为空。 */
+  | { type: "repair"; launchAfter: boolean; starter: StarterPick[] }
   /** pinFor：下载完把这个实例的 Java 固定为新装的运行时（崩溃诊断「下载 Java N」）。 */
   | { type: "java"; major: number; launchAfter: string | null; pinFor: string | null }
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
@@ -494,7 +495,7 @@ function metaFromSpec(task: Task): TaskMeta | null {
     case "install_modpack":
       return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
     case "repair_instance":
-      return { type: "repair", launchAfter: false };
+      return { type: "repair", launchAfter: false, starter: [] };
     case "install_java": {
       const major = args.requiredMajor;
       if (typeof major !== "number") throw new Error("任务 install_java 缺少 requiredMajor");
@@ -1688,6 +1689,7 @@ export class LauncherStore {
       case "repair": {
         const id = strArg(task.spec.args, "id", command);
         await this.fetchInstances();
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
           await this.actions.launch(id);
           return;
@@ -2217,7 +2219,7 @@ export class LauncherStore {
       },
       async repairInstance(id, opts = {}) {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
-        store.enqueueRepair(id, opts.launchAfter === true);
+        store.enqueueRepair(id, opts.launchAfter === true, []);
       },
       async saveInstanceAsTemplate(id) {
         await instancesIpc.saveInstanceAsTemplate(id);
@@ -2576,8 +2578,8 @@ export class LauncherStore {
     await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
   }
 
-  /** 排一个补全任务；同一件事已在队列里时提示重复并返回 null。 */
-  private enqueueRepair(id: string, launchAfter: boolean): Task | null {
+  /** 排一个补全任务；同一件事已在队列里时提示重复并返回 null。starter 为补全好之后接着装的开局 Mod。 */
+  private enqueueRepair(id: string, launchAfter: boolean, starter: StarterPick[]): Task | null {
     const inst = this.instance(id);
     const spec = inst.incomplete === null ? null : inst.incomplete.spec;
     const mcVersion = inst.mcVersion !== null ? inst.mcVersion : spec === null ? null : spec.mcVersion;
@@ -2589,7 +2591,7 @@ export class LauncherStore {
           : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
     return this.enqueue(
       { kind: "repair", title: TASK_TEXT.repairTitle(id), detail, instanceId: id, spec: { command: "repair_instance", args: { id } } },
-      { type: "repair", launchAfter },
+      { type: "repair", launchAfter, starter },
       id,
     );
   }
@@ -2605,9 +2607,14 @@ export class LauncherStore {
     return leftover === undefined ? null : leftover.id;
   }
 
-  /** 失败新建的重试改排补全：补全任务接替这一行，失败的那一行撤下，不再留着一个点了也没用的重试。 */
+  /**
+   * 失败新建的重试改排补全：补全任务接替这一行，失败的那一行撤下，不再留着一个点了也没用的重试。新建时勾的开局 Mod
+   * 跟着交给补全任务，否则重试成功后玩家勾的 Mod 一个都没装上，也没有任何提示。
+   */
   private retryAsRepair(task: Task, instanceId: string): boolean {
-    if (this.enqueueRepair(instanceId, false) === null) return false;
+    const meta = this.metaOf(task);
+    const starter = meta !== null && meta.type === "create" ? meta.starter : [];
+    if (this.enqueueRepair(instanceId, false, starter) === null) return false;
     this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
     this.tasksChanged();
     return true;
