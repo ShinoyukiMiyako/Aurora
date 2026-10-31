@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
+use crate::commands::discover::parse_resource_type;
 use crate::commands::error::code::MOD_FILE_BUSY;
 use crate::commands::instances::{InstanceActivity, InstanceLocks};
 use crate::commands::CommandError;
@@ -281,10 +282,6 @@ fn parse_platform(name: &str) -> Result<Platform, CommandError> {
 
 fn parse_loader(name: &str) -> Result<ModLoader, CommandError> {
     parse_serde_name(name, "加载器")
-}
-
-fn parse_resource_type(name: &str) -> Result<ResourceType, CommandError> {
-    parse_serde_name(name, "资源类型")
 }
 
 #[cfg(test)]
