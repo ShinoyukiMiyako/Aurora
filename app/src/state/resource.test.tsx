@@ -136,6 +136,60 @@ describe("资源缓存：按前缀失效", () => {
     expect(() => new ResourceCache().reload("nope")).toThrow("还没有被订阅过");
   });
 
+  it("出错时手里还有上一次成功的数据：重试期间照常给出它，这次也失败时 error 里仍带着它", async () => {
+    const cache = new ResourceCache();
+    const retry = deferred<string>();
+    const results: (() => Promise<string>)[] = [
+      () => Promise.resolve("v1"),
+      () => Promise.reject(new Error("网络断了")),
+      () => retry.promise,
+      () => Promise.reject(new Error("还是断的")),
+    ];
+    const fetcher = vi.fn(() => {
+      const next = results.shift();
+      if (next === undefined) throw new Error("多发了请求");
+      return next();
+    });
+    const off = cache.subscribe("news", fetcher, () => undefined);
+    await tick();
+    cache.invalidate("news");
+    await tick();
+    expect(cache.snapshot("news")).toMatchObject({ status: "error", data: "v1" });
+
+    cache.reload("news");
+    expect(cache.snapshot("news")).toMatchObject({ status: "ready", data: "v1", refreshing: true, error: null });
+    retry.reject(new Error("网络断了"));
+    await tick();
+    expect(cache.snapshot("news")).toMatchObject({ status: "error", data: "v1", refreshing: false });
+
+    cache.reload("news");
+    await tick();
+    const twice = cache.snapshot("news");
+    expect(twice).toMatchObject({ status: "error", data: "v1" });
+    expect(twice.error?.message).toBe("还是断的");
+    off();
+  });
+
+  it("从没成功过的出错条目重试时回到 loading", async () => {
+    const cache = new ResourceCache();
+    const retry = deferred<string>();
+    const results: (() => Promise<string>)[] = [() => Promise.reject(new Error("磁盘读不出来")), () => retry.promise];
+    const fetcher = vi.fn(() => {
+      const next = results.shift();
+      if (next === undefined) throw new Error("多发了请求");
+      return next();
+    });
+    const off = cache.subscribe("crash:A", fetcher, () => undefined);
+    await tick();
+    expect(cache.snapshot("crash:A")).toMatchObject({ status: "error", data: undefined });
+    cache.reload("crash:A");
+    expect(cache.snapshot("crash:A")).toMatchObject({ status: "loading", data: undefined });
+    retry.resolve("v2");
+    await tick();
+    expect(cache.snapshot("crash:A")).toMatchObject({ status: "ready", data: "v2" });
+    off();
+  });
+
   it("reloadWith 只这一次换用给定的 fetcher，之后的失效重取回到订阅时的 fetcher", async () => {
     const cache = new ResourceCache();
     const regular = vi.fn(() => Promise.resolve("常规"));

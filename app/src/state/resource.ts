@@ -81,8 +81,11 @@ export class ResourceCache {
   private fetch(key: string, entry: Entry, fetcher: () => Promise<unknown> = entry.fetcher): void {
     const version = ++entry.version;
     entry.inFlight = true;
+    // 出错时手里还有上一次成功的数据（重取失败过）：重试期间照常给出它，与失效重取保留旧数据一致；这次也失败时
+    // 下面的失败分支从快照里接着带上它。从没成功过的才回到 loading
+    const kept = entry.snapshot.data;
     if (entry.snapshot.status === "ready") this.set(entry, { ...entry.snapshot, refreshing: true });
-    else if (entry.snapshot.status === "error") this.set(entry, LOADING_SNAPSHOT);
+    else if (entry.snapshot.status === "error") this.set(entry, kept === undefined ? LOADING_SNAPSHOT : { status: "ready", data: kept, error: null, refreshing: true });
     fetcher().then(
       (data) => {
         if (this.entries.get(key) !== entry || entry.version !== version) return;
