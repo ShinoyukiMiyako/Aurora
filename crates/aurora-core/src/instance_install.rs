@@ -237,7 +237,7 @@ impl Aurora {
                     .java_version
                     .as_ref()
                     .map_or(LEGACY_JAVA_MAJOR, |java| java.major_version);
-                let (_, java) = self.prepare_java(major, events).await?;
+                let (_, java) = self.resolve_java(major, events).await?;
                 let url = match choice {
                     LoaderChoice::Forge => forge_installer_url(mc, &version),
                     _ => neoforge_installer_url(&version),

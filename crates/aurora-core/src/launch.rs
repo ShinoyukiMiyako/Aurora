@@ -19,12 +19,12 @@ use aurora_install::GameLayout;
 use aurora_instance::{
     DiscoveredVersion, IsolationOverride, JavaSelection, VERSIONS_DIR, VersionSettings,
 };
-use aurora_java::{DetectSource, JavaInstallation, detect_all, select_for_major};
+use aurora_java::{DetectSource, JavaInstallation, select_for_major};
 use aurora_launch::logfile::{SessionOutcome, logs_dir};
 use aurora_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, LaunchCommand,
     LauncherLevel, LogBatchSink, LogSource, MemoryConfig, SessionClock, SessionLog,
-    game_path_warning, required_java_major,
+    game_path_warning, recommended_max_mb, required_java_major,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
 use serde::Serialize;
@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 
 use crate::config::MemorySettings;
 use crate::error::CoreError;
-use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
+use crate::event::{CoreEvent, DownloadProgress};
 use crate::facade::{Aurora, make_context};
 use crate::session::GameRun;
 use crate::workdir::{discovered, read_version_json};
@@ -305,11 +305,21 @@ impl InstanceLaunchSettings {
     }
 }
 
-/// 解析实际使用的内存：实例单独设置了就用实例的，否则用全局。最小堆超过最大堆时 JVM 拒绝启动，
-/// 所以只在不超过最大堆时才带上。逐字段解构全局设置，理由同 [`InstanceLaunchSettings::from_settings`]。
-pub fn resolve_memory(instance_mb: Option<u32>, global: MemorySettings) -> MemoryConfig {
-    let MemorySettings { max_mb, min_mb } = global;
-    let max = instance_mb.unwrap_or(max_mb);
+/// 解析实际使用的内存：实例单独设置了就用实例的；否则全局开着自动分配时用 `auto_mb`（此刻的推荐值），
+/// 关着时用全局最大堆。`auto_mb` 只在实例没设、全局开着自动分配时由调用方算出，其余情况传 `None`。
+/// 最小堆超过最大堆时 JVM 拒绝启动，所以只在不超过最大堆时才带上。逐字段解构全局设置，理由同
+/// [`InstanceLaunchSettings::from_settings`]。
+pub fn resolve_memory(
+    instance_mb: Option<u32>,
+    global: MemorySettings,
+    auto_mb: Option<u32>,
+) -> MemoryConfig {
+    let MemorySettings {
+        max_mb,
+        min_mb,
+        auto: _,
+    } = global;
+    let max = instance_mb.or(auto_mb).unwrap_or(max_mb);
     let config = MemoryConfig::fixed(max);
     match min_mb {
         Some(min) if min <= max => config.with_min(min),
@@ -546,6 +556,13 @@ impl Aurora {
         if let Some(java) = java_override {
             settings.java = java;
         }
+        // 实例跟随全局、全局又固定了默认 Java 时，按固定路径对待：找不到或版本不够同样要报出来，
+        // 不能悄悄换成自动挑选的另一个 Java。
+        if settings.java == JavaChoice::Auto
+            && let Some(path) = &self.config().default_java
+        {
+            settings.java = JavaChoice::Path(path.clone());
+        }
         let (account, auth) = self.launch_identity(account, reporter).await?;
         let required_major = required_java_major(merged);
         let java_plan = self
@@ -663,7 +680,17 @@ impl Aurora {
 
         // -- 5 生成启动参数
         reporter.stage(LaunchStage::BuildArguments).await;
-        let memory = resolve_memory(settings.memory_mb, self.config().memory);
+        let global_memory = self.config().memory;
+        let auto_mb = if settings.memory_mb.is_none() && global_memory.auto {
+            let tier = self.instance_memory_tier(&chain.target).await?;
+            Some(recommended_max_mb(
+                crate::memory::read_system_memory().await?,
+                tier,
+            ))
+        } else {
+            None
+        };
+        let memory = resolve_memory(settings.memory_mb, global_memory, auto_mb);
         let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         let command = assemble_command(
             merged,
@@ -798,7 +825,8 @@ impl Aurora {
             return Ok(JavaPlan::Ready(java));
         }
 
-        let installations = tokio::task::spawn_blocking(detect_all).await?;
+        // 走带指纹缓存的探测：每次启动都对每个 java 跑一遍 -version 是数百毫秒的白等。
+        let installations = self.detect_java().await?;
         if let Some(java) = select_for_major(&installations, required_major) {
             return Ok(JavaPlan::Ready(java.clone()));
         }
@@ -1150,61 +1178,6 @@ impl Aurora {
     }
 }
 
-impl Aurora {
-    /// 解析可用 Java：本地探测并按主版本匹配，缺失且允许时自动下载 Mojang 运行时。供安装器（Forge 安装器
-    /// 要用 Java 跑）使用；启动走 [`Aurora::launch`] 自己的 Java 选择，那里还要区分失败码。
-    ///
-    /// 返回 `(探测/托管的 Java 列表, 选中的 java 可执行文件路径)`。
-    pub(crate) async fn prepare_java(
-        &self,
-        required_major: u32,
-        events: Option<&EventSink>,
-    ) -> crate::error::Result<(Vec<JavaInstallation>, PathBuf)> {
-        let mut installations = tokio::task::spawn_blocking(detect_all).await?;
-        if let Some(java) = select_for_major(&installations, required_major) {
-            let path = java.path.clone();
-            emit(
-                events,
-                CoreEvent::stage(format!(
-                    "使用本地 Java {required_major}：{}",
-                    path.display()
-                )),
-            );
-            return Ok((installations, path));
-        }
-
-        if !self.config().auto_download_java {
-            return Err(CoreError::NoJava {
-                major: required_major,
-            });
-        }
-
-        emit(
-            events,
-            CoreEvent::stage(format!(
-                "本地未找到 Java {required_major}，开始下载 Mojang 运行时"
-            )),
-        );
-        let installer = self.java_installer(self.java_runtime_url());
-        let install_dir = crate::java::runtime_install_dir(self.data_dir(), required_major);
-        let runtime = installer.install(required_major, &install_dir).await?;
-        let exe = runtime.java_executable.clone();
-        let probed =
-            tokio::task::spawn_blocking(move || aurora_java::probe(&exe, DetectSource::Managed))
-                .await??;
-        let path = probed.path.clone();
-        installations.push(probed);
-        emit(
-            events,
-            CoreEvent::stage(format!(
-                "Java {required_major} 运行时安装完成：{}",
-                path.display()
-            )),
-        );
-        Ok((installations, path))
-    }
-}
-
 /// 查不到最新构建、本地也没有任何一份 authlib-injector。
 fn agent_unavailable(err: crate::authlib::LatestLookupError) -> LaunchFailure {
     let code = if err.is_offline() {
@@ -1471,11 +1444,15 @@ mod tests {
     fn fixture() -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
-            root.clone(),
-            root.join(".minecraft"),
-        );
+        // 关掉自动分配：最大堆取全局的固定值，断言才不随本机此刻的空闲内存漂移。
+        let config = AuroraConfig {
+            memory: MemorySettings {
+                auto: false,
+                ..MemorySettings::default()
+            },
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::for_test(config, root.clone(), root.join(".minecraft"));
         Fixture {
             _tmp: tmp,
             root,
@@ -1562,16 +1539,30 @@ mod tests {
         let global = MemorySettings {
             max_mb: 4096,
             min_mb: Some(1024),
+            auto: false,
         };
-        let both = resolve_memory(None, global);
+        let both = resolve_memory(None, global, None);
         assert_eq!((both.max_mb, both.min_mb), (4096, Some(1024)));
-        let instance = resolve_memory(Some(6144), global);
+        let instance = resolve_memory(Some(6144), global, None);
         assert_eq!((instance.max_mb, instance.min_mb), (6144, Some(1024)));
         // 实例最大堆比全局最小堆还小：带上 -Xms 会让 JVM 拒绝启动。
-        let small = resolve_memory(Some(768), global);
+        let small = resolve_memory(Some(768), global, None);
         assert_eq!((small.max_mb, small.min_mb), (768, None));
-        let edge = resolve_memory(Some(1024), global);
+        let edge = resolve_memory(Some(1024), global, None);
         assert_eq!((edge.max_mb, edge.min_mb), (1024, Some(1024)));
+
+        // 自动分配：没有实例覆盖时用此刻的推荐值，实例覆盖仍然优先。
+        let auto = MemorySettings {
+            auto: true,
+            ..global
+        };
+        let recommended = resolve_memory(None, auto, Some(3584));
+        assert_eq!((recommended.max_mb, recommended.min_mb), (3584, Some(1024)));
+        let pinned = resolve_memory(Some(2048), auto, None);
+        assert_eq!(pinned.max_mb, 2048);
+        // 推荐值低于全局最小堆：-Xms 不带。
+        let tight = resolve_memory(None, auto, Some(768));
+        assert_eq!((tight.max_mb, tight.min_mb), (768, None));
     }
 
     #[test]
@@ -1744,6 +1735,38 @@ mod tests {
         assert_eq!(
             failure.params.get("mc_version"),
             Some(&Value::from(VERSION))
+        );
+    }
+
+    #[tokio::test]
+    async fn global_default_java_is_used_as_a_pinned_java() {
+        let mut fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 21, true);
+        let old = fake_java(&fx.root, 17, 0);
+        fx.aurora.set_default_java(Some(old.clone()));
+
+        // 实例没有指定 Java：全局固定的 Java 17 被当作指定的 Java，版本不够时报出来，
+        // 而不是悄悄换成自动挑选的另一个。
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let result = fx.aurora.launch(request(), &tx).await;
+        drop(tx);
+        while rx.recv().await.is_some() {}
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::JavaTooOld);
+        assert_eq!(failure.params.get("current"), Some(&Value::from(17)));
+        assert_eq!(failure.params.get("major"), Some(&Value::from(21)));
+
+        let missing = fx.root.join("gone").join("java.exe");
+        fx.aurora.set_default_java(Some(missing.clone()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let result = fx.aurora.launch(request(), &tx).await;
+        drop(tx);
+        while rx.recv().await.is_some() {}
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::JavaPinnedMissing);
+        assert_eq!(
+            failure.params.get("path"),
+            Some(&Value::from(missing.display().to_string()))
         );
     }
 

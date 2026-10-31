@@ -356,7 +356,12 @@ async fn launch(
     let mut aurora = aurora.clone();
     if let Some(max_mb) = max_memory {
         let min_mb = aurora.config().memory.min_mb;
-        aurora.set_memory(MemorySettings { max_mb, min_mb });
+        // 显式给了最大堆就关掉自动分配，否则自动分配会盖过这次覆盖。
+        aurora.set_memory(MemorySettings {
+            max_mb,
+            min_mb,
+            auto: false,
+        });
     }
 
     let (events, mut event_rx) = mpsc::unbounded_channel::<LaunchEvent>();

@@ -157,7 +157,7 @@ impl Aurora {
     /// 安装 Forge/NeoForge：先据原版版本 JSON 定 Java 主版本、备妥运行时，再下载并执行官方 installer。
     ///
     /// 与 Fabric/Quilt 不同，Forge/NeoForge 的 installer 内含需 Java 子进程执行的 processors，故本步依赖
-    /// [`Aurora::prepare_java`] 取得可执行 java。`installer_url` 由调用方按风味拼好（Forge 需 mc+loader
+    /// [`Aurora::resolve_java`] 取得可执行 java。`installer_url` 由调用方按风味拼好（Forge 需 mc+loader
     /// 两段，NeoForge 只需 loader 一段），本方法只负责 Java 解析、执行与把 [`aurora_install::ForgeSummary`]
     /// 收敛成 [`LoaderSummary`]。`processors` 计数在 [`LoaderSummary`] 中无对应字段，改由阶段事件保留。
     async fn install_forge(
@@ -197,7 +197,7 @@ impl Aurora {
                 choice.display_name()
             )),
         );
-        let (_, java_path) = self.prepare_java(required_major, events).await?;
+        let (_, java_path) = self.resolve_java(required_major, events).await?;
 
         emit(
             events,
@@ -378,11 +378,11 @@ mod tests {
     }
 
     /// 原版 JSON 声明 javaVersion.majorVersion，Forge 分支须读回它并据此解析 Java；这里给一个
-    /// 不存在的主版本（999）且关闭自动下载，令 prepare_java 必然报 NoJava。断言：
+    /// 不存在的主版本（999）且关闭自动下载，令 resolve_java 必然报 NoJava。断言：
     /// (1) 选择 Forge 走到了 Java 解析（Fabric/Quilt 分支不碰 Java），
     /// (2) java 主版本正是从原版 JSON 读出的 999（非硬编码 8），
     /// (3) 失败发生在下载 installer（硬编码 maven 地址）之前，故测试不触网。
-    /// 删掉「读版本 JSON 定 Java 主版本 + prepare_java」逻辑，本断言即挂。
+    /// 删掉「读版本 JSON 定 Java 主版本 + resolve_java」逻辑，本断言即挂。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn install_forge_reads_java_major_before_installer_download() {
         let server = MockServer::start().await;
