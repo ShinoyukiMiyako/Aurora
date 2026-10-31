@@ -3,7 +3,7 @@
 
 import { AUTHLIB_COPY } from "../../copy/flows";
 import { errorRecord } from "../../state/errors";
-import { AUTHLIB_DIALOG_COPY } from "./copy";
+import { AUTHLIB_DIALOG_COPY } from "../../copy/login";
 
 function detailOf(error: unknown): unknown {
   return typeof error === "object" && error !== null && "detail" in error ? (error as { detail: unknown }).detail : null;

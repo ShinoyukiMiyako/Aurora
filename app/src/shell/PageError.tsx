@@ -6,7 +6,7 @@ import { COPY_FEEDBACK_MS } from "../domain/limits";
 import { logDiagnostic } from "../ipc/diagnostics";
 import { Button } from "../ui/Button";
 import { EmptyState } from "../ui/EmptyState";
-import { PAGE_ERROR_COPY, SHELL_ACTION_ERROR } from "./copy";
+import { PAGE_ERROR_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { describeError } from "./ErrorScreen";
 import styles from "./PageError.module.css";

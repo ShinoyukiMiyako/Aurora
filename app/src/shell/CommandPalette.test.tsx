@@ -9,7 +9,7 @@ import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
 import { CommandPalette } from "./CommandPalette";
-import { PALETTE_COPY } from "./copy";
+import { PALETTE_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
 

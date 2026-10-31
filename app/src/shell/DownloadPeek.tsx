@@ -18,7 +18,7 @@ import { IconButton } from "../ui/IconButton";
 import { Popover } from "../ui/Popover";
 import { ProgressBar } from "../ui/ProgressBar";
 import { ProgressRing } from "../ui/ProgressRing";
-import { PEEK_COPY } from "./copy";
+import { PEEK_COPY } from "../copy/shell";
 import styles from "./DownloadPeek.module.css";
 import { useNav, useShell } from "./shell";
 import { useRunner } from "./useRunner";

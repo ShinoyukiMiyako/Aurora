@@ -21,7 +21,7 @@ import { RemoteImageProvider } from "../ui/remote-image";
 import styles from "./AppShell.module.css";
 import { ChromeProvider, type ChromeApi } from "./chrome";
 import { CommandPalette } from "./CommandPalette";
-import { SHELL_ACTION_ERROR } from "./copy";
+import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { FOCUS_FALLBACK_ATTR, OverlayRoot } from "./overlay";
 import { PageErrorBoundary } from "./PageError";
 import type { AnyPage, PageRegistry } from "./pages";

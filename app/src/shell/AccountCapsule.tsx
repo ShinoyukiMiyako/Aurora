@@ -17,7 +17,7 @@ import { activeAccount, busyInstanceId } from "../state/selectors";
 import { Popover } from "../ui/Popover";
 import { Tooltip } from "../ui/Tooltip";
 import styles from "./AccountCapsule.module.css";
-import { ACCOUNT_COPY, SHELL_ACTION_ERROR } from "./copy";
+import { ACCOUNT_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
 import { useNav, useShell } from "./shell";
 import { useRunner } from "./useRunner";
 

@@ -17,7 +17,7 @@ import { SETTINGS_COMMANDS, SettingsCommandsProvider, type SettingsCommands } fr
 import { UpdaterController } from "./pages/settings/update/controller";
 import { UpdaterControllerProvider } from "./pages/settings/update/useUpdater";
 import { AppShell, type ShellFlows } from "./shell/AppShell";
-import { SHELL_CRASH_COPY } from "./shell/copy";
+import { SHELL_CRASH_COPY } from "./copy/shell";
 import { ErrorBoundary } from "./shell/ErrorBoundary";
 import { describeError, ErrorScreen } from "./shell/ErrorScreen";
 import { buildPageTable } from "./shell/nav";

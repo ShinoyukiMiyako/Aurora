@@ -12,7 +12,7 @@ import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } fr
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
-import { SIDEBAR_COPY } from "./copy";
+import { SIDEBAR_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useNav, type NavApi } from "./shell";
 import { dragShift, dropIndex, hasUpdate, moveItem, PIN_STEP, pinLaunchItem, pinLine, pinTarget, Sidebar, sidebarSelection } from "./Sidebar";

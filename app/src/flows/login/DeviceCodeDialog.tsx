@@ -21,7 +21,7 @@ import { IconButton } from "../../ui/IconButton";
 import { Modal } from "../../ui/Modal";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Skeleton } from "../../ui/Skeleton";
-import { DEVICE_DIALOG_COPY, LOGIN_ERROR } from "./copy";
+import { DEVICE_DIALOG_COPY, LOGIN_ERROR } from "../../copy/login";
 import { XBOX_URL, openExternal } from "./external";
 import styles from "./login.module.css";
 import { useLoginSkin } from "./skin";

@@ -13,7 +13,7 @@ import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 import { Modal } from "../../ui/Modal";
 import { TextInput } from "../../ui/TextInput";
-import { LOGIN_ERROR, OFFLINE_DIALOG_COPY } from "./copy";
+import { LOGIN_ERROR, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import styles from "./login.module.css";
 import { hyphenateUuid, offlineUuid } from "./offline-uuid";
 

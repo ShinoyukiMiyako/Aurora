@@ -1,7 +1,7 @@
 // 外壳自己的文案：标题栏、状态岛、下载快览、账户胶囊、侧栏、命令面板、通知容器与错误兜底。
-// 与流程共用的词（阶段名、按钮动词、任务状态）从 copy/flows 取，不在这里另写一份。
+// 与流程共用的词（阶段名、按钮动词、任务状态）从 flows.ts 取，不在这里另写一份。
 
-import { LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "../copy/flows";
+import { LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "./flows";
 import { MAX_PARALLEL_TASKS } from "../domain/limits";
 import { APP_NAME } from "../lib/app-info";
 

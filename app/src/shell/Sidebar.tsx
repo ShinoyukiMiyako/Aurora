@@ -28,7 +28,7 @@ import type { LauncherState } from "../state/store";
 import { Menu, type MenuEntry, type MenuItem, type MenuOpenedBy } from "../ui/Menu";
 import { Tooltip } from "../ui/Tooltip";
 import { useChrome } from "./chrome";
-import { SHELL_ACTION_ERROR, SIDEBAR_COPY } from "./copy";
+import { SHELL_ACTION_ERROR, SIDEBAR_COPY } from "../copy/shell";
 import { PIN_SHORTCUT_COUNT, SHORTCUT_PAGES, type ShortcutPage } from "./keys";
 import { useNav, useShell } from "./shell";
 import styles from "./Sidebar.module.css";

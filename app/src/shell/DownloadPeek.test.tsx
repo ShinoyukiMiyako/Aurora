@@ -4,7 +4,7 @@ import { CONFIRM_COPY } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import type { Task } from "../domain/types";
 import type { LauncherState } from "../state/store";
-import { PEEK_COPY } from "./copy";
+import { PEEK_COPY } from "../copy/shell";
 import { cancelTaskConfirm, overallProgress, peekRows, unseenFailures } from "./DownloadPeek";
 
 function task(id: string, patch: Partial<Task> = {}): Task {

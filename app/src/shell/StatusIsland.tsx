@@ -23,7 +23,7 @@ import { Button } from "../ui/Button";
 import { Popover } from "../ui/Popover";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { ProgressRing } from "../ui/ProgressRing";
-import { ISLAND_COPY } from "./copy";
+import { ISLAND_COPY } from "../copy/shell";
 import { useShell } from "./shell";
 import styles from "./StatusIsland.module.css";
 import type { Tier } from "./tier";

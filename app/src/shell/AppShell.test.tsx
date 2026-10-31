@@ -11,7 +11,7 @@ import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../te
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { AppShell, PAGE_PRELOAD_DELAY_MS, type ShellFlows } from "./AppShell";
-import { PAGE_ERROR_COPY } from "./copy";
+import { PAGE_ERROR_COPY } from "../copy/shell";
 import type { PageTable } from "./nav";
 import { createPageRegistry, type PageRegistry } from "./pages";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
