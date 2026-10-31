@@ -40,7 +40,7 @@ export type LaunchPhaseName = "preparing" | "downloading" | "launching" | "runni
 export interface LaunchDownloadDto {
   total: number;
   finished: number;
-  /** 实际传输字节，含重传，可能超过 total_bytes：画进度时要封顶到 1。 */
+  /** 有效字节：已就绪的字节，不含重传，失败的文件退回 0；平台声明的大小与实际不符时仍可能越过 total_bytes，画进度时封顶到 1。 */
   bytes: number;
   /** 声明大小之和；有任一文件大小未知时为 null。 */
   total_bytes: number | null;

@@ -17,7 +17,7 @@ export type CoreEvent =
       total: number;
       /** 本批已结束文件数（成功与最终失败都计入）。 */
       finished: number;
-      /** 本批实际传输字节，含重传，可能超过 total_bytes：画进度时要封顶到 1。 */
+      /** 本批有效字节：已就绪的字节，不含重传，失败的文件退回 0；声明大小与实际不符时仍可能越过 total_bytes，画进度时封顶到 1。 */
       bytes: number;
       /** 本批声明大小之和；有任一文件大小未知时为 null。 */
       total_bytes: number | null;

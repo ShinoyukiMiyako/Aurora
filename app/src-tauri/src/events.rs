@@ -48,7 +48,7 @@ pub enum CoreEventKind {
         total: u64,
         /// 已结束文件数（成功与最终失败都计入）。
         finished: u64,
-        /// 实际传输字节（含重传，可能超过 `total_bytes`，画进度时要封顶）。
+        /// 有效字节：已就绪的字节，不含重传；声明大小与实际不符时仍可能越过 `total_bytes`，画进度时要封顶。
         bytes: u64,
         /// 本批声明大小之和；有文件大小未知时为 `null`。
         total_bytes: Option<u64>,
