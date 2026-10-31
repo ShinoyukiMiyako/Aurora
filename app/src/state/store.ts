@@ -101,6 +101,7 @@ import {
   completeCompositeStep,
   compositeProgress,
   findDuplicate,
+  INSTANCE_TASK_COMMANDS,
   isActiveTask,
   markCancelled,
   markDone,
@@ -377,9 +378,6 @@ const TASK_COMMANDS = new Set([
  * 存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
  */
 const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb"] as const;
-
-/** 写整个实例目录的任务：期间实例算「安装中」。其余挂在实例上的任务（装、更新 Mod 与资源）只改动其中的 Mod 与资源，算 modifying。 */
-const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
 
 /** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
 const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
@@ -824,7 +822,7 @@ class StateDeriver {
     const creating = new Map<string, CreationMeta>();
     for (const t of active) {
       if (t.instanceId === null) continue;
-      (INSTANCE_TASKS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
+      (INSTANCE_TASK_COMMANDS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
@@ -1550,7 +1548,7 @@ export class LauncherStore {
     this.tasksChanged();
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫。占位项与重扫结果在同一次
     // 更新里交接：盘上留了目录就由扫描项接替，没留就移除
-    if (INSTANCE_TASKS.has(before.spec.command)) {
+    if (INSTANCE_TASK_COMMANDS.has(before.spec.command)) {
       this.background(
         ACTION_ERROR.refreshInstances,
         this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)),

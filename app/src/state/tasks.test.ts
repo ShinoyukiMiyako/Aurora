@@ -73,6 +73,40 @@ describe("下载队列：纯函数", () => {
     expect(queuePosition(tasks, "t2")).toBeNull();
   });
 
+  describe("同一实例上写整个目录的任务（新建、导入、补全）不与这个实例上的其它任务同时跑", () => {
+    const repair = (id: string, instanceId: string, overrides: Partial<Task> = {}) =>
+      task(id, { kind: "repair", instanceId, spec: { command: "repair_instance", args: { id: instanceId } }, ...overrides });
+    const mods = (id: string, instanceId: string, overrides: Partial<Task> = {}) =>
+      task(id, { kind: "mod", instanceId, spec: { command: "install_mods", args: { versionId: instanceId, platform: "modrinth", projectId: id, items: [] } }, ...overrides });
+
+    it("装 Mod 在跑时，同一实例的补全留在队里，别的实例与不挂实例的任务照常开始", () => {
+      const tasks = [mods("m1", "生存", { status: "running" }), repair("r1", "生存"), repair("r2", "创造"), task("j21")];
+      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["r2", "j21"]);
+    });
+
+    it("实例 id 不分大小写：补全「Survival」在跑时，「survival」上的装 Mod 等着", () => {
+      const tasks = [repair("r1", "Survival", { status: "running" }), mods("m1", "survival")];
+      expect(tasksToStart(tasks)).toEqual([]);
+    });
+
+    it("先到先下：排在前面、还在等的补全挡住同一实例后来的装 Mod，即使装 Mod 彼此可以同时跑", () => {
+      const tasks = [mods("m1", "生存", { status: "running" }), repair("r1", "生存"), mods("m2", "生存")];
+      expect(tasksToStart(tasks)).toEqual([]);
+      const afterFirst = tasks.map((t) => (t.id === "m1" ? { ...t, status: "done" as const, finishedAt: T0 } : t));
+      expect(tasksToStart(afterFirst).map((t) => t.id)).toEqual(["r1"]);
+    });
+
+    it("同一实例上的装 Mod 与装资源彼此兼容，可以同时开始", () => {
+      const tasks = [mods("m1", "生存", { status: "running" }), mods("m2", "生存"), mods("m3", "生存")];
+      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["m2", "m3"]);
+    });
+
+    it("同一次调度里也互斥：空位够时，排队的补全与它后面同一实例的装 Mod 只开始前一个", () => {
+      const tasks = [repair("r1", "生存"), mods("m1", "生存"), task("j21")];
+      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["r1", "j21"]);
+    });
+  });
+
   it("重试只对失败的任务，换下一次尝试并排到队尾", () => {
     const tasks = [task("t1", { status: "failed", attempt: 1, error: { code: "network_failed", message: "x" }, finishedAt: T0 }), task("t2")];
     const retried = retryTask(tasks, "t1");
@@ -311,6 +345,30 @@ describe("下载队列：状态容器", () => {
     expect(callsOf(ipc, "install_java").map((a) => a.requiredMajor)).toEqual([8, 17, 21, 25]);
     expect(store.getState().toasts.some((t) => t.title === "Java 17 已就绪")).toBe(true);
     store.stop();
+  });
+
+  it("全部重试：同一实例上的补全与装 Mod 一起重新排队时，只先开始补全，装 Mod 等补全结束再开始", async () => {
+    const failed = (id: string, command: string, args: Record<string, unknown>, kind: Task["kind"]): TaskRecordDto =>
+      record(id, "failed", { kind, instance_id: "生存", error: { code: "network_failed", message: "连不上" }, spec: { command, args } });
+    ipc.overrides.set("load_task_journal", () => [
+      failed("r1", "repair_instance", { id: "生存" }, "repair"),
+      failed("m1", "install_mods", { versionId: "生存", platform: "modrinth", projectId: "sodium", items: [{ platform: "modrinth", projectId: "sodium", modVersionId: "v1", title: "Sodium", fileSize: 10 }] }, "mod"),
+    ]);
+    const store = await startedStore();
+    try {
+      const repairDone = deferred<unknown>();
+      ipc.overrides.set("repair_instance", () => repairDone.promise);
+      ipc.overrides.set("install_mod", () => null);
+      expect(store.actions.retryFailedTasks()).toBe(2);
+      await settle();
+      expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
+      expect(callsOf(ipc, "install_mod")).toHaveLength(0);
+      repairDone.resolve(null);
+      await settle();
+      expect(callsOf(ipc, "install_mod")).toHaveLength(1);
+    } finally {
+      store.stop();
+    }
   });
 
   it("取消排队中的任务只改状态，不发任何命令", async () => {
