@@ -681,6 +681,87 @@ describe("装到一半被重扫扫到半成品目录", () => {
   });
 });
 
+describe("重试失败的新建", () => {
+  const spec = { name: "新世界", mcVersion: "1.21.1", loader: "fabric" as const, loaderVersion: "0.16.10", cover: "grass" };
+  /** 后端失败时保留的目录：带着安装标记，结局是失败。 */
+  const leftover = () =>
+    instanceDto("新世界", {
+      status: "broken",
+      broken_reason: "缺少版本 JSON",
+      mc_version: null,
+      incomplete: { kind: "install", outcome: "failed", started_at: 1_720_000_000_000, spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" }, error: { code: "network_failed", message: "连接超时" } },
+    });
+
+  beforeEach(() => {
+    ipc.overrides.set("install_version", () => Promise.reject(new IpcError("network_failed", "连接超时")));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  const commands = () => store.getState().tasks.map((t) => [t.spec.command, t.status]);
+
+  it("盘上留下了带安装标记的目录：重试改排补全，失败的新建那一行撤下", async () => {
+    // 失败后的那次重扫才会扫到它：先备好盘上的样子再入队（安装一入队就失败）
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+    expect(commands()).toEqual([["install_version", "failed"]]);
+    const failed = store.getState().tasks[0];
+
+    store.actions.retryTask(failed.id);
+    await settle();
+    // 照原样重跑会以名称重复失败，所以不再调 install_version
+    expect(callsOf(ipc, "install_version")).toHaveLength(1);
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["新世界"]);
+    expect(commands()).toEqual([["repair_instance", "running"]]);
+    expect(store.getState().tasks.some((t) => t.id === failed.id)).toBe(false);
+  });
+
+  it("「全部重试」同样改排补全，并计入重试个数", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+    expect(store.actions.retryFailedTasks()).toBe(1);
+    await settle();
+    expect(commands()).toEqual([["repair_instance", "running"]]);
+    expect(callsOf(ipc, "install_version")).toHaveLength(1);
+  });
+
+  it("「全部重试」时补全已在跑：静默跳过，不逐条提示重复，失败的那一行留着", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+    await store.actions.repairInstance("新世界");
+    await settle();
+    const toasts = store.getState().toasts.length;
+    expect(store.actions.retryFailedTasks()).toBe(0);
+    expect(store.getState().toasts).toHaveLength(toasts);
+    expect(commands()).toEqual([
+      ["install_version", "failed"],
+      ["repair_instance", "running"],
+    ]);
+  });
+
+  it("盘上没留目录：重试照原样重跑 install_version", async () => {
+    await store.actions.createInstance(spec);
+    await settle();
+    store.actions.retryTask(store.getState().tasks[0].id);
+    await settle();
+    expect(callsOf(ipc, "install_version")).toHaveLength(2);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("同名目录不是安装留下的（例如已有实例改名撞上）：不改排补全", async () => {
+    instances = [...instances, instanceDto("新世界")];
+    await store.actions.createInstance(spec);
+    await settle();
+    store.actions.retryTask(store.getState().tasks[0].id);
+    await settle();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(callsOf(ipc, "install_version")).toHaveLength(2);
+  });
+});
+
 describe("删除还在安装的新建实例", () => {
   const spec = { name: "新世界", mcVersion: "1.21.1", loader: "vanilla" as const, loaderVersion: null, cover: "grass" };
   let install: Deferred<{ id: string }>;

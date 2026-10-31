@@ -2145,21 +2145,8 @@ export class LauncherStore {
         return saved;
       },
       async repairInstance(id, opts = {}) {
-        const inst = store.instance(id);
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
-        const spec = inst.incomplete === null ? null : inst.incomplete.spec;
-        const mcVersion = inst.mcVersion !== null ? inst.mcVersion : spec === null ? null : spec.mcVersion;
-        const detail =
-          mcVersion === null
-            ? TASK_TEXT.repairDetailUnknown
-            : inst.mcVersion !== null
-              ? TASK_TEXT.repairDetail(mcVersion, inst.loader, inst.loaderVersion)
-              : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
-        store.enqueue(
-          { kind: "repair", title: TASK_TEXT.repairTitle(id), detail, instanceId: id, spec: { command: "repair_instance", args: { id } } },
-          { type: "repair", launchAfter: opts.launchAfter === true },
-          id,
-        );
+        store.enqueueRepair(id, opts.launchAfter === true);
       },
       async openFolder(target, id = null, world = null) {
         await instancesIpc.openFolder(target, id, world);
@@ -2410,6 +2397,11 @@ export class LauncherStore {
       },
       retryTask(id) {
         const task = store.findTask(id);
+        const leftover = store.leftoverOfFailedCreate(task);
+        if (leftover !== null) {
+          store.retryAsRepair(task, leftover);
+          return;
+        }
         const duplicate = findDuplicate(store.raw.tasks, task.spec);
         if (duplicate !== undefined) {
           store.pushToast("info", TASK_TOAST.duplicate(task.title).title);
@@ -2421,6 +2413,12 @@ export class LauncherStore {
       retryFailedTasks() {
         let retried = 0;
         for (const task of store.raw.tasks.filter((t) => t.status === "failed")) {
+          const leftover = store.leftoverOfFailedCreate(task);
+          if (leftover !== null) {
+            // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
+            if (findDuplicate(store.raw.tasks, { command: "repair_instance", args: { id: leftover } }) === undefined && store.retryAsRepair(task, leftover)) retried += 1;
+            continue;
+          }
           // 逐个排：前一个重试后，同一件事的后一个就算重复
           if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
           store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id) }));
@@ -2494,6 +2492,43 @@ export class LauncherStore {
     invalidateResources(`skin:${account.uuid}`);
     const copy = TOAST_COPY.authlibAdded(account.name, account.authServer);
     await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
+  }
+
+  /** 排一个补全任务；同一件事已在队列里时提示重复并返回 null。 */
+  private enqueueRepair(id: string, launchAfter: boolean): Task | null {
+    const inst = this.instance(id);
+    const spec = inst.incomplete === null ? null : inst.incomplete.spec;
+    const mcVersion = inst.mcVersion !== null ? inst.mcVersion : spec === null ? null : spec.mcVersion;
+    const detail =
+      mcVersion === null
+        ? TASK_TEXT.repairDetailUnknown
+        : inst.mcVersion !== null
+          ? TASK_TEXT.repairDetail(mcVersion, inst.loader, inst.loaderVersion)
+          : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
+    return this.enqueue(
+      { kind: "repair", title: TASK_TEXT.repairTitle(id), detail, instanceId: id, spec: { command: "repair_instance", args: { id } } },
+      { type: "repair", launchAfter },
+      id,
+    );
+  }
+
+  /**
+   * 失败的新建在盘上留下了带安装标记的目录时，它的实例 id；否则 null。这时照原样重跑 install_version 必然
+   * 以名称重复失败（后端把这个目录算作已有实例），重试要改成按标记里记下的内容补全。
+   */
+  private leftoverOfFailedCreate(task: Task): string | null {
+    if (task.spec.command !== "install_version") return null;
+    const name = strArg(task.spec.args, "targetName", task.spec.command).toLowerCase();
+    const leftover = this.raw.scanned.find((i) => i.id.toLowerCase() === name && i.incomplete !== null && i.incomplete.kind === "install");
+    return leftover === undefined ? null : leftover.id;
+  }
+
+  /** 失败新建的重试改排补全：补全任务接替这一行，失败的那一行撤下，不再留着一个点了也没用的重试。 */
+  private retryAsRepair(task: Task, instanceId: string): boolean {
+    if (this.enqueueRepair(instanceId, false) === null) return false;
+    this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
+    this.tasksChanged();
+    return true;
   }
 
   private enqueueUpdate(instanceId: string, candidate: modsIpc.UpdateCandidate): void {
