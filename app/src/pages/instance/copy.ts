@@ -18,6 +18,8 @@ export const PAGE_COPY = {
 export const HERO_COPY = {
   eyebrowVanilla: "原版实例",
   eyebrowModded: "自建模组实例",
+  eyebrowModpack: (source: string) => `整合包 · ${source}`,
+  modpackLocal: "本地文件",
   played: (minutes: number) => `已游玩 ${formatPlaytime(minutes)}`,
   rename: "重命名",
   renameInput: "实例名称",
@@ -113,6 +115,8 @@ export const OVERVIEW_COPY = {
   kvLoader: "加载器",
   kvJava: "Java",
   kvMemory: "最大内存",
+  kvModpack: "整合包",
+  modpackNone: "无（自行组装）",
   kvCreated: "创建于",
   createdUnknown: "文件系统没有记录",
   javaAutoFound: (major: number) => `自动 · Java ${major}`,

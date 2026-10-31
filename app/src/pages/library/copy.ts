@@ -31,6 +31,7 @@ export const LIBRARY_COPY = {
   lastPlayed: "上次游玩",
   playtime: "累计时长",
   modCount: "Mod 数",
+  worldCount: "存档数",
 
   pin: (name: string) => `把「${name}」固定到侧栏`,
   unpin: (name: string) => `从侧栏取消固定「${name}」`,

@@ -8,7 +8,7 @@
 // 其余部分照最后一次的数据画完退场。
 
 import { Icon, type IconName } from "../../art/Icon";
-import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatPlaytimeShort, formatRelative } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
@@ -142,7 +142,12 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
     />
   );
 
-  const description = inst.description !== null && inst.description.trim() !== "" ? inst.description : LIBRARY_COPY.noDescription;
+  const description =
+    inst.modpack !== null
+      ? modpackLabel(inst.modpack)
+      : inst.description !== null && inst.description.trim() !== ""
+        ? inst.description
+        : LIBRARY_COPY.noDescription;
 
   return (
     <Card padding="none" clip selected={current} className={styles.card} as="article">
@@ -178,6 +183,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
             <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={formatRelative(inst.lastPlayedAt, now)} />
             <Stat icon="clock" label={LIBRARY_COPY.playtime} value={formatPlaytimeShort(inst.playtimeMin)} />
             {inst.modCount !== null && inst.modCount > 0 && <Stat icon="mod" label={LIBRARY_COPY.modCount} value={String(inst.modCount)} />}
+            {inst.worldCount !== null && <Stat icon="world" label={LIBRARY_COPY.worldCount} value={String(inst.worldCount)} />}
           </ul>
         )}
       </div>

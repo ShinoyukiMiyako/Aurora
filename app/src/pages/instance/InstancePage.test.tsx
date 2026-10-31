@@ -302,6 +302,35 @@ describe("实例详情：头图与标签", () => {
     expect(text()).toContain("1 个有更新");
   });
 
+  it("整合包实例：眉题写来源平台，信息标签与实例信息写整合包名与版本", async () => {
+    instances = instances.map((i) =>
+      i.id === ID ? { ...i, modpack: { platform: "modrinth", project_id: "rlc", version_id: "v1", name: "RLCraft", version: "2.9.3" } } : i,
+    );
+    await open("overview");
+    expect(text()).toContain("整合包 · Modrinth · 已游玩 2 小时 10 分钟");
+    const chips = document.querySelector("h1")?.parentElement?.textContent;
+    expect(chips).toContain("RLCraft 2.9.3");
+    expect(text()).toContain("整合包RLCraft 2.9.3");
+  });
+
+  it("从本地文件导入的整合包眉题写本地文件；自建实例的整合包一栏写无", async () => {
+    instances = instances.map((i) =>
+      i.id === ID ? { ...i, modpack: { platform: null, project_id: null, version_id: null, name: "空岛生存", version: null } } : i,
+    );
+    await open("overview");
+    expect(text()).toContain("整合包 · 本地文件");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, modpack: null } : i));
+    resetRecorderKeepOverrides();
+    await open("overview");
+    expect(text()).toContain("整合包无（自行组装）");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, modpack: null, modpack_error: "modpack.json 不是合法的 JSON" } : i));
+    resetRecorderKeepOverrides();
+    await open("overview");
+    expect(text()).toContain("整合包modpack.json 不是合法的 JSON");
+  });
+
   it("切标签用 replace：路由换成新标签，面板随之切换", async () => {
     await open("overview");
     click(byRole("tab", "设置"));

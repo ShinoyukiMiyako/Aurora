@@ -893,3 +893,8 @@ export const MODPACK_REIMPORT_COPY = {
   deleteInstance: "删除实例",
   note: "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
 } as const;
+
+/** 整合包的显示名：「RLCraft 2.9.3」；整合包没写版本时只写名字。实例库卡片、头图标签与实例信息共用。 */
+export function modpackLabel(pack: { name: string; version: string | null }): string {
+  return pack.version === null ? pack.name : `${pack.name} ${pack.version}`;
+}

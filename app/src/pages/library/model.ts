@@ -35,10 +35,12 @@ export function isFiltered(view: LibraryView): boolean {
   return view.loader !== "all" || normalizedQuery(view.query) !== "";
 }
 
+/** 搜索同时看实例名与整合包自己的名字：导入后实例可能被改了名，玩家记得的往往是整合包名。 */
 export function matchesView(inst: InstanceSummary, view: LibraryView): boolean {
   if (view.loader !== "all" && inst.loader !== view.loader) return false;
   const q = normalizedQuery(view.query);
-  return q === "" || inst.name.toLowerCase().includes(q);
+  if (q === "") return true;
+  return inst.name.toLowerCase().includes(q) || (inst.modpack !== null && inst.modpack.name.toLowerCase().includes(q));
 }
 
 /**

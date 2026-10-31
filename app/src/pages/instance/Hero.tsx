@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
-import { MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
+import { MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { isImeComposing } from "../../lib/util";
@@ -22,7 +22,7 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
-import { HERO_COPY } from "./copy";
+import { HERO_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
 import { needsReimport, reimportRoute } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
@@ -66,7 +66,12 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
     { label: HERO_COPY.delete, icon: "trash", danger: true, disabled: deleteReason !== undefined, hint: deleteReason, onSelect: ops.remove },
   ];
 
-  const eyebrow = inst.loader === "vanilla" && inst.extraLoaders.length === 0 ? HERO_COPY.eyebrowVanilla : HERO_COPY.eyebrowModded;
+  const eyebrow =
+    inst.modpack !== null
+      ? HERO_COPY.eyebrowModpack(inst.modpack.platform === null ? HERO_COPY.modpackLocal : SOURCE_LABEL[inst.modpack.platform])
+      : inst.loader === "vanilla" && inst.extraLoaders.length === 0
+        ? HERO_COPY.eyebrowVanilla
+        : HERO_COPY.eyebrowModded;
 
   return (
     <Card padding="none" clip as="section" className={styles.hero}>
@@ -99,6 +104,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                     {extra.version === null ? EXTRA_LOADER_NAME[extra.kind] : `${EXTRA_LOADER_NAME[extra.kind]} ${extra.version}`}
                   </Tag>
                 ))}
+                {inst.modpack !== null && <Tag icon="layers">{modpackLabel(inst.modpack)}</Tag>}
                 {view.kind === "broken" && (
                   <Tag tone="warn" icon="alert">
                     {HERO_COPY.broken}

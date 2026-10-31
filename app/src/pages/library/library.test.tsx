@@ -154,11 +154,32 @@ describe("实例库：列表与页头", () => {
     if (card === null) throw new Error("找不到卡片");
     expect(card.textContent).toContain("Fabric0.16.10");
     expect(card.textContent).toContain("1.21.1");
-    expect([...card.querySelectorAll("li")].map((li) => li.getAttribute("aria-label"))).toEqual(["上次游玩 2 小时前", "累计时长 2h", "Mod 数 34"]);
+    expect([...card.querySelectorAll("li")].map((li) => li.getAttribute("aria-label"))).toEqual(["上次游玩 2 小时前", "累计时长 2h", "Mod 数 34", "存档数 0"]);
     expect(card.textContent).toContain(LIBRARY_COPY.noDescription);
     const broken = byText<HTMLButtonElement>("article button", "坏掉的").closest("article");
     expect(broken?.textContent).toContain("缺少版本 JSON");
     expect(broken?.querySelector("ul")).toBeNull();
+  });
+
+  it("整合包实例的介绍行写整合包名与版本，统计行带存档数；读不出存档数时不写", async () => {
+    instances = [
+      ...instances,
+      instanceDto("我的冒险", {
+        description: "自己写的介绍",
+        world_count: 3,
+        mod_count: 168,
+        modpack: { platform: "curseforge", project_id: "285109", version_id: "4", name: "RLCraft", version: "2.9.3" },
+      }),
+      instanceDto("本地导入", { modpack: { platform: null, project_id: null, version_id: null, name: "空岛生存", version: null }, world_count: null }),
+    ];
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "我的冒险").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    expect(card.querySelector("p")?.textContent).toBe("RLCraft 2.9.3");
+    expect([...card.querySelectorAll("li")].map((li) => li.getAttribute("aria-label"))).toContain("存档数 3");
+    const local = byText<HTMLButtonElement>("article button", "本地导入").closest("article");
+    expect(local?.querySelector("p")?.textContent).toBe("空岛生存");
+    expect([...(local?.querySelectorAll("li") ?? [])].map((li) => li.getAttribute("aria-label")).some((l) => l !== null && l.startsWith("存档数"))).toBe(false);
   });
 
   it("点卡片标题进实例概览", async () => {
@@ -211,6 +232,14 @@ describe("实例库：筛选、搜索与空状态", () => {
     expect(byLabel<HTMLInputElement>(LIBRARY_COPY.searchPlaceholder).value).toBe("生存");
     expect(cardNames()).toEqual(["樱花生存"]);
     expect(createTile()).toBeUndefined();
+  });
+
+  it("搜索也匹配整合包的名字", async () => {
+    instances = [...instances, instanceDto("周末", { modpack: { platform: "modrinth", project_id: "x", version_id: "y", name: "Better MC", version: "v20" } })];
+    await mount();
+    setInput(byLabel<HTMLInputElement>(LIBRARY_COPY.searchPlaceholder), "better");
+    await afterMotion();
+    expect(cardNames()).toEqual(["周末"]);
   });
 
   it("Ctrl+F 聚焦搜索框", async () => {

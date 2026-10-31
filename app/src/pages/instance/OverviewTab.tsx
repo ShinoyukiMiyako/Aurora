@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, crashCategoryLabel, MODPACK_REIMPORT_COPY } from "../../copy/flows";
+import { ACTION_ERROR, crashCategoryLabel, MODPACK_REIMPORT_COPY, modpackLabel } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
 import type { LaunchView } from "../../launch/launchView";
@@ -362,6 +362,16 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
     );
   })();
 
+  // 整合包记录读不出来时如实写原因，不当成「自行组装」
+  const modpackValue =
+    inst.modpack !== null ? (
+      modpackLabel(inst.modpack)
+    ) : inst.modpackError !== null ? (
+      <span className={styles.dangerText}>{inst.modpackError}</span>
+    ) : (
+      OVERVIEW_COPY.modpackNone
+    );
+
   const memoryValue =
     memory.status === "loading" ? (
       <Skeleton shape="text" width={72} />
@@ -390,6 +400,7 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
         rows={[
           { label: OVERVIEW_COPY.kvVersion, value: <span className={styles.num}>{inst.mcVersion === null ? HERO_COPY.versionUnknown : inst.mcVersion}</span> },
           { label: OVERVIEW_COPY.kvLoader, value: <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" /> },
+          { label: OVERVIEW_COPY.kvModpack, value: modpackValue },
           { label: OVERVIEW_COPY.kvJava, value: javaValue },
           { label: OVERVIEW_COPY.kvMemory, value: memoryValue },
           { label: OVERVIEW_COPY.kvCreated, value: inst.createdAt === null ? OVERVIEW_COPY.createdUnknown : formatDate(inst.createdAt) },
