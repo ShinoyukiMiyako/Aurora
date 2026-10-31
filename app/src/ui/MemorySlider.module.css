@@ -1,0 +1,39 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 占用说明：刻度行下方 8px */
+.usage {
+  margin: var(--sk-space-8) 0 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.usage[data-tone="warn"],
+.usage [data-tone="warn"] {
+  color: var(--sk-warn);
+}
+
+/* 警示说明：与卡片内的局部提示同一外观（警示色调、无阴影、图标无底座） */
+.warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-10);
+  margin-top: var(--sk-space-10);
+  padding: var(--sk-space-10) var(--sk-space-14);
+  border: 1px solid color-mix(in srgb, var(--sk-warn) 28%, transparent);
+  border-radius: var(--sk-r);
+  background: color-mix(in srgb, var(--sk-warn) 7%, var(--sk-surface));
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+.warningIcon {
+  flex: none;
+  margin-top: var(--sk-space-2);
+  color: var(--sk-warn);
+}

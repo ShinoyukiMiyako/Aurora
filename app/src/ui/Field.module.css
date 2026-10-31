@@ -1,0 +1,44 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.label {
+  margin-bottom: var(--sk-space-6);
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-small);
+}
+
+.optional {
+  color: var(--sk-text-2);
+  font-weight: var(--sk-w-body);
+}
+
+/* 播报区常驻；没有提示也没有错误时不占位 */
+.message {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-4);
+  margin-top: var(--sk-space-6);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-body);
+  line-height: var(--sk-lh-caption);
+}
+
+.message:empty {
+  margin-top: 0;
+}
+
+.message[data-error] {
+  color: var(--sk-danger);
+}
+
+/* 14 的图标对齐 18 行高的第一行 */
+.errorIcon {
+  flex: none;
+  margin-top: var(--sk-space-2);
+}

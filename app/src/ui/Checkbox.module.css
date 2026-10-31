@@ -1,0 +1,78 @@
+/* 整行可点：方框与标签同属一个按钮，命中区高度不小于 24 */
+.root {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 24px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+.box {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--sk-line-strong);
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-surface);
+  color: var(--sk-accent-ink);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.root:hover:not(:disabled, [aria-disabled="true"]) .box {
+  border-color: var(--sk-accent-line);
+}
+
+.root[aria-checked="true"] .box,
+.root[aria-checked="mixed"] .box {
+  border-color: var(--sk-accent);
+  background: var(--sk-accent);
+}
+
+.root[aria-checked="true"]:hover:not(:disabled, [aria-disabled="true"]) .box,
+.root[aria-checked="mixed"]:hover:not(:disabled, [aria-disabled="true"]) .box {
+  border-color: var(--sk-accent-strong);
+  background: var(--sk-accent-strong);
+}
+
+.root[data-invalid] .box {
+  border-color: var(--sk-danger);
+}
+
+.root:focus-visible .box {
+  box-shadow: var(--sk-focus);
+}
+
+.glyph {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.label {
+  min-width: 0;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+}
+
+.root:disabled,
+.root[data-disabled] {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}

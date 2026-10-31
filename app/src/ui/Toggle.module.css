@@ -1,0 +1,117 @@
+.root {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--sk-space-10);
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+
+/* 40×24 胶囊；关态的 1.5px 内描边让轨道边界对底色达到 3:1 */
+.track {
+  position: relative;
+  flex: none;
+  width: 40px;
+  height: 24px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-line-2);
+  box-shadow: inset 0 0 0 1.5px var(--sk-line-strong);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.root[aria-checked="true"] .track {
+  background: var(--sk-accent);
+  box-shadow: none;
+}
+
+.root:hover:not(:disabled, [aria-disabled="true"]) .track {
+  background: var(--sk-text-3);
+}
+
+.root[aria-checked="true"]:hover:not(:disabled, [aria-disabled="true"]) .track {
+  background: var(--sk-accent-strong);
+}
+
+.root:focus-visible .track {
+  box-shadow: inset 0 0 0 1.5px var(--sk-line-strong), var(--sk-focus);
+}
+
+.root[aria-checked="true"]:focus-visible .track {
+  box-shadow: var(--sk-focus);
+}
+
+/* 位移与拉伸分在两层：外层平移走 settle，内层按下拉伸走 tap */
+.thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.root[aria-checked="true"] .thumb {
+  transform: translateX(16px);
+}
+
+.knob {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--sk-r-pill);
+  background: #FFFFFF;
+  box-shadow: 0 1px 3px rgba(60, 20, 40, 0.25);
+  transform-origin: left center;
+  transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
+}
+
+/* 按下时朝行程方向拉伸到 22：关态向右、开态向左 */
+.root[aria-checked="true"] .knob {
+  transform-origin: right center;
+}
+
+.root:active:not(:disabled, [aria-disabled="true"]) .knob {
+  transform: scaleX(calc(22 / 18));
+}
+
+:global([data-sk-reduced]) .thumb,
+:global([data-sk-reduced]) .knob {
+  transition: none;
+}
+
+:global([data-sk-reduced]) .root:active .knob {
+  transform: none;
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+  /* 文字首行与 24 高的轨道垂直居中：22 的行高上下各留 1px */
+  padding-top: 1px;
+}
+
+.label {
+  font-size: var(--sk-fs-body);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-body);
+}
+
+.description {
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.root:disabled,
+.root[data-disabled] {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}

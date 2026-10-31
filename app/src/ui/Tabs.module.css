@@ -1,0 +1,132 @@
+/* 横向滚动不显示滚动条；有被遮住的内容时对应一端渐隐 16px */
+.list {
+  --tabs-fade: 16px;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: var(--sk-space-20);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  isolation: isolate;
+}
+
+.list::-webkit-scrollbar {
+  display: none;
+}
+
+:global([data-sk-reduced]) .list {
+  scroll-behavior: auto;
+}
+
+.list[data-fade-start] {
+  mask-image: linear-gradient(to right, transparent, black var(--tabs-fade));
+}
+
+.list[data-fade-end] {
+  mask-image: linear-gradient(to right, black calc(100% - var(--tabs-fade)), transparent);
+}
+
+.list[data-fade-start][data-fade-end] {
+  mask-image: linear-gradient(to right, transparent, black var(--tabs-fade), black calc(100% - var(--tabs-fade)), transparent);
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--sk-text-2);
+  font: inherit;
+  font-weight: var(--sk-w-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  outline: none;
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.tab:hover:not(:disabled) {
+  color: var(--sk-text);
+}
+
+.tab:disabled {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.content {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* ---- underline：页面级，底边一条分隔线，指示条压在分隔线上 ---- */
+.list[data-variant="underline"] {
+  box-shadow: inset 0 -1px 0 var(--sk-line);
+}
+
+.list[data-variant="underline"] .tab {
+  height: 40px;
+  padding: 0 var(--sk-space-2);
+  font-size: var(--sk-fs-body);
+}
+
+.list[data-variant="underline"] .tab[aria-selected="true"] {
+  color: var(--sk-text);
+}
+
+.list[data-variant="underline"] .tab:focus-visible {
+  border-radius: var(--sk-r-xs);
+  box-shadow: var(--sk-focus);
+}
+
+.list[data-variant="underline"] .indicator {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2.5px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+}
+
+/* ---- pill：卡片内或页面次级切换，整项胶囊底 ---- */
+.list[data-variant="pill"] {
+  gap: var(--sk-space-4);
+}
+
+.list[data-variant="pill"] .tab {
+  height: 36px;
+  padding: 0 var(--sk-space-14);
+  border-radius: var(--sk-r-pill);
+  font-size: var(--sk-fs-body);
+}
+
+.list[data-variant="pill"][data-size="sm"] .tab {
+  height: 30px;
+  padding: 0 var(--sk-space-12);
+  font-size: var(--sk-fs-small);
+}
+
+.list[data-variant="pill"] .tab[aria-selected="true"] {
+  color: var(--sk-accent-strong);
+}
+
+.list[data-variant="pill"] .tab:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.list[data-variant="pill"] .indicator {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent-soft);
+}
