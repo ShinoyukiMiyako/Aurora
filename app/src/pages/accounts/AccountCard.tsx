@@ -29,7 +29,8 @@ export function AccountCard({ account, current, online, act }: AccountCardProps)
   // 凭据失效的账户刷新必然失败，菜单里只给能成功的动作；重新登录在卡片底部
   // 断网原因走菜单项的悬停提示气泡：右侧提示位与标签同一行、不折行，放原因会把标签挤成省略号
   if (isCredential(account) && account.status === "ok") {
-    items.push({ label: ACCOUNTS_COPY.refresh, icon: "refresh", disabled: !online, disabledReason: offlineReason, onSelect: () => act.refresh(account.uuid) });
+    // 这个账户正在刷新时这一项禁用，不发第二次刷新；当前账户的进行中由聚光卡的忙碌按钮交代，不另给原因
+    items.push({ label: ACCOUNTS_COPY.refresh, icon: "refresh", disabled: !online || act.refreshing.has(account.uuid), disabledReason: offlineReason, onSelect: () => act.refresh(account.uuid) });
   }
   items.push(
     { label: ACCOUNTS_COPY.copyUuid, icon: "copy", onSelect: () => act.copyFromMenu(displayUuid(account.uuid)) },

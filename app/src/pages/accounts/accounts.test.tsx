@@ -330,6 +330,25 @@ describe("账户页：凭据失效、刷新与重新登录", () => {
     expect(callsOf(ipc, "skin_info").slice(skinCalls)).toEqual([{ accountUuid: hanami.uuid }]);
   });
 
+  it("刷新进行中再从账户卡菜单点刷新：不发第二次刷新，聚光卡按钮一直忙到这一次落定，只弹一次成功", async () => {
+    const refreshed = deferred<AccountDto>();
+    ipc.overrides.set("refresh_account", () => refreshed.promise);
+    await mount();
+    const spot = page().querySelector("section") as HTMLElement;
+    await click(buttonIn(spot, "刷新账户信息"));
+    await openMenu("Hanami 的更多操作", cardOf("Hanami"));
+    const item = [...document.querySelectorAll<HTMLElement>(':not([data-exiting]) > [role="menu"] [role="menuitem"]')].find((i) => i.textContent === "刷新账户信息");
+    if (item === undefined) throw new Error("账户卡菜单里没有刷新账户信息");
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    await click(item);
+    expect(callsOf(ipc, "refresh_account")).toEqual([{ uuid: hanami.uuid }]);
+    expect(buttonIn(spot, "刷新账户信息").getAttribute("aria-busy")).toBe("true");
+    refreshed.resolve({ ...hanami, last_verified_at: NOW });
+    await flush();
+    expect(buttonIn(spot, "刷新账户信息").hasAttribute("aria-busy")).toBe(false);
+    expect(toastTitles()).toEqual(["success:账户信息已更新"]);
+  });
+
   it("刷新失败：错误通知带后端原文，按钮恢复", async () => {
     ipc.overrides.set("refresh_account", () => {
       throw new IpcError("Http", "无法连接到 api.minecraftservices.com");
