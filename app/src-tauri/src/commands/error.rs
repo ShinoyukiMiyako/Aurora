@@ -132,6 +132,12 @@ pub mod code {
     pub const OPEN_FAILED: &str = "open_failed";
     /// 要改动的 Mod 文件正被占用（游戏运行中）。detail：`{ path }`，为被占用的文件。
     pub const MOD_FILE_BUSY: &str = "mod_file_busy";
+    /// 这个实例写不成 Modrinth 整合包。detail：`{ id, reason, loader? }`，reason 为 version_unknown /
+    /// loader_unsupported / loader_version_unknown / multiple_loaders / incomplete，loader 只在加载器
+    /// 不受支持时给出。
+    pub const MODPACK_EXPORT_UNSUPPORTED: &str = "modpack_export_unsupported";
+    /// 导出的整合包没通过回读校验，产物已删除。detail：`{ path, reason }`。
+    pub const MODPACK_EXPORT_CHECK_FAILED: &str = "modpack_export_check_failed";
     /// 改名或删除已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改。前端照成功处理再
     /// 提示；没改成的记录由门面记着，之后读写游玩记录时补上。detail：`{ id, renamed_to? }` 与原因链。
     pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
@@ -281,6 +287,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+        CoreError::ModpackExportUnsupported { .. } => code::MODPACK_EXPORT_UNSUPPORTED,
     }
 }
 
@@ -309,6 +316,7 @@ fn modpack_code(err: &ModpackError) -> &'static str {
         }
         ModpackError::Io { .. } => code::IO,
         ModpackError::Cancelled => code::CANCELLED,
+        ModpackError::ExportCheckFailed { .. } => code::MODPACK_EXPORT_CHECK_FAILED,
     }
 }
 
@@ -496,8 +504,19 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             | ModpackError::DuplicatePath { path } => {
                 detail.insert("path".to_owned(), json!(path));
             }
+            ModpackError::ExportCheckFailed { path, reason } => {
+                detail.insert("path".to_owned(), json!(path.display().to_string()));
+                detail.insert("reason".to_owned(), json!(reason));
+            }
             ModpackError::Cancelled => {}
         },
+        CoreError::ModpackExportUnsupported { id, reason, loader } => {
+            detail.insert("id".to_owned(), json!(id));
+            detail.insert("reason".to_owned(), json!(reason));
+            if let Some(loader) = loader {
+                detail.insert("loader".to_owned(), json!(loader));
+            }
+        }
         CoreError::ConfigIo { path, .. } | CoreError::ConfigParse { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
@@ -723,6 +742,69 @@ mod tests {
 
         let cancelled: CommandError = CoreError::from(ModpackError::Cancelled).into();
         assert!(cancelled.is_cancelled());
+    }
+
+    #[test]
+    fn modpack_export_errors_map_to_codes_with_parameters() {
+        let unsupported: CommandError = CoreError::ModpackExportUnsupported {
+            id: "光影版".into(),
+            reason: aurora_core::ExportBlock::LoaderUnsupported,
+            loader: Some("OptiFine".into()),
+        }
+        .into();
+        assert_eq!(unsupported.code, code::MODPACK_EXPORT_UNSUPPORTED);
+        assert_eq!(
+            unsupported.message,
+            "整合包格式不支持 OptiFine，只支持 Fabric、Quilt、Forge、NeoForge"
+        );
+        assert_eq!(
+            unsupported.detail,
+            Some(json!({ "id": "光影版", "reason": "loader_unsupported", "loader": "OptiFine" }))
+        );
+
+        for (reason, wire) in [
+            (aurora_core::ExportBlock::VersionUnknown, "version_unknown"),
+            (
+                aurora_core::ExportBlock::LoaderVersionUnknown,
+                "loader_version_unknown",
+            ),
+            (
+                aurora_core::ExportBlock::MultipleLoaders,
+                "multiple_loaders",
+            ),
+            (aurora_core::ExportBlock::Incomplete, "incomplete"),
+        ] {
+            let err: CommandError = CoreError::ModpackExportUnsupported {
+                id: "生存".into(),
+                reason,
+                loader: None,
+            }
+            .into();
+            assert_eq!(err.code, code::MODPACK_EXPORT_UNSUPPORTED);
+            assert_eq!(
+                err.detail,
+                Some(json!({ "id": "生存", "reason": wire })),
+                "{wire}"
+            );
+        }
+
+        let check: CommandError = CoreError::from(ModpackError::ExportCheckFailed {
+            path: PathBuf::from("D:/导出/樱花林.part.mrpack"),
+            reason: "清单里有 2 个文件，要写的是 3 个".into(),
+        })
+        .into();
+        assert_eq!(check.code, code::MODPACK_EXPORT_CHECK_FAILED);
+        assert_eq!(
+            check.message,
+            "导出的整合包没通过回读校验：清单里有 2 个文件，要写的是 3 个"
+        );
+        assert_eq!(
+            check.detail,
+            Some(json!({
+                "path": "D:/导出/樱花林.part.mrpack",
+                "reason": "清单里有 2 个文件，要写的是 3 个"
+            }))
+        );
     }
 
     #[test]
