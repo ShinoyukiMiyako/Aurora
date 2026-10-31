@@ -2,7 +2,7 @@
 
 import { joinMixed, LOADER_NAME } from "../../copy/flows";
 import type { ReleaseType } from "../../domain/adapt";
-import { formatRelative } from "../../domain/format";
+import { formatBytes, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import type { StepId } from "./model";
 
@@ -124,6 +124,9 @@ export const CREATE_COPY = {
     javaAuto: (major: number) => `需要 Java ${major}，会自动下载`,
     javaManual: (major: number) => `需要 Java ${major}，自动下载已关闭，启动前要先装好`,
     javaUnknown: (reason: string) => `没能确认需要的 Java：${reason}`,
+    download: "预计下载",
+    downloadValue: (bytes: number) => `约 ${formatBytes(bytes)}`,
+    downloadNoLoader: " · 不含加载器",
     path: "存放位置",
     snapshotWarning: "快照版本可能有严重问题，别在里面放重要存档。",
     openAfter: "创建后打开实例详情",

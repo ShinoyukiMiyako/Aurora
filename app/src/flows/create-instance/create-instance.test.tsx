@@ -212,6 +212,7 @@ describe("新建实例：完整走一遍", () => {
     expect(text).toContain("Fabric 0.16.10");
     expect(text).toContain("草方块");
     expect(text).toContain("需要 Java 17，会自动下载");
+    expect(text).toContain("预计下载约 655 MB · 不含加载器");
     expect(text).toContain("D:/Games/.minecraft/versions/周末生存");
     expect(text).toContain(CREATE_COPY.confirm.autoPin);
 
@@ -232,6 +233,8 @@ describe("新建实例：完整走一遍", () => {
     await next();
     expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
     expect(dialog().textContent).toContain("Java 21 · 已安装（Eclipse Adoptium）");
+    expect(dialog().textContent).toContain("预计下载约 712 MB");
+    expect(dialog().textContent).not.toContain("不含加载器");
     keydown(heading(), "Enter");
     await flush();
     expect(callsOf(ipc, "install_version")).toEqual([]);
@@ -241,6 +244,21 @@ describe("新建实例：完整走一遍", () => {
     expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.21.1", loader: null, loaderVersion: null, targetName: "原版生存" }]);
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(nav.route).toEqual({ page: "home" });
+  });
+
+  it("版本清单没给全下载体积时确认步不写预计下载", async () => {
+    await mount();
+    await fillName("怀旧");
+    click(button(CREATE_COPY.version.old));
+    click(radio("1.5.2"));
+    await flush();
+    await next();
+    await next();
+    await next();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+    expect(dialog().textContent).toContain("1.5.2 · 正式版");
+    expect(dialog().textContent).toContain("Java 8 · 已安装（Oracle Corporation）");
+    expect(dialog().textContent).not.toContain(CREATE_COPY.confirm.download);
   });
 
   it("创建失败：弹窗留在确认步，顶部给出原因，主按钮恢复可点", async () => {
