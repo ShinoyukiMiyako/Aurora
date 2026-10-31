@@ -5,8 +5,8 @@
 //! [`is_safe_instance_id`]。
 //!
 //! 改名与删除会牵连两类引用：别的实例经 `inheritsFrom` 依赖它（传统布局的加载器版本），这种情况
-//! 直接拒绝；配置里的侧栏固定与当前选中由调用方拿到写锁后经 [`Aurora::rename_instance_refs`] /
-//! [`Aurora::forget_instance`] 同步再落盘，文件操作本身在快照上做，不占门面锁。
+//! 直接拒绝；配置里的侧栏固定、当前选中与固定服务器记住的实例由调用方拿到写锁后经
+//! [`Aurora::rename_instance_refs`] / [`Aurora::forget_instance`] 同步再落盘，文件操作本身在快照上做，不占门面锁。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -264,7 +264,8 @@ impl Aurora {
         Ok(true)
     }
 
-    /// 从配置里去掉对实例 `id` 的引用（侧栏固定、当前选中）。返回配置是否有变化，有变化时调用方落盘。
+    /// 从配置里去掉对实例 `id` 的引用（侧栏固定、当前选中、固定服务器记住的实例）。返回配置是否有变化，
+    /// 有变化时调用方落盘。
     pub fn forget_instance(&mut self, id: &str) -> bool {
         let pins = &self.config().sidebar_pins;
         let kept: Vec<String> = pins.iter().filter(|pin| *pin != id).cloned().collect();
@@ -276,7 +277,8 @@ impl Aurora {
         if was_selected {
             self.set_selected_version(None);
         }
-        pins_changed || was_selected
+        let servers_changed = self.forget_pinned_instance(id);
+        pins_changed || was_selected || servers_changed
     }
 
     /// 改名：实例目录、版本 JSON（文件名与其中的 `id`）、客户端 jar 与 natives 目录一起改。
@@ -305,7 +307,8 @@ impl Aurora {
         Ok(())
     }
 
-    /// 把配置里对 `old` 的引用改成 `new`（侧栏固定保持原位，当前选中跟着走）。返回配置是否有变化。
+    /// 把配置里对 `old` 的引用改成 `new`（侧栏固定保持原位，当前选中与固定服务器记住的实例跟着走）。
+    /// 返回配置是否有变化。
     pub fn rename_instance_refs(&mut self, old: &str, new: &str) -> bool {
         let pins = &self.config().sidebar_pins;
         let renamed: Vec<String> = pins
@@ -326,7 +329,8 @@ impl Aurora {
         if was_selected {
             self.set_selected_version(Some(new.to_owned()));
         }
-        pins_changed || was_selected
+        let servers_changed = self.rename_pinned_instance(old, new);
+        pins_changed || was_selected || servers_changed
     }
 
     /// 配置里固定的实例中当前仍然存在的那些，保持顺序。
@@ -1186,6 +1190,59 @@ pub(crate) mod tests {
         );
         assert!(dir.join("a.json").is_file(), "失败后目录与 JSON 应还原");
         assert!(!aurora.game_dir().join("versions").join("c").exists());
+    }
+
+    fn pinned(address: &str, instance: Option<&str>) -> crate::config::PinnedServer {
+        crate::config::PinnedServer {
+            name: address.to_owned(),
+            address: address.to_owned(),
+            instance: instance.map(str::to_owned),
+        }
+    }
+
+    fn pinned_instances(aurora: &Aurora) -> Vec<(String, Option<String>)> {
+        aurora
+            .pinned_servers()
+            .iter()
+            .map(|s| (s.address.clone(), s.instance.clone()))
+            .collect()
+    }
+
+    /// 只有固定服务器记住了这个实例（没有侧栏固定、不是当前选中）时，改名与删除也要报配置有变化，
+    /// 调用方才会落盘。
+    #[test]
+    fn rename_and_forget_carry_the_pinned_server_bindings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        aurora
+            .set_pinned_servers(vec![
+                pinned("a.example", Some("生存")),
+                pinned("b.example", Some("创造")),
+                pinned("c.example", None),
+            ])
+            .unwrap();
+
+        assert!(aurora.rename_instance_refs("生存", "生存 1.21.1"));
+        assert_eq!(
+            pinned_instances(&aurora),
+            vec![
+                ("a.example".to_owned(), Some("生存 1.21.1".to_owned())),
+                ("b.example".to_owned(), Some("创造".to_owned())),
+                ("c.example".to_owned(), None),
+            ]
+        );
+        assert!(!aurora.rename_instance_refs("生存", "又一个"));
+
+        assert!(aurora.forget_instance("生存 1.21.1"));
+        assert_eq!(
+            pinned_instances(&aurora),
+            vec![
+                ("a.example".to_owned(), None),
+                ("b.example".to_owned(), Some("创造".to_owned())),
+                ("c.example".to_owned(), None),
+            ]
+        );
+        assert!(!aurora.forget_instance("生存 1.21.1"));
     }
 
     #[tokio::test]

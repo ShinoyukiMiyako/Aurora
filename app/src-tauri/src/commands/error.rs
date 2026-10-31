@@ -135,6 +135,8 @@ pub mod code {
     /// 改名或删除已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改。前端照成功处理再
     /// 提示；没改成的记录由门面记着，之后读写游玩记录时补上。detail：`{ id, renamed_to? }` 与原因链。
     pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
+    /// 要改的服务器不在固定列表里。detail：`{ address }`。
+    pub const SERVER_NOT_PINNED: &str = "server_not_pinned";
 }
 
 /// 序列化给前端的命令错误。
@@ -279,6 +281,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::FeedParse { .. } => code::FEED_INVALID,
         CoreError::RemotePack { .. } => code::REMOTE_PACK_UNREADABLE,
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
+        CoreError::ServerNotPinned { .. } => code::SERVER_NOT_PINNED,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
     }
@@ -515,6 +518,9 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("address".to_owned(), json!(address));
             detail.insert("reason".to_owned(), json!(reason));
         }
+        CoreError::ServerNotPinned { address } => {
+            detail.insert("address".to_owned(), json!(address));
+        }
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
@@ -744,6 +750,20 @@ mod tests {
         .into();
         assert_eq!(address.code, code::INVALID_ARGUMENT);
         assert_eq!(address.detail.unwrap()["address"], json!("h:0"));
+
+        let not_pinned: CommandError = CoreError::ServerNotPinned {
+            address: "play.example.cn:25566".into(),
+        }
+        .into();
+        assert_eq!(not_pinned.code, "server_not_pinned");
+        assert_eq!(
+            not_pinned.message,
+            "服务器「play.example.cn:25566」没有固定"
+        );
+        assert_eq!(
+            not_pinned.detail,
+            Some(json!({ "address": "play.example.cn:25566" }))
+        );
 
         let memory: CommandError = CoreError::MemoryUnavailable.into();
         assert_eq!(memory.code, code::MEMORY_UNAVAILABLE);
