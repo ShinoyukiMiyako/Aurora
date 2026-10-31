@@ -156,6 +156,7 @@ export const SHELL_ACTION_ERROR = {
   fileDrop: "文件拖放没有接上",
   startupNotices: "启动提示读不出来",
   openDataDir: "没能打开数据目录",
+  openLink: "没能打开链接",
 } as const;
 
 /** 启动提示：后端在启动时遇到、但不妨碍继续运行的问题。标题说清出了什么事，正文说清结果。 */
