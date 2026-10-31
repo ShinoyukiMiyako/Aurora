@@ -1,0 +1,210 @@
+// 实例卡片：代码绘制的卡面 + 实例头像 + 名称与介绍 + 统计行（或损坏原因）+ 底栏启动入口与「更多」菜单。
+//
+// 卡内有多个控件，所以卡片不做整卡按钮：名称是 CardTitleButton，它的覆盖层铺满整卡，点空白处等于打开详情；
+// 图钉、底栏按钮与菜单浮在覆盖层之上，各管各的。卡面上的标签行放在与卡面同格叠放的普通层里，
+// 不放进卡面组件内部：卡面自成层叠上下文，放进去的图钉会被标题按钮的覆盖层盖住。
+//
+// 卡片退场（删除、改名、取消安装）期间实例已不在状态里，这时底栏不再挂启动入口（它按 id 取实例，取不到会抛错），
+// 其余部分照最后一次的数据画完退场。
+
+import { Icon, type IconName } from "../../art/Icon";
+import { ACTION_ERROR, CONFIRM_COPY, TOAST_COPY } from "../../copy/flows";
+import type { InstanceSummary } from "../../domain/adapt";
+import { formatPlaytimeShort, formatRelative } from "../../domain/format";
+import { instanceCover } from "../../launch/cover";
+import { InstanceAvatar } from "../../launch/InstanceAvatar";
+import { launchView } from "../../launch/launchView";
+import { useNav, useShell } from "../../shell/shell";
+import { useRunner } from "../../shell/useRunner";
+import { useLauncher } from "../../state/launcher";
+import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
+import { Callout } from "../../ui/Callout";
+import { Card, CardTitleButton } from "../../ui/Card";
+import { Cover } from "../../ui/Cover";
+import { IconButton } from "../../ui/IconButton";
+import { LoaderTag } from "../../ui/LoaderTag";
+import type { MenuEntry } from "../../ui/Menu";
+import { MoreMenu } from "../../ui/MoreMenu";
+import { Tag } from "../../ui/Tag";
+import { Tooltip } from "../../ui/Tooltip";
+import { CardStatus } from "./CardStatus";
+import { LIBRARY_COPY } from "./copy";
+import styles from "./library.module.css";
+
+/** 卡面高度：与骨架卡、页面样式里的同名变量一致。 */
+export const CARD_COVER_HEIGHT = 118;
+
+export interface InstanceCardProps {
+  inst: InstanceSummary;
+  /** 相对时间的基准，由页面统一按 30 s 刷新，不让每张卡各起一个定时器。 */
+  now: number;
+}
+
+export function InstanceCard({ inst, now }: InstanceCardProps) {
+  const { state, actions } = useLauncher();
+  const { go } = useNav();
+  const { confirm } = useShell();
+  const run = useRunner();
+
+  const id = inst.id;
+  const name = inst.name;
+  const live = findInstance(state, id) !== undefined;
+  const current = state.selectedInstanceId === id;
+  const busy = busyInstanceId(state) === id;
+  const pinAllowed = inst.pinned || canPinMore(state);
+  const cover = instanceCover(inst);
+  const crashed = live && launchView(state, inst).kind === "crashed";
+
+  const open = (tab: "overview" | "mods" | "settings" | "logs" | "crash" = "overview") => go({ page: "instance", id, tab });
+
+  const togglePin = async () => {
+    const wasPinned = inst.pinned;
+    // 满 5 个时状态容器自己弹上限提示、不改动固定，这里不再追加成功通知
+    const changes = wasPinned || canPinMore(state);
+    const result = await run(() => actions.togglePin(id), ACTION_ERROR.pin);
+    if (result.ok && changes) actions.toast("success", wasPinned ? LIBRARY_COPY.unpinned(name) : LIBRARY_COPY.pinned(name));
+  };
+
+  const select = async () => {
+    const result = await run(() => actions.selectInstance(id), ACTION_ERROR.selectInstance);
+    if (!result.ok) return;
+    const copy = TOAST_COPY.instanceSelected(name);
+    actions.toast("info", copy.title, copy.body);
+  };
+
+  const remove = async () => {
+    // 还没扫到目录的占位项（排队中的新建）磁盘上什么都没有，不必问后端有几个存档
+    let worlds = 0;
+    if (!inst.placeholder) {
+      const preview = await run(() => actions.previewInstanceDeletion(id), ACTION_ERROR.deleteInstance(name));
+      if (!preview.ok) return;
+      worlds = preview.value.worlds.length;
+    }
+    const copy = CONFIRM_COPY.deleteInstance(name, worlds);
+    const ok = await confirm({
+      title: copy.title,
+      body: inst.status === "installing" ? `${copy.body}${LIBRARY_COPY.removeCancelsInstall}` : copy.body,
+      confirmLabel: copy.confirmLabel,
+      tone: "danger",
+    });
+    if (!ok) return;
+    await run(() => actions.deleteInstance(id, worlds), ACTION_ERROR.deleteInstance(name));
+  };
+
+  const menu: MenuEntry[] = [
+    { label: LIBRARY_COPY.menu.open, icon: "arrow-right", onSelect: () => open() },
+    {
+      label: current ? LIBRARY_COPY.menu.selected : LIBRARY_COPY.menu.select,
+      icon: "star",
+      disabled: current,
+      onSelect: () => void select(),
+    },
+    {
+      label: inst.pinned ? LIBRARY_COPY.menu.unpin : LIBRARY_COPY.menu.pin,
+      icon: inst.pinned ? "pin-off" : "pin",
+      disabled: !pinAllowed,
+      hint: pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
+      onSelect: () => void togglePin(),
+    },
+    {
+      label: LIBRARY_COPY.menu.openFolder,
+      icon: "folder",
+      disabled: inst.placeholder,
+      hint: inst.placeholder ? LIBRARY_COPY.menu.folderPending : undefined,
+      onSelect: () => void run(() => actions.openFolder("instance", id), ACTION_ERROR.openFolder),
+    },
+    { kind: "separator" },
+    ...(inst.loader === "vanilla"
+      ? []
+      : [
+          {
+            label: LIBRARY_COPY.menu.mods,
+            icon: "mod" as const,
+            hint: inst.modCount === null ? undefined : String(inst.modCount),
+            onSelect: () => open("mods"),
+          },
+        ]),
+    { label: LIBRARY_COPY.menu.settings, icon: "sliders", onSelect: () => open("settings") },
+    { label: LIBRARY_COPY.menu.logs, icon: "terminal", onSelect: () => open("logs") },
+    { label: LIBRARY_COPY.menu.crash, icon: "bug", hint: crashed ? LIBRARY_COPY.menu.crashActive : undefined, onSelect: () => open("crash") },
+    { kind: "separator" },
+    {
+      label: LIBRARY_COPY.menu.remove,
+      icon: "trash",
+      danger: true,
+      disabled: busy,
+      hint: busy ? LIBRARY_COPY.menu.removeBusy : undefined,
+      onSelect: () => void remove(),
+    },
+  ];
+
+  const pinLabel = inst.pinned ? LIBRARY_COPY.unpin(name) : LIBRARY_COPY.pin(name);
+  const pinButton = (
+    <IconButton
+      icon="pin"
+      label={pinLabel}
+      size="sm"
+      pressed={inst.pinned}
+      tooltip={pinAllowed}
+      aria-disabled={pinAllowed ? undefined : true}
+      className={styles.pin}
+      onClick={() => void togglePin()}
+    />
+  );
+
+  const description = inst.description !== null && inst.description.trim() !== "" ? inst.description : LIBRARY_COPY.noDescription;
+
+  return (
+    <Card padding="none" clip selected={current} className={styles.card} as="article">
+      <div className={styles.coverArea}>
+        <Cover hue={cover.hue} seed={id} height={CARD_COVER_HEIGHT} className={styles.cover} />
+        <div className={styles.coverOverlay}>
+          <div className={styles.coverTop}>
+            <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" className={styles.chip} />
+            {current && (
+              <Tag tone="accent" size="sm" className={styles.currentTag}>
+                {LIBRARY_COPY.current}
+              </Tag>
+            )}
+            <span className={styles.grow} />
+            {pinAllowed ? pinButton : <Tooltip content={TOAST_COPY.pinLimit}>{pinButton}</Tooltip>}
+          </div>
+          {inst.mcVersion !== null && <span className={styles.coverVersion}>{inst.mcVersion}</span>}
+        </div>
+      </div>
+
+      <div className={styles.body}>
+        <InstanceAvatar instance={inst} size={44} className={styles.avatar} />
+        <CardTitleButton onClick={() => open()} ariaLabel={LIBRARY_COPY.openCard(name)} className={styles.name}>
+          {name}
+        </CardTitleButton>
+        <p className={styles.meta}>{description}</p>
+        {inst.status === "broken" ? (
+          <Callout tone="warn" className={styles.broken}>
+            {inst.brokenReason}
+          </Callout>
+        ) : (
+          <ul className={styles.stats} aria-label={LIBRARY_COPY.statsLabel}>
+            <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={formatRelative(inst.lastPlayedAt, now)} />
+            <Stat icon="clock" label={LIBRARY_COPY.playtime} value={formatPlaytimeShort(inst.playtimeMin)} />
+            {inst.modCount !== null && inst.modCount > 0 && <Stat icon="mod" label={LIBRARY_COPY.modCount} value={String(inst.modCount)} />}
+          </ul>
+        )}
+      </div>
+
+      <div className={styles.foot}>
+        {live ? <CardStatus instanceId={id} /> : <div className={styles.status} />}
+        <MoreMenu size="sm" label={LIBRARY_COPY.moreLabel(name)} items={menu} />
+      </div>
+    </Card>
+  );
+}
+
+function Stat({ icon, label, value }: { icon: IconName; label: string; value: string }) {
+  return (
+    <li aria-label={`${label} ${value}`}>
+      <Icon name={icon} size={16} />
+      <span aria-hidden="true">{value}</span>
+    </li>
+  );
+}

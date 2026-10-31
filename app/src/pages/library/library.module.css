@@ -1,0 +1,359 @@
+/*
+ * 实例库私有布局。尺寸常量写成具名变量；色值、圆角、阴影、间距一律取令牌。
+ * 按档切换只写 :root[data-sk-tier]，与脚本里的档位在同一像素切换。
+ */
+
+.grow {
+  flex: 1;
+}
+
+.ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- 工具条 */
+
+/* 一行放不下时搜索与排序整体换到第二行并右对齐，分段筛选独占第一行 */
+.toolbar {
+  --lib-search-width: 180px;
+  --lib-sort-width: 132px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-10);
+}
+
+:global(:root[data-sk-tier="regular"]) .toolbar,
+:global(:root[data-sk-tier="wide"]) .toolbar {
+  --lib-search-width: 240px;
+}
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  margin-left: auto;
+}
+
+.search {
+  width: var(--lib-search-width);
+}
+
+.sort {
+  width: var(--lib-sort-width);
+}
+
+/* ---------------------------------------------------------------- 网格 */
+
+.grid {
+  --lib-columns: 3;
+  display: grid;
+  grid-template-columns: repeat(var(--lib-columns), minmax(0, 1fr));
+  gap: var(--sk-gap);
+}
+
+:global(:root[data-sk-tier="regular"]) .grid {
+  --lib-columns: 4;
+}
+
+:global(:root[data-sk-tier="wide"]) .grid {
+  --lib-columns: 5;
+}
+
+.cell {
+  display: flex;
+  min-width: 0;
+}
+
+.card {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- 卡面 */
+
+/*
+ * 卡面与上面的标签行叠在同一个网格格子里。标签行是普通定位层而不是层叠上下文，
+ * 图钉按钮因此能浮到标题按钮的整卡覆盖层之上；标签本身不可点，点它们等于点卡片。
+ */
+.coverArea {
+  display: grid;
+  flex: none;
+}
+
+.cover,
+.coverOverlay {
+  grid-area: 1 / 1;
+}
+
+.coverOverlay {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-width: 0;
+  padding: var(--sk-space-10);
+}
+
+.coverTop {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  min-width: 0;
+}
+
+.chip {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.currentTag {
+  flex: none;
+}
+
+/* 未固定时只在卡片悬停或键盘聚焦到卡内时出现；已固定常显 */
+.pin:not([aria-pressed="true"]) {
+  opacity: 0;
+}
+
+.card:hover .pin,
+.card:focus-within .pin {
+  opacity: 1;
+}
+
+.coverVersion {
+  align-self: flex-end;
+  color: var(--sk-text);
+  font-size: var(--sk-fs-heading);
+  font-weight: var(--sk-w-title);
+  line-height: var(--sk-lh-heading);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 卡身 */
+
+/* 不设定位：标题按钮的覆盖层要以卡片为包含块铺满整卡 */
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+  padding: 0 var(--sk-space-14) var(--sk-space-12);
+}
+
+/* 头像压在卡面下沿：上移半个头像 */
+.avatar {
+  flex: none;
+  align-self: flex-start;
+  margin-top: calc(var(--sk-space-22) * -1);
+  margin-bottom: var(--sk-space-6);
+}
+
+.name {
+  font-size: var(--sk-fs-section);
+  font-weight: var(--sk-w-title);
+  line-height: var(--sk-lh-section);
+}
+
+.meta {
+  margin: 0;
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sk-space-4) var(--sk-space-12);
+  margin: var(--sk-space-8) 0 0;
+  padding: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-variant-numeric: tabular-nums;
+  list-style: none;
+}
+
+.stats > li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  white-space: nowrap;
+}
+
+.broken {
+  margin-top: var(--sk-space-8);
+}
+
+/* ---------------------------------------------------------------- 底栏 */
+
+.foot {
+  --lib-foot-min-height: 50px;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  box-sizing: border-box;
+  min-height: var(--lib-foot-min-height);
+  padding: var(--sk-space-8) var(--sk-space-10) var(--sk-space-10) var(--sk-space-12);
+  border-top: 1px solid var(--sk-line);
+}
+
+.status {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.statusHint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusDanger {
+  color: var(--sk-danger);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-title);
+  white-space: nowrap;
+}
+
+.statusProgress {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+.statusLine {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sk-space-8);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.statusPct {
+  margin-left: auto;
+  color: var(--sk-text);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.running {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  color: var(--sk-ok);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.runningDot {
+  --lib-dot-size: 7px;
+  flex: none;
+  width: var(--lib-dot-size);
+  height: var(--lib-dot-size);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-ok);
+}
+
+/* ---------------------------------------------------------------- 新建卡 */
+
+.createTile {
+  --lib-create-min-height: 268px;
+  --lib-create-body-width: 200px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sk-space-8);
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: var(--lib-create-min-height);
+  padding: var(--sk-space-24) var(--sk-space-20);
+  border: 1.5px dashed var(--sk-line-2);
+  border-radius: var(--sk-r-lg);
+  background: transparent;
+  color: var(--sk-text-2);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.createTile:hover {
+  border-color: var(--sk-accent-line);
+  background: var(--sk-accent-soft);
+  color: var(--sk-text);
+}
+
+.createTile:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.createIcon {
+  --lib-create-icon: 48px;
+  display: grid;
+  place-items: center;
+  width: var(--lib-create-icon);
+  height: var(--lib-create-icon);
+  border-radius: var(--sk-r);
+  background: var(--sk-surface);
+  color: var(--sk-accent-strong);
+  box-shadow: var(--sk-shadow-sm);
+  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+:global(:root:not([data-sk-reduced])) .createTile:hover .createIcon {
+  translate: 0 -2px;
+}
+
+.createTitle {
+  margin-top: var(--sk-space-4);
+  color: var(--sk-text);
+  font-size: var(--sk-fs-section);
+  font-weight: var(--sk-w-title);
+  line-height: var(--sk-lh-section);
+}
+
+.createBody {
+  max-width: var(--lib-create-body-width);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+/* ---------------------------------------------------------------- 状态 */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sk-space-10);
+}
