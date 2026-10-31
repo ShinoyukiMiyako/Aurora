@@ -448,6 +448,11 @@ impl Aurora {
     ) -> Result<ModpackInstallOutcome> {
         let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
         create_instance_dir(&version_dir, &name).await?;
+        // 名字下还留着的记录属于在启动器之外被删掉的同名旧实例，与新建实例同一处理：放在目录建成之后，
+        // 撞名时那份记录是现有实例的；清不掉不拦导入，改动已记下待补，在这个实例的第一局记下之前一定先补上。
+        if let Err(err) = self.forget_play_records(&name).await {
+            tracing::warn!(%name, error = %err, "清掉同名旧实例的游玩记录失败，已记下待补");
+        }
         write_marker(&version_dir, task_id).await?;
         let populated = self
             .populate_instance(
@@ -1289,6 +1294,39 @@ mod tests {
             stages.iter().any(|s| s == "整合包已导入为实例 我的整合包"),
             "{stages:?}"
         );
+    }
+
+    /// 同名旧实例在启动器之外被删掉后，名字下的游玩记录还留着；导入同名整合包得到的是一个没玩过的新实例。
+    /// 撞上现有实例的导入被拦下，不动那个实例的记录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn imported_instance_does_not_inherit_records_of_a_vanished_namesake() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("RLCraft.mrpack");
+        write_pack(&pack, &index(serde_json::json!({"minecraft": "test"})), &[]);
+        let aurora = aurora(tmp.path(), &server);
+        let hour = 3_600_000;
+        for id in ["RLCraft", "现有", "别的"] {
+            crate::playtime::record_play(aurora.data_dir(), aurora.game_dir(), id, 0, 10 * hour)
+                .await
+                .unwrap();
+        }
+        std::fs::create_dir_all(aurora.game_dir().join("versions").join("现有")).unwrap();
+        let source = ModpackSource::File { path: pack.clone() };
+
+        aurora
+            .install_modpack(&source, Some("现有"), "task-dup", None)
+            .await
+            .unwrap_err();
+        aurora
+            .install_modpack(&source, Some("RLCraft"), "task-1", None)
+            .await
+            .unwrap();
+
+        let summaries = aurora.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["别的", "现有"]);
+        assert_eq!(summaries["现有"].playtime_min, 600);
     }
 
     /// Fabric 整合包：实例版本 JSON 是加载器 JSON 的副本（id 换成实例名，仍继承原版），被识别为带加载器。
