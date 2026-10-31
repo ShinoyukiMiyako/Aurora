@@ -1179,7 +1179,9 @@ export class LauncherStore {
         this.set((raw) => ({ tasks: applyTaskDownload(raw.tasks, attemptId, snapshot) }));
         return;
       }
-      const next = applyCompositeDownload(this.raw.tasks, attemptId, cursor, snapshot);
+      // 组合任务的每一项都带着序号调用，后端把它标在每条事件上；缺了说明约定破了，按快照去猜正是要消灭的误判
+      if (event.step === undefined) throw new Error(`组合任务 ${attemptId} 收到了不带项序号的进度`);
+      const next = applyCompositeDownload(this.raw.tasks, attemptId, cursor, event.step, snapshot);
       if (next === null) return;
       this.composites.set(attemptId, next.cursor);
       this.set({ tasks: next.tasks });
@@ -1387,15 +1389,16 @@ export class LauncherStore {
 
   /**
    * 逐项执行组合任务：每开始一项前查一次取消（见 cancelRequested），进度按各项的声明大小折成整体（见 CompositeProgress）。
-   * 游标留到这一次尝试落定才清：最后一项做完到任务落为完成之间晚到的进度也按组合任务的口径丢掉，不会把进度条拉回单项。
+   * 每一项拿到自己的序号（从 0 计），调后端命令时带上，它的进度事件据此归到这一项。
+   * 游标留到这一次尝试落定才清：最后一项做完到任务落为完成之间晚到的进度也按组合任务的口径记账，不会把进度条拉回单项。
    */
-  private async runSteps(attemptId: string, steps: readonly { size: number | null; run: () => Promise<unknown> }[]): Promise<void> {
+  private async runSteps(attemptId: string, steps: readonly { size: number | null; run: (step: number) => Promise<unknown> }[]): Promise<void> {
     const start = compositeProgress(steps.map((step) => step.size));
     this.composites.set(attemptId, start);
     this.set((raw) => ({ tasks: startComposite(raw.tasks, attemptId, start) }));
-    for (const step of steps) {
+    for (const [index, step] of steps.entries()) {
       if (this.cancelRequested.has(attemptId)) throw new IpcError(CANCELLED_ERROR_CODE, "已取消");
-      await step.run();
+      await step.run(index);
       const cursor = this.composites.get(attemptId);
       if (cursor === undefined) throw new Error(`组合任务 ${attemptId} 的进度游标不见了`);
       const next = completeCompositeStep(this.raw.tasks, attemptId, cursor);
@@ -1413,7 +1416,7 @@ export class LauncherStore {
       const versionId = strArg(args, "versionId", command);
       await this.runSteps(
         taskId,
-        modItems(args).map((item) => ({ size: item.fileSize, run: () => installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId) })),
+        modItems(args).map((item) => ({ size: item.fileSize, run: (step) => installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId, step) })),
       );
       return null;
     }
@@ -1425,8 +1428,8 @@ export class LauncherStore {
         taskId,
         items.map((item) => ({
           size: item.fileSize,
-          run: async () => {
-            await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
+          run: async (step) => {
+            await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId, step);
             updated.push(item);
           },
         })),

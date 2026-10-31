@@ -206,6 +206,9 @@ pub async fn project_detail(
 /// 把某平台上的一个 Mod 版本安装到指定实例的 mods 目录。长任务：进度经 core-event 推送并带
 /// `task_id`，可经 `cancel_task(taskId)` 取消。
 ///
+/// 作为组合任务（批量装 Mod）的一项调用时传 `step`（第几项，从 0 计），它原样标在这次调用的每条事件上，
+/// 前端据此把上一项晚到的进度和这一项的分开；单独调用不传。
+///
 /// 安装全程以「改动 Mod 与资源」占住实例：路径在开始时按实例名算好，期间改名或删除会让落位按旧路径
 /// 把目录重新建出来，所以这两件事在安装结束前报 `instance_busy`。
 #[tauri::command]
@@ -213,6 +216,7 @@ pub async fn project_detail(
 pub async fn install_mod(
     app: AppHandle,
     task_id: String,
+    step: Option<u32>,
     version_id: String,
     platform: String,
     project_id: String,
@@ -222,7 +226,7 @@ pub async fn install_mod(
     locks: State<'_, InstanceLocks>,
 ) -> Result<ModInstallOutcomeDto, CommandError> {
     let target_platform = parse_platform(&platform)?;
-    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let events = CoreEventForwarder::to_app_step(&app, Some(task_id.clone()), step);
     let outcome = install_mod_with(
         &facade,
         &tasks,
@@ -596,6 +600,136 @@ mod tests {
         assert!(delivered
             .iter()
             .all(|p| p.task_id.as_deref() == Some("rp#1")));
+    }
+
+    /// 批量装 Mod 的两项先后经命令跑完、共用一个 task_id，两个文件大小相同：每一项的事件都标着它自己的
+    /// 项序号，两项下完时的快照除 step 外一模一样。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn composite_items_tag_every_event_with_their_own_step() {
+        use crate::events::CoreEventKind;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let items: [(&str, &str, &[u8]); 2] =
+            [("sodium", "s1", b"aaaa"), ("lithium", "l1", b"bbbb")];
+        for (project, version, bytes) in items {
+            let file = format!("{project}-{version}.jar");
+            Mock::given(method("GET"))
+                .and(path(format!("/version/{version}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": version, "project_id": project, "name": project, "version_number": "1.0",
+                    "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                    "game_versions": ["1.21"], "loaders": [], "dependencies": [],
+                    "files": [{"hashes": {}, "url": format!("{}/{file}", server.uri()),
+                               "filename": file, "primary": true, "size": bytes.len()}]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/{file}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "sodium", "title": "Sodium", "description": "d", "project_type": "mod", "downloads": 1},
+                {"id": "lithium", "title": "Lithium", "description": "d", "project_type": "mod", "downloads": 1}
+            ])))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let version_dir = dir.path().join(".minecraft").join("versions").join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = facade_in(dir.path(), &server.uri());
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (step, (project, version, _)) in (0u32..).zip(items) {
+            let log = delivered.clone();
+            let forwarder =
+                CoreEventForwarder::spawn_step(Some("all#1".into()), Some(step), move |p| {
+                    log.lock().unwrap().push(p)
+                });
+            install_mod_with(
+                &facade,
+                &registry,
+                &locks,
+                "all#1",
+                ModTarget {
+                    version_id: "生存",
+                    platform: Platform::Modrinth,
+                    project_id: project,
+                    mod_version_id: version,
+                },
+                forwarder.sink(),
+            )
+            .await
+            .unwrap();
+            forwarder.finish().await;
+            assert!(!registry.is_running("all#1"), "第 {step} 项结束后应注销");
+        }
+
+        let mods_dir = version_dir.join("mods");
+        assert_eq!(
+            std::fs::read(mods_dir.join("sodium-s1.jar")).unwrap(),
+            b"aaaa"
+        );
+        assert_eq!(
+            std::fs::read(mods_dir.join("lithium-l1.jar")).unwrap(),
+            b"bbbb"
+        );
+        let delivered = delivered.lock().unwrap();
+        assert!(delivered
+            .iter()
+            .all(|p| p.task_id.as_deref() == Some("all#1")));
+        let steps: Vec<u32> = delivered
+            .iter()
+            .map(|p| p.step.expect("组合任务的每条事件都要带项序号"))
+            .collect();
+        let switch = steps.iter().position(|&s| s == 1).expect("第 1 项应有事件");
+        assert!(switch > 0, "第 0 项应有事件");
+        assert!(steps[..switch].iter().all(|&s| s == 0));
+        assert!(steps[switch..].iter().all(|&s| s == 1));
+        let completed_download = |step: u32| {
+            delivered
+                .iter()
+                .filter(|p| p.step == Some(step))
+                .find_map(|p| match p.event {
+                    CoreEventKind::Download {
+                        total,
+                        finished,
+                        bytes,
+                        total_bytes,
+                        ..
+                    } if finished == total => Some((total, finished, bytes, total_bytes)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("第 {step} 项没有下完的快照"))
+        };
+        assert_eq!(completed_download(0), (1, 1, 4, Some(4)));
+        assert_eq!(completed_download(1), completed_download(0));
+        let stages_of = |step: u32| -> Vec<&str> {
+            delivered
+                .iter()
+                .filter(|p| p.step == Some(step))
+                .filter_map(|p| match &p.event {
+                    CoreEventKind::Stage { message } => Some(message.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(stages_of(0).iter().any(|m| m.contains("sodium-s1.jar")));
+        assert!(stages_of(1).iter().any(|m| m.contains("lithium-l1.jar")));
+        assert!(!stages_of(0).iter().any(|m| m.contains("lithium-l1.jar")));
     }
 
     /// 实例正在改名或删除时，装 Mod 与装资源在登记任务、碰网络之前就以 instance_busy 拒绝，

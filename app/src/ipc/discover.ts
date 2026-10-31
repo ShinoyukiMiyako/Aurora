@@ -171,14 +171,18 @@ export const searchResources = (args: SearchArgs): Promise<SearchResultDto> =>
 export const projectDetail = (platform: PlatformId, projectId: string): Promise<ProjectDetail> =>
   invoke<ProjectDetail>("project_detail", { platform, projectId });
 
-/** 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。 */
+/**
+ * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。
+ * 作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；单独调用不给。
+ */
 export const installMod = (
   taskId: string,
   versionId: string,
   platform: PlatformId,
   projectId: string,
   modVersionId: string,
-): Promise<ModInstallOutcomeDto> => invoke<ModInstallOutcomeDto>("install_mod", { taskId, versionId, platform, projectId, modVersionId });
+  step?: number,
+): Promise<ModInstallOutcomeDto> => invoke<ModInstallOutcomeDto>("install_mod", { taskId, versionId, platform, projectId, modVersionId, step });
 
 /** 长任务：资源包进 resourcepacks/，光影进 shaderpacks/，数据包进 saves/<存档>/datapacks/。Mod 不走这里（报 invalid_argument），用 installMod。 */
 export const installResource = (args: InstallResourceArgs): Promise<ResourceInstallOutcomeDto> =>

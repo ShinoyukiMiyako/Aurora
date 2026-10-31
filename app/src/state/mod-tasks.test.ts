@@ -175,6 +175,8 @@ describe("全部更新", () => {
       ["iris-i1.jar", "i2"],
     ]);
     expect(new Set(calls.map((a) => a.taskId)).size).toBe(1);
+    // 每一项带上自己是第几项，后端把它标在这一项的进度事件上
+    expect(calls.map((a) => a.step)).toEqual([0, 1, 2]);
     const toasts = store.getState().toasts.filter((t) => t.tone === "success");
     expect(toasts.map((t) => [t.title, t.body])).toEqual([["已更新 3 个 Mod", "「生存」· 旧版本已保留，可以回滚"]]);
   });
@@ -185,6 +187,8 @@ describe("全部更新", () => {
     await store.actions.updateAllMods("生存");
     await settle();
     expect(store.getState().tasks.map((t) => [t.title, t.spec.command])).toEqual([["更新 sodium", "update_mod"]]);
+    // 单独的任务不是组合任务的一项，不带项序号
+    expect(callsOf(ipc, "update_mod").map((a) => "step" in a)).toEqual([false]);
     expect(store.getState().toasts.filter((t) => t.tone === "success").map((t) => t.title)).toEqual(["已更新 sodium"]);
   });
 
@@ -408,8 +412,8 @@ describe("组合任务的进度按整体累计", () => {
       const t = store.getState().tasks[0];
       seen.push([t.progress, t.bytes, t.totalBytes]);
     };
-    const progress = (bytes: number, total: number) => {
-      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 1, finished: bytes === total ? 1 : 0, bytes, total_bytes: total, speed: 4096 });
+    const progress = (step: number, bytes: number, total: number) => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, step, total: 1, finished: bytes === total ? 1 : 0, bytes, total_bytes: total, speed: 4096 });
       snap();
     };
     const finish = async (i: number) => {
@@ -419,15 +423,15 @@ describe("组合任务的进度按整体累计", () => {
     };
 
     snap();
-    progress(0, 100);
-    progress(50, 100);
-    progress(100, 100);
+    progress(0, 0, 100);
+    progress(0, 50, 100);
+    progress(0, 100, 100);
     await finish(0);
-    progress(100, 100);
-    progress(150, 300);
-    progress(300, 300);
+    progress(0, 100, 100);
+    progress(1, 150, 300);
+    progress(1, 300, 300);
     await finish(1);
-    progress(300, 600);
+    progress(2, 300, 600);
     await finish(2);
 
     expect(seen).toEqual([
@@ -467,9 +471,9 @@ describe("组合任务的进度按整体累计", () => {
       seen.push([t.progress, t.bytes, t.totalBytes]);
     };
     // 主项的命令按计划把 Sodium 与 Fabric API 一批下完
-    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 2, finished: 1, bytes: 1536, total_bytes: 3072, speed: 1 });
+    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, step: 0, total: 2, finished: 1, bytes: 1536, total_bytes: 3072, speed: 1 });
     snap();
-    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 2, finished: 2, bytes: 3072, total_bytes: 3072, speed: 1 });
+    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, step: 0, total: 2, finished: 2, bytes: 3072, total_bytes: 3072, speed: 1 });
     snap();
     calls[0].resolve(null);
     await settle();
@@ -485,6 +489,10 @@ describe("组合任务的进度按整体累计", () => {
       [1, 3072, 3072],
     ]);
     expect(store.getState().tasks[0]).toMatchObject({ status: "done", doneBytes: 3072 });
+    expect(callsOf(ipc, "install_mod").map((a) => [a.projectId, a.step])).toEqual([
+      ["sodium", 0],
+      ["fabric-api", 1],
+    ]);
   });
 
   it("装 Mod 时有一项不知道大小：按项数折，进度单调不减", async () => {
@@ -502,19 +510,19 @@ describe("组合任务的进度按整体累计", () => {
     await settle();
     const [{ id }] = store.getState().tasks;
     const seen: number[] = [];
-    const progress = (bytes: number, total: number) => {
-      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 1, finished: 0, bytes, total_bytes: total, speed: 1 });
+    const progress = (step: number, bytes: number, total: number) => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, step, total: 1, finished: 0, bytes, total_bytes: total, speed: 1 });
       seen.push(store.getState().tasks[0].progress);
     };
-    progress(512, 1024);
+    progress(0, 512, 1024);
     calls[0].resolve(null);
     await settle();
     seen.push(store.getState().tasks[0].progress);
-    progress(0, 4096);
-    progress(4096, 4096);
+    progress(1, 0, 4096);
+    progress(1, 4096, 4096);
     calls[1].resolve(null);
     await settle();
-    progress(1024, 1024);
+    progress(2, 1024, 1024);
     calls[2].resolve(null);
     await settle();
 
@@ -522,5 +530,124 @@ describe("组合任务的进度按整体累计", () => {
     const expected = [1 / 6, 1 / 3, 1 / 3, 2 / 3, 1];
     expect(seen).toHaveLength(expected.length);
     seen.forEach((value, i) => expect(value).toBeCloseTo(expected[i], 10));
+  });
+
+  /** 全部更新：每个可更新按给定的声明大小起一项，返回各项挂起的调用与这一次尝试的 taskId。 */
+  async function updateAll(sizes: readonly (number | null)[]): Promise<{ calls: Deferred<unknown>[]; taskId: string }> {
+    const names = ["sodium", "lithium", "iris"];
+    ipc.overrides.set("check_updates", () =>
+      sizes.map((size, i) => ({ ...candidate(names[i], `${names[i]}1`, `${names[i]}2`), latest: version(names[i], `${names[i]}2`, { file_size: size }) })),
+    );
+    const calls = pendingCalls("update_mod");
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task).toMatchObject({ status: "running", spec: { command: "update_mods" } });
+    return { calls, taskId: `${task.id}#1` };
+  }
+
+  /** 逐条喂进度并记下每一步之后的 [进度, 已下字节, 总量, 累计字节]。 */
+  function progressLog(taskId: string, calls: Deferred<unknown>[]) {
+    const seen: [number, number, number | null, number][] = [];
+    const snap = () => {
+      const t = store.getState().tasks[0];
+      seen.push([t.progress, t.bytes, t.totalBytes, t.doneBytes]);
+    };
+    return {
+      seen,
+      snap,
+      download(step: number, bytes: number, totalBytes: number | null, finished: number, total = 1, speed = 1) {
+        emit(CORE_EVENT, { kind: "download", task_id: taskId, step, total, finished, bytes, total_bytes: totalBytes, speed });
+        snap();
+      },
+      async finish(i: number) {
+        calls[i].resolve({ file_name: `${i}.jar`, path: "", platform: "modrinth" });
+        await settle();
+        snap();
+      },
+    };
+  }
+
+  it("两项声明大小相同：后一项第一条就报满也照常算进整体，上一项晚到的同样快照不重复算", async () => {
+    const { calls, taskId } = await updateAll([100, 100]);
+    const log = progressLog(taskId, calls);
+    log.snap();
+    log.download(0, 0, 100, 0);
+    log.download(0, 100, 100, 1);
+    await log.finish(0);
+    // 第二项的文件在一个进度间隔里就下完了：它的第一条快照与上一项的最后一条逐字段相同
+    log.download(1, 100, 100, 1);
+    // 上一项的最后一条这时才送到
+    log.download(0, 100, 100, 1);
+    await log.finish(1);
+    expect(log.seen).toEqual([
+      [0, 0, 200, 0],
+      [0, 0, 200, 0],
+      [0.5, 100, 200, 100],
+      [0.5, 100, 200, 100],
+      [1, 200, 200, 200],
+      [1, 200, 200, 200],
+      [1, 200, 200, 200],
+    ]);
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", doneBytes: 200 });
+    expect(calls).toHaveLength(2);
+    expect(callsOf(ipc, "update_mod").map((a) => [a.fileName, a.step])).toEqual([
+      ["sodium-sodium1.jar", 0],
+      ["lithium-lithium1.jar", 1],
+    ]);
+  });
+
+  it("两项大小都未知：按项数折，后一项已下字节比上一项多也照常采纳", async () => {
+    const { calls, taskId } = await updateAll([null, null]);
+    const log = progressLog(taskId, calls);
+    log.snap();
+    log.download(0, 200, null, 0);
+    log.download(0, 500, null, 1);
+    await log.finish(0);
+    log.download(1, 600, null, 1, 2);
+    log.download(0, 500, null, 1);
+    log.download(1, 900, null, 2, 2);
+    await log.finish(1);
+    expect(log.seen).toEqual([
+      [0, 0, null, 0],
+      [0, 200, null, 200],
+      [0.5, 500, null, 500],
+      [0.5, 500, null, 500],
+      [0.75, 1100, null, 1100],
+      [0.75, 1100, null, 1100],
+      [1, 1400, null, 1400],
+      [1, 1400, null, 1400],
+    ]);
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", totalBytes: null, doneBytes: 1400 });
+  });
+
+  it("上一项的进度在下一项报过进度之后才到：只补上它自己的字节，不推整体进度、不算进下一项", async () => {
+    const { calls, taskId } = await updateAll([100, 300]);
+    const log = progressLog(taskId, calls);
+    log.snap();
+    log.download(0, 60, 100, 0, 1, 111);
+    await log.finish(0);
+    log.download(1, 30, 300, 0, 1, 222);
+    log.download(0, 100, 100, 1, 1, 111);
+    // 速度是这一刻正在下的那一项的，晚到的不改它
+    expect(store.getState().tasks[0].speedBps).toBe(222);
+    log.download(1, 300, 300, 1, 1, 222);
+    await log.finish(1);
+    expect(log.seen).toEqual([
+      [0, 0, 400, 0],
+      [0.15, 60, 400, 60],
+      [0.25, 100, 400, 60],
+      [0.325, 130, 400, 90],
+      [0.325, 130, 400, 130],
+      [1, 400, 400, 400],
+      [1, 400, 400, 400],
+    ]);
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", doneBytes: 400 });
+  });
+
+  it("组合任务收到不带项序号的进度：说明前后端的约定破了，直接报错，不靠快照去猜", async () => {
+    const { taskId } = await updateAll([100, 100]);
+    expect(() => emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes: 10, total_bytes: 100, speed: 1 })).toThrow("不带项序号");
+    expect(store.getState().tasks[0]).toMatchObject({ progress: 0, doneBytes: 0 });
   });
 });
