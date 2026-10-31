@@ -656,6 +656,72 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual([NAME]);
   });
 
+  /** 之后的实例列表请求挂起，直到调用返回的函数：模拟落地重扫还没回来。 */
+  function holdScans(): () => void {
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    ipc.overrides.set("list_instances", async () => {
+      await held;
+      return instances;
+    });
+    return () => {
+      if (release === null) throw new Error("挂起的重扫没有放行函数");
+      release();
+    };
+  }
+
+  it("装的过程中没有重扫：装好之后、落地重扫回来之前留在实例页并说明正在刷新；重扫回来后换成正常内容", async () => {
+    await openCreating("mods");
+    const release = holdScans();
+    instances = [...instances, instanceDto(NAME, { loaders: fabric })];
+    await act(async () => {
+      install.resolve(installResult());
+      await settle(20);
+    });
+    expect(launcher.state.tasks.find((t) => t.instanceId === NAME)?.status).toBe("done");
+    expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "mods" });
+    expect(text()).toContain("安装任务已经结束，正在刷新实例列表…");
+    // 读实例设置的那一次是状态层落地时写封面，不是页面的按需查询
+    expect(queriesFor(NAME)).toEqual(["get_instance_settings"]);
+
+    await act(async () => {
+      release();
+      await settle(20);
+    });
+    expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "mods" });
+    expect(text()).toContain("还没有安装 Mod");
+    expect(queriesFor(NAME)).toContain("list_mods");
+  });
+
+  it("装的过程中没有重扫、安装失败且盘上留了目录：留在实例页，换成失败原因与「修复实例」", async () => {
+    await openCreating("overview");
+    const release = holdScans();
+    instances = [
+      ...instances,
+      instanceDto(NAME, {
+        status: "broken",
+        mc_version: null,
+        java_major: null,
+        incomplete: { kind: "install", outcome: "failed", started_at: NOW, spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" }, error: { code: "network_failed", message: "连接超时" } },
+      }),
+    ];
+    await act(async () => {
+      install.reject(new IpcError("network_failed", "连接超时"));
+      await settle(20);
+    });
+    expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "overview" });
+
+    await act(async () => {
+      release();
+      await settle(20);
+    });
+    expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "overview" });
+    expect(text()).toContain("安装没有完成：连接超时");
+    expect(button("修复实例")).toBeDefined();
+  });
+
   it("状态层在任务失败后留着占位项时：说明没装完与原因，「重试」把同一个任务重新排进队列", async () => {
     let attempts = 0;
     ipc.overrides.set("install_version", () => {

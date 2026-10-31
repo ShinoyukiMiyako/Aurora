@@ -228,6 +228,11 @@ interface RawState {
   session: SessionState | null;
   tasks: Task[];
   taskMeta: Readonly<Record<string, TaskMeta>>;
+  /**
+   * 已结束、但这次结束触发的那次重扫还没落定的新建与导入任务。它们的占位项留到重扫落定：否则实例先从列表里
+   * 消失，外壳随即把指向它的实例页路由剪掉，等重扫回来用户已经被送回了上一页。
+   */
+  landing: readonly string[];
   /** 本次运行里失败、用户还没看过的尝试（attemptTaskId）。重试后再失败是新的一次尝试，重新算未看。 */
   unseenFailures: readonly string[];
   toasts: ToastsState;
@@ -422,6 +427,7 @@ function initialRaw(): RawState {
     session: null,
     tasks: [],
     taskMeta: {},
+    landing: [],
     unseenFailures: [],
     toasts: EMPTY_TOASTS,
     login: null,
@@ -747,7 +753,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
  * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、活动任务带来的状态（安装中或改动中）都没变，就复用上一次的那个对象。
  */
 class StateDeriver {
-  private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; activeKey: string } | null = null;
+  private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; landing: RawState["landing"]; activeKey: string } | null = null;
   private lastView: InstancesView | null = null;
   private scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; value: InstanceSummary }>();
   private placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
@@ -784,12 +790,13 @@ class StateDeriver {
       last.scanned === raw.scanned &&
       last.pins === raw.pins &&
       last.taskMeta === raw.taskMeta &&
+      last.landing === raw.landing &&
       last.activeKey === activeKey
     ) {
       return this.lastView;
     }
     const view = this.compute(raw, active);
-    this.lastInputs = { scanned: raw.scanned, pins: raw.pins, taskMeta: raw.taskMeta, activeKey };
+    this.lastInputs = { scanned: raw.scanned, pins: raw.pins, taskMeta: raw.taskMeta, landing: raw.landing, activeKey };
     // 内容没变就连数组一起复用：例如一个下载任务结束、另一个开始，但它们挂的实例不变
     const prev = this.lastView;
     this.lastView =
@@ -827,7 +834,9 @@ class StateDeriver {
     const known = new Set(instances.map((i) => i.id.toLowerCase()));
     const sidebarPins = [...raw.pins];
     const placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
-    for (const task of active) {
+    const landing = new Set(raw.landing);
+    for (const task of raw.tasks) {
+      if (!isActiveTask(task) && !landing.has(task.id)) continue;
       const meta = raw.taskMeta[task.id];
       if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
       if (known.has(meta.name.toLowerCase())) continue;
@@ -1467,17 +1476,38 @@ export class LauncherStore {
   private onTaskDone(id: string, attempt: number, result: unknown): void {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
-    this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())) }));
+    const keep = this.keepsPlaceholder(before);
+    this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())), ...(keep ? { landing: [...raw.landing, id] } : {}) }));
     this.tasksChanged();
     if (this.discardLanding.has(id)) return;
-    this.background(ACTION_ERROR.landTask(before.title), this.landTask(before, result));
+    this.background(
+      ACTION_ERROR.landTask(before.title),
+      this.landTask(before, result).finally(() => this.endLanding(id)),
+    );
+  }
+
+  /** 新建与导入任务结束时它的占位项要留到落地重扫落定（见 RawState.landing）；用户正在删除它时不留。 */
+  private keepsPlaceholder(task: Task): boolean {
+    const meta = this.raw.taskMeta[task.id];
+    return meta !== undefined && (meta.type === "create" || meta.type === "modpack") && !this.discardLanding.has(task.id);
+  }
+
+  private withoutLanding(raw: RawState, taskId: string): Partial<RawState> {
+    return raw.landing.includes(taskId) ? { landing: raw.landing.filter((id) => id !== taskId) } : {};
+  }
+
+  /** 落地重扫没走到（之前的步骤失败）或重扫本身失败时，占位项也不再留着。 */
+  private endLanding(taskId: string): void {
+    if (this.raw.landing.includes(taskId)) this.set((raw) => this.withoutLanding(raw, taskId));
   }
 
   private onTaskFailed(id: string, attempt: number, error: unknown): void {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
+    const keep = this.keepsPlaceholder(before);
+    const landing = (raw: RawState): Partial<RawState> => (keep ? { landing: [...raw.landing, id] } : {});
     if (isCancelled(error)) {
-      this.set((raw) => ({ tasks: trimHistory(markCancelled(raw.tasks, id, Date.now())) }));
+      this.set((raw) => ({ tasks: trimHistory(markCancelled(raw.tasks, id, Date.now())), ...landing(raw) }));
       this.pushToast("info", TASK_TOAST.cancelled(before.title).title);
     } else {
       console.error(`任务失败：${before.title}`, error);
@@ -1486,12 +1516,19 @@ export class LauncherStore {
       this.set((raw) => ({
         tasks: trimHistory(markFailed(raw.tasks, id, attempt, record, Date.now())),
         unseenFailures: [...raw.unseenFailures, attemptTaskId(before)],
+        ...landing(raw),
       }));
       this.failureToast(before, taskFailureReason(record));
     }
     this.tasksChanged();
-    // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫
-    if (INSTANCE_TASKS.has(before.spec.command)) this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫。占位项与重扫结果在同一次
+    // 更新里交接：盘上留了目录就由扫描项接替，没留就移除
+    if (INSTANCE_TASKS.has(before.spec.command)) {
+      this.background(
+        ACTION_ERROR.refreshInstances,
+        this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)),
+      );
+    }
     // 组合任务停下之前做完的那几项已经落盘，Mod 列表与数目不能停在任务开始前
     if (COMPOSITE_TASKS.has(before.spec.command) && before.instanceId !== null) {
       this.modsChanged(before.instanceId);
@@ -1528,8 +1565,8 @@ export class LauncherStore {
     return { label: TASK_TOAST.launchAction, run: () => this.actions.launch(instanceId), errorTitle: ACTION_ERROR.launch(instanceId) };
   }
 
-  /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。 */
-  private async settleNewInstance(id: string, cover: string | null, pin: boolean): Promise<void> {
+  /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。重扫结果与撤下占位项在同一次更新里。 */
+  private async settleNewInstance(taskId: string, id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
       const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
       await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
@@ -1541,7 +1578,7 @@ export class LauncherStore {
       });
     }
     this.instanceIdTaken(id);
-    await this.fetchInstances();
+    await this.fetchInstances((raw) => this.withoutLanding(raw, taskId));
   }
 
   /** 排进侧栏固定的链（见 sidebarPinChain）：前一次落定后才开始；这一次的结果与失败照常交给调用方，不挡后面排着的。 */
@@ -1586,14 +1623,14 @@ export class LauncherStore {
     switch (meta.type) {
       case "create": {
         const id = (result as InstallResultDto).id;
-        await this.settleNewInstance(id, meta.cover, meta.autoPin);
+        await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
         const copy = TASK_TOAST.ready(id);
         this.pushToast("success", copy.title, copy.body, this.launchAction(id));
         return;
       }
       case "modpack": {
         const id = (result as ModpackInstallOutcomeDto).version_id;
-        await this.settleNewInstance(id, meta.cover, true);
+        await this.settleNewInstance(task.id, id, meta.cover, true);
         // 重启后恢复的导入任务不知道 Mod 数，正文省略
         const copy = TASK_TOAST.imported(id, meta.modCount);
         this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, this.launchAction(id));

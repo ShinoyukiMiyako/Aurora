@@ -515,6 +515,133 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
   });
 });
 
+describe("新建与导入结束后，占位项留到这次结束触发的重扫落定", () => {
+  const spec = { name: "新世界", mcVersion: "1.21.1", loader: "fabric" as const, loaderVersion: "0.16.10", cover: "grass" };
+  let install: Deferred<{ id: string }>;
+  /** 非 null 时实例列表的下一次请求挂在它上面。 */
+  let scan: Deferred<InstanceDto[]> | null;
+
+  beforeEach(() => {
+    install = deferred<{ id: string }>();
+    scan = null;
+    ipc.overrides.set("install_version", () => install.promise);
+    ipc.overrides.set("list_instances", () => (scan === null ? instances : scan.promise));
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    stubInstanceSettings();
+  });
+
+  const ids = () => store.getState().instances.map((i) => i.id);
+  const entry = () => store.getState().instances.find((i) => i.id === "新世界");
+
+  it("装好：任务已完成、落地重扫还没回来时占位项仍在；重扫回来在同一次更新里换成扫描项，不重复", async () => {
+    await store.actions.createInstance(spec);
+    await settle();
+    scan = deferred<InstanceDto[]>();
+    install.resolve({ id: "新世界" });
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["done"]);
+    expect(entry()).toMatchObject({ placeholder: true, status: "installing", mcVersion: "1.21.1", loader: "fabric" });
+
+    const seen: (boolean | null)[] = [];
+    const off = store.subscribe(() => {
+      const current = entry();
+      seen.push(current === undefined ? null : current.placeholder);
+    });
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.21.1" })];
+    scan.resolve(instances);
+    await settle();
+    off();
+    // 中间没有一次是「列表里没有它」
+    expect(seen).not.toContain(null);
+    expect(entry()).toMatchObject({ placeholder: false, status: "ready" });
+    expect(ids()).toEqual(["生存", "创造", "新世界"]);
+    expect(store.getState().toasts.map((t) => t.title)).toContain("「新世界」已就绪");
+  });
+
+  it("失败且盘上没留目录：重扫回来之前占位项仍在，重扫回来后移除", async () => {
+    await store.actions.createInstance(spec);
+    await settle();
+    scan = deferred<InstanceDto[]>();
+    install.reject(new IpcError("download_failed", "下载源暂时不可用"));
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["failed"]);
+    expect(entry()).toMatchObject({ placeholder: true });
+    scan.resolve(instances);
+    await settle();
+    expect(ids()).toEqual(["生存", "创造"]);
+  });
+
+  it("失败且盘上留了未完成的目录：由扫描项接替，实例一直在列表里", async () => {
+    await store.actions.createInstance(spec);
+    await settle();
+    scan = deferred<InstanceDto[]>();
+    install.reject(new IpcError("download_failed", "下载源暂时不可用"));
+    await settle();
+    expect(entry()).toMatchObject({ placeholder: true });
+    instances = [...instances, instanceDto("新世界", { status: "broken", broken_reason: "安装没有完成" })];
+    scan.resolve(instances);
+    await settle();
+    expect(entry()).toMatchObject({ placeholder: false, status: "broken" });
+    expect(ids().filter((id) => id === "新世界")).toHaveLength(1);
+  });
+
+  it("落地重扫失败：占位项不再留着，失败照常报出", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await store.actions.createInstance(spec);
+    await settle();
+    scan = deferred<InstanceDto[]>();
+    install.resolve({ id: "新世界" });
+    await settle();
+    expect(entry()).toMatchObject({ placeholder: true });
+    scan.reject(new IpcError("io", "目录读不出来"));
+    await settle();
+    expect(entry()).toBeUndefined();
+    expect(store.getState().toasts.map((t) => t.tone)).toContain("error");
+  });
+
+  it("导入整合包失败（后端已清理半成品）：同样留到重扫落定", async () => {
+    const pack = deferred<unknown>();
+    ipc.overrides.set("install_modpack", () => pack.promise);
+    await store.actions.installModpack({
+      source: { kind: "file", path: "C:/packs/pack.mrpack" },
+      name: "整合包",
+      cover: "grass",
+      packName: "整合包",
+      packVersion: "1.0.0",
+      modCount: 12,
+      mcVersion: "1.20.1",
+      loader: "fabric",
+      loaderVersion: "0.16.10",
+    });
+    await settle();
+    scan = deferred<InstanceDto[]>();
+    pack.reject(new IpcError("modpack_invalid", "清单读不出来"));
+    await settle();
+    expect(store.getState().instances.find((i) => i.id === "整合包")).toMatchObject({ placeholder: true });
+    scan.resolve(instances);
+    await settle();
+    expect(ids()).toEqual(["生存", "创造"]);
+  });
+
+  it("用户正在删除它时不留：取消一到占位项就撤下", async () => {
+    ipc.overrides.set("cancel_task", () => {
+      install.reject(cancelledError());
+      return true;
+    });
+    await store.actions.createInstance(spec);
+    await settle();
+    scan = deferred<InstanceDto[]>();
+    const deleting = store.actions.deleteInstance("新世界", 0);
+    await settle();
+    expect(entry()).toBeUndefined();
+    scan.resolve(instances);
+    scan = null;
+    await deleting;
+    await settle();
+    expect(ids()).toEqual(["生存", "创造"]);
+  });
+});
+
 describe("删除还在安装的新建实例", () => {
   const spec = { name: "新世界", mcVersion: "1.21.1", loader: "vanilla" as const, loaderVersion: null, cover: "grass" };
   let install: Deferred<{ id: string }>;
