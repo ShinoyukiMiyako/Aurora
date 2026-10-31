@@ -120,7 +120,6 @@ export function effectiveRoute(route: Route, exists: (instanceId: string) => boo
 // ---------------------------------------------------------------- 页面与流程模块表
 
 export type PageComponent<P extends PageId> = ComponentType<PageProps<P>>;
-export type PageLoader = () => Promise<{ default: ComponentType<{ route: never }> }>;
 export type PageTable = { readonly [P in PageId]: () => Promise<{ default: PageComponent<P> }> };
 
 export type FlowComponent<N extends FlowName> = ComponentType<FlowProps<N>>;

@@ -8,7 +8,6 @@ import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
 import { MANUAL_LOGIN } from "../../state/login";
-import { invalidate } from "../../state/resource";
 import { busyInstanceId } from "../../state/selectors";
 import { ACCOUNTS_COPY } from "./copy";
 import { deleteConfirm } from "./model";
@@ -50,10 +49,8 @@ export function useAccountActions(): AccountActions {
   const refresh = (uuid: string) => {
     setRefreshing((prev) => new Set(prev).add(uuid));
     void run(async () => {
-      await actions.refreshAccount(uuid);
-      // 刷新会重新拉取皮肤，缓存里的旧皮肤信息要作废
-      invalidate(`skin:${uuid}`);
-      actions.toast("success", ACCOUNTS_COPY.refreshed);
+      // 凭据失效时账户已转为 expired、原位给出重新登录，不算失败也不弹成功；皮肤缓存由状态层作废
+      if ((await actions.refreshAccount(uuid)) === "refreshed") actions.toast("success", ACCOUNTS_COPY.refreshed);
     }, ACTION_ERROR.refreshAccount).then(() =>
       setRefreshing((prev) => {
         const next = new Set(prev);

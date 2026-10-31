@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "./errors";
-import { backupSize, listHistory, rollback, rollbackChecks } from "./history";
+import { listHistory, rollback, rollbackChecks } from "./history";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners, subscribeMockEvent } from "./mock/events";
 import { MOCK_MOD_INSTANCE, mockModFileCount, setMockModFileBusy } from "./mock/handlers/mods";
@@ -169,7 +169,6 @@ describe("更新检查与更新", () => {
     const names = (await listMods(MOCK_MOD_INSTANCE)).map((m) => m.file_name);
     expect(names).toContain("AANobbMI-0.6.0.jar");
     expect(names).not.toContain("AANobbMI-0.5.3.jar");
-    expect(await backupSize(MOCK_MOD_INSTANCE)).toBe(1_048_576);
 
     const history = await listHistory(MOCK_MOD_INSTANCE);
     const update = history[history.length - 1];
@@ -190,7 +189,6 @@ describe("更新检查与更新", () => {
     await rollback(MOCK_MOD_INSTANCE, update.id);
     const restored = await listMods(MOCK_MOD_INSTANCE);
     expect(restored[0]).toMatchObject({ file_name: "AANobbMI-0.5.3.jar", source: { version_id: "sodium-053", version_number: "0.5.3" } });
-    expect(await backupSize(MOCK_MOD_INSTANCE)).toBe(0);
     const checks = await rollbackChecks(MOCK_MOD_INSTANCE);
     expect(checks.find((c) => c.event_id === update.id)).toEqual({ event_id: update.id, can_rollback: false, reason: "该更新已经回滚过" });
     const twice = await failure(rollback(MOCK_MOD_INSTANCE, update.id));

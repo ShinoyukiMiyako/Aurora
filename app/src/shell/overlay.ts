@@ -288,38 +288,6 @@ export function useFocusTrap(containerRef: RefObject<HTMLElement | null>, active
   }, [active, containerRef, registry]);
 }
 
-export interface FocusReturn {
-  /** 本次关闭不归还焦点：Popover 因点击外部而关闭时，焦点应留在用户点的地方。 */
-  skip(): void;
-}
-
-/**
- * 焦点归还：active 变为真时记下当前焦点元素，变为假（或卸载）时把焦点还给它；
- * 它已不在文档中时落到带 FOCUS_FALLBACK_ATTR 的元素。
- */
-export function useFocusReturn(active: boolean): FocusReturn {
-  const registry = useRegistry();
-  const skipRef = useRef(false);
-  useLayoutEffect(() => {
-    if (!active) return;
-    const previous = document.activeElement;
-    skipRef.current = false;
-    return () => {
-      if (skipRef.current) return;
-      const target =
-        previous instanceof HTMLElement && previous.isConnected && previous !== document.body
-          ? previous
-          : document.querySelector<HTMLElement>(`[${FOCUS_FALLBACK_ATTR}]`);
-      if (target) registry.withTrapsSuspended(() => target.focus());
-    };
-  }, [active, registry]);
-  return {
-    skip: () => {
-      skipRef.current = true;
-    },
-  };
-}
-
 // ---------------------------------------------------------------- 锚定定位
 
 export interface Rect {

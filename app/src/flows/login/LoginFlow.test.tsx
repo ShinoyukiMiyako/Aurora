@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 import { act } from "react";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { AUTHLIB_COPY, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
+import { AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
 import { validateOfflineName } from "../../domain/rules";
 import { DEVICE_CODE_EVENT } from "../../ipc/accounts";
 import { IpcError } from "../../ipc/errors";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { MANUAL_LOGIN } from "../../state/login";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
@@ -42,7 +43,6 @@ let view: Rendered | undefined;
 let launcher: LauncherApi;
 let writeText: ReturnType<typeof vi.fn>;
 let opened: string[];
-let anchorClick: MockInstance<HTMLAnchorElement["click"]>;
 
 function Host() {
   launcher = useLauncher();
@@ -97,14 +97,14 @@ beforeEach(() => {
   writeText = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   opened = [];
-  anchorClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function click(this: HTMLAnchorElement) {
-    opened.push(`${this.target} ${this.href}`);
+  ipc.overrides.set("plugin:opener|open_url", (args) => {
+    opened.push(String(args.url));
+    return null;
   });
 });
 afterEach(() => {
   view?.unmount();
   view = undefined;
-  anchorClick.mockRestore();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -182,7 +182,7 @@ describe("微软设备码弹窗", () => {
     act(() => button(MICROSOFT_LOGIN_COPY.copyAndOpen).click());
     await flush();
     expect(writeText).toHaveBeenCalledWith("PF7Q-X2LM");
-    expect(opened).toEqual(["_blank https://www.microsoft.com/link"]);
+    expect(opened).toEqual(["https://www.microsoft.com/link"]);
   });
 
   it("复制失败就不打开网页，并报「复制失败」", async () => {
@@ -225,7 +225,7 @@ describe("微软设备码弹窗", () => {
     expect(dialog()?.textContent).toContain("还没有 Xbox 档案");
     act(() => button("打开 xbox.com").click());
     await flush();
-    expect(opened).toEqual(["_blank https://www.xbox.com/"]);
+    expect(opened).toEqual(["https://www.xbox.com/"]);
   });
 });
 
@@ -287,5 +287,75 @@ describe("外置登录弹窗", () => {
     expect(selected.pendingId).toMatch(/^authlib-/);
     expect(launcher.state.login).toBeNull();
     expect(launcher.state.toasts[0]?.title).toBe(TOAST_COPY.authlibAdded("multi_alt", "skin.example.com").title);
+  });
+});
+
+describe("外置登录：重新登录与用过的服务器", () => {
+  const SKIN_API = "https://skin.example.com/api/yggdrasil";
+  const authlib = (uuid: string, server: string, url: string, addedAt: number, username: string | null = null) =>
+    accountDto({ uuid, name: `玩家${uuid}`, account_type: "authlib_injector", auth_server: server, server_url: url, username, added_at: addedAt });
+
+  it("重新登录直接停在第 2 步：服务器与账号已填好、密码为空、焦点在密码框，不再探测服务器", async () => {
+    const account = authlib("a1", "皮肤站", SKIN_API, 1, "steve@example.com");
+    bootOverrides(ipc, { accounts: [account] });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    ipc.overrides.set("authlib_login", () => ({ status: "logged_in", account }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.relogin("a1", MANUAL_LOGIN);
+    });
+    await flush();
+
+    expect(launcher.state.login).toEqual({ kind: "authlib", intent: MANUAL_LOGIN, prefill: { serverUrl: SKIN_API, serverName: "皮肤站", username: "steve@example.com" } });
+    expect(dialog()?.textContent).toContain("皮肤站");
+    expect(dialog()?.textContent).toContain(SKIN_API);
+    const [username, password] = inputs();
+    expect(username.value).toBe("steve@example.com");
+    expect(password.value).toBe("");
+    expect(document.activeElement).toBe(password);
+    expect(callsOf(ipc, "probe_auth_server")).toEqual([]);
+
+    typeInto(password, "secret");
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    expect(callsOf(ipc, "authlib_login")).toEqual([{ serverUrl: SKIN_API, username: "steve@example.com", password: "secret" }]);
+    expect(launcher.state.login).toBeNull();
+  });
+
+  it("较早登录、没记下账号的账户：账号框为空并获得焦点", async () => {
+    bootOverrides(ipc, { accounts: [authlib("a1", "皮肤站", SKIN_API, 1)] });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.relogin("a1", MANUAL_LOGIN);
+    });
+    await flush();
+    const [username] = inputs();
+    expect(username.value).toBe("");
+    expect(document.activeElement).toBe(username);
+  });
+
+  it("第一步列出用过的服务器：按地址去重、最近添加的在前、最多 3 个，LittleSkin 不重复列", async () => {
+    bootOverrides(ipc, {
+      accounts: [
+        authlib("a1", "皮肤站", SKIN_API, 10),
+        authlib("a2", "皮肤站", SKIN_API, 50),
+        authlib("a3", "LittleSkin", LITTLESKIN_API, 60),
+        authlib("a4", "方块站", "https://block.example.com/api/yggdrasil", 40),
+        authlib("a5", "老站", "https://old.example.com/api/yggdrasil", 30),
+        authlib("a6", "旧旧站", "https://older.example.com/api/yggdrasil", 20),
+        accountDto({ uuid: "o1", name: "离线", added_at: 100 }),
+      ],
+    });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.openLogin("authlib");
+    });
+    await flush();
+    const chips = [...(dialog()?.querySelectorAll<HTMLButtonElement>("button[type='button']") ?? [])].filter((b) => b.closest("[role='dialog']") !== null && b.title !== "");
+    expect(chips.map((b) => b.textContent)).toEqual(["皮肤站", "方块站", "老站"]);
+    act(() => chips[1].click());
+    expect(inputs()[0].value).toBe("https://block.example.com/api/yggdrasil");
   });
 });

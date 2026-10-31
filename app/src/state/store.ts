@@ -4,7 +4,8 @@
 // - 事件订阅只在 start() 时建立一次、stop() 时全部撤销；先订阅再首查，首查期间的事件不会漏掉。
 // - 动作返回 Promise，失败原样抛给调用方，由外层（useRunner）统一转成通知；这里不吞错误。
 //   动作在后台继续的工作（任务完成后的落地、退出后的崩溃报告）没有调用方可抛，经 report 进通知并写控制台。
-// - 对外的 LauncherState 由原始状态派生（实例的「安装中」「固定」由任务与侧栏固定推出），按原始状态记忆。
+// - 对外的 LauncherState 由原始状态派生（实例的「安装中」「固定」由任务与侧栏固定推出）：整份按原始状态记忆，
+//   实例列表另按输入记忆、按实例增量复用（见 StateDeriver），高频的下载进度与游戏日志不让它换引用。
 
 import {
   ACTION_ERROR,
@@ -74,6 +75,7 @@ import * as tasksIpc from "../ipc/tasks";
 import type { CoreEvent } from "../ipc/tasks";
 import { describeError, errorRecord } from "./errors";
 import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type LoginState } from "./login";
+import { network as appNetwork, type NetworkMonitor } from "./online";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
 import {
@@ -178,7 +180,19 @@ export type AuthlibLoginOutcome =
 
 /** 入队时记下的、完成落地要用的上下文。任务日志不保存它：重启后恢复的任务按命令参数推出能推出的部分。 */
 type TaskMeta =
-  | { type: "create"; name: string; mcVersion: string; loader: LoaderKind; loaderVersion: string | null; cover: string | null }
+  | {
+      type: "create";
+      name: string;
+      mcVersion: string;
+      loader: LoaderKind;
+      loaderVersion: string | null;
+      cover: string | null;
+      /**
+       * 入队时侧栏还有空位：安装期间占位项就显示在侧栏末尾（带安装进度）。实例目录装好之前后端不认这个 id，
+       * 所以安装期间只在派生状态里固定，装好后再写进侧栏固定列表。
+       */
+      autoPin: boolean;
+    }
   | {
       type: "modpack";
       name: string;
@@ -189,10 +203,12 @@ type TaskMeta =
       loaderVersion: string | null;
     }
   | { type: "repair"; launchAfter: boolean }
-  | { type: "java"; major: number; launchAfter: string | null }
+  /** pinFor：下载完把这个实例的 Java 固定为新装的运行时（崩溃诊断「下载 Java N」）。 */
+  | { type: "java"; major: number; launchAfter: string | null; pinFor: string | null }
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
-  | { type: "update"; instanceId: string; name: string };
+  | { type: "update"; instanceId: string; name: string }
+  | { type: "updates"; instanceId: string; count: number };
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -206,6 +222,8 @@ interface RawState {
   session: SessionState | null;
   tasks: Task[];
   taskMeta: Readonly<Record<string, TaskMeta>>;
+  /** 本次运行里失败、用户还没看过的尝试（attemptTaskId）。重试后再失败是新的一次尝试，重新算未看。 */
+  unseenFailures: readonly string[];
   toasts: ToastsState;
   login: LoginState | null;
   launchPrompt: LaunchPrompt | null;
@@ -222,10 +240,16 @@ export interface LauncherState {
   instances: InstanceSummary[];
   /** 主页「继续游玩」与快捷启动指向的实例；配置里的实例已不存在时为 null。 */
   selectedInstanceId: string | null;
+  /** 侧栏固定的实例，按顺序；末尾含安装中、入队时侧栏还有空位而自动固定的新实例。 */
   sidebarPins: string[];
   firstRun: boolean | null;
   session: SessionState | null;
   tasks: Task[];
+  /**
+   * 用户还没看过的失败任务个数：本次运行里失败、此刻仍是失败状态、还没打开过下载快览或进过下载任务页的。
+   * 上次关闭时中断的不算，那是用户确认过的。
+   */
+  unseenFailures: number;
   toasts: Toast[];
   login: LoginState | null;
   launchPrompt: LaunchPrompt | null;
@@ -249,7 +273,11 @@ export interface LauncherActions {
   // 账户与登录
   selectAccount(uuid: string): Promise<void>;
   removeAccount(uuid: string): Promise<void>;
-  refreshAccount(uuid: string): Promise<void>;
+  /**
+   * 刷新名字、皮肤与令牌。凭据被判失效不是操作失败：账户重新读出来已是 expired，原位显示「重新登录」，
+   * 返回 "expired" 而不抛错；其余失败原样抛出。
+   */
+  refreshAccount(uuid: string): Promise<"refreshed" | "expired">;
   addOfflineAccount(name: string): Promise<Account>;
   openLogin(kind: LoginKind, intent?: LoginIntent): Promise<void>;
   closeLogin(): Promise<void>;
@@ -271,6 +299,8 @@ export interface LauncherActions {
   updateInstanceSettings(id: string, patch: Partial<InstanceSettings>): Promise<InstanceSettings>;
   repairInstance(id: string, opts?: { launchAfter?: boolean }): Promise<void>;
   openFolder(target: FolderTarget, id?: string | null, world?: string | null): Promise<void>;
+  /** 用系统默认浏览器打开一个 http(s) 网址；别的协议直接抛错。打开失败原样抛出。 */
+  openExternal(url: string): Promise<void>;
   refreshInstances(): Promise<void>;
   // 启动会话
   launch(id: string): Promise<void>;
@@ -286,16 +316,29 @@ export interface LauncherActions {
   removeMod(instanceId: string, fileName: string, name: string): Promise<void>;
   installResource(spec: InstallResourceSpec): Promise<void>;
   rollback(instanceId: string, eventId: string): Promise<void>;
-  installJava(major: number, opts?: { launchAfter?: string }): Promise<void>;
+  /** launchAfter：装好后通知带「启动」这个实例；pinFor：装好后把这个实例的 Java 固定为新装的运行时。 */
+  installJava(major: number, opts?: { launchAfter?: string; pinFor?: string }): Promise<void>;
   // 下载任务
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
+  /** 把全部失败的任务重新排进队列（已有同一件事在队列里的跳过），返回重新排进去的个数。 */
+  retryFailedTasks(): number;
   clearFinishedTasks(): void;
+  /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
+  markFailuresSeen(): void;
   flushTaskJournal(): Promise<void>;
   // 设置
   updateSettings(patch: SettingsPatch): Promise<void>;
   setGameDirectory(path: string): Promise<void>;
+  /**
+   * 首次启动向导第一步的提交：后端校验并落下游戏目录、收下勾选的文件夹、记下向导已完成（此后关窗口，下次直接进主页）。
+   * 向导仍然挂着，接着走后面几步；收尾时调 finishFirstRun 卸载它。
+   */
+  commitFirstRun(gameDir: string, extraDirectories: configIpc.NamedDirectoryDto[]): Promise<void>;
+  /** 向导收尾：firstRun 置为 false，外壳随即卸载向导。第一步还没提交时抛错。 */
+  finishFirstRun(): void;
+  /** commitFirstRun 加 finishFirstRun：提交后立即卸载向导。 */
   completeFirstRun(gameDir: string, extraDirectories: configIpc.NamedDirectoryDto[]): Promise<void>;
   togglePinServer(server: PinnedServerDto): Promise<void>;
   reload(slice: Slice): Promise<void>;
@@ -303,10 +346,29 @@ export interface LauncherActions {
 
 // ---------------------------------------------------------------- 常量与工具
 
-/** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 是前端的组合任务。 */
-const TASK_COMMANDS = new Set(["install_version", "install_modpack", "repair_instance", "install_java", "install_mod", "install_mods", "install_resource", "update_mod"]);
+/** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 与 update_mods 是前端的组合任务。 */
+const TASK_COMMANDS = new Set([
+  "install_version",
+  "install_modpack",
+  "repair_instance",
+  "install_java",
+  "install_mod",
+  "install_mods",
+  "install_resource",
+  "update_mod",
+  "update_mods",
+]);
 
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
+
+/** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
+const OPEN_URL_COMMAND = "plugin:opener|open_url";
+
+/** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
+const RELOGIN_REQUIRED_CODE = "ReloginRequired";
+
+/** load_task_journal 在日志文件损坏或版本不符时的错误码。 */
+const TASK_JOURNAL_INVALID_CODE = "task_journal_invalid";
 
 const RESOURCE_KIND: Readonly<Record<InstallableResourceType, TaskKind>> = {
   mod: "mod",
@@ -342,6 +404,7 @@ function initialRaw(): RawState {
     session: null,
     tasks: [],
     taskMeta: {},
+    unseenFailures: [],
     toasts: EMPTY_TOASTS,
     login: null,
     launchPrompt: null,
@@ -379,6 +442,8 @@ function metaFromSpec(task: Task): TaskMeta | null {
         loader: loaderOfArg(nullableStrArg(args, "loader", command)),
         loaderVersion: nullableStrArg(args, "loaderVersion", command),
         cover: null,
+        // 重启后恢复的新建任务不知道当时侧栏的余量：按「有空位就固定」处理
+        autoPin: true,
       };
     case "install_modpack":
       return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
@@ -387,12 +452,14 @@ function metaFromSpec(task: Task): TaskMeta | null {
     case "install_java": {
       const major = args.requiredMajor;
       if (typeof major !== "number") throw new Error("任务 install_java 缺少 requiredMajor");
-      return { type: "java", major, launchAfter: null };
+      return { type: "java", major, launchAfter: null, pinFor: null };
     }
     case "install_mods": {
       const items = modItems(args);
       return { type: "mods", instanceId: strArg(args, "versionId", command), name: items[0].title, dependencies: items.length - 1 };
     }
+    case "update_mods":
+      return { type: "updates", instanceId: strArg(args, "versionId", command), count: updateItems(args).length };
     default:
       return null;
   }
@@ -422,6 +489,57 @@ function modItems(args: Record<string, unknown>): ModItem[] {
   });
 }
 
+interface UpdateItem {
+  fileName: string;
+  platform: Platform;
+  projectId: string;
+  modVersionId: string;
+}
+
+function updateItems(args: Record<string, unknown>): UpdateItem[] {
+  const raw = args.items;
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error("组合任务 update_mods 缺少 items");
+  return raw.map((item: unknown, i) => {
+    const r = item as Record<string, unknown>;
+    if (typeof r !== "object" || r === null) throw new Error(`update_mods 第 ${i} 项不是对象`);
+    const platform = r.platform;
+    if (platform !== "modrinth" && platform !== "curseforge") throw new Error(`update_mods 第 ${i} 项平台不对：${String(platform)}`);
+    return {
+      fileName: strArg(r, "fileName", "update_mods"),
+      platform,
+      projectId: strArg(r, "projectId", "update_mods"),
+      modVersionId: strArg(r, "modVersionId", "update_mods"),
+    };
+  });
+}
+
+/**
+ * 动作失败时旁听一下错误（原样抛给调用方）：联网状态据此判断要不要探测连通性。
+ * 动作内部互相调用走的是未包装的那一份，同一个错误不会被记两遍。
+ */
+function observeFailures(actions: LauncherActions, observe: (error: unknown) => void): LauncherActions {
+  const wrapped: Record<string, unknown> = {};
+  for (const [name, fn] of Object.entries(actions) as [string, (...args: unknown[]) => unknown][]) {
+    wrapped[name] = (...args: unknown[]) => {
+      let result: unknown;
+      try {
+        result = fn(...args);
+      } catch (error) {
+        observe(error);
+        throw error;
+      }
+      if (result instanceof Promise) {
+        return result.catch((error: unknown) => {
+          observe(error);
+          throw error;
+        });
+      }
+      return result;
+    };
+  }
+  return wrapped as unknown as LauncherActions;
+}
+
 /** 等 predicate 成立；超时以 timeoutError 拒绝。 */
 function waitUntil(subscribe: (listener: () => void) => () => void, predicate: () => boolean, timeoutMs: number, timeoutError: () => Error): Promise<void> {
   if (predicate()) return Promise.resolve();
@@ -439,75 +557,199 @@ function waitUntil(subscribe: (listener: () => void) => () => void, predicate: (
   });
 }
 
+// ---------------------------------------------------------------- 改名
+
+/** 命令参数里指向实例的那一项：失败任务重试时按它重新调用命令。 */
+const INSTANCE_ARG: Readonly<Record<string, string>> = {
+  repair_instance: "id",
+  install_mod: "versionId",
+  install_mods: "versionId",
+  install_resource: "versionId",
+  update_mod: "versionId",
+  update_mods: "versionId",
+};
+
+/**
+ * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
+ * 后端在实例有活动任务时拒绝改名，所以这里换的只是已结束的任务（失败的可以重试）。
+ */
+function renamedTask(task: Task, from: string, to: string): Task {
+  if (task.instanceId !== from) return task;
+  const key = INSTANCE_ARG[task.spec.command];
+  const args = key !== undefined && task.spec.args[key] === from ? { ...task.spec.args, [key]: to } : task.spec.args;
+  return { ...task, instanceId: to, spec: { ...task.spec, args } };
+}
+
+/** 入队上下文里指向实例的字段：落地时的失效、通知文案与装好后的启动、固定都按它走。 */
+function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
+  const swap = (value: string | null) => (value === from ? to : value);
+  switch (meta.type) {
+    case "mods":
+    case "resource":
+    case "update":
+    case "updates":
+      return meta.instanceId === from ? { ...meta, instanceId: to } : meta;
+    case "java":
+      return meta.launchAfter === from || meta.pinFor === from ? { ...meta, launchAfter: swap(meta.launchAfter), pinFor: swap(meta.pinFor) } : meta;
+    case "create":
+    case "modpack":
+    case "repair":
+      return meta;
+  }
+}
+
 // ---------------------------------------------------------------- 派生
 
-function deriveState(raw: RawState): LauncherState {
-  const busy = new Set<string>();
-  for (const t of raw.tasks) if (isActiveTask(t) && t.instanceId !== null) busy.add(t.instanceId.toLowerCase());
-  const instances: InstanceSummary[] = raw.scanned.map((base) => {
-    const installing = busy.has(base.id.toLowerCase());
-    return {
-      ...base,
-      pinned: raw.pins.includes(base.id),
-      status: installing ? "installing" : base.status,
-      brokenReason: installing ? null : base.brokenReason,
-    };
-  });
-  const known = new Set(instances.map((i) => i.id.toLowerCase()));
-  for (const task of raw.tasks) {
-    if (!isActiveTask(task)) continue;
-    const meta = raw.taskMeta[task.id];
-    if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
-    if (known.has(meta.name.toLowerCase())) continue;
-    known.add(meta.name.toLowerCase());
-    instances.push({
-      id: meta.name,
-      name: meta.name,
-      mcVersion: meta.mcVersion,
-      loader: meta.loader,
-      loaderVersion: meta.loaderVersion,
-      extraLoaders: [],
-      releaseType: null,
-      javaMajor: null,
-      description: null,
-      cover: meta.cover,
-      pinned: raw.pins.includes(meta.name),
-      status: "installing",
-      brokenReason: null,
-      createdAt: task.createdAt,
-      lastPlayedAt: null,
-      playtimeMin: 0,
-      modCount: null,
-      worldCount: null,
-      isolated: null,
-      memoryMb: null,
-      modpack: null,
-      modpackError: null,
-      lastCrashAt: null,
-      lastCrashError: null,
-      activity: "installing",
-      settingsError: null,
-      incomplete: null,
-      placeholder: true,
-    });
-  }
-  const selected = raw.settings === null ? null : raw.settings.selectedVersion;
+function countUnseen(tasks: readonly Task[], unseen: readonly string[]): number {
+  if (unseen.length === 0) return 0;
+  const ids = new Set(unseen);
+  return tasks.filter((t) => t.status === "failed" && ids.has(attemptTaskId(t))).length;
+}
+
+/** 实例列表与侧栏固定列表：只随扫描结果、固定列表、入队上下文与活动任务的集合变，下载进度与会话日志不影响它们。 */
+interface InstancesView {
+  instances: InstanceSummary[];
+  sidebarPins: string[];
+}
+
+function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, createdAt: number, pinned: boolean): InstanceSummary {
   return {
-    status: raw.status,
-    settings: raw.settings,
-    accounts: raw.accounts,
-    currentAccountId: raw.currentAccountId,
-    instances,
-    selectedInstanceId: selected !== null && instances.some((i) => i.id === selected) ? selected : null,
-    sidebarPins: raw.pins,
-    firstRun: raw.firstRun,
-    session: raw.session,
-    tasks: raw.tasks,
-    toasts: raw.toasts.items,
-    login: raw.login,
-    launchPrompt: raw.launchPrompt,
-    lastRename: raw.lastRename,
+    id: meta.name,
+    name: meta.name,
+    mcVersion: meta.mcVersion,
+    loader: meta.loader,
+    loaderVersion: meta.loaderVersion,
+    extraLoaders: [],
+    releaseType: null,
+    javaMajor: null,
+    description: null,
+    cover: meta.cover,
+    pinned,
+    status: "installing",
+    brokenReason: null,
+    createdAt,
+    lastPlayedAt: null,
+    playtimeMin: 0,
+    modCount: null,
+    worldCount: null,
+    isolated: null,
+    memoryMb: null,
+    modpack: null,
+    modpackError: null,
+    lastCrashAt: null,
+    lastCrashError: null,
+    activity: "installing",
+    settingsError: null,
+    incomplete: null,
+    placeholder: true,
   };
+}
+
+/**
+ * 原始状态到对外状态的派生，按输入分别记忆。下载进度每个任务约 100 ms 一次、游戏日志每 100 ms 一批，
+ * 每次都会换掉原始状态；如果每次都重建实例对象，按 state.instances 做依赖或做选择的组件就跟着每秒重渲染十次。
+ *
+ * - 实例列表：扫描结果、固定列表、入队上下文都是同一份引用，活动任务的集合（id 与所挂实例）也没变时，整份复用上一次的。
+ * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、安装中与否都没变，就复用上一次的那个对象。
+ */
+class StateDeriver {
+  private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; activeKey: string } | null = null;
+  private lastView: InstancesView | null = null;
+  private scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; installing: boolean; value: InstanceSummary }>();
+  private placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
+
+  derive(raw: RawState): LauncherState {
+    const { instances, sidebarPins } = this.instancesView(raw);
+    const selected = raw.settings === null ? null : raw.settings.selectedVersion;
+    return {
+      status: raw.status,
+      settings: raw.settings,
+      accounts: raw.accounts,
+      currentAccountId: raw.currentAccountId,
+      instances,
+      selectedInstanceId: selected !== null && instances.some((i) => i.id === selected) ? selected : null,
+      sidebarPins,
+      firstRun: raw.firstRun,
+      session: raw.session,
+      tasks: raw.tasks,
+      unseenFailures: countUnseen(raw.tasks, raw.unseenFailures),
+      toasts: raw.toasts.items,
+      login: raw.login,
+      launchPrompt: raw.launchPrompt,
+      lastRename: raw.lastRename,
+    };
+  }
+
+  private instancesView(raw: RawState): InstancesView {
+    const active = raw.tasks.filter(isActiveTask);
+    const activeKey = active.map((t) => `${t.id}|${t.instanceId === null ? "" : t.instanceId}`).join("\n");
+    const last = this.lastInputs;
+    if (
+      this.lastView !== null &&
+      last !== null &&
+      last.scanned === raw.scanned &&
+      last.pins === raw.pins &&
+      last.taskMeta === raw.taskMeta &&
+      last.activeKey === activeKey
+    ) {
+      return this.lastView;
+    }
+    const view = this.compute(raw, active);
+    this.lastInputs = { scanned: raw.scanned, pins: raw.pins, taskMeta: raw.taskMeta, activeKey };
+    // 内容没变就连数组一起复用：例如一个下载任务结束、另一个开始，但它们挂的实例不变
+    const prev = this.lastView;
+    this.lastView =
+      prev !== null && sameItems(prev.instances, view.instances) && sameItems(prev.sidebarPins, view.sidebarPins)
+        ? prev
+        : {
+            instances: prev !== null && sameItems(prev.instances, view.instances) ? prev.instances : view.instances,
+            sidebarPins: prev !== null && sameItems(prev.sidebarPins, view.sidebarPins) ? prev.sidebarPins : view.sidebarPins,
+          };
+    return this.lastView;
+  }
+
+  private compute(raw: RawState, active: readonly Task[]): InstancesView {
+    const busy = new Set<string>();
+    for (const t of active) if (t.instanceId !== null) busy.add(t.instanceId.toLowerCase());
+    const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; installing: boolean; value: InstanceSummary }>();
+    const instances: InstanceSummary[] = raw.scanned.map((base) => {
+      const installing = busy.has(base.id.toLowerCase());
+      const pinned = raw.pins.includes(base.id);
+      const cached = this.scannedCache.get(base.id);
+      const value =
+        cached !== undefined && cached.base === base && cached.pinned === pinned && cached.installing === installing
+          ? cached.value
+          : { ...base, pinned, status: installing ? "installing" : base.status, brokenReason: installing ? null : base.brokenReason };
+      scannedCache.set(base.id, { base, pinned, installing, value });
+      return value;
+    });
+    this.scannedCache = scannedCache;
+
+    const known = new Set(instances.map((i) => i.id.toLowerCase()));
+    const sidebarPins = [...raw.pins];
+    const placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
+    for (const task of active) {
+      const meta = raw.taskMeta[task.id];
+      if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
+      if (known.has(meta.name.toLowerCase())) continue;
+      known.add(meta.name.toLowerCase());
+      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) sidebarPins.push(meta.name);
+      const pinned = sidebarPins.includes(meta.name);
+      const cached = this.placeholderCache.get(task.id);
+      const value =
+        cached !== undefined && cached.meta === meta && cached.createdAt === task.createdAt && cached.pinned === pinned
+          ? cached.value
+          : placeholderOf(meta, task.createdAt, pinned);
+      placeholderCache.set(task.id, { meta, createdAt: task.createdAt, pinned, value });
+      instances.push(value);
+    }
+    this.placeholderCache = placeholderCache;
+    return { instances, sidebarPins };
+  }
+}
+
+function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
 // ---------------------------------------------------------------- 容器
@@ -516,6 +758,7 @@ export class LauncherStore {
   private raw: RawState = initialRaw();
   private view: LauncherState | null = null;
   private viewOf: RawState | null = null;
+  private readonly deriver = new StateDeriver();
   private listeners = new Set<() => void>();
 
   private started = false;
@@ -532,11 +775,22 @@ export class LauncherStore {
   private lastScanAt = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
+  /**
+   * 任务日志读没读出来。unread 期间（首查进行中，或读失败、还可能读出来）不写回：写回会用内存里的表覆盖那份没读到的历史。
+   * invalid 是文件损坏或版本不符，内容本来就救不回来，照常写回，免得任务表从此再也存不下来。
+   */
+  private journalState: "unread" | "read" | "invalid" = "unread";
+  /** 首次启动向导的第一步已经提交（后端已记下向导完成）。 */
+  private firstRunCommitted = false;
 
   readonly actions: LauncherActions;
+  private readonly net: NetworkMonitor;
+  private unobserveResources: (() => void) | null = null;
 
-  constructor() {
-    this.actions = this.createActions();
+  /** network 供测试注入；应用里用全应用唯一的联网状态。 */
+  constructor(options: { network?: NetworkMonitor } = {}) {
+    this.net = options.network === undefined ? appNetwork : options.network;
+    this.actions = observeFailures(this.createActions(), (error) => this.net.reportFailure(error));
   }
 
   // ---------------------------------------------------------------- 订阅
@@ -550,7 +804,7 @@ export class LauncherStore {
 
   getState = (): LauncherState => {
     if (this.view === null || this.viewOf !== this.raw) {
-      this.view = deriveState(this.raw);
+      this.view = this.deriver.derive(this.raw);
       this.viewOf = this.raw;
     }
     return this.view;
@@ -593,6 +847,8 @@ export class LauncherStore {
       );
     }
     window.addEventListener("focus", this.onWindowFocus);
+    this.net.start({ onRecovered: () => this.announceRecovered(), onProbeError: (error) => this.report(ACTION_ERROR.probeNetwork, error) });
+    this.unobserveResources = resources.observeErrors((error) => this.net.reportFailure(error));
     void Promise.allSettled(subscriptions).then(() => {
       // 先订阅再首查：首查期间到达的事件不会漏掉
       if (this.booted || this.disposed || gen !== this.subscriptionGen) return;
@@ -607,6 +863,9 @@ export class LauncherStore {
     for (const unlisten of this.unlisteners) unlisten();
     this.unlisteners = [];
     window.removeEventListener("focus", this.onWindowFocus);
+    this.net.stop();
+    if (this.unobserveResources !== null) this.unobserveResources();
+    this.unobserveResources = null;
     for (const timer of [this.toastTimer, this.lingerTimer, this.deviceTimer]) if (timer !== null) clearTimeout(timer);
     this.toastTimer = null;
     this.lingerTimer = null;
@@ -669,12 +928,29 @@ export class LauncherStore {
     this.set({ pins: await instancesIpc.getSidebarPins() });
   }
 
+  /**
+   * 读任务日志并恢复上次的任务：上次没完成的记为「关闭时中断」。日志读不出来时用户照样能入队，所以重试读取时
+   * 内存里已有的任务优先，原样保留，只把日志里内存没有的那些并进来；读到过一次之后内存就是准的，再读不改任务表。
+   */
   private async fetchJournal(): Promise<void> {
-    const records = await tasksIpc.loadTaskJournal();
+    const records = await tasksIpc.loadTaskJournal().catch((error: unknown) => {
+      if (isIpcError(error) && error.code === TASK_JOURNAL_INVALID_CODE) this.journalState = "invalid";
+      throw error;
+    });
+    if (this.journalState === "read") return;
+    const now = Date.now();
     const loaded = records.map(taskFromRecord);
-    const restored = trimHistory(restoreJournal(loaded, Date.now()));
-    this.set({ tasks: restored });
-    if (restored.some((t, i) => t !== loaded[i])) this.scheduleJournal();
+    this.journalState = "read";
+    let changed = false;
+    this.set((raw) => {
+      const inMemory = new Set(raw.tasks.map((t) => t.id));
+      const previous = loaded.filter((t) => !inMemory.has(t.id));
+      const restored = restoreJournal(previous, now);
+      // 内存里的任务是日志读不出期间入队的，还没写进去过
+      changed = raw.tasks.length > 0 || restored.some((t, i) => t !== previous[i]);
+      return { tasks: trimHistory([...restored, ...raw.tasks]) };
+    });
+    if (changed) this.scheduleJournal();
   }
 
   private readonly onWindowFocus = (): void => {
@@ -689,6 +965,16 @@ export class LauncherStore {
   private report(title: string, error: unknown): void {
     console.error(title, error);
     this.pushToast("error", title, describeError(error));
+    this.net.reportFailure(error);
+  }
+
+  /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
+  private announceRecovered(): void {
+    const failed = this.raw.tasks.filter((t) => t.status === "failed").length;
+    const copy = TOAST_COPY.networkRestored(failed);
+    const action: ToastAction | undefined =
+      failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
+    this.pushToast("info", copy.title, "body" in copy ? copy.body : undefined, action);
   }
 
   private background(title: string, work: Promise<unknown>): void {
@@ -736,6 +1022,15 @@ export class LauncherStore {
   private sessionActiveFor(instanceId: string): boolean {
     const s = this.raw.session;
     return s !== null && s.instanceId === instanceId && isSessionActive(s);
+  }
+
+  /**
+   * 实例里的 Mod 变了：该实例的列表、历史、可更新项与安装计划失效。发现页的落位矩阵按「装没装、装的哪一版」判定可装与否，
+   * 它的 key 按工程而不是按实例划分，装上的前置也会改变别的工程的判定，所以整个 match 前缀一起失效。
+   */
+  private modsChanged(instanceId: string): void {
+    for (const prefix of ["mods", "history", "mod-updates", "plan"]) invalidateResources(`${prefix}:${instanceId}`);
+    invalidateResources("match");
   }
 
   /** Mod 文件操作的锁：运行中（含加载中）JVM 占着文件，安装中任务在写目录。界面已禁用入口，这里是第二道防线。 */
@@ -814,8 +1109,11 @@ export class LauncherStore {
       this.set({ session: next });
       crashedSession = next.phase === "crashed";
     }
+    // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好。这一局可能新建了存档，游玩统计也多了一段：
+    // 没人订阅的缓存条目随之丢弃，之后重新挂载的页面会重取，不靠页面自己观察签名变化
     invalidateResources(`log:${id}`);
-    // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好
+    invalidateResources(`content:${id}`);
+    invalidateResources("play-stats");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
   }
@@ -889,6 +1187,29 @@ export class LauncherStore {
     return task;
   }
 
+  /**
+   * 取消一个实例上的全部活动任务，等它们都落了结局再返回（删除实例前用）。
+   * 排队的先一次性标为取消，再取消运行中的：反过来的话，运行中的一结束就空出通道，同实例排队的下一个会被立即拉起。
+   * 排队的取消不逐条发通知，删除完成的那条通知已经交代了结果；运行中的仍按命令返回 cancelled 的常规路径落态。
+   */
+  private async cancelInstanceTasks(instanceId: string): Promise<void> {
+    const pending = this.raw.tasks.filter((t) => isActiveTask(t) && t.instanceId === instanceId);
+    if (pending.length === 0) return;
+    const now = Date.now();
+    this.set((raw) => ({
+      tasks: trimHistory(pending.reduce((tasks, t) => (t.status === "queued" ? markCancelled(tasks, t.id, now) : tasks), raw.tasks)),
+    }));
+    this.tasksChanged();
+    const ids = new Set(pending.map((t) => t.id));
+    await Promise.all(this.raw.tasks.filter((t) => ids.has(t.id) && t.status === "running").map((t) => tasksIpc.cancelTask(attemptTaskId(t))));
+    await waitUntil(
+      this.subscribe,
+      () => !this.raw.tasks.some((t) => ids.has(t.id) && isActiveTask(t)),
+      STOP_TIMEOUT_MS,
+      () => new Error(`「${instanceId}」的 ${pending.length} 个任务没能及时取消`),
+    );
+  }
+
   /** 任务表变化后：防抖写日志、调度空出来的通道。 */
   private tasksChanged(): void {
     this.scheduleJournal();
@@ -904,12 +1225,13 @@ export class LauncherStore {
   }
 
   private async saveJournal(): Promise<void> {
+    if (this.journalState === "unread") return;
     await tasksIpc.saveTaskJournal(this.raw.tasks.map(taskToRecord));
   }
 
   private pump(): void {
     for (const task of tasksToStart(this.raw.tasks)) {
-      this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id) }));
+      this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id, Date.now()) }));
       const attempt = task.attempt;
       this.execute(task).then(
         (result) => this.onTaskDone(task.id, attempt, result),
@@ -922,13 +1244,35 @@ export class LauncherStore {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
-    if (command !== "install_mods") return invoke<unknown>(command, { ...args, taskId });
-    // 组合任务：一个 Mod 连同它的前置逐个装，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
-    const versionId = strArg(args, "versionId", command);
-    for (const item of modItems(args)) {
-      await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
+    // 组合任务逐个调后端命令，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
+    if (command === "install_mods") {
+      const versionId = strArg(args, "versionId", command);
+      for (const item of modItems(args)) {
+        await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
+      }
+      return null;
     }
-    return null;
+    if (command === "update_mods") {
+      const versionId = strArg(args, "versionId", command);
+      for (const item of task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args)) {
+        await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
+      }
+      return null;
+    }
+    return invoke<unknown>(command, { ...args, taskId });
+  }
+
+  /**
+   * 重试「全部更新」时，上一次尝试里已经换过的不再更新：更新会把文件换成新版本的文件名，按原文件名再调一次只会失败。
+   * 按工程重新对一遍：已经是目标版本的、或者 Mod 已被移除不再有更新的跳过，其余用它现在的文件名。
+   */
+  private async pendingUpdates(versionId: string, items: UpdateItem[]): Promise<UpdateItem[]> {
+    const candidates = await modsIpc.checkUpdates(versionId);
+    return items.flatMap((item) => {
+      const current = candidates.find((c) => c.latest.platform === item.platform && c.latest.project_id === item.projectId);
+      if (current === undefined || current.current_version_id === item.modVersionId) return [];
+      return [{ ...item, fileName: current.file_name }];
+    });
   }
 
   private findTask(id: string): Task {
@@ -958,8 +1302,12 @@ export class LauncherStore {
       this.pushToast("info", TASK_TOAST.cancelled(before.title).title);
     } else {
       console.error(`任务失败：${before.title}`, error);
+      this.net.reportFailure(error);
       const record = errorRecord(error);
-      this.set((raw) => ({ tasks: trimHistory(markFailed(raw.tasks, id, attempt, record, Date.now())) }));
+      this.set((raw) => ({
+        tasks: trimHistory(markFailed(raw.tasks, id, attempt, record, Date.now())),
+        unseenFailures: [...raw.unseenFailures, attemptTaskId(before)],
+      }));
       this.failureToast(before, taskFailureReason(record));
     }
     this.tasksChanged();
@@ -996,15 +1344,26 @@ export class LauncherStore {
     return { label: TASK_TOAST.launchAction, run: () => this.actions.launch(instanceId), errorTitle: ACTION_ERROR.launch(instanceId) };
   }
 
-  /** 新建、导入的实例：写封面、侧栏没满时自动固定。 */
-  private async settleNewInstance(id: string, cover: string | null): Promise<void> {
+  /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。 */
+  private async settleNewInstance(id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
       const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
       await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
     }
     const pins = this.raw.pins;
-    if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+    if (pin && pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
     await this.fetchInstances();
+  }
+
+  /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
+  private pendingCreate(id: string): { taskId: string; meta: Extract<TaskMeta, { type: "create" }> } | null {
+    if (this.raw.scanned.some((i) => i.id === id)) return null;
+    for (const task of this.raw.tasks) {
+      if (!isActiveTask(task)) continue;
+      const meta = this.raw.taskMeta[task.id];
+      if (meta !== undefined && meta.type === "create" && meta.name === id) return { taskId: task.id, meta };
+    }
+    return null;
   }
 
   /** 任务完成后的落地与通知（任务完成一律弹，不论用户此时在哪一页）。 */
@@ -1013,7 +1372,8 @@ export class LauncherStore {
     const command = task.spec.command;
     if (meta === null) {
       if (task.instanceId !== null) {
-        for (const prefix of ["mods", "content", "history", "mod-updates"]) invalidateResources(`${prefix}:${task.instanceId}`);
+        this.modsChanged(task.instanceId);
+        invalidateResources(`content:${task.instanceId}`);
         await this.fetchInstances();
       }
       this.pushToast("success", TASK_TOAST.finished(task.title).title);
@@ -1022,14 +1382,14 @@ export class LauncherStore {
     switch (meta.type) {
       case "create": {
         const id = (result as InstallResultDto).id;
-        await this.settleNewInstance(id, meta.cover);
+        await this.settleNewInstance(id, meta.cover, meta.autoPin);
         const copy = TASK_TOAST.ready(id);
         this.pushToast("success", copy.title, copy.body, this.launchAction(id));
         return;
       }
       case "modpack": {
         const id = (result as ModpackInstallOutcomeDto).version_id;
-        await this.settleNewInstance(id, meta.cover);
+        await this.settleNewInstance(id, meta.cover, true);
         // 重启后恢复的导入任务不知道 Mod 数，正文省略
         const copy = TASK_TOAST.imported(id, meta.modCount);
         this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, this.launchAction(id));
@@ -1050,12 +1410,13 @@ export class LauncherStore {
         this.set((raw) => ({ tasks: raw.tasks.map((t) => (t.id === task.id ? { ...t, detail: TASK_TEXT.javaDetail(runtime.version.raw) } : t)) }));
         this.scheduleJournal();
         invalidateResources("java");
-        const copy = TASK_TOAST.java(meta.major);
+        if (meta.pinFor !== null) await this.actions.updateInstanceSettings(meta.pinFor, { java: runtime.java_executable });
+        const copy = meta.pinFor === null ? TASK_TOAST.java(meta.major) : TASK_TOAST.javaPinned(meta.major, meta.pinFor);
         this.pushToast("success", copy.title, copy.body, meta.launchAfter === null ? undefined : this.launchAction(meta.launchAfter));
         return;
       }
       case "mods": {
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+        this.modsChanged(meta.instanceId);
         await this.fetchInstances();
         const copy = TASK_TOAST.modInstalled(meta.name, meta.dependencies, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
@@ -1064,6 +1425,7 @@ export class LauncherStore {
       case "resource": {
         const outcome = result as ResourceInstallOutcomeDto;
         invalidateResources(`content:${meta.instanceId}`);
+        invalidateResources("match");
         const copy =
           outcome.resource_type === "resource_pack"
             ? TASK_TOAST.resourcePack(meta.name)
@@ -1073,15 +1435,21 @@ export class LauncherStore {
                 ? TASK_TOAST.datapack(meta.name, outcome.world)
                 : TASK_TOAST.modInstalled(meta.name, 0, meta.instanceId);
         if (outcome.resource_type === "mod") {
-          for (const prefix of ["mods", "history"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+          this.modsChanged(meta.instanceId);
           await this.fetchInstances();
         }
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
       case "update": {
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+        this.modsChanged(meta.instanceId);
         const copy = TASK_TOAST.modUpdated(meta.name, meta.instanceId);
+        this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        return;
+      }
+      case "updates": {
+        this.modsChanged(meta.instanceId);
+        const copy = TASK_TOAST.modsUpdated(meta.count, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
@@ -1129,6 +1497,7 @@ export class LauncherStore {
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });
       },
       (error: unknown) => {
+        this.net.reportFailure(error);
         const s = this.raw.session;
         if (s === null || s.taskId !== taskId) throw error;
         if (isCancelled(error)) {
@@ -1225,8 +1594,16 @@ export class LauncherStore {
         store.pushToast("info", TOAST_COPY.accountDeleted(account.name));
       },
       async refreshAccount(uuid) {
-        await accountsIpc.refreshAccount(uuid);
+        const outcome = await accountsIpc.refreshAccount(uuid).then(
+          () => "refreshed" as const,
+          (error: unknown) => {
+            if (isIpcError(error) && error.code === RELOGIN_REQUIRED_CODE) return "expired" as const;
+            throw error;
+          },
+        );
         await store.fetchAccounts();
+        if (outcome === "refreshed") invalidateResources(`skin:${uuid}`);
+        return outcome;
       },
       async addOfflineAccount(name) {
         const check = validateOfflineName(name, store.raw.accounts.map((a) => a.name));
@@ -1273,6 +1650,7 @@ export class LauncherStore {
             store.clearDeviceTimer();
             const account = accountFromDto(dto);
             await store.fetchAccounts();
+            invalidateResources(`skin:${account.uuid}`);
             const login = store.raw.login;
             if (gen !== store.loginGen || login === null || login.kind !== "microsoft") return;
             if (login.intent.kind === "launch") {
@@ -1284,6 +1662,7 @@ export class LauncherStore {
           (error: unknown) => {
             if (gen !== store.loginGen) return;
             store.clearDeviceTimer();
+            store.net.reportFailure(error);
             if (isCancelled(error)) {
               store.set({ login: null });
               return;
@@ -1329,7 +1708,8 @@ export class LauncherStore {
         if (account === undefined) throw new Error(`账户 ${accountUuid} 不存在`);
         if (account.kind === "microsoft") return actions.startMicrosoftLogin(intent);
         if (account.kind === "authlib") {
-          store.set({ login: { kind: "authlib", intent, prefill: null } });
+          if (account.serverUrl === null || account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少验证服务器`);
+          store.set({ login: { kind: "authlib", intent, prefill: { serverUrl: account.serverUrl, serverName: account.authServer, username: account.username } } });
           return;
         }
         throw new Error("离线账户没有登录状态，不需要重新登录");
@@ -1337,24 +1717,36 @@ export class LauncherStore {
 
       // ---- 实例
       async selectInstance(id) {
+        // 已经是当前实例时不再写配置（新建实例入队时已设过，新建流程收尾可能再设一次）
+        if (store.raw.settings !== null && store.raw.settings.selectedVersion === id) return;
         await configIpc.updateConfig({ selectedVersion: id });
         store.set((raw) => ({ settings: raw.settings === null ? null : { ...raw.settings, selectedVersion: id } }));
       },
       async togglePin(id) {
-        const pins = store.raw.pins;
-        if (!pins.includes(id) && pins.length >= SIDEBAR_PIN_LIMIT) {
+        // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
+        const shown = store.getState().sidebarPins;
+        if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
           store.pushToast("warning", TOAST_COPY.pinLimit);
           return;
         }
+        const pending = store.pendingCreate(id);
+        if (pending !== null) {
+          // 还在安装的新实例后端不认，只改它装好后要不要固定
+          store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
+          return;
+        }
+        const pins = store.raw.pins;
         const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
         store.set({ pins: await instancesIpc.setSidebarPins(next) });
       },
       async setSidebarPins(ids) {
+        // 安装中自动固定的新实例总排在末尾，不写进固定列表（装好后才写）
+        const persisted = ids.filter((id) => store.pendingCreate(id) === null);
         const before = store.raw.pins;
-        store.set({ pins: ids });
+        store.set({ pins: persisted });
         // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
         try {
-          store.set({ pins: await instancesIpc.setSidebarPins(ids) });
+          store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
         } catch (error) {
           store.set({ pins: before });
           throw error;
@@ -1365,7 +1757,8 @@ export class LauncherStore {
         if (nameError !== null) throw new Error(nameError);
         if (spec.loader !== "vanilla" && spec.loaderVersion === null) throw new Error(`${spec.loader} 实例需要加载器版本`);
         const loader = spec.loader === "vanilla" ? null : spec.loader;
-        store.enqueue(
+        const autoPin = store.getState().sidebarPins.length < SIDEBAR_PIN_LIMIT;
+        const task = store.enqueue(
           {
             kind: "game",
             title: TASK_TEXT.createTitle(spec.mcVersion, spec.loader, spec.loaderVersion),
@@ -1373,9 +1766,11 @@ export class LauncherStore {
             instanceId: spec.name,
             spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name } },
           },
-          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover },
+          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover, autoPin },
           spec.name,
         );
+        // 新实例即成为当前实例：主页「继续游玩」显示它的安装进度
+        if (task !== null) await actions.selectInstance(spec.name);
         return spec.name;
       },
       async installModpack(spec) {
@@ -1409,21 +1804,12 @@ export class LauncherStore {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
         // 取消排队中的新建任务后占位项随之消失，先记下它是不是占位
         const placeholder = store.instance(id).placeholder;
-        const pending = store.raw.tasks.find((t) => isActiveTask(t) && t.instanceId === id);
-        if (pending !== undefined) {
-          await actions.cancelTask(pending.id);
-          await waitUntil(
-            store.subscribe,
-            () => !isActiveTask(store.findTask(pending.id)),
-            STOP_TIMEOUT_MS,
-            () => new Error(`「${pending.title}」没能及时取消`),
-          );
-        }
+        await store.cancelInstanceTasks(id);
         if (!placeholder) await instancesIpc.deleteInstance(id);
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
-        for (const prefix of ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "deletion"]) invalidateResources(`${prefix}:${id}`);
+        for (const prefix of ["mods", "content", "history", "crash", "log", "settings", "mod-updates"]) invalidateResources(`${prefix}:${id}`);
         const copy = TOAST_COPY.instanceDeleted(id, worldCount);
         store.pushToast("info", copy.title, copy.body);
       },
@@ -1434,9 +1820,20 @@ export class LauncherStore {
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
         store.renameSeq += 1;
         const seq = store.renameSeq;
+        // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
         await store.fetchInstances((raw) => ({
           lastRename: { from: id, to: newId, seq },
-          tasks: raw.tasks.map((t) => (t.instanceId === id ? { ...t, instanceId: newId } : t)),
+          tasks: raw.tasks.map((t) => renamedTask(t, id, newId)),
+          taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, id, newId)])),
+          session: raw.session !== null && raw.session.instanceId === id ? { ...raw.session, instanceId: newId } : raw.session,
+          launchPrompt:
+            raw.launchPrompt === null
+              ? null
+              : {
+                  ...raw.launchPrompt,
+                  instanceId: raw.launchPrompt.instanceId === id ? newId : raw.launchPrompt.instanceId,
+                  occupantId: raw.launchPrompt.occupantId === id ? newId : raw.launchPrompt.occupantId,
+                },
         }));
         store.scheduleJournal();
         return newId;
@@ -1467,6 +1864,12 @@ export class LauncherStore {
       },
       async openFolder(target, id = null, world = null) {
         await instancesIpc.openFolder(target, id, world);
+      },
+      async openExternal(url) {
+        const parsed = new URL(url);
+        if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error(`只能打开 http(s) 网址：${url}`);
+        // 交给 opener 插件的命令而不是 target="_blank" 的链接：注入脚本接管链接点击时不等结果，打开失败就悄悄没了
+        await invoke<void>(OPEN_URL_COMMAND, { url: parsed.href });
       },
       async refreshInstances() {
         await store.fetchInstances();
@@ -1548,12 +1951,33 @@ export class LauncherStore {
           store.pushToast("info", TOAST_COPY.allModsLatest);
           return;
         }
-        for (const candidate of candidates) store.enqueueUpdate(instanceId, candidate);
+        // 只有一个可更新时就是单个 Mod 的更新，标题与通知写 Mod 名；多个合成一个任务、一条通知
+        if (candidates.length === 1) {
+          store.enqueueUpdate(instanceId, candidates[0]);
+          return;
+        }
+        store.enqueue(
+          {
+            kind: "mod",
+            title: TASK_TEXT.updateAllTitle(candidates.length),
+            detail: TASK_TEXT.updateAllDetail(instanceId),
+            instanceId,
+            spec: {
+              command: "update_mods",
+              args: {
+                versionId: instanceId,
+                items: candidates.map((c) => ({ fileName: c.file_name, platform: c.latest.platform, projectId: c.latest.project_id, modVersionId: c.latest.version_id })),
+              },
+            },
+          },
+          { type: "updates", instanceId, count: candidates.length },
+          TASK_TEXT.updateAllTitle(candidates.length),
+        );
       },
       async removeMod(instanceId, fileName, name) {
         store.assertModsEditable(instanceId);
         await modsIpc.removeMod(instanceId, fileName);
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${instanceId}`);
+        store.modsChanged(instanceId);
         await store.fetchInstances();
         store.pushToast("info", TOAST_COPY.modRemoved(name));
       },
@@ -1632,7 +2056,7 @@ export class LauncherStore {
         }
         const event = (await listHistory(instanceId)).find((e) => e.id === eventId);
         await rollbackIpc(instanceId, eventId);
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${instanceId}`);
+        store.modsChanged(instanceId);
         if (event !== undefined && event.kind === "update") {
           const name = event.title === null ? event.file_name : event.title;
           const from = event.from_version_number === null ? event.from_version : event.from_version_number;
@@ -1650,7 +2074,12 @@ export class LauncherStore {
             instanceId: null,
             spec: { command: "install_java", args: { requiredMajor: major } },
           },
-          { type: "java", major, launchAfter: opts.launchAfter === undefined ? null : opts.launchAfter },
+          {
+            type: "java",
+            major,
+            launchAfter: opts.launchAfter === undefined ? null : opts.launchAfter,
+            pinFor: opts.pinFor === undefined ? null : opts.pinFor,
+          },
           `Java ${major}`,
         );
       },
@@ -1682,9 +2111,24 @@ export class LauncherStore {
         store.set((raw) => ({ tasks: retryTask(raw.tasks, id) }));
         store.tasksChanged();
       },
+      retryFailedTasks() {
+        let retried = 0;
+        for (const task of store.raw.tasks.filter((t) => t.status === "failed")) {
+          // 逐个排：前一个重试后，同一件事的后一个就算重复
+          if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
+          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id) }));
+          retried += 1;
+        }
+        if (retried > 0) store.tasksChanged();
+        return retried;
+      },
       clearFinishedTasks() {
-        store.set((raw) => ({ tasks: clearFinished(raw.tasks) }));
+        store.set((raw) => ({ tasks: clearFinished(raw.tasks), unseenFailures: [] }));
         store.scheduleJournal();
+      },
+      markFailuresSeen() {
+        if (store.raw.unseenFailures.length === 0) return;
+        store.set({ unseenFailures: [] });
       },
       async flushTaskJournal() {
         if (store.journalTimer !== null) clearTimeout(store.journalTimer);
@@ -1701,8 +2145,18 @@ export class LauncherStore {
         await configIpc.setGameDirectory(path);
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
+      async commitFirstRun(gameDir, extraDirectories) {
+        await completeFirstRun(gameDir, extraDirectories);
+        store.firstRunCommitted = true;
+        await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
+      },
+      finishFirstRun() {
+        if (!store.firstRunCommitted) throw new Error("首次启动向导的第一步还没有提交，不能收尾");
+        store.set({ firstRun: false });
+      },
       async completeFirstRun(gameDir, extraDirectories) {
         await completeFirstRun(gameDir, extraDirectories);
+        store.firstRunCommitted = true;
         store.set({ firstRun: false });
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
@@ -1721,6 +2175,7 @@ export class LauncherStore {
 
   private async afterAuthlib(account: Account): Promise<void> {
     if (account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少服务器名`);
+    invalidateResources(`skin:${account.uuid}`);
     const copy = TOAST_COPY.authlibAdded(account.name, account.authServer);
     await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
   }

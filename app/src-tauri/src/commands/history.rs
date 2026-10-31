@@ -1,4 +1,4 @@
-//! 实例的 Mod 变更历史、回滚与备份占用。
+//! 实例的 Mod 变更历史与回滚。
 
 use aurora_core::{HistoryEvent, RollbackCheck};
 use tauri::State;
@@ -55,16 +55,6 @@ pub(crate) async fn rollback_with(
         .rollback(version_id, event_id)
         .await
         .map_err(mods_error)
-}
-
-/// 实例 mods 目录下全部 `.old` 备份占用的字节数。
-#[tauri::command]
-pub async fn backup_size(
-    version_id: String,
-    facade: State<'_, Facade>,
-) -> Result<u64, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.backup_size(&version_id).await?)
 }
 
 #[cfg(test)]

@@ -138,10 +138,6 @@ export function markFirstRunCompleted(): void {
   firstRunCompleted = true;
 }
 
-export function currentGameDir(): string {
-  return config.game_dir;
-}
-
 /** 解析带名目录：路径按游戏目录规则，名字去空白后不能为空。 */
 export function parseNamedDirectory(raw: unknown, command: string): NamedDirectoryDto {
   const dto = requireStruct(raw, ["name", "path"], command, "extraDirectories");

@@ -8,7 +8,7 @@ import { motion, useTransform } from "framer-motion";
 import { useRef } from "react";
 import { INSTANCE_AVATAR_SPECS, InstanceAvatarBase, type InstanceAvatarSize } from "../art/iso/InstanceAvatarBase";
 import type { InstanceSummary } from "../domain/adapt";
-import { useLauncher } from "../state/launcher";
+import { useLauncherSelector } from "../state/launcher";
 import { useSmoothProgress, visibleProgress } from "../ui/ProgressBar";
 import { useBreathPhase } from "./breath";
 import { instanceCover } from "./cover";
@@ -90,9 +90,18 @@ export function ringGeometry(size: InstanceAvatarSize): { box: number; path: str
   return { box, path, length: 4 * side + 2 * Math.PI * r };
 }
 
+const NO_INDICATOR: AvatarIndicator = { type: "none" };
+
+function sameIndicator(a: AvatarIndicator, b: AvatarIndicator): boolean {
+  if (a.type !== b.type) return false;
+  if (a.type === "ring" && b.type === "ring") return a.tone === b.tone && a.progress === b.progress && a.track === b.track;
+  if (a.type === "badge" && b.type === "badge") return a.tone === b.tone;
+  return true;
+}
+
 export function InstanceAvatar({ instance, size, base = "hue", selected = false, lift = true, status = true, className }: InstanceAvatarProps) {
-  const { state } = useLauncher();
-  const indicator = status ? avatarIndicator(launchView(state, instance), size) : ({ type: "none" } as const);
+  // 只订阅这个头像上的指示：别的实例的下载进度、游戏日志都不让它重渲染
+  const indicator = useLauncherSelector((s) => (status ? avatarIndicator(launchView(s, instance), size) : NO_INDICATOR), sameIndicator);
   return (
     <InstanceAvatarBase instanceId={instance.id} cover={instanceCover(instance)} size={size} base={base} selected={selected} lift={lift} className={className}>
       {indicator.type === "ring" && <ProgressRingOverlay size={size} tone={indicator.tone} progress={indicator.progress} track={indicator.track} />}

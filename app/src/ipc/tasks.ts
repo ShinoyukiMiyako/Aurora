@@ -47,7 +47,11 @@ export interface TaskRecordDto {
   progress: number;
   bytes: number;
   total_bytes: number | null;
+  /** 较早写入的日志没有这一项。 */
+  done_bytes?: number;
   speed_bps: number;
+  /** 较早写入的日志没有这一项。 */
+  started_at?: number | null;
   attempt: number;
   error: TaskErrorDto | null;
   created_at: number;

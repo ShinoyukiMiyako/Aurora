@@ -32,7 +32,6 @@ export const OFFLINE_DIALOG_COPY = {
 export const LOGIN_ERROR = {
   close: "登录弹窗没能关闭",
   openPage: "没能打开网页",
-  skin: "账户皮肤读不出来",
   probe: "没能连接外置登录服务器",
 } as const;
 

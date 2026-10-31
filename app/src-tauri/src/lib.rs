@@ -139,7 +139,6 @@ pub fn run() {
             commands::launch::play_stats,
             // -- diagnostics --
             commands::diagnostics::last_crash,
-            commands::diagnostics::diagnose_crash,
             commands::diagnostics::last_launch_log,
             commands::diagnostics::log_diagnostic,
             // -- mods --
@@ -155,7 +154,6 @@ pub fn run() {
             commands::history::list_history,
             commands::history::rollback_checks,
             commands::history::rollback,
-            commands::history::backup_size,
             // -- discover --
             commands::discover::search_resources,
             commands::discover::project_detail,

@@ -54,6 +54,15 @@ export function matchesPrefix(key: string, prefix: string): boolean {
 export class ResourceCache {
   private entries = new Map<string, Entry>();
   private clock = 0;
+  private errorObservers = new Set<(error: Error) => void>();
+
+  /** 旁听请求失败（错误照常进入条目的 error 状态）：联网状态据此判断要不要探测连通性。返回退订函数。 */
+  observeErrors(observer: (error: Error) => void): () => void {
+    this.errorObservers.add(observer);
+    return () => {
+      this.errorObservers.delete(observer);
+    };
+  }
 
   private entry(key: string, fetcher: () => Promise<unknown>): Entry {
     let entry = this.entries.get(key);
@@ -83,7 +92,9 @@ export class ResourceCache {
       (raw: unknown) => {
         if (this.entries.get(key) !== entry || entry.version !== version) return;
         entry.inFlight = false;
-        this.set(entry, { status: "error", data: entry.snapshot.data, error: toError(raw), refreshing: false });
+        const error = toError(raw);
+        this.set(entry, { status: "error", data: entry.snapshot.data, error, refreshing: false });
+        for (const observer of [...this.errorObservers]) observer(error);
       },
     );
   }

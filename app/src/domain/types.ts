@@ -109,9 +109,14 @@ export interface Task {
   status: TaskStatus;
   /** 0-1。 */
   progress: number;
+  /** 当前这一批下载已下的字节；一次安装连跑好几批，每批从 0 重新计。 */
   bytes: number;
   totalBytes: number | null;
+  /** 这一次尝试累计下载的字节，跨批次累加：完成后的「总量」用它。 */
+  doneBytes: number;
   speedBps: number;
+  /** 这一次尝试开始运行的时刻；排队中、还没开始过为 null。「用时」是 finishedAt 减去它，不含排队等待。 */
+  startedAt: number | null;
   /** 第几次尝试，从 1 计。 */
   attempt: number;
   error: { code: string; message: string } | null;

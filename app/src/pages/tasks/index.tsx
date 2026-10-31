@@ -2,7 +2,7 @@
 // 标题栏的下载快览只管进行中的任务，这一页还负责历史（完成、失败及原因、取消）。
 // 状态筛选写在路由上：多个下载失败合并成一条通知时，通知的「查看」直接带着「失败与取消」进页。
 
-import { useId, useLayoutEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL } from "../../copy/flows";
 import type { Task } from "../../domain/types";
 import { useNav, useShell } from "../../shell/shell";
@@ -63,6 +63,12 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     latestTasks.current = state.tasks;
   });
   const stillActive = (id: string) => latestTasks.current.some((t) => t.id === id && isActiveTask(t));
+
+  // 进到这一页即算看过全部失败；停在这一页期间新出现的失败也就在列表里，同样算看过
+  const unseenFailures = state.unseenFailures;
+  useEffect(() => {
+    if (unseenFailures > 0) actions.markFailuresSeen();
+  }, [actions, unseenFailures]);
 
   const slice = state.status.tasks;
   const showSkeleton = useLoadingGate(slice.kind === "loading" && state.tasks.length === 0);

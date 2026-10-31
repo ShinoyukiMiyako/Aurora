@@ -266,7 +266,11 @@ describe("账户页：凭据失效、刷新与重新登录", () => {
     expect(buttonIn(page().querySelector("header") as HTMLElement, "添加微软账户").dataset.variant).toBe("secondary");
     expect(cardOf("Yozakura").textContent).toContain("使用中需要重新登录");
     await click(buttonIn(spot, "重新登录"));
-    expect(launcher.state.login).toEqual({ kind: "authlib", intent: { kind: "manual" }, prefill: null });
+    expect(launcher.state.login).toEqual({
+      kind: "authlib",
+      intent: { kind: "manual" },
+      prefill: { serverUrl: "https://skin.example/api/yggdrasil/", serverName: "Example Skin", username: "yozakura@example.com" },
+    });
   });
 
   it("非当前的失效账户：卡片底部给重新登录，菜单里不给必然失败的刷新", async () => {

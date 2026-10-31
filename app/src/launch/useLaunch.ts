@@ -7,11 +7,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { ACTION_ERROR, CONFIRM_COPY, type FailureCopy, type FailureFixKind } from "../copy/flows";
 import { javaPinned, type InstanceSummary } from "../domain/adapt";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useInstanceSettings } from "../state/queries/instance";
 import { getInstance } from "../state/selectors";
 import { useLaunchHost } from "./host";
-import { launchFailure, launchView, type LaunchView } from "./launchView";
+import { launchFailure, launchView, launchViewEqual, type LaunchView } from "./launchView";
 
 export interface LaunchEntry {
   instance: InstanceSummary;
@@ -35,10 +35,11 @@ export interface LaunchEntry {
 }
 
 export function useLaunch(instanceId: string): LaunchEntry {
-  const { state, actions } = useLauncher();
+  // 按片订阅：别的实例的下载进度、这一局的游戏日志都不让入口重渲染
+  const actions = useLauncherActions();
   const host = useLaunchHost();
-  const inst = getInstance(state, instanceId);
-  const view = launchView(state, inst);
+  const inst = useLauncherSelector((s) => getInstance(s, instanceId));
+  const view = useLauncherSelector((s) => launchView(s, getInstance(s, instanceId)), launchViewEqual);
   const [stopping, setStopping] = useState(false);
 
   // spawn_failed 的第二个按钮只在实例固定了 Java 时出现，要读实例设置；其余视图不发这个请求

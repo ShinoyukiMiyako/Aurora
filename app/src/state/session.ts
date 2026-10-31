@@ -17,6 +17,11 @@ export interface SessionState extends Session {
   /** 本次所用账户的名字：失败文案要写它，账户随后被删除时也不丢。 */
   accountName: string;
   crash: SessionCrash | null;
+  /**
+   * 加载期间各阶段收到的提醒条数，下标对应八阶段表。准备阶段的检查项不通过但不阻断时，后端写一条启动器 warn 日志，
+   * 状态岛的阶段清单在该阶段右侧写「N 条提醒」。
+   */
+  stageWarnings: readonly number[];
 }
 
 /** 各阶段的起点；阶段 7 恒为 1。 */
@@ -72,6 +77,7 @@ export function startSession(instanceId: string, taskId: string, account: { uuid
     stopReason: null,
     failure: null,
     crash: null,
+    stageWarnings: STAGE_START.map(() => 0),
   };
 }
 
@@ -147,11 +153,16 @@ export function sessionCrashClue(session: SessionState, instanceId: string, cras
   return { ...session, crash };
 }
 
-/** 追加日志，内存里只留最近 SESSION_LOG_LIMIT 行；完整日志在后端文件里。 */
+/**
+ * 追加日志，内存里只留最近 SESSION_LOG_LIMIT 行；完整日志在后端文件里。
+ * 加载期间启动器的 warn 行记到当前阶段的提醒数上（一批日志在 100 ms 内到齐，按到达时所在的阶段算）。
+ */
 export function appendSessionLogs(session: SessionState, versionId: string, lines: readonly LogLine[]): SessionState {
   if (versionId !== session.instanceId || lines.length === 0) return session;
   const logs = session.logs.concat(lines);
-  return { ...session, logs: logs.length > SESSION_LOG_LIMIT ? logs.slice(logs.length - SESSION_LOG_LIMIT) : logs };
+  const warned = isLoadingPhase(session.phase) ? lines.filter((l) => l.source === "launcher" && l.level === "warn").length : 0;
+  const stageWarnings = warned === 0 ? session.stageWarnings : session.stageWarnings.map((n, i) => (i === session.stageIndex ? n + warned : n));
+  return { ...session, logs: logs.length > SESSION_LOG_LIMIT ? logs.slice(logs.length - SESSION_LOG_LIMIT) : logs, stageWarnings };
 }
 
 /** 运行了多少分钟（向下取整）；没进过运行为 null。stopped 时以进入 stopped 的时刻为终点。 */

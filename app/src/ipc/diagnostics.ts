@@ -1,4 +1,4 @@
-// 诊断：最近一次崩溃报告、对一段日志做崩溃诊断、最近一次启动日志，以及前端自己的诊断日志。
+// 诊断：最近一次崩溃报告、最近一次启动日志，以及前端自己的诊断日志。
 
 import { invoke } from "./bridge";
 import type { LogLineDto } from "./launch";
@@ -76,8 +76,6 @@ export type DiagnosticLevel = "debug" | "info" | "warn" | "error";
 /** 该实例最近一次的崩溃报告；从没崩溃过为 null。实例不存在时以 version_not_installed 拒绝。 */
 export const lastCrash = (versionId: string): Promise<CrashReportDto | null> => invoke<CrashReportDto | null>("last_crash", { versionId });
 
-/** 诊断一段日志文本（如玩家粘贴的崩溃报告），点名的 Mod 对到该实例当前的 mods 目录。不保存。 */
-export const diagnoseCrash = (versionId: string, logText: string): Promise<CrashReportDto> => invoke<CrashReportDto>("diagnose_crash", { versionId, logText });
 
 /** 该实例最近一次启动的日志；从没启动过为 null。 */
 export const lastLaunchLog = (versionId: string): Promise<LaunchLogDto | null> => invoke<LaunchLogDto | null>("last_launch_log", { versionId });

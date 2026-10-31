@@ -3,6 +3,7 @@ import { act, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { keydown, render, type Rendered } from "../test/dom";
+import { FocusReturnPoint, type FocusReturnHandle } from "../ui/focus-return";
 import {
   FLOATING_MARGIN,
   FOCUS_FALLBACK_ATTR,
@@ -12,7 +13,6 @@ import {
   tabbableElements,
   useEscapeLayer,
   useEscapeListener,
-  useFocusReturn,
   useFocusTrap,
   useOverlayControls,
   useOverlayRoot,
@@ -208,7 +208,8 @@ describe("浮层根", () => {
 });
 
 describe("焦点圈定与归还", () => {
-  // 与真实浮层一样 portal 进浮层根：圈定只把浮层根之外的焦点拉回
+  // 与真实浮层一样 portal 进浮层根：圈定只把浮层根之外的焦点拉回。归还记录点与 Modal 一样常驻在浮层之前，
+  // 随 open 切换：关闭时圈定先撤掉，记录点再归还
   function Dialog({ onClose }: { onClose?: () => void }) {
     const root = useOverlayRoot();
     return root ? createPortal(<DialogBody onClose={onClose} />, root) : null;
@@ -217,7 +218,6 @@ describe("焦点圈定与归还", () => {
   function DialogBody({ onClose }: { onClose?: () => void }) {
     const ref = useRef<HTMLDivElement>(null);
     useFocusTrap(ref, true);
-    useFocusReturn(true);
     return (
       <div ref={ref} tabIndex={-1} data-testid="dialog">
         <button>甲</button>
@@ -240,6 +240,7 @@ describe("焦点圈定与归还", () => {
       <>
         <button onClick={() => setOpen(true)}>打开</button>
         <button>背后</button>
+        <FocusReturnPoint active={open} />
         {open && <Dialog onClose={() => setOpen(false)} />}
       </>
     );
@@ -298,6 +299,7 @@ describe("焦点圈定与归还", () => {
               打开
             </button>
           )}
+          <FocusReturnPoint active={open} />
           {open && <Dialog onClose={() => setOpen(false)} />}
         </div>
       );
@@ -310,18 +312,19 @@ describe("焦点圈定与归还", () => {
   });
 
   it("skip() 后本次关闭不归还焦点", () => {
-    let skip!: () => void;
-    function Pop() {
-      skip = useFocusReturn(true).skip;
-      return <input aria-label="pop" />;
-    }
+    const handle: { current: FocusReturnHandle | null } = { current: null };
+    const skip = () => {
+      if (handle.current === null) throw new Error("归还记录点还没挂载");
+      handle.current.skip();
+    };
     function Host() {
       const [open, setOpen] = useState(false);
       return (
         <>
           <button onClick={() => setOpen(true)}>原处</button>
           <button onClick={() => setOpen(false)}>别处</button>
-          {open && <Pop />}
+          <FocusReturnPoint active={open} handle={handle} />
+          {open && <input aria-label="pop" />}
         </>
       );
     }

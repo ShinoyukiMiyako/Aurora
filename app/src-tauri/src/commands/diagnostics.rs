@@ -1,4 +1,4 @@
-//! 诊断：最近一次崩溃报告、对一段日志做崩溃诊断、最近一次启动日志，以及前端自己的诊断日志。
+//! 诊断：最近一次崩溃报告、最近一次启动日志，以及前端自己的诊断日志。
 
 use aurora_core::{CrashReport, LaunchLog, SessionEnded};
 use serde::Serialize;
@@ -58,17 +58,6 @@ pub async fn last_crash(
 ) -> Result<Option<CrashReport>, CommandError> {
     let aurora = facade.snapshot().await;
     Ok(aurora.last_crash(&version_id).await?)
-}
-
-/// 诊断一段日志文本（如玩家粘贴的崩溃报告），点名的 Mod 对到该实例的 mods 目录。不保存。
-#[tauri::command]
-pub async fn diagnose_crash(
-    version_id: String,
-    log_text: String,
-    facade: State<'_, Facade>,
-) -> Result<CrashReport, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.diagnose_crash(&version_id, &log_text).await?)
 }
 
 /// 该实例最近一次启动的日志；从没启动过为 `null`。

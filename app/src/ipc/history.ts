@@ -1,4 +1,4 @@
-// 实例的 Mod 变更历史、回滚与备份占用。事件按时间正序；rollbackChecks 与 listHistory 逐条对齐。
+// 实例的 Mod 变更历史与回滚。事件按时间正序；rollbackChecks 与 listHistory 逐条对齐。
 
 import { invoke } from "./bridge";
 
@@ -37,6 +37,3 @@ export const rollbackChecks = (versionId: string): Promise<RollbackCheck[]> => i
 
 /** 只有更新事件可回滚；同一个 Mod 连着更新过几次时只能从最近那次往回滚；文件被游戏占用时以 mod_file_busy 拒绝。 */
 export const rollback = (versionId: string, eventId: string): Promise<void> => invoke<void>("rollback", { versionId, eventId });
-
-/** mods 目录下全部 `.old` 备份占用的字节数。 */
-export const backupSize = (versionId: string): Promise<number> => invoke<number>("backup_size", { versionId });

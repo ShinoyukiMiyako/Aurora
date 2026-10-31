@@ -4,7 +4,8 @@ import { percent } from "../domain/format";
 import { GAME_EXIT_EVENT, LAUNCH_PHASE_EVENT, type GameExitEvent, type LaunchPhaseEvent } from "../ipc/launch";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, settle, startedStore } from "../test/launcher";
-import { applyPhase, sessionExited, sessionLaunched, startSession, type SessionState } from "./session";
+import type { LogLine } from "../domain/types";
+import { appendSessionLogs, applyPhase, sessionExited, sessionLaunched, startSession, type SessionState } from "./session";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -63,6 +64,28 @@ describe("会话进度：八阶段区间", () => {
   it("别的启动的阶段事件原样丢弃", () => {
     const stale = applyPhase(s0, { taskId: "launch-0", phase: "launching", stageIndex: 6, download: null }, T0);
     expect(stale).toBe(s0);
+  });
+});
+
+describe("准备阶段的提醒数", () => {
+  const line = (level: LogLine["level"], source: LogLine["source"], text: string): LogLine => ({ at: T0, level, source, text });
+
+  it("加载期间启动器的 warn 行记到当前阶段；游戏输出、info 与 error 行不算；运行之后不再计", () => {
+    let s = startSession("生存", "launch-1", ACCOUNT, T0);
+    expect(s.stageWarnings).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    s = appendSessionLogs(s, "生存", [line("warn", "launcher", "游戏路径含有非 ASCII 字符"), line("info", "launcher", "检查 Java"), line("warn", "game", "x")]);
+    s = phase(s, 2);
+    s = appendSessionLogs(s, "生存", [line("warn", "launcher", "内存设置超过物理内存的一半"), line("warn", "launcher", "Mod 加载器版本较旧"), line("error", "launcher", "e")]);
+    expect(s.stageWarnings).toEqual([1, 0, 2, 0, 0, 0, 0, 0]);
+    s = sessionLaunched(s, "launch-1", T0 + 1000);
+    s = appendSessionLogs(s, "生存", [line("warn", "launcher", "运行中的提醒不属于任何加载阶段")]);
+    expect(s.stageWarnings).toEqual([1, 0, 2, 0, 0, 0, 0, 0]);
+    expect(s.logs).toHaveLength(7);
+  });
+
+  it("别的实例的日志不记", () => {
+    const s = startSession("生存", "launch-1", ACCOUNT, T0);
+    expect(appendSessionLogs(s, "创造", [line("warn", "launcher", "x")])).toBe(s);
   });
 });
 

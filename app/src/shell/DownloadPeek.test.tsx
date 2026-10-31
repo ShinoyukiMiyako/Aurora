@@ -5,7 +5,7 @@ import type { InstanceSummary } from "../domain/adapt";
 import type { Task } from "../domain/types";
 import type { LauncherState } from "../state/store";
 import { PEEK_COPY } from "../copy/shell";
-import { cancelTaskConfirm, overallProgress, peekRows, unseenFailures } from "./DownloadPeek";
+import { cancelTaskConfirm, overallProgress, peekRows } from "./DownloadPeek";
 
 function task(id: string, patch: Partial<Task> = {}): Task {
   return {
@@ -18,7 +18,9 @@ function task(id: string, patch: Partial<Task> = {}): Task {
     progress: 0,
     bytes: 0,
     totalBytes: null,
+    doneBytes: 0,
     speedBps: 0,
+    startedAt: null,
     attempt: 1,
     error: null,
     createdAt: 0,
@@ -52,16 +54,6 @@ describe("快览的列表与失败点", () => {
   it("运行中在前、排队在后，各自保持队列顺序，已结束的不列", () => {
     const tasks = [task("q1", { status: "queued" }), task("r1"), task("d1", { status: "done" }), task("q2", { status: "queued" }), task("r2")];
     expect(peekRows(tasks).map((t) => t.id)).toEqual(["r1", "r2", "q1", "q2"]);
-  });
-
-  it("只认外壳挂载之后失败、还没看过的尝试；重试后再失败算新的一次", () => {
-    const tasks = [
-      task("old", { status: "failed", finishedAt: 99 }),
-      task("seen", { status: "failed", finishedAt: 150 }),
-      task("again", { status: "failed", finishedAt: 160, attempt: 2 }),
-    ];
-    const seen = new Set(["seen#1", "again#1"]);
-    expect(unseenFailures(tasks, 100, seen).map((t) => t.id)).toEqual(["again"]);
   });
 
   it("入口名称并入计数与失败数", () => {

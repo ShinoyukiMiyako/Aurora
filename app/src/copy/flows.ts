@@ -510,6 +510,8 @@ export const TASK_TEXT = {
     dependencies > 0 ? `到「${instance}」，含 ${dependencies} 个前置` : `到「${instance}」`,
   updateTitle: (modName: string) => `更新 ${modName}`,
   updateDetail: (from: string, to: string, instance: string) => `${from} → ${to} · 「${instance}」`,
+  updateAllTitle: (count: number) => `更新 ${count} 个 Mod`,
+  updateAllDetail: (instance: string) => `「${instance}」`,
   javaTitle: (major: number) => `下载 Java ${major}`,
   javaDetailPending: "Mojang 运行时 · 手动",
   javaDetail: (version: string) => `Mojang ${version} · 手动`,
@@ -546,6 +548,7 @@ export const TASK_TOAST = {
     body: `装入「${instance}」`,
   }),
   modUpdated: (mod: string, instance: string) => ({ title: `已更新 ${mod}`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
+  modsUpdated: (count: number, instance: string) => ({ title: `已更新 ${count} 个 Mod`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
   resourcePack: (name: string) => ({ title: `已安装资源包 ${name}`, body: "进入游戏后在「选项 → 资源包」里启用" }),
   shader: (name: string, instance: string) => ({ title: `已安装光影 ${name}`, body: `已设为「${instance}」的当前光影` }),
   datapack: (name: string, world: string | null) => ({
@@ -553,6 +556,8 @@ export const TASK_TOAST = {
     body: world === null ? "这个实例还没有存档，创建新世界时在「数据包」里选择它" : `已放入存档「${world}」`,
   }),
   java: (major: number) => ({ title: `Java ${major} 已就绪`, body: "需要它的实例会自动使用" }),
+  /** 下载完已固定给某个实例（崩溃诊断里的「下载 Java N」）。 */
+  javaPinned: (major: number, instance: string) => ({ title: `Java ${major} 已就绪`, body: `「${instance}」下次启动会用它` }),
   /** 从任务日志恢复后重试成功、已没有入队时上下文的任务。 */
   finished: (title: string) => ({ title: `已完成：${title}` }),
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
@@ -589,6 +594,8 @@ export const TOAST_COPY = {
   accountSwitched: (name: string) => `已切换到 ${name}`,
   instanceSelected: (name: string) => ({ title: `「${name}」已设为当前实例`, body: "主页的「继续游玩」会显示它" }),
   settingChanged: (name: string, item: string, value: string) => ({ title: `「${name}」的${item}已改为 ${value}`, body: "下次启动生效" }),
+  networkRestored: (failed: number) => (failed === 0 ? { title: "网络已恢复" } : { title: "网络已恢复", body: `有 ${failed} 个下载失败` }),
+  retryAllAction: "全部重试",
   copyFailed: "复制失败",
   pinLimit: "侧栏最多固定 5 个实例，先取消固定一个",
   loggedIn: (name: string) => `已登录 ${name}`,
@@ -630,6 +637,7 @@ export const ACTION_ERROR = {
   removeMod: "没能移除 Mod",
   updateMods: "没能检查 Mod 更新",
   install: "没能加入下载队列",
+  probeNetwork: "没能检测网络连接",
   rollback: "没能回滚",
   cancelTask: "没能取消任务",
   openFolder: "没能打开文件夹",

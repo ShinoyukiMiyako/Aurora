@@ -1,9 +1,9 @@
 // 外置登录（authlib-injector 认证服务器）：服务器 -> 登录 -> 选择角色（只有一个角色时没有这一步）。
 // 能原位说清的错误（连不上、不是认证服务器、地址无效、账户密码错、网络断、没有角色、服务器拒绝）显示在出错的那一步；
 // 其余错误照常交给外层统一处理（error 通知）。登录成功后由状态容器关掉弹窗并发通知。
-// 重新登录时带着上次的服务器与用户名进来：先自动探测服务器，成功后停在登录这一步，密码为空。
+// 重新登录时带着上次解析好的 API 地址、服务器名与账号进来：直接停在登录这一步，密码为空，不再探测一次服务器。
 
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API } from "../../copy/flows";
@@ -11,6 +11,7 @@ import type { AuthlibProfile, AuthServer } from "../../domain/adapt";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
 import type { AuthlibPrefill } from "../../state/login";
+import { usedAuthServers } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Field } from "../../ui/Field";
@@ -32,16 +33,22 @@ interface PendingProfiles {
   profiles: AuthlibProfile[];
 }
 
+/** 重新登录时的服务器：API 根地址就是上次登录时解析出来的那个，域名从它取。 */
+function prefilledServer(prefill: AuthlibPrefill): { url: string; info: AuthServer } {
+  return { url: prefill.serverUrl, info: { apiRoot: prefill.serverUrl, serverName: prefill.serverName, host: new URL(prefill.serverUrl).host } };
+}
+
 export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
-  const { actions } = useLauncher();
+  const { state, actions } = useLauncher();
   const run = useRunner();
-  const [step, setStep] = useState<AuthlibStep>("server");
+  const [step, setStep] = useState<AuthlibStep>(prefill === null ? "server" : "login");
+  const usedServers = usedAuthServers(state, [LITTLESKIN_API]);
 
   // ---- 第一步：服务器
   const [serverInput, setServerInput] = useState(prefill === null ? "" : prefill.serverUrl);
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<InlineProblem | null>(null);
-  const [server, setServer] = useState<{ url: string; info: AuthServer } | null>(null);
+  const [server, setServer] = useState<{ url: string; info: AuthServer } | null>(() => (prefill === null ? null : prefilledServer(prefill)));
   const normalized = normalizeServerUrl(serverInput);
 
   const probe = (input: string) =>
@@ -69,16 +76,10 @@ export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
       }
     }, LOGIN_ERROR.probe);
 
-  // 只在打开时自动探测一次（开发构建的 StrictMode 会重放 effect，靠 ref 挡住第二次）
-  const autoProbed = useRef(false);
-  useEffect(() => {
-    if (prefill === null || autoProbed.current) return;
-    autoProbed.current = true;
-    probe(prefill.serverUrl);
-  }, []);
-
   // ---- 第二步：登录
-  const [username, setUsername] = useState(prefill === null ? "" : prefill.username);
+  const [username, setUsername] = useState(prefill === null || prefill.username === null ? "" : prefill.username);
+  // 账号已经填好时，打开就落在密码框
+  const focusPassword = prefill !== null && prefill.username !== null;
   const [password, setPassword] = useState("");
   const [reveal, setReveal] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
@@ -236,6 +237,11 @@ export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
               <button type="button" className={styles.preset} onClick={() => setServerInput(LITTLESKIN_API)}>
                 {AUTHLIB_COPY.preset}
               </button>
+              {usedServers.map((used) => (
+                <button key={used.serverUrl} type="button" className={styles.preset} title={used.serverUrl} onClick={() => setServerInput(used.serverUrl)}>
+                  {used.serverName}
+                </button>
+              ))}
             </div>
             {normalized.startsWith("http://") && <Callout tone="warn">{AUTHLIB_COPY.httpWarning}</Callout>}
             {probeError !== null && (
@@ -261,7 +267,14 @@ export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
               </Button>
             </div>
             <Field label={AUTHLIB_COPY.username}>
-              <TextInput value={username} onChange={setUsername} autoComplete="username" spellCheck={false} data-autofocus="" onEnter={submitLogin} />
+              <TextInput
+                value={username}
+                onChange={setUsername}
+                autoComplete="username"
+                spellCheck={false}
+                data-autofocus={focusPassword ? undefined : ""}
+                onEnter={submitLogin}
+              />
             </Field>
             <Field label={AUTHLIB_COPY.password} hint={AUTHLIB_COPY.passwordNote} error={loginError !== null && loginError.kind === "credentials" ? AUTHLIB_COPY.badCredentials : undefined}>
               <TextInput
@@ -273,6 +286,7 @@ export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
                   if (loginError !== null && loginError.kind === "credentials") setLoginError(null);
                 }}
                 autoComplete="current-password"
+                data-autofocus={focusPassword ? "" : undefined}
                 onEnter={submitLogin}
                 trailing={
                   <IconButton
