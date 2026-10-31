@@ -232,7 +232,7 @@ export const AVATAR_LINE = {
 // ---------------------------------------------------------------- 启动失败
 
 /** 失败修复动作的种类；按钮行为由启动层按种类执行。 */
-export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs";
+export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs" | "launch_offline_once";
 
 export interface FailureFix {
   kind: FailureFixKind;
@@ -279,6 +279,8 @@ function sentence(text: string): string {
 
 const RETRY: FailureFix = { kind: "retry", label: "重试" };
 const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" };
+/** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
+const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
 
 export function failureCopy(code: FailureCode, params: FailureParams, ctx: FailureContext): FailureCopy {
   switch (code) {
@@ -312,9 +314,17 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     case "account_refresh_network":
       return {
         title: "无法验证微软账户",
-        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先切换到离线账户。",
+        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
         fix: RETRY,
-        secondary: null,
+        secondary: OFFLINE_ONCE,
+      };
+    // 不读插值参数：status 只供排查，缺了也不该让失败卡抛错
+    case "account_service_down":
+      return {
+        title: "微软登录服务暂时不可用",
+        body: `微软的登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+        fix: RETRY,
+        secondary: OFFLINE_ONCE,
       };
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
@@ -611,6 +621,8 @@ export const TOAST_COPY = {
   authlibAdded: (name: string, server: string) => ({ title: `已添加 ${name}`, body: `外置登录 · ${server}` }),
   /** 由启动拦截触发的登录或添加账户成功后，Toast 正文。 */
   continuingLaunch: (instance: string) => `正在启动「${instance}」`,
+  /** 失败卡上选了「以离线方式进单人」，游戏起来之后。 */
+  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了。" }),
   viewCrashAction: "查看诊断",
 } as const;
 
