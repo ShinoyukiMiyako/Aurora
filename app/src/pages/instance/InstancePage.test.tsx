@@ -131,6 +131,13 @@ function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   });
 }
 
+/** Mod 标签摘要行里的大号总数（「168」+「个 Mod」）。 */
+function modTotal(): string {
+  const big = [...document.querySelectorAll("b")].find((b) => b.parentElement !== null && b.parentElement.textContent === `${textOf(b)}个 Mod`);
+  if (big === undefined) throw new Error("找不到 Mod 总数");
+  return textOf(big);
+}
+
 function toastTitles(): string[] {
   return launcher.state.toasts.map((t) => t.title);
 }
@@ -485,6 +492,30 @@ describe("实例详情：Mod 管理", () => {
     expect(text()).toContain("列出的 Mod 里没有和「nothing-here」相关的。");
     click(button("清除筛选"));
     expect(search.value).toBe("");
+  });
+
+  it("自建实例的列表就是全部：摘要数与列表对不上时以列表为准，不说「其余由整合包统一管理」", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: 12 } : i));
+    await open("mods");
+    expect(modTotal()).toBe("2");
+    expect(text()).toContain("已启用 2 个，停用 0 个。");
+    expect(text()).not.toContain("其余由整合包统一管理");
+    click(byRole("tab", "概览"));
+    await flush();
+    expect(text()).toContain("共 2 个");
+    expect(text()).not.toContain("这里展示");
+  });
+
+  it("整合包实例的列表不全时说明其余由整合包统一管理，总数取摘要里的数", async () => {
+    instances = instances.map((i) =>
+      i.id === ID ? { ...i, mod_count: 12, modpack: { platform: "modrinth", project_id: "rlc", version_id: "v1", name: "RLCraft", version: "2.9.3" } } : i,
+    );
+    await open("mods");
+    expect(modTotal()).toBe("12");
+    expect(text()).toContain("整合包「RLCraft」共 12 个 Mod，这里列出 2 个代表；其余由整合包统一管理、随整合包版本更新。");
+    click(byRole("tab", "概览"));
+    await flush();
+    expect(text()).toContain("共 12 个 · 这里展示 2 个代表");
   });
 
   it("原版实例整页换成空状态，不请求 Mod 列表", async () => {

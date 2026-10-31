@@ -165,9 +165,8 @@ export const MODS_COPY = {
   checkUpdates: "检查更新",
   addMod: "添加 Mod",
   totalUnit: "个 Mod",
-  partialNote: (owner: string, total: number, shown: number) =>
-    `${owner}共 ${total} 个 Mod，这里列出 ${shown} 个代表；其余由整合包统一管理、随整合包版本更新。`,
-  partialOwner: "这个实例",
+  partialNote: (pack: string, total: number, shown: number) =>
+    `整合包「${pack}」共 ${total} 个 Mod，这里列出 ${shown} 个代表；其余由整合包统一管理、随整合包版本更新。`,
   completeNote: (enabled: number, disabled: number) => `已启用 ${enabled} 个，停用 ${disabled} 个。`,
   bannerRunning: "游戏正在运行，Mod 文件被占用。结束游戏后再启用、停用、更新或移除。",
   bannerInstalling: "实例正在补全文件，完成后再改动 Mod。",

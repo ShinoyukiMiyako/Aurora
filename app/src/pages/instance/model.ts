@@ -346,6 +346,17 @@ export function modRows(mods: readonly InstalledMod[], updates: readonly UpdateC
   return rows.sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName));
 }
 
+/**
+ * Mod 总数与列表是否不全。实例摘要里的 modCount 与列表同源（mods 目录里的 .jar 与 .jar.disabled），
+ * 自建实例的列表就是全部，两者对不上只说明摘要是早些时候扫的，以刚扫出的列表为准。
+ * 只有整合包实例的列表才可能只列出代表（其余由整合包统一管理），这时总数取摘要与列表中较大的一个。
+ */
+export function modTotals(inst: Pick<InstanceSummary, "modCount" | "modpack">, listed: number): { total: number; partial: boolean } {
+  if (inst.modpack === null || inst.modCount === null) return { total: listed, partial: false };
+  const total = Math.max(inst.modCount, listed);
+  return { total, partial: total > listed };
+}
+
 export type ModFilter = "all" | "enabled" | "disabled" | "outdated";
 
 export function modCounts(rows: readonly ModRow[]): Readonly<Record<ModFilter, number>> {

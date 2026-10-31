@@ -22,6 +22,7 @@ import {
   matchSuspect,
   modCounts,
   modRows,
+  modTotals,
   needsReimport,
   overridesHeap,
   overviewBanner,
@@ -156,6 +157,21 @@ describe("锁定矩阵", () => {
   it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
     expect(instanceLocks(true, false, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
     expect(instanceLocks(false, true, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
+  });
+});
+
+describe("Mod 总数", () => {
+  const pack = { platform: "modrinth" as const, projectId: "rlc", versionId: "v1", name: "RLCraft", version: "2.9.3" };
+  it("自建实例以列表为准，摘要数对不上也不算列表不全", () => {
+    expect(modTotals({ modCount: 12, modpack: null }, 2)).toEqual({ total: 2, partial: false });
+    expect(modTotals({ modCount: 0, modpack: null }, 3)).toEqual({ total: 3, partial: false });
+    expect(modTotals({ modCount: null, modpack: null }, 0)).toEqual({ total: 0, partial: false });
+  });
+  it("整合包实例的列表比摘要少时才算只列出代表，总数取较大者", () => {
+    expect(modTotals({ modCount: 168, modpack: pack }, 24)).toEqual({ total: 168, partial: true });
+    expect(modTotals({ modCount: 24, modpack: pack }, 24)).toEqual({ total: 24, partial: false });
+    expect(modTotals({ modCount: 20, modpack: pack }, 24)).toEqual({ total: 24, partial: false });
+    expect(modTotals({ modCount: null, modpack: pack }, 5)).toEqual({ total: 5, partial: false });
   });
 });
 

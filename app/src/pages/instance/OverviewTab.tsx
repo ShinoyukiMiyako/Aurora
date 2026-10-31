@@ -43,7 +43,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
-import { chosenRuntime, modRows, needsReimport, overviewBanner, peekLayout, peekPerRow, reimportRoute, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
+import { chosenRuntime, modRows, modTotals, needsReimport, overviewBanner, peekLayout, peekPerRow, reimportRoute, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { ModuleError } from "./parts";
 
@@ -71,7 +71,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
       {banner === "crashed" && crash.status === "ready" && crash.data !== null && <CrashBanner report={crash.data} onTab={onTab} />}
       {banner === "broken" && view.kind === "broken" && (needsReimport(inst) ? <ReimportBanner inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner reason={view.reason} ops={ops} />)}
       {banner === "installing" && view.kind === "installing" && <InstallingBanner view={view} />}
-      <StatsCard inst={inst} content={content} outdated={outdated} />
+      <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div className={styles.overviewGrid}>
         <WorldsCard content={content} ops={ops} />
         <InfoCard inst={inst} queryId={queryId} onTab={onTab} />
@@ -180,8 +180,20 @@ function InstallingBanner({ view }: { view: Extract<LaunchView, { kind: "install
 
 // ---------------------------------------------------------------- 四格数据
 
-function StatsCard({ inst, content, outdated }: { inst: InstanceSummary; content: ResourceResult<InstanceContentDto>; outdated: number | null }) {
+function StatsCard({
+  inst,
+  content,
+  mods,
+  outdated,
+}: {
+  inst: InstanceSummary;
+  content: ResourceResult<InstanceContentDto>;
+  mods: ResourceResult<InstalledMod[]>;
+  outdated: number | null;
+}) {
   const now = useNow(30_000);
+  // 列表扫完就与 Mod 速览用同一个总数，不让两处一个写 12 个、一个写「还没有装任何 Mod」
+  const modTotal = mods.status === "ready" ? modTotals(inst, mods.data.length).total : inst.modCount;
   const hours = Math.floor(inst.playtimeMin / 60);
   const minutes = inst.playtimeMin % 60;
   const modded = inst.loader !== "vanilla";
@@ -215,10 +227,10 @@ function StatsCard({ inst, content, outdated }: { inst: InstanceSummary; content
           value={inst.lastPlayedAt === null ? OVERVIEW_COPY.never : formatRelative(inst.lastPlayedAt, now)}
           delta={{ direction: "flat", text: inst.lastPlayedAt === null ? OVERVIEW_COPY.rememberOnLaunch : formatDate(inst.lastPlayedAt) }}
         />
-        {inst.modCount === null ? (
+        {modTotal === null ? (
           <StatTile icon="box" label={OVERVIEW_COPY.statMods} kind="text" value={OVERVIEW_COPY.modsUnknown} />
         ) : (
-          <StatTile icon="box" label={OVERVIEW_COPY.statMods} value={String(inst.modCount)} unit={OVERVIEW_COPY.modsUnit} delta={modDelta} />
+          <StatTile icon="box" label={OVERVIEW_COPY.statMods} value={String(modTotal)} unit={OVERVIEW_COPY.modsUnit} delta={modDelta} />
         )}
         {content.status === "ready" ? (
           <StatTile
@@ -408,10 +420,10 @@ function ModsPeekCard({
   const run = useRunner();
   const vanilla = inst.loader === "vanilla";
   const rows: ModRow[] = mods.status === "ready" ? modRows(mods.data, updates.status === "ready" ? updates.data : null) : [];
-  const total = inst.modCount === null ? rows.length : Math.max(inst.modCount, rows.length);
+  const { total, partial } = modTotals(inst, rows.length);
   const outdated = rows.filter((r) => r.update !== null);
 
-  const subtitle = vanilla || mods.status !== "ready" || rows.length === 0 ? undefined : total > rows.length ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
+  const subtitle = vanilla || mods.status !== "ready" || rows.length === 0 ? undefined : partial ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
 
   return (
     <Card>

@@ -27,7 +27,7 @@ import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
 import { MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
-import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, removalRelations, type ModFilter, type ModRow } from "./model";
+import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, modTotals, removalRelations, type ModFilter, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { ModuleError } from "./parts";
 
@@ -118,8 +118,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   });
   const counts = modCounts(rows);
   const shown = sortRows(filterMods(rows, query, filter), sort);
-  const total = inst.modCount === null ? rows.length : Math.max(inst.modCount, rows.length);
-  const partial = total > rows.length;
+  const { total, partial } = modTotals(inst, rows.length);
+  const shownTotal = mods.status === "ready" ? total : inst.modCount;
   const isUpdating = (r: ModRow) => pending.has(r.fileName) || updatingFiles.has(enabledFileName(r.fileName));
 
   const toggle = (r: ModRow) => {
@@ -224,11 +224,13 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
       <Inset className={styles.modSummary}>
         <span className={styles.modTotal}>
-          {mods.status === "ready" || inst.modCount !== null ? <b className={styles.bigNum}>{total}</b> : <Skeleton shape="block" width={40} height={28} radius="sm" />}
+          {shownTotal !== null ? <b className={styles.bigNum}>{shownTotal}</b> : <Skeleton shape="block" width={40} height={28} radius="sm" />}
           {MODS_COPY.totalUnit}
         </span>
         {mods.status === "ready" && (
-          <span className={styles.modSummaryText}>{partial ? MODS_COPY.partialNote(MODS_COPY.partialOwner, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}</span>
+          <span className={styles.modSummaryText}>
+            {partial && inst.modpack !== null ? MODS_COPY.partialNote(inst.modpack.name, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}
+          </span>
         )}
         {updateTasks.length > 0 && (
           <span className={styles.modTask}>
