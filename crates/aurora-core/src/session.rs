@@ -262,6 +262,16 @@ impl GameSlot {
         }
     }
 
+    /// 当前占用者：`(版本 id, 是否已跑起来)`，加载中为 `false`；槽空着时为 `None`。
+    ///
+    /// 不隔离的实例共用同一份存档，备份或恢复共用存档前要知道是不是别的实例正开着游戏。
+    pub fn occupant(&self) -> Option<(String, bool)> {
+        self.state()
+            .occupant
+            .as_ref()
+            .map(|o| (o.version_id.clone(), o.kill.is_some()))
+    }
+
     /// 运行中游戏的结束句柄；没有游戏或还在加载时为 `None`。
     pub fn kill_switch(&self) -> Option<KillSwitch> {
         self.state().occupant.as_ref().and_then(|o| o.kill.clone())
@@ -465,6 +475,28 @@ mod tests {
         assert!(waiting.await.unwrap().unwrap().exit.killed);
         slot.release(ticket);
         assert!(slot.reserve("b").is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn occupant_reports_who_holds_the_slot_and_whether_it_runs() {
+        let slot = GameSlot::default();
+        assert_eq!(slot.occupant(), None);
+        let loading = slot.reserve("共用存档").unwrap();
+        assert_eq!(slot.occupant(), Some(("共用存档".to_owned(), false)));
+
+        let started = start("ping", &["-n", "30", "127.0.0.1"]).await;
+        let ticket = loading.occupy(started.run.kill_switch());
+        assert_eq!(slot.occupant(), Some(("共用存档".to_owned(), true)));
+
+        let waiting = tokio::spawn(started.run.finish());
+        assert!(slot.kill_switch().unwrap().kill().await.unwrap());
+        waiting.await.unwrap().unwrap();
+        slot.release(ticket);
+        assert_eq!(slot.occupant(), None);
+
+        // 加载阶段的占用被丢弃（启动失败、取消）后同样空出来。
+        drop(slot.reserve("b").unwrap());
+        assert_eq!(slot.occupant(), None);
     }
 
     #[test]
