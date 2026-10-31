@@ -1610,6 +1610,17 @@ fn check_path_segment(field: &str, value: &str, what: &str) -> Result<(), Comman
     }
 }
 
+/// 长任务要在登记任务之前挡住不安全的实例 id；报法与门面一致（detail.field 为 id、reason 为 unsafe_id）。
+fn check_instance_id(id: &str) -> Result<(), CommandError> {
+    if is_safe_instance_id(id) {
+        Ok(())
+    } else {
+        Err(instance_error(CoreError::from(InstanceError::InvalidId {
+            id: id.to_owned(),
+        })))
+    }
+}
+
 fn check_world(world: &str) -> Result<(), CommandError> {
     check_path_segment("world", world, "存档文件夹名")
 }
@@ -1729,6 +1740,7 @@ pub(crate) async fn backup_world_with(
     world: &str,
     events: &EventSink,
 ) -> Result<BackupResultDto, CommandError> {
+    check_instance_id(id)?;
     check_world(world)?;
     let (_guard, task, aurora) = begin_world_task(env, task_id, id).await?;
     let outcome = task
@@ -1816,6 +1828,7 @@ pub(crate) async fn restore_world_backup_with(
     disposer: impl Disposer + 'static,
     events: &EventSink,
 ) -> Result<RestoreResultDto, CommandError> {
+    check_instance_id(id)?;
     check_world(world)?;
     check_backup_file(file)?;
     let (_guard, task, aurora) = begin_world_task(env, task_id, id).await?;
@@ -1897,6 +1910,7 @@ pub(crate) async fn export_world_with(
     dest: &str,
     events: &EventSink,
 ) -> Result<ExportResultDto, CommandError> {
+    check_instance_id(id)?;
     check_world(world)?;
     let dest = check_export_dest(dest)?;
     let (_guard, task, aurora) = begin_world_task(env, task_id, id).await?;
@@ -3615,6 +3629,19 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.code, common::INVALID_ARGUMENT, "{file:?}");
             assert_eq!(err.detail.unwrap()["field"], "file", "{file:?}");
+        }
+        for id in ["../生存", "", ".hidden", r"a"] {
+            let err = backup_world_with(&w.with(&env), "t", id, "新的世界", &events)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{id:?}");
+            let detail = err.detail.unwrap();
+            assert_eq!(
+                (&detail["field"], &detail["reason"]),
+                (&json!("id"), &json!("unsafe_id")),
+                "{id:?}"
+            );
+            assert_eq!(w.locks.activity(id), None);
         }
         let relative =
             export_world_with(&w.with(&env), "t", "生存", "新的世界", "导出.zip", &events)
