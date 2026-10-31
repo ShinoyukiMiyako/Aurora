@@ -191,6 +191,25 @@ async fn select_authlib_profile_rejects_stale_id_and_unknown_profile() {
     assert!(slot.get(&second).is_some(), "选错角色不应丢掉待选会话");
 }
 
+/// 启动链取账户走阻塞线程池：单线程运行时里也照样取得到，查不到报 AccountNotFound 并带上 uuid。
+#[tokio::test(flavor = "current_thread")]
+async fn find_account_reads_the_store_off_the_async_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let aurora = open_aurora(dir.path());
+    let saved = aurora.add_offline_account("Marisa", None).unwrap();
+
+    let found = find_account(&aurora, &saved.uuid).await.unwrap();
+    assert_eq!(found.uuid, saved.uuid);
+    assert_eq!(found.name, "Marisa");
+    assert_eq!(found.account_type, AccountType::Offline);
+
+    let missing = find_account(&aurora, "ffffffffffffffffffffffffffffffff")
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, "AccountNotFound");
+    assert!(missing.message.contains("ffffffffffffffffffffffffffffffff"));
+}
+
 /// 设备码登录要落 DPAPI 账户库，只在 Windows 上跑。
 #[cfg(windows)]
 mod microsoft {

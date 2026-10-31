@@ -199,7 +199,15 @@ pub(crate) async fn with_accounts<T: Send + 'static>(
     facade: &Facade,
     work: impl FnOnce(&Aurora) -> aurora_core::Result<T> + Send + 'static,
 ) -> Result<T, CommandError> {
-    let aurora = facade.snapshot().await;
+    on_blocking_pool(facade.snapshot().await, work).await
+}
+
+/// 账户库读写在进程级锁内做同步文件 IO 与 DPAPI 调用：放在异步工作线程上，锁被别处的写入占着时
+/// 会连同这个线程上的事件转发、取图一起卡住。
+async fn on_blocking_pool<T: Send + 'static>(
+    aurora: Aurora,
+    work: impl FnOnce(&Aurora) -> aurora_core::Result<T> + Send + 'static,
+) -> Result<T, CommandError> {
     let joined = tokio::task::spawn_blocking(move || work(&aurora)).await;
     Ok(joined.map_err(aurora_core::CoreError::from)??)
 }
@@ -452,10 +460,11 @@ pub async fn remove_account(uuid: String, facade: State<'_, Facade>) -> Result<(
 
 // ---- 供启动链使用 ----
 
-/// 按 uuid 取出完整账户（含令牌，仅供启动时注入命令行，绝不过 IPC）。
-pub(crate) fn find_account(aurora: &Aurora, uuid: &str) -> Result<Account, CommandError> {
-    aurora
-        .find_account(uuid)?
+/// 按 uuid 取出完整账户（含令牌，仅供启动时注入命令行，绝不过 IPC）。在阻塞线程池上查。
+pub(crate) async fn find_account(aurora: &Aurora, uuid: &str) -> Result<Account, CommandError> {
+    let lookup = uuid.to_owned();
+    on_blocking_pool(aurora.clone(), move |aurora| aurora.find_account(&lookup))
+        .await?
         .ok_or_else(|| aurora_core::AuthError::AccountNotFound(uuid.to_owned()).into())
 }
 
