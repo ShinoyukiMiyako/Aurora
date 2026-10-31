@@ -108,7 +108,7 @@ beforeEach(() => {
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
 
   instances = [
-    instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.9" }], mc_version: "1.21.1", playtime_min: 2480, last_played_at: NOW - 2 * MINUTE, mod_count: 78 }),
+    instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.9" }], mc_version: "1.21.1", playtime_min: 2480, last_played_at: NOW - 2 * MINUTE, mod_count: 78, world_count: 2 }),
     instanceDto("创造", { mc_version: "1.20.1", playtime_min: 60, last_played_at: NOW - 2 * HOUR }),
     instanceDto("空岛", { mc_version: "1.21.1", created_at: NOW - DAY }),
     instanceDto("红石", { mc_version: "1.19.2", playtime_min: 10, last_played_at: NOW - 3 * DAY }),
@@ -210,6 +210,20 @@ describe("主页：问候与继续游玩", () => {
     expect(document.querySelector("h2")?.textContent).toBe("生存");
     expect(text()).toContain("上次 2 分钟前");
     for (const fragment of ["1.21.1", "Fabric", "0.16.9", "78 个 Mod", "累计 41 小时 20 分钟", "存档「海岛据点」"]) expect(text()).toContain(fragment);
+  });
+
+  it("实例一个存档都没有：不读存档目录，信息行只写累计时长；游戏退出后数到了新存档才去读", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, world_count: 0 } : i));
+    await mount();
+    expect(callsOf(ipc, "list_instance_content")).toEqual([]);
+    expect(text()).toContain("累计 41 小时 20 分钟");
+    expect(text()).not.toContain("存档「");
+
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, world_count: 1, last_played_at: NOW } : i));
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 30 * MINUTE }));
+    await flush();
+    expect(callsOf(ipc, "list_instance_content")).toEqual([{ id: "生存" }]);
+    expect(text()).toContain("存档「海岛据点」");
   });
 
   it("整合包实例：大卡挂出整合包名与版本，让出 Mod 数", async () => {
