@@ -61,9 +61,9 @@ pub struct ModpackSummaryDto {
     pub pack_bytes: u64,
     /// 导入时要另外下载的远程文件数。
     pub remote_files: usize,
-    /// 远程文件里落进 mods/ 的个数；CurseForge 清单分不出哪些是 Mod，为 `null`。
-    pub mod_files: Option<usize>,
-    /// 远程文件总字节数；CurseForge 清单不带大小，为 `null`。
+    /// 远程文件里落进 mods/ 的个数；CurseForge 按工程大类认，与导入的落点一致。
+    pub mod_files: usize,
+    /// 远程文件总字节数；平台没给齐每个文件的大小时为 `null`。
     pub remote_bytes: Option<u64>,
     pub override_files: usize,
     pub override_bytes: u64,
@@ -71,6 +71,7 @@ pub struct ModpackSummaryDto {
 
 /// 平台整合包某个版本的清单摘要（Mod 数、要下载的字节）。只按范围读包末尾的目录与清单条目，
 /// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`。
+/// CurseForge 另问批量文件与批量工程两个接口，没配 API key 时报 CurseForge 源被禁用的同一个错误。
 #[tauri::command]
 pub async fn summarize_platform_modpack(
     platform: String,

@@ -742,6 +742,24 @@ impl Aurora {
         }
     }
 
+    /// 远程文件的落点与总字节数。Modrinth 清单自带；CurseForge 要多问两个批量接口，没配 API key 时
+    /// 与导入一样报 key 缺失（该源被禁用），没有远程文件时不问。
+    pub(crate) async fn remote_facts(&self, remote: &RemoteFiles) -> Result<RemoteFacts> {
+        match remote {
+            RemoteFiles::Modrinth(files) => Ok(RemoteFacts {
+                destinations: files.iter().map(|f| f.path.as_str().to_owned()).collect(),
+                bytes: Some(files.iter().map(|f| f.size).sum()),
+            }),
+            RemoteFiles::CurseForge(refs) if refs.is_empty() => Ok(RemoteFacts {
+                destinations: Vec::new(),
+                bytes: Some(0),
+            }),
+            RemoteFiles::CurseForge(refs) => {
+                curseforge_remote_facts(&self.curseforge_client()?, refs).await
+            }
+        }
+    }
+
     /// 批量下载远程文件；失败的文件有备用地址就换地址再下一轮。
     async fn download_remote(
         &self,
@@ -777,51 +795,57 @@ impl Aurora {
     }
 }
 
-/// CurseForge 清单里的文件 id 换成下载任务：批量取文件与所属工程（工程的大类决定落进哪个目录），
-/// 没给下载地址的再问 download-url 端点；作者禁止第三方分发的文件汇总成一个错误。
-async fn curseforge_downloads(
-    client: &CurseForgeClient,
-    refs: &[CurseForgeFileRef],
-    version_dir: &Path,
-) -> Result<Vec<RemoteDownload>> {
-    let file_ids: Vec<u32> = refs.iter().map(|r| r.file_id).collect();
-    let mut files: HashMap<u32, CurseForgeFile> = HashMap::with_capacity(refs.len());
-    for chunk in file_ids.chunks(CURSEFORGE_BATCH) {
-        for file in client.get_files(chunk).await? {
-            files.insert(file.id, file);
+/// CurseForge 清单引用的文件与各自所属工程的大类。导入换下载任务、摘要与预览数 Mod 和算下载量都从这里
+/// 取落点，保证「预先报的数」与「导入后真正落进去的」是同一条规则。
+struct CurseForgeIndex {
+    files: HashMap<u32, CurseForgeFile>,
+    classes: HashMap<u32, Option<u32>>,
+}
+
+impl CurseForgeIndex {
+    /// 全部文件 id 走批量文件接口、去重后的工程 id 走批量工程接口，各一个请求（超过一批时分批）。
+    async fn fetch(client: &CurseForgeClient, refs: &[CurseForgeFileRef]) -> Result<Self> {
+        let file_ids: Vec<u32> = refs.iter().map(|r| r.file_id).collect();
+        let mut files: HashMap<u32, CurseForgeFile> = HashMap::with_capacity(refs.len());
+        for chunk in file_ids.chunks(CURSEFORGE_BATCH) {
+            for file in client.get_files(chunk).await? {
+                files.insert(file.id, file);
+            }
         }
-    }
-    let mut mod_ids: Vec<u32> = refs
-        .iter()
-        .map(|r| r.project_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    mod_ids.sort_unstable();
-    let mut classes: HashMap<u32, Option<u32>> = HashMap::with_capacity(mod_ids.len());
-    for chunk in mod_ids.chunks(CURSEFORGE_BATCH) {
-        for project in client.get_mods(chunk).await? {
-            classes.insert(project.id, project.class_id);
+        let mut mod_ids: Vec<u32> = refs
+            .iter()
+            .map(|r| r.project_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        mod_ids.sort_unstable();
+        let mut classes: HashMap<u32, Option<u32>> = HashMap::with_capacity(mod_ids.len());
+        for chunk in mod_ids.chunks(CURSEFORGE_BATCH) {
+            for project in client.get_mods(chunk).await? {
+                classes.insert(project.id, project.class_id);
+            }
         }
+        Ok(Self { files, classes })
     }
 
-    let mut downloads = Vec::with_capacity(refs.len());
-    let mut blocked = Vec::new();
-    for reference in refs {
-        let file = files
-            .get(&reference.file_id)
-            .ok_or_else(|| CoreError::ModVersionNotFound {
-                platform: Platform::CurseForge.display_name(),
-                project_id: reference.project_id.to_string(),
-                version_id: reference.file_id.to_string(),
-            })?;
+    /// 清单引用的文件与它在实例里的落点目录（工程的大类决定落进哪个目录）。平台响应里没有这个文件报
+    /// 版本不存在，文件名带路径成分报不安全：两者导入都装不了，预先报数时也不该装作没事。
+    fn locate(&self, reference: &CurseForgeFileRef) -> Result<(&CurseForgeFile, &'static str)> {
+        let file =
+            self.files
+                .get(&reference.file_id)
+                .ok_or_else(|| CoreError::ModVersionNotFound {
+                    platform: Platform::CurseForge.display_name(),
+                    project_id: reference.project_id.to_string(),
+                    version_id: reference.file_id.to_string(),
+                })?;
         if !is_safe_file_name(&file.file_name) {
             return Err(CoreError::UnsafeFileName {
                 platform: Platform::CurseForge.display_name(),
                 file_name: file.file_name.clone(),
             });
         }
-        let class_id = classes.get(&reference.project_id).copied().flatten();
+        let class_id = self.classes.get(&reference.project_id).copied().flatten();
         let sub = match class_id {
             Some(CF_CLASS_RESOURCE_PACKS) => "resourcepacks",
             Some(CF_CLASS_SHADERS) => "shaderpacks",
@@ -833,6 +857,52 @@ async fn curseforge_downloads(
                 "mods"
             }
         };
+        Ok((file, sub))
+    }
+}
+
+/// 清单里的远程文件导入后落在哪、一共多大：平台摘要与本地预览据此数 Mod、报下载量。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteFacts {
+    /// 相对实例目录的落点，正斜杠分隔。
+    pub(crate) destinations: Vec<String>,
+    /// 总字节数；平台没给齐每个文件的大小时为 `None`，不拿缺了几项的和冒充总量。
+    pub(crate) bytes: Option<u64>,
+}
+
+/// CurseForge 清单只有工程与文件 id：落点与大小经 [`CurseForgeIndex`] 向批量接口要。
+pub(crate) async fn curseforge_remote_facts(
+    client: &CurseForgeClient,
+    refs: &[CurseForgeFileRef],
+) -> Result<RemoteFacts> {
+    let index = CurseForgeIndex::fetch(client, refs).await?;
+    let mut destinations = Vec::with_capacity(refs.len());
+    let mut bytes = Some(0u64);
+    for reference in refs {
+        let (file, sub) = index.locate(reference)?;
+        destinations.push(format!("{sub}/{}", file.file_name));
+        bytes = bytes
+            .zip(file.file_length)
+            .map(|(sum, length)| sum + length);
+    }
+    Ok(RemoteFacts {
+        destinations,
+        bytes,
+    })
+}
+
+/// CurseForge 清单里的文件 id 换成下载任务：落点按 [`CurseForgeIndex::locate`]，没给下载地址的再问
+/// download-url 端点；作者禁止第三方分发的文件汇总成一个错误。
+async fn curseforge_downloads(
+    client: &CurseForgeClient,
+    refs: &[CurseForgeFileRef],
+    version_dir: &Path,
+) -> Result<Vec<RemoteDownload>> {
+    let index = CurseForgeIndex::fetch(client, refs).await?;
+    let mut downloads = Vec::with_capacity(refs.len());
+    let mut blocked = Vec::new();
+    for reference in refs {
+        let (file, sub) = index.locate(reference)?;
         let dest = version_dir.join(sub).join(&file.file_name);
         let task = match file.to_download_task(&dest) {
             Some(task) => task,
@@ -1675,6 +1745,95 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, CoreError::ModVersionNotFound { .. }),
+            "{err:?}"
+        );
+    }
+
+    /// 摘要与预览报的落点就是导入用的落点：同一批引用，各问一次批量文件与批量工程接口，按工程大类落目录、
+    /// 大类不认识的按 Mod；大小逐个加总，有一个文件没给大小就不报总量；平台没回的文件与导入一样报不存在。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_remote_facts_follow_the_import_landing_rules() {
+        use wiremock::matchers::body_json;
+
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let sized = |id: u32, mod_id: u32, name: &str, length: Option<u64>| {
+            let mut file = cf_file(id, mod_id, name, Some(format!("{uri}/f/{id}")));
+            file["fileLength"] = length.map_or(serde_json::Value::Null, Into::into);
+            file
+        };
+        let files = serde_json::json!({"data": [
+            sized(11, 1, "sodium.jar", Some(1_000_000)),
+            sized(22, 2, "faithful.zip", Some(9_000_000)),
+            sized(33, 3, "mystery.jar", Some(0)),
+            sized(44, 1, "sodium-extra.jar", Some(u64::from(u32::MAX) + 1)),
+        ]});
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .and(body_json(serde_json::json!({"fileIds": [11, 22, 33, 44]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(files))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .and(body_json(serde_json::json!({"modIds": [1, 2, 3]})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                cf_mod(1, 6), cf_mod(2, 12),
+                serde_json::json!({"id": 3, "name": "m", "slug": "m", "summary": "", "classId": 17}),
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = CurseForgeClient::new(aurora_base::http::build_client().unwrap(), "k")
+            .with_base_url(&uri);
+        let refs: Vec<CurseForgeFileRef> = [(1, 11), (2, 22), (3, 33), (1, 44)]
+            .iter()
+            .map(|&(project_id, file_id)| CurseForgeFileRef {
+                project_id,
+                file_id,
+            })
+            .collect();
+
+        let facts = curseforge_remote_facts(&client, &refs).await.unwrap();
+        assert_eq!(
+            facts.destinations,
+            [
+                "mods/sodium.jar",
+                "resourcepacks/faithful.zip",
+                "mods/mystery.jar",
+                "mods/sodium-extra.jar"
+            ]
+        );
+        assert_eq!(facts.bytes, Some(10_000_000 + u64::from(u32::MAX) + 1));
+        server.verify().await;
+        server.reset().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    sized(11, 1, "sodium.jar", Some(1_000_000)),
+                    sized(22, 2, "faithful.zip", None),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(1, 6), cf_mod(2, 12)]})),
+            )
+            .mount(&server)
+            .await;
+        let facts = curseforge_remote_facts(&client, &refs[..2]).await.unwrap();
+        assert_eq!(facts.destinations.len(), 2);
+        assert_eq!(facts.bytes, None, "缺一个文件的大小就不报总量");
+
+        let err = curseforge_remote_facts(&client, &refs).await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::ModVersionNotFound { version_id, .. } if version_id == "33"),
             "{err:?}"
         );
     }

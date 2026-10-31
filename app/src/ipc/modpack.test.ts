@@ -43,7 +43,7 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
 });
 
 describe("整合包 mock", () => {
-  it("平台整合包摘要：Modrinth 给出 Mod 数与远程字节，CurseForge 两项为 null；目录里没有的工程报 mod_version_not_found", async () => {
+  it("平台整合包摘要：两种格式都给出 Mod 数与远程字节；目录里没有的工程报 mod_version_not_found", async () => {
     expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "fo-641")).toEqual({
       format: "modrinth",
       name: "Fabulously Optimized",
@@ -59,7 +59,7 @@ describe("整合包 mock", () => {
     });
     // 同一个包的旧版本是另一份清单
     expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "fo-5120")).toMatchObject({ version: "5.12.0", minecraft: "1.20.1", mod_files: 38 });
-    expect(await summarizePlatformModpack("curseforge", "396246", "5880001")).toMatchObject({ format: "curseforge", remote_files: 46, mod_files: null, remote_bytes: null });
+    expect(await summarizePlatformModpack("curseforge", "396246", "5880001")).toMatchObject({ format: "curseforge", remote_files: 46, mod_files: 41, remote_bytes: 95_420_416 });
     expect(await summarizePlatformModpack("modrinth", "nope", "v1").catch((e: unknown) => e)).toMatchObject({ code: "mod_version_not_found" });
     expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "nope").catch((e: unknown) => e)).toMatchObject({ code: "mod_version_not_found" });
   });

@@ -209,7 +209,7 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   });
 }
 
-/** 平台整合包某个版本的清单摘要：与导入时同一份清单。CurseForge 清单分不出 Mod、也不带大小，这两项照后端报 null。 */
+/** 平台整合包某个版本的清单摘要：与导入时同一份清单。CurseForge 的 Mod 数与大小后端经批量接口补齐，两种格式都报数。 */
 function summarizeModpack(args: MockArgs): ModpackSummaryDto {
   const read = argReader("summarize_platform_modpack", args);
   const source: ModpackSource = {
@@ -219,7 +219,6 @@ function summarizeModpack(args: MockArgs): ModpackSummaryDto {
     version_id: nonBlank("version_id", read.string("versionId")),
   };
   const pack = packOf(source);
-  const modrinth = pack.format === "modrinth";
   const { manifest } = pack;
   return {
     format: pack.format,
@@ -229,8 +228,8 @@ function summarizeModpack(args: MockArgs): ModpackSummaryDto {
     loader: loaderDto(manifest.loader),
     pack_bytes: pack.packBytes,
     remote_files: manifest.remoteFiles,
-    mod_files: modrinth ? manifest.modFiles : null,
-    remote_bytes: modrinth ? manifest.remoteBytes : null,
+    mod_files: manifest.modFiles,
+    remote_bytes: manifest.remoteBytes,
     override_files: manifest.overrideFiles,
     override_bytes: manifest.overrideBytes,
   };

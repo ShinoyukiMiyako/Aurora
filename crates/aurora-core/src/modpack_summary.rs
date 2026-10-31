@@ -6,16 +6,19 @@
 //!
 //! 服务器不支持 Range（回 200 整包）时直接报错，不退回整包下载：那与导入时的下载重复，也违背
 //! 「不下载整包」的前提。ZIP64（中央目录或条目超过 4 GiB）同样报错：整合包远到不了这个体量。
+//!
+//! CurseForge 清单只有工程与文件 id，Mod 数与下载量要再问批量文件、批量工程两个接口，与导入同一套落点规则。
 
 use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
-use aurora_modpack::{PackFormat, PackLoader, PackManifest, RemoteFiles};
+use aurora_modpack::{PackFormat, PackLoader, PackManifest};
 use aurora_modplatform::Platform;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
+use crate::modpack::RemoteFacts;
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
 const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
@@ -46,9 +49,9 @@ pub struct ModpackSummary {
     pub pack_bytes: u64,
     /// 导入时要另外下载的远程文件数。
     pub remote_files: usize,
-    /// 远程文件里落进 `mods/` 的个数；CurseForge 清单只有工程与文件 id，分不出哪些是 Mod，为 `None`。
-    pub mod_files: Option<usize>,
-    /// 远程文件总字节数；CurseForge 清单不带大小，为 `None`。
+    /// 远程文件里落进 `mods/` 的个数；CurseForge 按工程大类认，与导入的落点一致。
+    pub mod_files: usize,
+    /// 远程文件总字节数；平台没给齐每个文件的大小时为 `None`。
     pub remote_bytes: Option<u64>,
     /// 包内自带的覆盖文件数。
     pub override_files: usize,
@@ -69,6 +72,14 @@ struct CentralEntry {
     local_offset: u64,
 }
 
+/// 按范围读出来的平台整合包：文件总长、清单与中央目录。
+#[derive(Debug)]
+struct RemotePack {
+    total: u64,
+    manifest: PackManifest,
+    entries: Vec<CentralEntry>,
+}
+
 impl Aurora {
     /// 平台上某个整合包版本的清单摘要，不下载整包。服务器不支持范围读取、包不是可读的 zip
     /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法时报整合包解析错误。
@@ -82,60 +93,73 @@ impl Aurora {
         let (_, task) = self
             .platform_file_task(platform, project_id, version_id, Path::new(""))
             .await?;
-        let url = task.url;
-        let http = self.http();
+        let pack = read_remote_pack(&self.http(), &task.url, platform).await?;
+        let remote = self.remote_facts(&pack.manifest.remote).await?;
+        Ok(pack.summarize(remote))
+    }
+}
 
-        let (tail, total) = fetch_range(&http, &url, format!("bytes=-{TAIL_BYTES}")).await?;
-        let tail_start = total
-            .checked_sub(tail.len() as u64)
-            .ok_or_else(|| remote(&url, "尾部范围比整个文件还长"))?;
-        let entries = central_directory(&http, &url, &tail, tail_start).await?;
+/// 取尾部找到中央目录，再只取清单那一个条目解析。
+async fn read_remote_pack(
+    http: &reqwest::Client,
+    url: &str,
+    platform: Platform,
+) -> Result<RemotePack> {
+    let (tail, total) = fetch_range(http, url, format!("bytes=-{TAIL_BYTES}")).await?;
+    let tail_start = total
+        .checked_sub(tail.len() as u64)
+        .ok_or_else(|| remote(url, "尾部范围比整个文件还长"))?;
+    let entries = central_directory(http, url, &tail, tail_start).await?;
 
-        let (manifest_name, parse): (&str, ManifestParser) = match platform {
-            Platform::Modrinth => ("modrinth.index.json", PackManifest::parse_modrinth),
-            Platform::CurseForge => ("manifest.json", PackManifest::parse_curseforge),
-        };
-        let entry = entries
-            .iter()
-            .find(|entry| entry.name == manifest_name)
-            .ok_or_else(|| remote(&url, format!("包里没有 {manifest_name}")))?;
-        let manifest = parse(&read_entry(&http, &url, entry).await?)?;
+    let (manifest_name, parse): (&str, ManifestParser) = match platform {
+        Platform::Modrinth => ("modrinth.index.json", PackManifest::parse_modrinth),
+        Platform::CurseForge => ("manifest.json", PackManifest::parse_curseforge),
+    };
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == manifest_name)
+        .ok_or_else(|| remote(url, format!("包里没有 {manifest_name}")))?;
+    let manifest = parse(&read_entry(http, url, entry).await?)?;
+    Ok(RemotePack {
+        total,
+        manifest,
+        entries,
+    })
+}
 
-        let overrides: Vec<&CentralEntry> = entries
+impl RemotePack {
+    fn summarize(self, remote: RemoteFacts) -> ModpackSummary {
+        let overrides: Vec<&CentralEntry> = self
+            .entries
             .iter()
             .filter(|entry| !entry.name.ends_with('/'))
             .filter(|entry| {
-                manifest
+                self.manifest
                     .override_layers
                     .iter()
                     .any(|layer| entry.name.starts_with(layer.as_str()))
             })
             .collect();
-        let (mod_files, remote_bytes) = match &manifest.remote {
-            RemoteFiles::Modrinth(files) => (
-                Some(
-                    files
-                        .iter()
-                        .filter(|file| file.path.as_str().starts_with("mods/"))
-                        .count(),
-                ),
-                Some(files.iter().map(|file| file.size).sum()),
-            ),
-            RemoteFiles::CurseForge(_) => (None, None),
-        };
-        Ok(ModpackSummary {
+        let override_files = overrides.len();
+        let override_bytes = overrides.iter().map(|entry| entry.uncompressed).sum();
+        let manifest = self.manifest;
+        ModpackSummary {
             format: manifest.format,
             remote_files: manifest.remote.len(),
             name: manifest.name,
             version: manifest.version,
             minecraft: manifest.minecraft,
             loader: manifest.loader,
-            pack_bytes: total,
-            mod_files,
-            remote_bytes,
-            override_files: overrides.len(),
-            override_bytes: overrides.iter().map(|entry| entry.uncompressed).sum(),
-        })
+            pack_bytes: self.total,
+            mod_files: remote
+                .destinations
+                .iter()
+                .filter(|path| path.starts_with("mods/"))
+                .count(),
+            remote_bytes: remote.bytes,
+            override_files,
+            override_bytes,
+        }
     }
 }
 
@@ -444,13 +468,129 @@ mod tests {
         assert_eq!(summary.minecraft, "1.21.1");
         assert_eq!(summary.pack_bytes, total as u64);
         assert_eq!(summary.remote_files, 3);
-        assert_eq!(summary.mod_files, Some(2), "只数落进 mods/ 的");
+        assert_eq!(summary.mod_files, 2, "只数落进 mods/ 的");
         assert_eq!(summary.remote_bytes, Some(10_600_000));
         assert_eq!(summary.override_files, 2, "目录条目不算文件");
         assert_eq!(summary.override_bytes, 300 + 10);
         // 包里有 4 MiB 的填充：取到的字节远小于整包，说明没有整包下载。
         let read = served.load(Ordering::SeqCst);
         assert!(read < total / 20, "读了 {read} / {total} 字节");
+    }
+
+    /// CurseForge 导出的 .zip：清单、一个覆盖文件，再塞一大块不会被读到的填充。
+    fn curseforge_zip(manifest: &serde_json::Value) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("filler.bin", stored).unwrap();
+        writer.write_all(&vec![7u8; 4 * 1024 * 1024]).unwrap();
+        writer
+            .start_file("overrides/config/create.toml", deflated)
+            .unwrap();
+        writer.write_all(&[b'c'; 120]).unwrap();
+        writer.start_file("manifest.json", deflated).unwrap();
+        writer.write_all(manifest.to_string().as_bytes()).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn curseforge_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "minecraft": { "version": "1.20.1", "modLoaders": [{ "id": "forge-47.2.0", "primary": true }] },
+            "manifestType": "minecraftModpack", "manifestVersion": 1,
+            "name": "All of Create", "version": "2.1", "author": "樱",
+            "files": [
+                { "projectID": 328085, "fileID": 4_712_001, "required": true },
+                { "projectID": 306612, "fileID": 4_712_002, "required": true },
+                { "projectID": 457570, "fileID": 4_712_003, "required": true },
+                { "projectID": 328085, "fileID": 4_712_004, "required": false }
+            ],
+            "overrides": "overrides"
+        })
+    }
+
+    fn curseforge_file(id: u32, mod_id: u32, name: &str, length: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "modId": mod_id, "displayName": name, "fileName": name,
+            "fileLength": length, "downloadUrl": format!("https://edge.forgecdn.net/files/{id}/{name}")
+        })
+    }
+
+    /// CurseForge 摘要：Mod 数按工程大类认（资源包不算），下载量由批量文件接口的大小加总；批量文件与批量
+    /// 工程接口各只问一次，作者停用的文件不进请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_summary_counts_mods_by_class_and_sums_file_lengths() {
+        use wiremock::matchers::body_json;
+
+        let server = MockServer::start().await;
+        let pack = curseforge_zip(&curseforge_manifest());
+        let total = pack.len();
+        Mock::given(method("GET"))
+            .and(path("/pack.zip"))
+            .respond_with(RangeServer {
+                body: Arc::new(pack),
+                ranges: true,
+                served_bytes: Arc::new(AtomicUsize::new(0)),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .and(body_json(
+                serde_json::json!({"fileIds": [4_712_001, 4_712_002, 4_712_003]}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    curseforge_file(4_712_001, 328085, "create-0.5.1.jar", 13_000_000),
+                    curseforge_file(4_712_002, 306612, "jei-15.2.jar", 1_250_000),
+                    curseforge_file(4_712_003, 457570, "create-textures.zip", 8_000_000),
+                ]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .and(body_json(
+                serde_json::json!({"modIds": [306612, 328085, 457570]}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                { "id": 328085, "name": "Create", "slug": "create", "summary": "", "classId": 6 },
+                { "id": 306612, "name": "JEI", "slug": "jei", "summary": "", "classId": 6 },
+                { "id": 457570, "name": "Textures", "slug": "textures", "summary": "", "classId": 12 }
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+        let client = aurora_modplatform::CurseForgeClient::new(http.clone(), "k")
+            .with_base_url(server.uri());
+
+        let pack = read_remote_pack(
+            &http,
+            &format!("{}/pack.zip", server.uri()),
+            Platform::CurseForge,
+        )
+        .await
+        .unwrap();
+        let aurora_modpack::RemoteFiles::CurseForge(refs) = &pack.manifest.remote else {
+            panic!("应读出 CurseForge 清单");
+        };
+        let remote = crate::modpack::curseforge_remote_facts(&client, refs)
+            .await
+            .unwrap();
+        let summary = pack.summarize(remote);
+
+        assert_eq!(summary.format, PackFormat::CurseForge);
+        assert_eq!(summary.name, "All of Create");
+        assert_eq!(summary.minecraft, "1.20.1");
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!(summary.remote_files, 3);
+        assert_eq!(summary.mod_files, 2, "资源包工程不算 Mod");
+        assert_eq!(summary.remote_bytes, Some(22_250_000));
+        assert_eq!((summary.override_files, summary.override_bytes), (1, 120));
+        server.verify().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

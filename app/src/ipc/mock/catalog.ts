@@ -18,7 +18,7 @@ export interface MockPackManifest {
   remoteFiles: number;
   /** 远程文件里落进 mods/ 的个数。 */
   modFiles: number;
-  /** 远程文件总字节；CurseForge 清单不带大小，摘要里照后端报 null，这里仍记一个值供进度事件用。 */
+  /** 远程文件总字节；摘要报它，导入的进度事件也按它走。 */
   remoteBytes: number;
   overrideFiles: number;
   overrideBytes: number;

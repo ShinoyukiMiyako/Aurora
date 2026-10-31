@@ -225,8 +225,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
         expect(instance?.mc_version).toBe(summary.minecraft);
         const mods = await listMods(name);
         expect(instance?.mod_count).toBe(mods.length);
-        if (summary.mod_files !== null) expect(mods).toHaveLength(summary.mod_files);
-        else expect(mods.length).toBeGreaterThan(0);
+        expect(mods).toHaveLength(summary.mod_files);
       }
     }
     expect(n).toBe(4);
