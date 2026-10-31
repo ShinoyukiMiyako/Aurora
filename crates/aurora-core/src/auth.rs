@@ -576,7 +576,7 @@ impl Aurora {
                 })
                 .await
             }
-            Err(AuthError::ReloginRequired) => self.expire(&account.uuid).await,
+            Err(AuthError::ReloginRequired) => self.expire(account).await,
             Err(err) => Err(err.into()),
         }
     }
@@ -592,7 +592,7 @@ impl Aurora {
             .await
         {
             Ok(resp) => resp,
-            Err(err) if is_rejected_token(&err) => return self.expire(&account.uuid).await,
+            Err(err) if is_rejected_token(&err) => return self.expire(account).await,
             Err(err) => return Err(err.into()),
         };
         let skin = profile_skin_or_warn(&client, &account.uuid).await;
@@ -619,17 +619,31 @@ impl Aurora {
         .await
     }
 
-    /// 把账户落成「需要重新登录」，然后报 [`AuthError::ReloginRequired`]。
-    async fn expire(&self, uuid: &str) -> Result<Account> {
-        let target = uuid.to_owned();
-        let expired = self
+    /// 把账户落成「需要重新登录」，然后报 [`AuthError::ReloginRequired`]。`rejected` 是这次续期
+    /// 拿去用、被服务器拒绝的那份记录。
+    ///
+    /// 只在库里的凭据仍是被拒的那一份时才落：续期在网络上等回音的这段时间里用户可能已经重新登录，
+    /// 库里换成了新凭据，被拒的只是旧的那份，新登录的账户不能跟着被标成失效。
+    async fn expire(&self, rejected: &Account) -> Result<Account> {
+        let target = rejected.uuid.clone();
+        let rejected_credentials = rejected.credentials.clone();
+        let (stored, expired) = self
             .blocking(move |aurora| {
-                aurora.update_credential_account(&target, |stored| {
-                    stored.status = AccountStatus::Expired;
-                })
+                let mut expired = false;
+                let stored = aurora.update_credential_account(&target, |stored| {
+                    if stored.credentials == rejected_credentials {
+                        stored.status = AccountStatus::Expired;
+                        expired = true;
+                    }
+                })?;
+                Ok((stored, expired))
             })
             .await?;
-        tracing::warn!(uuid = %expired.uuid, name = %expired.name, "账户凭据已被服务器判定失效，标记为需要重新登录");
+        if expired {
+            tracing::warn!(uuid = %stored.uuid, name = %stored.name, "账户凭据已被服务器判定失效，标记为需要重新登录");
+        } else {
+            tracing::info!(uuid = %stored.uuid, name = %stored.name, "被拒的是重新登录之前的旧凭据，库里的新凭据不受影响，不标记失效");
+        }
         Err(AuthError::ReloginRequired.into())
     }
 
@@ -1209,6 +1223,64 @@ mod tests {
             // 手动刷新同样落成失效。
             let err = aurora.refresh_account(MS_UUID).await.unwrap_err();
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
+        }
+
+        /// 续期在网络上等回音的时候用户重新登录了同一个账户：旧 refresh token 随后被判失效，
+        /// 但库里已换成新登录的凭据，新账户不能跟着被标成需要重新登录。
+        /// 把 expire 里「凭据仍是被拒的那份」这一判断去掉，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rejection_of_old_credentials_does_not_expire_a_fresh_relogin() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(
+                    ResponseTemplate::new(400)
+                        .set_body_json(json!({
+                            "error": "invalid_grant", "error_description": "refresh token 已失效"
+                        }))
+                        .set_delay(Duration::from_millis(400)),
+                )
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let ms_account = |refresh: &str, expires_at: u64| {
+                Account::new(
+                    MS_UUID,
+                    "PetalPlayer",
+                    AccountCredentials::Microsoft(MicrosoftCredentials {
+                        refresh_token: refresh.into(),
+                        minecraft_token: Some("MC".into()),
+                        minecraft_expires_at: Some(expires_at),
+                    }),
+                )
+            };
+            let stale = aurora.store_login(ms_account("dead-refresh", 1)).unwrap();
+
+            let relogin = {
+                let aurora = aurora.clone();
+                let fresh = ms_account("new-refresh", u64::MAX);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::task::spawn_blocking(move || aurora.store_login(fresh))
+                        .await
+                        .unwrap()
+                        .unwrap()
+                })
+            };
+            let err = aurora.ensure_account_fresh(&stale).await.unwrap_err();
+            assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
+            relogin.await.unwrap();
+
+            let stored = aurora_at(tmp.path())
+                .find_account(MS_UUID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.status, AccountStatus::Ok, "新登录的账户被标成了失效");
+            match &stored.credentials {
+                AccountCredentials::Microsoft(c) => assert_eq!(c.refresh_token, "new-refresh"),
+                other => panic!("期望 Microsoft 凭据，得到 {other:?}"),
+            }
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
