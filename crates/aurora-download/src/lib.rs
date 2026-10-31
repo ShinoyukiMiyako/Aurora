@@ -10,6 +10,7 @@
 //! - [`SourcePlan`] / [`SourceResolver`]：官方源与 BMCLAPI 镜像的优先级调度与 URL 解析。
 //! - [`SourceSpeedCache`]：并发测各源首字节时间排出先后，结论在进程内缓存 30 分钟。
 //! - [`SourceHealth`]：跨文件的源健康表，连续失败的主机熔断沉底，坏源只付一次重试的代价。
+//! - [`WatchdogConfig`]：大文件的吞吐看门狗，终点慢到窗口平均低于阈值就向原地址换一个终点续传。
 //! - [`CancellationToken`]：挂到 [`DownloadPool`] 上，令牌触发后整批在文件粒度停下并清理临时文件。
 //!
 //! 所有失败归口到 [`Error`]，可重试性由 [`aurora_base::retry::RetryableError`] 精确分级。
@@ -41,6 +42,7 @@ pub mod progress;
 pub mod source;
 pub mod speed;
 pub mod task;
+pub mod watchdog;
 
 pub use chunk::{Chunk, ChunkConfig, ChunkPlan};
 pub use engine::{DownloadConfig, Downloader};
@@ -51,6 +53,7 @@ pub use progress::DownloadProgress;
 pub use source::{MirrorResolver, SourcePlan, SourceResolver, order_by_latency, probe_latencies};
 pub use speed::SourceSpeedCache;
 pub use task::DownloadTask;
+pub use watchdog::WatchdogConfig;
 
 // 下游可直接从本 crate 取镜像源枚举，无需再显式依赖 aurora-base。
 pub use aurora_base::mirror::MirrorSource;

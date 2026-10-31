@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
     CancellationToken, ChunkConfig, DownloadConfig, DownloadPool, DownloadProgress, DownloadTask,
-    Downloader, MirrorSource, SourcePlan,
+    Downloader, MirrorSource, SourcePlan, WatchdogConfig,
 };
 use tokio::sync::watch;
 use wiremock::matchers::{method, path};
@@ -33,6 +33,7 @@ fn config(chunk: ChunkConfig) -> DownloadConfig {
         // 默认退避（500 ms 起）保留：取消若落在退避里也必须及时返回。
         retry: RetryPolicy::default(),
         sources: SourcePlan::new(vec![MirrorSource::Official]),
+        watchdog: WatchdogConfig::default(),
     }
 }
 
