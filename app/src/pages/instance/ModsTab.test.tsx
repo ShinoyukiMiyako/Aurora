@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Mod 管理的安装时间与新增标注：整页挂上实例详情的 Mod 标签，经替身 IPC 断言发出的命令与参数。
+// Mod 管理的批量操作、忽略更新、安装时间与更新预览：整页挂上实例详情的 Mod 标签，经替身 IPC 断言发出的命令与参数。
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -7,11 +7,11 @@ import type { InstanceDto } from "../../ipc/instances";
 import type { InstalledMod, ModSource, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
-import { LauncherProvider } from "../../state/launcher";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -24,12 +24,14 @@ const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 
 let view: Rendered | undefined;
 let nav: NavApi;
+let launcher: LauncherApi;
 let instances: InstanceDto[];
 let mods: InstalledMod[];
 let updates: UpdateCandidate[];
 
 function Probe() {
   nav = useNav();
+  launcher = useLauncher();
   return null;
 }
 
@@ -74,8 +76,42 @@ function textOf(node: Node): string {
   return t;
 }
 
+const nameOf = (el: Element): string => {
+  const label = el.getAttribute("aria-label");
+  return label === null ? textOf(el) : label;
+};
+
+function find(role: string, name: string, root: ParentNode = document): HTMLElement {
+  const found = [...root.querySelectorAll<HTMLElement>(`[role="${role}"]`)].find((el) => nameOf(el) === name);
+  if (found === undefined) throw new Error(`找不到 role=${role} 名为 ${name} 的元素`);
+  return found;
+}
+
+function button(name: string, root: ParentNode = document): HTMLButtonElement {
+  const found = [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => nameOf(b) === name || b.textContent === name);
+  if (found === undefined) throw new Error(`找不到按钮 ${name}`);
+  return found;
+}
+
+function dialog(): HTMLElement {
+  const all = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')];
+  const last = all.at(-1);
+  if (last === undefined) throw new Error("没有打开的对话框");
+  return last;
+}
+
 function click(el: HTMLElement) {
   act(() => el.click());
+}
+
+function typeInto(el: HTMLInputElement, value: string) {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+  if (descriptor === undefined || descriptor.set === undefined) throw new Error("取不到 value 的 setter");
+  const setter = descriptor.set;
+  act(() => {
+    setter.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
 }
 
 const grid = (): HTMLElement => {
@@ -92,6 +128,8 @@ function gridNames(): string[] {
     return textOf(name);
   });
 }
+
+const toasts = () => launcher.state.toasts.map((t) => [t.tone, t.title, t.body]);
 
 function source(projectId: string, over: Partial<ModSource> = {}): ModSource {
   return {
@@ -197,5 +235,160 @@ describe("安装时间与新增标注", () => {
     expect(gridNames()).toEqual(["Sodium", "Handmade", "Fabric API", "Iris"]);
     click(installed);
     expect(gridNames()).toEqual(["Fabric API", "Iris", "Handmade", "Sodium"]);
+  });
+});
+
+describe("批量操作", () => {
+  it("勾选 2 行：工具条换成「已选 2 个」的批量条；点「停用」只把这 2 个文件名交给 set_mods_enabled，结束后选择清空", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Handmade"));
+    expect(textOf(document.body)).toContain("已选 2 个");
+    expect(document.querySelector('input[placeholder="搜索名称、作者或文件名"]')).toBeNull();
+
+    click(button("停用"));
+    await flush();
+    expect(callsOf(ipc, "set_mods_enabled")).toEqual([{ versionId: ID, fileNames: ["handmade.jar", "sodium.jar"], enabled: false }]);
+    expect(toasts()).toContainEqual(["info", "已停用 2 个 Mod", "文件名后加了 .disabled，随时可以再启用"]);
+    expect(textOf(document.body)).not.toContain("已选");
+    expect(document.querySelector('input[placeholder="搜索名称、作者或文件名"]')).not.toBeNull();
+  });
+
+  it("表头三态：选一行为半选，点表头选中列出的全部，再点全部取消；「取消选择」换回工具条", async () => {
+    await open();
+    const header = () => find("checkbox", "选择列出的全部 Mod");
+    expect(header().getAttribute("aria-checked")).toBe("false");
+    click(find("checkbox", "选择 Iris"));
+    expect(header().getAttribute("aria-checked")).toBe("mixed");
+    click(header());
+    expect(header().getAttribute("aria-checked")).toBe("true");
+    expect(textOf(document.body)).toContain("已选 4 个");
+    click(header());
+    expect(textOf(document.body)).not.toContain("已选");
+
+    click(find("checkbox", "选择 Iris"));
+    click(button("取消选择"));
+    expect(textOf(document.body)).not.toContain("已选");
+    expect(find("checkbox", "选择 Iris").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("选择随列表重扫剪枝：文件被挪走后不再列出的行从选择里剔除，放回来也不会自动选上", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Handmade"));
+    expect(textOf(document.body)).toContain("已选 2 个");
+    const handmade = mods[3];
+    mods = mods.filter((m) => m !== handmade);
+    // 窗口重新获得焦点时重扫 mods 目录
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flush();
+    expect(textOf(document.body)).toContain("已选 1 个");
+    mods = [...mods, handmade];
+    act(() => window.dispatchEvent(new Event("focus")));
+    await flush();
+    expect(textOf(document.body)).toContain("已选 1 个");
+    expect(find("checkbox", "选择 Handmade").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("选择随搜索剪枝：搜到的行里勾选，表头全选只作用于列出的行", async () => {
+    await open();
+    const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索名称、作者或文件名"]');
+    if (search === null) throw new Error("没有搜索框");
+    typeInto(search, "i");
+    expect(gridNames()).toEqual(["Fabric API", "Iris", "Sodium"]);
+    typeInto(search, "iri");
+    expect(gridNames()).toEqual(["Iris"]);
+    click(find("checkbox", "选择列出的全部 Mod"));
+    expect(textOf(document.body)).toContain("已选 1 个");
+    click(button("停用"));
+    await flush();
+    expect(callsOf(ipc, "set_mods_enabled")).toEqual([{ versionId: ID, fileNames: ["iris.jar"], enabled: false }]);
+  });
+
+  it("禁用原因：选中的都已启用时「启用」带原因禁用，选中的都没有更新时「更新」同样禁用", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Handmade"));
+    expect(button("启用").getAttribute("aria-disabled")).toBe("true");
+    expect(button("更新").getAttribute("aria-disabled")).toBe("true");
+    expect(button("停用").getAttribute("aria-disabled")).toBeNull();
+    click(button("启用"));
+    await flush();
+    expect(callsOf(ipc, "set_mods_enabled")).toEqual([]);
+  });
+
+  it("批量移除：危险确认写个数、总大小与没被一起选中的前置关系，确认后逐项移除并清空选择", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Handmade"));
+    click(button("移除"));
+    await flush();
+    expect(dialog().querySelector("h2")?.textContent).toBe("移除 2 个 Mod？");
+    expect(textOf(dialog())).toContain("会删除选中的 2 个文件（共 2.0 MB），这一步不能回滚。以后可以从发现页重新安装。");
+    expect(textOf(dialog())).toContain("它们带进来的前置 Fabric API 会保留，如果不再需要可以单独移除。");
+    click(button("移除", dialog()));
+    await flush();
+    expect(callsOf(ipc, "remove_mod")).toEqual([
+      { versionId: ID, fileName: "handmade.jar" },
+      { versionId: ID, fileName: "sodium.jar" },
+    ]);
+    expect(toasts()).toContainEqual(["info", "已移除 2 个 Mod", undefined]);
+    expect(textOf(document.body)).not.toContain("已选");
+  });
+
+  it("批量移除取消确认：不发命令，选择保留", async () => {
+    await open();
+    click(find("checkbox", "选择 Fabric API"));
+    click(button("移除"));
+    await flush();
+    expect(textOf(dialog())).toContain("Sodium 把其中的 Mod 作为前置，移除后可能无法加载。");
+    click(button("取消", dialog()));
+    await flush();
+    expect(callsOf(ipc, "remove_mod")).toEqual([]);
+    expect(textOf(document.body)).toContain("已选 1 个");
+  });
+});
+
+describe("忽略更新", () => {
+  it("被忽略的行带「不检查更新」，筛选里多一项；更多菜单恢复检查，本地文件的忽略项禁用", async () => {
+    await open();
+    expect(textOf(grid())).toContain("不检查更新");
+    click(find("radio", "不检查更新，1 个"));
+    expect(gridNames()).toEqual(["Iris"]);
+
+    click(button("Iris 的更多操作"));
+    const restore = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "恢复检查更新");
+    if (restore === undefined) throw new Error("被忽略的 Mod 菜单里没有「恢复检查更新」");
+    // 后端改好记录后列表重扫出来的就是恢复后的样子
+    mods = mods.map((m) => (m.file_name === "iris.jar" && m.source !== null ? { ...m, source: { ...m.source, update_hold: null } } : m));
+    click(restore);
+    await flush();
+    expect(callsOf(ipc, "set_mod_update_hold")).toEqual([{ versionId: ID, fileName: "iris.jar", hold: null }]);
+    expect(toasts()).toContainEqual(["info", "已恢复检查 Iris 的更新", undefined]);
+    // 不检查更新数到 0：筛选项消失，回到「全部」
+    expect([...document.querySelectorAll('[role="radio"]')].map(nameOf)).toEqual(["全部，4 个", "已启用，4 个", "已停用，0 个", "可更新，0 个"]);
+    expect(find("radio", "全部，4 个").getAttribute("aria-checked")).toBe("true");
+    expect(gridNames()).toEqual(["Fabric API", "Handmade", "Iris", "Sodium"]);
+    expect(textOf(grid())).not.toContain("不检查更新");
+  });
+
+  it("忽略一个有来源的 Mod：带上 ignored 调后端并说明怎么恢复；本地文件的忽略项禁用，点了不发命令", async () => {
+    await open();
+    click(button("Sodium 的更多操作"));
+    const ignore = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "忽略这个 Mod 的更新");
+    if (ignore === undefined) throw new Error("菜单里没有「忽略这个 Mod 的更新」");
+    click(ignore);
+    await flush();
+    expect(callsOf(ipc, "set_mod_update_hold")).toEqual([{ versionId: ID, fileName: "sodium.jar", hold: { kind: "ignored" } }]);
+    expect(toasts()).toContainEqual(["info", "已忽略 Sodium 的更新", "检查更新时会跳过它，可以在更多菜单里恢复"]);
+
+    click(button("Handmade 的更多操作"));
+    // 上一个菜单还在播退场：取最后打开的那个菜单里的项
+    const local = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].filter((el) => textOf(el) === "忽略这个 Mod 的更新").at(-1);
+    if (local === undefined) throw new Error("本地文件的菜单里没有忽略项");
+    expect(local.getAttribute("aria-disabled")).toBe("true");
+    click(local);
+    await flush();
+    expect(callsOf(ipc, "set_mod_update_hold")).toHaveLength(1);
   });
 });

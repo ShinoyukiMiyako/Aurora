@@ -524,6 +524,32 @@
   white-space: nowrap;
 }
 
+/* 批量操作条与工具条是同一个吸顶容器，控件同为 md 高，互换时高度不变 */
+.batchCount {
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.batchActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.batchClear {
+  margin-left: auto;
+}
+
+/* compact 下计数与「取消选择」留在第一行，按钮组换到第二行右对齐 */
+:root[data-sk-tier="compact"] .batchActions {
+  order: 3;
+  flex-basis: 100%;
+  justify-content: flex-end;
+}
+
 /* ---------------------------------------------------------------- 设置 */
 
 .settingsGrid {

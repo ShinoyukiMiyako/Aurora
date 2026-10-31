@@ -653,6 +653,7 @@ export const ACTION_ERROR = {
   toggleMod: "Mod 开关没有生效",
   removeMod: "没能移除 Mod",
   updateMods: "没能检查 Mod 更新",
+  updateHold: "更新检查设置没有保存",
   install: "没能加入下载队列",
   probeNetwork: "没能检测网络连接",
   rollback: "没能回滚",
