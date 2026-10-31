@@ -3,9 +3,10 @@
 //! 来源有两种：平台上某整合包的一个版本（先下载到缓存目录），或用户选的本地 `.mrpack` / `.zip`。
 //! 导入总是新建一个实例目录 `versions/<实例名>/`，按顺序：
 //!
-//! 1. 读清单；CurseForge 包先把全部文件 id 换成下载地址——有作者禁止第三方分发的文件就在这一步
-//!    整体报错，不先装几百 MB 游戏再告诉用户装不完。
-//! 2. 校验实例名并原子地建目录（同名即报错），写下带任务 id 的未完成标记。
+//! 1. 读清单、校验实例名并查重；CurseForge 包先把全部文件 id 换成下载地址——有作者禁止第三方分发
+//!    的文件就在这一步整体报错，不先装几百 MB 游戏再告诉用户装不完。这一步不动游戏目录
+//!    （[`Aurora::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
+//! 2. 原子地建目录（同名即报错），写下带任务 id 的未完成标记（[`Aurora::import_modpack`] 从这里开始）。
 //! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。
 //! 4. 在实例目录写一份以实例名为 id 的版本 JSON：有加载器时是加载器 JSON 的副本，原版时只
 //!    `inheritsFrom` 原版。启动按 `inheritsFrom` 找客户端 jar，实例目录里不需要 jar。
@@ -202,6 +203,43 @@ struct RemoteDownload {
     fallbacks: Vec<String>,
 }
 
+/// 准备好、还没落盘的一次整合包导入：包已在本地、清单已读、实例名已定并查过重，游戏目录还没动。
+///
+/// 导入拆成准备与落盘两步，是为了让调用方在实例名定下之后、建目录之前占住这个名字：平台整合包
+/// 要先下载下来才读得到清单里的名字，而目录一旦建出来，启动、改名、删除就都能看见它。
+#[derive(Debug)]
+pub struct PreparedModpack {
+    source: ModpackSource,
+    name: String,
+    pack_path: PathBuf,
+    archive: PackArchive,
+    remote: Vec<RemoteDownload>,
+    /// 平台整合包下载到的缓存目录；本地文件为 `None`。
+    cache_dir: Option<PathBuf>,
+}
+
+impl PreparedModpack {
+    /// 导入后的实例名（也是版本 id）。
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// 不导入了：删掉平台整合包的下载缓存，本地文件不动。
+    pub async fn discard(self) {
+        remove_pack_cache(self.cache_dir.as_deref()).await;
+    }
+}
+
+/// 下载来的包只是导入的中间产物；删不掉不影响任何实例，留日志即可。
+async fn remove_pack_cache(dir: Option<&Path>) {
+    let Some(dir) = dir else {
+        return;
+    };
+    if let Err(err) = tokio::fs::remove_dir_all(dir).await {
+        tracing::warn!(dir = %dir.display(), error = %err, "整合包下载缓存未能删除");
+    }
+}
+
 impl Aurora {
     /// 预览本地整合包文件（只读清单与条目表，不解压、不触网）。
     pub async fn preview_modpack_file(&self, path: &Path) -> Result<ModpackPreview> {
@@ -226,8 +264,8 @@ impl Aurora {
         })
     }
 
-    /// 把整合包导入为新实例。`name` 缺省用整合包自己的名字；`task_id` 写进未完成标记，
-    /// 供 [`Aurora::discard_incomplete_modpack`] 在任务被强行放弃后找回并清理。
+    /// 把整合包导入为新实例：[`Aurora::prepare_modpack`] 之后紧接 [`Aurora::import_modpack`]。
+    /// 需要在建目录前占住实例名的调用方分开调用这两步。
     pub async fn install_modpack(
         &self,
         source: &ModpackSource,
@@ -235,29 +273,72 @@ impl Aurora {
         task_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ModpackInstallOutcome> {
-        match source {
-            ModpackSource::File { path } => {
-                self.install_modpack_from(path, source, name, task_id, events)
-                    .await
-            }
+        let prepared = self.prepare_modpack(source, name, events).await?;
+        self.import_modpack(prepared, task_id, events).await
+    }
+
+    /// 导入的第一步：拿到整合包（平台整合包先下载到缓存目录）、读清单、定下实例名并查重，把远程
+    /// 文件换成下载任务（CurseForge 禁止分发的文件在这里整体报错）。`name` 缺省用整合包自己的名字。
+    ///
+    /// 不动游戏目录。之后交给 [`Aurora::import_modpack`]，不导入了就 [`PreparedModpack::discard`]。
+    pub async fn prepare_modpack(
+        &self,
+        source: &ModpackSource,
+        name: Option<&str>,
+        events: Option<&EventSink>,
+    ) -> Result<PreparedModpack> {
+        let (pack_path, cache_dir) = match source {
+            ModpackSource::File { path } => (path.clone(), None),
             ModpackSource::Platform {
                 platform,
                 project_id,
                 version_id,
             } => {
-                let (pack, cache_dir) = self
+                let (pack, dir) = self
                     .download_platform_pack(*platform, project_id, version_id, events)
                     .await?;
-                let outcome = self
-                    .install_modpack_from(&pack, source, name, task_id, events)
-                    .await;
-                // 下载来的包只是安装的中间产物；删不掉不影响已装好的实例，留日志即可。
-                if let Err(err) = tokio::fs::remove_dir_all(&cache_dir).await {
-                    tracing::warn!(dir = %cache_dir.display(), error = %err, "整合包下载缓存未能删除");
-                }
-                outcome
+                (pack, Some(dir))
+            }
+        };
+        match self.read_prepared(source, name, &pack_path, events).await {
+            Ok((name, archive, remote)) => Ok(PreparedModpack {
+                source: source.clone(),
+                name,
+                pack_path,
+                archive,
+                remote,
+                cache_dir,
+            }),
+            Err(err) => {
+                remove_pack_cache(cache_dir.as_deref()).await;
+                Err(err)
             }
         }
+    }
+
+    /// 导入的第二步：建实例目录、写下带 `task_id` 的未完成标记，装游戏与加载器、下载远程文件、
+    /// 解出覆盖文件、写整合包信息。任何一步失败都删掉这个实例目录；标记里的任务 id 供
+    /// [`Aurora::discard_incomplete_modpack`] 在任务被强行放弃后找回并清理。平台整合包的下载缓存
+    /// 不论成败都删掉。
+    pub async fn import_modpack(
+        &self,
+        prepared: PreparedModpack,
+        task_id: &str,
+        events: Option<&EventSink>,
+    ) -> Result<ModpackInstallOutcome> {
+        let PreparedModpack {
+            source,
+            name,
+            pack_path,
+            archive,
+            remote,
+            cache_dir,
+        } = prepared;
+        let outcome = self
+            .import_into_new_dir(&archive, &pack_path, &source, name, remote, task_id, events)
+            .await;
+        remove_pack_cache(cache_dir.as_deref()).await;
+        outcome
     }
 
     /// 删掉 `task_id` 这次导入留下的未完成实例，返回删掉的实例名。
@@ -312,14 +393,14 @@ impl Aurora {
         Ok(None)
     }
 
-    async fn install_modpack_from(
+    /// 读清单、定实例名并查重、把远程文件换成下载任务。
+    async fn read_prepared(
         &self,
-        pack_path: &Path,
         source: &ModpackSource,
         name: Option<&str>,
-        task_id: &str,
+        pack_path: &Path,
         events: Option<&EventSink>,
-    ) -> Result<ModpackInstallOutcome> {
+    ) -> Result<(String, PackArchive, Vec<RemoteDownload>)> {
         let archive = read_pack_blocking(pack_path.to_path_buf()).await?;
         let manifest = &archive.manifest;
         let requested = name.unwrap_or(&manifest.name);
@@ -342,12 +423,27 @@ impl Aurora {
         let remote = self
             .remote_downloads(&manifest.remote, &version_dir)
             .await?;
+        tracing::debug!(%name, ?source, remote = remote.len(), "整合包导入已准备好");
+        Ok((name, archive, remote))
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn import_into_new_dir(
+        &self,
+        archive: &PackArchive,
+        pack_path: &Path,
+        source: &ModpackSource,
+        name: String,
+        remote: Vec<RemoteDownload>,
+        task_id: &str,
+        events: Option<&EventSink>,
+    ) -> Result<ModpackInstallOutcome> {
+        let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
         create_instance_dir(&version_dir, &name).await?;
         write_marker(&version_dir, task_id).await?;
         let populated = self
             .populate_instance(
-                &archive,
+                archive,
                 pack_path,
                 source,
                 &name,
@@ -1201,6 +1297,72 @@ mod tests {
             .join("modpacks")
             .join("modrinth-pv1");
         assert!(!cache.exists(), "下载缓存应在导入后删除");
+    }
+
+    /// 准备一步不动游戏目录：名字已定、平台包已下到缓存，但实例目录还没建；放弃时缓存删掉。
+    /// 准备失败（名字不合法）时同样不留缓存。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prepare_leaves_the_game_dir_alone_and_discard_removes_the_cache() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.mrpack");
+        write_pack(
+            &built,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[],
+        );
+        let bytes = std::fs::read(&built).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/version/pv2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pv2", "project_id": "proj", "name": "1.0.0", "version_number": "1.0.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {"sha1": sha1_hex(&bytes)},
+                           "url": format!("{}/files/pack.mrpack", server.uri()),
+                           "filename": "pack.mrpack", "primary": true, "size": bytes.len()}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/files/pack.mrpack"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+            .mount(&server)
+            .await;
+        let aurora = aurora(tmp.path(), &server);
+        let source = ModpackSource::Platform {
+            platform: Platform::Modrinth,
+            project_id: "proj".into(),
+            version_id: "pv2".into(),
+        };
+        let cache = tmp
+            .path()
+            .join("data")
+            .join("cache")
+            .join("modpacks")
+            .join("modrinth-pv2");
+
+        let prepared = aurora.prepare_modpack(&source, None, None).await.unwrap();
+        assert_eq!(prepared.name(), "测试包");
+        assert!(cache.join("pack.mrpack").is_file(), "平台包应已下到缓存");
+        assert!(
+            !aurora.game_dir().join("versions").join("测试包").exists(),
+            "准备一步不建实例目录"
+        );
+        prepared.discard().await;
+        assert!(!cache.exists(), "放弃导入时删掉下载缓存");
+
+        let err = aurora
+            .prepare_modpack(&source, Some("a/b"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::InstanceNameInvalid {
+                rule: InstanceNameRule::IllegalChar,
+                ..
+            }
+        ));
+        assert!(!cache.exists(), "准备失败也不留下载缓存");
     }
 
     /// 装游戏失败时整个实例目录删掉；同名（不区分大小写）与和游戏版本同名都在动手前拒绝，已有目录不动。

@@ -514,6 +514,7 @@ dependencies = [
  "webview2-com",
  "windows-core 0.61.2",
  "wiremock",
+ "zip 8.6.0",
 ]
 
 [[package]]

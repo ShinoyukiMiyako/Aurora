@@ -53,3 +53,5 @@ windows-core = "0.61"
 tempfile = "3"
 # 命令层集成测试用本地 mock 端点（设备码登录、版本清单）。
 wiremock = "0.6"
+# 整合包导入的命令层测试要现场打一个 .mrpack；特性与 aurora-modpack 一致，不引入 C 依赖的压缩后端。
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

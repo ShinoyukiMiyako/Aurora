@@ -83,7 +83,7 @@ pub use ledger::{Ledger, LedgerEntry, LedgerStore};
 pub use modfs::is_mod_file_busy;
 pub use modpack::{
     INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
-    ModpackPreview, ModpackSource, read_instance_modpack, validate_instance_name,
+    ModpackPreview, ModpackSource, PreparedModpack, read_instance_modpack, validate_instance_name,
 };
 pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
 pub use modversions::ProjectInfo;

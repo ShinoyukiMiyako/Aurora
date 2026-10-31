@@ -1,6 +1,7 @@
 //! 整合包：预览本地整合包文件，把平台或本地整合包导入为新实例。
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use aurora_core::{
     EventSink, InstanceModpack, ModpackInstallOutcome, ModpackPreview, ModpackSource, PackFormat,
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::commands::discover::parse_platform;
+use crate::commands::instances::{InstanceActivity, InstanceGuard, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -78,7 +80,11 @@ pub(crate) async fn preview_modpack_with(
 
 /// 长任务：把整合包导入为新实例。`name` 缺省用整合包自己的名字。进度经 core-event 推送并带
 /// `task_id`，可用 cancel_task 取消；失败或取消后不留半成品实例。
+///
+/// 实例名一定下来（平台整合包要先下载完才知道清单里的名字）就以「安装」占住，直到导入结束、半成品
+/// 清理完：这期间启动、改名、删除这个实例都报 `instance_busy`，列表里它的 activity 为 installing。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn install_modpack(
     app: AppHandle,
     task_id: String,
@@ -86,11 +92,13 @@ pub async fn install_modpack(
     name: Option<String>,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<ModpackInstallOutcomeDto, CommandError> {
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = install_modpack_with(
         &facade,
         &tasks,
+        &locks,
         &task_id,
         source,
         name.as_deref(),
@@ -105,6 +113,7 @@ pub async fn install_modpack(
 pub(crate) async fn install_modpack_with(
     facade: &Facade,
     tasks: &TaskRegistry,
+    locks: &InstanceLocks,
     task_id: &str,
     source: ModpackSourceArg,
     name: Option<&str>,
@@ -114,10 +123,22 @@ pub(crate) async fn install_modpack_with(
     let source = parse_source(source)?;
     let task = tasks.register(task_id)?;
     let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    // 占用守卫放在导入的 future 之外：取消宽限期满时 run 会丢弃 future，实例名得一直占到下面按标记
+    // 清理完半成品，否则清理前的空档里别的命令就能动这个目录。
+    let reserved: Mutex<Option<InstanceGuard>> = Mutex::new(None);
     let result = task
         .run(async {
+            let prepared = aurora.prepare_modpack(&source, name, Some(events)).await?;
+            let guard = match locks.acquire(prepared.name(), InstanceActivity::Installing) {
+                Ok(guard) => guard,
+                Err(busy) => {
+                    prepared.discard().await;
+                    return Err(busy);
+                }
+            };
+            *reserved.lock().expect("整合包导入的占用槽锁已中毒") = Some(guard);
             Ok(aurora
-                .install_modpack(&source, name, task_id, Some(events))
+                .import_modpack(prepared, task_id, Some(events))
                 .await?)
         })
         .await;
@@ -272,9 +293,17 @@ mod tests {
         let facade = facade_in(dir.path(), "http://127.0.0.1:9");
         let registry = TaskRegistry::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-        let err = install_modpack_with(&facade, &registry, "mp", file("  "), None, &sink)
-            .await
-            .unwrap_err();
+        let err = install_modpack_with(
+            &facade,
+            &registry,
+            &InstanceLocks::default(),
+            "mp",
+            file("  "),
+            None,
+            &sink,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INVALID_ARGUMENT);
         assert!(!registry.is_running("mp"));
     }
@@ -291,6 +320,7 @@ mod tests {
         let err = install_modpack_with(
             &facade,
             &registry,
+            &InstanceLocks::default(),
             "mp#1",
             file(&missing.display().to_string()),
             None,
@@ -345,6 +375,7 @@ mod tests {
         let err = install_modpack_with(
             &facade,
             &registry,
+            &InstanceLocks::default(),
             "mp#2",
             file(&missing.display().to_string()),
             None,
@@ -355,6 +386,174 @@ mod tests {
         assert_eq!(err.code, code::IO);
         assert!(!versions.join("半成品").exists());
         assert!(versions.join("别人的").exists());
+    }
+
+    /// 只装原版 test、没有远程文件与覆盖文件的本地整合包。
+    fn write_vanilla_pack(dest: &Path) {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(dest).unwrap());
+        writer
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        let index = serde_json::json!({
+            "formatVersion": 1, "game": "minecraft", "versionId": "1.0.0", "name": "测试包",
+            "files": [], "dependencies": {"minecraft": "test"}
+        });
+        writer.write_all(index.to_string().as_bytes()).unwrap();
+        writer.finish().unwrap();
+    }
+
+    /// 测试里走不到真正的删除：实例被占着时删除命令必须在动目录之前就拒绝。
+    struct NeverDispose;
+
+    impl aurora_core::Disposer for NeverDispose {
+        fn dispose(&self, dir: &Path) -> Result<(), aurora_core::InstanceError> {
+            panic!("导入中的实例不该被删除：{}", dir.display());
+        }
+    }
+
+    /// 目标实例名正被别的事占着（例如同名改名进行中）时，导入在建目录前以 instance_busy 拒绝，
+    /// 不留下实例目录，别人的占用原样保留。
+    #[tokio::test]
+    async fn import_into_a_busy_name_is_refused_before_creating_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let pack = dir.path().join("pack.mrpack");
+        write_vanilla_pack(&pack);
+        let _held = locks.acquire("撞名", InstanceActivity::Renaming).unwrap();
+
+        let err = install_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "mp-busy",
+            file(&pack.display().to_string()),
+            Some(" 撞名 "),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap()["activity"],
+            serde_json::json!("renaming")
+        );
+        assert!(!dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("撞名")
+            .exists());
+        assert!(!registry.is_running("mp-busy"));
+        assert_eq!(locks.activity("撞名"), Some(InstanceActivity::Renaming));
+    }
+
+    /// 导入进行中实例名一直以「安装」占着：列表里 activity 为 installing，删除与改名报 instance_busy，
+    /// 目录不动；取消后半成品删掉，占用随之释放。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_holds_the_instance_name_until_it_is_cleaned_up() {
+        use crate::commands::instances::{
+            delete_instance_with, list_instances_with, rename_instance_with,
+        };
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        // 原版 JSON 迟迟不来：导入停在「实例目录已建好、游戏还没装完」的中途。
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"id":"test","type":"release","mainClass":"M"}"#)
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = AuroraConfig {
+            game_directory: Some(dir.path().join(".minecraft")),
+            download_source: DownloadSourcePolicy::OfficialFirst,
+            version_list_source: DownloadSourcePolicy::OfficialFirst,
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::open(
+            config,
+            dir.path().to_path_buf(),
+            dir.path().join("config.json"),
+        )
+        .unwrap()
+        .with_manifest_url(format!("{base}/manifest.json"));
+        let facade = std::sync::Arc::new(Facade::new(aurora));
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let pack = dir.path().join("pack.mrpack");
+        write_vanilla_pack(&pack);
+        let install = tokio::spawn({
+            let (f, r, l) = (facade.clone(), registry.clone(), locks.clone());
+            let source = file(&pack.display().to_string());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+                install_modpack_with(&f, &r, &l, "mp-hold", source, Some("导入中"), &sink).await
+            }
+        });
+
+        let instance = dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("导入中");
+        let marker = aurora_core::MarkerStore::for_version_dir(&instance)
+            .path()
+            .to_path_buf();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.is_file() {
+            assert!(Instant::now() < deadline, "导入没有建出实例目录");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(locks.activity("导入中"), Some(InstanceActivity::Installing));
+        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let entry = listed.iter().find(|i| i.id == "导入中").unwrap();
+        assert_eq!(entry.activity, Some(InstanceActivity::Installing));
+        let err = delete_instance_with(&facade, &locks, "导入中", NeverDispose)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap()["activity"],
+            serde_json::json!("installing")
+        );
+        let err = rename_instance_with(&facade, &locks, "导入中", "改名")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert!(instance.is_dir());
+        assert!(!dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("改名")
+            .exists());
+
+        assert!(registry.cancel("mp-hold"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert!(!instance.exists(), "取消后半成品应删掉");
+        assert_eq!(locks.activity("导入中"), None);
     }
 
     /// 发出响应头与 64 KiB 后保持连接不再发送，模拟慢到卡住的下载源。
@@ -416,7 +615,16 @@ mod tests {
                 project_id: "proj".into(),
                 version_id: "pv1".into(),
             };
-            install_modpack_with(&f, &r, "mp-slow", source, None, &sink).await
+            install_modpack_with(
+                &f,
+                &r,
+                &InstanceLocks::default(),
+                "mp-slow",
+                source,
+                None,
+                &sink,
+            )
+            .await
         });
 
         let deadline = Instant::now() + Duration::from_secs(10);
