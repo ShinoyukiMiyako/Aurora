@@ -23,7 +23,8 @@ export function setMockArtStatus(next: ArtStatusDto): void {
 // 原版客户端默认皮肤数组的顺序（先 9 套细臂、后 9 套宽臂）与 Java 的 UUID.hashCode 加 Math.floorMod，与后端同一规则。
 const DEFAULT_SKIN_NAMES = ["alex", "ari", "efe", "kai", "makena", "noor", "steve", "sunny", "zuri"] as const;
 
-function defaultSkin(uuid: string): Extract<SkinInfoDto, { kind: "default" }> {
+/** 导出给测试逐个核对：mock 生成的离线 UUID 只落在少数下标上，经 skin_info 覆盖不到全部 18 套。 */
+export function defaultSkin(uuid: string): Extract<SkinInfoDto, { kind: "default" }> {
   const hex = uuid.replace(/-/g, "");
   if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new IpcError("internal", `离线账户的 UUID 不是 32 位十六进制：${uuid}`);
   const hash = [0, 8, 16, 24].reduce((acc, at) => acc ^ Number.parseInt(hex.slice(at, at + 8), 16), 0) | 0;

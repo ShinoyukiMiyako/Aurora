@@ -5,7 +5,7 @@ import { NO_ART, setArtStatus } from "../../mc/art";
 import { clearArtCache } from "../../mc/useArt";
 import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
-import { AssemblingBlock } from "./AssemblingBlock";
+import { ASSEMBLY_TIMING, AssemblingBlock } from "./AssemblingBlock";
 import { InstanceAvatarBase } from "./InstanceAvatarBase";
 import { InstanceBlock } from "./InstanceBlock";
 
@@ -32,6 +32,7 @@ afterEach(() => {
   setArtStatus(NO_ART);
   clearArtCache();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 const settle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
@@ -132,7 +133,14 @@ describe("InstanceAvatarBase", () => {
 });
 
 describe("AssemblingBlock", () => {
-  it("挂载时已落的面直接显示；落位数增加时逐面补齐", async () => {
+  it("挂载时已落的面直接显示；落位数增加时逐面补齐，相邻两面隔一个落位间隔", () => {
+    // 落位间隔由定时器与 performance.now 共同决定。用真实时间等「间隔之内」时，机器一忙定时器就晚到、
+    // 下一个面已经落下；假时钟按毫秒推进，间隔前一刻与到点那一刻都能确定地看到
+    vi.useFakeTimers();
+    const advance = (ms: number) =>
+      act(() => {
+        vi.advanceTimersByTime(ms);
+      });
     view = render(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} placed={1} />);
     const root = () => view?.container.firstElementChild as HTMLElement;
     expect(root().dataset.placed).toBe("1");
@@ -140,15 +148,15 @@ describe("AssemblingBlock", () => {
     expect(root().style.height).toBe("32px");
     expect(root().querySelectorAll("[data-face]").length).toBe(3);
     view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} placed={3} />);
-    // act 在回调结束时才提交更新：每次只等一个落位间隔，让下一个面的定时器在两次提交之间排上
-    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+    // 挂载时已落的面不算一次落位，第一个新面不用等间隔
+    expect(root().dataset.placed).toBe("1");
+    advance(0);
     expect(root().dataset.placed).toBe("2");
-    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 40)));
+    advance(ASSEMBLY_TIMING.stepGapMs - 1);
     expect(root().dataset.placed).toBe("2");
-    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 80)));
+    advance(1);
     expect(root().dataset.placed).toBe("3");
     view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} placed={0} />);
-    await settle();
     expect(root().dataset.placed).toBe("0");
   });
 });
