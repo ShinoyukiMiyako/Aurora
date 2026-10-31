@@ -116,7 +116,8 @@ function ReportView({
           ))}
         </div>
         <div className={styles.stack}>
-          <FixesCard inst={inst} queryId={queryId} ops={ops} report={report} mods={modList} modsReady={!modded || mods.status === "ready"} onTab={onTab} />
+          {/* 推一次就定住的一键尝试只属于这一份报告：停在本页时又崩了一次，按新报告从头推，上一份的完成态与撤销不再适用 */}
+          <FixesCard key={report.at} inst={inst} queryId={queryId} ops={ops} report={report} mods={modList} modsReady={!modded || mods.status === "ready"} onTab={onTab} />
           {modded && <SuspectsCard inst={inst} ops={ops} report={report} mods={mods} />}
         </div>
       </div>

@@ -16,6 +16,7 @@ import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } fr
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { invalidate } from "../../state/resource";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 import { InstallStageTab } from "./InstallStage";
@@ -1543,6 +1544,23 @@ describe("实例详情：崩溃诊断", () => {
     expect(callsOf(ipc, "set_mod_enabled")).toEqual([{ versionId: ID, fileName: "sodium.jar", enabled: false }]);
     const toast = launcher.state.toasts.find((t) => t.title === "已停用 Sodium");
     expect(toast?.body).toBe("再启动一次，看看问题是否还在");
+  });
+
+  it("停在诊断页时又崩了一次：一键尝试按新报告重新推，不留着上一份的完成态", async () => {
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    await open("crash");
+    click(button("调到 6 GB"));
+    await flush();
+    expect(text()).toContain("已调到 6 GB，下次启动生效");
+    crash = report([{ category: "mixin_failure", detail: "sodium" }], NOW);
+    await act(async () => {
+      invalidate(`crash:${ID}`);
+      await settle(20);
+    });
+    expect(text()).toContain("找到 1 条线索，日志指向 Mixin 注入失败");
+    expect(button("停用 Sodium").textContent).toBe("停用 Sodium");
+    expect(text()).not.toContain("已调到 6 GB");
+    expect(() => button("撤销")).toThrow();
   });
 });
 
