@@ -901,6 +901,29 @@ export class LauncherStore {
     return task;
   }
 
+  /**
+   * 取消一个实例上的全部活动任务，等它们都落了结局再返回（删除实例前用）。
+   * 排队的先一次性标为取消，再取消运行中的：反过来的话，运行中的一结束就空出通道，同实例排队的下一个会被立即拉起。
+   * 排队的取消不逐条发通知，删除完成的那条通知已经交代了结果；运行中的仍按命令返回 cancelled 的常规路径落态。
+   */
+  private async cancelInstanceTasks(instanceId: string): Promise<void> {
+    const pending = this.raw.tasks.filter((t) => isActiveTask(t) && t.instanceId === instanceId);
+    if (pending.length === 0) return;
+    const now = Date.now();
+    this.set((raw) => ({
+      tasks: trimHistory(pending.reduce((tasks, t) => (t.status === "queued" ? markCancelled(tasks, t.id, now) : tasks), raw.tasks)),
+    }));
+    this.tasksChanged();
+    const ids = new Set(pending.map((t) => t.id));
+    await Promise.all(this.raw.tasks.filter((t) => ids.has(t.id) && t.status === "running").map((t) => tasksIpc.cancelTask(attemptTaskId(t))));
+    await waitUntil(
+      this.subscribe,
+      () => !this.raw.tasks.some((t) => ids.has(t.id) && isActiveTask(t)),
+      STOP_TIMEOUT_MS,
+      () => new Error(`「${instanceId}」的 ${pending.length} 个任务没能及时取消`),
+    );
+  }
+
   /** 任务表变化后：防抖写日志、调度空出来的通道。 */
   private tasksChanged(): void {
     this.scheduleJournal();
@@ -1423,16 +1446,7 @@ export class LauncherStore {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
         // 取消排队中的新建任务后占位项随之消失，先记下它是不是占位
         const placeholder = store.instance(id).placeholder;
-        const pending = store.raw.tasks.find((t) => isActiveTask(t) && t.instanceId === id);
-        if (pending !== undefined) {
-          await actions.cancelTask(pending.id);
-          await waitUntil(
-            store.subscribe,
-            () => !isActiveTask(store.findTask(pending.id)),
-            STOP_TIMEOUT_MS,
-            () => new Error(`「${pending.title}」没能及时取消`),
-          );
-        }
+        await store.cancelInstanceTasks(id);
         if (!placeholder) await instancesIpc.deleteInstance(id);
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
