@@ -50,6 +50,13 @@ pub mod code {
     pub const INSTANCE_FAILED: &str = "instance_failed";
     /// Java 探测或运行时下载失败。
     pub const JAVA_FAILED: &str = "java_failed";
+    /// 手动添加的 Java 路径不能用。detail：`{ path, reason }`，reason 为 not_absolute / not_java_executable /
+    /// not_found / probe_failed / probe_timeout。
+    pub const JAVA_PATH_INVALID: &str = "java_path_invalid";
+    /// 手动添加的 Java 缺少运行时文件。detail：`{ path, missing }`，missing 相对 Java 根目录、以 `/` 分隔。
+    pub const JAVA_RUNTIME_INCOMPLETE: &str = "java_runtime_incomplete";
+    /// 读不到本机显卡信息（DXGI 枚举失败）。detail：`{ hresult: "0x%08X", causes }`。
+    pub const GPU_QUERY_FAILED: &str = "gpu_query_failed";
     /// 启动链路失败（命令拼装、进程拉起）。
     pub const LAUNCH_FAILED: &str = "launch_failed";
     /// 未配置 CurseForge API 密钥。
@@ -281,6 +288,10 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+        CoreError::JavaPathInvalid { .. } => code::JAVA_PATH_INVALID,
+        CoreError::JavaRuntimeIncomplete { .. } => code::JAVA_RUNTIME_INCOMPLETE,
+        // 写注册表失败本质是一次读写失败；它只在启动链路里转成警告，到了命令边界与其余读写失败同码。
+        CoreError::GpuPreferenceWrite { .. } => code::IO,
     }
 }
 
@@ -501,7 +512,8 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::ConfigIo { path, .. } | CoreError::ConfigParse { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
-        CoreError::Base(BaseError::Io { path, .. }) => {
+        CoreError::Base(BaseError::Io { path, .. })
+        | CoreError::GpuPreferenceWrite { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::Fetch { url, .. } | CoreError::FeedParse { url, .. } => {
@@ -518,6 +530,14 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
+        }
+        CoreError::JavaPathInvalid { path, reason, .. } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("reason".to_owned(), json!(reason.code()));
+        }
+        CoreError::JavaRuntimeIncomplete { path, missing } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("missing".to_owned(), json!(missing));
         }
         _ => {}
     }
@@ -919,6 +939,88 @@ mod tests {
         let detail = rejected.detail.unwrap();
         assert!(detail.get("network").is_none(), "{detail}");
         assert_eq!(detail["causes"], json!([format!("HTTP 状态码 404: {url}")]));
+    }
+
+    #[test]
+    fn manual_java_errors_map_to_codes_with_reason_and_missing_files() {
+        for (reason, name) in [
+            (aurora_core::JavaPathProblem::NotAbsolute, "not_absolute"),
+            (
+                aurora_core::JavaPathProblem::NotJavaExecutable,
+                "not_java_executable",
+            ),
+            (aurora_core::JavaPathProblem::NotFound, "not_found"),
+            (aurora_core::JavaPathProblem::ProbeFailed, "probe_failed"),
+            (aurora_core::JavaPathProblem::ProbeTimeout, "probe_timeout"),
+        ] {
+            let err: CommandError = CoreError::JavaPathInvalid {
+                path: PathBuf::from("D:/jdk/bin/java.exe"),
+                reason,
+                source: None,
+            }
+            .into();
+            assert_eq!(err.code, code::JAVA_PATH_INVALID);
+            assert_eq!(
+                err.detail,
+                Some(json!({ "path": "D:/jdk/bin/java.exe", "reason": name })),
+                "{name}"
+            );
+        }
+
+        // 识别超时：原错误进原因链。
+        let timeout: CommandError = CoreError::JavaPathInvalid {
+            path: PathBuf::from("D:/jdk/bin/java.exe"),
+            reason: aurora_core::JavaPathProblem::ProbeTimeout,
+            source: Some(JavaError::JavaProbeTimeout {
+                path: PathBuf::from("D:/jdk/bin/java.exe"),
+                timeout_secs: 10,
+            }),
+        }
+        .into();
+        assert_eq!(
+            timeout.message,
+            "这个 Java 10 秒内没有给出版本信息，已放弃: D:/jdk/bin/java.exe"
+        );
+        let detail = timeout.detail.unwrap();
+        assert_eq!(detail["reason"], json!("probe_timeout"));
+        assert_eq!(detail["causes"].as_array().unwrap().len(), 1);
+
+        let incomplete: CommandError = CoreError::JavaRuntimeIncomplete {
+            path: PathBuf::from("D:/jdk/bin/java.exe"),
+            missing: vec!["release".into(), "lib/modules".into()],
+        }
+        .into();
+        assert_eq!(incomplete.code, code::JAVA_RUNTIME_INCOMPLETE);
+        assert_eq!(
+            incomplete.message,
+            "这个 Java 缺少 release、lib/modules，可能没装完整: D:/jdk/bin/java.exe"
+        );
+        assert_eq!(
+            incomplete.detail,
+            Some(json!({ "path": "D:/jdk/bin/java.exe", "missing": ["release", "lib/modules"] }))
+        );
+
+        // 启动链路等别处的识别超时仍是 java_failed。
+        let elsewhere: CommandError = JavaError::JavaProbeTimeout {
+            path: PathBuf::from("D:/jdk/bin/java.exe"),
+            timeout_secs: 10,
+        }
+        .into();
+        assert_eq!(elsewhere.code, code::JAVA_FAILED);
+    }
+
+    #[test]
+    fn gpu_preference_write_maps_to_io_with_the_program_path() {
+        let err: CommandError = CoreError::GpuPreferenceWrite {
+            path: PathBuf::from("D:/jdk-17/bin/java.exe"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问"),
+        }
+        .into();
+        assert_eq!(err.code, code::IO);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "path": "D:/jdk-17/bin/java.exe", "causes": ["拒绝访问"] }))
+        );
     }
 
     #[test]

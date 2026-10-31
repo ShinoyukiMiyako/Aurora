@@ -660,6 +660,9 @@ impl Aurora {
                     .await?
             }
         };
+        if self.config().prefer_dedicated_gpu {
+            self.prefer_dedicated_gpu_for(&java.path, reporter).await?;
+        }
         let authlib = match authlib {
             Some(api_root) => Some(self.prepare_authlib(&api_root, reporter).await?),
             None => None,
@@ -757,6 +760,48 @@ impl Aurora {
         ))
     }
 
+    /// 把这次要拉起的 java 可执行文件设为 Windows 图形设置里的「高性能」。
+    ///
+    /// 写不进去不挡启动：显卡偏好只影响帧数，游戏照样能玩，按 Windows 默认的显卡启动并在启动日志里说明。
+    /// 只有阻塞任务本身异常（程序缺陷）才冒泡。
+    async fn prefer_dedicated_gpu_for(
+        &self,
+        exe: &Path,
+        reporter: &mut Reporter<'_>,
+    ) -> Result<(), LaunchFailed> {
+        let store = self.gpu_preferences();
+        let path = exe.to_path_buf();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::gpu::prefer_high_performance(&*store, &path)
+        })
+        .await?;
+        match outcome {
+            Ok(crate::gpu::GpuPreferenceChange::Written { previous, value }) => {
+                tracing::info!(path = %exe.display(), ?previous, %value, "已写入显卡偏好");
+                reporter
+                    .info(format!(
+                        "已在 Windows 图形设置里让 {} 使用高性能显卡",
+                        exe.display()
+                    ))
+                    .await;
+            }
+            Ok(crate::gpu::GpuPreferenceChange::Unchanged) => {}
+            Err(err) => {
+                tracing::warn!(path = %exe.display(), error = %err, cause = ?std::error::Error::source(&err), "写入显卡偏好失败，按 Windows 默认的显卡启动");
+                let reason = match &err {
+                    CoreError::GpuPreferenceWrite { source, .. } => source.to_string(),
+                    other => other.to_string(),
+                };
+                reporter
+                    .warn(format!(
+                        "没能写入显卡偏好（{reason}），这次按 Windows 默认的显卡启动"
+                    ))
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
     /// 账户与注入命令行的鉴权值。微软账户在这里静默续期，续期失败按原因分成「需要重登」与「网络问题」。
     async fn launch_identity(
         &self,
@@ -826,6 +871,15 @@ impl Aurora {
                     ))
                     .await;
             }
+            // 用户指定的 Java 不完整也照用：缺的文件未必影响启动，替用户换一个就违背了设置。
+            if !java.is_complete() {
+                reporter
+                    .warn(format!(
+                        "指定的 Java 缺少 {}，可能没装完整，启动失败时换一个 Java",
+                        java.missing_files.join("、")
+                    ))
+                    .await;
+            }
             return Ok(JavaPlan::Ready(java));
         }
 
@@ -846,8 +900,12 @@ impl Aurora {
             })?
         {
             match probe_java(managed.clone(), DetectSource::Managed).await? {
-                Ok(java) if java.version.major == required_major => {
+                Ok(java) if java.version.major == required_major && java.is_complete() => {
                     return Ok(JavaPlan::Ready(java));
+                }
+                // 缺文件的托管运行时与自动选择一样跳过：重新下载时已就绪的文件按 sha1 跳过，等于补齐。
+                Ok(java) if java.version.major == required_major => {
+                    tracing::warn!(path = %managed.display(), missing = ?java.missing_files, "托管运行时缺少运行时文件，重新下载补齐")
                 }
                 Ok(java) => {
                     tracing::warn!(path = %managed.display(), major = java.version.major, "托管运行时主版本与目录不符，重新下载")
@@ -1428,6 +1486,7 @@ mod tests {
     use crate::config::AuroraConfig;
     use aurora_download::CancellationToken;
     use aurora_launch::logfile::SessionOutcome;
+    use std::sync::Arc;
 
     const VERSION: &str = "1.20.1";
 
@@ -1796,6 +1855,145 @@ mod tests {
         assert_eq!(
             failure.params.get("path"),
             Some(&Value::from(missing.display().to_string()))
+        );
+    }
+
+    fn log_texts(events: &[LaunchEvent], want: LauncherLevel) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LaunchEvent::Log { level, text, .. } if *level == want => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 按给定开关、换上替身写入器启动一次，断言启动成功并等游戏退出，返回推出的事件。
+    async fn launch_preferring_gpu(
+        fx: &Fixture,
+        store: Arc<crate::gpu::testing::MemoryGpuPreferences>,
+        enabled: bool,
+        java: PathBuf,
+    ) -> Vec<LaunchEvent> {
+        let mut aurora = fx.aurora.clone().with_gpu_preference_store(store);
+        aurora.set_prefer_dedicated_gpu(enabled);
+        let (result, events) = launch(&aurora, java).await;
+        match result {
+            Ok(run) => {
+                run.finish().await.unwrap();
+            }
+            Err(err) => panic!("启动应成功：{err:?}"),
+        }
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        events
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gpu_preference_is_left_alone_when_the_switch_is_off() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let store = Arc::new(crate::gpu::testing::MemoryGpuPreferences::default());
+
+        let events = launch_preferring_gpu(&fx, store.clone(), false, java).await;
+        assert!(store.writes().is_empty(), "开关关着不该写显卡偏好");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LaunchEvent::Log { text, .. } if text.contains("显卡"))),
+            "开关关着不该提到显卡"
+        );
+    }
+
+    /// 写的正是这次拉起的那个 java，取值是高性能；已有的别的片段保留。写在拉起进程之前。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gpu_preference_is_written_for_the_launched_java_before_spawn() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+
+        let fresh = Arc::new(crate::gpu::testing::MemoryGpuPreferences::default());
+        let events = launch_preferring_gpu(&fx, fresh.clone(), true, java.clone()).await;
+        assert_eq!(
+            fresh.writes(),
+            vec![(java.clone(), "GpuPreference=2;".to_owned())]
+        );
+        let notice = format!(
+            "已在 Windows 图形设置里让 {} 使用高性能显卡",
+            java.display()
+        );
+        let notice_at = events
+            .iter()
+            .position(|e| matches!(e, LaunchEvent::Log { text, .. } if *text == notice))
+            .expect("应在启动日志里说明写了显卡偏好");
+        let spawn_at = events
+            .iter()
+            .position(|e| matches!(e, LaunchEvent::Stage(LaunchStage::SpawnProcess)))
+            .unwrap();
+        assert!(notice_at < spawn_at, "显卡偏好要在拉起进程之前写好");
+
+        let existing = Arc::new(crate::gpu::testing::MemoryGpuPreferences::with_value(
+            &java,
+            "AppStatus=0;",
+        ));
+        launch_preferring_gpu(&fx, existing.clone(), true, java.clone()).await;
+        assert_eq!(
+            existing.writes(),
+            vec![(java.clone(), "AppStatus=0;GpuPreference=2;".to_owned())]
+        );
+
+        // 已经是高性能：不写也不提示。
+        let events = launch_preferring_gpu(&fx, existing.clone(), true, java).await;
+        assert_eq!(existing.writes().len(), 1);
+        assert!(!log_texts(&events, LauncherLevel::Info).contains(&notice));
+    }
+
+    /// 指定的 Java 缺运行时文件：照常启动，启动日志里提醒一句；补齐之后不再提醒。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incomplete_pinned_java_warns_but_still_launches() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let home = fx.root.join("half-jdk");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let java = fake_java(&home.join("bin"), 17, 0);
+        let store = Arc::new(crate::gpu::testing::MemoryGpuPreferences::default());
+        let reminder = "指定的 Java 缺少 release、lib/modules，可能没装完整，启动失败时换一个 Java";
+
+        let events = launch_preferring_gpu(&fx, store.clone(), false, java.clone()).await;
+        assert!(
+            log_texts(&events, LauncherLevel::Warn).contains(&reminder.to_owned()),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
+        );
+
+        std::fs::write(home.join("release"), b"JAVA_VERSION=\"17.0.8\"").unwrap();
+        std::fs::create_dir_all(home.join("lib")).unwrap();
+        std::fs::write(home.join("lib").join("modules"), b"image").unwrap();
+        let events = launch_preferring_gpu(&fx, store, false, java).await;
+        assert!(
+            !log_texts(&events, LauncherLevel::Warn)
+                .iter()
+                .any(|text| text.contains("可能没装完整")),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gpu_preference_failure_warns_and_still_launches() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let store = Arc::new(crate::gpu::testing::MemoryGpuPreferences::failing());
+
+        let events = launch_preferring_gpu(&fx, store.clone(), true, java).await;
+        assert!(store.writes().is_empty());
+        assert!(
+            log_texts(&events, LauncherLevel::Warn).contains(
+                &"没能写入显卡偏好（拒绝访问），这次按 Windows 默认的显卡启动".to_owned()
+            ),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
         );
     }
 

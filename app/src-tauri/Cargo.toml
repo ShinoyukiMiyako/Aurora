@@ -50,9 +50,12 @@ percent-encoding = "2"
 webview2-com = "0.38.2"
 windows-core = "0.61"
 # 主窗口的原生拖放（drop.rs）要自己注册 IDropTarget、读拖入数据里的文件列表与文字。
+# 设置页判断有没有两块能切换的显卡（gpu.rs）要经 DXGI 按高性能与省电偏好枚举适配器。
 # 版本同样跟着 webview2-com 所用的 windows 走，HWND 等类型才是同一个。
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

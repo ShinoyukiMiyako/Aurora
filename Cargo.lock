@@ -365,6 +365,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "winreg 0.56.0",
  "wiremock",
  "zip 8.6.0",
 ]

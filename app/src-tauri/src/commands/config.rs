@@ -67,6 +67,10 @@ pub struct ConfigDto {
     pub notified_update_version: Option<String>,
     /// 界面语言：`"zh-CN"` 或 `"en-US"`。
     pub language: UiLanguage,
+    /// 手动添加的 java 可执行文件路径（java.exe），只经 add_java_path / remove_java_path 修改。
+    pub extra_java_paths: Vec<String>,
+    /// 启动前是否把这次用的 Java 设为 Windows 图形设置里的「高性能」。
+    pub prefer_dedicated_gpu: bool,
 }
 
 pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
@@ -96,6 +100,12 @@ pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
         skipped_update_version: config.skipped_update_version.clone(),
         notified_update_version: config.notified_update_version.clone(),
         language: config.language,
+        extra_java_paths: config
+            .extra_java_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        prefer_dedicated_gpu: config.prefer_dedicated_gpu,
     }
 }
 
@@ -138,6 +148,7 @@ pub(crate) struct ConfigPatch {
     skipped_update_version: Option<String>,
     notified_update_version: Option<String>,
     language: Option<UiLanguage>,
+    prefer_dedicated_gpu: Option<bool>,
 }
 
 /// 未解析的配置修改，字段与 `update_config` 的入参一一对应。
@@ -158,6 +169,7 @@ pub(crate) struct RawConfigPatch {
     pub skipped_update_version: Option<String>,
     pub notified_update_version: Option<String>,
     pub language: Option<String>,
+    pub prefer_dedicated_gpu: Option<bool>,
 }
 
 /// 更新全局配置：字段全可选，未提供者不动。先把全部参数校验完再拿写锁：有一个非法就整体拒绝，
@@ -180,6 +192,7 @@ pub async fn update_config(
     skipped_update_version: Option<String>,
     notified_update_version: Option<String>,
     language: Option<String>,
+    prefer_dedicated_gpu: Option<bool>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     let raw = RawConfigPatch {
@@ -198,6 +211,7 @@ pub async fn update_config(
         skipped_update_version,
         notified_update_version,
         language,
+        prefer_dedicated_gpu,
     };
     update_config_with(&facade, raw).await
 }
@@ -250,6 +264,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         skipped_update_version: raw.skipped_update_version,
         notified_update_version: raw.notified_update_version,
         language: raw.language.as_deref().map(parse_language).transpose()?,
+        prefer_dedicated_gpu: raw.prefer_dedicated_gpu,
     })
 }
 
@@ -298,6 +313,9 @@ fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandErr
     }
     if let Some(language) = patch.language {
         aurora.set_language(language);
+    }
+    if let Some(enabled) = patch.prefer_dedicated_gpu {
+        aurora.set_prefer_dedicated_gpu(enabled);
     }
     Ok(())
 }
@@ -794,6 +812,55 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(read_config(&facade).await.default_java, DEFAULT_JAVA_AUTO);
+    }
+
+    /// 独显偏好默认关；update_config 带 preferDedicatedGpu 后 get_config 回读为开，并落了盘。
+    #[tokio::test]
+    async fn prefer_dedicated_gpu_patch_reads_back_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["prefer_dedicated_gpu"], false);
+        assert_eq!(initial["extra_java_paths"], serde_json::json!([]));
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                prefer_dedicated_gpu: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.prefer_dedicated_gpu);
+        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert!(reloaded.prefer_dedicated_gpu);
+
+        // 不带这一项的补丁不动它。
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.prefer_dedicated_gpu);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                prefer_dedicated_gpu: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.prefer_dedicated_gpu);
     }
 
     /// 任一字段非法整体拒绝：前面合法的字段也不生效，配置文件不写。

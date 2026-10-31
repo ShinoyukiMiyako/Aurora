@@ -155,6 +155,24 @@ pub enum CoreError {
     /// 读不到本机物理内存信息。
     #[error("读不到本机内存信息")]
     MemoryUnavailable,
+    /// 手动添加的 Java 路径不能用。`source` 只在识别失败（拉起了 java -version）时有。
+    #[error("{}", reason.message(path))]
+    JavaPathInvalid {
+        path: PathBuf,
+        reason: JavaPathProblem,
+        #[source]
+        source: Option<aurora_java::Error>,
+    },
+    /// 手动添加的 Java 缺少运行时文件，多半没装完整；`missing` 相对 Java 根目录、以 `/` 分隔。
+    #[error("这个 Java 缺少 {}，可能没装完整: {}", missing.join("、"), path.display())]
+    JavaRuntimeIncomplete { path: PathBuf, missing: Vec<String> },
+    /// 读写 Windows 图形设置里某个程序的显卡偏好失败。`path` 是那个程序。
+    #[error("写入 {path} 的显卡偏好失败")]
+    GpuPreferenceWrite {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。
@@ -190,6 +208,51 @@ impl std::fmt::Display for GameDirProblem {
             GameDirProblem::ContainsBang => "路径里有「!」，Java 会读不出里面的游戏文件",
             GameDirProblem::Unavailable => "这个位置现在访问不到",
         })
+    }
+}
+
+/// 手动添加的 Java 路径不能用的具体原因。[`JavaPathProblem::code`] 是给前端分支用的稳定码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaPathProblem {
+    /// 不是绝对路径。
+    NotAbsolute,
+    /// 文件名不是 java.exe 或 javaw.exe。
+    NotJavaExecutable,
+    /// 文件不存在。
+    NotFound,
+    /// java -version 跑不起来或输出里认不出版本。
+    ProbeFailed,
+    /// java -version 在限时内没有结束。
+    ProbeTimeout,
+}
+
+impl JavaPathProblem {
+    /// 稳定的 snake_case 码。
+    pub fn code(self) -> &'static str {
+        match self {
+            JavaPathProblem::NotAbsolute => "not_absolute",
+            JavaPathProblem::NotJavaExecutable => "not_java_executable",
+            JavaPathProblem::NotFound => "not_found",
+            JavaPathProblem::ProbeFailed => "probe_failed",
+            JavaPathProblem::ProbeTimeout => "probe_timeout",
+        }
+    }
+
+    /// 提示原文，直接作为界面上的提示正文。
+    fn message(self, path: &std::path::Path) -> String {
+        let path = path.display();
+        match self {
+            JavaPathProblem::NotAbsolute => format!("Java 路径须是绝对路径: {path}"),
+            JavaPathProblem::NotJavaExecutable => {
+                format!("只能添加 java.exe 或 javaw.exe: {path}")
+            }
+            JavaPathProblem::NotFound => format!("找不到这个文件: {path}"),
+            JavaPathProblem::ProbeFailed => format!("识别不出这个 Java: {path}"),
+            JavaPathProblem::ProbeTimeout => format!(
+                "这个 Java {} 秒内没有给出版本信息，已放弃: {path}",
+                aurora_java::PROBE_TIMEOUT.as_secs()
+            ),
+        }
     }
 }
 
@@ -232,11 +295,83 @@ mod tests {
         // 真正的失败不能被当成取消。
         assert!(!CoreError::NoJava { major: 17 }.is_cancelled());
         assert!(
+            !CoreError::JavaPathInvalid {
+                path: PathBuf::from("java.exe"),
+                reason: JavaPathProblem::ProbeTimeout,
+                source: None,
+            }
+            .is_cancelled()
+        );
+        assert!(
             !CoreError::Download(aurora_download::Error::Status {
                 url: "http://x".into(),
                 status: 404,
             })
             .is_cancelled()
+        );
+    }
+
+    /// 手动添加 Java 的提示原文直接显示给用户：每种原因的码与原文都钉住。
+    #[test]
+    fn java_path_problems_have_stable_codes_and_messages() {
+        let path = PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
+        let shown = path.display();
+        for (reason, code, message) in [
+            (
+                JavaPathProblem::NotAbsolute,
+                "not_absolute",
+                format!("Java 路径须是绝对路径: {shown}"),
+            ),
+            (
+                JavaPathProblem::NotJavaExecutable,
+                "not_java_executable",
+                format!("只能添加 java.exe 或 javaw.exe: {shown}"),
+            ),
+            (
+                JavaPathProblem::NotFound,
+                "not_found",
+                format!("找不到这个文件: {shown}"),
+            ),
+            (
+                JavaPathProblem::ProbeFailed,
+                "probe_failed",
+                format!("识别不出这个 Java: {shown}"),
+            ),
+            (
+                JavaPathProblem::ProbeTimeout,
+                "probe_timeout",
+                format!("这个 Java 10 秒内没有给出版本信息，已放弃: {shown}"),
+            ),
+        ] {
+            assert_eq!(reason.code(), code);
+            let err = CoreError::JavaPathInvalid {
+                path: path.clone(),
+                reason,
+                source: None,
+            };
+            assert_eq!(err.to_string(), message);
+            assert!(std::error::Error::source(&err).is_none());
+        }
+
+        let probed = CoreError::JavaPathInvalid {
+            path: path.clone(),
+            reason: JavaPathProblem::ProbeFailed,
+            source: Some(aurora_java::Error::JavaVersionParse {
+                output: "garbage".into(),
+            }),
+        };
+        assert_eq!(
+            std::error::Error::source(&probed).map(ToString::to_string),
+            Some("无法从 java -version 输出解析版本号: garbage".to_owned())
+        );
+
+        let incomplete = CoreError::JavaRuntimeIncomplete {
+            path: path.clone(),
+            missing: vec!["release".into(), "lib/modules".into()],
+        };
+        assert_eq!(
+            incomplete.to_string(),
+            format!("这个 Java 缺少 release、lib/modules，可能没装完整: {shown}")
         );
     }
 }
