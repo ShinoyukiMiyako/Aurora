@@ -714,6 +714,34 @@ describe("主页：固定的服务器", () => {
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
   });
 
+  it("断网时进主页测到的全是连不上：恢复联网重测回来之前每台写「测速中」，不把断网期间的结果当结论", async () => {
+    let reachable = false;
+    ipc.overrides.set("ping_servers", () => {
+      if (!reachable) return pinned.map((p) => ({ ...ping(p.address), reachable: false, latency_ms: null, online: null, max: null, error: "网络不可达" }));
+      return new Promise<ServerStatusDto[]>((resolve) => setTimeout(() => resolve(pinned.map((p) => ping(p.address))), 2_000));
+    });
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    await mount();
+    const signals = () => [...document.querySelectorAll<HTMLElement>("[data-state]")].filter((el) => el.className.includes("signal")).map((el) => el.dataset.state);
+    expect(text()).toContain("1 个 · 在线人数与延迟 · 本机离线");
+    expect(signals()).toEqual(["paused"]);
+
+    reachable = true;
+    setOnline(true);
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(2);
+    expect(text()).not.toContain("本机离线");
+    expect(text()).not.toContain("连不上");
+    expect(text()).toContain("测速中");
+    expect(signals()).toEqual(["pending"]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(text()).toContain("38 ms");
+    expect(text()).not.toContain("测速中");
+    expect(signals()).toEqual(["online"]);
+  });
+
   it("没有固定服务器：紧凑空状态", async () => {
     pinned = [];
     await mount();

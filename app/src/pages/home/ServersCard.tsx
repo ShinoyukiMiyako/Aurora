@@ -37,7 +37,7 @@ import { Thumb } from "../../ui/Thumb";
 import { HOME_COPY } from "./copy";
 import { SKELETON_SIZE } from "./layout";
 import { useReportOnce } from "./report";
-import { SIGNAL_BARS, pinCandidates, pinMenuPlan, serverRows, type ServerRow } from "./servers";
+import { SIGNAL_BARS, pinCandidates, pinMenuPlan, serverRows, type ProbeState, type ServerRow } from "./servers";
 import s from "./home.module.css";
 
 /** 主页可见时重测延迟与人数的间隔。 */
@@ -78,6 +78,12 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
     }, SERVER_REFRESH_MS);
     return () => clearInterval(timer);
   }, [hasPinned, online, reloadStatus]);
+
+  // 断网期间也会测速（断网时进主页、改固定列表），那时测到的连不上说明不了服务器：记下每份结果到手时是否在线，
+  // 恢复联网后这份结果在重测回来之前不下结论
+  const [probeOrigin, setProbeOrigin] = useState(() => ({ data: status.data, offline: !online }));
+  if (probeOrigin.data !== status.data) setProbeOrigin({ data: status.data, offline: !online });
+  const probe: ProbeState = !online ? "paused" : probeOrigin.data === status.data && probeOrigin.offline ? "retesting" : "live";
 
   const wasOnline = useRef(online);
   useEffect(() => {
@@ -135,7 +141,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
       );
     }
     if (pinned.data.length === 0) return <EmptyState scene="compass" compact title={HOME_COPY.serversEmptyTitle} body={HOME_COPY.serversEmptyBody} />;
-    const rows = serverRows(pinned.data, status.data, online);
+    const rows = serverRows(pinned.data, status.data, probe);
     return (
       <>
         <ul className={s.serverList}>

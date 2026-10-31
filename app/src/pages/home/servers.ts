@@ -24,7 +24,7 @@ export function signalQuality(bars: number): SignalQuality {
 }
 
 export type ServerSignal =
-  /** 还没有这台的状态（首次测速中）。 */
+  /** 测速中：还没有这台的状态，或恢复联网后正在重测、手里只有断网期间的结果。 */
   | { kind: "pending" }
   | { kind: "online"; latencyMs: number; bars: 1 | 2 | 3 | 4; quality: SignalQuality }
   | { kind: "unreachable" }
@@ -63,21 +63,30 @@ function populationOf(status: ServerStatusDto): ServerPopulation {
 }
 
 /**
+ * 手里这份测速结果能不能下连通结论。后端单台测速分不出本机断网与服务器宕机，所以用全应用的联网状态来分：
+ * - live：联网时测的，照常判定；
+ * - paused：本机离线，测速暂停；
+ * - retesting：已恢复联网，但手里的结果是断网期间测的（断网时进主页、改固定列表照样会测），重测回来之前不算数。
+ */
+export type ProbeState = "live" | "paused" | "retesting";
+
+/**
  * 固定列表与状态按地址对位（状态查询原样回传查询用的地址）。固定列表刚变、状态还没跟上时，
  * 新加的那台没有状态，显示测速中。
  *
- * 后端单台测速分不出本机断网与服务器宕机，所以用全应用的联网状态来分：本机离线（online 为 false）时
- * 每台的信号都是暂停，不把每台都标成连不上；版本、MOTD、在线人数与上次在线照旧取上次的结果。
+ * 结果不能下结论时不把每台都标成连不上：本机离线时每台的信号都是暂停，恢复联网后在重测的每台都是测速中；
+ * 版本、MOTD、在线人数与上次在线照旧取手里的结果。
  */
-export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonly ServerStatusDto[] | undefined, online: boolean): ServerRow[] {
+export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonly ServerStatusDto[] | undefined, probe: ProbeState): ServerRow[] {
   const byAddress = new Map((statuses === undefined ? [] : statuses).map((s) => [s.address, s]));
   const paused: ServerSignal = { kind: "paused" };
+  const pending: ServerSignal = { kind: "pending" };
   return pinned.map((server) => {
     const status = byAddress.get(server.address);
     if (status === undefined) {
-      return { name: server.name, address: server.address, versionName: null, motd: null, favicon: null, signal: online ? { kind: "pending" } : paused, population: { kind: "none" } };
+      return { name: server.name, address: server.address, versionName: null, motd: null, favicon: null, signal: probe === "paused" ? paused : pending, population: { kind: "none" } };
     }
-    // 离线时也先判一遍：标为连通却没有延迟是契约破坏，不因为暂停而放过
+    // 结果不算数时也先判一遍：标为连通却没有延迟是契约破坏，不因为暂停或重测而放过
     const signal = signalOf(status);
     return {
       name: server.name,
@@ -85,7 +94,7 @@ export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonl
       versionName: status.version_name,
       motd: status.motd,
       favicon: status.favicon,
-      signal: online ? signal : paused,
+      signal: probe === "live" ? signal : probe === "paused" ? paused : pending,
       population: populationOf(status),
     };
   });
