@@ -1,14 +1,17 @@
-// 窗口级文件拖放：系统把文件拖进窗口时由外壳统一接住，页面不自己监听（原生拖放接管了整个窗口，
-// 网页里的 dragenter / drop 拿不到文件路径，投放区只能经这里收到文件）。
+// 窗口级拖放：系统把文件或皮肤站的外置登录服务器链接拖进窗口时由外壳统一接住，页面不自己监听（原生层接管了
+// 整个窗口的放置目标，网页里的 dragenter / drop 拿不到文件路径，投放区只能经这里收到文件）。
 //
-// - 页面或弹窗登记了接收方（registerFileDrop）时，最后登记的那个独占全部拖放事件：导入弹窗的投放区据此高亮、收文件。
+// - 页面或弹窗登记了接收方（registerFileDrop）时，最后登记的那个独占全部文件拖放：导入弹窗的投放区据此高亮、收文件。
+//   接收方只收文件，这期间拖进来的服务器链接不处理。
 // - 没有接收方时外壳自己处理：拖进整合包文件（.mrpack / .zip）显示放置提示，松开后导航到发现页并带上文件路径，
 //   由发现页打开本地整合包导入弹窗；松开的不是整合包，提示只认哪两种文件。
+// - 拖进外置登录服务器链接（authlib-injector:yggdrasil-server:）显示放置提示，松开后打开外置登录弹窗、
+//   填好地址并自动执行「下一步」。
 // - 首次启动向导期间、或有浮层打开时外壳不处理也不提示：导航入口此时被挡住，与导航快捷键同一规则。
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Route } from "../state/route";
-import type { FileDropEvent, WindowPort } from "./window";
+import type { DropContent, WindowDropEvent, WindowPort } from "./window";
 
 /** 页面或弹窗登记的接收方：路径都是系统给出的完整路径，可能一次拖进多个文件。 */
 export interface FileDropTarget {
@@ -24,8 +27,8 @@ export const FILE_KINDS = {
 
 export type FileKind = keyof typeof FILE_KINDS;
 
-/** 拖动经过窗口时外壳显示的放置提示；null 为不显示。 */
-export type FileDropHint = FileKind | null;
+/** 拖动经过窗口时外壳显示的放置提示：整合包文件或外置登录服务器链接；null 为不显示。 */
+export type FileDropHint = FileKind | "auth_server" | null;
 
 export function fileExtension(path: string): string {
   const parts = path.split(/[\\/]/);
@@ -44,12 +47,20 @@ export function firstModpack(paths: readonly string[]): string | null {
   return found === undefined ? null : found;
 }
 
+/** 拖进来的内容配哪种提示：文件里有整合包才提示，服务器链接总是提示。 */
+function hintFor(content: DropContent): FileDropHint {
+  if (content.kind === "auth_server") return "auth_server";
+  return firstModpack(content.paths) !== null ? "modpack" : null;
+}
+
 export interface FileDropRouting {
   /** 外壳自己处理拖放时，不可处理的时刻（首次启动向导、有浮层打开）。 */
   blocked(): boolean;
   go(route: Route): void;
   /** 松开的文件里没有整合包。 */
   rejectNonModpack(): void;
+  /** 松开的是外置登录服务器链接：打开外置登录弹窗，填好这个地址并自动执行「下一步」。 */
+  openAuthServer(url: string): void;
   /** 订阅失败交给外层统一处理。 */
   reportError(error: unknown): void;
 }
@@ -79,21 +90,21 @@ export function useFileDrop(port: WindowPort, routing: FileDropRouting): FileDro
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    const onEvent = (event: FileDropEvent) => {
+    const onEvent = (event: WindowDropEvent) => {
       const target = targets.current[targets.current.length - 1];
       if (target !== undefined) {
         setHint(null);
-        if (event.type === "enter") target.onEnter?.(event.paths);
-        else if (event.type === "leave") target.onLeave?.();
-        else if (event.type === "drop") target.onDrop(event.paths);
+        if (event.type === "leave") target.onLeave?.();
+        else if (event.content.kind === "files") {
+          if (event.type === "enter") target.onEnter?.(event.content.paths);
+          else target.onDrop(event.content.paths);
+        }
         return;
       }
       const now = routingRef.current;
       switch (event.type) {
         case "enter":
-          setHint(!now.blocked() && firstModpack(event.paths) !== null ? "modpack" : null);
-          return;
-        case "over":
+          setHint(now.blocked() ? null : hintFor(event.content));
           return;
         case "leave":
           setHint(null);
@@ -101,14 +112,19 @@ export function useFileDrop(port: WindowPort, routing: FileDropRouting): FileDro
         case "drop": {
           setHint(null);
           if (now.blocked()) return;
-          const file = firstModpack(event.paths);
+          const content = event.content;
+          if (content.kind === "auth_server") {
+            now.openAuthServer(content.url);
+            return;
+          }
+          const file = firstModpack(content.paths);
           if (file === null) now.rejectNonModpack();
           else now.go({ page: "discover", importFile: file });
           return;
         }
       }
     };
-    port.onFileDrop(onEvent).then(
+    port.onDrop(onEvent).then(
       (release) => {
         if (disposed) release();
         else unlisten = release;

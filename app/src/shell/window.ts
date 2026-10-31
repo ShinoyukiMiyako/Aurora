@@ -7,6 +7,7 @@
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { createContext, createElement, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { inTauri } from "../ipc/bridge";
+import { onWindowDrop, type DropContentDto, type WindowDropEventDto } from "../ipc/window-drop";
 
 /** 关闭请求：挡住默认关闭后由外壳裁决，确认后再销毁窗口。 */
 export interface CloseRequest {
@@ -15,11 +16,14 @@ export interface CloseRequest {
 
 export type CloseRequestHandler = (request: CloseRequest) => void | Promise<void>;
 
+/** 拖进窗口、认得出来的内容：文件（系统给出的完整路径）或外置登录服务器链接（已解出 API 地址）。 */
+export type DropContent = DropContentDto;
+
 /**
- * 窗口级文件拖放：系统把文件拖进、拖过、松开在窗口上或拖出窗口。只有文件会触发，拖动网页链接、文字不会：
- * 原生拖放接管了整个窗口的放置目标（网页里的 drop 事件拿不到文件的完整路径），而它只认文件。
+ * 窗口级拖放：系统把文件或皮肤站的外置登录服务器链接拖进、松开在窗口上，或拖出窗口。别的东西（普通文字、网址）
+ * 不触发，鼠标显示不可放置。原生层接管了整个窗口的放置目标：网页里的 drop 事件拿不到文件的完整路径。
  */
-export type FileDropEvent = { type: "enter"; paths: string[] } | { type: "over" } | { type: "drop"; paths: string[] } | { type: "leave" };
+export type WindowDropEvent = WindowDropEventDto;
 
 export interface WindowPort {
   /** 是否有原生窗口（Tauri 里为 true）。 */
@@ -40,7 +44,7 @@ export interface WindowPort {
   onResized(handler: () => void): Promise<() => void>;
   onFocusChanged(handler: (focused: boolean) => void): Promise<() => void>;
   onCloseRequested(handler: CloseRequestHandler): Promise<() => void>;
-  onFileDrop(handler: (event: FileDropEvent) => void): Promise<() => void>;
+  onDrop(handler: (event: WindowDropEvent) => void): Promise<() => void>;
 }
 
 export function tauriWindowPort(): WindowPort {
@@ -61,12 +65,8 @@ export function tauriWindowPort(): WindowPort {
     onResized: (handler) => win.onResized(() => handler()),
     onFocusChanged: (handler) => win.onFocusChanged(({ payload }) => handler(payload)),
     onCloseRequested: (handler) => win.onCloseRequested(handler),
-    // 主窗口是窗口内容型 webview，原生拖放以窗口事件送达；位置信息用不上，只转交类型与路径
-    onFileDrop: (handler) =>
-      win.onDragDropEvent(({ payload }) => {
-        if (payload.type === "enter" || payload.type === "drop") handler({ type: payload.type, paths: payload.paths });
-        else handler({ type: payload.type });
-      }),
+    // Tauri 自带的拖放只认文件、已在窗口配置里关掉；后端的原生放置目标把文件与服务器链接都推过来
+    onDrop: (handler) => onWindowDrop(handler),
   };
 }
 
@@ -117,9 +117,9 @@ export function browserWindowPort(): WindowPort {
         closeHandlers.delete(handler);
       });
     },
-    // 网页里的 drop 事件拿不到文件的完整路径，后端也就读不到那个文件：浏览器预览不支持文件拖放
-    onFileDrop: () => {
-      console.info("[window] 浏览器预览没有原生文件拖放，拖进来的文件不处理");
+    // 网页里的 drop 事件拿不到文件的完整路径，后端也就读不到那个文件：浏览器预览不接窗口级拖放
+    onDrop: () => {
+      console.info("[window] 浏览器预览没有原生拖放，拖进来的文件与链接不处理");
       return Promise.resolve(() => {});
     },
   };

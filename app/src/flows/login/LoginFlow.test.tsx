@@ -230,9 +230,13 @@ describe("微软设备码弹窗", () => {
 });
 
 describe("外置登录弹窗", () => {
-  // 这一组走假后端的外置登录处理函数；桥第一次动态引入假后端要真实时间，假定时器推不动，先预热
+  // 这一组走假后端的外置登录处理函数；桥第一次动态引入假后端要真实时间，假定时器推不动，先预热。
+  // 预热要经过桥本身：单在测试里引入假后端模块，桥自己的那次动态引入仍要真实时间。此刻还是真定时器，
+  // 清掉上一个用例留下的改写，好让这条命令真正落到假后端
   beforeAll(async () => {
-    await import("../../ipc/mock");
+    resetRecorder(ipc);
+    const bridge = await import("../../ipc/bridge");
+    await bridge.invoke("is_first_run");
   });
 
   async function openAuthlib() {
@@ -257,6 +261,36 @@ describe("外置登录弹窗", () => {
     await flush();
     expect(dialog()?.textContent).toContain("https://skin.example.com/");
     expect(document.activeElement).toBe(inputs()[0]);
+  });
+
+  it("从皮肤站拖进服务器链接：弹窗打开即填好地址并执行一次「下一步」，停在登录这一步", async () => {
+    await mount();
+    await act(async () => {
+      await launcher.actions.openAuthlibServer("https://skin.example.com/api/yggdrasil");
+    });
+    await flush();
+    expect(launcher.state.login).toEqual({ kind: "authlib", intent: MANUAL_LOGIN, prefill: null, dropped: "https://skin.example.com/api/yggdrasil" });
+    expect(callsOf(ipc, "probe_auth_server")).toEqual([{ url: "https://skin.example.com/api/yggdrasil" }]);
+    expect(dialog()?.textContent).toContain("https://skin.example.com/");
+    const [username, password] = inputs();
+    expect(username.value).toBe("");
+    expect(password.value).toBe("");
+    // 之后的重渲染不再探测
+    typeInto(username, "steve@example.com");
+    await flush();
+    expect(callsOf(ipc, "probe_auth_server")).toHaveLength(1);
+  });
+
+  it("拖进来的地址不是认证服务器：停在第一步，地址留在输入框里，原因写在原位", async () => {
+    await mount();
+    await act(async () => {
+      await launcher.actions.openAuthlibServer("https://not-ygg.example.com");
+    });
+    await flush();
+    expect(callsOf(ipc, "probe_auth_server")).toEqual([{ url: "https://not-ygg.example.com" }]);
+    expect(inputs()[0].value).toBe("https://not-ygg.example.com");
+    expect(dialog()?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
+    expect(launcher.state.toasts).toHaveLength(0);
   });
 
   it("密码错误：提示挂在密码框下并清空密码；多个角色时进入选择角色", async () => {
@@ -306,7 +340,7 @@ describe("外置登录：重新登录与用过的服务器", () => {
     });
     await flush();
 
-    expect(launcher.state.login).toEqual({ kind: "authlib", intent: MANUAL_LOGIN, prefill: { serverUrl: SKIN_API, serverName: "皮肤站", username: "steve@example.com" } });
+    expect(launcher.state.login).toEqual({ kind: "authlib", intent: MANUAL_LOGIN, prefill: { serverUrl: SKIN_API, serverName: "皮肤站", username: "steve@example.com" }, dropped: null });
     expect(dialog()?.textContent).toContain("皮肤站");
     expect(dialog()?.textContent).toContain(SKIN_API);
     const [username, password] = inputs();

@@ -112,6 +112,7 @@ export const TOASTS_COPY = {
 /** 窗口级文件拖放：放置提示与松开了别的文件时的说明。 */
 export const DROP_COPY = {
   modpackHint: "松开以导入整合包",
+  authServerHint: "松开以添加外置登录服务器",
   notModpack: { title: "拖进来的不是整合包", body: "只认 .mrpack 和 CurseForge 导出的 .zip" },
 } as const;
 

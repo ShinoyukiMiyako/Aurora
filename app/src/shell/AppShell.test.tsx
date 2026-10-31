@@ -19,7 +19,7 @@ import type { PageTable } from "./nav";
 import { createPageRegistry, type PageRegistry } from "./pages";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
 import type { StartupNotice } from "./startup-notices";
-import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowPort } from "./window";
+import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -252,18 +252,18 @@ describe("外壳布局", () => {
   });
 
   it("文件拖过窗口时整窗显示放置提示", async () => {
-    let fire: ((event: FileDropEvent) => void) | null = null;
+    let fire: ((event: WindowDropEvent) => void) | null = null;
     port = {
       ...port,
-      onFileDrop: async (handler) => {
+      onDrop: async (handler) => {
         fire = handler;
         return () => undefined;
       },
     };
     await mount();
     if (fire === null) throw new Error("外壳没有订阅文件拖放");
-    const send: (event: FileDropEvent) => void = fire;
-    act(() => send({ type: "enter", paths: ["D:\\pack.mrpack"] }));
+    const send: (event: WindowDropEvent) => void = fire;
+    act(() => send({ type: "enter", content: { kind: "files", paths: ["D:\\pack.mrpack"] } }));
     expect(document.querySelector('[role="status"][data-hint="modpack"]')?.textContent).toBe(DROP_COPY.modpackHint);
   });
 

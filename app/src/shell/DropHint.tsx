@@ -1,14 +1,17 @@
-// 放置提示：把整合包文件拖过窗口时，整窗盖一层强调色虚线框与一句「松开以导入整合包」。
+// 放置提示：把整合包文件或外置登录服务器链接拖过窗口时，整窗盖一层强调色虚线框与一句说明松开会做什么。
 // 不接指针事件（拖放由原生层处理，这一层只是提示），读屏以 status 播报一次。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { Icon } from "../art/Icon";
+import { Icon, type IconName } from "../art/Icon";
 import { DROP_COPY } from "../copy/shell";
 import { fade } from "../lib/motion";
 import styles from "./DropHint.module.css";
 import type { FileDropHint } from "./file-drop";
 
-const HINT_TEXT: Readonly<Record<Exclude<FileDropHint, null>, string>> = { modpack: DROP_COPY.modpackHint };
+const HINT: Readonly<Record<Exclude<FileDropHint, null>, { text: string; icon: IconName }>> = {
+  modpack: { text: DROP_COPY.modpackHint, icon: "upload" },
+  auth_server: { text: DROP_COPY.authServerHint, icon: "server" },
+};
 
 export function DropHint({ hint }: { hint: FileDropHint }) {
   return (
@@ -24,8 +27,8 @@ export function DropHint({ hint }: { hint: FileDropHint }) {
           exit={{ opacity: 0, transition: fade.out }}
         >
           <span className={styles.label}>
-            <Icon name="upload" size={20} />
-            {HINT_TEXT[hint]}
+            <Icon name={HINT[hint].icon} size={20} />
+            {HINT[hint].text}
           </span>
         </motion.div>
       )}

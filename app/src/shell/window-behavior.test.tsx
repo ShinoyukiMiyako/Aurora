@@ -60,7 +60,7 @@ function fakeWindow(init: Partial<FakeWindow["flags"]> = {}): FakeWindow {
         handlers.delete(handler);
       };
     },
-    onFileDrop: async () => () => {},
+    onDrop: async () => () => {},
   };
   return { port, flags, requestClose };
 }

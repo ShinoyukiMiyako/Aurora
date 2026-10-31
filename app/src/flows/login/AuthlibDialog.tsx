@@ -2,8 +2,9 @@
 // 能原位说清的错误（连不上、不是认证服务器、地址无效、账户密码错、网络断、没有角色、服务器拒绝）显示在出错的那一步；
 // 其余错误照常交给外层统一处理（error 通知）。登录成功后由状态容器关掉弹窗并发通知。
 // 重新登录时带着上次解析好的 API 地址、服务器名与账号进来：直接停在登录这一步，密码为空，不再探测一次服务器。
+// 从皮肤站把服务器链接拖进窗口时带着解出来的地址进来：填进第一步并立即执行一次「下一步」，与用户手动点一样。
 
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API } from "../../copy/flows";
@@ -38,14 +39,14 @@ function prefilledServer(prefill: AuthlibPrefill): { url: string; info: AuthServ
   return { url: prefill.serverUrl, info: { apiRoot: prefill.serverUrl, serverName: prefill.serverName, host: new URL(prefill.serverUrl).host } };
 }
 
-export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
+export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | null; dropped: string | null }) {
   const { state, actions } = useLauncher();
   const run = useRunner();
   const [step, setStep] = useState<AuthlibStep>(prefill === null ? "server" : "login");
   const usedServers = usedAuthServers(state, [LITTLESKIN_API]);
 
   // ---- 第一步：服务器
-  const [serverInput, setServerInput] = useState(prefill === null ? "" : prefill.serverUrl);
+  const [serverInput, setServerInput] = useState(prefill !== null ? prefill.serverUrl : dropped !== null ? dropped : "");
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState<InlineProblem | null>(null);
   const [server, setServer] = useState<{ url: string; info: AuthServer } | null>(() => (prefill === null ? null : prefilledServer(prefill)));
@@ -75,6 +76,16 @@ export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
         setProbing(false);
       }
     }, LOGIN_ERROR.probe);
+
+  // 拖进来的地址只自动探测一次：StrictMode 的二次执行、之后的重渲染都不再探测；失败时原因照常写在这一步
+  const autoProbed = useRef(false);
+  const probeDropped = useRef(probe);
+  probeDropped.current = probe;
+  useEffect(() => {
+    if (dropped === null || autoProbed.current) return;
+    autoProbed.current = true;
+    probeDropped.current(dropped);
+  }, [dropped]);
 
   // ---- 第二步：登录
   const [username, setUsername] = useState(prefill === null || prefill.username === null ? "" : prefill.username);

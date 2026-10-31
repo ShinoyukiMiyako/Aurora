@@ -106,8 +106,8 @@ export interface ShellApi {
    */
   registerShortcut(combo: KeyCombo, handler: () => void): () => void;
   /**
-   * 接收窗口级文件拖放：登记期间（通常是导入弹窗打开期间）独占全部拖放事件，外壳不再自己导航或提示。
-   * 没有接收方时，拖进 .mrpack / .zip 由外壳导航到发现页并带上 importFile。
+   * 接收窗口级文件拖放：登记期间（通常是导入弹窗打开期间）独占全部文件拖放，外壳不再自己导航或提示，拖进来的服务器链接也不处理。
+   * 没有接收方时，拖进 .mrpack / .zip 由外壳导航到发现页并带上 importFile；拖进外置登录服务器链接打开外置登录弹窗。
    */
   registerFileDrop(target: FileDropTarget): () => void;
   /** 拖动经过窗口时外壳要显示的放置提示（外壳布局据此绘制）。 */
@@ -419,13 +419,14 @@ function ShellCore({ children }: { children: ReactNode }) {
     }
   }, onPageKey);
 
-  // ---------------------------------------------------------------- 文件：拖放与选择文件
+  // ---------------------------------------------------------------- 文件与服务器链接：拖放与选择文件
 
   const port = useWindowPort();
   const fileDrop = useFileDrop(port, {
     blocked: () => shortcutState.firstRun === true || overlay.isOpen() || shortcutState.paletteOpen,
     go,
     rejectNonModpack: () => void actions.toast("warning", DROP_COPY.notModpack.title, DROP_COPY.notModpack.body),
+    openAuthServer: (url) => void run(() => actions.openAuthlibServer(url), ACTION_ERROR.authlib),
     reportError: (error) => void run(() => Promise.reject(error), SHELL_ACTION_ERROR.fileDrop),
   });
 

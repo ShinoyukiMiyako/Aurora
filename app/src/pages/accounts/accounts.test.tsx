@@ -301,6 +301,7 @@ describe("账户页：凭据失效、刷新与重新登录", () => {
       kind: "authlib",
       intent: { kind: "manual" },
       prefill: { serverUrl: "https://skin.example/api/yggdrasil/", serverName: "Example Skin", username: "yozakura@example.com" },
+      dropped: null,
     });
   });
 
@@ -367,7 +368,7 @@ describe("账户页：添加", () => {
     act(() => other.focus());
     await click(other);
     await chooseMenuItem("外置登录");
-    expect(launcher.state.login).toEqual({ kind: "authlib", intent: { kind: "manual" }, prefill: null });
+    expect(launcher.state.login).toEqual({ kind: "authlib", intent: { kind: "manual" }, prefill: null, dropped: null });
   });
 
   it("添加卡的三行分别打开三种登录", async () => {

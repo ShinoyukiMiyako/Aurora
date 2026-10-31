@@ -32,7 +32,11 @@ export type LoginState =
   | { kind: "no_account"; intent: LoginIntent }
   | { kind: "microsoft"; intent: LoginIntent; device: DeviceLogin }
   | { kind: "offline"; intent: LoginIntent }
-  | { kind: "authlib"; intent: LoginIntent; prefill: AuthlibPrefill | null };
+  /**
+   * dropped：从皮肤站拖进窗口的认证服务器地址，弹窗打开时填进第一步并立即执行「下一步」；
+   * 手动打开与重新登录时为 null。
+   */
+  | { kind: "authlib"; intent: LoginIntent; prefill: AuthlibPrefill | null; dropped: string | null };
 
 export type LoginKind = "microsoft" | "offline" | "authlib";
 

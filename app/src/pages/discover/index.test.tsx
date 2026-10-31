@@ -6,7 +6,7 @@ import type { InstalledMod } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
-import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowPort } from "../../shell/window";
+import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "../../shell/window";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "../../state/queries/discover";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -29,7 +29,7 @@ let nav: NavApi;
 let launcher: LauncherApi;
 let observers: { callback: IntersectionObserverCallback; options: IntersectionObserverInit | undefined; targets: Element[] }[];
 let online: boolean;
-let dropHandlers: ((event: FileDropEvent) => void)[];
+let dropHandlers: ((event: WindowDropEvent) => void)[];
 let port: WindowPort;
 
 function Probe() {
@@ -199,7 +199,7 @@ beforeEach(() => {
   dropHandlers = [];
   port = {
     ...browserWindowPort(),
-    onFileDrop: async (handler) => {
+    onDrop: async (handler) => {
       dropHandlers.push(handler);
       return () => {
         dropHandlers = dropHandlers.filter((h) => h !== handler);
@@ -722,7 +722,7 @@ describe("发现页：本地整合包的三种入口", () => {
     override_files: 3,
     override_bytes: 512,
   });
-  const fire = (event: FileDropEvent) =>
+  const fire = (event: WindowDropEvent) =>
     act(async () => {
       for (const handler of [...dropHandlers]) handler(event);
       await settle();
@@ -799,12 +799,12 @@ describe("发现页：本地整合包的三种入口", () => {
     await mount({ page: "discover", query: "钠" });
     act(() => buttonByText("导入整合包文件").click());
     await flush();
-    await fire({ type: "enter", paths: ["D:\\notes.txt", PACK] });
+    await fire({ type: "enter", content: { kind: "files", paths: ["D:\\notes.txt", PACK] } });
     expect(dropZone().dataset.state).toBe("over");
     await fire({ type: "leave" });
     expect(dropZone().dataset.state).toBeUndefined();
-    await fire({ type: "enter", paths: [PACK] });
-    await fire({ type: "drop", paths: ["D:\\notes.txt", PACK] });
+    await fire({ type: "enter", content: { kind: "files", paths: [PACK] } });
+    await fire({ type: "drop", content: { kind: "files", paths: ["D:\\notes.txt", PACK] } });
     expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
     expect(nameValue()).toBe("生存包");
     expect(nav.route).toEqual({ page: "discover", query: "钠" });
@@ -818,7 +818,7 @@ describe("发现页：本地整合包的三种入口", () => {
     await mount();
     act(() => buttonByText("导入整合包文件").click());
     await flush();
-    await fire({ type: "drop", paths: ["D:\\a.png", "D:\\b.jar"] });
+    await fire({ type: "drop", content: { kind: "files", paths: ["D:\\a.png", "D:\\b.jar"] } });
     expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "D:\\a.png" }]);
     expect(dialog().textContent).toContain("只认 .mrpack 和 CurseForge 导出的 .zip");
     expect(dropZone()).toBeDefined();

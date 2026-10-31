@@ -10,7 +10,7 @@ import { DropHint } from "./DropHint";
 import { fileExtension, firstModpack, isFileOfKind } from "./file-drop";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
-import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowPort } from "./window";
+import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -19,7 +19,7 @@ let view: Rendered | undefined;
 let nav: NavApi;
 let shell: ShellApi;
 let launcher: LauncherApi;
-let dropHandlers: ((event: FileDropEvent) => void)[];
+let dropHandlers: ((event: WindowDropEvent) => void)[];
 let port: WindowPort;
 
 function Probe() {
@@ -46,7 +46,7 @@ async function mount() {
 }
 
 /** 模拟系统的一次拖放事件。 */
-const fire = (event: FileDropEvent) =>
+const fire = (event: WindowDropEvent) =>
   act(() => {
     for (const handler of [...dropHandlers]) handler(event);
   });
@@ -65,7 +65,7 @@ beforeEach(() => {
   dropHandlers = [];
   port = {
     ...browserWindowPort(),
-    onFileDrop: async (handler) => {
+    onDrop: async (handler) => {
       dropHandlers.push(handler);
       return () => {
         dropHandlers = dropHandlers.filter((h) => h !== handler);
@@ -102,12 +102,10 @@ describe("窗口级拖放：外壳自己处理", () => {
   it("拖进整合包显示放置提示；松开后导航到发现页并带上文件路径，提示收起", async () => {
     await mount();
     expect(dropHandlers).toHaveLength(1);
-    fire({ type: "enter", paths: [PACK] });
+    fire({ type: "enter", content: { kind: "files", paths: [PACK] } });
     expect(shell.fileDropHint).toBe("modpack");
     expect(hintText()).toBe(DROP_COPY.modpackHint);
-    fire({ type: "over" });
-    expect(shell.fileDropHint).toBe("modpack");
-    fire({ type: "drop", paths: ["D:\\notes.txt", PACK] });
+    fire({ type: "drop", content: { kind: "files", paths: ["D:\\notes.txt", PACK] } });
     expect(nav.route).toEqual({ page: "discover", importFile: PACK });
     expect(shell.fileDropHint).toBeNull();
     expect(nav.canBack).toBe(true);
@@ -115,7 +113,7 @@ describe("窗口级拖放：外壳自己处理", () => {
 
   it("拖出窗口：提示收起，不导航", async () => {
     await mount();
-    fire({ type: "enter", paths: [CF_PACK] });
+    fire({ type: "enter", content: { kind: "files", paths: [CF_PACK] } });
     fire({ type: "leave" });
     expect(shell.fileDropHint).toBeNull();
     expect(nav.route).toEqual({ page: "home" });
@@ -123,9 +121,9 @@ describe("窗口级拖放：外壳自己处理", () => {
 
   it("拖进的不是整合包：不显示提示；松开后不导航，弹一条只认哪两种文件的提醒", async () => {
     await mount();
-    fire({ type: "enter", paths: ["D:\\mods\\sodium.jar"] });
+    fire({ type: "enter", content: { kind: "files", paths: ["D:\\mods\\sodium.jar"] } });
     expect(shell.fileDropHint).toBeNull();
-    fire({ type: "drop", paths: ["D:\\mods\\sodium.jar"] });
+    fire({ type: "drop", content: { kind: "files", paths: ["D:\\mods\\sodium.jar"] } });
     expect(nav.route).toEqual({ page: "home" });
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["warning", DROP_COPY.notModpack.title, DROP_COPY.notModpack.body]]);
   });
@@ -133,9 +131,9 @@ describe("窗口级拖放：外壳自己处理", () => {
   it("有浮层打开时外壳不处理：不提示、不导航、不提醒", async () => {
     await mount();
     act(() => shell.openPalette());
-    fire({ type: "enter", paths: [PACK] });
+    fire({ type: "enter", content: { kind: "files", paths: [PACK] } });
     expect(shell.fileDropHint).toBeNull();
-    fire({ type: "drop", paths: [PACK] });
+    fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
     expect(nav.route).toEqual({ page: "home" });
     expect(launcher.state.toasts).toEqual([]);
   });
@@ -144,10 +142,66 @@ describe("窗口级拖放：外壳自己处理", () => {
     bootOverrides(ipc, { firstRun: true });
     await mount();
     expect(launcher.state.firstRun).toBe(true);
-    fire({ type: "enter", paths: [PACK] });
-    fire({ type: "drop", paths: [PACK] });
+    fire({ type: "enter", content: { kind: "files", paths: [PACK] } });
+    fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
     expect(shell.fileDropHint).toBeNull();
     expect(nav.route).toEqual({ page: "home" });
+  });
+});
+
+describe("窗口级拖放：外置登录服务器链接", () => {
+  const SERVER = "https://littleskin.cn/api/yggdrasil";
+  const link = { kind: "auth_server", url: SERVER } as const;
+
+  it("拖进链接显示「松开以添加外置登录服务器」；松开后打开外置登录弹窗并带上地址，提示收起，不导航", async () => {
+    await mount();
+    fire({ type: "enter", content: link });
+    expect(shell.fileDropHint).toBe("auth_server");
+    expect(hintText()).toBe(DROP_COPY.authServerHint);
+    await act(async () => {
+      for (const handler of [...dropHandlers]) handler({ type: "drop", content: link });
+      await settle();
+    });
+    expect(shell.fileDropHint).toBeNull();
+    expect(launcher.state.login).toEqual({ kind: "authlib", intent: { kind: "manual" }, prefill: null, dropped: SERVER });
+    expect(nav.route).toEqual({ page: "home" });
+  });
+
+  it("拖出窗口：提示收起，不打开弹窗", async () => {
+    await mount();
+    fire({ type: "enter", content: link });
+    fire({ type: "leave" });
+    expect(shell.fileDropHint).toBeNull();
+    expect(launcher.state.login).toBeNull();
+  });
+
+  it("有浮层打开或在首次启动向导里：不提示，松开也不打开弹窗", async () => {
+    await mount();
+    act(() => shell.openPalette());
+    fire({ type: "enter", content: link });
+    expect(shell.fileDropHint).toBeNull();
+    fire({ type: "drop", content: link });
+    expect(launcher.state.login).toBeNull();
+    view?.unmount();
+
+    bootOverrides(ipc, { firstRun: true });
+    await mount();
+    fire({ type: "enter", content: link });
+    fire({ type: "drop", content: link });
+    expect(shell.fileDropHint).toBeNull();
+    expect(launcher.state.login).toBeNull();
+  });
+
+  it("登记了接收方（导入弹窗的投放区）：链接不交给它，外壳也不处理", async () => {
+    await mount();
+    const target = { onEnter: vi.fn(), onLeave: vi.fn(), onDrop: vi.fn() };
+    act(() => void shell.registerFileDrop(target));
+    fire({ type: "enter", content: link });
+    fire({ type: "drop", content: link });
+    expect(target.onEnter).not.toHaveBeenCalled();
+    expect(target.onDrop).not.toHaveBeenCalled();
+    expect(shell.fileDropHint).toBeNull();
+    expect(launcher.state.login).toBeNull();
   });
 });
 
@@ -162,9 +216,9 @@ describe("窗口级拖放：登记了接收方", () => {
       offOuter = shell.registerFileDrop(outer);
       offInner = shell.registerFileDrop(inner);
     });
-    fire({ type: "enter", paths: [PACK] });
+    fire({ type: "enter", content: { kind: "files", paths: [PACK] } });
     fire({ type: "leave" });
-    fire({ type: "drop", paths: ["D:\\a.jar", PACK] });
+    fire({ type: "drop", content: { kind: "files", paths: ["D:\\a.jar", PACK] } });
     expect(inner.onEnter.mock.calls).toEqual([[[PACK]]]);
     expect(inner.onLeave).toHaveBeenCalledTimes(1);
     expect(inner.onDrop.mock.calls).toEqual([[["D:\\a.jar", PACK]]]);
@@ -174,10 +228,10 @@ describe("窗口级拖放：登记了接收方", () => {
     expect(nav.route).toEqual({ page: "home" });
 
     act(() => offInner());
-    fire({ type: "drop", paths: [PACK] });
+    fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
     expect(outer.onDrop.mock.calls).toEqual([[[PACK]]]);
     act(() => offOuter());
-    fire({ type: "drop", paths: [PACK] });
+    fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
     expect(nav.route).toEqual({ page: "discover", importFile: PACK });
   });
 
@@ -185,9 +239,9 @@ describe("窗口级拖放：登记了接收方", () => {
     await mount();
     const onDrop = vi.fn();
     act(() => void shell.registerFileDrop({ onDrop }));
-    fire({ type: "enter", paths: [PACK] });
+    fire({ type: "enter", content: { kind: "files", paths: [PACK] } });
     fire({ type: "leave" });
-    fire({ type: "drop", paths: [PACK] });
+    fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
     expect(onDrop).toHaveBeenCalledTimes(1);
   });
 });
@@ -195,7 +249,7 @@ describe("窗口级拖放：登记了接收方", () => {
 describe("订阅", () => {
   it("订阅失败经外层统一错误处理报告", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    port = { ...port, onFileDrop: () => Promise.reject(new Error("没有监听权限")) };
+    port = { ...port, onDrop: () => Promise.reject(new Error("没有监听权限")) };
     await mount();
     expect(launcher.state.toasts.map((t) => [t.tone, t.body])).toEqual([["error", "没有监听权限"]]);
   });

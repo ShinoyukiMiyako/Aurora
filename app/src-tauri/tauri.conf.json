@@ -27,7 +27,8 @@
         "center": true,
         "visible": false,
         "backgroundColor": "#FBF7F9",
-        "zoomHotkeysEnabled": false
+        "zoomHotkeysEnabled": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

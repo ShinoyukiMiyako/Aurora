@@ -16,6 +16,6 @@ export default function LoginFlow({ login }: FlowProps<"login">) {
     case "offline":
       return <OfflineDialog />;
     case "authlib":
-      return <AuthlibDialog prefill={login.prefill} />;
+      return <AuthlibDialog prefill={login.prefill} dropped={login.dropped} />;
   }
 }

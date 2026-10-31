@@ -280,6 +280,8 @@ export interface LauncherActions {
   refreshAccount(uuid: string): Promise<"refreshed" | "expired">;
   addOfflineAccount(name: string): Promise<Account>;
   openLogin(kind: LoginKind, intent?: LoginIntent): Promise<void>;
+  /** 拖进窗口的外置登录服务器链接：打开外置登录弹窗，填好这个地址并自动探测服务器。 */
+  openAuthlibServer(serverUrl: string): Promise<void>;
   closeLogin(): Promise<void>;
   startMicrosoftLogin(intent?: LoginIntent): Promise<void>;
   closeMicrosoftLogin(): Promise<void>;
@@ -1640,7 +1642,11 @@ export class LauncherStore {
         // 从设备码弹窗换到别的登录方式（「改用离线账户」）：先停掉后端还在轮询的微软登录
         if (store.raw.login !== null && store.raw.login.kind === "microsoft") await actions.closeMicrosoftLogin();
         if (kind === "offline") store.set({ login: { kind, intent } });
-        else store.set({ login: { kind, intent, prefill: null } });
+        else store.set({ login: { kind, intent, prefill: null, dropped: null } });
+      },
+      async openAuthlibServer(serverUrl) {
+        if (store.raw.login !== null && store.raw.login.kind === "microsoft") await actions.closeMicrosoftLogin();
+        store.set({ login: { kind: "authlib", intent: MANUAL_LOGIN, prefill: null, dropped: serverUrl } });
       },
       async closeLogin() {
         const login = store.raw.login;
@@ -1731,7 +1737,7 @@ export class LauncherStore {
         if (account.kind === "microsoft") return actions.startMicrosoftLogin(intent);
         if (account.kind === "authlib") {
           if (account.serverUrl === null || account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少验证服务器`);
-          store.set({ login: { kind: "authlib", intent, prefill: { serverUrl: account.serverUrl, serverName: account.authServer, username: account.username } } });
+          store.set({ login: { kind: "authlib", intent, prefill: { serverUrl: account.serverUrl, serverName: account.authServer, username: account.username }, dropped: null } });
           return;
         }
         throw new Error("离线账户没有登录状态，不需要重新登录");

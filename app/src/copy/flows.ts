@@ -821,7 +821,6 @@ export const AUTHLIB_COPY = {
   next: "下一步",
   unreachable: { title: "连不上这个地址", body: "检查地址是否正确，或稍后重试。" },
   notYggdrasil: { title: "这个地址不是外置登录服务器", body: "需要支持 authlib-injector 的认证服务器地址，皮肤站的说明页里一般会给出。" },
-  dropHint: "松开以添加外置登录服务器",
   username: "邮箱或用户名",
   password: "密码",
   passwordNote: `密码只用于这一次登录，${APP_NAME}不会保存`,

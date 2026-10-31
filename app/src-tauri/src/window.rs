@@ -1,4 +1,4 @@
-//! 主窗口的启动期处理：兜底显示，以及生产构建关闭 WebView2 浏览器加速键。
+//! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]），以及生产构建关闭 WebView2 浏览器加速键。
 //!
 //! 窗口以 `visible: false` 创建：前端在首帧渲染前读外观、写好明暗与强调色，画完第一帧才自己
 //! `show()`，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。
@@ -18,6 +18,9 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app
         .get_webview_window(MAIN_WINDOW)
         .ok_or_else(|| format!("找不到主窗口 {MAIN_WINDOW}，tauri.conf.json 与代码不一致"))?;
+
+    #[cfg(windows)]
+    crate::drop::install(&window)?;
 
     // 开发构建保留刷新与开发者工具。
     #[cfg(windows)]
@@ -160,6 +163,8 @@ mod tests {
         assert_eq!(window["visible"], false);
         assert_eq!(window["backgroundColor"], "#FBF7F9");
         assert_eq!(window["zoomHotkeysEnabled"], false);
+        // 原生拖放由 drop.rs 接管：Tauri 自带的那套只认文件，开着会占住 WebView2 的放置目标
+        assert_eq!(window["dragDropEnabled"], false);
     }
 
     /// 前端要用到的窗口与插件权限都在能力文件里；少一条，对应的 API 调用会在运行时被拒。
