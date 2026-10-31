@@ -1,6 +1,8 @@
 //! Java：探测本机运行时、下载 Mojang 运行时，以及启动时选显卡要用的本机显卡信息。
 
-use aurora_core::{CoreError, DetectSource, JavaInstallation, JavaVersion};
+use std::path::Path;
+
+use aurora_core::{CoreError, DetectSource, JavaInstallation, JavaVersion, RemovedJavaPath};
 use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, State};
@@ -28,8 +30,19 @@ pub struct JavaInstallationDto {
     pub version: JavaVersionDto,
     pub is_64bit: bool,
     pub vendor: String,
-    /// 探测来源：registry / common_dir / path / managed。
+    /// 探测来源：registry / common_dir / path / managed / manual / java_home。
     pub source: DetectSource,
+    /// 缺失的运行时文件，相对 Java 根目录、以 `/` 分隔；空为完整。
+    pub missing_files: Vec<String>,
+}
+
+/// 移除一条手动添加的 Java 的结果 DTO。
+#[derive(Debug, Serialize)]
+pub struct RemoveJavaPathDto {
+    /// 列表里有这一项，已移除。
+    pub removed: bool,
+    /// 全局默认 Java 正是它，已改回自动选择。
+    pub default_reset: bool,
 }
 
 /// 一次 Java 运行时安装结果 DTO。
@@ -108,10 +121,11 @@ fn java_installation_dto(java: &JavaInstallation) -> JavaInstallationDto {
         is_64bit: java.is_64bit,
         vendor: java.vendor.clone(),
         source: java.source,
+        missing_files: java.missing_files.clone(),
     }
 }
 
-/// 全量探测本机可用 Java（托管目录 / 注册表 / 常见目录 / PATH）。识别结果按文件指纹缓存，
+/// 全量探测本机可用 Java（托管目录 / 手动添加 / 注册表 / JAVA_HOME / 常见目录 / PATH）。识别结果按文件指纹缓存，
 /// 没变过的 Java 不再跑 `java -version`；首次探测仍可能要数秒，在快照上进行。
 #[tauri::command]
 pub async fn detect_java(
@@ -153,6 +167,77 @@ pub async fn install_java(
     })
 }
 
+/// 手动添加一个 Java：识别用户选的 java.exe 或 javaw.exe（javaw 按同目录的 java.exe 记），通过后记进配置。
+///
+/// 识别最多跑一次 `java -version`（限时 10 秒），在快照上进行，不占门面锁；同一路径再加一次照样返回安装项，
+/// 不落盘。不碰实例目录，不带 task_id。
+#[tauri::command]
+pub async fn add_java_path(
+    path: String,
+    facade: State<'_, Facade>,
+) -> Result<JavaInstallationDto, CommandError> {
+    add_java_path_with(&facade, &path).await
+}
+
+pub(crate) async fn add_java_path_with(
+    facade: &Facade,
+    path: &str,
+) -> Result<JavaInstallationDto, CommandError> {
+    let aurora = facade.snapshot().await;
+    let java = aurora.inspect_manual_java(Path::new(path.trim())).await?;
+    remember_java_path(facade, &java).await?;
+    Ok(java_installation_dto(&java))
+}
+
+/// 已在列表里时不落盘。
+async fn remember_java_path(facade: &Facade, java: &JavaInstallation) -> Result<bool, CoreError> {
+    facade
+        .update_if_changed(|aurora| aurora.add_extra_java_path(java.path.clone()))
+        .await
+}
+
+/// 移除一条手动添加的 Java（只删记录，不动磁盘文件）；它正是默认 Java 时默认改回自动选择。
+/// 不在列表里时什么都不做，也不落盘。
+#[tauri::command]
+pub async fn remove_java_path(
+    path: String,
+    facade: State<'_, Facade>,
+) -> Result<RemoveJavaPathDto, CommandError> {
+    remove_java_path_with(&facade, &path).await
+}
+
+pub(crate) async fn remove_java_path_with(
+    facade: &Facade,
+    path: &str,
+) -> Result<RemoveJavaPathDto, CommandError> {
+    let exe = Path::new(path.trim());
+    let listed = {
+        let aurora = facade.read().await;
+        let wanted = exe.to_string_lossy().to_lowercase();
+        aurora
+            .config()
+            .extra_java_paths
+            .iter()
+            .any(|known| known.to_string_lossy().to_lowercase() == wanted)
+    };
+    if !listed {
+        return Ok(RemoveJavaPathDto {
+            removed: false,
+            default_reset: false,
+        });
+    }
+    let RemovedJavaPath {
+        removed,
+        default_reset,
+    } = facade
+        .update(|aurora| Ok::<_, CommandError>(aurora.remove_extra_java_path(exe)))
+        .await?;
+    Ok(RemoveJavaPathDto {
+        removed,
+        default_reset,
+    })
+}
+
 /// 列出本机显卡，并看出 Windows 按高性能与省电偏好各挑哪一块。一次系统查询，不碰实例与配置。
 #[tauri::command]
 pub async fn gpu_adapters() -> Result<GpuAdaptersDto, CommandError> {
@@ -175,9 +260,130 @@ mod tests {
             (DetectSource::CommonDir, "common_dir"),
             (DetectSource::Path, "path"),
             (DetectSource::Managed, "managed"),
+            (DetectSource::Manual, "manual"),
+            (DetectSource::JavaHome, "java_home"),
         ] {
             assert_eq!(serde_json::to_value(source).unwrap(), name);
         }
+    }
+
+    fn facade_with(config: aurora_core::AuroraConfig, dir: &Path) -> Facade {
+        Facade::new(
+            aurora_core::Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap(),
+        )
+    }
+
+    /// 选的不是 java.exe / javaw.exe：报 java_path_invalid，detail.reason 为 not_java_executable，配置不动。
+    #[tokio::test]
+    async fn add_java_path_rejects_a_text_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(aurora_core::AuroraConfig::default(), dir.path());
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, b"not java").unwrap();
+
+        let err = add_java_path_with(&facade, &format!("  {}  ", notes.display()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::JAVA_PATH_INVALID);
+        assert_eq!(
+            err.message,
+            format!("只能添加 java.exe 或 javaw.exe: {}", notes.display())
+        );
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["reason"], json!("not_java_executable"));
+        assert_eq!(detail["path"], json!(notes.display().to_string()));
+        assert!(facade.read().await.config().extra_java_paths.is_empty());
+        assert!(!dir.path().join("config.json").exists());
+
+        let err = add_java_path_with(&facade, "jdk/bin/java.exe")
+            .await
+            .unwrap_err();
+        assert_eq!(err.detail.unwrap()["reason"], json!("not_absolute"));
+        let missing = dir.path().join("gone").join("bin").join("java.exe");
+        let err = add_java_path_with(&facade, &missing.display().to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::JAVA_PATH_INVALID);
+        assert_eq!(err.detail.unwrap()["reason"], json!("not_found"));
+    }
+
+    /// 同一路径（大小写不同也算）再记一次不落盘。
+    #[tokio::test]
+    async fn remembering_the_same_java_twice_saves_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(aurora_core::AuroraConfig::default(), dir.path());
+        let java = |path: &str| JavaInstallation {
+            path: path.into(),
+            version: JavaVersion::parse("21.0.3").unwrap(),
+            is_64bit: true,
+            vendor: "OpenJDK".into(),
+            source: DetectSource::Manual,
+            missing_files: Vec::new(),
+        };
+        assert!(
+            remember_java_path(&facade, &java(r"D:\Java\jdk-21\bin\java.exe"))
+                .await
+                .unwrap()
+        );
+        let config_file = dir.path().join("config.json");
+        let saved = aurora_core::ConfigStore::at(&config_file)
+            .load()
+            .await
+            .unwrap();
+        assert_eq!(
+            saved.extra_java_paths,
+            vec![std::path::PathBuf::from(r"D:\Java\jdk-21\bin\java.exe")]
+        );
+
+        std::fs::remove_file(&config_file).unwrap();
+        assert!(
+            !remember_java_path(&facade, &java(r"d:\java\JDK-21\bin\JAVA.EXE"))
+                .await
+                .unwrap()
+        );
+        assert!(!config_file.exists(), "已在列表里不该再落盘");
+        assert_eq!(facade.read().await.config().extra_java_paths.len(), 1);
+    }
+
+    /// 移除默认 Java：default_reset 为 true、默认改回 auto 并落盘；再移除一次什么都不做，也不落盘。
+    #[tokio::test]
+    async fn removing_the_default_java_resets_it_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = std::path::PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
+        let config = aurora_core::AuroraConfig {
+            extra_java_paths: vec![exe.clone()],
+            default_java: Some(exe.clone()),
+            ..aurora_core::AuroraConfig::default()
+        };
+        let facade = facade_with(config, dir.path());
+
+        let removed = remove_java_path_with(&facade, &format!(" {} ", exe.display()))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&removed).unwrap(),
+            json!({ "removed": true, "default_reset": true })
+        );
+        let dto = crate::commands::config::read_config(&facade).await;
+        assert_eq!(dto.default_java, crate::commands::config::DEFAULT_JAVA_AUTO);
+        assert!(dto.extra_java_paths.is_empty());
+        let config_file = dir.path().join("config.json");
+        let saved = aurora_core::ConfigStore::at(&config_file)
+            .load()
+            .await
+            .unwrap();
+        assert!(saved.extra_java_paths.is_empty());
+        assert!(saved.default_java.is_none());
+
+        std::fs::remove_file(&config_file).unwrap();
+        let again = remove_java_path_with(&facade, &exe.display().to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&again).unwrap(),
+            json!({ "removed": false, "default_reset": false })
+        );
+        assert!(!config_file.exists(), "不在列表里不该落盘");
     }
 
     /// 枚举失败报 gpu_query_failed，detail.hresult 是八位十六进制写法，原文进 causes。

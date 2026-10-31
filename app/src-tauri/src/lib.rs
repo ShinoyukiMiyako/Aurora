@@ -106,6 +106,8 @@ pub fn run() {
             // -- java --
             commands::java::detect_java,
             commands::java::install_java,
+            commands::java::add_java_path,
+            commands::java::remove_java_path,
             commands::java::gpu_adapters,
             // -- accounts --
             commands::accounts::current_account,
