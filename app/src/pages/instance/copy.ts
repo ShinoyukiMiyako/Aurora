@@ -47,6 +47,11 @@ export const LOCK_REASON = {
   renameRunning: "游戏正在运行，结束后才能重命名",
   renameInstalling: "安装任务正在写这个实例的文件夹",
   repairInProgress: "进行中",
+  modifying: {
+    rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
+    repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
+    delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
+  },
 } as const;
 
 // ---------------------------------------------------------------- 概览

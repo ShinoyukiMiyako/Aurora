@@ -349,7 +349,19 @@ describe("实例库：动作", () => {
     const other = byText<HTMLButtonElement>("article button", "樱花生存").closest("article");
     expect(other?.textContent).toContain("另一个游戏在运行");
     click(byLabel("「原版」的更多操作"));
-    const remove = menuItem(LIBRARY_COPY.menu.remove + LIBRARY_COPY.menu.removeBusy);
+    const remove = menuItem(`${LIBRARY_COPY.menu.remove}游戏正在运行，先结束游戏`);
     expect(remove.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("后端正在改动 Mod、资源或设置：删除入口提前禁用并写明原因，不发预览与删除", async () => {
+    instances = instances.map((i) => (i.id === "原版" ? { ...i, activity: "modifying" } : i));
+    await mount();
+    click(byLabel("「原版」的更多操作"));
+    const remove = menuItem(`${LIBRARY_COPY.menu.remove}正在改动这个实例的 Mod、资源或设置，完成后才能删除`);
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
   });
 });

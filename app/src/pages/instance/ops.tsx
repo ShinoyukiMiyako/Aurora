@@ -13,7 +13,7 @@ import { busyInstanceId, instanceTask } from "../../state/selectors";
 import type { LauncherActions } from "../../state/store";
 import { DELETE_COPY, HERO_COPY, LOCK_REASON, OVERVIEW_COPY } from "./copy";
 import styles from "./instance.module.css";
-import { instanceLocks, worldName, type InstanceLocks } from "./model";
+import { instanceLocks, worldName, type InstanceLock, type InstanceLocks } from "./model";
 
 /** 打开文件夹的目标，与状态层动作的入参同一类型。 */
 export type FolderTarget = Parameters<LauncherActions["openFolder"]>[0];
@@ -33,8 +33,12 @@ export interface InstanceOps {
 }
 
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
-export function lockReason(lock: "running" | "installing" | null, kind: "mods" | "rename" | "repair" | "delete"): string | undefined {
+export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "delete"): string | undefined {
   if (lock === null) return undefined;
+  if (lock === "modifying") {
+    if (kind === "mods") throw new Error("改动 Mod 与改动 Mod 互相兼容，不会因此锁住 Mod 操作");
+    return LOCK_REASON.modifying[kind];
+  }
   if (kind === "rename") return lock === "running" ? LOCK_REASON.renameRunning : LOCK_REASON.renameInstalling;
   if (kind === "mods") return lock === "running" ? LOCK_REASON.runningMods : LOCK_REASON.installing;
   if (kind === "repair" && lock === "installing") return LOCK_REASON.repairInProgress;
@@ -47,7 +51,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
   const run = useRunner();
   const busy = busyInstanceId(state) === inst.id;
   const installing = inst.status === "installing";
-  const locks = instanceLocks(busy, installing);
+  const locks = instanceLocks(busy, installing, inst.activity === "modifying");
   const ids = state.instances.map((i) => i.id);
   const id = inst.id;
   const name = inst.name;

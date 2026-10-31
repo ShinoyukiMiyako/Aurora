@@ -52,7 +52,6 @@ export const LIBRARY_COPY = {
     crash: "崩溃诊断",
     crashActive: "上次崩溃",
     remove: "删除实例",
-    removeBusy: "游戏正在运行，先结束游戏",
   },
   /** 删除安装中的实例时追加在确认正文之后。 */
   removeCancelsInstall: "正在进行的安装任务会先取消。",

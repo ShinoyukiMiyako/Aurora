@@ -21,23 +21,29 @@ export function isCrashActive(crashAt: number | null, lastPlayedAt: number | nul
 
 // ---------------------------------------------------------------- 锁定
 
+/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置。 */
+export type InstanceLock = "running" | "installing" | "modifying";
+
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
   /** 启用、停用、更新、移除 Mod 与回滚。 */
   mods: "running" | "installing" | null;
-  rename: "running" | "installing" | null;
+  rename: InstanceLock | null;
   /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。 */
-  repair: "running" | "installing" | null;
-  delete: "running" | null;
+  repair: InstanceLock | null;
+  delete: "running" | "modifying" | null;
 }
 
 /**
  * busy：本实例的会话在准备、下载、启动或运行中（JVM 占着 Mod 文件，Windows 下改名、替换、删除都会失败）。
  * installing：安装或补全任务正在写这个实例的目录。
+ * modifying：后端正占着实例改动 Mod、资源或设置。它与游戏运行、与它自己兼容，所以不锁 Mod 操作；
+ * 但与改名、删除、补全互斥，不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
  */
-export function instanceLocks(busy: boolean, installing: boolean): InstanceLocks {
+export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean): InstanceLocks {
   const fileLock = busy ? "running" : installing ? "installing" : null;
-  return { mods: fileLock, rename: fileLock, repair: fileLock, delete: busy ? "running" : null };
+  const dirLock = fileLock !== null ? fileLock : modifying ? "modifying" : null;
+  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : null };
 }
 
 // ---------------------------------------------------------------- 概览横幅

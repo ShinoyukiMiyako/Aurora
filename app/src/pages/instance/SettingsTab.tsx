@@ -523,7 +523,8 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             onEnter={saveName}
             className={styles.nameInput}
           />
-          <Button size="sm" disabled={!changed || error !== null} disabledReason={renameReason} loading={renaming} onClick={saveName}>
+          {/* 锁住时改用带原因的禁用（悬停说明为什么），否则名字没改时的普通禁用会把原因吞掉 */}
+          <Button size="sm" disabled={renameReason === undefined && (!changed || error !== null)} disabledReason={renameReason} loading={renaming} onClick={saveName}>
             {SETTINGS_COPY.rename}
           </Button>
         </SettingRow>
@@ -536,7 +537,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
           </Button>
         </SettingRow>
         <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
-          <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "running" ? repairReason : undefined} onClick={ops.repair}>
+          <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
             {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
           </Button>
         </SettingRow>

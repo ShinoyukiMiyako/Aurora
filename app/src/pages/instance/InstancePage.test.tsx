@@ -324,6 +324,44 @@ describe("实例详情：头图与标签", () => {
   });
 });
 
+describe("实例详情：后端正在改动实例", () => {
+  const reason = (what: string) => `正在改动这个实例的 Mod、资源或设置，完成后才能${what}`;
+
+  it("头图菜单的重命名、补全与删除提前禁用并写明原因，F2 不进入改名", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
+    await open("overview");
+    expect(document.querySelector('h1 button[aria-label="重命名"]')).toBeNull();
+    keydown(document.body, "F2");
+    expect(document.querySelector('input[aria-label="实例名称"]')).toBeNull();
+    click(button("更多操作"));
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const item = (label: string) => {
+      const found = items.find((el) => textOf(el).startsWith(label));
+      if (found === undefined) throw new Error(`菜单里没有「${label}」`);
+      return found;
+    };
+    expect(textOf(item("重命名"))).toBe(`重命名${reason("重命名")}`);
+    expect(item("重命名").getAttribute("aria-disabled")).toBe("true");
+    expect(textOf(item("补全游戏文件"))).toBe(`补全游戏文件${reason("补全")}`);
+    expect(textOf(item("删除实例"))).toBe(`删除实例${reason("删除")}`);
+    click(item("删除实例"));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+  });
+
+  it("设置页的重命名与删除按钮带原因禁用，Mod 开关照常可用", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
+    await open("settings");
+    expect(button("重命名").getAttribute("aria-disabled")).toBe("true");
+    click(button("删除实例"));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    click(byRole("tab", /^Mod/));
+    await flush();
+    expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
+});
+
 describe("实例详情：概览", () => {
   it("存档按最近游玩排序，极限模式标红；资源包与光影按加载顺序列出", async () => {
     await open("overview");

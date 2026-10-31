@@ -27,6 +27,8 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { Tooltip } from "../../ui/Tooltip";
+import { instanceLocks } from "../instance/model";
+import { lockReason } from "../instance/ops";
 import { CardStatus } from "./CardStatus";
 import { LIBRARY_COPY } from "./copy";
 import styles from "./library.module.css";
@@ -51,6 +53,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const live = findInstance(state, id) !== undefined;
   const current = state.selectedInstanceId === id;
   const busy = busyInstanceId(state) === id;
+  const deleteReason = lockReason(instanceLocks(busy, inst.status === "installing", inst.activity === "modifying").delete, "delete");
   const pinAllowed = inst.pinned || canPinMore(state);
   const cover = instanceCover(inst);
   const crashed = live && launchView(state, inst).kind === "crashed";
@@ -132,8 +135,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       label: LIBRARY_COPY.menu.remove,
       icon: "trash",
       danger: true,
-      disabled: busy,
-      hint: busy ? LIBRARY_COPY.menu.removeBusy : undefined,
+      disabled: deleteReason !== undefined,
+      hint: deleteReason,
       onSelect: () => void remove(),
     },
   ];

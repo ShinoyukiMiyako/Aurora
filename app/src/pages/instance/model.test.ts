@@ -140,13 +140,20 @@ describe("上次崩溃判定", () => {
 
 describe("锁定矩阵", () => {
   it("运行中锁住 Mod、重命名、补全与删除", () => {
-    expect(instanceLocks(true, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(true, false, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
   });
   it("安装中锁住文件操作但可以删除", () => {
-    expect(instanceLocks(false, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
+    expect(instanceLocks(false, true, false)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
   });
   it("就绪时全部可用", () => {
-    expect(instanceLocks(false, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
+    expect(instanceLocks(false, false, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
+  });
+  it("后端在改动 Mod、资源或设置：锁住改名、补全与删除，Mod 操作照常", () => {
+    expect(instanceLocks(false, false, true)).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
+  });
+  it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
+    expect(instanceLocks(true, false, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(false, true, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
   });
 });
 
