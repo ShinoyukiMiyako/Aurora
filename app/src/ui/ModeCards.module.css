@@ -1,0 +1,212 @@
+.modes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sk-space-12);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  padding: var(--sk-space-10);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.card:hover,
+.card[aria-checked="true"] {
+  border-color: var(--sk-accent-line);
+}
+
+.card[aria-checked="true"] {
+  outline: 3px solid var(--sk-accent-soft);
+}
+
+.card:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+/* ---- 迷你预览：颜色只取外观预览令牌，经组件私有变量分到各部件 ---- */
+.mini {
+  box-sizing: border-box;
+  display: flex;
+  gap: var(--sk-space-6);
+  height: 118px;
+  padding: var(--sk-space-8);
+  border: 1px solid var(--mini-line);
+  border-radius: var(--sk-r-sm);
+  background: var(--mini-bg);
+}
+
+.mini[data-mode="day"] {
+  --mini-bg: var(--sk-preview-day-bg);
+  --mini-surface: var(--sk-preview-day-surface);
+  --mini-line: var(--sk-preview-day-line);
+  --mini-line-2: var(--sk-preview-day-line-2);
+}
+
+.mini[data-mode="night"] {
+  --mini-bg: var(--sk-preview-night-bg);
+  --mini-surface: var(--sk-preview-night-surface);
+  --mini-line: var(--sk-preview-night-line);
+  --mini-line-2: var(--sk-preview-night-line-2);
+}
+
+.mini[data-mode="day"][data-tint="sakura"] {
+  --mini-accent: var(--sk-preview-day-sakura);
+}
+
+.mini[data-mode="day"][data-tint="amethyst"] {
+  --mini-accent: var(--sk-preview-day-amethyst);
+}
+
+.mini[data-mode="day"][data-tint="moss"] {
+  --mini-accent: var(--sk-preview-day-moss);
+}
+
+.mini[data-mode="night"][data-tint="sakura"] {
+  --mini-accent: var(--sk-preview-night-sakura);
+}
+
+.mini[data-mode="night"][data-tint="amethyst"] {
+  --mini-accent: var(--sk-preview-night-amethyst);
+}
+
+.mini[data-mode="night"][data-tint="moss"] {
+  --mini-accent: var(--sk-preview-night-moss);
+}
+
+.side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-4);
+  width: 22px;
+  padding-top: var(--sk-space-4);
+  border-radius: var(--sk-r-xs);
+  background: var(--mini-surface);
+}
+
+.side > i {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--sk-space-2);
+  background: var(--mini-line-2);
+}
+
+.side > i[data-accent] {
+  background: var(--mini-accent);
+}
+
+.main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+.bar {
+  height: 8px;
+  width: 46%;
+  border-radius: var(--sk-space-2);
+  background: var(--mini-line-2);
+}
+
+.hero {
+  position: relative;
+  flex: 1;
+  border-radius: var(--sk-r-xs);
+  background: var(--mini-surface);
+}
+
+.hero > b {
+  position: absolute;
+  left: var(--sk-space-8);
+  bottom: var(--sk-space-8);
+  width: 32px;
+  height: 10px;
+  border-radius: var(--sk-r-pill);
+  background: var(--mini-accent);
+}
+
+.row {
+  display: flex;
+  gap: var(--sk-space-4);
+  height: 22px;
+}
+
+.row > i {
+  flex: 1;
+  border-radius: var(--sk-r-xs);
+  background: var(--mini-surface);
+}
+
+/* ---- 标签行：图标 + 名称与说明 + 单选圆 ---- */
+.label {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  color: var(--sk-text-2);
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.name {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.desc {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.radio {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--sk-line-strong);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-surface);
+}
+
+.radio::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+  transform: scale(0);
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+[aria-checked="true"] > .label > .radio {
+  border-color: var(--sk-accent);
+}
+
+[aria-checked="true"] > .label > .radio::after {
+  transform: scale(1);
+}
