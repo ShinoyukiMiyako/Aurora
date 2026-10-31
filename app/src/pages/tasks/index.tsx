@@ -42,12 +42,11 @@ import {
   sameTaskLayout,
   TASK_FILTERS,
   taskGroups,
-  type RowMeta,
   type TaskBuckets,
 } from "./model";
 import styles from "./tasks.module.css";
 import { TaskRow } from "./TaskRow";
-import { ThroughputScope, useThroughputHistory } from "./throughput";
+import { readThroughputHistory, ThroughputScope } from "./throughput";
 import { ThroughputCard } from "./ThroughputCard";
 
 export default function TasksPage({ route }: PageProps<"tasks">) {
@@ -212,7 +211,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
 /** 吞吐卡与通道卡：读活动任务的实时进度与速度，每次进度更新都重渲染。 */
 function TasksOverview() {
   const active = useLauncherSelector((s) => s.tasks.filter(isActiveTask), shallowArrayEqual);
-  const history = useThroughputHistory();
+  const history = readThroughputHistory();
   const buckets = bucketTasks(active);
   return (
     <EntranceBlock className={styles.overview}>
@@ -240,7 +239,17 @@ interface TaskListProps extends RowHandlers {
   now: number;
 }
 
-function PlacedTaskRow({ task, meta, handlers }: { task: Task; meta: RowMeta; handlers: RowHandlers }) {
+/**
+ * 列表里的一行，各种状态共用这一个部件：排队轮到运行时行原地更新。按状态换成不同的部件会拆掉整行重建，
+ * 键盘焦点从它的取消键上掉回页面开头。
+ * 运行中的任务自己订阅这一个任务的实时进度，剩余时间按最近几秒的采样估；排队与已结束的进度不再变，沿用页面给的对象，
+ * 也不读采样，不随进度与每秒换的采样重渲染。
+ */
+function TaskListRow({ task: placed, queuePosition, now, handlers }: { task: Task; queuePosition: number | null; now: number; handlers: RowHandlers }) {
+  const running = placed.status === "running";
+  const task = useLauncherSelector((s) => (running ? s.tasks.find((t) => t.id === placed.id) : placed));
+  if (task === undefined) throw new Error(`任务 ${placed.id} 已不在任务表里，列表却还在画它`);
+  const meta = rowMeta(task, { queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, now });
   return (
     <TaskRow
       task={task}
@@ -255,14 +264,6 @@ function PlacedTaskRow({ task, meta, handlers }: { task: Task; meta: RowMeta; ha
       }}
     />
   );
-}
-
-/** 运行中的任务行：自己订阅这一个任务的实时进度，剩余时间按最近几秒的采样估。 */
-function RunningTaskRow({ id, now, handlers }: { id: string; now: number; handlers: RowHandlers }) {
-  const task = useLauncherSelector((s) => s.tasks.find((t) => t.id === id));
-  const history = useThroughputHistory();
-  if (task === undefined) throw new Error(`任务 ${id} 已不在任务表里，列表却还在画它`);
-  return <PlacedTaskRow task={task} meta={rowMeta(task, { queuePosition: null, etaSpeed: etaSpeed(history, task), now })} handlers={handlers} />;
 }
 
 function TaskList({ buckets, filter, tasks, now, ...handlers }: TaskListProps) {
@@ -280,18 +281,15 @@ function TaskList({ buckets, filter, tasks, now, ...handlers }: TaskListProps) {
   return (
     <Card padding="none">
       {groups.map((group) => {
-        const rows = group.tasks.map((task) =>
-          task.status === "running" ? (
-            <RunningTaskRow key={task.id} id={task.id} now={now} handlers={handlers} />
-          ) : (
-            <PlacedTaskRow
-              key={task.id}
-              task={task}
-              meta={rowMeta(task, { queuePosition: task.status === "queued" ? queuePosition(tasks, task.id) : null, etaSpeed: 0, now })}
-              handlers={handlers}
-            />
-          ),
-        );
+        const rows = group.tasks.map((task) => (
+          <TaskListRow
+            key={task.id}
+            task={task}
+            queuePosition={task.status === "queued" ? queuePosition(tasks, task.id) : null}
+            now={now}
+            handlers={handlers}
+          />
+        ));
         if (group.label === null) {
           return (
             <List key={group.key} variant="flush" aria-label={TASKS_COPY.row.listLabel}>

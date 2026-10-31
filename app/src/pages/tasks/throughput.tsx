@@ -3,7 +3,7 @@
 // 每秒采一次，经上下文交给吞吐卡与运行中的任务行。这一层的 children 由页面给出，进度更新时只有它自己重渲染，
 // 子树原样沿用；每秒换一次采样时，只有读采样的部件跟着重渲染。
 
-import { createContext, useContext, type ReactNode } from "react";
+import { createContext, use, type ReactNode } from "react";
 import { shallowArrayEqual, useLauncherSelector } from "../../state/launcher";
 import { useThroughput } from "./hooks";
 import type { ThroughputSample } from "./model";
@@ -16,9 +16,12 @@ export function ThroughputScope({ children }: { children: ReactNode }) {
   return <ThroughputContext.Provider value={history}>{children}</ThroughputContext.Provider>;
 }
 
-/** 最近 N 秒的吞吐采样；只能在 ThroughputScope 之内用。 */
-export function useThroughputHistory(): readonly ThroughputSample[] {
-  const history = useContext(ThroughputContext);
-  if (history === null) throw new Error("useThroughputHistory 必须在 ThroughputScope 之内使用");
+/**
+ * 最近 N 秒的吞吐采样；只能在 ThroughputScope 之内、渲染期间调用。可以按条件调用（React 的 use 读上下文不受调用顺序约束）：
+ * 部件只在真的读了采样的那几次渲染之后随采样更新：吞吐卡总是读，任务列表里只有运行中的行读。
+ */
+export function readThroughputHistory(): readonly ThroughputSample[] {
+  const history = use(ThroughputContext);
+  if (history === null) throw new Error("吞吐采样只能在 ThroughputScope 之内读取");
   return history;
 }

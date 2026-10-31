@@ -224,6 +224,47 @@ describe("下载任务页按片订阅", () => {
     expect(commits).toBe(0);
   });
 
+  it("每秒换一次吞吐采样：只有运行中的行与吞吐卡跟着重渲染，排队与已结束的行不动", async () => {
+    const { running, queued } = await mountBusy();
+    const rowsBefore = new Map(renders.rows);
+    const cardBefore = renders.ThroughputCard;
+    for (let i = 0; i < 3; i++) act(() => void vi.advanceTimersByTime(1000));
+    for (const t of running) expect(renders.rows.get(t.id)).toBe((rowsBefore.get(t.id) as number) + 3);
+    for (const id of queued.map((t) => t.id).concat(HISTORY.map((r) => r.id))) expect(renders.rows.get(id)).toBe(rowsBefore.get(id));
+    expect(renders.ThroughputCard).toBe(cardBefore + 3);
+  });
+
+  it("排队的任务轮到运行：那一行原地换成运行中，键盘焦点留在它的取消键上", async () => {
+    const { running, queued } = await mountBusy();
+    const [first] = running;
+    const [next] = queued;
+    const rowOf = (title: string): HTMLLIElement => {
+      if (view === undefined) throw new Error("页面还没有挂载");
+      const found = [...view.container.querySelectorAll<HTMLLIElement>("ul > li")].filter((li) => li.textContent?.includes(title));
+      if (found.length !== 1) throw new Error(`标题含「${title}」的任务行有 ${found.length} 个`);
+      return found[0];
+    };
+    const row = rowOf(next.title);
+    const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="取消任务"]');
+    if (cancel === null) throw new Error("排队中的任务行没有取消键");
+    cancel.focus();
+    expect(document.activeElement).toBe(cancel);
+
+    await act(async () => {
+      const run = javaRuns.get(`${first.id}#1`);
+      if (run === undefined) throw new Error("运行中的任务没有对应的安装命令");
+      run.resolve({ component: "java-runtime-gamma", version: { major: 8, minor: 0, security: 0, build: 1, raw: "8.0.0+1" }, java_executable: "C:/Petal/runtime/8/bin/java.exe" });
+      await settle();
+    });
+
+    expect(launcher.state.tasks.find((t) => t.id === first.id)?.status).toBe("done");
+    expect(launcher.state.tasks.find((t) => t.id === next.id)?.status).toBe("running");
+    // 同一个节点原地更新：行没有被拆掉重建，焦点不会掉回页面开头
+    expect(rowOf(next.title)).toBe(row);
+    expect(row.isConnected).toBe(true);
+    expect(document.activeElement).toBe(cancel);
+  });
+
   it("运行中的任务被取消：页面按新的结构重排，那一行移到「已结束」并写出取消时的进度", async () => {
     const { running } = await mountBusy();
     const [hot] = running;
