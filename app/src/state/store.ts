@@ -144,6 +144,16 @@ export interface LaunchPrompt {
   occupantPhase: "loading" | "running";
 }
 
+/** 新实例就绪后接着装的一个开局 Mod（Modrinth 上的工程与挑好的版本）。 */
+export interface StarterPick {
+  projectId: string;
+  modVersionId: string;
+  /** Mod 名（任务里这一项的标题）。 */
+  title: string;
+  /** 平台声明的文件大小，组合任务的进度按它折算；平台没声明为 null。 */
+  fileSize: number | null;
+}
+
 /** 新建实例的入参。cover 为封面预设 id。 */
 export interface CreateInstanceSpec {
   name: string;
@@ -152,6 +162,10 @@ export interface CreateInstanceSpec {
   /** 原版为 null；带加载器时必填。 */
   loaderVersion: string | null;
   cover: string;
+  /** 装好后沿用默认设置（只补实例里没有的文件）；不给与 false 相同。 */
+  useTemplate?: boolean;
+  /** 实例就绪后接着装的开局 Mod，按勾选的顺序、API 在前；不给与空列表相同。 */
+  starterMods?: StarterPick[];
 }
 
 /** 导入整合包的入参：名称就是新实例的 id，入队时即可拿到。 */
@@ -198,6 +212,8 @@ type TaskMeta =
        * 所以安装期间只在派生状态里固定，装好后再写进侧栏固定列表。
        */
       autoPin: boolean;
+      /** 就绪后接着装的开局 Mod；重启后恢复的新建任务推不出来，为空。 */
+      starter: StarterPick[];
     }
   | {
       type: "modpack";
@@ -212,6 +228,8 @@ type TaskMeta =
   /** pinFor：下载完把这个实例的 Java 固定为新装的运行时（崩溃诊断「下载 Java N」）。 */
   | { type: "java"; major: number; launchAfter: string | null; pinFor: string | null }
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
+  /** 新实例的开局 Mod：一个组合任务装好勾选的几个。 */
+  | { type: "starter"; instanceId: string; count: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
   | { type: "updates"; instanceId: string };
@@ -311,6 +329,9 @@ export interface LauncherActions {
   renameInstance(id: string, name: string): Promise<string>;
   updateInstanceSettings(id: string, patch: Partial<InstanceSettings>): Promise<InstanceSettings>;
   repairInstance(id: string, opts?: { launchAfter?: boolean }): Promise<void>;
+  /** 把实例的设置文件存为新实例的默认设置；成功后默认设置的查询失效并通知。 */
+  saveInstanceAsTemplate(id: string): Promise<void>;
+  clearTemplate(): Promise<void>;
   openFolder(target: FolderTarget, id?: string | null, world?: string | null): Promise<void>;
   /** 用系统默认浏览器打开一个 http(s) 网址；别的协议直接抛错。打开失败原样抛出。 */
   openExternal(url: string): Promise<void>;
@@ -468,6 +489,7 @@ function metaFromSpec(task: Task): TaskMeta | null {
         cover: null,
         // 重启后恢复的新建任务不知道当时侧栏的余量：按「有空位就固定」处理
         autoPin: true,
+        starter: [],
       };
     case "install_modpack":
       return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
@@ -480,6 +502,7 @@ function metaFromSpec(task: Task): TaskMeta | null {
     }
     case "install_mods": {
       const items = modItems(args);
+      if (args.starter === true) return { type: "starter", instanceId: strArg(args, "versionId", command), count: items.length };
       return { type: "mods", instanceId: strArg(args, "versionId", command), name: items[0].title, dependencies: items.length - 1 };
     }
     case "update_mods":
@@ -675,6 +698,7 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
   const swap = (value: string | null) => (value === from ? to : value);
   switch (meta.type) {
     case "mods":
+    case "starter":
     case "resource":
     case "update":
     case "updates":
@@ -1636,10 +1660,21 @@ export class LauncherStore {
     }
     switch (meta.type) {
       case "create": {
-        const id = (result as InstallResultDto).id;
+        const outcome = result as InstallResultDto;
+        const id = outcome.id;
         await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
         const copy = TASK_TOAST.ready(id);
         this.pushToast("success", copy.title, copy.body, this.launchAction(id));
+        // 勾选与否以任务参数为准：重启后恢复的任务没有入队时的上下文，参数里仍记着
+        if (task.spec.args.useTemplate === true) {
+          const template = outcome.template;
+          if (template === null || template === undefined) throw new Error(`新建「${id}」请求了沿用默认设置，安装结果里却没有套用结果`);
+          if (template.status === "skipped") {
+            const skipped = TASK_TOAST.templateSkipped(id, template.reason);
+            this.pushToast("info", skipped.title, skipped.body);
+          }
+        }
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
         return;
       }
       case "modpack": {
@@ -1675,6 +1710,12 @@ export class LauncherStore {
         await this.fetchInstances();
         const copy = TASK_TOAST.modInstalled(meta.name, meta.dependencies, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        return;
+      }
+      case "starter": {
+        this.modsChanged(meta.instanceId);
+        await this.fetchInstances();
+        this.pushToast("success", TASK_TOAST.starterInstalled(meta.instanceId, meta.count).title);
         return;
       }
       case "resource": {
@@ -1717,6 +1758,34 @@ export class LauncherStore {
         return;
       }
     }
+  }
+
+  /**
+   * 新实例就绪后接着装开局 Mod：排一个组合任务，在下载任务里只占一行。它是实例之外的一步，失败照任务失败呈现，
+   * 实例本身照常可用；重试时前面已经装上的几项后端认出已装、直接跳过。
+   */
+  private enqueueStarter(instanceId: string, starter: readonly StarterPick[]): void {
+    const title = TASK_TEXT.starterTitle(starter.length);
+    this.enqueue(
+      {
+        kind: "mod",
+        title,
+        detail: TASK_TEXT.starterDetail(instanceId),
+        instanceId,
+        spec: {
+          command: "install_mods",
+          args: {
+            versionId: instanceId,
+            platform: "modrinth",
+            projectId: starter[0].projectId,
+            starter: true,
+            items: starter.map((pick) => ({ platform: "modrinth", projectId: pick.projectId, modVersionId: pick.modVersionId, title: pick.title, fileSize: pick.fileSize })),
+          },
+        },
+      },
+      { type: "starter", instanceId, count: starter.length },
+      title,
+    );
   }
 
   // ---------------------------------------------------------------- 登录内部
@@ -2029,15 +2098,17 @@ export class LauncherStore {
         if (spec.loader !== "vanilla" && spec.loaderVersion === null) throw new Error(`${spec.loader} 实例需要加载器版本`);
         const loader = spec.loader === "vanilla" ? null : spec.loader;
         const autoPin = store.getState().sidebarPins.length < SIDEBAR_PIN_LIMIT;
+        const useTemplate = spec.useTemplate === true;
+        const starter = spec.starterMods === undefined ? [] : spec.starterMods;
         const task = store.enqueue(
           {
             kind: "game",
             title: TASK_TEXT.createTitle(spec.mcVersion, spec.loader, spec.loaderVersion),
             detail: TASK_TEXT.createDetail(spec.name),
             instanceId: spec.name,
-            spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name } },
+            spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name, useTemplate } },
           },
-          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover, autoPin },
+          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover, autoPin, starter },
           spec.name,
         );
         // 新实例即成为当前实例：主页「继续游玩」显示它的安装进度
@@ -2147,6 +2218,17 @@ export class LauncherStore {
       async repairInstance(id, opts = {}) {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
         store.enqueueRepair(id, opts.launchAfter === true);
+      },
+      async saveInstanceAsTemplate(id) {
+        await instancesIpc.saveInstanceAsTemplate(id);
+        invalidateResources("template");
+        const copy = TOAST_COPY.templateSaved(id);
+        store.pushToast("success", copy.title, copy.body);
+      },
+      async clearTemplate() {
+        await instancesIpc.clearTemplate();
+        invalidateResources("template");
+        store.pushToast("info", TOAST_COPY.templateCleared);
       },
       async openFolder(target, id = null, world = null) {
         await instancesIpc.openFolder(target, id, world);

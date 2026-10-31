@@ -496,7 +496,7 @@ describe("实例详情：新建与导入还没装好", () => {
   const QUERIES = new Set(["list_mods", "check_updates", "list_instance_content", "get_instance_settings", "memory_advice", "last_launch_log", "list_history", "rollback_checks", "last_crash"]);
   const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
   const queriesFor = (id: string) => ipc.calls.filter((c) => QUERIES.has(c.cmd) && Object.values(c.args).includes(id)).map((c) => c.cmd);
-  const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2 });
+  const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2, template: null });
   const fabric: InstanceDto["loaders"] = [{ kind: "fabric", version: "0.16.10" }];
   /** 后端建好了目录、还在往里装：之后任何一次重扫都会扫到这样一份（占着实例名，未完成标记还在进行中）。 */
   const halfInstalled = (): InstanceDto =>
