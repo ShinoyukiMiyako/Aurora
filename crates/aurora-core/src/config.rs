@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_base::mirror::{self, MirrorSource};
+use aurora_base::mirror::MirrorSource;
 use aurora_instance::IsolationPolicy;
 use chrono::{Datelike, Local, Timelike};
 use serde::de::DeserializeOwned;
@@ -57,21 +57,6 @@ impl DownloadSourcePolicy {
                 vec![MirrorSource::BmclApi, MirrorSource::Official]
             }
         }
-    }
-
-    /// 该策略的首选源（用于不走源计划换源的单源抓取）。
-    pub fn primary_mirror(self) -> MirrorSource {
-        match self {
-            DownloadSourcePolicy::MirrorFirst => MirrorSource::BmclApi,
-            DownloadSourcePolicy::Auto | DownloadSourcePolicy::OfficialFirst => {
-                MirrorSource::Official
-            }
-        }
-    }
-
-    /// 把一个官方 URL 按该策略的首选源改写（首选官方时原样返回）。
-    pub fn rewrite_primary(self, url: &str) -> Result<String> {
-        Ok(mirror::rewrite(url, self.primary_mirror())?)
     }
 }
 
@@ -592,24 +577,6 @@ mod tests {
         assert_eq!(
             DownloadSourcePolicy::Auto.mirror_order(),
             vec![MirrorSource::BmclApi, MirrorSource::Official]
-        );
-    }
-
-    #[test]
-    fn rewrite_primary_maps_manifest_to_mirror_only_when_mirror_first() {
-        let manifest = aurora_install::VERSION_MANIFEST_V2;
-        assert_eq!(
-            DownloadSourcePolicy::MirrorFirst
-                .rewrite_primary(manifest)
-                .unwrap(),
-            "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"
-        );
-        // 官方优先/自动时清单地址原样。
-        assert_eq!(
-            DownloadSourcePolicy::OfficialFirst
-                .rewrite_primary(manifest)
-                .unwrap(),
-            manifest
         );
     }
 

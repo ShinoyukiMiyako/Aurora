@@ -57,7 +57,7 @@ impl Aurora {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -281,6 +281,81 @@ mod tests {
         assert_eq!(
             (probe_count(&official).await, probe_count(&mirror).await),
             (2, 2)
+        );
+    }
+
+    /// 镜像实测更快、但在共享健康表上已经熔断：下载这一个文件时镜像沉底，请求只落在官方上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tripped_source_sinks_below_the_measured_order() {
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        mount_probe(&official, partial().set_delay(Duration::from_millis(300))).await;
+        mount_probe(&mirror, partial()).await;
+        let file_path = "/com/example/lib/1.0/lib-1.0.jar";
+        for server in [&official, &mirror] {
+            Mock::given(method("GET"))
+                .and(path(file_path))
+                .respond_with(ResponseTemplate::new(200).set_body_string("library"))
+                .mount(server)
+                .await;
+        }
+        let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
+        aurora.prepare_sources().await.unwrap();
+        assert_eq!(
+            aurora.source_order(DownloadSourcePolicy::Auto),
+            vec![MirrorSource::BmclApi, MirrorSource::Official]
+        );
+        let mirror_file = format!("{}{file_path}", mirror.uri());
+        for _ in 0..3 {
+            aurora.source_health().record_failure(&mirror_file, true);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("lib-1.0.jar");
+        let task = aurora_download::DownloadTask::new(
+            format!("https://libraries.minecraft.net{file_path}"),
+            &dest,
+        );
+        let report = aurora
+            .download_pool()
+            .download_all(vec![task], None)
+            .await
+            .unwrap();
+        assert!(report.is_success(), "{:?}", report.failures);
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "library");
+
+        let count = |requests: Vec<wiremock::Request>| {
+            requests
+                .iter()
+                .filter(|request| request.url.path() == file_path)
+                .count()
+        };
+        assert_eq!(count(mirror.received_requests().await.unwrap()), 0);
+        assert!(count(official.received_requests().await.unwrap()) >= 1);
+    }
+
+    /// 快照与常驻门面共用同一张健康表：一个任务记下的熔断，别的任务装配的下载池也看得到。
+    #[test]
+    fn clones_share_one_health_table() {
+        let dir = PathBuf::from("/data");
+        let aurora = Aurora::for_test(AuroraConfig::default(), dir.clone(), dir.join(".minecraft"));
+        let snapshot = aurora
+            .clone()
+            .with_cancel(aurora_download::CancellationToken::new());
+        assert!(Arc::ptr_eq(
+            aurora.source_health(),
+            snapshot.source_health()
+        ));
+        let url = "https://bmclapi2.bangbang93.com/maven/a.jar";
+        for _ in 0..3 {
+            snapshot.source_health().record_failure(url, true);
+        }
+        assert!(aurora.source_health().is_tripped(url));
+        assert!(
+            !Aurora::for_test(AuroraConfig::default(), dir.clone(), dir.join(".minecraft"))
+                .source_health()
+                .is_tripped(url),
+            "各自新建的门面不串用"
         );
     }
 

@@ -244,7 +244,9 @@ impl Aurora {
         let policy = self.retry_policy();
         let http = self.http();
         let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
-        let installer = VanillaInstaller::new(cx).with_manifest_url(self.manifest_url());
+        let installer = VanillaInstaller::new(cx)
+            .with_manifest_url(self.manifest_url())
+            .with_sources(self.source_plan(self.config().version_list_source));
         let entry = installer.find_entry(mc_version).await?;
         let json = installer.fetch_version_json(&entry).await?;
         let requirements = VersionRequirements {

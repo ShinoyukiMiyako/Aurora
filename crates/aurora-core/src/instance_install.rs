@@ -204,7 +204,9 @@ impl Aurora {
         let mc = request.mc_version.as_str();
 
         emit(events, CoreEvent::stage(format!("查找原版 {mc}")));
-        let vanilla_installer = VanillaInstaller::new(cx).with_manifest_url(self.manifest_url());
+        let vanilla_installer = VanillaInstaller::new(cx)
+            .with_manifest_url(self.manifest_url())
+            .with_sources(self.source_plan(self.config().version_list_source));
         let entry = vanilla_installer.find_entry(mc).await?;
         let staged = dir.join(AURORA_META_DIR).join(STAGED_VANILLA_JSON);
         let vanilla = vanilla_installer

@@ -95,6 +95,7 @@ impl Aurora {
         emit(events, CoreEvent::stage(format!("开始安装原版 {id}")));
         let vanilla = VanillaInstaller::new(cx)
             .with_manifest_url(self.manifest_url())
+            .with_sources(self.source_plan(self.config().version_list_source))
             .install(id)
             .await?;
         emit(

@@ -17,7 +17,7 @@ use aurora_auth::MsaEndpoints;
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
     CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader, MirrorResolver,
-    SourceResolver, SourceSpeedCache,
+    SourceHealth, SourceResolver, SourceSpeedCache,
 };
 use aurora_install::{GameLayout, InstallContext, VERSION_MANIFEST_V2};
 use aurora_instance::IsolationPolicy;
@@ -44,6 +44,7 @@ pub struct Aurora {
     game_dir: PathBuf,
     config_path: PathBuf,
     // 远端端点基址：生产默认，测试注入 mock。
+    /// 版本清单的官方地址；在官方与镜像之间选源交给源计划。
     manifest_url: String,
     modrinth_base: String,
     curseforge_base: String,
@@ -61,6 +62,8 @@ pub struct Aurora {
     pub(crate) source_speed: Arc<SourceSpeedCache>,
     /// 把官方地址改写到各下载源的解析器；生产为镜像改写表，测试把两个源钉到不同的本地 mock。
     pub(crate) source_resolver: Arc<dyn SourceResolver>,
+    /// 下载源健康表。跨池、跨任务共享：一个任务刚证明某个源不通，紧接着的任务不必把同一轮重试再赔一遍。
+    source_health: Arc<SourceHealth>,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -97,10 +100,6 @@ impl Aurora {
             .game_directory
             .clone()
             .unwrap_or_else(|| data_dir.join(aurora_instance::MINECRAFT_DIR_NAME));
-        // 版本清单地址随「版本列表源」策略选官方或镜像。
-        let manifest_url = config
-            .version_list_source
-            .rewrite_primary(VERSION_MANIFEST_V2)?;
         Ok(Self {
             config,
             http,
@@ -108,7 +107,7 @@ impl Aurora {
             data_dir,
             game_dir,
             config_path,
-            manifest_url,
+            manifest_url: VERSION_MANIFEST_V2.to_owned(),
             modrinth_base: aurora_modplatform::MODRINTH_BASE.to_owned(),
             curseforge_base: aurora_modplatform::CURSEFORGE_BASE.to_owned(),
             fabric_base: "https://meta.fabricmc.net".to_owned(),
@@ -119,12 +118,13 @@ impl Aurora {
             mod_versions: Default::default(),
             source_speed: Arc::new(SourceSpeedCache::new(VERSION_MANIFEST_V2)),
             source_resolver: Arc::new(MirrorResolver),
+            source_health: Arc::new(SourceHealth::new()),
             #[cfg(test)]
             curseforge_key: None,
         })
     }
 
-    /// 覆盖版本清单地址（默认按「版本列表源」策略取官方或镜像）。用于本地 mock 与集成测试。
+    /// 覆盖版本清单地址（默认官方地址）。用于本地 mock 与集成测试。
     pub fn with_manifest_url(mut self, url: impl Into<String>) -> Self {
         self.manifest_url = url.into();
         self
@@ -212,13 +212,9 @@ impl Aurora {
         self.config.download_source = policy;
     }
 
-    /// 设置版本列表源策略，并据此重算版本清单地址。
-    ///
-    /// 清单地址在构造时按此策略一次性改写为官方或镜像；只改配置字段不会生效，故这里同步重算。
-    pub fn set_version_list_source(&mut self, policy: DownloadSourcePolicy) -> Result<()> {
-        self.manifest_url = policy.rewrite_primary(VERSION_MANIFEST_V2)?;
+    /// 设置版本列表源策略（下次取版本清单即生效：清单地址恒为官方地址，选源在取的时候按源计划做）。
+    pub fn set_version_list_source(&mut self, policy: DownloadSourcePolicy) {
         self.config.version_list_source = policy;
-        Ok(())
     }
 
     /// 设置批量下载的文件级并发上限。
@@ -324,7 +320,11 @@ impl Aurora {
 
     /// 按当前配置的下载源策略与并发上限装配一个批量下载池；门面挂了取消令牌时池也挂上。
     pub(crate) fn download_pool(&self) -> DownloadPool {
-        let downloader = Downloader::new(self.http.clone(), self.download_config());
+        let downloader = Downloader::with_health(
+            self.http.clone(),
+            self.download_config(),
+            self.source_health().clone(),
+        );
         let pool = DownloadPool::new(downloader, self.config.download_concurrency);
         match &self.cancel {
             Some(token) => pool.with_cancel(token.clone()),
@@ -383,7 +383,12 @@ impl Aurora {
         RetryPolicy::default()
     }
 
-    /// 版本清单地址（已按版本列表源策略改写）。
+    /// 门面共享的下载源健康表。
+    pub(crate) fn source_health(&self) -> &Arc<SourceHealth> {
+        &self.source_health
+    }
+
+    /// 版本清单的官方地址（测试里是注入的 mock 地址）；具体请求哪个源由源计划改写得出。
     pub(crate) fn manifest_url(&self) -> &str {
         &self.manifest_url
     }
@@ -453,11 +458,12 @@ impl Aurora {
                 Duration::from_millis(1),
             )),
             source_resolver: Arc::new(MirrorResolver),
+            source_health: Arc::new(SourceHealth::new()),
             curseforge_key: None,
         }
     }
 
-    /// 换掉下载源解析器与测速缓存（两者用同一个解析器），把官方与镜像钉到不同的本地 mock。
+    /// 换掉下载源解析器与测速缓存（两者用同一个解析器），把官方与镜像钉到不同的本地 mock；健康表换新。
     pub(crate) fn with_source_routes(
         mut self,
         resolver: Arc<dyn SourceResolver>,
@@ -471,6 +477,7 @@ impl Aurora {
             probe_timeout,
         ));
         self.source_resolver = resolver;
+        self.source_health = Arc::new(SourceHealth::new());
         self
     }
 
@@ -573,21 +580,35 @@ mod tests {
         assert!(aurora.config().default_java.is_none());
     }
 
+    /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。
     #[test]
-    fn set_version_list_source_rederives_manifest_url() {
+    fn set_version_list_source_keeps_official_manifest_and_reorders_plan() {
         let mut aurora = test_aurora();
-        aurora
-            .set_version_list_source(DownloadSourcePolicy::MirrorFirst)
-            .expect("改写清单地址");
+        aurora.set_version_list_source(DownloadSourcePolicy::MirrorFirst);
         assert_eq!(
             aurora.config().version_list_source,
             DownloadSourcePolicy::MirrorFirst
         );
-        // 清单地址应等于按新策略改写的结果；删掉 setter 里的重算行会退回默认地址，此断言即挂。
-        let expected = DownloadSourcePolicy::MirrorFirst
-            .rewrite_primary(VERSION_MANIFEST_V2)
-            .expect("镜像改写");
-        assert_eq!(aurora.manifest_url(), expected);
+        assert_eq!(aurora.manifest_url(), VERSION_MANIFEST_V2);
+        let candidates = aurora
+            .source_plan(aurora.config().version_list_source)
+            .candidates(aurora.manifest_url())
+            .unwrap();
+        assert_eq!(
+            candidates,
+            vec![
+                "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json".to_owned(),
+                VERSION_MANIFEST_V2.to_owned(),
+            ]
+        );
+
+        aurora.set_version_list_source(DownloadSourcePolicy::OfficialFirst);
+        let first = aurora
+            .source_plan(aurora.config().version_list_source)
+            .candidates(aurora.manifest_url())
+            .unwrap()
+            .remove(0);
+        assert_eq!(first, VERSION_MANIFEST_V2);
     }
 
     #[test]
