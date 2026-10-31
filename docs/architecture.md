@@ -66,7 +66,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | 模块 | 职责 |
 | --- | --- |
 | `lib.rs` | 装配：日志、插件、managed state、命令注册（按领域分块） |
-| `commands/<领域>.rs` | 一个领域一个文件：accounts、appearance、art、config、diagnostics、discover、history、instances、java、launch、mods、modpack、news、servers、system、tasks、updater |
+| `commands/<领域>.rs` | 一个领域一个文件：accounts、appearance、art、config、diagnostics、discover、history、instances、java、launch、mods、modpack、news、servers、system、tasks、updater、window |
 | `commands/system.rs` 的 `StartupNotices` | 启动时遇到、但不妨碍继续运行的问题（见下文「启动提示」），setup 时装进 managed state |
 | `commands/error.rs` | 门面错误到 `{ code, message, detail? }` 的映射与错误码表 |
 | `facade.rs` | 门面的读写锁与快照规矩 |
@@ -89,7 +89,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 命令失败时返回 `{ code, message, detail? }`：
 
-- `code` 是稳定的机器码，前端按它分支，例如 `cancelled`、`invalid_argument`、`instance_busy`、`mod_file_busy`、`version_not_installed`。账户错误取 `aurora-auth` 错误枚举的变体名。
+- `code` 是稳定的机器码，前端按它分支，例如 `cancelled`、`invalid_argument`、`instance_busy`、`mod_file_busy`、`version_not_installed`、`play_records_failed`（改名、删除已做完、只差游玩记录，前端照成功处理再提示）。账户错误取 `aurora-auth` 错误枚举的变体名。
 - `message` 是中文原文，直接作为提示正文显示。
 - `detail` 放分支需要的结构化参数（如 `field`、`rule`、`activity`、`path`）和完整原因链，用于「复制错误原文」和排查问题。
 - 网络层失败另在 `detail.network` 里标明是哪一种：`connect`（DNS 解析失败、连接被拒、TLS 握手失败）或 `timeout`。命令层沿原因链找到 HTTP 客户端的错误后判定（`aurora_base::http::network_failure`），不靠错误文本匹配。
@@ -123,7 +123,9 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 `match_instances` 给出某工程对全部实例的落位矩阵，入参带资源类型：Mod 看加载器与 MC 版本，资源包、光影、数据包只看 MC 版本。整合包与插件不装进已有实例，报 `invalid_argument`。
 
-前端的任务表里，新建实例、导入整合包、补全实例三种任务期间实例算「安装中」；其余挂在实例上的任务（装、更新 Mod 与资源）只算「改动中」，不挡启动。批量装 Mod（`install_mods`）与批量更新 Mod（`update_mods`）是前端的组合任务，逐项调用 `install_mod` / `update_mod`，在任务表里只占一行。
+`installed_sources` 一次给出全部实例已装 Mod 的平台来源（卷宗与 mods 目录的文件名 join，禁用态也算），只读、不占实例锁；某个实例读不出时只让那一项带上错误。发现页的「已装入 n 个实例」用它，不再逐个实例调 `list_mods`。
+
+前端的任务表里，新建实例、导入整合包、补全实例三种任务期间实例算「安装中」；其余挂在实例上的任务（装、更新 Mod 与资源）只算「改动中」，不挡启动。批量装 Mod（`install_mods`）与批量更新 Mod（`update_mods`）是前端的组合任务，逐项调用 `install_mod` / `update_mod`，在任务表里只占一行。后端不记运行中被取消的任务 id，所以组合任务的取消由前端在每开始一项前检查：已请求取消即以 `cancelled` 结束，停下前做完的几项已经落盘，相关缓存一并失效。整体进度在各项声明大小都已知时按字节折算（已做完各项的声明大小加当前项实际下载的字节），有一项大小未知时按项数折算，只进不退。
 
 `open_folder` 的目标里，`game_dir`、`data_dir`（数据目录）与 `launcher_logs`（启动器日志目录）不属于任何实例，`id` 传 `null`；其余目标都要实例 id。
 
@@ -143,7 +145,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 ### 窗口拖放
 
-Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置目标，拖链接进来什么都收不到；网页里的 drop 事件又拿不到文件的完整路径。所以主窗口在 `tauri.conf.json` 里关掉它（`dragDropEnabled: false`），由 `drop.rs` 在 setup 时经 `with_webview` 回到 UI 线程，关掉 WebView2 的外部拖入，并在父窗口下的每个子窗口上换上自己的放置目标。
+Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置目标，拖链接进来什么都收不到；网页里的 drop 事件又拿不到文件的完整路径。所以主窗口在 `tauri.conf.json` 里关掉它（`dragDropEnabled: false`），由 `drop.rs` 在 setup 时经 `with_webview` 回到 UI 线程，关掉 WebView2 的外部拖入，并在父窗口下的每个子窗口上换上自己的放置目标。WebView2 的渲染、GPU 等子进程重启后网页区域的子窗口会被新建，所以每次页面加载完成（`NavigationCompleted`）都按当时的子窗口重挂一遍；浏览器进程退出时 WebView 已关闭，只记 error，要重启应用才能恢复。
 
 - 文件读 `CF_HDROP`，推送系统给出的完整路径。
 - 文字读 `CF_UNICODETEXT`，只认 authlib-injector 启动器规范约定的 `authlib-injector:yggdrasil-server:` 加 URL 编码的 API 地址，解码后推送；别的文字不认，鼠标显示不可放置，也不推送任何事件。
@@ -215,7 +217,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `credentials.bin` | 账户令牌，DPAPI 加密 |
 | `offline_accounts.json` | 离线账户 |
 | `tasks.json` | 前端任务表 |
-| `playtime.json` | 游玩时长；实例改名时记录随之迁到新名字，删除实例时一并清掉 |
+| `playtime.json` | 游玩时长，按游戏目录分开记（格式版本 2，旧版读到时归到当时的当前游戏目录）；实例改名、删除时只改当前游戏目录下的记录。记录没跟上时命令报 `play_records_failed`，改动留在进程内待补，之后读写时补上 |
 | `java-probe-cache.json` | Java 识别缓存，按可执行文件指纹记录 |
 | `runtime/<主版本>/` | 托管 Java 运行时 |
 | `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件 |
@@ -258,7 +260,8 @@ versions/<实例名>/
 | 中文名 | 落樱 | `APP_NAME` | `app_name!()` / `APP_NAME` |
 | 英文名 | Petalfall | `APP_NAME_EN` | `app_name_en!()` / `APP_NAME_EN` |
 | slug | petalfall | `APP_SLUG` | `app_slug!()` / `APP_SLUG` |
+| 仓库地址 | https://github.com/ShinoyukiMiyako/Aurora | `REPO_URL` | `REPO_URL` |
 
-前端常量定义在 `app/src/lib/app-info.ts`，Rust 常量定义在 `aurora-base` 的 `brand` 模块。Rust 用宏的形式提供，是为了能放进 `concat!`：User-Agent、元数据目录名、崩溃规则表都是编译期拼接的 `&'static str`。两边的取值由上面的品牌一致性测试保证相同。
+前端常量定义在 `app/src/lib/app-info.ts`，Rust 常量定义在 `aurora-base` 的 `brand` 模块。Rust 用宏的形式提供，是为了能放进 `concat!`：User-Agent、元数据目录名、崩溃规则表都是编译期拼接的 `&'static str`。两边的取值由上面的品牌一致性测试保证相同；仓库地址另由 `aurora-tauri` 资讯命令的测试 `repo_url_matches_frontend` 钉住（启动器资讯读这个仓库的 GitHub Releases）。
 
 `aurora` 是内部代号，crate 名、Rust 类型名、IPC 事件名前缀 `aurora://`、自定义协议 `aurora-tex` 和环境变量 `AURORA_*` 都沿用它，不随产品名变化。
