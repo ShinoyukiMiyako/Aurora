@@ -119,8 +119,9 @@ pub struct StarterMods {
     pub missing: Vec<StarterMissing>,
 }
 
+/// 一项的查询结果。版本对象有几百字节，装箱后缺项不必占那么大的槽位。
 enum Pick {
-    Found(ModVersionInfo),
+    Found(Box<ModVersionInfo>),
     Missing(StarterMissingReason),
 }
 
@@ -145,7 +146,10 @@ impl Aurora {
         };
         for (entry, pick) in entries.into_iter().zip(picks) {
             match pick {
-                Pick::Found(version) => result.available.push(StarterMod { entry, version }),
+                Pick::Found(version) => result.available.push(StarterMod {
+                    entry,
+                    version: *version,
+                }),
                 Pick::Missing(reason) => result.missing.push(StarterMissing { entry, reason }),
             }
         }
@@ -192,7 +196,7 @@ impl Aurora {
             ReleaseChannel::Alpha,
         ] {
             if let Some(version) = matching.iter().find(|v| v.release_channel == channel) {
-                return Ok(Pick::Found((*version).clone()));
+                return Ok(Pick::Found(Box::new((*version).clone())));
             }
         }
         Ok(Pick::Missing(StarterMissingReason::NoVersion))
