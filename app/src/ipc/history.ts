@@ -10,8 +10,10 @@ export type HistoryEvent =
       /** UNIX 秒。 */
       at: number;
       file_name: string;
-      /** 已改名为 `<old_file>.old` 留在 mods 目录。 */
+      /** 已改名为备份留在 mods 目录，备份名见 backup_file。 */
       old_file: string;
+      /** 旧文件实际改成的备份名（同名备份已有时带序号，如 `a.jar.2.old`）；早期记录没有这一项，备份名为 `<old_file>.old`。 */
+      backup_file?: string;
       /** 旧文件查无来源时为「未知」。 */
       from_version: string;
       to_version: string;
@@ -33,7 +35,7 @@ export const listHistory = (versionId: string): Promise<HistoryEvent[]> => invok
 
 export const rollbackChecks = (versionId: string): Promise<RollbackCheck[]> => invoke<RollbackCheck[]>("rollback_checks", { versionId });
 
-/** 只有更新事件可回滚；文件被游戏占用时以 mod_file_busy 拒绝。 */
+/** 只有更新事件可回滚；同一个 Mod 连着更新过几次时只能从最近那次往回滚；文件被游戏占用时以 mod_file_busy 拒绝。 */
 export const rollback = (versionId: string, eventId: string): Promise<void> => invoke<void>("rollback", { versionId, eventId });
 
 /** mods 目录下全部 `.old` 备份占用的字节数。 */

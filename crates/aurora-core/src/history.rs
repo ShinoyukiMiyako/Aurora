@@ -3,8 +3,9 @@
 //! 每次安装 / 更新 / 移除 / 回滚都往 `versions/<id>/<元数据目录>/history.json` 追加一条事件，既有条目
 //! 永不改写——历史一旦可被改写就不再是证据，玩家「昨天还好好的，今天进不去了」时便无从复盘。
 //!
-//! 更新事件同时是回滚的凭据：旧 jar 被改名为 `<file>.old` 留在原目录，事件里记下新旧文件名与新旧
-//! 版本，回滚就是把这对名字换回去。因此「这条能不能回滚」不由历史自身决定，而由 `.old` 文件是否
+//! 更新事件同时是回滚的凭据：旧 jar 被改名为 `<file>.old`（同名备份已经有了时为 `<file>.<序号>.old`）
+//! 留在原目录，事件里记下新旧文件名、备份名与新旧版本，回滚就是把这对名字换回去。一个 Mod 连着
+//! 更新几次就留下一条链，只能从最近的那次往回滚。因此「这条能不能回滚」不由历史自身决定，而由 `.old` 文件是否
 //! 还躺在磁盘上决定（见 [`RollbackCheck`]）——与卷宗同理，磁盘始终是权威。备份要占盘，代价必须
 //! 显式告诉玩家而不是偷偷长在他硬盘里（见 [`Aurora::backup_size`]）。
 //!
@@ -43,12 +44,17 @@ pub enum HistoryEvent {
         at: i64,
         files: Vec<String>,
     },
-    /// 更新：`old_file` 已改名为 `<old_file>.old` 保留在原目录。
+    /// 更新：`old_file` 已改名为备份（见 `backup_file`）保留在原目录。
     Update {
         id: String,
         at: i64,
         file_name: String,
         old_file: String,
+        /// 旧文件实际改成的备份名。同一个文件名先后被更新不止一次时（原地更新、名字来回换），后来的
+        /// 备份不能盖掉先前那份，名字里会带序号，所以要记下来。早期记录没有这一项，备份名就是
+        /// `<old_file>.old`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backup_file: Option<String>,
         /// 旧文件的平台版本标识；旧文件查无来源时为「未知」。
         from_version: String,
         to_version: String,
@@ -222,6 +228,44 @@ fn reverted_event_ids(history: &History) -> HashSet<&str> {
         .collect()
 }
 
+/// 一条更新事件留下的备份文件名。
+fn update_backup(old_file: &str, backup_file: Option<&str>) -> String {
+    backup_file.map_or_else(|| backup_name(old_file), str::to_owned)
+}
+
+/// 收集被之后的更新盖过的更新事件 id。
+///
+/// 更新 E 装上的文件之后又被更新 L 换掉（L 的旧文件就是 E 的新文件）、且 L 还没回滚时，E 装上的文件
+/// 已经变成了 L 的备份。这时回滚 E 会删一个早已不在的文件、再把 E 的备份复原出来，mods 里就同时有
+/// L 装上的新版和 E 之前的旧版，游戏按重复 Mod 报错。只能先回滚 L，E 的状态回到眼前才轮得到它。
+fn superseded_update_ids<'a>(history: &'a History, reverted: &HashSet<&str>) -> HashSet<&'a str> {
+    let live_updates: Vec<(usize, &str, &str)> = history
+        .events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            HistoryEvent::Update {
+                id,
+                file_name,
+                old_file,
+                ..
+            } if !reverted.contains(id.as_str()) => {
+                Some((index, file_name.as_str(), old_file.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    live_updates
+        .iter()
+        .filter(|(index, file_name, _)| {
+            live_updates
+                .iter()
+                .any(|(later, _, old_file)| later > index && old_file == file_name)
+        })
+        .map(|(index, _, _)| history.events[*index].id())
+        .collect()
+}
+
 /// 列出 mods 目录这一层全部 `.old` 备份的文件名与字节数。
 ///
 /// 回滚判定与备份占用共用这一次列目录：逐条事件去 stat 就是把一次列目录拆成事件数那么多次系统调用。
@@ -313,25 +357,32 @@ impl Aurora {
             .map(|(name, _)| name)
             .collect();
         let reverted = reverted_event_ids(&history);
+        let superseded = superseded_update_ids(&history, &reverted);
 
         Ok(history
             .events
             .iter()
             .map(|event| {
                 let (can_rollback, reason) = match event {
-                    HistoryEvent::Update { id, old_file, .. } => {
+                    HistoryEvent::Update {
+                        id,
+                        file_name,
+                        old_file,
+                        backup_file,
+                        ..
+                    } => {
+                        let backup = update_backup(old_file, backup_file.as_deref());
                         if reverted.contains(id.as_str()) {
                             (false, Some("该更新已经回滚过".to_owned()))
-                        } else if backups.contains(&backup_name(old_file)) {
-                            (true, None)
-                        } else {
+                        } else if superseded.contains(id.as_str()) {
                             (
                                 false,
-                                Some(format!(
-                                    "备份文件 {} 已不在 mods 目录里",
-                                    backup_name(old_file)
-                                )),
+                                Some(format!("{file_name} 之后又更新过，请先回滚之后的那次更新")),
                             )
+                        } else if backups.contains(&backup) {
+                            (true, None)
+                        } else {
+                            (false, Some(format!("备份文件 {backup} 已不在 mods 目录里")))
                         }
                     }
                     HistoryEvent::Install { .. } => (
@@ -357,8 +408,8 @@ impl Aurora {
 
     /// 回滚一次更新：把 `<old_file>.old` 改回原名、删掉更新装上的新文件，再追加一条回滚事件。
     ///
-    /// 全部前置检查（事件存在、是更新事件、没回滚过、备份还在、目标名没被占、文件没被游戏占用）
-    /// 通过后才动第一次盘。半个回滚比不回滚更糟——玩家会拿到一个既不是旧版也不是新版的 mods 目录，
+    /// 全部前置检查（事件存在、是更新事件、没回滚过、没被之后的更新盖过、备份还在、目标名没被占、
+    /// 文件没被游戏占用）通过后才动第一次盘。半个回滚比不回滚更糟——玩家会拿到一个既不是旧版也不是新版的 mods 目录，
     /// 且没人知道它缺了什么。
     pub async fn rollback(&self, version_id: &str, event_id: &str) -> Result<()> {
         let dirs = self.resolved_dirs(version_id).await?;
@@ -381,6 +432,7 @@ impl Aurora {
         let HistoryEvent::Update {
             file_name,
             old_file,
+            backup_file,
             from_version,
             from_version_number,
             ..
@@ -392,23 +444,29 @@ impl Aurora {
                 format!("事件 {event_id} 不是更新事件，只有更新事件留有 .old 备份可回滚"),
             ));
         };
-        if reverted_event_ids(&history).contains(event_id) {
+        let reverted = reverted_event_ids(&history);
+        if reverted.contains(event_id) {
             return Err(refuse(
                 store.path(),
                 std::io::ErrorKind::AlreadyExists,
                 format!("事件 {event_id} 已经回滚过，不能重复回滚"),
             ));
         }
+        if superseded_update_ids(&history, &reverted).contains(event_id) {
+            return Err(refuse(
+                store.path(),
+                std::io::ErrorKind::InvalidInput,
+                format!("事件 {event_id} 装上的 {file_name} 之后又更新过，请先回滚之后的那次更新"),
+            ));
+        }
 
-        let backup = mods_dir.join(backup_name(old_file));
+        let backup_file = update_backup(old_file, backup_file.as_deref());
+        let backup = mods_dir.join(&backup_file);
         if !try_exists(&backup).await? {
             return Err(refuse(
                 &backup,
                 std::io::ErrorKind::NotFound,
-                format!(
-                    "回滚事件 {event_id} 需要备份文件 {}，它已不在 mods 目录里",
-                    backup_name(old_file)
-                ),
+                format!("回滚事件 {event_id} 需要备份文件 {backup_file}，它已不在 mods 目录里"),
             ));
         }
         let restored = mods_dir.join(old_file);
@@ -537,6 +595,7 @@ mod tests {
             at,
             file_name: file_name.to_owned(),
             old_file: old_file.to_owned(),
+            backup_file: None,
             from_version: from_version.to_owned(),
             to_version: to_version.to_owned(),
             title: Some("Sodium".to_owned()),
@@ -649,10 +708,23 @@ mod tests {
         assert_eq!(json["title"], "Sodium");
         assert_eq!(json["from_version_number"], "0.5.3");
         assert_eq!(json["to_version_number"], "0.6.0");
+        // 没记备份名的（早期记录）不写这一项，读回来仍是 None。
+        assert!(json.get("backup_file").is_none());
 
         // 回环：历史文件要能原样读回。
         let back: HistoryEvent = serde_json::from_value(json).unwrap();
         assert_eq!(back, update("9-001", 9));
+
+        let mut numbered = update("9-002", 9);
+        if let HistoryEvent::Update { backup_file, .. } = &mut numbered {
+            *backup_file = Some("sodium-0.5.3.jar.2.old".to_owned());
+        }
+        let json = serde_json::to_value(&numbered).unwrap();
+        assert_eq!(json["backup_file"], "sodium-0.5.3.jar.2.old");
+        assert_eq!(
+            serde_json::from_value::<HistoryEvent>(json).unwrap(),
+            numbered
+        );
 
         let install_json = serde_json::to_value(install("8-001", 8, &["a.jar", "b.jar"])).unwrap();
         assert_eq!(install_json["kind"], "install");
@@ -1133,6 +1205,134 @@ mod tests {
         assert_eq!(ledger.find("lib-1.0.jar").unwrap().version_id, "V10");
         assert_eq!(aurora.backup_size(VERSION_ID).await.unwrap(), 0);
         assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 5);
+    }
+
+    /// 更新链里较早的那条在较晚的那条回滚之前不可回滚：检查给出原因，回滚被拒且一个文件都不动；
+    /// 较晚的回滚之后它才放开。
+    #[tokio::test]
+    async fn earlier_update_in_a_chain_waits_for_the_later_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("lib-1.2.jar"), b"v12")
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("lib-1.1.jar.old"), b"v11")
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("lib-1.0.jar.old"), b"v10")
+            .await
+            .unwrap();
+        let store = aurora.history_store(VERSION_ID);
+        for event in [
+            install("100-001", 100, &["lib-1.0.jar"]),
+            update_event("200-001", 200, "lib-1.1.jar", "lib-1.0.jar", "V10", "V11"),
+            update_event("300-001", 300, "lib-1.2.jar", "lib-1.1.jar", "V11", "V12"),
+        ] {
+            store.append(event).await.unwrap();
+        }
+
+        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        assert!(!checks[1].can_rollback);
+        assert_eq!(
+            checks[1].reason.as_deref(),
+            Some("lib-1.1.jar 之后又更新过，请先回滚之后的那次更新")
+        );
+        assert!(checks[2].can_rollback);
+
+        let disk_before = dir_names(&mods_dir).await;
+        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+        let (path, reason) = refusal(&err);
+        assert_eq!(path, store.path());
+        assert!(
+            reason.contains("请先回滚之后的那次更新"),
+            "原因实得 {reason}"
+        );
+        assert_eq!(dir_names(&mods_dir).await, disk_before);
+        assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 3);
+
+        aurora.rollback(VERSION_ID, "300-001").await.unwrap();
+        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        assert!(checks[1].can_rollback, "{:?}", checks[1].reason);
+        assert!(!checks[2].can_rollback);
+    }
+
+    /// 同名原地更新做了两次：第二份备份带序号，回滚各自取自己记下的那份，一步步回到最初的内容。
+    #[tokio::test]
+    async fn rollback_uses_the_backup_name_recorded_in_the_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (v1, v2, v3) = (
+            b"one".as_slice(),
+            b"two-two".as_slice(),
+            b"three-3-3".as_slice(),
+        );
+        tokio::fs::write(mods_dir.join("sodium.jar"), v3)
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("sodium.jar.old"), v1)
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("sodium.jar.2.old"), v2)
+            .await
+            .unwrap();
+        let ledger_store = aurora.ledger_store(VERSION_ID);
+        let mut ledger = Ledger::default();
+        ledger.upsert(ledger_entry("sodium.jar", "V3", &sha1_hex(v3)));
+        ledger_store.save(&ledger).await.unwrap();
+        let store = aurora.history_store(VERSION_ID);
+        store
+            .append(update_event(
+                "200-001",
+                200,
+                "sodium.jar",
+                "sodium.jar",
+                "V1",
+                "V2",
+            ))
+            .await
+            .unwrap();
+        let mut second = update_event("300-001", 300, "sodium.jar", "sodium.jar", "V2", "V3");
+        if let HistoryEvent::Update { backup_file, .. } = &mut second {
+            *backup_file = Some("sodium.jar.2.old".to_owned());
+        }
+        store.append(second).await.unwrap();
+
+        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        assert_eq!(
+            checks.iter().map(|c| c.can_rollback).collect::<Vec<_>>(),
+            vec![false, true]
+        );
+
+        aurora.rollback(VERSION_ID, "300-001").await.unwrap();
+        assert_eq!(
+            tokio::fs::read(mods_dir.join("sodium.jar")).await.unwrap(),
+            v2
+        );
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["sodium.jar", "sodium.jar.old"]
+        );
+        let entry = ledger_store.load().await.unwrap();
+        let entry = entry.find("sodium.jar").unwrap();
+        assert_eq!(entry.version_id, "V2");
+        assert_eq!(entry.sha1.as_deref(), Some(sha1_hex(v2).as_str()));
+
+        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
+        assert_eq!(
+            tokio::fs::read(mods_dir.join("sodium.jar")).await.unwrap(),
+            v1
+        );
+        assert_eq!(dir_names(&mods_dir).await, vec!["sodium.jar"]);
+        assert_eq!(
+            ledger_store
+                .load()
+                .await
+                .unwrap()
+                .find("sodium.jar")
+                .unwrap()
+                .version_id,
+            "V1"
+        );
     }
 
     /// 原地更新（新旧同名）：备份改回原名即可，「目标名被占」的护栏不能误伤这条正常路径。

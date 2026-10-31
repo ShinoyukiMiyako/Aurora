@@ -132,6 +132,7 @@ mod tests {
                 at: 200,
                 file_name: "a-2.jar".to_owned(),
                 old_file: "a-1.jar".to_owned(),
+                backup_file: None,
                 from_version: "V1".to_owned(),
                 to_version: "V2".to_owned(),
                 title: None,

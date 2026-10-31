@@ -36,8 +36,8 @@ use crate::facade::Aurora;
 use crate::history::HistoryEvent;
 use crate::ledger::{Ledger, LedgerEntry};
 use crate::modfs::{
-    MODS_DIR, backup_name, ensure_not_held, is_plain_file_name, ledger_key, lock_mods_dir,
-    now_unix, present, refuse, try_exists,
+    MODS_DIR, ensure_not_held, is_plain_file_name, ledger_key, lock_mods_dir, now_unix,
+    numbered_backup_name, present, refuse, try_exists,
 };
 
 /// 暂存区目录名，位于 `<工作目录>/<元数据目录>/staging`。每次安装在其下另开一个独立子目录。
@@ -147,6 +147,8 @@ struct Placement {
     required_by: Option<String>,
     /// 走更新路径时被备份掉的旧文件；新装为 `None`。
     replaced: Option<Replaced>,
+    /// 旧文件实际改成的备份名，与 `replaced` 同为 `Some` 或同为 `None`。
+    backup_file: Option<String>,
 }
 
 impl Aurora {
@@ -691,6 +693,7 @@ impl Aurora {
                     at,
                     file_name: placement.file_name.clone(),
                     old_file: replaced.old_file.clone(),
+                    backup_file: placement.backup_file.clone(),
                     from_version: replaced.from_version.clone(),
                     to_version: placement.version.version_id.clone(),
                     title: placement.title.clone(),
@@ -933,9 +936,10 @@ async fn place_file(
     item: StagedItem,
     replaced: Option<Replaced>,
 ) -> Result<Placement> {
-    if let Some(previous) = &replaced {
-        backup_previous(mods_dir, &previous.old_file).await?;
-    }
+    let backup_file = match &replaced {
+        Some(previous) => Some(backup_previous(mods_dir, &previous.old_file).await?),
+        None => None,
+    };
     let dest = mods_dir.join(&item.file_name);
     tokio::fs::rename(&item.task.dest, &dest)
         .await
@@ -951,21 +955,34 @@ async fn place_file(
         sha1: item.sha1,
         required_by: item.required_by,
         replaced,
+        backup_file,
     })
 }
 
-/// 把旧文件改名为 `<old_file>.old` 留在原目录，这是回滚的全部凭据。
+/// 把旧文件改名为备份留在原目录，返回备份名；这是回滚的全部凭据。
+///
+/// 备份名取 `<old_file>.old`，已被更早的一次更新占着时依次取 `<old_file>.2.old`、`.3.old`……：
+/// rename 会悄无声息地覆盖同名文件，盖掉的正是更早那次更新唯一的回滚凭据。调用方持有 mods 目录
+/// 写锁，选名与改名之间不会有本启动器的另一次写入插进来。
 ///
 /// 启用态与禁用态两种名字都试：玩家把旧版禁用了是常见操作，只认启用态会在 mods 里留下一份没人管的
 /// `<old_file>.disabled`，下次更新检查还会拿它当一个独立的已装 Mod 去查。
-async fn backup_previous(mods_dir: &Path, old_file: &str) -> Result<()> {
-    let backup = mods_dir.join(backup_name(old_file));
+async fn backup_previous(mods_dir: &Path, old_file: &str) -> Result<String> {
+    let mut n = 1;
+    let backup_file = loop {
+        let candidate = numbered_backup_name(old_file, n);
+        if !try_exists(&mods_dir.join(&candidate)).await? {
+            break candidate;
+        }
+        n += 1;
+    };
+    let backup = mods_dir.join(&backup_file);
     for candidate in [
         mods_dir.join(old_file),
         mods_dir.join(format!("{old_file}{DISABLED_SUFFIX}")),
     ] {
         match tokio::fs::rename(&candidate, &backup).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(backup_file),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => {
                 return Err(aurora_base::Error::Io {
@@ -987,14 +1004,12 @@ async fn backup_previous(mods_dir: &Path, old_file: &str) -> Result<()> {
 
 /// 一个文件落位后发给 UI 的那句话。
 fn describe_placement(placement: &Placement) -> String {
-    match &placement.replaced {
-        Some(previous) => format!(
-            "{} 已更新，旧版 {} 备份为 {}",
-            placement.file_name,
-            previous.old_file,
-            backup_name(&previous.old_file)
+    match (&placement.replaced, &placement.backup_file) {
+        (Some(previous), Some(backup)) => format!(
+            "{} 已更新，旧版 {} 备份为 {backup}",
+            placement.file_name, previous.old_file
         ),
-        None => format!("{} 已放入 mods 目录", placement.file_name),
+        _ => format!("{} 已放入 mods 目录", placement.file_name),
     }
 }
 
@@ -1622,6 +1637,152 @@ mod tests {
                 .as_deref(),
             Some("v1.0")
         );
+    }
+
+    /// 挂一个文件名固定为 sodium.jar 的版本：各版本的下载地址按版本分开，文件名却相同（原地更新）。
+    async fn mount_same_name_sodium(server: &MockServer, version: &str, bytes: &[u8]) {
+        let url = format!("{}/{version}/sodium.jar", server.uri());
+        let body = modrinth_version(
+            version,
+            "sodium",
+            "2026-01-01T00:00:00Z",
+            "sodium.jar",
+            &url,
+            &format!(r#"{{"sha1":"{}"}}"#, sha1_hex(bytes)),
+            bytes.len(),
+            "",
+        );
+        mount_version(server, version, &body).await;
+        mount_jar(server, &format!("{version}/sodium.jar"), bytes.to_vec()).await;
+    }
+
+    /// 同名原地更新连做两次：第二份备份带序号、不盖掉第一份，事件记下各自的备份名；较早的更新要等
+    /// 较晚的回滚之后才能回滚，两步回滚后内容、卷宗版本与哈希都回到最初那一版。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repeated_in_place_updates_keep_every_backup_and_roll_back_in_order() {
+        let server = MockServer::start().await;
+        let (v1, v2, v3) = (b"one".to_vec(), b"two-two".to_vec(), b"three-3-3".to_vec());
+        mount_same_name_sodium(&server, "v1", &v1).await;
+        mount_same_name_sodium(&server, "v2", &v2).await;
+        mount_same_name_sodium(&server, "v3", &v3).await;
+        mount_projects(&server, &[("sodium", "Sodium")]).await;
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), server.uri());
+
+        aurora
+            .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
+            .await
+            .unwrap();
+        aurora
+            .update_mod("1.21", "sodium.jar", "v2", None)
+            .await
+            .unwrap();
+        aurora
+            .update_mod("1.21", "sodium.jar", "v3", None)
+            .await
+            .unwrap();
+
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["sodium.jar", "sodium.jar.2.old", "sodium.jar.old"]
+        );
+        let read = |name: &str| std::fs::read(mods_dir.join(name)).unwrap();
+        assert_eq!(read("sodium.jar.old"), v1);
+        assert_eq!(read("sodium.jar.2.old"), v2);
+        assert_eq!(read("sodium.jar"), v3);
+        assert_eq!(
+            aurora.backup_size("1.21").await.unwrap(),
+            (v1.len() + v2.len()) as u64
+        );
+
+        let history = aurora.history("1.21").await.unwrap();
+        let updates: Vec<(String, Option<String>)> = history
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                HistoryEvent::Update {
+                    id, backup_file, ..
+                } => Some((id.clone(), backup_file.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].1.as_deref(), Some("sodium.jar.old"));
+        assert_eq!(updates[1].1.as_deref(), Some("sodium.jar.2.old"));
+        let checks = aurora.rollback_checks("1.21").await.unwrap();
+        assert_eq!(
+            checks.iter().map(|c| c.can_rollback).collect::<Vec<_>>(),
+            vec![false, false, true],
+            "安装不可回滚，第一次更新被第二次盖过"
+        );
+        assert!(aurora.rollback("1.21", &updates[0].0).await.is_err());
+        assert_eq!(read("sodium.jar"), v3);
+
+        aurora.rollback("1.21", &updates[1].0).await.unwrap();
+        assert_eq!(read("sodium.jar"), v2);
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["sodium.jar", "sodium.jar.old"]
+        );
+        aurora.rollback("1.21", &updates[0].0).await.unwrap();
+        assert_eq!(dir_names(&mods_dir).await, vec!["sodium.jar"]);
+        assert_eq!(read("sodium.jar"), v1);
+        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let entry = ledger.find("sodium.jar").unwrap();
+        assert_eq!(entry.version_id, "v1");
+        assert_eq!(entry.version_number.as_deref(), Some("v1.0"));
+        assert_eq!(entry.sha1.as_deref(), Some(sha1_hex(&v1).as_str()));
+    }
+
+    /// 改名式连续更新（v1 -> v2 -> v3）后先回滚较早的那次：被拒，mods 里只留 v3，不会出现两份同一个 Mod。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rolling_back_an_overtaken_update_is_refused_without_duplicating_the_mod() {
+        let server = MockServer::start().await;
+        mount_sodium(&server, "v1", "sodium-v1.jar", b"one").await;
+        mount_sodium(&server, "v2", "sodium-v2.jar", b"two").await;
+        mount_sodium(&server, "v3", "sodium-v3.jar", b"three").await;
+        mount_projects(&server, &[("sodium", "Sodium")]).await;
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), server.uri());
+        aurora
+            .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
+            .await
+            .unwrap();
+        aurora
+            .update_mod("1.21", "sodium-v1.jar", "v2", None)
+            .await
+            .unwrap();
+        aurora
+            .update_mod("1.21", "sodium-v2.jar", "v3", None)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let before = dir_names(&mods_dir).await;
+        assert_eq!(
+            before,
+            vec!["sodium-v1.jar.old", "sodium-v2.jar.old", "sodium-v3.jar"]
+        );
+
+        let first_update = aurora.history("1.21").await.unwrap().events[1]
+            .id()
+            .to_owned();
+        let err = aurora.rollback("1.21", &first_update).await.unwrap_err();
+        assert!(
+            refusal(&err).1.contains("请先回滚之后的那次更新"),
+            "{err:?}"
+        );
+        assert_eq!(dir_names(&mods_dir).await, before);
+        let jars: Vec<_> = aurora
+            .list_mods("1.21")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.installed.file_name)
+            .collect();
+        assert_eq!(jars, vec!["sodium-v3.jar"]);
     }
 
     /// 来源不明的文件不能「更新」：不知道它属于哪个工程。

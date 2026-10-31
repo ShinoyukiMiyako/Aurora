@@ -30,6 +30,18 @@ pub(crate) fn backup_name(file_name: &str) -> String {
     format!("{file_name}{BACKUP_SUFFIX}")
 }
 
+/// 某文件的第 `n` 个备份名：第 1 个就是 [`backup_name`]，之后是 `<文件名>.<n>.old`。
+///
+/// 同一个文件名先后被更新多次时（原地更新、名字来回换），每次更新的备份都是一条独立的回滚凭据，
+/// 不能互相覆盖。序号仍以 `.old` 结尾，备份统计与加载器的过滤都照旧认得它。
+pub(crate) fn numbered_backup_name(file_name: &str, n: u32) -> String {
+    if n <= 1 {
+        backup_name(file_name)
+    } else {
+        format!("{file_name}.{n}{BACKUP_SUFFIX}")
+    }
+}
+
 /// 文件名是否是一个不带任何路径成分的纯文件名。
 ///
 /// 文件名来自前端或第三方平台，随后要拼进 mods 目录、暂存目录与备份名；带分隔符或 `..` 的名字会让
