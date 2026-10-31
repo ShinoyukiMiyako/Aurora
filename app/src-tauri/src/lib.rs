@@ -169,6 +169,8 @@ pub fn run() {
             commands::modpack::preview_modpack,
             commands::modpack::summarize_platform_modpack,
             commands::modpack::install_modpack,
+            commands::modpack::claim_blocked_files,
+            commands::modpack::downloads_folder,
             // -- system --
             commands::system::memory_advice,
             commands::system::is_first_run,
