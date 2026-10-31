@@ -168,6 +168,100 @@ describe("切换游戏目录", () => {
   });
 });
 
+describe("改名、删除后挂在原 id 上的按需数据与游玩统计失效", () => {
+  const perInstance = [
+    "mods:生存",
+    "content:生存",
+    "settings:生存",
+    "history:生存",
+    "history:生存:checks",
+    "crash:生存",
+    "log:生存",
+    "mod-updates:生存",
+    "plan:生存:modrinth:AANobbMI:v2",
+    "memory-advice:生存",
+  ];
+  const stats = "play-stats:2024-07-01:2024-07-31";
+
+  /** 先订阅再退订：条目留在缓存里没人订阅，之后有人按同一个 key 订阅时直接拿到它。 */
+  async function cacheIdle(keys: readonly string[]): Promise<void> {
+    const stops = keys.map((key) => resources.subscribe(key, async () => `「生存」改名或删除前的 ${key}`, () => undefined));
+    await settle();
+    for (const stop of stops) stop();
+  }
+
+  function watchStats(): { fetches: () => number; stop: () => void } {
+    let fetches = 0;
+    const stop = resources.subscribe(
+      stats,
+      async () => {
+        fetches += 1;
+        return fetches;
+      },
+      () => undefined,
+    );
+    return { fetches: () => fetches, stop };
+  }
+
+  const statuses = () => perInstance.map((key) => resources.snapshot(key).status);
+  const allLoading = perInstance.map(() => "loading");
+
+  it("改名后新建同名实例：装好时丢掉原 id 下留着的缓存，新实例页不会读到改名前那个实例的 Mod、设置、日志与安装计划", async () => {
+    await cacheIdle(perInstance);
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    expect(statuses()).toEqual(perInstance.map(() => "ready"));
+
+    ipc.overrides.set("install_version", () => {
+      instances = [...instances, instanceDto("生存")];
+      return { id: "生存" };
+    });
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    await store.actions.createInstance({ name: "生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: null });
+    await settle();
+
+    expect(store.getState().toasts.map((t) => t.title)).toContain("「生存」已就绪");
+    expect(statuses()).toEqual(allLoading);
+  });
+
+  it("把别的实例改成曾经用过的名字：同样丢掉这个名字下留着的缓存", async () => {
+    await cacheIdle(perInstance);
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    renameOnDisk("创造", "生存");
+    await store.actions.renameInstance("创造", "生存");
+    expect(statuses()).toEqual(allLoading);
+  });
+
+  it("改名：游玩统计按迁移到新名字下的记录重取，日历不把改了名的实例说成已删除", async () => {
+    const watched = watchStats();
+    await settle();
+    expect(watched.fetches()).toBe(1);
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    await settle();
+    expect(watched.fetches()).toBe(2);
+    watched.stop();
+  });
+
+  it("删除：同名新实例的安装计划与内存建议也从头取；游玩统计去掉已清掉的记录", async () => {
+    await cacheIdle(perInstance);
+    const watched = watchStats();
+    await settle();
+    ipc.overrides.set("delete_instance", () => {
+      instances = instances.filter((i) => i.id !== "生存");
+      return { existed: true };
+    });
+
+    await store.actions.deleteInstance("生存", 0);
+    await settle();
+
+    expect(statuses()).toEqual(allLoading);
+    expect(watched.fetches()).toBe(2);
+    watched.stop();
+  });
+});
+
 describe("改名迁移任务", () => {
   it("失败的任务重试时按新名字调用命令，落地通知写新名字；下载中的 Java 装好后固定给新名字", async () => {
     let fail = true;

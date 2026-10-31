@@ -634,6 +634,14 @@ const GAME_DIR_SCOPED_RESOURCES = [
 ] as const;
 
 /**
+ * key 里带实例 id 的按需数据（<前缀>:<实例 id>…）。实例删除、改名后原 id 下没人订阅的条目还留在缓存里，之后再有实例
+ * 用上这个 id（新建、导入同名实例，或把别的实例改成这个名字）时一订阅就直接拿到前一个实例的 Mod、设置、日志与安装计划，
+ * 所以 id 一落到新实例上就丢掉它们。不在改名当时丢原 id 的：改名发起的页面那一刻还订阅着原 id，失效会让它按已经不在的
+ * 实例重取、在缓存里留下一条报错。
+ */
+const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice"] as const;
+
+/**
  * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
  * 没改成的记录由后端记着，之后读写游玩记录时补上。其余错误照常冒泡。
  */
@@ -1520,7 +1528,13 @@ export class LauncherStore {
     }
     const pins = this.raw.pins;
     if (pin && pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+    this.instanceIdTaken(id);
     await this.fetchInstances();
+  }
+
+  /** 这个 id 落到了一个新实例上：丢掉之前用过这个 id 的实例留下的按需数据（见 INSTANCE_SCOPED_RESOURCES）。 */
+  private instanceIdTaken(id: string): void {
+    for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
   }
 
   /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
@@ -2004,7 +2018,9 @@ export class LauncherStore {
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
-        for (const prefix of ["mods", "content", "history", "crash", "log", "settings", "mod-updates"]) invalidateResources(`${prefix}:${id}`);
+        for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
+        // 后端随删除清掉了它的游玩记录，日历与洞察不能还算着它
+        invalidateResources("play-stats");
         const copy = TOAST_COPY.instanceDeleted(id, worldCount);
         store.pushToast("info", copy.title, copy.body);
         if (lagged !== null) store.playRecordsLagged(id, lagged);
@@ -2020,6 +2036,9 @@ export class LauncherStore {
           },
         );
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
+        store.instanceIdTaken(newId);
+        // 游玩记录已迁到新名字下（没跟上的由后端在下一次读时补上）：主页日历按旧 id 找不到实例，会把改了名的说成已删除
+        invalidateResources("play-stats");
         store.renameSeq += 1;
         const seq = store.renameSeq;
         // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
