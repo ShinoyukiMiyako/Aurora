@@ -1,31 +1,33 @@
-//! 实例：列表、设置、内容、侧栏固定、新建（按实例名安装）、补全、删除、改名、打开文件夹，以及新建页要的
-//! 版本清单、加载器版本与所需 Java。
+//! 实例：列表、设置、内容、侧栏固定、新建（按实例名安装）、补全、删除、改名、打开文件夹、存档备份与恢复，
+//! 以及新建页要的版本清单、加载器版本与所需 Java。
 //!
-//! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，以及装、删、启停、
-//! 更新、回滚 Mod 与装资源）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy` 并在 detail 里带上
-//! 正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏之间可以并行（运行中改不了的文件由
-//! 门面的占用探测把关），与其余操作互斥。
+//! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，装、删、启停、
+//! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
+//! 并在 detail 里带上正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏、与存档备份之间可以并行
+//! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aurora_core::{
-    is_safe_instance_id, Aurora, CoreError, DeletionPreview, Disposer, EventSink, IncompleteKind,
-    IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError, InstanceInstallOutcome,
-    InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride, JavaSelection, LevelInfo,
-    LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry, Platform,
-    PlaySummary, Readable, RecycleBin, RepairOutcome, Resolution, VersionSettings, WorldEntry,
+    is_safe_instance_id, Aurora, BackupKind, CoreError, DeletionPreview, Disposer, EventSink,
+    GameSlot, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError,
+    InstanceInstallOutcome, InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride,
+    JavaSelection, LevelInfo, LoaderChoice, LoaderKind, ManifestOverview, MarkerError,
+    MarkerSettlement, PackEntry, Platform, PlaySummary, Readable, RecycleBin, RepairOutcome,
+    Resolution, VersionSettings, WorldBackup, WorldBackupList, WorldEntry, WorldScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::commands::launch::RunningGame;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
-use crate::tasks::TaskRegistry;
+use crate::tasks::{TaskHandle, TaskRegistry};
 
 // 本领域的 instance_busy、instance_has_dependents、open_failed 与通用码一起登记在 error::code。
 use crate::commands::error::code;
@@ -46,6 +48,8 @@ pub enum InstanceActivity {
     /// 装、删、启停、更新、回滚 Mod，往实例里装资源包、光影、数据包，查更新时回写卷宗，写实例设置，
     /// 或为打开文件夹建出工作目录下的子目录。
     Modifying,
+    /// 备份、恢复或导出存档；游戏退出后的自动备份由启动命令把「运行」转成它，备份完才释放。
+    BackingUp,
 }
 
 impl InstanceActivity {
@@ -58,6 +62,7 @@ impl InstanceActivity {
             InstanceActivity::Launching => "启动",
             InstanceActivity::Running => "运行",
             InstanceActivity::Modifying => "改动 Mod、资源或设置",
+            InstanceActivity::BackingUp => "备份或恢复存档",
         }
     }
 
@@ -66,19 +71,30 @@ impl InstanceActivity {
     /// Mod、资源与设置的改动只往实例目录里加删、改写文件，彼此不冲突；游戏运行中仍允许改动，
     /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、新建、补全会挪走或重写整个目录，
     /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。
+    ///
+    /// 备份与恢复只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动不相交；游戏开着时存档随时在写，
+    /// 打包出来的是半截，恢复则会被游戏下次保存覆盖，所以与启动、运行互斥。它与「运行」的兼容集合相同，
+    /// 游戏退出后可以原地从「运行」转成它。
     fn compatible_with(self, other: Self) -> bool {
-        use InstanceActivity::{Launching, Modifying, Running};
+        use InstanceActivity::{BackingUp, Launching, Modifying, Running};
         matches!(
             (self, other),
-            (Modifying, Modifying | Launching | Running) | (Launching | Running, Modifying)
+            (Modifying, Modifying | Launching | Running | BackingUp)
+                | (Launching | Running | BackingUp, Modifying)
         )
     }
 
-    /// 同一实例上有几件事并行时，对外报哪一件：Mod 改动排在最后，界面关心的是启动与运行。
+    /// 同一实例上有几件事并行时，对外报哪一件：Mod 改动排在最后，界面关心的是启动、运行与备份。
     fn report_rank(self) -> u8 {
         match self {
             InstanceActivity::Modifying => 1,
-            _ => 0,
+            InstanceActivity::Installing
+            | InstanceActivity::Repairing
+            | InstanceActivity::Renaming
+            | InstanceActivity::Deleting
+            | InstanceActivity::Launching
+            | InstanceActivity::Running
+            | InstanceActivity::BackingUp => 0,
         }
     }
 }
@@ -157,8 +173,8 @@ pub struct InstanceGuard {
 }
 
 impl InstanceGuard {
-    /// 改记正在做的事（启动成功后由「启动」转为「运行」）。只用于兼容关系相同的两件事之间转换，
-    /// 所以不重新检查冲突。
+    /// 改记正在做的事（启动成功后由「启动」转为「运行」，游戏退出后由「运行」转为「备份」）。只用于
+    /// 兼容关系相同的两件事之间转换，所以不重新检查冲突。
     pub fn set_activity(&self, activity: InstanceActivity) {
         let mut table = lock_table(&self.table);
         let hold = table
@@ -457,6 +473,10 @@ pub struct DeletionPreviewDto {
     pub dependents: Vec<String>,
     /// 实例此刻在做的事；非空时删除会报 instance_busy。
     pub activity: Option<InstanceActivity>,
+    /// 这个实例的存档备份所在目录。备份放在游戏目录下，不随实例删除。
+    pub backups_dir: String,
+    /// 这个实例名下的备份份数（各存档合计）。
+    pub backup_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -744,6 +764,8 @@ fn preview_dto(preview: DeletionPreview, activity: Option<InstanceActivity>) -> 
         file_count: preview.file_count,
         dependents: preview.dependents,
         activity,
+        backups_dir: preview.backups_dir.display().to_string(),
+        backup_count: preview.backup_count,
     }
 }
 
@@ -1133,7 +1155,8 @@ async fn settle_quietly(
 
 // ---------------------------------------------------------------- 删除与改名
 
-/// 删除前的预览：会一起删掉的存档、占用空间、依赖它的实例与它此刻在做的事。
+/// 删除前的预览：会一起删掉的存档、占用空间、依赖它的实例、它此刻在做的事，以及留下来的存档备份在哪、
+/// 有几份。
 #[tauri::command]
 pub async fn preview_instance_deletion(
     id: String,
@@ -1186,6 +1209,7 @@ pub(crate) async fn delete_instance_with(
 /// 目录操作完成后的两步收尾：配置里的侧栏固定与当前选中、游玩记录。两步互不拦着，一步失败另一步照做：
 /// 记录没跟上就不改引用的话，侧栏固定与当前选中会一直指着已经不在的实例，重试也只会报实例不存在。
 /// 两步都失败时报引用的错误（界面上看得见的是它），记录的错误留在日志里，门面已记下待补。
+/// 改名还有第三路（存档备份），见 [`follow_up_backups`]。
 fn follow_up(
     refs: Result<bool, CoreError>,
     records: aurora_core::Result<()>,
@@ -1211,9 +1235,53 @@ fn play_records_failed(err: CoreError, done: &str, extra: Value) -> CommandError
     mapped
 }
 
-/// 实例改名：目录、版本 JSON（文件名与 id）、jar、natives、游玩记录、侧栏固定与当前选中一起改。
+/// 改名收尾的第三路：存档备份目录跟着挪。与前两路互不拦着；只差它没挪成时报 `world_backups_not_moved`，
+/// 前两路也有失败时报前两路的错误（侧栏、列表与统计是界面上马上看得见的），备份的错误只进日志。
+fn follow_up_backups(
+    earlier: Result<(), CommandError>,
+    backups: aurora_core::Result<()>,
+    not_moved: impl FnOnce(CoreError) -> CommandError,
+) -> Result<(), CommandError> {
+    match (earlier, backups) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(err)) => Err(not_moved(err)),
+        (Err(earlier), Ok(())) => Err(earlier),
+        (Err(earlier), Err(backups)) => {
+            tracing::error!(error = %backups, "存档备份也没能跟着改名");
+            Err(earlier)
+        }
+    }
+}
+
+/// 改名已经做完、只差存档备份：单独成码，前端照成功处理（`renamed_to` 读 detail）再提示备份还留在旧名下。
+/// detail.path 是留在旧名下的备份目录，覆盖下层错误自带的 path：用户要去的是那里。
+fn world_backups_not_moved(
+    err: CoreError,
+    id: &str,
+    new_name: &str,
+    left_behind: &Path,
+) -> CommandError {
+    let mut mapped = CommandError::from(err);
+    mapped.code = code::WORLD_BACKUPS_NOT_MOVED;
+    mapped.message = format!(
+        "实例已改名为「{new_name}」，但存档备份没能跟着挪：{}",
+        mapped.message
+    );
+    merge_detail(
+        &mut mapped,
+        json!({
+            "id": id,
+            "renamed_to": new_name,
+            "path": left_behind.display().to_string(),
+        }),
+    );
+    mapped
+}
+
+/// 实例改名：目录、版本 JSON（文件名与 id）、jar、natives、游玩记录、存档备份、侧栏固定与当前选中一起改。
 /// 新名字按命名规则校验（报 `invalid_argument`，detail.rule 为规则码）；实例在忙报 `instance_busy`。
-/// 目录与引用都已改好、只有游玩记录没跟上时报 `play_records_failed`，detail.renamed_to 为新名字。
+/// 目录与引用都已改好、只有游玩记录没跟上时报 `play_records_failed`，只有存档备份没跟上时报
+/// `world_backups_not_moved`，两者的 detail.renamed_to 都是新名字。
 #[tauri::command]
 pub async fn rename_instance(
     app: AppHandle,
@@ -1241,21 +1309,28 @@ pub(crate) async fn rename_instance_with(
         Some(locks.acquire(new_name, InstanceActivity::Renaming)?)
     };
     let snapshot = facade.snapshot().await;
+    // 备份没挪成时要告诉用户它留在哪：改名之前按旧名算好，此时还没有动任何东西。
+    let old_backups = snapshot.instance_backups_dir(id).map_err(instance_error)?;
     snapshot
         .rename_instance_files(id, new_name)
         .await
         .map_err(instance_error)?;
     // 游玩记录以实例 id 为键，不跟着挪的话改名后的实例在列表与统计里就成了从没玩过。
     let records = snapshot.rename_play_records(id, new_name).await;
+    // 备份按实例 id 分目录放，不跟着挪的话改名后的实例就看不到改名前的备份。
+    let backups = snapshot.rename_world_backups(id, new_name).await;
     let refs = facade
         .update_if_changed(|aurora| aurora.rename_instance_refs(id, new_name))
         .await;
-    follow_up(refs, records, |err| {
+    let earlier = follow_up(refs, records, |err| {
         play_records_failed(
             err,
             &format!("实例已改名为「{new_name}」"),
             json!({ "id": id, "renamed_to": new_name }),
         )
+    });
+    follow_up_backups(earlier, backups, |err| {
+        world_backups_not_moved(err, id, new_name, &old_backups)
     })?;
     Ok(RenameOutcomeDto {
         id: new_name.to_owned(),
@@ -1439,6 +1514,417 @@ async fn ensure_dir(dir: &Path) -> Result<(), CommandError> {
             path: dir.to_path_buf(),
             source,
         })
+    })
+}
+
+// ---------------------------------------------------------------- 存档备份
+//
+// 备份放在游戏目录下的启动器元数据区，按实例与存档文件夹名分目录；不隔离、共用游戏目录 saves 的存档
+// 归在共用的一份下，几个实例看到的是同一批备份。备份、恢复、导出是长任务，占住实例做「备份」：
+// 与启动、运行、改名、删除、新建、补全互斥，只与 Mod 改动并行。列表与删除备份不碰存档本身，不占实例。
+
+/// 一份存档备份。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorldBackupDto {
+    /// 备份文件名，恢复与删除凭它指定。
+    pub file: String,
+    /// auto：游戏退出后自动备份的；manual：手动备份的。
+    pub kind: BackupKind,
+    /// 备份时刻（Unix 毫秒）。
+    pub created_at: u64,
+    pub size_bytes: u64,
+    /// 备份时 level.dat 里的存档名；读不出来时为 null。
+    pub level_name: Option<String>,
+}
+
+/// 一个存档的全部备份。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorldBackupListDto {
+    pub world: String,
+    /// instance：实例自己的存档；shared：共用游戏目录 saves 的存档，所有共用的实例看到的是同一份。
+    pub scope: &'static str,
+    /// 这个存档的备份目录。
+    pub dir: String,
+    /// 新的在前。
+    pub backups: Vec<WorldBackupDto>,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BackupResultDto {
+    pub backup: WorldBackupDto,
+    /// 这次顺带清理掉的旧自动备份份数。
+    pub pruned: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RestoreResultDto {
+    pub world: String,
+    /// 原来的存档是否移进了回收站；恢复时存档文件夹已经不在则为 false。
+    pub previous_in_recycle_bin: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExportResultDto {
+    pub path: String,
+    pub size_bytes: u64,
+}
+
+fn world_backup_dto(backup: WorldBackup) -> WorldBackupDto {
+    WorldBackupDto {
+        file: backup.file,
+        kind: backup.kind,
+        created_at: backup.created_at,
+        size_bytes: backup.size_bytes,
+        level_name: backup.level_name,
+    }
+}
+
+fn world_scope_key(scope: &WorldScope) -> &'static str {
+    match scope {
+        WorldScope::Instance(_) => "instance",
+        WorldScope::Shared => "shared",
+    }
+}
+
+fn world_backup_list_dto(list: WorldBackupList) -> WorldBackupListDto {
+    WorldBackupListDto {
+        scope: world_scope_key(&list.scope),
+        world: list.world,
+        dir: list.dir.display().to_string(),
+        backups: list.backups.into_iter().map(world_backup_dto).collect(),
+        total_bytes: list.total_bytes,
+    }
+}
+
+/// 存档文件夹名与备份文件名都要拼进路径，和实例 id 用同一套路径安全规则。
+fn check_path_segment(field: &str, value: &str, what: &str) -> Result<(), CommandError> {
+    if is_safe_instance_id(value) {
+        Ok(())
+    } else {
+        Err(invalid_field(
+            field,
+            "unsafe",
+            format!("{what}不合法：{value:?}"),
+        ))
+    }
+}
+
+/// 长任务要在登记任务之前挡住不安全的实例 id；报法与门面一致（detail.field 为 id、reason 为 unsafe_id）。
+fn check_instance_id(id: &str) -> Result<(), CommandError> {
+    if is_safe_instance_id(id) {
+        Ok(())
+    } else {
+        Err(instance_error(CoreError::from(InstanceError::InvalidId {
+            id: id.to_owned(),
+        })))
+    }
+}
+
+fn check_world(world: &str) -> Result<(), CommandError> {
+    check_path_segment("world", world, "存档文件夹名")
+}
+
+fn check_backup_file(file: &str) -> Result<(), CommandError> {
+    check_path_segment("file", file, "备份文件名")
+}
+
+/// 导出位置来自系统保存对话框，这里先挡住词法上就不对的：父目录在不在、是否落在存档里面由门面判断。
+fn check_export_dest(dest: &str) -> Result<PathBuf, CommandError> {
+    let path = PathBuf::from(dest);
+    if !path.is_absolute() {
+        return Err(invalid_field(
+            "dest",
+            "not_absolute",
+            format!("导出位置须是绝对路径：{dest}"),
+        ));
+    }
+    let is_zip = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+    if !is_zip {
+        return Err(invalid_field(
+            "dest",
+            "not_zip",
+            format!("导出文件须是 .zip：{dest}"),
+        ));
+    }
+    Ok(path)
+}
+
+/// 共用存档的跨实例检查。实例锁只管自己这个实例，可游戏同时只跑一个：另一个也不隔离的实例正开着游戏时，
+/// 它可能正打开着这份共用存档，打包会拿到半截、恢复会被它下次保存盖掉。
+async fn ensure_shared_world_free(
+    aurora: &Aurora,
+    game: &GameSlot,
+    id: &str,
+) -> Result<(), CommandError> {
+    let Some((other, running)) = game.occupant() else {
+        return Ok(());
+    };
+    // 占着游戏的就是自己时，实例锁已经拦下了。
+    if lock_key(&other) == lock_key(id) {
+        return Ok(());
+    }
+    if aurora.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
+        return Ok(());
+    }
+    if aurora.world_scope(&other).await.map_err(instance_error)? != WorldScope::Shared {
+        return Ok(());
+    }
+    let activity = if running {
+        InstanceActivity::Running
+    } else {
+        InstanceActivity::Launching
+    };
+    Err(busy(&other, activity))
+}
+
+/// 备份、恢复、导出这三个长任务要用的共享状态。
+pub(crate) struct WorldTaskEnv<'a> {
+    pub facade: &'a Facade,
+    pub tasks: &'a TaskRegistry,
+    pub locks: &'a InstanceLocks,
+    pub game: &'a GameSlot,
+}
+
+/// 三个长任务共同的开头（参数已由调用方校验过）：占住实例，共用存档再查别的实例的游戏，最后登记任务、
+/// 给快照挂上取消令牌。被拒绝的调用不占任务 id。
+async fn begin_world_task<'a>(
+    env: &WorldTaskEnv<'a>,
+    task_id: &str,
+    id: &str,
+) -> Result<(InstanceGuard, TaskHandle<'a>, Aurora), CommandError> {
+    let guard = env.locks.acquire(id, InstanceActivity::BackingUp)?;
+    let snapshot = env.facade.snapshot().await;
+    ensure_shared_world_free(&snapshot, env.game, id).await?;
+    let task = env.tasks.register(task_id)?;
+    let aurora = snapshot.with_cancel(task.token().clone());
+    Ok((guard, task, aurora))
+}
+
+/// 手动备份一个存档（工作目录下 `saves/<world>`）。长任务：进度经 core-event 推送并带 `task_id`，可取消，
+/// 取消后不留半截文件。备份完按保留策略清理旧的自动备份，手动备份不清理。
+///
+/// 游戏启动中或运行中报 `instance_busy`（detail.activity 为 launching / running）；共用存档在别的不隔离实例
+/// 开着游戏时同样报 `instance_busy`，detail.id 为那个实例。存档不在报 `world_not_found`，被游戏打开着报
+/// `world_in_use`。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn backup_world(
+    app: AppHandle,
+    task_id: String,
+    id: String,
+    world: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
+    running: State<'_, RunningGame>,
+) -> Result<BackupResultDto, CommandError> {
+    let env = WorldTaskEnv {
+        facade: &facade,
+        tasks: &tasks,
+        locks: &locks,
+        game: running.slot(),
+    };
+    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let outcome = backup_world_with(&env, &task_id, &id, &world, events.sink()).await;
+    events.finish().await;
+    outcome
+}
+
+pub(crate) async fn backup_world_with(
+    env: &WorldTaskEnv<'_>,
+    task_id: &str,
+    id: &str,
+    world: &str,
+    events: &EventSink,
+) -> Result<BackupResultDto, CommandError> {
+    check_instance_id(id)?;
+    check_world(world)?;
+    let (_guard, task, aurora) = begin_world_task(env, task_id, id).await?;
+    let outcome = task
+        .run(async {
+            aurora
+                .backup_world(id, world, BackupKind::Manual, Some(events))
+                .await
+                .map_err(instance_error)
+        })
+        .await?;
+    Ok(BackupResultDto {
+        backup: world_backup_dto(outcome.backup),
+        pruned: outcome.pruned,
+    })
+}
+
+/// 一个存档的全部备份，新的在前。只读，不占实例；存档文件夹已经不在了也照常列出。
+#[tauri::command]
+pub async fn list_world_backups(
+    id: String,
+    world: String,
+    facade: State<'_, Facade>,
+) -> Result<WorldBackupListDto, CommandError> {
+    list_world_backups_with(&facade, &id, &world).await
+}
+
+pub(crate) async fn list_world_backups_with(
+    facade: &Facade,
+    id: &str,
+    world: &str,
+) -> Result<WorldBackupListDto, CommandError> {
+    check_world(world)?;
+    let aurora = facade.snapshot().await;
+    let list = aurora
+        .list_world_backups(id, world)
+        .await
+        .map_err(instance_error)?;
+    Ok(world_backup_list_dto(list))
+}
+
+/// 用一份备份替换现在的存档：先解压到临时目录并确认 level.dat 读得出，再把现在的存档移入回收站、换上新的。
+/// 长任务，可取消；取消或失败时现在的存档原样不动。占用规则与 `backup_world` 相同。备份不在报
+/// `world_backup_not_found`，备份损坏或有越界条目报 `world_backup_corrupt`；原存档已进回收站、新的没放到位时报
+/// `world_restore_incomplete`，detail.staged 为恢复出的副本。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn restore_world_backup(
+    app: AppHandle,
+    task_id: String,
+    id: String,
+    world: String,
+    file: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
+    running: State<'_, RunningGame>,
+) -> Result<RestoreResultDto, CommandError> {
+    let env = WorldTaskEnv {
+        facade: &facade,
+        tasks: &tasks,
+        locks: &locks,
+        game: running.slot(),
+    };
+    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let outcome = restore_world_backup_with(
+        &env,
+        &task_id,
+        &id,
+        &world,
+        &file,
+        RecycleBin,
+        events.sink(),
+    )
+    .await;
+    events.finish().await;
+    outcome
+}
+
+pub(crate) async fn restore_world_backup_with(
+    env: &WorldTaskEnv<'_>,
+    task_id: &str,
+    id: &str,
+    world: &str,
+    file: &str,
+    disposer: impl Disposer + 'static,
+    events: &EventSink,
+) -> Result<RestoreResultDto, CommandError> {
+    check_instance_id(id)?;
+    check_world(world)?;
+    check_backup_file(file)?;
+    let (_guard, task, aurora) = begin_world_task(env, task_id, id).await?;
+    let outcome = task
+        .run(async {
+            aurora
+                .restore_world_backup(id, world, file, disposer, Some(events))
+                .await
+                .map_err(instance_error)
+        })
+        .await?;
+    Ok(RestoreResultDto {
+        world: outcome.world,
+        previous_in_recycle_bin: outcome.previous_in_recycle_bin,
+    })
+}
+
+/// 把一份备份移入回收站并从备份列表里去掉。可以从回收站找回，所以不需要确认。不占实例：只碰备份区，
+/// 与同一存档的备份、恢复由门面按存档排队。备份不在报 `world_backup_not_found`。
+#[tauri::command]
+pub async fn delete_world_backup(
+    id: String,
+    world: String,
+    file: String,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    delete_world_backup_with(&facade, &id, &world, &file, RecycleBin).await
+}
+
+pub(crate) async fn delete_world_backup_with(
+    facade: &Facade,
+    id: &str,
+    world: &str,
+    file: &str,
+    disposer: impl Disposer + 'static,
+) -> Result<(), CommandError> {
+    check_world(world)?;
+    check_backup_file(file)?;
+    let aurora = facade.snapshot().await;
+    aurora
+        .delete_world_backup(id, world, file, disposer)
+        .await
+        .map_err(instance_error)
+}
+
+/// 把存档打包导出到 `dest`（系统保存对话框选的位置，已存在则覆盖）：zip 里是一层存档文件夹，解压进 saves
+/// 就能直接用。长任务，可取消；占用规则与 `backup_world` 相同。`dest` 不是绝对路径、不是 .zip、父目录不在
+/// 或落在这个存档里面时报 `invalid_argument`，detail.field 为 dest。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn export_world(
+    app: AppHandle,
+    task_id: String,
+    id: String,
+    world: String,
+    dest: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
+    running: State<'_, RunningGame>,
+) -> Result<ExportResultDto, CommandError> {
+    let env = WorldTaskEnv {
+        facade: &facade,
+        tasks: &tasks,
+        locks: &locks,
+        game: running.slot(),
+    };
+    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let outcome = export_world_with(&env, &task_id, &id, &world, &dest, events.sink()).await;
+    events.finish().await;
+    outcome
+}
+
+pub(crate) async fn export_world_with(
+    env: &WorldTaskEnv<'_>,
+    task_id: &str,
+    id: &str,
+    world: &str,
+    dest: &str,
+    events: &EventSink,
+) -> Result<ExportResultDto, CommandError> {
+    check_instance_id(id)?;
+    check_world(world)?;
+    let dest = check_export_dest(dest)?;
+    let (_guard, task, aurora) = begin_world_task(env, task_id, id).await?;
+    let outcome = task
+        .run(async {
+            aurora
+                .export_world(id, world, &dest, Some(events))
+                .await
+                .map_err(instance_error)
+        })
+        .await?;
+    Ok(ExportResultDto {
+        path: outcome.path.display().to_string(),
+        size_bytes: outcome.size_bytes,
     })
 }
 
@@ -2757,6 +3243,981 @@ mod tests {
         drop(running);
         drop(modifying);
         assert_eq!(locks.activity("pack"), None);
+    }
+
+    /// 备份只与 Mod 改动并行：与启动、运行、新建、补全、改名、删除和它自己两个方向都互斥；运行中的占用
+    /// 可以原地转成备份（游戏退出后的自动备份），转过去之后照样挡住再次启动。
+    #[test]
+    fn backing_up_shares_the_instance_only_with_mod_changes() {
+        use InstanceActivity::*;
+        let exclusive = [
+            Installing, Repairing, Renaming, Deleting, Launching, Running, BackingUp,
+        ];
+        let locks = InstanceLocks::default();
+        assert_eq!(serde_json::to_value(BackingUp).unwrap(), "backing_up");
+
+        let backup = locks.acquire("Pack", BackingUp).unwrap();
+        for activity in exclusive {
+            let err = locks.acquire("pack", activity).err().unwrap();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["activity"], "backing_up", "{activity:?}");
+            assert_eq!(detail["id"], "pack");
+        }
+        let mods = locks.acquire("PACK", Modifying).unwrap();
+        assert_eq!(
+            locks.activity("pack"),
+            Some(BackingUp),
+            "并行时报备份而不是改动"
+        );
+        drop(backup);
+        assert_eq!(locks.activity("pack"), Some(Modifying));
+        let again = locks.acquire("pack", BackingUp).unwrap();
+        drop(again);
+        drop(mods);
+
+        for activity in exclusive {
+            let held = locks.acquire("pack", activity).unwrap();
+            let err = locks.acquire("pack", BackingUp).err().unwrap();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert_eq!(
+                err.detail.unwrap()["activity"],
+                serde_json::to_value(activity).unwrap()
+            );
+            drop(held);
+        }
+
+        let game = locks.acquire("pack", Launching).unwrap();
+        game.set_activity(Running);
+        let mods = locks.acquire("pack", Modifying).unwrap();
+        game.set_activity(BackingUp);
+        assert_eq!(locks.activity("pack"), Some(BackingUp));
+        let err = locks.acquire("pack", Launching).err().unwrap();
+        assert_eq!(err.detail.unwrap()["activity"], "backing_up");
+        drop(game);
+        drop(mods);
+        assert_eq!(locks.activity("pack"), None);
+    }
+
+    // ---- 存档备份的命令 ----
+
+    /// 测试里不往用户回收站塞东西：记下交来的路径再删掉，文件与目录都收。
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<PathBuf>>>);
+
+    impl Recorder {
+        fn disposed(&self) -> Vec<PathBuf> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Disposer for Recorder {
+        fn dispose(&self, path: &Path) -> Result<(), InstanceError> {
+            self.0.lock().unwrap().push(path.to_path_buf());
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            };
+            removed.map_err(|source| InstanceError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        }
+    }
+
+    /// gzip 的 CRC-32（IEEE 802.3，反射多项式）。
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// 只含 LevelName 的 level.dat：NBT 用 gzip 包一层，deflate 用不压缩的存储块（外壳不直接依赖压缩库）。
+    fn level_dat(name: &str) -> Vec<u8> {
+        let mut nbt = vec![10, 0, 0, 10, 0, 4];
+        nbt.extend_from_slice(b"Data");
+        nbt.extend_from_slice(&[8, 0, 9]);
+        nbt.extend_from_slice(b"LevelName");
+        nbt.extend_from_slice(&u16::try_from(name.len()).unwrap().to_be_bytes());
+        nbt.extend_from_slice(name.as_bytes());
+        nbt.extend_from_slice(&[0, 0]);
+        let len = u16::try_from(nbt.len()).unwrap();
+        let mut gz = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1];
+        gz.extend_from_slice(&len.to_le_bytes());
+        gz.extend_from_slice(&(!len).to_le_bytes());
+        gz.extend_from_slice(&nbt);
+        gz.extend_from_slice(&crc32(&nbt).to_le_bytes());
+        gz.extend_from_slice(&u32::try_from(nbt.len()).unwrap().to_le_bytes());
+        gz
+    }
+
+    #[tokio::test]
+    async fn level_dat_fixture_is_readable_by_the_launcher() {
+        let env = Env::new();
+        env.isolated_world("生存", "新的世界");
+        let content = env
+            .facade
+            .snapshot()
+            .await
+            .instance_content("生存")
+            .await
+            .unwrap();
+        let worlds = content_dto(content).worlds;
+        assert_eq!(worlds.len(), 1);
+        assert_eq!(worlds[0].level_status, "ok", "{:?}", worlds[0].level_error);
+        assert_eq!(worlds[0].name.as_deref(), Some("新的世界"));
+    }
+
+    /// 打包压不动的字节，让备份与恢复慢到能在中途取消。
+    fn noise(len: usize, seed: u64) -> Vec<u8> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    /// 在 `saves` 下放一个存档：level.dat、一个区域文件，以及游戏开着时才有的 session.lock。
+    fn write_world(saves: &Path, world: &str, region: &[u8]) -> PathBuf {
+        let dir = saves.join(world);
+        std::fs::create_dir_all(dir.join("region")).unwrap();
+        std::fs::create_dir_all(dir.join("datapacks")).unwrap();
+        std::fs::write(dir.join("level.dat"), level_dat(world)).unwrap();
+        std::fs::write(dir.join("region").join("r.0.0.mca"), region).unwrap();
+        std::fs::write(dir.join("session.lock"), b"\xe2\x98\x83").unwrap();
+        dir
+    }
+
+    impl Env {
+        /// 隔离实例 `id`（实例目录下已有 saves），里面一个存档。
+        fn isolated_world(&self, id: &str, world: &str) -> PathBuf {
+            let dir = self.vanilla(id);
+            write_world(&dir.join("saves"), world, b"region-v1")
+        }
+
+        /// 不隔离的原版实例 `id`，存档在游戏目录共用的 saves 里。
+        fn shared_world(&self, id: &str, world: &str) -> PathBuf {
+            self.vanilla(id);
+            write_world(&self.game_dir().join("saves"), world, b"shared-v1")
+        }
+
+        fn backups_root(&self) -> PathBuf {
+            self.game_dir()
+                .join(concat!(".", aurora_base::app_slug!()))
+                .join("backups")
+        }
+    }
+
+    /// 存档命令的共享状态；游戏占用槽单独给，测试里按需占住。
+    struct WorldEnv {
+        registry: TaskRegistry,
+        locks: InstanceLocks,
+        game: GameSlot,
+    }
+
+    impl WorldEnv {
+        fn new() -> Self {
+            Self {
+                registry: TaskRegistry::default(),
+                locks: InstanceLocks::default(),
+                game: GameSlot::default(),
+            }
+        }
+
+        fn with<'a>(&'a self, env: &'a Env) -> WorldTaskEnv<'a> {
+            WorldTaskEnv {
+                facade: &env.facade,
+                tasks: &self.registry,
+                locks: &self.locks,
+                game: &self.game,
+            }
+        }
+    }
+
+    fn sink() -> (EventSink, tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) {
+        tokio::sync::mpsc::unbounded_channel::<CoreEvent>()
+    }
+
+    fn zip_names(path: &Path) -> Vec<String> {
+        let archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        let mut names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+        names.sort();
+        names
+    }
+
+    /// 验收：游戏启动中、运行中备份、恢复、导出都报 instance_busy，detail.activity 指出是哪一种，不登记任务、
+    /// 不动存档；Mod 改动占着实例时三者照常进行。
+    #[tokio::test]
+    async fn backup_restore_and_export_wait_for_the_game_but_not_for_mod_changes() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let dest = env.dir.path().join("导出.zip");
+        let dest = dest.to_str().unwrap();
+
+        for activity in [InstanceActivity::Launching, InstanceActivity::Running] {
+            let held = w.locks.acquire("生存", activity).unwrap();
+            let expected = serde_json::to_value(activity).unwrap();
+            let errors = [
+                backup_world_with(&w.with(&env), "t", "生存", "新的世界", &events)
+                    .await
+                    .unwrap_err(),
+                restore_world_backup_with(
+                    &w.with(&env),
+                    "t",
+                    "生存",
+                    "新的世界",
+                    "1761900000000-manual.zip",
+                    Recorder::default(),
+                    &events,
+                )
+                .await
+                .unwrap_err(),
+                export_world_with(&w.with(&env), "t", "生存", "新的世界", dest, &events)
+                    .await
+                    .unwrap_err(),
+            ];
+            for err in errors {
+                assert_eq!(err.code, code::INSTANCE_BUSY);
+                let detail = err.detail.unwrap();
+                assert_eq!(detail["activity"], expected);
+                assert_eq!(detail["id"], "生存");
+            }
+            assert!(!w.registry.is_running("t"));
+            drop(held);
+        }
+        assert!(!env.backups_root().exists(), "被拒绝的备份不碰盘");
+        assert!(!env.dir.path().join("导出.zip").exists());
+
+        let _mods = w
+            .locks
+            .acquire("生存", InstanceActivity::Modifying)
+            .unwrap();
+        let made = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        assert_eq!(made.backup.kind, BackupKind::Manual);
+        assert!(
+            made.backup.file.ends_with("-manual.zip"),
+            "{}",
+            made.backup.file
+        );
+        assert_eq!(made.backup.level_name.as_deref(), Some("新的世界"));
+        assert_eq!(made.pruned, 0);
+        let dir = env
+            .backups_root()
+            .join("instances")
+            .join("生存")
+            .join("新的世界");
+        let zip = dir.join(&made.backup.file);
+        assert_eq!(
+            made.backup.size_bytes,
+            std::fs::metadata(&zip).unwrap().len()
+        );
+        let names = zip_names(&zip);
+        for expected in [
+            "新的世界/datapacks/",
+            "新的世界/level.dat",
+            "新的世界/region/",
+            "新的世界/region/r.0.0.mca",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "缺 {expected}：{names:?}"
+            );
+        }
+        assert!(
+            names
+                .iter()
+                .all(|n| n.starts_with("新的世界/") && !n.ends_with("session.lock")),
+            "条目都在存档文件夹下，session.lock 不进备份：{names:?}"
+        );
+        assert!(!w.registry.is_running("bk"), "任务结束即注销");
+        assert_eq!(
+            w.locks.activity("生存"),
+            Some(InstanceActivity::Modifying),
+            "备份的占用已释放"
+        );
+
+        let listed = list_world_backups_with(&env.facade, "生存", "新的世界")
+            .await
+            .unwrap();
+        assert_eq!(listed.scope, "instance");
+        assert_eq!(listed.dir, dir.display().to_string());
+        assert_eq!(listed.backups, vec![made.backup.clone()]);
+        assert_eq!(listed.total_bytes, made.backup.size_bytes);
+
+        let exported = export_world_with(&w.with(&env), "ex", "生存", "新的世界", dest, &events)
+            .await
+            .unwrap();
+        assert_eq!(exported.path, dest);
+        assert_eq!(exported.size_bytes, std::fs::metadata(dest).unwrap().len());
+        assert!(zip_names(Path::new(dest)).contains(&"新的世界/level.dat".to_owned()));
+
+        let disposer = Recorder::default();
+        let restored = restore_world_backup_with(
+            &w.with(&env),
+            "rs",
+            "生存",
+            "新的世界",
+            &made.backup.file,
+            disposer.clone(),
+            &events,
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.world, "新的世界");
+        assert_eq!(disposer.disposed(), vec![world.clone()]);
+    }
+
+    /// 参数先于实例锁校验：游戏运行中传错参数报 invalid_argument 而不是 instance_busy，不登记任务。
+    #[tokio::test]
+    async fn bad_world_file_and_dest_are_rejected_before_locking() {
+        let env = Env::new();
+        env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let _game = w.locks.acquire("生存", InstanceActivity::Running).unwrap();
+        let inside = env.dir.path().join("x.zip");
+        let inside = inside.to_str().unwrap();
+
+        for world in ["", "..", "../生存", "a/b", r"a\b", ".hidden", "C:x"] {
+            for err in [
+                backup_world_with(&w.with(&env), "t", "生存", world, &events)
+                    .await
+                    .unwrap_err(),
+                export_world_with(&w.with(&env), "t", "生存", world, inside, &events)
+                    .await
+                    .unwrap_err(),
+                list_world_backups_with(&env.facade, "生存", world)
+                    .await
+                    .unwrap_err(),
+                delete_world_backup_with(&env.facade, "生存", world, "1-auto.zip", Remove)
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert_eq!(err.code, common::INVALID_ARGUMENT, "{world:?}");
+                assert_eq!(err.detail.unwrap()["field"], "world", "{world:?}");
+            }
+        }
+        for file in ["", "../index.json", "..", "a/b.zip", ".zip"] {
+            let err = restore_world_backup_with(
+                &w.with(&env),
+                "t",
+                "生存",
+                "新的世界",
+                file,
+                Recorder::default(),
+                &events,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{file:?}");
+            assert_eq!(err.detail.unwrap()["field"], "file", "{file:?}");
+        }
+        for id in ["../生存", "", ".hidden", r"a\b"] {
+            let err = backup_world_with(&w.with(&env), "t", id, "新的世界", &events)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{id:?}");
+            let detail = err.detail.unwrap();
+            assert_eq!(
+                (&detail["field"], &detail["reason"]),
+                (&json!("id"), &json!("unsafe_id")),
+                "{id:?}"
+            );
+            assert_eq!(w.locks.activity(id), None);
+        }
+        let relative =
+            export_world_with(&w.with(&env), "t", "生存", "新的世界", "导出.zip", &events)
+                .await
+                .unwrap_err();
+        assert_eq!(relative.code, common::INVALID_ARGUMENT);
+        let detail = relative.detail.unwrap();
+        assert_eq!(
+            (&detail["field"], &detail["reason"]),
+            (&json!("dest"), &json!("not_absolute"))
+        );
+        let txt = env.dir.path().join("导出.txt");
+        let not_zip = export_world_with(
+            &w.with(&env),
+            "t",
+            "生存",
+            "新的世界",
+            txt.to_str().unwrap(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        let detail = not_zip.detail.unwrap();
+        assert_eq!(
+            (&detail["field"], &detail["reason"]),
+            (&json!("dest"), &json!("not_zip"))
+        );
+        assert!(!w.registry.is_running("t"));
+        assert_eq!(w.locks.activity("生存"), Some(InstanceActivity::Running));
+    }
+
+    /// 导出位置的其余规则由门面判断：父目录不在、落在存档自己里面都报 invalid_argument（field 为 dest）；
+    /// 已有同名文件则覆盖（系统保存对话框已经问过）。
+    #[tokio::test]
+    async fn export_checks_the_destination_and_overwrites_an_existing_file() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        for dest in [
+            env.dir.path().join("不存在").join("a.zip"),
+            world.join("region").join("自己.zip"),
+        ] {
+            let err = export_world_with(
+                &w.with(&env),
+                "ex",
+                "生存",
+                "新的世界",
+                dest.to_str().unwrap(),
+                &events,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{}", dest.display());
+            assert_eq!(err.detail.unwrap()["field"], "dest", "{}", dest.display());
+            assert!(!dest.exists());
+        }
+        let dest = env.dir.path().join("导出.zip");
+        std::fs::write(&dest, b"old").unwrap();
+        let exported = export_world_with(
+            &w.with(&env),
+            "ex",
+            "生存",
+            "新的世界",
+            dest.to_str().unwrap(),
+            &events,
+        )
+        .await
+        .unwrap();
+        assert!(exported.size_bytes > 3);
+        assert!(zip_names(&dest).contains(&"新的世界/region/r.0.0.mca".to_owned()));
+        let missing = export_world_with(
+            &w.with(&env),
+            "ex",
+            "生存",
+            "没有这个",
+            dest.to_str().unwrap(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.code, common::WORLD_NOT_FOUND);
+    }
+
+    fn files_with_suffix(dir: &Path, suffix: &str) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry.file_name().to_string_lossy().ends_with(suffix) {
+                    found.push(path.clone());
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    /// 打包压不动的大存档时取消：1000 ms 内以 cancelled 返回，.part 删掉，备份列表里没有半截，实例与任务都放开。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_backup_returns_in_time_and_leaves_no_part_file() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "大存档");
+        for i in 0..4 {
+            std::fs::write(
+                world.join("region").join(format!("r.{i}.0.mca")),
+                noise(8 << 20, i + 1),
+            )
+            .unwrap();
+        }
+        let facade = env.facade.clone();
+        let registry = Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let game = Arc::new(GameSlot::default());
+        let (r, l, g) = (registry.clone(), locks.clone(), game.clone());
+        let backup = tokio::spawn(async move {
+            let ctx = WorldTaskEnv {
+                facade: &facade,
+                tasks: &r,
+                locks: &l,
+                game: &g,
+            };
+            let (events, _rx) = sink();
+            backup_world_with(&ctx, "bk-big", "生存", "大存档", &events).await
+        });
+
+        let root = env.backups_root();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while files_with_suffix(&root, ".part").is_empty() {
+            assert!(Instant::now() < deadline, "打包没有开始");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::BackingUp));
+        let cancelled_at = Instant::now();
+        assert!(registry.cancel("bk-big"));
+        let err = backup.await.unwrap().unwrap_err();
+        let elapsed = cancelled_at.elapsed();
+
+        assert_eq!(err.code, common::CANCELLED);
+        assert!(elapsed < CANCEL_DEADLINE, "取消到返回耗时 {elapsed:?}");
+        assert_eq!(files_with_suffix(&root, ".part"), Vec::<PathBuf>::new());
+        assert_eq!(files_with_suffix(&root, ".zip"), Vec::<PathBuf>::new());
+        assert!(!registry.is_running("bk-big"));
+        assert_eq!(locks.activity("生存"), None);
+        let listed = list_world_backups_with(&env.facade, "生存", "大存档")
+            .await
+            .unwrap();
+        assert!(listed.backups.is_empty());
+    }
+
+    /// 按盘上布局直接放一份备份与它的索引（备份本体用不压缩的条目，解压时间主要花在建文件上）。
+    fn plant_backup(env: &Env, id: &str, world: &str, file: &str, entries: &[(String, Vec<u8>)]) {
+        use std::io::Write as _;
+        let dir = env.backups_root().join("instances").join(id).join(world);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join(file);
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            writer
+                .start_file(format!("{world}/{name}"), options)
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        let size = std::fs::metadata(&zip_path).unwrap().len();
+        let index = json!({
+            "version": 1,
+            "entries": [{
+                "file": file, "kind": "manual", "created_at": 1_761_900_000_000_u64,
+                "size_bytes": size, "level_name": world,
+            }],
+        });
+        std::fs::write(dir.join("index.json"), index.to_string()).unwrap();
+    }
+
+    /// 解压一份文件很多的备份时取消：1000 ms 内以 cancelled 返回，临时目录删掉，现在的存档一个字节不动，
+    /// 也没有交给回收站。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_restore_returns_in_time_and_keeps_the_world() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "新的世界");
+        let mut entries = vec![("level.dat".to_owned(), level_dat("新的世界"))];
+        let chunk = noise(16 << 10, 7);
+        entries.extend((0..3000).map(|i| (format!("region/r.{i}.mca"), chunk.clone())));
+        plant_backup(
+            &env,
+            "生存",
+            "新的世界",
+            "1761900000000-manual.zip",
+            &entries,
+        );
+
+        let facade = env.facade.clone();
+        let registry = Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let game = Arc::new(GameSlot::default());
+        let disposer = Recorder::default();
+        let (r, l, g, d) = (
+            registry.clone(),
+            locks.clone(),
+            game.clone(),
+            disposer.clone(),
+        );
+        let restore = tokio::spawn(async move {
+            let ctx = WorldTaskEnv {
+                facade: &facade,
+                tasks: &r,
+                locks: &l,
+                game: &g,
+            };
+            let (events, _rx) = sink();
+            restore_world_backup_with(
+                &ctx,
+                "rs-big",
+                "生存",
+                "新的世界",
+                "1761900000000-manual.zip",
+                d,
+                &events,
+            )
+            .await
+        });
+
+        let saves = world.parent().unwrap().to_path_buf();
+        let staging = saves.join(format!("新的世界.{}-restore", aurora_base::brand::APP_SLUG));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !staging.join("region").is_dir() {
+            assert!(Instant::now() < deadline, "解压没有开始");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        let cancelled_at = Instant::now();
+        assert!(registry.cancel("rs-big"));
+        let err = restore.await.unwrap().unwrap_err();
+        let elapsed = cancelled_at.elapsed();
+
+        assert_eq!(err.code, common::CANCELLED);
+        assert!(elapsed < CANCEL_DEADLINE, "取消到返回耗时 {elapsed:?}");
+        assert!(!staging.exists(), "临时目录应删掉");
+        assert_eq!(
+            std::fs::read(world.join("region").join("r.0.0.mca")).unwrap(),
+            b"region-v1"
+        );
+        assert!(!world.join("region").join("r.1.mca").exists());
+        assert!(disposer.disposed().is_empty(), "取消时不碰现在的存档");
+        assert_eq!(locks.activity("生存"), None);
+        assert!(!registry.is_running("rs-big"));
+    }
+
+    /// 恢复：现在的存档交给 disposer（生产环境是回收站），换上备份时的样子；备份不在报 world_backup_not_found。
+    #[tokio::test]
+    async fn restore_hands_the_current_world_to_the_disposer_and_puts_the_backup_back() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "新的世界");
+        let level_before = std::fs::read(world.join("level.dat")).unwrap();
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        std::fs::write(world.join("region").join("r.0.0.mca"), b"region-v2").unwrap();
+        std::fs::write(world.join("新加的.txt"), b"x").unwrap();
+        std::fs::write(world.join("level.dat"), level_dat("改过的名字")).unwrap();
+
+        let disposer = Recorder::default();
+        let restored = restore_world_backup_with(
+            &w.with(&env),
+            "rs",
+            "生存",
+            "新的世界",
+            &made.backup.file,
+            disposer.clone(),
+            &events,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            restored,
+            RestoreResultDto {
+                world: "新的世界".into(),
+                previous_in_recycle_bin: true,
+            }
+        );
+        assert_eq!(disposer.disposed(), vec![world.clone()]);
+        assert_eq!(
+            std::fs::read(world.join("region").join("r.0.0.mca")).unwrap(),
+            b"region-v1"
+        );
+        assert_eq!(
+            std::fs::read(world.join("level.dat")).unwrap(),
+            level_before
+        );
+        assert!(!world.join("新加的.txt").exists());
+        assert!(world.join("datapacks").is_dir(), "空目录也恢复出来");
+        let saves = world.parent().unwrap();
+        let names: Vec<String> = std::fs::read_dir(saves)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["新的世界".to_owned()], "临时目录不留");
+        assert_eq!(w.locks.activity("生存"), None);
+
+        let err = restore_world_backup_with(
+            &w.with(&env),
+            "rs",
+            "生存",
+            "新的世界",
+            "1-auto.zip",
+            disposer.clone(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, common::WORLD_BACKUP_NOT_FOUND);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": "生存", "world": "新的世界", "file": "1-auto.zip" }))
+        );
+        assert_eq!(disposer.disposed().len(), 1, "找不到备份时不碰存档");
+    }
+
+    /// 存档被游戏打开着（session.lock 上有排他锁，外部启动器开的游戏也算）：备份报 world_in_use，不留任何文件。
+    #[tokio::test]
+    async fn backing_up_a_world_open_in_a_game_reports_world_in_use() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let session = std::fs::File::open(world.join("session.lock")).unwrap();
+        session.lock().unwrap();
+
+        let err = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::WORLD_IN_USE);
+        assert_eq!(
+            err.detail.unwrap()["path"],
+            json!(world.display().to_string())
+        );
+        assert_eq!(
+            files_with_suffix(&env.backups_root(), ".zip"),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            files_with_suffix(&env.backups_root(), ".part"),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(w.locks.activity("生存"), None);
+
+        session.unlock().unwrap();
+        drop(session);
+        backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+    }
+
+    /// 删除备份：zip 交给 disposer，从列表里摘掉；再删一次报 world_backup_not_found。游戏运行中也能删（不占实例）。
+    #[tokio::test]
+    async fn deleting_a_backup_disposes_the_zip_and_drops_it_from_the_list() {
+        let env = Env::new();
+        env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let first = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        let second = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        assert_ne!(first.backup.file, second.backup.file);
+
+        let _game = w.locks.acquire("生存", InstanceActivity::Running).unwrap();
+        let disposer = Recorder::default();
+        delete_world_backup_with(
+            &env.facade,
+            "生存",
+            "新的世界",
+            &first.backup.file,
+            disposer.clone(),
+        )
+        .await
+        .unwrap();
+        let listed = list_world_backups_with(&env.facade, "生存", "新的世界")
+            .await
+            .unwrap();
+        assert_eq!(listed.backups, vec![second.backup.clone()]);
+        assert_eq!(listed.total_bytes, second.backup.size_bytes);
+        let dir = PathBuf::from(&listed.dir);
+        assert_eq!(disposer.disposed(), vec![dir.join(&first.backup.file)]);
+        assert!(!dir.join(&first.backup.file).exists());
+
+        let err = delete_world_backup_with(
+            &env.facade,
+            "生存",
+            "新的世界",
+            &first.backup.file,
+            disposer,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, common::WORLD_BACKUP_NOT_FOUND);
+        assert_eq!(err.detail.unwrap()["file"], json!(first.backup.file));
+    }
+
+    /// 共用存档：另一个也不隔离的实例开着游戏时，备份报 instance_busy，detail.id 是那个实例；隔离实例自己的存档
+    /// 不受影响。游戏放开后备份照常，共用这份存档的实例看到的是同一批备份。
+    #[tokio::test]
+    async fn shared_worlds_wait_for_another_shared_instance_in_game() {
+        let env = Env::new();
+        env.shared_world("甲", "共用");
+        env.vanilla("乙");
+        env.isolated_world("丙", "自己的");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+
+        let loading = w.game.reserve("乙").unwrap();
+        let err = backup_world_with(&w.with(&env), "bk", "甲", "共用", &events)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": "乙", "activity": "launching" }))
+        );
+        assert!(!w.registry.is_running("bk"));
+        assert_eq!(w.locks.activity("甲"), None, "被拒绝时实例占用随之放开");
+        let err = restore_world_backup_with(
+            &w.with(&env),
+            "rs",
+            "甲",
+            "共用",
+            "1-manual.zip",
+            Recorder::default(),
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.detail.unwrap()["id"], "乙");
+
+        backup_world_with(&w.with(&env), "bk", "丙", "自己的", &events)
+            .await
+            .unwrap();
+        drop(loading);
+
+        let made = backup_world_with(&w.with(&env), "bk", "甲", "共用", &events)
+            .await
+            .unwrap();
+        let mine = list_world_backups_with(&env.facade, "甲", "共用")
+            .await
+            .unwrap();
+        let theirs = list_world_backups_with(&env.facade, "乙", "共用")
+            .await
+            .unwrap();
+        assert_eq!(mine.scope, "shared");
+        assert_eq!(mine, theirs);
+        assert_eq!(mine.backups, vec![made.backup]);
+        assert_eq!(
+            PathBuf::from(&mine.dir),
+            env.backups_root().join("shared").join("共用")
+        );
+    }
+
+    /// 验收：改名后备份跟着新名字走，改名前的备份照常列出；删除实例的预览说明备份在哪、有几份，删除实例
+    /// 不带走备份。
+    #[tokio::test]
+    async fn backups_follow_the_rename_and_outlive_the_instance() {
+        let env = Env::new();
+        env.isolated_world("a", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(&env), "bk", "a", "新的世界", &events)
+            .await
+            .unwrap();
+
+        rename_instance_with(&env.facade, &w.locks, "a", "b")
+            .await
+            .unwrap();
+        let listed = list_world_backups_with(&env.facade, "b", "新的世界")
+            .await
+            .unwrap();
+        assert_eq!(listed.backups, vec![made.backup.clone()]);
+        let moved = env.backups_root().join("instances").join("b");
+        assert_eq!(PathBuf::from(&listed.dir), moved.join("新的世界"));
+        assert!(!env.backups_root().join("instances").join("a").exists());
+
+        let preview = preview_dto(
+            env.facade
+                .snapshot()
+                .await
+                .deletion_preview("b")
+                .await
+                .unwrap(),
+            None,
+        );
+        assert_eq!(preview.backup_count, 1);
+        assert_eq!(PathBuf::from(&preview.backups_dir), moved);
+        let json = serde_json::to_value(&preview).unwrap();
+        assert_eq!(json["backup_count"], 1);
+
+        delete_instance_with(&env.facade, &w.locks, "b", Remove)
+            .await
+            .unwrap();
+        assert!(!env.game_dir().join("versions").join("b").exists());
+        assert!(moved.join("新的世界").join(&made.backup.file).is_file());
+    }
+
+    /// 只差备份没挪成：报 world_backups_not_moved，detail.renamed_to 为新名字、path 为留在旧名下的备份目录，
+    /// 目录与侧栏固定照样改好；游玩记录也没跟上时报游玩记录那一路。
+    #[tokio::test]
+    async fn backups_left_behind_by_a_rename_are_reported_with_their_place() {
+        let env = Env::new();
+        env.isolated_world("a", "新的世界");
+        env.isolated_world("c", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        backup_world_with(&w.with(&env), "bk", "a", "新的世界", &events)
+            .await
+            .unwrap();
+        backup_world_with(&w.with(&env), "bk", "c", "新的世界", &events)
+            .await
+            .unwrap();
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["a".into()]);
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        // 新名字下已经有一个同名的文件，备份目录挪不过去。
+        let instances = env.backups_root().join("instances");
+        std::fs::write(instances.join("b"), b"not a directory").unwrap();
+        std::fs::write(instances.join("d"), b"not a directory").unwrap();
+
+        let err = rename_instance_with(&env.facade, &w.locks, "a", "b")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::WORLD_BACKUPS_NOT_MOVED);
+        assert!(
+            err.message
+                .starts_with("实例已改名为「b」，但存档备份没能跟着挪："),
+            "{}",
+            err.message
+        );
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["id"], "a");
+        assert_eq!(detail["renamed_to"], "b");
+        assert_eq!(
+            detail["path"],
+            json!(instances.join("a").display().to_string())
+        );
+        assert!(env.game_dir().join("versions").join("b").is_dir());
+        assert_eq!(env.saved_config().await.sidebar_pins, vec!["b".to_owned()]);
+        assert!(instances
+            .join("a")
+            .join("新的世界")
+            .join("index.json")
+            .is_file());
+        assert_eq!((w.locks.activity("a"), w.locks.activity("b")), (None, None));
+
+        write_playtime(&env, "{ broken");
+        let err = rename_instance_with(&env.facade, &w.locks, "c", "d")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            code::PLAY_RECORDS_FAILED,
+            "两路都失败时报游玩记录"
+        );
+        assert_eq!(err.detail.unwrap()["renamed_to"], "d");
     }
 
     #[test]

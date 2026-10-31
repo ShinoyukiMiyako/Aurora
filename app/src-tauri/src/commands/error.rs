@@ -135,6 +135,19 @@ pub mod code {
     /// 改名或删除已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改。前端照成功处理再
     /// 提示；没改成的记录由门面记着，之后读写游玩记录时补上。detail：`{ id, renamed_to? }` 与原因链。
     pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
+    /// 要恢复或删除的存档备份不在备份列表里，或文件已经不在盘上。detail：`{ id, world, file }`。
+    pub const WORLD_BACKUP_NOT_FOUND: &str = "world_backup_not_found";
+    /// 存档备份读不出来、有越界或符号链接条目、或解出来没有可读的 level.dat；现在的存档没有动。
+    /// detail：`{ path, reason, entry? }`，entry 为不合格的条目名。
+    pub const WORLD_BACKUP_CORRUPT: &str = "world_backup_corrupt";
+    /// 存档正被游戏打开（session.lock 被占着）。detail：`{ path }`。
+    pub const WORLD_IN_USE: &str = "world_in_use";
+    /// 恢复时原存档已移进回收站，恢复出的副本却没能放到位。detail：`{ path, staged }`，path 是存档原来的
+    /// 位置，staged 是恢复出的副本，那是这份备份唯一解出来的拷贝，不会被删掉。
+    pub const WORLD_RESTORE_INCOMPLETE: &str = "world_restore_incomplete";
+    /// 改名已经完成（目录、引用、游玩记录都已改好），只是存档备份没能跟着挪。前端照成功处理再提示。
+    /// detail：`{ id, renamed_to, path }` 与原因链，path 是留在旧名下的备份目录。
+    pub const WORLD_BACKUPS_NOT_MOVED: &str = "world_backups_not_moved";
 }
 
 /// 序列化给前端的命令错误。
@@ -268,6 +281,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidProjectId { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidResourceTarget(_) => code::INVALID_ARGUMENT,
         CoreError::WorldNotFound { .. } => code::WORLD_NOT_FOUND,
+        CoreError::WorldBackupNotFound { .. } => code::WORLD_BACKUP_NOT_FOUND,
         CoreError::UnsafeFileName { .. } => code::UNSAFE_FILE_NAME,
         CoreError::FileDistributionBlocked { .. } => code::DISTRIBUTION_BLOCKED,
         CoreError::Modpack(e) => modpack_code(e),
@@ -286,12 +300,23 @@ fn core_code(err: &CoreError) -> &'static str {
 
 /// 实例 id、名称、设置与侧栏固定的问题是调用方传错了参数，不论从哪个命令冒上来都报 invalid_argument：
 /// 崩溃诊断、启动日志、Mod 与历史这些命令不经实例领域自己的映射。
+///
+/// 存档备份的几种失败前端要分别处理（备份坏了、存档开着、恢复只做了一半），各自成码；备份索引读不懂与
+/// 实例里别的启动器 JSON 读不懂是同一类问题，沿用 json_file_invalid。
 fn instance_code(err: &InstanceError) -> &'static str {
     match err {
         InstanceError::InvalidId { .. }
         | InstanceError::InvalidName { .. }
         | InstanceError::InvalidSettings { .. }
-        | InstanceError::InvalidPins { .. } => code::INVALID_ARGUMENT,
+        | InstanceError::InvalidPins { .. }
+        | InstanceError::InvalidBackupArgument { .. } => code::INVALID_ARGUMENT,
+        InstanceError::BackupArchive { .. }
+        | InstanceError::BackupEntryUnsafe { .. }
+        | InstanceError::BackupLevelUnreadable { .. } => code::WORLD_BACKUP_CORRUPT,
+        InstanceError::BackupIndexInvalid { .. } => code::JSON_FILE_INVALID,
+        InstanceError::WorldInUse { .. } => code::WORLD_IN_USE,
+        InstanceError::RestoreNotPlaced { .. } => code::WORLD_RESTORE_INCOMPLETE,
+        InstanceError::Cancelled => code::CANCELLED,
         _ => code::INSTANCE_FAILED,
     }
 }
@@ -431,7 +456,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("rule".to_owned(), json!(violation.code()));
             detail.insert("name".to_owned(), json!(name));
         }
-        CoreError::Instance(InstanceError::InvalidSettings { field, reason }) => {
+        CoreError::Instance(
+            InstanceError::InvalidSettings { field, reason }
+            | InstanceError::InvalidBackupArgument { field, reason },
+        ) => {
             detail.insert("field".to_owned(), json!(field));
             detail.insert("reason".to_owned(), json!(reason));
         }
@@ -462,6 +490,40 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::WorldNotFound { version_id, world } => {
             detail.insert("version_id".to_owned(), json!(version_id));
             detail.insert("world".to_owned(), json!(world));
+        }
+        CoreError::WorldBackupNotFound {
+            version_id,
+            world,
+            file,
+        } => {
+            detail.insert("id".to_owned(), json!(version_id));
+            detail.insert("world".to_owned(), json!(world));
+            detail.insert("file".to_owned(), json!(file));
+        }
+        CoreError::Instance(
+            InstanceError::BackupArchive { path, reason }
+            | InstanceError::BackupLevelUnreadable { path, reason },
+        ) => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("reason".to_owned(), json!(reason));
+        }
+        CoreError::Instance(InstanceError::BackupEntryUnsafe {
+            path,
+            entry,
+            reason,
+        }) => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("entry".to_owned(), json!(entry));
+            detail.insert("reason".to_owned(), json!(reason));
+        }
+        CoreError::Instance(
+            InstanceError::BackupIndexInvalid { path, .. } | InstanceError::WorldInUse { path },
+        ) => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+        }
+        CoreError::Instance(InstanceError::RestoreNotPlaced { world_dir, staged }) => {
+            detail.insert("path".to_owned(), json!(world_dir.display().to_string()));
+            detail.insert("staged".to_owned(), json!(staged.display().to_string()));
         }
         CoreError::UnsafeFileName {
             platform,
@@ -919,6 +981,96 @@ mod tests {
         let detail = rejected.detail.unwrap();
         assert!(detail.get("network").is_none(), "{detail}");
         assert_eq!(detail["causes"], json!([format!("HTTP 状态码 404: {url}")]));
+    }
+
+    /// 存档备份的失败各自成码，detail 带前端分支与「打开文件夹」要的路径；取消从实例层冒上来也是 cancelled。
+    #[test]
+    fn world_backup_errors_map_to_codes_with_parameters() {
+        let missing: CommandError = CoreError::WorldBackupNotFound {
+            version_id: "生存".into(),
+            world: "新的世界".into(),
+            file: "1761900000000-auto.zip".into(),
+        }
+        .into();
+        assert_eq!(missing.code, code::WORLD_BACKUP_NOT_FOUND);
+        assert_eq!(
+            missing.detail,
+            Some(json!({ "id": "生存", "world": "新的世界", "file": "1761900000000-auto.zip" }))
+        );
+
+        let zip = PathBuf::from("D:/g/.petalfall/backups/instances/a/w/1-manual.zip");
+        let archive: CommandError = InstanceError::BackupArchive {
+            path: zip.clone(),
+            reason: "中央目录读不出".into(),
+        }
+        .into();
+        assert_eq!(archive.code, code::WORLD_BACKUP_CORRUPT);
+        let detail = archive.detail.unwrap();
+        assert_eq!(detail["path"], json!(zip.display().to_string()));
+        assert_eq!(detail["reason"], json!("中央目录读不出"));
+        assert!(detail.get("entry").is_none());
+
+        let traversal: CommandError = InstanceError::BackupEntryUnsafe {
+            path: zip.clone(),
+            entry: "w/../../evil.txt".into(),
+            reason: "parent_traversal",
+        }
+        .into();
+        assert_eq!(traversal.code, code::WORLD_BACKUP_CORRUPT);
+        let detail = traversal.detail.unwrap();
+        assert_eq!(detail["entry"], json!("w/../../evil.txt"));
+        assert_eq!(detail["reason"], json!("parent_traversal"));
+        assert_eq!(detail["path"], json!(zip.display().to_string()));
+
+        let level: CommandError = InstanceError::BackupLevelUnreadable {
+            path: PathBuf::from("D:/g/saves/w.petalfall-restore/level.dat"),
+            reason: "不是 gzip".into(),
+        }
+        .into();
+        assert_eq!(level.code, code::WORLD_BACKUP_CORRUPT);
+        assert_eq!(level.detail.unwrap()["reason"], json!("不是 gzip"));
+
+        let index: CommandError = InstanceError::BackupIndexInvalid {
+            path: PathBuf::from("D:/g/.petalfall/backups/shared/w/index.json"),
+            reason: "expected value at line 1".into(),
+        }
+        .into();
+        assert_eq!(index.code, code::JSON_FILE_INVALID);
+        assert_eq!(
+            index.detail.unwrap()["path"],
+            json!("D:/g/.petalfall/backups/shared/w/index.json")
+        );
+
+        let in_use: CommandError = InstanceError::WorldInUse {
+            path: PathBuf::from("D:/g/saves/w"),
+        }
+        .into();
+        assert_eq!(in_use.code, code::WORLD_IN_USE);
+        assert_eq!(in_use.detail.unwrap()["path"], json!("D:/g/saves/w"));
+
+        let incomplete: CommandError = InstanceError::RestoreNotPlaced {
+            world_dir: PathBuf::from("D:/g/saves/w"),
+            staged: PathBuf::from("D:/g/saves/w.petalfall-restore"),
+        }
+        .into();
+        assert_eq!(incomplete.code, code::WORLD_RESTORE_INCOMPLETE);
+        let detail = incomplete.detail.unwrap();
+        assert_eq!(detail["path"], json!("D:/g/saves/w"));
+        assert_eq!(detail["staged"], json!("D:/g/saves/w.petalfall-restore"));
+
+        let dest: CommandError = InstanceError::InvalidBackupArgument {
+            field: "dest",
+            reason: "导出位置不能在存档文件夹里面".into(),
+        }
+        .into();
+        assert_eq!(dest.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            dest.detail,
+            Some(json!({ "field": "dest", "reason": "导出位置不能在存档文件夹里面" }))
+        );
+
+        let cancelled: CommandError = InstanceError::Cancelled.into();
+        assert_eq!(cancelled, CommandError::cancelled());
     }
 
     #[test]
