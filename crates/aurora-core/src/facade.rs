@@ -71,7 +71,8 @@ impl Aurora {
         Self::open(config, data_dir, config_path)
     }
 
-    /// 同 [`Aurora::load`]，但配置文件损坏时不报错：坏文件改名留存、按默认配置构造，并交回经过。
+    /// 同 [`Aurora::load`]，但配置文件损坏时不报错：坏文件改名留存、按默认配置构造，并交回经过；
+    /// 只是个别枚举取值不认识时文件不动，交回退回默认的那几项。
     /// 给桌面应用启动用：那时还没有窗口能显示错误，报错等于一声不响地打不开。
     pub async fn load_recovering() -> Result<(Self, Option<crate::config::ConfigRecovery>)> {
         let data_dir = aurora_base::fs::data_dir()?;

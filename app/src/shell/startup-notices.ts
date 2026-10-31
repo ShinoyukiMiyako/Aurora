@@ -27,9 +27,22 @@ export function describeStartupNotice(notice: StartupNoticeDto): StartupNotice {
         body: STARTUP_NOTICE_COPY.configReset.body,
         action: { label: STARTUP_NOTICE_COPY.configReset.action, run: () => openFolder("data_dir", null), errorTitle: SHELL_ACTION_ERROR.openDataDir },
       };
+    case "config_fields_reset": {
+      // 后端只在至少退回一项时发这条；空列表或认不出的字段同样说明前后端版本不一致
+      if (notice.fields.length === 0) throw new Error("字段级重置的启动提示没有带任何字段");
+      const copy = STARTUP_NOTICE_COPY.configFieldsReset;
+      const items = notice.fields.map(({ field, value }) => {
+        const label: string | undefined = Object.hasOwn(copy.fields, field) ? copy.fields[field] : undefined;
+        if (label === undefined) throw new Error(`不认识的配置字段：${JSON.stringify(field)}`);
+        return copy.item(label, value);
+      });
+      return { title: copy.title(notice.fields.length), body: copy.body(items) };
+    }
     default: {
-      const unknown: never = notice.kind;
-      throw new Error(`不认识的启动提示类型：${JSON.stringify(unknown)}`);
+      // 类型上已穷尽，运行期到这里的是新版后端的提示：只报它的 kind
+      const unknown: never = notice;
+      const stray: { kind: unknown } = unknown;
+      throw new Error(`不认识的启动提示类型：${JSON.stringify(stray.kind)}`);
     }
   }
 }

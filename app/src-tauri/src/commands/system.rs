@@ -112,9 +112,25 @@ pub enum StartupNoticeDto {
     ConfigReset {
         /// 坏文件改名后的绝对路径，原样保留着用户的内容。
         preserved_path: String,
-        /// 解析失败的原因（含行列）。
+        /// 解析失败的原因（通常含行列）。
         error: String,
     },
+    /// config.json 里有几项设置的取值这个版本不认识（多半是更新的版本写的）：只这几项按默认值启动，
+    /// 其余设置照常读入；文件原样不动，用户改了任一设置后才按新值写回。
+    ConfigFieldsReset {
+        /// 按固定顺序（同核心的枚举字段登记表），至少一项。
+        fields: Vec<ConfigFieldResetDto>,
+    },
+}
+
+/// 一项退回默认的设置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConfigFieldResetDto {
+    /// 字段在 config.json 里的位置，嵌套用点号连接：download_source、version_list_source、
+    /// isolation_policy、appearance.mode、appearance.accent、after_launch、language。
+    pub field: &'static str,
+    /// 文件里写的原值。
+    pub value: String,
 }
 
 /// 本次启动的提示（managed state）。启动后不再变化，查询多少次都返回同一份。
@@ -125,9 +141,20 @@ impl StartupNotices {
         Self(
             recovery
                 .into_iter()
-                .map(|recovery| StartupNoticeDto::ConfigReset {
-                    preserved_path: recovery.preserved.display().to_string(),
-                    error: recovery.error,
+                .map(|recovery| match recovery {
+                    ConfigRecovery::Reset { preserved, error } => StartupNoticeDto::ConfigReset {
+                        preserved_path: preserved.display().to_string(),
+                        error,
+                    },
+                    ConfigRecovery::FieldsReset(resets) => StartupNoticeDto::ConfigFieldsReset {
+                        fields: resets
+                            .into_iter()
+                            .map(|reset| ConfigFieldResetDto {
+                                field: reset.field,
+                                value: reset.value,
+                            })
+                            .collect(),
+                    },
                 })
                 .collect(),
         )
@@ -156,23 +183,73 @@ pub async fn probe_network(facade: State<'_, Facade>) -> Result<bool, CommandErr
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::{Aurora, AuroraConfig, ConfigStore};
+    use aurora_core::{Aurora, AuroraConfig, ConfigFieldReset, ConfigStore};
 
     #[test]
     fn config_recovery_becomes_a_config_reset_notice() {
         assert!(StartupNotices::from_recovery(None).0.is_empty());
-        let notices = StartupNotices::from_recovery(Some(ConfigRecovery {
+        let notices = StartupNotices::from_recovery(Some(ConfigRecovery::Reset {
             preserved: std::path::PathBuf::from(r"C:\Data\config.json.broken-20261031-143025"),
-            error: "unknown variant `hide` at line 1 column 22".into(),
+            error: "invalid type: string \"eight\", expected usize at line 1 column 57".into(),
         }));
         assert_eq!(
             serde_json::to_value(&notices.0).unwrap(),
             serde_json::json!([{
                 "kind": "config_reset",
                 "preserved_path": r"C:\Data\config.json.broken-20261031-143025",
-                "error": "unknown variant `hide` at line 1 column 22"
+                "error": "invalid type: string \"eight\", expected usize at line 1 column 57"
             }])
         );
+    }
+
+    /// 字段级退回是一条提示，逐项带字段位置与原值（含空串），顺序原样保留。
+    #[test]
+    fn field_resets_become_one_config_fields_reset_notice() {
+        let notices = StartupNotices::from_recovery(Some(ConfigRecovery::FieldsReset(vec![
+            ConfigFieldReset {
+                field: "appearance.mode",
+                value: "dusk".into(),
+            },
+            ConfigFieldReset {
+                field: "after_launch",
+                value: String::new(),
+            },
+            ConfigFieldReset {
+                field: "language",
+                value: "fr-FR".into(),
+            },
+        ])));
+        assert_eq!(
+            serde_json::to_value(&notices.0).unwrap(),
+            serde_json::json!([{
+                "kind": "config_fields_reset",
+                "fields": [
+                    { "field": "appearance.mode", "value": "dusk" },
+                    { "field": "after_launch", "value": "" },
+                    { "field": "language", "value": "fr-FR" }
+                ]
+            }])
+        );
+    }
+
+    /// 从盘上的文件一路到提示：降级后读到新版本的语言，提示报出原值，文件不动。
+    #[tokio::test]
+    async fn unknown_enum_value_on_disk_reaches_startup_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let original = br#"{"language": "fr-FR", "first_run_completed": true}"#;
+        std::fs::write(&path, original).unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert!(config.first_run_completed);
+        let notices = StartupNotices::from_recovery(recovery);
+        assert_eq!(
+            serde_json::to_value(&notices.0).unwrap(),
+            serde_json::json!([{
+                "kind": "config_fields_reset",
+                "fields": [{ "field": "language", "value": "fr-FR" }]
+            }])
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
     }
 
     fn facade_in(dir: &std::path::Path) -> Facade {

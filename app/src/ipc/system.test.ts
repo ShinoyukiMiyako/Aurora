@@ -70,6 +70,26 @@ describe("启动提示", () => {
     expect(await startupNotices()).toEqual([]);
   });
 
+  it("个别设置退回默认的提示原样返回；设置之后改动传入的对象不影响模拟后端", async () => {
+    const fields = [
+      { field: "language" as const, value: "fr-FR" },
+      { field: "appearance.mode" as const, value: "" },
+    ];
+    const notice = { kind: "config_fields_reset" as const, fields };
+    setMockStartupNotices([notice]);
+    fields[0].value = "zh-CN";
+    fields.push({ field: "language", value: "de-DE" });
+    expect(await startupNotices()).toEqual([
+      {
+        kind: "config_fields_reset",
+        fields: [
+          { field: "language", value: "fr-FR" },
+          { field: "appearance.mode", value: "" },
+        ],
+      },
+    ]);
+  });
+
   it("Tauri 里不带参数调用 startup_notices", async () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
