@@ -26,6 +26,8 @@ zip = { version = "8", default-features = false, features = [
     "ppmd",
     "legacy-zip",
 ] }
+# 老工具（Windows 资源管理器、旧版 WinRAR）在中文系统上打包时不设 UTF-8 标志，条目名是 GBK 字节。
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

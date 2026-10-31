@@ -6,6 +6,7 @@ use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
+use zip::read::ZipFile;
 use zip::result::ZipError;
 
 use crate::error::{Error, Result};
@@ -20,7 +21,7 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 pub struct OverrideEntry {
     /// 压缩包内的条目序号。
     pub index: usize,
-    /// 压缩包内的条目名（含覆盖层前缀），解压时用来核对序号没有错位。
+    /// 压缩包内的条目名（含覆盖层前缀，按 [`entry_name`] 的规则解码），解压时用来核对序号没有错位。
     pub entry_name: String,
     /// 相对实例目录的落点。
     pub path: SafeRelativePath,
@@ -104,7 +105,7 @@ pub fn extract_overrides(
         let mut file = archive
             .by_index(entry.index)
             .map_err(|source| zip_error(pack_path, &entry.entry_name, source))?;
-        if file.name() != entry.entry_name {
+        if entry_name(&file) != entry.entry_name {
             return Err(corrupt(
                 pack_path,
                 ZipError::InvalidArchive(
@@ -197,6 +198,23 @@ fn unsupported(path: &Path, entry: &str, method: u16) -> Error {
     }
 }
 
+/// 条目名依次按 UTF-8、GBK、CP437 解码。
+///
+/// zip 只看通用标志位里的 UTF-8 标志：没有标志就按 CP437 解。中文系统上的老打包工具（资源管理器的
+/// 「发送到压缩文件夹」、旧版 WinRAR）不设标志，写的是本地代码页 GBK，按 CP437 解出来是乱码，落点与
+/// 路径校验都会错。带 UTF-8 标志或带 Unicode Path 扩展字段的条目，原始字节本来就是 UTF-8，第一步就命中；
+/// 不设标志却直接写 UTF-8 的打包器也在这一步。前两步都解不了的，才用 zip 按 CP437 解出的名字。
+pub(crate) fn entry_name<R: Read + ?Sized>(file: &ZipFile<'_, R>) -> String {
+    let raw = file.name_raw();
+    if let Ok(name) = std::str::from_utf8(raw) {
+        return name.to_owned();
+    }
+    if let Some(name) = encoding_rs::GBK.decode_without_bom_handling_and_without_replacement(raw) {
+        return name.into_owned();
+    }
+    file.name().to_owned()
+}
+
 fn read_manifest(
     archive: &mut ZipArchive<BufReader<File>>,
     index: usize,
@@ -237,7 +255,7 @@ fn list_overrides(
             .by_index_raw(index)
             .map_err(|source| corrupt(path, source))?;
         metas.push(EntryMeta {
-            name: file.name().to_owned(),
+            name: entry_name(&file),
             is_dir: file.is_dir(),
             is_symlink: file.is_symlink(),
             size: file.size(),
@@ -265,6 +283,7 @@ fn list_overrides(
                 source,
             })?;
             let key = safe.comparison_key();
+            // 解码后才比：同一个名字一条按 UTF-8、一条按 GBK 写进包里，解出来是同一个文件。
             if !in_layer.insert(key.clone()) {
                 return Err(Error::DuplicatePath {
                     path: meta.name.clone(),

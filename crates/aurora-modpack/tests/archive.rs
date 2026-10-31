@@ -397,6 +397,27 @@ fn patch_method(path: &Path, name: &str, method: u16) {
     fs::write(path, bytes).unwrap();
 }
 
+/// 把条目名里的 ASCII 占位字节原样换成 `raw`（长度相同，本地头与中央目录各一处）。占位名是 ASCII，
+/// zip 写入时不设 UTF-8 标志，换完就是不带标志、名字为任意字节的条目。
+fn patch_name(path: &Path, placeholder: &str, raw: &[u8]) {
+    assert_eq!(placeholder.len(), raw.len());
+    let mut bytes = fs::read(path).unwrap();
+    let needle = placeholder.as_bytes();
+    let mut patched = 0;
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            bytes[i..i + needle.len()].copy_from_slice(raw);
+            patched += 1;
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    assert_eq!(patched, 2, "本地头与中央目录各一处");
+    fs::write(path, bytes).unwrap();
+}
+
 /// 固定种子的伪随机字节，与重复内容交替，让各压缩方式都有东西可压。
 fn sample_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut state = seed | 1;
@@ -578,4 +599,95 @@ fn unsupported_entries_that_are_never_extracted_do_not_reject_the_pack() {
     fs::create_dir(&dest).unwrap();
     extract_overrides(&path, &archive.overrides, &dest, &never).unwrap();
     assert_eq!(fs::read(dest.join("options.txt")).unwrap(), b"client");
+}
+
+/// 「配置/中文.txt」的 GBK 字节。
+const GBK_CONFIG_NAME: &[u8] = &[
+    0xC5, 0xE4, 0xD6, 0xC3, b'/', 0xD6, 0xD0, 0xCE, 0xC4, b'.', b't', b'x', b't',
+];
+
+#[test]
+fn entry_names_decode_as_utf8_then_gbk_then_cp437() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = pack(
+        tmp.path(),
+        "names.zip",
+        &[
+            Entry::File("manifest.json", CF_MANIFEST),
+            Entry::File("overrides/QQQQ/WWWW.txt", b"gbk"),
+            Entry::File("overrides/mods/UUUUUU.jar", b"utf8"),
+            Entry::File("overrides/cp/legacy#.txt", b"cp437"),
+        ],
+    );
+    patch_name(&path, "QQQQ/WWWW.txt", GBK_CONFIG_NAME);
+    // 不设 UTF-8 标志却直接写 UTF-8 字节（不少 Java 打包器如此）。
+    patch_name(&path, "UUUUUU", "中文".as_bytes());
+    // 0xFF 既不是合法 UTF-8 也不是 GBK 的首字节，只能按 CP437 解（U+00A0）。
+    patch_name(&path, "legacy#", b"legacy\xFF");
+
+    // zip 自己按 CP437 解，前两个都是乱码：这正是要修的问题。
+    let zip_names: Vec<_> = raw_entries(&path).into_iter().map(|(n, _)| n).collect();
+    assert!(
+        !zip_names.iter().any(|n| n.contains("中文")),
+        "{zip_names:?}"
+    );
+
+    let archive = read_pack(&path).unwrap();
+    let listed: Vec<_> = archive
+        .overrides
+        .iter()
+        .map(|e| (e.entry_name.as_str(), e.path.as_str()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("overrides/配置/中文.txt", "配置/中文.txt"),
+            ("overrides/mods/中文.jar", "mods/中文.jar"),
+            ("overrides/cp/legacy\u{a0}.txt", "cp/legacy\u{a0}.txt"),
+        ]
+    );
+
+    let dest = tmp.path().join("instance");
+    fs::create_dir(&dest).unwrap();
+    assert_eq!(
+        extract_overrides(&path, &archive.overrides, &dest, &never).unwrap(),
+        3
+    );
+    assert_eq!(
+        fs::read(dest.join("配置").join("中文.txt")).unwrap(),
+        b"gbk"
+    );
+    assert_eq!(
+        fs::read(dest.join("mods").join("中文.jar")).unwrap(),
+        b"utf8"
+    );
+    assert_eq!(
+        fs::read(dest.join("cp").join("legacy\u{a0}.txt")).unwrap(),
+        b"cp437"
+    );
+}
+
+#[test]
+fn utf8_and_gbk_spellings_of_the_same_name_in_one_layer_are_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = pack(
+        tmp.path(),
+        "dup-names.zip",
+        &[
+            Entry::File("manifest.json", CF_MANIFEST),
+            // 非 ASCII 名字，zip 写入时设 UTF-8 标志。
+            Entry::File("overrides/中文.txt", b"utf8"),
+            Entry::File("overrides/QQQQ.txt", b"gbk"),
+        ],
+    );
+    patch_name(&path, "QQQQ", &GBK_CONFIG_NAME[5..9]);
+    // zip 眼里这是两个不同的名字。
+    let zip_names: Vec<_> = raw_entries(&path).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(zip_names.len(), 3);
+    assert_ne!(zip_names[1], zip_names[2]);
+
+    assert!(matches!(
+        read_pack(&path),
+        Err(Error::DuplicatePath { path }) if path == "overrides/中文.txt"
+    ));
 }
