@@ -138,6 +138,9 @@ pub fn run() {
             commands::instances::required_java,
             commands::instances::version_requirements,
             commands::instances::open_folder,
+            commands::instances::template_info,
+            commands::instances::save_instance_as_template,
+            commands::instances::clear_template,
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,

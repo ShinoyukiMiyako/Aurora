@@ -15,8 +15,8 @@ use aurora_core::{
     IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError, InstanceInstallOutcome,
     InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride, JavaSelection, LevelInfo,
     LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry, Platform,
-    PlaySummary, Readable, RecycleBin, RepairOutcome, Resolution, TemplateOutcome, TemplateSkip,
-    VersionSettings, WorldEntry,
+    PlaySummary, Readable, RecycleBin, RepairOutcome, Resolution, TemplateInfo, TemplateOutcome,
+    TemplateSkip, VersionSettings, WorldEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -478,6 +478,46 @@ pub struct InstalledLoaderDto {
     /// fabric / quilt / forge / neoforge。
     pub kind: &'static str,
     pub version: String,
+}
+
+/// 默认设置里的一个文件。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TemplateFileDto {
+    pub name: &'static str,
+    pub size: u64,
+}
+
+/// 默认设置的现状。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TemplateInfoDto {
+    pub present: bool,
+    /// 按白名单顺序。
+    pub files: Vec<TemplateFileDto>,
+    /// 从哪个实例保存来的；文件是手放进数据目录的为 null。
+    pub source_instance: Option<String>,
+    /// 保存的时刻（Unix 毫秒）。
+    pub saved_at: Option<u64>,
+    /// 配置里是否开着「新建实例时沿用默认设置」。
+    pub enabled: bool,
+}
+
+impl From<TemplateInfo> for TemplateInfoDto {
+    fn from(info: TemplateInfo) -> Self {
+        Self {
+            present: info.present(),
+            files: info
+                .files
+                .into_iter()
+                .map(|file| TemplateFileDto {
+                    name: file.name,
+                    size: file.size,
+                })
+                .collect(),
+            source_instance: info.source_instance,
+            saved_at: info.saved_at,
+            enabled: info.enabled,
+        }
+    }
 }
 
 /// 套默认设置的结果。
@@ -1162,6 +1202,65 @@ async fn settle_quietly(
     if let Err(err) = aurora.settle_instance_marker(id, marker, settlement).await {
         tracing::error!(id, error = %err, "记录实例未完成标记失败");
     }
+}
+
+// ---------------------------------------------------------------- 新实例的默认设置
+
+/// 默认设置（模板）的现状：有哪些文件、从哪个实例保存来的、配置里开没开。
+#[tauri::command]
+pub async fn template_info(facade: State<'_, Facade>) -> Result<TemplateInfoDto, CommandError> {
+    template_info_with(&facade).await
+}
+
+pub(crate) async fn template_info_with(facade: &Facade) -> Result<TemplateInfoDto, CommandError> {
+    let aurora = facade.snapshot().await;
+    Ok(aurora.template_info().await.map_err(instance_error)?.into())
+}
+
+/// 把实例工作目录里的 options.txt、服务器列表等设置文件存成默认设置，整份替换旧的，返回新的状态。
+///
+/// 只读实例，但改名、删除、新建、补全期间实例目录会被挪走，所以以「改动」占住实例；游戏运行中可以
+/// 保存，读的是此刻磁盘上的文件。实例里一个设置文件都没有时报 `template_source_empty`。
+#[tauri::command]
+pub async fn save_instance_as_template(
+    id: String,
+    facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<TemplateInfoDto, CommandError> {
+    save_instance_as_template_with(&facade, &locks, &id).await
+}
+
+pub(crate) async fn save_instance_as_template_with(
+    facade: &Facade,
+    locks: &InstanceLocks,
+    id: &str,
+) -> Result<TemplateInfoDto, CommandError> {
+    // 先于占锁校验：不安全的 id 不该在互斥表里留下一行，报错形状与门面的 InvalidId 相同。
+    if !is_safe_instance_id(id) {
+        return Err(CoreError::from(InstanceError::InvalidId { id: id.to_owned() }).into());
+    }
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+    let aurora = facade.snapshot().await;
+    Ok(aurora
+        .save_template_from_instance(id)
+        .await
+        .map_err(instance_error)?
+        .into())
+}
+
+/// 清除默认设置；本来就没有也算成功。返回清除后的状态。
+#[tauri::command]
+pub async fn clear_template(facade: State<'_, Facade>) -> Result<TemplateInfoDto, CommandError> {
+    clear_template_with(&facade).await
+}
+
+pub(crate) async fn clear_template_with(facade: &Facade) -> Result<TemplateInfoDto, CommandError> {
+    let aurora = facade.snapshot().await;
+    Ok(aurora
+        .clear_template()
+        .await
+        .map_err(instance_error)?
+        .into())
 }
 
 // ---------------------------------------------------------------- 删除与改名
@@ -1891,6 +1990,117 @@ mod tests {
                 json!({ "status": "skipped", "reason": name })
             );
         }
+    }
+
+    /// 保存、读取、清除走完一轮：出参按白名单顺序列出文件，记下来源实例；清除两次都成功。
+    /// 游戏运行中可以保存。
+    #[tokio::test]
+    async fn template_is_saved_from_an_instance_read_back_and_cleared() {
+        let env = Env::new();
+        env.vanilla("樱花生存");
+        // 原版正式版默认不隔离，设置文件在游戏目录根下。
+        std::fs::write(env.game_dir().join("servers.dat"), b"servers").unwrap();
+        std::fs::write(env.game_dir().join("options.txt"), b"fov:90").unwrap();
+        let locks = InstanceLocks::default();
+        let _running = locks
+            .acquire("樱花生存", InstanceActivity::Running)
+            .unwrap();
+        let before = template_info_with(&env.facade).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            json!({ "present": false, "files": [], "source_instance": null, "saved_at": null, "enabled": true })
+        );
+
+        let saved = save_instance_as_template_with(&env.facade, &locks, "樱花生存")
+            .await
+            .unwrap();
+        assert!(saved.present);
+        assert_eq!(
+            saved.files,
+            vec![
+                TemplateFileDto {
+                    name: "options.txt",
+                    size: 6
+                },
+                TemplateFileDto {
+                    name: "servers.dat",
+                    size: 7
+                },
+            ]
+        );
+        assert_eq!(saved.source_instance.as_deref(), Some("樱花生存"));
+        assert!(saved.saved_at.unwrap() > 1_700_000_000_000);
+        assert_eq!(template_info_with(&env.facade).await.unwrap(), saved);
+        assert_eq!(
+            locks.activity("樱花生存"),
+            Some(InstanceActivity::Running),
+            "保存结束后只剩游戏的占用"
+        );
+
+        for _ in 0..2 {
+            let cleared = clear_template_with(&env.facade).await.unwrap();
+            assert!(!cleared.present);
+            assert!(cleared.files.is_empty());
+            assert_eq!(cleared.source_instance, None);
+        }
+        assert!(!env.dir.path().join("templates").join("default").exists());
+    }
+
+    #[tokio::test]
+    async fn saving_a_template_waits_for_install_and_reports_missing_files() {
+        let env = Env::new();
+        env.vanilla("新装的");
+        let locks = InstanceLocks::default();
+
+        let installing = locks
+            .acquire("新装的", InstanceActivity::Installing)
+            .unwrap();
+        let err = save_instance_as_template_with(&env.facade, &locks, "新装的")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["activity"], "installing");
+        assert_eq!(detail["id"], "新装的");
+        drop(installing);
+
+        let err = save_instance_as_template_with(&env.facade, &locks, "新装的")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::TEMPLATE_SOURCE_EMPTY);
+        assert_eq!(
+            err.message,
+            "实例 新装的 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存"
+        );
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["id"], "新装的");
+        assert_eq!(
+            detail["files"],
+            json!([
+                "options.txt",
+                "servers.dat",
+                "optionsof.txt",
+                "optionsshaders.txt"
+            ])
+        );
+        assert!(!env.dir.path().join("templates").exists());
+        assert_eq!(locks.activity("新装的"), None);
+
+        let err = save_instance_as_template_with(&env.facade, &locks, "../x")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::INVALID_ARGUMENT);
+        let detail = err.detail.unwrap();
+        assert_eq!(
+            (&detail["field"], &detail["reason"], &detail["id"]),
+            (&json!("id"), &json!("unsafe_id"), &json!("../x"))
+        );
+        assert_eq!(locks.activity("../x"), None);
+
+        let err = save_instance_as_template_with(&env.facade, &locks, "不存在")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
     }
 
     #[tokio::test]
