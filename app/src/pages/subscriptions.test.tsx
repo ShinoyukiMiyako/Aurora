@@ -225,7 +225,7 @@ beforeEach(() => {
     const range = args.range as { from: string; to: string };
     return { from: range.from, to: range.to, days: [], total_minutes: 0, instances: [] };
   });
-  ipc.overrides.set("list_news", () => ({ items: [], fetched_at: NOW, offline: false }));
+  ipc.overrides.set("list_news", () => ({ items: [], fetched_at: NOW, offline: false, launcher_error: null }));
   ipc.overrides.set("list_pinned_servers", () => []);
   ipc.overrides.set("list_known_servers", () => []);
   ipc.overrides.set("ping_servers", () => []);
