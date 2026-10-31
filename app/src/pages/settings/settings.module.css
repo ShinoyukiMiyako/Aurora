@@ -727,6 +727,94 @@
   color: var(--sk-text-2);
 }
 
+.licenses {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-18);
+}
+
+.licenseGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+}
+
+.licenseGroupTitle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sk-space-6);
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.licenseCount {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  font-weight: var(--sk-w-mono);
+  color: var(--sk-text-2);
+}
+
+.licenseList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 名称占剩余宽度；版本与许可证按内容定宽，长许可证表达式（MIT OR Apache-2.0）不挤掉名称 */
+.licenseRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: var(--sk-space-12);
+  padding: var(--sk-space-6) 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  user-select: text;
+}
+
+.licenseRow + .licenseRow {
+  border-top: 1px solid var(--sk-line);
+}
+
+.licenseName {
+  overflow: hidden;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.licenseVersion {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.licenseId {
+  color: var(--sk-text-2);
+  text-align: right;
+}
+
+.licensesLoading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-32) 0;
+  font-size: var(--sk-fs-small);
+  color: var(--sk-text-2);
+}
+
 /* ---------------------------------------------------------------- 启动器更新 */
 
 .updateRow {

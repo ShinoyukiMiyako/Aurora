@@ -232,16 +232,37 @@ export const ACCENT_OPTIONS: readonly { value: AccentName; label: string }[] = [
 // ---------------------------------------------------------------- 关于
 
 export const ABOUT_COPY = {
-  version: (v: string) => `版本 ${v}`,
+  versionLine: (v: string, license: string) => `版本 ${v} · ${license}`,
   infoTitle: "版本信息",
   copy: "复制",
   copied: "已复制",
   versionRow: "版本",
+  channelRow: "发布通道",
+  builtRow: "构建日期",
+  licenseRow: "开源协议",
+  sourceRow: "源代码",
+  /** 「复制」整段版本信息时写进剪贴板的文字，反馈问题时直接贴出来。 */
+  infoText: (rows: { name: string; version: string; channel: string; built: string; license: string; source: string }) =>
+    [`${rows.name} ${rows.version}`, `发布通道：${rows.channel}`, `构建日期：${rows.built}`, `开源协议：${rows.license}`, `源代码：${rows.source}`].join("\n"),
   supportTitle: "支持",
   openLogs: "打开日志目录",
   openLogsDesc: "反馈问题时把这里的最新日志一起发来",
   open: "打开",
   openLogsFailed: "没能打开日志目录",
+  licenses: "第三方许可",
+  licensesDesc: "随应用分发的字体与依赖，各自的版本与许可证",
+  view: "查看",
+  licensesSubtitle: (n: number) => `共 ${n} 个，构建时从依赖树生成`,
+  licensesNpm: "前端依赖与字体",
+  licensesCargo: "Rust 依赖",
+  licensesLoading: "正在读取许可清单…",
+  licensesFailed: "第三方许可清单读不出来",
+  licensesHeadName: "名称",
+  licensesHeadVersion: "版本",
+  licensesHeadLicense: "许可证",
+  feedback: "问题反馈",
+  feedbackDesc: "在仓库的 Issues 页提交问题或建议，会用系统浏览器打开",
+  feedbackFailed: "没能打开问题反馈页",
   disclaimer: `实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
   infoFailed: "版本信息读不出来",
 } as const;
