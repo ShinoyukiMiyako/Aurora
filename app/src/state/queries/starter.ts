@@ -6,7 +6,7 @@ import { starterMods, type StarterLoader, type StarterModsDto } from "../../ipc/
 import { useResource, type ResourceResult } from "../resource";
 
 export type { TemplateInfoDto } from "../../ipc/instances";
-export type { StarterMissingDto, StarterModDto, StarterModsDto } from "../../ipc/mods";
+export type { StarterGroup, StarterMissingDto, StarterModDto, StarterModsDto } from "../../ipc/mods";
 
 /** template —— 默认设置的现状；保存为默认、清除之后失效。 */
 export function useTemplateInfo(): ResourceResult<TemplateInfoDto> {

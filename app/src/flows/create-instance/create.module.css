@@ -652,6 +652,49 @@
   font-size: var(--sk-fs-caption);
 }
 
+/* ---------------------------------------------------------------- 开局选项 */
+
+.starter {
+  /* 说明行与复选框的标签文字对齐：方框 18 加上方框与标签之间的 9 */
+  --cr-option-indent: 27px;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+}
+
+.option {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+}
+
+.optionNote {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  padding-left: var(--cr-option-indent);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+}
+
+.optionLine {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.optionWarn {
+  color: var(--sk-warn);
+}
+
+.starterNote {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+}
+
 /* 预计下载：数字等宽，「不含加载器」用弱色跟在后面 */
 .num {
   font-variant-numeric: tabular-nums;

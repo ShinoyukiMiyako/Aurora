@@ -1,9 +1,13 @@
-// 新建实例流程的纯逻辑：步骤表、版本清单的整理与筛选、推荐加载器版本、回落规则、存放位置与「填过几项」。
+// 新建实例流程的纯逻辑：步骤表、版本清单的整理与筛选、推荐加载器版本、回落规则、存放位置、「填过几项」与开局选项。
 // 状态由流程组件持有，这里只做推算，便于逐条测试。
 
 import { releaseTypeFromDto, type ReleaseType } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
+// sk-guard-allow T6: 新实例隔离与否要和实例设置页「跟随全局」的推断是同一套规则，不另写一份
+import { isolationByPolicy, type IsolationPolicyName } from "../../pages/instance/model";
 import type { LoaderChoice, LoaderVersionDto, ManifestDto } from "../../state/queries/catalog";
+import type { StarterGroup, StarterMissingDto, StarterModDto, StarterModsDto, TemplateInfoDto } from "../../state/queries/starter";
+import type { StarterPick } from "../../state/store";
 
 // ---------------------------------------------------------------- 步骤
 
@@ -134,3 +138,76 @@ export function filledCount(draft: DraftFacts): number {
 }
 
 export const DISCARD_CONFIRM_THRESHOLD = 2;
+
+// ---------------------------------------------------------------- 开局选项
+
+/** 新实例会不会隔离：新实例的隔离设置是「跟随」，与实例设置页跟随全局时同一套推断。 */
+export function newInstanceIsolated(policy: IsolationPolicyName, loader: LoaderKind, type: ReleaseType): boolean {
+  return isolationByPolicy(policy, { loader, extraLoaders: [], releaseType: type });
+}
+
+/** 查询在界面上要分的三种情况；error 带后端原文。 */
+export type QueryState<T> = { status: "loading" } | { status: "error"; error: Error } | { status: "ready"; data: T };
+
+/** 「沿用默认设置」用不上的原因。 */
+export type TemplateBlock = "loading" | "unreadable" | "disabled" | "empty" | "shared";
+
+/**
+ * 用不上时给第一条原因，用得上为 null。读取中与读不到排最前（别的都还不知道）；其后与后端套模板的判断同序：
+ * 配置开关、模板是否为空、新实例是否隔离，界面说的原因与后端会跳过的原因是同一条。
+ * isolated 为 null：全局设置还没读到，推断不了隔离。
+ */
+export function templateBlock(info: QueryState<Pick<TemplateInfoDto, "present" | "enabled">>, isolated: boolean | null): TemplateBlock | null {
+  if (info.status === "loading") return "loading";
+  if (info.status === "error") return "unreadable";
+  if (!info.data.enabled) return "disabled";
+  if (!info.data.present) return "empty";
+  if (isolated === null) return "loading";
+  if (!isolated) return "shared";
+  return null;
+}
+
+/** 开局表里有 API 一项的加载器与它的名字，与后端的开局表一致；查询回来之前标签与说明就要用到。 */
+export const STARTER_API: Readonly<Partial<Record<LoaderKind, "Fabric API" | "QFAPI">>> = { fabric: "Fabric API", quilt: "QFAPI" };
+
+/** 开局表的一组：能装的与缺的，都按表的顺序。 */
+export interface StarterGroupView {
+  available: StarterModDto[];
+  missing: StarterMissingDto[];
+}
+
+export function starterGroup(data: StarterModsDto, group: StarterGroup): StarterGroupView {
+  return { available: data.available.filter((m) => m.group === group), missing: data.missing.filter((m) => m.group === group) };
+}
+
+/** 开局 Mod 的一项为什么勾不了：查询中、查不到、这一组一项都装不了。 */
+export type StarterBlock = "loading" | "error" | "none";
+
+export function starterBlock(query: QueryState<StarterModsDto>, group: StarterGroup): StarterBlock | null {
+  if (query.status === "loading") return "loading";
+  if (query.status === "error") return "error";
+  return starterGroup(query.data, group).available.length === 0 ? "none" : null;
+}
+
+/**
+ * 三个复选项的勾选：pick 为 null 表示用户没动过，按默认（沿用默认设置与 API 用得上就勾，性能组合不勾）；
+ * 用不上的一律不勾，换了加载器或版本、变得用得上时又回到用户的选择。
+ */
+export interface StarterPicks {
+  template: boolean | null;
+  api: boolean | null;
+  performance: boolean | null;
+}
+
+export const NO_PICKS: StarterPicks = { template: null, api: null, performance: null };
+
+export function optionChecked(block: TemplateBlock | StarterBlock | null, pick: boolean | null, byDefault: boolean): boolean {
+  if (block !== null) return false;
+  return pick === null ? byDefault : pick;
+}
+
+/** 勾选结果组装成新建的 starterMods：API 在前，性能组合按开局表的顺序；只收能装的项。 */
+export function starterSelection(data: StarterModsDto, api: boolean, performance: boolean): StarterPick[] {
+  const chosen = [...(api ? starterGroup(data, "api").available : []), ...(performance ? starterGroup(data, "performance").available : [])];
+  return chosen.map((m) => ({ projectId: m.project_id, modVersionId: m.version.version_id, title: m.name, fileSize: m.version.file_size }));
+}
