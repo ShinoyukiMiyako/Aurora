@@ -20,12 +20,6 @@ export const BOOT_FAILURE_COPY = {
   },
 } as const;
 
-/** 生产构建里外壳尚未装配时的错误页文案。 */
-export const SHELL_MISSING_COPY = {
-  title: "界面外壳尚未接入",
-  body: "这个构建只包含界面地基与组件库，外壳与页面还没有装配。",
-} as const;
-
 /** 错误页上的按钮文案。 */
 export const ERROR_SCREEN_ACTIONS = {
   reload: "重新加载",
