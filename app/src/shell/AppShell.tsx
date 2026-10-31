@@ -16,8 +16,9 @@ import { logDiagnostic } from "../ipc/diagnostics";
 import { createThumbResolver } from "../mc/art";
 import { useAppearance } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
-import { useLauncherSelector } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { routeKey, type Route } from "../state/route";
+import { ExternalLinkProvider } from "../ui/external-link";
 import { RemoteImageProvider } from "../ui/remote-image";
 import styles from "./AppShell.module.css";
 import { ChromeProvider, type ChromeApi } from "./chrome";
@@ -69,6 +70,9 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   const { bindRoot, bindPageScroll, fileDropHint } = useShell();
   const { appearance, reduced } = useAppearance();
   const run = useRunner();
+  const actions = useLauncherActions();
+  // 组件库里的外部链接（资源介绍、更新说明）与其他打开网址的入口走同一个出口，失败经统一错误处理弹通知
+  const openLink = useCallback((url: string) => void run(() => actions.openExternal(url), SHELL_ACTION_ERROR.openLink), [actions, run]);
 
   useRevealWindow(firstRunKnown);
   useCloseGuard();
@@ -107,27 +111,29 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
 
   return (
     <ChromeProvider value={chrome}>
-      <RemoteImageProvider resolve={resolveRemoteImage}>
-        <div ref={bindRoot} className={styles.app}>
-          <div className={styles.backdrop} aria-hidden="true">
-            <PanoramaBackdrop enabled={appearance.panorama} />
+      <ExternalLinkProvider open={openLink}>
+        <RemoteImageProvider resolve={resolveRemoteImage}>
+          <div ref={bindRoot} className={styles.app}>
+            <div className={styles.backdrop} aria-hidden="true">
+              <PanoramaBackdrop enabled={appearance.panorama} />
+            </div>
+            {/* 向导收尾后先播完它自己的退场，再换成主界面：两者都占满整个网格，不能叠着同时出现 */}
+            <AnimatePresence mode="wait" initial={false}>
+              {onboarding !== null ? (
+                <OnboardingFrame key="onboarding" Flow={onboarding} />
+              ) : (
+                <MainFrame key="main" pages={pages} bindScroll={bindScroll} />
+              )}
+            </AnimatePresence>
+            <DropHint hint={fileDropHint} />
+            <Toasts />
+            <LoginMount Flow={flows.login} />
+            <CreateInstanceMount Flow={flows.createInstance} />
+            <UpdatePanelMount />
+            <OverlayRoot />
           </div>
-          {/* 向导收尾后先播完它自己的退场，再换成主界面：两者都占满整个网格，不能叠着同时出现 */}
-          <AnimatePresence mode="wait" initial={false}>
-            {onboarding !== null ? (
-              <OnboardingFrame key="onboarding" Flow={onboarding} />
-            ) : (
-              <MainFrame key="main" pages={pages} bindScroll={bindScroll} />
-            )}
-          </AnimatePresence>
-          <DropHint hint={fileDropHint} />
-          <Toasts />
-          <LoginMount Flow={flows.login} />
-          <CreateInstanceMount Flow={flows.createInstance} />
-          <UpdatePanelMount />
-          <OverlayRoot />
-        </div>
-      </RemoteImageProvider>
+        </RemoteImageProvider>
+      </ExternalLinkProvider>
     </ChromeProvider>
   );
 }
