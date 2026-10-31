@@ -178,6 +178,27 @@ describe("外壳：全局快捷键", () => {
     expect(nav.route).toEqual({ page: "library" });
   });
 
+  it("按住 Ctrl+K 不放：系统的按键自动重复不让面板开了又关", async () => {
+    await mount();
+    keydown(window, "k", { ctrlKey: true, code: "KeyK" });
+    for (let i = 0; i < 3; i++) {
+      const held = keydown(window, "k", { ctrlKey: true, code: "KeyK", repeat: true });
+      expect(held.defaultPrevented).toBe(true);
+      expect(shell.palette.open).toBe(true);
+    }
+    keydown(window, "k", { ctrlKey: true, code: "KeyK" });
+    expect(shell.palette.open).toBe(false);
+  });
+
+  it("按住 Alt+← 不放照常逐项后退（与浏览器一致）", async () => {
+    await mount();
+    act(() => nav.go({ page: "library" }));
+    act(() => nav.go({ page: "discover" }));
+    keydown(window, "ArrowLeft", { altKey: true });
+    keydown(window, "ArrowLeft", { altKey: true, repeat: true });
+    expect(nav.route).toEqual({ page: "home" });
+  });
+
   it("Alt+← 后退，Alt+1 打开第一个固定实例，Ctrl+N 打开新建实例，Ctrl+, 进设置", async () => {
     await mount();
     keydown(window, "1", { altKey: true, code: "Digit1" });
