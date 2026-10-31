@@ -5,7 +5,7 @@
 import { useCallback } from "react";
 import { isCancelled } from "../ipc/errors";
 import { describeError } from "../state/errors";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions } from "../state/launcher";
 
 export type RunResult<T> = { ok: true; value: T } | { ok: false; error: unknown };
 
@@ -33,8 +33,9 @@ export async function runGuarded<T>(work: () => T | Promise<T>, title: string, r
   }
 }
 
+/** 只取动作、不订阅状态：外壳各处都调用它，订阅整份状态会让调用方随每次下载进度与游戏日志重渲染。 */
 export function useRunner(): Runner {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   return useCallback<Runner>(
     (work, title) =>
       runGuarded(work, title, {

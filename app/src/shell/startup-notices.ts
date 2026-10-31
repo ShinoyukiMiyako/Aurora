@@ -6,7 +6,7 @@ import { useEffect, useRef } from "react";
 import { SHELL_ACTION_ERROR, STARTUP_NOTICE_COPY } from "../copy/shell";
 import { openFolder } from "../ipc/instances";
 import { startupNotices, type StartupNoticeDto } from "../ipc/system";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions } from "../state/launcher";
 import type { ToastAction } from "../state/toasts";
 import { useRunner } from "./useRunner";
 
@@ -41,7 +41,7 @@ export async function loadStartupNotices(): Promise<StartupNotice[]> {
 
 /** 整个应用运行期间只读一次：StrictMode 的二次挂载、外壳布局重渲染都不再读。 */
 export function useStartupNotices(load: (() => Promise<readonly StartupNotice[]>) | undefined): void {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const loaded = useRef(false);
 

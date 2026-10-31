@@ -1,12 +1,14 @@
 // 窗口层面的三件事：关闭前确认、游戏启动后按设置最小化或关闭启动器、窗口在后台时的任务栏提醒。
 // 判定都是纯函数（便于逐条测试），钩子只负责在状态变化时调用它们并经外层统一错误处理执行窗口操作。
+// 三个钩子都挂在外壳根上：只按片订阅各自要判断的那几样（会话的阶段、任务的状态与个数），
+// 下载进度与游戏日志每 100 ms 换一次状态，整份订阅会让外壳根和它不带 memo 的子部件跟着重渲染。
 
 import { useEffect, useRef } from "react";
 import { ACTION_ERROR, CONFIRM_COPY } from "../copy/flows";
-import type { TaskKind } from "../domain/types";
+import type { SessionPhase, TaskKind } from "../domain/types";
 import type { AfterLaunch } from "../ipc/config";
 import type { ConfirmOptions } from "../launch/host";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { activeTasks, closeNeedsConfirm } from "../state/selectors";
 import type { LauncherState } from "../state/store";
 import { isActiveTask } from "../state/tasks";
@@ -14,6 +16,24 @@ import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { useShell } from "./shell";
 import { useRunner } from "./useRunner";
 import { useWindowPort } from "./window";
+
+// ---------------------------------------------------------------- 订阅的片
+
+/** 会话是哪一次启动、在哪个阶段；日志与进度不在其中。 */
+export interface SessionStep {
+  taskId: string;
+  phase: SessionPhase;
+}
+
+export function sessionStep(state: Pick<LauncherState, "session">): SessionStep | null {
+  const s = state.session;
+  return s === null ? null : { taskId: s.taskId, phase: s.phase };
+}
+
+export function sameSessionStep(a: SessionStep | null, b: SessionStep | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.taskId === b.taskId && a.phase === b.phase;
+}
 
 // ---------------------------------------------------------------- 关闭确认
 
@@ -36,20 +56,21 @@ export function closeConfirmOptions(need: { session: boolean; tasks: number }): 
  * 确认后把下载任务记录立即写一次再销毁窗口。确认退出不结束游戏进程。
  */
 export function useCloseGuard(): void {
-  const { state, actions } = useLauncher();
+  const need = useLauncherSelector(closeNeedsConfirm, (a, b) => a.session === b.session && a.tasks === b.tasks);
+  const actions = useLauncherActions();
   const { confirm } = useShell();
   const run = useRunner();
   const port = useWindowPort();
-  const latest = useRef({ state, actions, confirm, run });
-  latest.current = { state, actions, confirm, run };
+  const latest = useRef({ need, actions, confirm, run });
+  latest.current = { need, actions, confirm, run };
 
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     const onClose = async (request: { preventDefault(): void }) => {
       request.preventDefault();
-      const { state: now, actions: act, confirm: ask, run: exec } = latest.current;
-      const options = closeConfirmOptions(closeNeedsConfirm(now));
+      const { need: now, actions: act, confirm: ask, run: exec } = latest.current;
+      const options = closeConfirmOptions(now);
       if (options !== null && !(await ask(options))) return;
       await exec(() => act.flushTaskJournal(), ACTION_ERROR.saveJournal);
       await exec(() => port.destroy(), SHELL_ACTION_ERROR.close);
@@ -84,20 +105,22 @@ export function afterLaunchMove(setting: AfterLaunch, activeTaskCount: number): 
  * 「关闭启动器」的自动退出不弹关闭确认。设置还没读到时按「保持打开」处理。
  */
 export function useAfterLaunch(): void {
-  const { state, actions } = useLauncher();
+  const step = useLauncherSelector(sessionStep, sameSessionStep);
+  const setting = useLauncherSelector((s): AfterLaunch => (s.settings === null ? "keep" : s.settings.afterLaunch));
+  const activeCount = useLauncherSelector((s) => activeTasks(s).length);
+  const actions = useLauncherActions();
   const run = useRunner();
   const port = useWindowPort();
-  const prevSession = useRef(state.session);
+  const prevSession = useRef(step);
   const minimizedFor = useRef<string | null>(null);
 
   useEffect(() => {
     const prev = prevSession.current;
-    const next = state.session;
+    const next = step;
     prevSession.current = next;
     const enteredRunning = next !== null && next.phase === "running" && (prev === null || prev.taskId !== next.taskId || prev.phase !== "running");
     if (enteredRunning) {
-      const setting = state.settings === null ? "keep" : state.settings.afterLaunch;
-      const move = afterLaunchMove(setting, activeTasks(state).length);
+      const move = afterLaunchMove(setting, activeCount);
       if (move === "minimize") {
         minimizedFor.current = next.taskId;
         void run(() => port.minimize(), SHELL_ACTION_ERROR.afterLaunch);
@@ -117,7 +140,7 @@ export function useAfterLaunch(): void {
     void run(async () => {
       if (await port.isMinimized()) await port.unminimize();
     }, SHELL_ACTION_ERROR.restore);
-  }, [actions, port, run, state]);
+  }, [actions, activeCount, port, run, setting, step]);
 }
 
 // ---------------------------------------------------------------- 后台提醒
@@ -133,11 +156,28 @@ export interface AttentionEvent {
 /** 新建、导入、修复：完成后实例才可用，算「实例级任务」。 */
 const INSTANCE_TASK_KINDS: ReadonlySet<TaskKind> = new Set(["game", "modpack", "repair"]);
 
+/** 判断后台提醒要看的两样：会话（只看是哪一次启动、在哪个阶段）与任务（只看 id、种类与状态）。 */
+export type AttentionInputs = Pick<LauncherState, "session" | "tasks">;
+
+function attentionInputs(state: LauncherState): AttentionInputs {
+  return { session: state.session, tasks: state.tasks };
+}
+
+/** 两份输入算出的提醒一样：会话的启动与阶段相同，任务逐个 id、种类、状态相同。下载进度与日志不改变它。 */
+export function sameAttentionInputs(a: AttentionInputs, b: AttentionInputs): boolean {
+  if (!sameSessionStep(sessionStep(a), sessionStep(b))) return false;
+  if (a.tasks === b.tasks) return true;
+  return a.tasks.length === b.tasks.length && a.tasks.every((t, i) => {
+    const u = b.tasks[i];
+    return t.id === u.id && t.kind === u.kind && t.status === u.status;
+  });
+}
+
 /**
  * 两次状态之间值得在后台提醒的事件。任务只认「上一刻还在跑、这一刻结束」的转变：
  * 启动时从任务日志恢复出来的失败记录不是这次运行里发生的，不提醒。
  */
-export function attentionEvents(prev: LauncherState, next: LauncherState): AttentionEvent[] {
+export function attentionEvents(prev: AttentionInputs, next: AttentionInputs): AttentionEvent[] {
   const events: AttentionEvent[] = [];
   const s = next.session;
   if (s !== null && (s.phase === "crashed" || s.phase === "failed")) {
@@ -159,7 +199,7 @@ export function attentionEvents(prev: LauncherState, next: LauncherState): Atten
 
 /** 窗口最小化或没有焦点时，崩溃、启动失败、实例就绪、任务失败要请求任务栏提醒；前台时什么都不做。 */
 export function useBackgroundAttention(): void {
-  const { state } = useLauncher();
+  const state = useLauncherSelector(attentionInputs, sameAttentionInputs);
   const run = useRunner();
   const port = useWindowPort();
   const prevState = useRef(state);
