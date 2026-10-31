@@ -5,7 +5,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useUpdaterInfo, type UpdaterInfoDto } from "../queries/catalog";
 import { invalidate, type ResourceResult } from "../resource";
-import { UpdaterController, type UpdaterPort } from "./controller";
+import { UpdaterController } from "./controller";
 import type { UpdaterState } from "./machine";
 import { UPDATER_PORT } from "./port";
 
@@ -13,14 +13,8 @@ const UpdaterContext = createContext<UpdaterController | null>(null);
 
 const INFO_KEY = "updater";
 
-export interface UpdaterProviderProps {
-  /** 测试换成假的后端；应用里省略，用真实命令。 */
-  port?: UpdaterPort;
-  children: ReactNode;
-}
-
-export function UpdaterProvider({ port = UPDATER_PORT, children }: UpdaterProviderProps) {
-  const [controller] = useState(() => new UpdaterController(port));
+export function UpdaterProvider({ children }: { children: ReactNode }) {
+  const [controller] = useState(() => new UpdaterController(UPDATER_PORT));
   const info = useUpdaterInfo();
   const data = info.status === "ready" ? info.data : null;
   useEffect(() => {
