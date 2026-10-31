@@ -571,14 +571,14 @@ describe("设置页：关于与启动器更新", () => {
     const writeText = vi.fn(async (_text: string) => undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     await mount("about");
-    expect(text()).toContain("版本 0.3.0-preview.2 · AGPL-3.0");
+    expect(text()).toContain("版本 0.3.0-preview.2 · AGPL-3.0-only");
     const card = section("版本信息");
     const rows = [...card.querySelectorAll("dl > div")].map((row) => [row.querySelector("dt")?.textContent, row.querySelector("dd")?.textContent]);
     expect(rows).toEqual([
       ["版本", "0.3.0-preview.2"],
       ["发布通道", "预览版"],
       ["构建日期", "2026年10月30日"],
-      ["开源协议", "AGPL-3.0"],
+      ["开源协议", "AGPL-3.0-only"],
       ["源代码", REPO_URL],
     ]);
     const copies = [...card.querySelectorAll<HTMLButtonElement>('button[aria-label="复制"]')];
@@ -587,7 +587,7 @@ describe("设置页：关于与启动器更新", () => {
     await click(copies[0]);
     expect(writeText.mock.calls.map((c) => c[0])).toEqual([
       REPO_URL,
-      [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0", `源代码：${REPO_URL}`].join("\n"),
+      [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0-only", `源代码：${REPO_URL}`].join("\n"),
     ]);
   });
 

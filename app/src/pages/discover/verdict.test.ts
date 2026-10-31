@@ -23,18 +23,18 @@ describe("单个目标的判定", () => {
   it("已装且矩阵给出另一个更合适的版本：可更新，原因写出新旧版本号", () => {
     const v = targetVerdict({
       instance: summary("a"),
-      match: match("a", { state: "installed", installed: { file_name: "x.jar", version_id: "v1", version_number: "1.0.0" }, best_version: modVersion("v2", { version_number: "1.1.0" }) }),
+      match: match("a", { state: "installed", installed: { file_name: "x.jar", version_id: "v1", version_number: "1.0.0", world: null }, best_version: modVersion("v2", { version_number: "1.1.0" }) }),
       resourceType: "mod",
     });
     expect([v.kind, v.selectable, v.reason, v.version?.version_id]).toEqual(["updatable", true, "已装 1.0.0，将换成 1.1.0", "v2"]);
   });
 
   it("已装的就是最佳版本、或最佳版本不匹配：已安装，不可勾选", () => {
-    const same = targetVerdict({ instance: summary("a"), match: match("a", { state: "installed", installed: { file_name: "x.jar", version_id: "v2", version_number: null } }), resourceType: "mod" });
+    const same = targetVerdict({ instance: summary("a"), match: match("a", { state: "installed", installed: { file_name: "x.jar", version_id: "v2", version_number: null, world: null } }), resourceType: "mod" });
     expect([same.kind, same.selectable]).toEqual(["installed", false]);
     const mismatch = targetVerdict({
       instance: summary("a"),
-      match: match("a", { state: "installed", compatibility: { kind: "mismatch", reason: "x" }, installed: { file_name: "x.jar", version_id: "v1", version_number: null } }),
+      match: match("a", { state: "installed", compatibility: { kind: "mismatch", reason: "x" }, installed: { file_name: "x.jar", version_id: "v1", version_number: null, world: null } }),
       resourceType: "mod",
     });
     expect(mismatch.kind).toBe("installed");
