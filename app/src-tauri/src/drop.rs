@@ -70,7 +70,7 @@ pub fn install(window: &tauri::WebviewWindow) -> tauri::Result<()> {
         // controller 与它的父窗口在回调期间都有效。
         match unsafe { native::install(&webview, emit) } {
             Ok(registered) => tracing::info!(registered, "主窗口的拖放目标已就绪"),
-            Err(err) => tracing::error!(error = %err, "主窗口的拖放目标装不上，拖进窗口的文件与外置登录链接都不会有反应"),
+            Err(err) => tracing::error!(error = %err, "主窗口的拖放目标没装上，拖进窗口的文件与外置登录链接眼下都没有反应"),
         }
     })
 }
@@ -116,8 +116,8 @@ mod native {
     /// 拖入文字最多读这么多个 UTF-16 码元。外置登录链接只有几十到几百个字符；拖进一大段网页文字时不必整段读出来。
     const MAX_TEXT_UNITS: usize = 4096;
 
-    /// 关掉 WebView2 自己的外部拖入，在父窗口下的每个子窗口上换上 [`DropTarget`]，再订阅子进程故障与
-    /// 页面加载完成，好在 WebView2 换掉子窗口之后重新挂上。返回注册上的窗口数。
+    /// 关掉 WebView2 自己的外部拖入，订阅子进程故障与页面加载完成（好在 WebView2 换掉子窗口之后重新挂上），
+    /// 再在父窗口下的每个子窗口上换上 [`DropTarget`]。返回注册上的窗口数。
     ///
     /// # Safety
     /// 只能在 WebView 所属的 UI 线程上调用，且该线程已初始化 OLE。
@@ -134,13 +134,28 @@ mod native {
             let mut parent = HWND::default();
             controller.ParentWindow(&mut parent)?;
             let registrar = Rc::new(Registrar::new(parent, emit));
-            let registered = registrar.sync()?;
-            // 订阅不上时眼下的拖放照常可用，只是子进程重启后不会重挂；单独记下，不当成装不上
-            if let Err(err) = watch(&controller.CoreWebView2()?, registrar) {
-                tracing::error!(error = %err, "订阅 WebView2 子进程故障与页面加载完成失败，WebView2 子进程重启后拖进窗口的文件与外置登录链接会没有反应");
-            }
-            Ok(registered)
+            arm(registrar, |registrar| {
+                watch(&controller.CoreWebView2()?, registrar)
+            })
         }
+    }
+
+    /// 先订阅页面加载完成，再按当前的子窗口挂一遍，返回这一遍注册上的窗口数。
+    ///
+    /// 订阅不看这一遍的结果：这一遍可能一个都挂不上（撤 WebView2 原有的放置目标会遇到 RPC_E_WRONG_THREAD），
+    /// 只要订阅在，页面加载完成时还会再挂。
+    ///
+    /// # Safety
+    /// 同 [`Registrar::sync`]。
+    unsafe fn arm(
+        registrar: Rc<Registrar>,
+        subscribe: impl FnOnce(Rc<Registrar>) -> windows_core::Result<()>,
+    ) -> windows_core::Result<usize> {
+        // 订阅不上时眼下的拖放照常可用，只是子进程重启后不会重挂；单独记下，不当成装不上
+        if let Err(err) = subscribe(registrar.clone()) {
+            tracing::error!(error = %err, "订阅 WebView2 子进程故障与页面加载完成失败，WebView2 子进程重启后拖进窗口的文件与外置登录链接会没有反应");
+        }
+        unsafe { registrar.sync() }
     }
 
     /// 子进程故障记一笔，页面加载完成时按当时的子窗口重挂。两个订阅随 WebView 活到应用退出，
@@ -515,7 +530,9 @@ mod native {
             COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
             COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
         };
-        use windows::Win32::Foundation::{DRAGDROP_E_ALREADYREGISTERED, HGLOBAL, POINT};
+        use windows::Win32::Foundation::{
+            DRAGDROP_E_ALREADYREGISTERED, E_NOINTERFACE, HGLOBAL, POINT,
+        };
         use windows::Win32::System::Memory::{GlobalAlloc, GMEM_MOVEABLE};
         use windows::Win32::System::Ole::OleInitialize;
         use windows::Win32::UI::Shell::{SHCreateDataObject, DROPFILES};
@@ -772,6 +789,50 @@ mod native {
             assert!(!registrar.rebuild_pending.get());
             registrar.process_failed(COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED);
             assert!(registrar.rebuild_pending.get());
+            unsafe { DestroyWindow(parent) }.unwrap();
+        }
+
+        /// 装的那一刻一个子窗口都没挂上（没有子窗口，或撤旧、注册全失败），仍要订阅页面加载完成：
+        /// 不然之后有了网页子窗口也没人去挂，这次运行里拖放一直没有反应。
+        #[test]
+        fn install_with_nothing_registered_still_waits_for_the_page_load() {
+            let parent = window(None);
+            let armed = RefCell::new(None);
+            let err = unsafe {
+                arm(
+                    Rc::new(Registrar::new(parent, Rc::new(|_| {}))),
+                    |registrar| {
+                        *armed.borrow_mut() = Some(registrar);
+                        Ok(())
+                    },
+                )
+            }
+            .unwrap_err();
+            assert_eq!(err.code(), E_FAIL);
+
+            let page = window(Some(parent));
+            let registrar = armed
+                .borrow_mut()
+                .take()
+                .expect("一个窗口都没挂上时也要订阅页面加载完成");
+            unsafe { registrar.navigation_completed() };
+            assert!(is_registered(page));
+            unsafe { DestroyWindow(parent) }.unwrap();
+        }
+
+        /// 订阅失败只少了之后的重挂，眼下的子窗口照样挂上。
+        #[test]
+        fn failed_subscription_still_registers_the_current_windows() {
+            let parent = window(None);
+            let page = window(Some(parent));
+            let registered = unsafe {
+                arm(Rc::new(Registrar::new(parent, Rc::new(|_| {}))), |_| {
+                    Err(E_NOINTERFACE.into())
+                })
+            }
+            .unwrap();
+            assert_eq!(registered, 1);
+            assert!(is_registered(page));
             unsafe { DestroyWindow(parent) }.unwrap();
         }
 
