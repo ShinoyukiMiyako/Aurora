@@ -447,6 +447,33 @@ describe("实例详情：后端正在改动实例", () => {
     await flush();
     expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
   });
+
+  it("后端在备份或恢复存档（含游戏退出后的自动备份）：重命名、删除带备份的原因禁用，Mod 开关照常可用", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
+    await open("settings");
+    for (const [label, what] of [
+      ["重命名", "重命名"],
+      ["删除实例", "删除"],
+    ]) {
+      const el = button(label);
+      expect(el.getAttribute("aria-disabled")).toBe("true");
+      act(() => {
+        el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tipId = el.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error(`「${label}」悬停后没有关联提示气泡`);
+      expect(document.getElementById(tipId)?.textContent).toBe(`正在备份或恢复这个实例的存档，完成后才能${what}`);
+    }
+    click(button("删除实例"));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    click(byRole("tab", /^Mod/));
+    await flush();
+    expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
 });
 
 describe("实例详情：新建还没落盘的实例", () => {

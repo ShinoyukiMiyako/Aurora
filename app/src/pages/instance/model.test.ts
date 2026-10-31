@@ -21,6 +21,7 @@ import {
   historyItems,
   installStage,
   instanceFolderPath,
+  heldActivity,
   instanceLocks,
   isCrashActive,
   isolationByPolicy,
@@ -152,20 +153,29 @@ describe("上次崩溃判定", () => {
 
 describe("锁定矩阵", () => {
   it("运行中锁住 Mod、重命名、补全与删除", () => {
-    expect(instanceLocks(true, false, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(true, false, null)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
   });
   it("安装中锁住文件操作但可以删除", () => {
-    expect(instanceLocks(false, true, false)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
+    expect(instanceLocks(false, true, null)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
   });
   it("就绪时全部可用", () => {
-    expect(instanceLocks(false, false, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
+    expect(instanceLocks(false, false, null)).toEqual({ mods: null, rename: null, repair: null, delete: null });
   });
   it("后端在改动 Mod、资源或设置：锁住改名、补全与删除，Mod 操作照常", () => {
-    expect(instanceLocks(false, false, true)).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
+    expect(instanceLocks(false, false, "modifying")).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
+  });
+  it("后端在备份、恢复或导出存档：同样锁住改名、补全与删除，Mod 操作照常", () => {
+    expect(instanceLocks(false, false, "backing_up")).toEqual({ mods: null, rename: "backing_up", repair: "backing_up", delete: "backing_up" });
+    expect(instanceLocks(true, false, "backing_up")).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+  });
+  it("只有改动中与备份中算后端占着；别的活动由各自的判定处理", () => {
+    expect(heldActivity("modifying")).toBe("modifying");
+    expect(heldActivity("backing_up")).toBe("backing_up");
+    for (const other of ["installing", "repairing", "renaming", "deleting", "launching", "running", null] as const) expect(heldActivity(other)).toBeNull();
   });
   it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
-    expect(instanceLocks(true, false, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
-    expect(instanceLocks(false, true, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
+    expect(instanceLocks(true, false, "modifying")).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(false, true, "modifying")).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
   });
 });
 

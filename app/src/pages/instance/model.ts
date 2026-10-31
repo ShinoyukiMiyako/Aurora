@@ -34,8 +34,11 @@ export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "wo
 
 // ---------------------------------------------------------------- 锁定
 
-/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置。 */
-export type InstanceLock = "running" | "installing" | "modifying";
+/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置，或正在备份、恢复、导出存档。 */
+export type InstanceLock = "running" | "installing" | "modifying" | "backing_up";
+
+/** 后端占着实例、又不挡 Mod 操作的两种活动。 */
+export type HeldActivity = "modifying" | "backing_up";
 
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
@@ -44,19 +47,25 @@ export interface InstanceLocks {
   rename: InstanceLock | null;
   /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。 */
   repair: InstanceLock | null;
-  delete: "running" | "modifying" | null;
+  delete: "running" | HeldActivity | null;
 }
 
 /**
  * busy：本实例的会话在准备、下载、启动或运行中（JVM 占着 Mod 文件，Windows 下改名、替换、删除都会失败）。
  * installing：安装或补全任务正在写这个实例的目录。
- * modifying：后端正占着实例改动 Mod、资源或设置。它与游戏运行、与它自己兼容，所以不锁 Mod 操作；
- * 但与改名、删除、补全互斥，不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
+ * held：后端报告的活动里，占着实例但与 Mod 改动兼容的那两种。modifying 是在改动 Mod、资源或设置；backing_up
+ * 是在备份、恢复或导出存档（游戏退出后的自动备份也算）。两者都不锁 Mod 操作，但与改名、删除、补全互斥，
+ * 不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
  */
-export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean): InstanceLocks {
+export function instanceLocks(busy: boolean, installing: boolean, held: HeldActivity | null): InstanceLocks {
   const fileLock = busy ? "running" : installing ? "installing" : null;
-  const dirLock = fileLock !== null ? fileLock : modifying ? "modifying" : null;
-  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : null };
+  const dirLock = fileLock !== null ? fileLock : held;
+  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : held };
+}
+
+/** 后端报告的活动里属于 held 的那部分（见 instanceLocks）。 */
+export function heldActivity(activity: InstanceSummary["activity"]): HeldActivity | null {
+  return activity === "modifying" || activity === "backing_up" ? activity : null;
 }
 
 /** 打开工作子目录与写实例设置被什么挡住。 */
