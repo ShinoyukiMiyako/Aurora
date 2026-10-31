@@ -203,6 +203,20 @@ describe("账户页：当前账户与列表", () => {
 });
 
 describe("账户页：皮肤", () => {
+  it("聚光卡与账户卡用全身立绘（聚光卡 6 倍 96 x 192，账户卡 4 倍 64 x 128）；离线账户没有远程皮肤，画剪影", async () => {
+    await mount();
+    const figures = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
+    expect(figures.map((f) => [f.style.width, f.style.height])).toEqual([
+      ["96px", "192px"],
+      ["64px", "128px"],
+      ["64px", "128px"],
+    ]);
+    const steveFigure = cardOf("Steve").querySelector('[data-sk-art="skin"]');
+    expect(steveFigure?.getAttribute("data-art")).toBe("silhouette");
+    // 离线账户同样问一次后端；后端对离线账户回 null（默认皮肤的推算规则未核对前不提供）
+    expect(callsOf(ipc, "skin_info")).toContainEqual({ accountUuid: steve.uuid });
+  });
+
   it("皮肤查询失败：舞台照常画剪影立绘，不弹通知，原因写进控制台", async () => {
     ipc.overrides.set("skin_info", () => {
       throw new IpcError("io", "账户文件读不出来");
