@@ -19,6 +19,7 @@ use aurora_download::{CancellationToken, SourcePlan};
 use serde::Deserialize;
 use tokio::process::{Child, Command};
 
+use crate::complete;
 use crate::context::InstallContext;
 use crate::error::{Error, Result, io_err, zip_err};
 use crate::net;
@@ -497,7 +498,12 @@ impl<'a> ForgeInstaller<'a> {
         libs.extend(embedded.libraries.clone());
         let (bundled, remote): (Vec<_>, Vec<_>) = libs.into_iter().partition(is_bundled);
         extract_bundled_libraries(installer, &bundled, self.cx.layout).await?;
-        let tasks = plan::tasks_for_libraries(&remote, self.cx.runtime, self.cx.layout)?;
+        let tasks = complete::skip_present_unverifiable(plan::tasks_for_libraries(
+            &remote,
+            self.cx.runtime,
+            self.cx.layout,
+        )?)
+        .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
         // 解出 data 表里 `/jar 内路径` 型取值到独立临时目录。
@@ -683,8 +689,14 @@ impl<'a> ForgeInstaller<'a> {
             .ok_or_else(|| Error::InvalidLibraryCoordinate { name: coord })?;
         extract_zip_entry_to_async(installer, file_path.trim_start_matches('/'), &dest).await?;
 
-        let tasks =
-            plan::tasks_for_libraries(&embedded.libraries, self.cx.runtime, self.cx.layout)?;
+        // versionInfo 里的 Forge 库条目只有坐标和仓库地址，仓库里那个坐标并没有文件（只有
+        // `-universal.jar`）；它就是刚解出的通用 jar，在盘上即算就绪。
+        let tasks = complete::skip_present_unverifiable(plan::tasks_for_libraries(
+            &embedded.libraries,
+            self.cx.runtime,
+            self.cx.layout,
+        )?)
+        .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
         Ok((
@@ -1454,6 +1466,59 @@ mod tests {
             "实际：{err:?}"
         );
         assert!(!f.layout.library_path(path).exists());
+    }
+
+    /// 1.7.10 到 1.12.2 早期构建的 installer：Forge 库条目带着 Maven 仓库地址，那里却只有
+    /// `-universal.jar`，照坐标去拉是 404；通用 jar 已经从 installer 里解到这个落点，不该再下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_forge_library_is_not_fetched_over_the_extracted_universal_jar() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let profile = serde_json::json!({
+            "install": {
+                "path": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                "filePath": "forge-1.7.10-10.13.4.1614-1.7.10-universal.jar"
+            },
+            "versionInfo": {
+                "id": "1.7.10-Forge10.13.4.1614-1.7.10",
+                "inheritsFrom": "1.7.10",
+                "mainClass": "net.minecraft.launchwrapper.Launch",
+                "libraries": [{
+                    "name": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                    "url": format!("{}/", server.uri())
+                }]
+            }
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                (
+                    "forge-1.7.10-10.13.4.1614-1.7.10-universal.jar",
+                    b"universal",
+                ),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap();
+
+        let universal = f
+            .layout
+            .library_path_for_coordinate("net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10")
+            .unwrap();
+        assert_eq!(std::fs::read(universal).unwrap(), b"universal");
     }
 
     /// 一个三十秒左右才自己退出的子进程，代替不观察取消令牌、一跑好几秒的处理器。
