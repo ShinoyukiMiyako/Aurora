@@ -215,6 +215,54 @@ describe("立即消失", () => {
     advance(5000);
     expect(button("A").hasAttribute("aria-describedby")).toBe(false);
   });
+
+  // 标题栏的后退键按到历史尽头就变成禁用：浏览器把焦点挪走却不派发 blur，气泡要自己收起，不能一直挂着
+  it("键盘聚焦打开后，触发元素自己变成禁用：立即收起", () => {
+    let setOff!: (v: boolean) => void;
+    function Host() {
+      const [off, set] = useState(false);
+      setOff = set;
+      return (
+        <Tooltip content="后退">
+          <button disabled={off}>A</button>
+        </Tooltip>
+      );
+    }
+    mount(<Host />);
+    focusByKeyboard(button("A"));
+    expect(bubble()?.textContent).toBe("后退");
+    act(() => setOff(true));
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("触发元素本来就是禁用的：悬停照常显示", () => {
+    mount(
+      <Tooltip content="后退">
+        <button disabled>A</button>
+      </Tooltip>,
+    );
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    expect(bubble()?.textContent).toBe("后退");
+    expect(button("A").getAttribute("aria-describedby")).toBe(bubble()?.id);
+  });
+
+  it("触发元素改的是别的属性：气泡照常留着", () => {
+    let setTitle!: (v: string) => void;
+    function Host() {
+      const [title, set] = useState("a");
+      setTitle = set;
+      return (
+        <Tooltip content="后退">
+          <button title={title}>A</button>
+        </Tooltip>
+      );
+    }
+    mount(<Host />);
+    focusByKeyboard(button("A"));
+    act(() => setTitle("b"));
+    expect(bubble()?.textContent).toBe("后退");
+  });
 });
 
 describe("键盘与关联", () => {

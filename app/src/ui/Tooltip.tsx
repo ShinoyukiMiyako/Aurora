@@ -62,8 +62,11 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
     setAnchor(null);
   }, []);
 
+  // 打开时触发元素就已禁用（悬停查看灰掉的后退键是什么）：照常显示，只在打开之后才变禁用时收起
+  const openedDisabled = useRef(false);
   const open = (target: Element) => {
     openRef.current = true;
+    openedDisabled.current = target.matches(":disabled");
     setAnchor(target);
   };
 
@@ -105,6 +108,12 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
     hideNow();
     // show 每次渲染都是新函数，不列进依赖：只跟随 open 的变化
   }, [forced, hideNow]);
+
+  // 显示期间触发元素自己变成禁用（后退键退到历史尽头）：浏览器把焦点挪到 body 却不派发 blur，
+  // 气泡会一直挂在那里。禁用总是随这里的子元素一起重渲染，每次提交后查一次即可
+  useLayoutEffect(() => {
+    if (anchor !== null && !openedDisabled.current && anchor.matches(":disabled")) hideNow();
+  });
 
   useEscapeListener(anchor !== null, hideNow);
 
