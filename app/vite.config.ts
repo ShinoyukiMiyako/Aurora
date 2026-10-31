@@ -5,9 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readBuildInfo } from "./scripts/build-info.mjs";
 import { thirdPartyManifest } from "./scripts/third-party-licenses.mjs";
-import { THIRD_PARTY_LICENSES_FILE } from "./src/lib/app-info";
+import { THIRD_PARTY_LICENSES_FILE } from "./scripts/licenses-file.mjs";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 const APP_DIR = dirname(fileURLToPath(import.meta.url));
