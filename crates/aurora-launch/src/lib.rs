@@ -36,7 +36,8 @@ pub use args::{dedup_jvm_args, ensure_client_jar_ignored, merge_game_args, split
 pub use classpath::{classpath_entries, classpath_separator, classpath_string};
 pub use command::{CommandBuilder, GamePaths, LaunchCommand};
 pub use crash::{
-    CrashCategory, CrashDiagnosis, analyze, analyze_lines, extract_mod_ids, has_crash_marker,
+    CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, analyze, analyze_lines,
+    exit_code_clue, explain_exit_code, extract_mod_ids, has_crash_marker, suspected_mods,
 };
 pub use error::{LaunchError, Result};
 pub use logfile::{
