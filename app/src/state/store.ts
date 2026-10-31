@@ -257,7 +257,11 @@ export interface LauncherActions {
   // 账户与登录
   selectAccount(uuid: string): Promise<void>;
   removeAccount(uuid: string): Promise<void>;
-  refreshAccount(uuid: string): Promise<void>;
+  /**
+   * 刷新名字、皮肤与令牌。凭据被判失效不是操作失败：账户重新读出来已是 expired，原位显示「重新登录」，
+   * 返回 "expired" 而不抛错；其余失败原样抛出。
+   */
+  refreshAccount(uuid: string): Promise<"refreshed" | "expired">;
   addOfflineAccount(name: string): Promise<Account>;
   openLogin(kind: LoginKind, intent?: LoginIntent): Promise<void>;
   closeLogin(): Promise<void>;
@@ -327,6 +331,9 @@ const TASK_COMMANDS = new Set([
 ]);
 
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
+
+/** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
+const RELOGIN_REQUIRED_CODE = "ReloginRequired";
 
 /** load_task_journal 在日志文件损坏或版本不符时的错误码。 */
 const TASK_JOURNAL_INVALID_CODE = "task_journal_invalid";
@@ -1373,8 +1380,16 @@ export class LauncherStore {
         store.pushToast("info", TOAST_COPY.accountDeleted(account.name));
       },
       async refreshAccount(uuid) {
-        await accountsIpc.refreshAccount(uuid);
+        const outcome = await accountsIpc.refreshAccount(uuid).then(
+          () => "refreshed" as const,
+          (error: unknown) => {
+            if (isIpcError(error) && error.code === RELOGIN_REQUIRED_CODE) return "expired" as const;
+            throw error;
+          },
+        );
         await store.fetchAccounts();
+        if (outcome === "refreshed") invalidateResources(`skin:${uuid}`);
+        return outcome;
       },
       async addOfflineAccount(name) {
         const check = validateOfflineName(name, store.raw.accounts.map((a) => a.name));
@@ -1421,6 +1436,7 @@ export class LauncherStore {
             store.clearDeviceTimer();
             const account = accountFromDto(dto);
             await store.fetchAccounts();
+            invalidateResources(`skin:${account.uuid}`);
             const login = store.raw.login;
             if (gen !== store.loginGen || login === null || login.kind !== "microsoft") return;
             if (login.intent.kind === "launch") {
@@ -1896,6 +1912,7 @@ export class LauncherStore {
 
   private async afterAuthlib(account: Account): Promise<void> {
     if (account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少服务器名`);
+    invalidateResources(`skin:${account.uuid}`);
     const copy = TOAST_COPY.authlibAdded(account.name, account.authServer);
     await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
   }
