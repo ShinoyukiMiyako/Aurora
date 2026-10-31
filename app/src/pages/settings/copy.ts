@@ -1,7 +1,6 @@
 // 设置页与启动器更新的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
-import type { AccentName, AppearanceMode } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 import type { SettingsSection } from "../../state/route";
 
@@ -124,13 +123,6 @@ export const JAVA_COPY = {
   enqueued: (major: number) => `已加入下载队列：Java ${major}`,
 } as const;
 
-export const JAVA_SOURCE_LABEL = {
-  managed: "托管",
-  registry: "注册表",
-  common_dir: "常用目录",
-  path: "PATH",
-} as const;
-
 // ---------------------------------------------------------------- 游戏
 
 export const MEMORY_COPY = {
@@ -217,17 +209,6 @@ export const APPEARANCE_COPY = {
   reduceMotionDesc: "停掉花瓣飘落、卡面视差与页面过渡。系统开了「减少动态效果」时无论这里怎么设都会生效。",
   systemReduced: "系统已开启",
 } as const;
-
-export const MODE_OPTIONS: readonly { value: AppearanceMode; label: string; desc: string; icon: IconName }[] = [
-  { value: "day", label: "日樱", desc: "浅粉白底，适合白天", icon: "sun" },
-  { value: "night", label: "夜樱", desc: "深紫灰底与紫水晶点缀", icon: "moon" },
-];
-
-export const ACCENT_OPTIONS: readonly { value: AccentName; label: string }[] = [
-  { value: "sakura", label: "樱粉" },
-  { value: "amethyst", label: "紫水晶" },
-  { value: "moss", label: "青苔" },
-];
 
 // ---------------------------------------------------------------- 关于
 

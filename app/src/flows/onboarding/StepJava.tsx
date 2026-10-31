@@ -11,7 +11,8 @@ import { EmptyState } from "../../ui/EmptyState";
 import { SettingRow } from "../../ui/SettingRow";
 import { Tag } from "../../ui/Tag";
 import { Toggle } from "../../ui/Toggle";
-import { JAVA_SOURCE_LABEL, JAVA_STEP_COPY } from "./copy";
+import { JAVA_SOURCE_LABEL } from "../../copy/settings";
+import { JAVA_STEP_COPY } from "./copy";
 import s from "./onboarding.module.css";
 
 /** 列表最多显示几个，其余折成「还有 n 个」。 */

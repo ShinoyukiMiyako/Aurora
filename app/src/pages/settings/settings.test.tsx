@@ -404,6 +404,23 @@ describe("设置页：游戏", () => {
 });
 
 describe("设置页：外观", () => {
+  it("非当前的明暗与强调色也画出真实颜色：预览按各自的明暗与当前强调色，色块各画各的", async () => {
+    await mount("appearance");
+    const previews = () => all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
+    expect(previews()).toEqual([
+      ["day", "sakura"],
+      ["night", "sakura"],
+    ]);
+    expect(all('[role="radiogroup"][aria-label="强调色"] [data-tint]').map((p) => p.getAttribute("data-tint"))).toEqual(["sakura", "amethyst", "moss"]);
+    await click(radio("青苔"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { accent: "moss" } }]);
+    expect(previews()).toEqual([
+      ["day", "moss"],
+      ["night", "moss"],
+    ]);
+    expect(radio("青苔").getAttribute("aria-checked")).toBe("true");
+  });
+
   it("明暗即时生效并写后端；本机没有樱花林全景时开关禁用并说明原因", async () => {
     await mount("appearance");
     await click(radio("夜樱"));
