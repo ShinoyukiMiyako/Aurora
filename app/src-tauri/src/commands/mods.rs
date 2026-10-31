@@ -455,6 +455,7 @@ mod tests {
             sha1: None,
             installed_at: 1_700_000_000,
             installed_as_dependency_of: None,
+            update_hold: None,
         });
         aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
 
@@ -695,6 +696,7 @@ mod tests {
                 sha1: None,
                 installed_at: 1_700_000_000,
                 installed_as_dependency_of: None,
+                update_hold: None,
             });
         }
         aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();

@@ -663,6 +663,7 @@ impl Aurora {
                 sha1: placement.sha1.clone(),
                 installed_at: at,
                 installed_as_dependency_of: placement.required_by.clone(),
+                update_hold: None,
             });
         }
         self.ledger_store(version_id).save(&ledger).await?;
@@ -747,7 +748,7 @@ fn join_ledger(installed: InstalledMod, ledger: &Ledger) -> InstanceMod {
 ///
 /// 移除与启停只该作用于模组文件本身：放任任意文件名进来，`.old` 备份、配置文件乃至带 `..` 的路径都会
 /// 被当成 Mod 删掉或改名。
-fn mod_file_path(mods_dir: &Path, file_name: &str) -> Result<PathBuf> {
+pub(crate) fn mod_file_path(mods_dir: &Path, file_name: &str) -> Result<PathBuf> {
     if !is_plain_file_name(file_name) || !ledger_key(file_name).ends_with(".jar") {
         return Err(refuse(
             &mods_dir.join(file_name),
@@ -1931,6 +1932,7 @@ mod tests {
             sha1: None,
             installed_at: 0,
             installed_as_dependency_of: None,
+            update_hold: None,
         });
         aurora.ledger_store("1.21").save(&ledger).await.unwrap();
 
@@ -2003,6 +2005,7 @@ mod tests {
                 sha1: None,
                 installed_at: 0,
                 installed_as_dependency_of: None,
+                update_hold: None,
             });
         }
         aurora.ledger_store("1.21").save(&ledger).await.unwrap();

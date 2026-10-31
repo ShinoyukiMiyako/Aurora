@@ -83,7 +83,7 @@ pub use launch::{
     resolve_memory,
 };
 pub use launcher_update::{UpdateSource, order_update_sources};
-pub use ledger::{Ledger, LedgerEntry, LedgerStore};
+pub use ledger::{Ledger, LedgerEntry, LedgerStore, UpdateHold};
 pub use modfs::is_mod_file_busy;
 pub use modpack::{
     INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
@@ -99,7 +99,7 @@ pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
 };
-pub use updates::UpdateCandidate;
+pub use updates::{ModChangelog, UpdateCandidate};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 

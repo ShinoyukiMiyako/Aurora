@@ -901,6 +901,7 @@ mod tests {
             sha1: Some(sha1.to_owned()),
             installed_at: 1_700_000_000,
             installed_as_dependency_of: Some("P-OWNER".to_owned()),
+            update_hold: None,
         }
     }
 
