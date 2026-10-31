@@ -9,6 +9,9 @@
 //! [`ConfigStore::load`] 冒泡报错，而不是静默用默认覆盖（避免用户改坏的配置被无声吞掉）。桌面应用启动
 //! 走 [`ConfigStore::load_or_preserve`]：坏文件改名留作现场、按默认配置启动，并交回经过供界面提示，
 //! 不让一份写错的配置把启动器堵死在打不开的状态。
+//!
+//! 枚举字段按字段前向兼容：降级后遇到新版本写入的取值，只把那一项退回默认，其余设置照常读入，
+//! 文件原样不动（见 [`ConfigFieldReset`]）。整份当坏文件处理的只剩不是合法 JSON 与类型对不上。
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +19,9 @@ use aurora_base::mirror::{self, MirrorSource};
 use aurora_download::SourcePlan;
 use aurora_instance::IsolationPolicy;
 use chrono::{Datelike, Local, Timelike};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::appearance::Appearance;
 use crate::error::{CoreError, Result};
@@ -226,13 +231,86 @@ impl Aurora {
     }
 }
 
-/// 配置文件读不出来、改名留存后按默认配置继续的经过。
+/// 配置文件没能原样读进来时做的处置，供界面提示。两种处置不会同时出现。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigRecovery {
-    /// 坏文件改名后的路径，原样保留着用户的内容。
-    pub preserved: PathBuf,
-    /// 解析失败的原因（含行列）。
-    pub error: String,
+pub enum ConfigRecovery {
+    /// 整份读不出来（不是合法 JSON、类型对不上）：坏文件改名留存，按全默认配置继续。
+    Reset {
+        /// 坏文件改名后的路径，原样保留着用户的内容。
+        preserved: PathBuf,
+        /// 解析失败的原因。通常含行列；不认识的取值退回后结构仍对不上时，报的是退回之后的错误，不含行列。
+        error: String,
+    },
+    /// 只有枚举字段的取值不认识：这几项按默认值，其余设置照常读入，文件原样不动。
+    FieldsReset(Vec<ConfigFieldReset>),
+}
+
+/// 一个因取值不认识而退回默认的枚举字段。
+///
+/// 文件不因此改写：降级后再升回去，新版本写的值还在。用户改了任一设置时整份配置照常落盘，
+/// 这一项才按当时内存里的值写回。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFieldReset {
+    /// 字段在 config.json 里的位置，嵌套用点号连接，如 `language`、`appearance.mode`。
+    pub field: &'static str,
+    /// 文件里写的原值。
+    pub value: String,
+}
+
+/// config.json 里取值是枚举的字段。只有登记在这里的字段享有字段级的前向兼容；新增枚举字段漏登记时，
+/// 测试按默认配置里的字符串取值核对出来。
+const ENUM_FIELDS: &[EnumField] = &[
+    EnumField::of::<DownloadSourcePolicy>("download_source"),
+    EnumField::of::<DownloadSourcePolicy>("version_list_source"),
+    EnumField::of::<IsolationPolicy>("isolation_policy"),
+    EnumField::of::<crate::appearance::AppearanceMode>("appearance.mode"),
+    EnumField::of::<crate::appearance::AccentColor>("appearance.accent"),
+    EnumField::of::<AfterLaunch>("after_launch"),
+    EnumField::of::<UiLanguage>("language"),
+];
+
+struct EnumField {
+    path: &'static str,
+    known: fn(&str) -> bool,
+}
+
+impl EnumField {
+    const fn of<E: DeserializeOwned>(path: &'static str) -> Self {
+        Self {
+            path,
+            known: is_variant::<E>,
+        }
+    }
+}
+
+/// 按枚举自己的 serde 名判定，与整份配置的解析共用同一套名字（含大小写）。
+fn is_variant<E: DeserializeOwned>(value: &str) -> bool {
+    serde_json::from_value::<E>(Value::String(value.to_owned())).is_ok()
+}
+
+/// 把登记字段里不认识的字符串取值从 JSON 树上摘掉，交给 `#[serde(default)]` 补默认值。
+/// 只认字符串：取值是数字、null、对象，或上层不是对象，都属于类型对不上，留给反序列化报错。
+fn take_unknown_enum_values(root: &mut Value) -> Vec<ConfigFieldReset> {
+    let mut resets = Vec::new();
+    for field in ENUM_FIELDS {
+        let (parent, leaf) = match field.path.rsplit_once('.') {
+            Some((parent, leaf)) => (format!("/{}", parent.replace('.', "/")), leaf),
+            None => (String::new(), field.path),
+        };
+        let Some(object) = root.pointer_mut(&parent).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        if let Some(Value::String(raw)) = object.get(leaf)
+            && !(field.known)(raw)
+        {
+            resets.push(ConfigFieldReset {
+                field: field.path,
+                value: raw.clone(),
+            });
+            object.remove(leaf);
+        }
+    }
+    resets
 }
 
 /// 坏配置文件改名用的后缀前缀，后面接本地时间 `YYYYMMDD-HHMMSS`。
@@ -255,13 +333,18 @@ impl ConfigStore {
     }
 
     /// 载入配置。文件不存在返回全默认；存在但内容损坏冒泡 [`CoreError::ConfigParse`]。
+    /// 枚举字段的取值不认识不算损坏：那几项退回默认、记进日志，其余照常读入。
     pub async fn load(&self) -> Result<AuroraConfig> {
+        Ok(self.load_reporting().await?.0)
+    }
+
+    /// 载入配置，连同取值不认识、退回默认的枚举字段。
+    async fn load_reporting(&self) -> Result<(AuroraConfig, Vec<ConfigFieldReset>)> {
         match tokio::fs::read(&self.path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| CoreError::ConfigParse {
-                path: self.path.clone(),
-                source,
-            }),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(AuroraConfig::default()),
+            Ok(bytes) => self.parse(&bytes),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Ok((AuroraConfig::default(), Vec::new()))
+            }
             Err(source) => Err(CoreError::ConfigIo {
                 path: self.path.clone(),
                 source,
@@ -269,14 +352,45 @@ impl ConfigStore {
         }
     }
 
-    /// 载入配置；内容损坏（JSON 写错、降级后遇到旧版不认识的取值）时把坏文件改名为
+    fn parse(&self, bytes: &[u8]) -> Result<(AuroraConfig, Vec<ConfigFieldReset>)> {
+        let parse_error = |source| CoreError::ConfigParse {
+            path: self.path.clone(),
+            source,
+        };
+        // 先整份严格解析：读得出来的文件走不到下面，结构损坏时也报这里带行列的原错误。
+        let strict = match serde_json::from_slice::<AuroraConfig>(bytes) {
+            Ok(config) => return Ok((config, Vec::new())),
+            Err(err) => err,
+        };
+        let mut tree: Value = serde_json::from_slice(bytes).map_err(parse_error)?;
+        let resets = take_unknown_enum_values(&mut tree);
+        if resets.is_empty() {
+            return Err(parse_error(strict));
+        }
+        // 退回之后仍对不上就是结构损坏。报退回之后的错误：严格解析的那个多半指向刚退回的取值，不是原因。
+        let config = serde_json::from_value(tree).map_err(parse_error)?;
+        for reset in &resets {
+            tracing::warn!(
+                path = %self.path.display(),
+                field = reset.field,
+                value = %reset.value,
+                "配置项的取值这个版本不认识，本次按默认值启动，文件未改写"
+            );
+        }
+        Ok((config, resets))
+    }
+
+    /// 载入配置；内容损坏（不是合法 JSON、类型对不上）时把坏文件改名为
     /// `config.json.broken-<本地时间>` 留作现场，按全默认配置继续，并交回这次处置的经过。
+    /// 只是枚举取值不认识（降级后遇到新版本写的值）时不动文件，只把那几项退回默认并交回。
     ///
     /// 读文件本身失败、改名失败仍然报错：这时继续的话，下一次保存会把用户的文件覆盖掉。
     pub async fn load_or_preserve(&self) -> Result<(AuroraConfig, Option<ConfigRecovery>)> {
-        let parse_error = match self.load().await {
+        let parse_error = match self.load_reporting().await {
+            Ok((config, resets)) if resets.is_empty() => return Ok((config, None)),
+            Ok((config, resets)) => return Ok((config, Some(ConfigRecovery::FieldsReset(resets)))),
             Err(CoreError::ConfigParse { source, .. }) => source,
-            other => return other.map(|config| (config, None)),
+            Err(other) => return Err(other),
         };
         let preserved = self.preserve_broken().await?;
         tracing::error!(
@@ -287,7 +401,7 @@ impl ConfigStore {
         );
         Ok((
             AuroraConfig::default(),
-            Some(ConfigRecovery {
+            Some(ConfigRecovery::Reset {
                 preserved,
                 error: parse_error.to_string(),
             }),
@@ -403,19 +517,22 @@ mod tests {
         assert_eq!(store.load().await.unwrap().language, UiLanguage::EnUs);
     }
 
-    /// 不认识的语言与其它写错的枚举一样让整份配置解析失败（随后由 load_or_preserve 留存现场）。
+    /// 不认识的语言（新版本才有的译文）不让整份配置失败：语言退回简体中文，其余照常。
+    /// 命令行与桌面应用走同一条解析，`load` 也一样宽容。
     #[tokio::test]
-    async fn unknown_language_fails_config_load() {
+    async fn unknown_language_falls_back_without_failing_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        tokio::fs::write(&path, br#"{"language": "fr-FR"}"#)
-            .await
-            .unwrap();
-        let err = ConfigStore::at(&path).load().await.unwrap_err();
-        assert!(
-            matches!(err, CoreError::ConfigParse { .. }),
-            "实际：{err:?}"
-        );
+        tokio::fs::write(
+            &path,
+            br#"{"language": "fr-FR", "download_concurrency": 24, "check_updates": false}"#,
+        )
+        .await
+        .unwrap();
+        let loaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(loaded.language, UiLanguage::ZhCn);
+        assert_eq!(loaded.download_concurrency, 24);
+        assert!(!loaded.check_updates);
     }
 
     /// 出参枚举的序列化名就是 IPC 与 config.json 里的写法，改名即破坏已有配置。
@@ -588,54 +705,87 @@ mod tests {
         assert_eq!(reloaded.appearance, config.appearance);
     }
 
+    /// 嵌套的外观段里只有强调色不认识：只退回强调色，同段的明暗与花瓣照常读入。
     #[tokio::test]
-    async fn invalid_appearance_value_fails_config_load() {
+    async fn unknown_appearance_value_resets_only_that_field() {
+        use crate::appearance::{AccentColor, AppearanceMode};
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        tokio::fs::write(&path, br#"{"appearance": {"accent": "pink"}}"#)
-            .await
-            .unwrap();
-        let err = ConfigStore::at(&path).load().await.unwrap_err();
-        assert!(
-            matches!(err, CoreError::ConfigParse { .. }),
-            "实际：{err:?}"
-        );
+        tokio::fs::write(
+            &path,
+            br#"{"appearance": {"accent": "pink", "mode": "night", "petals": false}}"#,
+        )
+        .await
+        .unwrap();
+        let loaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(loaded.appearance.accent, AccentColor::Sakura);
+        assert_eq!(loaded.appearance.mode, AppearanceMode::Night);
+        assert!(!loaded.appearance.petals);
     }
 
-    /// 损坏的配置改名留存、按默认继续；连坏两次各留一份，互不覆盖。
+    /// 整份重置的处置，取出留存路径与错误；不是整份重置即失败。
+    fn whole_reset(recovery: Option<ConfigRecovery>) -> (PathBuf, String) {
+        match recovery {
+            Some(ConfigRecovery::Reset { preserved, error }) => (preserved, error),
+            other => panic!("应整份重置并留存坏文件，实际：{other:?}"),
+        }
+    }
+
+    /// 字段级退回的处置，取出退回的 (字段, 原值)；不是字段级退回即失败。
+    fn field_resets(recovery: Option<ConfigRecovery>) -> Vec<(&'static str, String)> {
+        match recovery {
+            Some(ConfigRecovery::FieldsReset(resets)) => resets
+                .into_iter()
+                .map(|reset| (reset.field, reset.value))
+                .collect(),
+            other => panic!("应只退回个别字段，实际：{other:?}"),
+        }
+    }
+
+    /// 目录里除 config.json 外是否多出了文件（留存的坏文件、原子写入的临时文件）。
+    async fn other_files(dir: &Path) -> Vec<String> {
+        let mut entries = tokio::fs::read_dir(dir).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name != "config.json" {
+                names.push(name);
+            }
+        }
+        names
+    }
+
+    /// 损坏的配置（这里是类型对不上）改名留存、按默认继续；连坏两次各留一份，互不覆盖。
     #[tokio::test]
     async fn broken_config_is_preserved_and_defaults_are_used() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let store = ConfigStore::at(&path);
 
-        let broken = br#"{"after_launch": "hide", "download_concurrency": 8}"#;
+        let broken = br#"{"after_launch": "keep", "download_concurrency": "eight"}"#;
         tokio::fs::write(&path, broken).await.unwrap();
         let (config, recovery) = store.load_or_preserve().await.unwrap();
         assert_eq!(config, AuroraConfig::default());
-        let recovery = recovery.expect("应交回处置经过");
+        let (preserved, error) = whole_reset(recovery);
         assert!(!path.exists(), "坏文件已挪走，下次保存不会覆盖它");
-        assert_eq!(tokio::fs::read(&recovery.preserved).await.unwrap(), broken);
-        let name = recovery
-            .preserved
+        assert_eq!(tokio::fs::read(&preserved).await.unwrap(), broken);
+        let name = preserved
             .file_name()
             .unwrap()
             .to_string_lossy()
             .into_owned();
         let stamp = name.strip_prefix("config.json.broken-").expect(&name);
         assert_eq!(stamp.len(), "20261031-143025".len(), "{name}");
-        assert!(recovery.error.contains("hide"), "{}", recovery.error);
-        assert!(recovery.error.contains("line 1"), "{}", recovery.error);
+        assert!(error.contains("eight"), "{error}");
+        assert!(error.contains("line 1"), "{error}");
 
         tokio::fs::write(&path, b"{ broken again").await.unwrap();
         let (_, second) = store.load_or_preserve().await.unwrap();
-        let second = second.unwrap();
-        assert_ne!(second.preserved, recovery.preserved);
-        assert_eq!(
-            tokio::fs::read(&second.preserved).await.unwrap(),
-            b"{ broken again"
-        );
-        assert_eq!(tokio::fs::read(&recovery.preserved).await.unwrap(), broken);
+        let (second, _) = whole_reset(second);
+        assert_ne!(second, preserved);
+        assert_eq!(tokio::fs::read(&second).await.unwrap(), b"{ broken again");
+        assert_eq!(tokio::fs::read(&preserved).await.unwrap(), broken);
     }
 
     #[tokio::test]
@@ -654,6 +804,248 @@ mod tests {
         assert_eq!(config.download_concurrency, 8);
         assert_eq!(recovery, None);
         assert!(path.exists());
+    }
+
+    /// 降级后遇到新版本写入的语言：只把语言退回默认并报出原值，其余设置照常读入，文件一个字节都不动，
+    /// 也不留存坏文件。
+    #[tokio::test]
+    async fn unknown_enum_value_resets_only_that_field_and_keeps_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let original = r#"{
+            "language": "fr-FR",
+            "download_concurrency": 16,
+            "after_launch": "keep",
+            "sidebar_pins": ["1.21.1-Fabric", "生存"],
+            "first_run_completed": true
+        }"#
+        .as_bytes();
+        tokio::fs::write(&path, original).await.unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![("language", "fr-FR".to_owned())]
+        );
+        assert_eq!(config.language, UiLanguage::ZhCn);
+        assert_eq!(config.download_concurrency, 16);
+        assert_eq!(config.after_launch, AfterLaunch::Keep);
+        assert_eq!(config.sidebar_pins, vec!["1.21.1-Fabric", "生存"]);
+        assert!(config.first_run_completed, "首次启动向导不该重新出现");
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), original);
+        assert_eq!(other_files(dir.path()).await, Vec::<String>::new());
+    }
+
+    /// 几个字段同时不认识（含嵌套的外观段、空串、只差大小写）：按登记顺序逐项报出原值，
+    /// 认识的取值（含与默认不同的）一项不丢。
+    #[tokio::test]
+    async fn several_unknown_enum_values_are_each_reset_and_reported() {
+        use crate::appearance::{AccentColor, AppearanceMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{
+                "after_launch": "",
+                "download_source": "mirror_first",
+                "version_list_source": "nearest",
+                "isolation_policy": "ALL",
+                "appearance": {"mode": "dusk", "accent": "amethyst", "reduce_motion": true},
+                "language": "en-US",
+                "memory": {"max_mb": 6144, "min_mb": 1024, "auto": false}
+            }"#,
+        )
+        .await
+        .unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![
+                ("version_list_source", "nearest".to_owned()),
+                ("isolation_policy", "ALL".to_owned()),
+                ("appearance.mode", "dusk".to_owned()),
+                ("after_launch", String::new()),
+            ]
+        );
+        let defaults = AuroraConfig::default();
+        assert_eq!(config.version_list_source, defaults.version_list_source);
+        assert_eq!(config.isolation_policy, defaults.isolation_policy);
+        assert_eq!(config.appearance.mode, AppearanceMode::Day);
+        assert_eq!(config.after_launch, defaults.after_launch);
+        assert_eq!(config.download_source, DownloadSourcePolicy::MirrorFirst);
+        assert_eq!(config.appearance.accent, AccentColor::Amethyst);
+        assert!(config.appearance.reduce_motion);
+        assert_eq!(config.language, UiLanguage::EnUs);
+        assert_eq!(
+            config.memory,
+            MemorySettings {
+                max_mb: 6144,
+                min_mb: Some(1024),
+                auto: false,
+            }
+        );
+    }
+
+    /// 每个登记的枚举字段都退得回去：全部写成不认识的值，逐项报出、全部回到默认，别的设置照常。
+    #[tokio::test]
+    async fn every_registered_enum_field_tolerates_unknown_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut tree =
+            serde_json::json!({"download_concurrency": 128, "appearance": {"petals": false}});
+        for field in ENUM_FIELDS {
+            let pointer = format!("/{}", field.path.replace('.', "/"));
+            let (parent, leaf) = pointer.rsplit_once('/').unwrap();
+            tree.pointer_mut(parent)
+                .and_then(Value::as_object_mut)
+                .unwrap()
+                .insert(leaf.to_owned(), Value::String(format!("future-{leaf}")));
+        }
+        tokio::fs::write(&path, serde_json::to_vec(&tree).unwrap())
+            .await
+            .unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        let expected: Vec<_> = ENUM_FIELDS
+            .iter()
+            .map(|field| {
+                let leaf = field.path.rsplit('.').next().unwrap();
+                (field.path, format!("future-{leaf}"))
+            })
+            .collect();
+        assert_eq!(field_resets(recovery), expected);
+        let mut want = AuroraConfig {
+            download_concurrency: 128,
+            ..AuroraConfig::default()
+        };
+        want.appearance.petals = false;
+        assert_eq!(config, want);
+    }
+
+    /// 枚举字段登记表要覆盖默认配置里每一个字符串取值（默认配置的字符串叶子只有枚举），反过来表里也没有
+    /// 不存在的字段。新增枚举字段忘了登记，这里先失败。
+    #[test]
+    fn enum_field_table_matches_string_leaves_of_default_config() {
+        fn string_leaves(node: &Value, prefix: &str, out: &mut Vec<String>) {
+            match node {
+                Value::Object(map) => {
+                    for (key, child) in map {
+                        let path = if prefix.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{prefix}.{key}")
+                        };
+                        string_leaves(child, &path, out);
+                    }
+                }
+                Value::String(_) => out.push(prefix.to_owned()),
+                _ => {}
+            }
+        }
+        let mut leaves = Vec::new();
+        string_leaves(
+            &serde_json::to_value(AuroraConfig::default()).unwrap(),
+            "",
+            &mut leaves,
+        );
+        leaves.sort();
+        let mut registered: Vec<String> = ENUM_FIELDS.iter().map(|f| f.path.to_owned()).collect();
+        registered.sort();
+        assert_eq!(registered, leaves);
+    }
+
+    /// 合法取值（每个字段的每一个变体）都判为认识，不会被误退回；判定区分大小写。
+    #[test]
+    fn every_variant_of_registered_enums_is_known() {
+        const SOURCES: &[&str] = &["auto", "official_first", "mirror_first"];
+        let variants: &[(&str, &[&str])] = &[
+            ("download_source", SOURCES),
+            ("version_list_source", SOURCES),
+            (
+                "isolation_policy",
+                &[
+                    "disabled",
+                    "mod_loaders_only",
+                    "non_release_only",
+                    "mod_loaders_and_non_release",
+                    "all",
+                ],
+            ),
+            ("appearance.mode", &["day", "night"]),
+            ("appearance.accent", &["sakura", "amethyst", "moss"]),
+            ("after_launch", &["keep", "minimize", "close"]),
+            ("language", &["zh-CN", "en-US"]),
+        ];
+        assert_eq!(variants.len(), ENUM_FIELDS.len());
+        for (field, (path, names)) in ENUM_FIELDS.iter().zip(variants) {
+            assert_eq!(field.path, *path);
+            for name in *names {
+                assert!((field.known)(name), "{path} 应认识 {name}");
+                assert!(
+                    !(field.known)(&name.to_uppercase()),
+                    "{path} 不该认 {name} 的大写"
+                );
+            }
+            assert!(!(field.known)(""), "{path}");
+        }
+    }
+
+    /// 不改写的承诺只到用户改设置为止：之后整份照常落盘，退回的那项按当时内存里的值写回。
+    #[tokio::test]
+    async fn changed_setting_writes_back_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(&path, br#"{"language": "fr-FR", "check_updates": false}"#)
+            .await
+            .unwrap();
+        let store = ConfigStore::at(&path);
+        let (mut config, _) = store.load_or_preserve().await.unwrap();
+        config.download_concurrency = 32;
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["language"], "zh-CN");
+        assert_eq!(raw["check_updates"], false);
+        assert_eq!(raw["download_concurrency"], 32);
+        assert_eq!(store.load_or_preserve().await.unwrap(), (config, None));
+    }
+
+    /// 结构损坏不因为同时有不认识的取值而被放过：退回之后类型仍对不上，整份留存、按默认启动，
+    /// 错误指向真正对不上的那一项，而不是被退回的取值。
+    #[tokio::test]
+    async fn type_mismatch_still_preserves_whole_file_even_with_unknown_values() {
+        let cases: &[(&[u8], &str)] = &[
+            (
+                br#"{"language": "fr-FR", "download_concurrency": "eight"}"#,
+                "eight",
+            ),
+            (
+                br#"{"language": "fr-FR", "after_launch": 3}"#,
+                "integer `3`",
+            ),
+            (br#"{"appearance": "night", "language": "fr-FR"}"#, "night"),
+            (
+                br#"{"after_launch": 3, "check_updates": false}"#,
+                "expected value at line 1",
+            ),
+            (br#"{"language": null}"#, "expected value at line 1"),
+            (
+                br#"{"isolation_policy": ["all"]}"#,
+                "expected value at line 1",
+            ),
+            (br#""zh-CN""#, "expected struct AuroraConfig"),
+        ];
+        for (bytes, cause) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            tokio::fs::write(&path, bytes).await.unwrap();
+            let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+            let text = String::from_utf8_lossy(bytes);
+            assert_eq!(config, AuroraConfig::default(), "{text}");
+            let (preserved, error) = whole_reset(recovery);
+            assert!(error.contains(cause), "{text}：{error}");
+            assert!(!error.contains("fr-FR"), "{text}：{error}");
+            assert_eq!(tokio::fs::read(&preserved).await.unwrap(), *bytes);
+            assert!(!path.exists(), "{text}");
+        }
     }
 
     #[tokio::test]

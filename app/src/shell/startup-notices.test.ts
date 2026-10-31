@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SHELL_ACTION_ERROR, STARTUP_NOTICE_COPY } from "../copy/shell";
+import type { ConfigEnumField } from "../ipc/config";
 import type { StartupNoticeDto } from "../ipc/system";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { callsOf, resetRecorder } from "../test/launcher";
@@ -32,6 +33,38 @@ describe("启动提示的呈现", () => {
     expect(action.errorTitle).toBe(SHELL_ACTION_ERROR.openDataDir);
     await action.run();
     expect(callsOf(ipc, "open_folder")).toEqual([{ target: "data_dir", id: null, world: null }]);
+  });
+
+  it("个别设置退回默认：标题报项数，正文按后端顺序列出设置名与原值，不带动作也不调命令", () => {
+    const one = describeStartupNotice({ kind: "config_fields_reset", fields: [{ field: "language", value: "fr-FR" }] });
+    expect(one).toEqual({ title: "1 项设置已暂用默认值", body: "当前版本不认识原值：界面语言 fr-FR" });
+
+    const several = describeStartupNotice({
+      kind: "config_fields_reset",
+      fields: [
+        { field: "version_list_source", value: "nearest" },
+        { field: "appearance.mode", value: "dusk" },
+        { field: "after_launch", value: "" },
+      ],
+    });
+    expect(several).toEqual({
+      title: "3 项设置已暂用默认值",
+      body: "当前版本不认识原值：版本列表源 nearest、外观明暗 dusk、游戏启动后（空值）",
+    });
+    expect(ipc.calls).toEqual([]);
+  });
+
+  it("每个可能退回的字段都有设置名", () => {
+    const fields: ConfigEnumField[] = ["download_source", "version_list_source", "isolation_policy", "appearance.mode", "appearance.accent", "after_launch", "language"];
+    const notice = describeStartupNotice({ kind: "config_fields_reset", fields: fields.map((field) => ({ field, value: "x" })) });
+    expect(notice.title).toBe("7 项设置已暂用默认值");
+    expect(notice.body).toBe("当前版本不认识原值：文件下载源 x、版本列表源 x、版本隔离 x、外观明暗 x、强调色 x、游戏启动后 x、界面语言 x");
+  });
+
+  it("字段级重置里认不出的字段或空列表直接抛错", () => {
+    const stray = { kind: "config_fields_reset", fields: [{ field: "toString", value: "x" }] } as unknown as StartupNoticeDto;
+    expect(() => describeStartupNotice(stray)).toThrow("不认识的配置字段：\"toString\"");
+    expect(() => describeStartupNotice({ kind: "config_fields_reset", fields: [] })).toThrow("字段级重置的启动提示没有带任何字段");
   });
 
   it("认不出的提示类型直接抛错，不当作没有提示", () => {

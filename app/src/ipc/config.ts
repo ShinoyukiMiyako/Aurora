@@ -15,6 +15,19 @@ export type AfterLaunch = "keep" | "minimize" | "close";
 export type UiLanguage = "zh-CN" | "en-US";
 export const UI_LANGUAGES: readonly UiLanguage[] = ["zh-CN", "en-US"];
 
+/**
+ * config.json 里取值是枚举的字段，嵌套用点号连接。这些字段遇到这个版本不认识的取值时只退回默认，
+ * 其余设置照常读入（经启动提示 config_fields_reset 告知）。
+ */
+export type ConfigEnumField =
+  | "download_source"
+  | "version_list_source"
+  | "isolation_policy"
+  | "appearance.mode"
+  | "appearance.accent"
+  | "after_launch"
+  | "language";
+
 /** default_java 取这个值表示按版本自动选择。 */
 export const DEFAULT_JAVA_AUTO = "auto";
 

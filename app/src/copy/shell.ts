@@ -4,6 +4,7 @@
 import { LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "./flows";
 import { MAX_PARALLEL_TASKS } from "../domain/limits";
 import { APP_NAME } from "../lib/app-info";
+import type { ConfigEnumField } from "../ipc/config";
 
 export const TITLEBAR_COPY = {
   back: "后退（Alt+←）",
@@ -165,6 +166,21 @@ export const STARTUP_NOTICE_COPY = {
     title: "配置文件损坏，已按默认设置启动",
     body: "原文件已改名，留在数据目录里",
     action: "打开目录",
+  },
+  configFieldsReset: {
+    title: (count: number) => `${count} 项设置已暂用默认值`,
+    body: (items: readonly string[]) => `当前版本不认识原值：${items.join("、")}`,
+    item: (label: string, value: string) => (value === "" ? `${label}（空值）` : `${label} ${value}`),
+    /** 与设置页上的叫法一致；原值是这个版本不认识的，照原样显示。 */
+    fields: {
+      download_source: "文件下载源",
+      version_list_source: "版本列表源",
+      isolation_policy: "版本隔离",
+      "appearance.mode": "外观明暗",
+      "appearance.accent": "强调色",
+      after_launch: "游戏启动后",
+      language: "界面语言",
+    } satisfies Readonly<Record<ConfigEnumField, string>>,
   },
 } as const;
 

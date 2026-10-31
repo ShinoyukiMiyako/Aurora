@@ -66,8 +66,8 @@ pub use compat::{
     Compatibility, InstalledCopy, InstalledSource, InstanceMatch, InstanceSources, MatchState,
 };
 pub use config::{
-    AfterLaunch, AuroraConfig, ConfigRecovery, ConfigStore, DownloadSourcePolicy, MemorySettings,
-    NamedDirectory, PinnedServer,
+    AfterLaunch, AuroraConfig, ConfigFieldReset, ConfigRecovery, ConfigStore, DownloadSourcePolicy,
+    MemorySettings, NamedDirectory, PinnedServer,
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use deps::{InstallPlan, PlannedItem};

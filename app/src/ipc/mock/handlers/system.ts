@@ -81,7 +81,7 @@ let startupNotices: StartupNoticeDto[] = [];
 
 /** 模拟一次带提示的启动（测试与界面调试用）；reset 后恢复为没有提示。 */
 export function setMockStartupNotices(notices: StartupNoticeDto[]): void {
-  startupNotices = notices.map((n) => ({ ...n }));
+  startupNotices = notices.map((n) => (n.kind === "config_fields_reset" ? { ...n, fields: n.fields.map((f) => ({ ...f })) } : { ...n }));
 }
 
 // ---- 连通性 ----
