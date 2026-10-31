@@ -185,6 +185,12 @@ describe("设置页：骨架与分区导航", () => {
     expect(nav.route).toEqual({ page: "home" });
   });
 
+  it("分区导航每项写名称与一行说明，「常规」的说明涵盖启动后行为与语言", async () => {
+    await mount();
+    const items = all<HTMLButtonElement>('nav[aria-label="设置分区"] button').slice(0, 5);
+    expect(items.map((b) => b.textContent)).toEqual(["常规启动后行为、语言", "下载下载源与速度", "Java运行时与自动选择", "游戏内存、隔离与目录", "外观明暗、强调色、花瓣、动画"]);
+  });
+
   it("配置读不出来：内容列是错误卡，导航照常可点；重试成功后显示分区", async () => {
     let fail = true;
     ipc.overrides.set("get_config", async (args) => {

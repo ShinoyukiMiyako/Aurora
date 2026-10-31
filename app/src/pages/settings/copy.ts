@@ -12,7 +12,7 @@ export const settingsSubtitle = (section: string) => `${section} · 改动立即
 export const saveFailed = (name: string) => `没能保存「${name}」`;
 
 export const SECTION_META: Readonly<Record<SettingsSection, { icon: IconName; hint: string }>> = {
-  general: { icon: "sliders", hint: "启动后行为" },
+  general: { icon: "sliders", hint: "启动后行为、语言" },
   download: { icon: "download", hint: "下载源与速度" },
   java: { icon: "java", hint: "运行时与自动选择" },
   game: { icon: "cpu", hint: "内存、隔离与目录" },
