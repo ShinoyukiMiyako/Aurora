@@ -166,7 +166,7 @@ impl Aurora {
         if !modrinth_targets.is_empty() {
             let hashes: Vec<String> = modrinth_targets.keys().cloned().collect();
             let latest = modrinth
-                .latest_versions_by_hashes(&hashes, &loaders, &[mc_version.as_str()])
+                .latest_versions_by_hashes(&hashes, &loaders, &[mc_version.as_str()], &[])
                 .await?;
             for (hash, version) in latest {
                 let Some((file_name, entry)) = modrinth_targets.get(&hash) else {
