@@ -1257,20 +1257,22 @@ mod tests {
             };
             let stale = aurora.store_login(ms_account("dead-refresh", 1)).unwrap();
 
-            let relogin = {
+            // 等续期请求真正到了令牌端点（库里的旧凭据已经读出）才重新登录。按固定时延排先后的话，
+            // 机器满载时读库会晚于重新登录，续期直接拿到新凭据、根本不发请求。
+            let relogin = async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 let aurora = aurora.clone();
                 let fresh = ms_account("new-refresh", u64::MAX);
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    tokio::task::spawn_blocking(move || aurora.store_login(fresh))
-                        .await
-                        .unwrap()
-                        .unwrap()
-                })
+                tokio::task::spawn_blocking(move || aurora.store_login(fresh))
+                    .await
+                    .unwrap()
+                    .unwrap()
             };
-            let err = aurora.ensure_account_fresh(&stale).await.unwrap_err();
+            let (refreshed, _) = tokio::join!(aurora.ensure_account_fresh(&stale), relogin);
+            let err = refreshed.unwrap_err();
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
-            relogin.await.unwrap();
 
             let stored = aurora_at(tmp.path())
                 .find_account(MS_UUID)
