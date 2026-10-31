@@ -131,14 +131,17 @@ export function useWindowPort(): WindowPort {
 /**
  * 窗口以不可见状态创建，首帧画完再显示：ready 第一次为真时，等这次布局之后的下一帧调用 show()。
  * 显示失败不在这里处理：rejection 进控制台，后端 3 秒后的兜底显示仍会把窗口显示出来。
+ *
+ * 「已显示」在那一帧真正触发时才记下：开发构建的 StrictMode 会把布局 effect 装上、拆掉再装一次，
+ * 拆掉时那一帧被取消，若提前记下，第二次安装会以为已经显示过而什么都不做，窗口只能等后端兜底。
  */
 export function useRevealWindow(ready: boolean): void {
   const port = useWindowPort();
   const shown = useRef(false);
   useLayoutEffect(() => {
     if (!ready || shown.current) return;
-    shown.current = true;
     const frame = requestAnimationFrame(() => {
+      shown.current = true;
       port.show().catch((error: unknown) => console.error("窗口没能显示", error));
     });
     return () => cancelAnimationFrame(frame);
