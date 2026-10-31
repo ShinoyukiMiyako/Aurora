@@ -814,6 +814,11 @@ export class LauncherStore {
    * 照常做完时按成功返回，同一个 id 再登记拿到的是全新的令牌，下一项会照常开始。所以取消要由前端记着，每开始一项前查一次。
    */
   private readonly cancelRequested = new Set<string>();
+  /**
+   * 实例正在被删除、完成后不再落地的任务（任务 id）。删除前取消它们，但取消可能没赶上：任务在取消宽限期内照常做完时，
+   * 写封面、写固定、弹「已就绪」都是对一个马上要删掉的实例做的，提示也会和结果对不上。
+   */
+  private readonly discardLanding = new Set<string>();
   /** 固定服务器的读改写排成一条链：两次切换并发时，后一次要等前一次写完再读，否则先写的那台会被后写的覆盖。 */
   private serverPinChain: Promise<void> = Promise.resolve();
 
@@ -1345,6 +1350,7 @@ export class LauncherStore {
     if (before.status !== "running" || before.attempt !== attempt) return;
     this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())) }));
     this.tasksChanged();
+    if (this.discardLanding.has(id)) return;
     this.background(ACTION_ERROR.landTask(before.title), this.landTask(before, result));
   }
 
@@ -1867,8 +1873,17 @@ export class LauncherStore {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
         // 取消排队中的新建任务后占位项随之消失，先记下它是不是占位
         const placeholder = store.instance(id).placeholder;
-        await store.cancelInstanceTasks(id);
-        if (!placeholder) await instancesIpc.deleteInstance(id);
+        const doomed = store.raw.tasks.filter((t) => isActiveTask(t) && t.instanceId === id).map((t) => t.id);
+        for (const taskId of doomed) store.discardLanding.add(taskId);
+        try {
+          await store.cancelInstanceTasks(id);
+          // 占位实例的取消没赶上时（安装在宽限期内做完，或取消到达前就失败、留下了未完成的目录），实例已经在盘上，
+          // 照样要删；赶上了的，后端已经删掉半成品。重扫一次按盘上的实际情况定
+          if (placeholder) await store.fetchInstances();
+          if (!placeholder || store.raw.scanned.some((i) => i.id === id)) await instancesIpc.deleteInstance(id);
+        } finally {
+          for (const taskId of doomed) store.discardLanding.delete(taskId);
+        }
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
