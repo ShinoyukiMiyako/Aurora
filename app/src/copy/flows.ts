@@ -597,6 +597,7 @@ export const TOAST_COPY = {
   cannotRollback: "这条记录不能回滚",
   instanceDeleted: (name: string, worlds: number) =>
     worlds > 0 ? { title: `已删除「${name}」`, body: `${worlds} 个存档已移入回收站` } : { title: `已删除「${name}」` },
+  playRecordsLagging: (name: string) => ({ title: `「${name}」的游玩记录没能跟着改`, body: "之后会自动补上" }),
   accountDeleted: (name: string) => `已删除账户 ${name}`,
   accountSwitched: (name: string) => `已切换到 ${name}`,
   instanceSelected: (name: string) => ({ title: `「${name}」已设为当前实例`, body: "主页的「继续游玩」会显示它" }),

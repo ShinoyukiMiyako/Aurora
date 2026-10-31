@@ -88,6 +88,68 @@ describe("改名迁移启动会话", () => {
   });
 });
 
+describe("游玩记录没跟上时改名、删除照成功处理", () => {
+  const lagged = (message: string, detail: Record<string, unknown>) => new IpcError("play_records_failed", message, { ...detail, causes: ["拒绝访问。 (os error 5)"] });
+
+  it("改名：按 detail.renamed_to 迁移界面上挂在旧 id 上的状态，再提示记录之后补上", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_broken", "找不到启动入口");
+    });
+    await store.actions.launch("生存");
+    ipc.overrides.set("rename_instance", () => {
+      instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+      throw lagged("实例已改名为「生存二」，但游玩记录没能跟着改：拒绝访问。 (os error 5)", { id: "生存", renamed_to: "生存二" });
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(await store.actions.renameInstance("生存", "生存二")).toBe("生存二");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存二", phase: "failed" });
+    expect(store.getState().instances.map((i) => i.id).sort()).toEqual(["创造", "生存二"]);
+    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "「生存二」的游玩记录没能跟着改", "之后会自动补上"]);
+    expect(warn.mock.calls[0][0]).toBe("实例已改名为「生存二」，但游玩记录没能跟着改：拒绝访问。 (os error 5)");
+  });
+
+  it("改名报别的错照常抛出，界面状态不迁移；报这个码却缺 renamed_to 是契约被破坏", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_broken", "找不到启动入口");
+    });
+    await store.actions.launch("生存");
+    ipc.overrides.set("rename_instance", () => {
+      throw new IpcError("instance_busy", "「生存」正在补全文件", { id: "生存", activity: "installing" });
+    });
+    await expect(store.actions.renameInstance("生存", "生存二")).rejects.toMatchObject({ code: "instance_busy" });
+    ipc.overrides.set("rename_instance", () => {
+      throw lagged("实例已改名为「生存二」，但游玩记录没能跟着改：拒绝访问。 (os error 5)", { id: "生存" });
+    });
+    await expect(store.actions.renameInstance("生存", "生存二")).rejects.toThrow("改名报 play_records_failed 却没给出 detail.renamed_to");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
+    expect(store.getState().toasts.map((t) => t.title)).not.toContain("「生存二」的游玩记录没能跟着改");
+  });
+
+  it("删除：照删除成功清理并通知，另提示记录之后补上", async () => {
+    ipc.overrides.set("delete_instance", () => {
+      instances = instances.filter((i) => i.id !== "生存");
+      throw lagged("实例已删除，但游玩记录没能跟着改：拒绝访问。 (os error 5)", { id: "生存" });
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await store.actions.deleteInstance("生存", 2);
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["创造"]);
+    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toEqual(
+      expect.arrayContaining([
+        ["info", "已删除「生存」", "2 个存档已移入回收站"],
+        ["warning", "「生存」的游玩记录没能跟着改", "之后会自动补上"],
+      ]),
+    );
+  });
+
+  it("删除报别的错照常抛出，不弹「已删除」", async () => {
+    ipc.overrides.set("delete_instance", () => {
+      throw new IpcError("io", "拒绝访问");
+    });
+    await expect(store.actions.deleteInstance("生存", 0)).rejects.toMatchObject({ code: "io" });
+    expect(store.getState().toasts.map((t) => t.title)).not.toContain("已删除「生存」");
+  });
+});
+
 describe("改名迁移任务", () => {
   it("失败的任务重试时按新名字调用命令，落地通知写新名字；下载中的 Java 装好后固定给新名字", async () => {
     let fail = true;

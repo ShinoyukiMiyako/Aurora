@@ -613,6 +613,22 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
  * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
  * 后端在实例有活动任务时拒绝改名，所以这里换的只是已结束的任务（失败的可以重试）。
  */
+/**
+ * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
+ * 没改成的记录由后端记着，之后读写游玩记录时补上。其余错误照常冒泡。
+ */
+function playRecordsLag(err: unknown): IpcError {
+  if (isIpcError(err) && err.code === instancesIpc.PLAY_RECORDS_FAILED_ERROR_CODE) return err;
+  throw err;
+}
+
+/** play_records_failed 的 detail.renamed_to：改名已落盘后的新 id。缺了就是契约被破坏。 */
+function renamedTo(err: IpcError): string {
+  const detail = err.detail;
+  if (typeof detail === "object" && detail !== null && "renamed_to" in detail && typeof detail.renamed_to === "string") return detail.renamed_to;
+  throw new Error(`改名报 ${err.code} 却没给出 detail.renamed_to：${err.message}`);
+}
+
 function renamedTask(task: Task, from: string, to: string): Task {
   if (task.instanceId !== from) return task;
   const key = INSTANCE_ARG[task.spec.command];
@@ -1102,6 +1118,13 @@ export class LauncherStore {
     for (const prefix of ["mods", "history", "mod-updates", "plan"]) invalidateResources(`${prefix}:${instanceId}`);
     invalidateResources("match");
     invalidateResources("installed-sources");
+  }
+
+  /** 改名、删除已照成功落地，只差游玩记录：原因留在控制台，提示玩家记录之后会补上。 */
+  private playRecordsLagged(name: string, err: IpcError): void {
+    console.warn(err.message, err.detail);
+    const copy = TOAST_COPY.playRecordsLagging(name);
+    this.pushToast("warning", copy.title, copy.body);
   }
 
   /** Mod 文件操作的锁：运行中（含加载中）JVM 占着文件，安装中任务在写目录。界面已禁用入口，这里是第二道防线。 */
@@ -1943,12 +1966,18 @@ export class LauncherStore {
         const placeholder = store.instance(id).placeholder;
         const doomed = store.raw.tasks.filter((t) => isActiveTask(t) && t.instanceId === id).map((t) => t.id);
         for (const taskId of doomed) store.discardLanding.add(taskId);
+        let lagged: IpcError | null = null;
         try {
           await store.cancelInstanceTasks(id);
           // 占位实例的取消没赶上时（安装在宽限期内做完，或取消到达前就失败、留下了未完成的目录），实例已经在盘上，
           // 照样要删；赶上了的，后端已经删掉半成品。重扫一次按盘上的实际情况定
           if (placeholder) await store.fetchInstances();
-          if (!placeholder || store.raw.scanned.some((i) => i.id === id)) await instancesIpc.deleteInstance(id);
+          if (!placeholder || store.raw.scanned.some((i) => i.id === id)) {
+            lagged = await instancesIpc.deleteInstance(id).then(
+              () => null,
+              (err: unknown) => playRecordsLag(err),
+            );
+          }
         } finally {
           for (const taskId of doomed) store.discardLanding.delete(taskId);
         }
@@ -1958,11 +1987,18 @@ export class LauncherStore {
         for (const prefix of ["mods", "content", "history", "crash", "log", "settings", "mod-updates"]) invalidateResources(`${prefix}:${id}`);
         const copy = TOAST_COPY.instanceDeleted(id, worldCount);
         store.pushToast("info", copy.title, copy.body);
+        if (lagged !== null) store.playRecordsLagged(id, lagged);
       },
       async renameInstance(id, name) {
         const nameError = instanceNameError(name, store.instanceIds(), id);
         if (nameError !== null) throw new Error(nameError);
-        const { id: newId } = await instancesIpc.renameInstance(id, name);
+        const { newId, lagged } = await instancesIpc.renameInstance(id, name).then(
+          (outcome): { newId: string; lagged: IpcError | null } => ({ newId: outcome.id, lagged: null }),
+          (err: unknown) => {
+            const lag = playRecordsLag(err);
+            return { newId: renamedTo(lag), lagged: lag };
+          },
+        );
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
         store.renameSeq += 1;
         const seq = store.renameSeq;
@@ -1982,6 +2018,7 @@ export class LauncherStore {
                 },
         }));
         store.scheduleJournal();
+        if (lagged !== null) store.playRecordsLagged(newId, lagged);
         return newId;
       },
       async updateInstanceSettings(id, patch) {
