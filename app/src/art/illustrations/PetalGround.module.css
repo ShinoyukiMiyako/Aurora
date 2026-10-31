@@ -1,0 +1,9 @@
+.ground {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+
+.shadow {
+  fill: var(--sk-accent-soft);
+}

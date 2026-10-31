@@ -1,0 +1,20 @@
+.avatar {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  overflow: hidden;
+  background: linear-gradient(160deg, var(--sk-bg-2), var(--sk-bg-3));
+}
+
+.avatar[data-current] {
+  overflow: visible;
+  box-shadow:
+    0 0 0 2px var(--sk-surface),
+    0 0 0 4px var(--sk-accent);
+}
+
+.face {
+  position: relative;
+  display: block;
+}
