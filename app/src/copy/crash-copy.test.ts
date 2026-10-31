@@ -139,6 +139,8 @@ describe("启动提醒", () => {
     });
     expect(LAUNCH_WARNING.long_player_name.action).toEqual({ kind: "manage_accounts", label: "管理账户" });
     expect(LAUNCH_WARNING.jvm_min_over_max.body).toBe("JVM 参数里 -Xms 比 -Xmx 大，Java 会拒绝启动。");
+    // 单位与后端的判定一致：HotSpot 认 k、m、g、t 四种。
+    expect(LAUNCH_WARNING.jvm_memory_unit.body).toBe("-Xmx、-Xms 的数字后面只能跟 k、m、g、t，例如 -Xmx4g。");
     const byAction = (kind: string) => LAUNCH_WARNING_CODES.filter((c) => LAUNCH_WARNING[c].action.kind === kind);
     expect(byAction("change_game_dir")).toEqual(["game_path", "onedrive_folder", "icloud_folder"]);
     expect(byAction("manage_accounts")).toEqual(["long_player_name"]);

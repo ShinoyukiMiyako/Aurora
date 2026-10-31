@@ -604,7 +604,7 @@ export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCop
   },
   jvm_memory_unit: {
     title: "JVM 参数里的内存写法不对",
-    body: "-Xmx、-Xms 的数字后面只能跟 k、m、g，例如 -Xmx4g。",
+    body: "-Xmx、-Xms 的数字后面只能跟 k、m、g、t，例如 -Xmx4g。",
     action: OPEN_INSTANCE_SETTINGS,
   },
   jvm_min_over_max: {
