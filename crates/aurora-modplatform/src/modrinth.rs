@@ -73,7 +73,10 @@ impl ModrinthClient {
     /// 取工程详情（`id` 可为 project_id 或 slug）。
     pub async fn project(&self, id_or_slug: &str) -> Result<ModrinthProject> {
         let url = format!("{}/project/{}", self.base_url, id_or_slug);
-        send_json(&self.retry, "modrinth.project", || self.http.get(url.as_str())).await
+        send_json(&self.retry, "modrinth.project", || {
+            self.http.get(url.as_str())
+        })
+        .await
     }
 
     /// 工程成员列表（作者名取自这里：工程对象只带团队 id）。

@@ -66,10 +66,7 @@ mod tests {
 
     #[test]
     fn prefers_64bit_over_32bit_same_major() {
-        let candidates = vec![
-            make("x86", "17.0.9", false),
-            make("x64", "17.0.1", true),
-        ];
+        let candidates = vec![make("x86", "17.0.9", false), make("x64", "17.0.1", true)];
         // 即便 32 位版本号更高，也应选 64 位。
         let chosen = select_for_major(&candidates, 17).unwrap();
         assert_eq!(chosen.path, PathBuf::from("x64"));
@@ -102,7 +99,10 @@ mod tests {
             make("d", "21.0.0", true),
         ];
         let ranked = rank_for_major(&candidates, 17);
-        let paths: Vec<_> = ranked.iter().map(|j| j.path.to_string_lossy().into_owned()).collect();
+        let paths: Vec<_> = ranked
+            .iter()
+            .map(|j| j.path.to_string_lossy().into_owned())
+            .collect();
         // 64 位优先（b、c 在前，按版本降序 b>c），32 位垫底（a）；21 不入选。
         assert_eq!(paths, vec!["b", "c", "a"]);
     }

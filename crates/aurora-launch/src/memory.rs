@@ -131,7 +131,10 @@ pub struct MemoryConfig {
 impl MemoryConfig {
     /// 固定最大堆，不设最小堆。
     pub fn fixed(max_mb: u32) -> Self {
-        Self { max_mb, min_mb: None }
+        Self {
+            max_mb,
+            min_mb: None,
+        }
     }
 
     /// 链式设置最小堆。

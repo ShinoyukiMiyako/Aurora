@@ -25,8 +25,7 @@ use crate::version::JavaVersion;
 ///
 /// 该 gamecore 哈希路径是社区长期稳定的公开入口；piston-meta 域名在 aurora-base 镜像表中，
 /// 走 BMCLAPI 时会被改写到镜像的同路径。
-pub const MOJANG_JAVA_RUNTIME_ALL: &str =
-    "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
+pub const MOJANG_JAVA_RUNTIME_ALL: &str = "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
 
 /// `all.json` 顶层结构：平台键 -> 组件名 -> 该组件的条目列表。
 ///
@@ -305,14 +304,10 @@ impl JavaRuntimeInstaller {
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let client = &self.client;
         let fetch = retry_async(&self.policy, move || async move {
-            let resp = client
-                .get(url)
-                .send()
-                .await
-                .map_err(|source| Error::Http {
-                    url: url.to_owned(),
-                    source,
-                })?;
+            let resp = client.get(url).send().await.map_err(|source| Error::Http {
+                url: url.to_owned(),
+                source,
+            })?;
             let resp = resp.error_for_status().map_err(|source| Error::Http {
                 url: url.to_owned(),
                 source,
@@ -330,14 +325,10 @@ impl JavaRuntimeInstaller {
     async fn get_verified_bytes(&self, url: &str, expected_sha1: &str) -> Result<Vec<u8>> {
         let client = &self.client;
         let fetch = retry_async(&self.policy, move || async move {
-            let resp = client
-                .get(url)
-                .send()
-                .await
-                .map_err(|source| Error::Http {
-                    url: url.to_owned(),
-                    source,
-                })?;
+            let resp = client.get(url).send().await.map_err(|source| Error::Http {
+                url: url.to_owned(),
+                source,
+            })?;
             let resp = resp.error_for_status().map_err(|source| Error::Http {
                 url: url.to_owned(),
                 source,
@@ -394,9 +385,9 @@ fn select_component(
 
 /// 取一个组件里版本号最高的条目（通常只有一条）。
 fn best_entry(entries: &[RuntimeComponent]) -> Option<&RuntimeComponent> {
-    entries
-        .iter()
-        .max_by(|a, b| JavaVersion::parse(&a.version.name).cmp(&JavaVersion::parse(&b.version.name)))
+    entries.iter().max_by(|a, b| {
+        JavaVersion::parse(&a.version.name).cmp(&JavaVersion::parse(&b.version.name))
+    })
 }
 
 /// 把组件文件清单摊成计划：相对路径落到 `install_dir` 下，清单的 BTreeMap 顺序即计划顺序。

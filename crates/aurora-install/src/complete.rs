@@ -45,17 +45,17 @@ pub async fn ensure_complete(
     let mut primary = plan::library_tasks(version, cx.runtime, cx.layout)?;
     let libraries = primary.len();
 
-    let client_jar = if let Some(client) = version.downloads.as_ref().and_then(|d| d.client.as_ref())
-    {
-        primary.push(
-            DownloadTask::new(client.url.clone(), cx.layout.version_jar(target_id))
-                .with_sha1(client.sha1.clone())
-                .with_size(client.size),
-        );
-        true
-    } else {
-        false
-    };
+    let client_jar =
+        if let Some(client) = version.downloads.as_ref().and_then(|d| d.client.as_ref()) {
+            primary.push(
+                DownloadTask::new(client.url.clone(), cx.layout.version_jar(target_id))
+                    .with_sha1(client.sha1.clone())
+                    .with_size(client.size),
+            );
+            true
+        } else {
+            false
+        };
 
     if let Some(log) = plan::logging_task(version, cx.layout) {
         primary.push(log);

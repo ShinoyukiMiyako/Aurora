@@ -284,7 +284,12 @@ mod tests {
     fn split_legacy_collapses_whitespace() {
         assert_eq!(
             split_legacy_arguments("--username ${auth_player_name}   --uuid ${auth_uuid}"),
-            vec!["--username", "${auth_player_name}", "--uuid", "${auth_uuid}"]
+            vec![
+                "--username",
+                "${auth_player_name}",
+                "--uuid",
+                "${auth_uuid}"
+            ]
         );
     }
 

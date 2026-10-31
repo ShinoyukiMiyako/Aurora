@@ -65,7 +65,9 @@ impl AuthValues {
             }
             AccountCredentials::Offline => (OFFLINE_ACCESS_TOKEN.to_owned(), "legacy".to_owned()),
             // 第三方 Yggdrasil 也用 msa 类型（游戏侧仅用于皮肤/多人握手分支，不做真实校验）。
-            AccountCredentials::AuthlibInjector(creds) => (creds.access_token.clone(), "msa".to_owned()),
+            AccountCredentials::AuthlibInjector(creds) => {
+                (creds.access_token.clone(), "msa".to_owned())
+            }
         };
 
         Ok(Self {
@@ -117,7 +119,10 @@ impl AuthlibInjector {
     }
 
     /// 从 Yggdrasil 凭据（持有 api_root）与 agent jar 构造。
-    pub fn from_credentials(agent_jar: impl Into<PathBuf>, credentials: &YggdrasilCredentials) -> Self {
+    pub fn from_credentials(
+        agent_jar: impl Into<PathBuf>,
+        credentials: &YggdrasilCredentials,
+    ) -> Self {
         Self::new(agent_jar, credentials.api_root.clone())
     }
 
@@ -135,7 +140,9 @@ impl AuthlibInjector {
             self.api_root
         )];
         if let Some(prefetched) = &self.prefetched {
-            args.push(format!("-Dauthlibinjector.yggdrasil.prefetched={prefetched}"));
+            args.push(format!(
+                "-Dauthlibinjector.yggdrasil.prefetched={prefetched}"
+            ));
         }
         args
     }
@@ -204,7 +211,10 @@ mod tests {
 
     #[test]
     fn authlib_injector_jvm_args_with_and_without_prefetch() {
-        let injector = AuthlibInjector::new(PathBuf::from("D:/aurora/authlib-injector.jar"), "https://skin.example/api");
+        let injector = AuthlibInjector::new(
+            PathBuf::from("D:/aurora/authlib-injector.jar"),
+            "https://skin.example/api",
+        );
         assert_eq!(
             injector.jvm_args(),
             vec!["-javaagent:D:/aurora/authlib-injector.jar=https://skin.example/api"]

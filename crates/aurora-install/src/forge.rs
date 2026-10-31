@@ -157,7 +157,9 @@ fn resolve_data(
                 .into_owned(),
             DataValue::ExtractedFile(path) => extracted
                 .get(&path)
-                .ok_or_else(|| Error::InstallerEntryMissing { entry: path.clone() })?
+                .ok_or_else(|| Error::InstallerEntryMissing {
+                    entry: path.clone(),
+                })?
                 .to_string_lossy()
                 .into_owned(),
             DataValue::Literal(literal) => literal,
@@ -181,9 +183,9 @@ fn replace_placeholders(input: &str, values: &BTreeMap<String, String>) -> Resul
             continue;
         };
         let key = &after[..close];
-        let value = values
-            .get(key)
-            .ok_or_else(|| Error::DataKeyMissing { key: key.to_owned() })?;
+        let value = values.get(key).ok_or_else(|| Error::DataKeyMissing {
+            key: key.to_owned(),
+        })?;
         out.push_str(value);
         rest = &after[close + 1..];
     }
@@ -225,11 +227,11 @@ fn build_classpath(
 ) -> Result<String> {
     let mut parts = Vec::with_capacity(classpath.len() + 1);
     for coord in classpath.iter().chain(std::iter::once(&jar.to_owned())) {
-        let path = layout
-            .library_path_for_coordinate(coord)
-            .ok_or_else(|| Error::InvalidLibraryCoordinate {
+        let path = layout.library_path_for_coordinate(coord).ok_or_else(|| {
+            Error::InvalidLibraryCoordinate {
                 name: coord.clone(),
-            })?;
+            }
+        })?;
         parts.push(path.to_string_lossy().into_owned());
     }
     Ok(parts.join(&classpath_separator().to_string()))
@@ -464,16 +466,20 @@ impl<'a> ForgeInstaller<'a> {
         profile: InstallProfile,
         target: Target<'_>,
     ) -> Result<(VersionJson, ForgeSummary)> {
-        let version_id = profile.version.clone().ok_or_else(|| {
-            Error::UnsupportedInstallProfile {
-                reason: "install_profile 缺 version".to_owned(),
-            }
-        })?;
-        let minecraft = profile.minecraft.clone().ok_or_else(|| {
-            Error::UnsupportedInstallProfile {
-                reason: "install_profile 缺 minecraft".to_owned(),
-            }
-        })?;
+        let version_id =
+            profile
+                .version
+                .clone()
+                .ok_or_else(|| Error::UnsupportedInstallProfile {
+                    reason: "install_profile 缺 version".to_owned(),
+                })?;
+        let minecraft =
+            profile
+                .minecraft
+                .clone()
+                .ok_or_else(|| Error::UnsupportedInstallProfile {
+                    reason: "install_profile 缺 minecraft".to_owned(),
+                })?;
         let json_entry = profile.json.clone().expect("已判定 json 存在");
 
         // 解出内联 version.json；传统布局原样落盘，按实例安装交给调用方。
@@ -575,11 +581,12 @@ impl<'a> ForgeInstaller<'a> {
                 name: processor.jar.clone(),
             })?;
         let manifest = read_zip_entry_async(&jar_path, "META-INF/MANIFEST.MF").await?;
-        let main_class = parse_main_class(&String::from_utf8_lossy(&manifest)).ok_or_else(|| {
-            Error::ProcessorMainClassMissing {
-                jar: processor.jar.clone(),
-            }
-        })?;
+        let main_class =
+            parse_main_class(&String::from_utf8_lossy(&manifest)).ok_or_else(|| {
+                Error::ProcessorMainClassMissing {
+                    jar: processor.jar.clone(),
+                }
+            })?;
         let classpath = build_classpath(&processor.jar, &processor.classpath, self.cx.layout)?;
         let mut args = Vec::with_capacity(processor.args.len());
         for arg in &processor.args {
@@ -630,11 +637,13 @@ impl<'a> ForgeInstaller<'a> {
         profile: &InstallProfile,
         target: Target<'_>,
     ) -> Result<(VersionJson, ForgeSummary)> {
-        let version_info = profile.version_info.clone().ok_or_else(|| {
-            Error::UnsupportedInstallProfile {
-                reason: "legacy install 缺 versionInfo".to_owned(),
-            }
-        })?;
+        let version_info =
+            profile
+                .version_info
+                .clone()
+                .ok_or_else(|| Error::UnsupportedInstallProfile {
+                    reason: "legacy install 缺 versionInfo".to_owned(),
+                })?;
         let bytes = serde_json::to_vec(&version_info).map_err(|source| Error::Json {
             context: "legacy versionInfo".to_owned(),
             source,
@@ -657,12 +666,13 @@ impl<'a> ForgeInstaller<'a> {
             .ok_or_else(|| Error::UnsupportedInstallProfile {
                 reason: "legacy install 缺 path".to_owned(),
             })?;
-        let file_path = install
-            .file_path
-            .clone()
-            .ok_or_else(|| Error::UnsupportedInstallProfile {
-                reason: "legacy install 缺 filePath".to_owned(),
-            })?;
+        let file_path =
+            install
+                .file_path
+                .clone()
+                .ok_or_else(|| Error::UnsupportedInstallProfile {
+                    reason: "legacy install 缺 filePath".to_owned(),
+                })?;
         let dest = self
             .cx
             .layout
@@ -670,7 +680,8 @@ impl<'a> ForgeInstaller<'a> {
             .ok_or_else(|| Error::InvalidLibraryCoordinate { name: coord })?;
         extract_zip_entry_to_async(installer, file_path.trim_start_matches('/'), &dest).await?;
 
-        let tasks = plan::tasks_for_libraries(&embedded.libraries, self.cx.runtime, self.cx.layout)?;
+        let tasks =
+            plan::tasks_for_libraries(&embedded.libraries, self.cx.runtime, self.cx.layout)?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
         Ok((
@@ -711,7 +722,12 @@ async fn read_zip_entry_async(archive: &Path, entry: &str) -> Result<Vec<u8>> {
     let entry = entry.to_owned();
     tokio::task::spawn_blocking(move || read_zip_entry(&archive, &entry))
         .await
-        .map_err(|join| io_err(PathBuf::from("<zip>"), std::io::Error::other(join.to_string())))?
+        .map_err(|join| {
+            io_err(
+                PathBuf::from("<zip>"),
+                std::io::Error::other(join.to_string()),
+            )
+        })?
 }
 
 /// 把 zip 内某条目解出到目标路径（原子写）。
@@ -833,7 +849,10 @@ mod tests {
             },
         );
         let mut extracted = BTreeMap::new();
-        extracted.insert("/data/client.lzma".to_string(), PathBuf::from("/tmp/0-client.lzma"));
+        extracted.insert(
+            "/data/client.lzma".to_string(),
+            PathBuf::from("/tmp/0-client.lzma"),
+        );
         data.insert(
             "BINPATCH".to_string(),
             SidedData {
@@ -870,7 +889,12 @@ mod tests {
     #[test]
     fn substitute_arg_resolves_bracket_coordinate() {
         let values = BTreeMap::new();
-        let got = substitute_arg("[de.oceanlabs.mcp:mcp_config:1.20.1@zip]", &values, &layout()).unwrap();
+        let got = substitute_arg(
+            "[de.oceanlabs.mcp:mcp_config:1.20.1@zip]",
+            &values,
+            &layout(),
+        )
+        .unwrap();
         let expected = layout()
             .library_path_for_coordinate("de.oceanlabs.mcp:mcp_config:1.20.1@zip")
             .unwrap()
@@ -977,9 +1001,15 @@ mod tests {
 
         // 端到端组一遍 client 侧的第一个处理器 args（不含真正 java 执行）。
         let mut extracted = BTreeMap::new();
-        extracted.insert("/data/client.lzma".to_string(), PathBuf::from("/tmp/0-client.lzma"));
+        extracted.insert(
+            "/data/client.lzma".to_string(),
+            PathBuf::from("/tmp/0-client.lzma"),
+        );
         let mut values = resolve_data(&profile.data, "client", &layout(), &extracted).unwrap();
-        values.insert("MINECRAFT_JAR".to_string(), "/mc/versions/1.20.1/1.20.1.jar".to_string());
+        values.insert(
+            "MINECRAFT_JAR".to_string(),
+            "/mc/versions/1.20.1/1.20.1.jar".to_string(),
+        );
 
         let p0 = &profile.processors[0];
         let args: Vec<String> = p0
@@ -1212,7 +1242,10 @@ mod tests {
             attempt.await.unwrap_err()
         };
         assert!(
-            matches!(cancelled, Error::Download(aurora_download::Error::Cancelled)),
+            matches!(
+                cancelled,
+                Error::Download(aurora_download::Error::Cancelled)
+            ),
             "实际：{cancelled:?}"
         );
         assert!(server.received_requests().await.unwrap().is_empty());

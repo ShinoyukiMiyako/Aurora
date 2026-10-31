@@ -230,8 +230,14 @@ impl<'a> CommandBuilder<'a> {
             });
 
         let mut ph = Placeholders::new();
-        ph.insert("natives_directory", self.paths.natives_dir.display().to_string());
-        ph.insert("library_directory", self.paths.libraries_dir.display().to_string());
+        ph.insert(
+            "natives_directory",
+            self.paths.natives_dir.display().to_string(),
+        );
+        ph.insert(
+            "library_directory",
+            self.paths.libraries_dir.display().to_string(),
+        );
         ph.insert("classpath_separator", separator.to_string());
         ph.insert("game_directory", self.game_dir.display().to_string());
         ph.insert("assets_root", self.paths.assets_dir.display().to_string());
@@ -275,10 +281,17 @@ impl<'a> CommandBuilder<'a> {
             .as_ref()
             .filter(|arguments| !arguments.jvm.is_empty())
         {
-            Some(arguments) => jvm_templates.extend(args::expand_arguments(&arguments.jvm, &self.ctx)),
+            Some(arguments) => {
+                jvm_templates.extend(args::expand_arguments(&arguments.jvm, &self.ctx))
+            }
             None => jvm_templates.extend(args::legacy_jvm_base_args()),
         }
-        if let Some(client) = self.version.logging.as_ref().and_then(|l| l.client.as_ref()) {
+        if let Some(client) = self
+            .version
+            .logging
+            .as_ref()
+            .and_then(|l| l.client.as_ref())
+        {
             jvm_templates.push(client.argument.clone());
         }
 
@@ -292,13 +305,13 @@ impl<'a> CommandBuilder<'a> {
         }
         let jvm_args = args::dedup_jvm_args(jvm_args);
 
-        let main_class = self
-            .version
-            .main_class
-            .clone()
-            .ok_or_else(|| LaunchError::MissingMainClass {
-                version: self.version.id.clone(),
-            })?;
+        let main_class =
+            self.version
+                .main_class
+                .clone()
+                .ok_or_else(|| LaunchError::MissingMainClass {
+                    version: self.version.id.clone(),
+                })?;
 
         // 游戏段：优先新式 arguments.game，否则旧式 minecraftArguments。
         let game_templates: Vec<String> = if let Some(arguments) = self
@@ -341,7 +354,10 @@ mod tests {
     #[test]
     fn standard_paths_follow_minecraft_layout() {
         let paths = GamePaths::standard(PathBuf::from("D:/mc/.minecraft"), "1.21");
-        assert_eq!(paths.libraries_dir, PathBuf::from("D:/mc/.minecraft/libraries"));
+        assert_eq!(
+            paths.libraries_dir,
+            PathBuf::from("D:/mc/.minecraft/libraries")
+        );
         assert_eq!(paths.assets_dir, PathBuf::from("D:/mc/.minecraft/assets"));
         assert_eq!(
             paths.client_jar,
@@ -357,7 +373,12 @@ mod tests {
     fn command_line_quotes_spaced_and_empty_args() {
         let command = LaunchCommand {
             program: PathBuf::from("C:/Program Files/Java/bin/java.exe"),
-            args: vec!["-Xmx2048m".to_owned(), "--userProperties".to_owned(), "{}".to_owned(), "".to_owned()],
+            args: vec![
+                "-Xmx2048m".to_owned(),
+                "--userProperties".to_owned(),
+                "{}".to_owned(),
+                "".to_owned(),
+            ],
             working_dir: PathBuf::from("D:/mc"),
         };
         let line = command.command_line();

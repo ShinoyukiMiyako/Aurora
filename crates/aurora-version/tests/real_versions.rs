@@ -38,7 +38,10 @@ fn parse_real_1_21_all_fields() {
     let v = VersionJson::from_json_str(VANILLA_1_21).expect("1.21 应解析");
     assert_eq!(v.id, "1.21");
     assert_eq!(v.release_type.as_deref(), Some("release"));
-    assert_eq!(v.main_class.as_deref(), Some("net.minecraft.client.main.Main"));
+    assert_eq!(
+        v.main_class.as_deref(),
+        Some("net.minecraft.client.main.Main")
+    );
     assert_eq!(v.java_version.as_ref().unwrap().major_version, 21);
     assert_eq!(v.assets.as_deref(), Some("17"));
     assert_eq!(v.asset_index.as_ref().unwrap().id, "17");
@@ -48,7 +51,13 @@ fn parse_real_1_21_all_fields() {
         "0e9a07b9bb3390602f977073aa12884a4ce12431"
     );
     assert_eq!(
-        v.logging.as_ref().unwrap().client.as_ref().unwrap().log_type,
+        v.logging
+            .as_ref()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .log_type,
         "log4j2-xml"
     );
 
@@ -246,8 +255,7 @@ fn forge_on_1_12_2_merges_and_detects() {
     assert_eq!(raw_mc.value.as_deref(), Some("1.12.2"));
     assert_eq!(raw_mc.source, IdentifySource::InheritsFrom);
 
-    let provider: HashMap<String, VersionJson> =
-        HashMap::from([("1.12.2".to_string(), vanilla)]);
+    let provider: HashMap<String, VersionJson> = HashMap::from([("1.12.2".to_string(), vanilla)]);
     assert!(check_availability(&forge, &provider).is_available());
 
     let merged = resolve(&forge, &provider).expect("应合并");

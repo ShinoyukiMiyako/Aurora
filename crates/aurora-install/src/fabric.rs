@@ -275,7 +275,10 @@ mod tests {
     fn flavor_endpoints() {
         assert_eq!(LoaderFlavor::Fabric.api_version(), "v2");
         assert_eq!(LoaderFlavor::Quilt.api_version(), "v3");
-        assert_eq!(LoaderFlavor::Quilt.default_base(), "https://meta.quiltmc.org");
+        assert_eq!(
+            LoaderFlavor::Quilt.default_base(),
+            "https://meta.quiltmc.org"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -442,8 +445,8 @@ mod tests {
             std::fs::read(layout.version_json("fabric-loader-0.15.11-1.21")).unwrap();
         assert!(String::from_utf8_lossy(&json_on_disk).contains("KnotClient"));
         // 加载器库落到 libraries 下。
-        let lib = layout
-            .library_path("net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar");
+        let lib =
+            layout.library_path("net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar");
         assert_eq!(std::fs::read(lib).unwrap(), b"fabric-loader-jar");
     }
 }

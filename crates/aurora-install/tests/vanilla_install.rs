@@ -126,7 +126,12 @@ async fn full_vanilla_install_lands_every_artifact() {
     mount_bytes(&server, "/lib.jar", lib_bytes.clone()).await;
     mount_bytes(&server, "/log.xml", log_bytes.clone()).await;
     mount_bytes(&server, "/natives.jar", native_bytes.clone()).await;
-    mount_bytes(&server, "/assetindex.json", asset_index.clone().into_bytes()).await;
+    mount_bytes(
+        &server,
+        "/assetindex.json",
+        asset_index.clone().into_bytes(),
+    )
+    .await;
     // 资源对象走改写后的 mock 路径 /<h2>/<hash>。
     mount_bytes(
         &server,
@@ -179,7 +184,13 @@ async fn full_vanilla_install_lands_every_artifact() {
         object_bytes
     );
     assert_eq!(
-        std::fs::read(layout.assets_dir().join("log_configs").join("client-1.21.xml")).unwrap(),
+        std::fs::read(
+            layout
+                .assets_dir()
+                .join("log_configs")
+                .join("client-1.21.xml")
+        )
+        .unwrap(),
         log_bytes
     );
     // 版本 JSON 原样落盘（含未建模字段也保留，这里验证关键类名在）。

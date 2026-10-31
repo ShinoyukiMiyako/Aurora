@@ -342,7 +342,10 @@ mod tests {
         let diag = primary(log, CrashCategory::JavaVersionMismatch);
         assert_eq!(diag.detail.as_deref(), Some("class file version 61"));
 
-        assert_absent("[main] Setting user: Steve", CrashCategory::JavaVersionMismatch);
+        assert_absent(
+            "[main] Setting user: Steve",
+            CrashCategory::JavaVersionMismatch,
+        );
     }
 
     #[test]
@@ -364,12 +367,16 @@ mod tests {
         let diag = primary(log, CrashCategory::MissingDependency);
         assert_eq!(diag.detail.as_deref(), Some("fabric-api"));
 
-        assert_absent("All dependencies satisfied", CrashCategory::MissingDependency);
+        assert_absent(
+            "All dependencies satisfied",
+            CrashCategory::MissingDependency,
+        );
     }
 
     #[test]
     fn mixin_failure_positive_and_negative() {
-        let log = "[Sodium] Mixin apply failed sodium.mixins.json:features.MixinChunk from mod sodium";
+        let log =
+            "[Sodium] Mixin apply failed sodium.mixins.json:features.MixinChunk from mod sodium";
         let diag = primary(log, CrashCategory::MixinFailure);
         assert_eq!(diag.detail.as_deref(), Some("sodium.mixins.json"));
 
@@ -391,7 +398,10 @@ mod tests {
             "java.lang.UnsatisfiedLinkError: Failed to locate library: lwjgl.dll",
             CrashCategory::NativeLibraryMissing,
         );
-        assert_absent("Natives extracted successfully", CrashCategory::NativeLibraryMissing);
+        assert_absent(
+            "Natives extracted successfully",
+            CrashCategory::NativeLibraryMissing,
+        );
     }
 
     #[test]
@@ -400,7 +410,10 @@ mod tests {
             "GLFW error 65542: WGL: The driver does not appear to support OpenGL",
             CrashCategory::GraphicsDriver,
         );
-        assert_absent("OpenGL initialized: NVIDIA GeForce RTX", CrashCategory::GraphicsDriver);
+        assert_absent(
+            "OpenGL initialized: NVIDIA GeForce RTX",
+            CrashCategory::GraphicsDriver,
+        );
     }
 
     #[test]
@@ -417,7 +430,9 @@ mod tests {
         assert!(has_crash_marker(
             "Time: 2026-07-13\n---- Minecraft Crash Report ----\nDescription: ..."
         ));
-        assert!(has_crash_marker("Exception in thread \"main\" java.lang.Error"));
+        assert!(has_crash_marker(
+            "Exception in thread \"main\" java.lang.Error"
+        ));
         assert!(!has_crash_marker("Stopping! Saving worlds"));
     }
 

@@ -358,7 +358,10 @@ impl MicrosoftAuth {
     }
 
     async fn login_with_xbox(&self, uhs: &str, xsts_token: &str) -> Result<MinecraftToken> {
-        let url = format!("{}/authentication/login_with_xbox", self.endpoints.minecraft_base);
+        let url = format!(
+            "{}/authentication/login_with_xbox",
+            self.endpoints.minecraft_base
+        );
         let body = LoginWithXboxRequest {
             identity_token: format!("XBL3.0 x={uhs};{xsts_token}"),
         };

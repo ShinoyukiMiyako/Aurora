@@ -107,9 +107,10 @@ mod tests {
 
     #[test]
     fn map_to_resources_takes_priority() {
-        let idx =
-            AssetObjectsIndex::from_json_str(r#"{"map_to_resources":true,"virtual":true,"objects":{}}"#)
-                .unwrap();
+        let idx = AssetObjectsIndex::from_json_str(
+            r#"{"map_to_resources":true,"virtual":true,"objects":{}}"#,
+        )
+        .unwrap();
         assert_eq!(idx.layout(), AssetLayout::MapToResources);
     }
 

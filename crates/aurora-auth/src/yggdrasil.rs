@@ -557,8 +557,8 @@ struct YggdrasilErrorBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use serde_json::json;
+    use std::time::Duration;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -666,12 +666,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        assert!(
-            client_for(&server)
-                .validate("tok", None)
-                .await
-                .unwrap()
-        );
+        assert!(client_for(&server).validate("tok", None).await.unwrap());
 
         let server2 = MockServer::start().await;
         Mock::given(method("POST"))
@@ -682,12 +677,7 @@ mod tests {
             })))
             .mount(&server2)
             .await;
-        assert!(
-            !client_for(&server2)
-                .validate("tok", None)
-                .await
-                .unwrap()
-        );
+        assert!(!client_for(&server2).validate("tok", None).await.unwrap());
     }
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -752,7 +742,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ali.api_root, format!("{}/", server.uri()));
-        assert_eq!(ali.metadata.skin_domains, vec!["direct.example".to_string()]);
+        assert_eq!(
+            ali.metadata.skin_domains,
+            vec!["direct.example".to_string()]
+        );
         // meta 里没有 serverName：如实为 None，由上层回落到主机名。
         assert_eq!(ali.metadata.server_name(), None);
     }

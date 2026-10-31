@@ -149,7 +149,9 @@ fn is_retryable_http(err: &reqwest::Error) -> bool {
         return true;
     }
     match err.status() {
-        Some(status) => status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+        Some(status) => {
+            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        }
         None => false,
     }
 }
@@ -181,7 +183,9 @@ mod tests {
         };
         assert!(!err.is_retryable());
 
-        let err = Error::DataKeyMissing { key: "BINPATCH".into() };
+        let err = Error::DataKeyMissing {
+            key: "BINPATCH".into(),
+        };
         assert!(!err.is_retryable());
     }
 

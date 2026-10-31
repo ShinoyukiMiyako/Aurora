@@ -199,13 +199,22 @@ mod tests {
     #[test]
     fn parses_modern_java11_17_21() {
         let v11 = JavaVersion::parse("11.0.12+7").unwrap();
-        assert_eq!((v11.major, v11.minor, v11.security, v11.build), (11, 0, 12, 7));
+        assert_eq!(
+            (v11.major, v11.minor, v11.security, v11.build),
+            (11, 0, 12, 7)
+        );
 
         let v17 = JavaVersion::parse("17.0.1+12").unwrap();
-        assert_eq!((v17.major, v17.minor, v17.security, v17.build), (17, 0, 1, 12));
+        assert_eq!(
+            (v17.major, v17.minor, v17.security, v17.build),
+            (17, 0, 1, 12)
+        );
 
         let v21 = JavaVersion::parse("21.0.3").unwrap();
-        assert_eq!((v21.major, v21.minor, v21.security, v21.build), (21, 0, 3, 0));
+        assert_eq!(
+            (v21.major, v21.minor, v21.security, v21.build),
+            (21, 0, 3, 0)
+        );
     }
 
     #[test]
@@ -292,7 +301,10 @@ mod tests {
         assert_eq!(p11.vendor, "OpenJDK");
 
         let p17 = parse_java_version_output(OPENJDK_17).unwrap();
-        assert_eq!((p17.version.major, p17.version.security, p17.version.build), (17, 1, 12));
+        assert_eq!(
+            (p17.version.major, p17.version.security, p17.version.build),
+            (17, 1, 12)
+        );
         assert!(p17.is_64bit);
     }
 

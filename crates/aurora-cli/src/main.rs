@@ -223,7 +223,10 @@ async fn versions(aurora: &Aurora, action: VersionsAction) -> aurora_core::Resul
         VersionsAction::Installed => {
             let scan = aurora.list_installed().await?;
             if scan.versions.is_empty() && scan.broken.is_empty() {
-                println!("当前游戏目录未发现已安装版本：{}", aurora.game_dir().display());
+                println!(
+                    "当前游戏目录未发现已安装版本：{}",
+                    aurora.game_dir().display()
+                );
                 return Ok(());
             }
             for v in &scan.versions {
@@ -239,7 +242,11 @@ async fn versions(aurora: &Aurora, action: VersionsAction) -> aurora_core::Resul
                         .collect::<Vec<_>>()
                         .join(" + ")
                 };
-                let kind = if v.is_release() { "release" } else { "非正式版" };
+                let kind = if v.is_release() {
+                    "release"
+                } else {
+                    "非正式版"
+                };
                 println!("{:<28} [{kind}] {loaders}", v.id);
             }
             for b in &scan.broken {
@@ -268,7 +275,9 @@ async fn install(
     };
 
     let (sink, printer) = spawn_event_printer();
-    let outcome = aurora.install(id, choice, loader_version, Some(&sink)).await;
+    let outcome = aurora
+        .install(id, choice, loader_version, Some(&sink))
+        .await;
     drop(sink);
     let _ = printer.await;
     let outcome = outcome?;
@@ -276,7 +285,10 @@ async fn install(
     println!("安装完成。");
     println!(
         "  原版 {}：库 {} / 资源 {} / natives {}",
-        outcome.vanilla.id, outcome.vanilla.libraries, outcome.vanilla.assets, outcome.vanilla.natives
+        outcome.vanilla.id,
+        outcome.vanilla.libraries,
+        outcome.vanilla.assets,
+        outcome.vanilla.natives
     );
     if let Some(loader) = outcome.loader {
         println!(

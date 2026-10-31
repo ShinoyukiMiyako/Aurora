@@ -481,9 +481,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/manifest.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                r#"{"latest":{"release":"a","snapshot":"a"},"versions":[]}"#,
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"latest":{"release":"a","snapshot":"a"},"versions":[]}"#),
+            )
             .mount(&server)
             .await;
 

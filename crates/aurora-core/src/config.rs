@@ -55,7 +55,9 @@ impl DownloadSourcePolicy {
     pub fn primary_mirror(self) -> MirrorSource {
         match self {
             DownloadSourcePolicy::MirrorFirst => MirrorSource::BmclApi,
-            DownloadSourcePolicy::Auto | DownloadSourcePolicy::OfficialFirst => MirrorSource::Official,
+            DownloadSourcePolicy::Auto | DownloadSourcePolicy::OfficialFirst => {
+                MirrorSource::Official
+            }
         }
     }
 

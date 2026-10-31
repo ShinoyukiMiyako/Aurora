@@ -565,10 +565,17 @@ async fn sha1_mismatch_triggers_redownload() {
     downloader.download(&task).await.expect("重下后应通过校验");
 
     assert_eq!(tokio::fs::read(&dest).await.unwrap(), good.as_bytes());
-    assert_eq!(hits.load(Ordering::SeqCst), 2, "首次损坏、第二次正确，共两次");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "首次损坏、第二次正确，共两次"
+    );
     // 校验失败路径应已清掉临时文件。
     let tmp = format!("{}.petalfall-tmp", dest.display());
-    assert!(!std::path::Path::new(&tmp).exists(), "损坏重下后临时文件未清理");
+    assert!(
+        !std::path::Path::new(&tmp).exists(),
+        "损坏重下后临时文件未清理"
+    );
 }
 
 /// 两次安装同时要同一个共享文件：后到的一方等前一方落位，再按 sha1 认出它已就绪直接跳过，
@@ -650,9 +657,7 @@ async fn exhausted_primary_switches_to_mirror() {
         .mount(&server)
         .await;
 
-    let resolver = Arc::new(TwoWayResolver {
-        base: server.uri(),
-    });
+    let resolver = Arc::new(TwoWayResolver { base: server.uri() });
     let config = DownloadConfig {
         chunk: ChunkConfig::default(),
         retry: fast_policy(),
@@ -798,9 +803,7 @@ async fn pool_downloads_batch_and_reports_progress() {
             .await;
         let sha1 = sha1_of(body.as_bytes()).await;
         let dest = dir.path().join(format!("f{i}.txt"));
-        tasks.push(
-            DownloadTask::new(format!("{}{}", server.uri(), route), dest).with_sha1(&sha1),
-        );
+        tasks.push(DownloadTask::new(format!("{}{}", server.uri(), route), dest).with_sha1(&sha1));
     }
 
     let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));

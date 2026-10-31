@@ -85,11 +85,7 @@ mod tests {
         .await
         .unwrap();
 
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
-            mc.to_path_buf(),
-            mc.to_path_buf(),
-        );
+        let aurora = Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
         let scan = aurora.list_installed().await.unwrap();
         assert_eq!(scan.versions.len(), 1);
         assert_eq!(scan.versions[0].id, "1.21");

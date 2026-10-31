@@ -129,9 +129,6 @@ mod tests {
             expected: "abc".into(),
             actual: "def".into(),
         };
-        assert_eq!(
-            err.to_string(),
-            "SHA-256 校验不通过: 期望 abc, 实际 def"
-        );
+        assert_eq!(err.to_string(), "SHA-256 校验不通过: 期望 abc, 实际 def");
     }
 }

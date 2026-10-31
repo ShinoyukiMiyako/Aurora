@@ -160,6 +160,9 @@ mod tests {
 
     #[test]
     fn rel_to_path_ignores_empty_segments() {
-        assert_eq!(rel_to_path("a//b/c"), PathBuf::from("a").join("b").join("c"));
+        assert_eq!(
+            rel_to_path("a//b/c"),
+            PathBuf::from("a").join("b").join("c")
+        );
     }
 }

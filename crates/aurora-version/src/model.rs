@@ -19,7 +19,11 @@ pub struct VersionJson {
     /// 版本标识，如 `1.21`、`fabric-loader-0.15.11-1.21`。
     pub id: String,
     /// 父版本 id；加载器版本借此把自己叠加到原版之上。合并解析后置空。
-    #[serde(rename = "inheritsFrom", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "inheritsFrom",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub inherits_from: Option<String>,
     /// 启动主类。加载器版本会覆盖原版主类；某些仅含库的补丁 JSON 可能缺省。
     #[serde(rename = "mainClass", default, skip_serializing_if = "Option::is_none")]
@@ -35,7 +39,11 @@ pub struct VersionJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Arguments>,
     /// 资源索引引用（指向 objects 索引文件本身，不含逐个资源对象）。
-    #[serde(rename = "assetIndex", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "assetIndex",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub asset_index: Option<AssetIndex>,
     /// 资源索引 id；`legacy` / `pre-1.6` 表示虚拟布局。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,7 +55,11 @@ pub struct VersionJson {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub downloads: Option<Downloads>,
     /// 该版本推荐的 Java 主版本。
-    #[serde(rename = "javaVersion", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "javaVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub java_version: Option<JavaVersion>,
     /// 客户端日志配置（log4j2 xml）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,7 +68,11 @@ pub struct VersionJson {
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub release_type: Option<String>,
     /// 发布时间（ISO-8601）。
-    #[serde(rename = "releaseTime", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "releaseTime",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub release_time: Option<String>,
     /// 文件生成时间（ISO-8601）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,7 +92,11 @@ pub struct VersionJson {
     )]
     pub compliance_level: Option<u32>,
     /// 部分加载器 JSON 自带的原版版本号字段，是识别 MC 版本的高可信来源。
-    #[serde(rename = "clientVersion", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "clientVersion",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub client_version: Option<String>,
 }
 
@@ -265,9 +285,17 @@ pub struct Downloads {
     pub client: Option<DownloadEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<DownloadEntry>,
-    #[serde(rename = "client_mappings", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "client_mappings",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub client_mappings: Option<DownloadEntry>,
-    #[serde(rename = "server_mappings", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "server_mappings",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub server_mappings: Option<DownloadEntry>,
 }
 
@@ -424,13 +452,28 @@ mod tests {
         let lib: Library = serde_json::from_str(json).expect("应解析");
         let win64 = RuntimeContext::new(OsName::Windows, "x86_64", 64);
         let win32 = RuntimeContext::new(OsName::Windows, "x86", 32);
-        assert_eq!(lib.native_classifier(&win64).as_deref(), Some("natives-windows-64"));
-        assert_eq!(lib.native_classifier(&win32).as_deref(), Some("natives-windows-32"));
-        assert_eq!(lib.native_artifact(&win64).map(|a| a.url.as_str()), Some("u64"));
-        assert_eq!(lib.native_artifact(&win32).map(|a| a.url.as_str()), Some("u32"));
+        assert_eq!(
+            lib.native_classifier(&win64).as_deref(),
+            Some("natives-windows-64")
+        );
+        assert_eq!(
+            lib.native_classifier(&win32).as_deref(),
+            Some("natives-windows-32")
+        );
+        assert_eq!(
+            lib.native_artifact(&win64).map(|a| a.url.as_str()),
+            Some("u64")
+        );
+        assert_eq!(
+            lib.native_artifact(&win32).map(|a| a.url.as_str()),
+            Some("u32")
+        );
         // linux 有 natives 映射但 fixture 未提供对应 classifier 下载件。
         let linux = RuntimeContext::new(OsName::Linux, "x86_64", 64);
-        assert_eq!(lib.native_classifier(&linux).as_deref(), Some("natives-linux"));
+        assert_eq!(
+            lib.native_classifier(&linux).as_deref(),
+            Some("natives-linux")
+        );
         assert!(lib.native_artifact(&linux).is_none());
     }
 
@@ -469,7 +512,8 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_modeled_fields() {
-        let json = r#"{"id":"1.21","mainClass":"M","type":"release","libraries":[{"name":"g:a:1"}]}"#;
+        let json =
+            r#"{"id":"1.21","mainClass":"M","type":"release","libraries":[{"name":"g:a:1"}]}"#;
         let v = VersionJson::from_json_str(json).unwrap();
         let back = serde_json::to_string(&v).unwrap();
         let v2 = VersionJson::from_json_str(&back).unwrap();

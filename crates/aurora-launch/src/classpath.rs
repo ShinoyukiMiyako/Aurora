@@ -86,9 +86,10 @@ pub fn classpath_entries(
         if lib.is_native() {
             continue;
         }
-        let relative = library_relative_path(lib).ok_or_else(|| LaunchError::InvalidLibraryCoordinate {
-            name: lib.name.clone(),
-        })?;
+        let relative =
+            library_relative_path(lib).ok_or_else(|| LaunchError::InvalidLibraryCoordinate {
+                name: lib.name.clone(),
+            })?;
         entries.push(libraries_dir.join(rel_to_path(&relative)));
     }
     entries.push(client_jar.to_path_buf());
@@ -157,7 +158,10 @@ mod tests {
             rules: None,
             extract: None,
         };
-        assert_eq!(library_relative_path(&with_download).as_deref(), Some("custom/put/here.jar"));
+        assert_eq!(
+            library_relative_path(&with_download).as_deref(),
+            Some("custom/put/here.jar")
+        );
 
         let shorthand = Library {
             name: "net.fabricmc:fabric-loader:0.15.11".into(),
@@ -194,9 +198,19 @@ mod tests {
         let client_jar = Path::new("D:/mc/.minecraft/versions/1.21/1.21.jar");
         let entries = classpath_entries(&version, &win64(), libraries_dir, client_jar).unwrap();
 
-        assert_eq!(entries.len(), 3, "asm + lwjgl 主件 + client jar，natives 不计");
-        assert_eq!(entries[0], libraries_dir.join("org/ow2/asm/asm/9.6/asm-9.6.jar"));
-        assert_eq!(entries[1], libraries_dir.join("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar"));
+        assert_eq!(
+            entries.len(),
+            3,
+            "asm + lwjgl 主件 + client jar，natives 不计"
+        );
+        assert_eq!(
+            entries[0],
+            libraries_dir.join("org/ow2/asm/asm/9.6/asm-9.6.jar")
+        );
+        assert_eq!(
+            entries[1],
+            libraries_dir.join("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar")
+        );
         assert_eq!(entries[2], client_jar);
 
         let joined = classpath_string(&entries, ';');
@@ -206,17 +220,13 @@ mod tests {
 
     #[test]
     fn invalid_non_native_coordinate_errors() {
-        let version = VersionJson::from_json_str(
-            r#"{"id":"x","libraries":[{"name":"broken-coordinate"}]}"#,
-        )
-        .unwrap();
-        let err = classpath_entries(
-            &version,
-            &win64(),
-            Path::new("/libs"),
-            Path::new("/c.jar"),
-        )
-        .unwrap_err();
-        assert!(matches!(err, LaunchError::InvalidLibraryCoordinate { name } if name == "broken-coordinate"));
+        let version =
+            VersionJson::from_json_str(r#"{"id":"x","libraries":[{"name":"broken-coordinate"}]}"#)
+                .unwrap();
+        let err = classpath_entries(&version, &win64(), Path::new("/libs"), Path::new("/c.jar"))
+            .unwrap_err();
+        assert!(
+            matches!(err, LaunchError::InvalidLibraryCoordinate { name } if name == "broken-coordinate")
+        );
     }
 }

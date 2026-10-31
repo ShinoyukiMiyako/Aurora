@@ -6,9 +6,7 @@
 //! 这里只负责「下什么、下到哪、期望什么哈希」，因此可以脱离网络做表驱动断言。
 
 use aurora_download::DownloadTask;
-use aurora_version::{
-    AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries,
-};
+use aurora_version::{AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries};
 
 use crate::error::{Error, Result};
 use crate::layout::{ASSET_OBJECTS_BASE, GameLayout};
@@ -23,9 +21,11 @@ pub fn client_jar_task(version: &VersionJson, layout: &GameLayout) -> Result<Dow
         .ok_or_else(|| Error::MissingClientDownload {
             version: version.id.clone(),
         })?;
-    Ok(DownloadTask::new(client.url.clone(), layout.version_jar(&version.id))
-        .with_sha1(client.sha1.clone())
-        .with_size(client.size))
+    Ok(
+        DownloadTask::new(client.url.clone(), layout.version_jar(&version.id))
+            .with_sha1(client.sha1.clone())
+            .with_size(client.size),
+    )
 }
 
 /// 按 rules 过滤 + 去重后的全部库下载任务（含主件与当前平台的 natives 件）。
@@ -102,10 +102,14 @@ fn push_library_tasks(
     if lib.downloads.is_none()
         && let Some(base) = &lib.url
     {
-        let rel = maven::artifact_path(&lib.name).ok_or_else(|| Error::InvalidLibraryCoordinate {
-            name: lib.name.clone(),
-        })?;
-        out.push(DownloadTask::new(join_maven(base, &rel), layout.library_path(&rel)));
+        let rel =
+            maven::artifact_path(&lib.name).ok_or_else(|| Error::InvalidLibraryCoordinate {
+                name: lib.name.clone(),
+            })?;
+        out.push(DownloadTask::new(
+            join_maven(base, &rel),
+            layout.library_path(&rel),
+        ));
     }
     // 既无 downloads 又无 url 的库由加载器安装器本地产出（Forge 通用 jar），不下载。
     Ok(())
@@ -125,10 +129,7 @@ fn join_maven(base: &str, relative: &str) -> String {
 /// 客户端日志配置文件（log4j2 xml）的下载任务；无 logging 段时返回 None。
 pub fn logging_task(version: &VersionJson, layout: &GameLayout) -> Option<DownloadTask> {
     let file = version.logging.as_ref()?.client.as_ref()?.file.clone();
-    let dest = layout
-        .assets_dir()
-        .join("log_configs")
-        .join(&file.id);
+    let dest = layout.assets_dir().join("log_configs").join(&file.id);
     Some(
         DownloadTask::new(file.url, dest)
             .with_sha1(file.sha1)
@@ -222,14 +223,22 @@ mod tests {
         let tasks = library_tasks(&v, &win64(), &layout()).unwrap();
         assert_eq!(tasks.len(), 2, "gson 主件 + windows natives 件");
 
-        assert_eq!(tasks[0].dest, PathBuf::from("/mc/libraries/com/google/code/gson/gson/2.8.0/gson-2.8.0.jar"));
+        assert_eq!(
+            tasks[0].dest,
+            PathBuf::from("/mc/libraries/com/google/code/gson/gson/2.8.0/gson-2.8.0.jar")
+        );
         assert_eq!(tasks[0].sha1.as_deref(), Some("g1"));
 
         // 只挑到 windows natives，不含 linux。
-        assert_eq!(tasks[1].url, "https://libraries.minecraft.net/lwjgl-natives-windows.jar");
+        assert_eq!(
+            tasks[1].url,
+            "https://libraries.minecraft.net/lwjgl-natives-windows.jar"
+        );
         assert_eq!(
             tasks[1].dest,
-            PathBuf::from("/mc/libraries/org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-windows.jar")
+            PathBuf::from(
+                "/mc/libraries/org/lwjgl/lwjgl/lwjgl-platform/2.9.4/lwjgl-platform-2.9.4-natives-windows.jar"
+            )
         );
         assert_eq!(tasks[1].sha1.as_deref(), Some("w1"));
     }
@@ -250,7 +259,9 @@ mod tests {
         );
         assert_eq!(
             tasks[0].dest,
-            PathBuf::from("/mc/libraries/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar")
+            PathBuf::from(
+                "/mc/libraries/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar"
+            )
         );
         // 简写式无哈希/大小契约。
         assert!(tasks[0].sha1.is_none());
@@ -310,7 +321,10 @@ mod tests {
             obj_tasks[0].dest,
             PathBuf::from("/mc/assets/objects/ab/ab12cd0000000000000000000000000000000000")
         );
-        assert_eq!(obj_tasks[0].sha1.as_deref(), Some("ab12cd0000000000000000000000000000000000"));
+        assert_eq!(
+            obj_tasks[0].sha1.as_deref(),
+            Some("ab12cd0000000000000000000000000000000000")
+        );
         assert_eq!(obj_tasks[0].size, Some(123));
     }
 
@@ -321,7 +335,10 @@ mod tests {
         )
         .unwrap();
         let task = logging_task(&v, &layout()).unwrap();
-        assert_eq!(task.dest, PathBuf::from("/mc/assets/log_configs/client-1.12.xml"));
+        assert_eq!(
+            task.dest,
+            PathBuf::from("/mc/assets/log_configs/client-1.12.xml")
+        );
         assert_eq!(task.sha1.as_deref(), Some("log1"));
     }
 }

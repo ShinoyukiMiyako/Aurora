@@ -31,7 +31,10 @@ pub enum AuthError {
 
     /// 响应结构不符合协议约定（缺少必需字段、头部畸形等）。
     #[error("响应不符合协议约定（{context}）: {detail}")]
-    Response { context: &'static str, detail: String },
+    Response {
+        context: &'static str,
+        detail: String,
+    },
 
     /// 设备码在用户完成授权前已过期，需重新发起登录。
     #[error("设备码已过期，请重新发起登录")]

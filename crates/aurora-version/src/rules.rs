@@ -304,7 +304,9 @@ mod tests {
 
     #[test]
     fn feature_rule_requires_feature_true() {
-        let rules = vec![rule(r#"{"action":"allow","features":{"is_demo_user":true}}"#)];
+        let rules = vec![rule(
+            r#"{"action":"allow","features":{"is_demo_user":true}}"#,
+        )];
         assert!(!evaluate_rules(&rules, &win64()));
         assert!(evaluate_rules(
             &rules,
@@ -314,10 +316,18 @@ mod tests {
 
     #[test]
     fn os_version_regex_constraint() {
-        let rules = vec![rule(r#"{"action":"allow","os":{"name":"windows","version":"^10\\."}}"#)];
+        let rules = vec![rule(
+            r#"{"action":"allow","os":{"name":"windows","version":"^10\\."}}"#,
+        )];
         assert!(!evaluate_rules(&rules, &win64())); // 空版本串不匹配
-        assert!(evaluate_rules(&rules, &win64().with_os_version("10.0.22631")));
-        assert!(!evaluate_rules(&rules, &win64().with_os_version("6.1.7601")));
+        assert!(evaluate_rules(
+            &rules,
+            &win64().with_os_version("10.0.22631")
+        ));
+        assert!(!evaluate_rules(
+            &rules,
+            &win64().with_os_version("6.1.7601")
+        ));
     }
 
     #[test]

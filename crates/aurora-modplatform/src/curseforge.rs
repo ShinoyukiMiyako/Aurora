@@ -69,11 +69,15 @@ impl CurseForgeClient {
     }
 
     fn get(&self, url: &str) -> reqwest::RequestBuilder {
-        self.http.get(url).header("x-api-key", self.api_key.as_str())
+        self.http
+            .get(url)
+            .header("x-api-key", self.api_key.as_str())
     }
 
     fn post(&self, url: &str) -> reqwest::RequestBuilder {
-        self.http.post(url).header("x-api-key", self.api_key.as_str())
+        self.http
+            .post(url)
+            .header("x-api-key", self.api_key.as_str())
     }
 
     /// 按 [`search_plan`] 搜索工程。CurseForge 单次仅支持一个加载器与一个游戏版本，故取查询列表首项。
@@ -237,8 +241,10 @@ impl CurseForgeClient {
             "{}/v1/mods/{}/files/{}/download-url",
             self.base_url, mod_id, file_id
         );
-        let envelope: Envelope<String> =
-            send_json(&self.retry, "curseforge.download_url", || self.get(url.as_str())).await?;
+        let envelope: Envelope<String> = send_json(&self.retry, "curseforge.download_url", || {
+            self.get(url.as_str())
+        })
+        .await?;
         Ok(envelope.data)
     }
 }
@@ -957,7 +963,10 @@ mod tests {
         let m = &matches[0];
         assert_eq!(m.id, 238222);
         assert_eq!(m.file.sha1(), Some("abc123"));
-        assert_eq!(m.file.dependencies[0].kind(), Some(DependencyKind::Required));
+        assert_eq!(
+            m.file.dependencies[0].kind(),
+            Some(DependencyKind::Required)
+        );
 
         let task = m.file.to_download_task("C:/mods/jei.jar").unwrap();
         assert_eq!(task.url, "https://cf/jei-1.20.1.jar");

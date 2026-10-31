@@ -69,7 +69,9 @@ pub enum CoreError {
         version_id: String,
     },
     /// 找不到匹配主版本的 Java，且自动下载被关闭。
-    #[error("未找到匹配 Java {major} 的运行时，且自动下载已关闭（开启 auto_download_java 或手动安装对应 Java）")]
+    #[error(
+        "未找到匹配 Java {major} 的运行时，且自动下载已关闭（开启 auto_download_java 或手动安装对应 Java）"
+    )]
     NoJava { major: u32 },
     /// 启动前检查存在阻断项，已中止启动。
     #[error("启动前检查未通过：{0}")]

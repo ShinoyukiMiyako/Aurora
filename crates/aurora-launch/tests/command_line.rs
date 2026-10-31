@@ -217,7 +217,9 @@ fn modern_1_21_full_command_line() {
         // 内存。
         s("-Xmx4096m"),
         // 版本 arguments.jvm：osx 条件被排除；windows 与 ^10\. 命中；x86 arch 被排除。
-        s("-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"),
+        s(
+            "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump",
+        ),
         s("-Dos.name=Windows 10"),
         s("-Dos.version=10.0"),
         format!("-Djava.library.path={natives}"),
@@ -303,7 +305,11 @@ fn authlib_injector_agent_is_injected() {
     assert!(command.args.iter().any(|a| a == prefetch));
     // agent 在内存参数（-Xmx）之后，classpath 之前。
     let idx_agent = command.args.iter().position(|a| a == agent).unwrap();
-    let idx_xmx = command.args.iter().position(|a| a.starts_with("-Xmx")).unwrap();
+    let idx_xmx = command
+        .args
+        .iter()
+        .position(|a| a.starts_with("-Xmx"))
+        .unwrap();
     let idx_cp = command.args.iter().position(|a| a == "-cp").unwrap();
     assert!(idx_xmx < idx_agent && idx_agent < idx_cp);
 }

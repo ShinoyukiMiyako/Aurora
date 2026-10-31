@@ -147,10 +147,11 @@ fn write_and_sync(tmp: &Path, bytes: &[u8]) -> aurora_base::Result<()> {
         path: tmp.to_owned(),
         source,
     })?;
-    file.write_all(bytes).map_err(|source| aurora_base::Error::Io {
-        path: tmp.to_owned(),
-        source,
-    })?;
+    file.write_all(bytes)
+        .map_err(|source| aurora_base::Error::Io {
+            path: tmp.to_owned(),
+            source,
+        })?;
     // fsync：确保 rename 前数据已落盘，避免掉电后目标名指向空洞文件。
     file.sync_all().map_err(|source| aurora_base::Error::Io {
         path: tmp.to_owned(),

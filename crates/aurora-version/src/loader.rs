@@ -102,7 +102,9 @@ pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
     let optifine_version = find_lib_version(version, "optifine", "OptiFine");
     let optifine_present = optifine_version.is_some()
         || has_group(version, "optifine")
-        || tokens.iter().any(|t| t.contains("optifine.OptiFineTweaker"));
+        || tokens
+            .iter()
+            .any(|t| t.contains("optifine.OptiFineTweaker"));
     if optifine_present {
         out.push(LoaderInfo {
             kind: LoaderKind::OptiFine,

@@ -32,7 +32,9 @@ fn should_extract(entry_name: &str, excludes: &[String]) -> bool {
     if entry_name.ends_with('/') {
         return false;
     }
-    !excludes.iter().any(|prefix| entry_name.starts_with(prefix.as_str()))
+    !excludes
+        .iter()
+        .any(|prefix| entry_name.starts_with(prefix.as_str()))
 }
 
 /// 一个待解压的 native jar。
@@ -280,7 +282,10 @@ mod tests {
 
         let extracted = extract_jar(&jar, &dest, &["META-INF/".to_string()]).unwrap();
         assert_eq!(extracted, vec![PathBuf::from("lwjgl.dll")], "只应解压 dll");
-        assert_eq!(std::fs::read(dest.join("lwjgl.dll")).unwrap(), b"fake-dll-bytes");
+        assert_eq!(
+            std::fs::read(dest.join("lwjgl.dll")).unwrap(),
+            b"fake-dll-bytes"
+        );
         assert!(!dest.join("META-INF").exists(), "META-INF 应被排除");
     }
 

@@ -54,7 +54,13 @@ impl<'a> VanillaInstaller<'a> {
 
     /// 拉取并解析版本清单。
     pub async fn fetch_manifest(&self) -> Result<VersionManifest> {
-        net::get_json(self.cx.client, &self.manifest_url, self.cx.policy, "版本清单").await
+        net::get_json(
+            self.cx.client,
+            &self.manifest_url,
+            self.cx.policy,
+            "版本清单",
+        )
+        .await
     }
 
     /// 在版本清单里查出 `id` 的条目。清单里没有该 id 时报 [`Error::InstallerEntryMissing`]。

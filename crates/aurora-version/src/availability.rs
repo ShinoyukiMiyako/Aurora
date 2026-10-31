@@ -16,7 +16,10 @@ pub enum UnavailableReason {
     /// 合并后仍缺少 mainClass。
     MissingMainClass,
     /// inheritsFrom 前置未安装（provider 取不到）。
-    InheritanceUnresolved { missing_id: String, referenced_by: String },
+    InheritanceUnresolved {
+        missing_id: String,
+        referenced_by: String,
+    },
     /// 继承链存在循环。
     InheritanceCycle { chain: Vec<String> },
     /// inheritsFrom 指向自身。
@@ -95,10 +98,7 @@ where
 }
 
 fn has_main_class(version: &VersionJson) -> bool {
-    version
-        .main_class
-        .as_deref()
-        .is_some_and(|m| !m.is_empty())
+    version.main_class.as_deref().is_some_and(|m| !m.is_empty())
 }
 
 #[cfg(test)]
@@ -124,7 +124,9 @@ mod tests {
     #[test]
     fn loader_with_installed_parent_is_available() {
         let vanilla = v(r#"{"id":"1.21","mainClass":"net.minecraft.client.main.Main"}"#);
-        let fabric = v(r#"{"id":"fabric-1.21","inheritsFrom":"1.21","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient"}"#);
+        let fabric = v(
+            r#"{"id":"fabric-1.21","inheritsFrom":"1.21","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient"}"#,
+        );
         let a = check_availability(&fabric, &provider(&[vanilla]));
         assert!(a.is_available(), "预期可用，得到 {:?}", a.reasons);
     }

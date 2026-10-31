@@ -414,10 +414,7 @@ mod tests {
         let file = dir.path().join("out.txt");
         atomic_write(&file, b"first").await.unwrap();
         atomic_write(&file, b"second-and-longer").await.unwrap();
-        assert_eq!(
-            tokio::fs::read(&file).await.unwrap(),
-            b"second-and-longer"
-        );
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), b"second-and-longer");
         // 临时文件不应残留（目录里只剩目标文件）。
         let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
         let mut names = Vec::new();
