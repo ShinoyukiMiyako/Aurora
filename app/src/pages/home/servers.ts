@@ -83,10 +83,23 @@ export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonl
   });
 }
 
-/** 「固定服务器」菜单能列出的服务器：多人游戏列表里还没固定的，按列表顺序，不超过菜单的可操作项上限。 */
+/** 可以固定的服务器：多人游戏列表里还没固定的，按列表顺序。 */
 export function pinCandidates(known: readonly KnownServerDto[]): PinnedServerDto[] {
-  return known
-    .filter((s) => !s.pinned)
-    .slice(0, MENU_MAX_ACTIONS)
-    .map((s) => ({ name: s.name, address: s.address }));
+  return known.filter((s) => !s.pinned).map((s) => ({ name: s.name, address: s.address }));
+}
+
+export interface PinMenuPlan {
+  /** 直接列在加号菜单里的服务器。 */
+  inline: PinnedServerDto[];
+  /** 放不下时菜单末尾「全部 N 台服务器」的 N，打开弹窗挑选；放得下为 null。 */
+  overflow: number | null;
+}
+
+/**
+ * 加号菜单怎么排：菜单的可操作项有上限、也不支持子菜单，候选放得下就全部列出；放不下时列前面几台，
+ * 最后一项留给「全部 N 台服务器」打开弹窗，这样每台服务器都有入口，菜单项数也不超过上限。
+ */
+export function pinMenuPlan(candidates: readonly PinnedServerDto[]): PinMenuPlan {
+  if (candidates.length <= MENU_MAX_ACTIONS) return { inline: [...candidates], overflow: null };
+  return { inline: candidates.slice(0, MENU_MAX_ACTIONS - 1), overflow: candidates.length };
 }

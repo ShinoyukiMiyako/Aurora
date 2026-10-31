@@ -5,6 +5,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
+import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
 import { ACTION_ERROR } from "../../copy/flows";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
@@ -17,22 +18,25 @@ import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import { useLauncher, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
-import { useKnownServers, usePinnedServers, useServerStatus, type PinnedServerDto } from "../../state/queries/home";
+import { useKnownServers, usePinnedServers, useServerStatus, type KnownServerDto, type PinnedServerDto } from "../../state/queries/home";
+import type { ResourceResult } from "../../state/resource";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card, type ResponsiveValue } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
 import { EmptyState } from "../../ui/EmptyState";
 import { IconButton } from "../../ui/IconButton";
+import { List, ListRow } from "../../ui/ListRow";
 import type { MenuEntry } from "../../ui/Menu";
 import { MenuButton } from "../../ui/MenuButton";
+import { Modal } from "../../ui/Modal";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Skeleton } from "../../ui/Skeleton";
 import { Thumb } from "../../ui/Thumb";
 import { HOME_COPY } from "./copy";
 import { SKELETON_SIZE } from "./layout";
 import { useReportOnce } from "./report";
-import { SIGNAL_BARS, pinCandidates, serverRows, type ServerRow } from "./servers";
+import { SIGNAL_BARS, pinCandidates, pinMenuPlan, serverRows, type ServerRow } from "./servers";
 import s from "./home.module.css";
 
 /** 主页可见时重测延迟与人数的间隔。 */
@@ -53,6 +57,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const known = useKnownServers();
   const online = useOnline();
   const gate = useLoadingGate(pinned.status === "loading");
+  const [pickerOpen, setPickerOpen] = useState(false);
   useReportOnce(known.status === "error" ? known.error : null, HOME_COPY.knownError);
 
   const reloadStatus = status.reload;
@@ -81,7 +86,10 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
     if (known.data.length === 0) return [{ label: HOME_COPY.knownEmpty, disabled: true, onSelect: inert }];
     const candidates = pinCandidates(known.data);
     if (candidates.length === 0) return [{ label: HOME_COPY.allPinned, disabled: true, onSelect: inert }];
-    return candidates.map((server) => ({ label: server.name, hint: server.address, icon: "pin", onSelect: () => toggle(server) }));
+    const plan = pinMenuPlan(candidates);
+    const items: MenuEntry[] = plan.inline.map((server) => ({ label: server.name, hint: server.address, icon: "pin", onSelect: () => toggle(server) }));
+    if (plan.overflow !== null) items.push({ kind: "separator" }, { label: HOME_COPY.pickAll(plan.overflow), icon: "server", onSelect: () => setPickerOpen(true) });
+    return items;
   };
 
   const count = pinned.status === "ready" ? pinned.data.length : 0;
@@ -165,7 +173,59 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
         actions={<MenuButton items={addItems()} placement="bottom-end" trigger={(props) => <IconButton {...props} icon="plus" variant="secondary" size="sm" label={HOME_COPY.pinServer} />} />}
       />
       {body()}
+      <ServerPicker open={pickerOpen} known={known} onPin={toggle} onClose={() => setPickerOpen(false)} />
     </Card>
+  );
+}
+
+interface ServerPickerProps {
+  open: boolean;
+  known: ResourceResult<KnownServerDto[]>;
+  onPin: (server: PinnedServerDto) => void;
+  onClose: () => void;
+}
+
+/** 加号菜单放不下时的完整挑选：固定一台就从列表里消失，挑完了说明一句，不自动关闭（常常一次固定好几台）。 */
+function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
+  const body = () => {
+    // 固定之后多人列表会重读；重读期间手里的旧列表照常可用，只有一份都没有时才说明原因
+    if (known.data === undefined) {
+      if (known.status === "error") return <EmptyState scene="error" compact title={HOME_COPY.knownError} body={describeError(known.error)} />;
+      return <EmptyState icon="server" compact title={HOME_COPY.knownLoading} />;
+    }
+    const candidates = pinCandidates(known.data);
+    if (candidates.length === 0) return <EmptyState icon="check-circle" compact title={HOME_COPY.allPinned} />;
+    return (
+      <List>
+        {candidates.map((server) => (
+          <ListRow
+            key={server.address}
+            leading={<Icon name="pin" size={18} />}
+            title={server.name}
+            meta={server.address}
+            ariaLabel={HOME_COPY.pickerPin(server.name)}
+            onClick={() => onPin(server)}
+          />
+        ))}
+      </List>
+    );
+  };
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="sm"
+      icon="server"
+      title={HOME_COPY.pickerTitle}
+      subtitle={HOME_COPY.pickerSubtitle}
+      footer={
+        <Button variant="secondary" onClick={onClose}>
+          {HOME_COPY.close}
+        </Button>
+      }
+    >
+      {body()}
+    </Modal>
   );
 }
 

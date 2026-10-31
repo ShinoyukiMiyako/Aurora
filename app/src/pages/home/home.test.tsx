@@ -455,6 +455,44 @@ describe("主页：固定的服务器", () => {
     expect(menuItems()[0].getAttribute("aria-disabled")).toBe("true");
   });
 
+  it("多人列表里没固定的超过菜单上限：菜单列前 9 台加「全部 N 台服务器…」，弹窗里每台都能固定，固定一台少一台", async () => {
+    const many: KnownServerDto[] = Array.from({ length: 12 }, (_, i) => ({ name: `服${i + 1}`, address: `s${i + 1}.example`, pinned: false }));
+    ipc.overrides.set("list_known_servers", () => many.map((k) => ({ ...k, pinned: pinned.some((p) => p.address === k.address) })));
+    await mount();
+    await openMenu(buttonByLabel("固定服务器"));
+    const labels = menuItems().map((el) => el.textContent);
+    expect(labels).toHaveLength(10);
+    expect(labels.slice(0, 9)).toEqual(many.slice(0, 9).map((k) => `${k.name}${k.address}`));
+    expect(labels[9]).toBe("全部 12 台服务器…");
+
+    click(menuItem("全部 12 台服务器"));
+    await flush();
+    const picker = () => {
+      const el = dialog();
+      if (el === null || !el.textContent?.includes("从游戏的多人服务器列表里挑选")) throw new Error("服务器挑选弹窗没有打开");
+      return el;
+    };
+    const pickRows = () => [...picker().querySelectorAll<HTMLButtonElement>('button[aria-label^="固定 "]')];
+    expect(pickRows().map((b) => b.getAttribute("aria-label"))).toEqual(many.map((k) => `固定 ${k.name}`));
+
+    click(pickRows()[11]);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({
+      servers: [
+        { name: "晨星", address: "play.example" },
+        { name: "服12", address: "s12.example" },
+      ],
+    });
+    // 弹窗不自动关闭：刚固定的这台从列表里消失，其余照常可选
+    expect(pickRows()).toHaveLength(11);
+    expect(pickRows().some((b) => b.getAttribute("aria-label") === "固定 服12")).toBe(false);
+
+    click(buttonByText("关闭", picker()));
+    await flush();
+    await openMenu(buttonByLabel("固定服务器"));
+    expect(menuItems().at(-1)?.textContent).toBe("全部 11 台服务器…");
+  });
+
   it("复制地址：写剪贴板并原位显示「已复制」，2 秒后复原，不弹通知", async () => {
     await mount();
     await openMenu(buttonByLabel("晨星 的更多操作"));
