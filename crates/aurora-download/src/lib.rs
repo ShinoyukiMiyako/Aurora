@@ -8,7 +8,7 @@
 //! - [`DownloadPool`]：批量并发。信号量控住文件级并发，把上千小文件跑完，进度经 [`DownloadProgress`]
 //!   与 `watch` channel 上报。
 //! - [`SourcePlan`] / [`SourceResolver`]：官方源与 BMCLAPI 镜像的优先级调度与 URL 解析。
-//! - [`SourceSpeedCache`]：并发测各源首字节时间排出先后，结论在进程内缓存 30 分钟。
+//! - [`SourceSpeedCache`]：并发测各源首字节时间排出先后，结论在进程内缓存 10 分钟。
 //! - [`SourceHealth`]：跨文件的源健康表，连续失败的主机熔断沉底，坏源只付一次重试的代价。
 //! - [`WatchdogConfig`]：大文件的吞吐看门狗，终点慢到窗口平均低于阈值就向原地址换一个终点续传。
 //! - [`CancellationToken`]：挂到 [`DownloadPool`] 上，令牌触发后整批在文件粒度停下并清理临时文件。
