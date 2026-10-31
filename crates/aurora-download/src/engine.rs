@@ -13,13 +13,17 @@
 //! 6. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。sha1 在写盘的同时算好，
 //!    不把刚写完的文件再读一遍；落盘是否 fsync 见 [`Landing`]。
 //!
+//! 同一个目标路径的下载在进程内串行（[`lock_dest`]）：两次安装同时落同一个共享文件时，后到的一方
+//! 等前一方落位后再做第 1 步，通常直接跳过。
+//!
 //! 取消是协作式的：令牌只在文件开始前、网络等待点（发请求、读响应体）与退避等待里被观察，
 //! 观察到就让当前尝试正常返回 [`Error::Cancelled`]，再由 [`Downloader::run`] 统一清掉该文件的
 //! 临时文件与分片。不在落盘中途丢弃 future，否则进行中的阻塞文件操作会在清理之后才落地。
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use aurora_base::fs::Sha1Hasher;
 use aurora_base::retry::{RetryPolicy, retry_async, retry_async_until};
@@ -106,6 +110,7 @@ impl Downloader {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
+        let _dest = lock_dest(&task.dest, cancel).await?;
         let file = FileProgress::new(progress);
         if let Some(len) = self.already_complete(task).await? {
             tracing::debug!(dest = %task.dest.display(), "目标文件已存在且校验通过，跳过下载");
@@ -649,6 +654,36 @@ async fn until_cancelled<F: Future>(
     }
 }
 
+/// 正在下载或排队的目标路径。值存弱引用：没人持有的条目在下一次加锁时清掉，表里只留进行中的目标，
+/// 几千个资源对象下完也不会堆积。
+static DESTINATIONS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// 占住一个目标路径，同一路径上的下载在进程内一个接一个来。
+///
+/// 临时文件与分片按目标路径确定性命名（断点续传靠它找回分片）。两次安装同时落同一个共享文件——
+/// 两个实例同时装同一游戏版本或同一加载器，库与资源对象就是这样——会往同一批临时文件里交错写入，
+/// 拼出坏文件，或在改名落位时互相踩踏。等待期间照样响应取消。
+async fn lock_dest(
+    dest: &Path,
+    cancel: Option<&CancellationToken>,
+) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+    let slot = {
+        // 临界区里只有 HashMap 的增删查，真中毒说明程序已处于未知状态，直接崩。
+        let mut table = DESTINATIONS.lock().expect("下载目标表的锁已中毒");
+        table.retain(|_, held| held.strong_count() > 0);
+        match table.get(dest).and_then(Weak::upgrade) {
+            Some(slot) => slot,
+            None => {
+                let slot = Arc::new(tokio::sync::Mutex::new(()));
+                table.insert(dest.to_path_buf(), Arc::downgrade(&slot));
+                slot
+            }
+        }
+    };
+    until_cancelled(cancel, slot.lock_owned()).await
+}
+
 /// 删除一个可能不存在的中间文件。不存在是常态（该分片还没开始）；其余失败记日志，
 /// 不让清理失败盖过本来要返回的结果（已取消、换源、回退成功）。
 async fn remove_if_present(path: &Path) {
@@ -997,6 +1032,39 @@ mod tests {
             assert!(!part_path(&dest, index).exists(), "part{index} 应被清理");
         }
         assert_eq!(tokio::fs::read(&bystander).await.unwrap(), b"keep");
+    }
+
+    /// 同一目标的下载一个接一个：排在后面的在前一个落位前一直等着，取消照样能让它马上放弃；
+    /// 前一个放手后它才拿得到。
+    #[tokio::test]
+    async fn downloads_of_the_same_destination_take_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("shared.jar");
+        let other = dir.path().join("other.jar");
+        let held = lock_dest(&dest, None).await.unwrap();
+
+        let token = CancellationToken::new();
+        let waiter = {
+            let (dest, token) = (dest.clone(), token.clone());
+            tokio::spawn(async move { lock_dest(&dest, Some(&token)).await.map(|_| ()) })
+        };
+        // 别的目标不受影响。
+        drop(lock_dest(&other, None).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "前一个还没放手时不该拿到");
+        token.cancel();
+        let err = waiter.await.unwrap().unwrap_err();
+        assert!(err.is_cancelled(), "实际：{err:?}");
+
+        let next = {
+            let dest = dest.clone();
+            tokio::spawn(async move { lock_dest(&dest, None).await.map(|_| ()) })
+        };
+        drop(held);
+        next.await.unwrap().unwrap();
+        // 没人再占着时条目随下一次加锁清掉。
+        drop(lock_dest(&other, None).await.unwrap());
+        assert!(!DESTINATIONS.lock().unwrap().contains_key(&dest));
     }
 
     /// 已取消的令牌在文件开始前就挡住：不发请求、不建任何文件。

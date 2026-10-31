@@ -571,6 +571,41 @@ async fn sha1_mismatch_triggers_redownload() {
     assert!(!std::path::Path::new(&tmp).exists(), "损坏重下后临时文件未清理");
 }
 
+/// 两次安装同时要同一个共享文件：后到的一方等前一方落位，再按 sha1 认出它已就绪直接跳过，
+/// 服务器只被请求一次，两边都成功，落盘内容完整。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_downloads_of_one_destination_fetch_it_once() {
+    let server = MockServer::start().await;
+    let body = "shared-library-bytes";
+    let sha1 = sha1_of(body.as_bytes()).await;
+    Mock::given(method("GET"))
+        .and(path("/shared.jar"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(body)
+                .set_delay(Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("libraries").join("shared.jar");
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let task = DownloadTask::new(format!("{}/shared.jar", server.uri()), &dest)
+        .with_sha1(&sha1)
+        .with_size(body.len() as u64);
+
+    let (first, second) = tokio::join!(downloader.download(&task), downloader.download(&task));
+    first.unwrap();
+    second.unwrap();
+
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), body.as_bytes());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "同一目标只该下载一次");
+    let tmp = format!("{}.petalfall-tmp", dest.display());
+    assert!(!std::path::Path::new(&tmp).exists());
+}
+
 /// 换源路径映射器：把 Official / BmclApi 指向同一 mock 的不同路径。
 struct TwoWayResolver {
     base: String,

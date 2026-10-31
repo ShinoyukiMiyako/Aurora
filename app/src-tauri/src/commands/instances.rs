@@ -44,7 +44,8 @@ pub enum InstanceActivity {
     // 由启动命令持有：launch_game 先占为 Launching，进程起来后转 Running，退出时释放。
     Launching,
     Running,
-    /// 装、删、启停、更新、回滚 Mod，或往实例里装资源包、光影、数据包。
+    /// 装、删、启停、更新、回滚 Mod，往实例里装资源包、光影、数据包，查更新时回写卷宗，写实例设置，
+    /// 或为打开文件夹建出工作目录下的子目录。
     Modifying,
 }
 
@@ -57,13 +58,13 @@ impl InstanceActivity {
             InstanceActivity::Deleting => "删除",
             InstanceActivity::Launching => "启动",
             InstanceActivity::Running => "运行",
-            InstanceActivity::Modifying => "改动 Mod 与资源",
+            InstanceActivity::Modifying => "改动 Mod、资源或设置",
         }
     }
 
     /// 两件事能否同时在一个实例上进行。
     ///
-    /// Mod 与资源的改动只往工作目录里加删文件、写卷宗与历史，彼此不冲突；游戏运行中仍允许改动，
+    /// Mod、资源与设置的改动只往实例目录里加删、改写文件，彼此不冲突；游戏运行中仍允许改动，
     /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、新建、补全会挪走或重写整个目录，
     /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。
     fn compatible_with(self, other: Self) -> bool {
@@ -811,18 +812,21 @@ pub async fn get_instance_settings(
 }
 
 /// 整份写入实例设置并返回写下的内容。字段缺失、多出或取值不合法报 `invalid_argument`
-/// （detail.field 指出是哪一项），文件不变。
+/// （detail.field 指出是哪一项），文件不变。改名、删除、新建、补全进行中报 `instance_busy`：
+/// 设置文件在实例目录里，并发写会按旧路径把目录重新建出来。游戏运行中可以写，下次启动生效。
 #[tauri::command]
 pub async fn set_instance_settings(
     id: String,
     settings: Value,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<InstanceSettingsDto, CommandError> {
-    set_instance_settings_with(&facade, &id, settings).await
+    set_instance_settings_with(&facade, &locks, &id, settings).await
 }
 
 pub(crate) async fn set_instance_settings_with(
     facade: &Facade,
+    locks: &InstanceLocks,
     id: &str,
     settings: Value,
 ) -> Result<InstanceSettingsDto, CommandError> {
@@ -831,6 +835,7 @@ pub(crate) async fn set_instance_settings_with(
     let dto: InstanceSettingsDto = serde_json::from_value(settings).map_err(|err| {
         invalid_field("settings", "malformed", format!("实例设置格式不对：{err}"))
     })?;
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
     let settings = VersionSettings::from(dto);
     aurora
@@ -1221,7 +1226,7 @@ pub async fn required_java(
 /// - `launcher_logs`：启动器自己的日志目录 `<数据目录>/logs`（不需要 `id`）；
 /// - `instance`：实例目录 `versions/<id>`；
 /// - `mods` / `saves` / `resourcepacks` / `shaderpacks` / `logs` / `screenshots`：实例工作目录下的子目录，
-///   不存在时先建出来；
+///   不存在时先建出来；建目录期间占住实例，改名、删除进行中报 `instance_busy`，免得按旧路径建出空目录；
 /// - `world`：工作目录下 `saves/<world>`，必须已存在。
 ///
 /// 路径一律在这里按实例 id 解析，前端不传路径。
@@ -1232,8 +1237,9 @@ pub async fn open_folder(
     id: Option<String>,
     world: Option<String>,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<(), CommandError> {
-    let path = folder_path(&facade, &target, id.as_deref(), world.as_deref()).await?;
+    let path = folder_path(&facade, &locks, &target, id.as_deref(), world.as_deref()).await?;
     let text = path.to_str().ok_or_else(|| {
         CommandError::new(code::OPEN_FAILED, "文件夹路径含无法表示的字符")
             .with_detail(json!({ "path": path.display().to_string() }))
@@ -1258,6 +1264,7 @@ const WORKING_SUBDIRS: [&str; 6] = [
 
 pub(crate) async fn folder_path(
     facade: &Facade,
+    locks: &InstanceLocks,
     target: &str,
     id: Option<&str>,
     world: Option<&str>,
@@ -1310,8 +1317,10 @@ pub(crate) async fn folder_path(
             Ok(dir)
         }
         sub if WORKING_SUBDIRS.contains(&sub) => {
+            let id = require_id()?;
+            let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
             let resolved = aurora
-                .resolve_working_dir(require_id()?)
+                .resolve_working_dir(id)
                 .await
                 .map_err(instance_error)?;
             let dir = resolved.working_dir.join(sub);
@@ -2011,14 +2020,14 @@ mod tests {
             "resolution": { "width": 1920, "height": 1080 },
             "fullscreen": false
         });
-        let saved = set_instance_settings_with(&env.facade, "1.21.1", settings.clone())
+        let saved = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", settings.clone())
             .await
             .unwrap();
         assert_eq!(serde_json::to_value(&saved).unwrap(), settings);
 
         let mut unknown = settings.clone();
         unknown["colour"] = json!("pink");
-        let err = set_instance_settings_with(&env.facade, "1.21.1", unknown)
+        let err = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", unknown)
             .await
             .unwrap_err();
         assert_eq!(err.code, common::INVALID_ARGUMENT);
@@ -2026,7 +2035,7 @@ mod tests {
 
         let mut bad_memory = settings.clone();
         bad_memory["memory_mb"] = json!(1000);
-        let err = set_instance_settings_with(&env.facade, "1.21.1", bad_memory)
+        let err = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", bad_memory)
             .await
             .unwrap_err();
         assert_eq!(err.code, common::INVALID_ARGUMENT);
@@ -2041,7 +2050,7 @@ mod tests {
             .unwrap();
         assert_eq!(stored.memory_mb, Some(6144), "非法写入不改动文件");
 
-        let err = set_instance_settings_with(&env.facade, "不存在", settings)
+        let err = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "不存在", settings)
             .await
             .unwrap_err();
         assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
@@ -2121,36 +2130,37 @@ mod tests {
         let env = Env::new();
         let dir = env.vanilla("1.21.1");
         let facade = &env.facade;
+        let locks = InstanceLocks::default();
 
         assert_eq!(
-            folder_path(facade, "game_dir", None, None).await.unwrap(),
+            folder_path(facade, &locks, "game_dir", None, None).await.unwrap(),
             env.game_dir()
         );
         assert_eq!(
-            folder_path(facade, "data_dir", None, None).await.unwrap(),
+            folder_path(facade, &locks, "data_dir", None, None).await.unwrap(),
             env.dir.path()
         );
         // 启动器日志目录还没写过日志时也先建出来，资源管理器打得开。
-        let logs = folder_path(facade, "launcher_logs", None, None)
+        let logs = folder_path(facade, &locks, "launcher_logs", None, None)
             .await
             .unwrap();
         assert_eq!(logs, env.dir.path().join("logs"));
         assert!(logs.is_dir());
         assert_eq!(
-            folder_path(facade, "launcher_logs", Some("1.21.1"), None)
+            folder_path(facade, &locks, "launcher_logs", Some("1.21.1"), None)
                 .await
                 .unwrap(),
             logs,
             "不需要实例的目标忽略 id"
         );
         assert_eq!(
-            folder_path(facade, "instance", Some("1.21.1"), None)
+            folder_path(facade, &locks, "instance", Some("1.21.1"), None)
                 .await
                 .unwrap(),
             dir
         );
         // 原版正式版默认不隔离：mods 在游戏目录下，打开前建出来。
-        let mods = folder_path(facade, "mods", Some("1.21.1"), None)
+        let mods = folder_path(facade, &locks, "mods", Some("1.21.1"), None)
             .await
             .unwrap();
         assert_eq!(mods, env.game_dir().join("mods"));
@@ -2158,7 +2168,7 @@ mod tests {
 
         std::fs::create_dir_all(env.game_dir().join("saves").join("w1")).unwrap();
         assert_eq!(
-            folder_path(facade, "world", Some("1.21.1"), Some("w1"))
+            folder_path(facade, &locks, "world", Some("1.21.1"), Some("w1"))
                 .await
                 .unwrap(),
             env.game_dir().join("saves").join("w1")
@@ -2168,24 +2178,78 @@ mod tests {
             let detail = err.detail.unwrap();
             (detail["field"].clone(), detail["reason"].clone())
         };
-        let err = folder_path(facade, "world", Some("1.21.1"), Some("..\\x"))
+        let err = folder_path(facade, &locks, "world", Some("1.21.1"), Some("..\\x"))
             .await
             .unwrap_err();
         assert_eq!(field(err), (json!("world"), json!("unsafe")));
-        let err = folder_path(facade, "world", Some("1.21.1"), Some("w9"))
+        let err = folder_path(facade, &locks, "world", Some("1.21.1"), Some("w9"))
             .await
             .unwrap_err();
         assert_eq!(field(err), (json!("world"), json!("not_found")));
-        let err = folder_path(facade, "mods", None, None).await.unwrap_err();
+        let err = folder_path(facade, &locks, "mods", None, None).await.unwrap_err();
         assert_eq!(field(err), (json!("id"), json!("missing")));
-        let err = folder_path(facade, "desktop", None, None)
+        let err = folder_path(facade, &locks, "desktop", None, None)
             .await
             .unwrap_err();
         assert_eq!(field(err), (json!("target"), json!("unknown")));
-        let err = folder_path(facade, "instance", Some("ghost"), None)
+        let err = folder_path(facade, &locks, "instance", Some("ghost"), None)
             .await
             .unwrap_err();
         assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
+    }
+
+    /// 写设置、为打开文件夹建子目录都占住实例：改名或删除进行中报 instance_busy，什么都不写、不建；
+    /// 游戏运行中照常可以。
+    #[tokio::test]
+    async fn settings_and_subfolders_wait_for_rename_and_delete_but_not_for_the_game() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let settings = json!({
+            "description": "改名途中写进来的", "cover": null, "isolation": "enabled",
+            "memory_mb": null, "java": "auto", "jvm_args": "",
+            "resolution": { "width": 854, "height": 480 }, "fullscreen": false
+        });
+
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire("1.21.1", activity).unwrap();
+            let expected = serde_json::to_value(activity).unwrap();
+            let err = set_instance_settings_with(&env.facade, &locks, "1.21.1", settings.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert_eq!(err.detail.unwrap()["activity"], expected);
+            let err = folder_path(&env.facade, &locks, "mods", Some("1.21.1"), None)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            drop(held);
+        }
+        let description = || async {
+            env.facade
+                .snapshot()
+                .await
+                .instance_settings("1.21.1")
+                .await
+                .unwrap()
+                .description
+        };
+        assert_eq!(description().await, None, "被拒绝的写入不改动设置");
+        assert!(!env.game_dir().join("mods").exists());
+        assert!(!dir.join("mods").exists());
+
+        let _game = locks.acquire("1.21.1", InstanceActivity::Running).unwrap();
+        set_instance_settings_with(&env.facade, &locks, "1.21.1", settings)
+            .await
+            .unwrap();
+        assert_eq!(description().await.as_deref(), Some("改名途中写进来的"));
+        // 隔离已开：mods 建在实例目录里。
+        let mods = folder_path(&env.facade, &locks, "mods", Some("1.21.1"), None)
+            .await
+            .unwrap();
+        assert_eq!(mods, dir.join("mods"));
+        assert!(mods.is_dir());
+        assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
     }
 
     #[test]

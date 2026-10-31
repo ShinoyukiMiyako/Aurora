@@ -296,6 +296,14 @@ enum Target<'t> {
     Instance(&'t str),
 }
 
+/// 同一时刻只让一个 Forge / NeoForge 安装进来。
+///
+/// 处理器把产物直接写进共享的 libraries（同一游戏版本的映射表、改过的客户端 jar），不经下载引擎的
+/// 原子落位：两个实例同时装同一个 Forge 版本，甚至同一游戏版本的不同 Forge 版本，都会并发写同一批
+/// 文件，产物校验随之失败或留下坏文件。installer 也缓存在共享位置，先装完的一方会把它删掉，另一方
+/// 随后读它就失败。串行的代价只是后来的那个多等一会儿。
+static FORGE_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Forge/NeoForge 安装器。需注入 java 可执行文件路径以运行处理器。
 pub struct ForgeInstaller<'a> {
     cx: InstallContext<'a>,
@@ -330,8 +338,20 @@ impl<'a> ForgeInstaller<'a> {
         self
     }
 
+    /// 等到轮到自己安装（见 [`FORGE_INSTALL`]）；等待期间照样响应取消。
+    async fn exclusive(&self) -> Result<tokio::sync::MutexGuard<'static, ()>> {
+        let Some(token) = &self.cancel else {
+            return Ok(FORGE_INSTALL.lock().await);
+        };
+        tokio::select! {
+            guard = FORGE_INSTALL.lock() => Ok(guard),
+            () = token.cancelled() => Err(aurora_download::Error::Cancelled.into()),
+        }
+    }
+
     /// 下载 installer 到缓存目录再安装，版本 JSON 写到 `versions/<forge 版本 id>/`。
     pub async fn install(&self, installer_url: &str) -> Result<ForgeSummary> {
+        let _turn = self.exclusive().await?;
         let installer = self.download_installer(installer_url).await?;
         let (_, summary) = self.install_from(&installer, Target::Standalone).await?;
         self.discard_installer(&installer).await;
@@ -345,6 +365,7 @@ impl<'a> ForgeInstaller<'a> {
         installer_url: &str,
         instance_id: &str,
     ) -> Result<(VersionJson, ForgeSummary)> {
+        let _turn = self.exclusive().await?;
         let installer = self.download_installer(installer_url).await?;
         let outcome = self
             .install_from(&installer, Target::Instance(instance_id))
@@ -355,6 +376,7 @@ impl<'a> ForgeInstaller<'a> {
 
     /// 从已下载的 installer jar 安装（传统布局）。
     pub async fn install_from_installer(&self, installer: &Path) -> Result<ForgeSummary> {
+        let _turn = self.exclusive().await?;
         Ok(self.install_from(installer, Target::Standalone).await?.1)
     }
 
@@ -1149,6 +1171,65 @@ mod tests {
             .install_for_instance(&format!("{}/forge-installer.jar", server.uri()), "x")
             .await
             .unwrap();
+    }
+
+    /// 另一个 Forge 安装正在进行时，新的安装原地等着、不碰共享的 installer 缓存与库；前一个结束后
+    /// 它照常装完。等待中取消立刻以已取消返回。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_install_waits_for_the_running_one_and_can_be_cancelled_meanwhile() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let installer = legacy_installer_bytes();
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(installer.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar.sha1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sha1_hex(&installer)))
+            .mount(&server)
+            .await;
+        let url = format!("{}/forge-installer.jar", server.uri());
+        let f = fixture();
+
+        let running = FORGE_INSTALL.lock().await;
+        let token = CancellationToken::new();
+        let cancelled = {
+            let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+            let forge = ForgeInstaller::new(cx, "java").with_cancel(token.clone());
+            let attempt = forge.install_for_instance(&url, "排队的");
+            tokio::pin!(attempt);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), &mut attempt)
+                    .await
+                    .is_err(),
+                "前一个安装没结束时不该开始"
+            );
+            token.cancel();
+            attempt.await.unwrap_err()
+        };
+        assert!(
+            matches!(cancelled, Error::Download(aurora_download::Error::Cancelled)),
+            "实际：{cancelled:?}"
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let forge = ForgeInstaller::new(cx, "java");
+        let waiting = forge.install_for_instance(&url, "后来的");
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(running);
+        let (_, summary) = waiting.await.unwrap();
+        assert_eq!(summary.id, "1.12.2-forge-14.23.5.2860");
+        assert!(!server.received_requests().await.unwrap().is_empty());
     }
 
     /// 一个三十秒左右才自己退出的子进程，代替不观察取消令牌、一跑好几秒的处理器。
