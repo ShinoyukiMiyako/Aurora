@@ -2,10 +2,12 @@
 //   __sk.accentArea()        当前窗口里强调色填充的面积占比，上限 0.10；accentAreaDetail() 给出逐个元素的明细
 //   __sk.textureAudit()      所有取自游戏本机材质的元素及其所在点缀位，ok 为 false 的就是越界使用
 //   __sk.petals()            主页花瓣的运行状态：是否在跑 rAF、降级等级、数量与每帧耗时
+//   __sk.resetMockData()     纯浏览器里把模拟后端恢复到种子数据、清掉存下的状态并刷新页面
 // 这些检查都是近似测量，口径写在各函数的注释里；它们不进生产构建。
 
 import { parseComputedColor, resolveColorToken, sameColor, type Rgba } from "../art/petals/color";
 import { currentPetalStats, type PetalStats } from "../art/petals/engine";
+import { inTauri } from "../ipc/bridge";
 
 export interface Box {
   left: number;
@@ -337,6 +339,8 @@ export interface SkDiagnostics {
   textureAudit(): TextureAuditEntry[];
   /** 当前花瓣层的运行状态；没有挂载花瓣层（不在主页或开关已关）时为 null。 */
   petals(): PetalStats | null;
+  /** 模拟后端回到种子数据并清掉 localStorage 里存下的状态，随后刷新页面；Tauri 窗口里没有模拟后端，直接报错。 */
+  resetMockData(): Promise<void>;
 }
 
 declare global {
@@ -364,6 +368,12 @@ export function installDevDiagnostics(target: Window = window): SkDiagnostics {
     accentAreaDetail,
     textureAudit: () => auditTextures({ root: doc.documentElement }),
     petals: currentPetalStats,
+    resetMockData: async () => {
+      if (inTauri()) throw new Error("Tauri 窗口里走的是真实后端，没有模拟数据可以重置");
+      const mock = await import("../ipc/mock");
+      mock.resetMockData();
+      target.location.reload();
+    },
   };
   target.__sk = api;
   return api;

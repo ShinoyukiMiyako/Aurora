@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { currentPetalStats } from "../art/petals/engine";
+import { mockInvoke, resetMocks } from "../ipc/mock";
 import { styleBook } from "./diag-test-kit";
 import { auditTextures, installDevDiagnostics, textureProtocolPath } from "./diagnostics";
 
@@ -9,6 +10,8 @@ const BASE = "http://localhost:1420/";
 afterEach(() => {
   document.body.replaceChildren();
   delete window.__sk;
+  vi.unstubAllGlobals();
+  resetMocks();
 });
 
 describe("textureProtocolPath", () => {
@@ -62,8 +65,26 @@ describe("installDevDiagnostics", () => {
   it("在 window 上挂 __sk；没有花瓣层时 petals() 为 null", () => {
     const api = installDevDiagnostics(window);
     expect(window.__sk).toBe(api);
-    expect(Object.keys(api).sort()).toEqual(["accentArea", "accentAreaDetail", "petals", "textureAudit"]);
+    expect(Object.keys(api).sort()).toEqual(["accentArea", "accentAreaDetail", "petals", "resetMockData", "textureAudit"]);
     expect(currentPetalStats()).toBeNull();
     expect(api.petals()).toBeNull();
+  });
+
+  it("resetMockData：模拟后端回到种子数据，随后刷新页面一次", async () => {
+    const reload = vi.fn();
+    const target = { document, location: { reload } } as unknown as Window;
+    const api = installDevDiagnostics(target);
+    await mockInvoke("set_appearance", { patch: { mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true } });
+    await api.resetMockData();
+    expect(await mockInvoke("get_appearance")).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false });
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("resetMockData：Tauri 窗口里没有模拟后端，直接报错且不刷新", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    const reload = vi.fn();
+    const api = installDevDiagnostics({ document, location: { reload } } as unknown as Window);
+    await expect(api.resetMockData()).rejects.toThrow("没有模拟数据可以重置");
+    expect(reload).not.toHaveBeenCalled();
   });
 });

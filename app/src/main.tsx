@@ -2,12 +2,15 @@
 // 写到 <html>、预载主页模块，再渲染；首帧布局完成后的下一帧才显示窗口（由外壳在知道要不要进首次启动向导之后显示），
 // 用户看不到任何中间态（夜樱下没有白帧）。
 // 任何一步失败都渲染错误页并照常显示窗口；后端另有 3 秒兜底显示，保证前端异常时窗口不会永远不可见。
+// 开发构建在纯浏览器里看界面时，模拟后端的状态存进 localStorage，刷新不回到首次启动向导；必须在第一条命令之前启用。
 
 import "./styles/theme.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App, { prepareApp } from "./App";
 import { BOOT_FAILURE_COPY } from "./copy/flows";
+import { inTauri } from "./ipc/bridge";
+import { APP_SLUG } from "./lib/app-info";
 import { ErrorScreen } from "./shell/ErrorScreen";
 import { applyTier, tierOf } from "./shell/tier";
 import { RevealWindow } from "./shell/window";
@@ -29,12 +32,19 @@ function assertWebViewSupport(): void {
   if (missing.length > 0) throw new UnsupportedWebViewError(missing);
 }
 
+/** 存储里的模拟数据读不出时抛错进错误页：用 __sk.resetMockData() 清掉后会自动刷新。 */
+async function enableBrowserMockPersistence(): Promise<void> {
+  const mock = await import("./ipc/mock");
+  mock.enableMockPersistence(window.localStorage, APP_SLUG);
+}
+
 async function boot(container: HTMLElement): Promise<void> {
   const root = createRoot(container);
   applyTier(tierOf(window.innerWidth));
   const systemReduced = systemPrefersReducedMotion();
   try {
     assertWebViewSupport();
+    if (import.meta.env.DEV && !inTauri()) await enableBrowserMockPersistence();
     await loadFonts();
     const appearance = await loadAppearance();
     applyAppearance(appearance, systemReduced);
@@ -62,6 +72,6 @@ async function boot(container: HTMLElement): Promise<void> {
 const container = document.getElementById("root");
 if (!container) throw new Error("index.html 缺少 #root 挂载点");
 void boot(container);
-// 开发构建在应用里挂上 window.__sk（粉色面积、材质点缀位、花瓣状态），生产构建整段摇树移除；
+// 开发构建在应用里挂上 window.__sk（粉色面积、材质点缀位、花瓣状态、重置模拟数据），生产构建整段摇树移除；
 // 加载失败的 rejection 直接进控制台。
 if (import.meta.env.DEV) void import("./dev/diagnostics").then((m) => m.installDevDiagnostics());

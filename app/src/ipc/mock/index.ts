@@ -29,6 +29,12 @@ interface Persistence {
 
 let persistence: Persistence | null = null;
 
+/**
+ * 存储的位置，启用一开始就记下：装回失败时 persistence 仍为空（不再写回），
+ * resetMockData 也得知道去哪里清，否则报错里给的恢复办法清不掉坏数据。
+ */
+let storageTarget: { storage: Storage; prefix: string } | null = null;
+
 function storageKey(prefix: string, domain: string): string {
   return `${prefix}.mock.${domain}`;
 }
@@ -85,10 +91,12 @@ export function resetMocks(): void {
  * 传入产品 slug（ipc/ 引用不到品牌常量）。只能启用一次；vitest 不调用它，各用例仍从种子开始。
  *
  * 存储里的数据读不出（JSON 损坏、快照版本对不上）时抛错而不是丢掉重来，调用 resetMockData 清掉后再刷新。
+ * 装回失败也算启用过一次：这一页不再写回，刷新后重新启用。
  */
 export function enableMockPersistence(storage: Storage, prefix: string): void {
-  if (persistence !== null) throw new Error("mock 持久化已经启用过");
+  if (storageTarget !== null) throw new Error("mock 持久化已经启用过");
   if (prefix === "") throw new Error("mock 持久化的键前缀为空");
+  storageTarget = { storage, prefix };
   const written = new Map<string, string>();
   for (const [domain, persist] of persisted) {
     const key = storageKey(prefix, domain);
@@ -105,10 +113,10 @@ export function enableMockPersistence(storage: Storage, prefix: string): void {
   savePersisted();
 }
 
-/** 恢复种子数据；启用了持久化时一并删掉存下的状态。开发构建的重置入口调它，刷新后即从种子开始。 */
+/** 恢复种子数据；启用过持久化时（装回失败也算）一并删掉存下的状态。开发构建的重置入口调它，刷新后即从种子开始。 */
 export function resetMockData(): void {
   resetMocks();
-  if (persistence === null) return;
-  for (const [domain] of persisted) persistence.storage.removeItem(storageKey(persistence.prefix, domain));
-  persistence.written.clear();
+  if (storageTarget === null) return;
+  for (const [domain] of persisted) storageTarget.storage.removeItem(storageKey(storageTarget.prefix, domain));
+  persistence?.written.clear();
 }

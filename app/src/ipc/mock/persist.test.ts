@@ -124,6 +124,21 @@ describe("mock 持久化", () => {
     await expect(reload().then((core) => core.enableMockPersistence(stale, PREFIX))).rejects.toThrow("快照版本是 0，当前是 1");
   });
 
+  it("存下的数据读不出时，resetMockData 照样能清掉存储，刷新后从种子开始", async () => {
+    const corrupt = new MemoryStorage();
+    corrupt.setItem("slug.mock.appearance", "{oops");
+    corrupt.setItem("slug.mock.config", JSON.stringify({ version: 0, data: {} }));
+    corrupt.setItem("other.key", "kept");
+    const broken = await reload();
+    expect(() => broken.enableMockPersistence(corrupt, PREFIX)).toThrow(SyntaxError);
+    broken.resetMockData();
+    expect(corrupt.keys()).toEqual(["other.key"]);
+
+    const next = await reload();
+    next.enableMockPersistence(corrupt, PREFIX);
+    expect(await next.mockInvoke<{ mode: string }>("get_appearance")).toMatchObject({ mode: "day" });
+  });
+
   it("只能启用一次，前缀不能为空", async () => {
     const core = await reload();
     expect(() => core.enableMockPersistence(new MemoryStorage(), "")).toThrow("键前缀为空");
