@@ -3,9 +3,9 @@
 // 推荐值由使用方给出并画成穿过轨道的标记；刻度与推荐值都是指针拖动的吸附点。
 // 超过物理内存一半进入警示区：已填充段、读数与占用说明改警示色，下方出现警示说明。
 
-import { Icon } from "../art/Icon";
 import { formatMemory } from "../domain/format";
 import { cx } from "../lib/util";
+import { Callout } from "./Callout";
 import styles from "./MemorySlider.module.css";
 import { Slider, type SliderMark } from "./Slider";
 
@@ -81,10 +81,9 @@ export function MemorySlider({ value, onChange, onCommit, totalMb, recommended, 
         {notes.length > 0 && <span data-tone={notesTone === "warn" ? "warn" : undefined}>{` · ${notes.join(" · ")}`}</span>}
       </p>
       {warn && (
-        <div className={styles.warning} role="alert">
-          <Icon name="alert" size={16} className={styles.warningIcon} />
-          <span>{MEMORY_WARN_COPY}</span>
-        </div>
+        <Callout tone="warn" announce className={styles.callout}>
+          {MEMORY_WARN_COPY}
+        </Callout>
       )}
     </div>
   );
