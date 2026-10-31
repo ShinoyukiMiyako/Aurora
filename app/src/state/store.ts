@@ -600,76 +600,150 @@ function countUnseen(tasks: readonly Task[], unseen: readonly string[]): number 
   return tasks.filter((t) => t.status === "failed" && ids.has(attemptTaskId(t))).length;
 }
 
-function deriveState(raw: RawState): LauncherState {
-  const busy = new Set<string>();
-  for (const t of raw.tasks) if (isActiveTask(t) && t.instanceId !== null) busy.add(t.instanceId.toLowerCase());
-  const instances: InstanceSummary[] = raw.scanned.map((base) => {
-    const installing = busy.has(base.id.toLowerCase());
-    return {
-      ...base,
-      pinned: raw.pins.includes(base.id),
-      status: installing ? "installing" : base.status,
-      brokenReason: installing ? null : base.brokenReason,
-    };
-  });
-  const known = new Set(instances.map((i) => i.id.toLowerCase()));
-  const sidebarPins = [...raw.pins];
-  for (const task of raw.tasks) {
-    if (!isActiveTask(task)) continue;
-    const meta = raw.taskMeta[task.id];
-    if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
-    if (known.has(meta.name.toLowerCase())) continue;
-    known.add(meta.name.toLowerCase());
-    if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) sidebarPins.push(meta.name);
-    instances.push({
-      id: meta.name,
-      name: meta.name,
-      mcVersion: meta.mcVersion,
-      loader: meta.loader,
-      loaderVersion: meta.loaderVersion,
-      extraLoaders: [],
-      releaseType: null,
-      javaMajor: null,
-      description: null,
-      cover: meta.cover,
-      pinned: sidebarPins.includes(meta.name),
-      status: "installing",
-      brokenReason: null,
-      createdAt: task.createdAt,
-      lastPlayedAt: null,
-      playtimeMin: 0,
-      modCount: null,
-      worldCount: null,
-      isolated: null,
-      memoryMb: null,
-      modpack: null,
-      modpackError: null,
-      lastCrashAt: null,
-      lastCrashError: null,
-      activity: "installing",
-      settingsError: null,
-      incomplete: null,
-      placeholder: true,
-    });
-  }
-  const selected = raw.settings === null ? null : raw.settings.selectedVersion;
+/** 实例列表与侧栏固定列表：只随扫描结果、固定列表、入队上下文与活动任务的集合变，下载进度与会话日志不影响它们。 */
+interface InstancesView {
+  instances: InstanceSummary[];
+  sidebarPins: string[];
+}
+
+function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, createdAt: number, pinned: boolean): InstanceSummary {
   return {
-    status: raw.status,
-    settings: raw.settings,
-    accounts: raw.accounts,
-    currentAccountId: raw.currentAccountId,
-    instances,
-    selectedInstanceId: selected !== null && instances.some((i) => i.id === selected) ? selected : null,
-    sidebarPins,
-    firstRun: raw.firstRun,
-    session: raw.session,
-    tasks: raw.tasks,
-    unseenFailures: countUnseen(raw.tasks, raw.unseenFailures),
-    toasts: raw.toasts.items,
-    login: raw.login,
-    launchPrompt: raw.launchPrompt,
-    lastRename: raw.lastRename,
+    id: meta.name,
+    name: meta.name,
+    mcVersion: meta.mcVersion,
+    loader: meta.loader,
+    loaderVersion: meta.loaderVersion,
+    extraLoaders: [],
+    releaseType: null,
+    javaMajor: null,
+    description: null,
+    cover: meta.cover,
+    pinned,
+    status: "installing",
+    brokenReason: null,
+    createdAt,
+    lastPlayedAt: null,
+    playtimeMin: 0,
+    modCount: null,
+    worldCount: null,
+    isolated: null,
+    memoryMb: null,
+    modpack: null,
+    modpackError: null,
+    lastCrashAt: null,
+    lastCrashError: null,
+    activity: "installing",
+    settingsError: null,
+    incomplete: null,
+    placeholder: true,
   };
+}
+
+/**
+ * 原始状态到对外状态的派生，按输入分别记忆。下载进度每个任务约 100 ms 一次、游戏日志每 100 ms 一批，
+ * 每次都会换掉原始状态；如果每次都重建实例对象，按 state.instances 做依赖或做选择的组件就跟着每秒重渲染十次。
+ *
+ * - 实例列表：扫描结果、固定列表、入队上下文都是同一份引用，活动任务的集合（id 与所挂实例）也没变时，整份复用上一次的。
+ * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、安装中与否都没变，就复用上一次的那个对象。
+ */
+class StateDeriver {
+  private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; activeKey: string } | null = null;
+  private lastView: InstancesView | null = null;
+  private scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; installing: boolean; value: InstanceSummary }>();
+  private placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
+
+  derive(raw: RawState): LauncherState {
+    const { instances, sidebarPins } = this.instancesView(raw);
+    const selected = raw.settings === null ? null : raw.settings.selectedVersion;
+    return {
+      status: raw.status,
+      settings: raw.settings,
+      accounts: raw.accounts,
+      currentAccountId: raw.currentAccountId,
+      instances,
+      selectedInstanceId: selected !== null && instances.some((i) => i.id === selected) ? selected : null,
+      sidebarPins,
+      firstRun: raw.firstRun,
+      session: raw.session,
+      tasks: raw.tasks,
+      unseenFailures: countUnseen(raw.tasks, raw.unseenFailures),
+      toasts: raw.toasts.items,
+      login: raw.login,
+      launchPrompt: raw.launchPrompt,
+      lastRename: raw.lastRename,
+    };
+  }
+
+  private instancesView(raw: RawState): InstancesView {
+    const active = raw.tasks.filter(isActiveTask);
+    const activeKey = active.map((t) => `${t.id}|${t.instanceId === null ? "" : t.instanceId}`).join("\n");
+    const last = this.lastInputs;
+    if (
+      this.lastView !== null &&
+      last !== null &&
+      last.scanned === raw.scanned &&
+      last.pins === raw.pins &&
+      last.taskMeta === raw.taskMeta &&
+      last.activeKey === activeKey
+    ) {
+      return this.lastView;
+    }
+    const view = this.compute(raw, active);
+    this.lastInputs = { scanned: raw.scanned, pins: raw.pins, taskMeta: raw.taskMeta, activeKey };
+    // 内容没变就连数组一起复用：例如一个下载任务结束、另一个开始，但它们挂的实例不变
+    const prev = this.lastView;
+    this.lastView =
+      prev !== null && sameItems(prev.instances, view.instances) && sameItems(prev.sidebarPins, view.sidebarPins)
+        ? prev
+        : {
+            instances: prev !== null && sameItems(prev.instances, view.instances) ? prev.instances : view.instances,
+            sidebarPins: prev !== null && sameItems(prev.sidebarPins, view.sidebarPins) ? prev.sidebarPins : view.sidebarPins,
+          };
+    return this.lastView;
+  }
+
+  private compute(raw: RawState, active: readonly Task[]): InstancesView {
+    const busy = new Set<string>();
+    for (const t of active) if (t.instanceId !== null) busy.add(t.instanceId.toLowerCase());
+    const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; installing: boolean; value: InstanceSummary }>();
+    const instances: InstanceSummary[] = raw.scanned.map((base) => {
+      const installing = busy.has(base.id.toLowerCase());
+      const pinned = raw.pins.includes(base.id);
+      const cached = this.scannedCache.get(base.id);
+      const value =
+        cached !== undefined && cached.base === base && cached.pinned === pinned && cached.installing === installing
+          ? cached.value
+          : { ...base, pinned, status: installing ? "installing" : base.status, brokenReason: installing ? null : base.brokenReason };
+      scannedCache.set(base.id, { base, pinned, installing, value });
+      return value;
+    });
+    this.scannedCache = scannedCache;
+
+    const known = new Set(instances.map((i) => i.id.toLowerCase()));
+    const sidebarPins = [...raw.pins];
+    const placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
+    for (const task of active) {
+      const meta = raw.taskMeta[task.id];
+      if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
+      if (known.has(meta.name.toLowerCase())) continue;
+      known.add(meta.name.toLowerCase());
+      if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) sidebarPins.push(meta.name);
+      const pinned = sidebarPins.includes(meta.name);
+      const cached = this.placeholderCache.get(task.id);
+      const value =
+        cached !== undefined && cached.meta === meta && cached.createdAt === task.createdAt && cached.pinned === pinned
+          ? cached.value
+          : placeholderOf(meta, task.createdAt, pinned);
+      placeholderCache.set(task.id, { meta, createdAt: task.createdAt, pinned, value });
+      instances.push(value);
+    }
+    this.placeholderCache = placeholderCache;
+    return { instances, sidebarPins };
+  }
+}
+
+function sameItems<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a.length === b.length && a.every((item, i) => item === b[i]);
 }
 
 // ---------------------------------------------------------------- 容器
@@ -678,6 +752,7 @@ export class LauncherStore {
   private raw: RawState = initialRaw();
   private view: LauncherState | null = null;
   private viewOf: RawState | null = null;
+  private readonly deriver = new StateDeriver();
   private listeners = new Set<() => void>();
 
   private started = false;
@@ -723,7 +798,7 @@ export class LauncherStore {
 
   getState = (): LauncherState => {
     if (this.view === null || this.viewOf !== this.raw) {
-      this.view = deriveState(this.raw);
+      this.view = this.deriver.derive(this.raw);
       this.viewOf = this.raw;
     }
     return this.view;

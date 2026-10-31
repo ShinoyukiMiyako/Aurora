@@ -57,6 +57,36 @@ export function launchView(state: LauncherState, inst: InstanceSummary): LaunchV
   return { kind: "ready", busyElsewhere: busy !== null && busy !== inst.id };
 }
 
+/** 会话除日志以外的字段都相同。入口只读阶段、进度、时刻与结局，不读日志；日志每 100 ms 一批，不该让入口跟着重渲染。 */
+function sameSessionExceptLogs(a: SessionState, b: SessionState): boolean {
+  if (a === b) return true;
+  for (const key of Object.keys(a) as (keyof SessionState)[]) {
+    if (key !== "logs" && !Object.is(a[key], b[key])) return false;
+  }
+  return true;
+}
+
+/** 两个启动视图画出来一样：按片订阅启动视图时的相等比较。 */
+export function launchViewEqual(a: LaunchView, b: LaunchView): boolean {
+  switch (a.kind) {
+    case "ready":
+      return b.kind === "ready" && a.busyElsewhere === b.busyElsewhere;
+    case "loading":
+      return b.kind === "loading" && a.phase === b.phase && sameSessionExceptLogs(a.session, b.session);
+    case "running":
+    case "crashed":
+      return b.kind === a.kind && sameSessionExceptLogs(a.session, b.session);
+    case "stopped":
+      return b.kind === "stopped" && a.reason === b.reason && sameSessionExceptLogs(a.session, b.session);
+    case "failed":
+      return b.kind === "failed" && a.code === b.code && a.params === b.params && sameSessionExceptLogs(a.session, b.session);
+    case "installing":
+      return b.kind === "installing" && a.task === b.task && a.queuePosition === b.queuePosition;
+    case "broken":
+      return b.kind === "broken" && a.reason === b.reason;
+  }
+}
+
 /** 失败会话的文案；javaPinned 只影响 spawn_failed 的第二个按钮（实例设置固定了 Java 时才出现）。 */
 export function launchFailure(view: Extract<LaunchView, { kind: "failed" }>, javaPinned: boolean): FailureCopy {
   return failureCopy(view.code, view.params, { accountName: view.session.accountName, javaPinned });
