@@ -20,7 +20,7 @@ pub trait SourceResolver: Send + Sync {
     fn resolve(&self, url: &str, source: MirrorSource) -> Result<String>;
 }
 
-/// 生产用解析器：直接套用 [`aurora_base::mirror::rewrite`] 的官方↔BMCLAPI 改写规则。
+/// 生产用解析器：直接套用 [`aurora_base::mirror::rewrite`] 的官方与 BMCLAPI 之间的改写规则。
 pub struct MirrorResolver;
 
 impl SourceResolver for MirrorResolver {
