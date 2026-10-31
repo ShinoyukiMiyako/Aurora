@@ -2,6 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import type { GameDirectoryDto } from "../../ipc/config";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
@@ -17,6 +18,7 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const DEFAULT_DIR = "D:\\Games\\Launcher\\.minecraft";
+const OFFICIAL_DIR = "C:\\Users\\player\\AppData\\Roaming\\.minecraft";
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
@@ -234,6 +236,30 @@ describe("首次启动向导：推进与收尾", () => {
     expect(callsOf(ipc, "complete_first_run")).toHaveLength(2);
     expect(launcher.state.firstRun).toBe(false);
     expect(document.querySelector("h1")).toBeNull();
+  });
+
+  it("回到第一步改了目录、取消了勾选再离开：这一次替换上一次，目录列表与只提交这一次时相同", async () => {
+    await mount();
+    await typePath("D:\\Games\\Foo");
+    await click(button("下一步"));
+    expect(title()).toBe("看看这台电脑上的 Java");
+    await click(button("上一步"));
+    await typePath("D:\\Games\\Petal");
+    const boxes = all<HTMLButtonElement>('[role="checkbox"]');
+    expect(boxes.map((b) => b.getAttribute("aria-checked"))).toEqual(["true", "true"]);
+    await click(boxes[1]);
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run")).toEqual([
+      { gameDir: "D:\\Games\\Foo", extraDirectories: [{ name: "官方启动器", path: OFFICIAL_DIR }, { name: "HMCL", path: "D:\\HMCL\\.minecraft" }] },
+      { gameDir: "D:\\Games\\Petal", extraDirectories: [{ name: "官方启动器", path: OFFICIAL_DIR }] },
+    ]);
+    // 上一次选的 Foo 不被当成「原来的当前目录」留下，取消勾选的 HMCL 也不留；向导之前就有游戏文件的默认目录照常留着
+    const listed = await mockInvoke<GameDirectoryDto[]>("list_game_directories");
+    expect(listed.map((d) => [d.path, d.is_current])).toEqual([
+      ["D:\\Games\\Petal", true],
+      [DEFAULT_DIR, false],
+      [OFFICIAL_DIR, false],
+    ]);
   });
 
   it("离开第一步时其他启动器的文件夹还没探测完：照当时提交、不收下，收尾也不按后来的探测结果补交", async () => {

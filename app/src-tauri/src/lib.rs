@@ -75,6 +75,7 @@ pub fn run() {
             // -- art --
             textures::setup(app);
             // -- system --
+            app.manage(commands::system::FirstRunBaselineSlot::default());
             app.manage(server_monitor);
             app.manage(UpdaterState::new(updater_support));
             window::setup_main_window(app)?;

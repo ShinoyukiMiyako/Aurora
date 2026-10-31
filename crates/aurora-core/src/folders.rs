@@ -38,6 +38,21 @@ pub struct GameDirectoryEntry {
     pub available: bool,
 }
 
+/// 首次启动向导第一步之前的目录记录，由 [`Aurora::first_run_baseline`] 取得。
+///
+/// 第一步可以提交不止一次：离开第一步就提交，用户回到第一步改了目录或勾选再离开时重新提交。
+/// 每次提交都从这份记录出发套用本次的选择（[`Aurora::complete_first_run`]），前几次提交设下的
+/// 当前目录、收下的文件夹不会叠加进来——否则上一次选的目录会被当成「原来的当前目录」收进额外目录，
+/// 取消勾选的文件夹也还留着。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstRunBaseline {
+    game_directory: Option<PathBuf>,
+    game_dir: PathBuf,
+    extra_game_directories: Vec<NamedDirectory>,
+    /// 向导之前的当前目录那时在盘上是否存在。第一次提交可能就是在这里建的目录，事后再看盘就分不清了。
+    current_exists: bool,
+}
+
 /// 对一个候选目录的检查结果，供首次启动向导提示「这里已经有游戏文件」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameDirectoryInspection {
@@ -122,12 +137,34 @@ impl Aurora {
         !self.config().first_run_completed
     }
 
-    /// 首次启动第一步提交：把选定的目录设为当前、收下勾选的其它启动器文件夹、标记向导已完成。
+    /// 记下此刻的目录记录，作为首次启动向导各次提交的出发点。
+    ///
+    /// `current_exists` 是此刻的当前目录在盘上是否存在，由调用方在任何一次提交建目录之前限时探测
+    /// （[`probe_dir`]）：记录过的目录可能在挂起的盘上，不能在门面锁里同步探测。
+    pub fn first_run_baseline(&self, current_exists: bool) -> FirstRunBaseline {
+        FirstRunBaseline {
+            game_directory: self.config().game_directory.clone(),
+            game_dir: self.game_dir().to_path_buf(),
+            extra_game_directories: self.config().extra_game_directories.clone(),
+            current_exists,
+        }
+    }
+
+    /// 首次启动第一步提交：回到向导之前的目录记录，再把选定的目录设为当前、收下勾选的其它启动器文件夹、
+    /// 标记向导已完成。同一个基线上重复提交，结果与只提交最后一次相同。
     ///
     /// 目录须事先经 [`validate_game_dir`] 校验并经 [`ensure_game_dir`] 建好；落盘仍由调用方
     /// [`Aurora::save_config`] 完成。
-    pub fn complete_first_run(&mut self, game_dir: PathBuf, extras: Vec<NamedDirectory>) {
-        self.switch_game_directory(game_dir);
+    pub fn complete_first_run(
+        &mut self,
+        baseline: &FirstRunBaseline,
+        game_dir: PathBuf,
+        extras: Vec<NamedDirectory>,
+    ) {
+        self.config_mut().game_directory = baseline.game_directory.clone();
+        self.config_mut().extra_game_directories = baseline.extra_game_directories.clone();
+        self.set_game_dir(baseline.game_dir.clone());
+        self.replace_current_directory(game_dir, baseline.current_exists);
         for extra in extras {
             self.add_game_directory(extra.name, extra.path);
         }
@@ -214,13 +251,18 @@ impl Aurora {
     /// 原来的当前目录若在盘上存在就收进额外目录，否则切过去就再也找不回来了；从没建出来过的
     /// 默认目录不收，免得列表里多一条永远不可达的记录。
     pub fn switch_game_directory(&mut self, path: impl Into<PathBuf>) {
-        let next = path.into();
+        let previous_exists = self.game_dir().is_dir();
+        self.replace_current_directory(path.into(), previous_exists);
+    }
+
+    /// 换当前目录；原来的当前目录在盘上存在（`previous_exists`）就收进额外目录。
+    fn replace_current_directory(&mut self, next: PathBuf, previous_exists: bool) {
         let previous = self.game_dir().to_path_buf();
         if same_path(&previous, &next) {
             return;
         }
         self.remove_game_directory(&next);
-        if previous.is_dir() {
+        if previous_exists {
             let name = self.directory_name(&previous);
             let extras = &mut self.config_mut().extra_game_directories;
             if !extras.iter().any(|d| same_path(&d.path, &previous)) {
@@ -575,9 +617,11 @@ mod tests {
 
         let chosen = tmp.path().join("Games").join(".minecraft");
         let chosen = validate_game_dir(&chosen.display().to_string()).unwrap();
+        let baseline = aurora.first_run_baseline(probe_dir(aurora.game_dir()).await);
         ensure_game_dir(&chosen).await.unwrap();
         assert!(chosen.is_dir(), "目录不存在会自动创建");
         aurora.complete_first_run(
+            &baseline,
             chosen.clone(),
             vec![
                 named("HMCL", "D:/HMCL/.minecraft"),
@@ -600,6 +644,105 @@ mod tests {
         let reopened = Aurora::open(reloaded, tmp.path().to_path_buf(), config_path).unwrap();
         assert!(!reopened.is_first_run());
         assert_eq!(reopened.game_dir(), chosen);
+    }
+
+    /// 回到第一步改了再提交：从基线出发重新套用，结果与只提交最后一次相同。第一次提交建出来的默认目录
+    /// 不被当成「原来的当前目录」收进额外目录，取消勾选的文件夹也不留着。
+    #[tokio::test]
+    async fn recommitting_first_run_replaces_the_previous_choice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default_dir = default_game_dir(tmp.path());
+        let mut aurora = aurora_at(tmp.path(), &default_dir, Vec::new());
+        let baseline = aurora.first_run_baseline(probe_dir(aurora.game_dir()).await);
+        assert!(!default_dir.exists(), "向导之前默认目录还没建出来");
+
+        ensure_game_dir(&default_dir).await.unwrap();
+        aurora.complete_first_run(
+            &baseline,
+            default_dir.clone(),
+            vec![
+                named("HMCL", "D:/HMCL/.minecraft"),
+                named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft"),
+            ],
+        );
+        assert_eq!(aurora.config().extra_game_directories.len(), 2);
+
+        let petal = tmp.path().join("Petal");
+        ensure_game_dir(&petal).await.unwrap();
+        aurora.complete_first_run(
+            &baseline,
+            petal.clone(),
+            vec![named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft")],
+        );
+
+        assert_eq!(aurora.game_dir(), petal);
+        assert_eq!(
+            aurora.config().game_directory.as_deref(),
+            Some(petal.as_path())
+        );
+        assert_eq!(
+            aurora.config().extra_game_directories,
+            vec![named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft")]
+        );
+        assert!(aurora.config().first_run_completed);
+        let listed: Vec<(PathBuf, bool)> = aurora
+            .game_directories()
+            .await
+            .into_iter()
+            .map(|e| (e.path, e.is_current))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (petal.clone(), true),
+                (
+                    PathBuf::from("C:/Users/p/AppData/Roaming/.minecraft"),
+                    false
+                )
+            ]
+        );
+
+        // 再改回默认目录：默认目录又是当前，Petal 不留记录
+        aurora.complete_first_run(&baseline, default_dir.clone(), Vec::new());
+        assert_eq!(aurora.game_dir(), default_dir);
+        assert_eq!(
+            aurora.config().game_directory,
+            None,
+            "改回向导之前的当前目录，配置也回到原样"
+        );
+        assert!(aurora.config().extra_game_directories.is_empty());
+    }
+
+    /// 向导之前就有的记录与当时就在盘上的当前目录照常保留：配置损坏后按默认配置重进向导时，
+    /// 原来的默认目录里可能有实例，换走了也要能切回来。
+    #[tokio::test]
+    async fn recommitting_first_run_keeps_what_existed_before_the_wizard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("Games").join(".minecraft");
+        std::fs::create_dir_all(current.join("versions")).unwrap();
+        let mut aurora = aurora_at(
+            tmp.path(),
+            &current,
+            vec![named("PCL2", "E:/PCL2/.minecraft")],
+        );
+        let baseline = aurora.first_run_baseline(probe_dir(aurora.game_dir()).await);
+
+        let first = tmp.path().join("A");
+        ensure_game_dir(&first).await.unwrap();
+        aurora.complete_first_run(
+            &baseline,
+            first.clone(),
+            vec![named("HMCL", "D:/HMCL/.minecraft")],
+        );
+        let second = tmp.path().join("B");
+        ensure_game_dir(&second).await.unwrap();
+        aurora.complete_first_run(&baseline, second.clone(), Vec::new());
+
+        assert_eq!(aurora.game_dir(), second);
+        assert_eq!(
+            aurora.config().extra_game_directories,
+            vec![named("PCL2", "E:/PCL2/.minecraft"), named("Games", current)]
+        );
     }
 
     #[tokio::test]

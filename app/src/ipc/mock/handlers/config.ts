@@ -66,6 +66,19 @@ let disk = new Set(SEED_DISK.map(norm));
 let withVersions = new Set(SEED_WITH_VERSIONS.map(norm));
 let firstRunCompleted = false;
 
+/**
+ * 与后端 FirstRunBaseline 一致：首次启动向导第一步之前的目录记录。第一步可以提交不止一次（回到第一步改了再离开），
+ * 每次都从它出发，上一次设下的当前目录、收下的文件夹不叠加进来。只在内存里，不随模拟数据持久化（后端同样只在进程内）。
+ */
+interface FirstRunBaseline {
+  gameDir: string;
+  extras: NamedDirectoryDto[];
+  /** 向导之前的当前目录那时在盘上是否存在；第一次提交可能就在那里建了目录，事后看盘分不清。 */
+  currentExists: boolean;
+}
+
+let firstRunBaseline: FirstRunBaseline | null = null;
+
 /** 与后端 same_path 一致：大小写不敏感，抹平 / 与 \ 的混用和末尾分隔符。 */
 function norm(path: string): string {
   return path.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
@@ -116,13 +129,32 @@ export function addExtraDirectory(name: string, path: string): void {
 
 /** 与后端 switch_game_directory 一致：原目录在盘上存在才收进额外目录。 */
 export function switchGameDirectory(next: string): void {
+  replaceCurrentDirectory(next, disk.has(norm(config.game_dir)));
+}
+
+function replaceCurrentDirectory(next: string, previousExists: boolean): void {
   const previous = config.game_dir;
   if (samePath(previous, next)) return;
   extras = extras.filter((d) => !samePath(d.path, next));
-  if (disk.has(norm(previous)) && !extras.some((d) => samePath(d.path, previous))) {
+  if (previousExists && !extras.some((d) => samePath(d.path, previous))) {
     extras.push({ name: directoryName(previous), path: previous });
   }
   config.game_dir = next;
+}
+
+/** 首次启动第一步的基线：第一次提交时（建目录之前）记下，之后的提交都用这一份。 */
+export function firstRunBaselineOnce(): FirstRunBaseline {
+  if (firstRunBaseline === null) {
+    firstRunBaseline = { gameDir: config.game_dir, extras: extras.map((d) => ({ ...d })), currentExists: disk.has(norm(config.game_dir)) };
+  }
+  return firstRunBaseline;
+}
+
+/** 与后端 complete_first_run 一致：回到基线，再把选定的目录设为当前；收下勾选的文件夹由调用方接着做。 */
+export function applyFirstRunDirectory(baseline: FirstRunBaseline, gameDir: string): void {
+  config.game_dir = baseline.gameDir;
+  extras = baseline.extras.map((d) => ({ ...d }));
+  replaceCurrentDirectory(gameDir, baseline.currentExists);
 }
 
 /** 首次启动提交用：建目录（加入假磁盘）。 */
@@ -295,6 +327,7 @@ export function reset(): void {
   disk = new Set(SEED_DISK.map(norm));
   withVersions = new Set(SEED_WITH_VERSIONS.map(norm));
   firstRunCompleted = false;
+  firstRunBaseline = null;
 }
 
 interface ConfigSnapshot {

@@ -1,6 +1,6 @@
 //! 系统：内存建议、首次启动、启动提示与连通性探测。
 
-use aurora_core::folders::{ensure_game_dir, validate_game_dir};
+use aurora_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
 use aurora_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -48,22 +48,30 @@ pub async fn is_first_run(facade: State<'_, Facade>) -> Result<bool, CommandErro
     Ok(facade.read().await.is_first_run())
 }
 
+/// 本次运行里首次启动向导第一步之前的目录记录（managed state）。第一次提交时取一次，之后的提交都从它出发。
+#[derive(Default)]
+pub struct FirstRunBaselineSlot(tokio::sync::Mutex<Option<FirstRunBaseline>>);
+
 /// 首次启动第一步提交：校验并创建游戏目录、设为当前、收下勾选的其它启动器文件夹、标记向导完成，
 /// 一次落盘。之后中途关掉窗口，下次打开也不再进向导。
+///
+/// 用户回到第一步改了再离开时会再提交一次：这一次替换上一次的选择，而不是叠加（见 [`FirstRunBaseline`]）。
 #[tauri::command]
 pub async fn complete_first_run(
     app: AppHandle,
     game_dir: String,
     extra_directories: Vec<NamedDirectoryDto>,
     facade: State<'_, Facade>,
+    baseline: State<'_, FirstRunBaselineSlot>,
 ) -> Result<(), CommandError> {
-    let outcome = complete_first_run_with(&facade, &game_dir, extra_directories).await;
+    let outcome = complete_first_run_with(&facade, &baseline, &game_dir, extra_directories).await;
     crate::textures::refresh_on_success(&app, &outcome).await;
     outcome
 }
 
 pub(crate) async fn complete_first_run_with(
     facade: &Facade,
+    baseline: &FirstRunBaselineSlot,
     game_dir: &str,
     extra_directories: Vec<NamedDirectoryDto>,
 ) -> Result<(), CommandError> {
@@ -72,11 +80,23 @@ pub(crate) async fn complete_first_run_with(
         .into_iter()
         .map(parse_named_directory)
         .collect::<Result<Vec<_>, _>>()?;
+    // 整个提交持有基线锁：两次提交不交错，基线也只在第一次提交建目录之前取一次。
+    let mut slot = baseline.0.lock().await;
+    let base = match slot.as_ref() {
+        Some(base) => base.clone(),
+        None => {
+            let aurora = facade.snapshot().await;
+            let current_exists = probe_dir(aurora.game_dir()).await;
+            let base = aurora.first_run_baseline(current_exists);
+            *slot = Some(base.clone());
+            base
+        }
+    };
     // 建目录在拿写锁之前：盘慢或挂起时不连累其它命令。
     ensure_game_dir(&game_dir).await?;
     facade
         .update(|aurora| {
-            aurora.complete_first_run(game_dir, extras);
+            aurora.complete_first_run(&base, game_dir, extras);
             Ok::<_, CommandError>(())
         })
         .await
@@ -175,6 +195,7 @@ mod tests {
 
         complete_first_run_with(
             &facade,
+            &FirstRunBaselineSlot::default(),
             &game_dir.display().to_string(),
             vec![NamedDirectoryDto {
                 name: "HMCL".into(),
@@ -196,14 +217,77 @@ mod tests {
         assert_eq!(saved.extra_game_directories[0].name, "HMCL");
     }
 
+    /// 回到第一步改了目录、取消了勾选再离开：第二次提交替换第一次，目录列表只有这一次的当前目录与勾选项。
+    /// 第一次提交建出来的默认目录不被记成「其他游戏目录」，取消勾选的文件夹也不留着。
+    #[tokio::test]
+    async fn recommitting_first_run_replaces_the_previous_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let slot = FirstRunBaselineSlot::default();
+        let default_dir = facade.read().await.game_dir().to_path_buf();
+        assert!(!default_dir.exists());
+        let official_path = r"C:\Users\p\AppData\Roaming\.minecraft";
+        let hmcl = NamedDirectoryDto {
+            name: "HMCL".into(),
+            path: r"D:\HMCL\.minecraft".into(),
+        };
+        let official = NamedDirectoryDto {
+            name: "官方启动器".into(),
+            path: official_path.into(),
+        };
+
+        complete_first_run_with(
+            &facade,
+            &slot,
+            &default_dir.display().to_string(),
+            vec![hmcl, official.clone()],
+        )
+        .await
+        .unwrap();
+        assert!(default_dir.is_dir(), "第一次提交建出了默认目录");
+
+        let petal = dir.path().join("Petal");
+        complete_first_run_with(&facade, &slot, &petal.display().to_string(), vec![official])
+            .await
+            .unwrap();
+
+        let listed: Vec<(String, std::path::PathBuf, bool)> = facade
+            .snapshot()
+            .await
+            .game_directories()
+            .await
+            .into_iter()
+            .map(|e| (e.name, e.path, e.is_current))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("Petal".to_owned(), petal.clone(), true),
+                (
+                    "官方启动器".to_owned(),
+                    std::path::PathBuf::from(official_path),
+                    false
+                ),
+            ]
+        );
+        let saved = ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert_eq!(saved.game_directory.as_deref(), Some(petal.as_path()));
+        assert_eq!(saved.extra_game_directories.len(), 1);
+        assert!(saved.first_run_completed);
+    }
+
     /// 校验不过时什么都不写：不建目录、不改配置、仍是首次启动。
     #[tokio::test]
     async fn invalid_first_run_input_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path());
+        let slot = FirstRunBaselineSlot::default();
         let good = dir.path().join("ok");
 
-        let err = complete_first_run_with(&facade, "", Vec::new())
+        let err = complete_first_run_with(&facade, &slot, "", Vec::new())
             .await
             .unwrap_err();
         assert_eq!(err.code, code::INVALID_GAME_DIRECTORY);
@@ -211,6 +295,7 @@ mod tests {
 
         let err = complete_first_run_with(
             &facade,
+            &slot,
             &good.display().to_string(),
             vec![NamedDirectoryDto {
                 name: "".into(),

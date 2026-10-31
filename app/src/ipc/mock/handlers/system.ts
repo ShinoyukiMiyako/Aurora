@@ -16,13 +16,14 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import {
   addExtraDirectory,
+  applyFirstRunDirectory,
   createDirectory,
+  firstRunBaselineOnce,
   isFirstRunCompleted,
   markFirstRunCompleted,
   parseNamedDirectory,
   requireString,
   requireStruct,
-  switchGameDirectory,
   tauriArgError,
   validateGameDir,
 } from "./config";
@@ -99,8 +100,9 @@ function completeFirstRun(args: MockArgs): void {
   const raw = args.extraDirectories;
   if (!Array.isArray(raw)) throw tauriArgError("complete_first_run", "extraDirectories", "expected a sequence");
   const extras = raw.map((item) => parseNamedDirectory(item, "complete_first_run"));
+  const baseline = firstRunBaselineOnce();
   createDirectory(gameDir);
-  switchGameDirectory(gameDir);
+  applyFirstRunDirectory(baseline, gameDir);
   for (const extra of extras) addExtraDirectory(extra.name, extra.path);
   markFirstRunCompleted();
 }
