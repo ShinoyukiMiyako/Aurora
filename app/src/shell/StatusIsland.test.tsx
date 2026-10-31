@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
 import { stubCanvas } from "../art/illustrations/test-canvas";
-import { LAUNCH_PHASE_EVENT } from "../ipc/launch";
+import { GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { startSession, type SessionState } from "../state/session";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
@@ -16,6 +16,29 @@ import { downloadStageNote, islandSecond, islandTone, stageNote, stageState, Sta
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+// 状态岛里不单独导出的部件按它们必定画出的子部件计数：收起的胶囊与详情头各画一个等距方块，详情的动作行全是按钮
+const renders = vi.hoisted(() => ({ InstanceBlock: 0, Button: 0 }));
+vi.mock("../art/iso/InstanceBlock", async (orig) => {
+  const mod = await orig<typeof import("../art/iso/InstanceBlock")>();
+  return {
+    ...mod,
+    InstanceBlock: (props: Parameters<typeof mod.InstanceBlock>[0]) => {
+      renders.InstanceBlock += 1;
+      return mod.InstanceBlock(props);
+    },
+  };
+});
+vi.mock("../ui/Button", async (orig) => {
+  const mod = await orig<typeof import("../ui/Button")>();
+  return {
+    ...mod,
+    Button: (props: Parameters<typeof mod.Button>[0]) => {
+      renders.Button += 1;
+      return mod.Button(props);
+    },
+  };
+});
 
 const T0 = 1_700_000_000_000;
 
@@ -164,5 +187,133 @@ describe("状态岛", () => {
     act(() => cancel.click());
     await flush();
     expect(callsOf(ipc, "cancel_task")).toEqual([{ taskId: session.taskId }]);
+  });
+});
+
+describe("状态岛按片订阅", () => {
+  let commits = 0;
+
+  function mount() {
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <Profiler id="island" onRender={() => void (commits += 1)}>
+            <StatusIsland />
+          </Profiler>
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+  }
+
+  function islandButton(): HTMLButtonElement {
+    const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
+    if (island === null) throw new Error("状态岛没有出现");
+    return island;
+  }
+
+  async function running() {
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    mount();
+    await flush();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    expect(launcher.state.session).toMatchObject({ instanceId: "生存", phase: "running" });
+  }
+
+  function logs() {
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(GAME_LOG_EVENT, { version_id: "生存", lines: [{ level: "info", source: "game", text: `第 ${i} 行` }] });
+      });
+    }
+    expect(launcher.state.session?.logs).toHaveLength(20);
+  }
+
+  beforeEach(() => {
+    commits = 0;
+    renders.InstanceBlock = 0;
+    renders.Button = 0;
+  });
+
+  it("收起时：20 批游戏日志，状态岛一次都不提交", async () => {
+    await running();
+    commits = 0;
+    logs();
+    expect(commits).toBe(0);
+  });
+
+  it("展开后：20 批游戏日志只让最近几行跟着换，胶囊、详情头与动作行都不重渲染", async () => {
+    await running();
+    act(() => islandButton().click());
+    await flush();
+    expect(document.querySelector('[role="log"]')).toBeNull();
+    const before = { ...renders };
+    expect(before.InstanceBlock).toBeGreaterThan(0);
+    expect(before.Button).toBeGreaterThan(0);
+    logs();
+    const lines = [...document.querySelectorAll('[role="log"] p')].map((p) => p.textContent);
+    expect(lines).toHaveLength(4);
+    expect(lines.map((l) => l?.slice(l.indexOf(" ") + 1))).toEqual(["第 17 行", "第 18 行", "第 19 行", "第 20 行"]);
+    expect(renders).toEqual(before);
+  });
+
+  it("计时器只在运行中挂：加载阶段停着不动时不按秒重渲染，进入运行后每秒走一次", async () => {
+    mount();
+    await flush();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    expect(launcher.state.session?.phase).toBe("preparing");
+    commits = 0;
+    // 每秒单独一次 act：一次 act 里的更新会合并成一次提交，数不出每秒一次的重渲染
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    }
+    expect(commits).toBe(0);
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "running", stage_index: 7 }));
+    await flush();
+    expect(launcher.state.session?.phase).toBe("running");
+    expect(islandButton().getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "00:00"));
+    commits = 0;
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    }
+    expect(commits).toBe(3);
+    // jsdom 窗口宽 1024，按 compact 档只留计时
+    expect(islandButton().getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "00:03"));
+  });
+
+  it("只改数字的重渲染不量布局：下载进度一路走、百分比位数不变，布局动画不读胶囊的尺寸", async () => {
+    mount();
+    await flush();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished: 0, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
+    await flush();
+    const island = islandButton();
+    expect(island.getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "30%"));
+    const rects = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    commits = 0;
+    for (let i = 1; i <= 20; i++) {
+      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished: i, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20);
+      });
+    }
+    expect(island.getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "39%"));
+    expect(commits).toBeGreaterThanOrEqual(20);
+    expect(rects.mock.contexts.filter((el) => el === island)).toHaveLength(0);
+    rects.mockRestore();
   });
 });

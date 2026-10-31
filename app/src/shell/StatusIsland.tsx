@@ -3,9 +3,12 @@
 //
 // 退场动画期间外层拿到的会话是最后一帧的快照：显示按快照画；会话可能因为实例被删除而清空，
 // 所以这里只按 id 查实例、查不到时退回 id 显示，不读必然存在的实例。
+//
+// 游戏日志每 100 ms 一批。状态岛按会话除日志以外的字段订阅，收起时日志怎么来都不重渲染；
+// 展开后的最近几行由 LatestLogs 自己订阅，只有它跟着换。
 
 import { AnimatePresence, motion, useIsPresent, useTransform, type Variants } from "framer-motion";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "../art/Icon";
 import { InstanceBlock } from "../art/iso/InstanceBlock";
 import { ACTION_ERROR, CONFIRM_COPY, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL, failureCopy, type FailureFixKind } from "../copy/flows";
@@ -16,7 +19,7 @@ import { instanceCover } from "../launch/cover";
 import { useLaunchHost } from "../launch/host";
 import { sessionDetail, sessionPhaseLabel } from "../launch/launchView";
 import { fade, shake, springs } from "../lib/motion";
-import { useLauncherActions, useLauncherSelector, useNow } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { isLoadingPhase, type SessionState } from "../state/session";
 import { Button } from "../ui/Button";
@@ -78,10 +81,37 @@ export function islandSecondText(second: IslandSecond): string {
   return [second.label, second.value].filter((part): part is string => part !== null).join(" ");
 }
 
+/**
+ * 会话除日志以外的字段都相同（两边都没有会话也算）。拿到的会话快照里日志可能是旧的：状态岛除 LatestLogs 外都不读日志。
+ */
+function sameSessionExceptLogs(a: SessionState | null, b: SessionState | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  for (const key of Object.keys(a) as (keyof SessionState)[]) {
+    if (key !== "logs" && !Object.is(a[key], b[key])) return false;
+  }
+  return true;
+}
+
 export function StatusIsland() {
-  // 只随会话变（含展开时显示的日志），下载进度不让状态岛重渲染
-  const session = useLauncherSelector((s) => s.session);
+  // 只随会话的阶段、进度、时刻与结局变；日志与别的任务的下载进度都不让状态岛重渲染
+  const session = useLauncherSelector((s) => s.session, sameSessionExceptLogs);
   return <AnimatePresence>{session !== null && <Island key="island" session={session} />}</AnimatePresence>;
+}
+
+/**
+ * 「已运行 mm:ss」用的当前时刻：只在运行中每秒走一次。其余阶段显示的内容与此刻无关，不挂计时器，
+ * 免得停在加载、失败或崩溃的状态岛每秒白白重渲染。进入运行时立即取一次，不沿用挂载时的旧时刻。
+ */
+function useRunningNow(running: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+  return now;
 }
 
 const shakeVariants: Variants = {
@@ -94,7 +124,7 @@ function Island({ session }: { session: SessionState }) {
   const instance = useLauncherSelector((s) => findInstance(s, session.instanceId));
   const { tier } = useShell();
   const host = useLaunchHost();
-  const now = useNow(1000);
+  const now = useRunningNow(session.phase === "running");
   const present = useIsPresent();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
@@ -105,6 +135,9 @@ function Island({ session }: { session: SessionState }) {
   const tone = islandTone(session);
   const second = islandSecond(session, tier, now, stopping);
   const loading = isLoadingPhase(session.phase);
+  // 胶囊的宽度只取决于这几样：档位、名字、阶段文字、数字槽里的字数（等宽数字，字数相同就同宽）、尾部有没有圆点。
+  // 交给布局动画做 layoutDependency：下载进度、百分比这类只改数字的重渲染不再逐次量一遍布局
+  const layoutKey = JSON.stringify([tier, name, second.label, second.value === null ? null : second.value.length, tone, session.phase === "crashed"]);
 
   const endSession = async () => {
     setStopping(true);
@@ -135,6 +168,7 @@ function Island({ session }: { session: SessionState }) {
         ref={setAnchor}
         type="button"
         layout
+        layoutDependency={layoutKey}
         className={styles.island}
         data-tone={tone}
         data-open={open || undefined}
@@ -148,7 +182,14 @@ function Island({ session }: { session: SessionState }) {
         transition={{ layout: springs.morph }}
         onClick={() => setOpen((v) => !v)}
       >
-        <motion.span className={styles.row} layout="position" variants={shakeVariants} initial={false} animate={session.phase === "crashed" ? "shake" : "rest"}>
+        <motion.span
+          className={styles.row}
+          layout="position"
+          layoutDependency={layoutKey}
+          variants={shakeVariants}
+          initial={false}
+          animate={session.phase === "crashed" ? "shake" : "rest"}
+        >
           <span className={styles.blockFrame} aria-hidden="true">
             {instance !== undefined && <InstanceBlock instanceId={instance.id} cover={instanceCover(instance)} width={20} />}
           </span>
@@ -169,7 +210,7 @@ function Island({ session }: { session: SessionState }) {
         <div className={styles.detail}>
           <DetailHead session={session} instance={instance} name={name} now={now} />
           {loading && <StageList session={session} />}
-          <LatestLogs session={session} />
+          <LatestLogs instanceId={session.instanceId} />
           <DetailActions session={session} controls={controls} onClose={close} />
         </div>
       </Popover>
@@ -269,10 +310,15 @@ function StageList({ session }: { session: SessionState }) {
 
 const LOG_LINES = 4;
 
-function LatestLogs({ session }: { session: SessionState }) {
-  if (session.logs.length === 0) return null;
-  const lines = session.logs.slice(-LOG_LINES);
-  const offset = session.logs.length - lines.length;
+/**
+ * 详情里最近的几行日志：整座状态岛只有它订阅日志，详情收起时它不挂载。
+ * 会话已清空（退场动画期间）或换成了别的实例时不画。
+ */
+function LatestLogs({ instanceId }: { instanceId: string }) {
+  const logs = useLauncherSelector((s) => (s.session !== null && s.session.instanceId === instanceId ? s.session.logs : null));
+  if (logs === null || logs.length === 0) return null;
+  const lines = logs.slice(-LOG_LINES);
+  const offset = logs.length - lines.length;
   return (
     <div className={styles.logs} role="log" aria-label={ISLAND_COPY.logLabel}>
       {lines.map((line, i) => (
