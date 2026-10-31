@@ -1,8 +1,9 @@
 //! Petalfall 的 Tauri 外壳。
 //!
-//! 本文件只做装配：日志、插件、managed state、主窗口兜底与命令注册。命令实现按领域分在
+//! 本文件只做装配：日志、插件、managed state、主窗口兜底、命令注册与退出收尾（[`exit`]）。命令实现按领域分在
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
-//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]——各自成模块。
+//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
+//! 自动重载 [`renderer`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -10,8 +11,10 @@
 mod commands;
 mod drop;
 mod events;
+mod exit;
 mod facade;
 mod logging;
+mod renderer;
 mod tasks;
 mod textures;
 mod window;
@@ -189,7 +192,7 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                commands::updater::install_on_exit(app);
+                exit::on_exit(app);
             }
         });
 }

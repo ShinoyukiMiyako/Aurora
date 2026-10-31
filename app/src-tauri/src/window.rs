@@ -1,4 +1,5 @@
-//! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]），以及生产构建关闭 WebView2 浏览器加速键。
+//! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]）与渲染进程故障后的自动重载
+//! （见 [`crate::renderer`]），以及生产构建关闭 WebView2 浏览器加速键。
 //!
 //! 窗口以 `visible: false` 创建：前端在首帧渲染前读外观、写好明暗与强调色，画完第一帧才自己
 //! `show()`，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。
@@ -21,6 +22,8 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(windows)]
     crate::drop::install(&window)?;
+    #[cfg(windows)]
+    crate::renderer::install(&window)?;
 
     // 开发构建保留刷新与开发者工具。
     #[cfg(windows)]
