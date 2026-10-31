@@ -10,7 +10,9 @@ import type {
   InstallPlan,
   InstalledCopy,
   InstalledMod,
+  InstalledSource,
   InstanceMatch,
+  InstanceSources,
   MatchState,
   ModLoader,
   ModMetadata,
@@ -718,6 +720,19 @@ export const handlers: MockHandlers = {
     return rows.sort((a, b) => TIER[a.state] - TIER[b.state] || byCodeUnit(a.version_id, b.version_id));
   },
   install_mod: installMod,
+  installed_sources: (): InstanceSources[] =>
+    mockInstanceIds()
+      .filter((id) => mockInstanceFacts(id) !== null)
+      .sort(byCodeUnit)
+      .map((id) => {
+        const instance = mockInstance(id);
+        const sources: InstalledSource[] = [];
+        for (const row of instance.ledger) {
+          const duplicate = sources.some((s) => s.platform === row.platform && s.project_id === row.project_id);
+          if (!duplicate && present(instance, row.file_name)) sources.push({ platform: row.platform, project_id: row.project_id });
+        }
+        return { status: "ready", version_id: id, sources };
+      }),
   plan_install: (args) => {
     const platform = parsePlatform(args.platform);
     const projectId = requireNonEmpty(args.projectId, "projectId");

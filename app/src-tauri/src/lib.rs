@@ -151,6 +151,7 @@ pub fn run() {
             commands::mods::update_mod,
             commands::mods::list_mod_versions,
             commands::mods::match_instances,
+            commands::mods::installed_sources,
             commands::mods::plan_install,
             // -- history --
             commands::history::list_history,

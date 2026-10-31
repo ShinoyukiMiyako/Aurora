@@ -100,6 +100,20 @@ pub struct InstanceMatch {
     pub installed: Option<InstalledCopy>,
 }
 
+/// 实例里一个已装 Mod 的平台来源。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledSource {
+    pub platform: Platform,
+    pub project_id: String,
+}
+
+/// 一个实例里已装 Mod 的平台来源；读不出卷宗或 mods 目录时为那个错误。
+#[derive(Debug)]
+pub struct InstanceSources {
+    pub version_id: String,
+    pub sources: Result<Vec<InstalledSource>>,
+}
+
 /// 加载器的展示名（专有名词，保留原文大小写）。
 ///
 /// 判定结果里的实例加载器是小写技术名，直接塞进中文文案会读成「该实例装的是 neoforge」；
@@ -521,6 +535,79 @@ impl Aurora {
             .into_iter()
             .find(|copy| present.contains(copy.file_name.as_str())))
     }
+
+    /// 全部实例各装了哪些平台工程的 Mod（卷宗与 mods 目录 join，禁用态也算），按实例 id 排序。
+    ///
+    /// 发现页的结果卡要标「已装入 n 个实例」：逐实例调 `list_mods` 是 N 次调用，每次还要打开全部 jar
+    /// 读元数据；这里只读卷宗和 mods 目录的文件名，一次给齐，不联网。某个实例读不出卷宗或目录时只让
+    /// 它那一项带上错误，其余实例照常给出，一个坏实例不该让整页的标记都没有。
+    pub async fn installed_mod_sources(&self) -> Result<Vec<InstanceSources>> {
+        let scan = discover_versions(self.game_dir()).await?;
+        let aurora = self.clone();
+        let mut all = bounded_map(scan.versions, local_concurrency(), move |discovered| {
+            let aurora = aurora.clone();
+            async move {
+                let version_id = discovered.id.clone();
+                let sources = aurora.mod_sources_of(discovered).await;
+                Ok(InstanceSources {
+                    version_id,
+                    sources,
+                })
+            }
+        })
+        .await?;
+        all.sort_by(|a, b| a.version_id.cmp(&b.version_id));
+        Ok(all)
+    }
+
+    async fn mod_sources_of(&self, discovered: DiscoveredVersion) -> Result<Vec<InstalledSource>> {
+        let ledger = self.ledger_store(&discovered.id).load().await?;
+        if ledger.entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dirs = self.instance_dirs(&discovered).await?;
+        let on_disk = mod_file_keys(&dirs.mods_dir).await?;
+        let mut sources: Vec<InstalledSource> = Vec::new();
+        for entry in &ledger.entries {
+            let duplicate = sources
+                .iter()
+                .any(|s| s.platform == entry.platform && s.project_id == entry.project_id);
+            if !duplicate && on_disk.contains(entry.file_name.as_str()) {
+                sources.push(InstalledSource {
+                    platform: entry.platform,
+                    project_id: entry.project_id.clone(),
+                });
+            }
+        }
+        Ok(sources)
+    }
+}
+
+/// mods 目录里各文件的卷宗键（启用态文件名）。只读目录项、不打开 jar；目录不存在即为空。
+async fn mod_file_keys(mods_dir: &Path) -> Result<HashSet<String>> {
+    let io = |source| -> CoreError {
+        aurora_base::Error::Io {
+            path: mods_dir.to_owned(),
+            source,
+        }
+        .into()
+    };
+    let mut entries = match tokio::fs::read_dir(mods_dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(source) => return Err(io(source)),
+    };
+    let mut keys = HashSet::new();
+    while let Some(entry) = entries.next_entry().await.map_err(io)? {
+        if !entry.file_type().await.map_err(io)?.is_file() {
+            continue;
+        }
+        // 卷宗里的文件名都是 UTF-8，转不过来的一定对不上。
+        if let Ok(name) = entry.file_name().into_string() {
+            keys.insert(ledger_key(&name).to_owned());
+        }
+    }
+    Ok(keys)
 }
 
 /// 在一个资源目录里认出该工程的哪个版本装着；目录不存在即没装。
@@ -1319,6 +1406,79 @@ mod tests {
         assert_eq!(matches[1].version_id, "fabric-1.20.1");
         assert_eq!(matches[1].state, MatchState::Incompatible);
         assert_eq!(matches[1].compatibility, mismatch("不支持 MC 1.20.1"));
+    }
+
+    /// 发现页的「已装入 n 个实例」一次取齐全部实例的已装来源：卷宗与 mods 目录 join，禁用态也算，
+    /// 不联网；某个实例的卷宗读不出时只让它那一项带错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installed_mod_sources_cover_every_instance_in_one_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        matrix_fixture(&mc).await;
+        put_instance(&mc, "e-broken-ledger", "1.20.1", FABRIC_LIB).await;
+        put_file(
+            mc.join("versions/e-broken-ledger")
+                .join(aurora_instance::AURORA_META_DIR)
+                .join("ledger.json"),
+            b"{",
+        )
+        .await;
+        // 同一工程两份文件（换过文件名的两个版本都还在）：来源只算一次。
+        put_ledger_and_disk(&mc, "f-two-copies", &["sodium-0.5.jar", "sodium-0.4.jar"]).await;
+        put_instance(&mc, "f-two-copies", "1.20.1", FABRIC_LIB).await;
+        let store = LedgerStore::for_version_dir(&mc.join("versions/f-two-copies"));
+        let mut ledger = store.load().await.unwrap();
+        let mut older = ledger.entries[0].clone();
+        older.file_name = "sodium-0.4.jar".to_owned();
+        older.version_id = "old".to_owned();
+        ledger.upsert(older);
+        store.save(&ledger).await.unwrap();
+
+        // 不该有任何请求：给一个连不上的平台地址，真去联网就会失败。
+        let aurora = isolated(&mc, "http://127.0.0.1:9".to_owned());
+        let all = aurora.installed_mod_sources().await.unwrap();
+        let ids: Vec<&str> = all.iter().map(|i| i.version_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "a-fabric-1.19.2",
+                "a-quilt-1.20.1",
+                "b-fabric-1.20.1",
+                "c-forge-1.20.1",
+                "d-forge-1.18.2",
+                "e-broken-ledger",
+                "f-two-copies",
+            ]
+        );
+        let sodium = vec![InstalledSource {
+            platform: Platform::Modrinth,
+            project_id: "sodium".to_owned(),
+        }];
+        let sources = |id: &str| {
+            all.iter()
+                .find(|i| i.version_id == id)
+                .unwrap()
+                .sources
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(ToString::to_string)
+        };
+        // 卷宗有、盘上没有：不算。
+        assert_eq!(sources("a-quilt-1.20.1"), Ok(Vec::new()));
+        assert_eq!(sources("a-fabric-1.19.2"), Ok(Vec::new()));
+        assert_eq!(sources("b-fabric-1.20.1"), Ok(sodium.clone()));
+        // 禁用态也算装着。
+        assert_eq!(sources("c-forge-1.20.1"), Ok(sodium.clone()));
+        assert_eq!(sources("f-two-copies"), Ok(sodium));
+        let broken = all
+            .iter()
+            .find(|i| i.version_id == "e-broken-ledger")
+            .unwrap();
+        assert!(
+            matches!(&broken.sources, Err(CoreError::ConfigParse { path, .. }) if path.ends_with("ledger.json")),
+            "{:?}",
+            broken.sources
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

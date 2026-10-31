@@ -62,7 +62,9 @@ mod workdir;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
-pub use compat::{Compatibility, InstalledCopy, InstanceMatch, MatchState};
+pub use compat::{
+    Compatibility, InstalledCopy, InstalledSource, InstanceMatch, InstanceSources, MatchState,
+};
 pub use config::{
     AfterLaunch, AuroraConfig, ConfigRecovery, ConfigStore, DownloadSourcePolicy, MemorySettings,
     NamedDirectory, PinnedServer,
