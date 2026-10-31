@@ -100,9 +100,7 @@ pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
 };
-pub use template::{
-    TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip,
-};
+pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
 pub use updates::UpdateCandidate;
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};

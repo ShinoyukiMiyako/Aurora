@@ -82,9 +82,7 @@ impl TemplateSkip {
         match self {
             TemplateSkip::Disabled => "新建实例时沿用默认设置已在配置里关闭",
             TemplateSkip::Empty => "还没有默认设置",
-            TemplateSkip::SharedWorkingDir => {
-                "这个实例与其他未隔离的实例共用 .minecraft 里的设置"
-            }
+            TemplateSkip::SharedWorkingDir => "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
         }
     }
 }
@@ -454,7 +452,10 @@ mod tests {
             &[
                 ("options.txt", &options),
                 ("servers.dat", &servers),
-                (TEMPLATE_META_FILE, r#"{"source_instance":"樱花生存","saved_at":1}"#.as_bytes()),
+                (
+                    TEMPLATE_META_FILE,
+                    r#"{"source_instance":"樱花生存","saved_at":1}"#.as_bytes(),
+                ),
                 ("config.json", b"{}"),
             ],
         );
@@ -493,8 +494,14 @@ mod tests {
                 kept: vec!["options.txt"],
             }
         );
-        assert_eq!(std::fs::read(dir.join("options.txt")).unwrap(), b"lang:en_us");
-        assert_eq!(std::fs::read(dir.join("servers.dat")).unwrap(), b"\x0a\x00\x00");
+        assert_eq!(
+            std::fs::read(dir.join("options.txt")).unwrap(),
+            b"lang:en_us"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("servers.dat")).unwrap(),
+            b"\x0a\x00\x00"
+        );
     }
 
     /// 不隔离的原版正式版共用游戏目录根：根下原有的设置一个字节都不动，也不多出文件。
@@ -593,7 +600,10 @@ mod tests {
         std::fs::create_dir_all(root.join(".default-old-2")).unwrap();
         let before = now_millis();
 
-        let info = aurora.save_template_from_instance("樱花生存").await.unwrap();
+        let info = aurora
+            .save_template_from_instance("樱花生存")
+            .await
+            .unwrap();
         assert_eq!(
             info.files,
             vec![
@@ -668,11 +678,17 @@ mod tests {
             &aurora,
             &[
                 ("options.txt", b"old"),
-                (TEMPLATE_META_FILE, r#"{"source_instance":"旧的","saved_at":7}"#.as_bytes()),
+                (
+                    TEMPLATE_META_FILE,
+                    r#"{"source_instance":"旧的","saved_at":7}"#.as_bytes(),
+                ),
             ],
         );
 
-        let err = aurora.save_template_from_instance("坏的").await.unwrap_err();
+        let err = aurora
+            .save_template_from_instance("坏的")
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, CoreError::Base(aurora_base::Error::Io { path, .. }) if path.ends_with("servers.dat")),
             "{err:?}"
@@ -716,7 +732,10 @@ mod tests {
             std::fs::read(aurora.template_dir().join("options.txt")).unwrap(),
             b"old"
         );
-        assert_eq!(names(&aurora.template_dir()), vec!["options.txt".to_owned()]);
+        assert_eq!(
+            names(&aurora.template_dir()),
+            vec!["options.txt".to_owned()]
+        );
     }
 
     #[tokio::test]
@@ -727,7 +746,10 @@ mod tests {
             &aurora,
             &[
                 ("options.txt", b"fov:90"),
-                (TEMPLATE_META_FILE, br#"{"source_instance":"x","saved_at":1}"#),
+                (
+                    TEMPLATE_META_FILE,
+                    br#"{"source_instance":"x","saved_at":1}"#,
+                ),
             ],
         );
         assert!(aurora.template_info().await.unwrap().present());
@@ -757,7 +779,10 @@ mod tests {
         );
         assert_eq!((info.source_instance, info.saved_at), (None, None));
 
-        put_template(&aurora, &[(TEMPLATE_META_FILE, r#"{"saved_at":"昨天"}"#.as_bytes())]);
+        put_template(
+            &aurora,
+            &[(TEMPLATE_META_FILE, r#"{"saved_at":"昨天"}"#.as_bytes())],
+        );
         let err = aurora.template_info().await.unwrap_err();
         assert!(
             matches!(&err, CoreError::JsonFileInvalid { path, .. } if path.ends_with(TEMPLATE_META_FILE)),
