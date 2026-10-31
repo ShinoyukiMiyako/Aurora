@@ -9,6 +9,7 @@
 //!
 //! CurseForge 清单只有工程与文件 id，Mod 数与下载量要再问批量文件、批量工程两个接口，与导入同一套落点规则。
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
@@ -130,19 +131,23 @@ async fn read_remote_pack(
 
 impl RemotePack {
     fn summarize(self, remote: RemoteFacts) -> ModpackSummary {
-        // 覆盖文件与它去掉覆盖层前缀后、相对实例目录的落点。
-        let overrides: Vec<(&CentralEntry, &str)> = self
-            .entries
-            .iter()
-            .filter(|entry| !entry.name.ends_with('/'))
-            .filter_map(|entry| {
-                self.manifest
-                    .override_layers
-                    .iter()
-                    .find_map(|layer| entry.name.strip_prefix(layer.as_str()))
-                    .map(|relative| (entry, relative))
-            })
-            .collect();
+        // 覆盖文件与它去掉覆盖层前缀后、相对实例目录的落点。按落点去重、后面的层盖掉前面的，与本地读包
+        // 列覆盖文件同一规则（比较不分大小写），同一个包在发现页与导入弹窗报的覆盖文件数与大小才一致。
+        let mut landed: HashMap<String, (&CentralEntry, &str)> = HashMap::new();
+        for layer in &self.manifest.override_layers {
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| !entry.name.ends_with('/'))
+            {
+                if let Some(relative) = entry.name.strip_prefix(layer.as_str())
+                    && !relative.is_empty()
+                {
+                    landed.insert(relative.to_lowercase(), (entry, relative));
+                }
+            }
+        }
+        let overrides: Vec<(&CentralEntry, &str)> = landed.into_values().collect();
         let override_files = overrides.len();
         let override_bytes = overrides.iter().map(|(entry, _)| entry.uncompressed).sum();
         let mod_files = count_pack_mods(
@@ -514,6 +519,16 @@ mod tests {
         assert_eq!(summary.mod_files, 4, "sodium、lithium、extra、zoom");
         assert_eq!(preview.mod_files, summary.mod_files);
         assert_eq!(preview.remote_bytes, summary.remote_bytes);
+        // 覆盖文件按落点计：client-overrides 的 extra.jar 盖掉 overrides 的那份，只留它的 10 字节。
+        assert_eq!(
+            (summary.override_files, summary.override_bytes),
+            (5, 10 + 4 + 7 + 7 + 3),
+            "两层里的 extra.jar 只算一份"
+        );
+        assert_eq!(
+            (preview.override_files, preview.override_bytes),
+            (summary.override_files, summary.override_bytes)
+        );
     }
 
     /// CurseForge 导出的 .zip：清单、一个配置与两个 mods/ 下的覆盖文件，再塞一大块不会被读到的填充。
