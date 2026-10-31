@@ -102,7 +102,8 @@ export const pingServers = (addresses?: string[]): Promise<ServerStatusDto[]> =>
 
 // ---- 资讯 ----
 
-export type NewsTag = "release" | "snapshot" | "event";
+/** release / snapshot 是游戏更新日志，event 是官方资讯，launcher 是本启动器的发布。 */
+export type NewsTag = "release" | "snapshot" | "event" | "launcher";
 
 export interface NewsItemDto {
   id: string;
@@ -117,14 +118,20 @@ export interface NewsItemDto {
 }
 
 export interface NewsFeedDto {
-  /** 按发布时刻倒序。 */
+  /** 官方资讯与启动器资讯合并，按发布时刻倒序。 */
   items: NewsItemDto[];
+  /** 官方资讯这份内容取得的时刻。 */
   fetched_at: number;
-  /** 本次没取到新内容，给的是缓存。 */
+  /** 至少有一个来源本次没取到新内容，给的是缓存。 */
   offline: boolean;
+  /** 启动器资讯取不到且没有缓存时的错误（network_failed / feed_invalid，detail.url）；这时 items 里只有官方资讯。 */
+  launcher_error: { code: string; message: string; detail?: unknown } | null;
 }
 
-/** 6 小时内用缓存；联网失败退回缓存并标 offline。连缓存都没有才报错（network_failed / feed_invalid，detail.url）。 */
+/**
+ * 官方资讯 6 小时内用缓存；联网失败退回缓存并标 offline，连缓存都没有才报错（network_failed / feed_invalid，detail.url）。
+ * 启动器资讯（launcher）进程内缓存 1 小时，正式版不含预发布；它的失败不让命令报错，只放进 launcher_error。
+ */
 export const listNews = (): Promise<NewsFeedDto> => invoke<NewsFeedDto>("list_news");
 
 // ---- 启动器自更新 ----

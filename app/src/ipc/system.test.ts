@@ -182,8 +182,17 @@ describe("资讯", () => {
     expect(feed.offline).toBe(false);
     const dates = feed.items.map((i) => i.date);
     expect(dates).toEqual([...dates].sort((a, b) => b - a));
-    expect(feed.items.map((i) => i.tag)).toEqual(["snapshot", "release", "event"]);
-    expect(feed.items[2]).toMatchObject({ thumbnail_url: null, game_version: null });
+    expect(feed.items.map((i) => i.tag)).toEqual(["snapshot", "launcher", "release", "event"]);
+    expect(feed.items[3]).toMatchObject({ thumbnail_url: null, game_version: null });
+  });
+
+  it("启动器资讯混在官方资讯里按时刻排，没有游戏版本，取到时 launcher_error 为 null", async () => {
+    const feed = await listNews();
+    expect(feed.launcher_error).toBeNull();
+    const launcher = feed.items.filter((i) => i.tag === "launcher");
+    expect(launcher).toEqual([
+      expect.objectContaining({ id: "launcher-300", date: Date.UTC(2026, 9, 20, 8, 0, 0), thumbnail_url: null, game_version: null }),
+    ]);
   });
 });
 
