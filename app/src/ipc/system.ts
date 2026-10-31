@@ -1,4 +1,4 @@
-// 系统：内存建议、首次启动、主页固定的服务器、资讯与启动器自更新。
+// 系统：内存建议、首次启动、启动提示、主页固定的服务器、资讯与启动器自更新。
 
 import { invoke } from "./bridge";
 import type { NamedDirectoryDto } from "./config";
@@ -31,6 +31,21 @@ export const isFirstRun = (): Promise<boolean> => invoke<boolean>("is_first_run"
  */
 export const completeFirstRun = (gameDir: string, extraDirectories: NamedDirectoryDto[]): Promise<void> =>
   invoke<void>("complete_first_run", { gameDir, extraDirectories });
+
+// ---- 启动提示 ----
+
+/** 启动时发生、要让用户知道的事，按 kind 区分。 */
+export interface StartupNoticeDto {
+  /** config_reset：config.json 读不出来，坏文件已改名留存，本次按默认配置启动（首次启动向导会重新出现）。 */
+  kind: "config_reset";
+  /** 坏文件改名后的绝对路径，原样保留着用户的内容。 */
+  preserved_path: string;
+  /** 解析失败的原因（含行列）。 */
+  error: string;
+}
+
+/** 本次启动的提示；查询多少次都返回同一份，没有时为空列表。 */
+export const startupNotices = (): Promise<StartupNoticeDto[]> => invoke<StartupNoticeDto[]>("startup_notices");
 
 // ---- 服务器 ----
 

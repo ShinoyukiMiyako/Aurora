@@ -62,7 +62,7 @@ mod workdir;
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
 pub use compat::{Compatibility, InstalledCopy, InstanceMatch, MatchState};
 pub use config::{
-    AfterLaunch, AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings, NamedDirectory,
+    AfterLaunch, AuroraConfig, ConfigRecovery, ConfigStore, DownloadSourcePolicy, MemorySettings, NamedDirectory,
     PinnedServer,
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};

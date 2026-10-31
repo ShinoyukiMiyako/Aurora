@@ -17,8 +17,10 @@ import {
   pingServers,
   setInstallOnExit,
   setPinnedServers,
+  startupNotices,
   updaterInfo,
 } from "./system";
+import { setMockStartupNotices } from "./mock/handlers/system";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -50,6 +52,29 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("启动提示", () => {
+  it("没有提示时为空列表；配置被重置时给出留存路径与原因，查询多少次都一样", async () => {
+    expect(await startupNotices()).toEqual([]);
+    const notice = {
+      kind: "config_reset" as const,
+      preserved_path: "C:/Users/me/AppData/Local/Petalfall/config.json.broken-20261031-143025",
+      error: "unknown variant `hide` at line 1 column 22",
+    };
+    setMockStartupNotices([notice]);
+    expect(await startupNotices()).toEqual([notice]);
+    expect(await startupNotices()).toEqual([notice]);
+    resetMocks();
+    expect(await startupNotices()).toEqual([]);
+  });
+
+  it("Tauri 里不带参数调用 startup_notices", async () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
+    await startupNotices();
+    expect(vi.mocked(tauriInvoke).mock.calls).toEqual([["startup_notices", undefined]]);
+  });
 });
 
 describe("内存建议", () => {
