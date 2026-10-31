@@ -363,7 +363,12 @@ describe("实例详情：头图与标签", () => {
 describe("实例详情：后端正在改动实例", () => {
   const reason = (what: string) => `正在改动这个实例的 Mod、资源或设置，完成后才能${what}`;
 
-  it("头图菜单的重命名、补全与删除提前禁用并写明原因，F2 不进入改名", async () => {
+  it.each([
+    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+    ["regular", 1200, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+    ["wide", 1440, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+  ])("%s 档：头图菜单的重命名、补全与删除提前禁用，每项只写标签、原因放进悬停的提示气泡；F2 不进入改名", async (_tier, width, labels) => {
+    vi.stubGlobal("innerWidth", width);
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
     await open("overview");
     expect(document.querySelector('h1 button[aria-label="重命名"]')).toBeNull();
@@ -371,18 +376,54 @@ describe("实例详情：后端正在改动实例", () => {
     expect(document.querySelector('input[aria-label="实例名称"]')).toBeNull();
     click(button("更多操作"));
     const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
-    const item = (label: string) => {
-      const found = items.find((el) => textOf(el).startsWith(label));
-      if (found === undefined) throw new Error(`菜单里没有「${label}」`);
-      return found;
-    };
-    expect(textOf(item("重命名"))).toBe(`重命名${reason("重命名")}`);
-    expect(item("重命名").getAttribute("aria-disabled")).toBe("true");
-    expect(textOf(item("补全游戏文件"))).toBe(`补全游戏文件${reason("补全")}`);
-    expect(textOf(item("删除实例"))).toBe(`删除实例${reason("删除")}`);
-    click(item("删除实例"));
+    // 原因不再挤在标签右侧：每项的文字就是标签本身
+    expect(items.map(textOf)).toEqual(labels);
+    for (const [label, what] of [
+      ["重命名", "重命名"],
+      ["补全游戏文件", "补全"],
+      ["删除实例", "删除"],
+    ]) {
+      const item = items.find((el) => textOf(el) === label);
+      if (item === undefined) throw new Error(`菜单里没有「${label}」`);
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      act(() => {
+        item.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tipId = item.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error(`「${label}」悬停后没有关联提示气泡`);
+      expect(document.getElementById(tipId)?.textContent).toBe(reason(what));
+    }
+    click(items[items.length - 1]);
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+  });
+
+  it("compact 档侧栏已固定满：菜单里的固定项禁用，标签完整，原因放进提示气泡；点了不改固定列表", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    const others = ["一", "二", "三", "四", "五"].map((n) => instanceDto(`固定${n}`));
+    instances = [...instances, ...others];
+    bootOverrides(ipc, { instances, pins: others.map((i) => i.id), config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await open("overview");
+    click(button("更多操作"));
+    const pin = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "固定到侧栏");
+    if (pin === undefined) throw new Error("菜单里没有只写标签的「固定到侧栏」");
+    expect(pin.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      pin.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = pin.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("固定项悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("侧栏最多固定 5 个实例，先取消固定一个");
+    click(pin);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
   });
 
   it("设置页的重命名与删除按钮带原因禁用，Mod 开关照常可用", async () => {
