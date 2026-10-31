@@ -828,6 +828,50 @@ describe("实例详情：Mod 管理", () => {
     expect(callsOf(ipc, "remove_mod")).toEqual([]);
   });
 
+  it("「全部更新」进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
+    vi.stubGlobal("innerWidth", 1440);
+    const candidate = (fileName: string, title: string, projectId: string, from: string, to: string): UpdateCandidate => ({
+      file_name: fileName,
+      title,
+      current_version_id: from,
+      current_version_number: null,
+      latest: {
+        version_id: to,
+        project_id: projectId,
+        platform: "modrinth",
+        name: to,
+        version_number: to,
+        release_channel: "release",
+        game_versions: [],
+        loaders: [],
+        file_name: `${to}-${fileName}`,
+        file_size: 1000,
+        sha1: null,
+        download_url: null,
+        date_published: "",
+        dependencies: [],
+      },
+    });
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "v1", "v9"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "v2", "v8")];
+    ipc.overrides.set("update_mod", () => new Promise(() => undefined));
+    await open("mods");
+    click(button("全部更新 · 2"));
+    await flush();
+    const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
+    expect(composite.map((t) => t.status)).toEqual(["running"]);
+    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["sodium.jar"]);
+    // 组合任务还在跑，两行都算在更新中：按钮转圈，点了不另起一个同文件的单个更新
+    const sodium = button("更新 Sodium");
+    expect(sodium.getAttribute("aria-busy")).toBe("true");
+    expect(button("更新 Fabric API").getAttribute("aria-busy")).toBe("true");
+    click(sodium);
+    await flush();
+    expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mod")).toEqual([]);
+    expect(button("全部更新 · 2").getAttribute("aria-busy")).toBe("true");
+    const bar = document.querySelector<HTMLElement>('[role="progressbar"][aria-label="更新 2 个 Mod"]');
+    if (bar === null) throw new Error("摘要行没有「全部更新」任务的进度条");
+  });
+
   it("搜索不分大小写，没有结果时给清除筛选", async () => {
     await open("mods");
     const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索名称、作者或文件名"]');
