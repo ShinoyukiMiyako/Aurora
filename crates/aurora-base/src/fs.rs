@@ -114,23 +114,29 @@ pub async fn atomic_write(path: impl AsRef<Path>, bytes: &[u8]) -> Result<()> {
 }
 
 async fn write_and_sync(tmp: &Path, bytes: &[u8]) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::File::create(tmp)
         .await
         .map_err(|source| Error::Io {
             path: tmp.to_owned(),
             source,
         })?;
-    file.write_all(bytes).await.map_err(|source| Error::Io {
-        path: tmp.to_owned(),
-        source,
-    })?;
+    write_durably(&mut file, bytes)
+        .await
+        .map_err(|source| Error::Io {
+            path: tmp.to_owned(),
+            source,
+        })
+}
+
+/// 把 `bytes` 写进已打开的文件并 fsync，任何一步失败都报出来。
+async fn write_durably(file: &mut tokio::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    file.write_all(bytes).await?;
+    // tokio 的 write_all 把数据交给后台线程就返回，后台写失败（磁盘写满）只在下一次 flush 里报；
+    // sync_all 会把这个错误吞掉照样成功，所以必须先 flush。
+    file.flush().await?;
     // fsync：确保 rename 之前数据已真正落盘，避免掉电后目标名指向空洞文件。
-    file.sync_all().await.map_err(|source| Error::Io {
-        path: tmp.to_owned(),
-        source,
-    })?;
-    Ok(())
+    file.sync_all().await
 }
 
 /// 取目标文件名作为临时文件前缀；异常情况下退回固定名。
@@ -422,6 +428,23 @@ mod tests {
             names.push(e.file_name().to_string_lossy().into_owned());
         }
         assert_eq!(names, vec!["out.txt".to_string()]);
+    }
+
+    /// 写入本身失败（这里让写落在文件系统容不下的偏移上，与磁盘写满一样由后台写报错）必须报出来。
+    /// 小于 tokio 单次缓冲的写入在 write_all 返回时还没真正写，错误只在之后的 flush 里出现；
+    /// 漏掉它，atomic_write 会把半截临时文件改名成正式文件，原来的内容就没了。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_failure_behind_tokio_buffer_is_reported() {
+        use tokio::io::AsyncSeekExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unwritable.tmp");
+        let mut file = tokio::fs::File::create(&path).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(1 << 62)).await.unwrap();
+        let err = write_durably(&mut file, b"{\"download_concurrency\": 8}")
+            .await
+            .expect_err("写入没能落盘却报了成功");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     }
 
     #[tokio::test]

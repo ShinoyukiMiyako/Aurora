@@ -12,6 +12,7 @@
 //!
 //! 枚举字段按字段前向兼容：降级后遇到新版本写入的取值，只把那一项退回默认，其余设置照常读入，
 //! 文件原样不动（见 [`ConfigFieldReset`]）。整份当坏文件处理的只剩不是合法 JSON 与类型对不上。
+//! 不认识的顶层设置原样留在 [`AuroraConfig::unrecognized`] 里，落盘时写回。
 
 use std::path::{Path, PathBuf};
 
@@ -194,6 +195,12 @@ pub struct AuroraConfig {
     pub notified_update_version: Option<String>,
     /// 界面语言。旧配置没有这一项时取默认的简体中文。
     pub language: UiLanguage,
+    /// 这个版本不认识的顶层设置（多半是更新的版本写的），原样留着、落盘时原样写回。
+    ///
+    /// 配置整份按内存里的值落盘：不留着的话，降级之后随便改一项设置，新版本的设置就从文件里消失了，
+    /// 升回去只能重设一遍。
+    #[serde(flatten)]
+    pub unrecognized: serde_json::Map<String, Value>,
 }
 
 impl Default for AuroraConfig {
@@ -220,6 +227,7 @@ impl Default for AuroraConfig {
             skipped_update_version: None,
             notified_update_version: None,
             language: UiLanguage::default(),
+            unrecognized: serde_json::Map::new(),
         }
     }
 }
@@ -1006,6 +1014,75 @@ mod tests {
         assert_eq!(raw["check_updates"], false);
         assert_eq!(raw["download_concurrency"], 32);
         assert_eq!(store.load_or_preserve().await.unwrap(), (config, None));
+    }
+
+    /// 降级之后读到新版本才有的设置：照常读入、不算任何处置；改一项设置整份落盘时，那几项原样写回，
+    /// 升回去还在。不认识的设置不会顶替认识的同名字段。
+    #[tokio::test]
+    async fn unrecognized_settings_survive_a_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{
+                "download_concurrency": 16,
+                "proxy": {"mode": "socks5", "host": "127.0.0.1", "port": 1080},
+                "telemetry_opt_in": false,
+                "recent_searches": ["sodium", ""],
+                "appearance": {"accent": "moss"}
+            }"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (mut config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(config.download_concurrency, 16);
+        assert_eq!(
+            config.appearance.accent,
+            crate::appearance::AccentColor::Moss
+        );
+        assert_eq!(
+            config.unrecognized.keys().collect::<Vec<_>>(),
+            vec!["proxy", "recent_searches", "telemetry_opt_in"]
+        );
+
+        config.download_concurrency = 32;
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["download_concurrency"], 32);
+        assert_eq!(
+            raw["proxy"],
+            serde_json::json!({"mode": "socks5", "host": "127.0.0.1", "port": 1080})
+        );
+        assert_eq!(raw["telemetry_opt_in"], false);
+        assert_eq!(raw["recent_searches"], serde_json::json!(["sodium", ""]));
+        assert_eq!(raw["appearance"]["accent"], "moss");
+        assert_eq!(store.load().await.unwrap(), config);
+    }
+
+    /// 字段级退回与不认识的设置同时出现：枚举退回默认，不认识的设置照样留着，两者互不影响。
+    #[tokio::test]
+    async fn unrecognized_settings_are_kept_alongside_enum_fallbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"language": "fr-FR", "sync": {"enabled": true}, "check_updates": false}"#,
+        )
+        .await
+        .unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![("language", "fr-FR".to_owned())]
+        );
+        assert!(!config.check_updates);
+        assert_eq!(
+            config.unrecognized.get("sync"),
+            Some(&serde_json::json!({"enabled": true}))
+        );
+        assert!(!config.unrecognized.contains_key("language"));
     }
 
     /// 结构损坏不因为同时有不认识的取值而被放过：退回之后类型仍对不上，整份留存、按默认启动，

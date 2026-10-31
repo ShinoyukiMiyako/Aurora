@@ -31,6 +31,7 @@ pub fn run() {
     // 先装 subscriber 再做任何事：配置载入、数据目录探测这些最容易出问题的动作都在下面，
     // 晚一步初始化，恰恰是最想看的那几行日志就丢了。
     let log_path = logging::init();
+    log_panics();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         log = ?log_path,
@@ -63,6 +64,7 @@ pub fn run() {
             // 坏文件改名留存、按默认配置启动，经过记成启动提示，由前端查询后告诉用户。数据目录定位不到、
             // 坏文件改不了名这类错误仍然冒泡终止，避免带着半初始化的门面继续跑。
             let (aurora, recovery) = tauri::async_runtime::block_on(Aurora::load_recovering())?;
+            let aurora = aurora.with_app_version(&app.package_info().version.to_string())?;
             let server_monitor = ServerMonitor::new(aurora.data_dir());
             app.manage(Facade::new(aurora));
             app.manage(commands::system::StartupNotices::from_recovery(recovery));
@@ -197,6 +199,30 @@ pub fn run() {
         });
 }
 
+/// 把 panic 的现场写进会话日志，再交给原来的钩子。
+///
+/// GUI 子系统没有控制台，默认钩子写的 stderr 谁也看不见。Tauri 把 setup 返回的错误（配置读不了、数据目录
+/// 定位不到）转成 panic，那时窗口还没出来，双击之后什么都没有，日志里也没有一行原因；命令里的 panic 让那次
+/// 调用永远等不到返回，同样无迹可查。
+fn log_panics() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|at| format!("{}:{}:{}", at.file(), at.line(), at.column()));
+        // panic_any 抛出的非字符串负载读不出内容，如实写明是哪种情况。
+        let payload = info.payload_as_str().unwrap_or("panic 负载不是字符串");
+        tracing::error!(
+            payload = %payload,
+            location,
+            thread = std::thread::current().name(),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "进程 panic"
+        );
+        previous(info);
+    }));
+}
+
 /// 数据目录在日志装好之前就定位了（日志文件就落在里面），走了哪条路、为什么、花了多久在这里补记。
 fn log_data_dir() {
     match aurora_base::fs::resolve_data_dir() {
@@ -214,7 +240,52 @@ fn log_data_dir() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use aurora_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
+
+    /// 收集日志输出的写入端。
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// panic 的负载与位置进了日志，之后照常交给原来的钩子、照常展开。setup 失败就是这样一个 panic：
+    /// 没有这一条，日志停在「数据目录」那行，看不出启动为什么失败。
+    #[test]
+    fn panics_are_written_to_the_session_log() {
+        super::log_panics();
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let line = line!() + 3;
+        let unwound = tracing::subscriber::with_default(subscriber, || {
+            std::panic::catch_unwind(|| {
+                panic!("Failed to setup app: 读取配置文件 C:\\Data\\config.json 失败")
+            })
+        });
+        assert!(unwound.is_err(), "钩子不该吞掉 panic");
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("ERROR"), "{log}");
+        assert!(log.contains("进程 panic"), "{log}");
+        assert!(
+            log.contains("Failed to setup app: 读取配置文件 C:\\Data\\config.json 失败"),
+            "{log}"
+        );
+        assert!(log.contains(&format!("lib.rs:{line}:")), "{log}");
+    }
 
     // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，
     // 由这条测试钉住它们与 aurora-base 的 brand 模块一致。identifier 发布后即成兼容契约，单独写死。
