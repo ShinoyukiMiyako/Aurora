@@ -46,7 +46,12 @@ export function useLoadingGate(loading: boolean): LoadingGate {
       const elapsed = Date.now() - current.since;
       const timers: ReturnType<typeof setTimeout>[] = [];
       if (current.shownAt === null) {
-        timers.push(setTimeout(() => setGate((g) => (g.loading && g.shownAt === null ? { ...g, shownAt: Date.now() } : g)), Math.max(0, LOADING_DELAY_MS - elapsed)));
+        // 时刻在定时器到点时就取下：更新函数可能要等到下一次渲染才求值，那时再取，渲染推迟多久骨架就多停多久
+        const show = () => {
+          const at = Date.now();
+          setGate((g) => (g.loading && g.shownAt === null ? { ...g, shownAt: at } : g));
+        };
+        timers.push(setTimeout(show, Math.max(0, LOADING_DELAY_MS - elapsed)));
       }
       if (!current.slow) {
         timers.push(setTimeout(() => setGate((g) => (g.loading ? { ...g, slow: true } : g)), Math.max(0, SLOW_HINT_MS - elapsed)));

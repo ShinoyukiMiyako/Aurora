@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useEffect, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOADING_DELAY_MS, SLOW_HINT_MS } from "../domain/limits";
 import { render, type Rendered } from "../test/dom";
@@ -106,6 +106,35 @@ describe("useLoadingGate：最短停留", () => {
     expect(state().view).toBe("pending");
     advance(1);
     expect(state().view).toBe("skeleton");
+  });
+});
+
+describe("useLoadingGate：骨架出现的时刻", () => {
+  // 同一组件里还有别的更新在排队时，状态更新函数要等到下一次渲染才求值；骨架出现的时刻得取定时器到点那一刻，
+  // 不能取渲染那一刻，否则渲染被推迟多久，骨架就多停多久
+  function Busy({ loading }: { loading: boolean }) {
+    const gate = useLoadingGate(loading);
+    const [, setTick] = useState(0);
+    useEffect(() => {
+      const timer = setTimeout(() => setTick((n) => n + 1), LOADING_DELAY_MS - 1);
+      return () => clearTimeout(timer);
+    }, []);
+    return <span data-view={gate.view} data-slow={gate.slow} />;
+  }
+
+  it("渲染比定时器晚到：最短停留仍从定时器到点算起", () => {
+    view = render(<Busy loading />);
+    // 一次推进到延迟之后 200 ms：两个定时器都在这一步里触发，渲染在推进结束时才发生
+    act(() => {
+      vi.advanceTimersByTime(LOADING_DELAY_MS + 200);
+    });
+    expect(state().view).toBe("skeleton");
+    view.rerender(<Busy loading={false} />);
+    expect(state().view).toBe("skeleton");
+    advance(LOADING_DELAY_MS - 200 - 1);
+    expect(state().view).toBe("skeleton");
+    advance(1);
+    expect(state().view).toBe("content");
   });
 });
 
