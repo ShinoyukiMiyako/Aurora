@@ -32,12 +32,33 @@ function thirdPartyLicenses(): Plugin {
   };
 }
 
+/** 体积大、改动少的依赖各自成块：主块不超过 500 kB 的警告线，应用代码改动时这些块的缓存也不失效。 */
+const VENDOR_CHUNKS: readonly [chunk: string, packages: readonly string[]][] = [
+  ["react", ["react", "react-dom", "scheduler"]],
+  ["motion", ["framer-motion", "motion-dom", "motion-utils"]],
+  ["tauri", ["@tauri-apps/api", "@tauri-apps/plugin-dialog", "@tauri-apps/plugin-opener", "@tauri-apps/plugin-process", "@tauri-apps/plugin-updater"]],
+];
+
+function vendorChunk(id: string): string | null {
+  const normalized = id.split("\\").join("/");
+  for (const [chunk, packages] of VENDOR_CHUNKS) {
+    if (packages.some((pkg) => normalized.includes(`/node_modules/${pkg}/`))) return chunk;
+  }
+  return null;
+}
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss(), thirdPartyLicenses()],
 
   define: {
     __PETALFALL_BUILD__: JSON.stringify(readBuildInfo({ tauriConfPath: join(APP_DIR, "src-tauri", "tauri.conf.json"), env: process.env, now: new Date() })),
+  },
+
+  build: {
+    rollupOptions: {
+      output: { manualChunks: vendorChunk },
+    },
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
