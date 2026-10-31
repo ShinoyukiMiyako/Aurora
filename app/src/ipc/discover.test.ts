@@ -2,6 +2,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installMod, installResource, projectDetail, searchResources, type SearchArgs } from "./discover";
 import { IpcError } from "./errors";
+import { listInstanceContent } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { CORE_EVENT, cancelTask, type CoreEvent } from "./tasks";
@@ -191,9 +192,22 @@ describe("发现 mock", () => {
     });
     expect(datapack.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/saves/新的世界/datapacks/8oi3bsk5-2.5.4.zip");
     expect(datapack.world).toBe("新的世界");
+    const pack = await installResource({
+      taskId: "t-rp",
+      versionId: "1.21.1-Fabric",
+      resourceType: "resource_pack",
+      world: null,
+      platform: "modrinth",
+      projectId: "faithful-32x",
+      fileVersionId: "f32-1211",
+    });
+    // 资源包与光影记进实例内容（实例页的列表看得到）；新装的没在游戏里启用。数据包在存档里，不进这两份列表
+    const content = await listInstanceContent("1.21.1-Fabric");
+    expect(content.shader_packs.map((p) => [p.file_name, p.size_bytes, p.active])).toEqual([["HVnmMxH1-r5.3.zip", 3_145_728, false]]);
+    expect(content.resource_packs.map((p) => [p.file_name, p.size_bytes, p.load_order])).toEqual([[pack.file_name, 8_388_608, null]]);
     off();
     expect(events.length).toBeGreaterThan(0);
-    expect(new Set(events.map((e) => e.task_id))).toEqual(new Set(["t-sh", "t-dp"]));
+    expect(new Set(events.map((e) => e.task_id))).toEqual(new Set(["t-sh", "t-dp", "t-rp"]));
     const last = events.filter((e) => e.kind === "download" && e.task_id === "t-sh").pop();
     expect(last).toMatchObject({ finished: 1, bytes: 3_145_728, total_bytes: 3_145_728 });
   });

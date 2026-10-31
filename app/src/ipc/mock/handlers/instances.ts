@@ -488,6 +488,26 @@ export function mockInstanceWorlds(id: string): string[] | null {
   return found === undefined ? null : found.content.worlds.map((w) => w.dir_name);
 }
 
+/**
+ * 装好的资源包、光影记进实例内容，实例页的列表才看得到它（与后端读目录同一口径）。新装的还没在游戏里启用：
+ * 资源包没有加载顺序、光影不是当前光影；同名文件覆盖时沿用原记录的启用状态（游戏的选项文件按文件名记）。
+ */
+export function recordMockPack(id: string, type: "resource_pack" | "shader", fileName: string, sizeBytes: number): void {
+  const found = find(id);
+  if (found === undefined) throw new Error(`mock 里没有实例 ${id}`);
+  const at = Date.now();
+  const content = found.content;
+  if (type === "resource_pack") {
+    const previous = content.resource_packs.find((p) => p.file_name === fileName);
+    const entry = { file_name: fileName, is_dir: false, size_bytes: sizeBytes, modified_at: at, load_order: previous === undefined ? null : previous.load_order };
+    content.resource_packs = [...content.resource_packs.filter((p) => p.file_name !== fileName), entry];
+  } else {
+    const previous = content.shader_packs.find((p) => p.file_name === fileName);
+    const entry = { file_name: fileName, is_dir: false, size_bytes: sizeBytes, modified_at: at, active: previous !== undefined && previous.active };
+    content.shader_packs = [...content.shader_packs.filter((p) => p.file_name !== fileName), entry];
+  }
+}
+
 /** 全部实例 id（含损坏的），按种子与新建的先后。 */
 export function mockInstanceIds(): string[] {
   return instances.map((i) => i.dto.id);

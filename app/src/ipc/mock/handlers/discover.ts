@@ -24,7 +24,7 @@ import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { findMockSource, findMockVersion, mockProjects, newestFirst, sourceVersions, sourcesGameVersions, sourcesLoaders, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
-import { mockInstanceWorlds } from "./instances";
+import { mockInstanceWorlds, recordMockPack } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 /** 假游戏目录；只用来拼返回给界面的路径。 */
@@ -354,6 +354,8 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
     const { file_name, file_size } = version.info;
     if (file_size === null) throw new Error(`mock 目录里的版本 ${fileVersionId} 缺少 file_size`);
     await simulateDownload(taskId, file_name, file_size);
+    // 数据包装进存档，实例内容里没有它的列表
+    if (resourceType !== "data_pack") recordMockPack(versionId, resourceType, file_name, file_size);
     const dir = world === null ? RESOURCE_DIRS[resourceType] : `saves/${world}/${RESOURCE_DIRS[resourceType]}`;
     return {
       file_name,
