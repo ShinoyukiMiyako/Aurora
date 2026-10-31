@@ -3,6 +3,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { LOADER_NAME } from "../../copy/flows";
+import type { InstanceSummary } from "../../domain/adapt";
 import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
@@ -33,9 +34,11 @@ import {
   hasConditions,
   hitKey,
   installedCount,
+  instancesFromPack,
   PAGE_SIZE,
   partialFailure,
   PREFETCH_MARGIN_PX,
+  projectOrigins,
   routeFilters,
   routeOfFilters,
   routeSignature,
@@ -184,6 +187,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
               pages={pages}
               online={online}
               now={now}
+              instances={state.instances}
               installed={installed}
               container={container}
               onOpen={open}
@@ -207,13 +211,14 @@ interface ResultsProps {
   pages: ResultPages;
   online: boolean;
   now: number;
+  instances: readonly InstanceSummary[];
   installed: ReadonlyMap<string, ReadonlySet<string>>;
   container: HTMLElement | null;
   onOpen: (entry: SearchEntry) => void;
   onClearFilters: () => void;
 }
 
-function Results({ filters, committedQuery, pages, online, now, installed, container, onOpen, onClearFilters }: ResultsProps) {
+function Results({ filters, committedQuery, pages, online, now, instances, installed, container, onOpen, onClearFilters }: ResultsProps) {
   const requestKey = JSON.stringify(pages.state.request);
   // 首页的骨架与「比平时慢」走全站统一的加载门；下一页只在列表尾追加一行，慢提示按这一页的请求单独计时
   const gate = useLoadingGate(pages.loadingFirst);
@@ -338,7 +343,13 @@ function Results({ filters, committedQuery, pages, online, now, installed, conta
       )}
       <div className={styles.grid}>
         {pages.hits.map((entry) => (
-          <ResultCard key={hitKey(entry)} entry={entry} installed={installedCount(entry, installed)} now={now} onOpen={onOpen} />
+          <ResultCard
+            key={hitKey(entry)}
+            entry={entry}
+            installed={entry.resource_type === "modpack" ? instancesFromPack(projectOrigins(entry), instances).length : installedCount(entry, installed)}
+            now={now}
+            onOpen={onOpen}
+          />
         ))}
       </div>
       <div ref={bottomRef} className={styles.listFoot}>

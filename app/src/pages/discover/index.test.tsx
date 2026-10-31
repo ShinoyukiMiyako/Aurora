@@ -536,6 +536,7 @@ describe("发现页：整合包", () => {
     pages = () => result([pack]);
     ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
     ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
     // 导入任务一直在跑：面板停在进度态
     ipc.overrides.set("install_modpack", () => new Promise(() => {}));
     await mount();
@@ -606,6 +607,103 @@ describe("发现页：整合包", () => {
     expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号"]]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已开始导入「创造 2」");
     expect(openDialogs()).toHaveLength(0);
+  });
+});
+
+describe("发现页：平台整合包的清单摘要与同包提醒", () => {
+  const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
+  const v = modVersion("mp-3", { project_id: "M1", version_number: "3.0.0", loaders: ["fabric"], game_versions: ["1.20.1"], file_size: 2_000_000 });
+  const summary = (overrides: Record<string, unknown> = {}) => ({
+    format: "modrinth",
+    name: "樱落",
+    version: "3.0.0",
+    minecraft: "1.21.1",
+    loader: { kind: "quilt", version: "0.26.4" },
+    pack_bytes: 1_048_576,
+    remote_files: 48,
+    mod_files: 41,
+    remote_bytes: 9 * 1_048_576,
+    override_files: 3,
+    override_bytes: 512,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("install_modpack", () => new Promise(() => {}));
+  });
+
+  async function openPack() {
+    await mount();
+    act(() => card("樱落").click());
+    await flush();
+  }
+
+  it("Modrinth：按所选版本读清单，清单里的游戏版本、加载器、Mod 数与下载量为准，并随任务带上", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary());
+    await openPack();
+    expect(callsOf(ipc, "summarize_platform_modpack")).toEqual([{ platform: "modrinth", projectId: "M1", versionId: "mp-3" }]);
+    expect(dialog().textContent).toContain("41 个 Mod");
+    // 整合包文件本身加上清单里要另外下载的文件
+    expect(dialog().textContent).toContain("下载约 10.0 MB");
+    expect(dialog().textContent).toContain("1.21.1 · Quilt · 41 个 Mod");
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.detail)).toEqual(["3.0.0 · 41 个 Mod"]);
+  });
+
+  it("CurseForge：清单分不出 Mod，改写要下载的文件数，任务详情不写 Mod 数", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary({ format: "curseforge", mod_files: null, remote_bytes: null }));
+    await openPack();
+    expect(dialog().textContent).toContain("48 个文件需要下载");
+    expect(dialog().textContent).not.toContain("41 个 Mod");
+    expect(dialog().textContent).not.toContain("下载约");
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.detail)).toEqual(["3.0.0"]);
+  });
+
+  it("清单读不出来：说明原因可重试，仍可按平台版本信息安装", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    let fail = true;
+    ipc.overrides.set("summarize_platform_modpack", () => {
+      if (fail) throw new IpcError("remote_pack_unreadable", "服务器不支持分段下载", { url: "https://x/p.mrpack", reason: "no_range" });
+      return summary();
+    });
+    await openPack();
+    expect(dialog().textContent).toContain("整合包清单没能提前读出来");
+    expect(dialog().textContent).toContain("服务器不支持分段下载");
+    expect(dialog().textContent).toContain("1.20.1 · Fabric");
+    fail = false;
+    const retry = [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === "重试");
+    expect(retry).toHaveLength(1);
+    act(() => retry[0].click());
+    await flush();
+    expect(dialog().textContent).toContain("41 个 Mod");
+    expect(dialog().textContent).not.toContain("整合包清单没能提前读出来");
+  });
+
+  it("已有来自同一整合包的实例：卡片写出个数，面板提醒再装一次是独立的新实例", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary());
+    const fromPack = { platform: "modrinth" as const, project_id: "M1", version_id: "mp-2", name: "樱落", version: "2.0.0" };
+    bootOverrides(ipc, {
+      instances: [instanceDto("樱落周目", { modpack: fromPack }), instanceDto("另一份", { modpack: { ...fromPack, project_id: "M2" } }), instanceDto("樱落二周目", { modpack: fromPack })],
+      config: configDto({ selected_version: "樱落周目" }),
+    });
+    await mount();
+    expect(card("樱落").textContent).toContain("已有 2 个实例来自它");
+    act(() => card("樱落").click());
+    await flush();
+    expect(dialog().textContent).toContain("你已经有 2 个来自这个整合包的实例（「樱落周目」），再装一次会得到一个独立的新实例。");
+  });
+
+  it("没有来自它的实例时卡片与面板都不提", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary());
+    await openPack();
+    expect(card("樱落").textContent).not.toContain("实例来自它");
+    expect(dialog().textContent).not.toContain("来自这个整合包");
   });
 });
 

@@ -26,7 +26,7 @@ export function dotLoaders(loaders: readonly string[]): LoaderTagKind[] {
 
 export interface ResultCardProps {
   entry: SearchEntry;
-  /** 已装着它的实例数；整合包不计。 */
+  /** 与本机实例的关系：整合包是来自它的实例数，其余是已装着它的实例数；为 0 不显示。 */
   installed: number;
   now: number;
   onOpen: (entry: SearchEntry) => void;
@@ -51,11 +51,17 @@ export function ResultCard({ entry, installed, now, onOpen }: ResultCardProps) {
         <span className={styles.cardIcon}>
           <Thumb url={entry.icon_url} kind={kind} hue={hue} size={64} />
         </span>
-        {kind !== "modpack" && installed > 0 && (
+        {installed > 0 && (
           <span className={styles.installedTag}>
-            <Tag size="sm" tone="ok" icon="check">
-              {CARD_COPY.installed(installed)}
-            </Tag>
+            {kind === "modpack" ? (
+              <Tag size="sm" tone="neutral">
+                {CARD_COPY.fromPack(installed)}
+              </Tag>
+            ) : (
+              <Tag size="sm" tone="ok" icon="check">
+                {CARD_COPY.installed(installed)}
+              </Tag>
+            )}
           </span>
         )}
       </div>

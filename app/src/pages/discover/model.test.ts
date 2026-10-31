@@ -11,10 +11,12 @@ import {
   hasConditions,
   hitKey,
   installedCount,
+  instancesFromPack,
   PAGE_SIZE,
   parsePlatformTime,
   partialFailure,
   popoverFilterCount,
+  projectOrigins,
   resetPopoverFilters,
   routeFilters,
   routeOfFilters,
@@ -218,6 +220,36 @@ describe("已装入实例数", () => {
     expect(installedCount(entry("A"), installed)).toBe(1);
     expect(installedCount(entry("Z"), installed)).toBe(0);
     expect(installedCount(entry("A"), new Map())).toBe(0);
+  });
+});
+
+describe("来自整合包的实例", () => {
+  const pack = (platform: "modrinth" | "curseforge" | null, projectId: string | null) => ({ platform, projectId, versionId: null, name: "包", version: null });
+  const instances = [
+    summary("甲", { modpack: pack("modrinth", "FO") }),
+    summary("乙", { modpack: pack("curseforge", "396246") }),
+    // 本地文件导入的实例没有平台来源，同名也不算
+    summary("丙", { modpack: pack(null, null) }),
+    summary("丁"),
+    summary("戊", { modpack: pack("curseforge", "FO") }),
+  ];
+
+  it("合并卡两个平台的来源都认；平台与工程 id 都对上才算", () => {
+    const merged = entry("FO", {
+      resource_type: "modpack",
+      sources: [
+        { platform: "modrinth", project_id: "FO", slug: null, page_url: null, downloads: 1, follows: 1 },
+        { platform: "curseforge", project_id: "396246", slug: null, page_url: null, downloads: 1, follows: null },
+      ],
+    });
+    expect(instancesFromPack(projectOrigins(merged), instances).map((i) => i.id)).toEqual(["甲", "乙"]);
+  });
+
+  it("单平台卡只认自己；一个都没有时为空", () => {
+    expect(projectOrigins(entry("FO", { resource_type: "modpack" }))).toEqual([{ platform: "modrinth", projectId: "FO" }]);
+    expect(instancesFromPack(projectOrigins(entry("FO", { resource_type: "modpack" })), instances).map((i) => i.id)).toEqual(["甲"]);
+    expect(instancesFromPack(projectOrigins(entry("BMC", { platform: "curseforge", resource_type: "modpack" })), instances)).toEqual([]);
+    expect(instancesFromPack([], instances)).toEqual([]);
   });
 });
 
