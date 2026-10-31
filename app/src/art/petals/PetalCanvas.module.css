@@ -1,0 +1,13 @@
+/* 花瓣层铺满内容区，压在页面滚动容器之下，不随页面滚动，也不接收指针（指针由内容区转给引擎）。
+ * 画布是替换元素，绝对定位时 inset 撑不开它，宽高要显式写满。
+ * contain: strict 让画布每帧的重绘不波及布局与周围元素；它本身就是独立图层，不需要 will-change。 */
+.canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  z-index: var(--sk-z-petals);
+  contain: strict;
+  pointer-events: none;
+}
