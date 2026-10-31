@@ -25,7 +25,9 @@ export interface ModpackPreviewDto {
   minecraft: string;
   loader: PackLoader | null;
   remote_files: number;
-  /** CurseForge 清单不带文件大小，为 null。 */
+  /** 导入后落进 mods/ 的 Mod 数：落进 mods/ 的远程文件加上覆盖层 mods/ 下的 .jar，与平台摘要同一口径。 */
+  mod_files: number;
+  /** 远程文件总字节数；平台没给齐每个文件的大小时为 null。 */
   remote_bytes: number | null;
   override_files: number;
   override_bytes: number;
@@ -42,9 +44,9 @@ export interface ModpackSummaryDto {
   pack_bytes: number;
   /** 导入时要另外下载的远程文件数。 */
   remote_files: number;
-  /** 远程文件里落进 mods/ 的个数；CurseForge 清单分不出哪些是 Mod，为 null。 */
-  mod_files: number | null;
-  /** 远程文件总字节数；CurseForge 清单不带大小，为 null。 */
+  /** 导入后落进 mods/ 的 Mod 数，与本地预览同一口径；CurseForge 的远程文件按工程大类认，与导入的落点一致。 */
+  mod_files: number;
+  /** 远程文件总字节数；平台没给齐每个文件的大小时为 null。 */
   remote_bytes: number | null;
   override_files: number;
   override_bytes: number;
@@ -82,11 +84,16 @@ export type InstanceNameRule = "empty" | "too_long" | "illegal_char" | "reserved
 /** 实例名最多字符数，与后端一致。 */
 export const INSTANCE_NAME_MAX_CHARS = 32;
 
+/**
+ * 读本地整合包的清单与条目表（不解压）。CurseForge 清单有远程文件时后端另问两个批量接口来数 Mod、算下载量，
+ * 没配 API key 时报 CurseForge 源被禁用的同一个错误。
+ */
 export const previewModpack = (path: string): Promise<ModpackPreviewDto> => invoke<ModpackPreviewDto>("preview_modpack", { path });
 
 /**
  * 平台整合包某个版本的 Mod 数与要下载的字节，供安装前确认。只按范围读包末尾的目录与清单条目，
  * 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 remote_pack_unreadable（detail.url、detail.reason）。
+ * CurseForge 另问批量文件与批量工程两个接口，没配 API key 时报 CurseForge 源被禁用的同一个错误。
  */
 export const summarizePlatformModpack = (platform: Platform, projectId: string, versionId: string): Promise<ModpackSummaryDto> =>
   invoke<ModpackSummaryDto>("summarize_platform_modpack", { platform, projectId, versionId });

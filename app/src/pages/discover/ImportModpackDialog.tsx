@@ -58,12 +58,12 @@ export function droppedFile(paths: readonly string[]): string | null {
   return pack === undefined ? paths[0] : pack;
 }
 
-/** 本地整合包的清单事实。预览只给远程文件数与包内文件数，不区分其中有几个 Mod，Mod 数这一行不显示。 */
+/** 本地整合包的清单事实。Mod 数与平台摘要同一口径（落进 mods/ 的远程文件加上覆盖层 mods/ 下的 .jar）。 */
 export function previewFacts(preview: ModpackPreviewDto): PackFacts {
   return {
     mcVersion: preview.minecraft,
     loader: preview.loader === null ? "vanilla" : preview.loader.kind,
-    modCount: null,
+    modCount: preview.mod_files,
     downloadBytes: preview.remote_bytes,
     extra: [
       { icon: "file", text: MODPACK_COPY.remoteFiles(preview.remote_files) },
@@ -261,8 +261,7 @@ function ImportConfirm({ path, preview, online, footerHost, onBack, onDone }: Im
           cover: cover.block,
           packName: preview.name,
           packVersion: preview.version === null ? IMPORT_COPY.unversioned : preview.version,
-          // 清单里待下载的远程文件不只是 Mod（还有资源包、光影），当不了 Mod 数：导入前不知道
-          modCount: null,
+          modCount: preview.mod_files,
           mcVersion: preview.minecraft,
           loader: facts.loader,
           loaderVersion: preview.loader === null ? null : preview.loader.version,
