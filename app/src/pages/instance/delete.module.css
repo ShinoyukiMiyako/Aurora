@@ -1,0 +1,20 @@
+/* 删除确认的正文：段落、存档名列表与体积数字 */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+}
+
+.body p {
+  margin: 0;
+}
+
+.list {
+  margin: 0;
+  padding-left: var(--sk-space-20);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}

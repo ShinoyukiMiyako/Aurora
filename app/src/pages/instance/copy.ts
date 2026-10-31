@@ -443,11 +443,3 @@ export const CRASH_PAGE_COPY = {
   error: "读不到崩溃报告",
   retry: "重试",
 } as const;
-
-// ---------------------------------------------------------------- 删除
-
-export const DELETE_COPY = {
-  worldsListIntro: "随实例一起移入回收站的存档：",
-  installingNote: "正在进行的安装任务会先取消。",
-  backupHint: "想留着存档的话，先在概览里打开存档文件夹备份一份。",
-} as const;

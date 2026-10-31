@@ -8,13 +8,13 @@
 // 其余部分照最后一次的数据画完退场。
 
 import { Icon, type IconName } from "../../art/Icon";
-import { ACTION_ERROR, CONFIRM_COPY, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatPlaytimeShort, formatRelative } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
-import { useNav, useShell } from "../../shell/shell";
+import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
 import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
@@ -27,6 +27,7 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { Tooltip } from "../../ui/Tooltip";
+import { useDeleteInstance } from "../instance/delete";
 import { instanceLocks } from "../instance/model";
 import { lockReason } from "../instance/ops";
 import { CardStatus } from "./CardStatus";
@@ -45,8 +46,8 @@ export interface InstanceCardProps {
 export function InstanceCard({ inst, now }: InstanceCardProps) {
   const { state, actions } = useLauncher();
   const { go } = useNav();
-  const { confirm } = useShell();
   const run = useRunner();
+  const deleteInstance = useDeleteInstance();
 
   const id = inst.id;
   const name = inst.name;
@@ -73,25 +74,6 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
     if (!result.ok) return;
     const copy = TOAST_COPY.instanceSelected(name);
     actions.toast("info", copy.title, copy.body);
-  };
-
-  const remove = async () => {
-    // 还没扫到目录的占位项（排队中的新建）磁盘上什么都没有，不必问后端有几个存档
-    let worlds = 0;
-    if (!inst.placeholder) {
-      const preview = await run(() => actions.previewInstanceDeletion(id), ACTION_ERROR.deleteInstance(name));
-      if (!preview.ok) return;
-      worlds = preview.value.worlds.length;
-    }
-    const copy = CONFIRM_COPY.deleteInstance(name, worlds);
-    const ok = await confirm({
-      title: copy.title,
-      body: inst.status === "installing" ? `${copy.body}${LIBRARY_COPY.removeCancelsInstall}` : copy.body,
-      confirmLabel: copy.confirmLabel,
-      tone: "danger",
-    });
-    if (!ok) return;
-    await run(() => actions.deleteInstance(id, worlds), ACTION_ERROR.deleteInstance(name));
   };
 
   const menu: MenuEntry[] = [
@@ -137,7 +119,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       danger: true,
       disabled: deleteReason !== undefined,
       hint: deleteReason,
-      onSelect: () => void remove(),
+      onSelect: () => void deleteInstance(inst),
     },
   ];
 

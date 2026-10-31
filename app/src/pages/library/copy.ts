@@ -53,8 +53,6 @@ export const LIBRARY_COPY = {
     crashActive: "上次崩溃",
     remove: "删除实例",
   },
-  /** 删除安装中的实例时追加在确认正文之后。 */
-  removeCancelsInstall: "正在进行的安装任务会先取消。",
 
   createTileTitle: "新建实例",
   createTileBody: "选版本、加载器和封面，装好后自动固定到侧栏",

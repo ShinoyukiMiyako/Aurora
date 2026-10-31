@@ -2,8 +2,8 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { CONFIRM_COPY, TOAST_COPY } from "../../copy/flows";
-import type { InstanceDto } from "../../ipc/instances";
+import { CONFIRM_COPY, DELETE_INSTANCE_COPY, TOAST_COPY } from "../../copy/flows";
+import type { InstanceDto, WorldDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
@@ -297,11 +297,21 @@ describe("实例库：动作", () => {
     expect(menuItem(LIBRARY_COPY.menu.selected).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("删除：先问后端有几个存档，确认框照实说明，确认后删除", async () => {
+  it("删除：先问后端有几个存档，确认框照实列出并说明移入回收站，确认后删除", async () => {
+    const world = (dir: string, name: string | null, size: number): WorldDto => ({
+      dir_name: dir,
+      level_status: "ok",
+      level_error: null,
+      name,
+      mode: "survival",
+      last_played: null,
+      size_bytes: size,
+      modified_at: null,
+    });
     ipc.overrides.set("preview_instance_deletion", (args) => ({
       id: args.id,
-      worlds: [{ dir_name: "新的世界" }, { dir_name: "生存" }],
-      size_bytes: 1024,
+      worlds: [world("w1", "新的世界", 512 * 1024), world("生存", null, 512 * 1024)],
+      size_bytes: 4096 * 1024,
       file_count: 3,
       dependents: [],
       activity: null,
@@ -315,13 +325,32 @@ describe("实例库：动作", () => {
     click(menuItem(LIBRARY_COPY.menu.remove));
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: "原版" }]);
-    const copy = CONFIRM_COPY.deleteInstance("原版", 2);
-    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe(copy.title);
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(copy.body);
-    click(dialogButton(copy.confirmLabel));
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.querySelector("h2")?.textContent).toBe("删除「原版」？");
+    expect(dialog?.textContent).toContain("实例文件夹会移入回收站，其中的 2 个存档（共 1.0 MB）也会一起删除：");
+    expect([...(dialog?.querySelectorAll("li") ?? [])].map((li) => li.textContent)).toEqual(["新的世界", "生存"]);
+    expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.backupHint);
+    expect(dialog?.textContent).not.toContain(DELETE_INSTANCE_COPY.pendingTask);
+    click(dialogButton("删除实例和 2 个存档"));
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "原版" }]);
     expect(toastTitles()).toContain("info:已删除「原版」");
+  });
+
+  it("删除排队中的新建实例：磁盘上还没有目录，不问后端预览，确认框说明会先取消任务", async () => {
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.actions.createInstance({ name: "周末生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+      await settle();
+    });
+    click(byLabel("「周末生存」的更多操作"));
+    click(menuItem(LIBRARY_COPY.menu.remove));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.noWorlds);
+    expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.pendingTask);
   });
 
   it("取消删除确认不删", async () => {
@@ -330,7 +359,8 @@ describe("实例库：动作", () => {
     click(byLabel("「原版」的更多操作"));
     click(menuItem(LIBRARY_COPY.menu.remove));
     await flush();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(CONFIRM_COPY.deleteInstance("原版", 0).body);
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。");
+    expect(dialogButton("删除实例")).toBeDefined();
     click(dialogButton(CONFIRM_COPY.cancel));
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([]);

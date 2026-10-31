@@ -490,16 +490,32 @@ describe("实例详情：设置", () => {
     expect((saved[0].settings as InstanceSettingsDto).memory_mb).toBe(4096);
   });
 
-  it("删除实例：确认框写明存档数，确认后删除", async () => {
+  it("删除实例：确认框按后端预览列出会一起移入回收站的存档，确认后删除", async () => {
     await open("settings");
     click(button("删除实例"));
     await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: ID }]);
     expect(dialog().querySelector("h2")?.textContent).toBe("删除「樱花生存」？");
-    expect(dialog().textContent).toContain("2 个存档会移入回收站");
-    expect(dialog().textContent).toContain("新世界");
-    click(button("删除实例", dialog()));
+    expect(dialog().textContent).toContain("实例文件夹会移入回收站，其中的 2 个存档（共 3.0 MB）也会一起删除：");
+    expect([...dialog().querySelectorAll("li")].map(textOf)).toEqual(["旧世界", "新世界"]);
+    click(button("删除实例和 2 个存档", dialog()));
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([{ id: ID }]);
+  });
+
+  it("实例上还挂着任务：确认框说明会先取消任务", async () => {
+    ipc.overrides.set("preview_instance_deletion", () => ({ id: ID, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("settings");
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    expect(launcher.state.tasks.filter((t) => t.spec.command === "repair_instance")).toHaveLength(1);
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。");
+    expect(dialog().textContent).toContain("正在进行的安装任务会先取消。");
   });
 });
 

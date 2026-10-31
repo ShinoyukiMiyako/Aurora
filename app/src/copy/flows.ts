@@ -863,3 +863,22 @@ export function incompleteReason(incomplete: IncompleteInput): string {
       return incomplete.error === null ? `${what}没有完成` : `${what}没有完成：${incomplete.error.message}`;
   }
 }
+
+// ---------------------------------------------------------------- 删除实例
+
+/**
+ * 实例库卡片菜单、头图菜单与实例管理卡共用的删除确认。删除是把实例文件夹移入回收站，
+ * 所以正文按「移入回收站」写；存档只数实例文件夹里的（共用 .minecraft/saves 的不随实例删除）。
+ */
+export const DELETE_INSTANCE_COPY = {
+  title: (name: string) => `删除「${name}」？`,
+  /** 有存档时正文的三段：前半句、加粗的存档数、带总体积的后半句；其后列出存档名。 */
+  worldsLead: "实例文件夹会移入回收站，其中的 ",
+  worldsCount: (n: number) => `${n} 个存档`,
+  worldsTail: (bytes: number) => `（共 ${formatBytes(bytes)}）也会一起删除：`,
+  backupHint: "想留着存档的话，先在概览里打开存档文件夹备份一份。",
+  noWorlds: "这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。",
+  /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
+  pendingTask: "正在进行的安装任务会先取消。",
+  confirmLabel: (worlds: number) => (worlds > 0 ? `删除实例和 ${worlds} 个存档` : "删除实例"),
+} as const;

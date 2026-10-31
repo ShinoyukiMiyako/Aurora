@@ -973,8 +973,3 @@
 .confirmBody p {
   margin: 0;
 }
-
-.confirmList {
-  margin: 0;
-  padding-left: var(--sk-space-20);
-}
