@@ -593,6 +593,15 @@ export const TOAST_COPY = {
   stopFailed: "无法结束游戏进程",
   allModsLatest: ALL_MODS_LATEST,
   modRemoved: (name: string) => `已移除 ${name}`,
+  modsEnabled: (count: number) => `已启用 ${count} 个 Mod`,
+  modsDisabled: (count: number) => ({ title: `已停用 ${count} 个 Mod`, body: "文件名后加了 .disabled，随时可以再启用" }),
+  modsToggleFailed: (count: number, enabled: boolean) => (enabled ? `${count} 个 Mod 没能启用` : `${count} 个 Mod 没能停用`),
+  modsRemoved: (count: number) => `已移除 ${count} 个 Mod`,
+  modsRemoveFailed: (count: number) => `${count} 个 Mod 没能移除`,
+  /** 批量动作里失败的几项原因不止一种时的正文；只有一种时直接写后端原文。 */
+  mixedReasons: "原因各不相同",
+  updateIgnored: (name: string) => ({ title: `已忽略 ${name} 的更新`, body: "检查更新时会跳过它，可以在更多菜单里恢复" }),
+  updateRestored: (name: string) => `已恢复检查 ${name} 的更新`,
   rolledBack: (name: string, from: string, to: string) => ({ title: `已回滚 ${name}`, body: `${to} → ${from}` }),
   cannotRollback: "这条记录不能回滚",
   instanceDeleted: (name: string, worlds: number) =>
