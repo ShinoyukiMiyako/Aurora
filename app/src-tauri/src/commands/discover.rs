@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, State};
 
+use crate::commands::instances::{InstanceActivity, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -204,6 +205,9 @@ pub async fn project_detail(
 
 /// 把某平台上的一个 Mod 版本安装到指定实例的 mods 目录。长任务：进度经 core-event 推送并带
 /// `task_id`，可经 `cancel_task(taskId)` 取消。
+///
+/// 安装全程以「改动 Mod 与资源」占住实例：路径在开始时按实例名算好，期间改名或删除会让落位按旧路径
+/// 把目录重新建出来，所以这两件事在安装结束前报 `instance_busy`。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_mod(
@@ -215,28 +219,60 @@ pub async fn install_mod(
     mod_version_id: String,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<ModInstallOutcomeDto, CommandError> {
     let target_platform = parse_platform(&platform)?;
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
-    let outcome = async {
-        let task = tasks.register(&task_id)?;
-        let aurora = facade.snapshot().await.with_cancel(task.token().clone());
-        task.run(async {
+    let outcome = install_mod_with(
+        &facade,
+        &tasks,
+        &locks,
+        &task_id,
+        ModTarget {
+            version_id: &version_id,
+            platform: target_platform,
+            project_id: &project_id,
+            mod_version_id: &mod_version_id,
+        },
+        events.sink(),
+    )
+    .await;
+    events.finish().await;
+    outcome
+}
+
+/// [`install_mod`] 要装的是哪个实例、哪个平台上的哪个版本。
+pub(crate) struct ModTarget<'a> {
+    pub version_id: &'a str,
+    pub platform: Platform,
+    pub project_id: &'a str,
+    pub mod_version_id: &'a str,
+}
+
+pub(crate) async fn install_mod_with(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    locks: &InstanceLocks,
+    task_id: &str,
+    target: ModTarget<'_>,
+    events: &EventSink,
+) -> Result<ModInstallOutcomeDto, CommandError> {
+    let _guard = locks.acquire(target.version_id, InstanceActivity::Modifying)?;
+    let task = tasks.register(task_id)?;
+    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let outcome = task
+        .run(async {
             Ok(aurora
                 .install_mod(
-                    &version_id,
-                    target_platform,
-                    &project_id,
-                    &mod_version_id,
-                    Some(events.sink()),
+                    target.version_id,
+                    target.platform,
+                    target.project_id,
+                    target.mod_version_id,
+                    Some(events),
                 )
                 .await?)
         })
-        .await
-    }
-    .await;
-    events.finish().await;
-    let outcome = outcome?;
+        .await?;
     Ok(ModInstallOutcomeDto {
         file_name: outcome.file_name,
         path: outcome.path.display().to_string(),
@@ -269,7 +305,7 @@ fn resource_outcome_dto(outcome: ResourceInstallOutcome) -> ResourceInstallOutco
 /// core-event 推送并带 `task_id`，可经 `cancel_task(taskId)` 取消。
 ///
 /// `world` 只对数据包有意义且必填（存档目录名）；`fileVersionId` 为 Modrinth 版本 id 或
-/// CurseForge 文件 id。
+/// CurseForge 文件 id。与 [`install_mod`] 一样全程占住实例，改名与删除在安装结束前报 `instance_busy`。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_resource(
@@ -283,11 +319,13 @@ pub async fn install_resource(
     file_version_id: String,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<ResourceInstallOutcomeDto, CommandError> {
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = install_resource_with(
         &facade,
         &tasks,
+        &locks,
         &task_id,
         InstallResourceArgs {
             version_id: &version_id,
@@ -317,6 +355,7 @@ pub(crate) struct InstallResourceArgs<'a> {
 pub(crate) async fn install_resource_with(
     facade: &Facade,
     tasks: &TaskRegistry,
+    locks: &InstanceLocks,
     task_id: &str,
     args: InstallResourceArgs<'_>,
     events: &EventSink,
@@ -330,6 +369,7 @@ pub(crate) async fn install_resource_with(
         )));
     }
     let platform = parse_platform(args.platform)?;
+    let _guard = locks.acquire(args.version_id, InstanceActivity::Modifying)?;
     let task = tasks.register(task_id)?;
     let aurora = facade.snapshot().await.with_cancel(task.token().clone());
     let target = ResourceTarget {
@@ -474,7 +514,8 @@ mod tests {
         Facade::new(aurora)
     }
 
-    /// 端到端：资源包经命令装进实例的 resourcepacks/，事件都带本任务 id，任务随之注销。
+    /// 端到端：资源包经命令装进实例的 resourcepacks/，事件都带本任务 id，任务随之注销。游戏运行中
+    /// 照样能装，装完实例仍记为运行中。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn install_resource_lands_pack_and_tags_events_with_task_id() {
         use wiremock::matchers::{method, path};
@@ -512,10 +553,13 @@ mod tests {
         let log = delivered.clone();
         let forwarder =
             CoreEventForwarder::spawn(Some("rp#1".into()), move |p| log.lock().unwrap().push(p));
+        let locks = InstanceLocks::default();
+        let _game = locks.acquire("生存", InstanceActivity::Running).unwrap();
 
         let outcome = install_resource_with(
             &facade,
             &registry,
+            &locks,
             "rp#1",
             InstallResourceArgs {
                 version_id: "生存",
@@ -537,11 +581,173 @@ mod tests {
         assert_eq!(std::path::PathBuf::from(&outcome.path), landed);
         assert_eq!(std::fs::read(&landed).unwrap(), b"pack");
         assert!(!registry.is_running("rp#1"));
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::Running));
         let delivered = delivered.lock().unwrap();
         assert!(!delivered.is_empty());
         assert!(delivered
             .iter()
             .all(|p| p.task_id.as_deref() == Some("rp#1")));
+    }
+
+    /// 实例正在改名或删除时，装 Mod 与装资源在登记任务、碰网络之前就以 instance_busy 拒绝，
+    /// 也不在实例里建出任何目录。
+    #[tokio::test]
+    async fn installs_are_refused_while_the_instance_is_renamed_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let registry = TaskRegistry::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let version_dir = dir.path().join(".minecraft").join("versions").join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let locks = InstanceLocks::default();
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire("生存", activity).unwrap();
+            let err = install_mod_with(
+                &facade,
+                &registry,
+                &locks,
+                "mod#1",
+                ModTarget {
+                    version_id: "生存",
+                    platform: Platform::Modrinth,
+                    project_id: "sodium",
+                    mod_version_id: "v1",
+                },
+                &sink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert!(!registry.is_running("mod#1"));
+            let err = install_resource_with(
+                &facade,
+                &registry,
+                &locks,
+                "rp#2",
+                InstallResourceArgs {
+                    version_id: "生存",
+                    resource_type: "shader",
+                    world: None,
+                    platform: "modrinth",
+                    project_id: "bsl",
+                    file_version_id: "v1",
+                },
+                &sink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert_eq!(
+                err.detail.unwrap()["activity"],
+                serde_json::to_value(activity).unwrap()
+            );
+            assert!(!registry.is_running("rp#2"));
+            drop(held);
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(&version_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        entries.sort();
+        assert!(entries.is_empty(), "实例里不该多出东西：{entries:?}");
+    }
+
+    /// 资源下载进行中，实例一直以「改动 Mod 与资源」占着：改名与删除报 instance_busy、目录原地不动；
+    /// 取消后占用释放。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_resource_holds_the_instance_until_it_returns() {
+        use std::time::{Duration, Instant};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::commands::instances::{delete_instance_with, rename_instance_with};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/rp9"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "rp9", "project_id": "faithful", "name": "32x", "version_number": "1.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {}, "url": format!("{}/Slow.zip", server.uri()),
+                           "filename": "Slow.zip", "primary": true, "size": 4}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Slow.zip"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"pack".to_vec())
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let versions = dir.path().join(".minecraft").join("versions");
+        let version_dir = versions.join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = std::sync::Arc::new(facade_in(dir.path(), &server.uri()));
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let install = tokio::spawn({
+            let (f, r, l) = (facade.clone(), registry.clone(), locks.clone());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+                install_resource_with(
+                    &f,
+                    &r,
+                    &l,
+                    "rp#slow",
+                    InstallResourceArgs {
+                        version_id: "生存",
+                        resource_type: "resource_pack",
+                        world: None,
+                        platform: "modrinth",
+                        project_id: "faithful",
+                        file_version_id: "rp9",
+                    },
+                    &sink,
+                )
+                .await
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !registry.is_running("rp#slow") {
+            assert!(Instant::now() < deadline, "资源安装没有开始");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::Modifying));
+        let err = rename_instance_with(&facade, &locks, "生存", "创造")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], "modifying");
+        let err = delete_instance_with(&facade, &locks, "生存", NeverDispose)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert!(version_dir.join("生存.json").is_file());
+        assert!(!versions.join("创造").exists());
+
+        assert!(registry.cancel("rp#slow"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert_eq!(locks.activity("生存"), None);
+    }
+
+    /// 测试里走不到真正的删除：实例被占着时删除命令必须在动目录之前就拒绝。
+    struct NeverDispose;
+
+    impl aurora_core::Disposer for NeverDispose {
+        fn dispose(&self, dir: &std::path::Path) -> Result<(), aurora_core::InstanceError> {
+            panic!("被占着的实例不该被删除：{}", dir.display());
+        }
     }
 
     #[tokio::test]
@@ -554,6 +760,7 @@ mod tests {
             let err = install_resource_with(
                 &facade,
                 &registry,
+                &InstanceLocks::default(),
                 "t",
                 InstallResourceArgs {
                     version_id: "x",

@@ -1,8 +1,9 @@
 // 实例：列表、设置、内容、侧栏固定、新建、补全、删除、改名、打开文件夹，以及新建页要的版本清单、
 // 加载器版本与所需 Java。
 //
-// 会改动实例目录的命令（新建、补全、改名、删除）在实例正忙时以 instance_busy 拒绝，detail.activity
-// 指出正在做的事；被别的实例经 inheritsFrom 依赖时以 instance_has_dependents 拒绝。参数类问题一律是
+// 会改动实例目录的命令（新建、整合包导入、补全、改名、删除，以及装、删、启停、更新、回滚 Mod 与装资源）
+// 在实例正忙时以 instance_busy 拒绝，detail.activity 指出正在做的事（Mod 与资源的改动彼此、与运行中的
+// 游戏可以并行，记为 modifying）；被别的实例经 inheritsFrom 依赖时以 instance_has_dependents 拒绝。参数类问题一律是
 // invalid_argument，detail.field 指出哪一项：名称问题带 detail.rule（见 NameRule），侧栏固定带
 // detail.reason（too_many / duplicate / not_found）与 detail.id。
 
@@ -15,7 +16,7 @@ export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forg
 export type DetectedLoaderKind = LoaderChoice | "optifine" | "liteloader";
 
 /** 实例此刻在做的事。 */
-export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running";
+export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying";
 
 export interface LoaderDto {
   kind: DetectedLoaderKind;

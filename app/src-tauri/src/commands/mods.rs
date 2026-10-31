@@ -2,6 +2,9 @@
 //!
 //! 改动 mods 目录的命令（启停、移除、更新）在后端再守一道「游戏运行中不许改」：门面在动第一个文件前
 //! 探测占用，命中时这里报 [`MOD_FILE_BUSY`]，前端据此提示先关游戏，而不是把它当成普通 IO 故障。
+//!
+//! 这些命令还以「改动 Mod 与资源」占住实例（更新全程持有，启停与移除只占一瞬）：它们按实例名算好
+//! 路径再写文件、卷宗与历史，同时被改名或删除的话会按旧路径把实例目录重新建出来。
 
 use aurora_core::{
     is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstanceMatch,
@@ -13,6 +16,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
 use crate::commands::error::code::MOD_FILE_BUSY;
+use crate::commands::instances::{InstanceActivity, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -43,17 +47,20 @@ pub async fn set_mod_enabled(
     file_name: String,
     enabled: bool,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<String, CommandError> {
-    set_mod_enabled_with(&facade, &version_id, &file_name, enabled).await
+    set_mod_enabled_with(&facade, &locks, &version_id, &file_name, enabled).await
 }
 
 pub(crate) async fn set_mod_enabled_with(
     facade: &Facade,
+    locks: &InstanceLocks,
     version_id: &str,
     file_name: &str,
     enabled: bool,
 ) -> Result<String, CommandError> {
     require_non_empty("file_name", file_name)?;
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
     let path = aurora
         .set_mod_enabled(version_id, file_name, enabled)
@@ -68,16 +75,19 @@ pub async fn remove_mod(
     version_id: String,
     file_name: String,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<(), CommandError> {
-    remove_mod_with(&facade, &version_id, &file_name).await
+    remove_mod_with(&facade, &locks, &version_id, &file_name).await
 }
 
 pub(crate) async fn remove_mod_with(
     facade: &Facade,
+    locks: &InstanceLocks,
     version_id: &str,
     file_name: &str,
 ) -> Result<(), CommandError> {
     require_non_empty("file_name", file_name)?;
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
     aurora
         .remove_mod(version_id, file_name)
@@ -107,6 +117,7 @@ pub async fn update_mod(
     mod_version_id: String,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<ModUpdateOutcomeDto, CommandError> {
     // 参数在登记任务、起事件转发之前校验：非法调用不该占用一个任务 id。
     validate_update_args(&file_name, &mod_version_id)?;
@@ -114,6 +125,7 @@ pub async fn update_mod(
     let outcome = update_mod_with(
         &facade,
         &tasks,
+        &locks,
         &task_id,
         &version_id,
         &file_name,
@@ -130,9 +142,11 @@ fn validate_update_args(file_name: &str, mod_version_id: &str) -> Result<(), Com
     require_non_empty("mod_version_id", mod_version_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_mod_with(
     facade: &Facade,
     tasks: &TaskRegistry,
+    locks: &InstanceLocks,
     task_id: &str,
     version_id: &str,
     file_name: &str,
@@ -140,6 +154,7 @@ pub(crate) async fn update_mod_with(
     events: Option<&EventSink>,
 ) -> Result<ModUpdateOutcomeDto, CommandError> {
     validate_update_args(file_name, mod_version_id)?;
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let task = tasks.register(task_id)?;
     let aurora: Aurora = facade.snapshot().await.with_cancel(task.token().clone());
     let outcome = task
@@ -326,7 +341,7 @@ mod tests {
         });
         aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
 
-        remove_mod_with(&facade, VERSION_ID, "sodium.jar")
+        remove_mod_with(&facade, &InstanceLocks::default(), VERSION_ID, "sodium.jar")
             .await
             .unwrap();
 
@@ -355,14 +370,25 @@ mod tests {
         let (facade, _) = facade_with_instance(tmp.path()).await;
         let tasks = TaskRegistry::default();
 
-        let err = update_mod_with(&facade, &tasks, "t-1", VERSION_ID, "a.jar", " ", None)
-            .await
-            .unwrap_err();
+        let err = update_mod_with(
+            &facade,
+            &tasks,
+            &InstanceLocks::default(),
+            "t-1",
+            VERSION_ID,
+            "a.jar",
+            " ",
+            None,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INVALID_ARGUMENT);
         assert_eq!(err.message, "mod_version_id 不能为空");
         assert!(!tasks.is_running("t-1"));
 
-        let err = remove_mod_with(&facade, VERSION_ID, "").await.unwrap_err();
+        let err = remove_mod_with(&facade, &InstanceLocks::default(), VERSION_ID, "")
+            .await
+            .unwrap_err();
         assert_eq!(err.code, code::INVALID_ARGUMENT);
         assert_eq!(err.message, "file_name 不能为空");
     }
@@ -377,9 +403,18 @@ mod tests {
             .unwrap();
         let tasks = TaskRegistry::default();
 
-        let err = update_mod_with(&facade, &tasks, "t-2", VERSION_ID, "manual.jar", "v2", None)
-            .await
-            .unwrap_err();
+        let err = update_mod_with(
+            &facade,
+            &tasks,
+            &InstanceLocks::default(),
+            "t-2",
+            VERSION_ID,
+            "manual.jar",
+            "v2",
+            None,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::IO);
         assert!(
             err.detail.as_ref().unwrap()["causes"][0]
@@ -409,7 +444,7 @@ mod tests {
             .open(&jar)
             .unwrap();
 
-        let err = remove_mod_with(&facade, VERSION_ID, "sodium.jar")
+        let err = remove_mod_with(&facade, &InstanceLocks::default(), VERSION_ID, "sodium.jar")
             .await
             .unwrap_err();
         assert_eq!(err.code, MOD_FILE_BUSY);
@@ -418,17 +453,94 @@ mod tests {
             err.detail.as_ref().unwrap()["path"],
             jar.display().to_string()
         );
-        let err = set_mod_enabled_with(&facade, VERSION_ID, "sodium.jar", false)
-            .await
-            .unwrap_err();
+        let err = set_mod_enabled_with(
+            &facade,
+            &InstanceLocks::default(),
+            VERSION_ID,
+            "sodium.jar",
+            false,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, MOD_FILE_BUSY);
         assert!(jar.exists());
 
         drop(held);
-        remove_mod_with(&facade, VERSION_ID, "sodium.jar")
+        remove_mod_with(&facade, &InstanceLocks::default(), VERSION_ID, "sodium.jar")
             .await
             .unwrap();
         assert!(!jar.exists());
+    }
+
+    /// 实例正在改名或删除时，启停、移除、更新都以 instance_busy 拒绝，文件与卷宗原样不动，更新不登记任务。
+    #[tokio::test]
+    async fn mod_changes_are_refused_while_the_instance_is_renamed_or_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        let jar = mods_dir.join("sodium.jar");
+        tokio::fs::write(&jar, b"jar").await.unwrap();
+        let tasks = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire(VERSION_ID, activity).unwrap();
+            let expected = serde_json::to_value(activity).unwrap();
+            let err = set_mod_enabled_with(&facade, &locks, VERSION_ID, "sodium.jar", false)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert_eq!(err.detail.unwrap()["activity"], expected);
+            let err = remove_mod_with(&facade, &locks, VERSION_ID, "sodium.jar")
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            let err = update_mod_with(
+                &facade,
+                &tasks,
+                &locks,
+                "t-busy",
+                VERSION_ID,
+                "sodium.jar",
+                "v2",
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert!(!tasks.is_running("t-busy"));
+            drop(held);
+        }
+        assert_eq!(tokio::fs::read(&jar).await.unwrap(), b"jar");
+        assert!(!mods_dir.join("sodium.jar.disabled").exists());
+        let aurora = facade.snapshot().await;
+        assert!(aurora.history(VERSION_ID).await.unwrap().events.is_empty());
+    }
+
+    /// 游戏运行中照样能启停与移除（被游戏占着的文件另由占用探测拒绝）；命令结束后实例仍记为运行中。
+    #[tokio::test]
+    async fn mod_changes_are_allowed_while_the_game_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("a.jar"), b"a")
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("b.jar"), b"b")
+            .await
+            .unwrap();
+        let locks = InstanceLocks::default();
+        let _game = locks
+            .acquire(VERSION_ID, InstanceActivity::Running)
+            .unwrap();
+
+        let path = set_mod_enabled_with(&facade, &locks, VERSION_ID, "a.jar", false)
+            .await
+            .unwrap();
+        assert_eq!(PathBuf::from(path), mods_dir.join("a.jar.disabled"));
+        remove_mod_with(&facade, &locks, VERSION_ID, "b.jar")
+            .await
+            .unwrap();
+        assert!(!mods_dir.join("b.jar").exists());
+        assert_eq!(locks.activity(VERSION_ID), Some(InstanceActivity::Running));
     }
 
     #[test]

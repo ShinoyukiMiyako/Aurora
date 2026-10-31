@@ -1,8 +1,10 @@
 //! 实例：列表、设置、内容、侧栏固定、新建（按实例名安装）、补全、删除、改名、打开文件夹，以及新建页要的
 //! 版本清单、加载器版本与所需 Java。
 //!
-//! 会改动实例目录的操作（新建、补全、改名、删除，以及启动与运行中的游戏）经 [`InstanceLocks`] 互斥：
-//! 同一实例同时只能有一件事在做，冲突时报 `instance_busy` 并在 detail 里带上正在做的事。
+//! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，以及装、删、启停、
+//! 更新、回滚 Mod 与装资源）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy` 并在 detail 里带上
+//! 正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏之间可以并行（运行中改不了的文件由
+//! 门面的占用探测把关），与其余操作互斥。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +44,8 @@ pub enum InstanceActivity {
     // 由启动命令持有：launch_game 先占为 Launching，进程起来后转 Running，退出时释放。
     Launching,
     Running,
+    /// 装、删、启停、更新、回滚 Mod，或往实例里装资源包、光影、数据包。
+    Modifying,
 }
 
 impl InstanceActivity {
@@ -53,23 +57,52 @@ impl InstanceActivity {
             InstanceActivity::Deleting => "删除",
             InstanceActivity::Launching => "启动",
             InstanceActivity::Running => "运行",
+            InstanceActivity::Modifying => "改动 Mod 与资源",
         }
     }
+
+    /// 两件事能否同时在一个实例上进行。
+    ///
+    /// Mod 与资源的改动只往工作目录里加删文件、写卷宗与历史，彼此不冲突；游戏运行中仍允许改动，
+    /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、新建、补全会挪走或重写整个目录，
+    /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。
+    fn compatible_with(self, other: Self) -> bool {
+        use InstanceActivity::{Launching, Modifying, Running};
+        matches!(
+            (self, other),
+            (Modifying, Modifying | Launching | Running) | (Launching | Running, Modifying)
+        )
+    }
+
+    /// 同一实例上有几件事并行时，对外报哪一件：Mod 改动排在最后，界面关心的是启动与运行。
+    fn report_rank(self) -> u8 {
+        match self {
+            InstanceActivity::Modifying => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// 一个实例上的全部占用。`next` 给每次占用发一个号，守卫凭号释放自己那一份。
+#[derive(Default)]
+struct LockTable {
+    next: u64,
+    held: HashMap<String, Vec<(u64, InstanceActivity)>>,
 }
 
 /// 实例级互斥表（managed state）。键不分大小写：Windows 上 `ABC` 与 `abc` 是同一个目录。
 #[derive(Default, Clone)]
 pub struct InstanceLocks {
-    held: Arc<Mutex<HashMap<String, InstanceActivity>>>,
+    table: Arc<Mutex<LockTable>>,
+}
+
+fn lock_table(table: &Mutex<LockTable>) -> std::sync::MutexGuard<'_, LockTable> {
+    // 临界区里只有 HashMap 与 Vec 的增删查，真中毒说明程序已处于未知状态，直接崩。
+    table.lock().expect("实例互斥表的锁已中毒")
 }
 
 impl InstanceLocks {
-    fn held(&self) -> std::sync::MutexGuard<'_, HashMap<String, InstanceActivity>> {
-        // 临界区里只有 HashMap 的增删查，真中毒说明程序已处于未知状态，直接崩。
-        self.held.lock().expect("实例互斥表的锁已中毒")
-    }
-
-    /// 占住实例 `id` 做 `activity`；已有别的事在做时报 `instance_busy`。返回的守卫被丢弃即释放。
+    /// 占住实例 `id` 做 `activity`；已有与它不兼容的事在做时报 `instance_busy`。返回的守卫被丢弃即释放。
     ///
     /// 守卫自带表的引用、不借用 `self`，可以存进别的状态里跨命令持有（运行中的游戏会话）。
     pub fn acquire(
@@ -78,46 +111,74 @@ impl InstanceLocks {
         activity: InstanceActivity,
     ) -> Result<InstanceGuard, CommandError> {
         let key = lock_key(id);
-        let mut held = self.held();
-        if let Some(current) = held.get(&key) {
-            return Err(busy(id, *current));
+        let mut table = lock_table(&self.table);
+        if let Some(conflict) = table.held.get(&key).and_then(|holds| {
+            holds
+                .iter()
+                .map(|&(_, current)| current)
+                .find(|current| !activity.compatible_with(*current))
+        }) {
+            return Err(busy(id, conflict));
         }
-        held.insert(key.clone(), activity);
+        let token = table.next;
+        table.next += 1;
+        table
+            .held
+            .entry(key.clone())
+            .or_default()
+            .push((token, activity));
         tracing::debug!(id, ?activity, "占用实例");
         Ok(InstanceGuard {
-            held: self.held.clone(),
+            table: self.table.clone(),
             key,
+            token,
         })
     }
 
-    /// 实例此刻在做的事。
+    /// 实例此刻在做的事；有几件并行时报最值得界面知道的那一件。
     pub fn activity(&self, id: &str) -> Option<InstanceActivity> {
-        self.held().get(&lock_key(id)).copied()
+        lock_table(&self.table)
+            .held
+            .get(&lock_key(id))
+            .and_then(|holds| {
+                holds
+                    .iter()
+                    .map(|&(_, activity)| activity)
+                    .min_by_key(|activity| activity.report_rank())
+            })
     }
 }
 
 /// 一次实例占用；丢弃即释放。
 pub struct InstanceGuard {
-    held: Arc<Mutex<HashMap<String, InstanceActivity>>>,
+    table: Arc<Mutex<LockTable>>,
     key: String,
+    token: u64,
 }
 
 impl InstanceGuard {
-    /// 改记正在做的事（启动成功后由「启动」转为「运行」）。
+    /// 改记正在做的事（启动成功后由「启动」转为「运行」）。只用于兼容关系相同的两件事之间转换，
+    /// 所以不重新检查冲突。
     pub fn set_activity(&self, activity: InstanceActivity) {
-        self.held
-            .lock()
-            .expect("实例互斥表的锁已中毒")
-            .insert(self.key.clone(), activity);
+        let mut table = lock_table(&self.table);
+        let hold = table
+            .held
+            .get_mut(&self.key)
+            .and_then(|holds| holds.iter_mut().find(|(token, _)| *token == self.token))
+            .expect("守卫存活期间它的占用一定还在表里");
+        hold.1 = activity;
     }
 }
 
 impl Drop for InstanceGuard {
     fn drop(&mut self) {
-        self.held
-            .lock()
-            .expect("实例互斥表的锁已中毒")
-            .remove(&self.key);
+        let mut table = lock_table(&self.table);
+        if let Some(holds) = table.held.get_mut(&self.key) {
+            holds.retain(|(token, _)| *token != self.token);
+            if holds.is_empty() {
+                table.held.remove(&self.key);
+            }
+        }
     }
 }
 
@@ -2031,6 +2092,52 @@ mod tests {
         locks
             .acquire("survival", InstanceActivity::Deleting)
             .unwrap();
+    }
+
+    /// Mod 与资源改动彼此并行、与启动和运行并行，与改名、删除、新建、补全两个方向都互斥；
+    /// 每个守卫只释放自己那一份，最后一份放掉后实例才空闲。
+    #[test]
+    fn modifying_is_shared_with_itself_and_the_running_game_but_excludes_the_rest() {
+        use InstanceActivity::*;
+        let exclusive = [Installing, Repairing, Renaming, Deleting];
+        let locks = InstanceLocks::default();
+
+        let first = locks.acquire("Pack", Modifying).unwrap();
+        let second = locks.acquire("pack", Modifying).unwrap();
+        assert_eq!(locks.activity("PACK"), Some(Modifying));
+        for activity in exclusive {
+            let err = locks.acquire("pack", activity).err().unwrap();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert_eq!(err.detail.unwrap()["activity"], "modifying");
+        }
+        let game = locks.acquire("pack", Launching).unwrap();
+        game.set_activity(Running);
+        assert_eq!(
+            locks.activity("pack"),
+            Some(Running),
+            "并行时报运行而不是改动"
+        );
+        let err = locks.acquire("pack", Launching).err().unwrap();
+        assert_eq!(err.detail.unwrap()["activity"], "running");
+
+        drop(first);
+        drop(game);
+        assert_eq!(locks.activity("pack"), Some(Modifying), "还剩一份改动");
+        assert!(locks.acquire("pack", Renaming).is_err());
+        drop(second);
+        assert_eq!(locks.activity("pack"), None);
+
+        for activity in exclusive {
+            let held = locks.acquire("pack", activity).unwrap();
+            let err = locks.acquire("pack", Modifying).err().unwrap();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            drop(held);
+        }
+        let running = locks.acquire("pack", Running).unwrap();
+        let modifying = locks.acquire("pack", Modifying).unwrap();
+        drop(running);
+        drop(modifying);
+        assert_eq!(locks.activity("pack"), None);
     }
 
     #[test]

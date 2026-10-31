@@ -3,6 +3,7 @@
 use aurora_core::{HistoryEvent, RollbackCheck};
 use tauri::State;
 
+use crate::commands::instances::{InstanceActivity, InstanceLocks};
 use crate::commands::mods::mods_error;
 use crate::commands::CommandError;
 use crate::facade::Facade;
@@ -27,24 +28,28 @@ pub async fn rollback_checks(
     Ok(aurora.rollback_checks(&version_id).await?)
 }
 
-/// 回滚一条更新事件：旧文件从 `.old` 复原，新文件删除，历史追加一条回滚事件。
+/// 回滚一条更新事件：旧文件从 `.old` 复原，新文件删除，历史追加一条回滚事件。回滚期间以
+/// 「改动 Mod 与资源」占住实例，与改名、删除互斥。
 #[tauri::command]
 pub async fn rollback(
     version_id: String,
     event_id: String,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<(), CommandError> {
-    rollback_with(&facade, &version_id, &event_id).await
+    rollback_with(&facade, &locks, &version_id, &event_id).await
 }
 
 pub(crate) async fn rollback_with(
     facade: &Facade,
+    locks: &InstanceLocks,
     version_id: &str,
     event_id: &str,
 ) -> Result<(), CommandError> {
     if event_id.trim().is_empty() {
         return Err(CommandError::invalid_argument("event_id 不能为空"));
     }
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
     aurora
         .rollback(version_id, event_id)
@@ -81,9 +86,13 @@ mod tests {
         aurora.set_isolation_policy(IsolationPolicy::All);
         let facade = Facade::new(aurora);
 
-        let err = rollback_with(&facade, "1.21", "").await.unwrap_err();
+        let err = rollback_with(&facade, &InstanceLocks::default(), "1.21", "")
+            .await
+            .unwrap_err();
         assert_eq!(err.code, code::INVALID_ARGUMENT);
-        let err = rollback_with(&facade, "ghost", "1-001").await.unwrap_err();
+        let err = rollback_with(&facade, &InstanceLocks::default(), "ghost", "1-001")
+            .await
+            .unwrap_err();
         assert_eq!(err.code, code::VERSION_NOT_INSTALLED);
     }
 
@@ -143,7 +152,20 @@ mod tests {
             .unwrap();
         assert!(checks[0].can_rollback);
 
-        rollback_with(&facade, "1.21", "200-001").await.unwrap();
+        // 实例正在改名时回滚以 instance_busy 拒绝，文件不动；改名结束后照常回滚。
+        let locks = InstanceLocks::default();
+        let renaming = locks.acquire("1.21", InstanceActivity::Renaming).unwrap();
+        let err = rollback_with(&facade, &locks, "1.21", "200-001")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert!(mods.join("a-2.jar").exists());
+        assert!(mods.join("a-1.jar.old").exists());
+        drop(renaming);
+
+        rollback_with(&facade, &locks, "1.21", "200-001")
+            .await
+            .unwrap();
         assert_eq!(
             tokio::fs::read(mods.join("a-1.jar")).await.unwrap(),
             b"old!"
