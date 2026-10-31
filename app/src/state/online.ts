@@ -6,8 +6,8 @@
 
 import { useSyncExternalStore } from "react";
 import { OFFLINE_PROBE_MS } from "../domain/limits";
-import { invoke } from "../ipc/bridge";
 import { isIpcError } from "../ipc/errors";
+import { probeNetwork } from "../ipc/system";
 
 /** 连通性探测：能连上后端下载用的源时 resolve true，连不上 resolve false；探测本身出错（命令缺失等）时 reject。 */
 export type ConnectionProbe = () => Promise<boolean>;
@@ -161,7 +161,7 @@ export class NetworkMonitor {
 }
 
 /** 应用唯一的联网状态。探测命令由后端提供（向下载源发一个极小的请求），见 ipc 的系统命令。 */
-export const network = new NetworkMonitor(() => invoke<boolean>("probe_network"), {
+export const network = new NetworkMonitor(probeNetwork, {
   navigatorOnline: () => navigator.onLine,
   target: () => window,
 });

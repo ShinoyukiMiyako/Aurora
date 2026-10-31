@@ -15,12 +15,13 @@ import {
   listPinnedServers,
   memoryAdvice,
   pingServers,
+  probeNetwork,
   setInstallOnExit,
   setPinnedServers,
   startupNotices,
   updaterInfo,
 } from "./system";
-import { setMockStartupNotices } from "./mock/handlers/system";
+import { setMockNetworkReachable, setMockStartupNotices } from "./mock/handlers/system";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -74,6 +75,23 @@ describe("启动提示", () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
     await startupNotices();
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([["startup_notices", undefined]]);
+  });
+});
+
+describe("连通性探测", () => {
+  it("mock 默认连得上；模拟断网后为 false，reset 后恢复", async () => {
+    expect(await probeNetwork()).toBe(true);
+    setMockNetworkReachable(false);
+    expect(await probeNetwork()).toBe(false);
+    resetMocks();
+    expect(await probeNetwork()).toBe(true);
+  });
+
+  it("Tauri 里不带参数调用 probe_network，原样交回布尔值", async () => {
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(false);
+    expect(await probeNetwork()).toBe(false);
+    expect(vi.mocked(tauriInvoke).mock.calls).toEqual([["probe_network", undefined]]);
   });
 });
 

@@ -47,6 +47,11 @@ export interface StartupNoticeDto {
 /** 本次启动的提示；查询多少次都返回同一份，没有时为空列表。 */
 export const startupNotices = (): Promise<StartupNoticeDto[]> => invoke<StartupNoticeDto[]>("startup_notices");
 
+// ---- 连通性 ----
+
+/** 下载用的源此刻连不连得上（官方源或镜像任一收到响应即为 true）。 */
+export const probeNetwork = (): Promise<boolean> => invoke<boolean>("probe_network");
+
 // ---- 服务器 ----
 
 export interface PinnedServerDto {

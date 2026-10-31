@@ -1,4 +1,4 @@
-//! 系统：内存建议、首次启动与启动提示。
+//! 系统：内存建议、首次启动、启动提示与连通性探测。
 
 use aurora_core::folders::{ensure_game_dir, validate_game_dir};
 use aurora_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
@@ -120,6 +120,16 @@ pub async fn startup_notices(
     notices: State<'_, StartupNotices>,
 ) -> Result<Vec<StartupNoticeDto>, CommandError> {
     Ok(notices.0.clone())
+}
+
+// ---- 连通性 ----
+
+/// 下载用的源此刻连不连得上。前端在联网请求以连接类错误失败后、以及离线期间定时调用。
+/// 要联网，在快照上进行，不占门面锁。
+#[tauri::command]
+pub async fn probe_network(facade: State<'_, Facade>) -> Result<bool, CommandError> {
+    let aurora = facade.snapshot().await;
+    Ok(aurora.probe_network().await?)
 }
 
 #[cfg(test)]

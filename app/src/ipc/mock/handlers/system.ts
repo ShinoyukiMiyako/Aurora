@@ -83,6 +83,15 @@ export function setMockStartupNotices(notices: StartupNoticeDto[]): void {
   startupNotices = notices.map((n) => ({ ...n }));
 }
 
+// ---- 连通性 ----
+
+let networkReachable = true;
+
+/** 模拟连不上下载源（测试与界面调试用）；reset 后恢复为连得上。 */
+export function setMockNetworkReachable(reachable: boolean): void {
+  networkReachable = reachable;
+}
+
 // ---- 首次启动 ----
 
 function completeFirstRun(args: MockArgs): void {
@@ -350,6 +359,7 @@ export const handlers: MockHandlers = {
   is_first_run: () => !isFirstRunCompleted(),
   complete_first_run: (args) => completeFirstRun(args),
   startup_notices: () => startupNotices,
+  probe_network: () => networkReachable,
   list_pinned_servers: () => pinned,
   set_pinned_servers: (args) => setPinnedServers(args),
   list_known_servers: () => listKnownServers(),
@@ -364,6 +374,7 @@ export const handlers: MockHandlers = {
 
 export function reset(): void {
   startupNotices = [];
+  networkReachable = true;
   pinned = SEED_PINNED.map((s) => ({ ...s }));
   updater = seedUpdater();
 }

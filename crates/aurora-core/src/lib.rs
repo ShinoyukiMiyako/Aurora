@@ -10,7 +10,7 @@
 //! - [`event`]：进度/事件模型（[`CoreEvent`] / [`EventSink`] / [`DownloadProgress`]）。
 //! - [`facade`]：门面结构 [`Aurora`] 与共享装配；各操作分散在 `versions`/`install`/`auth`/`launch`/`search`。
 //! - 系统设置相关：[`folders`]（游戏目录并存与首次启动）、[`memory`]（内存建议）、[`servers`]（固定服务器与
-//!   状态查询）、[`news`]（官方资讯）、[`updates`]（启动器更新端点排序）、[`java`]（Java 取用与运行时下载）。
+//!   状态查询）、[`network`]（连通性探测）、[`news`]（官方资讯）、[`updates`]（启动器更新端点排序）、[`java`]（Java 取用与运行时下载）。
 //!
 //! ```no_run
 //! # async fn demo() -> aurora_core::Result<()> {
@@ -49,6 +49,7 @@ pub mod modpack;
 pub mod modpack_summary;
 pub mod mods;
 pub mod modversions;
+pub mod network;
 pub mod news;
 pub mod playtime;
 pub mod resources;

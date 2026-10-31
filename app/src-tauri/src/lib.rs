@@ -168,6 +168,7 @@ pub fn run() {
             commands::system::is_first_run,
             commands::system::complete_first_run,
             commands::system::startup_notices,
+            commands::system::probe_network,
             commands::servers::list_pinned_servers,
             commands::servers::set_pinned_servers,
             commands::servers::list_known_servers,
