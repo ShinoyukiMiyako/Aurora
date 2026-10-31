@@ -59,7 +59,7 @@ describe("启动提示", () => {
     expect(await startupNotices()).toEqual([]);
     const notice = {
       kind: "config_reset" as const,
-      preserved_path: "C:/Users/me/AppData/Local/Petalfall/config.json.broken-20261031-143025",
+      preserved_path: "D:/Games/Launcher/config.json.broken-20261031-143025",
       error: "unknown variant `hide` at line 1 column 22",
     };
     setMockStartupNotices([notice]);
