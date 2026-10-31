@@ -75,7 +75,7 @@ describe("账户 mock：两库仲裁", () => {
 
   it("离线账户保存即成为当前账户，同名重复保存幂等且保留加入时刻", async () => {
     const steve = await createOfflineAccount("Steve");
-    expect(steve).toMatchObject({ name: "Steve", account_type: "offline", auth_server: null, status: "ok", last_verified_at: null });
+    expect(steve).toMatchObject({ name: "Steve", account_type: "offline", auth_server: null, server_url: null, username: null, status: "ok", last_verified_at: null });
     expect(steve.uuid).toMatch(/^[0-9a-f]{32}$/);
     expect((await currentAccount())?.uuid).toBe(steve.uuid);
 
@@ -192,7 +192,15 @@ describe("账户 mock：外置登录", () => {
   it("单角色直接登录并成为当前账户，带验证服务器名", async () => {
     const result = await authlibLogin("skin.example", "alice@example.com", "pw");
     if (result.status !== "logged_in") throw new Error(`应直接登录，实为 ${result.status}`);
-    expect(result.account).toMatchObject({ name: "alice", account_type: "authlib_injector", auth_server: "skin.example", status: "ok" });
+    expect(result.account).toMatchObject({
+      name: "alice",
+      account_type: "authlib_injector",
+      auth_server: "skin.example",
+      // 重新登录要拿这两项预填：地址是规整后的 API 根，账号原样记下。
+      server_url: "https://skin.example/",
+      username: "alice@example.com",
+      status: "ok",
+    });
     expect((await currentAccount())?.uuid).toBe(result.account.uuid);
   });
 
@@ -214,7 +222,13 @@ describe("账户 mock：外置登录", () => {
     expect(unknown.message).toContain("c".repeat(32));
 
     const chosen = await selectAuthlibProfile(again.pending_id, again.profiles[1].uuid);
-    expect(chosen).toMatchObject({ uuid: again.profiles[1].uuid, name: "multi_alt", auth_server: "skin.example" });
+    expect(chosen).toMatchObject({
+      uuid: again.profiles[1].uuid,
+      name: "multi_alt",
+      auth_server: "skin.example",
+      server_url: "https://skin.example/",
+      username: "multi@example.com",
+    });
     expect((await currentAccount())?.uuid).toBe(chosen.uuid);
     expect((await rejection(selectAuthlibProfile(again.pending_id, again.profiles[0].uuid))).code).toBe("invalid_argument");
   });

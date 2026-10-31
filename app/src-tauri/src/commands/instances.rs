@@ -14,7 +14,7 @@ use aurora_core::{
     is_safe_instance_id, Aurora, CoreError, DeletionPreview, Disposer, EventSink, IncompleteKind,
     IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError, InstanceInstallOutcome,
     InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride, JavaSelection, LevelInfo,
-    LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry,
+    LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry, Platform,
     PlaySummary, Readable, RecycleBin, RepairOutcome, Resolution, VersionSettings, WorldEntry,
 };
 use serde::{Deserialize, Serialize};
@@ -295,6 +295,27 @@ pub struct IncompleteDto {
     pub error: Option<MarkerErrorDto>,
 }
 
+/// 实例所来自的整合包。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InstanceModpackDto {
+    /// modrinth / curseforge；从本地文件导入时为 null。
+    pub platform: Option<Platform>,
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    /// 整合包自己的名字与版本（实例名可以被改成别的）。
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// 新建某个游戏版本前要知道的 Java 与下载体积。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VersionRequirementsDto {
+    pub java_major: u32,
+    /// 全新下载的字节数（客户端、本机适用的库、资源索引与资源文件、日志配置），不含 Java 与加载器、
+    /// 不扣除本地已有的文件；版本 JSON 有一项没标大小时为 null。
+    pub download_bytes: Option<u64>,
+}
+
 /// 列表里的一个实例。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InstanceDto {
@@ -312,10 +333,24 @@ pub struct InstanceDto {
     pub java_major: Option<u32>,
     /// 工作目录 mods/ 下的 Mod 文件数；broken 或设置读不出时为 null。
     pub mod_count: Option<u32>,
+    /// 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。
+    pub world_count: Option<u32>,
+    /// 隔离的生效值；何时为 null 同 mod_count。
+    pub isolated: Option<bool>,
     pub description: Option<String>,
     pub cover: Option<String>,
-    /// 实例设置文件读不出来的原因；此时 description、cover 为 null。
+    /// 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。
+    pub memory_mb: Option<u32>,
+    /// 实例设置文件读不出来的原因；此时 description、cover、memory_mb 为 null。
     pub settings_error: Option<String>,
+    /// 从整合包导入的实例记下的整合包；不是整合包实例或记录读不出时为 null。
+    pub modpack: Option<InstanceModpackDto>,
+    /// 整合包记录读不出来的原因。
+    pub modpack_error: Option<String>,
+    /// 最近一次崩溃的 Unix 毫秒；没崩溃过或记录读不出时为 null。
+    pub last_crash_at: Option<u64>,
+    /// 崩溃记录读不出来的原因。
+    pub last_crash_error: Option<String>,
     pub incomplete: Option<IncompleteDto>,
     /// 实例目录的创建时刻（Unix 毫秒）。
     pub created_at: Option<u64>,
@@ -585,9 +620,31 @@ fn instance_dto(
     activity: Option<InstanceActivity>,
     play: Option<&PlaySummary>,
 ) -> InstanceDto {
-    let (description, cover, settings_error) = match summary.settings {
-        Readable::Read(settings) => (settings.description, settings.cover, None),
-        Readable::Unreadable(error) => (None, None, Some(error)),
+    let (description, cover, memory_mb, settings_error) = match summary.settings {
+        Readable::Read(settings) => (
+            settings.description,
+            settings.cover,
+            settings.memory_mb,
+            None,
+        ),
+        Readable::Unreadable(error) => (None, None, None, Some(error)),
+    };
+    let (modpack, modpack_error) = match summary.modpack {
+        Readable::Read(modpack) => (
+            modpack.map(|m| InstanceModpackDto {
+                platform: m.platform,
+                project_id: m.project_id,
+                version_id: m.version_id,
+                name: m.name,
+                version: m.version,
+            }),
+            None,
+        ),
+        Readable::Unreadable(error) => (None, Some(error)),
+    };
+    let (last_crash_at, last_crash_error) = match summary.last_crash_at {
+        Readable::Read(at) => (at, None),
+        Readable::Unreadable(error) => (None, Some(error)),
     };
     let mut dto = InstanceDto {
         id: summary.id,
@@ -599,9 +656,16 @@ fn instance_dto(
         is_release: false,
         java_major: None,
         mod_count: None,
+        world_count: None,
+        isolated: None,
         description,
         cover,
+        memory_mb,
         settings_error,
+        modpack,
+        modpack_error,
+        last_crash_at,
+        last_crash_error,
         incomplete: summary.incomplete.map(incomplete_dto),
         created_at: summary.created_at,
         activity,
@@ -623,6 +687,8 @@ fn instance_dto(
             dto.is_release = ready.is_release;
             dto.java_major = ready.java_major;
             dto.mod_count = ready.mod_count;
+            dto.world_count = ready.world_count;
+            dto.isolated = ready.isolated;
         }
         InstanceVersion::Broken(reason) => {
             dto.status = "broken";
@@ -1216,6 +1282,21 @@ pub async fn required_java(
 ) -> Result<u32, CommandError> {
     let aurora = facade.snapshot().await;
     Ok(aurora.required_java(&mc_version).await?)
+}
+
+/// 新建这个游戏版本的实例要的 Java 主版本与全新下载体积。版本清单不带这两项，每个版本取一次
+/// 版本 JSON 后在进程内缓存，版本列表按选中行逐个查询即可。
+#[tauri::command]
+pub async fn version_requirements(
+    mc_version: String,
+    facade: State<'_, Facade>,
+) -> Result<VersionRequirementsDto, CommandError> {
+    let aurora = facade.snapshot().await;
+    let requirements = aurora.version_requirements(&mc_version).await?;
+    Ok(VersionRequirementsDto {
+        java_major: requirements.java_major,
+        download_bytes: requirements.download_bytes,
+    })
 }
 
 // ---------------------------------------------------------------- 打开文件夹
@@ -2105,6 +2186,89 @@ mod tests {
         assert_eq!(vanilla.mod_count, Some(0));
         assert_eq!(vanilla.playtime_min, 0);
         assert_eq!(vanilla.last_played_at, None);
+    }
+
+    /// 列表 DTO 带上整合包来源、最近崩溃、存档数、隔离生效值与自定内存；附属文件读不出时
+    /// 只把原因放进对应的 *_error，其余字段照常给。
+    #[test]
+    fn instance_dto_carries_modpack_crash_worlds_isolation_and_memory() {
+        let summary = |modpack, last_crash_at, settings| InstanceSummary {
+            id: "整合包".into(),
+            dir: PathBuf::from("versions/整合包"),
+            version: InstanceVersion::Ready(aurora_core::ReadyVersion {
+                mc_version: Some("1.21.1".into()),
+                loaders: Vec::new(),
+                release_type: Some("release".into()),
+                is_release: true,
+                java_major: Some(21),
+                mod_count: Some(80),
+                world_count: Some(3),
+                isolated: Some(true),
+            }),
+            settings,
+            incomplete: None,
+            created_at: Some(1),
+            modpack,
+            last_crash_at,
+        };
+        let pack = aurora_core::InstanceModpack {
+            schema: 1,
+            format: aurora_core::PackFormat::Modrinth,
+            platform: Some(Platform::Modrinth),
+            project_id: Some("1KVo5zza".into()),
+            version_id: Some("abc123".into()),
+            name: "Fabulously Optimized".into(),
+            version: Some("6.4.0".into()),
+            minecraft: "1.21.1".into(),
+            loader: None,
+            remote_files: 80,
+            override_files: 12,
+            installed_at: 1,
+        };
+        let settings = VersionSettings {
+            memory_mb: Some(6144),
+            ..VersionSettings::default()
+        };
+
+        let dto = instance_dto(
+            summary(
+                Readable::Read(Some(pack)),
+                Readable::Read(Some(1_700_000_000_000)),
+                Readable::Read(settings),
+            ),
+            None,
+            None,
+        );
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            value["modpack"],
+            json!({
+                "platform": "modrinth", "project_id": "1KVo5zza", "version_id": "abc123",
+                "name": "Fabulously Optimized", "version": "6.4.0"
+            })
+        );
+        assert_eq!(value["modpack_error"], json!(null));
+        assert_eq!(value["last_crash_at"], json!(1_700_000_000_000_u64));
+        assert_eq!(value["last_crash_error"], json!(null));
+        assert_eq!(value["world_count"], json!(3));
+        assert_eq!(value["isolated"], json!(true));
+        assert_eq!(value["memory_mb"], json!(6144));
+
+        let broken = instance_dto(
+            summary(
+                Readable::Unreadable("整合包记录坏了".into()),
+                Readable::Unreadable("崩溃记录坏了".into()),
+                Readable::Unreadable("设置坏了".into()),
+            ),
+            None,
+            None,
+        );
+        assert_eq!(broken.modpack, None);
+        assert_eq!(broken.modpack_error.as_deref(), Some("整合包记录坏了"));
+        assert_eq!(broken.last_crash_at, None);
+        assert_eq!(broken.last_crash_error.as_deref(), Some("崩溃记录坏了"));
+        assert_eq!(broken.memory_mb, None);
+        assert_eq!(broken.settings_error.as_deref(), Some("设置坏了"));
     }
 
     /// 导入中断留下的整合包标记在列表里报为 modpack，而不是「标记读不出来」。

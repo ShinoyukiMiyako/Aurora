@@ -24,6 +24,7 @@ fn account_dto_maps_metadata_and_never_carries_tokens() {
             api_root: "https://skin.example/api/yggdrasil/".into(),
             access_token: "SECRET-ACCESS".into(),
             client_token: "SECRET-CLIENT".into(),
+            username: Some("sakuya@example.com".into()),
         }),
     );
     account.added_at = 1_700_000_000_123;
@@ -40,18 +41,15 @@ fn account_dto_maps_metadata_and_never_carries_tokens() {
             "name": "Sakuya",
             "account_type": "authlib_injector",
             "auth_server": "Example Skin",
+            "server_url": "https://skin.example/api/yggdrasil/",
+            "username": "sakuya@example.com",
             "added_at": 1_700_000_000_123_u64,
             "status": "expired",
             "last_verified_at": 1_700_000_500_000_u64
         })
     );
     let text = value.to_string();
-    for secret in [
-        "SECRET-ACCESS",
-        "SECRET-CLIENT",
-        "2535400000000000",
-        "skin.example",
-    ] {
+    for secret in ["SECRET-ACCESS", "SECRET-CLIENT", "2535400000000000"] {
         assert!(!text.contains(secret), "DTO 泄露了 {secret}");
     }
 
@@ -68,6 +66,8 @@ fn account_dto_maps_metadata_and_never_carries_tokens() {
     assert_eq!(value["account_type"], json!("microsoft"));
     assert_eq!(value["status"], json!("ok"));
     assert_eq!(value["auth_server"], json!(null));
+    assert_eq!(value["server_url"], json!(null));
+    assert_eq!(value["username"], json!(null));
     assert_eq!(value["last_verified_at"], json!(null));
     assert!(!value.to_string().contains("SECRET-"));
 }
@@ -159,6 +159,7 @@ async fn select_authlib_profile_rejects_stale_id_and_unknown_profile() {
         },
         access_token: "AT".into(),
         client_token: "CT".into(),
+        username: "alice@example.com".into(),
         profiles: vec![
             GameProfile {
                 id: "a".repeat(32),

@@ -131,6 +131,7 @@ pub fn run() {
             commands::instances::list_manifest,
             commands::instances::list_loader_versions,
             commands::instances::required_java,
+            commands::instances::version_requirements,
             commands::instances::open_folder,
             // -- launch --
             commands::launch::launch_game,

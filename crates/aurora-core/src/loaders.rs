@@ -1,4 +1,4 @@
-//! 加载器的可用版本、版本清单里每个游戏版本支持哪些加载器，以及新实例需要的 Java。
+//! 加载器的可用版本、版本清单里每个游戏版本支持哪些加载器，以及新实例需要的 Java 与下载体积。
 //!
 //! 版本清单与加载器列表都是远端元数据，断网时新建实例页不该整页报错：每次拉取成功就把结果写进
 //! `<缓存目录>/meta/`，拉取失败时退回上次的缓存，并把「用的是哪天的缓存、为什么没拉到」一并交给
@@ -17,7 +17,7 @@ use aurora_install::{
     NEOFORGE_LEGACY_MAVEN_METADATA, NEOFORGE_MAVEN_METADATA, VanillaInstaller, builds_for,
     fetch_maven_versions, forge_builds, neoforge_builds,
 };
-use aurora_version::VersionManifest;
+use aurora_version::{RuntimeContext, VersionJson, VersionManifest, select_libraries};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
@@ -27,9 +27,19 @@ use crate::facade::{Aurora, make_context};
 use crate::install::LoaderChoice;
 use crate::instances::LEGACY_JAVA_MAJOR;
 
-/// 已查过的「游戏版本 -> 需要的 Java 主版本」。版本 JSON 发布后不再变，进程内记住即可。
-static REQUIRED_JAVA: LazyLock<Mutex<HashMap<String, u32>>> =
+/// 已查过的「游戏版本 -> 新建要求」。版本 JSON 发布后不再变，进程内记住即可。
+static VERSION_REQUIREMENTS: LazyLock<Mutex<HashMap<String, VersionRequirements>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 新建某个游戏版本的实例前要知道的两件事。版本清单本身不带这些，要读该版本的 JSON。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionRequirements {
+    /// 版本 JSON 的 `javaVersion`，没有则为 8。
+    pub java_major: u32,
+    /// 全新下载的字节数：客户端 jar、本机适用的库与 natives、资源索引与全部资源文件、日志配置。
+    /// 不含 Java 运行时与加载器，也不扣除本地已有的文件；版本 JSON 有一项没标大小时为 `None`。
+    pub download_bytes: Option<u64>,
+}
 
 /// 一个可选的加载器版本。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,12 +226,18 @@ impl Aurora {
 
     /// 新建这个游戏版本的实例需要的 Java 主版本（版本 JSON 的 `javaVersion`，没有则为 8）。
     pub async fn required_java(&self, mc_version: &str) -> Result<u32> {
-        if let Some(major) = REQUIRED_JAVA
+        Ok(self.version_requirements(mc_version).await?.java_major)
+    }
+
+    /// 新建这个游戏版本的实例要的 Java 主版本与全新下载的体积。每个版本只取一次版本 JSON，
+    /// 之后走进程内缓存；版本清单里没有这个版本报 `InstallerEntryMissing`。
+    pub async fn version_requirements(&self, mc_version: &str) -> Result<VersionRequirements> {
+        if let Some(known) = VERSION_REQUIREMENTS
             .lock()
-            .expect("Java 需求缓存的锁已中毒")
+            .expect("版本要求缓存的锁已中毒")
             .get(mc_version)
         {
-            return Ok(*major);
+            return Ok(*known);
         }
         let layout = self.layout();
         let pool = self.download_pool();
@@ -231,14 +247,18 @@ impl Aurora {
         let installer = VanillaInstaller::new(cx).with_manifest_url(self.manifest_url());
         let entry = installer.find_entry(mc_version).await?;
         let json = installer.fetch_version_json(&entry).await?;
-        let major = json
-            .java_version
-            .map_or(LEGACY_JAVA_MAJOR, |java| java.major_version);
-        REQUIRED_JAVA
+        let requirements = VersionRequirements {
+            java_major: json
+                .java_version
+                .as_ref()
+                .map_or(LEGACY_JAVA_MAJOR, |java| java.major_version),
+            download_bytes: download_bytes(&json, self.runtime()),
+        };
+        VERSION_REQUIREMENTS
             .lock()
-            .expect("Java 需求缓存的锁已中毒")
-            .insert(mc_version.to_owned(), major);
-        Ok(major)
+            .expect("版本要求缓存的锁已中毒")
+            .insert(mc_version.to_owned(), requirements);
+        Ok(requirements)
     }
 
     /// 某加载器支持的全部游戏版本。
@@ -395,6 +415,30 @@ fn flavor_and_base(endpoints: &LoaderEndpoints, loader: LoaderChoice) -> (Loader
 }
 
 /// 游戏版本号来自前端，只有看起来像版本号（字母数字与 `.-_+`）时才拿来拼缓存文件名；否则不缓存。
+/// 原版版本 JSON 声明的全新下载体积；库只算本机生效的（规则求值、按坐标去重，与安装时同一口径），
+/// 只给了 Maven 地址、没标大小的库让结果为 `None`，免得报一个偏小的数。
+fn download_bytes(json: &VersionJson, ctx: &RuntimeContext) -> Option<u64> {
+    let mut total = json.downloads.as_ref()?.client.as_ref()?.size;
+    let index = json.asset_index.as_ref()?;
+    total += index.size + index.total_size?;
+    for library in select_libraries(json, ctx) {
+        let downloads = library.downloads.as_ref()?;
+        total += downloads
+            .artifact
+            .as_ref()
+            .map_or(0, |artifact| artifact.size);
+        total += library.native_artifact(ctx).map_or(0, |native| native.size);
+    }
+    if let Some(config) = json
+        .logging
+        .as_ref()
+        .and_then(|logging| logging.client.as_ref())
+    {
+        total += config.file.size;
+    }
+    Some(total)
+}
+
 fn cache_name(raw: &str) -> Option<String> {
     raw.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
@@ -666,6 +710,85 @@ mod tests {
             err,
             CoreError::Install(aurora_install::Error::InstallerEntryMissing { .. })
         ));
+    }
+
+    /// 体积按本机生效的库算：不适用于本系统的库与别的系统的 natives 不计；有库没标大小时给不出数。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn version_requirements_sum_what_a_fresh_install_downloads() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        // 版本号取测试专用的，免得与别的用例共用进程内缓存。
+        mount(
+            &server,
+            "/manifest.json",
+            format!(
+                r#"{{"latest":{{"release":"req-full","snapshot":"req-full"}},"versions":[
+                {{"id":"req-full","type":"release","url":"{base}/req-full.json","time":"t","releaseTime":"t"}},
+                {{"id":"req-maven","type":"release","url":"{base}/req-maven.json","time":"t","releaseTime":"t"}}]}}"#
+            ),
+        )
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora =
+            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
+        let os = aurora.runtime().os_name.as_mojang();
+        let other_os = if os == "windows" { "osx" } else { "windows" };
+        mount(
+            &server,
+            "/req-full.json",
+            serde_json::json!({
+                "id": "req-full", "type": "release", "mainClass": "M",
+                "javaVersion": { "component": "java-runtime-delta", "majorVersion": 21 },
+                "downloads": { "client": { "sha1": "c", "size": 1000, "url": "http://x/c.jar" } },
+                "assetIndex": { "id": "17", "sha1": "i", "size": 300, "totalSize": 50_000, "url": "http://x/i.json" },
+                "logging": { "client": {
+                    "argument": "-Dlog4j.configurationFile=${path}",
+                    "file": { "id": "client.xml", "sha1": "l", "size": 7, "url": "http://x/l.xml" },
+                    "type": "log4j2-xml"
+                } },
+                "libraries": [
+                    { "name": "a:common:1", "downloads": { "artifact": { "path": "a", "sha1": "1", "size": 20, "url": "http://x/a" } } },
+                    // 同坐标第二次出现按去重只算一次。
+                    { "name": "a:common:1", "downloads": { "artifact": { "path": "a", "sha1": "1", "size": 20, "url": "http://x/a" } } },
+                    { "name": "a:elsewhere:1",
+                      "rules": [{ "action": "allow", "os": { "name": other_os } }],
+                      "downloads": { "artifact": { "path": "b", "sha1": "2", "size": 4000, "url": "http://x/b" } } },
+                    { "name": "a:lwjgl:2",
+                      "natives": { os: "natives-here", other_os: "natives-there" },
+                      "downloads": {
+                          "artifact": { "path": "c", "sha1": "3", "size": 3, "url": "http://x/c" },
+                          "classifiers": {
+                              "natives-here": { "path": "d", "sha1": "4", "size": 400, "url": "http://x/d" },
+                              "natives-there": { "path": "e", "sha1": "5", "size": 90_000, "url": "http://x/e" }
+                          }
+                      } }
+                ]
+            })
+            .to_string(),
+        )
+        .await;
+        mount(
+            &server,
+            "/req-maven.json",
+            r#"{"id":"req-maven","type":"release","mainClass":"M",
+                "downloads":{"client":{"sha1":"c","size":1000,"url":"http://x/c.jar"}},
+                "assetIndex":{"id":"17","sha1":"i","size":300,"totalSize":50000,"url":"http://x/i.json"},
+                "libraries":[{"name":"a:maven-only:1","url":"https://maven.example/"}]}"#
+                .into(),
+        )
+        .await;
+
+        let full = aurora.version_requirements("req-full").await.unwrap();
+        assert_eq!(full.java_major, 21);
+        assert_eq!(
+            full.download_bytes,
+            Some(1000 + 300 + 50_000 + 7 + 20 + 3 + 400)
+        );
+        assert_eq!(aurora.required_java("req-full").await.unwrap(), 21);
+
+        let maven = aurora.version_requirements("req-maven").await.unwrap();
+        assert_eq!(maven.java_major, LEGACY_JAVA_MAJOR);
+        assert_eq!(maven.download_bytes, None);
     }
 
     #[test]

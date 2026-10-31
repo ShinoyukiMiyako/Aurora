@@ -12,6 +12,8 @@ import { addMockInstance, mockInstanceIds } from "./instances";
 
 /** mock 整合包都要求的游戏版本。 */
 const MOCK_MINECRAFT = "1.21.1";
+/** mock 整合包都报这个版本号。 */
+const MOCK_PACK_VERSION = "1.0.0";
 
 const RULE_TEXT: Record<InstanceNameRule, string> = {
   empty: "名字不能为空",
@@ -127,7 +129,18 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
 
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：48 个远程文件，57 个覆盖文件` });
     await simulateDownload(taskId, `${pack.name} 的 48 个文件`, 96_468_992);
-    addMockInstance(name, MOCK_MINECRAFT, { kind: "fabric", version: "0.16.9" });
+    addMockInstance(
+      name,
+      MOCK_MINECRAFT,
+      { kind: "fabric", version: "0.16.9" },
+      {
+        platform: pack.platform,
+        project_id: source.kind === "platform" ? source.project_id : null,
+        version_id: source.kind === "platform" ? source.version_id : null,
+        name: pack.name,
+        version: MOCK_PACK_VERSION,
+      },
+    );
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `整合包已导入为实例 ${name}` });
     return {
       version_id: name,
@@ -139,7 +152,7 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
         project_id: source.kind === "platform" ? source.project_id : null,
         version_id: source.kind === "platform" ? source.version_id : null,
         name: pack.name,
-        version: "1.0.0",
+        version: MOCK_PACK_VERSION,
         minecraft: MOCK_MINECRAFT,
         loader: { kind: "fabric", version: "0.16.9" },
         remote_files: 48,

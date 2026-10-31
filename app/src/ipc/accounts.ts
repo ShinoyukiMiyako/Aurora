@@ -18,6 +18,10 @@ export interface AccountDto {
   account_type: AccountType;
   /** 外置登录的验证服务器名；其余类型为 null。 */
   auth_server: string | null;
+  /** 外置登录的 API 根地址，可原样交回 authlibLogin 的 serverUrl；其余类型为 null。 */
+  server_url: string | null;
+  /** 外置登录时填的账号（邮箱或用户名），重新登录时预填；其余类型、或较早登录的记录为 null。 */
+  username: string | null;
   /** 加入时刻，毫秒时间戳。同一账户重新登录不改变它。 */
   added_at: number;
   status: AccountStatus;

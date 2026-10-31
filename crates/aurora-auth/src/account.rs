@@ -86,6 +86,9 @@ pub struct YggdrasilCredentials {
     pub api_root: String,
     pub access_token: String,
     pub client_token: String,
+    /// 登录时填的账号（邮箱或用户名），重新登录时预填用；早于这一项的记录为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 /// 按登录类型区分的令牌引用。离线账户无任何令牌。

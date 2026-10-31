@@ -189,9 +189,50 @@ fn crash_report_path(version_dir: &Path) -> PathBuf {
 }
 
 #[derive(Serialize, Deserialize)]
-struct CrashReportFile {
+struct CrashReportFile<R = CrashReport> {
     format: u32,
-    report: CrashReport,
+    report: R,
+}
+
+/// 列表只要崩溃时刻：只反序列化这一项，不把线索与上下文行整份建出来。
+#[derive(Deserialize)]
+struct CrashMoment {
+    at: Option<u64>,
+}
+
+/// 读实例目录里的崩溃报告文件；没有为 `None`，格式版本不对按解析失败报。
+async fn load_crash_file<R: serde::de::DeserializeOwned>(version_dir: &Path) -> Result<Option<R>> {
+    let path = crash_report_path(version_dir);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
+    };
+    let file: CrashReportFile<R> =
+        serde_json::from_slice(&bytes).map_err(|source| aurora_instance::Error::Json {
+            context: "崩溃报告",
+            path: path.clone(),
+            source,
+        })?;
+    if file.format != CRASH_REPORT_FORMAT {
+        return Err(aurora_instance::Error::Json {
+            context: "崩溃报告",
+            path,
+            source: serde::de::Error::custom(format!(
+                "格式版本是 {}，当前只认 {CRASH_REPORT_FORMAT}",
+                file.format
+            )),
+        }
+        .into());
+    }
+    Ok(Some(file.report))
+}
+
+/// 该实例最近一次崩溃的时刻（Unix 毫秒）；没崩溃过为 `None`。调用方负责先校验实例目录。
+pub(crate) async fn last_crash_at(version_dir: &Path) -> Result<Option<u64>> {
+    Ok(load_crash_file::<CrashMoment>(version_dir)
+        .await?
+        .and_then(|moment| moment.at))
 }
 
 /// 覆盖保存实例最近一次的崩溃报告。
@@ -232,30 +273,9 @@ impl Aurora {
     /// 该实例最近一次的崩溃报告；从没崩溃过为 `None`。
     pub async fn last_crash(&self, version_id: &str) -> Result<Option<CrashReport>> {
         let version_dir = self.existing_instance_dir(version_id).await?;
-        let path = crash_report_path(&version_dir);
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
+        let Some(mut report) = load_crash_file::<CrashReport>(&version_dir).await? else {
+            return Ok(None);
         };
-        let file: CrashReportFile =
-            serde_json::from_slice(&bytes).map_err(|source| aurora_instance::Error::Json {
-                context: "崩溃报告",
-                path: path.clone(),
-                source,
-            })?;
-        if file.format != CRASH_REPORT_FORMAT {
-            return Err(aurora_instance::Error::Json {
-                context: "崩溃报告",
-                path,
-                source: serde::de::Error::custom(format!(
-                    "格式版本是 {}，当前只认 {CRASH_REPORT_FORMAT}",
-                    file.format
-                )),
-            }
-            .into());
-        }
-        let mut report = file.report;
         if let Some(started_at) = report.session_started_at {
             report.log_path = session_log_path(&logs_dir(&version_dir), started_at)
                 .await?

@@ -226,6 +226,7 @@ mod tests {
             api_root: "https://ali.example/api/".into(),
             access_token: "at".into(),
             client_token: "ct".into(),
+            username: None,
         };
         let injector = AuthlibInjector::from_credentials(PathBuf::from("agent.jar"), &creds);
         assert_eq!(injector.api_root, "https://ali.example/api/");

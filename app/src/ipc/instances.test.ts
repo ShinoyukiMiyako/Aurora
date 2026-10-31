@@ -18,6 +18,7 @@ import {
   requiredJava,
   setInstanceSettings,
   setSidebarPins,
+  versionRequirements,
   type InstanceSettingsDto,
 } from "./instances";
 import { resetMocks } from "./mock";
@@ -127,6 +128,7 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
     await listManifest();
     await listLoaderVersions("neoforge", "1.21.1");
     await requiredJava("1.21.1");
+    await versionRequirements("1.21.1");
     await openFolder("world", "a", "New World");
     await openFolder("game_dir", null);
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
@@ -144,6 +146,7 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
       ["list_manifest", undefined],
       ["list_loader_versions", { loader: "neoforge", mcVersion: "1.21.1" }],
       ["required_java", { mcVersion: "1.21.1" }],
+      ["version_requirements", { mcVersion: "1.21.1" }],
       ["open_folder", { target: "world", id: "a", world: "New World" }],
       ["open_folder", { target: "game_dir", id: null, world: null }],
     ]);
@@ -166,14 +169,28 @@ describe("mock：列表、内容与元数据", () => {
       loaders: [{ kind: "fabric", version: "0.16.10" }],
       java_major: 21,
       mod_count: 12,
+      world_count: 2,
+      isolated: true,
       description: "和朋友的周末服务器",
       cover: "cherry_planks",
+      memory_mb: 6144,
+      modpack: null,
+      last_crash_at: null,
       activity: null,
       playtime_min: 0,
       last_played_at: null,
     });
+    // 原版正式版跟随全局时不隔离；整合包实例带上整合包自己的名字与版本。
+    expect(list.find((i) => i.id === "1.21.1")).toMatchObject({ isolated: false, world_count: 0, memory_mb: null });
+    expect(list.find((i) => i.id === "RLCraft")?.modpack).toEqual({
+      platform: "curseforge",
+      project_id: "285109",
+      version_id: "4612979",
+      name: "RLCraft",
+      version: "2.9.3",
+    });
     const broken = list.find((i) => i.id === "没装完");
-    expect(broken).toMatchObject({ status: "broken", mod_count: null, mc_version: null });
+    expect(broken).toMatchObject({ status: "broken", mod_count: null, world_count: null, isolated: null, mc_version: null });
     expect(broken?.incomplete).toMatchObject({ kind: "install", outcome: "failed", spec: { loader: "neoforge" } });
   });
 
@@ -213,6 +230,11 @@ describe("mock：列表、内容与元数据", () => {
     expect(await requiredJava("1.20.1")).toBe(17);
     expect(await requiredJava("1.5.2")).toBe(8);
     expect((await rejection(requiredJava("9.9.9"))).code).toBe("install_failed");
+
+    // 下载体积与 Java 同一份清单派生；给不出体积的版本是 null 而不是 0。
+    expect(await versionRequirements("1.20.1")).toEqual({ java_major: 17, download_bytes: 655 * 1_048_576 });
+    expect(await versionRequirements("1.5.2")).toEqual({ java_major: 8, download_bytes: null });
+    expect((await rejection(versionRequirements("9.9.9"))).code).toBe("install_failed");
   });
 
   it("打开文件夹的参数校验与后端一致", async () => {

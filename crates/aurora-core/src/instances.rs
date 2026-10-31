@@ -16,17 +16,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aurora_instance::{
     AURORA_META_DIR, BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker,
     InstanceContent, MarkerStore, PinsViolation, VersionProbe, VersionScan, VersionSettings,
-    VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, dir_footprint,
-    discover_versions, is_safe_instance_id, list_version_dirs, list_worlds, probe_version,
-    read_instance_content, resolve_isolation,
+    VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_worlds,
+    dir_footprint, discover_versions, is_safe_instance_id, list_version_dirs, list_worlds,
+    probe_version, read_instance_content, resolve_isolation,
 };
 use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::InstanceError;
+use crate::crashdiag::last_crash_at;
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
+use crate::modpack::{InstanceModpack, read_instance_modpack};
 
 /// 侧栏最多固定的实例数。
 pub const MAX_SIDEBAR_PINS: usize = 5;
@@ -65,6 +67,10 @@ pub struct InstanceSummary {
     pub incomplete: Option<Readable<IncompleteMarker>>,
     /// 实例目录的创建时刻（Unix 毫秒）；文件系统不记录创建时间时为 `None`。
     pub created_at: Option<u64>,
+    /// 从整合包导入时记下的整合包信息；`Read(None)` 表示不是整合包实例。
+    pub modpack: Readable<Option<InstanceModpack>>,
+    /// 最近一次崩溃的时刻（Unix 毫秒）；`Read(None)` 表示没崩溃过。
+    pub last_crash_at: Readable<Option<u64>>,
 }
 
 /// 实例的版本状态。
@@ -87,6 +93,10 @@ pub struct ReadyVersion {
     pub java_major: Option<u32>,
     /// 工作目录 `mods/` 下的 Mod 文件数；设置文件读不出、定不了工作目录时为 `None`。
     pub mod_count: Option<u32>,
+    /// 工作目录 `saves/` 下的存档数，口径同 [`count_worlds`]；何时为 `None` 同 `mod_count`。
+    pub world_count: Option<u32>,
+    /// 隔离的生效值（实例覆盖、全局档位与磁盘上已有数据共同决定）；何时为 `None` 同 `mod_count`。
+    pub isolated: Option<bool>,
 }
 
 /// 删除前的预览：会一起删掉的存档、占用空间与依赖它的实例。
@@ -129,9 +139,11 @@ impl Aurora {
             .unwrap_or_default())
     }
 
-    /// 列出全部实例：版本信息、设置、未完成标记、Mod 文件数与创建时间一次给齐。
+    /// 列出全部实例：版本信息、设置、未完成标记、Mod 与存档数、隔离生效值、整合包来源、最近崩溃时刻
+    /// 与创建时间一次给齐。
     ///
-    /// Mod 数只数 `mods/` 下的文件，不解析 jar；版本 JSON 解析走进程内缓存，文件没变就不重读。
+    /// Mod 数只数 `mods/` 下的文件，不解析 jar；存档数只数 `saves/` 下的文件夹，不读 level.dat；
+    /// 版本 JSON 解析走进程内缓存，文件没变就不重读。
     pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
         let scan = discover_versions(self.game_dir()).await?;
         let javas = java_majors(&scan);
@@ -419,6 +431,21 @@ async fn summarize(
             Some(Readable::Unreadable(err.to_string()))
         }
     };
+    // 整合包信息与崩溃记录是附属文件：读不出来只标在这一个实例上，和设置文件同一口径。
+    let modpack = match read_instance_modpack(&dir).await {
+        Ok(modpack) => Readable::Read(modpack),
+        Err(err) => {
+            tracing::warn!(id, error = %err, "整合包信息读不出来");
+            Readable::Unreadable(err.to_string())
+        }
+    };
+    let last_crash_at = match last_crash_at(&dir).await {
+        Ok(at) => Readable::Read(at),
+        Err(err) => {
+            tracing::warn!(id, error = %err, "崩溃记录读不出来");
+            Readable::Unreadable(err.to_string())
+        }
+    };
     let meta = tokio::fs::metadata(&dir)
         .await
         .map_err(|source| aurora_base::Error::Io {
@@ -431,7 +458,7 @@ async fn summarize(
     let version = match entry {
         Entry::Broken(broken) => InstanceVersion::Broken(broken.reason),
         Entry::Found(version, java_major) => {
-            let mod_count = match &settings {
+            let workdir = match &settings {
                 Readable::Read(settings) => {
                     let resolved = resolve_isolation(
                         game_dir,
@@ -442,7 +469,9 @@ async fn summarize(
                         version.is_release(),
                     )
                     .await?;
-                    Some(count_mod_files(&resolved.working_dir.join("mods")).await?)
+                    let mods = count_mod_files(&resolved.working_dir.join("mods")).await?;
+                    let worlds = count_worlds(&resolved.working_dir.join("saves")).await?;
+                    Some((mods, worlds, resolved.isolated))
                 }
                 Readable::Unreadable(_) => None,
             };
@@ -452,7 +481,9 @@ async fn summarize(
                 release_type: version.json.release_type.clone(),
                 loaders: version.loaders,
                 java_major,
-                mod_count,
+                mod_count: workdir.map(|(mods, _, _)| mods),
+                world_count: workdir.map(|(_, worlds, _)| worlds),
+                isolated: workdir.map(|(_, _, isolated)| isolated),
             })
         }
     };
@@ -463,6 +494,8 @@ async fn summarize(
         settings,
         incomplete,
         created_at,
+        modpack,
+        last_crash_at,
     })
 }
 
@@ -668,6 +701,7 @@ pub(crate) mod tests {
         IncompleteKind, IncompleteOutcome, InstallSpec, IsolationOverride, IsolationPolicy,
         NameViolation,
     };
+    use serde_json::json;
     use std::sync::Mutex;
 
     pub(crate) fn aurora_at(root: &Path) -> Aurora {
@@ -725,6 +759,11 @@ pub(crate) mod tests {
         for name in ["a.jar", "b.jar.disabled", "notes.txt"] {
             std::fs::write(modded.join("mods").join(name), b"x").unwrap();
         }
+        for world in ["生存", "创造"] {
+            std::fs::create_dir_all(modded.join("saves").join(world)).unwrap();
+        }
+        // 原版不隔离：公共目录里的存档算在原版头上，不算进隔离的模组实例。
+        std::fs::create_dir_all(game.join("saves").join("公共存档")).unwrap();
         VersionSettingsStore::for_version_dir(&modded)
             .save(&VersionSettings {
                 description: Some("周末一起玩".into()),
@@ -761,7 +800,11 @@ pub(crate) mod tests {
         assert!(vanilla.loaders.is_empty());
         // 原版正式版按默认档位不隔离，数的是公共 mods 目录（不存在为 0）。
         assert_eq!(vanilla.mod_count, Some(0));
+        assert_eq!(vanilla.world_count, Some(1));
+        assert_eq!(vanilla.isolated, Some(false));
         assert!(list[0].incomplete.is_none());
+        assert_eq!(list[0].modpack, Readable::Read(None));
+        assert_eq!(list[0].last_crash_at, Readable::Read(None));
 
         assert_eq!(
             list[1].version,
@@ -780,6 +823,8 @@ pub(crate) mod tests {
         assert_eq!(fabric.java_major, Some(21), "沿继承链取原版声明的 Java");
         assert_eq!(fabric.loaders[0].kind, aurora_version::LoaderKind::Fabric);
         assert_eq!(fabric.mod_count, Some(2), "只数 .jar 与 .jar.disabled");
+        assert_eq!(fabric.world_count, Some(2));
+        assert_eq!(fabric.isolated, Some(true), "装了加载器的实例默认隔离");
         let Readable::Read(settings) = &list[2].settings else {
             panic!("设置应可读");
         };
@@ -801,6 +846,81 @@ pub(crate) mod tests {
             panic!("版本 JSON 本身是好的");
         };
         assert_eq!(ready.mod_count, None, "定不了工作目录就不数");
+        assert_eq!(ready.world_count, None);
+        assert_eq!(ready.isolated, None);
+    }
+
+    /// 整合包来源与最近崩溃时刻随列表给出；这两份附属文件坏了只标在这个实例上，列表照常返回。
+    #[tokio::test]
+    async fn list_instances_carries_modpack_origin_and_last_crash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        let pack = write_version(&game, "整合包", &vanilla_json("整合包"));
+        let meta = pack.join(AURORA_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("modpack.json"),
+            serde_json::to_vec(&json!({
+                "schema": 1, "format": "modrinth", "platform": "modrinth",
+                "project_id": "1KVo5zza", "version_id": "abc123",
+                "name": "Fabulously Optimized", "version": "6.4.0", "minecraft": "1.21.1",
+                "loader": null, "remote_files": 80, "override_files": 12, "installed_at": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::crashdiag::save_crash_report(
+            &pack,
+            &crate::crashdiag::CrashReport {
+                at: Some(1_700_000_000_000),
+                exit_code: Some(-1),
+                session_started_at: None,
+                log_path: None,
+                diagnoses: Vec::new(),
+                suspects: Vec::new(),
+                java: None,
+                max_memory_mb: None,
+                warnings: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let bad = write_version(&game, "坏记录", &vanilla_json("坏记录"));
+        let bad_meta = bad.join(AURORA_META_DIR);
+        std::fs::create_dir_all(&bad_meta).unwrap();
+        std::fs::write(bad_meta.join("modpack.json"), b"{oops").unwrap();
+        std::fs::write(
+            bad_meta.join(crate::crashdiag::CRASH_REPORT_FILE),
+            br#"{"format":99,"report":{"at":5}}"#,
+        )
+        .unwrap();
+
+        let list = aurora.list_instances().await.unwrap();
+        let by_id = |id: &str| list.iter().find(|i| i.id == id).unwrap();
+        let Readable::Read(Some(modpack)) = &by_id("整合包").modpack else {
+            panic!("应读出整合包信息：{:?}", by_id("整合包").modpack);
+        };
+        assert_eq!(
+            modpack.platform,
+            Some(aurora_modplatform::Platform::Modrinth)
+        );
+        assert_eq!(modpack.project_id.as_deref(), Some("1KVo5zza"));
+        assert_eq!(modpack.name, "Fabulously Optimized");
+        assert_eq!(modpack.version.as_deref(), Some("6.4.0"));
+        assert_eq!(
+            by_id("整合包").last_crash_at,
+            Readable::Read(Some(1_700_000_000_000))
+        );
+
+        assert!(matches!(by_id("坏记录").modpack, Readable::Unreadable(_)));
+        let Readable::Unreadable(reason) = &by_id("坏记录").last_crash_at else {
+            panic!("格式版本不对应报读不出");
+        };
+        assert!(
+            reason.contains(crate::crashdiag::CRASH_REPORT_FILE),
+            "{reason}"
+        );
     }
 
     #[test]
