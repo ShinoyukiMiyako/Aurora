@@ -1,0 +1,442 @@
+// @vitest-environment jsdom
+import { act } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stubCanvas } from "../../art/illustrations/test-canvas";
+import type { InstanceDto } from "../../ipc/instances";
+import { IpcError } from "../../ipc/errors";
+import type { KnownServerDto, NewsItemDto, PinnedServerDto, PlayDayDto, ServerStatusDto } from "../../state/queries/home";
+import { OverlayRoot } from "../../shell/overlay";
+import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
+import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { RemoteImageProvider } from "../../ui/remote-image";
+import HomePage from "./index";
+import { world } from "./test-data";
+
+const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
+vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+/** 2026-10-30 是星期五，下午三点。 */
+const NOW = new Date(2026, 9, 30, 15, 0, 0).getTime();
+
+let view: Rendered | undefined;
+let nav: NavApi;
+let shell: ShellApi;
+let launcher: LauncherApi;
+let instances: InstanceDto[];
+let pinned: PinnedServerDto[];
+let writeText: ReturnType<typeof vi.fn>;
+
+function Probe() {
+  nav = useNav();
+  shell = useShell();
+  launcher = useLauncher();
+  return null;
+}
+
+const flush = () =>
+  act(async () => {
+    await settle();
+  });
+
+async function mount() {
+  view = render(
+    <LauncherProvider>
+      <ShellProvider>
+        <RemoteImageProvider resolve={async (url) => url}>
+          <Probe />
+          <HomePage route={{ page: "home" }} />
+        </RemoteImageProvider>
+        <OverlayRoot />
+      </ShellProvider>
+    </LauncherProvider>,
+  );
+  await flush();
+}
+
+function day(date: string, entries: [string, number][]): PlayDayDto {
+  return { date, minutes: entries.reduce((t, [, m]) => t + m, 0), instances: entries.map(([version_id, minutes]) => ({ version_id, minutes })) };
+}
+
+const PLAY_DAYS: PlayDayDto[] = [
+  day("2026-10-20", [["创造", 15]]),
+  day("2026-10-26", [["生存", 120]]),
+  day("2026-10-28", [["已删除", 30]]),
+  day("2026-10-29", [["创造", 40]]),
+  day("2026-10-30", [["生存", 95]]),
+];
+
+const NEWS: NewsItemDto[] = [
+  { id: "n-live", title: "Minecraft Live 回顾", summary: "直播内容一览。", date: NOW - 3 * DAY, tag: "event", thumbnail_url: null, game_version: null },
+  { id: "n-1211", title: "Minecraft 1.21.1", summary: "修复若干问题。", date: NOW - DAY, tag: "release", thumbnail_url: null, game_version: "1.21.1" },
+  { id: "n-263", title: "Minecraft 26.3", summary: "新的方块与生物。", date: NOW - 2 * DAY, tag: "release", thumbnail_url: null, game_version: "26.3" },
+];
+
+const KNOWN = (): KnownServerDto[] => [
+  { name: "晨星", address: "play.example", pinned: pinned.some((p) => p.address === "play.example") },
+  { name: "本地", address: "localhost", pinned: pinned.some((p) => p.address === "localhost") },
+];
+
+function ping(address: string): ServerStatusDto {
+  const base = { address, version_name: null, motd: null, favicon: null, checked_at: NOW, error: null };
+  if (address === "play.example") {
+    return { ...base, reachable: true, latency_ms: 38, online: 127, max: 500, version_name: "Paper 1.21.4", motd: "第六周目开荒中", last_seen_at: NOW, last_online: 127 };
+  }
+  return { ...base, reachable: false, latency_ms: null, online: null, max: null, last_seen_at: NOW - 2 * HOUR, last_online: 12_000, error: "连接被拒绝" };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers({ now: NOW });
+  resetRecorder(ipc);
+  stubResizeObserver();
+  stubMatchMedia(false);
+  stubCanvas();
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  writeText = vi.fn(async () => undefined);
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+
+  instances = [
+    instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.9" }], mc_version: "1.21.1", playtime_min: 2480, last_played_at: NOW - 2 * MINUTE, mod_count: 78 }),
+    instanceDto("创造", { mc_version: "1.20.1", playtime_min: 60, last_played_at: NOW - 2 * HOUR }),
+    instanceDto("空岛", { mc_version: "1.21.1", created_at: NOW - DAY }),
+    instanceDto("红石", { mc_version: "1.19.2", playtime_min: 10, last_played_at: NOW - 3 * DAY }),
+  ];
+  pinned = [{ name: "晨星", address: "play.example" }];
+  bootOverrides(ipc, { instances, config: configDto({ selected_version: "生存" }) });
+  ipc.overrides.set("list_instances", () => instances);
+  ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+  ipc.overrides.set("skin_info", () => null);
+  ipc.overrides.set("play_stats", (args: IpcArgs) => {
+    const range = args.range as { from: string; to: string };
+    return { from: range.from, to: range.to, days: PLAY_DAYS, total_minutes: 300, instances: [] };
+  });
+  ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW, offline: false }));
+  ipc.overrides.set("list_pinned_servers", () => pinned);
+  ipc.overrides.set("set_pinned_servers", (args: IpcArgs) => {
+    pinned = args.servers as PinnedServerDto[];
+    return pinned;
+  });
+  ipc.overrides.set("list_known_servers", () => KNOWN());
+  ipc.overrides.set("ping_servers", () => pinned.map((p) => ping(p.address)));
+  ipc.overrides.set("list_instance_content", () => ({
+    resource_packs: [],
+    shader_packs: [],
+    worlds: [world("New World", { name: "海岛据点", last_played: NOW - 2 * MINUTE }), world("旧档", { last_played: NOW - 9 * DAY })],
+  }));
+});
+
+afterEach(() => {
+  view?.unmount();
+  view = undefined;
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+const text = () => document.body.textContent as string;
+const buttonByLabel = (label: string) => {
+  const el = document.querySelector<HTMLElement>(`[aria-label="${label}"]`);
+  if (el === null) throw new Error(`找不到名称为 ${label} 的元素`);
+  return el;
+};
+const buttonByText = (label: string, root: ParentNode = document) => {
+  const el = [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  if (el === undefined) throw new Error(`找不到按钮 ${label}`);
+  return el;
+};
+const click = (el: Element) =>
+  act(() => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+  });
+const openMenu = async (trigger: HTMLElement) => {
+  act(() => trigger.focus());
+  click(trigger);
+  await flush();
+};
+/** 退场动画期间旧菜单还在文档里，取未在退场的那一个。 */
+const menuItems = () => [...document.querySelectorAll<HTMLElement>(':not([data-exiting]) > [role="menu"] [role="menuitem"]')];
+const menuItem = (prefix: string) => {
+  const item = menuItems().find((el) => el.textContent?.startsWith(prefix));
+  if (item === undefined) throw new Error(`菜单里找不到 ${prefix}`);
+  return item;
+};
+const dialog = () => {
+  const all = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')];
+  return all.length === 0 ? null : all[all.length - 1];
+};
+const statLabel = (prefix: string) => {
+  const el = [...document.querySelectorAll<HTMLElement>('[role="group"][aria-label]')].find((g) => g.getAttribute("aria-label")?.startsWith(prefix));
+  if (el === undefined) throw new Error(`找不到数据块 ${prefix}`);
+  return el.getAttribute("aria-label");
+};
+const bar = (datePrefix: string) => {
+  const el = [...document.querySelectorAll<HTMLButtonElement>('[aria-label="近 7 天每日游玩时长"] button')].find((b) => b.getAttribute("aria-label")?.startsWith(datePrefix));
+  if (el === undefined) throw new Error(`找不到 ${datePrefix} 的柱子`);
+  return el;
+};
+
+describe("主页：问候与继续游玩", () => {
+  it("问候当前账户，底栏是今天的时长与连续天数", async () => {
+    await mount();
+    expect(document.querySelector("h1")?.textContent).toBe("下午好，Steve");
+    expect(text()).toContain("10月30日 · 星期五");
+    expect(text()).toContain("离线账户");
+    expect(text()).toContain("1 小时 35 分钟今天");
+    expect(text()).toContain("3 天连续游玩");
+  });
+
+  it("大卡显示当前实例的名称、版本、加载器、Mod 数、累计时长与最近玩的存档", async () => {
+    await mount();
+    expect(document.querySelector("h2")?.textContent).toBe("生存");
+    expect(text()).toContain("上次 2 分钟前");
+    for (const fragment of ["1.21.1", "Fabric", "0.16.9", "78 个 Mod", "累计 41 小时 20 分钟", "存档「海岛据点」"]) expect(text()).toContain(fragment);
+  });
+
+  it("换一个：当前项禁用并标「当前」，选另一个写入配置并就地换成它", async () => {
+    await mount();
+    await openMenu(buttonByText("换一个"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["生存当前", "创造1.20.1", "空岛1.21.1", "红石1.19.2", "全部实例"]);
+    expect(menuItem("生存").getAttribute("aria-disabled")).toBe("true");
+    click(menuItem("创造"));
+    await flush();
+    expect(callsOf(ipc, "update_config")).toContainEqual({ selectedVersion: "创造" });
+    expect(launcher.state.selectedInstanceId).toBe("创造");
+    // 旧面在淡出期间还留在文档里（jsdom 不跑完退场），新面已经挂上
+    expect([...document.querySelectorAll("h2")].map((h) => h.textContent)).toContain("创造");
+  });
+
+  it("没有账户：写「还没有登录账户」，「添加账户」去账户页；没有实例：空状态的主按钮打开新建流程", async () => {
+    bootOverrides(ipc, { accounts: [], instances: [] });
+    instances = [];
+    await mount();
+    expect(document.querySelector("h1")?.textContent).toBe("下午好");
+    expect(text()).toContain("还没有登录账户");
+    expect(text()).toContain("还没有可以继续的实例");
+    expect(text()).not.toContain("最近游玩");
+    click(buttonByText("新建实例"));
+    expect(shell.createInstance).toEqual({ open: true, preset: null });
+    click(buttonByText("添加账户"));
+    expect(nav.route).toEqual({ page: "accounts" });
+  });
+});
+
+describe("主页：最近游玩", () => {
+  it("排除大卡上的实例与没玩过的，按上次游玩倒序；点卡片进详情", async () => {
+    await mount();
+    const titles = [...document.querySelectorAll<HTMLButtonElement>('section[aria-labelledby="home-recent-title"] button[aria-label^="打开「"]')].map((b) => b.textContent);
+    expect(titles).toEqual(["创造", "红石"]);
+    expect(text()).toContain("2 小时前 · 原版");
+    click(buttonByLabel("打开「红石」"));
+    expect(nav.route).toEqual({ page: "instance", id: "红石", tab: "overview" });
+  });
+});
+
+describe("主页：游玩日历与洞察", () => {
+  it("副标题是当月天数与合计；当日详情列出当天玩的实例", async () => {
+    await mount();
+    expect(text()).toContain("2026年10月 · 5 天 · 共 5 小时");
+    expect(text()).toContain("10月30日 · 周五");
+    expect(document.querySelector('[aria-label="打开「生存」"]')).not.toBeNull();
+  });
+
+  it("洞察：近 7 天、连续天数、常玩加载器与累计时长", async () => {
+    await mount();
+    expect(statLabel("近 7 天")).toBe("近 7 天 4.8 小时，较前 7 天 +1800%");
+    expect(statLabel("连续游玩")).toBe("连续游玩 3 天，继续保持");
+    expect(statLabel("常玩加载器")).toBe("常玩加载器 Fabric，近 30 天占 80%");
+    expect(statLabel("累计时长")).toBe("累计时长 43 小时，4 个实例");
+  });
+
+  it("点柱子在日历里选中那天：实例已删除与没玩的日子各有说明", async () => {
+    await mount();
+    click(bar("10月28日"));
+    expect(bar("10月28日").getAttribute("aria-pressed")).toBe("true");
+    expect(text()).toContain("10月28日 · 周三");
+    expect(text()).toContain("30 分钟");
+    expect(text()).toContain("当天玩的实例已被删除");
+    click(bar("10月27日"));
+    expect(text()).toContain("这天没有游玩");
+    expect(text()).toContain("休息也是游戏的一部分。");
+  });
+
+  it("游戏退出后实例的游玩时长变了：游玩记录重取；时长没变的刷新不重取", async () => {
+    await mount();
+    const before = callsOf(ipc, "play_stats").length;
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(callsOf(ipc, "play_stats")).toHaveLength(before);
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, playtime_min: i.playtime_min + 30, last_played_at: NOW } : i));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(callsOf(ipc, "play_stats")).toHaveLength(before + 1);
+  });
+
+  it("游玩记录读取失败：两张卡原位报错，重试再请求一次", async () => {
+    ipc.overrides.set("play_stats", () => {
+      throw new IpcError("io", "playtime.json 读不出来");
+    });
+    await mount();
+    expect(text().match(/游玩记录读取失败/g)).toHaveLength(2);
+    expect(text()).toContain("playtime.json 读不出来");
+    const before = callsOf(ipc, "play_stats").length;
+    click(buttonByText("重试"));
+    await flush();
+    expect(callsOf(ipc, "play_stats")).toHaveLength(before + 1);
+  });
+});
+
+describe("主页：资讯", () => {
+  it("按发布时刻倒序列出，标签写类型", async () => {
+    await mount();
+    const titles = [...document.querySelectorAll<HTMLButtonElement>("button")].map((b) => b.textContent).filter((t) => t?.startsWith("Minecraft"));
+    expect(titles).toEqual(["Minecraft 1.21.1", "Minecraft 26.3", "Minecraft Live 回顾"]);
+    expect(text()).toContain("正式版");
+    expect(text()).toContain("活动");
+  });
+
+  it("已有该版本的实例：主按钮打开它，先关弹窗再跳转", async () => {
+    await mount();
+    click(buttonByText("Minecraft 1.21.1"));
+    await flush();
+    const modal = dialog();
+    expect(modal?.textContent).toContain("修复若干问题。");
+    click(buttonByText("打开「生存」", modal as HTMLElement));
+    await flush();
+    expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "overview" });
+  });
+
+  it("还没有该版本：主按钮带版本预设打开新建；没有对应版本的资讯只有「关闭」", async () => {
+    await mount();
+    click(buttonByText("Minecraft 26.3"));
+    await flush();
+    click(buttonByText("用 26.3 新建实例", dialog() as HTMLElement));
+    expect(shell.createInstance).toEqual({ open: true, preset: { mcVersion: "26.3" } });
+    act(() => shell.closeCreateInstance());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    click(buttonByText("Minecraft Live 回顾"));
+    await flush();
+    const buttons = [...(dialog() as HTMLElement).querySelectorAll("button")].map((b) => b.textContent);
+    expect(buttons).toEqual(["关闭"]);
+  });
+
+  it("拉取失败且没有缓存：原位错误态，重试再拉一次", async () => {
+    ipc.overrides.set("list_news", () => {
+      throw new IpcError("network_failed", "连接超时");
+    });
+    await mount();
+    expect(text()).toContain("资讯暂时没拉下来");
+    expect(text()).toContain("连接超时");
+    const before = callsOf(ipc, "list_news").length;
+    click(buttonByText("重试"));
+    await flush();
+    expect(callsOf(ipc, "list_news")).toHaveLength(before + 1);
+  });
+
+  it("后端给的是缓存：副标题注明离线中", async () => {
+    ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW - DAY, offline: true }));
+    await mount();
+    expect(text()).toContain("游戏更新与官方活动 · 离线中");
+  });
+});
+
+describe("主页：固定的服务器", () => {
+  it("行写在线人数与延迟；加号从多人列表里固定，更多菜单取消固定", async () => {
+    await mount();
+    expect(text()).toContain("1 个 · 在线人数与延迟");
+    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("38 ms");
+    await openMenu(buttonByLabel("固定服务器"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["本地localhost"]);
+    click(menuItem("本地"));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({
+      servers: [
+        { name: "晨星", address: "play.example" },
+        { name: "本地", address: "localhost" },
+      ],
+    });
+    expect(text()).toContain("2 个 · 在线人数与延迟");
+    expect(text()).toContain("连不上");
+    expect(text()).toContain("上次 2 小时前在线 1.2 万");
+
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    click(menuItem("取消固定"));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({ servers: [{ name: "本地", address: "localhost" }] });
+  });
+
+  it("全部已固定时加号菜单只有一条禁用说明", async () => {
+    pinned = [
+      { name: "晨星", address: "play.example" },
+      { name: "本地", address: "localhost" },
+    ];
+    await mount();
+    await openMenu(buttonByLabel("固定服务器"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["所有服务器都已固定"]);
+    expect(menuItems()[0].getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("复制地址：写剪贴板并原位显示「已复制」，2 秒后复原，不弹通知", async () => {
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    click(menuItem("复制地址"));
+    await flush();
+    expect(writeText).toHaveBeenCalledWith("play.example");
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItem("已复制").textContent).toBe("已复制play.example");
+    expect(launcher.state.toasts).toEqual([]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(menuItems().some((el) => el.textContent?.startsWith("复制地址"))).toBe(true);
+  });
+
+  it("主页可见时每 60 秒重测一次", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
+  });
+
+  it("没有固定服务器：紧凑空状态", async () => {
+    pinned = [];
+    await mount();
+    expect(text()).toContain("还没有固定服务器");
+    expect(text()).toContain("把常去的服务器放这里");
+  });
+});
+
+describe("主页：账户皮肤", () => {
+  it("皮肤查询失败：照常画剪影立绘，错误经统一处理报告一次", async () => {
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    expect(document.querySelector('[data-sk-art="skin"]')?.getAttribute("data-art")).toBe("silhouette");
+    expect(launcher.state.toasts.map((t) => t.title)).toEqual(["账户皮肤读不出来"]);
+  });
+});
