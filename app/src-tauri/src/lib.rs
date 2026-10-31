@@ -12,6 +12,7 @@ mod events;
 mod facade;
 mod logging;
 mod tasks;
+mod textures;
 mod window;
 
 use aurora_core::Aurora;
@@ -38,6 +39,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // 自更新装完后重启进程。
         .plugin(tauri_plugin_process::init())
+        // -- art --
+        .register_asynchronous_uri_scheme_protocol(textures::SCHEME, textures::handle)
         .setup(|app| {
             // Aurora::load() 是异步，而 setup 是同步闭包；用 Tauri 运行时 block_on 构造后放进 state。
             // 构造失败（配置损坏等）直接冒泡终止启动，避免带着半初始化的门面继续跑。
@@ -50,6 +53,11 @@ pub fn run() {
             app.manage(commands::instances::InstanceLocks::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
+            // -- accounts --
+            app.manage(commands::accounts::MicrosoftLoginSlot::default());
+            app.manage(commands::accounts::AuthlibPendingSlot::default());
+            // -- art --
+            textures::setup(app);
             window::setup_main_window(app)?;
             Ok(())
         })
@@ -76,6 +84,14 @@ pub fn run() {
             commands::accounts::list_accounts,
             commands::accounts::set_current_account,
             commands::accounts::remove_account,
+            commands::accounts::cancel_microsoft_login,
+            commands::accounts::probe_auth_server,
+            commands::accounts::select_authlib_profile,
+            commands::accounts::refresh_account,
+            // -- art --
+            commands::art::art_status,
+            commands::art::skin_info,
+            commands::art::thumb_register,
             // -- instances --
             commands::instances::list_instances,
             commands::instances::get_instance_settings,

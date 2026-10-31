@@ -21,6 +21,7 @@
 //! ```
 
 pub mod appearance;
+pub mod art;
 pub mod auth;
 mod authlib;
 pub mod config;
@@ -62,8 +63,15 @@ pub use session::{
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
+pub use art::{ArtStatus, SkinInfo, TexResponse, TextureService, ThumbError};
+pub use auth::{AuthServerInfo, AuthlibLogin, AuthlibPending};
+
 // ---- 透传下层类型，让上层只依赖本 crate ----
 pub use aurora_auth::{Account, AccountType, DeviceCodeResponse, GameProfile};
+pub use aurora_auth::{
+    AccountCredentials, AccountStatus, MicrosoftCredentials, SkinModel, SkinRef,
+    YggdrasilCredentials,
+};
 pub use aurora_install::{LoaderSummary, VanillaSummary};
 pub use aurora_instance::{
     BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,

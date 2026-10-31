@@ -106,6 +106,37 @@ pub enum AuthError {
         operation: &'static str,
         message: String,
     },
+
+    /// 登录在完成前被取消（用户关掉了登录弹窗，或新的一次登录顶替了它）。
+    #[error("登录已取消")]
+    Cancelled,
+
+    /// 外置登录认证成功，但这个账户下一个游戏角色都没有，无从组装档案。
+    #[error("这个账户下还没有游戏角色，请先在验证服务器的网站上创建一个")]
+    YggdrasilNoProfile,
+
+    /// 填写的地址能连上，但返回的不是 Yggdrasil 验证服务器的元数据。
+    #[error("{url} 不是外置登录验证服务器：{detail}")]
+    NotYggdrasilServer { url: String, detail: String },
+
+    /// 离线账户库序列化失败。
+    #[error("离线账户库序列化失败")]
+    OfflineStoreSerialize(#[source] serde_json::Error),
+
+    /// 离线账户库文件存在但解析不了（被别的程序写坏或手改成了非法 JSON）。
+    #[error("离线账户库 {} 解析失败（文件可能已损坏）", path.display())]
+    OfflineStoreDeserialize {
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+impl AuthError {
+    /// 是否由取消令牌引起。
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, AuthError::Cancelled)
+    }
 }
 
 /// crate 级 `Result` 别名。
@@ -139,7 +170,12 @@ impl RetryableError for AuthError {
             | AuthError::AccountNotFound(_)
             | AuthError::CredentialSerialize(_)
             | AuthError::CredentialDeserialize(_)
-            | AuthError::Dpapi { .. } => false,
+            | AuthError::Dpapi { .. }
+            | AuthError::Cancelled
+            | AuthError::YggdrasilNoProfile
+            | AuthError::NotYggdrasilServer { .. }
+            | AuthError::OfflineStoreSerialize(_)
+            | AuthError::OfflineStoreDeserialize { .. } => false,
         }
     }
 }
@@ -152,6 +188,14 @@ mod tests {
     fn relogin_required_is_terminal_not_retryable() {
         // “需重登”是确定性失效，绝不能被当作瞬时网络故障重试。
         assert!(!AuthError::ReloginRequired.is_retryable());
+    }
+
+    #[test]
+    fn cancellation_is_recognised_and_never_retried() {
+        assert!(AuthError::Cancelled.is_cancelled());
+        assert!(!AuthError::Cancelled.is_retryable());
+        assert!(!AuthError::ReloginRequired.is_cancelled());
+        assert!(!AuthError::DeviceCodeExpired.is_cancelled());
     }
 
     #[test]

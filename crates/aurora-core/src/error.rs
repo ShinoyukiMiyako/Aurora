@@ -90,6 +90,7 @@ impl CoreError {
             CoreError::Download(err) => err.is_cancelled(),
             CoreError::Install(aurora_install::Error::Download(err)) => err.is_cancelled(),
             CoreError::Java(err) => err.is_cancelled(),
+            CoreError::Auth(err) => err.is_cancelled(),
             _ => false,
         }
     }
@@ -112,6 +113,8 @@ mod tests {
             .is_cancelled()
         );
         assert!(CoreError::Java(aurora_java::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Auth(aurora_auth::AuthError::Cancelled).is_cancelled());
+        assert!(!CoreError::Auth(aurora_auth::AuthError::ReloginRequired).is_cancelled());
 
         // 真正的失败不能被当成取消。
         assert!(!CoreError::NoJava { major: 17 }.is_cancelled());
