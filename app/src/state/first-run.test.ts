@@ -13,7 +13,7 @@ let gameDir: string;
 beforeEach(async () => {
   vi.useFakeTimers();
   resetRecorder(ipc);
-  gameDir = "C:/Users/me/AppData/Local/Petalfall/.minecraft";
+  gameDir = "C:/Users/me/AppData/Local/launcher/.minecraft";
   bootOverrides(ipc, { firstRun: true });
   ipc.overrides.set("get_config", () => configDto({ game_dir: gameDir }));
   ipc.overrides.set("complete_first_run", (args) => {
