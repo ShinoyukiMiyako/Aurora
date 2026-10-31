@@ -88,11 +88,33 @@ export function newTask(draft: TaskDraft, now: number): Task {
   };
 }
 
-/** 有空位时该开始的任务（按队列顺序），已在运行的不算。 */
+/** 写整个实例目录的命令（新建、导入、补全）：期间实例算「安装中」，后端的实例锁里它与这个实例上的任何别的事都互斥。 */
+export const INSTANCE_TASK_COMMANDS: ReadonlySet<string> = new Set(["install_version", "install_modpack", "repair_instance"]);
+
+/** 两个任务挂在同一实例（不分大小写，与后端的锁键一致）上，且至少一个要写整个目录：后端不让它们同时进行。 */
+function excludes(a: Task, b: Task): boolean {
+  if (a.instanceId === null || b.instanceId === null || a.instanceId.toLowerCase() !== b.instanceId.toLowerCase()) return false;
+  return INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command);
+}
+
+/**
+ * 有空位时该开始的任务（按队列顺序），已在运行的不算。与运行中的、或排在它前面的任务在同一实例上互斥的留在队里：
+ * 一起开始的话后到的那个必然以 instance_busy 失败（例如断网恢复后「全部重试」同时拉起同一实例的补全与装 Mod）。
+ * 排在前面、自己也还在等的也算，同一实例上先到的先做，后来的装 Mod 不绕过等着的补全。
+ */
 export function tasksToStart(tasks: readonly Task[]): Task[] {
   const free = MAX_PARALLEL_TASKS - tasks.filter((t) => t.status === "running").length;
   if (free <= 0) return [];
-  return tasks.filter((t) => t.status === "queued").slice(0, free);
+  const ahead = tasks.filter((t) => t.status === "running");
+  const start: Task[] = [];
+  for (const task of tasks) {
+    if (start.length === free) break;
+    if (task.status !== "queued") continue;
+    const blocked = ahead.some((other) => excludes(task, other));
+    ahead.push(task);
+    if (!blocked) start.push(task);
+  }
+  return start;
 }
 
 /** queued 任务在队里的位次，从 1 计；不在排队为 null。 */

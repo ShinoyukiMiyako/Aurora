@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
+import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { resources } from "./resource";
@@ -59,6 +60,60 @@ describe("改实例设置后按需重扫实例列表", () => {
     await store.actions.updateInstanceSettings("生存", patch);
     expect(callsOf(ipc, "list_instances").length - before).toBe(rescans);
     expect(callsOf(ipc, "set_instance_settings")).toHaveLength(1);
+  });
+});
+
+describe("同一实例的设置读改写按调用顺序串行", () => {
+  const initial = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  let disk: Record<string, Record<string, unknown>>;
+
+  beforeEach(() => {
+    disk = { 生存: { ...initial }, 创造: { ...initial } };
+    ipc.overrides.set("get_instance_settings", (args) => ({ ...disk[String(args.id)] }));
+    ipc.overrides.set("set_instance_settings", (args) => {
+      disk[String(args.id)] = args.settings as Record<string, unknown>;
+      return args.settings;
+    });
+  });
+
+  it("连着改两项（全屏、JVM 参数）：两次都落盘，后一次不按改前读到的值把前一次冲掉", async () => {
+    const [first, second] = await Promise.all([
+      store.actions.updateInstanceSettings("生存", { fullscreen: true }),
+      store.actions.updateInstanceSettings("生存", { jvmArgs: "-Xss2m" }),
+    ]);
+    expect(disk["生存"]).toMatchObject({ fullscreen: true, jvm_args: "-Xss2m" });
+    expect(first).toMatchObject({ fullscreen: true, jvmArgs: "" });
+    expect(second).toMatchObject({ fullscreen: true, jvmArgs: "-Xss2m" });
+  });
+
+  it("前一次写入失败不挡后面排着的那次，失败原样交给它自己的调用方", async () => {
+    let failNext = true;
+    ipc.overrides.set("set_instance_settings", (args) => {
+      if (failNext) {
+        failNext = false;
+        throw new IpcError("invalid_argument", "分辨率不合法", { field: "resolution" });
+      }
+      disk[String(args.id)] = args.settings as Record<string, unknown>;
+      return args.settings;
+    });
+    const results = await Promise.allSettled([
+      store.actions.updateInstanceSettings("生存", { resolution: { width: 0, height: 0 } }),
+      store.actions.updateInstanceSettings("生存", { memoryMb: 4096 }),
+    ]);
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "invalid_argument" } });
+    expect(results[1].status).toBe("fulfilled");
+    expect(disk["生存"]).toMatchObject({ memory_mb: 4096, resolution: { width: 854, height: 480 } });
+  });
+
+  it("不同实例之间不互相等：「创造」的写入不排在「生存」还没回来的那次后面", async () => {
+    const held = deferred<unknown>();
+    ipc.overrides.set("get_instance_settings", (args) => (args.id === "生存" ? held.promise : { ...disk[String(args.id)] }));
+    const slow = store.actions.updateInstanceSettings("生存", { fullscreen: true });
+    await store.actions.updateInstanceSettings("创造", { fullscreen: true });
+    expect(disk["创造"]).toMatchObject({ fullscreen: true });
+    held.resolve({ ...initial });
+    await slow;
+    expect(disk["生存"]).toMatchObject({ fullscreen: true });
   });
 });
 
@@ -847,5 +902,76 @@ describe("删除还在安装的新建实例", () => {
     const titles = store.getState().toasts.map((t) => t.title);
     expect(titles).not.toContain("「生存」已修复");
     expect(titles).toContain("已删除「生存」");
+  });
+});
+
+describe("重启后重试上次关闭时中断的新建与导入", () => {
+  /** 上次关闭时还在跑的任务：重启后恢复为「关闭时中断」的失败。 */
+  function interrupted(id: string, kind: TaskRecordDto["kind"], instanceId: string, command: string, args: Record<string, unknown>): TaskRecordDto {
+    return {
+      id,
+      kind,
+      title: `任务 ${id}`,
+      detail: "",
+      instance_id: instanceId,
+      status: "running",
+      progress: 0.3,
+      bytes: 0,
+      total_bytes: null,
+      speed_bps: 0,
+      attempt: 1,
+      error: null,
+      created_at: 1_719_999_000_000,
+      finished_at: null,
+      spec: { command, args },
+    };
+  }
+
+  async function restartWith(record: TaskRecordDto): Promise<void> {
+    store.stop();
+    ipc.overrides.set("load_task_journal", () => [record]);
+    store = await startedStore();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["failed"]);
+  }
+
+  const entry = (id: string) => store.getState().instances.find((i) => i.id === id);
+
+  it("新建：重试期间实例列表里有按命令参数推出的占位项；装好后由扫描项接替并自动固定", async () => {
+    await restartWith(
+      interrupted("t-old", "game", "新世界", "install_version", { id: "1.21.1", loader: "fabric", loaderVersion: "0.16.0", targetName: "新世界" }),
+    );
+    const install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    store.actions.retryTask("t-old");
+    await settle();
+    expect(callsOf(ipc, "install_version")).toHaveLength(1);
+    expect(entry("新世界")).toMatchObject({ placeholder: true, status: "installing", mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.0" });
+    expect(store.getState().sidebarPins).toEqual(["新世界"]);
+
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.21.1" })];
+    install.resolve({ id: "新世界" });
+    await settle();
+    expect(entry("新世界")).toMatchObject({ placeholder: false, status: "ready" });
+    expect(store.getState().instances.filter((i) => i.id === "新世界")).toHaveLength(1);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["新世界"] }]);
+  });
+
+  it("导入整合包：全部重试期间同样有占位项，失败后重扫落定才撤下", async () => {
+    await restartWith(interrupted("t-pack", "modpack", "整合包", "install_modpack", { source: { kind: "file", path: "C:/packs/pack.mrpack" }, name: "整合包" }));
+    const pack = deferred<unknown>();
+    ipc.overrides.set("install_modpack", () => pack.promise);
+    expect(store.actions.retryFailedTasks()).toBe(1);
+    await settle();
+    expect(entry("整合包")).toMatchObject({ placeholder: true, status: "installing" });
+
+    const scan = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => scan.promise);
+    pack.reject(new IpcError("modpack_invalid", "清单读不出来"));
+    await settle();
+    expect(entry("整合包")).toMatchObject({ placeholder: true });
+    scan.resolve(instances);
+    await settle();
+    expect(entry("整合包")).toBeUndefined();
   });
 });

@@ -101,6 +101,7 @@ import {
   completeCompositeStep,
   compositeProgress,
   findDuplicate,
+  INSTANCE_TASK_COMMANDS,
   isActiveTask,
   markCancelled,
   markDone,
@@ -377,9 +378,6 @@ const TASK_COMMANDS = new Set([
  * 存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
  */
 const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb"] as const;
-
-/** 写整个实例目录的任务：期间实例算「安装中」。其余挂在实例上的任务（装、更新 Mod 与资源）只改动其中的 Mod 与资源，算 modifying。 */
-const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
 
 /** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
 const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
@@ -824,7 +822,7 @@ class StateDeriver {
     const creating = new Map<string, CreationMeta>();
     for (const t of active) {
       if (t.instanceId === null) continue;
-      (INSTANCE_TASKS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
+      (INSTANCE_TASK_COMMANDS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
@@ -895,6 +893,9 @@ export class LauncherStore {
   private journalTimer: ReturnType<typeof setTimeout> | null = null;
   private loginGen = 0;
   private lastScanAt = 0;
+  /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
+  private scanIssued = 0;
+  private scanApplied = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
   /**
@@ -923,6 +924,11 @@ export class LauncherStore {
    * 两次固定、或装好的新实例落地自动固定撞上用户取消固定，后写的会把先写的那一项冲掉。
    */
   private sidebarPinChain: Promise<void> = Promise.resolve();
+  /**
+   * 实例设置只能整份写入，改一项要先读出整份再写回。设置页连着改两项（或装好的 Java 落地固定、崩溃页一键调内存撞上
+   * 用户在改设置）时，两次都读到改前的那份，后写的会把先写的那一项冲回去。所以同一实例（键不分大小写）的读改写排成一条链。
+   */
+  private readonly settingsChains = new Map<string, Promise<void>>();
 
   readonly actions: LauncherActions;
   private readonly net: NetworkMonitor;
@@ -1058,11 +1064,21 @@ export class LauncherStore {
     this.set({ accounts: list.map(accountFromDto), currentAccountId: current === null ? null : current.uuid });
   }
 
-  private async fetchInstances(extra?: (raw: RawState, scanned: InstanceSummary[]) => Partial<RawState>): Promise<void> {
+  /**
+   * 重扫实例列表。几处会同时发起重扫（窗口获得焦点、游戏退出、任务落地、删除与改名），先发出的那次可能后回来：
+   * 它读的是更早的盘面，照单采纳会让刚删掉的实例回到列表、刚改名的实例变回旧名。所以只采纳比已采纳的那次更晚发出的结果；
+   * 晚到的旧结果丢掉，但 extra（撤占位项、改名迁移）照样套在已采纳的那份更新的列表上。
+   */
+  private async fetchInstances(extra?: (raw: RawState) => Partial<RawState>): Promise<void> {
+    const seq = ++this.scanIssued;
     const dtos: InstanceDto[] = await instancesIpc.listInstances();
-    const scanned = dtos.map((dto) => instanceFromDto(dto, { pins: [], busyTaskInstanceIds: new Set() }));
-    this.lastScanAt = Date.now();
-    this.set((raw) => ({ scanned, ...(extra === undefined ? {} : extra(raw, scanned)) }));
+    const fresh = seq > this.scanApplied;
+    if (fresh) {
+      this.scanApplied = seq;
+      this.lastScanAt = Date.now();
+    }
+    const scanned = fresh ? { scanned: dtos.map((dto) => instanceFromDto(dto, { pins: [], busyTaskInstanceIds: new Set() })) } : {};
+    this.set((raw) => ({ ...scanned, ...(extra === undefined ? {} : extra(raw)) }));
   }
 
   private async fetchPins(): Promise<void> {
@@ -1487,6 +1503,16 @@ export class LauncherStore {
     return meta === undefined ? metaFromSpec(task) : meta;
   }
 
+  /**
+   * 重试时补上入队上下文：重启后恢复的任务没有它，而实例列表的占位项、结束时留占位到重扫落定、装好后自动固定都只认
+   * taskMeta。不补的话，重试上次关闭时中断的新建或导入，安装期间实例不在列表里，任务行的「查看实例」也无处可去。
+   */
+  private restoredMeta(raw: RawState, task: Task): Partial<RawState> {
+    if (raw.taskMeta[task.id] !== undefined) return {};
+    const meta = metaFromSpec(task);
+    return meta === null ? {} : { taskMeta: { ...raw.taskMeta, [task.id]: meta } };
+  }
+
   private onTaskDone(id: string, attempt: number, result: unknown): void {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
@@ -1537,7 +1563,7 @@ export class LauncherStore {
     this.tasksChanged();
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫。占位项与重扫结果在同一次
     // 更新里交接：盘上留了目录就由扫描项接替，没留就移除
-    if (INSTANCE_TASKS.has(before.spec.command)) {
+    if (INSTANCE_TASK_COMMANDS.has(before.spec.command)) {
       this.background(
         ACTION_ERROR.refreshInstances,
         this.fetchInstances((raw) => this.withoutLanding(raw, id)).finally(() => this.endLanding(id)),
@@ -1582,8 +1608,10 @@ export class LauncherStore {
   /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。重扫结果与撤下占位项在同一次更新里。 */
   private async settleNewInstance(taskId: string, id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
-      const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
-      await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
+      await this.queueInstanceSettings(id, async () => {
+        const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
+        await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
+      });
     }
     if (pin) {
       await this.queueSidebarPins(async () => {
@@ -1602,6 +1630,25 @@ export class LauncherStore {
       () => undefined,
       () => undefined,
     );
+    return run;
+  }
+
+  /**
+   * 排进这个实例的设置读改写链（见 settingsChains）：前一次落定后才开始；这一次的结果与失败照常交给调用方，不挡后面排着的。
+   * 链在排空时撤掉，不随用过的实例 id 越积越多。
+   */
+  private queueInstanceSettings<T>(id: string, work: () => Promise<T>): Promise<T> {
+    const key = id.toLowerCase();
+    const previous = this.settingsChains.get(key);
+    const run = (previous === undefined ? Promise.resolve() : previous).then(work);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.settingsChains.set(key, settled);
+    void settled.then(() => {
+      if (this.settingsChains.get(key) === settled) this.settingsChains.delete(key);
+    });
     return run;
   }
 
@@ -2138,8 +2185,10 @@ export class LauncherStore {
         return newId;
       },
       async updateInstanceSettings(id, patch) {
-        const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
-        const saved = instanceSettingsFromDto(await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, ...patch })));
+        const saved = await store.queueInstanceSettings(id, async () => {
+          const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
+          return instanceSettingsFromDto(await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, ...patch })));
+        });
         invalidateResources(`settings:${id}`);
         if (LISTED_INSTANCE_SETTINGS.some((key) => key in patch)) await store.fetchInstances();
         return saved;
@@ -2407,7 +2456,7 @@ export class LauncherStore {
           store.pushToast("info", TASK_TOAST.duplicate(task.title).title);
           return;
         }
-        store.set((raw) => ({ tasks: retryTask(raw.tasks, id) }));
+        store.set((raw) => ({ tasks: retryTask(raw.tasks, id), ...store.restoredMeta(raw, task) }));
         store.tasksChanged();
       },
       retryFailedTasks() {
@@ -2421,7 +2470,7 @@ export class LauncherStore {
           }
           // 逐个排：前一个重试后，同一件事的后一个就算重复
           if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
-          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id) }));
+          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id), ...store.restoredMeta(raw, task) }));
           retried += 1;
         }
         if (retried > 0) store.tasksChanged();

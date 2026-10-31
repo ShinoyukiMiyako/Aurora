@@ -73,7 +73,8 @@ export class UpdaterController {
   async check(): Promise<void> {
     const before = this.state;
     this.dispatch({ type: "check_start" });
-    if (this.state.phase.kind !== "checking") throw new Error(`当前阶段 ${before.phase.kind} 不能检查更新`);
+    // 状态机不认这次开始时原样返回：已在检查中时也是这样，阶段虽然还是 checking，这一次不能再发请求
+    if (this.state === before || this.state.phase.kind !== "checking") throw new Error(`当前阶段 ${before.phase.kind} 不能检查更新`);
     try {
       const update = await this.port.check();
       this.dispatch({ type: "check_done", update, at: this.now() });
@@ -86,9 +87,10 @@ export class UpdaterController {
   /** 下载失败同样是面板的正式状态（显示原因与重试）；用户取消回到「有更新」。 */
   async download(): Promise<void> {
     const taskId = this.newTaskId();
-    const before = this.state.phase.kind;
+    const before = this.state;
     this.dispatch({ type: "download_start", taskId });
-    if (this.state.phase.kind !== "downloading") throw new Error(`当前阶段 ${before} 不能开始下载`);
+    // 已在下载时再起一个会与进行中的那个抢同一个安装包，取消也只作用于状态里记着的那一个
+    if (this.state === before || this.state.phase.kind !== "downloading") throw new Error(`当前阶段 ${before.phase.kind} 不能开始下载`);
     try {
       const update = await this.port.download(taskId, (bytes, totalBytes) => this.dispatch({ type: "download_progress", taskId, bytes, totalBytes }));
       this.dispatch({ type: "download_done", taskId, update });
@@ -117,9 +119,9 @@ export class UpdaterController {
 
   /** 安装没能拉起时回到「已下载」并把原错误抛给调用方（外层统一提示）。 */
   async install(): Promise<void> {
-    const before = this.state.phase.kind;
+    const before = this.state;
     this.dispatch({ type: "install_start" });
-    if (this.state.phase.kind !== "installing") throw new Error(`当前阶段 ${before} 不能安装更新`);
+    if (this.state === before || this.state.phase.kind !== "installing") throw new Error(`当前阶段 ${before.phase.kind} 不能安装更新`);
     try {
       await this.port.install();
     } catch (error) {
