@@ -24,5 +24,6 @@ pub mod servers;
 pub mod system;
 pub mod tasks;
 pub mod updater;
+pub mod window;
 
 pub use error::CommandError;

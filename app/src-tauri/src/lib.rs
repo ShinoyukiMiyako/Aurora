@@ -182,6 +182,8 @@ pub fn run() {
             commands::updater::download_update,
             commands::updater::install_update,
             commands::updater::set_install_on_exit,
+            // -- window --
+            commands::window::restore_window_without_focus,
         ])
         .build(context)
         .expect("error while building tauri application")

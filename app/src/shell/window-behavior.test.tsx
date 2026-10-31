@@ -18,7 +18,7 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 interface FakeWindow {
-  port: WindowPort & Record<"show" | "minimize" | "unminimize" | "destroy" | "requestAttention", ReturnType<typeof vi.fn>>;
+  port: WindowPort & Record<"show" | "minimize" | "restoreWithoutFocus" | "destroy" | "requestAttention", ReturnType<typeof vi.fn>>;
   flags: { focused: boolean; minimized: boolean; maximized: boolean };
   /** 模拟 Alt+F4：依次调用登记的关闭请求处理器，返回是否挡住了默认关闭。 */
   requestClose(): Promise<boolean>;
@@ -38,7 +38,7 @@ function fakeWindow(init: Partial<FakeWindow["flags"]> = {}): FakeWindow {
     minimize: vi.fn(async () => {
       flags.minimized = true;
     }),
-    unminimize: vi.fn(async () => {
+    restoreWithoutFocus: vi.fn(async () => {
       flags.minimized = false;
     }),
     toggleMaximize: async () => {
@@ -262,7 +262,7 @@ describe("启动后的窗口行为与后台提醒", () => {
     expect(win.port.minimize).toHaveBeenCalledTimes(1);
     act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
     await flush();
-    expect(win.port.unminimize).toHaveBeenCalledTimes(1);
+    expect(win.port.restoreWithoutFocus).toHaveBeenCalledTimes(1);
   });
 
   it("设置为保持打开：进入运行时不动窗口", async () => {
@@ -287,7 +287,7 @@ describe("启动后的窗口行为与后台提醒", () => {
     });
     act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 1000 }));
     await flush();
-    expect(win.port.unminimize).toHaveBeenCalledTimes(1);
+    expect(win.port.restoreWithoutFocus).toHaveBeenCalledTimes(1);
     expect(win.port.requestAttention).toHaveBeenCalledTimes(1);
   });
 
