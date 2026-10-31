@@ -542,13 +542,50 @@ fn release_summary(body: Option<&str>) -> String {
         return String::new();
     };
     match body.lines().map(str::trim).find(|line| is_prose(line)) {
-        Some(line) => ["- ", "* ", "+ "]
-            .into_iter()
-            .find_map(|marker| line.strip_prefix(marker))
-            .map_or(line, str::trim_start)
-            .to_owned(),
+        Some(line) => plain_inline(
+            ["- ", "* ", "+ "]
+                .into_iter()
+                .find_map(|marker| line.strip_prefix(marker))
+                .map_or(line, str::trim_start),
+        ),
         None => String::new(),
     }
+}
+
+/// 主页把摘要当纯文本显示，行内 Markdown 记号会原样露出来：链接与图片只留文字，去掉加粗、删除线与
+/// 行内代码的记号。单个 `*`、`_` 也可能是乘号或 snake_case 里的下划线，不动。
+fn plain_inline(line: &str) -> String {
+    let mut text = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let link = after
+            .find(']')
+            .filter(|&close| after[close + 1..].starts_with('('))
+            .and_then(|close| {
+                // 链接地址里不会有空白：先碰到空白说明这不是链接，不能一路吞到后面别处的右括号。
+                let url = &after[close + 2..];
+                url.find(|c: char| c == ')' || c.is_whitespace())
+                    .filter(|&end| url[end..].starts_with(')'))
+                    .map(|end| (close, close + 2 + end))
+            });
+        match link {
+            Some((close, end)) => {
+                let before = &rest[..open];
+                text.push_str(before.strip_suffix('!').unwrap_or(before));
+                text.push_str(&after[..close]);
+                rest = &after[end + 1..];
+            }
+            None => {
+                text.push_str(&rest[..=open]);
+                rest = after;
+            }
+        }
+    }
+    text.push_str(rest);
+    ["**", "__", "~~", "`"]
+        .into_iter()
+        .fold(text, |text, mark| text.replace(mark, ""))
 }
 
 fn is_prose(line: &str) -> bool {
@@ -815,7 +852,7 @@ mod tests {
 
         assert!(!releases[1].prerelease);
         assert_eq!(releases[1].item.title, "v0.2.1", "名字为空串时用标签名");
-        assert_eq!(releases[1].item.summary, "**下载源** 测速更准");
+        assert_eq!(releases[1].item.summary, "下载源 测速更准");
         assert_eq!(releases[2].item.title, "v0.2.0", "名字为 null 时用标签名");
         assert_eq!(releases[2].item.summary, "");
         assert_eq!(releases[2].item.date, OCT_30 - 29 * DAY);
@@ -843,11 +880,44 @@ mod tests {
             release_summary(Some("# 标题\r\n\r\n+  加号列表\r\n")),
             "加号列表"
         );
+        // 以 ** 开头的是加粗不是列表：记号去掉，正文一字不少。
         assert_eq!(
             release_summary(Some("**加粗开头**的正文")),
-            "**加粗开头**的正文"
+            "加粗开头的正文"
         );
         assert_eq!(release_summary(Some("***\n-1 不是列表")), "-1 不是列表");
+    }
+
+    /// 主页按纯文本显示摘要：行内 Markdown 记号去掉只留文字，单个 * 与 _ 有歧义（乘号、snake_case）不动。
+    #[test]
+    fn release_summary_drops_inline_markdown() {
+        // GitHub 自动生成的说明里没有 PR 时，第一行正文就是这一句。
+        assert_eq!(
+            release_summary(Some(
+                "**Full Changelog**: https://github.com/o/r/compare/v0.1.0...v0.2.0"
+            )),
+            "Full Changelog: https://github.com/o/r/compare/v0.1.0...v0.2.0"
+        );
+        assert_eq!(
+            release_summary(Some(
+                "* 修复 [#12](https://github.com/o/r/pull/12) 里 `snake_case` 的问题"
+            )),
+            "修复 #12 里 snake_case 的问题"
+        );
+        assert_eq!(
+            release_summary(Some(
+                "![图标](https://x/a.png) 新图标，~~旧说法~~，__强调__"
+            )),
+            "图标 新图标，旧说法，强调"
+        );
+        assert_eq!(
+            release_summary(Some("- [x] 勾选框 [不是链接] (也不是) a_b * c")),
+            "[x] 勾选框 [不是链接] (也不是) a_b * c"
+        );
+        assert_eq!(
+            release_summary(Some("[没闭合](https://x 与 [空]()")),
+            "[没闭合](https://x 与 空"
+        );
     }
 
     async fn mount_feeds(server: &MockServer, news: &str, notes: &str) {
