@@ -42,8 +42,9 @@ pub async fn ensure_complete(
     target_id: &str,
 ) -> Result<CompletionReport> {
     // 第一批：库 + 日志配置 + 客户端 jar + assetIndex（都并入一池）。
-    let mut primary = plan::library_tasks(version, cx.runtime, cx.layout)?;
-    let libraries = primary.len();
+    let library_tasks = plan::library_tasks(version, cx.runtime, cx.layout)?;
+    let libraries = library_tasks.len();
+    let mut primary = skip_present_unverifiable(library_tasks).await?;
 
     let client_jar =
         if let Some(client) = version.downloads.as_ref().and_then(|d| d.client.as_ref()) {
@@ -87,6 +88,30 @@ pub async fn ensure_complete(
         assets,
         natives,
     })
+}
+
+/// 去掉落点上已有文件、却既无 sha1 也无大小可比的任务。
+///
+/// 只有坐标和仓库地址的库（Fabric 与旧版 Forge 的条目、外部安装器写进来的 OptiFine）没有任何校验信息，
+/// 下载引擎认不出它们已经就绪，每次都会重下；其中有的在声明的仓库里根本没有（旧版 Forge 的通用 jar
+/// 由安装器从 installer 里解出，按坐标去拉是 404），重下只会让整批失败。官方启动器对这类库也是在盘上
+/// 即用，启动前的缺失检查同样如此。
+pub(crate) async fn skip_present_unverifiable(
+    tasks: Vec<DownloadTask>,
+) -> Result<Vec<DownloadTask>> {
+    let mut kept = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if task.sha1.is_none() && task.size.is_none() {
+            match tokio::fs::metadata(&task.dest).await {
+                Ok(meta) if meta.is_file() => continue,
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => return Err(io_err(&task.dest, source)),
+            }
+        }
+        kept.push(task);
+    }
+    Ok(kept)
 }
 
 /// 从磁盘读回并解析已下载的 assetIndex。
@@ -245,6 +270,61 @@ mod tests {
             std::fs::read(target.join("sub").join("b.txt")).unwrap(),
             b"BBBBBB"
         );
+    }
+
+    /// 只有坐标和仓库地址的库在盘上就算就绪，补全不再按坐标重拉（旧版 Forge 的通用 jar 在仓库里是
+    /// 404）；缺的照常下载，带 sha1 的照常校验。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn present_libraries_without_checksums_are_not_fetched_again() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/net/minecraftforge/forge/1.8.9-11.15.1.2318-1.8.9/forge-1.8.9-11.15.1.2318-1.8.9.jar"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/org/scala-lang/scala-library/2.11.1/scala-library-2.11.1.jar",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"scala".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri());
+        let version: VersionJson = serde_json::from_value(serde_json::json!({
+            "id": "1.8.9-forge",
+            "libraries": [
+                {"name": "net.minecraftforge:forge:1.8.9-11.15.1.2318-1.8.9", "url": base},
+                {"name": "org.scala-lang:scala-library:2.11.1", "url": base}
+            ]
+        }))
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let universal = layout
+            .library_path_for_coordinate("net.minecraftforge:forge:1.8.9-11.15.1.2318-1.8.9")
+            .unwrap();
+        std::fs::create_dir_all(universal.parent().unwrap()).unwrap();
+        std::fs::write(&universal, b"universal").unwrap();
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = RetryPolicy::default();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let report = ensure_complete(cx, &version, "1.8.9-forge").await.unwrap();
+
+        assert_eq!(report.libraries, 2, "两个库都算确保就绪");
+        assert_eq!(std::fs::read(&universal).unwrap(), b"universal");
+        let scala = layout
+            .library_path_for_coordinate("org.scala-lang:scala-library:2.11.1")
+            .unwrap();
+        assert_eq!(std::fs::read(scala).unwrap(), b"scala");
     }
 
     /// virtual 布局却既没有 assetIndex 也没有 assets 字段：报缺少资源索引，而不是物化到

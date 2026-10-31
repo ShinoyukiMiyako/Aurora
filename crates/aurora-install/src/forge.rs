@@ -19,6 +19,7 @@ use aurora_download::{CancellationToken, SourcePlan};
 use serde::Deserialize;
 use tokio::process::{Child, Command};
 
+use crate::complete;
 use crate::context::InstallContext;
 use crate::error::{Error, Result, io_err, zip_err};
 use crate::net;
@@ -491,10 +492,18 @@ impl<'a> ForgeInstaller<'a> {
             aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
         }
 
-        // 下载 install_profile 与 version.json 声明的库（本地产出的通用 jar 无 url，自动跳过）。
+        // 下载 install_profile 与 version.json 声明的库。下载地址留空的是 installer 自带的
+        // （放在 `maven/` 下），从 installer 解出，不进下载批次：空地址交给下载引擎只会整批失败。
         let mut libs = profile.libraries.clone();
         libs.extend(embedded.libraries.clone());
-        let tasks = plan::tasks_for_libraries(&libs, self.cx.runtime, self.cx.layout)?;
+        let (bundled, remote): (Vec<_>, Vec<_>) = libs.into_iter().partition(is_bundled);
+        extract_bundled_libraries(installer, &bundled, self.cx.layout).await?;
+        let tasks = complete::skip_present_unverifiable(plan::tasks_for_libraries(
+            &remote,
+            self.cx.runtime,
+            self.cx.layout,
+        )?)
+        .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
         // 解出 data 表里 `/jar 内路径` 型取值到独立临时目录。
@@ -680,8 +689,14 @@ impl<'a> ForgeInstaller<'a> {
             .ok_or_else(|| Error::InvalidLibraryCoordinate { name: coord })?;
         extract_zip_entry_to_async(installer, file_path.trim_start_matches('/'), &dest).await?;
 
-        let tasks =
-            plan::tasks_for_libraries(&embedded.libraries, self.cx.runtime, self.cx.layout)?;
+        // versionInfo 里的 Forge 库条目只有坐标和仓库地址，仓库里那个坐标并没有文件（只有
+        // `-universal.jar`）；它就是刚解出的通用 jar，在盘上即算就绪。
+        let tasks = complete::skip_present_unverifiable(plan::tasks_for_libraries(
+            &embedded.libraries,
+            self.cx.runtime,
+            self.cx.layout,
+        )?)
+        .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
         Ok((
@@ -735,6 +750,72 @@ async fn extract_zip_entry_to_async(archive: &Path, entry: &str, dest: &Path) ->
     let bytes = read_zip_entry_async(archive, entry).await?;
     aurora_base::fs::atomic_write(dest, &bytes).await?;
     Ok(())
+}
+
+/// 库条目声明了下载件、地址却留空：这类库由 installer 自带。
+fn is_bundled(lib: &aurora_version::Library) -> bool {
+    lib.downloads
+        .as_ref()
+        .and_then(|d| d.artifact.as_ref())
+        .is_some_and(|artifact| artifact.url.is_empty())
+}
+
+/// 把 installer 自带的库从 `maven/<路径>` 解到库目录，按条目声明的 sha1 校验。
+///
+/// 盘上已有且 sha1 对得上的不再重写：同一 Forge 版本的另一个实例可能正在运行，Windows 上覆盖
+/// 一个被占用的 jar 会失败。
+async fn extract_bundled_libraries(
+    installer: &Path,
+    libraries: &[aurora_version::Library],
+    layout: &crate::layout::GameLayout,
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for lib in libraries {
+        let artifact = lib
+            .downloads
+            .as_ref()
+            .and_then(|d| d.artifact.as_ref())
+            .expect("is_bundled 已保证带下载件");
+        let rel = artifact
+            .path
+            .clone()
+            .or_else(|| crate::maven::artifact_path(&lib.name))
+            .ok_or_else(|| Error::InvalidLibraryCoordinate {
+                name: lib.name.clone(),
+            })?;
+        if !seen.insert(rel.clone()) {
+            continue;
+        }
+        let dest = layout.library_path(&rel);
+        if bundled_library_ready(&dest, &artifact.sha1).await? {
+            continue;
+        }
+        let bytes = read_zip_entry_async(installer, &format!("maven/{rel}")).await?;
+        if !artifact.sha1.is_empty() {
+            let mut hasher = aurora_base::fs::Sha1Hasher::new();
+            hasher.update(&bytes);
+            hasher.verify(&artifact.sha1)?;
+        }
+        aurora_base::fs::atomic_write(&dest, &bytes).await?;
+    }
+    Ok(())
+}
+
+/// 自带库的落点上是否已经是对的文件。没有 sha1 可比时一律重新解出。
+async fn bundled_library_ready(dest: &Path, sha1: &str) -> Result<bool> {
+    if sha1.is_empty() {
+        return Ok(false);
+    }
+    match aurora_base::fs::verify_sha1(dest, sha1).await {
+        Ok(()) => Ok(true),
+        Err(aurora_base::Error::HashMismatch { .. }) => Ok(false),
+        Err(aurora_base::Error::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(false)
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// 把 data 表里 `/jar 内路径` 型取值从 installer 解出到 `tmp_dir`，返回「原始取值 -> 临时路径」映射。
@@ -1263,6 +1344,181 @@ mod tests {
         let (_, summary) = waiting.await.unwrap();
         assert_eq!(summary.id, "1.12.2-forge-14.23.5.2860");
         assert!(!server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// 按给定条目造一个 installer zip，写到 `dir/installer.jar`。
+    fn write_installer(dir: &Path, entries: &[(&str, &[u8])]) -> PathBuf {
+        use std::io::Write;
+        let path = dir.join("installer.jar");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            writer.start_file(*name, opts).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    /// 1.13 到 1.16.5 的 installer（以及重新打包过的 1.12.2 推荐版）把 Forge 自己的 jar 放在
+    /// installer 的 `maven/` 下，库条目的下载地址留空：这些库从 installer 里解出来，不去下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn libraries_with_an_empty_url_are_extracted_from_the_installer() {
+        let universal: &[u8] = b"forge-universal-bytes";
+        let shim: &[u8] = b"forge-shim";
+        let universal_path =
+            "net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39-universal.jar";
+        let shim_path = "net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39.jar";
+        let profile = serde_json::json!({
+            "spec": 0,
+            "version": "1.16.5-forge-36.2.39",
+            "minecraft": "1.16.5",
+            "json": "/version.json",
+            "data": {},
+            "processors": [],
+            "libraries": [{
+                "name": "net.minecraftforge:forge:1.16.5-36.2.39:universal",
+                "downloads": {"artifact": {
+                    "path": universal_path, "url": "",
+                    "sha1": sha1_hex(universal), "size": universal.len()
+                }}
+            }]
+        });
+        let version = serde_json::json!({
+            "id": "1.16.5-forge-36.2.39",
+            "inheritsFrom": "1.16.5",
+            "mainClass": "cpw.mods.modlauncher.Launcher",
+            "libraries": [{
+                "name": "net.minecraftforge:forge:1.16.5-36.2.39",
+                "downloads": {"artifact": {
+                    "path": shim_path, "url": "",
+                    "sha1": sha1_hex(shim), "size": shim.len()
+                }}
+            }]
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+                (&format!("maven/{universal_path}"), universal),
+                (&format!("maven/{shim_path}"), shim),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let summary = ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.id, "1.16.5-forge-36.2.39");
+        assert_eq!(summary.libraries, 0, "没有需要下载的库");
+        assert_eq!(
+            std::fs::read(f.layout.library_path(universal_path)).unwrap(),
+            universal
+        );
+        assert_eq!(
+            std::fs::read(f.layout.library_path(shim_path)).unwrap(),
+            shim
+        );
+    }
+
+    /// installer 里那份 jar 与库条目声明的 sha1 对不上：照实报错，不把坏文件留在库目录里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_embedded_library_with_a_wrong_sha1_is_rejected() {
+        let path = "net/minecraftforge/forge/1.12.2-14.23.5.2860/forge-1.12.2-14.23.5.2860.jar";
+        let profile = serde_json::json!({
+            "version": "1.12.2-forge-14.23.5.2860",
+            "minecraft": "1.12.2",
+            "json": "/version.json",
+            "processors": [],
+            "libraries": [{
+                "name": "net.minecraftforge:forge:1.12.2-14.23.5.2860",
+                "downloads": {"artifact": {
+                    "path": path, "url": "", "sha1": "0".repeat(40), "size": 4
+                }}
+            }]
+        });
+        let version = serde_json::json!({
+            "id": "1.12.2-forge-14.23.5.2860", "inheritsFrom": "1.12.2", "libraries": []
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+                (&format!("maven/{path}"), b"evil"),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let err = ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, Error::Base(aurora_base::Error::HashMismatch { .. })),
+            "实际：{err:?}"
+        );
+        assert!(!f.layout.library_path(path).exists());
+    }
+
+    /// 1.7.10 到 1.12.2 早期构建的 installer：Forge 库条目带着 Maven 仓库地址，那里却只有
+    /// `-universal.jar`，照坐标去拉是 404；通用 jar 已经从 installer 里解到这个落点，不该再下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_forge_library_is_not_fetched_over_the_extracted_universal_jar() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let profile = serde_json::json!({
+            "install": {
+                "path": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                "filePath": "forge-1.7.10-10.13.4.1614-1.7.10-universal.jar"
+            },
+            "versionInfo": {
+                "id": "1.7.10-Forge10.13.4.1614-1.7.10",
+                "inheritsFrom": "1.7.10",
+                "mainClass": "net.minecraft.launchwrapper.Launch",
+                "libraries": [{
+                    "name": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                    "url": format!("{}/", server.uri())
+                }]
+            }
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                (
+                    "forge-1.7.10-10.13.4.1614-1.7.10-universal.jar",
+                    b"universal",
+                ),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap();
+
+        let universal = f
+            .layout
+            .library_path_for_coordinate("net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10")
+            .unwrap();
+        assert_eq!(std::fs::read(universal).unwrap(), b"universal");
     }
 
     /// 一个三十秒左右才自己退出的子进程，代替不观察取消令牌、一跑好几秒的处理器。
