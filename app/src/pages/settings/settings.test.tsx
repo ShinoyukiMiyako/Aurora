@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
 import { resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
@@ -332,6 +333,22 @@ describe("设置页：游戏", () => {
     await click(button("更改"));
     expect(toasts()).toContainEqual({ tone: "error", title: "没能切换游戏目录", body: "路径里不能有「!」，Java 会读不出里面的游戏文件" });
     expect(callsOf(ipc, "set_game_directory")).toEqual([]);
+  });
+
+  it("复制路径：写进剪贴板后按钮原位换成「已复制」；写入失败只报一次，按钮保持原样", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await mount("game");
+    await click(button("复制路径"));
+    expect(writeText).toHaveBeenCalledWith("D:\\Games\\Launcher\\.minecraft");
+    expect(button("已复制")).toBeDefined();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COPY_FEEDBACK_MS);
+    });
+    writeText.mockRejectedValueOnce(new Error("剪贴板被其他程序占用"));
+    await click(button("复制路径"));
+    expect(toasts().filter((t) => t.tone === "error")).toEqual([{ tone: "error", title: "复制失败", body: "剪贴板被其他程序占用" }]);
+    expect(all("button").some((b) => b.getAttribute("aria-label") === "已复制")).toBe(false);
   });
 
   it("有下载在进行时「更改」「切换」带原因禁用", async () => {

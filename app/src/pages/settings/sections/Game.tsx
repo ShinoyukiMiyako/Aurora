@@ -25,7 +25,6 @@ import { Skeleton } from "../../../ui/Skeleton";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { Tooltip } from "../../../ui/Tooltip";
-import { useCopyText } from "../clipboard";
 import { useSettingsCommands } from "../commands";
 import { GAME_DIR_COPY, ISOLATION_COPY, ISOLATION_OPTIONS, LOAD_COPY, MEMORY_COPY, MEMORY_TIER_LABEL, RECOMMENDED_ISOLATION } from "../copy";
 import { dirName, hasBang, overAvailable, samePath, unrecorded } from "../game-model";
@@ -305,7 +304,7 @@ function GameDirectoryCard() {
   const commands = useSettingsCommands();
   const dirs = useGameDirectories();
   const discovered = useDiscoveredGameDirectories();
-  const copyText = useCopyText();
+  const { copyText } = useShell();
   const switchTo = useSwitchDirectory();
   const busy = busyInstanceId(state) !== null || activeTasks(state).length > 0;
   const busyReason = busy ? GAME_DIR_COPY.busyReason : undefined;

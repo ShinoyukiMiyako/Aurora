@@ -3,6 +3,7 @@
 import { SakuraMark } from "../../../art/Logo";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { APP_NAME, APP_NAME_EN } from "../../../lib/app-info";
+import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { Button } from "../../../ui/Button";
 import { Card } from "../../../ui/Card";
@@ -10,7 +11,6 @@ import { CardHeader } from "../../../ui/CardHeader";
 import { CopyButton, KV } from "../../../ui/KV";
 import { Inset } from "../../../ui/Inset";
 import { SettingRow } from "../../../ui/SettingRow";
-import { useCopyText } from "../clipboard";
 import { useSettingsCommands } from "../commands";
 import { ABOUT_COPY } from "../copy";
 import { useUpdater } from "../../../state/updater/useUpdater";
@@ -36,7 +36,7 @@ function BrandCard({ version }: { version: string | null }) {
 }
 
 function VersionCard({ version }: { version: string }) {
-  const copyText = useCopyText();
+  const { copyText } = useShell();
   return (
     <Card>
       <CardHeader
