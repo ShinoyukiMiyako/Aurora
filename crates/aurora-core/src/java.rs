@@ -184,6 +184,7 @@ impl Aurora {
                 install_dir.display()
             )),
         );
+        self.prepare_sources().await?;
         let plan = self
             .java_installer(&manifest_url)
             .plan(required_major, &install_dir)

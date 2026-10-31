@@ -988,6 +988,7 @@ impl Aurora {
         reporter
             .info(format!("旧版资源目录缺少 {missing} 个文件，补全游戏文件"))
             .await;
+        self.prepare_sources().await?;
         let http = self.http();
         let pool = self.download_pool();
         let policy = self.retry_policy();
@@ -1053,6 +1054,7 @@ impl Aurora {
         files: Vec<DownloadTask>,
         reporter: &mut Reporter<'_>,
     ) -> Result<BatchReport, LaunchFailed> {
+        self.prepare_sources().await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<CoreEvent>();
         let pool = self.download_pool_reporting(Some(&tx));
         drop(tx);
@@ -1082,6 +1084,7 @@ impl Aurora {
     ) -> Result<JavaInstallation, LaunchFailed> {
         reporter.info(format!("下载 Java {major} 托管运行时")).await;
         let install_dir = crate::java::runtime_install_dir(self.data_dir(), major);
+        self.prepare_sources().await?;
         let plan = self
             .java_installer(manifest_url)
             .plan(major, &install_dir)
@@ -1143,7 +1146,7 @@ impl Aurora {
         reporter: &mut Reporter<'_>,
     ) -> Result<PathBuf, LaunchFailed> {
         let dir = crate::authlib::agent_dir(self.data_dir());
-        let urls = crate::authlib::latest_urls(&self.config().download_source.mirror_order());
+        let urls = crate::authlib::latest_urls(&self.source_order(self.config().download_source));
         let release = match crate::authlib::fetch_latest(&self.http(), &urls).await {
             Ok(release) => release,
             Err(err) => {

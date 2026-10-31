@@ -85,6 +85,7 @@ impl Aurora {
         loader_version: Option<&str>,
         events: Option<&EventSink>,
     ) -> Result<InstallOutcome> {
+        self.prepare_sources().await?;
         let layout = self.layout();
         let pool = self.download_pool_reporting(events);
         let policy = self.retry_policy();

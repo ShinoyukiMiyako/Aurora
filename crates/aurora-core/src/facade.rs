@@ -10,12 +10,14 @@
 //! 经它装配的下载池与 Java 下载都会响应取消。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aurora_auth::MsaEndpoints;
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
-    CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader,
+    CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader, MirrorResolver,
+    SourceResolver, SourceSpeedCache,
 };
 use aurora_install::{GameLayout, InstallContext, VERSION_MANIFEST_V2};
 use aurora_instance::IsolationPolicy;
@@ -54,6 +56,11 @@ pub struct Aurora {
     /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
     /// 各自新建的门面（含测试）互不串用。
     pub(crate) mod_versions: crate::modversions::SharedVersionCache,
+    /// 下载源测速结论。放在门面上随快照共享：各长任务生成下载计划时共用一份未过期的结论，
+    /// TTL 内不重复探测。
+    pub(crate) source_speed: Arc<SourceSpeedCache>,
+    /// 把官方地址改写到各下载源的解析器；生产为镜像改写表，测试把两个源钉到不同的本地 mock。
+    pub(crate) source_resolver: Arc<dyn SourceResolver>,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -110,6 +117,8 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            source_speed: Arc::new(SourceSpeedCache::new(VERSION_MANIFEST_V2)),
+            source_resolver: Arc::new(MirrorResolver),
             #[cfg(test)]
             curseforge_key: None,
         })
@@ -304,13 +313,18 @@ impl Aurora {
         GameLayout::new(&self.game_dir)
     }
 
+    /// 按文件下载源策略生成的单文件引擎配置。只读测速缓存，不发请求：自动档要先经
+    /// [`prepare_sources`](Self::prepare_sources) 测过，顺序才是实测的。
+    pub(crate) fn download_config(&self) -> DownloadConfig {
+        DownloadConfig {
+            sources: self.source_plan(self.config.download_source),
+            ..DownloadConfig::default()
+        }
+    }
+
     /// 按当前配置的下载源策略与并发上限装配一个批量下载池；门面挂了取消令牌时池也挂上。
     pub(crate) fn download_pool(&self) -> DownloadPool {
-        let config = DownloadConfig {
-            sources: self.config.download_source.source_plan(),
-            ..DownloadConfig::default()
-        };
-        let downloader = Downloader::new(self.http.clone(), config);
+        let downloader = Downloader::new(self.http.clone(), self.download_config());
         let pool = DownloadPool::new(downloader, self.config.download_concurrency);
         match &self.cancel {
             Some(token) => pool.with_cancel(token.clone()),
@@ -346,7 +360,7 @@ impl Aurora {
     pub(crate) fn java_installer(&self, manifest_url: &str) -> JavaRuntimeInstaller {
         let installer = JavaRuntimeInstaller::new(self.http())
             .with_manifest_url(manifest_url)
-            .with_source(self.config().download_source.primary_mirror());
+            .with_source(self.preferred_source(self.config().download_source));
         match &self.cancel {
             Some(token) => installer.with_cancel(token.clone()),
             None => installer,
@@ -430,8 +444,34 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            // 默认测速指向一个不会应答的本机地址且 1 毫秒即超时：走到生成下载计划的既有测试不连真实网络，
+            // 也不吃 Windows 上连接被拒要等秒级的延迟；探针全超时即按兜底顺序、不写缓存。
+            source_speed: Arc::new(SourceSpeedCache::with_probe(
+                VERSION_MANIFEST_V2,
+                Arc::new(UnansweredProbe),
+                Duration::from_secs(10 * 60),
+                Duration::from_millis(1),
+            )),
+            source_resolver: Arc::new(MirrorResolver),
             curseforge_key: None,
         }
+    }
+
+    /// 换掉下载源解析器与测速缓存（两者用同一个解析器），把官方与镜像钉到不同的本地 mock。
+    pub(crate) fn with_source_routes(
+        mut self,
+        resolver: Arc<dyn SourceResolver>,
+        ttl: Duration,
+        probe_timeout: Duration,
+    ) -> Self {
+        self.source_speed = Arc::new(SourceSpeedCache::with_probe(
+            VERSION_MANIFEST_V2,
+            resolver.clone(),
+            ttl,
+            probe_timeout,
+        ));
+        self.source_resolver = resolver;
+        self
     }
 
     pub(crate) fn with_modrinth_base(mut self, url: impl Into<String>) -> Self {
@@ -457,6 +497,21 @@ impl Aurora {
 
     pub(crate) fn injected_curseforge_key(&self) -> Option<&str> {
         self.curseforge_key.as_deref()
+    }
+}
+
+/// 测试门面默认的测速解析器：所有源都解析到同一个没人应答的本机地址。
+#[cfg(test)]
+struct UnansweredProbe;
+
+#[cfg(test)]
+impl SourceResolver for UnansweredProbe {
+    fn resolve(
+        &self,
+        _url: &str,
+        _source: aurora_download::MirrorSource,
+    ) -> aurora_download::Result<String> {
+        Ok("http://127.0.0.1:9/probe".to_owned())
     }
 }
 

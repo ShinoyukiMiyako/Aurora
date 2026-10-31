@@ -135,7 +135,7 @@ impl Aurora {
                         let (flavor, base) = flavor_and_base(endpoints, loader);
                         let loaders = LoaderInstaller::with_flavor(cx, flavor)
                             .with_base_url(base)
-                            .with_sources(self.config().version_list_source.source_plan())
+                            .with_sources(self.source_plan(self.config().version_list_source))
                             .list_loaders(mc_version)
                             .await?;
                         Ok(loaders
@@ -279,7 +279,7 @@ impl Aurora {
                     let (flavor, base) = flavor_and_base(endpoints, loader);
                     let versions = LoaderInstaller::with_flavor(cx, flavor)
                         .with_base_url(base)
-                        .with_sources(self.config().version_list_source.source_plan())
+                        .with_sources(self.source_plan(self.config().version_list_source))
                         .list_game_versions()
                         .await?;
                     Ok(versions.into_iter().map(|v| v.version).collect())
@@ -315,7 +315,7 @@ impl Aurora {
         self.fetch_or_cached(Some(&name), async {
             let http = self.http();
             let policy = self.retry_policy();
-            let sources = self.config().version_list_source.source_plan();
+            let sources = self.source_plan(self.config().version_list_source);
             let builds = match loader {
                 LoaderChoice::Forge => {
                     let versions = fetch_maven_versions(
