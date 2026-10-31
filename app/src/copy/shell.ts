@@ -122,6 +122,11 @@ export const FILE_PICK_COPY = {
   modpack: { title: "选择整合包文件", filter: "整合包" },
 } as const;
 
+/** 系统保存对话框。Windows 的类型下拉原样显示过滤名，不会自己补「（*.mrpack）」，所以写进名字里。 */
+export const FILE_SAVE_COPY = {
+  mrpack: { title: "导出整合包", filter: "Modrinth 整合包（*.mrpack）" },
+} as const;
+
 /** 页面级错误边界：外壳之内只有这一处兜底，标题栏、侧栏、状态岛不受页面错误影响。 */
 export const PAGE_ERROR_COPY = {
   title: "这一页出错了",
