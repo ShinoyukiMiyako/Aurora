@@ -129,6 +129,11 @@ export function addExtraDirectory(name: string, path: string): void {
   else extras.push({ name, path });
 }
 
+/** 实例改名或删除时当前选中跟着走（to 为 null 即删除后不再选中），与后端改实例引用的规则一致。 */
+export function followMockSelection(from: string, to: string | null): void {
+  if (config.selected_version === from) config.selected_version = to;
+}
+
 /** 与后端 switch_game_directory 一致：原目录在盘上存在才收进额外目录。 */
 export function switchGameDirectory(next: string): void {
   replaceCurrentDirectory(next, disk.has(norm(config.game_dir)));

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getConfig, setGameDirectory } from "../config";
+import { getConfig, setGameDirectory, updateConfig } from "../config";
 import { lastCrash, lastLaunchLog } from "../diagnostics";
 import { installMod, installResource } from "../discover";
 import { IpcError } from "../errors";
@@ -7,6 +7,7 @@ import { rollback } from "../history";
 import {
   deleteInstance,
   getInstanceSettings,
+  getSidebarPins,
   installVersion,
   listInstances,
   openFolder,
@@ -14,6 +15,7 @@ import {
   renameInstance,
   repairInstance,
   setInstanceSettings,
+  setSidebarPins,
 } from "../instances";
 import { launchGame, playStats } from "../launch";
 import { checkUpdates, removeMod, setModEnabled, updateMod } from "../mods";
@@ -21,7 +23,7 @@ import { cancelTask } from "../tasks";
 import { resetMocks } from ".";
 import { clearMockEventListeners } from "./events";
 import { acquireMockInstance, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
-import { endMockGame } from "./handlers/launch";
+import { endMockGame, failNextMockPlayRecords } from "./handlers/launch";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./handlers/tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -192,6 +194,47 @@ describe("mock 改名与删除带上游玩记录、崩溃报告与会话日志",
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS * (MOCK_INSTALL_STEPS + 2));
     await installing;
     expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 0, last_played_at: null, last_crash_at: null });
+  });
+});
+
+describe("mock 改名与删除时配置引用与后端同一套规则", () => {
+  it("当前选中跟着走：改名换成新名字，删除后不再选中；没选中它时不动", async () => {
+    await updateConfig({ selectedVersion: FABRIC });
+    await renameInstance(FABRIC, "旧档");
+    expect((await getConfig()).selected_version).toBe("旧档");
+    await deleteInstance("1.21");
+    expect((await getConfig()).selected_version).toBe("旧档");
+    await deleteInstance("旧档");
+    expect((await getConfig()).selected_version).toBeNull();
+  });
+
+  it("游玩记录没跟上：改名报 play_records_failed，目录、侧栏固定与当前选中照样改好，记录随后读得到", async () => {
+    const before = await minutesOf(FABRIC);
+    if (before === null) throw new Error(`种子数据里 ${FABRIC} 应当玩过`);
+    await setSidebarPins([FABRIC, "1.21.1"]);
+    await updateConfig({ selectedVersion: FABRIC });
+    failNextMockPlayRecords();
+    const error = await rejection(renameInstance(FABRIC, "旧档"));
+    expect([error.code, error.message, error.detail]).toEqual([
+      "play_records_failed",
+      "实例已改名为「旧档」，但游玩记录没能跟着改：拒绝访问。 (os error 5)",
+      { id: FABRIC, renamed_to: "旧档", causes: ["拒绝访问。 (os error 5)"] },
+    ]);
+    expect((await listInstances()).map((i) => i.id)).toContain("旧档");
+    expect(await getSidebarPins()).toEqual(["旧档", "1.21.1"]);
+    expect((await getConfig()).selected_version).toBe("旧档");
+    expect(await minutesOf("旧档")).toBe(before);
+    // 只报一次：再改回去照常成功
+    await expect(renameInstance("旧档", FABRIC)).resolves.toEqual({ id: FABRIC });
+  });
+
+  it("游玩记录没跟上：删除报 play_records_failed，实例与侧栏固定照样去掉", async () => {
+    await setSidebarPins(["1.21", "1.21.1"]);
+    failNextMockPlayRecords("磁盘已满");
+    const error = await rejection(deleteInstance("1.21"));
+    expect([error.code, error.message, error.detail]).toEqual(["play_records_failed", "实例已删除，但游玩记录没能跟着改：磁盘已满", { id: "1.21", causes: ["磁盘已满"] }]);
+    expect((await listInstances()).map((i) => i.id)).not.toContain("1.21");
+    expect(await getSidebarPins()).toEqual(["1.21.1"]);
   });
 });
 

@@ -322,6 +322,25 @@ export function endMockGame(exitCode: number | null, durationMs?: number): void 
   finishGame(exitCode, false, durationMs === undefined ? Date.now() - occupant.runningSince : durationMs);
 }
 
+/** 下一次改名或删除时游玩记录没跟上的原因；null 为照常。 */
+let pendingRecordsFailure: string | null = null;
+
+/**
+ * 下一次改名或删除时游玩记录没跟上（模拟 playtime.json 读写失败）：目录、侧栏固定与当前选中照常改好，命令报
+ * play_records_failed。后端会把没改成的记录留在待补队列、下一次读写时补上，前端随即重扫列表就会读到，
+ * 所以 mock 里记录照样迁移，只是命令报这个码。
+ */
+export function failNextMockPlayRecords(cause = "拒绝访问。 (os error 5)"): void {
+  pendingRecordsFailure = cause;
+}
+
+/** 取走待报的游玩记录失败原因，只报一次。 */
+export function takeMockPlayRecordsFailure(): string | null {
+  const cause = pendingRecordsFailure;
+  pendingRecordsFailure = null;
+  return cause;
+}
+
 /** 下一次启动在对应阶段以该失败码失败。 */
 export function failNextMockLaunch(code: string, params: Record<string, string | number>, message = `模拟的启动失败 ${code}`): void {
   if (!(code in FAILURE_STAGE)) throw new Error(`未知的启动失败码 ${code}`);
@@ -452,6 +471,7 @@ export const handlers: MockHandlers = {
 export function reset(): void {
   occupant = null;
   pendingFailure = null;
+  pendingRecordsFailure = null;
   logs = new Map();
   crashes = new Map();
   seedPlay();

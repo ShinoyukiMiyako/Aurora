@@ -21,7 +21,8 @@ import {
 } from "../../instances";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { forgetMockLaunchRecords, mockCrashReport, mockPlaySummary, renameMockLaunchRecords } from "./launch";
+import { followMockSelection } from "./config";
+import { forgetMockLaunchRecords, mockCrashReport, mockPlaySummary, renameMockLaunchRecords, takeMockPlayRecordsFailure } from "./launch";
 import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -928,6 +929,9 @@ export const handlers: MockHandlers = {
       // 目录已不在时也清：残留的记录会被之后新建的同名实例继承
       forgetMockLaunchRecords(id);
       pins = pins.filter((pin) => pin !== id);
+      followMockSelection(id, null);
+      const lag = takeMockPlayRecordsFailure();
+      if (lag !== null) throw new IpcError("play_records_failed", `实例已删除，但游玩记录没能跟着改：${lag}`, { id, causes: [lag] });
       return { existed };
     } finally {
       release();
@@ -950,6 +954,11 @@ export const handlers: MockHandlers = {
       renameMockMods(id, newName);
       renameMockLaunchRecords(id, newName);
       pins = pins.map((pin) => (pin === id ? newName : pin));
+      followMockSelection(id, newName);
+      const lag = takeMockPlayRecordsFailure();
+      if (lag !== null) {
+        throw new IpcError("play_records_failed", `实例已改名为「${newName}」，但游玩记录没能跟着改：${lag}`, { id, renamed_to: newName, causes: [lag] });
+      }
       return { id: newName };
     } finally {
       releaseNew();
