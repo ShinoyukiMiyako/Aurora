@@ -10,10 +10,12 @@
 //! 启动器资讯取本启动器公开仓库（[`REPO_URL`]）的 GitHub Releases，免鉴权，进程内缓存
 //! [`LAUNCHER_CACHE_TTL`]；草稿一律不收，预发布只给预览版与测试版看（[`LauncherChannel`]）。
 //! 取不到时同样退回缓存并标记离线；连缓存都没有时只在 [`NewsFeed::launcher_error`] 里报错，
-//! 官方资讯照常返回。
+//! 官方资讯照常返回。取不到之后按 [`LAUNCHER_BACKOFF`] 退避：退避期内不请求 GitHub，直接给上次取到的
+//! 发布（标记离线）或上次的失败，主页不必每次都等满请求时限；调用方明确要求重试时（重试按钮、恢复联网
+//! 后的重取）不等退避期满，立即再请求一次。
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aurora_base::brand::REPO_URL;
@@ -40,6 +42,14 @@ pub const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2026-03-10";
 /// 启动器发布的进程内缓存有效期。免鉴权调用按 IP 每小时只有 60 次额度，一小时取一次远在额度内。
 pub const LAUNCHER_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+/// 启动器发布连续第 n 次取不到之后，等第 n 档时长再请求，超出表长按最后一档。GitHub 连不上通常不是
+/// 几秒内能恢复的事，每次都重试只会让主页一次次等满 [`FETCH_TIMEOUT`]。
+pub const LAUNCHER_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+    Duration::from_secs(60 * 60),
+];
 
 /// 资讯类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,8 +115,19 @@ pub struct NewsFeed {
     pub fetched_at: u64,
     /// 至少有一个来源本次没取到新内容、给的是缓存。
     pub offline: bool,
-    /// 启动器资讯取不到、也没有缓存可退时的错误；这时 `items` 里只有官方资讯。
-    pub launcher_error: Option<CoreError>,
+    /// 启动器资讯取不到、也没有缓存可退时的失败；这时 `items` 里只有官方资讯。退避期内给的是上次那次失败。
+    pub launcher_error: Option<LauncherFailure>,
+}
+
+/// 启动器资讯的一次失败。退避期内同一次失败要原样重报多次，错误本身由各次结果共享。
+#[derive(Debug, Clone)]
+pub struct LauncherFailure {
+    /// 只会是请求失败（[`CoreError::Fetch`]）或内容认不出（[`CoreError::FeedParse`]）。
+    pub error: Arc<CoreError>,
+    /// 失败的时刻（Unix 毫秒）。
+    pub failed_at: u64,
+    /// 退避期满、不要求重试也会再请求的时刻（Unix 毫秒）。
+    pub retry_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,25 +157,67 @@ struct CachedReleases {
     releases: Vec<LauncherRelease>,
 }
 
-/// 启动器发布的进程内缓存。
+/// 启动器发布这一来源记着的状态。
+#[derive(Debug, Clone)]
+struct LauncherState {
+    /// 最近一次取到的发布。
+    releases: Option<CachedReleases>,
+    /// 最近一次请求失败了才有，取到就清掉。
+    failure: Option<FailureRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct FailureRecord {
+    failure: LauncherFailure,
+    /// 连续失败了几次，从 1 计；决定下一次退避多久。
+    streak: usize,
+}
+
+/// 启动器发布的进程内缓存，连同最近一次失败与退避。
 pub(crate) struct ReleaseCache {
-    entry: Mutex<Option<CachedReleases>>,
+    state: Mutex<LauncherState>,
 }
 
 impl ReleaseCache {
     pub(crate) const fn new() -> Self {
         Self {
-            entry: Mutex::new(None),
+            state: Mutex::new(LauncherState {
+                releases: None,
+                failure: None,
+            }),
         }
     }
 
-    fn get(&self) -> Option<CachedReleases> {
-        self.entry.lock().expect("启动器发布缓存的锁已中毒").clone()
+    fn get(&self) -> LauncherState {
+        self.state.lock().expect("启动器发布缓存的锁已中毒").clone()
     }
 
-    fn put(&self, fresh: CachedReleases) {
-        *self.entry.lock().expect("启动器发布缓存的锁已中毒") = Some(fresh);
+    fn succeed(&self, fresh: CachedReleases) {
+        let mut state = self.state.lock().expect("启动器发布缓存的锁已中毒");
+        state.releases = Some(fresh);
+        state.failure = None;
     }
+
+    /// 记下一次失败，按连续失败的次数排好下一次请求的时刻。
+    fn fail(&self, error: CoreError, now: u64) -> LauncherFailure {
+        let mut state = self.state.lock().expect("启动器发布缓存的锁已中毒");
+        let streak = state.failure.as_ref().map_or(1, |record| record.streak + 1);
+        let failure = LauncherFailure {
+            error: Arc::new(error),
+            failed_at: now,
+            retry_at: now.saturating_add(duration_ms(backoff_after(streak))),
+        };
+        state.failure = Some(FailureRecord {
+            failure: failure.clone(),
+            streak,
+        });
+        failure
+    }
+}
+
+/// 连续第 `streak` 次失败之后的退避时长。
+fn backoff_after(streak: usize) -> Duration {
+    LAUNCHER_BACKOFF[streak.saturating_sub(1).min(LAUNCHER_BACKOFF.len() - 1)]
 }
 
 /// 进程全局一份：发布列表与配置、数据目录都无关；测试各自新建一份经 [`NewsSources`] 传入，互不串用。
@@ -167,30 +230,73 @@ pub(crate) struct NewsSources<'a> {
     pub(crate) releases: &'a ReleaseCache,
 }
 
-/// 启动器发布这一来源：缓存新鲜时直接给，否则已在后台发出请求。
+/// 启动器发布这一来源：缓存新鲜或还在退避期内时不请求、直接有结果，否则已在后台发出请求。
 enum PendingReleases {
-    Fresh(Vec<LauncherRelease>),
+    Settled(LauncherOutcome),
     Fetching {
         stale: Option<CachedReleases>,
         task: tokio::task::JoinHandle<Result<Vec<LauncherRelease>>>,
     },
 }
 
+/// 启动器发布这一来源的结果：取到的（或退回的缓存），或者取不到又没有缓存时的那次失败。
+type LauncherOutcome = std::result::Result<LauncherNews, LauncherFailure>;
+
 struct LauncherNews {
     releases: Vec<LauncherRelease>,
     offline: bool,
 }
 
+/// 这一次要不要请求 GitHub。
+enum ReleasePlan {
+    /// 不请求：缓存还新鲜，或者还在失败后的退避期内。
+    Settled(LauncherOutcome),
+    /// 请求；带着过期的缓存，取不到时退回它。
+    Fetch(Option<CachedReleases>),
+}
+
+fn plan_releases(state: LauncherState, now: u64, retry: bool) -> ReleasePlan {
+    if let Some(cache) = &state.releases
+        && now.saturating_sub(cache.fetched_at) < duration_ms(LAUNCHER_CACHE_TTL)
+    {
+        return ReleasePlan::Settled(Ok(LauncherNews {
+            releases: cache.releases.clone(),
+            offline: false,
+        }));
+    }
+    match state.failure {
+        // 时钟往回拨过（现在早于失败的时刻）时不算在退避期内：宁可多请求一次，也不卡到时钟追上来。
+        Some(record)
+            if !retry && (record.failure.failed_at..record.failure.retry_at).contains(&now) =>
+        {
+            tracing::info!(
+                retry_at = record.failure.retry_at,
+                "启动器发布在失败后的退避期内，这次不请求 GitHub"
+            );
+            ReleasePlan::Settled(match state.releases {
+                Some(stale) => Ok(LauncherNews {
+                    releases: stale.releases,
+                    offline: true,
+                }),
+                None => Err(record.failure),
+            })
+        }
+        _ => ReleasePlan::Fetch(state.releases),
+    }
+}
+
 impl Aurora {
     /// 取资讯：官方资讯与启动器资讯各按自己的缓存规则取，合并后按发布时刻倒序。
     /// 官方资讯连缓存都没有才报错；启动器资讯的失败只记在 [`NewsFeed::launcher_error`]。
-    pub async fn list_news(&self, channel: LauncherChannel) -> Result<NewsFeed> {
+    /// `retry` 为真时启动器资讯不等失败后的退避期满，立即再请求一次。
+    pub async fn list_news(&self, channel: LauncherChannel, retry: bool) -> Result<NewsFeed> {
         let sources = NewsSources {
             official: LAUNCHER_CONTENT_BASE,
             github_api: GITHUB_API_BASE,
             releases: &LAUNCHER_RELEASES,
         };
-        self.list_news_from(&sources, channel, now_ms()).await
+        self.list_news_from(&sources, channel, now_ms(), retry)
+            .await
     }
 
     /// [`list_news`](Self::list_news) 的来源与当前时刻可注入内核，供测试指向本地 mock。
@@ -199,15 +305,12 @@ impl Aurora {
         sources: &NewsSources<'_>,
         channel: LauncherChannel,
         now: u64,
+        retry: bool,
     ) -> Result<NewsFeed> {
         // 启动器发布先在后台发出去，与官方资讯并发，主页不必等两段网络时延相加。
-        let pending = match sources.releases.get() {
-            Some(cache)
-                if now.saturating_sub(cache.fetched_at) < duration_ms(LAUNCHER_CACHE_TTL) =>
-            {
-                PendingReleases::Fresh(cache.releases)
-            }
-            stale => PendingReleases::Fetching {
+        let pending = match plan_releases(sources.releases.get(), now, retry) {
+            ReleasePlan::Settled(outcome) => PendingReleases::Settled(outcome),
+            ReleasePlan::Fetch(stale) => PendingReleases::Fetching {
                 stale,
                 task: tokio::spawn(fetch_releases(
                     self.http(),
@@ -232,9 +335,9 @@ impl Aurora {
                 );
                 None
             }
-            Err(err) => {
-                tracing::warn!(error = %err, "启动器资讯取不到，也没有缓存可退，只给官方资讯");
-                Some(err)
+            Err(failure) => {
+                tracing::warn!(error = %failure.error, "启动器资讯取不到，也没有缓存可退，只给官方资讯");
+                Some(failure)
             }
         };
         sort_newest_first(&mut items);
@@ -293,19 +396,14 @@ async fn settle_releases(
     pending: PendingReleases,
     cache: &ReleaseCache,
     now: u64,
-) -> Result<Result<LauncherNews>> {
+) -> Result<LauncherOutcome> {
     let (stale, task) = match pending {
-        PendingReleases::Fresh(releases) => {
-            return Ok(Ok(LauncherNews {
-                releases,
-                offline: false,
-            }));
-        }
+        PendingReleases::Settled(outcome) => return Ok(outcome),
         PendingReleases::Fetching { stale, task } => (stale, task),
     };
     Ok(match task.await? {
         Ok(releases) => {
-            cache.put(CachedReleases {
+            cache.succeed(CachedReleases {
                 fetched_at: now,
                 releases: releases.clone(),
             });
@@ -314,16 +412,23 @@ async fn settle_releases(
                 offline: false,
             })
         }
-        Err(err) => match stale {
-            Some(cache) => {
-                tracing::info!(error = %err, "启动器发布取不到，退回进程内缓存");
-                Ok(LauncherNews {
-                    releases: cache.releases,
-                    offline: true,
-                })
+        Err(err) => {
+            let failure = cache.fail(err, now);
+            tracing::info!(
+                retry_at = failure.retry_at,
+                "启动器发布取不到，退避期满前不再请求"
+            );
+            match stale {
+                Some(cache) => {
+                    tracing::info!(error = %failure.error, "启动器发布取不到，退回进程内缓存");
+                    Ok(LauncherNews {
+                        releases: cache.releases,
+                        offline: true,
+                    })
+                }
+                None => Err(failure),
             }
-            None => Err(err),
-        },
+        }
     })
 }
 
@@ -1015,7 +1120,7 @@ mod tests {
         let channel = LauncherChannel::Stable;
 
         let first = aurora
-            .list_news_from(&remote.sources(), channel, OCT_30)
+            .list_news_from(&remote.sources(), channel, OCT_30, false)
             .await
             .unwrap();
         assert!(!first.offline);
@@ -1032,7 +1137,7 @@ mod tests {
 
         let ttl = duration_ms(CACHE_TTL);
         let cached = aurora
-            .list_news_from(&remote.sources(), channel, OCT_30 + ttl - 1)
+            .list_news_from(&remote.sources(), channel, OCT_30 + ttl - 1, false)
             .await
             .unwrap();
         assert_eq!(cached.items, first.items);
@@ -1046,7 +1151,7 @@ mod tests {
 
         remote.official.reset().await;
         let offline = aurora
-            .list_news_from(&remote.sources(), channel, OCT_30 + ttl)
+            .list_news_from(&remote.sources(), channel, OCT_30 + ttl, false)
             .await
             .unwrap();
         assert!(offline.offline);
@@ -1055,7 +1160,7 @@ mod tests {
 
         let empty = tempfile::tempdir().unwrap();
         let err = aurora_in(empty.path())
-            .list_news_from(&remote.sources(), channel, OCT_30)
+            .list_news_from(&remote.sources(), channel, OCT_30, false)
             .await
             .unwrap_err();
         assert!(matches!(err, CoreError::Fetch { .. }), "实际：{err:?}");
@@ -1068,7 +1173,7 @@ mod tests {
         mount_releases(&remote.github, RELEASES_FIXTURE).await;
         let dir = tempfile::tempdir().unwrap();
         let err = aurora_in(dir.path())
-            .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30)
+            .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30, false)
             .await
             .unwrap_err();
         assert!(matches!(err, CoreError::FeedParse { .. }), "实际：{err:?}");
@@ -1084,7 +1189,7 @@ mod tests {
         let aurora = aurora_in(dir.path());
 
         let stable = aurora
-            .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30)
+            .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30, false)
             .await
             .unwrap();
         assert!(stable.launcher_error.is_none());
@@ -1105,7 +1210,12 @@ mod tests {
         assert_eq!(remote.github_requests().await, 1);
 
         let preview = aurora
-            .list_news_from(&remote.sources(), LauncherChannel::Prerelease, OCT_30 + 1)
+            .list_news_from(
+                &remote.sources(),
+                LauncherChannel::Prerelease,
+                OCT_30 + 1,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(preview.items.len(), 14);
@@ -1121,17 +1231,170 @@ mod tests {
 
         let ttl = duration_ms(LAUNCHER_CACHE_TTL);
         aurora
-            .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30 + ttl - 1)
+            .list_news_from(
+                &remote.sources(),
+                LauncherChannel::Stable,
+                OCT_30 + ttl - 1,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(remote.github_requests().await, 1, "一小时内不再请求 GitHub");
         let refreshed = aurora
-            .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30 + ttl)
+            .list_news_from(
+                &remote.sources(),
+                LauncherChannel::Stable,
+                OCT_30 + ttl,
+                false,
+            )
             .await
             .unwrap();
         assert_eq!(remote.github_requests().await, 2);
         assert_eq!(launcher_ids(&refreshed), ["launcher-299", "launcher-298"]);
         assert!(!refreshed.offline);
+    }
+
+    fn launcher_failure(feed: &NewsFeed) -> &LauncherFailure {
+        feed.launcher_error
+            .as_ref()
+            .unwrap_or_else(|| panic!("期望启动器资讯失败，实际条目：{:?}", feed.items))
+    }
+
+    async fn mount_github_unavailable(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path(RELEASES_PATH))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(server)
+            .await;
+    }
+
+    const MINUTE: u64 = 60_000;
+
+    #[test]
+    fn backoff_steps_cap_at_an_hour() {
+        let minutes: Vec<u64> = [1, 2, 3, 4, 5, 100]
+            .into_iter()
+            .map(|streak| duration_ms(backoff_after(streak)) / MINUTE)
+            .collect();
+        assert_eq!(minutes, [1, 5, 15, 60, 60, 60]);
+    }
+
+    /// 退避期是左闭右开的区间；要求重试、或者时钟拨回到失败之前时照样请求。
+    #[test]
+    fn plan_respects_backoff_window_and_explicit_retry() {
+        let cache = ReleaseCache::new();
+        let failure = cache.fail(
+            CoreError::FeedParse {
+                url: "u".into(),
+                source: serde_json::from_str::<serde_json::Value>("<").unwrap_err(),
+            },
+            10 * MINUTE,
+        );
+        assert_eq!(failure.retry_at, 11 * MINUTE);
+        let fetches = |now: u64, retry: bool| {
+            matches!(
+                plan_releases(cache.get(), now, retry),
+                ReleasePlan::Fetch(None)
+            )
+        };
+        assert!(fetches(10 * MINUTE - 1, false), "时钟拨回到失败之前");
+        assert!(!fetches(10 * MINUTE, false));
+        assert!(!fetches(11 * MINUTE - 1, false));
+        assert!(fetches(11 * MINUTE, false));
+        assert!(fetches(10 * MINUTE + 1, true), "要求重试时不等退避期满");
+    }
+
+    /// GitHub 连不上时按 1、5、15、60 分钟退避，之后一直 60 分钟：退避期内不请求，原样给上次那次失败，
+    /// 官方资讯照常给；要求重试时立即请求；取到之后连续失败的计数清零。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launcher_failure_backs_off_before_retrying() {
+        let remote = Remote::start().await;
+        mount_feeds(&remote.official, NEWS_FIXTURE, NOTES_FIXTURE).await;
+        mount_github_unavailable(&remote.github).await;
+        let dir = tempfile::tempdir().unwrap();
+        let aurora = aurora_in(dir.path());
+        let channel = LauncherChannel::Stable;
+        let at = |now: u64, retry: bool| {
+            let aurora = &aurora;
+            let sources = remote.sources();
+            async move {
+                aurora
+                    .list_news_from(&sources, channel, now, retry)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let first = at(OCT_30, false).await;
+        assert_eq!(remote.github_requests().await, 1);
+        assert_eq!(first.items.len(), 11, "官方资讯照常给");
+        let first_failure = launcher_failure(&first).clone();
+        assert_eq!(first_failure.failed_at, OCT_30);
+        assert_eq!(first_failure.retry_at, OCT_30 + MINUTE);
+        assert!(
+            matches!(*first_failure.error, CoreError::Fetch { .. }),
+            "实际：{:?}",
+            first_failure.error
+        );
+
+        let within = at(OCT_30 + MINUTE - 1, false).await;
+        assert_eq!(remote.github_requests().await, 1, "退避期内不请求 GitHub");
+        assert_eq!(within.items.len(), 11);
+        let replayed = launcher_failure(&within);
+        assert!(
+            Arc::ptr_eq(&replayed.error, &first_failure.error),
+            "给的是上次那次失败"
+        );
+        assert_eq!(replayed.retry_at, first_failure.retry_at);
+
+        // 每一档：期满前 1 毫秒不请求，期满即请求，请求失败后排到下一档。
+        let mut failed_at = OCT_30 + MINUTE;
+        let mut requests = 1;
+        for wait in [5, 15, 60, 60] {
+            let feed = at(failed_at, false).await;
+            requests += 1;
+            assert_eq!(remote.github_requests().await, requests);
+            assert_eq!(launcher_failure(&feed).retry_at, failed_at + wait * MINUTE);
+            at(failed_at + wait * MINUTE - 1, false).await;
+            assert_eq!(
+                remote.github_requests().await,
+                requests,
+                "{wait} 分钟的退避期内"
+            );
+            failed_at += wait * MINUTE;
+        }
+
+        // 恢复联网后的重取：不等退避期满。
+        let retried = at(failed_at - 30 * MINUTE, true).await;
+        assert_eq!(remote.github_requests().await, requests + 1);
+        assert_eq!(launcher_failure(&retried).retry_at, failed_at + 30 * MINUTE);
+
+        remote.github.reset().await;
+        mount_releases(&remote.github, RELEASES_FIXTURE).await;
+        let still_waiting = at(failed_at, false).await;
+        assert_eq!(remote.github_requests().await, 0, "没要求重试就等退避期满");
+        assert!(still_waiting.launcher_error.is_some());
+        let recovered = at(failed_at, true).await;
+        assert_eq!(remote.github_requests().await, 1);
+        assert!(recovered.launcher_error.is_none());
+        assert_eq!(launcher_ids(&recovered), ["launcher-299", "launcher-298"]);
+        assert!(!recovered.offline);
+
+        // 取到过之后再失败：从第一档重新计，退避期内给过期的发布并标离线。
+        remote.github.reset().await;
+        mount_github_unavailable(&remote.github).await;
+        let expired = failed_at + duration_ms(LAUNCHER_CACHE_TTL);
+        let stale = at(expired, false).await;
+        assert_eq!(remote.github_requests().await, 1);
+        assert!(stale.launcher_error.is_none());
+        assert!(stale.offline);
+        assert_eq!(launcher_ids(&stale), ["launcher-299", "launcher-298"]);
+        let stale_again = at(expired + MINUTE - 1, false).await;
+        assert_eq!(remote.github_requests().await, 1);
+        assert!(stale_again.offline);
+        assert_eq!(stale_again.items, stale.items);
+        at(expired + MINUTE, false).await;
+        assert_eq!(remote.github_requests().await, 2);
     }
 
     /// GitHub 拒绝或回了认不出的内容：官方资讯照常给，错误只记在 launcher_error；
@@ -1154,16 +1417,16 @@ mod tests {
         let releases_url = format!("{}{RELEASES_PATH}?per_page=20", remote.github_uri);
 
         let refused = aurora
-            .list_news_from(&remote.sources(), channel, OCT_30)
+            .list_news_from(&remote.sources(), channel, OCT_30, false)
             .await
             .unwrap();
         assert_eq!(refused.items.len(), 11, "官方资讯一条不少");
         assert!(launcher_ids(&refused).is_empty());
         assert!(!refused.offline);
+        let error = &launcher_failure(&refused).error;
         assert!(
-            matches!(refused.launcher_error, Some(CoreError::Fetch { ref url, .. }) if *url == releases_url),
-            "实际：{:?}",
-            refused.launcher_error
+            matches!(**error, CoreError::Fetch { ref url, .. } if *url == releases_url),
+            "实际：{error:?}"
         );
 
         remote.github.reset().await;
@@ -1173,20 +1436,20 @@ mod tests {
             .mount(&remote.github)
             .await;
         let garbled = aurora
-            .list_news_from(&remote.sources(), channel, OCT_30 + 1)
+            .list_news_from(&remote.sources(), channel, OCT_30 + 1, true)
             .await
             .unwrap();
         assert_eq!(garbled.items.len(), 11);
+        let error = &launcher_failure(&garbled).error;
         assert!(
-            matches!(garbled.launcher_error, Some(CoreError::FeedParse { ref url, .. }) if *url == releases_url),
-            "实际：{:?}",
-            garbled.launcher_error
+            matches!(**error, CoreError::FeedParse { ref url, .. } if *url == releases_url),
+            "实际：{error:?}"
         );
 
         remote.github.reset().await;
         mount_releases(&remote.github, RELEASES_FIXTURE).await;
         let fresh = aurora
-            .list_news_from(&remote.sources(), channel, OCT_30 + 2)
+            .list_news_from(&remote.sources(), channel, OCT_30 + 2, true)
             .await
             .unwrap();
         assert_eq!(launcher_ids(&fresh).len(), 3);
@@ -1197,6 +1460,7 @@ mod tests {
                 &remote.sources(),
                 channel,
                 OCT_30 + 2 + duration_ms(LAUNCHER_CACHE_TTL),
+                false,
             )
             .await
             .unwrap();

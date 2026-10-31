@@ -367,7 +367,7 @@ impl Aurora {
     /// `resource_type` 决定判定口径：Mod 看加载器与 MC 版本，资源包、光影、数据包只看 MC 版本。
     /// 整合包与插件不装进已有实例，传入即报 [`CoreError::InvalidResourceTarget`]。
     ///
-    /// 工程版本列表整场只拉一次（CurseForge 另按 MC 版本补拉，见 `match_candidates`），之后每个实例都在本地
+    /// 工程版本列表整场只拉一次（CurseForge 的列表截断时另按 MC 版本补拉，见 `match_candidates`），之后每个实例都在本地
     /// 判定；逐实例的「装没装」要读卷宗与扫 mods 目录，
     /// 有界并发执行。逐实例发请求会让装了十来个实例的玩家在点开安装弹层时等上十几个网络来回，还会
     /// 撞上平台限流把后半截请求打成失败。
@@ -467,20 +467,22 @@ impl Aurora {
 
     /// 落位矩阵的候选版本，发布时间倒序。
     ///
-    /// CurseForge 的文件列表按页给、一页最多 50 个，不带过滤只拿到最新的 50 个：文件多的工程（上千个文件），
-    /// 老 MC 版本的文件全在页外，那些实例会被误判为不兼容，装着的旧版资源包也认不出。所以 CurseForge
-    /// 另外按实例用到的每个 MC 版本各拉一页（平台按 gameVersion 过滤，结果同样进版本列表缓存），
-    /// 按版本 id 去重合并。请求数随 MC 版本的种数而不是实例数增长。Modrinth 的版本列表不分页，一次即全量。
+    /// CurseForge 的文件列表按页给，不带过滤的列表最多翻到页数上限：文件多的工程（上千个文件）翻到
+    /// 上限也没完，老 MC 版本的文件全在页外，那些实例会被误判为不兼容，装着的旧版资源包也认不出。所以
+    /// 列表截断时另外按实例用到的每个 MC 版本各拉一份（平台按 gameVersion 过滤，结果同样进版本列表
+    /// 缓存），按版本 id 去重合并；请求数随 MC 版本的种数而不是实例数增长。列表没截断时它已是全量，
+    /// 不再补拉。Modrinth 的版本列表不分页，一次即全量。
     async fn match_candidates(
         &self,
         platform: Platform,
         project_id: &str,
         mc_versions: &BTreeSet<String>,
     ) -> Result<Vec<ModVersionInfo>> {
-        let mut versions = self
-            .list_mod_versions(platform, project_id, &[], &[])
+        let listing = self
+            .mod_version_list(platform, project_id, &[], &[])
             .await?;
-        if platform == Platform::CurseForge && !mc_versions.is_empty() {
+        let mut versions = listing.versions;
+        if listing.truncated && !mc_versions.is_empty() {
             let aurora = self.clone();
             let project = project_id.to_owned();
             let pages = bounded_map(
@@ -491,7 +493,7 @@ impl Aurora {
                     let project = project.clone();
                     async move {
                         aurora
-                            .list_mod_versions(Platform::CurseForge, &project, &[mc], &[])
+                            .list_mod_versions(platform, &project, &[mc], &[])
                             .await
                     }
                 },
@@ -1560,52 +1562,78 @@ mod tests {
         );
     }
 
-    /// CurseForge 的文件列表一页最多 50 个：文件多的工程，老 MC 版本的文件全在第一页之外。
-    /// 1.12.2 实例在平台上有对得上的文件，矩阵必须认得出来，不能只看第一页就判不兼容。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn curseforge_files_beyond_the_first_page_still_match_older_instances() {
-        let server = MockServer::start().await;
-        let newest: Vec<serde_json::Value> = (0..50)
-            .map(|k| {
-                serde_json::json!({
-                    "id": 5000 + k, "modId": 238222, "displayName": format!("JEI 15.{k}"),
-                    "fileName": format!("jei-1.20.1-15.{k}.jar"), "releaseType": 1,
-                    "fileDate": format!("2026-03-{:02}T00:00:00Z", 1 + k % 28),
-                    "gameVersions": ["1.20.1", "Forge"]
-                })
-            })
-            .collect();
+    /// 第 `k` 个 1.20.1 的 JEI 文件，`k` 越大越新。
+    fn jei_1201(k: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": 5000 + k, "modId": 238222, "displayName": format!("JEI 15.{k}"),
+            "fileName": format!("jei-1.20.1-15.{k}.jar"), "releaseType": 1,
+            "fileDate": format!("2026-03-01T{:02}:{:02}:00Z", k / 60 % 24, k % 60),
+            "gameVersions": ["1.20.1", "Forge"]
+        })
+    }
+
+    fn jei_1122() -> serde_json::Value {
+        serde_json::json!({
+            "id": 2001, "modId": 238222, "displayName": "JEI 4.16",
+            "fileName": "jei_1.12.2-4.16.1.jar", "releaseType": 1,
+            "fileDate": "2020-06-01T00:00:00Z", "gameVersions": ["1.12.2", "Forge"]
+        })
+    }
+
+    fn files_page(files: Vec<serde_json::Value>, index: u64, total: u64) -> ResponseTemplate {
+        let count = files.len();
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": files,
+            "pagination": {"index": index, "pageSize": 50, "resultCount": count, "totalCount": total}
+        }))
+    }
+
+    /// 不过滤的文件列表按请求里的 `index` 一页页给：`all` 是平台上的全部文件，新的在前。
+    async fn mount_unfiltered_files(
+        server: &MockServer,
+        all: Vec<serde_json::Value>,
+        expected: u64,
+    ) {
+        let total = all.len() as u64;
         Mock::given(method("GET"))
             .and(path("/v1/mods/238222/files"))
             .and(query_param_is_missing("gameVersion"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": newest })),
-            )
-            .expect(1)
-            .mount(&server)
+            .and(query_param("pageSize", "50"))
+            .respond_with(move |request: &wiremock::Request| {
+                let index: u64 = request
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "index")
+                    .expect("翻页请求带 index")
+                    .1
+                    .parse()
+                    .unwrap();
+                let page = all.iter().skip(index as usize).take(50).cloned().collect();
+                files_page(page, index, total)
+            })
+            .expect(expected)
+            .mount(server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/mods/238222/files"))
-            .and(query_param("gameVersion", "1.20.1"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": newest })),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/v1/mods/238222/files"))
-            .and(query_param("gameVersion", "1.12.2"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [{
-                    "id": 2001, "modId": 238222, "displayName": "JEI 4.16",
-                    "fileName": "jei_1.12.2-4.16.1.jar", "releaseType": 1,
-                    "fileDate": "2020-06-01T00:00:00Z", "gameVersions": ["1.12.2", "Forge"]
-                }]
-            })))
-            .expect(1)
-            .mount(&server)
-            .await;
+    }
 
+    async fn mount_files_for(
+        server: &MockServer,
+        mc: &str,
+        files: Vec<serde_json::Value>,
+        expected: u64,
+    ) {
+        let total = files.len() as u64;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", mc))
+            .and(query_param("index", "0"))
+            .respond_with(files_page(files, 0, total))
+            .expect(expected)
+            .mount(server)
+            .await;
+    }
+
+    async fn curseforge_matrix(server: &MockServer) -> (Aurora, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
         put_instance(&mc, "老整合", "1.12.2", FORGE_LIB).await;
@@ -1613,6 +1641,26 @@ mod tests {
         let aurora = isolated(&mc, server.uri())
             .with_curseforge_base(server.uri())
             .with_curseforge_key("test-key");
+        (aurora, tmp)
+    }
+
+    /// 文件多到翻满页数上限还没完：老 MC 版本的文件全在页外，矩阵按实例用到的 MC 版本各补拉一份，
+    /// 1.12.2 实例照样认得出对得上的文件，不能只看翻到的那几页就判不兼容。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_files_beyond_the_page_cap_still_match_older_instances() {
+        let server = MockServer::start().await;
+        let mut all: Vec<serde_json::Value> = (0..1200).rev().map(jei_1201).collect();
+        all.push(jei_1122());
+        mount_unfiltered_files(&server, all, 10).await;
+        mount_files_for(
+            &server,
+            "1.20.1",
+            (1150..1200).rev().map(jei_1201).collect(),
+            1,
+        )
+        .await;
+        mount_files_for(&server, "1.12.2", vec![jei_1122()], 1).await;
+        let (aurora, _tmp) = curseforge_matrix(&server).await;
 
         let matches = aurora
             .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
@@ -1626,15 +1674,42 @@ mod tests {
         );
         assert_eq!(by_id("新整合").state, MatchState::Compatible);
         assert_eq!(
-            by_id("新整合").best_version.as_ref().unwrap().game_versions,
-            vec!["1.20.1".to_owned()]
+            by_id("新整合").best_version.as_ref().unwrap().version_id,
+            "6199"
         );
 
-        // 同一场里再开一次走版本列表缓存，不再发请求（上面的 expect(1) 在服务器析构时核对）。
+        // 同一场里再开一次走版本列表缓存，不再发请求（上面的 expect 在服务器析构时核对）。
         aurora
             .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
             .await
             .unwrap();
+    }
+
+    /// 文件列表翻得完（没截断）时它已是全量：第三页上的 1.12.2 文件直接认出来，不按 MC 版本补拉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_complete_listing_needs_no_per_version_fetches() {
+        let server = MockServer::start().await;
+        let mut all: Vec<serde_json::Value> = (0..119).rev().map(jei_1201).collect();
+        all.push(jei_1122());
+        mount_unfiltered_files(&server, all, 3).await;
+        mount_files_for(&server, "1.20.1", Vec::new(), 0).await;
+        mount_files_for(&server, "1.12.2", Vec::new(), 0).await;
+        let (aurora, _tmp) = curseforge_matrix(&server).await;
+
+        let matches = aurora
+            .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
+            .await
+            .unwrap();
+        let by_id = |id: &str| matches.iter().find(|m| m.version_id == id).unwrap();
+        assert_eq!(by_id("老整合").state, MatchState::Compatible);
+        assert_eq!(
+            by_id("老整合").best_version.as_ref().unwrap().version_id,
+            "2001"
+        );
+        assert_eq!(
+            by_id("新整合").best_version.as_ref().unwrap().version_id,
+            "5118"
+        );
     }
 
     /// Modrinth 给资源包版本标的加载器是 `minecraft`，不是 Mod 加载器。

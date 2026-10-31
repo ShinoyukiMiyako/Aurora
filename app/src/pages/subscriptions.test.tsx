@@ -295,7 +295,7 @@ describe("发现页", () => {
       dependencies: [],
       distribution_allowed: true,
     }));
-    ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
     ipc.overrides.set("match_instances", () => [match("生存", { best_version: v }), match("创造", { best_version: v }), match("空岛", { best_version: v }), match("红石", { best_version: v })]);
     await mount(<DiscoverPage route={{ page: "discover" }} />);
     const task = await busy();

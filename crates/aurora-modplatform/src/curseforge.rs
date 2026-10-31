@@ -5,6 +5,7 @@
 //! `AURORA_CURSEFORGE_API_KEY`；都没有时构造直接失败（[`Error::CurseForgeKeyMissing`]），该源被明确
 //! 禁用而非静默降级。远端地址经 `base_url` 注入以走 mock。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use aurora_base::retry::RetryPolicy;
@@ -24,6 +25,16 @@ pub const MINECRAFT_GAME_ID: u32 = 432;
 
 /// 环境变量名：CurseForge API key。
 pub const API_KEY_ENV: &str = "AURORA_CURSEFORGE_API_KEY";
+
+/// 文件列表一页的条数。官方文档写明 `pageSize` 的默认值与上限都是 50。
+pub const MOD_FILES_PAGE_SIZE: u32 = 50;
+
+/// 文件列表最多翻这么多页。文件上千的工程翻到底要几十个请求，版本下拉与落位判定用不着那么老的文件；
+/// 翻到上限还没完时结果标明截断（[`CurseForgeFileList::truncated`]）。
+pub const MOD_FILES_MAX_PAGES: u32 = 10;
+
+// 官方文档：分页参数须满足 index + pageSize <= 10000，超出的请求会被拒。
+const _: () = assert!(MOD_FILES_MAX_PAGES * MOD_FILES_PAGE_SIZE <= 10_000);
 
 /// CurseForge v1 客户端。
 #[derive(Debug, Clone)]
@@ -157,32 +168,72 @@ impl CurseForgeClient {
     }
 
     /// 列出工程文件，可按游戏版本与加载器过滤。
+    ///
+    /// 端点按页给，这里按官方文档的 `index` / `pageSize` 一页页往后翻，直到平台给完：拿到短页或空页，
+    /// 或者已取到 `pagination.totalCount` 个。响应没带分页信息时只能凭满页判断后面还有。最多翻
+    /// [`MOD_FILES_MAX_PAGES`] 页，翻满还没完就标 `truncated`。翻页期间有新文件发布时，后一页会把
+    /// 前一页末尾的文件再给一遍，按文件 id 去重。
     pub async fn mod_files(
         &self,
         mod_id: u32,
         loader: Option<crate::model::ModLoader>,
         game_version: Option<&str>,
-    ) -> Result<Vec<CurseForgeFile>> {
-        let mut params: Vec<(&str, String)> = Vec::new();
+    ) -> Result<CurseForgeFileList> {
+        let mut filters: Vec<(&str, String)> = Vec::new();
         if let Some(version) = game_version {
-            params.push(("gameVersion", version.to_string()));
+            filters.push(("gameVersion", version.to_string()));
         }
         if let Some(loader) = loader {
-            params.push(("modLoaderType", loader.curseforge_loader_type().to_string()));
+            filters.push(("modLoaderType", loader.curseforge_loader_type().to_string()));
         }
         let url = format!("{}/v1/mods/{}/files", self.base_url, mod_id);
-        let envelope: ListEnvelope<CurseForgeFile> =
-            send_json(&self.retry, "curseforge.mod_files", || {
-                self.get(url.as_str()).query(&params)
-            })
-            .await?;
-        Ok(envelope.data)
+        let mut files = Vec::new();
+        let mut seen = HashSet::new();
+        let mut index: u64 = 0;
+        for _ in 0..MOD_FILES_MAX_PAGES {
+            let mut params = filters.clone();
+            params.push(("index", index.to_string()));
+            params.push(("pageSize", MOD_FILES_PAGE_SIZE.to_string()));
+            let envelope: ListEnvelope<CurseForgeFile> =
+                send_json(&self.retry, "curseforge.mod_files", || {
+                    self.get(url.as_str()).query(&params)
+                })
+                .await?;
+            let fetched = u64::try_from(envelope.data.len()).expect("一页的文件数放得进 u64");
+            index += fetched;
+            let more = fetched > 0
+                && match &envelope.pagination {
+                    Some(pagination) => index < pagination.total_count,
+                    None => fetched >= u64::from(MOD_FILES_PAGE_SIZE),
+                };
+            files.extend(
+                envelope
+                    .data
+                    .into_iter()
+                    .filter(|file| seen.insert(file.id)),
+            );
+            if !more {
+                return Ok(CurseForgeFileList {
+                    files,
+                    truncated: false,
+                });
+            }
+        }
+        tracing::info!(
+            mod_id,
+            fetched = index,
+            "CurseForge 文件列表翻到页数上限还没完，结果截断"
+        );
+        Ok(CurseForgeFileList {
+            files,
+            truncated: true,
+        })
     }
 
     /// 按 fileId 取单个文件；工程或文件在平台上不存在返回 `None`。
     ///
-    /// 文件列表端点是分页的，文件多的大 Mod 目标文件未必在首页；安装与钉版本依赖只认一个确定的
-    /// fileId，直接走单文件端点既省请求又不会因分页误报「版本不存在」。
+    /// 文件列表端点是分页的、最多翻到页数上限，文件多的大 Mod 目标文件未必在翻到的页里；安装与钉版本
+    /// 依赖只认一个确定的 fileId，直接走单文件端点既省请求又不会因分页误报「版本不存在」。
     pub async fn mod_file(&self, mod_id: u32, file_id: u32) -> Result<Option<CurseForgeFile>> {
         let url = format!("{}/v1/mods/{}/files/{}", self.base_url, mod_id, file_id);
         let result: Result<Envelope<CurseForgeFile>> =
@@ -346,10 +397,21 @@ struct Envelope<T> {
     data: T,
 }
 
-/// 带分页的 `{ "data": [T], "pagination": ... }` 信封。
+/// 带分页的 `{ "data": [T], "pagination": ... }` 信封。只有翻页的文件列表读 `pagination`，没带时为 `None`。
 #[derive(Debug, Clone, Deserialize)]
 struct ListEnvelope<T> {
     data: Vec<T>,
+    #[serde(default)]
+    pagination: Option<CurseForgePagination>,
+}
+
+/// 一个工程的文件列表：翻页取齐，或者翻到 [`MOD_FILES_MAX_PAGES`] 页为止。
+#[derive(Debug, Clone)]
+pub struct CurseForgeFileList {
+    /// 各页拼起来的文件，按平台给的先后，同一文件只留第一次出现的那个。
+    pub files: Vec<CurseForgeFile>,
+    /// 翻到页数上限时平台那边还有没取的文件。
+    pub truncated: bool,
 }
 
 /// `/v1/mods/search` 响应。
@@ -1221,9 +1283,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let files = client(&server).mod_files(238222, None, None).await.unwrap();
-        assert_eq!(files.len(), 1);
-        let info = files[0].to_version_info();
+        let list = client(&server).mod_files(238222, None, None).await.unwrap();
+        assert!(!list.truncated);
+        assert_eq!(list.files.len(), 1);
+        let info = list.files[0].to_version_info();
         assert_eq!(info.version_id, "5001");
         assert_eq!(info.release_channel, ReleaseChannel::Release);
         assert_eq!(info.game_versions, vec!["1.21".to_string()]);
@@ -1231,5 +1294,155 @@ mod tests {
         assert_eq!(info.file_size, Some(2048));
         assert!(info.dependencies.is_empty());
         assert_eq!(info.download_url, None);
+    }
+
+    /// 第 `k` 个文件，id 为 `7000 + k`。
+    fn numbered_file(k: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": 7000 + k, "modId": 238222, "displayName": format!("JEI {k}"),
+            "fileName": format!("jei-{k}.jar"), "releaseType": 1,
+            "fileDate": "2026-01-01T00:00:00Z", "gameVersions": ["1.20.1", "Forge"]
+        })
+    }
+
+    fn query_number(request: &wiremock::Request, name: &str) -> u64 {
+        request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .unwrap_or_else(|| panic!("请求缺少 {name}：{}", request.url))
+            .1
+            .parse()
+            .unwrap()
+    }
+
+    /// 按请求里的 `index` / `pageSize` 从 `total` 个文件里切出一页；`paginated` 为假时响应不带分页信息。
+    fn paged_files(
+        total: u64,
+        paginated: bool,
+    ) -> impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync {
+        move |request| {
+            let index = query_number(request, "index");
+            let size = query_number(request, "pageSize");
+            let data: Vec<serde_json::Value> = (index.min(total)..(index + size).min(total))
+                .map(numbered_file)
+                .collect();
+            let mut body = serde_json::json!({ "data": data });
+            if paginated {
+                body["pagination"] = serde_json::json!({
+                    "index": index, "pageSize": size, "resultCount": data.len(), "totalCount": total
+                });
+            }
+            ResponseTemplate::new(200).set_body_json(body)
+        }
+    }
+
+    async fn files_server(total: u64, paginated: bool) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("pageSize", "50"))
+            .respond_with(paged_files(total, paginated))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn requested_indexes(server: &MockServer) -> Vec<u64> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| query_number(request, "index"))
+            .collect()
+    }
+
+    /// 按总数翻页：总数正好落在页边界时不多发一个请求，短页即止；文件一个不少、按平台给的先后。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_files_walks_pages_until_the_platform_runs_out() {
+        for (total, pages) in [
+            (0, vec![0]),
+            (1, vec![0]),
+            (50, vec![0]),
+            (51, vec![0, 50]),
+            (120, vec![0, 50, 100]),
+        ] {
+            let server = files_server(total, true).await;
+            let list = client(&server).mod_files(238222, None, None).await.unwrap();
+            let ids: Vec<u32> = list.files.iter().map(|file| file.id).collect();
+            assert_eq!(
+                ids,
+                (7000..7000 + total as u32).collect::<Vec<_>>(),
+                "共 {total} 个"
+            );
+            assert!(!list.truncated, "共 {total} 个");
+            assert_eq!(requested_indexes(&server).await, pages, "共 {total} 个");
+        }
+    }
+
+    /// 翻满 10 页（500 个）就停：总数刚好 500 不算截断，多一个就标截断，请求数都不超过 10。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_files_stops_at_the_page_cap_and_says_so() {
+        let every_page: Vec<u64> = (0..10).map(|page| page * 50).collect();
+        for (total, truncated) in [(500, false), (501, true)] {
+            let server = files_server(total, true).await;
+            let list = client(&server).mod_files(238222, None, None).await.unwrap();
+            assert_eq!(list.files.len(), 500, "共 {total} 个");
+            assert_eq!(list.truncated, truncated, "共 {total} 个");
+            assert_eq!(
+                requested_indexes(&server).await,
+                every_page,
+                "共 {total} 个"
+            );
+        }
+    }
+
+    /// 响应没带分页信息时凭满页判断：满页就再要一页，空页或短页即止。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_files_without_pagination_stops_on_a_short_page() {
+        for (total, pages) in [(50, vec![0, 50]), (70, vec![0, 50]), (30, vec![0])] {
+            let server = files_server(total, false).await;
+            let list = client(&server).mod_files(238222, None, None).await.unwrap();
+            assert_eq!(list.files.len() as u64, total);
+            assert!(!list.truncated);
+            assert_eq!(requested_indexes(&server).await, pages, "共 {total} 个");
+        }
+    }
+
+    /// 过滤条件每一页都带上；翻页期间新发布的文件把上一页末尾挤到下一页时，重复的那个只留一份。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mod_files_keeps_filters_on_every_page_and_drops_repeats() {
+        let server = MockServer::start().await;
+        let page = |range: std::ops::Range<u64>| {
+            serde_json::json!({
+                "data": range.map(numbered_file).collect::<Vec<_>>(),
+                "pagination": {"index": 0, "pageSize": 50, "resultCount": 50, "totalCount": 90}
+            })
+        };
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", "1.20.1"))
+            .and(query_param("modLoaderType", "1"))
+            .and(query_param("index", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(0..50)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", "1.20.1"))
+            .and(query_param("modLoaderType", "1"))
+            .and(query_param("index", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page(49..90)))
+            .mount(&server)
+            .await;
+
+        let list = client(&server)
+            .mod_files(238222, Some(ModLoader::Forge), Some("1.20.1"))
+            .await
+            .unwrap();
+        let ids: Vec<u32> = list.files.iter().map(|file| file.id).collect();
+        assert_eq!(ids, (7000..7090).collect::<Vec<_>>());
+        assert!(!list.truncated);
     }
 }

@@ -59,9 +59,9 @@ pub use modrinth::{
 
 pub use curseforge::{
     API_KEY_ENV, CURSEFORGE_BASE, CurseForgeClient, CurseForgeFile, CurseForgeFileDependency,
-    CurseForgeFileHash, CurseForgeFileIndex, CurseForgeFingerprintMatch, CurseForgeMod,
-    CurseForgeSearchPlan, CurseForgeSearchResponse, MINECRAFT_GAME_ID,
-    normalize_curseforge_game_versions, search_plan,
+    CurseForgeFileHash, CurseForgeFileIndex, CurseForgeFileList, CurseForgeFingerprintMatch,
+    CurseForgeMod, CurseForgeSearchPlan, CurseForgeSearchResponse, MINECRAFT_GAME_ID,
+    MOD_FILES_MAX_PAGES, MOD_FILES_PAGE_SIZE, normalize_curseforge_game_versions, search_plan,
 };
 
 pub use local::{

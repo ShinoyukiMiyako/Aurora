@@ -3,7 +3,7 @@ import { IpcError } from "./errors";
 import { listHistory, rollback, rollbackChecks } from "./history";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners, subscribeMockEvent } from "./mock/events";
-import { MOCK_MOD_INSTANCE, mockModFileCount, setMockModFileBusy } from "./mock/handlers/mods";
+import { MOCK_MOD_INSTANCE, mockModFileCount, setMockModFileBusy, setMockVersionListTruncated } from "./mock/handlers/mods";
 import { beginMockTask, endMockTask } from "./mock/handlers/tasks";
 import {
   checkUpdates,
@@ -12,6 +12,7 @@ import {
   listMods,
   listModVersions,
   matchInstances,
+  modVersionList,
   planInstall,
   removeMod,
   setModEnabled,
@@ -248,6 +249,19 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
     expect(await listModVersions("modrinth", "mOgUt4GM", ["1.20.1"], ["forge"])).toHaveLength(1);
     expect(await failure(listModVersions("modrinth", "AANobbMI", [], ["optifine" as never]))).toMatchObject({ code: "invalid_argument" });
     expect(await failure(listModVersions("curseforge", "AANobbMI", [], []))).toMatchObject({ code: "mod_platform_failed" });
+  });
+
+  it("版本列表的出参带 truncated：不过滤的列表翻不完时为 true，带过滤的照常为 false", async () => {
+    expect(await modVersionList("modrinth", "AANobbMI", [], [])).toEqual({
+      versions: await listModVersions("modrinth", "AANobbMI", [], []),
+      truncated: false,
+    });
+    setMockVersionListTruncated("modrinth", "AANobbMI", true);
+    const truncated = await modVersionList("modrinth", "AANobbMI", [], []);
+    expect(truncated.truncated).toBe(true);
+    expect(truncated.versions.map((v) => v.version_id)).toEqual(["sodium-121", "sodium-060", "sodium-053"]);
+    expect((await modVersionList("modrinth", "AANobbMI", ["1.20.1"], [])).truncated).toBe(false);
+    expect((await modVersionList("modrinth", "mOgUt4GM", [], [])).truncated).toBe(false);
   });
 
   it("矩阵四态按档位排序，不兼容带原因，已装带出已装版本", async () => {

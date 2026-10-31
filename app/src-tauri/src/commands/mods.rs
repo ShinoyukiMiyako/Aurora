@@ -6,6 +6,7 @@
 //! 这些命令还以「改动 Mod 与资源」占住实例（更新全程持有，启停与移除只占一瞬）：它们按实例名算好
 //! 路径再写文件、卷宗与历史，同时被改名或删除的话会按旧路径把实例目录重新建出来。
 
+use aurora_core::modversions::ModVersionList;
 use aurora_core::{
     is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstalledSource,
     InstanceMatch, InstanceMod, ModLoader, ModVersionInfo, Platform, UpdateCandidate,
@@ -185,6 +186,24 @@ pub(crate) async fn update_mod_with(
     })
 }
 
+/// 某工程的版本列表。
+#[derive(Debug, Serialize)]
+pub struct ModVersionListDto {
+    /// 发布时间倒序。
+    pub versions: Vec<ModVersionInfo>,
+    /// CurseForge 上文件太多、只翻到了页数上限（500 个文件）：更老的版本不在列表里。
+    pub truncated: bool,
+}
+
+impl From<ModVersionList> for ModVersionListDto {
+    fn from(list: ModVersionList) -> Self {
+        Self {
+            versions: list.versions,
+            truncated: list.truncated,
+        }
+    }
+}
+
 /// 列出某工程的可用版本（按发布时间倒序）。`game_versions` / `loaders` 为空表示该维度不过滤。
 #[tauri::command]
 pub async fn list_mod_versions(
@@ -193,7 +212,7 @@ pub async fn list_mod_versions(
     game_versions: Vec<String>,
     loaders: Vec<String>,
     facade: State<'_, Facade>,
-) -> Result<Vec<ModVersionInfo>, CommandError> {
+) -> Result<ModVersionListDto, CommandError> {
     let platform = parse_platform(&platform)?;
     require_non_empty("project_id", &project_id)?;
     let loaders = loaders
@@ -202,8 +221,9 @@ pub async fn list_mod_versions(
         .collect::<Result<Vec<_>, _>>()?;
     let aurora = facade.snapshot().await;
     Ok(aurora
-        .list_mod_versions(platform, &project_id, &game_versions, &loaders)
-        .await?)
+        .mod_version_list(platform, &project_id, &game_versions, &loaders)
+        .await?
+        .into())
 }
 
 /// 一个实例里已装 Mod 的平台来源；读不出卷宗或 mods 目录时带上与命令错误同形状的 `error`。
@@ -397,6 +417,17 @@ mod tests {
         assert_eq!(err.code, code::INVALID_ARGUMENT);
         assert_eq!(err.message, "未知资源平台 Modrinth");
         assert_eq!(parse_loader("").unwrap_err().code, code::INVALID_ARGUMENT);
+    }
+
+    /// 版本列表的出参是对象：前端据 truncated 在版本下拉里说明列表不全。
+    #[test]
+    fn version_list_serializes_with_truncation_flag() {
+        let wire = serde_json::to_value(ModVersionListDto::from(ModVersionList {
+            versions: Vec::new(),
+            truncated: true,
+        }))
+        .unwrap();
+        assert_eq!(wire, json!({ "versions": [], "truncated": true }));
     }
 
     /// 移除走完整链路：文件删掉、卷宗条目摘掉、历史里多一条移除事件。

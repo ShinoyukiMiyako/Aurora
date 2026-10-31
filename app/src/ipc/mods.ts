@@ -161,13 +161,25 @@ export const checkUpdates = (versionId: string): Promise<UpdateCandidate[]> => i
 export const updateMod = (taskId: string, versionId: string, fileName: string, modVersionId: string): Promise<ModUpdateOutcomeDto> =>
   invoke<ModUpdateOutcomeDto>("update_mod", { taskId, versionId, fileName, modVersionId });
 
-/** 工程的可用版本（发布时间倒序）；两个过滤维度传空数组表示不过滤。 */
-export const listModVersions = (
+/** 某工程的版本列表。 */
+export interface ModVersionList {
+  /** 发布时间倒序。 */
+  versions: ModVersionInfo[];
+  /** CurseForge 上文件太多、只翻到了页数上限（500 个文件）：更老的版本不在列表里，界面应说明列表不全。 */
+  truncated: boolean;
+}
+
+/** 工程的可用版本（发布时间倒序），连同列表是否截断；两个过滤维度传空数组表示不过滤。 */
+export const modVersionList = (
   platform: PlatformId,
   projectId: string,
   gameVersions: string[],
   loaders: ModLoader[],
-): Promise<ModVersionInfo[]> => invoke<ModVersionInfo[]>("list_mod_versions", { platform, projectId, gameVersions, loaders });
+): Promise<ModVersionList> => invoke<ModVersionList>("list_mod_versions", { platform, projectId, gameVersions, loaders });
+
+/** 同 modVersionList，只要版本、不关心列表是否截断的调用方用。 */
+export const listModVersions = (platform: PlatformId, projectId: string, gameVersions: string[], loaders: ModLoader[]): Promise<ModVersionInfo[]> =>
+  modVersionList(platform, projectId, gameVersions, loaders).then((list) => list.versions);
 
 /**
  * 工程对全部已装实例的落位矩阵；给出 modVersionId 时只按这个版本判定。

@@ -124,15 +124,22 @@ export interface NewsFeedDto {
   fetched_at: number;
   /** 至少有一个来源本次没取到新内容，给的是缓存。 */
   offline: boolean;
-  /** 启动器资讯取不到且没有缓存时的错误（network_failed / feed_invalid，detail.url）；这时 items 里只有官方资讯。 */
+  /** 启动器资讯取不到且没有缓存时的错误（network_failed / feed_invalid，detail.url）；这时 items 里只有官方资讯。退避期内给的是上次那次失败。 */
   launcher_error: { code: string; message: string; detail?: unknown } | null;
+}
+
+export interface ListNewsOptions {
+  /** 启动器资讯不等失败后的退避期满，立即重取一次：给「重试」按钮与恢复联网后的重取用。 */
+  retry: boolean;
 }
 
 /**
  * 官方资讯 6 小时内用缓存；联网失败退回缓存并标 offline，连缓存都没有才报错（network_failed / feed_invalid，detail.url）。
  * 启动器资讯（launcher）进程内缓存 1 小时，正式版不含预发布；它的失败不让命令报错，只放进 launcher_error。
+ * 启动器资讯取不到之后按 1、5、15、60 分钟退避：退避期内不请求，照样给上次的失败（或上次取到的发布并标 offline）。
  */
-export const listNews = (): Promise<NewsFeedDto> => invoke<NewsFeedDto>("list_news");
+export const listNews = (options: ListNewsOptions = { retry: false }): Promise<NewsFeedDto> =>
+  invoke<NewsFeedDto>("list_news", { retry: options.retry });
 
 // ---- 启动器自更新 ----
 
