@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use aurora_modpack::{
     Error, PackFormat, PathValidationError, RemoteFiles, extract_overrides, read_pack,
 };
-use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
+use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 const MRPACK_INDEX: &[u8] =
     include_bytes!("fixtures/fabulously-optimized-14.1.1.modrinth.index.json");
@@ -15,6 +15,7 @@ const CF_MANIFEST: &[u8] = include_bytes!("fixtures/fabulously-optimized-14.1.1.
 
 enum Entry<'a> {
     File(&'a str, &'a [u8]),
+    Compressed(&'a str, &'a [u8], CompressionMethod),
     Dir(&'a str),
     Symlink(&'a str, &'a str),
 }
@@ -26,6 +27,12 @@ fn write_zip(path: &Path, entries: &[Entry<'_>]) {
         match entry {
             Entry::File(name, bytes) => {
                 writer.start_file(*name, options).unwrap();
+                writer.write_all(bytes).unwrap();
+            }
+            Entry::Compressed(name, bytes, method) => {
+                writer
+                    .start_file(*name, options.compression_method(*method))
+                    .unwrap();
                 writer.write_all(bytes).unwrap();
             }
             Entry::Dir(name) => writer.add_directory(*name, options).unwrap(),
@@ -365,4 +372,210 @@ fn extracts_a_thousand_entries_promptly() {
     );
     // 上限放得很宽，只拦每个条目都去逐级检查祖先目录那种量级的退化。
     assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+}
+
+/// 把名为 `name` 的条目在本地头与中央目录里的压缩方法编号改成 `method`，模拟启动器解不了的压缩方式。
+/// 数据本身按 Stored 写入，只改编号。
+fn patch_method(path: &Path, name: &str, method: u16) {
+    let mut bytes = fs::read(path).unwrap();
+    let name = name.as_bytes();
+    let mut patched = 0;
+    for i in 0..bytes.len().saturating_sub(46) {
+        // 本地头：方法在 +8，名字长度在 +26，名字从 +30 开始；中央目录：方法 +10，名字长度 +28，名字 +46。
+        let (method_at, len_at, name_at) = match &bytes[i..i + 4] {
+            b"PK\x03\x04" => (8, 26, 30),
+            b"PK\x01\x02" => (10, 28, 46),
+            _ => continue,
+        };
+        let len = u16::from_le_bytes([bytes[i + len_at], bytes[i + len_at + 1]]) as usize;
+        if bytes.get(i + name_at..i + name_at + len) == Some(name) {
+            bytes[i + method_at..i + method_at + 2].copy_from_slice(&method.to_le_bytes());
+            patched += 1;
+        }
+    }
+    assert_eq!(patched, 2, "本地头与中央目录各一处");
+    fs::write(path, bytes).unwrap();
+}
+
+/// 固定种子的伪随机字节，与重复内容交替，让各压缩方式都有东西可压。
+fn sample_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    (0..len)
+        .map(|i| {
+            if (i / 4096) % 2 == 0 {
+                b"petal "[i % 6]
+            } else {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            }
+        })
+        .collect()
+}
+
+/// zip 自己解出的条目名与压缩方式。
+fn raw_entries(path: &Path) -> Vec<(String, CompressionMethod)> {
+    let mut archive = ZipArchive::new(fs::File::open(path).unwrap()).unwrap();
+    (0..archive.len())
+        .map(|i| {
+            let file = archive.by_index_raw(i).unwrap();
+            (file.name().to_owned(), file.compression())
+        })
+        .collect()
+}
+
+#[test]
+fn bzip2_xz_and_ppmd_overrides_extract_byte_for_byte() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 跨过解压循环 64 KiB 缓冲区的大文件、空文件、1 字节文件都要有。
+    let big = sample_bytes(300 * 1024 + 7, 0x51);
+    let medium = sample_bytes(70_000, 0x52);
+    let small = sample_bytes(1, 0x53);
+    let path = pack(
+        tmp.path(),
+        "methods.zip",
+        &[
+            Entry::File("manifest.json", CF_MANIFEST),
+            Entry::Compressed("overrides/config/big.bin", &big, CompressionMethod::Bzip2),
+            Entry::Compressed("overrides/empty.txt", b"", CompressionMethod::Bzip2),
+            Entry::Compressed(
+                "overrides/config/medium.bin",
+                &medium,
+                CompressionMethod::Xz,
+            ),
+            Entry::Compressed("overrides/one.bin", &small, CompressionMethod::Ppmd),
+        ],
+    );
+    // 确认写进去的真是这几种方法，不是写入端悄悄退回了 Stored。
+    let methods: Vec<_> = raw_entries(&path).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(
+        methods[1..],
+        [
+            CompressionMethod::Bzip2,
+            CompressionMethod::Bzip2,
+            CompressionMethod::Xz,
+            CompressionMethod::Ppmd
+        ]
+    );
+
+    let archive = read_pack(&path).unwrap();
+    let listed: Vec<_> = archive
+        .overrides
+        .iter()
+        .map(|e| (e.path.as_str(), e.size))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            ("config/big.bin", big.len() as u64),
+            ("empty.txt", 0),
+            ("config/medium.bin", medium.len() as u64),
+            ("one.bin", 1),
+        ]
+    );
+    assert_eq!(
+        archive.overrides_bytes,
+        (big.len() + medium.len() + 1) as u64
+    );
+
+    let dest = tmp.path().join("instance");
+    fs::create_dir(&dest).unwrap();
+    assert_eq!(
+        extract_overrides(&path, &archive.overrides, &dest, &never).unwrap(),
+        4
+    );
+    assert_eq!(fs::read(dest.join("config").join("big.bin")).unwrap(), big);
+    assert_eq!(fs::read(dest.join("empty.txt")).unwrap(), b"");
+    assert_eq!(
+        fs::read(dest.join("config").join("medium.bin")).unwrap(),
+        medium
+    );
+    assert_eq!(fs::read(dest.join("one.bin")).unwrap(), small);
+}
+
+#[test]
+fn zstd_override_is_reported_as_unsupported_compression_with_method_and_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entries = [
+        Entry::File("manifest.json", CF_MANIFEST),
+        Entry::File("overrides/options.txt", b"fov:70"),
+        Entry::Compressed(
+            "overrides/config/fast.txt",
+            b"zstd-bytes",
+            CompressionMethod::Stored,
+        ),
+    ];
+    let path = pack(tmp.path(), "zstd.zip", &entries);
+    patch_method(&path, "overrides/config/fast.txt", 93);
+    let err = read_pack(&path).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::UnsupportedCompression { path: p, entry, method: 93 }
+                if *p == path && entry == "overrides/config/fast.txt"
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "整合包用了不支持的压缩方式（方法编号 93）：overrides/config/fast.txt"
+    );
+
+    // 读包之后才被换成 Zstd 条目的，解压时同样按不支持的压缩方式报，而不是算包损坏。
+    let swapped = pack(tmp.path(), "swapped.zip", &entries);
+    let archive = read_pack(&swapped).unwrap();
+    patch_method(&swapped, "overrides/config/fast.txt", 93);
+    let dest = tmp.path().join("instance");
+    fs::create_dir(&dest).unwrap();
+    assert!(matches!(
+        extract_overrides(&swapped, &archive.overrides, &dest, &never),
+        Err(Error::UnsupportedCompression { method: 93, entry, .. })
+            if entry == "overrides/config/fast.txt"
+    ));
+
+    // 清单本身解不了，报清单的条目名；不认识的方法编号也走同一条路。
+    let manifest = pack(
+        tmp.path(),
+        "manifest.mrpack",
+        &[Entry::Compressed(
+            "modrinth.index.json",
+            MRPACK_INDEX,
+            CompressionMethod::Stored,
+        )],
+    );
+    patch_method(&manifest, "modrinth.index.json", 77);
+    assert!(matches!(
+        read_pack(&manifest),
+        Err(Error::UnsupportedCompression { method: 77, entry, .. }) if entry == "modrinth.index.json"
+    ));
+}
+
+#[test]
+fn unsupported_entries_that_are_never_extracted_do_not_reject_the_pack() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = pack(
+        tmp.path(),
+        "shadowed.mrpack",
+        &[
+            Entry::File("modrinth.index.json", MRPACK_INDEX),
+            Entry::Compressed("README.md", b"readme", CompressionMethod::Stored),
+            Entry::Compressed("overrides/options.txt", b"base", CompressionMethod::Stored),
+            Entry::File("client-overrides/options.txt", b"client"),
+        ],
+    );
+    // 不在覆盖层里的条目、被上层盖掉的条目都不会被解压，用了什么压缩方式与安装无关。
+    patch_method(&path, "README.md", 93);
+    patch_method(&path, "overrides/options.txt", 93);
+    let archive = read_pack(&path).unwrap();
+    let names: Vec<_> = archive
+        .overrides
+        .iter()
+        .map(|e| e.entry_name.as_str())
+        .collect();
+    assert_eq!(names, vec!["client-overrides/options.txt"]);
+    let dest = tmp.path().join("instance");
+    fs::create_dir(&dest).unwrap();
+    extract_overrides(&path, &archive.overrides, &dest, &never).unwrap();
+    assert_eq!(fs::read(dest.join("options.txt")).unwrap(), b"client");
 }
