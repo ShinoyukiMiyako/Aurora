@@ -78,3 +78,6 @@ async function boot(container: HTMLElement): Promise<void> {
 const container = document.getElementById("root");
 if (!container) throw new Error("index.html 缺少 #root 挂载点");
 void boot(container);
+// 开发构建在应用里挂上 window.__sk（粉色面积、材质点缀位、花瓣状态），生产构建整段摇树移除；
+// 加载失败的 rejection 直接进控制台。
+if (import.meta.env.DEV) void import("./dev/diagnostics").then((m) => m.installDevDiagnostics());
