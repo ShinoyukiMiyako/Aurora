@@ -154,6 +154,51 @@ describe("useLoadingGate：慢提示", () => {
     advance(1);
     expect(state().slow).toBe(true);
   });
+
+  // 加载中换了一次请求（例如首页还没回来就改了搜索词），加载状态一直为真：慢提示（以及接在它后面的超时）
+  // 若沿用上一个请求的起点，新请求刚发出就被说成「慢」，再过一会儿就被判超时
+  function Rounds({ loading, round }: { loading: boolean; round: string }) {
+    const gate = useLoadingGate(loading, round);
+    return <span data-view={gate.view} data-slow={gate.slow} />;
+  }
+
+  it("加载中换了一轮（round 变化）：慢提示清掉并从换轮那一刻重新计时；骨架照旧显示", () => {
+    view = render(<Rounds loading round="a" />);
+    advance(SLOW_HINT_MS);
+    expect(state()).toEqual({ view: "skeleton", slow: true });
+    view.rerender(<Rounds loading round="b" />);
+    expect(state()).toEqual({ view: "skeleton", slow: false });
+    advance(SLOW_HINT_MS - 1);
+    expect(state().slow).toBe(false);
+    advance(1);
+    expect(state()).toEqual({ view: "skeleton", slow: true });
+    // round 不变的重渲染不换轮
+    view.rerender(<Rounds loading round="b" />);
+    expect(state().slow).toBe(true);
+  });
+
+  it("骨架出现前换轮：骨架仍按加载开始的时刻出现，不因换了请求再多等一个延迟", () => {
+    view = render(<Rounds loading round="a" />);
+    advance(LOADING_DELAY_MS - 100);
+    view.rerender(<Rounds loading round="b" />);
+    expect(state().view).toBe("pending");
+    advance(99);
+    expect(state().view).toBe("pending");
+    advance(1);
+    expect(state()).toEqual({ view: "skeleton", slow: false });
+    // 慢提示从换轮算起：离加载开始已满 SLOW_HINT_MS，但离换轮还差 LOADING_DELAY_MS - 100
+    advance(SLOW_HINT_MS - LOADING_DELAY_MS);
+    expect(state().slow).toBe(false);
+    advance(LOADING_DELAY_MS - 100);
+    expect(state().slow).toBe(true);
+  });
+
+  it("不在加载时换轮：不出现骨架，也不留慢提示", () => {
+    view = render(<Rounds loading={false} round="a" />);
+    view.rerender(<Rounds loading={false} round="b" />);
+    advance(SLOW_HINT_MS * 2);
+    expect(state()).toEqual({ view: "content", slow: false });
+  });
 });
 
 /** 线性同余发生器：随机加载时长可复现，失败时能按种子重放。 */
