@@ -252,10 +252,7 @@ mod tests {
         let lib = Library {
             name: "g:a:1".into(),
             downloads: None,
-            url: None,
-            natives: None,
-            rules: None,
-            extract: None,
+            ..Default::default()
         };
         assert_eq!(effective_excludes(&lib), vec!["META-INF/".to_string()]);
     }

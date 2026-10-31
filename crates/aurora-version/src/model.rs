@@ -156,7 +156,7 @@ impl ArgumentValue {
 }
 
 /// 依赖库条目。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Library {
     /// maven 坐标 `group:artifact:version[:classifier]`。
     pub name: String,
@@ -166,6 +166,13 @@ pub struct Library {
     /// maven 简写式的仓库基址（Fabric/Forge），配合 name 拼出下载 URL。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// maven 简写式条目自带的 sha1（Fabric meta 写在库条目顶层）；没有 `downloads` 块时它是唯一的
+    /// 校验契约，盘上那份损坏时据此认出来重下。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<String>,
+    /// maven 简写式条目自带的字节大小，来源同 `sha1`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
     /// natives 映射：系统名 -> classifier 键（值里可能含 `${arch}` 占位）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub natives: Option<BTreeMap<String, String>>,
@@ -425,10 +432,7 @@ mod tests {
         let lib = Library {
             name: "org.lwjgl:lwjgl:3.3.3:natives-windows".into(),
             downloads: None,
-            url: None,
-            natives: None,
-            rules: None,
-            extract: None,
+            ..Default::default()
         };
         let c = lib.coordinate().expect("应解析坐标");
         assert_eq!(c.group, "org.lwjgl");

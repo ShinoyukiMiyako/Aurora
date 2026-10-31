@@ -98,7 +98,8 @@ fn push_library_tasks(
         );
     }
 
-    // 3) maven 简写式（无 downloads 块，靠仓库地址 + 坐标拼下载地址）。哈希/大小未知。
+    // 3) maven 简写式（无 downloads 块，靠仓库地址 + 坐标拼下载地址）。条目顶层写了 sha1 / 大小的
+    //    （Fabric meta）照样带上，其余的哈希与大小未知。
     //    没写仓库地址的按官方启动器的约定取 Mojang 的库仓库：旧版 Forge 的 launchwrapper 等就是
     //    这样声明的。带 natives 却没有下载件的条目只有 natives 分类件，不凭坐标猜主件。
     if lib.downloads.is_none() {
@@ -112,10 +113,14 @@ fn push_library_tasks(
                 maven::artifact_path(&lib.name).ok_or_else(|| Error::InvalidLibraryCoordinate {
                     name: lib.name.clone(),
                 })?;
-            out.push(DownloadTask::new(
-                join_maven(base, &rel),
-                layout.library_path(&rel),
-            ));
+            let mut task = DownloadTask::new(join_maven(base, &rel), layout.library_path(&rel));
+            if let Some(sha1) = &lib.sha1 {
+                task = task.with_sha1(sha1.clone());
+            }
+            if let Some(size) = lib.size {
+                task = task.with_size(size);
+            }
+            out.push(task);
         }
     }
     Ok(())
@@ -272,7 +277,7 @@ mod tests {
                 "/mc/libraries/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar"
             )
         );
-        // 简写式无哈希/大小契约。
+        // 没写 sha1 / 大小的简写式条目没有校验契约。
         assert!(tasks[0].sha1.is_none());
         assert!(tasks[0].size.is_none());
     }

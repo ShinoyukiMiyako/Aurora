@@ -153,10 +153,7 @@ mod tests {
                 }),
                 classifiers: None,
             }),
-            url: None,
-            natives: None,
-            rules: None,
-            extract: None,
+            ..Default::default()
         };
         assert_eq!(
             library_relative_path(&with_download).as_deref(),
@@ -167,9 +164,7 @@ mod tests {
             name: "net.fabricmc:fabric-loader:0.15.11".into(),
             downloads: None,
             url: Some("https://maven.fabricmc.net/".into()),
-            natives: None,
-            rules: None,
-            extract: None,
+            ..Default::default()
         };
         assert_eq!(
             library_relative_path(&shorthand).as_deref(),

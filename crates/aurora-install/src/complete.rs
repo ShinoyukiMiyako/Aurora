@@ -327,6 +327,55 @@ mod tests {
         assert_eq!(std::fs::read(scala).unwrap(), b"scala");
     }
 
+    /// Fabric meta 的库条目在顶层写了 sha1 与大小：盘上那份损坏时补全按校验值认出来并重下，不当成
+    /// 「只有坐标、在盘即用」的条目跳过。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_corrupt_library_with_a_declared_sha1_is_fetched_again() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const BODY: &[u8] = b"loader-jar";
+        const BODY_SHA1: &str = "159aa9fb9ff44707d319d307019efa372dac582c";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY.to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let version: VersionJson = serde_json::from_value(serde_json::json!({
+            "id": "fabric-loader-0.16.9-1.20.1",
+            "libraries": [{
+                "name": "net.fabricmc:fabric-loader:0.16.9",
+                "url": format!("{}/", server.uri()),
+                "sha1": BODY_SHA1,
+                "size": BODY.len()
+            }]
+        }))
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let jar = layout
+            .library_path_for_coordinate("net.fabricmc:fabric-loader:0.16.9")
+            .unwrap();
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        std::fs::write(&jar, b"truncated").unwrap();
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = RetryPolicy::default();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        ensure_complete(cx, &version, "fabric-loader-0.16.9-1.20.1")
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&jar).unwrap(), BODY);
+    }
+
     /// virtual 布局却既没有 assetIndex 也没有 assets 字段：报缺少资源索引，而不是物化到
     /// `assets/virtual/` 根目录下。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
