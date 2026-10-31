@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installMod, installResource, projectDetail, searchResources, type SearchArgs } from "../discover";
 import { deleteInstance, listInstances, renameInstance } from "../instances";
 import { installModpack, summarizePlatformModpack } from "../modpack";
-import { listMods, listModVersions, matchInstances, planInstall } from "../mods";
+import { listMods, matchInstances, modVersionList, planInstall } from "../mods";
 import { mockInvoke, resetMocks } from "./index";
 import { clearMockEventListeners } from "./events";
 import { addMockInstance } from "./handlers/instances";
@@ -23,6 +23,9 @@ async function readyInstanceIds(): Promise<string[]> {
   return (await listInstances()).filter((i) => i.status === "ready").map((i) => i.id);
 }
 
+/** 只看版本、不关心截断的断言用。 */
+const versionsOf = async (...args: Parameters<typeof modVersionList>) => (await modVersionList(...args)).versions;
+
 describe("工程目录：搜得到就打得开、装得上", () => {
   it("每张卡的每个平台来源：详情、版本列表都取得到，最新版本与版本列表一致；能装进实例的还取得到落位矩阵", async () => {
     const { hits } = await searchResources(ALL);
@@ -33,7 +36,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
         const where = `${hit.title} @ ${s.platform}`;
         const detail = await projectDetail(s.platform, s.project_id);
         expect(detail.title, where).toBe(hit.title);
-        const versions = await listModVersions(s.platform, s.project_id, [], []);
+        const versions = await versionsOf(s.platform, s.project_id, [], []);
         expect(versions.length, where).toBeGreaterThan(0);
         expect(versions.every((v) => v.platform === s.platform && v.project_id === s.project_id), where).toBe(true);
         expect(detail.latest_version?.version_id, where).toBe(versions[0].version_id);
@@ -49,7 +52,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
     const { hits } = await searchResources(ALL);
     for (const hit of hits) {
       for (const s of hit.sources) {
-        const versions = await listModVersions(s.platform, s.project_id, [], []);
+        const versions = await versionsOf(s.platform, s.project_id, [], []);
         for (const v of versions) {
           const where = `${hit.title} ${v.version_number}`;
           switch (hit.resource_type) {
@@ -213,7 +216,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
     let n = 0;
     for (const hit of hits) {
       for (const s of hit.sources) {
-        const [latest] = await listModVersions(s.platform, s.project_id, [], []);
+        const [latest] = await versionsOf(s.platform, s.project_id, [], []);
         const summary = await summarizePlatformModpack(s.platform, s.project_id, latest.version_id);
         expect(summary.version).toBe(latest.version_number);
         expect(summary.minecraft).toBe(latest.game_versions[0]);

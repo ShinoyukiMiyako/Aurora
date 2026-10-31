@@ -124,6 +124,8 @@ export const DETAIL_COPY = {
   versionsEmpty: "这个资源还没有发布版本",
   versionsFailed: "版本列表没加载出来",
   versionsLabel: "全部版本",
+  // 只有 CurseForge 会截断；平台没写明文件列表的排序，不能说成「最近的」
+  versionsTruncated: "CurseForge 上的文件太多，这里只列出了其中一部分，没找到的版本请到 CurseForge 网页查看",
   manyGameVersions: (head: string, n: number) => `${head} 等 ${n} 个`,
   externalPage: "在网页上打开",
 } as const;

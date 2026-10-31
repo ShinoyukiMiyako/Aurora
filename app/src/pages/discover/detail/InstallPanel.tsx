@@ -17,6 +17,7 @@ import {
   type InstallableResourceType,
   type InstanceMatch,
   type ModVersionInfo,
+  type ModVersionList,
   type ProjectDetail,
 } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
@@ -107,7 +108,7 @@ function instanceMeta(inst: InstanceSummary): string {
 
 export interface InstallPanelProps {
   detail: ProjectDetail;
-  versions: ResourceResult<ModVersionInfo[]>;
+  versions: ResourceResult<ModVersionList>;
   /** 选定的版本；null 为「自动」。 */
   pinned: string | null;
   onPin: (versionId: string | null) => void;
@@ -254,7 +255,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
 
   const versionSelect: SelectOption<string>[] = [
     { value: AUTO, label: INSTALL_COPY.versionAuto },
-    ...(versions.status === "ready" ? versionOptions(versions.data) : []),
+    ...(versions.status === "ready" ? versionOptions(versions.data.versions) : []),
   ];
 
   const footer = (
@@ -305,6 +306,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
         options={versionSelect}
         onChange={(v) => onPin(v === AUTO ? null : v)}
       />
+      {versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
 
       {type === "data_pack" &&
         probeWindow(

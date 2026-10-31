@@ -4,7 +4,7 @@
 import type { Platform } from "../../domain/types";
 import { projectDetail, searchResources, type InstallableResourceType, type ProjectDetail, type SearchArgs, type SearchResultDto } from "../../ipc/discover";
 import { previewModpack, summarizePlatformModpack, type ModpackPreviewDto, type ModpackSummaryDto } from "../../ipc/modpack";
-import { installedSources, listModVersions, matchInstances, planInstall, type InstallPlan, type InstanceMatch, type InstanceSources, type ModLoader, type ModVersionInfo } from "../../ipc/mods";
+import { installedSources, matchInstances, modVersionList, planInstall, type InstallPlan, type InstanceMatch, type InstanceSources, type ModLoader, type ModVersionList } from "../../ipc/mods";
 import { useResource, type ResourceResult } from "../resource";
 
 export type {
@@ -25,7 +25,7 @@ export type {
   SortField,
 } from "../../ipc/discover";
 export type { ModpackPreviewDto, ModpackSource, ModpackSummaryDto, PackFormat, PackLoader } from "../../ipc/modpack";
-export type { Compatibility, InstallPlan, InstalledSource, InstanceMatch, InstanceSources, MatchState, ModDependency, ModLoader, ModVersionInfo, PlannedItem } from "../../ipc/mods";
+export type { Compatibility, InstallPlan, InstalledSource, InstanceMatch, InstanceSources, MatchState, ModDependency, ModLoader, ModVersionInfo, ModVersionList, PlannedItem } from "../../ipc/mods";
 
 /** search:<参数 JSON>；args 为 null 时不请求（关键词还在防抖中）。 */
 export function useSearch(args: SearchArgs | null): ResourceResult<SearchResultDto> {
@@ -43,10 +43,10 @@ export function useProjectDetail(platform: Platform, projectId: string | null): 
   });
 }
 
-/** mod-versions:<platform>:<projectId>:<过滤 JSON>；两个过滤维度传空数组表示不过滤。 */
-export function useModVersions(platform: Platform, projectId: string, gameVersions: string[], loaders: ModLoader[]): ResourceResult<ModVersionInfo[]> {
+/** mod-versions:<platform>:<projectId>:<过滤 JSON>；两个过滤维度传空数组表示不过滤。truncated 时界面要说明列表不全。 */
+export function useModVersions(platform: Platform, projectId: string, gameVersions: string[], loaders: ModLoader[]): ResourceResult<ModVersionList> {
   return useResource(`mod-versions:${platform}:${projectId}:${JSON.stringify([gameVersions, loaders])}`, () =>
-    listModVersions(platform, projectId, gameVersions, loaders),
+    modVersionList(platform, projectId, gameVersions, loaders),
   );
 }
 

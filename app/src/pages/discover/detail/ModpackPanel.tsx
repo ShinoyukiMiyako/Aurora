@@ -14,7 +14,7 @@ import { useNav } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
-import { useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ProjectDetail } from "../../../state/queries/discover";
+import { useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
 import { findInstance } from "../../../state/selectors";
 import { Button } from "../../../ui/Button";
@@ -22,7 +22,7 @@ import { Callout } from "../../../ui/Callout";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { Select } from "../../../ui/Select";
-import { MODPACK_COPY, SEARCH_COPY } from "../copy";
+import { DETAIL_COPY, MODPACK_COPY, SEARCH_COPY } from "../copy";
 import { instancesFromPack, type ProjectOrigin } from "../model";
 import { uniqueName } from "../names";
 import { PackForm, packFootNote, type PackFacts } from "../PackForm";
@@ -89,7 +89,7 @@ export interface ModpackPanelProps {
   detail: ProjectDetail;
   /** 这个整合包在各平台上的身份（合并卡有两个），用来认出已经来自它的实例。 */
   origins: readonly ProjectOrigin[];
-  versions: ResourceResult<ModVersionInfo[]>;
+  versions: ResourceResult<ModVersionList>;
   /** 版本 Tab 里点选的版本；null 时用默认版本。 */
   pinned: string | null;
   onPin: (versionId: string | null) => void;
@@ -110,7 +110,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const list = versions.status === "ready" ? versions.data : null;
+  const list = versions.status === "ready" ? versions.data.versions : null;
   // 版本列表拉不到时还能装详情里给出的最新版本
   const fallback = detail.latest_version === null ? [] : [detail.latest_version];
   const choices = list === null ? fallback : list;
@@ -257,6 +257,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
           <span className={styles.errorText}>{versions.error.message}</span>
         </Callout>
       )}
+      {progress === null && versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
       {progress === null && summary.status === "error" && (
         <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={summary.reload}>{SEARCH_COPY.retry}</Button>}>
           <span className={styles.errorTitle}>{MODPACK_COPY.summaryFailed}</span>

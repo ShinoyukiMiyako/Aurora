@@ -641,6 +641,7 @@ describe("发现页：资源详情与安装", () => {
     expect(creative.getAttribute("aria-checked")).toBe("false");
     expect(creative.hasAttribute("disabled")).toBe(true);
     expect(dialog().textContent).toContain("已选 1 个实例");
+    expect(dialog().textContent).not.toContain("只列出了其中一部分");
 
     act(() => buttonByText("安装", dialog()).click());
     await flush();
@@ -648,6 +649,27 @@ describe("发现页：资源详情与安装", () => {
     expect(installs).toHaveLength(1);
     expect(installs[0]).toMatchObject({ versionId: "生存", resourceType: "resource_pack", world: null, platform: "modrinth", projectId: "R1", fileVersionId: "rp-2" });
     expect(openDialogs()).toHaveLength(0);
+  });
+
+  it("版本列表截断时，安装面板的版本下拉与版本标签都说明列表不全", async () => {
+    const note = "CurseForge 上的文件太多，这里只列出了其中一部分，没找到的版本请到 CurseForge 网页查看";
+    const notes = () => {
+      const text = dialog().textContent;
+      if (text === null) throw new Error("弹窗没有文字");
+      return text.split(note).length - 1;
+    };
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: true }));
+    await mount();
+    act(() => card("柔光材质").click());
+    await flush();
+    // 只请求一份不过滤的列表，截断标记随它一起来
+    expect(callsOf(ipc, "list_mod_versions")).toEqual([{ platform: "modrinth", projectId: "R1", gameVersions: [], loaders: [] }]);
+    expect(notes()).toBe(1);
+    const versionsTab = [...dialog().querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === "版本");
+    if (versionsTab === undefined) throw new Error("没有版本标签");
+    act(() => versionsTab.click());
+    await flush();
+    expect(notes()).toBe(2);
   });
 
   it("离线时不发起安装，只提示恢复联网后再装", async () => {

@@ -9,7 +9,7 @@ import { formatBytes, formatCount, formatDate, formatRelative } from "../../../d
 import type { Platform } from "../../../domain/types";
 import { useLauncherSelector, useNow } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
-import { useModVersions, useProjectDetail, type DependencyProject, type HitSource, type ModVersionInfo, type ProjectDetail } from "../../../state/queries/discover";
+import { useModVersions, useProjectDetail, type DependencyProject, type HitSource, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
 import { Icon, type IconName } from "../../../art/Icon";
 import { Button } from "../../../ui/Button";
@@ -438,7 +438,7 @@ function IntroTab({ detail, onOpenDependency }: { detail: ProjectDetail; onOpenD
 
 interface VersionsTabProps {
   detail: ProjectDetail;
-  versions: ResourceResult<ModVersionInfo[]>;
+  versions: ResourceResult<ModVersionList>;
   pinned: string | null;
   onPin: (versionId: string | null) => void;
 }
@@ -459,7 +459,7 @@ function VersionsTab({ detail, versions, pinned, onPin }: VersionsTabProps) {
       </Callout>
     );
   }
-  const all = versions.data;
+  const all = versions.data.versions;
   const anyFits = all.some((v) => fitsAnyInstance(v, instances, detail.resource_type));
   // 默认勾选「只看能装进我的实例的版本」；一个能装的都没有时默认不勾，免得列表是空的
   const filtering = onlyFits === null ? anyFits : onlyFits;
@@ -518,6 +518,7 @@ function VersionsTab({ detail, versions, pinned, onPin }: VersionsTabProps) {
           {DETAIL_COPY.loadMore}
         </Button>
       )}
+      {versions.data.truncated && <p className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</p>}
     </div>
   );
 }

@@ -180,10 +180,6 @@ export const modVersionList = (
   loaders: ModLoader[],
 ): Promise<ModVersionList> => invoke<ModVersionList>("list_mod_versions", { platform, projectId, gameVersions, loaders });
 
-/** 同 modVersionList，只要版本、不关心列表是否截断的调用方用。 */
-export const listModVersions = (platform: PlatformId, projectId: string, gameVersions: string[], loaders: ModLoader[]): Promise<ModVersionInfo[]> =>
-  modVersionList(platform, projectId, gameVersions, loaders).then((list) => list.versions);
-
 /**
  * 工程对全部已装实例的落位矩阵；给出 modVersionId 时只按这个版本判定。
  * resourceType 决定判定口径：Mod 看加载器与游戏版本，资源包、光影、数据包只看游戏版本。

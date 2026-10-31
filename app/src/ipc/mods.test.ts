@@ -10,7 +10,6 @@ import {
   isModFileBusy,
   installedSources,
   listMods,
-  listModVersions,
   matchInstances,
   modVersionList,
   planInstall,
@@ -35,6 +34,9 @@ const failure = (p: Promise<unknown>): Promise<IpcError> => p.then(
   },
   (e: unknown) => e as IpcError,
 );
+
+/** 只看版本、不关心截断的断言用。 */
+const versionsOf = async (...args: Parameters<typeof modVersionList>) => (await modVersionList(...args)).versions;
 
 describe("实例 Mod 列表", () => {
   it("按文件名排序，卷宗 join 出来源与图标，来源不明的为 null", async () => {
@@ -258,19 +260,19 @@ describe("更新检查与更新", () => {
 
 describe("下载页：版本列表、落位矩阵与安装计划", () => {
   it("版本列表按发布时间倒序，缺元数据的维度放行；非法入参与未知工程如实报错", async () => {
-    const all = await listModVersions("modrinth", "AANobbMI", [], []);
+    const all = await versionsOf("modrinth", "AANobbMI", [], []);
     expect(all.map((v) => v.version_id)).toEqual(["sodium-121", "sodium-060", "sodium-053"]);
-    const filtered = await listModVersions("modrinth", "AANobbMI", ["1.20.1"], ["fabric"]);
+    const filtered = await versionsOf("modrinth", "AANobbMI", ["1.20.1"], ["fabric"]);
     expect(filtered.map((v) => v.version_id)).toEqual(["sodium-060", "sodium-053"]);
     // Mod Menu 的版本没标加载器：缺失不是证据，照样列出。
-    expect(await listModVersions("modrinth", "mOgUt4GM", ["1.20.1"], ["forge"])).toHaveLength(1);
-    expect(await failure(listModVersions("modrinth", "AANobbMI", [], ["optifine" as never]))).toMatchObject({ code: "invalid_argument" });
-    expect(await failure(listModVersions("curseforge", "AANobbMI", [], []))).toMatchObject({ code: "mod_platform_failed" });
+    expect(await versionsOf("modrinth", "mOgUt4GM", ["1.20.1"], ["forge"])).toHaveLength(1);
+    expect(await failure(versionsOf("modrinth", "AANobbMI", [], ["optifine" as never]))).toMatchObject({ code: "invalid_argument" });
+    expect(await failure(versionsOf("curseforge", "AANobbMI", [], []))).toMatchObject({ code: "mod_platform_failed" });
   });
 
   it("版本列表的出参带 truncated：不过滤的列表翻不完时为 true，带过滤的照常为 false", async () => {
     expect(await modVersionList("modrinth", "AANobbMI", [], [])).toEqual({
-      versions: await listModVersions("modrinth", "AANobbMI", [], []),
+      versions: await versionsOf("modrinth", "AANobbMI", [], []),
       truncated: false,
     });
     setMockVersionListTruncated("modrinth", "AANobbMI", true);
