@@ -463,7 +463,7 @@ impl Aurora {
 
     /// 刷新账户信息：微软重走令牌链、外置刷新令牌，顺带更新名字与皮肤，返回更新后的记录。
     ///
-    /// 服务器判定凭据失效（微软 `invalid_grant`、外置令牌被拒）时把账户落成「需要重新登录」并报
+    /// 服务器判定凭据失效（微软刷新令牌被判需重登、外置令牌被拒）时把账户落成「需要重新登录」并报
     /// [`AuthError::ReloginRequired`]；网络故障原样冒泡、状态不变。离线账户没有可刷新的凭据，原样返回。
     pub async fn refresh_account(&self, uuid: &str) -> Result<Account> {
         let lookup = uuid.to_owned();

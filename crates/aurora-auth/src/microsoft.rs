@@ -7,7 +7,7 @@
 //! - `client_id` 由上层注入（默认值与环境变量覆盖的取舍归上层）。
 //! - 各端点 URL 通过 [`MsaEndpoints`] 可注入，便于本地 mock 测试；默认指向微软生产地址。
 //! - XSTS 六个错误码逐一映射为带中文说明的错误变体（见 [`map_xerr`]）。
-//! - 令牌刷新失败区分“需重登”（[`AuthError::ReloginRequired`]，`invalid_grant`）与瞬时网络失败
+//! - 令牌刷新失败区分“需重登”（[`AuthError::ReloginRequired`]，见 `REFRESH_NEEDS_RELOGIN`）与瞬时网络失败
 //!   （[`AuthError::Http`]，交由 `retry_async` 重试）。
 //! - 挂上取消令牌（[`MicrosoftAuth::with_cancel`]）后，设备码请求、轮询与令牌链任一步都会在令牌
 //!   触发时立刻以 [`AuthError::Cancelled`] 返回；设备码有效期长达十几分钟，用户关掉登录弹窗时
@@ -30,6 +30,10 @@ const SCOPE: &str = "XboxLive.signin offline_access";
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
 /// 轮询间隔下限。服务端给 0 时若照办，循环会退化成不停打令牌端点的紧循环。
 const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// 刷新时只能靠重新登录补救的 OAuth 错误。微软令牌端点对 `interaction_required`（要补一步验证）
+/// 与 `consent_required`（要重新同意）给的处理办法都是把用户送回授权页，refresh token 自己换不出令牌。
+const REFRESH_NEEDS_RELOGIN: [&str; 3] =
+    ["invalid_grant", "interaction_required", "consent_required"];
 
 /// 微软登录链各端点地址。默认指向生产环境；测试可整体替换为本地 mock 服务。
 #[derive(Debug, Clone)]
@@ -232,7 +236,7 @@ impl MicrosoftAuth {
         }
     }
 
-    /// 用 refresh token 换取新令牌（轮换）。`invalid_grant` 判定为需重登。
+    /// 用 refresh token 换取新令牌（轮换）。`REFRESH_NEEDS_RELOGIN` 里的错误判定为需重登。
     pub async fn refresh(&self, refresh_token: &str) -> Result<MsaToken> {
         self.cancellable(self.refresh_inner(refresh_token)).await
     }
@@ -252,8 +256,9 @@ impl MicrosoftAuth {
                 return Ok(body.into());
             }
             let err: OAuthErrorBody = parse(&text, "刷新令牌")?;
-            if err.error == "invalid_grant" {
-                // refresh token 已失效/被撤销：必须重新走完整登录，区别于可重试的网络失败。
+            if REFRESH_NEEDS_RELOGIN.contains(&err.error.as_str()) {
+                // refresh token 已失效/被撤销，或要求用户回授权页补验证：必须重新走完整登录，
+                // 区别于可重试的网络失败。
                 return Err(AuthError::ReloginRequired);
             }
             Err(AuthError::OAuth {
@@ -1060,6 +1065,46 @@ mod tests {
         // 需重登，而非网络失败：明确区分。
         assert!(matches!(err, AuthError::ReloginRequired));
         assert!(!err.is_retryable());
+    }
+
+    /// 令牌端点要求用户回到授权页（补一步验证、重新同意）时，refresh token 本身再也换不出令牌，
+    /// 补救办法与 invalid_grant 相同：只能重新登录。别的 OAuth 错误不是凭据失效，照旧原样上报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_rejections_that_need_user_interaction_require_relogin() {
+        for error in ["interaction_required", "consent_required"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                    "error": error,
+                    "error_description": "AADSTS50076: 需要额外的验证"
+                })))
+                .mount(&server)
+                .await;
+            let err = auth_for(&server)
+                .refresh("stale-refresh")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AuthError::ReloginRequired),
+                "{error} 应判为需重登，得到 {err:?}"
+            );
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_scope",
+                "error_description": "AADSTS70011"
+            })))
+            .mount(&server)
+            .await;
+        let err = auth_for(&server).refresh("r").await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::OAuth { error, .. } if error == "invalid_scope"),
+            "得到 {err:?}"
+        );
     }
 
     #[test]
