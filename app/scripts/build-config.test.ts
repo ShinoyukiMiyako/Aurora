@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,9 @@ describe("构建配置", () => {
     expect(result.error).toBeUndefined();
     expect(result.stdout).toBe("");
     expect(result.status).toBe(0);
+    // 构建配置的工程是 composite，tsc 必写增量信息；它得落在被忽略的 node_modules 里，不能弄脏工作区
+    expect(existsSync(join(APP_DIR, "tsconfig.node.tsbuildinfo"))).toBe(false);
+    expect(existsSync(join(APP_DIR, "node_modules", ".tmp", "tsconfig.node.tsbuildinfo"))).toBe(true);
   }, 60_000);
 
   it("前端读取许可清单用的文件名与构建时写出的是同一个", () => {
