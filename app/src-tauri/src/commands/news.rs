@@ -1,7 +1,6 @@
 //! 主页资讯：Mojang 官方启动器内容源的 Java 版条目，加上本启动器的 GitHub Releases。
 
-use aurora_core::news::{LauncherChannel, NewsFeed};
-use aurora_core::NewsItem;
+use aurora_core::{LauncherChannel, NewsFeed, NewsItem};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
