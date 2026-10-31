@@ -273,79 +273,12 @@
   box-shadow: var(--sk-focus);
 }
 
-/* ---- 介绍正文（平台 Markdown / HTML 转出的结构） ---- */
-.body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sk-space-10);
-  min-width: 0;
-  font-size: var(--sk-fs-body);
-  line-height: var(--sk-lh-body);
-  color: var(--sk-text);
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-
+/* ---- 介绍正文没有内容时的摘要段落（正文本身由 ui 的受限富文本组件绘制） ---- */
 .bodyParagraph {
   margin: 0;
   font-size: var(--sk-fs-body);
   line-height: var(--sk-lh-body);
   color: var(--sk-text);
-}
-
-.bodyHeading {
-  margin: var(--sk-space-6) 0 0;
-  font-size: var(--sk-fs-section);
-  line-height: var(--sk-lh-section);
-  font-weight: var(--sk-w-title);
-  color: var(--sk-text);
-}
-
-/* 配图位：加载完成前不占高度，进入视口附近才开始取图 */
-.bodyImage {
-  display: block;
-  max-width: 100%;
-}
-
-.bodyCanvas {
-  display: block;
-  max-width: 100%;
-  height: auto;
-  border-radius: var(--sk-r);
-}
-
-.bodyLink {
-  color: var(--sk-accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.bodyList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sk-space-4);
-  margin: 0;
-  padding-left: var(--sk-space-20);
-}
-
-.codeBlock {
-  margin: 0;
-  padding: var(--sk-space-10) var(--sk-space-12);
-  overflow-x: auto;
-  border-radius: var(--sk-r);
-  background: var(--sk-bg-2);
-  font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
-  line-height: var(--sk-lh-mono-sm);
-  white-space: pre;
-}
-
-.inlineCode {
-  padding: 0 var(--sk-space-4);
-  border-radius: var(--sk-r-xs);
-  background: var(--sk-bg-2);
-  font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono-sm);
 }
 
 /* ---- 版本 ---- */
