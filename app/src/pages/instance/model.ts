@@ -3,7 +3,7 @@
 
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
-import type { LaunchViewKind } from "../../launch/launchView";
+import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
 
@@ -69,6 +69,38 @@ export type WorkLock = "installing" | "renaming" | "deleting";
 export function workLock(installing: boolean, activity: InstanceSummary["activity"]): WorkLock | null {
   if (installing) return "installing";
   return activity === "renaming" || activity === "deleting" ? activity : null;
+}
+
+// ---------------------------------------------------------------- 整页订阅的启动视图
+
+/**
+ * 整页按片订阅启动视图时的相等比较：只比页面自己画的判定（种类、加载阶段、结束原因、失败码、损坏原因、
+ * 任务是哪一个、排没排上），不比进度。启动下载与安装、补全的进度每个任务约 100 ms 一次，
+ * 每次都换一份会话或任务对象；按 launchViewEqual 比，头图、标签条与当前标签就跟着整页重渲染。
+ * 所以页面拿到的视图里，会话与任务只是判定变化那一刻的快照：进度、速度、字节数可能是旧的，
+ * 画进度的部件（胶囊、头图的安装标签、概览的安装横幅）各自订阅。
+ */
+export function pageViewEqual(a: LaunchView, b: LaunchView): boolean {
+  switch (a.kind) {
+    case "ready":
+      return b.kind === "ready" && a.busyElsewhere === b.busyElsewhere;
+    case "loading":
+      return b.kind === "loading" && a.phase === b.phase;
+    case "running":
+    case "crashed":
+      return b.kind === a.kind;
+    case "stopped":
+      return b.kind === "stopped" && a.reason === b.reason;
+    case "failed":
+      return b.kind === "failed" && a.code === b.code && a.params === b.params;
+    case "installing": {
+      if (b.kind !== "installing" || a.queuePosition !== b.queuePosition) return false;
+      if (a.task === null || b.task === null) return a.task === b.task;
+      return a.task.id === b.task.id && a.task.status === b.task.status;
+    }
+    case "broken":
+      return b.kind === "broken" && a.reason === b.reason && a.reimport === b.reimport;
+  }
 }
 
 // ---------------------------------------------------------------- 概览横幅
@@ -285,6 +317,28 @@ export function enabledFileName(fileName: string): string {
 /** 停用后的文件名：后端把文件改名为 <文件名>.disabled。 */
 export function disabledFileName(fileName: string): string {
   return fileName.endsWith(DISABLED_SUFFIX) ? fileName : `${fileName}${DISABLED_SUFFIX}`;
+}
+
+/** 换 Mod 版本的两种任务：单个更新，与「全部更新」合成的组合任务。 */
+export const MOD_UPDATE_COMMANDS: ReadonlySet<string> = new Set(["update_mod", "update_mods"]);
+
+/**
+ * 一个更新任务要换掉的 Mod（启用态文件名）：单个更新是它那一个，组合任务是入队时的全部几项。
+ * 组合任务跑完之前这几行都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败。
+ */
+export function updateTaskFiles(spec: { command: string; args: Record<string, unknown> }): string[] {
+  const fileNameOf = (value: unknown): string => {
+    if (typeof value !== "string") throw new Error(`${spec.command} 任务的 fileName 不是字符串：${String(value)}`);
+    return value;
+  };
+  if (spec.command === "update_mod") return [fileNameOf(spec.args.fileName)];
+  if (spec.command !== "update_mods") throw new Error(`不是 Mod 更新任务：${spec.command}`);
+  const items = spec.args.items;
+  if (!Array.isArray(items)) throw new Error("update_mods 任务缺少 items");
+  return items.map((item: unknown) => {
+    if (typeof item !== "object" || item === null || !("fileName" in item)) throw new Error("update_mods 任务的一项缺少 fileName");
+    return fileNameOf(item.fileName);
+  });
 }
 
 function fileStem(fileName: string): string {

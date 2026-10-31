@@ -8,16 +8,20 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto } from "../../ipc/diagnostics";
 import type { HistoryEvent } from "../../ipc/history";
 import type { InstanceSettingsDto } from "../../ipc/instances";
-import { GAME_LOG_EVENT } from "../../ipc/launch";
+import { SESSION_COPY } from "../../copy/flows";
+import { formatBytes, formatSpeed, percent } from "../../domain/format";
+import { GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../../ipc/launch";
 import type { InstalledMod } from "../../ipc/mods";
+import { CORE_EVENT } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, configDto, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
+import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -307,6 +311,94 @@ describe("实例详情：本实例运行中，20 批游戏日志", () => {
     const before = { ...renders };
     logs(ID);
     expect(commits).toBe(0);
+    expect(renders).toEqual(before);
+  });
+});
+
+// 进度事件同样每个任务约 100 ms 一次：页面只在启动视图的种类或画出来的判定变了时重渲染，
+// 百分比由胶囊、头图的安装标签与概览的安装横幅各自订阅
+describe("实例详情：本实例的进度在走", () => {
+  it.each<[InstanceTab, keyof typeof renders]>([
+    ["overview", "OverviewTab"],
+    ["mods", "ModsTab"],
+  ])("%s 标签：补全中 20 次下载进度，头图、标签条与标签内容不重渲染，头图标签与横幅的百分比照常走", async (tab, panel) => {
+    // 没崩溃过：概览顶部才是安装横幅（崩溃横幅优先）。补全命令一直不返回：任务停在进行中，进度全靠事件推
+    bootOverrides(ipc, {
+      instances: [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 2, last_played_at: NOW - 7_200_000 }), instanceDto(OTHER)],
+      config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }),
+    });
+    ipc.overrides.set("last_crash", () => null);
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open(tab);
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    await flush();
+    const task = launcher.state.tasks.find((t) => t.instanceId === ID);
+    if (task === undefined || task.status !== "running") throw new Error("补全任务应在进行中");
+    expect(document.body.textContent).toContain(HERO_COPY.installing("0%"));
+    expect(renders[panel]).toBeGreaterThan(0);
+    const before = { ...renders };
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: i, bytes: i * 1000, total_bytes: 40_000, speed: 1_000_000 });
+      });
+    }
+    const progress = launcher.state.tasks.find((t) => t.id === task.id)?.progress;
+    if (progress === undefined) throw new Error("补全任务不见了");
+    expect(percent(progress)).toBe("50%");
+    expect(document.body.textContent).toContain(HERO_COPY.installing("50%"));
+    if (tab === "overview") {
+      const banner = OVERVIEW_COPY.installProgress("50%", formatSpeed(1_000_000), formatBytes(40_000));
+      expect(document.body.textContent).toContain(banner);
+    }
+    expect(renders).toEqual(before);
+  });
+
+  it("启动停在下载阶段，20 次进度：头图、标签条与概览不重渲染，胶囊上的文件计数照常走", async () => {
+    const spawn = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => spawn.promise);
+    await open("overview");
+    act(() => void launcher.actions.launch(ID));
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    const step = (finished: number) =>
+      act(() => {
+        emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished, total: 100, bytes: 0, total_bytes: null, speed: 2048 } });
+      });
+    step(0);
+    await flush();
+    expect(launcher.state.session?.phase).toBe("downloading");
+    const before = { ...renders };
+    for (let i = 1; i <= 20; i++) step(i);
+    expect(launcher.state.session?.download?.done).toBe(20);
+    expect(document.body.textContent).toContain(SESSION_COPY.downloadProgress(20, 100, 2048));
+    expect(renders).toEqual(before);
+  });
+
+  it("日志标签：启动停在下载阶段，20 次进度不带新日志，日志控制台也不重渲染", async () => {
+    const spawn = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => spawn.promise);
+    await open("logs");
+    act(() => void launcher.actions.launch(ID));
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    const step = (finished: number) =>
+      act(() => {
+        emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished, total: 100, bytes: 0, total_bytes: null, speed: 2048 } });
+      });
+    step(0);
+    await flush();
+    expect(launcher.state.session?.phase).toBe("downloading");
+    expect(renders.LogConsole).toBeGreaterThan(0);
+    const logsBefore = launcher.state.session?.logs;
+    const before = { ...renders };
+    for (let i = 1; i <= 20; i++) step(i);
+    expect(launcher.state.session?.download?.done).toBe(20);
+    expect(launcher.state.session?.logs).toBe(logsBefore);
     expect(renders).toEqual(before);
   });
 });

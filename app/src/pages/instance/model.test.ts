@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
+import type { Task } from "../../domain/types";
+import type { LaunchView } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, WorldDto } from "../../state/queries/instance";
+import { applyPhase, sessionLaunched, startSession } from "../../state/session";
+import { newTask } from "../../state/tasks";
 import { LOGS_COPY } from "./copy";
 import {
   autoJavaPick,
@@ -26,6 +30,7 @@ import {
   modTotals,
   overridesHeap,
   overviewBanner,
+  pageViewEqual,
   parseDimension,
   peekLayout,
   peekPerRow,
@@ -34,6 +39,7 @@ import {
   removalRelations,
   sortWorlds,
   toggleFlags,
+  updateTaskFiles,
   weeklyHours,
   workLock,
   type CrashFixContext,
@@ -169,6 +175,50 @@ describe("工作目录与实例设置的锁", () => {
   });
   it("与启动、运行和改动中兼容：这些活动下照常可用", () => {
     for (const activity of [null, "launching", "running", "modifying"] as const) expect(workLock(false, activity)).toBeNull();
+  });
+});
+
+describe("整页订阅的启动视图", () => {
+  const T0 = 1_700_000_000_000;
+  const account = { uuid: "u", name: "Steve" };
+  const repair = (status: Task["status"], progress: number, speedBps: number, id = "repair-1"): Task => ({
+    ...newTask({ id, kind: "game", title: "补全 生存", detail: "", instanceId: "生存", spec: { command: "repair", args: { versionId: "生存" } } }, T0),
+    status,
+    progress,
+    speedBps,
+  });
+  const installing = (task: Task | null, queuePosition: number | null): LaunchView => ({ kind: "installing", task, queuePosition });
+  const downloading = (done: number) => {
+    const session = applyPhase(startSession("生存", "launch-1", account, T0), { taskId: "launch-1", phase: "downloading", stageIndex: 3, download: { done, total: 100, bytes: 0, totalBytes: null, speedBps: 2048 } }, T0 + done);
+    if (session.phase !== "downloading") throw new Error("应在下载阶段");
+    return { kind: "loading", session, phase: session.phase } as const satisfies LaunchView;
+  };
+
+  it("只有进度、速度变了算相等：0% 到 100%、下载 0 到 100 个文件都不让页面重渲染", () => {
+    expect(pageViewEqual(installing(repair("running", 0, 0), null), installing(repair("running", 1, 5_000_000), null))).toBe(true);
+    expect(pageViewEqual(downloading(0), downloading(100))).toBe(true);
+    const run = sessionLaunched(downloading(100).session, "launch-1", T0 + 1000);
+    expect(pageViewEqual({ kind: "running", session: run }, { kind: "running", session: { ...run, progress: 1 } })).toBe(true);
+  });
+
+  it("任务换了一个、从排队转进行、名次变了，或有没有任务变了，都算不同", () => {
+    expect(pageViewEqual(installing(repair("queued", 0, 0), 2), installing(repair("running", 0, 0), null))).toBe(false);
+    expect(pageViewEqual(installing(repair("queued", 0, 0), 2), installing(repair("queued", 0, 0), 1))).toBe(false);
+    expect(pageViewEqual(installing(repair("running", 0.5, 0), null), installing(repair("running", 0.5, 0, "repair-2"), null))).toBe(false);
+    expect(pageViewEqual(installing(null, null), installing(repair("running", 0, 0), null))).toBe(false);
+    expect(pageViewEqual(installing(repair("running", 0, 0), null), installing(null, null))).toBe(false);
+    expect(pageViewEqual(installing(null, null), installing(null, null))).toBe(true);
+  });
+
+  it("种类、加载阶段、结束原因与损坏原因变了算不同", () => {
+    const preparing = { ...downloading(0), phase: "preparing" } as const;
+    expect(pageViewEqual(preparing, downloading(0))).toBe(false);
+    expect(pageViewEqual(downloading(0), { kind: "ready", busyElsewhere: false })).toBe(false);
+    expect(pageViewEqual({ kind: "ready", busyElsewhere: false }, { kind: "ready", busyElsewhere: true })).toBe(false);
+    const ended = downloading(0).session;
+    expect(pageViewEqual({ kind: "stopped", session: ended, reason: "exited" }, { kind: "stopped", session: ended, reason: "cancelled" })).toBe(false);
+    expect(pageViewEqual({ kind: "broken", reason: "缺少版本文件", reimport: false }, { kind: "broken", reason: "缺少库文件", reimport: false })).toBe(false);
+    expect(pageViewEqual({ kind: "broken", reason: "缺少版本文件", reimport: false }, { kind: "broken", reason: "缺少版本文件", reimport: true })).toBe(false);
   });
 });
 
@@ -308,6 +358,24 @@ describe("路径", () => {
   it("javaw.exe", () => {
     expect(javawOf("C:\\jdk\\bin\\java.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
     expect(javawOf("C:\\jdk\\bin\\javaw.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
+  });
+});
+
+describe("更新任务换掉的 Mod", () => {
+  it("单个更新是它那一个文件，「全部更新」是入队时的全部几项", () => {
+    expect(updateTaskFiles({ command: "update_mod", args: { versionId: "v", fileName: "sodium.jar", modVersionId: "m" } })).toEqual(["sodium.jar"]);
+    const items = [
+      { fileName: "sodium.jar", platform: "modrinth", projectId: "a", modVersionId: "1", title: "Sodium", fileSize: 1 },
+      { fileName: "fabric-api.jar", platform: "modrinth", projectId: "b", modVersionId: "2", title: "Fabric API", fileSize: null },
+    ];
+    expect(updateTaskFiles({ command: "update_mods", args: { versionId: "v", items } })).toEqual(["sodium.jar", "fabric-api.jar"]);
+  });
+
+  it("参数不成形或不是更新任务时直接报错，不当作没有文件", () => {
+    expect(() => updateTaskFiles({ command: "update_mods", args: { versionId: "v" } })).toThrow("缺少 items");
+    expect(() => updateTaskFiles({ command: "update_mods", args: { items: [{ platform: "modrinth" }] } })).toThrow("缺少 fileName");
+    expect(() => updateTaskFiles({ command: "update_mod", args: { fileName: 3 } })).toThrow("不是字符串");
+    expect(() => updateTaskFiles({ command: "install_mod", args: {} })).toThrow("不是 Mod 更新任务");
   });
 });
 

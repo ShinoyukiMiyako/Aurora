@@ -439,6 +439,58 @@ describe("实例详情：后端正在改动实例", () => {
   });
 });
 
+describe("实例详情：新建还没落盘的实例", () => {
+  // 安装命令一直不返回：实例只是状态层里的占位项，磁盘上还没有它的目录，后端打开哪个文件夹都只会报「未安装」
+  const pending = "新建的实例还没装好，装完后才能打开文件夹";
+
+  async function openPlaceholder(tab: InstanceTab) {
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.createInstance({ name: "周末生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+      await settle();
+    });
+    expect(launcher.state.instances.find((i) => i.id === "周末生存")?.placeholder).toBe(true);
+    act(() => nav.go({ page: "instance", id: "周末生存", tab }));
+    await flush();
+  }
+
+  async function reasonOf(el: HTMLElement): Promise<string | null | undefined> {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error(`「${textOf(el)}」悬停后没有关联提示气泡`);
+    return document.getElementById(tipId)?.textContent;
+  }
+
+  it("头图菜单的「打开实例文件夹」带原因禁用，点了不发命令、不报错", async () => {
+    await openPlaceholder("overview");
+    click(button("更多操作"));
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "打开实例文件夹");
+    if (item === undefined) throw new Error("菜单里没有只写标签的「打开实例文件夹」");
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(item)).toBe(pending);
+    click(item);
+    await flush();
+    expect(callsOf(ipc, "open_folder")).toEqual([]);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+  });
+
+  it("设置页实例管理里的「打开」带原因禁用，点了不发命令", async () => {
+    await openPlaceholder("settings");
+    const openButton = button("打开");
+    expect(openButton.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(openButton)).toContain(pending);
+    click(openButton);
+    await flush();
+    expect(callsOf(ipc, "open_folder")).toEqual([]);
+  });
+});
+
 describe("实例详情：工作目录与实例设置的占用", () => {
   // 打开 mods、saves、logs 这类工作子目录（缺了要先建）与写实例设置时后端会占住实例，与安装、补全、改名、删除互斥
   const folderReason = "安装任务正在写这个实例的文件夹，完成后才能打开";
@@ -774,6 +826,50 @@ describe("实例详情：Mod 管理", () => {
     await flush();
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(callsOf(ipc, "remove_mod")).toEqual([]);
+  });
+
+  it("「全部更新」进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
+    vi.stubGlobal("innerWidth", 1440);
+    const candidate = (fileName: string, title: string, projectId: string, from: string, to: string): UpdateCandidate => ({
+      file_name: fileName,
+      title,
+      current_version_id: from,
+      current_version_number: null,
+      latest: {
+        version_id: to,
+        project_id: projectId,
+        platform: "modrinth",
+        name: to,
+        version_number: to,
+        release_channel: "release",
+        game_versions: [],
+        loaders: [],
+        file_name: `${to}-${fileName}`,
+        file_size: 1000,
+        sha1: null,
+        download_url: null,
+        date_published: "",
+        dependencies: [],
+      },
+    });
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "v1", "v9"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "v2", "v8")];
+    ipc.overrides.set("update_mod", () => new Promise(() => undefined));
+    await open("mods");
+    click(button("全部更新 · 2"));
+    await flush();
+    const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
+    expect(composite.map((t) => t.status)).toEqual(["running"]);
+    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["sodium.jar"]);
+    // 组合任务还在跑，两行都算在更新中：按钮转圈，点了不另起一个同文件的单个更新
+    const sodium = button("更新 Sodium");
+    expect(sodium.getAttribute("aria-busy")).toBe("true");
+    expect(button("更新 Fabric API").getAttribute("aria-busy")).toBe("true");
+    click(sodium);
+    await flush();
+    expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mod")).toEqual([]);
+    expect(button("全部更新 · 2").getAttribute("aria-busy")).toBe("true");
+    const bar = document.querySelector<HTMLElement>('[role="progressbar"][aria-label="更新 2 个 Mod"]');
+    if (bar === null) throw new Error("摘要行没有「全部更新」任务的进度条");
   });
 
   it("搜索不分大小写，没有结果时给清除筛选", async () => {

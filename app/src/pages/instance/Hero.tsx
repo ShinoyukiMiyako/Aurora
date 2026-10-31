@@ -15,7 +15,7 @@ import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
-import { canPinMore } from "../../state/selectors";
+import { canPinMore, instanceTask } from "../../state/selectors";
 import { Card } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { IconButton } from "../../ui/IconButton";
@@ -51,6 +51,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
+  const folderReason = ops.folderReason("instance");
   const compact = tier === "compact";
 
   const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
@@ -61,7 +62,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
     ...(compact
       ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), disabled: pinBlocked, disabledReason: pinReason, onSelect: ops.togglePin }]
       : []),
-    { label: HERO_COPY.openFolder, icon: "folder", onSelect: () => ops.openFolder("instance") },
+    { label: HERO_COPY.openFolder, icon: "folder", disabled: folderReason !== undefined, disabledReason: folderReason, onSelect: () => ops.openFolder("instance") },
     { kind: "separator" },
     needsReimport(inst)
       ? { label: MODPACK_REIMPORT_COPY.menuReimport, icon: "modpack", onSelect: () => go(reimportRoute(inst)) }
@@ -114,11 +115,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                     {HERO_COPY.broken}
                   </Tag>
                 )}
-                {view.kind === "installing" && (
-                  <Tag tone="info" icon="download">
-                    {view.task !== null && view.task.status === "running" ? HERO_COPY.installing(percent(view.task.progress)) : HERO_COPY.installingQueued}
-                  </Tag>
-                )}
+                {view.kind === "installing" && <InstallingTag instanceId={inst.id} />}
                 {crashActive && (
                   <Tag tone="danger" icon="x-circle">
                     {HERO_COPY.lastCrash}
@@ -149,6 +146,19 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
 }
 
 const EXTRA_LOADER_NAME = { optifine: "OptiFine", liteloader: "LiteLoader" } as const;
+
+/** 头图上的安装标签：自己订阅本实例任务的百分比文字，进度怎么走都只换这一枚标签，头图其余部分不重渲染。 */
+function InstallingTag({ instanceId }: { instanceId: string }) {
+  const text = useLauncherSelector((s) => {
+    const task = instanceTask(s, instanceId);
+    return task !== null && task.status === "running" ? HERO_COPY.installing(percent(task.progress)) : HERO_COPY.installingQueued;
+  });
+  return (
+    <Tag tone="info" icon="download">
+      {text}
+    </Tag>
+  );
+}
 
 function RenameField({ inst, ops, onDone }: { inst: InstanceSummary; ops: InstanceOps; onDone(): void }) {
   const [draft, setDraft] = useState(inst.name);

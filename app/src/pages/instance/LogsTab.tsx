@@ -13,7 +13,7 @@ import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useHistory, useLastLaunchLog, useRollbackChecks } from "../../state/queries/instance";
-import { isSessionActive } from "../../state/session";
+import { isSessionActive, type SessionState } from "../../state/session";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
@@ -47,9 +47,17 @@ export function LogsTab({ inst, queryId, ops }: LogsTabProps) {
 const SKELETON_LINES = 8;
 const NO_LINES: readonly LogLine[] = [];
 
+/** 日志控制台卡画出来一样：同一份日志、同一个阶段与结束原因（两边都没有会话也算）。 */
+function sameConsoleSession(a: SessionState | null, b: SessionState | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return a.logs === b.logs && a.phase === b.phase && a.stopReason === b.stopReason;
+}
+
 function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
-  // 整页只有这张卡订阅会话日志：本实例的会话每来一批日志就换一份；别的实例的会话一律当作没有，它的日志不让这里重渲染
-  const session = useLauncherSelector((s) => (s.session !== null && s.session.instanceId === inst.id ? s.session : null));
+  // 整页只有这张卡订阅会话日志：本实例的会话每来一批日志就换一份；别的实例的会话一律当作没有，它的日志不让这里重渲染。
+  // 卡上只画日志行与阶段，启动下载的进度（同样约 100 ms 一次）不让它重渲染，拿到的会话里进度字段可能是旧的
+  const session = useLauncherSelector((s) => (s.session !== null && s.session.instanceId === inst.id ? s.session : null), sameConsoleSession);
   const now = useNow(30_000);
   const { copyText } = useShell();
   const [level, setLevel] = useState<LogLevelFilter>("all");

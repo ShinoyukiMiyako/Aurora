@@ -13,7 +13,7 @@ import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncherActions, useNow } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import {
   useInstanceContent,
   useInstanceMods,
@@ -25,6 +25,7 @@ import {
 } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute, type InstanceTab } from "../../state/route";
+import { instanceTask } from "../../state/selectors";
 import { Badge } from "../../ui/Badge";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -71,7 +72,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
       {banner === "failed" && <FailedBanner inst={inst} />}
       {banner === "crashed" && crash.status === "ready" && crash.data !== null && <CrashBanner report={crash.data} onTab={onTab} />}
       {banner === "broken" && view.kind === "broken" && (needsReimport(inst) ? <ReimportBanner inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner reason={view.reason} ops={ops} />)}
-      {banner === "installing" && view.kind === "installing" && <InstallingBanner view={view} />}
+      {banner === "installing" && view.kind === "installing" && <InstallingBanner instanceId={inst.id} />}
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div className={styles.overviewGrid}>
         <WorldsCard content={content} ops={ops} />
@@ -159,9 +160,10 @@ function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: 
   );
 }
 
-function InstallingBanner({ view }: { view: Extract<LaunchView, { kind: "installing" }> }) {
+function InstallingBanner({ instanceId }: { instanceId: string }) {
   const { go } = useNav();
-  const task = view.task;
+  // 进度每个任务约 100 ms 一次：横幅自己订阅本实例的任务，页面拿到的启动视图里的任务进度可能是旧的
+  const task = useLauncherSelector((s) => instanceTask(s, instanceId));
   const running = task !== null && task.status === "running";
   const title = task === null ? OVERVIEW_COPY.queuedTitle : task.title;
   return (

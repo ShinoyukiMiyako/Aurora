@@ -576,7 +576,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
           <Toggle checked={inst.pinned} onChange={ops.togglePin} ariaLabel={SETTINGS_COPY.pinTitle} disabledReason={pinBlocked ? TOAST_COPY.pinLimit : undefined} />
         </SettingRow>
         <SettingRow title={SETTINGS_COPY.folderTitle} description={folder === null ? undefined : <code className={styles.path}>{folder}</code>}>
-          <Button size="sm" icon="folder" onClick={() => ops.openFolder("instance")}>
+          <Button size="sm" icon="folder" disabledReason={ops.folderReason("instance")} onClick={() => ops.openFolder("instance")}>
             {SETTINGS_COPY.open}
           </Button>
         </SettingRow>

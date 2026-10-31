@@ -28,7 +28,7 @@ import { Toggle } from "../../ui/Toggle";
 import { Tooltip } from "../../ui/Tooltip";
 import { MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
-import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, modTotals, removalRelations, type ModFilter, type ModRow } from "./model";
+import { disabledFileName, enabledFileName, filterMods, MOD_UPDATE_COMMANDS, modCounts, modRows, modTotals, removalRelations, updateTaskFiles, type ModFilter, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -110,12 +110,13 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     }
   }, [actions, checking, run, updates]);
 
-  // 只订阅本实例排队与进行中的更新任务：它们的进度条要跟着走，别的任务的进度不让整张表重渲染
+  // 只订阅本实例排队与进行中的更新任务（含「全部更新」）：它们的进度条要跟着走，别的任务的进度不让整张表重渲染
   const updateTasks = useLauncherSelector(
-    (s) => s.tasks.filter((t) => t.instanceId === id && t.spec.command === "update_mod" && (t.status === "queued" || t.status === "running")),
+    (s) => s.tasks.filter((t) => t.instanceId === id && MOD_UPDATE_COMMANDS.has(t.spec.command) && (t.status === "queued" || t.status === "running")),
     shallowArrayEqual,
   );
-  const updatingFiles = new Set(updateTasks.map((t) => String(t.spec.args.fileName)));
+  const updatingFiles = new Set(updateTasks.flatMap((t) => updateTaskFiles(t.spec)));
+  const updatingAll = updateTasks.some((t) => t.spec.command === "update_mods");
   const rows = modsData === null ? [] : modRows(modsData, updates.status === "ready" ? updates.data : null).map((r) => {
     const override = overrides.get(r.fileName);
     return override === undefined ? r : { ...r, enabled: override };
@@ -212,7 +213,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         <div className={styles.toolRight}>
           <FolderButton ops={ops} target="mods" label={MODS_COPY.openFolder} variant="secondary" />
           {counts.outdated > 0 ? (
-            <Button icon="download" disabledReason={lock} loading={pending.size > 0} onClick={updateAll}>
+            <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updatingAll} onClick={updateAll}>
               {MODS_COPY.updateAll(counts.outdated)}
             </Button>
           ) : (

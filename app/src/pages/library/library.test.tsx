@@ -468,11 +468,13 @@ describe("实例库：动作", () => {
       await launcher.actions.createInstance({ name: "周末生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
       await settle();
     });
+    // 安装命令已经发出、任务在跑：原因不能说「还没开始安装」，与实例详情页同一句
+    expect(launcher.state.tasks.filter((t) => t.spec.command === "install_version").map((t) => t.status)).toEqual(["running"]);
     click(byLabel("「周末生存」的更多操作"));
-    // 还没开始安装、磁盘上没有目录：打开文件夹只写标签并禁用，原因在悬停气泡里，点了不发起
+    // 占位项盘上可能还没有目录：打开文件夹只写标签并禁用，原因在悬停气泡里，点了不发起
     const folder = menuItem(LIBRARY_COPY.menu.openFolder);
     expect(folder.getAttribute("aria-disabled")).toBe("true");
-    expect(await reasonOf(folder)).toBe(LIBRARY_COPY.menu.folderPending);
+    expect(await reasonOf(folder)).toBe("新建的实例还没装好，装完后才能打开文件夹");
     click(folder);
     expect(callsOf(ipc, "open_folder")).toEqual([]);
     click(menuItem(LIBRARY_COPY.menu.remove));

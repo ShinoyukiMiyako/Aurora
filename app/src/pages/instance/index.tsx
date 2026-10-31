@@ -13,13 +13,13 @@ import { Page } from "../../ui/Page";
 import { TabPanel, Tabs, type TabItem } from "../../ui/Tabs";
 import { Tag } from "../../ui/Tag";
 import { INSTANCE_TAB_LABEL } from "../../copy/flows";
-import { launchView, launchViewEqual } from "../../launch/launchView";
+import { launchView } from "../../launch/launchView";
 import { CrashTab } from "./CrashTab";
 import { PAGE_COPY } from "./copy";
 import { Hero } from "./Hero";
 import styles from "./instance.module.css";
 import { LogsTab } from "./LogsTab";
-import { isCrashActive } from "./model";
+import { isCrashActive, pageViewEqual } from "./model";
 import { ModsTab } from "./ModsTab";
 import { useInstanceOps } from "./ops";
 import { OverviewTab } from "./OverviewTab";
@@ -39,9 +39,10 @@ export default function InstancePage({ route }: PageProps<"instance">) {
   const { replace } = useNav();
   const { registerShortcut } = useShell();
   const tabsId = useId();
-  // 按片订阅：整页只随本实例的摘要与启动视图变；游戏日志每 100 ms 一批，只有日志标签的控制台订阅它
+  // 按片订阅：整页只随本实例的摘要与启动视图的判定变；游戏日志每 100 ms 一批，只有日志标签的控制台订阅它。
+  // 启动下载与安装、补全的进度同样频繁，只有画进度的部件各自订阅，视图里的进度字段可能是旧的（见 pageViewEqual）
   const inst = useLauncherSelector((s) => getInstance(s, route.id));
-  const view = useLauncherSelector((s) => launchView(s, getInstance(s, route.id)), launchViewEqual);
+  const view = useLauncherSelector((s) => launchView(s, getInstance(s, route.id)), pageViewEqual);
   const ops = useInstanceOps(inst);
   const [renaming, setRenaming] = useState(false);
   // 新建或导入还没落盘的占位项没有实例目录，按需查询一律不发

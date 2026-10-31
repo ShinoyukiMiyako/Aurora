@@ -82,7 +82,11 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     void run(() => actions.openFolder(target, id, world === undefined ? null : world), ACTION_ERROR.openFolder);
   };
 
-  const folderReason = (target: FolderTarget) => (work === null || !WORK_FOLDERS.has(target) ? undefined : LOCK_REASON.work.folder[work]);
+  const folderReason = (target: FolderTarget) => {
+    // 占位项的目录要等任务排到、导入要等读完整合包定下名字才建，前端分不清建了没有，一律先挡住
+    if (inst.placeholder) return LOCK_REASON.placeholderFolder;
+    return work === null || !WORK_FOLDERS.has(target) ? undefined : LOCK_REASON.work.folder[work];
+  };
   const settingsReason = work === null ? undefined : LOCK_REASON.work.settings[work];
 
   const repair = () => {

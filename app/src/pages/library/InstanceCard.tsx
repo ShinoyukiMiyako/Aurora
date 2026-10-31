@@ -27,6 +27,7 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { Tooltip } from "../../ui/Tooltip";
+import { LOCK_REASON } from "../instance/copy";
 import { useDeleteInstance } from "../instance/delete";
 import { instanceLocks, isCrashActive } from "../instance/model";
 import { lockReason } from "../instance/ops";
@@ -103,7 +104,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       label: LIBRARY_COPY.menu.openFolder,
       icon: "folder",
       disabled: inst.placeholder,
-      disabledReason: inst.placeholder ? LIBRARY_COPY.menu.folderPending : undefined,
+      // 占位项的目录要等任务排到、导入要等读完整合包才建，与实例详情页同一个判断、同一句原因
+      disabledReason: inst.placeholder ? LOCK_REASON.placeholderFolder : undefined,
       onSelect: () => void run(() => actions.openFolder("instance", id), ACTION_ERROR.openFolder),
     },
     { kind: "separator" },
