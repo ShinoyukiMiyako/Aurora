@@ -1,8 +1,8 @@
 // 更新状态机的执行者：把检查、下载、安装几条后端命令接到状态机上，供更新卡与更新面板共用一份状态。
 // 与 React 无关（订阅接口照 useSyncExternalStore 的形状），测试可以直接实例化并注入假的后端。
 
-import { describeError } from "../../../state/errors";
-import type { UpdaterInfoDto } from "../../../state/queries/catalog";
+import { describeError } from "../errors";
+import type { UpdaterInfoDto } from "../queries/catalog";
 import { INITIAL_UPDATER_STATE, updaterReducer, type UpdateInfo, type UpdaterEvent, type UpdaterState } from "./machine";
 
 /** 更新相关的后端命令。语义与同名命令一致：download 的进度来自带同一 taskId 的下载事件。 */

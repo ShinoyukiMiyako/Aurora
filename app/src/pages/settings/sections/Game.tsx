@@ -1,6 +1,6 @@
 // 游戏：全局内存（推荐值全部来自后端的内存建议）、版本隔离档位、游戏目录与其他文件夹。
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import type { InstanceSummary, Settings } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
@@ -9,7 +9,6 @@ import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
 import { useLauncher } from "../../../state/launcher";
 import { useDiscoveredGameDirectories, useGameDirectories, useMemoryAdvice, type GameDirectoryDto } from "../../../state/queries/catalog";
-import { useInstanceSettings } from "../../../state/queries/instance";
 import { invalidate } from "../../../state/resource";
 import { busyInstanceId, activeTasks } from "../../../state/selectors";
 import { Button } from "../../../ui/Button";
@@ -25,7 +24,6 @@ import { Skeleton } from "../../../ui/Skeleton";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { Tooltip } from "../../../ui/Tooltip";
-import { useCopyText } from "../clipboard";
 import { useSettingsCommands } from "../commands";
 import { GAME_DIR_COPY, ISOLATION_COPY, ISOLATION_OPTIONS, LOAD_COPY, MEMORY_COPY, MEMORY_TIER_LABEL, RECOMMENDED_ISOLATION } from "../copy";
 import { dirName, hasBang, overAvailable, samePath, unrecorded } from "../game-model";
@@ -38,43 +36,15 @@ type Isolation = Settings["isolationPolicy"];
 
 // ---------------------------------------------------------------- 内存
 
-/** 读一个实例的设置，报告它是否自定义了内存；读不出来的不计入，并在控制台留一条。 */
-function MemoryProbe({ id, onResult }: { id: string; onResult: (id: string, custom: boolean | null) => void }) {
-  const settings = useInstanceSettings(id);
-  const custom = settings.status === "ready" ? settings.data.memoryMb !== null : null;
-  const error = settings.status === "error" ? settings.error : null;
-  useEffect(() => {
-    if (error !== null) console.warn(`实例「${id}」的设置读不出来，自定义内存的统计不含它`, error);
-  }, [id, error]);
-  useEffect(() => onResult(id, custom), [id, custom, onResult]);
-  return null;
-}
-
+/** 实例列表里带着各实例设置的最大内存：非 null 即自定义了内存；设置读不出、安装中的占位项都为 null，不计入。 */
 function CustomMemoryLine({ instances }: { instances: readonly InstanceSummary[] }) {
-  const probed = instances.filter((i) => !i.placeholder && i.settingsError === null);
-  const [custom, setCustom] = useState<ReadonlyMap<string, boolean>>(new Map());
-  const onResult = useCallback((id: string, value: boolean | null) => {
-    setCustom((prev) => {
-      if (value === null ? !prev.has(id) : prev.get(id) === value) return prev;
-      const next = new Map(prev);
-      if (value === null) next.delete(id);
-      else next.set(id, value);
-      return next;
-    });
-  }, []);
-  const users = probed.filter((i) => custom.get(i.id) === true);
+  const users = instances.filter((i) => i.memoryMb !== null);
+  if (users.length === 0) return null;
   return (
-    <>
-      {probed.map((i) => (
-        <MemoryProbe key={i.id} id={i.id} onResult={onResult} />
-      ))}
-      {users.length > 0 && (
-        <p className={s.usersLine}>
-          <InstanceStack instances={users} />
-          {MEMORY_COPY.custom(users.length)}
-        </p>
-      )}
-    </>
+    <p className={s.usersLine}>
+      <InstanceStack instances={users} />
+      {MEMORY_COPY.custom(users.length)}
+    </p>
   );
 }
 
@@ -305,7 +275,7 @@ function GameDirectoryCard() {
   const commands = useSettingsCommands();
   const dirs = useGameDirectories();
   const discovered = useDiscoveredGameDirectories();
-  const copyText = useCopyText();
+  const { copyText } = useShell();
   const switchTo = useSwitchDirectory();
   const busy = busyInstanceId(state) !== null || activeTasks(state).length > 0;
   const busyReason = busy ? GAME_DIR_COPY.busyReason : undefined;

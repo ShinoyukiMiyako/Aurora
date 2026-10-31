@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
+import { APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
 import { resetMocks } from "../../ipc/mock";
-import { checkUpdate, downloadUpdate, installUpdate, setInstallOnExit } from "../../ipc/system";
-import { cancelTask, onCoreEvent } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { UpdatePanelMount } from "../../shell/UpdatePanel";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -15,8 +16,6 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { SettingsCommandsProvider, type SettingsCommands } from "./commands";
 import SettingsPage from "./index";
-import { UpdaterController, type UpdaterPort } from "./update/controller";
-import { UpdaterControllerProvider } from "./update/useUpdater";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -25,7 +24,6 @@ let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let commands: SettingsCommands & { calls: string[] };
-let updatePort: UpdaterPort;
 
 function Harness() {
   nav = useNav();
@@ -56,47 +54,20 @@ function fakeCommands(): SettingsCommands & { calls: string[] } {
   };
 }
 
-/**
- * 接在假后端上的更新命令：与状态层接入后应有的样子一致（下载进度取带同一 task_id 的下载事件）。
- * 假后端检查到 0.2.0，下载分 5 步、每步 120 ms。
- */
-function backendUpdatePort(): UpdaterPort {
-  return {
-    check: () => checkUpdate(),
-    download: async (taskId, onProgress) => {
-      const unlisten = await onCoreEvent((event) => {
-        if (event.kind === "download" && event.task_id === taskId) onProgress(event.bytes, event.total_bytes);
-      });
-      try {
-        return await downloadUpdate(taskId);
-      } finally {
-        unlisten();
-      }
-    },
-    cancel: async (taskId) => {
-      await cancelTask(taskId);
-    },
-    install: () => installUpdate(),
-    setInstallOnExit: (enabled) => setInstallOnExit(enabled),
-  };
-}
-
 const flush = () =>
   act(async () => {
     await settle(20);
   });
 
-async function mount(section?: "general" | "download" | "java" | "game" | "appearance" | "about", port: UpdaterPort = updatePort) {
-  const controller = new UpdaterController(port);
+async function mount(section?: "general" | "download" | "java" | "game" | "appearance" | "about") {
   view = render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
       <LauncherProvider>
         <ShellProvider>
-          <UpdaterControllerProvider value={controller}>
-            <SettingsCommandsProvider value={commands}>
-              <Harness />
-            </SettingsCommandsProvider>
-          </UpdaterControllerProvider>
+          <SettingsCommandsProvider value={commands}>
+            <Harness />
+          </SettingsCommandsProvider>
+          <UpdatePanelMount />
           <OverlayRoot />
         </ShellProvider>
       </LauncherProvider>
@@ -143,6 +114,33 @@ function radio(name: string): HTMLButtonElement {
   return found;
 }
 
+/** 设置行里的按钮：按行标题找到那一行，再按按钮文字找。 */
+function rowButton(title: string, label: string): HTMLButtonElement {
+  const row = all('[class*="row"]').find((r) => r.firstElementChild?.firstElementChild?.textContent === title);
+  if (row === undefined) throw new Error(`找不到设置行「${title}」`);
+  const found = [...row.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === label);
+  if (found === undefined) throw new Error(`设置行「${title}」里没有按钮「${label}」`);
+  return found;
+}
+
+/** 按卡片标题找卡片（CardHeader 的标题是卡内第一个标题元素）。 */
+function section(title: string): HTMLElement {
+  const heading = all("h2, h3").find((h) => h.textContent === title);
+  const card = heading?.closest<HTMLElement>('[class*="card"]');
+  if (card === undefined || card === null) throw new Error(`找不到卡片「${title}」`);
+  return card;
+}
+
+const BUILD = { version: "0.3.0-preview.2", channel: "preview", builtAt: "2026-10-30T08:15:30.000Z" } as const;
+
+const MANIFEST = {
+  packages: [
+    { ecosystem: "npm", name: "@fontsource-variable/outfit", version: "5.3.0", license: "OFL-1.1" },
+    { ecosystem: "npm", name: "react", version: "19.1.0", license: "MIT" },
+    { ecosystem: "cargo", name: "serde", version: "1.0.219", license: "MIT OR Apache-2.0" },
+  ],
+};
+
 const click = async (el: HTMLElement) => {
   act(() => el.click());
   await flush();
@@ -159,7 +157,6 @@ beforeEach(() => {
   stubMatchMedia(false);
   stubCanvas();
   commands = fakeCommands();
-  updatePort = backendUpdatePort();
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -349,6 +346,36 @@ describe("设置页：游戏", () => {
     expect(commands.calls).toEqual(["remove:F:\\.minecraft"]);
   });
 
+  it("自定义内存的实例：直接按实例列表的 memory_mb 计数，不再逐个读实例设置", async () => {
+    ipc.overrides.set("list_instances", () => [
+      instanceDto("生存", { memory_mb: 8192 }),
+      instanceDto("创造", { memory_mb: null }),
+      instanceDto("整合包", { memory_mb: 512 }),
+      instanceDto("坏掉的", { memory_mb: null, settings_error: "settings.json 第 1 行格式不对" }),
+    ]);
+    await mount("game");
+    expect(text()).toContain("2 个实例用自定义内存，不受这里影响");
+    expect(callsOf(ipc, "get_instance_settings")).toEqual([]);
+  });
+
+  it("没有实例自定义内存时不显示那一行", async () => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { memory_mb: null })]);
+    await mount("game");
+    expect(text()).not.toContain("个实例用自定义内存");
+  });
+
+  it("打开文件夹：游戏目录走 open_folder 的 game_dir，数据目录走注入的宿主实现", async () => {
+    ipc.overrides.set("open_folder", () => null);
+    await mount("game");
+    const opens = all<HTMLButtonElement>('button[aria-label="打开文件夹"]');
+    expect(opens).toHaveLength(2);
+    await click(opens[0]);
+    expect(callsOf(ipc, "open_folder")).toEqual([{ target: "game_dir", id: null, world: null }]);
+    await click(opens[1]);
+    expect(commands.calls).toEqual(["open-data"]);
+    expect(toasts()).toEqual([]);
+  });
+
   it("探测到、还没登记的文件夹可以添加", async () => {
     await mount("game");
     expect(text()).toContain("发现未记录的文件夹");
@@ -366,6 +393,22 @@ describe("设置页：游戏", () => {
     expect(callsOf(ipc, "set_game_directory")).toEqual([]);
   });
 
+  it("复制路径：写进剪贴板后按钮原位换成「已复制」；写入失败只报一次，按钮保持原样", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await mount("game");
+    await click(button("复制路径"));
+    expect(writeText).toHaveBeenCalledWith("D:\\Games\\Launcher\\.minecraft");
+    expect(button("已复制")).toBeDefined();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COPY_FEEDBACK_MS);
+    });
+    writeText.mockRejectedValueOnce(new Error("剪贴板被其他程序占用"));
+    await click(button("复制路径"));
+    expect(toasts().filter((t) => t.tone === "error")).toEqual([{ tone: "error", title: "复制失败", body: "剪贴板被其他程序占用" }]);
+    expect(all("button").some((b) => b.getAttribute("aria-label") === "已复制")).toBe(false);
+  });
+
   it("有下载在进行时「更改」「切换」带原因禁用", async () => {
     await mount("game");
     await act(async () => {
@@ -379,6 +422,23 @@ describe("设置页：游戏", () => {
 });
 
 describe("设置页：外观", () => {
+  it("非当前的明暗与强调色也画出真实颜色：预览按各自的明暗与当前强调色，色块各画各的", async () => {
+    await mount("appearance");
+    const previews = () => all('[role="radiogroup"][aria-label="明暗"] [data-mode]').map((p) => [p.getAttribute("data-mode"), p.getAttribute("data-tint")]);
+    expect(previews()).toEqual([
+      ["day", "sakura"],
+      ["night", "sakura"],
+    ]);
+    expect(all('[role="radiogroup"][aria-label="强调色"] [data-tint]').map((p) => p.getAttribute("data-tint"))).toEqual(["sakura", "amethyst", "moss"]);
+    await click(radio("青苔"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { accent: "moss" } }]);
+    expect(previews()).toEqual([
+      ["day", "moss"],
+      ["night", "moss"],
+    ]);
+    expect(radio("青苔").getAttribute("aria-checked")).toBe("true");
+  });
+
   it("明暗即时生效并写后端；本机没有樱花林全景时开关禁用并说明原因", async () => {
     await mount("appearance");
     await click(radio("夜樱"));
@@ -392,6 +452,13 @@ describe("设置页：外观", () => {
 });
 
 describe("设置页：关于与启动器更新", () => {
+  beforeEach(() => {
+    vi.stubGlobal("__PETALFALL_BUILD__", BUILD);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("未检查：写当前版本；检查到更新后导航挂提示点并改写新版本号", async () => {
     await mount("about");
     expect(text()).toContain("当前是 0.1.0");
@@ -470,18 +537,97 @@ describe("设置页：关于与启动器更新", () => {
     expect(text()).toContain("发布于 2026年10月29日 · 你跳过了这个版本");
   });
 
-  it("状态层还没接入更新命令：检查失败如实显示原因，不假装成功", async () => {
-    const { UPDATER_PORT } = await import("./update/port");
-    await mount("about", UPDATER_PORT);
+  it("检查失败：卡内如实显示后端原因并给出重试，重试成功后显示新版本", async () => {
+    let fail = true;
+    ipc.overrides.set("check_update", async (args) => {
+      if (fail) throw new IpcError("update_check_failed", "连不上更新服务器：连接超时");
+      const { mockInvoke } = await import("../../ipc/mock");
+      return mockInvoke("check_update", args);
+    });
+    await mount("about");
     await click(button("检查更新"));
     expect(text()).toContain("检查更新失败");
-    expect(text()).toContain("状态层还没有提供 check_update 的调用入口");
+    expect(text()).toContain("连不上更新服务器：连接超时");
+    fail = false;
+    await click(button("重试"));
+    expect(callsOf(ipc, "check_update")).toHaveLength(2);
+    expect(text()).toContain("有新版本 0.2.0");
   });
 
   it("支持卡与声明", async () => {
     await mount("about");
-    await click(button("打开"));
+    await click(rowButton("打开日志目录", "打开"));
     expect(commands.calls).toEqual(["open-logs"]);
     expect(text()).toContain("与 Mojang Studios 和 Microsoft 没有关联");
+  });
+
+  it("品牌卡与版本信息取构建信息：版本、发布通道、构建日期、协议与仓库地址；可复制整段或只复制仓库地址", async () => {
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await mount("about");
+    expect(text()).toContain("版本 0.3.0-preview.2 · AGPL-3.0");
+    const card = section("版本信息");
+    const rows = [...card.querySelectorAll("dl > div")].map((row) => [row.querySelector("dt")?.textContent, row.querySelector("dd")?.textContent]);
+    expect(rows).toEqual([
+      ["版本", "0.3.0-preview.2"],
+      ["发布通道", "预览版"],
+      ["构建日期", "2026年10月30日"],
+      ["开源协议", "AGPL-3.0"],
+      ["源代码", REPO_URL],
+    ]);
+    const copies = [...card.querySelectorAll<HTMLButtonElement>('button[aria-label="复制"]')];
+    expect(copies).toHaveLength(2);
+    await click(copies[1]);
+    await click(copies[0]);
+    expect(writeText.mock.calls.map((c) => c[0])).toEqual([
+      REPO_URL,
+      [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0", `源代码：${REPO_URL}`].join("\n"),
+    ]);
+  });
+
+  it("第三方许可：打开弹窗时才读清单，按前端与 Rust 分组列出名称、版本与许可证", async () => {
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, json: async () => MANIFEST }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    expect(fetchMock).not.toHaveBeenCalled();
+    await click(rowButton("第三方许可", "查看"));
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["/third-party-licenses.json"]);
+    const [dialog] = openDialogs();
+    expect(dialog.querySelector("h2")?.textContent).toBe("第三方许可");
+    expect(dialog.textContent).toContain("共 3 个，构建时从依赖树生成");
+    const groups = [...dialog.querySelectorAll("section[aria-label]")].map((g) => ({
+      name: g.getAttribute("aria-label"),
+      rows: [...g.querySelectorAll("li")].map((li) => [...li.children].map((c) => c.textContent)),
+    }));
+    expect(groups).toEqual([
+      { name: "前端依赖与字体", rows: [["@fontsource-variable/outfit", "5.3.0", "OFL-1.1"], ["react", "19.1.0", "MIT"]] },
+      { name: "Rust 依赖", rows: [["serde", "1.0.219", "MIT OR Apache-2.0"]] },
+    ]);
+  });
+
+  it("第三方许可清单读不出来：弹窗里写明原因，重试再读一次", async () => {
+    const fetchMock = vi
+      .fn(async (_url: string) => ({ ok: true, status: 200, json: async () => MANIFEST }))
+      .mockResolvedValueOnce({ ok: false, status: 404, json: async () => MANIFEST });
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    await click(rowButton("第三方许可", "查看"));
+    const [dialog] = openDialogs();
+    expect(dialog.textContent).toContain("第三方许可清单读不出来");
+    expect(dialog.textContent).toContain("返回 404");
+    await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(openDialogs()[0]?.textContent).toContain("serde");
+  });
+
+  it("问题反馈：用系统浏览器打开仓库的 Issues 页", async () => {
+    const opened: { href: string; target: string }[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      opened.push({ href: this.href, target: this.target });
+    });
+    await mount("about");
+    await click(rowButton("问题反馈", "打开"));
+    expect(opened).toEqual([{ href: ISSUES_URL, target: "_blank" }]);
+    expect(document.querySelectorAll("a[hidden]")).toHaveLength(0);
   });
 });

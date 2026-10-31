@@ -1,26 +1,39 @@
-// 关于：品牌卡、启动器更新卡与更新面板、版本信息、支持入口、关于原版图案与商标的声明。
+// 关于：品牌卡、启动器更新卡、版本信息、支持入口（日志目录、第三方许可、问题反馈）、关于原版图案与商标的声明。
+// 更新面板由外壳挂载。版本、发布通道与构建日期取构建时注入的构建信息：它和安装包、更新器比较用的是同一个版本号。
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { SakuraMark } from "../../../art/Logo";
+import { Spinner } from "../../../art/Spinner";
+import { RELEASE_CHANNEL_LABEL } from "../../../copy/flows";
+import { formatDate } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
-import { APP_NAME, APP_NAME_EN } from "../../../lib/app-info";
+import { APP_LICENSE, APP_NAME, APP_NAME_EN, buildInfo, ISSUES_URL, REPO_URL, type BuildInfo } from "../../../lib/app-info";
+import { openExternal } from "../../../lib/external";
+import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
+import { useThirdPartyLicenses, type ThirdPartyPackage } from "../../../state/queries/about";
 import { Button } from "../../../ui/Button";
+import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { CopyButton, KV } from "../../../ui/KV";
 import { Inset } from "../../../ui/Inset";
+import { Modal } from "../../../ui/Modal";
 import { SettingRow } from "../../../ui/SettingRow";
-import { useCopyText } from "../clipboard";
+import { Tag } from "../../../ui/Tag";
 import { useSettingsCommands } from "../commands";
-import { ABOUT_COPY } from "../copy";
-import { hasPanel, phaseUpdate } from "../update/machine";
+import { ABOUT_COPY, LOAD_COPY } from "../copy";
 import { UpdateCard } from "../update/UpdateCard";
-import { UpdatePanel } from "../update/UpdatePanel";
-import { useUpdater } from "../update/useUpdater";
 import s from "../settings.module.css";
 
-function BrandCard({ version }: { version: string | null }) {
+/** 构建时间是 ISO 字符串；读不成日期说明构建脚本坏了，直接报错。 */
+function builtDate(build: BuildInfo): string {
+  const ts = Date.parse(build.builtAt);
+  if (Number.isNaN(ts)) throw new Error(`构建时间「${build.builtAt}」不是有效的日期`);
+  return formatDate(ts);
+}
+
+function BrandCard({ build }: { build: BuildInfo }) {
   return (
     <section className={s.brand}>
       <span className={s.brandGlow} aria-hidden="true" />
@@ -31,30 +44,110 @@ function BrandCard({ version }: { version: string | null }) {
         <span className={s.brandName}>
           {APP_NAME}
           <span className={s.brandNameEn}>{APP_NAME_EN}</span>
+          <Tag tone="accent">{RELEASE_CHANNEL_LABEL[build.channel]}</Tag>
         </span>
-        {version !== null && <span className={s.brandSub}>{ABOUT_COPY.version(version)}</span>}
+        <span className={s.brandSub}>{ABOUT_COPY.versionLine(build.version, APP_LICENSE)}</span>
       </span>
     </section>
   );
 }
 
-function VersionCard({ version }: { version: string }) {
-  const copyText = useCopyText();
+function VersionCard({ build }: { build: BuildInfo }) {
+  const { copyText } = useShell();
+  const channel = RELEASE_CHANNEL_LABEL[build.channel];
+  const built = builtDate(build);
+  const text = ABOUT_COPY.infoText({ name: APP_NAME_EN, version: build.version, channel, built, license: APP_LICENSE, source: REPO_URL });
   return (
     <Card>
       <CardHeader
         title={ABOUT_COPY.infoTitle}
         icon="info"
-        actions={<CopyButton text={`${APP_NAME_EN} ${version}`} label={ABOUT_COPY.copy} copiedLabel={ABOUT_COPY.copied} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />}
+        actions={<CopyButton text={text} label={ABOUT_COPY.copy} copiedLabel={ABOUT_COPY.copied} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />}
       />
-      <KV rows={[{ label: ABOUT_COPY.versionRow, value: <span className={s.mono}>{version}</span> }]} />
+      <KV
+        onCopy={copyText}
+        copyFeedbackMs={COPY_FEEDBACK_MS}
+        rows={[
+          { label: ABOUT_COPY.versionRow, value: <span className={s.mono}>{build.version}</span> },
+          { label: ABOUT_COPY.channelRow, value: channel },
+          { label: ABOUT_COPY.builtRow, value: built },
+          { label: ABOUT_COPY.licenseRow, value: APP_LICENSE },
+          { label: ABOUT_COPY.sourceRow, value: <span className={s.mono}>{REPO_URL}</span>, copy: REPO_URL },
+        ]}
+      />
     </Card>
+  );
+}
+
+function LicenseGroup({ title, packages }: { title: string; packages: readonly ThirdPartyPackage[] }) {
+  if (packages.length === 0) return null;
+  return (
+    <section className={s.licenseGroup} aria-label={title}>
+      <h3 className={s.licenseGroupTitle}>
+        {title}
+        <span className={s.licenseCount}>{packages.length}</span>
+      </h3>
+      <ul className={s.licenseList}>
+        {packages.map((p) => (
+          <li key={`${p.name}@${p.version}`} className={s.licenseRow}>
+            <span className={s.licenseName}>{p.name}</span>
+            <span className={s.licenseVersion}>{p.version}</span>
+            <span className={s.licenseId}>{p.license}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** 清单体积大，弹窗打开时才去读；读过一次之后整个会话复用。 */
+function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const manifest = useThirdPartyLicenses(open);
+  let body;
+  let subtitle: string | undefined;
+  if (manifest.status === "error") {
+    body = (
+      <Callout
+        tone="danger"
+        announce
+        action={
+          <Button size="sm" onClick={() => manifest.reload()}>
+            {LOAD_COPY.retry}
+          </Button>
+        }
+      >
+        <span className={s.calloutTitle}>{ABOUT_COPY.licensesFailed}</span>
+        <span className={s.errorText}>{manifest.error.message}</span>
+      </Callout>
+    );
+  } else if (manifest.status === "loading") {
+    body = (
+      <div className={s.licensesLoading} role="status">
+        <Spinner size={20} />
+        <span>{ABOUT_COPY.licensesLoading}</span>
+      </div>
+    );
+  } else {
+    const { packages } = manifest.data;
+    subtitle = ABOUT_COPY.licensesSubtitle(packages.length);
+    body = (
+      <div className={s.licenses}>
+        <LicenseGroup title={ABOUT_COPY.licensesNpm} packages={packages.filter((p) => p.ecosystem === "npm")} />
+        <LicenseGroup title={ABOUT_COPY.licensesCargo} packages={packages.filter((p) => p.ecosystem === "cargo")} />
+      </div>
+    );
+  }
+  return (
+    <Modal open={open} onClose={onClose} size="md" icon="file-text" title={ABOUT_COPY.licenses} subtitle={subtitle}>
+      {body}
+    </Modal>
   );
 }
 
 function SupportCard() {
   const run = useRunner();
   const commands = useSettingsCommands();
+  const [licensesOpen, setLicensesOpen] = useState(false);
   return (
     <Card>
       <CardHeader title={ABOUT_COPY.supportTitle} icon="help" />
@@ -63,35 +156,32 @@ function SupportCard() {
           {ABOUT_COPY.open}
         </Button>
       </SettingRow>
+      <SettingRow title={ABOUT_COPY.licenses} description={ABOUT_COPY.licensesDesc}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setLicensesOpen(true)}>
+          {ABOUT_COPY.view}
+        </Button>
+      </SettingRow>
+      <SettingRow title={ABOUT_COPY.feedback} description={ABOUT_COPY.feedbackDesc}>
+        <Button size="sm" variant="ghost" icon="external" onClick={() => void run(() => openExternal(ISSUES_URL), ABOUT_COPY.feedbackFailed)}>
+          {ABOUT_COPY.open}
+        </Button>
+      </SettingRow>
+      <LicensesDialog open={licensesOpen} onClose={() => setLicensesOpen(false)} />
     </Card>
   );
 }
 
 export function AboutSection() {
-  const updater = useUpdater();
-  const [panelOpen, setPanelOpen] = useState(false);
-  const panelAvailable = hasPanel(updater.state.phase);
-  // 面板里的版本已经不在了（装完、被新一轮检查替换）：收起面板，免得之后出现新版本时自己弹出来
-  useEffect(() => {
-    if (!panelAvailable) setPanelOpen(false);
-  }, [panelAvailable]);
-  const openPanel = () => {
-    const update = phaseUpdate(updater.state.phase);
-    if (update === null) throw new Error("没有可查看的更新时不该打开更新面板");
-    updater.markSeen(update.version);
-    setPanelOpen(true);
-  };
-  const version = updater.state.currentVersion;
+  const build = buildInfo();
   return (
     <>
-      <BrandCard version={version} />
-      <UpdateCard onOpenPanel={openPanel} />
-      {version !== null && <VersionCard version={version} />}
+      <BrandCard build={build} />
+      <UpdateCard />
+      <VersionCard build={build} />
       <SupportCard />
       <Inset>
         <p className={s.disclaimer}>{ABOUT_COPY.disclaimer}</p>
       </Inset>
-      <UpdatePanel open={panelOpen && panelAvailable} onClose={() => setPanelOpen(false)} />
     </>
   );
 }

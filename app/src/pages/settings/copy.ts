@@ -1,7 +1,6 @@
 // 设置页与启动器更新的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
-import type { AccentName, AppearanceMode } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 import type { SettingsSection } from "../../state/route";
 
@@ -124,13 +123,6 @@ export const JAVA_COPY = {
   enqueued: (major: number) => `已加入下载队列：Java ${major}`,
 } as const;
 
-export const JAVA_SOURCE_LABEL = {
-  managed: "托管",
-  registry: "注册表",
-  common_dir: "常用目录",
-  path: "PATH",
-} as const;
-
 // ---------------------------------------------------------------- 游戏
 
 export const MEMORY_COPY = {
@@ -218,95 +210,40 @@ export const APPEARANCE_COPY = {
   systemReduced: "系统已开启",
 } as const;
 
-export const MODE_OPTIONS: readonly { value: AppearanceMode; label: string; desc: string; icon: IconName }[] = [
-  { value: "day", label: "日樱", desc: "浅粉白底，适合白天", icon: "sun" },
-  { value: "night", label: "夜樱", desc: "深紫灰底与紫水晶点缀", icon: "moon" },
-];
-
-export const ACCENT_OPTIONS: readonly { value: AccentName; label: string }[] = [
-  { value: "sakura", label: "樱粉" },
-  { value: "amethyst", label: "紫水晶" },
-  { value: "moss", label: "青苔" },
-];
-
 // ---------------------------------------------------------------- 关于
 
 export const ABOUT_COPY = {
-  version: (v: string) => `版本 ${v}`,
+  versionLine: (v: string, license: string) => `版本 ${v} · ${license}`,
   infoTitle: "版本信息",
   copy: "复制",
   copied: "已复制",
   versionRow: "版本",
+  channelRow: "发布通道",
+  builtRow: "构建日期",
+  licenseRow: "开源协议",
+  sourceRow: "源代码",
+  /** 「复制」整段版本信息时写进剪贴板的文字，反馈问题时直接贴出来。 */
+  infoText: (rows: { name: string; version: string; channel: string; built: string; license: string; source: string }) =>
+    [`${rows.name} ${rows.version}`, `发布通道：${rows.channel}`, `构建日期：${rows.built}`, `开源协议：${rows.license}`, `源代码：${rows.source}`].join("\n"),
   supportTitle: "支持",
   openLogs: "打开日志目录",
   openLogsDesc: "反馈问题时把这里的最新日志一起发来",
   open: "打开",
   openLogsFailed: "没能打开日志目录",
+  licenses: "第三方许可",
+  licensesDesc: "随应用分发的字体与依赖，各自的版本与许可证",
+  view: "查看",
+  licensesSubtitle: (n: number) => `共 ${n} 个，构建时从依赖树生成`,
+  licensesNpm: "前端依赖与字体",
+  licensesCargo: "Rust 依赖",
+  licensesLoading: "正在读取许可清单…",
+  licensesFailed: "第三方许可清单读不出来",
+  licensesHeadName: "名称",
+  licensesHeadVersion: "版本",
+  licensesHeadLicense: "许可证",
+  feedback: "问题反馈",
+  feedbackDesc: "在仓库的 Issues 页提交问题或建议，会用系统浏览器打开",
+  feedbackFailed: "没能打开问题反馈页",
   disclaimer: `实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
   infoFailed: "版本信息读不出来",
-} as const;
-
-// ---------------------------------------------------------------- 启动器更新
-
-export const UPDATE_COPY = {
-  cardTitle: "启动器更新",
-  autoCheck: "自动检查更新",
-  autoCheckDesc: "打开启动器时检查一次，之后每 12 小时检查一次",
-  current: (v: string) => `当前是 ${v}`,
-  autoOn: "已开启启动时自动检查",
-  autoOff: "自动检查已关闭",
-  check: "检查更新",
-  checking: "正在检查…",
-  upToDate: "已是最新版本",
-  checkedAgo: (relative: string) => `${relative}检查过`,
-  available: (v: string) => `有新版本 ${v}`,
-  publishedAt: (date: string) => `发布于 ${date}`,
-  skipped: "你跳过了这个版本",
-  view: "查看更新",
-  downloadingPct: (v: string, pct: string) => `正在下载 ${v} · ${pct}`,
-  downloading: (v: string) => `正在下载 ${v}`,
-  progress: (done: string, total: string) => `${done} / ${total}`,
-  viewProgress: "查看进度",
-  ready: (v: string) => `${v} 已下好，等待安装`,
-  readySub: `安装时${APP_NAME}会短暂关闭`,
-  restartInstall: "重启并安装",
-  installOnExitCard: (v: string) => `关闭${APP_NAME}时会安装 ${v}`,
-  installNow: "现在安装",
-  checkFailed: "检查更新失败",
-  retry: "重试",
-  unsupported: "当前环境不支持自动更新",
-  unsupportedSub: "开发环境或调试模式下不检查更新",
-  installingCard: "正在启动安装程序…",
-  downloadFailedCard: (reason: string) => `下载失败：${reason}`,
-  // 更新面板
-  panelTitle: (v: string) => `更新到 ${v}`,
-  panelSubtitle: (current: string, date: string | null) => (date === null ? `当前 ${current}` : `当前 ${current} · 发布于 ${date}`),
-  notesTitle: "更新内容",
-  notesEmpty: "这个版本没有附更新说明",
-  installNote: `安装时${APP_NAME}会短暂关闭，装好后自动重新打开。`,
-  skip: "跳过此版本",
-  later: "稍后",
-  download: "下载更新",
-  background: "后台下载",
-  cancelDownload: "取消下载",
-  readyNote: "新版本已经下好了。",
-  gameRunning: "游戏正在运行。安装会关闭启动器，游戏日志与崩溃诊断会中断，结束游戏后再安装。",
-  gameRunningReason: "游戏正在运行，结束游戏后再安装",
-  installOnExit: "退出时安装",
-  installOnExitNote: (v: string) => `关闭${APP_NAME}时会自动安装 ${v}。`,
-  switchToNow: "改为现在安装",
-  close: "关闭",
-  installing: "正在启动安装程序…",
-  downloadFailed: (reason: string) => `下载失败：${reason}`,
-  signatureInvalid: "更新包签名校验不通过，已丢弃，不会安装",
-  tasksConfirmTitle: "还有下载没完成",
-  tasksConfirmBody: (n: number) => `还有 ${n} 个下载任务，重启会中断它们，之后需要重新开始。`,
-  tasksConfirm: "仍然重启",
-  // 失败通知标题
-  installFailed: "没能安装更新",
-  installOnExitFailed: "没能设为退出时安装",
-  cancelFailed: "没能取消下载",
-  skipFailed: "没能跳过这个版本",
-  downloadStartFailed: "没能开始下载更新",
-  checkStartFailed: "没能检查更新",
 } as const;

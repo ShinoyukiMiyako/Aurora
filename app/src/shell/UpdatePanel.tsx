@@ -1,29 +1,40 @@
-// 更新面板：说清更新到哪一版、更新了什么，由用户决定何时下载、何时安装。正文与底栏随更新阶段变化。
+// 启动器更新面板：说清更新到哪一版、更新了什么，由用户决定何时下载、何时安装。正文与底栏随更新阶段变化。
+// 外壳级浮层：外壳布局挂 UpdatePanelMount，任何页面与通知动作经 openUpdatePanel 打开它。
 
-import type { ReactNode } from "react";
-import { SakuraMark } from "../../../art/Logo";
-import { Spinner } from "../../../art/Spinner";
-import { formatBytes, formatDate } from "../../../domain/format";
-import { useRunner } from "../../../shell/useRunner";
-import { useLauncher } from "../../../state/launcher";
-import { busyInstanceId } from "../../../state/selectors";
-import { Button } from "../../../ui/Button";
-import { Callout } from "../../../ui/Callout";
-import { Modal } from "../../../ui/Modal";
-import { ProgressBar } from "../../../ui/ProgressBar";
-import { LOAD_COPY, UPDATE_COPY } from "../copy";
-import { useOnline } from "../../../state/online";
-import s from "../settings.module.css";
-import { downloadFraction, phaseUpdate, type UpdaterPhase } from "./machine";
-import { useInstallUpdate } from "./useInstallUpdate";
-import { useUpdater } from "./useUpdater";
+import { useEffect, useMemo, type ReactNode } from "react";
+import { SakuraMark } from "../art/Logo";
+import { Spinner } from "../art/Spinner";
+import { UPDATE_COPY } from "../copy/updater";
+import { formatBytes, formatDate } from "../domain/format";
+import { useLauncher } from "../state/launcher";
+import { useOnline } from "../state/online";
+import { busyInstanceId } from "../state/selectors";
+import { downloadFraction, hasPanel, phaseUpdate, type UpdaterPhase } from "../state/updater/machine";
+import { useUpdater } from "../state/updater/useUpdater";
+import { Button } from "../ui/Button";
+import { Callout } from "../ui/Callout";
+import { Modal } from "../ui/Modal";
+import { ProgressBar } from "../ui/ProgressBar";
+import { RichText } from "../ui/RichText";
+import { parseMarkdown } from "../ui/richtext-parse";
+import { useShell } from "./shell";
+import s from "./UpdatePanel.module.css";
+import { useRunner } from "./useRunner";
 
+/** 更新说明是发布时写的 Markdown，按受限规则渲染：只画标题、段落、列表、强调、代码与 http(s) 链接，不注入原始 HTML。 */
 function Notes({ notes }: { notes: string | null }) {
   const text = notes === null ? "" : notes.trim();
+  const blocks = useMemo(() => (text === "" ? [] : parseMarkdown(text)), [text]);
   return (
     <section className={s.notes}>
       <h3 className={s.notesTitle}>{UPDATE_COPY.notesTitle}</h3>
-      {text === "" ? <p className={s.mutedText}>{UPDATE_COPY.notesEmpty}</p> : <div className={s.notesBody}>{text}</div>}
+      {blocks.length === 0 ? (
+        <p className={s.muted}>{UPDATE_COPY.notesEmpty}</p>
+      ) : (
+        <div className={s.notesBody}>
+          <RichText blocks={blocks} />
+        </div>
+      )}
     </section>
   );
 }
@@ -46,16 +57,17 @@ export interface UpdatePanelProps {
 
 export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
   const { state, actions } = useLauncher();
+  const { installUpdate } = useShell();
   const run = useRunner();
   const online = useOnline();
   const updater = useUpdater();
-  const install = useInstallUpdate();
   const { phase } = updater.state;
   const update = phaseUpdate(phase);
   if (update === null) return null;
 
   const gameRunning = busyInstanceId(state) !== null;
   const installReason = gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
+  const offlineReason = online ? undefined : UPDATE_COPY.offlineReason;
   const download = () => void run(() => updater.download(), UPDATE_COPY.downloadStartFailed);
 
   let status: ReactNode = null;
@@ -82,7 +94,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
           <Button variant="ghost" onClick={onClose}>
             {UPDATE_COPY.later}
           </Button>
-          <Button variant="primary" icon="download" disabledReason={online ? undefined : LOAD_COPY.offlineReason} onClick={download}>
+          <Button variant="primary" icon="download" disabledReason={offlineReason} onClick={download}>
             {UPDATE_COPY.download}
           </Button>
         </>
@@ -110,7 +122,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
           <Button variant="ghost" onClick={onClose}>
             {UPDATE_COPY.later}
           </Button>
-          <Button variant="primary" icon="refresh" disabledReason={online ? undefined : LOAD_COPY.offlineReason} onClick={download}>
+          <Button variant="primary" icon="refresh" disabledReason={offlineReason} onClick={download}>
             {UPDATE_COPY.retry}
           </Button>
         </>
@@ -129,7 +141,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
       footer = (
         <>
           <Button onClick={() => void run(() => updater.setInstallOnExit(true), UPDATE_COPY.installOnExitFailed)}>{UPDATE_COPY.installOnExit}</Button>
-          <Button variant="primary" disabledReason={installReason} onClick={() => void install()}>
+          <Button variant="primary" disabledReason={installReason} onClick={() => void installUpdate()}>
             {UPDATE_COPY.restartInstall}
           </Button>
         </>
@@ -143,7 +155,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
       );
       footer = (
         <>
-          <Button disabledReason={installReason} onClick={() => void install()}>
+          <Button disabledReason={installReason} onClick={() => void installUpdate()}>
             {UPDATE_COPY.switchToNow}
           </Button>
           <Button variant="ghost" onClick={onClose}>
@@ -177,10 +189,22 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
       ) : (
         <div className={s.panelBody}>
           <Notes notes={update.notes} />
-          <p className={s.mutedText}>{UPDATE_COPY.installNote}</p>
+          <p className={s.muted}>{UPDATE_COPY.installNote}</p>
           {status}
         </div>
       )}
     </Modal>
   );
+}
+
+/** 外壳布局里常驻的挂载点：面板的开合由外壳持有，版本已经不在时（装完、被新一轮检查替换）自动收起。 */
+export function UpdatePanelMount() {
+  const { updatePanelOpen, closeUpdatePanel } = useShell();
+  const updater = useUpdater();
+  const available = hasPanel(updater.state.phase);
+  // 不收起的话，下次出现新版本时面板会自己弹出来
+  useEffect(() => {
+    if (updatePanelOpen && !available) closeUpdatePanel();
+  }, [available, closeUpdatePanel, updatePanelOpen]);
+  return <UpdatePanel open={updatePanelOpen && available} onClose={closeUpdatePanel} />;
 }

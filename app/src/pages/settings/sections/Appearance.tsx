@@ -2,6 +2,7 @@
 // 写入失败时外观状态自己回到后端确认的值，这里只负责把原因交给外层提示。
 
 import { usePanoramaAvailable } from "../../../art/panorama/PanoramaBackdrop";
+import { ACCENT_OPTIONS, MODE_OPTIONS } from "../../../copy/settings";
 import type { Appearance } from "../../../domain/types";
 import { useRunner } from "../../../shell/useRunner";
 import { systemPrefersReducedMotion, useAppearance } from "../../../state/appearance";
@@ -9,8 +10,9 @@ import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
+import { AccentSwatches } from "../../../ui/AccentSwatches";
+import { MODE_ICON, ModeCards } from "../../../ui/ModeCards";
 import { Toggle } from "../../../ui/Toggle";
-import { AccentSwatches, ModeCards } from "../AppearanceChoices";
 import { APPEARANCE_COPY, saveFailed } from "../copy";
 import s from "../settings.module.css";
 
@@ -28,12 +30,23 @@ export function AppearanceSection() {
   return (
     <>
       <Card>
-        <CardHeader title={APPEARANCE_COPY.modeTitle} subtitle={APPEARANCE_COPY.modeSubtitle} icon={appearance.mode === "day" ? "sun" : "moon"} />
-        <ModeCards value={appearance.mode} onChange={(mode) => write(APPEARANCE_COPY.modeTitle, { mode })} />
+        <CardHeader title={APPEARANCE_COPY.modeTitle} subtitle={APPEARANCE_COPY.modeSubtitle} icon={MODE_ICON[appearance.mode]} />
+        <ModeCards
+          value={appearance.mode}
+          accent={appearance.accent}
+          options={MODE_OPTIONS}
+          ariaLabel={APPEARANCE_COPY.modeTitle}
+          onChange={(mode) => write(APPEARANCE_COPY.modeTitle, { mode })}
+        />
       </Card>
       <Card>
         <CardHeader title={APPEARANCE_COPY.accentTitle} subtitle={APPEARANCE_COPY.accentSubtitle} icon="palette" />
-        <AccentSwatches value={appearance.accent} onChange={(accent) => write(APPEARANCE_COPY.accentTitle, { accent })} />
+        <AccentSwatches
+          value={appearance.accent}
+          options={ACCENT_OPTIONS}
+          ariaLabel={APPEARANCE_COPY.accentTitle}
+          onChange={(accent) => write(APPEARANCE_COPY.accentTitle, { accent })}
+        />
       </Card>
       <Card>
         <CardHeader title={APPEARANCE_COPY.motionTitle} icon="sparkle" />

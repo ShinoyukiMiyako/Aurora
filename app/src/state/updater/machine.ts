@@ -1,11 +1,11 @@
 // 启动器自更新的状态机：纯函数，不碰 IPC 与 React。
 //
 // 两路输入：后端的更新信息（updater_info：能力、本次会话最近一次检查到的版本、已下载的版本、是否退出时安装）
-// 与本页发起的动作（检查、下载、安装）。后端信息只能说明「有没有、下没下好」，说明不了「刚检查过、已是最新」
+// 与界面发起的动作（检查、下载、安装）。后端信息只能说明「有没有、下没下好」，说明不了「刚检查过、已是最新」
 // 「正在下载」这些只存在于本次会话里的事，所以两路合并：瞬时阶段（检查中、下载中、安装中）不被后端信息覆盖，
 // 「已是最新」「检查失败」这类会话内结论在后端没有更新可报时保留。
 
-import type { UpdaterInfoDto } from "../../../state/queries/catalog";
+import type { UpdaterInfoDto } from "../queries/catalog";
 
 /** 一个可安装的版本。字段与后端 UpdateDto 同形。 */
 export type UpdateInfo = NonNullable<UpdaterInfoDto["available"]>;
@@ -70,7 +70,7 @@ function downloadedUpdate(info: UpdaterInfoDto, version: string): UpdateInfo {
 
 function fromInfo(prev: UpdaterPhase, info: UpdaterInfoDto): UpdaterPhase {
   if (!info.supported) return { kind: "unsupported", reason: info.unsupported_reason };
-  // 本页发起、还没结束的动作以本页为准；后端信息在动作结束后会再同步一次
+  // 界面发起、还没结束的动作以界面这一侧为准；后端信息在动作结束后会再同步一次
   if (prev.kind === "checking" || prev.kind === "downloading" || prev.kind === "installing") return prev;
   if (info.downloaded_version !== null) {
     const update = downloadedUpdate(info, info.downloaded_version);

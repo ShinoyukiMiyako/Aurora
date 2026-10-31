@@ -1,5 +1,5 @@
 // 外壳核心（不含视觉件）：路由与历史栈、浮层根的提供者、命令式确认框、命令面板与新建实例的开合、
-// 全局快捷键、尺寸分档、运行呼吸窗口、材质状态绑定，以及启动层要的宿主能力。
+// 启动器更新面板的开合与自动检查、全局快捷键、尺寸分档、运行呼吸窗口、材质状态绑定，以及启动层要的宿主能力。
 // 标题栏、侧栏、命令面板、通知容器等视觉件只读这里导出的 useShell / useNav，不各自持有这些状态。
 //
 // 装配：AppearanceProvider -> LauncherProvider -> ShellProvider -> 外壳布局。外壳布局把应用根元素交给 bindRoot、
@@ -14,10 +14,13 @@ import { bindArtStatus } from "../mc/binding";
 import type { CreateInstancePreset } from "../state/flows";
 import { useLauncher } from "../state/launcher";
 import { routeInstanceId, type Route } from "../state/route";
-import { pinnedInstances } from "../state/selectors";
+import { activeTasks, pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
 import type { Toast } from "../state/toasts";
+import { phaseUpdate } from "../state/updater/machine";
+import { UpdaterProvider, useUpdater } from "../state/updater/useUpdater";
 import { DROP_COPY, FILE_PICK_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
+import { UPDATE_COPY } from "../copy/updater";
 import { isTypingTarget } from "../lib/util";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { FILE_KINDS, useFileDrop, type FileDropHint, type FileDropTarget, type FileKind } from "./file-drop";
@@ -40,6 +43,7 @@ import {
 import { OverlayProvider, useOverlayControls, useOverlayState } from "./overlay";
 import { pickFile as pickNativeFile } from "./platform";
 import { useTier, type Tier } from "./tier";
+import { useUpdaterAutoCheck } from "./update-check";
 import { useRunner } from "./useRunner";
 import { useWindowPort } from "./window";
 
@@ -79,6 +83,19 @@ export interface ShellApi {
   createInstance: CreateInstanceState;
   openCreateInstance(preset?: CreateInstancePreset): void;
   closeCreateInstance(): void;
+  /** 启动器更新面板是否打开（外壳布局据此挂载面板）。 */
+  updatePanelOpen: boolean;
+  /**
+   * 打开启动器更新面板：设置页的更新卡、发现新版本通知的「查看」都走这里。打开即算看过这一版，提示点随之消失。
+   * 没有可查看的版本时调用属于调用方的错误，直接抛出。
+   */
+  openUpdatePanel(): void;
+  closeUpdatePanel(): void;
+  /**
+   * 「重启并安装」：有活动下载任务时先确认会中断它们；安装会关闭启动器，动手前把任务表写盘，重启后能看到被中断的任务并重试。
+   * 游戏会话进行中不允许安装，由入口自己禁用。失败经统一错误处理提示，永不 reject。
+   */
+  installUpdate(): Promise<void>;
   /** 页面级 Ctrl+F：页面挂载时登记、卸载时调用返回的函数注销；后登记的优先。 */
   registerFind(handler: () => void): () => void;
   /**
@@ -130,7 +147,9 @@ export function useShell(): ShellApi {
 export function ShellProvider({ children }: { children: ReactNode }) {
   return (
     <OverlayProvider>
-      <ShellCore>{children}</ShellCore>
+      <UpdaterProvider>
+        <ShellCore>{children}</ShellCore>
+      </UpdaterProvider>
     </OverlayProvider>
   );
 }
@@ -280,6 +299,40 @@ function ShellCore({ children }: { children: ReactNode }) {
   const [createInstance, setCreateInstance] = useState<CreateInstanceState>({ open: false, preset: null });
   const openCreateInstance = useCallback((preset?: CreateInstancePreset) => setCreateInstance({ open: true, preset: preset === undefined ? null : preset }), []);
   const closeCreateInstance = useCallback(() => setCreateInstance((c) => (c.open ? { ...c, open: false } : c)), []);
+
+  // ---------------------------------------------------------------- 启动器更新
+
+  const updater = useUpdater();
+  const updaterRef = useRef(updater);
+  updaterRef.current = updater;
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
+  const openUpdatePanel = useCallback(() => {
+    const api = updaterRef.current;
+    const update = phaseUpdate(api.snapshot().phase);
+    if (update === null) throw new Error("没有可查看的更新时不该打开更新面板");
+    api.markSeen(update.version);
+    setUpdatePanelOpen(true);
+  }, []);
+  const closeUpdatePanel = useCallback(() => setUpdatePanelOpen(false), []);
+  const installUpdate = useCallback(async () => {
+    const pending = activeTasks(stateRef.current).length;
+    if (pending > 0) {
+      const ok = await confirm({
+        title: UPDATE_COPY.tasksConfirmTitle,
+        body: UPDATE_COPY.tasksConfirmBody(pending),
+        confirmLabel: UPDATE_COPY.tasksConfirm,
+        tone: "primary",
+      });
+      if (!ok) return;
+    }
+    await run(async () => {
+      await actions.flushTaskJournal();
+      await updaterRef.current.install();
+    }, UPDATE_COPY.installFailed);
+  }, [actions, confirm, run]);
+  useUpdaterAutoCheck(openUpdatePanel);
 
   const findHandlers = useRef<(() => void)[]>([]);
   const registerFind = useCallback((handler: () => void) => {
@@ -484,6 +537,10 @@ function ShellCore({ children }: { children: ReactNode }) {
       createInstance,
       openCreateInstance,
       closeCreateInstance,
+      updatePanelOpen,
+      openUpdatePanel,
+      closeUpdatePanel,
+      installUpdate,
       registerFind,
       registerShortcut,
       registerFileDrop: fileDrop.registerFileDrop,
@@ -499,13 +556,16 @@ function ShellCore({ children }: { children: ReactNode }) {
       bindPageScroll,
       closeCreateInstance,
       closePalette,
+      closeUpdatePanel,
       confirm,
       copyText,
       createInstance,
       fileDrop.hint,
       fileDrop.registerFileDrop,
+      installUpdate,
       openCreateInstance,
       openPalette,
+      openUpdatePanel,
       palette,
       petalsPaused,
       pickFile,
@@ -513,6 +573,7 @@ function ShellCore({ children }: { children: ReactNode }) {
       registerShortcut,
       runToastAction,
       tier,
+      updatePanelOpen,
     ],
   );
 
