@@ -310,7 +310,7 @@ mod tests {
         // 9 个汉字加 8 个字母是 17 个 UTF-16 码元，按 Java 的算法同样超长。
         assert!(long_player_name("春夏秋冬春夏秋冬春abcdefgh", "1.21"));
         // 数的是码元而非字符：8 个增补平面字符正好 16 个码元，再加 1 个即超长。
-        let astral = "\u{1F338}".repeat(8);
+        let astral = "\u{20000}".repeat(8);
         assert_eq!(astral.chars().count(), 8);
         assert!(!long_player_name(&astral, "1.21"));
         assert!(long_player_name(&format!("{astral}a"), "1.21"));
