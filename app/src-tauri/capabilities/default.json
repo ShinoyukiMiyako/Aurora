@@ -15,7 +15,6 @@
     "core:window:allow-request-user-attention",
     "opener:default",
     "opener:allow-open-url",
-    "dialog:allow-open",
-    "process:allow-restart"
+    "dialog:allow-open"
   ]
 }

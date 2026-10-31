@@ -46,8 +46,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 更改游戏目录、导入本地整合包要拿磁盘绝对路径，只能走系统对话框。
         .plugin(tauri_plugin_dialog::init())
-        // 自更新装完后重启进程。
-        .plugin(tauri_plugin_process::init())
         // -- art --
         .register_asynchronous_uri_scheme_protocol(textures::SCHEME, textures::handle);
     // 插件配置里 pubkey 是必填项，缺了插件初始化就失败、整个应用起不来，所以只在支持时注册。

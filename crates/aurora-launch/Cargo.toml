@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 aurora-auth = { path = "../aurora-auth" }
 aurora-version = { path = "../aurora-version" }
-aurora-java = { path = "../aurora-java" }
 aurora-instance = { path = "../aurora-instance" }
 # 产品名常量（启动品牌、崩溃建议与预检文案）取自 aurora-base 的 brand 模块。
 aurora-base = { path = "../aurora-base" }
