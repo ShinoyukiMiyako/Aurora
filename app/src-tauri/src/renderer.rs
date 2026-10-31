@@ -10,8 +10,15 @@
 //! 会每分钟被重载两次，没完没了。
 //!
 //! 重载出来的页面换了网页区域的子窗口，拖放目标随页面加载完成（`NavigationCompleted`）重挂，见 [`crate::drop`]。
+//!
+//! 停下之后关闭请求由后端直接销毁主窗口：标题栏画在网页里，页面没了关闭键也就没了；Alt+F4 与任务栏的关闭
+//! 又被 Tauri 交给页面裁决——页面登记过关闭请求的监听，Tauri 就拦下默认关闭、等页面自己销毁窗口，错误页与
+//! 卡死的页面永远等不来，而那条监听 Tauri 不随页面重载清掉。不这样做，唯一的出路只剩任务管理器，退出时的
+//! 收尾也跑不到。代价是停下之后自己缓过来的无响应页面，关闭时不再经过页面的关闭确认。
 
 use std::fmt::Display;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// 自动重载的计数窗口。
@@ -81,13 +88,33 @@ impl ReloadBudget {
     }
 }
 
+/// 自动重载停下了没有：故障处置写，主窗口的关闭请求读。两边都在 UI 线程上。
+#[derive(Debug, Clone, Default)]
+pub struct Stopped(Arc<AtomicBool>);
+
+impl Stopped {
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, stopped: bool) {
+        self.0.store(stopped, Ordering::Relaxed);
+    }
+}
+
 /// 主窗口渲染进程故障的处置：按预算判定，要重载时调用重载，并记下经过。
 #[derive(Debug, Default)]
 pub struct RendererRecovery {
     budget: ReloadBudget,
+    stopped: Stopped,
 }
 
 impl RendererRecovery {
+    /// 自动重载停没停下的共享句柄。
+    pub fn stopped(&self) -> Stopped {
+        self.stopped.clone()
+    }
+
     /// 处理在 `now` 上报的一次故障；判定要重载时调用 `reload`。返回这次的判定。
     ///
     /// 调过 `reload` 就算用掉一次预算，调用失败也算：失败多半是 WebView 已经不可用，接着重试只会把预算换成一串错误日志。
@@ -98,6 +125,7 @@ impl RendererRecovery {
         reload: impl FnOnce() -> Result<(), E>,
     ) -> Verdict {
         let verdict = self.budget.judge(now);
+        self.stopped.set(!matches!(verdict, Verdict::Reload { .. }));
         match verdict {
             Verdict::Reload { attempt } => {
                 tracing::warn!(
@@ -130,17 +158,45 @@ impl RendererRecovery {
     }
 }
 
-/// 在主窗口上订阅子进程故障。订阅要在 WebView 所属的 UI 线程上做，经 `with_webview` 派过去；那边的结果传不回
-/// setup，只能记日志——订阅不上的后果是渲染进程崩溃或卡死后界面不会自己恢复。
+/// 在主窗口上订阅子进程故障，并接管停下之后的关闭请求。订阅要在 WebView 所属的 UI 线程上做，经 `with_webview`
+/// 派过去；那边的结果传不回 setup，只能记日志——订阅不上的后果是渲染进程崩溃或卡死后界面不会自己恢复。
 #[cfg(windows)]
 pub fn install(window: &tauri::WebviewWindow) -> tauri::Result<()> {
-    window.with_webview(|webview| {
+    let recovery = RendererRecovery::default();
+    destroy_on_close_while_stopped(window, recovery.stopped());
+    window.with_webview(move |webview| {
         // SAFETY: with_webview 的回调在 WebView 所属的 UI 线程上执行，controller 在回调期间有效
-        match unsafe { native::subscribe(&webview) } {
+        match unsafe { native::subscribe(&webview, recovery) } {
             Ok(()) => tracing::info!("已订阅 WebView2 子进程故障，渲染进程崩溃或无响应时自动重载页面"),
             Err(err) => tracing::error!(error = %err, "订阅 WebView2 子进程故障失败，渲染进程崩溃或无响应后界面不会自动恢复"),
         }
     })
+}
+
+/// 自动重载停下之后，主窗口的关闭请求不再等页面裁决，由后端直接销毁窗口（缘由见模块文档）。
+#[cfg(windows)]
+fn destroy_on_close_while_stopped(window: &tauri::WebviewWindow, stopped: Stopped) {
+    use tauri::Manager;
+
+    let app = window.app_handle().clone();
+    let label = window.label().to_owned();
+    window.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::CloseRequested { .. }) || !stopped.get() {
+            return;
+        }
+        tracing::warn!("自动重载已停下，页面接不住关闭请求，由后端直接销毁主窗口");
+        let (app, label) = (app.clone(), label.clone());
+        // 在窗口事件的回调里同步销毁会重入正在分发的窗口事件；派到运行时线程，由事件循环随后执行
+        tauri::async_runtime::spawn(async move {
+            // 找不到就是已经销毁了，没有要做的
+            let Some(window) = app.get_webview_window(&label) else {
+                return;
+            };
+            if let Err(err) = window.destroy() {
+                tracing::error!(error = %err, "销毁主窗口失败，只能从任务管理器结束启动器");
+            }
+        });
+    });
 }
 
 #[cfg(windows)]
@@ -173,9 +229,11 @@ mod native {
     ///
     /// # Safety
     /// 只能在 WebView 所属的 UI 线程上调用。
-    pub unsafe fn subscribe(webview: &tauri::webview::PlatformWebview) -> windows_core::Result<()> {
+    pub unsafe fn subscribe(
+        webview: &tauri::webview::PlatformWebview,
+        mut recovery: RendererRecovery,
+    ) -> windows_core::Result<()> {
         let core = unsafe { webview.controller().CoreWebView2()? };
-        let mut recovery = RendererRecovery::default();
         let handler = ProcessFailedEventHandler::create(Box::new(move |sender, args| {
             let kind = args.ok_or_else(|| E_POINTER.into()).and_then(|args| {
                 let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
@@ -421,6 +479,35 @@ mod tests {
             assert_eq!(verdict, expected);
         }
         assert_eq!(calls.get(), 2);
+    }
+
+    /// 停没停下随判定走：停下以及之后接连的故障里为真，主窗口的关闭请求据此直接销毁窗口；安静满一个窗口后
+    /// 再次重载，新页面接得住关闭请求，恢复为假。
+    #[test]
+    fn stopped_flag_follows_the_verdicts() {
+        let mut recovery = RendererRecovery::default();
+        let stopped = recovery.stopped();
+        let reloads = Cell::new(0);
+        let t0 = Instant::now();
+        assert!(!stopped.get());
+        for (at, verdict, expect_stopped) in [
+            (secs(0), Verdict::Reload { attempt: 1 }, false),
+            (secs(1), Verdict::Reload { attempt: 2 }, false),
+            (secs(2), Verdict::GiveUp, true),
+            (secs(17), Verdict::StillStopped, true),
+            (
+                secs(17) + RELOAD_WINDOW,
+                Verdict::Reload { attempt: 1 },
+                false,
+            ),
+        ] {
+            assert_eq!(
+                recovery.on_failure(RendererFailure::Unresponsive, t0 + at, reloader(&reloads)),
+                verdict
+            );
+            assert_eq!(stopped.get(), expect_stopped, "{at:?}");
+        }
+        assert_eq!(reloads.get(), 3);
     }
 
     /// 随机的故障节奏下（固定种子，可复现），任意 60 秒里的自动重载不超过两次；停下之后，没隔满一个窗口的
