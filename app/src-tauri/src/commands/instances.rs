@@ -2022,6 +2022,68 @@ mod tests {
         assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["别的"]);
     }
 
+    async fn switch_game_dir(env: &Env, game_dir: &Path) {
+        env.facade
+            .update(|aurora| {
+                aurora.switch_game_directory(game_dir);
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 游玩记录按游戏目录分开：换到另一个游戏目录后同名实例从零算起；在那边改名、删除，不动原目录的记录。
+    #[tokio::test]
+    async fn play_records_are_kept_apart_per_game_directory() {
+        let env = Env::new();
+        env.vanilla("周末生存");
+        let home = env.game_dir();
+        let other = env.dir.path().join("另一个").join(".minecraft");
+        let twin = other.join("versions").join("周末生存");
+        std::fs::create_dir_all(&twin).unwrap();
+        std::fs::write(
+            twin.join("周末生存.json"),
+            r#"{"id":"周末生存","type":"release","mainClass":"M"}"#,
+        )
+        .unwrap();
+        // 只按实例 id 记的旧记录：读到时归到当时的当前游戏目录。
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"周末生存":{"total_ms":5400000,"last_played_at":1761832800000}},
+                "days":{"2026-10-30":{"instances":{"周末生存":5400000}}}}}"#,
+        );
+        let locks = InstanceLocks::default();
+        let played = |list: &[InstanceDto]| {
+            let entry = list.iter().find(|i| i.id == "周末生存").unwrap();
+            (entry.playtime_min, entry.last_played_at)
+        };
+        let day = || aurora_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap();
+
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(played(&list), (90, Some(1_761_832_800_000)));
+
+        switch_game_dir(&env, &other).await;
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(played(&list), (0, None), "另一个游戏目录里的同名实例不继承");
+        let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
+        assert_eq!((stats.days.len(), stats.total_minutes), (0, 0));
+
+        rename_instance_with(&env.facade, &locks, "周末生存", "改了名")
+            .await
+            .unwrap();
+        delete_instance_with(&env.facade, &locks, "改了名", Remove)
+            .await
+            .unwrap();
+
+        switch_game_dir(&env, &home).await;
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(played(&list), (90, Some(1_761_832_800_000)));
+        let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
+        assert_eq!(stats.total_minutes, 90);
+        assert_eq!(stats.instances[0].version_id, "周末生存");
+    }
+
     /// 游玩记录读不出来时改名照样把文件改完，但命令报错，不假装一切正常。
     #[tokio::test]
     async fn rename_reports_unreadable_play_records() {

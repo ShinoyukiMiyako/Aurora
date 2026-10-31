@@ -124,6 +124,7 @@ export const launchGame = (args: LaunchArgs): Promise<LaunchedDto> =>
 /** 结束运行中的游戏；结局经 GAME_EXIT_EVENT 推送。没有运行中的游戏时为空操作，加载中的启动用 cancelTask 取消。 */
 export const stopGame = (): Promise<void> => invoke<void>("stop_game");
 
+/** 当前游戏目录的游玩统计：记录按游戏目录分开，换了游戏目录结果随之不同。 */
 export const playStats = (range: PlayRangeArgs): Promise<PlayStatsDto> => invoke<PlayStatsDto>("play_stats", { range: { from: range.from, to: range.to } });
 
 export const onLaunchPhase = (handler: (event: LaunchPhaseEvent) => void): Promise<UnlistenFn> => listen<LaunchPhaseEvent>(LAUNCH_PHASE_EVENT, handler);

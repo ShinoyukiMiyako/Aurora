@@ -31,6 +31,8 @@ pub(crate) struct RunInfo {
     pub version_dir: PathBuf,
     pub working_dir: PathBuf,
     pub data_dir: PathBuf,
+    /// 启动时的游戏目录：游玩记录按它分开记，游戏运行期间切换了游戏目录也记回启动时的那个。
+    pub game_dir: PathBuf,
     pub clock: SessionClock,
     /// 进程起来的 Unix 毫秒，游玩时长从这里算起。
     pub running_since: u64,
@@ -124,6 +126,7 @@ impl GameRun {
 
         if let Err(err) = crate::playtime::record_play(
             &info.data_dir,
+            &info.game_dir,
             &info.version_id,
             info.running_since,
             exited_at,
@@ -343,6 +346,7 @@ mod tests {
             version_dir: version_dir.clone(),
             working_dir: root.clone(),
             data_dir: root.clone(),
+            game_dir: root.clone(),
             clock,
             running_since: clock.now(),
             java: JavaUsed {
@@ -382,7 +386,7 @@ mod tests {
         let aurora = crate::facade::Aurora::for_test(
             crate::config::AuroraConfig::default(),
             root.to_path_buf(),
-            root.join(".minecraft"),
+            root.to_path_buf(),
         );
         aurora
             .play_summaries()

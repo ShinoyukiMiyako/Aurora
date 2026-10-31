@@ -5,6 +5,9 @@
 //!
 //! 每日时长按本地日期切分，跨午夜的一局分别计入两天。内部按毫秒累计、读出时才折成分钟：
 //! 一局不到一分钟的会话若按分钟取整再累加，会整局消失。
+//!
+//! 记录按游戏目录分开：实例 id 只在一个游戏目录里唯一，换到另一个游戏目录后，同名的是另一个实例，
+//! 不能继承这边的时长。读写一律针对门面当前的游戏目录。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,17 +18,22 @@ use tokio::sync::Mutex;
 
 use crate::error::Result;
 use crate::facade::Aurora;
+use crate::folders::same_path;
 
 /// 游玩记录文件名，位于数据目录下。
 pub const PLAYTIME_FILE: &str = "playtime.json";
-/// 文件格式版本；结构不兼容地变化时递增，旧文件读出即报错而不是被误读。
-const PLAYTIME_FORMAT: u32 = 1;
+/// 文件格式版本；结构不兼容地变化时递增，认不得的版本读出即报错而不是被误读。
+const PLAYTIME_FORMAT: u32 = 2;
+/// 只按实例 id 记、不分游戏目录的旧版本。读到时整份归到当时的当前游戏目录，并当场改写成现行版本：
+/// 拖到下次写入才改写的话，中间换了游戏目录，旧记录就会归错地方。
+const LEGACY_FORMAT: u32 = 1;
 /// 每日记录保留的天数（含当天）；累计时长与上次游玩不受影响。
 pub const RETAIN_DAYS: u64 = 400;
 const MS_PER_MINUTE: u64 = 60_000;
 
-/// 多个实例可能同时退出，读改写必须串行，否则后写的那次会覆盖先写的那一局。
-static WRITE_LOCK: Mutex<()> = Mutex::const_new(());
+/// 多个实例可能同时退出，读改写必须串行，否则后写的那次会覆盖先写的那一局。读也要排队：读到旧版本
+/// 时当场改写。
+static FILE_LOCK: Mutex<()> = Mutex::const_new(());
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PlayBook {
@@ -46,10 +54,83 @@ struct DayRecord {
     instances: BTreeMap<String, u64>,
 }
 
+/// 一个游戏目录的记录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DirectoryBook {
+    /// 记下时的游戏目录；比对时与切换游戏目录一样，不分大小写与斜杠方向。
+    game_dir: PathBuf,
+    book: PlayBook,
+}
+
+/// 全部游戏目录的记录。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PlayLibrary {
+    directories: Vec<DirectoryBook>,
+}
+
+/// 没记过的游戏目录读作一本空账。
+static EMPTY_BOOK: PlayBook = PlayBook {
+    instances: BTreeMap::new(),
+    days: BTreeMap::new(),
+};
+
+impl PlayLibrary {
+    fn book(&self, game_dir: &Path) -> &PlayBook {
+        self.directories
+            .iter()
+            .find(|d| same_path(&d.game_dir, game_dir))
+            .map_or(&EMPTY_BOOK, |d| &d.book)
+    }
+
+    /// 可改的记录；没记过的目录新开一本。
+    fn book_mut(&mut self, game_dir: &Path) -> &mut PlayBook {
+        let index = match self
+            .directories
+            .iter()
+            .position(|d| same_path(&d.game_dir, game_dir))
+        {
+            Some(index) => index,
+            None => {
+                self.directories.push(DirectoryBook {
+                    game_dir: game_dir.to_path_buf(),
+                    book: PlayBook::default(),
+                });
+                self.directories.len() - 1
+            }
+        };
+        &mut self.directories[index].book
+    }
+
+    /// 改一个游戏目录已有的记录；没记过的目录什么都不做，不凭空开一本空账。返回记录是否有变化。
+    fn change(&mut self, game_dir: &Path, change: impl FnOnce(&mut PlayBook) -> bool) -> bool {
+        self.directories
+            .iter_mut()
+            .find(|d| same_path(&d.game_dir, game_dir))
+            .is_some_and(|d| change(&mut d.book))
+    }
+
+    fn prune(&mut self, today: NaiveDate) {
+        for directory in &mut self.directories {
+            directory.book.prune(today);
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct PlayFile {
     format: u32,
+    directories: Vec<DirectoryBook>,
+}
+
+#[derive(Deserialize)]
+struct LegacyPlayFile {
     book: PlayBook,
+}
+
+/// 先只读格式版本，再按版本解析整份文件。
+#[derive(Deserialize)]
+struct FormatHeader {
+    format: u32,
 }
 
 /// 一个实例的游玩摘要。
@@ -275,11 +356,14 @@ fn parse_error(path: &Path, source: serde_json::Error) -> aurora_instance::Error
     }
 }
 
-/// 读游玩记录；文件不存在即一条记录都没有。
-async fn load(path: &Path) -> Result<PlayBook> {
+/// 读游玩记录；文件不存在即一条记录都没有。读到旧版本时把它的记录整份归到 `game_dir`，第二项为真
+/// 表示做了这次迁移、要落盘。
+async fn load(path: &Path, game_dir: &Path) -> Result<(PlayLibrary, bool)> {
     let bytes = match tokio::fs::read(path).await {
         Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(PlayBook::default()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((PlayLibrary::default(), false));
+        }
         Err(source) => {
             return Err(aurora_base::Error::Io {
                 path: path.to_path_buf(),
@@ -288,85 +372,140 @@ async fn load(path: &Path) -> Result<PlayBook> {
             .into());
         }
     };
-    let file: PlayFile = serde_json::from_slice(&bytes).map_err(|err| parse_error(path, err))?;
-    if file.format != PLAYTIME_FORMAT {
-        return Err(parse_error(
+    let header: FormatHeader =
+        serde_json::from_slice(&bytes).map_err(|err| parse_error(path, err))?;
+    match header.format {
+        PLAYTIME_FORMAT => {
+            let file: PlayFile =
+                serde_json::from_slice(&bytes).map_err(|err| parse_error(path, err))?;
+            Ok((
+                PlayLibrary {
+                    directories: file.directories,
+                },
+                false,
+            ))
+        }
+        LEGACY_FORMAT => {
+            let legacy: LegacyPlayFile =
+                serde_json::from_slice(&bytes).map_err(|err| parse_error(path, err))?;
+            tracing::info!(
+                path = %path.display(),
+                game_dir = %game_dir.display(),
+                "游玩记录改为按游戏目录分开记，旧记录归到当前游戏目录"
+            );
+            Ok((
+                PlayLibrary {
+                    directories: vec![DirectoryBook {
+                        game_dir: game_dir.to_path_buf(),
+                        book: legacy.book,
+                    }],
+                },
+                true,
+            ))
+        }
+        other => Err(parse_error(
             path,
             serde::de::Error::custom(format!(
-                "格式版本是 {}，当前只认 {PLAYTIME_FORMAT}",
-                file.format
+                "格式版本是 {other}，当前只认 {LEGACY_FORMAT} 与 {PLAYTIME_FORMAT}"
             )),
         )
-        .into());
+        .into()),
     }
-    Ok(file.book)
 }
 
-async fn save(path: &Path, book: PlayBook) -> Result<()> {
+async fn save(path: &Path, library: PlayLibrary) -> Result<()> {
     let bytes = serde_json::to_vec(&PlayFile {
         format: PLAYTIME_FORMAT,
-        book,
+        directories: library.directories,
     })
     .map_err(|err| parse_error(path, err))?;
     aurora_base::fs::atomic_write(path, &bytes).await?;
     Ok(())
 }
 
+/// 在锁里读出记录交给 `work`，`work` 报告有变化或读到的是旧版本时落盘。没有变化时不落盘：没玩过的
+/// 实例改名、删除不会凭空建出文件。
+async fn with_library<T>(
+    data_dir: &Path,
+    game_dir: &Path,
+    work: impl FnOnce(&mut PlayLibrary) -> (T, bool),
+) -> Result<T> {
+    let path = playtime_path(data_dir);
+    let _guard = FILE_LOCK.lock().await;
+    let (mut library, migrated) = load(&path, game_dir).await?;
+    let (value, changed) = work(&mut library);
+    if migrated || changed {
+        save(&path, library).await?;
+    }
+    Ok(value)
+}
+
 /// 记一局游玩：`started_at` 是进程起来的时刻，`ended_at` 是退出的时刻（Unix 毫秒）。
 pub(crate) async fn record_play(
     data_dir: &Path,
+    game_dir: &Path,
     version_id: &str,
     started_at: u64,
     ended_at: u64,
 ) -> Result<()> {
-    record_play_in(&Local, data_dir, version_id, started_at, ended_at).await
+    record_play_in(&Local, data_dir, game_dir, version_id, started_at, ended_at).await
 }
 
 async fn record_play_in<Tz: TimeZone>(
     tz: &Tz,
     data_dir: &Path,
+    game_dir: &Path,
     version_id: &str,
     started_at: u64,
     ended_at: u64,
 ) -> Result<()> {
-    let path = playtime_path(data_dir);
-    let _guard = WRITE_LOCK.lock().await;
-    let mut book = load(&path).await?;
-    book.add_session(tz, version_id, started_at, ended_at);
-    book.prune(local_date(tz, ended_at));
-    save(&path, book).await
-}
-
-/// 在写锁下读改写一次；`change` 报告没有变化时不落盘（没玩过的实例改名、删除不会凭空建出文件）。
-async fn update_book(data_dir: &Path, change: impl FnOnce(&mut PlayBook) -> bool) -> Result<()> {
-    let path = playtime_path(data_dir);
-    let _guard = WRITE_LOCK.lock().await;
-    let mut book = load(&path).await?;
-    if change(&mut book) {
-        save(&path, book).await?;
-    }
-    Ok(())
+    with_library(data_dir, game_dir, |library| {
+        library
+            .book_mut(game_dir)
+            .add_session(tz, version_id, started_at, ended_at);
+        library.prune(local_date(tz, ended_at));
+        ((), true)
+    })
+    .await
 }
 
 impl Aurora {
-    /// 实例改名后把它的游玩记录挪到新名字下（记录以实例 id 为键）。
+    /// 实例改名后把它在当前游戏目录下的游玩记录挪到新名字下（记录以实例 id 为键）。
     pub async fn rename_play_records(&self, old: &str, new: &str) -> Result<()> {
-        update_book(self.data_dir(), |book| book.rename_instance(old, new)).await
+        let game_dir = self.game_dir();
+        with_library(self.data_dir(), game_dir, |library| {
+            let changed = library.change(game_dir, |book| book.rename_instance(old, new));
+            ((), changed)
+        })
+        .await
     }
 
-    /// 实例删除后去掉它的游玩记录。
+    /// 实例删除后去掉它在当前游戏目录下的游玩记录。
     pub async fn forget_play_records(&self, id: &str) -> Result<()> {
-        update_book(self.data_dir(), |book| book.forget_instance(id)).await
+        let game_dir = self.game_dir();
+        with_library(self.data_dir(), game_dir, |library| {
+            let changed = library.change(game_dir, |book| book.forget_instance(id));
+            ((), changed)
+        })
+        .await
     }
 
-    /// 一段时间（本地日期，两端都含）的游玩统计。
+    /// 当前游戏目录一段时间（本地日期，两端都含）的游玩统计。
     pub async fn play_stats(&self, range: PlayRange) -> Result<PlayStats> {
-        Ok(load(&playtime_path(self.data_dir())).await?.stats(range))
+        let game_dir = self.game_dir();
+        with_library(self.data_dir(), game_dir, |library| {
+            (library.book(game_dir).stats(range), false)
+        })
+        .await
     }
 
-    /// 每个玩过的实例的累计时长与上次游玩；没玩过的实例不在其中。
+    /// 当前游戏目录里每个玩过的实例的累计时长与上次游玩；没玩过的实例不在其中。
     pub async fn play_summaries(&self) -> Result<BTreeMap<String, PlaySummary>> {
-        Ok(load(&playtime_path(self.data_dir())).await?.summaries())
+        let game_dir = self.game_dir();
+        with_library(self.data_dir(), game_dir, |library| {
+            (library.book(game_dir).summaries(), false)
+        })
+        .await
     }
 }
 
@@ -401,6 +540,19 @@ mod tests {
 
     fn range(from: &str, to: &str) -> PlayRange {
         PlayRange::new(date(from), date(to)).unwrap()
+    }
+
+    fn game_dir(root: &Path) -> PathBuf {
+        root.join(".minecraft")
+    }
+
+    /// 数据目录在 `root`、当前游戏目录为 `game` 的门面。
+    fn aurora_in(root: &Path, game: &Path) -> Aurora {
+        Aurora::for_test(
+            crate::config::AuroraConfig::default(),
+            root.to_path_buf(),
+            game.to_path_buf(),
+        )
     }
 
     #[test]
@@ -573,10 +725,11 @@ mod tests {
         let data_dir = tmp.path().to_path_buf();
         let start = at("2026-10-30", 20, 0);
         let mut tasks = Vec::new();
+        let game = game_dir(tmp.path());
         for id in ["a", "b", "c", "d"] {
-            let data_dir = data_dir.clone();
+            let (data_dir, game) = (data_dir.clone(), game.clone());
             tasks.push(tokio::spawn(async move {
-                record_play_in(&utc8(), &data_dir, id, start, start + HOUR)
+                record_play_in(&utc8(), &data_dir, &game, id, start, start + HOUR)
                     .await
                     .unwrap();
             }));
@@ -584,7 +737,8 @@ mod tests {
         for task in tasks {
             task.await.unwrap();
         }
-        let book = load(&playtime_path(&data_dir)).await.unwrap();
+        let (library, _) = load(&playtime_path(&data_dir), &game).await.unwrap();
+        let book = library.book(&game);
         assert_eq!(book.instances.len(), 4);
         assert_eq!(book.days["2026-10-30"].instances.len(), 4);
         assert!(book.instances.values().all(|r| r.total_ms == HOUR));
@@ -693,17 +847,14 @@ mod tests {
     #[tokio::test]
     async fn rename_and_forget_persist_and_do_not_create_an_empty_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = Aurora::for_test(
-            crate::config::AuroraConfig::default(),
-            tmp.path().to_path_buf(),
-            tmp.path().join(".minecraft"),
-        );
+        let game = game_dir(tmp.path());
+        let aurora = aurora_in(tmp.path(), &game);
         let path = playtime_path(tmp.path());
         aurora.rename_play_records("x", "y").await.unwrap();
         aurora.forget_play_records("x").await.unwrap();
         assert!(!path.exists());
 
-        record_play_in(&utc8(), tmp.path(), "旧名", 0, 2 * HOUR)
+        record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
             .await
             .unwrap();
         aurora.rename_play_records("旧名", "新名").await.unwrap();
@@ -713,17 +864,15 @@ mod tests {
 
         aurora.forget_play_records("新名").await.unwrap();
         assert!(aurora.play_summaries().await.unwrap().is_empty());
-        assert!(load(&path).await.unwrap().days.is_empty());
+        let (library, _) = load(&path, &game).await.unwrap();
+        assert!(library.book(&game).days.is_empty());
     }
 
     #[tokio::test]
     async fn missing_file_reads_as_empty_and_corrupt_file_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = Aurora::for_test(
-            crate::config::AuroraConfig::default(),
-            tmp.path().to_path_buf(),
-            tmp.path().join(".minecraft"),
-        );
+        let game = game_dir(tmp.path());
+        let aurora = aurora_in(tmp.path(), &game);
         assert!(aurora.play_summaries().await.unwrap().is_empty());
         let stats = aurora
             .play_stats(range("2026-10-01", "2026-10-31"))
@@ -735,11 +884,14 @@ mod tests {
         let path = playtime_path(tmp.path());
         std::fs::write(&path, "{ broken").unwrap();
         assert!(aurora.play_summaries().await.is_err());
+        // 认不得的新版本，以及版本号对、内容却是旧版形状的文件。
+        std::fs::write(&path, r#"{"format":3,"directories":[]}"#).unwrap();
+        assert!(aurora.play_summaries().await.is_err());
         std::fs::write(&path, r#"{"format":2,"book":{"instances":{},"days":{}}}"#).unwrap();
         assert!(aurora.play_summaries().await.is_err());
         // 坏文件不能被一次写入悄悄覆盖掉。
         assert!(
-            record_play_in(&utc8(), tmp.path(), "a", 0, HOUR)
+            record_play_in(&utc8(), tmp.path(), &game, "a", 0, HOUR)
                 .await
                 .is_err()
         );
@@ -747,6 +899,149 @@ mod tests {
             std::fs::read_to_string(&path)
                 .unwrap()
                 .contains("\"format\":2")
+        );
+    }
+
+    fn read_file(root: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(playtime_path(root)).unwrap()).unwrap()
+    }
+
+    /// 只按实例 id 记的旧文件：第一次读到时整份归到当时的当前游戏目录并当场改写，之后从别的游戏目录
+    /// 读也不会把旧记录算到那边去。
+    #[tokio::test]
+    async fn legacy_records_move_under_the_game_dir_current_at_first_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("落樱").join(".minecraft");
+        let other = tmp.path().join("PCL").join(".minecraft");
+        std::fs::write(
+            playtime_path(tmp.path()),
+            r#"{"format":1,"book":{
+                "instances":{"1.21":{"total_ms":5400000,"last_played_at":1761832800000}},
+                "days":{"2026-10-30":{"instances":{"1.21":5400000}}}}}"#,
+        )
+        .unwrap();
+
+        let summaries = aurora_in(tmp.path(), &home).play_summaries().await.unwrap();
+        assert_eq!(
+            summaries["1.21"],
+            PlaySummary {
+                playtime_min: 90,
+                last_played_at: 1_761_832_800_000
+            }
+        );
+        let file = read_file(tmp.path());
+        assert_eq!(file["format"], 2);
+        assert_eq!(file["directories"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            file["directories"][0]["game_dir"],
+            home.display().to_string()
+        );
+        assert_eq!(
+            file["directories"][0]["book"]["days"]["2026-10-30"]["instances"]["1.21"],
+            5_400_000
+        );
+
+        let elsewhere = aurora_in(tmp.path(), &other);
+        assert!(elsewhere.play_summaries().await.unwrap().is_empty());
+        assert_eq!(
+            aurora_in(tmp.path(), &home)
+                .play_stats(range("2026-10-30", "2026-10-30"))
+                .await
+                .unwrap()
+                .total_minutes,
+            90
+        );
+        // 已是现行版本：再读不改写文件。
+        let before = std::fs::read(playtime_path(tmp.path())).unwrap();
+        elsewhere.play_summaries().await.unwrap();
+        assert_eq!(std::fs::read(playtime_path(tmp.path())).unwrap(), before);
+    }
+
+    /// 两个游戏目录里的同名实例各记各的：游玩、改名、删除、列表与统计都只看当前游戏目录；路径写法不同
+    /// （大小写、斜杠方向、末尾分隔符）仍是同一个目录。
+    #[tokio::test]
+    async fn each_game_dir_keeps_its_own_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("Games").join(".minecraft");
+        let other = tmp.path().join("HMCL").join(".minecraft");
+        let (in_home, in_other) = (aurora_in(tmp.path(), &home), aurora_in(tmp.path(), &other));
+        let day = at("2026-10-30", 20, 0);
+        record_play_in(&utc8(), tmp.path(), &home, "生存", day, day + 2 * HOUR)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &other, "生存", day, day + HOUR / 2)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &other, "创造", day, day + HOUR)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            in_home.play_summaries().await.unwrap()["生存"].playtime_min,
+            120
+        );
+        assert_eq!(
+            in_other.play_summaries().await.unwrap()["生存"].playtime_min,
+            30
+        );
+        let stats = in_other
+            .play_stats(range("2026-10-30", "2026-10-30"))
+            .await
+            .unwrap();
+        assert_eq!(stats.total_minutes, 90);
+        assert_eq!(
+            stats
+                .instances
+                .iter()
+                .map(|i| (i.version_id.as_str(), i.minutes))
+                .collect::<Vec<_>>(),
+            vec![("创造", 60), ("生存", 30)]
+        );
+
+        in_other
+            .rename_play_records("生存", "改名了")
+            .await
+            .unwrap();
+        in_other.forget_play_records("创造").await.unwrap();
+        let summaries = in_other.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["改名了"]);
+        assert_eq!(summaries["改名了"].playtime_min, 30);
+        let summaries = in_home.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["生存"]);
+        assert_eq!(
+            in_home
+                .play_stats(range("2026-10-30", "2026-10-30"))
+                .await
+                .unwrap()
+                .total_minutes,
+            120
+        );
+
+        let alias = PathBuf::from(format!(
+            "{}/",
+            home.display().to_string().to_uppercase().replace('\\', "/")
+        ));
+        assert_eq!(
+            aurora_in(tmp.path(), &alias)
+                .play_summaries()
+                .await
+                .unwrap()["生存"]
+                .playtime_min,
+            120
+        );
+        record_play_in(&utc8(), tmp.path(), &alias, "生存", day, day + HOUR)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_file(tmp.path())["directories"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            in_home.play_summaries().await.unwrap()["生存"].playtime_min,
+            180
         );
     }
 }
