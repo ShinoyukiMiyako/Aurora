@@ -1,6 +1,5 @@
-// 关于：品牌卡、启动器更新卡与更新面板、版本信息、支持入口、关于原版图案与商标的声明。
+// 关于：品牌卡、启动器更新卡、版本信息、支持入口、关于原版图案与商标的声明。更新面板由外壳挂载。
 
-import { useEffect, useState } from "react";
 import { SakuraMark } from "../../../art/Logo";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { APP_NAME, APP_NAME_EN } from "../../../lib/app-info";
@@ -14,10 +13,8 @@ import { SettingRow } from "../../../ui/SettingRow";
 import { useCopyText } from "../clipboard";
 import { useSettingsCommands } from "../commands";
 import { ABOUT_COPY } from "../copy";
-import { hasPanel, phaseUpdate } from "../update/machine";
+import { useUpdater } from "../../../state/updater/useUpdater";
 import { UpdateCard } from "../update/UpdateCard";
-import { UpdatePanel } from "../update/UpdatePanel";
-import { useUpdater } from "../update/useUpdater";
 import s from "../settings.module.css";
 
 function BrandCard({ version }: { version: string | null }) {
@@ -69,29 +66,16 @@ function SupportCard() {
 
 export function AboutSection() {
   const updater = useUpdater();
-  const [panelOpen, setPanelOpen] = useState(false);
-  const panelAvailable = hasPanel(updater.state.phase);
-  // 面板里的版本已经不在了（装完、被新一轮检查替换）：收起面板，免得之后出现新版本时自己弹出来
-  useEffect(() => {
-    if (!panelAvailable) setPanelOpen(false);
-  }, [panelAvailable]);
-  const openPanel = () => {
-    const update = phaseUpdate(updater.state.phase);
-    if (update === null) throw new Error("没有可查看的更新时不该打开更新面板");
-    updater.markSeen(update.version);
-    setPanelOpen(true);
-  };
   const version = updater.state.currentVersion;
   return (
     <>
       <BrandCard version={version} />
-      <UpdateCard onOpenPanel={openPanel} />
+      <UpdateCard />
       {version !== null && <VersionCard version={version} />}
       <SupportCard />
       <Inset>
         <p className={s.disclaimer}>{ABOUT_COPY.disclaimer}</p>
       </Inset>
-      <UpdatePanel open={panelOpen && panelAvailable} onClose={() => setPanelOpen(false)} />
     </>
   );
 }

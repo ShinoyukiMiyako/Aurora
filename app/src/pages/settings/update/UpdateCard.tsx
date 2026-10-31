@@ -2,6 +2,7 @@
 
 import { useLauncher, useNow } from "../../../state/launcher";
 import { busyInstanceId } from "../../../state/selectors";
+import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
@@ -10,13 +11,13 @@ import { CardHeader } from "../../../ui/CardHeader";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Skeleton } from "../../../ui/Skeleton";
 import { Toggle } from "../../../ui/Toggle";
-import { ABOUT_COPY, LOAD_COPY, UPDATE_COPY } from "../copy";
+import { UPDATE_COPY } from "../../../copy/updater";
+import { useUpdater } from "../../../state/updater/useUpdater";
+import { ABOUT_COPY, LOAD_COPY } from "../copy";
 import { useOnline } from "../../../state/online";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
-import { useInstallUpdate } from "./useInstallUpdate";
-import { useUpdater } from "./useUpdater";
 import { updateCardView, type CardView } from "./view";
 
 /** 相对时间「x 分钟前检查过」的刷新间隔。 */
@@ -50,14 +51,14 @@ function StatusLine({ view, onAction }: { view: CardView; onAction: () => void }
   );
 }
 
-export function UpdateCard({ onOpenPanel }: { onOpenPanel: () => void }) {
+export function UpdateCard() {
   const settings = useLoadedSettings();
   const { state, actions } = useLauncher();
   const run = useRunner();
   const online = useOnline();
   const now = useNow(RELATIVE_REFRESH_MS);
   const updater = useUpdater();
-  const install = useInstallUpdate();
+  const { openUpdatePanel, installUpdate } = useShell();
   const autoCheck = useSettingWrite(settings.checkUpdates, UPDATE_COPY.autoCheck, (checkUpdates: boolean) => actions.updateSettings({ checkUpdates }));
 
   let line;
@@ -92,10 +93,10 @@ export function UpdateCard({ onOpenPanel }: { onOpenPanel: () => void }) {
           void run(() => updater.check(), UPDATE_COPY.checkStartFailed);
           return;
         case "open_panel":
-          onOpenPanel();
+          void run(openUpdatePanel, UPDATE_COPY.openPanelFailed);
           return;
         case "install":
-          void install();
+          void installUpdate();
           return;
       }
     };

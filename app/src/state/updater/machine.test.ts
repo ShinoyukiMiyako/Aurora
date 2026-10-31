@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { UpdaterInfoDto } from "../../../state/queries/catalog";
+import type { UpdaterInfoDto } from "../queries/catalog";
 import {
   canCheck,
   downloadFraction,

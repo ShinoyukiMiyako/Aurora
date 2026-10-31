@@ -10,8 +10,8 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "../../state/route";
 import { Badge } from "../../ui/Badge";
 import { Card } from "../../ui/Card";
 import { aboutHint, aboutUpdateHint, SECTION_META, SETTINGS_NAV_LABEL, UPDATE_DOT_LABEL } from "./copy";
-import { phaseUpdate, showsUpdateDot } from "./update/machine";
-import { useUpdater } from "./update/useUpdater";
+import { phaseUpdate, showsUpdateDot } from "../../state/updater/machine";
+import { useUpdater } from "../../state/updater/useUpdater";
 import s from "./settings.module.css";
 
 const PILL_ID = "settings-nav-pill";

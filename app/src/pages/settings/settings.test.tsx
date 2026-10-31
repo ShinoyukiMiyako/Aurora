@@ -3,10 +3,9 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
 import { resetMocks } from "../../ipc/mock";
-import { checkUpdate, downloadUpdate, installUpdate, setInstallOnExit } from "../../ipc/system";
-import { cancelTask, onCoreEvent } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { UpdatePanelMount } from "../../shell/UpdatePanel";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -15,8 +14,6 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { SettingsCommandsProvider, type SettingsCommands } from "./commands";
 import SettingsPage from "./index";
-import { UpdaterController, type UpdaterPort } from "./update/controller";
-import { UpdaterControllerProvider } from "./update/useUpdater";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -25,7 +22,6 @@ let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let commands: SettingsCommands & { calls: string[] };
-let updatePort: UpdaterPort;
 
 function Harness() {
   nav = useNav();
@@ -56,47 +52,20 @@ function fakeCommands(): SettingsCommands & { calls: string[] } {
   };
 }
 
-/**
- * 接在假后端上的更新命令：与状态层接入后应有的样子一致（下载进度取带同一 task_id 的下载事件）。
- * 假后端检查到 0.2.0，下载分 5 步、每步 120 ms。
- */
-function backendUpdatePort(): UpdaterPort {
-  return {
-    check: () => checkUpdate(),
-    download: async (taskId, onProgress) => {
-      const unlisten = await onCoreEvent((event) => {
-        if (event.kind === "download" && event.task_id === taskId) onProgress(event.bytes, event.total_bytes);
-      });
-      try {
-        return await downloadUpdate(taskId);
-      } finally {
-        unlisten();
-      }
-    },
-    cancel: async (taskId) => {
-      await cancelTask(taskId);
-    },
-    install: () => installUpdate(),
-    setInstallOnExit: (enabled) => setInstallOnExit(enabled),
-  };
-}
-
 const flush = () =>
   act(async () => {
     await settle(20);
   });
 
-async function mount(section?: "general" | "download" | "java" | "game" | "appearance" | "about", port: UpdaterPort = updatePort) {
-  const controller = new UpdaterController(port);
+async function mount(section?: "general" | "download" | "java" | "game" | "appearance" | "about") {
   view = render(
     <AppearanceProvider initial={DEFAULT_APPEARANCE}>
       <LauncherProvider>
         <ShellProvider>
-          <UpdaterControllerProvider value={controller}>
-            <SettingsCommandsProvider value={commands}>
-              <Harness />
-            </SettingsCommandsProvider>
-          </UpdaterControllerProvider>
+          <SettingsCommandsProvider value={commands}>
+            <Harness />
+          </SettingsCommandsProvider>
+          <UpdatePanelMount />
           <OverlayRoot />
         </ShellProvider>
       </LauncherProvider>
@@ -159,7 +128,6 @@ beforeEach(() => {
   stubMatchMedia(false);
   stubCanvas();
   commands = fakeCommands();
-  updatePort = backendUpdatePort();
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -470,12 +438,21 @@ describe("设置页：关于与启动器更新", () => {
     expect(text()).toContain("发布于 2026年10月29日 · 你跳过了这个版本");
   });
 
-  it("状态层还没接入更新命令：检查失败如实显示原因，不假装成功", async () => {
-    const { UPDATER_PORT } = await import("./update/port");
-    await mount("about", UPDATER_PORT);
+  it("检查失败：卡内如实显示后端原因并给出重试，重试成功后显示新版本", async () => {
+    let fail = true;
+    ipc.overrides.set("check_update", async (args) => {
+      if (fail) throw new IpcError("update_check_failed", "连不上更新服务器：连接超时");
+      const { mockInvoke } = await import("../../ipc/mock");
+      return mockInvoke("check_update", args);
+    });
+    await mount("about");
     await click(button("检查更新"));
     expect(text()).toContain("检查更新失败");
-    expect(text()).toContain("状态层还没有提供 check_update 的调用入口");
+    expect(text()).toContain("连不上更新服务器：连接超时");
+    fail = false;
+    await click(button("重试"));
+    expect(callsOf(ipc, "check_update")).toHaveLength(2);
+    expect(text()).toContain("有新版本 0.2.0");
   });
 
   it("支持卡与声明", async () => {

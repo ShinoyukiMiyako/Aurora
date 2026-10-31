@@ -1,8 +1,8 @@
 // 关于页更新卡在各阶段的呈现：主句、次句、唯一的按钮。纯函数，便于逐状态核对。
 
 import { formatBytes, formatDate, formatRelative, percent } from "../../../domain/format";
-import { LOAD_COPY, UPDATE_COPY } from "../copy";
-import { downloadFraction, type UpdaterState } from "./machine";
+import { UPDATE_COPY } from "../../../copy/updater";
+import { downloadFraction, type UpdaterState } from "../../../state/updater/machine";
 
 export type CardAction = "check" | "open_panel" | "install";
 
@@ -42,7 +42,7 @@ function button(label: string, variant: CardButton["variant"], action: CardActio
 
 export function updateCardView(state: UpdaterState, ctx: CardContext): CardView {
   const { phase } = state;
-  const offline = ctx.online ? undefined : LOAD_COPY.offlineReason;
+  const offline = ctx.online ? undefined : UPDATE_COPY.offlineReason;
   const check = (label: string = UPDATE_COPY.check) => button(label, "secondary", "check", { disabledReason: offline });
   const installReason = ctx.gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
   const view = (title: string, sub: string | null, btn: CardButton, extra: Partial<Pick<CardView, "accent" | "subIsError">> = {}): CardView => ({
