@@ -777,6 +777,223 @@ describe("主页：固定的服务器", () => {
   });
 });
 
+describe("主页：固定服务器的「加入」", () => {
+  const SERVER = { kind: "multiplayer", address: "play.example" } as const;
+
+  beforeEach(() => {
+    // 红石是 1.20 之前的版本，只能加入服务器、不能进存档，照样能加入；空岛的版本两样都不支持，不该出现在实例选择里
+    instances = instances.map((i) =>
+      i.id === "红石" ? { ...i, quick_play: { singleplayer: false, multiplayer: true } } : i.id === "空岛" ? { ...i, quick_play: { singleplayer: false, multiplayer: false } } : i,
+    );
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    ipc.overrides.set("set_pinned_server_instance", (args: IpcArgs) => {
+      pinned = pinned.map((p) => (p.address === args.address ? { ...p, instance: args.instance as string | null } : p));
+      return pinned;
+    });
+  });
+
+  const joinButton = () => buttonByText("加入");
+  /** 正在退场的面板还在文档里，取未在退场的那一个。 */
+  const picker = () => {
+    const el = [...document.querySelectorAll<HTMLElement>('[role="dialog"]:not([data-exiting])')].find((d) => d.getAttribute("aria-label")?.startsWith("选择用来加入"));
+    return el === undefined ? null : el;
+  };
+  const radios = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>('[role="radio"]')];
+  const commandIndex = (cmd: string) => ipc.calls.findIndex((c) => c.cmd === cmd);
+
+  it("记住的实例可用：点「加入」直接以它启动并进服，不弹实例选择", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
+    await mount();
+    click(joinButton());
+    await flush();
+    expect(picker()).toBeNull();
+    const calls = callsOf(ipc, "launch_game");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].versionId).toBe("创造");
+    expect(calls[0].quickPlay).toEqual(SERVER);
+    expect(callsOf(ipc, "set_pinned_server_instance")).toHaveLength(0);
+  });
+
+  it("没记住：弹出锚在「加入」上的实例选择，只列能加入的实例（按上次游玩倒序），默认选中当前实例", async () => {
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(panel.getAttribute("aria-label")).toBe("选择用来加入「晨星」的实例");
+    expect(panel.textContent).toContain("用哪个实例加入");
+    const options = radios(panel);
+    const eligible = instances.filter((i) => i.status === "ready" && i.quick_play !== null && i.quick_play.multiplayer);
+    expect(options).toHaveLength(eligible.length);
+    expect(options.map((o) => o.textContent)).toEqual(["生存· 1.21.1 Fabric", "创造· 1.20.1", "红石· 1.19.2"]);
+    expect(options.some((o) => o.textContent?.includes("空岛"))).toBe(false);
+    expect(options.map((o) => o.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    const remember = panel.querySelector<HTMLElement>('[role="checkbox"]');
+    expect(remember?.getAttribute("aria-checked")).toBe("false");
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+  });
+
+  it("选定并勾选「记住这个选择」：先保存选择（一次，参数为地址与实例）再启动，之后菜单里出现「更换加入用的实例」", async () => {
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    click(radios(panel)[2]);
+    const remember = panel.querySelector<HTMLElement>('[role="checkbox"]');
+    if (remember === null) throw new Error("没有「记住这个选择」");
+    click(remember);
+    click(buttonByText("加入服务器", panel));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: "红石" }]);
+    expect(commandIndex("set_pinned_server_instance")).toBeLessThan(commandIndex("launch_game"));
+    const calls = callsOf(ipc, "launch_game");
+    expect(calls.map((a) => [a.versionId, a.quickPlay])).toEqual([["红石", SERVER]]);
+    expect(picker()).toBeNull();
+
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["复制地址play.example", "更换加入用的实例红石", "不再记住实例", "取消固定"]);
+  });
+
+  it("不勾选「记住」：不保存，直接以选定的实例启动", async () => {
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    click(radios(panel)[1]);
+    click(buttonByText("加入服务器", panel));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toHaveLength(0);
+    expect(callsOf(ipc, "launch_game").map((a) => [a.versionId, a.quickPlay])).toEqual([["创造", SERVER]]);
+  });
+
+  it("保存选择失败：报「无法保存服务器设置」加原因，并且不启动", async () => {
+    ipc.overrides.set("set_pinned_server_instance", () => {
+      throw new IpcError("config_write_failed", "配置写入失败");
+    });
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    const remember = panel.querySelector<HTMLElement>('[role="checkbox"]');
+    if (remember === null) throw new Error("没有「记住这个选择」");
+    click(remember);
+    click(buttonByText("加入服务器", panel));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toHaveLength(1);
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body])).toEqual([["无法保存服务器设置", "配置写入失败"]]);
+  });
+
+  it("记住的实例已经不在：按没记住处理，点「加入」弹实例选择", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "已删除" }];
+    await mount();
+    click(joinButton());
+    await flush();
+    expect(picker()).not.toBeNull();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+  });
+
+  it("记住的实例正在运行：「加入」aria-disabled 并写明原因，点了不启动；别的实例运行时照常走替换确认", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    const join = joinButton();
+    expect(join.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      join.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = join.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「加入」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toContain("「创造」正在运行");
+    click(join);
+    await flush();
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["创造"]);
+
+    // 换成记住生存：创造仍在运行，点「加入」弹替换确认，确认里带着这次的 quickPlay
+    pinned = [{ name: "晨星", address: "play.example", instance: "生存" }];
+    await act(async () => {
+      await launcher.actions.setPinnedServerInstance("play.example", "生存");
+    });
+    await flush();
+    click(joinButton());
+    await flush();
+    expect(launcher.state.launchPrompt).toEqual({ instanceId: "生存", occupantId: "创造", occupantPhase: "running", quickPlay: SERVER });
+  });
+
+  it("「不再记住实例」清掉绑定；「更换加入用的实例」打开实例选择且默认勾选记住", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "生存" }];
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    click(menuItem("更换加入用的实例"));
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(panel.querySelector('[role="checkbox"]')?.getAttribute("aria-checked")).toBe("true");
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await flush();
+
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    click(menuItem("不再记住实例"));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: null }]);
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["复制地址play.example", "取消固定"]);
+  });
+
+  it("只有一个能加入的实例：不给单选组，直接写明用它", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? i : { ...i, quick_play: { singleplayer: false, multiplayer: false } }));
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(radios(panel)).toHaveLength(0);
+    expect(panel.textContent).toContain("生存· 1.21.1 Fabric");
+    click(buttonByText("加入服务器", panel));
+    await flush();
+    expect(callsOf(ipc, "launch_game").map((a) => [a.versionId, a.quickPlay])).toEqual([["生存", SERVER]]);
+  });
+
+  it("七个以上能加入的实例：改用下拉选择，当前实例不在其中时默认最近玩过的", async () => {
+    instances = Array.from({ length: 8 }, (_, i) => instanceDto(`实例${i + 1}`, { last_played_at: NOW - (8 - i) * HOUR }));
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(radios(panel)).toHaveLength(0);
+    expect(panel.querySelector('[role="combobox"]')?.textContent).toContain("实例8");
+    click(buttonByText("加入服务器", panel));
+    await flush();
+    expect(callsOf(ipc, "launch_game").map((a) => [a.versionId, a.quickPlay])).toEqual([["实例8", SERVER]]);
+  });
+
+  it("没有能加入服务器的实例：实例选择换成紧凑空状态，不给复选框与主按钮", async () => {
+    instances = instances.map((i) => ({ ...i, quick_play: { singleplayer: false, multiplayer: false } }));
+    await mount();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(panel.textContent).toContain("没有能加入服务器的实例");
+    expect(panel.textContent).toContain("新建一个 1.6 以后的实例再来加入。");
+    expect(panel.querySelector('[role="checkbox"]')).toBeNull();
+    expect(radios(panel)).toHaveLength(0);
+    expect([...panel.querySelectorAll("button")].some((b) => b.textContent === "加入服务器")).toBe(false);
+  });
+});
+
 describe("主页：账户皮肤", () => {
   it("皮肤查询失败：照常画剪影立绘，不弹通知，原因写进控制台", async () => {
     const failure = new IpcError("io", "账户文件读不出来");

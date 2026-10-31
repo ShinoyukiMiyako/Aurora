@@ -1,5 +1,6 @@
-// 固定的服务器：把固定列表与状态查询的结果拼成行，以及「固定服务器」菜单该列什么。
+// 固定的服务器：把固定列表与状态查询的结果拼成行，「固定服务器」菜单该列什么，以及行上的「加入」用哪个实例。
 
+import type { InstanceSummary } from "../../domain/adapt";
 import { MENU_MAX_ACTIONS } from "../../ui/Menu";
 import type { KnownServerDto, PinnedServerDto, ServerStatusDto } from "../../state/queries/home";
 
@@ -40,6 +41,8 @@ export type ServerPopulation =
 export interface ServerRow {
   name: string;
   address: string;
+  /** 记住的「加入」用实例 id；没记住为 null。不保证它此刻还在实例列表里，见 joinPlan。 */
+  instance: string | null;
   versionName: string | null;
   motd: string | null;
   favicon: string | null;
@@ -84,13 +87,23 @@ export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonl
   return pinned.map((server) => {
     const status = byAddress.get(server.address);
     if (status === undefined) {
-      return { name: server.name, address: server.address, versionName: null, motd: null, favicon: null, signal: probe === "paused" ? paused : pending, population: { kind: "none" } };
+      return {
+        name: server.name,
+        address: server.address,
+        instance: server.instance,
+        versionName: null,
+        motd: null,
+        favicon: null,
+        signal: probe === "paused" ? paused : pending,
+        population: { kind: "none" },
+      };
     }
     // 结果不算数时也先判一遍：标为连通却没有延迟是契约破坏，不因为暂停或重测而放过
     const signal = signalOf(status);
     return {
       name: server.name,
       address: server.address,
+      instance: server.instance,
       versionName: status.version_name,
       motd: status.motd,
       favicon: status.favicon,
@@ -119,4 +132,58 @@ export interface PinMenuPlan {
 export function pinMenuPlan(candidates: readonly PinnedServerDto[]): PinMenuPlan {
   if (candidates.length <= MENU_MAX_ACTIONS) return { inline: [...candidates], overflow: null };
   return { inline: candidates.slice(0, MENU_MAX_ACTIONS - 1), overflow: candidates.length };
+}
+
+// ---------------------------------------------------------------- 加入服务器
+
+/** 能用来加入服务器的实例：就绪，且版本的启动参数支持直接加入服务器。 */
+export function canJoinWith(inst: Pick<InstanceSummary, "status" | "quickPlay">): boolean {
+  return inst.status === "ready" && inst.quickPlay !== null && inst.quickPlay.multiplayer;
+}
+
+/** 实例选择里列出的实例：只列能加入的，按上次游玩倒序；没玩过的排在后面，彼此保持实例列表的顺序。 */
+export function joinCandidates(instances: readonly InstanceSummary[]): InstanceSummary[] {
+  return instances
+    .filter(canJoinWith)
+    .map((inst, index) => ({ inst, index }))
+    .sort((a, b) => {
+      const x = a.inst.lastPlayedAt;
+      const y = b.inst.lastPlayedAt;
+      if (x !== y) return x === null ? 1 : y === null ? -1 : y - x;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.inst);
+}
+
+/** 实例选择默认选中谁：当前选中的实例在候选里就选它，否则第一项；没有候选为 null。 */
+export function defaultJoinChoice(candidates: readonly InstanceSummary[], selectedInstanceId: string | null): string | null {
+  if (selectedInstanceId !== null && candidates.some((i) => i.id === selectedInstanceId)) return selectedInstanceId;
+  const first = candidates[0];
+  return first === undefined ? null : first.id;
+}
+
+/** 占着游戏进程的那一局：实例 id 与它在加载还是运行。 */
+export interface BusySession {
+  instanceId: string;
+  phase: "loading" | "running";
+}
+
+export type JoinPlan =
+  /** 记住的实例可用：点「加入」直接以它启动并进服。 */
+  | { kind: "direct"; instanceId: string }
+  /** 记住的实例正在启动或运行：按钮带原因禁用。 */
+  | { kind: "busy"; instanceId: string; phase: BusySession["phase"] }
+  /** 没记住，或记住的实例已经不在、损坏、在安装、版本不支持：弹实例选择。 */
+  | { kind: "pick" };
+
+/**
+ * 行上的「加入」怎么走。记住的实例只有仍在实例列表里、就绪、版本支持加入服务器时才算数（被删除或换了游戏目录后
+ * 同名的未必是同一个），否则按没记住处理。别的实例在运行时照常直接启动，由启动拦截弹替换确认。
+ */
+export function joinPlan(remembered: string | null, instances: readonly InstanceSummary[], busy: BusySession | null): JoinPlan {
+  if (remembered === null) return { kind: "pick" };
+  const inst = instances.find((i) => i.id === remembered);
+  if (inst === undefined || !canJoinWith(inst)) return { kind: "pick" };
+  if (busy !== null && busy.instanceId === inst.id) return { kind: "busy", instanceId: inst.id, phase: busy.phase };
+  return { kind: "direct", instanceId: inst.id };
 }
