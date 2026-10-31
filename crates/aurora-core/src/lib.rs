@@ -24,42 +24,56 @@ pub mod appearance;
 pub mod art;
 pub mod auth;
 mod authlib;
+pub mod compat;
 pub mod config;
 pub mod crashdiag;
+pub mod deps;
 pub mod error;
 pub mod event;
 pub mod facade;
+pub mod history;
 pub mod install;
 pub mod instance_install;
 pub mod instances;
 pub mod java;
 pub mod launch;
+pub mod ledger;
 pub mod loaders;
+mod modfs;
 pub mod mods;
+pub mod modversions;
 pub mod playtime;
 pub mod search;
 pub mod session;
+pub mod updates;
 pub mod versions;
 mod workdir;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
+pub use compat::{Compatibility, InstalledCopy, InstanceMatch, MatchState};
 pub use config::{AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings};
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
+pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
+pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
     LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
     resolve_memory,
 };
-pub use mods::ModInstallOutcome;
+pub use ledger::{Ledger, LedgerEntry, LedgerStore};
+pub use modfs::is_mod_file_busy;
+pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
+pub use modversions::ProjectInfo;
 pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
 pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
 };
+pub use updates::UpdateCandidate;
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -83,8 +97,9 @@ pub use aurora_launch::{
     SystemMemory, analyze, detect_crash, game_line_level, probe_system_memory,
 };
 pub use aurora_modplatform::{
-    AggregateResult, InstalledMod, MetadataFormat, ModLoader, ModMetadata, Platform, PlatformError,
-    ResourceType, SearchHit, SearchQuery, SortField,
+    AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,
+    ModMetadata, ModVersionInfo, Platform, PlatformError, ReleaseChannel, ResourceType, SearchHit,
+    SearchQuery, SortField,
 };
 pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifest};
 

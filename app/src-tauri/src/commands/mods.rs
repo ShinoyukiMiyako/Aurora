@@ -1,19 +1,39 @@
-//! 实例内已装 Mod：列出与启停。
+//! 实例内的 Mod：列表、启停、移除、更新检查与更新；下载页的版本列表、落位矩阵与安装计划。
+//!
+//! 改动 mods 目录的命令（启停、移除、更新）在后端再守一道「游戏运行中不许改」：门面在动第一个文件前
+//! 探测占用，命中时这里报 [`MOD_FILE_BUSY`]，前端据此提示先关游戏，而不是把它当成普通 IO 故障。
 
-use aurora_core::InstalledMod;
-use tauri::State;
+use aurora_core::{
+    is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstanceMatch,
+    InstanceMod, ModLoader, ModVersionInfo, Platform, UpdateCandidate,
+};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::{json, Value};
+use tauri::{AppHandle, State};
 
 use crate::commands::CommandError;
+use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
+use crate::tasks::TaskRegistry;
 
-/// 列出指定实例已装 Mod（含禁用态与解析出的元数据）。扫盘与解 jar 在快照上进行。
-///
-/// [`InstalledMod`] 已 derive Serialize 且不含任何令牌，直接透传。
+/// 要改动的 Mod 文件正被占用（游戏运行中）。`detail.path` 为被占用的文件。
+pub const MOD_FILE_BUSY: &str = "mod_file_busy";
+
+/// 一次 Mod 更新的结果 DTO。
+#[derive(Debug, Serialize)]
+pub struct ModUpdateOutcomeDto {
+    pub file_name: String,
+    pub path: String,
+    pub platform: Platform,
+}
+
+/// 列出指定实例已装 Mod（含禁用态、jar 元数据，以及卷宗 join 出的来源与图标）。
 #[tauri::command]
 pub async fn list_mods(
     version_id: String,
     facade: State<'_, Facade>,
-) -> Result<Vec<InstalledMod>, CommandError> {
+) -> Result<Vec<InstanceMod>, CommandError> {
     let aurora = facade.snapshot().await;
     Ok(aurora.list_mods(&version_id).await?)
 }
@@ -26,9 +46,398 @@ pub async fn set_mod_enabled(
     enabled: bool,
     facade: State<'_, Facade>,
 ) -> Result<String, CommandError> {
+    set_mod_enabled_with(&facade, &version_id, &file_name, enabled).await
+}
+
+pub(crate) async fn set_mod_enabled_with(
+    facade: &Facade,
+    version_id: &str,
+    file_name: &str,
+    enabled: bool,
+) -> Result<String, CommandError> {
+    require_non_empty("file_name", file_name)?;
     let aurora = facade.snapshot().await;
     let path = aurora
-        .set_mod_enabled(&version_id, &file_name, enabled)
-        .await?;
+        .set_mod_enabled(version_id, file_name, enabled)
+        .await
+        .map_err(mods_error)?;
     Ok(path.display().to_string())
+}
+
+/// 从实例里移除一个 Mod 文件，并在变更历史里记一条移除事件。
+#[tauri::command]
+pub async fn remove_mod(
+    version_id: String,
+    file_name: String,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    remove_mod_with(&facade, &version_id, &file_name).await
+}
+
+pub(crate) async fn remove_mod_with(
+    facade: &Facade,
+    version_id: &str,
+    file_name: &str,
+) -> Result<(), CommandError> {
+    require_non_empty("file_name", file_name)?;
+    let aurora = facade.snapshot().await;
+    aurora
+        .remove_mod(version_id, file_name)
+        .await
+        .map_err(mods_error)
+}
+
+/// 检查该实例可更新的 Mod（无身份的文件先按哈希反查补身份）。
+#[tauri::command]
+pub async fn check_updates(
+    version_id: String,
+    facade: State<'_, Facade>,
+) -> Result<Vec<UpdateCandidate>, CommandError> {
+    let aurora = facade.snapshot().await;
+    Ok(aurora.check_updates(&version_id).await?)
+}
+
+/// 把实例里的某个 Mod 换成同工程的 `mod_version_id`。长任务：进度经 core-event 推送并带 `task_id`，
+/// 可经 `cancel_task(taskId)` 取消（只能打断下载阶段，落位一旦开始就走完）。旧文件改名为 `.old`
+/// 保留，变更历史里可回滚。
+#[tauri::command]
+pub async fn update_mod(
+    app: AppHandle,
+    task_id: String,
+    version_id: String,
+    file_name: String,
+    mod_version_id: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+) -> Result<ModUpdateOutcomeDto, CommandError> {
+    // 参数在登记任务、起事件转发之前校验：非法调用不该占用一个任务 id。
+    validate_update_args(&file_name, &mod_version_id)?;
+    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let outcome = update_mod_with(
+        &facade,
+        &tasks,
+        &task_id,
+        &version_id,
+        &file_name,
+        &mod_version_id,
+        Some(events.sink()),
+    )
+    .await;
+    events.finish().await;
+    outcome
+}
+
+fn validate_update_args(file_name: &str, mod_version_id: &str) -> Result<(), CommandError> {
+    require_non_empty("file_name", file_name)?;
+    require_non_empty("mod_version_id", mod_version_id)
+}
+
+pub(crate) async fn update_mod_with(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    task_id: &str,
+    version_id: &str,
+    file_name: &str,
+    mod_version_id: &str,
+    events: Option<&EventSink>,
+) -> Result<ModUpdateOutcomeDto, CommandError> {
+    validate_update_args(file_name, mod_version_id)?;
+    let task = tasks.register(task_id)?;
+    let aurora: Aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let outcome = task
+        .run(async {
+            aurora
+                .update_mod(version_id, file_name, mod_version_id, events)
+                .await
+                .map_err(mods_error)
+        })
+        .await?;
+    Ok(ModUpdateOutcomeDto {
+        file_name: outcome.file_name,
+        path: outcome.path.display().to_string(),
+        platform: outcome.platform,
+    })
+}
+
+/// 列出某工程的可用版本（按发布时间倒序）。`game_versions` / `loaders` 为空表示该维度不过滤。
+#[tauri::command]
+pub async fn list_mod_versions(
+    platform: String,
+    project_id: String,
+    game_versions: Vec<String>,
+    loaders: Vec<String>,
+    facade: State<'_, Facade>,
+) -> Result<Vec<ModVersionInfo>, CommandError> {
+    let platform = parse_platform(&platform)?;
+    require_non_empty("project_id", &project_id)?;
+    let loaders = loaders
+        .iter()
+        .map(|name| parse_loader(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let aurora = facade.snapshot().await;
+    Ok(aurora
+        .list_mod_versions(platform, &project_id, &game_versions, &loaders)
+        .await?)
+}
+
+/// 某工程对全部已装实例的落位矩阵（兼容 / 可能可行 / 已安装 / 不兼容）。`mod_version_id` 给出时整个
+/// 矩阵只按这一个版本判定。
+#[tauri::command]
+pub async fn match_instances(
+    platform: String,
+    project_id: String,
+    mod_version_id: Option<String>,
+    facade: State<'_, Facade>,
+) -> Result<Vec<InstanceMatch>, CommandError> {
+    let platform = parse_platform(&platform)?;
+    require_non_empty("project_id", &project_id)?;
+    if let Some(id) = &mod_version_id {
+        require_non_empty("mod_version_id", id)?;
+    }
+    let aurora = facade.snapshot().await;
+    Ok(aurora
+        .match_instances(platform, &project_id, mod_version_id.as_deref())
+        .await?)
+}
+
+/// 安装前的计划：主 Mod + 自动带上的必需前置（已装的标为已满足、不再下载），以及跳过项的说明。
+#[tauri::command]
+pub async fn plan_install(
+    version_id: String,
+    platform: String,
+    project_id: String,
+    mod_version_id: String,
+    facade: State<'_, Facade>,
+) -> Result<InstallPlan, CommandError> {
+    let platform = parse_platform(&platform)?;
+    require_non_empty("project_id", &project_id)?;
+    require_non_empty("mod_version_id", &mod_version_id)?;
+    let aurora = facade.snapshot().await;
+    Ok(aurora
+        .plan_install(&version_id, platform, &project_id, &mod_version_id)
+        .await?)
+}
+
+/// 门面错误 -> 命令错误；文件占用单独给 [`MOD_FILE_BUSY`]，正文取门面给出的那句中文原因。
+pub(crate) fn mods_error(err: CoreError) -> CommandError {
+    if is_mod_file_busy(&err) {
+        if let CoreError::Base(BaseError::Io { path, source }) = &err {
+            tracing::warn!(path = %path.display(), "Mod 文件被占用，拒绝改动");
+            return CommandError::new(MOD_FILE_BUSY, source.to_string())
+                .with_detail(json!({ "path": path.display().to_string() }));
+        }
+    }
+    err.into()
+}
+
+fn require_non_empty(name: &str, value: &str) -> Result<(), CommandError> {
+    if value.trim().is_empty() {
+        return Err(CommandError::invalid_argument(format!("{name} 不能为空")));
+    }
+    Ok(())
+}
+
+/// 按核心类型的 serde 名解析：前端回传的就是出参里的序列化名，两边同一张表，不另写映射。
+fn parse_serde_name<T: DeserializeOwned>(name: &str, what: &str) -> Result<T, CommandError> {
+    serde_json::from_value(Value::String(name.to_owned()))
+        .map_err(|_| CommandError::invalid_argument(format!("未知{what} {name}")))
+}
+
+fn parse_platform(name: &str) -> Result<Platform, CommandError> {
+    parse_serde_name(name, "资源平台")
+}
+
+fn parse_loader(name: &str) -> Result<ModLoader, CommandError> {
+    parse_serde_name(name, "加载器")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::error::code;
+    use aurora_core::{AuroraConfig, HistoryEvent, IsolationPolicy, Ledger, LedgerEntry};
+    use std::path::{Path, PathBuf};
+
+    const VERSION_ID: &str = "1.21";
+
+    /// 一个全量隔离、已装 1.21 的门面；返回门面与该实例的 mods 目录。
+    async fn facade_with_instance(root: &Path) -> (Facade, PathBuf) {
+        let mc = root.join(".minecraft");
+        let dir = mc.join("versions").join(VERSION_ID);
+        tokio::fs::create_dir_all(dir.join("mods")).await.unwrap();
+        tokio::fs::write(
+            dir.join(format!("{VERSION_ID}.json")),
+            format!(r#"{{"id":"{VERSION_ID}","type":"release","mainClass":"m"}}"#),
+        )
+        .await
+        .unwrap();
+        let mut aurora = Aurora::open(
+            AuroraConfig::default(),
+            root.to_path_buf(),
+            root.join("config.json"),
+        )
+        .unwrap();
+        aurora.set_game_dir(&mc);
+        aurora.set_isolation_policy(IsolationPolicy::All);
+        (Facade::new(aurora), dir.join("mods"))
+    }
+
+    #[test]
+    fn parsers_accept_every_serialized_name_and_reject_others() {
+        for platform in [Platform::Modrinth, Platform::CurseForge] {
+            let name = serde_json::to_value(platform).unwrap();
+            assert_eq!(parse_platform(name.as_str().unwrap()).unwrap(), platform);
+        }
+        for loader in [
+            ModLoader::Fabric,
+            ModLoader::Quilt,
+            ModLoader::Forge,
+            ModLoader::NeoForge,
+            ModLoader::LiteLoader,
+        ] {
+            let name = serde_json::to_value(loader).unwrap();
+            assert_eq!(parse_loader(name.as_str().unwrap()).unwrap(), loader);
+        }
+        let err = parse_platform("Modrinth").unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert_eq!(err.message, "未知资源平台 Modrinth");
+        assert_eq!(parse_loader("").unwrap_err().code, code::INVALID_ARGUMENT);
+    }
+
+    /// 移除走完整链路：文件删掉、卷宗条目摘掉、历史里多一条移除事件。
+    #[tokio::test]
+    async fn remove_mod_deletes_file_and_writes_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("sodium.jar"), b"jar")
+            .await
+            .unwrap();
+        let aurora = facade.snapshot().await;
+        let mut ledger = Ledger::default();
+        ledger.upsert(LedgerEntry {
+            file_name: "sodium.jar".to_owned(),
+            platform: Platform::Modrinth,
+            project_id: "AANobbMI".to_owned(),
+            version_id: "v1".to_owned(),
+            version_number: Some("0.5.3".to_owned()),
+            title: Some("Sodium".to_owned()),
+            icon_url: None,
+            sha1: None,
+            installed_at: 1_700_000_000,
+            installed_as_dependency_of: None,
+        });
+        aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
+
+        remove_mod_with(&facade, VERSION_ID, "sodium.jar")
+            .await
+            .unwrap();
+
+        assert!(!mods_dir.join("sodium.jar").exists());
+        assert!(aurora
+            .ledger_store(VERSION_ID)
+            .load()
+            .await
+            .unwrap()
+            .entries
+            .is_empty());
+        let events = aurora.history(VERSION_ID).await.unwrap().events;
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            HistoryEvent::Remove { files, .. } => assert_eq!(files, &vec!["sodium.jar".to_owned()]),
+            other => panic!("期望移除事件，得到 {other:?}"),
+        }
+        // 门面锁在命令返回后已释放。
+        assert!(facade.is_unlocked());
+    }
+
+    /// 空参数在碰门面之前就以 invalid_argument 拒绝；更新命令不登记任务。
+    #[tokio::test]
+    async fn invalid_arguments_are_rejected_before_registering_a_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, _) = facade_with_instance(tmp.path()).await;
+        let tasks = TaskRegistry::default();
+
+        let err = update_mod_with(&facade, &tasks, "t-1", VERSION_ID, "a.jar", " ", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert_eq!(err.message, "mod_version_id 不能为空");
+        assert!(!tasks.is_running("t-1"));
+
+        let err = remove_mod_with(&facade, VERSION_ID, "").await.unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert_eq!(err.message, "file_name 不能为空");
+    }
+
+    /// 来源不明的文件不能更新：门面拒绝如实上抛，任务随命令结束注销。
+    #[tokio::test]
+    async fn update_of_unidentified_file_fails_and_unregisters_the_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("manual.jar"), b"x")
+            .await
+            .unwrap();
+        let tasks = TaskRegistry::default();
+
+        let err = update_mod_with(&facade, &tasks, "t-2", VERSION_ID, "manual.jar", "v2", None)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::IO);
+        assert!(
+            err.detail.as_ref().unwrap()["causes"][0]
+                .as_str()
+                .unwrap()
+                .contains("没有平台来源记录"),
+            "原因链里应带门面给出的拒绝原因：{:?}",
+            err.detail
+        );
+        assert!(!tasks.is_running("t-2"));
+    }
+
+    /// 后端第二道防线：jar 被以不许删除的方式打开着（游戏在跑）时，移除与启停报 mod_file_busy，
+    /// 文件原样不动。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn busy_mod_file_maps_to_mod_file_busy() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        let jar = mods_dir.join("sodium.jar");
+        tokio::fs::write(&jar, b"jar").await.unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&jar)
+            .unwrap();
+
+        let err = remove_mod_with(&facade, VERSION_ID, "sodium.jar")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, MOD_FILE_BUSY);
+        assert!(err.message.contains("sodium.jar"), "正文：{}", err.message);
+        assert_eq!(
+            err.detail.as_ref().unwrap()["path"],
+            jar.display().to_string()
+        );
+        let err = set_mod_enabled_with(&facade, VERSION_ID, "sodium.jar", false)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, MOD_FILE_BUSY);
+        assert!(jar.exists());
+
+        drop(held);
+        remove_mod_with(&facade, VERSION_ID, "sodium.jar")
+            .await
+            .unwrap();
+        assert!(!jar.exists());
+    }
+
+    #[test]
+    fn non_busy_errors_keep_their_regular_code() {
+        let err = mods_error(CoreError::VersionNotInstalled {
+            id: "ghost".to_owned(),
+        });
+        assert_eq!(err.code, code::VERSION_NOT_INSTALLED);
+    }
 }

@@ -13,6 +13,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod discover;
 pub mod error;
+pub mod history;
 pub mod instances;
 pub mod java;
 pub mod launch;
