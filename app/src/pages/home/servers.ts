@@ -27,7 +27,9 @@ export type ServerSignal =
   /** 还没有这台的状态（首次测速中）。 */
   | { kind: "pending" }
   | { kind: "online"; latencyMs: number; bars: 1 | 2 | 3 | 4; quality: SignalQuality }
-  | { kind: "unreachable" };
+  | { kind: "unreachable" }
+  /** 本机离线，测速暂停：这时连不上说明不了服务器宕机，不下结论。 */
+  | { kind: "paused" };
 
 export type ServerPopulation =
   | { kind: "online"; online: number; max: number }
@@ -63,21 +65,27 @@ function populationOf(status: ServerStatusDto): ServerPopulation {
 /**
  * 固定列表与状态按地址对位（状态查询原样回传查询用的地址）。固定列表刚变、状态还没跟上时，
  * 新加的那台没有状态，显示测速中。
+ *
+ * 后端单台测速分不出本机断网与服务器宕机，所以用全应用的联网状态来分：本机离线（online 为 false）时
+ * 每台的信号都是暂停，不把每台都标成连不上；版本、MOTD、在线人数与上次在线照旧取上次的结果。
  */
-export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonly ServerStatusDto[] | undefined): ServerRow[] {
+export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonly ServerStatusDto[] | undefined, online: boolean): ServerRow[] {
   const byAddress = new Map((statuses === undefined ? [] : statuses).map((s) => [s.address, s]));
+  const paused: ServerSignal = { kind: "paused" };
   return pinned.map((server) => {
     const status = byAddress.get(server.address);
     if (status === undefined) {
-      return { name: server.name, address: server.address, versionName: null, motd: null, favicon: null, signal: { kind: "pending" }, population: { kind: "none" } };
+      return { name: server.name, address: server.address, versionName: null, motd: null, favicon: null, signal: online ? { kind: "pending" } : paused, population: { kind: "none" } };
     }
+    // 离线时也先判一遍：标为连通却没有延迟是契约破坏，不因为暂停而放过
+    const signal = signalOf(status);
     return {
       name: server.name,
       address: server.address,
       versionName: status.version_name,
       motd: status.motd,
       favicon: status.favicon,
-      signal: signalOf(status),
+      signal: online ? signal : paused,
       population: populationOf(status),
     };
   });

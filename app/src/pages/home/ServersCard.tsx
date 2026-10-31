@@ -1,7 +1,8 @@
 // 固定的服务器：在线人数、版本与延迟信号。右上角的加号从游戏的多人服务器列表里挑服务器固定；
 // 主页可见期间每 60 秒重测一次（后端单台限时 3 秒、结果缓存 60 秒）。
-// 断网时不再重测（单台测速分不出是本机断网还是服务器宕机，重测只会把每台都刷成连不上），
-// 列表保留上一次的结果、副标题注明离线；恢复联网立即重测一次。
+// 单台测速分不出是本机断网还是服务器宕机，后端也不另给字段，由全应用的联网状态来分：
+// 本机离线时整张卡在副标题注明「本机离线」并暂停测速，每台的信号都不下结论（不标连不上），
+// 在线人数与上次在线照旧取上一次的结果；恢复联网立即重测一次。
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -102,7 +103,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 
   const count = pinned.status === "ready" ? pinned.data.length : 0;
   const countLine = count > 0 ? HOME_COPY.serversSubtitle(count) : HOME_COPY.serversSubtitleEmpty;
-  const subtitle = pinned.status !== "ready" ? undefined : count > 0 && !online ? HOME_COPY.withOffline(countLine) : countLine;
+  const subtitle = pinned.status !== "ready" ? undefined : count > 0 && !online ? HOME_COPY.serversOffline(countLine) : countLine;
 
   const body = () => {
     if (pinned.status === "loading" || gate.view === "skeleton") {
@@ -134,7 +135,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
       );
     }
     if (pinned.data.length === 0) return <EmptyState scene="compass" compact title={HOME_COPY.serversEmptyTitle} body={HOME_COPY.serversEmptyBody} />;
-    const rows = serverRows(pinned.data, status.data);
+    const rows = serverRows(pinned.data, status.data, online);
     return (
       <>
         <ul className={s.serverList}>
@@ -315,9 +316,12 @@ function ServerRowView({ row, onUnpin }: { row: ServerRow; onUnpin: () => void }
             <span key={i} className={s.signalBar} data-level={i + 1} data-on={i < lit || undefined} />
           ))}
         </span>
-        <span className={s.ping} data-state={signal.kind}>
-          {signal.kind === "online" ? HOME_COPY.latency(signal.latencyMs) : signal.kind === "unreachable" ? HOME_COPY.unreachable : HOME_COPY.pinging}
-        </span>
+        {/* 暂停测速时不逐台写字：副标题已经整体说明本机离线 */}
+        {signal.kind !== "paused" && (
+          <span className={s.ping} data-state={signal.kind}>
+            {signal.kind === "online" ? HOME_COPY.latency(signal.latencyMs) : signal.kind === "unreachable" ? HOME_COPY.unreachable : HOME_COPY.pinging}
+          </span>
+        )}
       </span>
       <MoreMenu
         size="sm"

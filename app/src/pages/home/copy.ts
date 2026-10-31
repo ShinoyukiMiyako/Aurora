@@ -105,6 +105,8 @@ export const HOME_COPY = {
   serversTitle: "固定的服务器",
   serversSubtitle: (n: number) => `${n} 个 · 在线人数与延迟`,
   serversSubtitleEmpty: "把常去的服务器放这里",
+  /** 本机离线：说清是本机的问题，不是服务器都宕机了。 */
+  serversOffline: (subtitle: string) => `${subtitle} · 本机离线`,
   pinServer: "固定服务器",
   allPinned: "所有服务器都已固定",
   pickAll: (n: number) => `全部 ${n} 台服务器…`,

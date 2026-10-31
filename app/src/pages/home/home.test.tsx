@@ -631,13 +631,27 @@ describe("主页：固定的服务器", () => {
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
   });
 
-  it("断网：保留上次的测速结果并注明离线中，期间不重测；恢复联网立即重测一次", async () => {
+  // 单台测速分不出本机断网与服务器宕机：本机离线时整张卡说明本机离线，不把每台都标成连不上
+  it("断网：整卡注明本机离线并暂停测速，每台都不下连通结论，在线人数取上次的结果；恢复联网立即重测一次", async () => {
+    pinned = [
+      { name: "晨星", address: "play.example" },
+      { name: "本地", address: "localhost" },
+    ];
     await mount();
-    const before = callsOf(ipc, "ping_servers").length;
-    setOnline(false);
-    expect(text()).toContain("1 个 · 在线人数与延迟 · 离线中");
-    expect(text()).toContain("127 / 500 在线");
+    const signals = () => [...document.querySelectorAll<HTMLElement>("[data-quality], [data-state]")].filter((el) => el.className.includes("signal")).map((el) => el.dataset.state);
     expect(text()).toContain("38 ms");
+    expect(text()).toContain("连不上");
+    expect(signals()).toEqual(["online", "unreachable"]);
+    const before = callsOf(ipc, "ping_servers").length;
+
+    setOnline(false);
+    expect(text()).toContain("2 个 · 在线人数与延迟 · 本机离线");
+    expect(text()).not.toContain("连不上");
+    expect(text()).not.toContain("38 ms");
+    expect(signals()).toEqual(["paused", "paused"]);
+    expect(document.querySelectorAll("[data-on]")).toHaveLength(0);
+    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("上次 2 小时前在线 1.2 万");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3 * 60_000);
     });
@@ -646,8 +660,11 @@ describe("主页：固定的服务器", () => {
     setOnline(true);
     await flush();
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
-    expect(text()).toContain("1 个 · 在线人数与延迟");
-    expect(text()).not.toContain("离线中");
+    expect(text()).toContain("2 个 · 在线人数与延迟");
+    expect(text()).not.toContain("本机离线");
+    expect(text()).toContain("38 ms");
+    expect(text()).toContain("连不上");
+    expect(signals()).toEqual(["online", "unreachable"]);
     // 周期重测接着恢复
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
