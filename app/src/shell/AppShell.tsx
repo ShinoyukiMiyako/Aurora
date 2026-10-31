@@ -104,7 +104,14 @@ export function AppShell({ pages, flows }: AppShellProps) {
           <div className={styles.backdrop} aria-hidden="true">
             <PanoramaBackdrop enabled={appearance.panorama} />
           </div>
-          {onboarding !== null ? <OnboardingFrame Flow={onboarding} /> : <MainFrame pages={pages} bindScroll={bindScroll} />}
+          {/* 向导收尾后先播完它自己的退场，再换成主界面：两者都占满整个网格，不能叠着同时出现 */}
+          <AnimatePresence mode="wait">
+            {onboarding !== null ? (
+              <OnboardingFrame key="onboarding" Flow={onboarding} />
+            ) : (
+              <MainFrame key="main" pages={pages} bindScroll={bindScroll} />
+            )}
+          </AnimatePresence>
           <Toasts />
           <LoginMount Flow={flows.login} />
           <CreateInstanceMount Flow={flows.createInstance} />
