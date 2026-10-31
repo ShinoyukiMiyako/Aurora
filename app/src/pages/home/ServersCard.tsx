@@ -57,14 +57,12 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const known = useKnownServers();
   const online = useOnline();
   const gate = useLoadingGate(pinned.status === "loading");
-  const [pickerOpen, setPickerOpen] = useState(false);
   // 挑选弹窗打开过才挂上，之后保持挂载好播完关闭的退场。从没打开过时不挂：关着的弹窗挂在页面里，
-  // 会让外层 AnimatePresence 的退场一直等不到结束（首次启动时外壳从主界面切到向导就卡在这一步）
-  const [pickerMounted, setPickerMounted] = useState(false);
-  const openPicker = () => {
-    setPickerMounted(true);
-    setPickerOpen(true);
-  };
+  // 会让外层 AnimatePresence 的退场一直等不到结束（首次启动时外壳从主界面切到向导就卡在这一步）。
+  // 每次打开换一个 session，弹窗里「刚点过」的记录随之清空
+  const [picker, setPicker] = useState<{ session: number; open: boolean } | null>(null);
+  const openPicker = () => setPicker((p) => ({ session: p === null ? 1 : p.session + 1, open: true }));
+  const closePicker = () => setPicker((p) => (p === null ? p : { ...p, open: false }));
   useReportOnce(known.status === "error" ? known.error : null, HOME_COPY.knownError);
 
   const reloadStatus = status.reload;
@@ -85,7 +83,8 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
     if (reconnected && hasPinned) reloadStatus();
   }, [online, hasPinned, reloadStatus]);
 
-  const toggle = (server: PinnedServerDto) => void run(() => actions.togglePinServer(server), ACTION_ERROR.servers);
+  const pin = async (server: PinnedServerDto) => (await run(() => actions.togglePinServer(server), ACTION_ERROR.servers)).ok;
+  const toggle = (server: PinnedServerDto) => void pin(server);
 
   const addItems = (): MenuEntry[] => {
     if (known.status === "loading") return [{ label: HOME_COPY.knownLoading, disabled: true, onSelect: inert }];
@@ -180,7 +179,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
         actions={<MenuButton items={addItems()} placement="bottom-end" trigger={(props) => <IconButton {...props} icon="plus" variant="secondary" size="sm" label={HOME_COPY.pinServer} />} />}
       />
       {body()}
-      {pickerMounted && <ServerPicker open={pickerOpen} known={known} onPin={toggle} onClose={() => setPickerOpen(false)} />}
+      {picker !== null && <ServerPicker key={picker.session} open={picker.open} known={known} onPin={pin} onClose={closePicker} />}
     </Card>
   );
 }
@@ -188,19 +187,35 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 interface ServerPickerProps {
   open: boolean;
   known: ResourceResult<KnownServerDto[]>;
-  onPin: (server: PinnedServerDto) => void;
+  /** 固定成功为 true；失败已经报告过，为 false。 */
+  onPin: (server: PinnedServerDto) => Promise<boolean>;
   onClose: () => void;
 }
 
 /** 加号菜单放不下时的完整挑选：固定一台就从列表里消失，挑完了说明一句，不自动关闭（常常一次固定好几台）。 */
 function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
+  // 点过的立即从列表里拿掉，不等多人列表重读：固定是「切换」，同一行连点两下会先固定再取消。
+  // 固定失败（已经报告过）再放回来，可以重试
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set());
+  const pick = (server: PinnedServerDto) => {
+    setPicked((prev) => new Set(prev).add(server.address));
+    void onPin(server).then((ok) => {
+      if (ok) return;
+      setPicked((prev) => {
+        const next = new Set(prev);
+        next.delete(server.address);
+        return next;
+      });
+    });
+  };
+
   const body = () => {
     // 固定之后多人列表会重读；重读期间手里的旧列表照常可用，只有一份都没有时才说明原因
     if (known.data === undefined) {
       if (known.status === "error") return <EmptyState scene="error" compact title={HOME_COPY.knownError} body={describeError(known.error)} />;
       return <EmptyState icon="server" compact title={HOME_COPY.knownLoading} />;
     }
-    const candidates = pinCandidates(known.data);
+    const candidates = pinCandidates(known.data).filter((server) => !picked.has(server.address));
     if (candidates.length === 0) return <EmptyState icon="check-circle" compact title={HOME_COPY.allPinned} />;
     return (
       <List>
@@ -211,7 +226,7 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
             title={server.name}
             meta={server.address}
             ariaLabel={HOME_COPY.pickerPin(server.name)}
-            onClick={() => onPin(server)}
+            onClick={() => pick(server)}
           />
         ))}
       </List>

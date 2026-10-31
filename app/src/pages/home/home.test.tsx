@@ -515,6 +515,44 @@ describe("主页：固定的服务器", () => {
     expect(menuItems().at(-1)?.textContent).toBe("全部 11 台服务器…");
   });
 
+  it("挑选弹窗：同一行连点两下只固定一次；固定失败报错后这一行回到列表里，可以再点", async () => {
+    const many: KnownServerDto[] = Array.from({ length: 12 }, (_, i) => ({ name: `服${i + 1}`, address: `s${i + 1}.example`, pinned: false }));
+    ipc.overrides.set("list_known_servers", () => many.map((k) => ({ ...k, pinned: pinned.some((p) => p.address === k.address) })));
+    let failNext = false;
+    ipc.overrides.set("set_pinned_servers", (args: IpcArgs) => {
+      if (failNext) {
+        failNext = false;
+        throw new IpcError("io", "servers.dat 写不进去");
+      }
+      pinned = args.servers as PinnedServerDto[];
+      return pinned;
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    await openMenu(buttonByLabel("固定服务器"));
+    click(menuItem("全部 12 台服务器"));
+    await flush();
+    const pickRow = (name: string) => (dialog() as HTMLElement).querySelector<HTMLButtonElement>(`button[aria-label="固定 ${name}"]`);
+
+    const row = pickRow("服3") as HTMLButtonElement;
+    click(row);
+    click(row);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_servers")).toHaveLength(1);
+    expect(pinned.map((p) => p.address)).toEqual(["play.example", "s3.example"]);
+    expect(pickRow("服3")).toBeNull();
+
+    failNext = true;
+    click(pickRow("服5") as HTMLButtonElement);
+    expect(pickRow("服5")).toBeNull();
+    await flush();
+    expect(launcher.state.toasts.map((t) => [t.tone, t.body])).toEqual([["error", "servers.dat 写不进去"]]);
+    expect(pickRow("服5")).not.toBeNull();
+    click(pickRow("服5") as HTMLButtonElement);
+    await flush();
+    expect(pinned.map((p) => p.address)).toEqual(["play.example", "s3.example", "s5.example"]);
+  });
+
   it("复制地址：写剪贴板并原位显示「已复制」，2 秒后复原，不弹通知", async () => {
     await mount();
     await openMenu(buttonByLabel("晨星 的更多操作"));
