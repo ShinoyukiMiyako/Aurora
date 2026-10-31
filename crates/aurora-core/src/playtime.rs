@@ -19,7 +19,7 @@ use chrono::{Days, Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::folders::same_path;
 
@@ -28,19 +28,34 @@ pub const PLAYTIME_FILE: &str = "playtime.json";
 /// 文件格式版本；结构不兼容地变化时递增，认不得的版本读出即报错而不是被误读。
 const PLAYTIME_FORMAT: u32 = 2;
 /// 只按实例 id 记、不分游戏目录的旧版本。读到时整份归到当时的当前游戏目录，并当场改写成现行版本：
-/// 拖到下次写入才改写的话，中间换了游戏目录，旧记录就会归错地方。
+/// 拖到下次写入才改写的话，中间换了游戏目录，旧记录就会归错地方。当场改写不成时，归属记在
+/// [`PENDING`] 里，之后的读写都按它迁移。
 const LEGACY_FORMAT: u32 = 1;
 /// 每日记录保留的天数（含当天）；累计时长与上次游玩不受影响。
 pub const RETAIN_DAYS: u64 = 400;
 const MS_PER_MINUTE: u64 = 60_000;
 
-/// 文件锁，锁里放着每个记录文件没能落盘的改名与删除。
+/// 文件锁，锁里放着每个记录文件没能落盘的改动。
 ///
 /// 多个实例可能同时退出，读改写必须串行，否则后写的那次会覆盖先写的那一局；读也要排队：读到旧版本时
 /// 当场改写，有待补的改动时一并补上落盘。之后对同一个文件的任何一次读写都先补上这些改动，补上之前读到
 /// 的记录也已是改过的样子。只在进程内：启动器在补上之前退出，这些改动就丢了，旧名下的记录不再对应
 /// 任何实例。
-static PENDING: Mutex<BTreeMap<PathBuf, Vec<BookChange>>> = Mutex::const_new(BTreeMap::new());
+static PENDING: Mutex<BTreeMap<PathBuf, Pending>> = Mutex::const_new(BTreeMap::new());
+
+/// 一个记录文件还没落盘的改动。
+#[derive(Debug, Default)]
+struct Pending {
+    /// 旧版本文件已经读出、改写没能落盘时它的记录归属的游戏目录。
+    legacy_owner: Option<PathBuf>,
+    changes: Vec<BookChange>,
+}
+
+impl Pending {
+    fn is_empty(&self) -> bool {
+        self.legacy_owner.is_none() && self.changes.is_empty()
+    }
+}
 
 /// 改名、删除对一个游戏目录记录的改动。记成数据而不是直接改，落盘失败时才能留到下一次补上。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,7 +473,11 @@ async fn save(path: &Path, library: PlayLibrary) -> Result<()> {
 
 /// 在锁里读出记录、先补上待补的改动与这次的 `change`，再交给 `work`；有任何变化或读到的是旧版本时
 /// 落盘。没有变化时不落盘：没玩过的实例改名、删除不会凭空建出文件。读或写失败时，待补的改动连同这次的
-/// `change` 原样留着，等下一次。
+/// `change` 原样留着，等下一次；读到旧版本却没能改写时，记下这次把它归到的游戏目录。
+///
+/// 只读的调用（不带 `change`，`work` 也没改记录）读出来了就交出结果，落盘失败只记日志：要落的是之前已经
+/// 报过错的改动或格式迁移，它们留着等下一次。让读也跟着失败的话，文件替换不了的那段时间里实例列表与游玩
+/// 统计全都打不开，而读到的记录本身没有问题。
 async fn with_library<T>(
     data_dir: &Path,
     game_dir: &Path,
@@ -468,17 +487,65 @@ async fn with_library<T>(
     let path = playtime_path(data_dir);
     let mut pending = PENDING.lock().await;
     let mut queued = pending.remove(&path).unwrap_or_default();
-    queued.extend(change);
-    let outcome = read_modify_write(&path, game_dir, &queued, work).await;
-    if outcome.is_err() && !queued.is_empty() {
+    let reading = change.is_none();
+    queued.changes.extend(change);
+    let owner = queued
+        .legacy_owner
+        .clone()
+        .unwrap_or_else(|| game_dir.to_path_buf());
+    let outcome = match read_modify_write(&path, &owner, &queued.changes, work).await {
+        Ok(Written::Saved(value)) => return Ok(value),
+        Ok(Written::Unsaved {
+            value,
+            migrated,
+            changed,
+            error,
+        }) => {
+            if migrated {
+                tracing::warn!(
+                    path = %path.display(),
+                    game_dir = %owner.display(),
+                    "旧版本游玩记录没能改写成现行版本，记下它归到的游戏目录"
+                );
+                queued.legacy_owner = Some(owner);
+            }
+            if reading && !changed {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "游玩记录已读出，待补的改动没能落盘，留到下一次"
+                );
+                Ok(value)
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    };
+    if !queued.changes.is_empty() {
         tracing::warn!(
             path = %path.display(),
-            pending = queued.len(),
+            pending = queued.changes.len(),
             "游玩记录的改名、删除没能落盘，记下待补"
         );
+    }
+    if !queued.is_empty() {
         pending.insert(path, queued);
     }
     outcome
+}
+
+/// 读出来之后的结局；读本身失败走 `Err`。
+enum Written<T> {
+    /// 要落盘的都落了，或者没有要落的。
+    Saved(T),
+    /// 读出并改好了，落盘失败。`migrated` 为读到的是旧版本，`changed` 为 `work` 改了记录。
+    Unsaved {
+        value: T,
+        migrated: bool,
+        changed: bool,
+        error: CoreError,
+    },
 }
 
 async fn read_modify_write<T>(
@@ -486,17 +553,25 @@ async fn read_modify_write<T>(
     game_dir: &Path,
     queued: &[BookChange],
     work: impl FnOnce(&mut PlayLibrary) -> (T, bool),
-) -> Result<T> {
+) -> Result<Written<T>> {
     let (mut library, migrated) = load(path, game_dir).await?;
     let mut dirty = migrated;
     for change in queued {
         dirty |= library.apply(change);
     }
     let (value, changed) = work(&mut library);
-    if dirty || changed {
-        save(path, library).await?;
+    if !(dirty || changed) {
+        return Ok(Written::Saved(value));
     }
-    Ok(value)
+    Ok(match save(path, library).await {
+        Ok(()) => Written::Saved(value),
+        Err(error) => Written::Unsaved {
+            value,
+            migrated,
+            changed,
+            error,
+        },
+    })
 }
 
 /// 记一局游玩：`started_at` 是进程起来的时刻，`ended_at` 是退出的时刻（Unix 毫秒）。
@@ -1165,14 +1240,24 @@ mod tests {
         assert_eq!(summaries["新名"].playtime_min, 120);
     }
 
-    /// 读得出、写不进（别的程序打开着文件且不许替换）：改名报错；写不进期间读到的记录已是改名后的样子，
-    /// 读也照实报落盘失败；放开后下一次写入一并落盘。
+    /// 别的程序以只许读的共享方式打开着文件：读得出、替换不了。
     #[cfg(windows)]
-    #[tokio::test]
-    async fn rename_that_cannot_be_saved_is_saved_with_the_next_write() {
+    fn hold_read_only(path: &Path) -> std::fs::File {
         use std::os::windows::fs::OpenOptionsExt;
 
         const FILE_SHARE_READ: u32 = 1;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(path)
+            .unwrap()
+    }
+
+    /// 读得出、写不进（别的程序打开着文件且不许替换）：改名报错；写不进期间照常读得出记录，读到的已是改名后
+    /// 的样子，同一局里能补的改动不让列表与统计跟着失败；放开后下一次写入一并落盘。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rename_that_cannot_be_saved_is_saved_with_the_next_write() {
         let tmp = tempfile::tempdir().unwrap();
         let game = game_dir(tmp.path());
         let aurora = aurora_in(tmp.path(), &game);
@@ -1181,14 +1266,23 @@ mod tests {
             .unwrap();
         let path = playtime_path(tmp.path());
 
-        let held = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(&path)
-            .unwrap();
+        let held = hold_read_only(&path);
         assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
-        assert!(aurora.play_summaries().await.is_err());
+        let summaries = aurora.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["新名"]);
+        assert_eq!(summaries["新名"].playtime_min, 120);
+        let stats = aurora
+            .play_stats(range("1970-01-01", "1970-01-01"))
+            .await
+            .unwrap();
+        assert_eq!(stats.instances[0].version_id, "新名");
         assert_eq!(instance_ids(&read_file(tmp.path())), vec!["旧名"]);
+        // 一局游玩自己的记录写不进时仍要报错：那一局确实没记下。
+        assert!(
+            record_play_in(&utc8(), tmp.path(), &game, "新名", 3 * HOUR, 4 * HOUR)
+                .await
+                .is_err()
+        );
         drop(held);
 
         record_play_in(&utc8(), tmp.path(), &game, "新名", 3 * HOUR, 4 * HOUR)
@@ -1198,6 +1292,45 @@ mod tests {
         assert_eq!(
             aurora.play_summaries().await.unwrap()["新名"].playtime_min,
             180
+        );
+    }
+
+    /// 旧版本文件读得出、改写不了：读照常给出归到当前游戏目录的记录；改写落盘之前换了游戏目录，旧记录仍归
+    /// 第一次读到时的那个目录，不随之后的当前目录走。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn legacy_file_that_cannot_be_rewritten_still_reads_and_keeps_its_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("落樱").join(".minecraft");
+        let other = tmp.path().join("HMCL").join(".minecraft");
+        let path = playtime_path(tmp.path());
+        let legacy = r#"{"format":1,"book":{
+            "instances":{"1.21":{"total_ms":5400000,"last_played_at":1761832800000}},
+            "days":{"2026-10-30":{"instances":{"1.21":5400000}}}}}"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let held = hold_read_only(&path);
+        let summaries = aurora_in(tmp.path(), &home).play_summaries().await.unwrap();
+        assert_eq!(summaries["1.21"].playtime_min, 90);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        let elsewhere = aurora_in(tmp.path(), &other);
+        assert!(elsewhere.play_summaries().await.unwrap().is_empty());
+        drop(held);
+
+        assert!(elsewhere.play_summaries().await.unwrap().is_empty());
+        let file = read_file(tmp.path());
+        assert_eq!(file["format"], 2);
+        assert_eq!(
+            file["directories"][0]["game_dir"],
+            home.display().to_string()
+        );
+        assert_eq!(
+            aurora_in(tmp.path(), &home)
+                .play_stats(range("2026-10-30", "2026-10-30"))
+                .await
+                .unwrap()
+                .total_minutes,
+            90
         );
     }
 }
