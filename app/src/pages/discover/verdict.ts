@@ -91,6 +91,12 @@ export function targetVerdict(input: TargetInput): TargetVerdict {
     if (worlds.status === "loading") return verdict(id, "unavailable", INSTALL_COPY.readingWorlds, null);
     if (worlds.status === "error") return verdict(id, "unavailable", INSTALL_COPY.worldsFailed(worlds.message), null);
     if (worlds.worlds.length === 0) return verdict(id, "unavailable", INSTALL_COPY.noWorlds, null);
+    const base = fromMatch(id, match);
+    // 任一存档里有就算已装：说明是哪个存档，否则玩家看不出为什么别的存档也勾不了
+    const world = match.installed === null ? null : match.installed.world;
+    if (base.kind !== "installed" || world === null) return base;
+    const known = worlds.worlds.find((w) => w.dir_name === world);
+    return verdict(id, "installed", INSTALL_COPY.installedInWorld(known === undefined || known.name === null ? world : known.name), null);
   }
 
   const base = fromMatch(id, match);

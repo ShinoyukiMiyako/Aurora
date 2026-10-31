@@ -57,6 +57,23 @@ describe("单个目标的判定", () => {
     expect(() => targetVerdict(base)).toThrow(/存档/);
   });
 
+  it("数据包已装：原因写出装在哪个存档，存档有名字用名字，没有名字或已不在列表里时写目录名", () => {
+    const installedIn = (dir: string) =>
+      match("a", { state: "installed", best_version: modVersion("dp-1"), installed: { file_name: "t.zip", version_id: "dp-1", version_number: null, world: dir } });
+    const worlds = { status: "ready" as const, worlds: [{ ...world("Alpha", 9), name: "阿尔法" }, { ...world("Beta", 1), name: null }] };
+    const named = targetVerdict({ instance: summary("a"), match: installedIn("Alpha"), resourceType: "data_pack", worlds });
+    expect([named.kind, named.selectable, named.reason]).toEqual(["installed", false, "已装在存档「阿尔法」"]);
+    expect(targetVerdict({ instance: summary("a"), match: installedIn("Beta"), resourceType: "data_pack", worlds }).reason).toBe("已装在存档「Beta」");
+    expect(targetVerdict({ instance: summary("a"), match: installedIn("Gone"), resourceType: "data_pack", worlds }).reason).toBe("已装在存档「Gone」");
+    // 其余类型没有存档，已安装照旧不写原因
+    const rp = targetVerdict({
+      instance: summary("a"),
+      match: match("a", { state: "installed", best_version: modVersion("rp-1"), installed: { file_name: "r.zip", version_id: "rp-1", version_number: null, world: null } }),
+      resourceType: "resource_pack",
+    });
+    expect([rp.kind, rp.reason]).toEqual(["installed", null]);
+  });
+
   it("光影：没有 Iris 或 OptiFine 时兼容降为可能可行；有加载器或不兼容时不改", () => {
     const base = { instance: summary("a"), resourceType: "shader" as const };
     const down = targetVerdict({ ...base, match: match("a"), shaderLoader: false });

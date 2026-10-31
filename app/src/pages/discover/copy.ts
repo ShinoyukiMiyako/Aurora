@@ -149,6 +149,7 @@ export const INSTALL_COPY = {
     incompatible: "不兼容",
   },
   updateReason: (from: string, to: string) => `已装 ${from}，将换成 ${to}`,
+  installedInWorld: (world: string) => `已装在存档「${world}」`,
   instanceInstalling: "实例正在安装",
   instanceBroken: "实例已损坏，先修复",
   judging: "正在判断能否安装…",
