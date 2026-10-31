@@ -3,7 +3,7 @@
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
 import { joinCrashLabels, joinMixed, LOADER_NAME } from "../../copy/flows";
-import { formatBytes, formatMemory, formatPlaytime } from "../../domain/format";
+import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 
@@ -314,6 +314,14 @@ export const SETTINGS_COPY = {
   pinNote: "固定后会以等距方块的样子常驻在侧栏，一键进入。",
   folderTitle: "实例文件夹",
   open: "打开",
+  templateTitle: "设为新实例的默认设置",
+  templateNote: "把本实例的 options.txt（键位、视距等）与服务器列表复制一份，新建实例时可以沿用。",
+  /** 已有默认设置时的第二行；文件是手放进数据目录的、没有记录时说来源不明。 */
+  templateCurrent: (source: string | null, savedAt: number | null, now: number) =>
+    source === null ? "当前默认来自数据目录里的文件" : savedAt === null ? `当前默认取自「${source}」` : `当前默认取自「${source}」，${formatRelative(savedAt, now)}保存`,
+  templateError: (message: string) => `读不到默认设置：${message}`,
+  templateSave: "保存为默认",
+  templateClear: "清除",
   repairTitle: "补全游戏文件",
   repairNote: "重新校验并下载缺失或损坏的原版文件、依赖库与加载器，存档不受影响。",
   repairRunning: "游戏正在运行，结束后才能补全。",

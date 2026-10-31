@@ -20,6 +20,10 @@ import type {
   ModVersionInfo,
   ModVersionList,
   PlannedItem,
+  ReleaseChannel,
+  StarterGroup,
+  StarterLoader,
+  StarterModsDto,
   UpdateCandidate,
 } from "../../mods";
 import type { InstallableResourceType, ModInstallOutcomeDto, PlatformId } from "../../discover";
@@ -605,6 +609,61 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
   }).finally(() => hold.release());
 }
 
+// ---- 开局 Mod ----
+
+interface StarterEntry {
+  group: StarterGroup;
+  projectId: string;
+  name: string;
+}
+
+const api = (projectId: string, name: string): StarterEntry => ({ group: "api", projectId, name });
+const perf = (projectId: string, name: string): StarterEntry => ({ group: "performance", projectId, name });
+
+/** 与后端的开局表逐项一致：只列 Modrinth 工程级 loaders 里有这个加载器的项。 */
+const STARTER_TABLE: Readonly<Record<StarterLoader, readonly StarterEntry[]>> = {
+  fabric: [api("P7dR8mSH", "Fabric API"), perf("AANobbMI", "Sodium"), perf("gvQqBUqZ", "Lithium"), perf("uXXizFIs", "FerriteCore"), perf("nmDcB62a", "ModernFix")],
+  quilt: [api("qvIfYCYJ", "QFAPI"), perf("AANobbMI", "Sodium"), perf("gvQqBUqZ", "Lithium"), perf("uXXizFIs", "FerriteCore")],
+  neoforge: [perf("AANobbMI", "Sodium"), perf("gvQqBUqZ", "Lithium"), perf("uXXizFIs", "FerriteCore"), perf("nmDcB62a", "ModernFix")],
+  forge: [perf("uXXizFIs", "FerriteCore"), perf("nmDcB62a", "ModernFix")],
+};
+
+const CHANNEL_RANK: Readonly<Record<ReleaseChannel, number>> = { release: 0, beta: 1, alpha: 2 };
+
+function starterLoader(value: unknown): StarterLoader {
+  const raw = requireString(value, "loader");
+  if (raw === "fabric" || raw === "quilt" || raw === "forge" || raw === "neoforge") return raw;
+  if (raw === "liteloader") throw new IpcError("invalid_argument", "LiteLoader 没有开局 Mod", { field: "loader", reason: "unsupported" });
+  throw new IpcError("invalid_argument", `未知加载器 ${raw}`, { field: "loader", reason: "unknown" });
+}
+
+/** 与发现页同一口径只认完全匹配的版本（Quilt 实例不收只标了 fabric 的版本），再按发布通道挑最好那一档里最新的。 */
+function starterPick(versions: ModVersionInfo[], mcVersion: string, loader: StarterLoader): ModVersionInfo | null {
+  const matching = newestFirst(versions).filter((v) => classify(v, mcVersion, [loader]).kind === "match");
+  let best: ModVersionInfo | null = null;
+  for (const v of matching) if (best === null || CHANNEL_RANK[v.release_channel] < CHANNEL_RANK[best.release_channel]) best = v;
+  return best;
+}
+
+function starterMods(args: MockArgs): StarterModsDto {
+  const loader = starterLoader(args.loader);
+  const mcVersion = requireString(args.mcVersion, "mcVersion").trim();
+  if (mcVersion === "") throw new IpcError("invalid_argument", "游戏版本不能为空", { field: "mc_version", reason: "empty" });
+  const result: StarterModsDto = { loader, mc_version: mcVersion, available: [], missing: [] };
+  for (const entry of STARTER_TABLE[loader]) {
+    const head = { group: entry.group, project_id: entry.projectId, name: entry.name };
+    const found = findMockSource("modrinth", entry.projectId);
+    if (found === undefined) {
+      result.missing.push({ ...head, reason: "not_found" });
+      continue;
+    }
+    const version = starterPick(sourceVersions(found.source), mcVersion, loader);
+    if (version === null) result.missing.push({ ...head, reason: "no_version" });
+    else result.available.push({ ...head, version });
+  }
+  return result;
+}
+
 /**
  * 整合包导入后实例 mods/ 里的文件：整合包自己管理的 Mod 不进卷宗（来源以整合包为准），也没有能解析的元数据，
  * 只数得出文件数。与后端一样，导入的实例 list_mods 与 mod_count 都能看到它们。
@@ -754,6 +813,7 @@ export const handlers: MockHandlers = {
     return rows.sort((a, b) => TIER[a.state] - TIER[b.state] || byCodeUnit(a.version_id, b.version_id));
   },
   install_mod: installMod,
+  starter_mods: starterMods,
   installed_sources: (): InstanceSources[] =>
     mockInstanceIds()
       .filter((id) => mockInstanceFacts(id) !== null)

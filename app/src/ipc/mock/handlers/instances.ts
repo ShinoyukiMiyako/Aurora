@@ -17,7 +17,12 @@ import {
   type ManifestVersionDto,
   type NameRule,
   type RepairResultDto,
+  type TemplateFileDto,
+  type TemplateInfoDto,
+  type TemplateOutcomeDto,
   type VersionRequirementsDto,
+  TEMPLATE_FILES,
+  TEMPLATE_SOURCE_EMPTY_ERROR_CODE,
 } from "../../instances";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
@@ -336,6 +341,14 @@ const LOADER_VERSIONS: Partial<Record<`${LoaderChoice}:${string}`, LoaderVersion
 
 let instances: MockInstance[] = seedInstances();
 let pins: string[] = ["樱花生存", "1.21.1"];
+
+/** 数据目录里的默认设置；null 为没有。配置里的开关在 mock 里恒为开。 */
+interface MockTemplate {
+  files: TemplateFileDto[];
+  source_instance: string | null;
+  saved_at: number | null;
+}
+let template: MockTemplate | null = null;
 // 实例上的全部占用，键不分大小写，与后端 InstanceLocks 一致：同一实例可以同时有几件兼容的事。
 const holds = new Map<string, { token: number; activity: InstanceActivity }[]>();
 let nextHoldToken = 0;
@@ -699,12 +712,48 @@ function manifestDto(): ManifestDto {
   };
 }
 
+// ---------------------------------------------------------------- 默认设置
+
+function templateInfo(): TemplateInfoDto {
+  if (template === null) return { present: false, files: [], source_instance: null, saved_at: null, enabled: true };
+  return { present: template.files.length > 0, files: template.files, source_instance: template.source_instance, saved_at: template.saved_at, enabled: true };
+}
+
+/** 与后端同一个判断顺序：配置开关、模板是否为空、新实例是否隔离（不隔离的共用游戏目录根下的设置，一个文件都不碰）。 */
+function applyTemplate(instance: MockInstance): TemplateOutcomeDto {
+  if (template === null || template.files.length === 0) return { status: "skipped", reason: "empty" };
+  if (!isolatedOf(instance)) return { status: "skipped", reason: "shared_working_dir" };
+  // 新建的实例目录里还没有任何设置文件：模板里的全都补上
+  return { status: "applied", copied: template.files.map((f) => f.name), kept: [] };
+}
+
+const TEMPLATE_SKIP_STAGE: Record<Extract<TemplateOutcomeDto, { status: "skipped" }>["reason"], string> = {
+  disabled: "配置里关闭了新建实例时沿用默认设置",
+  empty: "还没有默认设置",
+  shared_working_dir: "这个实例与其他未隔离的实例共用游戏目录里的设置",
+};
+
+function templateStage(outcome: TemplateOutcomeDto): string {
+  if (outcome.status === "skipped") return `没有沿用默认设置：${TEMPLATE_SKIP_STAGE[outcome.reason]}`;
+  const kept = outcome.kept.length === 0 ? "" : `（已有的 ${outcome.kept.join("、")} 保留不动）`;
+  return `沿用默认设置：补上 ${outcome.copied.join("、")}${kept}`;
+}
+
+/** useTemplate 与后端的 Option<bool> 形参一致：缺省等于 false，给了就必须是布尔。 */
+function useTemplateArg(args: MockArgs): boolean {
+  const value = args.useTemplate;
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") throw invalid("useTemplate", "type", `useTemplate 应为布尔值：${JSON.stringify(value)}`);
+  return value;
+}
+
 async function installVersion(args: MockArgs): Promise<InstallResultDto> {
   const taskId = str(args, "taskId");
   const mcVersion = str(args, "id");
   const loader = parseLoader(optStr(args, "loader"));
   const loaderVersionArg = optStr(args, "loaderVersion");
   const name = str(args, "targetName");
+  const useTemplate = useTemplateArg(args);
   if ((loader === "forge" || loader === "neoforge") && loaderVersionArg === null) {
     throw new IpcError("loader_version_not_found", `${LOADER_NAMES[loader]} 没有适用于 ${mcVersion} 的可用 loader 版本`);
   }
@@ -775,6 +824,9 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     };
     instance.sizeBytes = 40 * 512 * 1024;
     instance.fileCount = 40;
+    // 与后端一样在补全之后、首次启动之前套模板：判断隔离要用到装好后才知道的版本类型
+    const templateOutcome = useTemplate ? applyTemplate(instance) : null;
+    if (templateOutcome !== null) stage(taskId, templateStage(templateOutcome));
     stage(taskId, `实例 ${name} 安装完成：库 40 / 资源 0 / natives 0`);
     return {
       id: name,
@@ -783,6 +835,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
       libraries: 40,
       assets: 0,
       natives: 0,
+      template: templateOutcome,
     };
   } catch (error) {
     if (error instanceof IpcError && error.code === "cancelled") {
@@ -907,6 +960,34 @@ export const handlers: MockHandlers = {
 
   repair_instance: repairInstance,
 
+  template_info: () => templateInfo(),
+
+  // 与后端同序：先认实例，再占住（改名、删除、安装、补全进行中报 instance_busy；与运行中的游戏兼容），之后才读工作目录
+  save_instance_as_template: (args) => {
+    const id = str(args, "id");
+    const instance = requireInstance(id);
+    return withMockInstance(id, "modifying", () => {
+      // mock 没有真实的工作目录：没进过游戏的实例按「还没写出 options.txt 与服务器列表」处理
+      if (toDto(instance).last_played_at === null) {
+        throw new IpcError(TEMPLATE_SOURCE_EMPTY_ERROR_CODE, `实例 ${id} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存`, { id, files: TEMPLATE_FILES });
+      }
+      template = {
+        files: [
+          { name: "options.txt", size: 2048 },
+          { name: "servers.dat", size: 512 },
+        ],
+        source_instance: id,
+        saved_at: Date.now(),
+      };
+      return templateInfo();
+    });
+  },
+
+  clear_template: () => {
+    template = null;
+    return templateInfo();
+  },
+
   preview_instance_deletion: (args): DeletionPreviewDto => {
     const id = str(args, "id");
     const instance = requireInstance(id);
@@ -1026,21 +1107,24 @@ export const handlers: MockHandlers = {
 export function reset(): void {
   instances = seedInstances();
   pins = ["樱花生存", "1.21.1"];
+  template = null;
   holds.clear();
 }
 
 interface InstancesSnapshot {
   instances: MockInstance[];
   pins: string[];
+  template: MockTemplate | null;
 }
 
-// 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。
+// 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。默认设置在后端存于数据目录，跟着实例一起存。
 export const persist: MockPersist = {
-  version: 1,
-  snapshot: (): InstancesSnapshot => ({ instances, pins }),
+  version: 2,
+  snapshot: (): InstancesSnapshot => ({ instances, pins, template }),
   restore: (data) => {
     const saved = data as InstancesSnapshot;
     instances = saved.instances;
     pins = saved.pins;
+    template = saved.template;
   },
 };

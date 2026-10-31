@@ -1,4 +1,4 @@
-// 实例内的 Mod：列表、启停、移除、更新检查与更新；下载页的版本列表、落位矩阵与安装计划。
+// 实例内的 Mod：列表、启停、移除、更新检查与更新；下载页的版本列表、落位矩阵与安装计划；新实例的开局 Mod。
 // 字段名与后端 DTO 的 serde 名一致（snake_case），入参键为 camelCase。
 
 import { invoke } from "./bridge";
@@ -210,3 +210,43 @@ export const installedSources = (): Promise<InstanceSources[]> => invoke<Instanc
 
 export const planInstall = (versionId: string, platform: PlatformId, projectId: string, modVersionId: string): Promise<InstallPlan> =>
   invoke<InstallPlan>("plan_install", { versionId, platform, projectId, modVersionId });
+
+// ---------------------------------------------------------------- 开局 Mod
+
+/** 开局表里的分组：加载器的 API（Fabric API / QFAPI）与性能优化组合。 */
+export type StarterGroup = "api" | "performance";
+/** no_version：这个游戏版本与加载器下没有能用的版本；not_found：平台上已经没有这个工程（内置表过时）。 */
+export type StarterMissingReason = "no_version" | "not_found";
+/** 开局表按加载器分组；LiteLoader 没有开局表，以 invalid_argument（detail.reason 为 unsupported）拒绝。 */
+export type StarterLoader = "fabric" | "quilt" | "forge" | "neoforge";
+
+export interface StarterModDto {
+  group: StarterGroup;
+  /** Modrinth 工程 id。 */
+  project_id: string;
+  name: string;
+  /** 挑出的版本：与实例完全匹配的版本里，按正式版、测试版、内测版的顺序取最好那一档里最新的。 */
+  version: ModVersionInfo;
+}
+
+export interface StarterMissingDto {
+  group: StarterGroup;
+  project_id: string;
+  name: string;
+  reason: StarterMissingReason;
+}
+
+export interface StarterModsDto {
+  loader: StarterLoader;
+  mc_version: string;
+  /** available 与 missing 都按开局表的顺序（API 在前）。 */
+  available: StarterModDto[];
+  missing: StarterMissingDto[];
+}
+
+/**
+ * 某加载器与游戏版本下开局表里能装的项与缺的项，只查 Modrinth。某项没有这个版本时进 missing，不报错；
+ * 断网、超时这类失败让整次调用失败，不给半张表。参数问题报 invalid_argument：未知加载器 detail.reason 为 unknown，
+ * LiteLoader 为 unsupported，游戏版本去掉首尾空白后为空时 detail.field 为 mc_version、reason 为 empty。
+ */
+export const starterMods = (loader: StarterLoader, mcVersion: string): Promise<StarterModsDto> => invoke<StarterModsDto>("starter_mods", { loader, mcVersion });
