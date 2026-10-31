@@ -14,7 +14,7 @@ import { INSTANCE_TAB_LABEL, PAGE_LABEL, SETTINGS_SECTION_LABEL } from "./copy/f
 import { DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY, AUTHLIB_DIALOG_COPY } from "./copy/login";
 import { UPDATE_COPY } from "./copy/updater";
 import { FOOTER_COPY, STEP_COPY } from "./flows/onboarding/copy";
-import { resetMocks } from "./ipc/mock";
+import { mockInvoke, resetMocks } from "./ipc/mock";
 import { ACCOUNT_COPY, PAGE_ERROR_COPY, PALETTE_COPY, SIDEBAR_COPY } from "./copy/shell";
 import { ACCOUNTS_COPY } from "./pages/accounts/copy";
 import { DETAIL_COPY, IMPORT_COPY, SEARCH_COPY } from "./pages/discover/copy";
@@ -164,6 +164,20 @@ async function escape(): Promise<void> {
   await noDialogs();
 }
 
+/**
+ * 用 Ctrl+K 打开命令面板。由外层 AnimatePresence 条件渲染的流程弹窗（新建实例）关上时，弹窗节点随退场先移除，
+ * Esc 栈里那一层要等外层退场收尾、流程组件卸载时才撤；这段间隔里外壳仍按「有浮层」忽略全局快捷键，
+ * 而 noDialogs 的哪一次轮询落进这段间隔由真实时间决定。所以按到面板出现为止：面板没开才再按，开着时再按会把它关上。
+ */
+async function openPaletteByShortcut(): Promise<void> {
+  await vi.waitFor(() => {
+    if ([...document.querySelectorAll<HTMLElement>("[role='dialog']")].some((d) => dialogName(d) === PALETTE_COPY.label)) return;
+    press("k", { ctrlKey: true });
+    throw new Error("命令面板还没打开");
+  }, WAIT);
+  await openedDialog(PALETTE_COPY.label);
+}
+
 /** 设置行里的按钮：行标题之后的那个按钮。 */
 function rowButton(title: string, label: string): HTMLButtonElement {
   const heading = [...content().querySelectorAll<HTMLElement>("*")].find((el) => el.children.length === 0 && el.textContent === title);
@@ -302,6 +316,9 @@ describe.each(MATRIX)("应用冒烟：$tier 档（$width px）· $mode", ({ tier
 
   it("主要弹窗都能从界面打开、正常渲染并关上", async () => {
     ipc.overrides.set("is_first_run", () => false);
+    // 末尾手动检查更新要从「检查更新」按钮起步；启动后 8 秒的自动检查一旦先跑完，更新卡已换成「查看更新」。
+    // 走到关于分区要多久取决于机器忙不忙，所以这一轮关掉自动检查，只测手动这条路
+    await mockInvoke("update_config", { checkUpdates: false });
     await prepareApp();
     mount();
     await expectPage("home", null);
@@ -312,8 +329,7 @@ describe.each(MATRIX)("应用冒烟：$tier 档（$width px）· $mode", ({ tier
     click(buttonIn(await openedDialog(SIDEBAR_COPY.create), "取消"));
     await noDialogs();
 
-    press("k", { ctrlKey: true });
-    await openedDialog(PALETTE_COPY.label);
+    await openPaletteByShortcut();
     await escape();
 
     click(sidebarItem("discover"));
@@ -375,6 +391,8 @@ describe.each(MATRIX)("应用冒烟：$tier 档（$width px）· $mode", ({ tier
     const licenses = await openedDialog(ABOUT_COPY.licenses);
     await vi.waitFor(() => expect(licenses.textContent).toContain("serde"), WAIT);
     await escape();
+    // 更新卡在后端回了当前版本之前是骨架，没有按钮
+    await vi.waitFor(() => buttonIn(content(), UPDATE_COPY.check), WAIT);
     click(buttonIn(content(), UPDATE_COPY.check));
     await vi.waitFor(() => buttonIn(content(), UPDATE_COPY.view), WAIT);
     click(buttonIn(content(), UPDATE_COPY.view));
