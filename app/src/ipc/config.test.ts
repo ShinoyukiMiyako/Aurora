@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addGameDirectory,
   discoverGameDirectories,
@@ -134,5 +134,93 @@ describe("游戏目录", () => {
     expect(await inspectGameDirectory(DEFAULT_DIR)).toEqual({ exists: true, has_versions: false });
     expect(await inspectGameDirectory("F:\\New\\.minecraft")).toEqual({ exists: false, has_versions: false });
     expect((await rejection(inspectGameDirectory(""))).code).toBe("invalid_game_directory");
+  });
+});
+
+/** 内存里的 Storage，代替浏览器的 localStorage。 */
+class MemoryStorage implements Storage {
+  [name: string]: unknown;
+  private readonly items = new Map<string, string>();
+
+  get length(): number {
+    return this.items.size;
+  }
+
+  clear(): void {
+    this.items.clear();
+  }
+
+  getItem(key: string): string | null {
+    const value = this.items.get(key);
+    return value === undefined ? null : value;
+  }
+
+  key(index: number): string | null {
+    const key = [...this.items.keys()][index];
+    return key === undefined ? null : key;
+  }
+
+  removeItem(key: string): void {
+    this.items.delete(key);
+  }
+
+  setItem(key: string, value: string): void {
+    this.items.set(key, value);
+  }
+}
+
+describe("界面语言", () => {
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("种子是 zh-CN，补丁切到 en-US 再切回", async () => {
+    expect((await getConfig()).language).toBe("zh-CN");
+    await updateConfig({ language: "en-US" });
+    expect((await getConfig()).language).toBe("en-US");
+    await updateConfig({ language: "zh-CN" });
+    expect((await getConfig()).language).toBe("zh-CN");
+  });
+
+  it("不认识的语言报 invalid_argument，同一补丁里别的字段也不生效", async () => {
+    await updateConfig({ language: "en-US" });
+    for (const bad of ["fr-FR", "zh-cn", "en", ""]) {
+      const error = await rejection(updateConfig({ afterLaunch: "keep", language: bad as never }));
+      expect(error.code).toBe("invalid_argument");
+      expect(error.message).toContain("界面语言");
+    }
+    expect(await getConfig()).toMatchObject({ language: "en-US", after_launch: "minimize" });
+  });
+
+  it("resetMocks 回到 zh-CN", async () => {
+    await updateConfig({ language: "en-US" });
+    resetMocks();
+    expect((await getConfig()).language).toBe("zh-CN");
+  });
+
+  it("持久化：刷新后接着上次的语言；没有语言字段的旧版快照启用即报错", async () => {
+    const storage = new MemoryStorage();
+    vi.resetModules();
+    const first = await import("./mock");
+    first.enableMockPersistence(storage, "slug");
+    await first.mockInvoke("update_config", { language: "en-US" });
+    const saved = storage.getItem("slug.mock.config");
+    if (saved === null) throw new Error("配置没有落盘");
+    const snapshot = JSON.parse(saved) as { version: number; data: { config: Record<string, unknown> } };
+    expect(snapshot.data.config.language).toBe("en-US");
+
+    vi.resetModules();
+    const second = await import("./mock");
+    second.enableMockPersistence(storage, "slug");
+    expect(await second.mockInvoke<{ language: string }>("get_config")).toMatchObject({ language: "en-US" });
+
+    const oldConfig = { ...snapshot.data.config };
+    delete oldConfig.language;
+    const stale = new MemoryStorage();
+    stale.setItem("slug.mock.config", JSON.stringify({ version: snapshot.version - 1, data: { ...snapshot.data, config: oldConfig } }));
+    vi.resetModules();
+    const third = await import("./mock");
+    expect(() => third.enableMockPersistence(stale, "slug")).toThrow(`快照版本是 ${snapshot.version - 1}，当前是 ${snapshot.version}`);
+    expect(snapshot.version).toBe(2);
   });
 });

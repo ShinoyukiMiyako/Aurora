@@ -8,6 +8,7 @@ import type {
   MemorySettings,
   NamedDirectoryDto,
 } from "../../config";
+import { UI_LANGUAGES } from "../../config";
 import { IpcError } from "../../errors";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
@@ -57,6 +58,7 @@ function seedConfig(): ConfigDto {
     selected_version: null,
     skipped_update_version: null,
     notified_update_version: null,
+    language: "zh-CN",
   };
 }
 
@@ -257,6 +259,7 @@ function updateConfig(args: MockArgs): void {
   if (args.notifiedUpdateVersion !== undefined) {
     next.notified_update_version = requireString(args, "notifiedUpdateVersion", "update_config");
   }
+  if (args.language !== undefined) next.language = oneOf(args.language, UI_LANGUAGES, "的界面语言");
   config = next;
 }
 
@@ -338,8 +341,9 @@ interface ConfigSnapshot {
   firstRunCompleted: boolean;
 }
 
+// 快照形状一变就升版本：旧快照里的配置缺字段，读回来会在 DTO 适配处出错，不如启用时就明确报版本不符。
 export const persist: MockPersist = {
-  version: 1,
+  version: 2,
   snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], firstRunCompleted }),
   restore: (data) => {
     const saved = data as ConfigSnapshot;

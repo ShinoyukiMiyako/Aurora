@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use aurora_core::config::UiLanguage;
 use aurora_core::folders::{
     default_game_dir, inspect_game_directory as inspect_dir, probe_dir, validate_game_dir,
 };
@@ -64,6 +65,8 @@ pub struct ConfigDto {
     pub skipped_update_version: Option<String>,
     /// 自动检查已提示过的启动器版本。
     pub notified_update_version: Option<String>,
+    /// 界面语言：`"zh-CN"` 或 `"en-US"`。
+    pub language: UiLanguage,
 }
 
 pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
@@ -92,6 +95,7 @@ pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
         selected_version: config.selected_version.clone(),
         skipped_update_version: config.skipped_update_version.clone(),
         notified_update_version: config.notified_update_version.clone(),
+        language: config.language,
     }
 }
 
@@ -133,6 +137,7 @@ pub(crate) struct ConfigPatch {
     default_java: Option<Option<PathBuf>>,
     skipped_update_version: Option<String>,
     notified_update_version: Option<String>,
+    language: Option<UiLanguage>,
 }
 
 /// 未解析的配置修改，字段与 `update_config` 的入参一一对应。
@@ -152,6 +157,7 @@ pub(crate) struct RawConfigPatch {
     pub default_java: Option<String>,
     pub skipped_update_version: Option<String>,
     pub notified_update_version: Option<String>,
+    pub language: Option<String>,
 }
 
 /// 更新全局配置：字段全可选，未提供者不动。先把全部参数校验完再拿写锁：有一个非法就整体拒绝，
@@ -173,6 +179,7 @@ pub async fn update_config(
     default_java: Option<String>,
     skipped_update_version: Option<String>,
     notified_update_version: Option<String>,
+    language: Option<String>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     let raw = RawConfigPatch {
@@ -190,6 +197,7 @@ pub async fn update_config(
         default_java,
         skipped_update_version,
         notified_update_version,
+        language,
     };
     update_config_with(&facade, raw).await
 }
@@ -241,6 +249,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         default_java,
         skipped_update_version: raw.skipped_update_version,
         notified_update_version: raw.notified_update_version,
+        language: raw.language.as_deref().map(parse_language).transpose()?,
     })
 }
 
@@ -287,6 +296,9 @@ fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandErr
     if let Some(version) = patch.notified_update_version {
         aurora.set_notified_update_version(Some(version));
     }
+    if let Some(language) = patch.language {
+        aurora.set_language(language);
+    }
     Ok(())
 }
 
@@ -324,6 +336,16 @@ fn parse_after_launch(name: &str) -> Result<AfterLaunch, CommandError> {
         "close" => Ok(AfterLaunch::Close),
         other => Err(CommandError::invalid_argument(format!(
             "未知的启动后行为 {other}（支持 keep/minimize/close）"
+        ))),
+    }
+}
+
+fn parse_language(name: &str) -> Result<UiLanguage, CommandError> {
+    match name {
+        "zh-CN" => Ok(UiLanguage::ZhCn),
+        "en-US" => Ok(UiLanguage::EnUs),
+        other => Err(CommandError::invalid_argument(format!(
+            "未知的界面语言 {other}（支持 zh-CN/en-US）"
         ))),
     }
 }
@@ -613,6 +635,17 @@ mod tests {
             let name = serde_json::to_value(after).unwrap();
             assert_eq!(parse_after_launch(name.as_str().unwrap()).unwrap(), after);
         }
+        for language in [UiLanguage::ZhCn, UiLanguage::EnUs] {
+            let name = serde_json::to_value(language).unwrap();
+            assert_eq!(parse_language(name.as_str().unwrap()).unwrap(), language);
+        }
+        for bad in ["zh-cn", "zh_CN", "en", "fr-FR", ""] {
+            assert_eq!(
+                parse_language(bad).unwrap_err().code,
+                code::INVALID_ARGUMENT,
+                "{bad}"
+            );
+        }
         assert_eq!(
             parse_download_source_policy("bmclapi").unwrap_err().code,
             code::INVALID_ARGUMENT
@@ -789,12 +822,88 @@ mod tests {
                 download_concurrency: Some(0),
                 ..RawConfigPatch::default()
             },
+            RawConfigPatch {
+                check_updates: Some(false),
+                language: Some("english".into()),
+                ..RawConfigPatch::default()
+            },
         ] {
             let err = update_config_with(&facade, raw).await.unwrap_err();
             assert_eq!(err.code, code::INVALID_ARGUMENT);
         }
         assert!(read_config(&facade).await.check_updates);
         assert!(!dir.path().join("config.json").exists());
+    }
+
+    /// 前端 `ipc/config.ts` 里同样写着这几个语言标签（类型与取值表）；两边各写一份，改了一边这里就失败。
+    #[test]
+    fn front_end_language_tags_match_serde_names() {
+        let ts = include_str!("../../../src/ipc/config.ts");
+        let quoted: Vec<String> = [UiLanguage::ZhCn, UiLanguage::EnUs]
+            .into_iter()
+            .map(|language| serde_json::to_value(language).unwrap().to_string())
+            .collect();
+        let union = format!("export type UiLanguage = {};", quoted.join(" | "));
+        assert!(ts.contains(&union), "ipc/config.ts 里应有：{union}");
+        let table = format!(
+            "export const UI_LANGUAGES: readonly UiLanguage[] = [{}];",
+            quoted.join(", ")
+        );
+        assert!(ts.contains(&table), "ipc/config.ts 里应有：{table}");
+    }
+
+    /// 语言补丁：出参是语言标签，切换后落盘；非法值整体拒绝，已设的语言不动。
+    #[tokio::test]
+    async fn language_patch_switches_persists_and_rejects_unknown_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["language"], "zh-CN");
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                language: Some("en-US".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let dto = read_config(&facade).await;
+        assert_eq!(dto.language, UiLanguage::EnUs);
+        assert_eq!(serde_json::to_value(&dto).unwrap()["language"], "en-US");
+        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert_eq!(reloaded.language, UiLanguage::EnUs);
+
+        let err = update_config_with(
+            &facade,
+            RawConfigPatch {
+                language: Some("fr-FR".into()),
+                after_launch: Some("keep".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert!(err.message.contains("fr-FR"), "{}", err.message);
+        let after = read_config(&facade).await;
+        assert_eq!(after.language, UiLanguage::EnUs);
+        assert_eq!(after.after_launch, AfterLaunch::Minimize);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                language: Some("zh-CN".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_config(&facade).await.language, UiLanguage::ZhCn);
     }
 
     /// 存盘失败：命令报错，门面里的配置保持原值，下载源、并发这类后续命令马上要读的值不会悄悄生效。

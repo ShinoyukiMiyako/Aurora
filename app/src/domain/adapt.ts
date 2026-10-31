@@ -5,7 +5,7 @@
 import { incompleteReason } from "../copy/flows";
 import type { AccountDto, AccountType, AuthServerDto, AuthlibProfileDto } from "../ipc/accounts";
 import type { SkinInfoDto } from "../ipc/art";
-import type { AfterLaunch, ConfigDto, ConfigPatch, DownloadSourcePolicy, IsolationPolicy } from "../ipc/config";
+import { UI_LANGUAGES, type AfterLaunch, type ConfigDto, type ConfigPatch, type DownloadSourcePolicy, type IsolationPolicy, type UiLanguage } from "../ipc/config";
 import type {
   DetectedLoaderKind,
   IncompleteDto,
@@ -334,6 +334,7 @@ export interface Settings {
   selectedVersion: string | null;
   skippedUpdateVersion: string | null;
   notifiedUpdateVersion: string | null;
+  language: UiLanguage;
 }
 
 const SOURCES: readonly DownloadSourcePolicy[] = ["auto", "official_first", "mirror_first"];
@@ -359,6 +360,7 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     selectedVersion: dto.selected_version,
     skippedUpdateVersion: dto.skipped_update_version,
     notifiedUpdateVersion: dto.notified_update_version,
+    language: oneOf(dto.language, UI_LANGUAGES, "界面语言"),
   };
 }
 
@@ -377,6 +379,7 @@ export interface SettingsPatch {
   defaultJava?: string;
   skippedUpdateVersion?: string;
   notifiedUpdateVersion?: string;
+  language?: UiLanguage;
 }
 
 export function settingsPatchToConfig(patch: SettingsPatch): ConfigPatch {

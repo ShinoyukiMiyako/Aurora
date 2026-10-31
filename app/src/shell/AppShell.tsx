@@ -35,6 +35,7 @@ import { UpdatePanelMount } from "./UpdatePanel";
 import { useRunner } from "./useRunner";
 import { DropHint } from "./DropHint";
 import { useStartupNotices, type StartupNotice } from "./startup-notices";
+import { useDocumentLang } from "./useDocumentLang";
 import { useRevealWindow } from "./window";
 import { useAfterLaunch, useBackgroundAttention, useCloseGuard } from "./window-behavior";
 
@@ -75,6 +76,7 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   useAfterLaunch();
   useBackgroundAttention();
   useStartupNotices(startupNotices);
+  useDocumentLang();
 
   useEffect(() => {
     const timer = window.setTimeout(() => void run(() => pages.preloadAll(), SHELL_ACTION_ERROR.pagePreload), PAGE_PRELOAD_DELAY_MS);
