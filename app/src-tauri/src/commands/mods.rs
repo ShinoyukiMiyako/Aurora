@@ -120,11 +120,15 @@ pub(crate) async fn check_updates_with(
 /// 把实例里的某个 Mod 换成同工程的 `mod_version_id`。长任务：进度经 core-event 推送并带 `task_id`，
 /// 可经 `cancel_task(taskId)` 取消（只能打断下载阶段，落位一旦开始就走完）。旧文件改名为 `.old`
 /// 保留，变更历史里可回滚。
+///
+/// 作为组合任务（全部更新）的一项调用时传 `step`（第几项，从 0 计），它原样标在这次调用的每条事件上；
+/// 单独调用不传。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn update_mod(
     app: AppHandle,
     task_id: String,
+    step: Option<u32>,
     version_id: String,
     file_name: String,
     mod_version_id: String,
@@ -134,7 +138,7 @@ pub async fn update_mod(
 ) -> Result<ModUpdateOutcomeDto, CommandError> {
     // 参数在登记任务、起事件转发之前校验：非法调用不该占用一个任务 id。
     validate_update_args(&file_name, &mod_version_id)?;
-    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let events = CoreEventForwarder::to_app_step(&app, Some(task_id.clone()), step);
     let outcome = update_mod_with(
         &facade,
         &tasks,

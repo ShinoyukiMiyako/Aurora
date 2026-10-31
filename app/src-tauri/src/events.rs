@@ -25,11 +25,18 @@ pub fn emit<S: Serialize + Clone>(app: &AppHandle, event: &str, payload: S) {
     }
 }
 
-/// [`CORE_EVENT`] 的负载：`{ task_id, kind, ... }`。
+/// [`CORE_EVENT`] 的负载：`{ task_id, step?, kind, ... }`。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CoreEventPayload {
     /// 所属任务；启动会话与非任务命令的事件为 `null`。
     pub task_id: Option<String>,
+    /// 作为组合任务的一项调用时，这是第几项（从 0 计），取自前端调这一项命令时给的 `step`。
+    ///
+    /// 组合任务逐项调命令、共用一个 `task_id`，每项都从 0 报起；事件与命令的返回走不同的通道，上一项最后几条
+    /// 进度可能在下一项开始之后才送到。两项声明大小相同或都未知时，单看快照分不清是谁的，前端按它分。
+    /// 单独调用的命令没有这一项，序列化时整个省去，负载与加这个字段之前一模一样。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<u32>,
     #[serde(flatten)]
     pub event: CoreEventKind,
 }
@@ -85,12 +92,22 @@ impl CoreEventForwarder {
         task_id: Option<String>,
         deliver: impl Fn(CoreEventPayload) + Send + 'static,
     ) -> Self {
+        Self::spawn_step(task_id, None, deliver)
+    }
+
+    /// 同 [`spawn`](Self::spawn)，每条事件另标上组合任务的项序号 `step`（见 [`CoreEventPayload::step`]）。
+    pub fn spawn_step(
+        task_id: Option<String>,
+        step: Option<u32>,
+        deliver: impl Fn(CoreEventPayload) + Send + 'static,
+    ) -> Self {
         let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let task = tauri::async_runtime::spawn(async move {
             // 发送端全部释放后 recv 返回 None，循环自然结束。
             while let Some(event) = rx.recv().await {
                 deliver(CoreEventPayload {
                     task_id: task_id.clone(),
+                    step,
                     event: event.into(),
                 });
             }
@@ -102,6 +119,14 @@ impl CoreEventForwarder {
     pub fn to_app(app: &AppHandle, task_id: Option<String>) -> Self {
         let app = app.clone();
         Self::spawn(task_id, move |payload| emit(&app, CORE_EVENT, payload))
+    }
+
+    /// 同 [`to_app`](Self::to_app)，每条事件另标上组合任务的项序号 `step`。
+    pub fn to_app_step(app: &AppHandle, task_id: Option<String>, step: Option<u32>) -> Self {
+        let app = app.clone();
+        Self::spawn_step(task_id, step, move |payload| {
+            emit(&app, CORE_EVENT, payload)
+        })
     }
 
     /// 交给门面方法的事件发送端。
@@ -131,6 +156,7 @@ mod tests {
     fn payload_serializes_flat_with_task_id_and_kind() {
         let payload = CoreEventPayload {
             task_id: Some("task-7".into()),
+            step: None,
             event: CoreEventKind::Download {
                 total: 3,
                 finished: 1,
@@ -154,6 +180,7 @@ mod tests {
 
         let session = CoreEventPayload {
             task_id: None,
+            step: None,
             event: CoreEventKind::Stage {
                 message: "开始安装原版 1.21".into(),
             },
@@ -189,7 +216,7 @@ mod tests {
         assert_eq!(delivered.len(), 3);
         assert!(delivered
             .iter()
-            .all(|p| p.task_id.as_deref() == Some("install-1")));
+            .all(|p| p.task_id.as_deref() == Some("install-1") && p.step.is_none()));
         assert_eq!(
             delivered[1].event,
             CoreEventKind::Download {
@@ -225,5 +252,171 @@ mod tests {
         let delivered = delivered.lock().unwrap();
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].task_id, None);
+    }
+
+    /// 组合任务的一项：`step` 与 `task_id` 并列，第 0 项也照写；单独调用不带这个键（见上面的形状测试）。
+    #[test]
+    fn composite_item_payload_carries_step_beside_task_id() {
+        let download = CoreEventPayload {
+            task_id: Some("all#1".into()),
+            step: Some(0),
+            event: CoreEventKind::Download {
+                total: 1,
+                finished: 0,
+                bytes: 0,
+                total_bytes: None,
+                speed: 0,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&download).unwrap(),
+            json!({
+                "task_id": "all#1",
+                "step": 0,
+                "kind": "download",
+                "total": 1,
+                "finished": 0,
+                "bytes": 0,
+                "total_bytes": null,
+                "speed": 0
+            })
+        );
+        let stage = CoreEventPayload {
+            task_id: Some("all#1".into()),
+            step: Some(u32::MAX),
+            event: CoreEventKind::Stage {
+                message: "准备更新".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&stage).unwrap(),
+            json!({ "task_id": "all#1", "step": u32::MAX, "kind": "stage", "message": "准备更新" })
+        );
+    }
+
+    type Log = Arc<Mutex<Vec<CoreEventPayload>>>;
+
+    /// 组合任务「all#1」第 `step` 项的转发：几项共用同一个 task_id，各用各的转发器，全都投进同一份记录，
+    /// 与前端从同一个事件名上收到的一样。
+    fn item_forwarder(log: &Log, step: u32) -> CoreEventForwarder {
+        let log = log.clone();
+        CoreEventForwarder::spawn_step(Some("all#1".into()), Some(step), move |p| {
+            log.lock().unwrap().push(p)
+        })
+    }
+
+    fn snapshot(finished: u64, bytes: u64, total_bytes: Option<u64>) -> CoreEvent {
+        CoreEvent::Download(DownloadProgress {
+            total: 1,
+            finished,
+            bytes,
+            total_bytes,
+            speed: 0,
+        })
+    }
+
+    /// 记录里的下载快照：(项序号, 已下字节)。
+    fn downloads(log: &Log) -> Vec<(Option<u32>, u64)> {
+        let log = log.lock().unwrap();
+        assert!(log.iter().all(|p| p.task_id.as_deref() == Some("all#1")));
+        log.iter()
+            .filter_map(|p| match p.event {
+                CoreEventKind::Download { bytes, .. } => Some((p.step, bytes)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 两项按顺序各跑一遍同一串快照，返回整份记录。
+    async fn run_two_items(snapshots: &[(u64, u64, Option<u64>)]) -> Log {
+        let log = Log::default();
+        for step in 0..2 {
+            let forwarder = item_forwarder(&log, step);
+            for &(finished, bytes, total_bytes) in snapshots {
+                forwarder
+                    .sink()
+                    .send(snapshot(finished, bytes, total_bytes))
+                    .unwrap();
+            }
+            forwarder.finish().await;
+        }
+        log
+    }
+
+    /// 两项声明大小相同：两项的快照逐字段相同，只有 step 分得开。
+    #[tokio::test]
+    async fn items_of_equal_size_differ_only_in_step() {
+        let log =
+            run_two_items(&[(0, 0, Some(100)), (0, 50, Some(100)), (1, 100, Some(100))]).await;
+        assert_eq!(
+            downloads(&log),
+            vec![
+                (Some(0), 0),
+                (Some(0), 50),
+                (Some(0), 100),
+                (Some(1), 0),
+                (Some(1), 50),
+                (Some(1), 100)
+            ]
+        );
+        let log = log.lock().unwrap();
+        for i in 0..3 {
+            assert_eq!(
+                log[i].event,
+                log[i + 3].event,
+                "第 {i} 条快照两项应完全相同"
+            );
+        }
+    }
+
+    /// 两项大小都未知：总量为 null、已下字节各自从 0 涨起，同样只有 step 分得开。
+    #[tokio::test]
+    async fn items_of_unknown_size_differ_only_in_step() {
+        let log = run_two_items(&[(0, 0, None), (0, 700, None), (1, 1500, None)]).await;
+        assert_eq!(
+            downloads(&log),
+            vec![
+                (Some(0), 0),
+                (Some(0), 700),
+                (Some(0), 1500),
+                (Some(1), 0),
+                (Some(1), 700),
+                (Some(1), 1500)
+            ]
+        );
+    }
+
+    async fn wait_delivered(log: &Log, count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while log.lock().unwrap().len() < count {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("转发任务没有在 5 秒内送达");
+    }
+
+    /// 上一项的最后一条快照在下一项已经报过进度之后才送出：照旧标着上一项的序号，不会被下一项认领。
+    #[tokio::test]
+    async fn late_snapshot_of_previous_item_keeps_its_own_step() {
+        let log = Log::default();
+        let first = item_forwarder(&log, 0);
+        let straggler = first.sink().clone();
+        first.sink().send(snapshot(0, 60, Some(100))).unwrap();
+        wait_delivered(&log, 1).await;
+
+        let second = item_forwarder(&log, 1);
+        second.sink().send(snapshot(0, 30, Some(300))).unwrap();
+        wait_delivered(&log, 2).await;
+        straggler.send(snapshot(1, 100, Some(100))).unwrap();
+        drop(straggler);
+        first.finish().await;
+        second.sink().send(snapshot(1, 300, Some(300))).unwrap();
+        second.finish().await;
+
+        assert_eq!(
+            downloads(&log),
+            vec![(Some(0), 60), (Some(1), 30), (Some(0), 100), (Some(1), 300)]
+        );
     }
 }
