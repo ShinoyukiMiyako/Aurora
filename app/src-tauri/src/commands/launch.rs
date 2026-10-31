@@ -39,6 +39,13 @@ pub const GAME_EXIT_EVENT: &str = "aurora://game-exit";
 #[derive(Default)]
 pub struct RunningGame(GameSlot);
 
+impl RunningGame {
+    /// 槽本身：存档备份要看此刻是哪个实例在跑游戏。
+    pub(crate) fn slot(&self) -> &GameSlot {
+        &self.0
+    }
+}
+
 /// 启动成功：进程已经起来。
 #[derive(Debug, Serialize)]
 pub struct LaunchedDto {
