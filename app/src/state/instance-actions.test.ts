@@ -35,6 +35,13 @@ function renameOnDisk(from: string, to: string): void {
   });
 }
 
+/** 新建实例装好时要写封面：实例设置按传入的原样存下。 */
+function stubInstanceSettings(): void {
+  const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  ipc.overrides.set("get_instance_settings", () => settings);
+  ipc.overrides.set("set_instance_settings", (args) => args.settings);
+}
+
 describe("改实例设置后按需重扫实例列表", () => {
   const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
 
@@ -165,6 +172,168 @@ describe("切换游戏目录", () => {
     await settle();
     expect(fetched.sort()).toEqual(keys.filter((k) => k !== "servers:pinned" && k !== "news").sort());
     for (const stop of stops) stop();
+  });
+});
+
+describe("侧栏固定的读改写按调用顺序串行", () => {
+  let stored: string[];
+  let failNextWrite: boolean;
+
+  beforeEach(() => {
+    stored = [];
+    failNextWrite = false;
+    ipc.overrides.set("set_sidebar_pins", (args) => {
+      if (failNextWrite) {
+        failNextWrite = false;
+        throw new IpcError("config_write_failed", "配置写入失败");
+      }
+      stored = [...(args.pins as string[])];
+      return stored;
+    });
+  });
+
+  it("快速连续固定两个实例：两个都在，顺序与点击顺序一致", async () => {
+    await Promise.all([store.actions.togglePin("生存"), store.actions.togglePin("创造")]);
+    expect(stored).toEqual(["生存", "创造"]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "创造"]);
+    expect(callsOf(ipc, "set_sidebar_pins").map((a) => a.pins)).toEqual([["生存"], ["生存", "创造"]]);
+  });
+
+  it("新建的实例装好时自动固定，同时取消固定另一个：两次改动都留下", async () => {
+    await store.actions.togglePin("生存");
+    const install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    stubInstanceSettings();
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
+    await settle();
+    // 写入按到达顺序挂起，逐个放行：取消固定还没写完时，装好的实例落地要写固定
+    const held: (() => void)[] = [];
+    ipc.overrides.set(
+      "set_sidebar_pins",
+      (args) =>
+        new Promise<string[]>((resolve) =>
+          held.push(() => {
+            stored = [...(args.pins as string[])];
+            resolve(stored);
+          }),
+        ),
+    );
+    const unpin = store.actions.togglePin("生存");
+    instances = [...instances, instanceDto("新世界")];
+    install.resolve({ id: "新世界" });
+    await settle();
+    while (held.length > 0) {
+      const release = held.shift();
+      if (release === undefined) throw new Error("没有挂起的写入");
+      release();
+      await settle();
+    }
+    await unpin;
+    expect(stored).toEqual(["新世界"]);
+    expect(store.getState().sidebarPins).toEqual(["新世界"]);
+  });
+
+  it("前一次写入失败：错误交给它的调用方，后一次照常在原列表上执行", async () => {
+    failNextWrite = true;
+    const results = await Promise.allSettled([store.actions.togglePin("生存"), store.actions.togglePin("创造")]);
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "config_write_failed" } });
+    expect(results[1]).toEqual({ status: "fulfilled", value: undefined });
+    expect(stored).toEqual(["创造"]);
+  });
+});
+
+describe("改名、删除后挂在原 id 上的按需数据与游玩统计失效", () => {
+  const perInstance = [
+    "mods:生存",
+    "content:生存",
+    "settings:生存",
+    "history:生存",
+    "history:生存:checks",
+    "crash:生存",
+    "log:生存",
+    "mod-updates:生存",
+    "plan:生存:modrinth:AANobbMI:v2",
+    "memory-advice:生存",
+  ];
+  const stats = "play-stats:2024-07-01:2024-07-31";
+
+  /** 先订阅再退订：条目留在缓存里没人订阅，之后有人按同一个 key 订阅时直接拿到它。 */
+  async function cacheIdle(keys: readonly string[]): Promise<void> {
+    const stops = keys.map((key) => resources.subscribe(key, async () => `「生存」改名或删除前的 ${key}`, () => undefined));
+    await settle();
+    for (const stop of stops) stop();
+  }
+
+  function watchStats(): { fetches: () => number; stop: () => void } {
+    let fetches = 0;
+    const stop = resources.subscribe(
+      stats,
+      async () => {
+        fetches += 1;
+        return fetches;
+      },
+      () => undefined,
+    );
+    return { fetches: () => fetches, stop };
+  }
+
+  const statuses = () => perInstance.map((key) => resources.snapshot(key).status);
+  const allLoading = perInstance.map(() => "loading");
+
+  it("改名后新建同名实例：装好时丢掉原 id 下留着的缓存，新实例页不会读到改名前那个实例的 Mod、设置、日志与安装计划", async () => {
+    await cacheIdle(perInstance);
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    expect(statuses()).toEqual(perInstance.map(() => "ready"));
+
+    ipc.overrides.set("install_version", () => {
+      instances = [...instances, instanceDto("生存")];
+      return { id: "生存" };
+    });
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    stubInstanceSettings();
+    await store.actions.createInstance({ name: "生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
+    await settle();
+
+    expect(store.getState().toasts.map((t) => t.title)).toContain("「生存」已就绪");
+    expect(statuses()).toEqual(allLoading);
+  });
+
+  it("把别的实例改成曾经用过的名字：同样丢掉这个名字下留着的缓存", async () => {
+    await cacheIdle(perInstance);
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    renameOnDisk("创造", "生存");
+    await store.actions.renameInstance("创造", "生存");
+    expect(statuses()).toEqual(allLoading);
+  });
+
+  it("改名：游玩统计按迁移到新名字下的记录重取，日历不把改了名的实例说成已删除", async () => {
+    const watched = watchStats();
+    await settle();
+    expect(watched.fetches()).toBe(1);
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    await settle();
+    expect(watched.fetches()).toBe(2);
+    watched.stop();
+  });
+
+  it("删除：同名新实例的安装计划与内存建议也从头取；游玩统计去掉已清掉的记录", async () => {
+    await cacheIdle(perInstance);
+    const watched = watchStats();
+    await settle();
+    ipc.overrides.set("delete_instance", () => {
+      instances = instances.filter((i) => i.id !== "生存");
+      return { existed: true };
+    });
+
+    await store.actions.deleteInstance("生存", 0);
+    await settle();
+
+    expect(statuses()).toEqual(allLoading);
+    expect(watched.fetches()).toBe(2);
+    watched.stop();
   });
 });
 

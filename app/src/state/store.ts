@@ -634,6 +634,14 @@ const GAME_DIR_SCOPED_RESOURCES = [
 ] as const;
 
 /**
+ * key 里带实例 id 的按需数据（<前缀>:<实例 id>…）。实例删除、改名后原 id 下没人订阅的条目还留在缓存里，之后再有实例
+ * 用上这个 id（新建、导入同名实例，或把别的实例改成这个名字）时一订阅就直接拿到前一个实例的 Mod、设置、日志与安装计划，
+ * 所以 id 一落到新实例上就丢掉它们。不在改名当时丢原 id 的：改名发起的页面那一刻还订阅着原 id，失效会让它按已经不在的
+ * 实例重取、在缓存里留下一条报错。
+ */
+const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice"] as const;
+
+/**
  * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
  * 没改成的记录由后端记着，之后读写游玩记录时补上。其余错误照常冒泡。
  */
@@ -887,6 +895,11 @@ export class LauncherStore {
   private readonly discardLanding = new Set<string>();
   /** 固定服务器的读改写排成一条链：两次切换并发时，后一次要等前一次写完再读，否则先写的那台会被后写的覆盖。 */
   private serverPinChain: Promise<void> = Promise.resolve();
+  /**
+   * 侧栏固定的读改写同样排成一条链：每一次都按 raw.pins 算出整份新列表写回，前一次还没写完时读到的是旧列表，
+   * 两次固定、或装好的新实例落地自动固定撞上用户取消固定，后写的会把先写的那一项冲掉。
+   */
+  private sidebarPinChain: Promise<void> = Promise.resolve();
 
   readonly actions: LauncherActions;
   private readonly net: NetworkMonitor;
@@ -1518,9 +1531,29 @@ export class LauncherStore {
       const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
       await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
     }
-    const pins = this.raw.pins;
-    if (pin && pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+    if (pin) {
+      await this.queueSidebarPins(async () => {
+        const pins = this.raw.pins;
+        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+      });
+    }
+    this.instanceIdTaken(id);
     await this.fetchInstances();
+  }
+
+  /** 排进侧栏固定的链（见 sidebarPinChain）：前一次落定后才开始；这一次的结果与失败照常交给调用方，不挡后面排着的。 */
+  private queueSidebarPins<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.sidebarPinChain.then(work);
+    this.sidebarPinChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** 这个 id 落到了一个新实例上：丢掉之前用过这个 id 的实例留下的按需数据（见 INSTANCE_SCOPED_RESOURCES）。 */
+  private instanceIdTaken(id: string): void {
+    for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
   }
 
   /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
@@ -1902,35 +1935,39 @@ export class LauncherStore {
         await configIpc.updateConfig({ selectedVersion: id });
         store.set((raw) => ({ settings: raw.settings === null ? null : { ...raw.settings, selectedVersion: id } }));
       },
-      async togglePin(id) {
-        // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
-        const shown = store.getState().sidebarPins;
-        if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
-          store.pushToast("warning", TOAST_COPY.pinLimit);
-          return;
-        }
-        const pending = store.pendingCreate(id);
-        if (pending !== null) {
-          // 还在安装的新实例后端不认，只改它装好后要不要固定
-          store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
-          return;
-        }
-        const pins = store.raw.pins;
-        const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
-        store.set({ pins: await instancesIpc.setSidebarPins(next) });
+      togglePin(id) {
+        return store.queueSidebarPins(async () => {
+          // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
+          const shown = store.getState().sidebarPins;
+          if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
+            store.pushToast("warning", TOAST_COPY.pinLimit);
+            return;
+          }
+          const pending = store.pendingCreate(id);
+          if (pending !== null) {
+            // 还在安装的新实例后端不认，只改它装好后要不要固定
+            store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
+            return;
+          }
+          const pins = store.raw.pins;
+          const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
+          store.set({ pins: await instancesIpc.setSidebarPins(next) });
+        });
       },
-      async setSidebarPins(ids) {
-        // 安装中自动固定的新实例总排在末尾，不写进固定列表（装好后才写）
-        const persisted = ids.filter((id) => store.pendingCreate(id) === null);
-        const before = store.raw.pins;
-        store.set({ pins: persisted });
-        // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
-        try {
-          store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
-        } catch (error) {
-          store.set({ pins: before });
-          throw error;
-        }
+      setSidebarPins(ids) {
+        return store.queueSidebarPins(async () => {
+          // 安装中自动固定的新实例总排在末尾，不写进固定列表（装好后才写）
+          const persisted = ids.filter((id) => store.pendingCreate(id) === null);
+          const before = store.raw.pins;
+          store.set({ pins: persisted });
+          // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
+          try {
+            store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
+          } catch (error) {
+            store.set({ pins: before });
+            throw error;
+          }
+        });
       },
       async createInstance(spec) {
         const nameError = instanceNameError(spec.name, store.instanceIds());
@@ -2004,7 +2041,9 @@ export class LauncherStore {
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
-        for (const prefix of ["mods", "content", "history", "crash", "log", "settings", "mod-updates"]) invalidateResources(`${prefix}:${id}`);
+        for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
+        // 后端随删除清掉了它的游玩记录，日历与洞察不能还算着它
+        invalidateResources("play-stats");
         const copy = TOAST_COPY.instanceDeleted(id, worldCount);
         store.pushToast("info", copy.title, copy.body);
         if (lagged !== null) store.playRecordsLagged(id, lagged);
@@ -2020,6 +2059,9 @@ export class LauncherStore {
           },
         );
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
+        store.instanceIdTaken(newId);
+        // 游玩记录已迁到新名字下（没跟上的由后端在下一次读时补上）：主页日历按旧 id 找不到实例，会把改了名的说成已删除
+        invalidateResources("play-stats");
         store.renameSeq += 1;
         const seq = store.renameSeq;
         // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
