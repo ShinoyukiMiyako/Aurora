@@ -3,8 +3,8 @@
 //! 前端下载队列给每次长命令调用（安装版本、装 Mod、装 Java、启动……）分配一个 `task_id`。命令开头
 //! 用 [`TaskRegistry::register`] 登记，拿到的 [`TaskHandle`] 持有取消令牌；令牌挂到门面快照上
 //! （`Aurora::with_cancel`），下载引擎在文件粒度观察它。`cancel_task` 触发令牌后，命令在
-//! [`CANCEL_DEADLINE`] 内以 `cancelled` 返回：协作取消通常几毫秒就停，个别不观察令牌的阶段
-//! （Forge 处理器、Java 探测）由 [`TaskHandle::run`] 在宽限期满后强行放弃。
+//! [`CANCEL_DEADLINE`] 内以 `cancelled` 返回：协作取消通常几毫秒就停（Forge 处理器子进程也会被
+//! 结束并等它退出），个别不观察令牌的阶段（Java 探测）由 [`TaskHandle::run`] 在宽限期满后强行放弃。
 //!
 //! 任务日志是前端任务表的持久化：后端不解读任务内容，只保证整份原子写入与版本校验。
 
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(err.code, code::INVALID_ARGUMENT, "未取消时失败原样上报");
     }
 
-    /// 主体完全不看令牌（模拟 Forge 处理器这类阶段）：宽限期满后强行放弃，仍在时限内返回。
+    /// 主体完全不看令牌（模拟 Java 探测这类阶段）：宽限期满后强行放弃，仍在时限内返回。
     #[tokio::test]
     async fn run_abandons_work_that_ignores_the_token() {
         let registry = TaskRegistry::default();
