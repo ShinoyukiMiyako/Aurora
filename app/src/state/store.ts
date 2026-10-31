@@ -62,7 +62,7 @@ import { invoke, type UnlistenFn } from "../ipc/bridge";
 import * as configIpc from "../ipc/config";
 import { lastCrash } from "../ipc/diagnostics";
 import { installMod, type InstallableResourceType, type ResourceInstallOutcomeDto } from "../ipc/discover";
-import { isCancelled, isIpcError } from "../ipc/errors";
+import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/errors";
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
 import * as instancesIpc from "../ipc/instances";
 import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
@@ -369,6 +369,9 @@ const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb
 
 /** 写整个实例目录的任务：期间实例算「安装中」。其余挂在实例上的任务（装、更新 Mod 与资源）只改动其中的 Mod 与资源，算 modifying。 */
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
+
+/** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
+const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
 
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
@@ -806,6 +809,11 @@ export class LauncherStore {
   private journalState: "unread" | "read" | "invalid" = "unread";
   /** 首次启动向导的第一步已经提交（后端已记下向导完成）。 */
   private firstRunCommitted = false;
+  /**
+   * 已请求取消、还没落定的尝试（attemptTaskId）。后端只记「取消时不在运行」的 id：组合任务的某一项在取消宽限期内
+   * 照常做完时按成功返回，同一个 id 再登记拿到的是全新的令牌，下一项会照常开始。所以取消要由前端记着，每开始一项前查一次。
+   */
+  private readonly cancelRequested = new Set<string>();
 
   readonly actions: LauncherActions;
   private readonly net: NetworkMonitor;
@@ -1225,7 +1233,7 @@ export class LauncherStore {
     }));
     this.tasksChanged();
     const ids = new Set(pending.map((t) => t.id));
-    await Promise.all(this.raw.tasks.filter((t) => ids.has(t.id) && t.status === "running").map((t) => tasksIpc.cancelTask(attemptTaskId(t))));
+    await Promise.all(this.raw.tasks.filter((t) => ids.has(t.id) && t.status === "running").map((t) => this.requestCancel(t)));
     await waitUntil(
       this.subscribe,
       () => !this.raw.tasks.some((t) => ids.has(t.id) && isActiveTask(t)),
@@ -1257,21 +1265,40 @@ export class LauncherStore {
     for (const task of tasksToStart(this.raw.tasks)) {
       this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id, Date.now()) }));
       const attempt = task.attempt;
+      const attemptId = attemptTaskId(task);
       this.execute(task).then(
-        (result) => this.onTaskDone(task.id, attempt, result),
-        (error: unknown) => this.onTaskFailed(task.id, attempt, error),
+        (result) => {
+          this.cancelRequested.delete(attemptId);
+          this.onTaskDone(task.id, attempt, result);
+        },
+        (error: unknown) => {
+          this.cancelRequested.delete(attemptId);
+          this.onTaskFailed(task.id, attempt, error);
+        },
       );
     }
+  }
+
+  /** 请后端取消运行中的这一次尝试，并记下请求：组合任务据此不再开始下一项。返回后端此刻是否在运行它。 */
+  private requestCancel(task: Task): Promise<boolean> {
+    const attemptId = attemptTaskId(task);
+    this.cancelRequested.add(attemptId);
+    return tasksIpc.cancelTask(attemptId);
+  }
+
+  private assertNotCancelled(attemptId: string): void {
+    if (this.cancelRequested.has(attemptId)) throw new IpcError(CANCELLED_ERROR_CODE, "已取消");
   }
 
   private async execute(task: Task): Promise<unknown> {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
-    // 组合任务逐个调后端命令，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
+    // 组合任务逐个调后端命令，复用同一个 taskId；每开始一项前查一次取消（见 cancelRequested）
     if (command === "install_mods") {
       const versionId = strArg(args, "versionId", command);
       for (const item of modItems(args)) {
+        this.assertNotCancelled(taskId);
         await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
       }
       return null;
@@ -1279,6 +1306,7 @@ export class LauncherStore {
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
       for (const item of task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args)) {
+        this.assertNotCancelled(taskId);
         await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
       }
       return null;
@@ -1337,6 +1365,11 @@ export class LauncherStore {
     this.tasksChanged();
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫
     if (INSTANCE_TASKS.has(before.spec.command)) this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    // 组合任务停下之前做完的那几项已经落盘，Mod 列表与数目不能停在任务开始前
+    if (COMPOSITE_TASKS.has(before.spec.command) && before.instanceId !== null) {
+      this.modsChanged(before.instanceId);
+      this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    }
   }
 
   /** 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。 */
@@ -2123,7 +2156,7 @@ export class LauncherStore {
         }
         if (task.status !== "running") throw new Error(`任务 ${id} 已经结束`);
         // 运行中的任务由命令以 cancelled 返回后落态与通知
-        await tasksIpc.cancelTask(attemptTaskId(task));
+        await store.requestCancel(task);
       },
       async cancelAllTasks() {
         const active = store.raw.tasks.filter(isActiveTask);

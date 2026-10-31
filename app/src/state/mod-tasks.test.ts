@@ -212,3 +212,87 @@ describe("全部更新", () => {
     ]);
   });
 });
+
+describe("组合任务的取消", () => {
+  const installSodium = () =>
+    store.actions.installResource({
+      resourceType: "mod",
+      platform: "modrinth",
+      projectId: "sodium",
+      name: "Sodium",
+      targets: [{ instanceId: "生存", fileVersionId: "v2", world: null }],
+    });
+
+  it("某一项在取消宽限期内照常装完、后端按成功返回：不再开始下一项，任务落为已取消，Mod 列表重取", async () => {
+    ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }, { projectId: "lithium", versionId: "l1" }));
+    const first = deferred<unknown>();
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    // 取消到达时这一项正在运行（返回 true），后端随后不再记着这个 id
+    ipc.overrides.set("cancel_task", () => true);
+    await installSodium();
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task.status).toBe("running");
+    const mods = await cached("mods:生存");
+
+    await store.actions.cancelTask(task.id);
+    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth" });
+    await settle();
+
+    expect(callsOf(ipc, "install_mod").map((a) => a.projectId)).toEqual(["sodium"]);
+    expect(callsOf(ipc, "cancel_task")).toEqual([{ taskId: `${task.id}#1` }]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
+    expect(store.getState().toasts.map((t) => t.title)).toContain("已取消：安装 Sodium");
+    expect(store.getState().toasts.some((t) => t.tone === "success")).toBe(false);
+    // 第一项已经落进 mods 目录，列表不能停在取消前
+    expect(await readAgain("mods:生存", mods)).toBe(2);
+  });
+
+  it("全部更新：一项在宽限期内换好后不再更新其余的", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    const first = deferred<unknown>();
+    ipc.overrides.set("update_mod", (args) => (callsOf(ipc, "update_mod").length === 1 ? first.promise : { file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("cancel_task", () => true);
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [task] = store.getState().tasks;
+    await store.actions.cancelTask(task.id);
+    first.resolve({ file_name: "sodium-s2.jar", path: "", platform: "modrinth" });
+    await settle();
+    expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["sodium-s1.jar"]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
+  });
+
+  it("取消落在最后一项上、它在宽限期内做完：活已经干完，任务算完成", async () => {
+    ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }));
+    const last = deferred<unknown>();
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 2 ? last.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    ipc.overrides.set("cancel_task", () => true);
+    await installSodium();
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(callsOf(ipc, "install_mod")).toHaveLength(2);
+    await store.actions.cancelTask(task.id);
+    last.resolve({ file_name: "fabric-api-f1.jar", path: "", platform: "modrinth" });
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["done"]);
+    expect(store.getState().toasts.filter((t) => t.tone === "success").map((t) => t.title)).toEqual(["已安装 Sodium 及 1 个前置"]);
+  });
+
+  it("删除实例时取消运行中的组合任务：同样不再开始下一项", async () => {
+    ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }));
+    const first = deferred<unknown>();
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    ipc.overrides.set("cancel_task", () => true);
+    ipc.overrides.set("delete_instance", () => ({ existed: true }));
+    await installSodium();
+    await settle();
+    const deleting = store.actions.deleteInstance("生存", 0);
+    await settle();
+    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth" });
+    await deleting;
+    await settle();
+    expect(callsOf(ipc, "install_mod")).toHaveLength(1);
+    expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "生存" }]);
+  });
+});
