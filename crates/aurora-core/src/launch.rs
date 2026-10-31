@@ -871,6 +871,15 @@ impl Aurora {
                     ))
                     .await;
             }
+            // 用户指定的 Java 不完整也照用：缺的文件未必影响启动，替用户换一个就违背了设置。
+            if !java.is_complete() {
+                reporter
+                    .warn(format!(
+                        "指定的 Java 缺少 {}，可能没装完整，启动失败时换一个 Java",
+                        java.missing_files.join("、")
+                    ))
+                    .await;
+            }
             return Ok(JavaPlan::Ready(java));
         }
 
@@ -891,8 +900,12 @@ impl Aurora {
             })?
         {
             match probe_java(managed.clone(), DetectSource::Managed).await? {
-                Ok(java) if java.version.major == required_major => {
+                Ok(java) if java.version.major == required_major && java.is_complete() => {
                     return Ok(JavaPlan::Ready(java));
+                }
+                // 缺文件的托管运行时与自动选择一样跳过：重新下载时已就绪的文件按 sha1 跳过，等于补齐。
+                Ok(java) if java.version.major == required_major => {
+                    tracing::warn!(path = %managed.display(), missing = ?java.missing_files, "托管运行时缺少运行时文件，重新下载补齐")
                 }
                 Ok(java) => {
                     tracing::warn!(path = %managed.display(), major = java.version.major, "托管运行时主版本与目录不符，重新下载")
@@ -1933,6 +1946,37 @@ mod tests {
         let events = launch_preferring_gpu(&fx, existing.clone(), true, java).await;
         assert_eq!(existing.writes().len(), 1);
         assert!(!log_texts(&events, LauncherLevel::Info).contains(&notice));
+    }
+
+    /// 指定的 Java 缺运行时文件：照常启动，启动日志里提醒一句；补齐之后不再提醒。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incomplete_pinned_java_warns_but_still_launches() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let home = fx.root.join("half-jdk");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let java = fake_java(&home.join("bin"), 17, 0);
+        let store = Arc::new(crate::gpu::testing::MemoryGpuPreferences::default());
+        let reminder = "指定的 Java 缺少 release、lib/modules，可能没装完整，启动失败时换一个 Java";
+
+        let events = launch_preferring_gpu(&fx, store.clone(), false, java.clone()).await;
+        assert!(
+            log_texts(&events, LauncherLevel::Warn).contains(&reminder.to_owned()),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
+        );
+
+        std::fs::write(home.join("release"), b"JAVA_VERSION=\"17.0.8\"").unwrap();
+        std::fs::create_dir_all(home.join("lib")).unwrap();
+        std::fs::write(home.join("lib").join("modules"), b"image").unwrap();
+        let events = launch_preferring_gpu(&fx, store, false, java).await;
+        assert!(
+            !log_texts(&events, LauncherLevel::Warn)
+                .iter()
+                .any(|text| text.contains("可能没装完整")),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

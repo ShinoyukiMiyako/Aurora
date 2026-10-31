@@ -72,12 +72,13 @@ pub use config::{
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use deps::{InstallPlan, PlannedItem};
-pub use error::{CoreError, GameDirProblem, Result};
+pub use error::{CoreError, GameDirProblem, JavaPathProblem, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
+pub use java::RemovedJavaPath;
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
     LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
