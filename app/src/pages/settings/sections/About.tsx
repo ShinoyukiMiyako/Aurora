@@ -8,9 +8,9 @@ import { RELEASE_CHANNEL_LABEL } from "../../../copy/flows";
 import { formatDate } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { APP_LICENSE, APP_NAME, APP_NAME_EN, buildInfo, ISSUES_URL, REPO_URL, type BuildInfo } from "../../../lib/app-info";
-import { openExternal } from "../../../lib/external";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
+import { useLauncherActions } from "../../../state/launcher";
 import { useThirdPartyLicenses, type ThirdPartyPackage } from "../../../state/queries/about";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
@@ -146,6 +146,7 @@ function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void 
 
 function SupportCard() {
   const run = useRunner();
+  const actions = useLauncherActions();
   const commands = useSettingsCommands();
   const [licensesOpen, setLicensesOpen] = useState(false);
   return (
@@ -162,7 +163,7 @@ function SupportCard() {
         </Button>
       </SettingRow>
       <SettingRow title={ABOUT_COPY.feedback} description={ABOUT_COPY.feedbackDesc}>
-        <Button size="sm" variant="ghost" icon="external" onClick={() => void run(() => openExternal(ISSUES_URL), ABOUT_COPY.feedbackFailed)}>
+        <Button size="sm" variant="ghost" icon="external" onClick={() => void run(() => actions.openExternal(ISSUES_URL), ABOUT_COPY.feedbackFailed)}>
           {ABOUT_COPY.open}
         </Button>
       </SettingRow>

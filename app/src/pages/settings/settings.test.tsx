@@ -620,14 +620,10 @@ describe("设置页：关于与启动器更新", () => {
     expect(openDialogs()[0]?.textContent).toContain("serde");
   });
 
-  it("问题反馈：用系统浏览器打开仓库的 Issues 页", async () => {
-    const opened: { href: string; target: string }[] = [];
-    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
-      opened.push({ href: this.href, target: this.target });
-    });
+  it("问题反馈：交给 opener 插件用系统浏览器打开仓库的 Issues 页", async () => {
+    ipc.overrides.set("plugin:opener|open_url", () => null);
     await mount("about");
     await click(rowButton("问题反馈", "打开"));
-    expect(opened).toEqual([{ href: ISSUES_URL, target: "_blank" }]);
-    expect(document.querySelectorAll("a[hidden]")).toHaveLength(0);
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url: ISSUES_URL }]);
   });
 });

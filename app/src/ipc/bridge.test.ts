@@ -42,7 +42,30 @@ describe("浏览器与测试环境走 mock", () => {
     const registered = [...block.matchAll(/commands::\w+::(\w+)/g)].map((m) => m[1]).sort();
     expect(registered.length).toBeGreaterThan(80);
     expect(new Set(registered).size).toBe(registered.length);
-    expect(mockCommands()).toEqual(registered);
+    expect(mockCommands().filter((cmd) => !cmd.startsWith("plugin:"))).toEqual(registered);
+  });
+
+  // 插件命令不在 generate_handler! 里，它能不能调由能力文件授权：mock 提供的每一条都要在那里授予。
+  it("mock 提供的插件命令都在能力文件里授了权", () => {
+    const capability = JSON.parse(readFileSync(new URL("../../src-tauri/capabilities/default.json", import.meta.url), "utf8")) as {
+      permissions: string[];
+    };
+    const plugins = mockCommands().filter((cmd) => cmd.startsWith("plugin:"));
+    expect(plugins).toEqual(["plugin:opener|open_url"]);
+    for (const cmd of plugins) {
+      const [plugin, name] = cmd.slice("plugin:".length).split("|");
+      expect(capability.permissions).toContain(`${plugin}:allow-${name.replaceAll("_", "-")}`);
+    }
+  });
+
+  it("opener 的 mock 放行 http(s)、mailto、tel，别的协议照插件原文拒绝", async () => {
+    const open = vi.fn();
+    vi.stubGlobal("window", { open });
+    await invoke("plugin:opener|open_url", { url: "https://example.org/issues" });
+    expect(open).toHaveBeenCalledWith("https://example.org/issues", "_blank", "noopener,noreferrer");
+    const denied = await invoke("plugin:opener|open_url", { url: "file:///C:/Windows/System32/calc.exe" }).catch((e: unknown) => e);
+    expect(denied).toMatchObject({ code: "unknown", message: "Not allowed to open url file:///C:/Windows/System32/calc.exe" });
+    expect(open).toHaveBeenCalledTimes(1);
   });
 
   it("未实现的命令直接抛错，不返回空值", async () => {
