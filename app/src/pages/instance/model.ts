@@ -3,7 +3,7 @@
 
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
-import type { LaunchViewKind } from "../../launch/launchView";
+import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
 
@@ -69,6 +69,38 @@ export type WorkLock = "installing" | "renaming" | "deleting";
 export function workLock(installing: boolean, activity: InstanceSummary["activity"]): WorkLock | null {
   if (installing) return "installing";
   return activity === "renaming" || activity === "deleting" ? activity : null;
+}
+
+// ---------------------------------------------------------------- 整页订阅的启动视图
+
+/**
+ * 整页按片订阅启动视图时的相等比较：只比页面自己画的判定（种类、加载阶段、结束原因、失败码、损坏原因、
+ * 任务是哪一个、排没排上），不比进度。启动下载与安装、补全的进度每个任务约 100 ms 一次，
+ * 每次都换一份会话或任务对象；按 launchViewEqual 比，头图、标签条与当前标签就跟着整页重渲染。
+ * 所以页面拿到的视图里，会话与任务只是判定变化那一刻的快照：进度、速度、字节数可能是旧的，
+ * 画进度的部件（胶囊、头图的安装标签、概览的安装横幅）各自订阅。
+ */
+export function pageViewEqual(a: LaunchView, b: LaunchView): boolean {
+  switch (a.kind) {
+    case "ready":
+      return b.kind === "ready" && a.busyElsewhere === b.busyElsewhere;
+    case "loading":
+      return b.kind === "loading" && a.phase === b.phase;
+    case "running":
+    case "crashed":
+      return b.kind === a.kind;
+    case "stopped":
+      return b.kind === "stopped" && a.reason === b.reason;
+    case "failed":
+      return b.kind === "failed" && a.code === b.code && a.params === b.params;
+    case "installing": {
+      if (b.kind !== "installing" || a.queuePosition !== b.queuePosition) return false;
+      if (a.task === null || b.task === null) return a.task === b.task;
+      return a.task.id === b.task.id && a.task.status === b.task.status;
+    }
+    case "broken":
+      return b.kind === "broken" && a.reason === b.reason && a.reimport === b.reimport;
+  }
 }
 
 // ---------------------------------------------------------------- 概览横幅
