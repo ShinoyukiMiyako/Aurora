@@ -15,7 +15,7 @@ import { javaMajorFromClassVersion } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useNow } from "../../state/launcher";
 import { useJavaRuntimes } from "../../state/queries/catalog";
 import { useInstanceMods, useInstanceSettings, type CrashClueDto, type CrashReportDto, type InstalledMod } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
@@ -25,7 +25,6 @@ import { Callout } from "../../ui/Callout";
 import { Card } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
 import { EmptyState } from "../../ui/EmptyState";
-import { IconButton } from "../../ui/IconButton";
 import { CopyButton } from "../../ui/KV";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
@@ -36,7 +35,7 @@ import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
 import { crashFixes, crashFixKey, matchSuspect, modName, type CrashFix } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError, SlowHint, useModuleView } from "./parts";
+import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface CrashTabProps {
   inst: InstanceSummary;
@@ -49,7 +48,7 @@ export interface CrashTabProps {
 }
 
 export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab }: CrashTabProps) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   // 从「查看诊断」进来时收起崩溃态：报告已经落盘，不会丢
   const crashed = view.kind === "crashed";
   useEffect(() => {
@@ -159,7 +158,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
               <Icon name="file" size={14} />
               <code className={styles.path}>{report.log_path}</code>
               <CopyButton text={report.log_path} label={CRASH_PAGE_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
-              <IconButton icon="folder" label={SETTINGS_COPY.open} size="sm" onClick={() => ops.openFolder("logs")} />
+              <FolderButton ops={ops} target="logs" label={SETTINGS_COPY.open} size="sm" />
             </span>
           )}
           <span className={styles.soft}>{`${formatDate(report.at)} ${clock(report.at)}`}</span>
@@ -366,7 +365,7 @@ function FixRow({
   onUndone(): void;
   onTab(tab: InstanceTab): void;
 }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const { go } = useNav();
   const run = useRunner();
   const { copyText } = useShell();
@@ -374,6 +373,7 @@ function FixRow({
   const [expanded, setExpanded] = useState(false);
   const modLock = lockReason(ops.locks.mods, "mods");
   const repairLock = lockReason(ops.locks.repair, "repair");
+  const settingsLock = ops.settingsReason;
 
   /** 改实例设置的一键尝试：可撤销，成功后通知「某某已改为」。 */
   const changeSetting = (patch: Partial<InstanceSettings>, item: string, value: string, note: string) => {
@@ -423,8 +423,10 @@ function FixRow({
   switch (fix.kind) {
     case "raise_memory":
       note = CRASH_COPY.memoryNote(fix.currentMb, fix.followsGlobal);
-      action = button(CRASH_COPY.raiseMemory(fix.targetMb), () =>
-        changeSetting({ memoryMb: fix.targetMb }, CRASH_PAGE_COPY.memoryItem, formatMemory(fix.targetMb), CRASH_PAGE_COPY.memoryDone(fix.targetMb)),
+      action = button(
+        CRASH_COPY.raiseMemory(fix.targetMb),
+        () => changeSetting({ memoryMb: fix.targetMb }, CRASH_PAGE_COPY.memoryItem, formatMemory(fix.targetMb), CRASH_PAGE_COPY.memoryDone(fix.targetMb)),
+        settingsLock,
       );
       break;
     case "memory_at_cap":
@@ -437,18 +439,22 @@ function FixRow({
       break;
     case "lower_memory":
       note = CRASH_COPY.lowerMemoryNote(fix.currentMb);
-      action = button(CRASH_COPY.lowerMemory(fix.targetMb), () =>
-        changeSetting({ memoryMb: fix.targetMb }, CRASH_PAGE_COPY.memoryItem, formatMemory(fix.targetMb), CRASH_PAGE_COPY.memoryDone(fix.targetMb)),
+      action = button(
+        CRASH_COPY.lowerMemory(fix.targetMb),
+        () => changeSetting({ memoryMb: fix.targetMb }, CRASH_PAGE_COPY.memoryItem, formatMemory(fix.targetMb), CRASH_PAGE_COPY.memoryDone(fix.targetMb)),
+        settingsLock,
       );
       break;
     case "use_64bit_java":
       note = CRASH_PAGE_COPY.java64Note;
-      action = button(CRASH_COPY.use64BitJava, () => changeSetting({ java: JAVA_AUTO }, CRASH_PAGE_COPY.javaItem, SETTINGS_COPY.javaAuto, CRASH_PAGE_COPY.java64Done));
+      action = button(CRASH_COPY.use64BitJava, () => changeSetting({ java: JAVA_AUTO }, CRASH_PAGE_COPY.javaItem, SETTINGS_COPY.javaAuto, CRASH_PAGE_COPY.java64Done), settingsLock);
       break;
     case "switch_java":
       note = CRASH_PAGE_COPY.javaNote(fix.major);
-      action = button(CRASH_PAGE_COPY.switchJava(fix.major), () =>
-        changeSetting({ java: fix.path }, CRASH_PAGE_COPY.javaItem, CRASH_PAGE_COPY.javaValue(fix.major), CRASH_PAGE_COPY.javaDone(fix.major)),
+      action = button(
+        CRASH_PAGE_COPY.switchJava(fix.major),
+        () => changeSetting({ java: fix.path }, CRASH_PAGE_COPY.javaItem, CRASH_PAGE_COPY.javaValue(fix.major), CRASH_PAGE_COPY.javaDone(fix.major)),
+        settingsLock,
       );
       break;
     case "download_java":
@@ -520,7 +526,8 @@ function FixRow({
         <div className={styles.rowActions}>
           {isDone
             ? done.undo !== null && (
-                <Button variant="ghost" size="sm" onClick={done.undo}>
+                // 能撤销的只有改实例设置的那几项，撤销同样是写实例设置
+                <Button variant="ghost" size="sm" disabledReason={settingsLock} onClick={done.undo}>
                   {CRASH_PAGE_COPY.undo}
                 </Button>
               )
@@ -547,7 +554,7 @@ function FixRow({
 // ---------------------------------------------------------------- 日志指向的 Mod
 
 function SuspectsCard({ inst, ops, report, mods }: { inst: InstanceSummary; ops: InstanceOps; report: CrashReportDto; mods: ResourceResult<InstalledMod[]> }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const lock = lockReason(ops.locks.mods, "mods");
 

@@ -11,7 +11,7 @@ import { needsReimport } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useInstanceSettings } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute } from "../../state/route";
@@ -63,11 +63,13 @@ export interface SettingsTabProps {
 interface SettingsEditor {
   /** 磁盘上的值叠加还没回来的乐观补丁。 */
   value: InstanceSettings;
+  /** 此刻写不了实例设置的原因（安装、补全、改名、删除进行中）；能写为 undefined。锁住时各控件不触发 save。 */
+  locked: string | undefined;
   save(patch: Partial<InstanceSettings>): Promise<boolean>;
 }
 
-function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings>): SettingsEditor | null {
-  const { actions } = useLauncher();
+function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings>, locked: string | undefined): SettingsEditor | null {
+  const actions = useLauncherActions();
   const run = useRunner();
   const [patch, setPatch] = useState<Partial<InstanceSettings>>({});
   const data = settings.status === "ready" ? settings.data : null;
@@ -76,6 +78,7 @@ function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings
   if (data === null) return null;
   return {
     value: { ...data, ...patch },
+    locked,
     save: async (next) => {
       setPatch((p) => ({ ...p, ...next }));
       const outcome = await run(() => actions.updateInstanceSettings(id, next), ACTION_ERROR.instanceSettings);
@@ -87,7 +90,7 @@ function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings
 
 export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   const settings = useInstanceSettings(queryId);
-  const editor = useSettingsEditor(inst.id, settings);
+  const editor = useSettingsEditor(inst.id, settings, ops.settingsReason);
   const java = useJavaInfo(inst, settings);
   const memory = useMemoryInfo(inst, settings, queryId);
   // 整页一个加载门：300 ms 内都读到就不出骨架；骨架出现后至少停留 300 ms，几张卡一起换成内容
@@ -105,6 +108,7 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   return (
     <div className={styles.stack}>
       {ops.busy && <Banner tone="info" title={SETTINGS_COPY.runningNote} />}
+      {ops.settingsReason !== undefined && <Banner tone="info" title={ops.settingsReason} />}
       <div className={styles.settingsGrid}>
         <MemoryCard inst={inst} editor={editor} memory={memory} placeholder={placeholder} />
         <JavaCard inst={inst} editor={editor} java={java} placeholder={placeholder} />
@@ -155,7 +159,7 @@ function MemoryCard({
   memory: ReturnType<typeof useMemoryInfo>;
   placeholder: Placeholder;
 }) {
-  const { state } = useLauncher();
+  const global = useLauncherSelector((s) => s.settings);
   const { go } = useNav();
   const custom = editor !== null && editor.value.memoryMb !== null;
   const saved = editor === null ? null : editor.value.memoryMb;
@@ -165,7 +169,7 @@ function MemoryCard({
   const body = (() => {
     if (placeholder === "pending") return null;
     if (placeholder === null && memory.status === "error") return <ModuleError title={SETTINGS_COPY.memoryError} error={memory.error} onRetry={memory.reload} />;
-    if (placeholder !== null || memory.status !== "ready" || editor === null || state.settings === null) return <Skeleton shape="text" lines={3} />;
+    if (placeholder !== null || memory.status !== "ready" || editor === null || global === null) return <Skeleton shape="text" lines={3} />;
     const info: MemoryInfo = memory.value;
     const recommended = info.advice.recommended_mb;
     const mods = inst.modCount === null ? 0 : inst.modCount;
@@ -174,7 +178,7 @@ function MemoryCard({
         <div className={styles.followBox}>
           <div className={styles.followText}>
             <span className={styles.followValue}>{formatMemory(info.effectiveMb)}</span>
-            <span className={styles.soft}>{state.settings.memory.auto ? SETTINGS_COPY.followAuto : SETTINGS_COPY.followFixed}</span>
+            <span className={styles.soft}>{global.memory.auto ? SETTINGS_COPY.followAuto : SETTINGS_COPY.followFixed}</span>
           </div>
           <Button variant="ghost" size="sm" iconRight="arrow-right" onClick={() => go({ page: "settings", section: "game" })}>
             {SETTINGS_COPY.globalSettings}
@@ -188,6 +192,7 @@ function MemoryCard({
         value={draft}
         onChange={setDraft}
         onCommit={(mb) => void editor.save({ memoryMb: mb })}
+        disabled={editor.locked !== undefined}
         totalMb={info.advice.total_mb}
         recommended={{ mb: recommended, tip: SETTINGS_COPY.recommendTip(mods, recommended) }}
         notes={[below ? SETTINGS_COPY.belowRecommended(mods, recommended) : SETTINGS_COPY.enough(recommended)]}
@@ -204,7 +209,7 @@ function MemoryCard({
         <SegmentedControl
           block
           value={custom ? "custom" : "follow"}
-          disabled={editor === null || memory.status !== "ready"}
+          disabled={editor === null || memory.status !== "ready" || editor.locked !== undefined}
           onChange={(mode) => {
             if (editor === null || memory.status !== "ready") return;
             void editor.save({ memoryMb: mode === "custom" ? snapMemory(memory.value.effectiveMb) : null });
@@ -226,7 +231,7 @@ function MemoryCard({
 const FIT_ICON = { match: "check-circle", higher: "alert", lower: "x-circle" } as const;
 
 function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; editor: SettingsEditor | null; java: ReturnType<typeof useJavaInfo>; placeholder: Placeholder }) {
-  const { state } = useLauncher();
+  const global = useLauncherSelector((s) => s.settings);
   const subtitle =
     java.status === "ready" && java.value !== null && inst.mcVersion !== null
       ? SETTINGS_COPY.javaSubtitle(inst.mcVersion, java.value.required)
@@ -237,7 +242,7 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
   const body = (() => {
     if (placeholder === "pending") return null;
     if (placeholder === null && java.status === "error") return <ModuleError title={SETTINGS_COPY.javaError} error={java.error} onRetry={java.reload} />;
-    if (placeholder !== null || java.status !== "ready" || editor === null || state.settings === null) {
+    if (placeholder !== null || java.status !== "ready" || editor === null || global === null) {
       return (
         <>
           <Skeleton shape="block" width="100%" height={36} radius="md" />
@@ -266,8 +271,8 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
     }
     return (
       <>
-        <Select value={value} onChange={(next) => void editor.save({ java: next })} options={options} block ariaLabel={SETTINGS_COPY.javaSelect} />
-        <JavaState info={info} autoDownload={state.settings.autoDownloadJava} onUseAuto={() => void editor.save({ java: JAVA_AUTO })} />
+        <Select value={value} onChange={(next) => void editor.save({ java: next })} options={options} block disabled={editor.locked !== undefined} ariaLabel={SETTINGS_COPY.javaSelect} />
+        <JavaState info={info} autoDownload={global.autoDownloadJava} locked={editor.locked} onUseAuto={() => void editor.save({ java: JAVA_AUTO })} />
       </>
     );
   })();
@@ -288,10 +293,10 @@ function autoHint(info: JavaInfo): string {
   return SETTINGS_COPY.javaAutoDownload(info.required);
 }
 
-function JavaState({ info, autoDownload, onUseAuto }: { info: JavaInfo; autoDownload: boolean; onUseAuto(): void }) {
+function JavaState({ info, autoDownload, locked, onUseAuto }: { info: JavaInfo; autoDownload: boolean; locked: string | undefined; onUseAuto(): void }) {
   const runtime = chosenRuntime(info.choice);
   const useAuto = info.choice.auto ? undefined : (
-    <Button size="sm" onClick={onUseAuto}>
+    <Button size="sm" disabledReason={locked} onClick={onUseAuto}>
       {SETTINGS_COPY.useAuto}
     </Button>
   );
@@ -318,7 +323,7 @@ function JavaState({ info, autoDownload, onUseAuto }: { info: JavaInfo; autoDown
 // ---------------------------------------------------------------- JVM 参数
 
 function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | null }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const saved = editor.value.jvmArgs;
   const [draft, setDraft] = useState(saved);
   const [saving, setSaving] = useState(false);
@@ -327,7 +332,8 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
   const major = java === null ? null : effectiveJavaMajor(java.choice, java.required);
 
   const save = () => {
-    if (!dirty || saving) return;
+    // Ctrl + Enter 也走这里：锁住时与保存按钮一样不动作
+    if (!dirty || saving || editor.locked !== undefined) return;
     const next = draft.trim();
     setSaving(true);
     void editor.save({ jvmArgs: next }).then((ok) => {
@@ -389,7 +395,7 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
           <Button variant="ghost" size="sm" disabled={!dirty} onClick={() => setDraft(saved)}>
             {SETTINGS_COPY.restore}
           </Button>
-          <Button size="sm" icon="check" disabled={!dirty} loading={saving} onClick={save}>
+          <Button size="sm" icon="check" disabled={!dirty} disabledReason={editor.locked} loading={saving} onClick={save}>
             {SETTINGS_COPY.saveArgs}
           </Button>
         </div>
@@ -401,9 +407,8 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
 // ---------------------------------------------------------------- 版本隔离与窗口
 
 function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsEditor }) {
-  const { state } = useLauncher();
+  const policy = useLauncherSelector((state) => (state.settings === null ? null : state.settings.isolationPolicy));
   const s = editor.value;
-  const policy = state.settings === null ? null : state.settings.isolationPolicy;
   // 跟随全局时说此刻实际隔离与否：列表里后端给的生效值算上了「版本目录里已有 mods 或 saves 就强制隔离」，
   // 前端看不到目录、推断不出这一条；后端没给出（实例设置读不出）时才按全局策略推断
   const followIsolated = policy === null ? null : inst.isolated === null ? isolationByPolicy(policy, inst) : inst.isolated;
@@ -424,6 +429,7 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
           <SegmentedControl
             size="sm"
             value={s.isolation}
+            disabled={editor.locked !== undefined}
             onChange={(isolation) => void editor.save({ isolation })}
             ariaLabel={SETTINGS_COPY.isolation}
             options={[
@@ -435,7 +441,7 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
         </SettingRow>
         <ResolutionRow editor={editor} />
         <SettingRow title={SETTINGS_COPY.fullscreen} description={SETTINGS_COPY.fullscreenNote}>
-          <Toggle checked={s.fullscreen} onChange={(fullscreen) => void editor.save({ fullscreen })} ariaLabel={SETTINGS_COPY.fullscreen} />
+          <Toggle checked={s.fullscreen} onChange={(fullscreen) => void editor.save({ fullscreen })} ariaLabel={SETTINGS_COPY.fullscreen} disabledReason={editor.locked} />
         </SettingRow>
       </div>
     </Card>
@@ -445,6 +451,7 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
 function ResolutionRow({ editor }: { editor: SettingsEditor }) {
   const { width, height } = editor.value.resolution;
   const fullscreen = editor.value.fullscreen;
+  const locked = editor.locked;
   const [w, setW] = useState(String(width));
   const [h, setH] = useState(String(height));
   useEffect(() => setW(String(width)), [width]);
@@ -477,6 +484,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
                   variant={on ? "secondary" : "ghost"}
                   aria-pressed={on}
                   disabled={fullscreen}
+                  disabledReason={locked}
                   onClick={() => void editor.save({ resolution: { width: p.width, height: p.height } })}
                 >
                   {`${p.width}×${p.height}`}
@@ -494,7 +502,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
           size="sm"
           inputMode="numeric"
           invalid={wValue === null}
-          disabled={fullscreen}
+          disabled={fullscreen || locked !== undefined}
           aria-label={SETTINGS_COPY.resolutionWidth}
           onBlur={commit}
           onEnter={commit}
@@ -507,7 +515,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
           size="sm"
           inputMode="numeric"
           invalid={hValue === null}
-          disabled={fullscreen}
+          disabled={fullscreen || locked !== undefined}
           aria-label={SETTINGS_COPY.resolutionHeight}
           onBlur={commit}
           onEnter={commit}
@@ -522,7 +530,8 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
 // ---------------------------------------------------------------- 实例管理
 
 function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) {
-  const { state } = useLauncher();
+  const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
+  const gameDir = useLauncherSelector((s) => (s.settings === null ? null : s.settings.gameDir));
   const { tier } = useShell();
   const { go } = useNav();
   const [name, setName] = useState(inst.name);
@@ -534,8 +543,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
-  const pinBlocked = !inst.pinned && !canPinMore(state);
-  const folder = state.settings === null ? null : instanceFolderPath(state.settings.gameDir, inst.id);
+  const folder = gameDir === null ? null : instanceFolderPath(gameDir, inst.id);
 
   const saveName = () => {
     if (!changed || error !== null || renaming) return;

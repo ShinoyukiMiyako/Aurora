@@ -11,7 +11,7 @@ import type { LogLine } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useHistory, useLastLaunchLog, useRollbackChecks } from "../../state/queries/instance";
 import { isSessionActive } from "../../state/session";
 import { Button } from "../../ui/Button";
@@ -48,14 +48,14 @@ const SKELETON_LINES = 8;
 const NO_LINES: readonly LogLine[] = [];
 
 function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
-  const { state } = useLauncher();
+  // 整页只有这张卡订阅会话日志：本实例的会话每来一批日志就换一份；别的实例的会话一律当作没有，它的日志不让这里重渲染
+  const session = useLauncherSelector((s) => (s.session !== null && s.session.instanceId === inst.id ? s.session : null));
   const now = useNow(30_000);
   const { copyText } = useShell();
   const [level, setLevel] = useState<LogLevelFilter>("all");
   const [source, setSource] = useState<LogSourceFilter>("all");
-  const session = state.session !== null && state.session.instanceId === inst.id ? state.session : null;
   const lastLog = useLastLaunchLog(session === null ? queryId : null);
-  // 留底最多 5000 行，而这张卡随启动器的任何状态变化重渲染（下载进度每 100 ms 一次）：转换结果按查询结果缓存，
+  // 留底最多 5000 行，而这张卡随会话日志重渲染（游戏日志每 100 ms 一批）：转换结果按查询结果缓存，
   // 行对象不变，控制台按行对象分配的键与测量缓存才不会每次整批作废
   const lastData = lastLog.status === "ready" ? lastLog.data : null;
   const lastLines = useMemo(() => (lastData === null ? NO_LINES : lastData.lines.map(logLineFromDto)), [lastData]);
@@ -108,7 +108,8 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
         source={source}
         onCopy={copyText}
         copyFeedbackMs={COPY_FEEDBACK_MS}
-        onOpenFolder={() => ops.openFolder("logs")}
+        // 控制台的文件夹按钮不带禁用原因：logs 打不开（安装、补全、改名、删除进行中）时不给这个入口，免得点了才报错
+        onOpenFolder={ops.folderReason("logs") === undefined ? () => ops.openFolder("logs") : undefined}
         className={styles.consoleBody}
         filteredEmpty={LOGS_COPY.noLinesForFilter}
         filters={
@@ -186,7 +187,7 @@ function HistoryCard({ queryId, ops }: { queryId: string | null; ops: InstanceOp
 }
 
 function TimelineItem({ item, queryId, ops }: { item: HistoryItem; queryId: string | null; ops: InstanceOps }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const now = useNow(30_000);
   const [busy, setBusy] = useState(false);

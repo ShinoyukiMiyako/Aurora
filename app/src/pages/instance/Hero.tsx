@@ -13,7 +13,7 @@ import { instanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
 import { canPinMore } from "../../state/selectors";
 import { Card } from "../../ui/Card";
@@ -44,27 +44,30 @@ export interface HeroProps {
 }
 
 export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange }: HeroProps) {
-  const { state } = useLauncher();
   const { tier } = useShell();
   const { go } = useNav();
   const cover = instanceCover(inst);
-  const pinBlocked = !inst.pinned && !canPinMore(state);
+  const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
   const compact = tier === "compact";
 
   const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
+  const pinReason = pinBlocked ? TOAST_COPY.pinLimit : undefined;
+  // 禁用原因走菜单项的悬停提示气泡，不放右侧提示位：那一位与标签同一行、不折行，长原因会把标签挤成省略号
   const menu: MenuEntry[] = [
-    { label: HERO_COPY.rename, icon: "edit", disabled: renameReason !== undefined, hint: renameReason, onSelect: () => onRenamingChange(true) },
-    ...(compact ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), hint: pinBlocked ? TOAST_COPY.pinLimit : undefined, onSelect: ops.togglePin }] : []),
+    { label: HERO_COPY.rename, icon: "edit", disabled: renameReason !== undefined, disabledReason: renameReason, onSelect: () => onRenamingChange(true) },
+    ...(compact
+      ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), disabled: pinBlocked, disabledReason: pinReason, onSelect: ops.togglePin }]
+      : []),
     { label: HERO_COPY.openFolder, icon: "folder", onSelect: () => ops.openFolder("instance") },
     { kind: "separator" },
     needsReimport(inst)
       ? { label: MODPACK_REIMPORT_COPY.menuReimport, icon: "modpack", onSelect: () => go(reimportRoute(inst)) }
-      : { label: HERO_COPY.repair, icon: "wrench", disabled: repairReason !== undefined, hint: repairReason, onSelect: ops.repair },
+      : { label: HERO_COPY.repair, icon: "wrench", disabled: repairReason !== undefined, disabledReason: repairReason, onSelect: ops.repair },
     { kind: "separator" },
-    { label: HERO_COPY.delete, icon: "trash", danger: true, disabled: deleteReason !== undefined, hint: deleteReason, onSelect: ops.remove },
+    { label: HERO_COPY.delete, icon: "trash", danger: true, disabled: deleteReason !== undefined, disabledReason: deleteReason, onSelect: ops.remove },
   ];
 
   const eyebrow =

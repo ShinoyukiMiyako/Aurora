@@ -363,7 +363,12 @@ describe("实例详情：头图与标签", () => {
 describe("实例详情：后端正在改动实例", () => {
   const reason = (what: string) => `正在改动这个实例的 Mod、资源或设置，完成后才能${what}`;
 
-  it("头图菜单的重命名、补全与删除提前禁用并写明原因，F2 不进入改名", async () => {
+  it.each([
+    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+    ["regular", 1200, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+    ["wide", 1440, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+  ])("%s 档：头图菜单的重命名、补全与删除提前禁用，每项只写标签、原因放进悬停的提示气泡；F2 不进入改名", async (_tier, width, labels) => {
+    vi.stubGlobal("innerWidth", width);
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
     await open("overview");
     expect(document.querySelector('h1 button[aria-label="重命名"]')).toBeNull();
@@ -371,18 +376,54 @@ describe("实例详情：后端正在改动实例", () => {
     expect(document.querySelector('input[aria-label="实例名称"]')).toBeNull();
     click(button("更多操作"));
     const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
-    const item = (label: string) => {
-      const found = items.find((el) => textOf(el).startsWith(label));
-      if (found === undefined) throw new Error(`菜单里没有「${label}」`);
-      return found;
-    };
-    expect(textOf(item("重命名"))).toBe(`重命名${reason("重命名")}`);
-    expect(item("重命名").getAttribute("aria-disabled")).toBe("true");
-    expect(textOf(item("补全游戏文件"))).toBe(`补全游戏文件${reason("补全")}`);
-    expect(textOf(item("删除实例"))).toBe(`删除实例${reason("删除")}`);
-    click(item("删除实例"));
+    // 原因不再挤在标签右侧：每项的文字就是标签本身
+    expect(items.map(textOf)).toEqual(labels);
+    for (const [label, what] of [
+      ["重命名", "重命名"],
+      ["补全游戏文件", "补全"],
+      ["删除实例", "删除"],
+    ]) {
+      const item = items.find((el) => textOf(el) === label);
+      if (item === undefined) throw new Error(`菜单里没有「${label}」`);
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      act(() => {
+        item.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tipId = item.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error(`「${label}」悬停后没有关联提示气泡`);
+      expect(document.getElementById(tipId)?.textContent).toBe(reason(what));
+    }
+    click(items[items.length - 1]);
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+  });
+
+  it("compact 档侧栏已固定满：菜单里的固定项禁用，标签完整，原因放进提示气泡；点了不改固定列表", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    const others = ["一", "二", "三", "四", "五"].map((n) => instanceDto(`固定${n}`));
+    instances = [...instances, ...others];
+    bootOverrides(ipc, { instances, pins: others.map((i) => i.id), config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await open("overview");
+    click(button("更多操作"));
+    const pin = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "固定到侧栏");
+    if (pin === undefined) throw new Error("菜单里没有只写标签的「固定到侧栏」");
+    expect(pin.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      pin.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = pin.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("固定项悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("侧栏最多固定 5 个实例，先取消固定一个");
+    click(pin);
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
   });
 
   it("设置页的重命名与删除按钮带原因禁用，Mod 开关照常可用", async () => {
@@ -395,6 +436,147 @@ describe("实例详情：后端正在改动实例", () => {
     click(byRole("tab", /^Mod/));
     await flush();
     expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
+});
+
+describe("实例详情：工作目录与实例设置的占用", () => {
+  // 打开 mods、saves、logs 这类工作子目录（缺了要先建）与写实例设置时后端会占住实例，与安装、补全、改名、删除互斥
+  const folderReason = "安装任务正在写这个实例的文件夹，完成后才能打开";
+  const settingsReason = "安装任务正在写这个实例的文件夹，完成后才能改设置";
+  const lastLog = (): LaunchLogDto => ({
+    path: "latest.log",
+    started_at: NOW - DAY,
+    lines: [{ at: NOW - DAY, level: "info", source: "game", text: "第 0 行" }],
+    omitted: 0,
+    ended: { at: NOW - DAY + 60_000, outcome: "exited" },
+  });
+  const iconButton = (label: string) => {
+    const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => {
+      const name = b.getAttribute("aria-label");
+      return name !== null && (name === label || name.startsWith(`${label}：`));
+    });
+    if (found === undefined) throw new Error(`找不到图标按钮 ${label}`);
+    return found;
+  };
+
+  beforeEach(() => {
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    ipc.overrides.set("last_launch_log", () => lastLog());
+  });
+
+  it("补全进行中：打开 mods、存档、日志文件夹的按钮置灰并写明原因，点了不发命令；打开实例文件夹与单个存档照常", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
+    await open("overview");
+    const saves = iconButton("打开存档文件夹");
+    expect(saves.getAttribute("aria-label")).toBe(`打开存档文件夹：${folderReason}`);
+    expect(saves.disabled).toBe(true);
+    click(saves);
+    expect(iconButton("打开「新世界」所在文件夹").disabled).toBe(false);
+    click(iconButton("打开「新世界」所在文件夹"));
+    await flush();
+    expect(callsOf(ipc, "open_folder")).toEqual([{ target: "world", id: ID, world: "w2" }]);
+
+    click(byRole("tab", /^Mod/));
+    await flush();
+    const modsFolder = iconButton("打开 mods 文件夹");
+    expect(modsFolder.getAttribute("aria-label")).toBe(`打开 mods 文件夹：${folderReason}`);
+    expect(modsFolder.disabled).toBe(true);
+
+    click(byRole("tab", /^日志与历史/));
+    await flush();
+    expect(text()).toContain("最近一次启动");
+    expect(() => iconButton("打开日志文件夹")).toThrow();
+
+    click(byRole("tab", /^崩溃诊断/));
+    await flush();
+    const logsFolder = iconButton("打开");
+    expect(logsFolder.getAttribute("aria-label")).toBe(`打开：${folderReason}`);
+    expect(logsFolder.disabled).toBe(true);
+    click(logsFolder);
+
+    click(button("更多操作"));
+    const openInstance = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "打开实例文件夹");
+    if (openInstance === undefined) throw new Error("菜单里没有「打开实例文件夹」");
+    expect(openInstance.getAttribute("aria-disabled")).toBeNull();
+    click(openInstance);
+    await flush();
+    expect(callsOf(ipc, "open_folder").map((a) => a.target)).toEqual(["world", "instance"]);
+  });
+
+  it("补全进行中：设置页说明原因，立即保存的控件与 JVM 参数的保存都禁用，改了不发命令", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
+    await open("settings");
+    expect(text()).toContain(settingsReason);
+    const custom = byRole("radio", "为这个实例单独设置");
+    expect((custom as HTMLButtonElement).disabled).toBe(true);
+    click(custom);
+    const fullscreen = byRole("switch", "全屏启动");
+    expect(fullscreen.getAttribute("aria-disabled")).toBe("true");
+    click(fullscreen);
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="窗口宽度"]')?.disabled).toBe(true);
+    expect(byRole("radio", "开启").hasAttribute("disabled")).toBe(true);
+    const area = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="JVM 参数"]');
+    if (area === null) throw new Error("没有 JVM 参数框");
+    typeInto(area, "-XX:+UseG1GC");
+    const save = button("保存参数");
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    click(save);
+    keydown(area, "Enter", { ctrlKey: true });
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+  });
+
+  it("崩溃诊断：补全进行中改实例设置的一键尝试带原因禁用", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
+    await open("crash");
+    const raise = button("调到 6 GB");
+    expect(raise.getAttribute("aria-disabled")).toBe("true");
+    click(raise);
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+  });
+
+  it("后端正在改名这个实例：打开工作子目录与改设置同样提前禁用", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "renaming" } : i));
+    await open("settings");
+    expect(text()).toContain("正在重命名这个实例，完成后才能改设置");
+    expect(byRole("switch", "全屏启动").getAttribute("aria-disabled")).toBe("true");
+    click(byRole("tab", "概览"));
+    await flush();
+    expect(iconButton("打开存档文件夹").getAttribute("aria-label")).toBe("打开存档文件夹：正在重命名这个实例，完成后才能打开");
+  });
+
+  it("游戏运行中：打开这些文件夹与改实例设置照常可用", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    click(iconButton("打开存档文件夹"));
+    click(byRole("tab", /^Mod/));
+    await flush();
+    click(iconButton("打开 mods 文件夹"));
+    click(byRole("tab", /^日志与历史/));
+    await flush();
+    click(iconButton("打开日志文件夹"));
+    click(byRole("tab", /^崩溃诊断/));
+    await flush();
+    click(iconButton("打开"));
+    await flush();
+    expect(callsOf(ipc, "open_folder")).toEqual([
+      { target: "saves", id: ID, world: null },
+      { target: "mods", id: ID, world: null },
+      { target: "logs", id: ID, world: null },
+      { target: "logs", id: ID, world: null },
+    ]);
+    click(byRole("tab", "设置"));
+    await flush();
+    expect(text()).toContain("游戏正在运行，这里的改动会在下次启动时生效。");
+    click(byRole("switch", "全屏启动"));
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings").map((a) => (a.settings as InstanceSettingsDto).fullscreen)).toEqual([true]);
   });
 });
 
