@@ -510,6 +510,8 @@ export const TASK_TEXT = {
     dependencies > 0 ? `到「${instance}」，含 ${dependencies} 个前置` : `到「${instance}」`,
   updateTitle: (modName: string) => `更新 ${modName}`,
   updateDetail: (from: string, to: string, instance: string) => `${from} → ${to} · 「${instance}」`,
+  updateAllTitle: (count: number) => `更新 ${count} 个 Mod`,
+  updateAllDetail: (instance: string) => `「${instance}」`,
   javaTitle: (major: number) => `下载 Java ${major}`,
   javaDetailPending: "Mojang 运行时 · 手动",
   javaDetail: (version: string) => `Mojang ${version} · 手动`,
@@ -546,6 +548,7 @@ export const TASK_TOAST = {
     body: `装入「${instance}」`,
   }),
   modUpdated: (mod: string, instance: string) => ({ title: `已更新 ${mod}`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
+  modsUpdated: (count: number, instance: string) => ({ title: `已更新 ${count} 个 Mod`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
   resourcePack: (name: string) => ({ title: `已安装资源包 ${name}`, body: "进入游戏后在「选项 → 资源包」里启用" }),
   shader: (name: string, instance: string) => ({ title: `已安装光影 ${name}`, body: `已设为「${instance}」的当前光影` }),
   datapack: (name: string, world: string | null) => ({

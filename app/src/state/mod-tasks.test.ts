@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { InstallPlan, ModVersionInfo } from "../ipc/mods";
+import { IpcError } from "../ipc/errors";
+import type { InstallPlan, ModVersionInfo, UpdateCandidate } from "../ipc/mods";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, resetRecorder, settle, startedStore } from "../test/launcher";
 import { resources } from "./resource";
@@ -116,5 +117,65 @@ describe("Mod 集合变化后发现页的落位矩阵失效", () => {
     await settle();
     expect(store.getState().tasks.map((t) => t.status)).toEqual(["done"]);
     expect(await readAgain("match:modrinth:faithful:auto", pack)).toBe(2);
+  });
+});
+
+function candidate(projectId: string, current: string, latest: string): UpdateCandidate {
+  return { file_name: `${projectId}-${current}.jar`, title: projectId, current_version_id: current, current_version_number: current, latest: version(projectId, latest) };
+}
+
+describe("全部更新", () => {
+  it("多个可更新合成一个任务：标题写个数，逐个调 update_mod 并共用 taskId，完成只弹一条通知", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    await store.actions.updateAllMods("生存");
+    await settle();
+
+    const tasks = store.getState().tasks;
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ title: "更新 3 个 Mod", detail: "「生存」", kind: "mod", instanceId: "生存", status: "done" });
+    const calls = callsOf(ipc, "update_mod");
+    expect(calls.map((a) => [a.fileName, a.modVersionId])).toEqual([
+      ["sodium-s1.jar", "s2"],
+      ["lithium-l1.jar", "l2"],
+      ["iris-i1.jar", "i2"],
+    ]);
+    expect(new Set(calls.map((a) => a.taskId)).size).toBe(1);
+    const toasts = store.getState().toasts.filter((t) => t.tone === "success");
+    expect(toasts.map((t) => [t.title, t.body])).toEqual([["已更新 3 个 Mod", "「生存」· 旧版本已保留，可以回滚"]]);
+  });
+
+  it("只有一个可更新时退回单个 Mod 的任务与文案", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2")]);
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    await store.actions.updateAllMods("生存");
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.title, t.spec.command])).toEqual([["更新 sodium", "update_mod"]]);
+    expect(store.getState().toasts.filter((t) => t.tone === "success").map((t) => t.title)).toEqual(["已更新 sodium"]);
+  });
+
+  it("中途失败后重试：已经换过的跳过，其余按现在的文件名接着更新", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => {
+      if (args.fileName === "lithium-l1.jar") throw new IpcError("download_failed", "下载源暂时不可用");
+      return { file_name: String(args.fileName), path: "", platform: "modrinth" };
+    });
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task.status).toBe("failed");
+    expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["sodium-s1.jar", "lithium-l1.jar"]);
+
+    // sodium 已是 s2；lithium 被玩家手动换成了另一个文件名；iris 还没动
+    const lithiumRenamed = { ...candidate("lithium", "l1", "l2"), file_name: "lithium-fabric-l1.jar" };
+    ipc.overrides.set("check_updates", () => [lithiumRenamed, candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    store.actions.retryTask(task.id);
+    await settle();
+    expect(store.getState().tasks[0].status).toBe("done");
+    expect(callsOf(ipc, "update_mod").slice(2).map((a) => [a.fileName, a.modVersionId])).toEqual([
+      ["lithium-fabric-l1.jar", "l2"],
+      ["iris-i1.jar", "i2"],
+    ]);
   });
 });

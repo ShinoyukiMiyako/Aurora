@@ -192,7 +192,8 @@ type TaskMeta =
   | { type: "java"; major: number; launchAfter: string | null }
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
-  | { type: "update"; instanceId: string; name: string };
+  | { type: "update"; instanceId: string; name: string }
+  | { type: "updates"; instanceId: string; count: number };
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -303,8 +304,18 @@ export interface LauncherActions {
 
 // ---------------------------------------------------------------- 常量与工具
 
-/** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 是前端的组合任务。 */
-const TASK_COMMANDS = new Set(["install_version", "install_modpack", "repair_instance", "install_java", "install_mod", "install_mods", "install_resource", "update_mod"]);
+/** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 与 update_mods 是前端的组合任务。 */
+const TASK_COMMANDS = new Set([
+  "install_version",
+  "install_modpack",
+  "repair_instance",
+  "install_java",
+  "install_mod",
+  "install_mods",
+  "install_resource",
+  "update_mod",
+  "update_mods",
+]);
 
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
 
@@ -393,6 +404,8 @@ function metaFromSpec(task: Task): TaskMeta | null {
       const items = modItems(args);
       return { type: "mods", instanceId: strArg(args, "versionId", command), name: items[0].title, dependencies: items.length - 1 };
     }
+    case "update_mods":
+      return { type: "updates", instanceId: strArg(args, "versionId", command), count: updateItems(args).length };
     default:
       return null;
   }
@@ -418,6 +431,30 @@ function modItems(args: Record<string, unknown>): ModItem[] {
       projectId: strArg(r, "projectId", "install_mods"),
       modVersionId: strArg(r, "modVersionId", "install_mods"),
       title: strArg(r, "title", "install_mods"),
+    };
+  });
+}
+
+interface UpdateItem {
+  fileName: string;
+  platform: Platform;
+  projectId: string;
+  modVersionId: string;
+}
+
+function updateItems(args: Record<string, unknown>): UpdateItem[] {
+  const raw = args.items;
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error("组合任务 update_mods 缺少 items");
+  return raw.map((item: unknown, i) => {
+    const r = item as Record<string, unknown>;
+    if (typeof r !== "object" || r === null) throw new Error(`update_mods 第 ${i} 项不是对象`);
+    const platform = r.platform;
+    if (platform !== "modrinth" && platform !== "curseforge") throw new Error(`update_mods 第 ${i} 项平台不对：${String(platform)}`);
+    return {
+      fileName: strArg(r, "fileName", "update_mods"),
+      platform,
+      projectId: strArg(r, "projectId", "update_mods"),
+      modVersionId: strArg(r, "modVersionId", "update_mods"),
     };
   });
 }
@@ -957,13 +994,35 @@ export class LauncherStore {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
-    if (command !== "install_mods") return invoke<unknown>(command, { ...args, taskId });
-    // 组合任务：一个 Mod 连同它的前置逐个装，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
-    const versionId = strArg(args, "versionId", command);
-    for (const item of modItems(args)) {
-      await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
+    // 组合任务逐个调后端命令，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
+    if (command === "install_mods") {
+      const versionId = strArg(args, "versionId", command);
+      for (const item of modItems(args)) {
+        await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
+      }
+      return null;
     }
-    return null;
+    if (command === "update_mods") {
+      const versionId = strArg(args, "versionId", command);
+      for (const item of task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args)) {
+        await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
+      }
+      return null;
+    }
+    return invoke<unknown>(command, { ...args, taskId });
+  }
+
+  /**
+   * 重试「全部更新」时，上一次尝试里已经换过的不再更新：更新会把文件换成新版本的文件名，按原文件名再调一次只会失败。
+   * 按工程重新对一遍：已经是目标版本的、或者 Mod 已被移除不再有更新的跳过，其余用它现在的文件名。
+   */
+  private async pendingUpdates(versionId: string, items: UpdateItem[]): Promise<UpdateItem[]> {
+    const candidates = await modsIpc.checkUpdates(versionId);
+    return items.flatMap((item) => {
+      const current = candidates.find((c) => c.latest.platform === item.platform && c.latest.project_id === item.projectId);
+      if (current === undefined || current.current_version_id === item.modVersionId) return [];
+      return [{ ...item, fileName: current.file_name }];
+    });
   }
 
   private findTask(id: string): Task {
@@ -1119,6 +1178,12 @@ export class LauncherStore {
       case "update": {
         this.modsChanged(meta.instanceId);
         const copy = TASK_TOAST.modUpdated(meta.name, meta.instanceId);
+        this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        return;
+      }
+      case "updates": {
+        this.modsChanged(meta.instanceId);
+        const copy = TASK_TOAST.modsUpdated(meta.count, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
@@ -1586,7 +1651,28 @@ export class LauncherStore {
           store.pushToast("info", TOAST_COPY.allModsLatest);
           return;
         }
-        for (const candidate of candidates) store.enqueueUpdate(instanceId, candidate);
+        // 只有一个可更新时就是单个 Mod 的更新，标题与通知写 Mod 名；多个合成一个任务、一条通知
+        if (candidates.length === 1) {
+          store.enqueueUpdate(instanceId, candidates[0]);
+          return;
+        }
+        store.enqueue(
+          {
+            kind: "mod",
+            title: TASK_TEXT.updateAllTitle(candidates.length),
+            detail: TASK_TEXT.updateAllDetail(instanceId),
+            instanceId,
+            spec: {
+              command: "update_mods",
+              args: {
+                versionId: instanceId,
+                items: candidates.map((c) => ({ fileName: c.file_name, platform: c.latest.platform, projectId: c.latest.project_id, modVersionId: c.latest.version_id })),
+              },
+            },
+          },
+          { type: "updates", instanceId, count: candidates.length },
+          TASK_TEXT.updateAllTitle(candidates.length),
+        );
       },
       async removeMod(instanceId, fileName, name) {
         store.assertModsEditable(instanceId);

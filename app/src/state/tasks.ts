@@ -51,6 +51,8 @@ export function taskDedupeKey(spec: TaskSpec): string {
       return `install|${String(a.versionId).toLowerCase()}|${String(a.platform)}|${String(a.projectId)}`;
     case "update_mod":
       return `update_mod|${String(a.versionId).toLowerCase()}|${String(a.fileName)}`;
+    case "update_mods":
+      return `update_mods|${String(a.versionId).toLowerCase()}`;
     default:
       return `${spec.command}|${JSON.stringify(a)}`;
   }
