@@ -465,8 +465,8 @@ describe("更新任务换掉的 Mod", () => {
 });
 
 describe("Mod 列表", () => {
-  const sodium = mod("sodium-0.6.jar", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null } }, { name: "Sodium", authors: ["JellySquid", "IMS"], description: "渲染优化" });
-  const api = mod("fabric-api-0.1.jar.disabled", { source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.1", title: "Fabric API", dependency_of: "AANobbMI" } }, { name: null });
+  const sodium = mod("sodium-0.6.jar", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null, installed_at: 1_780_000_000, update_hold: null } }, { name: "Sodium", authors: ["JellySquid", "IMS"], description: "渲染优化" });
+  const api = mod("fabric-api-0.1.jar.disabled", { source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.1", title: "Fabric API", dependency_of: "AANobbMI", installed_at: 1_780_000_000, update_hold: null } }, { name: null });
   const local = mod("ZZZ-local.jar", {}, null);
 
   it("名称回落：元数据名、平台标题、文件名；按名称排序", () => {

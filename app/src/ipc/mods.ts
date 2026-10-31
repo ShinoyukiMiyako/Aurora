@@ -2,7 +2,7 @@
 // 字段名与后端 DTO 的 serde 名一致（snake_case），入参键为 camelCase。
 
 import { invoke } from "./bridge";
-import type { InstallableResourceType, PlatformId } from "./discover";
+import type { BodyFormat, InstallableResourceType, PlatformId } from "./discover";
 import { isIpcError } from "./errors";
 
 export type ModLoader = "fabric" | "quilt" | "forge" | "neoforge" | "liteloader";
@@ -32,6 +32,12 @@ export interface ModMetadata {
   format: MetadataFormat;
 }
 
+/**
+ * 检查更新时对这个 Mod 的处理：ignored 不检查；pinned 只报不晚于锁定版本发布的候选。
+ * 键名与后端核心类型的 serde 名一致，list_mods 给出的值可以原样传回 set_mod_update_hold。
+ */
+export type UpdateHold = { kind: "ignored" } | { kind: "pinned"; version_id: string };
+
 /** 已装 Mod 在卷宗里的平台来源。 */
 export interface ModSource {
   platform: PlatformId;
@@ -41,6 +47,10 @@ export interface ModSource {
   title: string | null;
   /** 作为谁的前置被带进来的（project_id）；玩家主动装的为 null。 */
   dependency_of: string | null;
+  /** 装进实例的时刻，UNIX 秒；更新与回滚沿用原值。 */
+  installed_at: number;
+  /** 没设置为 null：照常检查更新。 */
+  update_hold: UpdateHold | null;
 }
 
 export interface InstalledMod {
@@ -155,7 +165,37 @@ export const setModEnabled = (versionId: string, fileName: string, enabled: bool
 /** 移除一个 Mod 文件；变更历史里记一条移除事件。 */
 export const removeMod = (versionId: string, fileName: string): Promise<void> => invoke<void>("remove_mod", { versionId, fileName });
 
+/**
+ * 忽略更新的 Mod 不出现；锁定版本的不报晚于锁定版本的候选；按当前版本的发布通道过滤：
+ * 正式版只报正式版，测试版报正式版或测试版，预览版三种都报。
+ */
 export const checkUpdates = (versionId: string): Promise<UpdateCandidate[]> => invoke<UpdateCandidate[]>("check_updates", { versionId });
+
+/** 批量启停里一个文件的结果：成功给改名后的路径，失败给这一项的命令错误，其余文件不受影响。 */
+export type ModToggleResult =
+  | { status: "ok"; file_name: string; path: string }
+  | { status: "error"; file_name: string; error: { code: string; message: string; detail?: unknown } };
+
+/** 批量启用或停用；结果与入参逐项对应、顺序一致。整次调用只在实例解析与互斥失败时拒绝。 */
+export const setModsEnabled = (versionId: string, fileNames: readonly string[], enabled: boolean): Promise<ModToggleResult[]> =>
+  invoke<ModToggleResult[]>("set_mods_enabled", { versionId, fileNames, enabled });
+
+/** 改写卷宗里这个 Mod 的更新检查设置；hold 为 null 表示恢复检查更新。只改记录不碰文件，游戏运行中也可用。 */
+export const setModUpdateHold = (versionId: string, fileName: string, hold: UpdateHold | null): Promise<void> =>
+  invoke<void>("set_mod_update_hold", { versionId, fileName, hold });
+
+/** 某个平台版本的更新日志。 */
+export interface ModChangelog {
+  version_id: string;
+  /** Modrinth 为 markdown，CurseForge 为 html。 */
+  format: BodyFormat;
+  /** 平台没写（空或纯空白）为 null。 */
+  body: string | null;
+}
+
+/** 取这个 Mod 某个平台版本的更新日志：只读，不占实例；按卷宗里的平台与工程去问。 */
+export const modUpdateChangelog = (versionId: string, fileName: string, modVersionId: string): Promise<ModChangelog> =>
+  invoke<ModChangelog>("mod_update_changelog", { versionId, fileName, modVersionId });
 
 /**
  * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。旧文件留作 `.old` 备份，可在变更历史里回滚。
