@@ -31,12 +31,6 @@
   padding: var(--sk-space-12) var(--sk-space-14);
   border-radius: var(--sk-r);
   background: var(--sk-bg-2);
-  font-size: var(--sk-fs-small);
-  line-height: var(--sk-lh-small);
-  color: var(--sk-text);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
 }
 
 .progressRow {

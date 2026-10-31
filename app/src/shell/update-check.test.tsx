@@ -198,4 +198,40 @@ describe("启动器更新：外壳 API", () => {
     expect(() => shell.openUpdatePanel()).toThrow("没有可查看的更新时不该打开更新面板");
     expect(shell.updatePanelOpen).toBe(false);
   });
+
+  it("更新说明按受限 Markdown 渲染：列表、强调与 http(s) 链接，原始 HTML 与别的协议不生效", async () => {
+    const notes = "## 新增\n\n- 发现页支持**按实例**筛选\n- 详见 [发布页](https://example.org/r/0.2.0)\n\n<script>alert(1)</script>[本地](file:///C:/a)";
+    ipc.overrides.set("check_update", () => {
+      info = { ...info, available: { ...UPDATE, notes } };
+      return { ...UPDATE, notes };
+    });
+    await mount();
+    await advance(AUTO_CHECK_DELAY_MS);
+    act(() => shell.openUpdatePanel());
+    await act(async () => {
+      await settle();
+    });
+    const dialog = document.querySelector('[data-sk-modal-layer]:not([data-exiting]) [role="dialog"]');
+    if (dialog === null) throw new Error("更新面板没有打开");
+    expect([...dialog.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["发现页支持按实例筛选", "详见 发布页"]);
+    expect(dialog.querySelector("li strong")?.textContent).toBe("按实例");
+    expect([...dialog.querySelectorAll("a")].map((a) => [a.getAttribute("href"), a.getAttribute("target")])).toEqual([["https://example.org/r/0.2.0", "_blank"]]);
+    expect(dialog.querySelector("script")).toBeNull();
+  });
+
+  it("更新说明为空时写明没有附说明", async () => {
+    ipc.overrides.set("check_update", () => {
+      const update = { ...UPDATE, notes: "  \n " };
+      info = { ...info, available: update };
+      return update;
+    });
+    await mount();
+    await advance(AUTO_CHECK_DELAY_MS);
+    act(() => shell.openUpdatePanel());
+    await act(async () => {
+      await settle();
+    });
+    expect(openDialogTitles()).toEqual(["更新到 0.2.0"]);
+    expect(document.body.textContent).toContain("这个版本没有附更新说明");
+  });
 });

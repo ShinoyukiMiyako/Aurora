@@ -1,7 +1,7 @@
 // 启动器更新面板：说清更新到哪一版、更新了什么，由用户决定何时下载、何时安装。正文与底栏随更新阶段变化。
 // 外壳级浮层：外壳布局挂 UpdatePanelMount，任何页面与通知动作经 openUpdatePanel 打开它。
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 import { SakuraMark } from "../art/Logo";
 import { Spinner } from "../art/Spinner";
 import { UPDATE_COPY } from "../copy/updater";
@@ -15,16 +15,24 @@ import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
 import { Modal } from "../ui/Modal";
 import { ProgressBar } from "../ui/ProgressBar";
+import { RichText } from "../ui/RichText";
+import { parseMarkdown } from "../ui/richtext-parse";
 import { useShell } from "./shell";
 import s from "./UpdatePanel.module.css";
 import { useRunner } from "./useRunner";
 
+/** 更新说明是发布时写的 Markdown，按受限规则渲染：只画标题、段落、列表、强调、代码与 http(s) 链接，不注入原始 HTML。 */
 function Notes({ notes }: { notes: string | null }) {
   const text = notes === null ? "" : notes.trim();
+  const blocks = useMemo(() => (text === "" ? [] : parseMarkdown(text)), [text]);
   return (
     <section className={s.notes}>
       <h3 className={s.notesTitle}>{UPDATE_COPY.notesTitle}</h3>
-      {text === "" ? <p className={s.muted}>{UPDATE_COPY.notesEmpty}</p> : <div className={s.notesBody}>{text}</div>}
+      {blocks.length === 0 ? <p className={s.muted}>{UPDATE_COPY.notesEmpty}</p> : (
+        <div className={s.notesBody}>
+          <RichText blocks={blocks} />
+        </div>
+      )}
     </section>
   );
 }
