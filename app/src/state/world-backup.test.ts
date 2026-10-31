@@ -238,6 +238,14 @@ describe("游戏退出后的自动备份", () => {
     expect(store.getState().toasts).toEqual([]);
   });
 
+  it("这局没进过存档（两个列表都空）：照样重扫实例清掉 backing_up，不弹通知", async () => {
+    const scans = callsOf(ipc, "list_instances").length;
+    emit(WORLD_BACKUP_EVENT, event({}));
+    await settle();
+    expect(callsOf(ipc, "list_instances").length).toBe(scans + 1);
+    expect(store.getState().toasts).toEqual([]);
+  });
+
   it("有存档没备份成：error 通知，正文是第一个失败的原文；「复制错误原文」写进全部失败与详情", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const writeText = vi.fn(() => Promise.resolve());

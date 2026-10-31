@@ -9,7 +9,7 @@ export const LAUNCH_PHASE_EVENT = "aurora://launch-phase";
 export const GAME_EXIT_EVENT = "aurora://game-exit";
 /** 启动器日志与游戏输出，成批推送。 */
 export const GAME_LOG_EVENT = "aurora://game-log";
-/** 游戏退出后的自动备份做完；没有存档要备份（都没玩过，或自动备份关着）时不推送。 */
+/** 游戏退出后的自动备份做完。开着自动备份时每局都推（这局没进过存档时两个列表都空），关着时不推。 */
 export const WORLD_BACKUP_EVENT = "aurora://world-backup";
 
 /** 已有游戏在加载或运行时 launchGame 的错误码，detail 为 BusyDetail。同一时间只运行一个游戏。 */

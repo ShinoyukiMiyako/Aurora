@@ -36,7 +36,8 @@ pub const LAUNCH_PHASE_EVENT: &str = "aurora://launch-phase";
 /// 游戏进程退出（收尾记账已写完）。
 pub const GAME_EXIT_EVENT: &str = "aurora://game-exit";
 
-/// 游戏退出后的自动备份做完了（有备份成或有失败时才推）。
+/// 游戏退出后的自动备份做完了。开着自动备份时每局都推，这次没进过存档也推（两个列表都空）：实例在备份期间
+/// 记着 backing_up，前端要靠这条事件知道它已放开、重读实例列表。
 pub const WORLD_BACKUP_EVENT: &str = "aurora://world-backup";
 
 /// 运行中游戏的占用槽。与门面分列两个 managed state：会话生命周期独立于门面，启动后门面锁应立即可用。
@@ -160,12 +161,11 @@ pub struct WorldBackupEventDto {
 /// 整场自动备份没能开始时，`failed` 里那一项的存档名。
 const ALL_WORLDS: &str = "*";
 
-/// 自动备份的结果译成事件负载；什么都没备份、也没有失败（这次没进过存档）时不推。失败都记 error：
-/// 自动备份是后台进行的，前端只拿到一条通知，排查要靠日志。
+/// 自动备份的结果译成事件负载。失败都记 error：自动备份是后台进行的，前端只拿到一条通知，排查要靠日志。
 fn world_backup_event(
     instance_id: &str,
     outcome: aurora_core::Result<AutoBackupOutcome>,
-) -> Option<WorldBackupEventDto> {
+) -> WorldBackupEventDto {
     let (backed_up, failed) = match outcome {
         Ok(AutoBackupOutcome { backed_up, failed }) => {
             let failed = failed
@@ -189,14 +189,11 @@ fn world_backup_event(
             (Vec::new(), vec![failure])
         }
     };
-    if backed_up.is_empty() && failed.is_empty() {
-        return None;
-    }
-    Some(WorldBackupEventDto {
+    WorldBackupEventDto {
         instance_id: instance_id.to_owned(),
         backed_up,
         failed,
-    })
+    }
 }
 
 /// `play_stats` 的区间参数：两端都含的本地日期 `YYYY-MM-DD`。
@@ -375,9 +372,7 @@ async fn watch(
         .auto_backup_after_session(&version_id, session_started)
         .await;
     drop(instance);
-    if let Some(payload) = world_backup_event(&version_id, outcome) {
-        emit_backup(payload);
-    }
+    emit_backup(world_backup_event(&version_id, outcome));
 }
 
 /// 实例占用随进程寿命：游戏退出、收尾记账（与开着时的自动备份）做完后放开，删除、改名、补全在这期间被拒绝。
@@ -931,9 +926,9 @@ mod tests {
         assert!(untouched.backups.is_empty());
     }
 
-    /// 这一局没进过任何存档：不推备份事件，实例照样放开。
+    /// 这一局没进过任何存档：照样推一条两个列表都空的备份事件，推时实例已放开，前端靠它重读实例的活动。
     #[tokio::test]
-    async fn auto_backup_with_nothing_played_sends_no_event() {
+    async fn auto_backup_with_nothing_played_still_reports_the_release() {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path(), true);
         let started = SystemTime::now();
@@ -945,7 +940,8 @@ mod tests {
         );
         let locks = InstanceLocks::default();
         let guard = locks.acquire("1.21", InstanceActivity::Running).unwrap();
-        let sent = std::cell::Cell::new(0);
+        let order = std::cell::RefCell::new(Vec::new());
+        let delivered = std::cell::RefCell::new(None);
         watch(
             &facade,
             Watched {
@@ -955,12 +951,26 @@ mod tests {
             },
             async { finished("1.21") },
             || {},
-            |_| sent.set(sent.get() + 1),
-            |_| sent.set(sent.get() + 10),
+            |_| order.borrow_mut().push("exit"),
+            |backup| {
+                assert_eq!(locks.activity("1.21"), None, "推备份事件时实例已放开");
+                order.borrow_mut().push("backup");
+                *delivered.borrow_mut() = Some(backup);
+            },
         )
         .await;
-        assert_eq!(sent.get(), 1, "只推了退出事件");
-        assert_eq!(locks.activity("1.21"), None);
+        assert_eq!(order.into_inner(), vec!["exit", "backup"]);
+        let payload = delivered.into_inner().unwrap();
+        assert_eq!(payload.instance_id, "1.21");
+        assert!(payload.backed_up.is_empty());
+        assert!(payload.failed.is_empty());
+        let list = facade
+            .snapshot()
+            .await
+            .list_world_backups("1.21", "旧档")
+            .await
+            .unwrap();
+        assert!(list.backups.is_empty(), "会话前写过的存档不备份");
     }
 
     /// 单个存档失败带着它的错误码进 failed；整场没能开始时 failed 只有一项，存档名为 `*`。
@@ -978,8 +988,7 @@ mod tests {
                     },
                 )],
             }),
-        )
-        .unwrap();
+        );
         assert_eq!(payload.backed_up, vec!["a".to_owned()]);
         assert_eq!(payload.failed.len(), 1);
         assert_eq!(payload.failed[0].world, "b");
@@ -993,20 +1002,10 @@ mod tests {
             Err(aurora_core::CoreError::VersionNotInstalled {
                 id: "生存".into()
             }),
-        )
-        .unwrap();
+        );
         assert!(whole.backed_up.is_empty());
         assert_eq!(whole.failed.len(), 1);
         assert_eq!(whole.failed[0].world, "*");
         assert_eq!(whole.failed[0].error.code, "version_not_installed");
-
-        let nothing = world_backup_event(
-            "生存",
-            Ok(AutoBackupOutcome {
-                backed_up: Vec::new(),
-                failed: Vec::new(),
-            }),
-        );
-        assert_eq!(nothing, None);
     }
 }
