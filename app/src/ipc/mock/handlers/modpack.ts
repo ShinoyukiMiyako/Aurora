@@ -4,7 +4,7 @@
 
 import type { PlatformId } from "../../discover";
 import { IpcError } from "../../errors";
-import type { InstanceNameRule, ModpackInstallOutcomeDto, ModpackPreviewDto, ModpackSource, PackFormat } from "../../modpack";
+import type { InstanceNameRule, ModpackInstallOutcomeDto, ModpackPreviewDto, ModpackSource, ModpackSummaryDto, PackFormat } from "../../modpack";
 import { INSTANCE_NAME_MAX_CHARS } from "../../modpack";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, findCatalogueItem, parsePlatform, runMockTask, simulateDownload } from "./discover";
@@ -12,6 +12,8 @@ import { addMockInstance, mockInstanceIds } from "./instances";
 
 /** mock 整合包都要求的游戏版本。 */
 const MOCK_MINECRAFT = "1.21.1";
+/** mock 整合包都报这个版本号。 */
+const MOCK_PACK_VERSION = "1.0.0";
 
 const RULE_TEXT: Record<InstanceNameRule, string> = {
   empty: "名字不能为空",
@@ -127,7 +129,18 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
 
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：48 个远程文件，57 个覆盖文件` });
     await simulateDownload(taskId, `${pack.name} 的 48 个文件`, 96_468_992);
-    addMockInstance(name, MOCK_MINECRAFT, { kind: "fabric", version: "0.16.9" });
+    addMockInstance(
+      name,
+      MOCK_MINECRAFT,
+      { kind: "fabric", version: "0.16.9" },
+      {
+        platform: pack.platform,
+        project_id: source.kind === "platform" ? source.project_id : null,
+        version_id: source.kind === "platform" ? source.version_id : null,
+        name: pack.name,
+        version: MOCK_PACK_VERSION,
+      },
+    );
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `整合包已导入为实例 ${name}` });
     return {
       version_id: name,
@@ -139,7 +152,7 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
         project_id: source.kind === "platform" ? source.project_id : null,
         version_id: source.kind === "platform" ? source.version_id : null,
         name: pack.name,
-        version: "1.0.0",
+        version: MOCK_PACK_VERSION,
         minecraft: MOCK_MINECRAFT,
         loader: { kind: "fabric", version: "0.16.9" },
         remote_files: 48,
@@ -150,7 +163,34 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   });
 }
 
+/** 与导入时同一份假清单：48 个远程文件里 41 个是 Mod。 */
+function summarizeModpack(args: MockArgs): ModpackSummaryDto {
+  const read = argReader("summarize_platform_modpack", args);
+  const source: ModpackSource = {
+    kind: "platform",
+    platform: parsePlatform(read.string("platform")),
+    project_id: nonBlank("project_id", read.string("projectId")),
+    version_id: nonBlank("version_id", read.string("versionId")),
+  };
+  const pack = packOf(source);
+  const modrinth = pack.format === "modrinth";
+  return {
+    format: pack.format,
+    name: pack.name,
+    version: MOCK_PACK_VERSION,
+    minecraft: MOCK_MINECRAFT,
+    loader: { kind: "fabric", version: "0.16.9" },
+    pack_bytes: 2_412_544,
+    remote_files: 48,
+    mod_files: modrinth ? 41 : null,
+    remote_bytes: modrinth ? 96_468_992 : null,
+    override_files: 57,
+    override_bytes: 364_233,
+  };
+}
+
 export const handlers: MockHandlers = {
   preview_modpack: previewModpack,
+  summarize_platform_modpack: summarizeModpack,
   install_modpack: installModpack,
 };

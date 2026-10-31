@@ -1,7 +1,7 @@
-//! 系统：内存建议与首次启动。
+//! 系统：内存建议、首次启动与启动提示。
 
 use aurora_core::folders::{ensure_game_dir, validate_game_dir};
-use aurora_core::{MemoryAdvice, MemoryTier};
+use aurora_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -74,10 +74,52 @@ pub(crate) async fn complete_first_run_with(
         .collect::<Result<Vec<_>, _>>()?;
     // 建目录在拿写锁之前：盘慢或挂起时不连累其它命令。
     ensure_game_dir(&game_dir).await?;
-    let mut aurora = facade.write().await;
-    aurora.complete_first_run(game_dir, extras);
-    aurora.save_config().await?;
-    Ok(())
+    facade
+        .update(|aurora| {
+            aurora.complete_first_run(game_dir, extras);
+            Ok::<_, CommandError>(())
+        })
+        .await
+}
+
+// ---- 启动提示 ----
+
+/// 启动时发生、要让用户知道的事。前端启动后查询一次，按 `kind` 展示。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StartupNoticeDto {
+    /// config.json 读不出来：坏文件已改名留存，本次按默认配置启动（首次启动向导会重新出现）。
+    ConfigReset {
+        /// 坏文件改名后的绝对路径，原样保留着用户的内容。
+        preserved_path: String,
+        /// 解析失败的原因（含行列）。
+        error: String,
+    },
+}
+
+/// 本次启动的提示（managed state）。启动后不再变化，查询多少次都返回同一份。
+pub struct StartupNotices(Vec<StartupNoticeDto>);
+
+impl StartupNotices {
+    pub fn from_recovery(recovery: Option<ConfigRecovery>) -> Self {
+        Self(
+            recovery
+                .into_iter()
+                .map(|recovery| StartupNoticeDto::ConfigReset {
+                    preserved_path: recovery.preserved.display().to_string(),
+                    error: recovery.error,
+                })
+                .collect(),
+        )
+    }
+}
+
+/// 本次启动的提示；没有时为空列表。
+#[tauri::command]
+pub async fn startup_notices(
+    notices: State<'_, StartupNotices>,
+) -> Result<Vec<StartupNoticeDto>, CommandError> {
+    Ok(notices.0.clone())
 }
 
 #[cfg(test)]
@@ -85,6 +127,23 @@ mod tests {
     use super::*;
     use crate::commands::error::code;
     use aurora_core::{Aurora, AuroraConfig, ConfigStore};
+
+    #[test]
+    fn config_recovery_becomes_a_config_reset_notice() {
+        assert!(StartupNotices::from_recovery(None).0.is_empty());
+        let notices = StartupNotices::from_recovery(Some(ConfigRecovery {
+            preserved: std::path::PathBuf::from(r"C:\Data\config.json.broken-20261031-143025"),
+            error: "unknown variant `hide` at line 1 column 22".into(),
+        }));
+        assert_eq!(
+            serde_json::to_value(&notices.0).unwrap(),
+            serde_json::json!([{
+                "kind": "config_reset",
+                "preserved_path": r"C:\Data\config.json.broken-20261031-143025",
+                "error": "unknown variant `hide` at line 1 column 22"
+            }])
+        );
+    }
 
     fn facade_in(dir: &std::path::Path) -> Facade {
         Facade::new(

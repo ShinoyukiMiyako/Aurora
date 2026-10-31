@@ -95,14 +95,25 @@ pub(crate) async fn remove_mod_with(
         .map_err(mods_error)
 }
 
-/// 检查该实例可更新的 Mod（无身份的文件先按哈希反查补身份）。
+/// 检查该实例可更新的 Mod（无身份的文件先按哈希反查补身份）。反查到的身份会回写卷宗，所以与其它
+/// Mod 改动一样占住实例：改名、删除进行中报 `instance_busy`，免得卷宗按旧路径写回、建出空目录。
 #[tauri::command]
 pub async fn check_updates(
     version_id: String,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<Vec<UpdateCandidate>, CommandError> {
+    check_updates_with(&facade, &locks, &version_id).await
+}
+
+pub(crate) async fn check_updates_with(
+    facade: &Facade,
+    locks: &InstanceLocks,
+    version_id: &str,
+) -> Result<Vec<UpdateCandidate>, CommandError> {
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
-    Ok(aurora.check_updates(&version_id).await?)
+    Ok(aurora.check_updates(version_id).await?)
 }
 
 /// 把实例里的某个 Mod 换成同工程的 `mod_version_id`。长任务：进度经 core-event 推送并带 `task_id`，
@@ -509,6 +520,11 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY);
             assert!(!tasks.is_running("t-busy"));
+            let err = check_updates_with(&facade, &locks, VERSION_ID)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert_eq!(err.detail.unwrap()["activity"], expected);
             drop(held);
         }
         assert_eq!(tokio::fs::read(&jar).await.unwrap(), b"jar");

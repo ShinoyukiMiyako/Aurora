@@ -17,7 +17,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
 /// 日志目录名，位于数据目录下。
-const LOGS_DIR: &str = "logs";
+/// 启动器日志所在的子目录（相对数据目录）。
+pub(crate) const LOGS_DIR: &str = "logs";
 
 /// 保留的会话日志份数。十次启动够回溯到「昨天还好好的」，再多只是占地方。
 const KEEP_SESSIONS: usize = 10;

@@ -36,7 +36,7 @@ use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
 use crate::install::LoaderChoice;
-use crate::instance_install::now_millis;
+use crate::instance_install::{MarkerSettlement, now_millis};
 use crate::resources::{curseforge_download_url, is_safe_file_name};
 
 /// 实例名的最大字符数：界面上要完整显示，路径也不宜过长。
@@ -317,9 +317,9 @@ impl Aurora {
     }
 
     /// 导入的第二步：建实例目录、写下带 `task_id` 的未完成标记，装游戏与加载器、下载远程文件、
-    /// 解出覆盖文件、写整合包信息。任何一步失败都删掉这个实例目录；标记里的任务 id 供
-    /// [`Aurora::discard_incomplete_modpack`] 在任务被强行放弃后找回并清理。平台整合包的下载缓存
-    /// 不论成败都删掉。
+    /// 解出覆盖文件、写整合包信息。任何一步失败都删掉这个实例目录；任务被强行放弃（future 被丢弃）
+    /// 或这里删不掉时，由调用方经 [`Aurora::discard_modpack_import`] 按实例名再清一次。平台整合包的
+    /// 下载缓存不论成败都删掉。
     pub async fn import_modpack(
         &self,
         prepared: PreparedModpack,
@@ -341,56 +341,47 @@ impl Aurora {
         outcome
     }
 
-    /// 删掉 `task_id` 这次导入留下的未完成实例，返回删掉的实例名。
+    /// 删掉一次没成的导入留下的实例目录 `versions/<name>`，返回目录原先是否存在。
     ///
-    /// 导入在自己的失败路径上已经会清理；这个入口给「任务在取消宽限期后被强行放弃」的情况用：
-    /// 那时导入的 future 已被丢弃，清理代码没机会跑。
-    ///
-    /// 只认本任务写下的整合包标记。别的实例的标记（新建或补全没完成、别的导入）与读不出来的标记
-    /// 一律跳过：它们和这次清理无关，不能让一个坏掉的邻居挡住本该删掉的半成品。
-    pub async fn discard_incomplete_modpack(&self, task_id: &str) -> Result<Option<String>> {
-        let versions = self.game_dir().join(VERSIONS_DIR);
-        let mut entries = match tokio::fs::read_dir(&versions).await {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(source) => {
-                return Err(aurora_base::Error::Io {
-                    path: versions,
-                    source,
-                }
-                .into());
+    /// 调用方从定下实例名起就占住这个名字，并在占住之后经 [`Aurora::ensure_modpack_name_free`] 确认过
+    /// 名字仍然空闲：这期间名下出现的目录只可能是这次导入建的，所以不看未完成标记——标记可能还没
+    /// 来得及写下，也可能读不出来，按标记找会漏掉这两种半成品。
+    pub async fn discard_modpack_import(&self, name: &str) -> Result<bool> {
+        let dir = self.instance_dir(name)?;
+        match tokio::fs::metadata(&dir).await {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return Ok(false),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
+        }
+        remove_instance_dir(&dir).await?;
+        Ok(true)
+    }
+
+    /// 半成品删不掉时（文件被占用）把它的未完成标记落成这次导入的结局：否则标记一直停在进行中，
+    /// 列表里看不出导入其实已经结束。保留原标记的开始时刻；原标记读不出来时取此刻，新标记覆盖它。
+    pub async fn settle_modpack_import(
+        &self,
+        name: &str,
+        task_id: &str,
+        settlement: MarkerSettlement,
+    ) -> Result<()> {
+        let dir = self.instance_dir(name)?;
+        let started_at = match MarkerStore::for_version_dir(&dir).load().await {
+            Ok(Some(marker)) => marker.started_at,
+            Ok(None) => now_millis(),
+            Err(err) => {
+                tracing::warn!(dir = %dir.display(), error = %err, "导入半成品的未完成标记读不出来，改写一份新的");
+                now_millis()
             }
         };
-        while let Some(entry) =
-            entries
-                .next_entry()
-                .await
-                .map_err(|source| aurora_base::Error::Io {
-                    path: versions.clone(),
-                    source,
-                })?
-        {
-            let dir = entry.path();
-            let marker = match MarkerStore::for_version_dir(&dir).load().await {
-                Ok(marker) => marker,
-                Err(err) => {
-                    tracing::warn!(dir = %dir.display(), error = %err, "清理导入半成品时跳过读不出未完成标记的目录");
-                    continue;
-                }
-            };
-            let ours = matches!(
-                marker,
-                Some(IncompleteMarker {
-                    kind: IncompleteKind::Modpack { task_id: ref marked },
-                    ..
-                }) if marked == task_id
-            );
-            if ours {
-                remove_instance_dir(&dir).await?;
-                return Ok(Some(entry.file_name().to_string_lossy().into_owned()));
-            }
-        }
-        Ok(None)
+        let marker = IncompleteMarker::pending(
+            IncompleteKind::Modpack {
+                task_id: task_id.to_owned(),
+            },
+            started_at,
+        );
+        self.settle_instance_marker(name, marker, settlement).await
     }
 
     /// 读清单、定实例名并查重、把远程文件换成下载任务。
@@ -408,7 +399,7 @@ impl Aurora {
         if name.eq_ignore_ascii_case(&manifest.minecraft) {
             return Err(name_error(&name, InstanceNameRule::Duplicate));
         }
-        self.ensure_name_free(&name).await?;
+        self.ensure_modpack_name_free(&name).await?;
         let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
 
         emit(
@@ -638,8 +629,11 @@ impl Aurora {
         Ok(())
     }
 
-    /// 不区分大小写地检查 `versions/` 下有没有同名目录。
-    async fn ensure_name_free(&self, name: &str) -> Result<()> {
+    /// 不区分大小写地检查 `versions/` 下有没有同名目录；有就报与准备阶段相同的重名错误。
+    ///
+    /// 准备阶段已经查过一次；调用方占住实例名之后要再查一次：两次之间别的命令可能抢先建了同名实例，
+    /// 而只有占住之后仍然空闲，名下的目录才能认定是这次导入建的（见 [`Aurora::discard_modpack_import`]）。
+    pub async fn ensure_modpack_name_free(&self, name: &str) -> Result<()> {
         let versions = self.game_dir().join(VERSIONS_DIR);
         let mut entries = match tokio::fs::read_dir(&versions).await {
             Ok(entries) => entries,
@@ -1439,96 +1433,88 @@ mod tests {
         ));
     }
 
-    /// 只删本任务的整合包半成品。排在它前面的邻居带着别的标记（新建失败、补全取消、读不出来的坏
-    /// 标记、目录之外的普通文件）时扫描照样走完，邻居和它们的标记原样留着。
+    /// 按名字删半成品：标记读不出来、还没写下标记的都删得掉；名下没有目录时什么都不做；
+    /// 别的实例原样留着；带路径成分的名字直接拒绝。
     #[tokio::test]
-    async fn discard_removes_only_the_instance_marked_by_that_task() {
-        use aurora_instance::{IncompleteOutcome, InstallSpec, MarkerError};
+    async fn discard_by_name_removes_the_half_import_whatever_its_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        let aurora = aurora(tmp.path(), &server);
+        let versions = aurora.game_dir().join("versions");
+        let corrupt = MarkerStore::for_version_dir(&versions.join("标记坏了"));
+        std::fs::create_dir_all(corrupt.path().parent().unwrap()).unwrap();
+        std::fs::write(corrupt.path(), b"{").unwrap();
+        std::fs::create_dir_all(versions.join("还没写标记")).unwrap();
+        let ours = versions.join("正常的");
+        std::fs::create_dir_all(&ours).unwrap();
+        write_marker(&ours, "t1").await.unwrap();
+        std::fs::create_dir_all(versions.join("邻居")).unwrap();
+
+        for name in ["标记坏了", "还没写标记", "正常的"] {
+            assert!(aurora.discard_modpack_import(name).await.unwrap(), "{name}");
+            assert!(!versions.join(name).exists(), "{name}");
+        }
+        assert!(!aurora.discard_modpack_import("正常的").await.unwrap());
+        assert!(versions.join("邻居").is_dir());
+        assert!(matches!(
+            aurora.discard_modpack_import("..\\邻居").await.unwrap_err(),
+            CoreError::Instance(crate::InstanceError::InvalidId { .. })
+        ));
+    }
+
+    /// 删不掉的半成品落成结局：保留原来的开始时刻；原标记读不出来时换成一份新的、读得出来的。
+    #[tokio::test]
+    async fn settling_a_half_import_records_its_outcome() {
+        use aurora_instance::{IncompleteOutcome, MarkerError};
 
         let tmp = tempfile::tempdir().unwrap();
         let server = MockServer::start().await;
         let aurora = aurora(tmp.path(), &server);
         let versions = aurora.game_dir().join("versions");
-        std::fs::create_dir_all(&versions).unwrap();
-        std::fs::write(versions.join("a-file.txt"), b"not a dir").unwrap();
-        let failed_install = IncompleteMarker {
-            kind: IncompleteKind::Install {
-                spec: InstallSpec {
-                    mc_version: "1.21.1".into(),
-                    loader: None,
-                    loader_version: None,
+        let dir = versions.join("删不掉");
+        std::fs::create_dir_all(&dir).unwrap();
+        MarkerStore::for_version_dir(&dir)
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Modpack {
+                    task_id: "mp#1".into(),
                 },
-            },
-            outcome: IncompleteOutcome::Failed,
-            started_at: 1,
-            error: Some(MarkerError {
-                code: "download_failed".into(),
-                message: "下载失败".into(),
-            }),
+                1_700_000_000_000,
+            ))
+            .await
+            .unwrap();
+        let failure = MarkerError {
+            code: "download_failed".into(),
+            message: "下载失败".into(),
         };
-        let cancelled_repair = IncompleteMarker {
-            outcome: IncompleteOutcome::Cancelled,
-            ..IncompleteMarker::pending(IncompleteKind::Repair, 2)
-        };
-        for (name, marker) in [
-            ("b-install", &failed_install),
-            ("c-repair", &cancelled_repair),
-        ] {
-            let dir = versions.join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            MarkerStore::for_version_dir(&dir)
-                .save(marker)
-                .await
-                .unwrap();
-        }
-        let corrupt = MarkerStore::for_version_dir(&versions.join("d-corrupt"));
-        std::fs::create_dir_all(corrupt.path().parent().unwrap()).unwrap();
-        std::fs::write(corrupt.path(), b"{").unwrap();
-        for (name, task) in [
-            ("x-pack", Some("t1")),
-            ("y-pack", Some("t2")),
-            ("z-plain", None),
-        ] {
-            let dir = versions.join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            if let Some(task) = task {
-                write_marker(&dir, task).await.unwrap();
+        aurora
+            .settle_modpack_import("删不掉", "mp#1", MarkerSettlement::Failed(failure.clone()))
+            .await
+            .unwrap();
+        let marker = MarkerStore::for_version_dir(&dir)
+            .load()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.outcome, IncompleteOutcome::Failed);
+        assert_eq!(marker.started_at, 1_700_000_000_000);
+        assert_eq!(marker.error, Some(failure));
+        assert_eq!(
+            marker.kind,
+            IncompleteKind::Modpack {
+                task_id: "mp#1".into()
             }
-        }
+        );
 
-        assert_eq!(
-            aurora
-                .discard_incomplete_modpack("t1")
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("x-pack")
-        );
-        assert!(!versions.join("x-pack").exists());
-        for kept in ["y-pack", "z-plain", "d-corrupt"] {
-            assert!(versions.join(kept).exists(), "{kept} 不该被删");
-        }
-        assert_eq!(
-            MarkerStore::for_version_dir(&versions.join("b-install"))
-                .load()
-                .await
-                .unwrap(),
-            Some(failed_install)
-        );
-        assert_eq!(
-            MarkerStore::for_version_dir(&versions.join("c-repair"))
-                .load()
-                .await
-                .unwrap(),
-            Some(cancelled_repair)
-        );
-        assert_eq!(aurora.discard_incomplete_modpack("t9").await.unwrap(), None);
-        assert_eq!(
-            read_instance_modpack(&versions.join("z-plain"))
-                .await
-                .unwrap(),
-            None
-        );
+        let broken = MarkerStore::for_version_dir(&versions.join("标记坏了"));
+        std::fs::create_dir_all(broken.path().parent().unwrap()).unwrap();
+        std::fs::write(broken.path(), b"{").unwrap();
+        aurora
+            .settle_modpack_import("标记坏了", "mp#2", MarkerSettlement::Cancelled)
+            .await
+            .unwrap();
+        let marker = broken.load().await.unwrap().unwrap();
+        assert_eq!(marker.outcome, IncompleteOutcome::Cancelled);
+        assert!(marker.started_at > 1_700_000_000_000);
     }
 
     /// 导入写下的标记就是实例列表读的那一种：导入中断后列表认得出它是整合包导入，而不是报标记损坏。

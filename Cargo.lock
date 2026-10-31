@@ -354,14 +354,13 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "fastrand",
+ "flate2",
  "fs2",
  "image",
  "reqwest",
- "semver",
  "serde",
  "serde_json",
  "sha1",
- "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -416,7 +415,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -446,7 +444,6 @@ dependencies = [
  "aurora-auth",
  "aurora-base",
  "aurora-instance",
- "aurora-java",
  "aurora-version",
  "regex",
  "serde",
@@ -505,7 +502,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
- "tauri-plugin-process",
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
@@ -4598,16 +4594,6 @@ dependencies = [
  "url",
  "windows 0.61.3",
  "zbus",
-]
-
-[[package]]
-name = "tauri-plugin-process"
-version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d55511a7bf6cd70c8767b02c97bf8134fa434daf3926cfc1be0a0f94132d165a"
-dependencies = [
- "tauri",
- "tauri-plugin",
 ]
 
 [[package]]

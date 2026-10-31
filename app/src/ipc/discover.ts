@@ -180,6 +180,6 @@ export const installMod = (
   modVersionId: string,
 ): Promise<ModInstallOutcomeDto> => invoke<ModInstallOutcomeDto>("install_mod", { taskId, versionId, platform, projectId, modVersionId });
 
-/** 长任务：资源包进 resourcepacks/，光影进 shaderpacks/，数据包进 saves/<存档>/datapacks/，Mod 进 mods/。 */
+/** 长任务：资源包进 resourcepacks/，光影进 shaderpacks/，数据包进 saves/<存档>/datapacks/。Mod 不走这里（报 invalid_argument），用 installMod。 */
 export const installResource = (args: InstallResourceArgs): Promise<ResourceInstallOutcomeDto> =>
   invoke<ResourceInstallOutcomeDto>("install_resource", { ...args });

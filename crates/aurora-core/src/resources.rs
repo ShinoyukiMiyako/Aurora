@@ -1,7 +1,8 @@
-//! 资源包、光影、数据包（以及 Mod）从平台装进实例。
+//! 资源包、光影、数据包从平台装进实例。
 //!
 //! 每种资源落到实例工作目录下各自的位置：资源包 `resourcepacks/`、光影 `shaderpacks/`、
-//! 数据包 `saves/<存档>/datapacks/`（数据包只对单个存档生效，必须指明装进哪个存档）、Mod `mods/`。
+//! 数据包 `saves/<存档>/datapacks/`（数据包只对单个存档生效，必须指明装进哪个存档）。Mod 不走这里，
+//! 见 [`ResourceTarget::resource_type`]。
 //! 工作目录与启动时同一套隔离判定（[`Aurora::resolve_working_dir`]），装进去的东西启动后才找得到。
 //!
 //! 平台给的文件名直接拼进落盘路径，必须先验成单个安全的文件名：一个带 `..` 或路径分隔符的
@@ -36,7 +37,9 @@ pub struct ResourceInstallOutcome {
 pub struct ResourceTarget<'a> {
     /// 实例（版本目录名）。
     pub version_id: &'a str,
-    /// 资源类型；整合包与插件不在此列。
+    /// 资源类型；整合包、插件与 Mod 不在此列。Mod 要经 `install_mod`：那条路径占住 mods 目录、
+    /// 写卷宗与历史、先探测游戏是否占着同名文件，直接下载到 mods/ 会无备份地覆盖玩家的同名 jar，
+    /// 装进来的 Mod 也没有来源，查不了更新、回滚不了。
     pub resource_type: ResourceType,
     /// 数据包装进的存档目录名；其余类型必须为 `None`。
     pub world: Option<&'a str>,
@@ -107,7 +110,11 @@ impl Aurora {
                     "只有数据包需要指定存档".to_owned(),
                 ));
             }
-            (ResourceType::Mod, None) => Dest::Sub("mods"),
+            (ResourceType::Mod, None) => {
+                return Err(CoreError::InvalidResourceTarget(
+                    "Mod 要经 install_mod 安装，不能作为单个资源装进实例".to_owned(),
+                ));
+            }
             (ResourceType::ResourcePack, None) => Dest::Sub("resourcepacks"),
             (ResourceType::Shader, None) => Dest::Sub("shaderpacks"),
             (other @ (ResourceType::Modpack | ResourceType::Plugin), None) => {
@@ -487,13 +494,23 @@ mod tests {
         assert!(!mc.join("versions/evil.zip").exists());
     }
 
+    /// Mod 也不行：直接下到 mods/ 会绕过 Mod 管理，同名 jar 被无备份地覆盖。目录里原有的文件不动。
     #[tokio::test]
-    async fn modpack_and_plugin_are_not_single_resources() {
+    async fn modpack_plugin_and_mod_are_not_single_resources() {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         put_version(mc, "1.21.1").await;
+        let mods = mc.join("versions/1.21.1/mods");
+        tokio::fs::create_dir_all(&mods).await.unwrap();
+        tokio::fs::write(mods.join("sodium.jar"), b"player-patched")
+            .await
+            .unwrap();
         let aurora = aurora(mc, IsolationPolicy::All, "http://127.0.0.1:9");
-        for resource_type in [ResourceType::Modpack, ResourceType::Plugin] {
+        for resource_type in [
+            ResourceType::Modpack,
+            ResourceType::Plugin,
+            ResourceType::Mod,
+        ] {
             let err = aurora
                 .install_resource(
                     ResourceTarget {
@@ -508,8 +525,15 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(matches!(err, CoreError::InvalidResourceTarget(_)));
+            assert!(
+                matches!(err, CoreError::InvalidResourceTarget(_)),
+                "{resource_type:?}：{err:?}"
+            );
         }
+        assert_eq!(
+            tokio::fs::read(mods.join("sodium.jar")).await.unwrap(),
+            b"player-patched"
+        );
     }
 
     /// CurseForge 文件没有下载地址、download-url 端点也拒绝时，报成需要手动下载。

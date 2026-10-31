@@ -46,8 +46,6 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // 更改游戏目录、导入本地整合包要拿磁盘绝对路径，只能走系统对话框。
         .plugin(tauri_plugin_dialog::init())
-        // 自更新装完后重启进程。
-        .plugin(tauri_plugin_process::init())
         // -- art --
         .register_asynchronous_uri_scheme_protocol(textures::SCHEME, textures::handle);
     // 插件配置里 pubkey 是必填项，缺了插件初始化就失败、整个应用起不来，所以只在支持时注册。
@@ -56,11 +54,14 @@ pub fn run() {
     }
     builder
         .setup(move |app| {
-            // Aurora::load() 是异步，而 setup 是同步闭包；用 Tauri 运行时 block_on 构造后放进 state。
-            // 构造失败（配置损坏等）直接冒泡终止启动，避免带着半初始化的门面继续跑。
-            let aurora = tauri::async_runtime::block_on(Aurora::load())?;
+            // 载入是异步的，而 setup 是同步闭包；用 Tauri 运行时 block_on 构造后放进 state。
+            // config.json 读不出来时不终止：此刻还没有窗口，终止就是双击后什么都看不到，而且以后每次都这样。
+            // 坏文件改名留存、按默认配置启动，经过记成启动提示，由前端查询后告诉用户。数据目录定位不到、
+            // 坏文件改不了名这类错误仍然冒泡终止，避免带着半初始化的门面继续跑。
+            let (aurora, recovery) = tauri::async_runtime::block_on(Aurora::load_recovering())?;
             let server_monitor = ServerMonitor::new(aurora.data_dir());
             app.manage(Facade::new(aurora));
+            app.manage(commands::system::StartupNotices::from_recovery(recovery));
             // -- tasks --
             app.manage(TaskRegistry::default());
             app.manage(TaskJournal::default());
@@ -130,6 +131,7 @@ pub fn run() {
             commands::instances::list_manifest,
             commands::instances::list_loader_versions,
             commands::instances::required_java,
+            commands::instances::version_requirements,
             commands::instances::open_folder,
             // -- launch --
             commands::launch::launch_game,
@@ -161,11 +163,13 @@ pub fn run() {
             commands::discover::install_resource,
             // -- modpack --
             commands::modpack::preview_modpack,
+            commands::modpack::summarize_platform_modpack,
             commands::modpack::install_modpack,
             // -- system --
             commands::system::memory_advice,
             commands::system::is_first_run,
             commands::system::complete_first_run,
+            commands::system::startup_notices,
             commands::servers::list_pinned_servers,
             commands::servers::set_pinned_servers,
             commands::servers::list_known_servers,

@@ -13,9 +13,16 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     is_release: true,
     java_major: 21,
     mod_count: 0,
+    world_count: 0,
+    isolated: false,
     description: null,
     cover: null,
+    memory_mb: null,
     settings_error: null,
+    modpack: null,
+    modpack_error: null,
+    last_crash_at: null,
+    last_crash_error: null,
     incomplete: null,
     created_at: 1_700_000_000_000,
     activity: null,
@@ -104,5 +111,32 @@ describe("实例 DTO 适配：状态", () => {
     const inst = instanceFromDto(instanceDto("生存 1.21", { playtime_min: 754, last_played_at: 1_720_000_000_000, mod_count: 0 }), { pins: ["生存 1.21"], busyTaskInstanceIds: new Set() });
     expect(inst).toMatchObject({ id: "生存 1.21", name: "生存 1.21", pinned: true, playtimeMin: 754, lastPlayedAt: 1_720_000_000_000, modCount: 0, placeholder: false });
     expect(instanceFromDto(instanceDto("Other"), { pins: ["生存 1.21"], busyTaskInstanceIds: new Set() }).pinned).toBe(false);
+  });
+
+  it("存档数、隔离生效值、自定内存与最近崩溃原样带过，读不出的原因各自保留", () => {
+    const inst = instanceFromDto(
+      instanceDto("隔离", { world_count: 3, isolated: true, memory_mb: 6144, last_crash_at: 1_720_000_000_000, modpack_error: "整合包记录解析失败" }),
+      idle,
+    );
+    expect(inst).toMatchObject({ worldCount: 3, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
+    const unread = instanceFromDto(instanceDto("坏", { world_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
+    expect(unread).toMatchObject({ worldCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
+  });
+});
+
+describe("实例 DTO 适配：整合包来源", () => {
+  it("平台整合包带平台、工程与版本；本地文件导入的平台为 null", () => {
+    const fromPlatform = instanceFromDto(
+      instanceDto("FO", { modpack: { platform: "modrinth", project_id: "1KVo5zza", version_id: "abc123", name: "Fabulously Optimized", version: "6.4.0" } }),
+      idle,
+    );
+    expect(fromPlatform.modpack).toEqual({ platform: "modrinth", projectId: "1KVo5zza", versionId: "abc123", name: "Fabulously Optimized", version: "6.4.0" });
+    const fromFile = instanceFromDto(instanceDto("本地", { modpack: { platform: null, project_id: null, version_id: null, name: "私服整合包", version: null } }), idle);
+    expect(fromFile.modpack).toEqual({ platform: null, projectId: null, versionId: null, name: "私服整合包", version: null });
+  });
+
+  it("未知平台抛错", () => {
+    const dto = instanceDto("X", { modpack: { platform: "ftb" as never, project_id: "1", version_id: "2", name: "X", version: null } });
+    expect(() => instanceFromDto(dto, idle)).toThrow("未知的整合包来源平台：ftb");
   });
 });

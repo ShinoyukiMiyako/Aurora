@@ -490,6 +490,7 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
   const rawType = read.string("resourceType");
   const resourceType = parseOne(RESOURCE_TYPES, rawType, `未知资源类型 ${rawType}`);
   if (resourceType === "modpack" || resourceType === "plugin") throw invalid(`${rawType} 不能作为单个资源装进实例`);
+  if (resourceType === "mod") throw invalid("Mod 要经 install_mod 安装，不能作为单个资源装进实例");
   const world = read.nullableString("world");
   const platform = parsePlatform(read.string("platform"));
   const projectId = read.string("projectId");
@@ -501,7 +502,7 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
     if (world !== null && !worlds.includes(world)) {
       throw new IpcError("world_not_found", `实例 ${versionId} 里没有存档 ${world}`, { version_id: versionId, world });
     }
-    const file_name = fileNameFor(platform, projectId, fileVersionId, resourceType === "mod" ? "jar" : "zip");
+    const file_name = fileNameFor(platform, projectId, fileVersionId, "zip");
     await simulateDownload(taskId, file_name, 4_194_304);
     const dir = world === null ? RESOURCE_DIRS[resourceType] : `saves/${world}/${RESOURCE_DIRS[resourceType]}`;
     return {

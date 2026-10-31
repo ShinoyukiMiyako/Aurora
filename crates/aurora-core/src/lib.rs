@@ -46,6 +46,7 @@ pub mod loaders;
 pub mod memory;
 mod modfs;
 pub mod modpack;
+pub mod modpack_summary;
 pub mod mods;
 pub mod modversions;
 pub mod news;
@@ -62,7 +63,7 @@ mod workdir;
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
 pub use compat::{Compatibility, InstalledCopy, InstanceMatch, MatchState};
 pub use config::{
-    AfterLaunch, AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings, NamedDirectory,
+    AfterLaunch, AuroraConfig, ConfigRecovery, ConfigStore, DownloadSourcePolicy, MemorySettings, NamedDirectory,
     PinnedServer,
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
@@ -85,6 +86,7 @@ pub use modpack::{
     INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
     ModpackPreview, ModpackSource, PreparedModpack, read_instance_modpack, validate_instance_name,
 };
+pub use modpack_summary::ModpackSummary;
 pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
 pub use modversions::ProjectInfo;
 pub use news::{NewsFeed, NewsItem, NewsTag};
@@ -150,7 +152,7 @@ pub use instances::{
     DeletionPreview, InstanceSummary, InstanceVersion, LEGACY_JAVA_MAJOR, MAX_SIDEBAR_PINS,
     Readable, ReadyVersion, broken_reason_text,
 };
-pub use loaders::{LoaderEndpoints, LoaderVersionInfo, ManifestOverview};
+pub use loaders::{LoaderEndpoints, LoaderVersionInfo, ManifestOverview, VersionRequirements};
 
 // 各下层 crate 的错误类型：上层（命令边界）要把每一种都映射成稳定的错误码，故全部透传。
 pub use aurora_auth::AuthError;

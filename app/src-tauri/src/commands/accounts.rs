@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use aurora_core::{
-    Account, AccountStatus, AccountType, Aurora, AuthServerInfo, AuthlibLogin, AuthlibPending,
-    CancellationToken, DeviceCodeResponse, TextureService,
+    Account, AccountCredentials, AccountStatus, AccountType, Aurora, AuthServerInfo, AuthlibLogin,
+    AuthlibPending, CancellationToken, DeviceCodeResponse, TextureService,
 };
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -28,6 +28,10 @@ pub struct AccountDto {
     pub account_type: AccountType,
     /// 外置登录的验证服务器名；其余类型为 null。
     pub auth_server: Option<String>,
+    /// 外置登录的 API 根地址，可原样交回 `authlib_login` 的 server_url；其余类型为 null。
+    pub server_url: Option<String>,
+    /// 外置登录时填的账号（邮箱或用户名），重新登录时预填；其余类型、或这一项加入之前登录的记录为 null。
+    pub username: Option<String>,
     pub added_at: u64,
     /// `ok` 或 `expired`（需要重新登录）。
     pub status: AccountStatus,
@@ -36,11 +40,19 @@ pub struct AccountDto {
 }
 
 pub(crate) fn account_dto(account: &Account) -> AccountDto {
+    let (server_url, username) = match &account.credentials {
+        AccountCredentials::AuthlibInjector(creds) => {
+            (Some(creds.api_root.clone()), creds.username.clone())
+        }
+        AccountCredentials::Microsoft(_) | AccountCredentials::Offline => (None, None),
+    };
     AccountDto {
         uuid: account.uuid.clone(),
         name: account.name.clone(),
         account_type: account.account_type,
         auth_server: account.auth_server.clone(),
+        server_url,
+        username,
         added_at: account.added_at,
         status: account.status,
         last_verified_at: account.last_verified_at,
@@ -199,7 +211,15 @@ pub(crate) async fn with_accounts<T: Send + 'static>(
     facade: &Facade,
     work: impl FnOnce(&Aurora) -> aurora_core::Result<T> + Send + 'static,
 ) -> Result<T, CommandError> {
-    let aurora = facade.snapshot().await;
+    on_blocking_pool(facade.snapshot().await, work).await
+}
+
+/// 账户库读写在进程级锁内做同步文件 IO 与 DPAPI 调用：放在异步工作线程上，锁被别处的写入占着时
+/// 会连同这个线程上的事件转发、取图一起卡住。
+async fn on_blocking_pool<T: Send + 'static>(
+    aurora: Aurora,
+    work: impl FnOnce(&Aurora) -> aurora_core::Result<T> + Send + 'static,
+) -> Result<T, CommandError> {
     let joined = tokio::task::spawn_blocking(move || work(&aurora)).await;
     Ok(joined.map_err(aurora_core::CoreError::from)??)
 }
@@ -452,10 +472,11 @@ pub async fn remove_account(uuid: String, facade: State<'_, Facade>) -> Result<(
 
 // ---- 供启动链使用 ----
 
-/// 按 uuid 取出完整账户（含令牌，仅供启动时注入命令行，绝不过 IPC）。
-pub(crate) fn find_account(aurora: &Aurora, uuid: &str) -> Result<Account, CommandError> {
-    aurora
-        .find_account(uuid)?
+/// 按 uuid 取出完整账户（含令牌，仅供启动时注入命令行，绝不过 IPC）。在阻塞线程池上查。
+pub(crate) async fn find_account(aurora: &Aurora, uuid: &str) -> Result<Account, CommandError> {
+    let lookup = uuid.to_owned();
+    on_blocking_pool(aurora.clone(), move |aurora| aurora.find_account(&lookup))
+        .await?
         .ok_or_else(|| aurora_core::AuthError::AccountNotFound(uuid.to_owned()).into())
 }
 

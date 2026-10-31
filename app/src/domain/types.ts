@@ -27,7 +27,8 @@ export type LoaderKind = (typeof LOADER_KINDS)[number];
 
 export type AccountKind = "microsoft" | "offline" | "authlib";
 export type ResourceKind = "mod" | "modpack" | "resourcepack" | "shader" | "datapack";
-export type Platform = "modrinth" | "curseforge";
+export const PLATFORMS = ["modrinth", "curseforge"] as const;
+export type Platform = (typeof PLATFORMS)[number];
 
 // ---------------------------------------------------------------- 启动会话
 

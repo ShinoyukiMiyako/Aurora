@@ -5,7 +5,7 @@ import { IpcError } from "./errors";
 import { getInstanceSettings, listInstances } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { INSTANCE_NAME_MAX_CHARS, installModpack, previewModpack, type ModpackSource } from "./modpack";
+import { INSTANCE_NAME_MAX_CHARS, installModpack, previewModpack, summarizePlatformModpack, type ModpackSource } from "./modpack";
 import { CORE_EVENT, cancelTask, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -30,17 +30,31 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
   });
 
   it("source 是带 kind 的对象，内部字段为 snake_case", async () => {
-    vi.mocked(tauriInvoke).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     await previewModpack("D:/a.zip");
+    await summarizePlatformModpack("modrinth", "1KVo5zza", "v14");
     await installModpack("t-mp", platform, null);
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["preview_modpack", { path: "D:/a.zip" }],
+      ["summarize_platform_modpack", { platform: "modrinth", projectId: "1KVo5zza", versionId: "v14" }],
       ["install_modpack", { taskId: "t-mp", source: { kind: "platform", platform: "modrinth", project_id: "1KVo5zza", version_id: "v14" }, name: null }],
     ]);
   });
 });
 
 describe("整合包 mock", () => {
+  it("平台整合包摘要：Modrinth 给出 Mod 数与远程字节，CurseForge 两项为 null；目录里没有的工程报 mod_version_not_found", async () => {
+    expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "v14")).toMatchObject({
+      format: "modrinth",
+      name: "Fabulously Optimized",
+      remote_files: 48,
+      mod_files: 41,
+      remote_bytes: 96_468_992,
+    });
+    expect(await summarizePlatformModpack("curseforge", "396246", "f1")).toMatchObject({ format: "curseforge", mod_files: null, remote_bytes: null });
+    expect(await summarizePlatformModpack("modrinth", "nope", "v1").catch((e: unknown) => e)).toMatchObject({ code: "mod_version_not_found" });
+  });
+
   it("预览按扩展名认格式，CurseForge 不带远程大小；其它扩展名报 modpack_unsupported_extension", async () => {
     expect(await previewModpack("D:/下载/我的整合包.mrpack")).toMatchObject({ format: "modrinth", name: "我的整合包", remote_bytes: 96_468_992 });
     expect(await previewModpack("D:/下载/Pack.ZIP")).toMatchObject({ format: "curseforge", name: "Pack", remote_bytes: null });

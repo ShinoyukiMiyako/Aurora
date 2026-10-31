@@ -24,8 +24,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-# 整合包与 Mod 更新比较版本号。
-semver = "1"
 # 整合包同步期间对实例目录加文件锁，防止两个进程同时改同一实例。
 fs2 = "0.4"
 # 历史备份与整合包暂存目录的随机后缀。
@@ -33,14 +31,14 @@ fastrand = "2"
 # 读整合包（.mrpack / CurseForge .zip）与 jar 内的 Mod 图标。只留纯 Rust 的 deflate 后端，
 # 规避 Windows 无 C 编译器时的构建失败；与 aurora-modplatform 同一选择。
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# 远端整合包只取清单那一个条目的压缩数据自己解压，与 zip 的 deflate-flate2 后端是同一份实现。
+flate2 = "1"
 # 皮肤帽层判定要读 PNG 像素；只开 png 解码，其余格式用不到。
 image = { version = "0.25", default-features = false, features = ["png"] }
 # 游玩记录按本地日期切分每日时长，需要系统时区（clock）；其余特性用不到。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 原版材质服务：校验客户端 jar 与全景对象的哈希、给远程皮肤与缩略图按地址取缓存键。
 sha1 = "0.11"
-# 内存建议读本机物理内存总量与空闲量；只开 system，只刷 RAM。版本与 aurora-launch 一致。
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 # 网络逻辑用 wiremock 本地 mock 验证（需真正后台运行时，multi_thread flavor）。

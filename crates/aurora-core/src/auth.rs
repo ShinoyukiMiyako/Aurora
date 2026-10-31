@@ -85,6 +85,8 @@ pub struct AuthlibPending {
     pub access_token: String,
     pub client_token: String,
     pub profiles: Vec<GameProfile>,
+    /// 这次登录填的账号，选完角色后随凭据落盘。
+    pub username: String,
 }
 
 impl std::fmt::Debug for AuthlibPending {
@@ -133,6 +135,7 @@ fn account_from_session(session: &MicrosoftSession) -> Account {
 /// 组装一个刚验证过的外置登录账户。
 fn authlib_account(
     server: &AuthServerInfo,
+    username: &str,
     access_token: String,
     client_token: String,
     profile: GameProfile,
@@ -149,6 +152,7 @@ fn authlib_account(
                 api_root: server.api_root.clone(),
                 access_token,
                 client_token,
+                username: Some(username.to_owned()),
             }),
         )
     }
@@ -341,6 +345,7 @@ impl Aurora {
                 .finish_authlib(
                     &client,
                     &server,
+                    username,
                     resp.access_token,
                     resp.client_token,
                     profile,
@@ -353,6 +358,7 @@ impl Aurora {
             access_token: resp.access_token,
             client_token: resp.client_token,
             profiles: resp.available_profiles,
+            username: username.to_owned(),
         };
         match pending.profiles.as_slice() {
             [] => Err(AuthError::YggdrasilNoProfile.into()),
@@ -397,6 +403,7 @@ impl Aurora {
         self.finish_authlib(
             &client,
             &pending.server,
+            &pending.username,
             resp.access_token,
             resp.client_token,
             bound,
@@ -443,12 +450,13 @@ impl Aurora {
         &self,
         client: &YggdrasilClient,
         server: &AuthServerInfo,
+        username: &str,
         access_token: String,
         client_token: String,
         profile: GameProfile,
     ) -> Result<Account> {
         let skin = profile_skin_or_warn(client, &profile.id).await;
-        let account = authlib_account(server, access_token, client_token, profile, skin);
+        let account = authlib_account(server, username, access_token, client_token, profile, skin);
         self.blocking(move |aurora| aurora.store_login(account))
             .await
     }
@@ -548,12 +556,14 @@ impl Aurora {
         let name = resp.selected_profile.map(|p| p.name);
         let uuid = account.uuid.clone();
         let api_root = creds.api_root.clone();
+        let username = creds.username.clone();
         self.blocking(move |aurora| {
             aurora.update_credential_account(&uuid, |stored| {
                 stored.credentials = AccountCredentials::AuthlibInjector(YggdrasilCredentials {
                     api_root,
                     access_token: resp.access_token,
                     client_token: resp.client_token,
+                    username,
                 });
                 if let Some(name) = name {
                     stored.name = name;
@@ -977,6 +987,7 @@ mod tests {
             access_token: "SECRET-ACCESS".into(),
             client_token: "SECRET-CLIENT".into(),
             profiles: vec![],
+            username: "user@example.com".into(),
         };
         let text = format!("{pending:?}");
         assert!(text.contains("LittleSkin"));
@@ -1227,6 +1238,7 @@ mod tests {
                 AccountCredentials::AuthlibInjector(c) => {
                     assert_eq!(c.api_root, format!("{}/", server.uri()));
                     assert_eq!(c.access_token, "acc");
+                    assert_eq!(c.username.as_deref(), Some("user@example.com"));
                 }
                 other => panic!("期望外置凭据，得到 {other:?}"),
             }
@@ -1310,7 +1322,10 @@ mod tests {
                 "https://skins.example/alt.png"
             );
             match &account.credentials {
-                AccountCredentials::AuthlibInjector(c) => assert_eq!(c.access_token, "bound-acc"),
+                AccountCredentials::AuthlibInjector(c) => {
+                    assert_eq!(c.access_token, "bound-acc");
+                    assert_eq!(c.username.as_deref(), Some("u"), "选角色后仍记下登录账号");
+                }
                 other => panic!("期望外置凭据，得到 {other:?}"),
             }
             assert_eq!(aurora.current_account().unwrap().unwrap().uuid, ALT);
@@ -1401,6 +1416,7 @@ mod tests {
             let account = aurora
                 .store_login(authlib_account(
                     &info,
+                    "hero@example.com",
                     "acc".into(),
                     "cli".into(),
                     GameProfile {
@@ -1415,6 +1431,52 @@ mod tests {
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
             let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
             assert_eq!(stored.status, AccountStatus::Expired);
+        }
+
+        /// 刷新换了令牌，登录账号照旧留着：重新登录时还要拿它预填。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn authlib_refresh_keeps_the_login_username() {
+            let server = MockServer::start().await;
+            mount_yggdrasil(&server, json!({})).await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "accessToken": "fresh", "clientToken": "cli",
+                    "selectedProfile": { "id": HERO, "name": "Hero" }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "stale".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: HERO.into(),
+                        name: "Hero".into(),
+                    },
+                    None,
+                ))
+                .unwrap();
+
+            aurora.refresh_account(HERO).await.unwrap();
+            let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
+            match &stored.credentials {
+                AccountCredentials::AuthlibInjector(c) => {
+                    assert_eq!(c.access_token, "fresh");
+                    assert_eq!(c.username.as_deref(), Some("hero@example.com"));
+                }
+                other => panic!("期望外置凭据，得到 {other:?}"),
+            }
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1434,6 +1496,7 @@ mod tests {
             };
             let mut account = authlib_account(
                 &info,
+                "hero@example.com",
                 "acc".into(),
                 "cli".into(),
                 GameProfile {

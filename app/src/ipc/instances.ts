@@ -1,5 +1,5 @@
 // 实例：列表、设置、内容、侧栏固定、新建、补全、删除、改名、打开文件夹，以及新建页要的版本清单、
-// 加载器版本与所需 Java。
+// 加载器版本、所需 Java 与下载体积。
 //
 // 会改动实例目录的命令（新建、整合包导入、补全、改名、删除，以及装、删、启停、更新、回滚 Mod 与装资源）
 // 在实例正忙时以 instance_busy 拒绝，detail.activity 指出正在做的事（Mod 与资源的改动彼此、与运行中的
@@ -8,6 +8,7 @@
 // detail.reason（too_many / duplicate / not_found）与 detail.id。
 
 import { invoke } from "./bridge";
+import type { PlatformId } from "./discover";
 
 export type LoaderChoice = "fabric" | "quilt" | "forge" | "neoforge";
 export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forge", "neoforge"];
@@ -42,6 +43,17 @@ export interface IncompleteDto {
   error: { code: string; message: string } | null;
 }
 
+/** 实例所来自的整合包。 */
+export interface InstanceModpackDto {
+  /** 从本地文件导入时为 null。 */
+  platform: PlatformId | null;
+  project_id: string | null;
+  version_id: string | null;
+  /** 整合包自己的名字（实例名可以被改成别的）。 */
+  name: string;
+  version: string | null;
+}
+
 export interface InstanceDto {
   id: string;
   /** ready：版本 JSON 可用；broken：缺失或损坏，原因见 broken_reason。 */
@@ -57,11 +69,25 @@ export interface InstanceDto {
   java_major: number | null;
   /** 工作目录 mods/ 下的 Mod 文件数（.jar 与 .jar.disabled）；broken 或设置读不出时为 null。 */
   mod_count: number | null;
+  /** 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。 */
+  world_count: number | null;
+  /** 隔离的生效值（实例覆盖、全局档位与已有数据共同决定）；何时为 null 同 mod_count。 */
+  isolated: boolean | null;
   description: string | null;
   /** 封面预设 id；null 时按默认规则推导。 */
   cover: string | null;
-  /** 实例设置读不出来的原因；此时 description、cover 为 null。 */
+  /** 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。 */
+  memory_mb: number | null;
+  /** 实例设置读不出来的原因；此时 description、cover、memory_mb 为 null。 */
   settings_error: string | null;
+  /** 从整合包导入时记下的整合包；不是整合包实例或记录读不出时为 null。 */
+  modpack: InstanceModpackDto | null;
+  /** 整合包记录读不出来的原因。 */
+  modpack_error: string | null;
+  /** 最近一次崩溃的毫秒时间戳；没崩溃过或记录读不出时为 null。 */
+  last_crash_at: number | null;
+  /** 崩溃记录读不出来的原因。 */
+  last_crash_error: string | null;
   incomplete: IncompleteDto | null;
   /** 实例目录创建时刻（毫秒时间戳）；文件系统不记录时为 null。 */
   created_at: number | null;
@@ -181,9 +207,14 @@ export interface ManifestDto {
   fetch_error: string | null;
 }
 
-/** open_folder 能打开的文件夹。game_dir 不需要 id；world 还需要存档文件夹名。 */
+/**
+ * open_folder 能打开的文件夹。game_dir、data_dir（启动器数据目录）、launcher_logs（启动器自己的日志目录）
+ * 不需要 id；world 还需要存档文件夹名。
+ */
 export type FolderTarget =
   | "game_dir"
+  | "data_dir"
+  | "launcher_logs"
   | "instance"
   | "mods"
   | "saves"
@@ -289,6 +320,17 @@ export const listLoaderVersions = (loader: LoaderChoice, mcVersion: string): Pro
 
 /** 新建这个游戏版本的实例需要的 Java 主版本。 */
 export const requiredJava = (mcVersion: string): Promise<number> => invoke<number>("required_java", { mcVersion });
+
+export interface VersionRequirementsDto {
+  java_major: number;
+  /** 全新下载的字节数（客户端、本机适用的库、资源索引与资源文件、日志配置），不含 Java 与加载器、
+   * 不扣除本地已有的文件；版本 JSON 有一项没标大小时为 null。 */
+  download_bytes: number | null;
+}
+
+/** 新建这个游戏版本要的 Java 主版本与下载体积。版本清单不带这两项，按选中的版本逐个查；后端按版本缓存。 */
+export const versionRequirements = (mcVersion: string): Promise<VersionRequirementsDto> =>
+  invoke<VersionRequirementsDto>("version_requirements", { mcVersion });
 
 /** 用系统文件管理器打开文件夹；路径由后端按实例 id 解析。 */
 export const openFolder = (target: FolderTarget, id: string | null, world: string | null = null): Promise<void> =>

@@ -93,6 +93,13 @@ pub async fn list_worlds(saves_dir: &Path) -> Result<Vec<WorldEntry>> {
     blocking(saves_dir, move || worlds_in(&dir)).await
 }
 
+/// 统计 `saves_dir` 下的存档数，口径与 [`list_worlds`] 相同（每个子文件夹算一个），但不读 level.dat、
+/// 不量大小，供列表页用。目录不存在为 0。
+pub async fn count_worlds(saves_dir: &Path) -> Result<u32> {
+    let dir = saves_dir.to_path_buf();
+    blocking(saves_dir, move || count_worlds_in(&dir)).await
+}
+
 /// 统计 `mods_dir` 下的 Mod 文件数：`.jar` 与停用的 `.jar.disabled`，不解析内容。目录不存在为 0。
 pub async fn count_mod_files(mods_dir: &Path) -> Result<u32> {
     let dir = mods_dir.to_path_buf();
@@ -252,6 +259,19 @@ fn packs_in(dir: &Path) -> Result<Vec<PackEntry>> {
     }
     packs.sort_by(|a, b| a.file_name.cmp(&b.file_name));
     Ok(packs)
+}
+
+fn count_worlds_in(saves: &Path) -> Result<u32> {
+    let Some(entries) = read_dir_entries(saves)? else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    for entry in entries {
+        if metadata(&entry.path())?.is_dir() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn count_mods_in(mods: &Path) -> Result<u32> {
@@ -485,6 +505,24 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        assert_eq!(count_worlds(&tmp.path().join("saves")).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn world_count_matches_the_world_list_without_reading_level_dat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let saves = tmp.path().join("saves");
+        write(
+            &saves.join("ok").join("level.dat"),
+            &level_dat("a", 0, false, 1),
+        );
+        write(&saves.join("broken").join("level.dat"), b"garbage");
+        std::fs::create_dir_all(saves.join("empty")).unwrap();
+        write(&saves.join("note.txt"), b"not a world");
+        write(&saves.join("world.zip"), b"PK");
+
+        assert_eq!(count_worlds(&saves).await.unwrap(), 3);
+        assert_eq!(list_worlds(&saves).await.unwrap().len(), 3);
     }
 
     #[tokio::test]

@@ -14,7 +14,7 @@ use aurora_core::{
     is_safe_instance_id, Aurora, CoreError, DeletionPreview, Disposer, EventSink, IncompleteKind,
     IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError, InstanceInstallOutcome,
     InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride, JavaSelection, LevelInfo,
-    LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry,
+    LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry, Platform,
     PlaySummary, Readable, RecycleBin, RepairOutcome, Resolution, VersionSettings, WorldEntry,
 };
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,8 @@ pub enum InstanceActivity {
     // 由启动命令持有：launch_game 先占为 Launching，进程起来后转 Running，退出时释放。
     Launching,
     Running,
-    /// 装、删、启停、更新、回滚 Mod，或往实例里装资源包、光影、数据包。
+    /// 装、删、启停、更新、回滚 Mod，往实例里装资源包、光影、数据包，查更新时回写卷宗，写实例设置，
+    /// 或为打开文件夹建出工作目录下的子目录。
     Modifying,
 }
 
@@ -57,13 +58,13 @@ impl InstanceActivity {
             InstanceActivity::Deleting => "删除",
             InstanceActivity::Launching => "启动",
             InstanceActivity::Running => "运行",
-            InstanceActivity::Modifying => "改动 Mod 与资源",
+            InstanceActivity::Modifying => "改动 Mod、资源或设置",
         }
     }
 
     /// 两件事能否同时在一个实例上进行。
     ///
-    /// Mod 与资源的改动只往工作目录里加删文件、写卷宗与历史，彼此不冲突；游戏运行中仍允许改动，
+    /// Mod、资源与设置的改动只往实例目录里加删、改写文件，彼此不冲突；游戏运行中仍允许改动，
     /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、新建、补全会挪走或重写整个目录，
     /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。
     fn compatible_with(self, other: Self) -> bool {
@@ -294,6 +295,27 @@ pub struct IncompleteDto {
     pub error: Option<MarkerErrorDto>,
 }
 
+/// 实例所来自的整合包。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InstanceModpackDto {
+    /// modrinth / curseforge；从本地文件导入时为 null。
+    pub platform: Option<Platform>,
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    /// 整合包自己的名字与版本（实例名可以被改成别的）。
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// 新建某个游戏版本前要知道的 Java 与下载体积。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VersionRequirementsDto {
+    pub java_major: u32,
+    /// 全新下载的字节数（客户端、本机适用的库、资源索引与资源文件、日志配置），不含 Java 与加载器、
+    /// 不扣除本地已有的文件；版本 JSON 有一项没标大小时为 null。
+    pub download_bytes: Option<u64>,
+}
+
 /// 列表里的一个实例。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InstanceDto {
@@ -311,10 +333,24 @@ pub struct InstanceDto {
     pub java_major: Option<u32>,
     /// 工作目录 mods/ 下的 Mod 文件数；broken 或设置读不出时为 null。
     pub mod_count: Option<u32>,
+    /// 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。
+    pub world_count: Option<u32>,
+    /// 隔离的生效值；何时为 null 同 mod_count。
+    pub isolated: Option<bool>,
     pub description: Option<String>,
     pub cover: Option<String>,
-    /// 实例设置文件读不出来的原因；此时 description、cover 为 null。
+    /// 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。
+    pub memory_mb: Option<u32>,
+    /// 实例设置文件读不出来的原因；此时 description、cover、memory_mb 为 null。
     pub settings_error: Option<String>,
+    /// 从整合包导入的实例记下的整合包；不是整合包实例或记录读不出时为 null。
+    pub modpack: Option<InstanceModpackDto>,
+    /// 整合包记录读不出来的原因。
+    pub modpack_error: Option<String>,
+    /// 最近一次崩溃的 Unix 毫秒；没崩溃过或记录读不出时为 null。
+    pub last_crash_at: Option<u64>,
+    /// 崩溃记录读不出来的原因。
+    pub last_crash_error: Option<String>,
     pub incomplete: Option<IncompleteDto>,
     /// 实例目录的创建时刻（Unix 毫秒）。
     pub created_at: Option<u64>,
@@ -584,9 +620,31 @@ fn instance_dto(
     activity: Option<InstanceActivity>,
     play: Option<&PlaySummary>,
 ) -> InstanceDto {
-    let (description, cover, settings_error) = match summary.settings {
-        Readable::Read(settings) => (settings.description, settings.cover, None),
-        Readable::Unreadable(error) => (None, None, Some(error)),
+    let (description, cover, memory_mb, settings_error) = match summary.settings {
+        Readable::Read(settings) => (
+            settings.description,
+            settings.cover,
+            settings.memory_mb,
+            None,
+        ),
+        Readable::Unreadable(error) => (None, None, None, Some(error)),
+    };
+    let (modpack, modpack_error) = match summary.modpack {
+        Readable::Read(modpack) => (
+            modpack.map(|m| InstanceModpackDto {
+                platform: m.platform,
+                project_id: m.project_id,
+                version_id: m.version_id,
+                name: m.name,
+                version: m.version,
+            }),
+            None,
+        ),
+        Readable::Unreadable(error) => (None, Some(error)),
+    };
+    let (last_crash_at, last_crash_error) = match summary.last_crash_at {
+        Readable::Read(at) => (at, None),
+        Readable::Unreadable(error) => (None, Some(error)),
     };
     let mut dto = InstanceDto {
         id: summary.id,
@@ -598,9 +656,16 @@ fn instance_dto(
         is_release: false,
         java_major: None,
         mod_count: None,
+        world_count: None,
+        isolated: None,
         description,
         cover,
+        memory_mb,
         settings_error,
+        modpack,
+        modpack_error,
+        last_crash_at,
+        last_crash_error,
         incomplete: summary.incomplete.map(incomplete_dto),
         created_at: summary.created_at,
         activity,
@@ -622,6 +687,8 @@ fn instance_dto(
             dto.is_release = ready.is_release;
             dto.java_major = ready.java_major;
             dto.mod_count = ready.mod_count;
+            dto.world_count = ready.world_count;
+            dto.isolated = ready.isolated;
         }
         InstanceVersion::Broken(reason) => {
             dto.status = "broken";
@@ -811,18 +878,21 @@ pub async fn get_instance_settings(
 }
 
 /// 整份写入实例设置并返回写下的内容。字段缺失、多出或取值不合法报 `invalid_argument`
-/// （detail.field 指出是哪一项），文件不变。
+/// （detail.field 指出是哪一项），文件不变。改名、删除、新建、补全进行中报 `instance_busy`：
+/// 设置文件在实例目录里，并发写会按旧路径把目录重新建出来。游戏运行中可以写，下次启动生效。
 #[tauri::command]
 pub async fn set_instance_settings(
     id: String,
     settings: Value,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<InstanceSettingsDto, CommandError> {
-    set_instance_settings_with(&facade, &id, settings).await
+    set_instance_settings_with(&facade, &locks, &id, settings).await
 }
 
 pub(crate) async fn set_instance_settings_with(
     facade: &Facade,
+    locks: &InstanceLocks,
     id: &str,
     settings: Value,
 ) -> Result<InstanceSettingsDto, CommandError> {
@@ -831,6 +901,7 @@ pub(crate) async fn set_instance_settings_with(
     let dto: InstanceSettingsDto = serde_json::from_value(settings).map_err(|err| {
         invalid_field("settings", "malformed", format!("实例设置格式不对：{err}"))
     })?;
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
     let settings = VersionSettings::from(dto);
     aurora
@@ -881,9 +952,12 @@ pub(crate) async fn set_sidebar_pins_with(
         .validate_sidebar_pins(&pins)
         .await
         .map_err(instance_error)?;
-    let mut aurora = facade.write().await;
-    aurora.set_sidebar_pins(pins.clone());
-    aurora.save_config().await?;
+    facade
+        .update(|aurora| {
+            aurora.set_sidebar_pins(pins.clone());
+            Ok::<_, CommandError>(())
+        })
+        .await?;
     Ok(pins)
 }
 
@@ -1088,8 +1162,8 @@ pub async fn preview_instance_deletion(
     Ok(preview_dto(preview, locks.activity(&id)))
 }
 
-/// 把实例移入回收站，并从侧栏固定与当前选中里去掉它。实例在忙报 `instance_busy`，被依赖报
-/// `instance_has_dependents`；目录已不在时只清引用、返回 `existed: false`。
+/// 把实例移入回收站，并从侧栏固定、当前选中与游玩记录里去掉它。实例在忙报 `instance_busy`，被依赖报
+/// `instance_has_dependents`；目录已不在时只清引用与记录、返回 `existed: false`。
 #[tauri::command]
 pub async fn delete_instance(
     app: AppHandle,
@@ -1109,20 +1183,23 @@ pub(crate) async fn delete_instance_with(
     disposer: impl Disposer + 'static,
 ) -> Result<DeleteOutcomeDto, CommandError> {
     let _guard = locks.acquire(id, InstanceActivity::Deleting)?;
-    let existed = facade
-        .snapshot()
-        .await
+    let snapshot = facade.snapshot().await;
+    let existed = snapshot
         .delete_instance_files(id, disposer)
         .await
         .map_err(instance_error)?;
-    let mut aurora = facade.write().await;
-    if aurora.forget_instance(id) {
-        aurora.save_config().await?;
-    }
+    // 目录已不在（重复删除、在启动器外删掉）时也清：残留的记录会被之后新建的同名实例继承。
+    snapshot
+        .forget_play_records(id)
+        .await
+        .map_err(instance_error)?;
+    facade
+        .update_if_changed(|aurora| aurora.forget_instance(id))
+        .await?;
     Ok(DeleteOutcomeDto { existed })
 }
 
-/// 实例改名：目录、版本 JSON（文件名与 id）、jar、natives、侧栏固定与当前选中一起改。
+/// 实例改名：目录、版本 JSON（文件名与 id）、jar、natives、游玩记录、侧栏固定与当前选中一起改。
 /// 新名字按命名规则校验（报 `invalid_argument`，detail.rule 为规则码）；实例在忙报 `instance_busy`。
 #[tauri::command]
 pub async fn rename_instance(
@@ -1150,16 +1227,19 @@ pub(crate) async fn rename_instance_with(
     } else {
         Some(locks.acquire(new_name, InstanceActivity::Renaming)?)
     };
-    facade
-        .snapshot()
-        .await
+    let snapshot = facade.snapshot().await;
+    snapshot
         .rename_instance_files(id, new_name)
         .await
         .map_err(instance_error)?;
-    let mut aurora = facade.write().await;
-    if aurora.rename_instance_refs(id, new_name) {
-        aurora.save_config().await?;
-    }
+    // 游玩记录以实例 id 为键，不跟着挪的话改名后的实例在列表与统计里就成了从没玩过。
+    snapshot
+        .rename_play_records(id, new_name)
+        .await
+        .map_err(instance_error)?;
+    facade
+        .update_if_changed(|aurora| aurora.rename_instance_refs(id, new_name))
+        .await?;
     Ok(RenameOutcomeDto {
         id: new_name.to_owned(),
     })
@@ -1204,13 +1284,30 @@ pub async fn required_java(
     Ok(aurora.required_java(&mc_version).await?)
 }
 
+/// 新建这个游戏版本的实例要的 Java 主版本与全新下载体积。版本清单不带这两项，每个版本取一次
+/// 版本 JSON 后在进程内缓存，版本列表按选中行逐个查询即可。
+#[tauri::command]
+pub async fn version_requirements(
+    mc_version: String,
+    facade: State<'_, Facade>,
+) -> Result<VersionRequirementsDto, CommandError> {
+    let aurora = facade.snapshot().await;
+    let requirements = aurora.version_requirements(&mc_version).await?;
+    Ok(VersionRequirementsDto {
+        java_major: requirements.java_major,
+        download_bytes: requirements.download_bytes,
+    })
+}
+
 // ---------------------------------------------------------------- 打开文件夹
 
 /// 用系统文件管理器打开一个文件夹。`target`：
 /// - `game_dir`：游戏目录（不需要 `id`）；
+/// - `data_dir`：启动器数据目录（配置、凭据、任务表所在，不需要 `id`）；
+/// - `launcher_logs`：启动器自己的日志目录 `<数据目录>/logs`（不需要 `id`）；
 /// - `instance`：实例目录 `versions/<id>`；
 /// - `mods` / `saves` / `resourcepacks` / `shaderpacks` / `logs` / `screenshots`：实例工作目录下的子目录，
-///   不存在时先建出来；
+///   不存在时先建出来；建目录期间占住实例，改名、删除进行中报 `instance_busy`，免得按旧路径建出空目录；
 /// - `world`：工作目录下 `saves/<world>`，必须已存在。
 ///
 /// 路径一律在这里按实例 id 解析，前端不传路径。
@@ -1221,8 +1318,9 @@ pub async fn open_folder(
     id: Option<String>,
     world: Option<String>,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<(), CommandError> {
-    let path = folder_path(&facade, &target, id.as_deref(), world.as_deref()).await?;
+    let path = folder_path(&facade, &locks, &target, id.as_deref(), world.as_deref()).await?;
     let text = path.to_str().ok_or_else(|| {
         CommandError::new(code::OPEN_FAILED, "文件夹路径含无法表示的字符")
             .with_detail(json!({ "path": path.display().to_string() }))
@@ -1247,6 +1345,7 @@ const WORKING_SUBDIRS: [&str; 6] = [
 
 pub(crate) async fn folder_path(
     facade: &Facade,
+    locks: &InstanceLocks,
     target: &str,
     id: Option<&str>,
     world: Option<&str>,
@@ -1257,6 +1356,16 @@ pub(crate) async fn folder_path(
     match target {
         "game_dir" => {
             let dir = aurora.game_dir().to_path_buf();
+            ensure_dir(&dir).await?;
+            Ok(dir)
+        }
+        "data_dir" => {
+            let dir = aurora.data_dir().to_path_buf();
+            ensure_dir(&dir).await?;
+            Ok(dir)
+        }
+        "launcher_logs" => {
+            let dir = aurora.data_dir().join(crate::logging::LOGS_DIR);
             ensure_dir(&dir).await?;
             Ok(dir)
         }
@@ -1289,8 +1398,10 @@ pub(crate) async fn folder_path(
             Ok(dir)
         }
         sub if WORKING_SUBDIRS.contains(&sub) => {
+            let id = require_id()?;
+            let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
             let resolved = aurora
-                .resolve_working_dir(require_id()?)
+                .resolve_working_dir(id)
                 .await
                 .map_err(instance_error)?;
             let dir = resolved.working_dir.join(sub);
@@ -1709,12 +1820,14 @@ mod tests {
         let env = Env::new();
         let dir = env.vanilla("旧档");
         env.vanilla("留下");
-        {
-            let mut aurora = env.facade.write().await;
-            aurora.set_sidebar_pins(vec!["旧档".into(), "留下".into()]);
-            aurora.set_selected_version(Some("旧档".into()));
-            aurora.save_config().await.unwrap();
-        }
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["旧档".into(), "留下".into()]);
+                aurora.set_selected_version(Some("旧档".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
         let locks = InstanceLocks::default();
 
         let preview = preview_dto(
@@ -1792,12 +1905,14 @@ mod tests {
         let env = Env::new();
         let dir = env.vanilla("1.21.1");
         std::fs::write(dir.join("1.21.1.jar"), b"jar").unwrap();
-        {
-            let mut aurora = env.facade.write().await;
-            aurora.set_sidebar_pins(vec!["1.21.1".into()]);
-            aurora.set_selected_version(Some("1.21.1".into()));
-            aurora.save_config().await.unwrap();
-        }
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["1.21.1".into()]);
+                aurora.set_selected_version(Some("1.21.1".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
         let locks = InstanceLocks::default();
 
         let outcome = rename_instance_with(&env.facade, &locks, "1.21.1", "生存")
@@ -1819,6 +1934,79 @@ mod tests {
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
         assert_eq!(list[0].id, "生存");
         assert_eq!(list[0].mc_version.as_deref(), Some("1.21.1"));
+    }
+
+    fn write_playtime(env: &Env, json: &str) {
+        std::fs::write(
+            env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE),
+            json,
+        )
+        .unwrap();
+    }
+
+    /// 改名后游玩记录跟着新名字走，列表与统计都不再出现旧名；删掉后再建同名实例从零开始。
+    #[tokio::test]
+    async fn rename_and_delete_carry_or_drop_the_play_records() {
+        let env = Env::new();
+        env.vanilla("周末生存");
+        // 周末生存玩过 90 分钟（10 月 30 日），另一个实例 10 分钟。
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"周末生存":{"total_ms":5400000,"last_played_at":1761832800000},
+                             "别的":{"total_ms":600000,"last_played_at":1761800000000}},
+                "days":{"2026-10-30":{"instances":{"周末生存":5400000,"别的":600000}}}}}"#,
+        );
+        let locks = InstanceLocks::default();
+
+        rename_instance_with(&env.facade, &locks, "周末生存", "生存服")
+            .await
+            .unwrap();
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let renamed = list.iter().find(|i| i.id == "生存服").unwrap();
+        assert_eq!(renamed.playtime_min, 90);
+        assert_eq!(renamed.last_played_at, Some(1_761_832_800_000));
+        let stats = env
+            .facade
+            .snapshot()
+            .await
+            .play_stats(aurora_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap())
+            .await
+            .unwrap();
+        let ids: Vec<&str> = stats
+            .instances
+            .iter()
+            .map(|i| i.version_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["生存服", "别的"]);
+        assert_eq!(stats.total_minutes, 100);
+
+        delete_instance_with(&env.facade, &locks, "生存服", Remove)
+            .await
+            .unwrap();
+        env.vanilla("生存服");
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let fresh = list.iter().find(|i| i.id == "生存服").unwrap();
+        assert_eq!(fresh.playtime_min, 0, "同名新实例不继承被删实例的时长");
+        assert_eq!(fresh.last_played_at, None);
+        let summaries = env.facade.snapshot().await.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["别的"]);
+    }
+
+    /// 游玩记录读不出来时改名照样把文件改完，但命令报错，不假装一切正常。
+    #[tokio::test]
+    async fn rename_reports_unreadable_play_records() {
+        let env = Env::new();
+        let dir = env.vanilla("a");
+        write_playtime(&env, "{ broken");
+        let locks = InstanceLocks::default();
+        let err = rename_instance_with(&env.facade, &locks, "a", "b")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::INSTANCE_FAILED);
+        assert!(!dir.exists());
+        assert!(env.game_dir().join("versions").join("b").is_dir());
+        assert_eq!(locks.activity("b"), None);
     }
 
     #[tokio::test]
@@ -1913,24 +2101,35 @@ mod tests {
             "resolution": { "width": 1920, "height": 1080 },
             "fullscreen": false
         });
-        let saved = set_instance_settings_with(&env.facade, "1.21.1", settings.clone())
-            .await
-            .unwrap();
+        let saved = set_instance_settings_with(
+            &env.facade,
+            &InstanceLocks::default(),
+            "1.21.1",
+            settings.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(serde_json::to_value(&saved).unwrap(), settings);
 
         let mut unknown = settings.clone();
         unknown["colour"] = json!("pink");
-        let err = set_instance_settings_with(&env.facade, "1.21.1", unknown)
-            .await
-            .unwrap_err();
+        let err =
+            set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", unknown)
+                .await
+                .unwrap_err();
         assert_eq!(err.code, common::INVALID_ARGUMENT);
         assert_eq!(err.detail.unwrap()["field"], "settings");
 
         let mut bad_memory = settings.clone();
         bad_memory["memory_mb"] = json!(1000);
-        let err = set_instance_settings_with(&env.facade, "1.21.1", bad_memory)
-            .await
-            .unwrap_err();
+        let err = set_instance_settings_with(
+            &env.facade,
+            &InstanceLocks::default(),
+            "1.21.1",
+            bad_memory,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, common::INVALID_ARGUMENT);
         assert_eq!(err.detail.unwrap()["field"], "memory_mb");
 
@@ -1943,9 +2142,10 @@ mod tests {
             .unwrap();
         assert_eq!(stored.memory_mb, Some(6144), "非法写入不改动文件");
 
-        let err = set_instance_settings_with(&env.facade, "不存在", settings)
-            .await
-            .unwrap_err();
+        let err =
+            set_instance_settings_with(&env.facade, &InstanceLocks::default(), "不存在", settings)
+                .await
+                .unwrap_err();
         assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
     }
 
@@ -1988,6 +2188,89 @@ mod tests {
         assert_eq!(vanilla.last_played_at, None);
     }
 
+    /// 列表 DTO 带上整合包来源、最近崩溃、存档数、隔离生效值与自定内存；附属文件读不出时
+    /// 只把原因放进对应的 *_error，其余字段照常给。
+    #[test]
+    fn instance_dto_carries_modpack_crash_worlds_isolation_and_memory() {
+        let summary = |modpack, last_crash_at, settings| InstanceSummary {
+            id: "整合包".into(),
+            dir: PathBuf::from("versions/整合包"),
+            version: InstanceVersion::Ready(aurora_core::ReadyVersion {
+                mc_version: Some("1.21.1".into()),
+                loaders: Vec::new(),
+                release_type: Some("release".into()),
+                is_release: true,
+                java_major: Some(21),
+                mod_count: Some(80),
+                world_count: Some(3),
+                isolated: Some(true),
+            }),
+            settings,
+            incomplete: None,
+            created_at: Some(1),
+            modpack,
+            last_crash_at,
+        };
+        let pack = aurora_core::InstanceModpack {
+            schema: 1,
+            format: aurora_core::PackFormat::Modrinth,
+            platform: Some(Platform::Modrinth),
+            project_id: Some("1KVo5zza".into()),
+            version_id: Some("abc123".into()),
+            name: "Fabulously Optimized".into(),
+            version: Some("6.4.0".into()),
+            minecraft: "1.21.1".into(),
+            loader: None,
+            remote_files: 80,
+            override_files: 12,
+            installed_at: 1,
+        };
+        let settings = VersionSettings {
+            memory_mb: Some(6144),
+            ..VersionSettings::default()
+        };
+
+        let dto = instance_dto(
+            summary(
+                Readable::Read(Some(pack)),
+                Readable::Read(Some(1_700_000_000_000)),
+                Readable::Read(settings),
+            ),
+            None,
+            None,
+        );
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            value["modpack"],
+            json!({
+                "platform": "modrinth", "project_id": "1KVo5zza", "version_id": "abc123",
+                "name": "Fabulously Optimized", "version": "6.4.0"
+            })
+        );
+        assert_eq!(value["modpack_error"], json!(null));
+        assert_eq!(value["last_crash_at"], json!(1_700_000_000_000_u64));
+        assert_eq!(value["last_crash_error"], json!(null));
+        assert_eq!(value["world_count"], json!(3));
+        assert_eq!(value["isolated"], json!(true));
+        assert_eq!(value["memory_mb"], json!(6144));
+
+        let broken = instance_dto(
+            summary(
+                Readable::Unreadable("整合包记录坏了".into()),
+                Readable::Unreadable("崩溃记录坏了".into()),
+                Readable::Unreadable("设置坏了".into()),
+            ),
+            None,
+            None,
+        );
+        assert_eq!(broken.modpack, None);
+        assert_eq!(broken.modpack_error.as_deref(), Some("整合包记录坏了"));
+        assert_eq!(broken.last_crash_at, None);
+        assert_eq!(broken.last_crash_error.as_deref(), Some("崩溃记录坏了"));
+        assert_eq!(broken.memory_mb, None);
+        assert_eq!(broken.settings_error.as_deref(), Some("设置坏了"));
+    }
+
     /// 导入中断留下的整合包标记在列表里报为 modpack，而不是「标记读不出来」。
     #[tokio::test]
     async fn interrupted_modpack_import_lists_as_modpack_incomplete() {
@@ -2023,19 +2306,41 @@ mod tests {
         let env = Env::new();
         let dir = env.vanilla("1.21.1");
         let facade = &env.facade;
+        let locks = InstanceLocks::default();
 
         assert_eq!(
-            folder_path(facade, "game_dir", None, None).await.unwrap(),
+            folder_path(facade, &locks, "game_dir", None, None)
+                .await
+                .unwrap(),
             env.game_dir()
         );
         assert_eq!(
-            folder_path(facade, "instance", Some("1.21.1"), None)
+            folder_path(facade, &locks, "data_dir", None, None)
+                .await
+                .unwrap(),
+            env.dir.path()
+        );
+        // 启动器日志目录还没写过日志时也先建出来，资源管理器打得开。
+        let logs = folder_path(facade, &locks, "launcher_logs", None, None)
+            .await
+            .unwrap();
+        assert_eq!(logs, env.dir.path().join("logs"));
+        assert!(logs.is_dir());
+        assert_eq!(
+            folder_path(facade, &locks, "launcher_logs", Some("1.21.1"), None)
+                .await
+                .unwrap(),
+            logs,
+            "不需要实例的目标忽略 id"
+        );
+        assert_eq!(
+            folder_path(facade, &locks, "instance", Some("1.21.1"), None)
                 .await
                 .unwrap(),
             dir
         );
         // 原版正式版默认不隔离：mods 在游戏目录下，打开前建出来。
-        let mods = folder_path(facade, "mods", Some("1.21.1"), None)
+        let mods = folder_path(facade, &locks, "mods", Some("1.21.1"), None)
             .await
             .unwrap();
         assert_eq!(mods, env.game_dir().join("mods"));
@@ -2043,7 +2348,7 @@ mod tests {
 
         std::fs::create_dir_all(env.game_dir().join("saves").join("w1")).unwrap();
         assert_eq!(
-            folder_path(facade, "world", Some("1.21.1"), Some("w1"))
+            folder_path(facade, &locks, "world", Some("1.21.1"), Some("w1"))
                 .await
                 .unwrap(),
             env.game_dir().join("saves").join("w1")
@@ -2053,24 +2358,80 @@ mod tests {
             let detail = err.detail.unwrap();
             (detail["field"].clone(), detail["reason"].clone())
         };
-        let err = folder_path(facade, "world", Some("1.21.1"), Some("..\\x"))
+        let err = folder_path(facade, &locks, "world", Some("1.21.1"), Some("..\\x"))
             .await
             .unwrap_err();
         assert_eq!(field(err), (json!("world"), json!("unsafe")));
-        let err = folder_path(facade, "world", Some("1.21.1"), Some("w9"))
+        let err = folder_path(facade, &locks, "world", Some("1.21.1"), Some("w9"))
             .await
             .unwrap_err();
         assert_eq!(field(err), (json!("world"), json!("not_found")));
-        let err = folder_path(facade, "mods", None, None).await.unwrap_err();
+        let err = folder_path(facade, &locks, "mods", None, None)
+            .await
+            .unwrap_err();
         assert_eq!(field(err), (json!("id"), json!("missing")));
-        let err = folder_path(facade, "desktop", None, None)
+        let err = folder_path(facade, &locks, "desktop", None, None)
             .await
             .unwrap_err();
         assert_eq!(field(err), (json!("target"), json!("unknown")));
-        let err = folder_path(facade, "instance", Some("ghost"), None)
+        let err = folder_path(facade, &locks, "instance", Some("ghost"), None)
             .await
             .unwrap_err();
         assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
+    }
+
+    /// 写设置、为打开文件夹建子目录都占住实例：改名或删除进行中报 instance_busy，什么都不写、不建；
+    /// 游戏运行中照常可以。
+    #[tokio::test]
+    async fn settings_and_subfolders_wait_for_rename_and_delete_but_not_for_the_game() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let settings = json!({
+            "description": "改名途中写进来的", "cover": null, "isolation": "enabled",
+            "memory_mb": null, "java": "auto", "jvm_args": "",
+            "resolution": { "width": 854, "height": 480 }, "fullscreen": false
+        });
+
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire("1.21.1", activity).unwrap();
+            let expected = serde_json::to_value(activity).unwrap();
+            let err = set_instance_settings_with(&env.facade, &locks, "1.21.1", settings.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert_eq!(err.detail.unwrap()["activity"], expected);
+            let err = folder_path(&env.facade, &locks, "mods", Some("1.21.1"), None)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            drop(held);
+        }
+        let description = || async {
+            env.facade
+                .snapshot()
+                .await
+                .instance_settings("1.21.1")
+                .await
+                .unwrap()
+                .description
+        };
+        assert_eq!(description().await, None, "被拒绝的写入不改动设置");
+        assert!(!env.game_dir().join("mods").exists());
+        assert!(!dir.join("mods").exists());
+
+        let _game = locks.acquire("1.21.1", InstanceActivity::Running).unwrap();
+        set_instance_settings_with(&env.facade, &locks, "1.21.1", settings)
+            .await
+            .unwrap();
+        assert_eq!(description().await.as_deref(), Some("改名途中写进来的"));
+        // 隔离已开：mods 建在实例目录里。
+        let mods = folder_path(&env.facade, &locks, "mods", Some("1.21.1"), None)
+            .await
+            .unwrap();
+        assert_eq!(mods, dir.join("mods"));
+        assert!(mods.is_dir());
+        assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
     }
 
     #[test]

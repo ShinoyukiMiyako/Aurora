@@ -363,7 +363,7 @@ pub async fn launch_game(
         .run(async {
             let account = match account {
                 AccountArg::Stored(uuid) => {
-                    LaunchAccount::Stored(Box::new(find_account(&aurora, &uuid)?))
+                    LaunchAccount::Stored(Box::new(find_account(&aurora, &uuid).await?))
                 }
                 AccountArg::Offline(name) => LaunchAccount::Offline { name },
             };

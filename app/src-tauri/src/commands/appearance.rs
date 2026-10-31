@@ -35,26 +35,10 @@ pub(crate) async fn set_appearance_with(
     let patch: AppearancePatch = serde_json::from_value(patch)
         .map_err(|err| CommandError::invalid_argument(format!("外观设置不合法：{err}")))?;
 
-    let mut aurora = facade.write().await;
-    let previous = aurora.appearance();
-    let merged = aurora.set_appearance(patch);
-    if let Err(err) = aurora.save_config().await {
-        // 没存住就把内存里的也还原：否则之后读到的是一份重启即丢的外观，与前端回滚后的状态也对不上。
-        aurora.set_appearance(full_patch(previous));
-        return Err(err.into());
-    }
-    Ok(merged)
-}
-
-/// 把一份完整偏好变成「每个字段都改」的补丁，用于原样还原。
-fn full_patch(appearance: Appearance) -> AppearancePatch {
-    AppearancePatch {
-        mode: Some(appearance.mode),
-        accent: Some(appearance.accent),
-        petals: Some(appearance.petals),
-        panorama: Some(appearance.panorama),
-        reduce_motion: Some(appearance.reduce_motion),
-    }
+    // 没存住时门面原样不动：否则之后读到的是一份重启即丢的外观，与前端回滚后的状态也对不上。
+    facade
+        .update(|aurora| Ok::<_, CommandError>(aurora.set_appearance(patch)))
+        .await
 }
 
 #[cfg(test)]

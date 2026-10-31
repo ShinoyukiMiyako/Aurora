@@ -24,6 +24,7 @@ fn account_dto_maps_metadata_and_never_carries_tokens() {
             api_root: "https://skin.example/api/yggdrasil/".into(),
             access_token: "SECRET-ACCESS".into(),
             client_token: "SECRET-CLIENT".into(),
+            username: Some("sakuya@example.com".into()),
         }),
     );
     account.added_at = 1_700_000_000_123;
@@ -40,18 +41,15 @@ fn account_dto_maps_metadata_and_never_carries_tokens() {
             "name": "Sakuya",
             "account_type": "authlib_injector",
             "auth_server": "Example Skin",
+            "server_url": "https://skin.example/api/yggdrasil/",
+            "username": "sakuya@example.com",
             "added_at": 1_700_000_000_123_u64,
             "status": "expired",
             "last_verified_at": 1_700_000_500_000_u64
         })
     );
     let text = value.to_string();
-    for secret in [
-        "SECRET-ACCESS",
-        "SECRET-CLIENT",
-        "2535400000000000",
-        "skin.example",
-    ] {
+    for secret in ["SECRET-ACCESS", "SECRET-CLIENT", "2535400000000000"] {
         assert!(!text.contains(secret), "DTO 泄露了 {secret}");
     }
 
@@ -68,6 +66,8 @@ fn account_dto_maps_metadata_and_never_carries_tokens() {
     assert_eq!(value["account_type"], json!("microsoft"));
     assert_eq!(value["status"], json!("ok"));
     assert_eq!(value["auth_server"], json!(null));
+    assert_eq!(value["server_url"], json!(null));
+    assert_eq!(value["username"], json!(null));
     assert_eq!(value["last_verified_at"], json!(null));
     assert!(!value.to_string().contains("SECRET-"));
 }
@@ -159,6 +159,7 @@ async fn select_authlib_profile_rejects_stale_id_and_unknown_profile() {
         },
         access_token: "AT".into(),
         client_token: "CT".into(),
+        username: "alice@example.com".into(),
         profiles: vec![
             GameProfile {
                 id: "a".repeat(32),
@@ -189,6 +190,25 @@ async fn select_authlib_profile_rejects_stale_id_and_unknown_profile() {
     assert_eq!(unknown.code, crate::commands::error::code::INVALID_ARGUMENT);
     assert!(unknown.message.contains(&"c".repeat(32)));
     assert!(slot.get(&second).is_some(), "选错角色不应丢掉待选会话");
+}
+
+/// 启动链取账户走阻塞线程池：单线程运行时里也照样取得到，查不到报 AccountNotFound 并带上 uuid。
+#[tokio::test(flavor = "current_thread")]
+async fn find_account_reads_the_store_off_the_async_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let aurora = open_aurora(dir.path());
+    let saved = aurora.add_offline_account("Marisa", None).unwrap();
+
+    let found = find_account(&aurora, &saved.uuid).await.unwrap();
+    assert_eq!(found.uuid, saved.uuid);
+    assert_eq!(found.name, "Marisa");
+    assert_eq!(found.account_type, AccountType::Offline);
+
+    let missing = find_account(&aurora, "ffffffffffffffffffffffffffffffff")
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, "AccountNotFound");
+    assert!(missing.message.contains("ffffffffffffffffffffffffffffffff"));
 }
 
 /// 设备码登录要落 DPAPI 账户库，只在 Windows 上跑。

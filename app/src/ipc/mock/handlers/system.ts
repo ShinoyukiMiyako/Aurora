@@ -7,12 +7,13 @@ import type {
   NewsItemDto,
   PinnedServerDto,
   ServerStatusDto,
+  StartupNoticeDto,
   UpdateDto,
   UpdaterInfoDto,
 } from "../../system";
 import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import {
   addExtraDirectory,
   createDirectory,
@@ -71,6 +72,15 @@ function memoryAdvice(args: MockArgs): MemoryAdviceDto {
   // 实例是否存在归实例领域的 mock 管，这里只按 id 里的加载器名定档。
   const tier: MemoryTier = typeof id === "string" && /fabric|forge|quilt|optifine/i.test(id) ? "modded" : "vanilla";
   return { total_mb: TOTAL_MB, available_mb: AVAILABLE_MB, tier, recommended_mb: Math.min(RECOMMENDED_MB[tier], TOTAL_MB / 2) };
+}
+
+// ---- 启动提示 ----
+
+let startupNotices: StartupNoticeDto[] = [];
+
+/** 模拟一次带提示的启动（测试与界面调试用）；reset 后恢复为没有提示。 */
+export function setMockStartupNotices(notices: StartupNoticeDto[]): void {
+  startupNotices = notices.map((n) => ({ ...n }));
 }
 
 // ---- 首次启动 ----
@@ -339,6 +349,7 @@ export const handlers: MockHandlers = {
   memory_advice: (args) => memoryAdvice(args),
   is_first_run: () => !isFirstRunCompleted(),
   complete_first_run: (args) => completeFirstRun(args),
+  startup_notices: () => startupNotices,
   list_pinned_servers: () => pinned,
   set_pinned_servers: (args) => setPinnedServers(args),
   list_known_servers: () => listKnownServers(),
@@ -352,6 +363,16 @@ export const handlers: MockHandlers = {
 };
 
 export function reset(): void {
+  startupNotices = [];
   pinned = SEED_PINNED.map((s) => ({ ...s }));
   updater = seedUpdater();
 }
+
+// 固定的服务器在后端是配置的一部分；启动提示与更新状态每次启动重新得出，不存。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: () => pinned,
+  restore: (data) => {
+    pinned = data as PinnedServerDto[];
+  },
+};

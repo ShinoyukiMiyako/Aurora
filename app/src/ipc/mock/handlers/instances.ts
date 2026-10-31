@@ -9,6 +9,7 @@ import {
   type InstanceActivity,
   type InstanceContentDto,
   type InstanceDto,
+  type InstanceModpackDto,
   type InstanceSettingsDto,
   type LoaderChoice,
   type LoaderVersionDto,
@@ -16,10 +17,12 @@ import {
   type ManifestVersionDto,
   type NameRule,
   type RepairResultDto,
+  type VersionRequirementsDto,
 } from "../../instances";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
-import { mockPlaySummary } from "./launch";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
+import { mockCrashReport, mockPlaySummary } from "./launch";
+import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与上限在这里按后端各写一份。
@@ -27,6 +30,8 @@ const CORE_EVENT = "aurora://core-event";
 const SIDEBAR_PIN_MAX = 5;
 const FOLDER_TARGETS: readonly FolderTarget[] = [
   "game_dir",
+  "data_dir",
+  "launcher_logs",
   "instance",
   "mods",
   "saves",
@@ -63,9 +68,27 @@ const LOADER_NAMES: Record<LoaderChoice, string> = {
 
 // ---------------------------------------------------------------- 假数据
 
+/** 由设置、内容、整合包记录与启动 mock 现算的字段，不在 dto 里另存一份。 */
+type DerivedField =
+  | "activity"
+  | "description"
+  | "cover"
+  | "memory_mb"
+  | "playtime_min"
+  | "last_played_at"
+  | "mod_count"
+  | "world_count"
+  | "isolated"
+  | "modpack"
+  | "modpack_error"
+  | "last_crash_at"
+  | "last_crash_error";
+
 interface MockInstance {
-  dto: Omit<InstanceDto, "activity" | "description" | "cover" | "playtime_min" | "last_played_at">;
+  dto: Omit<InstanceDto, DerivedField>;
   settings: InstanceSettingsDto;
+  /** 从整合包导入时记下的整合包；手动新建的实例为 null。 */
+  modpack: InstanceModpackDto | null;
   /** 传统布局的加载器版本经 inheritsFrom 指向的原版实例。 */
   inheritsFrom: string | null;
   content: InstanceContentDto;
@@ -95,7 +118,6 @@ function readyDto(
   mc: string,
   loaders: InstanceDto["loaders"],
   javaMajor: number,
-  modCount: number,
   createdAt: number | null,
 ): MockInstance["dto"] {
   return {
@@ -107,7 +129,6 @@ function readyDto(
     release_type: "release",
     is_release: true,
     java_major: javaMajor,
-    mod_count: modCount,
     settings_error: null,
     incomplete: null,
     created_at: createdAt,
@@ -118,16 +139,18 @@ function seedInstances(): MockInstance[] {
   const now = Date.now();
   return [
     {
-      dto: readyDto("1.21.1", "1.21.1", [], 21, 0, now - 40 * DAY),
+      dto: readyDto("1.21.1", "1.21.1", [], 21, now - 40 * DAY),
       settings: defaultSettings(),
+      modpack: null,
       inheritsFrom: null,
       content: emptyContent(),
       sizeBytes: 31 * MB,
       fileCount: 4,
     },
     {
-      dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, 12, now - 12 * DAY),
+      dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 12 * DAY),
       settings: { ...defaultSettings(), description: "和朋友的周末服务器", cover: "cherry_planks", memory_mb: 6144 },
+      modpack: null,
       inheritsFrom: null,
       content: {
         resource_packs: [
@@ -165,32 +188,36 @@ function seedInstances(): MockInstance[] {
     },
     // 下面四个实例是 Mod、发现与启动各自 mock 里种好数据的实例：浏览器里从实例列表点进去，各页看到的是同一批实例。
     {
-      dto: readyDto("1.20.1-Fabric", "1.20.1", [{ kind: "fabric", version: "0.15.11" }], 17, 4, now - 60 * DAY),
+      dto: readyDto("1.20.1-Fabric", "1.20.1", [{ kind: "fabric", version: "0.15.11" }], 17, now - 60 * DAY),
       settings: defaultSettings(),
+      modpack: null,
       inheritsFrom: null,
       content: emptyContent(),
       sizeBytes: 96 * MB,
       fileCount: 410,
     },
     {
-      dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, 0, now - 55 * DAY),
+      dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, now - 55 * DAY),
       settings: defaultSettings(),
+      modpack: null,
       inheritsFrom: null,
       content: emptyContent(),
       sizeBytes: 120 * MB,
       fileCount: 520,
     },
     {
-      dto: readyDto("1.21", "1.21", [], 21, 0, now - 50 * DAY),
+      dto: readyDto("1.21", "1.21", [], 21, now - 50 * DAY),
       settings: defaultSettings(),
+      modpack: null,
       inheritsFrom: null,
       content: emptyContent(),
       sizeBytes: 30 * MB,
       fileCount: 4,
     },
     {
-      dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, 0, now - 20 * DAY),
+      dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 20 * DAY),
       settings: defaultSettings(),
+      modpack: null,
       inheritsFrom: null,
       content: {
         resource_packs: [],
@@ -222,8 +249,9 @@ function seedInstances(): MockInstance[] {
       fileCount: 900,
     },
     {
-      dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, 182, now - 90 * DAY),
+      dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, now - 90 * DAY),
       settings: { ...defaultSettings(), memory_mb: 8192, isolation: "enabled" },
+      modpack: { platform: "curseforge", project_id: "285109", version_id: "4612979", name: "RLCraft", version: "2.9.3" },
       inheritsFrom: null,
       content: emptyContent(),
       sizeBytes: 1300 * MB,
@@ -239,7 +267,6 @@ function seedInstances(): MockInstance[] {
         release_type: null,
         is_release: false,
         java_major: null,
-        mod_count: null,
         settings_error: null,
         incomplete: {
           kind: "install",
@@ -251,6 +278,7 @@ function seedInstances(): MockInstance[] {
         created_at: now - 2 * DAY,
       },
       settings: defaultSettings(),
+      modpack: null,
       inheritsFrom: null,
       content: emptyContent(),
       sizeBytes: 12 * MB,
@@ -264,14 +292,16 @@ interface ManifestSeed {
   type: string;
   loaders: LoaderChoice[];
   java: number;
+  /** null：版本 JSON 有一项没标大小，与后端给不出体积时一致。 */
+  downloadBytes: number | null;
 }
 
 const MANIFEST: ManifestSeed[] = [
-  { id: "1.21.1", type: "release", loaders: ["fabric", "quilt", "forge", "neoforge"], java: 21 },
-  { id: "24w14a", type: "snapshot", loaders: ["fabric"], java: 21 },
-  { id: "1.20.1", type: "release", loaders: ["fabric", "quilt", "forge", "neoforge"], java: 17 },
-  { id: "1.12.2", type: "release", loaders: ["forge"], java: 8 },
-  { id: "1.5.2", type: "release", loaders: [], java: 8 },
+  { id: "1.21.1", type: "release", loaders: ["fabric", "quilt", "forge", "neoforge"], java: 21, downloadBytes: 712 * MB },
+  { id: "24w14a", type: "snapshot", loaders: ["fabric"], java: 21, downloadBytes: 698 * MB },
+  { id: "1.20.1", type: "release", loaders: ["fabric", "quilt", "forge", "neoforge"], java: 17, downloadBytes: 655 * MB },
+  { id: "1.12.2", type: "release", loaders: ["forge"], java: 8, downloadBytes: 238 * MB },
+  { id: "1.5.2", type: "release", loaders: [], java: 8, downloadBytes: null },
 ];
 
 const LOADER_VERSIONS: Partial<Record<`${LoaderChoice}:${string}`, LoaderVersionDto[]>> = {
@@ -393,12 +423,31 @@ function ensureNoDependents(id: string): void {
   }
 }
 
+/** 隔离生效值：实例覆盖优先；跟随全局时按默认档位，装了加载器或不是正式版的隔离。 */
+function isolatedOf(instance: MockInstance): boolean {
+  const { isolation } = instance.settings;
+  if (isolation === "enabled") return true;
+  if (isolation === "disabled") return false;
+  return instance.dto.loaders.some((l) => l.kind !== "optifine" && l.kind !== "liteloader") || !instance.dto.is_release;
+}
+
 function toDto(instance: MockInstance): InstanceDto {
   const play = mockPlaySummary(instance.dto.id);
+  const ready = instance.dto.status === "ready";
+  const crash = mockCrashReport(instance.dto.id);
   return {
     ...instance.dto,
     description: instance.settings.description,
     cover: instance.settings.cover,
+    memory_mb: instance.settings.memory_mb,
+    // 与 list_mods 数的是同一份文件表，两边不会对不上。
+    mod_count: ready ? mockModFileCount(instance.dto.id) : null,
+    world_count: ready ? instance.content.worlds.length : null,
+    isolated: ready ? isolatedOf(instance) : null,
+    modpack: instance.modpack,
+    modpack_error: null,
+    last_crash_at: crash === null ? null : crash.at,
+    last_crash_error: null,
     activity: activityOf(instance.dto.id),
     playtime_min: play === null ? 0 : play.playtime_min,
     last_played_at: play === null ? null : play.last_played_at,
@@ -413,12 +462,18 @@ export function mockInstanceFacts(id: string): { mc_version: string; loaders: st
 }
 
 /** 别的领域 mock 新建出的实例（整合包导入）记进实例列表，与后端「导入后 list_instances 能看到」一致。 */
-export function addMockInstance(id: string, mcVersion: string, loader: InstanceDto["loaders"][number] | null): void {
+export function addMockInstance(
+  id: string,
+  mcVersion: string,
+  loader: InstanceDto["loaders"][number] | null,
+  modpack: InstanceModpackDto | null,
+): void {
   if (find(id) !== undefined) throw new Error(`mock 实例 ${id} 已存在`);
   instances.push({
-    dto: readyDto(id, mcVersion, loader === null ? [] : [loader], 21, 0, Date.now()),
+    dto: readyDto(id, mcVersion, loader === null ? [] : [loader], 21, Date.now()),
     // 整合包导入的实例强制隔离，与后端写入的实例设置一致。
     settings: { ...defaultSettings(), isolation: "enabled" },
+    modpack,
     inheritsFrom: null,
     content: emptyContent(),
     sizeBytes: 0,
@@ -598,12 +653,12 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
       release_type: null,
       is_release: false,
       java_major: null,
-      mod_count: null,
       settings_error: null,
       incomplete,
       created_at: createdAt,
     },
     settings: defaultSettings(),
+    modpack: null,
     inheritsFrom: null,
     content: emptyContent(),
     sizeBytes: 0,
@@ -630,7 +685,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     stage(taskId, "补全库、资源与 natives");
     await fakeDownload(taskId, 40, 512 * 1024);
     instance.dto = {
-      ...readyDto(name, mcVersion, loader && loaderVersion ? [{ kind: loader, version: loaderVersion }] : [], entry.java, 0, createdAt),
+      ...readyDto(name, mcVersion, loader && loaderVersion ? [{ kind: loader, version: loaderVersion }] : [], entry.java, createdAt),
       release_type: entry.type,
       is_release: entry.type === "release",
     };
@@ -705,7 +760,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
         throw error;
       }
       const loaders = spec.loader && spec.loader_version ? [{ kind: spec.loader, version: spec.loader_version }] : [];
-      instance.dto = readyDto(id, spec.mc_version, loaders, entry.java, 0, instance.dto.created_at);
+      instance.dto = readyDto(id, spec.mc_version, loaders, entry.java, instance.dto.created_at);
     }
     instance.dto.incomplete = null;
     return { reinstalled: spec !== null, libraries: 12, assets: 0, natives: 0 };
@@ -787,6 +842,7 @@ export const handlers: MockHandlers = {
       if (existed) {
         ensureNoDependents(id);
         instances = instances.filter((i) => i.dto.id !== id);
+        forgetMockMods(id);
       }
       pins = pins.filter((pin) => pin !== id);
       return { existed };
@@ -808,6 +864,7 @@ export const handlers: MockHandlers = {
       if (id === newName) return { id };
       ensureNoDependents(id);
       instance.dto = { ...instance.dto, id: newName };
+      renameMockMods(id, newName);
       pins = pins.map((pin) => (pin === id ? newName : pin));
       return { id: newName };
     } finally {
@@ -832,12 +889,19 @@ export const handlers: MockHandlers = {
     return entry.java;
   },
 
+  version_requirements: (args): VersionRequirementsDto => {
+    const mcVersion = str(args, "mcVersion");
+    const entry = MANIFEST.find((v) => v.id === mcVersion);
+    if (!entry) throw new IpcError("install_failed", `installer jar 内缺少条目: 版本清单中的 ${mcVersion}`);
+    return { java_major: entry.java, download_bytes: entry.downloadBytes };
+  },
+
   open_folder: (args) => {
     const target = str(args, "target");
     const id = optStr(args, "id");
     const world = optStr(args, "world");
     if (!(FOLDER_TARGETS as readonly string[]).includes(target)) throw invalid("target", "unknown", `不认识的文件夹类型 ${target}`);
-    if (target === "game_dir") return;
+    if (target === "game_dir" || target === "data_dir" || target === "launcher_logs") return;
     if (id === null) throw invalid("id", "missing", `打开 ${target} 需要实例 id`);
     if (target === "world") {
       if (world === null) throw invalid("world", "missing", "打开存档需要存档文件夹名");
@@ -861,3 +925,19 @@ export function reset(): void {
   pins = ["樱花生存", "1.21.1"];
   activities.clear();
 }
+
+interface InstancesSnapshot {
+  instances: MockInstance[];
+  pins: string[];
+}
+
+// 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: (): InstancesSnapshot => ({ instances, pins }),
+  restore: (data) => {
+    const saved = data as InstancesSnapshot;
+    instances = saved.instances;
+    pins = saved.pins;
+  },
+};

@@ -14,7 +14,6 @@ thiserror = "2.0.18"
 tokio = { version = "1", default-features = false, features = ["fs", "rt"] }
 # 存档的 level.dat 是 gzip 压缩的 NBT；flate2 已经在工作区里（zip 的 deflate 后端），用它的纯 Rust 后端。
 flate2 = "1"
-tracing = "0.1"
 
 # 删除实例时移入回收站（SHFileOperationW）。
 [target.'cfg(windows)'.dependencies]

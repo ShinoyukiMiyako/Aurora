@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
-use crate::logfile::{LogSource, SessionClock, SessionLog};
+use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog};
 
 /// 崩溃判定缓存的最近游戏输出行数。
 pub const RECENT_LINE_CAPACITY: usize = 500;
@@ -28,6 +28,10 @@ pub const RECENT_LINE_CAPACITY: usize = 500;
 pub const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// 时间窗内攒满这么多行就提前发出，免得单批过大。
 pub const LOG_BATCH_MAX_LINES: usize = 200;
+/// 进程退出后等两条输出流读完的时限。游戏或 Mod 拉起的辅助进程会继承输出管道，它不退出管道就不
+/// 关闭；一直等下去的话退出报告永远出不来，占用槽与实例锁也一直放不掉。正常退出时管道里剩下的
+/// 只有缓冲中的最后几行，远用不了这么久。
+pub const OUTPUT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 
 /// 日志来源流。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +98,7 @@ impl KillSwitch {
 /// 一次已启动的游戏会话。
 pub struct GameSession {
     child: Child,
+    clock: SessionClock,
     readers: Vec<JoinHandle<()>>,
     pump: JoinHandle<PumpOutcome>,
     kill_tx: mpsc::UnboundedSender<KillRequest>,
@@ -126,10 +131,28 @@ impl GameSession {
                 }
             }
         };
-        for reader in self.readers.drain(..) {
-            reader.await.map_err(LaunchError::Join)?;
+        let drained = drain_readers(std::mem::take(&mut self.readers)).await?;
+        let mut outcome = self.pump.await.map_err(LaunchError::Join)?;
+        if !drained {
+            let text = format!(
+                "游戏已退出，但输出管道在 {} 秒内没有关闭（多半是游戏拉起的进程还开着它），之后的输出不再记录",
+                OUTPUT_DRAIN_DEADLINE.as_secs()
+            );
+            tracing::warn!("{text}");
+            if let Some(writer) = outcome.log.as_mut()
+                && let Err(err) = writer
+                    .write(
+                        self.clock.now(),
+                        LogSource::Launcher,
+                        Some(LauncherLevel::Warn),
+                        &text,
+                    )
+                    .await
+            {
+                tracing::warn!(error = %err, "会话日志写入失败，本次会话停止写日志");
+                outcome.log = None;
+            }
         }
-        let outcome = self.pump.await.map_err(LaunchError::Join)?;
         Ok(SessionEnd {
             report: ExitReport {
                 code: status.code(),
@@ -139,6 +162,34 @@ impl GameSession {
             },
             log: outcome.log,
         })
+    }
+}
+
+/// 等读取任务读完各自的流，最多等 [`OUTPUT_DRAIN_DEADLINE`]；超时就结束它们。读取任务结束时放掉
+/// 各自的发送端，汇流任务随之收尾。返回是否在时限内读完。
+async fn drain_readers(mut readers: Vec<JoinHandle<()>>) -> Result<bool> {
+    let finished = tokio::time::timeout(OUTPUT_DRAIN_DEADLINE, async {
+        for reader in &mut readers {
+            reader.await.map_err(LaunchError::Join)?;
+        }
+        Ok::<(), LaunchError>(())
+    })
+    .await;
+    match finished {
+        Ok(result) => result.map(|()| true),
+        Err(_elapsed) => {
+            for reader in &readers {
+                reader.abort();
+            }
+            for reader in readers {
+                match reader.await {
+                    Ok(()) => {}
+                    Err(err) if err.is_cancelled() => {}
+                    Err(err) => return Err(LaunchError::Join(err)),
+                }
+            }
+            Ok(false)
+        }
     }
 }
 
@@ -195,6 +246,7 @@ pub fn spawn(
 
     Ok(GameSession {
         child,
+        clock,
         readers,
         pump,
         kill_tx,
@@ -530,6 +582,53 @@ mod tests {
         assert!(!detect_crash(&end.report));
         // 会话结束后句柄还能用，只是报告没有可结束的进程。
         assert!(!switch.kill().await.unwrap());
+    }
+
+    /// 游戏拉起的辅助进程继承了输出管道、比游戏活得久：游戏退出后最多等收尾时限就产出退出报告，
+    /// 不等那个进程退出；之前读到的输出照常交回，会话日志里记下输出被截断。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_is_reported_even_when_a_child_keeps_the_pipes_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(tmp.path(), "t", clock.started_at())
+            .await
+            .unwrap();
+        // start /b 拉起的 ping 继承 cmd 的标准输出，约 9 秒后才退出；cmd 自己立刻以 0 退出。
+        let session = spawn(
+            &cmd("echo BEFORE_EXIT & start /b ping -n 10 127.0.0.1 & exit 0"),
+            clock,
+            Some(log),
+            None,
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let end = tokio::time::timeout(Duration::from_secs(15), session.wait())
+            .await
+            .expect("游戏进程退出后应在收尾时限内产出报告")
+            .unwrap();
+        let waited = started.elapsed();
+
+        assert!(
+            waited < OUTPUT_DRAIN_DEADLINE + Duration::from_secs(4),
+            "等了 {waited:?}"
+        );
+        assert_eq!(end.report.code, Some(0));
+        assert!(
+            end.report
+                .recent_lines
+                .iter()
+                .any(|l| l.contains("BEFORE_EXIT"))
+        );
+        let log = end.log.expect("日志应保持打开交还调用方");
+        let path = log
+            .finish(clock.now(), crate::logfile::SessionOutcome::Exited)
+            .await
+            .unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("[game] BEFORE_EXIT"), "{content}");
+        assert!(content.contains("[launcher/warn]"), "{content}");
+        assert!(content.contains("输出管道"), "{content}");
     }
 
     #[cfg(windows)]

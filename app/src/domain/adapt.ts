@@ -11,13 +11,14 @@ import type {
   IncompleteDto,
   InstanceActivity,
   InstanceDto,
+  InstanceModpackDto,
   InstanceSettingsDto,
   IsolationOverride,
   LoaderChoice,
 } from "../ipc/instances";
 import type { LaunchDownloadDto, LogLineDto } from "../ipc/launch";
 import type { TaskRecordDto } from "../ipc/tasks";
-import { TASK_KINDS, TASK_STATUSES, type AccountKind, type LoaderKind, type LogLine, type SessionDownload, type Task } from "./types";
+import { PLATFORMS, TASK_KINDS, TASK_STATUSES, type AccountKind, type LoaderKind, type LogLine, type Platform, type SessionDownload, type Task } from "./types";
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) throw new Error(`未知的${what}：${String(value)}`);
@@ -34,6 +35,10 @@ export interface Account {
   kind: AccountKind;
   /** 外置登录的验证服务器名；其余类型为 null。 */
   authServer: string | null;
+  /** 外置登录的 API 根地址，重新登录时原样交回；其余类型为 null。 */
+  serverUrl: string | null;
+  /** 外置登录时填的账号，重新登录时预填；其余类型、或较早登录的记录为 null。 */
+  username: string | null;
   addedAt: number;
   /** expired：续期被服务器判定失效，只有重新登录能恢复。 */
   status: AccountStatus;
@@ -50,11 +55,14 @@ export function accountFromDto(dto: AccountDto): Account {
   if (!Object.hasOwn(ACCOUNT_KIND, dto.account_type)) throw new Error(`未知的账户类型：${String(dto.account_type)}`);
   const kind = ACCOUNT_KIND[dto.account_type];
   if (kind === "authlib" && dto.auth_server === null) throw new Error(`外置登录账户 ${dto.name} 缺少验证服务器名`);
+  if (kind === "authlib" && dto.server_url === null) throw new Error(`外置登录账户 ${dto.name} 缺少验证服务器地址`);
   return {
     uuid: dto.uuid,
     name: dto.name,
     kind,
     authServer: kind === "authlib" ? dto.auth_server : null,
+    serverUrl: kind === "authlib" ? dto.server_url : null,
+    username: kind === "authlib" ? dto.username : null,
     addedAt: dto.added_at,
     status: oneOf(dto.status, ["ok", "expired"] as const, "账户状态"),
     lastVerifiedAt: dto.last_verified_at,
@@ -87,6 +95,17 @@ export function authlibProfileFromDto(dto: AuthlibProfileDto): AuthlibProfile {
 export type InstanceStatus = "ready" | "installing" | "broken";
 export type ReleaseType = "release" | "snapshot" | "old";
 export type ExtraLoaderKind = "optifine" | "liteloader";
+
+/** 实例所来自的整合包。 */
+export interface InstanceModpack {
+  /** 从本地文件导入时为 null。 */
+  platform: Platform | null;
+  projectId: string | null;
+  versionId: string | null;
+  /** 整合包自己的名字（实例名可以被改成别的）。 */
+  name: string;
+  version: string | null;
+}
 
 export interface InstanceIncomplete {
   kind: IncompleteDto["kind"];
@@ -125,6 +144,20 @@ export interface InstanceSummary {
   playtimeMin: number;
   /** mods/ 下的文件数，只数不解析；损坏或设置读不出时为 null。 */
   modCount: number | null;
+  /** saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 modCount。 */
+  worldCount: number | null;
+  /** 隔离的生效值；何时为 null 同 modCount。 */
+  isolated: boolean | null;
+  /** 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。 */
+  memoryMb: number | null;
+  /** 从整合包导入的实例记下的整合包；不是整合包实例或记录读不出时为 null。 */
+  modpack: InstanceModpack | null;
+  /** 整合包记录读不出来的原因。 */
+  modpackError: string | null;
+  /** 最近一次崩溃的毫秒时间戳；没崩溃过或记录读不出时为 null。 */
+  lastCrashAt: number | null;
+  /** 崩溃记录读不出来的原因。 */
+  lastCrashError: string | null;
   /** 后端此刻在这个实例上做的事。 */
   activity: InstanceActivity | null;
   settingsError: string | null;
@@ -155,6 +188,16 @@ export function incompleteFromDto(dto: IncompleteDto): InstanceIncomplete {
     startedAt: dto.started_at,
     spec: dto.spec === null ? null : { mcVersion: dto.spec.mc_version, loader: dto.spec.loader, loaderVersion: dto.spec.loader_version },
     error: dto.error,
+  };
+}
+
+function modpackFromDto(dto: InstanceModpackDto): InstanceModpack {
+  return {
+    platform: dto.platform === null ? null : oneOf(dto.platform, PLATFORMS, "整合包来源平台"),
+    projectId: dto.project_id,
+    versionId: dto.version_id,
+    name: dto.name,
+    version: dto.version,
   };
 }
 
@@ -206,6 +249,13 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     lastPlayedAt: dto.last_played_at,
     playtimeMin: dto.playtime_min,
     modCount: dto.mod_count,
+    worldCount: dto.world_count,
+    isolated: dto.isolated,
+    memoryMb: dto.memory_mb,
+    modpack: dto.modpack === null ? null : modpackFromDto(dto.modpack),
+    modpackError: dto.modpack_error,
+    lastCrashAt: dto.last_crash_at,
+    lastCrashError: dto.last_crash_error,
     activity: dto.activity,
     settingsError: dto.settings_error,
     incomplete,

@@ -5,14 +5,17 @@
 //! 游戏/缓存目录，以及启动后窗口行为、默认 Java、主页固定的服务器、并存的游戏目录、首次启动
 //! 是否完成与启动器更新的检查偏好。凭据不进这里（归 aurora-auth 的加密存储）。
 //!
-//! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值，损坏则冒泡
-//! 报错而非静默用默认覆盖（避免用户改坏的配置被无声吞掉）。
+//! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值；损坏时
+//! [`ConfigStore::load`] 冒泡报错，而不是静默用默认覆盖（避免用户改坏的配置被无声吞掉）。桌面应用启动
+//! 走 [`ConfigStore::load_or_preserve`]：坏文件改名留作现场、按默认配置启动，并交回经过供界面提示，
+//! 不让一份写错的配置把启动器堵死在打不开的状态。
 
 use std::path::{Path, PathBuf};
 
 use aurora_base::mirror::{self, MirrorSource};
 use aurora_download::SourcePlan;
 use aurora_instance::IsolationPolicy;
+use chrono::{Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
 
 use crate::appearance::Appearance;
@@ -135,7 +138,8 @@ pub struct AuroraConfig {
     pub memory: MemorySettings,
     /// 全局版本隔离档位。
     pub isolation_policy: IsolationPolicy,
-    /// 微软登录 client_id（无内置默认；缺省时回落到环境变量 `AURORA_MSA_CLIENT_ID`）。
+    /// 微软登录 client_id 的用户覆盖；缺省时依次回落到环境变量 `AURORA_MSA_CLIENT_ID` 与内置默认
+    /// （`auth::DEFAULT_MSA_CLIENT_ID`），正版登录不依赖这一项。
     pub msa_client_id: Option<String>,
     /// 自定义游戏目录（`.minecraft`）；缺省时用数据目录下的 `.minecraft`。
     pub game_directory: Option<PathBuf>,
@@ -197,6 +201,18 @@ impl Default for AuroraConfig {
     }
 }
 
+/// 配置文件读不出来、改名留存后按默认配置继续的经过。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigRecovery {
+    /// 坏文件改名后的路径，原样保留着用户的内容。
+    pub preserved: PathBuf,
+    /// 解析失败的原因（含行列）。
+    pub error: String,
+}
+
+/// 坏配置文件改名用的后缀前缀，后面接本地时间 `YYYYMMDD-HHMMSS`。
+const BROKEN_SUFFIX: &str = ".broken-";
+
 /// 配置文件的读写存储。默认位置 `<数据目录>/config.json`，可注入路径供测试。
 pub struct ConfigStore {
     path: PathBuf,
@@ -226,6 +242,66 @@ impl ConfigStore {
                 source,
             }),
         }
+    }
+
+    /// 载入配置；内容损坏（JSON 写错、降级后遇到旧版不认识的取值）时把坏文件改名为
+    /// `config.json.broken-<本地时间>` 留作现场，按全默认配置继续，并交回这次处置的经过。
+    ///
+    /// 读文件本身失败、改名失败仍然报错：这时继续的话，下一次保存会把用户的文件覆盖掉。
+    pub async fn load_or_preserve(&self) -> Result<(AuroraConfig, Option<ConfigRecovery>)> {
+        let parse_error = match self.load().await {
+            Err(CoreError::ConfigParse { source, .. }) => source,
+            other => return other.map(|config| (config, None)),
+        };
+        let preserved = self.preserve_broken().await?;
+        tracing::error!(
+            path = %self.path.display(),
+            preserved = %preserved.display(),
+            error = %parse_error,
+            "配置文件读不出来，已改名留存，按默认配置启动"
+        );
+        Ok((
+            AuroraConfig::default(),
+            Some(ConfigRecovery {
+                preserved,
+                error: parse_error.to_string(),
+            }),
+        ))
+    }
+
+    /// 把坏配置文件改名到同目录下一个还没被占用的留存名，返回新路径。
+    async fn preserve_broken(&self) -> Result<PathBuf> {
+        let now = Local::now();
+        let stamp = format!(
+            "{:04}{:02}{:02}-{:02}{:02}{:02}",
+            now.year(),
+            now.month(),
+            now.day(),
+            now.hour(),
+            now.minute(),
+            now.second()
+        );
+        let base = format!("{}{BROKEN_SUFFIX}{stamp}", self.path.display());
+        let mut candidate = PathBuf::from(&base);
+        let mut attempt = 1u32;
+        // 同一秒里再坏一次（极少见）也不能覆盖上一份留存。
+        while tokio::fs::try_exists(&candidate)
+            .await
+            .map_err(|source| CoreError::ConfigIo {
+                path: candidate.clone(),
+                source,
+            })?
+        {
+            attempt += 1;
+            candidate = PathBuf::from(format!("{base}-{attempt}"));
+        }
+        tokio::fs::rename(&self.path, &candidate)
+            .await
+            .map_err(|source| CoreError::ConfigIo {
+                path: self.path.clone(),
+                source,
+            })?;
+        Ok(candidate)
     }
 
     /// 持久化配置（原子写入，带父目录创建）。
@@ -443,6 +519,60 @@ mod tests {
             matches!(err, CoreError::ConfigParse { .. }),
             "实际：{err:?}"
         );
+    }
+
+    /// 损坏的配置改名留存、按默认继续；连坏两次各留一份，互不覆盖。
+    #[tokio::test]
+    async fn broken_config_is_preserved_and_defaults_are_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+
+        let broken = br#"{"after_launch": "hide", "download_concurrency": 8}"#;
+        tokio::fs::write(&path, broken).await.unwrap();
+        let (config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(config, AuroraConfig::default());
+        let recovery = recovery.expect("应交回处置经过");
+        assert!(!path.exists(), "坏文件已挪走，下次保存不会覆盖它");
+        assert_eq!(tokio::fs::read(&recovery.preserved).await.unwrap(), broken);
+        let name = recovery
+            .preserved
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let stamp = name.strip_prefix("config.json.broken-").expect(&name);
+        assert_eq!(stamp.len(), "20261031-143025".len(), "{name}");
+        assert!(recovery.error.contains("hide"), "{}", recovery.error);
+        assert!(recovery.error.contains("line 1"), "{}", recovery.error);
+
+        tokio::fs::write(&path, b"{ broken again").await.unwrap();
+        let (_, second) = store.load_or_preserve().await.unwrap();
+        let second = second.unwrap();
+        assert_ne!(second.preserved, recovery.preserved);
+        assert_eq!(
+            tokio::fs::read(&second.preserved).await.unwrap(),
+            b"{ broken again"
+        );
+        assert_eq!(tokio::fs::read(&recovery.preserved).await.unwrap(), broken);
+    }
+
+    #[tokio::test]
+    async fn readable_or_missing_config_needs_no_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+        assert_eq!(
+            store.load_or_preserve().await.unwrap(),
+            (AuroraConfig::default(), None)
+        );
+        tokio::fs::write(&path, br#"{"download_concurrency": 8}"#)
+            .await
+            .unwrap();
+        let (config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(config.download_concurrency, 8);
+        assert_eq!(recovery, None);
+        assert!(path.exists());
     }
 
     #[tokio::test]

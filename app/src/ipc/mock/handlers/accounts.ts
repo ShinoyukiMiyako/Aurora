@@ -1,7 +1,7 @@
 import type { AccountDto, AuthlibLoginResult, AuthServerDto, DeviceCode } from "../../accounts";
 import { IpcError } from "../../errors";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
 // ipc/ 只能以类型方式引用别的模块，事件名在这里按后端各写一份。
 const DEVICE_CODE_EVENT = "aurora://device-code";
@@ -34,6 +34,8 @@ function seed(): Store {
         name: "Hanami_Walker",
         account_type: "microsoft",
         auth_server: null,
+        server_url: null,
+        username: null,
         added_at: now - 30 * DAY,
         status: "ok",
         last_verified_at: now - HOUR,
@@ -43,6 +45,8 @@ function seed(): Store {
         name: "Yozakura",
         account_type: "authlib_injector",
         auth_server: "Example Skin",
+        server_url: "https://skin.example/api/yggdrasil/",
+        username: "yozakura@example.com",
         added_at: now - 12 * DAY,
         status: "expired",
         last_verified_at: now - 9 * DAY,
@@ -68,6 +72,8 @@ interface Pending {
   id: string;
   serverName: string;
   authServer: string;
+  apiRoot: string;
+  username: string;
   profiles: { uuid: string; name: string }[];
 }
 let pending: Pending | null = null;
@@ -168,6 +174,8 @@ export const handlers: MockHandlers = {
         name,
         account_type: "offline",
         auth_server: null,
+        server_url: null,
+        username: null,
         added_at: Date.now(),
         status: "ok",
         last_verified_at: null,
@@ -191,6 +199,8 @@ export const handlers: MockHandlers = {
             name: "Mock_Player",
             account_type: "microsoft",
             auth_server: null,
+            server_url: null,
+            username: null,
             added_at: Date.now(),
             status: "ok",
             last_verified_at: Date.now(),
@@ -241,6 +251,8 @@ export const handlers: MockHandlers = {
         id: `authlib-${pendingSeq++}`,
         serverName: server.server_name,
         authServer: server.server_name,
+        apiRoot: server.api_root,
+        username,
         profiles: [
           { uuid: stableHex(`${server.host}/${base}_main`), name: `${base}_main` },
           { uuid: stableHex(`${server.host}/${base}_alt`), name: `${base}_alt` },
@@ -259,6 +271,8 @@ export const handlers: MockHandlers = {
       name: base,
       account_type: "authlib_injector",
       auth_server: server.server_name,
+      server_url: server.api_root,
+      username,
       added_at: now,
       status: "ok",
       last_verified_at: now,
@@ -278,6 +292,8 @@ export const handlers: MockHandlers = {
       name: profile.name,
       account_type: "authlib_injector",
       auth_server: pending.authServer,
+      server_url: pending.apiRoot,
+      username: pending.username,
       added_at: now,
       status: "ok",
       last_verified_at: now,
@@ -338,3 +354,12 @@ export function reset(): void {
   pendingSeq = 0;
   store = seed();
 }
+
+// 只存账户库本身；进行中的微软登录与等待选角色的会话随页面一起消失，与后端重启后的表现一致。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: () => store,
+  restore: (data) => {
+    store = data as Store;
+  },
+};
