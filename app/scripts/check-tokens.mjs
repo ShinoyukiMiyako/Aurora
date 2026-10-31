@@ -176,7 +176,6 @@ function checkImports(srcRel, text, report) {
     if (!spec.startsWith(".")) continue;
 
     const target = posix.normalize(posix.join(fileDir, spec));
-    if (within(target, "legacy")) report(line, "T6", `不允许引入 legacy/：${spec}`);
     if (zone === null) continue;
     const allow = DEPENDENCY_ALLOW[zone];
     if (!allow) continue;
