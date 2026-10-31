@@ -51,6 +51,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
+  const folderReason = ops.folderReason("instance");
   const compact = tier === "compact";
 
   const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
@@ -61,7 +62,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
     ...(compact
       ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), disabled: pinBlocked, disabledReason: pinReason, onSelect: ops.togglePin }]
       : []),
-    { label: HERO_COPY.openFolder, icon: "folder", onSelect: () => ops.openFolder("instance") },
+    { label: HERO_COPY.openFolder, icon: "folder", disabled: folderReason !== undefined, disabledReason: folderReason, onSelect: () => ops.openFolder("instance") },
     { kind: "separator" },
     needsReimport(inst)
       ? { label: MODPACK_REIMPORT_COPY.menuReimport, icon: "modpack", onSelect: () => go(reimportRoute(inst)) }
