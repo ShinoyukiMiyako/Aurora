@@ -240,6 +240,31 @@ describe("侧栏", () => {
     expect(nav.canForward).toBe(false);
   });
 
+  it("拖动固定实例途中按 Esc 放弃：松手后补发的那次点击不进实例页，也不写入顺序", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    try {
+      await mount();
+      const pin = item("pin:创造");
+      const pointer = (type: string, clientY: number) =>
+        act(() => {
+          pin.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 7, clientY }));
+        });
+      pointer("pointerdown", 100);
+      pointer("pointermove", 100 + PIN_STEP);
+      keydown(window, "Escape");
+      pointer("pointerup", 100 + PIN_STEP);
+      act(() => pin.click());
+      await flush();
+      expect(nav.route).toEqual({ page: "home" });
+      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+      // 放弃之后的下一次正常点击照常进实例页
+      act(() => pin.click());
+      expect(nav.route).toEqual({ page: "instance", id: "创造", tab: "overview" });
+    } finally {
+      delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
+    }
+  });
+
   it("主导航条目的名称写页面名，快捷键写在 aria-keyshortcuts 上", async () => {
     await mount();
     expect(item("discover").getAttribute("aria-label")).toBe(PAGE_LABEL.discover);
