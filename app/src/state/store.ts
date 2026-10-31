@@ -895,6 +895,11 @@ export class LauncherStore {
   private readonly discardLanding = new Set<string>();
   /** 固定服务器的读改写排成一条链：两次切换并发时，后一次要等前一次写完再读，否则先写的那台会被后写的覆盖。 */
   private serverPinChain: Promise<void> = Promise.resolve();
+  /**
+   * 侧栏固定的读改写同样排成一条链：每一次都按 raw.pins 算出整份新列表写回，前一次还没写完时读到的是旧列表，
+   * 两次固定、或装好的新实例落地自动固定撞上用户取消固定，后写的会把先写的那一项冲掉。
+   */
+  private sidebarPinChain: Promise<void> = Promise.resolve();
 
   readonly actions: LauncherActions;
   private readonly net: NetworkMonitor;
@@ -1526,10 +1531,24 @@ export class LauncherStore {
       const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
       await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
     }
-    const pins = this.raw.pins;
-    if (pin && pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+    if (pin) {
+      await this.queueSidebarPins(async () => {
+        const pins = this.raw.pins;
+        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+      });
+    }
     this.instanceIdTaken(id);
     await this.fetchInstances();
+  }
+
+  /** 排进侧栏固定的链（见 sidebarPinChain）：前一次落定后才开始；这一次的结果与失败照常交给调用方，不挡后面排着的。 */
+  private queueSidebarPins<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.sidebarPinChain.then(work);
+    this.sidebarPinChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   /** 这个 id 落到了一个新实例上：丢掉之前用过这个 id 的实例留下的按需数据（见 INSTANCE_SCOPED_RESOURCES）。 */
@@ -1916,35 +1935,39 @@ export class LauncherStore {
         await configIpc.updateConfig({ selectedVersion: id });
         store.set((raw) => ({ settings: raw.settings === null ? null : { ...raw.settings, selectedVersion: id } }));
       },
-      async togglePin(id) {
-        // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
-        const shown = store.getState().sidebarPins;
-        if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
-          store.pushToast("warning", TOAST_COPY.pinLimit);
-          return;
-        }
-        const pending = store.pendingCreate(id);
-        if (pending !== null) {
-          // 还在安装的新实例后端不认，只改它装好后要不要固定
-          store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
-          return;
-        }
-        const pins = store.raw.pins;
-        const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
-        store.set({ pins: await instancesIpc.setSidebarPins(next) });
+      togglePin(id) {
+        return store.queueSidebarPins(async () => {
+          // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
+          const shown = store.getState().sidebarPins;
+          if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
+            store.pushToast("warning", TOAST_COPY.pinLimit);
+            return;
+          }
+          const pending = store.pendingCreate(id);
+          if (pending !== null) {
+            // 还在安装的新实例后端不认，只改它装好后要不要固定
+            store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
+            return;
+          }
+          const pins = store.raw.pins;
+          const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
+          store.set({ pins: await instancesIpc.setSidebarPins(next) });
+        });
       },
-      async setSidebarPins(ids) {
-        // 安装中自动固定的新实例总排在末尾，不写进固定列表（装好后才写）
-        const persisted = ids.filter((id) => store.pendingCreate(id) === null);
-        const before = store.raw.pins;
-        store.set({ pins: persisted });
-        // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
-        try {
-          store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
-        } catch (error) {
-          store.set({ pins: before });
-          throw error;
-        }
+      setSidebarPins(ids) {
+        return store.queueSidebarPins(async () => {
+          // 安装中自动固定的新实例总排在末尾，不写进固定列表（装好后才写）
+          const persisted = ids.filter((id) => store.pendingCreate(id) === null);
+          const before = store.raw.pins;
+          store.set({ pins: persisted });
+          // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
+          try {
+            store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
+          } catch (error) {
+            store.set({ pins: before });
+            throw error;
+          }
+        });
       },
       async createInstance(spec) {
         const nameError = instanceNameError(spec.name, store.instanceIds());
