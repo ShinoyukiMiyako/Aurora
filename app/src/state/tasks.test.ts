@@ -118,7 +118,7 @@ describe("下载队列：纯函数", () => {
   });
 
   it("组合任务的权重：声明大小都已知且总和大于 0 时按字节，否则按项数", () => {
-    expect(compositeProgress([100, 300, 600])).toMatchObject({ weights: [100, 300, 600], totalBytes: 1000, index: 0 });
+    expect(compositeProgress([100, 300, 600])).toMatchObject({ weights: [100, 300, 600], totalBytes: 1000, index: 0, stepStartBytes: 0 });
     expect(compositeProgress([100, null, 600])).toMatchObject({ weights: [1, 1, 1], totalBytes: null });
     expect(compositeProgress([0, 0])).toMatchObject({ weights: [1, 1], totalBytes: null });
     // 大小为 0 的一项（文件已就绪）在按字节计时只是不占进度
@@ -154,9 +154,9 @@ describe("下载队列：纯函数", () => {
     expect(tasks[0]).toMatchObject({ progress: 0.25, bytes: 100, doneBytes: 100 });
     step(150, 300);
     expect(tasks[0]).toMatchObject({ progress: 0.625, bytes: 250, doneBytes: 250 });
-    // 同一项里换了一批（总量变了、从 0 报起）：整体不退
+    // 同一项里换了一批（总量变了、从 0 报起）：整体不退，这一批的字节接着累计
     step(10, 20);
-    expect(tasks[0]).toMatchObject({ progress: 0.625, doneBytes: 260 });
+    expect(tasks[0]).toMatchObject({ progress: 0.65, bytes: 260, doneBytes: 260 });
     finish();
     expect(tasks[0]).toMatchObject({ progress: 1, bytes: 400 });
     // 全部做完后再来的进度不认

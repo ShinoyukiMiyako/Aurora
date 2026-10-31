@@ -153,7 +153,11 @@ function continues(mark: BatchMark, event: DownloadSnapshot): boolean {
 
 /**
  * 组合任务（逐项调后端命令、共用一个 taskId）的进度游标。后端每一项都从 0 报起，按单项显示的话进度条每换一项归零一次，
- * 只认「只进不退」的进度条则卡在第一项的 100%。这里按各项的声明大小把单项进度折成整体进度；有一项不知道大小就按项数折。
+ * 只认「只进不退」的进度条则卡在第一项的 100%。这里把各项折成整体进度：
+ * - 各项的声明大小都已知时按字节：已做完各项的声明大小加上当前项实际下载的字节，除以声明总量。用实际字节而不是
+ *   「当前项的比例 × 它自己的大小」，是因为一次命令可能连带下载别的项（装 Mod 时一并装上缺的前置，后面那几项就无事可做），
+ *   按它自己的大小封顶会先卡住再跳到头。
+ * - 有一项不知道大小时按项数：每项占一份，当前项按它报来的比例。
  */
 export interface CompositeProgress {
   /** 每项的权重：声明大小都已知时为字节数，否则每项为 1。 */
@@ -162,6 +166,8 @@ export interface CompositeProgress {
   readonly totalBytes: number | null;
   /** 正在进行的那一项；等于项数时已全部做完。 */
   readonly index: number;
+  /** 当前项开始时任务的累计下载字节，用来算这一项实际下了多少。 */
+  readonly stepStartBytes: number;
   /** 当前项最近一批下载的标识；这一项还没报过进度时为 null。 */
   readonly batch: BatchMark | null;
   /**
@@ -179,6 +185,7 @@ export function compositeProgress(sizes: readonly (number | null)[]): CompositeP
     weights: bySize ? known : sizes.map(() => 1),
     totalBytes: bySize ? sum : null,
     index: 0,
+    stepStartBytes: 0,
     batch: null,
     previous: null,
   };
@@ -222,7 +229,11 @@ export function applyCompositeDownload(
   const sameBatch = cursor.batch !== null && continues(cursor.batch, event);
   const doneBytes = task.doneBytes + (sameBatch && cursor.batch !== null ? event.bytes - cursor.batch.bytes : event.bytes);
   const whole = weightBefore(cursor, cursor.weights.length);
-  const fraction = (weightBefore(cursor, cursor.index) + cursor.weights[cursor.index] * snapshotFraction(event)) / whole;
+  const before = weightBefore(cursor, cursor.index);
+  const fraction =
+    cursor.totalBytes === null
+      ? (before + cursor.weights[cursor.index] * snapshotFraction(event)) / whole
+      : Math.min(1, (before + doneBytes - cursor.stepStartBytes) / whole);
   const next: Task = { ...withCompositeProgress(task, cursor, fraction, doneBytes), speedBps: event.speed };
   return {
     tasks: tasks.map((t) => (t === task ? next : t)),
@@ -234,9 +245,10 @@ export function applyCompositeDownload(
 export function completeCompositeStep(tasks: readonly Task[], attemptId: string, cursor: CompositeProgress): { tasks: Task[]; cursor: CompositeProgress } {
   const index = cursor.index + 1;
   if (index > cursor.weights.length) throw new Error(`组合任务 ${attemptId} 只有 ${cursor.weights.length} 项，不能再往下走`);
-  const next: CompositeProgress = { ...cursor, index, batch: null, previous: cursor.batch === null ? cursor.previous : cursor.batch };
+  const previous = cursor.batch === null ? cursor.previous : cursor.batch;
   const task = runningAttempt(tasks, attemptId);
-  if (task === undefined) return { tasks: [...tasks], cursor: next };
+  if (task === undefined) return { tasks: [...tasks], cursor: { ...cursor, index, batch: null, previous } };
+  const next: CompositeProgress = { ...cursor, index, stepStartBytes: task.doneBytes, batch: null, previous };
   const fraction = weightBefore(cursor, index) / weightBefore(cursor, cursor.weights.length);
   const updated = withCompositeProgress(task, cursor, fraction, task.doneBytes);
   return { tasks: tasks.map((t) => (t === task ? updated : t)), cursor: next };

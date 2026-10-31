@@ -446,6 +446,47 @@ describe("组合任务的进度按整体累计", () => {
     expect(store.getState().tasks[0].status).toBe("done");
   });
 
+  it("装 Mod：第一项连带下载了前置，按实际字节算进整体，不卡在主项自己的那一份", async () => {
+    const sized = plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" });
+    sized.items[0] = { ...sized.items[0], version: { ...sized.items[0].version, file_size: 1024 } };
+    sized.items[1] = { ...sized.items[1], version: { ...sized.items[1].version, file_size: 2048 } };
+    ipc.overrides.set("plan_install", () => sized);
+    const calls = pendingCalls("install_mod");
+    await store.actions.installResource({
+      resourceType: "mod",
+      platform: "modrinth",
+      projectId: "sodium",
+      name: "Sodium",
+      targets: [{ instanceId: "生存", fileVersionId: "v2", world: null }],
+    });
+    await settle();
+    const [{ id }] = store.getState().tasks;
+    const seen: [number, number, number | null][] = [];
+    const snap = () => {
+      const t = store.getState().tasks[0];
+      seen.push([t.progress, t.bytes, t.totalBytes]);
+    };
+    // 主项的命令按计划把 Sodium 与 Fabric API 一批下完
+    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 2, finished: 1, bytes: 1536, total_bytes: 3072, speed: 1 });
+    snap();
+    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 2, finished: 2, bytes: 3072, total_bytes: 3072, speed: 1 });
+    snap();
+    calls[0].resolve(null);
+    await settle();
+    snap();
+    // 前置已经装好，第二项的命令无事可做
+    calls[1].resolve(null);
+    await settle();
+    snap();
+    expect(seen).toEqual([
+      [0.5, 1536, 3072],
+      [1, 3072, 3072],
+      [1, 3072, 3072],
+      [1, 3072, 3072],
+    ]);
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", doneBytes: 3072 });
+  });
+
   it("装 Mod 时有一项不知道大小：按项数折，进度单调不减", async () => {
     const unsized = plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }, { projectId: "lithium", versionId: "l1" });
     unsized.items[1] = { ...unsized.items[1], version: { ...unsized.items[1].version, file_size: null } };
