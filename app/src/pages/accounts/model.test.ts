@@ -8,6 +8,8 @@ function account(name: string, kind: Account["kind"], extra: Partial<Account> = 
     name,
     kind,
     authServer: kind === "authlib" ? "LittleSkin" : null,
+    serverUrl: kind === "authlib" ? "https://littleskin.cn/api/yggdrasil/" : null,
+    username: null,
     addedAt: 1_700_000_000_000,
     status: "ok",
     lastVerifiedAt: kind === "offline" ? null : 1_700_000_100_000,

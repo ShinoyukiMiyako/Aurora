@@ -34,6 +34,8 @@ const yozakura = accountDto({
   name: "Yozakura",
   account_type: "authlib_injector",
   auth_server: "Example Skin",
+  server_url: "https://skin.example/api/yggdrasil/",
+  username: "yozakura@example.com",
   status: "expired",
   last_verified_at: NOW - 9 * DAY,
 });
