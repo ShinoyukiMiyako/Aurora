@@ -1,7 +1,8 @@
 //! 针对下载引擎关键路径的本地 mock 服务器集成测试。
 //!
-//! 覆盖：Range 分块下载并合并、指数退避重试、sha1 校验失败重下、耗尽后换源、Range 不支持时
-//! 回退单流、分片粒度断点续传、批量池进度上报。全部走 wiremock 本地端口，无外网依赖。
+//! 覆盖：Range 分块下载并合并、跳转 CDN 上分片改打终点、分片失败回退整文件、换源前清分片、
+//! 指数退避重试、sha1 校验失败重下、耗尽后换源、Range 不支持时回退单流、分片粒度断点续传、
+//! 批量池进度上报。全部走 wiremock 本地端口，无外网依赖。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,11 +11,30 @@ use std::time::Duration;
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
     ChunkConfig, ChunkPlan, DownloadConfig, DownloadPool, DownloadProgress, DownloadTask,
-    Downloader, MirrorSource, SourcePlan, SourceResolver,
+    Downloader, Error, MirrorSource, SourcePlan, SourceResolver,
 };
 use tokio::sync::watch;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, header_exists, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+/// 「不带 Range 头」匹配器。探测/整文件请求与分片请求走两套 mock，靠它彻底分流，
+/// 断言便不依赖 wiremock 的匹配顺序。
+fn without_range(request: &Request) -> bool {
+    !request.headers.contains_key("range")
+}
+
+/// 为分片前的解跳转探测提供不带 Range 的整文件应答（真实服务器必然应答探测）。
+async fn mount_whole_file(server: &MockServer, route: &str, payload: &[u8]) {
+    Mock::given(method("GET"))
+        .and(path(route))
+        .and(without_range)
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(String::from_utf8(payload.to_vec()).unwrap()),
+        )
+        .mount(server)
+        .await;
+}
 
 fn client() -> reqwest::Client {
     aurora_base::http::build_client().expect("构建客户端")
@@ -70,6 +90,7 @@ async fn chunked_download_assembles_and_verifies() {
     let total = 1000u64;
     let payload = ascii_payload(total as usize);
     let sha1 = sha1_of(&payload).await;
+    mount_whole_file(&server, "/file", &payload).await;
 
     // 用与引擎一致的分块方案逐块注册 206 mock，模拟真实 Range 服务器。
     let plan = ChunkPlan::compute(total, 300, 8);
@@ -108,6 +129,375 @@ async fn chunked_download_assembles_and_verifies() {
         let part = format!("{}.petalfall-part{}", dest.display(), i);
         assert!(!std::path::Path::new(&part).exists(), "分片 {i} 未清理");
     }
+}
+
+/// 给每个分片注册 206 应答，返回所有分片请求的总命中计数。
+async fn mount_ranges(
+    server: &MockServer,
+    route: &str,
+    payload: &[u8],
+    plan: &ChunkPlan,
+) -> Arc<AtomicUsize> {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let total = payload.len();
+    for chunk in &plan.chunks {
+        let body =
+            String::from_utf8(payload[chunk.start as usize..=chunk.end as usize].to_vec()).unwrap();
+        let content_range = format!("bytes {}-{}/{}", chunk.start, chunk.end, total);
+        let counter = hits.clone();
+        Mock::given(method("GET"))
+            .and(path(route))
+            .and(header(
+                "range",
+                format!("bytes={}-{}", chunk.start, chunk.end).as_str(),
+            ))
+            .respond_with(move |_req: &Request| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", content_range.as_str())
+                    .set_body_string(body.clone())
+            })
+            .mount(server)
+            .await;
+    }
+    hits
+}
+
+fn assert_no_leftovers(dest: &std::path::Path, plan: &ChunkPlan) {
+    let tmp = format!("{}.petalfall-tmp", dest.display());
+    assert!(!std::path::Path::new(&tmp).exists(), "合并临时文件未清理");
+    for chunk in &plan.chunks {
+        let part = format!("{}.petalfall-part{}", dest.display(), chunk.index);
+        assert!(
+            !std::path::Path::new(&part).exists(),
+            "分片 {} 应被清理",
+            chunk.index
+        );
+    }
+}
+
+/// 跳转 CDN：探测解出终点后，所有分片必须打在终点地址上，一个都不许再打前端地址。
+///
+/// 复刻 CurseForge 实测行为：前端这一层对带 Range 的请求恒 404，只有跳转终点认 Range。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunk_requests_target_probed_redirect_destination() {
+    let server = MockServer::start().await;
+    let total = 1000u64;
+    let payload = ascii_payload(total as usize);
+    let sha1 = sha1_of(&payload).await;
+
+    let edge_probe_hits = Arc::new(AtomicUsize::new(0));
+    let probe_counter = edge_probe_hits.clone();
+    let location = format!("{}/media/file", server.uri());
+    Mock::given(method("GET"))
+        .and(path("/edge/file"))
+        .and(without_range)
+        .respond_with(move |_req: &Request| {
+            probe_counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(302).insert_header("location", location.as_str())
+        })
+        .mount(&server)
+        .await;
+    let edge_range_hits = Arc::new(AtomicUsize::new(0));
+    let edge_range_counter = edge_range_hits.clone();
+    Mock::given(method("GET"))
+        .and(path("/edge/file"))
+        .and(header_exists("range"))
+        .respond_with(move |_req: &Request| {
+            edge_range_counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(404)
+        })
+        .mount(&server)
+        .await;
+    mount_whole_file(&server, "/media/file", &payload).await;
+    let plan = ChunkPlan::compute(total, 300, 8);
+    assert_eq!(plan.chunks.len(), 4, "预期切成 4 块");
+    let media_range_hits = mount_ranges(&server, "/media/file", &payload, &plan).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("redirected.bin");
+    let downloader = Downloader::new(client(), single_source_config(small_chunk_config()));
+    let task = DownloadTask::new(format!("{}/edge/file", server.uri()), &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("解跳转后分片下载应成功");
+
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), payload);
+    assert_eq!(
+        edge_range_hits.load(Ordering::SeqCst),
+        0,
+        "分片请求不得再打会跳转的原地址"
+    );
+    assert_eq!(
+        media_range_hits.load(Ordering::SeqCst),
+        4,
+        "四个分片应全部打在探测解出的终点地址上"
+    );
+    assert_eq!(
+        edge_probe_hits.load(Ordering::SeqCst),
+        1,
+        "探测只发一次，不该每个分片各探一遍"
+    );
+    assert_no_leftovers(&dest, &plan);
+}
+
+/// 分片路径失败后回退整文件单请求，回退成功即整体成功；遗留分片被清理。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chunk_failure_falls_back_to_whole_file() {
+    let server = MockServer::start().await;
+    let total = 1000u64;
+    let payload = ascii_payload(total as usize);
+    let sha1 = sha1_of(&payload).await;
+
+    let whole_hits = Arc::new(AtomicUsize::new(0));
+    let whole_counter = whole_hits.clone();
+    let whole_body = String::from_utf8(payload.clone()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .and(without_range)
+        .respond_with(move |_req: &Request| {
+            whole_counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_string(whole_body.clone())
+        })
+        .mount(&server)
+        .await;
+
+    // 首块正常 206（让 part0 真的落盘），其余分片 404 打断分片路径。
+    let plan = ChunkPlan::compute(total, 300, 8);
+    let first = plan.chunks[0];
+    let first_body =
+        String::from_utf8(payload[first.start as usize..=first.end as usize].to_vec()).unwrap();
+    let first_content_range = format!("bytes {}-{}/{}", first.start, first.end, total);
+    let range_hits = Arc::new(AtomicUsize::new(0));
+    let first_counter = range_hits.clone();
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .and(header(
+            "range",
+            format!("bytes={}-{}", first.start, first.end).as_str(),
+        ))
+        .respond_with(move |_req: &Request| {
+            first_counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(206)
+                .insert_header("content-range", first_content_range.as_str())
+                .set_body_string(first_body.clone())
+        })
+        .mount(&server)
+        .await;
+    let rest_counter = range_hits.clone();
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .and(header_exists("range"))
+        .respond_with(move |_req: &Request| {
+            rest_counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(404)
+        })
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("fallback.bin");
+    let downloader = Downloader::new(client(), single_source_config(small_chunk_config()));
+    let task = DownloadTask::new(format!("{}/file", server.uri()), &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader.download(&task).await.expect("回退后应判定成功");
+
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), payload);
+    assert_eq!(
+        whole_hits.load(Ordering::SeqCst),
+        2,
+        "应为一次探测加一次整文件回退"
+    );
+    assert_eq!(
+        range_hits.load(Ordering::SeqCst),
+        4,
+        "首块 206 加三块 404，404 不可重试，分片路径不该被重试"
+    );
+    assert_no_leftovers(&dest, &plan);
+}
+
+/// 回退也失败时，错误必须同时带上分片阶段与回退阶段的定位信息。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fallback_failure_reports_both_stages() {
+    let server = MockServer::start().await;
+    let whole_hits = Arc::new(AtomicUsize::new(0));
+    let whole_counter = whole_hits.clone();
+    // 不带 Range：首次（探测）放行 200，之后（回退）一律 503。
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .and(without_range)
+        .respond_with(move |_req: &Request| {
+            if whole_counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_string("probe-only")
+            } else {
+                ResponseTemplate::new(503)
+            }
+        })
+        .mount(&server)
+        .await;
+    let range_hits = Arc::new(AtomicUsize::new(0));
+    let range_counter = range_hits.clone();
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .and(header_exists("range"))
+        .respond_with(move |_req: &Request| {
+            range_counter.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(404)
+        })
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("doomed.bin");
+    let url = format!("{}/file", server.uri());
+    let downloader = Downloader::new(client(), single_source_config(small_chunk_config()));
+    let task = DownloadTask::new(&url, &dest).with_size(1000);
+
+    let err = downloader
+        .download(&task)
+        .await
+        .expect_err("分片与回退双双失败时不得判定为成功");
+
+    assert_eq!(err.http_status(), Some(503), "外层归口到最后一次真实请求");
+    let Error::AllSourcesExhausted { url: failed, last } = err else {
+        panic!("应归口为多源耗尽");
+    };
+    assert_eq!(failed, url);
+    let Error::ChunkedFallbackFailed {
+        url: stage_url,
+        chunked,
+        fallback,
+    } = *last
+    else {
+        panic!("最后一个源的错误应是分片回退双失败");
+    };
+    assert_eq!(stage_url, url);
+    assert_eq!(chunked.http_status(), Some(404), "分片阶段应记下 404");
+    assert_eq!(fallback.http_status(), Some(503), "回退阶段应记下 503");
+    assert_eq!(
+        range_hits.load(Ordering::SeqCst),
+        1,
+        "首块 404 即终止分片路径"
+    );
+    assert_eq!(
+        whole_hits.load(Ordering::SeqCst),
+        4,
+        "一次探测加三次回退重试（503 可重试，max_attempts=3）"
+    );
+    assert!(!dest.exists(), "全程失败不得留下目标文件");
+}
+
+/// 两个源分别指向同一 mock 的 `/a/file` 与 `/b/file`。
+struct TwoPathResolver {
+    base: String,
+}
+
+impl SourceResolver for TwoPathResolver {
+    fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+        Ok(match source {
+            MirrorSource::Official => format!("{}/a/file", self.base),
+            MirrorSource::BmclApi => format!("{}/b/file", self.base),
+        })
+    }
+}
+
+/// 换源前必须清掉本源残留的分片——任务没有 sha1 时，这是唯一能拦住跨源拼接的地方。
+///
+/// 分片只按字节数判定「已完成」：源 A 写下一个长度对、内容错的分片后，若直接换到源 B 续传，
+/// B 会把它当成已完成跳过，拼出一个大小合法、内容损坏的文件。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switching_source_drops_parts_when_task_has_no_sha1() {
+    let server = MockServer::start().await;
+    let total = 1000u64;
+    let payload = ascii_payload(total as usize);
+    let plan = ChunkPlan::compute(total, 300, 8);
+
+    // 源 A：探测放行一次 200，之后的整文件回退一律 503，逼它耗尽后换源。
+    let a_whole_hits = Arc::new(AtomicUsize::new(0));
+    let a_whole_counter = a_whole_hits.clone();
+    Mock::given(method("GET"))
+        .and(path("/a/file"))
+        .and(without_range)
+        .respond_with(move |_req: &Request| {
+            if a_whole_counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_string("probe-only")
+            } else {
+                ResponseTemplate::new(503)
+            }
+        })
+        .mount(&server)
+        .await;
+    // 源 A 的第 0 块正确、第 1 块长度对但内容全错——这正是「换源不清分片」会被原样拼进去的那段。
+    for chunk in plan.chunks.iter().take(2) {
+        let body = if chunk.index == 0 {
+            String::from_utf8(payload[chunk.start as usize..=chunk.end as usize].to_vec()).unwrap()
+        } else {
+            "X".repeat(chunk.byte_len() as usize)
+        };
+        let content_range = format!("bytes {}-{}/{}", chunk.start, chunk.end, total);
+        Mock::given(method("GET"))
+            .and(path("/a/file"))
+            .and(header(
+                "range",
+                format!("bytes={}-{}", chunk.start, chunk.end).as_str(),
+            ))
+            .respond_with(
+                ResponseTemplate::new(206)
+                    .insert_header("content-range", content_range.as_str())
+                    .set_body_string(body),
+            )
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/a/file"))
+        .and(header_exists("range"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    // 源 B：探测与四个分片全部正常。
+    mount_whole_file(&server, "/b/file", &payload).await;
+    let b_range_hits = mount_ranges(&server, "/b/file", &payload, &plan).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("no-sha1.bin");
+    let config = DownloadConfig {
+        chunk: small_chunk_config(),
+        retry: fast_policy(),
+        sources: SourcePlan::with_resolver(
+            vec![MirrorSource::Official, MirrorSource::BmclApi],
+            Arc::new(TwoPathResolver { base: server.uri() }),
+        ),
+    };
+    let downloader = Downloader::new(client(), config);
+    // 刻意不给 sha1：这类任务只校验总大小，跨源拼接的坏字节没有第二道关。
+    let task = DownloadTask::new("https://official.example/no-sha1", &dest).with_size(total);
+
+    downloader.download(&task).await.expect("换源后应下载成功");
+
+    assert_eq!(
+        tokio::fs::read(&dest).await.unwrap(),
+        payload,
+        "必须是源 B 的完整内容，不许混进源 A 写坏的那一段"
+    );
+    assert_eq!(
+        b_range_hits.load(Ordering::SeqCst),
+        4,
+        "源 A 的残留分片必须在换源前清掉，源 B 四块都要重下"
+    );
+    assert_eq!(
+        a_whole_hits.load(Ordering::SeqCst),
+        4,
+        "源 A 为一次探测加三次整文件回退重试"
+    );
+    assert_no_leftovers(&dest, &plan);
 }
 
 /// 关键路径二：瞬时 5xx 触发指数退避重试，最终成功。
@@ -290,6 +680,7 @@ async fn resume_skips_already_completed_chunk() {
     let total = 1000u64;
     let payload = ascii_payload(total as usize);
     let sha1 = sha1_of(&payload).await;
+    mount_whole_file(&server, "/file", &payload).await;
 
     let plan = ChunkPlan::compute(total, 300, 8);
     assert_eq!(plan.chunks.len(), 4);
@@ -393,10 +784,177 @@ async fn pool_downloads_batch_and_reports_progress() {
     let final_progress = *rx.borrow();
     assert_eq!(final_progress.total, 3);
     assert_eq!(final_progress.finished, 3);
-    assert!(final_progress.bytes > 0, "应累计到实际传输字节");
+    let content: u64 = bodies.iter().map(|b| b.len() as u64).sum();
+    assert_eq!(
+        final_progress.bytes, content,
+        "无失败时有效字节等于内容总量"
+    );
 
     for (i, body) in bodies.iter().enumerate() {
         let dest = dir.path().join(format!("f{i}.txt"));
         assert_eq!(tokio::fs::read(&dest).await.unwrap(), body.as_bytes());
     }
+}
+
+/// 内容损坏触发重下时，进度字节不能把同一个文件计两遍。
+///
+/// 这是「100% · 1.06 GB / 1.04 GB」的根因复现：字节完整传下来了，只是 sha1 不对，整个文件重下。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn corrupted_retry_does_not_double_count_progress_bytes() {
+    let server = MockServer::start().await;
+    let good = "the-authentic-payload";
+    let bad = "the-corrupted-payload"; // 与 good 等长，只有 sha1 拦得住它
+    assert_eq!(good.len(), bad.len());
+    let sha1 = sha1_of(good.as_bytes()).await;
+    let size = good.len() as u64;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    Mock::given(method("GET"))
+        .and(path("/file"))
+        .respond_with(move |_req: &Request| {
+            if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(200).set_body_string(bad)
+            } else {
+                // 重下那一遍故意慢一点，留出窗口观察两次尝试之间的进度。
+                ResponseTemplate::new(200)
+                    .set_body_string(good)
+                    .set_delay(Duration::from_millis(400))
+            }
+        })
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("payload.bin");
+    let task = DownloadTask::new(format!("{}/file", server.uri()), &dest)
+        .with_sha1(&sha1)
+        .with_size(size);
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let pool = DownloadPool::new(downloader, 1).with_sample_interval(Duration::from_millis(10));
+    let (tx, rx) = watch::channel(DownloadProgress::default());
+    let download = tokio::spawn(async move { pool.download_all(vec![task], Some(tx)).await });
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while hits.load(Ordering::SeqCst) < 2 {
+        assert!(std::time::Instant::now() < deadline, "等不到重下请求");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        rx.borrow().bytes,
+        0,
+        "坏的那一遍作废后，进度应立即退回，而不是带着它等重下"
+    );
+
+    let report = download
+        .await
+        .expect("下载任务不应 panic")
+        .expect("不应 panic");
+
+    assert!(report.is_success(), "重下后应成功: {:?}", report.failures);
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), good.as_bytes());
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "首次拿到坏内容并触发一次重下"
+    );
+    let snap = *rx.borrow();
+    assert_eq!(snap.bytes, size, "坏的那一遍要被退回，进度字节恰为文件大小");
+    assert_eq!(snap.total_bytes, Some(size));
+}
+
+/// 本就完整的文件计入进度：补全类批次里大部分文件都已在盘上，不计入的话进度会停在 0。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn already_complete_files_count_towards_progress_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/missing"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("fresh"))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let present = dir.path().join("present.bin");
+    tokio::fs::write(&present, b"already-here").await.unwrap();
+    let tasks = vec![
+        DownloadTask::new(format!("{}/present", server.uri()), &present)
+            .with_sha1(sha1_of(b"already-here").await)
+            .with_size(12),
+        DownloadTask::new(
+            format!("{}/missing", server.uri()),
+            dir.path().join("missing.bin"),
+        )
+        .with_size(5),
+    ];
+
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let (tx, rx) = watch::channel(DownloadProgress::default());
+    let report = DownloadPool::new(downloader, 2)
+        .download_all(tasks, Some(tx))
+        .await
+        .unwrap();
+
+    assert!(report.is_success());
+    let requested: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect();
+    assert_eq!(requested, vec!["/missing"], "完整的文件不该再发请求");
+    let snap = *rx.borrow();
+    assert_eq!(snap.bytes, 17, "跳过的 12 字节加新下的 5 字节");
+    assert_eq!(snap.total_bytes, Some(17));
+}
+
+/// 并发为 1 时请求顺序即派发顺序：大文件先开工，大小未知的最后。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pool_dispatches_largest_files_first() {
+    let server = MockServer::start().await;
+    let files = [
+        ("/small", 3usize),
+        ("/unknown", 4),
+        ("/large", 9),
+        ("/mid", 6),
+    ];
+    for (route, len) in files {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(len)))
+            .mount(&server)
+            .await;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let tasks: Vec<DownloadTask> = files
+        .iter()
+        .map(|(route, len)| {
+            let task = DownloadTask::new(
+                format!("{}{route}", server.uri()),
+                dir.path().join(route.trim_start_matches('/')),
+            );
+            if *route == "/unknown" {
+                task
+            } else {
+                task.with_size(*len as u64)
+            }
+        })
+        .collect();
+
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let report = DownloadPool::new(downloader, 1)
+        .download_all(tasks, None)
+        .await
+        .unwrap();
+
+    assert!(report.is_success());
+    let order: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect();
+    assert_eq!(order, vec!["/large", "/mid", "/small", "/unknown"]);
 }

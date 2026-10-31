@@ -1,7 +1,7 @@
 //! aurora-download 的独立错误类型。
 //!
 //! 本 crate 在 [`aurora_base::Error`] 之上叠加下载专属的失败形态（HTTP 状态、响应体截断、
-//! 大小不符、Range 不支持、多源耗尽等）。底层的哈希/IO/URL 错误经 [`Error::Base`] 直接冒泡，
+//! 大小不符、Range 不支持、分片回退双失败、多源耗尽等）。底层的哈希/IO/URL 错误经 [`Error::Base`] 直接冒泡，
 //! 下游只需 `#[from] aurora_download::Error` 一处承接。
 //!
 //! 错误是否可重试实现在 [`RetryableError`] 上：区分「换个时机或换个源可能就好」的瞬时故障
@@ -48,9 +48,23 @@ pub enum Error {
     #[error("服务器不支持 Range 分块下载: {url}")]
     RangeUnsupported { url: String },
 
-    /// 承载分块下载的异步任务 panic 或被取消。
-    #[error("下载分块任务异常终止")]
-    ChunkTaskJoin(#[source] tokio::task::JoinError),
+    /// 承载分块、单文件或测速探针的后台任务 panic 或被运行时取消。
+    #[error("下载后台任务异常终止")]
+    TaskJoin(#[source] tokio::task::JoinError),
+
+    /// 分片路径失败后回退整文件单请求，回退同样失败。两个阶段的错误都保留，
+    /// 否则只看到「回退失败」会丢掉「分片为什么挂」这一半线索（跳转 CDN 对 Range 回 404 正是如此）。
+    #[error("分片下载与整文件回退均失败: {url}（分片阶段: {chunked}；回退阶段: {fallback}）")]
+    ChunkedFallbackFailed {
+        url: String,
+        chunked: Box<Error>,
+        #[source]
+        fallback: Box<Error>,
+    },
+
+    /// 引擎内部不变量被破坏（候选源为空、并发信号量被关闭）。出现即是缺陷，按错误上报而不 panic。
+    #[error("下载引擎内部错误: {what}")]
+    Internal { what: &'static str },
 
     /// 优先级列表里所有下载源都试过且全部失败，附带最后一个源的错误。
     #[error("所有下载源均失败: {url}")]
@@ -70,6 +84,19 @@ impl Error {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Error::Cancelled)
     }
+
+    /// 取该错误链上最贴近真相的 HTTP 状态码，供源健康记账与日志字段使用。
+    ///
+    /// 组合型错误自身没有状态码，递归到它承载的最后一次真实失败：排查时关心的是
+    /// 「最终那次请求被服务器怎么拒了」。
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Error::Status { status, .. } => Some(*status),
+            Error::AllSourcesExhausted { last, .. } => last.http_status(),
+            Error::ChunkedFallbackFailed { fallback, .. } => fallback.http_status(),
+            _ => None,
+        }
+    }
 }
 
 /// crate 级 `Result` 别名。
@@ -87,10 +114,13 @@ impl RetryableError for Error {
             }
             // 连接中途断开导致的截断、以及大小不符，换次尝试可能补齐。
             Error::IncompleteBody { .. } | Error::SizeMismatch { .. } => true,
+            // 分片路径已被判死，整体还值不值得再来一轮，只取决于回退阶段那次失败的性质。
+            Error::ChunkedFallbackFailed { fallback, .. } => fallback.is_retryable(),
             // Range 不支持是源能力问题（应切换到单流/换源，而非在同一路径上死重试）；
-            // 任务 join 失败与多源耗尽都是终态。
+            // 任务 join 失败、内部错误与多源耗尽都是终态。
             Error::RangeUnsupported { .. }
-            | Error::ChunkTaskJoin(_)
+            | Error::TaskJoin(_)
+            | Error::Internal { .. }
             | Error::AllSourcesExhausted { .. } => false,
             // 取消是调用方的决定，重试或换源都违背它。
             Error::Cancelled => false,
@@ -200,5 +230,67 @@ mod tests {
             status: 503,
         };
         assert_eq!(err.to_string(), "HTTP 状态码 503: http://host/path");
+    }
+
+    #[test]
+    fn http_status_digs_through_exhausted_sources() {
+        let exhausted = Error::AllSourcesExhausted {
+            url: "http://x/a".into(),
+            last: Box::new(Error::Status {
+                url: "http://mirror/a".into(),
+                status: 502,
+            }),
+        };
+        assert_eq!(exhausted.http_status(), Some(502));
+        let transport = Error::IncompleteBody {
+            url: "http://x/a".into(),
+            expected: 10,
+            actual: 3,
+        };
+        assert_eq!(transport.http_status(), None, "传输层失败没有状态码");
+    }
+
+    #[test]
+    fn chunked_fallback_failure_follows_the_fallback_stage() {
+        let err = Error::ChunkedFallbackFailed {
+            url: "http://x/a".into(),
+            chunked: Box::new(Error::Status {
+                url: "http://x/a".into(),
+                status: 404,
+            }),
+            fallback: Box::new(Error::Status {
+                url: "http://x/a".into(),
+                status: 503,
+            }),
+        };
+        assert_eq!(err.http_status(), Some(503), "状态码取回退阶段");
+        assert!(err.is_retryable(), "回退阶段是 503，整体仍值得再试");
+        let message = err.to_string();
+        assert!(
+            message.contains("404") && message.contains("503"),
+            "{message}"
+        );
+
+        let terminal = Error::ChunkedFallbackFailed {
+            url: "http://x/a".into(),
+            chunked: Box::new(Error::Status {
+                url: "http://x/a".into(),
+                status: 503,
+            }),
+            fallback: Box::new(Error::Status {
+                url: "http://x/a".into(),
+                status: 404,
+            }),
+        };
+        assert!(!terminal.is_retryable(), "回退阶段 404 即终态");
+    }
+
+    #[test]
+    fn internal_errors_are_terminal() {
+        let err = Error::Internal {
+            what: "文件信号量已关闭",
+        };
+        assert!(!err.is_retryable());
+        assert_eq!(err.to_string(), "下载引擎内部错误: 文件信号量已关闭");
     }
 }
