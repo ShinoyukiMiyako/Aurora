@@ -17,6 +17,7 @@ import { percent } from "../domain/format";
 import { fade, springs } from "../lib/motion";
 import { cx } from "../lib/util";
 import { useNow } from "../state/launcher";
+import { progressTrack } from "../state/tasks";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { useBreathPhase } from "./breath";
 import { instanceCover } from "./cover";
@@ -187,10 +188,10 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   );
 }
 
-function fillOf(face: LaunchView, seat: boolean): { value: number; track: string; tone: "loading" | "info" } | null {
+export function fillOf(face: LaunchView, seat: boolean): { value: number; track: string; tone: "loading" | "info" } | null {
   if (face.kind === "loading") return { value: seat ? 1 : face.session.progress, track: face.session.taskId, tone: "loading" };
   if (face.kind === "installing" && face.task !== null && face.task.status === "running") {
-    return { value: seat ? 1 : face.task.progress, track: `${face.task.id}#${face.task.attempt}`, tone: "info" };
+    return { value: seat ? 1 : face.task.progress, track: progressTrack(face.task), tone: "info" };
   }
   return null;
 }
@@ -301,7 +302,7 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
           {queued ? (
             <Text title={LAUNCH_COPY.queuedTitle} sub={face.queuePosition === null ? null : LAUNCH_COPY.queuedDetail(face.queuePosition)} />
           ) : (
-            <InstallingText progress={seat ? 1 : task.progress} track={`${task.id}#${task.attempt}`} sub={task.title} />
+            <InstallingText progress={seat ? 1 : task.progress} track={progressTrack(task)} sub={task.title} />
           )}
         </>
       );

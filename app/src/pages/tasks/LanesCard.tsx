@@ -3,12 +3,13 @@
 import { Icon } from "../../art/Icon";
 import { percent } from "../../domain/format";
 import type { Task } from "../../domain/types";
+import { progressTrack } from "../../state/tasks";
 import { Card } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { QUEUE_DOTS_MAX } from "./constants";
 import { TASKS_COPY } from "./copy";
-import { laneSlots, progressTrack } from "./model";
+import { laneSlots } from "./model";
 import styles from "./tasks.module.css";
 
 export interface LanesCardProps {

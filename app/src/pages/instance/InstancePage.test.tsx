@@ -13,7 +13,8 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey, type InstanceTab } from "../../state/route";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { CORE_EVENT } from "../../ipc/tasks";
+import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -720,6 +721,27 @@ describe("实例详情：概览", () => {
     expect(text()).toContain("2 个世界 · 3.0 MB");
     expect(text()).toContain("Complementary.zip");
     expect(text()).toContain("资源包 · 加载顺序 1");
+  });
+
+  it("补全连跑两批下载：安装横幅的进度条第二批从当批进度重新走，不停在上一批的满格", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    const [task] = launcher.state.tasks;
+    const bar = () => {
+      const el = document.querySelector<HTMLElement>(`[role="progressbar"][aria-label="${task.title}"]`);
+      if (el === null) throw new Error("安装横幅里没有进度条");
+      return el;
+    };
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 3, finished: 3, bytes: 3_000, total_bytes: 3_000, speed: 1_000 }));
+    await flush();
+    expect(bar().getAttribute("aria-valuenow")).toBe("100");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 2, bytes: 5_000, total_bytes: 100_000, speed: 1_000 }));
+    await flush();
+    expect(bar().getAttribute("aria-valuenow")).toBe("5");
   });
 
   it("存档读得慢才出骨架，超过 10 秒追加「比平时慢」；读到后换成存档列表", async () => {

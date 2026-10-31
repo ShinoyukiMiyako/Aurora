@@ -31,6 +31,14 @@ export function attemptTaskId(task: Pick<Task, "id" | "attempt">): string {
 }
 
 /**
+ * 任务进度条（进度环、百分比文字）的平滑标识：同一次尝试的同一批下载内只进不退；换了批次（批次总量变了）或换了尝试
+ * 直接跳到新值，否则新批次从 0 重新计起时，进度会停在上一批的最大值不动。凡是画任务进度的地方都用它。
+ */
+export function progressTrack(task: Task): string {
+  return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}`;
+}
+
+/**
  * 去重键：同一资源装到同一实例算同一件事。键里带上命令名，不同命令即使参数相同也不相撞；
  * 没列出的命令按完整参数比较。
  */

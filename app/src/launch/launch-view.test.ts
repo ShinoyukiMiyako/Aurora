@@ -5,7 +5,7 @@ import { applyPhase, sessionCancelled, sessionCrashClue, sessionExited, sessionF
 import type { LauncherState } from "../state/store";
 import { newTask } from "../state/tasks";
 import { avatarIndicator, ringGeometry } from "./InstanceAvatar";
-import { faceKey, holdFor, placedForProgress, placedForStage, FACE_HOLD_MS } from "./LaunchCapsule";
+import { faceKey, fillOf, holdFor, placedForProgress, placedForStage, FACE_HOLD_MS } from "./LaunchCapsule";
 import { brokenAction, launchFailure, launchView, sessionDetail, type LaunchView } from "./launchView";
 
 const T0 = 1_720_000_000_000;
@@ -176,6 +176,32 @@ describe("头像指示与胶囊换面", () => {
     expect(avatarIndicator({ kind: "broken", reason: "x", reimport: false }, 56)).toEqual({ type: "badge", tone: "warn" });
     expect(avatarIndicator({ kind: "installing", task: null, queuePosition: null }, 44)).toEqual({ type: "queued" });
     expect(avatarIndicator({ kind: "ready", busyElsewhere: true }, 56)).toEqual({ type: "none" });
+  });
+
+  it("安装连跑两批：换了批次环的标识跟着换，第二批从当批进度重新走；同一批内标识不变", () => {
+    const first = { ...installTask("A", "t1", "running", 1), totalBytes: 3_000, bytes: 3_000 };
+    const second = { ...first, progress: 0.05, totalBytes: 100_000, bytes: 5_000 };
+    const ring = (task: Task) => avatarIndicator({ kind: "installing", task, queuePosition: null }, 40);
+    const a = ring(first);
+    const b = ring(second);
+    if (a.type !== "ring" || b.type !== "ring") throw new Error("运行中的安装应画环");
+    expect(b.track).not.toBe(a.track);
+    expect(b.progress).toBe(0.05);
+    const later = ring({ ...second, progress: 0.4, bytes: 40_000 });
+    if (later.type !== "ring") throw new Error("运行中的安装应画环");
+    expect(later.track).toBe(b.track);
+  });
+
+  it("安装连跑两批：启动胶囊的填充换了批次跟着换标识，第二批从当批进度重新走", () => {
+    const first = { ...installTask("A", "t1", "running", 1), totalBytes: 3_000, bytes: 3_000 };
+    const second = { ...first, progress: 0.05, totalBytes: 100_000, bytes: 5_000 };
+    const fill = (task: Task) => fillOf({ kind: "installing", task, queuePosition: null }, false);
+    const a = fill(first);
+    const b = fill(second);
+    if (a === null || b === null) throw new Error("运行中的安装应有填充");
+    expect(b.track).not.toBe(a.track);
+    expect(b.value).toBe(0.05);
+    expect(fill({ ...second, progress: 0.4, bytes: 40_000 })?.track).toBe(b.track);
   });
 
   it("状态环是外扩 4 的圆角方框，从上边中点起，周长 = 4 × 直边 + 2πr", () => {

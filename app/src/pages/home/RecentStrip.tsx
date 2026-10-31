@@ -12,6 +12,7 @@ import { useLaunch } from "../../launch/useLaunch";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector, useNow } from "../../state/launcher";
+import { progressTrack } from "../../state/tasks";
 import { Button } from "../../ui/Button";
 import { Card, CardTitleButton } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -135,7 +136,7 @@ function RecentLaunch({ instanceId }: { instanceId: string }) {
           value={value}
           size={36}
           tone="info"
-          track={task === null ? undefined : `${task.id}#${task.attempt}`}
+          track={task === null ? undefined : progressTrack(task)}
           label={view.queuePosition !== null ? AVATAR_LINE.queued(view.queuePosition) : AVATAR_LINE.installing(percent(value))}
         />
       );

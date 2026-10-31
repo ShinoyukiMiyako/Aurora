@@ -5,14 +5,14 @@ import { TASK_KIND_LABEL, TASK_STATUS_LABEL } from "../../copy/flows";
 import { percent } from "../../domain/format";
 import type { Task, TaskStatus } from "../../domain/types";
 import { cx } from "../../lib/util";
-import { isActiveTask } from "../../state/tasks";
+import { isActiveTask, progressTrack } from "../../state/tasks";
 import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ListRow } from "../../ui/ListRow";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Tag } from "../../ui/Tag";
 import { TASKS_COPY } from "./copy";
-import { KIND_ICON, progressTrack, type RowMeta } from "./model";
+import { KIND_ICON, type RowMeta } from "./model";
 import styles from "./tasks.module.css";
 
 type BadgeTone = "ok" | "danger" | "muted";

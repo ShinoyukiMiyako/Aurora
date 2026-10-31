@@ -9,7 +9,8 @@ import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { CORE_EVENT } from "../../ipc/tasks";
+import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { LIBRARY_COPY } from "./copy";
 import LibraryPage from "./index";
 import { resetLibraryView } from "./view-state";
@@ -342,6 +343,28 @@ describe("实例库：动作", () => {
     const repairs = launcher.state.tasks.filter((t) => t.spec.command === "repair_instance");
     expect(repairs.map((t) => t.spec.args)).toEqual([{ id: "坏掉的" }]);
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+  });
+
+  it("补全连跑两批下载：卡片底栏的进度条第二批从当批进度重新走，不停在上一批的满格", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await mount();
+    click(byText("button", LIBRARY_COPY.repairOne));
+    await flush();
+    const [task] = launcher.state.tasks;
+    const bar = () => {
+      const card = byText<HTMLButtonElement>("article button", "坏掉的").closest("article");
+      const el = card === null ? null : card.querySelector<HTMLElement>('[role="progressbar"]');
+      if (el === null) throw new Error("卡片上没有进度条");
+      return el;
+    };
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 3, finished: 3, bytes: 3_000, total_bytes: 3_000, speed: 1_000 }));
+    await flush();
+    expect(bar().getAttribute("aria-valuenow")).toBe("100");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 2, bytes: 5_000, total_bytes: 100_000, speed: 1_000 }));
+    await flush();
+    expect(bar().getAttribute("aria-valuenow")).toBe("5");
+    // 换批时进度条与卡片底栏的动画还在帧循环里：放完再收尾，免得排在假时钟上的帧留给下一个用例
+    await afterMotion();
   });
 
   it("整合包没导入完的实例不进修复横幅，卡片底栏给「重新导入」与「删除」而不是「修复并启动」", async () => {

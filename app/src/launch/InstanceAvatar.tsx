@@ -9,6 +9,7 @@ import { useRef } from "react";
 import { INSTANCE_AVATAR_SPECS, InstanceAvatarBase, type InstanceAvatarSize } from "../art/iso/InstanceAvatarBase";
 import type { InstanceSummary } from "../domain/adapt";
 import { useLauncherSelector } from "../state/launcher";
+import { progressTrack } from "../state/tasks";
 import { useSmoothProgress, visibleProgress } from "../ui/ProgressBar";
 import { useBreathPhase } from "./breath";
 import { instanceCover } from "./cover";
@@ -51,7 +52,7 @@ export function avatarIndicator(view: LaunchView, size: InstanceAvatarSize): Ava
       if (!ringFits) return { type: "none" };
       const task = view.task;
       if (task === null || task.status === "queued") return { type: "queued" };
-      return { type: "ring", tone: "info", progress: task.progress, track: `${task.id}#${task.attempt}` };
+      return { type: "ring", tone: "info", progress: task.progress, track: progressTrack(task) };
     }
     case "running":
       return badgeFits ? { type: "badge", tone: "ok" } : { type: "none" };

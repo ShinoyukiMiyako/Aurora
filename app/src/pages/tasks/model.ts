@@ -122,14 +122,6 @@ export function sameTaskLayout(a: readonly Task[], b: readonly Task[]): boolean 
   return a.length === b.length && a.every((task, i) => sameApartFromProgress(task, b[i]));
 }
 
-/**
- * 进度条的平滑标识：同一次尝试的同一批下载内只进不退；换了批次（批次总量变了）或换了尝试直接跳到新值，
- * 否则新批次从 0 重新计起时，进度条会停在上一批的最大值不动。
- */
-export function progressTrack(task: Task): string {
-  return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}`;
-}
-
 /** 三条并行通道各放哪个运行中的任务；空闲的通道为 null。 */
 export function laneSlots(running: readonly Task[]): (Task | null)[] {
   if (running.length > MAX_PARALLEL_TASKS) throw new Error(`同时运行的任务有 ${running.length} 个，超过了上限 ${MAX_PARALLEL_TASKS}`);

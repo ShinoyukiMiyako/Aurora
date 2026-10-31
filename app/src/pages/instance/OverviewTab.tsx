@@ -26,6 +26,7 @@ import {
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute, type InstanceTab } from "../../state/route";
 import { instanceTask } from "../../state/selectors";
+import { progressTrack } from "../../state/tasks";
 import { Badge } from "../../ui/Badge";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -170,7 +171,7 @@ function InstallingBanner({ instanceId }: { instanceId: string }) {
     <Banner tone="info" icon="download" title={title} actions={<Button variant="ghost" onClick={() => go({ page: "tasks" })}>{OVERVIEW_COPY.viewTasks}</Button>}>
       <div className={styles.bannerProgress}>
         {/* 排队可能很久：静态空轨道，不放常驻的不定进度动画 */}
-        <ProgressBar value={running ? task.progress : 0} tone="info" size="sm" track={task === null ? undefined : task.id} label={title} />
+        <ProgressBar value={running ? task.progress : 0} tone="info" size="sm" track={task === null ? undefined : progressTrack(task)} label={title} />
         <span className={styles.num}>
           {running
             ? OVERVIEW_COPY.installProgress(percent(task.progress), formatSpeed(task.speedBps), task.totalBytes === null ? null : formatBytes(task.totalBytes))

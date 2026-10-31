@@ -13,6 +13,7 @@ import {
   completeCompositeStep,
   findDuplicate,
   newTask,
+  progressTrack,
   queuePosition,
   retryTask,
   startComposite,
@@ -55,6 +56,15 @@ function record(id: string, status: TaskRecordDto["status"], overrides: Partial<
 }
 
 describe("下载队列：纯函数", () => {
+  it("进度条标识：同批次不变，换批次或换尝试即变", () => {
+    const a = task("t", { status: "running", totalBytes: 1000 });
+    expect(progressTrack(a)).toBe(progressTrack({ ...a, bytes: 500, progress: 0.5 }));
+    expect(progressTrack(a)).not.toBe(progressTrack({ ...a, totalBytes: 4000 }));
+    expect(progressTrack(a)).not.toBe(progressTrack({ ...a, attempt: 2 }));
+    expect(progressTrack({ ...a, totalBytes: 0 })).toBe("t#1:0");
+    expect(progressTrack({ ...a, totalBytes: null })).toBe("t#1:count");
+  });
+
   it("调度按数组顺序取最靠前的 queued，同时最多 3 个在跑", () => {
     const tasks = [task("t1"), task("t2", { status: "running" }), task("t3"), task("t4"), task("t5")];
     expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["t1", "t3"]);

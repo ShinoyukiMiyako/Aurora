@@ -11,7 +11,7 @@ import type { ConfirmOptions } from "../launch/host";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import type { LauncherState } from "../state/store";
-import { attemptTaskId, isActiveTask, isFinishedTask } from "../state/tasks";
+import { isActiveTask, isFinishedTask, progressTrack } from "../state/tasks";
 import { Badge } from "../ui/Badge";
 import { Button } from "../ui/Button";
 import { IconButton } from "../ui/IconButton";
@@ -177,7 +177,7 @@ function PeekRow({ task, onCancel }: { task: Task; onCancel: () => void }) {
         </span>
         <IconButton icon="x" size="sm" label={PEEK_COPY.cancel} tooltipSide="left" onClick={onCancel} />
       </div>
-      <ProgressBar value={queued ? 0 : task.progress} tone={queued ? "muted" : "accent"} size="sm" track={attemptTaskId(task)} label={PEEK_COPY.rowProgress(task.title)} />
+      <ProgressBar value={queued ? 0 : task.progress} tone={queued ? "muted" : "accent"} size="sm" track={progressTrack(task)} label={PEEK_COPY.rowProgress(task.title)} />
       <div className={styles.rowMeta}>
         <span className={styles.rowDetail}>{task.detail}</span>
         <span className={styles.rowState}>{queued ? PEEK_COPY.queued : PEEK_COPY.progress(percent(task.progress), formatSpeed(task.speedBps))}</span>

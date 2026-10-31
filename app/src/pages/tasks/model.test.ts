@@ -17,7 +17,6 @@ import {
   laneSlots,
   overviewOf,
   overviewRemaining,
-  progressTrack,
   pushSample,
   rowMeta,
   sameTaskLayout,
@@ -127,14 +126,6 @@ describe("分组与筛选", () => {
     expect(laneSlots([running1]).map((t) => (t === null ? null : t.id))).toEqual(["r1", null, null]);
     expect(laneSlots([]).every((t) => t === null)).toBe(true);
     expect(() => laneSlots([running1, running2, task("r3", { status: "running" }), task("r4", { status: "running" })])).toThrow("超过了上限 3");
-  });
-
-  it("进度条标识：同批次不变，换批次或换尝试即变", () => {
-    const a = task("t", { status: "running", totalBytes: 1000 });
-    expect(progressTrack(a)).toBe(progressTrack({ ...a, bytes: 500, progress: 0.5 }));
-    expect(progressTrack(a)).not.toBe(progressTrack({ ...a, totalBytes: 4000 }));
-    expect(progressTrack(a)).not.toBe(progressTrack({ ...a, attempt: 2 }));
-    expect(progressTrack({ ...a, totalBytes: null })).toBe("t#1:count");
   });
 });
 

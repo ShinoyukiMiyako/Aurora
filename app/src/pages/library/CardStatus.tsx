@@ -11,6 +11,7 @@ import { useLaunch, type LaunchEntry } from "../../launch/useLaunch";
 import { useNav } from "../../shell/shell";
 import { useNow } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
+import { progressTrack } from "../../state/tasks";
 import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ProgressBar } from "../../ui/ProgressBar";
@@ -150,7 +151,7 @@ function InstallingStatus({ view }: { view: Extract<LaunchView, { kind: "install
           value={queued ? 0 : task.progress}
           tone="info"
           size="sm"
-          track={queued ? undefined : `${task.id}#${task.attempt}`}
+          track={queued ? undefined : progressTrack(task)}
           label={queued ? LAUNCH_COPY.queuedTitle : task.title}
         />
       </div>

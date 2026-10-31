@@ -5,6 +5,7 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { InstanceDto } from "../../ipc/instances";
 import { IpcError } from "../../ipc/errors";
 import { GAME_EXIT_EVENT } from "../../ipc/launch";
+import { CORE_EVENT } from "../../ipc/tasks";
 import type { KnownServerDto, NewsItemDto, PinnedServerDto, PlayDayDto, ServerStatusDto } from "../../state/queries/home";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
@@ -272,6 +273,27 @@ describe("主页：最近游玩", () => {
     expect(text()).toContain("2 小时前 · 原版");
     click(buttonByLabel("打开「红石」"));
     expect(nav.route).toEqual({ page: "instance", id: "红石", tab: "overview" });
+  });
+
+  it("修复连跑两批下载：卡片上的进度环第二批从当批进度重新走，不停在上一批的满格", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.actions.repairInstance("创造");
+      await settle();
+    });
+    const [task] = launcher.state.tasks;
+    const ring = () => {
+      const el = document.querySelector<HTMLElement>('section[aria-labelledby="home-recent-title"] [role="progressbar"]');
+      if (el === null) throw new Error("最近游玩里没有进度环");
+      return el;
+    };
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 3, finished: 3, bytes: 3_000, total_bytes: 3_000, speed: 1_000 }));
+    await flush();
+    expect(ring().getAttribute("aria-valuenow")).toBe("100");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 2, bytes: 5_000, total_bytes: 100_000, speed: 1_000 }));
+    await flush();
+    expect(ring().getAttribute("aria-valuenow")).toBe("5");
   });
 });
 

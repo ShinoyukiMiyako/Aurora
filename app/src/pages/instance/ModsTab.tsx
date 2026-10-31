@@ -11,6 +11,7 @@ import { errorRecord } from "../../state/errors";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useInstanceMods, type UpdateCandidate } from "../../state/queries/instance";
 import { invalidate, type ResourceResult } from "../../state/resource";
+import { progressTrack } from "../../state/tasks";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -239,7 +240,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         )}
         {updateTasks.length > 0 && (
           <span className={styles.modTask}>
-            <ProgressBar value={updateTasks[0].status === "running" ? updateTasks[0].progress : 0} size="sm" track={updateTasks[0].id} label={updateTasks[0].title} />
+            <ProgressBar value={updateTasks[0].status === "running" ? updateTasks[0].progress : 0} size="sm" track={progressTrack(updateTasks[0])} label={updateTasks[0].title} />
             <span className={styles.ellipsis}>{updateTasks[0].title}</span>
           </span>
         )}
