@@ -1,0 +1,369 @@
+// 外置登录（authlib-injector 认证服务器）：服务器 -> 登录 -> 选择角色（只有一个角色时没有这一步）。
+// 能原位说清的错误（连不上、不是认证服务器、地址无效、账户密码错、网络断、没有角色、服务器拒绝）显示在出错的那一步；
+// 其余错误照常交给外层统一处理（error 通知）。登录成功后由状态容器关掉弹窗并发通知。
+// 重新登录时带着上次的服务器与用户名进来：先自动探测服务器，成功后停在登录这一步，密码为空。
+
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Icon } from "../../art/Icon";
+import { AccountAvatar } from "../../art/skin/AccountAvatar";
+import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API } from "../../copy/flows";
+import type { AuthlibProfile, AuthServer } from "../../domain/adapt";
+import { useRunner } from "../../shell/useRunner";
+import { useLauncher } from "../../state/launcher";
+import type { AuthlibPrefill } from "../../state/login";
+import { Button } from "../../ui/Button";
+import { Callout } from "../../ui/Callout";
+import { Field } from "../../ui/Field";
+import { IconButton } from "../../ui/IconButton";
+import { Modal } from "../../ui/Modal";
+import { useRovingGroup } from "../../ui/roving";
+import { TextInput } from "../../ui/TextInput";
+import { AUTHLIB_DIALOG_COPY, LOGIN_ERROR } from "./copy";
+import { loginProblem, normalizeServerUrl, probeProblem, type InlineProblem, type LoginProblem } from "./errors";
+import styles from "./login.module.css";
+
+export type AuthlibStep = "server" | "login" | "profile";
+
+const STEP_ORDER: readonly AuthlibStep[] = ["server", "login", "profile"];
+
+interface PendingProfiles {
+  pendingId: string;
+  serverName: string;
+  profiles: AuthlibProfile[];
+}
+
+export function AuthlibDialog({ prefill }: { prefill: AuthlibPrefill | null }) {
+  const { actions } = useLauncher();
+  const run = useRunner();
+  const [step, setStep] = useState<AuthlibStep>("server");
+
+  // ---- 第一步：服务器
+  const [serverInput, setServerInput] = useState(prefill === null ? "" : prefill.serverUrl);
+  const [probing, setProbing] = useState(false);
+  const [probeError, setProbeError] = useState<InlineProblem | null>(null);
+  const [server, setServer] = useState<{ url: string; info: AuthServer } | null>(null);
+  const normalized = normalizeServerUrl(serverInput);
+
+  const probe = (input: string) =>
+    void run(async () => {
+      const url = normalizeServerUrl(input);
+      setProbing(true);
+      setProbeError(null);
+      try {
+        const outcome = await actions.probeAuthServer(url).then(
+          (info) => ({ ok: true as const, info }),
+          (error: unknown) => {
+            const problem = probeProblem(error);
+            if (problem === null) throw error;
+            return { ok: false as const, problem };
+          },
+        );
+        if (!outcome.ok) {
+          setProbeError(outcome.problem);
+          return;
+        }
+        setServer({ url, info: outcome.info });
+        setStep("login");
+      } finally {
+        setProbing(false);
+      }
+    }, LOGIN_ERROR.probe);
+
+  // 只在打开时自动探测一次（开发构建的 StrictMode 会重放 effect，靠 ref 挡住第二次）
+  const autoProbed = useRef(false);
+  useEffect(() => {
+    if (prefill === null || autoProbed.current) return;
+    autoProbed.current = true;
+    probe(prefill.serverUrl);
+  }, []);
+
+  // ---- 第二步：登录
+  const [username, setUsername] = useState(prefill === null ? "" : prefill.username);
+  const [password, setPassword] = useState("");
+  const [reveal, setReveal] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginError, setLoginError] = useState<LoginProblem | null>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+  const canLogin = username.trim() !== "" && password !== "";
+
+  // ---- 第三步：角色
+  const [pending, setPending] = useState<PendingProfiles | null>(null);
+  const [profileUuid, setProfileUuid] = useState<string | null>(null);
+  const [selecting, setSelecting] = useState(false);
+
+  const submitLogin = () => {
+    if (!canLogin || loggingIn) return;
+    if (server === null) throw new Error("外置登录还没有选定服务器");
+    const url = server.url;
+    void run(async () => {
+      setLoggingIn(true);
+      setLoginError(null);
+      try {
+        const outcome = await actions.authlibLogin(url, username.trim(), password).then(
+          (result) => ({ ok: true as const, result }),
+          (error: unknown) => {
+            const problem = loginProblem(error);
+            if (problem === null) throw error;
+            return { ok: false as const, problem };
+          },
+        );
+        if (!outcome.ok) {
+          setLoginError(outcome.problem);
+          if (outcome.problem.kind === "credentials") {
+            setPassword("");
+            passwordRef.current?.focus();
+          }
+          return;
+        }
+        // logged_in：状态容器已经关掉弹窗
+        if (outcome.result.status !== "select_profile") return;
+        const first = outcome.result.profiles[0];
+        if (first === undefined) throw new Error("认证服务器要求选择角色，却没有给出任何角色");
+        setPending({ pendingId: outcome.result.pendingId, serverName: outcome.result.serverName, profiles: outcome.result.profiles });
+        setProfileUuid(first.uuid);
+        setStep("profile");
+      } finally {
+        setLoggingIn(false);
+      }
+    }, ACTION_ERROR.authlib);
+  };
+
+  const submitProfile = () => {
+    if (pending === null || profileUuid === null) throw new Error("还没有可选的角色");
+    const { pendingId } = pending;
+    void run(async () => {
+      setSelecting(true);
+      try {
+        await actions.selectAuthlibProfile(pendingId, profileUuid);
+      } finally {
+        setSelecting(false);
+      }
+    }, ACTION_ERROR.authlib);
+  };
+
+  // 换步之后焦点落到这一步的第一个输入（弹窗自己的初始焦点只在打开时生效）
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const firstStep = useRef(true);
+  useLayoutEffect(() => {
+    if (firstStep.current) {
+      firstStep.current = false;
+      return;
+    }
+    const body = bodyRef.current;
+    if (body === null) throw new Error("外置登录弹窗的内容还没挂载");
+    const target = body.querySelector<HTMLElement>("[data-autofocus]");
+    if (target === null) throw new Error(`外置登录的「${AUTHLIB_DIALOG_COPY.steps[STEP_ORDER.indexOf(step)]}」一步没有可聚焦的输入`);
+    target.focus();
+  }, [step]);
+
+  const close = () => void run(() => actions.closeLogin(), LOGIN_ERROR.close);
+  const back = () => {
+    if (step === "login") {
+      setLoginError(null);
+      setStep("server");
+    } else if (step === "profile") {
+      setPending(null);
+      setStep("login");
+    }
+  };
+
+  let footer: ReactNode;
+  switch (step) {
+    case "server":
+      footer = (
+        <>
+          <Button variant="ghost" onClick={close}>
+            {AUTHLIB_DIALOG_COPY.cancel}
+          </Button>
+          <Button variant="primary" iconRight="arrow-right" loading={probing} disabled={normalized === ""} onClick={() => probe(serverInput)}>
+            {AUTHLIB_COPY.next}
+          </Button>
+        </>
+      );
+      break;
+    case "login":
+      footer = (
+        <>
+          <Button variant="ghost" onClick={back}>
+            {AUTHLIB_DIALOG_COPY.back}
+          </Button>
+          <Button variant="primary" loading={loggingIn} disabled={!canLogin} onClick={submitLogin}>
+            {AUTHLIB_COPY.login}
+          </Button>
+        </>
+      );
+      break;
+    case "profile":
+      footer = (
+        <>
+          <Button variant="ghost" onClick={back}>
+            {AUTHLIB_DIALOG_COPY.back}
+          </Button>
+          <Button variant="primary" loading={selecting} onClick={submitProfile}>
+            {AUTHLIB_COPY.pickProfile}
+          </Button>
+        </>
+      );
+      break;
+  }
+
+  return (
+    <Modal open onClose={close} size="md" icon="server" title={AUTHLIB_COPY.title} closeOnScrim={false} footer={footer}>
+      <div ref={bodyRef} className={styles.authlib}>
+        <StepIndicator step={step} />
+        {step === "server" && (
+          <div className={styles.section}>
+            <Field label={AUTHLIB_COPY.serverLabel} hint={normalized !== "" && normalized !== serverInput.trim() ? AUTHLIB_DIALOG_COPY.willUse(normalized) : undefined}>
+              <TextInput
+                type="url"
+                value={serverInput}
+                onChange={(value) => {
+                  setServerInput(value);
+                  setProbeError(null);
+                }}
+                placeholder={AUTHLIB_COPY.serverPlaceholder}
+                icon="server"
+                clearable
+                spellCheck={false}
+                autoComplete="off"
+                data-autofocus=""
+                onEnter={() => {
+                  if (normalized !== "" && !probing) probe(serverInput);
+                }}
+              />
+            </Field>
+            <div className={styles.presets}>
+              <button type="button" className={styles.preset} onClick={() => setServerInput(LITTLESKIN_API)}>
+                {AUTHLIB_COPY.preset}
+              </button>
+            </div>
+            {normalized.startsWith("http://") && <Callout tone="warn">{AUTHLIB_COPY.httpWarning}</Callout>}
+            {probeError !== null && (
+              <Callout tone="danger" announce>
+                <strong className={styles.problemTitle}>{probeError.title}</strong>
+                <span>{probeError.body}</span>
+              </Callout>
+            )}
+          </div>
+        )}
+        {step === "login" && server !== null && (
+          <div className={styles.section}>
+            <div className={styles.serverCard}>
+              <span className={styles.serverIcon} aria-hidden="true">
+                <Icon name="server" size={18} />
+              </span>
+              <div className={styles.serverText}>
+                <p className={styles.serverName}>{server.info.serverName}</p>
+                <p className={styles.serverUrl}>{server.info.apiRoot}</p>
+              </div>
+              <Button variant="ghost" size="sm" onClick={back}>
+                {AUTHLIB_DIALOG_COPY.changeServer}
+              </Button>
+            </div>
+            <Field label={AUTHLIB_COPY.username}>
+              <TextInput value={username} onChange={setUsername} autoComplete="username" spellCheck={false} data-autofocus="" onEnter={submitLogin} />
+            </Field>
+            <Field label={AUTHLIB_COPY.password} hint={AUTHLIB_COPY.passwordNote} error={loginError !== null && loginError.kind === "credentials" ? AUTHLIB_COPY.badCredentials : undefined}>
+              <TextInput
+                ref={passwordRef}
+                type={reveal ? "text" : "password"}
+                value={password}
+                onChange={(value) => {
+                  setPassword(value);
+                  if (loginError !== null && loginError.kind === "credentials") setLoginError(null);
+                }}
+                autoComplete="current-password"
+                onEnter={submitLogin}
+                trailing={
+                  <IconButton
+                    icon="eye"
+                    size="sm"
+                    label={AUTHLIB_DIALOG_COPY.showPassword}
+                    pressed={reveal}
+                    onClick={() => setReveal((v) => !v)}
+                  />
+                }
+              />
+            </Field>
+            {loginError !== null && loginError.kind === "network" && (
+              <Callout
+                tone="danger"
+                announce
+                action={
+                  <Button variant="secondary" size="sm" icon="refresh" onClick={submitLogin}>
+                    {AUTHLIB_COPY.retry}
+                  </Button>
+                }
+              >
+                {AUTHLIB_COPY.network}
+              </Callout>
+            )}
+            {loginError !== null && loginError.kind === "no_profile" && (
+              <Callout tone="warn" announce>
+                <strong className={styles.problemTitle}>{AUTHLIB_COPY.noProfile.title}</strong>
+                <span>{AUTHLIB_COPY.noProfile.body}</span>
+              </Callout>
+            )}
+            {loginError !== null && loginError.kind === "rejected" && (
+              <Callout tone="danger" announce>
+                {loginError.message}
+              </Callout>
+            )}
+          </div>
+        )}
+        {step === "profile" && pending !== null && profileUuid !== null && (
+          <ProfilePicker pending={pending} value={profileUuid} onChange={setProfileUuid} />
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function StepIndicator({ step }: { step: AuthlibStep }) {
+  const current = STEP_ORDER.indexOf(step);
+  return (
+    <ol className={styles.stepper} aria-label={AUTHLIB_DIALOG_COPY.stepsLabel}>
+      {AUTHLIB_DIALOG_COPY.steps.map((label, i) => (
+        <li key={label} className={styles.stepperItem} data-state={i < current ? "done" : i === current ? "now" : "todo"} aria-current={i === current ? "step" : undefined}>
+          <span className={styles.stepperDot} aria-hidden="true">
+            {i < current ? <Icon name="check" size={12} /> : i + 1}
+          </span>
+          <span>{label}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function ProfilePicker({ pending, value, onChange }: { pending: PendingProfiles; value: string; onChange: (uuid: string) => void }) {
+  const group = useRovingGroup(
+    pending.profiles.map((p) => ({ value: p.uuid })),
+    value,
+    onChange,
+    false,
+  );
+  return (
+    <div className={styles.section}>
+      <p className={styles.lead}>{AUTHLIB_DIALOG_COPY.profileHint(pending.serverName)}</p>
+      <div className={styles.profiles} role="radiogroup" aria-label={AUTHLIB_DIALOG_COPY.profiles} onKeyDown={group.onKeyDown}>
+        {pending.profiles.map((profile, i) => (
+          <button
+            key={profile.uuid}
+            ref={group.register(i)}
+            type="button"
+            role="radio"
+            aria-checked={profile.uuid === value}
+            tabIndex={group.tabIndexOf(i)}
+            className={styles.profile}
+            data-autofocus={profile.uuid === value ? "" : undefined}
+            onClick={() => onChange(profile.uuid)}
+          >
+            <AccountAvatar uuid={profile.uuid} skin={profile.skin} size={40} current={profile.uuid === value} />
+            <span className={styles.profileName}>{profile.name}</span>
+            {profile.uuid === value && <Icon name="check" size={16} className={styles.profileCheck} />}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
