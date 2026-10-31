@@ -358,6 +358,8 @@ pub fn auth_code(err: &AuthError) -> &'static str {
         AuthError::XstsUnknown(_) => "XstsUnknown",
         AuthError::MinecraftProfileNotFound => "MinecraftProfileNotFound",
         AuthError::ReloginRequired => "ReloginRequired",
+        AuthError::ServiceUnavailable { .. } => "ServiceUnavailable",
+        AuthError::AppNotApproved => "AppNotApproved",
         AuthError::InvalidUsername(_) => "InvalidUsername",
         AuthError::Yggdrasil { .. } => "Yggdrasil",
         AuthError::AccountNotFound(_) => "AccountNotFound",

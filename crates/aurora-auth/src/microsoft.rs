@@ -9,6 +9,8 @@
 //! - XSTS 六个错误码逐一映射为带中文说明的错误变体（见 [`map_xerr`]）。
 //! - 令牌刷新失败区分“需重登”（[`AuthError::ReloginRequired`]，`invalid_grant`）与瞬时网络失败
 //!   （[`AuthError::Http`]，交由 `retry_async` 重试）。
+//! - 任一步收到 5xx 或 429 都报 [`AuthError::ServiceUnavailable`]（可重试），且在解析响应体之前判定：
+//!   故障页多半是 HTML，先解析只会得到误导性的解析错误，把微软的故障说成启动器的问题。
 //! - 挂上取消令牌（[`MicrosoftAuth::with_cancel`]）后，设备码请求、轮询与令牌链任一步都会在令牌
 //!   触发时立刻以 [`AuthError::Cancelled`] 返回；设备码有效期长达十几分钟，用户关掉登录弹窗时
 //!   不能让后台继续轮询到过期。
@@ -168,6 +170,9 @@ impl MicrosoftAuth {
         let params = [("client_id", self.client_id.as_str()), ("scope", SCOPE)];
         retry_async(&self.retry, || async {
             let (status, text) = self.send_form(&url, &params, "请求设备码").await?;
+            if let Some(err) = service_unavailable(status, "请求设备码") {
+                return Err(err);
+            }
             if !status.is_success() {
                 let err: OAuthErrorBody = parse(&text, "请求设备码")?;
                 return Err(AuthError::OAuth {
@@ -215,6 +220,9 @@ impl MicrosoftAuth {
             ("grant_type", DEVICE_CODE_GRANT),
         ];
         let (status, text) = self.send_form(&url, &params, "轮询设备码令牌").await?;
+        if let Some(err) = service_unavailable(status, "轮询设备码令牌") {
+            return Err(err);
+        }
         if status.is_success() {
             let body: MsaTokenBody = parse(&text, "轮询设备码令牌")?;
             return Ok(PollOutcome::Token(body.into()));
@@ -247,6 +255,10 @@ impl MicrosoftAuth {
         ];
         retry_async(&self.retry, || async {
             let (status, text) = self.send_form(&url, &params, "刷新令牌").await?;
+            // invalid_grant 走的是 400，不会落进这里，仍归「需重登」。
+            if let Some(err) = service_unavailable(status, "刷新令牌") {
+                return Err(err);
+            }
             if status.is_success() {
                 let body: MsaTokenBody = parse(&text, "刷新令牌")?;
                 return Ok(body.into());
@@ -308,6 +320,9 @@ impl MicrosoftAuth {
         let (status, text) = self
             .send_json(&self.endpoints.xbl_authenticate, &body, "XBL 认证")
             .await?;
+        if let Some(err) = service_unavailable(status, "XBL 认证") {
+            return Err(err);
+        }
         if !status.is_success() {
             return Err(AuthError::Response {
                 context: "XBL 认证",
@@ -333,6 +348,9 @@ impl MicrosoftAuth {
         let (status, text) = self
             .send_json(&self.endpoints.xsts_authorize, &body, "XSTS 授权")
             .await?;
+        if let Some(err) = service_unavailable(status, "XSTS 授权") {
+            return Err(err);
+        }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             let err: XstsErrorBody = parse(&text, "XSTS 授权")?;
             return Err(map_xerr(err.xerr));
@@ -366,6 +384,17 @@ impl MicrosoftAuth {
             identity_token: format!("XBL3.0 x={uhs};{xsts_token}"),
         };
         let (status, text) = self.send_json(&url, &body, "Minecraft 登录").await?;
+        if let Some(err) = service_unavailable(status, "Minecraft 登录") {
+            return Err(err);
+        }
+        // 官方没有公开这个拒绝的响应体结构，只按原文子串认，不依赖 JSON 字段名。
+        if status == StatusCode::FORBIDDEN
+            && text
+                .to_ascii_lowercase()
+                .contains("invalid app registration")
+        {
+            return Err(AuthError::AppNotApproved);
+        }
         if !status.is_success() {
             return Err(AuthError::Response {
                 context: "Minecraft 登录",
@@ -395,6 +424,9 @@ impl MicrosoftAuth {
         // 无档案：账户未拥有 Minecraft（未购买或未创建档案）。
         if status == StatusCode::NOT_FOUND {
             return Err(AuthError::MinecraftProfileNotFound);
+        }
+        if let Some(err) = service_unavailable(status, "获取游戏档案") {
+            return Err(err);
         }
         let text = resp.text().await.map_err(|source| AuthError::Http {
             context: "获取游戏档案",
@@ -458,6 +490,16 @@ impl MicrosoftAuth {
             .map_err(|source| AuthError::Http { context, source })?;
         Ok((status, text))
     }
+}
+
+/// 5xx 与 429 判为服务端故障。各端点在故障或限流时的响应体没有文档，只能按状态码类别认。
+fn service_unavailable(status: StatusCode, step: &'static str) -> Option<AuthError> {
+    (status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS).then(|| {
+        AuthError::ServiceUnavailable {
+            step,
+            status: status.as_u16(),
+        }
+    })
 }
 
 /// 把 XSTS 的 XErr 错误码映射为带中文说明的错误变体。
@@ -1060,6 +1102,370 @@ mod tests {
         // 需重登，而非网络失败：明确区分。
         assert!(matches!(err, AuthError::ReloginRequired));
         assert!(!err.is_retryable());
+    }
+
+    fn three_attempts() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            jitter: false,
+        }
+    }
+
+    fn msa() -> MsaToken {
+        MsaToken {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: 3600,
+        }
+    }
+
+    async fn hits(server: &MockServer, at: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == at)
+            .count()
+    }
+
+    async fn mount_xbl_ok(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/xbl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xbl-token",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_xsts_ok(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xsts-tok",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xsts_outage_is_retried_then_reported_as_service_unavailable() {
+        let server = MockServer::start().await;
+        mount_xbl_ok(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .complete_login(&msa())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "XSTS 授权",
+                    status: 503
+                }
+            ),
+            "得到 {err:?}"
+        );
+        assert!(err.is_retryable());
+        // 按退避把三次机会用满；不可重试的话这里只有 1 次。
+        assert_eq!(hits(&server, "/xsts").await, 3);
+        // XBL 第一次就成功，不应被连带重试。
+        assert_eq!(hits(&server, "/xbl").await, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_outage_html_page_is_service_unavailable_not_parse() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .set_body_string("<html><body><h1>Service Unavailable</h1></body></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server).refresh("old-refresh").await.unwrap_err();
+        assert!(!matches!(err, AuthError::Parse { .. }), "得到 {err:?}");
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "刷新令牌",
+                    status: 503
+                }
+            ),
+            "得到 {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_code_outage_is_service_unavailable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/devicecode"))
+            .respond_with(
+                ResponseTemplate::new(502)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html>Bad Gateway</html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server).begin_device_code().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "请求设备码",
+                    status: 502
+                }
+            ),
+            "得到 {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polling_outage_is_retried_then_reported_not_waited_out() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "error": "temporarily_unavailable",
+                        "error_description": "AADSTS90033"
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .poll_device_code(&device(900, 0))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "轮询设备码令牌",
+                    status: 503
+                }
+            ),
+            "得到 {err:?}"
+        );
+        assert_eq!(hits(&server, "/token").await, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xbl_status_boundaries_split_outage_from_rejection() {
+        // 499 与 403 是客户端一侧的拒绝，重试无益，仍按协议错误报；500 与 599 是服务端故障。
+        for status in [403_u16, 499, 500, 599] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/xbl"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("{}"))
+                .mount(&server)
+                .await;
+
+            let err = auth_for(&server)
+                .with_retry(three_attempts())
+                .complete_login(&msa())
+                .await
+                .unwrap_err();
+            let attempts = hits(&server, "/xbl").await;
+            if status >= 500 {
+                assert!(
+                    matches!(err, AuthError::ServiceUnavailable { step: "XBL 认证", status: s } if s == status),
+                    "HTTP {status} 得到 {err:?}"
+                );
+                assert_eq!(attempts, 3, "HTTP {status}");
+            } else {
+                assert!(
+                    matches!(&err, AuthError::Response { context: "XBL 认证", detail } if detail.contains(&status.to_string())),
+                    "HTTP {status} 得到 {err:?}"
+                );
+                assert_eq!(attempts, 1, "HTTP {status}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn profile_throttling_is_service_unavailable_but_neighbours_are_not() {
+        for (status, want_outage) in [(429_u16, true), (428, false), (430, false)] {
+            let server = MockServer::start().await;
+            mount_full_chain(&server, "uhs", "xsts-tok").await;
+            Mock::given(method("GET"))
+                .and(path("/minecraft/profile"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("Too Many Requests"))
+                .mount(&server)
+                .await;
+
+            let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+            if want_outage {
+                assert!(
+                    matches!(
+                        err,
+                        AuthError::ServiceUnavailable {
+                            step: "获取游戏档案",
+                            status: 429
+                        }
+                    ),
+                    "HTTP {status} 得到 {err:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        err,
+                        AuthError::Response {
+                            context: "获取游戏档案",
+                            ..
+                        }
+                    ),
+                    "HTTP {status} 得到 {err:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minecraft_login_server_error_is_service_unavailable() {
+        let server = MockServer::start().await;
+        mount_xbl_ok(&server).await;
+        mount_xsts_ok(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "Minecraft 登录",
+                    status: 500
+                }
+            ),
+            "得到 {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_grant_and_missing_profile_keep_their_meaning() {
+        // 服务端故障判定不能吞掉这两个确定性结论。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS70000"
+            })))
+            .mount(&server)
+            .await;
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .refresh("dead")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::ReloginRequired), "得到 {err:?}");
+        assert_eq!(hits(&server, "/token").await, 1);
+
+        let server = MockServer::start().await;
+        mount_full_chain(&server, "uhs", "xsts-tok").await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("<html>Not Found</html>"))
+            .mount(&server)
+            .await;
+        let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+        assert!(
+            matches!(err, AuthError::MinecraftProfileNotFound),
+            "得到 {err:?}"
+        );
+    }
+
+    /// 挂上 XBL/XSTS 成功，login_with_xbox 按给定状态与响应体回应。
+    async fn mount_login_rejection(server: &MockServer, status: u16, body: &str) {
+        mount_xbl_ok(server).await;
+        mount_xsts_ok(server).await;
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body.to_owned()))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_app_registration_is_app_not_approved_and_not_retried() {
+        let server = MockServer::start().await;
+        mount_login_rejection(
+            &server,
+            403,
+            r#"{"path":"/authentication/login_with_xbox","errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}"#,
+        )
+        .await;
+
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .complete_login(&msa())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::AppNotApproved), "得到 {err:?}");
+        assert!(!err.is_retryable());
+        assert_eq!(hits(&server, "/authentication/login_with_xbox").await, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_app_registration_is_matched_case_insensitively_in_plain_text() {
+        let server = MockServer::start().await;
+        mount_login_rejection(&server, 403, "Forbidden: INVALID APP REGISTRATION").await;
+
+        let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+        assert!(matches!(err, AuthError::AppNotApproved), "得到 {err:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn other_login_rejections_stay_response_errors() {
+        // 403 但不是应用审批问题；400 带同样字样也不算，只有 403 才是这个拒绝。
+        for (status, body) in [
+            (
+                403_u16,
+                r#"{"path":"/authentication/login_with_xbox","errorMessage":"Forbidden"}"#,
+            ),
+            (400, "Invalid app registration"),
+        ] {
+            let server = MockServer::start().await;
+            mount_login_rejection(&server, status, body).await;
+
+            let err = auth_for(&server)
+                .with_retry(three_attempts())
+                .complete_login(&msa())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, AuthError::Response { context: "Minecraft 登录", detail } if detail.contains(&status.to_string())),
+                "HTTP {status} 得到 {err:?}"
+            );
+            assert_eq!(hits(&server, "/authentication/login_with_xbox").await, 1);
+        }
     }
 
     #[test]
