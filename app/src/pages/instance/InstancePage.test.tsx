@@ -1562,6 +1562,39 @@ describe("实例详情：崩溃诊断", () => {
     expect(text()).not.toContain("已调到 6 GB");
     expect(() => button("撤销")).toThrow();
   });
+
+  it("版本要求的 Java 读不出来：一键尝试原位报错并能重试，不一直停在骨架", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, java_major: null } : i));
+    let fail = true;
+    ipc.overrides.set("required_java", () => {
+      if (fail) throw new IpcError("network_failed", "版本清单下载失败");
+      return 21;
+    });
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    await open("crash");
+    expect(text()).toContain("版本清单下载失败");
+    fail = false;
+    click(button("重试"));
+    await flush();
+    expect(text()).not.toContain("版本清单下载失败");
+    expect(button("调到 6 GB").textContent).toBe("调到 6 GB");
+  });
+
+  it("Mod 列表读不出来：一键尝试与日志指向的 Mod 都原位报错，不一直停在骨架", async () => {
+    let fail = true;
+    ipc.overrides.set("list_mods", () => {
+      if (fail) throw new IpcError("io", "mods 目录读不出来");
+      return mods;
+    });
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    await open("crash");
+    expect(text().split("mods 目录读不出来").length - 1).toBe(2);
+    fail = false;
+    click(button("重试"));
+    await flush();
+    expect(text()).not.toContain("mods 目录读不出来");
+    expect(button("调到 6 GB").textContent).toBe("调到 6 GB");
+  });
 });
 
 function report(diagnoses: { category: CrashReportDto["diagnoses"][number]["category"]; detail?: string }[], at: number): CrashReportDto {
