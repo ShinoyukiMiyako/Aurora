@@ -31,7 +31,7 @@ use crate::facade::Aurora;
 const PROBE_CACHE_FILE: &str = "java-probe-cache.json";
 
 /// 不带控制台窗口的 Java 启动器文件名。用户在「添加 Java」里选它时按同目录的 java 记下：
-/// 启动链路拉起的是 java，游戏输出要经它的标准输出读回来。
+/// 启动链路拉起的是 java，显卡偏好也要写给真正拉起的那个文件，同一个 Java 也不该记成两条。
 #[cfg(windows)]
 const JAVAW_EXE: &str = "javaw.exe";
 #[cfg(not(windows))]

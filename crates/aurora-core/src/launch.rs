@@ -1868,7 +1868,7 @@ mod tests {
             .collect()
     }
 
-    /// 开着独显偏好、换上替身写入器启动一次，返回启动结果与事件；跑起来的游戏等它退出。
+    /// 按给定开关、换上替身写入器启动一次，断言启动成功并等游戏退出，返回推出的事件。
     async fn launch_preferring_gpu(
         fx: &Fixture,
         store: Arc<crate::gpu::testing::MemoryGpuPreferences>,
