@@ -414,7 +414,6 @@ fn flavor_and_base(endpoints: &LoaderEndpoints, loader: LoaderChoice) -> (Loader
     }
 }
 
-/// 游戏版本号来自前端，只有看起来像版本号（字母数字与 `.-_+`）时才拿来拼缓存文件名；否则不缓存。
 /// 原版版本 JSON 声明的全新下载体积；库只算本机生效的（规则求值、按坐标去重，与安装时同一口径），
 /// 只给了 Maven 地址、没标大小的库让结果为 `None`，免得报一个偏小的数。
 fn download_bytes(json: &VersionJson, ctx: &RuntimeContext) -> Option<u64> {
@@ -439,6 +438,7 @@ fn download_bytes(json: &VersionJson, ctx: &RuntimeContext) -> Option<u64> {
     Some(total)
 }
 
+/// 游戏版本号来自前端，只有看起来像版本号（字母数字与 `.-_+`）时才拿来拼缓存文件名；否则不缓存。
 fn cache_name(raw: &str) -> Option<String> {
     raw.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
