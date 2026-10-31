@@ -270,5 +270,6 @@ describe("路由参数", () => {
     expect(routeSignature({ page: "discover", query: "x", forInstance: "生存" })).not.toBe(a);
     expect(routeSignature({ page: "discover", query: "x", open: { platform: "modrinth", projectId: "A" } })).not.toBe(a);
     expect(routeSignature({ page: "discover", query: "x", kind: "mod" })).not.toBe(a);
+    expect(routeSignature({ page: "discover", query: "x", importFile: "D:\\a.mrpack" })).not.toBe(a);
   });
 });

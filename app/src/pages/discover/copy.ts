@@ -220,8 +220,13 @@ export const MODPACK_COPY = {
 
 export const IMPORT_COPY = {
   title: "导入整合包文件",
-  dropTitle: "填入整合包文件的路径",
+  dropTitle: "把整合包文件拖到这里",
   dropHint: "支持 Modrinth 的 .mrpack 与 CurseForge 导出的 .zip",
+  pick: "选择文件",
+  /** 打开系统选择文件对话框失败时的通知标题。 */
+  pickFailed: "没能打开文件选择",
+  /** 路径输入框上方的说明：拖放与对话框之外，也可以直接粘贴完整路径。 */
+  pathCaption: "或者填入文件的完整路径",
   pathLabel: "整合包文件的完整路径",
   pathPlaceholder: "例如 D:\\Downloads\\pack.mrpack",
   read: "读取",

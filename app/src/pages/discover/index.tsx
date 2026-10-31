@@ -22,7 +22,7 @@ import { ResourceDetail, type DetailTarget } from "./detail/ResourceDetail";
 import styles from "./discover.module.css";
 import { useOnline } from "../../state/online";
 import { useDebounced, useElapsed, useNearBottom, useScrollContainer, useStuck } from "./hooks";
-import { ImportModpackDialog } from "./ImportModpackDialog";
+import { ImportModpackDialog, type ImportRequest } from "./ImportModpackDialog";
 import {
   allPlatformsFailed,
   clearFilters,
@@ -62,7 +62,8 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   const [restored] = useState(readSnapshot);
   const [filters, setFilters] = useState<DiscoverFilters>(() => routeFilters(restored === null ? DEFAULT_FILTERS : restored.filters, route, state.instances));
   const [detail, setDetail] = useState<DetailTarget | null>(() => (route.open === undefined ? null : { ...route.open, sources: [] }));
-  const [importOpen, setImportOpen] = useState(false);
+  // 外壳把拖进窗口的整合包经路由带进来：进页即打开导入弹窗读取它
+  const [importing, setImporting] = useState<ImportRequest | null>(() => (route.importFile === undefined ? null : { file: route.importFile }));
   const debounced = useDebounced(filters.query, SEARCH_DEBOUNCE_MS);
   const committedQuery = debounced.value;
 
@@ -75,6 +76,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     setFilters(next);
     debounced.flush(next.query);
     if (route.open !== undefined) setDetail({ ...route.open, sources: [] });
+    if (route.importFile !== undefined) setImporting({ file: route.importFile });
   }
 
   // 适配实例被删掉或变得不可用（开始重装、损坏）时回到不限
@@ -84,7 +86,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   }
 
   // 生效的关键词与类型写回路由：命令面板与历史项都能看到当前搜的是什么。
-  // 进页带来的适配实例与详情参数在这一步从路由里去掉：它们只在进页那一刻生效
+  // 进页带来的适配实例、详情与导入文件在这一步从路由里去掉：它们只在进页那一刻生效，后退、前进不再重放
   const kind = filters.kind;
   useEffect(() => {
     const writeBack = routeOfFilters(kind, committedQuery);
@@ -167,7 +169,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
           onFilters={setFilters}
           onQuery={setQuery}
           onSubmit={() => debounced.flush(filters.query)}
-          onImport={() => setImportOpen(true)}
+          onImport={() => setImporting({ file: null })}
           inputRef={inputRef}
         />
         <EntranceBlock as="section" className={styles.results} aria-label={SEARCH_COPY.label}>
@@ -194,7 +196,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
         <ModSourcesProbe key={id} instanceId={id} onReport={report} />
       ))}
       <ResourceDetail target={detail} onClose={() => setDetail(null)} fitInstance={filters.fitInstance} online={online} />
-      <ImportModpackDialog open={importOpen} onClose={() => setImportOpen(false)} online={online} />
+      <ImportModpackDialog request={importing} onClose={() => setImporting(null)} online={online} />
     </>
   );
 }

@@ -334,5 +334,5 @@ export function routeOfFilters(kind: DiscoverKind, committedQuery: string): Rout
 
 /** 判断路由参数是否变过：页面自己写回的路由与外部导航带来的路由都按它比较。 */
 export function routeSignature(route: RouteOf<"discover">): string {
-  return JSON.stringify([route.query, route.kind, route.forInstance, route.open === undefined ? null : [route.open.platform, route.open.projectId]]);
+  return JSON.stringify([route.query, route.kind, route.forInstance, route.open === undefined ? null : [route.open.platform, route.open.projectId], route.importFile]);
 }

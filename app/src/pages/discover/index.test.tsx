@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { InstalledMod } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
+import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowPort } from "../../shell/window";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "../../state/queries/discover";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -16,12 +18,19 @@ import { clearSnapshot } from "./session";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 系统选择文件对话框只在 Tauri 里有：默认照真实实现在测试里拒绝，个别用例改成返回选中的文件
+vi.mock("../../shell/platform", async (orig) => {
+  const actual = await orig<typeof import("../../shell/platform")>();
+  return { ...actual, pickFile: vi.fn(actual.pickFile) };
+});
 
 let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let observers: { callback: IntersectionObserverCallback; options: IntersectionObserverInit | undefined; targets: Element[] }[];
 let online: boolean;
+let dropHandlers: ((event: FileDropEvent) => void)[];
+let port: WindowPort;
 
 function Probe() {
   nav = useNav();
@@ -42,13 +51,15 @@ const flush = () =>
 
 async function mount(route: Parameters<NavApi["go"]>[0] = { page: "discover" }) {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <Probe />
-        <PageArea />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <WindowPortProvider port={port}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <PageArea />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </WindowPortProvider>,
   );
   await flush();
   act(() => nav.go(route));
@@ -185,6 +196,16 @@ beforeEach(() => {
   );
   online = true;
   vi.spyOn(navigator, "onLine", "get").mockImplementation(() => online);
+  dropHandlers = [];
+  port = {
+    ...browserWindowPort(),
+    onFileDrop: async (handler) => {
+      dropHandlers.push(handler);
+      return () => {
+        dropHandlers = dropHandlers.filter((h) => h !== handler);
+      };
+    },
+  };
   bootOverrides(ipc, { instances: [instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.5" }] }), instanceDto("创造")], config: configDto({ selected_version: "生存" }) });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("list_manifest", () => ({ latest: { release: "1.21.1", snapshot: "24w14a" }, versions: [], loader_errors: [], stale_since: null, fetch_error: null }));
@@ -585,5 +606,123 @@ describe("发现页：整合包", () => {
     expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号"]]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已开始导入「创造 2」");
     expect(openDialogs()).toHaveLength(0);
+  });
+});
+
+describe("发现页：本地整合包的三种入口", () => {
+  const PACK = "D:\\Downloads\\生存.mrpack";
+  const preview = (path: string) => ({
+    format: "modrinth",
+    name: path.includes("创造") ? "创造包" : "生存包",
+    version: "1.2.0",
+    summary: null,
+    author: null,
+    minecraft: "1.21.1",
+    loader: { kind: "fabric", version: "0.16.9" },
+    remote_files: 12,
+    remote_bytes: 2048,
+    override_files: 3,
+    override_bytes: 512,
+  });
+  const fire = (event: FileDropEvent) =>
+    act(async () => {
+      for (const handler of [...dropHandlers]) handler(event);
+      await settle();
+    });
+  const nameValue = () => {
+    const input = dialog().querySelector<HTMLInputElement>('input:not([aria-label="整合包文件的完整路径"])');
+    if (input === null) throw new Error("没有名称输入框");
+    return input.value;
+  };
+  const dropZone = () => {
+    const el = dialog().querySelector<HTMLElement>("[data-drop-zone]");
+    if (el === null) throw new Error("没有投放区");
+    return el;
+  };
+  const clickInDialog = (text: string) =>
+    act(async () => {
+      buttonByText(text, dialog()).click();
+      await settle();
+    });
+
+  beforeEach(() => {
+    ipc.overrides.set("preview_modpack", (args) => preview(String(args.path)));
+  });
+
+  it("路由带入文件路径：进页直接打开导入弹窗并读取它，随后路由里去掉这个路径", async () => {
+    await mount({ page: "discover", importFile: PACK });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+    expect(dialog().textContent).toContain("版本 1.2.0");
+    expect(nav.route).toEqual({ page: "discover" });
+  });
+
+  it("已在发现页时外壳带来新的文件路径：同样打开弹窗读取", async () => {
+    await mount();
+    act(() => nav.go({ page: "discover", importFile: PACK }));
+    await flush();
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+    expect(nav.route).toEqual({ page: "discover" });
+  });
+
+  it("「选择文件」：选中即读取；取消选择什么都不做", async () => {
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    vi.mocked(pickFile).mockResolvedValueOnce(null);
+    await clickInDialog("选择文件");
+    expect(callsOf(ipc, "preview_modpack")).toEqual([]);
+    expect(dialog().textContent).toContain("把整合包文件拖到这里");
+
+    vi.mocked(pickFile).mockResolvedValueOnce("C:\\packs\\创造.zip");
+    await clickInDialog("选择文件");
+    expect(vi.mocked(pickFile).mock.calls.map((c) => c[0].filter.extensions)).toEqual([
+      ["mrpack", "zip"],
+      ["mrpack", "zip"],
+    ]);
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "C:\\packs\\创造.zip" }]);
+    expect(nameValue()).toBe("创造包");
+  });
+
+  it("浏览器预览里没有系统对话框：如实报错，弹窗停在第一步", async () => {
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await clickInDialog("选择文件");
+    const toast = launcher.state.toasts.find((t) => t.title === "没能打开文件选择");
+    expect(toast?.tone).toBe("error");
+    expect(toast?.body).toContain("浏览器预览里没有系统的选择文件对话框");
+    expect(callsOf(ipc, "preview_modpack")).toEqual([]);
+    expect(dialog().textContent).toContain("把整合包文件拖到这里");
+  });
+
+  it("弹窗打开时拖进文件：投放区高亮，松开读第一个整合包，外壳不再自己导航", async () => {
+    await mount({ page: "discover", query: "钠" });
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "enter", paths: ["D:\\notes.txt", PACK] });
+    expect(dropZone().dataset.state).toBe("over");
+    await fire({ type: "leave" });
+    expect(dropZone().dataset.state).toBeUndefined();
+    await fire({ type: "enter", paths: [PACK] });
+    await fire({ type: "drop", paths: ["D:\\notes.txt", PACK] });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+    expect(nav.route).toEqual({ page: "discover", query: "钠" });
+  });
+
+  it("拖进来的都不是整合包：照样交给后端读，按错误码说明只认哪两种文件", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    ipc.overrides.set("preview_modpack", () => {
+      throw new IpcError("modpack_unsupported_extension", "unsupported");
+    });
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "drop", paths: ["D:\\a.png", "D:\\b.jar"] });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "D:\\a.png" }]);
+    expect(dialog().textContent).toContain("只认 .mrpack 和 CurseForge 导出的 .zip");
+    expect(dropZone()).toBeDefined();
   });
 });
