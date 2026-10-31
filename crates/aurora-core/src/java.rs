@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use aurora_download::DownloadTask;
 use aurora_java::{
-    DetectScope, DetectSource, InstalledRuntime, JavaInstallation, ProbeCache, detect_with,
-    java_exe_in_home, managed_runtime_root, probe_cached, rank_for_major, select_for_major,
+    DetectScope, DetectSource, InstalledRuntime, JavaInstallation, ProbeCache, RuntimePlan,
+    detect_with, java_exe_in_home, managed_runtime_root, probe_cached, rank_for_major,
+    select_for_major,
 };
 
 use crate::error::{CoreError, Result};
@@ -187,17 +188,7 @@ impl Aurora {
             .java_installer(&manifest_url)
             .plan(required_major, &install_dir)
             .await?;
-        let tasks = plan
-            .files
-            .iter()
-            .map(|file| {
-                let task = DownloadTask::new(&file.url, &file.path).with_sha1(&file.sha1);
-                match file.size {
-                    Some(size) => task.with_size(size),
-                    None => task,
-                }
-            })
-            .collect();
+        let tasks = runtime_download_tasks(&plan);
         let report = self
             .download_pool_reporting(events)
             .download_all(tasks, None)
@@ -294,6 +285,21 @@ fn pick_local_java(
 /// 托管 Java 运行时的安装目录：`<数据目录>/runtime/<主版本>`。
 pub(crate) fn runtime_install_dir(data_dir: &Path, required_major: u32) -> PathBuf {
     managed_runtime_root(data_dir).join(required_major.to_string())
+}
+
+/// 运行时计划里的文件换成下载池的任务（带 sha1 与已知大小）。设置里手动安装与启动时自动下载
+/// 共用这一份：两条路径的并发、换源与进度应当完全一样。
+pub(crate) fn runtime_download_tasks(plan: &RuntimePlan) -> Vec<DownloadTask> {
+    plan.files
+        .iter()
+        .map(|file| {
+            let task = DownloadTask::new(&file.url, &file.path).with_sha1(&file.sha1);
+            match file.size {
+                Some(size) => task.with_size(size),
+                None => task,
+            }
+        })
+        .collect()
 }
 
 /// 探测缓存是派生数据：缺失从空开始；损坏记一条告警后丢弃，下次探测会重建。

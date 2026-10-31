@@ -655,7 +655,10 @@ impl Aurora {
         }
         let java = match java_plan {
             JavaPlan::Ready(java) => java,
-            JavaPlan::Download { major } => self.download_java(major, reporter).await?,
+            JavaPlan::Download { major } => {
+                self.download_java(major, self.java_runtime_url(), reporter)
+                    .await?
+            }
         };
         let authlib = match authlib {
             Some(api_root) => Some(self.prepare_authlib(&api_root, reporter).await?),
@@ -1006,10 +1009,21 @@ impl Aurora {
         Ok(())
     }
 
-    /// 下载一批文件并把进度转成阶段 3 的事件。下载前先看磁盘够不够。
+    /// 下载一批游戏文件并把进度转成阶段 3 的事件。下载前先看游戏目录所在的盘够不够。
     async fn download_files(
         &self,
         files: Vec<DownloadTask>,
+        reporter: &mut Reporter<'_>,
+    ) -> Result<(), LaunchFailed> {
+        self.download_files_into(files, self.game_dir(), reporter)
+            .await
+    }
+
+    /// 下载一批落在 `root` 下的文件，进度转成阶段 3 的事件；下载前先看 `root` 所在的盘够不够。
+    async fn download_files_into(
+        &self,
+        files: Vec<DownloadTask>,
+        root: &Path,
         reporter: &mut Reporter<'_>,
     ) -> Result<(), LaunchFailed> {
         if files.is_empty() {
@@ -1018,19 +1032,19 @@ impl Aurora {
         let count = files.len();
         if let Some(needed) = files.iter().map(|task| task.size).sum::<Option<u64>>() {
             let available =
-                fs2::available_space(self.game_dir()).map_err(|source| aurora_base::Error::Io {
-                    path: self.game_dir().to_path_buf(),
+                fs2::available_space(root).map_err(|source| aurora_base::Error::Io {
+                    path: root.to_path_buf(),
                     source,
                 })?;
             if available < needed {
-                return Err(disk_full(self.game_dir(), needed - available).into());
+                return Err(disk_full(root, needed - available).into());
             }
         }
         let report = self.run_download(files, reporter).await?;
         if report.is_success() {
             return Ok(());
         }
-        Err(classify_download(&report, count, self.game_dir()).into())
+        Err(classify_download(&report, count, root).into())
     }
 
     async fn run_download(
@@ -1056,32 +1070,29 @@ impl Aurora {
         Ok(result?)
     }
 
+    /// 下载托管 Java：清单定出要哪些文件，文件交给下载池，与设置里手动安装是同一条路——并发、换源、
+    /// 已就绪的按 sha1 跳过，进度和游戏文件一样进阶段 3 的事件。运行时有几百个文件，逐个顺序下载时
+    /// 启动进度会停住几十秒到几分钟，首选源上一个文件失败就让整次启动失败。
     async fn download_java(
         &self,
         major: u32,
+        manifest_url: &str,
         reporter: &mut Reporter<'_>,
     ) -> Result<JavaInstallation, LaunchFailed> {
         reporter.info(format!("下载 Java {major} 托管运行时")).await;
         let install_dir = crate::java::runtime_install_dir(self.data_dir(), major);
-        let runtime = self
-            .java_installer(self.java_runtime_url())
-            .install(major, &install_dir)
+        let plan = self
+            .java_installer(manifest_url)
+            .plan(major, &install_dir)
             .await
-            .map_err(|err| -> LaunchFailed {
-                if err.is_cancelled() {
-                    return CoreError::from(err).into();
-                }
-                let code = if matches!(err, aurora_java::Error::Http { .. }) {
-                    FailureCode::FilesOffline
-                } else {
-                    FailureCode::FilesFailed
-                };
-                LaunchFailure::new(code, format!("下载 Java {major} 运行时失败：{err}"))
-                    .param("count", 1)
-                    .param("reason", err.to_string())
-                    .caused_by(err)
-                    .into()
-            })?;
+            .map_err(|err| java_download_failure(major, err))?;
+        let tasks = crate::java::runtime_download_tasks(&plan);
+        self.download_files_into(tasks, self.data_dir(), reporter)
+            .await?;
+        plan.finalize()
+            .await
+            .map_err(|err| java_download_failure(major, err))?;
+        let runtime = plan.installed();
         let java = probe_java(runtime.java_executable.clone(), DetectSource::Managed)
             .await?
             .map_err(|reason| {
@@ -1306,6 +1317,23 @@ fn classify_download(report: &BatchReport, planned: usize, game_dir: &Path) -> L
     )
     .param("count", failures.len())
     .param("reason", first)
+}
+
+/// 拉运行时清单或收尾（建目录、链接、可执行位）失败。取消照原样冒泡，连不上清单算离线。
+fn java_download_failure(major: u32, err: aurora_java::Error) -> LaunchFailed {
+    if err.is_cancelled() {
+        return CoreError::from(err).into();
+    }
+    let code = if matches!(err, aurora_java::Error::Http { .. }) {
+        FailureCode::FilesOffline
+    } else {
+        FailureCode::FilesFailed
+    };
+    LaunchFailure::new(code, format!("下载 Java {major} 运行时失败：{err}"))
+        .param("count", 1)
+        .param("reason", err.to_string())
+        .caused_by(err)
+        .into()
 }
 
 /// 换源下载全部失败时，真正的原因在最后一个源的错误里。
@@ -1876,6 +1904,104 @@ mod tests {
         assert_eq!(
             disk.params.get("needed_bytes"),
             Some(&Value::from(1_048_576u64))
+        );
+    }
+
+    /// 本地 mock 的一套两文件运行时清单；返回清单地址与各文件内容（java 本体放在第一个）。
+    async fn mount_runtime(server: &wiremock::MockServer) -> (String, Vec<Vec<u8>>) {
+        use sha1::{Digest, Sha1};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let base = server.uri();
+        let hex = |bytes: &[u8]| -> String {
+            Sha1::digest(bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let files = vec![
+            b"MZ-not-really-java".to_vec(),
+            b"modules image body".to_vec(),
+        ];
+        let component = format!(
+            r#"{{"files":{{
+                "bin":{{"type":"directory"}},
+                "lib":{{"type":"directory"}},
+                "bin/{exe}":{{"type":"file","executable":true,"downloads":{{"raw":{{"sha1":"{s0}","size":{n0},"url":"{base}/objects/java"}}}}}},
+                "lib/modules":{{"type":"file","executable":false,"downloads":{{"raw":{{"sha1":"{s1}","size":{n1},"url":"{base}/objects/modules"}}}}}}
+            }}}}"#,
+            exe = aurora_java::JAVA_EXE,
+            s0 = hex(&files[0]),
+            n0 = files[0].len(),
+            s1 = hex(&files[1]),
+            n1 = files[1].len(),
+        );
+        let all = format!(
+            r#"{{"{platform}":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{sha}","url":"{base}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
+            platform = aurora_java::current_platform(),
+            sha = hex(component.as_bytes()),
+        );
+        for (route, body) in [
+            ("/all.json", all.into_bytes()),
+            ("/gamma.json", component.into_bytes()),
+            ("/objects/java", files[0].clone()),
+            ("/objects/modules", files[1].clone()),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+                .mount(server)
+                .await;
+        }
+        (format!("{base}/all.json"), files)
+    }
+
+    /// 启动时缺 Java 自动下载走下载池：阶段 3 推出带总数与总字节的进度，文件落进托管目录。冒充的
+    /// 运行时跑不起来，于是停在「刚下载的 Java 无法运行」——证明文件确实已经全部下完。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_java_download_runs_through_the_pool_and_reports_progress() {
+        let server = wiremock::MockServer::start().await;
+        let (manifest, files) = mount_runtime(&server).await;
+        let fx = fixture();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reporter = Reporter {
+            events: &tx,
+            clock: SessionClock::start().unwrap(),
+            log: None,
+        };
+
+        let result = fx.aurora.download_java(17, &manifest, &mut reporter).await;
+        drop(reporter);
+        drop(tx);
+
+        let failure = match result {
+            Err(LaunchFailed::Failure(failure)) => *failure,
+            other => panic!("冒充的运行时应在探测时失败：{other:?}"),
+        };
+        assert_eq!(failure.code, FailureCode::FilesFailed);
+        assert!(failure.message.contains("无法运行"), "{}", failure.message);
+        let home = crate::java::runtime_install_dir(&fx.root, 17);
+        assert_eq!(
+            std::fs::read(aurora_java::java_exe_in_home(&home)).unwrap(),
+            files[0]
+        );
+        assert_eq!(
+            std::fs::read(home.join("lib").join("modules")).unwrap(),
+            files[1]
+        );
+
+        let mut progress = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let LaunchEvent::Download(snapshot) = event {
+                progress.push(snapshot);
+            }
+        }
+        let last = progress.last().expect("自动下载 Java 应推出下载进度");
+        assert_eq!((last.total, last.finished), (2, 2));
+        assert_eq!(
+            last.total_bytes,
+            Some(files.iter().map(|f| f.len() as u64).sum())
         );
     }
 }
