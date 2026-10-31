@@ -9,7 +9,7 @@ export type { SkinInfoDto, SkinModel } from "../../ipc/art";
 export type { InstanceMinutesDto, PlayDayDto, PlayRangeArgs, PlayStatsDto } from "../../ipc/launch";
 export type { KnownServerDto, NewsFeedDto, NewsItemDto, NewsTag, PinnedServerDto, ServerStatusDto } from "../../ipc/system";
 
-/** play-stats:<from>:<to> —— 两端都含的本地日期；游戏退出后失效（instances 刷新时页面按需 reload）。 */
+/** play-stats:<from>:<to> —— 两端都含的本地日期；游戏退出后由状态层整体失效。 */
 export function usePlayStats(range: PlayRangeArgs): ResourceResult<PlayStatsDto> {
   return useResource(`play-stats:${range.from}:${range.to}`, () => playStats(range));
 }

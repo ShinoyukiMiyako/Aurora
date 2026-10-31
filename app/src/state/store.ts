@@ -814,8 +814,11 @@ export class LauncherStore {
       this.set({ session: next });
       crashedSession = next.phase === "crashed";
     }
+    // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好。这一局可能新建了存档，游玩统计也多了一段：
+    // 没人订阅的缓存条目随之丢弃，之后重新挂载的页面会重取，不靠页面自己观察签名变化
     invalidateResources(`log:${id}`);
-    // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好
+    invalidateResources(`content:${id}`);
+    invalidateResources("play-stats");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
   }
