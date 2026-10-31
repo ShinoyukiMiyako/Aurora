@@ -207,6 +207,8 @@ interface RawState {
   session: SessionState | null;
   tasks: Task[];
   taskMeta: Readonly<Record<string, TaskMeta>>;
+  /** 本次运行里失败、用户还没看过的尝试（attemptTaskId）。重试后再失败是新的一次尝试，重新算未看。 */
+  unseenFailures: readonly string[];
   toasts: ToastsState;
   login: LoginState | null;
   launchPrompt: LaunchPrompt | null;
@@ -227,6 +229,11 @@ export interface LauncherState {
   firstRun: boolean | null;
   session: SessionState | null;
   tasks: Task[];
+  /**
+   * 用户还没看过的失败任务个数：本次运行里失败、此刻仍是失败状态、还没打开过下载快览或进过下载任务页的。
+   * 上次关闭时中断的不算，那是用户确认过的。
+   */
+  unseenFailures: number;
   toasts: Toast[];
   login: LoginState | null;
   launchPrompt: LaunchPrompt | null;
@@ -293,6 +300,8 @@ export interface LauncherActions {
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
   clearFinishedTasks(): void;
+  /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
+  markFailuresSeen(): void;
   flushTaskJournal(): Promise<void>;
   // 设置
   updateSettings(patch: SettingsPatch): Promise<void>;
@@ -356,6 +365,7 @@ function initialRaw(): RawState {
     session: null,
     tasks: [],
     taskMeta: {},
+    unseenFailures: [],
     toasts: EMPTY_TOASTS,
     login: null,
     launchPrompt: null,
@@ -481,6 +491,12 @@ function waitUntil(subscribe: (listener: () => void) => () => void, predicate: (
 
 // ---------------------------------------------------------------- 派生
 
+function countUnseen(tasks: readonly Task[], unseen: readonly string[]): number {
+  if (unseen.length === 0) return 0;
+  const ids = new Set(unseen);
+  return tasks.filter((t) => t.status === "failed" && ids.has(attemptTaskId(t))).length;
+}
+
 function deriveState(raw: RawState): LauncherState {
   const busy = new Set<string>();
   for (const t of raw.tasks) if (isActiveTask(t) && t.instanceId !== null) busy.add(t.instanceId.toLowerCase());
@@ -543,6 +559,7 @@ function deriveState(raw: RawState): LauncherState {
     firstRun: raw.firstRun,
     session: raw.session,
     tasks: raw.tasks,
+    unseenFailures: countUnseen(raw.tasks, raw.unseenFailures),
     toasts: raw.toasts.items,
     login: raw.login,
     launchPrompt: raw.launchPrompt,
@@ -1079,7 +1096,10 @@ export class LauncherStore {
     } else {
       console.error(`任务失败：${before.title}`, error);
       const record = errorRecord(error);
-      this.set((raw) => ({ tasks: trimHistory(markFailed(raw.tasks, id, attempt, record, Date.now())) }));
+      this.set((raw) => ({
+        tasks: trimHistory(markFailed(raw.tasks, id, attempt, record, Date.now())),
+        unseenFailures: [...raw.unseenFailures, attemptTaskId(before)],
+      }));
       this.failureToast(before, taskFailureReason(record));
     }
     this.tasksChanged();
@@ -1833,8 +1853,12 @@ export class LauncherStore {
         store.tasksChanged();
       },
       clearFinishedTasks() {
-        store.set((raw) => ({ tasks: clearFinished(raw.tasks) }));
+        store.set((raw) => ({ tasks: clearFinished(raw.tasks), unseenFailures: [] }));
         store.scheduleJournal();
+      },
+      markFailuresSeen() {
+        if (store.raw.unseenFailures.length === 0) return;
+        store.set({ unseenFailures: [] });
       },
       async flushTaskJournal() {
         if (store.journalTimer !== null) clearTimeout(store.journalTimer);

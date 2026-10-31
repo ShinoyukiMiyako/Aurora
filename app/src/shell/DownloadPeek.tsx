@@ -1,8 +1,8 @@
 // 下载快览：标题栏右列的下载入口与它的浮层。入口空闲时是下载图标；有进行中的任务时换成总进度环 + 计数角标；
-// 外壳挂载之后有任务失败、用户还没看过时挂一个危险点，打开快览或进入下载任务页即算看过。
+// 有用户还没看过的失败任务时挂一个危险点（未看标记归状态层），打开快览即算看过，进入下载任务页由那一页清除。
 // 浮层只列进行中的任务（运行在前、排队在后，各自保持队列顺序），已结束的去下载任务页看。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Icon } from "../art/Icon";
 import { ACTION_ERROR, CONFIRM_COPY } from "../copy/flows";
 import { formatSpeed, percent } from "../domain/format";
@@ -43,11 +43,6 @@ export function peekRows(tasks: readonly Task[]): Task[] {
   return [...tasks.filter((t) => t.status === "running"), ...tasks.filter((t) => t.status === "queued")];
 }
 
-/** 外壳挂载之后失败、还没被看过的尝试。按尝试 id 记，重试之后再失败算新的一次。 */
-export function unseenFailures(tasks: readonly Task[], since: number, seen: ReadonlySet<string>): Task[] {
-  return tasks.filter((t) => t.status === "failed" && t.finishedAt !== null && t.finishedAt >= since && !seen.has(attemptTaskId(t)));
-}
-
 /**
  * 取消一个任务前要不要确认：排队中的直接取消；运行中的新建与导入取消后实例会被删除，
  * 修复取消后实例停在文件不完整的状态，这两类要确认；其余直接取消。
@@ -66,24 +61,19 @@ export function cancelTaskConfirm(state: LauncherState, task: Task): ConfirmOpti
 export function DownloadPeek() {
   const { state, actions } = useLauncher();
   const { confirm } = useShell();
-  const { route, go } = useNav();
+  const { go } = useNav();
   const run = useRunner();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
-  const mountedAt = useRef(Date.now());
-  const [seen, setSeen] = useState<ReadonlySet<string>>(() => new Set());
 
   const tasks = state.tasks;
   const active = tasks.filter(isActiveTask);
-  const unseen = unseenFailures(tasks, mountedAt.current, seen);
-  const onTasksPage = route.page === "tasks";
+  const unseen = state.unseenFailures;
 
-  // 打开快览或停在下载任务页时，失败即被看到
-  const unseenKey = unseen.map(attemptTaskId).join("|");
+  // 快览开着的时候，失败即被看到（包括开着期间新出现的）
   useEffect(() => {
-    if (unseenKey === "" || (!open && !onTasksPage)) return;
-    setSeen((prev) => new Set([...prev, ...unseenKey.split("|")]));
-  }, [onTasksPage, open, unseenKey]);
+    if (open && unseen > 0) actions.markFailuresSeen();
+  }, [actions, open, unseen]);
 
   const close = () => setOpen(false);
   const leaveTo = (filter?: "failed") => {
@@ -107,7 +97,7 @@ export function DownloadPeek() {
         ref={setAnchor}
         type="button"
         className={styles.entry}
-        aria-label={PEEK_COPY.button(active.length, unseen.length)}
+        aria-label={PEEK_COPY.button(active.length, unseen)}
         aria-haspopup="dialog"
         aria-expanded={open}
         data-open={open || undefined}
@@ -115,7 +105,7 @@ export function DownloadPeek() {
       >
         {active.length === 0 ? <Icon name="download" size={18} /> : <ActiveGlyph tasks={tasks} />}
         {active.length > 0 && <Badge className={styles.count} count={active.length} tone="accent" ring />}
-        {unseen.length > 0 && <span className={styles.failDot} data-alone={active.length === 0 || undefined} aria-hidden="true" />}
+        {unseen > 0 && <span className={styles.failDot} data-alone={active.length === 0 || undefined} aria-hidden="true" />}
       </button>
       <Popover open={open} anchor={anchor} onClose={close} placement="bottom-end" aria-label={PEEK_COPY.title}>
         <div className={styles.panel}>

@@ -57,6 +57,7 @@ function state(overrides: Partial<LauncherState>): LauncherState {
     firstRun: false,
     session: null,
     tasks: [],
+    unseenFailures: 0,
     toasts: [],
     login: null,
     launchPrompt: null,
