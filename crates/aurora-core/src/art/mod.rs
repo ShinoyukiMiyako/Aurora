@@ -141,11 +141,15 @@ impl Aurora {
         TextureService::new(self.data_dir().join("cache"), self.http())
     }
 
-    /// 材质的候选游戏目录，按优先级：设置里的游戏目录，然后是官方启动器的默认目录（只读）。
-    ///
-    /// 这些目录只读不写。启动器登记的其他游戏目录还没有对应的配置项，有了之后排在两者之间。
+    /// 材质的候选游戏目录，按优先级：设置里的游戏目录、与它并存登记的其他游戏目录，最后是官方启动器
+    /// 的默认目录。这些目录只读不写，重复的只留一次。
     pub fn art_candidates(&self) -> Vec<PathBuf> {
         let mut dirs = vec![self.game_dir().to_path_buf()];
+        for extra in &self.config().extra_game_directories {
+            if !dirs.contains(&extra.path) {
+                dirs.push(extra.path.clone());
+            }
+        }
         if let Some(official) = official_minecraft_dir()
             && !dirs.contains(&official)
         {

@@ -869,6 +869,7 @@ pub async fn install_version(
     )
     .await;
     events.finish().await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
     outcome
 }
 
@@ -955,6 +956,7 @@ pub async fn repair_instance(
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = repair_instance_with(&facade, &tasks, &locks, &task_id, &id, events.sink()).await;
     events.finish().await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
     outcome
 }
 
@@ -1035,11 +1037,14 @@ pub async fn preview_instance_deletion(
 /// `instance_has_dependents`；目录已不在时只清引用、返回 `existed: false`。
 #[tauri::command]
 pub async fn delete_instance(
+    app: AppHandle,
     id: String,
     facade: State<'_, Facade>,
     locks: State<'_, InstanceLocks>,
 ) -> Result<DeleteOutcomeDto, CommandError> {
-    delete_instance_with(&facade, &locks, &id, RecycleBin).await
+    let outcome = delete_instance_with(&facade, &locks, &id, RecycleBin).await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
+    outcome
 }
 
 pub(crate) async fn delete_instance_with(
@@ -1066,12 +1071,15 @@ pub(crate) async fn delete_instance_with(
 /// 新名字按命名规则校验（报 `invalid_argument`，detail.rule 为规则码）；实例在忙报 `instance_busy`。
 #[tauri::command]
 pub async fn rename_instance(
+    app: AppHandle,
     id: String,
     new_name: String,
     facade: State<'_, Facade>,
     locks: State<'_, InstanceLocks>,
 ) -> Result<RenameOutcomeDto, CommandError> {
-    rename_instance_with(&facade, &locks, &id, &new_name).await
+    let outcome = rename_instance_with(&facade, &locks, &id, &new_name).await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
+    outcome
 }
 
 pub(crate) async fn rename_instance_with(

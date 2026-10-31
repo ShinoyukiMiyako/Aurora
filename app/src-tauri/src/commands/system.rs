@@ -3,7 +3,7 @@
 use aurora_core::folders::{ensure_game_dir, validate_game_dir};
 use aurora_core::{MemoryAdvice, MemoryTier};
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::config::{parse_named_directory, NamedDirectoryDto};
 use crate::commands::CommandError;
@@ -52,11 +52,14 @@ pub async fn is_first_run(facade: State<'_, Facade>) -> Result<bool, CommandErro
 /// 一次落盘。之后中途关掉窗口，下次打开也不再进向导。
 #[tauri::command]
 pub async fn complete_first_run(
+    app: AppHandle,
     game_dir: String,
     extra_directories: Vec<NamedDirectoryDto>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
-    complete_first_run_with(&facade, &game_dir, extra_directories).await
+    let outcome = complete_first_run_with(&facade, &game_dir, extra_directories).await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
+    outcome
 }
 
 pub(crate) async fn complete_first_run_with(

@@ -47,6 +47,14 @@ pub async fn refresh(app: &AppHandle) -> ArtStatus {
     after
 }
 
+/// 命令成功后重选材质源：游戏目录换了、版本装好、删掉或改名之后，最合适的材质源可能变了，
+/// 当前源也可能正是被删掉的那个。命令失败时什么都没变，不必重选。
+pub async fn refresh_on_success<T, E>(app: &AppHandle, outcome: &Result<T, E>) {
+    if outcome.is_ok() {
+        refresh(app).await;
+    }
+}
+
 /// 删掉不再被任何账户引用的皮肤缓存与过期缩略图。读不了账户库时跳过皮肤清理并记 warn。
 async fn prune_caches(app: &AppHandle) {
     let service = app.state::<TextureService>();

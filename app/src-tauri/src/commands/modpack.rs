@@ -98,6 +98,7 @@ pub async fn install_modpack(
     )
     .await;
     events.finish().await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
     outcome
 }
 

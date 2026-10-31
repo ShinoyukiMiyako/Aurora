@@ -10,7 +10,7 @@ use aurora_core::{
     IsolationPolicy, MemorySettings, NamedDirectory,
 };
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::CommandError;
 use crate::facade::Facade;
@@ -517,10 +517,13 @@ pub async fn remove_game_directory(
 /// 切换当前游戏目录并落盘；原目录收进其它文件夹。目标必须是此刻可访问的目录。
 #[tauri::command]
 pub async fn set_game_directory(
+    app: AppHandle,
     path: String,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
-    set_game_directory_with(&facade, &path).await
+    let outcome = set_game_directory_with(&facade, &path).await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
+    outcome
 }
 
 pub(crate) async fn set_game_directory_with(

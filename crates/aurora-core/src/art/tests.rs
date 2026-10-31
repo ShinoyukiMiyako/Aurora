@@ -595,13 +595,29 @@ async fn thumbs_are_limited_to_known_hosts_and_served_from_cache() {
 #[test]
 fn candidates_start_with_the_configured_game_dir() {
     let tmp = tempfile::tempdir().unwrap();
-    let aurora = Aurora::for_test(
-        crate::config::AuroraConfig::default(),
-        tmp.path().to_path_buf(),
-        tmp.path().join("game"),
-    );
+    let named = |name: &str, path: PathBuf| crate::config::NamedDirectory {
+        name: name.to_owned(),
+        path,
+    };
+    let config = crate::config::AuroraConfig {
+        extra_game_directories: vec![
+            named("PCL", tmp.path().join("pcl")),
+            // 与当前目录相同的登记只留一次。
+            named("重复", tmp.path().join("game")),
+            named("HMCL", tmp.path().join("hmcl")),
+        ],
+        ..crate::config::AuroraConfig::default()
+    };
+    let aurora = Aurora::for_test(config, tmp.path().to_path_buf(), tmp.path().join("game"));
     let candidates = aurora.art_candidates();
-    assert_eq!(candidates[0], tmp.path().join("game"));
+    assert_eq!(
+        candidates[..3],
+        [
+            tmp.path().join("game"),
+            tmp.path().join("pcl"),
+            tmp.path().join("hmcl")
+        ]
+    );
     if let Some(official) = official_minecraft_dir() {
         assert_eq!(candidates.last(), Some(&official));
     }
