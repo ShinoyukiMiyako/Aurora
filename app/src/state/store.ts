@@ -68,7 +68,7 @@ import * as instancesIpc from "../ipc/instances";
 import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
 import type { InstalledRuntimeDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
-import type { ModpackInstallOutcomeDto, ModpackSource } from "../ipc/modpack";
+import { revealExportedPack, type ModpackExportOptions, type ModpackExportOutcomeDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
 import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
@@ -214,7 +214,9 @@ type TaskMeta =
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
-  | { type: "updates"; instanceId: string };
+  | { type: "updates"; instanceId: string }
+  /** name：整合包名称（完成通知用），与命令参数 options.name 相同。 */
+  | { type: "export"; name: string };
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -306,6 +308,11 @@ export interface LauncherActions {
   setSidebarPins(ids: string[]): Promise<void>;
   createInstance(spec: CreateInstanceSpec): Promise<string>;
   installModpack(spec: InstallModpackSpec): Promise<string>;
+  /**
+   * 把实例导出为 .mrpack：入队一个挂在实例上的任务，返回任务 id（同一份导出已在队列里时返回那个任务的 id）。
+   * 期间实例算「改动中」，不挡启动。options.destination 由系统保存对话框给出。
+   */
+  exportModpack(id: string, options: ModpackExportOptions): Promise<string>;
   previewInstanceDeletion(id: string): Promise<DeletionPreviewDto>;
   deleteInstance(id: string, worldCount: number): Promise<void>;
   renameInstance(id: string, name: string): Promise<string>;
@@ -370,6 +377,7 @@ const TASK_COMMANDS = new Set([
   "install_resource",
   "update_mod",
   "update_mods",
+  "export_modpack",
 ]);
 
 /**
@@ -484,6 +492,11 @@ function metaFromSpec(task: Task): TaskMeta | null {
     }
     case "update_mods":
       return { type: "updates", instanceId: strArg(args, "versionId", command) };
+    case "export_modpack": {
+      const options = args.options;
+      if (typeof options !== "object" || options === null) throw new Error("任务 export_modpack 缺少 options");
+      return { type: "export", name: strArg(options as Record<string, unknown>, "name", command) };
+    }
     default:
       return null;
   }
@@ -613,6 +626,7 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
   install_resource: "versionId",
   update_mod: "versionId",
   update_mods: "versionId",
+  export_modpack: "id",
 };
 
 /**
@@ -684,6 +698,7 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "create":
     case "modpack":
     case "repair":
+    case "export":
       return meta;
   }
 }
@@ -1550,9 +1565,17 @@ export class LauncherStore {
     }
   }
 
-  /** 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。 */
+  /**
+   * 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。
+   * 导出整合包不是下载：它的失败单独一条「导出失败」，不并进也不开启下载失败的合并。
+   */
   private failureToast(task: Task, reason: string): void {
     const now = Date.now();
+    if (task.kind === "modpack_export") {
+      const copy = TASK_TOAST.exportFailed(task.title, reason);
+      this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.exportModpack });
+      return;
+    }
     const batch = this.failureBatch;
     if (batch !== null && now - batch.startedAt <= FAILURE_TOAST_MERGE_MS) {
       this.set({ toasts: dismissToast(this.raw.toasts, batch.toastId) });
@@ -1714,6 +1737,17 @@ export class LauncherStore {
         const only = updated.length === 1 ? updated[0].title : null;
         const copy = only === null ? TASK_TOAST.modsUpdated(updated.length, meta.instanceId) : TASK_TOAST.modUpdated(only, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        return;
+      }
+      case "export": {
+        // 导出不改实例：没有要失效的缓存，也不追加「下次启动生效」
+        const outcome = result as ModpackExportOutcomeDto;
+        const copy = TASK_TOAST.exported(meta.name, outcome.bundled_mods.length);
+        this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, {
+          label: TASK_TOAST.revealAction,
+          run: () => revealExportedPack(outcome.path),
+          errorTitle: ACTION_ERROR.revealExport,
+        });
         return;
       }
     }
@@ -2067,6 +2101,24 @@ export class LauncherStore {
           spec.packName,
         );
         return spec.name;
+      },
+      async exportModpack(id, options) {
+        const inst = store.instance(id);
+        const spec = { command: "export_modpack", args: { id, options } };
+        const task = store.enqueue(
+          { kind: "modpack_export", title: TASK_TEXT.exportTitle(options.name), detail: TASK_TEXT.exportDetail(options.version, inst.name), instanceId: id, spec },
+          { type: "export", name: options.name },
+          options.name,
+        );
+        if (task === null) {
+          // 同一份导出（同实例、同参数、同位置）已在队列里：入队已经提示过，交回那个任务
+          const existing = findDuplicate(store.raw.tasks, spec);
+          if (existing === undefined) throw new Error(`导出「${options.name}」没有入队，队列里也没有同样的任务`);
+          return existing.id;
+        }
+        const copy = TASK_TOAST.exportStarted(options.name);
+        store.pushToast("info", copy.title, copy.body);
+        return task.id;
       },
       async previewInstanceDeletion(id) {
         return instancesIpc.previewInstanceDeletion(id);
