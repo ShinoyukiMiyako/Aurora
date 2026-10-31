@@ -2182,6 +2182,58 @@ mod tests {
         );
     }
 
+    /// 游玩记录文件被别的程序以只许读的方式占着（读得出、替换不了）：改名报 play_records_failed 之后，前端
+    /// 随即重扫的实例列表照常列出，改了名的实例带着原来的时长；放开后记录补上落盘。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn list_still_loads_while_the_play_records_cannot_be_replaced() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 1;
+        let env = Env::new();
+        env.vanilla("a");
+        env.vanilla("留下");
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},
+                "days":{"2026-10-30":{"instances":{"a":600000}}}}}"#,
+        );
+        let path = env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE);
+        let locks = InstanceLocks::default();
+        let played = |list: &[InstanceDto], id: &str| {
+            let entry = list.iter().find(|i| i.id == id).unwrap();
+            (entry.playtime_min, entry.last_played_at)
+        };
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(played(&list, "a"), (10, Some(1_761_800_000_000)));
+        let err = rename_instance_with(&env.facade, &locks, "a", "b")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::PLAY_RECORDS_FAILED);
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(played(&list, "b"), (10, Some(1_761_800_000_000)));
+        assert_eq!(played(&list, "留下"), (0, None));
+        drop(held);
+
+        list_instances_with(&env.facade, &locks).await.unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["format"], 2);
+        let ids: Vec<&String> = saved["directories"][0]["book"]["instances"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect();
+        assert_eq!(ids, vec!["b"]);
+    }
+
     /// 配置存不下时改名报配置的错，游玩记录照样跟着新名字走：两步收尾互不拦着。
     #[tokio::test]
     async fn play_records_follow_the_rename_even_when_the_config_cannot_be_saved() {
