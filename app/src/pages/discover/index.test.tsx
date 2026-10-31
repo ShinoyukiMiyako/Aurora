@@ -810,6 +810,76 @@ describe("发现页：本地整合包的三种入口", () => {
     expect(nav.route).toEqual({ page: "discover", query: "钠" });
   });
 
+  const closeDialog = () =>
+    act(async () => {
+      const close = dialog().querySelector<HTMLButtonElement>('button[aria-label="关闭"]');
+      if (close === null) throw new Error("弹窗没有关闭按钮");
+      close.click();
+      await settle();
+    });
+
+  /** 第一次读失败（文件没下载完），之后读得出来：模拟用户等下载完成后再带入同一个文件。 */
+  async function failOnceThenRead() {
+    const { IpcError } = await import("../../ipc/errors");
+    let calls = 0;
+    ipc.overrides.set("preview_modpack", (args) => {
+      calls += 1;
+      if (calls === 1) throw new IpcError("modpack_corrupt", "unexpected end of archive");
+      return preview(String(args.path));
+    });
+  }
+
+  it("读失败后关掉弹窗，外壳再带入同一个文件：重新读取，不直接显示上次的错误", async () => {
+    await failOnceThenRead();
+    await mount({ page: "discover", importFile: PACK });
+    expect(dialog().textContent).toContain("文件不完整或已损坏，重新下载一份再试");
+    await closeDialog();
+    expect(openDialogs()).toHaveLength(0);
+
+    act(() => nav.go({ page: "discover", importFile: PACK }));
+    // 请求发出到结果回来之间显示读取中，而不是缓存里那条旧错误
+    expect(dialog().textContent).toContain("正在读取 生存.mrpack");
+    expect(dialog().textContent).not.toContain("文件不完整或已损坏");
+    await flush();
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }, { path: PACK }]);
+    expect(dialog().textContent).not.toContain("文件不完整或已损坏");
+    expect(nameValue()).toBe("生存包");
+  });
+
+  it("读失败后关掉弹窗，重新打开再把同一个文件拖进投放区：同样重新读取", async () => {
+    await failOnceThenRead();
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    expect(dialog().textContent).toContain("文件不完整或已损坏，重新下载一份再试");
+    await closeDialog();
+
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    // 重新打开是从选文件开始，不带着上次的错误
+    expect(dialog().textContent).not.toContain("文件不完整或已损坏");
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }, { path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+  });
+
+  it("读成功过的文件关掉后再带入：也重新读取，显示文件现在的内容", async () => {
+    let version = "1.2.0";
+    ipc.overrides.set("preview_modpack", (args) => ({ ...preview(String(args.path)), version }));
+    await mount({ page: "discover", importFile: PACK });
+    expect(dialog().textContent).toContain("版本 1.2.0");
+    await closeDialog();
+
+    version = "1.3.0";
+    act(() => nav.go({ page: "discover", importFile: PACK }));
+    expect(dialog().textContent).toContain("正在读取 生存.mrpack");
+    await flush();
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }, { path: PACK }]);
+    expect(dialog().textContent).toContain("版本 1.3.0");
+    expect(dialog().textContent).not.toContain("版本 1.2.0");
+  });
+
   it("拖进来的都不是整合包：照样交给后端读，按错误码说明只认哪两种文件", async () => {
     const { IpcError } = await import("../../ipc/errors");
     ipc.overrides.set("preview_modpack", () => {
