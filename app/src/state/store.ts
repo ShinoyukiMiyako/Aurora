@@ -1007,7 +1007,7 @@ export class LauncherStore {
 
   private pump(): void {
     for (const task of tasksToStart(this.raw.tasks)) {
-      this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id) }));
+      this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id, Date.now()) }));
       const attempt = task.attempt;
       this.execute(task).then(
         (result) => this.onTaskDone(task.id, attempt, result),
