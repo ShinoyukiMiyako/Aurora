@@ -132,6 +132,9 @@ pub mod code {
     pub const OPEN_FAILED: &str = "open_failed";
     /// 要改动的 Mod 文件正被占用（游戏运行中）。detail：`{ path }`，为被占用的文件。
     pub const MOD_FILE_BUSY: &str = "mod_file_busy";
+    /// 改名或删除已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改。前端照成功处理再
+    /// 提示；没改成的记录由门面记着，之后读写游玩记录时补上。detail：`{ id, renamed_to? }` 与原因链。
+    pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
 }
 
 /// 序列化给前端的命令错误。

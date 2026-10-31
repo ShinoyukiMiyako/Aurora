@@ -300,14 +300,21 @@ export const installVersion = (
 export const repairInstance = (taskId: string, id: string): Promise<RepairResultDto> =>
   invoke<RepairResultDto>("repair_instance", { taskId, id });
 
+/**
+ * 改名或删除本身已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改：照成功处理（刷新列表、
+ * 迁移界面上挂在旧 id 上的状态）再提示。detail.id 为原实例 id，改名时 detail.renamed_to 为新名字。没改成的记录
+ * 由后端记着，之后读写游玩记录时补上。
+ */
+export const PLAY_RECORDS_FAILED_ERROR_CODE = "play_records_failed";
+
 export const previewInstanceDeletion = (id: string): Promise<DeletionPreviewDto> =>
   invoke<DeletionPreviewDto>("preview_instance_deletion", { id });
 
-/** 移入回收站并从侧栏固定、当前选中里去掉。目录已不在时 existed 为 false。 */
+/** 移入回收站并从侧栏固定、当前选中与游玩记录里去掉。目录已不在时 existed 为 false。只有游玩记录没清成时以 PLAY_RECORDS_FAILED_ERROR_CODE 拒绝。 */
 export const deleteInstance = (id: string): Promise<{ existed: boolean }> =>
   invoke<{ existed: boolean }>("delete_instance", { id });
 
-/** 改名：目录、版本 JSON、jar、侧栏固定与当前选中一起改。返回新的实例 id。 */
+/** 改名：目录、版本 JSON、jar、游玩记录、侧栏固定与当前选中一起改。返回新的实例 id。只有游玩记录没跟上时以 PLAY_RECORDS_FAILED_ERROR_CODE 拒绝。 */
 export const renameInstance = (id: string, newName: string): Promise<{ id: string }> =>
   invoke<{ id: string }>("rename_instance", { id, newName });
 

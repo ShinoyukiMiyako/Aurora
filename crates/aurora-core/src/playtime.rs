@@ -8,6 +8,9 @@
 //!
 //! 记录按游戏目录分开：实例 id 只在一个游戏目录里唯一，换到另一个游戏目录后，同名的是另一个实例，
 //! 不能继承这边的时长。读写一律针对门面当前的游戏目录。
+//!
+//! 实例改名、删除时记录要跟着改，这一步晚于目录操作，可能单独失败（文件被备份或杀毒软件占着、读不出来）。
+//! 失败的改动记在进程内、之后补上，见 [`PENDING`]。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,9 +34,27 @@ const LEGACY_FORMAT: u32 = 1;
 pub const RETAIN_DAYS: u64 = 400;
 const MS_PER_MINUTE: u64 = 60_000;
 
-/// 多个实例可能同时退出，读改写必须串行，否则后写的那次会覆盖先写的那一局。读也要排队：读到旧版本
-/// 时当场改写。
-static FILE_LOCK: Mutex<()> = Mutex::const_new(());
+/// 文件锁，锁里放着每个记录文件没能落盘的改名与删除。
+///
+/// 多个实例可能同时退出，读改写必须串行，否则后写的那次会覆盖先写的那一局；读也要排队：读到旧版本时
+/// 当场改写，有待补的改动时一并补上落盘。之后对同一个文件的任何一次读写都先补上这些改动，补上之前读到
+/// 的记录也已是改过的样子。只在进程内：启动器在补上之前退出，这些改动就丢了，旧名下的记录不再对应
+/// 任何实例。
+static PENDING: Mutex<BTreeMap<PathBuf, Vec<BookChange>>> = Mutex::const_new(BTreeMap::new());
+
+/// 改名、删除对一个游戏目录记录的改动。记成数据而不是直接改，落盘失败时才能留到下一次补上。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BookChange {
+    Rename {
+        game_dir: PathBuf,
+        old: String,
+        new: String,
+    },
+    Forget {
+        game_dir: PathBuf,
+        id: String,
+    },
+}
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PlayBook {
@@ -112,6 +133,18 @@ impl PlayLibrary {
     fn prune(&mut self, today: NaiveDate) {
         for directory in &mut self.directories {
             directory.book.prune(today);
+        }
+    }
+
+    /// 套用一次改名或删除；返回记录是否有变化。
+    fn apply(&mut self, change: &BookChange) -> bool {
+        match change {
+            BookChange::Rename { game_dir, old, new } => {
+                self.change(game_dir, |book| book.rename_instance(old, new))
+            }
+            BookChange::Forget { game_dir, id } => {
+                self.change(game_dir, |book| book.forget_instance(id))
+            }
         }
     }
 }
@@ -423,19 +456,45 @@ async fn save(path: &Path, library: PlayLibrary) -> Result<()> {
     Ok(())
 }
 
-/// 在锁里读出记录交给 `work`，`work` 报告有变化或读到的是旧版本时落盘。没有变化时不落盘：没玩过的
-/// 实例改名、删除不会凭空建出文件。
+/// 在锁里读出记录、先补上待补的改动与这次的 `change`，再交给 `work`；有任何变化或读到的是旧版本时
+/// 落盘。没有变化时不落盘：没玩过的实例改名、删除不会凭空建出文件。读或写失败时，待补的改动连同这次的
+/// `change` 原样留着，等下一次。
 async fn with_library<T>(
     data_dir: &Path,
     game_dir: &Path,
+    change: Option<BookChange>,
     work: impl FnOnce(&mut PlayLibrary) -> (T, bool),
 ) -> Result<T> {
     let path = playtime_path(data_dir);
-    let _guard = FILE_LOCK.lock().await;
-    let (mut library, migrated) = load(&path, game_dir).await?;
+    let mut pending = PENDING.lock().await;
+    let mut queued = pending.remove(&path).unwrap_or_default();
+    queued.extend(change);
+    let outcome = read_modify_write(&path, game_dir, &queued, work).await;
+    if outcome.is_err() && !queued.is_empty() {
+        tracing::warn!(
+            path = %path.display(),
+            pending = queued.len(),
+            "游玩记录的改名、删除没能落盘，记下待补"
+        );
+        pending.insert(path, queued);
+    }
+    outcome
+}
+
+async fn read_modify_write<T>(
+    path: &Path,
+    game_dir: &Path,
+    queued: &[BookChange],
+    work: impl FnOnce(&mut PlayLibrary) -> (T, bool),
+) -> Result<T> {
+    let (mut library, migrated) = load(path, game_dir).await?;
+    let mut dirty = migrated;
+    for change in queued {
+        dirty |= library.apply(change);
+    }
     let (value, changed) = work(&mut library);
-    if migrated || changed {
-        save(&path, library).await?;
+    if dirty || changed {
+        save(path, library).await?;
     }
     Ok(value)
 }
@@ -459,7 +518,7 @@ async fn record_play_in<Tz: TimeZone>(
     started_at: u64,
     ended_at: u64,
 ) -> Result<()> {
-    with_library(data_dir, game_dir, |library| {
+    with_library(data_dir, game_dir, None, |library| {
         library
             .book_mut(game_dir)
             .add_session(tz, version_id, started_at, ended_at);
@@ -470,22 +529,28 @@ async fn record_play_in<Tz: TimeZone>(
 }
 
 impl Aurora {
-    /// 实例改名后把它在当前游戏目录下的游玩记录挪到新名字下（记录以实例 id 为键）。
+    /// 实例改名后把它在当前游戏目录下的游玩记录挪到新名字下（记录以实例 id 为键）。失败时改动记下待补，
+    /// 之后读写游玩记录时补上。
     pub async fn rename_play_records(&self, old: &str, new: &str) -> Result<()> {
-        let game_dir = self.game_dir();
-        with_library(self.data_dir(), game_dir, |library| {
-            let changed = library.change(game_dir, |book| book.rename_instance(old, new));
-            ((), changed)
+        let change = BookChange::Rename {
+            game_dir: self.game_dir().to_path_buf(),
+            old: old.to_owned(),
+            new: new.to_owned(),
+        };
+        with_library(self.data_dir(), self.game_dir(), Some(change), |_| {
+            ((), false)
         })
         .await
     }
 
-    /// 实例删除后去掉它在当前游戏目录下的游玩记录。
+    /// 实例删除后去掉它在当前游戏目录下的游玩记录。失败时同改名，记下待补。
     pub async fn forget_play_records(&self, id: &str) -> Result<()> {
-        let game_dir = self.game_dir();
-        with_library(self.data_dir(), game_dir, |library| {
-            let changed = library.change(game_dir, |book| book.forget_instance(id));
-            ((), changed)
+        let change = BookChange::Forget {
+            game_dir: self.game_dir().to_path_buf(),
+            id: id.to_owned(),
+        };
+        with_library(self.data_dir(), self.game_dir(), Some(change), |_| {
+            ((), false)
         })
         .await
     }
@@ -493,7 +558,7 @@ impl Aurora {
     /// 当前游戏目录一段时间（本地日期，两端都含）的游玩统计。
     pub async fn play_stats(&self, range: PlayRange) -> Result<PlayStats> {
         let game_dir = self.game_dir();
-        with_library(self.data_dir(), game_dir, |library| {
+        with_library(self.data_dir(), game_dir, None, |library| {
             (library.book(game_dir).stats(range), false)
         })
         .await
@@ -502,7 +567,7 @@ impl Aurora {
     /// 当前游戏目录里每个玩过的实例的累计时长与上次游玩；没玩过的实例不在其中。
     pub async fn play_summaries(&self) -> Result<BTreeMap<String, PlaySummary>> {
         let game_dir = self.game_dir();
-        with_library(self.data_dir(), game_dir, |library| {
+        with_library(self.data_dir(), game_dir, None, |library| {
             (library.book(game_dir).summaries(), false)
         })
         .await
@@ -1041,6 +1106,97 @@ mod tests {
         );
         assert_eq!(
             in_home.play_summaries().await.unwrap()["生存"].playtime_min,
+            180
+        );
+    }
+
+    fn instance_ids(file: &serde_json::Value) -> Vec<String> {
+        file["directories"][0]["book"]["instances"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// 记录文件读不出来时改名、删除报错，改动记下待补；文件恢复之后的第一次读就补上并落盘，之后不再重复
+    /// 套用，也不碰别的游戏目录。
+    #[tokio::test]
+    async fn failed_rename_and_forget_are_applied_once_the_file_reads_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = game_dir(tmp.path());
+        let other = tmp.path().join("别处").join(".minecraft");
+        let aurora = aurora_in(tmp.path(), &game);
+        record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &game, "删掉的", 0, HOUR)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &other, "旧名", 0, HOUR)
+            .await
+            .unwrap();
+        let path = playtime_path(tmp.path());
+        let intact = std::fs::read(&path).unwrap();
+
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
+        assert!(aurora.forget_play_records("删掉的").await.is_err());
+        assert!(aurora.play_summaries().await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
+
+        std::fs::write(&path, &intact).unwrap();
+        let summaries = aurora.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["新名"]);
+        assert_eq!(summaries["新名"].playtime_min, 120);
+        assert_eq!(instance_ids(&read_file(tmp.path())), vec!["新名"]);
+        let elsewhere = aurora_in(tmp.path(), &other)
+            .play_summaries()
+            .await
+            .unwrap();
+        assert_eq!(elsewhere.keys().collect::<Vec<_>>(), vec!["旧名"]);
+
+        // 补过的改动已清空：之后新玩的「旧名」不会再被改到「新名」下。
+        record_play_in(&utc8(), tmp.path(), &game, "旧名", 3 * HOUR, 4 * HOUR)
+            .await
+            .unwrap();
+        let summaries = aurora.play_summaries().await.unwrap();
+        assert_eq!(summaries["旧名"].playtime_min, 60);
+        assert_eq!(summaries["新名"].playtime_min, 120);
+    }
+
+    /// 读得出、写不进（别的程序打开着文件且不许替换）：改名报错；写不进期间读到的记录已是改名后的样子，
+    /// 读也照实报落盘失败；放开后下一次写入一并落盘。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rename_that_cannot_be_saved_is_saved_with_the_next_write() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_SHARE_READ: u32 = 1;
+        let tmp = tempfile::tempdir().unwrap();
+        let game = game_dir(tmp.path());
+        let aurora = aurora_in(tmp.path(), &game);
+        record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
+            .await
+            .unwrap();
+        let path = playtime_path(tmp.path());
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&path)
+            .unwrap();
+        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
+        assert!(aurora.play_summaries().await.is_err());
+        assert_eq!(instance_ids(&read_file(tmp.path())), vec!["旧名"]);
+        drop(held);
+
+        record_play_in(&utc8(), tmp.path(), &game, "新名", 3 * HOUR, 4 * HOUR)
+            .await
+            .unwrap();
+        assert_eq!(instance_ids(&read_file(tmp.path())), vec!["新名"]);
+        assert_eq!(
+            aurora.play_summaries().await.unwrap()["新名"].playtime_min,
             180
         );
     }
