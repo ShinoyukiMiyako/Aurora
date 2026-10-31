@@ -1,34 +1,6 @@
-// 发现页自用的几个小 hook：加载态的出现延迟与最短停留、超时、防抖、滚动容器。
+// 发现页自用的几个小 hook：超时、防抖、滚动容器。加载态的出现与停留走全站统一的 lib/loading-gate。
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-
-/**
- * 加载态的显示开关：active 持续超过 delayMs 才出现（快的请求不闪一下骨架），
- * 一旦出现至少停留 minMs（避免骨架一闪而过）。
- */
-export function useDelayedFlag(active: boolean, delayMs: number, minMs: number): boolean {
-  const [shown, setShown] = useState(false);
-  const shownAt = useRef(0);
-  useEffect(() => {
-    if (active && !shown) {
-      const timer = setTimeout(() => {
-        shownAt.current = Date.now();
-        setShown(true);
-      }, delayMs);
-      return () => clearTimeout(timer);
-    }
-    if (!active && shown) {
-      const remain = minMs - (Date.now() - shownAt.current);
-      if (remain <= 0) {
-        setShown(false);
-        return;
-      }
-      const timer = setTimeout(() => setShown(false), remain);
-      return () => clearTimeout(timer);
-    }
-  }, [active, shown, delayMs, minMs]);
-  return shown;
-}
+import { useCallback, useEffect, useLayoutEffect, useState, type RefObject } from "react";
 
 /** active 连续成立超过 ms 后为 true；key 变化时重新计时（同一状态下换了一次请求）。 */
 export function useElapsed(active: boolean, ms: number, key: string): boolean {

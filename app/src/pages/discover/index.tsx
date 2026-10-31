@@ -3,6 +3,8 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import { LOADER_NAME } from "../../copy/flows";
+import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncher, useNow } from "../../state/launcher";
 import type { SearchEntry } from "../../state/queries/discover";
@@ -19,7 +21,7 @@ import { PLATFORM_LABEL, SEARCH_COPY } from "./copy";
 import { ResourceDetail, type DetailTarget } from "./detail/ResourceDetail";
 import styles from "./discover.module.css";
 import { useOnline } from "../../state/online";
-import { useDebounced, useDelayedFlag, useElapsed, useNearBottom, useScrollContainer, useStuck } from "./hooks";
+import { useDebounced, useElapsed, useNearBottom, useScrollContainer, useStuck } from "./hooks";
 import { ImportModpackDialog } from "./ImportModpackDialog";
 import {
   allPlatformsFailed,
@@ -48,16 +50,6 @@ import { readSnapshot, writeSnapshot } from "./session";
 import { SearchHero, Toolbar } from "./Toolbar";
 import { useResultPages, type ResultPages } from "./useResultPages";
 
-/** 输入停止这么久才发起搜索；回车立即搜。 */
-const QUERY_DEBOUNCE_MS = 300;
-/** 首页请求超过这么久才出骨架，出现后至少停留这么久，快的请求不闪。 */
-const SKELETON_DELAY_MS = 120;
-const SKELETON_MIN_MS = 400;
-/** 请求超过这么久提示「比平时慢」。 */
-const SLOW_MS = 5000;
-/** 首页请求超过这么久按超时呈现，可重试。 */
-const TIMEOUT_MS = 20000;
-
 export default function DiscoverPage({ route }: PageProps<"discover">) {
   const { state } = useLauncher();
   const nav = useNav();
@@ -71,7 +63,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   const [filters, setFilters] = useState<DiscoverFilters>(() => routeFilters(restored === null ? DEFAULT_FILTERS : restored.filters, route, state.instances));
   const [detail, setDetail] = useState<DetailTarget | null>(() => (route.open === undefined ? null : { ...route.open, sources: [] }));
   const [importOpen, setImportOpen] = useState(false);
-  const debounced = useDebounced(filters.query, QUERY_DEBOUNCE_MS);
+  const debounced = useDebounced(filters.query, SEARCH_DEBOUNCE_MS);
   const committedQuery = debounced.value;
 
   // 已在本页时外部导航又带来新参数（命令面板搜索、实例页「找 Mod」）：叠到当前筛选上
@@ -215,9 +207,10 @@ interface ResultsProps {
 
 function Results({ filters, committedQuery, pages, online, now, installed, container, onOpen, onClearFilters }: ResultsProps) {
   const requestKey = JSON.stringify(pages.state.request);
-  const skeleton = useDelayedFlag(pages.loadingFirst, SKELETON_DELAY_MS, SKELETON_MIN_MS);
-  const slow = useElapsed(pages.loadingFirst || pages.loadingNext, SLOW_MS, requestKey);
-  const timedOut = useElapsed(pages.loadingFirst, TIMEOUT_MS, requestKey);
+  // 首页的骨架与「比平时慢」走全站统一的加载门；下一页只在列表尾追加一行，慢提示按这一页的请求单独计时
+  const gate = useLoadingGate(pages.loadingFirst);
+  const slowNext = useElapsed(pages.loadingNext, SLOW_HINT_MS, requestKey);
+  const timedOut = useElapsed(pages.loadingFirst, PLATFORM_TIMEOUT_MS, requestKey);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const near = useNearBottom(bottomRef, container, PREFETCH_MARGIN_PX, pages.canLoadMore && online);
@@ -273,14 +266,14 @@ function Results({ filters, committedQuery, pages, online, now, installed, conta
     );
   }
 
-  if (skeleton || pages.loadingFirst) {
+  if (gate.view !== "content") {
     return (
       <>
         {info}
         <div className={styles.grid} aria-busy="true">
-          {skeleton && Array.from({ length: PAGE_SIZE }, (_, i) => <SkeletonCard key={i} />)}
+          {gate.view === "skeleton" && Array.from({ length: PAGE_SIZE }, (_, i) => <SkeletonCard key={i} />)}
         </div>
-        {slow && <p className={styles.listNote}>{SEARCH_COPY.slow}</p>}
+        {gate.slow && <p className={styles.listNote}>{SEARCH_COPY.slow}</p>}
       </>
     );
   }
@@ -344,7 +337,7 @@ function Results({ filters, committedQuery, pages, online, now, installed, conta
         {pages.loadingNext && (
           <span className={styles.listNote}>
             <Spinner size={16} />
-            {slow ? SEARCH_COPY.slow : SEARCH_COPY.searching}
+            {slowNext ? SEARCH_COPY.slow : SEARCH_COPY.searching}
           </span>
         )}
         {pages.nextError !== null && (

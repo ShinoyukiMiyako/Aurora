@@ -1,6 +1,7 @@
 // 发现页、资源详情、安装面板与整合包导入的文案。插值一律经 domain/format 格式化，页面组件只引用这里。
 
 import { formatBytes, formatCount } from "../../domain/format";
+import { PLATFORM_TIMEOUT_MS } from "../../domain/limits";
 import type { Platform } from "../../domain/types";
 import type { DiscoverKind } from "../../state/route";
 import type { SortField } from "../../state/queries/discover";
@@ -71,7 +72,7 @@ export const SEARCH_COPY = {
   partialFailed: (failed: Platform, other: Platform) => `${PLATFORM_LABEL[failed]} 暂时没有响应，下面只有 ${PLATFORM_LABEL[other]} 的结果。`,
   allFailed: "暂时连不上资源平台",
   timeout: "请求超时",
-  timeoutBody: "资源平台 20 秒内没有回应。",
+  timeoutBody: `资源平台 ${PLATFORM_TIMEOUT_MS / 1000} 秒内没有回应。`,
   offlineBanner: "没有网络连接",
   offlineBannerBody: "搜索和安装需要联网，恢复后会自动刷新。",
   offlineEmpty: "连不上网络",

@@ -282,6 +282,58 @@ describe("发现页：搜索", () => {
   });
 });
 
+/** 结果区里正在显示的骨架卡数。 */
+const skeletonCards = () => document.querySelectorAll('section[aria-label="搜索资源"] [aria-busy="true"] > *').length;
+
+describe("发现页：加载态的时机", () => {
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  it("300 ms 内返回的搜索不出骨架；超过 300 ms 才出，出现后至少停留 300 ms", async () => {
+    pages = () => new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 280)) as never;
+    await mount();
+    await advance(279);
+    expect(skeletonCards()).toBe(0);
+    await advance(1);
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+    expect(skeletonCards()).toBe(0);
+
+    // 换个关键词：这次 320 ms 才返回，骨架在 300 ms 出现，数据到了也要停满 300 ms
+    pages = () => new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("B")])), 320)) as never;
+    typeInto(searchInput(), "慢");
+    act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    await advance(299);
+    expect(skeletonCards()).toBe(0);
+    await advance(1);
+    expect(skeletonCards()).toBe(24);
+    await advance(20);
+    await flush();
+    expect(skeletonCards()).toBe(24);
+    await advance(280);
+    await flush();
+    expect(skeletonCards()).toBe(0);
+    expect(cardTitles()).toEqual(["资源 B，查看详情"]);
+  });
+
+  it("首页请求 10 s 还没回来才提示「比平时慢」，20 s 按超时呈现可重试", async () => {
+    pages = () => new Promise<SearchResultDto>(() => {}) as never;
+    await mount();
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    await advance(1);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+    expect(document.body.textContent).toContain("资源平台 20 秒内没有回应。");
+  });
+});
+
 describe("发现页：失败与离线", () => {
   it("首页失败原位给出原因，重试成功后出现结果", async () => {
     let fail = true;
