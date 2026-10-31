@@ -94,6 +94,13 @@ pub enum CoreError {
     /// 数据包要装进的存档在该实例里不存在。
     #[error("实例 {version_id} 里没有存档 {world}")]
     WorldNotFound { version_id: String, world: String },
+    /// 要恢复或删除的备份不在这个存档的备份清单里，或清单里有、盘上已经没有了。
+    #[error("实例 {version_id} 的存档 {world} 没有备份 {file}")]
+    WorldBackupNotFound {
+        version_id: String,
+        world: String,
+        file: String,
+    },
     /// 平台给出的文件名不能安全地落盘（含路径分隔符、`..` 等）。
     #[error("{platform} 给出的文件名不安全：{file_name}")]
     UnsafeFileName {
@@ -203,6 +210,7 @@ impl CoreError {
             CoreError::Java(err) => err.is_cancelled(),
             CoreError::Auth(err) => err.is_cancelled(),
             CoreError::Modpack(aurora_modpack::Error::Cancelled) => true,
+            CoreError::Instance(aurora_instance::Error::Cancelled) => true,
             _ => false,
         }
     }
@@ -228,6 +236,13 @@ mod tests {
         assert!(CoreError::Auth(aurora_auth::AuthError::Cancelled).is_cancelled());
         assert!(!CoreError::Auth(aurora_auth::AuthError::ReloginRequired).is_cancelled());
         assert!(CoreError::Modpack(aurora_modpack::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Instance(aurora_instance::Error::Cancelled).is_cancelled());
+        assert!(
+            !CoreError::Instance(aurora_instance::Error::WorldInUse {
+                path: PathBuf::from("saves/w"),
+            })
+            .is_cancelled()
+        );
 
         // 真正的失败不能被当成取消。
         assert!(!CoreError::NoJava { major: 17 }.is_cancelled());
