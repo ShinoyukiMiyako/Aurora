@@ -11,7 +11,7 @@ export type IsolationPolicy =
   | "all";
 /** 游戏启动后启动器窗口的去留。 */
 export type AfterLaunch = "keep" | "minimize" | "close";
-/** 界面语言：BCP 47 语言标签，外壳原样写到 <html lang>。 */
+/** 界面语言：BCP 47 语言标签。外壳按它与已有译文推出 <html lang>（没有译文的语言落回中文）。 */
 export type UiLanguage = "zh-CN" | "en-US";
 export const UI_LANGUAGES: readonly UiLanguage[] = ["zh-CN", "en-US"];
 

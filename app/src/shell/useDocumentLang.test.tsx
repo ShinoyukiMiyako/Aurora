@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-// <html lang> 跟着界面语言走：配置读到之前保持页面自带的 zh-CN，读到之后与设置一致，切换立即生效。
+// <html lang> 写界面文案实际所用的语言：配置读到之前保持页面自带的 zh-CN；选了还没有译文的 English 时文案仍是中文，
+// lang 也保持 zh-CN，读屏不会用英文语音念中文。
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
@@ -16,7 +17,7 @@ import { AppShell } from "./AppShell";
 import type { PageTable } from "./nav";
 import { createPageRegistry } from "./pages";
 import { ShellProvider } from "./shell";
-import { applyDocumentLang, useDocumentLang } from "./useDocumentLang";
+import { applyDocumentLang, textLanguage, useDocumentLang } from "./useDocumentLang";
 import { WindowPortProvider, browserWindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -78,6 +79,13 @@ describe("applyDocumentLang", () => {
   });
 });
 
+describe("textLanguage", () => {
+  it("有译文的语言原样返回，English 还没有译文，落回中文", () => {
+    expect(textLanguage("zh-CN")).toBe("zh-CN");
+    expect(textLanguage("en-US")).toBe("zh-CN");
+  });
+});
+
 describe("useDocumentLang", () => {
   async function mountHost() {
     view = render(
@@ -89,9 +97,11 @@ describe("useDocumentLang", () => {
     await flush();
   }
 
-  it("配置读到后写成设置里的语言；切换语言立即跟着改", async () => {
+  it("配置读到后写文案实际所用的语言：选 English 时仍写 zh-CN，来回切换都不变成 en-US", async () => {
+    // 先清掉页面自带的值，才看得出是读到配置后写进去的
+    document.documentElement.lang = "";
     await mountHost();
-    expect(lang()).toBe("en-US");
+    expect(lang()).toBe("zh-CN");
     await act(async () => {
       await launcher.actions.updateSettings({ language: "zh-CN" });
     });
@@ -99,7 +109,7 @@ describe("useDocumentLang", () => {
     await act(async () => {
       await launcher.actions.updateSettings({ language: "en-US" });
     });
-    expect(lang()).toBe("en-US");
+    expect(lang()).toBe("zh-CN");
   });
 
   it("配置读失败时不动 lang，保持页面自带的 zh-CN", async () => {
@@ -135,7 +145,8 @@ describe("外壳挂着它", () => {
     return <p data-flow="login">{login.kind}</p>;
   }
 
-  it("外壳渲染出来后 <html lang> 就是设置里的语言", async () => {
+  it("外壳渲染出来后 <html lang> 是文案实际所用的语言，外壳内（含浮层）都按它念", async () => {
+    document.documentElement.lang = "";
     stubResizeObserver();
     stubMatchMedia(false);
     stubCanvas();
@@ -161,8 +172,8 @@ describe("外壳挂着它", () => {
     );
     await flush();
     expect(document.querySelector("[data-page]")?.getAttribute("data-page")).toBe("home");
-    expect(lang()).toBe("en-US");
-    // English 预览期还没有译文：外壳里的文案仍是中文，读屏要按中文念、断行按中文排；浮层根也在外壳里
+    // 设置里是 English，但还没有译文：文案仍是中文，读屏要按中文念、断行按中文排
+    expect(lang()).toBe("zh-CN");
     expect(document.querySelector("[data-page]")?.closest("[lang]")?.getAttribute("lang")).toBe("zh-CN");
     act(() => launcher.actions.toast("info", "已保存"));
     const toast = [...document.querySelectorAll<HTMLElement>("*")].find((el) => el.children.length === 0 && el.textContent === "已保存");

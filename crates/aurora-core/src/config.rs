@@ -111,7 +111,7 @@ pub enum AfterLaunch {
     Close,
 }
 
-/// 界面语言。序列化名就是 BCP 47 语言标签，前端原样写进 `<html lang>`，config.json 里也是这个写法。
+/// 界面语言。序列化名就是 BCP 47 语言标签，config.json 里也是这个写法；前端按它与已有译文推出 `<html lang>`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum UiLanguage {
     /// 简体中文（默认）。
@@ -363,7 +363,7 @@ mod tests {
         assert_eq!(c.language, UiLanguage::ZhCn, "界面语言默认简体中文");
     }
 
-    /// 序列化名就是 `<html lang>` 与 config.json 里的写法：区分大小写，下划线写法与裸语言码都不认。
+    /// 序列化名就是 config.json 里的 BCP 47 写法：区分大小写，下划线写法与裸语言码都不认。
     #[test]
     fn ui_language_serializes_as_language_tag() {
         for (value, name) in [(UiLanguage::ZhCn, "zh-CN"), (UiLanguage::EnUs, "en-US")] {

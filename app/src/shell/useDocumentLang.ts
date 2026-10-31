@@ -1,17 +1,22 @@
-// 把界面语言写到 <html lang>：浏览器按它选断行与连字规则，读屏软件按它选发音。
-// 配置读到之前（以及读失败时）不动它，保持页面自带的 zh-CN；读到之后随设置切换立即改写，不用重启。
+// 把界面文案实际所用的语言写到 <html lang>：浏览器按它选断行与连字规则，读屏软件按它选发音。
+// 写的是「文案实际是什么语言」而不是「设置里选了什么」：某种语言还没有译文时界面仍是中文，
+// 这时写成那种语言会让读屏用错语音去念中文。配置读到之前（以及读失败时）不动它，保持页面自带的 zh-CN。
 
 import { useLayoutEffect } from "react";
 import type { UiLanguage } from "../ipc/config";
 import { useLauncherSelector } from "../state/launcher";
 import type { LauncherState } from "../state/store";
 
-/**
- * 界面文案实际所用的语言。English 预览期还没有译文，<html lang> 随设置写成 en-US，文案却仍是中文：
- * 外壳根（浮层根也在其中）标上它，读屏照旧按中文念、断行照旧按中文排，不会用英文语音去读中文。
- * 某块有了译文时，那一块按设置标语言。
- */
-export const UI_TEXT_LANG: UiLanguage = "zh-CN";
+/** 已有译文的界面语言。English 还在预览、没有译文；某种语言的译文落地后加进来，<html lang> 随之跟设置走。 */
+const TRANSLATED: ReadonlySet<UiLanguage> = new Set<UiLanguage>(["zh-CN"]);
+
+/** 没有译文时界面文案落回的语言，与 index.html 自带的 lang 一致。 */
+const SOURCE_TEXT_LANG: UiLanguage = "zh-CN";
+
+/** 设置为 language 时界面文案实际所用的语言。 */
+export function textLanguage(language: UiLanguage): UiLanguage {
+  return TRANSLATED.has(language) ? language : SOURCE_TEXT_LANG;
+}
 
 export function applyDocumentLang(language: UiLanguage, root: HTMLElement = document.documentElement): void {
   root.lang = language;
@@ -25,6 +30,6 @@ export function useDocumentLang(): void {
   const language = useLauncherSelector(selectLanguage);
   // 布局阶段写入：读到配置后的第一帧就按新语言排版，不先按旧语言画一帧
   useLayoutEffect(() => {
-    if (language !== null) applyDocumentLang(language);
+    if (language !== null) applyDocumentLang(textLanguage(language));
   }, [language]);
 }
