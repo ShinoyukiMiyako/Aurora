@@ -572,6 +572,7 @@ describe("发现页：整合包", () => {
         minecraft: "1.21.1",
         loader: { kind: "quilt", version: "0.26.0" },
         remote_files: 120,
+        mod_files: 96,
         remote_bytes: 3 * 1024 * 1024,
         override_files: 8,
         override_bytes: 4096,
@@ -594,6 +595,9 @@ describe("发现页：整合包", () => {
     await flush();
     expect(dialog().textContent).toContain("整合包没有写版本号");
     expect(dialog().textContent).toContain("120 个文件需要下载");
+    // 120 个待下载文件里只有一部分是 Mod：Mod 数取预览给的口径，不拿文件数充数
+    expect(dialog().textContent).toContain("96 个 Mod");
+    expect(dialog().textContent).toContain("1.21.1 · Quilt · 96 个 Mod");
     const nameInput = dialog().querySelector<HTMLInputElement>('input:not([aria-label="整合包文件的完整路径"])');
     if (nameInput === null) throw new Error("没有名称输入框");
     expect(nameInput.value).toBe("创造 2");
@@ -603,8 +607,7 @@ describe("发现页：整合包", () => {
     const installs = callsOf(ipc, "install_modpack");
     expect(installs).toHaveLength(1);
     expect(installs[0]).toMatchObject({ source: { kind: "file", path: "D:\Downloads\pack.mrpack" }, name: "创造 2" });
-    // 120 个待下载文件不等于 120 个 Mod：任务详情不写 Mod 数
-    expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号"]]);
+    expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号 · 96 个 Mod"]]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已开始导入「创造 2」");
     expect(openDialogs()).toHaveLength(0);
   });
@@ -718,6 +721,7 @@ describe("发现页：本地整合包的三种入口", () => {
     minecraft: "1.21.1",
     loader: { kind: "fabric", version: "0.16.9" },
     remote_files: 12,
+    mod_files: 10,
     remote_bytes: 2048,
     override_files: 3,
     override_bytes: 512,

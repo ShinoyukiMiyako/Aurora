@@ -154,7 +154,8 @@ function previewModpack(args: MockArgs): ModpackPreviewDto {
     minecraft: LOCAL_MINECRAFT,
     loader: LOCAL_MANIFEST.loader,
     remote_files: LOCAL_MANIFEST.remoteFiles,
-    remote_bytes: format === "modrinth" ? LOCAL_MANIFEST.remoteBytes : null,
+    mod_files: LOCAL_MANIFEST.modFiles,
+    remote_bytes: LOCAL_MANIFEST.remoteBytes,
     override_files: LOCAL_MANIFEST.overrideFiles,
     override_bytes: LOCAL_MANIFEST.overrideBytes,
   };

@@ -64,9 +64,9 @@ describe("整合包 mock", () => {
     expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "nope").catch((e: unknown) => e)).toMatchObject({ code: "mod_version_not_found" });
   });
 
-  it("预览按扩展名认格式，CurseForge 不带远程大小；其它扩展名报 modpack_unsupported_extension", async () => {
-    expect(await previewModpack("D:/下载/我的整合包.mrpack")).toMatchObject({ format: "modrinth", name: "我的整合包", remote_bytes: 96_468_992 });
-    expect(await previewModpack("D:/下载/Pack.ZIP")).toMatchObject({ format: "curseforge", name: "Pack", remote_bytes: null });
+  it("预览按扩展名认格式，两种格式都给出 Mod 数与远程字节；其它扩展名报 modpack_unsupported_extension", async () => {
+    expect(await previewModpack("D:/下载/我的整合包.mrpack")).toMatchObject({ format: "modrinth", name: "我的整合包", mod_files: 41, remote_bytes: 96_468_992 });
+    expect(await previewModpack("D:/下载/Pack.ZIP")).toMatchObject({ format: "curseforge", name: "Pack", mod_files: 41, remote_bytes: 96_468_992 });
     const jar = await previewModpack("D:/下载/sodium.jar").catch((e: unknown) => e);
     expect(jar).toMatchObject({ code: "modpack_unsupported_extension", detail: { path: "D:/下载/sodium.jar" } });
     expect(await previewModpack(" ").catch((e: unknown) => e)).toMatchObject({ code: "invalid_argument" });

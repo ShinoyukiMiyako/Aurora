@@ -43,7 +43,9 @@ pub struct ModpackPreviewDto {
     pub minecraft: String,
     pub loader: Option<PackLoader>,
     pub remote_files: usize,
-    /// CurseForge 清单不带文件大小，为 `null`。
+    /// 导入后落进 mods/ 的 Mod 数，与平台摘要同一口径。
+    pub mod_files: usize,
+    /// 平台没给齐每个文件的大小时为 `null`。
     pub remote_bytes: Option<u64>,
     pub override_files: usize,
     pub override_bytes: u64,
@@ -61,7 +63,7 @@ pub struct ModpackSummaryDto {
     pub pack_bytes: u64,
     /// 导入时要另外下载的远程文件数。
     pub remote_files: usize,
-    /// 远程文件里落进 mods/ 的个数；CurseForge 按工程大类认，与导入的落点一致。
+    /// 导入后落进 mods/ 的 Mod 数，与本地预览同一口径；CurseForge 的远程文件按工程大类认。
     pub mod_files: usize,
     /// 远程文件总字节数；平台没给齐每个文件的大小时为 `null`。
     pub remote_bytes: Option<u64>,
@@ -115,7 +117,8 @@ pub struct ModpackInstallOutcomeDto {
     pub modpack: InstanceModpack,
 }
 
-/// 读本地整合包的清单与条目表，供导入前确认（不解压、不触网）。
+/// 读本地整合包的清单与条目表，供导入前确认（不解压）。CurseForge 清单有远程文件时另问批量文件与
+/// 批量工程两个接口来数 Mod、算下载量，没配 API key 时报 CurseForge 源被禁用的同一个错误。
 #[tauri::command]
 pub async fn preview_modpack(
     path: String,
@@ -287,6 +290,7 @@ fn preview_dto(preview: ModpackPreview) -> ModpackPreviewDto {
         minecraft: preview.minecraft,
         loader: preview.loader,
         remote_files: preview.remote_files,
+        mod_files: preview.mod_files,
         remote_bytes: preview.remote_bytes,
         override_files: preview.override_files,
         override_bytes: preview.override_bytes,
@@ -492,6 +496,37 @@ mod tests {
         });
         writer.write_all(index.to_string().as_bytes()).unwrap();
         writer.finish().unwrap();
+    }
+
+    /// 预览 DTO 带上 mod_files（snake_case），数的是落进 mods/ 的远程文件加上覆盖层 mods/ 下的 .jar。
+    #[tokio::test]
+    async fn preview_reports_the_mod_count_under_its_wire_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let pack = dir.path().join("带 Mod.mrpack");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&pack).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("modrinth.index.json", options).unwrap();
+        let index = serde_json::json!({
+            "formatVersion": 1, "game": "minecraft", "versionId": "1.0.0", "name": "带 Mod",
+            "dependencies": {"minecraft": "1.21.1"},
+            "files": [{ "path": "mods/sodium.jar", "hashes": { "sha1": "a".repeat(40) },
+                        "downloads": ["https://cdn.modrinth.com/sodium.jar"], "fileSize": 4096 }]
+        });
+        writer.write_all(index.to_string().as_bytes()).unwrap();
+        for name in ["overrides/mods/extra.jar", "overrides/mods/notes.txt"] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(b"x").unwrap();
+        }
+        writer.finish().unwrap();
+
+        let dto = preview_modpack_with(&facade, &pack.display().to_string())
+            .await
+            .unwrap();
+        let wire = serde_json::to_value(&dto).unwrap();
+        assert_eq!(wire["mod_files"], serde_json::json!(2));
+        assert_eq!(wire["remote_bytes"], serde_json::json!(4096));
+        assert_eq!(wire["override_files"], serde_json::json!(2));
     }
 
     /// 测试里走不到真正的删除：实例被占着时删除命令必须在动目录之前就拒绝。

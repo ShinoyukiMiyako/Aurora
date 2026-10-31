@@ -18,7 +18,7 @@ use aurora_modplatform::Platform;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
-use crate::modpack::RemoteFacts;
+use crate::modpack::{RemoteFacts, count_pack_mods};
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
 const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
@@ -49,7 +49,8 @@ pub struct ModpackSummary {
     pub pack_bytes: u64,
     /// 导入时要另外下载的远程文件数。
     pub remote_files: usize,
-    /// 远程文件里落进 `mods/` 的个数；CurseForge 按工程大类认，与导入的落点一致。
+    /// 导入后落进 `mods/` 的 Mod 数，与本地预览同一口径（见 `count_pack_mods`）；CurseForge 的远程
+    /// 文件按工程大类认，与导入的落点一致。
     pub mod_files: usize,
     /// 远程文件总字节数；平台没给齐每个文件的大小时为 `None`。
     pub remote_bytes: Option<u64>,
@@ -129,19 +130,25 @@ async fn read_remote_pack(
 
 impl RemotePack {
     fn summarize(self, remote: RemoteFacts) -> ModpackSummary {
-        let overrides: Vec<&CentralEntry> = self
+        // 覆盖文件与它去掉覆盖层前缀后、相对实例目录的落点。
+        let overrides: Vec<(&CentralEntry, &str)> = self
             .entries
             .iter()
             .filter(|entry| !entry.name.ends_with('/'))
-            .filter(|entry| {
+            .filter_map(|entry| {
                 self.manifest
                     .override_layers
                     .iter()
-                    .any(|layer| entry.name.starts_with(layer.as_str()))
+                    .find_map(|layer| entry.name.strip_prefix(layer.as_str()))
+                    .map(|relative| (entry, relative))
             })
             .collect();
         let override_files = overrides.len();
-        let override_bytes = overrides.iter().map(|entry| entry.uncompressed).sum();
+        let override_bytes = overrides.iter().map(|(entry, _)| entry.uncompressed).sum();
+        let mod_files = count_pack_mods(
+            remote.destinations.iter().map(String::as_str),
+            overrides.iter().map(|&(_, relative)| relative),
+        );
         let manifest = self.manifest;
         ModpackSummary {
             format: manifest.format,
@@ -151,11 +158,7 @@ impl RemotePack {
             minecraft: manifest.minecraft,
             loader: manifest.loader,
             pack_bytes: self.total,
-            mod_files: remote
-                .destinations
-                .iter()
-                .filter(|path| path.starts_with("mods/"))
-                .count(),
+            mod_files,
             remote_bytes: remote.bytes,
             override_files,
             override_bytes,
@@ -477,7 +480,43 @@ mod tests {
         assert!(read < total / 20, "读了 {read} / {total} 字节");
     }
 
-    /// CurseForge 导出的 .zip：清单、一个覆盖文件，再塞一大块不会被读到的填充。
+    /// 同一个 .mrpack，放在平台上读摘要与放在本地读预览，Mod 数一样：落进 mods/ 的远程文件加上两层覆盖里
+    /// 直接在 mods/ 下的 .jar，同一落点只算一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn platform_summary_and_local_preview_count_mods_the_same_way() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("overrides/mods/extra.jar", &b"jar"[..]),
+            ("client-overrides/mods/extra.jar", b"client jar"),
+            ("client-overrides/mods/zoom.jar", b"zoom"),
+            ("overrides/mods/sodium.jar", b"patched"),
+            ("overrides/mods/README.md", b"read me"),
+            ("overrides/mods/old/legacy.jar", b"old"),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.start_file("modrinth.index.json", options).unwrap();
+        writer.write_all(manifest().to_string().as_bytes()).unwrap();
+        let pack = writer.finish().unwrap().into_inner();
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("同一个包.mrpack");
+        std::fs::write(&local, &pack).unwrap();
+        let (server, _, _) = serve(pack, true).await;
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+        let preview = aurora.preview_modpack_file(&local).await.unwrap();
+        assert_eq!(summary.mod_files, 4, "sodium、lithium、extra、zoom");
+        assert_eq!(preview.mod_files, summary.mod_files);
+        assert_eq!(preview.remote_bytes, summary.remote_bytes);
+    }
+
+    /// CurseForge 导出的 .zip：清单、一个配置与两个 mods/ 下的覆盖文件，再塞一大块不会被读到的填充。
     fn curseforge_zip(manifest: &serde_json::Value) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let deflated = zip::write::SimpleFileOptions::default()
@@ -490,6 +529,14 @@ mod tests {
             .start_file("overrides/config/create.toml", deflated)
             .unwrap();
         writer.write_all(&[b'c'; 120]).unwrap();
+        writer
+            .start_file("overrides/mods/kubejs-extra.jar", stored)
+            .unwrap();
+        writer.write_all(&[b'j'; 30]).unwrap();
+        writer
+            .start_file("overrides/mods/notes.txt", stored)
+            .unwrap();
+        writer.write_all(&[b'n'; 6]).unwrap();
         writer.start_file("manifest.json", deflated).unwrap();
         writer.write_all(manifest.to_string().as_bytes()).unwrap();
         writer.finish().unwrap().into_inner()
@@ -587,9 +634,15 @@ mod tests {
         assert_eq!(summary.minecraft, "1.20.1");
         assert_eq!(summary.pack_bytes, total as u64);
         assert_eq!(summary.remote_files, 3);
-        assert_eq!(summary.mod_files, 2, "资源包工程不算 Mod");
+        assert_eq!(
+            summary.mod_files, 3,
+            "create 与 jei 加覆盖层的 kubejs-extra.jar；资源包工程与覆盖层的说明文件不算"
+        );
         assert_eq!(summary.remote_bytes, Some(22_250_000));
-        assert_eq!((summary.override_files, summary.override_bytes), (1, 120));
+        assert_eq!(
+            (summary.override_files, summary.override_bytes),
+            (3, 120 + 30 + 6)
+        );
         server.verify().await;
     }
 

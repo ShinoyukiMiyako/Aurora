@@ -16,7 +16,7 @@ import type { PackLoader } from "../modpack";
 export interface MockPackManifest {
   /** 导入时要另外下载的远程文件数。 */
   remoteFiles: number;
-  /** 远程文件里落进 mods/ 的个数。 */
+  /** 导入后落进 mods/ 的 Mod 数：落进 mods/ 的远程文件加上覆盖层 mods/ 下的 .jar。 */
   modFiles: number;
   /** 远程文件总字节；摘要报它，导入的进度事件也按它走。 */
   remoteBytes: number;

@@ -81,12 +81,44 @@ pub struct ModpackPreview {
     pub loader: Option<PackLoader>,
     /// 要下载的远程文件数。
     pub remote_files: usize,
-    /// 远程文件总字节数；CurseForge 清单不带大小，为 `None`。
+    /// 导入后落进 `mods/` 的 Mod 数，与平台摘要同一口径（见 `count_pack_mods`）。
+    pub mod_files: usize,
+    /// 远程文件总字节数；平台没给齐每个文件的大小时为 `None`。
     pub remote_bytes: Option<u64>,
     /// 包内自带的覆盖文件数。
     pub override_files: usize,
     /// 覆盖文件总字节数。
     pub override_bytes: u64,
+}
+
+/// 整合包导入后落进 `mods/` 的 Mod 数，平台摘要与本地预览都用它：清单里落点直接在 `mods/` 下的远程
+/// 文件（CurseForge 是工程大类为 Mod 的那些），加上覆盖层里直接在 `mods/` 下的 `.jar`。
+///
+/// 覆盖层的 `mods/` 里常带说明与配置，所以只认 `.jar`；子目录里的文件加载器不读，也不算。同一落点只算
+/// 一次：覆盖文件会盖掉同名的下载文件，叠起来的几层覆盖也只留一份。比较不分大小写，与 Windows 上落盘
+/// 的结果一致。`overrides` 给去掉覆盖层前缀之后、相对实例目录的路径。
+pub(crate) fn count_pack_mods<'a>(
+    remote: impl IntoIterator<Item = &'a str>,
+    overrides: impl IntoIterator<Item = &'a str>,
+) -> usize {
+    fn directly_in_mods(key: &str) -> bool {
+        key.strip_prefix("mods/")
+            .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+    }
+    let mut landed: HashSet<String> = HashSet::new();
+    for path in remote {
+        let key = path.to_lowercase();
+        if directly_in_mods(&key) {
+            landed.insert(key);
+        }
+    }
+    for path in overrides {
+        let key = path.to_lowercase();
+        if directly_in_mods(&key) && key.ends_with(".jar") {
+            landed.insert(key);
+        }
+    }
+    landed.len()
 }
 
 /// 一次整合包导入的结果。
@@ -241,27 +273,12 @@ async fn remove_pack_cache(dir: Option<&Path>) {
 }
 
 impl Aurora {
-    /// 预览本地整合包文件（只读清单与条目表，不解压、不触网）。
+    /// 预览本地整合包文件：只读清单与条目表，不解压。CurseForge 清单有远程文件时要问两个批量接口才
+    /// 数得出 Mod、算得出下载量（导入同样要问），没配 API key 或断网时与导入报同样的错。
     pub async fn preview_modpack_file(&self, path: &Path) -> Result<ModpackPreview> {
         let archive = read_pack_blocking(path.to_path_buf()).await?;
-        let manifest = &archive.manifest;
-        let remote_bytes = match &manifest.remote {
-            RemoteFiles::Modrinth(files) => Some(files.iter().map(|f| f.size).sum()),
-            RemoteFiles::CurseForge(_) => None,
-        };
-        Ok(ModpackPreview {
-            format: manifest.format,
-            name: manifest.name.clone(),
-            version: manifest.version.clone(),
-            summary: manifest.summary.clone(),
-            author: manifest.author.clone(),
-            minecraft: manifest.minecraft.clone(),
-            loader: manifest.loader.clone(),
-            remote_files: manifest.remote.len(),
-            remote_bytes,
-            override_files: archive.overrides.len(),
-            override_bytes: archive.overrides_bytes,
-        })
+        let remote = self.remote_facts(&archive.manifest.remote).await?;
+        Ok(preview_of(&archive, remote))
     }
 
     /// 把整合包导入为新实例：[`Aurora::prepare_modpack`] 之后紧接 [`Aurora::import_modpack`]。
@@ -942,6 +959,27 @@ async fn curseforge_downloads(
         return Err(CoreError::FileDistributionBlocked { files: blocked });
     }
     Ok(downloads)
+}
+
+fn preview_of(archive: &PackArchive, remote: RemoteFacts) -> ModpackPreview {
+    let manifest = &archive.manifest;
+    ModpackPreview {
+        format: manifest.format,
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        summary: manifest.summary.clone(),
+        author: manifest.author.clone(),
+        minecraft: manifest.minecraft.clone(),
+        loader: manifest.loader.clone(),
+        remote_files: manifest.remote.len(),
+        mod_files: count_pack_mods(
+            remote.destinations.iter().map(String::as_str),
+            archive.overrides.iter().map(|entry| entry.path.as_str()),
+        ),
+        remote_bytes: remote.bytes,
+        override_files: archive.overrides.len(),
+        override_bytes: archive.overrides_bytes,
+    }
 }
 
 async fn read_pack_blocking(path: PathBuf) -> Result<PackArchive> {
@@ -1836,6 +1874,203 @@ mod tests {
             matches!(&err, CoreError::ModVersionNotFound { version_id, .. } if version_id == "33"),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn pack_mod_count_takes_remote_files_and_override_jars_directly_in_mods() {
+        let none: [&str; 0] = [];
+        assert_eq!(count_pack_mods(none, none), 0);
+        let remote = [
+            "mods/sodium.jar",
+            "Mods/Lithium.jar",
+            "mods/notes.txt",
+            "mods/old/legacy.jar",
+            "mods/",
+            "resourcepacks/faithful.zip",
+            "config/mods/x.jar",
+        ];
+        assert_eq!(
+            count_pack_mods(remote, none),
+            3,
+            "远程文件落在 mods/ 下就算"
+        );
+        let overrides = [
+            "mods/extra.JAR",
+            "mods/README.md",
+            "mods/sodium.jar",
+            "MODS/lithium.jar",
+            "mods/cfg/x.jar",
+            "config/extra.jar",
+        ];
+        assert_eq!(count_pack_mods(none, overrides), 3, "覆盖层只认 .jar");
+        assert_eq!(
+            count_pack_mods(remote, overrides),
+            4,
+            "覆盖文件盖掉同名下载文件，只算一次"
+        );
+
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let remote_count = rng.usize(0..300);
+        let override_count = rng.usize(0..300);
+        let remote: Vec<String> = (0..remote_count)
+            .map(|i| format!("mods/remote-{i}.jar"))
+            .collect();
+        let overrides: Vec<String> = (0..override_count)
+            .map(|i| format!("mods/override-{i}.jar"))
+            .chain(remote.iter().take(rng.usize(0..=remote_count)).cloned())
+            .collect();
+        assert_eq!(
+            count_pack_mods(
+                remote.iter().map(String::as_str),
+                overrides.iter().map(String::as_str)
+            ),
+            remote_count + override_count,
+            "seed {seed}"
+        );
+    }
+
+    fn write_curseforge_pack(dest: &Path, manifest: &serde_json::Value, entries: &[(&str, &[u8])]) {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(dest).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        writer.start_file("manifest.json", options).unwrap();
+        writer
+            .write_all(&serde_json::to_vec(manifest).unwrap())
+            .unwrap();
+        for (name, bytes) in entries {
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    fn curseforge_manifest(files: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "minecraft": { "version": "1.20.1", "modLoaders": [{ "id": "forge-47.2.0", "primary": true }] },
+            "manifestType": "minecraftModpack", "manifestVersion": 1,
+            "name": "本地 CF 包", "files": files, "overrides": "overrides"
+        })
+    }
+
+    /// 本地 .mrpack 预览：Mod 数是清单里落进 mods/ 的远程文件加上两层覆盖里的 .jar，同一落点只算一次；
+    /// 下载量是清单里的大小之和，整个预览不发任何请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_modrinth_preview_counts_remote_mods_and_override_jars() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = |path: &str, size: u64| {
+            serde_json::json!({
+                "path": path, "hashes": { "sha1": "a".repeat(40) },
+                "downloads": [format!("https://cdn.modrinth.com/{path}")], "fileSize": size
+            })
+        };
+        let mut manifest =
+            index(serde_json::json!({"minecraft": "1.21.1", "fabric-loader": "0.16.10"}));
+        manifest["files"] = serde_json::json!([
+            file("mods/sodium.jar", 1_000_000),
+            file("mods/lithium.jar", 600_000),
+            file("resourcepacks/faithful.zip", 9_000_000),
+        ]);
+        let pack = tmp.path().join("本地.mrpack");
+        write_pack(
+            &pack,
+            &manifest,
+            &[
+                ("overrides/mods/extra.jar", b"jar"),
+                ("overrides/mods/README.md", b"read me"),
+                ("overrides/mods/sodium.jar", b"patched"),
+                ("overrides/mods/old/legacy.jar", b"old"),
+                ("client-overrides/mods/extra.jar", b"client jar"),
+                ("client-overrides/mods/zoom.jar", b"zoom"),
+                ("overrides/config/sodium.json", b"{}"),
+            ],
+        );
+        let aurora = aurora(tmp.path(), &server);
+
+        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(preview.format, PackFormat::Modrinth);
+        assert_eq!(preview.remote_files, 3);
+        assert_eq!(preview.mod_files, 4, "sodium、lithium、extra、zoom");
+        assert_eq!(preview.remote_bytes, Some(10_600_000));
+        assert_eq!(preview.override_files, 6, "两层里的 extra.jar 只留一份");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// 本地 CurseForge 包：没有远程文件时不问平台（也就不需要 API key），Mod 数只来自覆盖层；有远程文件时
+    /// 按批量接口回的工程大类认，与覆盖层同名的 .jar 只算一次，下载量是平台给的大小之和。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_curseforge_preview_counts_mods_by_class_and_override_jars() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let overrides: &[(&str, &[u8])] = &[
+            ("overrides/mods/kubejs-extra.jar", b"jar"),
+            ("overrides/mods/create-0.5.1.jar", b"patched"),
+            ("overrides/mods/notes.txt", b"notes"),
+            ("overrides/config/create.toml", b"x=1"),
+        ];
+        let offline = tmp.path().join("offline.zip");
+        write_curseforge_pack(
+            &offline,
+            &curseforge_manifest(serde_json::json!([])),
+            overrides,
+        );
+        let preview = aurora(tmp.path(), &server)
+            .preview_modpack_file(&offline)
+            .await
+            .unwrap();
+        assert_eq!(preview.format, PackFormat::CurseForge);
+        assert_eq!((preview.remote_files, preview.mod_files), (0, 2));
+        assert_eq!(preview.remote_bytes, Some(0));
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file(11, 1, "create-0.5.1.jar", None),
+                    cf_file(22, 2, "jei-15.2.jar", None),
+                    cf_file(33, 3, "create-textures.zip", None),
+                ]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_mod(1, 6), cf_mod(2, 6), cf_mod(3, 12)
+                ]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let online = tmp.path().join("online.zip");
+        write_curseforge_pack(
+            &online,
+            &curseforge_manifest(serde_json::json!([
+                { "projectID": 1, "fileID": 11, "required": true },
+                { "projectID": 2, "fileID": 22, "required": true },
+                { "projectID": 3, "fileID": 33, "required": true }
+            ])),
+            overrides,
+        );
+        let archive = read_pack_blocking(online).await.unwrap();
+        let RemoteFiles::CurseForge(refs) = &archive.manifest.remote else {
+            panic!("应读出 CurseForge 清单");
+        };
+        let client = CurseForgeClient::new(aurora_base::http::build_client().unwrap(), "k")
+            .with_base_url(server.uri());
+        let remote = curseforge_remote_facts(&client, refs).await.unwrap();
+        let preview = preview_of(&archive, remote);
+        assert_eq!(preview.remote_files, 3);
+        assert_eq!(
+            preview.mod_files, 3,
+            "create 与 jei 是 Mod、材质包不是；覆盖层的 create 盖掉下载的那份，再加 kubejs-extra"
+        );
+        assert_eq!(preview.remote_bytes, Some(30), "每个文件 10 字节");
+        assert_eq!(preview.override_files, 4);
+        server.verify().await;
     }
 
     #[test]
