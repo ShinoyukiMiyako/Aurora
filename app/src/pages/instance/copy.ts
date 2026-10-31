@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { joinCrashLabels, joinMixed, LOADER_NAME } from "../../copy/flows";
+import { joinCrashLabels, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -257,6 +257,26 @@ export const MODS_COPY = {
 } as const;
 
 export const SOURCE_LABEL = { modrinth: "Modrinth", curseforge: "CurseForge" } as const;
+
+/** Mod 版本的不稳定通道沿用启动器自己发布通道的叫法；正式版不标。 */
+export const MOD_CHANNEL_LABEL = { beta: RELEASE_CHANNEL_LABEL.beta, alpha: RELEASE_CHANNEL_LABEL.preview } as const;
+
+export const UPDATE_PREVIEW_COPY = {
+  title: "更新 Mod",
+  subtitle: "勾选要更新的 Mod。旧版本会保留，之后可以在历史里回滚。",
+  selectAll: "全选",
+  picked: (picked: number, total: number) => `已勾选 ${picked} / ${total}`,
+  pick: (name: string) => `选择 ${name}`,
+  versions: (from: string, to: string) => `${from} → ${to}`,
+  changelog: "更新日志",
+  changelogLabel: (name: string) => `${name} 的更新日志`,
+  changelogFailed: "更新日志没能取到",
+  changelogEmpty: "这个版本没有写更新日志",
+  retry: "重试",
+  cancel: "取消",
+  confirm: (count: number) => `更新 ${count} 个`,
+  nonePicked: "至少勾选一个 Mod",
+} as const;
 
 // ---------------------------------------------------------------- 设置
 

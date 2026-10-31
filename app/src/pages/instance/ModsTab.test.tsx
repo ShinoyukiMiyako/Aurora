@@ -3,8 +3,9 @@
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { IpcError } from "../../ipc/errors";
 import type { InstanceDto } from "../../ipc/instances";
-import type { InstalledMod, ModSource, UpdateCandidate } from "../../ipc/mods";
+import type { InstalledMod, ModChangelog, ModSource, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
@@ -167,6 +168,31 @@ function modDto(fileName: string, name: string, over: Partial<InstalledMod> = {}
     icon_url: null,
     source: null,
     ...over,
+  };
+}
+
+function candidate(fileName: string, title: string, projectId: string, from: string | null, to: string, channel: "release" | "beta" | "alpha" = "release"): UpdateCandidate {
+  return {
+    file_name: fileName,
+    title,
+    current_version_id: `${projectId}-v1`,
+    current_version_number: from,
+    latest: {
+      version_id: `${projectId}-${to}`,
+      project_id: projectId,
+      platform: "modrinth",
+      name: to,
+      version_number: to,
+      release_channel: channel,
+      game_versions: [],
+      loaders: [],
+      file_name: `${projectId}-${to}.jar`,
+      file_size: 1000,
+      sha1: null,
+      download_url: null,
+      date_published: "",
+      dependencies: [],
+    },
   };
 }
 
@@ -390,5 +416,118 @@ describe("忽略更新", () => {
     click(local);
     await flush();
     expect(callsOf(ipc, "set_mod_update_hold")).toHaveLength(1);
+  });
+});
+
+describe("更新预览", () => {
+  beforeEach(() => {
+    updates = [
+      candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1"),
+      candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", null, "0.2.0-beta.1", "beta"),
+      candidate("handmade.jar", "Handmade", "hand", "1.0", "2.0-alpha", "alpha"),
+    ];
+  });
+
+  it("全部更新打开预览、默认全选；取消勾选 1 项后确认，入队任务的 items 只含其余各项", async () => {
+    await open();
+    click(button("全部更新 · 3"));
+    await flush();
+    expect(textOf(dialog())).toContain("已勾选 3 / 3");
+    expect(find("checkbox", "全选", dialog()).getAttribute("aria-checked")).toBe("true");
+    // 旧版本缺失写「版本未知」，测试版与预览版各带标签
+    expect(textOf(dialog())).toContain("版本未知 → 0.2.0-beta.1");
+    expect(textOf(dialog())).toContain("测试版");
+    expect(textOf(dialog())).toContain("预览版");
+
+    click(find("checkbox", "选择 Handmade", dialog()));
+    expect(textOf(dialog())).toContain("已勾选 2 / 3");
+    expect(find("checkbox", "全选", dialog()).getAttribute("aria-checked")).toBe("mixed");
+    click(button("更新 2 个", dialog()));
+    await flush();
+
+    const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
+    expect(composite).toHaveLength(1);
+    const items = composite[0].spec.args.items as { fileName: string; modVersionId: string }[];
+    expect(items.map((i) => [i.fileName, i.modVersionId])).toEqual([
+      ["fabric-api.jar", "P7dR8mSH-0.2.0-beta.1"],
+      ["sodium.jar", "AANobbMI-1.1"],
+    ]);
+    expect(callsOf(ipc, "check_updates")).toHaveLength(1);
+  });
+
+  it("全不选时确认键带原因禁用；批量更新只列选中行里可更新的", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Iris"));
+    click(button("更新"));
+    await flush();
+    expect(textOf(dialog())).toContain("已勾选 1 / 1");
+    click(find("checkbox", "全选", dialog()));
+    expect(textOf(dialog())).toContain("已勾选 0 / 1");
+    const confirm = button("更新 0 个", dialog());
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    click(confirm);
+    await flush();
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("只勾一项确认：按单个更新入队，批量选择随之清空", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Fabric API"));
+    click(button("更新"));
+    await flush();
+    click(find("checkbox", "选择 Fabric API", dialog()));
+    click(button("更新 1 个", dialog()));
+    await flush();
+    expect(launcher.state.tasks.map((t) => [t.spec.command, t.spec.args.fileName, t.spec.args.modVersionId])).toEqual([["update_mod", "sodium.jar", "AANobbMI-1.1"]]);
+    expect(textOf(document.body)).not.toContain("已选");
+  });
+
+  it("更新日志点开才请求：Markdown 经受限节点树渲染；为空时说明没写；失败给后端原文与重试", async () => {
+    let changelog: () => ModChangelog = () => ({ version_id: "AANobbMI-1.1", format: "markdown", body: "## 1.1\n\n- 修好了夜视闪烁" });
+    ipc.overrides.set("mod_update_changelog", () => changelog());
+    await open();
+    click(button("全部更新 · 3"));
+    await flush();
+    expect(callsOf(ipc, "mod_update_changelog")).toEqual([]);
+
+    click(button("Sodium 的更新日志", dialog()));
+    await flush();
+    expect(callsOf(ipc, "mod_update_changelog")).toEqual([{ versionId: ID, fileName: "sodium.jar", modVersionId: "AANobbMI-1.1" }]);
+    expect(dialog().querySelector("li")?.textContent).toBe("修好了夜视闪烁");
+    expect(button("Sodium 的更新日志", dialog()).getAttribute("aria-expanded")).toBe("true");
+
+    changelog = () => ({ version_id: "hand-2.0-alpha", format: "html", body: null });
+    click(button("Handmade 的更新日志", dialog()));
+    await flush();
+    expect(textOf(dialog())).toContain("这个版本没有写更新日志");
+
+    changelog = () => {
+      throw new IpcError("mod_platform_failed", "Modrinth 请求失败: HTTP 503", { status: 503 });
+    };
+    click(button("Fabric API 的更新日志", dialog()));
+    await flush();
+    expect(textOf(dialog())).toContain("更新日志没能取到");
+    expect(textOf(dialog())).toContain("Modrinth 请求失败: HTTP 503（503）");
+    changelog = () => ({ version_id: "P7dR8mSH-0.2.0-beta.1", format: "markdown", body: "- 修了前置加载顺序" });
+    click(button("重试", dialog()));
+    await flush();
+    expect(textOf(dialog())).toContain("修了前置加载顺序");
+    expect(textOf(dialog())).not.toContain("更新日志没能取到");
+    // 日志失败不影响勾选与确认
+    expect(textOf(dialog())).toContain("已勾选 3 / 3");
+  });
+
+  it("概览页的「全部更新」打开同一个预览，确认后才入队", async () => {
+    await open("overview");
+    click(button("全部更新"));
+    await flush();
+    expect(textOf(dialog())).toContain("已勾选 3 / 3");
+    expect(launcher.state.tasks).toEqual([]);
+    click(button("更新 3 个", dialog()));
+    await flush();
+    const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
+    expect((composite[0].spec.args.items as { fileName: string }[]).map((i) => i.fileName)).toEqual(["fabric-api.jar", "handmade.jar", "sodium.jar"]);
   });
 });

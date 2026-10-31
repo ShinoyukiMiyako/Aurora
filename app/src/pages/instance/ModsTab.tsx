@@ -1,5 +1,5 @@
 // Mod 管理：吸顶工具条（搜索、状态筛选、打开文件夹、全部更新、添加）+ 总数说明 + 表格。
-// 选中至少一行时工具条原位换成批量操作条。
+// 选中至少一行时工具条原位换成批量操作条；全部更新与批量更新都先打开更新预览，勾选后才入队。
 // 游戏运行中（含加载中）与安装中禁用全部 Mod 文件操作：JVM 占着文件，Windows 下改名、替换、删除都会失败。
 // 忽略更新只改记录、不碰 jar，只在补全时禁用。
 
@@ -57,6 +57,7 @@ import {
 } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
+import { UpdatePreviewModal } from "./UpdatePreviewModal";
 
 export interface ModsTabProps {
   inst: InstanceSummary;
@@ -71,6 +72,12 @@ const NETWORK_FAILED = "network_failed";
 const NEW_TAG_TICK_MS = 60 * 60 * 1000;
 
 type BatchAction = "enable" | "disable" | "update" | "remove";
+
+/** 更新预览一次打开的范围：null 为全部可更新的，否则为批量选中的那几个文件。key 每次打开递增，勾选状态从默认全选重新开始。 */
+interface PreviewScope {
+  files: ReadonlySet<string> | null;
+  key: number;
+}
 
 export function ModsTab({ inst, queryId, ops, updates }: ModsTabProps) {
   if (inst.loader === "vanilla") return <VanillaMods inst={inst} />;
@@ -113,6 +120,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const [checking, setChecking] = useState(false);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [batchBusy, setBatchBusy] = useState<BatchAction | null>(null);
+  const [preview, setPreview] = useState<PreviewScope | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   // 工具条与批量操作条互换时新条淡入；页面刚挂上时的那一条不淡入
   const barMounted = useRef(false);
@@ -202,10 +211,23 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     );
   };
 
-  const updateAll = () => {
-    const files = rows.filter((r) => r.update !== null).map((r) => r.fileName);
+  const openPreview = (files: ReadonlySet<string> | null) => {
+    setPreview((p) => ({ files, key: p === null ? 0 : p.key + 1 }));
+    setPreviewOpen(true);
+  };
+  const previewRows = preview === null ? [] : rows.filter((r) => r.update !== null && (preview.files === null || preview.files.has(r.fileName)));
+  const confirmPreview = (picked: readonly UpdateCandidate[]) => {
+    setPreviewOpen(false);
+    const files = rows.filter((r) => picked.some((c) => c.file_name === enabledFileName(r.fileName))).map((r) => r.fileName);
+    const batch = preview !== null && preview.files !== null;
     setPending(new Set(files));
-    void run(() => actions.updateAllMods(id), ACTION_ERROR.updateMods).then(() => setPending(new Set()));
+    if (batch) setBatchBusy("update");
+    void run(() => actions.updateAllMods(id, picked), ACTION_ERROR.updateMods).then(() => {
+      setPending(new Set());
+      if (!batch) return;
+      setBatchBusy(null);
+      setSelected(new Set());
+    });
   };
 
   const checkUpdates = () => {
@@ -249,25 +271,6 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     // 已是目标状态的不发：通知里的个数就是真正改了的个数
     const files = selectedRows.filter((r) => r.enabled !== enabled).map((r) => r.fileName);
     runBatch(enabled ? "enable" : "disable", () => actions.toggleMods(id, files, enabled), ACTION_ERROR.toggleMod);
-  };
-
-  const batchUpdate = () => {
-    const targets = selectedRows.filter((r) => r.update !== null);
-    setPending(new Set(targets.map((r) => r.fileName)));
-    runBatch(
-      "update",
-      async () => {
-        try {
-          await actions.updateAllMods(
-            id,
-            targets.flatMap((r) => (r.update === null ? [] : [r.update])),
-          );
-        } finally {
-          setPending(new Set());
-        }
-      },
-      ACTION_ERROR.updateMods,
-    );
   };
 
   const batchRemove = () => {
@@ -334,7 +337,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
               disabled={batchBlocked("update")}
               disabledReason={batch.update}
               loading={batchBusy === "update"}
-              onClick={batchUpdate}
+              onClick={() => openPreview(new Set(selectedRows.map((r) => r.fileName)))}
             >
               {MODS_COPY.batchUpdate}
             </Button>
@@ -365,7 +368,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           <div className={styles.toolRight}>
             <FolderButton ops={ops} target="mods" label={MODS_COPY.openFolder} variant="secondary" />
             {counts.outdated > 0 ? (
-              <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updatingAll} onClick={updateAll}>
+              <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updatingAll} onClick={() => openPreview(null)}>
                 {MODS_COPY.updateAll(counts.outdated)}
               </Button>
             ) : (
@@ -474,6 +477,9 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         </Card>
       )}
 
+      {preview !== null && (
+        <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
+      )}
     </div>
   );
 }
