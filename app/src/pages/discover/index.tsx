@@ -232,6 +232,8 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
   // 首页超时只记在超时那一刻的请求上：换了请求、点了重试即作废。超时的那一轮对加载门来说已经结束，
   // 作废后加载门看到加载重新开始，从头算新的一轮
   const [timedOutKey, setTimedOutKey] = useState<string | null>(null);
+  // 结果晚到或失败，那一次加载就结束了：之后同一组条件再从头加载（缓存被丢弃）是新的一次，不能沿用旧的超时
+  if (timedOutKey !== null && !pages.loadingFirst) setTimedOutKey(null);
   const timedOut = pages.loadingFirst && timedOutKey === requestKey;
   // 首页的骨架与「比平时慢」、下一页列表尾的「比平时慢」都走全站统一的加载门
   const gate = useLoadingGate(pages.loadingFirst && !timedOut);

@@ -424,6 +424,55 @@ describe("发现页：加载态的时机", () => {
     expect(document.body.textContent).not.toContain("请求超时");
   });
 
+  it("超时后结果晚到；之后同一组条件的首页缓存丢了、再从头加载：重新计时，不直接显示超时", async () => {
+    let first = true;
+    pages = (args) => {
+      if (args.query === "换一个") return result([entry("B")]);
+      if (first) {
+        first = false;
+        return new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 25_000)) as never;
+      }
+      return new Promise<SearchResultDto>(() => {}) as never;
+    };
+    await mount();
+    await advance(10_000);
+    await advance(10_000);
+    expect(document.body.textContent).toContain("请求超时");
+    await advance(5_000);
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+
+    // 换个关键词后断网再恢复：没人在看的首页缓存随之丢弃
+    typeInto(searchInput(), "换一个");
+    act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    expect(cardTitles()).toEqual(["资源 B，查看详情"]);
+    online = false;
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    online = true;
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await settle();
+    });
+
+    // 回到最初的条件：这是新的一次请求，刚开始加载
+    const before = searchCalls().length;
+    typeInto(searchInput(), "");
+    await flush();
+    expect(searchCalls()).toHaveLength(before + 1);
+    expect(document.body.textContent).toContain("搜索中…");
+    expect(document.body.textContent).not.toContain("请求超时");
+    // 分两步走：慢提示在 10 s 那一刻渲染出来，超时接在它后面计
+    await advance(10_000);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+  });
+
   // 慢提示与超时同属加载门的一轮：加载中途换了条件不另起一轮，两者不会一个重来一个不重来
   it("首页加载中途换关键词：慢提示与超时按同一轮计时，都从这一轮开始的时刻算", async () => {
     pages = () => new Promise<SearchResultDto>(() => {}) as never;
