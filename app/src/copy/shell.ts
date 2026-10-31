@@ -1,7 +1,7 @@
 // 外壳自己的文案：标题栏、状态岛、下载快览、账户胶囊、侧栏、命令面板、通知容器与错误兜底。
-// 与流程共用的词（阶段名、按钮动词、任务状态）从 copy/flows 取，不在这里另写一份。
+// 与流程共用的词（阶段名、按钮动词、任务状态）从 flows.ts 取，不在这里另写一份。
 
-import { LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "../copy/flows";
+import { LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "./flows";
 import { MAX_PARALLEL_TASKS } from "../domain/limits";
 import { APP_NAME } from "../lib/app-info";
 
@@ -107,6 +107,17 @@ export const TOASTS_COPY = {
   region: "通知",
 } as const;
 
+/** 窗口级文件拖放：放置提示与松开了别的文件时的说明。 */
+export const DROP_COPY = {
+  modpackHint: "松开以导入整合包",
+  notModpack: { title: "拖进来的不是整合包", body: "只认 .mrpack 和 CurseForge 导出的 .zip" },
+} as const;
+
+/** 系统选择文件对话框：标题与文件类型下拉里的名称。 */
+export const FILE_PICK_COPY = {
+  modpack: { title: "选择整合包文件", filter: "整合包" },
+} as const;
+
 /** 页面级错误边界：外壳之内只有这一处兜底，标题栏、侧栏、状态岛不受页面错误影响。 */
 export const PAGE_ERROR_COPY = {
   title: "这一页出错了",
@@ -139,4 +150,11 @@ export const SHELL_ACTION_ERROR = {
   skin: "账户皮肤读不出来",
   updater: "更新状态读不出来",
   pagePreload: "页面模块没能预载",
+  fileDrop: "文件拖放没有接上",
+  startupNotices: "启动提示读不出来",
+} as const;
+
+/** 首次启动却缺少向导模块：构建产物不完整，外壳不能继续（错误原文进整屏错误页）。 */
+export const SHELL_DEFECT_COPY = {
+  missingOnboarding: "首次启动向导模块缺失：这个构建不完整，无法完成首次设置",
 } as const;

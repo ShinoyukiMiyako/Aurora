@@ -122,6 +122,31 @@
   --sk-disabled: 0.5;
   --sk-scrollbar-size: 10px;
 
+  /*
+   * ---- 外观预览：只供明暗卡的迷你预览与强调色块使用 ----
+   * 这两处要画出非当前明暗、非当前强调色的真实样子，而主题令牌只能在 :root 上随外观切换、不能在子树里重设，
+   * 所以把每种明暗与强调色的几个关键色值静态声明一份，与当前主题无关、不进 Tailwind 工具色。
+   * 每个值都与下方主题块里对应的基础令牌相同，由主题测试逐个核对。强调色块固定画日樱值。
+   */
+  --sk-preview-day-bg: #FBF7F9;
+  --sk-preview-day-surface: #FFFFFF;
+  --sk-preview-day-line: #F1E6EB;
+  --sk-preview-day-line-2: #E6D6DE;
+  --sk-preview-night-bg: #1B1620;
+  --sk-preview-night-surface: #262030;
+  --sk-preview-night-line: #352C3F;
+  --sk-preview-night-line-2: #43384E;
+  --sk-preview-day-sakura: #CF3080;
+  --sk-preview-day-amethyst: #8953DF;
+  --sk-preview-day-moss: #3F7D49;
+  --sk-preview-night-sakura: #F06AAE;
+  --sk-preview-night-amethyst: #B08CF5;
+  --sk-preview-night-moss: #78C287;
+  --sk-preview-sakura-2: #F7B6D2;
+  --sk-preview-amethyst-2: #CDB6F5;
+  --sk-preview-moss-2: #B9DDB0;
+  --sk-preview-ink: #FFFFFF;
+
   /* ---- 字体与字重 ---- */
   --sk-font: "Outfit Variable", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
   --sk-mono: "JetBrains Mono Variable", "Microsoft YaHei UI", "Microsoft YaHei", monospace;
@@ -203,6 +228,7 @@
   --sk-z-page: 1;
   --sk-z-main: 2;
   --sk-z-sidebar: 3;
+  --sk-z-drop: 4;
   --sk-z-overlay: 50;
   --sk-z-modal: 10;
   --sk-z-palette: 20;

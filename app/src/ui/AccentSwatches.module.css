@@ -1,0 +1,67 @@
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sk-space-12);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  padding: var(--sk-space-12);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.card:hover,
+.card[aria-checked="true"] {
+  border-color: var(--sk-accent-line);
+}
+
+.card[aria-checked="true"] {
+  outline: 3px solid var(--sk-accent-soft);
+}
+
+.card:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+/* 色块渐变与日樱强调色渐变同一公式，两端换成该强调色自己的预览值 */
+.swatch {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--sk-r-pill);
+  background: linear-gradient(140deg, color-mix(in srgb, var(--swatch-2) 35%, var(--swatch)) 0%, var(--swatch) 30%, var(--swatch) 100%);
+  color: var(--sk-preview-ink);
+}
+
+.swatch[data-tint="sakura"] {
+  --swatch: var(--sk-preview-day-sakura);
+  --swatch-2: var(--sk-preview-sakura-2);
+}
+
+.swatch[data-tint="amethyst"] {
+  --swatch: var(--sk-preview-day-amethyst);
+  --swatch-2: var(--sk-preview-amethyst-2);
+}
+
+.swatch[data-tint="moss"] {
+  --swatch: var(--sk-preview-day-moss);
+  --swatch-2: var(--sk-preview-moss-2);
+}
+
+.name {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}

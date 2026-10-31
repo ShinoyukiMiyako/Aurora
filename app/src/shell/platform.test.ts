@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CORE_EVENT } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { callsOf, deferred, emit, resetRecorder } from "../test/launcher";
-import { gameDirectoryCommands, pickDirectory, updaterCommands } from "./platform";
+import { gameDirectoryCommands, pickDirectory, pickFile, updaterCommands } from "./platform";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const update = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
@@ -16,6 +18,7 @@ function download(taskId: string, bytes: number, totalBytes: number | null) {
 
 beforeEach(() => {
   resetRecorder(ipc);
+  dialog.open.mockReset();
 });
 
 afterEach(() => {
@@ -83,5 +86,23 @@ describe("游戏目录与选择文件夹", () => {
 
   it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消", async () => {
     await expect(pickDirectory("C:\\Users\\a\\.minecraft")).rejects.toThrow("浏览器预览里没有系统的选择文件夹对话框");
+  });
+});
+
+describe("选择文件", () => {
+  const filter = { name: "整合包", extensions: ["mrpack", "zip"] };
+
+  it("窗口里：只选一个文件，带上标题与扩展名过滤；选中给出完整路径，取消为 null", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.open.mockResolvedValueOnce("D:\Downloads\pack.mrpack").mockResolvedValueOnce(null);
+    await expect(pickFile({ title: "选择整合包文件", filter })).resolves.toBe("D:\Downloads\pack.mrpack");
+    await expect(pickFile({ title: "选择整合包文件", filter })).resolves.toBeNull();
+    expect(dialog.open).toHaveBeenCalledTimes(2);
+    expect(dialog.open).toHaveBeenNthCalledWith(1, { title: "选择整合包文件", multiple: false, directory: false, filters: [{ name: "整合包", extensions: ["mrpack", "zip"] }] });
+  });
+
+  it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消，也不去调对话框", async () => {
+    await expect(pickFile({ title: "选择整合包文件", filter })).rejects.toThrow("浏览器预览里没有系统的选择文件对话框");
+    expect(dialog.open).not.toHaveBeenCalled();
   });
 });

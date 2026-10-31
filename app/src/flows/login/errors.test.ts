@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AUTHLIB_COPY } from "../../copy/flows";
 import { IpcError } from "../../ipc/errors";
-import { AUTHLIB_DIALOG_COPY } from "./copy";
+import { AUTHLIB_DIALOG_COPY } from "../../copy/login";
 import { loginProblem, normalizeServerUrl, probeProblem } from "./errors";
 
 describe("探测服务器的原位提示", () => {

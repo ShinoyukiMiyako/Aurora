@@ -1,6 +1,6 @@
-// 登录弹窗自己的文案；与账户页、启动拦截共用的词（按钮名、失败对照、外置登录说明）从 copy/flows 取。
+// 登录弹窗自己的文案；与账户页、启动拦截共用的词（按钮名、失败对照、外置登录说明）从 flows.ts 取。
 
-import { MICROSOFT_LOGIN_COPY, accountKindLabel } from "../../copy/flows";
+import { MICROSOFT_LOGIN_COPY, accountKindLabel } from "./flows";
 
 export const DEVICE_DIALOG_COPY = {
   title: "添加微软账户",

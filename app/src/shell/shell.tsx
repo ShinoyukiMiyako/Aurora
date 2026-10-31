@@ -6,7 +6,7 @@
 // 内容区滚动容器交给 bindPageScroll，并把 OverlayRoot 放在应用根元素的最后一个子位置。
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ACTION_ERROR } from "../copy/flows";
+import { ACTION_ERROR, TOAST_COPY } from "../copy/flows";
 import { artStatus, onArtChanged } from "../ipc/art";
 import { endBreathWindow, startBreathWindow } from "../launch/breath";
 import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";
@@ -17,8 +17,11 @@ import { routeInstanceId, type Route } from "../state/route";
 import { pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
 import type { Toast } from "../state/toasts";
+import { DROP_COPY, FILE_PICK_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
+import { isTypingTarget } from "../lib/util";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { useGlobalShortcuts, type Shortcut } from "./keys";
+import { FILE_KINDS, useFileDrop, type FileDropHint, type FileDropTarget, type FileKind } from "./file-drop";
+import { assertPageCombo, matchesCombo, useGlobalShortcuts, type KeyCombo, type Shortcut } from "./keys";
 import {
   canBack,
   canForward,
@@ -35,8 +38,10 @@ import {
   type NavHistory,
 } from "./nav";
 import { OverlayProvider, useOverlayControls, useOverlayState } from "./overlay";
+import { pickFile as pickNativeFile } from "./platform";
 import { useTier, type Tier } from "./tier";
 import { useRunner } from "./useRunner";
+import { useWindowPort } from "./window";
 
 export type { ConfirmOptions } from "../launch/host";
 
@@ -76,8 +81,29 @@ export interface ShellApi {
   closeCreateInstance(): void;
   /** 页面级 Ctrl+F：页面挂载时登记、卸载时调用返回的函数注销；后登记的优先。 */
   registerFind(handler: () => void): () => void;
+  /**
+   * 页面级快捷键（实例详情的 F2 改名之类）：页面挂载时在 effect 里登记、卸载时调用返回的函数注销；同一组合后登记的优先。
+   * 与全局快捷键同一套规则：只在没有浮层打开、不在首次启动向导时生效，输入法组字期间不响应，控件自己处理过的按键不再触发。
+   * 不带 Ctrl / Alt 的组合（F2、字母）在焦点落在输入框里时不触发，那时按键属于输入框。
+   * 占用全局快捷键或 Esc 属于设计错误，登记时抛出。
+   */
+  registerShortcut(combo: KeyCombo, handler: () => void): () => void;
+  /**
+   * 接收窗口级文件拖放：登记期间（通常是导入弹窗打开期间）独占全部拖放事件，外壳不再自己导航或提示。
+   * 没有接收方时，拖进 .mrpack / .zip 由外壳导航到发现页并带上 importFile。
+   */
+  registerFileDrop(target: FileDropTarget): () => void;
+  /** 拖动经过窗口时外壳要显示的放置提示（外壳布局据此绘制）。 */
+  fileDropHint: FileDropHint;
+  /** 系统选择文件对话框，按文件种类给出标题与扩展名过滤；用户取消为 null。浏览器预览里没有这个对话框，如实拒绝。 */
+  pickFile(kind: FileKind): Promise<string | null>;
   /** 通知的动作：先关闭这条通知，再导航或经统一错误处理执行命令。 */
   runToastAction(toast: Toast): void;
+  /**
+   * 写剪贴板，给 CopyButton、KV、LogConsole 的 onCopy 直接用：写入成功为 true；失败经统一错误处理弹出「复制失败」后为 false，
+   * 永不 reject（失败已经报告过，再抛回去会报两次）。
+   */
+  copyText(text: string): Promise<boolean>;
   /** 主页花瓣暂停：窗口不可见、失焦或有带遮罩的浮层。 */
   petalsPaused: boolean;
   /** 应用根元素（尺寸分档按它的宽度）。 */
@@ -264,9 +290,36 @@ function ShellCore({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  const pageShortcuts = useRef<{ combo: KeyCombo; handler: () => void }[]>([]);
+  const registerShortcut = useCallback((combo: KeyCombo, handler: () => void) => {
+    assertPageCombo(combo);
+    const entry = { combo, handler };
+    pageShortcuts.current.push(entry);
+    return () => {
+      const i = pageShortcuts.current.lastIndexOf(entry);
+      if (i >= 0) pageShortcuts.current.splice(i, 1);
+    };
+  }, []);
+
   // ---------------------------------------------------------------- 全局快捷键
 
   const shortcutState = { firstRun: state.firstRun, paletteOpen: palette.open, pins: pinnedInstances(state) };
+
+  /** 不是全局快捷键的按键：交给最后登记的、组合相同的页面快捷键；返回是否接手。 */
+  const onPageKey = (event: KeyboardEvent): boolean => {
+    if (shortcutState.firstRun === true || overlay.isOpen() || shortcutState.paletteOpen) return false;
+    const list = pageShortcuts.current;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const entry = list[i];
+      if (!matchesCombo(event, entry.combo)) continue;
+      // 不带 Ctrl / Alt 的组合在输入框里属于输入框本身（例如改名框里再按 F2）
+      if (entry.combo.ctrl !== true && entry.combo.alt !== true && isTypingTarget(event.target)) return false;
+      entry.handler();
+      return true;
+    }
+    return false;
+  };
+
   useGlobalShortcuts((shortcut: Shortcut) => {
     // 首次启动向导期间只有 Esc 生效（Esc 归浮层体系）
     if (shortcutState.firstRun === true) return;
@@ -311,7 +364,22 @@ function ShellCore({ children }: { children: ReactNode }) {
         go({ page: "settings" });
         return;
     }
+  }, onPageKey);
+
+  // ---------------------------------------------------------------- 文件：拖放与选择文件
+
+  const port = useWindowPort();
+  const fileDrop = useFileDrop(port, {
+    blocked: () => shortcutState.firstRun === true || overlay.isOpen() || shortcutState.paletteOpen,
+    go,
+    rejectNonModpack: () => void actions.toast("warning", DROP_COPY.notModpack.title, DROP_COPY.notModpack.body),
+    reportError: (error) => void run(() => Promise.reject(error), SHELL_ACTION_ERROR.fileDrop),
   });
+
+  const pickFile = useCallback((kind: FileKind) => {
+    const copy = FILE_PICK_COPY[kind];
+    return pickNativeFile({ title: copy.title, filter: { name: copy.filter, extensions: FILE_KINDS[kind].extensions } });
+  }, []);
 
   // ---------------------------------------------------------------- 尺寸分档、可见性与焦点
 
@@ -397,6 +465,8 @@ function ShellCore({ children }: { children: ReactNode }) {
     [actions, go, run],
   );
 
+  const copyText = useCallback(async (text: string) => (await run(() => navigator.clipboard.writeText(text), TOAST_COPY.copyFailed)).ok, [run]);
+
   const launchHost = useMemo<LaunchHost>(() => ({ run, go, confirm }), [confirm, go, run]);
 
   const nav = useMemo<NavApi>(
@@ -415,12 +485,35 @@ function ShellCore({ children }: { children: ReactNode }) {
       openCreateInstance,
       closeCreateInstance,
       registerFind,
+      registerShortcut,
+      registerFileDrop: fileDrop.registerFileDrop,
+      fileDropHint: fileDrop.hint,
+      pickFile,
       runToastAction,
+      copyText,
       petalsPaused,
       bindRoot: setRootEl,
       bindPageScroll,
     }),
-    [bindPageScroll, closeCreateInstance, closePalette, confirm, createInstance, openCreateInstance, openPalette, palette, petalsPaused, registerFind, runToastAction, tier],
+    [
+      bindPageScroll,
+      closeCreateInstance,
+      closePalette,
+      confirm,
+      copyText,
+      createInstance,
+      fileDrop.hint,
+      fileDrop.registerFileDrop,
+      openCreateInstance,
+      openPalette,
+      palette,
+      petalsPaused,
+      pickFile,
+      registerFind,
+      registerShortcut,
+      runToastAction,
+      tier,
+    ],
   );
 
   return (

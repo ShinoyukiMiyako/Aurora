@@ -25,7 +25,7 @@ import { KeyHint } from "../ui/KeyHint";
 import { useSwitchAccount } from "./AccountCapsule";
 import { useChrome } from "./chrome";
 import styles from "./CommandPalette.module.css";
-import { PALETTE_COPY, SHELL_ACTION_ERROR } from "./copy";
+import { PALETTE_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
 import { useEscapeLayer, useFocusTrap, useOverlayRoot } from "./overlay";
 import { moveHighlight, normalizeQuery, rankPalette, type PaletteCandidate, type PaletteGroup } from "./palette";
 import { useNav, useShell } from "./shell";

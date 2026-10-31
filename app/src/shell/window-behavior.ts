@@ -10,7 +10,7 @@ import { useLauncher } from "../state/launcher";
 import { activeTasks, closeNeedsConfirm } from "../state/selectors";
 import type { LauncherState } from "../state/store";
 import { isActiveTask } from "../state/tasks";
-import { SHELL_ACTION_ERROR } from "./copy";
+import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { useShell } from "./shell";
 import { useRunner } from "./useRunner";
 import { useWindowPort } from "./window";

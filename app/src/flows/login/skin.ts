@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import type { SkinRef } from "../../art/skin/layout";
 import { useRunner } from "../../shell/useRunner";
 import { useSkinInfo } from "../../state/queries/home";
-import { LOGIN_ERROR } from "./copy";
+import { LOGIN_ERROR } from "../../copy/login";
 
 export function useLoginSkin(uuid: string): SkinRef | null {
   const skin = useSkinInfo(uuid);

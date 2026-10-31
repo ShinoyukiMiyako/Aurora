@@ -49,3 +49,12 @@
   font-variant-numeric: tabular-nums;
   color: var(--sk-text);
 }
+
+/* 84 档是页面级的总进度环：圆心数字按小标题字号画，才和 7px 的描边相称 */
+.ring[data-size="84"] > .label {
+  font-size: var(--sk-fs-lead);
+}
+
+.ring[data-empty] > .label {
+  color: var(--sk-text-2);
+}

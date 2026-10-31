@@ -18,7 +18,7 @@ import { IconButton } from "../../ui/IconButton";
 import { Modal } from "../../ui/Modal";
 import { useRovingGroup } from "../../ui/roving";
 import { TextInput } from "../../ui/TextInput";
-import { AUTHLIB_DIALOG_COPY, LOGIN_ERROR } from "./copy";
+import { AUTHLIB_DIALOG_COPY, LOGIN_ERROR } from "../../copy/login";
 import { loginProblem, normalizeServerUrl, probeProblem, type InlineProblem, type LoginProblem } from "./errors";
 import styles from "./login.module.css";
 

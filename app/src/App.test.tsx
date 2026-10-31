@@ -9,10 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import App, { prepareApp } from "./App";
 import { stubCanvas } from "./art/illustrations/test-canvas";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL, SETTINGS_SECTION_LABEL } from "./copy/flows";
-import { DEVICE_DIALOG_COPY } from "./flows/login/copy";
+import { DEVICE_DIALOG_COPY } from "./copy/login";
 import { FOOTER_COPY, STEP_COPY } from "./flows/onboarding/copy";
 import { resetMocks } from "./ipc/mock";
-import { ACCOUNT_COPY, PAGE_ERROR_COPY, SIDEBAR_COPY } from "./shell/copy";
+import { ACCOUNT_COPY, PAGE_ERROR_COPY, SIDEBAR_COPY } from "./copy/shell";
 import { DEFAULT_APPEARANCE } from "./state/appearance";
 import { INSTANCE_TABS, PAGE_IDS, SETTINGS_SECTIONS, type PageId } from "./state/route";
 import { stubMatchMedia, stubResizeObserver } from "./test/dom";

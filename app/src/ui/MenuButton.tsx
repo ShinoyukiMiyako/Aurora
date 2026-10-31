@@ -20,10 +20,12 @@ export interface MenuTriggerProps {
 export interface MenuButtonProps {
   items: readonly MenuEntry[];
   placement?: Placement;
+  /** 菜单与触发器的间距（px），默认同 Popover。 */
+  offset?: number;
   trigger: (props: MenuTriggerProps) => ReactNode;
 }
 
-export function MenuButton({ items, placement = "bottom-start", trigger }: MenuButtonProps) {
+export function MenuButton({ items, placement = "bottom-start", offset, trigger }: MenuButtonProps) {
   const base = useId();
   const triggerId = `${base}-trigger`;
   const menuId = `${base}-menu`;
@@ -61,7 +63,7 @@ export function MenuButton({ items, placement = "bottom-start", trigger }: MenuB
         "aria-controls": open ? menuId : undefined,
         "data-open": open ? "" : undefined,
       })}
-      <Menu open={open} anchor={anchor} onClose={() => setOpen(false)} items={items} openedBy={openedBy} placement={placement} id={menuId} aria-labelledby={triggerId} />
+      <Menu open={open} anchor={anchor} onClose={() => setOpen(false)} items={items} openedBy={openedBy} placement={placement} offset={offset} id={menuId} aria-labelledby={triggerId} />
     </>
   );
 }

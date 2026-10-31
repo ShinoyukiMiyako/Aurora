@@ -9,7 +9,7 @@ import { createPortal } from "react-dom";
 import { useLauncher } from "../state/launcher";
 import { toastCountdown, type Toast as ToastState } from "../state/toasts";
 import { Toast } from "../ui/Toast";
-import { TOASTS_COPY } from "./copy";
+import { TOASTS_COPY } from "../copy/shell";
 import { useOverlayRoot } from "./overlay";
 import { useShell } from "./shell";
 import styles from "./Toasts.module.css";

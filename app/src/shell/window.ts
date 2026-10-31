@@ -15,6 +15,12 @@ export interface CloseRequest {
 
 export type CloseRequestHandler = (request: CloseRequest) => void | Promise<void>;
 
+/**
+ * 窗口级文件拖放：系统把文件拖进、拖过、松开在窗口上或拖出窗口。只有文件会触发，拖动网页链接、文字不会：
+ * 原生拖放接管了整个窗口的放置目标（网页里的 drop 事件拿不到文件的完整路径），而它只认文件。
+ */
+export type FileDropEvent = { type: "enter"; paths: string[] } | { type: "over" } | { type: "drop"; paths: string[] } | { type: "leave" };
+
 export interface WindowPort {
   /** 是否有原生窗口（Tauri 里为 true）。 */
   readonly native: boolean;
@@ -34,6 +40,7 @@ export interface WindowPort {
   onResized(handler: () => void): Promise<() => void>;
   onFocusChanged(handler: (focused: boolean) => void): Promise<() => void>;
   onCloseRequested(handler: CloseRequestHandler): Promise<() => void>;
+  onFileDrop(handler: (event: FileDropEvent) => void): Promise<() => void>;
 }
 
 export function tauriWindowPort(): WindowPort {
@@ -54,6 +61,12 @@ export function tauriWindowPort(): WindowPort {
     onResized: (handler) => win.onResized(() => handler()),
     onFocusChanged: (handler) => win.onFocusChanged(({ payload }) => handler(payload)),
     onCloseRequested: (handler) => win.onCloseRequested(handler),
+    // 主窗口是窗口内容型 webview，原生拖放以窗口事件送达；位置信息用不上，只转交类型与路径
+    onFileDrop: (handler) =>
+      win.onDragDropEvent(({ payload }) => {
+        if (payload.type === "enter" || payload.type === "drop") handler({ type: payload.type, paths: payload.paths });
+        else handler({ type: payload.type });
+      }),
   };
 }
 
@@ -104,6 +117,11 @@ export function browserWindowPort(): WindowPort {
         closeHandlers.delete(handler);
       });
     },
+    // 网页里的 drop 事件拿不到文件的完整路径，后端也就读不到那个文件：浏览器预览不支持文件拖放
+    onFileDrop: () => {
+      console.info("[window] 浏览器预览没有原生文件拖放，拖进来的文件不处理");
+      return Promise.resolve(() => {});
+    },
   };
   return port;
 }
@@ -131,14 +149,17 @@ export function useWindowPort(): WindowPort {
 /**
  * 窗口以不可见状态创建，首帧画完再显示：ready 第一次为真时，等这次布局之后的下一帧调用 show()。
  * 显示失败不在这里处理：rejection 进控制台，后端 3 秒后的兜底显示仍会把窗口显示出来。
+ *
+ * 「已显示」在那一帧真正触发时才记下：开发构建的 StrictMode 会把布局 effect 装上、拆掉再装一次，
+ * 拆掉时那一帧被取消，若提前记下，第二次安装会以为已经显示过而什么都不做，窗口只能等后端兜底。
  */
 export function useRevealWindow(ready: boolean): void {
   const port = useWindowPort();
   const shown = useRef(false);
   useLayoutEffect(() => {
     if (!ready || shown.current) return;
-    shown.current = true;
     const frame = requestAnimationFrame(() => {
+      shown.current = true;
       port.show().catch((error: unknown) => console.error("窗口没能显示", error));
     });
     return () => cancelAnimationFrame(frame);

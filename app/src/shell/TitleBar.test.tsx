@@ -7,7 +7,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launch
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
-import { ACCOUNT_COPY, PEEK_COPY, TITLEBAR_COPY } from "./copy";
+import { ACCOUNT_COPY, PEEK_COPY, TITLEBAR_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useNav, type NavApi } from "./shell";
 import { TitleBar } from "./TitleBar";

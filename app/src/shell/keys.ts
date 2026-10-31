@@ -1,5 +1,5 @@
 // 全局快捷键、鼠标侧键与原生右键菜单。监听只挂在 window 上、由外壳统一处理，页面不各自监听全局键；
-// 页面级的 Ctrl+F 由页面向外壳登记处理函数，经这里的同一个处理器分发。
+// 页面级快捷键（Ctrl+F 与 registerShortcut 登记的组合）由页面向外壳登记处理函数，经这里的同一个处理器分发。
 //
 // - 修饰键只认 Ctrl，不认 Win 键：Win 组合键属于系统，混进来会和系统快捷键打架。
 // - 输入法组字期间一律不响应：中文输入时这些按键属于输入法。
@@ -7,6 +7,14 @@
 
 import { useEffect, useRef } from "react";
 import { isImeComposing } from "../lib/util";
+
+/** 页面级快捷键的按键组合：key 取 KeyboardEvent.key（「F2」「Enter」「d」），没写的修饰键一律要求不按。 */
+export interface KeyCombo {
+  key: string;
+  ctrl?: boolean;
+  alt?: boolean;
+  shift?: boolean;
+}
 
 export type ShortcutPage = "home" | "library" | "discover" | "tasks";
 
@@ -60,6 +68,32 @@ export function shortcutOf(event: KeyInput): Shortcut | null {
   return null;
 }
 
+export function describeCombo(combo: KeyCombo): string {
+  return [combo.ctrl === true ? "Ctrl" : null, combo.alt === true ? "Alt" : null, combo.shift === true ? "Shift" : null, combo.key].filter((part) => part !== null).join("+");
+}
+
+/** 组合对应的物理键位：全局快捷键表的数字键按 code 认，探测时要给出同样的 code。 */
+function codeOf(key: string): string {
+  if (/^[0-9]$/.test(key)) return `Digit${key}`;
+  if (/^[a-z]$/i.test(key)) return `Key${key.toUpperCase()}`;
+  if (key === ",") return "Comma";
+  return key;
+}
+
+/** 页面级快捷键不得占用全局快捷键表里的组合，也不能占用 Esc（Esc 归浮层体系）；占用属于设计错误，登记时就抛出。 */
+export function assertPageCombo(combo: KeyCombo): void {
+  if (combo.key === "Escape") throw new Error("Esc 归浮层体系，不能登记为页面快捷键");
+  const probe = { key: combo.key, code: codeOf(combo.key), ctrlKey: combo.ctrl === true, altKey: combo.alt === true, shiftKey: combo.shift === true, metaKey: false, isComposing: false, keyCode: 0 };
+  if (shortcutOf(probe) !== null) throw new Error(`${describeCombo(combo)} 是全局快捷键，页面不能占用`);
+}
+
+/** 按键是否就是这个组合：修饰键必须逐个一致；单字符键不分大小写（Caps Lock 开着也认）。 */
+export function matchesCombo(event: KeyInput, combo: KeyCombo): boolean {
+  if (event.metaKey || isImeComposing(event as KeyboardEvent)) return false;
+  if (event.ctrlKey !== (combo.ctrl === true) || event.altKey !== (combo.alt === true) || event.shiftKey !== (combo.shift === true)) return false;
+  return event.key.length === 1 ? event.key.toLowerCase() === combo.key.toLowerCase() : event.key === combo.key;
+}
+
 /**
  * 原生右键菜单只在可编辑元素与可选中文字的区域保留（复制粘贴要用）。
  * user-select 不继承，计算值为 auto 时由祖先决定，所以从目标往上找第一个明确的取值；根元素是 none。
@@ -79,16 +113,23 @@ export function allowsNativeContextMenu(target: EventTarget | null): boolean {
 
 /**
  * 挂上全局键盘、鼠标侧键与右键菜单的监听。handler 每次渲染都可以是新引用：存进 ref，监听只建一次。
+ * 不是全局快捷键的按键交给 onOtherKey（页面级快捷键的分发）；它返回 true 表示接手，这里随之 preventDefault。
+ * 控件自己的 onKeyDown 已经处理过的按键（defaultPrevented）两边都不再处理。
  * 鼠标侧键在 mousedown / mouseup / auxclick 上都要 preventDefault，WebView 自身的前进后退才不会发生；动作只在 mouseup 上触发一次。
  */
-export function useGlobalShortcuts(handler: (shortcut: Shortcut) => void): void {
+export function useGlobalShortcuts(handler: (shortcut: Shortcut) => void, onOtherKey: (event: KeyboardEvent) => boolean): void {
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
+  const otherRef = useRef(onOtherKey);
+  otherRef.current = onOtherKey;
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       const shortcut = shortcutOf(event);
-      if (shortcut === null) return;
+      if (shortcut === null) {
+        if (otherRef.current(event)) event.preventDefault();
+        return;
+      }
       event.preventDefault();
       handlerRef.current(shortcut);
     };

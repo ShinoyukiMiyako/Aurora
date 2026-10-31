@@ -9,7 +9,7 @@ import { startSession, type SessionState } from "../state/session";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
-import { ISLAND_COPY } from "./copy";
+import { ISLAND_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
 import { downloadStageNote, islandSecond, islandTone, stageState, StatusIsland } from "./StatusIsland";

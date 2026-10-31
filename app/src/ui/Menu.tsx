@@ -4,6 +4,7 @@
 // 焦点停在菜单容器上，高亮项由 aria-activedescendant 指出：键盘打开时高亮第一项，指针打开时不高亮。
 // ↑↓ 循环移动（跳过分隔线、分组标题与禁用项），Home / End 到首尾，Enter / Space 执行，键入字符按首字跳转；
 // Esc 关闭并把焦点还给触发器（Esc 栈），Tab 关闭后焦点按文档顺序前进。执行顺序：先关闭菜单再执行动作。
+// 禁用原因不显而易见的项（「游戏运行中不能修改」）给出 disabledReason：指针停在该项上时以提示气泡写明原因。
 
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon, type IconName } from "../art/Icon";
@@ -11,6 +12,7 @@ import { isImeComposing } from "../lib/util";
 import type { Placement } from "../shell/overlay";
 import styles from "./Menu.module.css";
 import { Popover, type PopoverAnchor } from "./Popover";
+import { Tooltip } from "./Tooltip";
 import { isTypeaheadKey, matchTypeahead, useTypeahead } from "./typeahead";
 
 export interface MenuItem {
@@ -22,6 +24,8 @@ export interface MenuItem {
   /** 危险项：一律放在最后，前面加分隔线。 */
   danger?: boolean;
   disabled?: boolean;
+  /** 为什么禁用；只能与 disabled 一起给。 */
+  disabledReason?: string;
   /** 单选菜单（排序、视图方式）：传了即为勾选项，true 时右侧打勾。 */
   checked?: boolean;
   onSelect: () => void;
@@ -42,6 +46,8 @@ export interface MenuProps {
   /** 打开方式决定初始高亮：keyboard 高亮第一项，keyboard-last 高亮最后一项（↑ 打开），pointer 不高亮。 */
   openedBy: MenuOpenedBy;
   placement?: Placement;
+  /** 与锚点的间距（px），默认同 Popover。 */
+  offset?: number;
   id?: string;
   /** 菜单名称；有触发器时通常省略，由 aria-labelledby 指向触发器。 */
   "aria-label"?: string;
@@ -56,15 +62,17 @@ function assertMenuShape(items: readonly MenuEntry[]): void {
   if (actions.length === 0) throw new Error("菜单至少需要一个可操作项");
   if (actions.length > MENU_MAX_ACTIONS) throw new Error(`菜单可操作项不能超过 ${MENU_MAX_ACTIONS} 个，收到 ${actions.length} 个`);
   const firstDanger = items.findIndex((e) => isItem(e) && e.danger === true);
+  const unexplained = actions.find((e) => e.disabledReason !== undefined && e.disabled !== true);
+  if (unexplained !== undefined) throw new Error(`菜单项「${unexplained.label}」给了禁用原因却没有禁用`);
   if (firstDanger < 0) return;
   if (items.slice(firstDanger).some((e) => !isItem(e) || e.danger !== true)) throw new Error("危险项必须集中放在菜单最后");
   if (firstDanger === 0 || items[firstDanger - 1].kind !== "separator") throw new Error("危险项前面必须有一条分隔线");
 }
 
-export function Menu({ open, anchor, onClose, items, openedBy, placement = "bottom-start", id, ...aria }: MenuProps) {
+export function Menu({ open, anchor, onClose, items, openedBy, placement = "bottom-start", offset, id, ...aria }: MenuProps) {
   assertMenuShape(items);
   return (
-    <Popover open={open} anchor={anchor} onClose={onClose} placement={placement} role="presentation">
+    <Popover open={open} anchor={anchor} onClose={onClose} placement={placement} offset={offset} role="presentation">
       <MenuList items={items} onClose={onClose} openedBy={openedBy} id={id} aria={aria} />
     </Popover>
   );
@@ -166,7 +174,7 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
             </div>
           );
         const checkable = entry.checked !== undefined;
-        return (
+        const item = (
           <div
             key={i}
             id={optionId(i)}
@@ -186,6 +194,12 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
             {entry.hint !== undefined && <span className={styles.hint}>{entry.hint}</span>}
             {entry.checked === true && <Icon name="check" size={16} className={styles.check} />}
           </div>
+        );
+        if (entry.disabled !== true || entry.disabledReason === undefined) return item;
+        return (
+          <Tooltip key={i} content={entry.disabledReason} side="right" wrap>
+            {item}
+          </Tooltip>
         );
       })}
     </div>

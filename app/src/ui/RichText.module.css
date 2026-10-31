@@ -1,0 +1,78 @@
+/* 受限富文本：资源介绍正文与更新说明。正文可选中复制。 */
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  color: var(--sk-text);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.paragraph {
+  margin: 0;
+}
+
+/* 原文里不论几级标题，一律降为小节标题：正文里的大标题会盖过外层页面与弹窗的标题层级 */
+.heading {
+  margin: var(--sk-space-6) 0 0;
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+}
+
+/* 配图位：加载完成前不占高度，进入视口附近才开始取图 */
+.image {
+  display: block;
+  max-width: 100%;
+}
+
+.canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--sk-r-sm);
+}
+
+.link {
+  color: var(--sk-accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.link:focus-visible {
+  border-radius: var(--sk-r-xs);
+  outline: none;
+  box-shadow: var(--sk-focus);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  margin: 0;
+  padding-left: var(--sk-space-20);
+}
+
+/* 代码底用更深一档的凹陷色：更新说明本身就放在凹陷底的内容块里，同色会看不出代码块 */
+.codeBlock {
+  margin: 0;
+  padding: var(--sk-space-10) var(--sk-space-12);
+  overflow-x: auto;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-3);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  white-space: pre;
+}
+
+.inlineCode {
+  padding: 0 var(--sk-space-4);
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-bg-3);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+}

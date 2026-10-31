@@ -106,6 +106,48 @@ describe("六种强调色组合", () => {
   });
 });
 
+describe("外观预览令牌", () => {
+  const PREVIEW = /^--sk-preview-/;
+  const DAY = resolve(ROOT);
+  const NIGHT_VALUES = resolve(ROOT, NIGHT);
+
+  it("只在 :root 上声明，任何主题块都不覆盖：预览与当前明暗、强调色无关", () => {
+    for (const selector of [AMETHYST, MOSS, NIGHT, NIGHT_AMETHYST, NIGHT_MOSS]) {
+      expect([...block(tokenBlocks, selector).keys()].filter((k) => PREVIEW.test(k))).toEqual([]);
+    }
+  });
+
+  it("两种明暗的中性色与对应主题块的基础令牌逐个相同", () => {
+    for (const name of ["bg", "surface", "line", "line-2"]) {
+      expect(root.get(`--sk-preview-day-${name}`), name).toBe(DAY.get(`--sk-${name}`));
+      expect(root.get(`--sk-preview-night-${name}`), name).toBe(NIGHT_VALUES.get(`--sk-${name}`));
+    }
+  });
+
+  it("六种明暗与强调色组合的强调色，与对应主题块的 --sk-accent 相同", () => {
+    const sources: [string, string[]][] = [
+      ["--sk-preview-day-sakura", [ROOT]],
+      ["--sk-preview-day-amethyst", [ROOT, AMETHYST]],
+      ["--sk-preview-day-moss", [ROOT, MOSS]],
+      ["--sk-preview-night-sakura", [ROOT, NIGHT]],
+      ["--sk-preview-night-amethyst", [ROOT, AMETHYST, NIGHT, NIGHT_AMETHYST]],
+      ["--sk-preview-night-moss", [ROOT, MOSS, NIGHT, NIGHT_MOSS]],
+    ];
+    for (const [token, selectors] of sources) expect(root.get(token), token).toBe(resolve(...selectors).get("--sk-accent"));
+  });
+
+  it("强调色块固定画日樱值：渐变亮端与对勾色取日樱的 accent-2 与 accent-ink", () => {
+    expect(root.get("--sk-preview-sakura-2")).toBe(DAY.get("--sk-accent-2"));
+    expect(root.get("--sk-preview-amethyst-2")).toBe(resolve(ROOT, AMETHYST).get("--sk-accent-2"));
+    expect(root.get("--sk-preview-moss-2")).toBe(resolve(ROOT, MOSS).get("--sk-accent-2"));
+    expect(root.get("--sk-preview-ink")).toBe(DAY.get("--sk-accent-ink"));
+  });
+
+  it("声明齐全：4 种中性色 x 2 种明暗、6 种强调色、3 个亮端、1 个对勾色", () => {
+    expect([...root.keys()].filter((k) => PREVIEW.test(k))).toHaveLength(4 * 2 + 6 + 3 + 1);
+  });
+});
+
 describe("Tailwind 主题映射", () => {
   it("默认主题的颜色、圆角、阴影、字体、字号与断点全部清空", () => {
     const reset = block(themeBlocks, "@theme");
@@ -114,8 +156,8 @@ describe("Tailwind 主题映射", () => {
     }
   });
 
-  it("每个颜色令牌都有 --color-sk-* 工具色，且同名", () => {
-    const colorTokens = [...root].filter(([k, v]) => isColorValue(k, v)).map(([k]) => k).sort();
+  it("每个颜色令牌都有 --color-sk-* 工具色，且同名（外观预览令牌只供预览组件引用，不进工具色）", () => {
+    const colorTokens = [...root].filter(([k, v]) => isColorValue(k, v) && !k.startsWith("--sk-preview-")).map(([k]) => k).sort();
     const colors = mapped("--color-");
     expect(colorTokens.length).toBeGreaterThan(60);
     expect([...colors.values()].sort()).toEqual(colorTokens);

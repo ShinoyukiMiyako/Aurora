@@ -13,7 +13,7 @@ import { IconButton } from "../ui/IconButton";
 import { KeyHint } from "../ui/KeyHint";
 import { Tooltip } from "../ui/Tooltip";
 import { AccountCapsule } from "./AccountCapsule";
-import { SHELL_ACTION_ERROR, TITLEBAR_COPY } from "./copy";
+import { SHELL_ACTION_ERROR, TITLEBAR_COPY } from "../copy/shell";
 import { DownloadPeek } from "./DownloadPeek";
 import { useNav, useShell } from "./shell";
 import { StatusIsland } from "./StatusIsland";

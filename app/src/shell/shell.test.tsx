@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TOAST_COPY } from "../copy/flows";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
@@ -238,5 +239,137 @@ describe("外壳：通知动作", () => {
     act(() => shell.runToastAction(toast));
     expect(launcher.state.toasts).toEqual([]);
     expect(nav.route).toEqual({ page: "tasks", filter: "failed" });
+  });
+});
+
+describe("外壳：写剪贴板", () => {
+  let writeText: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  });
+
+  it("写入成功：原文写进剪贴板，结果为 true，不弹通知", async () => {
+    await mount();
+    let written: boolean | undefined;
+    await act(async () => {
+      written = await shell.copyText("C:\Games\.minecraft\versions\生存");
+    });
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("C:\Games\.minecraft\versions\生存");
+    expect(written).toBe(true);
+    expect(launcher.state.toasts).toEqual([]);
+  });
+
+  it("写入失败：弹一条「复制失败」，结果为 false，Promise 不 reject", async () => {
+    writeText.mockImplementation(() => Promise.reject(new Error("Document is not focused.")));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mount();
+    let written: boolean | undefined;
+    await act(async () => {
+      written = await shell.copyText("");
+    });
+    expect(written).toBe(false);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", TOAST_COPY.copyFailed, "Document is not focused."]]);
+    expect(error).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("外壳：页面级快捷键", () => {
+  it("F2 交给最后登记的处理器并屏蔽默认行为；注销后同一组合交还给更早登记的，全部注销后无动作", async () => {
+    await mount();
+    const a = vi.fn();
+    const b = vi.fn();
+    const offA = shell.registerShortcut({ key: "F2" }, a);
+    const offB = shell.registerShortcut({ key: "F2" }, b);
+    const event = keydown(window, "F2", { code: "F2" });
+    expect(event.defaultPrevented).toBe(true);
+    expect([a.mock.calls.length, b.mock.calls.length]).toEqual([0, 1]);
+    offB();
+    keydown(window, "F2", { code: "F2" });
+    expect([a.mock.calls.length, b.mock.calls.length]).toEqual([1, 1]);
+    offA();
+    const idle = keydown(window, "F2", { code: "F2" });
+    expect(idle.defaultPrevented).toBe(false);
+    expect([a.mock.calls.length, b.mock.calls.length]).toEqual([1, 1]);
+  });
+
+  it("修饰键必须逐个一致：Ctrl+D 不响应 D、Ctrl+Shift+D 与 Alt+D；字母不分大小写", async () => {
+    await mount();
+    const dup = vi.fn();
+    shell.registerShortcut({ key: "d", ctrl: true }, dup);
+    keydown(window, "d", { code: "KeyD" });
+    keydown(window, "D", { ctrlKey: true, shiftKey: true, code: "KeyD" });
+    keydown(window, "d", { altKey: true, code: "KeyD" });
+    keydown(window, "d", { ctrlKey: true, metaKey: true, code: "KeyD" });
+    expect(dup).not.toHaveBeenCalled();
+    keydown(window, "D", { ctrlKey: true, code: "KeyD" });
+    expect(dup).toHaveBeenCalledTimes(1);
+  });
+
+  it("不带 Ctrl / Alt 的组合在输入框里不触发；带 Ctrl 的照常触发", async () => {
+    await mount();
+    const rename = vi.fn();
+    const save = vi.fn();
+    shell.registerShortcut({ key: "F2" }, rename);
+    shell.registerShortcut({ key: "s", ctrl: true }, save);
+    const input = document.createElement("input");
+    document.body.append(input);
+    try {
+      input.focus();
+      keydown(input, "F2", { code: "F2" });
+      keydown(input, "s", { ctrlKey: true, code: "KeyS" });
+      expect(rename).not.toHaveBeenCalled();
+      expect(save).toHaveBeenCalledTimes(1);
+    } finally {
+      input.remove();
+    }
+  });
+
+  it("有浮层打开、输入法组字、控件已经处理过的按键都不触发", async () => {
+    await mount();
+    const rename = vi.fn();
+    shell.registerShortcut({ key: "F2" }, rename);
+    keydown(window, "F2", { code: "F2", isComposing: true });
+    const handled = new KeyboardEvent("keydown", { key: "F2", code: "F2", bubbles: true, cancelable: true });
+    handled.preventDefault();
+    act(() => {
+      window.dispatchEvent(handled);
+    });
+    act(() => shell.openPalette());
+    keydown(window, "F2", { code: "F2" });
+    expect(rename).not.toHaveBeenCalled();
+    act(() => shell.closePalette());
+    keydown(window, "F2", { code: "F2" });
+    expect(rename).toHaveBeenCalledTimes(1);
+  });
+
+  it("首次启动向导期间页面快捷键无效", async () => {
+    bootOverrides(ipc, { instances, firstRun: true });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount();
+    const rename = vi.fn();
+    shell.registerShortcut({ key: "F2" }, rename);
+    keydown(window, "F2", { code: "F2" });
+    expect(rename).not.toHaveBeenCalled();
+  });
+
+  it("占用全局快捷键或 Esc 属于设计错误，登记时抛出", async () => {
+    await mount();
+    expect(() => shell.registerShortcut({ key: "k", ctrl: true }, () => undefined)).toThrow("Ctrl+k 是全局快捷键，页面不能占用");
+    expect(() => shell.registerShortcut({ key: "f", ctrl: true }, () => undefined)).toThrow("Ctrl+f 是全局快捷键");
+    expect(() => shell.registerShortcut({ key: "3", ctrl: true }, () => undefined)).toThrow("Ctrl+3 是全局快捷键");
+    expect(() => shell.registerShortcut({ key: "5", alt: true }, () => undefined)).toThrow("Alt+5 是全局快捷键");
+    expect(() => shell.registerShortcut({ key: ",", ctrl: true }, () => undefined)).toThrow("Ctrl+, 是全局快捷键");
+    expect(() => shell.registerShortcut({ key: "Escape" }, () => undefined)).toThrow("Esc 归浮层体系");
+    expect(() => shell.registerShortcut({ key: "6", alt: true }, () => undefined)).not.toThrow();
+    expect(() => shell.registerShortcut({ key: "k", ctrl: true, shift: true }, () => undefined)).not.toThrow();
+  });
+});
+
+describe("外壳：选择文件", () => {
+  it("浏览器预览里没有系统对话框：如实拒绝", async () => {
+    await mount();
+    await expect(shell.pickFile("modpack")).rejects.toThrow("浏览器预览里没有系统的选择文件对话框");
   });
 });

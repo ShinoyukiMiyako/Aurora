@@ -6,7 +6,7 @@ import { useNearViewport, useRemoteImage } from "./remote-image";
 import styles from "./Thumb.module.css";
 
 export type ThumbKind = "mod" | "modpack" | "resourcepack" | "shader" | "datapack" | "news" | "server";
-export type ThumbSize = 32 | 40 | 48 | 64 | 96;
+export type ThumbSize = 32 | 40 | 44 | 48 | 64 | 96;
 
 /** 无图与失败时底座上的类型图标。 */
 export const THUMB_KIND_ICON: Readonly<Record<ThumbKind, IconName>> = {
@@ -20,7 +20,7 @@ export const THUMB_KIND_ICON: Readonly<Record<ThumbKind, IconName>> = {
 };
 
 /** 比例圆角 round(边长 × 0.3)。 */
-export const THUMB_RADIUS: Readonly<Record<ThumbSize, number>> = { 32: 10, 40: 12, 48: 14, 64: 19, 96: 29 };
+export const THUMB_RADIUS: Readonly<Record<ThumbSize, number>> = { 32: 10, 40: 12, 44: 13, 48: 14, 64: 19, 96: 29 };
 
 /** 图块内图标档位：边长 ≤ 32 用 16，33-48 用 20，更大用 24。 */
 export function thumbIconSize(size: ThumbSize): 16 | 20 | 24 {

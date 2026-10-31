@@ -5,7 +5,7 @@ import { Button } from "./Button";
 import type { ProgressTone } from "./ProgressBar";
 import { ProgressRing, type ProgressRingSize } from "./ProgressRing";
 
-const SIZES: ProgressRingSize[] = [16, 20, 24, 36, 48];
+const SIZES: ProgressRingSize[] = [16, 20, 24, 36, 48, 84];
 const TONES: ProgressTone[] = ["accent", "ok", "info", "warn", "danger", "muted"];
 
 function Live() {
@@ -41,6 +41,11 @@ export const gallery: GalleryEntry = {
         <ProgressRing value={0.999} size={36} capAt99 label="启动中封顶 99" />
         <ProgressRing value={1} size={36} tone="ok" label="完成" />
         <ProgressRing value={0.02} size={24} label="刚开始" />
+      </GalleryRow>
+      <GalleryRow label="无进度">
+        <ProgressRing value={null} size={84} tone="muted" label="没有活动任务" />
+        <ProgressRing value={null} size={48} tone="muted" label="没有活动任务" />
+        <ProgressRing value={null} size={24} tone="muted" label="没有活动任务" />
       </GalleryRow>
       <Live />
     </>

@@ -10,16 +10,29 @@ import { cancelTask, onCoreEvent } from "../ipc/tasks";
 
 /** 浏览器预览里没有系统对话框：如实拒绝（由外层统一提示），不当作用户取消。 */
 class NoNativeDialogError extends Error {
-  constructor() {
-    super("浏览器预览里没有系统的选择文件夹对话框，请直接在输入框里填写路径");
+  constructor(what: "选择文件夹" | "选择文件") {
+    super(`浏览器预览里没有系统的${what}对话框，请直接在输入框里填写路径`);
     this.name = "NoNativeDialogError";
   }
 }
 
 /** 系统选择文件夹对话框，从 defaultPath 打开；用户取消为 null。 */
 export async function pickDirectory(defaultPath: string): Promise<string | null> {
-  if (!inTauri()) throw new NoNativeDialogError();
+  if (!inTauri()) throw new NoNativeDialogError("选择文件夹");
   return open({ directory: true, multiple: false, defaultPath });
+}
+
+export interface FileFilter {
+  /** 对话框里文件类型下拉的名称（「整合包」）。 */
+  name: string;
+  /** 不带点的扩展名。 */
+  extensions: readonly string[];
+}
+
+/** 系统选择文件对话框，只选一个文件；用户取消为 null。 */
+export async function pickFile(options: { title: string; filter: FileFilter }): Promise<string | null> {
+  if (!inTauri()) throw new NoNativeDialogError("选择文件");
+  return open({ title: options.title, multiple: false, directory: false, filters: [{ name: options.filter.name, extensions: [...options.filter.extensions] }] });
 }
 
 export interface GameDirectoryCommands {

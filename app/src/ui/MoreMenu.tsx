@@ -14,8 +14,10 @@ export interface MoreMenuProps {
   label?: string;
   size?: ControlSize;
   placement?: Placement;
+  /** 菜单与按钮的间距（px），默认同 Popover。 */
+  offset?: number;
 }
 
-export function MoreMenu({ items, label = MORE_MENU_LABEL, size = "md", placement = "bottom-end" }: MoreMenuProps) {
-  return <MenuButton items={items} placement={placement} trigger={(props) => <IconButton {...props} icon="more" label={label} size={size} />} />;
+export function MoreMenu({ items, label = MORE_MENU_LABEL, size = "md", placement = "bottom-end", offset }: MoreMenuProps) {
+  return <MenuButton items={items} placement={placement} offset={offset} trigger={(props) => <IconButton {...props} icon="more" label={label} size={size} />} />;
 }
