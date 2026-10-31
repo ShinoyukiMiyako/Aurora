@@ -114,7 +114,7 @@ beforeEach(() => {
     instanceDto("空岛", { mc_version: "1.21.1", created_at: NOW - DAY }),
     instanceDto("红石", { mc_version: "1.19.2", playtime_min: 10, last_played_at: NOW - 3 * DAY }),
   ];
-  pinned = [{ name: "晨星", address: "play.example" }];
+  pinned = [{ name: "晨星", address: "play.example", instance: null }];
   bootOverrides(ipc, { instances, config: configDto({ selected_version: "生存" }) });
   ipc.overrides.set("list_instances", () => instances);
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
@@ -521,8 +521,8 @@ describe("主页：固定的服务器", () => {
     await flush();
     expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({
       servers: [
-        { name: "晨星", address: "play.example" },
-        { name: "本地", address: "localhost" },
+        { name: "晨星", address: "play.example", instance: null },
+        { name: "本地", address: "localhost", instance: null },
       ],
     });
     expect(text()).toContain("2 个 · 在线人数与延迟");
@@ -532,13 +532,13 @@ describe("主页：固定的服务器", () => {
     await openMenu(buttonByLabel("晨星 的更多操作"));
     click(menuItem("取消固定"));
     await flush();
-    expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({ servers: [{ name: "本地", address: "localhost" }] });
+    expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({ servers: [{ name: "本地", address: "localhost", instance: null }] });
   });
 
   it("全部已固定时加号菜单只有一条禁用说明", async () => {
     pinned = [
-      { name: "晨星", address: "play.example" },
-      { name: "本地", address: "localhost" },
+      { name: "晨星", address: "play.example", instance: null },
+      { name: "本地", address: "localhost", instance: null },
     ];
     await mount();
     await openMenu(buttonByLabel("固定服务器"));
@@ -570,8 +570,8 @@ describe("主页：固定的服务器", () => {
     await flush();
     expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({
       servers: [
-        { name: "晨星", address: "play.example" },
-        { name: "服12", address: "s12.example" },
+        { name: "晨星", address: "play.example", instance: null },
+        { name: "服12", address: "s12.example", instance: null },
       ],
     });
     // 弹窗不自动关闭：刚固定的这台从列表里消失，其余照常可选
@@ -703,8 +703,8 @@ describe("主页：固定的服务器", () => {
   // 单台测速分不出本机断网与服务器宕机：本机离线时整张卡说明本机离线，不把每台都标成连不上
   it("断网：整卡注明本机离线并暂停测速，每台都不下连通结论，在线人数取上次的结果；恢复联网立即重测一次", async () => {
     pinned = [
-      { name: "晨星", address: "play.example" },
-      { name: "本地", address: "localhost" },
+      { name: "晨星", address: "play.example", instance: null },
+      { name: "本地", address: "localhost", instance: null },
     ];
     await mount();
     const signals = () => [...document.querySelectorAll<HTMLElement>("[data-quality], [data-state]")].filter((el) => el.className.includes("signal")).map((el) => el.dataset.state);

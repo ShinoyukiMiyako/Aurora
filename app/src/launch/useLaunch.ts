@@ -11,6 +11,7 @@ import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useInstanceSettings } from "../state/queries/instance";
 import { reimportRoute } from "../state/route";
 import { getInstance } from "../state/selectors";
+import type { QuickPlayArg } from "../state/store";
 import { useLaunchHost } from "./host";
 import { launchFailure, launchView, launchViewEqual, type LaunchView } from "./launchView";
 
@@ -23,6 +24,11 @@ export interface LaunchEntry {
   failure: FailureCopy | null;
   /** 启动（就绪、已结束、失败、崩溃后再启动）；损坏时由状态容器转成「修复并启动」，整合包没导入完的去重新导入。 */
   launch(): void;
+  /**
+   * 启动并直达一个世界或一台服务器，拦截与 launch 相同（没有账户先登录、替换运行中的游戏先确认）。
+   * 损坏与安装中的实例不转成修复，由入口按禁用处理。
+   */
+  quickPlay(target: QuickPlayArg): void;
   /** 取消启动：加载阶段，不确认。 */
   cancel(): void;
   /** 结束游戏：运行中，先确认。 */
@@ -66,6 +72,13 @@ export function useLaunch(instanceId: string): LaunchEntry {
     void host.run(() => actions.launch(instanceId), isBroken ? ACTION_ERROR.repair : ACTION_ERROR.launch(name));
   }, [actions, host, inst, instanceId, isBroken, name, reimport]);
 
+  const quickPlay = useCallback(
+    (target: QuickPlayArg) => {
+      void host.run(() => actions.quickPlay(instanceId, target), ACTION_ERROR.launch(name));
+    },
+    [actions, host, instanceId, name],
+  );
+
   const endSession = useCallback(async () => {
     setStopping(true);
     await host.run(() => actions.stop(), ACTION_ERROR.stop);
@@ -101,5 +114,5 @@ export function useLaunch(instanceId: string): LaunchEntry {
     [actions, host, name],
   );
 
-  return { instance: inst, view, stopping, failure, launch, cancel, stop, dismiss, openCrash, openLogs, fix };
+  return { instance: inst, view, stopping, failure, launch, quickPlay, cancel, stop, dismiss, openCrash, openLogs, fix };
 }

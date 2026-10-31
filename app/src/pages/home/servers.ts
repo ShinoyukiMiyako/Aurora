@@ -100,9 +100,9 @@ export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonl
   });
 }
 
-/** 可以固定的服务器：多人游戏列表里还没固定的，按列表顺序。 */
+/** 可以固定的服务器：多人游戏列表里还没固定的，按列表顺序。刚固定的还没选过加入用的实例。 */
 export function pinCandidates(known: readonly KnownServerDto[]): PinnedServerDto[] {
-  return known.filter((s) => !s.pinned).map((s) => ({ name: s.name, address: s.address }));
+  return known.filter((s) => !s.pinned).map((s) => ({ name: s.name, address: s.address, instance: null }));
 }
 
 export interface PinMenuPlan {

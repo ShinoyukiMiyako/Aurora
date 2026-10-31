@@ -157,7 +157,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
                 exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
                 transition={springs.settle}
               >
-                <ServerRowView row={row} onUnpin={() => toggle({ name: row.name, address: row.address })} />
+                <ServerRowView row={row} onUnpin={() => toggle({ name: row.name, address: row.address, instance: null })} />
               </motion.li>
             ))}
           </AnimatePresence>

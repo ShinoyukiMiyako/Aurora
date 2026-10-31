@@ -54,6 +54,11 @@ export interface InstanceModpackDto {
   version: string | null;
 }
 
+export interface QuickPlaySupportDto {
+  singleplayer: boolean;
+  multiplayer: boolean;
+}
+
 export interface InstanceDto {
   id: string;
   /** ready：版本 JSON 可用；broken：缺失或损坏，原因见 broken_reason。 */
@@ -67,6 +72,11 @@ export interface InstanceDto {
   is_release: boolean;
   /** 需要的 Java 主版本；继承链断了或 broken 时为 null。 */
   java_major: number | null;
+  /**
+   * 版本能否直接进入存档、直接加入服务器（按版本 JSON 里的启动参数规则判定，沿继承链合并）；
+   * 继承链断了或 broken 时为 null。
+   */
+  quick_play: QuickPlaySupportDto | null;
   /** 工作目录 mods/ 下的 Mod 文件数（.jar 与 .jar.disabled）；broken 或设置读不出时为 null。 */
   mod_count: number | null;
   /** 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。 */

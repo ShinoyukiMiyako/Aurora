@@ -33,9 +33,9 @@ describe("信号格", () => {
 
 describe("服务器行", () => {
   const pinned = [
-    { name: "晨星", address: "play.example" },
-    { name: "小镇", address: "town.example:25570" },
-    { name: "新加的", address: "new.example" },
+    { name: "晨星", address: "play.example", instance: "生存" },
+    { name: "小镇", address: "town.example:25570", instance: null },
+    { name: "新加的", address: "new.example", instance: null },
   ];
 
   it("按地址对位：连通的给信号与在线人数，连不上的记得上次在线，还没测的是测速中", () => {
@@ -110,8 +110,8 @@ describe("固定服务器菜单的候选项", () => {
       { name: "小镇", address: "town.example", pinned: false },
     ];
     expect(pinCandidates(known)).toEqual([
-      { name: "本地", address: "localhost" },
-      { name: "小镇", address: "town.example" },
+      { name: "本地", address: "localhost", instance: null },
+      { name: "小镇", address: "town.example", instance: null },
     ]);
   });
 
@@ -124,7 +124,7 @@ describe("固定服务器菜单的候选项", () => {
   });
 
   it("加号菜单：放得下就全部直接列出；多一台就列前面几台，留最后一项给「全部 N 台」，可操作项恰好到上限", () => {
-    const servers = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `服${i}`, address: `s${i}.example` }));
+    const servers = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `服${i}`, address: `s${i}.example`, instance: null }));
     expect(pinMenuPlan([])).toEqual({ inline: [], overflow: null });
     expect(pinMenuPlan(servers(MENU_MAX_ACTIONS))).toEqual({ inline: servers(MENU_MAX_ACTIONS), overflow: null });
     const over = pinMenuPlan(servers(MENU_MAX_ACTIONS + 1));
