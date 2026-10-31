@@ -398,6 +398,21 @@ describe("实例详情：后端正在改动实例", () => {
   });
 });
 
+describe("实例详情：版本隔离说明", () => {
+  it("跟随全局时按后端给的生效值说：原版正式版按策略本不隔离，但后端已强制隔离时写独立存放", async () => {
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: true } : i));
+    await open("settings", "创造");
+    expect(text()).toContain("这个实例会独立存放存档与配置。");
+    expect(text()).not.toContain("这个实例与其他未隔离的实例共用存档与配置。");
+  });
+
+  it("后端也说不隔离时写共用", async () => {
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: false } : i));
+    await open("settings", "创造");
+    expect(text()).toContain("这个实例与其他未隔离的实例共用存档与配置。");
+  });
+});
+
 describe("实例详情：整合包没导入完", () => {
   beforeEach(() => {
     instances = instances.map((i) =>

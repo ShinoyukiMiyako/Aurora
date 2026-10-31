@@ -359,6 +359,12 @@ const TASK_COMMANDS = new Set([
   "update_mods",
 ]);
 
+/**
+ * 实例列表里带着结果的实例设置，改了要重扫列表：简介与封面直接显示；隔离会换掉工作目录，列表里的隔离生效值、
+ * 存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
+ */
+const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb"] as const;
+
 /** 写整个实例目录的任务：期间实例算「安装中」。其余挂在实例上的任务（装、更新 Mod 与资源）只改动其中的 Mod 与资源，算 modifying。 */
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
 
@@ -1858,7 +1864,7 @@ export class LauncherStore {
         const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
         const saved = instanceSettingsFromDto(await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, ...patch })));
         invalidateResources(`settings:${id}`);
-        if ("description" in patch || "cover" in patch) await store.fetchInstances();
+        if (LISTED_INSTANCE_SETTINGS.some((key) => key in patch)) await store.fetchInstances();
         return saved;
       },
       async repairInstance(id, opts = {}) {

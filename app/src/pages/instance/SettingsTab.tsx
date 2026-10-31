@@ -403,14 +403,17 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
   const { state } = useLauncher();
   const s = editor.value;
   const policy = state.settings === null ? null : state.settings.isolationPolicy;
+  // 跟随全局时说此刻实际隔离与否：列表里后端给的生效值算上了「版本目录里已有 mods 或 saves 就强制隔离」，
+  // 前端看不到目录、推断不出这一条；后端没给出（实例设置读不出）时才按全局策略推断
+  const followIsolated = policy === null ? null : inst.isolated === null ? isolationByPolicy(policy, inst) : inst.isolated;
   const isolationNote =
     s.isolation === "enabled"
       ? SETTINGS_COPY.isolationOnNote
       : s.isolation === "disabled"
         ? SETTINGS_COPY.isolationOffNote
-        : policy === null
+        : policy === null || followIsolated === null
           ? undefined
-          : SETTINGS_COPY.isolationFollowNote(ISOLATION_POLICY_LABEL[policy], isolationByPolicy(policy, inst));
+          : SETTINGS_COPY.isolationFollowNote(ISOLATION_POLICY_LABEL[policy], followIsolated);
 
   return (
     <Card padding="lg">

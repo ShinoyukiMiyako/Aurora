@@ -34,6 +34,26 @@ function renameOnDisk(from: string, to: string): void {
   });
 }
 
+describe("改实例设置后按需重扫实例列表", () => {
+  const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+
+  it.each([
+    ["隔离（换工作目录，存档数与 Mod 数跟着变）", { isolation: "enabled" as const }, 1],
+    ["自定内存", { memoryMb: 4096 }, 1],
+    ["简介", { description: "生存服" }, 1],
+    ["封面", { cover: "grass" }, 1],
+    ["JVM 参数（列表里没有它）", { jvmArgs: "-XX:+UseG1GC" }, 0],
+    ["分辨率（列表里没有它）", { resolution: { width: 1280, height: 720 } }, 0],
+  ])("%s", async (_name, patch, rescans) => {
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    const before = callsOf(ipc, "list_instances").length;
+    await store.actions.updateInstanceSettings("生存", patch);
+    expect(callsOf(ipc, "list_instances").length - before).toBe(rescans);
+    expect(callsOf(ipc, "set_instance_settings")).toHaveLength(1);
+  });
+});
+
 describe("改名迁移启动会话", () => {
   it("启动失败的会话随改名换成新 id：重试按新名字启动，查看日志也落到新名字", async () => {
     ipc.overrides.set("launch_game", () => {
