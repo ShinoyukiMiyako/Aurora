@@ -210,10 +210,8 @@ fn log_panics() {
         let location = info
             .location()
             .map(|at| format!("{}:{}:{}", at.file(), at.line(), at.column()));
-        let payload = match info.payload_as_str() {
-            Some(text) => text,
-            None => "panic 负载不是字符串",
-        };
+        // panic_any 抛出的非字符串负载读不出内容，如实写明是哪种情况。
+        let payload = info.payload_as_str().unwrap_or("panic 负载不是字符串");
         tracing::error!(
             payload = %payload,
             location,
