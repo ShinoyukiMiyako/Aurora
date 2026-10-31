@@ -114,7 +114,7 @@ export function allowsNativeContextMenu(target: EventTarget | null): boolean {
 /**
  * 挂上全局键盘、鼠标侧键与右键菜单的监听。handler 每次渲染都可以是新引用：存进 ref，监听只建一次。
  * 不是全局快捷键的按键交给 onOtherKey（页面级快捷键的分发）；它返回 true 表示接手，这里随之 preventDefault。
- * 控件自己的 onKeyDown 已经处理过的按键（defaultPrevented）两边都不再处理。
+ * 控件自己的 onKeyDown 已经处理过的按键（defaultPrevented）两边都不再处理。按住不放的自动重复只对后退 / 前进生效。
  * 鼠标侧键在 mousedown / mouseup / auxclick 上都要 preventDefault，WebView 自身的前进后退才不会发生；动作只在 mouseup 上触发一次。
  */
 export function useGlobalShortcuts(handler: (shortcut: Shortcut) => void, onOtherKey: (event: KeyboardEvent) => boolean): void {
@@ -131,6 +131,9 @@ export function useGlobalShortcuts(handler: (shortcut: Shortcut) => void, onOthe
         return;
       }
       event.preventDefault();
+      // 按住不放时系统按键自动重复：后退 / 前进像浏览器一样逐项走，其余只认第一下，
+      // 否则按久一点 Ctrl+K 就把面板开了又关
+      if (event.repeat && shortcut.kind !== "back" && shortcut.kind !== "forward") return;
       handlerRef.current(shortcut);
     };
     const onMouse = (event: MouseEvent) => {

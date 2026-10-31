@@ -225,6 +225,8 @@ export function Sidebar() {
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
+      // 指针还按着：松手后浏览器照样补发一次 click，放弃了的拖动不能变成一次点击
+      suppressClick.current = true;
       cancelDrag();
     };
     window.addEventListener("keydown", onKey, true);
@@ -233,6 +235,8 @@ export function Sidebar() {
 
   const onPinPointerDown = (event: ReactPointerEvent<HTMLButtonElement>, id: string, index: number) => {
     if (event.button !== 0 || drag.current !== null) return;
+    // 新的一次按下：上一次手势没等到补发的 click（松在了别处），留下的屏蔽不能吞掉这一次
+    suppressClick.current = false;
     drag.current = { id, pointerId: event.pointerId, startY: event.clientY, from: index, over: index, active: false };
     event.currentTarget.setPointerCapture(event.pointerId);
   };

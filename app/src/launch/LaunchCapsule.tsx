@@ -150,6 +150,17 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   const entry = useLaunch(instanceId);
   const reduced = useReducedMotionConfig() === true;
   const { face, exit, seat } = useFaceHold(entry.view, reduced);
+  const capsuleRef = useRef<HTMLDivElement>(null);
+  const key = faceKey(face);
+  // 键盘按了面上的按钮（「启动」「结束游戏」）随即换面：焦点还停在退场的旧面上，旧面移除时浏览器把它落回 body
+  // 且不派发任何事件，键盘用户只能从文档开头重新找起。换面时焦点在胶囊里，就交给新面第一个可用的按钮；
+  // 新面没有按钮（安装中、已结束）时留在原处
+  useLayoutEffect(() => {
+    const capsule = capsuleRef.current;
+    if (capsule === null || !capsule.contains(document.activeElement)) return;
+    const next = capsule.querySelector<HTMLElement>(`[data-face="${key}"] button:not(:disabled)`);
+    if (next !== null) next.focus();
+  }, [key]);
   const tone = toneOf(face);
   const expanded = face.kind !== "ready" && face.kind !== "broken";
   const height = CAPSULE_HEIGHT[size];
@@ -160,6 +171,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
 
   return (
     <motion.div
+      ref={capsuleRef}
       layout
       transition={{ layout: springs.morph }}
       role="group"
@@ -180,7 +192,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
         {announce}
       </span>
       <AnimatePresence mode="popLayout" initial={false}>
-        <motion.div key={faceKey(face)} layout className={styles.face} variants={faceSwap} initial="enter" animate="show" exit="leave">
+        <motion.div key={key} data-face={key} layout className={styles.face} variants={faceSwap} initial="enter" animate="show" exit="leave">
           <Face face={face} entry={entry} exit={exit} seat={seat} relaunch={relaunch} />
         </motion.div>
       </AnimatePresence>
