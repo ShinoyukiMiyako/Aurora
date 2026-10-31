@@ -8,7 +8,7 @@
 
 use aurora_core::{
     is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstalledSource,
-    InstanceMatch, InstanceMod, ModLoader, ModVersionInfo, Platform, ResourceType, UpdateCandidate,
+    InstanceMatch, InstanceMod, ModLoader, ModVersionInfo, Platform, UpdateCandidate,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -331,7 +331,9 @@ fn parse_loader(name: &str) -> Result<ModLoader, CommandError> {
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::{AuroraConfig, HistoryEvent, IsolationPolicy, Ledger, LedgerEntry};
+    use aurora_core::{
+        AuroraConfig, HistoryEvent, IsolationPolicy, Ledger, LedgerEntry, ResourceType,
+    };
     use std::path::{Path, PathBuf};
 
     const VERSION_ID: &str = "1.21";
