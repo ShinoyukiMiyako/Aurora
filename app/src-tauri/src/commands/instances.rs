@@ -3970,6 +3970,41 @@ mod tests {
         assert_eq!(disposer.disposed().len(), 1, "找不到备份时不碰存档");
     }
 
+    /// 存档被游戏打开着（session.lock 上有排他锁，外部启动器开的游戏也算）：备份报 world_in_use，不留任何文件。
+    #[tokio::test]
+    async fn backing_up_a_world_open_in_a_game_reports_world_in_use() {
+        let env = Env::new();
+        let world = env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let session = std::fs::File::open(world.join("session.lock")).unwrap();
+        session.lock().unwrap();
+
+        let err = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::WORLD_IN_USE);
+        assert_eq!(
+            err.detail.unwrap()["path"],
+            json!(world.display().to_string())
+        );
+        assert_eq!(
+            files_with_suffix(&env.backups_root(), ".zip"),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(
+            files_with_suffix(&env.backups_root(), ".part"),
+            Vec::<PathBuf>::new()
+        );
+        assert_eq!(w.locks.activity("生存"), None);
+
+        session.unlock().unwrap();
+        drop(session);
+        backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+    }
+
     /// 删除备份：zip 交给 disposer，从列表里摘掉；再删一次报 world_backup_not_found。游戏运行中也能删（不占实例）。
     #[tokio::test]
     async fn deleting_a_backup_disposes_the_zip_and_drops_it_from_the_list() {
