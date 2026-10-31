@@ -3,7 +3,7 @@
 
 import type { Platform } from "../../domain/types";
 import { projectDetail, searchResources, type ProjectDetail, type SearchArgs, type SearchResultDto } from "../../ipc/discover";
-import { previewModpack, type ModpackPreviewDto } from "../../ipc/modpack";
+import { previewModpack, summarizePlatformModpack, type ModpackPreviewDto, type ModpackSummaryDto } from "../../ipc/modpack";
 import { listModVersions, matchInstances, planInstall, type InstallPlan, type InstanceMatch, type ModLoader, type ModVersionInfo } from "../../ipc/mods";
 import { useResource, type ResourceResult } from "../resource";
 
@@ -24,7 +24,7 @@ export type {
   SkipReason,
   SortField,
 } from "../../ipc/discover";
-export type { ModpackPreviewDto, ModpackSource, PackFormat, PackLoader } from "../../ipc/modpack";
+export type { ModpackPreviewDto, ModpackSource, ModpackSummaryDto, PackFormat, PackLoader } from "../../ipc/modpack";
 export type { Compatibility, InstallPlan, InstanceMatch, MatchState, ModDependency, ModLoader, ModVersionInfo, PlannedItem } from "../../ipc/mods";
 
 /** search:<参数 JSON>；args 为 null 时不请求（关键词还在防抖中）。 */
@@ -71,5 +71,16 @@ export function useModpackPreview(path: string | null): ResourceResult<ModpackPr
   return useResource(path === null ? null : `modpack-preview:${path}`, () => {
     if (path === null) throw new Error("未启用的查询不应发出请求");
     return previewModpack(path);
+  });
+}
+
+/**
+ * modpack-summary:<platform>:<projectId>:<versionId> —— 平台整合包的 Mod 数与下载字节，只读远端 zip 的目录与清单、不下载整包。
+ * versionId 为 null 时不请求（还没选定版本）。
+ */
+export function useModpackSummary(platform: Platform, projectId: string, versionId: string | null): ResourceResult<ModpackSummaryDto> {
+  return useResource(versionId === null ? null : `modpack-summary:${platform}:${projectId}:${versionId}`, () => {
+    if (versionId === null) throw new Error("未启用的查询不应发出请求");
+    return summarizePlatformModpack(platform, projectId, versionId);
   });
 }

@@ -9,13 +9,22 @@ import {
   type NamedDirectoryDto,
 } from "../../ipc/config";
 import { detectJava, type JavaInstallationDto } from "../../ipc/java";
-import { listLoaderVersions, listManifest, requiredJava, type LoaderChoice, type LoaderVersionDto, type ManifestDto } from "../../ipc/instances";
+import {
+  listLoaderVersions,
+  listManifest,
+  requiredJava,
+  versionRequirements,
+  type LoaderChoice,
+  type LoaderVersionDto,
+  type ManifestDto,
+  type VersionRequirementsDto,
+} from "../../ipc/instances";
 import { memoryAdvice, updaterInfo, type MemoryAdviceDto, type UpdaterInfoDto } from "../../ipc/system";
 import { useResource, type ResourceResult } from "../resource";
 
 export type { GameDirectoryDto, GameDirectoryInspectionDto, GameDirectoryProblem, NamedDirectoryDto } from "../../ipc/config";
 export type { JavaInstallationDto, JavaSource, JavaVersionDto } from "../../ipc/java";
-export type { LoaderChoice, LoaderVersionDto, ManifestDto, ManifestVersionDto } from "../../ipc/instances";
+export type { LoaderChoice, LoaderVersionDto, ManifestDto, ManifestVersionDto, VersionRequirementsDto } from "../../ipc/instances";
 export type { MemoryAdviceDto, MemoryTier, UpdaterInfoDto } from "../../ipc/system";
 
 /** manifest —— 每个版本附可装的加载器；断网时为缓存，stale_since 与 fetch_error 说明情况。 */
@@ -29,6 +38,14 @@ export function useLoaderVersions(loader: LoaderChoice | null, mcVersion: string
   return useResource(key, () => {
     if (loader === null || mcVersion === null) throw new Error("未启用的查询不应发出请求");
     return listLoaderVersions(loader, mcVersion);
+  });
+}
+
+/** version-requirements:<mc> —— 新建这个版本要的 Java 主版本与全新下载的字节数（有库没标大小时为 null）。 */
+export function useVersionRequirements(mcVersion: string | null): ResourceResult<VersionRequirementsDto> {
+  return useResource(mcVersion === null ? null : `version-requirements:${mcVersion}`, () => {
+    if (mcVersion === null) throw new Error("未启用的查询不应发出请求");
+    return versionRequirements(mcVersion);
   });
 }
 
