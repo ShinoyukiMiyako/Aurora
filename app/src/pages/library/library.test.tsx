@@ -256,6 +256,39 @@ describe("实例库：筛选、搜索与空状态", () => {
     expect(nav.route).toEqual({ page: "discover", kind: "modpack" });
   });
 
+  it("列表 300 ms 内读到：不出现骨架；读得慢才出骨架，出现后至少停留 300 ms", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const skeletons = () => {
+      const grid = document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`);
+      return grid === null ? 0 : grid.children.length;
+    };
+    expect(document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`)).not.toBeNull();
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    // jsdom 里没有宽度，按 compact 档铺满两行
+    expect(skeletons()).toBe(6);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      list.resolve(instances);
+      await settle();
+    });
+    expect(skeletons()).toBe(6);
+    expect(cardNames()).toEqual([]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(skeletons()).toBe(0);
+    expect(cardNames()).toHaveLength(4);
+  });
+
   it("列表读取失败：显示原因，重试重新读取", async () => {
     let fail = true;
     ipc.overrides.set("list_instances", () => {
