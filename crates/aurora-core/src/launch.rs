@@ -758,7 +758,8 @@ impl Aurora {
         ))
     }
 
-    /// 账户与注入命令行的鉴权值。微软账户在这里静默续期，续期失败按原因分成「需要重登」与「网络问题」。
+    /// 账户与注入命令行的鉴权值。微软账户在这里静默续期，续期失败按原因分成「需要重登」「网络问题」与
+    /// 其余原样报出的错误（见 [`classify_refresh`]）。
     async fn launch_identity(
         &self,
         account: LaunchAccount,
@@ -1123,17 +1124,7 @@ impl Aurora {
             crate::auth::AUTH_SERVER_TIMEOUT,
         )
         .await
-        .map_err(|err| -> LaunchFailed {
-            let code = if matches!(err, aurora_auth::AuthError::Http { .. }) {
-                FailureCode::AccountRefreshNetwork
-            } else {
-                FailureCode::AccountRelogin
-            };
-            LaunchFailure::new(code, format!("读取验证服务器 {api_root} 的信息失败：{err}"))
-                .param("server", api_root)
-                .caused_by(err)
-                .into()
-        })?;
+        .map_err(|err| authlib_metadata_failure(err, api_root))?;
         Ok(AuthlibInjector::new(agent, metadata.api_root).with_prefetched(metadata.prefetched))
     }
 
@@ -1228,6 +1219,24 @@ fn spawn_game(
     })
 }
 
+/// 读不到验证服务器元数据时，只有连不上算玩家能对症处理的失败（联网后重试）。服务器回错误页、
+/// 地址不是验证服务器之类的失败重新登录也解决不了，按门面错误原样报出原文，不提示重新登录。
+fn authlib_metadata_failure(err: aurora_auth::AuthError, api_root: &str) -> LaunchFailed {
+    if !matches!(err, aurora_auth::AuthError::Http { .. }) {
+        return err.into();
+    }
+    LaunchFailure::new(
+        FailureCode::AccountRefreshNetwork,
+        format!("读取验证服务器 {api_root} 的信息失败：{err}"),
+    )
+    .param("server", api_root)
+    .caused_by(err)
+    .into()
+}
+
+/// 续期失败里只有两种给失败码：凭据被服务器判定失效（重新登录）与连不上（联网后重试）。封禁、
+/// 未购买、服务器回 5xx 或解析不了、凭据库读写失败、取消都不是重新登录能解决的，按门面错误原样
+/// 报出原文与错误码；取消因此也照常认得出。
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
         CoreError::Auth(aurora_auth::AuthError::Http { .. }) => LaunchFailure::new(
@@ -1236,7 +1245,7 @@ fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
         )
         .caused_by(err)
         .into(),
-        CoreError::Auth(_) => LaunchFailure::new(
+        CoreError::Auth(aurora_auth::AuthError::ReloginRequired) => LaunchFailure::new(
             FailureCode::AccountRelogin,
             format!("{account_name} 的登录已失效：{err}"),
         )
@@ -1631,6 +1640,88 @@ mod tests {
         assert_eq!(fullscreen.java, JavaChoice::Auto);
         assert_eq!(fullscreen.memory_mb, None);
         assert!(fullscreen.jvm_args.is_empty());
+    }
+
+    /// 一个真实的 reqwest 错误：地址解析失败，不联网。
+    fn http_error() -> aurora_auth::AuthError {
+        let source = reqwest::Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("非法地址应当构造失败");
+        aurora_auth::AuthError::Http {
+            context: "测试",
+            source,
+        }
+    }
+
+    #[test]
+    fn only_rejected_credentials_ask_for_relogin_before_launch() {
+        use aurora_auth::AuthError;
+        let relogin = classify_refresh(CoreError::Auth(AuthError::ReloginRequired), "Steve");
+        let LaunchFailed::Failure(failure) = relogin else {
+            panic!("凭据被判失效应给出失败码：{relogin:?}");
+        };
+        assert_eq!(failure.code, FailureCode::AccountRelogin);
+        assert_eq!(failure.params["account"], Value::from("Steve"));
+
+        let network = classify_refresh(CoreError::Auth(http_error()), "Steve");
+        let LaunchFailed::Failure(failure) = network else {
+            panic!("连不上应给出失败码：{network:?}");
+        };
+        assert_eq!(failure.code, FailureCode::AccountRefreshNetwork);
+
+        // 重新登录也解决不了的失败按门面错误原样报出，错误码与原文由命令层照常映射。
+        for err in [
+            AuthError::XstsBanned,
+            AuthError::MinecraftProfileNotFound,
+            AuthError::Response {
+                context: "XBL 认证",
+                detail: "HTTP 503".into(),
+            },
+            AuthError::Dpapi {
+                operation: "解密",
+                message: "拒绝访问".into(),
+            },
+            AuthError::AccountNotFound("0000".into()),
+        ] {
+            let name = format!("{err:?}");
+            let failed = classify_refresh(CoreError::Auth(err), "Steve");
+            assert!(
+                matches!(failed, LaunchFailed::Core(CoreError::Auth(_))),
+                "{name} 不该提示重新登录：{failed:?}"
+            );
+        }
+
+        let cancelled = classify_refresh(CoreError::Auth(AuthError::Cancelled), "Steve");
+        assert!(cancelled.is_cancelled(), "取消应原样认得出：{cancelled:?}");
+    }
+
+    #[test]
+    fn unreadable_auth_server_metadata_does_not_ask_for_relogin() {
+        const SERVER: &str = "https://skin.example/api/yggdrasil";
+        let network = authlib_metadata_failure(http_error(), SERVER);
+        let LaunchFailed::Failure(failure) = network else {
+            panic!("连不上验证服务器应给出失败码：{network:?}");
+        };
+        assert_eq!(failure.code, FailureCode::AccountRefreshNetwork);
+        assert_eq!(failure.params["server"], Value::from(SERVER));
+
+        let not_yggdrasil = authlib_metadata_failure(
+            aurora_auth::AuthError::NotYggdrasilServer {
+                url: SERVER.into(),
+                detail: "API 根地址返回 HTTP 502 Bad Gateway".into(),
+            },
+            SERVER,
+        );
+        assert!(
+            matches!(
+                not_yggdrasil,
+                LaunchFailed::Core(CoreError::Auth(
+                    aurora_auth::AuthError::NotYggdrasilServer { .. }
+                ))
+            ),
+            "服务器回错页不该提示重新登录：{not_yggdrasil:?}"
+        );
     }
 
     #[test]
