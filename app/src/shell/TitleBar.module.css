@@ -1,0 +1,241 @@
+/*
+ * 三列网格：左右两列各占剩余宽度的一半，中列状态岛按内容宽度居中于主列。
+ * 右列不小于自身内容宽（max-content），窗口变窄时先压缩左列的标题。
+ */
+.bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
+  align-items: center;
+  gap: var(--sk-space-12);
+  height: 56px;
+  padding-left: var(--sk-space-4);
+}
+
+.start {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.center {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
+}
+
+.end {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sk-space-4);
+}
+
+.history {
+  display: flex;
+  flex: none;
+  gap: var(--sk-space-2);
+}
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+/* ---- 标题与面包屑 ---- */
+.title,
+.crumbs {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sk-fs-heading);
+  line-height: var(--sk-lh-heading);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.crumbs {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sk-space-6);
+}
+
+.crumbLink {
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--sk-r-xs);
+  background: none;
+  font: inherit;
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+  cursor: pointer;
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.crumbLink:hover {
+  color: var(--sk-accent-strong);
+}
+
+.crumbLink:focus-visible {
+  outline: none;
+  box-shadow: var(--sk-focus);
+}
+
+.crumbSep {
+  flex: none;
+  color: var(--sk-text-3);
+  font-weight: var(--sk-w-body);
+}
+
+.crumbName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crumbTab {
+  flex: none;
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.bar[data-blurred] .title,
+.bar[data-blurred] .crumbs {
+  color: var(--sk-text-2);
+}
+
+/* ---- 搜索入口 ---- */
+.search {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  box-sizing: border-box;
+  width: 180px;
+  height: 34px;
+  padding: 0 var(--sk-space-6) 0 var(--sk-space-10);
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-surface);
+  font: inherit;
+  color: var(--sk-text-3);
+  cursor: text;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+:global(:root[data-sk-tier="wide"]) .search {
+  width: 240px;
+}
+
+.search:hover {
+  border-color: var(--sk-line-2);
+  color: var(--sk-text-2);
+}
+
+.search:focus-visible,
+.searchIcon:focus-visible {
+  outline: none;
+  box-shadow: var(--sk-focus);
+}
+
+.searchText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+.searchIcon {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--sk-r-sm);
+  background: transparent;
+  color: var(--sk-text-2);
+  cursor: pointer;
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.searchIcon:hover {
+  background: var(--sk-bg-2);
+  color: var(--sk-text);
+}
+
+/* ---- 窗口三键：命中区铺满栏高，可见底色只是中间 34×30 的圆角块 ---- */
+.window {
+  display: flex;
+  align-self: stretch;
+}
+
+.winButton {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  height: 56px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sk-text-2);
+  cursor: default;
+  outline: none;
+}
+
+.winButton[data-close] {
+  width: 46px;
+  margin-left: var(--sk-space-4);
+}
+
+.winFace {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 30px;
+  border-radius: var(--sk-r-sm);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease),
+    box-shadow var(--sk-dur-hover) var(--sk-ease);
+}
+
+.winButton:hover .winFace {
+  background: var(--sk-bg-3);
+  box-shadow: inset 0 0 0 1px var(--sk-line-2);
+  color: var(--sk-text);
+}
+
+.winButton:active .winFace {
+  background: var(--sk-fill-press);
+}
+
+.winButton[data-close]:hover .winFace {
+  background: var(--sk-win-close);
+  box-shadow: none;
+  color: var(--sk-win-close-ink);
+}
+
+.winButton[data-close]:active .winFace {
+  background: var(--sk-win-close-active);
+  color: var(--sk-win-close-ink);
+}
+
+.winButton:focus-visible .winFace {
+  box-shadow: var(--sk-focus);
+}
+
+.bar[data-blurred] .winButton:not(:hover) {
+  color: var(--sk-text-3);
+}
