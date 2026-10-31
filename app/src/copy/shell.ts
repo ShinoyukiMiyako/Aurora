@@ -120,6 +120,7 @@ export const DROP_COPY = {
 /** 系统选择文件对话框：标题与文件类型下拉里的名称。 */
 export const FILE_PICK_COPY = {
   modpack: { title: "选择整合包文件", filter: "整合包" },
+  java: { title: "选择 java.exe 或 javaw.exe", filter: "Java 可执行文件" },
 } as const;
 
 /** 页面级错误边界：外壳之内只有这一处兜底，标题栏、侧栏、状态岛不受页面错误影响。 */
