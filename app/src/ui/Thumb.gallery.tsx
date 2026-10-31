@@ -4,7 +4,7 @@ import { Cover } from "./Cover";
 import { RemoteImageProvider, type RemoteImageResolver } from "./remote-image";
 import { Thumb, type ThumbKind, type ThumbSize } from "./Thumb";
 
-const SIZES: ThumbSize[] = [32, 40, 48, 64, 96];
+const SIZES: ThumbSize[] = [32, 40, 44, 48, 64, 96];
 const KINDS: ThumbKind[] = ["mod", "modpack", "resourcepack", "shader", "datapack", "news", "server"];
 
 /** 陈列用的假图：用当前强调色现画，不依赖网络；颜色取自根上的令牌。 */

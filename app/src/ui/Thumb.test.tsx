@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, type CanvasStub } from "../art/illustrations/test-canvas";
 import { render, stubMatchMedia, type Rendered } from "../test/dom";
 import { RemoteImageProvider } from "./remote-image";
-import { isPixelArtThumb, Thumb, thumbIconSize } from "./Thumb";
+import { isPixelArtThumb, Thumb, THUMB_RADIUS, thumbIconSize, type ThumbSize } from "./Thumb";
 
 let view: Rendered | undefined;
 let canvas: CanvasStub;
@@ -76,7 +76,13 @@ describe("判定规则", () => {
   });
 
   it("图标档位：边长 ≤ 32 用 16，33-48 用 20，更大用 24", () => {
-    expect([32, 40, 48, 64, 96].map((s) => thumbIconSize(s as 32))).toEqual([16, 20, 20, 24, 24]);
+    expect([32, 40, 44, 48, 64, 96].map((s) => thumbIconSize(s as 32))).toEqual([16, 20, 20, 20, 24, 24]);
+  });
+
+  it("每一档的圆角都是 round(边长 × 0.3)", () => {
+    const sizes = Object.keys(THUMB_RADIUS).map(Number) as ThumbSize[];
+    expect(sizes).toEqual([32, 40, 44, 48, 64, 96]);
+    for (const size of sizes) expect(THUMB_RADIUS[size]).toBe(Math.round(size * 0.3));
   });
 });
 
@@ -89,6 +95,12 @@ describe("Thumb", () => {
     expect(thumb().querySelector("svg")?.getAttribute("width")).toBe("24");
     expect(thumb().getAttribute("aria-hidden")).toBe("true");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("44 档：底座 44 见方、圆角 13、类型图标 20", () => {
+    view = render(<Thumb url={null} kind="server" hue={120} size={44} />);
+    expect([thumb().style.width, thumb().style.height, thumb().style.borderRadius]).toEqual(["44px", "44px", "13px"]);
+    expect(thumb().querySelector("svg")?.getAttribute("width")).toBe("20");
   });
 
   it("有地址却缺少解析函数是装配错误", () => {
