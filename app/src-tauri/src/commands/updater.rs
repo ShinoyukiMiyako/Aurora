@@ -342,10 +342,21 @@ pub async fn download_update(
 pub async fn install_update(
     app: AppHandle,
     updater: State<'_, UpdaterState>,
+    facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     updater.require_supported()?;
-    updater.install_downloaded()?;
+    install_after_saving_play_records(&facade, || updater.install_downloaded()).await?;
     app.restart()
+}
+
+/// 先补写游玩记录里还没落盘的改动再安装：Windows 上更新插件拉起安装程序后直接结束进程，不经过
+/// `RunEvent::Exit`，退出收尾里的那次补写赶不上。补写失败只记日志、照样安装，与正常退出时一致。
+pub(crate) async fn install_after_saving_play_records(
+    facade: &Facade,
+    install: impl FnOnce() -> Result<(), CommandError>,
+) -> Result<(), CommandError> {
+    crate::exit::save_play_records(facade, crate::exit::PLAY_RECORDS_DEADLINE).await;
+    install()
 }
 
 /// 开关「退出时安装」。打开前更新包必须已下载好（否则 `update_not_ready`）。
@@ -517,6 +528,61 @@ fn updater_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 立即安装在拉起安装程序之前就把待补的游玩记录写进了文件，安装的结果原样返回。
+    #[tokio::test]
+    async fn install_now_saves_pending_play_records_before_installing() {
+        use aurora_core::playtime::PLAYTIME_FILE;
+        use aurora_core::{Aurora, AuroraConfig};
+
+        const RECORDS: &str = r#"{"format":1,"book":{
+            "instances":{
+                "旧名":{"total_ms":7200000,"last_played_at":1761800000000},
+                "留下":{"total_ms":1800000,"last_played_at":1761600000000}},
+            "days":{"2026-10-30":{"instances":{"旧名":7200000,"留下":1800000}}}}}"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PLAYTIME_FILE);
+        let facade = Facade::new(
+            Aurora::open(
+                AuroraConfig::default(),
+                dir.path().to_path_buf(),
+                dir.path().join("config.json"),
+            )
+            .unwrap(),
+        );
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(facade
+            .snapshot()
+            .await
+            .rename_play_records("旧名", "新名")
+            .await
+            .is_err());
+        std::fs::write(&path, RECORDS).unwrap();
+
+        let mut on_disk_at_install = None;
+        let result = install_after_saving_play_records(&facade, || {
+            on_disk_at_install = Some(std::fs::read_to_string(&path).unwrap());
+            Err(CommandError::new(
+                code::UPDATE_INSTALL_FAILED,
+                "启动更新安装失败",
+            ))
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err().code, code::UPDATE_INSTALL_FAILED);
+        let saved: Value = serde_json::from_str(&on_disk_at_install.unwrap()).unwrap();
+        let book = &saved["directories"][0]["book"];
+        assert_eq!(book["instances"]["新名"]["total_ms"], 7_200_000);
+        assert!(book["instances"].get("旧名").is_none());
+        assert_eq!(book["instances"]["留下"]["total_ms"], 1_800_000);
+        assert_eq!(book["days"]["2026-10-30"]["instances"]["新名"], 7_200_000);
+        assert!(!facade
+            .snapshot()
+            .await
+            .save_pending_play_records()
+            .await
+            .unwrap());
+    }
 
     #[test]
     fn support_requires_release_build_and_non_empty_pubkey() {
