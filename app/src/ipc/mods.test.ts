@@ -3,7 +3,7 @@ import { IpcError } from "./errors";
 import { backupSize, listHistory, rollback, rollbackChecks } from "./history";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners, subscribeMockEvent } from "./mock/events";
-import { MOCK_MOD_INSTANCE, setMockModFileBusy } from "./mock/handlers/mods";
+import { MOCK_MOD_INSTANCE, mockModFileCount, setMockModFileBusy } from "./mock/handlers/mods";
 import { beginMockTask, endMockTask } from "./mock/handlers/tasks";
 import {
   checkUpdates,
@@ -17,7 +17,7 @@ import {
   updateMod,
 } from "./mods";
 import { CORE_EVENT, cancelTask } from "./tasks";
-import { deleteInstance } from "./instances";
+import { deleteInstance, listInstances, renameInstance } from "./instances";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -65,9 +65,32 @@ describe("实例 Mod 列表", () => {
   });
 
   it("实例以实例 mock 为准：列表里有、没种过 Mod 的实例是空 mods 目录，删掉后报未安装", async () => {
-    expect(await listMods("樱花生存")).toEqual([]);
-    await deleteInstance("樱花生存");
-    expect(await failure(listMods("樱花生存"))).toMatchObject({ code: "version_not_installed" });
+    expect(await listMods("1.21.1-Fabric")).toEqual([]);
+    await deleteInstance("1.21.1-Fabric");
+    expect(await failure(listMods("1.21.1-Fabric"))).toMatchObject({ code: "version_not_installed" });
+  });
+
+  it("实例列表的 mod_count 与 list_mods 数的是同一份文件：每个就绪实例都对得上，启停、移除、改名后依旧", async () => {
+    const counts = async (): Promise<[string, number | null, number][]> => {
+      const ready = (await listInstances()).filter((i) => i.status === "ready");
+      return Promise.all(ready.map(async (i): Promise<[string, number | null, number]> => [i.id, i.mod_count, (await listMods(i.id)).length]));
+    };
+    for (const [id, listed, files] of await counts()) expect(listed, id).toBe(files);
+    expect((await counts()).find(([id]) => id === "樱花生存")?.[1]).toBe(12);
+    expect((await counts()).find(([id]) => id === "RLCraft")?.[1]).toBe(182);
+
+    await setModEnabled(MOCK_MOD_INSTANCE, "handmade-1.0.jar", false);
+    await removeMod(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar");
+    await renameInstance("樱花生存", "樱花生存二周目");
+    const after = await counts();
+    for (const [id, listed, files] of after) expect(listed, id).toBe(files);
+    // 停用的仍算一个 Mod，移除的不算；改名后 Mod 跟着实例走。
+    expect(after.find(([id]) => id === MOCK_MOD_INSTANCE)?.[1]).toBe(3);
+    expect(after.find(([id]) => id === "樱花生存二周目")?.[1]).toBe(12);
+
+    // 删掉后 Mod 一侧的状态一并忘掉，同名新实例不会凭空带着旧 Mod。
+    await deleteInstance("樱花生存二周目");
+    expect(mockModFileCount("樱花生存二周目")).toBe(0);
   });
 
   it("启停改文件名并返回新路径；已是目标状态不动；文件不在如实报错", async () => {

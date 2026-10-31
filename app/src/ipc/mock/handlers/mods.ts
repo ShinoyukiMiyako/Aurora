@@ -20,7 +20,7 @@ import type {
 import type { PlatformId } from "../../discover";
 import { CORE_EVENT } from "../../tasks";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { mockInstanceFacts, mockInstanceIds } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -147,7 +147,7 @@ function seedCatalog(): Map<string, CatalogProject> {
   ]);
 }
 
-function metadata(modId: string, name: string, ver: string): ModMetadata {
+function metadata(modId: string, name: string, ver: string, minecraft = "~1.20.1"): ModMetadata {
   return {
     mod_id: modId,
     name,
@@ -155,7 +155,7 @@ function metadata(modId: string, name: string, ver: string): ModMetadata {
     description: null,
     authors: [],
     depends: ["fabricloader", "minecraft"],
-    minecraft_version: "~1.20.1",
+    minecraft_version: minecraft,
     icon: `assets/${modId}/icon.png`,
     loader: "fabric",
     format: "fabric",
@@ -202,8 +202,56 @@ function seedInstances(): Map<string, MockInstance> {
     ],
     ["1.20.1-Forge", { mc_version: "1.20.1", loaders: ["forge"], files: [], ledger: [], history: [] }],
     ["1.21", { mc_version: "1.21", loaders: [], files: [], ledger: [], history: [] }],
+    [
+      "樱花生存",
+      {
+        mc_version: "1.21.1",
+        loaders: ["fabric"],
+        files: SAKURA_MODS.map(([modId, name, ver]) => ({
+          file_name: `${modId}-${ver}.jar`,
+          size: 786_432,
+          modified_ms: base - 12 * day,
+          metadata: metadata(modId, name, ver, "~1.21.1"),
+        })),
+        ledger: [],
+        history: [],
+      },
+    ],
+    [
+      "RLCraft",
+      {
+        mc_version: "1.12.2",
+        loaders: ["forge"],
+        // 老 Forge 整合包的 jar 多数没有能解析的元数据，按读不出元数据的文件种。
+        files: Array.from({ length: RLCRAFT_MOD_COUNT }, (_, i) => ({
+          file_name: `rlcraft-mod-${String(i + 1).padStart(3, "0")}.jar`,
+          size: 262_144,
+          modified_ms: base - 90 * day,
+          metadata: null,
+        })),
+        ledger: [],
+        history: [],
+      },
+    ],
   ]);
 }
+
+/** 樱花生存实例里本地放进去的 Mod：[mod id, 名称, 版本]。 */
+const SAKURA_MODS: readonly (readonly [string, string, string])[] = [
+  ["sodium", "Sodium", "0.6.5"],
+  ["lithium", "Lithium", "0.14.3"],
+  ["iris", "Iris", "1.8.1"],
+  ["fabric-api", "Fabric API", "0.107.0"],
+  ["modmenu", "Mod Menu", "11.0.3"],
+  ["indium", "Indium", "1.0.35"],
+  ["entityculling", "Entity Culling", "1.7.2"],
+  ["ferritecore", "FerriteCore", "7.0.2"],
+  ["krypton", "Krypton", "0.2.8"],
+  ["lambdynlights", "LambDynamicLights", "3.1.2"],
+  ["appleskin", "AppleSkin", "3.0.5"],
+  ["jei", "Just Enough Items", "19.21.0"],
+];
+const RLCRAFT_MOD_COUNT = 182;
 
 let catalog = seedCatalog();
 let instances = seedInstances();
@@ -429,9 +477,32 @@ function modFileName(args: MockArgs, versionId: string): string {
   return fileName;
 }
 
+/** mods 目录里算作 Mod 的文件：.jar 与停用的 .jar.disabled，更新留下的 .old 备份不算，口径同后端 count_mod_files。 */
+function modFiles(instance: MockInstance): DiskFile[] {
+  return instance.files.filter((f) => ledgerKey(f.file_name).endsWith(".jar"));
+}
+
+/** 实例列表的 mod_count：与 list_mods 用同一个过滤数同一份文件表。没种过 Mod 的实例为空目录。 */
+export function mockModFileCount(versionId: string): number {
+  const known = instances.get(versionId);
+  return known === undefined ? 0 : modFiles(known).length;
+}
+
+/** 实例改名时 Mod 一侧的状态跟着走（后端的 mods 目录就在实例目录里）。 */
+export function renameMockMods(from: string, to: string): void {
+  const known = instances.get(from);
+  if (known === undefined) return;
+  instances.delete(from);
+  instances.set(to, known);
+}
+
+/** 实例删除时一并忘掉 Mod 一侧的状态，免得同名新实例凭空带着旧 Mod。 */
+export function forgetMockMods(versionId: string): void {
+  instances.delete(versionId);
+}
+
 function listMods(versionId: string, instance: MockInstance): InstalledMod[] {
-  return instance.files
-    .filter((f) => ledgerKey(f.file_name).endsWith(".jar"))
+  return modFiles(instance)
     .sort((a, b) => byCodeUnit(a.file_name, b.file_name))
     .map((f) => {
       const row = instance.ledger.find((r) => r.file_name === ledgerKey(f.file_name));
@@ -642,3 +713,12 @@ export function reset(): void {
   instances = seedInstances();
   busyFiles.clear();
 }
+
+// 工程目录是固定的种子，不存；被占用的文件只在一次命令里有意义，也不存。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: () => [...instances.entries()],
+  restore: (data) => {
+    instances = new Map(data as [string, MockInstance][]);
+  },
+};

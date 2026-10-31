@@ -13,7 +13,7 @@ import type {
 } from "../../system";
 import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import {
   addExtraDirectory,
   createDirectory,
@@ -367,3 +367,12 @@ export function reset(): void {
   pinned = SEED_PINNED.map((s) => ({ ...s }));
   updater = seedUpdater();
 }
+
+// 固定的服务器在后端是配置的一部分；启动提示与更新状态每次启动重新得出，不存。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: () => pinned,
+  restore: (data) => {
+    pinned = data as PinnedServerDto[];
+  },
+};

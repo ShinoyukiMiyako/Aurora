@@ -1,6 +1,6 @@
 import type { AppearanceDto } from "../../appearance";
 import { IpcError } from "../../errors";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
 const DEFAULTS: AppearanceDto = { mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false };
 
@@ -50,3 +50,11 @@ export const handlers: MockHandlers = {
 export function reset(): void {
   current = { ...DEFAULTS };
 }
+
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: () => current,
+  restore: (data) => {
+    current = data as AppearanceDto;
+  },
+};

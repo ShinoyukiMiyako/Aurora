@@ -20,8 +20,9 @@ import {
   type VersionRequirementsDto,
 } from "../../instances";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { mockCrashReport, mockPlaySummary } from "./launch";
+import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与上限在这里按后端各写一份。
@@ -75,6 +76,7 @@ type DerivedField =
   | "memory_mb"
   | "playtime_min"
   | "last_played_at"
+  | "mod_count"
   | "world_count"
   | "isolated"
   | "modpack"
@@ -116,7 +118,6 @@ function readyDto(
   mc: string,
   loaders: InstanceDto["loaders"],
   javaMajor: number,
-  modCount: number,
   createdAt: number | null,
 ): MockInstance["dto"] {
   return {
@@ -128,7 +129,6 @@ function readyDto(
     release_type: "release",
     is_release: true,
     java_major: javaMajor,
-    mod_count: modCount,
     settings_error: null,
     incomplete: null,
     created_at: createdAt,
@@ -139,7 +139,7 @@ function seedInstances(): MockInstance[] {
   const now = Date.now();
   return [
     {
-      dto: readyDto("1.21.1", "1.21.1", [], 21, 0, now - 40 * DAY),
+      dto: readyDto("1.21.1", "1.21.1", [], 21, now - 40 * DAY),
       settings: defaultSettings(),
       modpack: null,
       inheritsFrom: null,
@@ -148,7 +148,7 @@ function seedInstances(): MockInstance[] {
       fileCount: 4,
     },
     {
-      dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, 12, now - 12 * DAY),
+      dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 12 * DAY),
       settings: { ...defaultSettings(), description: "和朋友的周末服务器", cover: "cherry_planks", memory_mb: 6144 },
       modpack: null,
       inheritsFrom: null,
@@ -188,7 +188,7 @@ function seedInstances(): MockInstance[] {
     },
     // 下面四个实例是 Mod、发现与启动各自 mock 里种好数据的实例：浏览器里从实例列表点进去，各页看到的是同一批实例。
     {
-      dto: readyDto("1.20.1-Fabric", "1.20.1", [{ kind: "fabric", version: "0.15.11" }], 17, 4, now - 60 * DAY),
+      dto: readyDto("1.20.1-Fabric", "1.20.1", [{ kind: "fabric", version: "0.15.11" }], 17, now - 60 * DAY),
       settings: defaultSettings(),
       modpack: null,
       inheritsFrom: null,
@@ -197,7 +197,7 @@ function seedInstances(): MockInstance[] {
       fileCount: 410,
     },
     {
-      dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, 0, now - 55 * DAY),
+      dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, now - 55 * DAY),
       settings: defaultSettings(),
       modpack: null,
       inheritsFrom: null,
@@ -206,7 +206,7 @@ function seedInstances(): MockInstance[] {
       fileCount: 520,
     },
     {
-      dto: readyDto("1.21", "1.21", [], 21, 0, now - 50 * DAY),
+      dto: readyDto("1.21", "1.21", [], 21, now - 50 * DAY),
       settings: defaultSettings(),
       modpack: null,
       inheritsFrom: null,
@@ -215,7 +215,7 @@ function seedInstances(): MockInstance[] {
       fileCount: 4,
     },
     {
-      dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, 0, now - 20 * DAY),
+      dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 20 * DAY),
       settings: defaultSettings(),
       modpack: null,
       inheritsFrom: null,
@@ -249,7 +249,7 @@ function seedInstances(): MockInstance[] {
       fileCount: 900,
     },
     {
-      dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, 182, now - 90 * DAY),
+      dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, now - 90 * DAY),
       settings: { ...defaultSettings(), memory_mb: 8192, isolation: "enabled" },
       modpack: { platform: "curseforge", project_id: "285109", version_id: "4612979", name: "RLCraft", version: "2.9.3" },
       inheritsFrom: null,
@@ -267,7 +267,6 @@ function seedInstances(): MockInstance[] {
         release_type: null,
         is_release: false,
         java_major: null,
-        mod_count: null,
         settings_error: null,
         incomplete: {
           kind: "install",
@@ -441,6 +440,8 @@ function toDto(instance: MockInstance): InstanceDto {
     description: instance.settings.description,
     cover: instance.settings.cover,
     memory_mb: instance.settings.memory_mb,
+    // 与 list_mods 数的是同一份文件表，两边不会对不上。
+    mod_count: ready ? mockModFileCount(instance.dto.id) : null,
     world_count: ready ? instance.content.worlds.length : null,
     isolated: ready ? isolatedOf(instance) : null,
     modpack: instance.modpack,
@@ -469,7 +470,7 @@ export function addMockInstance(
 ): void {
   if (find(id) !== undefined) throw new Error(`mock 实例 ${id} 已存在`);
   instances.push({
-    dto: readyDto(id, mcVersion, loader === null ? [] : [loader], 21, 0, Date.now()),
+    dto: readyDto(id, mcVersion, loader === null ? [] : [loader], 21, Date.now()),
     // 整合包导入的实例强制隔离，与后端写入的实例设置一致。
     settings: { ...defaultSettings(), isolation: "enabled" },
     modpack,
@@ -652,7 +653,6 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
       release_type: null,
       is_release: false,
       java_major: null,
-      mod_count: null,
       settings_error: null,
       incomplete,
       created_at: createdAt,
@@ -685,7 +685,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     stage(taskId, "补全库、资源与 natives");
     await fakeDownload(taskId, 40, 512 * 1024);
     instance.dto = {
-      ...readyDto(name, mcVersion, loader && loaderVersion ? [{ kind: loader, version: loaderVersion }] : [], entry.java, 0, createdAt),
+      ...readyDto(name, mcVersion, loader && loaderVersion ? [{ kind: loader, version: loaderVersion }] : [], entry.java, createdAt),
       release_type: entry.type,
       is_release: entry.type === "release",
     };
@@ -760,7 +760,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
         throw error;
       }
       const loaders = spec.loader && spec.loader_version ? [{ kind: spec.loader, version: spec.loader_version }] : [];
-      instance.dto = readyDto(id, spec.mc_version, loaders, entry.java, 0, instance.dto.created_at);
+      instance.dto = readyDto(id, spec.mc_version, loaders, entry.java, instance.dto.created_at);
     }
     instance.dto.incomplete = null;
     return { reinstalled: spec !== null, libraries: 12, assets: 0, natives: 0 };
@@ -842,6 +842,7 @@ export const handlers: MockHandlers = {
       if (existed) {
         ensureNoDependents(id);
         instances = instances.filter((i) => i.dto.id !== id);
+        forgetMockMods(id);
       }
       pins = pins.filter((pin) => pin !== id);
       return { existed };
@@ -863,6 +864,7 @@ export const handlers: MockHandlers = {
       if (id === newName) return { id };
       ensureNoDependents(id);
       instance.dto = { ...instance.dto, id: newName };
+      renameMockMods(id, newName);
       pins = pins.map((pin) => (pin === id ? newName : pin));
       return { id: newName };
     } finally {
@@ -923,3 +925,19 @@ export function reset(): void {
   pins = ["樱花生存", "1.21.1"];
   activities.clear();
 }
+
+interface InstancesSnapshot {
+  instances: MockInstance[];
+  pins: string[];
+}
+
+// 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: (): InstancesSnapshot => ({ instances, pins }),
+  restore: (data) => {
+    const saved = data as InstancesSnapshot;
+    instances = saved.instances;
+    pins = saved.pins;
+  },
+};

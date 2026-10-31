@@ -1,7 +1,7 @@
 import type { AccountDto, AuthlibLoginResult, AuthServerDto, DeviceCode } from "../../accounts";
 import { IpcError } from "../../errors";
 import { emitMockEvent } from "../events";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
 // ipc/ 只能以类型方式引用别的模块，事件名在这里按后端各写一份。
 const DEVICE_CODE_EVENT = "aurora://device-code";
@@ -354,3 +354,12 @@ export function reset(): void {
   pendingSeq = 0;
   store = seed();
 }
+
+// 只存账户库本身；进行中的微软登录与等待选角色的会话随页面一起消失，与后端重启后的表现一致。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: () => store,
+  restore: (data) => {
+    store = data as Store;
+  },
+};

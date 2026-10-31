@@ -9,7 +9,7 @@ import type {
   NamedDirectoryDto,
 } from "../../config";
 import { IpcError } from "../../errors";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
 export const MOCK_DATA_DIR = "D:\\Games\\Launcher";
 const DEFAULT_GAME_DIR = `${MOCK_DATA_DIR}\\.minecraft`;
@@ -300,3 +300,24 @@ export function reset(): void {
   withVersions = new Set(SEED_WITH_VERSIONS.map(norm));
   firstRunCompleted = false;
 }
+
+interface ConfigSnapshot {
+  config: ConfigDto;
+  extras: NamedDirectoryDto[];
+  disk: string[];
+  withVersions: string[];
+  firstRunCompleted: boolean;
+}
+
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], firstRunCompleted }),
+  restore: (data) => {
+    const saved = data as ConfigSnapshot;
+    config = saved.config;
+    extras = saved.extras;
+    disk = new Set(saved.disk);
+    withVersions = new Set(saved.withVersions);
+    firstRunCompleted = saved.firstRunCompleted;
+  },
+};
