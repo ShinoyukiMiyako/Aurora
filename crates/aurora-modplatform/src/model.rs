@@ -47,6 +47,15 @@ pub enum ResourceType {
 }
 
 impl ResourceType {
+    /// 发现页「全部」所涵盖的类型：客户端启动器不装服务端插件，插件不在其中。
+    pub const DISCOVERABLE: [ResourceType; 5] = [
+        ResourceType::Mod,
+        ResourceType::Modpack,
+        ResourceType::ResourcePack,
+        ResourceType::Shader,
+        ResourceType::DataPack,
+    ];
+
     /// Modrinth `project_type` facet 取值（见 `/v2/tag/project_type`）。
     pub fn modrinth_project_type(self) -> &'static str {
         match self {
@@ -81,6 +90,23 @@ impl ResourceType {
             "plugin" => ResourceType::Plugin,
             _ => ResourceType::Mod,
         }
+    }
+
+    /// 由 CurseForge classId 精确还原资源类型；不认识的 class（世界、附加包、自定义等）返回 `None`。
+    ///
+    /// 多类型搜索在 CurseForge 侧不带 classId，结果里会混进这些 class，靠它把它们筛掉。
+    pub fn exact_from_curseforge_class_id(class_id: Option<u32>) -> Option<Self> {
+        let class_id = class_id?;
+        [
+            ResourceType::Mod,
+            ResourceType::Modpack,
+            ResourceType::ResourcePack,
+            ResourceType::Shader,
+            ResourceType::DataPack,
+            ResourceType::Plugin,
+        ]
+        .into_iter()
+        .find(|t| t.curseforge_class_id() == class_id)
     }
 
     /// 由 CurseForge classId 还原资源类型；未知/缺失回落到 [`ResourceType::Mod`]。
@@ -138,6 +164,18 @@ impl ModLoader {
             ModLoader::Fabric => 4,
             ModLoader::Quilt => 5,
             ModLoader::NeoForge => 6,
+        }
+    }
+
+    /// 由 CurseForge `modLoaderType` 数值还原；0（Any）、2（Cauldron）与未知编码返回 `None`。
+    pub fn from_curseforge_loader_type(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(ModLoader::Forge),
+            3 => Some(ModLoader::LiteLoader),
+            4 => Some(ModLoader::Fabric),
+            5 => Some(ModLoader::Quilt),
+            6 => Some(ModLoader::NeoForge),
+            _ => None,
         }
     }
 }
@@ -230,8 +268,11 @@ impl DependencyKind {
 pub struct SearchQuery {
     /// 关键词。`None` 表示不带关键词（按排序浏览）。
     pub query: Option<String>,
-    /// 资源类型。
-    pub resource_type: ResourceType,
+    /// 资源类型，多个之间为「或」；为空表示 [`ResourceType::DISCOVERABLE`] 全部。
+    pub resource_types: Vec<ResourceType>,
+    /// 分类条件，取 Modrinth 的分类键（如 `optimization`）；CurseForge 侧经
+    /// [`crate::category_map`] 换成分类 id，换不到时该次搜索不发往 CurseForge。
+    pub category: Option<String>,
     /// 目标加载器过滤。多个之间为「或」；CurseForge 单次仅支持一个加载器，取列表首个。
     pub loaders: Vec<ModLoader>,
     /// 目标游戏版本过滤。多个之间为「或」；CurseForge 单次仅支持一个版本，取列表首个。
@@ -248,7 +289,8 @@ impl Default for SearchQuery {
     fn default() -> Self {
         Self {
             query: None,
-            resource_type: ResourceType::Mod,
+            resource_types: vec![ResourceType::Mod],
+            category: None,
             loaders: Vec::new(),
             game_versions: Vec::new(),
             sort: SortField::Relevance,
@@ -267,10 +309,38 @@ impl SearchQuery {
         }
     }
 
-    /// 链式设置资源类型。
+    /// 链式设置为单一资源类型。
     pub fn with_resource_type(mut self, resource_type: ResourceType) -> Self {
-        self.resource_type = resource_type;
+        self.resource_types = vec![resource_type];
         self
+    }
+
+    /// 链式设置资源类型列表（空列表即全部）。
+    pub fn with_resource_types(mut self, resource_types: Vec<ResourceType>) -> Self {
+        self.resource_types = resource_types;
+        self
+    }
+
+    /// 链式设置分类条件（Modrinth 分类键）。
+    pub fn with_category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
+    /// 实际参与搜索的类型：空列表展开成 [`ResourceType::DISCOVERABLE`]，重复项只留首次出现。
+    pub fn effective_types(&self) -> Vec<ResourceType> {
+        let source: &[ResourceType] = if self.resource_types.is_empty() {
+            &ResourceType::DISCOVERABLE
+        } else {
+            &self.resource_types
+        };
+        let mut types = Vec::with_capacity(source.len());
+        for t in source {
+            if !types.contains(t) {
+                types.push(*t);
+            }
+        }
+        types
     }
 
     /// 链式追加一个加载器过滤。
@@ -320,14 +390,42 @@ pub struct SearchHit {
     pub follows: Option<u64>,
     /// 图标 URL。
     pub icon_url: Option<String>,
-    /// 分类标签。
+    /// 平台图库首图（整合包卡片的色带用图）；平台没给为 `None`。
+    pub gallery_url: Option<String>,
+    /// 平台为工程给出的主色换算成的 HSL 色相（0-359）；只有 Modrinth 提供，缺失为 `None`。
+    pub hue: Option<u16>,
+    /// 分类标签（Modrinth 为分类键，CurseForge 为分类名，加载器名不在其中）。
     pub categories: Vec<String>,
+    /// 支持的加载器（能认出的才列出）。
+    pub loaders: Vec<ModLoader>,
     /// 资源类型。
     pub resource_type: ResourceType,
     /// 最近更新时间（ISO-8601 原样字符串）。
     pub date_modified: Option<String>,
     /// 工程详情页 URL（若可得）。
     pub page_url: Option<String>,
+}
+
+/// 把 `0xRRGGBB` 主色换算成 HSL 色相（0-359）；灰色（无彩度）没有色相，返回 `None`。
+pub fn hue_from_rgb(rgb: u32) -> Option<u16> {
+    let r = f64::from((rgb >> 16) & 0xff) / 255.0;
+    let g = f64::from((rgb >> 8) & 0xff) / 255.0;
+    let b = f64::from(rgb & 0xff) / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    if delta == 0.0 {
+        return None;
+    }
+    let sector = if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    // 四舍五入后可能正好落到 360，按色相环折回 0。
+    Some(((sector * 60.0).round() as u16) % 360)
 }
 
 #[cfg(test)]
@@ -434,5 +532,91 @@ mod tests {
         assert_eq!(q.sort, SortField::Downloads);
         assert_eq!(q.limit, 50);
         assert_eq!(q.offset, 100);
+        assert_eq!(q.resource_types, vec![ResourceType::Mod]);
+        assert_eq!(q.category, None);
+    }
+
+    #[test]
+    fn empty_resource_types_expand_to_discoverable_without_plugin() {
+        let q = SearchQuery::default().with_resource_types(Vec::new());
+        assert_eq!(
+            q.effective_types(),
+            vec![
+                ResourceType::Mod,
+                ResourceType::Modpack,
+                ResourceType::ResourcePack,
+                ResourceType::Shader,
+                ResourceType::DataPack,
+            ]
+        );
+        assert!(!q.effective_types().contains(&ResourceType::Plugin));
+    }
+
+    #[test]
+    fn effective_types_keep_order_and_drop_duplicates() {
+        let q = SearchQuery::default().with_resource_types(vec![
+            ResourceType::Shader,
+            ResourceType::Mod,
+            ResourceType::Shader,
+        ]);
+        assert_eq!(
+            q.effective_types(),
+            vec![ResourceType::Shader, ResourceType::Mod]
+        );
+    }
+
+    #[test]
+    fn exact_class_lookup_rejects_unknown_classes() {
+        assert_eq!(
+            ResourceType::exact_from_curseforge_class_id(Some(6552)),
+            Some(ResourceType::Shader)
+        );
+        assert_eq!(
+            ResourceType::exact_from_curseforge_class_id(Some(6)),
+            Some(ResourceType::Mod)
+        );
+        // 17 是「世界」，4546 是「自定义」：发现页不收，不能回落成 Mod。
+        assert_eq!(ResourceType::exact_from_curseforge_class_id(Some(17)), None);
+        assert_eq!(
+            ResourceType::exact_from_curseforge_class_id(Some(4546)),
+            None
+        );
+        assert_eq!(ResourceType::exact_from_curseforge_class_id(None), None);
+    }
+
+    #[test]
+    fn curseforge_loader_codes_roundtrip() {
+        for loader in [
+            ModLoader::Fabric,
+            ModLoader::Quilt,
+            ModLoader::Forge,
+            ModLoader::NeoForge,
+            ModLoader::LiteLoader,
+        ] {
+            assert_eq!(
+                ModLoader::from_curseforge_loader_type(loader.curseforge_loader_type()),
+                Some(loader)
+            );
+        }
+        assert_eq!(ModLoader::from_curseforge_loader_type(0), None);
+        assert_eq!(ModLoader::from_curseforge_loader_type(2), None);
+        assert_eq!(ModLoader::from_curseforge_loader_type(7), None);
+    }
+
+    #[test]
+    fn hue_from_rgb_matches_hsl_definition() {
+        assert_eq!(hue_from_rgb(0xff0000), Some(0));
+        assert_eq!(hue_from_rgb(0x00ff00), Some(120));
+        assert_eq!(hue_from_rgb(0x0000ff), Some(240));
+        assert_eq!(hue_from_rgb(0xffff00), Some(60));
+        assert_eq!(hue_from_rgb(0xff00ff), Some(300));
+        // 4996660 = 0x4C3E34：偏暖的深褐，色相约 25。
+        assert_eq!(hue_from_rgb(4_996_660), Some(25));
+        // 接近 360 的值四舍五入后折回 0，而不是越界成 360。
+        assert_eq!(hue_from_rgb(0xff0001), Some(0));
+        // 黑、白、灰没有色相。
+        assert_eq!(hue_from_rgb(0x000000), None);
+        assert_eq!(hue_from_rgb(0xffffff), None);
+        assert_eq!(hue_from_rgb(0x808080), None);
     }
 }

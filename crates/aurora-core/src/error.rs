@@ -36,6 +36,9 @@ pub enum CoreError {
     /// Mod 平台错误（Modrinth/CurseForge 客户端、本地模组扫描与启禁）。
     #[error(transparent)]
     ModPlatform(#[from] aurora_modplatform::Error),
+    /// 整合包文件错误（格式、清单、路径安全、解压）。
+    #[error(transparent)]
+    Modpack(#[from] aurora_modpack::Error),
 
     /// 读取配置文件失败。
     #[error("读取配置文件 {path} 失败")]
@@ -80,6 +83,46 @@ pub enum CoreError {
     /// 该操作在当前平台不受支持（微软登录凭据加密仅限 Windows）。
     #[error("该操作在当前平台不受支持（微软登录的凭据加密仅限 Windows）")]
     PlatformUnsupported,
+    /// 工程 id 的格式不符合该平台的约定（CurseForge 的工程与文件 id 都是十进制数字）。
+    #[error("{platform} 的工程 id 格式不对：{project_id}")]
+    InvalidProjectId {
+        platform: &'static str,
+        project_id: String,
+    },
+    /// 资源安装的目标不成立（数据包没指明存档、非数据包却给了存档、整合包当单个资源装等）。
+    #[error("安装目标不对：{0}")]
+    InvalidResourceTarget(String),
+    /// 数据包要装进的存档在该实例里不存在。
+    #[error("实例 {version_id} 里没有存档 {world}")]
+    WorldNotFound { version_id: String, world: String },
+    /// 平台给出的文件名不能安全地落盘（含路径分隔符、`..` 等）。
+    #[error("{platform} 给出的文件名不安全：{file_name}")]
+    UnsafeFileName {
+        platform: &'static str,
+        file_name: String,
+    },
+    /// CurseForge 作者禁止第三方分发，这些文件拿不到下载地址，只能去网页手动下载。
+    #[error("这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}", files.join("、"))]
+    FileDistributionBlocked { files: Vec<String> },
+    /// 新实例的名字不可用。
+    #[error("实例名 {name} 不可用：{}", rule.describe())]
+    InstanceNameInvalid {
+        name: String,
+        rule: crate::modpack::InstanceNameRule,
+    },
+    /// 启动器写在实例里的 JSON 文件（整合包信息、未完成标记、版本 JSON）读不懂。
+    #[error("读不懂 {path}")]
+    JsonFileInvalid {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    /// 序列化启动器自己的 JSON 文件失败。
+    #[error("序列化 JSON 失败")]
+    JsonSerialize(#[source] serde_json::Error),
+    /// 系统时钟早于 1970 年，记不了导入时间。
+    #[error("系统时钟早于 1970 年")]
+    SystemClock(#[source] std::time::SystemTimeError),
 }
 
 impl CoreError {
@@ -91,6 +134,7 @@ impl CoreError {
             CoreError::Install(aurora_install::Error::Download(err)) => err.is_cancelled(),
             CoreError::Java(err) => err.is_cancelled(),
             CoreError::Auth(err) => err.is_cancelled(),
+            CoreError::Modpack(aurora_modpack::Error::Cancelled) => true,
             _ => false,
         }
     }
@@ -115,6 +159,7 @@ mod tests {
         assert!(CoreError::Java(aurora_java::Error::Cancelled).is_cancelled());
         assert!(CoreError::Auth(aurora_auth::AuthError::Cancelled).is_cancelled());
         assert!(!CoreError::Auth(aurora_auth::AuthError::ReloginRequired).is_cancelled());
+        assert!(CoreError::Modpack(aurora_modpack::Error::Cancelled).is_cancelled());
 
         // 真正的失败不能被当成取消。
         assert!(!CoreError::NoJava { major: 17 }.is_cancelled());

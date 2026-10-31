@@ -17,6 +17,7 @@ pub mod history;
 pub mod instances;
 pub mod java;
 pub mod launch;
+pub mod modpack;
 pub mod mods;
 pub mod tasks;
 

@@ -109,6 +109,17 @@ impl Aurora {
         self
     }
 
+    /// 覆盖 Modrinth 与 CurseForge 的 API 根地址（默认官方地址）。用于本地 mock 与集成测试。
+    pub fn with_platform_bases(
+        mut self,
+        modrinth: impl Into<String>,
+        curseforge: impl Into<String>,
+    ) -> Self {
+        self.modrinth_base = modrinth.into();
+        self.curseforge_base = curseforge.into();
+        self
+    }
+
     /// 给这份门面挂上取消令牌，返回挂好的门面。
     ///
     /// 用在长任务的快照上：之后经它装配的下载池（安装、装 Mod）与 Java 运行时下载都会在文件粒度
@@ -299,7 +310,8 @@ impl Aurora {
         &self.msa_endpoints
     }
 
-    /// 快照上挂的取消令牌（常驻门面为 `None`）；不走下载池的长流程（如设备码登录）据此响应取消。
+    /// 快照上挂的取消令牌（常驻门面为 `None`）；不走下载池的长流程（设备码登录、在阻塞线程里解压
+    /// 整合包）据此响应取消。
     pub(crate) fn cancel_token(&self) -> Option<&CancellationToken> {
         self.cancel.as_ref()
     }

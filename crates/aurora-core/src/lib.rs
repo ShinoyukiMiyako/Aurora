@@ -40,9 +40,11 @@ pub mod launch;
 pub mod ledger;
 pub mod loaders;
 mod modfs;
+pub mod modpack;
 pub mod mods;
 pub mod modversions;
 pub mod playtime;
+pub mod resources;
 pub mod search;
 pub mod session;
 pub mod updates;
@@ -74,6 +76,11 @@ pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
 };
 pub use updates::UpdateCandidate;
+pub use modpack::{
+    INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
+    ModpackPreview, ModpackSource, read_instance_modpack, validate_instance_name,
+};
+pub use resources::{ResourceInstallOutcome, ResourceTarget};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -100,6 +107,11 @@ pub use aurora_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,
     ModMetadata, ModVersionInfo, Platform, PlatformError, ReleaseChannel, ResourceType, SearchHit,
     SearchQuery, SortField,
+};
+// 发现页：聚合搜索的合并结果与翻页游标、工程详情。
+pub use aurora_modplatform::{
+    BodyFormat, DependencyProject, HitSource, PlatformCursor, ProjectDetail, SearchCursor,
+    SearchEntry, SkipReason, SkippedPlatform,
 };
 pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifest};
 
@@ -134,5 +146,7 @@ pub use aurora_install::Error as InstallError;
 pub use aurora_instance::Error as InstanceError;
 pub use aurora_java::Error as JavaError;
 pub use aurora_launch::LaunchError;
+pub use aurora_modpack::Error as ModpackError;
+pub use aurora_modpack::{PackFormat, PackLoader, PackLoaderKind, PathValidationError};
 pub use aurora_modplatform::Error as ModPlatformError;
 pub use aurora_version::Error as VersionError;
