@@ -11,6 +11,8 @@
 //! - [`SourceSpeedCache`]：并发测各源首字节时间排出先后，结论在进程内缓存 30 分钟。
 //! - [`SourceHealth`]：跨文件的源健康表，连续失败的主机熔断沉底，坏源只付一次重试的代价。
 //! - [`CancellationToken`]：挂到 [`DownloadPool`] 上，令牌触发后整批在文件粒度停下并清理临时文件。
+//! - [`DownloadCredential`]：挂在任务上的下载凭据（CurseForge CDN 的 `x-api-key`），引擎逐跳跟随跳转，
+//!   只有 [`CredentialScope`] 内的那一跳才带上它。
 //!
 //! 所有失败归口到 [`Error`]，可重试性由 [`aurora_base::retry::RetryableError`] 精确分级。
 //!
@@ -34,6 +36,7 @@
 mod engine;
 
 pub mod chunk;
+pub mod credential;
 pub mod error;
 pub mod health;
 pub mod pool;
@@ -43,6 +46,7 @@ pub mod speed;
 pub mod task;
 
 pub use chunk::{Chunk, ChunkConfig, ChunkPlan};
+pub use credential::{CredentialRealm, CredentialScope, DownloadCredential};
 pub use engine::{DownloadConfig, Downloader};
 pub use error::{Error, Result};
 pub use health::{SourceHealth, is_host_fault};

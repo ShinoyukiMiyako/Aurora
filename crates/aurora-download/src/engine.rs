@@ -19,6 +19,10 @@
 //! 取消是协作式的：令牌只在文件开始前、网络等待点（发请求、读响应体）与退避等待里被观察，
 //! 观察到就让当前尝试正常返回 [`Error::Cancelled`]，再由 [`Downloader::run`] 统一清掉该文件的
 //! 临时文件与分片。不在落盘中途丢弃 future，否则进行中的阻塞文件操作会在清理之后才落地。
+//!
+//! 带凭据的任务（[`DownloadTask::credential`]）换用不自动跳转的客户端，跳转由引擎逐跳跟随，
+//! 每一跳各自按凭据作用域决定带不带头（见 [`follow_redirects`]）；带了凭据的那一跳回 401 时，
+//! 不重试、不换源、不回退整文件，直接以 [`Error::CredentialRejected`] 结束。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,6 +37,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::chunk::{Chunk, ChunkConfig, ChunkPlan};
+use crate::credential::DownloadCredential;
 use crate::error::{Error, Result};
 use crate::health::{SourceHealth, is_host_fault};
 use crate::progress::{FileProgress, ProgressReporter};
@@ -54,6 +59,8 @@ pub struct DownloadConfig {
 #[derive(Clone)]
 pub struct Downloader {
     client: reqwest::Client,
+    /// 不自动跟随跳转的客户端，带凭据的任务全靠它发请求；没装时带凭据的任务直接报错。
+    manual_client: Option<reqwest::Client>,
     config: Arc<DownloadConfig>,
     /// 跨任务共享的源健康表：克隆出的引擎共用同一份，一个文件学到的教训整批受用。
     health: Arc<SourceHealth>,
@@ -74,9 +81,17 @@ impl Downloader {
     ) -> Self {
         Self {
             client,
+            manual_client: None,
             config: Arc::new(config),
             health,
         }
+    }
+
+    /// 装上不自动跟随跳转的客户端，应由 [`aurora_base::http::build_manual_redirect_client`] 构建。
+    /// 共享客户端跟随跳转时会把自定义头原样带到下一跳，带凭据的任务因此只能走这个客户端。
+    pub fn with_manual_redirect_client(mut self, client: reqwest::Client) -> Self {
+        self.manual_client = Some(client);
+        self
     }
 
     /// 只读访问源健康表。
@@ -110,6 +125,9 @@ impl Downloader {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
+        // 装配缺陷在碰磁盘、发请求之前就报出来：拖到请求时才发现，会在重试与换源里打转，
+        // 还会被记成源的故障。
+        self.route_for(task)?;
         let _dest = lock_dest(&task.dest, cancel).await?;
         let file = FileProgress::new(progress);
         if let Some(len) = self.already_complete(task).await? {
@@ -151,6 +169,18 @@ impl Downloader {
                     // 取消是调用方的决定，不说明源的好坏，不记账。
                     self.discard_leftovers(task).await;
                     return Err(Error::Cancelled);
+                }
+                Err(err @ Error::CredentialRejected { .. }) => {
+                    // 密钥失效只能由用户换密钥解决：换源只会把这条明确的结论淹没在「所有源均失败」里。
+                    // 这也不是源的毛病，不记健康账。
+                    tracing::warn!(
+                        source_index = index,
+                        file = %task.dest.display(),
+                        %url,
+                        error = %err,
+                        "下载密钥被拒，不再尝试其余下载源"
+                    );
+                    return Err(err);
                 }
                 Err(err) => {
                     // 4xx 只说明「这个源没有这个文件」，换源即可，不能记在主机头上。
@@ -202,7 +232,7 @@ impl Downloader {
         }
         let chunk_err = match self.retry_on(url, task, file, cancel, transfer).await {
             Ok(len) => return Ok(len),
-            Err(err) if err.is_cancelled() => return Err(err),
+            Err(err) if ends_the_download(&err) => return Err(err),
             Err(err) => err,
         };
         tracing::info!(
@@ -220,7 +250,7 @@ impl Downloader {
                 self.remove_parts(task).await;
                 Ok(len)
             }
-            Err(err) if err.is_cancelled() => Err(err),
+            Err(err) if ends_the_download(&err) => Err(err),
             Err(fallback_err) => {
                 tracing::warn!(
                     stage = "fallback",
@@ -313,12 +343,7 @@ impl Downloader {
         landing: &mut Landing<'_>,
     ) -> Result<u64> {
         let temp = temp_path(&task.dest);
-        let resp = until_cancelled(cancel, self.client.get(url).send())
-            .await?
-            .map_err(|source| Error::Request {
-                url: url.to_owned(),
-                source,
-            })?;
+        let resp = self.route_for(task)?.get(url, None, cancel).await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(Error::Status {
@@ -347,7 +372,8 @@ impl Downloader {
         cancel: Option<&CancellationToken>,
         landing: &mut Landing<'_>,
     ) -> Result<Assembled> {
-        let final_url = match probe_final_url(&self.client, url, cancel).await {
+        let route = self.route_for(task)?;
+        let final_url = match probe_final_url(&route, url, cancel).await {
             Ok(resolved) => resolved,
             Err(err) => {
                 if !err.is_cancelled() {
@@ -412,9 +438,10 @@ impl Downloader {
             self.config.chunk.max_chunks,
         );
         let first = plan.chunks[0];
+        let route = self.route_for(task)?;
 
         // 首块兼任「探测该源是否支持 Range」之责。
-        let resp0 = ranged_get(&self.client, url, first.start, first.end, cancel).await?;
+        let resp0 = ranged_get(&route, url, first.start, first.end, cancel).await?;
         if resp0.status() == reqwest::StatusCode::OK {
             // 服务器忽略了 Range、返回整体 200：此响应即完整文件，直接落到合并临时文件。
             return match stream_to_file(resp0, &temp, file, cancel, landing.hasher(), durable).await
@@ -461,14 +488,14 @@ impl Downloader {
                 });
                 break;
             };
-            let client = self.client.clone();
+            let route = route.clone();
             let url = url.to_owned();
             let chunk_file = file.clone();
             let token = owned_cancel.clone();
             set.spawn(async move {
                 let _permit = permit;
                 download_one_chunk(
-                    &client,
+                    &route,
                     &url,
                     chunk,
                     &part,
@@ -569,6 +596,22 @@ impl Downloader {
         }
     }
 
+    /// 这个任务的请求怎么发：不带凭据走共享客户端，带凭据走不自动跳转的客户端。
+    fn route_for(&self, task: &DownloadTask) -> Result<Route> {
+        match &task.credential {
+            None => Ok(Route::Auto(self.client.clone())),
+            Some(credential) => {
+                let client = self.manual_client.clone().ok_or(Error::Internal {
+                    what: "带下载凭据的任务需要不自动跳转的客户端",
+                })?;
+                Ok(Route::Credentialed {
+                    client,
+                    credential: credential.clone(),
+                })
+            }
+        }
+    }
+
     /// 目标是否已存在且满足完整性契约：声明了大小先比大小，有 sha1 再校 sha1，两者都没有则不认为
     /// 完整。完整时返回文件大小，供进度计入。
     ///
@@ -639,6 +682,139 @@ impl<'a> Landing<'a> {
             None => Ok(()),
         }
     }
+}
+
+/// 换源、回退都救不回来的失败：取消是调用方的决定，密钥被拒只能换密钥。
+fn ends_the_download(err: &Error) -> bool {
+    err.is_cancelled() || matches!(err, Error::CredentialRejected { .. })
+}
+
+/// 带凭据时引擎最多跟随的跳数，与 reqwest 默认跳转策略的上限相同。
+const MAX_REDIRECTS: usize = 10;
+
+/// 一个任务的请求怎么发。克隆只是增加引用计数，分片任务各持一份。
+#[derive(Clone)]
+enum Route {
+    /// 共享客户端，跳转由 reqwest 自动跟随。
+    Auto(reqwest::Client),
+    /// 不自动跳转的客户端加凭据：跳转由引擎逐跳跟随，见 [`follow_redirects`]。
+    Credentialed {
+        client: reqwest::Client,
+        credential: DownloadCredential,
+    },
+}
+
+impl Route {
+    /// 发一次 GET，返回跳转链末端的响应；状态码交给调用方判定。`range` 每一跳都带同一个值。
+    async fn get(
+        &self,
+        url: &str,
+        range: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<reqwest::Response> {
+        match self {
+            Route::Auto(client) => {
+                let mut request = client.get(url);
+                if let Some(range) = range {
+                    request = request.header(reqwest::header::RANGE, range);
+                }
+                until_cancelled(cancel, request.send())
+                    .await?
+                    .map_err(|source| Error::Request {
+                        url: url.to_owned(),
+                        source,
+                    })
+            }
+            Route::Credentialed { client, credential } => {
+                follow_redirects(client, credential, url, range, cancel).await
+            }
+        }
+    }
+}
+
+/// 逐跳跟随跳转：每一跳各自按 `credential` 的作用域决定带不带头，最多跟 [`MAX_REDIRECTS`] 跳。
+///
+/// 为什么不让客户端自己跟：reqwest 跨主机跳转时只摘掉 Authorization、Cookie 等标准敏感头，
+/// 自定义的 `x-api-key` 会被原样带到下一跳。CurseForge 的 edge.forgecdn.net 302 到
+/// mediafilez.forgecdn.net，两者都在作用域内；但跳转一旦指向作用域外的主机，密钥就不能跟过去。
+///
+/// 带了凭据的那一跳回 401，报 [`Error::CredentialRejected`]；没带凭据的那一跳回 401 照常交回调用方，
+/// 按普通状态码处理。
+async fn follow_redirects(
+    client: &reqwest::Client,
+    credential: &DownloadCredential,
+    url: &str,
+    range: Option<&str>,
+    cancel: Option<&CancellationToken>,
+) -> Result<reqwest::Response> {
+    let mut hop = reqwest::Url::parse(url).map_err(|source| {
+        Error::Base(aurora_base::Error::UrlParse {
+            url: url.to_owned(),
+            source,
+        })
+    })?;
+    let mut followed = 0usize;
+    loop {
+        let carries = credential.applies_to(&hop);
+        let mut request = client.get(hop.clone());
+        if carries {
+            request = request.header(
+                credential.header_name().clone(),
+                credential.header_value().clone(),
+            );
+        }
+        if let Some(range) = range {
+            request = request.header(reqwest::header::RANGE, range);
+        }
+        let resp = until_cancelled(cancel, request.send())
+            .await?
+            .map_err(|source| Error::Request {
+                url: hop.as_str().to_owned(),
+                source,
+            })?;
+        let status = resp.status();
+        if is_followed_redirect(status) {
+            if followed == MAX_REDIRECTS {
+                tracing::warn!(%url, last_hop = %hop, "下载跳转超过上限");
+                return Err(Error::TooManyRedirects {
+                    url: url.to_owned(),
+                });
+            }
+            let next = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| hop.join(location).ok());
+            let Some(next) = next else {
+                return Err(Error::Status {
+                    url: hop.as_str().to_owned(),
+                    status: status.as_u16(),
+                });
+            };
+            tracing::debug!(
+                from = %hop,
+                to = %next,
+                credential_sent = credential.applies_to(&next),
+                "逐跳跟随下载跳转"
+            );
+            hop = next;
+            followed += 1;
+            continue;
+        }
+        if carries && status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Error::CredentialRejected {
+                realm: credential.realm(),
+                url: hop.as_str().to_owned(),
+                status: status.as_u16(),
+            });
+        }
+        return Ok(resp);
+    }
+}
+
+/// 引擎替客户端跟随的跳转状态码。300（多选）与 304（未修改）不是跳转到别处的指令，原样交回。
+fn is_followed_redirect(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
 }
 
 /// 在取消令牌下等待一个网络 future：令牌先触发即返回 [`Error::Cancelled`]。
@@ -735,16 +911,11 @@ fn transfer_for(config: &ChunkConfig, url: &str, size: Option<u64>) -> Transfer 
 /// 取到最终 URL 后立即丢弃响应，底层传输随之取消。不用 HEAD 是因为部分 CDN 对 HEAD 直接回
 /// 403/405，会把好源误判成坏源。
 async fn probe_final_url(
-    client: &reqwest::Client,
+    route: &Route,
     url: &str,
     cancel: Option<&CancellationToken>,
 ) -> Result<String> {
-    let resp = until_cancelled(cancel, client.get(url).send())
-        .await?
-        .map_err(|source| Error::Request {
-            url: url.to_owned(),
-            source,
-        })?;
+    let resp = route.get(url, None, cancel).await?;
     let status = resp.status();
     let final_url = resp.url().as_str().to_owned();
     drop(resp);
@@ -760,20 +931,14 @@ async fn probe_final_url(
 
 /// 发起一次 Range 请求。仅放行 206（分块命中）与 200（服务器忽略 Range 的整体响应）两种成功形态。
 async fn ranged_get(
-    client: &reqwest::Client,
+    route: &Route,
     url: &str,
     start: u64,
     end: u64,
     cancel: Option<&CancellationToken>,
 ) -> Result<reqwest::Response> {
     let value = format!("bytes={start}-{end}");
-    let send = client.get(url).header(reqwest::header::RANGE, value).send();
-    let resp = until_cancelled(cancel, send)
-        .await?
-        .map_err(|source| Error::Request {
-            url: url.to_owned(),
-            source,
-        })?;
+    let resp = route.get(url, Some(&value), cancel).await?;
     let status = resp.status();
     if status == reqwest::StatusCode::PARTIAL_CONTENT || status == reqwest::StatusCode::OK {
         Ok(resp)
@@ -787,7 +952,7 @@ async fn ranged_get(
 
 /// 下载单个非首分片到其分片文件，并校验落盘字节数与区间长度一致。
 async fn download_one_chunk(
-    client: &reqwest::Client,
+    route: &Route,
     url: &str,
     chunk: Chunk,
     part: &Path,
@@ -795,7 +960,7 @@ async fn download_one_chunk(
     cancel: Option<&CancellationToken>,
     durable: bool,
 ) -> Result<()> {
-    let resp = ranged_get(client, url, chunk.start, chunk.end, cancel).await?;
+    let resp = ranged_get(route, url, chunk.start, chunk.end, cancel).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         // 非零起始的分片却收到 200，意味着该源不支持 Range：上抛以触发换源，而非把整文件塞进某一分片。
         return Err(Error::RangeUnsupported {
