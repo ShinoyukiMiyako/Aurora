@@ -39,6 +39,17 @@ export function reimportRoute(inst: Pick<InstanceSummary, "modpack">): Route {
   return { page: "discover", kind: "modpack" };
 }
 
+// ---------------------------------------------------------------- 删除
+
+/**
+ * 删除时随实例一起移入回收站的存档数，读不出为 null。实例列表里的存档数按工作目录数：隔离的实例工作目录
+ * 就是实例文件夹；不隔离的共用 .minecraft/saves，删除实例不碰它们（实例文件夹里有存档时后端会强制隔离）。
+ */
+export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "worldCount">): number | null {
+  if (inst.isolated === null || inst.worldCount === null) return null;
+  return inst.isolated ? inst.worldCount : 0;
+}
+
 // ---------------------------------------------------------------- 锁定
 
 /** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置。 */

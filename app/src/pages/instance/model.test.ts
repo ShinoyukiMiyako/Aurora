@@ -5,6 +5,7 @@ import { LOGS_COPY } from "./copy";
 import {
   autoJavaPick,
   crashFixes,
+  deletableWorldCount,
   disabledFileName,
   effectiveJavaMajor,
   effectiveMemoryMb,
@@ -157,6 +158,16 @@ describe("锁定矩阵", () => {
   it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
     expect(instanceLocks(true, false, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
     expect(instanceLocks(false, true, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
+  });
+});
+
+describe("删除时一起走的存档", () => {
+  it("隔离的实例按存档数，不隔离的共用目录不算，读不出为 null", () => {
+    expect(deletableWorldCount({ isolated: true, worldCount: 3 })).toBe(3);
+    expect(deletableWorldCount({ isolated: true, worldCount: 0 })).toBe(0);
+    expect(deletableWorldCount({ isolated: false, worldCount: 7 })).toBe(0);
+    expect(deletableWorldCount({ isolated: null, worldCount: 7 })).toBeNull();
+    expect(deletableWorldCount({ isolated: true, worldCount: null })).toBeNull();
   });
 });
 

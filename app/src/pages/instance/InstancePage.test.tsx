@@ -600,6 +600,16 @@ describe("实例详情：设置", () => {
     expect(callsOf(ipc, "delete_instance")).toEqual([{ id: ID }]);
   });
 
+  it("删除说明只数随实例删除的存档：不隔离的实例共用 .minecraft/saves，删除时不受影响", async () => {
+    await open("settings");
+    expect(text()).toContain("这个实例没有存档，实例文件夹会移入回收站。");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, isolated: true, world_count: 2 } : i));
+    resetRecorderKeepOverrides();
+    await open("settings");
+    expect(text()).toContain("连同 2 个存档一起移入回收站。");
+  });
+
   it("实例上还挂着任务：确认框说明会先取消任务", async () => {
     ipc.overrides.set("preview_instance_deletion", () => ({ id: ID, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
     ipc.overrides.set("repair_instance", () => new Promise(() => undefined));

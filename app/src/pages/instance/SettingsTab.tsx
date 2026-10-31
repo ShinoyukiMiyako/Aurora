@@ -9,7 +9,7 @@ import { formatMemory } from "../../domain/format";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
-import { useInstanceContent, useInstanceSettings } from "../../state/queries/instance";
+import { useInstanceSettings } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import { canPinMore } from "../../state/selectors";
 import { Banner } from "../../ui/Banner";
@@ -32,6 +32,7 @@ import { useJavaInfo, useMemoryInfo, type JavaInfo, type MemoryInfo } from "./ho
 import styles from "./instance.module.css";
 import {
   chosenRuntime,
+  deletableWorldCount,
   effectiveJavaMajor,
   hasFlags,
   instanceFolderPath,
@@ -567,17 +568,11 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
 }
 
 function DeleteNote({ inst, busy }: { inst: InstanceSummary; busy: boolean }) {
-  const content = useInstanceContentCount(inst);
+  const worlds = deletableWorldCount(inst);
   return (
     <span className={styles.soft}>
-      {content === null ? null : content > 0 ? SETTINGS_COPY.deleteWorlds(content) : SETTINGS_COPY.deleteNoWorlds}
+      {worlds === null ? null : worlds > 0 ? SETTINGS_COPY.deleteWorlds(worlds) : SETTINGS_COPY.deleteNoWorlds}
       {busy && SETTINGS_COPY.deleteRunning}
     </span>
   );
-}
-
-
-function useInstanceContentCount(inst: InstanceSummary): number | null {
-  const content = useInstanceContent(inst.placeholder ? null : inst.id);
-  return content.status === "ready" ? content.data.worlds.length : null;
 }
