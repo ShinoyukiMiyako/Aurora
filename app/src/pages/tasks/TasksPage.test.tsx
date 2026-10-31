@@ -242,6 +242,36 @@ describe("下载任务页：历史", () => {
   });
 });
 
+describe("下载任务页：断网", () => {
+  it("断网：页头下出现离线横幅，失败任务的重试置灰且点了不发命令；恢复联网后横幅消失、重试可用", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    bootOverrides(ipc, {
+      journal: [record("failed-java", "failed", { error: { code: "network_failed", message: "dns" }, spec: { command: "install_java", args: { requiredMajor: 17 } } })],
+    });
+    await mount();
+    const banner = () => [...page().querySelectorAll<HTMLElement>("[data-tone]")].find((el) => el.textContent?.startsWith("没有网络连接"));
+    expect(banner()?.textContent).toBe("没有网络连接进行中的下载会继续重试，重试用完仍连不上时记为失败；联网后可以再重试。");
+    // 横幅紧跟页头，在任务列表之前
+    expect(header().nextElementSibling).toBe(banner());
+    const retry = buttonIn(row("failed-java"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "install_java")).toEqual([]);
+    expect(launcher.state.tasks[0].status).toBe("failed");
+
+    onLine.mockReturnValue(true);
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(banner()).toBeUndefined();
+    expect(buttonIn(row("failed-java"), "重试").getAttribute("aria-disabled")).toBeNull();
+    act(() => buttonIn(row("failed-java"), "重试").click());
+    await flush();
+    expect(callsOf(ipc, "install_java")).toEqual([{ requiredMajor: 17, taskId: "failed-java#2" }]);
+  });
+});
+
 describe("下载任务页：筛选", () => {
   it("筛选来自路由；切换筛选替换当前历史项，全部写回不带参数的路由", async () => {
     bootOverrides(ipc, { journal: HISTORY });

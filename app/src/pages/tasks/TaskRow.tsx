@@ -47,12 +47,14 @@ export interface TaskRowProps {
   meta: RowMeta;
   /** 关联的实例还在实例列表里（新建被取消后实例已撤掉，就不给「查看实例」）。 */
   hasInstance: boolean;
+  /** 重试眼下必然失败（断网）时的原因：按钮置灰并在悬停时说明；能重试为 undefined。 */
+  retryBlocked: string | undefined;
   onCancel(): void;
   onRetry(): void;
   onViewInstance(): void;
 }
 
-export function TaskRow({ task, meta, hasInstance, onCancel, onRetry, onViewInstance }: TaskRowProps) {
+export function TaskRow({ task, meta, hasInstance, retryBlocked, onCancel, onRetry, onViewInstance }: TaskRowProps) {
   const active = isActiveTask(task);
   const viewInstance = hasInstance && (
     <Button variant="ghost" size="sm" iconRight="arrow-right" onClick={onViewInstance}>
@@ -106,7 +108,7 @@ export function TaskRow({ task, meta, hasInstance, onCancel, onRetry, onViewInst
           {task.status === "running" && <span className={styles.pct}>{percent(task.progress)}</span>}
           {active && <IconButton icon="x" label={TASKS_COPY.row.cancel} size="sm" onClick={onCancel} />}
           {task.status === "failed" && (
-            <Button variant="secondary" size="sm" onClick={onRetry}>
+            <Button variant="secondary" size="sm" disabledReason={retryBlocked} onClick={onRetry}>
               {TASKS_COPY.row.retry}
             </Button>
           )}

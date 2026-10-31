@@ -90,4 +90,10 @@ export const TASKS_COPY = {
   },
 
   slow: "比平时慢一些，仍在加载…",
+
+  offline: {
+    title: "没有网络连接",
+    body: "进行中的下载会继续重试，重试用完仍连不上时记为失败；联网后可以再重试。",
+    retryReason: "联网后才能重试",
+  },
 } as const;

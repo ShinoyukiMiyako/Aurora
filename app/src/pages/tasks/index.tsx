@@ -10,9 +10,11 @@ import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import { useLauncher, useNow } from "../../state/launcher";
+import { useOnline } from "../../state/online";
 import type { PageProps, TaskFilter } from "../../state/route";
 import { findInstance } from "../../state/selectors";
 import { isActiveTask, queuePosition } from "../../state/tasks";
+import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card } from "../../ui/Card";
@@ -49,6 +51,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   const nav = useNav();
   const { confirm, openCreateInstance } = useShell();
   const run = useRunner();
+  const online = useOnline();
   const now = useNow(RELATIVE_TIME_REFRESH_MS);
   const titleId = useId();
 
@@ -102,6 +105,13 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     />
   );
 
+  // 断网时进行中的任务照常由后端重试，本页如实呈现；只有重试这个必然失败的入口置灰
+  const offlineBanner = online ? null : (
+    <Banner key="offline" tone="warn" title={TASKS_COPY.offline.title}>
+      {TASKS_COPY.offline.body}
+    </Banner>
+  );
+
   const loadError =
     slice.kind === "error" ? (
       <Card key="load-error">
@@ -142,6 +152,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         now={now}
         historyEta={(task) => etaSpeed(history, task)}
         hasInstance={(id) => findInstance(state, id) !== undefined}
+        retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
         onCancel={(task) => void cancel(task)}
         onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
         onViewInstance={(id) => nav.go({ page: "instance", id, tab: "overview" })}
@@ -179,6 +190,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   return (
     <Page aria-labelledby={titleId}>
       {header}
+      {offlineBanner}
       {loadError}
       {body}
     </Page>
@@ -194,12 +206,14 @@ interface TaskListProps {
   now: number;
   historyEta(task: Task): number;
   hasInstance(id: string): boolean;
+  /** 重试眼下必然失败（断网）时的原因；能重试为 undefined。 */
+  retryBlocked: string | undefined;
   onCancel(task: Task): void;
   onRetry(task: Task): void;
   onViewInstance(id: string): void;
 }
 
-function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, onCancel, onRetry, onViewInstance }: TaskListProps) {
+function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, retryBlocked, onCancel, onRetry, onViewInstance }: TaskListProps) {
   const idBase = useId();
   const groups = taskGroups(buckets, filter);
   if (groups.length === 0) {
@@ -224,6 +238,7 @@ function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, onCanc
               now,
             })}
             hasInstance={task.instanceId !== null && hasInstance(task.instanceId)}
+            retryBlocked={retryBlocked}
             onCancel={() => onCancel(task)}
             onRetry={() => onRetry(task)}
             onViewInstance={() => {
