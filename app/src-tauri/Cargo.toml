@@ -18,8 +18,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
-# dialog 与 updater 的次版本锁定：package.json 里有同名的 @tauri-apps/plugin-* 时，tauri 构建会比对
+# dialog 的次版本锁定：package.json 里有同名的 @tauri-apps/plugin-dialog，tauri 构建会比对
 # JS 包与 crate 的主次版本，不一致直接报错；放开成 "2" 的话一次 cargo update 就可能打破配对。
+# opener 与 updater 没有对应的 JS 包：外链由 opener 注入的脚本接管，打开文件夹与自更新都走 Rust 命令。
 # 系统选择文件夹 / 文件对话框：更改游戏目录、导入本地整合包都要拿磁盘绝对路径，
 # 而 WebView 里的 <input type="file"> 出于安全拿不到路径。
 tauri-plugin-dialog = "~2.7"

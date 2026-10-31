@@ -36,7 +36,7 @@ function thirdPartyLicenses(): Plugin {
 const VENDOR_CHUNKS: readonly [chunk: string, packages: readonly string[]][] = [
   ["react", ["react", "react-dom", "scheduler"]],
   ["motion", ["framer-motion", "motion-dom", "motion-utils"]],
-  ["tauri", ["@tauri-apps/api", "@tauri-apps/plugin-dialog", "@tauri-apps/plugin-opener", "@tauri-apps/plugin-process", "@tauri-apps/plugin-updater"]],
+  ["tauri", ["@tauri-apps/api", "@tauri-apps/plugin-dialog"]],
 ];
 
 function vendorChunk(id: string): string | null {
