@@ -13,7 +13,7 @@
 //! - [`process`]：进程 spawn、输出捕获与批量转发、结束游戏、退出报告、崩溃触发判定。
 //! - [`logfile`]：每次启动的会话日志（写入、滚动保留、读尾部）。
 //! - [`crash`]：崩溃基础检测规则表与结构化诊断。
-//! - [`precheck`]：启动前的轻量判断（所需 Java 主版本、路径提醒）。
+//! - [`precheck`]：启动前的轻量判断（所需 Java 主版本、路径与同步盘提醒、角色名长度、JVM 内存参数）。
 //! - [`workspace`]：游戏工作目录（版本隔离）解析。
 //!
 //! 错误统一归口到 [`LaunchError`]，下游可 `#[from] aurora_launch::LaunchError` 冒泡。
@@ -49,7 +49,11 @@ pub use memory::{
     recommended_max_mb,
 };
 pub use placeholder::Placeholders;
-pub use precheck::{DEFAULT_JAVA_MAJOR, game_path_warning, required_java_major};
+pub use precheck::{
+    DEFAULT_JAVA_MAJOR, JvmMemoryIssue, MIN_MAX_HEAP_MB, ONEDRIVE_ENV_VARS, PLAYER_NAME_MAX_UNITS,
+    SyncProvider, SyncRoot, game_path_warning, jvm_memory_issue, long_player_name,
+    required_java_major, sync_folder, sync_roots_from_env,
+};
 pub use process::{
     ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogStream, SessionEnd,
     detect_crash, spawn,
