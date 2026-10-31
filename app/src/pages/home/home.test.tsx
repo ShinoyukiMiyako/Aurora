@@ -145,6 +145,14 @@ afterEach(() => {
 });
 
 const text = () => document.body.textContent as string;
+
+/** 浏览器报告的联网状态：改返回值后发出对应事件，订阅方立即重算。 */
+function setOnline(onLine: boolean) {
+  vi.spyOn(navigator, "onLine", "get").mockReturnValue(onLine);
+  act(() => {
+    window.dispatchEvent(new Event(onLine ? "online" : "offline"));
+  });
+}
 const buttonByLabel = (label: string) => {
   const el = document.querySelector<HTMLElement>(`[aria-label="${label}"]`);
   if (el === null) throw new Error(`找不到名称为 ${label} 的元素`);
@@ -375,6 +383,39 @@ describe("主页：资讯", () => {
     await mount();
     expect(text()).toContain("游戏更新与官方活动 · 离线中");
   });
+
+  it("断网又没有缓存：说「需要联网获取」而不是拉取失败；恢复联网自动重取一次", async () => {
+    let reachable = false;
+    ipc.overrides.set("list_news", () => {
+      if (!reachable) throw new IpcError("network_failed", "dns lookup failed");
+      return { items: NEWS, fetched_at: NOW, offline: false };
+    });
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    await mount();
+    expect(text()).toContain("需要联网获取");
+    expect(text()).not.toContain("资讯暂时没拉下来");
+    expect(callsOf(ipc, "list_news")).toHaveLength(1);
+
+    reachable = true;
+    setOnline(true);
+    await flush();
+    expect(callsOf(ipc, "list_news")).toHaveLength(2);
+    expect(text()).not.toContain("需要联网获取");
+    expect(text()).toContain("Minecraft 1.21.1");
+    expect(text()).not.toContain("游戏更新与官方活动 · 离线中");
+  });
+
+  it("拿到的是新内容、之后才断网：内容留着，副标题注明离线中；恢复联网不重取", async () => {
+    await mount();
+    expect(text()).not.toContain("离线中");
+    setOnline(false);
+    expect(text()).toContain("游戏更新与官方活动 · 离线中");
+    expect(text()).toContain("Minecraft 1.21.1");
+    setOnline(true);
+    await flush();
+    expect(text()).not.toContain("离线中");
+    expect(callsOf(ipc, "list_news")).toHaveLength(1);
+  });
 });
 
 describe("主页：固定的服务器", () => {
@@ -450,6 +491,30 @@ describe("主页：固定的服务器", () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
+  });
+
+  it("断网：保留上次的测速结果并注明离线中，期间不重测；恢复联网立即重测一次", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    setOnline(false);
+    expect(text()).toContain("1 个 · 在线人数与延迟 · 离线中");
+    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("38 ms");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before);
+
+    setOnline(true);
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+    expect(text()).toContain("1 个 · 在线人数与延迟");
+    expect(text()).not.toContain("离线中");
+    // 周期重测接着恢复
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });

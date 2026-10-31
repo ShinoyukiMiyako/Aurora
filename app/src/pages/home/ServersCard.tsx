@@ -1,8 +1,10 @@
 // 固定的服务器：在线人数、版本与延迟信号。右上角的加号从游戏的多人服务器列表里挑服务器固定；
 // 主页可见期间每 60 秒重测一次（后端单台限时 3 秒、结果缓存 60 秒）。
+// 断网时不再重测（单台测速分不出是本机断网还是服务器宕机，重测只会把每台都刷成连不上），
+// 列表保留上一次的结果、副标题注明离线；恢复联网立即重测一次。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { serverHue } from "../../art/illustrations/seed";
 import { ACTION_ERROR } from "../../copy/flows";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
@@ -14,6 +16,7 @@ import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import { useLauncher, useNow } from "../../state/launcher";
+import { useOnline } from "../../state/online";
 import { useKnownServers, usePinnedServers, useServerStatus, type PinnedServerDto } from "../../state/queries/home";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -48,19 +51,27 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const pinned = usePinnedServers();
   const status = useServerStatus();
   const known = useKnownServers();
+  const online = useOnline();
   const gate = useLoadingGate(pinned.status === "loading");
   useReportOnce(known.status === "error" ? known.error : null, HOME_COPY.knownError);
 
   const reloadStatus = status.reload;
   const hasPinned = pinned.status === "ready" && pinned.data.length > 0;
   useEffect(() => {
-    if (!hasPinned) return;
+    if (!hasPinned || !online) return;
     const timer = setInterval(() => {
       // 窗口不可见时不测：重新可见后下一个周期再测
       if (document.visibilityState === "visible") reloadStatus();
     }, SERVER_REFRESH_MS);
     return () => clearInterval(timer);
-  }, [hasPinned, reloadStatus]);
+  }, [hasPinned, online, reloadStatus]);
+
+  const wasOnline = useRef(online);
+  useEffect(() => {
+    const reconnected = online && !wasOnline.current;
+    wasOnline.current = online;
+    if (reconnected && hasPinned) reloadStatus();
+  }, [online, hasPinned, reloadStatus]);
 
   const toggle = (server: PinnedServerDto) => void run(() => actions.togglePinServer(server), ACTION_ERROR.servers);
 
@@ -74,7 +85,8 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   };
 
   const count = pinned.status === "ready" ? pinned.data.length : 0;
-  const subtitle = pinned.status !== "ready" ? undefined : count > 0 ? HOME_COPY.serversSubtitle(count) : HOME_COPY.serversSubtitleEmpty;
+  const countLine = count > 0 ? HOME_COPY.serversSubtitle(count) : HOME_COPY.serversSubtitleEmpty;
+  const subtitle = pinned.status !== "ready" ? undefined : count > 0 && !online ? HOME_COPY.withOffline(countLine) : countLine;
 
   const body = () => {
     if (pinned.status === "loading" || gate.view === "skeleton") {
