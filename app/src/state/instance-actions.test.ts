@@ -68,6 +68,46 @@ describe("改名迁移启动会话", () => {
   });
 });
 
+describe("改名迁移任务", () => {
+  it("失败的任务重试时按新名字调用命令，落地通知写新名字；下载中的 Java 装好后固定给新名字", async () => {
+    let fail = true;
+    ipc.overrides.set("install_resource", () => {
+      if (fail) throw new IpcError("download_failed", "下载源暂时不可用");
+      return { resource_type: "shader", world: null, file_name: "bsl.zip" };
+    });
+    await store.actions.installResource({
+      resourceType: "shader",
+      platform: "modrinth",
+      projectId: "bsl",
+      name: "BSL",
+      targets: [{ instanceId: "生存", fileVersionId: "b1", world: null }],
+    });
+    const java = deferred<unknown>();
+    ipc.overrides.set("install_java", () => java.promise);
+    await store.actions.installJava(21, { pinFor: "生存" });
+    await settle();
+    const [failed] = store.getState().tasks;
+    expect(failed.status).toBe("failed");
+
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    expect(store.getState().tasks[0]).toMatchObject({ instanceId: "生存二", spec: { args: { versionId: "生存二" } } });
+
+    fail = false;
+    store.actions.retryTask(failed.id);
+    await settle();
+    expect(callsOf(ipc, "install_resource").map((a) => a.versionId)).toEqual(["生存", "生存二"]);
+    expect(store.getState().toasts.map((t) => t.body)).toContain("已设为「生存二」的当前光影");
+
+    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    java.resolve({ component: "java-runtime-delta", version: { major: 21, minor: 0, security: 5, build: 11, raw: "21.0.5" }, java_executable: "C:/jdk21/bin/java.exe" });
+    await settle();
+    expect(callsOf(ipc, "set_instance_settings").map((a) => a.id)).toEqual(["生存二"]);
+  });
+});
+
 describe("删除实例时取消它的全部任务", () => {
   it("3 个运行中、2 个排队：排队的不再被拉起，运行中的都取消并落定后才删除目录", async () => {
     const running = new Map<string, Deferred<unknown>>();
