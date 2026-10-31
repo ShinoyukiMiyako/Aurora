@@ -128,7 +128,7 @@ describe("下载队列：纯函数", () => {
   });
 
   it("组合任务的权重：声明大小都已知且总和大于 0 时按字节，否则按项数", () => {
-    expect(compositeProgress([100, 300, 600])).toMatchObject({ weights: [100, 300, 600], totalBytes: 1000, index: 0, stepStartBytes: 0 });
+    expect(compositeProgress([100, 300, 600])).toMatchObject({ weights: [100, 300, 600], totalBytes: 1000, index: 0, batches: [null, null, null], itemBytes: [0, 0, 0] });
     expect(compositeProgress([100, null, 600])).toMatchObject({ weights: [1, 1, 1], totalBytes: null });
     expect(compositeProgress([0, 0])).toMatchObject({ weights: [1, 1], totalBytes: null });
     // 大小为 0 的一项（文件已就绪）在按字节计时只是不占进度
@@ -140,8 +140,8 @@ describe("下载队列：纯函数", () => {
     let cursor: CompositeProgress = compositeProgress([100, 300]);
     let tasks = startComposite([task("t1", { status: "running" })], "t1#1", cursor);
     expect(tasks[0]).toMatchObject({ progress: 0, bytes: 0, totalBytes: 400 });
-    const step = (bytes: number, totalBytes: number | null) => {
-      const next = applyCompositeDownload(tasks, "t1#1", cursor, { total: 1, finished: bytes === totalBytes ? 1 : 0, bytes, totalBytes, speed: 7 });
+    const step = (item: number, bytes: number, totalBytes: number | null) => {
+      const next = applyCompositeDownload(tasks, "t1#1", cursor, item, { total: 1, finished: bytes === totalBytes ? 1 : 0, bytes, totalBytes, speed: 7 + item });
       if (next === null) return false;
       tasks = next.tasks;
       cursor = next.cursor;
@@ -152,46 +152,120 @@ describe("下载队列：纯函数", () => {
       tasks = next.tasks;
       cursor = next.cursor;
     };
-    step(50, 100);
+    step(0, 50, 100);
     expect(tasks[0]).toMatchObject({ progress: 0.125, bytes: 50, totalBytes: 400, doneBytes: 50, speedBps: 7 });
-    step(100, 100);
+    step(0, 100, 100);
     finish();
     expect(tasks[0]).toMatchObject({ progress: 0.25, bytes: 100, doneBytes: 100 });
-    // 上一项最后一条进度在它的命令返回后才到：认作晚到的，不算进下一项
-    expect(step(100, 100)).toBe(false);
-    expect(tasks[0].progress).toBe(0.25);
-    step(0, 300);
+    // 上一项最后一条进度在它的命令返回后才到：续的是它自己那一批，没有新字节，也不算进下一项
+    step(0, 100, 100);
     expect(tasks[0]).toMatchObject({ progress: 0.25, bytes: 100, doneBytes: 100 });
-    step(150, 300);
+    step(1, 0, 300);
+    expect(tasks[0]).toMatchObject({ progress: 0.25, bytes: 100, doneBytes: 100, speedBps: 8 });
+    step(1, 150, 300);
     expect(tasks[0]).toMatchObject({ progress: 0.625, bytes: 250, doneBytes: 250 });
     // 同一项里换了一批（总量变了、从 0 报起）：整体不退，这一批的字节接着累计
-    step(10, 20);
+    step(1, 10, 20);
     expect(tasks[0]).toMatchObject({ progress: 0.65, bytes: 260, doneBytes: 260 });
+    expect(cursor.itemBytes).toEqual([100, 160]);
     finish();
     expect(tasks[0]).toMatchObject({ progress: 1, bytes: 400 });
-    // 全部做完后再来的进度不认
-    expect(step(5, 300)).toBe(false);
+    // 全部做完后最后一项晚到的进度：只补字节，进度与速度不动
+    expect(step(1, 20, 20)).toBe(true);
+    expect(tasks[0]).toMatchObject({ progress: 1, bytes: 400, doneBytes: 270, speedBps: 8 });
     // 别的尝试的进度不认
-    expect(applyCompositeDownload(tasks, "t1#2", cursor, { total: 1, finished: 0, bytes: 1, totalBytes: 2, speed: 1 })).toBeNull();
+    expect(applyCompositeDownload(tasks, "t1#2", cursor, 0, { total: 1, finished: 0, bytes: 1, totalBytes: 2, speed: 1 })).toBeNull();
   });
 
   it("组合任务按项数折算时：总量为空，已下字节累计实际下载的", () => {
     let cursor = compositeProgress([null, 2048, 4096]);
     let tasks = startComposite([task("t1", { status: "running" })], "t1#1", cursor);
-    const apply = (bytes: number, totalBytes: number) => {
-      const next = applyCompositeDownload(tasks, "t1#1", cursor, { total: 1, finished: 0, bytes, totalBytes, speed: 1 });
+    const apply = (step: number, bytes: number, totalBytes: number) => {
+      const next = applyCompositeDownload(tasks, "t1#1", cursor, step, { total: 1, finished: 0, bytes, totalBytes, speed: 1 });
       if (next === null) throw new Error("这条进度应被采纳");
       tasks = next.tasks;
       cursor = next.cursor;
     };
-    apply(512, 1024);
+    apply(0, 512, 1024);
     expect(tasks[0].progress).toBeCloseTo(1 / 6, 10);
     expect(tasks[0]).toMatchObject({ bytes: 512, totalBytes: null, doneBytes: 512 });
     ({ tasks, cursor } = completeCompositeStep(tasks, "t1#1", cursor));
     expect(tasks[0].progress).toBeCloseTo(1 / 3, 10);
-    apply(1024, 2048);
+    apply(1, 1024, 2048);
     expect(tasks[0].progress).toBeCloseTo(1 / 2, 10);
     expect(tasks[0]).toMatchObject({ bytes: 1536, totalBytes: null, doneBytes: 1536 });
+  });
+
+  /** 起一个两项的组合任务，返回按项喂进度、做完当前项的操作与当前任务。 */
+  function twoItems(sizes: [number | null, number | null]) {
+    let cursor = compositeProgress(sizes);
+    let tasks = startComposite([task("t1", { status: "running" })], "t1#1", cursor);
+    return {
+      feed(step: number, bytes: number, totalBytes: number | null, finished: number, speed = 1) {
+        const next = applyCompositeDownload(tasks, "t1#1", cursor, step, { total: 1, finished, bytes, totalBytes, speed });
+        if (next === null) throw new Error("这一次尝试在运行，进度应被采纳");
+        ({ tasks, cursor } = next);
+      },
+      finish() {
+        ({ tasks, cursor } = completeCompositeStep(tasks, "t1#1", cursor));
+      },
+      get task() {
+        return tasks[0];
+      },
+      get cursor() {
+        return cursor;
+      },
+    };
+  }
+
+  it("两项声明大小相同：后一项第一条就与上一项最后一条逐字段相同，也照常算进后一项", () => {
+    const run = twoItems([100, 100]);
+    run.feed(0, 100, 100, 1);
+    run.finish();
+    expect(run.task).toMatchObject({ progress: 0.5, bytes: 100, doneBytes: 100 });
+    run.feed(1, 100, 100, 1);
+    expect(run.task).toMatchObject({ progress: 1, bytes: 200, totalBytes: 200, doneBytes: 200 });
+    // 上一项同样的那条快照这时才到：续它自己的批次，不重复算
+    run.feed(0, 100, 100, 1);
+    expect(run.task).toMatchObject({ progress: 1, bytes: 200, doneBytes: 200 });
+    expect(run.cursor.itemBytes).toEqual([100, 100]);
+  });
+
+  it("两项大小都未知：后一项的已下字节比上一项多也照常采纳，按项数推进", () => {
+    const run = twoItems([null, null]);
+    run.feed(0, 500, null, 1);
+    run.finish();
+    expect(run.task).toMatchObject({ progress: 0.5, bytes: 500, totalBytes: null, doneBytes: 500 });
+    run.feed(1, 600, null, 0);
+    expect(run.task).toMatchObject({ progress: 0.5, bytes: 1100, doneBytes: 1100 });
+    run.feed(1, 900, null, 1);
+    expect(run.task).toMatchObject({ progress: 1, bytes: 1400, doneBytes: 1400 });
+    // 边界：后一项从 0 报起、没有新字节
+    const fresh = twoItems([null, null]);
+    fresh.feed(0, 0, null, 0);
+    expect(fresh.task).toMatchObject({ progress: 0, bytes: 0, doneBytes: 0 });
+  });
+
+  it("上一项的进度在后一项报过进度之后才到：只补上一项的字节，整体进度与速度都不动", () => {
+    const run = twoItems([100, 300]);
+    run.feed(0, 60, 100, 0, 5);
+    run.finish();
+    run.feed(1, 30, 300, 0, 9);
+    expect(run.task).toMatchObject({ progress: 0.325, bytes: 130, doneBytes: 90, speedBps: 9 });
+    run.feed(0, 100, 100, 1, 5);
+    expect(run.task).toMatchObject({ progress: 0.325, bytes: 130, doneBytes: 130, speedBps: 9 });
+    run.feed(1, 300, 300, 1, 9);
+    expect(run.task).toMatchObject({ progress: 1, bytes: 400, doneBytes: 400 });
+    expect(run.cursor.itemBytes).toEqual([100, 300]);
+  });
+
+  it("项序号越过当前项或越界：调用方给错了序号，直接报错", () => {
+    const run = twoItems([100, 100]);
+    expect(() => run.feed(1, 10, 100, 0)).toThrow("还在第 0 项，收到了第 1 项的进度");
+    expect(() => run.feed(2, 10, 100, 0)).toThrow("只有 2 项，收到了第 2 项的进度");
+    expect(() => run.feed(-1, 10, 100, 0)).toThrow("只有 2 项，收到了第 -1 项的进度");
+    expect(() => run.feed(0.5, 10, 100, 0)).toThrow("只有 2 项");
+    expect(run.task).toMatchObject({ progress: 0, doneBytes: 0 });
   });
 
   it("重试清掉上一次尝试的开始时刻与累计字节", () => {

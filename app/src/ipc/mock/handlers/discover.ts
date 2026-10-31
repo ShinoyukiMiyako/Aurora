@@ -75,6 +75,8 @@ function invalid(message: string): IpcError {
   return new IpcError("invalid_argument", message);
 }
 
+const U32_MAX = 4_294_967_295;
+
 /**
  * 按形参类型取参数。缺参数或类型不对在真机上是 Tauri 自己的反序列化错误，到前端是纯字符串、
  * 归一为 unknown；mock 照样报 unknown，界面不会在假后端下拿到一个真机上不存在的错误码。
@@ -102,6 +104,13 @@ export function argReader(cmd: string, args: MockArgs) {
     integer(key: string): number {
       const value = args[key];
       if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw fail(key, "u32");
+      return value;
+    },
+    /** Option<u32>：缺省与 null 都是 None。 */
+    nullableInteger(key: string): number | null {
+      const value = args[key];
+      if (value === null || value === undefined) return null;
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > U32_MAX) throw fail(key, "u32");
       return value;
     },
   };
@@ -279,27 +288,33 @@ export function emitCoreEvent(event: CoreEvent): void {
   emitMockEvent(CORE_EVENT, event);
 }
 
+/** 事件的归属。step 只在组合任务的一项上出现，没有时整个键都不写，与后端省去它的序列化一致。 */
+export function eventOwner(taskId: string, step: number | null): { task_id: string; step?: number } {
+  return step === null ? { task_id: taskId } : { task_id: taskId, step };
+}
+
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
 
 /**
  * 模拟一次下载：阶段事件 + 四次进度快照，每步之间检查取消。
- * 被取消时以 IpcError("cancelled") 拒绝，与后端在取消后的返回一致。
+ * 被取消时以 IpcError("cancelled") 拒绝，与后端在取消后的返回一致。step 是组合任务的项序号，标在每条事件上。
  */
-export async function simulateDownload(taskId: string, label: string, totalBytes: number): Promise<void> {
-  emitCoreEvent({ task_id: taskId, kind: "stage", message: `开始下载 ${label}` });
-  for (let step = 0; step <= 4; step++) {
+export async function simulateDownload(taskId: string, label: string, totalBytes: number, step: number | null = null): Promise<void> {
+  const owner = eventOwner(taskId, step);
+  emitCoreEvent({ ...owner, kind: "stage", message: `开始下载 ${label}` });
+  for (let quarter = 0; quarter <= 4; quarter++) {
     if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
-    const bytes = Math.round((totalBytes * step) / 4);
+    const bytes = Math.round((totalBytes * quarter) / 4);
     emitCoreEvent({
-      task_id: taskId,
+      ...owner,
       kind: "download",
       total: 1,
-      finished: step === 4 ? 1 : 0,
+      finished: quarter === 4 ? 1 : 0,
       bytes,
       total_bytes: totalBytes,
-      speed: step === 0 ? 0 : 2_097_152,
+      speed: quarter === 0 ? 0 : 2_097_152,
     });
-    if (step < 4) await tick();
+    if (quarter < 4) await tick();
   }
 }
 

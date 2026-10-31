@@ -230,6 +230,23 @@ describe("更新检查与更新", () => {
     expect((await listMods(MOCK_MOD_INSTANCE)).map((m) => m.file_name)).toContain("AANobbMI-0.5.3.jar");
   });
 
+  it("全部更新的一项：update_mod 把调用时给的 step 标在每条事件上；单独调用的事件不带这个键", async () => {
+    const events: Record<string, unknown>[] = [];
+    subscribeMockEvent(CORE_EVENT, (payload) => events.push(payload as Record<string, unknown>));
+    await updateMod("task-one", MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.2.jar", "fapi-0927");
+    await updateMod("task-all", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060", 0);
+    expect(events.map((e) => [e.task_id, "step" in e, e.step, e.message])).toEqual([
+      ["task-one", false, undefined, "准备把 P7dR8mSH-0.92.2.jar 更新到版本 fapi-0927"],
+      ["task-one", false, undefined, "模组 P7dR8mSH-0.92.7.jar 已安装"],
+      ["task-all", true, 0, "准备把 AANobbMI-0.5.3.jar 更新到版本 sodium-060"],
+      ["task-all", true, 0, "模组 AANobbMI-0.6.0.jar 已安装"],
+    ]);
+    expect(await failure(updateMod("task-bad", MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.7.jar", "fapi-0927", -1))).toMatchObject({
+      code: "unknown",
+      message: "invalid args `step` for command `update_mod`: expected u32",
+    });
+  });
+
   it("来源不明的文件不能更新；被占用时报 mod_file_busy", async () => {
     const unknown = await failure(updateMod("task-u5", MOCK_MOD_INSTANCE, "handmade-1.0.jar", "x"));
     expect(unknown.detail).toEqual({ causes: ["handmade-1.0.jar 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）"] });

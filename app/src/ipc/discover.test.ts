@@ -235,6 +235,35 @@ describe("发现 mock", () => {
     expect(noVersion).toMatchObject({ code: "mod_version_not_found" });
   });
 
+  it("组合任务的一项：install_mod 把调用时给的 step 标在每条事件上，单独调用的事件不带这个键", async () => {
+    const events: CoreEvent[] = [];
+    const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
+    // 两项先后共用一个 taskId，第 0 项也照写
+    await installMod("t-all", "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", 0);
+    await installMod("t-all", "1.21.1-Fabric", "modrinth", "mOgUt4GM", "mm-11", 1);
+    await installMod("t-one", "1.21.1-Fabric", "modrinth", "P7dR8mSH", "fapi-0115");
+    off();
+    const all = events.filter((e) => e.task_id === "t-all");
+    const steps = all.map((e) => e.step);
+    expect(new Set(steps)).toEqual(new Set([0, 1]));
+    expect(steps.indexOf(1)).toBe(steps.lastIndexOf(0) + 1);
+    const finished = (step: number) => all.filter((e) => e.kind === "download" && e.step === step).pop();
+    expect(finished(0)).toMatchObject({ finished: 1, bytes: 786_432, total_bytes: 786_432 });
+    expect(finished(1)).toMatchObject({ finished: 1, bytes: 262_144, total_bytes: 262_144 });
+    const single = events.filter((e) => e.task_id === "t-one");
+    expect(single.some((e) => e.kind === "download")).toBe(true);
+    expect(single.filter((e) => "step" in e)).toEqual([]);
+  });
+
+  it("step 不是 u32 时按 Tauri 的参数错误整条拒绝", async () => {
+    for (const step of [-1, 1.5, 2 ** 32]) {
+      const err = await installMod("t-bad", "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", step).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "unknown", message: "invalid args `step` for command `install_mod`: expected u32" });
+    }
+    // 边界：u32 的最大值照收
+    expect((await installMod("t-max", "1.21.1-Fabric", "modrinth", "gvQqBUqZ", "lith-0143", 2 ** 32 - 1)).file_name).toBe("gvQqBUqZ-0.14.3.jar");
+  });
+
   it("下载途中取消以 cancelled 结束，任务随之注销", async () => {
     const args = {
       taskId: "t-cancel",

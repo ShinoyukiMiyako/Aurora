@@ -166,6 +166,10 @@ function continues(mark: BatchMark, event: DownloadSnapshot): boolean {
  *   「当前项的比例 × 它自己的大小」，是因为一次命令可能连带下载别的项（装 Mod 时一并装上缺的前置，后面那几项就无事可做），
  *   按它自己的大小封顶会先卡住再跳到头。
  * - 有一项不知道大小时按项数：每项占一份，当前项按它报来的比例。
+ *
+ * 每条进度带着它属于第几项（core-event 的 step，调用每一项时给出）。进度事件与命令的返回走不同的通道，上一项的最后几条
+ * 可能在下一项已经开始、甚至已经报过进度之后才到；两项声明大小相同或都未知时，单看快照分不清是谁的。所以批次与字节都按项
+ * 分开记：晚到的进度只续它自己那一项的批次、补上那一项的字节，不动整体进度——那一项的份额在它做完时已经推满。
  */
 export interface CompositeProgress {
   /** 每项的权重：声明大小都已知时为字节数，否则每项为 1。 */
@@ -174,15 +178,10 @@ export interface CompositeProgress {
   readonly totalBytes: number | null;
   /** 正在进行的那一项；等于项数时已全部做完。 */
   readonly index: number;
-  /** 当前项开始时任务的累计下载字节，用来算这一项实际下了多少。 */
-  readonly stepStartBytes: number;
-  /** 当前项最近一批下载的标识；这一项还没报过进度时为 null。 */
-  readonly batch: BatchMark | null;
-  /**
-   * 之前各项最近的一批。进度事件经后端的转发通道异步送达，上一项的最后几条可能在它的命令返回、下一项已经开始之后才到；
-   * 当前项还没报过进度时，接着这一批往下走的快照认作晚到的，丢掉。
-   */
-  readonly previous: BatchMark | null;
+  /** 每一项最近一批下载的标识；那一项还没报过进度时为 null。 */
+  readonly batches: readonly (BatchMark | null)[];
+  /** 每一项实际下载的字节（跨批次累计，晚到的也算上）。 */
+  readonly itemBytes: readonly number[];
 }
 
 export function compositeProgress(sizes: readonly (number | null)[]): CompositeProgress {
@@ -193,10 +192,13 @@ export function compositeProgress(sizes: readonly (number | null)[]): CompositeP
     weights: bySize ? known : sizes.map(() => 1),
     totalBytes: bySize ? sum : null,
     index: 0,
-    stepStartBytes: 0,
-    batch: null,
-    previous: null,
+    batches: sizes.map(() => null),
+    itemBytes: sizes.map(() => 0),
   };
+}
+
+function replaced<T>(items: readonly T[], index: number, value: T): T[] {
+  return items.map((item, i) => (i === index ? value : item));
 }
 
 function weightBefore(cursor: CompositeProgress, index: number): number {
@@ -224,39 +226,49 @@ export function startComposite(tasks: readonly Task[], attemptId: string, cursor
   return tasks.map((t) => (t.status === "running" && attemptTaskId(t) === attemptId ? withCompositeProgress(t, cursor, 0, t.doneBytes) : t));
 }
 
-/** 组合任务当前项的一条下载进度。不属于这一次尝试、晚到的上一项进度、全部做完后再来的进度返回 null，表示不采纳。 */
+/**
+ * 组合任务第 step 项的一条下载进度。不属于这一次尝试（或这一次尝试已经落定）时返回 null，表示不采纳。
+ * step 早于当前项是晚到的进度：只补那一项的字节，整体进度与速度不动。step 越过当前项或越界说明调用方的序号给错了，直接报错。
+ */
 export function applyCompositeDownload(
   tasks: readonly Task[],
   attemptId: string,
   cursor: CompositeProgress,
+  step: number,
   event: DownloadSnapshot,
 ): { tasks: Task[]; cursor: CompositeProgress } | null {
   const task = runningAttempt(tasks, attemptId);
-  if (task === undefined || cursor.index >= cursor.weights.length) return null;
-  if (cursor.batch === null && cursor.previous !== null && continues(cursor.previous, event)) return null;
-  const sameBatch = cursor.batch !== null && continues(cursor.batch, event);
-  const doneBytes = task.doneBytes + (sameBatch && cursor.batch !== null ? event.bytes - cursor.batch.bytes : event.bytes);
+  if (task === undefined) return null;
+  if (!Number.isInteger(step) || step < 0 || step >= cursor.weights.length) {
+    throw new Error(`组合任务 ${attemptId} 只有 ${cursor.weights.length} 项，收到了第 ${step} 项的进度`);
+  }
+  if (step > cursor.index) throw new Error(`组合任务 ${attemptId} 还在第 ${cursor.index} 项，收到了第 ${step} 项的进度`);
+  const mark = cursor.batches[step];
+  const added = mark !== null && continues(mark, event) ? event.bytes - mark.bytes : event.bytes;
+  const itemBytes = replaced(cursor.itemBytes, step, cursor.itemBytes[step] + added);
+  const next: CompositeProgress = { ...cursor, batches: replaced(cursor.batches, step, { bytes: event.bytes, totalBytes: event.totalBytes }), itemBytes };
+  const doneBytes = task.doneBytes + added;
+  if (step < cursor.index) {
+    const late = withCompositeProgress(task, cursor, task.progress, doneBytes);
+    return { tasks: tasks.map((t) => (t === task ? late : t)), cursor: next };
+  }
   const whole = weightBefore(cursor, cursor.weights.length);
-  const before = weightBefore(cursor, cursor.index);
+  const before = weightBefore(cursor, step);
   const fraction =
     cursor.totalBytes === null
-      ? (before + cursor.weights[cursor.index] * snapshotFraction(event)) / whole
-      : Math.min(1, (before + doneBytes - cursor.stepStartBytes) / whole);
-  const next: Task = { ...withCompositeProgress(task, cursor, fraction, doneBytes), speedBps: event.speed };
-  return {
-    tasks: tasks.map((t) => (t === task ? next : t)),
-    cursor: { ...cursor, batch: { bytes: event.bytes, totalBytes: event.totalBytes } },
-  };
+      ? (before + cursor.weights[step] * snapshotFraction(event)) / whole
+      : Math.min(1, (before + itemBytes[step]) / whole);
+  const current: Task = { ...withCompositeProgress(task, cursor, fraction, doneBytes), speedBps: event.speed };
+  return { tasks: tasks.map((t) => (t === task ? current : t)), cursor: next };
 }
 
 /** 组合任务的当前项做完：整体进度推到这一项的末尾，游标移到下一项。 */
 export function completeCompositeStep(tasks: readonly Task[], attemptId: string, cursor: CompositeProgress): { tasks: Task[]; cursor: CompositeProgress } {
   const index = cursor.index + 1;
   if (index > cursor.weights.length) throw new Error(`组合任务 ${attemptId} 只有 ${cursor.weights.length} 项，不能再往下走`);
-  const previous = cursor.batch === null ? cursor.previous : cursor.batch;
+  const next: CompositeProgress = { ...cursor, index };
   const task = runningAttempt(tasks, attemptId);
-  if (task === undefined) return { tasks: [...tasks], cursor: { ...cursor, index, batch: null, previous } };
-  const next: CompositeProgress = { ...cursor, index, stepStartBytes: task.doneBytes, batch: null, previous };
+  if (task === undefined) return { tasks: [...tasks], cursor: next };
   const fraction = weightBefore(cursor, index) / weightBefore(cursor, cursor.weights.length);
   const updated = withCompositeProgress(task, cursor, fraction, task.doneBytes);
   return { tasks: tasks.map((t) => (t === task ? updated : t)), cursor: next };

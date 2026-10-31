@@ -8,6 +8,7 @@ import { installMod } from "./discover";
 import { installVersion } from "./instances";
 import { installJava } from "./java";
 import { launchGame } from "./launch";
+import { updateMod } from "./mods";
 import { IpcError, isCancelled, toIpcError } from "./errors";
 import { mockCommands, resetMocks } from "./mock";
 import { clearMockEventListeners, emitMockEvent } from "./mock/events";
@@ -187,6 +188,16 @@ describe("Tauri 窗口里走真命令", () => {
       ["install_version", { taskId: "t-ver", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9", targetName: "周末生存" }],
       ["install_mod", { taskId: "t-mod", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1" }],
       ["launch_game", { taskId: "t-run", versionId: "1.21.1", accountUuid: null, offlineName: "Steve" }],
+    ]);
+  });
+
+  it("组合任务的一项带上 step（第 0 项也带），键名与 Rust 形参一致", async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    await installMod("t-all", "1.21.1-fabric", "modrinth", "AANobbMI", "mv1", 0);
+    await updateMod("t-all", "1.21.1-fabric", "AANobbMI-0.5.jar", "mv2", 1);
+    expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
+      ["install_mod", { taskId: "t-all", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1", step: 0 }],
+      ["update_mod", { taskId: "t-all", versionId: "1.21.1-fabric", fileName: "AANobbMI-0.5.jar", modVersionId: "mv2", step: 1 }],
     ]);
   });
 

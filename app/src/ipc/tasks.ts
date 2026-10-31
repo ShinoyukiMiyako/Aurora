@@ -7,12 +7,18 @@ import { invoke, listen, type UnlistenFn } from "./bridge";
 
 export const CORE_EVENT = "aurora://core-event";
 
+/**
+ * step：命令作为组合任务的一项调用时，调用方给的「第几项」（从 0 计），后端原样标在这次调用的每条事件上。
+ * 组合任务的各项共用一个 task_id、各自从 0 报起，上一项的进度可能晚于下一项开始才送到，单看快照分不清，靠它分开。
+ * 单独调用的命令没有这一项。
+ */
 export type CoreEvent =
-  | { kind: "stage"; task_id: string | null; message: string }
-  | { kind: "warning"; task_id: string | null; message: string }
+  | { kind: "stage"; task_id: string | null; step?: number; message: string }
+  | { kind: "warning"; task_id: string | null; step?: number; message: string }
   | {
       kind: "download";
       task_id: string | null;
+      step?: number;
       /** 本批文件数。一次安装会连跑多批（版本 JSON、库、资源），每批 finished 都从 0 重新计起。 */
       total: number;
       /** 本批已结束文件数（成功与最终失败都计入）。 */

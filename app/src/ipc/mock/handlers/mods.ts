@@ -26,7 +26,7 @@ import { CORE_EVENT } from "../../tasks";
 import { byCodeUnit, findMockSource, newestFirst, sourceVersions, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { argReader, forgetMockPackFiles, mockPackFiles, parsePlatform as parsePlatformArg, renameMockPackFiles, runMockTask, simulateDownload, type MockPackFile } from "./discover";
+import { argReader, eventOwner, forgetMockPackFiles, mockPackFiles, parsePlatform as parsePlatformArg, renameMockPackFiles, runMockTask, simulateDownload, type MockPackFile } from "./discover";
 import { acquireMockInstance, mockInstanceFacts, mockInstanceIds, withMockInstance } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -561,14 +561,15 @@ function place(instance: MockInstance, items: PlannedItem[]): void {
   if (fresh.length > 0) instance.history.push({ kind: "install", id: nextEventId(instance.history, at), at, files: fresh });
 }
 
-function stage(taskId: string, message: string): void {
-  emitMockEvent(CORE_EVENT, { kind: "stage", task_id: taskId, message });
+function stage(taskId: string, step: number | null, message: string): void {
+  emitMockEvent(CORE_EVENT, { kind: "stage", ...eventOwner(taskId, step), message });
 }
 
 /** 与后端 install_mod 同一条管线：按计划装上主项与缺的必需前置，卷宗登记来源，历史记一条安装事件。 */
 function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
   const read = argReader("install_mod", args);
   const taskId = read.string("taskId");
+  const step = read.nullableInteger("step");
   const versionId = read.string("versionId");
   const platform = parsePlatformArg(read.string("platform"));
   const projectId = read.string("projectId");
@@ -576,7 +577,7 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
   const hold = acquireMockInstance(versionId, "modifying");
   return runMockTask(taskId, async () => {
     const instance = mockInstance(versionId);
-    stage(taskId, `准备从 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 安装模组到 ${versionId}`);
+    stage(taskId, step, `准备从 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 安装模组到 ${versionId}`);
     const result = plan(instance, findVersion(platform, projectId, modVersionId));
     const pending = result.items.filter((i) => !i.already_satisfied);
     const bytes = pending.reduce((sum, i) => {
@@ -584,10 +585,10 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
       return sum + i.version.file_size;
     }, 0);
     const main = result.items[0].version;
-    if (pending.length > 0) await simulateDownload(taskId, main.file_name, bytes);
+    if (pending.length > 0) await simulateDownload(taskId, main.file_name, bytes, step);
     assertNotBusy(versionId, pending.map((i) => i.version.file_name));
     place(instance, result.items);
-    stage(taskId, `模组 ${main.file_name} 已安装`);
+    stage(taskId, step, `模组 ${main.file_name} 已安装`);
     return { file_name: main.file_name, path: `${mockModsDir(versionId)}/${main.file_name}`, platform: main.platform };
   }).finally(() => hold.release());
 }
@@ -659,6 +660,7 @@ export const handlers: MockHandlers = {
   },
   update_mod: async (args): Promise<ModUpdateOutcomeDto> => {
     const taskId = requireString(args.taskId, "taskId");
+    const step = argReader("update_mod", args).nullableInteger("step");
     const id = requireString(args.versionId, "versionId");
     const fileName = requireNonEmpty(args.fileName, "fileName");
     const modVersionId = requireNonEmpty(args.modVersionId, "modVersionId");
@@ -673,7 +675,7 @@ export const handlers: MockHandlers = {
       const instance = mockInstance(id);
       const row = instance.ledger.find((r) => r.file_name === ledgerKey(fileName));
       if (!row) throw refuse(`${mockModsDir(id)}/${fileName}`, `${fileName} 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）`);
-      stage(taskId, `准备把 ${fileName} 更新到版本 ${modVersionId}`);
+      stage(taskId, step, `准备把 ${fileName} 更新到版本 ${modVersionId}`);
       const result = plan(instance, findVersion(row.platform, row.project_id, modVersionId));
       // 真实后端在下载阶段观察取消；这里让出一次事件循环，给 cancel_task 留出到达的机会。
       await Promise.resolve();
@@ -681,7 +683,7 @@ export const handlers: MockHandlers = {
       assertNotBusy(id, [row.file_name, `${row.file_name}${DISABLED_SUFFIX}`]);
       place(instance, result.items);
       const main = result.items[0].version;
-      stage(taskId, `模组 ${main.file_name} 已安装`);
+      stage(taskId, step, `模组 ${main.file_name} 已安装`);
       return { file_name: main.file_name, path: `${mockModsDir(id)}/${main.file_name}`, platform: main.platform };
     } finally {
       endMockTask(taskId);
