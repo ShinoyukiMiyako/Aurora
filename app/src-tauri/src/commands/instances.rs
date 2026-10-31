@@ -3630,7 +3630,7 @@ mod tests {
             assert_eq!(err.code, common::INVALID_ARGUMENT, "{file:?}");
             assert_eq!(err.detail.unwrap()["field"], "file", "{file:?}");
         }
-        for id in ["../生存", "", ".hidden", r"a"] {
+        for id in ["../生存", "", ".hidden", r"a\b"] {
             let err = backup_world_with(&w.with(&env), "t", id, "新的世界", &events)
                 .await
                 .unwrap_err();
