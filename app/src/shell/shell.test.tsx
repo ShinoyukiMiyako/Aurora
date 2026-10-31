@@ -1,0 +1,242 @@
+// @vitest-environment jsdom
+import { act } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { GAME_EXIT_EVENT } from "../ipc/launch";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
+import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import type { IpcRecorder } from "../test/fake-bridge";
+import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { OverlayRoot } from "./overlay";
+import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
+
+const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
+vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+let view: Rendered | undefined;
+let nav: NavApi;
+let shell: ShellApi;
+let launcher: LauncherApi;
+let instances: ReturnType<typeof instanceDto>[];
+
+function Probe() {
+  nav = useNav();
+  shell = useShell();
+  launcher = useLauncher();
+  return null;
+}
+
+async function mount() {
+  view = render(
+    <LauncherProvider>
+      <ShellProvider>
+        <Probe />
+        <OverlayRoot />
+      </ShellProvider>
+    </LauncherProvider>,
+  );
+  await act(async () => {
+    await settle();
+  });
+}
+
+const flush = () =>
+  act(async () => {
+    await settle();
+  });
+
+const dialogTitle = () => document.querySelector('[role="dialog"] h2')?.textContent;
+const button = (text: string) => {
+  const el = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')].find((b) => b.textContent === text);
+  if (el === undefined) throw new Error(`弹窗里找不到按钮 ${text}`);
+  return el;
+};
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  resetRecorder(ipc);
+  stubResizeObserver();
+  instances = [instanceDto("生存"), instanceDto("创造")];
+  bootOverrides(ipc, { instances, pins: ["创造"] });
+  ipc.overrides.set("list_instances", () => instances);
+  ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+});
+afterEach(() => {
+  view?.unmount();
+  view = undefined;
+  vi.useRealTimers();
+});
+
+describe("外壳：导航", () => {
+  it("go / back / forward 驱动路由与前后可用态", async () => {
+    await mount();
+    expect(nav.route).toEqual({ page: "home" });
+    expect([nav.canBack, nav.canForward]).toEqual([false, false]);
+    act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+    act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+    expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "mods" });
+    act(() => nav.back());
+    expect(nav.route).toEqual({ page: "home" });
+    expect(nav.canForward).toBe(true);
+    act(() => nav.forward());
+    expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "mods" });
+  });
+
+  it("实例被删除：当前页落到之前的存活项，历史里指向它的项一并剪除", async () => {
+    await mount();
+    act(() => nav.go({ page: "library" }));
+    act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+    instances = [instanceDto("创造")];
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(nav.route).toEqual({ page: "library" });
+    expect(nav.canForward).toBe(false);
+  });
+
+  it("滚动位置：go 回到顶部，后退恢复离开时的位置", async () => {
+    await mount();
+    const scroller = document.createElement("div");
+    act(() => shell.bindPageScroll(scroller));
+    act(() => nav.go({ page: "library" }));
+    scroller.scrollTop = 640;
+    act(() => nav.go({ page: "tasks" }));
+    expect(scroller.scrollTop).toBe(0);
+    act(() => nav.back());
+    expect(scroller.scrollTop).toBe(640);
+  });
+
+  it("打开崩溃实例的诊断页即收起它的崩溃会话", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    ipc.overrides.set("last_crash", () => null);
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 1000 }));
+    await flush();
+    expect(launcher.state.session?.phase).toBe("crashed");
+    act(() => nav.go({ page: "instance", id: "生存", tab: "crash" }));
+    await flush();
+    expect(launcher.state.session).toBeNull();
+  });
+});
+
+describe("外壳：确认框与启动替换", () => {
+  it("新的确认顶掉尚未回答的旧请求，旧请求按取消结算", async () => {
+    await mount();
+    let first: Promise<boolean> | null = null;
+    let second: Promise<boolean> | null = null;
+    act(() => {
+      first = shell.confirm({ title: "删除「生存」？", confirmLabel: "删除实例", tone: "danger" });
+    });
+    act(() => {
+      second = shell.confirm({ title: "结束游戏？", confirmLabel: "结束游戏", tone: "danger" });
+    });
+    await expect(first).resolves.toBe(false);
+    expect(dialogTitle()).toBe("结束游戏？");
+    act(() => button("结束游戏").click());
+    await expect(second).resolves.toBe(true);
+  });
+
+  it("另一实例在运行时再点启动：弹替换确认，确认后结束旧的并启动新的", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    ipc.overrides.set("stop_game", () => {
+      emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: true, duration_ms: 1000 });
+      return null;
+    });
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    expect(launcher.state.session).toMatchObject({ instanceId: "生存", phase: "running" });
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    expect(dialogTitle()).toBe("结束「生存」并启动「创造」？");
+    act(() => button("结束并启动").click());
+    await flush();
+    expect(callsOf(ipc, "stop_game")).toHaveLength(1);
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "创造"]);
+    expect(launcher.state.session).toMatchObject({ instanceId: "创造", phase: "running" });
+    expect(launcher.state.launchPrompt).toBeNull();
+  });
+});
+
+describe("外壳：全局快捷键", () => {
+  it("Ctrl+K 开合命令面板；面板开着时导航快捷键无效", async () => {
+    await mount();
+    keydown(window, "k", { ctrlKey: true, code: "KeyK" });
+    expect(shell.palette).toEqual({ open: true, query: "" });
+    keydown(window, "2", { ctrlKey: true, code: "Digit2" });
+    keydown(window, "k", { ctrlKey: true, code: "KeyK" });
+    expect(shell.palette.open).toBe(false);
+    expect(nav.route).toEqual({ page: "home" });
+    keydown(window, "2", { ctrlKey: true, code: "Digit2" });
+    expect(nav.route).toEqual({ page: "library" });
+  });
+
+  it("Alt+← 后退，Alt+1 打开第一个固定实例，Ctrl+N 打开新建实例，Ctrl+, 进设置", async () => {
+    await mount();
+    keydown(window, "1", { altKey: true, code: "Digit1" });
+    expect(nav.route).toEqual({ page: "instance", id: "创造", tab: "overview" });
+    keydown(window, "ArrowLeft", { altKey: true });
+    expect(nav.route).toEqual({ page: "home" });
+    keydown(window, ",", { ctrlKey: true, code: "Comma" });
+    expect(nav.route).toEqual({ page: "settings" });
+    keydown(window, "n", { ctrlKey: true, code: "KeyN" });
+    expect(shell.createInstance).toEqual({ open: true, preset: null });
+  });
+
+  it("有浮层时 Alt+← 只关栈顶一层，不后退", async () => {
+    await mount();
+    act(() => nav.go({ page: "library" }));
+    act(() => {
+      void shell.confirm({ title: "取消全部 2 个任务？", confirmLabel: "全部取消" });
+    });
+    await flush();
+    keydown(window, "ArrowLeft", { altKey: true });
+    await flush();
+    expect(nav.route).toEqual({ page: "library" });
+  });
+
+  it("Ctrl+F 交给最后登记的页面处理器，注销后无动作", async () => {
+    await mount();
+    const a = vi.fn();
+    const b = vi.fn();
+    const offA = shell.registerFind(a);
+    const offB = shell.registerFind(b);
+    const event = keydown(window, "f", { ctrlKey: true, code: "KeyF" });
+    expect(event.defaultPrevented).toBe(true);
+    expect(b).toHaveBeenCalledTimes(1);
+    expect(a).not.toHaveBeenCalled();
+    offB();
+    offA();
+    keydown(window, "f", { ctrlKey: true, code: "KeyF" });
+    expect(a).not.toHaveBeenCalled();
+  });
+
+  it("首次启动向导期间导航快捷键全部无效", async () => {
+    bootOverrides(ipc, { instances, firstRun: true });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount();
+    keydown(window, "2", { ctrlKey: true, code: "Digit2" });
+    keydown(window, "k", { ctrlKey: true, code: "KeyK" });
+    expect(nav.route).toEqual({ page: "home" });
+    expect(shell.palette.open).toBe(false);
+  });
+});
+
+describe("外壳：通知动作", () => {
+  it("先关闭这条通知再导航", async () => {
+    await mount();
+    act(() => {
+      launcher.actions.toast("error", "2 个下载失败", "原因各不相同", { action: { label: "查看", to: { page: "tasks", filter: "failed" } } });
+    });
+    const toast = launcher.state.toasts[0];
+    act(() => shell.runToastAction(toast));
+    expect(launcher.state.toasts).toEqual([]);
+    expect(nav.route).toEqual({ page: "tasks", filter: "failed" });
+  });
+});
