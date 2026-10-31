@@ -71,7 +71,8 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
             placement="bottom-end"
             items={[
               { label: ACCOUNTS_COPY.menuOffline, icon: "user", onSelect: () => openLogin("offline") },
-              { label: ACCOUNTS_COPY.menuAuthlib, icon: "server", disabled: !online, hint: offlineReason, onSelect: () => openLogin("authlib") },
+              // 断网原因放悬停提示气泡，不占右侧提示位，免得把标签挤成省略号
+              { label: ACCOUNTS_COPY.menuAuthlib, icon: "server", disabled: !online, disabledReason: offlineReason, onSelect: () => openLogin("authlib") },
             ]}
             trigger={(props) => (
               <Button {...props} iconRight="chevron-down">

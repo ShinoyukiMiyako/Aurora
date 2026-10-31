@@ -27,8 +27,9 @@ export function AccountCard({ account, current, online, act }: AccountCardProps)
   const items: MenuEntry[] = [];
   if (!current) items.push({ label: ACCOUNTS_COPY.setCurrent, icon: "check", onSelect: () => act.switchTo(account.uuid) });
   // 凭据失效的账户刷新必然失败，菜单里只给能成功的动作；重新登录在卡片底部
+  // 断网原因走菜单项的悬停提示气泡：右侧提示位与标签同一行、不折行，放原因会把标签挤成省略号
   if (isCredential(account) && account.status === "ok") {
-    items.push({ label: ACCOUNTS_COPY.refresh, icon: "refresh", disabled: !online, hint: offlineReason, onSelect: () => act.refresh(account.uuid) });
+    items.push({ label: ACCOUNTS_COPY.refresh, icon: "refresh", disabled: !online, disabledReason: offlineReason, onSelect: () => act.refresh(account.uuid) });
   }
   items.push(
     { label: ACCOUNTS_COPY.copyUuid, icon: "copy", onSelect: () => act.copyFromMenu(displayUuid(account.uuid)) },

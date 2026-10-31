@@ -480,6 +480,45 @@ describe("账户页：断网、加载与读取失败", () => {
     expect(page().textContent).not.toContain("没有网络连接");
   });
 
+  it("断网：菜单里的刷新与外置登录只写标签并禁用，原因放进悬停的提示气泡；点了不发起", async () => {
+    net.onLine = false;
+    await mount();
+    const menuItems = () => [...document.querySelectorAll<HTMLElement>(':not([data-exiting]) > [role="menu"] [role="menuitem"]')];
+    const reasonOf = async (item: HTMLElement) => {
+      act(() => {
+        item.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tipId = item.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error(`「${item.textContent}」悬停后没有关联提示气泡`);
+      return document.getElementById(tipId)?.textContent;
+    };
+
+    await openMenu("Hanami 的更多操作", cardOf("Hanami"));
+    expect(menuLabels()).toEqual(["刷新账户信息", "复制 UUID", "删除账户"]);
+    const refresh = menuItems()[0];
+    expect(refresh.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(refresh)).toBe("联网后才能登录");
+    await click(refresh);
+    expect(callsOf(ipc, "refresh_account")).toEqual([]);
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await flush();
+
+    const other = buttonIn(page().querySelector("header") as HTMLElement, "添加其他账户");
+    act(() => other.focus());
+    await click(other);
+    expect(menuLabels()).toEqual(["离线账户", "外置登录"]);
+    const authlib = menuItems()[1];
+    expect(authlib.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(authlib)).toBe("联网后才能登录");
+    await click(authlib);
+    expect(launcher.state.login).toBeNull();
+  });
+
   it("加载超过 300 ms 才出现骨架，出现后至少保持 300 ms", async () => {
     const list = deferred<AccountDto[]>();
     ipc.overrides.set("list_accounts", () => list.promise);
