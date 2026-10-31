@@ -4,6 +4,7 @@
 import { IpcError } from "../../errors";
 import type { HistoryEvent, RollbackCheck } from "../../history";
 import type { MockHandlers } from "../types";
+import { withMockInstance } from "./instances";
 import {
   BACKUP_SUFFIX,
   DISABLED_SUFFIX,
@@ -96,6 +97,7 @@ export const handlers: MockHandlers = {
     const versionId = requireString(args.versionId, "versionId");
     const eventId = requireString(args.eventId, "eventId");
     if (eventId.trim() === "") throw new IpcError("invalid_argument", "event_id 不能为空");
-    rollback(versionId, mockInstance(versionId), eventId);
+    // 与后端一样以「改动 Mod 与资源」占住实例，与改名、删除互斥
+    withMockInstance(versionId, "modifying", () => rollback(versionId, mockInstance(versionId), eventId));
   },
 };

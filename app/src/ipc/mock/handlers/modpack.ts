@@ -9,7 +9,7 @@ import { INSTANCE_NAME_MAX_CHARS } from "../../modpack";
 import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { addMockInstance, mockInstanceIds } from "./instances";
+import { acquireMockInstance, addMockInstance, mockInstanceIds, type MockInstanceHold } from "./instances";
 import { placeMockPackMods } from "./mods";
 
 /** 本地整合包文件的假清单：读不到真文件，每个本地包都报这一份。 */
@@ -169,6 +169,8 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   const taskId = read.string("taskId");
   const source = parseSource(args.source);
   const requested = read.nullableString("name");
+  // 与后端一样，占用放在导入主体之外，导入无论怎样结束都在最后放开
+  let hold: MockInstanceHold | null = null;
   return runMockTask(taskId, async () => {
     const pack = packOf(source);
     const raw = requested === null ? pack.name : requested;
@@ -178,6 +180,8 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
     const lower = name.toLowerCase();
     // 已占用的名字以实例 mock 为准，导入成功的实例也记进那里；整合包要的原版自然目录也占着它的版本号。
     if (lower === pack.minecraft.toLowerCase() || mockInstanceIds().some((v) => v.toLowerCase() === lower)) throw nameError(name, "duplicate");
+    // 实例名一定下来就以「安装」占住，直到导入结束：这期间启动、改名、删除这个实例都报 instance_busy
+    hold = acquireMockInstance(name, "installing");
 
     const { manifest } = pack;
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：${manifest.remoteFiles} 个远程文件，${manifest.overrideFiles} 个覆盖文件` });
@@ -206,6 +210,8 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
         installed_at: Math.floor(Date.now() / 1000),
       },
     };
+  }).finally(() => {
+    if (hold !== null) hold.release();
   });
 }
 

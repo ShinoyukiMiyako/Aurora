@@ -542,6 +542,8 @@ export function taskFailureReason(error: { code: string; message: string }): str
 /** 目标实例正在运行时，任务完成 Toast 正文末尾追加。 */
 export const NEXT_LAUNCH_SUFFIX = "，下次启动生效";
 
+const ALL_MODS_LATEST = "所有 Mod 都是最新的";
+
 export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以开始游戏了" }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
@@ -552,6 +554,8 @@ export const TASK_TOAST = {
   }),
   modUpdated: (mod: string, instance: string) => ({ title: `已更新 ${mod}`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
   modsUpdated: (count: number, instance: string) => ({ title: `已更新 ${count} 个 Mod`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
+  /** 「全部更新」重试时，上一次已经全部换好（或玩家另行更新、移除了），这一次没有要换的。 */
+  modsAlreadyLatest: (instance: string) => ({ title: ALL_MODS_LATEST, body: `「${instance}」` }),
   resourcePack: (name: string) => ({ title: `已安装资源包 ${name}`, body: "进入游戏后在「选项 → 资源包」里启用" }),
   shader: (name: string, instance: string) => ({ title: `已安装光影 ${name}`, body: `已设为「${instance}」的当前光影` }),
   datapack: (name: string, world: string | null) => ({
@@ -587,7 +591,7 @@ export const TOAST_COPY = {
   crashed: (name: string) => `「${name}」崩溃了`,
   launchFailed: (name: string) => `「${name}」启动失败`,
   stopFailed: "无法结束游戏进程",
-  allModsLatest: "所有 Mod 都是最新的",
+  allModsLatest: ALL_MODS_LATEST,
   modRemoved: (name: string) => `已移除 ${name}`,
   rolledBack: (name: string, from: string, to: string) => ({ title: `已回滚 ${name}`, body: `${to} → ${from}` }),
   cannotRollback: "这条记录不能回滚",

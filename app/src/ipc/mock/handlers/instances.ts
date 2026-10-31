@@ -21,7 +21,7 @@ import {
 } from "../../instances";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { mockCrashReport, mockPlaySummary } from "./launch";
+import { forgetMockLaunchRecords, mockCrashReport, mockPlaySummary, renameMockLaunchRecords } from "./launch";
 import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -335,8 +335,9 @@ const LOADER_VERSIONS: Partial<Record<`${LoaderChoice}:${string}`, LoaderVersion
 
 let instances: MockInstance[] = seedInstances();
 let pins: string[] = ["樱花生存", "1.21.1"];
-// 键不分大小写，与后端 InstanceLocks 一致。
-const activities = new Map<string, InstanceActivity>();
+// 实例上的全部占用，键不分大小写，与后端 InstanceLocks 一致：同一实例可以同时有几件兼容的事。
+const holds = new Map<string, { token: number; activity: InstanceActivity }[]>();
+let nextHoldToken = 0;
 
 // ---------------------------------------------------------------- 共用
 
@@ -386,8 +387,12 @@ function checkName(name: string, current: string | null): void {
   if (rule) throw nameError(name, rule);
 }
 
+/** 有几件事并行时报最值得界面知道的那一件：Mod 与设置的改动排在最后，与后端的 report_rank 一致。 */
 function activityOf(id: string): InstanceActivity | null {
-  return activities.get(id.toLowerCase()) ?? null;
+  const held = holds.get(id.toLowerCase());
+  if (held === undefined) return null;
+  const primary = held.find((h) => h.activity !== "modifying");
+  return primary === undefined ? held[0].activity : primary.activity;
 }
 
 const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
@@ -400,16 +405,69 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
   modifying: "改动 Mod、资源或设置",
 };
 
-function acquire(id: string, activity: InstanceActivity): () => void {
-  const current = activityOf(id);
-  if (current) {
-    throw new IpcError("instance_busy", `实例 ${id} 正在${ACTIVITY_LABELS[current]}，请稍后再试`, { id, activity: current });
-  }
+/**
+ * 两件事能否同时在一个实例上进行，与后端 InstanceActivity::compatible_with 同一张表：Mod、资源与设置的改动彼此兼容，
+ * 也与启动、运行中的游戏兼容；新建、补全、改名、删除会挪走或重写整个目录，与任何事都互斥。
+ */
+function compatible(a: InstanceActivity, b: InstanceActivity): boolean {
+  if (a === "modifying") return b === "modifying" || b === "launching" || b === "running";
+  return (a === "launching" || a === "running") && b === "modifying";
+}
+
+/** 实例上的一份占用。release 放开它；setActivity 只用于兼容关系相同的两件事之间改记（启动转为运行）。 */
+export interface MockInstanceHold {
+  release(): void;
+  setActivity(activity: InstanceActivity): void;
+}
+
+/** 占住实例做 activity；有与它不兼容的事在做时报 instance_busy，形状与后端一致。 */
+export function acquireMockInstance(id: string, activity: InstanceActivity): MockInstanceHold {
   const key = id.toLowerCase();
-  activities.set(key, activity);
-  return () => {
-    activities.delete(key);
+  const held = holds.get(key);
+  const conflict = held === undefined ? undefined : held.find((h) => !compatible(activity, h.activity));
+  if (conflict !== undefined) {
+    throw new IpcError("instance_busy", `实例 ${id} 正在${ACTIVITY_LABELS[conflict.activity]}，请稍后再试`, { id, activity: conflict.activity });
+  }
+  const hold = { token: nextHoldToken, activity };
+  nextHoldToken += 1;
+  holds.set(key, held === undefined ? [hold] : [...held, hold]);
+  const ownEntry = () => {
+    const list = holds.get(key);
+    const found = list === undefined ? undefined : list.find((h) => h.token === hold.token);
+    if (list === undefined || found === undefined) throw new Error(`mock：实例 ${id} 的这份占用（${activity}）已经放开`);
+    return { list, found };
   };
+  return {
+    release: () => {
+      const { list } = ownEntry();
+      const rest = list.filter((h) => h.token !== hold.token);
+      if (rest.length === 0) holds.delete(key);
+      else holds.set(key, rest);
+    },
+    setActivity: (next) => {
+      ownEntry().found.activity = next;
+    },
+  };
+}
+
+/** 占着实例执行 work，结束（含异步完成与失败）即放开；同步的处理函数仍同步返回。 */
+export function withMockInstance<T>(id: string, activity: InstanceActivity, work: () => T): T {
+  const hold = acquireMockInstance(id, activity);
+  let result: T;
+  try {
+    result = work();
+  } catch (error) {
+    hold.release();
+    throw error;
+  }
+  if (result instanceof Promise) return result.finally(() => hold.release()) as T;
+  hold.release();
+  return result;
+}
+
+function acquire(id: string, activity: InstanceActivity): () => void {
+  const hold = acquireMockInstance(id, activity);
+  return () => hold.release();
 }
 
 function dependentsOf(id: string): string[] {
@@ -800,13 +858,16 @@ export const handlers: MockHandlers = {
 
   get_instance_settings: (args) => requireInstance(str(args, "id")).settings,
 
+  // 与后端同序：格式不对先报，再占住实例（改名、删除、新建、补全进行中报 instance_busy），之后才校验取值与实例是否存在。
   set_instance_settings: (args) => {
     const id = str(args, "id");
     const settings = parseSettings(args.settings);
-    validateSettings(settings);
-    const instance = requireInstance(id);
-    instance.settings = settings;
-    return settings;
+    return withMockInstance(id, "modifying", () => {
+      validateSettings(settings);
+      const instance = requireInstance(id);
+      instance.settings = settings;
+      return settings;
+    });
   },
 
   list_instance_content: (args) => {
@@ -864,6 +925,8 @@ export const handlers: MockHandlers = {
         instances = instances.filter((i) => i.dto.id !== id);
         forgetMockMods(id);
       }
+      // 目录已不在时也清：残留的记录会被之后新建的同名实例继承
+      forgetMockLaunchRecords(id);
       pins = pins.filter((pin) => pin !== id);
       return { existed };
     } finally {
@@ -885,6 +948,7 @@ export const handlers: MockHandlers = {
       ensureNoDependents(id);
       instance.dto = { ...instance.dto, id: newName };
       renameMockMods(id, newName);
+      renameMockLaunchRecords(id, newName);
       pins = pins.map((pin) => (pin === id ? newName : pin));
       return { id: newName };
     } finally {
@@ -927,23 +991,28 @@ export const handlers: MockHandlers = {
       if (world === null) throw invalid("world", "missing", "打开存档需要存档文件夹名");
       if (!isSafeId(world)) throw invalid("world", "unsafe", `存档文件夹名不合法：${JSON.stringify(world)}`);
     }
-    const instance = requireInstance(id);
-    // 工作目录要从版本 JSON 推出来，版本 JSON 坏了的实例只能打开实例目录本身。
-    if (target !== "instance" && instance.dto.status === "broken") {
-      const reason = instance.dto.broken_reason ?? "版本 JSON 不可用";
-      throw new IpcError("instance_failed", `实例 ${id} 的版本 JSON 不可用：${reason}`, { id, reason });
-    }
-    if (target === "world" && !instance.content.worlds.some((w) => w.dir_name === world)) {
-      throw invalid("world", "not_found", `存档 ${world} 不存在`);
-    }
+    const resolve = () => {
+      const instance = requireInstance(id);
+      // 工作目录要从版本 JSON 推出来，版本 JSON 坏了的实例只能打开实例目录本身。
+      if (target !== "instance" && instance.dto.status === "broken") {
+        const reason = instance.dto.broken_reason ?? "版本 JSON 不可用";
+        throw new IpcError("instance_failed", `实例 ${id} 的版本 JSON 不可用：${reason}`, { id, reason });
+      }
+      if (target === "world" && !instance.content.worlds.some((w) => w.dir_name === world)) {
+        throw invalid("world", "not_found", `存档 ${world} 不存在`);
+      }
+    };
+    // 工作目录下的子目录不存在时后端会先建出来，建目录期间占住实例，免得改名、删除进行中按旧路径建出空目录。
     // 浏览器里没有文件管理器可开，校验通过即视为已打开。
+    if (target === "instance" || target === "world") resolve();
+    else withMockInstance(id, "modifying", resolve);
   },
 };
 
 export function reset(): void {
   instances = seedInstances();
   pins = ["樱花生存", "1.21.1"];
-  activities.clear();
+  holds.clear();
 }
 
 interface InstancesSnapshot {

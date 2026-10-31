@@ -28,10 +28,17 @@ function seedJournal(): TaskRecordDto[] {
   ];
 }
 
+/** 记住多少个「取消先于登记到达」的 id，与后端的 EARLY_CANCEL_MEMORY 一致。 */
+const EARLY_CANCEL_MEMORY = 64;
+
 let journal: TaskRecordDto[] = seedJournal();
-const running = new Set<string>();
-// 与后端一样，取消先于登记到达时也记下 id：同 id 随后登记就是已取消状态。
-const cancelled = new Set<string>();
+/** 运行中的长任务：这一次登记有没有收到取消。 */
+const running = new Map<string, { cancelled: boolean }>();
+/**
+ * 与后端一样只记「取消时不在运行」的 id（取消先于登记到达），同 id 随后登记就是已取消状态，记下的 id 随即用掉。
+ * 取消时正在运行的只作用于那一次登记：它结束后同一个 id 再登记拿到的是全新的状态。
+ */
+let cancelledEarly: string[] = [];
 
 /**
  * 长任务 mock 在开始时登记自己，与后端 TaskRegistry::register 同样拒绝空 id 与重复 id。
@@ -40,16 +47,22 @@ const cancelled = new Set<string>();
 export function beginMockTask(taskId: string): void {
   if (taskId.trim() === "") throw new IpcError("invalid_argument", "task_id 不能为空");
   if (running.has(taskId)) throw new IpcError("task_conflict", `任务 ${taskId} 已在运行`, { task_id: taskId });
-  running.add(taskId);
+  const early = cancelledEarly.includes(taskId);
+  if (early) cancelledEarly = cancelledEarly.filter((id) => id !== taskId);
+  running.set(taskId, { cancelled: early });
 }
 
 export function endMockTask(taskId: string): void {
   running.delete(taskId);
 }
 
-/** 长任务 mock 用它检查自己是否已被取消；被取消的长任务应以 IpcError("cancelled") 拒绝。 */
+/**
+ * 长任务 mock 用它检查自己是否已被取消；被取消的长任务应以 IpcError("cancelled") 拒绝。
+ * 不在运行的 id 回答它是否作为先到的取消被记着。
+ */
 export function isMockTaskCancelled(taskId: string): boolean {
-  return cancelled.has(taskId);
+  const entry = running.get(taskId);
+  return entry === undefined ? cancelledEarly.includes(taskId) : entry.cancelled;
 }
 
 function validateJournal(tasks: unknown[]): TaskRecordDto[] {
@@ -66,8 +79,14 @@ function validateJournal(tasks: unknown[]): TaskRecordDto[] {
 export const handlers: MockHandlers = {
   cancel_task: (args) => {
     if (typeof args.taskId !== "string") throw new Error("cancel_task 缺少 taskId");
-    cancelled.add(args.taskId);
-    return running.has(args.taskId);
+    const taskId = args.taskId;
+    const entry = running.get(taskId);
+    if (entry !== undefined) {
+      entry.cancelled = true;
+      return true;
+    }
+    if (!cancelledEarly.includes(taskId)) cancelledEarly = [...cancelledEarly, taskId].slice(-EARLY_CANCEL_MEMORY);
+    return false;
   },
   save_task_journal: (args) => {
     if (!Array.isArray(args.tasks)) throw new Error("save_task_journal 缺少 tasks 数组");
@@ -79,5 +98,5 @@ export const handlers: MockHandlers = {
 export function reset(): void {
   journal = seedJournal();
   running.clear();
-  cancelled.clear();
+  cancelledEarly = [];
 }

@@ -265,3 +265,91 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
     expect(store.getState().toasts.map((t) => t.tone)).toContain("warning");
   });
 });
+
+describe("删除还在安装的新建实例", () => {
+  const spec = { name: "新世界", mcVersion: "1.21.1", loader: "vanilla" as const, loaderVersion: null, cover: "grass" };
+  let install: Deferred<{ id: string }>;
+
+  beforeEach(() => {
+    install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    ipc.overrides.set("delete_instance", (args) => {
+      const existed = instances.some((i) => i.id === args.id);
+      instances = instances.filter((i) => i.id !== args.id);
+      return { existed };
+    });
+  });
+
+  it("安装恰好在取消宽限期内做完：接着删掉装好的实例，不写封面、不固定、不弹「已就绪」", async () => {
+    // 取消到达时安装正在运行；它没观察到令牌就做完了，后端照常返回成功
+    ipc.overrides.set("cancel_task", () => true);
+    await store.actions.createInstance(spec);
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["running"]);
+
+    const deleting = store.actions.deleteInstance("新世界", 0);
+    await settle();
+    instances = [...instances, instanceDto("新世界")];
+    install.resolve({ id: "新世界" });
+    await deleting;
+    await settle();
+
+    expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "新世界" }]);
+    expect(instances.map((i) => i.id)).toEqual(["生存", "创造"]);
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["生存", "创造"]);
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    const titles = store.getState().toasts.map((t) => t.title);
+    expect(titles).toContain("已删除「新世界」");
+    expect(titles).not.toContain("「新世界」已就绪");
+  });
+
+  it("取消到达前安装就失败、留下了未完成的实例：同样删掉它", async () => {
+    ipc.overrides.set("cancel_task", () => false);
+    await store.actions.createInstance(spec);
+    await settle();
+    const deleting = store.actions.deleteInstance("新世界", 0);
+    instances = [...instances, instanceDto("新世界", { status: "broken", broken_reason: "缺少版本 JSON" })];
+    install.reject(new IpcError("download_failed", "下载源暂时不可用"));
+    await deleting;
+    await settle();
+    expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "新世界" }]);
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["生存", "创造"]);
+  });
+
+  it("取消赶上了：后端已经删掉半成品，不再调删除命令", async () => {
+    ipc.overrides.set("cancel_task", () => {
+      install.reject(cancelledError());
+      return true;
+    });
+    await store.actions.createInstance(spec);
+    await settle();
+    await store.actions.deleteInstance("新世界", 0);
+    await settle();
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["生存", "创造"]);
+    expect(store.getState().toasts.map((t) => t.title)).toContain("已删除「新世界」");
+  });
+
+  it("删除已有实例时补全恰好做完：不弹「已修复」，照常删除", async () => {
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    ipc.overrides.set("cancel_task", () => true);
+    await store.actions.repairInstance("生存");
+    await settle();
+    const deleting = store.actions.deleteInstance("生存", 0);
+    await settle();
+    repair.resolve({ reinstalled: false, libraries: 0, assets: 0, natives: 0 });
+    await deleting;
+    await settle();
+    expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "生存" }]);
+    const titles = store.getState().toasts.map((t) => t.title);
+    expect(titles).not.toContain("「生存」已修复");
+    expect(titles).toContain("已删除「生存」");
+  });
+});
