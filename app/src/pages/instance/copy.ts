@@ -262,6 +262,7 @@ export const SETTINGS_COPY = {
   javaOption: (major: number, vendor: string) => `Java ${major} · ${vendor}`,
   javaFitMatch: " · 匹配",
   javaFitLower: " · 版本过低",
+  javaIncomplete: (version: string) => `${version} · 不完整`,
   fitMatch: (major: number) => `与要求的 Java ${major} 匹配`,
   fitHigher: (major: number) => `高于要求的 Java ${major}`,
   fitHigherBody: "新版 Java 多数情况下能跑，但旧版 Forge 与部分 Mod 会直接报错。",

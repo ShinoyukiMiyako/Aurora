@@ -171,8 +171,8 @@ function modDto(fileName: string, name: string, over: Partial<InstalledMod> = {}
   };
 }
 
-function java(path: string, major: number): JavaInstallationDto {
-  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [] };
+function java(path: string, major: number, over: Partial<JavaInstallationDto> = {}): JavaInstallationDto {
+  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [], ...over };
 }
 
 function contentDto(): InstanceContentDto {
@@ -1219,6 +1219,42 @@ describe("实例详情：设置", () => {
     expect(saved).toHaveLength(1);
     expect((saved[0].settings as InstanceSettingsDto).jvm_args).toBe("-Xmx8G -XX:+UseG1GC");
     expect(toastTitles()).toContain("JVM 参数已保存");
+  });
+
+  it("Java 下拉：手动添加的写明来源；不完整的禁用、提示写「不完整」，自动选择也跳过它", async () => {
+    ipc.overrides.set("detect_java", () => [
+      java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] }),
+      java("D:/Portable/jdk-17/bin/java.exe", 17, { source: "manual" }),
+    ]);
+    await open("settings");
+    click(byRole("combobox", "Java 运行时"));
+    await flush();
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const option = (start: string) => {
+      const found = options.find((o) => textOf(o).startsWith(start));
+      if (found === undefined) throw new Error(`Java 下拉里没有「${start}」`);
+      return found;
+    };
+    expect(option("Java 21").getAttribute("aria-disabled")).toBe("true");
+    expect(textOf(option("Java 21"))).toContain("21.0.5 · 不完整");
+    expect(option("Java 17").getAttribute("aria-disabled")).toBeNull();
+    expect(textOf(option("Java 17"))).toContain("17.0.5 · 手动添加");
+    expect(textOf(option("自动选择"))).toContain("本机没有 Java 21，启动时自动下载");
+    click(option("Java 21"));
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+  });
+
+  it("Java 下拉：实例已经固定成不完整的 Java 时照常显示为当前值", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["lib/modules"] })]);
+    await open("settings");
+    expect(textOf(byRole("combobox", "Java 运行时"))).toBe("Java 21 · Microsoft");
+    click(byRole("combobox", "Java 运行时"));
+    await flush();
+    const current = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => textOf(o).startsWith("Java 21"));
+    expect(current?.getAttribute("aria-disabled")).toBeNull();
+    expect(current?.getAttribute("aria-selected")).toBe("true");
   });
 
   it("分代 ZGC 按实际生效的 Java：自动挑到 21 时带 ZGenerational", async () => {

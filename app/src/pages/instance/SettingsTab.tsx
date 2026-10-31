@@ -48,6 +48,7 @@ import {
   presetFlags,
   RESOLUTION_LIMITS,
   RESOLUTION_PRESETS,
+  runtimeComplete,
   toggleFlags,
   ZGC_MIN_JAVA,
 } from "./model";
@@ -257,10 +258,15 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
       { value: JAVA_AUTO, label: SETTINGS_COPY.javaAuto, icon: "sparkle", hint: autoHint(info) },
       ...info.runtimes.map((r) => {
         const fit = javaFit(r.version.major, info.required);
+        const label = SETTINGS_COPY.javaOption(r.version.major, r.vendor);
+        // 缺运行时文件的不让选；已经固定成它的照常显示为当前值，让人看清现状
+        if (!runtimeComplete(r)) {
+          return { value: r.path, label, hint: SETTINGS_COPY.javaIncomplete(r.version.raw), icon: FIT_ICON[fit], disabled: r.path !== value };
+        }
         const suffix = fit === "match" ? SETTINGS_COPY.javaFitMatch : fit === "lower" ? SETTINGS_COPY.javaFitLower : "";
         return {
           value: r.path,
-          label: SETTINGS_COPY.javaOption(r.version.major, r.vendor),
+          label,
           hint: `${r.version.raw} · ${JAVA_SOURCE_LABEL[r.source]}${suffix}`,
           icon: FIT_ICON[fit],
         };
