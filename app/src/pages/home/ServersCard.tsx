@@ -58,6 +58,13 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const online = useOnline();
   const gate = useLoadingGate(pinned.status === "loading");
   const [pickerOpen, setPickerOpen] = useState(false);
+  // 挑选弹窗打开过才挂上，之后保持挂载好播完关闭的退场。从没打开过时不挂：关着的弹窗挂在页面里，
+  // 会让外层 AnimatePresence 的退场一直等不到结束（首次启动时外壳从主界面切到向导就卡在这一步）
+  const [pickerMounted, setPickerMounted] = useState(false);
+  const openPicker = () => {
+    setPickerMounted(true);
+    setPickerOpen(true);
+  };
   useReportOnce(known.status === "error" ? known.error : null, HOME_COPY.knownError);
 
   const reloadStatus = status.reload;
@@ -88,7 +95,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
     if (candidates.length === 0) return [{ label: HOME_COPY.allPinned, disabled: true, onSelect: inert }];
     const plan = pinMenuPlan(candidates);
     const items: MenuEntry[] = plan.inline.map((server) => ({ label: server.name, hint: server.address, icon: "pin", onSelect: () => toggle(server) }));
-    if (plan.overflow !== null) items.push({ kind: "separator" }, { label: HOME_COPY.pickAll(plan.overflow), icon: "server", onSelect: () => setPickerOpen(true) });
+    if (plan.overflow !== null) items.push({ kind: "separator" }, { label: HOME_COPY.pickAll(plan.overflow), icon: "server", onSelect: openPicker });
     return items;
   };
 
@@ -173,7 +180,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
         actions={<MenuButton items={addItems()} placement="bottom-end" trigger={(props) => <IconButton {...props} icon="plus" variant="secondary" size="sm" label={HOME_COPY.pinServer} />} />}
       />
       {body()}
-      <ServerPicker open={pickerOpen} known={known} onPin={toggle} onClose={() => setPickerOpen(false)} />
+      {pickerMounted && <ServerPicker open={pickerOpen} known={known} onPin={toggle} onClose={() => setPickerOpen(false)} />}
     </Card>
   );
 }
