@@ -165,3 +165,64 @@ describe("UpdaterController", () => {
     expect(c.getState().seenVersion).toBe("1.4.0");
   });
 });
+
+describe("UpdaterController：同一个动作进行中再发起一次", () => {
+  function held<T>(): { promise: Promise<T>; resolve(value: T): void } {
+    let resolve: (value: T) => void = () => undefined;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("检查进行中再检查：按阶段不对抛错，不发第二次请求", async () => {
+    const answer = held<UpdateInfo | null>();
+    const port = fakePort({
+      check: () => {
+        port.calls.push("check");
+        return answer.promise;
+      },
+    });
+    const c = controllerWith(port);
+    const first = c.check();
+    await expect(c.check()).rejects.toThrow("当前阶段 checking 不能检查更新");
+    answer.resolve(UPDATE);
+    await first;
+    expect(port.calls).toEqual(["check"]);
+    expect(c.getState().phase).toEqual({ kind: "available", update: UPDATE });
+  });
+
+  it("下载进行中再下载：不起第二个下载，取消仍作用于进行中的那一个", async () => {
+    const ids = ["task-1", "task-2"];
+    const port = fakePort({
+      download: (taskId) => {
+        port.calls.push(`download:${taskId}`);
+        return new Promise<UpdateInfo>(() => undefined);
+      },
+    });
+    const c = new UpdaterController(port, () => 42_000, () => {
+      const id = ids.shift();
+      if (id === undefined) throw new Error("多要了任务 id");
+      return id;
+    });
+    c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, available: UPDATE, downloaded_version: null, install_on_exit: false });
+    void c.download();
+    await expect(c.download()).rejects.toThrow("当前阶段 downloading 不能开始下载");
+    await c.cancelDownload();
+    expect(port.calls).toEqual(["download:task-1", "cancel:task-1"]);
+  });
+
+  it("安装进行中再安装：不调第二次安装命令", async () => {
+    const port = fakePort({
+      install: () => {
+        port.calls.push("install");
+        return new Promise<void>(() => undefined);
+      },
+    });
+    const c = controllerWith(port);
+    c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, available: null, downloaded_version: "1.4.0", install_on_exit: false });
+    void c.install();
+    await expect(c.install()).rejects.toThrow("当前阶段 installing 不能安装更新");
+    expect(port.calls).toEqual(["install"]);
+  });
+});
