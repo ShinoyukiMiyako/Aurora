@@ -30,7 +30,7 @@ import { MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
 import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, modTotals, removalRelations, type ModFilter, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError, SlowHint, useModuleView } from "./parts";
+import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface ModsTabProps {
   inst: InstanceSummary;
@@ -210,7 +210,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           ]}
         />
         <div className={styles.toolRight}>
-          <IconButton icon="folder" label={MODS_COPY.openFolder} variant="secondary" onClick={() => ops.openFolder("mods")} />
+          <FolderButton ops={ops} target="mods" label={MODS_COPY.openFolder} variant="secondary" />
           {counts.outdated > 0 ? (
             <Button icon="download" disabledReason={lock} loading={pending.size > 0} onClick={updateAll}>
               {MODS_COPY.updateAll(counts.outdated)}
@@ -268,7 +268,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
             error={mods.error}
             onRetry={mods.reload}
             extra={
-              <Button variant="ghost" size="sm" onClick={() => ops.openFolder("mods")}>
+              <Button variant="ghost" size="sm" disabledReason={ops.folderReason("mods")} onClick={() => ops.openFolder("mods")}>
                 {MODS_COPY.openFolder}
               </Button>
             }

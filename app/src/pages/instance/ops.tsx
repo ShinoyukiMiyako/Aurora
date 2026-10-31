@@ -10,13 +10,18 @@ import { busyInstanceId } from "../../state/selectors";
 import type { LauncherActions } from "../../state/store";
 import { HERO_COPY, LOCK_REASON, OVERVIEW_COPY } from "./copy";
 import { useDeleteInstance } from "./delete";
-import { instanceLocks, type InstanceLock, type InstanceLocks } from "./model";
+import { instanceLocks, workLock, type InstanceLock, type InstanceLocks, type WorkLock } from "./model";
 
 /** 打开文件夹的目标，与状态层动作的入参同一类型。 */
 export type FolderTarget = Parameters<LauncherActions["openFolder"]>[0];
 
+/** 打开前后端要先占住实例（缺了要建出来）的工作子目录；实例文件夹本身与单个存档只是定位，不占。 */
+const WORK_FOLDERS: ReadonlySet<FolderTarget> = new Set<FolderTarget>(["mods", "saves", "resourcepacks", "shaderpacks", "logs", "screenshots"]);
+
 export interface InstanceOps {
   locks: InstanceLocks;
+  /** 打开工作子目录与写实例设置的锁：安装、补全、改名、删除进行中；游戏运行不挡。 */
+  work: WorkLock | null;
   busy: boolean;
   installing: boolean;
   /** 校验新名字；与当前名字相同（只改大小写也算不同）时为 null。 */
@@ -25,6 +30,10 @@ export interface InstanceOps {
   rename(name: string): Promise<boolean>;
   togglePin(): void;
   openFolder(target: FolderTarget, world?: string): void;
+  /** 这个目标此刻打不开的原因；能打开为 undefined。 */
+  folderReason(target: FolderTarget): string | undefined;
+  /** 实例设置此刻改不了的原因；能改为 undefined，可以直接交给 disabledReason。 */
+  settingsReason: string | undefined;
   repair(): void;
   remove(): void;
 }
@@ -52,6 +61,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const installing = inst.status === "installing";
   const locks = instanceLocks(busy, installing, inst.activity === "modifying");
+  const work = workLock(installing, inst.activity);
   const name = inst.name;
 
   const nameError = (next: string) => (next.trim() === name ? null : instanceNameError(next.trim(), ids, id));
@@ -72,6 +82,9 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     void run(() => actions.openFolder(target, id, world === undefined ? null : world), ACTION_ERROR.openFolder);
   };
 
+  const folderReason = (target: FolderTarget) => (work === null || !WORK_FOLDERS.has(target) ? undefined : LOCK_REASON.work.folder[work]);
+  const settingsReason = work === null ? undefined : LOCK_REASON.work.settings[work];
+
   const repair = () => {
     void run(() => actions.repairInstance(id), ACTION_ERROR.repair).then((outcome) => {
       if (outcome.ok) actions.toast("info", OVERVIEW_COPY.repairStarted(name), OVERVIEW_COPY.repairStartedBody);
@@ -82,5 +95,5 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     void deleteInstance(inst);
   };
 
-  return { locks, busy, installing, nameError, rename, togglePin, openFolder, repair, remove };
+  return { locks, work, busy, installing, nameError, rename, togglePin, openFolder, folderReason, settingsReason, repair, remove };
 }

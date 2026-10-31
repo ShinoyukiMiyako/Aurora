@@ -46,7 +46,7 @@ import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
 import { chosenRuntime, modRows, modTotals, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError, SlowHint, useModuleView } from "./parts";
+import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface OverviewTabProps {
   inst: InstanceSummary;
@@ -279,7 +279,7 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
         icon="world"
         title={OVERVIEW_COPY.worldsTitle}
         subtitle={subtitle}
-        actions={<IconButton icon="folder" label={OVERVIEW_COPY.openSaves} size="sm" onClick={() => ops.openFolder("saves")} />}
+        actions={<FolderButton ops={ops} target="saves" label={OVERVIEW_COPY.openSaves} size="sm" />}
       />
       {load.view === "skeleton" && <RowSkeletons rows={3} slow={load.slow} />}
       {load.view === "error" && content.status === "error" && <ModuleError title={OVERVIEW_COPY.worldsError} error={content.error} onRetry={content.reload} />}

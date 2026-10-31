@@ -57,6 +57,20 @@ export function instanceLocks(busy: boolean, installing: boolean, modifying: boo
   return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : null };
 }
 
+/** 打开工作子目录与写实例设置被什么挡住。 */
+export type WorkLock = "installing" | "renaming" | "deleting";
+
+/**
+ * 打开 mods、saves、logs 这类工作子目录（缺了要先建出来）与写实例设置时，后端以「改动中」占住实例：
+ * 与安装、补全、改名、删除互斥，与启动、运行和别的改动兼容。所以游戏运行中照常可用，只有这几种活动挡住它们；
+ * 不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
+ * installing：本实例的安装或补全任务在排队或进行中（前端任务表或后端报告的活动）。
+ */
+export function workLock(installing: boolean, activity: InstanceSummary["activity"]): WorkLock | null {
+  if (installing) return "installing";
+  return activity === "renaming" || activity === "deleting" ? activity : null;
+}
+
 // ---------------------------------------------------------------- 概览横幅
 
 export type OverviewBannerKind = "failed" | "crashed" | "broken" | "installing";

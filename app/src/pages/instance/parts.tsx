@@ -1,4 +1,4 @@
-// 本页几个模块共用的小件：模块级加载门与错误态。
+// 本页几个模块共用的小件：模块级加载门、错误态与打开工作子目录的按钮。
 
 import type { ReactNode } from "react";
 import { SLOW_LOADING_HINT } from "../../copy/flows";
@@ -6,9 +6,12 @@ import { useLoadingGate } from "../../lib/loading-gate";
 import { describeError } from "../../state/errors";
 import type { ResourceResult } from "../../state/resource";
 import { Button } from "../../ui/Button";
+import type { ControlSize } from "../../ui/Button";
 import { EmptyState } from "../../ui/EmptyState";
-import { OVERVIEW_COPY } from "./copy";
+import { IconButton, type IconButtonVariant } from "../../ui/IconButton";
+import { LOCK_REASON, OVERVIEW_COPY } from "./copy";
 import styles from "./instance.module.css";
+import type { FolderTarget, InstanceOps } from "./ops";
 
 /**
  * 模块此刻该画什么：300 ms 内读到就不出骨架（pending 期间只留卡片框架），骨架一旦出现至少停留 300 ms，
@@ -41,6 +44,36 @@ export function ModuleError({ title, error, onRetry, extra }: { title: string; e
           {extra}
         </>
       }
+    />
+  );
+}
+
+/**
+ * 打开 mods、saves、logs 这类工作子目录的图标按钮。被安装、补全、改名、删除挡住时置灰，
+ * 原因并进可访问名称与悬停提示，不让玩家点了才收到 instance_busy。
+ */
+export function FolderButton({
+  ops,
+  target,
+  label,
+  size,
+  variant,
+}: {
+  ops: InstanceOps;
+  target: FolderTarget;
+  label: string;
+  size?: ControlSize;
+  variant?: IconButtonVariant;
+}) {
+  const reason = ops.folderReason(target);
+  return (
+    <IconButton
+      icon="folder"
+      label={reason === undefined ? label : LOCK_REASON.labelled(label, reason)}
+      size={size}
+      variant={variant}
+      disabled={reason !== undefined}
+      onClick={() => ops.openFolder(target)}
     />
   );
 }

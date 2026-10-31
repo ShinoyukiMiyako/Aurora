@@ -35,6 +35,7 @@ import {
   sortWorlds,
   toggleFlags,
   weeklyHours,
+  workLock,
   type CrashFixContext,
 } from "./model";
 
@@ -156,6 +157,18 @@ describe("锁定矩阵", () => {
   it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
     expect(instanceLocks(true, false, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
     expect(instanceLocks(false, true, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
+  });
+});
+
+describe("工作目录与实例设置的锁", () => {
+  it("安装中（含补全）锁住；后端在改名或删除时按活动锁住", () => {
+    expect(workLock(true, null)).toBe("installing");
+    expect(workLock(true, "repairing")).toBe("installing");
+    expect(workLock(false, "renaming")).toBe("renaming");
+    expect(workLock(false, "deleting")).toBe("deleting");
+  });
+  it("与启动、运行和改动中兼容：这些活动下照常可用", () => {
+    for (const activity of [null, "launching", "running", "modifying"] as const) expect(workLock(false, activity)).toBeNull();
   });
 });
 

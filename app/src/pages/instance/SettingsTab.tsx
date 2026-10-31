@@ -63,10 +63,12 @@ export interface SettingsTabProps {
 interface SettingsEditor {
   /** 磁盘上的值叠加还没回来的乐观补丁。 */
   value: InstanceSettings;
+  /** 此刻写不了实例设置的原因（安装、补全、改名、删除进行中）；能写为 undefined。锁住时各控件不触发 save。 */
+  locked: string | undefined;
   save(patch: Partial<InstanceSettings>): Promise<boolean>;
 }
 
-function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings>): SettingsEditor | null {
+function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings>, locked: string | undefined): SettingsEditor | null {
   const actions = useLauncherActions();
   const run = useRunner();
   const [patch, setPatch] = useState<Partial<InstanceSettings>>({});
@@ -76,6 +78,7 @@ function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings
   if (data === null) return null;
   return {
     value: { ...data, ...patch },
+    locked,
     save: async (next) => {
       setPatch((p) => ({ ...p, ...next }));
       const outcome = await run(() => actions.updateInstanceSettings(id, next), ACTION_ERROR.instanceSettings);
@@ -87,7 +90,7 @@ function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings
 
 export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   const settings = useInstanceSettings(queryId);
-  const editor = useSettingsEditor(inst.id, settings);
+  const editor = useSettingsEditor(inst.id, settings, ops.settingsReason);
   const java = useJavaInfo(inst, settings);
   const memory = useMemoryInfo(inst, settings, queryId);
   // 整页一个加载门：300 ms 内都读到就不出骨架；骨架出现后至少停留 300 ms，几张卡一起换成内容
@@ -105,6 +108,7 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   return (
     <div className={styles.stack}>
       {ops.busy && <Banner tone="info" title={SETTINGS_COPY.runningNote} />}
+      {ops.settingsReason !== undefined && <Banner tone="info" title={ops.settingsReason} />}
       <div className={styles.settingsGrid}>
         <MemoryCard inst={inst} editor={editor} memory={memory} placeholder={placeholder} />
         <JavaCard inst={inst} editor={editor} java={java} placeholder={placeholder} />
@@ -188,6 +192,7 @@ function MemoryCard({
         value={draft}
         onChange={setDraft}
         onCommit={(mb) => void editor.save({ memoryMb: mb })}
+        disabled={editor.locked !== undefined}
         totalMb={info.advice.total_mb}
         recommended={{ mb: recommended, tip: SETTINGS_COPY.recommendTip(mods, recommended) }}
         notes={[below ? SETTINGS_COPY.belowRecommended(mods, recommended) : SETTINGS_COPY.enough(recommended)]}
@@ -204,7 +209,7 @@ function MemoryCard({
         <SegmentedControl
           block
           value={custom ? "custom" : "follow"}
-          disabled={editor === null || memory.status !== "ready"}
+          disabled={editor === null || memory.status !== "ready" || editor.locked !== undefined}
           onChange={(mode) => {
             if (editor === null || memory.status !== "ready") return;
             void editor.save({ memoryMb: mode === "custom" ? snapMemory(memory.value.effectiveMb) : null });
@@ -266,8 +271,8 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
     }
     return (
       <>
-        <Select value={value} onChange={(next) => void editor.save({ java: next })} options={options} block ariaLabel={SETTINGS_COPY.javaSelect} />
-        <JavaState info={info} autoDownload={global.autoDownloadJava} onUseAuto={() => void editor.save({ java: JAVA_AUTO })} />
+        <Select value={value} onChange={(next) => void editor.save({ java: next })} options={options} block disabled={editor.locked !== undefined} ariaLabel={SETTINGS_COPY.javaSelect} />
+        <JavaState info={info} autoDownload={global.autoDownloadJava} locked={editor.locked} onUseAuto={() => void editor.save({ java: JAVA_AUTO })} />
       </>
     );
   })();
@@ -288,10 +293,10 @@ function autoHint(info: JavaInfo): string {
   return SETTINGS_COPY.javaAutoDownload(info.required);
 }
 
-function JavaState({ info, autoDownload, onUseAuto }: { info: JavaInfo; autoDownload: boolean; onUseAuto(): void }) {
+function JavaState({ info, autoDownload, locked, onUseAuto }: { info: JavaInfo; autoDownload: boolean; locked: string | undefined; onUseAuto(): void }) {
   const runtime = chosenRuntime(info.choice);
   const useAuto = info.choice.auto ? undefined : (
-    <Button size="sm" onClick={onUseAuto}>
+    <Button size="sm" disabledReason={locked} onClick={onUseAuto}>
       {SETTINGS_COPY.useAuto}
     </Button>
   );
@@ -327,7 +332,8 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
   const major = java === null ? null : effectiveJavaMajor(java.choice, java.required);
 
   const save = () => {
-    if (!dirty || saving) return;
+    // Ctrl + Enter 也走这里：锁住时与保存按钮一样不动作
+    if (!dirty || saving || editor.locked !== undefined) return;
     const next = draft.trim();
     setSaving(true);
     void editor.save({ jvmArgs: next }).then((ok) => {
@@ -389,7 +395,7 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
           <Button variant="ghost" size="sm" disabled={!dirty} onClick={() => setDraft(saved)}>
             {SETTINGS_COPY.restore}
           </Button>
-          <Button size="sm" icon="check" disabled={!dirty} loading={saving} onClick={save}>
+          <Button size="sm" icon="check" disabled={!dirty} disabledReason={editor.locked} loading={saving} onClick={save}>
             {SETTINGS_COPY.saveArgs}
           </Button>
         </div>
@@ -423,6 +429,7 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
           <SegmentedControl
             size="sm"
             value={s.isolation}
+            disabled={editor.locked !== undefined}
             onChange={(isolation) => void editor.save({ isolation })}
             ariaLabel={SETTINGS_COPY.isolation}
             options={[
@@ -434,7 +441,7 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
         </SettingRow>
         <ResolutionRow editor={editor} />
         <SettingRow title={SETTINGS_COPY.fullscreen} description={SETTINGS_COPY.fullscreenNote}>
-          <Toggle checked={s.fullscreen} onChange={(fullscreen) => void editor.save({ fullscreen })} ariaLabel={SETTINGS_COPY.fullscreen} />
+          <Toggle checked={s.fullscreen} onChange={(fullscreen) => void editor.save({ fullscreen })} ariaLabel={SETTINGS_COPY.fullscreen} disabledReason={editor.locked} />
         </SettingRow>
       </div>
     </Card>
@@ -444,6 +451,7 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
 function ResolutionRow({ editor }: { editor: SettingsEditor }) {
   const { width, height } = editor.value.resolution;
   const fullscreen = editor.value.fullscreen;
+  const locked = editor.locked;
   const [w, setW] = useState(String(width));
   const [h, setH] = useState(String(height));
   useEffect(() => setW(String(width)), [width]);
@@ -476,6 +484,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
                   variant={on ? "secondary" : "ghost"}
                   aria-pressed={on}
                   disabled={fullscreen}
+                  disabledReason={locked}
                   onClick={() => void editor.save({ resolution: { width: p.width, height: p.height } })}
                 >
                   {`${p.width}×${p.height}`}
@@ -493,7 +502,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
           size="sm"
           inputMode="numeric"
           invalid={wValue === null}
-          disabled={fullscreen}
+          disabled={fullscreen || locked !== undefined}
           aria-label={SETTINGS_COPY.resolutionWidth}
           onBlur={commit}
           onEnter={commit}
@@ -506,7 +515,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
           size="sm"
           inputMode="numeric"
           invalid={hValue === null}
-          disabled={fullscreen}
+          disabled={fullscreen || locked !== undefined}
           aria-label={SETTINGS_COPY.resolutionHeight}
           onBlur={commit}
           onEnter={commit}
