@@ -238,7 +238,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::Version(_) => code::VERSION_JSON_INVALID,
         CoreError::Download(_) => code::DOWNLOAD_FAILED,
         CoreError::Install(e) => install_code(e),
-        CoreError::Instance(_) => code::INSTANCE_FAILED,
+        CoreError::Instance(e) => instance_code(e),
         CoreError::Java(_) => code::JAVA_FAILED,
         CoreError::Auth(e) => auth_code(e),
         CoreError::Launch(_) => code::LAUNCH_FAILED,
@@ -268,6 +268,18 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+    }
+}
+
+/// 实例 id、名称、设置与侧栏固定的问题是调用方传错了参数，不论从哪个命令冒上来都报 invalid_argument：
+/// 崩溃诊断、启动日志、Mod 与历史这些命令不经实例领域自己的映射。
+fn instance_code(err: &InstanceError) -> &'static str {
+    match err {
+        InstanceError::InvalidId { .. }
+        | InstanceError::InvalidName { .. }
+        | InstanceError::InvalidSettings { .. }
+        | InstanceError::InvalidPins { .. } => code::INVALID_ARGUMENT,
+        _ => code::INSTANCE_FAILED,
     }
 }
 
@@ -394,6 +406,25 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             }
         }
         CoreError::VersionNotInstalled { id } => {
+            detail.insert("id".to_owned(), json!(id));
+        }
+        CoreError::Instance(InstanceError::InvalidId { id }) => {
+            detail.insert("field".to_owned(), json!("id"));
+            detail.insert("reason".to_owned(), json!("unsafe_id"));
+            detail.insert("id".to_owned(), json!(id));
+        }
+        CoreError::Instance(InstanceError::InvalidName { name, violation }) => {
+            detail.insert("field".to_owned(), json!("name"));
+            detail.insert("rule".to_owned(), json!(violation.code()));
+            detail.insert("name".to_owned(), json!(name));
+        }
+        CoreError::Instance(InstanceError::InvalidSettings { field, reason }) => {
+            detail.insert("field".to_owned(), json!(field));
+            detail.insert("reason".to_owned(), json!(reason));
+        }
+        CoreError::Instance(InstanceError::InvalidPins { reason, id }) => {
+            detail.insert("field".to_owned(), json!("pins"));
+            detail.insert("reason".to_owned(), json!(reason.code()));
             detail.insert("id".to_owned(), json!(id));
         }
         CoreError::NoJava { major } => {
@@ -744,6 +775,81 @@ mod tests {
         }
         .into();
         assert!(local.detail.unwrap().get("network").is_none());
+    }
+
+    /// 实例参数类问题不论从哪个命令冒上来都是 invalid_argument，detail 指出字段与取值：崩溃诊断、启动日志、
+    /// Mod 与历史这些命令不经实例领域自己的映射，直接走通用转换。
+    #[tokio::test]
+    async fn instance_argument_errors_are_invalid_argument_on_every_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let aurora = aurora_core::Aurora::open(
+            aurora_core::AuroraConfig::default(),
+            dir.path().to_path_buf(),
+            dir.path().join("config.json"),
+        )
+        .unwrap();
+        for id in [r"..\outside", "../outside", ".hidden", "a/b"] {
+            let crash: CommandError = aurora.last_crash(id).await.unwrap_err().into();
+            let log: CommandError = aurora.last_launch_log(id).await.unwrap_err().into();
+            for err in [crash, log] {
+                assert_eq!(err.code, code::INVALID_ARGUMENT, "{id}");
+                assert_eq!(
+                    err.detail,
+                    Some(json!({ "field": "id", "reason": "unsafe_id", "id": id })),
+                    "{id}"
+                );
+            }
+        }
+
+        let name: CommandError = InstanceError::InvalidName {
+            name: "CON".into(),
+            violation: aurora_core::NameViolation::ReservedByWindows,
+        }
+        .into();
+        assert_eq!(name.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            name.detail,
+            Some(json!({ "field": "name", "rule": "reserved", "name": "CON" }))
+        );
+
+        let settings: CommandError = InstanceError::InvalidSettings {
+            field: "memory_mb",
+            reason: "不能小于 512".into(),
+        }
+        .into();
+        assert_eq!(settings.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            settings.detail,
+            Some(json!({ "field": "memory_mb", "reason": "不能小于 512" }))
+        );
+
+        let pins: CommandError = InstanceError::InvalidPins {
+            reason: aurora_core::PinsViolation::NotFound,
+            id: Some("ghost".into()),
+        }
+        .into();
+        assert_eq!(pins.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            pins.detail,
+            Some(json!({ "field": "pins", "reason": "not_found", "id": "ghost" }))
+        );
+        let too_many: CommandError = InstanceError::InvalidPins {
+            reason: aurora_core::PinsViolation::TooMany,
+            id: None,
+        }
+        .into();
+        assert_eq!(
+            too_many.detail,
+            Some(json!({ "field": "pins", "reason": "too_many", "id": null }))
+        );
+
+        // 数据本身的问题仍是 instance_failed：不是调用方传错了参数。
+        let broken: CommandError = InstanceError::Broken {
+            id: "1.21".into(),
+            reason: "缺少版本 JSON".into(),
+        }
+        .into();
+        assert_eq!(broken.code, code::INSTANCE_FAILED);
     }
 
     #[test]

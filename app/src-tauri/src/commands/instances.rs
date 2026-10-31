@@ -22,7 +22,6 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::commands::error::code as common_code;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -197,27 +196,11 @@ fn busy(id: &str, activity: InstanceActivity) -> CommandError {
 
 // ---------------------------------------------------------------- 错误映射
 
-/// 实例领域的门面错误：参数类问题报 `invalid_argument` 并在 detail 里给出字段与规则，依赖冲突单独成码，
-/// 其余照通用映射，并补上实例 id 等定位信息。
+/// 实例领域的门面错误：依赖冲突单独成码，其余照通用映射（参数类问题在那里统一报 `invalid_argument`），
+/// 并补上实例 id 等定位信息。
 fn instance_error(err: CoreError) -> CommandError {
     let message = err.to_string();
     let (code, detail) = match &err {
-        CoreError::Instance(InstanceError::InvalidId { id }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": "id", "reason": "unsafe_id", "id": id }),
-        ),
-        CoreError::Instance(InstanceError::InvalidName { name, violation }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": "name", "rule": violation.code(), "name": name }),
-        ),
-        CoreError::Instance(InstanceError::InvalidSettings { field, reason }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": field, "reason": reason }),
-        ),
-        CoreError::Instance(InstanceError::InvalidPins { reason, id }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": "pins", "reason": reason.code(), "id": id }),
-        ),
         CoreError::Instance(InstanceError::HasDependents { id, dependents }) => (
             code::INSTANCE_HAS_DEPENDENTS,
             json!({ "id": id, "dependents": dependents }),
