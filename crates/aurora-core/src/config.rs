@@ -3,7 +3,7 @@
 //! 门面持有一份可读写的全局配置：下载源与版本列表源各自的三档策略（对应功能矩阵「文件下载源 /
 //! 版本列表源」两项独立三档设置）、下载并发、默认内存、版本隔离档位、微软 client_id、可选自定义
 //! 游戏/缓存目录，以及启动后窗口行为、默认 Java、主页固定的服务器、并存的游戏目录、首次启动
-//! 是否完成与启动器更新的检查偏好。凭据不进这里（归 aurora-auth 的加密存储）。
+//! 是否完成、启动器更新的检查偏好与界面语言。凭据不进这里（归 aurora-auth 的加密存储）。
 //!
 //! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值；损坏时
 //! [`ConfigStore::load`] 冒泡报错，而不是静默用默认覆盖（避免用户改坏的配置被无声吞掉）。桌面应用启动
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::appearance::Appearance;
 use crate::error::{CoreError, Result};
+use crate::facade::Aurora;
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
 ///
@@ -110,6 +111,18 @@ pub enum AfterLaunch {
     Close,
 }
 
+/// 界面语言。序列化名就是 BCP 47 语言标签，前端原样写进 `<html lang>`，config.json 里也是这个写法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum UiLanguage {
+    /// 简体中文（默认）。
+    #[default]
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+    /// 英文，预览阶段：还没有译文的文案照常显示中文。
+    #[serde(rename = "en-US")]
+    EnUs,
+}
+
 /// 主页固定的一台服务器。地址就是身份：同一地址只固定一次。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedServer {
@@ -174,6 +187,8 @@ pub struct AuroraConfig {
     pub skipped_update_version: Option<String>,
     /// 自动检查已经弹过提示的启动器版本，同一版本只提示一次。
     pub notified_update_version: Option<String>,
+    /// 界面语言。旧配置没有这一项时取默认的简体中文。
+    pub language: UiLanguage,
 }
 
 impl Default for AuroraConfig {
@@ -199,7 +214,15 @@ impl Default for AuroraConfig {
             first_run_completed: false,
             skipped_update_version: None,
             notified_update_version: None,
+            language: UiLanguage::default(),
         }
+    }
+}
+
+impl Aurora {
+    /// 设置界面语言；落盘仍需调用 [`Aurora::save_config`]。
+    pub fn set_language(&mut self, language: UiLanguage) {
+        self.config_mut().language = language;
     }
 }
 
@@ -337,6 +360,62 @@ mod tests {
         assert!(!c.first_run_completed, "新配置必须进首次启动向导");
         assert!(c.skipped_update_version.is_none());
         assert!(c.notified_update_version.is_none());
+        assert_eq!(c.language, UiLanguage::ZhCn, "界面语言默认简体中文");
+    }
+
+    /// 序列化名就是 `<html lang>` 与 config.json 里的写法：区分大小写，下划线写法与裸语言码都不认。
+    #[test]
+    fn ui_language_serializes_as_language_tag() {
+        for (value, name) in [(UiLanguage::ZhCn, "zh-CN"), (UiLanguage::EnUs, "en-US")] {
+            assert_eq!(serde_json::to_value(value).unwrap(), name);
+            let parsed: UiLanguage = serde_json::from_value(serde_json::json!(name)).unwrap();
+            assert_eq!(parsed, value);
+        }
+        for bad in ["zh-cn", "zh_CN", "en", "EN-US", ""] {
+            assert!(
+                serde_json::from_value::<UiLanguage>(serde_json::json!(bad)).is_err(),
+                "{bad} 不该被认作界面语言"
+            );
+        }
+    }
+
+    /// 旧配置没有 language 时按简体中文载入；写过之后原样落盘、原样读回。
+    #[tokio::test]
+    async fn language_defaults_for_old_config_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 16, "after_launch": "keep"}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let mut loaded = store.load().await.unwrap();
+        assert_eq!(loaded.language, UiLanguage::ZhCn);
+        assert_eq!(loaded.download_concurrency, 16);
+
+        loaded.language = UiLanguage::EnUs;
+        store.save(&loaded).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["language"], "en-US");
+        assert_eq!(store.load().await.unwrap().language, UiLanguage::EnUs);
+    }
+
+    /// 不认识的语言与其它写错的枚举一样让整份配置解析失败（随后由 load_or_preserve 留存现场）。
+    #[tokio::test]
+    async fn unknown_language_fails_config_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(&path, br#"{"language": "fr-FR"}"#)
+            .await
+            .unwrap();
+        let err = ConfigStore::at(&path).load().await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::ConfigParse { .. }),
+            "实际：{err:?}"
+        );
     }
 
     /// 出参枚举的序列化名就是 IPC 与 config.json 里的写法，改名即破坏已有配置。

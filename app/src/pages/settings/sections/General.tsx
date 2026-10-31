@@ -1,22 +1,37 @@
-// 常规：游戏启动后启动器做什么；高级里的微软登录 client_id。
+// 常规：游戏启动后启动器做什么；界面语言；高级里的微软登录 client_id。
+//
+// 各行按片订阅自己那一项设置：游戏运行时每批日志、下载时每次进度都会换一次状态，整份订阅会让整个分区跟着重渲染。
 
 import { useState } from "react";
+import { INTERFACE_COPY, LANGUAGE_OPTIONS } from "../../../copy/settings";
 import type { Settings } from "../../../domain/adapt";
 import { useRunner } from "../../../shell/useRunner";
-import { useLauncher } from "../../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
+import type { LauncherState } from "../../../state/store";
 import { Button } from "../../../ui/Button";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
+import { Select } from "../../../ui/Select";
 import { SegmentedControl } from "../../../ui/SegmentedControl";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
 import { TextInput } from "../../../ui/TextInput";
 import { AFTER_LAUNCH_OPTIONS, GENERAL_COPY, saveFailed } from "../copy";
-import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
 
 type AfterLaunch = Settings["afterLaunch"];
+type Language = Settings["language"];
+
+/** 分区只在配置读到之后渲染（经 SettingsGate）；读到 null 说明装配错了。 */
+function loaded(state: LauncherState): Settings {
+  if (state.settings === null) throw new Error("设置分区必须在配置读到之后渲染（经 SettingsGate）");
+  return state.settings;
+}
+
+const selectAfterLaunch = (state: LauncherState): AfterLaunch => loaded(state).afterLaunch;
+const selectLanguage = (state: LauncherState): Language => loaded(state).language;
+const selectHasClientId = (state: LauncherState): boolean => loaded(state).hasClientId;
 
 function afterLaunchOption(value: AfterLaunch) {
   const option = AFTER_LAUNCH_OPTIONS.find((o) => o.value === value);
@@ -25,9 +40,9 @@ function afterLaunchOption(value: AfterLaunch) {
 }
 
 function AfterLaunchRow() {
-  const settings = useLoadedSettings();
-  const { actions } = useLauncher();
-  const write = useSettingWrite(settings.afterLaunch, GENERAL_COPY.afterLaunch, (afterLaunch: AfterLaunch) => actions.updateSettings({ afterLaunch }));
+  const afterLaunch = useLauncherSelector(selectAfterLaunch);
+  const actions = useLauncherActions();
+  const write = useSettingWrite(afterLaunch, GENERAL_COPY.afterLaunch, (next: AfterLaunch) => actions.updateSettings({ afterLaunch: next }));
   const current = afterLaunchOption(write.value);
   return (
     <SettingRow
@@ -49,9 +64,33 @@ function AfterLaunchRow() {
   );
 }
 
+function languageOption(value: Language) {
+  const option = LANGUAGE_OPTIONS.find((o) => o.value === value);
+  if (option === undefined) throw new Error(`未知的界面语言：${value}`);
+  return option;
+}
+
+function LanguageRow() {
+  const language = useLauncherSelector(selectLanguage);
+  const actions = useLauncherActions();
+  const write = useSettingWrite(language, INTERFACE_COPY.language, (next: Language) => actions.updateSettings({ language: next }));
+  return (
+    <SettingRow title={INTERFACE_COPY.language} description={languageOption(write.value).desc}>
+      <Select<Language>
+        className={s.select}
+        size="sm"
+        ariaLabel={INTERFACE_COPY.language}
+        value={write.value}
+        onChange={write.set}
+        options={LANGUAGE_OPTIONS.map((o) => ({ value: o.value, label: o.label, hint: o.hint }))}
+      />
+    </SettingRow>
+  );
+}
+
 function ClientIdRow() {
-  const settings = useLoadedSettings();
-  const { actions } = useLauncher();
+  const hasClientId = useLauncherSelector(selectHasClientId);
+  const actions = useLauncherActions();
   const run = useRunner();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -72,7 +111,7 @@ function ClientIdRow() {
   return (
     <div className={s.stackRow}>
       <SettingRow title={GENERAL_COPY.clientId} description={GENERAL_COPY.clientIdDesc}>
-        <Tag tone={settings.hasClientId ? "ok" : "neutral"}>{settings.hasClientId ? GENERAL_COPY.clientIdSet : GENERAL_COPY.clientIdUnset}</Tag>
+        <Tag tone={hasClientId ? "ok" : "neutral"}>{hasClientId ? GENERAL_COPY.clientIdSet : GENERAL_COPY.clientIdUnset}</Tag>
         {!editing && (
           <Button size="sm" onClick={() => setEditing(true)}>
             {GENERAL_COPY.clientIdEdit}
@@ -87,7 +126,7 @@ function ClientIdRow() {
             onChange={setDraft}
             onEnter={() => void save()}
             aria-label={GENERAL_COPY.clientId}
-            placeholder={settings.hasClientId ? GENERAL_COPY.clientIdPlaceholderSet : GENERAL_COPY.clientIdPlaceholderUnset}
+            placeholder={hasClientId ? GENERAL_COPY.clientIdPlaceholderSet : GENERAL_COPY.clientIdPlaceholderUnset}
             autoFocus
             spellCheck={false}
             autoComplete="off"
@@ -116,6 +155,10 @@ export function GeneralSection() {
       <Card>
         <CardHeader title={GENERAL_COPY.launchTitle} subtitle={GENERAL_COPY.launchSubtitle} icon="play" />
         <AfterLaunchRow />
+      </Card>
+      <Card>
+        <CardHeader title={INTERFACE_COPY.title} icon="sliders" />
+        <LanguageRow />
       </Card>
       <Card>
         <CardHeader title={GENERAL_COPY.advancedTitle} icon="key" />

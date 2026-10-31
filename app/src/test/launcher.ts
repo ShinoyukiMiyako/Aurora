@@ -113,6 +113,7 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     selected_version: null,
     skipped_update_version: null,
     notified_update_version: null,
+    language: "zh-CN",
     ...overrides,
   };
 }

@@ -11,6 +11,9 @@ export type IsolationPolicy =
   | "all";
 /** 游戏启动后启动器窗口的去留。 */
 export type AfterLaunch = "keep" | "minimize" | "close";
+/** 界面语言：BCP 47 语言标签，外壳原样写到 <html lang>。 */
+export type UiLanguage = "zh-CN" | "en-US";
+export const UI_LANGUAGES: readonly UiLanguage[] = ["zh-CN", "en-US"];
 
 /** default_java 取这个值表示按版本自动选择。 */
 export const DEFAULT_JAVA_AUTO = "auto";
@@ -47,10 +50,11 @@ export interface ConfigDto {
   skipped_update_version: string | null;
   /** 自动检查已经提示过的启动器版本，同一版本只提示一次。 */
   notified_update_version: string | null;
+  language: UiLanguage;
 }
 
 /**
- * 参数键为 camelCase，只写出要改的字段。有一个字段不合法整次都不生效：枚举、并发、client_id、
+ * 参数键为 camelCase，只写出要改的字段。有一个字段不合法整次都不生效：枚举（含 language）、并发、client_id、
  * defaultJava 不合法报 invalid_argument；memory 缺字段或多字段是 Tauri 参数错误，归为 unknown。
  */
 export interface ConfigPatch {
@@ -71,6 +75,7 @@ export interface ConfigPatch {
   defaultJava?: string;
   skippedUpdateVersion?: string;
   notifiedUpdateVersion?: string;
+  language?: UiLanguage;
 }
 
 export const getConfig = (): Promise<ConfigDto> => invoke<ConfigDto>("get_config");
