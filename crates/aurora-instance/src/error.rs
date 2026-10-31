@@ -76,6 +76,42 @@ pub enum Error {
     /// 实例目录在，但版本 JSON 缺失或损坏，读不出它是什么版本、该用哪个目录运行。
     #[error("实例 {id} 的版本 JSON 不可用：{reason}")]
     Broken { id: String, reason: String },
+
+    /// 存档备份的 zip 读不了或写不成（不是 zip、条目坏了、解压后大小对不上等）。
+    #[error("存档备份 {path} 读写失败：{reason}")]
+    BackupArchive { path: PathBuf, reason: String },
+
+    /// 备份里有不能安全解出的条目；`reason` 是稳定的规则码，见 [`crate::world_backup::stage_restore`]。
+    #[error("备份 {path} 里的条目「{entry}」不能解出：{}", crate::world_backup::unsafe_entry_text(.reason))]
+    BackupEntryUnsafe {
+        path: PathBuf,
+        entry: String,
+        reason: &'static str,
+    },
+
+    /// 备份解出来了，但里面没有 level.dat 或读不懂，不像一个能玩的存档。
+    #[error("备份 {path} 里的 level.dat 读不出来：{reason}")]
+    BackupLevelUnreadable { path: PathBuf, reason: String },
+
+    /// 某个存档的备份清单（index.json）读不懂。
+    #[error("存档备份清单 {path} 读不懂：{reason}")]
+    BackupIndexInvalid { path: PathBuf, reason: String },
+
+    /// 存档正被游戏打开（游戏对 session.lock 持有排他锁）。
+    #[error("存档 {path} 正被游戏打开，退出游戏后再试")]
+    WorldInUse { path: PathBuf },
+
+    /// 原来的存档已移入回收站，恢复出的副本却没能改名就位；副本留在 `staged`，那是用户唯一的新副本。
+    #[error("原来的存档已移入回收站，但恢复出的存档没能放到 {world_dir}，它还在 {staged}")]
+    RestoreNotPlaced { world_dir: PathBuf, staged: PathBuf },
+
+    /// 存档备份的参数不成立（存档文件夹名不安全、导出位置不对）；`field` 指出是哪个参数。
+    #[error("{reason}")]
+    InvalidBackupArgument { field: &'static str, reason: String },
+
+    /// 打包或解压被取消令牌中止。
+    #[error("操作已取消")]
+    Cancelled,
 }
 
 /// 侧栏固定列表的问题。
@@ -129,7 +165,15 @@ impl RetryableError for Error {
             | Error::HasDependents { .. }
             | Error::NotRepairable { .. }
             | Error::Recycle { .. }
-            | Error::Broken { .. } => false,
+            | Error::Broken { .. }
+            | Error::BackupArchive { .. }
+            | Error::BackupEntryUnsafe { .. }
+            | Error::BackupLevelUnreadable { .. }
+            | Error::BackupIndexInvalid { .. }
+            | Error::WorldInUse { .. }
+            | Error::RestoreNotPlaced { .. }
+            | Error::InvalidBackupArgument { .. }
+            | Error::Cancelled => false,
         }
     }
 }

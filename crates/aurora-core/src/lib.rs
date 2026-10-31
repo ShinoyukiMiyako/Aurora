@@ -59,6 +59,7 @@ pub mod session;
 pub mod updates;
 pub mod versions;
 mod workdir;
+pub mod world_backup;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
@@ -67,7 +68,7 @@ pub use compat::{
 };
 pub use config::{
     AfterLaunch, AuroraConfig, ConfigFieldReset, ConfigRecovery, ConfigStore, DownloadSourcePolicy,
-    MemorySettings, NamedDirectory, PinnedServer,
+    MemorySettings, NamedDirectory, PinnedServer, WorldBackupSettings,
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use deps::{InstallPlan, PlannedItem};
@@ -100,6 +101,9 @@ pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
 };
 pub use updates::UpdateCandidate;
+pub use world_backup::{
+    AutoBackupOutcome, BackupOutcome, ExportOutcome, RestoreOutcome, WorldBackup, WorldBackupList,
+};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -116,7 +120,8 @@ pub use aurora_auth::{
 };
 pub use aurora_install::{LoaderSummary, VanillaSummary};
 pub use aurora_instance::{
-    BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,
+    BackupKind, BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,
+    WorldScope,
 };
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use aurora_launch::{

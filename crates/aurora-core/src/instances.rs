@@ -110,6 +110,10 @@ pub struct DeletionPreview {
     pub file_count: u64,
     /// 经 `inheritsFrom` 依赖它的实例；非空时删除会被拒绝。
     pub dependents: Vec<String>,
+    /// 这个实例名下存档备份的目录。备份不随实例删除。
+    pub backups_dir: PathBuf,
+    /// 这个实例名下的备份份数（各存档清单的条目数之和）。
+    pub backup_count: u32,
 }
 
 impl Aurora {
@@ -238,6 +242,8 @@ impl Aurora {
             size_bytes,
             file_count,
             dependents: dependents_in(&scan, id),
+            backups_dir: self.instance_backups_dir(id)?,
+            backup_count: self.instance_backup_count(id).await?,
         })
     }
 
@@ -1028,6 +1034,16 @@ pub(crate) mod tests {
         assert_eq!(preview.worlds[0].dir_name, "w");
         assert!(preview.size_bytes > 0);
         assert!(preview.dependents.is_empty());
+        assert_eq!(
+            preview.backups_dir,
+            aurora
+                .game_dir()
+                .join(AURORA_META_DIR)
+                .join("backups")
+                .join("instances")
+                .join("旧世界")
+        );
+        assert_eq!(preview.backup_count, 0);
 
         let disposer = RecordingDisposer::default();
         assert!(
