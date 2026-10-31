@@ -46,7 +46,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
-import { chosenRuntime, modRows, modTotals, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
+import { chosenRuntime, isPendingModUpdate, modRows, modTotals, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -434,6 +434,7 @@ function ModsPeekCard({
   const actions = useLauncherActions();
   const run = useRunner();
   const vanilla = inst.loader === "vanilla";
+  const updating = useLauncherSelector((s) => s.tasks.some((t) => isPendingModUpdate(t, inst.id)));
   const load = useModuleView(mods);
   const rows: ModRow[] = mods.status === "ready" ? modRows(mods.data, updates.status === "ready" ? updates.data : null) : [];
   const { total, partial } = modTotals(inst, rows.length);
@@ -496,6 +497,7 @@ function ModsPeekCard({
                   size="sm"
                   icon="download"
                   disabledReason={lockReason(ops.locks.mods, "mods")}
+                  loading={updating}
                   onClick={() => void run(() => actions.updateAllMods(inst.id), ACTION_ERROR.updateMods)}
                 >
                   {OVERVIEW_COPY.updateAll}

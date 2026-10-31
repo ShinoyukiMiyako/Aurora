@@ -1224,6 +1224,62 @@ describe("实例详情：Mod 管理", () => {
     expect(byRole("switch", "启用 Sodium").getAttribute("aria-disabled")).toBeNull();
   });
 
+  describe("单个 Mod 的更新还在跑", () => {
+    const candidate = (fileName: string, title: string, projectId: string, from: string, to: string): UpdateCandidate => ({
+      file_name: fileName,
+      title,
+      current_version_id: from,
+      current_version_number: null,
+      latest: {
+        version_id: to,
+        project_id: projectId,
+        platform: "modrinth",
+        name: to,
+        version_number: to,
+        release_channel: "release",
+        game_versions: [],
+        loaders: [],
+        file_name: `${to}-${fileName}`,
+        file_size: 1000,
+        sha1: null,
+        download_url: null,
+        date_published: "",
+        dependencies: [],
+      },
+    });
+
+    beforeEach(() => {
+      vi.stubGlobal("innerWidth", 1440);
+      updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "v1", "v9"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "v2", "v8")];
+      ipc.overrides.set("update_mod", () => new Promise(() => undefined));
+    });
+
+    it("Mod 标签的「全部更新」转圈，点了不把同一个文件再排进组合任务", async () => {
+      await open("mods");
+      click(button("更新 Sodium"));
+      await flush();
+      expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mod").map((t) => t.status)).toEqual(["running"]);
+      const all = button("全部更新 · 2");
+      expect(all.getAttribute("aria-busy")).toBe("true");
+      click(all);
+      await flush();
+      expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mods")).toEqual([]);
+    });
+
+    it("概览 Mod 速览里的「全部更新」同样转圈，点了不入队", async () => {
+      await open("mods");
+      click(button("更新 Sodium"));
+      await flush();
+      click(byRole("tab", "概览"));
+      await flush();
+      const all = button("全部更新");
+      expect(all.getAttribute("aria-busy")).toBe("true");
+      click(all);
+      await flush();
+      expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mods")).toEqual([]);
+    });
+  });
+
   it("自建实例的列表就是全部：摘要数与列表对不上时以列表为准，不说「其余由整合包统一管理」", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: 12 } : i));
     await open("mods");

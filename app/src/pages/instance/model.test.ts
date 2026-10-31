@@ -24,6 +24,7 @@ import {
   instanceLocks,
   isCrashActive,
   isolationByPolicy,
+  isPendingModUpdate,
   javaChoice,
   javaFit,
   javawOf,
@@ -461,6 +462,19 @@ describe("更新任务换掉的 Mod", () => {
     expect(() => updateTaskFiles({ command: "update_mods", args: { items: [{ platform: "modrinth" }] } })).toThrow("缺少 fileName");
     expect(() => updateTaskFiles({ command: "update_mod", args: { fileName: 3 } })).toThrow("不是字符串");
     expect(() => updateTaskFiles({ command: "install_mod", args: {} })).toThrow("不是 Mod 更新任务");
+  });
+
+  it("挡住「全部更新」的只有本实例排队或进行中的更新任务", () => {
+    const task = (command: string, instanceId: string, status: Task["status"]): Task => ({
+      ...newTask({ id: `${command}-${status}`, kind: "mod", title: "", detail: "", instanceId, spec: { command, args: {} } }, 0),
+      status,
+    });
+    expect(isPendingModUpdate(task("update_mod", "生存", "queued"), "生存")).toBe(true);
+    expect(isPendingModUpdate(task("update_mods", "生存", "running"), "生存")).toBe(true);
+    expect(isPendingModUpdate(task("update_mod", "生存", "done"), "生存")).toBe(false);
+    expect(isPendingModUpdate(task("update_mod", "生存", "failed"), "生存")).toBe(false);
+    expect(isPendingModUpdate(task("update_mod", "创造", "running"), "生存")).toBe(false);
+    expect(isPendingModUpdate(task("install_mods", "生存", "running"), "生存")).toBe(false);
   });
 });
 
