@@ -377,4 +377,28 @@ describe("实例详情：本实例的进度在走", () => {
     expect(document.body.textContent).toContain(SESSION_COPY.downloadProgress(20, 100, 2048));
     expect(renders).toEqual(before);
   });
+
+  it("日志标签：启动停在下载阶段，20 次进度不带新日志，日志控制台也不重渲染", async () => {
+    const spawn = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => spawn.promise);
+    await open("logs");
+    act(() => void launcher.actions.launch(ID));
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    const step = (finished: number) =>
+      act(() => {
+        emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished, total: 100, bytes: 0, total_bytes: null, speed: 2048 } });
+      });
+    step(0);
+    await flush();
+    expect(launcher.state.session?.phase).toBe("downloading");
+    expect(renders.LogConsole).toBeGreaterThan(0);
+    const logsBefore = launcher.state.session?.logs;
+    const before = { ...renders };
+    for (let i = 1; i <= 20; i++) step(i);
+    expect(launcher.state.session?.download?.done).toBe(20);
+    expect(launcher.state.session?.logs).toBe(logsBefore);
+    expect(renders).toEqual(before);
+  });
 });
