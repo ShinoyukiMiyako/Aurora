@@ -35,6 +35,13 @@ function renameOnDisk(from: string, to: string): void {
   });
 }
 
+/** 新建实例装好时要写封面：实例设置按传入的原样存下。 */
+function stubInstanceSettings(): void {
+  const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  ipc.overrides.set("get_instance_settings", () => settings);
+  ipc.overrides.set("set_instance_settings", (args) => args.settings);
+}
+
 describe("改实例设置后按需重扫实例列表", () => {
   const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
 
@@ -196,7 +203,8 @@ describe("侧栏固定的读改写按调用顺序串行", () => {
     await store.actions.togglePin("生存");
     const install = deferred<{ id: string }>();
     ipc.overrides.set("install_version", () => install.promise);
-    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: null });
+    stubInstanceSettings();
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
     await settle();
     // 写入按到达顺序挂起，逐个放行：取消固定还没写完时，装好的实例落地要写固定
     const held: (() => void)[] = [];
@@ -283,7 +291,8 @@ describe("改名、删除后挂在原 id 上的按需数据与游玩统计失效
       return { id: "生存" };
     });
     ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
-    await store.actions.createInstance({ name: "生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: null });
+    stubInstanceSettings();
+    await store.actions.createInstance({ name: "生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
     await settle();
 
     expect(store.getState().toasts.map((t) => t.title)).toContain("「生存」已就绪");
