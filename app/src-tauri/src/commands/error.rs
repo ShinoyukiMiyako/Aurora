@@ -15,7 +15,7 @@ use std::error::Error as StdError;
 
 use aurora_core::{
     AuthError, BaseError, CoreError, DownloadError, InstallError, InstanceError, JavaError,
-    LaunchError, ModPlatformError, ModpackError, VersionError,
+    LaunchError, ModPlatformError, ModpackError, VersionError, TEMPLATE_FILES,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -135,6 +135,8 @@ pub mod code {
     /// 改名或删除已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改。前端照成功处理再
     /// 提示；没改成的记录由门面记着，之后读写游玩记录时补上。detail：`{ id, renamed_to? }` 与原因链。
     pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
+    /// 实例工作目录里没有可保存的设置文件。detail：`{ id, files }`，files 为白名单。
+    pub const TEMPLATE_SOURCE_EMPTY: &str = "template_source_empty";
 }
 
 /// 序列化给前端的命令错误。
@@ -281,6 +283,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+        CoreError::TemplateSourceEmpty { .. } => code::TEMPLATE_SOURCE_EMPTY,
     }
 }
 
@@ -518,6 +521,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
+        }
+        CoreError::TemplateSourceEmpty { id } => {
+            detail.insert("id".to_owned(), json!(id));
+            detail.insert("files".to_owned(), json!(TEMPLATE_FILES));
         }
         _ => {}
     }
@@ -765,6 +772,23 @@ mod tests {
         let detail = pack.detail.unwrap();
         assert_eq!(detail["url"], json!("https://cdn/pack.mrpack"));
         assert_eq!(detail["reason"], json!("服务器不支持按范围读取"));
+
+        let template: CommandError = CoreError::TemplateSourceEmpty {
+            id: "樱花生存".into(),
+        }
+        .into();
+        assert_eq!(template.code, code::TEMPLATE_SOURCE_EMPTY);
+        assert_eq!(
+            template.message,
+            "实例 樱花生存 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存"
+        );
+        assert_eq!(
+            template.detail.unwrap(),
+            json!({
+                "id": "樱花生存",
+                "files": ["options.txt", "servers.dat", "optionsof.txt", "optionsshaders.txt"],
+            })
+        );
     }
 
     /// 联网失败不论从哪个领域冒上来都带 detail.network；与网络无关的错误不带。
