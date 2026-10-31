@@ -81,9 +81,20 @@ mod native {
     use std::ptr;
     use std::rc::Rc;
 
-    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Controller4;
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2, ICoreWebView2Controller4, COREWEBVIEW2_PROCESS_FAILED_KIND,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_BROKER_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_PLUGIN_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED,
+        COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED,
+    };
+    use webview2_com::{NavigationCompletedEventHandler, ProcessFailedEventHandler};
     use windows::Win32::Foundation::{
-        DRAGDROP_E_NOTREGISTERED, DV_E_FORMATETC, DV_E_TYMED, E_FAIL, HWND, LPARAM, POINTL, TRUE,
+        DRAGDROP_E_NOTREGISTERED, DV_E_FORMATETC, DV_E_TYMED, E_FAIL, E_POINTER, HWND, LPARAM,
+        POINTL, TRUE,
     };
     use windows::Win32::System::Com::{
         IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL,
@@ -105,7 +116,8 @@ mod native {
     /// 拖入文字最多读这么多个 UTF-16 码元。外置登录链接只有几十到几百个字符；拖进一大段网页文字时不必整段读出来。
     const MAX_TEXT_UNITS: usize = 4096;
 
-    /// 关掉 WebView2 自己的外部拖入，再在父窗口下的每个子窗口上换上 [`DropTarget`]。返回注册上的窗口数。
+    /// 关掉 WebView2 自己的外部拖入，在父窗口下的每个子窗口上换上 [`DropTarget`]，再订阅子进程故障与
+    /// 页面加载完成，好在 WebView2 换掉子窗口之后重新挂上。返回注册上的窗口数。
     ///
     /// # Safety
     /// 只能在 WebView 所属的 UI 线程上调用，且该线程已初始化 OLE。
@@ -121,10 +133,106 @@ mod native {
                 .SetAllowExternalDrop(false)?;
             let mut parent = HWND::default();
             controller.ParentWindow(&mut parent)?;
-            let target: IDropTarget = DropTarget::new(emit).into();
+            let registrar = Rc::new(Registrar::new(parent, emit));
+            let registered = registrar.sync()?;
+            // 订阅不上时眼下的拖放照常可用，只是子进程重启后不会重挂；单独记下，不当成装不上
+            if let Err(err) = watch(&controller.CoreWebView2()?, registrar) {
+                tracing::error!(error = %err, "订阅 WebView2 子进程故障与页面加载完成失败，WebView2 子进程重启后拖进窗口的文件与外置登录链接会没有反应");
+            }
+            Ok(registered)
+        }
+    }
+
+    /// 子进程故障记一笔，页面加载完成时按当时的子窗口重挂。两个订阅随 WebView 活到应用退出，
+    /// 从不退订，注册令牌不用留。
+    unsafe fn watch(core: &ICoreWebView2, registrar: Rc<Registrar>) -> windows_core::Result<()> {
+        let mut token = 0i64;
+        let on_failure = registrar.clone();
+        let failed = ProcessFailedEventHandler::create(Box::new(move |_, args| {
+            let kind = args.ok_or_else(|| E_POINTER.into()).and_then(|args| {
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND::default();
+                // SAFETY: 事件参数在回调期间有效，kind 是可写的输出位置
+                unsafe { args.ProcessFailedKind(&mut kind) }.map(|()| kind)
+            });
+            match kind {
+                Ok(kind) => on_failure.process_failed(kind),
+                Err(err) => {
+                    tracing::error!(error = %err, "读不出 WebView2 子进程故障的类型，按子窗口会被换掉处理");
+                    on_failure
+                        .process_failed(COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED);
+                }
+            }
+            Ok(())
+        }));
+        let completed = NavigationCompletedEventHandler::create(Box::new(move |_, _| {
+            // SAFETY: WebView2 的事件回调都在创建它的 UI 线程上执行，那里已初始化过 OLE
+            unsafe { registrar.navigation_completed() };
+            Ok(())
+        }));
+        unsafe {
+            core.add_ProcessFailed(&failed, &mut token)?;
+            core.add_NavigationCompleted(&completed, &mut token)?;
+        }
+        Ok(())
+    }
+
+    /// 一次 WebView2 子进程故障对放置目标意味着什么。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum FailureImpact {
+        /// 浏览器进程退出：WebView 随之关闭，子窗口全部销毁，只有重建 WebView 才能恢复，而 Tauri 不重建。
+        WebViewClosed,
+        /// 渲染进程或 GPU 进程没了（认不出的类型也归这里）：WebView2 起新进程时会新建网页区域的子窗口，
+        /// 新窗口上没有这里的放置目标。
+        WindowsRebuilt,
+        /// 只承载子框架或后台服务的进程，不带窗口。
+        NoWindows,
+    }
+
+    /// 故障类型的取值见 WebView2 的 `COREWEBVIEW2_PROCESS_FAILED_KIND`。认不出的新类型按子窗口会被换掉处理：
+    /// 宁可多记一条恢复日志，也不漏掉拖放失效的线索。
+    pub fn failure_impact(kind: COREWEBVIEW2_PROCESS_FAILED_KIND) -> FailureImpact {
+        match kind {
+            COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => FailureImpact::WebViewClosed,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED
+            | COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED
+            | COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED
+            | COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_PLUGIN_PROCESS_EXITED
+            | COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_BROKER_PROCESS_EXITED => {
+                FailureImpact::NoWindows
+            }
+            _ => FailureImpact::WindowsRebuilt,
+        }
+    }
+
+    /// 主窗口共用的放置目标，以及把它挂到 WebView2 子窗口上的时机。
+    ///
+    /// 网页区域的子窗口归 WebView2 的浏览器进程所有：渲染进程退出时随之销毁，下一次加载页面时新建，新窗口上
+    /// 没有这里的放置目标。WebView2 不通知子窗口的新建，能对上的是两件事：子进程故障告诉我们要换窗口了，
+    /// 页面加载完成时新窗口一定已经在了。所以每次页面加载完成都按当时的子窗口重挂一遍，重挂对已挂好的窗口没有影响。
+    pub struct Registrar {
+        parent: HWND,
+        target: IDropTarget,
+        /// 子进程故障之后、子窗口重挂之前为真，用来把那一次重挂记成恢复而不是例行。
+        rebuild_pending: Cell<bool>,
+    }
+
+    impl Registrar {
+        pub fn new(parent: HWND, emit: Emit) -> Self {
+            Self {
+                parent,
+                target: DropTarget::new(emit).into(),
+                rebuild_pending: Cell::new(false),
+            }
+        }
+
+        /// 在父窗口下当前的每个子孙窗口上换上放置目标，返回注册上的窗口数；可以反复调用，挂着的不论是谁的都先撤下。
+        ///
+        /// # Safety
+        /// 只能在父窗口所属的 UI 线程上调用，且该线程已初始化 OLE。
+        pub unsafe fn sync(&self) -> windows_core::Result<usize> {
             let mut registered = 0;
-            for hwnd in child_windows(parent) {
-                match RevokeDragDrop(hwnd) {
+            for hwnd in unsafe { child_windows(self.parent) } {
+                match unsafe { RevokeDragDrop(hwnd) } {
                     Ok(()) => {}
                     // 没注册过放置目标的子窗口是常态
                     Err(err) if err.code() == DRAGDROP_E_NOTREGISTERED => {}
@@ -133,7 +241,7 @@ mod native {
                         continue;
                     }
                 }
-                match RegisterDragDrop(hwnd, &target) {
+                match unsafe { RegisterDragDrop(hwnd, &self.target) } {
                     Ok(()) => registered += 1,
                     Err(err) => {
                         tracing::warn!(error = %err, "在 WebView2 子窗口上注册放置目标失败")
@@ -147,6 +255,44 @@ mod native {
                 ));
             }
             Ok(registered)
+        }
+
+        pub fn process_failed(&self, kind: COREWEBVIEW2_PROCESS_FAILED_KIND) {
+            match failure_impact(kind) {
+                FailureImpact::WebViewClosed => tracing::error!(
+                    kind = kind.0,
+                    "WebView2 浏览器进程退出，WebView 已关闭：界面与拖放都不再可用，要重启应用才能恢复"
+                ),
+                FailureImpact::WindowsRebuilt => {
+                    self.rebuild_pending.set(true);
+                    tracing::warn!(
+                        kind = kind.0,
+                        "WebView2 子进程退出，网页区域的子窗口会被新建，拖放目标等下一次页面加载完成时重挂"
+                    );
+                }
+                FailureImpact::NoWindows => tracing::warn!(
+                    kind = kind.0,
+                    "WebView2 子进程退出，它不带窗口，拖放目标不受影响"
+                ),
+            }
+        }
+
+        /// # Safety
+        /// 同 [`Registrar::sync`]。
+        pub unsafe fn navigation_completed(&self) {
+            let recovering = self.rebuild_pending.replace(false);
+            match unsafe { self.sync() } {
+                Ok(registered) if recovering => tracing::info!(
+                    registered,
+                    "WebView2 子进程重启后，拖放目标已重挂到新的子窗口上"
+                ),
+                Ok(registered) => {
+                    tracing::debug!(registered, "页面加载完成，拖放目标按当前子窗口重挂")
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, recovering, "页面加载完成后重挂拖放目标失败，拖进窗口的文件与外置登录链接都不会有反应")
+                }
+            }
         }
     }
 
@@ -364,10 +510,19 @@ mod native {
     mod tests {
         use std::cell::RefCell;
 
-        use windows::Win32::Foundation::{HGLOBAL, POINT};
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+            COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+        };
+        use windows::Win32::Foundation::{DRAGDROP_E_ALREADYREGISTERED, HGLOBAL, POINT};
         use windows::Win32::System::Memory::{GlobalAlloc, GMEM_MOVEABLE};
         use windows::Win32::System::Ole::OleInitialize;
         use windows::Win32::UI::Shell::{SHCreateDataObject, DROPFILES};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_CHILD, WS_POPUP,
+        };
+        use windows_core::PCWSTR;
 
         use super::*;
 
@@ -544,6 +699,143 @@ mod native {
             assert_eq!(unsafe { read_text(&data) }, None);
             let short = text_object("你好");
             assert_eq!(unsafe { read_text(&short) }.as_deref(), Some("你好"));
+        }
+
+        /// 测试线程上的一个窗口；STATIC 是系统预注册的窗口类，不用自己注册。
+        fn window(parent: Option<HWND>) -> HWND {
+            unsafe {
+                // 每个测试线程各自初始化；同一线程重复调用返回 S_FALSE，也算成功
+                OleInitialize(None).unwrap();
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    windows_core::w!("STATIC"),
+                    PCWSTR::null(),
+                    if parent.is_some() { WS_CHILD } else { WS_POPUP },
+                    0,
+                    0,
+                    100,
+                    100,
+                    parent,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            }
+        }
+
+        /// 窗口上挂没挂放置目标：再注册一个探针，挂着的会报已注册；没挂的就地把探针撤掉。
+        fn is_registered(hwnd: HWND) -> bool {
+            let probe: IDropTarget = DropTarget::new(Rc::new(|_| {})).into();
+            match unsafe { RegisterDragDrop(hwnd, &probe) } {
+                Ok(()) => {
+                    unsafe { RevokeDragDrop(hwnd) }.unwrap();
+                    false
+                }
+                Err(err) if err.code() == DRAGDROP_E_ALREADYREGISTERED => true,
+                Err(err) => panic!("探测放置目标失败：{err}"),
+            }
+        }
+
+        /// 照 WebView2 的窗口层级搭：父窗口下一层宿主窗口，宿主下面是网页区域的子窗口。渲染进程退出后旧的网页
+        /// 子窗口被销毁、下一次加载页面时换一个新的，新窗口要在页面加载完成时挂上放置目标。
+        #[test]
+        fn page_load_after_a_renderer_restart_registers_the_rebuilt_window() {
+            let parent = window(None);
+            let host = window(Some(parent));
+            let page = window(Some(host));
+            let registrar = Registrar::new(parent, Rc::new(|_| {}));
+            assert_eq!(unsafe { registrar.sync() }.unwrap(), 2);
+            assert!(is_registered(host) && is_registered(page));
+
+            registrar.process_failed(COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED);
+            assert!(registrar.rebuild_pending.get());
+            unsafe { DestroyWindow(page) }.unwrap();
+            let rebuilt = window(Some(host));
+            assert!(!is_registered(rebuilt), "新建的子窗口上本来什么都没挂");
+
+            unsafe { registrar.navigation_completed() };
+            assert!(is_registered(rebuilt));
+            assert!(is_registered(host));
+            assert!(!registrar.rebuild_pending.get());
+            unsafe { DestroyWindow(parent) }.unwrap();
+        }
+
+        /// 浏览器进程退出时 WebView 已经关了，不会再有新的子窗口，也就没有重挂可等。
+        #[test]
+        fn browser_process_exit_does_not_wait_for_a_rebuild() {
+            let parent = window(None);
+            let registrar = Registrar::new(parent, Rc::new(|_| {}));
+            registrar.process_failed(COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED);
+            assert!(!registrar.rebuild_pending.get());
+            registrar.process_failed(COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED);
+            assert!(!registrar.rebuild_pending.get());
+            registrar.process_failed(COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED);
+            assert!(registrar.rebuild_pending.get());
+            unsafe { DestroyWindow(parent) }.unwrap();
+        }
+
+        /// WebView2 下一个子窗口都没有时挂不上任何东西，要报错而不是当成挂好了。
+        #[test]
+        fn no_child_window_is_an_error() {
+            let parent = window(None);
+            let registrar = Registrar::new(parent, Rc::new(|_| {}));
+            let err = unsafe { registrar.sync() }.unwrap_err();
+            assert_eq!(err.code(), E_FAIL);
+            unsafe { DestroyWindow(parent) }.unwrap();
+        }
+
+        #[test]
+        fn every_failure_kind_has_a_known_impact() {
+            for (kind, impact) in [
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED,
+                    FailureImpact::WebViewClosed,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED,
+                    FailureImpact::WindowsRebuilt,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE,
+                    FailureImpact::WindowsRebuilt,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_GPU_PROCESS_EXITED,
+                    FailureImpact::WindowsRebuilt,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED,
+                    FailureImpact::WindowsRebuilt,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED,
+                    FailureImpact::NoWindows,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED,
+                    FailureImpact::NoWindows,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_SANDBOX_HELPER_PROCESS_EXITED,
+                    FailureImpact::NoWindows,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_PLUGIN_PROCESS_EXITED,
+                    FailureImpact::NoWindows,
+                ),
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND_PPAPI_BROKER_PROCESS_EXITED,
+                    FailureImpact::NoWindows,
+                ),
+                // 以后的运行时新增的类型
+                (
+                    COREWEBVIEW2_PROCESS_FAILED_KIND(42),
+                    FailureImpact::WindowsRebuilt,
+                ),
+            ] {
+                assert_eq!(failure_impact(kind), impact, "{kind:?}");
+            }
         }
     }
 }
