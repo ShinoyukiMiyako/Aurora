@@ -190,6 +190,8 @@ export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | n
 /**
  * 长任务：下载最近一次检查到的更新并校验签名，进度经 core-event（kind download，total 为 1）推送并带 task_id，
  * 可用 cancelTask(taskId) 取消。没检查到更新报 update_not_available，签名不符报 update_signature_invalid。
+ * 下载期间再次检查换了版本或已无更新时同样报 update_not_available（message 写明新旧版本），这次下载的包已作废，
+ * 按最新的检查结果重新下载即可。
  */
 export const downloadUpdate = (taskId: string): Promise<UpdateDto> => invoke<UpdateDto>("download_update", { taskId });
 
