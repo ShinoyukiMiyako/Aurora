@@ -211,6 +211,89 @@ describe("全部更新", () => {
       ["iris-i1.jar", "i2"],
     ]);
   });
+
+  /** 三个可更新，第三个（iris）第一次失败；返回失败的那个任务。 */
+  async function failOnIris(): Promise<string> {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => {
+      if (args.fileName === "iris-i1.jar") throw new IpcError("history_write_failed", "变更历史写入失败");
+      return { file_name: String(args.fileName), path: "", platform: "modrinth" };
+    });
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task.status).toBe("failed");
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    return task.id;
+  }
+
+  const successes = () => store.getState().toasts.filter((t) => t.tone === "success").map((t) => [t.title, t.body]);
+
+  it("重试时上次已经全部换好：这次一个都没更新，提示都已是最新，不报「已更新 3 个」", async () => {
+    const id = await failOnIris();
+    ipc.overrides.set("check_updates", () => []);
+    store.actions.retryTask(id);
+    await settle();
+    expect(store.getState().tasks[0].status).toBe("done");
+    expect(callsOf(ipc, "update_mod")).toHaveLength(3);
+    expect(successes()).toEqual([]);
+    const info = store.getState().toasts.filter((t) => t.tone === "info").map((t) => [t.title, t.body]);
+    expect(info).toEqual([["所有 Mod 都是最新的", "「生存」"]]);
+  });
+
+  it("重试时只剩一个要换：按这一次实际换的写，单个时写 Mod 名", async () => {
+    const id = await failOnIris();
+    ipc.overrides.set("check_updates", () => [candidate("iris", "i1", "i2")]);
+    store.actions.retryTask(id);
+    await settle();
+    expect(callsOf(ipc, "update_mod").slice(3).map((a) => a.fileName)).toEqual(["iris-i1.jar"]);
+    expect(successes()).toEqual([["已更新 iris", "「生存」· 旧版本已保留，可以回滚"]]);
+  });
+
+  it("重试时剩两个要换：写这一次换的个数", async () => {
+    const id = await failOnIris();
+    ipc.overrides.set("check_updates", () => [candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    store.actions.retryTask(id);
+    await settle();
+    expect(successes()).toEqual([["已更新 2 个 Mod", "「生存」· 旧版本已保留，可以回滚"]]);
+  });
+
+  it("从任务日志恢复的旧记录没有 Mod 名：只剩一个时写个数", async () => {
+    store.stop();
+    resetRecorder(ipc);
+    const items = [
+      { fileName: "sodium-s1.jar", platform: "modrinth", projectId: "sodium", modVersionId: "s2" },
+      { fileName: "iris-i1.jar", platform: "modrinth", projectId: "iris", modVersionId: "i2" },
+    ];
+    bootOverrides(ipc, {
+      journal: [
+        {
+          id: "task-old",
+          kind: "mod",
+          title: "更新 2 个 Mod",
+          detail: "「生存」",
+          instance_id: "生存",
+          status: "running",
+          progress: 0.5,
+          bytes: 0,
+          total_bytes: null,
+          speed_bps: 0,
+          attempt: 1,
+          error: null,
+          created_at: 1_719_000_000_000,
+          finished_at: null,
+          spec: { command: "update_mods", args: { versionId: "生存", items } },
+        },
+      ],
+    });
+    ipc.overrides.set("check_updates", () => [candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    store = await startedStore();
+    store.actions.retryTask("task-old");
+    await settle();
+    expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["iris-i1.jar"]);
+    expect(successes()).toEqual([["已更新 1 个 Mod", "「生存」· 旧版本已保留，可以回滚"]]);
+  });
 });
 
 describe("组合任务的取消", () => {

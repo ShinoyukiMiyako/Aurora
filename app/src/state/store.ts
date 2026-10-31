@@ -208,7 +208,7 @@ type TaskMeta =
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
-  | { type: "updates"; instanceId: string; count: number };
+  | { type: "updates"; instanceId: string };
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -471,7 +471,7 @@ function metaFromSpec(task: Task): TaskMeta | null {
       return { type: "mods", instanceId: strArg(args, "versionId", command), name: items[0].title, dependencies: items.length - 1 };
     }
     case "update_mods":
-      return { type: "updates", instanceId: strArg(args, "versionId", command), count: updateItems(args).length };
+      return { type: "updates", instanceId: strArg(args, "versionId", command) };
     default:
       return null;
   }
@@ -506,6 +506,8 @@ interface UpdateItem {
   platform: Platform;
   projectId: string;
   modVersionId: string;
+  /** Mod 名（完成通知用）；较早写入任务日志的记录没有这一项，为 null。 */
+  title: string | null;
 }
 
 function updateItems(args: Record<string, unknown>): UpdateItem[] {
@@ -521,8 +523,14 @@ function updateItems(args: Record<string, unknown>): UpdateItem[] {
       platform,
       projectId: strArg(r, "projectId", "update_mods"),
       modVersionId: strArg(r, "modVersionId", "update_mods"),
+      title: "title" in r ? strArg(r, "title", "update_mods") : null,
     };
   });
+}
+
+/** 「全部更新」这一次尝试实际换掉的 Mod（重试时只含这一次换的）。 */
+interface UpdatesOutcome {
+  updated: UpdateItem[];
 }
 
 /**
@@ -1312,11 +1320,14 @@ export class LauncherStore {
     }
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
+      const updated: UpdateItem[] = [];
       for (const item of task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args)) {
         this.assertNotCancelled(taskId);
         await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
+        updated.push(item);
       }
-      return null;
+      const outcome: UpdatesOutcome = { updated };
+      return outcome;
     }
     return invoke<unknown>(command, { ...args, taskId });
   }
@@ -1513,8 +1524,16 @@ export class LauncherStore {
         return;
       }
       case "updates": {
+        // 重试时上一次尝试已经换掉的不再计入：通知只说这一次实际换了什么
+        const { updated } = result as UpdatesOutcome;
         this.modsChanged(meta.instanceId);
-        const copy = TASK_TOAST.modsUpdated(meta.count, meta.instanceId);
+        if (updated.length === 0) {
+          const latest = TASK_TOAST.modsAlreadyLatest(meta.instanceId);
+          this.pushToast("info", latest.title, latest.body);
+          return;
+        }
+        const only = updated.length === 1 ? updated[0].title : null;
+        const copy = only === null ? TASK_TOAST.modsUpdated(updated.length, meta.instanceId) : TASK_TOAST.modUpdated(only, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
@@ -2044,11 +2063,17 @@ export class LauncherStore {
               command: "update_mods",
               args: {
                 versionId: instanceId,
-                items: candidates.map((c) => ({ fileName: c.file_name, platform: c.latest.platform, projectId: c.latest.project_id, modVersionId: c.latest.version_id })),
+                items: candidates.map((c) => ({
+                  fileName: c.file_name,
+                  platform: c.latest.platform,
+                  projectId: c.latest.project_id,
+                  modVersionId: c.latest.version_id,
+                  title: c.title === null ? c.file_name : c.title,
+                })),
               },
             },
           },
-          { type: "updates", instanceId, count: candidates.length },
+          { type: "updates", instanceId },
           TASK_TEXT.updateAllTitle(candidates.length),
         );
       },
