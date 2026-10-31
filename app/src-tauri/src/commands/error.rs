@@ -174,28 +174,38 @@ impl CommandError {
     }
 }
 
-impl From<CoreError> for CommandError {
-    fn from(err: CoreError) -> Self {
+impl CommandError {
+    /// 门面错误到命令错误的映射，不记日志。借用的错误也走这里（例如启动器资讯退避期内多次重报、由各次结果
+    /// 共享的同一次失败），与拿走所有权的 `From<CoreError>` 得到同一个形状。
+    pub(crate) fn describe(err: &CoreError) -> Self {
         if err.is_cancelled() {
             return Self::cancelled();
         }
-        let code = core_code(&err);
-        let message = err.to_string();
-        let causes = source_chain(&err);
-        let mut detail = core_detail(&err);
-        if let Some(failure) = aurora_base::http::network_failure(&err) {
+        let causes = source_chain(err);
+        let mut detail = core_detail(err);
+        if let Some(failure) = aurora_base::http::network_failure(err) {
             detail.insert("network".to_owned(), json!(failure.code()));
         }
         if !causes.is_empty() {
             detail.insert("causes".to_owned(), json!(causes));
         }
-        // 命令边界是错误离开后端的最后一站，在这里留一条日志，排查时与前端提示对得上。
-        tracing::warn!(code, %message, ?causes, "命令失败");
         Self {
-            code,
-            message,
+            code: core_code(err),
+            message: err.to_string(),
             detail: (!detail.is_empty()).then_some(Value::Object(detail)),
         }
+    }
+}
+
+impl From<CoreError> for CommandError {
+    fn from(err: CoreError) -> Self {
+        if err.is_cancelled() {
+            return Self::cancelled();
+        }
+        let error = Self::describe(&err);
+        // 命令边界是错误离开后端的最后一站，在这里留一条日志，排查时与前端提示对得上。
+        tracing::warn!(code = error.code, message = %error.message, causes = ?source_chain(&err), "命令失败");
+        error
     }
 }
 
@@ -536,6 +546,12 @@ mod tests {
 
         let from_java: CommandError = JavaError::Cancelled.into();
         assert!(from_java.is_cancelled());
+
+        // 借用转换同样先认取消，不把取消报成下载失败
+        let borrowed = CommandError::describe(&CoreError::from(InstallError::Download(
+            DownloadError::Cancelled,
+        )));
+        assert_eq!(borrowed, CommandError::cancelled());
     }
 
     #[test]

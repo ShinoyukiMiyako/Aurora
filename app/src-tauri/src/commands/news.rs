@@ -2,10 +2,9 @@
 
 use aurora_core::{CoreError, LauncherChannel, NewsFeed, NewsItem};
 use serde::Serialize;
-use serde_json::{json, Map, Value};
 use tauri::{AppHandle, State};
 
-use crate::commands::error::{code, source_chain};
+use crate::commands::error::source_chain;
 use crate::commands::CommandError;
 use crate::facade::Facade;
 
@@ -35,34 +34,12 @@ impl From<NewsFeed> for NewsFeedDto {
     }
 }
 
-/// 退避期内门面把同一次失败原样重报多次，错误由各次结果共享、拿不走所有权，而命令边界的通用转换要拿走
-/// 错误本身。启动器资讯只会以请求失败或内容认不出告终，这里照通用转换的规则给出同形状的错误，
-/// `shared_launcher_error_matches_command_boundary` 钉住两边逐字段一致。
+/// 退避期内门面把同一次失败原样重报多次，错误由各次结果共享、拿不走所有权，所以按借用转换；命令照常成功，
+/// 日志写明是哪一路没取到，而不是「命令失败」。
 fn launcher_error(err: &CoreError) -> CommandError {
-    let (code, url) = match err {
-        CoreError::Fetch { url, .. } => (code::NETWORK_FAILED, Some(url)),
-        CoreError::FeedParse { url, .. } => (code::FEED_INVALID, Some(url)),
-        // 门面给不出别的失败；真出现了就是程序缺陷，按 internal 报，原文与原因链照样带上。
-        _ => (code::INTERNAL, None),
-    };
-    let message = err.to_string();
-    let causes = source_chain(err);
-    let mut detail = Map::new();
-    if let Some(url) = url {
-        detail.insert("url".to_owned(), json!(url));
-    }
-    if let Some(failure) = aurora_base::http::network_failure(err) {
-        detail.insert("network".to_owned(), json!(failure.code()));
-    }
-    if !causes.is_empty() {
-        detail.insert("causes".to_owned(), json!(causes));
-    }
-    tracing::warn!(code, %message, ?causes, "启动器资讯取不到");
-    CommandError {
-        code,
-        message,
-        detail: (!detail.is_empty()).then_some(Value::Object(detail)),
-    }
+    let error = CommandError::describe(err);
+    tracing::warn!(code = error.code, message = %error.message, causes = ?source_chain(err), "启动器资讯取不到");
+    error
 }
 
 /// 取资讯。官方资讯 6 小时内用磁盘缓存，联网失败时退回缓存并标 `offline: true`，
@@ -90,6 +67,9 @@ mod tests {
     use aurora_base::brand::REPO_URL;
     use aurora_core::news::LauncherFailure;
     use aurora_core::NewsTag;
+    use serde_json::json;
+
+    use crate::commands::error::code;
 
     // 前端 TS 引用不到 Rust 常量，仓库地址只能各写一份，由这条测试钉住两边相同。
     #[test]
@@ -198,8 +178,12 @@ mod tests {
         let garbled = parse_error("https://api.github.com/repos/o/r/releases");
         assert_eq!(launcher_error(&garbled), CommandError::from(garbled));
 
-        let internal = launcher_error(&CoreError::PlatformUnsupported);
-        assert_eq!(internal.code, code::INTERNAL);
-        assert_eq!(internal.detail, None);
+        // 门面给不出的变体也照通用规则取码，不另起一套
+        let unexpected = launcher_error(&CoreError::PlatformUnsupported);
+        assert_eq!(unexpected.code, code::PLATFORM_UNSUPPORTED);
+        assert_eq!(
+            unexpected,
+            CommandError::from(CoreError::PlatformUnsupported)
+        );
     }
 }
