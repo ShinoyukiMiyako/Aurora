@@ -11,7 +11,7 @@ import { useLoadingGate } from "../../lib/loading-gate";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { describeError } from "../../state/errors";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import { useNews, type NewsItemDto, type NewsTag } from "../../state/queries/home";
 import { Button } from "../../ui/Button";
@@ -122,10 +122,10 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
 }
 
 function NewsModal({ item, open, onClose }: { item: NewsItemDto; open: boolean; onClose: () => void }) {
-  const { state } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
   const { go } = useNav();
   const { openCreateInstance } = useShell();
-  const action = newsAction(item, state.instances);
+  const action = newsAction(item, instances);
 
   const perform = (a: NewsAction) => {
     onClose();

@@ -16,7 +16,7 @@ import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useInstanceContent } from "../../state/queries/instance";
 import { findInstance } from "../../state/selectors";
 import { Button } from "../../ui/Button";
@@ -41,10 +41,10 @@ export interface ContinueCardProps {
 }
 
 export function ContinueCard({ span, target }: ContinueCardProps) {
-  const { state, actions } = useLauncher();
+  const status = useLauncherSelector((s) => s.status.instances);
+  const actions = useLauncherActions();
   const { openCreateInstance } = useShell();
   const run = useRunner();
-  const status = state.status.instances;
   const gate = useLoadingGate(status.kind === "loading");
 
   if (status.kind === "loading" || gate.view === "skeleton") {
@@ -180,15 +180,15 @@ function HeroFrame({ instanceId }: { instanceId: string }) {
 }
 
 function HeroFace({ instanceId, height }: { instanceId: string; height: number }) {
-  const { state } = useLauncher();
-  const inst = findInstance(state, instanceId);
+  const inst = useLauncherSelector((s) => findInstance(s, instanceId));
   // 淡出中的旧面：实例在这期间被删除时不再画它
   if (inst === undefined) return null;
   return <HeroContent inst={inst} height={height} />;
 }
 
 function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }) {
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
   const { go } = useNav();
   const { tier } = useShell();
   const run = useRunner();
@@ -202,7 +202,7 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const world = content.status === "ready" ? latestWorld(content.data.worlds) : null;
 
   const switchItems: MenuEntry[] = [
-    ...switchOptions(state.instances, inst.id).map((o): MenuEntry => {
+    ...switchOptions(instances, inst.id).map((o): MenuEntry => {
       const hint = o.current ? HOME_COPY.switchCurrent : o.mcVersion;
       return {
         label: o.name,

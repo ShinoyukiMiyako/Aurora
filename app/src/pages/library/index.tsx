@@ -12,7 +12,7 @@ import { fade, springs } from "../../lib/motion";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -62,7 +62,11 @@ const cellFade: Variants = {
 };
 
 export default function LibraryPage() {
-  const { state, actions } = useLauncher();
+  // 只订阅实例列表、它的读取状态与固定个数：下载进度与游戏日志不让整页与每张卡跟着重渲染
+  const all = useLauncherSelector((s) => s.instances);
+  const slice = useLauncherSelector((s) => s.status.instances);
+  const pinCount = useLauncherSelector((s) => s.sidebarPins.length);
+  const actions = useLauncherActions();
   const { go } = useNav();
   const { tier, openCreateInstance, registerFind } = useShell();
   const run = useRunner();
@@ -82,8 +86,6 @@ export default function LibraryPage() {
     [registerFind],
   );
 
-  const all = state.instances;
-  const slice = state.status.instances;
   const ready = slice.kind === "ready";
   // 300 ms 内读到就不出骨架；骨架一旦出现至少停留一段，数据早到也等满再换成卡片
   const gate = useLoadingGate(slice.kind === "loading");
@@ -110,7 +112,7 @@ export default function LibraryPage() {
     ) : !ready ? null : all.length === 0 ? (
       LIBRARY_COPY.subtitleEmpty
     ) : (
-      LIBRARY_COPY.subtitle(all.length, state.sidebarPins.length, totalPlaytime(all))
+      LIBRARY_COPY.subtitle(all.length, pinCount, totalPlaytime(all))
     );
 
   return (

@@ -12,7 +12,7 @@ import type { LoaderKind, Task } from "../../../domain/types";
 import { LaunchCapsule } from "../../../launch/LaunchCapsule";
 import { useNav } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
-import { useLauncher } from "../../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
 import { useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
@@ -100,11 +100,12 @@ export interface ModpackPanelProps {
 }
 
 export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, footerHost, onClose }: ModpackPanelProps) {
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
   const run = useRunner();
   const nav = useNav();
   const manifest = useManifest();
-  const existing = state.instances.map((i) => i.id);
+  const existing = instances.map((i) => i.id);
   const [name, setName] = useState(() => uniqueName(detail.title, existing));
   const [cover, setCover] = useState<InstanceCover>(() => defaultModpackCover(detail.project_id));
   const [createdId, setCreatedId] = useState<string | null>(null);
@@ -122,10 +123,11 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const facts = packFacts(version, summary.status === "ready" ? summary.data : null, releases);
   const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, extra: [{ icon: "box", text: MODPACK_COPY.summaryLoading }] } : facts;
   const nameError = instanceNameError(name, existing);
-  const fromPack = instancesFromPack(origins, state.instances);
+  const fromPack = instancesFromPack(origins, instances);
 
-  const task = createdId === null ? null : importTask(state.tasks, createdId);
-  const created = createdId === null ? undefined : findInstance(state, createdId);
+  // 装出新实例之后只订阅它的导入任务：进度随这个任务变，别的任务的进度不让面板重渲染
+  const task = useLauncherSelector((s) => (createdId === null ? null : importTask(s.tasks, createdId)));
+  const created = createdId === null ? undefined : findInstance({ instances }, createdId);
   const progress: Progress | null = (() => {
     if (createdId === null) return null;
     if (task === null) return created !== undefined && created.status !== "installing" ? { kind: "ready" } : { kind: "queued" };

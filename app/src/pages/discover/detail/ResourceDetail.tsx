@@ -7,7 +7,7 @@ import { hueOf } from "../../../art/illustrations/seed";
 import { LOADER_NAME } from "../../../copy/flows";
 import { formatBytes, formatCount, formatDate, formatRelative } from "../../../domain/format";
 import type { Platform } from "../../../domain/types";
-import { useLauncher, useNow } from "../../../state/launcher";
+import { useLauncherSelector, useNow } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
 import { useModVersions, useProjectDetail, type DependencyProject, type HitSource, type ModVersionInfo, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
@@ -374,13 +374,13 @@ function StatsBar({ detail }: { detail: ProjectDetail }) {
 }
 
 function IntroTab({ detail, onOpenDependency }: { detail: ProjectDetail; onOpenDependency: (dep: DependencyProject) => void }) {
-  const { state } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
   const manifest = useManifest();
   const blocks = useMemo(() => parseBody(detail.body, detail.body_format), [detail.body, detail.body_format]);
   const kind = resourceKindOf(detail.resource_type);
   const order = manifest.status === "ready" ? manifest.data.versions.map((v) => v.id) : null;
   const gameVersions = sortGameVersions(detail.game_versions, order);
-  const owned = new Set(state.instances.flatMap((i) => (i.status === "ready" && i.mcVersion !== null ? [i.mcVersion] : [])));
+  const owned = new Set(instances.flatMap((i) => (i.status === "ready" && i.mcVersion !== null ? [i.mcVersion] : [])));
   const loaders = dotLoaders(detail.loaders);
   return (
     <div className={styles.intro}>
@@ -444,7 +444,7 @@ interface VersionsTabProps {
 }
 
 function VersionsTab({ detail, versions, pinned, onPin }: VersionsTabProps) {
-  const { state } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
   const manifest = useManifest();
   const [onlyFits, setOnlyFits] = useState<boolean | null>(null);
   const [shown, setShown] = useState(VERSION_PAGE);
@@ -460,10 +460,10 @@ function VersionsTab({ detail, versions, pinned, onPin }: VersionsTabProps) {
     );
   }
   const all = versions.data;
-  const anyFits = all.some((v) => fitsAnyInstance(v, state.instances, detail.resource_type));
+  const anyFits = all.some((v) => fitsAnyInstance(v, instances, detail.resource_type));
   // 默认勾选「只看能装进我的实例的版本」；一个能装的都没有时默认不勾，免得列表是空的
   const filtering = onlyFits === null ? anyFits : onlyFits;
-  const list = filtering ? all.filter((v) => fitsAnyInstance(v, state.instances, detail.resource_type)) : all;
+  const list = filtering ? all.filter((v) => fitsAnyInstance(v, instances, detail.resource_type)) : all;
   const showLoaders = detail.resource_type === "mod" || detail.resource_type === "modpack";
 
   return (

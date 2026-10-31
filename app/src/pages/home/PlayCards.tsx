@@ -7,7 +7,7 @@ import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { cssVars, cx } from "../../lib/util";
 import { useNav } from "../../shell/shell";
 import { describeError } from "../../state/errors";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherSelector } from "../../state/launcher";
 import { findInstance } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { CalendarHeatmap, addMonths, calendarDayLabel, weekdayIndex } from "../../ui/CalendarHeatmap";
@@ -142,7 +142,7 @@ export function CalendarCard({ span, play, today, month, onMonthChange, selected
 }
 
 function DayDetail({ activity, date }: { activity: PlayActivity; date: string }) {
-  const { state } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
   const { go } = useNav();
   if (!activity.hasRecords) return <span className={s.dayTime}>{HOME_COPY.noRecords}</span>;
   const day = activity.days.get(date);
@@ -155,7 +155,7 @@ function DayDetail({ activity, date }: { activity: PlayActivity; date: string })
     );
   }
   const alive = day.instances.flatMap((entry) => {
-    const inst = findInstance(state, entry.version_id);
+    const inst = findInstance({ instances }, entry.version_id);
     return inst === undefined ? [] : [inst];
   });
   return (
@@ -230,11 +230,11 @@ function InsightsSkeleton({ pending, today }: { pending: boolean; today: string 
 }
 
 function InsightsBody({ activity, selected, onPickDay }: { activity: PlayActivity; selected: string; onPickDay: (date: string) => void }) {
-  const { state } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
   const week = weekCompare(activity);
   const streak = streakDays(activity);
-  const top = topLoader(activity, state.instances);
-  const total = totalPlaytime(state.instances);
+  const top = topLoader(activity, instances);
+  const total = totalPlaytime(instances);
   const days = lastDays(activity.today, WEEK_DAYS);
   const max = Math.max(...days.map((d) => minutesOn(activity, d)));
 

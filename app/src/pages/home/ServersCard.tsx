@@ -16,7 +16,7 @@ import { cx } from "../../lib/util";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import { useKnownServers, usePinnedServers, useServerStatus, type KnownServerDto, type PinnedServerDto } from "../../state/queries/home";
 import type { ResourceResult } from "../../state/resource";
@@ -50,7 +50,7 @@ function inert(): never {
 }
 
 export function ServersCard({ span }: { span: ResponsiveValue }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const pinned = usePinnedServers();
   const status = useServerStatus();

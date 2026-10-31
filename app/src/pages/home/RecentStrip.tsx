@@ -11,7 +11,7 @@ import { brokenAction } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherSelector, useNow } from "../../state/launcher";
 import { Button } from "../../ui/Button";
 import { Card, CardTitleButton } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -29,17 +29,17 @@ import s from "./home.module.css";
 const TITLE_ID = "home-recent-title";
 
 export function RecentStrip({ currentId }: { currentId: string | null }) {
-  const { state } = useLauncher();
+  const status = useLauncherSelector((s) => s.status.instances);
+  const instances = useLauncherSelector((s) => s.instances);
   const { go } = useNav();
   const { tier } = useShell();
-  const status = state.status.instances;
   const gate = useLoadingGate(status.kind === "loading");
   const count = RECENT_COUNT[tier];
 
   const skeleton = status.kind === "loading" || gate.view === "skeleton";
   // 加载的前 300 ms 整段不占位：列表很快回来、又一个都没玩过时，标题不会闪一下再消失
   if (skeleton && gate.view === "pending") return null;
-  const recent = skeleton || status.kind === "error" ? [] : recentInstances(state.instances, currentId, count);
+  const recent = skeleton || status.kind === "error" ? [] : recentInstances(instances, currentId, count);
   // 实例列表读不出来时由大卡原位报错；这里与「一个都没玩过」一样整段不渲染
   if (!skeleton && recent.length === 0) return null;
 

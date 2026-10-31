@@ -11,7 +11,7 @@ import { useLoadingGate } from "../../lib/loading-gate";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useSkinInfo } from "../../state/queries/home";
 import { activeAccount, activeTasks } from "../../state/selectors";
 import { Button } from "../../ui/Button";
@@ -35,17 +35,21 @@ export interface GreetingCardProps {
 }
 
 export function GreetingCard({ span, play }: GreetingCardProps) {
-  const { state, actions } = useLauncher();
+  const actions = useLauncherActions();
   const { go } = useNav();
   const { tier } = useShell();
   const run = useRunner();
   const now = useNow(60_000);
   const date = new Date(now);
-  const accounts = state.status.accounts;
-  const account = accounts.kind === "ready" ? activeAccount(state) : null;
+  const accounts = useLauncherSelector((s) => s.status.accounts);
+  const account = useLauncherSelector((s) => (s.status.accounts.kind === "ready" ? activeAccount(s) : null));
   const accountGate = useLoadingGate(accounts.kind === "loading");
-  const tasks = activeTasks(state);
-  const taskProgress = tasks.length === 0 ? null : tasks.reduce((t, task) => t + task.progress, 0) / tasks.length;
+  // 只订阅活动任务的个数与平均进度：它们随下载进度变是应当的，别的状态变化不让问候卡重渲染
+  const taskCount = useLauncherSelector((s) => activeTasks(s).length);
+  const taskProgress = useLauncherSelector((s) => {
+    const tasks = activeTasks(s);
+    return tasks.length === 0 ? null : tasks.reduce((t, task) => t + task.progress, 0) / tasks.length;
+  });
 
   const skin = useSkinInfo(account === null ? null : account.uuid);
   const skinError = skin.status === "error" ? skin.error : null;
@@ -111,7 +115,7 @@ export function GreetingCard({ span, play }: GreetingCardProps) {
             <ListRow
               size="lg"
               leading={<Icon name="download" size={18} />}
-              title={HOME_COPY.downloads(tasks.length)}
+              title={HOME_COPY.downloads(taskCount)}
               progress={<ProgressBar value={taskProgress} tone="info" size="sm" label={HOME_COPY.downloadsProgress} />}
               onClick={() => go({ page: "tasks" })}
             />

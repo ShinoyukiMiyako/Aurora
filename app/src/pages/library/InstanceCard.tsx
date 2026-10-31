@@ -16,7 +16,7 @@ import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
 import { Callout } from "../../ui/Callout";
 import { Card, CardTitleButton } from "../../ui/Card";
@@ -44,22 +44,24 @@ export interface InstanceCardProps {
 }
 
 export function InstanceCard({ inst, now }: InstanceCardProps) {
-  const { state, actions } = useLauncher();
+  const id = inst.id;
+  const name = inst.name;
+  // 每张卡只订阅自己用到的几样判定结果（都是布尔值或字符串）：下载进度与游戏日志不让实例库的卡片跟着重渲染
+  const live = useLauncherSelector((s) => findInstance(s, id) !== undefined);
+  const current = useLauncherSelector((s) => s.selectedInstanceId === id);
+  const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
+  const canPin = useLauncherSelector(canPinMore);
+  // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
+  // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
+  const viewKind = useLauncherSelector((s) => (findInstance(s, id) === undefined ? null : launchView(s, inst).kind));
+  const actions = useLauncherActions();
   const { go } = useNav();
   const run = useRunner();
   const deleteInstance = useDeleteInstance();
 
-  const id = inst.id;
-  const name = inst.name;
-  const live = findInstance(state, id) !== undefined;
-  const current = state.selectedInstanceId === id;
-  const busy = busyInstanceId(state) === id;
   const deleteReason = lockReason(instanceLocks(busy, inst.status === "installing", inst.activity === "modifying").delete, "delete");
-  const pinAllowed = inst.pinned || canPinMore(state);
+  const pinAllowed = inst.pinned || canPin;
   const cover = instanceCover(inst);
-  // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
-  // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
-  const viewKind = live ? launchView(state, inst).kind : null;
   const justCrashed = viewKind === "crashed";
   const hasCrash = justCrashed || inst.lastCrashAt !== null || inst.lastCrashError !== null;
   const crashActive = justCrashed || (viewKind !== null && isCrashActive(inst.lastCrashAt, inst.lastPlayedAt, viewKind));
@@ -69,7 +71,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const togglePin = async () => {
     const wasPinned = inst.pinned;
     // 满 5 个时状态容器自己弹上限提示、不改动固定，这里不再追加成功通知
-    const changes = wasPinned || canPinMore(state);
+    const changes = wasPinned || canPin;
     const result = await run(() => actions.togglePin(id), ACTION_ERROR.pin);
     if (result.ok && changes) actions.toast("success", wasPinned ? LIBRARY_COPY.unpinned(name) : LIBRARY_COPY.pinned(name));
   };

@@ -10,7 +10,7 @@ import { formatBytes } from "../../../domain/format";
 import { InstanceAvatar } from "../../../launch/InstanceAvatar";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
-import { useLauncher } from "../../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import {
   useInstallPlan,
   useInstanceMatches,
@@ -118,7 +118,9 @@ export interface InstallPanelProps {
 }
 
 export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, online, footerHost, onClose }: InstallPanelProps) {
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
+  const actions = useLauncherActions();
   const run = useRunner();
   const shell = useShell();
   const type = installableType(detail);
@@ -135,7 +137,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   const matchRows = matches.status === "ready" ? matches.data : null;
 
   // 矩阵是打开详情时的实例快照：之后新装好的实例不在里面，按实例集合重取一次
-  const readyIds = state.instances.filter((i) => i.status === "ready").map((i) => i.id);
+  const readyIds = instances.filter((i) => i.status === "ready").map((i) => i.id);
   const missing = matchRows === null ? [] : readyIds.filter((id) => !matchRows.some((m) => m.version_id === id));
   const missingKey = missing.join("\u0000");
   const reloadedFor = useRef("");
@@ -171,7 +173,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   };
 
   const rows: TargetRow[] = sortTargets(
-    state.instances.map((instance) => ({
+    instances.map((instance) => ({
       instance,
       verdict: targetVerdict({
         instance,
@@ -186,11 +188,11 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   // 默认勾选只做一次，且要等判定落定：矩阵到了、数据包的存档读完、光影的 Iris 情况查完
   const settled =
     matchRows !== null &&
-    (type !== "data_pack" || state.instances.every((i) => i.status !== "ready" || worldsOf(i.id).status !== "loading")) &&
+    (type !== "data_pack" || instances.every((i) => i.status !== "ready" || worldsOf(i.id).status !== "loading")) &&
     (type !== "shader" || (iris !== null && iris.status !== "loading"));
   useEffect(() => {
-    if (picked === null && settled) setPicked(new Set(defaultPick(rows, fitInstance, state.selectedInstanceId)));
-  }, [picked, settled, rows, fitInstance, state.selectedInstanceId]);
+    if (picked === null && settled) setPicked(new Set(defaultPick(rows, fitInstance, selectedInstanceId)));
+  }, [picked, settled, rows, fitInstance, selectedInstanceId]);
 
   const selected = effectiveSelection(rows, picked === null ? new Set() : picked);
   const installableCount = rows.filter((r) => r.verdict.selectable).length;
@@ -305,7 +307,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
 
       {type === "data_pack" &&
         probeWindow(
-          state.instances.filter((i) => i.status === "ready").map((i) => i.id),
+          instances.filter((i) => i.status === "ready").map((i) => i.id),
           (id) => worldsProgress(worlds.get(id)),
           PROBE_CONCURRENCY,
         ).map((id) => <WorldsProbe key={id} instanceId={id} onReport={reportWorlds} />)}
@@ -324,7 +326,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
         </Callout>
       )}
 
-      {state.instances.length === 0 ? (
+      {instances.length === 0 ? (
         <Callout tone="info" action={<Button size="sm" variant="ghost" onClick={() => shell.openCreateInstance()}>{INSTALL_COPY.createInstance}</Button>}>
           {INSTALL_COPY.noInstances}
         </Callout>

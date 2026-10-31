@@ -6,9 +6,9 @@ import { ACTION_ERROR, DELETE_INSTANCE_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import type { WorldDto } from "../../state/queries/instance";
-import { instanceTask } from "../../state/selectors";
+import { activeTasks } from "../../state/selectors";
 import styles from "./delete.module.css";
 import { worldName } from "./model";
 
@@ -17,7 +17,9 @@ import { worldName } from "./model";
  * 再弹危险确认，确认后删除。预览与删除的失败都经外层统一错误处理报告，确认框取消就什么也不做。
  */
 export function useDeleteInstance(): (inst: InstanceSummary) => Promise<void> {
-  const { state, actions } = useLauncher();
+  // 只订阅挂着未完成任务的实例 id：实例库每张卡都调用这个钩子，订阅任务本身会让它们随下载进度重渲染
+  const withTask = useLauncherSelector((s) => activeTasks(s).flatMap((t) => (t.instanceId === null ? [] : [t.instanceId])), shallowArrayEqual);
+  const actions = useLauncherActions();
   const { confirm } = useShell();
   const run = useRunner();
   return async (inst) => {
@@ -33,7 +35,7 @@ export function useDeleteInstance(): (inst: InstanceSummary) => Promise<void> {
       title: DELETE_INSTANCE_COPY.title(name),
       tone: "danger",
       confirmLabel: DELETE_INSTANCE_COPY.confirmLabel(worlds.length),
-      body: <DeleteBody worlds={worlds} pendingTask={instanceTask(state, id) !== null} />,
+      body: <DeleteBody worlds={worlds} pendingTask={withTask.includes(id)} />,
     });
     if (!ok) return;
     await run(() => actions.deleteInstance(id, worlds.length), ACTION_ERROR.deleteInstance(name));

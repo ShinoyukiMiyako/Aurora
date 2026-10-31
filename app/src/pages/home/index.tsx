@@ -7,7 +7,7 @@
 import { useMemo, useState } from "react";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useShell } from "../../shell/shell";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherSelector, useNow } from "../../state/launcher";
 import { usePlayStats } from "../../state/queries/home";
 import type { PageProps } from "../../state/route";
 import { Bento } from "../../ui/Bento";
@@ -26,7 +26,10 @@ import { ServersCard } from "./ServersCard";
 import s from "./home.module.css";
 
 export default function HomePage(_props: PageProps<"home">) {
-  const { state } = useLauncher();
+  // 主页根与各张卡只订阅自己用到的那几片：游戏运行时日志每 100 ms 一批，整份订阅会让整块 bento 跟着重渲染
+  const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
+  const instances = useLauncherSelector((s) => s.instances);
+  const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
   const { tier } = useShell();
   const now = useNow(60_000);
   const today = localDateKey(now);
@@ -49,7 +52,7 @@ export default function HomePage(_props: PageProps<"home">) {
     setMonth(monthOf(date));
   };
 
-  const target = state.status.instances.kind === "ready" ? continueTarget(state.instances, state.selectedInstanceId) : null;
+  const target = instancesReady ? continueTarget(instances, selectedInstanceId) : null;
 
   const insights = (span: ResponsiveValue, className?: string) => (
     <InsightsCard span={span} play={play} today={today} selected={selected} onPickDay={pickDay} className={className} />

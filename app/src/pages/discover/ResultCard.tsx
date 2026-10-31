@@ -1,5 +1,7 @@
 // 结果卡与它的骨架。整卡是按钮（卡内没有其他控件），点开资源详情。
+// 结果卡包着 memo：一页最多几百张，页面因输入、筛选或打开详情重渲染时，属性没变的卡不跟着重渲染。
 
+import { memo } from "react";
 import { Icon } from "../../art/Icon";
 import { hueOf } from "../../art/illustrations/seed";
 import { formatCount, formatRelative } from "../../domain/format";
@@ -32,7 +34,7 @@ export interface ResultCardProps {
   onOpen: (entry: SearchEntry) => void;
 }
 
-export function ResultCard({ entry, installed, now, onOpen }: ResultCardProps) {
+export const ResultCard = memo(function ResultCard({ entry, installed, now, onOpen }: ResultCardProps) {
   const kind = resourceKindOf(entry.resource_type);
   const hue = entryHue(entry.hue, entry.project_id, hueOf);
   const modified = parsePlatformTime(entry.date_modified);
@@ -91,7 +93,7 @@ export function ResultCard({ entry, installed, now, onOpen }: ResultCardProps) {
       </div>
     </Card>
   );
-}
+});
 
 /** 骨架卡：色带 78、标题 58% 宽、作者 36%、两行摘要、底栏 44%。 */
 export function SkeletonCard() {

@@ -12,7 +12,7 @@ import { instanceNameError } from "../../domain/rules";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useModpackPreview, type ModpackPreviewDto } from "../../state/queries/discover";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -236,9 +236,10 @@ interface ImportConfirmProps {
 }
 
 function ImportConfirm({ path, preview, online, footerHost, onBack, onDone }: ImportConfirmProps) {
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
   const run = useRunner();
-  const existing = state.instances.map((i) => i.id);
+  const existing = instances.map((i) => i.id);
   const [name, setName] = useState(() => uniqueName(preview.name, existing));
   const [cover, setCover] = useState<InstanceCover>(() => defaultModpackCover(preview.name));
   const [submitting, setSubmitting] = useState(false);

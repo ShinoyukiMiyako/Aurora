@@ -8,7 +8,7 @@ import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
 import { coverLabel, LOADER_NAME } from "../../copy/flows";
 import { SIDEBAR_PIN_LIMIT } from "../../domain/limits";
 import type { LoaderKind } from "../../domain/types";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherSelector } from "../../state/launcher";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 import { LoaderTag } from "../../ui/LoaderTag";
@@ -99,9 +99,8 @@ export interface PackFormProps {
 }
 
 export function PackForm({ seed, name, onName, nameError, cover, onCover, version, facts, readOnly }: PackFormProps) {
-  const { state } = useLauncher();
-  const pins = state.sidebarPins.length;
-  const memoryAuto = state.settings !== null && state.settings.memory.auto;
+  const pins = useLauncherSelector((s) => s.sidebarPins.length);
+  const memoryAuto = useLauncherSelector((s) => s.settings !== null && s.settings.memory.auto);
   return (
     <>
       <div className={styles.packCard}>

@@ -1,13 +1,13 @@
 // 发现页：跨 Modrinth / CurseForge 搜资源，点开详情装进实例；整合包装成新实例，本地整合包文件从头图右上角导入。
 // 页面持有界面上的筛选与分页累积；搜索结果、详情、版本、落位矩阵都是状态层的按需查询。
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherSelector, useNow } from "../../state/launcher";
 import type { SearchEntry } from "../../state/queries/discover";
 import { invalidate } from "../../state/resource";
 import type { DiscoverKind, PageProps } from "../../state/route";
@@ -54,7 +54,9 @@ import { SearchHero, Toolbar } from "./Toolbar";
 import { useResultPages, type ResultPages } from "./useResultPages";
 
 export default function DiscoverPage({ route }: PageProps<"discover">) {
-  const { state } = useLauncher();
+  // 只订阅实例列表与它是否读到：装 Mod 期间下载进度每 100 ms 一次，整份订阅会让全部结果卡跟着重渲染
+  const instances = useLauncherSelector((s) => s.instances);
+  const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
   const nav = useNav();
   const shell = useShell();
   const titleId = useId();
@@ -63,7 +65,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   const now = useNow(60000);
 
   const [restored] = useState(readSnapshot);
-  const [filters, setFilters] = useState<DiscoverFilters>(() => routeFilters(restored === null ? DEFAULT_FILTERS : restored.filters, route, state.instances));
+  const [filters, setFilters] = useState<DiscoverFilters>(() => routeFilters(restored === null ? DEFAULT_FILTERS : restored.filters, route, instances));
   const [detail, setDetail] = useState<DetailTarget | null>(() => (route.open === undefined ? null : { ...route.open, sources: [] }));
   // 外壳把拖进窗口的整合包经路由带进来：进页即打开导入弹窗读取它
   const [importing, setImporting] = useState<ImportRequest | null>(() => (route.importFile === undefined ? null : { file: route.importFile }));
@@ -75,7 +77,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   const signature = routeSignature(route);
   if (signature !== appliedRoute) {
     setAppliedRoute(signature);
-    const next = routeFilters(filters, route, state.instances);
+    const next = routeFilters(filters, route, instances);
     setFilters(next);
     debounced.flush(next.query);
     if (route.open !== undefined) setDetail({ ...route.open, sources: [] });
@@ -83,8 +85,8 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   }
 
   // 适配实例被删掉或变得不可用（开始重装、损坏）时回到不限
-  const candidates = fitCandidates(state.instances);
-  if (filters.fitInstance !== null && state.status.instances.kind === "ready" && !candidates.some((i) => i.id === filters.fitInstance)) {
+  const candidates = fitCandidates(instances);
+  if (filters.fitInstance !== null && instancesReady && !candidates.some((i) => i.id === filters.fitInstance)) {
     setFilters(withFitInstance(filters, null));
   }
 
@@ -146,7 +148,8 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     // 清空即刻生效，不必等防抖
     if (query === "") debounced.flush("");
   };
-  const open = (entry: SearchEntry) => setDetail({ platform: entry.platform, projectId: entry.project_id, sources: entry.sources });
+  // 引用稳定：结果卡包着 memo，页面因输入、筛选或详情开合重渲染时几百张卡不跟着重渲染
+  const open = useCallback((entry: SearchEntry) => setDetail({ platform: entry.platform, projectId: entry.project_id, sources: entry.sources }), []);
 
   // 「已装入 n 个实例」只对 Mod 有意义：结果里确实有 Mod 时才去读各实例的 Mod 列表，同时在读的有上限
   const [modSources, report] = useCollected<ModSourcesState>();
@@ -155,7 +158,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     for (const [id, s] of modSources) if (s.status === "ready") out.set(id, s.sources);
     return out;
   }, [modSources]);
-  const probeIds = pages.hits.some((e) => e.resource_type === "mod") ? state.instances.filter((i) => i.status === "ready" && !i.placeholder).map((i) => i.id) : [];
+  const probeIds = pages.hits.some((e) => e.resource_type === "mod") ? instances.filter((i) => i.status === "ready" && !i.placeholder).map((i) => i.id) : [];
   const probing = probeWindow(probeIds, (id) => modSourcesProgress(modSources.get(id)), PROBE_CONCURRENCY);
 
   return (
@@ -187,7 +190,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
               pages={pages}
               online={online}
               now={now}
-              instances={state.instances}
+              instances={instances}
               installed={installed}
               container={container}
               onOpen={open}
