@@ -15,6 +15,7 @@
 //! - [`content`]：存档、资源包、光影包、Mod 文件计数与目录体积。
 //! - [`level`]：`level.dat` 的最小 NBT 读取。
 //! - [`trash`]：移入回收站。
+//! - [`world_backup`]：存档备份的打包、清单、保留策略与恢复。
 //!
 //! 错误统一归口到 [`Error`]，下游 `#[from]` 冒泡。
 
@@ -28,6 +29,7 @@ pub mod marker;
 pub mod naming;
 pub mod settings;
 pub mod trash;
+pub mod world_backup;
 
 pub use error::{Error, PinsViolation, Result};
 
@@ -72,3 +74,11 @@ pub use content::{
 pub use level::{GameMode, LevelSummary};
 
 pub use trash::{Disposer, RecycleBin};
+
+pub use world_backup::{
+    BACKUP_INDEX_FILE, BACKUP_INDEX_VERSION, BACKUPS_DIR, BackupEntry, BackupIndex, BackupKind,
+    BackupLayout, PackProgress, PackedWorld, RESTORE_SUFFIX, RetentionPolicy, WorldScope,
+    commit_restore, is_backup_file_name, merge_scope_dir, pack_world, plan_prune,
+    read_backup_index, remove_partial_backups, scan_backup_indices, scope_backup_indices,
+    stage_restore, world_in_use, write_backup_index,
+};
