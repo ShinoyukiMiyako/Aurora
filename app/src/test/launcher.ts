@@ -114,6 +114,8 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     skipped_update_version: null,
     notified_update_version: null,
     language: "zh-CN",
+    extra_java_paths: [],
+    prefer_dedicated_gpu: false,
     ...overrides,
   };
 }

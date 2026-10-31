@@ -59,6 +59,8 @@ function seedConfig(): ConfigDto {
     skipped_update_version: null,
     notified_update_version: null,
     language: "zh-CN",
+    extra_java_paths: [],
+    prefer_dedicated_gpu: false,
   };
 }
 
@@ -233,6 +235,21 @@ export function setMockJavaPaths(paths: readonly string[]): void {
   knownJava = new Set(paths.map(norm));
 }
 
+/** 与后端 add_extra_java_path 一致：按不区分大小写的路径去重，已有时不动。 */
+export function addMockExtraJavaPath(path: string): void {
+  if (config.extra_java_paths.some((p) => samePath(p, path))) return;
+  config = { ...config, extra_java_paths: [...config.extra_java_paths, path] };
+}
+
+/** 与后端 remove_extra_java_path 一致：默认 Java 正是被移除的那个时改回自动选择。 */
+export function removeMockExtraJavaPath(path: string): { removed: boolean; default_reset: boolean } {
+  const kept = config.extra_java_paths.filter((p) => !samePath(p, path));
+  const removed = kept.length !== config.extra_java_paths.length;
+  const defaultReset = removed && config.default_java !== DEFAULT_JAVA_AUTO && samePath(config.default_java, path);
+  config = { ...config, extra_java_paths: kept, default_java: defaultReset ? DEFAULT_JAVA_AUTO : config.default_java };
+  return { removed, default_reset: defaultReset };
+}
+
 // 先把所有字段校验完再一次性写入，与后端「有一个不合法就整体拒绝」一致。
 function updateConfig(args: MockArgs): void {
   const next: ConfigDto = { ...config, memory: { ...config.memory } };
@@ -265,6 +282,7 @@ function updateConfig(args: MockArgs): void {
     next.notified_update_version = requireString(args, "notifiedUpdateVersion", "update_config");
   }
   if (args.language !== undefined) next.language = oneOf(args.language, UI_LANGUAGES, "的界面语言");
+  if (args.preferDedicatedGpu !== undefined) next.prefer_dedicated_gpu = requireBoolean(args, "preferDedicatedGpu");
   config = next;
 }
 
@@ -346,13 +364,18 @@ interface ConfigSnapshot {
   firstRunCompleted: boolean;
 }
 
+/** 后来才加进配置、早先存下的快照里没有的字段。 */
+type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu";
+type StoredConfigSnapshot = Omit<ConfigSnapshot, "config"> & { config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>> };
+
 // 快照形状一变就升版本：旧快照里的配置缺字段，读回来会在 DTO 适配处出错，不如启用时就明确报版本不符。
 export const persist: MockPersist = {
   version: 2,
   snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], firstRunCompleted }),
   restore: (data) => {
-    const saved = data as ConfigSnapshot;
-    config = saved.config;
+    const saved = data as StoredConfigSnapshot;
+    // 与后端配置的 serde(default) 一致：手动 Java 与独显偏好是后加的字段，之前存下的快照没有它们，按默认值读入
+    config = { extra_java_paths: [], prefer_dedicated_gpu: false, ...saved.config };
     extras = saved.extras;
     disk = new Set(saved.disk);
     withVersions = new Set(saved.withVersions);

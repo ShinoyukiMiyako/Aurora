@@ -66,7 +66,8 @@ import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
 import * as instancesIpc from "../ipc/instances";
 import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
-import type { InstalledRuntimeDto } from "../ipc/java";
+import * as javaIpc from "../ipc/java";
+import type { InstalledRuntimeDto, JavaInstallationDto, RemoveJavaPathDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
 import type { ModpackInstallOutcomeDto, ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
@@ -343,6 +344,10 @@ export interface LauncherActions {
   flushTaskJournal(): Promise<void>;
   // 设置
   updateSettings(patch: SettingsPatch): Promise<void>;
+  /** 记下一个手动指定的 Java；成功后 Java 列表重新探测、设置重读（extra_java_paths 变了）。 */
+  addJavaPath(path: string): Promise<JavaInstallationDto>;
+  /** 移除一条手动添加的 Java；默认 Java 可能随之改回自动选择，所以同样重读设置。 */
+  removeJavaPath(path: string): Promise<RemoveJavaPathDto>;
   setGameDirectory(path: string): Promise<void>;
   /**
    * 首次启动向导第一步的提交：后端校验并落下游戏目录、收下勾选的文件夹、记下向导已完成（此后关窗口，下次直接进主页）。
@@ -2445,6 +2450,18 @@ export class LauncherStore {
       async updateSettings(patch) {
         await configIpc.updateConfig(settingsPatchToConfig(patch));
         await store.fetchSettings();
+      },
+      async addJavaPath(path) {
+        const java = await javaIpc.addJavaPath(path);
+        invalidateResources("java");
+        await store.fetchSettings();
+        return java;
+      },
+      async removeJavaPath(path) {
+        const result = await javaIpc.removeJavaPath(path);
+        invalidateResources("java");
+        await store.fetchSettings();
+        return result;
       },
       async setGameDirectory(path) {
         await configIpc.setGameDirectory(path);

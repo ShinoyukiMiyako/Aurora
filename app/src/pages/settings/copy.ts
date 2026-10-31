@@ -121,6 +121,37 @@ export const JAVA_COPY = {
   majorUsers: (n: number) => `${n} 个实例需要`,
   noMajors: "还没有实例用到需要下载的 Java，新建实例后这里会列出它们要的主版本。",
   enqueued: (major: number) => `已加入下载队列：Java ${major}`,
+  add: "添加 Java",
+  added: (major: number) => `已添加 Java ${major}`,
+  addedBody: (vendor: string, version: string) => `${vendor} ${version}`,
+  addFailed: "没能添加 Java",
+  pickFailed: "没能打开文件选择框",
+  incomplete: "不完整",
+  missingFiles: (files: readonly string[]) => `缺少 ${files.join("、")}，自动选择会跳过它`,
+  manualTitle: "手动添加的 Java",
+  manualDesc: "移除只删记录，不动磁盘文件",
+  manualDetail: (major: number, vendor: string, version: string) => `Java ${major} · ${vendor} ${version}`,
+  unrecognized: "识别不出",
+  unrecognizedDesc: "这个位置现在识别不出 Java，文件可能被移走了",
+  remove: "移除",
+  removed: "已移除手动添加的 Java",
+  defaultReset: "默认 Java 改回了自动选择",
+  removeFailed: "没能移除 Java",
+} as const;
+
+export const GPU_COPY = {
+  title: "显卡",
+  subtitle: `让${APP_NAME}启动的游戏用哪块显卡`,
+  toggle: "让游戏用独立显卡",
+  descSwitchable: (name: string) => `启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」，游戏会用 ${name}`,
+  descSingle: "这台电脑只找到一块显卡，开着也不会换显卡",
+  descLoading: "正在读取显卡信息",
+  descGeneric: "启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」",
+  dualNote: (powerSaving: string, highPerformance: string) =>
+    `这台电脑有两块显卡：${powerSaving} 和 ${highPerformance}。笔记本常默认用省电的那块跑游戏，帧数会低不少。`,
+  revertNote:
+    "关掉后不会撤销已经写进 Windows 的设置；要改回，到 Windows 设置 → 系统 → 屏幕 → 显示卡（Windows 10：系统 → 显示 → 图形设置）里把 java.exe 改回「让 Windows 决定」。",
+  readFailed: "读不到显卡信息",
 } as const;
 
 // ---------------------------------------------------------------- 游戏

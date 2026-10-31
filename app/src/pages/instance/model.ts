@@ -220,17 +220,22 @@ function compareJavaVersion(a: JavaInstallationDto["version"], b: JavaInstallati
 
 /**
  * 自动选择会落到哪个运行时，与后端的挑选同一条规则：全局设置里指定了默认 Java 时一律用它；
- * 否则在主版本相等的候选里先挑 64 位、再挑版本号最高的；一个都没有时启动阶段自动下载。
+ * 否则在主版本相等、文件齐全的候选里先挑 64 位、再挑版本号最高的；一个都没有时启动阶段自动下载。
  */
 export type AutoJavaPick =
   | { kind: "global"; path: string; runtime: JavaInstallationDto | null }
   | { kind: "local"; runtime: JavaInstallationDto }
   | { kind: "download" };
 
-/** 主版本相等的候选里先挑 64 位、再挑版本号最高的；一个都没有为 null。 */
+/** 运行时文件齐全；后端挑选先滤掉不完整的，这里的推断与它保持一致。 */
+export function runtimeComplete(runtime: JavaInstallationDto): boolean {
+  return runtime.missing_files.length === 0;
+}
+
+/** 主版本相等、文件齐全的候选里先挑 64 位、再挑版本号最高的；一个都没有为 null。 */
 export function bestLocalRuntime(runtimes: readonly JavaInstallationDto[], major: number): JavaInstallationDto | null {
   return runtimes
-    .filter((r) => r.version.major === major)
+    .filter((r) => r.version.major === major && runtimeComplete(r))
     .reduce<JavaInstallationDto | null>((acc, r) => {
       if (acc === null) return r;
       if (r.is_64bit !== acc.is_64bit) return r.is_64bit ? r : acc;
