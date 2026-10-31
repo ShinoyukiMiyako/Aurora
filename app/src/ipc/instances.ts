@@ -181,9 +181,14 @@ export interface ManifestDto {
   fetch_error: string | null;
 }
 
-/** open_folder 能打开的文件夹。game_dir 不需要 id；world 还需要存档文件夹名。 */
+/**
+ * open_folder 能打开的文件夹。game_dir、data_dir（启动器数据目录）、launcher_logs（启动器自己的日志目录）
+ * 不需要 id；world 还需要存档文件夹名。
+ */
 export type FolderTarget =
   | "game_dir"
+  | "data_dir"
+  | "launcher_logs"
   | "instance"
   | "mods"
   | "saves"

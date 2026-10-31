@@ -217,6 +217,9 @@ describe("mock：列表、内容与元数据", () => {
 
   it("打开文件夹的参数校验与后端一致", async () => {
     await openFolder("game_dir", null);
+    // 数据目录与启动器日志目录不属于任何实例，不需要 id。
+    await openFolder("data_dir", null);
+    await openFolder("launcher_logs", null);
     await openFolder("mods", "樱花生存");
     await openFolder("world", "樱花生存", "New World");
     await openFolder("instance", "没装完");

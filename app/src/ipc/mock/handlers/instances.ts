@@ -27,6 +27,8 @@ const CORE_EVENT = "aurora://core-event";
 const SIDEBAR_PIN_MAX = 5;
 const FOLDER_TARGETS: readonly FolderTarget[] = [
   "game_dir",
+  "data_dir",
+  "launcher_logs",
   "instance",
   "mods",
   "saves",
@@ -837,7 +839,7 @@ export const handlers: MockHandlers = {
     const id = optStr(args, "id");
     const world = optStr(args, "world");
     if (!(FOLDER_TARGETS as readonly string[]).includes(target)) throw invalid("target", "unknown", `不认识的文件夹类型 ${target}`);
-    if (target === "game_dir") return;
+    if (target === "game_dir" || target === "data_dir" || target === "launcher_logs") return;
     if (id === null) throw invalid("id", "missing", `打开 ${target} 需要实例 id`);
     if (target === "world") {
       if (world === null) throw invalid("world", "missing", "打开存档需要存档文件夹名");

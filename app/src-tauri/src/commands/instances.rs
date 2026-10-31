@@ -1217,6 +1217,8 @@ pub async fn required_java(
 
 /// 用系统文件管理器打开一个文件夹。`target`：
 /// - `game_dir`：游戏目录（不需要 `id`）；
+/// - `data_dir`：启动器数据目录（配置、凭据、任务表所在，不需要 `id`）；
+/// - `launcher_logs`：启动器自己的日志目录 `<数据目录>/logs`（不需要 `id`）；
 /// - `instance`：实例目录 `versions/<id>`；
 /// - `mods` / `saves` / `resourcepacks` / `shaderpacks` / `logs` / `screenshots`：实例工作目录下的子目录，
 ///   不存在时先建出来；
@@ -1266,6 +1268,16 @@ pub(crate) async fn folder_path(
     match target {
         "game_dir" => {
             let dir = aurora.game_dir().to_path_buf();
+            ensure_dir(&dir).await?;
+            Ok(dir)
+        }
+        "data_dir" => {
+            let dir = aurora.data_dir().to_path_buf();
+            ensure_dir(&dir).await?;
+            Ok(dir)
+        }
+        "launcher_logs" => {
+            let dir = aurora.data_dir().join(crate::logging::LOGS_DIR);
             ensure_dir(&dir).await?;
             Ok(dir)
         }
@@ -2113,6 +2125,23 @@ mod tests {
         assert_eq!(
             folder_path(facade, "game_dir", None, None).await.unwrap(),
             env.game_dir()
+        );
+        assert_eq!(
+            folder_path(facade, "data_dir", None, None).await.unwrap(),
+            env.dir.path()
+        );
+        // 启动器日志目录还没写过日志时也先建出来，资源管理器打得开。
+        let logs = folder_path(facade, "launcher_logs", None, None)
+            .await
+            .unwrap();
+        assert_eq!(logs, env.dir.path().join("logs"));
+        assert!(logs.is_dir());
+        assert_eq!(
+            folder_path(facade, "launcher_logs", Some("1.21.1"), None)
+                .await
+                .unwrap(),
+            logs,
+            "不需要实例的目标忽略 id"
         );
         assert_eq!(
             folder_path(facade, "instance", Some("1.21.1"), None)
