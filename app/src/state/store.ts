@@ -814,6 +814,8 @@ export class LauncherStore {
    * 照常做完时按成功返回，同一个 id 再登记拿到的是全新的令牌，下一项会照常开始。所以取消要由前端记着，每开始一项前查一次。
    */
   private readonly cancelRequested = new Set<string>();
+  /** 固定服务器的读改写排成一条链：两次切换并发时，后一次要等前一次写完再读，否则先写的那台会被后写的覆盖。 */
+  private serverPinChain: Promise<void> = Promise.resolve();
 
   readonly actions: LauncherActions;
   private readonly net: NetworkMonitor;
@@ -2222,10 +2224,18 @@ export class LauncherStore {
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
       async togglePinServer(server) {
-        const current = await listPinnedServers();
-        const pinned = current.some((s) => s.address === server.address);
-        await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, server]);
-        invalidateResources("servers");
+        const run = store.serverPinChain.then(async () => {
+          const current = await listPinnedServers();
+          const pinned = current.some((s) => s.address === server.address);
+          await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, server]);
+          invalidateResources("servers");
+        });
+        // 链只负责排队：这一次的失败经下面的 await 照常抛给调用方，不挡后面排着的切换
+        store.serverPinChain = run.then(
+          () => undefined,
+          () => undefined,
+        );
+        await run;
       },
       async reload(slice) {
         await store.loadSlice(slice);
