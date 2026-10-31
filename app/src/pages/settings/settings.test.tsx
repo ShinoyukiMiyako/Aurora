@@ -3,10 +3,10 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
-import { APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
-import type { JavaInstallationDto } from "../../ipc/java";
+import { APP_NAME, APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
+import type { GpuAdapterDto, JavaInstallationDto } from "../../ipc/java";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
-import { setMockJavaInstallations } from "../../ipc/mock/handlers/java";
+import { setMockGpuAdapters, setMockJavaInstallations } from "../../ipc/mock/handlers/java";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -512,6 +512,81 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
     await click(removeButton(path));
     expect(toasts()).toContainEqual({ tone: "error", title: "没能移除 Java", body: "写入 config.json 失败: 拒绝访问" });
     expect(manualRow(path).textContent).toContain("Java 17");
+  });
+});
+
+function gpuAdapter(name: string, over: Partial<GpuAdapterDto> = {}): GpuAdapterDto {
+  return { name, vendor_id: 0x1002, dedicated_video_memory_mb: 16368, high_performance: false, power_saving: false, ...over };
+}
+
+describe("设置页：Java · 显卡", () => {
+  it("两块显卡：说明块写出两块的名字，开关说明写出会用哪块；打开开关写入 preferDedicatedGpu", async () => {
+    await mount("java");
+    const card = section("显卡");
+    expect(card.textContent).toContain(`让${APP_NAME}启动的游戏用哪块显卡`);
+    const note = card.querySelector('[data-tone="info"]');
+    expect(note?.textContent).toBe("这台电脑有两块显卡：Intel(R) UHD Graphics 和 NVIDIA GeForce RTX 4060 Laptop GPU。笔记本常默认用省电的那块跑游戏，帧数会低不少。");
+    expect(card.textContent).toContain("启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」，游戏会用 NVIDIA GeForce RTX 4060 Laptop GPU");
+    expect(card.textContent).toContain("关掉后不会撤销已经写进 Windows 的设置");
+    const toggle = button("让游戏用独立显卡");
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await click(toggle);
+    expect(callsOf(ipc, "update_config")).toEqual([{ preferDedicatedGpu: true }]);
+    expect(button("让游戏用独立显卡").getAttribute("aria-checked")).toBe("true");
+    expect((await mockInvoke<{ prefer_dedicated_gpu: boolean }>("get_config")).prefer_dedicated_gpu).toBe(true);
+  });
+
+  it("只有一块显卡：没有说明块，开关说明写明不会换显卡", async () => {
+    setMockGpuAdapters({ adapters: [gpuAdapter("AMD Radeon RX 7800 XT", { high_performance: true, power_saving: true })], switchable: false });
+    await mount("java");
+    const card = section("显卡");
+    expect(card.querySelector('[data-tone="info"]')).toBeNull();
+    expect(card.textContent).not.toContain("这台电脑有两块显卡");
+    expect(card.textContent).toContain("这台电脑只找到一块显卡，开着也不会换显卡");
+  });
+
+  it("两块显卡挑的是同一块：不提示切换，也不写会用哪块", async () => {
+    setMockGpuAdapters({
+      adapters: [gpuAdapter("NVIDIA RTX A4000", { vendor_id: 0x10de, high_performance: true, power_saving: true }), gpuAdapter("NVIDIA RTX A2000", { vendor_id: 0x10de })],
+      switchable: false,
+    });
+    await mount("java");
+    const card = section("显卡");
+    expect(card.querySelector('[data-tone="info"]')).toBeNull();
+    expect(card.textContent).toContain("启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」");
+    expect(card.textContent).not.toContain("游戏会用");
+    expect(card.textContent).not.toContain("只找到一块显卡");
+  });
+
+  it("读取中：说明位置是骨架行，开关说明写正在读取，开关照常可用", async () => {
+    const pending = deferred<unknown>();
+    ipc.overrides.set("gpu_adapters", () => pending.promise);
+    await mount("java");
+    const card = section("显卡");
+    expect(card.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(card.textContent).toContain("正在读取显卡信息");
+    await click(button("让游戏用独立显卡"));
+    expect(callsOf(ipc, "update_config")).toEqual([{ preferDedicatedGpu: true }]);
+  });
+
+  it("读不到显卡信息：卡内说明原因并可重试，开关照常可用", async () => {
+    ipc.overrides.set("gpu_adapters", () => {
+      throw new IpcError("gpu_query_failed", "枚举显卡失败: 不支持的接口", { hresult: "0x887A0004", causes: [] });
+    });
+    await mount("java");
+    const card = section("显卡");
+    expect(card.querySelector('[data-tone="danger"]')?.textContent).toContain("读不到显卡信息枚举显卡失败: 不支持的接口");
+    expect(card.textContent).toContain("启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」");
+    expect(card.textContent).not.toContain("游戏会用");
+    await click(button("让游戏用独立显卡"));
+    expect(callsOf(ipc, "update_config")).toEqual([{ preferDedicatedGpu: true }]);
+
+    ipc.overrides.delete("gpu_adapters");
+    const retry = [...card.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "重试");
+    if (retry === undefined) throw new Error("显卡卡里没有「重试」");
+    await click(retry);
+    expect(callsOf(ipc, "gpu_adapters")).toHaveLength(2);
+    expect(section("显卡").querySelector('[data-tone="info"]')?.textContent).toContain("Intel(R) UHD Graphics 和 NVIDIA GeForce RTX 4060 Laptop GPU");
   });
 });
 

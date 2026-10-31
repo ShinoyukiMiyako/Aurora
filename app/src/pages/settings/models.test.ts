@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { instanceFromDto } from "../../domain/adapt";
-import type { JavaInstallationDto } from "../../state/queries/catalog";
+import type { GpuAdapterDto, JavaInstallationDto } from "../../state/queries/catalog";
 import { instanceDto } from "../../test/launcher";
 import { dirName, hasBang, normalizePath, overAvailable, samePath, unrecorded } from "./game-model";
 import {
+  gpuSummary,
   hasManaged,
   isComplete,
   javaNotes,
@@ -103,6 +104,29 @@ describe("Java 分区推导", () => {
   it("重新扫描的差异按路径比较", () => {
     expect(scanDiff([runtime("a", 8), runtime("b", 17)], [runtime("b", 17), runtime("c", 21), runtime("d", 25)])).toEqual({ added: 2, removed: 1 });
     expect(scanDiff([runtime("a", 8)], [runtime("a", 8)])).toEqual({ added: 0, removed: 0 });
+  });
+});
+
+describe("显卡说明", () => {
+  function adapter(name: string, over: Partial<GpuAdapterDto> = {}): GpuAdapterDto {
+    return { name, vendor_id: 0x10de, dedicated_video_memory_mb: 8192, high_performance: false, power_saving: false, ...over };
+  }
+
+  it("可切换时取高性能与省电偏好各自的首选", () => {
+    const dgpu = adapter("RTX 4060", { high_performance: true });
+    const igpu = adapter("UHD 770", { vendor_id: 0x8086, power_saving: true });
+    expect(gpuSummary({ adapters: [dgpu, igpu], switchable: true })).toEqual({ kind: "switchable", highPerformance: dgpu, powerSaving: igpu });
+  });
+
+  it("只有一块是 single；没有显卡或几块都挑同一块时说不出会换到哪块", () => {
+    const only = adapter("RX 7800 XT", { high_performance: true, power_saving: true });
+    expect(gpuSummary({ adapters: [only], switchable: false })).toEqual({ kind: "single", adapter: only });
+    expect(gpuSummary({ adapters: [], switchable: false })).toEqual({ kind: "other" });
+    expect(gpuSummary({ adapters: [only, adapter("RTX A2000")], switchable: false })).toEqual({ kind: "other" });
+  });
+
+  it("标了可切换却缺首选时直接报错，不编一个名字", () => {
+    expect(() => gpuSummary({ adapters: [adapter("A", { high_performance: true }), adapter("B")], switchable: true })).toThrow("显卡信息自相矛盾");
   });
 });
 

@@ -1,5 +1,5 @@
 // Java：自动下载开关、默认 Java（自动选择或固定一个探测到的运行时）、手动添加与移除 Java、按条件出现的提醒、
-// 以及手动下载运行时。
+// 手动下载运行时，以及让游戏用独立显卡。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { JAVA_AUTO, type InstanceSummary } from "../../../domain/adapt";
@@ -7,7 +7,7 @@ import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
-import { useJavaRuntimes, type JavaInstallationDto } from "../../../state/queries/catalog";
+import { useGpuAdapters, useJavaRuntimes, type JavaInstallationDto } from "../../../state/queries/catalog";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
@@ -21,9 +21,10 @@ import { Skeleton } from "../../../ui/Skeleton";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { JAVA_SOURCE_LABEL } from "../../../copy/settings";
-import { JAVA_COPY, LOAD_COPY } from "../copy";
+import { GPU_COPY, JAVA_COPY, LOAD_COPY } from "../copy";
 import { InstanceStack } from "../InstanceStack";
 import {
+  gpuSummary,
   hasManaged,
   instancesNeeding,
   isComplete,
@@ -372,11 +373,72 @@ function DownloadCard() {
   );
 }
 
+function GpuCard() {
+  const settings = useLoadedSettings();
+  const actions = useLauncherActions();
+  const gpu = useGpuAdapters();
+  const prefer = useSettingWrite(settings.preferDedicatedGpu, GPU_COPY.toggle, (preferDedicatedGpu: boolean) => actions.updateSettings({ preferDedicatedGpu }));
+
+  // 开关不随读取状态禁用：偏好在启动时才按选中的 Java 写入，读不到显卡信息也照样能写
+  let notice: ReactNode = null;
+  let description: string;
+  if (gpu.status === "loading") {
+    notice = (
+      <div aria-busy="true">
+        <Skeleton shape="text" />
+      </div>
+    );
+    description = GPU_COPY.descLoading;
+  } else if (gpu.status === "error") {
+    notice = (
+      <Callout
+        tone="danger"
+        announce
+        action={
+          <Button size="sm" onClick={() => gpu.reload()}>
+            {LOAD_COPY.retry}
+          </Button>
+        }
+      >
+        <span className={s.calloutTitle}>{GPU_COPY.readFailed}</span>
+        <span className={s.errorText}>{gpu.error.message}</span>
+      </Callout>
+    );
+    description = GPU_COPY.descGeneric;
+  } else {
+    const summary = gpuSummary(gpu.data);
+    if (summary.kind === "switchable") {
+      notice = (
+        <Callout tone="info" icon="info">
+          {GPU_COPY.dualNote(summary.powerSaving.name, summary.highPerformance.name)}
+        </Callout>
+      );
+      description = GPU_COPY.descSwitchable(summary.highPerformance.name);
+    } else {
+      description = summary.kind === "single" ? GPU_COPY.descSingle : GPU_COPY.descGeneric;
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader title={GPU_COPY.title} subtitle={GPU_COPY.subtitle} icon="monitor" />
+      <div className={s.cardBody}>
+        {notice}
+        <SettingRow title={GPU_COPY.toggle} description={description}>
+          <Toggle checked={prefer.value} onChange={prefer.set} ariaLabel={GPU_COPY.toggle} />
+        </SettingRow>
+        <p className={s.mutedText}>{GPU_COPY.revertNote}</p>
+      </div>
+    </Card>
+  );
+}
+
 export function JavaSection() {
   return (
     <>
       <RuntimeCard />
       <DownloadCard />
+      <GpuCard />
     </>
   );
 }

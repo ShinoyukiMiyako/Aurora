@@ -139,6 +139,21 @@ export const JAVA_COPY = {
   removeFailed: "没能移除 Java",
 } as const;
 
+export const GPU_COPY = {
+  title: "显卡",
+  subtitle: `让${APP_NAME}启动的游戏用哪块显卡`,
+  toggle: "让游戏用独立显卡",
+  descSwitchable: (name: string) => `启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」，游戏会用 ${name}`,
+  descSingle: "这台电脑只找到一块显卡，开着也不会换显卡",
+  descLoading: "正在读取显卡信息",
+  descGeneric: "启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」",
+  dualNote: (powerSaving: string, highPerformance: string) =>
+    `这台电脑有两块显卡：${powerSaving} 和 ${highPerformance}。笔记本常默认用省电的那块跑游戏，帧数会低不少。`,
+  revertNote:
+    "关掉后不会撤销已经写进 Windows 的设置；要改回，到 Windows 设置 → 系统 → 屏幕 → 显示卡（Windows 10：系统 → 显示 → 图形设置）里把 java.exe 改回「让 Windows 决定」。",
+  readFailed: "读不到显卡信息",
+} as const;
+
 // ---------------------------------------------------------------- 游戏
 
 export const MEMORY_COPY = {

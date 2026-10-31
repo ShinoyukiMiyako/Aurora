@@ -1,8 +1,9 @@
-// Java 分区的推导：哪些主版本有实例在用、本机缺哪些、默认 Java 的提醒、重新扫描前后的差异、手动添加的记录。纯函数。
+// Java 分区的推导：哪些主版本有实例在用、本机缺哪些、默认 Java 的提醒、重新扫描前后的差异、手动添加的记录、
+// 显卡卡片的说明。纯函数。
 
 import type { InstanceSummary } from "../../domain/adapt";
 import { JAVA_AUTO } from "../../domain/adapt";
-import type { JavaInstallationDto } from "../../state/queries/catalog";
+import type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto } from "../../state/queries/catalog";
 import { samePath } from "./game-model";
 
 /**
@@ -68,6 +69,25 @@ export function manualJavas(extraPaths: readonly string[], runtimes: readonly Ja
     const found = runtimes.find((r) => samePath(r.path, path));
     return { path, runtime: found === undefined ? null : found };
   });
+}
+
+export type GpuSummary =
+  | { kind: "switchable"; highPerformance: GpuAdapterDto; powerSaving: GpuAdapterDto }
+  | { kind: "single"; adapter: GpuAdapterDto }
+  /** 没有硬件显卡，或几块显卡里两种偏好挑的是同一块：说不出会换到哪块。 */
+  | { kind: "other" };
+
+export function gpuSummary(dto: GpuAdaptersDto): GpuSummary {
+  if (dto.switchable) {
+    const highPerformance = dto.adapters.find((a) => a.high_performance);
+    const powerSaving = dto.adapters.find((a) => a.power_saving);
+    if (highPerformance === undefined || powerSaving === undefined) {
+      throw new Error("显卡信息自相矛盾：标了可切换，却找不到高性能或省电偏好的首选");
+    }
+    return { kind: "switchable", highPerformance, powerSaving };
+  }
+  if (dto.adapters.length === 1) return { kind: "single", adapter: dto.adapters[0] };
+  return { kind: "other" };
 }
 
 /** 默认 Java 指向的运行时；自动选择或路径已不在探测结果里时为 null。 */
