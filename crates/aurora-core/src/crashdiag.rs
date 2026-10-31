@@ -1065,9 +1065,17 @@ mod tests {
 
     #[test]
     fn exit_code_fallback_is_a_clue_but_not_a_crash_sign_for_suspects() {
-        for (code, hex) in [
-            (-1_073_741_819, "0xC0000005"),
-            (-1_073_740_791, "0xC0000409"),
+        for (code, hex, kind) in [
+            (
+                -1_073_741_819,
+                "0xC0000005",
+                aurora_launch::ExitCodeKind::AccessViolation,
+            ),
+            (
+                -1_073_740_791,
+                "0xC0000409",
+                aurora_launch::ExitCodeKind::StackBufferOverrun,
+            ),
         ] {
             let report = CrashReport::from_sources(
                 &[ScanInput {
@@ -1084,6 +1092,9 @@ mod tests {
             assert_eq!(clue.detail.as_deref(), Some(hex));
             assert_eq!((clue.line, clue.matched.as_str()), (0, ""));
             assert!(clue.context.is_empty());
+            // 兜底线索与报告的退出码说明指的是同一个码。
+            let note = report.exit_code_note.as_ref().expect("认得的退出码带说明");
+            assert_eq!((note.code, note.hex.as_str(), note.kind), (code, hex, kind));
             // 正常加载日志里列出的 sodium 不因兜底线索变成嫌疑。
             assert!(report.suspects.is_empty());
         }
