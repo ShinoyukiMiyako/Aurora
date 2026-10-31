@@ -1,0 +1,40 @@
+/* 标题与动作底对齐；窄宽下动作整体折到标题下方，不挤压标题 */
+.header {
+  --page-header-text-min: 220px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sk-space-16);
+  min-width: 0;
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: var(--page-header-text-min);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--sk-fs-title);
+  line-height: var(--sk-lh-title);
+  letter-spacing: var(--sk-ls-title);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+.subtitle {
+  margin: 0;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  color: var(--sk-text-2);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}

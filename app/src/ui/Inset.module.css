@@ -1,0 +1,8 @@
+.inset {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--sk-space-12) var(--sk-space-14);
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r);
+  background: var(--sk-bg-2);
+}

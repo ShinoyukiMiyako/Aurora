@@ -1,0 +1,208 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.list[data-variant="inset"] {
+  gap: var(--sk-space-2);
+}
+
+/* 贴边列表：行间分隔线，末行无 */
+.list[data-variant="flush"] > .item + .item {
+  border-top: 1px solid var(--sk-line);
+}
+
+.item {
+  display: block;
+  min-width: 0;
+  outline: none;
+}
+
+.row {
+  --row-height: 56px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--row-height);
+  margin: 0;
+  padding: 0 var(--sk-space-10);
+  border: 0;
+  border-radius: var(--sk-r-sm);
+  background: transparent;
+  font: inherit;
+  color: var(--sk-text);
+  text-align: start;
+  outline: none;
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.row[data-variant="flush"] {
+  padding: 0 var(--sk-space-18);
+  border-radius: 0;
+}
+
+.row[data-size="sm"] {
+  --row-height: 44px;
+}
+
+.row[data-size="lg"] {
+  --row-height: 72px;
+}
+
+.leading {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.title,
+.meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title {
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-medium);
+}
+
+.row[data-size="sm"] .title {
+  font-weight: var(--sk-w-body);
+}
+
+.meta {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.progress {
+  display: block;
+  margin-top: var(--sk-space-6);
+}
+
+.trailing {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-4);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 状态 ---- */
+.row[data-interactive] {
+  cursor: pointer;
+}
+
+.row[data-interactive]:hover {
+  background: var(--sk-bg-2);
+}
+
+.row[data-variant="flush"][data-interactive]:hover {
+  background: color-mix(in srgb, var(--sk-bg-2) 60%, transparent);
+}
+
+.row[data-selected],
+.row[data-selected]:hover {
+  background: var(--sk-accent-soft);
+}
+
+.row[data-selected] .title {
+  color: var(--sk-accent-strong);
+}
+
+.row[data-inactive] > .leading,
+.row[data-inactive] > .body {
+  opacity: var(--sk-disabled);
+}
+
+.row[data-disabled] {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.row[data-disabled]:hover {
+  background: transparent;
+}
+
+/* 聚焦：内嵌列表用标准焦点环；贴边列表的外环会被卡片裁掉，改成内描边 */
+button.row:focus-visible,
+.item:focus-visible > .row {
+  box-shadow: var(--sk-focus);
+}
+
+button.row[data-variant="flush"]:focus-visible,
+.item:focus-visible > .row[data-variant="flush"] {
+  box-shadow: inset 0 0 0 2px var(--sk-accent);
+}
+
+/* ---- 标题按钮：覆盖整行，尾部控件浮在覆盖层之上 ---- */
+.row[data-overlay] {
+  isolation: isolate;
+}
+
+.titleButton {
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  outline: none;
+}
+
+.titleButton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--sk-r-sm);
+}
+
+.row[data-variant="flush"] .titleButton::after {
+  border-radius: 0;
+}
+
+.titleButton:disabled {
+  cursor: not-allowed;
+}
+
+.titleButton:focus-visible::after {
+  box-shadow: var(--sk-focus);
+}
+
+.row[data-variant="flush"] .titleButton:focus-visible::after {
+  box-shadow: inset 0 0 0 2px var(--sk-accent);
+}
+
+:where(.row[data-overlay] .trailing :is(button, a[href], input, select, textarea, label, [tabindex])) {
+  position: relative;
+  z-index: 1;
+}

@@ -1,0 +1,75 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sk-space-14) var(--sk-space-16);
+  min-width: 0;
+}
+
+.grid[data-columns="4"] {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.label {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--sk-space-4) + 1px);
+  min-width: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+/* 大号数字压紧行高，免得一组数据块的标签与数值之间空出一大截 */
+.value {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  font-size: var(--sk-fs-title);
+  line-height: 1.15;
+  letter-spacing: var(--sk-ls-title);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.value[data-kind="text"] {
+  font-size: var(--sk-fs-heading);
+  letter-spacing: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.unit {
+  margin-left: calc(var(--sk-space-2) + 1px);
+  font-size: var(--sk-fs-small);
+  letter-spacing: normal;
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.delta {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text-2);
+}
+
+.delta[data-tone="positive"] {
+  color: var(--sk-ok);
+}
+
+.delta[data-tone="negative"] {
+  color: var(--sk-danger);
+}

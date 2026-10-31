@@ -1,0 +1,76 @@
+/*
+ * 扫光是伪元素上一条与骨架同宽的光带，用 transform 横扫；不动 background-position（那会每帧重绘整块）。
+ * 同一区域的骨架同时挂载，光带自然同相。
+ */
+.skeleton {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  background: var(--sk-bg-2);
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--sk-bg-3), transparent);
+  transform: translateX(-100%);
+  animation: shimmer var(--sk-loop-shimmer) linear infinite;
+  will-change: transform;
+}
+
+@keyframes shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* 减少动画：静止为凹陷底色 */
+:global([data-sk-reduced]) .skeleton::after {
+  display: none;
+}
+
+.skeleton[data-radius="xs"] {
+  border-radius: var(--sk-r-xs);
+}
+
+.skeleton[data-radius="sm"] {
+  border-radius: var(--sk-r-sm);
+}
+
+.skeleton[data-radius="md"] {
+  border-radius: var(--sk-r);
+}
+
+.skeleton[data-radius="lg"] {
+  border-radius: var(--sk-r-lg);
+}
+
+.skeleton[data-radius="xl"] {
+  border-radius: var(--sk-r-xl);
+}
+
+.skeleton[data-radius="pill"] {
+  border-radius: var(--sk-r-pill);
+}
+
+/* 文字行：条高 12，上下各留 5，合起来正好一个正文行高（22），换成真实文字时高度不变 */
+.text {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.line {
+  --skeleton-line: 12px;
+  height: var(--skeleton-line);
+  margin: calc((var(--sk-lh-body) - var(--skeleton-line)) / 2) 0;
+  border-radius: var(--sk-r-xs);
+}
+
+.line[data-last] {
+  width: 60%;
+}

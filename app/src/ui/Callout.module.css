@@ -1,0 +1,50 @@
+/* 底与描边的混色公式同横幅，但更轻：无阴影、圆角小一档、无图标底座 */
+.callout {
+  --callout-tone: var(--sk-info);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  padding: var(--sk-space-10) var(--sk-space-14);
+  border: 1px solid color-mix(in srgb, var(--callout-tone) 28%, transparent);
+  border-radius: var(--sk-r);
+  background: color-mix(in srgb, var(--callout-tone) 7%, var(--sk-surface));
+}
+
+.callout[data-tone="ok"] {
+  --callout-tone: var(--sk-ok);
+}
+
+.callout[data-tone="warn"] {
+  --callout-tone: var(--sk-warn);
+}
+
+.callout[data-tone="danger"] {
+  --callout-tone: var(--sk-danger);
+}
+
+/* 16px 图标与 20px 行高的首行居中对齐 */
+.icon {
+  flex: none;
+  margin-top: calc((var(--sk-lh-small) - 16px) / 2);
+  color: var(--callout-tone);
+}
+
+.text {
+  display: -webkit-box;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* 小按钮比一行文字高：让按钮在首行中线上居中，而不是把整条撑高 */
+.action {
+  flex: none;
+  margin: calc((var(--sk-lh-small) - 30px) / 2) 0;
+}

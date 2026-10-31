@@ -1,0 +1,55 @@
+/* sm 档也用 12px：标签里常有中文，中文不小于 12 */
+.tag {
+  --tag-height: 22px;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-4);
+  box-sizing: border-box;
+  height: var(--tag-height);
+  padding: 0 var(--sk-space-8);
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-medium);
+  line-height: 1;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.tag[data-size="sm"] {
+  --tag-height: 18px;
+  padding: 0 var(--sk-space-6);
+}
+
+.tag[data-tone="accent"] {
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.tag[data-tone="ok"] {
+  background: var(--sk-ok-soft);
+  color: var(--sk-ok);
+}
+
+.tag[data-tone="warn"] {
+  background: var(--sk-warn-soft);
+  color: var(--sk-warn);
+}
+
+.tag[data-tone="danger"] {
+  background: var(--sk-danger-soft);
+  color: var(--sk-danger);
+}
+
+.tag[data-tone="info"] {
+  background: var(--sk-info-soft);
+  color: var(--sk-info);
+}
+
+/* 描边画在内侧：外框尺寸与有底色的色调一致 */
+.tag[data-tone="outline"] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--sk-line-2);
+}

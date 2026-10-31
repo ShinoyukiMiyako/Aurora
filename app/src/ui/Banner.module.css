@@ -1,0 +1,70 @@
+/* 色调只经两个私有变量进来：底、描边与图标底座都由它们混出，四种色调共用一套几何 */
+.banner {
+  --banner-tone: var(--sk-info);
+  --banner-soft: var(--sk-info-soft);
+  --banner-icon: 40px;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-14);
+  min-width: 0;
+  padding: var(--sk-space-14) var(--sk-space-16);
+  border: 1px solid color-mix(in srgb, var(--banner-tone) 28%, transparent);
+  border-radius: var(--sk-r-lg);
+  background: color-mix(in srgb, var(--banner-tone) 7%, var(--sk-surface));
+  box-shadow: var(--sk-shadow-sm);
+}
+
+.banner[data-tone="ok"] {
+  --banner-tone: var(--sk-ok);
+  --banner-soft: var(--sk-ok-soft);
+}
+
+.banner[data-tone="warn"] {
+  --banner-tone: var(--sk-warn);
+  --banner-soft: var(--sk-warn-soft);
+}
+
+.banner[data-tone="danger"] {
+  --banner-tone: var(--sk-danger);
+  --banner-soft: var(--sk-danger-soft);
+}
+
+/* 40 边长的比例圆角为 12 */
+.icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: var(--banner-icon);
+  height: var(--banner-icon);
+  border-radius: 12px;
+  background: var(--banner-soft);
+  color: var(--banner-tone);
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: calc(var(--sk-space-4) + 1px);
+  min-width: 0;
+}
+
+.title {
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+.body {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-8);
+}

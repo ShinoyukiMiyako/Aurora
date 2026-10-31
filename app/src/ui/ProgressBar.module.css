@@ -1,0 +1,87 @@
+.bar {
+  --bar-height: 6px;
+  --bar-fill: var(--sk-accent-grad);
+  position: relative;
+  display: block;
+  flex: none;
+  height: var(--bar-height);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-bg-3);
+  overflow: hidden;
+}
+
+.bar[data-size="sm"] {
+  --bar-height: 4px;
+}
+
+.bar[data-size="lg"] {
+  --bar-height: 8px;
+}
+
+.bar[data-tone="ok"] {
+  --bar-fill: var(--sk-ok);
+}
+
+.bar[data-tone="info"] {
+  --bar-fill: var(--sk-info);
+}
+
+.bar[data-tone="warn"] {
+  --bar-fill: var(--sk-warn);
+}
+
+.bar[data-tone="danger"] {
+  --bar-fill: var(--sk-danger);
+}
+
+.bar[data-tone="muted"] {
+  --bar-fill: var(--sk-text-3);
+}
+
+/* 填充铺满轨道，位移由组件按平滑后的进度写入 */
+.fill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--bar-fill);
+  will-change: transform;
+}
+
+/* 宽 40% 的光带从左外侧扫到右外侧（位移相对光带自身宽度） */
+.indeterminate {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  border-radius: inherit;
+  background: var(--bar-fill);
+  animation: sweep var(--sk-loop-indet) var(--sk-ease) infinite;
+  will-change: transform;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+/* 减少动画：不扫动，整条满宽做透明度脉冲 */
+:global([data-sk-reduced]) .indeterminate {
+  width: 100%;
+  animation: pulse var(--sk-loop-pulse) var(--sk-ease-breath) infinite;
+  will-change: opacity;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
