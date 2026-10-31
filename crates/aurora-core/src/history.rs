@@ -550,8 +550,7 @@ impl Aurora {
         // 旧版本的 sha1 平台侧已无从取得，但文件本身就躺在磁盘上，算一遍是唯一诚实的取值；留 None
         // 会让后续的哈希反查白跑一趟。
         entry.sha1 = Some(aurora_base::fs::sha1_hex(restored).await?);
-        // 记的是「这个文件当前是何时落到磁盘上的」，回滚正是它重新落盘的时刻。
-        entry.installed_at = now_unix();
+        // installed_at 沿用装进实例的时刻：回滚换回的是旧版本，不是新装了一个 Mod。
         // 走 upsert 而不是直接 push：万一卷宗里还留着旧文件名的残条，同名原位覆盖，不留重复键。
         ledger.upsert(entry);
         store.save(&ledger).await
@@ -998,6 +997,8 @@ mod tests {
         assert_eq!(entry.title.as_deref(), Some("Sodium"));
         assert_eq!(entry.sha1.as_deref(), Some(sha1_hex(OLD_BYTES).as_str()));
         assert_eq!(entry.installed_as_dependency_of.as_deref(), Some("P-OWNER"));
+        // 装进实例的时刻沿用原值，不因回滚变成「现在」。
+        assert_eq!(entry.installed_at, 1_700_000_000);
 
         // 历史：追加一条回滚事件，既有两条原样保留。
         let history = aurora.history(VERSION_ID).await.unwrap();
