@@ -12,8 +12,8 @@ use aurora_core::{
     is_safe_instance_id, Aurora, CoreError, DeletionPreview, Disposer, EventSink, IncompleteKind,
     IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError, InstanceInstallOutcome,
     InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride, JavaSelection, LevelInfo,
-    LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry, Readable,
-    RecycleBin, RepairOutcome, Resolution, VersionSettings, WorldEntry,
+    LoaderChoice, LoaderKind, ManifestOverview, MarkerError, MarkerSettlement, PackEntry,
+    PlaySummary, Readable, RecycleBin, RepairOutcome, Resolution, VersionSettings, WorldEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -47,10 +47,7 @@ pub enum InstanceActivity {
     Renaming,
     Deleting,
     // 由启动命令持有：launch_game 先占为 Launching，进程起来后转 Running，退出时释放。
-    // 启动命令接入之前只有测试用到，接入后这两条 expect 会因不再成立而报警，提醒删掉。
-    #[cfg_attr(not(test), expect(dead_code, reason = "等启动命令接入"))]
     Launching,
-    #[cfg_attr(not(test), expect(dead_code, reason = "等启动命令接入"))]
     Running,
 }
 
@@ -114,7 +111,6 @@ pub struct InstanceGuard {
 
 impl InstanceGuard {
     /// 改记正在做的事（启动成功后由「启动」转为「运行」）。
-    #[cfg_attr(not(test), expect(dead_code, reason = "等启动命令接入"))]
     pub fn set_activity(&self, activity: InstanceActivity) {
         self.held
             .lock()
@@ -270,6 +266,10 @@ pub struct InstanceDto {
     pub created_at: Option<u64>,
     /// 实例此刻在做的事；空闲为 null。
     pub activity: Option<InstanceActivity>,
+    /// 累计游玩分钟（向下取整）；没玩过为 0。
+    pub playtime_min: u64,
+    /// 上次游玩结束的 Unix 毫秒；没玩过为 null。
+    pub last_played_at: Option<u64>,
 }
 
 /// 实例设置。读写同一形状；写入时不认识的字段直接报错。
@@ -524,7 +524,11 @@ fn incomplete_dto(marker: Readable<IncompleteMarker>) -> IncompleteDto {
     }
 }
 
-fn instance_dto(summary: InstanceSummary, activity: Option<InstanceActivity>) -> InstanceDto {
+fn instance_dto(
+    summary: InstanceSummary,
+    activity: Option<InstanceActivity>,
+    play: Option<&PlaySummary>,
+) -> InstanceDto {
     let (description, cover, settings_error) = match summary.settings {
         Readable::Read(settings) => (settings.description, settings.cover, None),
         Readable::Unreadable(error) => (None, None, Some(error)),
@@ -545,6 +549,8 @@ fn instance_dto(summary: InstanceSummary, activity: Option<InstanceActivity>) ->
         incomplete: summary.incomplete.map(incomplete_dto),
         created_at: summary.created_at,
         activity,
+        playtime_min: play.map_or(0, |p| p.playtime_min),
+        last_played_at: play.map(|p| p.last_played_at),
     };
     match summary.version {
         InstanceVersion::Ready(ready) => {
@@ -724,11 +730,13 @@ pub(crate) async fn list_instances_with(
 ) -> Result<Vec<InstanceDto>, CommandError> {
     let aurora = facade.snapshot().await;
     let list = aurora.list_instances().await.map_err(instance_error)?;
+    let plays = aurora.play_summaries().await?;
     Ok(list
         .into_iter()
         .map(|summary| {
             let activity = locks.activity(&summary.id);
-            instance_dto(summary, activity)
+            let play = plays.get(&summary.id);
+            instance_dto(summary, activity, play)
         })
         .collect())
 }
@@ -1888,6 +1896,12 @@ mod tests {
                 "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
                 "libraries":[{"name":"net.fabricmc:fabric-loader:0.16.10"}]}"#,
         );
+        // fab 玩过 121 分 59 秒：分钟向下取整为 121；1.21.1 没玩过。
+        std::fs::write(
+            env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE),
+            r#"{"format":1,"book":{"instances":{"fab":{"total_ms":7319000,"last_played_at":1767225600000}},"days":{}}}"#,
+        )
+        .unwrap();
         let locks = InstanceLocks::default();
         let _guard = locks.acquire("fab", InstanceActivity::Launching).unwrap();
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
@@ -1902,9 +1916,13 @@ mod tests {
         );
         assert_eq!(fab.mc_version.as_deref(), Some("1.21.1"));
         assert_eq!(fab.status, "ready");
+        assert_eq!(fab.playtime_min, 121);
+        assert_eq!(fab.last_played_at, Some(1_767_225_600_000));
         let vanilla = list.iter().find(|i| i.id == "1.21.1").unwrap();
         assert_eq!(vanilla.activity, None);
         assert_eq!(vanilla.mod_count, Some(0));
+        assert_eq!(vanilla.playtime_min, 0);
+        assert_eq!(vanilla.last_played_at, None);
     }
 
     #[tokio::test]

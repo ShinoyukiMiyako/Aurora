@@ -14,7 +14,7 @@ use std::time::Instant;
 use aurora_core::{
     game_line_level, DownloadProgress, Finished, GameExit, GameRun, GameSlot, LaunchAccount,
     LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage, LauncherLevel, LogLine,
-    LogSource, PlayRange, PlayStats, SlotBusy, SlotTicket,
+    LogSource, PlayRange, PlayStats, SlotBusy, SlotReservation, SlotTicket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 
 use crate::commands::accounts::find_account;
+use crate::commands::instances::{InstanceActivity, InstanceGuard, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::{self, GAME_LOG_EVENT};
 use crate::facade::Facade;
@@ -275,17 +276,33 @@ async fn watch(
     emit(exit);
 }
 
-fn spawn_watch(app: AppHandle, ticket: SlotTicket, run: GameRun) {
+/// 实例占用随进程寿命：游戏退出、收尾记账写完后与占用槽一起放开，删除、改名、补全在运行期间被拒绝。
+fn spawn_watch(app: AppHandle, ticket: SlotTicket, instance: InstanceGuard, run: GameRun) {
     let version_id = run.version_id().to_owned();
     tauri::async_runtime::spawn(async move {
         watch(
             version_id,
             run.finish(),
-            || app.state::<RunningGame>().0.release(ticket),
+            || {
+                drop(instance);
+                app.state::<RunningGame>().0.release(ticket);
+            },
             |exit| events::emit(&app, GAME_EXIT_EVENT, exit),
         )
         .await;
     });
+}
+
+/// 启动前的两道占用：全局只跑一个游戏（[`BUSY`]），目标实例此刻没有在安装、补全、改名或删除
+/// （`instance_busy`）。第二道失败时第一道的预留随返回值一起丢弃，不会把占用槽留在加载中。
+fn reserve_launch<'a>(
+    running: &'a RunningGame,
+    locks: &InstanceLocks,
+    version_id: &str,
+) -> Result<(SlotReservation<'a>, InstanceGuard), CommandError> {
+    let reservation = running.0.reserve(version_id).map_err(busy)?;
+    let instance = locks.acquire(version_id, InstanceActivity::Launching)?;
+    Ok((reservation, instance))
 }
 
 /// 用哪个账户启动。
@@ -307,6 +324,7 @@ pub async fn launch_game(
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
     running: State<'_, RunningGame>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<LaunchedDto, CommandError> {
     let account = match (account_uuid, offline_name) {
         (Some(uuid), None) => AccountArg::Stored(uuid),
@@ -317,7 +335,8 @@ pub async fn launch_game(
             ))
         }
     };
-    let reservation = running.0.reserve(&version_id).map_err(busy)?;
+    // 实例占用从这里一直持有到游戏退出。
+    let (reservation, instance) = reserve_launch(&running, &locks, &version_id)?;
     let task = tasks.register(&task_id)?;
     let aurora = facade.snapshot().await.with_cancel(task.token().clone());
 
@@ -368,7 +387,8 @@ pub async fn launch_game(
 
     let pid = run.pid();
     let ticket = reservation.occupy(run.kill_switch());
-    spawn_watch(app, ticket, run);
+    instance.set_activity(InstanceActivity::Running);
+    spawn_watch(app, ticket, instance, run);
     Ok(LaunchedDto { pid })
 }
 
@@ -565,6 +585,33 @@ mod tests {
             aurora_core::DownloadError::Cancelled,
         )));
         assert!(cancelled.is_cancelled());
+    }
+
+    #[test]
+    fn launch_reserves_the_slot_and_the_instance_or_neither() {
+        let running = RunningGame::default();
+        let locks = InstanceLocks::default();
+
+        // 实例正在安装：报 instance_busy，占用槽的预留随之放开，别的实例照常能启动。
+        let installing = locks.acquire("生存", InstanceActivity::Installing).unwrap();
+        let err = reserve_launch(&running, &locks, "生存").err().unwrap();
+        assert_eq!(err.code, crate::commands::instances::code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], json!("installing"));
+        drop(installing);
+
+        let (reservation, instance) = reserve_launch(&running, &locks, "生存").unwrap();
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::Launching));
+        // 加载中：另一个实例拿不到占用槽，也不会被占住实例。
+        let err = reserve_launch(&running, &locks, "创造").err().unwrap();
+        assert_eq!(err.code, BUSY);
+        assert_eq!(locks.activity("创造"), None);
+
+        instance.set_activity(InstanceActivity::Running);
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::Running));
+        drop(reservation);
+        drop(instance);
+        assert_eq!(locks.activity("生存"), None);
+        assert!(reserve_launch(&running, &locks, "创造").is_ok());
     }
 
     #[test]

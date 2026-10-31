@@ -65,6 +65,10 @@ export interface InstanceDto {
   /** 实例目录创建时刻（毫秒时间戳）；文件系统不记录时为 null。 */
   created_at: number | null;
   activity: InstanceActivity | null;
+  /** 累计游玩分钟（向下取整）；没玩过为 0。 */
+  playtime_min: number;
+  /** 上次游玩结束的毫秒时间戳；没玩过为 null。 */
+  last_played_at: number | null;
 }
 
 export type IsolationOverride = "follow_global" | "enabled" | "disabled";
