@@ -43,6 +43,7 @@ export const HOME_COPY = {
   switchCurrent: "当前",
   allInstances: "全部实例",
   modCount: (n: number) => `${n} 个 Mod`,
+  modpack: (name: string, version: string | null) => (version === null ? name : `${name} ${version}`),
   playtime: (minutes: number) => `累计 ${formatPlaytime(minutes)}`,
   world: (name: string) => `存档「${name}」`,
   details: "实例详情",
@@ -94,6 +95,7 @@ export const HOME_COPY = {
   offline: "离线中",
   withOffline: (subtitle: string) => `${subtitle} · 离线中`,
   newsError: "资讯暂时没拉下来",
+  newsNeedsNetwork: "需要联网获取",
   newsEmpty: "暂时没有新资讯",
   newsOpen: (name: string) => `打开「${name}」`,
   newsCreate: (version: string) => `用 ${version} 新建实例`,
@@ -105,6 +107,10 @@ export const HOME_COPY = {
   serversSubtitleEmpty: "把常去的服务器放这里",
   pinServer: "固定服务器",
   allPinned: "所有服务器都已固定",
+  pickAll: (n: number) => `全部 ${n} 台服务器…`,
+  pickerTitle: "固定服务器",
+  pickerSubtitle: "从游戏的多人服务器列表里挑选，点一下就固定到主页",
+  pickerPin: (name: string) => `固定 ${name}`,
   knownLoading: "正在读取服务器列表…",
   knownError: "服务器列表读不出来",
   knownEmpty: "多人游戏列表里还没有服务器",
@@ -124,7 +130,6 @@ export const HOME_COPY = {
 
   // ---- 共用
   slow: "比平时慢一些，仍在加载…",
-  skinError: "账户皮肤读不出来",
   worldsError: "存档列表读不出来",
 } as const;
 

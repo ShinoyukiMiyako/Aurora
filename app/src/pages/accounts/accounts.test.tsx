@@ -18,6 +18,8 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
+/** 假时钟会接管 setImmediate；等未处理的拒绝上报要用真的那一个。 */
+const realSetImmediate = setImmediate;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -197,6 +199,35 @@ describe("账户页：当前账户与列表", () => {
     expect(menuLabels()).toEqual(["设为当前账户", "复制 UUID", "删除账户"]);
     await chooseMenuItem("设为当前账户");
     expect(callsOf(ipc, "set_current_account")).toEqual([{ uuid: steve.uuid }]);
+  });
+});
+
+describe("账户页：皮肤", () => {
+  it("聚光卡与账户卡用全身立绘（聚光卡 6 倍 96 x 192，账户卡 4 倍 64 x 128）；离线账户没有远程皮肤，画剪影", async () => {
+    await mount();
+    const figures = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
+    expect(figures.map((f) => [f.style.width, f.style.height])).toEqual([
+      ["96px", "192px"],
+      ["64px", "128px"],
+      ["64px", "128px"],
+    ]);
+    const steveFigure = cardOf("Steve").querySelector('[data-sk-art="skin"]');
+    expect(steveFigure?.getAttribute("data-art")).toBe("silhouette");
+    // 离线账户同样问一次后端；后端对离线账户回 null（默认皮肤的推算规则未核对前不提供）
+    expect(callsOf(ipc, "skin_info")).toContainEqual({ accountUuid: steve.uuid });
+  });
+
+  it("皮肤查询失败：舞台照常画剪影立绘，不弹通知，原因写进控制台", async () => {
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await mount();
+    const figures = [...page().querySelectorAll('[data-sk-art="skin"]')];
+    // 聚光卡一个，两张账户卡各一个
+    expect(figures.map((f) => f.getAttribute("data-art"))).toEqual(["silhouette", "silhouette", "silhouette"]);
+    expect(launcher.state.toasts).toEqual([]);
+    expect(warn.mock.calls.some(([message]) => String(message).includes("皮肤信息读不出来"))).toBe(true);
   });
 });
 
@@ -383,6 +414,30 @@ describe("账户页：复制 UUID", () => {
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "复制失败", "Document is not focused."]]);
   });
 
+  it("聚光卡的复制按钮遇到剪贴板被拒绝：只报一次「复制失败」，按钮不显示「已复制」，也不留下未处理的拒绝", async () => {
+    net.clipboard.writeText.mockImplementation(() => Promise.reject(new Error("Document is not focused.")));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      await mount();
+      const spot = page().querySelector("section") as HTMLElement;
+      await click(spot.querySelector('button[aria-label="复制 UUID"]') as HTMLButtonElement);
+      await flush();
+      expect(net.clipboard.writeText).toHaveBeenCalledTimes(1);
+      expect(spot.querySelector('button[aria-label="已复制"]')).toBeNull();
+      expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "复制失败", "Document is not focused."]]);
+      // 未处理的拒绝在下一轮事件循环才上报
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+        await new Promise<void>((resolve) => realSetImmediate(resolve));
+      });
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
+  });
+
   it("聚光卡的复制按钮原位换成「已复制」，2000 ms 后复原", async () => {
     await mount();
     const spot = page().querySelector("section") as HTMLElement;
@@ -445,6 +500,28 @@ describe("账户页：断网、加载与读取失败", () => {
       await vi.advanceTimersByTimeAsync(250);
     });
     expect([busy(), spotlightName()]).toEqual([false, "Hanami"]);
+  });
+
+  it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读完随骨架一起收起", async () => {
+    const list = deferred<AccountDto[]>();
+    ipc.overrides.set("list_accounts", () => list.promise);
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(page().querySelector('[aria-busy="true"]')).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_699);
+    });
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(page().textContent).toContain("比平时慢一些，仍在加载…");
+    list.resolve([hanami]);
+    await flush();
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    expect(spotlightName()).toBe("Hanami");
   });
 
   it("300 ms 内读完不出现骨架", async () => {

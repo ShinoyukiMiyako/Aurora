@@ -9,7 +9,6 @@ import {
   localDateKey,
   minutesOn,
   monthSummary,
-  playSignature,
   ratioPercent,
   statsRange,
   streakDays,
@@ -202,14 +201,5 @@ describe("近 7 天柱与累计", () => {
     const list = [inst("a", { playtimeMin: 90 }), inst("b", { playtimeMin: 29 }), inst("c", { playtimeMin: 600, placeholder: true })];
     expect(totalPlaytime(list)).toEqual({ hours: 2, count: 2 });
     expect(totalPlaytime([])).toEqual({ hours: 0, count: 0 });
-  });
-
-  it("游玩签名只随累计时长或上次游玩时刻变，与列表顺序无关", () => {
-    const a = [inst("a", { playtimeMin: 10, lastPlayedAt: 1 }), inst("b")];
-    const reordered = [a[1], a[0]];
-    expect(playSignature(reordered)).toBe(playSignature(a));
-    expect(playSignature([inst("a", { playtimeMin: 11, lastPlayedAt: 1 }), inst("b")])).not.toBe(playSignature(a));
-    expect(playSignature([inst("a", { playtimeMin: 10, lastPlayedAt: 2 }), inst("b")])).not.toBe(playSignature(a));
-    expect(playSignature([...a, inst("新建", { placeholder: true })])).toBe(playSignature(a));
   });
 });

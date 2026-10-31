@@ -5,6 +5,7 @@
 import { useId } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR } from "../../copy/flows";
 import type { AccountKind } from "../../domain/types";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
 import type { PageProps } from "../../state/route";
@@ -24,7 +25,6 @@ import styles from "./accounts.module.css";
 import { AddCard } from "./AddCard";
 import { ACCOUNTS_COPY } from "./copy";
 import { useOnline } from "../../state/online";
-import { useDelayedLoading } from "./hooks";
 import { Spotlight } from "./Spotlight";
 import { useAccountActions } from "./useAccountActions";
 
@@ -44,7 +44,8 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
   const online = useOnline();
   const act = useAccountActions();
   const status = state.status.accounts;
-  const skeleton = useDelayedLoading(status.kind === "loading");
+  const gate = useLoadingGate(status.kind === "loading");
+  const skeleton = gate.view === "skeleton";
   const ready = status.kind === "ready" && !skeleton;
   const current = ready ? activeAccount(state) : null;
   const offlineReason = online ? undefined : ACCOUNTS_COPY.offline.needsNetwork;
@@ -90,7 +91,7 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
           {ACCOUNTS_COPY.offline.body}
         </Banner>
       )}
-      {skeleton && <LoadingSkeleton />}
+      {skeleton && <LoadingSkeleton slow={gate.slow} />}
       {status.kind === "error" && !skeleton && (
         <Card padding="lg">
           <Callout
@@ -142,8 +143,8 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
   );
 }
 
-/** 聚光卡与账户卡的骨架：舞台灰块 + 两行文字，尺寸与真实内容一致。 */
-function LoadingSkeleton() {
+/** 聚光卡与账户卡的骨架：舞台灰块 + 两行文字，尺寸与真实内容一致。读得久了在下方补一行「比平时慢」。 */
+function LoadingSkeleton({ slow }: { slow: boolean }) {
   return (
     <div className={styles.loading} aria-busy="true">
       <Card padding="none" clip>
@@ -164,6 +165,7 @@ function LoadingSkeleton() {
           </Card>
         ))}
       </div>
+      {slow && <p className={styles.slowHint}>{ACCOUNTS_COPY.slow}</p>}
     </div>
   );
 }

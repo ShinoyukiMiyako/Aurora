@@ -2,8 +2,10 @@
 // 下面是游玩日历、洞察、资讯与固定的服务器。卡片保持微透底色、不加背景模糊，外壳铺在内容区底下的飘落花瓣从卡片后面隐约透出。
 //
 // 游玩记录在这里查一次，问候卡、日历与洞察共用；日历与洞察共享「选中日期」与日历停留的月份。
+// 游戏退出后状态层统一作废游玩记录的缓存，这里订阅着就会重取，刚结束的这一局随之进入日历与洞察。
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useShell } from "../../shell/shell";
 import { useLauncher, useNow } from "../../state/launcher";
 import { usePlayStats } from "../../state/queries/home";
@@ -12,11 +14,10 @@ import { Bento } from "../../ui/Bento";
 import type { ResponsiveValue } from "../../ui/Card";
 import { monthOf } from "../../ui/CalendarHeatmap";
 import { Page } from "../../ui/Page";
-import { buildActivity, localDateKey, playSignature, statsRange } from "./activity";
+import { buildActivity, localDateKey, statsRange } from "./activity";
 import { ContinueCard } from "./ContinueCard";
 import { GreetingCard } from "./GreetingCard";
 import { continueTarget } from "./instances";
-import { useLoadingGate } from "./loading";
 import { NewsCard } from "./NewsCard";
 import { CalendarCard, InsightsCard } from "./PlayCards";
 import type { PlayView } from "./play-view";
@@ -35,18 +36,6 @@ export default function HomePage(_props: PageProps<"home">) {
   const stats = usePlayStats(range);
   const statsGate = useLoadingGate(stats.status === "loading");
   const activity = useMemo(() => (stats.status === "ready" ? buildActivity(stats.data, today) : null), [stats.status, stats.data, today]);
-
-  // 游戏退出后实例列表会刷新出新的累计时长与上次游玩时刻；游玩记录跟着重取，日历与洞察才包含刚结束的这一局
-  const signature = playSignature(state.instances);
-  const lastSignature = useRef<string | null>(null);
-  const reloadStats = stats.reload;
-  const instancesReady = state.status.instances.kind === "ready";
-  useEffect(() => {
-    if (!instancesReady) return;
-    const previous = lastSignature.current;
-    lastSignature.current = signature;
-    if (previous !== null && previous !== signature) reloadStats();
-  }, [instancesReady, signature, reloadStats]);
 
   let play: PlayView;
   if (stats.status === "error") play = { status: "error", error: stats.error, retry: stats.reload };

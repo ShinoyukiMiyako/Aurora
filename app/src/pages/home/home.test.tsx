@@ -4,13 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { InstanceDto } from "../../ipc/instances";
 import { IpcError } from "../../ipc/errors";
+import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import type { KnownServerDto, NewsItemDto, PinnedServerDto, PlayDayDto, ServerStatusDto } from "../../state/queries/home";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import HomePage from "./index";
 import { world } from "./test-data";
@@ -107,7 +108,7 @@ beforeEach(() => {
   Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
 
   instances = [
-    instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.9" }], mc_version: "1.21.1", playtime_min: 2480, last_played_at: NOW - 2 * MINUTE, mod_count: 78 }),
+    instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.9" }], mc_version: "1.21.1", playtime_min: 2480, last_played_at: NOW - 2 * MINUTE, mod_count: 78, world_count: 2 }),
     instanceDto("创造", { mc_version: "1.20.1", playtime_min: 60, last_played_at: NOW - 2 * HOUR }),
     instanceDto("空岛", { mc_version: "1.21.1", created_at: NOW - DAY }),
     instanceDto("红石", { mc_version: "1.19.2", playtime_min: 10, last_played_at: NOW - 3 * DAY }),
@@ -145,6 +146,14 @@ afterEach(() => {
 });
 
 const text = () => document.body.textContent as string;
+
+/** 浏览器报告的联网状态：改返回值后发出对应事件，订阅方立即重算。 */
+function setOnline(onLine: boolean) {
+  vi.spyOn(navigator, "onLine", "get").mockReturnValue(onLine);
+  act(() => {
+    window.dispatchEvent(new Event(onLine ? "online" : "offline"));
+  });
+}
 const buttonByLabel = (label: string) => {
   const el = document.querySelector<HTMLElement>(`[aria-label="${label}"]`);
   if (el === null) throw new Error(`找不到名称为 ${label} 的元素`);
@@ -201,6 +210,30 @@ describe("主页：问候与继续游玩", () => {
     expect(document.querySelector("h2")?.textContent).toBe("生存");
     expect(text()).toContain("上次 2 分钟前");
     for (const fragment of ["1.21.1", "Fabric", "0.16.9", "78 个 Mod", "累计 41 小时 20 分钟", "存档「海岛据点」"]) expect(text()).toContain(fragment);
+  });
+
+  it("实例一个存档都没有：不读存档目录，信息行只写累计时长；游戏退出后数到了新存档才去读", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, world_count: 0 } : i));
+    await mount();
+    expect(callsOf(ipc, "list_instance_content")).toEqual([]);
+    expect(text()).toContain("累计 41 小时 20 分钟");
+    expect(text()).not.toContain("存档「");
+
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, world_count: 1, last_played_at: NOW } : i));
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 30 * MINUTE }));
+    await flush();
+    expect(callsOf(ipc, "list_instance_content")).toEqual([{ id: "生存" }]);
+    expect(text()).toContain("存档「海岛据点」");
+  });
+
+  it("整合包实例：大卡挂出整合包名与版本，让出 Mod 数", async () => {
+    instances = instances.map((i) =>
+      i.id === "生存" ? { ...i, modpack: { platform: "modrinth", project_id: "1KVo5zza", version_id: "v6", name: "Fabulously Optimized", version: "6.2.0" } } : i,
+    );
+    await mount();
+    const meta = document.querySelector("h2")?.nextElementSibling as HTMLElement;
+    expect([...meta.children].map((el) => el.textContent)).toEqual(["1.21.1", "Fabric0.16.9", "Fabulously Optimized 6.2.0"]);
+    expect(text()).not.toContain("78 个 Mod");
   });
 
   it("换一个：当前项禁用并标「当前」，选另一个写入配置并就地换成它", async () => {
@@ -281,20 +314,27 @@ describe("主页：游玩日历与洞察", () => {
     expect(text()).toContain("休息也是游戏的一部分。");
   });
 
-  it("游戏退出后实例的游玩时长变了：游玩记录重取；时长没变的刷新不重取", async () => {
+  it("游戏退出：游玩记录与大卡的存档重取，这一局新建的存档进信息行；单纯重扫实例列表不重取", async () => {
     await mount();
-    const before = callsOf(ipc, "play_stats").length;
+    const stats = callsOf(ipc, "play_stats").length;
+    const content = callsOf(ipc, "list_instance_content").length;
     await act(async () => {
       await launcher.actions.refreshInstances();
     });
     await flush();
-    expect(callsOf(ipc, "play_stats")).toHaveLength(before);
-    instances = instances.map((i) => (i.id === "生存" ? { ...i, playtime_min: i.playtime_min + 30, last_played_at: NOW } : i));
-    await act(async () => {
-      await launcher.actions.refreshInstances();
-    });
+    expect(callsOf(ipc, "play_stats")).toHaveLength(stats);
+    expect(callsOf(ipc, "list_instance_content")).toHaveLength(content);
+
+    ipc.overrides.set("list_instance_content", () => ({
+      resource_packs: [],
+      shader_packs: [],
+      worlds: [world("New World", { name: "海岛据点", last_played: NOW - 2 * MINUTE }), world("新家", { name: "山顶小屋", last_played: NOW })],
+    }));
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 30 * MINUTE }));
     await flush();
-    expect(callsOf(ipc, "play_stats")).toHaveLength(before + 1);
+    expect(callsOf(ipc, "play_stats")).toHaveLength(stats + 1);
+    expect(callsOf(ipc, "list_instance_content").slice(content)).toEqual([{ id: "生存" }]);
+    expect(text()).toContain("存档「山顶小屋」");
   });
 
   it("游玩记录读取失败：两张卡原位报错，重试再请求一次", async () => {
@@ -365,6 +405,39 @@ describe("主页：资讯", () => {
     await mount();
     expect(text()).toContain("游戏更新与官方活动 · 离线中");
   });
+
+  it("断网又没有缓存：说「需要联网获取」而不是拉取失败；恢复联网自动重取一次", async () => {
+    let reachable = false;
+    ipc.overrides.set("list_news", () => {
+      if (!reachable) throw new IpcError("network_failed", "dns lookup failed");
+      return { items: NEWS, fetched_at: NOW, offline: false };
+    });
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    await mount();
+    expect(text()).toContain("需要联网获取");
+    expect(text()).not.toContain("资讯暂时没拉下来");
+    expect(callsOf(ipc, "list_news")).toHaveLength(1);
+
+    reachable = true;
+    setOnline(true);
+    await flush();
+    expect(callsOf(ipc, "list_news")).toHaveLength(2);
+    expect(text()).not.toContain("需要联网获取");
+    expect(text()).toContain("Minecraft 1.21.1");
+    expect(text()).not.toContain("游戏更新与官方活动 · 离线中");
+  });
+
+  it("拿到的是新内容、之后才断网：内容留着，副标题注明离线中；恢复联网不重取", async () => {
+    await mount();
+    expect(text()).not.toContain("离线中");
+    setOnline(false);
+    expect(text()).toContain("游戏更新与官方活动 · 离线中");
+    expect(text()).toContain("Minecraft 1.21.1");
+    setOnline(true);
+    await flush();
+    expect(text()).not.toContain("离线中");
+    expect(callsOf(ipc, "list_news")).toHaveLength(1);
+  });
 });
 
 describe("主页：固定的服务器", () => {
@@ -404,6 +477,82 @@ describe("主页：固定的服务器", () => {
     expect(menuItems()[0].getAttribute("aria-disabled")).toBe("true");
   });
 
+  it("多人列表里没固定的超过菜单上限：菜单列前 9 台加「全部 N 台服务器…」，弹窗里每台都能固定，固定一台少一台", async () => {
+    const many: KnownServerDto[] = Array.from({ length: 12 }, (_, i) => ({ name: `服${i + 1}`, address: `s${i + 1}.example`, pinned: false }));
+    ipc.overrides.set("list_known_servers", () => many.map((k) => ({ ...k, pinned: pinned.some((p) => p.address === k.address) })));
+    await mount();
+    await openMenu(buttonByLabel("固定服务器"));
+    const labels = menuItems().map((el) => el.textContent);
+    expect(labels).toHaveLength(10);
+    expect(labels.slice(0, 9)).toEqual(many.slice(0, 9).map((k) => `${k.name}${k.address}`));
+    expect(labels[9]).toBe("全部 12 台服务器…");
+
+    click(menuItem("全部 12 台服务器"));
+    await flush();
+    const picker = () => {
+      const el = dialog();
+      if (el === null || !el.textContent?.includes("从游戏的多人服务器列表里挑选")) throw new Error("服务器挑选弹窗没有打开");
+      return el;
+    };
+    const pickRows = () => [...picker().querySelectorAll<HTMLButtonElement>('button[aria-label^="固定 "]')];
+    expect(pickRows().map((b) => b.getAttribute("aria-label"))).toEqual(many.map((k) => `固定 ${k.name}`));
+
+    click(pickRows()[11]);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({
+      servers: [
+        { name: "晨星", address: "play.example" },
+        { name: "服12", address: "s12.example" },
+      ],
+    });
+    // 弹窗不自动关闭：刚固定的这台从列表里消失，其余照常可选
+    expect(pickRows()).toHaveLength(11);
+    expect(pickRows().some((b) => b.getAttribute("aria-label") === "固定 服12")).toBe(false);
+
+    click(buttonByText("关闭", picker()));
+    await flush();
+    await openMenu(buttonByLabel("固定服务器"));
+    expect(menuItems().at(-1)?.textContent).toBe("全部 11 台服务器…");
+  });
+
+  it("挑选弹窗：同一行连点两下只固定一次；固定失败报错后这一行回到列表里，可以再点", async () => {
+    const many: KnownServerDto[] = Array.from({ length: 12 }, (_, i) => ({ name: `服${i + 1}`, address: `s${i + 1}.example`, pinned: false }));
+    ipc.overrides.set("list_known_servers", () => many.map((k) => ({ ...k, pinned: pinned.some((p) => p.address === k.address) })));
+    let failNext = false;
+    ipc.overrides.set("set_pinned_servers", (args: IpcArgs) => {
+      if (failNext) {
+        failNext = false;
+        throw new IpcError("io", "servers.dat 写不进去");
+      }
+      pinned = args.servers as PinnedServerDto[];
+      return pinned;
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    await openMenu(buttonByLabel("固定服务器"));
+    click(menuItem("全部 12 台服务器"));
+    await flush();
+    const pickRow = (name: string) => (dialog() as HTMLElement).querySelector<HTMLButtonElement>(`button[aria-label="固定 ${name}"]`);
+
+    const row = pickRow("服3") as HTMLButtonElement;
+    click(row);
+    click(row);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_servers")).toHaveLength(1);
+    expect(pinned.map((p) => p.address)).toEqual(["play.example", "s3.example"]);
+    expect(pickRow("服3")).toBeNull();
+
+    failNext = true;
+    click(pickRow("服5") as HTMLButtonElement);
+    expect(pickRow("服5")).toBeNull();
+    await flush();
+    expect(launcher.state.toasts.map((t) => [t.tone, t.body])).toEqual([["error", "servers.dat 写不进去"]]);
+    expect(pickRow("服5")).not.toBeNull();
+    click(pickRow("服5") as HTMLButtonElement);
+    await flush();
+    expect(pinned.map((p) => p.address)).toEqual(["play.example", "s3.example", "s5.example"]);
+  });
+
   it("复制地址：写剪贴板并原位显示「已复制」，2 秒后复原，不弹通知", async () => {
     await mount();
     await openMenu(buttonByLabel("晨星 的更多操作"));
@@ -419,6 +568,20 @@ describe("主页：固定的服务器", () => {
     expect(menuItems().some((el) => el.textContent?.startsWith("复制地址"))).toBe(true);
   });
 
+  it("复制地址被剪贴板拒绝：只弹一次「复制失败」带原因，菜单项不换成「已复制」", async () => {
+    writeText.mockImplementation(async () => {
+      throw new Error("Document is not focused.");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    click(menuItem("复制地址"));
+    await flush();
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "复制失败", "Document is not focused."]]);
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItem("复制地址").textContent).toBe("复制地址play.example");
+  });
+
   it("主页可见时每 60 秒重测一次", async () => {
     await mount();
     const before = callsOf(ipc, "ping_servers").length;
@@ -426,6 +589,30 @@ describe("主页：固定的服务器", () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
+  });
+
+  it("断网：保留上次的测速结果并注明离线中，期间不重测；恢复联网立即重测一次", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    setOnline(false);
+    expect(text()).toContain("1 个 · 在线人数与延迟 · 离线中");
+    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("38 ms");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before);
+
+    setOnline(true);
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+    expect(text()).toContain("1 个 · 在线人数与延迟");
+    expect(text()).not.toContain("离线中");
+    // 周期重测接着恢复
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
@@ -441,13 +628,18 @@ describe("主页：固定的服务器", () => {
 });
 
 describe("主页：账户皮肤", () => {
-  it("皮肤查询失败：照常画剪影立绘，错误经统一处理报告一次", async () => {
+  it("皮肤查询失败：照常画剪影立绘，不弹通知，原因写进控制台", async () => {
+    const failure = new IpcError("io", "账户文件读不出来");
     ipc.overrides.set("skin_info", () => {
-      throw new IpcError("io", "账户文件读不出来");
+      throw failure;
     });
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await mount();
     expect(document.querySelector('[data-sk-art="skin"]')?.getAttribute("data-art")).toBe("silhouette");
-    expect(launcher.state.toasts.map((t) => t.title)).toEqual(["账户皮肤读不出来"]);
+    expect(launcher.state.toasts).toEqual([]);
+    const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤"));
+    expect(skinWarnings).toHaveLength(1);
+    expect(skinWarnings[0][1]).toBeInstanceOf(IpcError);
+    expect((skinWarnings[0][1] as IpcError).message).toBe("账户文件读不出来");
   });
 });

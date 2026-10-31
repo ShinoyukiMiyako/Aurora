@@ -54,6 +54,7 @@ export const ACCOUNTS_COPY = {
   },
 
   retry: "重试",
+  slow: "比平时慢一些，仍在加载…",
 
   offline: {
     title: "没有网络连接",

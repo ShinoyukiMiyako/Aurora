@@ -97,6 +97,13 @@ const radio = (label: string) => {
 
 const headings = () => [...page().querySelectorAll("section > h2")].map((h) => h.textContent);
 
+/** 吞吐卡的总进度环。 */
+function totalRing(): HTMLElement {
+  const el = page().querySelector<HTMLElement>('[role="progressbar"][aria-label="全部活动任务的总进度"]');
+  if (el === null) throw new Error("吞吐卡没有总进度环");
+  return el;
+}
+
 function record(id: string, status: TaskRecordDto["status"], overrides: Partial<TaskRecordDto> = {}): TaskRecordDto {
   return {
     id,
@@ -120,7 +127,16 @@ function record(id: string, status: TaskRecordDto["status"], overrides: Partial<
 
 /** 一条完成、一条失败（关联现存实例）、一条取消（关联已不存在的实例）。 */
 const HISTORY: TaskRecordDto[] = [
-  record("done-java", "done", { progress: 1, bytes: 52_400_000, total_bytes: 52_400_000, created_at: T0 - 300_000, finished_at: T0 - 240_000 }),
+  // 排队 10 秒后开始，跑了 50 秒；最后一批 2 MB，这一次尝试累计下了 50 MB
+  record("done-java", "done", {
+    progress: 1,
+    bytes: 2 * MB,
+    total_bytes: 2 * MB,
+    done_bytes: 52_400_000,
+    created_at: T0 - 300_000,
+    started_at: T0 - 290_000,
+    finished_at: T0 - 240_000,
+  }),
   record("failed-create", "failed", {
     kind: "game",
     title: "安装 1.21.1",
@@ -207,8 +223,15 @@ describe("下载任务页：历史", () => {
     // 新建被取消，实例已经不在了
     expect(hasButton(cancelled, "查看实例")).toBe(false);
 
+    // 没有活动任务：总进度环是 84 档的空环，圆心写「--」，不报一个没有意义的百分数
+    expect(totalRing().dataset.size).toBe("84");
+    expect(totalRing().dataset.tone).toBe("muted");
+    expect(totalRing().getAttribute("aria-valuetext")).toBe("--");
+    expect(totalRing().hasAttribute("aria-valuenow")).toBe(false);
+    expect(totalRing().textContent).toBe("--");
+
     const done = row("下载 Java done-java");
-    expect(done.textContent).toContain("50.0 MB · 用时 1 分钟");
+    expect(done.textContent).toContain("50.0 MB · 用时 50 秒");
     expect(done.textContent).toContain("4 分钟前");
     expect(hasButton(done, "查看实例")).toBe(false);
 
@@ -239,6 +262,36 @@ describe("下载任务页：历史", () => {
     expect(headings()).toEqual(["进行中 · 1"]);
     expect(row("failed-java").textContent).toContain("第 2 次尝试");
     expect(row("failed-java").textContent).toContain("等待数据");
+  });
+});
+
+describe("下载任务页：断网", () => {
+  it("断网：页头下出现离线横幅，失败任务的重试置灰且点了不发命令；恢复联网后横幅消失、重试可用", async () => {
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    bootOverrides(ipc, {
+      journal: [record("failed-java", "failed", { error: { code: "network_failed", message: "dns" }, spec: { command: "install_java", args: { requiredMajor: 17 } } })],
+    });
+    await mount();
+    const banner = () => [...page().querySelectorAll<HTMLElement>("[data-tone]")].find((el) => el.textContent?.startsWith("没有网络连接"));
+    expect(banner()?.textContent).toBe("没有网络连接进行中的下载会继续重试，重试用完仍连不上时记为失败；联网后可以再重试。");
+    // 横幅紧跟页头，在任务列表之前
+    expect(header().nextElementSibling).toBe(banner());
+    const retry = buttonIn(row("failed-java"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBe("true");
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "install_java")).toEqual([]);
+    expect(launcher.state.tasks[0].status).toBe("failed");
+
+    onLine.mockReturnValue(true);
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(banner()).toBeUndefined();
+    expect(buttonIn(row("failed-java"), "重试").getAttribute("aria-disabled")).toBeNull();
+    act(() => buttonIn(row("failed-java"), "重试").click());
+    await flush();
+    expect(callsOf(ipc, "install_java")).toEqual([{ requiredMajor: 17, taskId: "failed-java#2" }]);
   });
 });
 
@@ -305,7 +358,33 @@ describe("下载任务页：进行中", () => {
     expect(row("Java 8").textContent).toContain("20%");
     expect(page().textContent).toContain("当前总速度");
     expect(page().textContent).toContain("剩余 492 MB · 约 45 秒");
+    // 只有这一个任务报了总量：总进度就是它的 120 / 612
+    expect(totalRing().dataset.tone).toBe("accent");
+    expect(totalRing().getAttribute("aria-valuenow")).toBe("20");
+    expect(totalRing().hasAttribute("aria-valuetext")).toBe(false);
     expect(page().textContent).not.toContain("最近 48 秒没有下载流量");
+  });
+
+  it("完成行：总量是几批下载的累计，用时从开始运行算起，排队等待不算", async () => {
+    const ids = await fourJavaTasks();
+    // 第四个任务排队 30 秒后才轮到
+    await advance(30_000);
+    javaRuns.get(`${ids[0]}#1`)?.resolve({ component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" });
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.id === ids[3])?.status).toBe("running");
+
+    const id = `${ids[3]}#1`;
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 2, bytes: 60 * MB, total_bytes: 100 * MB, speed: 10 * MB }));
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 4, bytes: 100 * MB, total_bytes: 100 * MB, speed: 10 * MB }));
+    // 第二批从 0 重新计起
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 3, finished: 3, bytes: 20 * MB, total_bytes: 20 * MB, speed: 10 * MB }));
+    await advance(12_000);
+    javaRuns.get(id)?.resolve({ component: "java-runtime-delta", version: { major: 25, minor: 0, security: 1, build: 1, raw: "25.0.1" }, java_executable: "C:/java25.exe" });
+    await flush();
+
+    const finished = row("Java 25");
+    expect(finished.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Java，已完成");
+    expect(finished.textContent).toContain("120 MB · 用时 12 秒");
   });
 
   it("取消排队中的任务不确认、不发命令；全部取消要确认，继续下载则什么都不做", async () => {
@@ -411,6 +490,22 @@ describe("下载任务页：任务记录读取", () => {
     expect(page().textContent).not.toContain("下载队列是空的");
     await advance(200);
     expect(busy()).toBe(false);
+    expect(page().textContent).toContain("下载队列是空的");
+  });
+
+  it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读完随骨架一起收起", async () => {
+    const journal = deferred<TaskRecordDto[]>();
+    ipc.overrides.set("load_task_journal", () => journal.promise);
+    await mount();
+    await advance(300);
+    expect(page().querySelector('[aria-busy="true"]')).not.toBeNull();
+    await advance(9_699);
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    await advance(1);
+    expect(page().textContent).toContain("比平时慢一些，仍在加载…");
+    journal.resolve([]);
+    await flush();
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
     expect(page().textContent).toContain("下载队列是空的");
   });
 });

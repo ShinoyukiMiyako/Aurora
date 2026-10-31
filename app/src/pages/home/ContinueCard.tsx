@@ -2,7 +2,7 @@
 // 「换一个」切换当前实例时整块内容交叉淡入；被删除的实例在淡出期间直接不画（它的启动入口已不存在）。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { ACTION_ERROR, BOOT_SLICE_ERROR } from "../../copy/flows";
@@ -10,6 +10,7 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
@@ -28,9 +29,8 @@ import { MenuButton } from "../../ui/MenuButton";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { HOME_COPY } from "./copy";
-import { latestWorld, switchOptions, worldName } from "./instances";
+import { heroTags, latestWorld, switchOptions, worldName, type HeroTag } from "./instances";
 import { SKELETON_SIZE } from "./layout";
-import { useLoadingGate } from "./loading";
 import { useReportOnce } from "./report";
 import s from "./home.module.css";
 
@@ -116,6 +116,32 @@ function HeroSkeleton({ pending, slow }: { pending: boolean; slow: boolean }) {
   );
 }
 
+function HeroTagView({ tag, inst }: { tag: HeroTag; inst: InstanceSummary }) {
+  switch (tag.kind) {
+    case "version":
+      return (
+        <Tag tone="outline" size="sm">
+          {tag.mcVersion}
+        </Tag>
+      );
+    case "loader":
+      return <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" />;
+    case "modpack":
+      // 整合包名可能很长：标签随卡宽收缩，名字单行截断，不把卡撑宽
+      return (
+        <Tag tone="outline" size="sm" icon="layers" className={s.heroPack}>
+          <span className={s.ellipsis}>{HOME_COPY.modpack(tag.name, tag.version)}</span>
+        </Tag>
+      );
+    case "mods":
+      return (
+        <Tag tone="outline" size="sm">
+          {HOME_COPY.modCount(tag.count)}
+        </Tag>
+      );
+  }
+}
+
 /** 量出卡面实际高度交给 Cover：大卡随内容变高（名称折两行、标签换行），底图要铺满。 */
 function useFrameHeight(ref: RefObject<HTMLDivElement | null>): number {
   const [height, setHeight] = useState(0);
@@ -169,16 +195,10 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const now = useNow(30_000);
   const cover = instanceCover(inst);
 
-  const content = useInstanceContent(inst.placeholder ? null : inst.id);
+  // 游戏退出后状态层作废这个实例的存档缓存，这里订阅着就会重取，信息行里的存档名才是刚玩的那个。
+  // 实例列表已数过 saves/：一个存档都没有就不必读目录（信息行本来就省略这一段）；数不出来时照常去读
+  const content = useInstanceContent(inst.placeholder || inst.worldCount === 0 ? null : inst.id);
   useReportOnce(content.status === "error" ? content.error : null, HOME_COPY.worldsError);
-  // 游戏退出后存档的最后游玩时刻变了：跟着实例的上次游玩时刻重读，信息行里的存档名才是刚玩的那个
-  const reload = content.reload;
-  const playedAt = useRef(inst.lastPlayedAt);
-  useEffect(() => {
-    if (playedAt.current === inst.lastPlayedAt) return;
-    playedAt.current = inst.lastPlayedAt;
-    if (!inst.placeholder) reload();
-  }, [inst.lastPlayedAt, inst.placeholder, reload]);
   const world = content.status === "ready" ? latestWorld(content.data.worlds) : null;
 
   const switchItems: MenuEntry[] = [
@@ -220,17 +240,9 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
         <div className={s.heroTitle}>
           <h2 className={s.heroName}>{inst.name}</h2>
           <div className={s.heroMeta}>
-            {inst.mcVersion !== null && (
-              <Tag tone="outline" size="sm">
-                {inst.mcVersion}
-              </Tag>
-            )}
-            <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" />
-            {inst.modCount !== null && inst.modCount > 0 && (
-              <Tag tone="outline" size="sm">
-                {HOME_COPY.modCount(inst.modCount)}
-              </Tag>
-            )}
+            {heroTags(inst).map((tag) => (
+              <HeroTagView key={tag.kind} tag={tag} inst={inst} />
+            ))}
           </div>
           <p className={s.heroLine}>
             <Icon name="clock" size={16} />

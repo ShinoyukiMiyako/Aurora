@@ -1,4 +1,4 @@
-// 主页上与实例挑选有关的纯函数：「继续游玩」指向谁、「最近游玩」列哪几个、「换一个」菜单列哪几项。
+// 主页上与实例挑选有关的纯函数：「继续游玩」指向谁、大卡上挂哪几枚信息标签、「最近游玩」列哪几个、「换一个」菜单列哪几项。
 
 import type { InstanceSummary } from "../../domain/adapt";
 import type { WorldDto } from "../../state/queries/instance";
@@ -8,6 +8,29 @@ import type { TierName } from "../../ui/Card";
 export const RECENT_COUNT: Readonly<Record<TierName, number>> = { compact: 4, regular: 5, wide: 6 };
 /** 「换一个」菜单最多列几个实例（之后是「全部实例」）。 */
 export const SWITCH_MENU_LIMIT = 8;
+
+/** 一个条目上最多几枚标签，与 Tag 组件约定的上限一致：再多就挤成一团，哪一枚都读不清。 */
+export const HERO_TAG_LIMIT = 3;
+
+export type HeroTag =
+  | { kind: "version"; mcVersion: string }
+  | { kind: "loader" }
+  | { kind: "modpack"; name: string; version: string | null }
+  | { kind: "mods"; count: number };
+
+/**
+ * 「继续游玩」大卡的信息标签，按游戏版本、加载器、整合包、Mod 数的先后取前 HERO_TAG_LIMIT 枚。
+ * 整合包实例四样都有时让出 Mod 数：整合包的名字与版本比数量更能说明这是哪个实例，数量在实例页里看得到。
+ * Mod 数为 0 或数不出来（损坏、设置读不出）时不挂。
+ */
+export function heroTags(inst: InstanceSummary): HeroTag[] {
+  const tags: HeroTag[] = [];
+  if (inst.mcVersion !== null) tags.push({ kind: "version", mcVersion: inst.mcVersion });
+  tags.push({ kind: "loader" });
+  if (inst.modpack !== null) tags.push({ kind: "modpack", name: inst.modpack.name, version: inst.modpack.version });
+  if (inst.modCount !== null && inst.modCount > 0) tags.push({ kind: "mods", count: inst.modCount });
+  return tags.slice(0, HERO_TAG_LIMIT);
+}
 
 /** 排序用的新近度：玩过按上次游玩，没玩过按创建时刻；两者都没有为 null，排在最后。 */
 export function recencyOf(inst: InstanceSummary): number | null {

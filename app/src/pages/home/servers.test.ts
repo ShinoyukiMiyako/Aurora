@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { KnownServerDto, ServerStatusDto } from "../../state/queries/home";
 import { MENU_MAX_ACTIONS } from "../../ui/Menu";
-import { pinCandidates, serverRows, signalBars, signalQuality } from "./servers";
+import { pinCandidates, pinMenuPlan, serverRows, signalBars, signalQuality } from "./servers";
 
 function status(address: string, overrides: Partial<ServerStatusDto> = {}): ServerStatusDto {
   return {
@@ -82,11 +82,26 @@ describe("固定服务器菜单的候选项", () => {
     ]);
   });
 
-  it("超过菜单可操作项上限时截断，菜单不会因项数过多而抛错", () => {
-    const known = Array.from({ length: MENU_MAX_ACTIONS + 3 }, (_, i) => ({ name: `服${i}`, address: `s${i}.example`, pinned: false }));
+  it("候选不截断：多人列表里没固定的全部列出", () => {
+    const known = Array.from({ length: MENU_MAX_ACTIONS + 3 }, (_, i) => ({ name: `服${i}`, address: `s${i}.example`, pinned: i === 0 }));
     const candidates = pinCandidates(known);
-    expect(candidates).toHaveLength(MENU_MAX_ACTIONS);
-    expect(candidates[MENU_MAX_ACTIONS - 1].name).toBe(`服${MENU_MAX_ACTIONS - 1}`);
+    expect(candidates).toHaveLength(MENU_MAX_ACTIONS + 2);
+    expect(candidates[0].name).toBe("服1");
     expect(pinCandidates([])).toEqual([]);
+  });
+
+  it("加号菜单：放得下就全部直接列出；多一台就列前面几台，留最后一项给「全部 N 台」，可操作项恰好到上限", () => {
+    const servers = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `服${i}`, address: `s${i}.example` }));
+    expect(pinMenuPlan([])).toEqual({ inline: [], overflow: null });
+    expect(pinMenuPlan(servers(MENU_MAX_ACTIONS))).toEqual({ inline: servers(MENU_MAX_ACTIONS), overflow: null });
+    const over = pinMenuPlan(servers(MENU_MAX_ACTIONS + 1));
+    expect(over.inline).toEqual(servers(MENU_MAX_ACTIONS - 1));
+    expect(over.overflow).toBe(MENU_MAX_ACTIONS + 1);
+    // 直接列出的几台加上「全部 N 台」一项，正好用满菜单的可操作项
+    expect(over.inline.length + 1).toBe(MENU_MAX_ACTIONS);
+    for (const n of [MENU_MAX_ACTIONS + 7, 3 * MENU_MAX_ACTIONS]) {
+      const plan = pinMenuPlan(servers(n));
+      expect([plan.inline.length, plan.overflow]).toEqual([MENU_MAX_ACTIONS - 1, n]);
+    }
   });
 });

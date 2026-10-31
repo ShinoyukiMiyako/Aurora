@@ -5,13 +5,16 @@
 import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL } from "../../copy/flows";
 import type { Task } from "../../domain/types";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import { useLauncher, useNow } from "../../state/launcher";
+import { useOnline } from "../../state/online";
 import type { PageProps, TaskFilter } from "../../state/route";
 import { findInstance } from "../../state/selectors";
 import { isActiveTask, queuePosition } from "../../state/tasks";
+import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card } from "../../ui/Card";
@@ -23,7 +26,7 @@ import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
 import { RELATIVE_TIME_REFRESH_MS } from "./constants";
 import { TASKS_COPY } from "./copy";
-import { useLoadingGate, useThroughput } from "./hooks";
+import { useThroughput } from "./hooks";
 import { LanesCard } from "./LanesCard";
 import {
   bucketTasks,
@@ -48,6 +51,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   const nav = useNav();
   const { confirm, openCreateInstance } = useShell();
   const run = useRunner();
+  const online = useOnline();
   const now = useNow(RELATIVE_TIME_REFRESH_MS);
   const titleId = useId();
 
@@ -71,7 +75,8 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   }, [actions, unseenFailures]);
 
   const slice = state.status.tasks;
-  const showSkeleton = useLoadingGate(slice.kind === "loading" && state.tasks.length === 0);
+  const gate = useLoadingGate(slice.kind === "loading" && state.tasks.length === 0);
+  const showSkeleton = gate.view === "skeleton";
 
   const cancel = async (task: Task) => {
     const ask = cancelConfirm(task);
@@ -104,6 +109,13 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         </>
       }
     />
+  );
+
+  // 断网时进行中的任务照常由后端重试，本页如实呈现；只有重试这个必然失败的入口置灰
+  const offlineBanner = online ? null : (
+    <Banner key="offline" tone="warn" title={TASKS_COPY.offline.title}>
+      {TASKS_COPY.offline.body}
+    </Banner>
   );
 
   const loadError =
@@ -146,6 +158,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         now={now}
         historyEta={(task) => etaSpeed(history, task)}
         hasInstance={(id) => findInstance(state, id) !== undefined}
+        retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
         onCancel={(task) => void cancel(task)}
         onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
         onViewInstance={(id) => nav.go({ page: "instance", id, tab: "overview" })}
@@ -153,7 +166,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     ];
   } else if (slice.kind === "loading" || showSkeleton) {
     // 骨架出现后即使数据已到也要停够最短时长，期间不切到空状态
-    body = showSkeleton ? [<TasksSkeleton key="skeleton" />] : [];
+    body = showSkeleton ? [<TasksSkeleton key="skeleton" slow={gate.slow} />] : [];
   } else if (slice.kind === "error") {
     // 任务记录读不出来时不能说「队列是空的」：只给错误与重试
     body = [];
@@ -183,6 +196,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   return (
     <Page aria-labelledby={titleId}>
       {header}
+      {offlineBanner}
       {loadError}
       {body}
     </Page>
@@ -198,12 +212,14 @@ interface TaskListProps {
   now: number;
   historyEta(task: Task): number;
   hasInstance(id: string): boolean;
+  /** 重试眼下必然失败（断网）时的原因；能重试为 undefined。 */
+  retryBlocked: string | undefined;
   onCancel(task: Task): void;
   onRetry(task: Task): void;
   onViewInstance(id: string): void;
 }
 
-function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, onCancel, onRetry, onViewInstance }: TaskListProps) {
+function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, retryBlocked, onCancel, onRetry, onViewInstance }: TaskListProps) {
   const idBase = useId();
   const groups = taskGroups(buckets, filter);
   if (groups.length === 0) {
@@ -228,6 +244,7 @@ function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, onCanc
               now,
             })}
             hasInstance={task.instanceId !== null && hasInstance(task.instanceId)}
+            retryBlocked={retryBlocked}
             onCancel={() => onCancel(task)}
             onRetry={() => onRetry(task)}
             onViewInstance={() => {
@@ -259,12 +276,15 @@ function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, onCanc
 
 // ---------------------------------------------------------------- 骨架
 
-/** 形状与有任务时的首屏一致：总览的两张卡。 */
-function TasksSkeleton() {
+/** 形状与有任务时的首屏一致：总览的两张卡。读得久了在下方补一行「比平时慢」。 */
+function TasksSkeleton({ slow }: { slow: boolean }) {
   return (
-    <EntranceBlock className={styles.overview} aria-busy="true">
-      <Skeleton shape="block" width="100%" height={188} radius="lg" />
-      <Skeleton shape="block" width="100%" height={188} radius="lg" />
-    </EntranceBlock>
+    <>
+      <EntranceBlock className={styles.overview} aria-busy="true">
+        <Skeleton shape="block" width="100%" height={188} radius="lg" />
+        <Skeleton shape="block" width="100%" height={188} radius="lg" />
+      </EntranceBlock>
+      {slow && <p className={styles.slowHint}>{TASKS_COPY.slow}</p>}
+    </>
   );
 }

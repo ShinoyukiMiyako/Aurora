@@ -158,10 +158,22 @@ describe("行内元信息", () => {
     expect(() => rowMeta(task("q"), ctx())).toThrow("没有队列位次");
   });
 
-  it("已完成：总量 · 用时，右侧相对时间；总量未知时只写用时", () => {
-    const done = task("d", { status: "done", totalBytes: 52_400_000, createdAt: T0, finishedAt: T0 + 20_000 });
-    expect(rowMeta(done, ctx({ now: T0 + 5 * 60_000 + 20_000 }))).toEqual({ left: "50.0 MB · 用时 20 秒", right: "5 分钟前", danger: false });
-    expect(rowMeta({ ...done, totalBytes: null, finishedAt: T0 + 125_000 }, ctx({ now: T0 + 125_000 })).left).toBe("用时 2 分钟");
+  it("已完成：总量是这一次尝试跨批次累计的字节，用时从开始运行算起、不含排队等待；右侧相对时间", () => {
+    // 加入队列 90 秒后才开始跑，跑了 20 秒；最后一批只有 2 MB，累计下了 50 MB
+    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 90_000, finishedAt: T0 + 110_000, bytes: 2 * MB, totalBytes: 2 * MB, doneBytes: 52_400_000 });
+    expect(rowMeta(done, ctx({ now: T0 + 5 * 60_000 + 110_000 }))).toEqual({ left: "50.0 MB · 用时 20 秒", right: "5 分钟前", danger: false });
+    expect(rowMeta({ ...done, finishedAt: T0 + 90_000 + 125_000 }, ctx({ now: T0 + 215_000 })).left).toBe("50.0 MB · 用时 2 分钟");
+    // 边界：刚开始就结束也写满 1 秒
+    expect(rowMeta({ ...done, finishedAt: T0 + 90_000 }, ctx()).left).toBe("50.0 MB · 用时 1 秒");
+  });
+
+  it("已完成：一个字节都没下（文件都已就绪）不写总量；较早的任务记录没有开始时刻，不写用时", () => {
+    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 1_000, finishedAt: T0 + 4_000, doneBytes: 0 });
+    expect(rowMeta(done, ctx()).left).toBe("用时 3 秒");
+    expect(rowMeta({ ...done, startedAt: null, doneBytes: 4096 }, ctx()).left).toBe("4.0 KB");
+    expect(rowMeta({ ...done, startedAt: null, doneBytes: 0 }, ctx()).left).toBe("已完成");
+    // 重试过的任务照样写第几次尝试，用时只算最后这一次
+    expect(rowMeta({ ...done, attempt: 3 }, ctx()).left).toBe("用时 3 秒 · 第 3 次尝试");
   });
 
   it("失败：危险色的具体原因，能归类的用统一说法，其余用后端原文", () => {
@@ -230,8 +242,11 @@ describe("吞吐采样与总览", () => {
     expect(overviewRemaining(o, 0)).toBe("剩余 700 B · 约 10 秒");
     expect(overviewRemaining(o, 10)).toBe("剩余 700 B · 约 2 分钟");
     expect(overviewRemaining({ ...o, speed: 0 }, 0)).toBe("剩余 700 B · 等待数据");
-    expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: 0 });
-    expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })])).label).toBe("idle");
+    // 只有总量未知的排队任务、或没有任何活动任务：没有可显示的进度，而不是 0%
+    expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: null });
+    expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })]))).toEqual({ label: "idle", speed: 0, downloaded: 0, total: 0, fraction: null });
+    // 边界：总量已知但一个字节都还没下，是真实的 0
+    expect(overviewOf(bucketTasks([task("r0", { status: "running", bytes: 0, totalBytes: 1 })])).fraction).toBe(0);
   });
 
   it("曲线：不足 48 个采样左侧补 0；纵轴上限至少 4 MB/s，超过时按样本最大值", () => {

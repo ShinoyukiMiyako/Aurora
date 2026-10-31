@@ -1,8 +1,8 @@
-// 账户页上各处共用的动作：切换、删除、刷新、重新登录、复制 UUID。全部经 useRunner 走外层统一错误处理，
+// 账户页上各处共用的动作：切换、删除、刷新、重新登录、复制 UUID。全部经 useRunner 或外壳的 copyText 走外层统一错误处理，
 // 页面不自己捕获。切换的结果在本页原位可见（聚光卡换人、描边移动），所以不弹通知；删除的通知由状态层发。
 
 import { useState } from "react";
-import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -17,21 +17,17 @@ export interface AccountActions {
   remove(account: Account): void;
   refresh(uuid: string): void;
   relogin(uuid: string): void;
-  /** 复制按钮用：成功 resolve；失败已经弹过「复制失败」，再以原错误 reject，按钮不显示「已复制」。 */
-  copyText(text: string): Promise<void>;
+  /** 复制按钮用：写进去为 true；失败已经弹过「复制失败」，为 false，按钮不显示「已复制」。永不 reject。 */
+  copyText(text: string): Promise<boolean>;
   /** 菜单项用：菜单选中即关闭，没有原位反馈的位置，只在失败时报错。 */
   copyFromMenu(text: string): void;
   /** 正在刷新的账户（按钮显示进行中）。 */
   refreshing: ReadonlySet<string>;
 }
 
-function writeClipboard(text: string): Promise<void> {
-  return navigator.clipboard.writeText(text);
-}
-
 export function useAccountActions(): AccountActions {
   const { state, actions } = useLauncher();
-  const { confirm } = useShell();
+  const { confirm, copyText } = useShell();
   const run = useRunner();
   const [refreshing, setRefreshing] = useState<ReadonlySet<string>>(() => new Set());
 
@@ -62,12 +58,7 @@ export function useAccountActions(): AccountActions {
 
   const relogin = (uuid: string) => void run(() => actions.relogin(uuid, MANUAL_LOGIN), ACTION_ERROR.relogin);
 
-  const copyText = async (text: string) => {
-    const result = await run(() => writeClipboard(text), TOAST_COPY.copyFailed);
-    if (!result.ok) throw result.error;
-  };
-
-  const copyFromMenu = (text: string) => void run(() => writeClipboard(text), TOAST_COPY.copyFailed);
+  const copyFromMenu = (text: string) => void copyText(text);
 
   return { switchTo, remove, refresh, relogin, copyText, copyFromMenu, refreshing };
 }
