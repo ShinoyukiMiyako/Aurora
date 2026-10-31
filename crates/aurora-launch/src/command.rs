@@ -327,6 +327,20 @@ impl<'a> CommandBuilder<'a> {
             Vec::new()
         };
         let mut game_args: Vec<String> = game_templates.iter().map(|t| ph.substitute(t)).collect();
+        // 旧式 minecraftArguments 不带窗口尺寸，新式参数靠 has_custom_resolution 条件块带上；
+        // 游戏 1.6 起都认 --width / --height，模板里没有时补一份。
+        if let Some((width, height)) = self.resolution
+            && !game_args
+                .iter()
+                .any(|arg| arg == "--width" || arg == "--height")
+        {
+            game_args.extend([
+                "--width".to_owned(),
+                width.to_string(),
+                "--height".to_owned(),
+                height.to_string(),
+            ]);
+        }
         if self.fullscreen {
             game_args.push("--fullscreen".to_owned());
         }
@@ -386,6 +400,61 @@ mod tests {
         assert!(line.contains(" -Xmx2048m "));
         // 空参数渲染成一对引号。
         assert!(line.ends_with(" \"\""));
+    }
+
+    fn build_with_resolution(json: &str, resolution: Option<(u32, u32)>) -> Vec<String> {
+        let version = VersionJson::from_json_str(json).unwrap();
+        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
+        let mut builder = CommandBuilder::new(
+            &version,
+            ctx,
+            "java.exe",
+            paths,
+            "/mc",
+            AuthValues::offline("Steve", "uuid"),
+            "1.0.0",
+        );
+        if let Some((width, height)) = resolution {
+            builder = builder.with_resolution(width, height);
+        }
+        builder.build().unwrap().args
+    }
+
+    fn value_after<'a>(args: &'a [String], key: &str) -> Vec<&'a str> {
+        args.windows(2)
+            .filter(|pair| pair[0] == key)
+            .map(|pair| pair[1].as_str())
+            .collect()
+    }
+
+    /// 1.12.2 及更早的 minecraftArguments 不带窗口尺寸参数，游戏本身认 `--width` / `--height`：
+    /// 设了分辨率就要补上，否则实例设置里的窗口大小对这些版本不生效。
+    #[test]
+    fn legacy_arguments_get_the_custom_resolution_appended() {
+        let legacy = r#"{"id":"1.12.2","mainClass":"net.minecraft.client.main.Main",
+            "minecraftArguments":"--username ${auth_player_name} --version ${version_name}"}"#;
+        let args = build_with_resolution(legacy, Some((1920, 1080)));
+        assert_eq!(value_after(&args, "--width"), vec!["1920"]);
+        assert_eq!(value_after(&args, "--height"), vec!["1080"]);
+        assert_eq!(args.last().map(String::as_str), Some("1080"));
+
+        // 没设分辨率：不凭空加尺寸参数，交给游戏自己的默认窗口。
+        let args = build_with_resolution(legacy, None);
+        assert!(!args.iter().any(|a| a == "--width" || a == "--height"));
+    }
+
+    /// 新式参数自带 has_custom_resolution 条件块：只出现一份，不重复追加。
+    #[test]
+    fn modern_arguments_carry_the_resolution_exactly_once() {
+        let modern = r#"{"id":"1.21","mainClass":"net.minecraft.client.main.Main",
+            "arguments":{"game":["--username","${auth_player_name}",
+                {"rules":[{"action":"allow","features":{"has_custom_resolution":true}}],
+                 "value":["--width","${resolution_width}","--height","${resolution_height}"]}],
+             "jvm":["-cp","${classpath}"]}}"#;
+        let args = build_with_resolution(modern, Some((854, 480)));
+        assert_eq!(value_after(&args, "--width"), vec!["854"]);
+        assert_eq!(value_after(&args, "--height"), vec!["480"]);
     }
 
     #[test]
