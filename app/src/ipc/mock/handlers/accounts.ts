@@ -81,11 +81,14 @@ let pendingSeq = 0;
 
 // ---------------------------------------------------------------- 共用
 
-/** mock 不复刻后端的 MD5 离线 UUID，只保证同名得同一个 32 位十六进制串。 */
+/**
+ * mock 不复刻后端的 MD5 离线 UUID，只保证同名得同一个 32 位十六进制串。四轮只靠输入前缀的轮次区分：
+ * 轮次若再异或进初始种子，会与前缀首字符 '0'+round 的异或互相抵消，四段完全相同，Java 的 UUID.hashCode 恒为 0。
+ */
 function stableHex(text: string): string {
   let out = "";
   for (let round = 0; round < 4; round++) {
-    let hash = 0x811c9dc5 ^ round;
+    let hash = 0x811c9dc5;
     for (const ch of `${round}:${text}`) {
       hash ^= ch.codePointAt(0) as number;
       hash = Math.imul(hash, 0x01000193) >>> 0;
