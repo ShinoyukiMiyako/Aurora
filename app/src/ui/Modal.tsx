@@ -72,7 +72,8 @@ export function Modal(props: ModalProps) {
   // 弹窗框还挂着（开着，或关上后退场还没播完）：只有这时才有东西要随父级退场
   const [framed, setFramed] = useState(open);
   if (open && !framed) setFramed(true);
-  useEscapeLayer(open, onClose, { kind: "modal", dismissible });
+  // 父级退场与 open 变 false 一样立即撤层：退场要播几帧，期间弹窗已不可操作，Esc 与全局快捷键不该还被它挡着
+  useEscapeLayer(open && parentPresent, onClose, { kind: "modal", dismissible });
   return (
     <>
       <FocusReturnPoint active={open} />

@@ -325,6 +325,35 @@ describe("Modal 随父级退场", () => {
     await vi.waitFor(() => expect(dialogs()).toHaveLength(0), { timeout: 3000, interval: 20 });
   });
 
+  it("父级开始退场即撤下 Esc 层：退场期间按 Esc 不再关这个弹窗，也不挡住下面那一层", async () => {
+    const closes: string[] = [];
+    const handles: { hide?: () => void } = {};
+    function Host() {
+      const [shown, setShown] = useState(true);
+      handles.hide = () => setShown(false);
+      return (
+        <>
+          <Modal open title="底下的弹窗" onClose={() => closes.push("底下")}>
+            正文
+          </Modal>
+          <AnimatePresence>
+            {shown && (
+              <Modal key="flow" open title="新建实例" onClose={() => closes.push("流程")}>
+                正文
+              </Modal>
+            )}
+          </AnimatePresence>
+        </>
+      );
+    }
+    mount(<Host />);
+    expect(dialogs()).toHaveLength(2);
+    act(() => handles.hide?.());
+    keydown(document.body, "Escape");
+    expect(closes).toEqual(["底下"]);
+    await vi.waitFor(() => expect(dialogs()).toHaveLength(1), { timeout: 3000, interval: 20 });
+  });
+
   // 关着的弹窗常挂在页面里（例如打开过一次的详情弹窗）。页面整体退场时它没有任何东西要播，不能拖住父级：
   // mode="wait" 下父级退场播不完，下一屏就永远挂不上。
   it("关着的弹窗挂在退场的子树里：父级照常退场完，mode=wait 的下一屏能挂上", async () => {
