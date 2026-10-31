@@ -13,7 +13,7 @@ use aurora_instance::{
 use aurora_launch::resolve_game_directory;
 use aurora_version::{VersionJson, detect_loaders};
 
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::facade::Aurora;
 
 impl Aurora {
@@ -31,16 +31,12 @@ impl Aurora {
         )
     }
 
-    /// 解析某版本的运行工作目录：只读这一个版本的 JSON 与设置，不扫整个 `versions/`。
-    /// 版本本地未安装返回 [`CoreError::VersionNotInstalled`]。
+    /// 解析某实例的运行工作目录：只读这一个实例的 JSON 与设置，不扫整个 `versions/`。
+    ///
+    /// 启动、Mod 管理、实例内容与打开文件夹都走这里。id 不安全报 `InvalidId`，目录不在报
+    /// [`CoreError::VersionNotInstalled`]，目录在而版本 JSON 缺失或损坏报 `Broken`。
     pub async fn resolve_working_dir(&self, version_id: &str) -> Result<ResolvedIsolation> {
-        let versions_dir = self.game_dir().join(VERSIONS_DIR);
-        let json = read_version_json(&versions_dir, version_id)
-            .await?
-            .ok_or_else(|| CoreError::VersionNotInstalled {
-                id: version_id.to_owned(),
-            })?;
-        let target = discovered(&versions_dir, version_id, json);
+        let target = self.instance_version(version_id).await?;
         let settings = self.version_settings(version_id).await?;
         self.resolve_working_dir_from(
             version_id,
@@ -114,6 +110,7 @@ pub(crate) fn discovered(versions_dir: &Path, id: &str, json: VersionJson) -> Di
 mod tests {
     use super::*;
     use crate::config::AuroraConfig;
+    use crate::error::CoreError;
     use aurora_instance::IsolationPolicy;
 
     #[tokio::test]
@@ -229,7 +226,7 @@ mod tests {
         ));
         assert!(matches!(
             aurora.resolve_working_dir("broken").await.unwrap_err(),
-            CoreError::Version(aurora_version::Error::Json { .. })
+            CoreError::Instance(crate::InstanceError::Broken { id, .. }) if id == "broken"
         ));
     }
 

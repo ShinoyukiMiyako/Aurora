@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use aurora_auth::{Account, AccountCredentials};
 use aurora_download::{BatchReport, DownloadTask};
 use aurora_install::GameLayout;
-use aurora_instance::{DiscoveredVersion, IsolationOverride, VERSIONS_DIR, VersionSettings};
+use aurora_instance::{
+    DiscoveredVersion, IsolationOverride, JavaSelection, VERSIONS_DIR, VersionSettings,
+};
 use aurora_java::{DetectSource, JavaInstallation, detect_all, select_for_major};
 use aurora_launch::logfile::{SessionOutcome, logs_dir};
 use aurora_launch::{
@@ -279,14 +281,26 @@ impl InstanceLaunchSettings {
     pub fn from_settings(settings: VersionSettings) -> Self {
         let VersionSettings {
             description: _,
-            icon: _,
-            favorite: _,
-            category: _,
+            cover: _,
             isolation,
+            memory_mb,
+            java,
+            jvm_args,
+            resolution,
+            fullscreen,
         } = settings;
         Self {
             isolation,
-            ..Self::default()
+            memory_mb,
+            java: match java {
+                JavaSelection::Auto => JavaChoice::Auto,
+                JavaSelection::Path(path) => JavaChoice::Path(path),
+            },
+            // 设置里原样保存玩家输入的整行参数，这里按空白切成独立参数交给 JVM。
+            jvm_args: jvm_args.split_whitespace().map(str::to_owned).collect(),
+            // 全屏时窗口尺寸参数没有意义，不传，免得部分版本先按尺寸开窗再切全屏。
+            resolution: (!fullscreen).then_some((resolution.width, resolution.height)),
+            fullscreen,
         }
     }
 }
@@ -1560,6 +1574,44 @@ mod tests {
         assert_eq!((small.max_mb, small.min_mb), (768, None));
         let edge = resolve_memory(Some(1024), global);
         assert_eq!((edge.max_mb, edge.min_mb), (1024, Some(1024)));
+    }
+
+    #[test]
+    fn instance_settings_map_every_launch_field() {
+        let windowed = InstanceLaunchSettings::from_settings(VersionSettings {
+            description: Some("周末生存".into()),
+            cover: Some("cherry_planks".into()),
+            isolation: IsolationOverride::Enabled,
+            memory_mb: Some(6144),
+            java: JavaSelection::Path(PathBuf::from(r"C:\jdk\bin\java.exe")),
+            jvm_args: "  -XX:+UseG1GC\t-Dfoo=bar \n".into(),
+            resolution: aurora_instance::Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            fullscreen: false,
+        });
+        assert_eq!(
+            windowed,
+            InstanceLaunchSettings {
+                isolation: IsolationOverride::Enabled,
+                memory_mb: Some(6144),
+                java: JavaChoice::Path(PathBuf::from(r"C:\jdk\bin\java.exe")),
+                jvm_args: vec!["-XX:+UseG1GC".into(), "-Dfoo=bar".into()],
+                resolution: Some((1920, 1080)),
+                fullscreen: false,
+            }
+        );
+
+        let fullscreen = InstanceLaunchSettings::from_settings(VersionSettings {
+            fullscreen: true,
+            ..VersionSettings::default()
+        });
+        assert_eq!(fullscreen.resolution, None);
+        assert!(fullscreen.fullscreen);
+        assert_eq!(fullscreen.java, JavaChoice::Auto);
+        assert_eq!(fullscreen.memory_mb, None);
+        assert!(fullscreen.jvm_args.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

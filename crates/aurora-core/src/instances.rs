@@ -15,10 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aurora_instance::{
     AURORA_META_DIR, BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker,
-    InstanceContent, MarkerStore, PinsViolation, ResolvedIsolation, VersionProbe, VersionScan,
-    VersionSettings, VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files,
-    dir_footprint, discover_versions, is_safe_instance_id, list_version_dirs, list_worlds,
-    probe_version, read_instance_content, resolve_isolation,
+    InstanceContent, MarkerStore, PinsViolation, VersionProbe, VersionScan, VersionSettings,
+    VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, dir_footprint,
+    discover_versions, is_safe_instance_id, list_version_dirs, list_worlds, probe_version,
+    read_instance_content, resolve_isolation,
 };
 use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
 use tokio::sync::Semaphore;
@@ -205,25 +205,6 @@ impl Aurora {
                 .into())
             }
         }
-    }
-
-    /// 实例运行时的工作目录：全局隔离档位、实例自己的隔离覆盖与「已有 mods/saves 强制隔离」综合判定。
-    ///
-    /// 启动、Mod 管理、打开文件夹都要用同一个结果，不然会出现「启动用的是隔离目录，Mod 却装进了公共目录」。
-    pub async fn resolve_working_dir(&self, id: &str) -> Result<ResolvedIsolation> {
-        let version = self.instance_version(id).await?;
-        let settings = VersionSettingsStore::for_version_dir(&version.dir)
-            .load()
-            .await?;
-        Ok(resolve_isolation(
-            self.game_dir(),
-            id,
-            self.config().isolation_policy,
-            settings.isolation,
-            version.has_mod_loader(),
-            version.is_release(),
-        )
-        .await?)
     }
 
     /// 实例的资源包、光影包与存档（从它的工作目录读）。
