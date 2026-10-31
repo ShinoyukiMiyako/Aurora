@@ -70,6 +70,7 @@ pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, GameDirProblem, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
+pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::{
@@ -77,24 +78,23 @@ pub use launch::{
     LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
     resolve_memory,
 };
+pub use launcher_update::{UpdateSource, order_update_sources};
 pub use ledger::{Ledger, LedgerEntry, LedgerStore};
 pub use modfs::is_mod_file_busy;
-pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
-pub use modversions::ProjectInfo;
-pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
-pub use session::{
-    Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
-};
-pub use updates::UpdateCandidate;
 pub use modpack::{
     INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
     ModpackPreview, ModpackSource, read_instance_modpack, validate_instance_name,
 };
-pub use resources::{ResourceInstallOutcome, ResourceTarget};
-pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
-pub use launcher_update::{UpdateSource, order_update_sources};
+pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
+pub use modversions::ProjectInfo;
 pub use news::{NewsFeed, NewsItem, NewsTag};
+pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
+pub use resources::{ResourceInstallOutcome, ResourceTarget};
 pub use servers::{KnownServer, ServerMonitor, ServerStatus};
+pub use session::{
+    Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
+};
+pub use updates::UpdateCandidate;
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 

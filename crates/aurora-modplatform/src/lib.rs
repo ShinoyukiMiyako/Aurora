@@ -45,7 +45,9 @@ pub use aggregate::{
     SearchEntry, SkipReason, SkippedPlatform, aggregate_search, normalize_for_merge, should_merge,
 };
 
-pub use detail::{BodyFormat, DependencyProject, ProjectDetail, curseforge_detail, modrinth_detail};
+pub use detail::{
+    BodyFormat, DependencyProject, ProjectDetail, curseforge_detail, modrinth_detail,
+};
 
 pub use version::{ModDependency, ModVersionInfo, ReleaseChannel, parse_loader_name};
 
