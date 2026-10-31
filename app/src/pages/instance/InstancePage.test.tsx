@@ -5,7 +5,7 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
 import type { HistoryEvent } from "../../ipc/history";
-import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
+import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, WorldBackupDto, WorldBackupListDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
@@ -20,9 +20,12 @@ import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 import { InstallStageTab } from "./InstallStage";
 import { creationRef, creationRefEqual, installStage } from "./model";
+import { PickSaveFileProvider, type PickSaveFile } from "./save-file";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+/** 系统保存文件对话框的替身：各用例按需改写返回值。 */
+const saveDialog = vi.hoisted(() => ({ pick: null as unknown as PickSaveFile }));
 
 const ID = "樱花生存";
 const DAY = 24 * 3600 * 1000;
@@ -55,8 +58,10 @@ function Providers({ children }: { children: ReactNode }) {
     <LauncherProvider>
       <ShellProvider>
         <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          {children}
-          <OverlayRoot />
+          <PickSaveFileProvider value={(options) => saveDialog.pick(options)}>
+            {children}
+            <OverlayRoot />
+          </PickSaveFileProvider>
         </RemoteImageProvider>
       </ShellProvider>
     </LauncherProvider>
@@ -189,6 +194,7 @@ function contentDto(): InstanceContentDto {
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   resetRecorder(ipc);
+  saveDialog.pick = vi.fn(() => Promise.reject(new Error("这个用例不该弹保存对话框")));
   stubMatchMedia(false);
   stubResizeObserver();
   stubCanvas();
@@ -1466,3 +1472,281 @@ function resetRecorderKeepOverrides() {
   resetRecorder(ipc);
   for (const [k, v] of saved) ipc.overrides.set(k, v);
 }
+
+describe("实例详情：存档备份", () => {
+  const MB = 1024 * 1024;
+  const HOUR = 3600 * 1000;
+  let list: WorldBackupListDto;
+
+  function backup(file: string, kind: WorldBackupDto["kind"], createdAt: number, sizeBytes: number, levelName: string | null): WorldBackupDto {
+    return { file, kind, created_at: createdAt, size_bytes: sizeBytes, level_name: levelName };
+  }
+
+  beforeEach(() => {
+    // 故意不按时间排：界面自己按 created_at 倒序
+    list = {
+      world: "w2",
+      scope: "instance",
+      dir: `D:/Games/.minecraft/.petalfall/backups/instances/${ID}/w2`,
+      backups: [
+        backup("b-old.zip", "auto", NOW - 3 * DAY, 300 * MB, "新世界"),
+        backup("b-new.zip", "auto", NOW - 2 * HOUR, 412 * MB, "新世界"),
+        backup("b-mid.zip", "manual", NOW - DAY - 2 * HOUR, 405 * MB, "最早的名字"),
+      ],
+      total_bytes: 1117 * MB,
+    };
+    ipc.overrides.set("list_world_backups", () => list);
+    ipc.overrides.set("restore_world_backup", () => new Promise(() => undefined));
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    ipc.overrides.set("export_world", () => new Promise(() => undefined));
+    ipc.overrides.set("delete_world_backup", (args) => {
+      list = { ...list, backups: list.backups.filter((b) => b.file !== args.file) };
+      return null;
+    });
+  });
+
+  const rowMenu = (world: string) => button(`「${world}」的更多操作`);
+  const menuItems = () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+  const menuItem = (label: string) => {
+    const found = menuItems().find((el) => textOf(el) === label);
+    if (found === undefined) throw new Error(`菜单里没有「${label}」`);
+    return found;
+  };
+  const dialogs = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter((d) => d.closest("[data-exiting]") === null);
+  const backupsDialog = () => {
+    const found = dialogs().find((d) => d.querySelector("h2")?.textContent === "「新世界」的备份");
+    if (found === undefined) throw new Error("备份列表弹窗没有打开");
+    return found;
+  };
+  const rows = () => [...backupsDialog().querySelectorAll("li")];
+
+  async function hoverReason(el: HTMLElement): Promise<string> {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tip = [...document.querySelectorAll<HTMLElement>('[role="tooltip"]')].at(-1);
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+    });
+    if (tip === undefined) throw new Error("悬停后没有提示气泡");
+    return textOf(tip);
+  }
+
+  async function openBackups() {
+    await open("overview");
+    click(rowMenu("新世界"));
+    click(menuItem("查看备份"));
+    await flush();
+  }
+
+  async function startGame() {
+    ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+  }
+
+  it("存档行的更多菜单有三项：备份存档、查看备份、导出存档，平时都能用", async () => {
+    await open("overview");
+    click(rowMenu("新世界"));
+    expect(menuItems().map(textOf)).toEqual(["备份存档", "查看备份", "导出存档"]);
+    expect(menuItems().map((el) => el.getAttribute("aria-disabled"))).toEqual([null, null, null]);
+    click(menuItem("备份存档"));
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([{ id: ID, world: "w2", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "备份「新世界」" });
+    expect(toastTitles()).toContain("已开始备份「新世界」");
+  });
+
+  it("游戏运行中：备份与导出禁用并写明原因，查看备份照常；点了不发命令", async () => {
+    await open("overview");
+    await startGame();
+    click(rowMenu("新世界"));
+    expect(menuItem("备份存档").getAttribute("aria-disabled")).toBe("true");
+    expect(menuItem("导出存档").getAttribute("aria-disabled")).toBe("true");
+    expect(menuItem("查看备份").getAttribute("aria-disabled")).toBeNull();
+    expect(await hoverReason(menuItem("备份存档"))).toBe("游戏退出后再备份，退出时会自动备份一份");
+    expect(await hoverReason(menuItem("导出存档"))).toBe("游戏退出后再备份，退出时会自动备份一份");
+    click(menuItem("备份存档"));
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("后端报实例正在改名：备份与导出禁用，原因写实例名与活动", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "renaming" } : i));
+    await open("overview");
+    click(rowMenu("新世界"));
+    expect(menuItem("备份存档").getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(menuItem("备份存档"))).toBe("「樱花生存」正在改名，完成后再试");
+  });
+
+  it("备份列表：按时间倒序列出，自动与手动各带 Tag，写大小、时刻与改名前的存档名；副标题写份数与总量", async () => {
+    await openBackups();
+    const dlg = backupsDialog();
+    expect(dlg.textContent).toContain("3 份 · 共 1.1 GB");
+    expect(rows()).toHaveLength(3);
+    const tags = rows().map((li) => li.querySelector("[data-tone]"));
+    expect(tags.map((t) => (t === null ? null : [textOf(t), t.getAttribute("data-tone")]))).toEqual([
+      ["自动", "neutral"],
+      ["手动", "accent"],
+      ["自动", "neutral"],
+    ]);
+    const texts = rows().map(textOf);
+    expect(texts[0]).toContain("2026年10月31日 10:00 · 2 小时前");
+    expect(texts[0]).toContain("412 MB");
+    expect(texts[1]).toContain("2026年10月30日 10:00 · 昨天");
+    expect(texts[1]).toContain("当时名为「最早的名字」");
+    expect(texts[2]).toContain("2026年10月28日 12:00 · 3 天前");
+    expect(texts[2]).toContain("300 MB");
+    // 存档名没变过的那几份不写「当时名为」
+    expect(texts[0]).not.toContain("当时名为");
+    expect(callsOf(ipc, "list_world_backups")).toEqual([{ id: ID, world: "w2" }]);
+    expect(dlg.textContent).toContain("退出游戏后会自动备份玩过的存档，每个存档保留 5 份自动备份。");
+  });
+
+  it("恢复先确认：确认前不调用 restore_world_backup，确认后调用一次，参数为实例、存档与那一份备份", async () => {
+    await openBackups();
+    click(button("恢复 2026年10月30日 10:00 的备份", backupsDialog()));
+    await flush();
+    const confirm = dialogs().at(-1);
+    if (confirm === undefined) throw new Error("没有确认框");
+    expect(confirm.querySelector("h2")?.textContent).toBe("恢复「新世界」的备份？");
+    expect(confirm.textContent).toContain("存档会回到 2026年10月30日 10:00 备份时的样子，现在的存档会移入回收站，需要时可以从回收站找回。");
+    expect(callsOf(ipc, "restore_world_backup")).toHaveLength(0);
+    click(button("恢复备份", confirm));
+    await flush();
+    const calls = callsOf(ipc, "restore_world_backup");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ id: ID, world: "w2", file: "b-mid.zip", taskId: `${launcher.state.tasks[0].id}#1` });
+    expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_restore", title: "恢复「新世界」" });
+  });
+
+  it("恢复的确认框取消：什么都不做", async () => {
+    await openBackups();
+    click(button("恢复 2026年10月31日 10:00 的备份", backupsDialog()));
+    await flush();
+    const confirm = dialogs().at(-1);
+    if (confirm === undefined) throw new Error("没有确认框");
+    click(button("取消", confirm));
+    await flush();
+    expect(callsOf(ipc, "restore_world_backup")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("这个存档有任务在进行：各行的恢复与删除禁用，原因写这个存档正在备份或恢复", async () => {
+    await openBackups();
+    click(button("备份存档", backupsDialog()));
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toHaveLength(1);
+    const restore = button("恢复 2026年10月31日 10:00 的备份", backupsDialog());
+    const remove = button("删除 2026年10月31日 10:00 的备份", backupsDialog());
+    expect(restore.getAttribute("aria-disabled")).toBe("true");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(restore)).toBe("这个存档正在备份或恢复");
+    expect(button("备份存档", backupsDialog()).getAttribute("aria-disabled")).toBe("true");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "delete_world_backup")).toEqual([]);
+  });
+
+  it("游戏运行中：恢复与备份存档禁用并写原因，删除照常（不占实例）", async () => {
+    await open("overview");
+    await startGame();
+    click(rowMenu("新世界"));
+    click(menuItem("查看备份"));
+    await flush();
+    const restore = button("恢复 2026年10月31日 10:00 的备份", backupsDialog());
+    expect(await hoverReason(restore)).toBe("游戏退出后再恢复");
+    expect(await hoverReason(button("备份存档", backupsDialog()))).toBe("游戏退出后再备份，退出时会自动备份一份");
+    click(button("删除 2026年10月31日 10:00 的备份", backupsDialog()));
+    await flush();
+    expect(callsOf(ipc, "delete_world_backup")).toEqual([{ id: ID, world: "w2", file: "b-new.zip" }]);
+  });
+
+  it("删除不确认：移入回收站后列表去掉这一行，提示已移入回收站", async () => {
+    await openBackups();
+    click(button("删除 2026年10月31日 10:00 的备份", backupsDialog()));
+    await flush();
+    expect(dialogs()).toHaveLength(1);
+    expect(callsOf(ipc, "delete_world_backup")).toEqual([{ id: ID, world: "w2", file: "b-new.zip" }]);
+    expect(rows()).toHaveLength(2);
+    expect(toastTitles()).toContain("已删除一份备份");
+  });
+
+  it("打开备份文件夹：在文件管理器里定位到列表给的目录；还没有备份时禁用", async () => {
+    ipc.overrides.set("plugin:opener|reveal_item_in_dir", () => null);
+    await openBackups();
+    click(button("打开备份文件夹", backupsDialog()));
+    await flush();
+    expect(callsOf(ipc, "plugin:opener|reveal_item_in_dir")).toEqual([{ paths: [list.dir] }]);
+    view?.unmount();
+    list = { ...list, backups: [], total_bytes: 0 };
+    resetRecorderKeepOverrides();
+    await openBackups();
+    const openDir = button("打开备份文件夹", backupsDialog());
+    expect(await hoverReason(openDir)).toBe("还没有备份，备份目录还没建出来");
+    click(openDir);
+    await flush();
+    expect(callsOf(ipc, "plugin:opener|reveal_item_in_dir")).toEqual([]);
+  });
+
+  it("没有备份：副标题与空状态都说还没有备份；共用存档的副标题注明所有共用的实例看到同一份", async () => {
+    list = { ...list, scope: "shared", backups: [], total_bytes: 0 };
+    await openBackups();
+    const dlg = backupsDialog();
+    expect(dlg.textContent).toContain("还没有备份 · 所有共用存档的实例看到的是同一份");
+    expect(dlg.textContent).toContain("退出游戏时会自动备份玩过的存档，也可以现在备份一份。");
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("读不到列表：原位报错写原因，「重试」重新请求", async () => {
+    let fail = true;
+    ipc.overrides.set("list_world_backups", () => {
+      if (fail) throw new IpcError("json_file_invalid", "index.json 不是合法的 JSON", { path: "D:/b/index.json" });
+      return list;
+    });
+    await openBackups();
+    expect(backupsDialog().textContent).toContain("读不到备份列表");
+    expect(backupsDialog().textContent).toContain("index.json 不是合法的 JSON");
+    fail = false;
+    click(button("重试", backupsDialog()));
+    await flush();
+    expect(rows()).toHaveLength(3);
+    expect(callsOf(ipc, "list_world_backups")).toHaveLength(2);
+  });
+
+  it("自动备份关着：注记换成去设置，点了关掉弹窗并打开设置的游戏分区", async () => {
+    bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false }, world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await openBackups();
+    expect(backupsDialog().textContent).toContain("自动备份已关闭，可以在设置 · 游戏里打开。");
+    click(button("去设置", backupsDialog()));
+    await flush();
+    expect(nav.route).toEqual({ page: "settings", section: "game" });
+  });
+
+  it("导出：弹系统保存对话框（默认文件名是存档文件夹名），选定后入队导出；取消对话框什么都不做", async () => {
+    const pick = vi.fn<PickSaveFile>(() => Promise.resolve(null));
+    saveDialog.pick = pick;
+    await open("overview");
+    click(rowMenu("新世界"));
+    click(menuItem("导出存档"));
+    await flush();
+    expect(pick).toHaveBeenCalledWith({ title: "导出「新世界」", defaultPath: "w2.zip", filter: { name: "存档压缩包", extensions: ["zip"] } });
+    expect(callsOf(ipc, "export_world")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+
+    pick.mockResolvedValueOnce("E:\\导出\\新世界.zip");
+    click(rowMenu("新世界"));
+    click(menuItem("导出存档"));
+    await flush();
+    expect(callsOf(ipc, "export_world")).toEqual([{ id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "导出「新世界」" });
+  });
+});

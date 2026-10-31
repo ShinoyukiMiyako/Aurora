@@ -37,18 +37,20 @@ import { EmptyState } from "../../ui/EmptyState";
 import { IconButton } from "../../ui/IconButton";
 import { KV } from "../../ui/KV";
 import { LoaderTag } from "../../ui/LoaderTag";
+import { MoreMenu } from "../../ui/MoreMenu";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Skeleton } from "../../ui/Skeleton";
 import { StatGrid, StatTile } from "../../ui/StatTile";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Tooltip } from "../../ui/Tooltip";
-import { HERO_COPY, OVERVIEW_COPY } from "./copy";
+import { HERO_COPY, OVERVIEW_COPY, WORLD_BACKUP_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
 import { chosenRuntime, modRows, modTotals, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
+import { useWorldOps, WorldBackupsModal, worldRef, type WorldRef } from "./WorldBackupsModal";
 
 export interface OverviewTabProps {
   inst: InstanceSummary;
@@ -76,7 +78,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
       {banner === "installing" && view.kind === "installing" && <InstallingBanner instanceId={inst.id} />}
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div className={styles.overviewGrid}>
-        <WorldsCard content={content} ops={ops} />
+        <WorldsCard inst={inst} content={content} ops={ops} />
         <InfoCard inst={inst} queryId={queryId} onTab={onTab} />
         <ModsPeekCard inst={inst} mods={mods} updates={updates} ops={ops} onTab={onTab} />
         <PacksCard inst={inst} content={content} />
@@ -266,9 +268,13 @@ const MODE_TILE: Readonly<Record<keyof typeof MODE_LABEL, WorldMode | null>> = {
   spectator: null,
 };
 
-function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
+function WorldsCard({ inst, content, ops }: { inst: InstanceSummary; content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
   const now = useNow(30_000);
   const [expanded, setExpanded] = useState(false);
+  const worldOps = useWorldOps(inst, ops);
+  // 弹窗关上后仍记着最近看的那个存档：退场动画期间标题与列表不变成空的
+  const [backupsOf, setBackupsOf] = useState<WorldRef | null>(null);
+  const [backupsOpen, setBackupsOpen] = useState(false);
   const load = useModuleView(content);
   const worlds = content.status === "ready" ? sortWorlds(content.data.worlds) : [];
   const total = worlds.reduce((sum, w) => sum + w.size_bytes, 0);
@@ -320,6 +326,14 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
                   </div>
                   <span className={styles.rowMeta}>{formatBytes(w.size_bytes)}</span>
                   <IconButton icon="folder" label={OVERVIEW_COPY.openWorld(name)} size="sm" onClick={() => ops.openFolder("world", w.dir_name)} />
+                  <MoreMenu
+                    size="sm"
+                    label={WORLD_BACKUP_COPY.rowMenu(name)}
+                    items={worldOps.menu(worldRef(w), () => {
+                      setBackupsOf(worldRef(w));
+                      setBackupsOpen(true);
+                    })}
+                  />
                 </li>
               );
             })}
@@ -333,6 +347,7 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
           )}
         </>
       )}
+      {backupsOf !== null && <WorldBackupsModal inst={inst} world={backupsOf} open={backupsOpen} onClose={() => setBackupsOpen(false)} worldOps={worldOps} />}
     </Card>
   );
 }
