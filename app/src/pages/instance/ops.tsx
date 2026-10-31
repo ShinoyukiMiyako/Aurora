@@ -1,8 +1,7 @@
-// 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、补全、删除与复制。
+// 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、补全与删除。
 // 几处入口的锁定判断与反馈都从这里出，保证完全一致（删除确认与实例库共用 delete.tsx）。动作一律经外层统一错误处理执行。
 
-import { useCallback } from "react";
-import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { instanceNameError } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
@@ -83,21 +82,4 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
   };
 
   return { locks, busy, installing, nameError, rename, togglePin, openFolder, repair, remove };
-}
-
-/**
- * 复制到剪贴板，给 CopyButton 用：成功时 resolve，按钮原位换成「已复制」。失败时统一错误处理已弹出「复制失败」，
- * 按钮保持原样，所以失败不再向按钮传播（按钮不接 rejection，传过去只会变成无人处理的 rejection）。
- */
-export function useCopy(): (text: string) => Promise<void> {
-  const run = useRunner();
-  return useCallback(
-    (text: string) =>
-      new Promise<void>((resolve) => {
-        void run(() => navigator.clipboard.writeText(text), TOAST_COPY.copyFailed).then((outcome) => {
-          if (outcome.ok) resolve();
-        });
-      }),
-    [run],
-  );
 }

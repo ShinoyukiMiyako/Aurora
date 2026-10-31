@@ -4,10 +4,6 @@
  */
 
 /* 只为接住 F2：不参与布局 */
-.keyScope {
-  display: contents;
-}
-
 .page {
   gap: var(--sk-space-16);
 }

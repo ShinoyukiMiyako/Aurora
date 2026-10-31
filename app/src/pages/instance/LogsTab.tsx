@@ -8,6 +8,7 @@ import { logLineFromDto, type InstanceSummary } from "../../domain/adapt";
 import { clock, formatDate, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import type { LogLine } from "../../domain/types";
+import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher, useNow } from "../../state/launcher";
 import { useHistory, useLastLaunchLog, useRollbackChecks } from "../../state/queries/instance";
@@ -24,7 +25,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HISTORY_KIND_LABEL, LOGS_COPY } from "./copy";
 import styles from "./instance.module.css";
 import { HISTORY_PAGE, historyItems, type HistoryItem } from "./model";
-import { lockReason, useCopy, type InstanceOps } from "./ops";
+import { lockReason, type InstanceOps } from "./ops";
 import { ModuleError } from "./parts";
 
 export interface LogsTabProps {
@@ -48,7 +49,7 @@ const NO_LINES: readonly LogLine[] = [];
 function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
   const { state } = useLauncher();
   const now = useNow(30_000);
-  const copy = useCopy();
+  const { copyText } = useShell();
   const [level, setLevel] = useState<LogLevelFilter>("all");
   const [source, setSource] = useState<LogSourceFilter>("all");
   const session = state.session !== null && state.session.instanceId === inst.id ? state.session : null;
@@ -99,7 +100,7 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
         live={live}
         level={level}
         source={source}
-        onCopy={copy}
+        onCopy={copyText}
         copyFeedbackMs={COPY_FEEDBACK_MS}
         onOpenFolder={() => ops.openFolder("logs")}
         className={styles.consoleBody}

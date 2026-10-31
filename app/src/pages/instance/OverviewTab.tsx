@@ -519,7 +519,7 @@ function PeekTiles({ rows, total, onOpen }: { rows: readonly ModRow[]; total: nu
       {rows.slice(0, shown).map((r) => (
         <Tooltip key={r.fileName} content={r.name} sub={`${r.version === null ? "" : r.version}${r.enabled ? "" : OVERVIEW_COPY.modDisabledSuffix}`}>
           <button type="button" className={styles.peekTile} aria-label={r.name} onClick={onOpen}>
-            <Thumb url={r.iconUrl} kind="mod" hue={hueOf(r.seed)} size={40} inactive={!r.enabled} />
+            <Thumb url={r.iconUrl} kind="mod" hue={hueOf(r.seed)} size={44} inactive={!r.enabled} />
             {r.update !== null && <Badge tone="accent" ring className={styles.peekDot} />}
           </button>
         </Tooltip>

@@ -674,6 +674,25 @@ describe("实例详情：崩溃诊断", () => {
     expect(text()).toContain("当前最大内存 4 GB（跟随全局），只改这个实例");
   });
 
+  it("复制报告路径：写入成功原位换成「已复制」；失败只报一次错，按钮保持原样", async () => {
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    await open("crash");
+    click(button("复制报告路径"));
+    await flush();
+    expect(writeText).toHaveBeenCalledWith(`D:/Games/.minecraft/versions/${ID}/logs/latest.log`);
+    expect(button("已复制").getAttribute("aria-label")).toBe("已复制");
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    writeText.mockImplementation(() => Promise.reject(new Error("剪贴板被占用")));
+    click(button("复制报告路径"));
+    await flush();
+    expect(toastTitles().filter((t) => t === "复制失败")).toHaveLength(1);
+    expect(() => button("已复制")).toThrow();
+  });
+
   it("没有崩溃记录时是空状态，按钮去日志页", async () => {
     await open("crash");
     expect(text()).toContain("没有崩溃记录");
