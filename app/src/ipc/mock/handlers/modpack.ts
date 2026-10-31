@@ -1,16 +1,35 @@
 // 整合包导入的假后端：实例名按后端同一套规则校验（写法、长度、保留名、不区分大小写的重名），
 // 本地文件按扩展名认格式，平台整合包的版本与清单从共用的工程目录（ipc/mock/catalog）里取。导入是长任务：
 // 登记任务、推送带 task_id 的事件、响应取消，成功后新实例进入实例列表，清单里的 Mod 落进它的 mods/。
+// 导出读 Mod mock 里的同一份 mods 目录与卷宗，额外项的文件数与体积用固定表（浏览器里没有磁盘）。
 
 import type { PlatformId } from "../../discover";
 import { IpcError } from "../../errors";
-import type { InstanceNameRule, ModpackInstallOutcomeDto, ModpackPreviewDto, ModpackSource, ModpackSummaryDto, PackFormat, PackLoader } from "../../modpack";
-import { INSTANCE_NAME_MAX_CHARS } from "../../modpack";
+import type { InstanceDto } from "../../instances";
+import type {
+  ExportBundledModDto,
+  ExportExtra,
+  ExportExtraStatDto,
+  ExportIndexedModDto,
+  InstanceNameRule,
+  ModpackExportOptions,
+  ModpackExportOutcomeDto,
+  ModpackExportPreviewDto,
+  ModpackInstallOutcomeDto,
+  ModpackPreviewDto,
+  ModpackSource,
+  ModpackSummaryDto,
+  PackFormat,
+  PackLoader,
+  PackLoaderKind,
+} from "../../modpack";
+import { EXPORT_EXTRAS, INSTANCE_NAME_MAX_CHARS } from "../../modpack";
 import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { acquireMockInstance, addMockInstance, mockInstanceIds, type MockInstanceHold } from "./instances";
-import { placeMockPackMods } from "./mods";
+import { acquireMockInstance, addMockInstance, handlers as instanceHandlers, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
+import { isMockTaskCancelled } from "./tasks";
 
 /** 本地整合包文件的假清单：读不到真文件，每个本地包都报这一份。 */
 const LOCAL_MANIFEST: MockPackManifest = {
@@ -242,8 +261,233 @@ function summarizeModpack(args: MockArgs): ModpackSummaryDto {
   };
 }
 
+// ---------------------------------------------------------------- 导出
+
+const KB = 1024;
+const MB = 1_048_576;
+/** 每个存档按这么大算：mock 的存档列表不带可打包的文件数与体积。 */
+const MOCK_WORLD_BYTES = 40 * MB;
+/** 索引文件本身按每条这么多字节估，产物体积 = 覆盖文件 + 索引。 */
+const MOCK_INDEX_ENTRY_BYTES = 512;
+
+/** 额外项的固定盘面：config 有内容，defaultconfigs 与 kubejs 不存在，存档按实例的存档数现算。 */
+const MOCK_EXTRAS: Readonly<Record<Exclude<ExportExtra, "saves">, { files: number; bytes: number }>> = {
+  config: { files: 37, bytes: 412 * KB },
+  defaultconfigs: { files: 0, bytes: 0 },
+  kubejs: { files: 0, bytes: 0 },
+  resourcepacks: { files: 2, bytes: 18 * MB },
+  shaderpacks: { files: 1, bytes: 3 * MB },
+  options: { files: 1, bytes: 6 * KB },
+};
+
+const EXPORT_NAME_MAX = 64;
+const EXPORT_VERSION_MAX = 32;
+const EXPORT_SUMMARY_MAX = 256;
+const DEFAULT_PACK_VERSION = "1.0.0";
+const WRITABLE_LOADERS: readonly PackLoaderKind[] = ["fabric", "quilt", "forge", "neoforge"];
+const LOADER_TITLE: Readonly<Record<string, string>> = { optifine: "OptiFine", liteloader: "LiteLoader" };
+
+function unsupported(id: string, reason: string, message: string, loader?: string): IpcError {
+  return new IpcError("modpack_export_unsupported", message, loader === undefined ? { id, reason } : { id, reason, loader });
+}
+
+function instanceDtoOf(id: string): InstanceDto {
+  const list = instanceHandlers.list_instances({}) as InstanceDto[];
+  const found = list.find((i) => i.id === id);
+  if (found === undefined) throw new IpcError("version_not_installed", `本地未安装版本 ${id}`, { id });
+  return found;
+}
+
+/** 与后端同一个规划顺序：未装完 -> 版本认不出 -> 加载器写不进去 -> Mod 分组。 */
+function planExport(id: string): ModpackExportPreviewDto {
+  if (!mockInstanceIds().includes(id)) throw new IpcError("version_not_installed", `本地未安装版本 ${id}`, { id });
+  const dto = instanceDtoOf(id);
+  if (dto.status === "broken" || dto.activity === "installing" || dto.activity === "repairing") {
+    throw unsupported(id, "incomplete", "实例还没装完整，修复后再导出");
+  }
+  if (dto.mc_version === null) throw unsupported(id, "version_unknown", "认不出这个实例的游戏版本，没法写进整合包");
+  const foreign = dto.loaders.find((l) => l.kind === "optifine" || l.kind === "liteloader");
+  if (foreign !== undefined) {
+    throw unsupported(id, "loader_unsupported", `整合包格式不支持 ${LOADER_TITLE[foreign.kind]}，只支持 Fabric、Quilt、Forge、NeoForge`, foreign.kind);
+  }
+  const writable = dto.loaders.filter((l) => (WRITABLE_LOADERS as readonly string[]).includes(l.kind));
+  if (writable.length > 1) throw unsupported(id, "multiple_loaders", "这个实例装了不止一种加载器，整合包只能写一种");
+  let loader: PackLoader | null = null;
+  if (writable.length === 1) {
+    const only = writable[0];
+    if (only.version === null) throw unsupported(id, "loader_version_unknown", "认不出加载器版本，没法写进整合包");
+    loader = { kind: only.kind as PackLoaderKind, version: only.version };
+  }
+
+  const mods = mockInstance(id);
+  const dir = mockModsDir(id);
+  const indexed: ExportIndexedModDto[] = [];
+  const bundled: ExportBundledModDto[] = [];
+  const disabled: ExportBundledModDto[] = [];
+  const byPath = [...mods.files].sort((a, b) => (a.file_name < b.file_name ? -1 : a.file_name > b.file_name ? 1 : 0));
+  for (const file of byPath) {
+    const path = `${dir}/${file.file_name}`;
+    // 只认 *.jar 与 *.jar.disabled：.old 备份与别的文件不进包
+    if (file.file_name.endsWith(`.jar${DISABLED_SUFFIX}`)) {
+      disabled.push({ file_name: file.file_name, path, size: file.size, reason: "disabled" });
+      continue;
+    }
+    if (!file.file_name.endsWith(".jar")) continue;
+    const row = mods.ledger.find((r) => r.file_name === ledgerKey(file.file_name));
+    if (row !== undefined && row.platform === "modrinth") {
+      indexed.push({ file_name: file.file_name, path, size: file.size, project_id: row.project_id, version_id: row.version_id, title: row.title, matched_by: "ledger" });
+    } else {
+      bundled.push({ file_name: file.file_name, path, size: file.size, reason: row !== undefined && row.platform === "curseforge" ? "curseforge" : "unlisted" });
+    }
+  }
+
+  const worlds = mockInstanceWorlds(id);
+  if (worlds === null) throw new Error(`mock 实例 ${id} 已就绪却读不出存档`);
+  const extras: ExportExtraStatDto[] = EXPORT_EXTRAS.map((extra) => {
+    const stat = extra === "saves" ? { files: worlds.length, bytes: worlds.length * MOCK_WORLD_BYTES } : MOCK_EXTRAS[extra];
+    return { extra, files: stat.files, bytes: stat.bytes, default_selected: extra !== "saves" && stat.files > 0 };
+  });
+
+  const pack = dto.modpack;
+  return {
+    name: pack === null ? id : pack.name,
+    version: pack === null || pack.version === null ? DEFAULT_PACK_VERSION : pack.version,
+    minecraft: dto.mc_version,
+    loader,
+    indexed,
+    bundled,
+    disabled,
+    extras,
+    skipped: [],
+  };
+}
+
+function previewModpackExport(args: MockArgs): ModpackExportPreviewDto {
+  return planExport(argReader("preview_modpack_export", args).string("id"));
+}
+
+const OPTION_KEYS = new Set(["destination", "name", "version", "summary", "extras", "include_disabled"]);
+
+/** options 的形状由 serde 反序列化（deny_unknown_fields）：认不出来是 Tauri 的参数错误，到前端归一为 unknown。 */
+function parseExportOptions(raw: unknown): ModpackExportOptions {
+  const malformed = (why: string) => new IpcError("unknown", `invalid args \`options\` for command \`export_modpack\`: ${why}`);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw malformed("expected struct ModpackExportOptionsArg");
+  const o = raw as Record<string, unknown>;
+  const stray = Object.keys(o).find((k) => !OPTION_KEYS.has(k));
+  if (stray !== undefined) throw malformed(`unknown field \`${stray}\``);
+  const text = (key: string): string => {
+    const value = o[key];
+    if (typeof value !== "string") throw malformed(`missing or invalid field \`${key}\``);
+    return value;
+  };
+  const summary = o.summary;
+  if (summary !== undefined && summary !== null && typeof summary !== "string") throw malformed("invalid field `summary`");
+  const extras = o.extras;
+  if (!Array.isArray(extras) || extras.some((e) => typeof e !== "string")) throw malformed("missing or invalid field `extras`");
+  if (typeof o.include_disabled !== "boolean") throw malformed("missing or invalid field `include_disabled`");
+  return {
+    destination: text("destination"),
+    name: text("name"),
+    version: text("version"),
+    summary: summary === undefined ? null : summary,
+    extras: extras as ExportExtra[],
+    include_disabled: o.include_disabled,
+  };
+}
+
+function exportInvalid(field: string, rule: string, message: string, extra: Record<string, unknown> = {}): IpcError {
+  return new IpcError("invalid_argument", message, { field, rule, ...extra });
+}
+
+/** 名称与版本号：去掉首尾空白后非空、不超长（按字符计）、不含控制字符。 */
+function checkedText(field: "name" | "version", raw: string, max: number, label: string): string {
+  const value = raw.trim();
+  if (value === "") throw exportInvalid(field, "empty", `${label}不能为空`);
+  if ([...value].length > max) throw exportInvalid(field, "too_long", `${label}最多 ${max} 个字符`);
+  if (/\p{Cc}/u.test(value)) throw exportInvalid(field, "control_char", `${label}不能含控制字符`);
+  return value;
+}
+
+/** 与后端同一套规则；父目录是否存在不查（浏览器里没有磁盘）。 */
+function validateExport(id: string, options: ModpackExportOptions): ModpackExportOptions {
+  if (id.trim() === "") throw exportInvalid("id", "empty", "实例 id 不能为空");
+  const name = checkedText("name", options.name, EXPORT_NAME_MAX, "整合包名称");
+  const version = checkedText("version", options.version, EXPORT_VERSION_MAX, "版本号");
+  const summaryText = options.summary === null ? "" : options.summary.trim();
+  if ([...summaryText].length > EXPORT_SUMMARY_MAX) throw exportInvalid("summary", "too_long", `简介最多 ${EXPORT_SUMMARY_MAX} 个字符`);
+  const extras: ExportExtra[] = [];
+  for (const raw of options.extras) {
+    const known = EXPORT_EXTRAS.find((e) => e === raw);
+    if (known === undefined) throw exportInvalid("extras", "unknown", `不认识的打包项 ${raw}`, { value: raw });
+    if (!extras.includes(known)) extras.push(known);
+  }
+  const destination = options.destination;
+  if (!/^[A-Za-z]:[\\/]/.test(destination) && !/^\\\\/.test(destination)) {
+    throw exportInvalid("destination", "relative", `导出位置必须是绝对路径：${destination}`);
+  }
+  if (!destination.toLowerCase().endsWith(".mrpack")) throw exportInvalid("destination", "extension", `导出的文件扩展名必须是 .mrpack：${destination}`);
+  return { destination, name, version, summary: summaryText === "" ? null : summaryText, extras, include_disabled: options.include_disabled };
+}
+
+const exportTick = () => new Promise<void>((resolve) => setTimeout(resolve, 15));
+
+function cancelledCheck(taskId: string): void {
+  if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+}
+
+function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
+  const read = argReader("export_modpack", args);
+  const taskId = read.string("taskId");
+  const id = read.string("id");
+  const options = validateExport(id, parseExportOptions(args.options));
+  // 与后端一样先占实例再登记任务：参数不合法不占任何东西，任务无论怎样结束都在最后放开
+  const hold = acquireMockInstance(id, "modifying");
+  return runMockTask(taskId, async () => {
+    const plan = planExport(id);
+    emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取 ${plan.indexed.length + plan.bundled.length} 个 Mod 文件` });
+    cancelledCheck(taskId);
+    emitCoreEvent({ task_id: taskId, kind: "stage", message: `向 Modrinth 查询 ${plan.indexed.length + plan.bundled.length} 个 Mod` });
+    if (plan.bundled.length > 0) emitCoreEvent({ task_id: taskId, kind: "warning", message: `${plan.bundled.length} 个 Mod 不在 Modrinth 上，已直接打包进文件` });
+
+    const extras = plan.extras.filter((e) => options.extras.includes(e.extra));
+    const carried = options.include_disabled ? plan.disabled : [];
+    const files = extras.reduce((n, e) => n + e.files, 0) + plan.bundled.length + carried.length;
+    const bytes = extras.reduce((n, e) => n + e.bytes, 0) + [...plan.bundled, ...carried].reduce((n, m) => n + m.size, 0);
+    emitCoreEvent({ task_id: taskId, kind: "stage", message: `打包 ${files} 个文件` });
+    for (let quarter = 0; quarter <= 4; quarter++) {
+      cancelledCheck(taskId);
+      emitCoreEvent({
+        task_id: taskId,
+        kind: "download",
+        total: files,
+        finished: Math.round((files * quarter) / 4),
+        bytes: Math.round((bytes * quarter) / 4),
+        total_bytes: bytes,
+        speed: quarter === 0 ? 0 : 8 * MB,
+      });
+      if (quarter < 4) await exportTick();
+    }
+    emitCoreEvent({ task_id: taskId, kind: "stage", message: "校验导出的整合包" });
+    cancelledCheck(taskId);
+    emitCoreEvent({ task_id: taskId, kind: "stage", message: `已导出到 ${options.destination}` });
+    return {
+      path: options.destination,
+      name: options.name,
+      version: options.version,
+      bytes: bytes + MOCK_INDEX_ENTRY_BYTES * (plan.indexed.length + 1),
+      indexed_files: plan.indexed.length,
+      override_files: files,
+      bundled_mods: plan.bundled.map((m) => m.file_name),
+      disabled_mods: carried.length,
+      skipped: plan.skipped,
+    };
+  }).finally(() => hold.release());
+}
+
 export const handlers: MockHandlers = {
   preview_modpack: previewModpack,
   summarize_platform_modpack: summarizeModpack,
   install_modpack: installModpack,
+  preview_modpack_export: previewModpackExport,
+  export_modpack: exportModpack,
 };
