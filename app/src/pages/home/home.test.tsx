@@ -515,6 +515,42 @@ describe("主页：固定的服务器", () => {
     expect(menuItems().at(-1)?.textContent).toBe("全部 11 台服务器…");
   });
 
+  // 固定的那一行连同焦点一起从列表里拿掉：焦点不能掉到 body，连续固定多台时停在原位置附近
+  it("挑选弹窗：键盘固定一台后焦点移到同一位置的下一行，最后一行移到上一行，列表空了移到「关闭」", async () => {
+    const many: KnownServerDto[] = Array.from({ length: 11 }, (_, i) => ({ name: `服${i + 1}`, address: `s${i + 1}.example`, pinned: false }));
+    ipc.overrides.set("list_known_servers", () => many.map((k) => ({ ...k, pinned: pinned.some((p) => p.address === k.address) })));
+    await mount();
+    await openMenu(buttonByLabel("固定服务器"));
+    click(menuItem("全部 11 台服务器"));
+    await flush();
+    const picker = dialog() as HTMLElement;
+    const rows = () => [...picker.querySelectorAll<HTMLButtonElement>('button[aria-label^="固定 "]')];
+    const focused = () => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent;
+    const pickFocused = async () => {
+      const el = document.activeElement;
+      if (!(el instanceof HTMLButtonElement) || !picker.contains(el)) throw new Error(`焦点不在挑选弹窗的行上：${String(el?.tagName)}`);
+      click(el);
+      await flush();
+    };
+
+    act(() => rows()[2].focus());
+    await pickFocused();
+    expect(rows()).toHaveLength(10);
+    expect(focused()).toBe("固定 服4");
+
+    act(() => rows()[9].focus());
+    expect(focused()).toBe("固定 服11");
+    await pickFocused();
+    expect(focused()).toBe("固定 服10");
+
+    act(() => rows()[0].focus());
+    for (let left = rows().length; left > 0; left--) await pickFocused();
+    expect(rows()).toHaveLength(0);
+    expect(picker.textContent).toContain("所有服务器都已固定");
+    expect(document.activeElement).toBe(buttonByText("关闭", picker));
+    expect(pinned).toHaveLength(12);
+  });
+
   it("挑选弹窗：同一行连点两下只固定一次；固定失败报错后这一行回到列表里，可以再点", async () => {
     const many: KnownServerDto[] = Array.from({ length: 12 }, (_, i) => ({ name: `服${i + 1}`, address: `s${i + 1}.example`, pinned: false }));
     ipc.overrides.set("list_known_servers", () => many.map((k) => ({ ...k, pinned: pinned.some((p) => p.address === k.address) })));
