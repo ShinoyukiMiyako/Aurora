@@ -23,7 +23,7 @@ import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
 import { useSettingsCommands } from "../commands";
 import { ABOUT_COPY, LOAD_COPY } from "../copy";
-import { UpdateCard } from "../update/UpdateCard";
+import { UpdateCard } from "./UpdateCard";
 import s from "../settings.module.css";
 
 /** 构建时间是 ISO 字符串；读不成日期说明构建脚本坏了，直接报错。 */

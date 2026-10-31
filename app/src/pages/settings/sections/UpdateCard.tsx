@@ -18,7 +18,7 @@ import { useOnline } from "../../../state/online";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
-import { updateCardView, type CardView } from "./view";
+import { updateCardView, type CardView } from "./update-view";
 
 /** 相对时间「x 分钟前检查过」的刷新间隔。 */
 const RELATIVE_REFRESH_MS = 30_000;

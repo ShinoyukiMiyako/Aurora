@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
-import { updateCardView, type CardContext } from "./view";
+import { updateCardView, type CardContext } from "./update-view";
 
 const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: new Date(2026, 9, 28, 12).getTime() };
 const NOW = new Date(2026, 9, 31, 12).getTime();
