@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TOAST_COPY } from "../copy/flows";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
@@ -238,5 +239,38 @@ describe("外壳：通知动作", () => {
     act(() => shell.runToastAction(toast));
     expect(launcher.state.toasts).toEqual([]);
     expect(nav.route).toEqual({ page: "tasks", filter: "failed" });
+  });
+});
+
+describe("外壳：写剪贴板", () => {
+  let writeText: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+  });
+
+  it("写入成功：原文写进剪贴板，结果为 true，不弹通知", async () => {
+    await mount();
+    let written: boolean | undefined;
+    await act(async () => {
+      written = await shell.copyText("C:\Games\.minecraft\versions\生存");
+    });
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith("C:\Games\.minecraft\versions\生存");
+    expect(written).toBe(true);
+    expect(launcher.state.toasts).toEqual([]);
+  });
+
+  it("写入失败：弹一条「复制失败」，结果为 false，Promise 不 reject", async () => {
+    writeText.mockImplementation(() => Promise.reject(new Error("Document is not focused.")));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    await mount();
+    let written: boolean | undefined;
+    await act(async () => {
+      written = await shell.copyText("");
+    });
+    expect(written).toBe(false);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", TOAST_COPY.copyFailed, "Document is not focused."]]);
+    expect(error).toHaveBeenCalledTimes(1);
   });
 });

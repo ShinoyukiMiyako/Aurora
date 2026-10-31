@@ -17,7 +17,7 @@ import { cx } from "../lib/util";
 import { Button } from "./Button";
 import { CardHeader } from "./CardHeader";
 import { IconButton } from "./IconButton";
-import { CopyButton } from "./KV";
+import { CopyButton, type CopyHandler } from "./KV";
 import styles from "./LogConsole.module.css";
 
 export type LogLevel = "info" | "warn" | "error";
@@ -146,8 +146,8 @@ export interface LogConsoleProps {
   source: LogSourceFilter;
   /** 两组小号分段控件（级别、来源），由页面放入。 */
   filters?: ReactNode;
-  /** 复制当前显示的行；失败必须 reject，语义同 CopyButton。 */
-  onCopy: (text: string) => Promise<void>;
+  /** 复制当前显示的行，契约同 CopyButton。 */
+  onCopy: CopyHandler;
   /** 复制成功的原位反馈停留时长（毫秒）。 */
   copyFeedbackMs: number;
   onOpenFolder?: () => void;

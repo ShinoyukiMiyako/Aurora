@@ -6,6 +6,14 @@ import { cx } from "../lib/util";
 import { IconButton } from "./IconButton";
 import styles from "./KV.module.css";
 
+/**
+ * 写剪贴板的动作。resolve false：没写进去，失败已由调用方经外层统一处理报告过，按钮保持原样；
+ * 其余 resolve：已写入，按钮原位换成「已复制」。
+ * reject 留给调用方没有报告过的错误：组件不接，它会成为无人处理的 rejection 暴露出来。
+ * 所以调用方报告过失败就不要再把错误抛回来，否则同一个失败会报两次。外壳的 useShell().copyText 按这个契约实现。
+ */
+export type CopyHandler = (text: string) => Promise<boolean | void>;
+
 export interface CopyButtonProps {
   /** 要写进剪贴板的文本；生成代价高时（几千行日志）传函数，点击时才求值。 */
   text: string | (() => string);
@@ -13,10 +21,7 @@ export interface CopyButtonProps {
   label: string;
   /** 复制成功后的名称与提示，默认「已复制」。 */
   copiedLabel?: string;
-  /**
-   * 执行复制。成功时 resolve；失败时必须 reject：组件不捕获，错误交给调用方经外层统一处理（error 通知「复制失败」）。
-   */
-  onCopy: (text: string) => Promise<void>;
+  onCopy: CopyHandler;
   /** 原位反馈的停留时长（毫秒）。 */
   feedbackMs: number;
   disabled?: boolean;
@@ -40,8 +45,8 @@ export function CopyButton({ text, label, copiedLabel = "已复制", onCopy, fee
   }, []);
 
   const copy = () => {
-    void onCopy(typeof text === "function" ? text() : text).then(() => {
-      if (!mounted.current) return;
+    void onCopy(typeof text === "function" ? text() : text).then((written) => {
+      if (written === false || !mounted.current) return;
       window.clearTimeout(timer.current);
       setCopied(true);
       timer.current = window.setTimeout(() => setCopied(false), feedbackMs);
@@ -61,7 +66,7 @@ export interface KVRow {
 export interface KVProps {
   rows: readonly KVRow[];
   /** 有任一行带 copy 时必填，语义同 CopyButton。 */
-  onCopy?: (text: string) => Promise<void>;
+  onCopy?: CopyHandler;
   /** 有任一行带 copy 时必填。 */
   copyFeedbackMs?: number;
   className?: string;

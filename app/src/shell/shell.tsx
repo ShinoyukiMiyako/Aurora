@@ -6,7 +6,7 @@
 // 内容区滚动容器交给 bindPageScroll，并把 OverlayRoot 放在应用根元素的最后一个子位置。
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ACTION_ERROR } from "../copy/flows";
+import { ACTION_ERROR, TOAST_COPY } from "../copy/flows";
 import { artStatus, onArtChanged } from "../ipc/art";
 import { endBreathWindow, startBreathWindow } from "../launch/breath";
 import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";
@@ -78,6 +78,11 @@ export interface ShellApi {
   registerFind(handler: () => void): () => void;
   /** 通知的动作：先关闭这条通知，再导航或经统一错误处理执行命令。 */
   runToastAction(toast: Toast): void;
+  /**
+   * 写剪贴板，给 CopyButton、KV、LogConsole 的 onCopy 直接用：写入成功为 true；失败经统一错误处理弹出「复制失败」后为 false，
+   * 永不 reject（失败已经报告过，再抛回去会报两次）。
+   */
+  copyText(text: string): Promise<boolean>;
   /** 主页花瓣暂停：窗口不可见、失焦或有带遮罩的浮层。 */
   petalsPaused: boolean;
   /** 应用根元素（尺寸分档按它的宽度）。 */
@@ -397,6 +402,8 @@ function ShellCore({ children }: { children: ReactNode }) {
     [actions, go, run],
   );
 
+  const copyText = useCallback(async (text: string) => (await run(() => navigator.clipboard.writeText(text), TOAST_COPY.copyFailed)).ok, [run]);
+
   const launchHost = useMemo<LaunchHost>(() => ({ run, go, confirm }), [confirm, go, run]);
 
   const nav = useMemo<NavApi>(
@@ -416,11 +423,12 @@ function ShellCore({ children }: { children: ReactNode }) {
       closeCreateInstance,
       registerFind,
       runToastAction,
+      copyText,
       petalsPaused,
       bindRoot: setRootEl,
       bindPageScroll,
     }),
-    [bindPageScroll, closeCreateInstance, closePalette, confirm, createInstance, openCreateInstance, openPalette, palette, petalsPaused, registerFind, runToastAction, tier],
+    [bindPageScroll, closeCreateInstance, closePalette, confirm, copyText, createInstance, openCreateInstance, openPalette, palette, petalsPaused, registerFind, runToastAction, tier],
   );
 
   return (
