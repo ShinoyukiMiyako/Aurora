@@ -2,18 +2,22 @@
 // 每种视图写什么、点了做什么都照搬胶囊的判定，这里只负责排版。
 
 import { Icon } from "../../art/Icon";
-import { LAUNCH_COPY, SESSION_COPY, TASK_STATUS_LABEL } from "../../copy/flows";
+import { LAUNCH_COPY, MODPACK_REIMPORT_COPY, SESSION_COPY, TASK_STATUS_LABEL } from "../../copy/flows";
+import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { sessionPhaseLabel, stageLabel, type LaunchView } from "../../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../../launch/useLaunch";
+import { useNav } from "../../shell/shell";
 import { useNow } from "../../state/launcher";
 import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ProgressBar } from "../../ui/ProgressBar";
+import { useDeleteInstance } from "../instance/delete";
+import { needsReimport, reimportRoute } from "../instance/model";
 import styles from "./library.module.css";
 
-export function CardStatus({ instanceId }: { instanceId: string }) {
-  const entry = useLaunch(instanceId);
+export function CardStatus({ inst }: { inst: InstanceSummary }) {
+  const entry = useLaunch(inst.id);
   const view = entry.view;
   switch (view.kind) {
     case "ready":
@@ -68,6 +72,7 @@ export function CardStatus({ instanceId }: { instanceId: string }) {
     case "installing":
       return <InstallingStatus view={view} />;
     case "broken":
+      if (needsReimport(inst)) return <ReimportStatus inst={inst} />;
       return (
         <div className={styles.status} data-view="broken">
           <Button size="sm" icon="wrench" onClick={entry.launch}>
@@ -76,6 +81,22 @@ export function CardStatus({ instanceId }: { instanceId: string }) {
         </div>
       );
   }
+}
+
+/** 整合包没导入完：补全补不回来，底栏不给「修复并启动」，改给重新导入与删除。 */
+function ReimportStatus({ inst }: { inst: InstanceSummary }) {
+  const { go } = useNav();
+  const deleteInstance = useDeleteInstance();
+  return (
+    <div className={styles.status} data-view="broken">
+      <Button size="sm" icon="modpack" onClick={() => go(reimportRoute(inst))}>
+        {MODPACK_REIMPORT_COPY.reimport}
+      </Button>
+      <Button size="sm" variant="danger" icon="trash" onClick={() => void deleteInstance(inst)}>
+        {MODPACK_REIMPORT_COPY.delete}
+      </Button>
+    </div>
+  );
 }
 
 function LoadingStatus({ view, entry }: { view: Extract<LaunchView, { kind: "loading" }>; entry: LaunchEntry }) {

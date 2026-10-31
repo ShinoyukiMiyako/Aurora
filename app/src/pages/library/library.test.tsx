@@ -2,8 +2,8 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { CONFIRM_COPY, TOAST_COPY } from "../../copy/flows";
-import type { InstanceDto } from "../../ipc/instances";
+import { CONFIRM_COPY, DELETE_INSTANCE_COPY, TOAST_COPY } from "../../copy/flows";
+import type { InstanceDto, WorldDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
@@ -154,11 +154,32 @@ describe("实例库：列表与页头", () => {
     if (card === null) throw new Error("找不到卡片");
     expect(card.textContent).toContain("Fabric0.16.10");
     expect(card.textContent).toContain("1.21.1");
-    expect([...card.querySelectorAll("li")].map((li) => li.getAttribute("aria-label"))).toEqual(["上次游玩 2 小时前", "累计时长 2h", "Mod 数 34"]);
+    expect([...card.querySelectorAll("li")].map((li) => li.getAttribute("aria-label"))).toEqual(["上次游玩 2 小时前", "累计时长 2h", "Mod 数 34", "存档数 0"]);
     expect(card.textContent).toContain(LIBRARY_COPY.noDescription);
     const broken = byText<HTMLButtonElement>("article button", "坏掉的").closest("article");
     expect(broken?.textContent).toContain("缺少版本 JSON");
     expect(broken?.querySelector("ul")).toBeNull();
+  });
+
+  it("整合包实例的介绍行写整合包名与版本，统计行带存档数；读不出存档数时不写", async () => {
+    instances = [
+      ...instances,
+      instanceDto("我的冒险", {
+        description: "自己写的介绍",
+        world_count: 3,
+        mod_count: 168,
+        modpack: { platform: "curseforge", project_id: "285109", version_id: "4", name: "RLCraft", version: "2.9.3" },
+      }),
+      instanceDto("本地导入", { modpack: { platform: null, project_id: null, version_id: null, name: "空岛生存", version: null }, world_count: null }),
+    ];
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "我的冒险").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    expect(card.querySelector("p")?.textContent).toBe("RLCraft 2.9.3");
+    expect([...card.querySelectorAll("li")].map((li) => li.getAttribute("aria-label"))).toContain("存档数 3");
+    const local = byText<HTMLButtonElement>("article button", "本地导入").closest("article");
+    expect(local?.querySelector("p")?.textContent).toBe("空岛生存");
+    expect([...(local?.querySelectorAll("li") ?? [])].map((li) => li.getAttribute("aria-label")).some((l) => l !== null && l.startsWith("存档数"))).toBe(false);
   });
 
   it("点卡片标题进实例概览", async () => {
@@ -213,6 +234,14 @@ describe("实例库：筛选、搜索与空状态", () => {
     expect(createTile()).toBeUndefined();
   });
 
+  it("搜索也匹配整合包的名字", async () => {
+    instances = [...instances, instanceDto("周末", { modpack: { platform: "modrinth", project_id: "x", version_id: "y", name: "Better MC", version: "v20" } })];
+    await mount();
+    setInput(byLabel<HTMLInputElement>(LIBRARY_COPY.searchPlaceholder), "better");
+    await afterMotion();
+    expect(cardNames()).toEqual(["周末"]);
+  });
+
   it("Ctrl+F 聚焦搜索框", async () => {
     await mount();
     keydown(window, "f", { ctrlKey: true });
@@ -225,6 +254,52 @@ describe("实例库：筛选、搜索与空状态", () => {
     expect(document.querySelector("header p")?.textContent).toBe(LIBRARY_COPY.subtitleEmpty);
     click(byText("button", LIBRARY_COPY.emptyAction));
     expect(nav.route).toEqual({ page: "discover", kind: "modpack" });
+  });
+
+  it("列表 300 ms 内读到：不出现骨架；读得慢才出骨架，出现后至少停留 300 ms", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const skeletons = () => {
+      const grid = document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`);
+      return grid === null ? 0 : grid.children.length;
+    };
+    expect(document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`)).not.toBeNull();
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    // jsdom 里没有宽度，按 compact 档铺满两行
+    expect(skeletons()).toBe(6);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      list.resolve(instances);
+      await settle();
+    });
+    expect(skeletons()).toBe(6);
+    expect(cardNames()).toEqual([]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(skeletons()).toBe(0);
+    expect(cardNames()).toHaveLength(4);
+  });
+
+  it("列表超过 10 秒还没读到：骨架下方追加「比平时慢一些」", async () => {
+    ipc.overrides.set("list_instances", () => deferred<InstanceDto[]>().promise);
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_999);
+    });
+    expect(document.body.textContent).not.toContain(LIBRARY_COPY.slow);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(document.body.textContent).toContain(LIBRARY_COPY.slow);
   });
 
   it("列表读取失败：显示原因，重试重新读取", async () => {
@@ -254,6 +329,41 @@ describe("实例库：动作", () => {
     const repairs = launcher.state.tasks.filter((t) => t.spec.command === "repair_instance");
     expect(repairs.map((t) => t.spec.args)).toEqual([{ id: "坏掉的" }]);
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+  });
+
+  it("整合包没导入完的实例不进修复横幅，卡片底栏给「重新导入」与「删除」而不是「修复并启动」", async () => {
+    const incomplete = { kind: "modpack" as const, outcome: "failed" as const, started_at: NOW - HOUR, spec: null, error: { code: "network_failed", message: "连接被重置" } };
+    instances = [
+      ...instances,
+      instanceDto("RLCraft", {
+        status: "broken",
+        broken_reason: null,
+        incomplete,
+        modpack: { platform: "modrinth", project_id: "rlc", version_id: "v293", name: "RLCraft", version: "2.9.3" },
+      }),
+      instanceDto("本地包", { status: "broken", broken_reason: null, incomplete, modpack: null }),
+    ];
+    await mount();
+    // 横幅只数补全能修好的那一个
+    expect(document.body.textContent).toContain("1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。");
+    const card = byText<HTMLButtonElement>("article button", "RLCraft").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    expect(card.textContent).toContain("整合包没有导入完，请删掉这个实例后重新导入");
+    expect([...card.querySelectorAll("button")].map((b) => b.textContent)).not.toContain("修复并启动");
+    click(byText("button", LIBRARY_COPY.repairOne));
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+    click(byText("button", "重新导入", card));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "modrinth", projectId: "rlc" } });
+    const local = byText<HTMLButtonElement>("article button", "本地包").closest("article");
+    if (local === null) throw new Error("找不到卡片");
+    click(byText("button", "重新导入", local));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack" });
+    ipc.overrides.set("preview_instance_deletion", (args) => ({ id: args.id, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
+    click(byText("button", "删除", local));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: "本地包" }]);
+    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe("删除「本地包」？");
   });
 
   it("图钉：追加到固定列表末尾并通知；已固定的取消固定", async () => {
@@ -297,11 +407,21 @@ describe("实例库：动作", () => {
     expect(menuItem(LIBRARY_COPY.menu.selected).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("删除：先问后端有几个存档，确认框照实说明，确认后删除", async () => {
+  it("删除：先问后端有几个存档，确认框照实列出并说明移入回收站，确认后删除", async () => {
+    const world = (dir: string, name: string | null, size: number): WorldDto => ({
+      dir_name: dir,
+      level_status: "ok",
+      level_error: null,
+      name,
+      mode: "survival",
+      last_played: null,
+      size_bytes: size,
+      modified_at: null,
+    });
     ipc.overrides.set("preview_instance_deletion", (args) => ({
       id: args.id,
-      worlds: [{ dir_name: "新的世界" }, { dir_name: "生存" }],
-      size_bytes: 1024,
+      worlds: [world("w1", "新的世界", 512 * 1024), world("生存", null, 512 * 1024)],
+      size_bytes: 4096 * 1024,
       file_count: 3,
       dependents: [],
       activity: null,
@@ -315,13 +435,54 @@ describe("实例库：动作", () => {
     click(menuItem(LIBRARY_COPY.menu.remove));
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: "原版" }]);
-    const copy = CONFIRM_COPY.deleteInstance("原版", 2);
-    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe(copy.title);
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(copy.body);
-    click(dialogButton(copy.confirmLabel));
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.querySelector("h2")?.textContent).toBe("删除「原版」？");
+    expect(dialog?.textContent).toContain("实例文件夹会移入回收站，其中的 2 个存档（共 1.0 MB）也会一起删除：");
+    expect([...(dialog?.querySelectorAll("li") ?? [])].map((li) => li.textContent)).toEqual(["新的世界", "生存"]);
+    expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.backupHint);
+    expect(dialog?.textContent).not.toContain(DELETE_INSTANCE_COPY.pendingTask);
+    click(dialogButton("删除实例和 2 个存档"));
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "原版" }]);
     expect(toastTitles()).toContain("info:已删除「原版」");
+  });
+
+  it("删除排队中的新建实例：磁盘上还没有目录，不问后端预览，确认框说明会先取消任务", async () => {
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.actions.createInstance({ name: "周末生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+      await settle();
+    });
+    click(byLabel("「周末生存」的更多操作"));
+    click(menuItem(LIBRARY_COPY.menu.remove));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.noWorlds);
+    expect(dialog?.textContent).toContain(DELETE_INSTANCE_COPY.pendingTask);
+  });
+
+  it("「崩溃诊断」只给崩溃过的实例；之后没再正常玩过才提示「上次崩溃」", async () => {
+    instances = instances.map((i) => {
+      if (i.id === "樱花生存") return { ...i, last_crash_at: NOW - HOUR, last_played_at: NOW - HOUR };
+      if (i.id === "机械动力") return { ...i, last_crash_at: NOW - 72 * HOUR };
+      return i;
+    });
+    await mount();
+    const items = () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((el) => el.textContent);
+    click(byLabel("「樱花生存」的更多操作"));
+    expect(items()).toContain(LIBRARY_COPY.menu.crash + LIBRARY_COPY.menu.crashActive);
+    click(menuItem(LIBRARY_COPY.menu.crash + LIBRARY_COPY.menu.crashActive));
+    expect(nav.route).toEqual({ page: "instance", id: "樱花生存", tab: "crash" });
+    act(() => nav.go({ page: "library" }));
+    await afterMotion();
+    click(byLabel("「机械动力」的更多操作"));
+    expect(items()).toContain(LIBRARY_COPY.menu.crash);
+    keydown(document, "Escape");
+    await afterMotion();
+    click(byLabel("「原版」的更多操作"));
+    expect(items().some((t) => t !== null && t.startsWith(LIBRARY_COPY.menu.crash))).toBe(false);
   });
 
   it("取消删除确认不删", async () => {
@@ -330,7 +491,8 @@ describe("实例库：动作", () => {
     click(byLabel("「原版」的更多操作"));
     click(menuItem(LIBRARY_COPY.menu.remove));
     await flush();
-    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(CONFIRM_COPY.deleteInstance("原版", 0).body);
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。");
+    expect(dialogButton("删除实例")).toBeDefined();
     click(dialogButton(CONFIRM_COPY.cancel));
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([]);
@@ -349,7 +511,19 @@ describe("实例库：动作", () => {
     const other = byText<HTMLButtonElement>("article button", "樱花生存").closest("article");
     expect(other?.textContent).toContain("另一个游戏在运行");
     click(byLabel("「原版」的更多操作"));
-    const remove = menuItem(LIBRARY_COPY.menu.remove + LIBRARY_COPY.menu.removeBusy);
+    const remove = menuItem(`${LIBRARY_COPY.menu.remove}游戏正在运行，先结束游戏`);
     expect(remove.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("后端正在改动 Mod、资源或设置：删除入口提前禁用并写明原因，不发预览与删除", async () => {
+    instances = instances.map((i) => (i.id === "原版" ? { ...i, activity: "modifying" } : i));
+    await mount();
+    click(byLabel("「原版」的更多操作"));
+    const remove = menuItem(`${LIBRARY_COPY.menu.remove}正在改动这个实例的 Mod、资源或设置，完成后才能删除`);
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
   });
 });

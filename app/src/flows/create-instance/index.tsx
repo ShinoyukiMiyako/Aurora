@@ -21,7 +21,7 @@ import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import type { FlowProps } from "../../state/flows";
 import { useLauncher, useNow } from "../../state/launcher";
-import { useLoaderVersions, useManifest, useRequiredJava } from "../../state/queries/catalog";
+import { useLoaderVersions, useManifest, useVersionRequirements } from "../../state/queries/catalog";
 import { canPinMore } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
@@ -122,7 +122,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const loaderVersions = useLoaderVersions(loaderChoice, version === null ? null : version.id);
   const recommended = loaderVersions.data === undefined ? null : recommendedLoaderVersion(loaderVersions.data);
   const loaderVersion = effectiveLoaderVersion(loader, version === null ? null : version.id, loaderVersionPick, loaderVersions.data);
-  const requiredJava = useRequiredJava(version === null ? null : version.id);
+  const requirements = useVersionRequirements(version === null ? null : version.id);
 
   const visible = visibleSteps(loader);
   const index = visible.indexOf(step);
@@ -251,7 +251,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
             }}
             filter={filter}
             onFilter={changeFilter}
-            selectedJava={requiredJava.status === "ready" ? requiredJava.data : null}
+            selectedJava={requirements.status === "ready" ? requirements.data.java_major : null}
             now={now}
           />
         );
@@ -282,7 +282,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
             loaderVersion={loaderVersion}
             cover={cover}
             settings={state.settings}
-            requiredJava={requiredJava}
+            requirements={requirements}
             willPin={canPinMore(state)}
             openAfter={openAfter}
             onOpenAfter={setOpenAfter}

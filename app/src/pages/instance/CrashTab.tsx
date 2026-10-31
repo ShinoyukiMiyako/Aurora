@@ -35,8 +35,8 @@ import { CRASH_PAGE_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
 import { crashFixes, crashFixKey, matchSuspect, modName, type CrashFix } from "./model";
-import { lockReason, useCopy, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { lockReason, type InstanceOps } from "./ops";
+import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface CrashTabProps {
   inst: InstanceSummary;
@@ -55,14 +55,17 @@ export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab }
   useEffect(() => {
     if (crashed) actions.dismissSession();
   }, [actions, crashed]);
+  const load = useModuleView(crash);
 
-  if (crash.status === "loading") {
+  if (load.view === "pending" || load.view === "skeleton") {
     return (
       <Card padding="lg">
-        <Skeleton shape="text" lines={4} />
+        {load.view === "skeleton" && <Skeleton shape="text" lines={4} />}
+        <SlowHint slow={load.slow} />
       </Card>
     );
   }
+  if (crash.status === "loading") throw new Error("加载门放行时崩溃报告不可能还在读取");
   if (crash.status === "error") {
     return (
       <Card padding="lg">
@@ -126,8 +129,7 @@ function ReportView({
 
 function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: InstanceSummary; ops: InstanceOps; view: LaunchView; report: CrashReportDto; crashActive: boolean; onTab(tab: InstanceTab): void }) {
   const now = useNow(30_000);
-  const { tier } = useShell();
-  const copy = useCopy();
+  const { tier, copyText } = useShell();
   if (report.at === null) throw new Error(`实例 ${inst.id} 的崩溃报告缺少崩溃时刻`);
   const labels = report.diagnoses.map((d) => crashCategoryLabel(d.category));
   const unique = labels.filter((l, i) => labels.indexOf(l) === i);
@@ -156,7 +158,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
             <span className={styles.crashPath}>
               <Icon name="file" size={14} />
               <code className={styles.path}>{report.log_path}</code>
-              <CopyButton text={report.log_path} label={CRASH_PAGE_COPY.copyPath} onCopy={copy} feedbackMs={COPY_FEEDBACK_MS} />
+              <CopyButton text={report.log_path} label={CRASH_PAGE_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
               <IconButton icon="folder" label={SETTINGS_COPY.open} size="sm" onClick={() => ops.openFolder("logs")} />
             </span>
           )}
@@ -367,7 +369,7 @@ function FixRow({
   const { actions } = useLauncher();
   const { go } = useNav();
   const run = useRunner();
-  const copy = useCopy();
+  const { copyText } = useShell();
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const modLock = lockReason(ops.locks.mods, "mods");
@@ -532,7 +534,7 @@ function FixRow({
           {fix.javawPath !== null && (
             <li className={styles.stepCopy}>
               <code className={styles.path}>{fix.javawPath}</code>
-              <CopyButton text={fix.javawPath} label={CRASH_PAGE_COPY.copyJavaw} onCopy={copy} feedbackMs={COPY_FEEDBACK_MS} />
+              <CopyButton text={fix.javawPath} label={CRASH_PAGE_COPY.copyJavaw} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
             </li>
           )}
         </ol>

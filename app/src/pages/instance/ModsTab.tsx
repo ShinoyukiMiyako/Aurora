@@ -25,11 +25,12 @@ import { Table, type TableColumn, type TableSort } from "../../ui/Table";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
+import { Tooltip } from "../../ui/Tooltip";
 import { MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
-import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, removalRelations, type ModFilter, type ModRow } from "./model";
+import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, modTotals, removalRelations, type ModFilter, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface ModsTabProps {
   inst: InstanceSummary;
@@ -71,6 +72,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const { go } = useNav();
   const run = useRunner();
   const mods = useInstanceMods(queryId);
+  const load = useModuleView(mods);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ModFilter>("all");
   const [sort, setSort] = useState<TableSort>({ key: "mod", direction: "asc" });
@@ -118,8 +120,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   });
   const counts = modCounts(rows);
   const shown = sortRows(filterMods(rows, query, filter), sort);
-  const total = inst.modCount === null ? rows.length : Math.max(inst.modCount, rows.length);
-  const partial = total > rows.length;
+  const { total, partial } = modTotals(inst, rows.length);
+  const shownTotal = mods.status === "ready" ? total : inst.modCount;
   const isUpdating = (r: ModRow) => pending.has(r.fileName) || updatingFiles.has(enabledFileName(r.fileName));
 
   const toggle = (r: ModRow) => {
@@ -224,11 +226,13 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
       <Inset className={styles.modSummary}>
         <span className={styles.modTotal}>
-          {mods.status === "ready" || inst.modCount !== null ? <b className={styles.bigNum}>{total}</b> : <Skeleton shape="block" width={40} height={28} radius="sm" />}
+          {shownTotal !== null ? <b className={styles.bigNum}>{shownTotal}</b> : <Skeleton shape="block" width={40} height={28} radius="sm" />}
           {MODS_COPY.totalUnit}
         </span>
         {mods.status === "ready" && (
-          <span className={styles.modSummaryText}>{partial ? MODS_COPY.partialNote(MODS_COPY.partialOwner, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}</span>
+          <span className={styles.modSummaryText}>
+            {partial && inst.modpack !== null ? MODS_COPY.partialNote(inst.modpack.name, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}
+          </span>
         )}
         {updateTasks.length > 0 && (
           <span className={styles.modTask}>
@@ -240,7 +244,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
       {ops.locks.mods !== null && <Banner tone="info" title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : MODS_COPY.bannerInstalling} />}
 
-      {mods.status === "loading" && (
+      {load.view === "skeleton" && (
         <Card padding="none">
           <div className={styles.tableSkeleton}>
             {Array.from({ length: SKELETON_ROWS }, (_, i) => (
@@ -251,10 +255,11 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
                 </div>
               </div>
             ))}
+            <SlowHint slow={load.slow} />
           </div>
         </Card>
       )}
-      {mods.status === "error" && (
+      {load.view === "error" && mods.status === "error" && (
         <Card padding="lg">
           <ModuleError
             title={MODS_COPY.errorTitle}
@@ -268,7 +273,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           />
         </Card>
       )}
-      {mods.status === "ready" && rows.length === 0 && (
+      {load.view === "ready" && rows.length === 0 && (
         <Card padding="lg">
           <EmptyState
             scene="enchanted-book"
@@ -283,7 +288,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           />
         </Card>
       )}
-      {mods.status === "ready" && rows.length > 0 && (
+      {load.view === "ready" && rows.length > 0 && (
         <Card padding="none" className={styles.modCard}>
           <Table
             label={MODS_COPY.tableLabel}
@@ -406,7 +411,15 @@ function modColumns({ compact, lock, isUpdating, toggle, update, remove }: Colum
       width: 64,
       sortable: true,
       keepOpaque: true,
-      cell: (r) => <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={lock} />,
+      // 锁住时开关自己用提示气泡写禁用原因；可用时悬停说明点了是停用还是启用
+      cell: (r) =>
+        lock === undefined ? (
+          <Tooltip content={MODS_COPY.toggleTip(r.enabled)}>
+            <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} />
+          </Tooltip>
+        ) : (
+          <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={lock} />
+        ),
     },
     {
       key: "actions",

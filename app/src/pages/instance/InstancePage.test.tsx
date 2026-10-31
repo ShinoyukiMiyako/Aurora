@@ -2,7 +2,7 @@
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import type { CrashReportDto } from "../../ipc/diagnostics";
+import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import type { HistoryEvent } from "../../ipc/history";
 import type { InstanceContentDto, InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
@@ -13,7 +13,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey, type InstanceTab } from "../../state/route";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -129,6 +129,13 @@ function typeInto(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
     setter.call(el, value);
     el.dispatchEvent(new Event("input", { bubbles: true }));
   });
+}
+
+/** Mod 标签摘要行里的大号总数（「168」+「个 Mod」）。 */
+function modTotal(): string {
+  const big = [...document.querySelectorAll("b")].find((b) => b.parentElement !== null && b.parentElement.textContent === `${textOf(b)}个 Mod`);
+  if (big === undefined) throw new Error("找不到 Mod 总数");
+  return textOf(big);
 }
 
 function toastTitles(): string[] {
@@ -259,6 +266,7 @@ afterEach(() => {
   view = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("实例详情：头图与标签", () => {
@@ -294,6 +302,35 @@ describe("实例详情：头图与标签", () => {
     expect(text()).toContain("1 个有更新");
   });
 
+  it("整合包实例：眉题写来源平台，信息标签与实例信息写整合包名与版本", async () => {
+    instances = instances.map((i) =>
+      i.id === ID ? { ...i, modpack: { platform: "modrinth", project_id: "rlc", version_id: "v1", name: "RLCraft", version: "2.9.3" } } : i,
+    );
+    await open("overview");
+    expect(text()).toContain("整合包 · Modrinth · 已游玩 2 小时 10 分钟");
+    const chips = document.querySelector("h1")?.parentElement?.textContent;
+    expect(chips).toContain("RLCraft 2.9.3");
+    expect(text()).toContain("整合包RLCraft 2.9.3");
+  });
+
+  it("从本地文件导入的整合包眉题写本地文件；自建实例的整合包一栏写无", async () => {
+    instances = instances.map((i) =>
+      i.id === ID ? { ...i, modpack: { platform: null, project_id: null, version_id: null, name: "空岛生存", version: null } } : i,
+    );
+    await open("overview");
+    expect(text()).toContain("整合包 · 本地文件");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, modpack: null } : i));
+    resetRecorderKeepOverrides();
+    await open("overview");
+    expect(text()).toContain("整合包无（自行组装）");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, modpack: null, modpack_error: "modpack.json 不是合法的 JSON" } : i));
+    resetRecorderKeepOverrides();
+    await open("overview");
+    expect(text()).toContain("整合包modpack.json 不是合法的 JSON");
+  });
+
   it("切标签用 replace：路由换成新标签，面板随之切换", async () => {
     await open("overview");
     click(byRole("tab", "设置"));
@@ -323,6 +360,81 @@ describe("实例详情：头图与标签", () => {
   });
 });
 
+describe("实例详情：后端正在改动实例", () => {
+  const reason = (what: string) => `正在改动这个实例的 Mod、资源或设置，完成后才能${what}`;
+
+  it("头图菜单的重命名、补全与删除提前禁用并写明原因，F2 不进入改名", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
+    await open("overview");
+    expect(document.querySelector('h1 button[aria-label="重命名"]')).toBeNull();
+    keydown(document.body, "F2");
+    expect(document.querySelector('input[aria-label="实例名称"]')).toBeNull();
+    click(button("更多操作"));
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const item = (label: string) => {
+      const found = items.find((el) => textOf(el).startsWith(label));
+      if (found === undefined) throw new Error(`菜单里没有「${label}」`);
+      return found;
+    };
+    expect(textOf(item("重命名"))).toBe(`重命名${reason("重命名")}`);
+    expect(item("重命名").getAttribute("aria-disabled")).toBe("true");
+    expect(textOf(item("补全游戏文件"))).toBe(`补全游戏文件${reason("补全")}`);
+    expect(textOf(item("删除实例"))).toBe(`删除实例${reason("删除")}`);
+    click(item("删除实例"));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+  });
+
+  it("设置页的重命名与删除按钮带原因禁用，Mod 开关照常可用", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
+    await open("settings");
+    expect(button("重命名").getAttribute("aria-disabled")).toBe("true");
+    click(button("删除实例"));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    click(byRole("tab", /^Mod/));
+    await flush();
+    expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
+});
+
+describe("实例详情：整合包没导入完", () => {
+  beforeEach(() => {
+    instances = instances.map((i) =>
+      i.id === ID
+        ? {
+            ...i,
+            status: "broken",
+            incomplete: { kind: "modpack", outcome: "failed", started_at: NOW - DAY, spec: null, error: { code: "network_failed", message: "连接被重置" } },
+            modpack: { platform: "curseforge", project_id: "285109", version_id: "4", name: "RLCraft", version: "2.9.3" },
+          }
+        : i,
+    );
+  });
+
+  it("概览横幅与头图菜单不给补全，改为重新导入与删除", async () => {
+    await open("overview");
+    expect(text()).toContain("整合包没有导入完，请删掉这个实例后重新导入");
+    expect(() => button("修复实例")).toThrow();
+    click(button("更多操作"));
+    const labels = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(textOf);
+    expect(labels).not.toContain("补全游戏文件");
+    expect(labels).toContain("重新导入整合包");
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    click(button("重新导入"));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "curseforge", projectId: "285109" } });
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("设置页的补全行换成重新导入", async () => {
+    await open("settings");
+    expect(() => button("补全")).toThrow();
+    expect(text()).toContain("整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。");
+    click(button("重新导入"));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "curseforge", projectId: "285109" } });
+  });
+});
+
 describe("实例详情：概览", () => {
   it("存档按最近游玩排序，极限模式标红；资源包与光影按加载顺序列出", async () => {
     await open("overview");
@@ -337,10 +449,51 @@ describe("实例详情：概览", () => {
     expect(text()).toContain("资源包 · 加载顺序 1");
   });
 
+  it("存档读得慢才出骨架，超过 10 秒追加「比平时慢」；读到后换成存档列表", async () => {
+    const pending = deferred<InstanceContentDto>();
+    ipc.overrides.set("list_instance_content", () => pending.promise);
+    await open("overview");
+    // 其余查询都已读完，骨架只会来自等着内容列表的存档卡、资源包卡与四格数据的存档格
+    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(skeletons()).toBeGreaterThan(0);
+    expect(text()).not.toContain("比平时慢一些，仍在加载…");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(text()).toContain("比平时慢一些，仍在加载…");
+    await act(async () => {
+      pending.resolve(contentDto());
+      await settle(20);
+    });
+    expect(text()).toContain("2 个世界 · 3.0 MB");
+    expect(text()).not.toContain("比平时慢一些，仍在加载…");
+  });
+
   it("实例信息按生效值写 Java 与内存：自动挑到本机的 Java 21，跟随全局的固定 4 GB", async () => {
     await open("overview");
     expect(text()).toContain("自动 · Java 21 · 要求 21");
     expect(text()).toContain("4 GB · 跟随全局");
+  });
+
+  it("头图的「上次崩溃」按实例列表里的崩溃时刻先画出来，不等崩溃报告", async () => {
+    const pending = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => pending.promise);
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - DAY, last_played_at: NOW - DAY } : i));
+    await open("settings");
+    expect(document.querySelector("section")?.textContent).toContain("上次崩溃");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - 2 * DAY, last_played_at: NOW - DAY } : i));
+    resetRecorderKeepOverrides();
+    await open("settings");
+    expect(document.querySelector("section")?.textContent).not.toContain("上次崩溃");
   });
 
   it("崩溃之后没再玩过：危险横幅与头图「上次崩溃」；之后正常玩过就不再提示", async () => {
@@ -411,6 +564,30 @@ describe("实例详情：Mod 管理", () => {
     expect(search.value).toBe("");
   });
 
+  it("自建实例的列表就是全部：摘要数与列表对不上时以列表为准，不说「其余由整合包统一管理」", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: 12 } : i));
+    await open("mods");
+    expect(modTotal()).toBe("2");
+    expect(text()).toContain("已启用 2 个，停用 0 个。");
+    expect(text()).not.toContain("其余由整合包统一管理");
+    click(byRole("tab", "概览"));
+    await flush();
+    expect(text()).toContain("共 2 个");
+    expect(text()).not.toContain("这里展示");
+  });
+
+  it("整合包实例的列表不全时说明其余由整合包统一管理，总数取摘要里的数", async () => {
+    instances = instances.map((i) =>
+      i.id === ID ? { ...i, mod_count: 12, modpack: { platform: "modrinth", project_id: "rlc", version_id: "v1", name: "RLCraft", version: "2.9.3" } } : i,
+    );
+    await open("mods");
+    expect(modTotal()).toBe("12");
+    expect(text()).toContain("整合包「RLCraft」共 12 个 Mod，这里列出 2 个代表；其余由整合包统一管理、随整合包版本更新。");
+    click(byRole("tab", "概览"));
+    await flush();
+    expect(text()).toContain("共 12 个 · 这里展示 2 个代表");
+  });
+
   it("原版实例整页换成空状态，不请求 Mod 列表", async () => {
     await open("mods", "创造");
     expect(text()).toContain("原版实例不加载 Mod");
@@ -443,6 +620,27 @@ describe("实例详情：设置", () => {
     expect(area?.value).toBe("-XX:+UseZGC -XX:+ZGenerational");
   });
 
+  it("整页一个加载门：本机内存读得慢时 300 ms 后几张卡一起出骨架，读到后一起换成内容", async () => {
+    const advice = deferred<{ total_mb: number; available_mb: number; tier: string; recommended_mb: number }>();
+    ipc.overrides.set("memory_advice", () => advice.promise);
+    await open("settings");
+    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
+    expect(skeletons()).toBe(0);
+    expect(document.querySelector('textarea[aria-label="JVM 参数"]')).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(skeletons()).toBeGreaterThan(0);
+    await act(async () => {
+      advice.resolve({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 });
+      await settle(20);
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(skeletons()).toBe(0);
+    expect(document.querySelector('textarea[aria-label="JVM 参数"]')).not.toBeNull();
+    expect(text()).toContain("全局固定值");
+  });
+
   it("内存改为单独设置时以全局生效值为初值", async () => {
     await open("settings");
     click(byRole("radio", "为这个实例单独设置"));
@@ -451,16 +649,42 @@ describe("实例详情：设置", () => {
     expect((saved[0].settings as InstanceSettingsDto).memory_mb).toBe(4096);
   });
 
-  it("删除实例：确认框写明存档数，确认后删除", async () => {
+  it("删除实例：确认框按后端预览列出会一起移入回收站的存档，确认后删除", async () => {
     await open("settings");
     click(button("删除实例"));
     await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: ID }]);
     expect(dialog().querySelector("h2")?.textContent).toBe("删除「樱花生存」？");
-    expect(dialog().textContent).toContain("2 个存档会移入回收站");
-    expect(dialog().textContent).toContain("新世界");
-    click(button("删除实例", dialog()));
+    expect(dialog().textContent).toContain("实例文件夹会移入回收站，其中的 2 个存档（共 3.0 MB）也会一起删除：");
+    expect([...dialog().querySelectorAll("li")].map(textOf)).toEqual(["旧世界", "新世界"]);
+    click(button("删除实例和 2 个存档", dialog()));
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([{ id: ID }]);
+  });
+
+  it("删除说明只数随实例删除的存档：不隔离的实例共用 .minecraft/saves，删除时不受影响", async () => {
+    await open("settings");
+    expect(text()).toContain("这个实例没有存档，实例文件夹会移入回收站。");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, isolated: true, world_count: 2 } : i));
+    resetRecorderKeepOverrides();
+    await open("settings");
+    expect(text()).toContain("连同 2 个存档一起移入回收站。");
+  });
+
+  it("实例上还挂着任务：确认框说明会先取消任务", async () => {
+    ipc.overrides.set("preview_instance_deletion", () => ({ id: ID, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("settings");
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    expect(launcher.state.tasks.filter((t) => t.spec.command === "repair_instance")).toHaveLength(1);
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。");
+    expect(dialog().textContent).toContain("正在进行的安装任务会先取消。");
   });
 });
 
@@ -497,6 +721,37 @@ describe("实例详情：日志与历史", () => {
     expect(text()).toContain("还没有日志");
     expect(text()).toContain("还没有启动记录");
   });
+
+  it("最近一次启动的日志：无关的状态变化不重建日志行，计数照常", async () => {
+    const at = NOW - DAY;
+    const lines: LaunchLogDto["lines"] = Array.from({ length: 40 }, (_, i) => ({
+      at: at + i * 1000,
+      level: i === 0 ? "error" : i % 4 === 0 ? "warn" : "info",
+      source: i % 2 === 0 ? "game" : "launcher",
+      text: `第 ${i} 行`,
+    }));
+    ipc.overrides.set("last_launch_log", (): LaunchLogDto => ({ path: "latest.log", started_at: at, lines, omitted: 0, ended: { at: at + 60_000, outcome: "exited" } }));
+    // jsdom 不做布局：给日志区一个视口高，虚拟列表才会画出行
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
+      return this.getAttribute("role") === "log" ? 220 : 0;
+    });
+    await open("logs");
+    const row = () => document.querySelector('[role="log"] [data-index="0"]');
+    const first = row();
+    expect(first?.textContent).toContain("第 0 行");
+    expect(byRole("radio", /^警告及以上/).textContent).toBe("警告及以上10");
+    act(() => {
+      launcher.actions.toast("info", "无关的通知");
+    });
+    await flush();
+    expect(row()).toBe(first);
+    expect(byRole("radio", /^错误/).textContent).toBe("错误1");
+    // 唯一的错误行来自游戏：只看启动器的错误时一行不剩，说明写在日志区里
+    click(byRole("radio", "启动器"));
+    expect(byRole("radio", /^错误/).textContent).toBe("错误0");
+    click(byRole("radio", /^错误/));
+    expect(document.querySelector('[role="log"]')?.textContent).toContain("当前筛选下没有日志行");
+  });
 });
 
 describe("实例详情：崩溃诊断", () => {
@@ -518,6 +773,25 @@ describe("实例详情：崩溃诊断", () => {
     const all = callsOf(ipc, "set_instance_settings");
     expect((all[1].settings as InstanceSettingsDto).memory_mb).toBeNull();
     expect(text()).toContain("当前最大内存 4 GB（跟随全局），只改这个实例");
+  });
+
+  it("复制报告路径：写入成功原位换成「已复制」；失败只报一次错，按钮保持原样", async () => {
+    crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    await open("crash");
+    click(button("复制报告路径"));
+    await flush();
+    expect(writeText).toHaveBeenCalledWith(`D:/Games/.minecraft/versions/${ID}/logs/latest.log`);
+    expect(button("已复制").getAttribute("aria-label")).toBe("已复制");
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    writeText.mockImplementation(() => Promise.reject(new Error("剪贴板被占用")));
+    click(button("复制报告路径"));
+    await flush();
+    expect(toastTitles().filter((t) => t === "复制失败")).toHaveLength(1);
+    expect(() => button("已复制")).toThrow();
   });
 
   it("没有崩溃记录时是空状态，按钮去日志页", async () => {

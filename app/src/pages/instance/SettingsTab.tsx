@@ -3,13 +3,14 @@
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
-import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
-import { useInstanceContent, useInstanceSettings } from "../../state/queries/instance";
+import { useInstanceSettings } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import { canPinMore } from "../../state/selectors";
 import { Banner } from "../../ui/Banner";
@@ -32,22 +33,25 @@ import { useJavaInfo, useMemoryInfo, type JavaInfo, type MemoryInfo } from "./ho
 import styles from "./instance.module.css";
 import {
   chosenRuntime,
+  deletableWorldCount,
   effectiveJavaMajor,
   hasFlags,
   instanceFolderPath,
   isolationByPolicy,
   javaFit,
   JVM_PRESET_KEYS,
+  needsReimport,
   overridesHeap,
   parseDimension,
   presetFlags,
+  reimportRoute,
   RESOLUTION_LIMITS,
   RESOLUTION_PRESETS,
   toggleFlags,
   ZGC_MIN_JAVA,
 } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { ModuleError, SlowHint } from "./parts";
 
 export interface SettingsTabProps {
   inst: InstanceSummary;
@@ -85,6 +89,9 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   const editor = useSettingsEditor(inst.id, settings);
   const java = useJavaInfo(inst, settings);
   const memory = useMemoryInfo(inst, settings, queryId);
+  // 整页一个加载门：300 ms 内都读到就不出骨架；骨架出现后至少停留 300 ms，几张卡一起换成内容
+  const gate = useLoadingGate(editor === null || java.status === "loading" || memory.status === "loading");
+  const placeholder = gate.view === "content" ? null : gate.view;
 
   if (settings.status === "error") {
     return (
@@ -98,21 +105,33 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
     <div className={styles.stack}>
       {ops.busy && <Banner tone="info" title={SETTINGS_COPY.runningNote} />}
       <div className={styles.settingsGrid}>
-        <MemoryCard inst={inst} editor={editor} memory={memory} />
-        <JavaCard inst={inst} editor={editor} java={java} />
-        {editor === null || java.status === "loading" ? <CardSkeleton title={SETTINGS_COPY.jvmTitle} icon="terminal" /> : <JvmCard editor={editor} java={java.status === "ready" ? java.value : null} />}
-        {editor === null ? <CardSkeleton title={SETTINGS_COPY.windowTitle} icon="monitor" /> : <WindowCard inst={inst} editor={editor} />}
+        <MemoryCard inst={inst} editor={editor} memory={memory} placeholder={placeholder} />
+        <JavaCard inst={inst} editor={editor} java={java} placeholder={placeholder} />
+        {placeholder !== null || editor === null || java.status === "loading" ? (
+          <CardSkeleton title={SETTINGS_COPY.jvmTitle} icon="terminal" visible={placeholder !== "pending"} slow={gate.slow} />
+        ) : (
+          <JvmCard editor={editor} java={java.status === "ready" ? java.value : null} />
+        )}
+        {placeholder !== null || editor === null ? (
+          <CardSkeleton title={SETTINGS_COPY.windowTitle} icon="monitor" visible={placeholder !== "pending"} slow={false} />
+        ) : (
+          <WindowCard inst={inst} editor={editor} />
+        )}
         <ManageCard inst={inst} ops={ops} />
       </div>
     </div>
   );
 }
 
-function CardSkeleton({ title, icon }: { title: string; icon: "terminal" | "monitor" | "memory" | "java" }) {
+/** 加载门的占位：pending 时只有卡片框架，skeleton 时才画骨架。 */
+type Placeholder = "pending" | "skeleton" | null;
+
+function CardSkeleton({ title, icon, visible, slow }: { title: string; icon: "terminal" | "monitor" | "memory" | "java"; visible: boolean; slow: boolean }) {
   return (
     <Card padding="lg">
       <CardHeader icon={icon} title={title} />
-      <Skeleton shape="text" lines={3} />
+      {visible && <Skeleton shape="text" lines={3} />}
+      <SlowHint slow={slow} />
     </Card>
   );
 }
@@ -124,7 +143,17 @@ function snapMemory(mb: number): number {
   return Math.max(MEMORY_MIN_MB, Math.round(mb / MEMORY_STEP_MB) * MEMORY_STEP_MB);
 }
 
-function MemoryCard({ inst, editor, memory }: { inst: InstanceSummary; editor: SettingsEditor | null; memory: ReturnType<typeof useMemoryInfo> }) {
+function MemoryCard({
+  inst,
+  editor,
+  memory,
+  placeholder,
+}: {
+  inst: InstanceSummary;
+  editor: SettingsEditor | null;
+  memory: ReturnType<typeof useMemoryInfo>;
+  placeholder: Placeholder;
+}) {
   const { state } = useLauncher();
   const { go } = useNav();
   const custom = editor !== null && editor.value.memoryMb !== null;
@@ -133,8 +162,9 @@ function MemoryCard({ inst, editor, memory }: { inst: InstanceSummary; editor: S
   useEffect(() => setDraft(saved), [saved]);
 
   const body = (() => {
-    if (memory.status === "error") return <ModuleError title={SETTINGS_COPY.memoryError} error={memory.error} onRetry={memory.reload} />;
-    if (memory.status === "loading" || editor === null || state.settings === null) return <Skeleton shape="text" lines={3} />;
+    if (placeholder === "pending") return null;
+    if (placeholder === null && memory.status === "error") return <ModuleError title={SETTINGS_COPY.memoryError} error={memory.error} onRetry={memory.reload} />;
+    if (placeholder !== null || memory.status !== "ready" || editor === null || state.settings === null) return <Skeleton shape="text" lines={3} />;
     const info: MemoryInfo = memory.value;
     const recommended = info.advice.recommended_mb;
     const mods = inst.modCount === null ? 0 : inst.modCount;
@@ -194,7 +224,7 @@ function MemoryCard({ inst, editor, memory }: { inst: InstanceSummary; editor: S
 
 const FIT_ICON = { match: "check-circle", higher: "alert", lower: "x-circle" } as const;
 
-function JavaCard({ inst, editor, java }: { inst: InstanceSummary; editor: SettingsEditor | null; java: ReturnType<typeof useJavaInfo> }) {
+function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; editor: SettingsEditor | null; java: ReturnType<typeof useJavaInfo>; placeholder: Placeholder }) {
   const { state } = useLauncher();
   const subtitle =
     java.status === "ready" && java.value !== null && inst.mcVersion !== null
@@ -204,8 +234,9 @@ function JavaCard({ inst, editor, java }: { inst: InstanceSummary; editor: Setti
         : undefined;
 
   const body = (() => {
-    if (java.status === "error") return <ModuleError title={SETTINGS_COPY.javaError} error={java.error} onRetry={java.reload} />;
-    if (java.status === "loading" || editor === null || state.settings === null) {
+    if (placeholder === "pending") return null;
+    if (placeholder === null && java.status === "error") return <ModuleError title={SETTINGS_COPY.javaError} error={java.error} onRetry={java.reload} />;
+    if (placeholder !== null || java.status !== "ready" || editor === null || state.settings === null) {
       return (
         <>
           <Skeleton shape="block" width="100%" height={36} radius="md" />
@@ -489,6 +520,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
 function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) {
   const { state } = useLauncher();
   const { tier } = useShell();
+  const { go } = useNav();
   const [name, setName] = useState(inst.name);
   const [renaming, setRenaming] = useState(false);
   // 头图那边也能改名：名字从外部变了就跟着同步
@@ -523,7 +555,8 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             onEnter={saveName}
             className={styles.nameInput}
           />
-          <Button size="sm" disabled={!changed || error !== null} disabledReason={renameReason} loading={renaming} onClick={saveName}>
+          {/* 锁住时改用带原因的禁用（悬停说明为什么），否则名字没改时的普通禁用会把原因吞掉 */}
+          <Button size="sm" disabled={renameReason === undefined && (!changed || error !== null)} disabledReason={renameReason} loading={renaming} onClick={saveName}>
             {SETTINGS_COPY.rename}
           </Button>
         </SettingRow>
@@ -535,11 +568,19 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             {SETTINGS_COPY.open}
           </Button>
         </SettingRow>
-        <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
-          <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "running" ? repairReason : undefined} onClick={ops.repair}>
-            {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
-          </Button>
-        </SettingRow>
+        {needsReimport(inst) ? (
+          <SettingRow title={MODPACK_REIMPORT_COPY.menuReimport} description={MODPACK_REIMPORT_COPY.note}>
+            <Button size="sm" icon="modpack" onClick={() => go(reimportRoute(inst))}>
+              {MODPACK_REIMPORT_COPY.reimport}
+            </Button>
+          </SettingRow>
+        ) : (
+          <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
+            <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
+              {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
+            </Button>
+          </SettingRow>
+        )}
       </div>
       <div className={styles.dangerZone} data-stack={tier === "compact" || undefined}>
         <div className={styles.dangerText}>
@@ -555,17 +596,11 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
 }
 
 function DeleteNote({ inst, busy }: { inst: InstanceSummary; busy: boolean }) {
-  const content = useInstanceContentCount(inst);
+  const worlds = deletableWorldCount(inst);
   return (
     <span className={styles.soft}>
-      {content === null ? null : content > 0 ? SETTINGS_COPY.deleteWorlds(content) : SETTINGS_COPY.deleteNoWorlds}
+      {worlds === null ? null : worlds > 0 ? SETTINGS_COPY.deleteWorlds(worlds) : SETTINGS_COPY.deleteNoWorlds}
       {busy && SETTINGS_COPY.deleteRunning}
     </span>
   );
-}
-
-
-function useInstanceContentCount(inst: InstanceSummary): number | null {
-  const content = useInstanceContent(inst.placeholder ? null : inst.id);
-  return content.status === "ready" ? content.data.worlds.length : null;
 }

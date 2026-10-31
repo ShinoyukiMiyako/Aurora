@@ -4,6 +4,7 @@
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { LaunchViewKind } from "../../launch/launchView";
+import type { Route } from "../../state/route";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
 
@@ -19,25 +20,61 @@ export function isCrashActive(crashAt: number | null, lastPlayedAt: number | nul
   return lastPlayedAt === null || crashAt >= lastPlayedAt;
 }
 
+// ---------------------------------------------------------------- 整合包没导入完
+
+/**
+ * 整合包导入半途而废的实例：缺的是整合包里的 Mod 与配置，补全只补原版文件与加载器，补不回来，
+ * 后端对它的补全一律报错。所以各处不给「修复」入口，改给「重新导入」与「删除」。
+ */
+export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete">): boolean {
+  return inst.status === "broken" && inst.incomplete !== null && inst.incomplete.kind === "modpack";
+}
+
+/** 重新导入去哪：记得平台来源就直接打开那个整合包的详情，从本地文件导入的（或记录没写下来的）回到发现页的整合包。 */
+export function reimportRoute(inst: Pick<InstanceSummary, "modpack">): Route {
+  const pack = inst.modpack;
+  if (pack !== null && pack.platform !== null && pack.projectId !== null) {
+    return { page: "discover", kind: "modpack", open: { platform: pack.platform, projectId: pack.projectId } };
+  }
+  return { page: "discover", kind: "modpack" };
+}
+
+// ---------------------------------------------------------------- 删除
+
+/**
+ * 删除时随实例一起移入回收站的存档数，读不出为 null。实例列表里的存档数按工作目录数：隔离的实例工作目录
+ * 就是实例文件夹；不隔离的共用 .minecraft/saves，删除实例不碰它们（实例文件夹里有存档时后端会强制隔离）。
+ */
+export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "worldCount">): number | null {
+  if (inst.isolated === null || inst.worldCount === null) return null;
+  return inst.isolated ? inst.worldCount : 0;
+}
+
 // ---------------------------------------------------------------- 锁定
+
+/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置。 */
+export type InstanceLock = "running" | "installing" | "modifying";
 
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
   /** 启用、停用、更新、移除 Mod 与回滚。 */
   mods: "running" | "installing" | null;
-  rename: "running" | "installing" | null;
+  rename: InstanceLock | null;
   /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。 */
-  repair: "running" | "installing" | null;
-  delete: "running" | null;
+  repair: InstanceLock | null;
+  delete: "running" | "modifying" | null;
 }
 
 /**
  * busy：本实例的会话在准备、下载、启动或运行中（JVM 占着 Mod 文件，Windows 下改名、替换、删除都会失败）。
  * installing：安装或补全任务正在写这个实例的目录。
+ * modifying：后端正占着实例改动 Mod、资源或设置。它与游戏运行、与它自己兼容，所以不锁 Mod 操作；
+ * 但与改名、删除、补全互斥，不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
  */
-export function instanceLocks(busy: boolean, installing: boolean): InstanceLocks {
+export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean): InstanceLocks {
   const fileLock = busy ? "running" : installing ? "installing" : null;
-  return { mods: fileLock, rename: fileLock, repair: fileLock, delete: busy ? "running" : null };
+  const dirLock = fileLock !== null ? fileLock : modifying ? "modifying" : null;
+  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : null };
 }
 
 // ---------------------------------------------------------------- 概览横幅
@@ -318,6 +355,17 @@ export function modRows(mods: readonly InstalledMod[], updates: readonly UpdateC
     };
   });
   return rows.sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName));
+}
+
+/**
+ * Mod 总数与列表是否不全。实例摘要里的 modCount 与列表同源（mods 目录里的 .jar 与 .jar.disabled），
+ * 自建实例的列表就是全部，两者对不上只说明摘要是早些时候扫的，以刚扫出的列表为准。
+ * 只有整合包实例的列表才可能只列出代表（其余由整合包统一管理），这时总数取摘要与列表中较大的一个。
+ */
+export function modTotals(inst: Pick<InstanceSummary, "modCount" | "modpack">, listed: number): { total: number; partial: boolean } {
+  if (inst.modpack === null || inst.modCount === null) return { total: listed, partial: false };
+  const total = Math.max(inst.modCount, listed);
+  return { total, partial: total > listed };
 }
 
 export type ModFilter = "all" | "enabled" | "disabled" | "outdated";

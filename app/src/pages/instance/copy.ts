@@ -18,6 +18,8 @@ export const PAGE_COPY = {
 export const HERO_COPY = {
   eyebrowVanilla: "原版实例",
   eyebrowModded: "自建模组实例",
+  eyebrowModpack: (source: string) => `整合包 · ${source}`,
+  modpackLocal: "本地文件",
   played: (minutes: number) => `已游玩 ${formatPlaytime(minutes)}`,
   rename: "重命名",
   renameInput: "实例名称",
@@ -47,6 +49,11 @@ export const LOCK_REASON = {
   renameRunning: "游戏正在运行，结束后才能重命名",
   renameInstalling: "安装任务正在写这个实例的文件夹",
   repairInProgress: "进行中",
+  modifying: {
+    rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
+    repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
+    delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
+  },
 } as const;
 
 // ---------------------------------------------------------------- 概览
@@ -108,6 +115,8 @@ export const OVERVIEW_COPY = {
   kvLoader: "加载器",
   kvJava: "Java",
   kvMemory: "最大内存",
+  kvModpack: "整合包",
+  modpackNone: "无（自行组装）",
   kvCreated: "创建于",
   createdUnknown: "文件系统没有记录",
   javaAutoFound: (major: number) => `自动 · Java ${major}`,
@@ -144,6 +153,7 @@ export const OVERVIEW_COPY = {
   packInactive: "资源包 · 未启用",
   packsFoot: (loader: LoaderKind, mc: string) => `${joinMixed(LOADER_NAME[loader], mc)} 的资源可以在发现页按版本筛选。`,
   packsError: "读不到资源包与光影",
+  slow: "比平时慢一些，仍在加载…",
 } as const;
 
 // ---------------------------------------------------------------- Mod 管理
@@ -160,9 +170,8 @@ export const MODS_COPY = {
   checkUpdates: "检查更新",
   addMod: "添加 Mod",
   totalUnit: "个 Mod",
-  partialNote: (owner: string, total: number, shown: number) =>
-    `${owner}共 ${total} 个 Mod，这里列出 ${shown} 个代表；其余由整合包统一管理、随整合包版本更新。`,
-  partialOwner: "这个实例",
+  partialNote: (pack: string, total: number, shown: number) =>
+    `整合包「${pack}」共 ${total} 个 Mod，这里列出 ${shown} 个代表；其余由整合包统一管理、随整合包版本更新。`,
   completeNote: (enabled: number, disabled: number) => `已启用 ${enabled} 个，停用 ${disabled} 个。`,
   bannerRunning: "游戏正在运行，Mod 文件被占用。结束游戏后再启用、停用、更新或移除。",
   bannerInstalling: "实例正在补全文件，完成后再改动 Mod。",
@@ -437,12 +446,4 @@ export const CRASH_PAGE_COPY = {
   viewLogs: "查看启动日志",
   error: "读不到崩溃报告",
   retry: "重试",
-} as const;
-
-// ---------------------------------------------------------------- 删除
-
-export const DELETE_COPY = {
-  worldsListIntro: "随实例一起移入回收站的存档：",
-  installingNote: "正在进行的安装任务会先取消。",
-  backupHint: "想留着存档的话，先在概览里打开存档文件夹备份一份。",
 } as const;

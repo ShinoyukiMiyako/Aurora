@@ -31,6 +31,7 @@ export const LIBRARY_COPY = {
   lastPlayed: "上次游玩",
   playtime: "累计时长",
   modCount: "Mod 数",
+  worldCount: "存档数",
 
   pin: (name: string) => `把「${name}」固定到侧栏`,
   unpin: (name: string) => `从侧栏取消固定「${name}」`,
@@ -52,10 +53,7 @@ export const LIBRARY_COPY = {
     crash: "崩溃诊断",
     crashActive: "上次崩溃",
     remove: "删除实例",
-    removeBusy: "游戏正在运行，先结束游戏",
   },
-  /** 删除安装中的实例时追加在确认正文之后。 */
-  removeCancelsInstall: "正在进行的安装任务会先取消。",
 
   createTileTitle: "新建实例",
   createTileBody: "选版本、加载器和封面，装好后自动固定到侧栏",
@@ -76,4 +74,5 @@ export const LIBRARY_COPY = {
 
   gridLabel: "实例",
   loadingLabel: "正在读取实例列表",
+  slow: "比平时慢一些，仍在加载…",
 } as const;

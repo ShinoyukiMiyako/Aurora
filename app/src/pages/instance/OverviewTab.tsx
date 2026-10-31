@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, crashCategoryLabel } from "../../copy/flows";
+import { ACTION_ERROR, crashCategoryLabel, MODPACK_REIMPORT_COPY, modpackLabel } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
 import type { LaunchView } from "../../launch/launchView";
@@ -43,9 +43,9 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
-import { chosenRuntime, modRows, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
+import { chosenRuntime, modRows, modTotals, needsReimport, overviewBanner, peekLayout, peekPerRow, reimportRoute, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface OverviewTabProps {
   inst: InstanceSummary;
@@ -69,9 +69,9 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
     <div className={styles.stack}>
       {banner === "failed" && <FailedBanner inst={inst} />}
       {banner === "crashed" && crash.status === "ready" && crash.data !== null && <CrashBanner report={crash.data} onTab={onTab} />}
-      {banner === "broken" && view.kind === "broken" && <BrokenBanner reason={view.reason} ops={ops} />}
+      {banner === "broken" && view.kind === "broken" && (needsReimport(inst) ? <ReimportBanner inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner reason={view.reason} ops={ops} />)}
       {banner === "installing" && view.kind === "installing" && <InstallingBanner view={view} />}
-      <StatsCard inst={inst} content={content} outdated={outdated} />
+      <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div className={styles.overviewGrid}>
         <WorldsCard content={content} ops={ops} />
         <InfoCard inst={inst} queryId={queryId} onTab={onTab} />
@@ -134,6 +134,30 @@ function BrokenBanner({ reason, ops }: { reason: string; ops: InstanceOps }) {
   );
 }
 
+/** 整合包没导入完：补全补不回来，横幅改给重新导入与删除。 */
+function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: string; ops: InstanceOps }) {
+  const { go } = useNav();
+  return (
+    <Banner
+      tone="warn"
+      icon="alert"
+      title={OVERVIEW_COPY.brokenTitle}
+      actions={
+        <>
+          <Button icon="modpack" onClick={() => go(reimportRoute(inst))}>
+            {MODPACK_REIMPORT_COPY.reimport}
+          </Button>
+          <Button variant="danger" icon="trash" disabledReason={lockReason(ops.locks.delete, "delete")} onClick={ops.remove}>
+            {MODPACK_REIMPORT_COPY.deleteInstance}
+          </Button>
+        </>
+      }
+    >
+      {reason}
+    </Banner>
+  );
+}
+
 function InstallingBanner({ view }: { view: Extract<LaunchView, { kind: "installing" }> }) {
   const { go } = useNav();
   const task = view.task;
@@ -156,11 +180,24 @@ function InstallingBanner({ view }: { view: Extract<LaunchView, { kind: "install
 
 // ---------------------------------------------------------------- 四格数据
 
-function StatsCard({ inst, content, outdated }: { inst: InstanceSummary; content: ResourceResult<InstanceContentDto>; outdated: number | null }) {
+function StatsCard({
+  inst,
+  content,
+  mods,
+  outdated,
+}: {
+  inst: InstanceSummary;
+  content: ResourceResult<InstanceContentDto>;
+  mods: ResourceResult<InstalledMod[]>;
+  outdated: number | null;
+}) {
   const now = useNow(30_000);
+  // 列表扫完就与 Mod 速览用同一个总数，不让两处一个写 12 个、一个写「还没有装任何 Mod」
+  const modTotal = mods.status === "ready" ? modTotals(inst, mods.data.length).total : inst.modCount;
   const hours = Math.floor(inst.playtimeMin / 60);
   const minutes = inst.playtimeMin % 60;
   const modded = inst.loader !== "vanilla";
+  const worlds = useModuleView(content);
   const worldsBytes = content.status === "ready" ? content.data.worlds.reduce((sum, w) => sum + w.size_bytes, 0) : 0;
 
   const modDelta = !modded
@@ -191,12 +228,12 @@ function StatsCard({ inst, content, outdated }: { inst: InstanceSummary; content
           value={inst.lastPlayedAt === null ? OVERVIEW_COPY.never : formatRelative(inst.lastPlayedAt, now)}
           delta={{ direction: "flat", text: inst.lastPlayedAt === null ? OVERVIEW_COPY.rememberOnLaunch : formatDate(inst.lastPlayedAt) }}
         />
-        {inst.modCount === null ? (
+        {modTotal === null ? (
           <StatTile icon="box" label={OVERVIEW_COPY.statMods} kind="text" value={OVERVIEW_COPY.modsUnknown} />
         ) : (
-          <StatTile icon="box" label={OVERVIEW_COPY.statMods} value={String(inst.modCount)} unit={OVERVIEW_COPY.modsUnit} delta={modDelta} />
+          <StatTile icon="box" label={OVERVIEW_COPY.statMods} value={String(modTotal)} unit={OVERVIEW_COPY.modsUnit} delta={modDelta} />
         )}
-        {content.status === "ready" ? (
+        {worlds.view === "ready" && content.status === "ready" ? (
           <StatTile
             icon="globe"
             label={OVERVIEW_COPY.statWorlds}
@@ -204,12 +241,10 @@ function StatsCard({ inst, content, outdated }: { inst: InstanceSummary; content
             unit={OVERVIEW_COPY.worldsUnit}
             delta={{ direction: "flat", text: content.data.worlds.length > 0 ? OVERVIEW_COPY.worldsSize(worldsBytes) : OVERVIEW_COPY.worldsNone }}
           />
-        ) : content.status === "error" ? (
+        ) : worlds.view === "error" ? (
           <StatTile icon="globe" label={OVERVIEW_COPY.statWorlds} kind="text" value={OVERVIEW_COPY.worldsError} />
         ) : (
-          <div className={styles.statSkeleton}>
-            <Skeleton shape="text" lines={3} />
-          </div>
+          <div className={styles.statSkeleton}>{worlds.view === "skeleton" && <Skeleton shape="text" lines={3} />}</div>
         )}
       </StatGrid>
     </Card>
@@ -230,11 +265,12 @@ const MODE_TILE: Readonly<Record<keyof typeof MODE_LABEL, WorldMode | null>> = {
 function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
   const now = useNow(30_000);
   const [expanded, setExpanded] = useState(false);
+  const load = useModuleView(content);
   const worlds = content.status === "ready" ? sortWorlds(content.data.worlds) : [];
   const total = worlds.reduce((sum, w) => sum + w.size_bytes, 0);
   const shown = expanded ? worlds : worlds.slice(0, WORLDS_PREVIEW);
   const subtitle =
-    content.status !== "ready" ? undefined : worlds.length > 0 ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total) : OVERVIEW_COPY.worldsEmptySubtitle;
+    load.view !== "ready" ? undefined : worlds.length > 0 ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total) : OVERVIEW_COPY.worldsEmptySubtitle;
 
   return (
     <Card>
@@ -244,10 +280,10 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
         subtitle={subtitle}
         actions={<IconButton icon="folder" label={OVERVIEW_COPY.openSaves} size="sm" onClick={() => ops.openFolder("saves")} />}
       />
-      {content.status === "loading" && <RowSkeletons rows={3} />}
-      {content.status === "error" && <ModuleError title={OVERVIEW_COPY.worldsError} error={content.error} onRetry={content.reload} />}
-      {content.status === "ready" && worlds.length === 0 && <EmptyState compact scene="map" title={OVERVIEW_COPY.worldsEmptyTitle} body={OVERVIEW_COPY.worldsEmptyBody} />}
-      {content.status === "ready" && worlds.length > 0 && (
+      {load.view === "skeleton" && <RowSkeletons rows={3} slow={load.slow} />}
+      {load.view === "error" && content.status === "error" && <ModuleError title={OVERVIEW_COPY.worldsError} error={content.error} onRetry={content.reload} />}
+      {load.view === "ready" && worlds.length === 0 && <EmptyState compact scene="map" title={OVERVIEW_COPY.worldsEmptyTitle} body={OVERVIEW_COPY.worldsEmptyBody} />}
+      {load.view === "ready" && worlds.length > 0 && (
         <>
           <ul className={styles.rows}>
             {shown.map((w, i) => {
@@ -326,6 +362,16 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
     );
   })();
 
+  // 整合包记录读不出来时如实写原因，不当成「自行组装」
+  const modpackValue =
+    inst.modpack !== null ? (
+      modpackLabel(inst.modpack)
+    ) : inst.modpackError !== null ? (
+      <span className={styles.dangerText}>{inst.modpackError}</span>
+    ) : (
+      OVERVIEW_COPY.modpackNone
+    );
+
   const memoryValue =
     memory.status === "loading" ? (
       <Skeleton shape="text" width={72} />
@@ -354,6 +400,7 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
         rows={[
           { label: OVERVIEW_COPY.kvVersion, value: <span className={styles.num}>{inst.mcVersion === null ? HERO_COPY.versionUnknown : inst.mcVersion}</span> },
           { label: OVERVIEW_COPY.kvLoader, value: <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" /> },
+          { label: OVERVIEW_COPY.kvModpack, value: modpackValue },
           { label: OVERVIEW_COPY.kvJava, value: javaValue },
           { label: OVERVIEW_COPY.kvMemory, value: memoryValue },
           { label: OVERVIEW_COPY.kvCreated, value: inst.createdAt === null ? OVERVIEW_COPY.createdUnknown : formatDate(inst.createdAt) },
@@ -383,11 +430,12 @@ function ModsPeekCard({
   const { actions } = useLauncher();
   const run = useRunner();
   const vanilla = inst.loader === "vanilla";
+  const load = useModuleView(mods);
   const rows: ModRow[] = mods.status === "ready" ? modRows(mods.data, updates.status === "ready" ? updates.data : null) : [];
-  const total = inst.modCount === null ? rows.length : Math.max(inst.modCount, rows.length);
+  const { total, partial } = modTotals(inst, rows.length);
   const outdated = rows.filter((r) => r.update !== null);
 
-  const subtitle = vanilla || mods.status !== "ready" || rows.length === 0 ? undefined : total > rows.length ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
+  const subtitle = vanilla || load.view !== "ready" || rows.length === 0 ? undefined : partial ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
 
   return (
     <Card>
@@ -414,12 +462,11 @@ function ModsPeekCard({
         >
           {OVERVIEW_COPY.vanillaPeek}
         </Callout>
-      ) : mods.status === "loading" ? (
-        <div className={styles.peek}>
-          {Array.from({ length: 12 }, (_, i) => (
-            <Skeleton key={i} shape="square" size={44} />
-          ))}
-        </div>
+      ) : load.view === "pending" || load.view === "skeleton" ? (
+        <>
+          <div className={styles.peek}>{load.view === "skeleton" && Array.from({ length: 12 }, (_, i) => <Skeleton key={i} shape="square" size={44} />)}</div>
+          <SlowHint slow={load.slow} />
+        </>
       ) : mods.status === "error" ? (
         <ModuleError title={OVERVIEW_COPY.modsError} error={mods.error} onRetry={mods.reload} />
       ) : rows.length === 0 ? (
@@ -483,7 +530,7 @@ function PeekTiles({ rows, total, onOpen }: { rows: readonly ModRow[]; total: nu
       {rows.slice(0, shown).map((r) => (
         <Tooltip key={r.fileName} content={r.name} sub={`${r.version === null ? "" : r.version}${r.enabled ? "" : OVERVIEW_COPY.modDisabledSuffix}`}>
           <button type="button" className={styles.peekTile} aria-label={r.name} onClick={onOpen}>
-            <Thumb url={r.iconUrl} kind="mod" hue={hueOf(r.seed)} size={40} inactive={!r.enabled} />
+            <Thumb url={r.iconUrl} kind="mod" hue={hueOf(r.seed)} size={44} inactive={!r.enabled} />
             {r.update !== null && <Badge tone="accent" ring className={styles.peekDot} />}
           </button>
         </Tooltip>
@@ -503,13 +550,14 @@ function PacksCard({ inst, content }: { inst: InstanceSummary; content: Resource
   const { go } = useNav();
   const vanilla = inst.loader === "vanilla";
   const discover = () => go({ page: "discover", kind: "resourcepack", forInstance: inst.id });
+  const load = useModuleView(content);
 
   return (
     <Card>
       <CardHeader icon="image" title={OVERVIEW_COPY.packsTitle} actions={<IconButton icon="compass" label={OVERVIEW_COPY.findPacks} size="sm" onClick={discover} />} />
-      {content.status === "loading" && <RowSkeletons rows={2} />}
-      {content.status === "error" && <ModuleError title={OVERVIEW_COPY.packsError} error={content.error} onRetry={content.reload} />}
-      {content.status === "ready" && (
+      {load.view === "skeleton" && <RowSkeletons rows={2} slow={load.slow} />}
+      {load.view === "error" && content.status === "error" && <ModuleError title={OVERVIEW_COPY.packsError} error={content.error} onRetry={content.reload} />}
+      {load.view === "ready" && content.status === "ready" && (
         <ul className={styles.rows}>
           {(() => {
             const active = content.data.shader_packs.find((s) => s.active);
@@ -567,7 +615,7 @@ function PacksCard({ inst, content }: { inst: InstanceSummary; content: Resource
   );
 }
 
-function RowSkeletons({ rows }: { rows: number }) {
+function RowSkeletons({ rows, slow }: { rows: number; slow: boolean }) {
   return (
     <div className={styles.rows}>
       {Array.from({ length: rows }, (_, i) => (
@@ -578,6 +626,7 @@ function RowSkeletons({ rows }: { rows: number }) {
           </div>
         </div>
       ))}
+      <SlowHint slow={slow} />
     </div>
   );
 }

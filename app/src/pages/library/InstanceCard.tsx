@@ -8,13 +8,13 @@
 // 其余部分照最后一次的数据画完退场。
 
 import { Icon, type IconName } from "../../art/Icon";
-import { ACTION_ERROR, CONFIRM_COPY, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatPlaytimeShort, formatRelative } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
-import { useNav, useShell } from "../../shell/shell";
+import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
 import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
@@ -27,6 +27,9 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { Tooltip } from "../../ui/Tooltip";
+import { useDeleteInstance } from "../instance/delete";
+import { instanceLocks, isCrashActive } from "../instance/model";
+import { lockReason } from "../instance/ops";
 import { CardStatus } from "./CardStatus";
 import { LIBRARY_COPY } from "./copy";
 import styles from "./library.module.css";
@@ -43,17 +46,23 @@ export interface InstanceCardProps {
 export function InstanceCard({ inst, now }: InstanceCardProps) {
   const { state, actions } = useLauncher();
   const { go } = useNav();
-  const { confirm } = useShell();
   const run = useRunner();
+  const deleteInstance = useDeleteInstance();
 
   const id = inst.id;
   const name = inst.name;
   const live = findInstance(state, id) !== undefined;
   const current = state.selectedInstanceId === id;
   const busy = busyInstanceId(state) === id;
+  const deleteReason = lockReason(instanceLocks(busy, inst.status === "installing", inst.activity === "modifying").delete, "delete");
   const pinAllowed = inst.pinned || canPinMore(state);
   const cover = instanceCover(inst);
-  const crashed = live && launchView(state, inst).kind === "crashed";
+  // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
+  // 刚崩溃、列表还没重扫到崩溃时刻时，以会话的崩溃态为准
+  const viewKind = live ? launchView(state, inst).kind : null;
+  const justCrashed = viewKind === "crashed";
+  const hasCrash = justCrashed || inst.lastCrashAt !== null || inst.lastCrashError !== null;
+  const crashActive = justCrashed || (viewKind !== null && isCrashActive(inst.lastCrashAt, inst.lastPlayedAt, viewKind));
 
   const open = (tab: "overview" | "mods" | "settings" | "logs" | "crash" = "overview") => go({ page: "instance", id, tab });
 
@@ -70,25 +79,6 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
     if (!result.ok) return;
     const copy = TOAST_COPY.instanceSelected(name);
     actions.toast("info", copy.title, copy.body);
-  };
-
-  const remove = async () => {
-    // 还没扫到目录的占位项（排队中的新建）磁盘上什么都没有，不必问后端有几个存档
-    let worlds = 0;
-    if (!inst.placeholder) {
-      const preview = await run(() => actions.previewInstanceDeletion(id), ACTION_ERROR.deleteInstance(name));
-      if (!preview.ok) return;
-      worlds = preview.value.worlds.length;
-    }
-    const copy = CONFIRM_COPY.deleteInstance(name, worlds);
-    const ok = await confirm({
-      title: copy.title,
-      body: inst.status === "installing" ? `${copy.body}${LIBRARY_COPY.removeCancelsInstall}` : copy.body,
-      confirmLabel: copy.confirmLabel,
-      tone: "danger",
-    });
-    if (!ok) return;
-    await run(() => actions.deleteInstance(id, worlds), ACTION_ERROR.deleteInstance(name));
   };
 
   const menu: MenuEntry[] = [
@@ -126,15 +116,15 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
         ]),
     { label: LIBRARY_COPY.menu.settings, icon: "sliders", onSelect: () => open("settings") },
     { label: LIBRARY_COPY.menu.logs, icon: "terminal", onSelect: () => open("logs") },
-    { label: LIBRARY_COPY.menu.crash, icon: "bug", hint: crashed ? LIBRARY_COPY.menu.crashActive : undefined, onSelect: () => open("crash") },
+    ...(hasCrash ? [{ label: LIBRARY_COPY.menu.crash, icon: "bug" as const, hint: crashActive ? LIBRARY_COPY.menu.crashActive : undefined, onSelect: () => open("crash") }] : []),
     { kind: "separator" },
     {
       label: LIBRARY_COPY.menu.remove,
       icon: "trash",
       danger: true,
-      disabled: busy,
-      hint: busy ? LIBRARY_COPY.menu.removeBusy : undefined,
-      onSelect: () => void remove(),
+      disabled: deleteReason !== undefined,
+      hint: deleteReason,
+      onSelect: () => void deleteInstance(inst),
     },
   ];
 
@@ -152,7 +142,12 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
     />
   );
 
-  const description = inst.description !== null && inst.description.trim() !== "" ? inst.description : LIBRARY_COPY.noDescription;
+  const description =
+    inst.modpack !== null
+      ? modpackLabel(inst.modpack)
+      : inst.description !== null && inst.description.trim() !== ""
+        ? inst.description
+        : LIBRARY_COPY.noDescription;
 
   return (
     <Card padding="none" clip selected={current} className={styles.card} as="article">
@@ -188,12 +183,13 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
             <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={formatRelative(inst.lastPlayedAt, now)} />
             <Stat icon="clock" label={LIBRARY_COPY.playtime} value={formatPlaytimeShort(inst.playtimeMin)} />
             {inst.modCount !== null && inst.modCount > 0 && <Stat icon="mod" label={LIBRARY_COPY.modCount} value={String(inst.modCount)} />}
+            {inst.worldCount !== null && <Stat icon="world" label={LIBRARY_COPY.worldCount} value={String(inst.worldCount)} />}
           </ul>
         )}
       </div>
 
       <div className={styles.foot}>
-        {live ? <CardStatus instanceId={id} /> : <div className={styles.status} />}
+        {live ? <CardStatus inst={inst} /> : <div className={styles.status} />}
         <MoreMenu size="sm" label={LIBRARY_COPY.moreLabel(name)} items={menu} />
       </div>
     </Card>

@@ -101,6 +101,18 @@ describe("统计与签名", () => {
     expect(LIBRARY_COPY.subtitle(3, 2, totalPlaytime(list))).toBe("共 3 个实例 · 2 个固定在侧栏 · 累计 2 小时");
   });
 
+  it("修复横幅不收整合包没导入完的实例：补全补不回来；其他种类的未完成照收", () => {
+    const marker = (kind: "install" | "repair" | "modpack") => ({ kind, outcome: "failed" as const, startedAt: null, spec: null, error: null });
+    const list = [
+      inst("pack", { status: "broken", brokenReason: "整合包没有导入完", incomplete: marker("modpack") }),
+      inst("install", { status: "broken", brokenReason: "安装没有完成", incomplete: marker("install") }),
+      inst("repair", { status: "broken", brokenReason: "补全没有完成", incomplete: marker("repair") }),
+      // 正在重新补全的不算损坏
+      inst("busy", { status: "installing", incomplete: marker("modpack") }),
+    ];
+    expect(ids(brokenInstances(list))).toEqual(["install", "repair"]);
+  });
+
   it("顺序签名随顺序变化、不随实例的其他字段变化", () => {
     const a = [inst("x"), inst("y")];
     expect(orderSignature(a)).toBe(orderSignature([inst("x", { playtimeMin: 9 }), inst("y")]));

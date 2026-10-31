@@ -5,6 +5,7 @@ import { LOGS_COPY } from "./copy";
 import {
   autoJavaPick,
   crashFixes,
+  deletableWorldCount,
   disabledFileName,
   effectiveJavaMajor,
   effectiveMemoryMb,
@@ -22,6 +23,8 @@ import {
   matchSuspect,
   modCounts,
   modRows,
+  modTotals,
+  needsReimport,
   overridesHeap,
   overviewBanner,
   parseDimension,
@@ -29,6 +32,7 @@ import {
   peekPerRow,
   presetFlags,
   RESOLUTION_LIMITS,
+  reimportRoute,
   removalRelations,
   sortWorlds,
   toggleFlags,
@@ -140,13 +144,63 @@ describe("上次崩溃判定", () => {
 
 describe("锁定矩阵", () => {
   it("运行中锁住 Mod、重命名、补全与删除", () => {
-    expect(instanceLocks(true, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(true, false, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
   });
   it("安装中锁住文件操作但可以删除", () => {
-    expect(instanceLocks(false, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
+    expect(instanceLocks(false, true, false)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
   });
   it("就绪时全部可用", () => {
-    expect(instanceLocks(false, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
+    expect(instanceLocks(false, false, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
+  });
+  it("后端在改动 Mod、资源或设置：锁住改名、补全与删除，Mod 操作照常", () => {
+    expect(instanceLocks(false, false, true)).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
+  });
+  it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
+    expect(instanceLocks(true, false, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(false, true, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
+  });
+});
+
+describe("删除时一起走的存档", () => {
+  it("隔离的实例按存档数，不隔离的共用目录不算，读不出为 null", () => {
+    expect(deletableWorldCount({ isolated: true, worldCount: 3 })).toBe(3);
+    expect(deletableWorldCount({ isolated: true, worldCount: 0 })).toBe(0);
+    expect(deletableWorldCount({ isolated: false, worldCount: 7 })).toBe(0);
+    expect(deletableWorldCount({ isolated: null, worldCount: 7 })).toBeNull();
+    expect(deletableWorldCount({ isolated: true, worldCount: null })).toBeNull();
+  });
+});
+
+describe("Mod 总数", () => {
+  const pack = { platform: "modrinth" as const, projectId: "rlc", versionId: "v1", name: "RLCraft", version: "2.9.3" };
+  it("自建实例以列表为准，摘要数对不上也不算列表不全", () => {
+    expect(modTotals({ modCount: 12, modpack: null }, 2)).toEqual({ total: 2, partial: false });
+    expect(modTotals({ modCount: 0, modpack: null }, 3)).toEqual({ total: 3, partial: false });
+    expect(modTotals({ modCount: null, modpack: null }, 0)).toEqual({ total: 0, partial: false });
+  });
+  it("整合包实例的列表比摘要少时才算只列出代表，总数取较大者", () => {
+    expect(modTotals({ modCount: 168, modpack: pack }, 24)).toEqual({ total: 168, partial: true });
+    expect(modTotals({ modCount: 24, modpack: pack }, 24)).toEqual({ total: 24, partial: false });
+    expect(modTotals({ modCount: 20, modpack: pack }, 24)).toEqual({ total: 24, partial: false });
+    expect(modTotals({ modCount: null, modpack: pack }, 5)).toEqual({ total: 5, partial: false });
+  });
+});
+
+describe("整合包没导入完", () => {
+  const marker = (kind: "install" | "repair" | "modpack" | "unknown") => ({ kind, outcome: "failed" as const, startedAt: null, spec: null, error: null });
+  it("只有损坏且未完成标记是整合包导入时才需要重新导入", () => {
+    expect(needsReimport({ status: "broken", incomplete: marker("modpack") })).toBe(true);
+    expect(needsReimport({ status: "broken", incomplete: marker("install") })).toBe(false);
+    expect(needsReimport({ status: "broken", incomplete: marker("unknown") })).toBe(false);
+    expect(needsReimport({ status: "broken", incomplete: null })).toBe(false);
+    expect(needsReimport({ status: "installing", incomplete: marker("modpack") })).toBe(false);
+  });
+  it("重新导入：记得平台来源时直接打开那个整合包，否则回到发现页的整合包", () => {
+    const pack = { platform: "modrinth" as const, projectId: "abc", versionId: "v1", name: "RLCraft", version: "2.9.3" };
+    expect(reimportRoute({ modpack: pack })).toEqual({ page: "discover", kind: "modpack", open: { platform: "modrinth", projectId: "abc" } });
+    expect(reimportRoute({ modpack: { ...pack, platform: null, projectId: null } })).toEqual({ page: "discover", kind: "modpack" });
+    expect(reimportRoute({ modpack: { ...pack, projectId: null } })).toEqual({ page: "discover", kind: "modpack" });
+    expect(reimportRoute({ modpack: null })).toEqual({ page: "discover", kind: "modpack" });
   });
 });
 

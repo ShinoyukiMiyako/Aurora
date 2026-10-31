@@ -4,10 +4,6 @@
  */
 
 /* 只为接住 F2：不参与布局 */
-.keyScope {
-  display: contents;
-}
-
 .page {
   gap: var(--sk-space-16);
 }
@@ -25,6 +21,13 @@
 
 .soft {
   color: var(--sk-text-2);
+}
+
+.slowHint {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
 }
 
 .num {
@@ -972,9 +975,4 @@
 
 .confirmBody p {
   margin: 0;
-}
-
-.confirmList {
-  margin: 0;
-  padding-left: var(--sk-space-20);
 }

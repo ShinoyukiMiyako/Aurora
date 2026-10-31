@@ -7,6 +7,7 @@ import { useEffect, useId, useMemo, useRef } from "react";
 import { Icon } from "../../art/Icon";
 import { ACTION_ERROR, LOADER_NAME } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { fade, springs } from "../../lib/motion";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -84,6 +85,8 @@ export default function LibraryPage() {
   const all = state.instances;
   const slice = state.status.instances;
   const ready = slice.kind === "ready";
+  // 300 ms 内读到就不出骨架；骨架一旦出现至少停留一段，数据早到也等满再换成卡片
+  const gate = useLoadingGate(slice.kind === "loading");
   const counts = useMemo(() => loaderCounts(all), [all]);
   const shown = useMemo(() => visibleInstances(all, view), [all, view]);
   const broken = useMemo(() => brokenInstances(all), [all]);
@@ -101,13 +104,14 @@ export default function LibraryPage() {
 
   const clearFilter = () => setView({ loader: "all", query: "" });
 
-  const subtitle = !ready ? (
-    <Skeleton shape="text" width={260} />
-  ) : all.length === 0 ? (
-    LIBRARY_COPY.subtitleEmpty
-  ) : (
-    LIBRARY_COPY.subtitle(all.length, state.sidebarPins.length, totalPlaytime(all))
-  );
+  const subtitle =
+    gate.view === "skeleton" ? (
+      <Skeleton shape="text" width={260} />
+    ) : !ready ? null : all.length === 0 ? (
+      LIBRARY_COPY.subtitleEmpty
+    ) : (
+      LIBRARY_COPY.subtitle(all.length, state.sidebarPins.length, totalPlaytime(all))
+    );
 
   return (
     <Page aria-labelledby={titleId}>
@@ -159,12 +163,13 @@ export default function LibraryPage() {
         </Banner>
       )}
 
-      {slice.kind === "loading" ? (
-        <EntranceBlock className={styles.grid} aria-busy="true" aria-label={LIBRARY_COPY.loadingLabel}>
-          {Array.from({ length: SKELETON_CARDS[tier] }, (_, i) => (
-            <SkeletonCard key={i} />
-          ))}
-        </EntranceBlock>
+      {gate.view !== "content" || slice.kind === "loading" ? (
+        <>
+          <EntranceBlock className={styles.grid} aria-busy="true" aria-label={LIBRARY_COPY.loadingLabel}>
+            {gate.view === "skeleton" && Array.from({ length: SKELETON_CARDS[tier] }, (_, i) => <SkeletonCard key={i} />)}
+          </EntranceBlock>
+          {gate.slow && <p className={styles.slowHint}>{LIBRARY_COPY.slow}</p>}
+        </>
       ) : slice.kind === "error" ? (
         <EntranceBlock>
           <EmptyState

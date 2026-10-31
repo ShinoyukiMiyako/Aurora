@@ -1,13 +1,15 @@
 // 日志与历史：左侧日志控制台（本实例有会话就看会话日志，否则看最近一次启动的留底），右侧 Mod 变更时间线。
 // 时间线上可回滚的给回滚按钮，不可回滚的如实写原因；回滚不确认，它本身会再记一条可追溯的回滚记录。
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { ACTION_ERROR, phaseLabel } from "../../copy/flows";
 import { logLineFromDto, type InstanceSummary } from "../../domain/adapt";
 import { clock, formatDate, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import type { LogLine } from "../../domain/types";
+import { useLoadingGate } from "../../lib/loading-gate";
+import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher, useNow } from "../../state/launcher";
 import { useHistory, useLastLaunchLog, useRollbackChecks } from "../../state/queries/instance";
@@ -16,7 +18,7 @@ import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
 import { EmptyState } from "../../ui/EmptyState";
-import { countLogLevels, filterLogLines, LOG_LEVEL_FILTER_LABEL, LOG_SOURCE_FILTER_LABEL, LogConsole, type LogLevelFilter, type LogSourceFilter } from "../../ui/LogConsole";
+import { countLogLevels, LOG_LEVEL_FILTER_LABEL, LOG_SOURCE_FILTER_LABEL, LogConsole, type LogLevelFilter, type LogSourceFilter } from "../../ui/LogConsole";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
@@ -24,8 +26,8 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HISTORY_KIND_LABEL, LOGS_COPY } from "./copy";
 import styles from "./instance.module.css";
 import { HISTORY_PAGE, historyItems, type HistoryItem } from "./model";
-import { lockReason, useCopy, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { lockReason, type InstanceOps } from "./ops";
+import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface LogsTabProps {
   inst: InstanceSummary;
@@ -43,50 +45,56 @@ export function LogsTab({ inst, queryId, ops }: LogsTabProps) {
 }
 
 const SKELETON_LINES = 8;
+const NO_LINES: readonly LogLine[] = [];
 
 function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
   const { state } = useLauncher();
   const now = useNow(30_000);
-  const copy = useCopy();
+  const { copyText } = useShell();
   const [level, setLevel] = useState<LogLevelFilter>("all");
   const [source, setSource] = useState<LogSourceFilter>("all");
   const session = state.session !== null && state.session.instanceId === inst.id ? state.session : null;
   const lastLog = useLastLaunchLog(session === null ? queryId : null);
+  // 留底最多 5000 行，而这张卡随启动器的任何状态变化重渲染（下载进度每 100 ms 一次）：转换结果按查询结果缓存，
+  // 行对象不变，控制台按行对象分配的键与测量缓存才不会每次整批作废
+  const lastData = lastLog.status === "ready" ? lastLog.data : null;
+  const lastLines = useMemo(() => (lastData === null ? NO_LINES : lastData.lines.map(logLineFromDto)), [lastData]);
+  const lines = session !== null ? session.logs : lastLines;
+  const counts = useMemo(() => countLogLevels(lines, source), [lines, source]);
+  const load = useModuleView(lastLog);
 
-  let lines: readonly LogLine[];
   let dropped = 0;
   let subtitle: string;
   const live = session !== null && isSessionActive(session);
   if (session !== null) {
-    lines = session.logs;
     subtitle = live ? LOGS_COPY.live(phaseLabel(session.phase, session.stopReason)) : LOGS_COPY.sessionEnded;
-  } else if (lastLog.status === "ready" && lastLog.data !== null) {
-    lines = lastLog.data.lines.map(logLineFromDto);
-    dropped = lastLog.data.omitted;
-    const ended = lastLog.data.ended;
-    subtitle = LOGS_COPY.lastLaunch(formatRelative(lastLog.data.started_at, now), ended !== null && ended.outcome === "crashed");
-  } else if (lastLog.status === "ready") {
+  } else if (load.view === "pending" || load.view === "skeleton") {
+    return (
+      <Card className={styles.console}>
+        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} />
+        {load.view === "skeleton" && <Skeleton shape="text" lines={SKELETON_LINES} />}
+        <SlowHint slow={load.slow} />
+      </Card>
+    );
+  } else if (lastLog.status === "error") {
+    return (
+      <Card className={styles.console}>
+        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} />
+        <ModuleError title={LOGS_COPY.error} error={lastLog.error} onRetry={lastLog.reload} />
+      </Card>
+    );
+  } else if (lastData !== null) {
+    dropped = lastData.omitted;
+    const ended = lastData.ended;
+    subtitle = LOGS_COPY.lastLaunch(formatRelative(lastData.started_at, now), ended !== null && ended.outcome === "crashed");
+  } else {
     return (
       <Card className={styles.console}>
         <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} subtitle={LOGS_COPY.noRecord} />
         <EmptyState compact scene="book-pen" title={LOGS_COPY.emptyTitle} body={LOGS_COPY.emptyBody} />
       </Card>
     );
-  } else {
-    return (
-      <Card className={styles.console}>
-        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} />
-        {lastLog.status === "error" ? (
-          <ModuleError title={LOGS_COPY.error} error={lastLog.error} onRetry={lastLog.reload} />
-        ) : (
-          <Skeleton shape="text" lines={SKELETON_LINES} />
-        )}
-      </Card>
-    );
   }
-
-  const counts = countLogLevels(lines, source);
-  const nothingShown = lines.length > 0 && filterLogLines(lines, level, source).length === 0;
 
   return (
     <Card padding="none" className={styles.console}>
@@ -98,10 +106,11 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
         live={live}
         level={level}
         source={source}
-        onCopy={copy}
+        onCopy={copyText}
         copyFeedbackMs={COPY_FEEDBACK_MS}
         onOpenFolder={() => ops.openFolder("logs")}
         className={styles.consoleBody}
+        filteredEmpty={LOGS_COPY.noLinesForFilter}
         filters={
           <>
             <SegmentedControl
@@ -126,7 +135,6 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
                 { value: "game", label: LOG_SOURCE_FILTER_LABEL.game },
               ]}
             />
-            {nothingShown && <span className={styles.soft}>{LOGS_COPY.noLinesForFilter}</span>}
           </>
         }
       />
@@ -145,16 +153,19 @@ function HistoryCard({ queryId, ops }: { queryId: string | null; ops: InstanceOp
   const checks = useRollbackChecks(queryId);
   const [limit, setLimit] = useState(HISTORY_PAGE);
 
-  const items = history.status === "ready" && checks.status === "ready" ? historyItems(history.data, checks.data, LOGS_COPY) : null;
+  const ready = history.status === "ready" && checks.status === "ready";
   const error = history.status === "error" ? history : checks.status === "error" ? checks : null;
+  const gate = useLoadingGate(!ready && error === null);
+  const items = ready && gate.view === "content" ? historyItems(history.data, checks.data, LOGS_COPY) : null;
   const rollbackable = items === null ? 0 : items.filter((i) => i.canRollback).length;
   const subtitle = items === null ? undefined : items.length > 0 ? LOGS_COPY.historySubtitle(items.length, rollbackable) : LOGS_COPY.historyEmptySubtitle;
 
   return (
     <Card className={styles.historyCard}>
       <CardHeader icon="history" title={LOGS_COPY.historyTitle} subtitle={subtitle} />
-      {error !== null && error.status === "error" && <ModuleError title={LOGS_COPY.historyError} error={error.error} onRetry={error.reload} />}
-      {error === null && items === null && <Skeleton shape="text" lines={4} />}
+      {gate.view === "content" && error !== null && error.status === "error" && <ModuleError title={LOGS_COPY.historyError} error={error.error} onRetry={error.reload} />}
+      {gate.view === "skeleton" && <Skeleton shape="text" lines={4} />}
+      <SlowHint slow={gate.slow} />
       {items !== null && items.length === 0 && <EmptyState compact scene="clock" title={LOGS_COPY.historyEmptyTitle} body={LOGS_COPY.historyEmptyBody} />}
       {items !== null && items.length > 0 && (
         <div className={styles.timelineScroll}>

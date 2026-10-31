@@ -10,7 +10,7 @@ import { coverLabel, LOADER_NAME } from "../../copy/flows";
 import type { Settings } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
 import { describeError } from "../../state/errors";
-import { useJavaRuntimes, type LoaderVersionDto } from "../../state/queries/catalog";
+import { useJavaRuntimes, type LoaderVersionDto, type VersionRequirementsDto } from "../../state/queries/catalog";
 import type { ResourceResult } from "../../state/resource";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -480,7 +480,8 @@ export interface ConfirmStepProps {
   loaderVersion: string | null;
   cover: InstanceCover;
   settings: Settings | null;
-  requiredJava: ResourceResult<number>;
+  /** 这个游戏版本要的 Java 主版本与全新下载的字节数。 */
+  requirements: ResourceResult<VersionRequirementsDto>;
   /** 侧栏还能再固定一个：新实例装好后会自动固定。 */
   willPin: boolean;
   openAfter: boolean;
@@ -489,7 +490,7 @@ export interface ConfirmStepProps {
   error: unknown;
 }
 
-export function ConfirmStep({ name, version, loader, loaderVersion, cover, settings, requiredJava, willPin, openAfter, onOpenAfter, error }: ConfirmStepProps) {
+export function ConfirmStep({ name, version, loader, loaderVersion, cover, settings, requirements, willPin, openAfter, onOpenAfter, error }: ConfirmStepProps) {
   const c = CREATE_COPY.confirm;
   const loaderValue = loader === "vanilla" ? c.vanilla : loaderVersion === null ? LOADER_NAME[loader] : `${LOADER_NAME[loader]} ${loaderVersion}`;
   return (
@@ -507,7 +508,13 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
             { label: c.version, value: c.versionValue(version.id, version.type) },
             { label: c.loader, value: loaderValue },
             { label: c.cover, value: coverLabel(cover.block) },
-            { label: c.java, value: settings === null ? <Skeleton shape="text" width={180} /> : <JavaValue required={requiredJava} autoDownload={settings.autoDownloadJava} /> },
+            { label: c.java, value: settings === null ? <Skeleton shape="text" width={180} /> : <JavaValue requirements={requirements} autoDownload={settings.autoDownloadJava} /> },
+            // 体积只统计游戏本体（客户端、库、资源）；有库没标大小时后端给 null，宁可不写也不写一个偏小的数
+            ...(requirements.status === "loading"
+              ? [{ label: c.download, value: <Skeleton shape="text" width={120} /> }]
+              : requirements.status === "ready" && requirements.data.download_bytes !== null
+                ? [{ label: c.download, value: <DownloadValue bytes={requirements.data.download_bytes} withLoader={loader !== "vanilla"} /> }]
+                : []),
             {
               label: c.path,
               value: settings === null ? <Skeleton shape="text" width={220} /> : <span className={styles.path}>{instancePath(settings.gameDir, name)}</span>,
@@ -528,13 +535,23 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
   );
 }
 
-function JavaValue({ required, autoDownload }: { required: ResourceResult<number>; autoDownload: boolean }) {
+function DownloadValue({ bytes, withLoader }: { bytes: number; withLoader: boolean }) {
+  const c = CREATE_COPY.confirm;
+  return (
+    <span className={styles.num}>
+      {c.downloadValue(bytes)}
+      {withLoader && <span className={styles.soft}>{c.downloadNoLoader}</span>}
+    </span>
+  );
+}
+
+function JavaValue({ requirements, autoDownload }: { requirements: ResourceResult<VersionRequirementsDto>; autoDownload: boolean }) {
   const runtimes = useJavaRuntimes();
   const c = CREATE_COPY.confirm;
-  if (required.status === "error") return <>{c.javaUnknown(describeError(required.error))}</>;
+  if (requirements.status === "error") return <>{c.javaUnknown(describeError(requirements.error))}</>;
   if (runtimes.status === "error") return <>{c.javaUnknown(describeError(runtimes.error))}</>;
-  if (required.status === "loading" || runtimes.status === "loading") return <Skeleton shape="text" width={180} />;
-  const major = required.data;
+  if (requirements.status === "loading" || runtimes.status === "loading") return <Skeleton shape="text" width={180} />;
+  const major = requirements.data.java_major;
   const installed = runtimes.data.find((j) => j.version.major === major);
   if (installed !== undefined) return <>{c.javaInstalled(major, installed.vendor)}</>;
   return <>{autoDownload ? c.javaAuto(major) : c.javaManual(major)}</>;
