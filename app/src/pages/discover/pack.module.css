@@ -1,0 +1,208 @@
+/* 弹窗页脚的挂载点：自身不成盒，挂进来的说明与按钮直接排在页脚的弹性布局里 */
+.footerHost {
+  display: contents;
+}
+
+.footNote {
+  flex: 1;
+  min-width: 0;
+  margin-right: auto;
+  overflow: hidden;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 整合包表单：方块舞台 + 名称版本 + 清单 ---- */
+.packCard {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-14);
+  min-width: 0;
+}
+
+.stageColumn {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
+.packFields {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+}
+
+.packName {
+  overflow: hidden;
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.packTags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
+.packList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.packList > li {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.packList > li > svg {
+  flex: none;
+  color: var(--sk-text-3);
+}
+
+/* ---- 换封面：4 列方块 ---- */
+.coverPanel {
+  width: 336px;
+}
+
+.coverGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sk-space-6);
+  padding: var(--sk-space-10);
+}
+
+.coverCell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  padding: var(--sk-space-6) var(--sk-space-4);
+  border: 0;
+  border-radius: var(--sk-r);
+  background: transparent;
+  color: var(--sk-text-2);
+  font: inherit;
+  cursor: pointer;
+  outline: none;
+}
+
+.coverCell:hover {
+  background: var(--sk-fill-hover);
+}
+
+.coverCell:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.coverCell[aria-checked="true"] {
+  color: var(--sk-text);
+}
+
+.coverName {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--sk-fs-micro);
+  line-height: var(--sk-lh-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coverCheck {
+  position: absolute;
+  top: var(--sk-space-2);
+  right: var(--sk-space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+  color: var(--sk-accent-ink);
+}
+
+/* ---- 本地整合包导入 ---- */
+.choose,
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-14);
+}
+
+.dropZone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-6);
+  padding: var(--sk-space-24) var(--sk-space-20);
+  border: 1px dashed var(--sk-line-2);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-bg-2);
+  color: var(--sk-text-3);
+  text-align: center;
+}
+
+.dropZone[data-state="reading"] {
+  justify-content: center;
+  min-height: 160px;
+  color: var(--sk-accent);
+}
+
+.dropTitle {
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.dropHint {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+}
+
+.pathRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  width: 100%;
+  margin-top: var(--sk-space-8);
+}
+
+.pathRow > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.readonlyVersion {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.selectable {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
