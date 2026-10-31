@@ -24,6 +24,7 @@ import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { followMockSelection } from "./config";
 import { forgetMockLaunchRecords, mockCrashReport, mockPlaySummary, renameMockLaunchRecords, takeMockPlayRecordsFailure } from "./launch";
 import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
+import { forgetMockPinnedInstance, renameMockPinnedInstance } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与上限在这里按后端各写一份。
@@ -114,6 +115,22 @@ function emptyContent(): InstanceContentDto {
   return { resource_packs: [], shader_packs: [], worlds: [] };
 }
 
+/**
+ * 版本能否直达，与后端一样只看启动参数规则；mock 没有版本 JSON，按版本号推出真实版本 JSON 里的规则：
+ * 23w14a（1.20 的快照）起有 Quick Play 的单人、多人规则；1.6 起是带 --username 的选项式启动参数，
+ * 后端改追加 --server / --port，只能加入服务器；再早的位置参数式两样都不支持。按年份编号的新版本都在 1.20 之后。
+ */
+function quickPlayOf(mc: string): InstanceDto["quick_play"] {
+  const both = { singleplayer: true, multiplayer: true };
+  const legacy = { singleplayer: false, multiplayer: true };
+  const snapshot = /^(\d{2})w(\d{2})[a-z]$/.exec(mc);
+  if (snapshot !== null) return Number(snapshot[1]) * 100 + Number(snapshot[2]) >= 2314 ? both : legacy;
+  const release = /^1\.(\d+)/.exec(mc);
+  if (release === null) return both;
+  const minor = Number(release[1]);
+  return minor >= 20 ? both : minor >= 6 ? legacy : { singleplayer: false, multiplayer: false };
+}
+
 function readyDto(
   id: string,
   mc: string,
@@ -130,6 +147,7 @@ function readyDto(
     release_type: "release",
     is_release: true,
     java_major: javaMajor,
+    quick_play: quickPlayOf(mc),
     settings_error: null,
     incomplete: null,
     created_at: createdAt,
@@ -268,6 +286,7 @@ function seedInstances(): MockInstance[] {
         release_type: null,
         is_release: false,
         java_major: null,
+        quick_play: null,
         settings_error: null,
         incomplete: {
           kind: "install",
@@ -542,6 +561,16 @@ export function addMockInstance(
   });
 }
 
+/** 别的领域 mock 要求实例存在时用：id 不安全报 invalid_argument，不存在报 version_not_installed，与后端同形。 */
+export function requireMockInstanceId(id: string): void {
+  requireInstance(id);
+}
+
+/** 实例版本的直达能力，与 list_instances 给的同一份；实例不存在报 version_not_installed，与后端启动时一致。 */
+export function mockInstanceQuickPlay(id: string): InstanceDto["quick_play"] {
+  return requireInstance(id).dto.quick_play;
+}
+
 /** 实例存档的目录名；实例不存在或损坏为 null。 */
 export function mockInstanceWorlds(id: string): string[] | null {
   if (mockInstanceFacts(id) === null) return null;
@@ -734,6 +763,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
       release_type: null,
       is_release: false,
       java_major: null,
+      quick_play: null,
       settings_error: null,
       incomplete,
       created_at: createdAt,
@@ -934,6 +964,7 @@ export const handlers: MockHandlers = {
       // 目录已不在时也清：残留的记录会被之后新建的同名实例继承
       forgetMockLaunchRecords(id);
       pins = pins.filter((pin) => pin !== id);
+      forgetMockPinnedInstance(id);
       followMockSelection(id, null);
       const lag = takeMockPlayRecordsFailure();
       if (lag !== null) throw new IpcError("play_records_failed", `实例已删除，但游玩记录没能跟着改：${lag}`, { id, causes: [lag] });
@@ -959,6 +990,7 @@ export const handlers: MockHandlers = {
       renameMockMods(id, newName);
       renameMockLaunchRecords(id, newName);
       pins = pins.map((pin) => (pin === id ? newName : pin));
+      renameMockPinnedInstance(id, newName);
       followMockSelection(id, newName);
       const lag = takeMockPlayRecordsFailure();
       if (lag !== null) {
@@ -1034,9 +1066,9 @@ interface InstancesSnapshot {
   pins: string[];
 }
 
-// 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。
+// 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。版本 2：实例多了直达能力。
 export const persist: MockPersist = {
-  version: 1,
+  version: 2,
   snapshot: (): InstancesSnapshot => ({ instances, pins }),
   restore: (data) => {
     const saved = data as InstancesSnapshot;

@@ -130,6 +130,22 @@ export const HOME_COPY = {
   copied: "已复制",
   unpin: "取消固定",
   serverMore: (name: string) => `${name} 的更多操作`,
+  join: "加入",
+  joinRunning: (instance: string) => `「${instance}」正在运行`,
+  joinLaunching: (instance: string) => `「${instance}」正在启动`,
+  joinPickerLabel: (server: string) => `选择用来加入「${server}」的实例`,
+  joinPickerTitle: "用哪个实例加入",
+  /** 实例选择里每项的版本小字；原版只写版本号。 */
+  joinVersion: (mcVersion: string, loader: string | null) => (loader === null ? mcVersion : `${mcVersion} ${loader}`),
+  /** 单选项里跟在实例名后面的版本小字。 */
+  joinVersionInline: (version: string) => `· ${version}`,
+  rememberChoice: "记住这个选择",
+  joinServer: "加入服务器",
+  switchJoinInstance: "更换加入用的实例",
+  forgetJoinInstance: "不再记住实例",
+  joinEmptyTitle: "没有能加入服务器的实例",
+  joinEmptyBody: "新建一个 1.6 以后的实例再来加入。",
+  saveJoinError: "无法保存服务器设置",
 
   // ---- 共用
   worldsError: "存档列表读不出来",

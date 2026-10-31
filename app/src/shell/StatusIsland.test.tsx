@@ -43,7 +43,7 @@ vi.mock("../ui/Button", async (orig) => {
 const T0 = 1_700_000_000_000;
 
 function session(patch: Partial<SessionState>): SessionState {
-  return { ...startSession("生存", "launch-1", { uuid: "u", name: "Steve" }, T0), ...patch };
+  return { ...startSession("生存", "launch-1", { uuid: "u", name: "Steve" }, T0, null), ...patch };
 }
 
 describe("状态岛收起态的第二段", () => {

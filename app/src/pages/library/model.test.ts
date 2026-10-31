@@ -13,6 +13,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     extraLoaders: [],
     releaseType: "release",
     javaMajor: 21,
+    quickPlay: { singleplayer: true, multiplayer: true },
     description: null,
     cover: null,
     pinned: false,

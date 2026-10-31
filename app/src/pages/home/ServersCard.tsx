@@ -3,12 +3,14 @@
 // 单台测速分不出是本机断网还是服务器宕机，后端也不另给字段，由全应用的联网状态来分：
 // 本机离线时整张卡在副标题注明「本机离线」并暂停测速，每台的信号都不下结论（不标连不上），
 // 在线人数与上次在线照旧取上一次的结果；恢复联网立即重测一次。
+// 每行的「加入」以记住的实例直接启动并进服；没记住（或记住的已不可用）时弹实例选择，可以顺手记住这次的选择。
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
-import { ACTION_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
+import { ACTION_ERROR, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
+import type { InstanceSummary } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
@@ -17,14 +19,16 @@ import { cx } from "../../lib/util";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
-import { useLauncherActions, useNow } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import { useKnownServers, usePinnedServers, useServerStatus, type KnownServerDto, type PinnedServerDto } from "../../state/queries/home";
 import type { ResourceResult } from "../../state/resource";
+import { busyInstanceId } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card, type ResponsiveValue } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
+import { Checkbox } from "../../ui/Checkbox";
 import { EmptyState } from "../../ui/EmptyState";
 import { IconButton } from "../../ui/IconButton";
 import { List, ListRow } from "../../ui/ListRow";
@@ -32,12 +36,27 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MenuButton } from "../../ui/MenuButton";
 import { Modal } from "../../ui/Modal";
 import { MoreMenu } from "../../ui/MoreMenu";
+import { Popover } from "../../ui/Popover";
+import { RADIO_MAX_OPTIONS, RADIO_MIN_OPTIONS, RadioGroup } from "../../ui/RadioGroup";
+import { Select } from "../../ui/Select";
 import { Skeleton } from "../../ui/Skeleton";
 import { Thumb } from "../../ui/Thumb";
 import { HOME_COPY } from "./copy";
 import { SKELETON_SIZE } from "./layout";
 import { useReportOnce } from "./report";
-import { SIGNAL_BARS, pinCandidates, pinMenuPlan, serverRows, type ProbeState, type ServerRow } from "./servers";
+import {
+  SIGNAL_BARS,
+  defaultJoinChoice,
+  joinCandidates,
+  joinPlan,
+  pinCandidates,
+  pinMenuPlan,
+  serverRows,
+  type BusySession,
+  type JoinPlan,
+  type ProbeState,
+  type ServerRow,
+} from "./servers";
 import s from "./home.module.css";
 
 /** 主页可见时重测延迟与人数的间隔。 */
@@ -60,6 +79,13 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const status = useServerStatus();
   const known = useKnownServers();
   const online = useOnline();
+  // 实例列表只在重扫时换引用；会话只取占着游戏进程的实例与它在加载还是运行这两个原始值，
+  // 下载进度与游戏日志每 100 ms 换一份会话，都不让这张卡重渲染
+  const instances = useLauncherSelector((st) => st.instances);
+  const selectedInstanceId = useLauncherSelector((st) => st.selectedInstanceId);
+  const busyId = useLauncherSelector(busyInstanceId);
+  const busyPhase = useLauncherSelector((st) => (busyInstanceId(st) === null || st.session === null ? null : st.session.phase === "running" ? "running" : "loading"));
+  const busy: BusySession | null = busyId === null || busyPhase === null ? null : { instanceId: busyId, phase: busyPhase };
   const gate = useLoadingGate(pinned.status === "loading");
   // 挑选弹窗打开过才挂上，之后保持挂载好播完关闭的退场。
   // 每次打开换一个 session，弹窗里「刚点过」的记录随之清空
@@ -142,6 +168,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
     }
     if (pinned.data.length === 0) return <EmptyState scene="compass" compact title={HOME_COPY.serversEmptyTitle} body={HOME_COPY.serversEmptyBody} />;
     const rows = serverRows(pinned.data, status.data, probe);
+    const candidates = joinCandidates(instances);
     return (
       <>
         <ul className={s.serverList}>
@@ -157,7 +184,13 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
                 exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
                 transition={springs.settle}
               >
-                <ServerRowView row={row} onUnpin={() => toggle({ name: row.name, address: row.address })} />
+                <ServerRowView
+                  row={row}
+                  join={joinPlan(row.instance, instances, busy)}
+                  candidates={candidates}
+                  selectedInstanceId={selectedInstanceId}
+                  onUnpin={() => toggle({ name: row.name, address: row.address, instance: row.instance })}
+                />
               </motion.li>
             ))}
           </AnimatePresence>
@@ -277,10 +310,49 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
   );
 }
 
-function ServerRowView({ row, onUnpin }: { row: ServerRow; onUnpin: () => void }) {
+interface ServerRowViewProps {
+  row: ServerRow;
+  join: JoinPlan;
+  /** 能用来加入服务器的实例，已排好序。 */
+  candidates: readonly InstanceSummary[];
+  selectedInstanceId: string | null;
+  onUnpin: () => void;
+}
+
+function ServerRowView({ row, join, candidates, selectedInstanceId, onUnpin }: ServerRowViewProps) {
   const { copyText } = useShell();
+  const actions = useLauncherActions();
+  const run = useRunner();
   const now = useNow(30_000);
   const [copied, setCopied] = useState(false);
+  // 实例选择锚在「加入」上：从「更多」菜单打开时也锚在这里。打开过才挂上，之后保持挂载好播完关闭的退场；
+  // 每次打开换一个 session，选择与「记住」都从默认值开始
+  const joinRef = useRef<HTMLSpanElement>(null);
+  const [picker, setPicker] = useState<{ session: number; open: boolean; anchor: Element; remember: boolean } | null>(null);
+  const openPicker = (remember: boolean) => {
+    const anchor = joinRef.current;
+    if (anchor === null) throw new Error("服务器行的「加入」尚未挂载");
+    setPicker((p) => ({ session: p === null ? 1 : p.session + 1, open: true, anchor, remember }));
+  };
+  const closePicker = () => setPicker((p) => (p === null ? p : { ...p, open: false }));
+
+  const quickPlay = (instanceId: string) =>
+    run(() => actions.quickPlay(instanceId, { kind: "multiplayer", address: row.address }), ACTION_ERROR.launch(instanceId));
+  const onJoin = () => {
+    if (join.kind === "direct") void quickPlay(join.instanceId);
+    else openPicker(false);
+  };
+  // 先关掉选择再启动；要记住时先存下选择，存不下就报错且不启动，免得下次「加入」又和这次不一样
+  const joinWith = async (instanceId: string, remember: boolean) => {
+    closePicker();
+    if (remember) {
+      const saved = await run(() => actions.setPinnedServerInstance(row.address, instanceId), HOME_COPY.saveJoinError);
+      if (!saved.ok) return;
+    }
+    await quickPlay(instanceId);
+  };
+  const forget = () => void run(() => actions.setPinnedServerInstance(row.address, null), HOME_COPY.saveJoinError);
+  const joinBlocked = join.kind === "busy" ? (join.phase === "running" ? HOME_COPY.joinRunning(join.instanceId) : HOME_COPY.joinLaunching(join.instanceId)) : undefined;
 
   useEffect(() => {
     if (!copied) return;
@@ -293,6 +365,15 @@ function ServerRowView({ row, onUnpin }: { row: ServerRow; onUnpin: () => void }
     void copyText(row.address).then((written) => {
       if (written) setCopied(true);
     });
+
+  const menu: MenuEntry[] = [{ label: copied ? HOME_COPY.copied : HOME_COPY.copyAddress, icon: copied ? "check" : "copy", hint: row.address, onSelect: copy }];
+  if (row.instance !== null) {
+    menu.push(
+      { label: HOME_COPY.switchJoinInstance, icon: "switch", hint: row.instance, onSelect: () => openPicker(true) },
+      { label: HOME_COPY.forgetJoinInstance, icon: "x", onSelect: forget },
+    );
+  }
+  menu.push({ kind: "separator" }, { label: HOME_COPY.unpin, icon: "pin-off", onSelect: onUnpin });
 
   const signal = row.signal;
   const lit = signal.kind === "online" ? signal.bars : 0;
@@ -329,15 +410,110 @@ function ServerRowView({ row, onUnpin }: { row: ServerRow; onUnpin: () => void }
           </span>
         )}
       </span>
-      <MoreMenu
-        size="sm"
-        label={HOME_COPY.serverMore(row.name)}
-        items={[
-          { label: copied ? HOME_COPY.copied : HOME_COPY.copyAddress, icon: copied ? "check" : "copy", hint: row.address, onSelect: copy },
-          { kind: "separator" },
-          { label: HOME_COPY.unpin, icon: "pin-off", onSelect: onUnpin },
-        ]}
-      />
+      <span ref={joinRef} className={s.serverJoin}>
+        <Button variant="secondary" size="sm" disabledReason={joinBlocked} onClick={onJoin}>
+          {HOME_COPY.join}
+        </Button>
+      </span>
+      <MoreMenu size="sm" label={HOME_COPY.serverMore(row.name)} items={menu} />
+      {picker !== null && (
+        <JoinPicker
+          key={picker.session}
+          open={picker.open}
+          anchor={picker.anchor}
+          server={row.name}
+          candidates={candidates}
+          selectedInstanceId={selectedInstanceId}
+          rememberDefault={picker.remember}
+          onJoin={(instanceId, remember) => void joinWith(instanceId, remember)}
+          onClose={closePicker}
+        />
+      )}
     </>
+  );
+}
+
+interface JoinPickerProps {
+  open: boolean;
+  anchor: Element;
+  server: string;
+  candidates: readonly InstanceSummary[];
+  selectedInstanceId: string | null;
+  rememberDefault: boolean;
+  onJoin: (instanceId: string, remember: boolean) => void;
+  onClose: () => void;
+}
+
+/** 选用哪个实例加入：只列能加入服务器的实例；一个都没有时换成紧凑空状态，不给复选框与主按钮。 */
+function JoinPicker({ open, anchor, server, candidates, selectedInstanceId, rememberDefault, onJoin, onClose }: JoinPickerProps) {
+  const [choice, setChoice] = useState<string | null>(() => defaultJoinChoice(candidates, selectedInstanceId));
+  const [remember, setRemember] = useState(rememberDefault);
+  // 开着的时候实例列表可能变了（被删除、开始安装）：选中的那一项不在候选里就退回默认
+  const current = choice !== null && candidates.some((c) => c.id === choice) ? choice : defaultJoinChoice(candidates, selectedInstanceId);
+  return (
+    <Popover open={open} anchor={anchor} onClose={onClose} placement="bottom-end" autoFocus aria-label={HOME_COPY.joinPickerLabel(server)} className={s.joinPanel}>
+      {current === null ? (
+        <EmptyState icon="server" compact title={HOME_COPY.joinEmptyTitle} body={HOME_COPY.joinEmptyBody} />
+      ) : (
+        <div className={s.joinBody}>
+          <span className={s.joinTitle}>{HOME_COPY.joinPickerTitle}</span>
+          <JoinChoice candidates={candidates} value={current} onChange={setChoice} />
+          <Checkbox checked={remember} onChange={setRemember} label={HOME_COPY.rememberChoice} />
+          <div className={s.joinFoot}>
+            <Button variant="primary" size="sm" onClick={() => onJoin(current, remember)}>
+              {HOME_COPY.joinServer}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Popover>
+  );
+}
+
+function versionLine(inst: InstanceSummary): string | null {
+  if (inst.mcVersion === null) return null;
+  return HOME_COPY.joinVersion(inst.mcVersion, inst.loader === "vanilla" ? null : LOADER_NAME[inst.loader]);
+}
+
+/**
+ * 候选的单选：单选组只收 2 到 6 项，所以只有一个候选时直接写明用它，7 个以上改用下拉选择（与单选组的用法约定一致）。
+ */
+function JoinChoice({ candidates, value, onChange }: { candidates: readonly InstanceSummary[]; value: string; onChange: (id: string) => void }) {
+  if (candidates.length < RADIO_MIN_OPTIONS) {
+    const only = candidates[0];
+    const version = versionLine(only);
+    return (
+      <span className={s.joinOption}>
+        <span className={s.ellipsis}>{only.name}</span>
+        {version !== null && <span className={s.joinVersion}>{HOME_COPY.joinVersionInline(version)}</span>}
+      </span>
+    );
+  }
+  if (candidates.length > RADIO_MAX_OPTIONS) {
+    const options = candidates.map((inst) => {
+      const version = versionLine(inst);
+      return version === null ? { value: inst.id, label: inst.name } : { value: inst.id, label: inst.name, hint: version };
+    });
+    return <Select size="sm" block value={value} onChange={onChange} options={options} ariaLabel={HOME_COPY.joinPickerTitle} />;
+  }
+  return (
+    <RadioGroup
+      className={s.joinList}
+      value={value}
+      onChange={onChange}
+      ariaLabel={HOME_COPY.joinPickerTitle}
+      options={candidates.map((inst) => {
+        const version = versionLine(inst);
+        return {
+          value: inst.id,
+          label: (
+            <span className={s.joinOption}>
+              <span className={s.ellipsis}>{inst.name}</span>
+              {version !== null && <span className={s.joinVersion}>{HOME_COPY.joinVersionInline(version)}</span>}
+            </span>
+          ),
+        };
+      })}
+    />
   );
 }

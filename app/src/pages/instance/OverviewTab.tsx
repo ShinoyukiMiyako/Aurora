@@ -11,6 +11,7 @@ import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, per
 import { needsReimport } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
+import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
@@ -46,7 +47,20 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
-import { chosenRuntime, modRows, modTotals, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
+import {
+  chosenRuntime,
+  enterWorldBlock,
+  modRows,
+  modTotals,
+  overviewBanner,
+  peekLayout,
+  peekPerRow,
+  sortWorlds,
+  weeklyHours,
+  worldName,
+  WORLDS_PREVIEW,
+  type ModRow,
+} from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -76,7 +90,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
       {banner === "installing" && view.kind === "installing" && <InstallingBanner instanceId={inst.id} />}
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div className={styles.overviewGrid}>
-        <WorldsCard content={content} ops={ops} />
+        <WorldsCard inst={inst} view={view} content={content} ops={ops} />
         <InfoCard inst={inst} queryId={queryId} onTab={onTab} />
         <ModsPeekCard inst={inst} mods={mods} updates={updates} ops={ops} onTab={onTab} />
         <PacksCard inst={inst} content={content} />
@@ -266,8 +280,15 @@ const MODE_TILE: Readonly<Record<keyof typeof MODE_LABEL, WorldMode | null>> = {
   spectator: null,
 };
 
-function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
+function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view: LaunchView; content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
   const now = useNow(30_000);
+  // 不经 useLaunch：它按片订阅的启动视图随下载进度变，页面传进来的 view 只在阶段变化时变，存档行用它就够了
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const block = enterWorldBlock(inst, view.kind);
+  const enterReason = block === null ? undefined : OVERVIEW_COPY.enterWorldBlocked[block];
+  // 直达按世界文件夹名：level.dat 里的世界名可以重名，也可以和文件夹名不同
+  const enter = (dirName: string) => void run(() => actions.quickPlay(inst.id, { kind: "singleplayer", world_dir_name: dirName }), ACTION_ERROR.launch(inst.name));
   const [expanded, setExpanded] = useState(false);
   const load = useModuleView(content);
   const worlds = content.status === "ready" ? sortWorlds(content.data.worlds) : [];
@@ -318,7 +339,8 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
                       )}
                     </span>
                   </div>
-                  <span className={styles.rowMeta}>{formatBytes(w.size_bytes)}</span>
+                  <span className={cx(styles.rowMeta, styles.worldSize)}>{formatBytes(w.size_bytes)}</span>
+                  <IconButton icon="play" label={OVERVIEW_COPY.enterWorld(name)} size="sm" disabledReason={enterReason} onClick={() => enter(w.dir_name)} />
                   <IconButton icon="folder" label={OVERVIEW_COPY.openWorld(name)} size="sm" onClick={() => ops.openFolder("world", w.dir_name)} />
                 </li>
               );

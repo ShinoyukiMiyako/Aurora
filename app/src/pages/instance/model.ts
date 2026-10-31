@@ -118,6 +118,24 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
   return null;
 }
 
+// ---------------------------------------------------------------- 存档直达
+
+export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "launching" | "running";
+
+/**
+ * 存档行「进入」此刻为什么不能点；能点为 null。自上而下取第一条：实例自身的状态先于版本能力，版本能力先于这一局的会话。
+ * 另一个实例占着游戏进程时照常能点，由启动拦截弹替换确认。
+ */
+export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPlay">, view: LaunchViewKind): EnterWorldBlock | null {
+  if (inst.status === "installing") return "installing";
+  if (inst.status === "broken") return "broken";
+  if (inst.quickPlay === null) return "unknownVersion";
+  if (!inst.quickPlay.singleplayer) return "legacy";
+  if (view === "loading") return "launching";
+  if (view === "running") return "running";
+  return null;
+}
+
 // ---------------------------------------------------------------- 新建与导入还没装好
 
 /** 新建实例与导入整合包：它们的任务挂在一个还没装好的实例名下。补全不在其中，补全的实例原本就装好过、内容都在。 */

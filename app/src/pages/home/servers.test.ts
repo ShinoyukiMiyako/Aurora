@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { KnownServerDto, ServerStatusDto } from "../../state/queries/home";
 import { MENU_MAX_ACTIONS } from "../../ui/Menu";
-import { pinCandidates, pinMenuPlan, serverRows, signalBars, signalQuality } from "./servers";
+import { canJoinWith, defaultJoinChoice, joinCandidates, joinPlan, pinCandidates, pinMenuPlan, serverRows, signalBars, signalQuality } from "./servers";
+import { summary } from "./test-data";
 
 function status(address: string, overrides: Partial<ServerStatusDto> = {}): ServerStatusDto {
   return {
@@ -33,9 +34,9 @@ describe("信号格", () => {
 
 describe("服务器行", () => {
   const pinned = [
-    { name: "晨星", address: "play.example" },
-    { name: "小镇", address: "town.example:25570" },
-    { name: "新加的", address: "new.example" },
+    { name: "晨星", address: "play.example", instance: "生存" },
+    { name: "小镇", address: "town.example:25570", instance: null },
+    { name: "新加的", address: "new.example", instance: null },
   ];
 
   it("按地址对位：连通的给信号与在线人数，连不上的记得上次在线，还没测的是测速中", () => {
@@ -48,6 +49,8 @@ describe("服务器行", () => {
       "live",
     );
     expect(rows.map((r) => r.name)).toEqual(["晨星", "小镇", "新加的"]);
+    // 记住的实例原样带到行上，「加入」据此决定直接启动还是弹实例选择
+    expect(rows.map((r) => r.instance)).toEqual(["生存", null, null]);
     expect(rows[0].signal).toEqual({ kind: "online", latencyMs: 186, bars: 2, quality: "fair" });
     expect(rows[0].population).toEqual({ kind: "online", online: 25_000, max: 200_000 });
     expect(rows[1].signal).toEqual({ kind: "unreachable" });
@@ -110,8 +113,8 @@ describe("固定服务器菜单的候选项", () => {
       { name: "小镇", address: "town.example", pinned: false },
     ];
     expect(pinCandidates(known)).toEqual([
-      { name: "本地", address: "localhost" },
-      { name: "小镇", address: "town.example" },
+      { name: "本地", address: "localhost", instance: null },
+      { name: "小镇", address: "town.example", instance: null },
     ]);
   });
 
@@ -124,7 +127,7 @@ describe("固定服务器菜单的候选项", () => {
   });
 
   it("加号菜单：放得下就全部直接列出；多一台就列前面几台，留最后一项给「全部 N 台」，可操作项恰好到上限", () => {
-    const servers = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `服${i}`, address: `s${i}.example` }));
+    const servers = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `服${i}`, address: `s${i}.example`, instance: null }));
     expect(pinMenuPlan([])).toEqual({ inline: [], overflow: null });
     expect(pinMenuPlan(servers(MENU_MAX_ACTIONS))).toEqual({ inline: servers(MENU_MAX_ACTIONS), overflow: null });
     const over = pinMenuPlan(servers(MENU_MAX_ACTIONS + 1));
@@ -136,5 +139,61 @@ describe("固定服务器菜单的候选项", () => {
       const plan = pinMenuPlan(servers(n));
       expect([plan.inline.length, plan.overflow]).toEqual([MENU_MAX_ACTIONS - 1, n]);
     }
+  });
+});
+
+describe("加入服务器用的实例", () => {
+  const both = { singleplayer: true, multiplayer: true };
+  const instances = [
+    summary("没玩过", { quickPlay: both, lastPlayedAt: null }),
+    summary("旧版", { mcVersion: "1.12.2", quickPlay: { singleplayer: false, multiplayer: true }, lastPlayedAt: 300 }),
+    summary("太老", { mcVersion: "1.5.2", quickPlay: { singleplayer: false, multiplayer: false }, lastPlayedAt: 900 }),
+    summary("坏了", { status: "broken", brokenReason: "缺少版本 JSON", quickPlay: null, lastPlayedAt: 800 }),
+    summary("安装中", { status: "installing", quickPlay: null }),
+    summary("最近", { quickPlay: both, lastPlayedAt: 500 }),
+    summary("也没玩过", { quickPlay: both, lastPlayedAt: null }),
+  ];
+
+  it("只有就绪且版本支持加入服务器的才算", () => {
+    expect(instances.map((i) => [i.id, canJoinWith(i)])).toEqual([
+      ["没玩过", true],
+      ["旧版", true],
+      ["太老", false],
+      ["坏了", false],
+      ["安装中", false],
+      ["最近", true],
+      ["也没玩过", true],
+    ]);
+    expect(canJoinWith(summary("读不出版本", { quickPlay: null }))).toBe(false);
+  });
+
+  it("候选按上次游玩倒序，没玩过的在后且保持列表顺序", () => {
+    expect(joinCandidates(instances).map((i) => i.id)).toEqual(["最近", "旧版", "没玩过", "也没玩过"]);
+    expect(joinCandidates([])).toEqual([]);
+  });
+
+  it("默认选中当前选中的实例（它在候选里时），否则第一项；没有候选为 null", () => {
+    const candidates = joinCandidates(instances);
+    expect(defaultJoinChoice(candidates, "没玩过")).toBe("没玩过");
+    expect(defaultJoinChoice(candidates, "太老")).toBe("最近");
+    expect(defaultJoinChoice(candidates, null)).toBe("最近");
+    expect(defaultJoinChoice([], "最近")).toBeNull();
+  });
+
+  it("记住的实例可用就直接加入；正在启动或运行时带原因禁用；别的实例在跑不影响", () => {
+    expect(joinPlan("旧版", instances, null)).toEqual({ kind: "direct", instanceId: "旧版" });
+    expect(joinPlan("旧版", instances, { instanceId: "最近", phase: "running" })).toEqual({ kind: "direct", instanceId: "旧版" });
+    expect(joinPlan("旧版", instances, { instanceId: "旧版", phase: "loading" })).toEqual({ kind: "busy", instanceId: "旧版", phase: "loading" });
+    expect(joinPlan("最近", instances, { instanceId: "最近", phase: "running" })).toEqual({ kind: "busy", instanceId: "最近", phase: "running" });
+  });
+
+  it("没记住、记住的已不在、损坏、在安装、版本不支持：都按没记住弹实例选择", () => {
+    for (const remembered of [null, "已删除", "坏了", "安装中", "太老"]) {
+      expect(joinPlan(remembered, instances, null)).toEqual({ kind: "pick" });
+    }
+    // 记住的 id 按字符串精确比对，与后端改名、删除时同步绑定的口径一致
+    const named = [summary("Survival", { quickPlay: both })];
+    expect(joinPlan("survival", named, null)).toEqual({ kind: "pick" });
+    expect(joinPlan("Survival", named, null)).toEqual({ kind: "direct", instanceId: "Survival" });
   });
 });

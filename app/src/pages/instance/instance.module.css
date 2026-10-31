@@ -300,6 +300,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 最窄一档里存档行先让出大小列，「进入」与「打开文件夹」两个图标钮始终保留 */
+:root[data-sk-tier="compact"] .worldSize {
+  display: none;
+}
+
 .rowActions {
   display: flex;
   flex: none;

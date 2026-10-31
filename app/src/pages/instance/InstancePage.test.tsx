@@ -1438,6 +1438,106 @@ describe("实例详情：崩溃诊断", () => {
   });
 });
 
+describe("实例详情：存档直达", () => {
+  const playButton = (name: string) => {
+    const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === `进入「${name}」`);
+    if (found === undefined) throw new Error(`找不到「进入「${name}」」`);
+    return found;
+  };
+  /** 悬停后关联的提示气泡里的文字；没有关联气泡时报错。 */
+  const hoverTip = async (el: HTMLButtonElement): Promise<string> => {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error(`「${el.getAttribute("aria-label")}」悬停后没有关联提示气泡`);
+    const tip = document.getElementById(tipId);
+    if (tip === null) throw new Error("提示气泡不在文档里");
+    return textOf(tip);
+  };
+
+  it("「进入」以世界文件夹名直达：launch_game 的 quickPlay 是 singleplayer 加文件夹名，不是 level 里的世界名", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    await open("overview");
+    click(playButton("新世界"));
+    await flush();
+    const calls = callsOf(ipc, "launch_game");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ versionId: ID, offlineName: null });
+    expect(calls[0].quickPlay).toEqual({ kind: "singleplayer", world_dir_name: "w2" });
+    expect(launcher.state.session).toMatchObject({ instanceId: ID, quickPlay: { kind: "singleplayer", world_dir_name: "w2" } });
+  });
+
+  it("1.20 之前的版本：「进入」可聚焦但 aria-disabled，悬停写明原因，点了不启动；打开文件夹照常", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, mc_version: "1.12.2", quick_play: { singleplayer: false, multiplayer: true } } : i));
+    await open("overview");
+    const play = playButton("新世界");
+    expect(play.disabled).toBe(false);
+    expect(play.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverTip(play)).toContain("1.20 之前的版本不能直接进入存档");
+    click(play);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(launcher.state.session).toBeNull();
+    const folder = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === "打开「新世界」所在文件夹");
+    expect(folder?.getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("读不出版本信息：每行都写「这个实例的版本信息不完整」", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, quick_play: null } : i));
+    await open("overview");
+    for (const name of ["新世界", "旧世界"]) {
+      expect(playButton(name).getAttribute("aria-disabled")).toBe("true");
+      expect(await hoverTip(playButton(name))).toContain("这个实例的版本信息不完整");
+    }
+  });
+
+  it("本实例在启动、在运行：分别写「正在启动这个实例」「游戏正在运行」，点了不再发 launch_game", async () => {
+    const launched = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => launched.promise);
+    await open("overview");
+    click(playButton("新世界"));
+    await flush();
+    expect(await hoverTip(playButton("旧世界"))).toContain("正在启动这个实例");
+    click(playButton("旧世界"));
+    launched.resolve({ pid: 1 });
+    await flush();
+    expect(await hoverTip(playButton("旧世界"))).toContain("游戏正在运行");
+    click(playButton("旧世界"));
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+  });
+
+  it("另一个实例在运行：「进入」照常可点，走替换确认，确认里带着这次的 quickPlay", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    const play = playButton("旧世界");
+    expect(play.getAttribute("aria-disabled")).toBeNull();
+    click(play);
+    await flush();
+    expect(launcher.state.launchPrompt).toEqual({ instanceId: ID, occupantId: "创造", occupantPhase: "running", quickPlay: { kind: "singleplayer", world_dir_name: "w1" } });
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["创造"]);
+  });
+
+  it("直达失败（存档已被移走）：外层报「无法启动」类错误，正文是后端原文，会话回到启动前", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("world_not_found", `实例 ${ID} 里没有存档 w2`, { version_id: ID, world: "w2" });
+    });
+    await open("overview");
+    click(playButton("新世界"));
+    await flush();
+    expect(launcher.state.session).toBeNull();
+    expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body])).toEqual([[`「${ID}」启动失败`, `实例 ${ID} 里没有存档 w2`]]);
+  });
+});
+
 function report(diagnoses: { category: CrashReportDto["diagnoses"][number]["category"]; detail?: string }[], at: number): CrashReportDto {
   return {
     at,
