@@ -83,6 +83,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
     actions.toast("info", copy.title, copy.body);
   };
 
+  // 禁用原因走菜单项的悬停提示气泡，与实例页头图菜单一致：右侧提示位与标签同一行、不折行，放原因会把标签挤成省略号
   const menu: MenuEntry[] = [
     { label: LIBRARY_COPY.menu.open, icon: "arrow-right", onSelect: () => open() },
     {
@@ -95,14 +96,14 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       label: inst.pinned ? LIBRARY_COPY.menu.unpin : LIBRARY_COPY.menu.pin,
       icon: inst.pinned ? "pin-off" : "pin",
       disabled: !pinAllowed,
-      hint: pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
+      disabledReason: pinAllowed ? undefined : LIBRARY_COPY.menu.pinFull,
       onSelect: () => void togglePin(),
     },
     {
       label: LIBRARY_COPY.menu.openFolder,
       icon: "folder",
       disabled: inst.placeholder,
-      hint: inst.placeholder ? LIBRARY_COPY.menu.folderPending : undefined,
+      disabledReason: inst.placeholder ? LIBRARY_COPY.menu.folderPending : undefined,
       onSelect: () => void run(() => actions.openFolder("instance", id), ACTION_ERROR.openFolder),
     },
     { kind: "separator" },
@@ -125,7 +126,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       icon: "trash",
       danger: true,
       disabled: deleteReason !== undefined,
-      hint: deleteReason,
+      disabledReason: deleteReason,
       onSelect: () => void deleteInstance(inst),
     },
   ];

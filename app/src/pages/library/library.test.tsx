@@ -105,6 +105,19 @@ const cardNames = () => [...document.querySelectorAll<HTMLButtonElement>("articl
 const createTile = () => [...document.querySelectorAll("section button")].find((b) => b.textContent === LIBRARY_COPY.createTileTitle + LIBRARY_COPY.createTileBody);
 const toastTitles = () => launcher.state.toasts.map((t) => `${t.tone}:${t.title}`);
 const menuItem = (text: string) => byText<HTMLElement>('[role="menuitem"]', text);
+
+/** 菜单项悬停后关联的提示气泡写着什么：禁用原因不占标签，放在气泡里。 */
+async function reasonOf(item: HTMLElement): Promise<string | null | undefined> {
+  act(() => {
+    item.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  const tipId = item.getAttribute("aria-describedby");
+  if (tipId === null) throw new Error(`「${item.textContent}」悬停后没有关联提示气泡`);
+  return document.getElementById(tipId)?.textContent;
+}
 const dialogButton = (text: string) => byText<HTMLButtonElement>('[role="dialog"] button', text);
 
 beforeEach(() => {
@@ -390,8 +403,9 @@ describe("实例库：动作", () => {
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
     expect(toastTitles()).toEqual([`warning:${TOAST_COPY.pinLimit}`]);
     click(byLabel("「f」的更多操作"));
-    const item = menuItem(LIBRARY_COPY.menu.pin + LIBRARY_COPY.menu.pinFull);
+    const item = menuItem(LIBRARY_COPY.menu.pin);
     expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(item)).toBe(LIBRARY_COPY.menu.pinFull);
   });
 
   it("设为当前实例：写配置并通知；之后卡片标出「当前」、菜单项禁用", async () => {
@@ -455,6 +469,12 @@ describe("实例库：动作", () => {
       await settle();
     });
     click(byLabel("「周末生存」的更多操作"));
+    // 还没开始安装、磁盘上没有目录：打开文件夹只写标签并禁用，原因在悬停气泡里，点了不发起
+    const folder = menuItem(LIBRARY_COPY.menu.openFolder);
+    expect(folder.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(folder)).toBe(LIBRARY_COPY.menu.folderPending);
+    click(folder);
+    expect(callsOf(ipc, "open_folder")).toEqual([]);
     click(menuItem(LIBRARY_COPY.menu.remove));
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
@@ -511,16 +531,18 @@ describe("实例库：动作", () => {
     const other = byText<HTMLButtonElement>("article button", "樱花生存").closest("article");
     expect(other?.textContent).toContain("另一个游戏在运行");
     click(byLabel("「原版」的更多操作"));
-    const remove = menuItem(`${LIBRARY_COPY.menu.remove}游戏正在运行，先结束游戏`);
+    const remove = menuItem(LIBRARY_COPY.menu.remove);
     expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(remove)).toBe("游戏正在运行，先结束游戏");
   });
 
   it("后端正在改动 Mod、资源或设置：删除入口提前禁用并写明原因，不发预览与删除", async () => {
     instances = instances.map((i) => (i.id === "原版" ? { ...i, activity: "modifying" } : i));
     await mount();
     click(byLabel("「原版」的更多操作"));
-    const remove = menuItem(`${LIBRARY_COPY.menu.remove}正在改动这个实例的 Mod、资源或设置，完成后才能删除`);
+    const remove = menuItem(LIBRARY_COPY.menu.remove);
     expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(remove)).toBe("正在改动这个实例的 Mod、资源或设置，完成后才能删除");
     click(remove);
     await flush();
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
