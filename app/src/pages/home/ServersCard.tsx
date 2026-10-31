@@ -4,12 +4,13 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { serverHue } from "../../art/illustrations/seed";
-import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR } from "../../copy/flows";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { fade, springs } from "../../lib/motion";
 import { cx } from "../../lib/util";
+import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import { useLauncher, useNow } from "../../state/launcher";
@@ -157,7 +158,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 }
 
 function ServerRowView({ row, onUnpin }: { row: ServerRow; onUnpin: () => void }) {
-  const run = useRunner();
+  const { copyText } = useShell();
   const now = useNow(30_000);
   const [copied, setCopied] = useState(false);
 
@@ -167,11 +168,11 @@ function ServerRowView({ row, onUnpin }: { row: ServerRow; onUnpin: () => void }
     return () => clearTimeout(timer);
   }, [copied]);
 
+  // 失败时外壳已经弹过「复制失败」，这里只是不换成「已复制」
   const copy = () =>
-    void run(async () => {
-      await navigator.clipboard.writeText(row.address);
-      setCopied(true);
-    }, TOAST_COPY.copyFailed);
+    void copyText(row.address).then((written) => {
+      if (written) setCopied(true);
+    });
 
   const signal = row.signal;
   const lit = signal.kind === "online" ? signal.bars : 0;

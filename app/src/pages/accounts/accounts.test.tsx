@@ -18,6 +18,8 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
+/** 假时钟会接管 setImmediate；等未处理的拒绝上报要用真的那一个。 */
+const realSetImmediate = setImmediate;
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -377,6 +379,30 @@ describe("账户页：复制 UUID", () => {
     await openMenu("Steve 的更多操作");
     await chooseMenuItem("复制 UUID");
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "复制失败", "Document is not focused."]]);
+  });
+
+  it("聚光卡的复制按钮遇到剪贴板被拒绝：只报一次「复制失败」，按钮不显示「已复制」，也不留下未处理的拒绝", async () => {
+    net.clipboard.writeText.mockImplementation(() => Promise.reject(new Error("Document is not focused.")));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const unhandled = vi.fn();
+    process.on("unhandledRejection", unhandled);
+    try {
+      await mount();
+      const spot = page().querySelector("section") as HTMLElement;
+      await click(spot.querySelector('button[aria-label="复制 UUID"]') as HTMLButtonElement);
+      await flush();
+      expect(net.clipboard.writeText).toHaveBeenCalledTimes(1);
+      expect(spot.querySelector('button[aria-label="已复制"]')).toBeNull();
+      expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "复制失败", "Document is not focused."]]);
+      // 未处理的拒绝在下一轮事件循环才上报
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+        await new Promise<void>((resolve) => realSetImmediate(resolve));
+      });
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off("unhandledRejection", unhandled);
+    }
   });
 
   it("聚光卡的复制按钮原位换成「已复制」，2000 ms 后复原", async () => {

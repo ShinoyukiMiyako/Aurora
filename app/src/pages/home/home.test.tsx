@@ -419,6 +419,20 @@ describe("主页：固定的服务器", () => {
     expect(menuItems().some((el) => el.textContent?.startsWith("复制地址"))).toBe(true);
   });
 
+  it("复制地址被剪贴板拒绝：只弹一次「复制失败」带原因，菜单项不换成「已复制」", async () => {
+    writeText.mockImplementation(async () => {
+      throw new Error("Document is not focused.");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    click(menuItem("复制地址"));
+    await flush();
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "复制失败", "Document is not focused."]]);
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItem("复制地址").textContent).toBe("复制地址play.example");
+  });
+
   it("主页可见时每 60 秒重测一次", async () => {
     await mount();
     const before = callsOf(ipc, "ping_servers").length;
