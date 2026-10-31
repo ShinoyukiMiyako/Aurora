@@ -699,8 +699,17 @@ function countUnseen(tasks: readonly Task[], unseen: readonly string[]): number 
 /** 活动任务对一个已扫描实例的影响：整个目录在写（安装中），或者只在改动 Mod 与资源。 */
 type TaskEffect = "installing" | "modifying" | null;
 
-function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEffect): InstanceSummary {
-  if (effect === "installing") return { ...base, pinned, status: "installing", brokenReason: null };
+type CreationMeta = Extract<TaskMeta, { type: "create" | "modpack" }>;
+
+/**
+ * creation：正在新建或导入这个实例的任务的入队上下文。装到一半被重扫扫到的半成品目录还没写版本 JSON，
+ * 扫出来既没有版本也没有加载器；这时沿用入队时的内容，与占位项说的一致，不写成「原版 · 版本未知」。
+ */
+function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEffect, creation: CreationMeta | null): InstanceSummary {
+  if (effect === "installing") {
+    const facts = creation !== null && base.mcVersion === null ? { mcVersion: creation.mcVersion, loader: creation.loader, loaderVersion: creation.loaderVersion } : {};
+    return { ...base, ...facts, pinned, status: "installing", brokenReason: null };
+  }
   // 列表是任务开始前扫的，后端那时还没记下占用；后端报的活动（例如运行中）比前端推断的更准，留着它。
   if (effect === "modifying") return { ...base, pinned, activity: base.activity === null ? "modifying" : base.activity };
   return { ...base, pinned };
@@ -755,7 +764,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
 class StateDeriver {
   private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; landing: RawState["landing"]; activeKey: string } | null = null;
   private lastView: InstancesView | null = null;
-  private scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; value: InstanceSummary }>();
+  private scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; creation: CreationMeta | null; value: InstanceSummary }>();
   private placeholderCache = new Map<string, { meta: TaskMeta; createdAt: number; pinned: boolean; value: InstanceSummary }>();
 
   derive(raw: RawState): LauncherState {
@@ -812,21 +821,26 @@ class StateDeriver {
   private compute(raw: RawState, active: readonly Task[]): InstancesView {
     const installing = new Set<string>();
     const modifying = new Set<string>();
+    const creating = new Map<string, CreationMeta>();
     for (const t of active) {
       if (t.instanceId === null) continue;
       (INSTANCE_TASKS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
+      const meta = raw.taskMeta[t.id];
+      if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
-    const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; value: InstanceSummary }>();
+    const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; creation: CreationMeta | null; value: InstanceSummary }>();
     const instances: InstanceSummary[] = raw.scanned.map((base) => {
       const key = base.id.toLowerCase();
       const effect: TaskEffect = installing.has(key) ? "installing" : modifying.has(key) ? "modifying" : null;
       const pinned = raw.pins.includes(base.id);
+      const found = creating.get(key);
+      const creation = found === undefined ? null : found;
       const cached = this.scannedCache.get(base.id);
       const value =
-        cached !== undefined && cached.base === base && cached.pinned === pinned && cached.effect === effect
+        cached !== undefined && cached.base === base && cached.pinned === pinned && cached.effect === effect && cached.creation === creation
           ? cached.value
-          : applyTaskEffect(base, pinned, effect);
-      scannedCache.set(base.id, { base, pinned, effect, value });
+          : applyTaskEffect(base, pinned, effect, creation);
+      scannedCache.set(base.id, { base, pinned, effect, creation, value });
       return value;
     });
     this.scannedCache = scannedCache;

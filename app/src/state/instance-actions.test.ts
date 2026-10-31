@@ -642,6 +642,45 @@ describe("新建与导入结束后，占位项留到这次结束触发的重扫�
   });
 });
 
+describe("装到一半被重扫扫到半成品目录", () => {
+  it("扫描项缺版本信息时沿用入队时的版本与加载器；装好重扫后换成扫描到的真实内容", async () => {
+    const install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    stubInstanceSettings();
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass" });
+    await settle();
+    // 后端建好了目录、还没写版本 JSON：扫出来没有版本、没有加载器
+    instances = [...instances, instanceDto("新世界", { status: "broken", mc_version: null, loaders: [], activity: "installing" })];
+    await store.actions.reload("instances");
+    await settle();
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({
+      placeholder: false,
+      status: "installing",
+      mcVersion: "1.21.1",
+      loader: "fabric",
+      loaderVersion: "0.16.10",
+    });
+
+    instances = instances.map((i) => (i.id === "新世界" ? instanceDto("新世界", { mc_version: "1.21.1", loaders: [{ kind: "fabric", version: "0.16.11" }] }) : i));
+    install.resolve({ id: "新世界" });
+    await settle();
+    // 装好后以盘上为准：这里故意让扫描结果的加载器版本与入队时不同
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ status: "ready", mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.11" });
+  });
+
+  it("补全中的实例扫不出版本时不套用别的任务的内容", async () => {
+    const repair = deferred<unknown>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    instances = instances.map((i) => (i.id === "生存" ? instanceDto("生存", { status: "broken", broken_reason: "缺少版本 JSON", mc_version: null, loaders: [] }) : i));
+    await store.actions.reload("instances");
+    await settle();
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(store.getState().instances.find((i) => i.id === "生存")).toMatchObject({ status: "installing", mcVersion: null, loader: "vanilla" });
+  });
+});
+
 describe("删除还在安装的新建实例", () => {
   const spec = { name: "新世界", mcVersion: "1.21.1", loader: "vanilla" as const, loaderVersion: null, cover: "grass" };
   let install: Deferred<{ id: string }>;
