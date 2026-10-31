@@ -319,6 +319,9 @@ const TASK_COMMANDS = new Set([
 
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
 
+/** load_task_journal 在日志文件损坏或版本不符时的错误码。 */
+const TASK_JOURNAL_INVALID_CODE = "task_journal_invalid";
+
 const RESOURCE_KIND: Readonly<Record<InstallableResourceType, TaskKind>> = {
   mod: "mod",
   resource_pack: "resourcepack",
@@ -569,6 +572,11 @@ export class LauncherStore {
   private lastScanAt = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
+  /**
+   * 任务日志读没读出来。unread 期间（首查进行中，或读失败、还可能读出来）不写回：写回会用内存里的表覆盖那份没读到的历史。
+   * invalid 是文件损坏或版本不符，内容本来就救不回来，照常写回，免得任务表从此再也存不下来。
+   */
+  private journalState: "unread" | "read" | "invalid" = "unread";
 
   readonly actions: LauncherActions;
 
@@ -706,12 +714,29 @@ export class LauncherStore {
     this.set({ pins: await instancesIpc.getSidebarPins() });
   }
 
+  /**
+   * 读任务日志并恢复上次的任务：上次没完成的记为「关闭时中断」。日志读不出来时用户照样能入队，所以重试读取时
+   * 内存里已有的任务优先，原样保留，只把日志里内存没有的那些并进来；读到过一次之后内存就是准的，再读不改任务表。
+   */
   private async fetchJournal(): Promise<void> {
-    const records = await tasksIpc.loadTaskJournal();
+    const records = await tasksIpc.loadTaskJournal().catch((error: unknown) => {
+      if (isIpcError(error) && error.code === TASK_JOURNAL_INVALID_CODE) this.journalState = "invalid";
+      throw error;
+    });
+    if (this.journalState === "read") return;
+    const now = Date.now();
     const loaded = records.map(taskFromRecord);
-    const restored = trimHistory(restoreJournal(loaded, Date.now()));
-    this.set({ tasks: restored });
-    if (restored.some((t, i) => t !== loaded[i])) this.scheduleJournal();
+    this.journalState = "read";
+    let changed = false;
+    this.set((raw) => {
+      const inMemory = new Set(raw.tasks.map((t) => t.id));
+      const previous = loaded.filter((t) => !inMemory.has(t.id));
+      const restored = restoreJournal(previous, now);
+      // 内存里的任务是日志读不出期间入队的，还没写进去过
+      changed = raw.tasks.length > 0 || restored.some((t, i) => t !== previous[i]);
+      return { tasks: trimHistory([...restored, ...raw.tasks]) };
+    });
+    if (changed) this.scheduleJournal();
   }
 
   private readonly onWindowFocus = (): void => {
@@ -976,6 +1001,7 @@ export class LauncherStore {
   }
 
   private async saveJournal(): Promise<void> {
+    if (this.journalState === "unread") return;
     await tasksIpc.saveTaskJournal(this.raw.tasks.map(taskToRecord));
   }
 
