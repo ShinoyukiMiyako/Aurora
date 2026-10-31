@@ -620,6 +620,27 @@ describe("实例详情：设置", () => {
     expect(area?.value).toBe("-XX:+UseZGC -XX:+ZGenerational");
   });
 
+  it("整页一个加载门：本机内存读得慢时 300 ms 后几张卡一起出骨架，读到后一起换成内容", async () => {
+    const advice = deferred<{ total_mb: number; available_mb: number; tier: string; recommended_mb: number }>();
+    ipc.overrides.set("memory_advice", () => advice.promise);
+    await open("settings");
+    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
+    expect(skeletons()).toBe(0);
+    expect(document.querySelector('textarea[aria-label="JVM 参数"]')).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(skeletons()).toBeGreaterThan(0);
+    await act(async () => {
+      advice.resolve({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 });
+      await settle(20);
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(skeletons()).toBe(0);
+    expect(document.querySelector('textarea[aria-label="JVM 参数"]')).not.toBeNull();
+    expect(text()).toContain("全局固定值");
+  });
+
   it("内存改为单独设置时以全局生效值为初值", async () => {
     await open("settings");
     click(byRole("radio", "为这个实例单独设置"));
