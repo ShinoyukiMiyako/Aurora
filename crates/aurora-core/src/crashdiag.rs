@@ -17,7 +17,7 @@ use aurora_launch::{
 use aurora_modplatform::{InstalledMod, scan_mods_dir};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CoreError, Result};
+use crate::error::Result;
 use crate::facade::Aurora;
 use crate::launch::LaunchWarning;
 use crate::session::JavaUsed;
@@ -225,29 +225,13 @@ pub struct LaunchLog {
     pub ended: Option<SessionEnded>,
 }
 
+// 读崩溃记录与日志前的实例目录一律经 existing_instance_dir：它先拦下带路径成分的 id（否则
+// `..\..\某目录` 能读出游戏目录之外的文件），再要求目录存在——对不存在的实例回「没有记录」会把
+// 拼错的 id 伪装成正常的空状态。
 impl Aurora {
-    /// 实例目录必须存在：对一个不存在的实例回「没有记录」会把拼错的 id 伪装成正常的空状态。
-    async fn existing_version_dir(&self, version_id: &str) -> Result<PathBuf> {
-        let dir = self.version_dir(version_id);
-        let exists =
-            tokio::fs::try_exists(&dir)
-                .await
-                .map_err(|source| aurora_base::Error::Io {
-                    path: dir.clone(),
-                    source,
-                })?;
-        if exists {
-            Ok(dir)
-        } else {
-            Err(CoreError::VersionNotInstalled {
-                id: version_id.to_owned(),
-            })
-        }
-    }
-
     /// 该实例最近一次的崩溃报告；从没崩溃过为 `None`。
     pub async fn last_crash(&self, version_id: &str) -> Result<Option<CrashReport>> {
-        let version_dir = self.existing_version_dir(version_id).await?;
+        let version_dir = self.existing_instance_dir(version_id).await?;
         let path = crash_report_path(&version_dir);
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
@@ -295,7 +279,7 @@ impl Aurora {
 
     /// 该实例最近一次启动的日志；从没启动过为 `None`。
     pub async fn last_launch_log(&self, version_id: &str) -> Result<Option<LaunchLog>> {
-        let version_dir = self.existing_version_dir(version_id).await?;
+        let version_dir = self.existing_instance_dir(version_id).await?;
         let path = logs_dir(&version_dir).join(LATEST_LOG);
         let exists =
             tokio::fs::try_exists(&path)
@@ -322,6 +306,7 @@ impl Aurora {
 mod tests {
     use super::*;
     use crate::config::AuroraConfig;
+    use crate::error::CoreError;
     use aurora_launch::logfile::SessionOutcome;
     use aurora_launch::{LogSource, SessionLog};
 
@@ -515,6 +500,36 @@ mod tests {
                 matches!(&err, CoreError::VersionNotInstalled { id } if id == "ghost"),
                 "{err:?}"
             );
+        }
+    }
+
+    /// 带路径成分的 id 在拼路径前就被拦下：游戏目录之外即便真有一份崩溃记录与日志也读不到。
+    #[tokio::test]
+    async fn unsafe_instance_id_is_rejected_before_touching_the_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        put_version(tmp.path(), "1.21");
+        let outside = tmp.path().join("outside");
+        let report_path = crash_report_path(&outside);
+        std::fs::create_dir_all(report_path.parent().unwrap()).unwrap();
+        std::fs::write(&report_path, r#"{"format":1,"report":{}}"#).unwrap();
+        std::fs::create_dir_all(logs_dir(&outside)).unwrap();
+        std::fs::write(
+            logs_dir(&outside).join(LATEST_LOG),
+            "[+0.000] [game] secret\n",
+        )
+        .unwrap();
+
+        for id in [r"..\..\outside", "../../outside", r"..\outside"] {
+            for err in [
+                aurora.last_crash(id).await.unwrap_err(),
+                aurora.last_launch_log(id).await.unwrap_err(),
+            ] {
+                assert!(
+                    matches!(&err, CoreError::Instance(crate::InstanceError::InvalidId { id: bad }) if bad == id),
+                    "{id}：{err:?}"
+                );
+            }
         }
     }
 
