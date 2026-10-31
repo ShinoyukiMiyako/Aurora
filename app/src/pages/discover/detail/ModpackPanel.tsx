@@ -51,8 +51,8 @@ export function defaultPackVersion(versions: readonly ModVersionInfo[]): ModVers
 }
 
 /**
- * 面板上的清单事实。摘要到了以清单为准：Mod 数取落进 mods/ 的远程文件数（CurseForge 清单分不出，改写要下载的文件数），
- * 下载量是整合包文件本身加上清单里另外要下载的文件（CurseForge 清单不带大小，不显示）。
+ * 面板上的清单事实。摘要到了以清单为准：Mod 数取直接落进 mods/ 的远程文件与覆盖层 jar（CurseForge 由平台按大类认落点），
+ * 下载量是整合包文件本身加上清单里另外要下载的文件；平台没给齐每个文件的大小时不显示，不拿缺项的部分和冒充总量。
  * 摘要没到（读取中、读不出来）时游戏版本与加载器取平台版本信息，其余不显示。
  */
 export function packFacts(version: ModVersionInfo | null, summary: ModpackSummaryDto | null, releases: readonly string[] | null): PackFacts {
@@ -62,7 +62,6 @@ export function packFacts(version: ModVersionInfo | null, summary: ModpackSummar
       loader: summary.loader === null ? "vanilla" : summary.loader.kind,
       modCount: summary.mod_files,
       downloadBytes: summary.remote_bytes === null ? null : summary.pack_bytes + summary.remote_bytes,
-      extra: summary.mod_files === null ? [{ icon: "file", text: MODPACK_COPY.remoteFiles(summary.remote_files) }] : [],
     };
   }
   const mc = version === null ? undefined : sortGameVersions(version.game_versions, releases)[0];

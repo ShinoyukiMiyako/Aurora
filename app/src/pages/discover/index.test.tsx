@@ -742,15 +742,23 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
     expect(launcher.state.tasks.map((t) => t.detail)).toEqual(["3.0.0 · 41 个 Mod"]);
   });
 
-  it("CurseForge：清单分不出 Mod，改写要下载的文件数，任务详情不写 Mod 数", async () => {
-    ipc.overrides.set("summarize_platform_modpack", () => summary({ format: "curseforge", mod_files: null, remote_bytes: null }));
+  it("CurseForge：摘要同样给出 Mod 数与下载量，并随任务带上", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary({ format: "curseforge", mod_files: 37, remote_bytes: 4 * 1_048_576 }));
     await openPack();
-    expect(dialog().textContent).toContain("48 个文件需要下载");
-    expect(dialog().textContent).not.toContain("41 个 Mod");
-    expect(dialog().textContent).not.toContain("下载约");
+    expect(dialog().textContent).toContain("1.21.1 · Quilt · 37 个 Mod");
+    expect(dialog().textContent).toContain("下载约 5.0 MB");
+    expect(dialog().textContent).not.toContain("个文件需要下载");
     act(() => buttonByText("安装为新实例", dialog()).click());
     await flush();
-    expect(launcher.state.tasks.map((t) => t.detail)).toEqual(["3.0.0"]);
+    expect(launcher.state.tasks.map((t) => t.detail)).toEqual(["3.0.0 · 37 个 Mod"]);
+  });
+
+  it("平台没给齐每个文件的大小：照写 Mod 数，下载量不显示；一个 Mod 都没有时写 0 个", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary({ format: "curseforge", mod_files: 0, remote_bytes: null }));
+    await openPack();
+    expect(dialog().textContent).toContain("0 个 Mod");
+    expect(dialog().textContent).not.toContain("下载约");
+    expect(dialog().textContent).not.toContain("个文件需要下载");
   });
 
   it("清单读不出来：说明原因可重试，仍可按平台版本信息安装", async () => {
