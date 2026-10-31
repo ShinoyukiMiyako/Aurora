@@ -67,8 +67,6 @@ export const LOCK_REASON = {
       deleting: "正在删除这个实例",
     },
   },
-  /** 纯图标按钮锁住时，原因并进可访问名称与悬停提示。 */
-  labelled: (label: string, reason: string) => `${label}：${reason}`,
 } as const;
 
 // ---------------------------------------------------------------- 概览
@@ -204,7 +202,6 @@ export const MODS_COPY = {
   toggleLabel: (name: string, enabled: boolean) => (enabled ? `停用 ${name}` : `启用 ${name}`),
   toggleTip: (enabled: boolean) => (enabled ? "停用" : "启用"),
   remove: (name: string) => `移除 ${name}`,
-  removeLocked: (name: string, reason: string) => `移除 ${name}：${reason}`,
   versionUnknown: "版本未知",
   disabledToast: (name: string) => `已停用 ${name}`,
   disabledToastBody: (fileName: string) => `文件改名为 ${fileName}，随时可以再启用`,

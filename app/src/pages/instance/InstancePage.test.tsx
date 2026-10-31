@@ -451,12 +451,26 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     ended: { at: NOW - DAY + 60_000, outcome: "exited" },
   });
   const iconButton = (label: string) => {
-    const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => {
-      const name = b.getAttribute("aria-label");
-      return name !== null && (name === label || name.startsWith(`${label}：`));
-    });
+    const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === label);
     if (found === undefined) throw new Error(`找不到图标按钮 ${label}`);
     return found;
+  };
+  /** 带原因禁用的图标按钮：名称只是标签，可聚焦、不是原生禁用，悬停后关联的提示气泡里写着原因。 */
+  const expectLockedWith = async (el: HTMLButtonElement, reason: string) => {
+    expect(el.disabled).toBe(false);
+    expect(el.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error(`「${el.getAttribute("aria-label")}」悬停后没有关联提示气泡`);
+    expect(document.getElementById(tipId)?.textContent).toContain(reason);
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+    });
   };
 
   beforeEach(() => {
@@ -468,8 +482,7 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
     await open("overview");
     const saves = iconButton("打开存档文件夹");
-    expect(saves.getAttribute("aria-label")).toBe(`打开存档文件夹：${folderReason}`);
-    expect(saves.disabled).toBe(true);
+    await expectLockedWith(saves, folderReason);
     click(saves);
     expect(iconButton("打开「新世界」所在文件夹").disabled).toBe(false);
     click(iconButton("打开「新世界」所在文件夹"));
@@ -479,19 +492,20 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     click(byRole("tab", /^Mod/));
     await flush();
     const modsFolder = iconButton("打开 mods 文件夹");
-    expect(modsFolder.getAttribute("aria-label")).toBe(`打开 mods 文件夹：${folderReason}`);
-    expect(modsFolder.disabled).toBe(true);
+    await expectLockedWith(modsFolder, folderReason);
+    click(modsFolder);
 
     click(byRole("tab", /^日志与历史/));
     await flush();
     expect(text()).toContain("最近一次启动");
-    expect(() => iconButton("打开日志文件夹")).toThrow();
+    const consoleFolder = iconButton("打开日志文件夹");
+    await expectLockedWith(consoleFolder, folderReason);
+    click(consoleFolder);
 
     click(byRole("tab", /^崩溃诊断/));
     await flush();
     const logsFolder = iconButton("打开");
-    expect(logsFolder.getAttribute("aria-label")).toBe(`打开：${folderReason}`);
-    expect(logsFolder.disabled).toBe(true);
+    await expectLockedWith(logsFolder, folderReason);
     click(logsFolder);
 
     click(button("更多操作"));
@@ -543,7 +557,7 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     expect(byRole("switch", "全屏启动").getAttribute("aria-disabled")).toBe("true");
     click(byRole("tab", "概览"));
     await flush();
-    expect(iconButton("打开存档文件夹").getAttribute("aria-label")).toBe("打开存档文件夹：正在重命名这个实例，完成后才能打开");
+    await expectLockedWith(iconButton("打开存档文件夹"), "正在重命名这个实例，完成后才能打开");
   });
 
   it("游戏运行中：打开这些文件夹与改实例设置照常可用", async () => {
@@ -754,7 +768,12 @@ describe("实例详情：Mod 管理", () => {
     click(toggle);
     await flush();
     expect(callsOf(ipc, "set_mod_enabled")).toEqual([]);
-    expect(button(/^移除 Sodium/).disabled).toBe(true);
+    const remove = button("移除 Sodium");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    click(remove);
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(callsOf(ipc, "remove_mod")).toEqual([]);
   });
 
   it("搜索不分大小写，没有结果时给清除筛选", async () => {

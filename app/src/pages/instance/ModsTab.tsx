@@ -433,13 +433,13 @@ function modColumns({ compact, lock, isUpdating, toggle, update, remove }: Colum
         <div className={styles.rowActions}>
           {r.update !== null &&
             (compact ? (
-              <IconButton icon="download" label={MODS_COPY.updateLabel(r.name)} size="sm" variant="secondary" disabled={lock !== undefined || isUpdating(r)} onClick={() => update(r)} />
+              <IconButton icon="download" label={MODS_COPY.updateLabel(r.name)} size="sm" variant="secondary" disabled={isUpdating(r)} disabledReason={lock} onClick={() => update(r)} />
             ) : (
               <Button size="sm" disabledReason={lock} loading={isUpdating(r)} onClick={() => update(r)} aria-label={MODS_COPY.updateLabel(r.name)}>
                 {MODS_COPY.update}
               </Button>
             ))}
-          <IconButton icon="trash" label={lock === undefined ? MODS_COPY.remove(r.name) : MODS_COPY.removeLocked(r.name, lock)} size="sm" variant="danger" disabled={lock !== undefined} onClick={() => remove(r)} />
+          <IconButton icon="trash" label={MODS_COPY.remove(r.name)} size="sm" variant="danger" disabledReason={lock} onClick={() => remove(r)} />
         </div>
       ),
     },

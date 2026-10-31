@@ -9,7 +9,7 @@ import { Button } from "../../ui/Button";
 import type { ControlSize } from "../../ui/Button";
 import { EmptyState } from "../../ui/EmptyState";
 import { IconButton, type IconButtonVariant } from "../../ui/IconButton";
-import { LOCK_REASON, OVERVIEW_COPY } from "./copy";
+import { OVERVIEW_COPY } from "./copy";
 import styles from "./instance.module.css";
 import type { FolderTarget, InstanceOps } from "./ops";
 
@@ -65,15 +65,6 @@ export function FolderButton({
   size?: ControlSize;
   variant?: IconButtonVariant;
 }) {
-  const reason = ops.folderReason(target);
-  return (
-    <IconButton
-      icon="folder"
-      label={reason === undefined ? label : LOCK_REASON.labelled(label, reason)}
-      size={size}
-      variant={variant}
-      disabled={reason !== undefined}
-      onClick={() => ops.openFolder(target)}
-    />
-  );
+  // 带原因禁用而不是原生禁用：键盘也能聚焦到它、读到原因，标签保持原样
+  return <IconButton icon="folder" label={label} size={size} variant={variant} disabledReason={ops.folderReason(target)} onClick={() => ops.openFolder(target)} />;
 }

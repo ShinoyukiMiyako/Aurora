@@ -108,8 +108,9 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
         source={source}
         onCopy={copyText}
         copyFeedbackMs={COPY_FEEDBACK_MS}
-        // 控制台的文件夹按钮不带禁用原因：logs 打不开（安装、补全、改名、删除进行中）时不给这个入口，免得点了才报错
-        onOpenFolder={ops.folderReason("logs") === undefined ? () => ops.openFolder("logs") : undefined}
+        // logs 打不开（安装、补全、改名、删除进行中）时按钮置灰并写明原因，而不是点了才报错
+        onOpenFolder={() => ops.openFolder("logs")}
+        openFolderDisabledReason={ops.folderReason("logs")}
         className={styles.consoleBody}
         filteredEmpty={LOGS_COPY.noLinesForFilter}
         filters={
