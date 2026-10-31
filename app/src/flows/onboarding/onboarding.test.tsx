@@ -165,6 +165,26 @@ describe("首次启动向导：第一步", () => {
 });
 
 describe("首次启动向导：推进与收尾", () => {
+  it("第二步的 Java 列表照样列出缺运行时文件的，并给它标「不完整」", async () => {
+    const runtime = (major: number, missing: string[]) => ({
+      path: `C:\\Java\\jdk-${major}\\bin\\java.exe`,
+      version: { major, minor: 0, security: 2, build: 0, raw: `${major}.0.2` },
+      is_64bit: true,
+      vendor: "Eclipse Adoptium",
+      source: "registry",
+      missing_files: missing,
+    });
+    ipc.overrides.set("detect_java", () => [runtime(21, []), runtime(17, ["release", "lib/modules"])]);
+    await mount();
+    await click(button("下一步"));
+    expect(title()).toBe("看看这台电脑上的 Java");
+    const rows = [...document.querySelectorAll("li")].filter((li) => li.textContent?.startsWith("Java "));
+    expect(rows.map((li) => [li.textContent?.slice(0, 7), li.textContent?.includes("不完整")])).toEqual([
+      ["Java 21", false],
+      ["Java 17", true],
+    ]);
+  });
+
   it("第二步扫描 Java 并能关掉自动下载；跳过后步骤条标「已跳过」，只能点回到过的步", async () => {
     await mount();
     await click(button("下一步"));
