@@ -8,8 +8,11 @@ import type { HistoryEvent } from "../../history";
 import type {
   Compatibility,
   InstallPlan,
+  InstalledCopy,
   InstalledMod,
+  InstalledSource,
   InstanceMatch,
+  InstanceSources,
   MatchState,
   ModLoader,
   ModMetadata,
@@ -23,7 +26,7 @@ import { CORE_EVENT } from "../../tasks";
 import { byCodeUnit, findMockSource, newestFirst, sourceVersions, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { argReader, parsePlatform as parsePlatformArg, runMockTask, simulateDownload } from "./discover";
+import { argReader, forgetMockPackFiles, mockPackFiles, parsePlatform as parsePlatformArg, renameMockPackFiles, runMockTask, simulateDownload, type MockPackFile } from "./discover";
 import { acquireMockInstance, mockInstanceFacts, mockInstanceIds, withMockInstance } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -429,17 +432,38 @@ export function mockModFileCount(versionId: string): number {
   return known === undefined ? 0 : modFiles(known).length;
 }
 
-/** 实例改名时 Mod 一侧的状态跟着走（后端的 mods 目录就在实例目录里）。 */
+/** 实例改名时 Mod 与资源包这一侧的状态跟着走（后端的 mods、resourcepacks 等目录就在实例目录里）。 */
 export function renameMockMods(from: string, to: string): void {
+  renameMockPackFiles(from, to);
   const known = instances.get(from);
   if (known === undefined) return;
   instances.delete(from);
   instances.set(to, known);
 }
 
-/** 实例删除时一并忘掉 Mod 一侧的状态，免得同名新实例凭空带着旧 Mod。 */
+/** 实例删除时一并忘掉 Mod 与资源包这一侧的状态，免得同名新实例凭空带着旧 Mod。 */
 export function forgetMockMods(versionId: string): void {
+  forgetMockPackFiles(versionId);
   instances.delete(versionId);
+}
+
+/**
+ * 资源包、光影、数据包没有卷宗，与后端一样拿装着的文件对工程的版本列表：同名且大小对得上才认作那个版本。
+ * 数据包看全部存档，几个存档都有时取存档名排在最前的那个。
+ */
+function installedPack(versionId: string, type: Exclude<InstallableResourceType, "mod">, known: readonly ModVersionInfo[]): InstalledCopy | null {
+  const files = mockPackFiles(versionId).filter((f) => f.type === type);
+  if (type === "data_pack") files.sort((a, b) => byCodeUnit(packWorld(a), packWorld(b)));
+  for (const file of files) {
+    const version = known.find((v) => v.file_name === file.file_name && (v.file_size === null || v.file_size === file.size));
+    if (version !== undefined) return { file_name: file.file_name, version_id: version.version_id, version_number: version.version_number, world: file.world };
+  }
+  return null;
+}
+
+function packWorld(file: MockPackFile): string {
+  if (file.world === null) throw new Error(`mock 里的数据包 ${file.file_name} 没有记装在哪个存档`);
+  return file.world;
 }
 
 function listMods(versionId: string, instance: MockInstance): InstalledMod[] {
@@ -681,6 +705,8 @@ export const handlers: MockHandlers = {
     const type = parseMatchType(args.resourceType);
     const pinned = args.modVersionId === null || args.modVersionId === undefined ? null : requireNonEmpty(args.modVersionId, "modVersionId");
     const versions = pinned === null ? projectVersions(platform, projectId) : [findVersion(platform, projectId, pinned)];
+    // 资源包这类靠版本列表认盘上的文件；指定了版本也要整份列表，才认得出装着的是别的版本。
+    const known = type === "mod" || pinned === null ? versions : projectVersions(platform, projectId);
     const ready = mockInstanceIds().filter((id) => mockInstanceFacts(id) !== null);
     const rows: InstanceMatch[] = ready.map((id) => {
       const instance = mockInstance(id);
@@ -691,8 +717,14 @@ export const handlers: MockHandlers = {
         compatibility = judge(type, versions[0], instance);
         best = compatibility.kind === "mismatch" ? null : versions[0];
       }
-      const row = instance.ledger.find((r) => r.platform === platform && r.project_id === projectId && present(instance, r.file_name));
-      const state: MatchState = row ? "installed" : compatibility.kind === "match" ? "compatible" : compatibility.kind === "unknown" ? "maybe" : "incompatible";
+      let installed: InstalledCopy | null;
+      if (type === "mod") {
+        const row = instance.ledger.find((r) => r.platform === platform && r.project_id === projectId && present(instance, r.file_name));
+        installed = row ? { file_name: row.file_name, version_id: row.version_id, version_number: row.version_number, world: null } : null;
+      } else {
+        installed = installedPack(id, type, newestFirst(known));
+      }
+      const state: MatchState = installed ? "installed" : compatibility.kind === "match" ? "compatible" : compatibility.kind === "unknown" ? "maybe" : "incompatible";
       return {
         version_id: id,
         mc_version: instance.mc_version,
@@ -700,12 +732,25 @@ export const handlers: MockHandlers = {
         state,
         compatibility,
         best_version: best,
-        installed: row ? { file_name: row.file_name, version_id: row.version_id, version_number: row.version_number } : null,
+        installed,
       };
     });
     return rows.sort((a, b) => TIER[a.state] - TIER[b.state] || byCodeUnit(a.version_id, b.version_id));
   },
   install_mod: installMod,
+  installed_sources: (): InstanceSources[] =>
+    mockInstanceIds()
+      .filter((id) => mockInstanceFacts(id) !== null)
+      .sort(byCodeUnit)
+      .map((id) => {
+        const instance = mockInstance(id);
+        const sources: InstalledSource[] = [];
+        for (const row of instance.ledger) {
+          const duplicate = sources.some((s) => s.platform === row.platform && s.project_id === row.project_id);
+          if (!duplicate && present(instance, row.file_name)) sources.push({ platform: row.platform, project_id: row.project_id });
+        }
+        return { status: "ready", version_id: id, sources };
+      }),
   plan_install: (args) => {
     const platform = parsePlatform(args.platform);
     const projectId = requireNonEmpty(args.projectId, "projectId");

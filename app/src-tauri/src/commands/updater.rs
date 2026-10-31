@@ -494,6 +494,15 @@ fn updater_error(
     if let Some(endpoints) = endpoints {
         detail.insert("endpoints".to_owned(), json!(endpoints));
     }
+    // 插件的 Reqwest 变体是 transparent：它的 source() 直接给出 reqwest 错误的下一层，
+    // 从插件错误顺着原因链找不到 reqwest 错误本身，只能在这里取出来判断。
+    let network = match &err {
+        UpdaterError::Reqwest(http) => aurora_base::http::network_failure(http),
+        other => aurora_base::http::network_failure(other),
+    };
+    if let Some(failure) = network {
+        detail.insert("network".to_owned(), json!(failure.code()));
+    }
     if !causes.is_empty() {
         detail.insert("causes".to_owned(), json!(causes));
     }
@@ -670,5 +679,42 @@ mod tests {
         );
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         assert_eq!(err.detail.unwrap()["endpoints"], json!([PRIMARY_ENDPOINT]));
+    }
+
+    /// 更新源都连不上时插件把最后一个 reqwest 错误包成 `Reqwest` 返回；它是 transparent 变体，
+    /// 顺着 source 链往下走会跳过 reqwest 那一层，所以要单独认出来标 detail.network。
+    #[tokio::test]
+    async fn unreachable_update_endpoints_are_marked_as_network_failures() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/latest.json",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        let refused = aurora_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_err();
+        let endpoints = vec![PRIMARY_ENDPOINT.to_owned()];
+
+        let err = updater_error(
+            code::UPDATE_CHECK_FAILED,
+            "检查更新失败",
+            Some(&endpoints),
+            tauri_plugin_updater::Error::Reqwest(refused),
+        );
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        assert_eq!(err.detail.unwrap()["network"], json!("connect"));
+
+        // 拿到了响应但内容不对：网络是通的。
+        let err = updater_error(
+            code::UPDATE_CHECK_FAILED,
+            "检查更新失败",
+            Some(&endpoints),
+            tauri_plugin_updater::Error::ReleaseNotFound,
+        );
+        assert!(err.detail.unwrap().get("network").is_none());
     }
 }

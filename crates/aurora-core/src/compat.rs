@@ -15,6 +15,7 @@
 //! （光影由 Iris / OptiFine）读取，与实例装的 Mod 加载器无关。
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use aurora_instance::{DiscoveredVersion, discover_versions};
@@ -58,12 +59,26 @@ pub enum MatchState {
 /// 该工程已装在实例里的那份文件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InstalledCopy {
-    /// 启用态文件名（卷宗的 join 键；磁盘上可能多一个 `.disabled` 后缀）。
+    /// Mod 为启用态文件名（卷宗的 join 键；磁盘上可能多一个 `.disabled` 后缀）；资源包、光影、
+    /// 数据包为盘上的文件名。
     pub file_name: String,
     /// 已装的平台版本标识。
     pub version_id: String,
     /// 已装的版本号；卷宗里没记为 `None`。
     pub version_number: Option<String>,
+    /// 数据包装在哪个存档（存档目录名）；其余类型为 `None`。
+    pub world: Option<String>,
+}
+
+impl InstalledCopy {
+    fn of_version(version: &ModVersionInfo, world: Option<String>) -> Self {
+        Self {
+            file_name: version.file_name.clone(),
+            version_id: version.version_id.clone(),
+            version_number: Some(version.version_number.clone()),
+            world,
+        }
+    }
 }
 
 /// 一个已装实例对某工程的匹配结果。
@@ -83,6 +98,20 @@ pub struct InstanceMatch {
     pub best_version: Option<ModVersionInfo>,
     /// 该工程已装在此实例里时给出已装的那份（据卷宗与磁盘 join）。
     pub installed: Option<InstalledCopy>,
+}
+
+/// 实例里一个已装 Mod 的平台来源。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledSource {
+    pub platform: Platform,
+    pub project_id: String,
+}
+
+/// 一个实例里已装 Mod 的平台来源；读不出卷宗或 mods 目录时为那个错误。
+#[derive(Debug)]
+pub struct InstanceSources {
+    pub version_id: String,
+    pub sources: Result<Vec<InstalledSource>>,
 }
 
 /// 加载器的展示名（专有名词，保留原文大小写）。
@@ -371,12 +400,25 @@ impl Aurora {
             }
         };
         let versions = Arc::new(versions);
+        // 资源包、光影、数据包没有卷宗，只能拿盘上的文件去对平台的版本文件，认出装的是哪个版本。
+        // 指定了版本时也要整份列表：盘上装的若是别的版本，前端要据此判「可更新」而不是「未安装」。
+        // 版本下拉刚拉过这份列表，这里多半命中版本列表缓存。
+        let known = if pinned && resource_type != ResourceType::Mod {
+            let mut all = self
+                .list_mod_versions(platform, project_id, &[], &[])
+                .await?;
+            sort_by_published_desc(&mut all);
+            Arc::new(all)
+        } else {
+            versions.clone()
+        };
         let aurora = self.clone();
         let project = project_id.to_owned();
 
         let mut matches = bounded_map(scan.versions, local_concurrency(), move |discovered| {
             let aurora = aurora.clone();
             let versions = versions.clone();
+            let known = known.clone();
             let project = project.clone();
             async move {
                 let mc_version = instance_mc_version(&discovered);
@@ -388,7 +430,7 @@ impl Aurora {
                 };
                 let id = discovered.id.clone();
                 let installed = aurora
-                    .installed_copy_of(discovered, platform, &project)
+                    .installed_copy_of(discovered, platform, &project, resource_type, &known)
                     .await?;
                 let state = match (&installed, &compatibility) {
                     (Some(_), _) => MatchState::Installed,
@@ -417,11 +459,46 @@ impl Aurora {
         Ok(matches)
     }
 
-    /// 该工程是否已装在这个实例里：卷宗给身份，磁盘给存在性，两者都成立才算装了。
+    /// 该工程是否已装在这个实例里，按资源类型去游戏读取它的位置找：Mod 在卷宗与 mods 目录，
+    /// 资源包在 `resourcepacks/`，光影在 `shaderpacks/`，数据包在任一存档的 `datapacks/`。
+    /// `known` 是该工程的版本列表（发布时间倒序），资源包这类没有卷宗的靠它认出盘上的文件。
+    async fn installed_copy_of(
+        &self,
+        discovered: DiscoveredVersion,
+        platform: Platform,
+        project_id: &str,
+        resource_type: ResourceType,
+        known: &[ModVersionInfo],
+    ) -> Result<Option<InstalledCopy>> {
+        let sub = match resource_type {
+            ResourceType::Mod => {
+                return self
+                    .installed_mod_of(discovered, platform, project_id)
+                    .await;
+            }
+            ResourceType::ResourcePack => "resourcepacks",
+            ResourceType::Shader => "shaderpacks",
+            ResourceType::DataPack => {
+                let working = self.instance_dirs(&discovered).await?.working_dir;
+                return find_data_pack(&working.join("saves"), known).await;
+            }
+            ResourceType::Modpack | ResourceType::Plugin => {
+                return Err(CoreError::InvalidResourceTarget(format!(
+                    "{resource_type:?} 不装进已有实例，没有已装文件"
+                )));
+            }
+        };
+        let working = self.instance_dirs(&discovered).await?.working_dir;
+        Ok(find_pack_in(&working.join(sub), known)
+            .await?
+            .map(|version| InstalledCopy::of_version(version, None)))
+    }
+
+    /// Mod 是否已装在这个实例里：卷宗给身份，磁盘给存在性，两者都成立才算装了。
     ///
     /// 卷宗有而磁盘没有一律当没装——玩家手动删 jar 是完全合法的操作，拿一条陈旧记录告诉他「已安装」
     /// 会让他找不到那个根本不存在的文件。卷宗里一条都对不上时直接短路，不去扫盘。
-    async fn installed_copy_of(
+    async fn installed_mod_of(
         &self,
         discovered: DiscoveredVersion,
         platform: Platform,
@@ -438,6 +515,7 @@ impl Aurora {
                 file_name: entry.file_name.clone(),
                 version_id: entry.version_id.clone(),
                 version_number: entry.version_number.clone(),
+                world: None,
             })
             .collect();
         if candidates.is_empty() {
@@ -457,6 +535,169 @@ impl Aurora {
             .into_iter()
             .find(|copy| present.contains(copy.file_name.as_str())))
     }
+
+    /// 全部实例各装了哪些平台工程的 Mod（卷宗与 mods 目录 join，禁用态也算），按实例 id 排序。
+    ///
+    /// 发现页的结果卡要标「已装入 n 个实例」：逐实例调 `list_mods` 是 N 次调用，每次还要打开全部 jar
+    /// 读元数据；这里只读卷宗和 mods 目录的文件名，一次给齐，不联网。某个实例读不出卷宗或目录时只让
+    /// 它那一项带上错误，其余实例照常给出，一个坏实例不该让整页的标记都没有。
+    pub async fn installed_mod_sources(&self) -> Result<Vec<InstanceSources>> {
+        let scan = discover_versions(self.game_dir()).await?;
+        let aurora = self.clone();
+        let mut all = bounded_map(scan.versions, local_concurrency(), move |discovered| {
+            let aurora = aurora.clone();
+            async move {
+                let version_id = discovered.id.clone();
+                let sources = aurora.mod_sources_of(discovered).await;
+                Ok(InstanceSources {
+                    version_id,
+                    sources,
+                })
+            }
+        })
+        .await?;
+        all.sort_by(|a, b| a.version_id.cmp(&b.version_id));
+        Ok(all)
+    }
+
+    async fn mod_sources_of(&self, discovered: DiscoveredVersion) -> Result<Vec<InstalledSource>> {
+        let ledger = self.ledger_store(&discovered.id).load().await?;
+        if ledger.entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let dirs = self.instance_dirs(&discovered).await?;
+        let on_disk = mod_file_keys(&dirs.mods_dir).await?;
+        let mut sources: Vec<InstalledSource> = Vec::new();
+        for entry in &ledger.entries {
+            let duplicate = sources
+                .iter()
+                .any(|s| s.platform == entry.platform && s.project_id == entry.project_id);
+            if !duplicate && on_disk.contains(entry.file_name.as_str()) {
+                sources.push(InstalledSource {
+                    platform: entry.platform,
+                    project_id: entry.project_id.clone(),
+                });
+            }
+        }
+        Ok(sources)
+    }
+}
+
+/// mods 目录里各文件的卷宗键（启用态文件名）。只读目录项、不打开 jar；目录不存在即为空。
+async fn mod_file_keys(mods_dir: &Path) -> Result<HashSet<String>> {
+    let io = |source| -> CoreError {
+        aurora_base::Error::Io {
+            path: mods_dir.to_owned(),
+            source,
+        }
+        .into()
+    };
+    let mut entries = match tokio::fs::read_dir(mods_dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(source) => return Err(io(source)),
+    };
+    let mut keys = HashSet::new();
+    while let Some(entry) = entries.next_entry().await.map_err(io)? {
+        if !entry.file_type().await.map_err(io)?.is_file() {
+            continue;
+        }
+        // 卷宗里的文件名都是 UTF-8，转不过来的一定对不上。
+        if let Ok(name) = entry.file_name().into_string() {
+            keys.insert(ledger_key(&name).to_owned());
+        }
+    }
+    Ok(keys)
+}
+
+/// 在一个资源目录里认出该工程的哪个版本装着；目录不存在即没装。
+///
+/// 没有卷宗，只能拿平台给的文件名比对：同名且大小对得上才算（同名的别家文件、解压开的同名目录都不是它）。
+/// 几个版本共用同一个文件名与大小时再算 sha1 分辨，都对不上就不认。玩家改过名的文件认不出来，按没装处理。
+async fn find_pack_in<'v>(
+    dir: &Path,
+    known: &'v [ModVersionInfo],
+) -> Result<Option<&'v ModVersionInfo>> {
+    let io = |source| -> CoreError {
+        aurora_base::Error::Io {
+            path: dir.to_owned(),
+            source,
+        }
+        .into()
+    };
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(io(source)),
+    };
+    while let Some(entry) = entries.next_entry().await.map_err(io)? {
+        let name = entry.file_name();
+        // 平台给的文件名都是 UTF-8，转不过来的一定不是它。
+        let Some(name) = name.to_str() else { continue };
+        let named: Vec<&ModVersionInfo> = known.iter().filter(|v| v.file_name == name).collect();
+        if named.is_empty() {
+            continue;
+        }
+        let meta = entry.metadata().await.map_err(io)?;
+        if !meta.is_file() {
+            continue;
+        }
+        let sized: Vec<&ModVersionInfo> = named
+            .into_iter()
+            .filter(|v| v.file_size.is_none_or(|size| size == meta.len()))
+            .collect();
+        match sized.as_slice() {
+            [] => {}
+            [only] => return Ok(Some(only)),
+            several => {
+                let actual = aurora_base::fs::sha1_hex(entry.path()).await?;
+                let hit = several.iter().find(|v| {
+                    v.sha1
+                        .as_deref()
+                        .is_some_and(|sha1| sha1.eq_ignore_ascii_case(&actual))
+                });
+                if let Some(hit) = hit {
+                    return Ok(Some(hit));
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// 数据包按存档生效：任一存档的 `datapacks/` 里有它即算已装，结果带上是哪个存档。几个存档都有时
+/// 取目录名排在最前的那个，同一份盘面每次给出同一个答案。
+async fn find_data_pack(saves: &Path, known: &[ModVersionInfo]) -> Result<Option<InstalledCopy>> {
+    let io = |source| -> CoreError {
+        aurora_base::Error::Io {
+            path: saves.to_owned(),
+            source,
+        }
+        .into()
+    };
+    let mut entries = match tokio::fs::read_dir(saves).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(io(source)),
+    };
+    let mut worlds = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(io)? {
+        // 结果要把存档名交给前端，装数据包也要传存档名：转不成 UTF-8 的存档名两头都用不了。
+        let Ok(world) = entry.file_name().into_string() else {
+            continue;
+        };
+        if entry.metadata().await.map_err(io)?.is_dir() {
+            worlds.push(world);
+        }
+    }
+    worlds.sort();
+    for world in worlds {
+        let datapacks = saves.join(&world).join("datapacks");
+        if let Some(version) = find_pack_in(&datapacks, known).await? {
+            return Ok(Some(InstalledCopy::of_version(version, Some(world))));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -701,6 +942,7 @@ mod tests {
                 file_name: "sodium.jar".to_owned(),
                 version_id: "old".to_owned(),
                 version_number: None,
+                world: None,
             }),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -713,6 +955,9 @@ mod tests {
         assert_eq!(json["installed"]["file_name"], "sodium.jar");
         assert_eq!(json["installed"]["version_id"], "old");
         assert_eq!(json["installed"]["version_number"], serde_json::Value::Null);
+        // 键始终在：Mod 没有存档，给 null 而不是省掉。
+        assert_eq!(json["installed"]["world"], serde_json::Value::Null);
+        assert!(json["installed"].as_object().unwrap().contains_key("world"));
     }
 
     // ---- 择优与实例事实抽取 ----
@@ -1163,6 +1408,79 @@ mod tests {
         assert_eq!(matches[1].compatibility, mismatch("不支持 MC 1.20.1"));
     }
 
+    /// 发现页的「已装入 n 个实例」一次取齐全部实例的已装来源：卷宗与 mods 目录 join，禁用态也算，
+    /// 不联网；某个实例的卷宗读不出时只让它那一项带错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installed_mod_sources_cover_every_instance_in_one_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        matrix_fixture(&mc).await;
+        put_instance(&mc, "e-broken-ledger", "1.20.1", FABRIC_LIB).await;
+        put_file(
+            mc.join("versions/e-broken-ledger")
+                .join(aurora_instance::AURORA_META_DIR)
+                .join("ledger.json"),
+            b"{",
+        )
+        .await;
+        // 同一工程两份文件（换过文件名的两个版本都还在）：来源只算一次。
+        put_ledger_and_disk(&mc, "f-two-copies", &["sodium-0.5.jar", "sodium-0.4.jar"]).await;
+        put_instance(&mc, "f-two-copies", "1.20.1", FABRIC_LIB).await;
+        let store = LedgerStore::for_version_dir(&mc.join("versions/f-two-copies"));
+        let mut ledger = store.load().await.unwrap();
+        let mut older = ledger.entries[0].clone();
+        older.file_name = "sodium-0.4.jar".to_owned();
+        older.version_id = "old".to_owned();
+        ledger.upsert(older);
+        store.save(&ledger).await.unwrap();
+
+        // 不该有任何请求：给一个连不上的平台地址，真去联网就会失败。
+        let aurora = isolated(&mc, "http://127.0.0.1:9".to_owned());
+        let all = aurora.installed_mod_sources().await.unwrap();
+        let ids: Vec<&str> = all.iter().map(|i| i.version_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "a-fabric-1.19.2",
+                "a-quilt-1.20.1",
+                "b-fabric-1.20.1",
+                "c-forge-1.20.1",
+                "d-forge-1.18.2",
+                "e-broken-ledger",
+                "f-two-copies",
+            ]
+        );
+        let sodium = vec![InstalledSource {
+            platform: Platform::Modrinth,
+            project_id: "sodium".to_owned(),
+        }];
+        let sources = |id: &str| {
+            all.iter()
+                .find(|i| i.version_id == id)
+                .unwrap()
+                .sources
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(ToString::to_string)
+        };
+        // 卷宗有、盘上没有：不算。
+        assert_eq!(sources("a-quilt-1.20.1"), Ok(Vec::new()));
+        assert_eq!(sources("a-fabric-1.19.2"), Ok(Vec::new()));
+        assert_eq!(sources("b-fabric-1.20.1"), Ok(sodium.clone()));
+        // 禁用态也算装着。
+        assert_eq!(sources("c-forge-1.20.1"), Ok(sodium.clone()));
+        assert_eq!(sources("f-two-copies"), Ok(sodium));
+        let broken = all
+            .iter()
+            .find(|i| i.version_id == "e-broken-ledger")
+            .unwrap();
+        assert!(
+            matches!(&broken.sources, Err(CoreError::ConfigParse { path, .. }) if path.ends_with("ledger.json")),
+            "{:?}",
+            broken.sources
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn match_instances_without_any_instance_skips_the_network_entirely() {
         let server = MockServer::start().await;
@@ -1254,6 +1572,355 @@ mod tests {
             ]
         );
         assert_eq!(matches[0].best_version.as_ref().unwrap().version_id, "f32");
+    }
+
+    /// 一个 Modrinth 版本：文件名、大小与 sha1 是在盘上认出已装文件的依据。
+    fn pack_version(
+        id: &str,
+        project: &str,
+        published: &str,
+        loader: &str,
+        file_name: &str,
+        sha1: &str,
+        size: u64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "project_id": project, "name": id, "version_number": format!("v-{id}"),
+            "version_type": "release", "date_published": published,
+            "game_versions": ["1.20.1"], "loaders": [loader],
+            "files": [{"hashes": {"sha1": sha1}, "url": format!("https://example.invalid/{file_name}"),
+                       "filename": file_name, "primary": true, "size": size}]
+        })
+    }
+
+    async fn put_file(path: std::path::PathBuf, bytes: &[u8]) {
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, bytes).await.unwrap();
+    }
+
+    async fn mount_project(server: &MockServer, project: &str, versions: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/project/{project}/version")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(versions))
+            .mount(server)
+            .await;
+    }
+
+    fn state_of<'m>(matches: &'m [InstanceMatch], id: &str) -> &'m InstanceMatch {
+        matches
+            .iter()
+            .find(|m| m.version_id == id)
+            .unwrap_or_else(|| panic!("矩阵里没有 {id}"))
+    }
+
+    /// 资源包、光影没有卷宗：在游戏读取它们的目录里按平台给的文件名与大小认出装的是哪个版本，
+    /// 装的是旧版时照样算已装（前端据此判「可更新」）；放错目录、同名但大小不对都不算。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resource_packs_and_shaders_are_found_in_the_directories_the_game_reads() {
+        let server = MockServer::start().await;
+        mount_project(
+            &server,
+            "faithful",
+            serde_json::json!([
+                pack_version(
+                    "r5",
+                    "faithful",
+                    "2026-02-01T00:00:00Z",
+                    "minecraft",
+                    "faithful-r5.zip",
+                    "55",
+                    5
+                ),
+                pack_version(
+                    "r4",
+                    "faithful",
+                    "2025-02-01T00:00:00Z",
+                    "minecraft",
+                    "faithful-r4.zip",
+                    "44",
+                    4
+                ),
+            ]),
+        )
+        .await;
+        mount_project(
+            &server,
+            "complementary",
+            serde_json::json!([pack_version(
+                "s1",
+                "complementary",
+                "2026-01-01T00:00:00Z",
+                "iris",
+                "Complementary_r5.3.zip",
+                "66",
+                6
+            )]),
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        for id in ["a-old", "b-latest", "c-wrong-size", "d-in-mods", "e-none"] {
+            put_instance(&mc, id, "1.20.1", FABRIC_LIB).await;
+        }
+        let dir = |id: &str| mc.join("versions").join(id);
+        put_file(dir("a-old").join("resourcepacks/faithful-r4.zip"), b"rrrr").await;
+        put_file(
+            dir("b-latest").join("resourcepacks/faithful-r5.zip"),
+            b"rrrrr",
+        )
+        .await;
+        put_file(
+            dir("c-wrong-size").join("resourcepacks/faithful-r5.zip"),
+            b"rrr",
+        )
+        .await;
+        put_file(dir("d-in-mods").join("mods/faithful-r5.zip"), b"rrrrr").await;
+        // 同名的目录（解压开的资源包）不是这份文件。
+        tokio::fs::create_dir_all(dir("e-none").join("resourcepacks/faithful-r5.zip"))
+            .await
+            .unwrap();
+        put_file(
+            dir("b-latest").join("shaderpacks/Complementary_r5.3.zip"),
+            b"ssssss",
+        )
+        .await;
+        put_file(
+            dir("a-old").join("resourcepacks/Complementary_r5.3.zip"),
+            b"ssssss",
+        )
+        .await;
+
+        let aurora = isolated(&mc, server.uri());
+        let packs = aurora
+            .match_instances(
+                Platform::Modrinth,
+                "faithful",
+                ResourceType::ResourcePack,
+                None,
+            )
+            .await
+            .unwrap();
+        for (id, state) in [
+            ("a-old", MatchState::Installed),
+            ("b-latest", MatchState::Installed),
+            ("c-wrong-size", MatchState::Compatible),
+            ("d-in-mods", MatchState::Compatible),
+            ("e-none", MatchState::Compatible),
+        ] {
+            assert_eq!(state_of(&packs, id).state, state, "{id}");
+        }
+        // 装的是旧版：带出旧版的标识与版本号，最佳版本仍是新版，前端据两者不同判「可更新」。
+        let old = state_of(&packs, "a-old");
+        assert_eq!(
+            old.installed,
+            Some(InstalledCopy {
+                file_name: "faithful-r4.zip".to_owned(),
+                version_id: "r4".to_owned(),
+                version_number: Some("v-r4".to_owned()),
+                world: None,
+            })
+        );
+        assert_eq!(old.best_version.as_ref().unwrap().version_id, "r5");
+        let latest = state_of(&packs, "b-latest").installed.as_ref().unwrap();
+        assert_eq!(latest.version_id, "r5");
+        assert_eq!(state_of(&packs, "c-wrong-size").installed, None);
+
+        let shaders = aurora
+            .match_instances(
+                Platform::Modrinth,
+                "complementary",
+                ResourceType::Shader,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_of(&shaders, "b-latest").state, MatchState::Installed);
+        assert_eq!(
+            state_of(&shaders, "b-latest")
+                .installed
+                .as_ref()
+                .unwrap()
+                .file_name,
+            "Complementary_r5.3.zip"
+        );
+        // 光影文件放进了资源包目录：游戏不会把它当光影读，不算装了。
+        assert_eq!(state_of(&shaders, "a-old").state, MatchState::Compatible);
+    }
+
+    /// 指定了版本时，盘上装着别的版本也要认出来：已装带出旧版，最佳版本是指定的那个。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pinned_resource_pack_still_recognises_another_installed_version() {
+        let server = MockServer::start().await;
+        let r5 = pack_version(
+            "r5",
+            "faithful",
+            "2026-02-01T00:00:00Z",
+            "minecraft",
+            "faithful-r5.zip",
+            "55",
+            5,
+        );
+        let r4 = pack_version(
+            "r4",
+            "faithful",
+            "2025-02-01T00:00:00Z",
+            "minecraft",
+            "faithful-r4.zip",
+            "44",
+            4,
+        );
+        Mock::given(method("GET"))
+            .and(path("/version/r5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(r5.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/faithful/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([r5, r4])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        put_instance(&mc, "old", "1.20.1", FABRIC_LIB).await;
+        put_instance(&mc, "none", "1.20.1", FABRIC_LIB).await;
+        put_file(
+            mc.join("versions/old/resourcepacks/faithful-r4.zip"),
+            b"rrrr",
+        )
+        .await;
+
+        let matches = isolated(&mc, server.uri())
+            .match_instances(
+                Platform::Modrinth,
+                "faithful",
+                ResourceType::ResourcePack,
+                Some("r5"),
+            )
+            .await
+            .unwrap();
+        let old = state_of(&matches, "old");
+        assert_eq!(old.state, MatchState::Installed);
+        assert_eq!(old.installed.as_ref().unwrap().version_id, "r4");
+        assert_eq!(old.best_version.as_ref().unwrap().version_id, "r5");
+        assert_eq!(state_of(&matches, "none").state, MatchState::Compatible);
+    }
+
+    /// 几个版本的文件同名同大小：按 sha1 认出装的是哪一个；都对不上就不算装了。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn same_named_versions_are_told_apart_by_sha1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("resourcepacks");
+        put_file(dir.join("pack.zip"), b"AAAA").await;
+        let actual = aurora_base::fs::sha1_hex(dir.join("pack.zip"))
+            .await
+            .unwrap();
+        let info = |id: &str, sha1: &str| ModVersionInfo {
+            version_id: id.to_owned(),
+            file_name: "pack.zip".to_owned(),
+            file_size: Some(4),
+            sha1: Some(sha1.to_owned()),
+            ..version(&[], &["1.20.1"])
+        };
+
+        let known = [
+            info("v2", "0000000000000000000000000000000000000000"),
+            info("v1", &actual.to_ascii_uppercase()),
+        ];
+        let hit = find_pack_in(&dir, &known).await.unwrap();
+        assert_eq!(hit.map(|v| v.version_id.as_str()), Some("v1"));
+
+        let strangers = [
+            info("v2", "0000000000000000000000000000000000000000"),
+            info("v1", "1111111111111111111111111111111111111111"),
+        ];
+        assert_eq!(find_pack_in(&dir, &strangers).await.unwrap(), None);
+        // 目录不存在：没装，不是错误。
+        assert_eq!(
+            find_pack_in(&tmp.path().join("shaderpacks"), &known)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    /// 数据包装在存档里：任一存档的 datapacks 有它即算已装。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn data_packs_are_found_in_any_world() {
+        let server = MockServer::start().await;
+        mount_project(
+            &server,
+            "terralith",
+            serde_json::json!([pack_version(
+                "t1",
+                "terralith",
+                "2026-01-01T00:00:00Z",
+                "datapack",
+                "Terralith_2.5.zip",
+                "77",
+                7
+            )]),
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        for id in ["in-world", "other-pack", "no-saves"] {
+            put_instance(&mc, id, "1.20.1", FABRIC_LIB).await;
+        }
+        let saves = |id: &str| mc.join("versions").join(id).join("saves");
+        tokio::fs::create_dir_all(saves("in-world").join("Alpha"))
+            .await
+            .unwrap();
+        put_file(
+            saves("in-world").join("Gamma/datapacks/Terralith_2.5.zip"),
+            b"ttttttt",
+        )
+        .await;
+        put_file(
+            saves("in-world").join("Beta/datapacks/Terralith_2.5.zip"),
+            b"ttttttt",
+        )
+        .await;
+        put_file(
+            saves("other-pack").join("Alpha/datapacks/other.zip"),
+            b"ttttttt",
+        )
+        .await;
+
+        let matches = isolated(&mc, server.uri())
+            .match_instances(
+                Platform::Modrinth,
+                "terralith",
+                ResourceType::DataPack,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_of(&matches, "in-world").state, MatchState::Installed);
+        // Beta 与 Gamma 都有：取目录名排在前面的 Beta，Alpha 没有 datapacks 目录不影响。
+        assert_eq!(
+            state_of(&matches, "in-world").installed,
+            Some(InstalledCopy {
+                file_name: "Terralith_2.5.zip".to_owned(),
+                version_id: "t1".to_owned(),
+                version_number: Some("v-t1".to_owned()),
+                world: Some("Beta".to_owned()),
+            })
+        );
+        assert_eq!(
+            state_of(&matches, "other-pack").state,
+            MatchState::Compatible
+        );
+        assert_eq!(state_of(&matches, "no-saves").state, MatchState::Compatible);
+
+        let json = serde_json::to_value(state_of(&matches, "in-world")).unwrap();
+        assert_eq!(json["installed"]["world"], "Beta");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

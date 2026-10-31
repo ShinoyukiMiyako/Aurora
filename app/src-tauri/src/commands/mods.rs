@@ -7,14 +7,15 @@
 //! 路径再写文件、卷宗与历史，同时被改名或删除的话会按旧路径把实例目录重新建出来。
 
 use aurora_core::{
-    is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstanceMatch,
-    InstanceMod, ModLoader, ModVersionInfo, Platform, ResourceType, UpdateCandidate,
+    is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstalledSource,
+    InstanceMatch, InstanceMod, ModLoader, ModVersionInfo, Platform, ResourceType, UpdateCandidate,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 
+use crate::commands::discover::parse_resource_type;
 use crate::commands::error::code::MOD_FILE_BUSY;
 use crate::commands::instances::{InstanceActivity, InstanceLocks};
 use crate::commands::CommandError;
@@ -205,6 +206,49 @@ pub async fn list_mod_versions(
         .await?)
 }
 
+/// 一个实例里已装 Mod 的平台来源；读不出卷宗或 mods 目录时带上与命令错误同形状的 `error`。
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InstanceSourcesDto {
+    Ready {
+        version_id: String,
+        sources: Vec<InstalledSource>,
+    },
+    Error {
+        version_id: String,
+        error: CommandError,
+    },
+}
+
+/// 全部实例已装 Mod 的平台来源，一次取齐，按实例 id 排序（发现页结果卡的「已装入 n 个实例」）。
+/// 只读卷宗与 mods 目录的文件名，不占实例锁：读的同时有人改 Mod，结果只是暂时过期，改完失效重取即对。
+#[tauri::command]
+pub async fn installed_sources(
+    facade: State<'_, Facade>,
+) -> Result<Vec<InstanceSourcesDto>, CommandError> {
+    installed_sources_with(&facade).await
+}
+
+pub(crate) async fn installed_sources_with(
+    facade: &Facade,
+) -> Result<Vec<InstanceSourcesDto>, CommandError> {
+    let aurora = facade.snapshot().await;
+    let all = aurora.installed_mod_sources().await?;
+    Ok(all
+        .into_iter()
+        .map(|instance| match instance.sources {
+            Ok(sources) => InstanceSourcesDto::Ready {
+                version_id: instance.version_id,
+                sources,
+            },
+            Err(err) => InstanceSourcesDto::Error {
+                version_id: instance.version_id,
+                error: err.into(),
+            },
+        })
+        .collect())
+}
+
 /// 某工程对全部已装实例的落位矩阵（兼容 / 可能可行 / 已安装 / 不兼容）。`mod_version_id` 给出时整个
 /// 矩阵只按这一个版本判定。`resource_type` 决定判定口径：资源包、光影、数据包不看加载器。
 #[tauri::command]
@@ -281,10 +325,6 @@ fn parse_platform(name: &str) -> Result<Platform, CommandError> {
 
 fn parse_loader(name: &str) -> Result<ModLoader, CommandError> {
     parse_serde_name(name, "加载器")
-}
-
-fn parse_resource_type(name: &str) -> Result<ResourceType, CommandError> {
-    parse_serde_name(name, "资源类型")
 }
 
 #[cfg(test)]
@@ -594,5 +634,59 @@ mod tests {
             id: "ghost".to_owned(),
         });
         assert_eq!(err.code, code::VERSION_NOT_INSTALLED);
+    }
+
+    /// 一次给出全部实例的已装来源；卷宗坏掉的实例单独带上命令错误的形状，不拖垮整次调用。
+    #[tokio::test]
+    async fn installed_sources_report_every_instance_and_isolate_broken_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("sodium.jar.disabled"), b"jar")
+            .await
+            .unwrap();
+        let aurora = facade.snapshot().await;
+        let mut ledger = Ledger::default();
+        for (file_name, project_id) in [("sodium.jar", "AANobbMI"), ("gone.jar", "P7dR8mSH")] {
+            ledger.upsert(LedgerEntry {
+                file_name: file_name.to_owned(),
+                platform: Platform::Modrinth,
+                project_id: project_id.to_owned(),
+                version_id: "v1".to_owned(),
+                version_number: None,
+                title: None,
+                icon_url: None,
+                sha1: None,
+                installed_at: 1_700_000_000,
+                installed_as_dependency_of: None,
+            });
+        }
+        aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
+
+        let broken = aurora.game_dir().join("versions").join("broken");
+        tokio::fs::create_dir_all(&broken).await.unwrap();
+        tokio::fs::write(
+            broken.join("broken.json"),
+            r#"{"id":"broken","type":"release","mainClass":"m"}"#,
+        )
+        .await
+        .unwrap();
+        let broken_ledger = aurora.ledger_store("broken");
+        tokio::fs::create_dir_all(broken_ledger.path().parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(broken_ledger.path(), b"{").await.unwrap();
+
+        let all = serde_json::to_value(installed_sources_with(&facade).await.unwrap()).unwrap();
+        assert_eq!(all[0]["status"], "ready");
+        assert_eq!(all[0]["version_id"], VERSION_ID);
+        assert_eq!(
+            all[0]["sources"],
+            json!([{ "platform": "modrinth", "project_id": "AANobbMI" }])
+        );
+        assert_eq!(all[1]["status"], "error");
+        assert_eq!(all[1]["version_id"], "broken");
+        assert_eq!(all[1]["error"]["code"], code::CONFIG_INVALID);
+        assert_eq!(all.as_array().unwrap().len(), 2);
+        assert!(facade.is_unlocked());
     }
 }

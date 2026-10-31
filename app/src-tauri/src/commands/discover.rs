@@ -414,7 +414,7 @@ pub(crate) fn parse_platform(name: &str) -> Result<Platform, CommandError> {
     }
 }
 
-fn parse_resource_type(name: &str) -> Result<ResourceType, CommandError> {
+pub(crate) fn parse_resource_type(name: &str) -> Result<ResourceType, CommandError> {
     match name {
         "mod" => Ok(ResourceType::Mod),
         "modpack" => Ok(ResourceType::Modpack),

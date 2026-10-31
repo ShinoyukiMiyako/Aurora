@@ -62,6 +62,10 @@ pub enum Error {
         stage: &'static str,
         total: usize,
         failed: usize,
+        /// 其中一个文件的最终错误：有网络层失败时取它，否则取第一个。挂在 source 上，
+        /// 上层才能沿原因链认出这批失败是不是断网造成的。
+        #[source]
+        cause: Box<aurora_download::Error>,
     },
 
     /// 版本 JSON 缺少客户端主件下载信息，无法确定 client.jar 来源。
@@ -205,7 +209,16 @@ mod tests {
             stage: "库",
             total: 40,
             failed: 3,
+            cause: Box::new(aurora_download::Error::Status {
+                url: "https://libraries.minecraft.net/a.jar".into(),
+                status: 404,
+            }),
         };
         assert_eq!(err.to_string(), "库 阶段有 3/40 个文件下载失败");
+        let cause = std::error::Error::source(&err).expect("应挂着其中一个文件的错误");
+        assert_eq!(
+            cause.to_string(),
+            "HTTP 状态码 404: https://libraries.minecraft.net/a.jar"
+        );
     }
 }

@@ -855,6 +855,56 @@ mod tests {
         assert_eq!(broken.code, code::INSTANCE_FAILED);
     }
 
+    /// 安装批次把单文件失败收成计数错误，原因链上挂的那条连不上时同样带 detail.network。
+    #[tokio::test]
+    async fn install_batch_failures_caused_by_the_network_are_marked() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/a.jar",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        let refused = aurora_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_err();
+        let batch = |cause: DownloadError| InstallError::BatchIncomplete {
+            stage: "库",
+            total: 40,
+            failed: 3,
+            cause: Box::new(cause),
+        };
+
+        let offline: CommandError = batch(DownloadError::AllSourcesExhausted {
+            url: url.clone(),
+            last: Box::new(DownloadError::Request {
+                url: url.clone(),
+                source: refused,
+            }),
+        })
+        .into();
+        assert_eq!(offline.code, code::INSTALL_FAILED);
+        assert_eq!(offline.message, "库 阶段有 3/40 个文件下载失败");
+        let detail = offline.detail.unwrap();
+        assert_eq!(detail["network"], json!("connect"));
+        assert_eq!(
+            detail["causes"][0],
+            json!(format!("所有下载源均失败: {url}"))
+        );
+
+        let rejected: CommandError = batch(DownloadError::Status {
+            url: url.clone(),
+            status: 404,
+        })
+        .into();
+        assert_eq!(rejected.code, code::INSTALL_FAILED);
+        let detail = rejected.detail.unwrap();
+        assert!(detail.get("network").is_none(), "{detail}");
+        assert_eq!(detail["causes"], json!([format!("HTTP 状态码 404: {url}")]));
+    }
+
     #[test]
     fn io_errors_keep_path_and_cause_chain() {
         let err: CommandError = BaseError::Io {

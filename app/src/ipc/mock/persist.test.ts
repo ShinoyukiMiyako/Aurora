@@ -63,7 +63,24 @@ describe("mock 持久化", () => {
     await first.mockInvoke("create_offline_account", { name: "Steve" });
     await first.mockInvoke("rename_instance", { id: "樱花生存", newName: "樱花二周目" });
     await first.mockInvoke("remove_mod", { versionId: "1.20.1-Fabric", fileName: "handmade-1.0.jar" });
-    expect(storage.keys()).toEqual(["slug.mock.accounts", "slug.mock.appearance", "slug.mock.config", "slug.mock.instances", "slug.mock.mods", "slug.mock.system"]);
+    await first.mockInvoke("install_resource", {
+      taskId: "t-rp",
+      versionId: "1.21.1-Fabric",
+      resourceType: "resource_pack",
+      world: null,
+      platform: "modrinth",
+      projectId: "faithful-32x",
+      fileVersionId: "f32-1211",
+    });
+    expect(storage.keys()).toEqual([
+      "slug.mock.accounts",
+      "slug.mock.appearance",
+      "slug.mock.config",
+      "slug.mock.discover",
+      "slug.mock.instances",
+      "slug.mock.mods",
+      "slug.mock.system",
+    ]);
 
     const second = await reload();
     // 没启用持久化之前就是种子：证明下面读到的确实来自存储。
@@ -77,6 +94,14 @@ describe("mock 持久化", () => {
     expect(ids).toContainEqual(["樱花二周目", 12]);
     expect(ids).toContainEqual(["1.20.1-Fabric", 3]);
     expect(ids.some(([id]) => id === "樱花生存")).toBe(false);
+    // 装过的资源包刷新后仍认作已装。
+    const matrix = await second.mockInvoke<{ version_id: string; state: string }[]>("match_instances", {
+      platform: "modrinth",
+      projectId: "faithful-32x",
+      resourceType: "resource_pack",
+      modVersionId: null,
+    });
+    expect(matrix.find((m) => m.version_id === "1.21.1-Fabric")?.state).toBe("installed");
   });
 
   it("resetMockData 回到种子并清掉存下的状态，刷新后仍是种子", async () => {

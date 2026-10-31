@@ -151,6 +151,7 @@ pub fn run() {
             commands::mods::update_mod,
             commands::mods::list_mod_versions,
             commands::mods::match_instances,
+            commands::mods::installed_sources,
             commands::mods::plan_install,
             // -- history --
             commands::history::list_history,
@@ -235,6 +236,43 @@ mod tests {
         ] {
             let decl = format!("export const {name} = \"{value}\";");
             assert!(app_info.contains(&decl), "app-info.ts 缺少 {decl}");
+        }
+    }
+
+    // 许可证只在根 Cargo.toml 的 [workspace.package] 写一次；关于页显示的 APP_LICENSE 引用不到
+    // Cargo 元数据，由这条测试钉住两边相同，也拦住新加的 crate 忘了继承、各写各的。
+    #[test]
+    fn license_is_declared_once_for_the_workspace_and_matches_frontend() {
+        let license = env!("CARGO_PKG_LICENSE");
+        assert_eq!(license, "AGPL-3.0-only");
+        let decl = format!("export const APP_LICENSE = \"{license}\";");
+        assert!(
+            include_str!("../../src/lib/app-info.ts").contains(&decl),
+            "app-info.ts 缺少 {decl}"
+        );
+
+        let shell_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates_dir = shell_dir.join("../../crates");
+        let mut manifests = vec![shell_dir.join("Cargo.toml")];
+        for entry in std::fs::read_dir(&crates_dir).expect("读 crates 目录") {
+            let manifest = entry.expect("读 crates 目录项").path().join("Cargo.toml");
+            if manifest.is_file() {
+                manifests.push(manifest);
+            }
+        }
+        assert!(
+            manifests.len() > 1,
+            "{} 下没找到 crate",
+            crates_dir.display()
+        );
+        for manifest in manifests {
+            let text = std::fs::read_to_string(&manifest).expect("读 Cargo.toml");
+            assert!(
+                text.lines()
+                    .any(|line| line.trim() == "license.workspace = true"),
+                "{} 没有继承 workspace 的 license",
+                manifest.display()
+            );
         }
     }
 }

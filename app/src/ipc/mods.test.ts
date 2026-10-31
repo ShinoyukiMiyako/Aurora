@@ -8,6 +8,7 @@ import { beginMockTask, endMockTask } from "./mock/handlers/tasks";
 import {
   checkUpdates,
   isModFileBusy,
+  installedSources,
   listMods,
   listModVersions,
   matchInstances,
@@ -124,6 +125,24 @@ describe("移除", () => {
     // 卷宗条目已摘：同工程在落位矩阵里不再是「已安装」。
     const matrix = await matchInstances("modrinth", "AANobbMI", "mod", null);
     expect(matrix.find((m) => m.version_id === MOCK_MOD_INSTANCE)?.state).toBe("compatible");
+  });
+
+  it("全部实例的已装来源一次取齐：禁用态也算，移除后随之消失", async () => {
+    const sourcesOf = async (id: string) => {
+      const row = (await installedSources()).find((r) => r.version_id === id);
+      if (row === undefined || row.status !== "ready") throw new Error(`${id} 没有读出已装来源`);
+      return row.sources.map((s) => `${s.platform}:${s.project_id}`);
+    };
+    const all = await installedSources();
+    // 覆盖实例 mock 里全部可用的实例（损坏的不在其中），按实例 id 排序。
+    expect(all.map((r) => r.version_id)).toEqual(["1.20.1-Fabric", "1.20.1-Forge", "1.21", "1.21.1", "1.21.1-Fabric", "RLCraft", "樱花生存"]);
+    expect(all.every((r) => r.status === "ready")).toBe(true);
+    // 种子里 Lithium 是禁用态，仍算装着；没有卷宗来源的手动 Mod 不出现。
+    expect(await sourcesOf(MOCK_MOD_INSTANCE)).toEqual(["modrinth:AANobbMI", "modrinth:P7dR8mSH", "modrinth:gvQqBUqZ"]);
+    expect(await sourcesOf("樱花生存")).toEqual([]);
+
+    await removeMod(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar");
+    expect(await sourcesOf(MOCK_MOD_INSTANCE)).toEqual(["modrinth:P7dR8mSH", "modrinth:gvQqBUqZ"]);
   });
 
   it("空名报 invalid_argument，非模组文件名与不存在的文件报 io 且不记历史", async () => {
@@ -244,7 +263,7 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       ["RLCraft", "incompatible"],
     ]);
     expect(matrix[0].best_version?.version_id).toBe("sodium-121");
-    expect(matrix[2].installed).toEqual({ file_name: "AANobbMI-0.5.3.jar", version_id: "sodium-053", version_number: "0.5.3" });
+    expect(matrix[2].installed).toEqual({ file_name: "AANobbMI-0.5.3.jar", version_id: "sodium-053", version_number: "0.5.3", world: null });
     expect(matrix[2].best_version?.version_id).toBe("sodium-060");
     expect(matrix[3].compatibility).toEqual({ kind: "mismatch", reason: "需要 Fabric/NeoForge，该实例装的是 Forge" });
     expect(matrix[4].compatibility).toEqual({ kind: "mismatch", reason: "该实例未安装 Mod 加载器" });

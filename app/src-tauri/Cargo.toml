@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Petalfall 的 Tauri 外壳：把 aurora-core 门面通过 IPC 暴露给 React 前端"
 authors = ["Petalfall"]
 edition = "2021"
+license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

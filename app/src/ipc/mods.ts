@@ -109,10 +109,13 @@ export type Compatibility =
 /** 落位矩阵的四态：兼容 / 可能可行 / 已安装 / 不兼容。数组已按这个顺序排好。 */
 export type MatchState = "compatible" | "maybe" | "installed" | "incompatible";
 
+/** 已装在实例里的那份。资源包、光影、数据包没有卷宗，后端按盘上文件的文件名与大小对平台版本认出来。 */
 export interface InstalledCopy {
   file_name: string;
   version_id: string;
   version_number: string | null;
+  /** 数据包装在哪个存档（存档目录名，几个存档都有时取名字排在最前的）；其余类型为 null。 */
+  world: string | null;
 }
 
 export interface InstanceMatch {
@@ -176,6 +179,23 @@ export const matchInstances = (
   resourceType: InstallableResourceType,
   modVersionId: string | null,
 ): Promise<InstanceMatch[]> => invoke<InstanceMatch[]>("match_instances", { platform, projectId, resourceType, modVersionId });
+
+/** 实例里一个已装 Mod 的平台来源。 */
+export interface InstalledSource {
+  platform: PlatformId;
+  project_id: string;
+}
+
+/** 一个实例里已装 Mod 的平台来源；读不出卷宗或 mods 目录时带上命令错误的形状，其余实例不受影响。 */
+export type InstanceSources =
+  | { status: "ready"; version_id: string; sources: InstalledSource[] }
+  | { status: "error"; version_id: string; error: { code: string; message: string; detail?: unknown } };
+
+/**
+ * 全部实例已装 Mod 的平台来源，一次取齐，按实例 id 排序（发现页的「已装入 n 个实例」）。
+ * 卷宗与 mods 目录 join，禁用态也算；只读文件名，不打开 jar、不联网。
+ */
+export const installedSources = (): Promise<InstanceSources[]> => invoke<InstanceSources[]>("installed_sources");
 
 export const planInstall = (versionId: string, platform: PlatformId, projectId: string, modVersionId: string): Promise<InstallPlan> =>
   invoke<InstallPlan>("plan_install", { versionId, platform, projectId, modVersionId });
