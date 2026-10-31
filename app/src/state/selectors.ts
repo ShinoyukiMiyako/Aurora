@@ -1,7 +1,7 @@
 // 选择器：页面、外壳与启动层读状态的统一入口，避免各处自己拼同样的判断。
 
 import type { Account, InstanceSummary } from "../domain/adapt";
-import { SIDEBAR_PIN_LIMIT } from "../domain/limits";
+import { SIDEBAR_PIN_LIMIT, USED_AUTH_SERVERS_LIMIT } from "../domain/limits";
 import type { Task } from "../domain/types";
 import { isSessionActive } from "./session";
 import type { LauncherState } from "./store";
@@ -58,6 +58,23 @@ export function pinnedInstances(state: LauncherState): InstanceSummary[] {
 /** 还能再固定一个（已固定的取消固定不受此限）。 */
 export function canPinMore(state: LauncherState): boolean {
   return state.sidebarPins.length < SIDEBAR_PIN_LIMIT;
+}
+
+/**
+ * 已有外置登录账户用过的验证服务器：按 API 根地址去重，最近添加的账户在前，最多 USED_AUTH_SERVERS_LIMIT 个。
+ * except 里的地址（已经有固定快捷项的）不列。
+ */
+export function usedAuthServers(state: LauncherState, except: readonly string[]): { serverUrl: string; serverName: string }[] {
+  const seen = new Set<string>(except);
+  const servers: { serverUrl: string; serverName: string }[] = [];
+  for (const account of [...state.accounts].sort((a, b) => b.addedAt - a.addedAt)) {
+    if (account.kind !== "authlib") continue;
+    if (account.serverUrl === null || account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少验证服务器`);
+    if (seen.has(account.serverUrl)) continue;
+    seen.add(account.serverUrl);
+    servers.push({ serverUrl: account.serverUrl, serverName: account.authServer });
+  }
+  return servers.slice(0, USED_AUTH_SERVERS_LIMIT);
 }
 
 /** 有活动会话或排队、进行中的任务时，关闭窗口要先确认。 */

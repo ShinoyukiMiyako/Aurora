@@ -47,3 +47,5 @@ export const OFFLINE_PROBE_MS = 15000;
 export const INSTANCE_RESCAN_MIN_MS = 30000;
 /** 侧栏固定实例的上限。 */
 export const SIDEBAR_PIN_LIMIT = 5;
+/** 外置登录第一步列出的「用过的服务器」快捷项个数上限。 */
+export const USED_AUTH_SERVERS_LIMIT = 3;

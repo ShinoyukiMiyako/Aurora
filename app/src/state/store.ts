@@ -1477,7 +1477,8 @@ export class LauncherStore {
         if (account === undefined) throw new Error(`账户 ${accountUuid} 不存在`);
         if (account.kind === "microsoft") return actions.startMicrosoftLogin(intent);
         if (account.kind === "authlib") {
-          store.set({ login: { kind: "authlib", intent, prefill: null } });
+          if (account.serverUrl === null || account.authServer === null) throw new Error(`外置登录账户 ${account.name} 缺少验证服务器`);
+          store.set({ login: { kind: "authlib", intent, prefill: { serverUrl: account.serverUrl, serverName: account.authServer, username: account.username } } });
           return;
         }
         throw new Error("离线账户没有登录状态，不需要重新登录");

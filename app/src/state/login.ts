@@ -17,10 +17,15 @@ export type DeviceLogin =
   | { status: "success"; account: Account; updated: boolean }
   | { status: "failed"; code: string; message: string; detail: unknown };
 
-/** 外置登录重新登录时预填的内容；停在第二步，密码为空。 */
+/**
+ * 外置登录重新登录时预填的内容：弹窗直接停在第二步，密码为空。API 根地址是上次登录时解析好的，
+ * 服务器名随账户存着，不必再探测一次服务器。
+ */
 export interface AuthlibPrefill {
   serverUrl: string;
-  username: string;
+  serverName: string;
+  /** 上次登录填的账号；较早登录的账户没有记下，为 null。 */
+  username: string | null;
 }
 
 export type LoginState =
