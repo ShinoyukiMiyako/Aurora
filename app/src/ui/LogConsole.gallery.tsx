@@ -45,6 +45,7 @@ function Demo() {
   const [live, setLive] = useState(true);
   const [level, setLevel] = useState<LogLevelFilter>("all");
   const [source, setSource] = useState<LogSourceFilter>("all");
+  const [installing, setInstalling] = useState(false);
 
   useEffect(() => {
     if (!live) return;
@@ -69,6 +70,9 @@ function Demo() {
         </Button>
         <Button size="sm" variant="ghost" onClick={() => append(3000)}>
           追加 3000 行
+        </Button>
+        <Button size="sm" variant="ghost" onClick={() => setInstalling((v) => !v)}>
+          {installing ? "结束安装占用" : "模拟安装占用（文件夹按钮置灰）"}
         </Button>
       </GalleryRow>
       <div style={{ height: 420, display: "grid" }}>
@@ -95,6 +99,7 @@ function Demo() {
             onCopy={fakeCopy}
             copyFeedbackMs={2000}
             onOpenFolder={() => undefined}
+            openFolderDisabledReason={installing ? "安装进行中，暂时不能打开" : undefined}
             onOpenLogFile={() => undefined}
           />
         </Card>

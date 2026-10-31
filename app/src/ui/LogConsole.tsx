@@ -155,6 +155,8 @@ export interface LogConsoleProps {
   /** 复制成功的原位反馈停留时长（毫秒）。 */
   copyFeedbackMs: number;
   onOpenFolder?: () => void;
+  /** 暂时打不开日志文件夹时的原因（例如安装、补全占用实例期间）：给了就把文件夹按钮置灰，悬停与聚焦显示它。 */
+  openFolderDisabledReason?: string;
   onOpenLogFile?: () => void;
   className?: string;
 }
@@ -172,10 +174,13 @@ export function LogConsole({
   onCopy,
   copyFeedbackMs,
   onOpenFolder,
+  openFolderDisabledReason,
   onOpenLogFile,
   className,
 }: LogConsoleProps) {
   if (!Number.isInteger(dropped) || dropped < 0) throw new Error(`LogConsole 的 dropped 必须是非负整数，收到 ${dropped}`);
+  // 没有文件夹入口时原因无处显示，多半是调用方接错了属性，不让它悄悄失效
+  if (openFolderDisabledReason !== undefined && onOpenFolder === undefined) throw new Error("LogConsole 的 openFolderDisabledReason 要与 onOpenFolder 一起给");
   const [wrap, setWrap] = useState(false);
   const [stuck, setStuck] = useState(true);
   const stuckRef = useRef(true);
@@ -256,7 +261,9 @@ export function LogConsole({
                 feedbackMs={copyFeedbackMs}
                 disabled={shown.length === 0}
               />
-              {onOpenFolder !== undefined && <IconButton icon="folder" label="打开日志文件夹" size="sm" onClick={onOpenFolder} />}
+              {onOpenFolder !== undefined && (
+                <IconButton icon="folder" label="打开日志文件夹" size="sm" disabledReason={openFolderDisabledReason} onClick={onOpenFolder} />
+              )}
               <IconButton icon="list" label="自动换行" size="sm" pressed={wrap} onClick={() => setWrap((w) => !w)} />
             </>
           }
