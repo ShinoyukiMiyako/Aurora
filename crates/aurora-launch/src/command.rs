@@ -284,7 +284,10 @@ impl<'a> CommandBuilder<'a> {
             Some(arguments) => {
                 jvm_templates.extend(args::expand_arguments(&arguments.jvm, &self.ctx))
             }
-            None => jvm_templates.extend(args::legacy_jvm_base_args()),
+            None => {
+                jvm_templates.extend(args::legacy_jvm_platform_args(&self.ctx));
+                jvm_templates.extend(args::legacy_jvm_base_args());
+            }
         }
         if let Some(client) = self
             .version

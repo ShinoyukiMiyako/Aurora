@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use aurora_version::{Argument, RuntimeContext, evaluate_rules};
+use aurora_version::{Argument, OsName, RuntimeContext, evaluate_rules};
 
 /// 强制安全参数：缓解 Log4Shell（CVE-2021-44228）。必须默认注入，与用户设置无关。
 pub fn security_args() -> Vec<String> {
@@ -35,6 +35,21 @@ pub fn legacy_jvm_base_args() -> Vec<String> {
         "-cp".to_owned(),
         "${classpath}".to_owned(),
     ]
+}
+
+/// 旧版（无 `arguments.jvm`）在当前平台上要补的 JVM 参数，排在 [`legacy_jvm_base_args`] 之前。
+///
+/// 1.13 起的版本 JSON 在 Windows 上自带 `-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance...`：
+/// Intel 显卡驱动靠命令行里的这串认出 Minecraft，套用为它准备的驱动配置。旧版本 JSON 不写这条，
+/// 由启动器补上，否则同一块显卡上旧版本拿不到这份配置。
+pub fn legacy_jvm_platform_args(ctx: &RuntimeContext) -> Vec<String> {
+    match ctx.os_name {
+        OsName::Windows => vec![
+            "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"
+                .to_owned(),
+        ],
+        OsName::Osx | OsName::Linux => Vec::new(),
+    }
 }
 
 /// 展开新式 `arguments`（game 或 jvm）数组：纯字符串直接收，条件块按 rules 命中才收其 value。
@@ -260,6 +275,20 @@ mod tests {
     fn security_and_encoding_are_fixed() {
         assert_eq!(security_args(), vec!["-Dlog4j2.formatMsgNoLookups=true"]);
         assert!(encoding_args().contains(&"-Dfile.encoding=UTF-8".to_string()));
+    }
+
+    /// Intel 显卡驱动按命令行里有没有这串识别 Minecraft；新式版本 JSON 在 Windows 上带着它，旧版本
+    /// JSON 没有，补的时候同样只在 Windows 上补。
+    #[test]
+    fn legacy_platform_args_only_on_windows() {
+        assert_eq!(
+            legacy_jvm_platform_args(&ctx(OsName::Windows)),
+            vec![
+                "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump"
+            ]
+        );
+        assert!(legacy_jvm_platform_args(&ctx(OsName::Linux)).is_empty());
+        assert!(legacy_jvm_platform_args(&ctx(OsName::Osx)).is_empty());
     }
 
     #[test]
