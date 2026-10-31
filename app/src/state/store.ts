@@ -895,6 +895,9 @@ export class LauncherStore {
   private journalTimer: ReturnType<typeof setTimeout> | null = null;
   private loginGen = 0;
   private lastScanAt = 0;
+  /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
+  private scanIssued = 0;
+  private scanApplied = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
   /**
@@ -1058,11 +1061,21 @@ export class LauncherStore {
     this.set({ accounts: list.map(accountFromDto), currentAccountId: current === null ? null : current.uuid });
   }
 
-  private async fetchInstances(extra?: (raw: RawState, scanned: InstanceSummary[]) => Partial<RawState>): Promise<void> {
+  /**
+   * 重扫实例列表。几处会同时发起重扫（窗口获得焦点、游戏退出、任务落地、删除与改名），先发出的那次可能后回来：
+   * 它读的是更早的盘面，照单采纳会让刚删掉的实例回到列表、刚改名的实例变回旧名。所以只采纳比已采纳的那次更晚发出的结果；
+   * 晚到的旧结果丢掉，但 extra（撤占位项、改名迁移）照样套在已采纳的那份更新的列表上。
+   */
+  private async fetchInstances(extra?: (raw: RawState) => Partial<RawState>): Promise<void> {
+    const seq = ++this.scanIssued;
     const dtos: InstanceDto[] = await instancesIpc.listInstances();
-    const scanned = dtos.map((dto) => instanceFromDto(dto, { pins: [], busyTaskInstanceIds: new Set() }));
-    this.lastScanAt = Date.now();
-    this.set((raw) => ({ scanned, ...(extra === undefined ? {} : extra(raw, scanned)) }));
+    const fresh = seq > this.scanApplied;
+    if (fresh) {
+      this.scanApplied = seq;
+      this.lastScanAt = Date.now();
+    }
+    const scanned = fresh ? { scanned: dtos.map((dto) => instanceFromDto(dto, { pins: [], busyTaskInstanceIds: new Set() })) } : {};
+    this.set((raw) => ({ ...scanned, ...(extra === undefined ? {} : extra(raw)) }));
   }
 
   private async fetchPins(): Promise<void> {
