@@ -12,8 +12,9 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use aurora_auth::{Account, AccountCredentials};
+use aurora_auth::{Account, AccountCredentials, AccountStatus};
 use aurora_download::{BatchReport, DownloadTask};
 use aurora_install::GameLayout;
 use aurora_instance::{
@@ -32,7 +33,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::config::MemorySettings;
-use crate::error::CoreError;
+use crate::error::{CoreError, OfflineFallbackRefusal};
 use crate::event::{CoreEvent, DownloadProgress};
 use crate::facade::{Aurora, make_context};
 use crate::session::GameRun;
@@ -141,6 +142,40 @@ pub struct LaunchRequest {
     pub game_log: Option<LogBatchSink>,
 }
 
+/// 各账户最近一次账户类启动失败，键为账户 uuid。只在内存里：降级放行要的是「刚才亲眼看到验证失败」，
+/// 重开启动器后就不再作数。门面的快照克隆共享同一个句柄。
+pub(crate) type AccountFailures = Arc<Mutex<HashMap<String, FailureCode>>>;
+
+/// 会被记进 [`AccountFailures`] 的失败码。
+const ACCOUNT_FAILURES: [FailureCode; 3] = [
+    FailureCode::AccountRelogin,
+    FailureCode::AccountRefreshNetwork,
+    FailureCode::AccountServiceDown,
+];
+
+/// 按记下的上一次账户失败决定能否降级：只有验证本身没能完成（服务故障、网络故障）才放行；凭据被判定
+/// 失效时离线进游戏只会掩盖问题，应当重新登录。
+fn offline_fallback_verdict(
+    previous: Option<FailureCode>,
+) -> Result<FailureCode, OfflineFallbackRefusal> {
+    match previous {
+        Some(code @ (FailureCode::AccountServiceDown | FailureCode::AccountRefreshNetwork)) => {
+            Ok(code)
+        }
+        // 记录里只有账户类失败码，剩下的就是 account_relogin。
+        Some(_) => Err(OfflineFallbackRefusal::ReloginRequired),
+        None => Err(OfflineFallbackRefusal::NoRecentFailure),
+    }
+}
+
+/// 启动用的身份：注入命令行的鉴权值、外置登录要注入的验证服务器，以及这一局是否未经验证。
+struct LaunchIdentity {
+    auth: AuthValues,
+    /// 外置登录账户的验证服务器 API 根；`None` 时不下载、不注入 authlib-injector。
+    authlib_root: Option<String>,
+    offline: bool,
+}
+
 /// 玩家能针对性处理的启动失败码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,6 +185,8 @@ pub enum FailureCode {
     JavaTooOld,
     AccountRelogin,
     AccountRefreshNetwork,
+    /// 微软登录服务一侧故障（5xx、429 或故障页），重试过仍不行；不是这个账户的问题。
+    AccountServiceDown,
     FilesOffline,
     FilesFailed,
     DiskFull,
@@ -165,6 +202,7 @@ impl FailureCode {
             FailureCode::JavaTooOld => "java_too_old",
             FailureCode::AccountRelogin => "account_relogin",
             FailureCode::AccountRefreshNetwork => "account_refresh_network",
+            FailureCode::AccountServiceDown => "account_service_down",
             FailureCode::FilesOffline => "files_offline",
             FailureCode::FilesFailed => "files_failed",
             FailureCode::DiskFull => "disk_full",
@@ -464,7 +502,18 @@ impl Aurora {
         request: LaunchRequest,
         events: &LaunchEventSink,
     ) -> Result<GameRun, LaunchFailed> {
-        self.launch_inner(request, events, None).await
+        self.launch_inner(request, false, events, None).await
+    }
+
+    /// 以离线方式进单人：这一局不续期、不校验，用账户上次登录时的档案名与 uuid、离线令牌进游戏，阶段
+    /// 推进与普通启动相同。只在这个账户上一次启动因服务或网络故障没能验证时放行，由门面凭自己记下的
+    /// 失败判定，不信调用方；不能放行时报 [`CoreError::OfflineFallbackRefused`]。
+    pub async fn launch_offline_fallback(
+        &self,
+        request: LaunchRequest,
+        events: &LaunchEventSink,
+    ) -> Result<GameRun, LaunchFailed> {
+        self.launch_inner(request, true, events, None).await
     }
 
     /// 固定用某个 Java 启动。实例设置还没有 Java 字段，测试要绕开本机 Java 探测只能从这里指定。
@@ -472,16 +521,23 @@ impl Aurora {
     pub(crate) async fn launch_with_java(
         &self,
         request: LaunchRequest,
+        offline_fallback: bool,
         events: &LaunchEventSink,
         java: PathBuf,
     ) -> Result<GameRun, LaunchFailed> {
-        self.launch_inner(request, events, Some(JavaChoice::Path(java)))
-            .await
+        self.launch_inner(
+            request,
+            offline_fallback,
+            events,
+            Some(JavaChoice::Path(java)),
+        )
+        .await
     }
 
     async fn launch_inner(
         &self,
         request: LaunchRequest,
+        offline_fallback: bool,
         events: &LaunchEventSink,
         java_override: Option<JavaChoice>,
     ) -> Result<GameRun, LaunchFailed> {
@@ -508,10 +564,23 @@ impl Aurora {
                 ))
                 .await;
         }
-        match self
-            .launch_with(request, chain, &mut reporter, java_override)
-            .await
-        {
+        let stored_uuid = match &request.account {
+            LaunchAccount::Stored(account) => Some(account.uuid.clone()),
+            LaunchAccount::Offline { .. } => None,
+        };
+        let result = self
+            .launch_with(
+                request,
+                offline_fallback,
+                chain,
+                &mut reporter,
+                java_override,
+            )
+            .await;
+        if let Some(uuid) = stored_uuid {
+            self.record_account_outcome(uuid, &result);
+        }
+        match result {
             Ok(run) => Ok(run),
             Err(err) => {
                 let outcome = if err.is_cancelled() {
@@ -535,6 +604,7 @@ impl Aurora {
     async fn launch_with(
         &self,
         request: LaunchRequest,
+        offline_fallback: bool,
         chain: VersionChain,
         reporter: &mut Reporter<'_>,
         java_override: Option<JavaChoice>,
@@ -563,7 +633,13 @@ impl Aurora {
         {
             settings.java = JavaChoice::Path(path.clone());
         }
-        let (account, auth) = self.launch_identity(account, reporter).await?;
+        let LaunchIdentity {
+            auth,
+            authlib_root: authlib,
+            offline,
+        } = self
+            .launch_identity(account, offline_fallback, reporter)
+            .await?;
         let required_major = required_java_major(merged);
         let java_plan = self
             .plan_java(required_major, &settings.java, &mc_version, reporter)
@@ -615,10 +691,6 @@ impl Aurora {
         let mut plan = DownloadPlan {
             files: missing_files(plan.files).await?,
             asset_index_missing: plan.asset_index_missing,
-        };
-        let authlib = match &account.credentials {
-            AccountCredentials::AuthlibInjector(creds) => Some(creds.api_root.clone()),
-            _ => None,
         };
 
         // -- 3 下载缺失文件（游戏文件、托管 Java、authlib-injector）
@@ -752,17 +824,41 @@ impl Aurora {
                 max_memory_mb: memory.max_mb,
                 warnings,
                 pid,
+                offline,
             },
             session,
         ))
     }
 
-    /// 账户与注入命令行的鉴权值。微软账户在这里静默续期，续期失败按原因分成「需要重登」与「网络问题」。
+    /// 记下或清掉这个账户最近一次账户类失败，供以离线方式进单人时判定。只有可处理的账户失败才记；
+    /// 正常验证后跑起来的一局清掉记录；其余结局（取消、文件或 Java 失败、降级启动本身）不动它。
+    fn record_account_outcome(&self, uuid: String, result: &Result<GameRun, LaunchFailed>) {
+        let mut failures = self
+            .account_failures
+            .lock()
+            .expect("账户失败记录的锁已中毒");
+        match result {
+            Err(LaunchFailed::Failure(failure)) if ACCOUNT_FAILURES.contains(&failure.code) => {
+                failures.insert(uuid, failure.code);
+            }
+            Ok(run) if !run.offline() => {
+                failures.remove(&uuid);
+            }
+            _ => {}
+        }
+    }
+
+    /// 账户与注入命令行的鉴权值。微软账户在这里静默续期，续期失败按原因分成「需要重登」「服务故障」与
+    /// 「网络问题」。
     async fn launch_identity(
         &self,
         account: LaunchAccount,
+        offline_fallback: bool,
         reporter: &mut Reporter<'_>,
-    ) -> Result<(Account, AuthValues), LaunchFailed> {
+    ) -> Result<LaunchIdentity, LaunchFailed> {
+        if offline_fallback {
+            return self.offline_fallback_identity(account, reporter).await;
+        }
         let account = match account {
             LaunchAccount::Offline { name } => {
                 let (tx, mut rx) = mpsc::unbounded_channel();
@@ -778,7 +874,68 @@ impl Aurora {
             LaunchAccount::Stored(account) => self.refresh_for_launch(*account).await?,
         };
         let auth = AuthValues::from_account(&account)?;
-        Ok((account, auth))
+        let authlib_root = match &account.credentials {
+            AccountCredentials::AuthlibInjector(creds) => Some(creds.api_root.clone()),
+            _ => None,
+        };
+        Ok(LaunchIdentity {
+            auth,
+            authlib_root,
+            offline: false,
+        })
+    }
+
+    /// 以离线方式进单人：不发任何网络请求，不写账户库，用账户上次登录时的档案名与 uuid、离线令牌进游戏。
+    /// 判定顺序固定：离线账户、已失效账户先拒；再取出（同时消耗）上一次账户失败的记录，按它放行或拒绝。
+    async fn offline_fallback_identity(
+        &self,
+        account: LaunchAccount,
+        reporter: &mut Reporter<'_>,
+    ) -> Result<LaunchIdentity, LaunchFailed> {
+        let refuse = |account: String, reason: OfflineFallbackRefusal| -> LaunchFailed {
+            CoreError::OfflineFallbackRefused { account, reason }.into()
+        };
+        let account = match account {
+            LaunchAccount::Offline { name } => {
+                return Err(refuse(name, OfflineFallbackRefusal::OfflineAccount));
+            }
+            LaunchAccount::Stored(account) => *account,
+        };
+        if matches!(account.credentials, AccountCredentials::Offline) {
+            return Err(refuse(account.name, OfflineFallbackRefusal::OfflineAccount));
+        }
+        if account.status == AccountStatus::Expired {
+            return Err(refuse(
+                account.name,
+                OfflineFallbackRefusal::ReloginRequired,
+            ));
+        }
+        let previous = self
+            .account_failures
+            .lock()
+            .expect("账户失败记录的锁已中毒")
+            .remove(&account.uuid);
+        let previous = match offline_fallback_verdict(previous) {
+            Ok(code) => code,
+            Err(reason) => return Err(refuse(account.name, reason)),
+        };
+        reporter
+            .warn(format!(
+                "以离线方式进单人：{} 这一局不经账户验证，只能玩单人游戏",
+                account.name
+            ))
+            .await;
+        tracing::warn!(
+            uuid = %account.uuid,
+            name = %account.name,
+            previous = previous.as_str(),
+            "账户验证不可用，按玩家选择以离线方式启动"
+        );
+        Ok(LaunchIdentity {
+            auth: AuthValues::offline(account.name, account.uuid),
+            authlib_root: None,
+            offline: true,
+        })
     }
 
     /// 微软令牌过期就续期，外置令牌先校验、无效再刷新，离线原样返回。凭据被判定失效时账户库里
@@ -1227,6 +1384,8 @@ fn spawn_game(
     })
 }
 
+/// 续期失败分三类。只有服务器明确判定凭据失效时账户才会被标成需要重登（由续期本身写库）；服务故障与
+/// 网络故障不碰账户库，账户还是好的，玩家可以稍后重试或先以离线方式进单人。
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
         CoreError::Auth(aurora_auth::AuthError::Http { .. }) => LaunchFailure::new(
@@ -1235,6 +1394,17 @@ fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
         )
         .caused_by(err)
         .into(),
+        CoreError::Auth(aurora_auth::AuthError::ServiceUnavailable { status, .. }) => {
+            let status = u64::from(*status);
+            LaunchFailure::new(
+                FailureCode::AccountServiceDown,
+                format!("刷新 {account_name} 的登录失败：{err}"),
+            )
+            .param("account", account_name)
+            .param("status", status)
+            .caused_by(err)
+            .into()
+        }
         CoreError::Auth(_) => LaunchFailure::new(
             FailureCode::AccountRelogin,
             format!("{account_name} 的登录已失效：{err}"),
@@ -1505,8 +1675,36 @@ mod tests {
         aurora: &Aurora,
         java: PathBuf,
     ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
+        launch_request(aurora, request(), java).await
+    }
+
+    async fn launch_request(
+        aurora: &Aurora,
+        request: LaunchRequest,
+        java: PathBuf,
+    ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
+        launch_mode(aurora, request, false, java).await
+    }
+
+    /// 以离线方式进单人发起一次启动。
+    async fn launch_fallback(
+        aurora: &Aurora,
+        request: LaunchRequest,
+        java: PathBuf,
+    ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
+        launch_mode(aurora, request, true, java).await
+    }
+
+    async fn launch_mode(
+        aurora: &Aurora,
+        request: LaunchRequest,
+        offline_fallback: bool,
+        java: PathBuf,
+    ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let result = aurora.launch_with_java(request(), &tx, java).await;
+        let result = aurora
+            .launch_with_java(request, offline_fallback, &tx, java)
+            .await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -1531,6 +1729,516 @@ mod tests {
             Err(LaunchFailed::Core(err)) => panic!("应是可处理的启动失败，实际：{err:?}"),
             Ok(_) => panic!("应启动失败"),
         }
+    }
+
+    const MS_UUID: &str = "0123456789abcdef0123456789abcdef";
+    const MS_NAME: &str = "PetalPlayer";
+
+    /// Minecraft 令牌早已过期的微软账户：启动必须先续期。
+    fn stale_microsoft() -> Account {
+        let mut account = Account::new(
+            MS_UUID,
+            MS_NAME,
+            AccountCredentials::Microsoft(aurora_auth::MicrosoftCredentials {
+                refresh_token: "CACHED-REFRESH".into(),
+                minecraft_token: Some("CACHED-MC".into()),
+                minecraft_expires_at: Some(1),
+            }),
+        );
+        account.last_verified_at = Some(7);
+        account.xuid = Some("2535400000000001".into());
+        account
+    }
+
+    fn stored_request(account: Account) -> LaunchRequest {
+        LaunchRequest {
+            account: LaunchAccount::Stored(Box::new(account)),
+            ..request()
+        }
+    }
+
+    fn msa_endpoints(server: &wiremock::MockServer) -> aurora_auth::MsaEndpoints {
+        aurora_auth::MsaEndpoints {
+            oauth_base: server.uri(),
+            xbl_authenticate: format!("{}/xbl", server.uri()),
+            xsts_authorize: format!("{}/xsts", server.uri()),
+            minecraft_base: server.uri(),
+        }
+    }
+
+    /// 刷新令牌端点按给定状态与响应体回应；其后的 XBL 等步骤都没挂，走不到。
+    async fn mount_token(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    fn outage_page() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(503)
+            .insert_header("content-type", "text/html")
+            .set_body_string("<html><body>Service Unavailable</body></html>")
+    }
+
+    fn invalid_grant() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": "invalid_grant",
+            "error_description": "AADSTS70000: refresh token revoked"
+        }))
+    }
+
+    /// 门面上布置一个过期的微软账户、指向 mock 的登录端点，返回落库后的账户。
+    fn with_stale_account(fx: &Fixture, server: &wiremock::MockServer) -> (Aurora, Account) {
+        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(server));
+        let stored = aurora.store_account_for_test(stale_microsoft()).unwrap();
+        (aurora, stored)
+    }
+
+    /// 冒充 java 的批处理：报 Java 17；当作游戏时把收到的全部参数回显成一行游戏输出。
+    fn echo_java(dir: &Path) -> PathBuf {
+        let path = dir.join("echo-java.cmd");
+        let script = "@echo off\r\n\
+             if \"%~1\"==\"-version\" goto version\r\n\
+             echo ARGS %*\r\n\
+             exit /b 0\r\n\
+             :version\r\n\
+             >&2 echo openjdk version \"17.0.8\" 2023-07-18\r\n\
+             >&2 echo OpenJDK 64-Bit Server VM (build 17.0.8+7, mixed mode)\r\n\
+             exit /b 0\r\n";
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+
+    /// 带旧式 minecraftArguments 的最小原版：鉴权值经占位符原样落进游戏参数，回显出来即可断言。
+    fn install_legacy_args_version(mc: &Path) {
+        let dir = mc.join("versions").join(VERSION);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{VERSION}.json")),
+            format!(
+                r#"{{"id":"{VERSION}","type":"release","mainClass":"net.minecraft.client.main.Main","minecraftArguments":"--username ${{auth_player_name}} --uuid ${{auth_uuid}} --accessToken ${{auth_access_token}} --userType ${{user_type}}","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{VERSION}.jar")), b"jar").unwrap();
+    }
+
+    /// 刷新成功的整条令牌链；`login` 决定 Minecraft 登录那一步怎么回应。
+    async fn mount_chain(server: &wiremock::MockServer, login: wiremock::ResponseTemplate) {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        mount_token(
+            server,
+            ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "msa-access",
+                "refresh_token": "ROTATED-REFRESH",
+                "expires_in": 3600
+            })),
+        )
+        .await;
+        for route in ["/xbl", "/xsts"] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "Token": "xbox-token",
+                    "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+                })))
+                .mount(server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(login)
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": MS_UUID,
+                "name": MS_NAME
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn refusal(result: Result<GameRun, LaunchFailed>) -> (String, OfflineFallbackRefusal) {
+        match result {
+            Err(LaunchFailed::Core(CoreError::OfflineFallbackRefused { account, reason })) => {
+                (account, reason)
+            }
+            Err(other) => panic!("应拒绝以离线方式进单人，实际：{other:?}"),
+            Ok(_) => panic!("应拒绝以离线方式进单人，实际启动成功"),
+        }
+    }
+
+    fn expect_run(result: Result<GameRun, LaunchFailed>) -> GameRun {
+        match result {
+            Ok(run) => run,
+            Err(err) => panic!("启动应成功：{err:?}"),
+        }
+    }
+
+    fn failures_of(aurora: &Aurora) -> HashMap<String, FailureCode> {
+        aurora.account_failures.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn offline_fallback_verdict_allows_only_unverifiable_outcomes() {
+        assert_eq!(
+            offline_fallback_verdict(Some(FailureCode::AccountServiceDown)),
+            Ok(FailureCode::AccountServiceDown)
+        );
+        assert_eq!(
+            offline_fallback_verdict(Some(FailureCode::AccountRefreshNetwork)),
+            Ok(FailureCode::AccountRefreshNetwork)
+        );
+        assert_eq!(
+            offline_fallback_verdict(Some(FailureCode::AccountRelogin)),
+            Err(OfflineFallbackRefusal::ReloginRequired)
+        );
+        assert_eq!(
+            offline_fallback_verdict(None),
+            Err(OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_after_service_down_plays_with_cached_identity_and_no_network() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_legacy_args_version(&fx.root.join(".minecraft"));
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let java = echo_java(&fx.root);
+
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+        assert_eq!(
+            failures_of(&aurora).get(MS_UUID),
+            Some(&FailureCode::AccountServiceDown)
+        );
+        let before = server.received_requests().await.unwrap().len();
+
+        let (result, events) = launch_fallback(&aurora, stored_request(stored.clone()), java).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        // 不续期、不校验：这一局没有打到任何登录端点。
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        // 阶段推进与普通启动相同。
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let warning = format!("以离线方式进单人：{MS_NAME} 这一局不经账户验证，只能玩单人游戏");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                LaunchEvent::Log { level: LauncherLevel::Warn, text, .. } if *text == warning
+            )),
+            "{events:?}"
+        );
+        // 记录取出即消耗，降级成功也不会再写回。
+        assert!(failures_of(&aurora).is_empty());
+
+        let finished = run.finish().await.unwrap();
+        assert_eq!(finished.exit.exit_code, Some(0));
+        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert!(
+            log.lines.iter().any(|l| l.source == LogSource::Launcher
+                && l.level == Some(LauncherLevel::Warn)
+                && l.text == warning),
+            "{:?}",
+            log.lines
+        );
+        let args = log
+            .lines
+            .iter()
+            .find(|l| l.source == LogSource::Game && l.text.starts_with("ARGS "))
+            .map(|l| l.text.clone())
+            .expect("假 java 应回显启动参数");
+        assert!(args.contains(&format!("--username {MS_NAME} ")), "{args}");
+        assert!(args.contains(&format!("--uuid {MS_UUID} ")), "{args}");
+        assert!(args.contains("--accessToken 0 "), "{args}");
+        assert!(args.contains("--userType legacy"), "{args}");
+        for secret in ["CACHED-MC", "CACHED-REFRESH", "MC-TOKEN", "--userType msa"] {
+            assert!(!args.contains(secret), "参数里不该出现 {secret}：{args}");
+        }
+
+        // 账户状态与凭据不变：降级不写账户库。
+        let after = aurora
+            .find_account(MS_UUID)
+            .unwrap()
+            .expect("账户应仍在库中");
+        assert_eq!(after, stored);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_is_refused_for_offline_accounts() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, events) = launch_fallback(&fx.aurora, request(), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            ("Steve".to_owned(), OfflineFallbackRefusal::OfflineAccount)
+        );
+        assert_eq!(stage_indices(&events), vec![0]);
+
+        let library = fx.aurora.add_offline_account("Alex", None).unwrap();
+        // 即便门面记着它的一次失败，离线账户也没有验证可降级。
+        fx.aurora
+            .account_failures
+            .lock()
+            .unwrap()
+            .insert(library.uuid.clone(), FailureCode::AccountServiceDown);
+        let (result, _) = launch_fallback(&fx.aurora, stored_request(library.clone()), java).await;
+        assert_eq!(
+            refusal(result),
+            ("Alex".to_owned(), OfflineFallbackRefusal::OfflineAccount)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_is_refused_once_the_login_is_invalid() {
+        // 续期被判定失效：账户落为 expired，降级按「需要重新登录」拒绝。
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, invalid_grant()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (result, _) = launch_request(&aurora, stored_request(stored), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountRelogin);
+        let expired = aurora.find_account(MS_UUID).unwrap().unwrap();
+        assert_eq!(expired.status, AccountStatus::Expired);
+        let before = server.received_requests().await.unwrap().len();
+        let (result, _) =
+            launch_fallback(&aurora, stored_request(expired.clone()), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::ReloginRequired)
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), expired);
+
+        // 应用未获批准：账户本身没被标成失效，但记下的失败是 account_relogin，同样拒绝。
+        let server = wiremock::MockServer::start().await;
+        mount_chain(
+            &server,
+            wiremock::ResponseTemplate::new(403).set_body_string(
+                r#"{"path":"/authentication/login_with_xbox","errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}"#,
+            ),
+        )
+        .await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (result, _) = launch_request(&aurora, stored_request(stored), java.clone()).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::AccountRelogin);
+        let current = aurora.find_account(MS_UUID).unwrap().unwrap();
+        assert_eq!(current.status, AccountStatus::Ok);
+        let (result, _) = launch_fallback(&aurora, stored_request(current), java).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::ReloginRequired)
+        );
+        // 拒绝时那条记录已被取出，不会残留。
+        assert!(failures_of(&aurora).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_needs_a_recent_failure_and_consumes_it_once() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+
+        // 没有先前失败：不放行，也不联网。
+        let (result, events) =
+            launch_fallback(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+        assert_eq!(stage_indices(&events), vec![0]);
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        // 重开门面（同一数据目录）：记录只在内存里，不作数。
+        let reopened = Aurora::for_test(
+            fx.aurora.config().clone(),
+            fx.root.clone(),
+            fx.root.join(".minecraft"),
+        )
+        .with_msa_endpoints(msa_endpoints(&server));
+        let (result, _) =
+            launch_fallback(&reopened, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+
+        // 快照克隆共享同一份记录：在克隆上降级成功，原门面上的记录随之消耗。
+        let snapshot = aurora.clone();
+        let (result, _) =
+            launch_fallback(&snapshot, stored_request(stored.clone()), java.clone()).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        run.finish().await.unwrap();
+
+        // 一次性：紧接着再降级一次就没有可用的失败记录了。
+        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_launch_clears_the_recorded_failure() {
+        let down = wiremock::MockServer::start().await;
+        mount_token(&down, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &down);
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        // 服务恢复：普通启动续期成功并跑起来，清掉记下的失败。
+        let up = wiremock::MockServer::start().await;
+        mount_chain(
+            &up,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "MC-TOKEN",
+                "expires_in": 86400
+            })),
+        )
+        .await;
+        let recovered = aurora.clone().with_msa_endpoints(msa_endpoints(&up));
+        let (result, _) =
+            launch_request(&recovered, stored_request(stored.clone()), java.clone()).await;
+        let run = expect_run(result);
+        assert!(!run.offline());
+        run.finish().await.unwrap();
+        assert!(failures_of(&aurora).is_empty());
+
+        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[test]
+    fn refresh_failures_split_into_relogin_outage_and_network() {
+        let outage = CoreError::Auth(aurora_auth::AuthError::ServiceUnavailable {
+            step: "刷新令牌",
+            status: 503,
+        });
+        let LaunchFailed::Failure(failure) = classify_refresh(outage, MS_NAME) else {
+            panic!("服务故障应是可处理的启动失败");
+        };
+        assert_eq!(failure.code, FailureCode::AccountServiceDown);
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        assert_eq!(failure.params.get("status"), Some(&Value::from(503u64)));
+        assert!(failure.message.contains(MS_NAME), "{}", failure.message);
+        assert!(failure.message.contains("HTTP 503"), "{}", failure.message);
+        assert!(failure.source.is_some());
+
+        for terminal in [
+            aurora_auth::AuthError::ReloginRequired,
+            aurora_auth::AuthError::AppNotApproved,
+            aurora_auth::AuthError::MinecraftProfileNotFound,
+        ] {
+            let LaunchFailed::Failure(failure) =
+                classify_refresh(CoreError::Auth(terminal), MS_NAME)
+            else {
+                panic!("确定性的账户错误应是可处理的启动失败");
+            };
+            assert_eq!(failure.code, FailureCode::AccountRelogin);
+            assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+            assert_eq!(failure.params.get("status"), None);
+        }
+
+        // 非账户错误原样冒泡，不冒充账户失败。
+        let other = classify_refresh(CoreError::NoJava { major: 17 }, MS_NAME);
+        assert!(
+            matches!(other, LaunchFailed::Core(CoreError::NoJava { major: 17 })),
+            "{other:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_outage_fails_as_service_down_and_leaves_the_account_alone() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+
+        let (result, events) = launch_request(
+            &aurora,
+            stored_request(stored.clone()),
+            fake_java(&fx.root, 17, 0),
+        )
+        .await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::AccountServiceDown);
+        assert_eq!(failure.params.get("status"), Some(&Value::from(503u64)));
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        // 停在阶段 0：账户不可用就不往下走。
+        assert_eq!(stage_indices(&events), vec![0]);
+        // 服务故障值得按退避重试：默认策略的每一次机会都打到了令牌端点。
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            aurora_base::retry::RetryPolicy::default().max_attempts as usize
+        );
+
+        // 账户还在、状态正常、凭据一个字没动。
+        let after = aurora
+            .find_account(MS_UUID)
+            .unwrap()
+            .expect("账户应仍在库中");
+        assert_eq!(after.status, aurora_auth::AccountStatus::Ok);
+        assert_eq!(after, stored);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_grant_fails_as_relogin_and_marks_the_account_expired() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, invalid_grant()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+
+        let (result, _) = launch_request(
+            &aurora,
+            stored_request(stored.clone()),
+            fake_java(&fx.root, 17, 0),
+        )
+        .await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::AccountRelogin);
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        // 凭据失效不重试。
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        let after = aurora
+            .find_account(MS_UUID)
+            .unwrap()
+            .expect("账户应仍在库中");
+        assert_eq!(after.status, aurora_auth::AccountStatus::Expired);
+        assert_eq!(after.credentials, stored.credentials);
     }
 
     #[test]
@@ -1831,6 +2539,7 @@ mod tests {
                 FailureCode::AccountRefreshNetwork,
                 "account_refresh_network",
             ),
+            (FailureCode::AccountServiceDown, "account_service_down"),
             (FailureCode::FilesOffline, "files_offline"),
             (FailureCode::FilesFailed, "files_failed"),
             (FailureCode::DiskFull, "disk_full"),

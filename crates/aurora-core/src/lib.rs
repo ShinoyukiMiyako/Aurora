@@ -71,7 +71,7 @@ pub use config::{
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use deps::{InstallPlan, PlannedItem};
-pub use error::{CoreError, GameDirProblem, Result};
+pub use error::{CoreError, GameDirProblem, OfflineFallbackRefusal, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
