@@ -313,6 +313,13 @@
   gap: var(--sk-space-6);
 }
 
+/* 整合包标签随卡宽收缩（标签默认不收缩），名字在标签里单行截断 */
+.heroPack {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .heroLine {
   display: flex;
   align-items: center;

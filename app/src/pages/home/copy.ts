@@ -43,6 +43,7 @@ export const HOME_COPY = {
   switchCurrent: "当前",
   allInstances: "全部实例",
   modCount: (n: number) => `${n} 个 Mod`,
+  modpack: (name: string, version: string | null) => (version === null ? name : `${name} ${version}`),
   playtime: (minutes: number) => `累计 ${formatPlaytime(minutes)}`,
   world: (name: string) => `存档「${name}」`,
   details: "实例详情",

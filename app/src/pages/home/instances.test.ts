@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SWITCH_MENU_LIMIT, continueTarget, latestWorld, recencyOf, recentInstances, sortByRecency, switchOptions, worldName } from "./instances";
+import { HERO_TAG_LIMIT, SWITCH_MENU_LIMIT, continueTarget, heroTags, latestWorld, recencyOf, recentInstances, sortByRecency, switchOptions, worldName } from "./instances";
 import { summary, world } from "./test-data";
 
 describe("新近度与排序", () => {
@@ -30,6 +30,37 @@ describe("继续游玩指向的实例", () => {
 
   it("一个实例都没有为 null", () => {
     expect(continueTarget([], null)).toBeNull();
+  });
+});
+
+describe("继续游玩大卡的信息标签", () => {
+  const pack = { platform: "modrinth" as const, projectId: "1KVo5zza", versionId: "v6", name: "Fabulously Optimized", version: "6.2.0" };
+
+  it("自建 Mod 实例：版本、加载器、Mod 数", () => {
+    expect(heroTags(summary("生存", { loader: "fabric", loaderVersion: "0.16.9", modCount: 78 }))).toEqual([
+      { kind: "version", mcVersion: "1.21.1" },
+      { kind: "loader" },
+      { kind: "mods", count: 78 },
+    ]);
+  });
+
+  it("整合包实例：版本、加载器、整合包名与版本，四样都有时让出 Mod 数，不超过上限", () => {
+    const tags = heroTags(summary("FO", { loader: "fabric", modCount: 92, modpack: pack }));
+    expect(tags).toEqual([{ kind: "version", mcVersion: "1.21.1" }, { kind: "loader" }, { kind: "modpack", name: "Fabulously Optimized", version: "6.2.0" }]);
+    expect(tags).toHaveLength(HERO_TAG_LIMIT);
+  });
+
+  it("版本识别不出时，整合包与 Mod 数都放得下；本地文件导入的整合包可以没有版本号", () => {
+    expect(heroTags(summary("坏", { mcVersion: null, modCount: 3, modpack: { ...pack, platform: null, projectId: null, versionId: null, version: null } }))).toEqual([
+      { kind: "loader" },
+      { kind: "modpack", name: "Fabulously Optimized", version: null },
+      { kind: "mods", count: 3 },
+    ]);
+  });
+
+  it("Mod 数为 0 或数不出来时不挂", () => {
+    expect(heroTags(summary("原版", { modCount: 0 }))).toEqual([{ kind: "version", mcVersion: "1.21.1" }, { kind: "loader" }]);
+    expect(heroTags(summary("损坏", { modCount: null }))).toEqual([{ kind: "version", mcVersion: "1.21.1" }, { kind: "loader" }]);
   });
 });
 

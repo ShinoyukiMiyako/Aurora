@@ -203,6 +203,16 @@ describe("主页：问候与继续游玩", () => {
     for (const fragment of ["1.21.1", "Fabric", "0.16.9", "78 个 Mod", "累计 41 小时 20 分钟", "存档「海岛据点」"]) expect(text()).toContain(fragment);
   });
 
+  it("整合包实例：大卡挂出整合包名与版本，让出 Mod 数", async () => {
+    instances = instances.map((i) =>
+      i.id === "生存" ? { ...i, modpack: { platform: "modrinth", project_id: "1KVo5zza", version_id: "v6", name: "Fabulously Optimized", version: "6.2.0" } } : i,
+    );
+    await mount();
+    const meta = document.querySelector("h2")?.nextElementSibling as HTMLElement;
+    expect([...meta.children].map((el) => el.textContent)).toEqual(["1.21.1", "Fabric0.16.9", "Fabulously Optimized 6.2.0"]);
+    expect(text()).not.toContain("78 个 Mod");
+  });
+
   it("换一个：当前项禁用并标「当前」，选另一个写入配置并就地换成它", async () => {
     await mount();
     await openMenu(buttonByText("换一个"));

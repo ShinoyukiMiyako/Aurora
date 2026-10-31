@@ -29,7 +29,7 @@ import { MenuButton } from "../../ui/MenuButton";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { HOME_COPY } from "./copy";
-import { latestWorld, switchOptions, worldName } from "./instances";
+import { heroTags, latestWorld, switchOptions, worldName, type HeroTag } from "./instances";
 import { SKELETON_SIZE } from "./layout";
 import { useReportOnce } from "./report";
 import s from "./home.module.css";
@@ -114,6 +114,32 @@ function HeroSkeleton({ pending, slow }: { pending: boolean; slow: boolean }) {
       </span>
     </div>
   );
+}
+
+function HeroTagView({ tag, inst }: { tag: HeroTag; inst: InstanceSummary }) {
+  switch (tag.kind) {
+    case "version":
+      return (
+        <Tag tone="outline" size="sm">
+          {tag.mcVersion}
+        </Tag>
+      );
+    case "loader":
+      return <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" />;
+    case "modpack":
+      // 整合包名可能很长：标签随卡宽收缩，名字单行截断，不把卡撑宽
+      return (
+        <Tag tone="outline" size="sm" icon="layers" className={s.heroPack}>
+          <span className={s.ellipsis}>{HOME_COPY.modpack(tag.name, tag.version)}</span>
+        </Tag>
+      );
+    case "mods":
+      return (
+        <Tag tone="outline" size="sm">
+          {HOME_COPY.modCount(tag.count)}
+        </Tag>
+      );
+  }
 }
 
 /** 量出卡面实际高度交给 Cover：大卡随内容变高（名称折两行、标签换行），底图要铺满。 */
@@ -220,17 +246,9 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
         <div className={s.heroTitle}>
           <h2 className={s.heroName}>{inst.name}</h2>
           <div className={s.heroMeta}>
-            {inst.mcVersion !== null && (
-              <Tag tone="outline" size="sm">
-                {inst.mcVersion}
-              </Tag>
-            )}
-            <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" />
-            {inst.modCount !== null && inst.modCount > 0 && (
-              <Tag tone="outline" size="sm">
-                {HOME_COPY.modCount(inst.modCount)}
-              </Tag>
-            )}
+            {heroTags(inst).map((tag) => (
+              <HeroTagView key={tag.kind} tag={tag} inst={inst} />
+            ))}
           </div>
           <p className={s.heroLine}>
             <Icon name="clock" size={16} />
