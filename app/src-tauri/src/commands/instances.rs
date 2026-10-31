@@ -99,11 +99,13 @@ impl InstanceActivity {
     }
 }
 
-/// 一个实例上的全部占用。`next` 给每次占用发一个号，守卫凭号释放自己那一份。
+/// 一个实例上的全部占用。`next` 给每次占用发一个号，守卫凭号释放自己那一份。`ids` 记下每个键第一次占用时
+/// 的原样 id：按活动找实例时要拿它去解析工作目录、写进 `instance_busy` 的 detail，不能用小写键代替。
 #[derive(Default)]
 struct LockTable {
     next: u64,
     held: HashMap<String, Vec<(u64, InstanceActivity)>>,
+    ids: HashMap<String, String>,
 }
 
 /// 实例级互斥表（managed state）。键不分大小写：Windows 上 `ABC` 与 `abc` 是同一个目录。
@@ -143,6 +145,10 @@ impl InstanceLocks {
             .entry(key.clone())
             .or_default()
             .push((token, activity));
+        table
+            .ids
+            .entry(key.clone())
+            .or_insert_with(|| id.to_owned());
         tracing::debug!(id, ?activity, "占用实例");
         Ok(InstanceGuard {
             table: self.table.clone(),
@@ -162,6 +168,23 @@ impl InstanceLocks {
                     .map(|&(_, activity)| activity)
                     .min_by_key(|activity| activity.report_rank())
             })
+    }
+
+    /// 此刻占着 `activity` 的实例（原样的 id）。
+    pub fn holding(&self, activity: InstanceActivity) -> Vec<String> {
+        let table = lock_table(&self.table);
+        table
+            .held
+            .iter()
+            .filter(|(_, holds)| holds.iter().any(|&(_, current)| current == activity))
+            .map(|(key, _)| {
+                table
+                    .ids
+                    .get(key)
+                    .expect("有占用的键一定记着原样 id")
+                    .clone()
+            })
+            .collect()
     }
 }
 
@@ -193,6 +216,7 @@ impl Drop for InstanceGuard {
             holds.retain(|(token, _)| *token != self.token);
             if holds.is_empty() {
                 table.held.remove(&self.key);
+                table.ids.remove(&self.key);
             }
         }
     }
@@ -1678,6 +1702,33 @@ async fn ensure_shared_world_free(
         InstanceActivity::Launching
     };
     Err(busy(&other, activity))
+}
+
+/// 启动前的共用存档检查，与 [`ensure_shared_world_free`] 方向相反：另一个也不隔离的实例正在备份、恢复或
+/// 导出共用存档时，这个实例的游戏一起来就可能打开同一份存档，边写边打包得到的备份是半截的。
+pub(crate) async fn ensure_shared_worlds_settled(
+    aurora: &Aurora,
+    locks: &InstanceLocks,
+    id: &str,
+) -> Result<(), CommandError> {
+    let others: Vec<String> = locks
+        .holding(InstanceActivity::BackingUp)
+        .into_iter()
+        .filter(|other| lock_key(other) != lock_key(id))
+        .collect();
+    // 没有别的实例在备份时不碰盘：每次启动都会经过这里。
+    if others.is_empty() {
+        return Ok(());
+    }
+    if aurora.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
+        return Ok(());
+    }
+    for other in others {
+        if aurora.world_scope(&other).await.map_err(instance_error)? == WorldScope::Shared {
+            return Err(busy(&other, InstanceActivity::BackingUp));
+        }
+    }
+    Ok(())
 }
 
 /// 备份、恢复、导出这三个长任务要用的共享状态。
@@ -4109,6 +4160,84 @@ mod tests {
             PathBuf::from(&mine.dir),
             env.backups_root().join("shared").join("共用")
         );
+    }
+
+    /// 反方向：另一个不隔离的实例正在备份共用存档时，不隔离的实例不能启动；隔离的照常，改动 Mod 不算。
+    #[tokio::test]
+    async fn launching_a_shared_instance_waits_for_another_shared_backup() {
+        let env = Env::new();
+        env.shared_world("甲", "共用");
+        env.vanilla("乙");
+        env.isolated_world("丙", "自己的");
+        let locks = InstanceLocks::default();
+        let aurora = env.facade.snapshot().await;
+        ensure_shared_worlds_settled(&aurora, &locks, "乙")
+            .await
+            .unwrap();
+
+        let backing = locks.acquire("甲", InstanceActivity::BackingUp).unwrap();
+        let err = ensure_shared_worlds_settled(&aurora, &locks, "乙")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": "甲", "activity": "backing_up" }))
+        );
+        ensure_shared_worlds_settled(&aurora, &locks, "丙")
+            .await
+            .unwrap();
+        // 自己在备份时由实例锁挡，这里不重复报。
+        ensure_shared_worlds_settled(&aurora, &locks, "甲")
+            .await
+            .unwrap();
+        drop(backing);
+
+        let isolated = locks.acquire("丙", InstanceActivity::BackingUp).unwrap();
+        let modifying = locks.acquire("甲", InstanceActivity::Modifying).unwrap();
+        ensure_shared_worlds_settled(&aurora, &locks, "乙")
+            .await
+            .unwrap();
+        drop((isolated, modifying));
+    }
+
+    /// 按活动找实例时给出原样的 id（键是小写的），放开后不再列出。
+    #[test]
+    fn holders_are_reported_by_their_original_id() {
+        let locks = InstanceLocks::default();
+        let first = locks
+            .acquire("Survival", InstanceActivity::BackingUp)
+            .unwrap();
+        let second = locks
+            .acquire("survival", InstanceActivity::Modifying)
+            .unwrap();
+        let other = locks.acquire("创造", InstanceActivity::Running).unwrap();
+        assert_eq!(
+            locks.holding(InstanceActivity::BackingUp),
+            vec!["Survival".to_owned()]
+        );
+        assert_eq!(
+            locks.holding(InstanceActivity::Running),
+            vec!["创造".to_owned()]
+        );
+        drop(first);
+        assert!(locks.holding(InstanceActivity::BackingUp).is_empty());
+        assert_eq!(
+            locks.holding(InstanceActivity::Modifying),
+            vec!["Survival".to_owned()],
+            "同一个键还有占用时原样 id 不变"
+        );
+        drop((second, other));
+        assert!(locks.holding(InstanceActivity::Modifying).is_empty());
+        let again = locks
+            .acquire("SURVIVAL", InstanceActivity::BackingUp)
+            .unwrap();
+        assert_eq!(
+            locks.holding(InstanceActivity::BackingUp),
+            vec!["SURVIVAL".to_owned()],
+            "全部放开后再占用，按新的写法记"
+        );
+        drop(again);
     }
 
     /// 验收：改名后备份跟着新名字走，改名前的备份照常列出；删除实例的预览说明备份在哪、有几份，删除实例
