@@ -127,6 +127,8 @@ describe("Card", () => {
     );
     expect(card.getAttribute("role")).toBeNull();
     expect(card.dataset.selected).toBe("true");
+    // 卡内点缀（封面底纹、身份方块）靠这个属性认出悬停宿主。
+    expect(card.hasAttribute("data-sk-hover-host")).toBe(true);
     const buttons = card.querySelectorAll("button");
     expect(buttons).toHaveLength(2);
     act(() => buttons[1].click());
@@ -135,6 +137,27 @@ describe("Card", () => {
     act(() => buttons[0].click());
     expect(open).toHaveBeenCalledTimes(1);
     expect(buttons[0].getAttribute("type")).toBe("button");
+  });
+
+  it("只有带标题按钮的卡片是悬停宿主；标题按钮卸载后不再是；脱离卡片使用直接报错", () => {
+    function Host({ titled }: { titled: boolean }) {
+      return <Card>{titled ? <CardTitleButton onClick={() => undefined}>生存 1.21</CardTitleButton> : <p>静态</p>}</Card>;
+    }
+    const card = mount(<Host titled />);
+    expect(card.hasAttribute("data-sk-hover-host")).toBe(true);
+    view?.rerender(
+      <OverlayProvider>
+        <Host titled={false} />
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+    expect(card.hasAttribute("data-sk-hover-host")).toBe(false);
+    view?.unmount();
+    // 整卡按钮已有 role="button"，不另加宿主标记。
+    const whole = mount(<Card onClick={() => undefined} ariaLabel="打开「生存」">生存</Card>);
+    expect(whole.hasAttribute("data-sk-hover-host")).toBe(false);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(() => render(<CardTitleButton onClick={() => undefined}>孤立</CardTitleButton>)).toThrow("CardTitleButton 只能放在 Card 里");
   });
 });
 

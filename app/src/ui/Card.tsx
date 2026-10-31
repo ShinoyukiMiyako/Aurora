@@ -6,8 +6,10 @@
 // - 卡内没有其他可交互控件：传 onClick，整卡是 role="button"，Enter / Space 触发，aria-label 写目标；
 // - 卡内有其他控件（启动胶囊、更多菜单、开关）：卡片本身不加 role，把标题写成 CardTitleButton，
 //   它用覆盖整卡的伪元素扩大点击区，卡内其他控件自动浮在覆盖层之上。按钮里不能再嵌按钮。
+//   这种卡片根上带 data-sk-hover-host：卡内的封面底纹、身份方块等点缀按「悬停宿主」选择器响应悬停，
+//   整卡按钮已有 role="button"，不需要它。
 
-import { useRef, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { cssVars, cx } from "../lib/util";
 import styles from "./Card.module.css";
 import { EntranceBlock, type EntranceTag } from "./Page";
@@ -69,9 +71,17 @@ export interface CardProps {
   children?: ReactNode;
 }
 
+/** 卡内的 CardTitleButton 挂载时登记，卸载时注销；卡片据此判断自己是不是悬停宿主。 */
+const TitleButtonRegistry = createContext<(() => () => void) | null>(null);
+
 export function Card({ span, rowSpan, padding = "md", onClick, ariaLabel, selected = false, clip = false, as = "div", className, children }: CardProps) {
   if (onClick !== undefined && (ariaLabel === undefined || ariaLabel.trim() === "")) throw new Error("可点卡片必须用 ariaLabel 写明点击的目标");
   const interactive = onClick !== undefined;
+  const [titleButtons, setTitleButtons] = useState(0);
+  const registerTitleButton = useCallback(() => {
+    setTitleButtons((n) => n + 1);
+    return () => setTitleButtons((n) => n - 1);
+  }, []);
   // Space 在按下时只阻止页面滚动，抬起时才触发，与原生按钮一致：按住 Space 再 Tab 走不会误触发
   const spaceDown = useRef(false);
 
@@ -116,6 +126,7 @@ export function Card({ span, rowSpan, padding = "md", onClick, ariaLabel, select
       data-interactive={interactive || undefined}
       data-selected={selected || undefined}
       data-clip={clip || undefined}
+      data-sk-hover-host={titleButtons > 0 ? "" : undefined}
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}
       aria-label={interactive ? ariaLabel : undefined}
@@ -123,7 +134,7 @@ export function Card({ span, rowSpan, padding = "md", onClick, ariaLabel, select
       onKeyDown={interactive ? onKeyDown : undefined}
       onKeyUp={interactive ? onKeyUp : undefined}
     >
-      {children}
+      <TitleButtonRegistry.Provider value={registerTitleButton}>{children}</TitleButtonRegistry.Provider>
     </EntranceBlock>
   );
 }
@@ -138,6 +149,9 @@ export interface CardTitleButtonProps {
 
 /** 卡内有其他控件时，把标题做成按钮：覆盖层伪元素铺满整张卡，点卡片空白处等于点标题。 */
 export function CardTitleButton({ onClick, ariaLabel, className, children }: CardTitleButtonProps) {
+  const register = useContext(TitleButtonRegistry);
+  if (register === null) throw new Error("CardTitleButton 只能放在 Card 里：它的覆盖层要铺满所在的卡片");
+  useLayoutEffect(register, [register]);
   return (
     <button type="button" className={cx(styles.titleButton, className)} aria-label={ariaLabel} onClick={onClick}>
       {children}
