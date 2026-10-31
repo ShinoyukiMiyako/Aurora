@@ -14,7 +14,10 @@ export interface CreateInstancePreset {
 export interface FlowPropsMap {
   /** useLauncher().state.login 非空时挂载；关闭与各步动作都经 actions（closeLogin、startMicrosoftLogin、addOfflineAccount…）。 */
   login: { login: LoginState };
-  /** useLauncher().state.firstRun 为 true 时挂载，覆盖主列与侧栏；actions.completeFirstRun 成功后 firstRun 变 false 即卸载。 */
+  /**
+   * useLauncher().state.firstRun 为 true 时挂载，覆盖主列与侧栏。第一步用 actions.commitFirstRun 提交后仍挂着，
+   * 收尾时 actions.finishFirstRun 把 firstRun 置为 false 即卸载（completeFirstRun 是两者合一）。
+   */
   onboarding: Record<string, never>;
   /** useShell().openCreateInstance() 打开时挂载；onClose 由外壳给出。 */
   "create-instance": { preset: CreateInstancePreset | null; onClose: () => void };

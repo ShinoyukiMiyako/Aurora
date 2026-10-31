@@ -325,6 +325,14 @@ export interface LauncherActions {
   // 设置
   updateSettings(patch: SettingsPatch): Promise<void>;
   setGameDirectory(path: string): Promise<void>;
+  /**
+   * 首次启动向导第一步的提交：后端校验并落下游戏目录、收下勾选的文件夹、记下向导已完成（此后关窗口，下次直接进主页）。
+   * 向导仍然挂着，接着走后面几步；收尾时调 finishFirstRun 卸载它。
+   */
+  commitFirstRun(gameDir: string, extraDirectories: configIpc.NamedDirectoryDto[]): Promise<void>;
+  /** 向导收尾：firstRun 置为 false，外壳随即卸载向导。第一步还没提交时抛错。 */
+  finishFirstRun(): void;
+  /** commitFirstRun 加 finishFirstRun：提交后立即卸载向导。 */
   completeFirstRun(gameDir: string, extraDirectories: configIpc.NamedDirectoryDto[]): Promise<void>;
   togglePinServer(server: PinnedServerDto): Promise<void>;
   reload(slice: Slice): Promise<void>;
@@ -661,6 +669,8 @@ export class LauncherStore {
    * invalid 是文件损坏或版本不符，内容本来就救不回来，照常写回，免得任务表从此再也存不下来。
    */
   private journalState: "unread" | "read" | "invalid" = "unread";
+  /** 首次启动向导的第一步已经提交（后端已记下向导完成）。 */
+  private firstRunCommitted = false;
 
   readonly actions: LauncherActions;
 
@@ -1985,8 +1995,18 @@ export class LauncherStore {
         await configIpc.setGameDirectory(path);
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
+      async commitFirstRun(gameDir, extraDirectories) {
+        await completeFirstRun(gameDir, extraDirectories);
+        store.firstRunCommitted = true;
+        await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
+      },
+      finishFirstRun() {
+        if (!store.firstRunCommitted) throw new Error("首次启动向导的第一步还没有提交，不能收尾");
+        store.set({ firstRun: false });
+      },
       async completeFirstRun(gameDir, extraDirectories) {
         await completeFirstRun(gameDir, extraDirectories);
+        store.firstRunCommitted = true;
         store.set({ firstRun: false });
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
