@@ -134,6 +134,10 @@ fn legacy_1_12_2_full_command_line() {
         s("-Dstdout.encoding=UTF-8"),
         s("-Dstderr.encoding=UTF-8"),
         s("-Xmx2048m"),
+        // 与新式版本 JSON 在 Windows 上带的那条相同：旧版本 JSON 不写，由启动器补上。
+        s(
+            "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump",
+        ),
         format!("-Djava.library.path={natives}"),
         s("-Dminecraft.launcher.brand=Petalfall"),
         format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}"),

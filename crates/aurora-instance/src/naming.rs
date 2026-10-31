@@ -105,13 +105,16 @@ pub fn check_instance_name<'a>(
     Ok(())
 }
 
-/// 已有实例 id 是否可以安全地拼进 `versions/` 下的路径：单个普通路径段、不以点开头。
+/// 已有实例 id 是否可以安全地拼进 `versions/` 下的路径：单个普通路径段、不以点开头、不以点或空格结尾。
 ///
-/// id 来自前端，是不可信输入：`..`、带分隔符或盘符的名字会把删除、改名指到游戏目录之外。
-/// 这里只拦路径层面的危险；别的启动器建的实例名不一定符合 [`check_name_format`]，照样可以管理。
+/// id 来自前端，是不可信输入：`..`、带分隔符或盘符的名字会把删除、改名指到游戏目录之外；Windows
+/// 解析路径时去掉段尾的点与空格，`abc.` 实际指向 `abc`，而实例锁按字面区分两者，删除、改名会绕过
+/// `abc` 上的占用。这里只拦路径层面的危险；别的启动器建的实例名不一定符合 [`check_name_format`]，
+/// 照样可以管理（段尾带点或空格的文件夹 Windows 本来就建不出）。
 pub fn is_safe_instance_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('.')
+        && !id.ends_with(['.', ' '])
         && !id.contains(['/', '\\', ':', '\0'])
         && std::path::Path::new(id)
             .components()
@@ -263,6 +266,31 @@ mod tests {
             "CON",
             "a b",
         ] {
+            assert!(is_safe_instance_id(id), "{id:?}");
+        }
+    }
+
+    /// Windows 解析路径时会去掉段尾的点与空格：`周末生存.` 与 `周末生存 ` 都落到 `周末生存` 这个目录上，
+    /// 而实例锁按字面区分它们，拿这样的 id 删除、改名就能绕过运行中的那个实例的占用。
+    #[test]
+    fn ids_aliasing_another_folder_through_trailing_dots_or_spaces_are_unsafe() {
+        #[cfg(windows)]
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir(tmp.path().join("周末生存")).unwrap();
+            assert!(
+                tmp.path().join("周末生存.").is_dir(),
+                "前提：段尾的点被系统去掉"
+            );
+            assert!(
+                tmp.path().join("周末生存 ").is_dir(),
+                "前提：段尾的空格被系统去掉"
+            );
+        }
+        for id in ["周末生存.", "周末生存 ", "1.21..", "a. ", "a ."] {
+            assert!(!is_safe_instance_id(id), "{id:?}");
+        }
+        for id in ["1.21", "a.b", " a", "a b", "v1.0-rc"] {
             assert!(is_safe_instance_id(id), "{id:?}");
         }
     }

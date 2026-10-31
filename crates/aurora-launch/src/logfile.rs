@@ -496,8 +496,8 @@ impl LogTail {
 
 /// 读会话日志的尾部：最多读末尾 `max_bytes` 字节、保留最后 `max_lines` 行。
 ///
-/// 一份大整合包的会话日志能到几十 MB，而诊断与日志页都只关心最后那段。被截断处的半截行丢弃；
-/// 截断点之前的行只数换行、不解析，用来给出准确的行号与「较早的 N 行已省略」。
+/// 一份大整合包的会话日志能到几十 MB，而诊断与日志页都只关心最后那段。被截断处的半截行与文件末尾
+/// 还没写完的半行都丢弃；截断点之前的行只数换行、不解析，用来给出准确的行号与「较早的 N 行已省略」。
 pub async fn read_log_tail(path: &Path, max_bytes: u64, max_lines: usize) -> Result<LogTail> {
     let header = read_header(path)
         .await?
@@ -550,10 +550,10 @@ pub async fn read_log_tail(path: &Path, max_bytes: u64, max_lines: usize) -> Res
     // 截断点的半截行可能切开一个多字节字符，有损解码只影响被丢弃的那一行。
     let text = String::from_utf8_lossy(&bytes);
     let mut raw_lines: Vec<&str> = text.split('\n').collect();
-    // 末尾换行之后的空串不是一行；进程写到一半被杀留下的无换行尾巴仍是一行。
-    if raw_lines.last() == Some(&"") {
-        raw_lines.pop();
-    }
+    // 写出的每一行（含结局行）都以换行收尾，最后一段要么是末尾换行之后的空串，要么是还没写完的半行：
+    // 会话进行中写缓冲按块落盘，文件常停在某行中间；启动器在会话中途退出也会留下这样的尾巴。
+    // 半行可能连标签都没写全，按格式错误报出来会让整份日志读不出；写全了的也只是截断的正文。
+    raw_lines.pop();
     let ended = match raw_lines
         .last()
         .and_then(|line| line.strip_prefix(TRAILER_ENDED))
@@ -934,6 +934,61 @@ mod tests {
             .unwrap();
         assert_eq!(tail.ended, None);
         assert_eq!(tail.entries.len(), 1);
+    }
+
+    /// 写缓冲按块落盘，会话进行中（或启动器在会话中途退出后）文件末尾常停在某一行的半截。
+    /// 读尾部时这半行不能让整份日志读不出来：已经完整落盘的行照常给出，行数不算半截行。
+    #[tokio::test]
+    async fn torn_last_line_of_a_running_session_is_dropped() {
+        for torn in [
+            "[+3",
+            "[+3.405] [ga",
+            "# end",
+            "[+3.405] [game] [19:04:12] [main/IN",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("logs");
+            let mut log = SessionLog::create(&dir, "1.21", 0).await.unwrap();
+            log.write(5, LogSource::Game, None, "first").await.unwrap();
+            log.write(9, LogSource::Game, None, "second").await.unwrap();
+            log.writer.flush().await.unwrap();
+            let path = dir.join(LATEST_LOG);
+            let mut content = std::fs::read(&path).unwrap();
+            content.extend_from_slice(torn.as_bytes());
+            std::fs::write(&path, content).unwrap();
+
+            let tail = read_log_tail(&path, 1 << 20, 10)
+                .await
+                .unwrap_or_else(|err| panic!("{torn:?}: {err:?}"));
+            let texts: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
+            assert_eq!(texts, vec!["first", "second"], "{torn:?}");
+            assert_eq!(tail.total_lines, 2, "{torn:?}");
+            assert_eq!(tail.ended, None, "{torn:?}");
+        }
+    }
+
+    /// 只读末尾一段时截断点与半截尾行同在：两头都丢，中间完整的行照常给出。
+    #[tokio::test]
+    async fn torn_last_line_is_dropped_together_with_the_cut_first_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let mut log = SessionLog::create(&dir, "1.21", 0).await.unwrap();
+        for i in 1..=50 {
+            log.write(i, LogSource::Game, None, &format!("line {i:03}"))
+                .await
+                .unwrap();
+        }
+        log.writer.flush().await.unwrap();
+        let path = dir.join(LATEST_LOG);
+        let mut content = std::fs::read(&path).unwrap();
+        content.extend_from_slice(b"[+0.051] [ga");
+        std::fs::write(&path, content).unwrap();
+
+        let tail = read_log_tail(&path, 200, 1_000).await.unwrap();
+        assert_eq!(tail.entries.last().unwrap().text, "line 050");
+        assert_eq!(tail.total_lines, 50);
+        assert_eq!(tail.first_line + tail.entries.len() as u64 - 1, 50);
+        assert_eq!(tail.entries[0].text, format!("line {:03}", tail.first_line));
     }
 
     #[tokio::test]
