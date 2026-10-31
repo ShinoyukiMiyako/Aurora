@@ -1,13 +1,28 @@
 // 整合包导入的假后端：实例名按后端同一套规则校验（写法、长度、保留名、不区分大小写的重名），
 // 本地文件按扩展名认格式，平台整合包的版本与清单从共用的工程目录（ipc/mock/catalog）里取。导入是长任务：
 // 登记任务、推送带 task_id 的事件、响应取消，成功后新实例进入实例列表，清单里的 Mod 落进它的 mods/。
+// 文件名词干含 blocked 的 .zip 是带两个需要手动下载文件的 CurseForge 包：用户「下载」到下载文件夹里的文件
+// 记在 mockDownloads（测试经 seedMockDownloads 放），认领过的记在 claimed，导入时只有都认领了才能成。
+// 这两份状态只在内存里，不进浏览器里的持久化快照。
 
 import type { PlatformId } from "../../discover";
 import { IpcError } from "../../errors";
-import type { InstanceNameRule, ModpackInstallOutcomeDto, ModpackPreviewDto, ModpackSource, ModpackSummaryDto, PackFormat, PackLoader } from "../../modpack";
-import { INSTANCE_NAME_MAX_CHARS } from "../../modpack";
+import type {
+  BlockedFileDto,
+  ClaimReportDto,
+  InstanceNameRule,
+  ModpackInstallOutcomeDto,
+  ModpackPreviewDto,
+  ModpackSource,
+  ModpackSummaryDto,
+  PackFormat,
+  PackLoader,
+  PackModDto,
+} from "../../modpack";
+import { DISTRIBUTION_BLOCKED, INSTANCE_NAME_MAX_CHARS, parseBlockedFiles } from "../../modpack";
 import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
+import { MOCK_DATA_DIR, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
 import { acquireMockInstance, addMockInstance, mockInstanceIds, type MockInstanceHold } from "./instances";
 import { placeMockPackMods } from "./mods";
@@ -23,6 +38,55 @@ const LOCAL_MANIFEST: MockPackManifest = {
 };
 const LOCAL_MINECRAFT = "1.21.1";
 const LOCAL_VERSION = "1.0.0";
+
+/** 系统下载文件夹：downloads_folder 给它，claim_blocked_files 只在它里面找得到 mockDownloads 里的文件。 */
+export const MOCK_DOWNLOADS_DIR = "C:\\Users\\Player\\Downloads";
+
+/** 带受限文件的 CurseForge 夹具里那两个需要手动下载的文件。 */
+const BLOCKED_FIXTURE: readonly BlockedFileDto[] = [
+  {
+    project_id: 900001,
+    file_id: 5000001,
+    file_name: "blocked-a.jar",
+    web_url: "https://www.curseforge.com/minecraft/mc-mods/blocked-a/files/5000001",
+    destination: "mods/blocked-a.jar",
+    sha1: "3f786850e387550fdab836ed7e6dc881de23001b",
+    fingerprint: 0,
+    size: 1024,
+  },
+  {
+    project_id: 900002,
+    file_id: 5000002,
+    file_name: "blocked-b.jar",
+    web_url: "https://www.curseforge.com/minecraft/mc-mods/blocked-b/files/5000002",
+    destination: "mods/blocked-b.jar",
+    sha1: "89e6c98d92887913cadf06b2adb97f26cde4849b",
+    fingerprint: 0,
+    size: 1024,
+  },
+];
+
+/** 本地 .mrpack 夹具里的可选文件：一个落进 mods/，一个是资源包。 */
+const OPTIONAL_MOD = "mods/optional-helper.jar";
+const OPTIONAL_EXTRA = "resourcepacks/optional-pack.zip";
+/** 覆盖层 mods/ 里随包自带的 jar，三种本地夹具都有。 */
+const BUNDLED_MODS = ["mods/config-helper.jar", "mods/pack-tweaks.jar"];
+
+/** 下载文件夹里已有的文件（小写文件名）。 */
+const mockDownloads = new Set<string>();
+/** 已认领、暂存位里有校验通过副本的文件 id。 */
+const claimed = new Set<number>();
+
+/** 测试辅助：下载文件夹里现在有这些文件（整份换掉）。 */
+export function seedMockDownloads(names: readonly string[]): void {
+  mockDownloads.clear();
+  for (const name of names) mockDownloads.add(name.toLowerCase());
+}
+
+export function reset(): void {
+  mockDownloads.clear();
+  claimed.clear();
+}
 
 const RULE_TEXT: Record<InstanceNameRule, string> = {
   empty: "名字不能为空",
@@ -59,6 +123,53 @@ function stemOf(path: string): string {
   if (file === undefined) throw new Error("split 至少返回一段");
   const dot = file.lastIndexOf(".");
   return dot > 0 ? file.slice(0, dot) : file;
+}
+
+/** 本地夹具的种类：按扩展名认格式，词干含 blocked 的 .zip 带受限文件。 */
+type LocalFixture = "mrpack" | "zip" | "blocked";
+
+function fixtureOf(path: string): LocalFixture {
+  if (formatOf(path) === "modrinth") return "mrpack";
+  return stemOf(path).toLowerCase().includes("blocked") ? "blocked" : "zip";
+}
+
+function packEntry(path: string, ids: { project_id: number; file_id: number } | null, optional: boolean): PackModDto {
+  const file = path.split("/").pop();
+  if (file === undefined) throw new Error("split 至少返回一段");
+  return {
+    path,
+    file_name: file,
+    origin: "remote",
+    optional,
+    project_id: ids === null ? null : ids.project_id,
+    file_id: ids === null ? null : ids.file_id,
+    availability: "download",
+  };
+}
+
+/** 夹具的 Mod 清单：条数与 LOCAL_MANIFEST.modFiles 一致，按落点小写排序（与后端同一口径）。 */
+function fixtureMods(fixture: LocalFixture): PackModDto[] {
+  const bundled: PackModDto[] = BUNDLED_MODS.map((path) => ({ ...packEntry(path, null, false), origin: "override", availability: "bundled" }));
+  let special: PackModDto[] = [];
+  if (fixture === "mrpack") special = [packEntry(OPTIONAL_MOD, null, true)];
+  if (fixture === "blocked") {
+    special = BLOCKED_FIXTURE.map((f) => ({ ...packEntry(f.destination, f, false), availability: claimed.has(f.file_id) ? "claimed" : "blocked" }));
+  }
+  const plain = LOCAL_MANIFEST.modFiles - bundled.length - special.length;
+  const remote = Array.from({ length: plain }, (_, i) => {
+    const n = String(i + 1).padStart(2, "0");
+    return packEntry(`mods/pack-mod-${n}.jar`, fixture === "mrpack" ? null : { project_id: 800_000 + i, file_id: 4_000_000 + i }, false);
+  });
+  return [...remote, ...special, ...bundled].sort((a, b) => (a.path.toLowerCase() < b.path.toLowerCase() ? -1 : 1));
+}
+
+/** 夹具里能在导入前取消勾选的文件落点。 */
+function fixtureOptional(fixture: LocalFixture): readonly string[] {
+  return fixture === "mrpack" ? [OPTIONAL_MOD, OPTIONAL_EXTRA] : [];
+}
+
+function unclaimedBlocked(): BlockedFileDto[] {
+  return BLOCKED_FIXTURE.filter((f) => !claimed.has(f.file_id)).map((f) => ({ ...f }));
 }
 
 /** 命令自己校验的空白值报 invalid_argument（与后端 non_blank 一致）。 */
@@ -145,6 +256,7 @@ function packOf(source: ModpackSource): PackFacts {
 function previewModpack(args: MockArgs): ModpackPreviewDto {
   const path = nonBlank("path", argReader("preview_modpack", args).string("path"));
   const format = formatOf(path);
+  const fixture = fixtureOf(path);
   return {
     format,
     name: stemOf(path),
@@ -158,7 +270,25 @@ function previewModpack(args: MockArgs): ModpackPreviewDto {
     remote_bytes: LOCAL_MANIFEST.remoteBytes,
     override_files: LOCAL_MANIFEST.overrideFiles,
     override_bytes: LOCAL_MANIFEST.overrideBytes,
+    mods: fixtureMods(fixture),
+    optional_extras: fixture === "mrpack" ? [packEntry(OPTIONAL_EXTRA, null, true)] : [],
+    blocked_files: fixture === "blocked" ? unclaimedBlocked() : [],
   };
+}
+
+/** Option<Vec<String>>：缺省与 null 都是不跳过任何文件；每一项去掉首尾空白后不能为空（与后端登记任务前的校验一致）。 */
+function parseExcluded(args: MockArgs): string[] {
+  if (args.excludedOptional === undefined || args.excludedOptional === null) return [];
+  const paths = argReader("install_modpack", args).strings("excludedOptional");
+  if (paths.some((p) => p.trim() === "")) throw new IpcError("invalid_argument", "excludedOptional 里有空路径");
+  return paths;
+}
+
+/** 跳过的必须是这个包里的可选文件，比较不分大小写（Windows 下落点不分大小写）。 */
+function checkExcluded(excluded: readonly string[], optional: readonly string[]): void {
+  const known = new Set(optional.map((p) => p.toLowerCase()));
+  const stray = excluded.find((p) => !known.has(p.toLowerCase()));
+  if (stray !== undefined) throw new IpcError("invalid_argument", `不能跳过 ${stray}：它不是这个整合包里的可选文件`, { path: stray });
 }
 
 function loaderDto(loader: PackLoader | null) {
@@ -170,10 +300,14 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   const taskId = read.string("taskId");
   const source = parseSource(args.source);
   const requested = read.nullableString("name");
+  const excluded = parseExcluded(args);
   // 与后端一样，占用放在导入主体之外，导入无论怎样结束都在最后放开
   let hold: MockInstanceHold | null = null;
   return runMockTask(taskId, async () => {
     const pack = packOf(source);
+    const fixture = source.kind === "file" ? fixtureOf(source.path) : null;
+    // 平台整合包的目录夹具没有可选文件：跳过任何文件都不对
+    checkExcluded(excluded, fixture === null ? [] : fixtureOptional(fixture));
     const raw = requested === null ? pack.name : requested;
     const checked = checkName(raw);
     if ("rule" in checked) throw nameError(raw, checked.rule);
@@ -186,6 +320,15 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
 
     const { manifest } = pack;
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：${manifest.remoteFiles} 个远程文件，${manifest.overrideFiles} 个覆盖文件` });
+    if (fixture === "blocked") {
+      // 与后端一样在读包时判定：还有没认领到的受限文件就整体失败，不建实例
+      const missing = unclaimedBlocked();
+      if (missing.length > 0) {
+        const names = missing.map((f) => f.file_name).join("、");
+        throw new IpcError(DISTRIBUTION_BLOCKED, `这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：${names}`, { files: missing });
+      }
+      emitCoreEvent({ task_id: taskId, kind: "stage", message: `放入 ${BLOCKED_FIXTURE.length} 个手动下载的文件` });
+    }
     await simulateDownload(taskId, `${pack.name} 的 ${manifest.remoteFiles} 个文件`, manifest.remoteBytes);
     const modpack = {
       platform: pack.platform,
@@ -214,6 +357,52 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   }).finally(() => {
     if (hold !== null) hold.release();
   });
+}
+
+/** 与后端 is_safe_file_name 一致：单个文件名，不含路径分隔符、冒号与控制字符，不以空格或点结尾。 */
+function isSafeFileName(name: string): boolean {
+  return name !== "" && name !== "." && name !== ".." && !/[ .]$/.test(name) && !/[\\/:\p{Cc}]/u.test(name);
+}
+
+function claimStagingPath(file: BlockedFileDto): string {
+  return `${MOCK_DATA_DIR}\\cache\\modpacks\\claims\\curseforge-${file.file_id}\\${file.file_name}`;
+}
+
+/**
+ * 认领手动下载的文件。暂存位里已经认领过的直接算找到（与后端一样，不看这次选的是哪个文件夹）；
+ * 其余只在选的是下载文件夹（不分大小写）、且 mockDownloads 里有同名文件时找到。
+ */
+function claimBlockedFiles(args: MockArgs): ClaimReportDto {
+  const cmd = "claim_blocked_files";
+  const folder = argReader(cmd, args).string("folder");
+  let files: BlockedFileDto[];
+  try {
+    files = parseBlockedFiles(args.files, "files");
+  } catch (error) {
+    // 形状由 serde 反序列化：不对是 Tauri 的参数错误
+    throw tauriArgError(cmd, "files", error instanceof Error ? error.message : String(error));
+  }
+  if (folder.trim() === "") throw new IpcError("invalid_argument", "folder 不能为空");
+  if (files.length === 0) throw new IpcError("invalid_argument", "files 不能为空");
+  const seen = new Set<number>();
+  for (const file of files) {
+    if (!isSafeFileName(file.file_name)) throw new IpcError("invalid_argument", `${file.file_name} 不是单个安全的文件名`);
+    if (seen.has(file.file_id)) throw new IpcError("invalid_argument", `file_id ${file.file_id} 出现了不止一次`);
+    seen.add(file.file_id);
+  }
+  const inDownloads = folder.toLowerCase() === MOCK_DOWNLOADS_DIR.toLowerCase();
+  const report: ClaimReportDto = { claimed: [], missing: [] };
+  for (const file of files) {
+    if (claimed.has(file.file_id)) {
+      report.claimed.push({ file_id: file.file_id, source_path: claimStagingPath(file) });
+    } else if (inDownloads && mockDownloads.has(file.file_name.toLowerCase())) {
+      claimed.add(file.file_id);
+      report.claimed.push({ file_id: file.file_id, source_path: `${folder}\\${file.file_name}` });
+    } else {
+      report.missing.push(file.file_id);
+    }
+  }
+  return report;
 }
 
 /** 平台整合包某个版本的清单摘要：与导入时同一份清单。CurseForge 的 Mod 数与大小后端经批量接口补齐，两种格式都报数。 */
@@ -246,4 +435,6 @@ export const handlers: MockHandlers = {
   preview_modpack: previewModpack,
   summarize_platform_modpack: summarizeModpack,
   install_modpack: installModpack,
+  claim_blocked_files: claimBlockedFiles,
+  downloads_folder: () => MOCK_DOWNLOADS_DIR,
 };
