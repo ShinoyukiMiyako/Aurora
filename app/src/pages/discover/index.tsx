@@ -1,7 +1,7 @@
 // 发现页：跨 Modrinth / CurseForge 搜资源，点开详情装进实例；整合包装成新实例，本地整合包文件从头图右上角导入。
 // 页面持有界面上的筛选与分页累积；搜索结果、详情、版本、落位矩阵都是状态层的按需查询。
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
@@ -22,7 +22,7 @@ import { PLATFORM_LABEL, SEARCH_COPY } from "./copy";
 import { ResourceDetail, type DetailTarget } from "./detail/ResourceDetail";
 import styles from "./discover.module.css";
 import { useOnline } from "../../state/online";
-import { useDebounced, useElapsed, useNearBottom, useScrollContainer, useStuck } from "./hooks";
+import { useDebounced, useNearBottom, useScrollContainer, useStuck } from "./hooks";
 import { ImportModpackDialog, type ImportRequest } from "./ImportModpackDialog";
 import {
   allPlatformsFailed,
@@ -208,6 +208,10 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   );
 }
 
+/** 首页超时在「比平时慢」之后再等多久：两者同属加载门的一轮，超时 = 这一轮开始后 PLATFORM_TIMEOUT_MS。 */
+const TIMEOUT_AFTER_SLOW_MS = PLATFORM_TIMEOUT_MS - SLOW_HINT_MS;
+if (TIMEOUT_AFTER_SLOW_MS <= 0) throw new Error(`首页超时（${PLATFORM_TIMEOUT_MS} ms）必须晚于慢提示（${SLOW_HINT_MS} ms）`);
+
 interface ResultsProps {
   filters: DiscoverFilters;
   committedQuery: string;
@@ -223,10 +227,28 @@ interface ResultsProps {
 
 function Results({ filters, committedQuery, pages, online, now, instances, installed, container, onOpen, onClearFilters }: ResultsProps) {
   const requestKey = JSON.stringify(pages.state.request);
-  // 首页的骨架与「比平时慢」走全站统一的加载门；下一页只在列表尾追加一行，慢提示按这一页的请求单独计时
-  const gate = useLoadingGate(pages.loadingFirst);
-  const slowNext = useElapsed(pages.loadingNext, SLOW_HINT_MS, requestKey);
-  const timedOut = useElapsed(pages.loadingFirst, PLATFORM_TIMEOUT_MS, requestKey);
+  // 首页超时只记在超时那一刻的请求上：换了请求、点了重试即作废。超时的那一轮对加载门来说已经结束，
+  // 作废后加载门看到加载重新开始，从头算新的一轮
+  const [timedOutKey, setTimedOutKey] = useState<string | null>(null);
+  const timedOut = pages.loadingFirst && timedOutKey === requestKey;
+  // 首页的骨架与「比平时慢」、下一页列表尾的「比平时慢」都走全站统一的加载门
+  const gate = useLoadingGate(pages.loadingFirst && !timedOut);
+  const slowNext = useLoadingGate(pages.loadingNext).slow;
+
+  // 加载门没有超时：超时接在它的「慢」后面计，与慢提示同一轮、同一个起点，加载门换轮时一起重来
+  const latestKey = useRef(requestKey);
+  useLayoutEffect(() => {
+    latestKey.current = requestKey;
+  });
+  useEffect(() => {
+    if (!gate.slow) return;
+    const timer = setTimeout(() => setTimedOutKey(latestKey.current), TIMEOUT_AFTER_SLOW_MS);
+    return () => clearTimeout(timer);
+  }, [gate.slow]);
+  const restartAfterFailure = () => {
+    setTimedOutKey(null);
+    pages.restart();
+  };
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const near = useNearBottom(bottomRef, container, PREFETCH_MARGIN_PX, pages.canLoadMore && online);
@@ -272,7 +294,7 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
           body={online ? <span className={styles.selectable}>{message}</span> : SEARCH_COPY.offlineEmptyBody}
           action={
             online ? (
-              <Button variant="secondary" icon="refresh" onClick={pages.restart}>
+              <Button variant="secondary" icon="refresh" onClick={restartAfterFailure}>
                 {SEARCH_COPY.retry}
               </Button>
             ) : undefined

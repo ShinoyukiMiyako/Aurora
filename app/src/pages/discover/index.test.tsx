@@ -388,6 +388,91 @@ describe("发现页：加载态的时机", () => {
     expect(document.body.textContent).toContain("请求超时");
     expect(document.body.textContent).toContain("资源平台 20 秒内没有回应。");
   });
+
+  it("超时后点重试：重新开始一轮加载，超时说明立即收起；新一轮照样 10 s 提示慢、20 s 超时", async () => {
+    let call = 0;
+    pages = () => {
+      call += 1;
+      // 第一次一直不回；重试那次 25 s 才回，足够再超时一次
+      if (call === 1) return new Promise<SearchResultDto>(() => {}) as never;
+      return new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 25_000)) as never;
+    };
+    await mount();
+    // 分两步走到 20 s：慢提示在 10 s 那一刻渲染出来，超时接在它后面计
+    await advance(10_000);
+    await advance(10_000);
+    expect(document.body.textContent).toContain("请求超时");
+
+    act(() => buttonByText("重试").click());
+    await flush();
+    expect(searchCalls()).toHaveLength(2);
+    expect(document.body.textContent).not.toContain("请求超时");
+    expect(document.body.textContent).toContain("搜索中…");
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    await advance(1);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+    // 超时之后结果才到：照常换成结果
+    await advance(5_000);
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+    expect(document.body.textContent).not.toContain("请求超时");
+  });
+
+  // 慢提示与超时同属加载门的一轮：加载中途换了条件不另起一轮，两者不会一个重来一个不重来
+  it("首页加载中途换关键词：慢提示与超时按同一轮计时，都从这一轮开始的时刻算", async () => {
+    pages = () => new Promise<SearchResultDto>(() => {}) as never;
+    await mount();
+    await advance(10_000);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(2_000);
+    typeInto(searchInput(), "换一个");
+    act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    expect(searchCalls()).toHaveLength(2);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(7_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+  });
+
+  it("下一页 10 s 还没回来才在列表尾写「比平时慢」，回来后收起", async () => {
+    let resolveNext: ((r: SearchResultDto) => void) | undefined;
+    pages = (args) =>
+      args.cursor === null
+        ? result([entry("A"), entry("B")], { total: 57, next_cursor: CURSOR })
+        : (new Promise<SearchResultDto>((resolve) => {
+            resolveNext = resolve;
+          }) as never);
+    await mount();
+    const near = observers.find((o) => o.options !== undefined && o.options.rootMargin === "0px 0px 600px 0px" && o.targets.length > 0);
+    if (near === undefined) throw new Error("没有观察列表尾");
+    await act(async () => {
+      near.callback([{ isIntersecting: true, target: near.targets[0] } as unknown as IntersectionObserverEntry], {} as IntersectionObserver);
+      await settle();
+    });
+    expect(searchCalls()).toHaveLength(2);
+    const foot = () => document.querySelector('section[aria-label="搜索资源"]')?.textContent as string;
+    expect(foot()).toContain("搜索中…");
+    await advance(9_999);
+    expect(foot()).not.toContain("比平时慢一些");
+    await advance(1);
+    expect(foot()).toContain("比平时慢一些");
+    const finish = resolveNext;
+    if (finish === undefined) throw new Error("下一页请求没有发出");
+    await act(async () => {
+      finish(result([entry("C")], { total: 57, next_cursor: null }));
+      await settle();
+    });
+    expect(foot()).not.toContain("比平时慢一些");
+    expect(cardTitles()).toEqual(["资源 A，查看详情", "资源 B，查看详情", "资源 C，查看详情"]);
+  });
 });
 
 describe("发现页：失败与离线", () => {
