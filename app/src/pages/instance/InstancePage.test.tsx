@@ -1342,6 +1342,18 @@ describe("实例详情：设置", () => {
     expect(toastTitles()).toContain("JVM 参数已保存");
   });
 
+  it("盘上的 JVM 参数带首尾空白（手改过 settings.json）：读进来不算未保存，保存按钮不亮", async () => {
+    settings = { ...settings, jvm_args: " -Xmx4G\n" };
+    await open("settings");
+    expect(text()).not.toContain("未保存");
+    expect(button("保存参数").disabled).toBe(true);
+    const area = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="JVM 参数"]');
+    if (area === null) throw new Error("没有 JVM 参数框");
+    typeInto(area, "-Xmx4G -XX:+UseG1GC");
+    expect(text()).toContain("未保存");
+    expect(button("保存参数").disabled).toBe(false);
+  });
+
   it("分代 ZGC 按实际生效的 Java：自动挑到 21 时带 ZGenerational", async () => {
     await open("settings");
     click(button("分代 ZGC"));

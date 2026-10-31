@@ -328,7 +328,8 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
   const [draft, setDraft] = useState(saved);
   const [saving, setSaving] = useState(false);
   useEffect(() => setDraft(saved), [saved]);
-  const dirty = draft.trim() !== saved;
+  // 保存时去掉首尾空白，盘上的值却可能带着（手改过 settings.json）：两边都去掉再比，读进来原样不动不算未保存
+  const dirty = draft.trim() !== saved.trim();
   const major = java === null ? null : effectiveJavaMajor(java.choice, java.required);
 
   const save = () => {
