@@ -43,6 +43,8 @@ pub struct RunningGame(GameSlot);
 #[derive(Debug, Serialize)]
 pub struct LaunchedDto {
     pub pid: Option<u32>,
+    /// 这一局以离线方式进单人（未经账户验证）。
+    pub offline: bool,
 }
 
 /// 阶段 3 的下载进度。字段与 core-event 的下载进度一致。
@@ -311,6 +313,10 @@ enum AccountArg {
 
 /// 启动一个已安装版本。账户给 `account_uuid`（账户库里的账户）或 `offline_name`（临时离线账户）二者之一。
 /// 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析。
+///
+/// `offline_fallback` 为真时以离线方式进单人：不刷新登录，用账户上次登录时的档案名进游戏。能否放行由
+/// 后端凭这个账户上一次启动的失败判定，不能放行时报 `invalid_argument`（`detail.field` 为
+/// `offlineFallback`，`detail.reason` 为拒绝原因）。取消、占用与互斥的语义与普通启动相同。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_game(
@@ -319,6 +325,7 @@ pub async fn launch_game(
     version_id: String,
     account_uuid: Option<String>,
     offline_name: Option<String>,
+    offline_fallback: bool,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
     running: State<'_, RunningGame>,
@@ -373,10 +380,12 @@ pub async fn launch_game(
                 launcher_version: app.package_info().version.to_string(),
                 game_log: Some(log_tx),
             };
-            aurora
-                .launch(request, &events_tx)
-                .await
-                .map_err(launch_error)
+            let launched = if offline_fallback {
+                aurora.launch_offline_fallback(request, &events_tx).await
+            } else {
+                aurora.launch(request, &events_tx).await
+            };
+            launched.map_err(launch_error)
         })
         .await;
     drop(events_tx);
@@ -385,11 +394,14 @@ pub async fn launch_game(
     }
     let run = launched?;
 
-    let pid = run.pid();
+    let launched = LaunchedDto {
+        pid: run.pid(),
+        offline: run.offline(),
+    };
     let ticket = reservation.occupy(run.kill_switch());
     instance.set_activity(InstanceActivity::Running);
     spawn_watch(app, ticket, instance, run);
-    Ok(LaunchedDto { pid })
+    Ok(launched)
 }
 
 /// 结束运行中的游戏，等结束动作执行完才返回；退出结果经 [`GAME_EXIT_EVENT`] 推送。没有运行中的游戏时
@@ -585,6 +597,55 @@ mod tests {
             aurora_core::DownloadError::Cancelled,
         )));
         assert!(cancelled.is_cancelled());
+    }
+
+    #[test]
+    fn service_down_failure_carries_account_status_and_causes() {
+        let mut params = BTreeMap::new();
+        params.insert("account".to_owned(), json!("PetalPlayer"));
+        params.insert("status".to_owned(), json!(503));
+        let failure = LaunchFailure {
+            code: FailureCode::AccountServiceDown,
+            message: "刷新 PetalPlayer 的登录失败：微软登录服务暂时不可用（刷新令牌：HTTP 503）"
+                .into(),
+            params,
+            source: Some(aurora_core::CoreError::Auth(
+                aurora_core::AuthError::ServiceUnavailable {
+                    step: "刷新令牌",
+                    status: 503,
+                },
+            )),
+        };
+        let err = launch_error(LaunchFailed::Failure(Box::new(failure)));
+        assert_eq!(err.code, "account_service_down");
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "account": "PetalPlayer",
+                "status": 503,
+                "causes": ["微软登录服务暂时不可用（刷新令牌：HTTP 503）"]
+            }))
+        );
+    }
+
+    #[test]
+    fn launched_payload_says_whether_the_run_is_offline() {
+        assert_eq!(
+            serde_json::to_value(LaunchedDto {
+                pid: Some(4242),
+                offline: true,
+            })
+            .unwrap(),
+            json!({ "pid": 4242, "offline": true })
+        );
+        assert_eq!(
+            serde_json::to_value(LaunchedDto {
+                pid: None,
+                offline: false,
+            })
+            .unwrap(),
+            json!({ "pid": null, "offline": false })
+        );
     }
 
     #[test]
