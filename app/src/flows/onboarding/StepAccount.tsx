@@ -7,7 +7,7 @@ import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { accountKindLabel } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useSkinInfo } from "../../state/queries/home";
 import { Button } from "../../ui/Button";
 import { ACCOUNT_STEP_COPY, LOGIN_OPTIONS } from "./copy";
@@ -30,7 +30,7 @@ function AccountChip({ account }: { account: Account }) {
 }
 
 function useOpenLogin(): (kind: LoginKind) => void {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   return (kind) => void run(() => actions.openLogin(kind), ACCOUNT_STEP_COPY.loginFailed);
 }
@@ -79,10 +79,9 @@ function OptionButtons({ online }: { online: boolean }) {
 }
 
 export function StepAccount() {
-  const { state } = useLauncher();
+  const accounts = useLauncherSelector((s) => s.accounts);
   const online = useOnline();
   const [expanded, setExpanded] = useState(false);
-  const accounts = state.accounts;
   return (
     <div className={s.stepBody}>
       {accounts.length > 0 && (

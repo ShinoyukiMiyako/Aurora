@@ -15,7 +15,7 @@ import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import type { FlowProps } from "../../state/flows";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useDiscoveredGameDirectories } from "../../state/queries/catalog";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -114,7 +114,9 @@ function StepRail({ wizard, onJump }: { wizard: WizardState; onJump: (index: num
 }
 
 export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
-  const { state, actions } = useLauncher();
+  const settings = useLauncherSelector((s) => s.settings);
+  const settingsStatus = useLauncherSelector((s) => s.status.settings);
+  const actions = useLauncherActions();
   const { tier } = useShell();
   const run = useRunner();
   const discovered = useDiscoveredGameDirectories();
@@ -127,8 +129,6 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   // 上次提交给后端的第一步内容；与此刻一样就不再提交
   const [committed, setCommitted] = useState<string | null>(null);
 
-  const settings = state.settings;
-  const settingsStatus = state.status.settings;
   // 默认目录来自后端配置：配置读到之前没有目录可言，各个按钮也都不可用
   const path = settings === null ? null : pathOverride === null ? settings.defaultGameDir : pathOverride;
   const id = stepId(wizard.index);

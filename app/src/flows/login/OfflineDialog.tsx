@@ -8,7 +8,7 @@ import { AccountFigure } from "../../art/skin/AccountFigure";
 import { ACTION_ERROR, OFFLINE_NAME_COPY } from "../../copy/flows";
 import { validateOfflineName, type OfflineNameCheck } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 import { Modal } from "../../ui/Modal";
@@ -42,17 +42,15 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 export function OfflineDialog() {
-  const { state, actions } = useLauncher();
+  const takenNames = useLauncherSelector((s) => s.accounts.map((a) => a.name), shallowArrayEqual);
+  const actions = useLauncherActions();
   const run = useRunner();
   const [name, setName] = useState("");
   const [touched, setTouched] = useState(false);
   // 输入过再清空、离开输入框才算碰过；只是点进来又点「取消」不该闪一下错误
   const edited = useRef(false);
   const [submitting, setSubmitting] = useState(false);
-  const check = validateOfflineName(
-    name,
-    state.accounts.map((a) => a.name),
-  );
+  const check = validateOfflineName(name, takenNames);
   const display = nameDisplay(name, check, touched);
   const figureName = useDebounced(name, FIGURE_DEBOUNCE_MS);
   const figureUuid = offlineUuid(figureName);

@@ -18,7 +18,8 @@ import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
 import { fade, springs } from "../lib/motion";
 import { isImeComposing } from "../lib/util";
 import { useAppearance } from "../state/appearance";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
+import type { LauncherState } from "../state/store";
 import { SETTINGS_SECTIONS, type PageId, type Route } from "../state/route";
 import { activeAccount, findInstance } from "../state/selectors";
 import { FocusReturnPoint, type FocusReturnHandle } from "../ui/focus-return";
@@ -77,8 +78,15 @@ export function CommandPalette() {
   );
 }
 
+/** 当前实例：有会话时是会话的实例（结束、取消、诊断总能从这里做），否则是选中的实例；都不在实例列表里时为 null。 */
+function currentInstanceId(state: LauncherState): string | null {
+  const sessionId = state.session === null ? null : state.session.instanceId;
+  const candidate = sessionId !== null && findInstance(state, sessionId) !== undefined ? sessionId : state.selectedInstanceId;
+  return candidate !== null && findInstance(state, candidate) !== undefined ? candidate : null;
+}
+
 function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; focusReturn: { current: FocusReturnHandle | null } }) {
-  const { state } = useLauncher();
+  const currentId = useLauncherSelector(currentInstanceId);
   const { closePalette } = useShell();
   const chrome = useChrome();
   const present = useIsPresent();
@@ -92,11 +100,6 @@ function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; foc
     entry.run();
     if (entry.navigates) chrome.focusContent();
   };
-
-  // 当前实例：有会话时是会话的实例（结束、取消、诊断总能从这里做），否则是选中的实例
-  const sessionId = state.session === null ? null : state.session.instanceId;
-  const candidate = sessionId !== null && findInstance(state, sessionId) !== undefined ? sessionId : state.selectedInstanceId;
-  const currentId = candidate !== null && findInstance(state, candidate) !== undefined ? candidate : null;
 
   const body = (entry: LaunchEntry | null) => <PaletteBody query={query} onQuery={setQuery} current={entry} onExecute={execute} />;
   return (
@@ -152,7 +155,10 @@ function instanceHint(inst: InstanceSummary): string | null {
 }
 
 function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteEntry[] {
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const accounts = useLauncherSelector((s) => s.accounts);
+  const me = useLauncherSelector(activeAccount);
+  const actions = useLauncherActions();
   const { go } = useNav();
   const { openCreateInstance } = useShell();
   const { appearance, setAppearance } = useAppearance();
@@ -162,7 +168,7 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
   const entries: PaletteEntry[] = [];
   const goTo = (route: Route) => () => go(route);
 
-  for (const inst of state.instances) {
+  for (const inst of instances) {
     if (inst.placeholder) continue;
     const isCurrent = current !== null && current.instance.id === inst.id;
     entries.push({
@@ -239,8 +245,7 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
     run: () => void run(() => actions.openFolder("game_dir"), ACTION_ERROR.openFolder),
   });
 
-  const me = activeAccount(state);
-  for (const account of state.accounts) {
+  for (const account of accounts) {
     if (me !== null && account.uuid === me.uuid) continue;
     entries.push({
       id: `account:${account.uuid}`,

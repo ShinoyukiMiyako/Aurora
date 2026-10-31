@@ -20,6 +20,7 @@ import {
   progressTrack,
   pushSample,
   rowMeta,
+  sameTaskLayout,
   takeSample,
   taskGroups,
   totalEtaSpeed,
@@ -312,5 +313,32 @@ describe("取消前的确认", () => {
     });
     expect(cancelAllConfirm([task("a", { status: "running" }), task("b")]).body).toBe("已下载的部分会被丢弃。");
     expect(cancelAllConfirm([instanceTask("repair_instance", "running"), task("b")]).body).toBe("正在修复的 1 个实例会保持文件不完整。");
+  });
+});
+
+describe("任务表的结构比较", () => {
+  const running = task("a", { status: "running", progress: 0.1, bytes: 1 * MB, totalBytes: 10 * MB, doneBytes: 1 * MB, speedBps: MB, startedAt: T0 });
+  const queued = task("b");
+
+  it("只换了下载进度的五个字段：结构相同", () => {
+    const next = { ...running, progress: 0.9, bytes: 9 * MB, totalBytes: 12 * MB, doneBytes: 9 * MB, speedBps: 0 };
+    expect(sameTaskLayout([running, queued], [next, queued])).toBe(true);
+  });
+
+  it("换了状态、尝试次数、结束时刻或标题：结构变了", () => {
+    expect(sameTaskLayout([running], [{ ...running, status: "failed", finishedAt: T0 + 1 }])).toBe(false);
+    expect(sameTaskLayout([running], [{ ...running, attempt: 2 }])).toBe(false);
+    expect(sameTaskLayout([running], [{ ...running, title: "下载 Java 17" }])).toBe(false);
+  });
+
+  it("增删任务、换了顺序：结构变了；空表与空表相同", () => {
+    expect(sameTaskLayout([running, queued], [running])).toBe(false);
+    expect(sameTaskLayout([running, queued], [queued, running])).toBe(false);
+    expect(sameTaskLayout([], [])).toBe(true);
+  });
+
+  it("不认识的字段一律算结构", () => {
+    const extra = { ...running, note: "新字段" } as Task;
+    expect(sameTaskLayout([running], [extra])).toBe(false);
   });
 });

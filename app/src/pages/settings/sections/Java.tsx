@@ -5,7 +5,7 @@ import { JAVA_AUTO, type InstanceSummary } from "../../../domain/adapt";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
-import { useLauncher } from "../../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useJavaRuntimes, type JavaInstallationDto } from "../../../state/queries/catalog";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
@@ -74,7 +74,7 @@ function noteText(note: JavaNote): string {
 
 /** 手动「重新扫描」：记下扫描前的列表，结果回来后报告找到几个、与上次差多少。 */
 function useRescan(java: ReturnType<typeof useJavaRuntimes>) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const before = useRef<readonly JavaInstallationDto[] | null>(null);
   const [scanning, setScanning] = useState(false);
   useEffect(() => {
@@ -100,12 +100,13 @@ function useRescan(java: ReturnType<typeof useJavaRuntimes>) {
 
 function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] }) {
   const settings = useLoadedSettings();
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
   const { tier } = useShell();
   const write = useSettingWrite(settings.defaultJava, JAVA_COPY.defaultJava, (defaultJava: string) => actions.updateSettings({ defaultJava }));
-  const majors = majorsInUse(state.instances);
+  const majors = majorsInUse(instances);
   const sorted = sortRuntimes(runtimes);
-  const notes = javaNotes(write.value, runtimes, state.instances, settings.autoDownloadJava);
+  const notes = javaNotes(write.value, runtimes, instances, settings.autoDownloadJava);
   return (
     <>
       <RadioTile<string>
@@ -130,7 +131,7 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
           ...sorted.map((runtime) => ({
             value: runtime.path,
             title: <RuntimeTitle runtime={runtime} />,
-            description: <RuntimeDetail runtime={runtime} instances={state.instances} />,
+            description: <RuntimeDetail runtime={runtime} instances={instances} />,
           })),
         ]}
       />
@@ -145,7 +146,7 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
 
 function RuntimeCard() {
   const settings = useLoadedSettings();
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const java = useJavaRuntimes();
   const { scanning, rescan } = useRescan(java);
@@ -206,13 +207,18 @@ function RuntimeCard() {
 }
 
 function DownloadCard() {
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
   const run = useRunner();
   const online = useOnline();
   const java = useJavaRuntimes();
-  const majors = majorsInUse(state.instances);
+  const majors = majorsInUse(instances);
   const [picked, setPicked] = useState<string | null>(null);
   const major = picked !== null && majors.includes(Number(picked)) ? Number(picked) : majors.length > 0 ? majors[0] : null;
+  // 同一主版本已在队列里时状态层会自己提示，这里只在真正入队时报「已加入」
+  const alreadyQueued = useLauncherSelector((s) =>
+    s.tasks.some((t) => (t.status === "queued" || t.status === "running") && t.spec.command === "install_java" && t.spec.args.requiredMajor === major),
+  );
 
   if (major === null) {
     return (
@@ -227,12 +233,8 @@ function DownloadCard() {
   const reason = !online ? LOAD_COPY.offlineReason : managed ? JAVA_COPY.managedInstalled(major) : undefined;
   const download = () =>
     void run(async () => {
-      // 同一主版本已在队列里时状态层会自己提示，这里只在真正入队时报「已加入」
-      const queued = state.tasks.some(
-        (t) => (t.status === "queued" || t.status === "running") && t.spec.command === "install_java" && t.spec.args.requiredMajor === major,
-      );
       await actions.installJava(major);
-      if (!queued) actions.toast("info", JAVA_COPY.enqueued(major));
+      if (!alreadyQueued) actions.toast("info", JAVA_COPY.enqueued(major));
     }, ACTION_ERROR.installJava);
 
   return (
@@ -245,7 +247,7 @@ function DownloadCard() {
           ariaLabel={JAVA_COPY.downloadMajor}
           value={String(major)}
           onChange={setPicked}
-          options={majors.map((m) => ({ value: String(m), label: JAVA_COPY.runtime(m), hint: JAVA_COPY.majorUsers(instancesNeeding(state.instances, m).length) }))}
+          options={majors.map((m) => ({ value: String(m), label: JAVA_COPY.runtime(m), hint: JAVA_COPY.majorUsers(instancesNeeding(instances, m).length) }))}
         />
         <Button size="sm" icon="download" disabledReason={reason} onClick={download}>
           {JAVA_COPY.download}

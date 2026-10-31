@@ -103,6 +103,25 @@ export function taskGroups(b: TaskBuckets, filter: TaskFilter): TaskGroup[] {
   return groups.filter((g) => g.tasks.length > 0);
 }
 
+/** 下载进度快照只改这几个字段。 */
+const PROGRESS_FIELDS: ReadonlySet<string> = new Set<keyof Task>(["progress", "bytes", "totalBytes", "doneBytes", "speedBps"]);
+
+function sameApartFromProgress(a: Task, b: Task): boolean {
+  if (a === b) return true;
+  const keys = Object.keys(a) as (keyof Task)[];
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => PROGRESS_FIELDS.has(key) || Object.is(a[key], b[key]));
+}
+
+/**
+ * 两张任务表除了下载进度以外完全相同：任务没有增删、没有换状态、没有重试。页面按它订阅任务表，
+ * 每 100 ms 一次的进度只让进度相关的部件（吞吐卡、通道卡、运行中的那一行）各自重渲染，分组、筛选与已结束的行不动。
+ * 不认识的字段一律算结构：以后给任务加了字段，宁可多重排一次，也不漏掉变化。
+ */
+export function sameTaskLayout(a: readonly Task[], b: readonly Task[]): boolean {
+  return a.length === b.length && a.every((task, i) => sameApartFromProgress(task, b[i]));
+}
+
 /**
  * 进度条的平滑标识：同一次尝试的同一批下载内只进不退；换了批次（批次总量变了）或换了尝试直接跳到新值，
  * 否则新批次从 0 重新计起时，进度条会停在上一批的最大值不动。
