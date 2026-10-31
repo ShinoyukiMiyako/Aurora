@@ -13,6 +13,7 @@ import type { Account } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { fade, springs } from "../../lib/motion";
 import { useRunner } from "../../shell/useRunner";
+import { errorDetailOf } from "../../state/errors";
 import { useLauncher, useNow } from "../../state/launcher";
 import { deviceCodeExpired, deviceCodeRemaining, type DeviceLogin, type LoginState } from "../../state/login";
 import { Banner } from "../../ui/Banner";
@@ -128,7 +129,7 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
             void run(() => actions.openLogin("offline", login.intent), ACTION_ERROR.addOffline);
             return;
           case "copy_error":
-            void run(() => navigator.clipboard.writeText(`${device.message}（${device.code}）`), TOAST_COPY.copyFailed);
+            void run(() => navigator.clipboard.writeText(errorDetailOf(device.code, device.message, device.detail)), TOAST_COPY.copyFailed);
             return;
           case "close":
             close();
