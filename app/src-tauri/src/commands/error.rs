@@ -8,6 +8,8 @@
 //! - 账户与登录错误取 aurora-auth 错误枚举的变体名（如 `DeviceCodeExpired`、`XstsChildAccount`），
 //!   XSTS 的 XErr 数值放进 `detail.xerr`。
 //! - 其余取 snake_case 码，见 [`code`]；同一来源的不同失败只在前端需要区别对待时才拆码。
+//! - 原因链上有网络层失败（连不上、等不到响应）时，不论码是什么，`detail.network` 标明是哪一种
+//!   （`connect` / `timeout`）：前端据此判断要不要做一次连通性探测，而不必认识每一个可能联网的错误码。
 
 use std::error::Error as StdError;
 
@@ -178,6 +180,9 @@ impl From<CoreError> for CommandError {
         let message = err.to_string();
         let causes = source_chain(&err);
         let mut detail = core_detail(&err);
+        if let Some(failure) = aurora_base::http::network_failure(&err) {
+            detail.insert("network".to_owned(), json!(failure.code()));
+        }
         if !causes.is_empty() {
             detail.insert("causes".to_owned(), json!(causes));
         }
@@ -710,6 +715,35 @@ mod tests {
         let detail = pack.detail.unwrap();
         assert_eq!(detail["url"], json!("https://cdn/pack.mrpack"));
         assert_eq!(detail["reason"], json!("服务器不支持按范围读取"));
+    }
+
+    /// 联网失败不论从哪个领域冒上来都带 detail.network；与网络无关的错误不带。
+    #[tokio::test]
+    async fn network_layer_failures_are_marked_in_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let aurora = aurora_core::Aurora::open(
+            aurora_core::AuroraConfig::default(),
+            dir.path().to_path_buf(),
+            dir.path().join("config.json"),
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let refused: CommandError = aurora
+            .probe_auth_server(&format!("http://127.0.0.1:{port}/api/yggdrasil/"))
+            .await
+            .unwrap_err()
+            .into();
+        assert_eq!(refused.detail.unwrap()["network"], json!("connect"));
+
+        let local: CommandError = BaseError::Io {
+            path: PathBuf::from("C:/data/tasks.json"),
+            source: std::io::Error::new(std::io::ErrorKind::TimedOut, "磁盘超时"),
+        }
+        .into();
+        assert!(local.detail.unwrap().get("network").is_none());
     }
 
     #[test]

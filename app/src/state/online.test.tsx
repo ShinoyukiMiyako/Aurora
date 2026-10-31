@@ -52,8 +52,10 @@ describe("连接类错误的判定", () => {
     expect(isConnectionError(offlineError())).toBe(true);
     expect(isConnectionError(new IpcError("account_refresh_network", "x"))).toBe(true);
     expect(isConnectionError(new IpcError("Http", "x"))).toBe(true);
-    expect(isConnectionError(new IpcError("download_failed", "x", { network: "dns" }))).toBe(true);
-    expect(isConnectionError(new IpcError("download_failed", "x", { network: "tls" }))).toBe(false);
+    expect(isConnectionError(new IpcError("download_failed", "x", { network: "connect" }))).toBe(true);
+    expect(isConnectionError(new IpcError("modrinth_failed", "x", { network: "timeout" }))).toBe(true);
+    expect(isConnectionError(new IpcError("download_failed", "x", { network: "dns" }))).toBe(false);
+    expect(isConnectionError(new IpcError("download_failed", "x", { network: 1 }))).toBe(false);
     expect(isConnectionError(new IpcError("download_failed", "下载源上找不到这个文件（404）", { status: 404 }))).toBe(false);
     expect(isConnectionError(new Error("编程错误"))).toBe(false);
   });

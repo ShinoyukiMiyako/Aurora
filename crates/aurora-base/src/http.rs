@@ -73,11 +73,116 @@ pub fn build_client_with(config: &HttpConfig) -> Result<reqwest::Client> {
     builder.build().map_err(Error::HttpClientBuild)
 }
 
+/// 联网请求在网络层失败的种类：连不上（DNS 解析失败、连接被拒、TLS 握手失败都在这里），或者等不到响应。
+/// 收到了响应但状态码不对、响应体解析失败不算：那说明网络是通的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkFailure {
+    Connect,
+    Timeout,
+}
+
+impl NetworkFailure {
+    /// 交给前端的稳定名字。
+    pub fn code(self) -> &'static str {
+        match self {
+            NetworkFailure::Connect => "connect",
+            NetworkFailure::Timeout => "timeout",
+        }
+    }
+}
+
+/// 沿错误的 source 链找第一个 reqwest 错误，判断它是不是网络层失败。各层错误都把 reqwest 错误挂在
+/// source 上，所以不论从哪条路径冒上来都认得出；链上没有 reqwest 错误时为 `None`。
+pub fn network_failure(err: &(dyn std::error::Error + 'static)) -> Option<NetworkFailure> {
+    let mut current = Some(err);
+    while let Some(layer) = current {
+        if let Some(http) = layer.downcast_ref::<reqwest::Error>() {
+            return if http.is_timeout() {
+                Some(NetworkFailure::Timeout)
+            } else if http.is_connect() {
+                Some(NetworkFailure::Connect)
+            } else {
+                None
+            };
+        }
+        current = layer.source();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 模拟上层错误把 reqwest 错误挂在 source 上的样子。
+    #[derive(Debug, thiserror::Error)]
+    #[error("下载失败")]
+    struct Wrapped(#[source] reqwest::Error);
+
+    fn closed_port_url() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("http://127.0.0.1:{port}/file")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refused_connection_is_a_connect_failure_wherever_it_sits_in_the_chain() {
+        let err = build_client()
+            .unwrap()
+            .get(closed_port_url())
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(network_failure(&err), Some(NetworkFailure::Connect));
+        let wrapped = Wrapped(err);
+        assert_eq!(network_failure(&wrapped), Some(NetworkFailure::Connect));
+        assert_eq!(NetworkFailure::Connect.code(), "connect");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_response_within_the_deadline_is_a_timeout() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let err = build_client()
+            .unwrap()
+            .get(format!("{}/slow", server.uri()))
+            .timeout(Duration::from_millis(200))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            network_failure(&Wrapped(err)),
+            Some(NetworkFailure::Timeout)
+        );
+        assert_eq!(NetworkFailure::Timeout.code(), "timeout");
+    }
+
+    /// 收到了响应只是状态码不对，网络是通的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_error_status_or_a_non_http_error_is_not_a_network_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let status = build_client()
+            .unwrap()
+            .get(format!("{}/busy", server.uri()))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap_err();
+        assert_eq!(network_failure(&Wrapped(status)), None);
+        let io = std::io::Error::new(std::io::ErrorKind::TimedOut, "磁盘超时");
+        assert_eq!(network_failure(&io), None);
+    }
 
     #[test]
     fn default_user_agent_has_brand_prefix() {

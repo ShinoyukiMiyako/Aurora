@@ -16,8 +16,8 @@ export type ConnectionProbe = () => Promise<boolean>;
 const OFFLINE_FAILURE_CODES = new Set(["files_offline", "account_refresh_network"]);
 /** 微软登录可重试的网络故障。 */
 const AUTH_NETWORK_CODE = "Http";
-/** 后端在原因链里认出连接类错误时，在 detail.network 里标明是哪一种。 */
-const CONNECTION_KINDS = new Set(["connect", "dns", "timeout"]);
+/** 后端在原因链里认出网络层失败时，在 detail.network 里标明是哪一种：connect（含 DNS 解析失败、连接被拒、TLS 握手失败）或 timeout。 */
+const CONNECTION_KINDS = new Set(["connect", "timeout"]);
 
 /** 这个错误是不是连接类的：只有它才值得去探测一次连通性。 */
 export function isConnectionError(error: unknown): boolean {
