@@ -1749,4 +1749,47 @@ describe("实例详情：存档备份", () => {
     expect(callsOf(ipc, "export_world")).toEqual([{ id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "导出「新世界」" });
   });
+
+  it("删除实例的确认：有备份时说备份留在哪、不随实例删除；没有备份时指向存档菜单", async () => {
+    const preview = (backupCount: number) => () => ({
+      id: ID,
+      worlds: contentDto().worlds,
+      size_bytes: 3 * MB,
+      file_count: 10,
+      dependents: [],
+      activity: null,
+      backups_dir: `D:/Games/.minecraft/.petalfall/backups/instances/${ID}`,
+      backup_count: backupCount,
+    });
+    ipc.overrides.set("preview_instance_deletion", preview(4));
+    await open("settings");
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain(`这些存档已有 4 份备份，保留在 D:/Games/.minecraft/.petalfall/backups/instances/${ID}，不会随实例删除。`);
+    expect(dialog().textContent).not.toContain("想留着存档的话");
+    const path = [...dialog().querySelectorAll<HTMLElement>("[title]")].find((el) => el.getAttribute("title") === `D:/Games/.minecraft/.petalfall/backups/instances/${ID}`);
+    expect(path).toBeDefined();
+    click(button("取消", dialog()));
+    await flush();
+
+    ipc.overrides.set("preview_instance_deletion", preview(0));
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("想留着存档的话，先在概览的存档菜单里选「备份存档」。");
+    expect(dialog().textContent).not.toContain("份备份，保留在");
+    click(button("取消", dialog()));
+    await flush();
+
+    // 路径太长时从中间省略，盘符与实例名都留着，悬停看全文
+    const long = `D:/Users/player/Games/Minecraft/.minecraft/.petalfall/backups/instances/${ID}`;
+    ipc.overrides.set("preview_instance_deletion", () => ({ ...preview(2)(), backups_dir: long }));
+    click(button("删除实例"));
+    await flush();
+    const shown = [...dialog().querySelectorAll<HTMLElement>("[title]")].find((el) => el.getAttribute("title") === long);
+    if (shown === undefined) throw new Error("备份目录没有带全文的悬停提示");
+    expect([...textOf(shown)].length).toBe(56);
+    expect(textOf(shown).startsWith("D:/Users/player/Games/")).toBe(true);
+    expect(textOf(shown).endsWith(`instances/${ID}`)).toBe(true);
+    expect(textOf(shown)).toContain("…");
+  });
 });
