@@ -28,7 +28,9 @@ function Notes({ notes }: { notes: string | null }) {
   return (
     <section className={s.notes}>
       <h3 className={s.notesTitle}>{UPDATE_COPY.notesTitle}</h3>
-      {blocks.length === 0 ? <p className={s.muted}>{UPDATE_COPY.notesEmpty}</p> : (
+      {blocks.length === 0 ? (
+        <p className={s.muted}>{UPDATE_COPY.notesEmpty}</p>
+      ) : (
         <div className={s.notesBody}>
           <RichText blocks={blocks} />
         </div>
