@@ -16,18 +16,21 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use aurora_instance::{AURORA_META_DIR, DiscoveredVersion, MarkerStore};
 use aurora_modpack::{
-    IndexFile, PackLoader, PackLoaderKind, SafeRelativePath, is_export_download_url,
+    ExportPack, IndexFile, OverrideFile, PackLoader, PackLoaderKind, SafeRelativePath,
+    WriteProgress, is_export_download_url,
 };
 use aurora_modplatform::{DISABLED_SUFFIX, ModrinthFile, ModrinthVersion, Platform};
 use aurora_version::{LoaderKind, identify_mc_version};
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::error::{CoreError, Result};
-use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::Aurora;
+use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
+use crate::facade::{Aurora, PROGRESS_EVENT_INTERVAL};
 use crate::modfs::{BACKUP_SUFFIX, MODS_DIR, bounded_map, local_concurrency, try_exists};
 use crate::modpack::read_instance_modpack;
 
@@ -284,6 +287,15 @@ struct PlannedFile {
     size: u64,
 }
 
+impl PlannedFile {
+    fn into_override(self) -> OverrideFile {
+        OverrideFile {
+            path: self.path,
+            source: self.source,
+        }
+    }
+}
+
 /// 一个额外项收集到的文件。
 #[derive(Debug, Default)]
 struct CollectedExtra {
@@ -356,6 +368,173 @@ impl Aurora {
     /// 只读，要联网问 Modrinth。
     pub async fn preview_modpack_export(&self, id: &str) -> Result<ModpackExportPreview> {
         Ok(self.plan_export(id, None, None).await?.preview())
+    }
+
+    /// 把实例导出为 `.mrpack`，写到 `target` 的目标位置（已有同名文件时替换）。
+    ///
+    /// 先按此刻的盘面重新规划，再在阻塞线程里写到临时文件并回读校验，通过后改名到目标位置。取消在
+    /// 算哈希时按文件、联网时立即、写包时按 64 KiB 观察。失败时临时文件已删，目标文件不动。
+    pub async fn export_modpack(
+        &self,
+        id: &str,
+        options: &ModpackExportOptions,
+        target: &ModpackExportTarget,
+        events: Option<&EventSink>,
+    ) -> Result<ModpackExportOutcome> {
+        self.ensure_not_cancelled()?;
+        let plan = self.plan_export(id, Some(target), events).await?;
+        let selected: HashSet<ExportExtra> = options.extras.iter().copied().collect();
+
+        let mut skipped = plan.mod_skipped.clone();
+        let mut overrides: Vec<PlannedFile> = Vec::new();
+        overrides.extend(plan.bundled.iter().map(|(_, f)| f.clone()));
+        let disabled_mods = if options.include_disabled {
+            overrides.extend(plan.disabled.iter().map(|(_, f)| f.clone()));
+            plan.disabled.len()
+        } else {
+            0
+        };
+        for (extra, collected) in &plan.extras {
+            if selected.contains(extra) {
+                overrides.extend(collected.files.iter().cloned());
+                skipped.extend(collected.skipped.iter().cloned());
+            }
+        }
+        overrides.sort_by(|a, b| a.path.cmp(&b.path));
+        skipped.sort();
+        let bundled_mods: Vec<String> = plan
+            .bundled
+            .iter()
+            .map(|(m, _)| m.file_name.clone())
+            .collect();
+
+        let mut files: Vec<IndexFile> = plan.indexed.iter().map(|(_, f)| f.clone()).collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        let override_count = overrides.len();
+        let bytes_total: u64 = overrides.iter().map(|f| f.size).sum();
+        let pack = ExportPack {
+            name: options.name.clone(),
+            version_id: options.version.clone(),
+            summary: options.summary.clone(),
+            minecraft: plan.minecraft.clone(),
+            loader: plan.loader.clone(),
+            files,
+            overrides: overrides
+                .into_iter()
+                .map(PlannedFile::into_override)
+                .collect(),
+        };
+
+        if !bundled_mods.is_empty() {
+            emit(
+                events,
+                CoreEvent::warning(format!(
+                    "{} 个 Mod 不在 Modrinth 上，已直接打包进文件",
+                    bundled_mods.len()
+                )),
+            );
+        }
+        if !skipped.is_empty() {
+            emit(
+                events,
+                CoreEvent::warning(format!(
+                    "{} 个文件名不能安全写进整合包，已跳过",
+                    skipped.len()
+                )),
+            );
+        }
+        emit(
+            events,
+            CoreEvent::stage(format!("打包 {override_count} 个文件")),
+        );
+        let written = self
+            .write_pack_reporting(pack, target.part_path(), bytes_total, events)
+            .await?;
+
+        if let Err(source) = tokio::fs::rename(target.part_path(), target.destination()).await {
+            target.discard().await;
+            return Err(aurora_base::Error::Io {
+                path: target.destination().to_path_buf(),
+                source,
+            }
+            .into());
+        }
+        emit(
+            events,
+            CoreEvent::stage(format!("已导出到 {}", target.destination().display())),
+        );
+        Ok(ModpackExportOutcome {
+            path: target.destination().to_path_buf(),
+            name: options.name.clone(),
+            version: options.version.clone(),
+            bytes: written.bytes,
+            indexed_files: written.index_files,
+            override_files: written.override_files,
+            bundled_mods,
+            disabled_mods,
+            skipped,
+        })
+    }
+
+    /// 在阻塞线程里写包，把写包进度节流成下载进度事件（结束时补发终值）。
+    async fn write_pack_reporting(
+        &self,
+        pack: ExportPack,
+        part: &Path,
+        bytes_total: u64,
+        events: Option<&EventSink>,
+    ) -> Result<aurora_modpack::WrittenPack> {
+        let (tx, rx) = watch::channel(DownloadProgress {
+            total: pack.overrides.len() as u64,
+            finished: 0,
+            bytes: 0,
+            total_bytes: Some(bytes_total),
+            speed: 0,
+        });
+        let forwarder = events
+            .cloned()
+            .map(|sink| tokio::spawn(forward_progress(rx, sink)));
+        let cancel = self.cancel_token().cloned();
+        let verify_sink = events.cloned();
+        let part = part.to_path_buf();
+        let written = tokio::task::spawn_blocking(move || {
+            let started = Instant::now();
+            let mut verifying = false;
+            let is_cancelled = || cancel.as_ref().is_some_and(|t| t.is_cancelled());
+            let mut on_progress = |p: WriteProgress| {
+                let secs = started.elapsed().as_secs_f64();
+                let speed = if secs > 0.0 {
+                    (p.bytes_done as f64 / secs) as u64
+                } else {
+                    0
+                };
+                tx.send_replace(DownloadProgress {
+                    total: p.files_total,
+                    finished: p.files_done,
+                    bytes: p.bytes_done,
+                    total_bytes: Some(p.bytes_total),
+                    speed,
+                });
+                // 最后一个文件写完之后紧接着收尾与回读校验。
+                if !verifying && p.files_done == p.files_total {
+                    verifying = true;
+                    emit(verify_sink.as_ref(), CoreEvent::stage("校验导出的整合包"));
+                }
+            };
+            aurora_modpack::write_pack(&pack, &part, &is_cancelled, &mut on_progress)
+        })
+        .await?;
+        if let Some(forwarder) = forwarder {
+            forwarder.await?;
+        }
+        Ok(written?)
+    }
+
+    fn ensure_not_cancelled(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(aurora_modpack::Error::Cancelled.into());
+        }
+        Ok(())
     }
 
     /// 网络请求不经下载池，自己响应取消：取消后立即放弃等待，不等平台慢慢回。
@@ -826,13 +1005,27 @@ fn walk(
     Ok(())
 }
 
+/// 把写包进度节流成下载进度事件；发送端全部释放后补发最后一份再结束。
+async fn forward_progress(mut rx: watch::Receiver<DownloadProgress>, sink: EventSink) {
+    while rx.changed().await.is_ok() {
+        let snapshot = *rx.borrow_and_update();
+        if sink.send(CoreEvent::Download(snapshot)).is_err() {
+            break;
+        }
+        tokio::time::sleep(PROGRESS_EVENT_INTERVAL).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+    use std::sync::Arc;
 
     use super::*;
     use crate::config::AuroraConfig;
     use crate::ledger::{Ledger, LedgerEntry};
-    use crate::modpack::InstanceModpack;
+    use crate::modpack::{InstanceModpack, ModpackSource};
+    use aurora_download::CancellationToken;
     use aurora_instance::{IsolationOverride, VersionSettings, VersionSettingsStore};
     use aurora_modpack::PackFormat;
     use sha1::{Digest, Sha1};
@@ -880,6 +1073,7 @@ mod tests {
 
     struct Fixture {
         _tmp: tempfile::TempDir,
+        root: PathBuf,
         aurora: Aurora,
         server: MockServer,
         dir: PathBuf,
@@ -941,6 +1135,7 @@ mod tests {
         }
         let fixture = Fixture {
             _tmp: tmp,
+            root,
             aurora,
             server,
             dir,
@@ -1499,5 +1694,367 @@ mod tests {
             0,
             "目录本身是联接也不跟随"
         );
+    }
+
+    // ---- 导出 ----
+
+    fn options(extras: Vec<ExportExtra>, include_disabled: bool) -> ModpackExportOptions {
+        ModpackExportOptions {
+            name: "樱花林整合包".into(),
+            version: "2.1.0".into(),
+            summary: Some("春天的整合包".into()),
+            extras,
+            include_disabled,
+        }
+    }
+
+    fn read_entry(pack: &Path, name: &str) -> Vec<u8> {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(pack).unwrap()).unwrap();
+        let mut bytes = Vec::new();
+        archive
+            .by_name(name)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    fn entry_names(pack: &Path) -> Vec<String> {
+        let archive = zip::ZipArchive::new(std::fs::File::open(pack).unwrap()).unwrap();
+        let mut names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+        names.sort();
+        names
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".part.mrpack"))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_indexes_platform_mods_and_bundles_the_rest() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let out = fixture.root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let target = ModpackExportTarget::new(out.join("樱花林整合包 2.1.0.mrpack"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = fixture
+            .aurora
+            .export_modpack(
+                ID,
+                &options(vec![ExportExtra::Config], false),
+                &target,
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+
+        let pack = target.destination();
+        assert_eq!(outcome.path, pack);
+        assert_eq!(outcome.bytes, std::fs::metadata(pack).unwrap().len());
+        assert_eq!(
+            (outcome.indexed_files, outcome.override_files),
+            (3, 4),
+            "d、e 两个 jar 加两个配置文件"
+        );
+        assert_eq!(outcome.bundled_mods, vec!["d.jar", "e.jar"]);
+        assert_eq!(outcome.disabled_mods, 0);
+        assert_eq!(outcome.skipped, vec!["config/nul.json"]);
+        assert!(leftovers(&out).is_empty());
+
+        let index: serde_json::Value =
+            serde_json::from_slice(&read_entry(pack, "modrinth.index.json")).unwrap();
+        assert_eq!(index["name"], "樱花林整合包");
+        assert_eq!(index["versionId"], "2.1.0");
+        assert_eq!(index["summary"], "春天的整合包");
+        assert_eq!(
+            index["dependencies"],
+            serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"})
+        );
+        let files = index["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3);
+        for (file, (name, project, version)) in files.iter().zip([
+            ("a.jar", "pa", "va"),
+            ("b.jar", "pb", "vb"),
+            ("c.jar", "pc", "vc"),
+        ]) {
+            let bytes = &fixture.jars[name];
+            let sha1 = sha1_of(bytes);
+            assert_eq!(file["path"], format!("mods/{name}"));
+            assert_eq!(file["hashes"]["sha1"], sha1);
+            assert_eq!(
+                file["hashes"]["sha512"],
+                fake_sha512(&sha1).to_ascii_lowercase()
+            );
+            assert_eq!(file["fileSize"], bytes.len());
+            assert_eq!(
+                file["downloads"],
+                serde_json::json!([cdn(project, version, name)])
+            );
+            assert!(file.get("env").is_none());
+        }
+
+        assert_eq!(
+            entry_names(pack),
+            vec![
+                "modrinth.index.json",
+                "overrides/config/sodium-options.json",
+                "overrides/config/sub/deep.toml",
+                "overrides/mods/d.jar",
+                "overrides/mods/e.jar",
+            ]
+        );
+        assert_eq!(
+            read_entry(pack, "overrides/mods/d.jar"),
+            fixture.jars["d.jar"]
+        );
+
+        let mut stages = Vec::new();
+        let mut warnings = Vec::new();
+        let mut downloads = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                CoreEvent::Stage(s) => stages.push(s),
+                CoreEvent::Warning(w) => warnings.push(w),
+                CoreEvent::Download(p) => downloads.push(p),
+            }
+        }
+        assert_eq!(
+            stages,
+            vec![
+                "读取 5 个 Mod 文件".to_owned(),
+                "向 Modrinth 查询 5 个 Mod".to_owned(),
+                "打包 4 个文件".to_owned(),
+                "校验导出的整合包".to_owned(),
+                format!("已导出到 {}", pack.display()),
+            ]
+        );
+        assert_eq!(
+            warnings,
+            vec![
+                "2 个 Mod 不在 Modrinth 上，已直接打包进文件",
+                "1 个文件名不能安全写进整合包，已跳过"
+            ]
+        );
+        let last = downloads.last().expect("应有打包进度");
+        let override_bytes = (fixture.jars["d.jar"].len()
+            + fixture.jars["e.jar"].len()
+            + b"{\"quality\":1}".len()
+            + b"deep = true".len()) as u64;
+        assert_eq!((last.total, last.finished), (4, 4));
+        assert_eq!(last.bytes, override_bytes);
+        assert_eq!(last.total_bytes, Some(override_bytes));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disabled_mods_ride_along_only_when_asked_and_existing_files_are_replaced() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let destination = fixture.root.join("已有.mrpack");
+        std::fs::write(&destination, b"an older export").unwrap();
+        let target = ModpackExportTarget::new(destination.clone());
+
+        let outcome = fixture
+            .aurora
+            .export_modpack(ID, &options(ExportExtra::ALL.to_vec(), true), &target, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.disabled_mods, 1);
+        let names = entry_names(&destination);
+        for expected in [
+            "overrides/mods/x.jar.disabled",
+            "overrides/options.txt",
+            "overrides/resourcepacks/pack.zip",
+            "overrides/saves/World/level.dat",
+        ] {
+            assert!(
+                names.contains(&expected.to_owned()),
+                "{expected}: {names:?}"
+            );
+        }
+        for name in &names {
+            let lower = name.to_lowercase();
+            assert!(!lower.contains(AURORA_META_DIR), "{name}");
+            assert!(!lower.ends_with(".old"), "{name}");
+            assert!(
+                !lower.contains("logs/") && !lower.contains("crash-reports/"),
+                "{name}"
+            );
+            assert!(
+                !lower.contains("mods/sub/") && !lower.ends_with("readme.txt"),
+                "{name}"
+            );
+            assert!(
+                !lower.ends_with(".json")
+                    || lower.starts_with("overrides/config/")
+                    || lower == "modrinth.index.json",
+                "{name}"
+            );
+        }
+        assert_eq!(
+            read_entry(&destination, "overrides/mods/x.jar.disabled"),
+            fixture.jars["x.jar.disabled"]
+        );
+        assert!(leftovers(&fixture.root).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pre_cancelled_export_leaves_neither_destination_nor_part() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let token = CancellationToken::new();
+        token.cancel();
+        let aurora = fixture.aurora.clone().with_cancel(token);
+        let target = ModpackExportTarget::new(fixture.root.join("取消.mrpack"));
+        let err = aurora
+            .export_modpack(ID, &options(vec![ExportExtra::Config], true), &target, None)
+            .await
+            .unwrap_err();
+        assert!(err.is_cancelled(), "{err:?}");
+        assert!(!target.destination().exists());
+        assert!(!target.part_path().exists());
+        assert!(leftovers(&fixture.root).is_empty());
+        assert!(fixture.server.received_requests().await.unwrap().is_empty());
+    }
+
+    /// 把清单里的正式 CDN 地址改写到本地 mock，导入侧对清单地址的白名单校验不变。
+    struct CdnToMock(String);
+
+    impl aurora_download::SourceResolver for CdnToMock {
+        fn resolve(
+            &self,
+            url: &str,
+            _source: aurora_download::MirrorSource,
+        ) -> aurora_download::Result<String> {
+            Ok(url.replace("https://cdn.modrinth.com/", &format!("{}/cdn/", self.0)))
+        }
+    }
+
+    fn mod_files(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap())
+            .filter(|e| e.file_type().unwrap().is_file())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".jar") || n.ends_with(".jar.disabled"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// 导出的包经现有导入流程装成新实例：下载的、打包的、停用的 Mod 一个不少，整合包信息是导出时填的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_exported_pack_imports_back_into_the_same_mods() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let base = fixture.server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&fixture.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
+            ))
+            .mount(&fixture.server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/test/0.15.0/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"id":"fabric-loader-0.15.0-test","inheritsFrom":"test","type":"release",
+                    "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                    "libraries":[]}"#,
+            ))
+            .mount(&fixture.server)
+            .await;
+        for (name, project, version) in [
+            ("a.jar", "pa", "va"),
+            ("b.jar", "pb", "vb"),
+            ("c.jar", "pc", "vc"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/cdn/data/{project}/versions/{version}/{name}"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(fixture.jars[name].clone()))
+                .mount(&fixture.server)
+                .await;
+        }
+        let aurora = fixture
+            .aurora
+            .clone()
+            .with_download_resolver(Arc::new(CdnToMock(base.clone())));
+        let target = ModpackExportTarget::new(fixture.root.join("往返.mrpack"));
+        aurora
+            .export_modpack(ID, &options(vec![ExportExtra::Config], true), &target, None)
+            .await
+            .unwrap();
+
+        let imported = aurora
+            .install_modpack(
+                &ModpackSource::File {
+                    path: target.destination().to_path_buf(),
+                },
+                Some("导入回来"),
+                "roundtrip",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.modpack.name, "樱花林整合包");
+        assert_eq!(imported.modpack.version.as_deref(), Some("2.1.0"));
+        assert_eq!(imported.modpack.remote_files, 3);
+        let new_mods = imported.version_dir.join("mods");
+        assert_eq!(mod_files(&new_mods), mod_files(&fixture.dir.join("mods")));
+        assert_eq!(
+            mod_files(&new_mods),
+            vec![
+                "a.jar",
+                "b.jar",
+                "c.jar",
+                "d.jar",
+                "e.jar",
+                "x.jar.disabled"
+            ]
+        );
+        for (name, bytes) in &fixture.jars {
+            assert_eq!(
+                &std::fs::read(new_mods.join(name)).unwrap(),
+                bytes,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(
+                imported
+                    .version_dir
+                    .join("config")
+                    .join("sub")
+                    .join("deep.toml")
+            )
+            .unwrap(),
+            b"deep = true"
+        );
+        let cdn_hits = fixture
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().starts_with("/cdn/"))
+            .count();
+        assert_eq!(cdn_hits, 3, "走索引的三个 Mod 各下载一次");
     }
 }

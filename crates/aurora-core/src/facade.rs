@@ -30,7 +30,7 @@ use crate::event::{CoreEvent, EventSink};
 
 /// 下载进度事件的最小间隔。采样器每 100 ms 推一次快照，逐文件完成时还会额外推一次；
 /// 上千个小文件的资源批次若逐条转发，事件通道与前端 IPC 都会被灌满，按此间隔只留最新快照。
-const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 门面：组合下层 crate 的统一入口。
 #[derive(Clone)]
@@ -58,6 +58,10 @@ pub struct Aurora {
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
     curseforge_key: Option<String>,
+    /// 测试注入的下载地址改写：往返测试要让导入侧把清单里的正式 CDN 地址下到本地 mock，又不能放松导入
+    /// 对清单地址的白名单校验，只能在下载池这一层改写。
+    #[cfg(test)]
+    download_resolver: Option<std::sync::Arc<dyn aurora_download::SourceResolver>>,
 }
 
 impl Aurora {
@@ -112,6 +116,8 @@ impl Aurora {
             mod_versions: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
+            #[cfg(test)]
+            download_resolver: None,
         })
     }
 
@@ -306,8 +312,16 @@ impl Aurora {
 
     /// 按当前配置的下载源策略与并发上限装配一个批量下载池；门面挂了取消令牌时池也挂上。
     pub(crate) fn download_pool(&self) -> DownloadPool {
+        let sources = self.config.download_source.source_plan();
+        #[cfg(test)]
+        let sources = match &self.download_resolver {
+            Some(resolver) => {
+                aurora_download::SourcePlan::with_resolver(sources.sources, resolver.clone())
+            }
+            None => sources,
+        };
         let config = DownloadConfig {
-            sources: self.config.download_source.source_plan(),
+            sources,
             ..DownloadConfig::default()
         };
         let downloader = Downloader::new(self.http.clone(), config);
@@ -431,6 +445,7 @@ impl Aurora {
             cancel: None,
             mod_versions: Default::default(),
             curseforge_key: None,
+            download_resolver: None,
         }
     }
 
@@ -457,6 +472,15 @@ impl Aurora {
 
     pub(crate) fn injected_curseforge_key(&self) -> Option<&str> {
         self.curseforge_key.as_deref()
+    }
+
+    /// 下载池里每个地址先经这个解析器改写。
+    pub(crate) fn with_download_resolver(
+        mut self,
+        resolver: std::sync::Arc<dyn aurora_download::SourceResolver>,
+    ) -> Self {
+        self.download_resolver = Some(resolver);
+        self
     }
 }
 
