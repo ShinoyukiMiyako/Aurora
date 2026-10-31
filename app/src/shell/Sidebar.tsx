@@ -20,11 +20,12 @@ import { brokenAction, launchView, type LaunchView } from "../launch/launchView"
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
 import { TOOLTIP_TIMING, fade, springs } from "../lib/motion";
 import { clamp, isImeComposing } from "../lib/util";
-import { useLauncher, useNow } from "../state/launcher";
-import { useUpdaterInfo } from "../state/queries/catalog";
+import { useLauncher, useLauncherSelector, useNow } from "../state/launcher";
 import { sameRoute, type Route } from "../state/route";
 import { findInstance, pinnedInstances } from "../state/selectors";
 import type { LauncherState } from "../state/store";
+import { showsUpdateDot } from "../state/updater/machine";
+import { useUpdater } from "../state/updater/useUpdater";
 import { Menu, type MenuEntry, type MenuItem, type MenuOpenedBy } from "../ui/Menu";
 import { Tooltip } from "../ui/Tooltip";
 import { useChrome } from "./chrome";
@@ -452,19 +453,19 @@ function CreateItem({ tabStop, tooltipsOff, onActivate }: ItemBaseProps & { onAc
   );
 }
 
-/** 有可安装的更新（检查到新版本，或已下载待安装）时设置上挂一个强调点。 */
-export function hasUpdate(info: { supported: boolean; available: unknown; downloaded_version: string | null }): boolean {
-  return info.supported && (info.available !== null || info.downloaded_version !== null);
-}
-
+/**
+ * 设置上的更新点与设置导航「关于」上的同一条规则：已下载待安装一直亮；只是检查到新版本时，跳过的版本不亮，
+ * 打开过更新面板看过的也不再亮。设置还没读出来时不知道跳过了哪个版本，先不亮。
+ */
 function SettingsItem({ selected = false, tabStop, tooltipsOff, onActivate }: ItemBaseProps & { onActivate: () => void }) {
-  const updater = useUpdaterInfo();
+  const updater = useUpdater();
+  const skipped = useLauncherSelector((s) => (s.settings === null ? undefined : s.settings.skippedUpdateVersion));
   const run = useRunner();
-  const error = updater.status === "error" ? updater.error : null;
+  const error = updater.info.status === "error" ? updater.info.error : null;
   useEffect(() => {
     if (error !== null) void run(() => Promise.reject(error), SHELL_ACTION_ERROR.updater);
   }, [error, run]);
-  const update = updater.data !== undefined && hasUpdate(updater.data);
+  const update = skipped !== undefined && showsUpdateDot(updater.state, skipped);
   return (
     <NavItem
       itemKey="settings"

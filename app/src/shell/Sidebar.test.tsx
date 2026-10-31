@@ -10,12 +10,12 @@ import type { Task } from "../domain/types";
 import { LauncherProvider } from "../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
 import { SIDEBAR_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
-import { ShellProvider, useNav, type NavApi } from "./shell";
-import { dragShift, dropIndex, hasUpdate, moveItem, PIN_STEP, pinLaunchItem, pinLine, pinTarget, Sidebar, sidebarSelection } from "./Sidebar";
+import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
+import { dragShift, dropIndex, moveItem, PIN_STEP, pinLaunchItem, pinLine, pinTarget, Sidebar, sidebarSelection } from "./Sidebar";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -109,21 +109,14 @@ describe("固定实例菜单的第一项", () => {
   });
 });
 
-describe("设置上的更新点", () => {
-  it("检查到新版本或已下载待安装时出现；不支持自动更新时不出现", () => {
-    expect(hasUpdate({ supported: true, available: { version: "1.2.0" }, downloaded_version: null })).toBe(true);
-    expect(hasUpdate({ supported: true, available: null, downloaded_version: "1.2.0" })).toBe(true);
-    expect(hasUpdate({ supported: true, available: null, downloaded_version: null })).toBe(false);
-    expect(hasUpdate({ supported: false, available: { version: "1.2.0" }, downloaded_version: null })).toBe(false);
-  });
-});
-
 let view: Rendered | undefined;
 let nav: NavApi;
+let shell: ShellApi;
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 
 function Probe() {
   nav = useNav();
+  shell = useShell();
   return null;
 }
 
@@ -170,6 +163,44 @@ afterEach(() => {
   view = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("设置上的更新点", () => {
+  const info = (patch: Record<string, unknown>) => ({
+    current_version: "0.1.0",
+    supported: true,
+    unsupported_reason: null,
+    available: null,
+    downloaded_version: null,
+    install_on_exit: false,
+    ...patch,
+  });
+  const release = (version: string) => ({ version, current_version: "0.1.0", notes: null, date: null });
+  const dotted = () => item("settings").getAttribute("aria-label") === SIDEBAR_COPY.settingsWithUpdate;
+
+  it("检查到新版本时亮；打开更新面板看过之后熄灭", async () => {
+    ipc.overrides.set("updater_info", () => info({ available: release("1.2.0") }));
+    await mount();
+    expect(dotted()).toBe(true);
+    act(() => shell.openUpdatePanel());
+    await flush();
+    expect(dotted()).toBe(false);
+    expect(item("settings").getAttribute("aria-label")).toBe(PAGE_LABEL.settings);
+  });
+
+  const skipped = () => bootOverrides(ipc, { config: configDto({ skipped_update_version: "1.2.0" }), instances: [], pins: [] });
+  const cases: [string, () => void, Record<string, unknown>, boolean][] = [
+    ["跳过的版本不亮", skipped, { available: release("1.2.0") }, false],
+    ["跳过了但已下载待安装：照样亮", skipped, { available: release("1.2.0"), downloaded_version: "1.2.0" }, true],
+    ["不支持自动更新时不亮", () => undefined, { supported: false, unsupported_reason: "debug_build", available: release("1.2.0") }, false],
+    ["没有新版本时不亮", () => undefined, {}, false],
+  ];
+  it.each(cases)("%s", async (_name, boot, patch, expected) => {
+    boot();
+    ipc.overrides.set("updater_info", () => info(patch));
+    await mount();
+    expect(dotted()).toBe(expected);
+  });
 });
 
 describe("侧栏", () => {
