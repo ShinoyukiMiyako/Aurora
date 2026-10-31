@@ -191,23 +191,37 @@ fn worlds_in(saves: &Path) -> Result<Vec<WorldEntry>> {
     let Some(entries) = read_dir_entries(saves)? else {
         return Ok(Vec::new());
     };
+    worlds_from_entries(entries)
+}
+
+/// 游戏运行中存档目录随时在变：玩家删存档，存盘时 level.dat 先被挪成 level.dat_old 再换上新的。
+/// 类型取列目录时的信息（与计数同一口径），level.dat 的内容与修改时刻取自同一个打开的文件，不按路径
+/// 再查一次；列出之后整个存档已经不在的，不再列出。
+fn worlds_from_entries(entries: Vec<std::fs::DirEntry>) -> Result<Vec<WorldEntry>> {
     let mut worlds = Vec::new();
     for entry in entries {
         let path = entry.path();
-        if !metadata(&path)?.is_dir() {
-            continue;
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => {}
+            Ok(_) => continue,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(Error::Io { path, source }),
         }
         let level_path = path.join("level.dat");
-        let (level, modified_at) = match std::fs::read(&level_path) {
-            Ok(bytes) => {
+        let (level, modified_at) = match read_with_metadata(&level_path) {
+            Ok((bytes, meta)) => {
                 let level = match parse_level_dat(&bytes) {
                     Ok(summary) => LevelInfo::Read(summary),
                     Err(LevelDatError(reason)) => LevelInfo::Unreadable(reason),
                 };
-                (level, millis(metadata(&level_path)?.modified()))
+                (level, millis(meta.modified()))
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                (LevelInfo::Missing, millis(metadata(&path)?.modified()))
+                match std::fs::symlink_metadata(&path) {
+                    Ok(meta) => (LevelInfo::Missing, millis(meta.modified())),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(source) => return Err(Error::Io { path, source }),
+                }
             }
             Err(source) => {
                 return Err(Error::Io {
@@ -229,6 +243,15 @@ fn worlds_in(saves: &Path) -> Result<Vec<WorldEntry>> {
             .then_with(|| a.dir_name.cmp(&b.dir_name))
     });
     Ok(worlds)
+}
+
+fn read_with_metadata(path: &Path) -> std::io::Result<(Vec<u8>, std::fs::Metadata)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let meta = file.metadata()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, meta))
 }
 
 /// 资源包与光影包：`.zip` 文件与文件夹，按名称排序；其它文件（说明文本等）不算。
@@ -563,6 +586,33 @@ mod tests {
         std::fs::remove_dir(saves.join("删掉的")).unwrap();
         assert_eq!(count_world_entries(&entries).unwrap(), 3);
         assert_eq!(count_worlds_in(&saves).unwrap(), 2);
+    }
+
+    /// 列出存档目录之后有存档被删掉（玩家在游戏里删存档）：其余存档照常列出，不让整个内容页失败；
+    /// 已经不在的那个不再列出，免得给出一个读不到 level.dat、体积为 0 的空壳。
+    #[test]
+    fn world_list_survives_an_entry_vanishing_after_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let saves = tmp.path().join("saves");
+        write(
+            &saves.join("生存").join("level.dat"),
+            &level_dat("生存", 0, false, 2_000),
+        );
+        write(
+            &saves.join("删掉的").join("level.dat"),
+            &level_dat("删掉的", 1, false, 1_000),
+        );
+        std::fs::create_dir_all(saves.join("空文件夹")).unwrap();
+        let entries = read_dir_entries(&saves).unwrap().unwrap();
+        assert_eq!(entries.len(), 3);
+
+        std::fs::remove_dir_all(saves.join("删掉的")).unwrap();
+        std::fs::remove_dir(saves.join("空文件夹")).unwrap();
+        let worlds = worlds_from_entries(entries).unwrap();
+        let names: Vec<&str> = worlds.iter().map(|w| w.dir_name.as_str()).collect();
+        assert_eq!(names, vec!["生存"]);
+        assert!(matches!(&worlds[0].level, LevelInfo::Read(s) if s.last_played == Some(2_000)));
+        assert!(worlds[0].modified_at.is_some());
     }
 
     #[tokio::test]
