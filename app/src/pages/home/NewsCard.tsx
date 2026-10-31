@@ -46,14 +46,17 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
   const feed = news.data;
   const stale = news.status === "error" || (feed !== undefined && feed.offline);
   const subtitle = feed !== undefined && (stale || !online) ? HOME_COPY.withOffline(HOME_COPY.newsSubtitle) : HOME_COPY.newsSubtitle;
+  // 启动器资讯没有缓存可退时只给 launcher_error、不标 offline（官方资讯的缓存可能还新鲜）：它同样是手里的错误，
+  // 恢复联网也要重取；但不算离线，副标题不跟着写「离线中」
+  const retryOnReconnect = stale || (feed !== undefined && feed.launcher_error !== null);
 
   const wasOnline = useRef(online);
   const reloadNews = news.reload;
   useEffect(() => {
     const reconnected = online && !wasOnline.current;
     wasOnline.current = online;
-    if (reconnected && stale) reloadNews();
-  }, [online, stale, reloadNews]);
+    if (reconnected && retryOnReconnect) reloadNews();
+  }, [online, retryOnReconnect, reloadNews]);
 
   const body = () => {
     if (news.status === "loading" || gate.view === "skeleton") {

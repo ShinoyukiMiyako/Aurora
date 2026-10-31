@@ -36,6 +36,9 @@ export function previewErrorText(error: unknown): string {
       return IMPORT_COPY.errorManifestInvalid(record.message);
     case "modpack_corrupt":
       return IMPORT_COPY.errorCorrupt;
+    // 只有 CurseForge 包的预览会联网（清单不带落点与大小，要问平台）
+    case "network_failed":
+      return IMPORT_COPY.errorNetwork;
     default:
       return record.message;
   }

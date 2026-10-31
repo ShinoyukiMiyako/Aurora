@@ -149,6 +149,7 @@ export const INSTALL_COPY = {
     incompatible: "不兼容",
   },
   updateReason: (from: string, to: string) => `已装 ${from}，将换成 ${to}`,
+  installedInWorld: (world: string) => `已装在存档「${world}」`,
   instanceInstalling: "实例正在安装",
   instanceBroken: "实例已损坏，先修复",
   judging: "正在判断能否安装…",
@@ -245,4 +246,5 @@ export const IMPORT_COPY = {
   errorManifestMissing: "这个压缩包里没有 modrinth.index.json 或 manifest.json，不像是整合包",
   errorManifestInvalid: (message: string) => `整合包清单读不出来：${message}`,
   errorCorrupt: "文件不完整或已损坏，重新下载一份再试",
+  errorNetwork: "CurseForge 整合包要联网向平台查文件信息，联网后再读一次",
 } as const;

@@ -420,6 +420,28 @@ describe("主页：资讯", () => {
     expect(text()).toContain("Minecraft 1.21.1");
   });
 
+  // 官方资讯的磁盘缓存还新鲜（不算离线），启动器资讯没有缓存又取不到：只有 launcher_error，没有 offline
+  it("断网时只有启动器资讯没拉下来：恢复联网自动重取一次，拉下来后提示消失", async () => {
+    let reachable = false;
+    ipc.overrides.set("list_news", () => ({
+      items: NEWS,
+      fetched_at: NOW,
+      offline: false,
+      launcher_error: reachable ? null : { code: "network_failed", message: "dns lookup failed", detail: { url: "https://api.github.com/x" } },
+    }));
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    await mount();
+    expect(document.querySelector('[role="note"]')?.textContent).toContain("启动器资讯暂时没拉下来");
+    expect(callsOf(ipc, "list_news")).toHaveLength(1);
+
+    reachable = true;
+    setOnline(true);
+    await flush();
+    expect(callsOf(ipc, "list_news")).toHaveLength(2);
+    expect(document.querySelector('[role="note"]')).toBeNull();
+    expect(text()).not.toContain("离线中");
+  });
+
   it("后端给的是缓存：副标题注明离线中", async () => {
     ipc.overrides.set("list_news", () => ({ items: NEWS, fetched_at: NOW - DAY, offline: true, launcher_error: null }));
     await mount();
@@ -690,6 +712,34 @@ describe("主页：固定的服务器", () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
+  });
+
+  it("断网时进主页测到的全是连不上：恢复联网重测回来之前每台写「测速中」，不把断网期间的结果当结论", async () => {
+    let reachable = false;
+    ipc.overrides.set("ping_servers", () => {
+      if (!reachable) return pinned.map((p) => ({ ...ping(p.address), reachable: false, latency_ms: null, online: null, max: null, error: "网络不可达" }));
+      return new Promise<ServerStatusDto[]>((resolve) => setTimeout(() => resolve(pinned.map((p) => ping(p.address))), 2_000));
+    });
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    await mount();
+    const signals = () => [...document.querySelectorAll<HTMLElement>("[data-state]")].filter((el) => el.className.includes("signal")).map((el) => el.dataset.state);
+    expect(text()).toContain("1 个 · 在线人数与延迟 · 本机离线");
+    expect(signals()).toEqual(["paused"]);
+
+    reachable = true;
+    setOnline(true);
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(2);
+    expect(text()).not.toContain("本机离线");
+    expect(text()).not.toContain("连不上");
+    expect(text()).toContain("测速中");
+    expect(signals()).toEqual(["pending"]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(text()).toContain("38 ms");
+    expect(text()).not.toContain("测速中");
+    expect(signals()).toEqual(["online"]);
   });
 
   it("没有固定服务器：紧凑空状态", async () => {

@@ -57,6 +57,23 @@ describe("单个目标的判定", () => {
     expect(() => targetVerdict(base)).toThrow(/存档/);
   });
 
+  it("数据包已装：原因写出装在哪个存档，存档有名字用名字，没有名字或已不在列表里时写目录名", () => {
+    const installedIn = (dir: string) =>
+      match("a", { state: "installed", best_version: modVersion("dp-1"), installed: { file_name: "t.zip", version_id: "dp-1", version_number: null, world: dir } });
+    const worlds = { status: "ready" as const, worlds: [{ ...world("Alpha", 9), name: "阿尔法" }, { ...world("Beta", 1), name: null }] };
+    const named = targetVerdict({ instance: summary("a"), match: installedIn("Alpha"), resourceType: "data_pack", worlds });
+    expect([named.kind, named.selectable, named.reason]).toEqual(["installed", false, "已装在存档「阿尔法」"]);
+    expect(targetVerdict({ instance: summary("a"), match: installedIn("Beta"), resourceType: "data_pack", worlds }).reason).toBe("已装在存档「Beta」");
+    expect(targetVerdict({ instance: summary("a"), match: installedIn("Gone"), resourceType: "data_pack", worlds }).reason).toBe("已装在存档「Gone」");
+    // 其余类型没有存档，已安装照旧不写原因
+    const rp = targetVerdict({
+      instance: summary("a"),
+      match: match("a", { state: "installed", best_version: modVersion("rp-1"), installed: { file_name: "r.zip", version_id: "rp-1", version_number: null, world: null } }),
+      resourceType: "resource_pack",
+    });
+    expect([rp.kind, rp.reason]).toEqual(["installed", null]);
+  });
+
   it("光影：没有 Iris 或 OptiFine 时兼容降为可能可行；有加载器或不兼容时不改", () => {
     const base = { instance: summary("a"), resourceType: "shader" as const };
     const down = targetVerdict({ ...base, match: match("a"), shaderLoader: false });
@@ -106,9 +123,17 @@ describe("目标列表", () => {
   });
 
   it("数据包默认装进最近游玩的存档，都没有游玩时刻时取第一个；没有存档时报错", () => {
-    expect(defaultWorld([world("旧", 1), world("新", 9), world("从没玩", null)])).toBe("新");
-    expect(defaultWorld([world("甲", null), world("乙", null)])).toBe("甲");
-    expect(() => defaultWorld([])).toThrow();
+    expect(defaultWorld([world("旧", 1), world("新", 9), world("从没玩", null)], null)).toBe("新");
+    expect(defaultWorld([world("甲", null), world("乙", null)], null)).toBe("甲");
+    expect(() => defaultWorld([], null)).toThrow();
+  });
+
+  it("数据包可更新：默认装回旧版本所在的存档；那个存档已不在列表里时退回最近游玩的", () => {
+    const worlds = [world("旧", 1), world("新", 9), world("从没玩", null)];
+    expect(defaultWorld(worlds, "从没玩")).toBe("从没玩");
+    expect(defaultWorld(worlds, "旧")).toBe("旧");
+    expect(defaultWorld(worlds, "已删除")).toBe("新");
+    expect(() => defaultWorld([], "旧")).toThrow();
   });
 
   it("底栏合计：任一组没算出时为 null，任一组不知道大小时字节为 null", () => {

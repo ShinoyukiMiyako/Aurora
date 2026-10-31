@@ -91,6 +91,12 @@ export function targetVerdict(input: TargetInput): TargetVerdict {
     if (worlds.status === "loading") return verdict(id, "unavailable", INSTALL_COPY.readingWorlds, null);
     if (worlds.status === "error") return verdict(id, "unavailable", INSTALL_COPY.worldsFailed(worlds.message), null);
     if (worlds.worlds.length === 0) return verdict(id, "unavailable", INSTALL_COPY.noWorlds, null);
+    const base = fromMatch(id, match);
+    // 任一存档里有就算已装：说明是哪个存档，否则玩家看不出为什么别的存档也勾不了
+    const world = match.installed === null ? null : match.installed.world;
+    if (base.kind !== "installed" || world === null) return base;
+    const known = worlds.worlds.find((w) => w.dir_name === world);
+    return verdict(id, "installed", INSTALL_COPY.installedInWorld(known === undefined || known.name === null ? world : known.name), null);
   }
 
   const base = fromMatch(id, match);
@@ -145,9 +151,14 @@ export function primaryLabel(selected: readonly TargetRow[]): string {
   return selected.length === 1 ? INSTALL_COPY.install : INSTALL_COPY.installMany(selected.length);
 }
 
-/** 数据包默认装进最近游玩的存档；都没有游玩时刻时取第一个。 */
-export function defaultWorld(worlds: readonly WorldDto[]): string {
+/**
+ * 数据包默认装进哪个存档。已装过的（可更新）默认装回旧版本所在的存档：更新针对的是那个存档里的那一份，
+ * 装进别的存档就成了两个存档各有一个版本。没装过、或旧版本所在的存档已不在列表里时，取最近游玩的存档，
+ * 都没有游玩时刻时取第一个。
+ */
+export function defaultWorld(worlds: readonly WorldDto[], installedIn: string | null): string {
   if (worlds.length === 0) throw new Error("没有存档时不该选默认存档");
+  if (installedIn !== null && worlds.some((w) => w.dir_name === installedIn)) return installedIn;
   let best = worlds[0];
   for (const w of worlds) {
     const lw = w.last_played === null ? -Infinity : w.last_played;

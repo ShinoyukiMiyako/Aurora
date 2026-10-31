@@ -424,6 +424,93 @@ describe("发现页：加载态的时机", () => {
     expect(document.body.textContent).not.toContain("请求超时");
   });
 
+  it("超时后结果晚到；之后同一组条件的首页缓存丢了、再从头加载：重新计时，不直接显示超时", async () => {
+    let first = true;
+    pages = (args) => {
+      if (args.query === "换一个") return result([entry("B")]);
+      if (first) {
+        first = false;
+        return new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 25_000)) as never;
+      }
+      return new Promise<SearchResultDto>(() => {}) as never;
+    };
+    await mount();
+    await advance(10_000);
+    await advance(10_000);
+    expect(document.body.textContent).toContain("请求超时");
+    await advance(5_000);
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+
+    // 换个关键词后断网再恢复：没人在看的首页缓存随之丢弃
+    typeInto(searchInput(), "换一个");
+    act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    expect(cardTitles()).toEqual(["资源 B，查看详情"]);
+    online = false;
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    online = true;
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await settle();
+    });
+
+    // 回到最初的条件：这是新的一次请求，刚开始加载
+    const before = searchCalls().length;
+    typeInto(searchInput(), "");
+    await flush();
+    expect(searchCalls()).toHaveLength(before + 1);
+    expect(document.body.textContent).toContain("搜索中…");
+    expect(document.body.textContent).not.toContain("请求超时");
+    // 分两步走：慢提示在 10 s 那一刻渲染出来，超时接在它后面计
+    await advance(10_000);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+  });
+
+  it("超时后断网再恢复联网：恢复时重发的首页请求从头计时，不沿用上一次的超时", async () => {
+    let call = 0;
+    pages = () => {
+      call += 1;
+      // 第一次一直不回；恢复联网重发的那次 25 s 才回
+      if (call === 1) return new Promise<SearchResultDto>(() => {}) as never;
+      return new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 25_000)) as never;
+    };
+    await mount();
+    await advance(10_000);
+    await advance(10_000);
+    expect(document.body.textContent).toContain("请求超时");
+
+    online = false;
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    online = true;
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await settle();
+    });
+    expect(searchCalls()).toHaveLength(2);
+    expect(document.body.textContent).not.toContain("请求超时");
+    expect(document.body.textContent).toContain("搜索中…");
+    await advance(300);
+    expect(skeletonCards()).toBe(24);
+    await advance(9_700);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+    await advance(5_000);
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+  });
+
   // 慢提示与超时同属加载门的一轮：加载中途换了条件不另起一轮，两者不会一个重来一个不重来
   it("首页加载中途换关键词：慢提示与超时按同一轮计时，都从这一轮开始的时刻算", async () => {
     pages = () => new Promise<SearchResultDto>(() => {}) as never;
@@ -604,6 +691,31 @@ describe("发现页：资源详情与安装", () => {
     expect(peak).toBe(2);
     expect(dialog().querySelector('[role="checkbox"][aria-label^="甲，兼容"]')?.getAttribute("aria-checked")).toBe("true");
     expect(dialog().querySelector('[role="checkbox"][aria-label^="乙，不可用，还没有存档"]')).not.toBeNull();
+  });
+
+  it("数据包可更新：新版本默认装进旧版本所在的存档，不是最近游玩的那个", async () => {
+    const dp = entry("D2", { title: "地形扩展", resource_type: "data_pack", loaders: [] });
+    const next = modVersion("dp-2", { project_id: "D2", loaders: [], version_number: "1.1.0" });
+    bootOverrides(ipc, { instances: [instanceDto("甲")], config: configDto({ selected_version: "甲" }) });
+    pages = () => result([dp]);
+    ipc.overrides.set("project_detail", () => detailOf(dp, { latest_version: next }));
+    ipc.overrides.set("list_mod_versions", () => [next]);
+    ipc.overrides.set("match_instances", () => [
+      match("甲", { state: "installed", best_version: next, installed: { file_name: "terrain-1.0.0.zip", version_id: "dp-1", version_number: "1.0.0", world: "Old" } }),
+    ]);
+    const world = (dir: string, name: string, lastPlayed: number) => ({ dir_name: dir, level_status: "ok", level_error: null, name, mode: null, last_played: lastPlayed, size_bytes: 0, modified_at: null });
+    // 最近玩的是「新世界」，旧版本装在「老世界」
+    ipc.overrides.set("list_instance_content", () => ({ resource_packs: [], shader_packs: [], worlds: [world("New", "新世界", 2_000), world("Old", "老世界", 1_000)] }));
+    await mount();
+    act(() => card("地形扩展").click());
+    await flush();
+    expect(dialog().querySelector('[role="checkbox"][aria-label^="甲，可更新，已装 1.0.0，将换成 1.1.0"]')?.getAttribute("aria-checked")).toBe("true");
+
+    act(() => buttonByText("更新", dialog()).click());
+    await flush();
+    const installs = callsOf(ipc, "install_resource");
+    expect(installs).toHaveLength(1);
+    expect(installs[0]).toMatchObject({ versionId: "甲", resourceType: "data_pack", world: "Old", fileVersionId: "dp-2" });
   });
 
   it("路由带 open 时进页直接打开该资源的详情", async () => {
