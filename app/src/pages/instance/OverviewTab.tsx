@@ -8,6 +8,7 @@ import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, crashCategoryLabel, MODPACK_REIMPORT_COPY, modpackLabel } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
+import { needsReimport } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { useNav, useShell } from "../../shell/shell";
@@ -23,7 +24,7 @@ import {
   type UpdateCandidate,
 } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
-import type { InstanceTab } from "../../state/route";
+import { reimportRoute, type InstanceTab } from "../../state/route";
 import { Badge } from "../../ui/Badge";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -43,7 +44,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
-import { chosenRuntime, modRows, modTotals, needsReimport, overviewBanner, peekLayout, peekPerRow, reimportRoute, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
+import { chosenRuntime, modRows, modTotals, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { ModuleError, SlowHint, useModuleView } from "./parts";
 

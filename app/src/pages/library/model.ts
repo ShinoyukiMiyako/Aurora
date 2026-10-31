@@ -2,7 +2,7 @@
 
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
-import { needsReimport } from "../instance/model";
+import { needsReimport } from "../../domain/rules";
 
 export type LoaderFilter = "all" | LoaderKind;
 export type SortKey = "recent" | "name" | "playtime";

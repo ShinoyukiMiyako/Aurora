@@ -7,12 +7,14 @@ import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
+import { needsReimport } from "../../domain/rules";
 import { isImeComposing } from "../../lib/util";
 import { instanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncher } from "../../state/launcher";
+import { reimportRoute } from "../../state/route";
 import { canPinMore } from "../../state/selectors";
 import { Card } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -24,7 +26,6 @@ import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
 import { HERO_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
-import { needsReimport, reimportRoute } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 
 /** 头图高度：wide 档多给 20，方块 compact 档缩到 64。 */

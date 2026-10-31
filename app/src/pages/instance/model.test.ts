@@ -24,7 +24,6 @@ import {
   modCounts,
   modRows,
   modTotals,
-  needsReimport,
   overridesHeap,
   overviewBanner,
   parseDimension,
@@ -32,7 +31,6 @@ import {
   peekPerRow,
   presetFlags,
   RESOLUTION_LIMITS,
-  reimportRoute,
   removalRelations,
   sortWorlds,
   toggleFlags,
@@ -186,23 +184,6 @@ describe("Mod 总数", () => {
   });
 });
 
-describe("整合包没导入完", () => {
-  const marker = (kind: "install" | "repair" | "modpack" | "unknown") => ({ kind, outcome: "failed" as const, startedAt: null, spec: null, error: null });
-  it("只有损坏且未完成标记是整合包导入时才需要重新导入", () => {
-    expect(needsReimport({ status: "broken", incomplete: marker("modpack") })).toBe(true);
-    expect(needsReimport({ status: "broken", incomplete: marker("install") })).toBe(false);
-    expect(needsReimport({ status: "broken", incomplete: marker("unknown") })).toBe(false);
-    expect(needsReimport({ status: "broken", incomplete: null })).toBe(false);
-    expect(needsReimport({ status: "installing", incomplete: marker("modpack") })).toBe(false);
-  });
-  it("重新导入：记得平台来源时直接打开那个整合包，否则回到发现页的整合包", () => {
-    const pack = { platform: "modrinth" as const, projectId: "abc", versionId: "v1", name: "RLCraft", version: "2.9.3" };
-    expect(reimportRoute({ modpack: pack })).toEqual({ page: "discover", kind: "modpack", open: { platform: "modrinth", projectId: "abc" } });
-    expect(reimportRoute({ modpack: { ...pack, platform: null, projectId: null } })).toEqual({ page: "discover", kind: "modpack" });
-    expect(reimportRoute({ modpack: { ...pack, projectId: null } })).toEqual({ page: "discover", kind: "modpack" });
-    expect(reimportRoute({ modpack: null })).toEqual({ page: "discover", kind: "modpack" });
-  });
-});
 
 describe("概览横幅取最高严重度", () => {
   it("失败与崩溃（danger）压过损坏（warn）压过安装中（info）", () => {

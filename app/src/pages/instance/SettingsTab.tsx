@@ -6,12 +6,14 @@ import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
+import { needsReimport } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncher } from "../../state/launcher";
 import { useInstanceSettings } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
+import { reimportRoute } from "../../state/route";
 import { canPinMore } from "../../state/selectors";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -40,11 +42,9 @@ import {
   isolationByPolicy,
   javaFit,
   JVM_PRESET_KEYS,
-  needsReimport,
   overridesHeap,
   parseDimension,
   presetFlags,
-  reimportRoute,
   RESOLUTION_LIMITS,
   RESOLUTION_PRESETS,
   toggleFlags,

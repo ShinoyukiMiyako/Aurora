@@ -4,7 +4,6 @@
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { LaunchViewKind } from "../../launch/launchView";
-import type { Route } from "../../state/route";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
 
@@ -18,25 +17,6 @@ export function isCrashActive(crashAt: number | null, lastPlayedAt: number | nul
   if (crashAt === null) return false;
   if (view === "loading" || view === "running") return false;
   return lastPlayedAt === null || crashAt >= lastPlayedAt;
-}
-
-// ---------------------------------------------------------------- 整合包没导入完
-
-/**
- * 整合包导入半途而废的实例：缺的是整合包里的 Mod 与配置，补全只补原版文件与加载器，补不回来，
- * 后端对它的补全一律报错。所以各处不给「修复」入口，改给「重新导入」与「删除」。
- */
-export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete">): boolean {
-  return inst.status === "broken" && inst.incomplete !== null && inst.incomplete.kind === "modpack";
-}
-
-/** 重新导入去哪：记得平台来源就直接打开那个整合包的详情，从本地文件导入的（或记录没写下来的）回到发现页的整合包。 */
-export function reimportRoute(inst: Pick<InstanceSummary, "modpack">): Route {
-  const pack = inst.modpack;
-  if (pack !== null && pack.platform !== null && pack.projectId !== null) {
-    return { page: "discover", kind: "modpack", open: { platform: pack.platform, projectId: pack.projectId } };
-  }
-  return { page: "discover", kind: "modpack" };
 }
 
 // ---------------------------------------------------------------- 删除

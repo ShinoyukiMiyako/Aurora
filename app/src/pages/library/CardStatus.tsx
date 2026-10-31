@@ -5,15 +5,16 @@ import { Icon } from "../../art/Icon";
 import { LAUNCH_COPY, MODPACK_REIMPORT_COPY, SESSION_COPY, TASK_STATUS_LABEL } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
+import { needsReimport } from "../../domain/rules";
 import { sessionPhaseLabel, stageLabel, type LaunchView } from "../../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../../launch/useLaunch";
 import { useNav } from "../../shell/shell";
 import { useNow } from "../../state/launcher";
+import { reimportRoute } from "../../state/route";
 import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { useDeleteInstance } from "../instance/delete";
-import { needsReimport, reimportRoute } from "../instance/model";
 import styles from "./library.module.css";
 
 export function CardStatus({ inst }: { inst: InstanceSummary }) {

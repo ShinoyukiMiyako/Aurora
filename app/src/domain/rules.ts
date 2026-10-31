@@ -1,7 +1,8 @@
-// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本。纯函数，页面与状态层共用同一份。
+// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、整合包没导入完。纯函数，页面、启动入口与状态层共用同一份。
 
 import { INSTANCE_NAME_ERROR, OFFLINE_NAME_COPY } from "../copy/flows";
 import { checkInstanceName } from "../ipc/instances";
+import type { InstanceSummary } from "./adapt";
 
 // ---------------------------------------------------------------- 实例名
 
@@ -95,4 +96,14 @@ export function javaMajorFromClassVersion(detail: string | null): number | null 
   const match = CLASS_FILE_VERSION.exec(detail);
   if (match === null) return null;
   return Number(match[1]) - CLASS_FILE_VERSION_OFFSET;
+}
+
+// ---------------------------------------------------------------- 整合包没导入完
+
+/**
+ * 整合包导入半途而废的实例：缺的是整合包里的 Mod 与配置，补全只补原版文件与加载器，补不回来，
+ * 后端对它的补全一律报错。所以各处不给「修复」入口，改给「重新导入」与「删除」。
+ */
+export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete">): boolean {
+  return inst.status === "broken" && inst.incomplete !== null && inst.incomplete.kind === "modpack";
 }

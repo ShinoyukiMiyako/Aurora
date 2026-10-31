@@ -2,6 +2,7 @@
 // 类型定义放在状态层而不是外壳：通知的「查看诊断」、任务完成的「查看」都要带导航目标，状态层不能依赖外壳；
 // 页面组件的 props 也要用到它，而页面只能从外壳引入 useShell / useNav / useRunner。
 
+import type { InstanceSummary } from "../domain/adapt";
 import type { Platform } from "../domain/types";
 
 export const INSTANCE_TABS = ["overview", "mods", "settings", "logs", "crash"] as const;
@@ -69,6 +70,15 @@ export function routeInstanceId(route: Route): string | null {
   if (route.page === "instance") return route.id;
   if (route.page === "discover" && route.forInstance !== undefined) return route.forInstance;
   return null;
+}
+
+/** 重新导入整合包去哪：记得平台来源就直接打开那个整合包的详情，从本地文件导入的（或记录没写下来的）回到发现页的整合包。 */
+export function reimportRoute(inst: Pick<InstanceSummary, "modpack">): Route {
+  const pack = inst.modpack;
+  if (pack !== null && pack.platform !== null && pack.projectId !== null) {
+    return { page: "discover", kind: "modpack", open: { platform: pack.platform, projectId: pack.projectId } };
+  }
+  return { page: "discover", kind: "modpack" };
 }
 
 export function sameRoute(a: Route, b: Route): boolean {
