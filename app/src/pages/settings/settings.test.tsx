@@ -250,6 +250,25 @@ describe("设置页：常规", () => {
     expect(toasts()).toContainEqual({ tone: "success", title: "client_id 已保存", body: undefined });
     expect(document.querySelector('input[aria-label="微软登录 client_id"]')).toBeNull();
   });
+
+  it("client_id：保存还没回来时再按 Enter 不重复写入，只提示一次", async () => {
+    await mount("general");
+    await click(button("修改"));
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="微软登录 client_id"]');
+    if (input === null) throw new Error("没有展开 client_id 输入框");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, "00000000-aaaa-bbbb-cccc-000000000002");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const pending: (() => void)[] = [];
+    ipc.overrides.set("update_config", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+    for (let i = 0; i < 3; i++) act(() => void input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    expect(callsOf(ipc, "update_config")).toEqual([{ clientId: "00000000-aaaa-bbbb-cccc-000000000002" }]);
+    for (const resolve of pending) act(() => resolve());
+    await flush();
+    expect(toasts().filter((t) => t.title === "client_id 已保存")).toHaveLength(1);
+  });
 });
 
 describe("设置页：下载", () => {
