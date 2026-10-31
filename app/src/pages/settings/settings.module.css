@@ -1,0 +1,821 @@
+/*
+ * 设置页版式。尺寸按 <html data-sk-tier> 分档；色值、圆角、间距、字号全部取令牌。
+ */
+
+/* ---------------------------------------------------------------- 骨架：导航 + 内容列 */
+
+.layout {
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+  gap: var(--sk-space-18);
+  align-items: start;
+}
+
+:global(:root[data-sk-tier="wide"]) .layout {
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: var(--sk-space-22);
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-gap);
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- 分区导航 */
+
+.navCard {
+  position: sticky;
+  top: 4px;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  padding: var(--sk-space-8);
+}
+
+.navItem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  padding: var(--sk-space-8);
+  border: 0;
+  border-radius: var(--sk-r);
+  background: transparent;
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.navItem:hover:not([data-on]) {
+  background: var(--sk-fill-hover);
+}
+
+.navItem:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.navPill {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--sk-r);
+  background: var(--sk-accent-soft);
+}
+
+.navIcon {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.navItem[data-on] .navIcon {
+  background: var(--sk-accent-grad);
+  color: var(--sk-accent-ink);
+  translate: 0 -1px;
+}
+
+.navText {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.navLabel {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.navHint {
+  overflow: hidden;
+  font-size: var(--sk-fs-micro);
+  line-height: var(--sk-lh-micro);
+  color: var(--sk-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.navHint[data-tone="accent"] {
+  color: var(--sk-accent-strong);
+}
+
+.navDot {
+  position: relative;
+  flex: none;
+}
+
+/* ---------------------------------------------------------------- 载入与错误 */
+
+.skeletonCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+}
+
+.skeletonRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-18);
+}
+
+.listSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+}
+
+.calloutTitle {
+  display: block;
+  font-weight: var(--sk-w-medium);
+}
+
+.errorText {
+  display: block;
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* ---------------------------------------------------------------- 卡内通用 */
+
+.cardBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+  min-width: 0;
+}
+
+.desc[data-tone="warn"] {
+  color: var(--sk-warn);
+}
+
+.mutedText {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.titleWithTag {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
+.mono {
+  font-family: var(--sk-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.select {
+  width: 220px;
+}
+
+.selectWide {
+  width: 260px;
+}
+
+.slider {
+  width: 280px;
+}
+
+:global(:root:is([data-sk-tier="regular"], [data-sk-tier="wide"])) .slider {
+  width: 340px;
+}
+
+/* compact 档滑杆折到说明下方撑满整行 */
+:global(:root[data-sk-tier="compact"]) .slider {
+  width: auto;
+}
+
+.stackRow {
+  display: flex;
+  flex-direction: column;
+}
+
+.inlineEditor {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.inlineEditor > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.monoInput input {
+  font-family: var(--sk-mono);
+}
+
+.avatarStack {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  --instance-badge-cutout: var(--sk-surface);
+}
+
+.avatarStack > * + * {
+  margin-left: calc(var(--sk-space-6) * -1);
+}
+
+.usersLine {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+/* ---------------------------------------------------------------- Java */
+
+/* 「自动选择」在两列时也独占一整行 */
+.javaList > :first-child {
+  grid-column: 1 / -1;
+}
+
+.runtimeDetail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+.monoLine {
+  overflow: hidden;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+/* ---------------------------------------------------------------- 游戏目录 */
+
+.pathRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.pathBox {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
+  padding: 0 var(--sk-space-12);
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: 36px;
+  color: var(--sk-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.subsection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  margin-top: var(--sk-space-18);
+}
+
+.subsectionHead {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-12);
+}
+
+.subsectionText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.subheading {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.dirList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dirRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  padding: var(--sk-space-8) 0;
+}
+
+.dirRow + .dirRow {
+  border-top: 1px solid var(--sk-line);
+}
+
+.dirText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dirName {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.tagHost {
+  display: inline-flex;
+  border-radius: var(--sk-r-xs);
+  outline: none;
+}
+
+.tagHost:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.dirPath {
+  overflow: hidden;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.discovered {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  padding: var(--sk-space-10) var(--sk-space-12);
+  border-radius: var(--sk-r);
+  background: var(--sk-bg-2);
+}
+
+.dataDirRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  margin-top: var(--sk-space-16);
+  padding-top: var(--sk-space-12);
+  border-top: 1px solid var(--sk-line);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.dataDirPath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+/* ---------------------------------------------------------------- 外观：明暗卡与强调色块 */
+
+.modes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sk-space-12);
+}
+
+.modeCard,
+.swatchCard {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--sk-space-10);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.modeCard {
+  gap: var(--sk-space-10);
+}
+
+.modeCard:hover,
+.swatchCard:hover {
+  border-color: var(--sk-accent-line);
+}
+
+.modeCard[aria-checked="true"],
+.swatchCard[aria-checked="true"] {
+  border-color: var(--sk-accent-line);
+  outline: 3px solid var(--sk-accent-soft);
+}
+
+.modeCard:focus-visible,
+.swatchCard:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.mini,
+.miniPlaceholder {
+  box-sizing: border-box;
+  display: flex;
+  gap: var(--sk-space-6);
+  height: 118px;
+  padding: var(--sk-space-8);
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-sm);
+}
+
+.mini {
+  background: var(--sk-bg);
+}
+
+.miniPlaceholder {
+  background: var(--sk-bg-2);
+}
+
+.miniSide {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-4);
+  width: 22px;
+  padding-top: var(--sk-space-4);
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-surface);
+}
+
+.miniSide > i {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--sk-space-2);
+  background: var(--sk-line-2);
+}
+
+.miniSide > i[data-accent] {
+  background: var(--sk-accent);
+}
+
+.miniMain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+.miniBar {
+  height: 8px;
+  width: 46%;
+  border-radius: var(--sk-space-2);
+  background: var(--sk-line-2);
+}
+
+.miniHero {
+  position: relative;
+  flex: 1;
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-surface);
+}
+
+.miniHero > b {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  width: 32px;
+  height: 10px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+}
+
+.miniRow {
+  display: flex;
+  gap: var(--sk-space-4);
+  height: 22px;
+}
+
+.miniRow > i {
+  flex: 1;
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-surface);
+}
+
+.modeLabel {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  color: var(--sk-text-2);
+}
+
+.modeText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.modeName {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.modeDesc {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.radioDot {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--sk-line-strong);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-surface);
+}
+
+.radioDot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+  transform: scale(0);
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+[aria-checked="true"] > .modeLabel > .radioDot {
+  border-color: var(--sk-accent);
+}
+
+[aria-checked="true"] > .modeLabel > .radioDot::after {
+  transform: scale(1);
+}
+
+.swatches {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sk-space-12);
+}
+
+.swatchCard {
+  align-items: center;
+  gap: var(--sk-space-8);
+  padding: var(--sk-space-12);
+}
+
+.swatch,
+.swatchPlaceholder {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--sk-r-pill);
+}
+
+.swatch {
+  background: var(--sk-accent-grad);
+  color: var(--sk-accent-ink);
+}
+
+.swatchPlaceholder {
+  box-sizing: border-box;
+  border: 1px solid var(--sk-line);
+  background: var(--sk-bg-2);
+}
+
+.swatchName {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+/* ---------------------------------------------------------------- 关于 */
+
+.brand {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-20);
+  overflow: hidden;
+  padding: var(--sk-space-24) var(--sk-space-28);
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-card);
+  box-shadow: var(--sk-shadow-sm);
+}
+
+.brandGlow {
+  position: absolute;
+  inset: 0;
+  background: var(--sk-ambience);
+  pointer-events: none;
+}
+
+.brandMark {
+  position: relative;
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-xl);
+  background: var(--sk-surface);
+}
+
+.brandText {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+.brandName {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sk-space-10);
+  font-size: var(--sk-fs-title);
+  line-height: var(--sk-lh-title);
+  font-weight: var(--sk-w-title);
+  letter-spacing: var(--sk-ls-title);
+}
+
+.brandNameEn {
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.brandSub {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.disclaimer {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: 1.65;
+  color: var(--sk-text-2);
+}
+
+/* ---------------------------------------------------------------- 启动器更新 */
+
+.updateRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-18);
+  min-width: 0;
+  padding-bottom: var(--sk-space-4);
+}
+
+.updateText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.updateTitle {
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.updateTitle[data-tone="accent"] {
+  color: var(--sk-accent-strong);
+}
+
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+}
+
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+}
+
+.notesTitle {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.notesBody {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: var(--sk-space-12) var(--sk-space-14);
+  border-radius: var(--sk-r);
+  background: var(--sk-bg-2);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.progressRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+}
+
+.progressBar {
+  flex: 1;
+  min-width: 0;
+}
+
+.progressText {
+  flex: none;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.installing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-32) 0;
+  font-size: var(--sk-fs-small);
+  color: var(--sk-text-2);
+}
