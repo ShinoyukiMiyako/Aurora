@@ -281,6 +281,8 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+        // 降级被拒说明这次传入的 offlineFallback 不成立，按参数错误报；拒绝原因放在 detail 里供前端分支。
+        CoreError::OfflineFallbackRefused { .. } => code::INVALID_ARGUMENT,
     }
 }
 
