@@ -192,7 +192,8 @@ type TaskMeta =
   | { type: "java"; major: number; launchAfter: string | null }
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
-  | { type: "update"; instanceId: string; name: string };
+  | { type: "update"; instanceId: string; name: string }
+  | { type: "updates"; instanceId: string; count: number };
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -303,10 +304,23 @@ export interface LauncherActions {
 
 // ---------------------------------------------------------------- 常量与工具
 
-/** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 是前端的组合任务。 */
-const TASK_COMMANDS = new Set(["install_version", "install_modpack", "repair_instance", "install_java", "install_mod", "install_mods", "install_resource", "update_mod"]);
+/** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 与 update_mods 是前端的组合任务。 */
+const TASK_COMMANDS = new Set([
+  "install_version",
+  "install_modpack",
+  "repair_instance",
+  "install_java",
+  "install_mod",
+  "install_mods",
+  "install_resource",
+  "update_mod",
+  "update_mods",
+]);
 
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
+
+/** load_task_journal 在日志文件损坏或版本不符时的错误码。 */
+const TASK_JOURNAL_INVALID_CODE = "task_journal_invalid";
 
 const RESOURCE_KIND: Readonly<Record<InstallableResourceType, TaskKind>> = {
   mod: "mod",
@@ -393,6 +407,8 @@ function metaFromSpec(task: Task): TaskMeta | null {
       const items = modItems(args);
       return { type: "mods", instanceId: strArg(args, "versionId", command), name: items[0].title, dependencies: items.length - 1 };
     }
+    case "update_mods":
+      return { type: "updates", instanceId: strArg(args, "versionId", command), count: updateItems(args).length };
     default:
       return null;
   }
@@ -418,6 +434,30 @@ function modItems(args: Record<string, unknown>): ModItem[] {
       projectId: strArg(r, "projectId", "install_mods"),
       modVersionId: strArg(r, "modVersionId", "install_mods"),
       title: strArg(r, "title", "install_mods"),
+    };
+  });
+}
+
+interface UpdateItem {
+  fileName: string;
+  platform: Platform;
+  projectId: string;
+  modVersionId: string;
+}
+
+function updateItems(args: Record<string, unknown>): UpdateItem[] {
+  const raw = args.items;
+  if (!Array.isArray(raw) || raw.length === 0) throw new Error("组合任务 update_mods 缺少 items");
+  return raw.map((item: unknown, i) => {
+    const r = item as Record<string, unknown>;
+    if (typeof r !== "object" || r === null) throw new Error(`update_mods 第 ${i} 项不是对象`);
+    const platform = r.platform;
+    if (platform !== "modrinth" && platform !== "curseforge") throw new Error(`update_mods 第 ${i} 项平台不对：${String(platform)}`);
+    return {
+      fileName: strArg(r, "fileName", "update_mods"),
+      platform,
+      projectId: strArg(r, "projectId", "update_mods"),
+      modVersionId: strArg(r, "modVersionId", "update_mods"),
     };
   });
 }
@@ -532,6 +572,11 @@ export class LauncherStore {
   private lastScanAt = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
+  /**
+   * 任务日志读没读出来。unread 期间（首查进行中，或读失败、还可能读出来）不写回：写回会用内存里的表覆盖那份没读到的历史。
+   * invalid 是文件损坏或版本不符，内容本来就救不回来，照常写回，免得任务表从此再也存不下来。
+   */
+  private journalState: "unread" | "read" | "invalid" = "unread";
 
   readonly actions: LauncherActions;
 
@@ -669,12 +714,29 @@ export class LauncherStore {
     this.set({ pins: await instancesIpc.getSidebarPins() });
   }
 
+  /**
+   * 读任务日志并恢复上次的任务：上次没完成的记为「关闭时中断」。日志读不出来时用户照样能入队，所以重试读取时
+   * 内存里已有的任务优先，原样保留，只把日志里内存没有的那些并进来；读到过一次之后内存就是准的，再读不改任务表。
+   */
   private async fetchJournal(): Promise<void> {
-    const records = await tasksIpc.loadTaskJournal();
+    const records = await tasksIpc.loadTaskJournal().catch((error: unknown) => {
+      if (isIpcError(error) && error.code === TASK_JOURNAL_INVALID_CODE) this.journalState = "invalid";
+      throw error;
+    });
+    if (this.journalState === "read") return;
+    const now = Date.now();
     const loaded = records.map(taskFromRecord);
-    const restored = trimHistory(restoreJournal(loaded, Date.now()));
-    this.set({ tasks: restored });
-    if (restored.some((t, i) => t !== loaded[i])) this.scheduleJournal();
+    this.journalState = "read";
+    let changed = false;
+    this.set((raw) => {
+      const inMemory = new Set(raw.tasks.map((t) => t.id));
+      const previous = loaded.filter((t) => !inMemory.has(t.id));
+      const restored = restoreJournal(previous, now);
+      // 内存里的任务是日志读不出期间入队的，还没写进去过
+      changed = raw.tasks.length > 0 || restored.some((t, i) => t !== previous[i]);
+      return { tasks: trimHistory([...restored, ...raw.tasks]) };
+    });
+    if (changed) this.scheduleJournal();
   }
 
   private readonly onWindowFocus = (): void => {
@@ -736,6 +798,15 @@ export class LauncherStore {
   private sessionActiveFor(instanceId: string): boolean {
     const s = this.raw.session;
     return s !== null && s.instanceId === instanceId && isSessionActive(s);
+  }
+
+  /**
+   * 实例里的 Mod 变了：该实例的列表、历史、可更新项与安装计划失效。发现页的落位矩阵按「装没装、装的哪一版」判定可装与否，
+   * 它的 key 按工程而不是按实例划分，装上的前置也会改变别的工程的判定，所以整个 match 前缀一起失效。
+   */
+  private modsChanged(instanceId: string): void {
+    for (const prefix of ["mods", "history", "mod-updates", "plan"]) invalidateResources(`${prefix}:${instanceId}`);
+    invalidateResources("match");
   }
 
   /** Mod 文件操作的锁：运行中（含加载中）JVM 占着文件，安装中任务在写目录。界面已禁用入口，这里是第二道防线。 */
@@ -814,8 +885,11 @@ export class LauncherStore {
       this.set({ session: next });
       crashedSession = next.phase === "crashed";
     }
+    // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好。这一局可能新建了存档，游玩统计也多了一段：
+    // 没人订阅的缓存条目随之丢弃，之后重新挂载的页面会重取，不靠页面自己观察签名变化
     invalidateResources(`log:${id}`);
-    // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好
+    invalidateResources(`content:${id}`);
+    invalidateResources("play-stats");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
   }
@@ -889,6 +963,29 @@ export class LauncherStore {
     return task;
   }
 
+  /**
+   * 取消一个实例上的全部活动任务，等它们都落了结局再返回（删除实例前用）。
+   * 排队的先一次性标为取消，再取消运行中的：反过来的话，运行中的一结束就空出通道，同实例排队的下一个会被立即拉起。
+   * 排队的取消不逐条发通知，删除完成的那条通知已经交代了结果；运行中的仍按命令返回 cancelled 的常规路径落态。
+   */
+  private async cancelInstanceTasks(instanceId: string): Promise<void> {
+    const pending = this.raw.tasks.filter((t) => isActiveTask(t) && t.instanceId === instanceId);
+    if (pending.length === 0) return;
+    const now = Date.now();
+    this.set((raw) => ({
+      tasks: trimHistory(pending.reduce((tasks, t) => (t.status === "queued" ? markCancelled(tasks, t.id, now) : tasks), raw.tasks)),
+    }));
+    this.tasksChanged();
+    const ids = new Set(pending.map((t) => t.id));
+    await Promise.all(this.raw.tasks.filter((t) => ids.has(t.id) && t.status === "running").map((t) => tasksIpc.cancelTask(attemptTaskId(t))));
+    await waitUntil(
+      this.subscribe,
+      () => !this.raw.tasks.some((t) => ids.has(t.id) && isActiveTask(t)),
+      STOP_TIMEOUT_MS,
+      () => new Error(`「${instanceId}」的 ${pending.length} 个任务没能及时取消`),
+    );
+  }
+
   /** 任务表变化后：防抖写日志、调度空出来的通道。 */
   private tasksChanged(): void {
     this.scheduleJournal();
@@ -904,12 +1001,13 @@ export class LauncherStore {
   }
 
   private async saveJournal(): Promise<void> {
+    if (this.journalState === "unread") return;
     await tasksIpc.saveTaskJournal(this.raw.tasks.map(taskToRecord));
   }
 
   private pump(): void {
     for (const task of tasksToStart(this.raw.tasks)) {
-      this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id) }));
+      this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id, Date.now()) }));
       const attempt = task.attempt;
       this.execute(task).then(
         (result) => this.onTaskDone(task.id, attempt, result),
@@ -922,13 +1020,35 @@ export class LauncherStore {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
-    if (command !== "install_mods") return invoke<unknown>(command, { ...args, taskId });
-    // 组合任务：一个 Mod 连同它的前置逐个装，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
-    const versionId = strArg(args, "versionId", command);
-    for (const item of modItems(args)) {
-      await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
+    // 组合任务逐个调后端命令，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
+    if (command === "install_mods") {
+      const versionId = strArg(args, "versionId", command);
+      for (const item of modItems(args)) {
+        await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
+      }
+      return null;
     }
-    return null;
+    if (command === "update_mods") {
+      const versionId = strArg(args, "versionId", command);
+      for (const item of task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args)) {
+        await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
+      }
+      return null;
+    }
+    return invoke<unknown>(command, { ...args, taskId });
+  }
+
+  /**
+   * 重试「全部更新」时，上一次尝试里已经换过的不再更新：更新会把文件换成新版本的文件名，按原文件名再调一次只会失败。
+   * 按工程重新对一遍：已经是目标版本的、或者 Mod 已被移除不再有更新的跳过，其余用它现在的文件名。
+   */
+  private async pendingUpdates(versionId: string, items: UpdateItem[]): Promise<UpdateItem[]> {
+    const candidates = await modsIpc.checkUpdates(versionId);
+    return items.flatMap((item) => {
+      const current = candidates.find((c) => c.latest.platform === item.platform && c.latest.project_id === item.projectId);
+      if (current === undefined || current.current_version_id === item.modVersionId) return [];
+      return [{ ...item, fileName: current.file_name }];
+    });
   }
 
   private findTask(id: string): Task {
@@ -1013,7 +1133,8 @@ export class LauncherStore {
     const command = task.spec.command;
     if (meta === null) {
       if (task.instanceId !== null) {
-        for (const prefix of ["mods", "content", "history", "mod-updates"]) invalidateResources(`${prefix}:${task.instanceId}`);
+        this.modsChanged(task.instanceId);
+        invalidateResources(`content:${task.instanceId}`);
         await this.fetchInstances();
       }
       this.pushToast("success", TASK_TOAST.finished(task.title).title);
@@ -1055,7 +1176,7 @@ export class LauncherStore {
         return;
       }
       case "mods": {
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+        this.modsChanged(meta.instanceId);
         await this.fetchInstances();
         const copy = TASK_TOAST.modInstalled(meta.name, meta.dependencies, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
@@ -1064,6 +1185,7 @@ export class LauncherStore {
       case "resource": {
         const outcome = result as ResourceInstallOutcomeDto;
         invalidateResources(`content:${meta.instanceId}`);
+        invalidateResources("match");
         const copy =
           outcome.resource_type === "resource_pack"
             ? TASK_TOAST.resourcePack(meta.name)
@@ -1073,15 +1195,21 @@ export class LauncherStore {
                 ? TASK_TOAST.datapack(meta.name, outcome.world)
                 : TASK_TOAST.modInstalled(meta.name, 0, meta.instanceId);
         if (outcome.resource_type === "mod") {
-          for (const prefix of ["mods", "history"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+          this.modsChanged(meta.instanceId);
           await this.fetchInstances();
         }
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
       case "update": {
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+        this.modsChanged(meta.instanceId);
         const copy = TASK_TOAST.modUpdated(meta.name, meta.instanceId);
+        this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        return;
+      }
+      case "updates": {
+        this.modsChanged(meta.instanceId);
+        const copy = TASK_TOAST.modsUpdated(meta.count, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
@@ -1409,16 +1537,7 @@ export class LauncherStore {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
         // 取消排队中的新建任务后占位项随之消失，先记下它是不是占位
         const placeholder = store.instance(id).placeholder;
-        const pending = store.raw.tasks.find((t) => isActiveTask(t) && t.instanceId === id);
-        if (pending !== undefined) {
-          await actions.cancelTask(pending.id);
-          await waitUntil(
-            store.subscribe,
-            () => !isActiveTask(store.findTask(pending.id)),
-            STOP_TIMEOUT_MS,
-            () => new Error(`「${pending.title}」没能及时取消`),
-          );
-        }
+        await store.cancelInstanceTasks(id);
         if (!placeholder) await instancesIpc.deleteInstance(id);
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
@@ -1434,9 +1553,19 @@ export class LauncherStore {
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
         store.renameSeq += 1;
         const seq = store.renameSeq;
+        // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
         await store.fetchInstances((raw) => ({
           lastRename: { from: id, to: newId, seq },
           tasks: raw.tasks.map((t) => (t.instanceId === id ? { ...t, instanceId: newId } : t)),
+          session: raw.session !== null && raw.session.instanceId === id ? { ...raw.session, instanceId: newId } : raw.session,
+          launchPrompt:
+            raw.launchPrompt === null
+              ? null
+              : {
+                  ...raw.launchPrompt,
+                  instanceId: raw.launchPrompt.instanceId === id ? newId : raw.launchPrompt.instanceId,
+                  occupantId: raw.launchPrompt.occupantId === id ? newId : raw.launchPrompt.occupantId,
+                },
         }));
         store.scheduleJournal();
         return newId;
@@ -1548,12 +1677,33 @@ export class LauncherStore {
           store.pushToast("info", TOAST_COPY.allModsLatest);
           return;
         }
-        for (const candidate of candidates) store.enqueueUpdate(instanceId, candidate);
+        // 只有一个可更新时就是单个 Mod 的更新，标题与通知写 Mod 名；多个合成一个任务、一条通知
+        if (candidates.length === 1) {
+          store.enqueueUpdate(instanceId, candidates[0]);
+          return;
+        }
+        store.enqueue(
+          {
+            kind: "mod",
+            title: TASK_TEXT.updateAllTitle(candidates.length),
+            detail: TASK_TEXT.updateAllDetail(instanceId),
+            instanceId,
+            spec: {
+              command: "update_mods",
+              args: {
+                versionId: instanceId,
+                items: candidates.map((c) => ({ fileName: c.file_name, platform: c.latest.platform, projectId: c.latest.project_id, modVersionId: c.latest.version_id })),
+              },
+            },
+          },
+          { type: "updates", instanceId, count: candidates.length },
+          TASK_TEXT.updateAllTitle(candidates.length),
+        );
       },
       async removeMod(instanceId, fileName, name) {
         store.assertModsEditable(instanceId);
         await modsIpc.removeMod(instanceId, fileName);
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${instanceId}`);
+        store.modsChanged(instanceId);
         await store.fetchInstances();
         store.pushToast("info", TOAST_COPY.modRemoved(name));
       },
@@ -1632,7 +1782,7 @@ export class LauncherStore {
         }
         const event = (await listHistory(instanceId)).find((e) => e.id === eventId);
         await rollbackIpc(instanceId, eventId);
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${instanceId}`);
+        store.modsChanged(instanceId);
         if (event !== undefined && event.kind === "update") {
           const name = event.title === null ? event.file_name : event.title;
           const from = event.from_version_number === null ? event.from_version : event.from_version_number;

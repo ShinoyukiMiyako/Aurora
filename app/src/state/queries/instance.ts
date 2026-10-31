@@ -23,7 +23,7 @@ export function useInstanceMods(id: string | null): ResourceResult<InstalledMod[
   return useResource(key("mods", id), () => listMods(need(id)));
 }
 
-/** content:<id> —— 资源包、光影、存档；装资源包、光影、数据包后失效。 */
+/** content:<id> —— 资源包、光影、存档；装资源包、光影、数据包后与游戏退出后失效。 */
 export function useInstanceContent(id: string | null): ResourceResult<InstanceContentDto> {
   return useResource(key("content", id), () => listInstanceContent(need(id)));
 }

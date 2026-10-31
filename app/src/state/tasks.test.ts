@@ -88,6 +88,26 @@ describe("下载队列：纯函数", () => {
     // 别的尝试的进度不认
     expect(applyTaskDownload(first, "t1#2", { total: 1, finished: 1, bytes: 1, totalBytes: 1, speed: 1 })).toEqual(first);
   });
+
+  it("累计字节跨批次往上加：批次内按增量计，新批次从它自己的已下字节算起", () => {
+    const running = [task("t1", { status: "running" })];
+    const a = applyTaskDownload(running, "t1#1", { total: 10, finished: 2, bytes: 200, totalBytes: 1000, speed: 5 });
+    const b = applyTaskDownload(a, "t1#1", { total: 10, finished: 10, bytes: 1000, totalBytes: 1000, speed: 5 });
+    expect(b[0].doneBytes).toBe(1000);
+    // 第二批：资源文件 500 字节
+    const c = applyTaskDownload(b, "t1#1", { total: 3, finished: 1, bytes: 120, totalBytes: 500, speed: 5 });
+    expect(c[0]).toMatchObject({ bytes: 120, doneBytes: 1120 });
+    const d = applyTaskDownload(c, "t1#1", { total: 3, finished: 3, bytes: 500, totalBytes: 500, speed: 5 });
+    expect(d[0]).toMatchObject({ bytes: 500, doneBytes: 1500 });
+    // 第三批大小与第二批相同，但已下字节变少：仍认作新批次
+    const e = applyTaskDownload(d, "t1#1", { total: 3, finished: 0, bytes: 0, totalBytes: 500, speed: 0 });
+    expect(e[0].doneBytes).toBe(1500);
+  });
+
+  it("重试清掉上一次尝试的开始时刻与累计字节", () => {
+    const failed = task("t1", { status: "failed", startedAt: T0 + 5, doneBytes: 4096, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
+    expect(retryTask([failed], "t1")[0]).toMatchObject({ status: "queued", startedAt: null, doneBytes: 0 });
+  });
 });
 
 describe("下载队列：状态容器", () => {
@@ -184,6 +204,42 @@ describe("下载队列：状态容器", () => {
     await store.actions.installJava(21);
     expect(store.getState().tasks).toHaveLength(1);
     expect(store.getState().toasts.at(-1)?.title).toContain("Java 21");
+    store.stop();
+  });
+
+  it("开始时刻记在开始运行的那一刻而不是入队时；用时与总量取这一次尝试的开始时刻与累计字节", async () => {
+    const store = await startedStore();
+    for (const major of [8, 17, 21, 25]) await store.actions.installJava(major);
+    await settle();
+    const tasks = store.getState().tasks;
+    expect(tasks.map((t) => t.startedAt)).toEqual([T0, T0, T0, null]);
+
+    vi.setSystemTime(T0 + 4000);
+    emit(CORE_EVENT, { kind: "download", task_id: `${tasks[0].id}#1`, total: 2, finished: 2, bytes: 700, total_bytes: 700, speed: 1 });
+    runs.get(`${tasks[0].id}#1`)?.resolve(runtime("8.0.412"));
+    await settle();
+    const after = store.getState().tasks;
+    expect(after[0]).toMatchObject({ status: "done", startedAt: T0, finishedAt: T0 + 4000, doneBytes: 700 });
+    // 第四个在通道空出的这一刻才开始
+    expect(after[3]).toMatchObject({ status: "running", startedAt: T0 + 4000, doneBytes: 0 });
+    store.stop();
+  });
+
+  it("任务日志存下开始时刻与累计字节；较早的日志没有这两项时，开始时刻为空、累计字节取最后一批", async () => {
+    bootOverrides(ipc, {
+      journal: [record("new", "done", { started_at: T0 - 9000, done_bytes: 52_000 }), record("old", "done")],
+    });
+    const store = await startedStore();
+    expect(store.getState().tasks.map((t) => [t.id, t.startedAt, t.doneBytes])).toEqual([
+      ["new", T0 - 9000, 52_000],
+      ["old", null, 4096],
+    ]);
+    await store.actions.flushTaskJournal();
+    const saved = callsOf(ipc, "save_task_journal").at(-1)?.tasks as TaskRecordDto[];
+    expect(saved.map((r) => [r.id, r.started_at, r.done_bytes])).toEqual([
+      ["new", T0 - 9000, 52_000],
+      ["old", null, 4096],
+    ]);
     store.stop();
   });
 

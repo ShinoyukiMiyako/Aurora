@@ -51,6 +51,8 @@ export function taskDedupeKey(spec: TaskSpec): string {
       return `install|${String(a.versionId).toLowerCase()}|${String(a.platform)}|${String(a.projectId)}`;
     case "update_mod":
       return `update_mod|${String(a.versionId).toLowerCase()}|${String(a.fileName)}`;
+    case "update_mods":
+      return `update_mods|${String(a.versionId).toLowerCase()}`;
     default:
       return `${spec.command}|${JSON.stringify(a)}`;
   }
@@ -68,7 +70,9 @@ export function newTask(draft: TaskDraft, now: number): Task {
     progress: 0,
     bytes: 0,
     totalBytes: null,
+    doneBytes: 0,
     speedBps: 0,
+    startedAt: null,
     attempt: 1,
     error: null,
     createdAt: now,
@@ -94,13 +98,15 @@ function update(tasks: readonly Task[], id: string, fn: (task: Task) => Task): T
   return tasks.map((t) => (t.id === id ? fn(t) : t));
 }
 
-export function markRunning(tasks: readonly Task[], id: string): Task[] {
-  return update(tasks, id, (t) => (t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, speedBps: 0 } : t));
+export function markRunning(tasks: readonly Task[], id: string, now: number): Task[] {
+  return update(tasks, id, (t) =>
+    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, speedBps: 0, startedAt: now } : t,
+  );
 }
 
 /**
  * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计：进度按当前批次如实显示，
- * 批次内只进不退，新批次（已结束数变少或批次大小变了）从头开始。
+ * 批次内只进不退，新批次（已下字节变少或批次大小变了）从头开始。累计字节跨批次往上加。
  */
 export function applyTaskDownload(
   tasks: readonly Task[],
@@ -117,6 +123,7 @@ export function applyTaskDownload(
       progress: sameBatch ? Math.max(t.progress, fraction) : fraction,
       bytes: event.bytes,
       totalBytes: event.totalBytes,
+      doneBytes: t.doneBytes + (sameBatch ? event.bytes - t.bytes : event.bytes),
       speedBps: event.speed,
     };
   });
@@ -147,7 +154,19 @@ export function retryTask(tasks: readonly Task[], id: string): Task[] {
   const task = tasks.find((t) => t.id === id);
   if (task === undefined) throw new Error(`没有任务 ${id}`);
   if (task.status !== "failed") throw new Error(`任务 ${id} 是 ${task.status}，只有失败的任务能重试`);
-  const retried: Task = { ...task, status: "queued", attempt: task.attempt + 1, error: null, progress: 0, bytes: 0, totalBytes: null, speedBps: 0, finishedAt: null };
+  const retried: Task = {
+    ...task,
+    status: "queued",
+    attempt: task.attempt + 1,
+    error: null,
+    progress: 0,
+    bytes: 0,
+    totalBytes: null,
+    doneBytes: 0,
+    speedBps: 0,
+    startedAt: null,
+    finishedAt: null,
+  };
   return [...tasks.filter((t) => t.id !== id), retried];
 }
 
