@@ -14,6 +14,16 @@ export function inTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+// 首屏会同时发出十几条命令。vitest 的模块执行器遇到同一模块的并发首次加载时，后到的 import 可能拿到还没执行完的
+// 模块（读到暂时性死区里的变量而报错）；所有调用共用同一个加载 Promise，拿到的一定是执行完的模块。
+// 浏览器的模块表本身就保证这一点，这里不改变浏览器里的行为。
+let mockModule: Promise<typeof import("./mock")> | null = null;
+
+function loadMock(): Promise<typeof import("./mock")> {
+  if (mockModule === null) mockModule = import("./mock");
+  return mockModule;
+}
+
 /**
  * 调用后端命令。命令名保持 snake_case；参数键用 camelCase（Tauri 映射到 Rust 的 snake_case 形参）；
  * 返回 DTO 字段为 serde 默认的 snake_case。rejection 一律经 toIpcError 归一。
@@ -21,7 +31,7 @@ export function inTauri(): boolean {
 export async function invoke<T>(cmd: string, args?: IpcArgs): Promise<T> {
   try {
     if (inTauri()) return await tauriInvoke<T>(cmd, args);
-    const mock = await import("./mock");
+    const mock = await loadMock();
     return await mock.mockInvoke<T>(cmd, args);
   } catch (raw) {
     throw toIpcError(raw);
@@ -31,6 +41,6 @@ export async function invoke<T>(cmd: string, args?: IpcArgs): Promise<T> {
 /** 订阅后端事件，handler 只拿到负载。调用方负责在卸载时调用返回的 unlisten。 */
 export async function listen<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
   if (inTauri()) return tauriListen<T>(event, (e) => handler(e.payload));
-  const mock = await import("./mock");
+  const mock = await loadMock();
   return mock.mockListen<T>(event, handler);
 }
