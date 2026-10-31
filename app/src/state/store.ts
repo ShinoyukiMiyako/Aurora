@@ -1448,9 +1448,19 @@ export class LauncherStore {
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
         store.renameSeq += 1;
         const seq = store.renameSeq;
+        // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
         await store.fetchInstances((raw) => ({
           lastRename: { from: id, to: newId, seq },
           tasks: raw.tasks.map((t) => (t.instanceId === id ? { ...t, instanceId: newId } : t)),
+          session: raw.session !== null && raw.session.instanceId === id ? { ...raw.session, instanceId: newId } : raw.session,
+          launchPrompt:
+            raw.launchPrompt === null
+              ? null
+              : {
+                  ...raw.launchPrompt,
+                  instanceId: raw.launchPrompt.instanceId === id ? newId : raw.launchPrompt.instanceId,
+                  occupantId: raw.launchPrompt.occupantId === id ? newId : raw.launchPrompt.occupantId,
+                },
         }));
         store.scheduleJournal();
         return newId;
