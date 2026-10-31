@@ -296,8 +296,9 @@ impl InstanceLaunchSettings {
                 JavaSelection::Auto => JavaChoice::Auto,
                 JavaSelection::Path(path) => JavaChoice::Path(path),
             },
-            // 设置里原样保存玩家输入的整行参数，这里按空白切成独立参数交给 JVM。
-            jvm_args: jvm_args.split_whitespace().map(str::to_owned).collect(),
+            // 设置里原样保存玩家输入的整行参数。按引号切分而不是按空白：带空格的路径（Program Files
+            // 下的 -javaagent）与带空格的属性值要写成引号括起来的一个参数，引号本身不交给 JVM。
+            jvm_args: aurora_launch::split_args(&jvm_args),
             // 全屏时窗口尺寸参数没有意义，不传，免得部分版本先按尺寸开窗再切全屏。
             resolution: (!fullscreen).then_some((resolution.width, resolution.height)),
             fullscreen,
@@ -1630,6 +1631,25 @@ mod tests {
         assert_eq!(fullscreen.java, JavaChoice::Auto);
         assert_eq!(fullscreen.memory_mb, None);
         assert!(fullscreen.jvm_args.is_empty());
+    }
+
+    #[test]
+    fn instance_jvm_args_keep_quoted_values_in_one_argument() {
+        let settings = InstanceLaunchSettings::from_settings(VersionSettings {
+            jvm_args:
+                r#"-javaagent:"C:\Program Files\agent\agent.jar" -Dfoo="a b" -Dempty="" -Xss4m"#
+                    .into(),
+            ..VersionSettings::default()
+        });
+        assert_eq!(
+            settings.jvm_args,
+            vec![
+                r"-javaagent:C:\Program Files\agent\agent.jar".to_owned(),
+                "-Dfoo=a b".to_owned(),
+                "-Dempty=".to_owned(),
+                "-Xss4m".to_owned(),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

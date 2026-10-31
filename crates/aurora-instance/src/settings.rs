@@ -37,7 +37,8 @@ pub struct VersionSettings {
     pub memory_mb: Option<u32>,
     /// 使用的 Java。
     pub java: JavaSelection,
-    /// 追加在默认参数之后的 JVM 参数，原样保存，启动时按空白切分。
+    /// 追加在默认参数之后的 JVM 参数，原样保存。启动时按空白切分，双引号括起来的部分不切开、引号不传给
+    /// JVM（规则见 `aurora_launch::split_args`）。
     pub jvm_args: String,
     /// 窗口分辨率。
     pub resolution: Resolution,
