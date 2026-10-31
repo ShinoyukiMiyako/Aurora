@@ -1,11 +1,13 @@
-// 发现页的假后端：一份覆盖五种可搜类型、两个平台（含双平台合并卡与只在单个平台上的工程）的小目录。
-// 参数按后端同样的规则校验（任一项非法整体报 invalid_argument），筛选、排序、翻页语义与后端一致；
-// 安装类长任务登记任务、推送带 task_id 的进度事件并响应取消。
+// 发现页的假后端：搜索与详情读共用的工程目录（ipc/mock/catalog），五种可搜类型、两个平台（含双平台合并卡与只在
+// 单个平台上的工程）都在里面。参数按后端同样的规则校验（任一项非法整体报 invalid_argument），筛选、排序、翻页语义
+// 与后端一致；装资源包、光影、数据包的长任务登记任务、推送带 task_id 的进度事件并响应取消。Mod 走 install_mod，
+// 在 handlers/mods 里，与实例的 Mod 状态放在一起。
 
 import type {
+  DependencyProject,
   DiscoverableType,
+  HitSource,
   InstallableResourceType,
-  ModInstallOutcomeDto,
   PlatformId,
   ProjectDetail,
   ResourceInstallOutcomeDto,
@@ -19,6 +21,7 @@ import type {
 import { IpcError } from "../../errors";
 import type { ModLoader } from "../../mods";
 import { CORE_EVENT, type CoreEvent } from "../../tasks";
+import { findMockSource, findMockVersion, mockProjects, newestFirst, sourceVersions, sourcesGameVersions, sourcesLoaders, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { mockInstanceWorlds } from "./instances";
@@ -34,193 +37,38 @@ const DISCOVERABLE: readonly DiscoverableType[] = ["mod", "modpack", "resource_p
 const LOADERS: readonly ModLoader[] = ["fabric", "quilt", "forge", "neoforge", "liteloader"];
 const SORTS: readonly SortField[] = ["relevance", "downloads", "follows", "newest", "updated"];
 const CATEGORY_KEY = /^[a-z0-9-]{1,64}$/;
-/** 已有存档的实例（数据包只能装进存在的存档）。 */
 
-export interface CatalogueItem {
-  entry: SearchEntry;
-  /** 搜索卡里没有游戏版本与发布日期，按版本筛选与「最新」排序要用。 */
-  gameVersions: string[];
-  datePublished: string;
-  body: string;
+function pageUrl(platform: PlatformId, slug: string): string {
+  return platform === "modrinth" ? `https://modrinth.com/project/${slug}` : `https://www.curseforge.com/minecraft/${slug}`;
 }
 
-function source(platform: PlatformId, project_id: string, slug: string | null, downloads: number, follows: number | null) {
-  const page_url =
-    platform === "modrinth" ? `https://modrinth.com/project/${slug ?? project_id}` : `https://www.curseforge.com/minecraft/${slug ?? project_id}`;
-  return { platform, project_id, slug, page_url, downloads, follows };
+function hitSource(s: MockSource): HitSource {
+  return { platform: s.platform, project_id: s.projectId, slug: s.slug, page_url: pageUrl(s.platform, s.slug), downloads: s.downloads, follows: s.follows };
 }
 
-function item(
-  base: Omit<SearchEntry, "downloads" | "follows" | "platform" | "project_id" | "slug" | "page_url" | "sources">,
-  sources: ReturnType<typeof source>[],
-  gameVersions: string[],
-  datePublished: string,
-): CatalogueItem {
-  const primary = sources[0];
-  const follows = sources.every((s) => s.follows === null) ? null : sources.reduce((sum, s) => sum + (s.follows === null ? 0 : s.follows), 0);
+/** 一张搜索卡：顶层取主来源，下载量与关注数是各平台之和（都没给关注数时为 null）。 */
+function searchEntry(project: MockProject): SearchEntry {
+  const primary = project.sources[0];
+  const follows = project.sources.every((s) => s.follows === null) ? null : project.sources.reduce((sum, s) => sum + (s.follows === null ? 0 : s.follows), 0);
   return {
-    entry: {
-      ...base,
-      platform: primary.platform,
-      project_id: primary.project_id,
-      slug: primary.slug,
-      page_url: primary.page_url,
-      downloads: sources.reduce((sum, s) => sum + s.downloads, 0),
-      follows,
-      sources,
-    },
-    gameVersions,
-    datePublished,
-    body: `## ${base.title}\n\n${base.description}`,
+    platform: primary.platform,
+    project_id: primary.projectId,
+    slug: primary.slug,
+    title: project.title,
+    description: project.description,
+    author: project.author,
+    downloads: project.sources.reduce((sum, s) => sum + s.downloads, 0),
+    follows,
+    icon_url: null,
+    gallery_url: null,
+    hue: project.hue,
+    categories: project.categories,
+    loaders: sourcesLoaders(project.sources),
+    resource_type: project.resourceType,
+    date_modified: project.dateModified,
+    page_url: pageUrl(primary.platform, primary.slug),
+    sources: project.sources.map(hitSource),
   };
-}
-
-function seedCatalogue(): CatalogueItem[] {
-  return [
-    item(
-      {
-        title: "Sodium",
-        description: "现代渲染引擎，大幅提升帧率",
-        author: "jellysquid3",
-        icon_url: null,
-        gallery_url: null,
-        hue: 145,
-        categories: ["optimization"],
-        loaders: ["fabric", "quilt", "neoforge"],
-        resource_type: "mod",
-        date_modified: "2026-10-12T08:00:00Z",
-      },
-      [source("modrinth", "AANobbMI", "sodium", 98_000_000, 26_000), source("curseforge", "394468", "sodium", 41_000_000, null)],
-      ["1.21.1", "1.20.1"],
-      "2020-11-01T00:00:00Z",
-    ),
-    item(
-      {
-        title: "Create",
-        description: "齿轮、传送带与动力装置",
-        author: "simibubi",
-        icon_url: null,
-        gallery_url: null,
-        hue: 32,
-        categories: ["technology", "decoration"],
-        loaders: ["forge", "neoforge", "fabric"],
-        resource_type: "mod",
-        date_modified: "2026-09-30T12:00:00Z",
-      },
-      [source("modrinth", "LNytGWDc", "create", 12_000_000, 9_000)],
-      ["1.21.1", "1.20.1"],
-      "2021-01-18T00:00:00Z",
-    ),
-    item(
-      {
-        title: "Just Enough Items",
-        description: "物品与合成配方查看",
-        author: "mezz",
-        icon_url: null,
-        gallery_url: null,
-        hue: null,
-        categories: ["utility"],
-        loaders: ["forge", "neoforge"],
-        resource_type: "mod",
-        date_modified: "2026-10-20T00:00:00Z",
-      },
-      [source("curseforge", "238222", "jei", 380_000_000, null)],
-      ["1.21.1", "1.20.1"],
-      "2015-11-24T00:00:00Z",
-    ),
-    item(
-      {
-        title: "Fabulously Optimized",
-        description: "开箱即用的性能整合包",
-        author: "robotkoer",
-        icon_url: null,
-        gallery_url: null,
-        hue: 210,
-        categories: ["optimization", "lightweight"],
-        loaders: ["fabric"],
-        resource_type: "modpack",
-        date_modified: "2026-10-25T00:00:00Z",
-      },
-      [source("modrinth", "1KVo5zza", "fabulously-optimized", 7_400_000, 3_100), source("curseforge", "396246", "fabulously-optimized", 5_100_000, null)],
-      ["1.21.1"],
-      "2021-06-02T00:00:00Z",
-    ),
-    item(
-      {
-        title: "Better MC",
-        description: "冒险向大型整合包",
-        author: "Luna Pixel Studios",
-        icon_url: null,
-        gallery_url: null,
-        hue: null,
-        categories: ["adventure", "quests"],
-        loaders: ["fabric"],
-        resource_type: "modpack",
-        date_modified: "2026-08-14T00:00:00Z",
-      },
-      [source("curseforge", "452013", "better-mc-fabric-bmc1", 9_800_000, null)],
-      ["1.20.1"],
-      "2021-03-15T00:00:00Z",
-    ),
-    item(
-      {
-        title: "Faithful 32x",
-        description: "忠于原版风格的高清材质",
-        author: "Faithful Resource Pack",
-        icon_url: null,
-        gallery_url: null,
-        hue: 95,
-        categories: ["vanilla-like"],
-        loaders: [],
-        resource_type: "resource_pack",
-        date_modified: "2026-07-01T00:00:00Z",
-      },
-      [source("modrinth", "faithful-32x", "faithful-32x", 2_300_000, 1_800)],
-      ["1.21.1", "1.20.1"],
-      "2022-02-01T00:00:00Z",
-    ),
-    item(
-      {
-        title: "Complementary Shaders - Reimagined",
-        description: "兼顾性能与观感的光影",
-        author: "EminGT",
-        icon_url: null,
-        gallery_url: null,
-        hue: 260,
-        categories: ["realistic"],
-        loaders: [],
-        resource_type: "shader",
-        date_modified: "2026-10-01T00:00:00Z",
-      },
-      [source("modrinth", "HVnmMxH1", "complementary-reimagined", 9_100_000, 4_200), source("curseforge", "627557", "complementary-reimagined", 6_300_000, null)],
-      ["1.21.1", "1.20.1"],
-      "2023-01-09T00:00:00Z",
-    ),
-    item(
-      {
-        title: "Terralith",
-        description: "近百种新生物群系的地形生成",
-        author: "Stardust Labs",
-        icon_url: null,
-        gallery_url: null,
-        hue: 120,
-        categories: ["worldgen", "adventure"],
-        loaders: [],
-        resource_type: "data_pack",
-        date_modified: "2026-06-20T00:00:00Z",
-      },
-      [source("modrinth", "8oi3bsk5", "terralith", 5_500_000, 2_400)],
-      ["1.21.1"],
-      "2021-10-30T00:00:00Z",
-    ),
-  ];
-}
-
-let catalogue: CatalogueItem[] = seedCatalogue();
-
-/** 给整合包 mock 查平台整合包用。 */
-export function findCatalogueItem(platform: PlatformId, projectId: string): CatalogueItem | undefined {
-  return catalogue.find((c) => c.entry.sources.some((s) => s.platform === platform && s.project_id === projectId));
 }
 
 function invalid(message: string): IpcError {
@@ -286,20 +134,20 @@ function compareDesc(a: number | null, b: number | null): number {
   return b - a;
 }
 
-function sortItems(items: CatalogueItem[], sort: SortField): CatalogueItem[] {
+function sortItems(items: SearchEntry[], sort: SortField, published: (e: SearchEntry) => string): SearchEntry[] {
   const sorted = [...items];
   switch (sort) {
     case "relevance":
       return sorted;
     case "downloads":
-      return sorted.sort((a, b) => compareDesc(a.entry.downloads, b.entry.downloads));
+      return sorted.sort((a, b) => compareDesc(a.downloads, b.downloads));
     case "follows":
-      return sorted.sort((a, b) => compareDesc(a.entry.follows, b.entry.follows));
+      return sorted.sort((a, b) => compareDesc(a.follows, b.follows));
     case "newest":
-      return sorted.sort((a, b) => b.datePublished.localeCompare(a.datePublished));
+      return sorted.sort((a, b) => published(b).localeCompare(published(a)));
     case "updated": {
       // 没有更新时间的排在最后。
-      const modified = (c: CatalogueItem) => (c.entry.date_modified === null ? "" : c.entry.date_modified);
+      const modified = (e: SearchEntry) => (e.date_modified === null ? "" : e.date_modified);
       return sorted.sort((a, b) => modified(b).localeCompare(modified(a)));
     }
   }
@@ -324,16 +172,25 @@ function searchResources(args: MockArgs): SearchResultDto {
   const only = rawPlatform === null ? null : parsePlatform(rawPlatform);
 
   const wanted: readonly ResourceType[] = types.length === 0 ? DISCOVERABLE : types;
-  const matched = catalogue.filter(({ entry, gameVersions: versions }) => {
-    if (!wanted.includes(entry.resource_type)) return false;
-    if (category !== null && !entry.categories.includes(category)) return false;
-    if (only !== null && !entry.sources.some((s) => s.platform === only)) return false;
-    if (loaders.length > 0 && !entry.loaders.some((l) => loaders.includes(l))) return false;
-    if (gameVersions.length > 0 && !versions.some((v) => gameVersions.includes(v))) return false;
-    if (query !== "" && !`${entry.title} ${entry.description}`.toLowerCase().includes(query)) return false;
-    return true;
+  const published = new Map<SearchEntry, string>();
+  const matched: SearchEntry[] = [];
+  for (const project of mockProjects()) {
+    // 只搜一个平台时，合并卡只剩那个平台的一份：卡面、数字、来源都只按它算
+    const sources = only === null ? project.sources : project.sources.filter((s) => s.platform === only);
+    if (sources.length === 0 || !wanted.includes(project.resourceType)) continue;
+    if (category !== null && !project.categories.includes(category)) continue;
+    if (loaders.length > 0 && !sourcesLoaders(sources).some((l) => loaders.includes(l))) continue;
+    if (gameVersions.length > 0 && !sourcesGameVersions(sources).some((v) => gameVersions.includes(v))) continue;
+    if (query !== "" && !`${project.title} ${project.description}`.toLowerCase().includes(query)) continue;
+    const entry = searchEntry({ ...project, sources });
+    published.set(entry, project.datePublished);
+    matched.push(entry);
+  }
+  const sorted = sortItems(matched, sort, (e) => {
+    const date = published.get(e);
+    if (date === undefined) throw new Error("搜索结果里出现了不是本次筛出的条目");
+    return date;
   });
-  const sorted = sortItems(matched, sort);
   const offset = cursor === null ? 0 : cursor.modrinth.offset;
   const page = sorted.slice(offset, offset + limit);
   const nextOffset = offset + page.length;
@@ -341,7 +198,7 @@ function searchResources(args: MockArgs): SearchResultDto {
   const side = { offset: nextOffset, exhausted, total: sorted.length, absorbed: [] };
   const skipped: SkippedPlatform[] = only === null ? [] : PLATFORMS.filter((p) => p !== only).map((platform) => ({ platform, reason: "filtered" }));
   return {
-    hits: page.map((c) => c.entry),
+    hits: page,
     total: sorted.length,
     errors: [],
     skipped,
@@ -349,60 +206,70 @@ function searchResources(args: MockArgs): SearchResultDto {
   };
 }
 
+/** 平台上没有这个工程：后端是平台接口的 404，经命令层归为 mod_platform_failed。 */
+function notFound(platform: PlatformId, projectId: string): IpcError {
+  return new IpcError("mod_platform_failed", `${platform} 返回 404：工程 ${projectId} 不存在`);
+}
+
+/** 详情的「必需前置」：最新版本声明的必需依赖，前置本身也在目录里（目录是自洽的）。 */
+function dependencyProjects(platform: PlatformId, source: MockSource): DependencyProject[] {
+  const latest = newestFirst(sourceVersions(source))[0];
+  if (latest === undefined) return [];
+  return latest.dependencies.flatMap((dep) => {
+    if (dep.kind !== "required" || dep.project_id === null) return [];
+    const found = findMockSource(platform, dep.project_id);
+    if (found === undefined) throw new Error(`mock 目录里 ${source.projectId} 的前置 ${dep.project_id} 不在目录里`);
+    const depLatest = newestFirst(sourceVersions(found.source))[0];
+    return [
+      {
+        platform,
+        project_id: found.source.projectId,
+        title: found.project.title,
+        icon_url: null,
+        author: found.project.author,
+        latest_version: depLatest === undefined ? null : depLatest.version_number,
+      },
+    ];
+  });
+}
+
 function projectDetail(args: MockArgs): ProjectDetail {
   const read = argReader("project_detail", args);
   const platform = parsePlatform(read.string("platform"));
   const projectId = read.string("projectId");
-  const found = findCatalogueItem(platform, projectId);
-  if (!found) throw new IpcError("mod_platform_failed", `${platform} 返回 404：工程 ${projectId} 不存在`);
-  const { entry } = found;
-  const own = entry.sources.find((s) => s.platform === platform);
-  if (!own) throw new Error("findCatalogueItem 返回了不含该平台的条目");
-  const fileName = `${own.slug === null ? own.project_id : own.slug}-1.0.0.${entry.resource_type === "mod" ? "jar" : "zip"}`;
+  const found = findMockSource(platform, projectId);
+  if (found === undefined) throw notFound(platform, projectId);
+  const { project, source } = found;
+  const latest = newestFirst(sourceVersions(source))[0];
   return {
     platform,
-    project_id: own.project_id,
-    slug: own.slug,
-    title: entry.title,
-    summary: entry.description,
-    body: platform === "modrinth" ? found.body : `<h2>${entry.title}</h2><p>${entry.description}</p>`,
+    project_id: source.projectId,
+    slug: source.slug,
+    title: project.title,
+    summary: project.description,
+    body:
+      platform === "modrinth"
+        ? `## ${project.title}\n\n${project.description}\n\n- 作者：**${project.author}**\n- 更多介绍见 [项目主页](${pageUrl(platform, source.slug)})`
+        : `<h2>${project.title}</h2><p>${project.description}</p><p>作者：<strong>${project.author}</strong></p>`,
     body_format: platform === "modrinth" ? "markdown" : "html",
-    author: entry.author,
-    downloads: own.downloads,
-    follows: own.follows,
-    icon_url: entry.icon_url,
+    author: project.author,
+    downloads: source.downloads,
+    follows: source.follows,
+    icon_url: null,
     gallery: [],
-    hue: entry.hue,
-    categories: entry.categories,
-    resource_type: entry.resource_type,
-    loaders: entry.loaders,
-    game_versions: found.gameVersions,
-    date_published: found.datePublished,
-    date_modified: entry.date_modified,
-    page_url: own.page_url,
+    hue: project.hue,
+    categories: project.categories,
+    resource_type: project.resourceType,
+    loaders: sourcesLoaders([source]),
+    game_versions: sourcesGameVersions([source]),
+    date_published: project.datePublished,
+    date_modified: project.dateModified,
+    page_url: pageUrl(platform, source.slug),
     source_url: null,
     issues_url: null,
     wiki_url: null,
-    latest_version: {
-      version_id: `${own.project_id}-latest`,
-      project_id: own.project_id,
-      platform,
-      name: `${entry.title} 最新版`,
-      version_number: "1.0.0",
-      release_channel: "release",
-      game_versions: found.gameVersions,
-      loaders: entry.loaders,
-      file_name: fileName,
-      file_size: 1_048_576,
-      sha1: null,
-      download_url:
-        platform === "modrinth"
-          ? `https://cdn.modrinth.com/data/${own.project_id}/${fileName}`
-          : `https://edge.forgecdn.net/files/1/2/${fileName}`,
-      date_published: entry.date_modified === null ? found.datePublished : entry.date_modified,
-      dependencies: [],
-    },
-    dependencies: [],
+    latest_version: latest === undefined ? null : latest,
+    dependencies: dependencyProjects(platform, source),
     distribution_allowed: true,
   };
 }
@@ -447,28 +314,6 @@ export async function runMockTask<T>(taskId: string, work: () => Promise<T>): Pr
   }
 }
 
-function fileNameFor(platform: PlatformId, projectId: string, fileVersionId: string, extension: string): string {
-  const found = findCatalogueItem(platform, projectId);
-  const own = found?.entry.sources.find((s) => s.platform === platform);
-  const stem = own === undefined || own.slug === null ? projectId : own.slug;
-  return `${stem}-${fileVersionId}.${extension}`;
-}
-
-function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
-  const read = argReader("install_mod", args);
-  const taskId = read.string("taskId");
-  const versionId = read.string("versionId");
-  const platform = parsePlatform(read.string("platform"));
-  const projectId = read.string("projectId");
-  const modVersionId = read.string("modVersionId");
-  return runMockTask(taskId, async () => {
-    requireInstalled(versionId);
-    const file_name = fileNameFor(platform, projectId, modVersionId, "jar");
-    await simulateDownload(taskId, file_name, 1_048_576);
-    return { file_name, path: `${MOCK_GAME_DIR}/versions/${versionId}/mods/${file_name}`, platform };
-  });
-}
-
 /** 实例以实例 mock 为准：不存在或损坏报 version_not_installed，与后端解析工作目录时一致；返回它的存档目录名。 */
 function requireInstalled(versionId: string): string[] {
   const worlds = mockInstanceWorlds(versionId);
@@ -476,8 +321,7 @@ function requireInstalled(versionId: string): string[] {
   return worlds;
 }
 
-const RESOURCE_DIRS: Record<InstallableResourceType, string> = {
-  mod: "mods",
+const RESOURCE_DIRS: Record<Exclude<InstallableResourceType, "mod">, string> = {
   resource_pack: "resourcepacks",
   shader: "shaderpacks",
   data_pack: "datapacks",
@@ -502,8 +346,14 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
     if (world !== null && !worlds.includes(world)) {
       throw new IpcError("world_not_found", `实例 ${versionId} 里没有存档 ${world}`, { version_id: versionId, world });
     }
-    const file_name = fileNameFor(platform, projectId, fileVersionId, "zip");
-    await simulateDownload(taskId, file_name, 4_194_304);
+    if (findMockSource(platform, projectId) === undefined) throw notFound(platform, projectId);
+    const version = findMockVersion(platform, projectId, fileVersionId);
+    if (version === undefined) {
+      throw new IpcError("mod_version_not_found", `平台 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 上工程 ${projectId} 未找到版本 ${fileVersionId}`);
+    }
+    const { file_name, file_size } = version.info;
+    if (file_size === null) throw new Error(`mock 目录里的版本 ${fileVersionId} 缺少 file_size`);
+    await simulateDownload(taskId, file_name, file_size);
     const dir = world === null ? RESOURCE_DIRS[resourceType] : `saves/${world}/${RESOURCE_DIRS[resourceType]}`;
     return {
       file_name,
@@ -518,10 +368,5 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
 export const handlers: MockHandlers = {
   search_resources: searchResources,
   project_detail: projectDetail,
-  install_mod: installMod,
   install_resource: installResource,
 };
-
-export function reset(): void {
-  catalogue = seedCatalogue();
-}

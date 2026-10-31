@@ -1,4 +1,6 @@
 // 整合包的右栏：整合包总是装成新实例。可改名、选包版本、换封面；点安装后面板原位切到进度，弹窗不关。
+// 所选版本的清单摘要（只读远端包末尾的目录与清单，不下载整包）给出游戏版本、加载器、Mod 数与下载量；
+// 摘要还没到或读不出来时，游戏版本与加载器退回平台版本信息，Mod 数与下载量不显示。
 
 import { useState } from "react";
 import { createPortal } from "react-dom";
@@ -12,7 +14,7 @@ import { useNav } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncher } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
-import type { ModVersionInfo, ProjectDetail } from "../../../state/queries/discover";
+import { useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
 import { findInstance } from "../../../state/selectors";
 import { Button } from "../../../ui/Button";
@@ -21,6 +23,7 @@ import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { Select } from "../../../ui/Select";
 import { MODPACK_COPY, SEARCH_COPY } from "../copy";
+import { instancesFromPack, type ProjectOrigin } from "../model";
 import { uniqueName } from "../names";
 import { PackForm, packFootNote, type PackFacts } from "../PackForm";
 import { sortGameVersions } from "../versions";
@@ -47,6 +50,30 @@ export function defaultPackVersion(versions: readonly ModVersionInfo[]): ModVers
   return release === undefined ? versions[0] : release;
 }
 
+/**
+ * 面板上的清单事实。摘要到了以清单为准：Mod 数取落进 mods/ 的远程文件数（CurseForge 清单分不出，改写要下载的文件数），
+ * 下载量是整合包文件本身加上清单里另外要下载的文件（CurseForge 清单不带大小，不显示）。
+ * 摘要没到（读取中、读不出来）时游戏版本与加载器取平台版本信息，其余不显示。
+ */
+export function packFacts(version: ModVersionInfo | null, summary: ModpackSummaryDto | null, releases: readonly string[] | null): PackFacts {
+  if (summary !== null) {
+    return {
+      mcVersion: summary.minecraft,
+      loader: summary.loader === null ? "vanilla" : summary.loader.kind,
+      modCount: summary.mod_files,
+      downloadBytes: summary.remote_bytes === null ? null : summary.pack_bytes + summary.remote_bytes,
+      extra: summary.mod_files === null ? [{ icon: "file", text: MODPACK_COPY.remoteFiles(summary.remote_files) }] : [],
+    };
+  }
+  const mc = version === null ? undefined : sortGameVersions(version.game_versions, releases)[0];
+  return {
+    mcVersion: mc === undefined ? null : mc,
+    loader: version === null ? "vanilla" : packLoader(version),
+    modCount: null,
+    downloadBytes: null,
+  };
+}
+
 /** 这个实例最近一次导入任务。 */
 function importTask(tasks: readonly Task[], instanceId: string): Task | null {
   let latest: Task | null = null;
@@ -61,6 +88,8 @@ type Progress = { kind: "queued" } | { kind: "downloading"; progress: number } |
 
 export interface ModpackPanelProps {
   detail: ProjectDetail;
+  /** 这个整合包在各平台上的身份（合并卡有两个），用来认出已经来自它的实例。 */
+  origins: readonly ProjectOrigin[];
   versions: ResourceResult<ModVersionInfo[]>;
   /** 版本 Tab 里点选的版本；null 时用默认版本。 */
   pinned: string | null;
@@ -70,7 +99,7 @@ export interface ModpackPanelProps {
   onClose: () => void;
 }
 
-export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHost, onClose }: ModpackPanelProps) {
+export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, footerHost, onClose }: ModpackPanelProps) {
   const { state, actions } = useLauncher();
   const run = useRunner();
   const nav = useNav();
@@ -88,16 +117,12 @@ export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHo
   const pinnedVersion = pinned === null ? undefined : choices.find((v) => v.version_id === pinned);
   const version = pinnedVersion === undefined ? defaultPackVersion(choices) : pinnedVersion;
 
+  const summary = useModpackSummary(detail.platform, detail.project_id, version === null ? null : version.version_id);
   const releases = manifest.status === "ready" ? manifest.data.versions.map((v) => v.id) : null;
-  const mcVersion = version === null ? null : sortGameVersions(version.game_versions, releases)[0];
-  const facts: PackFacts = {
-    mcVersion: mcVersion === undefined ? null : mcVersion,
-    loader: version === null ? "vanilla" : packLoader(version),
-    modCount: modCountOf(version),
-    // 平台只给出整合包文件本身的大小，里面的 Mod 要读到清单才知道多大
-    downloadBytes: null,
-  };
+  const facts = packFacts(version, summary.status === "ready" ? summary.data : null, releases);
+  const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, extra: [{ icon: "box", text: MODPACK_COPY.summaryLoading }] } : facts;
   const nameError = instanceNameError(name, existing);
+  const fromPack = instancesFromPack(origins, state.instances);
 
   const task = createdId === null ? null : importTask(state.tasks, createdId);
   const created = createdId === null ? undefined : findInstance(state, createdId);
@@ -127,6 +152,7 @@ export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHo
     }
     if (version === null || facts.mcVersion === null) throw new Error("没有可装的整合包版本时安装按钮应当禁用");
     const mc = facts.mcVersion;
+    const loaderVersion = summary.status === "ready" && summary.data.loader !== null ? summary.data.loader.version : null;
     setSubmitting(true);
     const result = await run(
       () =>
@@ -136,10 +162,10 @@ export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHo
           cover: cover.block,
           packName: detail.title,
           packVersion: version.version_number,
-          modCount: modCountOf(version),
+          modCount: facts.modCount,
           mcVersion: mc,
           loader: facts.loader,
-          loaderVersion: null,
+          loaderVersion,
         }),
       ACTION_ERROR.importModpack,
     );
@@ -220,13 +246,20 @@ export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHo
         cover={cover}
         onCover={setCover}
         version={versionRow}
-        facts={facts}
+        facts={listedFacts}
         readOnly={progress !== null && progress.kind !== "cancelled"}
       />
+      {progress === null && fromPack.length > 0 && <Callout tone="warn">{MODPACK_COPY.duplicate(fromPack.length, fromPack[0].name)}</Callout>}
       {versions.status === "error" && (
         <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={versions.reload}>{SEARCH_COPY.retry}</Button>}>
           <span className={styles.errorTitle}>{MODPACK_COPY.versionsFailed}</span>
           <span className={styles.errorText}>{versions.error.message}</span>
+        </Callout>
+      )}
+      {progress === null && summary.status === "error" && (
+        <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={summary.reload}>{SEARCH_COPY.retry}</Button>}>
+          <span className={styles.errorTitle}>{MODPACK_COPY.summaryFailed}</span>
+          <span className={styles.errorText}>{summary.error.message}</span>
         </Callout>
       )}
       {progress === null && version !== null && facts.mcVersion === null && <Callout tone="warn">{MODPACK_COPY.noGameVersion}</Callout>}
@@ -250,10 +283,4 @@ export function ModpackPanel({ detail, versions, pinned, onPin, online, footerHo
       {footerHost !== null && createPortal(footer, footerHost)}
     </Inset>
   );
-}
-
-/** 平台版本声明了包含的工程时，它们的个数就是 Mod 数；没声明时不知道。 */
-function modCountOf(version: ModVersionInfo | null): number | null {
-  if (version === null || version.dependencies.length === 0) return null;
-  return version.dependencies.length;
 }

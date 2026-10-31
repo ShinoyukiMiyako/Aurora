@@ -1,8 +1,11 @@
 // 发现页：跨 Modrinth / CurseForge 搜资源，点开详情装进实例；整合包装成新实例，本地整合包文件从头图右上角导入。
 // 页面持有界面上的筛选与分页累积；搜索结果、详情、版本、落位矩阵都是状态层的按需查询。
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { LOADER_NAME } from "../../copy/flows";
+import type { InstanceSummary } from "../../domain/adapt";
+import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncher, useNow } from "../../state/launcher";
 import type { SearchEntry } from "../../state/queries/discover";
@@ -19,8 +22,8 @@ import { PLATFORM_LABEL, SEARCH_COPY } from "./copy";
 import { ResourceDetail, type DetailTarget } from "./detail/ResourceDetail";
 import styles from "./discover.module.css";
 import { useOnline } from "../../state/online";
-import { useDebounced, useDelayedFlag, useElapsed, useNearBottom, useScrollContainer, useStuck } from "./hooks";
-import { ImportModpackDialog } from "./ImportModpackDialog";
+import { useDebounced, useElapsed, useNearBottom, useScrollContainer, useStuck } from "./hooks";
+import { ImportModpackDialog, type ImportRequest } from "./ImportModpackDialog";
 import {
   allPlatformsFailed,
   clearFilters,
@@ -31,9 +34,11 @@ import {
   hasConditions,
   hitKey,
   installedCount,
+  instancesFromPack,
   PAGE_SIZE,
   partialFailure,
   PREFETCH_MARGIN_PX,
+  projectOrigins,
   routeFilters,
   routeOfFilters,
   routeSignature,
@@ -42,21 +47,11 @@ import {
   withKind,
   type DiscoverFilters,
 } from "./model";
-import { ModSourcesProbe, useCollected } from "./probes";
+import { ModSourcesProbe, modSourcesProgress, PROBE_CONCURRENCY, probeWindow, useCollected, type ModSourcesState } from "./probes";
 import { ResultCard, SkeletonCard } from "./ResultCard";
 import { readSnapshot, writeSnapshot } from "./session";
 import { SearchHero, Toolbar } from "./Toolbar";
 import { useResultPages, type ResultPages } from "./useResultPages";
-
-/** 输入停止这么久才发起搜索；回车立即搜。 */
-const QUERY_DEBOUNCE_MS = 300;
-/** 首页请求超过这么久才出骨架，出现后至少停留这么久，快的请求不闪。 */
-const SKELETON_DELAY_MS = 120;
-const SKELETON_MIN_MS = 400;
-/** 请求超过这么久提示「比平时慢」。 */
-const SLOW_MS = 5000;
-/** 首页请求超过这么久按超时呈现，可重试。 */
-const TIMEOUT_MS = 20000;
 
 export default function DiscoverPage({ route }: PageProps<"discover">) {
   const { state } = useLauncher();
@@ -70,8 +65,9 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   const [restored] = useState(readSnapshot);
   const [filters, setFilters] = useState<DiscoverFilters>(() => routeFilters(restored === null ? DEFAULT_FILTERS : restored.filters, route, state.instances));
   const [detail, setDetail] = useState<DetailTarget | null>(() => (route.open === undefined ? null : { ...route.open, sources: [] }));
-  const [importOpen, setImportOpen] = useState(false);
-  const debounced = useDebounced(filters.query, QUERY_DEBOUNCE_MS);
+  // 外壳把拖进窗口的整合包经路由带进来：进页即打开导入弹窗读取它
+  const [importing, setImporting] = useState<ImportRequest | null>(() => (route.importFile === undefined ? null : { file: route.importFile }));
+  const debounced = useDebounced(filters.query, SEARCH_DEBOUNCE_MS);
   const committedQuery = debounced.value;
 
   // 已在本页时外部导航又带来新参数（命令面板搜索、实例页「找 Mod」）：叠到当前筛选上
@@ -83,6 +79,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     setFilters(next);
     debounced.flush(next.query);
     if (route.open !== undefined) setDetail({ ...route.open, sources: [] });
+    if (route.importFile !== undefined) setImporting({ file: route.importFile });
   }
 
   // 适配实例被删掉或变得不可用（开始重装、损坏）时回到不限
@@ -92,7 +89,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   }
 
   // 生效的关键词与类型写回路由：命令面板与历史项都能看到当前搜的是什么。
-  // 进页带来的适配实例与详情参数在这一步从路由里去掉：它们只在进页那一刻生效
+  // 进页带来的适配实例、详情与导入文件在这一步从路由里去掉：它们只在进页那一刻生效，后退、前进不再重放
   const kind = filters.kind;
   useEffect(() => {
     const writeBack = routeOfFilters(kind, committedQuery);
@@ -151,9 +148,15 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   };
   const open = (entry: SearchEntry) => setDetail({ platform: entry.platform, projectId: entry.project_id, sources: entry.sources });
 
-  // 「已装入 n 个实例」只对 Mod 有意义：结果里可能有 Mod 时才去读各实例的 Mod 列表
-  const [installed, report] = useCollected<ReadonlySet<string>>();
-  const probeInstances = filters.kind === "all" || filters.kind === "mod" ? state.instances.filter((i) => i.status === "ready" && !i.placeholder) : [];
+  // 「已装入 n 个实例」只对 Mod 有意义：结果里确实有 Mod 时才去读各实例的 Mod 列表，同时在读的有上限
+  const [modSources, report] = useCollected<ModSourcesState>();
+  const installed = useMemo(() => {
+    const out = new Map<string, ReadonlySet<string>>();
+    for (const [id, s] of modSources) if (s.status === "ready") out.set(id, s.sources);
+    return out;
+  }, [modSources]);
+  const probeIds = pages.hits.some((e) => e.resource_type === "mod") ? state.instances.filter((i) => i.status === "ready" && !i.placeholder).map((i) => i.id) : [];
+  const probing = probeWindow(probeIds, (id) => modSourcesProgress(modSources.get(id)), PROBE_CONCURRENCY);
 
   return (
     <>
@@ -169,7 +172,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
           onFilters={setFilters}
           onQuery={setQuery}
           onSubmit={() => debounced.flush(filters.query)}
-          onImport={() => setImportOpen(true)}
+          onImport={() => setImporting({ file: null })}
           inputRef={inputRef}
         />
         <EntranceBlock as="section" className={styles.results} aria-label={SEARCH_COPY.label}>
@@ -184,6 +187,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
               pages={pages}
               online={online}
               now={now}
+              instances={state.instances}
               installed={installed}
               container={container}
               onOpen={open}
@@ -192,11 +196,11 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
           </TabPanel>
         </EntranceBlock>
       </Page>
-      {probeInstances.map((i) => (
-        <ModSourcesProbe key={i.id} instanceId={i.id} onReport={report} />
+      {probing.map((id) => (
+        <ModSourcesProbe key={id} instanceId={id} onReport={report} />
       ))}
       <ResourceDetail target={detail} onClose={() => setDetail(null)} fitInstance={filters.fitInstance} online={online} />
-      <ImportModpackDialog open={importOpen} onClose={() => setImportOpen(false)} online={online} />
+      <ImportModpackDialog request={importing} onClose={() => setImporting(null)} online={online} />
     </>
   );
 }
@@ -207,17 +211,19 @@ interface ResultsProps {
   pages: ResultPages;
   online: boolean;
   now: number;
+  instances: readonly InstanceSummary[];
   installed: ReadonlyMap<string, ReadonlySet<string>>;
   container: HTMLElement | null;
   onOpen: (entry: SearchEntry) => void;
   onClearFilters: () => void;
 }
 
-function Results({ filters, committedQuery, pages, online, now, installed, container, onOpen, onClearFilters }: ResultsProps) {
+function Results({ filters, committedQuery, pages, online, now, instances, installed, container, onOpen, onClearFilters }: ResultsProps) {
   const requestKey = JSON.stringify(pages.state.request);
-  const skeleton = useDelayedFlag(pages.loadingFirst, SKELETON_DELAY_MS, SKELETON_MIN_MS);
-  const slow = useElapsed(pages.loadingFirst || pages.loadingNext, SLOW_MS, requestKey);
-  const timedOut = useElapsed(pages.loadingFirst, TIMEOUT_MS, requestKey);
+  // 首页的骨架与「比平时慢」走全站统一的加载门；下一页只在列表尾追加一行，慢提示按这一页的请求单独计时
+  const gate = useLoadingGate(pages.loadingFirst);
+  const slowNext = useElapsed(pages.loadingNext, SLOW_HINT_MS, requestKey);
+  const timedOut = useElapsed(pages.loadingFirst, PLATFORM_TIMEOUT_MS, requestKey);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const near = useNearBottom(bottomRef, container, PREFETCH_MARGIN_PX, pages.canLoadMore && online);
@@ -273,14 +279,14 @@ function Results({ filters, committedQuery, pages, online, now, installed, conta
     );
   }
 
-  if (skeleton || pages.loadingFirst) {
+  if (gate.view !== "content") {
     return (
       <>
         {info}
         <div className={styles.grid} aria-busy="true">
-          {skeleton && Array.from({ length: PAGE_SIZE }, (_, i) => <SkeletonCard key={i} />)}
+          {gate.view === "skeleton" && Array.from({ length: PAGE_SIZE }, (_, i) => <SkeletonCard key={i} />)}
         </div>
-        {slow && <p className={styles.listNote}>{SEARCH_COPY.slow}</p>}
+        {gate.slow && <p className={styles.listNote}>{SEARCH_COPY.slow}</p>}
       </>
     );
   }
@@ -337,14 +343,20 @@ function Results({ filters, committedQuery, pages, online, now, installed, conta
       )}
       <div className={styles.grid}>
         {pages.hits.map((entry) => (
-          <ResultCard key={hitKey(entry)} entry={entry} installed={installedCount(entry, installed)} now={now} onOpen={onOpen} />
+          <ResultCard
+            key={hitKey(entry)}
+            entry={entry}
+            installed={entry.resource_type === "modpack" ? instancesFromPack(projectOrigins(entry), instances).length : installedCount(entry, installed)}
+            now={now}
+            onOpen={onOpen}
+          />
         ))}
       </div>
       <div ref={bottomRef} className={styles.listFoot}>
         {pages.loadingNext && (
           <span className={styles.listNote}>
             <Spinner size={16} />
-            {slow ? SEARCH_COPY.slow : SEARCH_COPY.searching}
+            {slowNext ? SEARCH_COPY.slow : SEARCH_COPY.searching}
           </span>
         )}
         {pages.nextError !== null && (

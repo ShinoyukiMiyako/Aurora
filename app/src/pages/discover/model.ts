@@ -280,6 +280,25 @@ export function curseForgeSkipNote(result: SearchResultDto): "category_unmapped"
   return skip.reason;
 }
 
+/** 一个工程在各平台上的身份：合并卡有两个来源，单平台卡与从路由直接打开的只有自己。 */
+export interface ProjectOrigin {
+  platform: Platform;
+  projectId: string;
+}
+
+export function projectOrigins(entry: { platform: Platform; project_id: string; sources: readonly { platform: Platform; project_id: string }[] }): ProjectOrigin[] {
+  const sources = entry.sources.length > 0 ? entry.sources : [entry];
+  return sources.map((s) => ({ platform: s.platform, projectId: s.project_id }));
+}
+
+/** 来自这个整合包的实例：实例记下的整合包平台与工程 id 对上任一来源；本地文件导入的实例没有平台来源，不算。 */
+export function instancesFromPack(origins: readonly ProjectOrigin[], instances: readonly InstanceSummary[]): InstanceSummary[] {
+  return instances.filter((i) => {
+    const pack = i.modpack;
+    return pack !== null && pack.platform !== null && origins.some((o) => o.platform === pack.platform && o.projectId === pack.projectId);
+  });
+}
+
 /** 已装入几个实例：任一来源（合并卡有两个）出现在实例的已装 Mod 里就算。 */
 export function installedCount(entry: SearchEntry, installed: ReadonlyMap<string, ReadonlySet<string>>): number {
   const keys = entry.sources.length > 0 ? entry.sources.map((s) => `${s.platform}:${s.project_id}`) : [hitKey(entry)];
@@ -334,5 +353,5 @@ export function routeOfFilters(kind: DiscoverKind, committedQuery: string): Rout
 
 /** 判断路由参数是否变过：页面自己写回的路由与外部导航带来的路由都按它比较。 */
 export function routeSignature(route: RouteOf<"discover">): string {
-  return JSON.stringify([route.query, route.kind, route.forInstance, route.open === undefined ? null : [route.open.platform, route.open.projectId]]);
+  return JSON.stringify([route.query, route.kind, route.forInstance, route.open === undefined ? null : [route.open.platform, route.open.projectId], route.importFile]);
 }

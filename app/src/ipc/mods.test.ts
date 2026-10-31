@@ -235,20 +235,27 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
     const matrix = await matchInstances("modrinth", "AANobbMI", null);
     // 矩阵覆盖实例 mock 里全部可用的实例（损坏的「没装完」不在其中）。
     expect(matrix.map((m) => [m.version_id, m.state])).toEqual([
+      ["1.21.1-Fabric", "compatible"],
+      ["樱花生存", "compatible"],
       ["1.20.1-Fabric", "installed"],
       ["1.20.1-Forge", "incompatible"],
       ["1.21", "incompatible"],
       ["1.21.1", "incompatible"],
-      ["1.21.1-Fabric", "incompatible"],
       ["RLCraft", "incompatible"],
-      ["樱花生存", "incompatible"],
     ]);
-    expect(matrix[0].installed).toEqual({ file_name: "AANobbMI-0.5.3.jar", version_id: "sodium-053", version_number: "0.5.3" });
-    expect(matrix[0].best_version?.version_id).toBe("sodium-060");
-    expect(matrix[1].compatibility).toEqual({ kind: "mismatch", reason: "需要 Fabric/NeoForge，该实例装的是 Forge" });
-    expect(matrix[2].compatibility).toEqual({ kind: "mismatch", reason: "该实例未安装 Mod 加载器" });
-    expect(matrix[2].best_version).toBeNull();
-    expect(matrix[4].compatibility).toEqual({ kind: "mismatch", reason: "不支持 MC 1.21.1" });
+    expect(matrix[0].best_version?.version_id).toBe("sodium-121");
+    expect(matrix[2].installed).toEqual({ file_name: "AANobbMI-0.5.3.jar", version_id: "sodium-053", version_number: "0.5.3" });
+    expect(matrix[2].best_version?.version_id).toBe("sodium-060");
+    expect(matrix[3].compatibility).toEqual({ kind: "mismatch", reason: "需要 Fabric/NeoForge，该实例装的是 Forge" });
+    expect(matrix[4].compatibility).toEqual({ kind: "mismatch", reason: "该实例未安装 Mod 加载器" });
+    expect(matrix[4].best_version).toBeNull();
+    expect(matrix[6].compatibility).toEqual({ kind: "mismatch", reason: "需要 Fabric/NeoForge，该实例装的是 Forge" });
+
+    // 1.20.1 的 Fabric 实例只认 1.20.1 的版本：只有 1.21.1 版本的工程判为不支持这个 MC 版本
+    const create = await matchInstances("modrinth", "LNytGWDc", "create-604");
+    expect(create.find((m) => m.version_id === "1.21.1-Fabric")?.compatibility).toEqual({ kind: "mismatch", reason: "需要 NeoForge，该实例装的是 Fabric" });
+    const lithium = await matchInstances("modrinth", "gvQqBUqZ", "lith-0143");
+    expect(lithium.find((m) => m.version_id === "1.20.1-Fabric")?.compatibility).toEqual({ kind: "mismatch", reason: "不支持 MC 1.20.1" });
 
     // 指定版本：整个矩阵只按它判。
     const pinned = await matchInstances("modrinth", "mOgUt4GM", "mm-7");

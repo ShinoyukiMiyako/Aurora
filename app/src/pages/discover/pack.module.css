@@ -155,19 +155,42 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: var(--sk-space-6);
+  min-height: 180px;
   padding: var(--sk-space-24) var(--sk-space-20);
-  border: 1px dashed var(--sk-line-2);
+  border: 1.5px dashed var(--sk-line-2);
   border-radius: var(--sk-r-lg);
   background: var(--sk-bg-2);
   color: var(--sk-text-3);
   text-align: center;
 }
 
-.dropZone[data-state="reading"] {
-  justify-content: center;
-  min-height: 160px;
+/* 文件正拖在窗口上方：投放区接住它的提示 */
+.dropZone[data-state="over"] {
+  border-color: var(--sk-accent-line);
+  background: var(--sk-accent-soft);
   color: var(--sk-accent);
+}
+
+.dropZone[data-state="reading"] {
+  color: var(--sk-accent);
+}
+
+.dropAction {
+  margin-top: var(--sk-space-8);
+}
+
+.pathBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+}
+
+.pathCaption {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
 }
 
 .dropTitle {
@@ -180,7 +203,7 @@
 .dropHint {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
 }
 
 .pathRow {
@@ -188,7 +211,6 @@
   align-items: center;
   gap: var(--sk-space-8);
   width: 100%;
-  margin-top: var(--sk-space-8);
 }
 
 .pathRow > :first-child {

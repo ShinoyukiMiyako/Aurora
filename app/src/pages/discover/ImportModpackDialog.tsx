@@ -1,12 +1,15 @@
 // 导入本地整合包文件：选文件 -> 读取 -> 确认三步。读取失败留在第一步，按错误码给出原因。
+// 文件有四个来源：拖进投放区（第一步期间独占窗口拖放）、「选择文件」的系统对话框、路径输入框，
+// 以及外壳在没有接收方时把拖进窗口的整合包经路由带进来（打开弹窗即读取）。
 // 确认的内容与资源详情里的整合包面板相同（共用 PackForm），版本只读。
 
-import { useState, type DragEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../../art/Icon";
 import { defaultModpackCover, type InstanceCover } from "../../art/iso/covers";
 import { ACTION_ERROR } from "../../copy/flows";
 import { instanceNameError } from "../../domain/rules";
+import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
 import { useLauncher } from "../../state/launcher";
@@ -43,6 +46,18 @@ function fileName(path: string): string {
   return parts[parts.length - 1];
 }
 
+const PACK_EXTENSION = /\.(mrpack|zip)$/i;
+
+/**
+ * 一次拖进几个文件时读哪一个：第一个整合包；一个整合包都没有时读第一个，由后端按扩展名说明只认哪两种。
+ * 拖进来的不是文件（没有路径）时为 null。
+ */
+export function droppedFile(paths: readonly string[]): string | null {
+  if (paths.length === 0) return null;
+  const pack = paths.find((p) => PACK_EXTENSION.test(p));
+  return pack === undefined ? paths[0] : pack;
+}
+
 /** 本地整合包的清单事实。预览只给远程文件数与包内文件数，不区分其中有几个 Mod，Mod 数这一行不显示。 */
 export function previewFacts(preview: ModpackPreviewDto): PackFacts {
   return {
@@ -57,23 +72,43 @@ export function previewFacts(preview: ModpackPreviewDto): PackFacts {
   };
 }
 
+/** 打开导入弹窗的请求：带着文件时打开即读取它。每次打开都是新对象，弹窗据此重置。 */
+export interface ImportRequest {
+  file: string | null;
+}
+
 export interface ImportModpackDialogProps {
-  open: boolean;
+  /** null 为关闭。 */
+  request: ImportRequest | null;
   onClose: () => void;
   online: boolean;
 }
 
-export function ImportModpackDialog({ open, onClose, online }: ImportModpackDialogProps) {
+export function ImportModpackDialog({ request, onClose, online }: ImportModpackDialogProps) {
   const [input, setInput] = useState("");
   const [path, setPath] = useState<string | null>(null);
   const [footerHost, setFooterHost] = useState<HTMLElement | null>(null);
   const preview = useModpackPreview(path);
 
+  // 新的打开请求：带着文件就直接进入读取，否则从选文件开始
+  const [handled, setHandled] = useState<ImportRequest | null>(null);
+  if (request !== handled) {
+    setHandled(request);
+    if (request !== null) {
+      setPath(request.file);
+      setInput(request.file === null ? "" : request.file);
+    }
+  }
+
+  const openFile = (file: string) => {
+    setInput(file);
+    // 同一个文件上次读失败了：再读一次（文件可能已经换过或下载完整了）
+    if (file === path && preview.status === "error") preview.reload();
+    else setPath(file);
+  };
   const read = () => {
     const next = input.trim();
-    if (next === "") return;
-    if (next === path && preview.status === "error") preview.reload();
-    else setPath(next);
+    if (next !== "") openFile(next);
   };
   const close = () => {
     setPath(null);
@@ -84,7 +119,7 @@ export function ImportModpackDialog({ open, onClose, online }: ImportModpackDial
   const confirming = path !== null && preview.status === "ready";
   return (
     <Modal
-      open={open}
+      open={request !== null}
       onClose={close}
       title={IMPORT_COPY.title}
       icon="upload"
@@ -99,21 +134,74 @@ export function ImportModpackDialog({ open, onClose, online }: ImportModpackDial
           <span className={styles.dropTitle}>{IMPORT_COPY.reading(fileName(path))}</span>
         </div>
       ) : (
-        <ChooseFile input={input} onInput={setInput} onRead={read} error={path !== null && preview.status === "error" ? previewErrorText(preview.error) : null} />
+        <ChooseFile
+          input={input}
+          onInput={setInput}
+          onRead={read}
+          onFile={openFile}
+          error={path !== null && preview.status === "error" ? previewErrorText(preview.error) : null}
+        />
       )}
     </Modal>
   );
 }
 
-function ChooseFile({ input, onInput, onRead, error }: { input: string; onInput: (v: string) => void; onRead: () => void; error: string | null }) {
-  // 文件拖进网页时浏览器默认会打开它，整个界面被换掉；投放区拦下默认行为
-  const block = (event: DragEvent<HTMLDivElement>) => event.preventDefault();
+interface ChooseFileProps {
+  input: string;
+  onInput: (v: string) => void;
+  onRead: () => void;
+  /** 拖进来或在系统对话框里选中了一个文件。 */
+  onFile: (path: string) => void;
+  error: string | null;
+}
+
+function ChooseFile({ input, onInput, onRead, onFile, error }: ChooseFileProps) {
+  const { registerFileDrop, pickFile } = useShell();
+  const run = useRunner();
+  const [over, setOver] = useState(false);
+
+  // 第一步期间独占窗口拖放（外壳不再自己导航）；只登记一次，回调经 ref 取最新的，不随每次渲染注销重登
+  const onFileRef = useRef(onFile);
+  useLayoutEffect(() => {
+    onFileRef.current = onFile;
+  });
+  useEffect(
+    () =>
+      registerFileDrop({
+        onEnter: () => setOver(true),
+        onLeave: () => setOver(false),
+        onDrop: (paths) => {
+          setOver(false);
+          const file = droppedFile(paths);
+          if (file !== null) onFileRef.current(file);
+        },
+      }),
+    [registerFileDrop],
+  );
+
+  const pick = useCallback(
+    () =>
+      void run(async () => {
+        const file = await pickFile("modpack");
+        if (file !== null) onFileRef.current(file);
+      }, IMPORT_COPY.pickFailed),
+    [pickFile, run],
+  );
+
   return (
     <div className={styles.choose}>
-      <div className={styles.dropZone} onDragOver={block} onDrop={block}>
+      <div className={styles.dropZone} data-drop-zone="" data-state={over ? "over" : undefined}>
         <Icon name="upload" size={24} />
         <span className={styles.dropTitle}>{IMPORT_COPY.dropTitle}</span>
         <span className={styles.dropHint}>{IMPORT_COPY.dropHint}</span>
+        <span className={styles.dropAction}>
+          <Button size="sm" variant="secondary" icon="folder-open" onClick={pick} {...{ [AUTOFOCUS_ATTR]: "" }}>
+            {IMPORT_COPY.pick}
+          </Button>
+        </span>
+      </div>
+      <div className={styles.pathBlock}>
+        <span className={styles.pathCaption}>{IMPORT_COPY.pathCaption}</span>
         <div className={styles.pathRow}>
           <TextInput
             size="sm"
@@ -123,9 +211,8 @@ function ChooseFile({ input, onInput, onRead, error }: { input: string; onInput:
             placeholder={IMPORT_COPY.pathPlaceholder}
             aria-label={IMPORT_COPY.pathLabel}
             invalid={error !== null}
-            {...{ [AUTOFOCUS_ATTR]: "" }}
           />
-          <Button size="sm" variant="secondary" disabled={input.trim() === ""} onClick={onRead}>
+          <Button size="sm" variant="ghost" disabled={input.trim() === ""} onClick={onRead}>
             {IMPORT_COPY.read}
           </Button>
         </div>

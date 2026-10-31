@@ -25,15 +25,15 @@ import { SegmentedControl } from "../../../ui/SegmentedControl";
 import { Skeleton } from "../../../ui/Skeleton";
 import { TabPanel, Tabs } from "../../../ui/Tabs";
 import { Tag } from "../../../ui/Tag";
+import { RichText } from "../../../ui/RichText";
+import { parseBody } from "../../../ui/richtext-parse";
 import { Thumb } from "../../../ui/Thumb";
 import { DETAIL_COPY, KIND_LABEL, PLATFORM_LABEL, SEARCH_COPY } from "../copy";
-import { categoryDisplay, entryHue, parsePlatformTime, resourceKindOf } from "../model";
+import { categoryDisplay, entryHue, parsePlatformTime, projectOrigins, resourceKindOf } from "../model";
 import { dotLoaders } from "../ResultCard";
-import { parseBody } from "../richtext";
 import { fitsAnyInstance, gameVersionSummary, sortGameVersions } from "../versions";
 import { InstallPanel } from "./InstallPanel";
 import { ModpackPanel } from "./ModpackPanel";
-import { RichText } from "./RichText";
 import styles from "./detail.module.css";
 
 /** 头图高度。 */
@@ -283,7 +283,16 @@ function DetailBody({ entry, detail, back, onTitle, onClose, onOpenDependency, f
         </div>
         <div className={styles.sideColumn}>
           {isPack ? (
-            <ModpackPanel detail={detail} versions={versions} pinned={pinned} onPin={setPinned} online={online} footerHost={footerHost} onClose={onClose} />
+            <ModpackPanel
+              detail={detail}
+              origins={projectOrigins({ platform: detail.platform, project_id: detail.project_id, sources: entry.sources })}
+              versions={versions}
+              pinned={pinned}
+              onPin={setPinned}
+              online={online}
+              footerHost={footerHost}
+              onClose={onClose}
+            />
           ) : (
             <InstallPanel detail={detail} versions={versions} pinned={pinned} onPin={setPinned} fitInstance={fitInstance} online={online} footerHost={footerHost} onClose={onClose} />
           )}

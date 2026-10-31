@@ -4,24 +4,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { InstalledMod } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
+import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowPort } from "../../shell/window";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "../../state/queries/discover";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
 import { clearSnapshot } from "./session";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 系统选择文件对话框只在 Tauri 里有：默认照真实实现在测试里拒绝，个别用例改成返回选中的文件
+vi.mock("../../shell/platform", async (orig) => {
+  const actual = await orig<typeof import("../../shell/platform")>();
+  return { ...actual, pickFile: vi.fn(actual.pickFile) };
+});
 
 let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let observers: { callback: IntersectionObserverCallback; options: IntersectionObserverInit | undefined; targets: Element[] }[];
 let online: boolean;
+let dropHandlers: ((event: FileDropEvent) => void)[];
+let port: WindowPort;
 
 function Probe() {
   nav = useNav();
@@ -42,13 +51,15 @@ const flush = () =>
 
 async function mount(route: Parameters<NavApi["go"]>[0] = { page: "discover" }) {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <Probe />
-        <PageArea />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <WindowPortProvider port={port}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <PageArea />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </WindowPortProvider>,
   );
   await flush();
   act(() => nav.go(route));
@@ -185,6 +196,16 @@ beforeEach(() => {
   );
   online = true;
   vi.spyOn(navigator, "onLine", "get").mockImplementation(() => online);
+  dropHandlers = [];
+  port = {
+    ...browserWindowPort(),
+    onFileDrop: async (handler) => {
+      dropHandlers.push(handler);
+      return () => {
+        dropHandlers = dropHandlers.filter((h) => h !== handler);
+      };
+    },
+  };
   bootOverrides(ipc, { instances: [instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.5" }] }), instanceDto("创造")], config: configDto({ selected_version: "生存" }) });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("list_manifest", () => ({ latest: { release: "1.21.1", snapshot: "24w14a" }, versions: [], loader_errors: [], stale_since: null, fetch_error: null }));
@@ -267,6 +288,41 @@ describe("发现页：搜索", () => {
     expect(card("资源 B").textContent).not.toContain("已装入");
   });
 
+  it("「已装入」逐个读各实例的 Mod 列表：同时在读的不超过 2 个，前面的读完后面的才接上", async () => {
+    const ids = ["甲", "乙", "丙", "丁", "戊"];
+    bootOverrides(ipc, { instances: ids.map((id) => instanceDto(id, { loaders: [{ kind: "fabric", version: "0.16.5" }] })), config: configDto({ selected_version: "甲" }) });
+    const waiting = new Map<string, Deferred<InstalledMod[]>>();
+    let inFlight = 0;
+    let peak = 0;
+    ipc.overrides.set("list_mods", (args) => {
+      const d = deferred<InstalledMod[]>();
+      waiting.set(String(args.versionId), d);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      return d.promise.finally(() => inFlight--);
+    });
+    await mount();
+    expect(callsOf(ipc, "list_mods").map((a) => a.versionId)).toEqual(["甲", "乙"]);
+    for (const id of ids) {
+      const d = waiting.get(id);
+      if (d === undefined) throw new Error(`「${id}」的 Mod 列表还没开始读`);
+      await act(async () => {
+        d.resolve(id === "丁" ? [installedMod("A")] : []);
+        await settle();
+      });
+    }
+    expect(callsOf(ipc, "list_mods").map((a) => a.versionId)).toEqual(ids);
+    expect(peak).toBe(2);
+    expect(card("资源 A").textContent).toContain("已装入 1 个实例");
+  });
+
+  it("结果里一个 Mod 都没有时不读任何实例的 Mod 列表", async () => {
+    pages = () => result([entry("R", { title: "材质", resource_type: "resource_pack", loaders: [] }), entry("P", { title: "整合包", resource_type: "modpack" })]);
+    await mount();
+    expect(cardTitles()).toEqual(["材质，查看详情", "整合包，查看详情"]);
+    expect(callsOf(ipc, "list_mods")).toEqual([]);
+  });
+
   it("滚到底部附近按游标接下一页，同一工程只留先到的一张，到底后提示", async () => {
     await mount();
     const near = observers.find((o) => o.options !== undefined && o.options.rootMargin === "0px 0px 600px 0px" && o.targets.length > 0);
@@ -279,6 +335,58 @@ describe("发现页：搜索", () => {
     expect(lastSearch().cursor).toEqual(CURSOR);
     expect(cardTitles()).toEqual(["资源 A，查看详情", "资源 B，查看详情", "资源 C，查看详情"]);
     expect(document.body.textContent).toContain("已经到底了");
+  });
+});
+
+/** 结果区里正在显示的骨架卡数。 */
+const skeletonCards = () => document.querySelectorAll('section[aria-label="搜索资源"] [aria-busy="true"] > *').length;
+
+describe("发现页：加载态的时机", () => {
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+
+  it("300 ms 内返回的搜索不出骨架；超过 300 ms 才出，出现后至少停留 300 ms", async () => {
+    pages = () => new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 280)) as never;
+    await mount();
+    await advance(279);
+    expect(skeletonCards()).toBe(0);
+    await advance(1);
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+    expect(skeletonCards()).toBe(0);
+
+    // 换个关键词：这次 320 ms 才返回，骨架在 300 ms 出现，数据到了也要停满 300 ms
+    pages = () => new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("B")])), 320)) as never;
+    typeInto(searchInput(), "慢");
+    act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    await advance(299);
+    expect(skeletonCards()).toBe(0);
+    await advance(1);
+    expect(skeletonCards()).toBe(24);
+    await advance(20);
+    await flush();
+    expect(skeletonCards()).toBe(24);
+    await advance(280);
+    await flush();
+    expect(skeletonCards()).toBe(0);
+    expect(cardTitles()).toEqual(["资源 B，查看详情"]);
+  });
+
+  it("首页请求 10 s 还没回来才提示「比平时慢」，20 s 按超时呈现可重试", async () => {
+    pages = () => new Promise<SearchResultDto>(() => {}) as never;
+    await mount();
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("比平时慢一些");
+    await advance(1);
+    expect(document.body.textContent).toContain("比平时慢一些");
+    await advance(9_999);
+    expect(document.body.textContent).not.toContain("请求超时");
+    await advance(1);
+    expect(document.body.textContent).toContain("请求超时");
+    expect(document.body.textContent).toContain("资源平台 20 秒内没有回应。");
   });
 });
 
@@ -375,6 +483,44 @@ describe("发现页：资源详情与安装", () => {
     expect(openDialogs()).toHaveLength(1);
   });
 
+  it("数据包：逐个读各实例的存档，同时在读的不超过 2 个；读完后按存档判定", async () => {
+    const ids = ["甲", "乙", "丙", "丁"];
+    const dp = entry("D1", { title: "地形", resource_type: "data_pack", loaders: [] });
+    const dv = modVersion("dp-1", { project_id: "D1", loaders: [] });
+    bootOverrides(ipc, { instances: ids.map((id) => instanceDto(id)), config: configDto({ selected_version: "甲" }) });
+    pages = () => result([dp]);
+    ipc.overrides.set("project_detail", () => detailOf(dp, { latest_version: dv }));
+    ipc.overrides.set("list_mod_versions", () => [dv]);
+    ipc.overrides.set("match_instances", () => ids.map((id) => match(id, { best_version: dv })));
+    const waiting = new Map<string, Deferred<unknown>>();
+    let inFlight = 0;
+    let peak = 0;
+    ipc.overrides.set("list_instance_content", (args) => {
+      const d = deferred<unknown>();
+      waiting.set(String(args.id), d);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      return d.promise.finally(() => inFlight--);
+    });
+    await mount();
+    act(() => card("地形").click());
+    await flush();
+    expect(callsOf(ipc, "list_instance_content").map((a) => a.id)).toEqual(["甲", "乙"]);
+    const world = { dir_name: "w", level_status: "ok", level_error: null, name: "主世界", mode: null, last_played: null, size_bytes: 0, modified_at: null };
+    for (const id of ids) {
+      const d = waiting.get(id);
+      if (d === undefined) throw new Error(`「${id}」的存档还没开始读`);
+      await act(async () => {
+        d.resolve({ resource_packs: [], shader_packs: [], worlds: id === "乙" ? [] : [world] });
+        await settle();
+      });
+    }
+    expect(callsOf(ipc, "list_instance_content").map((a) => a.id)).toEqual(ids);
+    expect(peak).toBe(2);
+    expect(dialog().querySelector('[role="checkbox"][aria-label^="甲，兼容"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(dialog().querySelector('[role="checkbox"][aria-label^="乙，不可用，还没有存档"]')).not.toBeNull();
+  });
+
   it("路由带 open 时进页直接打开该资源的详情", async () => {
     await mount({ page: "discover", open: { platform: "modrinth", projectId: "R1" } });
     expect(callsOf(ipc, "project_detail")).toEqual([{ platform: "modrinth", projectId: "R1" }]);
@@ -390,6 +536,7 @@ describe("发现页：整合包", () => {
     pages = () => result([pack]);
     ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
     ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
     // 导入任务一直在跑：面板停在进度态
     ipc.overrides.set("install_modpack", () => new Promise(() => {}));
     await mount();
@@ -460,5 +607,220 @@ describe("发现页：整合包", () => {
     expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号"]]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已开始导入「创造 2」");
     expect(openDialogs()).toHaveLength(0);
+  });
+});
+
+describe("发现页：平台整合包的清单摘要与同包提醒", () => {
+  const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
+  const v = modVersion("mp-3", { project_id: "M1", version_number: "3.0.0", loaders: ["fabric"], game_versions: ["1.20.1"], file_size: 2_000_000 });
+  const summary = (overrides: Record<string, unknown> = {}) => ({
+    format: "modrinth",
+    name: "樱落",
+    version: "3.0.0",
+    minecraft: "1.21.1",
+    loader: { kind: "quilt", version: "0.26.4" },
+    pack_bytes: 1_048_576,
+    remote_files: 48,
+    mod_files: 41,
+    remote_bytes: 9 * 1_048_576,
+    override_files: 3,
+    override_bytes: 512,
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("install_modpack", () => new Promise(() => {}));
+  });
+
+  async function openPack() {
+    await mount();
+    act(() => card("樱落").click());
+    await flush();
+  }
+
+  it("Modrinth：按所选版本读清单，清单里的游戏版本、加载器、Mod 数与下载量为准，并随任务带上", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary());
+    await openPack();
+    expect(callsOf(ipc, "summarize_platform_modpack")).toEqual([{ platform: "modrinth", projectId: "M1", versionId: "mp-3" }]);
+    expect(dialog().textContent).toContain("41 个 Mod");
+    // 整合包文件本身加上清单里要另外下载的文件
+    expect(dialog().textContent).toContain("下载约 10.0 MB");
+    expect(dialog().textContent).toContain("1.21.1 · Quilt · 41 个 Mod");
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.detail)).toEqual(["3.0.0 · 41 个 Mod"]);
+  });
+
+  it("CurseForge：清单分不出 Mod，改写要下载的文件数，任务详情不写 Mod 数", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary({ format: "curseforge", mod_files: null, remote_bytes: null }));
+    await openPack();
+    expect(dialog().textContent).toContain("48 个文件需要下载");
+    expect(dialog().textContent).not.toContain("41 个 Mod");
+    expect(dialog().textContent).not.toContain("下载约");
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.detail)).toEqual(["3.0.0"]);
+  });
+
+  it("清单读不出来：说明原因可重试，仍可按平台版本信息安装", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    let fail = true;
+    ipc.overrides.set("summarize_platform_modpack", () => {
+      if (fail) throw new IpcError("remote_pack_unreadable", "服务器不支持分段下载", { url: "https://x/p.mrpack", reason: "no_range" });
+      return summary();
+    });
+    await openPack();
+    expect(dialog().textContent).toContain("整合包清单没能提前读出来");
+    expect(dialog().textContent).toContain("服务器不支持分段下载");
+    expect(dialog().textContent).toContain("1.20.1 · Fabric");
+    fail = false;
+    const retry = [...dialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === "重试");
+    expect(retry).toHaveLength(1);
+    act(() => retry[0].click());
+    await flush();
+    expect(dialog().textContent).toContain("41 个 Mod");
+    expect(dialog().textContent).not.toContain("整合包清单没能提前读出来");
+  });
+
+  it("已有来自同一整合包的实例：卡片写出个数，面板提醒再装一次是独立的新实例", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary());
+    const fromPack = { platform: "modrinth" as const, project_id: "M1", version_id: "mp-2", name: "樱落", version: "2.0.0" };
+    bootOverrides(ipc, {
+      instances: [instanceDto("樱落周目", { modpack: fromPack }), instanceDto("另一份", { modpack: { ...fromPack, project_id: "M2" } }), instanceDto("樱落二周目", { modpack: fromPack })],
+      config: configDto({ selected_version: "樱落周目" }),
+    });
+    await mount();
+    expect(card("樱落").textContent).toContain("已有 2 个实例来自它");
+    act(() => card("樱落").click());
+    await flush();
+    expect(dialog().textContent).toContain("你已经有 2 个来自这个整合包的实例（「樱落周目」），再装一次会得到一个独立的新实例。");
+  });
+
+  it("没有来自它的实例时卡片与面板都不提", async () => {
+    ipc.overrides.set("summarize_platform_modpack", () => summary());
+    await openPack();
+    expect(card("樱落").textContent).not.toContain("实例来自它");
+    expect(dialog().textContent).not.toContain("来自这个整合包");
+  });
+});
+
+describe("发现页：本地整合包的三种入口", () => {
+  const PACK = "D:\\Downloads\\生存.mrpack";
+  const preview = (path: string) => ({
+    format: "modrinth",
+    name: path.includes("创造") ? "创造包" : "生存包",
+    version: "1.2.0",
+    summary: null,
+    author: null,
+    minecraft: "1.21.1",
+    loader: { kind: "fabric", version: "0.16.9" },
+    remote_files: 12,
+    remote_bytes: 2048,
+    override_files: 3,
+    override_bytes: 512,
+  });
+  const fire = (event: FileDropEvent) =>
+    act(async () => {
+      for (const handler of [...dropHandlers]) handler(event);
+      await settle();
+    });
+  const nameValue = () => {
+    const input = dialog().querySelector<HTMLInputElement>('input:not([aria-label="整合包文件的完整路径"])');
+    if (input === null) throw new Error("没有名称输入框");
+    return input.value;
+  };
+  const dropZone = () => {
+    const el = dialog().querySelector<HTMLElement>("[data-drop-zone]");
+    if (el === null) throw new Error("没有投放区");
+    return el;
+  };
+  const clickInDialog = (text: string) =>
+    act(async () => {
+      buttonByText(text, dialog()).click();
+      await settle();
+    });
+
+  beforeEach(() => {
+    ipc.overrides.set("preview_modpack", (args) => preview(String(args.path)));
+  });
+
+  it("路由带入文件路径：进页直接打开导入弹窗并读取它，随后路由里去掉这个路径", async () => {
+    await mount({ page: "discover", importFile: PACK });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+    expect(dialog().textContent).toContain("版本 1.2.0");
+    expect(nav.route).toEqual({ page: "discover" });
+  });
+
+  it("已在发现页时外壳带来新的文件路径：同样打开弹窗读取", async () => {
+    await mount();
+    act(() => nav.go({ page: "discover", importFile: PACK }));
+    await flush();
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+    expect(nav.route).toEqual({ page: "discover" });
+  });
+
+  it("「选择文件」：选中即读取；取消选择什么都不做", async () => {
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    vi.mocked(pickFile).mockResolvedValueOnce(null);
+    await clickInDialog("选择文件");
+    expect(callsOf(ipc, "preview_modpack")).toEqual([]);
+    expect(dialog().textContent).toContain("把整合包文件拖到这里");
+
+    vi.mocked(pickFile).mockResolvedValueOnce("C:\\packs\\创造.zip");
+    await clickInDialog("选择文件");
+    expect(vi.mocked(pickFile).mock.calls.map((c) => c[0].filter.extensions)).toEqual([
+      ["mrpack", "zip"],
+      ["mrpack", "zip"],
+    ]);
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "C:\\packs\\创造.zip" }]);
+    expect(nameValue()).toBe("创造包");
+  });
+
+  it("浏览器预览里没有系统对话框：如实报错，弹窗停在第一步", async () => {
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await clickInDialog("选择文件");
+    const toast = launcher.state.toasts.find((t) => t.title === "没能打开文件选择");
+    expect(toast?.tone).toBe("error");
+    expect(toast?.body).toContain("浏览器预览里没有系统的选择文件对话框");
+    expect(callsOf(ipc, "preview_modpack")).toEqual([]);
+    expect(dialog().textContent).toContain("把整合包文件拖到这里");
+  });
+
+  it("弹窗打开时拖进文件：投放区高亮，松开读第一个整合包，外壳不再自己导航", async () => {
+    await mount({ page: "discover", query: "钠" });
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "enter", paths: ["D:\\notes.txt", PACK] });
+    expect(dropZone().dataset.state).toBe("over");
+    await fire({ type: "leave" });
+    expect(dropZone().dataset.state).toBeUndefined();
+    await fire({ type: "enter", paths: [PACK] });
+    await fire({ type: "drop", paths: ["D:\\notes.txt", PACK] });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
+    expect(nameValue()).toBe("生存包");
+    expect(nav.route).toEqual({ page: "discover", query: "钠" });
+  });
+
+  it("拖进来的都不是整合包：照样交给后端读，按错误码说明只认哪两种文件", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    ipc.overrides.set("preview_modpack", () => {
+      throw new IpcError("modpack_unsupported_extension", "unsupported");
+    });
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "drop", paths: ["D:\\a.png", "D:\\b.jar"] });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "D:\\a.png" }]);
+    expect(dialog().textContent).toContain("只认 .mrpack 和 CurseForge 导出的 .zip");
+    expect(dropZone()).toBeDefined();
   });
 });

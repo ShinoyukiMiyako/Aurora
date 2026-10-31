@@ -1,6 +1,7 @@
 // 发现页、资源详情、安装面板与整合包导入的文案。插值一律经 domain/format 格式化，页面组件只引用这里。
 
 import { formatBytes, formatCount } from "../../domain/format";
+import { PLATFORM_TIMEOUT_MS } from "../../domain/limits";
 import type { Platform } from "../../domain/types";
 import type { DiscoverKind } from "../../state/route";
 import type { SortField } from "../../state/queries/discover";
@@ -71,7 +72,7 @@ export const SEARCH_COPY = {
   partialFailed: (failed: Platform, other: Platform) => `${PLATFORM_LABEL[failed]} 暂时没有响应，下面只有 ${PLATFORM_LABEL[other]} 的结果。`,
   allFailed: "暂时连不上资源平台",
   timeout: "请求超时",
-  timeoutBody: "资源平台 20 秒内没有回应。",
+  timeoutBody: `资源平台 ${PLATFORM_TIMEOUT_MS / 1000} 秒内没有回应。`,
   offlineBanner: "没有网络连接",
   offlineBannerBody: "搜索和安装需要联网，恢复后会自动刷新。",
   offlineEmpty: "连不上网络",
@@ -85,6 +86,7 @@ export const CARD_COPY = {
   authorUnknown: "作者未知",
   byline: (author: string, relative: string | null) => (relative === null ? author : `${author} · ${relative}更新`),
   installed: (n: number) => `已装入 ${n} 个实例`,
+  fromPack: (n: number) => `已有 ${n} 个实例来自它`,
   loaders: (n: number) => `支持 ${n} 种加载器`,
   downloads: (n: number) => `下载 ${formatCount(n)}`,
   follows: (n: number) => `关注 ${formatCount(n)}`,
@@ -194,6 +196,9 @@ export const MODPACK_COPY = {
   modCount: (n: number) => `${n} 个 Mod`,
   download: (bytes: number) => `下载约 ${formatBytes(bytes)}`,
   remoteFiles: (n: number) => `${n} 个文件需要下载`,
+  summaryLoading: "正在读取整合包清单…",
+  summaryFailed: "整合包清单没能提前读出来，Mod 数和下载大小要到导入时才知道",
+  duplicate: (n: number, first: string) => `你已经有 ${n} 个来自这个整合包的实例（「${first}」），再装一次会得到一个独立的新实例。`,
   overrides: (n: number, bytes: number) => `包内自带 ${n} 个文件 · ${formatBytes(bytes)}`,
   memory: "内存跟随全局设置",
   memoryAuto: "内存跟随全局设置，会按大型整合包档位给足",
@@ -219,8 +224,13 @@ export const MODPACK_COPY = {
 
 export const IMPORT_COPY = {
   title: "导入整合包文件",
-  dropTitle: "填入整合包文件的路径",
+  dropTitle: "把整合包文件拖到这里",
   dropHint: "支持 Modrinth 的 .mrpack 与 CurseForge 导出的 .zip",
+  pick: "选择文件",
+  /** 打开系统选择文件对话框失败时的通知标题。 */
+  pickFailed: "没能打开文件选择",
+  /** 路径输入框上方的说明：拖放与对话框之外，也可以直接粘贴完整路径。 */
+  pathCaption: "或者填入文件的完整路径",
   pathLabel: "整合包文件的完整路径",
   pathPlaceholder: "例如 D:\\Downloads\\pack.mrpack",
   read: "读取",

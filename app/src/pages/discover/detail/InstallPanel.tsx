@@ -29,7 +29,7 @@ import { SearchInput } from "../../../ui/SearchInput";
 import { Select, type SelectOption } from "../../../ui/Select";
 import { Tag } from "../../../ui/Tag";
 import { DETAIL_COPY, INSTALL_COPY, SEARCH_COPY } from "../copy";
-import { useCollected, WorldsProbe } from "../probes";
+import { PROBE_CONCURRENCY, probeWindow, useCollected, WorldsProbe, worldsProgress } from "../probes";
 import {
   defaultPick,
   defaultWorld,
@@ -303,7 +303,12 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
         onChange={(v) => onPin(v === AUTO ? null : v)}
       />
 
-      {type === "data_pack" && state.instances.filter((i) => i.status === "ready").map((i) => <WorldsProbe key={i.id} instanceId={i.id} onReport={reportWorlds} />)}
+      {type === "data_pack" &&
+        probeWindow(
+          state.instances.filter((i) => i.status === "ready").map((i) => i.id),
+          (id) => worldsProgress(worlds.get(id)),
+          PROBE_CONCURRENCY,
+        ).map((id) => <WorldsProbe key={id} instanceId={id} onReport={reportWorlds} />)}
       {type === "shader" && <IrisProbe onReport={setIris} />}
 
       {matches.status === "error" && (
