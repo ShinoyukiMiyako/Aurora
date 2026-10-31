@@ -39,8 +39,8 @@ const MS_PER_MINUTE: u64 = 60_000;
 ///
 /// 多个实例可能同时退出，读改写必须串行，否则后写的那次会覆盖先写的那一局；读也要排队：读到旧版本时
 /// 当场改写，有待补的改动时一并补上落盘。之后对同一个文件的任何一次读写都先补上这些改动，补上之前读到
-/// 的记录也已是改过的样子。只在进程内：启动器在补上之前退出，这些改动就丢了，旧名下的记录不再对应
-/// 任何实例。
+/// 的记录也已是改过的样子。只在进程内：启动器正常退出时再补写一次（[`Aurora::save_pending_play_records`]），
+/// 那次也没写进去、或进程被强行结束时，这些改动就丢了，旧名下的记录不再对应任何实例。
 static PENDING: Mutex<BTreeMap<PathBuf, Pending>> = Mutex::const_new(BTreeMap::new());
 
 /// 一个记录文件还没落盘的改动。
@@ -574,6 +574,34 @@ async fn read_modify_write<T>(
     })
 }
 
+/// 把记录文件待补的改动落盘，返回有没有待补的。没有时不读也不写文件。读或写失败时改动原样留着（读到旧版本时
+/// 连同这次把它归到的游戏目录），并报错：与只读调用不同，这里落盘就是全部目的，失败不能当成成功交出去。
+async fn save_pending(data_dir: &Path, game_dir: &Path) -> Result<bool> {
+    let path = playtime_path(data_dir);
+    let mut pending = PENDING.lock().await;
+    let Some(mut queued) = pending.remove(&path) else {
+        return Ok(false);
+    };
+    let owner = queued
+        .legacy_owner
+        .clone()
+        .unwrap_or_else(|| game_dir.to_path_buf());
+    let error = match read_modify_write(&path, &owner, &queued.changes, |_| ((), false)).await {
+        Ok(Written::Saved(())) => return Ok(true),
+        Ok(Written::Unsaved {
+            migrated, error, ..
+        }) => {
+            if migrated {
+                queued.legacy_owner = Some(owner);
+            }
+            error
+        }
+        Err(error) => error,
+    };
+    pending.insert(path, queued);
+    Err(error)
+}
+
 /// 记一局游玩：`started_at` 是进程起来的时刻，`ended_at` 是退出的时刻（Unix 毫秒）。
 pub(crate) async fn record_play(
     data_dir: &Path,
@@ -628,6 +656,12 @@ impl Aurora {
             ((), false)
         })
         .await
+    }
+
+    /// 把改名、删除时没能落盘的游玩记录改动（以及旧版本文件没改写成的格式迁移）写进文件，返回有没有待补的；
+    /// 没有时不碰文件。写不进时报错，改动留着等下一次。待补的改动只在进程内，退出前调这里是它们最后的机会。
+    pub async fn save_pending_play_records(&self) -> Result<bool> {
+        save_pending(self.data_dir(), self.game_dir()).await
     }
 
     /// 当前游戏目录一段时间（本地日期，两端都含）的游玩统计。
@@ -1332,5 +1366,105 @@ mod tests {
                 .total_minutes,
             90
         );
+    }
+
+    /// 没有待补的改动时补写什么都不做：不读文件（坏文件也不报错），不凭空建出文件。
+    #[tokio::test]
+    async fn saving_with_nothing_pending_does_not_touch_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = game_dir(tmp.path());
+        let aurora = aurora_in(tmp.path(), &game);
+        let path = playtime_path(tmp.path());
+        assert!(!aurora.save_pending_play_records().await.unwrap());
+        assert!(!path.exists());
+
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(!aurora.save_pending_play_records().await.unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
+    }
+
+    /// 改名、删除没写进去的改动由补写落盘：文件还坏着时补写报错、改动留着；文件恢复后补写落盘，队列随之清空，
+    /// 再补写什么都不做，也不碰别的游戏目录的记录。
+    #[tokio::test]
+    async fn pending_rename_and_forget_are_saved_on_request_and_then_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = game_dir(tmp.path());
+        let other = tmp.path().join("别处").join(".minecraft");
+        let aurora = aurora_in(tmp.path(), &game);
+        record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &game, "删掉的", 0, HOUR)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &game, "留下", 0, HOUR / 2)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &other, "旧名", 0, HOUR)
+            .await
+            .unwrap();
+        let path = playtime_path(tmp.path());
+        let intact = std::fs::read(&path).unwrap();
+
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
+        assert!(aurora.forget_play_records("删掉的").await.is_err());
+        assert!(aurora.save_pending_play_records().await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
+
+        std::fs::write(&path, &intact).unwrap();
+        assert!(aurora.save_pending_play_records().await.unwrap());
+        assert_eq!(instance_ids(&read_file(tmp.path())), vec!["新名", "留下"]);
+        let file = read_file(tmp.path());
+        let book = &file["directories"][0]["book"];
+        assert_eq!(book["instances"]["新名"]["total_ms"], 2 * HOUR);
+        assert_eq!(book["instances"]["留下"]["total_ms"], HOUR / 2);
+        assert_eq!(
+            file["directories"][1]["book"]["instances"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["旧名"]
+        );
+
+        // 队列已清空：文件拿走之后再补写什么都不做，也不重新建出文件。
+        std::fs::remove_file(&path).unwrap();
+        assert!(!aurora.save_pending_play_records().await.unwrap());
+        assert!(!path.exists());
+    }
+
+    /// 读得出、替换不了时补写报错，改动留着；放开后下一次补写落盘。旧版本文件的归属按第一次读到时记下的游戏
+    /// 目录走，不随补写时门面的当前游戏目录变。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn saving_pending_records_keeps_them_while_the_file_cannot_be_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("落樱").join(".minecraft");
+        let other = tmp.path().join("HMCL").join(".minecraft");
+        let path = playtime_path(tmp.path());
+        let legacy = r#"{"format":1,"book":{
+            "instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},
+            "days":{"2026-10-30":{"instances":{"a":600000}}}}}"#;
+        std::fs::write(&path, legacy).unwrap();
+        let at_home = aurora_in(tmp.path(), &home);
+        let elsewhere = aurora_in(tmp.path(), &other);
+
+        let held = hold_read_only(&path);
+        assert!(at_home.rename_play_records("a", "b").await.is_err());
+        assert!(elsewhere.save_pending_play_records().await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        drop(held);
+
+        assert!(elsewhere.save_pending_play_records().await.unwrap());
+        let file = read_file(tmp.path());
+        assert_eq!(file["format"], 2);
+        assert_eq!(file["directories"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            file["directories"][0]["game_dir"],
+            home.display().to_string()
+        );
+        assert_eq!(instance_ids(&file), vec!["b"]);
+        assert!(!elsewhere.save_pending_play_records().await.unwrap());
     }
 }
