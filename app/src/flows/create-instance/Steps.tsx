@@ -12,6 +12,7 @@ import { bestLocalRuntime } from "../../domain/rules";
 import type { LoaderKind } from "../../domain/types";
 import { describeError } from "../../state/errors";
 import { useJavaRuntimes, type LoaderVersionDto, type VersionRequirementsDto } from "../../state/queries/catalog";
+import type { StarterModsDto, TemplateInfoDto } from "../../state/queries/starter";
 import type { ResourceResult } from "../../state/resource";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -31,7 +32,17 @@ import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
 import { CREATE_COPY, LOADER_DESCRIPTION, RELEASE_TYPE_LABEL } from "./copy";
 import styles from "./create.module.css";
-import { instancePath, loaderOptions, type GameVersion, type VersionFilter } from "./model";
+import {
+  instancePath,
+  loaderOptions,
+  STARTER_API,
+  starterGroup,
+  type GameVersion,
+  type StarterBlock,
+  type StarterPicks,
+  type TemplateBlock,
+  type VersionFilter,
+} from "./model";
 
 /** 名称输入框的长度上限，与名称校验的上限一致（按 UTF-16 码元计）。 */
 export const NAME_MAX = 32;
@@ -487,11 +498,13 @@ export interface ConfirmStepProps {
   willPin: boolean;
   openAfter: boolean;
   onOpenAfter: (open: boolean) => void;
+  /** 键值表下方的「开局选项」。 */
+  starter: StarterOptionsProps;
   /** 上一次点「创建并开始安装」的错误；没有为 null。 */
   error: unknown;
 }
 
-export function ConfirmStep({ name, version, loader, loaderVersion, cover, settings, requirements, willPin, openAfter, onOpenAfter, error }: ConfirmStepProps) {
+export function ConfirmStep({ name, version, loader, loaderVersion, cover, settings, requirements, willPin, openAfter, onOpenAfter, starter, error }: ConfirmStepProps) {
   const c = CREATE_COPY.confirm;
   const loaderValue = loader === "vanilla" ? c.vanilla : loaderVersion === null ? LOADER_NAME[loader] : `${LOADER_NAME[loader]} ${loaderVersion}`;
   return (
@@ -528,11 +541,133 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
           {c.snapshotWarning}
         </Callout>
       )}
+      <StarterOptions {...starter} />
       <div className={styles.after}>
         <Checkbox checked={openAfter} onChange={onOpenAfter} label={c.openAfter} />
         <span className={styles.afterHint}>{willPin ? c.autoPin : c.pinFull}</span>
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------- 开局选项
+
+export interface StarterOptionsProps {
+  loader: LoaderKind;
+  mcVersion: string;
+  template: ResourceResult<TemplateInfoDto>;
+  /** 「沿用默认设置」用不上的原因；用得上为 null。 */
+  templateBlock: TemplateBlock | null;
+  /** 开局 Mod 的查询；原版不查，也不出现这两项。 */
+  starter: ResourceResult<StarterModsDto>;
+  apiBlock: StarterBlock | null;
+  performanceBlock: StarterBlock | null;
+  checked: Readonly<Record<keyof StarterPicks, boolean>>;
+  onPick: (key: keyof StarterPicks, value: boolean) => void;
+  now: number;
+}
+
+/** 文本骨架的宽度：说明行读到之前占一行的位置。 */
+const NOTE_SKELETON_WIDTH = 200;
+
+function StarterOption({ label, checked, onChange, reason, children }: { label: string; checked: boolean; onChange: (next: boolean) => void; reason: string | undefined; children: ReactNode }) {
+  return (
+    <div className={styles.option}>
+      <Checkbox checked={checked} onChange={onChange} label={label} disabledReason={reason} />
+      <div className={styles.optionNote}>{children}</div>
+    </div>
+  );
+}
+
+/**
+ * 确认步的「开局选项」：沿用默认设置一律出现；Fabric 与 Quilt 多一项 API；装了加载器的再多一项性能组合。
+ * 用不上的项悬停与键盘高亮都能看到原因；沿用默认设置用不上时说明行直接写原因，告诉用户怎样才能用上。
+ */
+export function StarterOptions({ loader, mcVersion, template, templateBlock, starter, apiBlock, performanceBlock, checked, onPick, now }: StarterOptionsProps) {
+  const s = CREATE_COPY.confirm.starter;
+  const apiName = STARTER_API[loader];
+  const modded = loader !== "vanilla";
+  const ready = starter.status === "ready" ? starter.data : null;
+  const api = ready === null ? null : starterGroup(ready, "api");
+  const performance = ready === null ? null : starterGroup(ready, "performance");
+
+  const templateReason = ((): string | undefined => {
+    if (templateBlock === null) return undefined;
+    if (templateBlock !== "unreadable") return s.templateBlocked[templateBlock];
+    if (template.status !== "error") throw new Error("默认设置的查询没有失败，却按读不到禁用");
+    return s.templateUnreadable(describeError(template.error));
+  })();
+  const templateNote =
+    templateBlock === "loading" ? (
+      <Skeleton shape="text" width={NOTE_SKELETON_WIDTH} />
+    ) : templateBlock === null && template.status === "ready" ? (
+      s.templateFrom(template.data.source_instance, template.data.saved_at, now)
+    ) : (
+      templateReason
+    );
+
+  const starterReason = (block: StarterBlock | null, none: () => string): string | undefined => {
+    if (block === null) return undefined;
+    if (block === "loading") return s.loading;
+    if (block === "error") {
+      if (starter.status !== "error") throw new Error("开局 Mod 的查询没有失败，却按失败禁用");
+      return s.loadError(describeError(starter.error));
+    }
+    return none();
+  };
+
+  const apiMissing = api === null ? undefined : api.missing[0];
+  const apiReason =
+    apiName === undefined
+      ? undefined
+      : starterReason(apiBlock, () => {
+          if (apiMissing === undefined) throw new Error(`${apiName} 既不能装也不在缺项里`);
+          return apiMissing.reason === "not_found" ? s.apiNotFound(apiName) : s.apiMissing(apiName, mcVersion);
+        });
+  const performanceReason = starterReason(performanceBlock, () => s.noneAvailable(mcVersion));
+  const performanceNames = performance === null ? [] : performance.available.map((m) => m.name);
+
+  const retry =
+    starter.status === "error" ? (
+      <Button size="sm" variant="ghost" onClick={starter.reload}>
+        {CREATE_COPY.retry}
+      </Button>
+    ) : null;
+
+  return (
+    <div className={styles.starter} role="group" aria-label={s.groupLabel}>
+      <StarterOption label={s.template} checked={checked.template} onChange={(v) => onPick("template", v)} reason={templateReason}>
+        <span className={styles.optionLine}>{templateNote}</span>
+      </StarterOption>
+      {apiName !== undefined && (
+        <StarterOption label={s.api(apiName)} checked={checked.api} onChange={(v) => onPick("api", v)} reason={apiReason}>
+          {starter.status === "loading" ? <Skeleton shape="text" width={NOTE_SKELETON_WIDTH} /> : <span className={styles.optionLine}>{s.apiNote(loader)}</span>}
+        </StarterOption>
+      )}
+      {modded && (
+        <StarterOption label={s.performance(performanceNames)} checked={checked.performance} onChange={(v) => onPick("performance", v)} reason={performanceReason}>
+          {starter.status === "loading" ? (
+            <Skeleton shape="text" width={NOTE_SKELETON_WIDTH} />
+          ) : starter.status === "error" ? (
+            <span className={styles.optionLine}>
+              {s.loadError(describeError(starter.error))}
+              {retry}
+            </span>
+          ) : (
+            <>
+              {performanceNames.length > 0 && <span className={styles.optionLine}>{s.names(performanceNames)}</span>}
+              {performance !== null &&
+                s.missing(performance.missing, mcVersion).map((line) => (
+                  <span key={line} className={styles.optionWarn}>
+                    {line}
+                  </span>
+                ))}
+            </>
+          )}
+        </StarterOption>
+      )}
+      {(checked.api || checked.performance) && <p className={styles.starterNote}>{s.footnote}</p>}
+    </div>
   );
 }
 

@@ -11,8 +11,10 @@ import { needsReimport, runtimeComplete } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
+import { describeError } from "../../state/errors";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useInstanceSettings } from "../../state/queries/instance";
+import { useTemplateInfo } from "../../state/queries/starter";
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute } from "../../state/route";
 import { canPinMore } from "../../state/selectors";
@@ -589,6 +591,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             {SETTINGS_COPY.open}
           </Button>
         </SettingRow>
+        <TemplateRow id={inst.id} locked={ops.settingsReason} />
         {needsReimport(inst) ? (
           <SettingRow title={MODPACK_REIMPORT_COPY.menuReimport} description={MODPACK_REIMPORT_COPY.note}>
             <Button size="sm" icon="modpack" onClick={() => go(reimportRoute(inst))}>
@@ -613,6 +616,61 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
         </Button>
       </div>
     </Card>
+  );
+}
+
+/** 文本骨架的宽度：默认设置读到之前，第二行先占一行的位置。 */
+const TEMPLATE_SKELETON_WIDTH = 200;
+
+/**
+ * 「设为新实例的默认设置」：保存读的是磁盘上的文件，所以游戏运行中也能存（游戏退出时才写入的改动不在其中）；
+ * 只在安装、补全、改名、删除挪动实例目录时禁用，原因与改实例设置的锁同一套。清除与本实例无关，不受这把锁约束。
+ */
+function TemplateRow({ id, locked }: { id: string; locked: string | undefined }) {
+  const template = useTemplateInfo();
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const now = useNow(60_000);
+  const [busy, setBusy] = useState<"save" | "clear" | null>(null);
+  const info = template.status === "ready" ? template.data : null;
+
+  const save = () => {
+    setBusy("save");
+    void run(() => actions.saveInstanceAsTemplate(id), ACTION_ERROR.saveTemplate).then(() => setBusy(null));
+  };
+  const clear = () => {
+    setBusy("clear");
+    void run(() => actions.clearTemplate(), ACTION_ERROR.clearTemplate).then(() => setBusy(null));
+  };
+
+  const current =
+    template.status === "loading" ? (
+      <Skeleton shape="text" width={TEMPLATE_SKELETON_WIDTH} />
+    ) : template.status === "error" ? (
+      <span className={styles.soft}>{SETTINGS_COPY.templateError(describeError(template.error))}</span>
+    ) : info !== null && info.present ? (
+      <span className={styles.soft}>{SETTINGS_COPY.templateCurrent(info.source_instance, info.saved_at, now)}</span>
+    ) : null;
+
+  return (
+    <SettingRow
+      title={SETTINGS_COPY.templateTitle}
+      description={
+        <span className={styles.resolutionNote}>
+          <span>{SETTINGS_COPY.templateNote}</span>
+          {current}
+        </span>
+      }
+    >
+      {info !== null && info.present && (
+        <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} onClick={clear}>
+          {SETTINGS_COPY.templateClear}
+        </Button>
+      )}
+      <Button size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} disabledReason={locked} onClick={save}>
+        {SETTINGS_COPY.templateSave}
+      </Button>
+    </SettingRow>
   );
 }
 

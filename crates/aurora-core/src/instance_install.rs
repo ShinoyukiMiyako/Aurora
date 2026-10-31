@@ -31,6 +31,7 @@ use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::{Aurora, make_context};
 use crate::install::LoaderChoice;
 use crate::instances::{LEGACY_JAVA_MAJOR, broken_reason_text, inheritance_root};
+use crate::template::TemplateOutcome;
 
 /// 安装过程中原版 JSON 的暂存位置（实例元数据目录里）。合并后的 JSON 写好即删除。
 const STAGED_VANILLA_JSON: &str = "vanilla.json";
@@ -43,6 +44,8 @@ pub struct InstanceRequest {
     pub loader: Option<LoaderChoice>,
     /// 加载器版本；Fabric / Quilt 缺省取推荐版，Forge / NeoForge 必须给出。
     pub loader_version: Option<String>,
+    /// 装好后把默认设置补进实例。
+    pub use_template: bool,
 }
 
 impl InstanceRequest {
@@ -52,6 +55,7 @@ impl InstanceRequest {
             mc_version: self.mc_version.clone(),
             loader: self.loader.map(|choice| choice.key().to_owned()),
             loader_version: self.loader_version.clone(),
+            use_template: self.use_template,
         }
     }
 
@@ -71,6 +75,7 @@ impl InstanceRequest {
             mc_version: spec.mc_version.clone(),
             loader,
             loader_version: spec.loader_version.clone(),
+            use_template: spec.use_template,
         })
     }
 
@@ -108,6 +113,8 @@ pub struct InstanceInstallOutcome {
     pub assets: usize,
     /// natives 文件数。
     pub natives: u32,
+    /// 套默认设置的结果；没请求套用时为 `None`。
+    pub template: Option<TemplateOutcome>,
 }
 
 /// 补全的方案。
@@ -287,6 +294,16 @@ impl Aurora {
                 path: staged.clone(),
                 source,
             })?;
+        // 放在版本 JSON 写好之后：要不要套看实例隔离不隔离，而隔离取决于版本类型（正式版还是快照），
+        // 建目录那一刻还读不到。仍然在第一次启动之前，游戏还没来得及写出自己的默认设置。套失败让安装
+        // 失败：重试经补全重装时会再套一次，标记里记着这次请求了套用。
+        let template = if request.use_template {
+            let outcome = self.apply_template(id).await?;
+            emit(events, CoreEvent::stage(template_stage(&outcome)));
+            Some(outcome)
+        } else {
+            None
+        };
         emit(
             events,
             CoreEvent::stage(format!(
@@ -301,6 +318,7 @@ impl Aurora {
             libraries: report.libraries,
             assets: report.assets,
             natives: report.natives,
+            template,
         })
     }
 
@@ -454,6 +472,23 @@ impl Aurora {
     }
 }
 
+/// 套默认设置这一步的进度文案。
+pub(crate) fn template_stage(outcome: &TemplateOutcome) -> String {
+    match outcome {
+        TemplateOutcome::Applied { copied, kept } if copied.is_empty() => {
+            format!("沿用默认设置：已有的 {} 保留不动", kept.join("、"))
+        }
+        TemplateOutcome::Applied { copied, kept } => {
+            let mut text = format!("沿用默认设置：补上 {}", copied.join("、"));
+            if !kept.is_empty() {
+                text.push_str(&format!("（已有的 {} 保留不动）", kept.join("、")));
+            }
+            text
+        }
+        TemplateOutcome::Skipped(reason) => format!("没有沿用默认设置：{}", reason.describe()),
+    }
+}
+
 /// 当前 Unix 毫秒。系统时钟早于 1970 年时报错而不是记一个 0：标记的开始时间要拿来展示。
 pub(crate) fn now_millis() -> u64 {
     let elapsed = SystemTime::now()
@@ -480,6 +515,7 @@ mod tests {
             mc_version: mc.to_owned(),
             loader,
             loader_version: version.map(str::to_owned),
+            use_template: false,
         }
     }
 
@@ -568,6 +604,186 @@ mod tests {
         assert_eq!(ready.mc_version.as_deref(), Some("1.21.1"));
         assert_eq!(ready.loaders[0].kind, aurora_version::LoaderKind::Fabric);
         assert!(list[0].incomplete.is_none());
+    }
+
+    fn put_template(aurora: &Aurora, files: &[(&str, &[u8])]) {
+        let dir = aurora.template_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+    }
+
+    fn stages(mut rx: tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<String> {
+        let mut stages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        stages
+    }
+
+    /// 请求了套用：版本 JSON 写好后补上模板文件，标记里记着这次请求；没请求的实例一个文件都不多。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requested_template_is_applied_once_the_instance_is_installed() {
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+        let servers: Vec<u8> = (0..fastrand::usize(1..2048))
+            .map(|_| fastrand::u8(..))
+            .collect();
+        put_template(
+            &aurora,
+            &[
+                ("options.txt", b"fov:90\nrenderDistance:16"),
+                ("servers.dat", &servers),
+            ],
+        );
+        let req = InstanceRequest {
+            use_template: true,
+            ..request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"))
+        };
+
+        aurora.create_instance_dir("周末生存", &req).await.unwrap();
+        let dir = aurora.game_dir().join("versions").join("周末生存");
+        let stored = MarkerStore::for_version_dir(&dir)
+            .load()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.kind, IncompleteKind::Install { spec: req.spec() });
+        assert!(req.spec().use_template);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = aurora
+            .install_instance("周末生存", &req, Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            outcome.template,
+            Some(TemplateOutcome::Applied {
+                copied: vec!["options.txt", "servers.dat"],
+                kept: vec![],
+            })
+        );
+        assert_eq!(
+            std::fs::read(dir.join("options.txt")).unwrap(),
+            b"fov:90\nrenderDistance:16"
+        );
+        assert_eq!(std::fs::read(dir.join("servers.dat")).unwrap(), servers);
+        let stages = stages(rx);
+        let at = stages
+            .iter()
+            .position(|s| s == "沿用默认设置：补上 options.txt、servers.dat")
+            .unwrap_or_else(|| panic!("{stages:?}"));
+        assert!(
+            stages[at + 1].starts_with("实例 周末生存 安装完成"),
+            "{stages:?}"
+        );
+
+        let plain = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+        aurora.create_instance_dir("不套", &plain).await.unwrap();
+        let outcome = aurora.install_instance("不套", &plain, None).await.unwrap();
+        assert_eq!(outcome.template, None);
+        let other = aurora.game_dir().join("versions").join("不套");
+        assert!(!other.join("options.txt").exists());
+        assert!(!other.join("servers.dat").exists());
+    }
+
+    /// 原版正式版在默认档位下不隔离：版本 JSON 写好后才判得出来，判出来就不碰共用的根目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn template_is_skipped_for_an_instance_sharing_the_game_dir() {
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora =
+            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
+        put_template(&aurora, &[("options.txt", b"fov:90")]);
+        std::fs::create_dir_all(aurora.game_dir()).unwrap();
+        std::fs::write(aurora.game_dir().join("options.txt"), b"fov:70").unwrap();
+        let req = InstanceRequest {
+            use_template: true,
+            ..request("1.21.1", None, None)
+        };
+
+        aurora.create_instance_dir("原版", &req).await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = aurora
+            .install_instance("原版", &req, Some(&tx))
+            .await
+            .unwrap();
+        drop(tx);
+
+        assert_eq!(
+            outcome.template,
+            Some(TemplateOutcome::Skipped(
+                crate::template::TemplateSkip::SharedWorkingDir
+            ))
+        );
+        assert_eq!(
+            std::fs::read(aurora.game_dir().join("options.txt")).unwrap(),
+            b"fov:70"
+        );
+        let dir = aurora.game_dir().join("versions").join("原版");
+        assert!(!dir.join("options.txt").exists());
+        assert!(
+            stages(rx).iter().any(
+                |s| s == "没有沿用默认设置：这个实例与其他未隔离的实例共用 .minecraft 里的设置"
+            ),
+        );
+    }
+
+    #[test]
+    fn request_round_trips_through_the_marker_spec() {
+        for use_template in [true, false] {
+            for (loader, version) in [
+                (None, None),
+                (Some(LoaderChoice::Fabric), None),
+                (Some(LoaderChoice::Quilt), Some("0.27.1")),
+                (Some(LoaderChoice::Forge), Some("47.4.20")),
+                (Some(LoaderChoice::NeoForge), Some("21.1.77")),
+            ] {
+                let req = InstanceRequest {
+                    use_template,
+                    ..request("1.21.1", loader, version)
+                };
+                let spec = req.spec();
+                assert_eq!(spec.use_template, use_template);
+                assert_eq!(InstanceRequest::from_spec("x", &spec).unwrap(), req);
+            }
+        }
+    }
+
+    #[test]
+    fn template_stage_names_copied_and_kept_files() {
+        use crate::template::TemplateSkip;
+        assert_eq!(
+            template_stage(&TemplateOutcome::Applied {
+                copied: vec!["servers.dat"],
+                kept: vec!["options.txt", "optionsof.txt"],
+            }),
+            "沿用默认设置：补上 servers.dat（已有的 options.txt、optionsof.txt 保留不动）"
+        );
+        assert_eq!(
+            template_stage(&TemplateOutcome::Applied {
+                copied: vec![],
+                kept: vec!["options.txt"],
+            }),
+            "沿用默认设置：已有的 options.txt 保留不动"
+        );
+        assert_eq!(
+            template_stage(&TemplateOutcome::Skipped(TemplateSkip::Empty)),
+            "没有沿用默认设置：还没有默认设置"
+        );
+        assert_eq!(
+            template_stage(&TemplateOutcome::Skipped(TemplateSkip::Disabled)),
+            "没有沿用默认设置：新建实例时沿用默认设置已在配置里关闭"
+        );
     }
 
     #[tokio::test]
@@ -802,6 +1018,7 @@ mod tests {
             mc_version: "1.21.1".into(),
             loader: Some("rift".into()),
             loader_version: None,
+            use_template: false,
         };
         let err = InstanceRequest::from_spec("x", &spec).unwrap_err();
         assert!(matches!(

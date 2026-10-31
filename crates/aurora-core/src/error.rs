@@ -173,6 +173,9 @@ pub enum CoreError {
         #[source]
         source: std::io::Error,
     },
+    /// 要保存为默认设置的实例，工作目录里一个设置文件都没有（还没进过游戏）。
+    #[error("实例 {id} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存")]
+    TemplateSourceEmpty { id: String },
 }
 
 /// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。
