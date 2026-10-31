@@ -191,6 +191,25 @@ export const GAME_DIR_COPY = {
   discoverFailed: "没能探测其他启动器的文件夹",
 } as const;
 
+export const WORLD_BACKUP_COPY = {
+  title: "存档备份",
+  subtitle: "退出游戏后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走",
+  auto: "自动备份",
+  autoDesc: "游戏退出后，把这次玩过的存档各备份一份",
+  keep: "每个存档保留",
+  keepDesc: "只清理自动备份，手动备份一直保留",
+  keepOption: (n: number) => `${n} 份`,
+  total: "总量上限",
+  totalDesc: "超过后先删最旧的自动备份",
+  totalOption: (gb: number) => `${gb} GB`,
+  /** 自动备份关着时后两项不起作用：清理只在写完一份自动备份后进行。 */
+  pruneOff: "自动备份关闭时不会清理",
+} as const;
+
+/** 两个下拉的常用取值；配置里是别的值（手改过配置）时把它作为额外一项列出。 */
+export const KEEP_PER_WORLD_OPTIONS: readonly number[] = [3, 5, 10, 20];
+export const MAX_TOTAL_GB_OPTIONS: readonly number[] = [5, 10, 20, 50, 100];
+
 // ---------------------------------------------------------------- 外观
 
 export const APPEARANCE_COPY = {
