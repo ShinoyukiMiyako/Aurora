@@ -166,15 +166,17 @@
   text-align: center;
 }
 
-/* 文件正拖在窗口上方：投放区接住它的提示 */
+/* 文件正拖在窗口上方：投放区接住它的提示。
+   状态色写在投放区上，图标与没有自带颜色的文字都继承它；--sk-accent 落在 accent-soft 或 bg-2 上日樱只有约 4.1:1，
+   写字的强调色一律用 accent-strong（两套外观、三种强调色下 5.2:1 以上） */
 .dropZone[data-state="over"] {
   border-color: var(--sk-accent-line);
   background: var(--sk-accent-soft);
-  color: var(--sk-accent);
+  color: var(--sk-accent-strong);
 }
 
 .dropZone[data-state="reading"] {
-  color: var(--sk-accent);
+  color: var(--sk-accent-strong);
 }
 
 .dropAction {
