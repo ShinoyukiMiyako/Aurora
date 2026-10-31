@@ -14,8 +14,10 @@ import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../..
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
+import { NO_ART, setArtStatus } from "../../mc/art";
+import { clearArtCache } from "../../mc/useArt";
 import LoginFlow from "./index";
-import { nameDisplay } from "./OfflineDialog";
+import { FIGURE_DEBOUNCE_MS, nameDisplay } from "./OfflineDialog";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -158,6 +160,76 @@ describe("离线账户弹窗", () => {
     typeInto(inputs()[0], "ALEX");
     expect(dialog()?.textContent).toContain(OFFLINE_NAME_COPY.duplicate);
     expect(button(OFFLINE_NAME_COPY.submit).disabled).toBe(true);
+  });
+
+  describe("预览立绘", () => {
+    let missing: Set<string>;
+    let fetched: string[];
+    const figure = () => {
+      const el = dialog()?.querySelector<HTMLElement>('[data-sk-art="skin"]');
+      if (el === undefined || el === null) throw new Error("离线弹窗里没有立绘");
+      return el;
+    };
+
+    beforeEach(() => {
+      // 本机有可用的客户端：默认皮肤从它的游戏文件里读
+      ipc.overrides.set("art_status", () => ({ source: { version_id: "1.21.1" }, panorama: false }));
+      missing = new Set();
+      fetched = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          const path = new URL(url).pathname;
+          // 只记皮肤：材质源就绪后外壳还会预取封面方块
+          if (path.startsWith("/art/entity/")) fetched.push(url);
+          return { ok: !missing.has(path), status: missing.has(path) ? 404 : 200, blob: async () => new Blob([url]) };
+        }),
+      );
+      vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64, close() {} })));
+    });
+    afterEach(() => {
+      setArtStatus(NO_ART);
+      clearArtCache();
+    });
+
+    async function openWithName(name: string) {
+      await mount();
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      typeInto(inputs()[0], name);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+    }
+
+    it("输入用户名后换成它在游戏里的默认皮肤：Steve 的离线 UUID 选中宽臂 Efe，从本机游戏文件读取", async () => {
+      await openWithName("Steve");
+      expect(fetched.map((url) => new URL(url).pathname + new URL(url).search)).toEqual(["/art/entity/player/wide/efe.png?v=1.21.1"]);
+      expect(figure().dataset.art).toBe("skin");
+    });
+
+    it("还没输入用户名：画剪影，不读任何皮肤", async () => {
+      await mount();
+      await act(async () => {
+        await launcher.actions.openLogin("offline");
+      });
+      await flush();
+      expect(figure().dataset.art).toBe("silhouette");
+      expect(fetched).toEqual([]);
+    });
+
+    it("本机游戏文件里没有这套默认皮肤（1.19.3 以前的客户端）：退回剪影", async () => {
+      missing.add("/art/entity/player/slim/makena.png");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await openWithName("Alex");
+      expect(fetched.map((url) => new URL(url).pathname)).toEqual(["/art/entity/player/slim/makena.png"]);
+      expect(figure().dataset.art).toBe("silhouette");
+      expect(warn.mock.calls.some(([message]) => String(message).includes("/art/entity/player/slim/makena.png"))).toBe(true);
+      warn.mockRestore();
+    });
   });
 });
 
