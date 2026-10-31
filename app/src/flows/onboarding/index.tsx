@@ -185,8 +185,9 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
 
   const finish = async (via: FinishVia) => {
     setFinishing(via);
-    // 通常离开第一步时已经提交过；这里兜住改了第一步又从别处直接收尾的情形
-    if (!(await commitStepOne())) {
+    // 收尾只能在第二步以后，离开第一步时已经按用户当时看到的内容提交过；这里不按此刻的状态重算：
+    // 用户离开第一步之后才探测到的文件夹，用户没见过，不替用户收下
+    if (committed === null && !(await commitStepOne())) {
       setFinishing(null);
       return;
     }

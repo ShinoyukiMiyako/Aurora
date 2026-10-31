@@ -236,6 +236,19 @@ describe("首次启动向导：推进与收尾", () => {
     expect(document.querySelector("h1")).toBeNull();
   });
 
+  it("离开第一步时其他启动器的文件夹还没探测完：照当时提交、不收下，收尾也不按后来的探测结果补交", async () => {
+    let found: (dirs: { name: string; path: string }[]) => void = () => undefined;
+    ipc.overrides.set("discover_game_directories", () => new Promise((resolve) => (found = resolve)));
+    await mount();
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run")).toEqual([{ gameDir: DEFAULT_DIR, extraDirectories: [] }]);
+    act(() => found([{ name: "HMCL", path: "D:\\HMCL\\.minecraft" }]));
+    await flush();
+    await click(button("直接开始"));
+    expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
+    expect(launcher.state.firstRun).toBe(false);
+  });
+
   it("第四步：明暗立即作用于整个窗口并写后端，「开始使用」收尾", async () => {
     await mount();
     for (let i = 0; i < 3; i++) await click(button("下一步"));
