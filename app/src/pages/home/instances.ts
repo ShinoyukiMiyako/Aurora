@@ -9,7 +9,7 @@ export const RECENT_COUNT: Readonly<Record<TierName, number>> = { compact: 4, re
 /** 「换一个」菜单最多列几个实例（之后是「全部实例」）。 */
 export const SWITCH_MENU_LIMIT = 8;
 
-/** 一个条目上最多几枚标签（组件规范的上限）。 */
+/** 一个条目上最多几枚标签，与 Tag 组件约定的上限一致：再多就挤成一团，哪一枚都读不清。 */
 export const HERO_TAG_LIMIT = 3;
 
 export type HeroTag =
