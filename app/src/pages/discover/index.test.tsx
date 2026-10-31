@@ -787,6 +787,73 @@ describe("发现页：整合包", () => {
     expect(buttonByText("查看实例", dialog())).toBeDefined();
   });
 
+  it("平台整合包的名称按去掉首尾空格后的样子校验：前面多个空格撞上已有实例就报重名，末尾多个空格照常装、装成去掉空格的名字", async () => {
+    const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    ipc.overrides.set("install_modpack", () => new Promise(() => {}));
+    await mount();
+    act(() => card("樱落").click());
+    await flush();
+    const nameInput = dialog().querySelector<HTMLInputElement>("input");
+    if (nameInput === null) throw new Error("没有名称输入框");
+
+    typeInto(nameInput, " 生存");
+    await flush();
+    expect(dialog().textContent).toContain("已经有同名的实例了，换一个吧");
+    expect(buttonByText("安装为新实例", dialog()).disabled).toBe(true);
+
+    typeInto(nameInput, "樱落 ");
+    await flush();
+    expect(dialog().textContent).not.toContain("Windows 不允许");
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(callsOf(ipc, "install_modpack").map((a) => a.name)).toEqual(["樱落"]);
+  });
+
+  it("本地整合包的名称同样按去掉首尾空格后的样子校验", async () => {
+    ipc.overrides.set("preview_modpack", () => ({
+      format: "modrinth",
+      name: "樱落",
+      version: "1.0.0",
+      summary: null,
+      author: null,
+      minecraft: "1.21.1",
+      loader: null,
+      remote_files: 0,
+      mod_files: 0,
+      remote_bytes: 0,
+      override_files: 0,
+      override_bytes: 0,
+    }));
+    ipc.overrides.set("install_modpack", () => new Promise(() => {}));
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    const path = dialog().querySelector<HTMLInputElement>('input[aria-label="整合包文件的完整路径"]');
+    if (path === null) throw new Error("没有路径输入框");
+    typeInto(path, "D:\\Downloads\\pack.mrpack");
+    act(() => buttonByText("读取", dialog()).click());
+    await flush();
+    const nameInput = dialog().querySelector<HTMLInputElement>("input");
+    if (nameInput === null) throw new Error("没有名称输入框");
+
+    typeInto(nameInput, " 创造");
+    await flush();
+    expect(dialog().textContent).toContain("已经有同名的实例了，换一个吧");
+    expect(buttonByText("导入为新实例").disabled).toBe(true);
+
+    typeInto(nameInput, "樱落 ");
+    await flush();
+    expect(dialog().textContent).not.toContain("Windows 不允许");
+    act(() => buttonByText("导入为新实例").click());
+    await flush();
+    expect(callsOf(ipc, "install_modpack").map((a) => a.name)).toEqual(["樱落"]);
+  });
+
   it("本地整合包：读取失败按错误码说明原因并留在第一步；读取成功后导入为新实例", async () => {
     const { IpcError } = await import("../../ipc/errors");
     let broken = true;

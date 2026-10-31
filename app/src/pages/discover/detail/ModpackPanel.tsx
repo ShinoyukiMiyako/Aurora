@@ -121,7 +121,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const releases = manifest.status === "ready" ? manifest.data.versions.map((v) => v.id) : null;
   const facts = packFacts(version, summary.status === "ready" ? summary.data : null, releases);
   const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, extra: [{ icon: "box", text: MODPACK_COPY.summaryLoading }] } : facts;
-  const nameError = instanceNameError(name, existing);
+  // 提交的是去掉首尾空格的名字，校验也按它：否则前面多个空格就躲过重名检查，末尾多个空格又被当成 Windows 不允许的名字
+  const nameError = instanceNameError(name.trim(), existing);
   const fromPack = instancesFromPack(origins, instances);
 
   // 装出新实例之后只订阅它的导入任务：进度随这个任务变，别的任务的进度不让面板重渲染
