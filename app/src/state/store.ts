@@ -74,6 +74,7 @@ import * as tasksIpc from "../ipc/tasks";
 import type { CoreEvent } from "../ipc/tasks";
 import { describeError, errorRecord } from "./errors";
 import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type LoginState } from "./login";
+import { network as appNetwork, type NetworkMonitor } from "./online";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
 import {
@@ -318,6 +319,8 @@ export interface LauncherActions {
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
+  /** 把全部失败的任务重新排进队列（已有同一件事在队列里的跳过），返回重新排进去的个数。 */
+  retryFailedTasks(): number;
   clearFinishedTasks(): void;
   /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
   markFailuresSeen(): void;
@@ -504,6 +507,33 @@ function updateItems(args: Record<string, unknown>): UpdateItem[] {
   });
 }
 
+/**
+ * 动作失败时旁听一下错误（原样抛给调用方）：联网状态据此判断要不要探测连通性。
+ * 动作内部互相调用走的是未包装的那一份，同一个错误不会被记两遍。
+ */
+function observeFailures(actions: LauncherActions, observe: (error: unknown) => void): LauncherActions {
+  const wrapped: Record<string, unknown> = {};
+  for (const [name, fn] of Object.entries(actions) as [string, (...args: unknown[]) => unknown][]) {
+    wrapped[name] = (...args: unknown[]) => {
+      let result: unknown;
+      try {
+        result = fn(...args);
+      } catch (error) {
+        observe(error);
+        throw error;
+      }
+      if (result instanceof Promise) {
+        return result.catch((error: unknown) => {
+          observe(error);
+          throw error;
+        });
+      }
+      return result;
+    };
+  }
+  return wrapped as unknown as LauncherActions;
+}
+
 /** 等 predicate 成立；超时以 timeoutError 拒绝。 */
 function waitUntil(subscribe: (listener: () => void) => () => void, predicate: () => boolean, timeoutMs: number, timeoutError: () => Error): Promise<void> {
   if (predicate()) return Promise.resolve();
@@ -673,9 +703,13 @@ export class LauncherStore {
   private firstRunCommitted = false;
 
   readonly actions: LauncherActions;
+  private readonly net: NetworkMonitor;
+  private unobserveResources: (() => void) | null = null;
 
-  constructor() {
-    this.actions = this.createActions();
+  /** network 供测试注入；应用里用全应用唯一的联网状态。 */
+  constructor(options: { network?: NetworkMonitor } = {}) {
+    this.net = options.network === undefined ? appNetwork : options.network;
+    this.actions = observeFailures(this.createActions(), (error) => this.net.reportFailure(error));
   }
 
   // ---------------------------------------------------------------- 订阅
@@ -732,6 +766,8 @@ export class LauncherStore {
       );
     }
     window.addEventListener("focus", this.onWindowFocus);
+    this.net.start({ onRecovered: () => this.announceRecovered(), onProbeError: (error) => this.report(ACTION_ERROR.probeNetwork, error) });
+    this.unobserveResources = resources.observeErrors((error) => this.net.reportFailure(error));
     void Promise.allSettled(subscriptions).then(() => {
       // 先订阅再首查：首查期间到达的事件不会漏掉
       if (this.booted || this.disposed || gen !== this.subscriptionGen) return;
@@ -746,6 +782,9 @@ export class LauncherStore {
     for (const unlisten of this.unlisteners) unlisten();
     this.unlisteners = [];
     window.removeEventListener("focus", this.onWindowFocus);
+    this.net.stop();
+    if (this.unobserveResources !== null) this.unobserveResources();
+    this.unobserveResources = null;
     for (const timer of [this.toastTimer, this.lingerTimer, this.deviceTimer]) if (timer !== null) clearTimeout(timer);
     this.toastTimer = null;
     this.lingerTimer = null;
@@ -845,6 +884,16 @@ export class LauncherStore {
   private report(title: string, error: unknown): void {
     console.error(title, error);
     this.pushToast("error", title, describeError(error));
+    this.net.reportFailure(error);
+  }
+
+  /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
+  private announceRecovered(): void {
+    const failed = this.raw.tasks.filter((t) => t.status === "failed").length;
+    const copy = TOAST_COPY.networkRestored(failed);
+    const action: ToastAction | undefined =
+      failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
+    this.pushToast("info", copy.title, "body" in copy ? copy.body : undefined, action);
   }
 
   private background(title: string, work: Promise<unknown>): void {
@@ -1172,6 +1221,7 @@ export class LauncherStore {
       this.pushToast("info", TASK_TOAST.cancelled(before.title).title);
     } else {
       console.error(`任务失败：${before.title}`, error);
+      this.net.reportFailure(error);
       const record = errorRecord(error);
       this.set((raw) => ({
         tasks: trimHistory(markFailed(raw.tasks, id, attempt, record, Date.now())),
@@ -1366,6 +1416,7 @@ export class LauncherStore {
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });
       },
       (error: unknown) => {
+        this.net.reportFailure(error);
         const s = this.raw.session;
         if (s === null || s.taskId !== taskId) throw error;
         if (isCancelled(error)) {
@@ -1530,6 +1581,7 @@ export class LauncherStore {
           (error: unknown) => {
             if (gen !== store.loginGen) return;
             store.clearDeviceTimer();
+            store.net.reportFailure(error);
             if (isCancelled(error)) {
               store.set({ login: null });
               return;
@@ -1971,6 +2023,17 @@ export class LauncherStore {
         }
         store.set((raw) => ({ tasks: retryTask(raw.tasks, id) }));
         store.tasksChanged();
+      },
+      retryFailedTasks() {
+        let retried = 0;
+        for (const task of store.raw.tasks.filter((t) => t.status === "failed")) {
+          // 逐个排：前一个重试后，同一件事的后一个就算重复
+          if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
+          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id) }));
+          retried += 1;
+        }
+        if (retried > 0) store.tasksChanged();
+        return retried;
       },
       clearFinishedTasks() {
         store.set((raw) => ({ tasks: clearFinished(raw.tasks), unseenFailures: [] }));
