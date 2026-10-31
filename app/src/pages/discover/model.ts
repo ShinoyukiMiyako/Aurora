@@ -254,6 +254,14 @@ export function appendHits(existing: readonly SearchEntry[], page: readonly Sear
   return out;
 }
 
+/**
+ * 这一页有平台失败、给回的下一页游标又与请求的一模一样：失败的平台游标原地不动，另一个平台已经到底，
+ * 再接下一页只是把同一个请求再发一遍。游标原样回传、前端不解读内容，所以按序列化后的样子整体比较。
+ */
+export function stalledPage(request: SearchArgs, page: SearchResultDto): boolean {
+  return page.errors.length > 0 && page.next_cursor !== null && JSON.stringify(page.next_cursor) === JSON.stringify(request.cursor);
+}
+
 export type PartialFailure = { failed: Platform; other: Platform; message: string };
 
 /** 只有一个平台失败、另一个照常返回时的说明；两个都失败或都正常时为 null。 */

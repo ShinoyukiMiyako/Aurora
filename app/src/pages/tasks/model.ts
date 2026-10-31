@@ -241,10 +241,13 @@ function runningMeta(task: Task, speedForEta: number): { left: string; right: st
  * 完成行左侧的「总量 · 用时」。总量是这一次尝试跨批次累计下载的字节（一次安装连跑好几批，最后一批只是其中一段）；
  * 一个字节都没下（文件都已就绪）时不写。用时从这一次尝试开始运行算起，不含排队等待，也不含之前失败的尝试；
  * 较早写入的任务记录没有开始时刻，不写用时，而不是拿加入队列的时刻冒充。
+ * 运行期间系统时钟往回调过时结束时刻会早于开始时刻：两个时刻都是真实记下的，只是用时无从得知，同样不写；
+ * 任务表会落盘，按契约错误抛出的话下载任务页每次打开都崩，清理已结束任务的按钮也在这一页上。
  */
 function doneSummary(task: Task): string {
   const size = task.doneBytes > 0 ? formatBytes(task.doneBytes) : null;
-  const took = task.startedAt === null ? null : durationText(finishedAtOf(task) - task.startedAt);
+  const finishedAt = finishedAtOf(task);
+  const took = task.startedAt === null || finishedAt < task.startedAt ? null : durationText(finishedAt - task.startedAt);
   if (size !== null && took !== null) return TASKS_COPY.row.doneWithSize(size, took);
   if (took !== null) return TASKS_COPY.row.doneNoSize(took);
   if (size !== null) return size;

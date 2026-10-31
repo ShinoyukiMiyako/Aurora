@@ -271,7 +271,8 @@ function ImportConfirm({ path, preview, online, footerHost, onBack, onDone }: Im
   const [cover, setCover] = useState<InstanceCover>(() => defaultModpackCover(preview.name));
   const [submitting, setSubmitting] = useState(false);
   const facts = previewFacts(preview);
-  const nameError = instanceNameError(name, existing);
+  // 与平台整合包面板同理：校验与提交用同一个去掉首尾空格的名字
+  const nameError = instanceNameError(name.trim(), existing);
 
   const submit = async () => {
     if (!online) {

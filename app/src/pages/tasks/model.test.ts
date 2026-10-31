@@ -168,6 +168,14 @@ describe("行内元信息", () => {
     expect(rowMeta({ ...done, attempt: 3 }, ctx()).left).toBe("用时 3 秒 · 第 3 次尝试");
   });
 
+  it("已完成：运行期间系统时钟往回调过（结束时刻早于开始时刻）算不出用时，不写用时，也不让整行抛错", () => {
+    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 5_000, finishedAt: T0 + 2_000, doneBytes: 3 * MB });
+    expect(rowMeta(done, ctx()).left).toBe("3.0 MB");
+    expect(rowMeta({ ...done, doneBytes: 0 }, ctx()).left).toBe("已完成");
+    // 边界：只早 1 毫秒同样不写
+    expect(rowMeta({ ...done, finishedAt: T0 + 4_999 }, ctx()).left).toBe("3.0 MB");
+  });
+
   it("失败：危险色的具体原因，能归类的用统一说法，其余用后端原文", () => {
     const failed = (code: string, message: string) => task("f", { status: "failed", finishedAt: T0, error: { code, message } });
     expect(rowMeta(failed("network_failed", "dns error"), ctx({ now: T0 + 30_000 }))).toEqual({ left: "失败：网络连接失败", right: "30 秒前", danger: true });

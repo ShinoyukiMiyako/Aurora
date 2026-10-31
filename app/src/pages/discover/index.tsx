@@ -347,11 +347,27 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
     );
   }
 
+  const partialNote =
+    partial === null ? null : (
+      <Callout
+        tone="warn"
+        action={
+          <Button size="sm" variant="ghost" onClick={pages.restart}>
+            {SEARCH_COPY.retry}
+          </Button>
+        }
+      >
+        {SEARCH_COPY.partialFailed(partial.failed, partial.other)}
+      </Callout>
+    );
+
   if (pages.hits.length === 0) {
     const query = committedQuery.trim();
+    // 另一个平台照常回来、只是一条都没有：失败的平台上可能有，空状态上方照样说明并给重试
     return (
       <>
         {info}
+        {partialNote}
         <EmptyState
           scene="empty-branch"
           title={query === "" ? SEARCH_COPY.emptyNoQuery(filters.kind) : SEARCH_COPY.emptyWithQuery(query, filters.kind)}
@@ -365,18 +381,7 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
   return (
     <>
       {info}
-      {partial !== null && (
-        <Callout
-          tone="warn"
-          action={
-            <Button size="sm" variant="ghost" onClick={pages.restart}>
-              {SEARCH_COPY.retry}
-            </Button>
-          }
-        >
-          {SEARCH_COPY.partialFailed(partial.failed, partial.other)}
-        </Callout>
-      )}
+      {partialNote}
       <div className={styles.grid}>
         {pages.hits.map((entry) => (
           <ResultCard

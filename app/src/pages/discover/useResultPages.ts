@@ -4,7 +4,8 @@
 import { useState } from "react";
 import { invalidate } from "../../state/resource";
 import { useSearch, type SearchArgs, type SearchEntry, type SearchResultDto } from "../../state/queries/discover";
-import { appendHits, MAX_RESULTS, searchKey } from "./model";
+import { PLATFORM_LABEL } from "./copy";
+import { appendHits, MAX_RESULTS, searchKey, stalledPage } from "./model";
 
 export interface PagesState {
   baseKey: string;
@@ -41,6 +42,11 @@ function firstPage(base: SearchArgs): SearchArgs {
   return { ...base, cursor: null };
 }
 
+/** 原地踏步的一页没有自己的错误对象：拿平台给的失败原因拼一个，下一页失败的那一行照常写出原文。 */
+function stalledError(page: SearchResultDto): Error {
+  return new Error(page.errors.map((e) => `${PLATFORM_LABEL[e.platform]}：${e.message}`).join("\n"));
+}
+
 export function useResultPages(base: SearchArgs, restored: PagesState | null): ResultPages {
   const baseKey = searchKey(firstPage(base));
   const [state, setState] = useState<PagesState>(() =>
@@ -58,22 +64,26 @@ export function useResultPages(base: SearchArgs, restored: PagesState | null): R
   const pages = ready === null ? current.settled : [...current.settled, ready];
   const hits = pages.reduce<SearchEntry[]>((acc, page) => appendHits(acc, page.hits), []);
   const onFirst = current.settled.length === 0;
+  // 平台失败时后端把它的游标原地留着，下一页再问一次；另一个平台已经到底时这一页就原地踏步：
+  // 游标与请求的一模一样，再「接下一页」还是同一个请求、同一份缓存，列表尾一直在视野里就会无休止地接下去。
+  // 这样的一页按下一页失败呈现，由「重试」重新请求
+  const stalled = ready !== null && !onFirst && stalledPage(current.request, ready) ? ready : null;
   const end = ready !== null && ready.next_cursor === null;
   const capped = hits.length >= MAX_RESULTS;
-  const canLoadMore = ready !== null && !result.refreshing && ready.next_cursor !== null && !capped;
+  const canLoadMore = ready !== null && stalled === null && !result.refreshing && ready.next_cursor !== null && !capped;
 
   return {
     hits,
     first: pages.length > 0 ? pages[0] : null,
     loadingFirst: onFirst && result.status === "loading",
     firstError: onFirst && result.status === "error" ? result.error : null,
-    loadingNext: !onFirst && result.status === "loading",
-    nextError: !onFirst && result.status === "error" ? result.error : null,
+    loadingNext: !onFirst && (result.status === "loading" || (stalled !== null && result.refreshing)),
+    nextError: !onFirst && result.status === "error" ? result.error : stalled !== null && !result.refreshing ? stalledError(stalled) : null,
     end,
     capped,
     canLoadMore,
     loadMore() {
-      if (ready === null || ready.next_cursor === null || capped) return;
+      if (ready === null || ready.next_cursor === null || capped || stalled !== null) return;
       setState({ baseKey, settled: [...current.settled, ready], request: { ...firstPage(base), cursor: ready.next_cursor } });
     },
     retry() {
