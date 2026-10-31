@@ -58,9 +58,6 @@ pub enum CoreError {
     #[error("序列化配置失败")]
     ConfigSerialize(#[source] serde_json::Error),
 
-    /// 未配置微软登录 client_id。
-    #[error("未配置微软登录 client_id：请在 config.json 设置 msa_client_id 或提供环境变量 AURORA_MSA_CLIENT_ID")]
-    MissingClientId,
     /// 请求启动/操作的版本本地未安装。
     #[error("本地未安装版本 {id}")]
     VersionNotInstalled { id: String },

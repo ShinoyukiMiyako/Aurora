@@ -62,8 +62,6 @@ pub mod code {
     pub const CONFIG_INVALID: &str = "config_invalid";
     /// 配置序列化失败。
     pub const CONFIG_SERIALIZE: &str = "config_serialize";
-    /// 缺少微软登录 client_id。
-    pub const MISSING_CLIENT_ID: &str = "missing_client_id";
     /// 目标版本本地未安装。
     pub const VERSION_NOT_INSTALLED: &str = "version_not_installed";
     /// 平台上找不到请求的 Mod 版本。
@@ -241,7 +239,6 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::ConfigIo { .. } => code::CONFIG_IO,
         CoreError::ConfigParse { .. } => code::CONFIG_INVALID,
         CoreError::ConfigSerialize(_) => code::CONFIG_SERIALIZE,
-        CoreError::MissingClientId => code::MISSING_CLIENT_ID,
         CoreError::VersionNotInstalled { .. } => code::VERSION_NOT_INSTALLED,
         CoreError::ModVersionNotFound { .. } => code::MOD_VERSION_NOT_FOUND,
         CoreError::NoJava { .. } => code::JAVA_MISSING,

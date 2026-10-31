@@ -46,7 +46,7 @@ pub struct ConfigDto {
     pub memory: MemorySettings,
     /// 全局版本隔离档位。
     pub isolation_policy: IsolationPolicy,
-    /// 是否已配置微软登录 client_id（不回传 id 本身，前端只需知道能否走正版登录）。
+    /// 是否填了自定义的微软登录 client_id（不回传 id 本身）。没填时走内置默认，正版登录照常可用。
     pub has_client_id: bool,
     /// 找不到匹配 Java 时是否自动下载。
     pub auto_download_java: bool,

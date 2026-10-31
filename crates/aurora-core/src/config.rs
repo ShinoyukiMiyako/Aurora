@@ -138,7 +138,8 @@ pub struct AuroraConfig {
     pub memory: MemorySettings,
     /// 全局版本隔离档位。
     pub isolation_policy: IsolationPolicy,
-    /// 微软登录 client_id（无内置默认；缺省时回落到环境变量 `AURORA_MSA_CLIENT_ID`）。
+    /// 微软登录 client_id 的用户覆盖；缺省时依次回落到环境变量 `AURORA_MSA_CLIENT_ID` 与内置默认
+    /// （`auth::DEFAULT_MSA_CLIENT_ID`），正版登录不依赖这一项。
     pub msa_client_id: Option<String>,
     /// 自定义游戏目录（`.minecraft`）；缺省时用数据目录下的 `.minecraft`。
     pub game_directory: Option<PathBuf>,

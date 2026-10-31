@@ -3,12 +3,11 @@
 //! 流程：拉 `all.json`（平台 -> 组件 -> 条目）→ 按目标主版本挑组件 → 拉该组件的文件清单，
 //! 得到一份 [`RuntimePlan`]（每个文件的落盘路径、官方直链、sha1 与大小）。
 //!
-//! 文件本身怎么下由调用方决定：有下载池的上层把计划转成批量下载任务（并发、换源、进度、已就绪
-//! 文件按 sha1 跳过），下完再调 [`RuntimePlan::finalize`] 建目录、设可执行位、建链接；
-//! [`JavaRuntimeInstaller::install`] 是不依赖下载池的逐文件版本，同样跳过 sha1 已对上的文件。
+//! 文件本身由调用方下载：上层把计划转成批量下载任务（并发、换源、进度、已就绪文件按 sha1 跳过），
+//! 下完再调 [`RuntimePlan::finalize`] 建目录、设可执行位、建链接。
 //!
-//! 清单与逐文件下载的 sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 aurora-base 的
-//! `HashMismatch`（可重试），于是一次损坏下载会自动重新拉取，而不是把坏文件留在盘上。
+//! 组件清单的 sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 aurora-base 的
+//! `HashMismatch`（可重试），于是一次损坏的下载会自动重新拉取。
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -214,9 +213,7 @@ impl JavaRuntimeInstaller {
         }
     }
 
-    /// 挂取消令牌：每个文件开始前检查，网络等待中触发即放弃该请求，以 [`Error::Cancelled`] 返回。
-    ///
-    /// 文件内容先整份读进内存、校验通过后才原子落盘，丢弃进行中的请求不会留下半截文件。
+    /// 挂取消令牌：拉取清单的网络等待中触发即放弃该请求，以 [`Error::Cancelled`] 返回。
     pub fn with_cancel(mut self, token: CancellationToken) -> Self {
         self.cancel = Some(token);
         self
@@ -284,31 +281,6 @@ impl JavaRuntimeInstaller {
         ))
     }
 
-    /// 为当前平台安装匹配 `required_major` 的运行时到 `install_dir`：逐文件下载，sha1 已对上的跳过。
-    pub async fn install(
-        &self,
-        required_major: u32,
-        install_dir: &Path,
-    ) -> Result<InstalledRuntime> {
-        self.install_for_platform(required_major, current_platform(), install_dir)
-            .await
-    }
-
-    /// 显式指定平台键的安装入口（测试用 `windows-x64` 注入，避开真实平台判定）。
-    pub async fn install_for_platform(
-        &self,
-        required_major: u32,
-        platform: &str,
-        install_dir: &Path,
-    ) -> Result<InstalledRuntime> {
-        let plan = self
-            .plan_for_platform(required_major, platform, install_dir)
-            .await?;
-        self.download_missing(&plan).await?;
-        plan.finalize().await?;
-        Ok(plan.installed())
-    }
-
     /// 拉取并校验某组件的文件清单（含对清单自身的 sha1 校验）。
     async fn fetch_component_files(&self, component: &RuntimeComponent) -> Result<ComponentFiles> {
         let url = mirror::rewrite(&component.manifest.url, self.source)?;
@@ -316,26 +288,6 @@ impl JavaRuntimeInstaller {
             .get_verified_bytes(&url, &component.manifest.sha1)
             .await?;
         parse_json(&bytes, "java-runtime component manifest")
-    }
-
-    /// 逐个文件下载计划里还没就绪的文件：已存在且 sha1 对上的直接跳过，其余校验后原子写。
-    async fn download_missing(&self, plan: &RuntimePlan) -> Result<()> {
-        for file in &plan.files {
-            if self
-                .cancel
-                .as_ref()
-                .is_some_and(CancellationToken::is_cancelled)
-            {
-                return Err(Error::Cancelled);
-            }
-            if is_ready(&file.path, &file.sha1).await {
-                continue;
-            }
-            let url = mirror::rewrite(&file.url, self.source)?;
-            let bytes = self.get_verified_bytes(&url, &file.sha1).await?;
-            aurora_base::fs::atomic_write(&file.path, &bytes).await?;
-        }
-        Ok(())
     }
 
     /// 在取消令牌下等待一次网络读取；令牌先触发即返回 [`Error::Cancelled`]。
@@ -445,14 +397,6 @@ fn best_entry(entries: &[RuntimeComponent]) -> Option<&RuntimeComponent> {
     entries
         .iter()
         .max_by(|a, b| JavaVersion::parse(&a.version.name).cmp(&JavaVersion::parse(&b.version.name)))
-}
-
-/// 已存在且 sha1 与期望一致的文件视为就绪。读不了或对不上都当未就绪，交给下载覆盖。
-async fn is_ready(path: &Path, expected_sha1: &str) -> bool {
-    path.is_file()
-        && aurora_base::fs::verify_sha1(path, expected_sha1)
-            .await
-            .is_ok()
 }
 
 /// 把组件文件清单摊成计划：相对路径落到 `install_dir` 下，清单的 BTreeMap 顺序即计划顺序。
@@ -748,48 +692,12 @@ mod tests {
             .await;
     }
 
+    /// 拉组件清单卡住时取消：1000 ms 内以 Cancelled 返回。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_downloads_verifies_and_lands_files() {
-        let server = MockServer::start().await;
-        let (gamma_java, gamma_lib) = mount_full_manifest(&server).await;
-
-        let client = aurora_base::http::build_client().expect("客户端应构建成功");
-        let installer = fast_installer(client, &server.uri());
-        let dir = tempfile::tempdir().unwrap();
-
-        let installed = installer
-            .install_for_platform(17, "windows-x64", dir.path())
-            .await
-            .expect("安装应成功");
-
-        assert_eq!(installed.component, "java-runtime-gamma");
-        assert_eq!(installed.version.major, 17);
-        assert_eq!(installed.version.security, 8);
-        let expected_exe = dir.path().join("bin").join("java.exe");
-        assert_eq!(installed.java_executable, expected_exe);
-
-        // 文件真实落盘且内容与下载对象一致。
-        assert_eq!(std::fs::read(&expected_exe).unwrap(), gamma_java);
-        assert_eq!(
-            std::fs::read(dir.path().join("lib").join("rt")).unwrap(),
-            gamma_lib
-        );
-    }
-
-    /// 组件文件下载卡住时取消：1000 ms 内以 Cancelled 返回，卡住的那个文件不落盘。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancel_during_slow_file_returns_cancelled_quickly() {
+    async fn cancel_while_fetching_the_component_manifest_returns_quickly() {
         let server = MockServer::start().await;
         let base = server.uri();
-        let java = b"MZ-slow-java".to_vec();
-        let manifest = format!(
-            r#"{{"files":{{
-                "bin/java.exe":{{"type":"file","executable":true,"downloads":{{"raw":{{"sha1":"{}","size":{},"url":"{}/objects/slow-java"}}}}}}
-            }}}}"#,
-            sha1_hex(&java),
-            java.len(),
-            base,
-        );
+        let manifest = r#"{"files":{}}"#;
         let all_json = format!(
             r#"{{"windows-x64":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{}","size":{},"url":"{}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
             sha1_hex(manifest.as_bytes()),
@@ -797,12 +705,11 @@ mod tests {
             base,
         );
         mount_get(&server, "/all.json", all_json).await;
-        mount_get(&server, "/gamma.json", manifest).await;
         Mock::given(method("GET"))
-            .and(match_path("/objects/slow-java"))
+            .and(match_path("/gamma.json"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_bytes(java)
+                    .set_body_string(manifest)
                     .set_delay(Duration::from_secs(30)),
             )
             .mount(&server)
@@ -813,32 +720,27 @@ mod tests {
         let installer = fast_installer(client, &base).with_cancel(token.clone());
         let dir = tempfile::tempdir().unwrap();
         let install_dir = dir.path().to_path_buf();
-        let install = tokio::spawn(async move {
+        let plan = tokio::spawn(async move {
             installer
-                .install_for_platform(17, "windows-x64", &install_dir)
+                .plan_for_platform(17, "windows-x64", &install_dir)
                 .await
         });
 
-        // 等到卡住的那个对象请求已经发出，再取消。
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             let requests = server.received_requests().await.unwrap_or_default();
-            if requests
-                .iter()
-                .any(|r| r.url.path() == "/objects/slow-java")
-            {
+            if requests.iter().any(|r| r.url.path() == "/gamma.json") {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "对象请求未发出");
+            assert!(std::time::Instant::now() < deadline, "组件清单请求未发出");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let cancelled_at = std::time::Instant::now();
         token.cancel();
-        let err = install.await.unwrap().unwrap_err();
+        let err = plan.await.unwrap().unwrap_err();
 
         assert!(err.is_cancelled(), "应为取消，实际：{err:?}");
         assert!(cancelled_at.elapsed() < Duration::from_millis(1000));
-        assert!(!dir.path().join("bin").join("java.exe").exists());
     }
 
     /// 计划给出每个文件的落盘路径、官方直链、sha1 与大小，且只拉清单、不下任何对象文件。
@@ -895,46 +797,8 @@ mod tests {
         assert!(dir.path().join("bin").is_dir(), "收尾应建出清单里的目录");
     }
 
-    /// 第二次安装同一运行时：sha1 已对上的文件一个都不重下；只有被改坏的那个会重下。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reinstall_skips_files_already_in_place() {
-        let server = MockServer::start().await;
-        mount_full_manifest(&server).await;
-        let client = aurora_base::http::build_client().unwrap();
-        let installer = fast_installer(client, &server.uri());
-        let dir = tempfile::tempdir().unwrap();
-        let object_requests = |requests: &[Request]| {
-            requests
-                .iter()
-                .filter(|r| r.url.path().starts_with("/objects/"))
-                .count()
-        };
-
-        installer
-            .install_for_platform(17, "windows-x64", dir.path())
-            .await
-            .unwrap();
-        let after_first = object_requests(&server.received_requests().await.unwrap());
-        assert_eq!(after_first, 2);
-
-        installer
-            .install_for_platform(17, "windows-x64", dir.path())
-            .await
-            .unwrap();
-        let after_second = object_requests(&server.received_requests().await.unwrap());
-        assert_eq!(after_second, 2, "已就绪的文件不应再请求");
-
-        std::fs::write(dir.path().join("lib").join("rt"), b"tampered").unwrap();
-        installer
-            .install_for_platform(17, "windows-x64", dir.path())
-            .await
-            .unwrap();
-        let after_third = object_requests(&server.received_requests().await.unwrap());
-        assert_eq!(after_third, 3);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_selects_delta_for_major_21() {
+    async fn plan_selects_delta_for_major_21() {
         let server = MockServer::start().await;
         mount_full_manifest(&server).await;
 
@@ -942,13 +806,18 @@ mod tests {
         let installer = fast_installer(client, &server.uri());
         let dir = tempfile::tempdir().unwrap();
 
-        let installed = installer
-            .install_for_platform(21, "windows-x64", dir.path())
+        let plan = installer
+            .plan_for_platform(21, "windows-x64", dir.path())
             .await
-            .expect("安装 21 应成功");
+            .expect("21 的计划应成功");
+        let installed = plan.installed();
         assert_eq!(installed.component, "java-runtime-delta");
         assert_eq!(installed.version.major, 21);
-        assert!(dir.path().join("bin").join("java.exe").is_file());
+        assert_eq!(
+            installed.java_executable,
+            dir.path().join("bin").join("java.exe")
+        );
+        assert_eq!(plan.files.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -960,7 +829,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let err = installer
-            .install_for_platform(17, "solaris-sparc", dir.path())
+            .plan_for_platform(17, "solaris-sparc", dir.path())
             .await
             .unwrap_err();
         assert!(matches!(err, Error::UnsupportedPlatform(p) if p == "solaris-sparc"));
@@ -975,38 +844,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let err = installer
-            .install_for_platform(8, "windows-x64", dir.path())
+            .plan_for_platform(8, "windows-x64", dir.path())
             .await
             .unwrap_err();
         assert!(matches!(err, Error::NoRuntimeForMajor { major: 8 }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn corrupt_object_exhausts_retries_with_hash_mismatch() {
+    async fn corrupt_component_manifest_exhausts_retries_with_hash_mismatch() {
         let server = MockServer::start().await;
         let base = server.uri();
 
-        // 组件清单声明的 java sha1 与实际下发字节不符，触发 HashMismatch 重试直至耗尽。
-        let real_bytes = b"whatever-bytes".to_vec();
-        let gamma_manifest = format!(
-            r#"{{"files":{{"bin/java.exe":{{"type":"file","downloads":{{"raw":{{"sha1":"{}","url":"{}/objects/gamma-java"}}}}}}}}}}"#,
-            "0000000000000000000000000000000000000000", base,
-        );
+        // all.json 声明的组件清单 sha1 与实际下发的清单不符，触发 HashMismatch 重试直至耗尽。
+        let gamma_manifest = r#"{"files":{}}"#.to_owned();
         let all_json = format!(
             r#"{{"windows-x64":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{}","url":"{}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
-            sha1_hex(gamma_manifest.as_bytes()),
-            base,
+            "0000000000000000000000000000000000000000", base,
         );
         mount_get(&server, "/all.json", all_json).await;
         mount_get(&server, "/gamma.json", gamma_manifest).await;
-        mount_get_bytes(&server, "/objects/gamma-java", real_bytes).await;
 
         let client = aurora_base::http::build_client().unwrap();
         let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
         let err = installer
-            .install_for_platform(17, "windows-x64", dir.path())
+            .plan_for_platform(17, "windows-x64", dir.path())
             .await
             .unwrap_err();
         // sha1 不符经 aurora-base 冒泡为 Base(HashMismatch)。
@@ -1050,17 +913,16 @@ mod tests {
             .mount(&server)
             .await;
         mount_get(&server, "/gamma.json", gamma_manifest).await;
-        mount_get_bytes(&server, "/objects/gamma-java", gamma_java.clone()).await;
 
         let client = aurora_base::http::build_client().unwrap();
         let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
-        let installed = installer
-            .install_for_platform(17, "windows-x64", dir.path())
+        let plan = installer
+            .plan_for_platform(17, "windows-x64", dir.path())
             .await
             .expect("首个 503 后重试应成功");
-        assert_eq!(installed.component, "java-runtime-gamma");
-        assert_eq!(std::fs::read(dir.path().join("bin").join("java.exe")).unwrap(), gamma_java);
+        assert_eq!(plan.component, "java-runtime-gamma");
+        assert_eq!(plan.files[0].sha1, sha1_hex(&gamma_java));
     }
 }
