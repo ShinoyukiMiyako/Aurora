@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use aurora_core::{
-    EventSink, InstanceModpack, ModpackInstallOutcome, ModpackPreview, ModpackSource, PackFormat,
-    PackLoader,
+    Aurora, EventSink, InstanceModpack, MarkerError, MarkerSettlement, ModpackInstallOutcome,
+    ModpackPreview, ModpackSource, PackFormat, PackLoader,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -123,9 +123,9 @@ pub(crate) async fn install_modpack_with(
     let source = parse_source(source)?;
     let task = tasks.register(task_id)?;
     let aurora = facade.snapshot().await.with_cancel(task.token().clone());
-    // 占用守卫放在导入的 future 之外：取消宽限期满时 run 会丢弃 future，实例名得一直占到下面按标记
-    // 清理完半成品，否则清理前的空档里别的命令就能动这个目录。
-    let reserved: Mutex<Option<InstanceGuard>> = Mutex::new(None);
+    // 占用守卫与实例名放在导入的 future 之外：取消宽限期满时 run 会丢弃 future，实例名得一直占到下面
+    // 按名字清理完半成品，否则清理前的空档里别的命令就能动这个目录。
+    let reserved: Mutex<Option<(String, InstanceGuard)>> = Mutex::new(None);
     let result = task
         .run(async {
             let prepared = aurora.prepare_modpack(&source, name, Some(events)).await?;
@@ -136,7 +136,14 @@ pub(crate) async fn install_modpack_with(
                     return Err(busy);
                 }
             };
-            *reserved.lock().expect("整合包导入的占用槽锁已中毒") = Some(guard);
+            // 准备阶段查重与占住之间，别的命令可能抢先建了同名实例；占住之后仍然空闲，名下之后出现的
+            // 目录才能认定是这次导入建的，失败时才可以放心按名字删。
+            if let Err(taken) = aurora.ensure_modpack_name_free(prepared.name()).await {
+                prepared.discard().await;
+                return Err(taken.into());
+            }
+            *reserved.lock().expect("整合包导入的占用槽锁已中毒") =
+                Some((prepared.name().to_owned(), guard));
             Ok(aurora
                 .import_modpack(prepared, task_id, Some(events))
                 .await?)
@@ -145,19 +152,46 @@ pub(crate) async fn install_modpack_with(
     match result {
         Ok(outcome) => Ok(outcome_dto(outcome)),
         Err(err) => {
-            // 取消宽限期满时 run 会丢弃导入的 future，导入自己的失败清理没机会跑，按标记再清一次。
-            // 清理失败不顶替原错误：用户要看到的是导入为什么没成。
-            match aurora.discard_incomplete_modpack(task_id).await {
-                Ok(Some(instance)) => {
-                    tracing::info!(task_id, %instance, "已删除导入未完成的实例");
-                }
-                Ok(None) => {}
-                Err(cleanup) => {
-                    tracing::error!(task_id, error = %cleanup, "删除导入未完成的实例失败");
-                }
+            let name = reserved
+                .lock()
+                .expect("整合包导入的占用槽锁已中毒")
+                .as_ref()
+                .map(|(name, _)| name.clone());
+            if let Some(name) = name {
+                discard_failed_import(&aurora, &name, task_id, &err).await;
             }
             Err(err)
         }
+    }
+}
+
+/// 导入失败后按名字删掉半成品。导入自己的失败路径已经删过一次，这里兜住两种情况：取消宽限期满时
+/// 导入的 future 被丢弃、清理代码没机会跑；删目录失败（文件被杀毒软件等占用）。还是删不掉就把未完成
+/// 标记落成这次导入的结局，列表里显示导入已经失败或取消，而不是一直停在进行中，用户可以自己删。
+/// 清理的问题只记日志：返回给前端的仍是导入本身的错误，用户要看到的是导入为什么没成。
+async fn discard_failed_import(aurora: &Aurora, name: &str, task_id: &str, err: &CommandError) {
+    let cleanup = match aurora.discard_modpack_import(name).await {
+        Ok(true) => {
+            tracing::info!(task_id, name, "已删除导入未完成的实例");
+            return;
+        }
+        Ok(false) => return,
+        Err(cleanup) => cleanup,
+    };
+    tracing::error!(task_id, name, error = %cleanup, "删除导入未完成的实例失败，改为记下导入的结局");
+    let settlement = if err.is_cancelled() {
+        MarkerSettlement::Cancelled
+    } else {
+        MarkerSettlement::Failed(MarkerError {
+            code: err.code.to_owned(),
+            message: err.message.clone(),
+        })
+    };
+    if let Err(settle) = aurora
+        .settle_modpack_import(name, task_id, settlement)
+        .await
+    {
+        tracing::error!(task_id, name, error = %settle, "记录导入未完成标记失败");
     }
 }
 
@@ -351,25 +385,24 @@ mod tests {
     }
 
     /// 导入失败后按任务 id 清掉它留下的半成品实例，别的任务的半成品不动。
+    /// 还没定下实例名就失败的导入不碰游戏目录里的任何实例，哪怕别的目录带着整合包标记。
     #[tokio::test]
-    async fn failed_import_discards_the_instance_its_task_left_behind() {
+    async fn import_failing_before_reserving_a_name_touches_no_instance() {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path(), "http://127.0.0.1:9");
         let registry = TaskRegistry::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let versions = dir.path().join(".minecraft").join("versions");
-        // 模拟上一次被强行放弃的导入：未完成标记与导入时写的同一种格式。
-        for (instance, task) in [("半成品", "mp#2"), ("别人的", "other")] {
-            aurora_core::MarkerStore::for_version_dir(&versions.join(instance))
-                .save(&aurora_core::IncompleteMarker::pending(
-                    aurora_core::IncompleteKind::Modpack {
-                        task_id: task.to_owned(),
-                    },
-                    1,
-                ))
-                .await
-                .unwrap();
-        }
+        let other = versions.join("别人的");
+        aurora_core::MarkerStore::for_version_dir(&other)
+            .save(&aurora_core::IncompleteMarker::pending(
+                aurora_core::IncompleteKind::Modpack {
+                    task_id: "mp#2".to_owned(),
+                },
+                1,
+            ))
+            .await
+            .unwrap();
 
         let missing = dir.path().join("missing.mrpack");
         let err = install_modpack_with(
@@ -384,8 +417,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, code::IO);
-        assert!(!versions.join("半成品").exists());
-        assert!(versions.join("别人的").exists());
+        assert!(other.is_dir());
     }
 
     /// 只装原版 test、没有远程文件与覆盖文件的本地整合包。
@@ -554,6 +586,112 @@ mod tests {
         assert_eq!(err.code, code::CANCELLED);
         assert!(!instance.exists(), "取消后半成品应删掉");
         assert_eq!(locks.activity("导入中"), None);
+    }
+
+    /// 半成品里有文件被别的进程占着、删不掉：导入照样以取消返回、放开实例名，未完成标记落成「已取消」
+    /// 而不是一直停在进行中；占用解除后能正常删除。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn undeletable_half_import_is_settled_instead_of_left_pending() {
+        use crate::commands::instances::{delete_instance_with, list_instances_with};
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"id":"test","type":"release","mainClass":"M"}"#)
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let config = AuroraConfig {
+            game_directory: Some(dir.path().join(".minecraft")),
+            download_source: DownloadSourcePolicy::OfficialFirst,
+            version_list_source: DownloadSourcePolicy::OfficialFirst,
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::open(
+            config,
+            dir.path().to_path_buf(),
+            dir.path().join("config.json"),
+        )
+        .unwrap()
+        .with_manifest_url(format!("{base}/manifest.json"));
+        let facade = std::sync::Arc::new(Facade::new(aurora));
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let pack = dir.path().join("pack.mrpack");
+        write_vanilla_pack(&pack);
+        let install = tokio::spawn({
+            let (f, r, l) = (facade.clone(), registry.clone(), locks.clone());
+            let source = file(&pack.display().to_string());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+                install_modpack_with(&f, &r, &l, "mp-locked", source, Some("删不掉"), &sink).await
+            }
+        });
+        let instance = dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("删不掉");
+        let marker = aurora_core::MarkerStore::for_version_dir(&instance);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.path().is_file() {
+            assert!(Instant::now() < deadline, "导入没有建出实例目录");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // 不允许别人删除的打开方式：remove_dir_all 删不掉这个文件。
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .share_mode(0)
+            .open(instance.join("占着.log"))
+            .unwrap();
+
+        assert!(registry.cancel("mp-locked"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert!(instance.is_dir(), "文件被占着，半成品还在");
+        assert_eq!(locks.activity("删不掉"), None, "导入结束后实例名放开");
+        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let entry = listed.iter().find(|i| i.id == "删不掉").unwrap();
+        let incomplete = entry.incomplete.as_ref().expect("应带未完成标记");
+        assert_eq!(incomplete.kind, "modpack");
+        assert_eq!(incomplete.outcome, "cancelled");
+
+        drop(held);
+        let deleted = delete_instance_with(&facade, &locks, "删不掉", RemoveDir)
+            .await
+            .unwrap();
+        assert!(deleted.existed);
+        assert!(!instance.exists());
+    }
+
+    /// 测试里不往用户回收站塞东西：直接删掉。
+    struct RemoveDir;
+
+    impl aurora_core::Disposer for RemoveDir {
+        fn dispose(&self, dir: &Path) -> Result<(), aurora_core::InstanceError> {
+            std::fs::remove_dir_all(dir).map_err(|source| aurora_core::InstanceError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })
+        }
     }
 
     /// 发出响应头与 64 KiB 后保持连接不再发送，模拟慢到卡住的下载源。
