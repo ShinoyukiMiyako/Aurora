@@ -107,7 +107,7 @@ function candidate(fileName: string, version: string): UpdateCandidate {
 }
 
 function clue(category: CrashClueDto["category"], over: Partial<CrashClueDto> = {}): CrashClueDto {
-  return { category, summary: "", advice: "", detail: null, matched: "boom", line: 10, context: [], ...over };
+  return { category, summary: "", advice: "", detail: null, matched: "boom", line: 10, context: [], source: "session_log", ...over };
 }
 
 function report(diagnoses: CrashClueDto[], over: Partial<CrashReportDto> = {}): CrashReportDto {
@@ -121,6 +121,8 @@ function report(diagnoses: CrashClueDto[], over: Partial<CrashReportDto> = {}): 
     java: { major: 17, path: "C:/jdk/bin/java.exe", is_64bit: true },
     max_memory_mb: 4096,
     warnings: [],
+    exit_code_note: null,
+    scanned_files: [],
     ...over,
   };
 }
