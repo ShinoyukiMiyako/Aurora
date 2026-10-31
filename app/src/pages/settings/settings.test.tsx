@@ -605,6 +605,27 @@ describe("设置页：关于与启动器更新", () => {
     ]);
   });
 
+  it("第三方许可：名称过长时截断，悬停提示给出全名；很长的许可证表达式原样完整写出", async () => {
+    const longName = "wasm-bindgen-backend-with-a-rather-long-crate-name";
+    const longLicense = "(MIT OR Apache-2.0) AND Unicode-DFS-2016 AND Apache-2.0 WITH LLVM-exception";
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ packages: [{ ecosystem: "cargo", name: longName, version: "0.11.1+wasi-snapshot-preview1", license: longLicense }] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    await click(rowButton("第三方许可", "查看"));
+    const [dialog] = openDialogs();
+    const row = dialog.querySelector("li");
+    if (row === null) throw new Error("许可列表是空的");
+    const [nameCell, versionCell, licenseCell] = [...row.children] as HTMLElement[];
+    expect(nameCell.textContent).toBe(longName);
+    expect(nameCell.title).toBe(longName);
+    expect(versionCell.textContent).toBe("0.11.1+wasi-snapshot-preview1");
+    expect(licenseCell.textContent).toBe(longLicense);
+  });
+
   it("第三方许可清单读不出来：弹窗里写明原因，重试再读一次", async () => {
     const fetchMock = vi
       .fn(async (_url: string) => ({ ok: true, status: 200, json: async () => MANIFEST }))
