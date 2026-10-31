@@ -12,7 +12,7 @@ import { Callout } from "../../../ui/Callout";
 import { Modal } from "../../../ui/Modal";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { LOAD_COPY, UPDATE_COPY } from "../copy";
-import { useOnline } from "../online";
+import { useOnline } from "../../../state/online";
 import s from "../settings.module.css";
 import { downloadFraction, phaseUpdate, type UpdaterPhase } from "./machine";
 import { useInstallUpdate } from "./useInstallUpdate";

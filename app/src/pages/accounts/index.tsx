@@ -23,7 +23,8 @@ import { AccountCard } from "./AccountCard";
 import styles from "./accounts.module.css";
 import { AddCard } from "./AddCard";
 import { ACCOUNTS_COPY } from "./copy";
-import { useDelayedLoading, useOnline } from "./hooks";
+import { useOnline } from "../../state/online";
+import { useDelayedLoading } from "./hooks";
 import { Spotlight } from "./Spotlight";
 import { useAccountActions } from "./useAccountActions";
 

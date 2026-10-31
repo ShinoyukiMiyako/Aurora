@@ -1,25 +1,6 @@
-// 发现页自用的几个小 hook：联网状态、加载态的出现延迟与最短停留、超时、防抖、滚动容器。
+// 发现页自用的几个小 hook：加载态的出现延迟与最短停留、超时、防抖、滚动容器。
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
-
-/**
- * 浏览器报告的联网状态。只认 navigator.onLine 与 online / offline 事件：连通性探测需要后端提供探测命令，
- * 本页不自己去 ping 外网。
- */
-export function useOnline(): boolean {
-  const [online, setOnline] = useState(() => navigator.onLine);
-  useEffect(() => {
-    const up = () => setOnline(true);
-    const down = () => setOnline(false);
-    window.addEventListener("online", up);
-    window.addEventListener("offline", down);
-    return () => {
-      window.removeEventListener("online", up);
-      window.removeEventListener("offline", down);
-    };
-  }, []);
-  return online;
-}
 
 /**
  * 加载态的显示开关：active 持续超过 delayMs 才出现（快的请求不闪一下骨架），

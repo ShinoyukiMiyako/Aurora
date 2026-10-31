@@ -12,7 +12,7 @@ import { useSkinInfo } from "../../state/queries/home";
 import { Button } from "../../ui/Button";
 import { ACCOUNT_STEP_COPY, LOGIN_OPTIONS } from "./copy";
 import s from "./onboarding.module.css";
-import { useOnline } from "./platform";
+import { useOnline } from "../../state/online";
 
 type LoginKind = (typeof LOGIN_OPTIONS)[number]["kind"];
 

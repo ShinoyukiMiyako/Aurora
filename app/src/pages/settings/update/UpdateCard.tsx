@@ -11,7 +11,7 @@ import { SettingRow } from "../../../ui/SettingRow";
 import { Skeleton } from "../../../ui/Skeleton";
 import { Toggle } from "../../../ui/Toggle";
 import { ABOUT_COPY, LOAD_COPY, UPDATE_COPY } from "../copy";
-import { useOnline } from "../online";
+import { useOnline } from "../../../state/online";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";

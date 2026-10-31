@@ -18,7 +18,8 @@ import { Spinner } from "../../art/Spinner";
 import { PLATFORM_LABEL, SEARCH_COPY } from "./copy";
 import { ResourceDetail, type DetailTarget } from "./detail/ResourceDetail";
 import styles from "./discover.module.css";
-import { useDebounced, useDelayedFlag, useElapsed, useNearBottom, useOnline, useScrollContainer, useStuck } from "./hooks";
+import { useOnline } from "../../state/online";
+import { useDebounced, useDelayedFlag, useElapsed, useNearBottom, useScrollContainer, useStuck } from "./hooks";
 import { ImportModpackDialog } from "./ImportModpackDialog";
 import {
   allPlatformsFailed,

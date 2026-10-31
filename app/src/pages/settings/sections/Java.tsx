@@ -21,7 +21,7 @@ import { Toggle } from "../../../ui/Toggle";
 import { JAVA_COPY, JAVA_SOURCE_LABEL, LOAD_COPY } from "../copy";
 import { InstanceStack } from "../InstanceStack";
 import { hasManaged, instancesNeeding, javaNotes, joinMajors, majorsInUse, scanDiff, sortRuntimes, type JavaNote } from "../java-model";
-import { useOnline } from "../online";
+import { useOnline } from "../../../state/online";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
