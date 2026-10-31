@@ -44,15 +44,24 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
 
 describe("整合包 mock", () => {
   it("平台整合包摘要：Modrinth 给出 Mod 数与远程字节，CurseForge 两项为 null；目录里没有的工程报 mod_version_not_found", async () => {
-    expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "v14")).toMatchObject({
+    expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "fo-641")).toEqual({
       format: "modrinth",
       name: "Fabulously Optimized",
+      version: "6.4.1",
+      minecraft: "1.21.1",
+      loader: { kind: "fabric", version: "0.16.9" },
+      pack_bytes: 2_412_544,
       remote_files: 48,
       mod_files: 41,
       remote_bytes: 96_468_992,
+      override_files: 57,
+      override_bytes: 364_233,
     });
-    expect(await summarizePlatformModpack("curseforge", "396246", "f1")).toMatchObject({ format: "curseforge", mod_files: null, remote_bytes: null });
+    // 同一个包的旧版本是另一份清单
+    expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "fo-5120")).toMatchObject({ version: "5.12.0", minecraft: "1.20.1", mod_files: 38 });
+    expect(await summarizePlatformModpack("curseforge", "396246", "5880001")).toMatchObject({ format: "curseforge", remote_files: 46, mod_files: null, remote_bytes: null });
     expect(await summarizePlatformModpack("modrinth", "nope", "v1").catch((e: unknown) => e)).toMatchObject({ code: "mod_version_not_found" });
+    expect(await summarizePlatformModpack("modrinth", "1KVo5zza", "nope").catch((e: unknown) => e)).toMatchObject({ code: "mod_version_not_found" });
   });
 
   it("预览按扩展名认格式，CurseForge 不带远程大小；其它扩展名报 modpack_unsupported_extension", async () => {
@@ -66,11 +75,11 @@ describe("整合包 mock", () => {
   it("平台整合包导入为新实例：名字缺省取整合包名，记下来源，事件带本任务 id", async () => {
     const events: CoreEvent[] = [];
     const off = await listen<CoreEvent>(CORE_EVENT, (e) => events.push(e));
-    const outcome = await installModpack("t-1", platform, null);
+    const outcome = await installModpack("t-1", { ...platform, version_id: "fo-641" }, null);
     off();
     expect(outcome.version_id).toBe("Fabulously Optimized");
     expect(outcome.version_dir).toBe("D:/Games/.minecraft/versions/Fabulously Optimized");
-    expect(outcome.modpack).toMatchObject({ format: "modrinth", platform: "modrinth", project_id: "1KVo5zza", version_id: "v14", name: "Fabulously Optimized" });
+    expect(outcome.modpack).toMatchObject({ format: "modrinth", platform: "modrinth", project_id: "1KVo5zza", version_id: "fo-641", name: "Fabulously Optimized", version: "6.4.1" });
     // 导入的实例出现在实例列表里，设置为强制隔离。
     expect((await listInstances()).map((i) => i.id)).toContain("Fabulously Optimized");
     expect((await getInstanceSettings("Fabulously Optimized")).isolation).toBe("enabled");
@@ -78,7 +87,7 @@ describe("整合包 mock", () => {
     expect(events.at(-1)).toEqual({ task_id: "t-1", kind: "stage", message: "整合包已导入为实例 Fabulously Optimized" });
 
     // 同名再导入一次：不区分大小写的重名。
-    const again = await installModpack("t-2", platform, "fabulously optimized").catch((e: unknown) => e);
+    const again = await installModpack("t-2", { ...platform, version_id: "fo-641" }, "fabulously optimized").catch((e: unknown) => e);
     expect(again).toMatchObject({ code: "instance_name_invalid", detail: { name: "fabulously optimized", rule: "duplicate" } });
   });
 

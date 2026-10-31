@@ -1,5 +1,6 @@
-// Mod 领域的假后端：实例内的 Mod 列表、启停、移除、更新检查与更新，下载页的版本列表、落位矩阵与安装计划。
-// 变更历史（history.ts）读写的是这里的同一份实例状态：移除与更新要在历史里留痕，两边不能各存一份。
+// Mod 领域的假后端：实例内的 Mod 列表、启停、移除、更新检查与更新，发现页的版本列表、落位矩阵、安装计划与装 Mod。
+// 工程与版本读共用的工程目录（ipc/mock/catalog），与发现页搜得到的是同一批工程。
+// 变更历史（history.ts）读写的是这里的同一份实例状态：安装、移除与更新要在历史里留痕，两边不能各存一份。
 // 判定规则与后端同一口径：缺元数据的维度不算不匹配，加载器先于 MC 版本判，新旧按发布时间比。
 
 import { IpcError } from "../../errors";
@@ -17,10 +18,12 @@ import type {
   PlannedItem,
   UpdateCandidate,
 } from "../../mods";
-import type { PlatformId } from "../../discover";
+import type { ModInstallOutcomeDto, PlatformId } from "../../discover";
 import { CORE_EVENT } from "../../tasks";
+import { byCodeUnit, findMockSource, newestFirst, sourceVersions, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
+import { argReader, parsePlatform as parsePlatformArg, runMockTask, simulateDownload } from "./discover";
 import { mockInstanceFacts, mockInstanceIds } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -60,93 +63,6 @@ export interface MockInstance {
   history: HistoryEvent[];
 }
 
-interface CatalogProject {
-  platform: PlatformId;
-  title: string;
-  icon_url: string;
-  versions: ModVersionInfo[];
-}
-
-function version(
-  projectId: string,
-  versionId: string,
-  versionNumber: string,
-  date: string,
-  gameVersions: string[],
-  loaders: ModLoader[],
-  dependencies: ModVersionInfo["dependencies"] = [],
-): ModVersionInfo {
-  const fileName = `${projectId}-${versionNumber}.jar`;
-  return {
-    version_id: versionId,
-    project_id: projectId,
-    platform: "modrinth",
-    name: `${projectId} ${versionNumber}`,
-    version_number: versionNumber,
-    release_channel: "release",
-    game_versions: gameVersions,
-    loaders,
-    file_name: fileName,
-    file_size: 1_048_576,
-    sha1: null,
-    download_url: `https://cdn.modrinth.com/data/${projectId}/${fileName}`,
-    date_published: date,
-    dependencies,
-  };
-}
-
-function seedCatalog(): Map<string, CatalogProject> {
-  const fabricApi = { project_id: "P7dR8mSH", version_id: null, kind: "required" as const };
-  return new Map<string, CatalogProject>([
-    [
-      "AANobbMI",
-      {
-        platform: "modrinth",
-        title: "Sodium",
-        icon_url: "https://cdn.modrinth.com/data/AANobbMI/icon.png",
-        versions: [
-          version("AANobbMI", "sodium-060", "0.6.0", "2026-06-01T00:00:00Z", ["1.20.1"], ["fabric", "quilt"], [
-            fabricApi,
-            { project_id: "mOgUt4GM", version_id: null, kind: "optional" },
-          ]),
-          version("AANobbMI", "sodium-053", "0.5.3", "2025-09-01T00:00:00Z", ["1.20.1"], ["fabric"], [fabricApi]),
-          version("AANobbMI", "sodium-121", "0.6.5", "2026-08-01T00:00:00Z", ["1.21"], ["fabric", "neoforge"], [fabricApi]),
-        ],
-      },
-    ],
-    [
-      "P7dR8mSH",
-      {
-        platform: "modrinth",
-        title: "Fabric API",
-        icon_url: "https://cdn.modrinth.com/data/P7dR8mSH/icon.png",
-        versions: [
-          version("P7dR8mSH", "fapi-0922", "0.92.2", "2025-06-01T00:00:00Z", ["1.20.1"], ["fabric"]),
-          version("P7dR8mSH", "fapi-0927", "0.92.7", "2026-02-01T00:00:00Z", ["1.20.1"], ["fabric"]),
-        ],
-      },
-    ],
-    [
-      "gvQqBUqZ",
-      {
-        platform: "modrinth",
-        title: "Lithium",
-        icon_url: "https://cdn.modrinth.com/data/gvQqBUqZ/icon.png",
-        versions: [version("gvQqBUqZ", "lith-060", "0.11.2", "2025-12-01T00:00:00Z", ["1.20.1"], ["fabric"])],
-      },
-    ],
-    [
-      "mOgUt4GM",
-      {
-        platform: "modrinth",
-        title: "Mod Menu",
-        icon_url: "https://cdn.modrinth.com/data/mOgUt4GM/icon.png",
-        versions: [version("mOgUt4GM", "mm-7", "7.2.2", "2025-03-01T00:00:00Z", ["1.20.1"], [])],
-      },
-    ],
-  ]);
-}
-
 function metadata(modId: string, name: string, ver: string, minecraft = "~1.20.1"): ModMetadata {
   return {
     mod_id: modId,
@@ -162,17 +78,19 @@ function metadata(modId: string, name: string, ver: string, minecraft = "~1.20.1
   };
 }
 
+/** 种子实例的卷宗行：都是从 Modrinth 装的，图标地址是当时平台给的那张（目录本身不带图，假后端不托管图片）。 */
 function ledgerRow(fileName: string, projectId: string, versionId: string, versionNumber: string, dependencyOf: string | null): LedgerRow {
-  const project = catalog.get(projectId);
-  if (!project) throw new Error(`mock 种子引用了目录里没有的工程 ${projectId}`);
+  const found = findMockSource("modrinth", projectId);
+  if (found === undefined) throw new Error(`mock 种子引用了目录里没有的工程 ${projectId}`);
+  if (!found.source.versions.some((v) => v.info.version_id === versionId)) throw new Error(`mock 种子引用了目录里没有的版本 ${versionId}`);
   return {
     file_name: fileName,
-    platform: project.platform,
+    platform: "modrinth",
     project_id: projectId,
     version_id: versionId,
     version_number: versionNumber,
-    title: project.title,
-    icon_url: project.icon_url,
+    title: found.project.title,
+    icon_url: `https://cdn.modrinth.com/data/${projectId}/icon.png`,
     dependency_of: dependencyOf,
   };
 }
@@ -253,7 +171,6 @@ const SAKURA_MODS: readonly (readonly [string, string, string])[] = [
 ];
 const RLCRAFT_MOD_COUNT = 182;
 
-let catalog = seedCatalog();
 let instances = seedInstances();
 
 // ---- 与 history.ts 共用的工具 ----
@@ -352,19 +269,10 @@ function classify(v: ModVersionInfo, mcVersion: string | null, instanceLoaders: 
   return { kind: "match" };
 }
 
-/** 与 Rust 的 String 比较同序（按码元）；大小写不敏感的本地化比较排出来会与后端不一致。 */
-function byCodeUnit(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
-function byDateDesc(versions: ModVersionInfo[]): ModVersionInfo[] {
-  return [...versions].sort((a, b) => byCodeUnit(b.date_published, a.date_published));
-}
-
 function pickBest(versions: ModVersionInfo[], instance: MockInstance): [Compatibility, ModVersionInfo | null] {
   let unknown: [Compatibility, ModVersionInfo] | null = null;
   let firstReason: Compatibility | null = null;
-  for (const v of byDateDesc(versions)) {
+  for (const v of newestFirst(versions)) {
     const c = classify(v, instance.mc_version, instance.loaders);
     if (c.kind === "match") return [c, v];
     if (c.kind === "unknown" && unknown === null) unknown = [c, v];
@@ -383,20 +291,22 @@ function parsePlatform(value: unknown): PlatformId {
   throw new IpcError("invalid_argument", `未知资源平台 ${String(value)}`);
 }
 
-function project(platform: PlatformId, projectId: string): CatalogProject {
-  const found = catalog.get(projectId);
-  if (!found || found.platform !== platform) {
-    throw new IpcError("mod_platform_failed", `${platform} 请求失败: HTTP 404`, { status: 404 });
-  }
+function project(platform: PlatformId, projectId: string): { project: MockProject; source: MockSource } {
+  const found = findMockSource(platform, projectId);
+  if (found === undefined) throw new IpcError("mod_platform_failed", `${platform} 请求失败: HTTP 404`, { status: 404 });
   return found;
 }
 
+function projectVersions(platform: PlatformId, projectId: string): ModVersionInfo[] {
+  return sourceVersions(project(platform, projectId).source);
+}
+
 function findVersion(platform: PlatformId, projectId: string, versionId: string): ModVersionInfo {
-  const found = catalog.get(projectId)?.versions.find((v) => v.version_id === versionId);
-  if (!found || found.platform !== platform) {
+  const found = findMockSource(platform, projectId)?.source.versions.find((v) => v.info.version_id === versionId);
+  if (found === undefined) {
     throw new IpcError("mod_version_not_found", `平台 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 上工程 ${projectId} 未找到版本 ${versionId}`);
   }
-  return found;
+  return found.info;
 }
 
 function matchesFilters(v: ModVersionInfo, gameVersions: string[], loaders: ModLoader[]): boolean {
@@ -419,7 +329,11 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
   const items: PlannedItem[] = [];
   const skipped: string[] = [];
   const visited = new Set([root.project_id]);
-  const name = (id: string | null) => (id === null ? "未标明工程的依赖项" : (catalog.get(id)?.title ?? id));
+  const name = (id: string | null) => {
+    if (id === null) return "未标明工程的依赖项";
+    const found = findMockSource(root.platform, id);
+    return found === undefined ? id : found.project.title;
+  };
   const stack: [ModVersionInfo, string | null, boolean][] = [[root, null, installedExact(instance, root)]];
   for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
     const [v, requiredBy, satisfied] = next;
@@ -437,15 +351,15 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
           children.push([findVersion(v.platform, dep.project_id, kept.version_id), v.project_id, true]);
           continue;
         }
-        const candidates = project(v.platform, dep.project_id).versions;
-        const chosen = byDateDesc(candidates).find((c) => classify(c, instance.mc_version, instance.loaders).kind !== "mismatch");
+        const candidates = projectVersions(v.platform, dep.project_id);
+        const chosen = newestFirst(candidates).find((c) => classify(c, instance.mc_version, instance.loaders).kind !== "mismatch");
         if (chosen) children.push([chosen, v.project_id, false]);
         else skipped.push(`依赖 ${name(dep.project_id)} 没有适配该实例的版本，未加入计划`);
       }
     }
     stack.push(...children.reverse());
-    const meta = project(v.platform, v.project_id);
-    items.push({ version: v, title: meta.title, icon_url: meta.icon_url, required_by: requiredBy, already_satisfied: satisfied });
+    // 目录不带图（假后端不托管图片），计划项与卷宗里的图标都为空
+    items.push({ version: v, title: project(v.platform, v.project_id).project.title, icon_url: null, required_by: requiredBy, already_satisfied: satisfied });
   }
   return { items, skipped };
 }
@@ -537,7 +451,7 @@ function checkUpdates(instance: MockInstance): UpdateCandidate[] {
   for (const key of keys) {
     const row = instance.ledger.find((r) => r.file_name === key);
     if (!row) continue;
-    const versions = byDateDesc(project(row.platform, row.project_id).versions).filter((v) => matchesFilters(v, [mc], kinds));
+    const versions = newestFirst(projectVersions(row.platform, row.project_id)).filter((v) => matchesFilters(v, [mc], kinds));
     const latest = versions[0];
     const current = versions.find((v) => v.version_id === row.version_id);
     if (!latest || !current || latest.version_id === row.version_id || latest.date_published <= current.date_published) continue;
@@ -598,6 +512,52 @@ function place(instance: MockInstance, items: PlannedItem[]): void {
 
 function stage(taskId: string, message: string): void {
   emitMockEvent(CORE_EVENT, { kind: "stage", task_id: taskId, message });
+}
+
+/** 与后端 install_mod 同一条管线：按计划装上主项与缺的必需前置，卷宗登记来源，历史记一条安装事件。 */
+function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
+  const read = argReader("install_mod", args);
+  const taskId = read.string("taskId");
+  const versionId = read.string("versionId");
+  const platform = parsePlatformArg(read.string("platform"));
+  const projectId = read.string("projectId");
+  const modVersionId = read.string("modVersionId");
+  return runMockTask(taskId, async () => {
+    const instance = mockInstance(versionId);
+    stage(taskId, `准备从 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 安装模组到 ${versionId}`);
+    const result = plan(instance, findVersion(platform, projectId, modVersionId));
+    const pending = result.items.filter((i) => !i.already_satisfied);
+    const bytes = pending.reduce((sum, i) => {
+      if (i.version.file_size === null) throw new Error(`mock 目录里的版本 ${i.version.version_id} 缺少 file_size`);
+      return sum + i.version.file_size;
+    }, 0);
+    const main = result.items[0].version;
+    if (pending.length > 0) await simulateDownload(taskId, main.file_name, bytes);
+    assertNotBusy(versionId, pending.map((i) => i.version.file_name));
+    place(instance, result.items);
+    stage(taskId, `模组 ${main.file_name} 已安装`);
+    return { file_name: main.file_name, path: `${mockModsDir(versionId)}/${main.file_name}`, platform: main.platform };
+  });
+}
+
+/**
+ * 整合包导入后实例 mods/ 里的文件：整合包自己管理的 Mod 不进卷宗（来源以整合包为准），也没有能解析的元数据，
+ * 只数得出文件数。与后端一样，导入的实例 list_mods 与 mod_count 都能看到它们。
+ */
+export function placeMockPackMods(versionId: string, mcVersion: string, loaders: string[], count: number, packSlug: string): void {
+  if (instances.has(versionId)) throw new Error(`mock 实例 ${versionId} 的 Mod 状态已存在，整合包只能装进新实例`);
+  instances.set(versionId, {
+    mc_version: mcVersion,
+    loaders: loaders.filter(isModLoader),
+    files: Array.from({ length: count }, (_, i) => ({
+      file_name: `${packSlug}-mod-${String(i + 1).padStart(3, "0")}.jar`,
+      size: 262_144,
+      modified_ms: Date.now(),
+      metadata: null,
+    })),
+    ledger: [],
+    history: [],
+  });
 }
 
 export const handlers: MockHandlers = {
@@ -668,13 +628,13 @@ export const handlers: MockHandlers = {
       if (typeof l !== "string" || !isModLoader(l)) throw new IpcError("invalid_argument", `未知加载器 ${String(l)}`);
       return l;
     });
-    return byDateDesc(project(platform, projectId).versions).filter((v) => matchesFilters(v, gameVersions, loaders));
+    return newestFirst(projectVersions(platform, projectId)).filter((v) => matchesFilters(v, gameVersions, loaders));
   },
   match_instances: (args): InstanceMatch[] => {
     const platform = parsePlatform(args.platform);
     const projectId = requireNonEmpty(args.projectId, "projectId");
     const pinned = args.modVersionId === null || args.modVersionId === undefined ? null : requireNonEmpty(args.modVersionId, "modVersionId");
-    const versions = pinned === null ? project(platform, projectId).versions : [findVersion(platform, projectId, pinned)];
+    const versions = pinned === null ? projectVersions(platform, projectId) : [findVersion(platform, projectId, pinned)];
     const ready = mockInstanceIds().filter((id) => mockInstanceFacts(id) !== null);
     const rows: InstanceMatch[] = ready.map((id) => {
       const instance = mockInstance(id);
@@ -699,6 +659,7 @@ export const handlers: MockHandlers = {
     });
     return rows.sort((a, b) => TIER[a.state] - TIER[b.state] || byCodeUnit(a.version_id, b.version_id));
   },
+  install_mod: installMod,
   plan_install: (args) => {
     const platform = parsePlatform(args.platform);
     const projectId = requireNonEmpty(args.projectId, "projectId");
@@ -709,7 +670,6 @@ export const handlers: MockHandlers = {
 };
 
 export function reset(): void {
-  catalog = seedCatalog();
   instances = seedInstances();
   busyFiles.clear();
 }

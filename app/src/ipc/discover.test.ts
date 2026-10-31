@@ -91,17 +91,23 @@ describe("发现 mock", () => {
     expect(shaders.hits.map((h) => h.title)).toEqual(["Faithful 32x", "Complementary Shaders - Reimagined"]);
 
     const optimization = await searchResources({ ...base, category: "optimization" });
-    expect(optimization.hits.map((h) => h.title)).toEqual(["Sodium", "Fabulously Optimized"]);
+    expect(optimization.hits.map((h) => h.title)).toEqual(["Sodium", "Lithium", "Fabulously Optimized"]);
 
+    // 只搜 CurseForge：合并卡只剩 CurseForge 那一份，卡面与数字都按它算
     const curseforge = await searchResources({ ...base, resourceTypes: ["mod"], platform: "curseforge" });
-    expect(curseforge.hits.map((h) => h.title)).toEqual(["Sodium", "Just Enough Items"]);
+    expect(curseforge.hits.map((h) => [h.title, h.platform, h.project_id, h.downloads])).toEqual([
+      ["Sodium", "curseforge", "394468", 41_000_000],
+      ["Fabric API", "curseforge", "306612", 230_000_000],
+      ["Just Enough Items", "curseforge", "238222", 380_000_000],
+    ]);
+    expect(curseforge.hits[0].sources.map((s) => s.platform)).toEqual(["curseforge"]);
     expect(curseforge.skipped).toEqual([{ platform: "modrinth", reason: "filtered" }]);
 
     const forge = await searchResources({ ...base, loaders: ["forge"] });
-    expect(forge.hits.map((h) => h.title)).toEqual(["Create", "Just Enough Items"]);
+    expect(forge.hits.map((h) => h.title)).toEqual(["Create", "Just Enough Items", "RLCraft"]);
 
     const keyword = await searchResources({ ...base, query: "  光影 " });
-    expect(keyword.hits.map((h) => h.title)).toEqual(["Complementary Shaders - Reimagined"]);
+    expect(keyword.hits.map((h) => h.title)).toEqual(["Iris Shaders", "Complementary Shaders - Reimagined"]);
   });
 
   it("按下载量降序；翻页游标原样回传直到 null", async () => {
@@ -144,9 +150,13 @@ describe("发现 mock", () => {
     expect(modrinth).toMatchObject({ title: "Sodium", body_format: "markdown", downloads: 98_000_000, distribution_allowed: true });
     const curseforge = await projectDetail("curseforge", "394468");
     expect(curseforge).toMatchObject({ project_id: "394468", body_format: "html", downloads: 41_000_000, follows: null });
-    // 安装直接用版本视图里的直链建下载任务，mock 也得带上，否则 Tauri 外跑不出安装路径。
-    expect(modrinth.latest_version?.download_url).toBe("https://cdn.modrinth.com/data/AANobbMI/sodium-1.0.0.jar");
-    expect(curseforge.latest_version?.download_url).toBe("https://edge.forgecdn.net/files/1/2/sodium-1.0.0.jar");
+    // 最新版本取目录里发布最晚的那个；安装直接用版本视图里的直链建下载任务，mock 也得带上
+    expect(modrinth.latest_version).toMatchObject({ version_id: "sodium-121", version_number: "0.6.5", file_name: "AANobbMI-0.6.5.jar" });
+    expect(modrinth.latest_version?.download_url).toBe("https://cdn.modrinth.com/data/AANobbMI/versions/sodium-121/AANobbMI-0.6.5.jar");
+    expect(curseforge.latest_version?.download_url).toBe("https://edge.forgecdn.net/files/5626/431/394468-0.6.5.jar");
+    // 必需前置取最新版本声明的，前置本身也在目录里
+    expect(modrinth.dependencies).toEqual([{ platform: "modrinth", project_id: "P7dR8mSH", title: "Fabric API", icon_url: null, author: "modmuss50", latest_version: "0.115.0" }]);
+    expect(curseforge.dependencies).toEqual([]);
     const missing = await projectDetail("modrinth", "nope").catch((e: unknown) => e);
     expect(missing).toMatchObject({ code: "mod_platform_failed" });
   });
@@ -161,11 +171,11 @@ describe("发现 mock", () => {
       world: null,
       platform: "modrinth",
       projectId: "HVnmMxH1",
-      fileVersionId: "v9",
+      fileVersionId: "cr-r53",
     });
     expect(shader).toEqual({
-      file_name: "complementary-reimagined-v9.zip",
-      path: "D:/Games/.minecraft/versions/1.21.1-Fabric/shaderpacks/complementary-reimagined-v9.zip",
+      file_name: "HVnmMxH1-r5.3.zip",
+      path: "D:/Games/.minecraft/versions/1.21.1-Fabric/shaderpacks/HVnmMxH1-r5.3.zip",
       platform: "modrinth",
       resource_type: "shader",
       world: null,
@@ -177,15 +187,15 @@ describe("发现 mock", () => {
       world: "新的世界",
       platform: "modrinth",
       projectId: "8oi3bsk5",
-      fileVersionId: "v2",
+      fileVersionId: "tl-254",
     });
-    expect(datapack.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/saves/新的世界/datapacks/terralith-v2.zip");
+    expect(datapack.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/saves/新的世界/datapacks/8oi3bsk5-2.5.4.zip");
     expect(datapack.world).toBe("新的世界");
     off();
     expect(events.length).toBeGreaterThan(0);
     expect(new Set(events.map((e) => e.task_id))).toEqual(new Set(["t-sh", "t-dp"]));
     const last = events.filter((e) => e.kind === "download" && e.task_id === "t-sh").pop();
-    expect(last).toMatchObject({ finished: 1, bytes: 4_194_304, total_bytes: 4_194_304 });
+    expect(last).toMatchObject({ finished: 1, bytes: 3_145_728, total_bytes: 3_145_728 });
   });
 
   it("安装目标不成立时报对应的码", async () => {
@@ -206,6 +216,9 @@ describe("发现 mock", () => {
     expect(ghost).toMatchObject({ code: "version_not_installed", detail: { id: "ghost" } });
     const broken = await installMod("t-b", "没装完", "modrinth", "AANobbMI", "v").catch((e: unknown) => e);
     expect(broken).toMatchObject({ code: "version_not_installed", detail: { id: "没装完" } });
+    // 平台上没有这个版本：与后端解析文件时一样报 mod_version_not_found
+    const noVersion = await installResource({ ...args, resourceType: "data_pack", world: "新的世界", fileVersionId: "nope" }).catch((e: unknown) => e);
+    expect(noVersion).toMatchObject({ code: "mod_version_not_found" });
   });
 
   it("下载途中取消以 cancelled 结束，任务随之注销", async () => {
@@ -216,12 +229,12 @@ describe("发现 mock", () => {
       world: null,
       platform: "modrinth" as const,
       projectId: "faithful-32x",
-      fileVersionId: "v1",
+      fileVersionId: "f32-1211",
     };
     const running = installResource(args).catch((e: unknown) => e);
     expect(await cancelTask("t-cancel")).toBe(true);
     expect(await running).toMatchObject({ code: "cancelled" });
     expect(await cancelTask("t-cancel")).toBe(false);
-    expect((await installResource({ ...args, taskId: "t-retry" })).file_name).toBe("faithful-32x-v1.zip");
+    expect((await installResource({ ...args, taskId: "t-retry" })).file_name).toBe("faithful-32x-1.21.1-r2.zip");
   });
 });
