@@ -128,7 +128,7 @@ pub enum LaunchAccount {
     /// 临时离线账户：只校验名字，不落库。
     Offline { name: String },
     /// 账户库里的账户（含令牌）。
-    Stored(Account),
+    Stored(Box<Account>),
 }
 
 /// 一次启动的输入。
@@ -771,7 +771,7 @@ impl Aurora {
                 }
                 account
             }
-            LaunchAccount::Stored(account) => self.refresh_for_launch(account).await?,
+            LaunchAccount::Stored(account) => self.refresh_for_launch(*account).await?,
         };
         let auth = AuthValues::from_account(&account)?;
         Ok((account, auth))

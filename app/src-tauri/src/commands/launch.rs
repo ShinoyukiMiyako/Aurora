@@ -362,7 +362,9 @@ pub async fn launch_game(
     let launched = task
         .run(async {
             let account = match account {
-                AccountArg::Stored(uuid) => LaunchAccount::Stored(find_account(&aurora, &uuid)?),
+                AccountArg::Stored(uuid) => {
+                    LaunchAccount::Stored(Box::new(find_account(&aurora, &uuid)?))
+                }
                 AccountArg::Offline(name) => LaunchAccount::Offline { name },
             };
             let request = LaunchRequest {
