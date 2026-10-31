@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { IpcError } from "../../ipc/errors";
-import { droppedFile, previewErrorText } from "./ImportModpackDialog";
+import type { ModpackPreviewDto, PackModDto } from "../../ipc/modpack";
+import { claimStatuses, destinationDir } from "./BlockedFilesModal";
+import { droppedFile, excludedPaths, previewErrorText } from "./ImportModpackDialog";
 
 describe("droppedFile", () => {
   it("一次拖进几个文件时读第一个整合包，扩展名不分大小写", () => {
@@ -29,5 +31,68 @@ describe("previewErrorText", () => {
     expect(previewErrorText(new IpcError("modpack_corrupt", "zip 头损坏"))).toBe("文件不完整或已损坏，重新下载一份再试");
     expect(previewErrorText(new IpcError("modpack_manifest_invalid", "缺少 minecraft 字段"))).toBe("整合包清单读不出来：缺少 minecraft 字段");
     expect(previewErrorText(new IpcError("curseforge_key_missing", "CurseForge API key 未配置"))).toBe("CurseForge API key 未配置");
+  });
+
+  it("不支持的压缩方式：写出解码后的条目名；后端没带条目名时抛错，不编一个", () => {
+    const error = new IpcError("modpack_unsupported_compression", "整合包用了不支持的压缩方式（方法编号 93）：overrides/配置/说明.txt", {
+      path: "D:\\packs\\a.zip",
+      entry: "overrides/配置/说明.txt",
+      method: 93,
+    });
+    expect(previewErrorText(error)).toBe("这个整合包用了不支持的压缩方式（overrides/配置/说明.txt），用整合包作者发布的原始文件再试");
+    expect(() => previewErrorText(new IpcError("modpack_unsupported_compression", "x", { path: "a.zip", method: 93 }))).toThrow("没有带条目名");
+    expect(() => previewErrorText(new IpcError("modpack_unsupported_compression", "x"))).toThrow("没有带条目名");
+  });
+});
+
+function entry(path: string, optional: boolean): PackModDto {
+  const name = path.split("/").pop();
+  if (name === undefined) throw new Error("空路径");
+  return { path, file_name: name, origin: "remote", optional, project_id: null, file_id: null, availability: "download" };
+}
+
+describe("excludedPaths", () => {
+  const preview = {
+    mods: [entry("mods/a.jar", false), entry("mods/b.jar", true), entry("mods/c.jar", true)],
+    optional_extras: [entry("resourcepacks/r.zip", true)],
+  } as Pick<ModpackPreviewDto, "mods" | "optional_extras"> as ModpackPreviewDto;
+
+  it("按清单顺序给出取消勾选的可选文件；什么都没取消时为空", () => {
+    expect(excludedPaths(preview, new Set())).toEqual([]);
+    expect(excludedPaths(preview, new Set(["resourcepacks/r.zip", "mods/c.jar"]))).toEqual(["mods/c.jar", "resourcepacks/r.zip"]);
+  });
+
+  it("重新读取后不再是可选文件、或不在清单里的落点不带上", () => {
+    expect(excludedPaths(preview, new Set(["mods/a.jar", "mods/gone.jar", "mods/b.jar"]))).toEqual(["mods/b.jar"]);
+  });
+});
+
+describe("需要手动下载的文件清单", () => {
+  const file = (id: number, destination: string) => ({
+    project_id: 1,
+    file_id: id,
+    file_name: `f${id}.jar`,
+    web_url: `https://www.curseforge.com/minecraft/mc-mods/x/files/${id}`,
+    destination,
+    sha1: null,
+    fingerprint: 0,
+    size: null,
+  });
+
+  it("落点目录取最后一个斜杠之前；不在子目录里的落点违反契约", () => {
+    expect(destinationDir("mods/a.jar")).toBe("mods");
+    expect(destinationDir("config/sub/a.json")).toBe("config/sub");
+    expect(() => destinationDir("a.jar")).toThrow("不在任何子目录里");
+    expect(() => destinationDir("/a.jar")).toThrow("不在任何子目录里");
+  });
+
+  it("按认领结果给每个文件定状态；结果没覆盖到的文件直接报错", () => {
+    const files = [file(1, "mods/f1.jar"), file(2, "mods/f2.jar"), file(3, "shaderpacks/f3.zip")];
+    expect([...claimStatuses(files, { claimed: [{ file_id: 3, source_path: "x" }, { file_id: 1, source_path: "y" }], missing: [2] })]).toEqual([
+      [1, "found"],
+      [2, "missing"],
+      [3, "found"],
+    ]);
+    expect(() => claimStatuses(files, { claimed: [{ file_id: 1, source_path: "y" }], missing: [2] })).toThrow("认领结果里没有文件 f3.jar（3）");
   });
 });

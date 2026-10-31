@@ -230,3 +230,82 @@
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/* ---- 导入确认步：包内 Mod 与其他可选文件 ---- */
+.modSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+}
+
+/* 最多露出 8 行（紧凑行高 44、行距 2），多出来的在列表里滚动，弹窗本身不滚 */
+.modList {
+  --mod-row: 44px;
+  max-height: calc(var(--mod-row) * 8 + var(--sk-space-2) * 7);
+  overflow-y: auto;
+}
+
+.modName {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+/* 窄档里状态标签换到文件名下一行，勾选框仍在行尾 */
+.modTagBelow {
+  display: flex;
+  margin-top: var(--sk-space-2);
+}
+
+.modTrailing {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.rereading {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* ---- 需要手动下载的文件清单 ---- */
+.blocked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+}
+
+.blockedIntro {
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* 最多露出 6 行（标准行高 56、行距 2），多出来的在列表里滚动 */
+.blockedList {
+  --blocked-row: 56px;
+  max-height: calc(var(--blocked-row) * 6 + var(--sk-space-2) * 5);
+  overflow-y: auto;
+}
+
+.blockedName {
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.blockedDest {
+  font-size: var(--sk-fs-caption);
+  color: var(--sk-text-3);
+}
+
+/* 淡入淡出的标签外层：不成块、不占额外间距 */
+.fadeInline {
+  display: inline-flex;
+}

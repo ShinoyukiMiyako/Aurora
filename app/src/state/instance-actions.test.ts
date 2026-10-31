@@ -612,6 +612,7 @@ describe("新建与导入结束后，占位项留到这次结束触发的重扫�
       mcVersion: "1.20.1",
       loader: "fabric",
       loaderVersion: "0.16.10",
+      excludedOptional: [],
     });
     await settle();
     scan = deferred<InstanceDto[]>();

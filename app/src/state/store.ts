@@ -56,7 +56,7 @@ import {
   TASK_JOURNAL_DEBOUNCE_MS,
 } from "../domain/limits";
 import { instanceNameError, validateOfflineName } from "../domain/rules";
-import type { FailureCode, LoaderKind, Platform, Task, TaskKind } from "../domain/types";
+import type { FailureCode, LoaderKind, Platform, Task, TaskError, TaskKind } from "../domain/types";
 import * as accountsIpc from "../ipc/accounts";
 import { invoke, type UnlistenFn } from "../ipc/bridge";
 import * as configIpc from "../ipc/config";
@@ -68,7 +68,7 @@ import * as instancesIpc from "../ipc/instances";
 import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
 import type { InstalledRuntimeDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
-import type { ModpackInstallOutcomeDto, ModpackSource } from "../ipc/modpack";
+import { blockedFilesOf, claimBlockedFiles, downloadsFolder, parseBlockedFiles, type BlockedFileDto, type ClaimReportDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
 import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
@@ -132,6 +132,15 @@ import {
   type ToastsState,
 } from "./toasts";
 
+// 页面不能引用 ipc/：需要手动下载的文件清单与认领结果的形状经这里给出
+export type { BlockedFileDto, ClaimReportDto, PackFileAvailability, PackModDto } from "../ipc/modpack";
+
+/**
+ * 一次认领检查的结局：后端给出的认领结果，或选的文件夹读不了（不存在、不是文件夹、没有权限，错误码 io）时的后端原文。
+ * 文件夹读不了是这次检查本身的结果，清单原位说明；别的失败照常 reject，交给外层统一处理。
+ */
+export type ClaimOutcome = { kind: "report"; report: ClaimReportDto } | { kind: "folder_error"; message: string };
+
 // ---------------------------------------------------------------- 状态形状
 
 export type Slice = "settings" | "accounts" | "instances" | "pins" | "tasks" | "firstRun";
@@ -168,6 +177,8 @@ export interface InstallModpackSpec {
   mcVersion: string;
   loader: LoaderKind;
   loaderVersion: string | null;
+  /** 不装的可选文件落点（本地 .mrpack 预览里取消勾选的）；原样进任务参数，重试照旧带上。 */
+  excludedOptional: readonly string[];
 }
 
 export interface InstallResourceSpec {
@@ -314,6 +325,10 @@ export interface LauncherActions {
   openFolder(target: FolderTarget, id?: string | null, world?: string | null): Promise<void>;
   /** 用系统默认浏览器打开一个 http(s) 网址；别的协议直接抛错。打开失败原样抛出。 */
   openExternal(url: string): Promise<void>;
+  /** 系统的下载文件夹，选文件夹对话框的默认位置。 */
+  downloadsFolder(): Promise<string>;
+  /** 从用户选的文件夹里认领需要手动下载的文件；不登记任务、不占实例。 */
+  claimBlockedFiles(folder: string, files: readonly BlockedFileDto[]): Promise<ClaimOutcome>;
   refreshInstances(): Promise<void>;
   // 启动会话
   launch(id: string): Promise<void>;
@@ -390,6 +405,9 @@ const OPEN_URL_COMMAND = "plugin:opener|open_url";
 /** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
 
+/** 读写本机文件失败的错误码；认领时多半是选的文件夹读不了。 */
+const IO_ERROR_CODE = "io";
+
 /** load_task_journal 在日志文件损坏或版本不符时的错误码。 */
 const TASK_JOURNAL_INVALID_CODE = "task_journal_invalid";
 
@@ -434,6 +452,20 @@ function initialRaw(): RawState {
     launchPrompt: null,
     lastRename: null,
   };
+}
+
+/** 任务失败记录：需要手动下载的文件清单随记录进任务日志，失败态据此列出清单、重新检查后重试。 */
+function failureRecord(error: unknown): TaskError {
+  const record = errorRecord(error);
+  const blocked = blockedFilesOf(error);
+  return blocked === null ? record : { ...record, blocked_files: blocked };
+}
+
+/** 任务日志里读回的失败记录：带着清单时逐项校验，形状不对按日志损坏报错；较早的日志没有清单，原样读入。 */
+function journalTask(task: Task): Task {
+  const error = task.error;
+  if (error === null || error.blocked_files === undefined) return task;
+  return { ...task, error: { ...error, blocked_files: parseBlockedFiles(error.blocked_files, `任务 ${task.id} 的 error.blocked_files`) } };
 }
 
 function strArg(args: Record<string, unknown>, key: string, command: string): string {
@@ -1080,7 +1112,7 @@ export class LauncherStore {
     });
     if (this.journalState === "read") return;
     const now = Date.now();
-    const loaded = records.map(taskFromRecord);
+    const loaded = records.map((record) => journalTask(taskFromRecord(record)));
     this.journalState = "read";
     let changed = false;
     this.set((raw) => {
@@ -1526,7 +1558,7 @@ export class LauncherStore {
     } else {
       console.error(`任务失败：${before.title}`, error);
       this.net.reportFailure(error);
-      const record = errorRecord(error);
+      const record = failureRecord(error);
       this.set((raw) => ({
         tasks: trimHistory(markFailed(raw.tasks, id, attempt, record, Date.now())),
         unseenFailures: [...raw.unseenFailures, attemptTaskId(before)],
@@ -2053,7 +2085,7 @@ export class LauncherStore {
             title: TASK_TEXT.modpackTitle(spec.packName),
             detail: TASK_TEXT.modpackDetail(spec.packVersion, spec.modCount),
             instanceId: spec.name,
-            spec: { command: "install_modpack", args: { source: spec.source, name: spec.name } },
+            spec: { command: "install_modpack", args: { source: spec.source, name: spec.name, excludedOptional: [...spec.excludedOptional] } },
           },
           {
             type: "modpack",
@@ -2156,6 +2188,18 @@ export class LauncherStore {
         if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error(`只能打开 http(s) 网址：${url}`);
         // 交给 opener 插件的命令而不是 target="_blank" 的链接：注入脚本接管链接点击时不等结果，打开失败就悄悄没了
         await invoke<void>(OPEN_URL_COMMAND, { url: parsed.href });
+      },
+      async downloadsFolder() {
+        return downloadsFolder();
+      },
+      async claimBlockedFiles(folder, files) {
+        return claimBlockedFiles(folder, files).then(
+          (report): ClaimOutcome => ({ kind: "report", report }),
+          (error: unknown): ClaimOutcome => {
+            if (isIpcError(error) && error.code === IO_ERROR_CODE) return { kind: "folder_error", message: error.message };
+            throw error;
+          },
+        );
       },
       async refreshInstances() {
         await store.fetchInstances();
