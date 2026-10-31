@@ -10,10 +10,14 @@
 //! 读写库的方法是同步的（文件极小、DPAPI 是同步系统调用），由异步上下文调用时要放进
 //! `spawn_blocking`；本模块的异步方法自己这样做。登录、刷新这类要联网的流程先跑完网络、再开库写入：
 //! 库实例打开时读入整库、写回时整库覆盖，跨十几分钟的设备码轮询持有它，期间别处的改动就会被盖掉。
-//! 所有读写再经进程内一把锁串行，两次读改写不会交错丢更新。
+//! 所有读写再经进程内一把锁串行，两次读改写不会交错丢更新。同一账户的续期另按账户排队
+//! （`refresh_gate`），排在后面的一方以库里刚续出的凭据为准。
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
+
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use aurora_auth::{
     Account, AccountCredentials, AccountManager, AccountStatus, AuthError, DeviceCodeResponse,
@@ -57,6 +61,26 @@ fn lock_account_db() -> MutexGuard<'static, ()> {
     ACCOUNT_DB_LOCK
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// 每个账户一把续期闸：同一账户的续期（启动前的静默续期、账户页的手动刷新）一个接一个来。
+///
+/// 外置登录的刷新会让旧令牌当场作废，两次续期同时拿同一个旧令牌去刷，后到的一方必被服务器以
+/// 「令牌无效」拒绝，账户就被误判成需要重新登录。排在后面的一方拿到闸后先重读库里的凭据，
+/// 别人刚续出的新令牌直接接着用。表项只增不删：一个进程里出现过的账户屈指可数。
+static REFRESH_GATES: LazyLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+async fn refresh_gate(uuid: &str) -> OwnedMutexGuard<()> {
+    let gate = {
+        // 表里只有闸本身，中毒不携带需要放弃的状态。
+        let mut gates = REFRESH_GATES.lock().unwrap_or_else(PoisonError::into_inner);
+        gates
+            .entry(uuid.to_owned())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    };
+    gate.lock_owned().await
 }
 
 /// 外置登录服务器的探测结果。
@@ -466,11 +490,8 @@ impl Aurora {
     /// 服务器判定凭据失效（微软刷新令牌被判需重登、外置令牌被拒）时把账户落成「需要重新登录」并报
     /// [`AuthError::ReloginRequired`]；网络故障原样冒泡、状态不变。离线账户没有可刷新的凭据，原样返回。
     pub async fn refresh_account(&self, uuid: &str) -> Result<Account> {
-        let lookup = uuid.to_owned();
-        let account = self
-            .blocking(move |aurora| aurora.find_account(&lookup))
-            .await?
-            .ok_or_else(|| AuthError::AccountNotFound(uuid.to_owned()))?;
+        let _gate = refresh_gate(uuid).await;
+        let account = self.stored_account(uuid).await?;
         match &account.credentials {
             AccountCredentials::Microsoft(creds) => {
                 self.refresh_microsoft(&account, &creds.refresh_token).await
@@ -489,13 +510,27 @@ impl Aurora {
     /// - 离线：原样返回。
     ///
     /// 续期被判定为凭据失效时账户落成「需要重新登录」并报 [`AuthError::ReloginRequired`]。
+    ///
+    /// 要联网时先排进这个账户的续期闸，再以库里此刻的记录为准：排队期间别处可能刚续过，
+    /// 传进来的那份凭据已经作废。
     pub async fn ensure_account_fresh(&self, account: &Account) -> Result<Account> {
+        match &account.credentials {
+            AccountCredentials::Microsoft(creds)
+                if creds.minecraft_token_valid_at(unix_millis() / 1000) =>
+            {
+                return Ok(account.clone());
+            }
+            AccountCredentials::Offline => return Ok(account.clone()),
+            AccountCredentials::Microsoft(_) | AccountCredentials::AuthlibInjector(_) => {}
+        }
+        let _gate = refresh_gate(&account.uuid).await;
+        let account = self.stored_account(&account.uuid).await?;
         match &account.credentials {
             AccountCredentials::Microsoft(creds) => {
                 if creds.minecraft_token_valid_at(unix_millis() / 1000) {
                     return Ok(account.clone());
                 }
-                self.refresh_microsoft(account, &creds.refresh_token).await
+                self.refresh_microsoft(&account, &creds.refresh_token).await
             }
             AccountCredentials::AuthlibInjector(creds) => {
                 let client = self.yggdrasil(&creds.api_root);
@@ -513,10 +548,18 @@ impl Aurora {
                         })
                         .await;
                 }
-                self.refresh_authlib(account, creds).await
+                self.refresh_authlib(&account, creds).await
             }
             AccountCredentials::Offline => Ok(account.clone()),
         }
+    }
+
+    /// 在阻塞线程池上按 uuid 取库里的账户，不存在即报 [`AuthError::AccountNotFound`]。
+    async fn stored_account(&self, uuid: &str) -> Result<Account> {
+        let lookup = uuid.to_owned();
+        self.blocking(move |aurora| aurora.find_account(&lookup))
+            .await?
+            .ok_or_else(|| AuthError::AccountNotFound(uuid.to_owned()).into())
     }
 
     async fn refresh_microsoft(&self, account: &Account, refresh_token: &str) -> Result<Account> {
@@ -1431,6 +1474,112 @@ mod tests {
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
             let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
             assert_eq!(stored.status, AccountStatus::Expired);
+        }
+
+        /// 启动前的静默续期与账户页的手动刷新同时撞上同一个外置账户。外置刷新会让旧令牌当场作废：
+        /// 两边都拿旧令牌去刷时后到的一方必被服务器拒绝，账户被误判成需要重新登录、启动随之失败。
+        /// 续期按账户排队、后到的一方先重读库里的凭据之后，两边都成功，旧令牌只被刷一次。
+        /// 去掉续期闸，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn concurrent_authlib_refreshes_do_not_burn_each_others_token() {
+            let server = MockServer::start().await;
+            mount_yggdrasil(&server, json!({})).await;
+            let forbidden = || {
+                ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                }))
+            };
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .and(body_partial_json(json!({ "accessToken": "stale" })))
+                .respond_with(forbidden())
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .and(body_partial_json(json!({ "accessToken": "fresh" })))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            // 头一次拿旧令牌刷新成功，但慢一拍，好让另一边在它返回前也发出请求；之后旧令牌作废。
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .and(body_partial_json(json!({ "accessToken": "stale" })))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({
+                            "accessToken": "fresh", "clientToken": "cli",
+                            "selectedProfile": { "id": HERO, "name": "Hero" }
+                        }))
+                        .set_delay(Duration::from_millis(300)),
+                )
+                .up_to_n_times(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .and(body_partial_json(json!({ "accessToken": "stale" })))
+                .respond_with(forbidden())
+                .mount(&server)
+                .await;
+            // 手动刷新排在后面时，拿到的是刚续出的新令牌，照常再轮换一次。
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .and(body_partial_json(json!({ "accessToken": "fresh" })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "accessToken": "fresher", "clientToken": "cli",
+                    "selectedProfile": { "id": HERO, "name": "Hero" }
+                })))
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let account = aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "stale".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: HERO.into(),
+                        name: "Hero".into(),
+                    },
+                    None,
+                ))
+                .unwrap();
+
+            let (launch, manual) = tokio::join!(
+                aurora.ensure_account_fresh(&account),
+                aurora.refresh_account(HERO)
+            );
+            let launch = launch.expect("启动前的续期不该被另一次刷新拖成需重登");
+            let manual = manual.expect("手动刷新不该被另一次续期拖成需重登");
+            for refreshed in [&launch, &manual] {
+                match &refreshed.credentials {
+                    AccountCredentials::AuthlibInjector(c) => assert_ne!(c.access_token, "stale"),
+                    other => panic!("期望外置凭据，得到 {other:?}"),
+                }
+            }
+            let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
+            assert_eq!(stored.status, AccountStatus::Ok);
+            let stale_refreshes = server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| {
+                    r.url.path() == "/authserver/refresh"
+                        && serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()
+                            ["accessToken"]
+                            == "stale"
+                })
+                .count();
+            assert_eq!(stale_refreshes, 1, "旧令牌只该被刷一次");
         }
 
         /// 刷新换了令牌，登录账号照旧留着：重新登录时还要拿它预填。
