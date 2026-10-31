@@ -155,6 +155,13 @@ pub enum CoreError {
     /// 读不到本机物理内存信息。
     #[error("读不到本机内存信息")]
     MemoryUnavailable,
+    /// 读写 Windows 图形设置里某个程序的显卡偏好失败。`path` 是那个程序。
+    #[error("写入 {path} 的显卡偏好失败")]
+    GpuPreferenceWrite {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。

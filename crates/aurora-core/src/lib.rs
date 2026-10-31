@@ -34,6 +34,7 @@ pub mod error;
 pub mod event;
 pub mod facade;
 pub mod folders;
+mod gpu;
 pub mod history;
 pub mod install;
 pub mod instance_install;
