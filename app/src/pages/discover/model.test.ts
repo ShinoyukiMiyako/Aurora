@@ -23,6 +23,7 @@ import {
   routeSignature,
   searchArgsOf,
   searchKey,
+  stalledPage,
   toggleCategory,
   withFitInstance,
   withGameVersion,
@@ -168,6 +169,22 @@ describe("分页累积", () => {
       }
       expect(acc.map(hitKey)).toEqual(firstSeen);
     }
+  });
+
+  it("原地踏步：有平台失败、下一页游标与请求的完全相同才算；没失败、到底了、游标动了一点都不算", () => {
+    const cursor = {
+      modrinth: { offset: 24, exhausted: true, total: 24, absorbed: [] },
+      curseforge: { offset: 0, exhausted: false, total: null, absorbed: [] },
+    };
+    const request = { ...searchArgsOf(DEFAULT_FILTERS, ""), cursor };
+    const failed = [{ platform: "curseforge" as const, message: "503" }];
+    expect(stalledPage(request, result([], { errors: failed, next_cursor: structuredClone(cursor) }))).toBe(true);
+    expect(stalledPage(request, result([], { next_cursor: structuredClone(cursor) }))).toBe(false);
+    expect(stalledPage(request, result([], { errors: failed, next_cursor: null }))).toBe(false);
+    expect(stalledPage(request, result([], { errors: failed, next_cursor: { ...cursor, modrinth: { ...cursor.modrinth, offset: 25 } } }))).toBe(false);
+    expect(stalledPage(request, result([], { errors: failed, next_cursor: { ...cursor, curseforge: { ...cursor.curseforge, absorbed: ["X"] } } }))).toBe(false);
+    // 首页请求不带游标，给回的游标总是新的
+    expect(stalledPage(searchArgsOf(DEFAULT_FILTERS, ""), result([], { errors: failed, next_cursor: cursor }))).toBe(false);
   });
 });
 
