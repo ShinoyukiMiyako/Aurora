@@ -56,6 +56,7 @@ pub mod resources;
 pub mod search;
 pub mod servers;
 pub mod session;
+pub mod starter;
 pub mod template;
 pub mod updates;
 pub mod versions;
@@ -99,6 +100,10 @@ pub use resources::{ResourceInstallOutcome, ResourceTarget};
 pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
+};
+pub use starter::{
+    StarterEntry, StarterGroup, StarterMissing, StarterMissingReason, StarterMod, StarterMods,
+    starter_table,
 };
 pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
 pub use updates::UpdateCandidate;
