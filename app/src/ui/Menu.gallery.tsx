@@ -8,6 +8,7 @@ const INSTANCE_ACTIONS: MenuEntry[] = [
   { label: "打开实例文件夹", icon: "folder-open", onSelect: () => undefined },
   { label: "复制实例", icon: "copy", hint: "Ctrl D", onSelect: () => undefined },
   { label: "导出整合包", icon: "upload", disabled: true, onSelect: () => undefined },
+  { label: "重命名", icon: "edit", disabled: true, disabledReason: "游戏正在运行，先结束游戏", onSelect: () => undefined },
   { label: "固定到侧栏", icon: "pin", onSelect: () => undefined },
   { kind: "separator" },
   { label: "删除实例", icon: "trash", danger: true, onSelect: () => undefined },

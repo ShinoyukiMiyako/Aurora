@@ -249,6 +249,80 @@ describe("定位", () => {
   });
 });
 
+describe("间距与禁用原因", () => {
+  const noop = () => undefined;
+
+  /** 把菜单面板放到 960 x 720 的浮层根里、锚点在 (100, 100) 起 36 x 30 处，返回面板。 */
+  function placeMenu(container: HTMLElement) {
+    const root = container.querySelector("[data-sk-overlay-root]") as HTMLElement;
+    const panel = menu()?.parentElement as HTMLElement;
+    setRect(root, { left: 0, top: 0, width: 960, height: 720 });
+    setRect(trigger(), { left: 100, top: 100, width: 36, height: 30 });
+    Object.defineProperty(panel, "offsetWidth", { configurable: true, value: 200 });
+    Object.defineProperty(panel, "offsetHeight", { configurable: true, value: 120 });
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+    });
+    return panel;
+  }
+
+  it.each([
+    [undefined, 138],
+    [0, 130],
+    [4, 134],
+    [12, 142],
+  ] as const)("offset=%s：菜单顶边落在锚点底边 130 之下 %s", (offset, top) => {
+    const { container } = mount(<MoreMenu items={entries(noop)} placement="bottom-start" offset={offset} />);
+    openMenu(1);
+    const panel = placeMenu(container);
+    expect(panel.style.left).toBe("100px");
+    expect(panel.style.top).toBe(`${top}px`);
+  });
+
+  it("禁用项给了原因：指针停留后以提示气泡写明，并经 aria-describedby 关联到该项", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      mount(
+        <MoreMenu
+          items={[
+            { label: "打开实例文件夹", onSelect: noop },
+            { label: "重命名", disabled: true, disabledReason: "游戏正在运行，先结束游戏", onSelect: noop },
+          ]}
+        />,
+      );
+      openMenu(1);
+      const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => el.textContent === "重命名") as HTMLElement;
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      act(() => {
+        item.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      act(() => vi.advanceTimersByTime(1000));
+      const tip = document.querySelector<HTMLElement>('[role="tooltip"]');
+      expect(tip?.textContent).toBe("游戏正在运行，先结束游戏");
+      expect(item.getAttribute("aria-describedby")).toBe(tip?.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("没有原因的禁用项与可用项不挂提示气泡", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      mount(<MoreMenu items={entries(noop)} />);
+      openMenu(1);
+      for (const item of document.querySelectorAll('[role="menuitem"]')) {
+        act(() => {
+          item.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+        });
+      }
+      act(() => vi.advanceTimersByTime(1000));
+      expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("菜单形状约束", () => {
   const noop = () => undefined;
   const assertThrows = (items: MenuEntry[], message: string) => {
@@ -259,6 +333,10 @@ describe("菜单形状约束", () => {
   it("危险项必须在最后，且前面有分隔线", () => {
     assertThrows([{ label: "删除", danger: true, onSelect: noop }, { label: "复制", onSelect: noop }], "危险项必须集中放在菜单最后");
     assertThrows([{ label: "复制", onSelect: noop }, { label: "删除", danger: true, onSelect: noop }], "危险项前面必须有一条分隔线");
+  });
+
+  it("禁用原因只能给禁用项", () => {
+    assertThrows([{ label: "重命名", disabledReason: "游戏正在运行", onSelect: noop }], "菜单项「重命名」给了禁用原因却没有禁用");
   });
 
   it("可操作项不超过 10 个", () => {
