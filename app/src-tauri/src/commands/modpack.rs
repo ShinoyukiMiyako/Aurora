@@ -1,11 +1,11 @@
-//! 整合包：预览本地整合包文件，把平台或本地整合包导入为新实例。
+//! 整合包：预览本地整合包文件、不下载整包读平台整合包的清单摘要，把平台或本地整合包导入为新实例。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use aurora_core::{
     Aurora, EventSink, InstanceModpack, MarkerError, MarkerSettlement, ModpackInstallOutcome,
-    ModpackPreview, ModpackSource, PackFormat, PackLoader,
+    ModpackPreview, ModpackSource, ModpackSummary, PackFormat, PackLoader,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -47,6 +47,62 @@ pub struct ModpackPreviewDto {
     pub remote_bytes: Option<u64>,
     pub override_files: usize,
     pub override_bytes: u64,
+}
+
+/// 平台整合包版本的清单摘要 DTO。
+#[derive(Debug, Serialize)]
+pub struct ModpackSummaryDto {
+    pub format: PackFormat,
+    pub name: String,
+    pub version: Option<String>,
+    pub minecraft: String,
+    pub loader: Option<PackLoader>,
+    /// 整合包文件本身的字节数。
+    pub pack_bytes: u64,
+    /// 导入时要另外下载的远程文件数。
+    pub remote_files: usize,
+    /// 远程文件里落进 mods/ 的个数；CurseForge 清单分不出哪些是 Mod，为 `null`。
+    pub mod_files: Option<usize>,
+    /// 远程文件总字节数；CurseForge 清单不带大小，为 `null`。
+    pub remote_bytes: Option<u64>,
+    pub override_files: usize,
+    pub override_bytes: u64,
+}
+
+/// 平台整合包某个版本的清单摘要（Mod 数、要下载的字节）。只按范围读包末尾的目录与清单条目，
+/// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`。
+#[tauri::command]
+pub async fn summarize_platform_modpack(
+    platform: String,
+    project_id: String,
+    version_id: String,
+    facade: State<'_, Facade>,
+) -> Result<ModpackSummaryDto, CommandError> {
+    let platform = parse_platform(&platform)?;
+    let project_id = non_blank("project_id", &project_id)?;
+    let version_id = non_blank("version_id", &version_id)?;
+    let aurora = facade.snapshot().await;
+    Ok(summary_dto(
+        aurora
+            .summarize_platform_modpack(platform, project_id, version_id)
+            .await?,
+    ))
+}
+
+fn summary_dto(summary: ModpackSummary) -> ModpackSummaryDto {
+    ModpackSummaryDto {
+        format: summary.format,
+        name: summary.name,
+        version: summary.version,
+        minecraft: summary.minecraft,
+        loader: summary.loader,
+        pack_bytes: summary.pack_bytes,
+        remote_files: summary.remote_files,
+        mod_files: summary.mod_files,
+        remote_bytes: summary.remote_bytes,
+        override_files: summary.override_files,
+        override_bytes: summary.override_bytes,
+    }
 }
 
 /// 整合包导入结果 DTO。

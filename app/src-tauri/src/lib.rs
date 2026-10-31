@@ -163,6 +163,7 @@ pub fn run() {
             commands::discover::install_resource,
             // -- modpack --
             commands::modpack::preview_modpack,
+            commands::modpack::summarize_platform_modpack,
             commands::modpack::install_modpack,
             // -- system --
             commands::system::memory_advice,

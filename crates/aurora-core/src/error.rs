@@ -128,6 +128,9 @@ pub enum CoreError {
         #[source]
         source: reqwest::Error,
     },
+    /// 只读远端整合包的目录与清单时读不下去：服务器不支持范围读取、不是可读的 zip、缺清单。
+    #[error("读不了远端整合包 {url} 的清单：{reason}")]
+    RemotePack { url: String, reason: String },
     /// 远端内容源返回的内容不是预期的格式。
     #[error("解析 {url} 的内容失败")]
     FeedParse {

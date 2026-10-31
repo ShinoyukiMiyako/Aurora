@@ -31,6 +31,25 @@ export interface ModpackPreviewDto {
   override_bytes: number;
 }
 
+/** 平台整合包某个版本的清单摘要：不下载整包，只读包末尾的目录与清单。 */
+export interface ModpackSummaryDto {
+  format: PackFormat;
+  name: string;
+  version: string | null;
+  minecraft: string;
+  loader: PackLoader | null;
+  /** 整合包文件本身的字节数。 */
+  pack_bytes: number;
+  /** 导入时要另外下载的远程文件数。 */
+  remote_files: number;
+  /** 远程文件里落进 mods/ 的个数；CurseForge 清单分不出哪些是 Mod，为 null。 */
+  mod_files: number | null;
+  /** 远程文件总字节数；CurseForge 清单不带大小，为 null。 */
+  remote_bytes: number | null;
+  override_files: number;
+  override_bytes: number;
+}
+
 /** 实例里记下的整合包信息。 */
 export interface InstanceModpack {
   schema: number;
@@ -64,6 +83,13 @@ export type InstanceNameRule = "empty" | "too_long" | "illegal_char" | "reserved
 export const INSTANCE_NAME_MAX_CHARS = 32;
 
 export const previewModpack = (path: string): Promise<ModpackPreviewDto> => invoke<ModpackPreviewDto>("preview_modpack", { path });
+
+/**
+ * 平台整合包某个版本的 Mod 数与要下载的字节，供安装前确认。只按范围读包末尾的目录与清单条目，
+ * 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 remote_pack_unreadable（detail.url、detail.reason）。
+ */
+export const summarizePlatformModpack = (platform: Platform, projectId: string, versionId: string): Promise<ModpackSummaryDto> =>
+  invoke<ModpackSummaryDto>("summarize_platform_modpack", { platform, projectId, versionId });
 
 /**
  * 长任务：把整合包导入为新实例。name 为 null 时用整合包自己的名字。

@@ -4,7 +4,7 @@
 
 import type { PlatformId } from "../../discover";
 import { IpcError } from "../../errors";
-import type { InstanceNameRule, ModpackInstallOutcomeDto, ModpackPreviewDto, ModpackSource, PackFormat } from "../../modpack";
+import type { InstanceNameRule, ModpackInstallOutcomeDto, ModpackPreviewDto, ModpackSource, ModpackSummaryDto, PackFormat } from "../../modpack";
 import { INSTANCE_NAME_MAX_CHARS } from "../../modpack";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, findCatalogueItem, parsePlatform, runMockTask, simulateDownload } from "./discover";
@@ -163,7 +163,34 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   });
 }
 
+/** 与导入时同一份假清单：48 个远程文件里 41 个是 Mod。 */
+function summarizeModpack(args: MockArgs): ModpackSummaryDto {
+  const read = argReader("summarize_platform_modpack", args);
+  const source: ModpackSource = {
+    kind: "platform",
+    platform: parsePlatform(read.string("platform")),
+    project_id: nonBlank("project_id", read.string("projectId")),
+    version_id: nonBlank("version_id", read.string("versionId")),
+  };
+  const pack = packOf(source);
+  const modrinth = pack.format === "modrinth";
+  return {
+    format: pack.format,
+    name: pack.name,
+    version: MOCK_PACK_VERSION,
+    minecraft: MOCK_MINECRAFT,
+    loader: { kind: "fabric", version: "0.16.9" },
+    pack_bytes: 2_412_544,
+    remote_files: 48,
+    mod_files: modrinth ? 41 : null,
+    remote_bytes: modrinth ? 96_468_992 : null,
+    override_files: 57,
+    override_bytes: 364_233,
+  };
+}
+
 export const handlers: MockHandlers = {
   preview_modpack: previewModpack,
+  summarize_platform_modpack: summarizeModpack,
   install_modpack: installModpack,
 };

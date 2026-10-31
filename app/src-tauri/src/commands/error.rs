@@ -100,6 +100,8 @@ pub mod code {
     pub const NETWORK_FAILED: &str = "network_failed";
     /// 远端内容源返回的内容解析不了，detail.url 为请求地址。
     pub const FEED_INVALID: &str = "feed_invalid";
+    /// 只读远端整合包的清单时读不下去（服务器不支持范围读取、不是可读的 zip、缺清单），detail.url、detail.reason。
+    pub const REMOTE_PACK_UNREADABLE: &str = "remote_pack_unreadable";
     /// 游戏目录不能用，detail.path 与 detail.problem（empty / not_absolute / contains_bang / unavailable）。
     pub const INVALID_GAME_DIRECTORY: &str = "invalid_game_directory";
     /// 读不到本机物理内存信息。
@@ -257,6 +259,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::SystemClock(_) => code::SYSTEM_CLOCK,
         CoreError::Fetch { .. } => code::NETWORK_FAILED,
         CoreError::FeedParse { .. } => code::FEED_INVALID,
+        CoreError::RemotePack { .. } => code::REMOTE_PACK_UNREADABLE,
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
@@ -454,6 +457,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         }
         CoreError::Fetch { url, .. } | CoreError::FeedParse { url, .. } => {
             detail.insert("url".to_owned(), json!(url));
+        }
+        CoreError::RemotePack { url, reason } => {
+            detail.insert("url".to_owned(), json!(url));
+            detail.insert("reason".to_owned(), json!(reason));
         }
         CoreError::InvalidServerAddress { address, reason } => {
             detail.insert("address".to_owned(), json!(address));
@@ -693,6 +700,16 @@ mod tests {
         .into();
         assert_eq!(feed.code, code::FEED_INVALID);
         assert_eq!(feed.detail.unwrap()["url"], json!("https://x/news.json"));
+
+        let pack: CommandError = CoreError::RemotePack {
+            url: "https://cdn/pack.mrpack".into(),
+            reason: "服务器不支持按范围读取".into(),
+        }
+        .into();
+        assert_eq!(pack.code, code::REMOTE_PACK_UNREADABLE);
+        let detail = pack.detail.unwrap();
+        assert_eq!(detail["url"], json!("https://cdn/pack.mrpack"));
+        assert_eq!(detail["reason"], json!("服务器不支持按范围读取"));
     }
 
     #[test]

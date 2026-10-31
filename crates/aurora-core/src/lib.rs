@@ -46,6 +46,7 @@ pub mod loaders;
 pub mod memory;
 mod modfs;
 pub mod modpack;
+pub mod modpack_summary;
 pub mod mods;
 pub mod modversions;
 pub mod news;
@@ -85,6 +86,7 @@ pub use modpack::{
     INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
     ModpackPreview, ModpackSource, PreparedModpack, read_instance_modpack, validate_instance_name,
 };
+pub use modpack_summary::ModpackSummary;
 pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
 pub use modversions::ProjectInfo;
 pub use news::{NewsFeed, NewsItem, NewsTag};

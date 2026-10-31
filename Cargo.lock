@@ -354,6 +354,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "fastrand",
+ "flate2",
  "fs2",
  "image",
  "reqwest",
