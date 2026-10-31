@@ -1,8 +1,9 @@
 // 启动链路的假后端：八阶段推进、同一时间只运行一个游戏、结束与退出、游玩统计。
-// 游戏不会自己退出：浏览器里看界面时用 endMockGame 模拟正常退出或崩溃，用 failNextMockLaunch 模拟启动失败。
+// 游戏不会自己退出：浏览器里看界面时用 endMockGame 模拟正常退出或崩溃，用 failNextMockLaunch 模拟启动失败，
+// 用 setMockLaunchWarnings 给下一份崩溃报告带上启动提醒。崩溃报告只扫会话日志，不模拟 hs_err 与 crash-reports 文件。
 
 import type { ConfigDto } from "../../config";
-import type { CrashReportDto, LaunchLogDto, SessionOutcome } from "../../diagnostics";
+import type { CrashClueDto, CrashReportDto, ExitCodeKind, ExitCodeNoteDto, LaunchLogDto, LaunchWarningCode, SessionOutcome } from "../../diagnostics";
 import { IpcError } from "../../errors";
 import {
   BUSY_ERROR_CODE,
@@ -61,6 +62,62 @@ const CRASH_TAIL = [
   "java.lang.OutOfMemoryError: Java heap space",
 ];
 
+/** 本地代码崩掉（访问冲突、紧急中止）时 JVM 来不及打印 Java 异常：尾部只有普通输出，诊断只能落到退出码上。 */
+const NATIVE_CRASH_TAIL = CRASH_TAIL.slice(0, 2);
+
+const OOM_MARKER = "OutOfMemoryError";
+
+/** 与后端的退出码对照表一致；nativeCrash 为真的码在日志没有命中时兜底出一条 native_crash 线索。 */
+const EXIT_CODES: ReadonlyMap<number, { kind: ExitCodeKind; summary: string; nativeCrash: boolean }> = new Map([
+  [-1073741819, { kind: "access_violation", summary: "访问冲突（STATUS_ACCESS_VIOLATION）：进程读写了不允许访问的内存", nativeCrash: true }],
+  [-1073740791, { kind: "stack_buffer_overrun", summary: "紧急中止（STATUS_STACK_BUFFER_OVERRUN）：进程检测到栈缓冲区溢出或主动快速失败", nativeCrash: true }],
+  [1, { kind: "generic_failure", summary: "进程报错退出，具体原因要看日志", nativeCrash: false }],
+]);
+
+/** 与后端 format!("0x{:08X}", code as u32) 一致。 */
+function exitHex(code: number): string {
+  return `0x${(code >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+}
+
+function exitCodeNote(code: number | null): ExitCodeNoteDto | null {
+  if (code === null) return null;
+  const known = EXIT_CODES.get(code);
+  return known === undefined ? null : { code, hex: exitHex(code), kind: known.kind, summary: known.summary };
+}
+
+/** 与后端同序：日志规则先，一条都没命中时才看退出码。mock 的规则只有内存耗尽这一条。 */
+function mockDiagnoses(log: LaunchLogDto, exitCode: number | null): CrashClueDto[] {
+  const hit = log.lines.findIndex((l) => l.text.includes(OOM_MARKER));
+  if (hit >= 0) {
+    return [
+      {
+        category: "out_of_memory",
+        summary: "内存不足",
+        advice: "调高最大内存（-Xmx），减少同时加载的 Mod 与高清材质。",
+        detail: null,
+        matched: log.lines[hit].text,
+        line: hit + 1,
+        context: log.lines.slice(Math.max(0, hit - 2), hit).map((l) => l.text),
+        source: "session_log",
+      },
+    ];
+  }
+  const known = exitCode === null ? undefined : EXIT_CODES.get(exitCode);
+  if (exitCode === null || known === undefined || !known.nativeCrash) return [];
+  return [
+    {
+      category: "native_crash",
+      summary: `游戏进程异常退出，${known.summary}`,
+      advice: "先更新显卡驱动，再换一个 Java 版本试试；带本地库的 Mod 也可能是线索。",
+      detail: exitHex(exitCode),
+      matched: "",
+      line: 0,
+      context: [],
+      source: "exit_code",
+    },
+  ];
+}
+
 interface Occupant {
   versionId: string;
   phase: BusyDetail["phase"];
@@ -82,6 +139,8 @@ let occupant: Occupant | null = null;
 let pendingFailure: PendingFailure | null = null;
 let logs = new Map<string, LaunchLogDto>();
 let crashes = new Map<string, CrashReportDto>();
+/** 下一份崩溃报告带的启动提醒；用一次就清空。 */
+let pendingWarnings: LaunchWarningCode[] = [];
 
 /** 一个游戏目录的游玩记录。 */
 interface PlayBook {
@@ -274,9 +333,11 @@ function finishGame(exitCode: number | null, killed: boolean, durationMs: number
   const crashed = !killed && exitCode !== 0;
   const outcome: SessionOutcome = killed ? "killed" : crashed ? "crashed" : "exited";
   if (crashed) {
+    const known = exitCode === null ? undefined : EXIT_CODES.get(exitCode);
+    const tail = known !== undefined && known.nativeCrash ? NATIVE_CRASH_TAIL : CRASH_TAIL;
     pushLines(
       versionId,
-      CRASH_TAIL.map((text, i) => line("game", i === CRASH_TAIL.length - 1 ? "error" : i === 1 ? "warn" : "info", text)),
+      tail.map((text) => line("game", text.includes(OOM_MARKER) ? "error" : text.includes("/WARN]") ? "warn" : "info", text)),
     );
   }
   const code = exitCode === null ? "未知" : String(exitCode);
@@ -285,28 +346,20 @@ function finishGame(exitCode: number | null, killed: boolean, durationMs: number
   const exitedAt = Date.now();
   addPlay(occupant.gameDir, versionId, exitedAt, durationMs);
   if (crashed) {
-    const matched = CRASH_TAIL[CRASH_TAIL.length - 1];
-    const hit = log.lines.findIndex((l) => l.text === matched);
+    const warnings = pendingWarnings;
+    pendingWarnings = [];
     crashes.set(versionId, {
       at: exitedAt,
       exit_code: exitCode,
       session_started_at: log.started_at,
       log_path: log.path,
-      diagnoses: [
-        {
-          category: "out_of_memory",
-          summary: "内存不足",
-          advice: "调高最大内存（-Xmx），减少同时加载的 Mod 与高清材质。",
-          detail: null,
-          matched,
-          line: hit + 1,
-          context: log.lines.slice(Math.max(0, hit - 2), hit).map((l) => l.text),
-        },
-      ],
+      diagnoses: mockDiagnoses(log, exitCode),
       suspects: [],
       java: { major: 21, path: "C:/Program Files/Java/jdk-21/bin/java.exe", is_64bit: true },
       max_memory_mb: 4096,
-      warnings: [],
+      warnings,
+      exit_code_note: exitCodeNote(exitCode),
+      scanned_files: [{ kind: "session_log", path: log.path }],
     });
   }
   // 收尾记账写完后放开占用，再推退出事件：前端收到退出时已经可以改名、删除
@@ -339,6 +392,11 @@ export function takeMockPlayRecordsFailure(): string | null {
   const cause = pendingRecordsFailure;
   pendingRecordsFailure = null;
   return cause;
+}
+
+/** 下一份崩溃报告的启动提醒（模拟启动时查出的同步盘、角色名过长、JVM 内存写法等）；复位时清空。 */
+export function setMockLaunchWarnings(codes: LaunchWarningCode[]): void {
+  pendingWarnings = [...codes];
 }
 
 /** 下一次启动在对应阶段以该失败码失败。 */
@@ -413,7 +471,11 @@ export function renameMockLaunchRecords(from: string, to: string): void {
     for (const day of book.days.values()) moveKey(day, from, to);
   }
   moveKey(logs, from, to, (log) => ({ ...log, path: relocated(log.path, from, to) }));
-  moveKey(crashes, from, to, (report) => ({ ...report, log_path: report.log_path === null ? null : relocated(report.log_path, from, to) }));
+  moveKey(crashes, from, to, (report) => ({
+    ...report,
+    log_path: report.log_path === null ? null : relocated(report.log_path, from, to),
+    scanned_files: report.scanned_files.map((file) => ({ ...file, path: relocated(file.path, from, to) })),
+  }));
 }
 
 function rankMinutes(totals: Map<string, number>): InstanceMinutesDto[] {
@@ -472,6 +534,7 @@ export function reset(): void {
   occupant = null;
   pendingFailure = null;
   pendingRecordsFailure = null;
+  pendingWarnings = [];
   logs = new Map();
   crashes = new Map();
   seedPlay();

@@ -1452,11 +1452,14 @@ function report(diagnoses: { category: CrashReportDto["diagnoses"][number]["cate
       matched: "java.lang.OutOfMemoryError: Java heap space",
       line: 18 + i,
       context: ["[19:04:10] [Render thread/INFO]: x", "[19:04:11] [Render thread/WARN]: y"],
+      source: "session_log",
     })),
     suspects: [],
     java: { major: 21, path: "C:/Java/jdk-21/bin/java.exe", is_64bit: true },
     max_memory_mb: 4096,
     warnings: [],
+    exit_code_note: null,
+    scanned_files: [],
   };
 }
 

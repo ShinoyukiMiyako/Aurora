@@ -9,6 +9,7 @@ import { LOGS_COPY } from "./copy";
 import {
   autoJavaPick,
   crashFixes,
+  crashFixKey,
   creationRef,
   creationRefEqual,
   deletableWorldCount,
@@ -107,7 +108,7 @@ function candidate(fileName: string, version: string): UpdateCandidate {
 }
 
 function clue(category: CrashClueDto["category"], over: Partial<CrashClueDto> = {}): CrashClueDto {
-  return { category, summary: "", advice: "", detail: null, matched: "boom", line: 10, context: [], ...over };
+  return { category, summary: "", advice: "", detail: null, matched: "boom", line: 10, context: [], source: "session_log", ...over };
 }
 
 function report(diagnoses: CrashClueDto[], over: Partial<CrashReportDto> = {}): CrashReportDto {
@@ -121,6 +122,8 @@ function report(diagnoses: CrashClueDto[], over: Partial<CrashReportDto> = {}): 
     java: { major: 17, path: "C:/jdk/bin/java.exe", is_64bit: true },
     max_memory_mb: 4096,
     warnings: [],
+    exit_code_note: null,
+    scanned_files: [],
     ...over,
   };
 }
@@ -627,7 +630,11 @@ describe("一键尝试", () => {
       fileName: "cloth-config-1.jar.disabled",
       name: "cloth-config-1",
     });
-    expect(crashFixes(report([clue("missing_dependency", { detail: "architectury" })]), ctx({ mods }))[0]).toEqual({ kind: "search_dependency", detail: "architectury" });
+    expect(crashFixes(report([clue("missing_dependency", { detail: "architectury" })]), ctx({ mods }))[0]).toEqual({
+      kind: "search_dependency",
+      category: "missing_dependency",
+      detail: "architectury",
+    });
     expect(crashFixes(report([clue("missing_dependency")]), ctx())[0]).toEqual({ kind: "find_dependency" });
   });
 
@@ -656,7 +663,7 @@ describe("一键尝试", () => {
       category: "native_library_missing",
       changeGameDir: true,
     });
-    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", javawPath: "C:/jdk/bin/javaw.exe" });
+    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javawPath: "C:/jdk/bin/javaw.exe" });
     const mods = [mod("badmod-1.jar")];
     expect(crashFixes(report([clue("corrupted_jar", { matched: "zip END header not found D:\\mc\\mods\\badmod-1.jar" })]), ctx({ mods }))[0]).toEqual({
       kind: "disable_mod",
@@ -674,5 +681,129 @@ describe("一键尝试", () => {
   it("同一类别只出一条；没有线索时只剩对照日志", () => {
     expect(crashFixes(report([clue("out_of_memory"), clue("out_of_memory")]), ctx()).length).toBe(2);
     expect(crashFixes(report([]), ctx())).toEqual([{ kind: "compare_log" }]);
+  });
+});
+
+describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () => {
+  const only = (fixes: ReturnType<typeof crashFixes>) => fixes.filter((f) => f.kind !== "compare_log");
+
+  it("缺少语言支持：第三方语言支持去搜索；Forge 自带的 javafml / lowcodefml 与没有 detail 时不出按钮", () => {
+    expect(crashFixes(report([clue("missing_language_provider", { detail: "kotlinforforge" })]), ctx())).toEqual([
+      { kind: "search_dependency", category: "missing_language_provider", detail: "kotlinforforge" },
+      { kind: "compare_log" },
+    ]);
+    expect(crashFixes(report([clue("missing_language_provider", { detail: "javafml" })]), ctx())).toEqual([{ kind: "compare_log" }]);
+    expect(crashFixes(report([clue("missing_language_provider", { detail: "LowCodeFML" })]), ctx())).toEqual([{ kind: "compare_log" }]);
+    expect(crashFixes(report([clue("missing_language_provider")]), ctx())).toEqual([{ kind: "compare_log" }]);
+  });
+
+  it("缺少语言支持与缺少前置指向同一个 Mod 时只留一条搜索，键不重复", () => {
+    const fixes = crashFixes(
+      report([clue("missing_language_provider", { detail: "kotlinforforge" }), clue("missing_dependency", { detail: "KotlinForForge" })]),
+      ctx(),
+    );
+    expect(fixes).toEqual([{ kind: "search_dependency", category: "missing_language_provider", detail: "kotlinforforge" }, { kind: "compare_log" }]);
+  });
+
+  it("版本不符：detail 恰好对上一个已启用的 Mod 给停用按钮", () => {
+    const mods = [mod("sodium-0.5.3.jar", {}, { name: "Sodium" }), mod("lithium-0.11.jar")];
+    expect(crashFixes(report([clue("game_version_mismatch", { detail: "sodium" })]), ctx({ mods }))).toEqual([
+      { kind: "disable_mod", category: "game_version_mismatch", fileName: "sodium-0.5.3.jar", name: "Sodium" },
+      { kind: "compare_log" },
+    ]);
+  });
+
+  it("版本不符：对不上、只对上停用着的、对上多个时改去发现页按 detail 查找；没有 detail 时不带关键词", () => {
+    expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "iris" })]), ctx({ mods: [mod("sodium-1.jar")] })))).toEqual([
+      { kind: "find_mod_version", detail: "iris" },
+    ]);
+    expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "sodium" })]), ctx({ mods: [mod("sodium-1.jar.disabled")] })))).toEqual([
+      { kind: "find_mod_version", detail: "sodium" },
+    ]);
+    expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "sodium" })]), ctx({ mods: [mod("sodium-1.jar"), mod("sodium-2.jar")] })))).toEqual([
+      { kind: "find_mod_version", detail: "sodium" },
+    ]);
+    expect(only(crashFixes(report([clue("game_version_mismatch")]), ctx({ mods: [mod("sodium-1.jar")] })))).toEqual([{ kind: "find_mod_version", detail: null }]);
+  });
+
+  it("OptiFine 不兼容：文件名或 mod id 带 optifine 的已启用 Mod 恰好一个才给停用按钮", () => {
+    const optifine = mod("OptiFine_1.20.1_HD_U_I6.jar", {}, null);
+    expect(crashFixes(report([clue("optifine_incompatible")]), ctx({ mods: [optifine, mod("sodium-1.jar")] }))).toEqual([
+      { kind: "disable_mod", category: "optifine_incompatible", fileName: "OptiFine_1.20.1_HD_U_I6.jar", name: "OptiFine_1.20.1_HD_U_I6" },
+      { kind: "compare_log" },
+    ]);
+    // 文件名看不出、元数据里的 mod id 是 optifine 的也算
+    const byId = mod("of-renamed.jar", {}, { mod_id: "optifine", name: "OptiFine" });
+    expect(only(crashFixes(report([clue("optifine_incompatible")]), ctx({ mods: [byId] })))).toEqual([
+      { kind: "disable_mod", category: "optifine_incompatible", fileName: "of-renamed.jar", name: "OptiFine" },
+    ]);
+    // 已经停用、一个都没有、装了两份：不出按钮
+    expect(only(crashFixes(report([clue("optifine_incompatible")]), ctx({ mods: [mod("OptiFine_1.20.1_HD_U_I6.jar.disabled", {}, null)] })))).toEqual([]);
+    expect(only(crashFixes(report([clue("optifine_incompatible")]), ctx({ mods: [mod("sodium-1.jar")] })))).toEqual([]);
+    expect(only(crashFixes(report([clue("optifine_incompatible")]), ctx({ mods: [optifine, mod("OptiFine_1.20.1_HD_U_I5.jar", {}, null)] })))).toEqual([]);
+    // 转接用的 OptiFabric 名字里没有 optifine，不算第二份
+    expect(only(crashFixes(report([clue("optifine_incompatible")]), ctx({ mods: [optifine, mod("optifabric-1.7.jar")] })))).toEqual([
+      { kind: "disable_mod", category: "optifine_incompatible", fileName: "OptiFine_1.20.1_HD_U_I6.jar", name: "OptiFine_1.20.1_HD_U_I6" },
+    ]);
+  });
+
+  it("停用同一个文件的两条线索只出一行，标题跟第一条线索的类别", () => {
+    const mods = [mod("sodium-1.jar")];
+    const fixes = crashFixes(report([clue("game_version_mismatch", { detail: "sodium" }), clue("mixin_failure", { detail: "sodium" })]), ctx({ mods }));
+    expect(fixes).toEqual([{ kind: "disable_mod", category: "game_version_mismatch", fileName: "sodium-1.jar", name: "sodium-1" }, { kind: "compare_log" }]);
+  });
+
+  it("Intel 显卡驱动与本地崩溃：给处理办法三步与 javaw 路径；报告里没有 Java 时不给路径", () => {
+    expect(crashFixes(report([clue("intel_graphics_driver", { detail: "ig9icd64.dll" })]), ctx())[0]).toEqual({
+      kind: "driver_steps",
+      category: "intel_graphics_driver",
+      javawPath: "C:/jdk/bin/javaw.exe",
+    });
+    const nativeClue = clue("native_crash", { detail: "0xC0000005", matched: "", line: 0, source: "exit_code" });
+    expect(crashFixes(report([nativeClue], { java: null }), ctx())).toEqual([{ kind: "driver_steps", category: "native_crash", javawPath: null }, { kind: "compare_log" }]);
+  });
+
+  it("显卡、Intel 显卡与本地崩溃同在一份报告里只出一条处理办法，取第一条出现的类别", () => {
+    const fixes = crashFixes(report([clue("intel_graphics_driver"), clue("graphics_driver"), clue("native_crash", { source: "exit_code" })]), ctx());
+    expect(fixes).toEqual([{ kind: "driver_steps", category: "intel_graphics_driver", javawPath: "C:/jdk/bin/javaw.exe" }, { kind: "compare_log" }]);
+    const reversed = crashFixes(report([clue("graphics_driver"), clue("intel_graphics_driver")]), ctx());
+    expect(reversed.map((f) => (f.kind === "driver_steps" ? f.category : f.kind))).toEqual(["graphics_driver", "compare_log"]);
+  });
+
+  it("全部 13 类线索同在一份报告里：每条一键尝试的键都不重复", () => {
+    const mods = [mod("sodium-1.jar"), mod("jei-1.jar"), mod("jei-2.jar"), mod("OptiFine_HD_U_I6.jar", {}, null), mod("badmod-1.jar")];
+    const fixes = crashFixes(
+      report([
+        clue("java_version_mismatch", { detail: "class file version 65" }),
+        clue("out_of_memory"),
+        clue("missing_language_provider", { detail: "kotlinforforge" }),
+        clue("game_version_mismatch", { detail: "sodium" }),
+        clue("missing_dependency", { detail: "architectury" }),
+        clue("optifine_incompatible"),
+        clue("mixin_failure", { detail: "sodium" }),
+        clue("duplicate_mod", { detail: "jei" }),
+        clue("native_library_missing"),
+        clue("intel_graphics_driver"),
+        clue("graphics_driver"),
+        clue("corrupted_jar", { matched: "zip END header not found D:/mc/mods/badmod-1.jar" }),
+        clue("native_crash", { source: "exit_code" }),
+      ]),
+      ctx({ mods }),
+    );
+    const keys = fixes.map(crashFixKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toEqual([
+      "download_java:21",
+      "raise_memory",
+      "search_dependency:kotlinforforge",
+      "disable_mod:sodium-1.jar",
+      "search_dependency:architectury",
+      "disable_mod:OptiFine_HD_U_I6.jar",
+      "keep_latest",
+      "repair:native_library_missing",
+      "driver_steps",
+      "disable_mod:badmod-1.jar",
+      "compare_log",
+    ]);
   });
 });
