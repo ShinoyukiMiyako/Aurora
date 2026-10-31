@@ -4,6 +4,7 @@
 
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
+import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
 import { needsReimport } from "../../domain/rules";
@@ -30,7 +31,7 @@ import { Tag } from "../../ui/Tag";
 import { Textarea } from "../../ui/Textarea";
 import { TextInput } from "../../ui/TextInput";
 import { Toggle } from "../../ui/Toggle";
-import { ISOLATION_POLICY_LABEL, JAVA_SOURCE_LABEL, JVM_PRESET_LABEL, SETTINGS_COPY } from "./copy";
+import { ISOLATION_POLICY_LABEL, JVM_PRESET_LABEL, SETTINGS_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo, type JavaInfo, type MemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
 import {

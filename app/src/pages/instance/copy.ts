@@ -322,13 +322,6 @@ export const ISOLATION_POLICY_LABEL = {
   all: "全部版本隔离",
 } as const;
 
-export const JAVA_SOURCE_LABEL = {
-  managed: `${APP_NAME}托管`,
-  registry: "系统注册表",
-  common_dir: "常见目录",
-  path: "PATH",
-} as const;
-
 export const JVM_PRESET_LABEL = {
   g1: "G1 回收器",
   zgc: "分代 ZGC",
