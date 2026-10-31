@@ -738,6 +738,15 @@ export class LauncherStore {
     return s !== null && s.instanceId === instanceId && isSessionActive(s);
   }
 
+  /**
+   * 实例里的 Mod 变了：该实例的列表、历史、可更新项与安装计划失效。发现页的落位矩阵按「装没装、装的哪一版」判定可装与否，
+   * 它的 key 按工程而不是按实例划分，装上的前置也会改变别的工程的判定，所以整个 match 前缀一起失效。
+   */
+  private modsChanged(instanceId: string): void {
+    for (const prefix of ["mods", "history", "mod-updates", "plan"]) invalidateResources(`${prefix}:${instanceId}`);
+    invalidateResources("match");
+  }
+
   /** Mod 文件操作的锁：运行中（含加载中）JVM 占着文件，安装中任务在写目录。界面已禁用入口，这里是第二道防线。 */
   private assertModsEditable(instanceId: string): void {
     if (this.sessionActiveFor(instanceId)) throw new Error(`「${instanceId}」的游戏正在运行，Mod 文件被占用`);
@@ -1016,7 +1025,8 @@ export class LauncherStore {
     const command = task.spec.command;
     if (meta === null) {
       if (task.instanceId !== null) {
-        for (const prefix of ["mods", "content", "history", "mod-updates"]) invalidateResources(`${prefix}:${task.instanceId}`);
+        this.modsChanged(task.instanceId);
+        invalidateResources(`content:${task.instanceId}`);
         await this.fetchInstances();
       }
       this.pushToast("success", TASK_TOAST.finished(task.title).title);
@@ -1058,7 +1068,7 @@ export class LauncherStore {
         return;
       }
       case "mods": {
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+        this.modsChanged(meta.instanceId);
         await this.fetchInstances();
         const copy = TASK_TOAST.modInstalled(meta.name, meta.dependencies, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
@@ -1067,6 +1077,7 @@ export class LauncherStore {
       case "resource": {
         const outcome = result as ResourceInstallOutcomeDto;
         invalidateResources(`content:${meta.instanceId}`);
+        invalidateResources("match");
         const copy =
           outcome.resource_type === "resource_pack"
             ? TASK_TOAST.resourcePack(meta.name)
@@ -1076,14 +1087,14 @@ export class LauncherStore {
                 ? TASK_TOAST.datapack(meta.name, outcome.world)
                 : TASK_TOAST.modInstalled(meta.name, 0, meta.instanceId);
         if (outcome.resource_type === "mod") {
-          for (const prefix of ["mods", "history"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+          this.modsChanged(meta.instanceId);
           await this.fetchInstances();
         }
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
       case "update": {
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${meta.instanceId}`);
+        this.modsChanged(meta.instanceId);
         const copy = TASK_TOAST.modUpdated(meta.name, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
@@ -1556,7 +1567,7 @@ export class LauncherStore {
       async removeMod(instanceId, fileName, name) {
         store.assertModsEditable(instanceId);
         await modsIpc.removeMod(instanceId, fileName);
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${instanceId}`);
+        store.modsChanged(instanceId);
         await store.fetchInstances();
         store.pushToast("info", TOAST_COPY.modRemoved(name));
       },
@@ -1635,7 +1646,7 @@ export class LauncherStore {
         }
         const event = (await listHistory(instanceId)).find((e) => e.id === eventId);
         await rollbackIpc(instanceId, eventId);
-        for (const prefix of ["mods", "history", "mod-updates"]) invalidateResources(`${prefix}:${instanceId}`);
+        store.modsChanged(instanceId);
         if (event !== undefined && event.kind === "update") {
           const name = event.title === null ? event.file_name : event.title;
           const from = event.from_version_number === null ? event.from_version : event.from_version_number;

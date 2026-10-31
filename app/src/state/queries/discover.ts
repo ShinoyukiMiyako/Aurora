@@ -50,7 +50,7 @@ export function useModVersions(platform: Platform, projectId: string, gameVersio
   );
 }
 
-/** match:<platform>:<projectId>:<版本或 auto> —— 全部实例的落位矩阵；实例增删后失效（instances 前缀不覆盖它，页面按需 reload）。 */
+/** match:<platform>:<projectId>:<版本或 auto> —— 全部实例的落位矩阵；任一实例的 Mod 或资源变化后整个前缀失效，实例增删时页面按需 reload。 */
 export function useInstanceMatches(platform: Platform, projectId: string, modVersionId: string | null): ResourceResult<InstanceMatch[]> {
   return useResource(`match:${platform}:${projectId}:${modVersionId === null ? "auto" : modVersionId}`, () =>
     matchInstances(platform, projectId, modVersionId),
