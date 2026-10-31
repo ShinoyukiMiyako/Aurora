@@ -169,6 +169,12 @@ impl Aurora {
             }
             Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
         }
+        // 名字下还留着的记录属于在启动器之外被删掉的同名旧实例，不清掉的话新实例一建出来就带着它的时长。
+        // 放在目录建成之后：撞名时那份记录是现有实例的。清不掉不拦新建，改动已记下待补，在这个实例的
+        // 第一局记下之前一定先补上。
+        if let Err(err) = self.forget_play_records(name).await {
+            tracing::warn!(name, error = %err, "清掉同名旧实例的游玩记录失败，已记下待补");
+        }
         let marker = IncompleteMarker::pending(
             IncompleteKind::Install {
                 spec: request.spec(),
@@ -591,6 +597,52 @@ mod tests {
             CoreError::Install(aurora_install::Error::LoaderVersionNotFound { .. })
         ));
         assert!(!aurora.game_dir().join("versions").join("x").exists());
+    }
+
+    /// 同名旧实例在启动器之外（资源管理器、共用游戏目录的别的启动器）被删掉后，它的游玩记录还在；新建的
+    /// 同名实例从零算起。撞名失败时不动已有实例的记录，别的实例与别的游戏目录的记录也不动。
+    #[tokio::test]
+    async fn new_instance_does_not_inherit_records_of_a_vanished_namesake() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let other = tmp.path().join("HMCL").join(".minecraft");
+        let hour = 3_600_000;
+        for (game_dir, id) in [
+            (aurora.game_dir(), "周末生存"),
+            (aurora.game_dir(), "Survival"),
+            (aurora.game_dir(), "别的"),
+            (other.as_path(), "周末生存"),
+        ] {
+            crate::playtime::record_play(tmp.path(), game_dir, id, 0, hour)
+                .await
+                .unwrap();
+        }
+        write_version(aurora.game_dir(), "Survival", &vanilla_json("1.21.1"));
+
+        aurora
+            .create_instance_dir("survival", &request("1.21.1", None, None))
+            .await
+            .unwrap_err();
+        aurora
+            .create_instance_dir("周末生存", &request("1.21.1", None, None))
+            .await
+            .unwrap();
+
+        let summaries = aurora.play_summaries().await.unwrap();
+        assert_eq!(
+            summaries.keys().collect::<Vec<_>>(),
+            vec!["Survival", "别的"]
+        );
+        assert_eq!(summaries["Survival"].playtime_min, 60);
+        let elsewhere = Aurora::for_test(
+            crate::config::AuroraConfig::default(),
+            tmp.path().to_path_buf(),
+            other,
+        );
+        assert_eq!(
+            elsewhere.play_summaries().await.unwrap()["周末生存"].playtime_min,
+            60
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
