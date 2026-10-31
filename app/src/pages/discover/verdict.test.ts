@@ -106,9 +106,17 @@ describe("目标列表", () => {
   });
 
   it("数据包默认装进最近游玩的存档，都没有游玩时刻时取第一个；没有存档时报错", () => {
-    expect(defaultWorld([world("旧", 1), world("新", 9), world("从没玩", null)])).toBe("新");
-    expect(defaultWorld([world("甲", null), world("乙", null)])).toBe("甲");
-    expect(() => defaultWorld([])).toThrow();
+    expect(defaultWorld([world("旧", 1), world("新", 9), world("从没玩", null)], null)).toBe("新");
+    expect(defaultWorld([world("甲", null), world("乙", null)], null)).toBe("甲");
+    expect(() => defaultWorld([], null)).toThrow();
+  });
+
+  it("数据包可更新：默认装回旧版本所在的存档；那个存档已不在列表里时退回最近游玩的", () => {
+    const worlds = [world("旧", 1), world("新", 9), world("从没玩", null)];
+    expect(defaultWorld(worlds, "从没玩")).toBe("从没玩");
+    expect(defaultWorld(worlds, "旧")).toBe("旧");
+    expect(defaultWorld(worlds, "已删除")).toBe("新");
+    expect(() => defaultWorld([], "旧")).toThrow();
   });
 
   it("底栏合计：任一组没算出时为 null，任一组不知道大小时字节为 null", () => {

@@ -210,7 +210,8 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
     if (chosen !== undefined) return chosen;
     const w = worlds.get(id);
     if (w === undefined || w.status !== "ready") throw new Error(`实例 ${id} 的存档还没读出来，不能确定装进哪个存档`);
-    return defaultWorld(w.worlds);
+    const m = matchOf(id);
+    return defaultWorld(w.worlds, m === null || m.installed === null ? null : m.installed.world);
   };
 
   const irisTargets = type === "shader" && withIris ? selected.filter((r) => r.verdict.kind === "maybe" && shaderLoaderOf(r.instance) === false && irisInstallable(r.instance) !== null) : [];
