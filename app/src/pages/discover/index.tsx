@@ -8,7 +8,7 @@ import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../dom
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector, useNow } from "../../state/launcher";
-import type { SearchEntry } from "../../state/queries/discover";
+import { useInstalledSources, type SearchEntry } from "../../state/queries/discover";
 import { invalidate } from "../../state/resource";
 import type { DiscoverKind, PageProps } from "../../state/route";
 import { Banner } from "../../ui/Banner";
@@ -33,6 +33,7 @@ import {
   fitCandidates,
   hasConditions,
   hitKey,
+  installedBySource,
   installedCount,
   instancesFromPack,
   PAGE_SIZE,
@@ -47,7 +48,6 @@ import {
   withKind,
   type DiscoverFilters,
 } from "./model";
-import { ModSourcesProbe, modSourcesProgress, PROBE_CONCURRENCY, probeWindow, useCollected, type ModSourcesState } from "./probes";
 import { ResultCard, SkeletonCard } from "./ResultCard";
 import { readSnapshot, writeSnapshot } from "./session";
 import { SearchHero, Toolbar } from "./Toolbar";
@@ -151,15 +151,20 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   // 引用稳定：结果卡包着 memo，页面因输入、筛选或详情开合重渲染时几百张卡不跟着重渲染
   const open = useCallback((entry: SearchEntry) => setDetail({ platform: entry.platform, projectId: entry.project_id, sources: entry.sources }), []);
 
-  // 「已装入 n 个实例」只对 Mod 有意义：结果里确实有 Mod 时才去读各实例的 Mod 列表，同时在读的有上限
-  const [modSources, report] = useCollected<ModSourcesState>();
-  const installed = useMemo(() => {
-    const out = new Map<string, ReadonlySet<string>>();
-    for (const [id, s] of modSources) if (s.status === "ready") out.set(id, s.sources);
-    return out;
-  }, [modSources]);
-  const probeIds = pages.hits.some((e) => e.resource_type === "mod") ? instances.filter((i) => i.status === "ready" && !i.placeholder).map((i) => i.id) : [];
-  const probing = probeWindow(probeIds, (id) => modSourcesProgress(modSources.get(id)), PROBE_CONCURRENCY);
+  // 「已装入 n 个实例」只对 Mod 有意义：结果里确实有 Mod 时才读，全部实例的已装来源一条命令取齐
+  const readyIds = useMemo(() => instances.filter((i) => i.status === "ready" && !i.placeholder).map((i) => i.id), [instances]);
+  const sources = useInstalledSources(pages.hits.some((e) => e.resource_type === "mod") ? readyIds : null);
+  const installed = useMemo(() => installedBySource(sources.data, readyIds), [sources.data, readyIds]);
+  // 读不出的实例按没装处理，与实例列表照常显示它一致；原因留在控制台，不打断找资源
+  const sourcesError = sources.error;
+  useEffect(() => {
+    if (sourcesError !== null) console.warn("全部实例的已装 Mod 来源读不出来，发现页的「已装入」暂不计数", sourcesError);
+  }, [sourcesError]);
+  const sourceRows = sources.data;
+  useEffect(() => {
+    if (sourceRows === undefined) return;
+    for (const row of sourceRows) if (row.status === "error") console.warn(`「${row.version_id}」的已装 Mod 来源读不出来，发现页的「已装入」不计这个实例`, row.error);
+  }, [sourceRows]);
 
   return (
     <>
@@ -199,9 +204,6 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
           </TabPanel>
         </EntranceBlock>
       </Page>
-      {probing.map((id) => (
-        <ModSourcesProbe key={id} instanceId={id} onReport={report} />
-      ))}
       <ResourceDetail target={detail} onClose={() => setDetail(null)} fitInstance={filters.fitInstance} online={online} />
       <ImportModpackDialog request={importing} onClose={() => setImporting(null)} online={online} />
     </>

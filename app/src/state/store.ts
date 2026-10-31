@@ -1096,10 +1096,12 @@ export class LauncherStore {
   /**
    * 实例里的 Mod 变了：该实例的列表、历史、可更新项与安装计划失效。发现页的落位矩阵按「装没装、装的哪一版」判定可装与否，
    * 它的 key 按工程而不是按实例划分，装上的前置也会改变别的工程的判定，所以整个 match 前缀一起失效。
+   * 「已装入 n 个实例」一次读全部实例的已装来源，同样整个前缀失效。
    */
   private modsChanged(instanceId: string): void {
     for (const prefix of ["mods", "history", "mod-updates", "plan"]) invalidateResources(`${prefix}:${instanceId}`);
     invalidateResources("match");
+    invalidateResources("installed-sources");
   }
 
   /** Mod 文件操作的锁：运行中（含加载中）JVM 占着文件，安装中任务在写目录。界面已禁用入口，这里是第二道防线。 */

@@ -3,7 +3,7 @@
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind, Platform, ResourceKind } from "../../domain/types";
 import type { LoaderChoice } from "../../state/queries/catalog";
-import type { DiscoverableType, ResourceType, SearchArgs, SearchEntry, SearchResultDto, SortField } from "../../state/queries/discover";
+import type { DiscoverableType, InstanceSources, ResourceType, SearchArgs, SearchEntry, SearchResultDto, SortField } from "../../state/queries/discover";
 import type { DiscoverKind, RouteOf } from "../../state/route";
 
 /** 每页 24 条：2 / 3 / 4 列的公倍数，末行不留半排。 */
@@ -297,6 +297,20 @@ export function instancesFromPack(origins: readonly ProjectOrigin[], instances: 
     const pack = i.modpack;
     return pack !== null && pack.platform !== null && origins.some((o) => o.platform === pack.platform && o.projectId === pack.projectId);
   });
+}
+
+/**
+ * 实例 id -> 已装 Mod 的「平台:工程 id」。只收 ids 里的实例（装好的、不是占位项），读不出来源的实例不收，按没装处理。
+ * rows 为 undefined（还没读到）时为空表。
+ */
+export function installedBySource(rows: readonly InstanceSources[] | undefined, ids: readonly string[]): ReadonlyMap<string, ReadonlySet<string>> {
+  const out = new Map<string, ReadonlySet<string>>();
+  if (rows === undefined) return out;
+  const wanted = new Set(ids);
+  for (const row of rows) {
+    if (row.status === "ready" && wanted.has(row.version_id)) out.set(row.version_id, new Set(row.sources.map((s) => `${s.platform}:${s.project_id}`)));
+  }
+  return out;
 }
 
 /** 已装入几个实例：任一来源（合并卡有两个）出现在实例的已装 Mod 里就算。 */

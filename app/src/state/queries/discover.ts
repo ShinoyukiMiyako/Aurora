@@ -4,7 +4,7 @@
 import type { Platform } from "../../domain/types";
 import { projectDetail, searchResources, type InstallableResourceType, type ProjectDetail, type SearchArgs, type SearchResultDto } from "../../ipc/discover";
 import { previewModpack, summarizePlatformModpack, type ModpackPreviewDto, type ModpackSummaryDto } from "../../ipc/modpack";
-import { listModVersions, matchInstances, planInstall, type InstallPlan, type InstanceMatch, type ModLoader, type ModVersionInfo } from "../../ipc/mods";
+import { installedSources, listModVersions, matchInstances, planInstall, type InstallPlan, type InstanceMatch, type InstanceSources, type ModLoader, type ModVersionInfo } from "../../ipc/mods";
 import { useResource, type ResourceResult } from "../resource";
 
 export type {
@@ -25,7 +25,7 @@ export type {
   SortField,
 } from "../../ipc/discover";
 export type { ModpackPreviewDto, ModpackSource, ModpackSummaryDto, PackFormat, PackLoader } from "../../ipc/modpack";
-export type { Compatibility, InstallPlan, InstanceMatch, MatchState, ModDependency, ModLoader, ModVersionInfo, PlannedItem } from "../../ipc/mods";
+export type { Compatibility, InstallPlan, InstalledSource, InstanceMatch, InstanceSources, MatchState, ModDependency, ModLoader, ModVersionInfo, PlannedItem } from "../../ipc/mods";
 
 /** search:<参数 JSON>；args 为 null 时不请求（关键词还在防抖中）。 */
 export function useSearch(args: SearchArgs | null): ResourceResult<SearchResultDto> {
@@ -63,6 +63,14 @@ export function useInstanceMatches(
   return useResource(`match:${platform}:${projectId}:${resourceType}:${modVersionId === null ? "auto" : modVersionId}`, () =>
     matchInstances(platform, projectId, resourceType, modVersionId),
   );
+}
+
+/**
+ * installed-sources:<实例 id 列表 JSON> —— 全部实例已装 Mod 的平台来源，一条命令取齐（发现页「已装入 n 个实例」）。
+ * 实例增删、改名时 key 随 id 列表变；Mod 装上、移除、更新、回滚后由 store 按前缀失效。instanceIds 为 null 时不请求。
+ */
+export function useInstalledSources(instanceIds: readonly string[] | null): ResourceResult<InstanceSources[]> {
+  return useResource(instanceIds === null ? null : `installed-sources:${JSON.stringify(instanceIds)}`, () => installedSources());
 }
 
 /** plan:<实例>:<platform>:<projectId>:<版本> —— 一起装的前置与已满足项。 */

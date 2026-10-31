@@ -2,7 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import type { InstalledMod } from "../../ipc/mods";
+import type { InstanceSources } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -150,17 +150,9 @@ function detailOf(e: SearchEntry, overrides: Partial<ProjectDetail> = {}): Proje
   };
 }
 
-function installedMod(projectId: string): InstalledMod {
-  return {
-    path: `mods/${projectId}.jar`,
-    file_name: `${projectId}.jar`,
-    enabled: true,
-    size: 1,
-    modified_ms: 0,
-    metadata: null,
-    icon_url: null,
-    source: { platform: "modrinth", project_id: projectId, version_id: "x", version_number: null, title: null, dependency_of: null },
-  };
+/** installed_sources 的一行：实例里装着这些 Modrinth 工程。 */
+function sourcesOf(versionId: string, projectIds: readonly string[]): InstanceSources {
+  return { status: "ready", version_id: versionId, sources: projectIds.map((id) => ({ platform: "modrinth", project_id: id })) };
 }
 
 const CURSOR = {
@@ -209,7 +201,7 @@ beforeEach(() => {
   bootOverrides(ipc, { instances: [instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.5" }] }), instanceDto("创造")], config: configDto({ selected_version: "生存" }) });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("list_manifest", () => ({ latest: { release: "1.21.1", snapshot: "24w14a" }, versions: [], loader_errors: [], stale_since: null, fetch_error: null }));
-  ipc.overrides.set("list_mods", (args) => (args.versionId === "生存" ? [installedMod("A")] : []));
+  ipc.overrides.set("installed_sources", () => [sourcesOf("创造", []), sourcesOf("生存", ["A"])]);
   pages = (args) =>
     args.cursor === null
       ? result([entry("A"), entry("B")], { total: 57, next_cursor: CURSOR })
@@ -281,46 +273,54 @@ describe("发现页：搜索", () => {
     expect(nav.route).toEqual({ page: "discover", kind: "shader" });
   });
 
-  it("「已装入」按各实例已装 Mod 的平台来源计数", async () => {
+  it("「已装入」一条 installed_sources 取齐全部实例的已装来源，不逐个读 Mod 列表", async () => {
     await mount();
-    expect(callsOf(ipc, "list_mods").map((a) => a.versionId).sort()).toEqual(["创造", "生存"]);
+    expect(callsOf(ipc, "installed_sources")).toEqual([{}]);
+    expect(callsOf(ipc, "list_mods")).toEqual([]);
     expect(card("资源 A").textContent).toContain("已装入 1 个实例");
     expect(card("资源 B").textContent).not.toContain("已装入");
   });
 
-  it("「已装入」逐个读各实例的 Mod 列表：同时在读的不超过 2 个，前面的读完后面的才接上", async () => {
+  it("「已装入」只数可用实例里装着同平台同工程的：读不出的、列表外的、别的平台的都不算", async () => {
     const ids = ["甲", "乙", "丙", "丁", "戊"];
     bootOverrides(ipc, { instances: ids.map((id) => instanceDto(id, { loaders: [{ kind: "fabric", version: "0.16.5" }] })), config: configDto({ selected_version: "甲" }) });
-    const waiting = new Map<string, Deferred<InstalledMod[]>>();
-    let inFlight = 0;
-    let peak = 0;
-    ipc.overrides.set("list_mods", (args) => {
-      const d = deferred<InstalledMod[]>();
-      waiting.set(String(args.versionId), d);
-      inFlight++;
-      peak = Math.max(peak, inFlight);
-      return d.promise.finally(() => inFlight--);
-    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    ipc.overrides.set("installed_sources", () => [
+      sourcesOf("丁", ["A", "B"]),
+      sourcesOf("丙", []),
+      { status: "error", version_id: "乙", error: { code: "config_invalid", message: "卷宗不是合法的 JSON" } },
+      { status: "ready", version_id: "戊", sources: [{ platform: "curseforge", project_id: "A" }] },
+      sourcesOf("甲", ["A"]),
+      sourcesOf("盘上还有但列表里没有", ["A", "B"]),
+    ]);
     await mount();
-    expect(callsOf(ipc, "list_mods").map((a) => a.versionId)).toEqual(["甲", "乙"]);
-    for (const id of ids) {
-      const d = waiting.get(id);
-      if (d === undefined) throw new Error(`「${id}」的 Mod 列表还没开始读`);
-      await act(async () => {
-        d.resolve(id === "丁" ? [installedMod("A")] : []);
-        await settle();
-      });
-    }
-    expect(callsOf(ipc, "list_mods").map((a) => a.versionId)).toEqual(ids);
-    expect(peak).toBe(2);
-    expect(card("资源 A").textContent).toContain("已装入 1 个实例");
+    expect(card("资源 A").textContent).toContain("已装入 2 个实例");
+    expect(card("资源 B").textContent).toContain("已装入 1 个实例");
+    expect(warn.mock.calls.map((c) => c[0])).toContain("「乙」的已装 Mod 来源读不出来，发现页的「已装入」不计这个实例");
   });
 
-  it("结果里一个 Mod 都没有时不读任何实例的 Mod 列表", async () => {
+  it("移除 Mod 后已装来源失效重取，「已装入」随之更新", async () => {
+    let installed = ["A"];
+    ipc.overrides.set("installed_sources", () => [sourcesOf("创造", []), sourcesOf("生存", installed)]);
+    ipc.overrides.set("remove_mod", () => {
+      installed = [];
+      return null;
+    });
+    await mount();
+    expect(card("资源 A").textContent).toContain("已装入 1 个实例");
+    await act(async () => {
+      await launcher.actions.removeMod("生存", "A.jar", "资源 A");
+      await settle();
+    });
+    expect(callsOf(ipc, "installed_sources")).toHaveLength(2);
+    expect(card("资源 A").textContent).not.toContain("已装入");
+  });
+
+  it("结果里一个 Mod 都没有时不读已装来源", async () => {
     pages = () => result([entry("R", { title: "材质", resource_type: "resource_pack", loaders: [] }), entry("P", { title: "整合包", resource_type: "modpack" })]);
     await mount();
     expect(cardTitles()).toEqual(["材质，查看详情", "整合包，查看详情"]);
-    expect(callsOf(ipc, "list_mods")).toEqual([]);
+    expect(callsOf(ipc, "installed_sources")).toEqual([]);
   });
 
   it("滚到底部附近按游标接下一页，同一工程只留先到的一张，到底后提示", async () => {
