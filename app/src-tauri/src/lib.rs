@@ -159,6 +159,7 @@ pub fn run() {
             commands::mods::match_instances,
             commands::mods::installed_sources,
             commands::mods::plan_install,
+            commands::mods::starter_mods,
             // -- history --
             commands::history::list_history,
             commands::history::rollback_checks,
