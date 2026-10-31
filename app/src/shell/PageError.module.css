@@ -1,0 +1,34 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-20);
+  box-sizing: border-box;
+  max-width: var(--sk-page-narrow);
+  margin: 0 auto;
+  padding: var(--sk-space-48) var(--sk-space-24);
+}
+
+.actions {
+  display: flex;
+  gap: var(--sk-space-8);
+}
+
+.detail {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 240px;
+  margin: 0;
+  padding: var(--sk-space-12) var(--sk-space-14);
+  overflow: auto;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}

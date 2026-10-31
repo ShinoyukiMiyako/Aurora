@@ -1,0 +1,202 @@
+.capsule,
+.add {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-8);
+  box-sizing: border-box;
+  max-width: 140px;
+  height: 34px;
+  padding: 0 var(--sk-space-12) 0 var(--sk-space-4);
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-surface);
+  font: inherit;
+  color: var(--sk-text);
+  cursor: pointer;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+:global(:root[data-sk-tier="wide"]) .capsule {
+  max-width: 220px;
+}
+
+.capsule[data-compact] {
+  width: 34px;
+  padding: 0;
+  justify-content: center;
+}
+
+.add {
+  padding: 0 var(--sk-space-12) 0 var(--sk-space-10);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.add[data-compact] {
+  width: 34px;
+  padding: 0;
+  justify-content: center;
+}
+
+.capsule:hover,
+.capsule[data-open],
+.add:hover {
+  border-color: var(--sk-line-2);
+}
+
+/* 停在账户页时胶囊描边用强调色：标题栏里没有别的「当前页」指示 */
+.capsule[data-here],
+.add[data-here] {
+  border-color: var(--sk-accent-line);
+}
+
+.capsule:focus-visible,
+.add:focus-visible {
+  outline: none;
+  box-shadow: var(--sk-focus);
+}
+
+.avatar {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.warnDot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-warn);
+  box-shadow: 0 0 0 2px var(--sk-surface);
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+
+.name,
+.kind {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.name {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.kind {
+  margin-top: -2px;
+  font-size: var(--sk-fs-micro);
+  line-height: var(--sk-lh-micro);
+  color: var(--sk-text-3);
+}
+
+.kind[data-expired],
+.itemLine[data-expired] {
+  color: var(--sk-warn);
+}
+
+/* ---- 切换菜单 ---- */
+.menu {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  box-sizing: border-box;
+  width: 280px;
+  max-width: calc(100vw - var(--sk-space-32));
+  padding: var(--sk-space-6);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  width: 100%;
+  padding: var(--sk-space-6) var(--sk-space-8);
+  border: 0;
+  border-radius: var(--sk-r-sm);
+  background: transparent;
+  font: inherit;
+  color: var(--sk-text);
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.item:hover,
+.item:focus-visible {
+  background: var(--sk-fill-hover);
+}
+
+.item[data-current] {
+  background: var(--sk-accent-soft);
+}
+
+.item:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.itemText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.itemName,
+.itemLine {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.itemName {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.itemLine {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+}
+
+.check {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  color: var(--sk-accent-strong);
+}
+
+.manageIcon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+}
+
+.separator {
+  height: 1px;
+  margin: var(--sk-space-4) var(--sk-space-2);
+  background: var(--sk-line);
+}

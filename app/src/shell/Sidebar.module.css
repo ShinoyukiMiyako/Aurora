@@ -1,0 +1,175 @@
+/*
+ * 胶囊相对外壳的侧栏槽位定位；nav 本身不定位、不占面积，槽位的空白仍是窗口拖动区。
+ * 胶囊内的每一行都铺满胶囊内宽：条目居中，指示条贴在行的左缘（即胶囊内缘），
+ * 固定实例的滚动容器也就不会把指示条裁掉。
+ */
+.capsule {
+  position: absolute;
+  top: var(--sk-space-10);
+  bottom: var(--sk-space-10);
+  left: var(--sk-space-10);
+  z-index: var(--sk-z-sidebar);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  box-sizing: border-box;
+  width: 64px;
+  padding: var(--sk-space-10) 0;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-xl);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow);
+}
+
+.capsule[data-dragging] {
+  cursor: grabbing;
+}
+
+.row {
+  position: relative;
+  display: flex;
+  flex: none;
+  justify-content: center;
+  width: 100%;
+}
+
+.indicator {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 3px;
+  height: 20px;
+  margin-top: -10px;
+  border-radius: 0 var(--sk-r-pill) var(--sk-r-pill) 0;
+  background: var(--sk-accent);
+  pointer-events: none;
+}
+
+.item,
+.pin,
+.create {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--sk-r);
+  background: transparent;
+  color: var(--sk-text-2);
+  cursor: pointer;
+  outline: none;
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease),
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
+}
+
+.item:hover {
+  background: var(--sk-fill-hover);
+  color: var(--sk-text);
+}
+
+.item:active {
+  background: var(--sk-fill-press);
+  transform: scale(0.96);
+}
+
+.item[data-selected] {
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.item:focus-visible,
+.pin:focus-visible,
+.create:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.dot {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+  box-shadow: 0 0 0 2px var(--sk-surface);
+}
+
+.separator {
+  flex: none;
+  align-self: center;
+  width: 24px;
+  height: 1px;
+  margin: var(--sk-space-4) 0;
+  background: var(--sk-line-2);
+}
+
+/* ---- 固定的实例 ---- */
+.pinScroll {
+  position: relative;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.pinScroll::-webkit-scrollbar {
+  display: none;
+}
+
+.pinScroll[data-overflow] {
+  mask-image: linear-gradient(to bottom, transparent, black var(--sk-space-12), black calc(100% - var(--sk-space-12)), transparent);
+}
+
+.pins {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pin {
+  width: 44px;
+  height: 44px;
+  touch-action: none;
+}
+
+.row[data-dragging] {
+  z-index: 1;
+}
+
+.row[data-dragging] .pin {
+  cursor: grabbing;
+}
+
+/* ---- 新建实例 ---- */
+.create {
+  width: 40px;
+  height: 40px;
+  margin: var(--sk-space-2) 0;
+  border: 1.5px dashed var(--sk-line-2);
+  color: var(--sk-text-3);
+}
+
+.create:hover {
+  border-color: var(--sk-accent-line);
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.create:active {
+  transform: scale(0.96);
+}
+
+.spacer {
+  flex: 1 1 0;
+  min-height: 0;
+}

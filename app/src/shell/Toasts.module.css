@@ -1,0 +1,22 @@
+/* 容器高度只等于通知栈本身，上方没有透明的大块挡住内容区 */
+.region {
+  --toasts-width: 340px;
+  position: absolute;
+  right: var(--sk-space-16);
+  bottom: var(--sk-space-16);
+  z-index: var(--sk-z-toast);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+  width: var(--toasts-width);
+  max-width: calc(100% - var(--sk-space-32));
+}
+
+:global(:root[data-sk-tier="compact"]) .region {
+  --toasts-width: 320px;
+}
+
+:global(:root[data-sk-tier="wide"]) .region {
+  --toasts-width: 360px;
+}

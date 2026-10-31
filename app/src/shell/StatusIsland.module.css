@@ -1,0 +1,319 @@
+/*
+ * 状态岛：标题栏中列的 34px 胶囊。宽度随内容变化、由布局动画过渡；圆角由组件经 style 传入，
+ * 不在这里写，布局动画才不会把圆角拉成椭圆。
+ */
+.island {
+  --island-max: 280px;
+  --island-name-max: 110px;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  max-width: var(--island-max);
+  height: 34px;
+  padding: 0 var(--sk-space-12) 0 var(--sk-space-6);
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow-sm);
+  font: inherit;
+  color: var(--sk-text);
+  cursor: pointer;
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+:global(:root[data-sk-tier="compact"]) .island {
+  --island-max: 240px;
+  --island-name-max: 96px;
+}
+
+:global(:root[data-sk-tier="wide"]) .island {
+  --island-max: 340px;
+  --island-name-max: 140px;
+}
+
+.island:hover,
+.island[data-open] {
+  border-color: var(--sk-line-2);
+}
+
+.island:focus-visible {
+  outline: none;
+  box-shadow: var(--sk-focus);
+}
+
+.island[data-tone="running"] {
+  background: var(--sk-ok-tint);
+  border-color: color-mix(in srgb, var(--sk-ok) 30%, transparent);
+}
+
+.island[data-tone="danger"] {
+  background: var(--sk-danger-tint);
+  border-color: color-mix(in srgb, var(--sk-danger) 30%, transparent);
+}
+
+.row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.blockFrame {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+}
+
+.name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: var(--island-name-max);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.second {
+  display: inline-flex;
+  flex: none;
+  align-items: baseline;
+  gap: var(--sk-space-4);
+  white-space: nowrap;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* 数字槽固定最小宽度：百分比从 9% 走到 10% 时胶囊不跟着抖 */
+.value {
+  display: inline-block;
+  min-width: 4ch;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.island[data-tone="danger"] .second {
+  color: var(--sk-danger);
+}
+
+.island[data-tone="running"] .second {
+  color: var(--sk-ok);
+}
+
+.runningDot,
+.dangerDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--sk-r-pill);
+}
+
+.runningDot {
+  background: var(--sk-ok);
+}
+
+:global(:root[data-sk-breath]:not([data-sk-reduced])) .runningDot {
+  animation: breath var(--sk-loop-breath) var(--sk-ease-breath) infinite;
+  animation-delay: var(--breath-delay);
+}
+
+@keyframes breath {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.dangerDot {
+  background: var(--sk-danger);
+}
+
+/* 底边 2px 的启动进度：轨道裁掉填充的溢出 */
+.barTrack {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.barFill {
+  position: absolute;
+  inset: 0;
+  background: var(--sk-accent-grad);
+  will-change: transform;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- 详情浮层 ---- */
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+  box-sizing: border-box;
+  width: 340px;
+  max-width: calc(100vw - var(--sk-space-32));
+  padding: var(--sk-space-16);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+}
+
+.headBlock {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+}
+
+.headText {
+  flex: 1;
+  min-width: 0;
+}
+
+.headName,
+.headPhase {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.headName {
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+}
+
+.headPhase {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.stages {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-3);
+}
+
+.stage[data-state="done"] {
+  color: var(--sk-text-2);
+}
+
+.stage[data-state="now"] {
+  color: var(--sk-text);
+  font-weight: var(--sk-w-medium);
+}
+
+.stageDot {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--sk-line-2);
+  border-radius: var(--sk-r-pill);
+}
+
+.stage[data-state="done"] .stageDot {
+  border-color: transparent;
+  background: var(--sk-ok-soft);
+  color: var(--sk-ok);
+}
+
+.stage[data-state="now"] .stageDot {
+  border-color: var(--sk-accent);
+  background: var(--sk-accent-soft);
+}
+
+.stageCheck {
+  display: inline-grid;
+  place-items: center;
+}
+
+.stageLabel {
+  flex: 1;
+  min-width: 0;
+}
+
+.stageNote {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text-2);
+}
+
+.logs {
+  display: flex;
+  flex-direction: column;
+  max-height: 96px;
+  padding: var(--sk-space-8) var(--sk-space-10);
+  overflow: hidden;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  user-select: text;
+}
+
+.logLine {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+}
+
+.logLine[data-level="warn"] {
+  color: var(--sk-warn);
+}
+
+.logLine[data-level="error"] {
+  color: var(--sk-danger);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sk-space-8);
+}
