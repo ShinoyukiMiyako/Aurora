@@ -1,0 +1,264 @@
+// 发现页、资源详情、安装面板与整合包导入的文案。插值一律经 domain/format 格式化，页面组件只引用这里。
+
+import { formatBytes, formatCount } from "../../domain/format";
+import type { Platform } from "../../domain/types";
+import type { DiscoverKind } from "../../state/route";
+import type { SortField } from "../../state/queries/discover";
+
+export const PLATFORM_LABEL: Readonly<Record<Platform, string>> = {
+  modrinth: "Modrinth",
+  curseforge: "CurseForge",
+};
+
+export const KIND_LABEL: Readonly<Record<DiscoverKind, string>> = {
+  all: "全部",
+  mod: "Mod",
+  modpack: "整合包",
+  resourcepack: "资源包",
+  shader: "光影",
+  datapack: "数据包",
+};
+
+/** 空状态标题里的类型名：「全部」读作「资源」。 */
+export function kindNoun(kind: DiscoverKind): string {
+  return kind === "all" ? "资源" : KIND_LABEL[kind];
+}
+
+export const SORT_LABEL: Readonly<Record<SortField, string>> = {
+  relevance: "相关度",
+  downloads: "下载量",
+  follows: "关注数",
+  newest: "最新发布",
+  updated: "最近更新",
+};
+
+/** 封面预设的中文名，按封面白名单的 id。 */
+export const COVER_NAME: Readonly<Record<string, string>> = {
+  cherry_planks: "樱花木板",
+  cherry_leaves: "樱花树叶",
+  grass_block: "草方块",
+  moss_block: "苔藓块",
+  honeycomb_block: "蜜脾块",
+  amethyst_block: "紫水晶块",
+  copper_block: "铜块",
+  prismarine_bricks: "海晶石砖",
+  deepslate_tiles: "深板岩瓦",
+  purpur_block: "紫珀块",
+  mossy_cobblestone: "苔石",
+  red_wool: "红色羊毛",
+  blue_ice: "蓝冰",
+  oxidized_copper: "氧化的铜",
+  netherrack: "下界岩",
+  end_stone_bricks: "末地石砖",
+};
+
+export function coverName(block: string): string {
+  if (!Object.hasOwn(COVER_NAME, block)) throw new Error(`封面预设 ${block} 没有中文名`);
+  return COVER_NAME[block];
+}
+
+export const SEARCH_COPY = {
+  eyebrow: "Modrinth · CurseForge",
+  importButton: "导入整合包文件",
+  heroTitle: "找下一件让世界更好玩的东西",
+  placeholder: "搜索 Mod、整合包、资源包、光影…",
+  label: "搜索资源",
+  hotCategories: "热门分类",
+  kindTabs: "资源类型",
+  fitLabel: "适配实例",
+  fitAny: "适配：不限",
+  fitOption: (name: string) => `适配：${name}`,
+  filter: "筛选",
+  filterWithCount: (n: number) => `筛选，${n} 个条件生效`,
+  filterPanel: "筛选条件",
+  sortLabel: "排序",
+  platformRow: "平台",
+  platformAll: "全部",
+  gameVersionRow: "游戏版本",
+  gameVersionAny: "不限",
+  showSnapshots: "显示快照",
+  loaderRow: "加载器",
+  loaderAny: "不限",
+  reset: "重置",
+  resultCount: (total: number) => `约 ${formatCount(total)} 个结果`,
+  searching: "搜索中…",
+  clearFilters: "清除筛选",
+  onlyModrinthUnmapped: "仅 Modrinth（这个分类在 CurseForge 没有对应）",
+  onlyModrinthKeyMissing: "仅 Modrinth（没有配置 CurseForge 密钥）",
+  slow: "比平时慢一些，仍在加载…",
+  end: "已经到底了",
+  tooMany: "结果太多，换个更具体的关键词试试",
+  nextFailed: "下一页没加载出来",
+  retry: "重试",
+  emptyWithQuery: (query: string, kind: DiscoverKind) => `没有找到与「${query}」相关的${kindNoun(kind)}`,
+  emptyNoQuery: (kind: DiscoverKind) => `没有符合条件的${kindNoun(kind)}`,
+  emptyBody: "换个关键词，或者清除筛选再看看。",
+  partialFailed: (failed: Platform, other: Platform) => `${PLATFORM_LABEL[failed]} 暂时没有响应，下面只有 ${PLATFORM_LABEL[other]} 的结果。`,
+  allFailed: "暂时连不上资源平台",
+  timeout: "请求超时",
+  timeoutBody: "资源平台 20 秒内没有回应。",
+  offlineBanner: "没有网络连接",
+  offlineBannerBody: "搜索和安装需要联网，恢复后会自动刷新。",
+  offlineEmpty: "连不上网络",
+  offlineEmptyBody: "联网后才能搜索资源。",
+  offlineInstall: "没有网络连接",
+  offlineInstallBody: "恢复联网后再安装",
+} as const;
+
+export const CARD_COPY = {
+  open: (title: string) => `${title}，查看详情`,
+  authorUnknown: "作者未知",
+  byline: (author: string, relative: string | null) => (relative === null ? author : `${author} · ${relative}更新`),
+  installed: (n: number) => `已装入 ${n} 个实例`,
+  loaders: (n: number) => `支持 ${n} 种加载器`,
+  downloads: (n: number) => `下载 ${formatCount(n)}`,
+  follows: (n: number) => `关注 ${formatCount(n)}`,
+} as const;
+
+export const DETAIL_COPY = {
+  close: "关闭",
+  back: (name: string) => `返回 ${name}`,
+  loadFailed: "资源详情没加载出来",
+  by: (author: string | null, summary: string) => `by ${author === null ? CARD_COPY.authorUnknown : author} · ${summary}`,
+  statDownloads: "下载量",
+  statFollows: "关注",
+  statLatest: "最新版本",
+  statUpdated: "更新于",
+  statFileSize: "文件大小",
+  statPackSize: "整合包大小",
+  notProvided: "平台未提供",
+  noVersion: "没有可用版本",
+  tabsLabel: "资源详情",
+  tabIntro: "介绍",
+  tabVersions: "版本",
+  source: "来源",
+  noBody: "作者没有写介绍。",
+  loadersTitle: "支持的加载器",
+  gameVersionsTitle: "支持的游戏版本 · 绿色是你已有实例的版本",
+  moreVersions: (n: number) => `等 ${n} 个版本`,
+  depsTitle: "必需前置 · 安装时自动带上，已装的会跳过",
+  depMeta: (author: string | null, latest: string | null) =>
+    [author === null ? CARD_COPY.authorUnknown : author, latest === null ? DETAIL_COPY.noVersion : latest].join(" · "),
+  depOpen: (title: string) => `查看前置 ${title}`,
+  onlyFits: "只看能装进我的实例的版本",
+  beta: "测试版",
+  alpha: "预览版",
+  loadMore: "加载更多",
+  versionsEmptyFit: "没有能装进你的实例的版本",
+  versionsEmpty: "这个资源还没有发布版本",
+  versionsFailed: "版本列表没加载出来",
+  versionsLabel: "全部版本",
+  manyGameVersions: (head: string, n: number) => `${head} 等 ${n} 个`,
+  externalPage: "在网页上打开",
+} as const;
+
+export const INSTALL_COPY = {
+  panelLabel: "安装目标",
+  title: "安装到",
+  installable: (n: number) => `${n} 个实例可装 · 可多选`,
+  noneInstallable: "没有可装的实例",
+  noInstances: "还没有实例，新建一个再来安装。",
+  createInstance: "新建实例",
+  versionLabel: "版本",
+  versionAuto: "自动（每个实例取最合适的版本）",
+  filterInstances: "筛选实例",
+  targetsLabel: "选择目标实例",
+  noMatchedTargets: "没有名称匹配的实例",
+  verdict: {
+    compatible: "兼容",
+    updatable: "可更新",
+    maybe: "可能可行",
+    installed: "已安装",
+    unavailable: "不可用",
+    incompatible: "不兼容",
+  },
+  updateReason: (from: string, to: string) => `已装 ${from}，将换成 ${to}`,
+  instanceInstalling: "实例正在安装",
+  instanceBroken: "实例已损坏，先修复",
+  judging: "正在判断能否安装…",
+  readingWorlds: "正在读取存档…",
+  worldsFailed: (message: string) => `存档读不出来：${message}`,
+  noWorlds: "还没有存档，先进游戏建一个世界",
+  shaderNeedsLoader: "需要先装 Iris 或 OptiFine 才能加载光影",
+  worldSelect: "装进存档",
+  matchesFailed: "没能判断能装进哪些实例",
+  irisFailed: "没查到 Iris 能装进哪些实例",
+  previewTitle: "会一起安装",
+  previewGroup: (name: string) => `「${name}」`,
+  requiredBy: (name: string) => `${name} 的前置`,
+  satisfied: "已满足，跳过",
+  planLoading: "正在计算要一起安装的文件…",
+  planFailed: "没能算出要一起安装的文件",
+  skipped: "以下前置没有一起装：",
+  maybeWarn: (name: string, reason: string) => `「${name}」只是可能可行：${reason}`,
+  withIris: "一并安装 Iris Shaders",
+  irisName: "Iris Shaders",
+  footNone: "勾选右侧的实例后安装",
+  footSelected: (instances: number, files: number, bytes: number | null) =>
+    bytes === null ? `已选 ${instances} 个实例 · 共 ${files} 个文件待下载` : `已选 ${instances} 个实例 · 共 ${files} 个文件待下载 · 约 ${formatBytes(bytes)}`,
+  footCounting: (instances: number) => `已选 ${instances} 个实例 · 正在计算要下载的文件`,
+  cancel: "取消",
+  update: "更新",
+  install: "安装",
+  installMany: (n: number) => `安装到 ${n} 个实例`,
+  blocked: "作者不允许在启动器里下载这个资源，只能去 CurseForge 网页下载。",
+  openWeb: "打开网页",
+} as const;
+
+export const MODPACK_COPY = {
+  panelLabel: "安装为新实例",
+  title: "安装为新实例",
+  createdTitle: "新实例",
+  hint: "整合包总是单独建一个实例",
+  name: "名称",
+  version: "版本",
+  versionHint: (mcVersion: string | null) => (mcVersion === null ? "没有标注游戏版本" : `游戏版本 ${mcVersion}`),
+  changeCover: "换封面",
+  coverPanel: "换封面",
+  coverOption: (name: string) => `封面：${name}`,
+  modCount: (n: number) => `${n} 个 Mod`,
+  download: (bytes: number) => `下载约 ${formatBytes(bytes)}`,
+  remoteFiles: (n: number) => `${n} 个文件需要下载`,
+  overrides: (n: number, bytes: number) => `包内自带 ${n} 个文件 · ${formatBytes(bytes)}`,
+  memory: "内存跟随全局设置",
+  memoryAuto: "内存跟随全局设置，会按大型整合包档位给足",
+  pin: (next: number, limit: number) => `装好后固定在侧栏（${next}/${limit}）`,
+  pinFull: (limit: number) => `侧栏固定位已满（${limit}/${limit}），这个实例不会自动固定`,
+  noGameVersion: "这个版本没有标注游戏版本，没法建实例",
+  versionsFailed: "整合包的版本列表没加载出来，只能装最新版本",
+  queued: "排队中，前面的任务完成后开始",
+  downloading: (pct: string) => `正在下载 · ${pct}`,
+  background: "已出现在侧栏与实例库里，关掉这个窗口不影响下载。",
+  ready: (name: string) => `「${name}」已就绪，可以直接开玩。`,
+  cancelled: "安装已取消，未完成的实例已撤掉。可以重新安装。",
+  failed: (reason: string) => `没装成：${reason}`,
+  footNote: (mcVersion: string | null, loader: string, modCount: number | null) =>
+    [mcVersion, loader, modCount === null ? null : `${modCount} 个 Mod`].filter((part): part is string => part !== null).join(" · "),
+  cancel: "取消",
+  close: "关闭",
+  viewInstance: "查看实例",
+  reinstall: "重新安装",
+  retry: "重试",
+  install: "安装为新实例",
+} as const;
+
+export const IMPORT_COPY = {
+  title: "导入整合包文件",
+  dropTitle: "填入整合包文件的路径",
+  dropHint: "支持 Modrinth 的 .mrpack 与 CurseForge 导出的 .zip",
+  pathLabel: "整合包文件的完整路径",
+  pathPlaceholder: "例如 D:\\Downloads\\pack.mrpack",
+  read: "读取",
+  reading: (file: string) => `正在读取 ${file}…`,
+  versionReadonly: (version: string | null) => (version === null ? "整合包没有写版本号" : `版本 ${version}`),
+  /** 任务详情里的版本位：清单没写版本号时。 */
+  unversioned: "未写版本号",
+  changeFile: "换一个文件",
+  submit: "导入为新实例",
+  started: (name: string) => `已开始导入「${name}」`,
+  startedBody: "进度见下载任务",
+  errorExtension: "只认 .mrpack 和 CurseForge 导出的 .zip",
+  errorManifestMissing: "这个压缩包里没有 modrinth.index.json 或 manifest.json，不像是整合包",
+  errorManifestInvalid: (message: string) => `整合包清单读不出来：${message}`,
+  errorCorrupt: "文件不完整或已损坏，重新下载一份再试",
+} as const;
