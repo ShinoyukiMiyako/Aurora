@@ -18,6 +18,7 @@ import type {
   ModMetadata,
   ModUpdateOutcomeDto,
   ModVersionInfo,
+  ModVersionList,
   PlannedItem,
   UpdateCandidate,
 } from "../../mods";
@@ -409,6 +410,17 @@ export function setMockModFileBusy(versionId: string, fileName: string, busy: bo
   else busyFiles.delete(`${versionId}/${fileName}`);
 }
 
+const truncatedListings = new Set<string>();
+
+/**
+ * 测试与演示用：让某工程不过滤的版本列表标成截断（后端在 CurseForge 文件翻到页数上限还没完时这样标）。
+ * 种子目录里的工程没有那么多版本，只能这样造出这种状态。
+ */
+export function setMockVersionListTruncated(platform: PlatformId, projectId: string, truncated: boolean): void {
+  if (truncated) truncatedListings.add(`${platform}:${projectId}`);
+  else truncatedListings.delete(`${platform}:${projectId}`);
+}
+
 export function assertNotBusy(versionId: string, fileNames: string[]): void {
   for (const name of fileNames) busyCheck(versionId, name);
 }
@@ -688,7 +700,7 @@ export const handlers: MockHandlers = {
       hold.release();
     }
   },
-  list_mod_versions: (args) => {
+  list_mod_versions: (args): ModVersionList => {
     const platform = parsePlatform(args.platform);
     const projectId = requireNonEmpty(args.projectId, "projectId");
     if (!Array.isArray(args.gameVersions) || !Array.isArray(args.loaders)) throw new Error("list_mod_versions 缺少数组参数 gameVersions / loaders");
@@ -697,7 +709,9 @@ export const handlers: MockHandlers = {
       if (typeof l !== "string" || !isModLoader(l)) throw new IpcError("invalid_argument", `未知加载器 ${String(l)}`);
       return l;
     });
-    return newestFirst(projectVersions(platform, projectId)).filter((v) => matchesFilters(v, gameVersions, loaders));
+    const versions = newestFirst(projectVersions(platform, projectId)).filter((v) => matchesFilters(v, gameVersions, loaders));
+    const unfiltered = gameVersions.length === 0 && loaders.length === 0;
+    return { versions, truncated: unfiltered && truncatedListings.has(`${platform}:${projectId}`) };
   },
   match_instances: (args): InstanceMatch[] => {
     const platform = parsePlatform(args.platform);
@@ -763,6 +777,7 @@ export const handlers: MockHandlers = {
 export function reset(): void {
   instances = seedInstances();
   busyFiles.clear();
+  truncatedListings.clear();
 }
 
 // 工程目录是固定的种子，不存；被占用的文件只在一次命令里有意义，也不存。

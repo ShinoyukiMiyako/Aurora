@@ -9,7 +9,11 @@
 //! 「最新的那个」，排序规则若各处自定必然分叉。
 //!
 //! 版本列表带一层短时进程内缓存：落位矩阵、安装计划（每个依赖一次）、更新检查（CurseForge 侧每个
-//! Mod 一次）会在几秒内反复问同一个工程的版本列表，没有缓存就全靠令牌桶在客户端排队。
+//! Mod 一次）会在几秒内反复问同一个工程的版本列表，没有缓存就全靠令牌桶在客户端排队。缓存里有该工程
+//! 完整的不过滤列表时，带过滤的查询直接在它上面本地过滤，不再问平台。
+//!
+//! CurseForge 的文件列表按页给，客户端翻到页数上限为止（[`aurora_modplatform::MOD_FILES_MAX_PAGES`]），
+//! 翻不完时列表标明截断（[`ModVersionList::truncated`]）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -40,8 +44,32 @@ pub struct ProjectInfo {
     pub icon_url: Option<String>,
 }
 
+/// 某工程的版本列表，连同它是不是全的。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModVersionList {
+    /// 通过过滤条件的版本，发布时间倒序。
+    pub versions: Vec<ModVersionInfo>,
+    /// 平台上的文件太多、只取到了页数上限：页外的版本不在 `versions` 里。只有 CurseForge 会出现。
+    pub truncated: bool,
+}
+
 impl Aurora {
-    /// 列出某工程的全部可用版本（跨平台统一模型），按发布时间倒序。
+    /// 列出某工程的可用版本（跨平台统一模型），按发布时间倒序；不关心列表全不全的调用方用。
+    /// 口径与缓存同 [`mod_version_list`](Self::mod_version_list)。
+    pub async fn list_mod_versions(
+        &self,
+        platform: Platform,
+        project_id: &str,
+        game_versions: &[String],
+        loaders: &[ModLoader],
+    ) -> Result<Vec<ModVersionInfo>> {
+        Ok(self
+            .mod_version_list(platform, project_id, game_versions, loaders)
+            .await?
+            .versions)
+    }
+
+    /// 列出某工程的全部可用版本（跨平台统一模型），按发布时间倒序，并标明列表是否因翻页上限截断。
     ///
     /// `game_versions` / `loaders` 传空表示该维度不过滤。同一维度内多个取值之间是「或」，两个维度
     /// 之间是「与」。能下推给平台的过滤条件一律下推（Modrinth 支持多值数组，CurseForge 单次只能
@@ -53,25 +81,50 @@ impl Aurora {
     ///
     /// 工程不存在时平台返回 404，经 [`CoreError::ModPlatform`] 原样冒泡而不吞成空列表——
     /// 「这个工程一个版本都没有」与「这个工程根本不存在」对 UI 是两件事。
-    pub async fn list_mod_versions(
+    ///
+    /// 带过滤的查询先看缓存里有没有该工程完整（没截断）的不过滤列表：有就在它上面本地过滤，省掉一次
+    /// 请求。最终口径本来就由本地那一遍定，在全量上本地过滤得到的就是这个口径；截断的列表缺页外的版本，
+    /// 不拿来代答。
+    pub async fn mod_version_list(
         &self,
         platform: Platform,
         project_id: &str,
         game_versions: &[String],
         loaders: &[ModLoader],
-    ) -> Result<Vec<ModVersionInfo>> {
+    ) -> Result<ModVersionList> {
         let base = match platform {
             Platform::Modrinth => self.modrinth_base(),
             Platform::CurseForge => self.curseforge_base(),
         };
         let key = cache_key(base, platform, project_id, game_versions, loaders);
-        if let Some(hit) = self.version_cache().get(&key, Instant::now()) {
-            return Ok(hit);
+        let now = Instant::now();
+        {
+            let cache = self.version_cache();
+            if let Some(hit) = cache.get(&key, now) {
+                return Ok(hit);
+            }
+            if !(game_versions.is_empty() && loaders.is_empty())
+                && let Some(all) = cache.get(&cache_key(base, platform, project_id, &[], &[]), now)
+                && !all.truncated
+            {
+                return Ok(ModVersionList {
+                    versions: refine(all.versions, game_versions, loaders),
+                    truncated: false,
+                });
+            }
         }
         let fetched = match platform {
-            Platform::Modrinth => {
-                fetch_modrinth(&self.modrinth_client(), project_id, game_versions, loaders).await?
-            }
+            Platform::Modrinth => ModVersionList {
+                versions: fetch_modrinth(
+                    &self.modrinth_client(),
+                    project_id,
+                    game_versions,
+                    loaders,
+                )
+                .await?,
+                // Modrinth 的版本列表不分页，一次即全量。
+                truncated: false,
+            },
             Platform::CurseForge => {
                 fetch_curseforge(
                     &self.curseforge_client()?,
@@ -82,7 +135,10 @@ impl Aurora {
                 .await?
             }
         };
-        let refined = refine(fetched, game_versions, loaders);
+        let refined = ModVersionList {
+            versions: refine(fetched.versions, game_versions, loaders),
+            truncated: fetched.truncated,
+        };
         self.version_cache()
             .put(key, Instant::now(), refined.clone());
         Ok(refined)
@@ -106,7 +162,7 @@ impl Aurora {
     /// [`CoreError::ModVersionNotFound`]。
     ///
     /// 安装、更新与钉了版本的依赖都只认一个确定的版本，直接走平台的单版本端点：CurseForge 的文件列表
-    /// 是分页的，文件多的大 Mod 目标文件未必在首页，从列表里找会误报「版本不存在」。
+    /// 是分页的、最多翻到页数上限，文件多的大 Mod 目标文件未必在翻到的页里，从列表里找会误报「版本不存在」。
     pub async fn get_mod_version(
         &self,
         platform: Platform,
@@ -180,14 +236,15 @@ async fn fetch_modrinth(
 /// 拉取 CurseForge 工程文件并归一。
 ///
 /// `/mods/{id}/files` 的 `gameVersion` 与 `modLoaderType` 都只收单值，因此只有该维度恰好请求一个取值
-/// 时才下推。这不只是省流量：该端点是分页的（客户端只取首页），不下推游戏版本时，一个有上百个文件
-/// 的大 Mod 首页可能压根不含目标 MC 版本的文件，列表会「明明有版本却是空的」。
+/// 时才下推。这不只是省流量：该端点是分页的，客户端最多翻 [`aurora_modplatform::MOD_FILES_MAX_PAGES`]
+/// 页，不下推游戏版本时，一个有上千个文件的大 Mod 翻到上限也可能不含目标 MC 版本的文件，列表会
+/// 「明明有版本却是空的」。
 async fn fetch_curseforge(
     client: &CurseForgeClient,
     project_id: &str,
     game_versions: &[String],
     loaders: &[ModLoader],
-) -> Result<Vec<ModVersionInfo>> {
+) -> Result<ModVersionList> {
     let mod_id = parse_curseforge_id(project_id, "*")?;
     let single_game_version = match game_versions {
         [only] => Some(only.as_str()),
@@ -197,12 +254,17 @@ async fn fetch_curseforge(
         [only] => Some(*only),
         _ => None,
     };
-    Ok(client
+    let listing = client
         .mod_files(mod_id, single_loader, single_game_version)
-        .await?
-        .iter()
-        .map(CurseForgeFile::to_version_info)
-        .collect())
+        .await?;
+    Ok(ModVersionList {
+        versions: listing
+            .files
+            .iter()
+            .map(CurseForgeFile::to_version_info)
+            .collect(),
+        truncated: listing.truncated,
+    })
 }
 
 /// CurseForge 的工程与文件 id 都是十进制数字；非数字串不可能对应任何东西，在触网前就判为未找到。
@@ -387,16 +449,16 @@ fn cache_key(
 /// 带有效期与容量上限的版本列表缓存。时刻由调用方传入，便于脱离真实时钟测试。
 #[derive(Default)]
 pub(crate) struct VersionListCache {
-    entries: HashMap<String, (Instant, Vec<ModVersionInfo>)>,
+    entries: HashMap<String, (Instant, ModVersionList)>,
 }
 
 impl VersionListCache {
-    fn get(&self, key: &str, now: Instant) -> Option<Vec<ModVersionInfo>> {
+    fn get(&self, key: &str, now: Instant) -> Option<ModVersionList> {
         let (stored_at, value) = self.entries.get(key)?;
         (now.saturating_duration_since(*stored_at) < VERSION_LIST_TTL).then(|| value.clone())
     }
 
-    fn put(&mut self, key: String, now: Instant, value: Vec<ModVersionInfo>) {
+    fn put(&mut self, key: String, now: Instant, value: ModVersionList) {
         if self.entries.len() >= VERSION_LIST_CAPACITY && !self.entries.contains_key(&key) {
             self.entries.retain(|_, (stored_at, _)| {
                 now.saturating_duration_since(*stored_at) < VERSION_LIST_TTL
@@ -460,6 +522,13 @@ mod tests {
             game_versions: game_versions.iter().map(|v| (*v).to_owned()).collect(),
             loaders: loaders.to_vec(),
             ..version(id, date)
+        }
+    }
+
+    fn complete(versions: Vec<ModVersionInfo>) -> ModVersionList {
+        ModVersionList {
+            versions,
+            truncated: false,
         }
     }
 
@@ -628,9 +697,17 @@ mod tests {
     fn cache_entry_expires_after_ttl() {
         let mut cache = VersionListCache::default();
         let t0 = Instant::now();
-        cache.put("k".into(), t0, vec![version("v", "2026-01-01T00:00:00Z")]);
+        cache.put(
+            "k".into(),
+            t0,
+            complete(vec![version("v", "2026-01-01T00:00:00Z")]),
+        );
         assert_eq!(
-            cache.get("k", t0 + Duration::from_secs(1)).unwrap().len(),
+            cache
+                .get("k", t0 + Duration::from_secs(1))
+                .unwrap()
+                .versions
+                .len(),
             1
         );
         assert!(cache.get("k", t0 + VERSION_LIST_TTL).is_none());
@@ -653,7 +730,7 @@ mod tests {
         let other = cache_key("http://x", Platform::Modrinth, "proj2", &[], &[]);
         let same_id_other_platform = cache_key("http://x", Platform::CurseForge, "proj", &[], &[]);
         for key in [&a1, &a2, &other, &same_id_other_platform] {
-            cache.put(key.clone(), t0, Vec::new());
+            cache.put(key.clone(), t0, complete(Vec::new()));
         }
         cache.invalidate(&project_marker(Platform::Modrinth, "proj"));
         assert!(cache.get(&a1, t0).is_none());
@@ -689,10 +766,14 @@ mod tests {
             cache.put(
                 format!("k{i}"),
                 t0 + Duration::from_millis(i as u64),
-                Vec::new(),
+                complete(Vec::new()),
             );
         }
-        cache.put("new".into(), t0 + Duration::from_secs(1), Vec::new());
+        cache.put(
+            "new".into(),
+            t0 + Duration::from_secs(1),
+            complete(Vec::new()),
+        );
         assert_eq!(cache.entries.len(), VERSION_LIST_CAPACITY);
         assert!(cache.get("k0", t0 + Duration::from_secs(1)).is_none());
         assert!(cache.get("k1", t0 + Duration::from_secs(1)).is_some());
@@ -930,7 +1011,8 @@ mod tests {
         let list = refine(
             fetch_curseforge(&curseforge_client(&server.uri()), "238222", &[], &[])
                 .await
-                .unwrap(),
+                .unwrap()
+                .versions,
             &[],
             &[],
         );
@@ -965,7 +1047,8 @@ mod tests {
                 &[ModLoader::NeoForge],
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .versions,
             &["1.20.1".to_owned()],
             &[ModLoader::NeoForge],
         );
@@ -995,11 +1078,142 @@ mod tests {
                 &loaders,
             )
             .await
-            .unwrap(),
+            .unwrap()
+            .versions,
             &games,
             &loaders,
         );
         assert_eq!(ids(&list), vec!["1001"]);
+    }
+
+    /// 一个 CurseForge 文件：`k` 越大越新，id 与文件名都由它派生。
+    fn cf_file(k: u32, game_version: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": 10_000 + k, "modId": 238222, "displayName": format!("JEI {k}"),
+            "fileName": format!("jei-{k}.jar"), "releaseType": 1,
+            "fileDate": format!("2026-01-01T00:{:02}:{:02}Z", k / 60 % 60, k % 60),
+            "gameVersions": [game_version, "Forge"]
+        })
+    }
+
+    /// 按官方文档的分页参数挂一页不过滤的文件：`index` 与 `pageSize` 都对上才命中，否则 wiremock 回 404。
+    async fn mount_cf_page(
+        server: &MockServer,
+        index: u32,
+        files: Vec<serde_json::Value>,
+        total: u64,
+    ) {
+        let count = files.len();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param_is_missing("gameVersion"))
+            .and(query_param("index", index.to_string()))
+            .and(query_param("pageSize", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": files,
+                "pagination": {"index": index, "pageSize": 50, "resultCount": count, "totalCount": total}
+            })))
+            .mount(server)
+            .await;
+    }
+
+    /// 编号 `k` 的文件，每三个里有一个是 1.12.2 的。
+    fn mixed_file(k: u32) -> serde_json::Value {
+        cf_file(
+            k,
+            if k.is_multiple_of(3) {
+                "1.12.2"
+            } else {
+                "1.20.1"
+            },
+        )
+    }
+
+    async fn requests(server: &MockServer) -> usize {
+        server.received_requests().await.unwrap().len()
+    }
+
+    /// 不带过滤时把文件列表翻到底：120 个文件分三页，一个不少，不算截断；之后带过滤的查询直接在
+    /// 这份完整列表上本地过滤，不再问平台。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_unfiltered_listing_walks_every_page() {
+        let server = MockServer::start().await;
+        for (page, range) in [(0, 0..50), (1, 50..100), (2, 100..120)] {
+            let files = range.map(|k| mixed_file(119 - k)).collect();
+            mount_cf_page(&server, page * 50, files, 120).await;
+        }
+        let aurora = test_aurora(&server.uri()).with_curseforge_key("test-key");
+
+        let all = aurora
+            .mod_version_list(Platform::CurseForge, "238222", &[], &[])
+            .await
+            .unwrap();
+        assert!(!all.truncated);
+        assert_eq!(all.versions.len(), 120);
+        assert_eq!(all.versions[0].version_id, "10119");
+        assert_eq!(all.versions[119].version_id, "10000");
+        assert_eq!(requests(&server).await, 3);
+
+        let old = aurora
+            .mod_version_list(
+                Platform::CurseForge,
+                "238222",
+                &["1.12.2".to_owned()],
+                &[ModLoader::Forge],
+            )
+            .await
+            .unwrap();
+        assert!(!old.truncated);
+        assert_eq!(old.versions.len(), 40);
+        assert_eq!(old.versions[0].version_id, "10117");
+        assert!(old.versions.iter().all(|v| v.game_versions == ["1.12.2"]));
+        assert_eq!(requests(&server).await, 3, "带过滤的查询由完整列表代答");
+    }
+
+    /// 文件多到翻满 10 页还没完：给出 500 个并标截断；截断的列表缺页外的版本，带过滤的查询照样问平台。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_listing_beyond_the_page_cap_is_marked_truncated() {
+        let server = MockServer::start().await;
+        for page in 0..10 {
+            let files = (page * 50..page * 50 + 50)
+                .map(|k| mixed_file(1999 - k))
+                .collect();
+            mount_cf_page(&server, page * 50, files, 2000).await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", "1.12.2"))
+            .and(query_param("index", "0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [cf_file(3, "1.12.2")],
+                "pagination": {"index": 0, "pageSize": 50, "resultCount": 1, "totalCount": 1}
+            })))
+            .mount(&server)
+            .await;
+        let aurora = test_aurora(&server.uri()).with_curseforge_key("test-key");
+
+        let all = aurora
+            .mod_version_list(Platform::CurseForge, "238222", &[], &[])
+            .await
+            .unwrap();
+        assert!(all.truncated);
+        assert_eq!(all.versions.len(), 500);
+        assert_eq!(all.versions[499].version_id, "11500");
+        assert_eq!(requests(&server).await, 10);
+        // 截断标记跟着缓存走：再问一次不发请求，照样标截断。
+        let cached = aurora
+            .mod_version_list(Platform::CurseForge, "238222", &[], &[])
+            .await
+            .unwrap();
+        assert_eq!(cached, all);
+        assert_eq!(requests(&server).await, 10);
+
+        let old = aurora
+            .list_mod_versions(Platform::CurseForge, "238222", &["1.12.2".to_owned()], &[])
+            .await
+            .unwrap();
+        assert_eq!(ids(&old), ["10003"]);
+        assert_eq!(requests(&server).await, 11);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

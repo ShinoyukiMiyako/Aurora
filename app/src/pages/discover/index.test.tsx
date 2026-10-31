@@ -621,7 +621,7 @@ describe("发现页：资源详情与安装", () => {
   beforeEach(() => {
     pages = () => result([pack]);
     ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
-    ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
     ipc.overrides.set("match_instances", () => [
       match("生存", { best_version: v }),
       match("创造", { state: "incompatible", compatibility: { kind: "mismatch", reason: "需要 1.20.1" }, best_version: null }),
@@ -672,7 +672,7 @@ describe("发现页：资源详情与安装", () => {
     bootOverrides(ipc, { instances: ids.map((id) => instanceDto(id)), config: configDto({ selected_version: "甲" }) });
     pages = () => result([dp]);
     ipc.overrides.set("project_detail", () => detailOf(dp, { latest_version: dv }));
-    ipc.overrides.set("list_mod_versions", () => [dv]);
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [dv], truncated: false }));
     ipc.overrides.set("match_instances", () => ids.map((id) => match(id, { best_version: dv })));
     const waiting = new Map<string, Deferred<unknown>>();
     let inFlight = 0;
@@ -709,7 +709,7 @@ describe("发现页：资源详情与安装", () => {
     bootOverrides(ipc, { instances: [instanceDto("甲")], config: configDto({ selected_version: "甲" }) });
     pages = () => result([dp]);
     ipc.overrides.set("project_detail", () => detailOf(dp, { latest_version: next }));
-    ipc.overrides.set("list_mod_versions", () => [next]);
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [next], truncated: false }));
     ipc.overrides.set("match_instances", () => [
       match("甲", { state: "installed", best_version: next, installed: { file_name: "terrain-1.0.0.zip", version_id: "dp-1", version_number: "1.0.0", world: "Old" } }),
     ]);
@@ -742,7 +742,7 @@ describe("发现页：整合包", () => {
     const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
     pages = () => result([pack]);
     ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
-    ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
     ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
     // 导入任务一直在跑：面板停在进度态
     ipc.overrides.set("install_modpack", () => new Promise(() => {}));
@@ -841,7 +841,7 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
   beforeEach(() => {
     pages = () => result([pack]);
     ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
-    ipc.overrides.set("list_mod_versions", () => [v]);
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
     ipc.overrides.set("install_modpack", () => new Promise(() => {}));
   });
 
