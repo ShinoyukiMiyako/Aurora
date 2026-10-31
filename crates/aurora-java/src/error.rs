@@ -43,6 +43,10 @@ pub enum Error {
     #[error("无法从 java -version 输出解析版本号: {output}")]
     JavaVersionParse { output: String },
 
+    /// `java -version` 在等待上限内没有结束；子进程已被结束并确认退出。
+    #[error("java -version 超过 {timeout_secs} 秒没有结束，已结束该进程: {path}")]
+    JavaProbeTimeout { path: PathBuf, timeout_secs: u64 },
+
     /// Java 运行时清单不包含当前平台键（如非 windows-x64 平台）。
     #[error("Java 运行时清单不含平台 {0}")]
     UnsupportedPlatform(String),
@@ -81,6 +85,8 @@ impl RetryableError for Error {
             Error::Json { .. }
             | Error::JavaExec { .. }
             | Error::JavaVersionParse { .. }
+            // 挂住的 JVM 再拉一次多半还是挂住，只会让调用方多等一个超时。
+            | Error::JavaProbeTimeout { .. }
             | Error::UnsupportedPlatform(_)
             | Error::NoRuntimeForMajor { .. }
             | Error::MissingJavaExecutable => false,
