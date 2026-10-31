@@ -90,7 +90,7 @@ interface IrisReport {
 
 /** Iris 对全部实例的落位矩阵：判断光影目标有没有能加载光影的东西、能不能顺带装上 Iris。 */
 function IrisProbe({ onReport }: { onReport: (report: IrisReport) => void }) {
-  const iris = useInstanceMatches("modrinth", IRIS_PROJECT_ID, null);
+  const iris = useInstanceMatches("modrinth", IRIS_PROJECT_ID, "mod", null);
   const { status, reload } = iris;
   const rows = iris.status === "ready" ? iris.data : null;
   const error = iris.status === "error" ? iris.error : null;
@@ -122,7 +122,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   const run = useRunner();
   const shell = useShell();
   const type = installableType(detail);
-  const matches = useInstanceMatches(detail.platform, detail.project_id, pinned);
+  const matches = useInstanceMatches(detail.platform, detail.project_id, type, pinned);
   const [worlds, reportWorlds] = useCollected<WorldsState>();
   const [iris, setIris] = useState<IrisReport | null>(null);
   const [picked, setPicked] = useState<ReadonlySet<string> | null>(null);

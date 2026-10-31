@@ -10,18 +10,21 @@
 //! 因此 [`Compatibility::Unknown`] 在界面上是软提示、仍然放行，只有确凿对不上才判
 //! [`Compatibility::Mismatch`]；两者都附一句给玩家看的中文原因——「装不了」与「拿不准」都必须
 //! 同时说明「为什么」。
+//!
+//! 资源包、光影、数据包也走同一张矩阵，但只判 MC 版本一维（[`classify_game_version`]）：它们由游戏本体
+//! （光影由 Iris / OptiFine）读取，与实例装的 Mod 加载器无关。
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use aurora_instance::{DiscoveredVersion, discover_versions};
 use aurora_modplatform::{
-    ModLoader, ModVersionInfo, Platform, parse_loader_name, scan_mods_dir_cached,
+    ModLoader, ModVersionInfo, Platform, ResourceType, parse_loader_name, scan_mods_dir_cached,
 };
 use aurora_version::identify_mc_version;
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::modfs::{bounded_map, ledger_key, local_concurrency, try_exists};
 use crate::modversions::sort_by_published_desc;
@@ -147,37 +150,60 @@ pub fn classify(
         }
     }
 
-    // 认不出实例的 MC 版本：加载器这一关已经过了，但版本对不对无从判断，交给用户自行决定。
+    // 加载器这一关已经过了，剩下的 MC 版本一维与资源同一口径。版本维度对得上也不够：加载器一维
+    // 平台压根没给时，同样没有资格声称匹配。
+    match classify_game_version(version, instance_mc_version) {
+        Compatibility::Match if version.loaders.is_empty() => Compatibility::Unknown {
+            reason: "平台没有标注这个版本支持的加载器".to_owned(),
+        },
+        other => other,
+    }
+}
+
+/// 纯函数：只按 MC 版本判定（资源包、光影、数据包；Mod 判定的版本维度也由它给出）。
+///
+/// 平台给这几类资源标的「加载器」是 `minecraft`、`iris` 之类的取值，并不是 Mod 加载器；按 Mod 口径判，
+/// 认不出的取值成了空列表，每个资源包都会落到「平台没有标注加载器」的可能可行，CurseForge 上偶尔标了
+/// Forge 的资源包文件更会在原版实例上被判成不兼容。
+pub fn classify_game_version(
+    version: &ModVersionInfo,
+    instance_mc_version: Option<&str>,
+) -> Compatibility {
+    // 认不出实例的 MC 版本：版本对不对无从判断，交给用户自行决定。
     let Some(instance_mc_version) = instance_mc_version else {
         return Compatibility::Unknown {
             reason: "认不出该实例基于哪个 MC 版本，无法确认是否适配".to_owned(),
         };
     };
-
-    if !version.game_versions.is_empty()
-        && !version
-            .game_versions
-            .iter()
-            .any(|v| v == instance_mc_version)
-    {
-        return Compatibility::Mismatch {
-            reason: format!("不支持 MC {instance_mc_version}"),
-        };
-    }
-
-    // 走到这里说明「已知的部分都对得上」。但只要有一维平台压根没给，就没有资格声称匹配。
+    // 平台没给 MC 版本：不知道就不能声称匹配。
     if version.game_versions.is_empty() {
         return Compatibility::Unknown {
             reason: "平台没有标注这个版本支持的 MC 版本".to_owned(),
         };
     }
-    if version.loaders.is_empty() {
-        return Compatibility::Unknown {
-            reason: "平台没有标注这个版本支持的加载器".to_owned(),
+    if !version
+        .game_versions
+        .iter()
+        .any(|v| v == instance_mc_version)
+    {
+        return Compatibility::Mismatch {
+            reason: format!("不支持 MC {instance_mc_version}"),
         };
     }
-
     Compatibility::Match
+}
+
+/// 按资源类型选判定口径：只有 Mod 要看加载器。整合包与插件在 [`Aurora::match_instances`] 入口就被拒掉。
+fn judge(
+    resource_type: ResourceType,
+    version: &ModVersionInfo,
+    instance_mc_version: Option<&str>,
+    instance_loaders: &[String],
+) -> Compatibility {
+    match resource_type {
+        ResourceType::Mod => classify(version, instance_mc_version, instance_loaders),
+        _ => classify_game_version(version, instance_mc_version),
+    }
 }
 
 /// 排序档位：兼容 0 > 可能可行 1 > 已安装 2 > 不兼容 3。
@@ -201,6 +227,7 @@ fn tier(state: MatchState) -> u8 {
 /// 全部版本都对不上时取「最新那个版本的原因」作为该实例的说明：玩家最可能去试的就是最新版，
 /// 拿一个陈年旧版的失败原因去解释当前状况只会误导。
 fn pick_best(
+    resource_type: ResourceType,
     versions: &[ModVersionInfo],
     instance_mc_version: Option<&str>,
     instance_loaders: &[String],
@@ -209,7 +236,12 @@ fn pick_best(
     let mut newest_reason: Option<String> = None;
 
     for version in versions {
-        match classify(version, instance_mc_version, instance_loaders) {
+        match judge(
+            resource_type,
+            version,
+            instance_mc_version,
+            instance_loaders,
+        ) {
             Compatibility::Match => return (Compatibility::Match, Some(version.clone())),
             Compatibility::Unknown { reason } => {
                 if newest_unknown.is_none() {
@@ -241,11 +273,17 @@ fn pick_best(
 
 /// 只判调用方指定的那一个版本（落位层的版本下拉选了具体版本时）。
 fn judge_pinned(
+    resource_type: ResourceType,
     version: &ModVersionInfo,
     instance_mc_version: Option<&str>,
     instance_loaders: &[String],
 ) -> (Compatibility, Option<ModVersionInfo>) {
-    let compatibility = classify(version, instance_mc_version, instance_loaders);
+    let compatibility = judge(
+        resource_type,
+        version,
+        instance_mc_version,
+        instance_loaders,
+    );
     let best = match compatibility {
         Compatibility::Mismatch { .. } => None,
         _ => Some(version.clone()),
@@ -293,6 +331,9 @@ impl Aurora {
     /// `mod_version_id` 给出时整个矩阵只按这一个版本判定（落位层的版本下拉选了具体版本）；
     /// 为 `None` 时每个实例各自挑最合适的版本。
     ///
+    /// `resource_type` 决定判定口径：Mod 看加载器与 MC 版本，资源包、光影、数据包只看 MC 版本。
+    /// 整合包与插件不装进已有实例，传入即报 [`CoreError::InvalidResourceTarget`]。
+    ///
     /// 工程版本列表整场只拉一次，之后每个实例都在本地判定；逐实例的「装没装」要读卷宗与扫 mods 目录，
     /// 有界并发执行。逐实例发请求会让装了十来个实例的玩家在点开安装弹层时等上十几个网络来回，还会
     /// 撞上平台限流把后半截请求打成失败。
@@ -300,8 +341,14 @@ impl Aurora {
         &self,
         platform: Platform,
         project_id: &str,
+        resource_type: ResourceType,
         mod_version_id: Option<&str>,
     ) -> Result<Vec<InstanceMatch>> {
+        if matches!(resource_type, ResourceType::Modpack | ResourceType::Plugin) {
+            return Err(CoreError::InvalidResourceTarget(format!(
+                "{resource_type:?} 不装进已有实例，没有落位矩阵"
+            )));
+        }
         // 先扫本地：一个实例都没有时连网络都不必打。矩阵本来就要覆盖全部实例，这里的全量扫描是
         // 必需而不是浪费。
         let scan = discover_versions(self.game_dir()).await?;
@@ -335,9 +382,9 @@ impl Aurora {
                 let mc_version = instance_mc_version(&discovered);
                 let loaders = instance_loaders(&discovered);
                 let (compatibility, best_version) = if pinned {
-                    judge_pinned(&versions[0], mc_version.as_deref(), &loaders)
+                    judge_pinned(resource_type, &versions[0], mc_version.as_deref(), &loaders)
                 } else {
-                    pick_best(&versions, mc_version.as_deref(), &loaders)
+                    pick_best(resource_type, &versions, mc_version.as_deref(), &loaders)
                 };
                 let id = discovered.id.clone();
                 let installed = aurora
@@ -686,7 +733,12 @@ mod tests {
             dated("newest", 2026, &[ModLoader::Fabric], &["1.20.1"]),
             dated("older", 2025, &[ModLoader::Fabric], &["1.20.1"]),
         ];
-        let (compat, best) = pick_best(&versions, Some("1.20.1"), &names(&["fabric"]));
+        let (compat, best) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.20.1"),
+            &names(&["fabric"]),
+        );
         assert_eq!(compat, Compatibility::Match);
         assert_eq!(best.unwrap().version_id, "newest");
     }
@@ -697,7 +749,12 @@ mod tests {
             dated("too-new", 2026, &[ModLoader::Fabric], &["1.21"]),
             dated("fits", 2025, &[ModLoader::Fabric], &["1.20.1"]),
         ];
-        let (compat, best) = pick_best(&versions, Some("1.20.1"), &names(&["fabric"]));
+        let (compat, best) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.20.1"),
+            &names(&["fabric"]),
+        );
         assert_eq!(compat, Compatibility::Match);
         assert_eq!(best.unwrap().version_id, "fits");
     }
@@ -709,7 +766,12 @@ mod tests {
             dated("no-metadata", 2026, &[], &[]),
             dated("certain", 2025, &[ModLoader::Fabric], &["1.20.1"]),
         ];
-        let (compat, best) = pick_best(&versions, Some("1.20.1"), &names(&["fabric"]));
+        let (compat, best) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.20.1"),
+            &names(&["fabric"]),
+        );
         assert_eq!(compat, Compatibility::Match);
         assert_eq!(best.unwrap().version_id, "certain");
     }
@@ -721,7 +783,12 @@ mod tests {
             dated("no-loaders", 2025, &[], &["1.20.1"]),
             dated("older-unknown", 2024, &[ModLoader::Fabric], &[]),
         ];
-        let (compat, best) = pick_best(&versions, Some("1.20.1"), &names(&["fabric"]));
+        let (compat, best) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.20.1"),
+            &names(&["fabric"]),
+        );
         assert_eq!(compat, unknown("平台没有标注这个版本支持的加载器"));
         // 软提示也要给最新的那个候选。
         assert_eq!(best.unwrap().version_id, "no-loaders");
@@ -733,7 +800,12 @@ mod tests {
             dated("newest", 2026, &[ModLoader::Fabric], &["1.21"]),
             dated("ancient", 2019, &[ModLoader::Forge], &["1.12.2"]),
         ];
-        let (compat, best) = pick_best(&versions, Some("1.20.1"), &names(&["fabric"]));
+        let (compat, best) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.20.1"),
+            &names(&["fabric"]),
+        );
         assert_eq!(compat, mismatch("不支持 MC 1.20.1"));
         // 不兼容时不给候选版本：让 UI 无从把一个装不上的版本渲染成可安装项。
         assert!(best.is_none());
@@ -741,18 +813,95 @@ mod tests {
 
     #[test]
     fn pick_best_on_empty_version_list_states_the_project_has_none() {
-        let (compat, best) = pick_best(&[], Some("1.20.1"), &names(&["fabric"]));
+        let (compat, best) = pick_best(ResourceType::Mod, &[], Some("1.20.1"), &names(&["fabric"]));
         assert_eq!(compat, mismatch("该工程没有可用版本"));
         assert!(best.is_none());
     }
 
     #[test]
+    fn resources_are_judged_by_game_version_alone() {
+        // 标了 Forge 的资源包文件：原版实例、Fabric 实例照样能用
+        let tagged = version(&[ModLoader::Forge], &["1.20.1"]);
+        for loaders in [names(&[]), names(&["fabric"]), names(&["optifine"])] {
+            for kind in [
+                ResourceType::ResourcePack,
+                ResourceType::Shader,
+                ResourceType::DataPack,
+            ] {
+                assert_eq!(
+                    judge(kind, &tagged, Some("1.20.1"), &loaders),
+                    Compatibility::Match
+                );
+            }
+        }
+        // 没标加载器不是「拿不准」：资源根本不看这一维
+        let bare = version(&[], &["1.20.1"]);
+        assert_eq!(
+            judge(ResourceType::ResourcePack, &bare, Some("1.20.1"), &[]),
+            Compatibility::Match
+        );
+        assert_eq!(
+            judge(
+                ResourceType::Mod,
+                &bare,
+                Some("1.20.1"),
+                &names(&["fabric"])
+            ),
+            unknown("平台没有标注这个版本支持的加载器")
+        );
+        // 同一个版本按 Mod 判仍然要加载器对上
+        assert_eq!(
+            judge(
+                ResourceType::Mod,
+                &tagged,
+                Some("1.20.1"),
+                &names(&["fabric"])
+            ),
+            mismatch("需要 Forge，该实例装的是 Fabric")
+        );
+    }
+
+    #[test]
+    fn game_version_dimension_keeps_its_three_outcomes() {
+        assert_eq!(
+            classify_game_version(&version(&[], &["1.20.1", "1.20.2"]), Some("1.20.2")),
+            Compatibility::Match
+        );
+        assert_eq!(
+            classify_game_version(&version(&[], &["1.20.1"]), Some("1.19.2")),
+            mismatch("不支持 MC 1.19.2")
+        );
+        assert_eq!(
+            classify_game_version(&version(&[], &[]), Some("1.20.1")),
+            unknown("平台没有标注这个版本支持的 MC 版本")
+        );
+        assert_eq!(
+            classify_game_version(&version(&[], &["1.20.1"]), None),
+            unknown("认不出该实例基于哪个 MC 版本，无法确认是否适配")
+        );
+    }
+
+    #[test]
+    fn pick_best_for_resource_takes_newest_fitting_game_version() {
+        let versions = vec![
+            dated("too-new", 2026, &[], &["1.21"]),
+            dated("fits", 2025, &[], &["1.20.1"]),
+            dated("older", 2024, &[], &["1.20.1"]),
+        ];
+        let (compat, best) = pick_best(ResourceType::Shader, &versions, Some("1.20.1"), &[]);
+        assert_eq!(compat, Compatibility::Match);
+        assert_eq!(best.unwrap().version_id, "fits");
+    }
+
+    #[test]
     fn pinned_version_is_judged_alone() {
         let v = dated("pinned", 2020, &[ModLoader::Forge], &["1.20.1"]);
-        let (compat, best) = judge_pinned(&v, Some("1.20.1"), &names(&["fabric"]));
+        let (compat, best) =
+            judge_pinned(ResourceType::Mod, &v, Some("1.20.1"), &names(&["fabric"]));
         assert_eq!(compat, mismatch("需要 Forge，该实例装的是 Fabric"));
         assert!(best.is_none());
-        let (compat, best) = judge_pinned(&v, Some("1.20.1"), &names(&["forge"]));
+        let (compat, best) =
+            judge_pinned(ResourceType::Mod, &v, Some("1.20.1"), &names(&["forge"]));
         assert_eq!(compat, Compatibility::Match);
         assert_eq!(best.unwrap().version_id, "pinned");
     }
@@ -927,7 +1076,7 @@ mod tests {
         matrix_fixture(&mc).await;
 
         let matches = isolated(&mc, server.uri())
-            .match_instances(Platform::Modrinth, "sodium", None)
+            .match_instances(Platform::Modrinth, "sodium", ResourceType::Mod, None)
             .await
             .unwrap();
 
@@ -1003,7 +1152,7 @@ mod tests {
         put_instance(&mc, "fabric-1.19.2", "1.19.2", FABRIC_LIB).await;
 
         let matches = isolated(&mc, server.uri())
-            .match_instances(Platform::Modrinth, "sodium", Some("old"))
+            .match_instances(Platform::Modrinth, "sodium", ResourceType::Mod, Some("old"))
             .await
             .unwrap();
         assert_eq!(matches[0].version_id, "fabric-1.19.2");
@@ -1030,10 +1179,105 @@ mod tests {
         let aurora = isolated(&mc, server.uri());
         assert!(
             aurora
-                .match_instances(Platform::Modrinth, "sodium", None)
+                .match_instances(Platform::Modrinth, "sodium", ResourceType::Mod, None)
                 .await
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// Modrinth 给资源包版本标的加载器是 `minecraft`，不是 Mod 加载器。
+    const FAITHFUL_VERSIONS: &str = r#"[
+        {"id":"f32","project_id":"faithful","name":"Faithful 1.20.1","version_number":"1.20.1-r5",
+         "version_type":"release","date_published":"2026-02-01T00:00:00Z",
+         "game_versions":["1.20.1"],"loaders":["minecraft"],
+         "files":[{"hashes":{"sha1":"cc"},"url":"https://example.invalid/faithful.zip",
+                   "filename":"faithful.zip","primary":true,"size":3}]}
+    ]"#;
+
+    /// 资源包由游戏本体读取：不论实例装没装、装的哪种 Mod 加载器，MC 版本对上就是兼容。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resource_pack_matrix_judges_game_version_only() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/faithful/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(FAITHFUL_VERSIONS))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        put_instance(&mc, "fabric-1.20.1", "1.20.1", FABRIC_LIB).await;
+        put_instance(&mc, "forge-1.20.1", "1.20.1", FORGE_LIB).await;
+        put_instance(&mc, "fabric-1.19.2", "1.19.2", FABRIC_LIB).await;
+        let vanilla = mc.join("versions").join("1.20.1");
+        tokio::fs::create_dir_all(&vanilla).await.unwrap();
+        tokio::fs::write(
+            vanilla.join("1.20.1.json"),
+            r#"{"id":"1.20.1","type":"release","mainClass":"m","libraries":[]}"#,
+        )
+        .await
+        .unwrap();
+
+        let matches = isolated(&mc, server.uri())
+            .match_instances(
+                Platform::Modrinth,
+                "faithful",
+                ResourceType::ResourcePack,
+                None,
+            )
+            .await
+            .unwrap();
+        let rows: Vec<(&str, MatchState, &Compatibility)> = matches
+            .iter()
+            .map(|m| (m.version_id.as_str(), m.state, &m.compatibility))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("1.20.1", MatchState::Compatible, &Compatibility::Match),
+                (
+                    "fabric-1.20.1",
+                    MatchState::Compatible,
+                    &Compatibility::Match
+                ),
+                (
+                    "forge-1.20.1",
+                    MatchState::Compatible,
+                    &Compatibility::Match
+                ),
+                (
+                    "fabric-1.19.2",
+                    MatchState::Incompatible,
+                    &mismatch("不支持 MC 1.19.2")
+                ),
+            ]
+        );
+        assert_eq!(matches[0].best_version.as_ref().unwrap().version_id, "f32");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn modpack_and_plugin_have_no_matrix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            // 类型不成立就不该去问平台
+            .expect(0)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        put_instance(&mc, "fabric-1.20.1", "1.20.1", FABRIC_LIB).await;
+        let aurora = isolated(&mc, server.uri());
+        for kind in [ResourceType::Modpack, ResourceType::Plugin] {
+            let err = aurora
+                .match_instances(Platform::Modrinth, "pack", kind, None)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, CoreError::InvalidResourceTarget(_)),
+                "{kind:?} 得到 {err:?}"
+            );
+        }
     }
 }

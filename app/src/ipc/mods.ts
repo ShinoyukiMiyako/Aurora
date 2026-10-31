@@ -2,7 +2,7 @@
 // 字段名与后端 DTO 的 serde 名一致（snake_case），入参键为 camelCase。
 
 import { invoke } from "./bridge";
-import type { PlatformId } from "./discover";
+import type { InstallableResourceType, PlatformId } from "./discover";
 import { isIpcError } from "./errors";
 
 export type ModLoader = "fabric" | "quilt" | "forge" | "neoforge" | "liteloader";
@@ -166,9 +166,16 @@ export const listModVersions = (
   loaders: ModLoader[],
 ): Promise<ModVersionInfo[]> => invoke<ModVersionInfo[]>("list_mod_versions", { platform, projectId, gameVersions, loaders });
 
-/** 工程对全部已装实例的落位矩阵；给出 modVersionId 时只按这个版本判定。 */
-export const matchInstances = (platform: PlatformId, projectId: string, modVersionId: string | null): Promise<InstanceMatch[]> =>
-  invoke<InstanceMatch[]>("match_instances", { platform, projectId, modVersionId });
+/**
+ * 工程对全部已装实例的落位矩阵；给出 modVersionId 时只按这个版本判定。
+ * resourceType 决定判定口径：Mod 看加载器与游戏版本，资源包、光影、数据包只看游戏版本。
+ */
+export const matchInstances = (
+  platform: PlatformId,
+  projectId: string,
+  resourceType: InstallableResourceType,
+  modVersionId: string | null,
+): Promise<InstanceMatch[]> => invoke<InstanceMatch[]>("match_instances", { platform, projectId, resourceType, modVersionId });
 
 export const planInstall = (versionId: string, platform: PlatformId, projectId: string, modVersionId: string): Promise<InstallPlan> =>
   invoke<InstallPlan>("plan_install", { versionId, platform, projectId, modVersionId });

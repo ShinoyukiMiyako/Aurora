@@ -2,7 +2,7 @@
 // 搜索的防抖与分页累积归页面：这里一组参数就是一页，换参数即换 key。
 
 import type { Platform } from "../../domain/types";
-import { projectDetail, searchResources, type ProjectDetail, type SearchArgs, type SearchResultDto } from "../../ipc/discover";
+import { projectDetail, searchResources, type InstallableResourceType, type ProjectDetail, type SearchArgs, type SearchResultDto } from "../../ipc/discover";
 import { previewModpack, summarizePlatformModpack, type ModpackPreviewDto, type ModpackSummaryDto } from "../../ipc/modpack";
 import { listModVersions, matchInstances, planInstall, type InstallPlan, type InstanceMatch, type ModLoader, type ModVersionInfo } from "../../ipc/mods";
 import { useResource, type ResourceResult } from "../resource";
@@ -50,10 +50,18 @@ export function useModVersions(platform: Platform, projectId: string, gameVersio
   );
 }
 
-/** match:<platform>:<projectId>:<版本或 auto> —— 全部实例的落位矩阵；任一实例的 Mod 或资源变化后整个前缀失效，实例增删时页面按需 reload。 */
-export function useInstanceMatches(platform: Platform, projectId: string, modVersionId: string | null): ResourceResult<InstanceMatch[]> {
-  return useResource(`match:${platform}:${projectId}:${modVersionId === null ? "auto" : modVersionId}`, () =>
-    matchInstances(platform, projectId, modVersionId),
+/**
+ * match:<platform>:<projectId>:<类型>:<版本或 auto> —— 全部实例的落位矩阵；任一实例的 Mod 或资源变化后整个前缀失效，
+ * 实例增删时页面按需 reload。类型决定判定口径（资源包、光影、数据包不看加载器）。
+ */
+export function useInstanceMatches(
+  platform: Platform,
+  projectId: string,
+  resourceType: InstallableResourceType,
+  modVersionId: string | null,
+): ResourceResult<InstanceMatch[]> {
+  return useResource(`match:${platform}:${projectId}:${resourceType}:${modVersionId === null ? "auto" : modVersionId}`, () =>
+    matchInstances(platform, projectId, resourceType, modVersionId),
   );
 }
 

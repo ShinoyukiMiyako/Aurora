@@ -18,7 +18,7 @@ import type {
   PlannedItem,
   UpdateCandidate,
 } from "../../mods";
-import type { ModInstallOutcomeDto, PlatformId } from "../../discover";
+import type { InstallableResourceType, ModInstallOutcomeDto, PlatformId } from "../../discover";
 import { CORE_EVENT } from "../../tasks";
 import { byCodeUnit, findMockSource, newestFirst, sourceVersions, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
@@ -262,18 +262,45 @@ function classify(v: ModVersionInfo, mcVersion: string | null, instanceLoaders: 
       };
     }
   }
+  const game = classifyGameVersion(v, mcVersion);
+  if (game.kind === "match" && v.loaders.length === 0) return { kind: "unknown", reason: "平台没有标注这个版本支持的加载器" };
+  return game;
+}
+
+/** 只看游戏版本一维：资源包、光影、数据包由游戏本体读取，与 Mod 加载器无关（与后端同一口径）。 */
+function classifyGameVersion(v: ModVersionInfo, mcVersion: string | null): Compatibility {
   if (mcVersion === null) return { kind: "unknown", reason: "认不出该实例基于哪个 MC 版本，无法确认是否适配" };
-  if (v.game_versions.length > 0 && !v.game_versions.includes(mcVersion)) return { kind: "mismatch", reason: `不支持 MC ${mcVersion}` };
   if (v.game_versions.length === 0) return { kind: "unknown", reason: "平台没有标注这个版本支持的 MC 版本" };
-  if (v.loaders.length === 0) return { kind: "unknown", reason: "平台没有标注这个版本支持的加载器" };
+  if (!v.game_versions.includes(mcVersion)) return { kind: "mismatch", reason: `不支持 MC ${mcVersion}` };
   return { kind: "match" };
 }
 
-function pickBest(versions: ModVersionInfo[], instance: MockInstance): [Compatibility, ModVersionInfo | null] {
+function judge(type: InstallableResourceType, v: ModVersionInfo, instance: MockInstance): Compatibility {
+  return type === "mod" ? classify(v, instance.mc_version, instance.loaders) : classifyGameVersion(v, instance.mc_version);
+}
+
+/** 整合包与插件不装进已有实例，没有落位矩阵。 */
+function parseMatchType(value: unknown): InstallableResourceType {
+  const raw = requireString(value, "resourceType");
+  switch (raw) {
+    case "mod":
+    case "resource_pack":
+    case "shader":
+    case "data_pack":
+      return raw;
+    case "modpack":
+    case "plugin":
+      throw new IpcError("invalid_argument", `安装目标不对：${raw} 不装进已有实例，没有落位矩阵`);
+    default:
+      throw new IpcError("invalid_argument", `未知资源类型 ${raw}`);
+  }
+}
+
+function pickBest(type: InstallableResourceType, versions: ModVersionInfo[], instance: MockInstance): [Compatibility, ModVersionInfo | null] {
   let unknown: [Compatibility, ModVersionInfo] | null = null;
   let firstReason: Compatibility | null = null;
   for (const v of newestFirst(versions)) {
-    const c = classify(v, instance.mc_version, instance.loaders);
+    const c = judge(type, v, instance);
     if (c.kind === "match") return [c, v];
     if (c.kind === "unknown" && unknown === null) unknown = [c, v];
     if (c.kind === "mismatch" && firstReason === null) firstReason = c;
@@ -633,6 +660,7 @@ export const handlers: MockHandlers = {
   match_instances: (args): InstanceMatch[] => {
     const platform = parsePlatform(args.platform);
     const projectId = requireNonEmpty(args.projectId, "projectId");
+    const type = parseMatchType(args.resourceType);
     const pinned = args.modVersionId === null || args.modVersionId === undefined ? null : requireNonEmpty(args.modVersionId, "modVersionId");
     const versions = pinned === null ? projectVersions(platform, projectId) : [findVersion(platform, projectId, pinned)];
     const ready = mockInstanceIds().filter((id) => mockInstanceFacts(id) !== null);
@@ -640,9 +668,9 @@ export const handlers: MockHandlers = {
       const instance = mockInstance(id);
       let compatibility: Compatibility;
       let best: ModVersionInfo | null;
-      if (pinned === null) [compatibility, best] = pickBest(versions, instance);
+      if (pinned === null) [compatibility, best] = pickBest(type, versions, instance);
       else {
-        compatibility = classify(versions[0], instance.mc_version, instance.loaders);
+        compatibility = judge(type, versions[0], instance);
         best = compatibility.kind === "mismatch" ? null : versions[0];
       }
       const row = instance.ledger.find((r) => r.platform === platform && r.project_id === projectId && present(instance, r.file_name));

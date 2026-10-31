@@ -122,7 +122,7 @@ describe("移除", () => {
       reason: "移除事件不支持回滚，文件已从磁盘删除",
     });
     // 卷宗条目已摘：同工程在落位矩阵里不再是「已安装」。
-    const matrix = await matchInstances("modrinth", "AANobbMI", null);
+    const matrix = await matchInstances("modrinth", "AANobbMI", "mod", null);
     expect(matrix.find((m) => m.version_id === MOCK_MOD_INSTANCE)?.state).toBe("compatible");
   });
 
@@ -232,7 +232,7 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
   });
 
   it("矩阵四态按档位排序，不兼容带原因，已装带出已装版本", async () => {
-    const matrix = await matchInstances("modrinth", "AANobbMI", null);
+    const matrix = await matchInstances("modrinth", "AANobbMI", "mod", null);
     // 矩阵覆盖实例 mock 里全部可用的实例（损坏的「没装完」不在其中）。
     expect(matrix.map((m) => [m.version_id, m.state])).toEqual([
       ["1.21.1-Fabric", "compatible"],
@@ -252,13 +252,13 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
     expect(matrix[6].compatibility).toEqual({ kind: "mismatch", reason: "需要 Fabric/NeoForge，该实例装的是 Forge" });
 
     // 1.20.1 的 Fabric 实例只认 1.20.1 的版本：只有 1.21.1 版本的工程判为不支持这个 MC 版本
-    const create = await matchInstances("modrinth", "LNytGWDc", "create-604");
+    const create = await matchInstances("modrinth", "LNytGWDc", "mod", "create-604");
     expect(create.find((m) => m.version_id === "1.21.1-Fabric")?.compatibility).toEqual({ kind: "mismatch", reason: "需要 NeoForge，该实例装的是 Fabric" });
-    const lithium = await matchInstances("modrinth", "gvQqBUqZ", "lith-0143");
+    const lithium = await matchInstances("modrinth", "gvQqBUqZ", "mod", "lith-0143");
     expect(lithium.find((m) => m.version_id === "1.20.1-Fabric")?.compatibility).toEqual({ kind: "mismatch", reason: "不支持 MC 1.20.1" });
 
     // 指定版本：整个矩阵只按它判。
-    const pinned = await matchInstances("modrinth", "mOgUt4GM", "mm-7");
+    const pinned = await matchInstances("modrinth", "mOgUt4GM", "mod", "mm-7");
     expect(pinned.map((m) => [m.version_id, m.state, m.compatibility.kind])).toEqual([
       ["1.20.1-Fabric", "maybe", "unknown"],
       ["1.20.1-Forge", "maybe", "unknown"],

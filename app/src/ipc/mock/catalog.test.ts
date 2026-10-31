@@ -5,7 +5,7 @@ import { installMod, installResource, projectDetail, searchResources, type Searc
 import { listInstances } from "../instances";
 import { installModpack, summarizePlatformModpack } from "../modpack";
 import { listMods, listModVersions, matchInstances, planInstall } from "../mods";
-import { resetMocks } from "./index";
+import { mockInvoke, resetMocks } from "./index";
 import { clearMockEventListeners } from "./events";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -23,7 +23,7 @@ async function readyInstanceIds(): Promise<string[]> {
 }
 
 describe("工程目录：搜得到就打得开、装得上", () => {
-  it("每张卡的每个平台来源：详情、版本列表、落位矩阵都取得到，最新版本与版本列表一致", async () => {
+  it("每张卡的每个平台来源：详情、版本列表都取得到，最新版本与版本列表一致；能装进实例的还取得到落位矩阵", async () => {
     const { hits } = await searchResources(ALL);
     expect(hits.length).toBe(13);
     const ready = (await readyInstanceIds()).sort();
@@ -36,7 +36,9 @@ describe("工程目录：搜得到就打得开、装得上", () => {
         expect(versions.length, where).toBeGreaterThan(0);
         expect(versions.every((v) => v.platform === s.platform && v.project_id === s.project_id), where).toBe(true);
         expect(detail.latest_version?.version_id, where).toBe(versions[0].version_id);
-        const matrix = await matchInstances(s.platform, s.project_id, null);
+        // 整合包装成新实例，不往已有实例里落
+        if (hit.resource_type === "modpack" || hit.resource_type === "plugin") continue;
+        const matrix = await matchInstances(s.platform, s.project_id, hit.resource_type, null);
         expect(matrix.map((m) => m.version_id).sort(), where).toEqual(ready);
       }
     }
@@ -74,12 +76,49 @@ describe("工程目录：搜得到就打得开、装得上", () => {
   });
 
   it("光影要用的 Iris 在目录里：Fabric / Quilt 实例能装，原版与 Forge 实例不能", async () => {
-    const matrix = await matchInstances("modrinth", "YL57xq9U", null);
+    const matrix = await matchInstances("modrinth", "YL57xq9U", "mod", null);
     const state = (id: string) => matrix.find((m) => m.version_id === id)?.state;
     expect(state("1.21.1-Fabric")).toBe("compatible");
     expect(state("1.20.1-Fabric")).toBe("compatible");
     expect(state("1.21.1")).toBe("incompatible");
     expect(state("1.20.1-Forge")).toBe("incompatible");
+  });
+
+  it("资源包、光影、数据包的矩阵只看游戏版本：原版、Fabric、Forge 实例对得上就兼容", async () => {
+    const rows = async (projectId: string, type: "resource_pack" | "shader" | "data_pack") =>
+      (await matchInstances("modrinth", projectId, type, null)).map((m) => [
+        m.version_id,
+        m.state,
+        m.compatibility,
+        m.best_version === null ? null : m.best_version.version_id,
+      ]);
+    const fits = { kind: "match" };
+    const off = (mc: string) => ({ kind: "mismatch", reason: `不支持 MC ${mc}` });
+    expect(await rows("faithful-32x", "resource_pack")).toEqual([
+      ["1.20.1-Fabric", "compatible", fits, "f32-1201"],
+      ["1.20.1-Forge", "compatible", fits, "f32-1201"],
+      ["1.21.1", "compatible", fits, "f32-1211"],
+      ["1.21.1-Fabric", "compatible", fits, "f32-1211"],
+      ["樱花生存", "compatible", fits, "f32-1211"],
+      ["1.21", "incompatible", off("1.21"), null],
+      ["RLCraft", "incompatible", off("1.12.2"), null],
+    ]);
+    expect((await rows("HVnmMxH1", "shader")).slice(0, 3)).toEqual([
+      ["1.20.1-Fabric", "compatible", fits, "cr-r53"],
+      ["1.20.1-Forge", "compatible", fits, "cr-r53"],
+      ["1.21.1", "compatible", fits, "cr-r53"],
+    ]);
+    expect((await rows("8oi3bsk5", "data_pack")).slice(0, 3)).toEqual([
+      ["1.20.1-Fabric", "compatible", fits, "tl-243"],
+      ["1.20.1-Forge", "compatible", fits, "tl-243"],
+      ["1.21.1", "compatible", fits, "tl-254"],
+    ]);
+  });
+
+  it("同一个版本按 Mod 判仍要加载器对上；整合包没有落位矩阵", async () => {
+    const sodium = await matchInstances("modrinth", "AANobbMI", "mod", null);
+    expect(sodium.find((m) => m.version_id === "1.20.1-Forge")).toMatchObject({ state: "incompatible" });
+    await expect(mockInvoke("match_instances", { platform: "modrinth", projectId: "1KVo5zza", resourceType: "modpack", modVersionId: null })).rejects.toMatchObject({ code: "invalid_argument" });
   });
 
   it("装 Mod：主项与缺的必需前置一起落进 mods/，卷宗记下来源，之后矩阵判为已安装", async () => {
@@ -98,7 +137,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
       ["YL57xq9U-1.8.1.jar", "YL57xq9U", null],
     ]);
     expect((await listInstances()).find((i) => i.id === "1.21.1-Fabric")?.mod_count).toBe(3);
-    const after = await matchInstances("modrinth", "AANobbMI", null);
+    const after = await matchInstances("modrinth", "AANobbMI", "mod", null);
     expect(after.find((m) => m.version_id === "1.21.1-Fabric")).toMatchObject({ state: "installed", installed: { file_name: "AANobbMI-0.6.5.jar", version_id: "sodium-121" } });
     // CurseForge 的工程在自己的平台上解析前置
     await installMod("t-cf", "1.20.1-Fabric", "curseforge", "394468", "4957843");
@@ -106,15 +145,15 @@ describe("工程目录：搜得到就打得开、装得上", () => {
   });
 
   it("资源包、光影、数据包按矩阵给出的版本装进各自目录", async () => {
-    const pick = async (platform: "modrinth" | "curseforge", projectId: string, instance: string) => {
-      const row = (await matchInstances(platform, projectId, null)).find((m) => m.version_id === instance);
+    const pick = async (platform: "modrinth" | "curseforge", projectId: string, type: "resource_pack" | "shader" | "data_pack", instance: string) => {
+      const row = (await matchInstances(platform, projectId, type, null)).find((m) => m.version_id === instance);
       if (row === undefined || row.best_version === null) throw new Error(`${projectId} 在 ${instance} 上没有可装的版本`);
       return row.best_version.version_id;
     };
     const base = { versionId: "1.21.1-Fabric", world: null };
-    const rp = await installResource({ ...base, taskId: "t-rp", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: await pick("modrinth", "faithful-32x", "1.21.1-Fabric") });
+    const rp = await installResource({ ...base, taskId: "t-rp", resourceType: "resource_pack", platform: "modrinth", projectId: "faithful-32x", fileVersionId: await pick("modrinth", "faithful-32x", "resource_pack", "1.21.1-Fabric") });
     expect(rp.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/resourcepacks/faithful-32x-1.21.1-r2.zip");
-    const sh = await installResource({ ...base, taskId: "t-sh", resourceType: "shader", platform: "curseforge", projectId: "627557", fileVersionId: await pick("curseforge", "627557", "1.21.1-Fabric") });
+    const sh = await installResource({ ...base, taskId: "t-sh", resourceType: "shader", platform: "curseforge", projectId: "627557", fileVersionId: await pick("curseforge", "627557", "shader", "1.21.1-Fabric") });
     expect(sh.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/shaderpacks/627557-r5.3.zip");
     const dp = await installResource({
       ...base,
@@ -123,7 +162,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
       resourceType: "data_pack",
       platform: "modrinth",
       projectId: "8oi3bsk5",
-      fileVersionId: await pick("modrinth", "8oi3bsk5", "1.21.1-Fabric"),
+      fileVersionId: await pick("modrinth", "8oi3bsk5", "data_pack", "1.21.1-Fabric"),
     });
     expect(dp.path).toBe("D:/Games/.minecraft/versions/1.21.1-Fabric/saves/生存/datapacks/8oi3bsk5-2.5.4.zip");
   });

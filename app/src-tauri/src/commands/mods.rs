@@ -8,7 +8,7 @@
 
 use aurora_core::{
     is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstanceMatch,
-    InstanceMod, ModLoader, ModVersionInfo, Platform, UpdateCandidate,
+    InstanceMod, ModLoader, ModVersionInfo, Platform, ResourceType, UpdateCandidate,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -206,22 +206,29 @@ pub async fn list_mod_versions(
 }
 
 /// 某工程对全部已装实例的落位矩阵（兼容 / 可能可行 / 已安装 / 不兼容）。`mod_version_id` 给出时整个
-/// 矩阵只按这一个版本判定。
+/// 矩阵只按这一个版本判定。`resource_type` 决定判定口径：资源包、光影、数据包不看加载器。
 #[tauri::command]
 pub async fn match_instances(
     platform: String,
     project_id: String,
+    resource_type: String,
     mod_version_id: Option<String>,
     facade: State<'_, Facade>,
 ) -> Result<Vec<InstanceMatch>, CommandError> {
     let platform = parse_platform(&platform)?;
     require_non_empty("project_id", &project_id)?;
+    let resource_type = parse_resource_type(&resource_type)?;
     if let Some(id) = &mod_version_id {
         require_non_empty("mod_version_id", id)?;
     }
     let aurora = facade.snapshot().await;
     Ok(aurora
-        .match_instances(platform, &project_id, mod_version_id.as_deref())
+        .match_instances(
+            platform,
+            &project_id,
+            resource_type,
+            mod_version_id.as_deref(),
+        )
         .await?)
 }
 
@@ -276,6 +283,10 @@ fn parse_loader(name: &str) -> Result<ModLoader, CommandError> {
     parse_serde_name(name, "加载器")
 }
 
+fn parse_resource_type(name: &str) -> Result<ResourceType, CommandError> {
+    parse_serde_name(name, "资源类型")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +334,23 @@ mod tests {
             let name = serde_json::to_value(loader).unwrap();
             assert_eq!(parse_loader(name.as_str().unwrap()).unwrap(), loader);
         }
+        for resource_type in [
+            ResourceType::Mod,
+            ResourceType::Modpack,
+            ResourceType::ResourcePack,
+            ResourceType::Shader,
+            ResourceType::DataPack,
+            ResourceType::Plugin,
+        ] {
+            let name = serde_json::to_value(resource_type).unwrap();
+            assert_eq!(
+                parse_resource_type(name.as_str().unwrap()).unwrap(),
+                resource_type
+            );
+        }
+        let err = parse_resource_type("resourcepack").unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert_eq!(err.message, "未知资源类型 resourcepack");
         let err = parse_platform("Modrinth").unwrap_err();
         assert_eq!(err.code, code::INVALID_ARGUMENT);
         assert_eq!(err.message, "未知资源平台 Modrinth");
