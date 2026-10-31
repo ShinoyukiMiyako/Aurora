@@ -1,0 +1,477 @@
+import { describe, expect, it } from "vitest";
+import type { JavaInstallationDto } from "../../state/queries/catalog";
+import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, WorldDto } from "../../state/queries/instance";
+import { LOGS_COPY } from "./copy";
+import {
+  autoJavaPick,
+  crashFixes,
+  disabledFileName,
+  effectiveJavaMajor,
+  effectiveMemoryMb,
+  enabledFileName,
+  filterMods,
+  hasFlags,
+  historyItems,
+  instanceFolderPath,
+  instanceLocks,
+  isCrashActive,
+  isolationByPolicy,
+  javaChoice,
+  javaFit,
+  javawOf,
+  matchSuspect,
+  modCounts,
+  modRows,
+  overridesHeap,
+  overviewBanner,
+  parseDimension,
+  peekLayout,
+  peekPerRow,
+  presetFlags,
+  RESOLUTION_LIMITS,
+  removalRelations,
+  sortWorlds,
+  toggleFlags,
+  weeklyHours,
+  type CrashFixContext,
+} from "./model";
+
+function java(path: string, major: number, minor: number, is64 = true, vendor = "Microsoft"): JavaInstallationDto {
+  return { path, version: { major, minor, security: 0, build: 0, raw: `${major}.${minor}` }, is_64bit: is64, vendor, source: "registry" };
+}
+
+function mod(fileName: string, over: Partial<InstalledMod> = {}, meta: Partial<NonNullable<InstalledMod["metadata"]>> | null = {}): InstalledMod {
+  return {
+    path: `D:/mc/mods/${fileName}`,
+    file_name: fileName,
+    enabled: !fileName.endsWith(".disabled"),
+    size: 1024,
+    modified_ms: 1,
+    metadata:
+      meta === null
+        ? null
+        : {
+            mod_id: fileName.split("-")[0],
+            name: null,
+            version: null,
+            description: null,
+            authors: [],
+            depends: [],
+            minecraft_version: null,
+            icon: null,
+            loader: "fabric",
+            format: "fabric",
+            ...meta,
+          },
+    icon_url: null,
+    source: null,
+    ...over,
+  };
+}
+
+function candidate(fileName: string, version: string): UpdateCandidate {
+  return {
+    file_name: fileName,
+    title: null,
+    current_version_id: "old",
+    current_version_number: null,
+    latest: {
+      version_id: `v-${version}`,
+      project_id: "p",
+      platform: "modrinth",
+      name: version,
+      version_number: version,
+      release_channel: "release",
+      game_versions: [],
+      loaders: [],
+      file_name: fileName,
+      file_size: null,
+      sha1: null,
+      download_url: null,
+      date_published: "",
+      dependencies: [],
+    },
+  };
+}
+
+function clue(category: CrashClueDto["category"], over: Partial<CrashClueDto> = {}): CrashClueDto {
+  return { category, summary: "", advice: "", detail: null, matched: "boom", line: 10, context: [], ...over };
+}
+
+function report(diagnoses: CrashClueDto[], over: Partial<CrashReportDto> = {}): CrashReportDto {
+  return {
+    at: 1000,
+    exit_code: -1,
+    session_started_at: 0,
+    log_path: "D:/mc/logs/latest.log",
+    diagnoses,
+    suspects: [],
+    java: { major: 17, path: "C:/jdk/bin/java.exe", is_64bit: true },
+    max_memory_mb: 4096,
+    warnings: [],
+    ...over,
+  };
+}
+
+const ctx = (over: Partial<CrashFixContext> = {}): CrashFixContext => ({
+  memoryMb: 4096,
+  followsGlobal: true,
+  physicalMb: 32768,
+  mods: [],
+  runtimes: [],
+  requiredJava: 21,
+  ...over,
+});
+
+describe("上次崩溃判定", () => {
+  it("崩溃之后没有再玩过才提示，崩溃那一局与上次游玩同一时刻也算", () => {
+    expect(isCrashActive(5000, 5000, "ready")).toBe(true);
+    expect(isCrashActive(5000, null, "ready")).toBe(true);
+    expect(isCrashActive(5000, 5001, "ready")).toBe(false);
+    expect(isCrashActive(null, null, "ready")).toBe(false);
+  });
+
+  it("启动中与运行中一律不提示", () => {
+    expect(isCrashActive(5000, 4000, "loading")).toBe(false);
+    expect(isCrashActive(5000, 4000, "running")).toBe(false);
+    expect(isCrashActive(5000, 4000, "crashed")).toBe(true);
+  });
+});
+
+describe("锁定矩阵", () => {
+  it("运行中锁住 Mod、重命名、补全与删除", () => {
+    expect(instanceLocks(true, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+  });
+  it("安装中锁住文件操作但可以删除", () => {
+    expect(instanceLocks(false, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
+  });
+  it("就绪时全部可用", () => {
+    expect(instanceLocks(false, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
+  });
+});
+
+describe("概览横幅取最高严重度", () => {
+  it("失败与崩溃（danger）压过损坏（warn）压过安装中（info）", () => {
+    expect(overviewBanner("failed", true)).toBe("failed");
+    expect(overviewBanner("broken", true)).toBe("crashed");
+    expect(overviewBanner("broken", false)).toBe("broken");
+    expect(overviewBanner("installing", false)).toBe("installing");
+    expect(overviewBanner("ready", false)).toBeNull();
+  });
+});
+
+describe("游玩与内存", () => {
+  it("平均每周时长按创建至今的周数，不足一周按一周", () => {
+    const week = 7 * 24 * 3600 * 1000;
+    expect(weeklyHours(120, 0, week * 4)).toBe("0.5");
+    expect(weeklyHours(90, 0, 1000)).toBe("1.5");
+  });
+
+  it("实例设置优先，否则自动分配取推荐值、固定取全局值", () => {
+    expect(effectiveMemoryMb(6144, { maxMb: 4096, minMb: null, auto: true }, 8192)).toBe(6144);
+    expect(effectiveMemoryMb(null, { maxMb: 4096, minMb: null, auto: true }, 8192)).toBe(8192);
+    expect(effectiveMemoryMb(null, { maxMb: 4096, minMb: null, auto: false }, 8192)).toBe(4096);
+  });
+});
+
+describe("Java 选择", () => {
+  const runtimes = [java("C:/j17a", 17, 0, false), java("C:/j17b", 17, 0, true), java("C:/j17c", 17, 9, true), java("C:/j21", 21, 3)];
+
+  it("自动：同主版本里 64 位优先、再挑版本最高的", () => {
+    expect(autoJavaPick(runtimes, 17, "auto", "auto")).toEqual({ kind: "local", runtime: runtimes[2] });
+    expect(autoJavaPick(runtimes, 8, "auto", "auto")).toEqual({ kind: "download" });
+  });
+
+  it("全局指定了默认 Java 时一律用它，找不到也照实报告", () => {
+    expect(autoJavaPick(runtimes, 17, "C:/j21", "auto")).toEqual({ kind: "global", path: "C:/j21", runtime: runtimes[3] });
+    expect(autoJavaPick(runtimes, 17, "C:/gone", "auto")).toEqual({ kind: "global", path: "C:/gone", runtime: null });
+  });
+
+  it("固定路径对不上本机列表时 runtime 为 null；JVM 预设判断回落到要求版本", () => {
+    const missing = javaChoice("C:/gone/java.exe", runtimes, 17, "auto", "auto");
+    expect(missing).toEqual({ auto: false, path: "C:/gone/java.exe", runtime: null });
+    expect(effectiveJavaMajor(missing, 17)).toBe(17);
+    expect(effectiveJavaMajor(javaChoice("C:/j21", runtimes, 17, "auto", "auto"), 17)).toBe(21);
+  });
+
+  it("匹配程度", () => {
+    expect([javaFit(17, 17), javaFit(21, 17), javaFit(8, 17)]).toEqual(["match", "higher", "lower"]);
+  });
+});
+
+describe("JVM 预设", () => {
+  it("分代 ZGC：21-22 带 ZGenerational，23 起只写 UseZGC，低于 21 不可用", () => {
+    expect(presetFlags("zgc", 20)).toBeNull();
+    expect(presetFlags("zgc", 21)).toEqual(["-XX:+UseZGC", "-XX:+ZGenerational"]);
+    expect(presetFlags("zgc", 22)).toEqual(["-XX:+UseZGC", "-XX:+ZGenerational"]);
+    expect(presetFlags("zgc", 23)).toEqual(["-XX:+UseZGC"]);
+  });
+
+  it("切换片加入与移除，不重复、不动其他参数", () => {
+    const on = toggleFlags("-Xss2m", ["-XX:+UseG1GC"]);
+    expect(on).toBe("-Xss2m -XX:+UseG1GC");
+    expect(toggleFlags(on, ["-XX:+UseG1GC"])).toBe("-Xss2m");
+    expect(toggleFlags("  -XX:+UseZGC   -XX:+ZGenerational -Dx=1 ", ["-XX:+UseZGC"])).toBe("-Dx=1");
+    expect(hasFlags("-XX:+UseZGC", ["-XX:+UseZGC", "-XX:+ZGenerational"])).toBe(false);
+  });
+
+  it("自带 -Xmx / -Xms 时提示会覆盖内存设置", () => {
+    expect(overridesHeap("-XX:+UseG1GC -Xmx8G")).toBe(true);
+    expect(overridesHeap("-Xms2g")).toBe(true);
+    expect(overridesHeap("-XX:MaxGCPauseMillis=50")).toBe(false);
+  });
+});
+
+describe("窗口分辨率", () => {
+  it("边界值内的整数才有效", () => {
+    expect(parseDimension("320", RESOLUTION_LIMITS.width)).toBe(320);
+    expect(parseDimension("319", RESOLUTION_LIMITS.width)).toBeNull();
+    expect(parseDimension("7680", RESOLUTION_LIMITS.width)).toBe(7680);
+    expect(parseDimension("7681", RESOLUTION_LIMITS.width)).toBeNull();
+    expect(parseDimension(" 1080 ", RESOLUTION_LIMITS.height)).toBe(1080);
+    expect(parseDimension("10.5", RESOLUTION_LIMITS.height)).toBeNull();
+    expect(parseDimension("", RESOLUTION_LIMITS.height)).toBeNull();
+  });
+});
+
+describe("版本隔离推断", () => {
+  const vanillaRelease = { loader: "vanilla" as const, extraLoaders: [], releaseType: "release" as const };
+  const fabric = { ...vanillaRelease, loader: "fabric" as const };
+  const snapshot = { ...vanillaRelease, releaseType: "snapshot" as const };
+  const optifine = { ...vanillaRelease, extraLoaders: [{ kind: "optifine" as const, version: null }] };
+
+  it("按全局策略与实例类型，与后端的判定表一致", () => {
+    expect(isolationByPolicy("mod_loaders_and_non_release", vanillaRelease)).toBe(false);
+    expect(isolationByPolicy("mod_loaders_and_non_release", fabric)).toBe(true);
+    expect(isolationByPolicy("mod_loaders_and_non_release", snapshot)).toBe(true);
+    expect(isolationByPolicy("mod_loaders_only", snapshot)).toBe(false);
+    expect(isolationByPolicy("mod_loaders_only", optifine)).toBe(true);
+    expect(isolationByPolicy("non_release_only", fabric)).toBe(false);
+    expect(isolationByPolicy("all", vanillaRelease)).toBe(true);
+    expect(isolationByPolicy("disabled", fabric)).toBe(false);
+  });
+});
+
+describe("路径", () => {
+  it("沿用游戏目录的分隔符", () => {
+    expect(instanceFolderPath("C:\\Users\\a\\.minecraft", "生存")).toBe("C:\\Users\\a\\.minecraft\\versions\\生存");
+    expect(instanceFolderPath("D:/Games/.minecraft/", "RLCraft")).toBe("D:/Games/.minecraft/versions/RLCraft");
+  });
+  it("javaw.exe", () => {
+    expect(javawOf("C:\\jdk\\bin\\java.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
+    expect(javawOf("C:\\jdk\\bin\\javaw.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
+  });
+});
+
+describe("Mod 列表", () => {
+  const sodium = mod("sodium-0.6.jar", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null } }, { name: "Sodium", authors: ["JellySquid", "IMS"], description: "渲染优化" });
+  const api = mod("fabric-api-0.1.jar.disabled", { source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.1", title: "Fabric API", dependency_of: "AANobbMI" } }, { name: null });
+  const local = mod("ZZZ-local.jar", {}, null);
+
+  it("名称回落：元数据名、平台标题、文件名；按名称排序", () => {
+    const rows = modRows([local, sodium, api], null);
+    expect(rows.map((r) => r.name)).toEqual(["Fabric API", "Sodium", "ZZZ-local"]);
+    expect(rows[1]).toMatchObject({ author: "JellySquid, IMS", summary: "渲染优化", platform: "modrinth", version: "0.6.0", update: null });
+    expect(rows[2]).toMatchObject({ platform: null, author: null, version: null, seed: "ZZZ-local.jar" });
+  });
+
+  it("前置来源对到带它进来的 Mod 的显示名；更新候选按启用态文件名对齐", () => {
+    const rows = modRows([sodium, api], [candidate("fabric-api-0.1.jar", "0.2")]);
+    const apiRow = rows.find((r) => r.fileName === api.file_name);
+    expect(apiRow?.dependencyOf).toBe("Sodium");
+    expect(apiRow?.update?.latest.version_number).toBe("0.2");
+    expect(modCounts(rows)).toEqual({ all: 2, enabled: 1, disabled: 1, outdated: 1 });
+  });
+
+  it("搜索不分大小写，匹配作者与文件名，并叠加状态筛选", () => {
+    const rows = modRows([sodium, api, local], [candidate("fabric-api-0.1.jar", "0.2")]);
+    expect(filterMods(rows, "jelly", "all").map((r) => r.name)).toEqual(["Sodium"]);
+    expect(filterMods(rows, "ZZZ-LOCAL.JAR", "all").map((r) => r.name)).toEqual(["ZZZ-local"]);
+    expect(filterMods(rows, "", "disabled").map((r) => r.name)).toEqual(["Fabric API"]);
+    expect(filterMods(rows, "", "outdated").map((r) => r.name)).toEqual(["Fabric API"]);
+    expect(filterMods(rows, "sodium", "disabled")).toEqual([]);
+  });
+
+  it("移除确认的两层关系", () => {
+    const rows = modRows([sodium, api], null);
+    const sodiumRow = rows.find((r) => r.name === "Sodium");
+    const apiRow = rows.find((r) => r.name === "Fabric API");
+    if (sodiumRow === undefined || apiRow === undefined) throw new Error("样本缺行");
+    expect(removalRelations(sodiumRow, rows)).toEqual({ broughtIn: ["Fabric API"], dependents: [] });
+    expect(removalRelations(apiRow, rows)).toEqual({ broughtIn: [], dependents: ["Sodium"] });
+  });
+
+  it("启用态与停用态文件名", () => {
+    expect(enabledFileName("a.jar.disabled")).toBe("a.jar");
+    expect(disabledFileName("a.jar")).toBe("a.jar.disabled");
+    expect(disabledFileName("a.jar.disabled")).toBe("a.jar.disabled");
+  });
+});
+
+describe("Mod 速览", () => {
+  it("每行个数按内宽：44 宽、8 间距", () => {
+    expect(peekPerRow(44)).toBe(1);
+    expect(peekPerRow(95)).toBe(1);
+    expect(peekPerRow(96)).toBe(2);
+    expect(peekPerRow(400)).toBe(7);
+  });
+
+  it("放得下全部就全部显示；放不下时最后一格留给 +N，N 按 Mod 总数算", () => {
+    expect(peekLayout(14, 14, 7)).toEqual({ shown: 14, more: 0 });
+    expect(peekLayout(15, 15, 7)).toEqual({ shown: 13, more: 2 });
+    expect(peekLayout(24, 168, 7)).toEqual({ shown: 13, more: 155 });
+    expect(peekLayout(5, 168, 7)).toEqual({ shown: 5, more: 163 });
+  });
+});
+
+describe("存档排序", () => {
+  const world = (dir: string, lastPlayed: number | null): WorldDto => ({
+    dir_name: dir,
+    level_status: "ok",
+    level_error: null,
+    name: dir,
+    mode: "survival",
+    last_played: lastPlayed,
+    size_bytes: 0,
+    modified_at: null,
+  });
+  it("最近玩过的在前，没记录的排最后", () => {
+    expect(sortWorlds([world("b", null), world("a", 10), world("c", 20)]).map((w) => w.dir_name)).toEqual(["c", "a", "b"]);
+  });
+});
+
+describe("变更历史", () => {
+  const events: HistoryEvent[] = [
+    { kind: "install", id: "100-000", at: 100, files: ["sodium-0.5.jar", "fabric-api.jar"] },
+    {
+      kind: "update",
+      id: "200-000",
+      at: 200,
+      file_name: "sodium-0.6.jar",
+      old_file: "sodium-0.5.jar",
+      from_version: "v05",
+      to_version: "v06",
+      title: "Sodium",
+      from_version_number: "0.5.0",
+      to_version_number: null,
+    },
+    { kind: "rollback", id: "300-000", at: 300, reverted_event: "200-000" },
+    { kind: "remove", id: "400-000", at: 400, files: ["lithium.jar"] },
+  ];
+  const checks = [
+    { event_id: "100-000", can_rollback: false, reason: "安装事件不支持回滚" },
+    { event_id: "200-000", can_rollback: false, reason: "该更新已经回滚过" },
+    { event_id: "300-000", can_rollback: false, reason: "回滚事件本身不可再回滚" },
+  ];
+
+  it("最新在前，秒换毫秒，回滚指向的更新标为已撤销，版本号缺失时用版本标识", () => {
+    const items = historyItems(events, checks, LOGS_COPY);
+    expect(items.map((i) => i.title)).toEqual(["移除 lithium", "回滚 Sodium", "更新 Sodium", "安装 sodium-0.5 等 2 个文件"]);
+    expect(items[0].atMs).toBe(400_000);
+    const update = items[2];
+    expect(update).toMatchObject({ reverted: true, from: "0.5.0", to: "v06", canRollback: false, blockedReason: "该更新已经回滚过", files: ["sodium-0.6.jar"] });
+  });
+
+  it("对不上检查结果的事件按不可回滚、没有原因处理", () => {
+    const items = historyItems(events, checks, LOGS_COPY);
+    expect(items[0]).toMatchObject({ canRollback: false, blockedReason: null });
+  });
+});
+
+describe("日志指向的 Mod", () => {
+  const mods = [mod("create-1.0.jar.disabled"), mod("jei-15.jar")];
+  it("先按文件名（含停用态），再按 mod id", () => {
+    expect(matchSuspect({ mod_id: "x", file_name: "create-1.0.jar" }, mods)?.file_name).toBe("create-1.0.jar.disabled");
+    expect(matchSuspect({ mod_id: "JEI", file_name: null }, mods)?.file_name).toBe("jei-15.jar");
+    expect(matchSuspect({ mod_id: "betterfoliage", file_name: null }, mods)).toBeNull();
+  });
+});
+
+describe("一键尝试", () => {
+  it("内存不足：在当前值上加 2 GB 取整，封顶物理内存一半；末尾固定对照日志", () => {
+    expect(crashFixes(report([clue("out_of_memory")]), ctx({ memoryMb: 4096 }))).toEqual([
+      { kind: "raise_memory", currentMb: 4096, targetMb: 6144, followsGlobal: true },
+      { kind: "compare_log" },
+    ]);
+    expect(crashFixes(report([clue("out_of_memory")]), ctx({ memoryMb: 15000, physicalMb: 32768 }))[0]).toEqual({
+      kind: "raise_memory",
+      currentMb: 15000,
+      targetMb: 16384,
+      followsGlobal: true,
+    });
+  });
+
+  it("已到上限时不给调整按钮", () => {
+    expect(crashFixes(report([clue("out_of_memory")]), ctx({ memoryMb: 8192, physicalMb: 16384 }))[0]).toEqual({ kind: "memory_at_cap", totalMb: 16384 });
+  });
+
+  it("堆分配失败：32 位 Java 改用 64 位，64 位则调低（不低于 2 GB）", () => {
+    const reserve = clue("out_of_memory", { matched: "Error: Could not reserve enough space for object heap" });
+    expect(crashFixes(report([reserve], { java: { major: 8, path: "C:/j8/java.exe", is_64bit: false } }), ctx())[0]).toEqual({ kind: "use_64bit_java" });
+    expect(crashFixes(report([reserve]), ctx({ memoryMb: 3072 }))[0]).toEqual({ kind: "lower_memory", currentMb: 3072, targetMb: 2048 });
+    expect(crashFixes(report([reserve]), ctx({ memoryMb: 8192 }))[0]).toEqual({ kind: "lower_memory", currentMb: 8192, targetMb: 6144 });
+  });
+
+  it("Java 不匹配：从 class file version 推出主版本；本机有就切换，没有就下载", () => {
+    const mismatch = clue("java_version_mismatch", { detail: "class file version 65" });
+    const runtimes = [java("C:/j21/java.exe", 21, 1)];
+    expect(crashFixes(report([mismatch]), ctx({ runtimes }))[0]).toEqual({ kind: "switch_java", major: 21, path: "C:/j21/java.exe" });
+    expect(crashFixes(report([clue("java_version_mismatch")]), ctx({ requiredJava: 17 }))[0]).toEqual({ kind: "download_java", major: 17 });
+  });
+
+  it("缺少前置：停用着的启用它，没装的去搜索，没有 detail 去发现页", () => {
+    const mods = [mod("cloth-config-1.jar.disabled")];
+    expect(crashFixes(report([clue("missing_dependency", { detail: "cloth" })]), ctx({ mods }))[0]).toEqual({
+      kind: "enable_mod",
+      fileName: "cloth-config-1.jar.disabled",
+      name: "cloth-config-1",
+    });
+    expect(crashFixes(report([clue("missing_dependency", { detail: "architectury" })]), ctx({ mods }))[0]).toEqual({ kind: "search_dependency", detail: "architectury" });
+    expect(crashFixes(report([clue("missing_dependency")]), ctx())[0]).toEqual({ kind: "find_dependency" });
+  });
+
+  it("Mixin 注入失败：恰好对上一个已启用的 Mod 才给停用按钮", () => {
+    const mods = [mod("iris-1.jar"), mod("iris-2.jar")];
+    expect(crashFixes(report([clue("mixin_failure", { detail: "sodium" })]), ctx({ mods: [mod("sodium-1.jar")] }))[0]).toEqual({
+      kind: "disable_mod",
+      category: "mixin_failure",
+      fileName: "sodium-1.jar",
+      name: "sodium-1",
+    });
+    expect(crashFixes(report([clue("mixin_failure", { detail: "iris" })]), ctx({ mods }))).toEqual([{ kind: "compare_log" }]);
+  });
+
+  it("重复的 Mod：停用其余同 id 的文件，留下版本最高的", () => {
+    const mods = [mod("jei-1.jar", {}, { mod_id: "jei", version: "15.2.0" }), mod("jei-2.jar", {}, { mod_id: "jei", version: "15.10.1" })];
+    expect(crashFixes(report([clue("duplicate_mod", { detail: "jei" })]), ctx({ mods }))[0]).toEqual({
+      kind: "keep_latest",
+      disable: [{ fileName: "jei-1.jar", name: "jei-1" }],
+    });
+  });
+
+  it("本地库缺失带游戏路径提醒时多一个更换游戏目录；显卡驱动给 javaw 路径；文件损坏落在 mods 下改为停用该文件", () => {
+    expect(crashFixes(report([clue("native_library_missing")], { warnings: ["game_path"] }), ctx())[0]).toEqual({
+      kind: "repair",
+      category: "native_library_missing",
+      changeGameDir: true,
+    });
+    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", javawPath: "C:/jdk/bin/javaw.exe" });
+    const mods = [mod("badmod-1.jar")];
+    expect(crashFixes(report([clue("corrupted_jar", { matched: "zip END header not found D:\\mc\\mods\\badmod-1.jar" })]), ctx({ mods }))[0]).toEqual({
+      kind: "disable_mod",
+      category: "corrupted_jar",
+      fileName: "badmod-1.jar",
+      name: "badmod-1",
+    });
+    expect(crashFixes(report([clue("corrupted_jar", { matched: "client.jar is corrupt" })]), ctx({ mods }))[0]).toEqual({
+      kind: "repair",
+      category: "corrupted_jar",
+      changeGameDir: false,
+    });
+  });
+
+  it("同一类别只出一条；没有线索时只剩对照日志", () => {
+    expect(crashFixes(report([clue("out_of_memory"), clue("out_of_memory")]), ctx()).length).toBe(2);
+    expect(crashFixes(report([]), ctx())).toEqual([{ kind: "compare_log" }]);
+  });
+});
