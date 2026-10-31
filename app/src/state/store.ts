@@ -1503,6 +1503,16 @@ export class LauncherStore {
     return meta === undefined ? metaFromSpec(task) : meta;
   }
 
+  /**
+   * 重试时补上入队上下文：重启后恢复的任务没有它，而实例列表的占位项、结束时留占位到重扫落定、装好后自动固定都只认
+   * taskMeta。不补的话，重试上次关闭时中断的新建或导入，安装期间实例不在列表里，任务行的「查看实例」也无处可去。
+   */
+  private restoredMeta(raw: RawState, task: Task): Partial<RawState> {
+    if (raw.taskMeta[task.id] !== undefined) return {};
+    const meta = metaFromSpec(task);
+    return meta === null ? {} : { taskMeta: { ...raw.taskMeta, [task.id]: meta } };
+  }
+
   private onTaskDone(id: string, attempt: number, result: unknown): void {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
@@ -2446,7 +2456,7 @@ export class LauncherStore {
           store.pushToast("info", TASK_TOAST.duplicate(task.title).title);
           return;
         }
-        store.set((raw) => ({ tasks: retryTask(raw.tasks, id) }));
+        store.set((raw) => ({ tasks: retryTask(raw.tasks, id), ...store.restoredMeta(raw, task) }));
         store.tasksChanged();
       },
       retryFailedTasks() {
@@ -2460,7 +2470,7 @@ export class LauncherStore {
           }
           // 逐个排：前一个重试后，同一件事的后一个就算重复
           if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
-          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id) }));
+          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id), ...store.restoredMeta(raw, task) }));
           retried += 1;
         }
         if (retried > 0) store.tasksChanged();
