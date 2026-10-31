@@ -5,13 +5,14 @@ import { stubCanvas } from "../art/illustrations/test-canvas";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL } from "../copy/flows";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
-import { LauncherProvider } from "../state/launcher";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { PAGE_IDS, type PageId, type Route } from "../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { AppShell, PAGE_PRELOAD_DELAY_MS, type ShellFlows } from "./AppShell";
-import { DROP_COPY, PAGE_ERROR_COPY } from "../copy/shell";
+import { DROP_COPY, PAGE_ERROR_COPY, SHELL_DEFECT_COPY } from "../copy/shell";
+import { ErrorBoundary } from "./ErrorBoundary";
 import type { PageTable } from "./nav";
 import { createPageRegistry, type PageRegistry } from "./pages";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
@@ -40,6 +41,7 @@ function pageTable(loads: PageId[], broken: Set<PageId>): PageTable {
 let view: Rendered | undefined;
 let nav: NavApi;
 let shell: ShellApi;
+let launcher: LauncherApi;
 let port: WindowPort & { show: ReturnType<typeof vi.fn> };
 let loads: PageId[];
 let broken: Set<PageId>;
@@ -49,6 +51,7 @@ let warn: MockInstance<typeof console.warn>;
 function Probe() {
   nav = useNav();
   shell = useShell();
+  launcher = useLauncher();
   return null;
 }
 
@@ -65,14 +68,25 @@ const flush = () =>
     await settle();
   });
 
+let crashed: unknown;
+
 async function mount(flows: Partial<ShellFlows> = {}) {
+  crashed = undefined;
   view = render(
     <WindowPortProvider port={port}>
       <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: false }}>
         <LauncherProvider>
           <ShellProvider>
             <Probe />
-            <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null, ...flows }} />
+            <ErrorBoundary
+              onError={() => undefined}
+              fallback={(error) => {
+                crashed = error;
+                return <p data-crashed="" />;
+              }}
+            >
+              <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null, ...flows }} />
+            </ErrorBoundary>
           </ShellProvider>
         </LauncherProvider>
       </AppearanceProvider>
@@ -190,12 +204,44 @@ describe("外壳布局", () => {
     expect(document.querySelector("[data-sidebar-item]")).toBeNull();
   });
 
-  it("首次启动却没有向导模块：进入主界面并记一条警告", async () => {
+  it("首次启动却没有向导模块：构建不完整，外壳抛错交给最外层整屏报错，不进主界面", async () => {
     bootOverrides(ipc, { instances: [], firstRun: true });
     ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     await mount();
+    expect(crashed).toBeInstanceOf(Error);
+    expect((crashed as Error).message).toBe(SHELL_DEFECT_COPY.missingOnboarding);
+    expect(pageShown()).toBeUndefined();
+    expect(document.querySelector("[data-crashed]")).not.toBeNull();
+    error.mockRestore();
+  });
+
+  it("不是首次启动时没有向导模块也照常进主界面", async () => {
+    await mount();
+    expect(crashed).toBeUndefined();
     expect(pageShown()).toBe("home");
-    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("应用启动时的那一屏不播入场：侧栏与主列一挂上就不透明，窗口显示时就是成品", async () => {
+    await mount();
+    const slot = document.querySelector<HTMLElement>('[data-tauri-drag-region=""]');
+    expect(slot?.style.opacity).toBe("1");
+  });
+
+  it("向导收尾后主界面淡入：侧栏与主列从透明开始", async () => {
+    bootOverrides(ipc, { instances: [], firstRun: true });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    ipc.overrides.set("complete_first_run", () => null);
+    await mount({ onboarding: OnboardingStub });
+    expect(document.querySelector("[data-flow='onboarding']")).not.toBeNull();
+    await act(async () => {
+      await launcher.actions.completeFirstRun("D:\\Games\\.minecraft", []);
+    });
+    await flush();
+    expect(document.querySelector("[data-flow='onboarding']")).toBeNull();
+    const slot = document.querySelector<HTMLElement>('[data-tauri-drag-region=""]');
+    expect(slot).not.toBeNull();
+    expect(slot?.style.opacity).toBe("0");
   });
 
   it("文件拖过窗口时整窗显示放置提示", async () => {

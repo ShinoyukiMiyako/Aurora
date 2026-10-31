@@ -152,3 +152,8 @@ export const SHELL_ACTION_ERROR = {
   pagePreload: "页面模块没能预载",
   fileDrop: "文件拖放没有接上",
 } as const;
+
+/** 首次启动却缺少向导模块：构建产物不完整，外壳不能继续（错误原文进整屏错误页）。 */
+export const SHELL_DEFECT_COPY = {
+  missingOnboarding: "首次启动向导模块缺失：这个构建不完整，无法完成首次设置",
+} as const;
