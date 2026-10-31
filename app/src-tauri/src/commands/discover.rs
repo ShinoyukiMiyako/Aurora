@@ -301,8 +301,9 @@ fn resource_outcome_dto(outcome: ResourceInstallOutcome) -> ResourceInstallOutco
     }
 }
 
-/// 把平台上的资源包、光影、数据包或 Mod 的一个版本装进实例里该类型的目录。长任务：进度经
-/// core-event 推送并带 `task_id`，可经 `cancel_task(taskId)` 取消。
+/// 把平台上的资源包、光影或数据包的一个版本装进实例里该类型的目录。长任务：进度经
+/// core-event 推送并带 `task_id`，可经 `cancel_task(taskId)` 取消。Mod 报 `invalid_argument`，
+/// 要经 [`install_mod`]：只有那条路径占住 mods 目录、写卷宗与历史并探测游戏占用。
 ///
 /// `world` 只对数据包有意义且必填（存档目录名）；`fileVersionId` 为 Modrinth 版本 id 或
 /// CurseForge 文件 id。与 [`install_mod`] 一样全程占住实例，改名与删除在安装结束前报 `instance_busy`。
@@ -362,11 +363,19 @@ pub(crate) async fn install_resource_with(
 ) -> Result<ResourceInstallOutcomeDto, CommandError> {
     // 先解析全部入参再登记任务：参数非法不该占用任务 id。
     let resource_type = parse_resource_type(args.resource_type)?;
-    if matches!(resource_type, ResourceType::Modpack | ResourceType::Plugin) {
-        return Err(CommandError::invalid_argument(format!(
-            "{} 不能作为单个资源装进实例",
-            args.resource_type
-        )));
+    match resource_type {
+        ResourceType::Modpack | ResourceType::Plugin => {
+            return Err(CommandError::invalid_argument(format!(
+                "{} 不能作为单个资源装进实例",
+                args.resource_type
+            )));
+        }
+        ResourceType::Mod => {
+            return Err(CommandError::invalid_argument(
+                "Mod 要经 install_mod 安装，不能作为单个资源装进实例",
+            ));
+        }
+        ResourceType::ResourcePack | ResourceType::Shader | ResourceType::DataPack => {}
     }
     let platform = parse_platform(args.platform)?;
     let _guard = locks.acquire(args.version_id, InstanceActivity::Modifying)?;
@@ -756,7 +765,7 @@ mod tests {
         let facade = facade_in(dir.path(), "http://127.0.0.1:9");
         let registry = TaskRegistry::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
-        for resource_type in ["modpack", "plugin", "world"] {
+        for resource_type in ["modpack", "plugin", "world", "mod"] {
             let err = install_resource_with(
                 &facade,
                 &registry,

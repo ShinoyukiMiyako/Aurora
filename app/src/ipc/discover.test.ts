@@ -198,6 +198,9 @@ describe("发现 mock", () => {
     expect(unknownWorld).toMatchObject({ code: "world_not_found", detail: { version_id: "1.21.1-Fabric", world: "不存在" } });
     const modpack = await installResource({ ...args, resourceType: "modpack" as never, world: null }).catch((e: unknown) => e);
     expect(modpack).toMatchObject({ code: "invalid_argument" });
+    // Mod 只能经 install_mod：直接下进 mods/ 会绕过卷宗、历史与占用探测。
+    const mod = await installResource({ ...args, resourceType: "mod", world: null }).catch((e: unknown) => e);
+    expect(mod).toMatchObject({ code: "invalid_argument" });
     // 实例以实例 mock 为准：不存在与损坏的实例都报未安装。
     const ghost = await installResource({ ...args, versionId: "ghost", resourceType: "shader", world: null }).catch((e: unknown) => e);
     expect(ghost).toMatchObject({ code: "version_not_installed", detail: { id: "ghost" } });
