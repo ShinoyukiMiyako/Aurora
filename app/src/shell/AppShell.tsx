@@ -33,6 +33,7 @@ import { TitleBar, useReportedWindowFrame, WindowControls } from "./TitleBar";
 import { Toasts } from "./Toasts";
 import { useRunner } from "./useRunner";
 import { DropHint } from "./DropHint";
+import { useStartupNotices, type StartupNotice } from "./startup-notices";
 import { useRevealWindow } from "./window";
 import { useAfterLaunch, useBackgroundAttention, useCloseGuard } from "./window-behavior";
 
@@ -50,6 +51,8 @@ export interface ShellFlows {
 export interface AppShellProps {
   pages: PageRegistry;
   flows: ShellFlows;
+  /** 后端在启动时记下的提示（例如配置文件损坏、已按默认设置启动）；给出时启动后读一次，逐条以通知显示。 */
+  startupNotices?: () => Promise<readonly StartupNotice[]>;
 }
 
 /** 首帧与窗口显示之后再预载其余页面，不和首屏抢主线程。 */
@@ -58,7 +61,7 @@ export const PAGE_PRELOAD_DELAY_MS = 800;
 // 资源图标、资讯配图、服务器图标的地址解析：同一地址整个进程只向后端登记一次，所以解析函数只建一份
 const resolveRemoteImage = createThumbResolver(thumbRegister);
 
-export function AppShell({ pages, flows }: AppShellProps) {
+export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   const { state } = useLauncher();
   const { bindRoot, bindPageScroll, fileDropHint } = useShell();
   const { appearance, reduced } = useAppearance();
@@ -68,6 +71,7 @@ export function AppShell({ pages, flows }: AppShellProps) {
   useCloseGuard();
   useAfterLaunch();
   useBackgroundAttention();
+  useStartupNotices(startupNotices);
 
   useEffect(() => {
     const timer = window.setTimeout(() => void run(() => pages.preloadAll(), SHELL_ACTION_ERROR.pagePreload), PAGE_PRELOAD_DELAY_MS);

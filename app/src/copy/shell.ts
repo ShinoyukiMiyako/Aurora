@@ -151,6 +151,7 @@ export const SHELL_ACTION_ERROR = {
   updater: "更新状态读不出来",
   pagePreload: "页面模块没能预载",
   fileDrop: "文件拖放没有接上",
+  startupNotices: "启动提示读不出来",
 } as const;
 
 /** 首次启动却缺少向导模块：构建产物不完整，外壳不能继续（错误原文进整屏错误页）。 */

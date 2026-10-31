@@ -10,12 +10,13 @@ import { PAGE_IDS, type PageId, type Route } from "../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
-import { AppShell, PAGE_PRELOAD_DELAY_MS, type ShellFlows } from "./AppShell";
-import { DROP_COPY, PAGE_ERROR_COPY, SHELL_DEFECT_COPY } from "../copy/shell";
+import { AppShell, PAGE_PRELOAD_DELAY_MS, type AppShellProps, type ShellFlows } from "./AppShell";
+import { DROP_COPY, PAGE_ERROR_COPY, SHELL_ACTION_ERROR, SHELL_DEFECT_COPY } from "../copy/shell";
 import { ErrorBoundary } from "./ErrorBoundary";
 import type { PageTable } from "./nav";
 import { createPageRegistry, type PageRegistry } from "./pages";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
+import type { StartupNotice } from "./startup-notices";
 import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -70,7 +71,7 @@ const flush = () =>
 
 let crashed: unknown;
 
-async function mount(flows: Partial<ShellFlows> = {}) {
+async function mount(flows: Partial<ShellFlows> = {}, startupNotices?: AppShellProps["startupNotices"]) {
   crashed = undefined;
   view = render(
     <WindowPortProvider port={port}>
@@ -85,7 +86,7 @@ async function mount(flows: Partial<ShellFlows> = {}) {
                 return <p data-crashed="" />;
               }}
             >
-              <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null, ...flows }} />
+              <AppShell pages={registry} flows={{ login: LoginStub, onboarding: null, createInstance: null, ...flows }} startupNotices={startupNotices} />
             </ErrorBoundary>
           </ShellProvider>
         </LauncherProvider>
@@ -258,6 +259,36 @@ describe("外壳布局", () => {
     const send: (event: FileDropEvent) => void = fire;
     act(() => send({ type: "enter", paths: ["D:\\pack.mrpack"] }));
     expect(document.querySelector('[role="status"][data-hint="modpack"]')?.textContent).toBe(DROP_COPY.modpackHint);
+  });
+
+  it("启动提示：启动后读一次，逐条以 warning 通知显示；重渲染不再读", async () => {
+    const load = vi.fn(async (): Promise<StartupNotice[]> => [
+      { code: "config_reset", message: "配置文件读不出来，已按默认设置启动", detail: { backup: "config.json.broken-1761900000" } },
+      { code: "x", message: "第二条" },
+    ]);
+    await mount({}, load);
+    expect(load).toHaveBeenCalledTimes(1);
+    // 测试替身的账户没有皮肤，外壳另会报一条皮肤读取失败；这里只看启动提示
+    expect(launcher.state.toasts.filter((t) => t.tone === "warning").map((t) => [t.title, t.body])).toEqual([
+      ["配置文件读不出来，已按默认设置启动", undefined],
+      ["第二条", undefined],
+    ]);
+    act(() => nav.go({ page: "library" }));
+    await flush();
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it("启动提示读取失败：经外层统一错误处理报告", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount({}, async () => Promise.reject(new Error("命令不存在")));
+    expect(launcher.state.toasts.filter((t) => t.title === SHELL_ACTION_ERROR.startupNotices).map((t) => [t.tone, t.body])).toEqual([["error", "命令不存在"]]);
+    expect(launcher.state.toasts.filter((t) => t.tone === "warning")).toEqual([]);
+    error.mockRestore();
+  });
+
+  it("没有注入启动提示的读取函数：什么都不读", async () => {
+    await mount();
+    expect(launcher.state.toasts.filter((t) => t.tone === "warning" || t.title === SHELL_ACTION_ERROR.startupNotices)).toEqual([]);
   });
 
   it("没有新建实例模块时，打开请求立即收回", async () => {
