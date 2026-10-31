@@ -24,6 +24,7 @@ import { buildPageTable } from "./shell/nav";
 import { createPageRegistry, type PageRegistry } from "./shell/pages";
 import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, updaterCommands } from "./shell/platform";
 import { ShellProvider } from "./shell/shell";
+import { loadStartupNotices } from "./shell/startup-notices";
 import { RevealWindow } from "./shell/window";
 import { AppearanceProvider } from "./state/appearance";
 import type { FlowName, FlowProps } from "./state/flows";
@@ -114,7 +115,7 @@ export default function App({ appearance }: { appearance: Appearance }) {
         <LauncherProvider>
           <ShellProvider>
             <HostProviders>
-              <AppShell pages={pageRegistry()} flows={FLOWS} />
+              <AppShell pages={pageRegistry()} flows={FLOWS} startupNotices={loadStartupNotices} />
             </HostProviders>
           </ShellProvider>
         </LauncherProvider>

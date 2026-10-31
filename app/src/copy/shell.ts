@@ -152,6 +152,16 @@ export const SHELL_ACTION_ERROR = {
   pagePreload: "页面模块没能预载",
   fileDrop: "文件拖放没有接上",
   startupNotices: "启动提示读不出来",
+  openDataDir: "没能打开数据目录",
+} as const;
+
+/** 启动提示：后端在启动时遇到、但不妨碍继续运行的问题。标题说清出了什么事，正文说清结果。 */
+export const STARTUP_NOTICE_COPY = {
+  configReset: {
+    title: "配置文件损坏，已按默认设置启动",
+    body: "原文件已改名，留在数据目录里",
+    action: "打开目录",
+  },
 } as const;
 
 /** 首次启动却缺少向导模块：构建产物不完整，外壳不能继续（错误原文进整屏错误页）。 */

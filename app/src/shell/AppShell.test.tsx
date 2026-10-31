@@ -262,16 +262,17 @@ describe("外壳布局", () => {
   });
 
   it("启动提示：启动后读一次，逐条以 warning 通知显示；重渲染不再读", async () => {
+    const run = vi.fn();
     const load = vi.fn(async (): Promise<StartupNotice[]> => [
-      { code: "config_reset", message: "配置文件读不出来，已按默认设置启动", detail: { backup: "config.json.broken-1761900000" } },
-      { code: "x", message: "第二条" },
+      { title: "配置文件读不出来，已按默认设置启动", body: "原文件已改名", action: { label: "打开目录", run, errorTitle: "没能打开" } },
+      { title: "第二条" },
     ]);
     await mount({}, load);
     expect(load).toHaveBeenCalledTimes(1);
     // 测试替身的账户没有皮肤，外壳另会报一条皮肤读取失败；这里只看启动提示
-    expect(launcher.state.toasts.filter((t) => t.tone === "warning").map((t) => [t.title, t.body])).toEqual([
-      ["配置文件读不出来，已按默认设置启动", undefined],
-      ["第二条", undefined],
+    expect(launcher.state.toasts.filter((t) => t.tone === "warning").map((t) => [t.title, t.body, t.action?.label])).toEqual([
+      ["配置文件读不出来，已按默认设置启动", "原文件已改名", "打开目录"],
+      ["第二条", undefined, undefined],
     ]);
     act(() => nav.go({ page: "library" }));
     await flush();
