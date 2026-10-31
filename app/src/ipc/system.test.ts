@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "./bridge";
 import { addGameDirectory, getConfig, listGameDirectories, updateConfig } from "./config";
 import { IpcError } from "./errors";
 import { resetMocks } from "./mock";
@@ -184,6 +185,15 @@ describe("资讯", () => {
     expect(dates).toEqual([...dates].sort((a, b) => b - a));
     expect(feed.items.map((i) => i.tag)).toEqual(["snapshot", "launcher", "release", "event"]);
     expect(feed.items[3]).toMatchObject({ thumbnail_url: null, game_version: null });
+  });
+
+  it("retry 是必填的布尔参数：listNews 不传时按 false 发出，直接调命令漏了它照 Tauri 原文拒绝", async () => {
+    expect((await listNews({ retry: true })).items).toHaveLength(4);
+    expect((await listNews()).items).toHaveLength(4);
+    const missing = await invoke("list_news", {}).catch((e: unknown) => e);
+    expect(missing).toMatchObject({ code: "unknown", message: "invalid args `retry` for command `list_news`: missing required key retry" });
+    const wrongType = await invoke("list_news", { retry: "yes" }).catch((e: unknown) => e);
+    expect(wrongType).toBeInstanceOf(IpcError);
   });
 
   it("启动器资讯混在官方资讯里按时刻排，没有游戏版本，取到时 launcher_error 为 null", async () => {

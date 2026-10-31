@@ -284,7 +284,8 @@ const NEWS: NewsItemDto[] = [
   },
 ];
 
-function listNews(): NewsFeedDto {
+function listNews(args: MockArgs): NewsFeedDto {
+  if (typeof args.retry !== "boolean") throw tauriArgError("list_news", "retry", "missing required key retry");
   return { items: NEWS, fetched_at: Date.now(), offline: false, launcher_error: null };
 }
 
@@ -375,7 +376,7 @@ export const handlers: MockHandlers = {
   set_pinned_servers: (args) => setPinnedServers(args),
   list_known_servers: () => listKnownServers(),
   ping_servers: (args) => pingServers(args),
-  list_news: () => listNews(),
+  list_news: (args) => listNews(args),
   updater_info: () => updaterInfo(),
   check_update: () => checkUpdate(),
   download_update: (args) => downloadUpdate(args),
