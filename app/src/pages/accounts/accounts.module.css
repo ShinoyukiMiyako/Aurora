@@ -337,6 +337,13 @@
   gap: var(--sk-page-gap);
 }
 
+.slowHint {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
 /* ---------------------------------------------------------------- 减少动画：没有悬停位移 */
 
 :global([data-sk-reduced]) .figure,

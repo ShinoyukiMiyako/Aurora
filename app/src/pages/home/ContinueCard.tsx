@@ -10,6 +10,7 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
@@ -30,7 +31,6 @@ import { Tag } from "../../ui/Tag";
 import { HOME_COPY } from "./copy";
 import { latestWorld, switchOptions, worldName } from "./instances";
 import { SKELETON_SIZE } from "./layout";
-import { useLoadingGate } from "./loading";
 import { useReportOnce } from "./report";
 import s from "./home.module.css";
 

@@ -5,6 +5,7 @@
 import { useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL } from "../../copy/flows";
 import type { Task } from "../../domain/types";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
@@ -23,7 +24,7 @@ import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
 import { RELATIVE_TIME_REFRESH_MS } from "./constants";
 import { TASKS_COPY } from "./copy";
-import { useLoadingGate, useThroughput } from "./hooks";
+import { useThroughput } from "./hooks";
 import { LanesCard } from "./LanesCard";
 import {
   bucketTasks,
@@ -65,7 +66,8 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   const stillActive = (id: string) => latestTasks.current.some((t) => t.id === id && isActiveTask(t));
 
   const slice = state.status.tasks;
-  const showSkeleton = useLoadingGate(slice.kind === "loading" && state.tasks.length === 0);
+  const gate = useLoadingGate(slice.kind === "loading" && state.tasks.length === 0);
+  const showSkeleton = gate.view === "skeleton";
 
   const cancel = async (task: Task) => {
     const ask = cancelConfirm(task);
@@ -147,7 +149,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     ];
   } else if (slice.kind === "loading" || showSkeleton) {
     // 骨架出现后即使数据已到也要停够最短时长，期间不切到空状态
-    body = showSkeleton ? [<TasksSkeleton key="skeleton" />] : [];
+    body = showSkeleton ? [<TasksSkeleton key="skeleton" slow={gate.slow} />] : [];
   } else if (slice.kind === "error") {
     // 任务记录读不出来时不能说「队列是空的」：只给错误与重试
     body = [];
@@ -253,12 +255,15 @@ function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, onCanc
 
 // ---------------------------------------------------------------- 骨架
 
-/** 形状与有任务时的首屏一致：总览的两张卡。 */
-function TasksSkeleton() {
+/** 形状与有任务时的首屏一致：总览的两张卡。读得久了在下方补一行「比平时慢」。 */
+function TasksSkeleton({ slow }: { slow: boolean }) {
   return (
-    <EntranceBlock className={styles.overview} aria-busy="true">
-      <Skeleton shape="block" width="100%" height={188} radius="lg" />
-      <Skeleton shape="block" width="100%" height={188} radius="lg" />
-    </EntranceBlock>
+    <>
+      <EntranceBlock className={styles.overview} aria-busy="true">
+        <Skeleton shape="block" width="100%" height={188} radius="lg" />
+        <Skeleton shape="block" width="100%" height={188} radius="lg" />
+      </EntranceBlock>
+      {slow && <p className={styles.slowHint}>{TASKS_COPY.slow}</p>}
+    </>
   );
 }

@@ -4,6 +4,7 @@
 // 游玩记录在这里查一次，问候卡、日历与洞察共用；日历与洞察共享「选中日期」与日历停留的月份。
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useShell } from "../../shell/shell";
 import { useLauncher, useNow } from "../../state/launcher";
 import { usePlayStats } from "../../state/queries/home";
@@ -16,7 +17,6 @@ import { buildActivity, localDateKey, playSignature, statsRange } from "./activi
 import { ContinueCard } from "./ContinueCard";
 import { GreetingCard } from "./GreetingCard";
 import { continueTarget } from "./instances";
-import { useLoadingGate } from "./loading";
 import { NewsCard } from "./NewsCard";
 import { CalendarCard, InsightsCard } from "./PlayCards";
 import type { PlayView } from "./play-view";

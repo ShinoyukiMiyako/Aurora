@@ -8,6 +8,7 @@ import { formatRelative, percent } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { useLaunch } from "../../launch/useLaunch";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncher, useNow } from "../../state/launcher";
 import { Button } from "../../ui/Button";
@@ -22,7 +23,6 @@ import { Tag } from "../../ui/Tag";
 import { HOME_COPY } from "./copy";
 import { RECENT_COUNT, recentInstances } from "./instances";
 import { RECENT_COVER_HEIGHT, SKELETON_SIZE } from "./layout";
-import { useLoadingGate } from "./loading";
 import s from "./home.module.css";
 
 const TITLE_ID = "home-recent-title";

@@ -443,6 +443,28 @@ describe("账户页：断网、加载与读取失败", () => {
     expect([busy(), spotlightName()]).toEqual([false, "Hanami"]);
   });
 
+  it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读完随骨架一起收起", async () => {
+    const list = deferred<AccountDto[]>();
+    ipc.overrides.set("list_accounts", () => list.promise);
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(page().querySelector('[aria-busy="true"]')).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_699);
+    });
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(page().textContent).toContain("比平时慢一些，仍在加载…");
+    list.resolve([hanami]);
+    await flush();
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    expect(spotlightName()).toBe("Hanami");
+  });
+
   it("300 ms 内读完不出现骨架", async () => {
     const list = deferred<AccountDto[]>();
     ipc.overrides.set("list_accounts", () => list.promise);

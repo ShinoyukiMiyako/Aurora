@@ -88,4 +88,6 @@ export const TASKS_COPY = {
   loadError: {
     retry: "重试",
   },
+
+  slow: "比平时慢一些，仍在加载…",
 } as const;

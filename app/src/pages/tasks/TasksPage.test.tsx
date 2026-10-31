@@ -413,4 +413,20 @@ describe("下载任务页：任务记录读取", () => {
     expect(busy()).toBe(false);
     expect(page().textContent).toContain("下载队列是空的");
   });
+
+  it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读完随骨架一起收起", async () => {
+    const journal = deferred<TaskRecordDto[]>();
+    ipc.overrides.set("load_task_journal", () => journal.promise);
+    await mount();
+    await advance(300);
+    expect(page().querySelector('[aria-busy="true"]')).not.toBeNull();
+    await advance(9_699);
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    await advance(1);
+    expect(page().textContent).toContain("比平时慢一些，仍在加载…");
+    journal.resolve([]);
+    await flush();
+    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    expect(page().textContent).toContain("下载队列是空的");
+  });
 });

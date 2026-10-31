@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Icon } from "../../art/Icon";
 import { hueOf } from "../../art/illustrations/seed";
 import { formatDate, formatRelative } from "../../domain/format";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { describeError } from "../../state/errors";
@@ -22,7 +23,6 @@ import { Tag, type TagTone } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { HOME_COPY, NEWS_TAG_LABEL } from "./copy";
 import { NEWS_HERO_HEIGHT, SKELETON_SIZE } from "./layout";
-import { useLoadingGate } from "./loading";
 import { NEWS_COUNT, latestNews, newsAction, type NewsAction } from "./news";
 import s from "./home.module.css";
 
