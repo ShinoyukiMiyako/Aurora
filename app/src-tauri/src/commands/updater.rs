@@ -176,8 +176,30 @@ impl<U: ReleaseVersion> UpdateSlot<U> {
         self.available = found;
     }
 
-    fn store_download(&mut self, update: U, bytes: Vec<u8>) {
+    /// 收下下载好的包。下载期间又检查过一次、结果换了版本或已无更新时不收：与 [`record_check`](Self::record_check)
+    /// 守的是同一件事，界面按最新的检查结果显示版本，退出时装上的却是旧包。
+    fn store_download(&mut self, update: U, bytes: Vec<u8>) -> Result<(), CommandError> {
+        let latest = self.available.as_ref().map(ReleaseVersion::release_version);
+        if latest != Some(update.release_version()) {
+            tracing::info!(
+                downloaded = update.release_version(),
+                ?latest,
+                "下载期间检查结果已变化，丢弃刚下好的更新包"
+            );
+            let message = match latest {
+                Some(latest) => format!(
+                    "下载期间检查到了更新的版本 {latest}，刚下好的 {} 已作废，请重新下载",
+                    update.release_version()
+                ),
+                None => format!(
+                    "下载期间再次检查时已没有可用更新，刚下好的 {} 已作废",
+                    update.release_version()
+                ),
+            };
+            return Err(CommandError::new(code::UPDATE_NOT_AVAILABLE, message));
+        }
         self.downloaded = Some(Downloaded { update, bytes });
+        Ok(())
     }
 
     fn ready(&self) -> Result<&Downloaded<U>, CommandError> {
@@ -307,7 +329,8 @@ pub async fn check_update(
 
 /// 下载最近一次检查到的更新并校验签名。长任务：进度经 core-event 推送（`kind: "download"`，
 /// `total` 恒为 1，带 `task_id`），可经 `cancel_task(taskId)` 取消。签名不符报
-/// `update_signature_invalid`，包随即丢弃。
+/// `update_signature_invalid`，包随即丢弃；下载期间再次检查换了版本或已无更新时报 `update_not_available`，
+/// 包同样丢弃。
 #[tauri::command]
 pub async fn download_update(
     task_id: String,
@@ -328,7 +351,7 @@ pub async fn download_update(
             .await?;
         let dto = update_dto(&update);
         tracing::info!(version = %update.version, size = bytes.len(), "更新包下载并校验完成");
-        updater.slot().store_download(update, bytes);
+        updater.slot().store_download(update, bytes)?;
         Ok(dto)
     }
     .await;
@@ -656,7 +679,7 @@ mod tests {
         assert!(!slot.install_on_exit);
 
         slot.record_check(Some(Fake("0.2.0")));
-        slot.store_download(Fake("0.2.0"), vec![1, 2, 3]);
+        slot.store_download(Fake("0.2.0"), vec![1, 2, 3]).unwrap();
         slot.set_install_on_exit(true).unwrap();
         assert!(slot.install_on_exit);
         assert_eq!(slot.ready().unwrap().bytes, vec![1, 2, 3]);
@@ -669,7 +692,7 @@ mod tests {
     fn recheck_keeps_package_only_for_the_same_version() {
         let mut slot = UpdateSlot::<Fake>::default();
         slot.record_check(Some(Fake("0.2.0")));
-        slot.store_download(Fake("0.2.0"), vec![9]);
+        slot.store_download(Fake("0.2.0"), vec![9]).unwrap();
         slot.set_install_on_exit(true).unwrap();
 
         slot.record_check(Some(Fake("0.2.0")));
@@ -681,10 +704,40 @@ mod tests {
         assert!(!slot.install_on_exit);
         assert_eq!(slot.available.as_ref().map(|u| u.0), Some("0.2.1"));
 
-        slot.store_download(Fake("0.2.1"), vec![1]);
+        slot.store_download(Fake("0.2.1"), vec![1]).unwrap();
         slot.record_check(None);
         assert_eq!(slot.downloaded_version(), None);
         assert!(slot.available.is_none());
+    }
+
+    /// 下载期间又检查了一次（页面重载后的自动检查）：检查换了版本或已无更新时，下好的旧包不收，
+    /// 「退出时安装」也就打不开，不会在界面显示新版本时退出装上旧包；检查结果没变照常收下。
+    #[test]
+    fn download_outdated_by_a_check_during_it_is_discarded() {
+        let mut slot = UpdateSlot::<Fake>::default();
+        slot.record_check(Some(Fake("0.2.0")));
+        let downloading = slot.available.clone().unwrap();
+        slot.record_check(Some(Fake("0.2.1")));
+
+        let err = slot.store_download(downloading, vec![7]).unwrap_err();
+        assert_eq!(err.code, code::UPDATE_NOT_AVAILABLE);
+        assert!(err.message.contains("0.2.1"), "{}", err.message);
+        assert!(err.message.contains("0.2.0"), "{}", err.message);
+        assert_eq!(slot.downloaded_version(), None);
+        assert_eq!(
+            slot.set_install_on_exit(true).unwrap_err().code,
+            code::UPDATE_NOT_READY
+        );
+
+        slot.record_check(None);
+        let err = slot.store_download(Fake("0.2.1"), vec![8]).unwrap_err();
+        assert_eq!(err.code, code::UPDATE_NOT_AVAILABLE);
+        assert_eq!(slot.downloaded_version(), None);
+
+        slot.record_check(Some(Fake("0.2.1")));
+        slot.store_download(Fake("0.2.1"), vec![9]).unwrap();
+        assert_eq!(slot.downloaded_version().as_deref(), Some("0.2.1"));
+        assert_eq!(slot.ready().unwrap().bytes, vec![9]);
     }
 
     #[test]
