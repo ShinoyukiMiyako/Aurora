@@ -116,6 +116,11 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                   </Tag>
                 )}
                 {view.kind === "installing" && <InstallingTag instanceId={inst.id} />}
+                {inst.activity === "backing_up" && (
+                  <Tag tone="info" icon="clock">
+                    {HERO_COPY.backingUp}
+                  </Tag>
+                )}
                 {crashActive && (
                   <Tag tone="danger" icon="x-circle">
                     {HERO_COPY.lastCrash}

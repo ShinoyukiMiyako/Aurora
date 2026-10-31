@@ -30,6 +30,8 @@ export const HERO_COPY = {
   broken: "文件不完整",
   installing: (pct: string) => `安装中 ${pct}`,
   installingQueued: "等待安装",
+  /** 后端报告实例在备份、恢复或导出存档（游戏退出后的自动备份也算）。 */
+  backingUp: "正在备份存档",
   lastCrash: "上次崩溃",
   pin: "固定到侧栏",
   unpin: "从侧栏取消固定",

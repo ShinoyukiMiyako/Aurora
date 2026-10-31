@@ -448,6 +448,19 @@ describe("实例详情：后端正在改动实例", () => {
     expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("头图状态标签：后端在备份或恢复存档时写「正在备份存档」，改动 Mod 时不写", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
+    await open("overview");
+    const hero = () => document.querySelector("section");
+    expect(hero()?.textContent).not.toContain("正在备份存档");
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(hero()?.textContent).toContain("正在备份存档");
+  });
+
   it("后端在备份或恢复存档（含游戏退出后的自动备份）：重命名、删除带备份的原因禁用，Mod 开关照常可用", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
     await open("settings");
