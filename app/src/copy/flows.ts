@@ -233,7 +233,7 @@ export const AVATAR_LINE = {
 // ---------------------------------------------------------------- 启动失败
 
 /** 失败修复动作的种类；按钮行为由启动层按种类执行。 */
-export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs";
+export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs" | "launch_offline_once";
 
 export interface FailureFix {
   kind: FailureFixKind;
@@ -280,6 +280,8 @@ function sentence(text: string): string {
 
 const RETRY: FailureFix = { kind: "retry", label: "重试" };
 const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" };
+/** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
+const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
 
 export function failureCopy(code: FailureCode, params: FailureParams, ctx: FailureContext): FailureCopy {
   switch (code) {
@@ -313,9 +315,17 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     case "account_refresh_network":
       return {
         title: "无法验证微软账户",
-        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先切换到离线账户。",
+        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
         fix: RETRY,
-        secondary: null,
+        secondary: OFFLINE_ONCE,
+      };
+    // 不读插值参数：status 只供排查，缺了也不该让失败卡抛错
+    case "account_service_down":
+      return {
+        title: "微软登录服务暂时不可用",
+        body: `微软的登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+        fix: RETRY,
+        secondary: OFFLINE_ONCE,
       };
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
@@ -766,6 +776,8 @@ export const TOAST_COPY = {
   authlibAdded: (name: string, server: string) => ({ title: `已添加 ${name}`, body: `外置登录 · ${server}` }),
   /** 由启动拦截触发的登录或添加账户成功后，Toast 正文。 */
   continuingLaunch: (instance: string) => `正在启动「${instance}」`,
+  /** 失败卡上选了「以离线方式进单人」，游戏起来之后。 */
+  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了。" }),
   viewCrashAction: "查看诊断",
 } as const;
 
@@ -898,7 +910,7 @@ export const MICROSOFT_LOGIN_COPY = {
 /** 前端判定的失败：发起登录后 15 s 内没收到设备码。 */
 export const DEVICE_CODE_TIMEOUT_CODE = "device_code_timeout";
 
-export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close";
+export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close" | "open_client_id_settings";
 
 export interface LoginFailureAction {
   kind: LoginFailureActionKind;
@@ -964,6 +976,16 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
         "没有找到 Minecraft Java 版的购买记录或游戏档案。买过的话，先在官方启动器里创建一次档案。",
         LOGIN_RETRY,
         { kind: "use_offline", label: "改用离线账户" },
+      );
+    case "ServiceUnavailable":
+      return plain("微软登录服务暂时不可用", "微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。", LOGIN_RETRY);
+    // 不给「重试」：同一个 client_id 重试只会得到同样的结果
+    case "AppNotApproved":
+      return plain(
+        "登录应用未获批准",
+        `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+        { kind: "open_client_id_settings", label: "打开设置" },
+        { kind: "copy_error", label: "复制错误信息" },
       );
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });

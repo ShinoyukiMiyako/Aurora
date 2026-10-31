@@ -43,6 +43,8 @@ pub(crate) struct RunInfo {
     pub max_memory_mb: u32,
     pub warnings: Vec<LaunchWarning>,
     pub pid: Option<u32>,
+    /// 这一局以离线方式进单人，没有经过账户验证。
+    pub offline: bool,
 }
 
 /// 一局运行中的游戏。
@@ -81,6 +83,11 @@ impl GameRun {
 
     pub fn pid(&self) -> Option<u32> {
         self.info.pid
+    }
+
+    /// 这一局是否以离线方式进单人（未经账户验证，只保证单人游戏）。
+    pub fn offline(&self) -> bool {
+        self.info.offline
     }
 
     pub fn running_since(&self) -> u64 {
@@ -384,6 +391,7 @@ mod tests {
             max_memory_mb: 4096,
             warnings: Vec::new(),
             pid: session.id(),
+            offline: false,
         };
         Started {
             _tmp: tmp,

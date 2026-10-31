@@ -5,7 +5,9 @@ import { lastCrash, lastLaunchLog } from "./diagnostics";
 import { IpcError } from "./errors";
 import {
   BUSY_ERROR_CODE,
+  OFFLINE_FALLBACK_FIELD,
   launchGame,
+  offlineFallbackRefusal,
   onGameExit,
   onGameLog,
   onLaunchPhase,
@@ -43,7 +45,7 @@ function today(): string {
 }
 
 function offline(versionId: string, taskId: string): LaunchArgs {
-  return { taskId, versionId, accountUuid: null, offlineName: "Steve" };
+  return { taskId, versionId, accountUuid: null, offlineName: "Steve", offlineFallback: false };
 }
 
 async function recordEvents() {
@@ -84,7 +86,7 @@ describe("启动 mock", () => {
 
   it("阶段下标 0 到 7 单调推进，阶段 3 带一份下载进度，resolve 时已在运行", async () => {
     const { phases, logs } = await recordEvents();
-    expect(await launchGame(offline("1.21", "t-1"))).toEqual({ pid: 4242 });
+    expect(await launchGame(offline("1.21", "t-1"))).toEqual({ pid: 4242, offline: false });
     const indices = phases.map((p) => p.stage_index);
     expect(indices).toEqual([0, 1, 2, 3, 3, 4, 5, 6, 7]);
     expect(phases.every((p) => p.task_id === "t-1")).toBe(true);
@@ -110,7 +112,7 @@ describe("启动 mock", () => {
     expect(whileRunning.detail).toEqual({ version_id: "1.20.1-fabric", phase: "running" });
 
     await stopGame();
-    expect(await launchGame(offline("1.21", "t-d"))).toEqual({ pid: 4242 });
+    expect(await launchGame(offline("1.21", "t-d"))).toEqual({ pid: 4242, offline: false });
   });
 
   it("结束游戏推送 killed 退出，不算崩溃也不留崩溃报告，游玩照记", async () => {
@@ -166,7 +168,7 @@ describe("启动 mock", () => {
     expect(phases.every((p) => p.stage_index < 7)).toBe(true);
     expect((await lastLaunchLog("1.21"))?.ended?.outcome).toBe("cancelled");
     expect(await minutesToday()).toBe(0);
-    expect(await launchGame(offline("1.21", "t-y"))).toEqual({ pid: 4242 });
+    expect(await launchGame(offline("1.21", "t-y"))).toEqual({ pid: 4242, offline: false });
   });
 
   it("失败码在它所属的阶段拒绝，插值参数原样在 detail 里，之后能再次启动", async () => {
@@ -183,19 +185,145 @@ describe("启动 mock", () => {
     expect(disk.code).toBe("disk_full");
     expect(Math.max(...phases.slice(1).map((p) => p.stage_index))).toBe(3);
 
-    expect(await launchGame(offline("1.21", "t-3"))).toEqual({ pid: 4242 });
+    expect(await launchGame(offline("1.21", "t-3"))).toEqual({ pid: 4242, offline: false });
     expect(() => failNextMockLaunch("teapot", {})).toThrow("未知的启动失败码 teapot");
   });
 
   it("账户必须二选一；参数类型不对是 Tauri 自己的参数错误", async () => {
-    const neither = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: null, offlineName: null } as never));
+    const neither = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: null, offlineName: null, offlineFallback: false } as never));
     expect(neither.code).toBe("invalid_argument");
-    const both = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: "u", offlineName: "Steve" } as never));
+    const both = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: "u", offlineName: "Steve", offlineFallback: false } as never));
     expect(both.code).toBe("invalid_argument");
-    const wrongType = await rejection(launchGame({ taskId: "t", versionId: 7, accountUuid: null, offlineName: "Steve" } as never));
+    const wrongType = await rejection(launchGame({ taskId: "t", versionId: 7, accountUuid: null, offlineName: "Steve", offlineFallback: false } as never));
     expect(wrongType.code).toBe("unknown");
     // 被拒的启动不占槽。
-    expect(await launchGame(offline("1.21", "t-ok"))).toEqual({ pid: 4242 });
+    expect(await launchGame(offline("1.21", "t-ok"))).toEqual({ pid: 4242, offline: false });
+  });
+});
+
+describe("以离线方式进单人 mock", () => {
+  // 账户 mock 的种子：一个验证正常的微软账户，一个已被判定需要重新登录的外置账户
+  const HANAMI = "6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20";
+  const YOZAKURA = "b7c2d3e4f5a64b7c8d9e0f1a2b3c4d5e";
+  const WARN_LINE = "以离线方式进单人：Hanami_Walker 这一局不经账户验证，只能玩单人游戏";
+
+  const stored = (uuid: string, taskId: string, offlineFallback: boolean): LaunchArgs => ({ taskId, versionId: "1.21", accountUuid: uuid, offlineName: null, offlineFallback });
+
+  /** 用这个账户普通启动一次，在阶段 0 以账户类失败码失败。 */
+  async function failWith(code: string, uuid = HANAMI): Promise<void> {
+    failNextMockLaunch(code, { account: "Hanami_Walker", status: 503 });
+    const error = await rejection(launchGame(stored(uuid, `t-fail-${code}`, false)));
+    expect(error.code).toBe(code);
+  }
+
+  async function refusal(args: LaunchArgs): Promise<IpcError> {
+    const error = await rejection(launchGame(args));
+    expect(error.code).toBe("invalid_argument");
+    return error;
+  }
+
+  it.each(["account_service_down", "account_refresh_network"])("上次以 %s 失败：放行一次，返回 offline: true，阶段 0 多一行 warn", async (code) => {
+    await failWith(code);
+    const { phases, logs } = await recordEvents();
+    expect(await launchGame(stored(HANAMI, "t-off", true))).toEqual({ pid: 4242, offline: true });
+    expect(phases.map((p) => p.stage_index)).toEqual([0, 1, 2, 3, 3, 4, 5, 6, 7]);
+    const launcher = logs.flatMap((batch) => batch.lines).filter((l) => l.source === "launcher");
+    expect(launcher.slice(0, 3).map((l) => [l.level, l.text])).toEqual([
+      ["info", "检查 Java"],
+      ["warn", WARN_LINE],
+      ["info", "校验游戏文件"],
+    ]);
+    expect(launcher.filter((l) => l.level === "warn")).toHaveLength(1);
+
+    // 一次性：那条失败记录已经用掉
+    await stopGame();
+    const again = await refusal(stored(HANAMI, "t-again", true));
+    expect(again.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+  });
+
+  it("没有失败记录：no_recent_failure，正文给出原因；被拒的启动不推阶段、不占槽", async () => {
+    const { phases } = await recordEvents();
+    const error = await refusal(stored(HANAMI, "t-1", true));
+    expect(error.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+    expect(error.message).toBe("Hanami_Walker 不能以离线方式进单人：没有这个账户最近一次验证失败的记录，先重试一次启动");
+    expect(phases).toEqual([]);
+    expect(await launchGame(stored(HANAMI, "t-2", false))).toEqual({ pid: 4242, offline: false });
+  });
+
+  it("离线角色名与账户库里的离线账户：offline_account", async () => {
+    const byName = await refusal({ taskId: "t-1", versionId: "1.21", accountUuid: null, offlineName: "Steve", offlineFallback: true });
+    expect(byName.detail).toEqual({ field: "offlineFallback", reason: "offline_account", account: "Steve" });
+    expect(byName.message).toBe("Steve 不能以离线方式进单人：离线账户本来就不经验证");
+
+    const alex = await invoke<{ uuid: string }>("create_offline_account", { name: "Alex" });
+    const byUuid = await refusal(stored(alex.uuid, "t-2", true));
+    expect(byUuid.detail).toEqual({ field: "offlineFallback", reason: "offline_account", account: "Alex" });
+  });
+
+  it("账户已被判定需要重新登录：即使上次是服务故障也报 relogin_required", async () => {
+    await failWith("account_service_down", YOZAKURA);
+    const error = await refusal(stored(YOZAKURA, "t-1", true));
+    expect(error.detail).toEqual({ field: "offlineFallback", reason: "relogin_required", account: "Yozakura" });
+    expect(error.message).toBe("Yozakura 不能以离线方式进单人：登录已失效，需要重新登录");
+  });
+
+  it("上次失败是 account_relogin：relogin_required，记录照样消耗", async () => {
+    await failWith("account_relogin");
+    const first = await refusal(stored(HANAMI, "t-1", true));
+    expect(first.detail).toEqual({ field: "offlineFallback", reason: "relogin_required", account: "Hanami_Walker" });
+    const second = await refusal(stored(HANAMI, "t-2", true));
+    expect(second.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+  });
+
+  it("普通启动成功清掉记录", async () => {
+    await failWith("account_refresh_network");
+    expect(await launchGame(stored(HANAMI, "t-ok", false))).toEqual({ pid: 4242, offline: false });
+    await stopGame();
+    const error = await refusal(stored(HANAMI, "t-off", true));
+    expect(error.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+  });
+
+  it("后一次账户类失败覆盖前一次：先网络故障、再登录失效，降级报 relogin_required", async () => {
+    await failWith("account_refresh_network");
+    await failWith("account_relogin");
+    const error = await refusal(stored(HANAMI, "t-off", true));
+    expect(error.detail).toEqual({ field: "offlineFallback", reason: "relogin_required", account: "Hanami_Walker" });
+  });
+
+  it("降级启动跳过账户类的失败；别的阶段的失败照常，且那条记录已在判定时用掉", async () => {
+    await failWith("account_service_down");
+    failNextMockLaunch("account_relogin", { account: "Hanami_Walker" });
+    expect(await launchGame(stored(HANAMI, "t-off", true))).toEqual({ pid: 4242, offline: true });
+    await stopGame();
+
+    await failWith("account_service_down");
+    failNextMockLaunch("disk_full", { drive: "D:", needed_bytes: 1024 });
+    const disk = await rejection(launchGame(stored(HANAMI, "t-disk", true)));
+    expect(disk.code).toBe("disk_full");
+    const after = await refusal(stored(HANAMI, "t-after", true));
+    expect(after.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+  });
+
+  it("不是账户类的失败不记：java_missing 之后降级报 no_recent_failure", async () => {
+    failNextMockLaunch("java_missing", { major: 21, mc_version: "1.21" });
+    await rejection(launchGame(stored(HANAMI, "t-java", false)));
+    const error = await refusal(stored(HANAMI, "t-off", true));
+    expect(error.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+  });
+
+  it("记录只在内存里：复位后为空", async () => {
+    await failWith("account_service_down");
+    resetMocks();
+    const error = await refusal(stored(HANAMI, "t-off", true));
+    expect(error.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+  });
+
+  it("offlineFallback 缺失或不是布尔值是 Tauri 自己的参数错误", async () => {
+    const missing = await rejection(invoke("launch_game", { taskId: "t-1", versionId: "1.21", accountUuid: HANAMI, offlineName: null }));
+    expect(missing.code).toBe("unknown");
+    const wrongType = await rejection(invoke("launch_game", { taskId: "t-2", versionId: "1.21", accountUuid: HANAMI, offlineName: null, offlineFallback: "true" }));
+    expect(wrongType.code).toBe("unknown");
+    expect(wrongType.message).toBe("invalid args `offlineFallback` for command `launch_game`");
   });
 });
 
@@ -230,20 +358,42 @@ describe("游玩统计 mock", () => {
   });
 });
 
+describe("降级启动的拒绝细节", () => {
+  const refused = (detail: unknown) => new IpcError("invalid_argument", "Steve 不能以离线方式进单人", detail);
+
+  it("invalid_argument 且 field 为 offlineFallback 时取出 reason 与账户名", () => {
+    for (const reason of ["offline_account", "relogin_required", "no_recent_failure"] as const) {
+      expect(offlineFallbackRefusal(refused({ field: OFFLINE_FALLBACK_FIELD, reason, account: "Steve" }))).toEqual({ field: "offlineFallback", reason, account: "Steve" });
+    }
+  });
+
+  it("别的错误不是降级拒绝：别的码、别的 field、没有 detail、前端自己的 Error", () => {
+    expect(offlineFallbackRefusal(new IpcError("account_service_down", "x", { field: OFFLINE_FALLBACK_FIELD, reason: "relogin_required", account: "Steve" }))).toBeNull();
+    expect(offlineFallbackRefusal(refused({ field: "accountUuid", reason: "relogin_required", account: "Steve" }))).toBeNull();
+    expect(offlineFallbackRefusal(refused(undefined))).toBeNull();
+    expect(offlineFallbackRefusal(new Error("invalid_argument"))).toBeNull();
+  });
+
+  it("field 对上了而 reason 或账户名不合契约时直接抛出", () => {
+    expect(() => offlineFallbackRefusal(refused({ field: OFFLINE_FALLBACK_FIELD, reason: "expired", account: "Steve" }))).toThrow("降级启动的拒绝细节不合契约");
+    expect(() => offlineFallbackRefusal(refused({ field: OFFLINE_FALLBACK_FIELD, reason: "relogin_required" }))).toThrow("降级启动的拒绝细节不合契约");
+  });
+});
+
 describe("Tauri 窗口里", () => {
   beforeEach(() => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
-  it("launchGame 只传实例、账户与取消句柄；playStats 传 range 对象", async () => {
-    vi.mocked(tauriInvoke).mockResolvedValueOnce({ pid: 7 }).mockResolvedValueOnce(null).mockResolvedValueOnce({});
-    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这四项。
+  it("launchGame 只传实例、账户、降级标记与取消句柄；playStats 传 range 对象", async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ pid: 7, offline: false }).mockResolvedValueOnce(null).mockResolvedValueOnce({});
+    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这五项。
     const extra = { ...offline("1.21", "t-run"), maxMemoryMb: 4096 } as unknown as LaunchArgs;
-    expect(await launchGame(extra)).toEqual({ pid: 7 });
+    expect(await launchGame(extra)).toEqual({ pid: 7, offline: false });
     await stopGame();
     await playStats({ from: "2026-10-01", to: "2026-10-31" });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
-      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineName: "Steve" }],
+      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineFallback: false, offlineName: "Steve" }],
       ["stop_game", undefined],
       ["play_stats", { range: { from: "2026-10-01", to: "2026-10-31" } }],
     ]);

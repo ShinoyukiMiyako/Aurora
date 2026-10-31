@@ -10,18 +10,23 @@ import {
   GAME_EXIT_EVENT,
   GAME_LOG_EVENT,
   LAUNCH_PHASE_EVENT,
+  OFFLINE_FALLBACK_FIELD,
   type BusyDetail,
   type GameExitEvent,
   type InstanceMinutesDto,
+  type LaunchedDto,
   type LaunchPhaseEvent,
   type LaunchPhaseName,
   type LogLevelName,
   type LogLineDto,
+  type OfflineFallbackRefusal,
+  type OfflineFallbackRefusedDetail,
   type PlayDayDto,
   type PlayStatsDto,
 } from "../../launch";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
+import { mockAccountFacts } from "./accounts";
 import { handlers as configHandlers, samePath } from "./config";
 import { acquireMockInstance, type MockInstanceHold } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
@@ -48,6 +53,7 @@ const FAILURE_STAGE: Record<string, number> = {
   java_too_old: 0,
   account_relogin: 0,
   account_refresh_network: 0,
+  account_service_down: 0,
   version_broken: 1,
   files_offline: 3,
   files_failed: 3,
@@ -135,8 +141,23 @@ interface PendingFailure {
   params: Record<string, string | number>;
 }
 
+/** 账户验证类的失败码：以这些码失败的启动记一笔，供之后「以离线方式进单人」判定。 */
+const ACCOUNT_FAILURE_CODES: ReadonlySet<string> = new Set(["account_relogin", "account_refresh_network", "account_service_down"]);
+
+/** 降级被拒绝时正文里的原因，与后端的说法一致。 */
+const OFFLINE_FALLBACK_REFUSAL_TEXT: Readonly<Record<OfflineFallbackRefusal, string>> = {
+  offline_account: "离线账户本来就不经验证",
+  relogin_required: "登录已失效，需要重新登录",
+  no_recent_failure: "没有这个账户最近一次验证失败的记录，先重试一次启动",
+};
+
 let occupant: Occupant | null = null;
 let pendingFailure: PendingFailure | null = null;
+/**
+ * 每个账户最近一次账户验证类的失败：账户 uuid -> 失败码。与后端一样只在内存里，不随 persist 落盘，
+ * 刷新页面（相当于重开启动器）后为空；普通启动成功时清掉，降级启动取出即消耗。
+ */
+let accountFailures = new Map<string, string>();
 let logs = new Map<string, LaunchLogDto>();
 let crashes = new Map<string, CrashReportDto>();
 /** 下一份崩溃报告带的启动提醒；用一次就清空。 */
@@ -255,6 +276,12 @@ function stringArg(command: string, args: MockArgs, key: string): string {
   return value;
 }
 
+function boolArg(command: string, args: MockArgs, key: string): boolean {
+  const value = args[key];
+  if (typeof value !== "boolean") throw argError(command, key);
+  return value;
+}
+
 /** Rust 侧的 Option<String>：缺键与 null 都是 None。 */
 function optionalStringArg(command: string, args: MockArgs, key: string): string | null {
   const value = args[key];
@@ -269,13 +296,38 @@ function busy(current: Occupant): IpcError {
   return new IpcError(BUSY_ERROR_CODE, `${current.versionId} ${verb}，同一时间只能运行一个游戏`, detail);
 }
 
-async function launchGame(args: MockArgs): Promise<{ pid: number }> {
+function refuseOfflineFallback(name: string, reason: OfflineFallbackRefusal): IpcError {
+  const detail: OfflineFallbackRefusedDetail = { field: OFFLINE_FALLBACK_FIELD, reason, account: name };
+  return new IpcError("invalid_argument", `${name} 不能以离线方式进单人：${OFFLINE_FALLBACK_REFUSAL_TEXT[reason]}`, detail);
+}
+
+/**
+ * 判定能否以离线方式进单人，顺序与后端相同，放行时返回账户名。上一次失败的记录在最后一步取出即消耗；
+ * 离线账户与已失效的账户在前两步就被拒绝，记录不动。
+ */
+function admitOfflineFallback(uuid: string | null, offlineName: string | null): string {
+  if (offlineName !== null) throw refuseOfflineFallback(offlineName, "offline_account");
+  if (uuid === null) throw new Error("mock：账户二选一校验过后 accountUuid 不应为空");
+  const account = mockAccountFacts(uuid);
+  if (account.offline) throw refuseOfflineFallback(account.name, "offline_account");
+  if (account.status === "expired") throw refuseOfflineFallback(account.name, "relogin_required");
+  const previous = accountFailures.get(uuid);
+  accountFailures.delete(uuid);
+  if (previous === undefined) throw refuseOfflineFallback(account.name, "no_recent_failure");
+  if (previous === "account_relogin") throw refuseOfflineFallback(account.name, "relogin_required");
+  return account.name;
+}
+
+async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   const taskId = stringArg("launch_game", args, "taskId");
   const versionId = stringArg("launch_game", args, "versionId");
   const uuid = optionalStringArg("launch_game", args, "accountUuid");
   const name = optionalStringArg("launch_game", args, "offlineName");
+  const offlineFallback = boolArg("launch_game", args, "offlineFallback");
   if ((uuid === null) === (name === null)) throw new IpcError("invalid_argument", "启动需提供 account_uuid 与 offline_name 二者之一");
   if (occupant) throw busy(occupant);
+  // 后端在开局取账户身份时才拒绝，那时已占了槽与实例，但一失败就全部放开；这里在占用之前拒绝，对外可见的状态相同。
+  const offlineAs = offlineFallback ? admitOfflineFallback(uuid, name) : null;
   // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），最后登记任务。
   const hold = acquireMockInstance(versionId, "launching");
   try {
@@ -301,9 +353,15 @@ async function launchGame(args: MockArgs): Promise<{ pid: number }> {
       }
       emitPhase(taskId, index);
       pushLines(versionId, [line("launcher", "info", STAGES[index].label)]);
-      if (failure && FAILURE_STAGE[failure.code] === index) {
+      if (index === 0 && offlineAs !== null) {
+        pushLines(versionId, [line("launcher", "warn", `以离线方式进单人：${offlineAs} 这一局不经账户验证，只能玩单人游戏`)]);
+      }
+      // 降级启动不刷新登录，账户验证类的失败轮不到它；别的阶段的失败照常
+      const skipped = failure !== null && offlineAs !== null && ACCOUNT_FAILURE_CODES.has(failure.code);
+      if (failure && !skipped && FAILURE_STAGE[failure.code] === index) {
         pushLines(versionId, [line("launcher", "error", `启动失败：${failure.message}`)]);
         endLog(versionId, "failed");
+        if (uuid !== null && ACCOUNT_FAILURE_CODES.has(failure.code)) accountFailures.set(uuid, failure.code);
         throw new IpcError(failure.code, failure.message, failure.params);
       }
       if (index === 3) {
@@ -317,11 +375,13 @@ async function launchGame(args: MockArgs): Promise<{ pid: number }> {
   } finally {
     endMockTask(taskId);
   }
+  // 验证通过的一局说明账户已恢复，上一次的失败作废；降级的一局没经验证，记录在判定时已经消耗
+  if (uuid !== null && offlineAs === null) accountFailures.delete(uuid);
   hold.setActivity("running");
   occupant = { versionId, phase: "running", startedAt, runningSince: Date.now(), hold, gameDir };
   emitPhase(taskId, STAGES.length - 1);
   pushLines(versionId, [line("game", "info", "[12:00:00] [main/INFO]: Loading Minecraft")]);
-  return { pid: MOCK_PID };
+  return { pid: MOCK_PID, offline: offlineAs !== null };
 }
 
 /** 游戏退出的收尾：记游玩、崩溃时留报告，先放开占用再推退出事件，与后端顺序一致。 */
@@ -533,6 +593,7 @@ export const handlers: MockHandlers = {
 export function reset(): void {
   occupant = null;
   pendingFailure = null;
+  accountFailures = new Map();
   pendingRecordsFailure = null;
   pendingWarnings = [];
   logs = new Map();

@@ -54,6 +54,9 @@ pub struct Aurora {
     /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
     /// 各自新建的门面（含测试）互不串用。
     pub(crate) mod_versions: crate::modversions::SharedVersionCache,
+    /// 各账户最近一次账户类启动失败，以离线方式进单人时据此放行。与工程版本缓存一样放在门面上：快照
+    /// 克隆共享同一个句柄，重开门面即清空。
+    pub(crate) account_failures: crate::launch::AccountFailures,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -110,6 +113,7 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            account_failures: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
         })
@@ -430,6 +434,7 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            account_failures: Default::default(),
             curseforge_key: None,
         }
     }

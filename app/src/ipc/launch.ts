@@ -2,6 +2,7 @@
 // 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析，启动只给实例、账户与取消句柄。
 
 import { invoke, listen, type UnlistenFn } from "./bridge";
+import { IpcError } from "./errors";
 
 /** 启动阶段推进与阶段 3 的下载进度。 */
 export const LAUNCH_PHASE_EVENT = "aurora://launch-phase";
@@ -26,11 +27,56 @@ export type LaunchArgs = {
   /** 只作取消句柄（cancelTask）：启动不进下载队列，阶段事件以它标明属于哪一次启动。 */
   taskId: string;
   versionId: string;
+  /**
+   * 这一局以离线方式进单人：不刷新登录、不注入有效令牌。只在这个账户上一次启动因验证不可用而失败时放行，
+   * 判据是后端自己记下的那次失败码，不信前端；放行一次即消耗那条记录。普通启动传 false。
+   */
+  offlineFallback: boolean;
 } & LaunchAccountArgs;
 
 /** 启动成功：游戏进程已经起来。 */
 export interface LaunchedDto {
   pid: number | null;
+  /** 这一局以离线方式进单人（未经账户验证）。 */
+  offline: boolean;
+}
+
+/** 降级启动被拒绝时 invalid_argument 的 detail.field。 */
+export const OFFLINE_FALLBACK_FIELD = "offlineFallback";
+
+const OFFLINE_FALLBACK_REFUSALS = ["offline_account", "relogin_required", "no_recent_failure"] as const;
+
+/**
+ * offline_account：离线账户本来就不经验证；relogin_required：账户已被判定需要重新登录，或上次失败就是登录失效；
+ * no_recent_failure：后端没有这个账户最近一次验证失败的记录（启动器重开过，或那条记录已用掉）。
+ */
+export type OfflineFallbackRefusal = (typeof OFFLINE_FALLBACK_REFUSALS)[number];
+
+export interface OfflineFallbackRefusedDetail {
+  field: typeof OFFLINE_FALLBACK_FIELD;
+  reason: OfflineFallbackRefusal;
+  /** 被拒绝的账户名。 */
+  account: string;
+}
+
+function isOfflineFallbackRefusal(value: unknown): value is OfflineFallbackRefusal {
+  return typeof value === "string" && (OFFLINE_FALLBACK_REFUSALS as readonly string[]).includes(value);
+}
+
+/**
+ * 降级启动被拒绝时取出细节；不是这类拒绝为 null。field 对上了而 reason 或 account 不合契约时直接抛出：
+ * 前后端随同一个安装包发布，这说明发布有缺陷，不能当成别的错误放过去。
+ */
+export function offlineFallbackRefusal(error: unknown): OfflineFallbackRefusedDetail | null {
+  if (!(error instanceof IpcError) || error.code !== "invalid_argument") return null;
+  const detail = error.detail;
+  if (typeof detail !== "object" || detail === null) return null;
+  const fields = detail as Record<string, unknown>;
+  if (fields.field !== OFFLINE_FALLBACK_FIELD) return null;
+  if (!isOfflineFallbackRefusal(fields.reason) || typeof fields.account !== "string") {
+    throw new Error(`降级启动的拒绝细节不合契约：${JSON.stringify(detail)}`);
+  }
+  return { field: OFFLINE_FALLBACK_FIELD, reason: fields.reason, account: fields.account };
 }
 
 /** 加载阶段的分段；stage_index 0-2 为 preparing，3 为 downloading，4-6 为 launching，7 为 running。 */
@@ -117,9 +163,16 @@ export interface PlayStatsDto {
 /**
  * 启动一个实例。失败时 IpcError 的 code 为启动失败码（java_missing 等，插值参数平铺在 detail 里，
  * 原因链在 detail.causes）、BUSY_ERROR_CODE、cancelled，或门面的通用错误码。
+ * 降级启动被拒绝时 code 为 invalid_argument，detail 为 OfflineFallbackRefusedDetail（用 offlineFallbackRefusal 取出）。
  */
 export const launchGame = (args: LaunchArgs): Promise<LaunchedDto> =>
-  invoke<LaunchedDto>("launch_game", { taskId: args.taskId, versionId: args.versionId, accountUuid: args.accountUuid, offlineName: args.offlineName });
+  invoke<LaunchedDto>("launch_game", {
+    taskId: args.taskId,
+    versionId: args.versionId,
+    accountUuid: args.accountUuid,
+    offlineFallback: args.offlineFallback,
+    offlineName: args.offlineName,
+  });
 
 /** 结束运行中的游戏；结局经 GAME_EXIT_EVENT 推送。没有运行中的游戏时为空操作，加载中的启动用 cancelTask 取消。 */
 export const stopGame = (): Promise<void> => invoke<void>("stop_game");

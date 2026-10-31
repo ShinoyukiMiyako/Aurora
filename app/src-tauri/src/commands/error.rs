@@ -281,6 +281,8 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+        // 降级被拒说明这次传入的 offlineFallback 不成立，按参数错误报；拒绝原因放在 detail 里供前端分支。
+        CoreError::OfflineFallbackRefused { .. } => code::INVALID_ARGUMENT,
     }
 }
 
@@ -358,6 +360,8 @@ pub fn auth_code(err: &AuthError) -> &'static str {
         AuthError::XstsUnknown(_) => "XstsUnknown",
         AuthError::MinecraftProfileNotFound => "MinecraftProfileNotFound",
         AuthError::ReloginRequired => "ReloginRequired",
+        AuthError::ServiceUnavailable { .. } => "ServiceUnavailable",
+        AuthError::AppNotApproved => "AppNotApproved",
         AuthError::InvalidUsername(_) => "InvalidUsername",
         AuthError::Yggdrasil { .. } => "Yggdrasil",
         AuthError::AccountNotFound(_) => "AccountNotFound",
@@ -415,8 +419,19 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
                 AuthError::OfflineStoreDeserialize { path, .. } => {
                     detail.insert("path".to_owned(), json!(path.display().to_string()));
                 }
+                // 原因链上没有 reqwest 错误，因而不会带 detail.network：服务故障不是本机连不上网，
+                // 不该触发前端的连通性探测。
+                AuthError::ServiceUnavailable { step, status } => {
+                    detail.insert("step".to_owned(), json!(step));
+                    detail.insert("status".to_owned(), json!(status));
+                }
                 _ => {}
             }
+        }
+        CoreError::OfflineFallbackRefused { account, reason } => {
+            detail.insert("field".to_owned(), json!("offlineFallback"));
+            detail.insert("reason".to_owned(), json!(reason.as_str()));
+            detail.insert("account".to_owned(), json!(account));
         }
         CoreError::VersionNotInstalled { id } => {
             detail.insert("id".to_owned(), json!(id));
@@ -527,6 +542,7 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aurora_core::OfflineFallbackRefusal;
     use std::path::PathBuf;
 
     #[test]
@@ -609,6 +625,59 @@ mod tests {
         let detail = broken.detail.unwrap();
         assert_eq!(detail["path"], json!("C:/data/offline_accounts.json"));
         assert_eq!(detail["causes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn login_outage_and_unapproved_app_map_to_their_own_codes() {
+        let outage: CommandError = AuthError::ServiceUnavailable {
+            step: "XSTS 授权",
+            status: 503,
+        }
+        .into();
+        assert_eq!(outage.code, "ServiceUnavailable");
+        assert_eq!(
+            outage.message,
+            "微软登录服务暂时不可用（XSTS 授权：HTTP 503）"
+        );
+        let detail = outage.detail.unwrap();
+        assert_eq!(detail, json!({ "step": "XSTS 授权", "status": 503 }));
+        // 不是本机网络问题：不带 network，前端不去探测连通性。
+        assert!(detail.get("network").is_none());
+
+        let throttled: CommandError = AuthError::ServiceUnavailable {
+            step: "获取游戏档案",
+            status: 429,
+        }
+        .into();
+        assert_eq!(throttled.detail.unwrap()["status"], json!(429));
+
+        let unapproved: CommandError = AuthError::AppNotApproved.into();
+        assert_eq!(unapproved.code, "AppNotApproved");
+        assert!(unapproved.detail.is_none());
+        assert!(unapproved.message.contains("Invalid app registration"));
+    }
+
+    #[test]
+    fn refused_offline_fallback_is_an_invalid_argument_naming_the_reason() {
+        for (reason, wire) in [
+            (OfflineFallbackRefusal::OfflineAccount, "offline_account"),
+            (OfflineFallbackRefusal::ReloginRequired, "relogin_required"),
+            (OfflineFallbackRefusal::NoRecentFailure, "no_recent_failure"),
+        ] {
+            let err: CommandError = CoreError::OfflineFallbackRefused {
+                account: "PetalPlayer".into(),
+                reason,
+            }
+            .into();
+            assert_eq!(err.code, code::INVALID_ARGUMENT);
+            assert!(err
+                .message
+                .starts_with("PetalPlayer 不能以离线方式进单人："));
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "field": "offlineFallback", "reason": wire, "account": "PetalPlayer" })
+            );
+        }
     }
 
     #[test]

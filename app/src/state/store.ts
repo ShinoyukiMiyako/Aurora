@@ -1747,17 +1747,22 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 启动内部
 
-  private async startLaunch(instanceId: string, account: Account): Promise<void> {
+  /** offlineFallback：失败卡上的「以离线方式进单人」，这一局不刷新登录；能否放行由后端凭它记下的上一次失败判定。 */
+  private async startLaunch(instanceId: string, account: Account, offlineFallback: boolean): Promise<void> {
     const taskId = freshId("launch");
     this.set({ session: startSession(instanceId, taskId, account, Date.now()), launchPrompt: null });
     if (this.raw.settings !== null && this.raw.settings.selectedVersion !== instanceId) {
       this.background(ACTION_ERROR.selectInstance, this.actions.selectInstance(instanceId));
     }
     // 启动的结局（失败码、取消）是会话状态的一部分，不是异常：在这里转成会话；其余错误清掉乐观会话后原样抛出
-    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null }).then(
-      () => {
+    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null, offlineFallback }).then(
+      (launched) => {
         const s = this.raw.session;
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });
+        if (launched.offline) {
+          const copy = TOAST_COPY.offlineLaunched(instanceId);
+          this.pushToast("info", copy.title, copy.body);
+        }
       },
       (error: unknown) => {
         this.net.reportFailure(error);
@@ -1769,6 +1774,12 @@ export class LauncherStore {
         }
         if (isIpcError(error) && isFailureCode(error.code)) {
           this.failLaunch(s, error.code, error.detail);
+          return;
+        }
+        // 登录已失效而被拒绝降级：失败卡改给「重新登录」；其余拒绝原因（离线账户、启动器重开后不记得上次的失败）交给外层
+        const refusal = offlineFallback ? launchIpc.offlineFallbackRefusal(error) : null;
+        if (refusal !== null && refusal.reason === "relogin_required") {
+          this.failLaunch(s, "account_relogin", { account: refusal.account });
           return;
         }
         this.set({ session: null });
@@ -1816,6 +1827,21 @@ export class LauncherStore {
       case "relogin": {
         const accountUuid = s.accountUuid;
         return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId }), errorTitle: ACTION_ERROR.relogin };
+      }
+      case "launch_offline_once": {
+        const accountUuid = s.accountUuid;
+        return {
+          // 用失败的那一局的账户，不看此刻的当前账户：降级判据是这个账户上一次的失败
+          run: async () => {
+            const inst = this.instance(instanceId);
+            if (inst.status === "installing") throw new Error(`「${instanceId}」还在安装，入口不应提供启动`);
+            if (inst.status === "broken") throw new Error(`「${instanceId}」文件不完整，入口不应提供以离线方式进单人`);
+            const account = this.raw.accounts.find((a) => a.uuid === accountUuid);
+            if (account === undefined) throw new Error(`账户 ${accountUuid} 不存在`);
+            await this.startLaunch(instanceId, account, true);
+          },
+          errorTitle: ACTION_ERROR.launch(instanceId),
+        };
       }
       case "open_game_dir":
         return { run: () => this.actions.openFolder("game_dir"), errorTitle: ACTION_ERROR.openFolder };
@@ -2181,7 +2207,7 @@ export class LauncherStore {
           store.set({ login: { kind: "no_account", intent: { kind: "launch", instanceId: id } } });
           return;
         }
-        await store.startLaunch(id, account);
+        await store.startLaunch(id, account, false);
       },
       async stop() {
         const s = store.raw.session;
