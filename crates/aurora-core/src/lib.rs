@@ -26,6 +26,7 @@ pub mod appearance;
 pub mod art;
 pub mod auth;
 mod authlib;
+pub mod blocked;
 pub mod compat;
 pub mod config;
 pub mod crashdiag;
@@ -62,6 +63,7 @@ mod workdir;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
+pub use blocked::{BlockedFile, ClaimReport, ClaimedFile};
 pub use compat::{
     Compatibility, InstalledCopy, InstalledSource, InstanceMatch, InstanceSources, MatchState,
 };
@@ -86,14 +88,16 @@ pub use launcher_update::{UpdateSource, order_update_sources};
 pub use ledger::{Ledger, LedgerEntry, LedgerStore};
 pub use modfs::is_mod_file_busy;
 pub use modpack::{
-    INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
-    ModpackPreview, ModpackSource, PreparedModpack, read_instance_modpack, validate_instance_name,
+    INSTANCE_NAME_MAX_CHARS, ImportSelection, InstanceModpack, InstanceNameRule,
+    ModpackInstallOutcome, ModpackPreview, ModpackSource, PackFileAvailability, PackFileOrigin,
+    PackModEntry, PreparedModpack, read_instance_modpack, validate_instance_name,
 };
 pub use modpack_summary::ModpackSummary;
 pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
 pub use modversions::ProjectInfo;
 pub use news::{LauncherChannel, NewsFeed, NewsItem, NewsTag};
 pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
+pub use resources::is_safe_file_name;
 pub use resources::{ResourceInstallOutcome, ResourceTarget};
 pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 pub use session::{
@@ -140,6 +144,8 @@ pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifes
 // （长任务快照经 [`Aurora::with_cancel`] 挂上，命令层用同一类型登记与触发取消）。
 pub use aurora_auth::MsaEndpoints;
 pub use aurora_download::CancellationToken;
+// 下载密钥被拒时命令层按平台给出码与提示。
+pub use aurora_download::CredentialRealm;
 
 // 实例管理：列表、设置、内容、删除、改名、侧栏固定；按实例名新建与补全；加载器版本与版本清单概览。
 pub use aurora_instance::{

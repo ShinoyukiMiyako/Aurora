@@ -101,8 +101,16 @@ pub enum CoreError {
         file_name: String,
     },
     /// CurseForge 作者禁止第三方分发，这些文件拿不到下载地址，只能去网页手动下载。
-    #[error("这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}", files.join("、"))]
-    FileDistributionBlocked { files: Vec<String> },
+    #[error(
+        "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}",
+        blocked_names(files)
+    )]
+    FileDistributionBlocked {
+        files: Vec<crate::blocked::BlockedFile>,
+    },
+    /// 认领手动下载的文件时，选的文件夹不存在、不是文件夹或读不了。
+    #[error("{reason}")]
+    ClaimFolderInvalid { path: PathBuf, reason: String },
     /// 新实例的名字不可用。
     #[error("实例名 {name} 不可用：{}", rule.describe())]
     InstanceNameInvalid {
@@ -155,6 +163,14 @@ pub enum CoreError {
     /// 读不到本机物理内存信息。
     #[error("读不到本机内存信息")]
     MemoryUnavailable,
+}
+
+fn blocked_names(files: &[crate::blocked::BlockedFile]) -> String {
+    files
+        .iter()
+        .map(|file| file.file_name.as_str())
+        .collect::<Vec<_>>()
+        .join("、")
 }
 
 /// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。

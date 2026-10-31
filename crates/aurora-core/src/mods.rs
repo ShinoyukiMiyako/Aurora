@@ -29,6 +29,7 @@ use aurora_modplatform::{
 };
 use serde::Serialize;
 
+use crate::blocked::{BlockedFile, single_blocked};
 use crate::deps::PlannedItem;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
@@ -39,6 +40,7 @@ use crate::modfs::{
     MODS_DIR, ensure_not_held, is_plain_file_name, ledger_key, lock_mods_dir, now_unix,
     numbered_backup_name, present, refuse, try_exists,
 };
+use crate::resources::curseforge_download_url;
 
 /// 暂存区目录名，位于 `<工作目录>/<元数据目录>/staging`。每次安装在其下另开一个独立子目录。
 ///
@@ -482,6 +484,13 @@ impl Aurora {
                 version.task_for_url(url, &dest)
             }
         };
+        let task = match version.platform {
+            Platform::CurseForge => {
+                let client = self.curseforge_client()?;
+                task.with_credential(self.curseforge_credential(&client)?)
+            }
+            Platform::Modrinth => task,
+        };
         Ok(StagedItem {
             sha1: version.sha1.clone(),
             version,
@@ -494,7 +503,8 @@ impl Aurora {
     }
 
     /// 版本自带直链为空时的兜底直链。只有 CurseForge 会走到这里（禁止第三方分发的工程不在文件对象里
-    /// 给直链）；Modrinth 版本没有文件时根本不会进入版本列表。
+    /// 给直链）；Modrinth 版本没有文件时根本不会进入版本列表。作者不允许第三方分发时报受限文件，
+    /// 落点是 `mods/` 下的同名文件。
     async fn fallback_download_url(&self, version: &ModVersionInfo) -> Result<String> {
         let not_found = || CoreError::ModVersionNotFound {
             platform: version.platform.display_name(),
@@ -505,10 +515,22 @@ impl Aurora {
             Platform::CurseForge => {
                 let mod_id: u32 = version.project_id.parse().map_err(|_| not_found())?;
                 let file_id: u32 = version.version_id.parse().map_err(|_| not_found())?;
-                Ok(self
-                    .curseforge_client()?
-                    .file_download_url(mod_id, file_id)
-                    .await?)
+                let client = self.curseforge_client()?;
+                match curseforge_download_url(&client, mod_id, file_id).await? {
+                    Some(url) => Ok(url),
+                    // 版本信息里没有 fileFingerprint，只按 sha1 与大小认。
+                    None => Err(single_blocked(&client, mod_id, |project| BlockedFile {
+                        project_id: mod_id,
+                        file_id,
+                        file_name: version.file_name.clone(),
+                        web_url: aurora_modplatform::curseforge::file_page_url(project, file_id),
+                        destination: format!("{MODS_DIR}/{}", version.file_name),
+                        sha1: version.sha1.clone(),
+                        fingerprint: 0,
+                        size: version.file_size,
+                    })
+                    .await),
+                }
             }
             Platform::Modrinth => Err(not_found()),
         }
@@ -2157,5 +2179,222 @@ mod tests {
             dir_names(&mods_dir).await,
             vec!["sodium-v1.jar", "sodium-v2.jar"]
         );
+    }
+
+    fn version_info(
+        platform: &str,
+        project: &str,
+        file: &str,
+        url: Option<&str>,
+    ) -> ModVersionInfo {
+        serde_json::from_value(serde_json::json!({
+            "version_id": file, "project_id": project, "platform": platform, "name": "n",
+            "version_number": "1", "release_channel": "release", "game_versions": ["1.21"],
+            "loaders": [], "file_name": format!("{project}-{file}.jar"), "file_size": 3,
+            "sha1": null, "download_url": url, "date_published": "", "dependencies": []
+        }))
+        .unwrap()
+    }
+
+    fn planned(version: ModVersionInfo) -> PlannedItem {
+        PlannedItem {
+            version,
+            title: None,
+            icon_url: None,
+            required_by: None,
+            already_satisfied: false,
+        }
+    }
+
+    /// CurseForge 的暂存任务（直链与 download-url 兜底出来的）都挂 CurseForge 凭据，Modrinth 的不挂。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_staged_tasks_carry_the_credential_and_modrinth_tasks_do_not() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/8/files/80/download-url"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": format!("{uri}/cdn/fallback.jar")})),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = isolated_aurora(tmp.path(), uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let staging = tmp.path().join("staging");
+
+        let modrinth = aurora
+            .stage_item(
+                planned(version_info(
+                    "modrinth",
+                    "sodium",
+                    "v1",
+                    Some("https://cdn.modrinth.com/a.jar"),
+                )),
+                &staging,
+            )
+            .await
+            .unwrap();
+        assert!(modrinth.task.credential.is_none());
+        let direct = aurora
+            .stage_item(
+                planned(version_info(
+                    "curseforge",
+                    "7",
+                    "70",
+                    Some(&format!("{uri}/cdn/direct.jar")),
+                )),
+                &staging,
+            )
+            .await
+            .unwrap();
+        let fallback = aurora
+            .stage_item(
+                planned(version_info("curseforge", "8", "80", None)),
+                &staging,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fallback.task.url, format!("{uri}/cdn/fallback.jar"));
+        for item in [direct, fallback] {
+            let credential = item
+                .task
+                .credential
+                .as_ref()
+                .expect("CurseForge 任务应带凭据");
+            assert_eq!(
+                credential.realm(),
+                aurora_download::CredentialRealm::CurseForge
+            );
+        }
+    }
+
+    /// 作者不允许第三方分发的 CurseForge Mod：报受限文件，落点是 mods/ 下的同名文件，网页链接按工程拼。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_curseforge_mod_is_reported_with_its_page_and_landing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/9/files/90/download-url"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/9"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 9, "name": "Locked", "slug": "locked", "summary": "", "classId": 6
+                }})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = server.uri();
+        let aurora = isolated_aurora(tmp.path(), uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let mut version = version_info("curseforge", "9", "90", None);
+        version.sha1 = Some("a".repeat(40));
+
+        let err = aurora
+            .stage_item(planned(version), &tmp.path().join("staging"))
+            .await
+            .err()
+            .expect("受限 Mod 应报错");
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            files,
+            &[BlockedFile {
+                project_id: 9,
+                file_id: 90,
+                file_name: "9-90.jar".into(),
+                web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90".into(),
+                destination: "mods/9-90.jar".into(),
+                sha1: Some("a".repeat(40)),
+                fingerprint: 0,
+                size: Some(3),
+            }]
+        );
+        server.verify().await;
+    }
+
+    /// 门面级：CDN 对带了密钥的请求回 401，install_mod 失败；错误链上认得出是 CurseForge 拒绝了密钥，
+    /// 带着被拒那一跳的地址；CDN 只被请求 1 次（不重试、不换源），请求确实带了 x-api-key；mods 里什么都没落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_cdn_rejecting_the_key_fails_install_once() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let cdn = format!("{uri}/files/3040/523/jei.jar");
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/3040523"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 3040523, "modId": 238222, "displayName": "JEI", "fileName": "jei.jar",
+                    "hashes": [{"value": sha1_hex(b"jar"), "algo": 1}], "fileLength": 3,
+                    "downloadUrl": cdn, "gameVersions": ["1.21"]
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    {"id": 238222, "name": "JEI", "slug": "jei", "summary": "", "classId": 6}
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/files/3040/523/jei.jar"))
+            .and(header("x-api-key", "k"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let port = server.address().port();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ));
+
+        let err = aurora
+            .install_mod("1.21", Platform::CurseForge, "238222", "3040523", None)
+            .await
+            .unwrap_err();
+        let CoreError::Download(download) = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            download.credential_rejection(),
+            Some(aurora_download::CredentialRealm::CurseForge)
+        );
+        assert!(
+            matches!(download, aurora_download::Error::CredentialRejected { url, status: 401, .. } if url == &cdn),
+            "{download:?}"
+        );
+        server.verify().await;
+        let cdn_hits = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/files/3040/523/jei.jar")
+            .count();
+        assert_eq!(cdn_hits, 1);
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!mods_dir.join("jei.jar").exists());
     }
 }

@@ -209,6 +209,20 @@ impl Aurora {
         }
         Ok(CurseForgeClient::from_env(self.http())?.with_base_url(self.curseforge_base()))
     }
+
+    /// 与 `client` 同一个 key 的 CDN 下载凭据，CurseForge 的三条下载路径（资源与平台整合包本体、Mod、
+    /// 整合包里的文件）生成的任务都挂上它。
+    pub(crate) fn curseforge_credential(
+        &self,
+        client: &CurseForgeClient,
+    ) -> Result<aurora_download::DownloadCredential> {
+        let credential = client.download_credential()?;
+        #[cfg(test)]
+        if let Some(scope) = self.injected_curseforge_cdn_scope() {
+            return Ok(credential.with_scope(scope.clone()));
+        }
+        Ok(credential)
+    }
 }
 
 /// 拉取 Modrinth 工程版本并归一。

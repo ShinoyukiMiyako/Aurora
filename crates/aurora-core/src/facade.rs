@@ -37,6 +37,9 @@ const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 pub struct Aurora {
     config: AuroraConfig,
     http: reqwest::Client,
+    /// 不自动跟随跳转的客户端，只给带下载凭据的任务用：自动跟随会把凭据头原样带到下一跳的主机，
+    /// 由下载引擎逐跳决定带不带。
+    http_manual: reqwest::Client,
     runtime: RuntimeContext,
     data_dir: PathBuf,
     game_dir: PathBuf,
@@ -58,6 +61,9 @@ pub struct Aurora {
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
     curseforge_key: Option<String>,
+    /// 测试把 CurseForge 下载凭据的作用域换成本地 mock：生产作用域只认 https 的 forgecdn.net。
+    #[cfg(test)]
+    curseforge_cdn_scope: Option<aurora_download::CredentialScope>,
 }
 
 impl Aurora {
@@ -86,6 +92,7 @@ impl Aurora {
     /// 用显式配置与数据目录构造（供 CLI 应用命令行覆盖后调用，或测试注入）。
     pub fn open(config: AuroraConfig, data_dir: PathBuf, config_path: PathBuf) -> Result<Self> {
         let http = aurora_base::http::build_client()?;
+        let http_manual = aurora_base::http::build_manual_redirect_client()?;
         let game_dir = config
             .game_directory
             .clone()
@@ -97,6 +104,7 @@ impl Aurora {
         Ok(Self {
             config,
             http,
+            http_manual,
             runtime: RuntimeContext::current(),
             data_dir,
             game_dir,
@@ -112,6 +120,8 @@ impl Aurora {
             mod_versions: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
+            #[cfg(test)]
+            curseforge_cdn_scope: None,
         })
     }
 
@@ -310,7 +320,8 @@ impl Aurora {
             sources: self.config.download_source.source_plan(),
             ..DownloadConfig::default()
         };
-        let downloader = Downloader::new(self.http.clone(), config);
+        let downloader = Downloader::new(self.http.clone(), config)
+            .with_manual_redirect_client(self.http_manual.clone());
         let pool = DownloadPool::new(downloader, self.config.download_concurrency);
         match &self.cancel {
             Some(token) => pool.with_cancel(token.clone()),
@@ -414,9 +425,12 @@ impl Aurora {
     /// 测试构造：以显式配置、数据目录、游戏目录建门面，端点基址随后用 `with_*` 注入。
     pub(crate) fn for_test(config: AuroraConfig, data_dir: PathBuf, game_dir: PathBuf) -> Self {
         let http = aurora_base::http::build_client().expect("构建测试 HTTP 客户端");
+        let http_manual =
+            aurora_base::http::build_manual_redirect_client().expect("构建测试 HTTP 客户端");
         Self {
             config,
             http,
+            http_manual,
             runtime: RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64),
             data_dir,
             config_path: game_dir.join("config.json"),
@@ -431,6 +445,7 @@ impl Aurora {
             cancel: None,
             mod_versions: Default::default(),
             curseforge_key: None,
+            curseforge_cdn_scope: None,
         }
     }
 
@@ -457,6 +472,21 @@ impl Aurora {
 
     pub(crate) fn injected_curseforge_key(&self) -> Option<&str> {
         self.curseforge_key.as_deref()
+    }
+
+    /// 让 CurseForge 下载凭据只发往这个作用域（测试里指到某一个 wiremock 服务器）。
+    pub(crate) fn with_curseforge_cdn_scope(
+        mut self,
+        scope: aurora_download::CredentialScope,
+    ) -> Self {
+        self.curseforge_cdn_scope = Some(scope);
+        self
+    }
+
+    pub(crate) fn injected_curseforge_cdn_scope(
+        &self,
+    ) -> Option<&aurora_download::CredentialScope> {
+        self.curseforge_cdn_scope.as_ref()
     }
 }
 
