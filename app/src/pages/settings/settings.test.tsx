@@ -346,6 +346,24 @@ describe("设置页：游戏", () => {
     expect(commands.calls).toEqual(["remove:F:\\.minecraft"]);
   });
 
+  it("自定义内存的实例：直接按实例列表的 memory_mb 计数，不再逐个读实例设置", async () => {
+    ipc.overrides.set("list_instances", () => [
+      instanceDto("生存", { memory_mb: 8192 }),
+      instanceDto("创造", { memory_mb: null }),
+      instanceDto("整合包", { memory_mb: 512 }),
+      instanceDto("坏掉的", { memory_mb: null, settings_error: "settings.json 第 1 行格式不对" }),
+    ]);
+    await mount("game");
+    expect(text()).toContain("2 个实例用自定义内存，不受这里影响");
+    expect(callsOf(ipc, "get_instance_settings")).toEqual([]);
+  });
+
+  it("没有实例自定义内存时不显示那一行", async () => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { memory_mb: null })]);
+    await mount("game");
+    expect(text()).not.toContain("个实例用自定义内存");
+  });
+
   it("打开文件夹：游戏目录走 open_folder 的 game_dir，数据目录走注入的宿主实现", async () => {
     ipc.overrides.set("open_folder", () => null);
     await mount("game");
