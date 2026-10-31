@@ -119,6 +119,8 @@ beforeEach(() => {
   );
   // 远程缩略图走 fetch：测试不联网，取图失败按设计回落到代码绘制的图形（只记 warn）
   vi.stubGlobal("fetch", () => Promise.reject(new TypeError("测试环境不联网")));
+  // 构建信息由 vite 注入，vitest 里没有；设置的关于分区要读它
+  vi.stubGlobal("__PETALFALL_BUILD__", { version: "0.1.0", channel: "preview", builtAt: "2026-10-31T00:00:00.000Z" });
   HTMLElement.prototype.scrollTo = function scrollTo(this: HTMLElement) {
     this.scrollTop = 0;
   };
