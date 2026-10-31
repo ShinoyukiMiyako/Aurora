@@ -162,5 +162,10 @@ describe("外壳挂着它", () => {
     await flush();
     expect(document.querySelector("[data-page]")?.getAttribute("data-page")).toBe("home");
     expect(lang()).toBe("en-US");
+    // English 预览期还没有译文：外壳里的文案仍是中文，读屏要按中文念、断行按中文排；浮层根也在外壳里
+    expect(document.querySelector("[data-page]")?.closest("[lang]")?.getAttribute("lang")).toBe("zh-CN");
+    act(() => launcher.actions.toast("info", "已保存"));
+    const toast = [...document.querySelectorAll<HTMLElement>("*")].find((el) => el.children.length === 0 && el.textContent === "已保存");
+    expect(toast?.closest("[lang]")?.getAttribute("lang")).toBe("zh-CN");
   });
 });

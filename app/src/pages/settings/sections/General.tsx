@@ -74,8 +74,9 @@ function LanguageRow() {
   const language = useLauncherSelector(selectLanguage);
   const actions = useLauncherActions();
   const write = useSettingWrite(language, INTERFACE_COPY.language, (next: Language) => actions.updateSettings({ language: next }));
+  // 每个选项的说明用它自己的语言写：English 那句标 en-US，读屏按英文念
   return (
-    <SettingRow title={INTERFACE_COPY.language} description={languageOption(write.value).desc}>
+    <SettingRow title={INTERFACE_COPY.language} description={<span lang={write.value}>{languageOption(write.value).desc}</span>}>
       <Select<Language>
         className={s.select}
         size="sm"

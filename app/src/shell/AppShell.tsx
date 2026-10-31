@@ -36,7 +36,7 @@ import { UpdatePanelMount } from "./UpdatePanel";
 import { useRunner } from "./useRunner";
 import { DropHint } from "./DropHint";
 import { useStartupNotices, type StartupNotice } from "./startup-notices";
-import { useDocumentLang } from "./useDocumentLang";
+import { UI_TEXT_LANG, useDocumentLang } from "./useDocumentLang";
 import { useRevealWindow } from "./window";
 import { useAfterLaunch, useBackgroundAttention, useCloseGuard } from "./window-behavior";
 
@@ -115,7 +115,7 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
     <ChromeProvider value={chrome}>
       <ExternalLinkProvider open={openLink}>
         <RemoteImageProvider resolve={resolveRemoteImage}>
-          <div ref={bindRoot} className={styles.app}>
+          <div ref={bindRoot} className={styles.app} lang={UI_TEXT_LANG}>
             <div className={styles.backdrop} aria-hidden="true">
               <PanoramaBackdrop enabled={appearance.panorama} />
             </div>

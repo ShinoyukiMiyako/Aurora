@@ -89,6 +89,14 @@ function interfaceCard(): HTMLElement {
   return card;
 }
 
+/** 界面卡片里写着这句说明的元素所标的语言；没有任何祖先标语言时为 null。 */
+function descLang(text: string): string | null {
+  const el = [...interfaceCard().querySelectorAll<HTMLElement>("*")].find((e) => e.textContent === text && [...e.children].every((c) => c.textContent !== text));
+  if (el === undefined) throw new Error(`界面卡片里没有这句说明：${text}`);
+  const tagged = el.closest("[lang]");
+  return tagged === null ? null : tagged.getAttribute("lang");
+}
+
 const click = async (el: HTMLElement) => {
   act(() => el.click());
   await flush();
@@ -153,6 +161,8 @@ describe("设置页常规分区：界面语言", () => {
     expect(languageTrigger().textContent).toBe("English");
     expect(interfaceCard().textContent).toContain(EN_DESC);
     expect(interfaceCard().textContent).not.toContain(ZH_DESC);
+    // 每个选项的说明用它自己的语言写：English 那句标 en-US，读屏按英文念，周围的中文照旧按中文
+    expect(descLang(EN_DESC)).toBe("en-US");
 
     await pickLanguage("简体中文");
     expect(callsOf(ipc, "update_config")).toEqual([{ language: "en-US" }, { language: "zh-CN" }]);

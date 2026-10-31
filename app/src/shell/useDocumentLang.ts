@@ -6,6 +6,13 @@ import type { UiLanguage } from "../ipc/config";
 import { useLauncherSelector } from "../state/launcher";
 import type { LauncherState } from "../state/store";
 
+/**
+ * 界面文案实际所用的语言。English 预览期还没有译文，<html lang> 随设置写成 en-US，文案却仍是中文：
+ * 外壳根（浮层根也在其中）标上它，读屏照旧按中文念、断行照旧按中文排，不会用英文语音去读中文。
+ * 某块有了译文时，那一块按设置标语言。
+ */
+export const UI_TEXT_LANG: UiLanguage = "zh-CN";
+
 export function applyDocumentLang(language: UiLanguage, root: HTMLElement = document.documentElement): void {
   root.lang = language;
 }
