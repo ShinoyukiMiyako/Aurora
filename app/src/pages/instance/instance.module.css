@@ -964,6 +964,97 @@
   gap: var(--sk-space-6);
 }
 
+/* 摘要卡里的「参与扫描的文件」与「这次启动时的提醒」：三档都纵向堆叠在文字列里 */
+.crashBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  margin-top: var(--sk-space-8);
+}
+
+.crashBlockTitle {
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.scanList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.scanRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+/* 最长的类型名「JVM 错误日志」也放得下，三行的路径左缘对齐 */
+.scanKind {
+  flex: none;
+  min-width: 6.5em;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+/* 中间省略：目录部分先缩并出省略号，文件名尽量留全 */
+.scanPath {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: var(--sk-r-xs);
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  white-space: nowrap;
+  user-select: text;
+}
+
+.scanDir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.scanFile {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tipPath {
+  overflow-wrap: anywhere;
+}
+
+.warningTitle {
+  margin-inline-end: var(--sk-space-8);
+  color: var(--sk-text);
+  font-weight: var(--sk-w-medium);
+}
+
+.exitCodeLine {
+  display: block;
+  margin-top: var(--sk-space-14);
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  user-select: text;
+}
+
 /* ---------------------------------------------------------------- 确认框正文 */
 
 .confirmBody {

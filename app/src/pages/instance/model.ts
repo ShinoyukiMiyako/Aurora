@@ -1,6 +1,7 @@
 // 实例详情页的派生计算：纯函数，不碰 React 与状态容器，五个标签页与头图共用同一份判断。
 // 输入一律是状态层给出的领域模型与 DTO；页面组件只负责把这里的结论画出来。
 
+import { isForgeBuiltinProvider } from "../../copy/flows";
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskStatus } from "../../domain/types";
@@ -651,12 +652,15 @@ export type CrashFix =
   | { kind: "switch_java"; major: number; path: string }
   | { kind: "download_java"; major: number }
   | { kind: "enable_mod"; fileName: string; name: string }
-  | { kind: "search_dependency"; detail: string }
+  | { kind: "search_dependency"; category: "missing_dependency" | "missing_language_provider"; detail: string }
   | { kind: "find_dependency" }
-  | { kind: "disable_mod"; category: "mixin_failure" | "corrupted_jar"; fileName: string; name: string }
+  /** Mod 要求别的游戏或加载器版本、又对不上唯一一个已装 Mod：去发现页按 detail 找适配的版本，没有 detail 时不带关键词。 */
+  | { kind: "find_mod_version"; detail: string | null }
+  | { kind: "disable_mod"; category: "mixin_failure" | "corrupted_jar" | "game_version_mismatch" | "optifine_incompatible"; fileName: string; name: string }
   | { kind: "keep_latest"; disable: { fileName: string; name: string }[] }
   | { kind: "repair"; category: "native_library_missing" | "corrupted_jar"; changeGameDir: boolean }
-  | { kind: "driver_steps"; javawPath: string | null }
+  /** category 是这份报告里第一条显卡或本地崩溃类线索的类别，三类共用这一条。 */
+  | { kind: "driver_steps"; category: "graphics_driver" | "intel_graphics_driver" | "native_crash"; javawPath: string | null }
   | { kind: "compare_log" };
 
 export interface CrashFixContext {
@@ -683,12 +687,27 @@ function compareModVersion(a: InstalledMod, b: InstalledMod): number {
   return va.localeCompare(vb, undefined, { numeric: true }) || a.modified_ms - b.modified_ms;
 }
 
+/** 文件名或 mod id 里带 optifine 的已启用 Mod。OptiFine 的 jar 不一定带加载器读得出的元数据，所以文件名也要看。 */
+function enabledOptifine(mods: readonly InstalledMod[]): InstalledMod[] {
+  return mods.filter(
+    (m) => m.enabled && (m.file_name.toLowerCase().includes("optifine") || (m.metadata !== null && m.metadata.mod_id.toLowerCase().includes("optifine"))),
+  );
+}
+
 /**
  * 按线索推出的一键尝试，同一类别只出一条（取第一条线索），末尾固定「对照完整日志」。
+ * 不同类别推出同一个动作（比如两条线索都指向停用同一个文件）时只留第一条，键不重复。
  * 一键尝试只改实例设置（可撤销）或建任务（可在任务里取消），不改全局设置、不删除文件。
  */
 export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashFix[] {
   const fixes: CrashFix[] = [];
+  const keys = new Set<string>();
+  const push = (fix: CrashFix) => {
+    const key = crashFixKey(fix);
+    if (keys.has(key)) return;
+    keys.add(key);
+    fixes.push(fix);
+  };
   const seen = new Set<string>();
   for (const clue of report.diagnoses) {
     if (seen.has(clue.category)) continue;
@@ -696,12 +715,12 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
     switch (clue.category) {
       case "out_of_memory": {
         if (isHeapReserveFailure(clue.matched)) {
-          if (report.java !== null && !report.java.is_64bit) fixes.push({ kind: "use_64bit_java" });
-          else fixes.push({ kind: "lower_memory", currentMb: ctx.memoryMb, targetMb: memoryLowerTarget(ctx.memoryMb) });
+          if (report.java !== null && !report.java.is_64bit) push({ kind: "use_64bit_java" });
+          else push({ kind: "lower_memory", currentMb: ctx.memoryMb, targetMb: memoryLowerTarget(ctx.memoryMb) });
           break;
         }
         const target = memoryTarget(ctx.memoryMb, ctx.physicalMb);
-        fixes.push(
+        push(
           target.kind === "raise"
             ? { kind: "raise_memory", currentMb: ctx.memoryMb, targetMb: target.targetMb, followsGlobal: ctx.followsGlobal }
             : { kind: "memory_at_cap", totalMb: ctx.physicalMb },
@@ -713,25 +732,40 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         const major = fromDetail === null ? ctx.requiredJava : fromDetail;
         if (major === null) break;
         const runtime = bestLocalRuntime(ctx.runtimes, major);
-        fixes.push(runtime === null ? { kind: "download_java", major } : { kind: "switch_java", major, path: runtime.path });
+        push(runtime === null ? { kind: "download_java", major } : { kind: "switch_java", major, path: runtime.path });
         break;
       }
       case "missing_dependency": {
         if (clue.detail === null) {
-          fixes.push({ kind: "find_dependency" });
+          push({ kind: "find_dependency" });
           break;
         }
         const installed = modsByDetail(clue.detail, ctx.mods);
         const disabled = installed.find((m) => !m.enabled);
-        if (disabled !== undefined) fixes.push({ kind: "enable_mod", fileName: disabled.file_name, name: modName(disabled) });
-        else if (installed.length === 0) fixes.push({ kind: "search_dependency", detail: clue.detail });
+        if (disabled !== undefined) push({ kind: "enable_mod", fileName: disabled.file_name, name: modName(disabled) });
+        else if (installed.length === 0) push({ kind: "search_dependency", category: "missing_dependency", detail: clue.detail });
+        break;
+      }
+      case "missing_language_provider":
+        // Forge 自带的语言支持装不上：缺它说明 Mod 不是给这个版本的 Forge 做的，没有可搜的东西
+        if (clue.detail !== null && !isForgeBuiltinProvider(clue.detail)) push({ kind: "search_dependency", category: "missing_language_provider", detail: clue.detail });
+        break;
+      case "game_version_mismatch": {
+        const hits = clue.detail === null ? [] : modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
+        if (hits.length === 1) push({ kind: "disable_mod", category: "game_version_mismatch", fileName: hits[0].file_name, name: modName(hits[0]) });
+        else push({ kind: "find_mod_version", detail: clue.detail });
+        break;
+      }
+      case "optifine_incompatible": {
+        const hits = enabledOptifine(ctx.mods);
+        if (hits.length === 1) push({ kind: "disable_mod", category: "optifine_incompatible", fileName: hits[0].file_name, name: modName(hits[0]) });
         break;
       }
       case "mixin_failure": {
         // 对应到多个或对应不上时不出按钮，交给「日志指向的 Mod」逐个开关
         if (clue.detail === null) break;
         const hits = modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
-        if (hits.length === 1) fixes.push({ kind: "disable_mod", category: "mixin_failure", fileName: hits[0].file_name, name: modName(hits[0]) });
+        if (hits.length === 1) push({ kind: "disable_mod", category: "mixin_failure", fileName: hits[0].file_name, name: modName(hits[0]) });
         break;
       }
       case "duplicate_mod": {
@@ -739,19 +773,22 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         const copies = modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
         if (copies.length < 2) break;
         const keep = copies.reduce((a, b) => (compareModVersion(b, a) > 0 ? b : a));
-        fixes.push({ kind: "keep_latest", disable: copies.filter((m) => m !== keep).map((m) => ({ fileName: m.file_name, name: modName(m) })) });
+        push({ kind: "keep_latest", disable: copies.filter((m) => m !== keep).map((m) => ({ fileName: m.file_name, name: modName(m) })) });
         break;
       }
       case "native_library_missing":
-        fixes.push({ kind: "repair", category: "native_library_missing", changeGameDir: report.warnings.includes("game_path") });
+        push({ kind: "repair", category: "native_library_missing", changeGameDir: report.warnings.includes("game_path") });
         break;
       case "graphics_driver":
-        fixes.push({ kind: "driver_steps", javawPath: report.java === null ? null : javawOf(report.java.path) });
+      case "intel_graphics_driver":
+      case "native_crash":
+        // 三类的处理办法相同，键都是 driver_steps：只留第一条出现的类别
+        push({ kind: "driver_steps", category: clue.category, javawPath: report.java === null ? null : javawOf(report.java.path) });
         break;
       case "corrupted_jar": {
         const mod = corruptedModFile(clue.matched, ctx.mods);
-        if (mod !== null && mod.enabled) fixes.push({ kind: "disable_mod", category: "corrupted_jar", fileName: mod.file_name, name: modName(mod) });
-        else fixes.push({ kind: "repair", category: "corrupted_jar", changeGameDir: false });
+        if (mod !== null && mod.enabled) push({ kind: "disable_mod", category: "corrupted_jar", fileName: mod.file_name, name: modName(mod) });
+        else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false });
         break;
       }
       default:
@@ -772,7 +809,9 @@ export function crashFixKey(fix: CrashFix): string {
     case "disable_mod":
       return `${fix.kind}:${fix.fileName}`;
     case "search_dependency":
-      return `${fix.kind}:${fix.detail}`;
+      return `${fix.kind}:${fix.detail.toLowerCase()}`;
+    case "find_mod_version":
+      return fix.detail === null ? fix.kind : `${fix.kind}:${fix.detail.toLowerCase()}`;
     case "repair":
       return `${fix.kind}:${fix.category}`;
     default:
