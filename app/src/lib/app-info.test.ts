@@ -23,10 +23,17 @@ describe("仓库与协议", () => {
     expect(ISSUES_URL).toBe(`${REPO_URL}/issues`);
   });
 
-  it("开源协议与仓库根目录的 LICENSE 一致：AGPL 第 3 版", () => {
+  it("开源协议与仓库根目录的 LICENSE 一致：AGPL 第 3 版，SPDX 写作 -only", () => {
     const license = readFileSync(join(REPO_ROOT, "LICENSE"), "utf8");
     expect(license).toMatch(/^\s*GNU AFFERO GENERAL PUBLIC LICENSE\s+Version 3,/);
-    expect(APP_LICENSE).toBe("AGPL-3.0");
+    expect(APP_LICENSE).toBe("AGPL-3.0-only");
+  });
+
+  it("README 的许可一节只声明第 3 版，没有「或任何更高版本」的授权", () => {
+    const readme = readFileSync(join(REPO_ROOT, "README.md"), "utf8");
+    const section = readme.slice(readme.indexOf("## 许可"));
+    expect(section).toContain("GNU Affero General Public License v3.0");
+    expect(section).not.toMatch(/later|更高版本|or-later/i);
   });
 });
 

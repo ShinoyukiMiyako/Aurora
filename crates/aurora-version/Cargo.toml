@@ -2,6 +2,7 @@
 name = "aurora-version"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 # 纯解析 crate：只需 serde 派生 + serde_json 落地反序列化。

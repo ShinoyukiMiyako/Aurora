@@ -2,6 +2,7 @@
 name = "aurora-base"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 # 统一 HTTP 客户端工厂：禁用 native-tls 走 rustls，规避 Windows schannel 差异。

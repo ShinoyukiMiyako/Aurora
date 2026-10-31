@@ -2,6 +2,7 @@
 name = "aurora-modpack"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 # 只取游戏目录内启动器元数据目录名：整合包不得写进这个目录。

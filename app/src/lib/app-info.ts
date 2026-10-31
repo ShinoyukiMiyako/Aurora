@@ -18,8 +18,8 @@ export const APP_SLUG = "petalfall";
 /** 源代码仓库。问题反馈地址由它派生，仓库改名只改这一处。 */
 export const REPO_URL = "https://github.com/ShinoyukiMiyako/Aurora";
 export const ISSUES_URL = `${REPO_URL}/issues`;
-/** 开源协议，与仓库根目录的 LICENSE 一致。 */
-export const APP_LICENSE = "AGPL-3.0";
+/** 开源协议的 SPDX 写法，与仓库根目录的 LICENSE 一致：只授权第 3 版，没有「或任何更高版本」，故为 -only。Rust 侧的 Cargo 元数据由一致性测试钉住同值。 */
+export const APP_LICENSE = "AGPL-3.0-only";
 
 /** 版本号、发布通道与构建时间。只有经 vite 构建或开发服务器加载的代码里才有；没注入就是构建配置坏了，直接报错。 */
 export function buildInfo(): BuildInfo {
