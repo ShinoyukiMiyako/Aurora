@@ -9,7 +9,8 @@
 use aurora_core::modversions::ModVersionList;
 use aurora_core::{
     is_mod_file_busy, Aurora, BaseError, CoreError, EventSink, InstallPlan, InstalledSource,
-    InstanceMatch, InstanceMod, ModLoader, ModVersionInfo, Platform, UpdateCandidate,
+    InstanceMatch, InstanceMod, ModLoader, ModVersionInfo, Platform, StarterGroup,
+    StarterMissingReason, StarterMods, UpdateCandidate,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -316,6 +317,103 @@ pub async fn plan_install(
     Ok(aurora
         .plan_install(&version_id, platform, &project_id, &mod_version_id)
         .await?)
+}
+
+/// 开局组合里一项能装的 Mod 与挑中的版本。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StarterModDto {
+    pub group: StarterGroup,
+    pub project_id: &'static str,
+    pub name: &'static str,
+    pub version: ModVersionInfo,
+}
+
+/// 开局组合里一项装不上的 Mod。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StarterMissingDto {
+    pub group: StarterGroup,
+    pub project_id: &'static str,
+    pub name: &'static str,
+    pub reason: StarterMissingReason,
+}
+
+/// 某加载器与 MC 版本的开局组合，两张表都按开局表的顺序，前置 API 在最前。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StarterModsDto {
+    pub loader: ModLoader,
+    pub mc_version: String,
+    pub available: Vec<StarterModDto>,
+    pub missing: Vec<StarterMissingDto>,
+}
+
+fn starter_mods_dto(loader: ModLoader, mc_version: String, mods: StarterMods) -> StarterModsDto {
+    StarterModsDto {
+        loader,
+        mc_version,
+        available: mods
+            .available
+            .into_iter()
+            .map(|m| StarterModDto {
+                group: m.entry.group,
+                project_id: m.entry.project_id,
+                name: m.entry.name,
+                version: m.version,
+            })
+            .collect(),
+        missing: mods
+            .missing
+            .into_iter()
+            .map(|m| StarterMissingDto {
+                group: m.entry.group,
+                project_id: m.entry.project_id,
+                name: m.entry.name,
+                reason: m.reason,
+            })
+            .collect(),
+    }
+}
+
+/// 新建实例确认步的开局 Mod：按加载器的开局表逐项查适配 `mc_version` 的版本，列出能装的与装不上的。
+///
+/// 加载器按 serde 名解析，认不出报 `invalid_argument`（detail.field = loader，reason = unknown），
+/// LiteLoader 没有开局表（reason = unsupported）；MC 版本去掉首尾空白后为空同样报错
+/// （field = mc_version，reason = empty）。某个工程在平台上不存在时只把它列为缺项，其他失败整体报错。
+#[tauri::command]
+pub async fn starter_mods(
+    loader: String,
+    mc_version: String,
+    facade: State<'_, Facade>,
+) -> Result<StarterModsDto, CommandError> {
+    starter_mods_with(&facade, &loader, &mc_version).await
+}
+
+pub(crate) async fn starter_mods_with(
+    facade: &Facade,
+    loader: &str,
+    mc_version: &str,
+) -> Result<StarterModsDto, CommandError> {
+    let parsed: ModLoader =
+        serde_json::from_value(Value::String(loader.to_owned())).map_err(|_| {
+            CommandError::invalid_argument(format!("未知加载器 {loader}"))
+                .with_detail(json!({ "field": "loader", "reason": "unknown" }))
+        })?;
+    if parsed == ModLoader::LiteLoader {
+        return Err(
+            CommandError::invalid_argument("LiteLoader 没有开局 Mod 组合")
+                .with_detail(json!({ "field": "loader", "reason": "unsupported" })),
+        );
+    }
+    let mc_version = mc_version.trim();
+    if mc_version.is_empty() {
+        return Err(CommandError::invalid_argument("mc_version 不能为空")
+            .with_detail(json!({ "field": "mc_version", "reason": "empty" })));
+    }
+    let aurora = facade.snapshot().await;
+    let mods = aurora
+        .starter_mods(parsed, mc_version)
+        .await
+        .map_err(mods_error)?;
+    Ok(starter_mods_dto(parsed, mc_version.to_owned(), mods))
 }
 
 /// 门面错误 -> 命令错误；文件占用单独给 [`MOD_FILE_BUSY`]，正文取门面给出的那句中文原因。
@@ -725,5 +823,122 @@ mod tests {
         assert_eq!(all[1]["error"]["code"], code::CONFIG_INVALID);
         assert_eq!(all.as_array().unwrap().len(), 2);
         assert!(facade.is_unlocked());
+    }
+
+    fn starter_facade(root: &Path, modrinth: &str) -> Facade {
+        let aurora = Aurora::open(
+            AuroraConfig::default(),
+            root.to_path_buf(),
+            root.join("config.json"),
+        )
+        .unwrap()
+        .with_platform_bases(modrinth, modrinth);
+        Facade::new(aurora)
+    }
+
+    /// 参数在联网之前校验：认不出的加载器、LiteLoader 与空的 MC 版本都报 invalid_argument。
+    #[tokio::test]
+    async fn starter_mods_rejects_bad_arguments_before_any_request() {
+        let server = wiremock::MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let facade = starter_facade(tmp.path(), &server.uri());
+        for (loader, mc, field, reason) in [
+            ("liteloader", "1.12.2", "loader", "unsupported"),
+            ("vanilla", "1.21.1", "loader", "unknown"),
+            ("Fabric", "1.21.1", "loader", "unknown"),
+            ("", "1.21.1", "loader", "unknown"),
+            ("fabric", "", "mc_version", "empty"),
+            ("neoforge", " \t ", "mc_version", "empty"),
+        ] {
+            let err = starter_mods_with(&facade, loader, mc).await.unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "{loader:?} {mc:?}");
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["field"], field, "{loader:?} {mc:?}");
+            assert_eq!(detail["reason"], reason, "{loader:?} {mc:?}");
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn starter_mods_lists_available_and_missing_in_table_order() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        for (project, versions) in [
+            ("P7dR8mSH", vec!["fapi"]),
+            ("AANobbMI", vec!["sodium"]),
+            ("gvQqBUqZ", vec!["lithium"]),
+            ("uXXizFIs", vec![]),
+            ("nmDcB62a", vec!["modernfix"]),
+        ] {
+            let body: Vec<Value> = versions
+                .iter()
+                .map(|id| {
+                    json!({
+                        "id": id, "project_id": project, "name": id, "version_number": "1.0.0",
+                        "version_type": "release", "date_published": "2026-08-01T00:00:00Z",
+                        "game_versions": ["1.21.1"], "loaders": ["neoforge"],
+                        "files": [{"hashes": {"sha1": "00"}, "url": format!("https://cdn/{id}.jar"),
+                            "filename": format!("{id}.jar"), "primary": true, "size": 64}]
+                    })
+                })
+                .collect();
+            Mock::given(method("GET"))
+                .and(path(format!("/project/{project}/version")))
+                .and(query_param("loaders", r#"["neoforge"]"#))
+                .and(query_param("game_versions", r#"["1.21.1"]"#))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let facade = starter_facade(tmp.path(), &server.uri());
+
+        let dto = starter_mods_with(&facade, "neoforge", " 1.21.1 ")
+            .await
+            .unwrap();
+        let wire = serde_json::to_value(&dto).unwrap();
+        assert_eq!(wire["loader"], "neoforge");
+        assert_eq!(wire["mc_version"], "1.21.1");
+        let available: Vec<(&str, &str, &str)> = dto
+            .available
+            .iter()
+            .map(|m| (m.project_id, m.name, m.version.version_id.as_str()))
+            .collect();
+        assert_eq!(
+            available,
+            vec![
+                ("AANobbMI", "Sodium", "sodium"),
+                ("gvQqBUqZ", "Lithium", "lithium"),
+                ("nmDcB62a", "ModernFix", "modernfix"),
+            ]
+        );
+        assert_eq!(wire["available"][0]["group"], "performance");
+        assert_eq!(wire["available"][0]["version"]["file_name"], "sodium.jar");
+        assert_eq!(
+            wire["missing"],
+            json!([{
+                "group": "performance", "project_id": "uXXizFIs", "name": "FerriteCore",
+                "reason": "no_version"
+            }])
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    }
+
+    /// 平台连不上时整体报错，并照约定在 detail.network 里标明是连接失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn starter_mods_marks_network_failures() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let tmp = tempfile::tempdir().unwrap();
+        let facade = starter_facade(tmp.path(), &format!("http://127.0.0.1:{port}"));
+
+        let err = starter_mods_with(&facade, "forge", "1.21.1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::MOD_PLATFORM_FAILED);
+        assert_eq!(err.detail.unwrap()["network"], json!("connect"));
     }
 }

@@ -36,7 +36,7 @@ use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
 use crate::install::LoaderChoice;
-use crate::instance_install::{MarkerSettlement, now_millis};
+use crate::instance_install::{MarkerSettlement, now_millis, template_stage};
 use crate::resources::{curseforge_download_url, is_safe_file_name};
 
 /// 实例名的最大字符数：界面上要完整显示，路径也不宜过长。
@@ -560,6 +560,15 @@ impl Aurora {
                 aurora_modpack::extract_overrides(&pack, &entries, &dest, &is_cancelled)
             })
             .await??;
+        }
+
+        // 覆盖文件之后才补：包里自带的 options.txt 是作者调好的，按只补缺的规则原样留着，缺的服务器列表
+        // 之类由默认设置补上。导入的实例一律隔离，套不套只看配置这一道闸。失败与其他步骤一样让导入失败。
+        let template = self.apply_template(name).await?;
+        if let crate::template::TemplateOutcome::Applied { copied, .. } = &template
+            && !copied.is_empty()
+        {
+            emit(events, CoreEvent::stage(template_stage(&template)));
         }
 
         let (platform, project_id, version_id) = match source {
@@ -1294,6 +1303,84 @@ mod tests {
             stages.iter().any(|s| s == "整合包已导入为实例 我的整合包"),
             "{stages:?}"
         );
+    }
+
+    /// 包里自带的 options.txt 压过默认设置，包里没有的服务器列表由默认设置补上；配置里关掉时一个都不补。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn imported_instance_gets_missing_files_from_the_template() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"lang:en_us")],
+        );
+        let aurora = aurora(tmp.path(), &server);
+        let servers: Vec<u8> = (0..fastrand::usize(1..2048))
+            .map(|_| fastrand::u8(..))
+            .collect();
+        let template = aurora.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+        std::fs::write(template.join("servers.dat"), &servers).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = aurora
+            .install_modpack(
+                &ModpackSource::File { path: pack.clone() },
+                Some("带模板"),
+                "task-t",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+        let dir = outcome.version_dir;
+        assert_eq!(
+            std::fs::read(dir.join("options.txt")).unwrap(),
+            b"lang:en_us"
+        );
+        assert_eq!(std::fs::read(dir.join("servers.dat")).unwrap(), servers);
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages
+                .iter()
+                .any(|s| s == "沿用默认设置：补上 servers.dat（已有的 options.txt 保留不动）"),
+            "{stages:?}"
+        );
+
+        let mut off = Aurora::for_test(
+            AuroraConfig {
+                new_instance_template: false,
+                ..AuroraConfig::default()
+            },
+            tmp.path().join("data"),
+            tmp.path().join("mc"),
+        )
+        .with_manifest_url(format!("{}/manifest.json", server.uri()));
+        off.set_isolation_policy(IsolationPolicy::Disabled);
+        let outcome = off
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("不带模板"),
+                "task-u",
+                None,
+            )
+            .await
+            .unwrap();
+        let dir = outcome.version_dir;
+        assert_eq!(
+            std::fs::read(dir.join("options.txt")).unwrap(),
+            b"lang:en_us"
+        );
+        assert!(!dir.join("servers.dat").exists());
     }
 
     /// 同名旧实例在启动器之外被删掉后，名字下的游玩记录还留着；导入同名整合包得到的是一个没玩过的新实例。
