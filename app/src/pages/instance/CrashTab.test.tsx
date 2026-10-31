@@ -71,7 +71,7 @@ async function open(tab: InstanceTab) {
 
 /** 在假后端里跑一局，以 exitCode 崩掉；崩溃报告由 mock 按会话日志与退出码生成。 */
 async function crashWith(exitCode: number) {
-  await launchGame({ taskId: `t-${exitCode}`, versionId: ID, accountUuid: null, offlineName: "Steve" });
+  await launchGame({ taskId: `t-${exitCode}`, versionId: ID, accountUuid: null, offlineName: "Steve", offlineFallback: false });
   vi.setSystemTime(NOW - 60_000);
   endMockGame(exitCode, 30 * 60_000);
   vi.setSystemTime(NOW);
