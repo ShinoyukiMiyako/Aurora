@@ -14,10 +14,12 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use aurora_download::SourcePlan;
 use serde::Deserialize;
 
 use crate::context::InstallContext;
 use crate::error::{Error, Result, io_err, zip_err};
+use crate::net;
 use crate::plan;
 use aurora_version::VersionJson;
 
@@ -269,11 +271,27 @@ pub fn forge_installer_url(mc_version: &str, forge_version: &str) -> String {
     )
 }
 
-/// 构造 NeoForge 官方 installer 的下载 URL（现代 net.neoforged:neoforge 坐标）。
+/// 构造 NeoForge 官方 installer 的下载 URL。1.20.1 的构建（47.x）沿用 Forge 坐标
+/// `net.neoforged:forge:1.20.1-<版本>`，其余走 `net.neoforged:neoforge:<版本>`。
 pub fn neoforge_installer_url(neoforge_version: &str) -> String {
+    if neoforge_version.starts_with(crate::forge_versions::NEOFORGE_LEGACY_PREFIX) {
+        return format!(
+            "https://maven.neoforged.net/releases/net/neoforged/forge/1.20.1-{neoforge_version}/forge-1.20.1-{neoforge_version}-installer.jar"
+        );
+    }
     format!(
         "https://maven.neoforged.net/releases/net/neoforged/neoforge/{neoforge_version}/neoforge-{neoforge_version}-installer.jar"
     )
+}
+
+/// 安装产物落在哪里。
+#[derive(Debug, Clone, Copy)]
+enum Target<'t> {
+    /// 传统布局：版本 JSON 写到 `versions/<forge 版本 id>/`，处理器读原版目录里的客户端 jar。
+    Standalone,
+    /// 按实例安装：版本 JSON 不落盘（交给调用方与原版合并后写进实例目录），处理器读实例目录里的
+    /// 客户端 jar，临时文件也放在实例目录下。
+    Instance(&'t str),
 }
 
 /// Forge/NeoForge 安装器。需注入 java 可执行文件路径以运行处理器。
@@ -281,6 +299,7 @@ pub struct ForgeInstaller<'a> {
     cx: InstallContext<'a>,
     java_path: PathBuf,
     side: String,
+    sources: Option<SourcePlan>,
 }
 
 impl<'a> ForgeInstaller<'a> {
@@ -290,41 +309,114 @@ impl<'a> ForgeInstaller<'a> {
             cx,
             java_path: java_path.into(),
             side: "client".to_owned(),
+            sources: None,
         }
     }
 
-    /// 下载 installer 到缓存目录再安装。
+    /// installer 旁的 `.sha1` 校验文件按此方案在官方与镜像之间兜底抓取。
+    pub fn with_sources(mut self, sources: SourcePlan) -> Self {
+        self.sources = Some(sources);
+        self
+    }
+
+    /// 下载 installer 到缓存目录再安装，版本 JSON 写到 `versions/<forge 版本 id>/`。
     pub async fn install(&self, installer_url: &str) -> Result<ForgeSummary> {
+        let installer = self.download_installer(installer_url).await?;
+        let (_, summary) = self.install_from(&installer, Target::Standalone).await?;
+        self.discard_installer(&installer).await;
+        Ok(summary)
+    }
+
+    /// 为实例 `instance_id` 安装：处理器读实例目录里已就绪的客户端 jar；返回 installer 内嵌的
+    /// 版本 JSON（带 inheritsFrom，尚未与原版合并）与安装计数，版本 JSON 由调用方合并后落盘。
+    pub async fn install_for_instance(
+        &self,
+        installer_url: &str,
+        instance_id: &str,
+    ) -> Result<(VersionJson, ForgeSummary)> {
+        let installer = self.download_installer(installer_url).await?;
+        let outcome = self
+            .install_from(&installer, Target::Instance(instance_id))
+            .await?;
+        self.discard_installer(&installer).await;
+        Ok(outcome)
+    }
+
+    /// 从已下载的 installer jar 安装（传统布局）。
+    pub async fn install_from_installer(&self, installer: &Path) -> Result<ForgeSummary> {
+        Ok(self.install_from(installer, Target::Standalone).await?.1)
+    }
+
+    /// installer 下到 `<根>/.<slug>-cache/<文件名>`，带 Maven 侧 `.sha1` 校验：同一版本重试安装时
+    /// 校验通过的旧文件直接复用，不再重下几十 MB。
+    async fn download_installer(&self, installer_url: &str) -> Result<PathBuf> {
         let file_name = installer_url.rsplit('/').next().unwrap_or("installer.jar");
-        let dest = self
-            .cx
+        let dest = self.installer_cache_dir().join(file_name);
+        let mut task = aurora_download::DownloadTask::new(installer_url, dest.clone());
+        match self.installer_sha1(installer_url).await {
+            Ok(sha1) => task = task.with_sha1(sha1),
+            // 拿不到校验值只影响复用：没有 sha1 时下载引擎每次都重下，安装本身照常进行。
+            Err(err) => {
+                tracing::warn!(url = installer_url, error = %err, "取不到 installer 的 sha1，本次不复用缓存")
+            }
+        }
+        self.cx.run_batch(vec![task], "installer", None).await?;
+        Ok(dest)
+    }
+
+    fn installer_cache_dir(&self) -> PathBuf {
+        self.cx
             .layout
             .root()
             .join(concat!(".", aurora_base::app_slug!(), "-cache"))
-            .join(file_name);
-        self.cx
-            .run_batch(
-                vec![aurora_download::DownloadTask::new(installer_url, dest.clone())],
-                "installer",
-                None,
-            )
-            .await?;
-        self.install_from_installer(&dest).await
     }
 
-    /// 从已下载的 installer jar 安装。
-    pub async fn install_from_installer(&self, installer: &Path) -> Result<ForgeSummary> {
+    async fn installer_sha1(&self, installer_url: &str) -> Result<String> {
+        let bytes = net::get_bytes_from(
+            self.cx.client,
+            self.sources.as_ref(),
+            &format!("{installer_url}.sha1"),
+            self.cx.policy,
+        )
+        .await?;
+        let text = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
+            reason: format!("installer 的 .sha1 不是文本: {err}"),
+        })?;
+        let sha1 = text
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if sha1.len() != 40 || !sha1.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::UnsupportedInstallProfile {
+                reason: format!("installer 的 .sha1 内容不是 sha1：{text}"),
+            });
+        }
+        Ok(sha1)
+    }
+
+    /// 安装成功后删掉 installer 与空了的缓存目录。删不掉不影响安装结果，只记日志。
+    async fn discard_installer(&self, installer: &Path) {
+        if let Err(err) = tokio::fs::remove_file(installer).await {
+            tracing::warn!(path = %installer.display(), %err, "删除已用完的 installer 失败");
+            return;
+        }
+        // 目录里还有别的 installer（并行安装）时 remove_dir 失败，正是想要的结果。
+        let _ = tokio::fs::remove_dir(self.installer_cache_dir()).await;
+    }
+
+    async fn install_from(
+        &self,
+        installer: &Path,
+        target: Target<'_>,
+    ) -> Result<(VersionJson, ForgeSummary)> {
         let profile_bytes = read_zip_entry_async(installer, "install_profile.json").await?;
-        let profile: InstallProfile =
-            serde_json::from_slice(&profile_bytes).map_err(|source| Error::Json {
-                context: "install_profile.json".to_owned(),
-                source,
-            })?;
+        let profile: InstallProfile = net::parse_json(&profile_bytes, "install_profile.json")?;
 
         if profile.install.is_some() && profile.processors.is_empty() {
-            self.install_legacy(installer, &profile).await
+            self.install_legacy(installer, &profile, target).await
         } else if profile.json.is_some() {
-            self.install_modern(installer, profile).await
+            self.install_modern(installer, profile, target).await
         } else {
             Err(Error::UnsupportedInstallProfile {
                 reason: "既无 processors/json 也无 legacy install 字段".to_owned(),
@@ -337,7 +429,8 @@ impl<'a> ForgeInstaller<'a> {
         &self,
         installer: &Path,
         profile: InstallProfile,
-    ) -> Result<ForgeSummary> {
+        target: Target<'_>,
+    ) -> Result<(VersionJson, ForgeSummary)> {
         let version_id = profile.version.clone().ok_or_else(|| {
             Error::UnsupportedInstallProfile {
                 reason: "install_profile 缺 version".to_owned(),
@@ -350,12 +443,14 @@ impl<'a> ForgeInstaller<'a> {
         })?;
         let json_entry = profile.json.clone().expect("已判定 json 存在");
 
-        // 解出内联 version.json 并原样落盘。
+        // 解出内联 version.json；传统布局原样落盘，按实例安装交给调用方。
         let version_bytes =
             read_zip_entry_async(installer, json_entry.trim_start_matches('/')).await?;
-        let embedded = VersionJson::from_json_str(&String::from_utf8_lossy(&version_bytes))?;
-        let json_path = self.cx.layout.version_json(&version_id);
-        aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
+        let embedded: VersionJson = net::parse_json(&version_bytes, "Forge version.json")?;
+        if let Target::Standalone = target {
+            let json_path = self.cx.layout.version_json(&version_id);
+            aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
+        }
 
         // 下载 install_profile 与 version.json 声明的库（本地产出的通用 jar 无 url，自动跳过）。
         let mut libs = profile.libraries.clone();
@@ -364,16 +459,24 @@ impl<'a> ForgeInstaller<'a> {
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
         // 解出 data 表里 `/jar 内路径` 型取值到独立临时目录。
-        let tmp_dir = self
-            .cx
-            .layout
-            .version_dir(&version_id)
-            .join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
-        let extracted =
-            extract_data_files(installer, &profile.data, &self.side, &tmp_dir).await?;
+        let scratch_owner = match target {
+            Target::Standalone => version_id.as_str(),
+            Target::Instance(id) => id,
+        };
+        let tmp_dir = self.cx.layout.version_dir(scratch_owner).join(concat!(
+            ".",
+            aurora_base::app_slug!(),
+            "-forge-tmp"
+        ));
+        let extracted = extract_data_files(installer, &profile.data, &self.side, &tmp_dir).await?;
 
         // 组装占位符表：解析后的 data + 安装器注入的特殊变量。
-        let values = self.build_values(&profile, &minecraft, installer, extracted)?;
+        let minecraft_jar = match target {
+            Target::Standalone => self.cx.layout.version_jar(&minecraft),
+            Target::Instance(id) => self.cx.layout.version_jar(id),
+        };
+        let values =
+            self.build_values(&profile, &minecraft, &minecraft_jar, installer, extracted)?;
 
         // 逐个处理器执行。
         let mut ran = 0usize;
@@ -390,11 +493,14 @@ impl<'a> ForgeInstaller<'a> {
             tracing::debug!(dir = %tmp_dir.display(), %err, "清理 Forge 安装临时目录失败");
         }
 
-        Ok(ForgeSummary {
-            id: version_id,
-            libraries,
-            processors: ran,
-        })
+        Ok((
+            embedded,
+            ForgeSummary {
+                id: version_id,
+                libraries,
+                processors: ran,
+            },
+        ))
     }
 
     /// 组装处理器占位符表。
@@ -402,6 +508,7 @@ impl<'a> ForgeInstaller<'a> {
         &self,
         profile: &InstallProfile,
         minecraft: &str,
+        minecraft_jar: &Path,
         installer: &Path,
         extracted: BTreeMap<String, PathBuf>,
     ) -> Result<BTreeMap<String, String>> {
@@ -412,13 +519,12 @@ impl<'a> ForgeInstaller<'a> {
         };
         values.insert("SIDE".to_owned(), self.side.clone());
         values.insert("MINECRAFT_VERSION".to_owned(), minecraft.to_owned());
-        insert_path(&mut values, "MINECRAFT_JAR", layout.version_jar(minecraft));
+        insert_path(&mut values, "MINECRAFT_JAR", minecraft_jar.to_path_buf());
         insert_path(&mut values, "ROOT", layout.root().to_path_buf());
         insert_path(&mut values, "INSTALLER", installer.to_path_buf());
         insert_path(&mut values, "LIBRARY_DIR", layout.libraries_dir());
         Ok(values)
     }
-
     /// 执行单个处理器：读 Main-Class、组 classpath、替换参数、调 java、校验 outputs。
     async fn run_processor(
         &self,
@@ -474,12 +580,13 @@ impl<'a> ForgeInstaller<'a> {
         Ok(())
     }
 
-    /// legacy 安装：versionInfo 落盘、解出通用 jar、下 versionInfo 里的库。
+    /// legacy 安装：versionInfo 落盘（传统布局）、解出通用 jar、下 versionInfo 里的库。
     async fn install_legacy(
         &self,
         installer: &Path,
         profile: &InstallProfile,
-    ) -> Result<ForgeSummary> {
+        target: Target<'_>,
+    ) -> Result<(VersionJson, ForgeSummary)> {
         let version_info = profile.version_info.clone().ok_or_else(|| {
             Error::UnsupportedInstallProfile {
                 reason: "legacy install 缺 versionInfo".to_owned(),
@@ -495,7 +602,9 @@ impl<'a> ForgeInstaller<'a> {
                 source,
             })?;
         let id = embedded.id.clone();
-        aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
+        if let Target::Standalone = target {
+            aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
+        }
 
         // 从 installer zip 解出通用 jar 到其 maven 落点。
         let install = profile.install.as_ref().expect("已判定 install 存在");
@@ -521,11 +630,14 @@ impl<'a> ForgeInstaller<'a> {
         let tasks = plan::tasks_for_libraries(&embedded.libraries, self.cx.runtime, self.cx.layout)?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
-        Ok(ForgeSummary {
-            id,
-            libraries,
-            processors: 0,
-        })
+        Ok((
+            embedded,
+            ForgeSummary {
+                id,
+                libraries,
+                processors: 0,
+            },
+        ))
     }
 }
 
@@ -732,6 +844,10 @@ mod tests {
             neoforge_installer_url("21.0.167"),
             "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.0.167/neoforge-21.0.167-installer.jar"
         );
+        assert_eq!(
+            neoforge_installer_url("47.1.106"),
+            "https://maven.neoforged.net/releases/net/neoforged/forge/1.20.1-47.1.106/forge-1.20.1-47.1.106-installer.jar"
+        );
     }
 
     #[test]
@@ -808,5 +924,168 @@ mod tests {
                 mojmaps_path,
             ]
         );
+    }
+
+    /// 造一个 legacy 风格的 installer：install_profile 声明通用 jar 坐标与 zip 内路径，
+    /// versionInfo 内联版本 JSON（inheritsFrom 原版）。无处理器，不需要 java。
+    fn legacy_installer_bytes() -> Vec<u8> {
+        use std::io::Write;
+        let profile = serde_json::json!({
+            "install": {
+                "path": "net.minecraftforge:forge:1.12.2-14.23.5.2860",
+                "filePath": "/forge-universal.jar"
+            },
+            "versionInfo": {
+                "id": "1.12.2-forge-14.23.5.2860",
+                "inheritsFrom": "1.12.2",
+                "mainClass": "net.minecraft.launchwrapper.Launch",
+                "libraries": [{ "name": "net.minecraftforge:forge:1.12.2-14.23.5.2860" }]
+            }
+        });
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            writer.start_file("install_profile.json", opts).unwrap();
+            writer
+                .write_all(serde_json::to_string(&profile).unwrap().as_bytes())
+                .unwrap();
+            writer.start_file("forge-universal.jar", opts).unwrap();
+            writer.write_all(b"universal-jar").unwrap();
+            writer.finish().unwrap();
+        }
+        buf
+    }
+
+    fn sha1_hex(bytes: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        base16ct::lower::encode_string(&Sha1::digest(bytes))
+    }
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        client: reqwest::Client,
+        pool: aurora_download::DownloadPool,
+        layout: GameLayout,
+        runtime: aurora_version::RuntimeContext,
+        policy: aurora_base::retry::RetryPolicy,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = aurora_download::DownloadPool::new(
+            aurora_download::Downloader::with_defaults(client.clone()),
+            2,
+        );
+        Fixture {
+            layout: GameLayout::new(&root),
+            root,
+            _dir: dir,
+            client,
+            pool,
+            runtime: aurora_version::RuntimeContext::new(
+                aurora_version::OsName::Windows,
+                "x86_64",
+                64,
+            ),
+            policy: aurora_base::retry::RetryPolicy {
+                max_attempts: 1,
+                initial_delay: std::time::Duration::from_millis(1),
+                max_delay: std::time::Duration::from_millis(1),
+                multiplier: 1.0,
+                jitter: false,
+            },
+        }
+    }
+
+    /// 按实例安装：installer 内嵌的版本 JSON 原样交回、不写 versions/<forge id>/；通用 jar 解到库目录；
+    /// 安装成功后 installer 与空的缓存目录被清掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_for_instance_returns_embedded_json_and_discards_installer() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let installer = legacy_installer_bytes();
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(installer.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar.sha1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "{}
+",
+                sha1_hex(&installer)
+            )))
+            .mount(&server)
+            .await;
+
+        let f = fixture();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let (embedded, summary) = ForgeInstaller::new(cx, "java")
+            .install_for_instance(&format!("{}/forge-installer.jar", server.uri()), "周末生存")
+            .await
+            .unwrap();
+
+        assert_eq!(embedded.inherits_from.as_deref(), Some("1.12.2"));
+        assert_eq!(summary.id, "1.12.2-forge-14.23.5.2860");
+        assert_eq!(summary.processors, 0);
+        assert!(
+            !f.layout.version_dir("1.12.2-forge-14.23.5.2860").exists(),
+            "按实例安装不应另建 forge 版本目录"
+        );
+        let universal = f
+            .layout
+            .library_path_for_coordinate("net.minecraftforge:forge:1.12.2-14.23.5.2860")
+            .unwrap();
+        assert_eq!(std::fs::read(universal).unwrap(), b"universal-jar");
+        assert!(
+            !f.root
+                .join(concat!(".", aurora_base::app_slug!(), "-cache"))
+                .exists(),
+            "用完的 installer 与空缓存目录应被清掉"
+        );
+    }
+
+    /// 上次安装失败后留在缓存里的 installer 与 Maven 侧 sha1 一致：直接复用，不再下载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cached_installer_matching_maven_sha1_is_reused() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let installer = legacy_installer_bytes();
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(installer.clone()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar.sha1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sha1_hex(&installer)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let f = fixture();
+        let cache = f
+            .root
+            .join(concat!(".", aurora_base::app_slug!(), "-cache"));
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("forge-installer.jar"), &installer).unwrap();
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        ForgeInstaller::new(cx, "java")
+            .install_for_instance(&format!("{}/forge-installer.jar", server.uri()), "x")
+            .await
+            .unwrap();
     }
 }

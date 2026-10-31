@@ -121,6 +121,8 @@ pub struct AuroraConfig {
     pub auto_download_java: bool,
     /// 外观偏好（明暗、强调色、花瓣、全景、减少动画）。
     pub appearance: Appearance,
+    /// 侧栏固定的实例 id，按显示顺序；最多 5 个，实例删除或改名时同步。
+    pub sidebar_pins: Vec<String>,
 }
 
 impl Default for AuroraConfig {
@@ -137,6 +139,7 @@ impl Default for AuroraConfig {
             cache_directory: None,
             auto_download_java: true,
             appearance: Appearance::default(),
+            sidebar_pins: Vec::new(),
         }
     }
 }

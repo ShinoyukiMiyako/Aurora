@@ -38,6 +38,31 @@ impl LoaderChoice {
             LoaderChoice::NeoForge => "NeoForge",
         }
     }
+
+    /// IPC 参数与未完成标记里用的小写键。
+    pub fn key(self) -> &'static str {
+        match self {
+            LoaderChoice::Fabric => "fabric",
+            LoaderChoice::Quilt => "quilt",
+            LoaderChoice::Forge => "forge",
+            LoaderChoice::NeoForge => "neoforge",
+        }
+    }
+
+    /// 由 [`LoaderChoice::key`] 的取值还原；不认识的键返回 `None`。
+    pub fn from_key(key: &str) -> Option<Self> {
+        LoaderChoice::ALL
+            .into_iter()
+            .find(|choice| choice.key() == key)
+    }
+
+    /// 全部可安装的加载器。
+    pub const ALL: [LoaderChoice; 4] = [
+        LoaderChoice::Fabric,
+        LoaderChoice::Quilt,
+        LoaderChoice::Forge,
+        LoaderChoice::NeoForge,
+    ];
 }
 
 /// 一次安装的结果：原版摘要 + 可选加载器摘要。
@@ -153,7 +178,12 @@ impl Aurora {
                 path: json_path.clone(),
                 source,
             })?;
-        let version = VersionJson::from_json_str(&String::from_utf8_lossy(&bytes))?;
+        // 直接按字节解析：有损转换会把坏字节换成替换符，让损坏的 JSON 看起来能读。
+        let version: VersionJson =
+            serde_json::from_slice(&bytes).map_err(|source| aurora_version::Error::Json {
+                context: "版本 JSON",
+                source,
+            })?;
         let required_major = version
             .java_version
             .as_ref()

@@ -29,8 +29,11 @@ pub mod error;
 pub mod event;
 pub mod facade;
 pub mod install;
+pub mod instance_install;
+pub mod instances;
 pub mod java;
 pub mod launch;
+pub mod loaders;
 pub mod mods;
 pub mod playtime;
 pub mod search;
@@ -81,6 +84,24 @@ pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifes
 // （长任务快照经 [`Aurora::with_cancel`] 挂上，命令层用同一类型登记与触发取消）。
 pub use aurora_auth::MsaEndpoints;
 pub use aurora_download::CancellationToken;
+
+// 实例管理：列表、设置、内容、删除、改名、侧栏固定；按实例名新建与补全；加载器版本与版本清单概览。
+pub use aurora_instance::{
+    Disposer, GameMode, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec,
+    InstanceContent, IsolationOverride, JavaSelection, LevelInfo, LevelSummary, MarkerError,
+    NameViolation, PackEntry, PinsViolation, RecycleBin, Resolution, ResolvedIsolation,
+    ResourcePackEntry, SettingsViolation, ShaderPackEntry, VersionSettings, WorldEntry,
+    is_safe_instance_id,
+};
+pub use instance_install::{
+    InstalledLoader, InstanceInstallOutcome, InstanceRequest, MarkerSettlement, RepairOutcome,
+    RepairPlan,
+};
+pub use instances::{
+    DeletionPreview, InstanceSummary, InstanceVersion, LEGACY_JAVA_MAJOR, MAX_SIDEBAR_PINS,
+    Readable, ReadyVersion, broken_reason_text,
+};
+pub use loaders::{LoaderEndpoints, LoaderVersionInfo, ManifestOverview};
 
 // 各下层 crate 的错误类型：上层（命令边界）要把每一种都映射成稳定的错误码，故全部透传。
 pub use aurora_auth::AuthError;
