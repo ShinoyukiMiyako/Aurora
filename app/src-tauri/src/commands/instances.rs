@@ -1845,6 +1845,52 @@ mod tests {
         assert!(!again.existed);
     }
 
+    /// 上次关闭启动器时留下的整合包导入半成品：新进程里没有任务占着它，列表照常列出（整合包标记、结局停在
+    /// 进行中、没有在做的事），名字一直占着；可以直接删除，删掉后同一个名字能重新导入或新建。
+    #[tokio::test]
+    async fn half_import_left_by_a_closed_launcher_is_listed_and_deletable() {
+        let env = Env::new();
+        let dir = env.game_dir().join("versions").join("RLCraft");
+        aurora_core::MarkerStore::for_version_dir(&dir)
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Modpack {
+                    task_id: "mp#9".into(),
+                },
+                1_761_800_000_000,
+            ))
+            .await
+            .unwrap();
+        let locks = InstanceLocks::default();
+
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(list.len(), 1);
+        let entry = &list[0];
+        assert_eq!(entry.id, "RLCraft");
+        assert_eq!(entry.status, "broken");
+        assert_eq!(entry.activity, None);
+        let incomplete = entry.incomplete.as_ref().unwrap();
+        assert_eq!(
+            (incomplete.kind, incomplete.outcome),
+            ("modpack", "pending")
+        );
+        assert_eq!(incomplete.started_at, Some(1_761_800_000_000));
+
+        let snapshot = env.facade.snapshot().await;
+        assert!(snapshot.ensure_modpack_name_free("rlcraft").await.is_err());
+
+        let deleted = delete_instance_with(&env.facade, &locks, "RLCraft", Remove)
+            .await
+            .unwrap();
+        assert!(deleted.existed);
+        assert!(!dir.exists());
+        snapshot.ensure_modpack_name_free("RLCraft").await.unwrap();
+        snapshot.check_new_instance_name("RLCraft").await.unwrap();
+        assert!(list_instances_with(&env.facade, &locks)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     async fn get_pins(env: &Env) -> Vec<String> {
         env.facade
             .snapshot()
