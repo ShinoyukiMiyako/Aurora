@@ -1,9 +1,10 @@
 // 主页与账户页的数据模块：游玩统计、资讯、固定的服务器、皮肤。
 
+import { useCallback } from "react";
 import { skinInfo, type SkinInfoDto } from "../../ipc/art";
 import { playStats, type PlayRangeArgs, type PlayStatsDto } from "../../ipc/launch";
 import { listKnownServers, listNews, listPinnedServers, pingServers, type KnownServerDto, type NewsFeedDto, type PinnedServerDto, type ServerStatusDto } from "../../ipc/system";
-import { useResource, type ResourceResult } from "../resource";
+import { resources, useResource, type ResourceResult } from "../resource";
 
 export type { SkinInfoDto, SkinModel } from "../../ipc/art";
 export type { InstanceMinutesDto, PlayDayDto, PlayRangeArgs, PlayStatsDto } from "../../ipc/launch";
@@ -14,9 +15,19 @@ export function usePlayStats(range: PlayRangeArgs): ResourceResult<PlayStatsDto>
   return useResource(`play-stats:${range.from}:${range.to}`, () => playStats(range));
 }
 
-/** news —— 6 小时内是后端缓存，离线时 offline 为 true。 */
-export function useNews(): ResourceResult<NewsFeedDto> {
-  return useResource("news", listNews);
+export type NewsResult = ResourceResult<NewsFeedDto> & {
+  /** 用户点「重试」或恢复联网后的重取：后端不等启动器资讯失败后的退避期满，立即重取一次。 */
+  retry(): void;
+};
+
+/**
+ * news —— 6 小时内是后端缓存，离线时 offline 为 true。首挂与失效重取不带 retry：启动器资讯取不到后
+ * 后端按退避期给上次的失败，免得每次进主页都等 GitHub 超时。
+ */
+export function useNews(): NewsResult {
+  const news = useResource("news", () => listNews({ retry: false }));
+  const retry = useCallback(() => resources.reloadWith("news", () => listNews({ retry: true })), []);
+  return { ...news, retry };
 }
 
 /** servers:pinned —— togglePinServer 后与 servers 前缀一起失效。 */

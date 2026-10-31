@@ -417,9 +417,12 @@ describe("主页：资讯", () => {
     expect(text()).toContain("资讯暂时没拉下来");
     expect(text()).toContain("连接超时");
     const before = callsOf(ipc, "list_news").length;
+    // 首挂不跳过退避，点了「重试」才要后端立即重取
+    expect(callsOf(ipc, "list_news")).toEqual(Array.from({ length: before }, () => ({ retry: false })));
     click(buttonByText("重试"));
     await flush();
     expect(callsOf(ipc, "list_news")).toHaveLength(before + 1);
+    expect(callsOf(ipc, "list_news")[before]).toEqual({ retry: true });
   });
 
   it("只有启动器资讯没拉下来：官方资讯照常列出，底部轻提示原因，重试再拉一次；拉下来后提示消失", async () => {
@@ -438,6 +441,7 @@ describe("主页：资讯", () => {
     click(buttonByText("重试", note));
     await flush();
     expect(callsOf(ipc, "list_news")).toHaveLength(before + 1);
+    expect(callsOf(ipc, "list_news")[before]).toEqual({ retry: true });
     expect(document.querySelector('[role="note"]')).toBeNull();
     expect(text()).toContain("Minecraft 1.21.1");
   });
@@ -459,7 +463,8 @@ describe("主页：资讯", () => {
     reachable = true;
     setOnline(true);
     await flush();
-    expect(callsOf(ipc, "list_news")).toHaveLength(2);
+    // 恢复联网的那次重取跳过后端退避，否则退避期内拿回来的仍是断网时那次失败
+    expect(callsOf(ipc, "list_news")).toEqual([{ retry: false }, { retry: true }]);
     expect(document.querySelector('[role="note"]')).toBeNull();
     expect(text()).not.toContain("离线中");
   });
@@ -485,7 +490,7 @@ describe("主页：资讯", () => {
     reachable = true;
     setOnline(true);
     await flush();
-    expect(callsOf(ipc, "list_news")).toHaveLength(2);
+    expect(callsOf(ipc, "list_news")).toEqual([{ retry: false }, { retry: true }]);
     expect(text()).not.toContain("需要联网获取");
     expect(text()).toContain("Minecraft 1.21.1");
     expect(text()).not.toContain("游戏更新与官方活动 · 离线中");

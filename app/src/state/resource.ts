@@ -78,12 +78,12 @@ export class ResourceCache {
     for (const listener of [...entry.listeners]) listener();
   }
 
-  private fetch(key: string, entry: Entry): void {
+  private fetch(key: string, entry: Entry, fetcher: () => Promise<unknown> = entry.fetcher): void {
     const version = ++entry.version;
     entry.inFlight = true;
     if (entry.snapshot.status === "ready") this.set(entry, { ...entry.snapshot, refreshing: true });
     else if (entry.snapshot.status === "error") this.set(entry, LOADING_SNAPSHOT);
-    entry.fetcher().then(
+    fetcher().then(
       (data) => {
         if (this.entries.get(key) !== entry || entry.version !== version) return;
         entry.inFlight = false;
@@ -122,6 +122,16 @@ export class ResourceCache {
     const entry = this.entries.get(key);
     if (entry === undefined) throw new Error(`资源 ${key} 还没有被订阅过，不能重载`);
     this.fetch(key, entry);
+  }
+
+  /**
+   * 只这一次换用 fetcher 重取，例如用户点「重试」时要后端跳过退避立即重取的那一次；
+   * 之后的失效重取与 reload 仍用订阅时登记的 fetcher，取的必须是同一份数据。
+   */
+  reloadWith(key: string, fetcher: () => Promise<unknown>): void {
+    const entry = this.entries.get(key);
+    if (entry === undefined) throw new Error(`资源 ${key} 还没有被订阅过，不能重载`);
+    this.fetch(key, entry, fetcher);
   }
 
   invalidate(prefix: string): void {

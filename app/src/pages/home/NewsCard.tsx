@@ -51,12 +51,12 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
   const retryOnReconnect = stale || (feed !== undefined && feed.launcher_error !== null);
 
   const wasOnline = useRef(online);
-  const reloadNews = news.reload;
+  const retryNews = news.retry;
   useEffect(() => {
     const reconnected = online && !wasOnline.current;
     wasOnline.current = online;
-    if (reconnected && retryOnReconnect) reloadNews();
-  }, [online, retryOnReconnect, reloadNews]);
+    if (reconnected && retryOnReconnect) retryNews();
+  }, [online, retryOnReconnect, retryNews]);
 
   const body = () => {
     if (news.status === "loading" || gate.view === "skeleton") {
@@ -81,7 +81,7 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
           title={online ? HOME_COPY.newsError : HOME_COPY.newsNeedsNetwork}
           body={describeError(news.error)}
           action={
-            <Button variant="ghost" icon="refresh" onClick={news.reload}>
+            <Button variant="ghost" icon="refresh" onClick={news.retry}>
               {HOME_COPY.retry}
             </Button>
           }
@@ -125,7 +125,7 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
           <span>
             {HOME_COPY.launcherNewsError}：{describeErrorRecord(feed.launcher_error)}
           </span>
-          <Button variant="ghost" size="sm" icon="refresh" onClick={news.reload}>
+          <Button variant="ghost" size="sm" icon="refresh" onClick={news.retry}>
             {HOME_COPY.retry}
           </Button>
         </p>

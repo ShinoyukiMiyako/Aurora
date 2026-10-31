@@ -135,4 +135,35 @@ describe("资源缓存：按前缀失效", () => {
     off();
     expect(() => new ResourceCache().reload("nope")).toThrow("还没有被订阅过");
   });
+
+  it("reloadWith 只这一次换用给定的 fetcher，之后的失效重取回到订阅时的 fetcher", async () => {
+    const cache = new ResourceCache();
+    const regular = vi.fn(() => Promise.resolve("常规"));
+    const once = vi.fn(() => Promise.resolve("立即重试"));
+    const off = cache.subscribe("news", regular, () => undefined);
+    await tick();
+    cache.reloadWith("news", once);
+    expect(cache.snapshot("news")).toMatchObject({ status: "ready", data: "常规", refreshing: true });
+    await tick();
+    expect(cache.snapshot("news")).toMatchObject({ status: "ready", data: "立即重试", refreshing: false });
+    cache.invalidate("news");
+    await tick();
+    expect(cache.snapshot("news")).toMatchObject({ status: "ready", data: "常规" });
+    expect(regular).toHaveBeenCalledTimes(2);
+    expect(once).toHaveBeenCalledTimes(1);
+    off();
+    expect(() => new ResourceCache().reloadWith("nope", once)).toThrow("还没有被订阅过");
+  });
+
+  it("reloadWith 发出后，先前那次请求晚到的结果丢弃", async () => {
+    const cache = new ResourceCache();
+    const stale = deferred<string>();
+    const off = cache.subscribe("news", () => stale.promise, () => undefined);
+    cache.reloadWith("news", () => Promise.resolve("新"));
+    await tick();
+    stale.resolve("旧");
+    await tick();
+    expect(cache.snapshot("news")).toMatchObject({ status: "ready", data: "新" });
+    off();
+  });
 });
