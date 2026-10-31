@@ -192,6 +192,37 @@ impl PlayBook {
         self.days.retain(|date, _| *date >= cutoff);
     }
 
+    /// 实例改名：累计与每日记录都挪到新名字下。新名字下原有的记录只可能属于一个已经不在的同名实例
+    /// （在本启动器之外删掉的），先整份丢掉，否则改名后的实例会继承别人的时长。返回记录是否有变化。
+    fn rename_instance(&mut self, old: &str, new: &str) -> bool {
+        if old == new {
+            return false;
+        }
+        let mut changed = self.forget_instance(new);
+        if let Some(record) = self.instances.remove(old) {
+            self.instances.insert(new.to_owned(), record);
+            changed = true;
+        }
+        for day in self.days.values_mut() {
+            if let Some(ms) = day.instances.remove(old) {
+                day.instances.insert(new.to_owned(), ms);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// 实例删除：去掉它的累计与每日记录，之后新建的同名实例从零开始。返回记录是否有变化。
+    fn forget_instance(&mut self, id: &str) -> bool {
+        let mut changed = self.instances.remove(id).is_some();
+        for day in self.days.values_mut() {
+            changed |= day.instances.remove(id).is_some();
+        }
+        // 只剩这个实例的日子删掉后是空记录，留着会在统计里出现一个零分钟的日子。
+        self.days.retain(|_, day| !day.instances.is_empty());
+        changed
+    }
+
     fn summaries(&self) -> BTreeMap<String, PlaySummary> {
         self.instances
             .iter()
@@ -306,7 +337,28 @@ async fn record_play_in<Tz: TimeZone>(
     save(&path, book).await
 }
 
+/// 在写锁下读改写一次；`change` 报告没有变化时不落盘（没玩过的实例改名、删除不会凭空建出文件）。
+async fn update_book(data_dir: &Path, change: impl FnOnce(&mut PlayBook) -> bool) -> Result<()> {
+    let path = playtime_path(data_dir);
+    let _guard = WRITE_LOCK.lock().await;
+    let mut book = load(&path).await?;
+    if change(&mut book) {
+        save(&path, book).await?;
+    }
+    Ok(())
+}
+
 impl Aurora {
+    /// 实例改名后把它的游玩记录挪到新名字下（记录以实例 id 为键）。
+    pub async fn rename_play_records(&self, old: &str, new: &str) -> Result<()> {
+        update_book(self.data_dir(), |book| book.rename_instance(old, new)).await
+    }
+
+    /// 实例删除后去掉它的游玩记录。
+    pub async fn forget_play_records(&self, id: &str) -> Result<()> {
+        update_book(self.data_dir(), |book| book.forget_instance(id)).await
+    }
+
     /// 一段时间（本地日期，两端都含）的游玩统计。
     pub async fn play_stats(&self, range: PlayRange) -> Result<PlayStats> {
         Ok(load(&playtime_path(self.data_dir())).await?.stats(range))
@@ -536,6 +588,132 @@ mod tests {
         assert_eq!(book.instances.len(), 4);
         assert_eq!(book.days["2026-10-30"].instances.len(), 4);
         assert!(book.instances.values().all(|r| r.total_ms == HOUR));
+    }
+
+    /// 改名把累计与每日记录一起挪走；新名字下残留的别人记录被丢掉；只改大小写也算改名。
+    #[test]
+    fn rename_moves_totals_and_days_and_drops_stale_records_under_the_new_name() {
+        let mut book = PlayBook::default();
+        book.add_session(
+            &utc8(),
+            "周末生存",
+            at("2026-10-29", 20, 0),
+            at("2026-10-29", 21, 30),
+        );
+        book.add_session(
+            &utc8(),
+            "周末生存",
+            at("2026-10-30", 20, 0),
+            at("2026-10-30", 20, 45),
+        );
+        // 「生存服」是早先在启动器外删掉的同名实例留下的。
+        book.add_session(
+            &utc8(),
+            "生存服",
+            at("2026-10-01", 8, 0),
+            at("2026-10-01", 9, 0),
+        );
+        book.add_session(
+            &utc8(),
+            "别的",
+            at("2026-10-30", 9, 0),
+            at("2026-10-30", 9, 10),
+        );
+
+        assert!(book.rename_instance("周末生存", "生存服"));
+        let summaries = book.summaries();
+        assert!(!summaries.contains_key("周末生存"));
+        assert_eq!(summaries["生存服"].playtime_min, 135);
+        assert_eq!(summaries["生存服"].last_played_at, at("2026-10-30", 20, 45));
+        assert_eq!(summaries["别的"].playtime_min, 10);
+        let stats = book.stats(range("2026-10-01", "2026-10-31"));
+        let dates: Vec<&str> = stats.days.iter().map(|d| d.date.as_str()).collect();
+        assert_eq!(
+            dates,
+            vec!["2026-10-29", "2026-10-30"],
+            "被丢掉的旧记录不留空日子"
+        );
+        assert_eq!(
+            stats.instances,
+            vec![
+                InstanceMinutes {
+                    version_id: "生存服".into(),
+                    minutes: 135
+                },
+                InstanceMinutes {
+                    version_id: "别的".into(),
+                    minutes: 10
+                },
+            ]
+        );
+
+        assert!(!book.rename_instance("别的", "别的"), "同名不算变化");
+        assert!(book.rename_instance("生存服", "SMP"));
+        assert!(book.rename_instance("SMP", "smp"));
+        assert_eq!(book.summaries()["smp"].playtime_min, 135);
+        assert!(!book.summaries().contains_key("SMP"));
+        assert!(!book.rename_instance("没玩过", "也没玩过"));
+    }
+
+    #[test]
+    fn forget_removes_totals_and_days_and_keeps_other_instances() {
+        let mut book = PlayBook::default();
+        book.add_session(
+            &utc8(),
+            "a",
+            at("2026-10-29", 20, 0),
+            at("2026-10-29", 21, 0),
+        );
+        book.add_session(
+            &utc8(),
+            "a",
+            at("2026-10-30", 20, 0),
+            at("2026-10-30", 21, 0),
+        );
+        book.add_session(
+            &utc8(),
+            "b",
+            at("2026-10-30", 9, 0),
+            at("2026-10-30", 9, 30),
+        );
+
+        assert!(book.forget_instance("a"));
+        assert!(!book.summaries().contains_key("a"));
+        assert_eq!(book.summaries()["b"].playtime_min, 30);
+        let days: Vec<&String> = book.days.keys().collect();
+        assert_eq!(days, vec!["2026-10-30"], "只剩 a 的那天整条去掉");
+        assert_eq!(
+            book.stats(range("2026-10-29", "2026-10-30")).total_minutes,
+            30
+        );
+        assert!(!book.forget_instance("a"), "重复删除没有变化");
+    }
+
+    /// 门面入口在写锁下读改写落盘；没有任何记录时不建出文件。
+    #[tokio::test]
+    async fn rename_and_forget_persist_and_do_not_create_an_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = Aurora::for_test(
+            crate::config::AuroraConfig::default(),
+            tmp.path().to_path_buf(),
+            tmp.path().join(".minecraft"),
+        );
+        let path = playtime_path(tmp.path());
+        aurora.rename_play_records("x", "y").await.unwrap();
+        aurora.forget_play_records("x").await.unwrap();
+        assert!(!path.exists());
+
+        record_play_in(&utc8(), tmp.path(), "旧名", 0, 2 * HOUR)
+            .await
+            .unwrap();
+        aurora.rename_play_records("旧名", "新名").await.unwrap();
+        let summaries = aurora.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["新名"]);
+        assert_eq!(summaries["新名"].playtime_min, 120);
+
+        aurora.forget_play_records("新名").await.unwrap();
+        assert!(aurora.play_summaries().await.unwrap().is_empty());
+        assert!(load(&path).await.unwrap().days.is_empty());
     }
 
     #[tokio::test]

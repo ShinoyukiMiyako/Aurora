@@ -1088,8 +1088,8 @@ pub async fn preview_instance_deletion(
     Ok(preview_dto(preview, locks.activity(&id)))
 }
 
-/// 把实例移入回收站，并从侧栏固定与当前选中里去掉它。实例在忙报 `instance_busy`，被依赖报
-/// `instance_has_dependents`；目录已不在时只清引用、返回 `existed: false`。
+/// 把实例移入回收站，并从侧栏固定、当前选中与游玩记录里去掉它。实例在忙报 `instance_busy`，被依赖报
+/// `instance_has_dependents`；目录已不在时只清引用与记录、返回 `existed: false`。
 #[tauri::command]
 pub async fn delete_instance(
     app: AppHandle,
@@ -1109,10 +1109,14 @@ pub(crate) async fn delete_instance_with(
     disposer: impl Disposer + 'static,
 ) -> Result<DeleteOutcomeDto, CommandError> {
     let _guard = locks.acquire(id, InstanceActivity::Deleting)?;
-    let existed = facade
-        .snapshot()
-        .await
+    let snapshot = facade.snapshot().await;
+    let existed = snapshot
         .delete_instance_files(id, disposer)
+        .await
+        .map_err(instance_error)?;
+    // 目录已不在（重复删除、在启动器外删掉）时也清：残留的记录会被之后新建的同名实例继承。
+    snapshot
+        .forget_play_records(id)
         .await
         .map_err(instance_error)?;
     let mut aurora = facade.write().await;
@@ -1122,7 +1126,7 @@ pub(crate) async fn delete_instance_with(
     Ok(DeleteOutcomeDto { existed })
 }
 
-/// 实例改名：目录、版本 JSON（文件名与 id）、jar、natives、侧栏固定与当前选中一起改。
+/// 实例改名：目录、版本 JSON（文件名与 id）、jar、natives、游玩记录、侧栏固定与当前选中一起改。
 /// 新名字按命名规则校验（报 `invalid_argument`，detail.rule 为规则码）；实例在忙报 `instance_busy`。
 #[tauri::command]
 pub async fn rename_instance(
@@ -1150,10 +1154,14 @@ pub(crate) async fn rename_instance_with(
     } else {
         Some(locks.acquire(new_name, InstanceActivity::Renaming)?)
     };
-    facade
-        .snapshot()
-        .await
+    let snapshot = facade.snapshot().await;
+    snapshot
         .rename_instance_files(id, new_name)
+        .await
+        .map_err(instance_error)?;
+    // 游玩记录以实例 id 为键，不跟着挪的话改名后的实例在列表与统计里就成了从没玩过。
+    snapshot
+        .rename_play_records(id, new_name)
         .await
         .map_err(instance_error)?;
     let mut aurora = facade.write().await;
@@ -1819,6 +1827,79 @@ mod tests {
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
         assert_eq!(list[0].id, "生存");
         assert_eq!(list[0].mc_version.as_deref(), Some("1.21.1"));
+    }
+
+    fn write_playtime(env: &Env, json: &str) {
+        std::fs::write(
+            env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE),
+            json,
+        )
+        .unwrap();
+    }
+
+    /// 改名后游玩记录跟着新名字走，列表与统计都不再出现旧名；删掉后再建同名实例从零开始。
+    #[tokio::test]
+    async fn rename_and_delete_carry_or_drop_the_play_records() {
+        let env = Env::new();
+        env.vanilla("周末生存");
+        // 周末生存玩过 90 分钟（10 月 30 日），另一个实例 10 分钟。
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"周末生存":{"total_ms":5400000,"last_played_at":1761832800000},
+                             "别的":{"total_ms":600000,"last_played_at":1761800000000}},
+                "days":{"2026-10-30":{"instances":{"周末生存":5400000,"别的":600000}}}}}"#,
+        );
+        let locks = InstanceLocks::default();
+
+        rename_instance_with(&env.facade, &locks, "周末生存", "生存服")
+            .await
+            .unwrap();
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let renamed = list.iter().find(|i| i.id == "生存服").unwrap();
+        assert_eq!(renamed.playtime_min, 90);
+        assert_eq!(renamed.last_played_at, Some(1_761_832_800_000));
+        let stats = env
+            .facade
+            .snapshot()
+            .await
+            .play_stats(aurora_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap())
+            .await
+            .unwrap();
+        let ids: Vec<&str> = stats
+            .instances
+            .iter()
+            .map(|i| i.version_id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["生存服", "别的"]);
+        assert_eq!(stats.total_minutes, 100);
+
+        delete_instance_with(&env.facade, &locks, "生存服", Remove)
+            .await
+            .unwrap();
+        env.vanilla("生存服");
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let fresh = list.iter().find(|i| i.id == "生存服").unwrap();
+        assert_eq!(fresh.playtime_min, 0, "同名新实例不继承被删实例的时长");
+        assert_eq!(fresh.last_played_at, None);
+        let summaries = env.facade.snapshot().await.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["别的"]);
+    }
+
+    /// 游玩记录读不出来时改名照样把文件改完，但命令报错，不假装一切正常。
+    #[tokio::test]
+    async fn rename_reports_unreadable_play_records() {
+        let env = Env::new();
+        let dir = env.vanilla("a");
+        write_playtime(&env, "{ broken");
+        let locks = InstanceLocks::default();
+        let err = rename_instance_with(&env.facade, &locks, "a", "b")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::INSTANCE_FAILED);
+        assert!(!dir.exists());
+        assert!(env.game_dir().join("versions").join("b").is_dir());
+        assert_eq!(locks.activity("b"), None);
     }
 
     #[tokio::test]
