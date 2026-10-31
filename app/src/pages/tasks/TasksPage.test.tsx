@@ -127,7 +127,16 @@ function record(id: string, status: TaskRecordDto["status"], overrides: Partial<
 
 /** 一条完成、一条失败（关联现存实例）、一条取消（关联已不存在的实例）。 */
 const HISTORY: TaskRecordDto[] = [
-  record("done-java", "done", { progress: 1, bytes: 52_400_000, total_bytes: 52_400_000, created_at: T0 - 300_000, finished_at: T0 - 240_000 }),
+  // 排队 10 秒后开始，跑了 50 秒；最后一批 2 MB，这一次尝试累计下了 50 MB
+  record("done-java", "done", {
+    progress: 1,
+    bytes: 2 * MB,
+    total_bytes: 2 * MB,
+    done_bytes: 52_400_000,
+    created_at: T0 - 300_000,
+    started_at: T0 - 290_000,
+    finished_at: T0 - 240_000,
+  }),
   record("failed-create", "failed", {
     kind: "game",
     title: "安装 1.21.1",
@@ -222,7 +231,7 @@ describe("下载任务页：历史", () => {
     expect(totalRing().textContent).toBe("--");
 
     const done = row("下载 Java done-java");
-    expect(done.textContent).toContain("50.0 MB · 用时 1 分钟");
+    expect(done.textContent).toContain("50.0 MB · 用时 50 秒");
     expect(done.textContent).toContain("4 分钟前");
     expect(hasButton(done, "查看实例")).toBe(false);
 
@@ -354,6 +363,28 @@ describe("下载任务页：进行中", () => {
     expect(totalRing().getAttribute("aria-valuenow")).toBe("20");
     expect(totalRing().hasAttribute("aria-valuetext")).toBe(false);
     expect(page().textContent).not.toContain("最近 48 秒没有下载流量");
+  });
+
+  it("完成行：总量是几批下载的累计，用时从开始运行算起，排队等待不算", async () => {
+    const ids = await fourJavaTasks();
+    // 第四个任务排队 30 秒后才轮到
+    await advance(30_000);
+    javaRuns.get(`${ids[0]}#1`)?.resolve({ component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" });
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.id === ids[3])?.status).toBe("running");
+
+    const id = `${ids[3]}#1`;
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 2, bytes: 60 * MB, total_bytes: 100 * MB, speed: 10 * MB }));
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 4, bytes: 100 * MB, total_bytes: 100 * MB, speed: 10 * MB }));
+    // 第二批从 0 重新计起
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 3, finished: 3, bytes: 20 * MB, total_bytes: 20 * MB, speed: 10 * MB }));
+    await advance(12_000);
+    javaRuns.get(id)?.resolve({ component: "java-runtime-delta", version: { major: 25, minor: 0, security: 1, build: 1, raw: "25.0.1" }, java_executable: "C:/java25.exe" });
+    await flush();
+
+    const finished = row("Java 25");
+    expect(finished.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Java，已完成");
+    expect(finished.textContent).toContain("120 MB · 用时 12 秒");
   });
 
   it("取消排队中的任务不确认、不发命令；全部取消要确认，继续下载则什么都不做", async () => {

@@ -2,7 +2,7 @@
 // 页面组件只负责把这些结果画出来，规则都在这里，便于不挂界面直接测。
 
 import type { IconName } from "../../art/Icon";
-import { CONFIRM_COPY, TASK_TEXT, taskFailureReason } from "../../copy/flows";
+import { CONFIRM_COPY, TASK_STATUS_LABEL, TASK_TEXT, taskFailureReason } from "../../copy/flows";
 import { formatBytes, formatPlaytime, formatRelative, formatSpeed, percent } from "../../domain/format";
 import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import type { Task, TaskKind } from "../../domain/types";
@@ -226,6 +226,20 @@ function runningMeta(task: Task, speedForEta: number): { left: string; right: st
   return { left, right: TASKS_COPY.row.speedEta(formatSpeed(task.speedBps), etaText(Math.max(0, total - task.bytes) / speed)) };
 }
 
+/**
+ * 完成行左侧的「总量 · 用时」。总量是这一次尝试跨批次累计下载的字节（一次安装连跑好几批，最后一批只是其中一段）；
+ * 一个字节都没下（文件都已就绪）时不写。用时从这一次尝试开始运行算起，不含排队等待，也不含之前失败的尝试；
+ * 较早写入的任务记录没有开始时刻，不写用时，而不是拿加入队列的时刻冒充。
+ */
+function doneSummary(task: Task): string {
+  const size = task.doneBytes > 0 ? formatBytes(task.doneBytes) : null;
+  const took = task.startedAt === null ? null : durationText(finishedAtOf(task) - task.startedAt);
+  if (size !== null && took !== null) return TASKS_COPY.row.doneWithSize(size, took);
+  if (took !== null) return TASKS_COPY.row.doneNoSize(took);
+  if (size !== null) return size;
+  return TASK_STATUS_LABEL.done;
+}
+
 export function rowMeta(task: Task, ctx: RowMetaContext): RowMeta {
   let meta: RowMeta;
   switch (task.status) {
@@ -237,13 +251,9 @@ export function rowMeta(task: Task, ctx: RowMetaContext): RowMeta {
       meta = { left: TASK_TEXT.queuePosition(ctx.queuePosition), right: sizeOrPending(task.totalBytes), danger: false };
       break;
     }
-    case "done": {
-      // 任务记录没有开始运行的时刻，用时从加入队列算起（含排队等待）
-      const took = durationText(finishedAtOf(task) - task.createdAt);
-      const left = task.totalBytes === null ? TASKS_COPY.row.doneNoSize(took) : TASKS_COPY.row.doneWithSize(formatBytes(task.totalBytes), took);
-      meta = { left, right: formatRelative(finishedAtOf(task), ctx.now), danger: false };
+    case "done":
+      meta = { left: doneSummary(task), right: formatRelative(finishedAtOf(task), ctx.now), danger: false };
       break;
-    }
     case "failed": {
       if (task.error === null) throw new Error(`失败的任务 ${task.id} 没有失败原因`);
       meta = { left: TASKS_COPY.row.failed(taskFailureReason(task.error)), right: formatRelative(finishedAtOf(task), ctx.now), danger: true };
