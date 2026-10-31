@@ -20,6 +20,7 @@ use aurora_instance::{
     dir_footprint, discover_versions, is_safe_instance_id, list_version_dirs, list_worlds,
     probe_version, read_instance_content, resolve_isolation,
 };
+use aurora_launch::{QuickPlaySupport, quick_play_support};
 use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -91,6 +92,8 @@ pub struct ReadyVersion {
     pub is_release: bool,
     /// 需要的 Java 主版本；继承链断了（父版本不在）时为 `None`。
     pub java_major: Option<u32>,
+    /// 支持哪些直达方式（进入存档、加入服务器）；继承链断了时为 `None`。
+    pub quick_play: Option<QuickPlaySupport>,
     /// 工作目录 `mods/` 下的 Mod 文件数；设置文件读不出、定不了工作目录时为 `None`。
     pub mod_count: Option<u32>,
     /// 工作目录 `saves/` 下的存档数，口径同 [`count_worlds`]；何时为 `None` 同 `mod_count`。
@@ -147,12 +150,14 @@ impl Aurora {
     pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
         let scan = discover_versions(self.game_dir()).await?;
         let javas = java_majors(&scan);
+        let quick_plays = quick_play_supports(&scan);
         let mut entries: Vec<Entry> = scan
             .versions
             .into_iter()
             .map(|version| {
                 let java = javas.get(&version.id).copied().flatten();
-                Entry::Found(Box::new(version), java)
+                let quick_play = quick_plays.get(&version.id).copied().flatten();
+                Entry::Found(Box::new(version), java, quick_play)
             })
             .chain(scan.broken.into_iter().map(Entry::Broken))
             .collect();
@@ -399,14 +404,18 @@ pub fn broken_reason_text(reason: &BrokenReason) -> String {
 }
 
 enum Entry {
-    Found(Box<DiscoveredVersion>, Option<u32>),
+    Found(
+        Box<DiscoveredVersion>,
+        Option<u32>,
+        Option<QuickPlaySupport>,
+    ),
     Broken(BrokenVersion),
 }
 
 impl Entry {
     fn id(&self) -> &str {
         match self {
-            Entry::Found(version, _) => &version.id,
+            Entry::Found(version, ..) => &version.id,
             Entry::Broken(broken) => &broken.id,
         }
     }
@@ -418,7 +427,7 @@ async fn summarize(
     entry: Entry,
 ) -> Result<InstanceSummary> {
     let (id, dir) = match &entry {
-        Entry::Found(version, _) => (version.id.clone(), version.dir.clone()),
+        Entry::Found(version, ..) => (version.id.clone(), version.dir.clone()),
         Entry::Broken(broken) => (broken.id.clone(), broken.dir.clone()),
     };
     let settings = match VersionSettingsStore::for_version_dir(&dir).load().await {
@@ -461,7 +470,7 @@ async fn summarize(
 
     let version = match entry {
         Entry::Broken(broken) => InstanceVersion::Broken(broken.reason),
-        Entry::Found(version, java_major) => {
+        Entry::Found(version, java_major, quick_play) => {
             let workdir = match &settings {
                 Readable::Read(settings) => {
                     let resolved = resolve_isolation(
@@ -485,6 +494,7 @@ async fn summarize(
                 release_type: version.json.release_type.clone(),
                 loaders: version.loaders,
                 java_major,
+                quick_play,
                 mod_count: workdir.map(|(mods, _, _)| mods),
                 world_count: workdir.map(|(_, worlds, _)| worlds),
                 isolated: workdir.map(|(_, _, isolated)| isolated),
@@ -532,6 +542,38 @@ fn declared_java(json: &VersionJson, by_id: &HashMap<&str, &VersionJson>) -> Opt
         match current.inherits_from.as_deref() {
             Some(parent) => current = by_id.get(parent)?,
             None => return Some(LEGACY_JAVA_MAJOR),
+        }
+    }
+    None
+}
+
+/// 每个版本支持的直达方式：沿继承链逐层判定、按字段取或。启动时各层的 `arguments.game` 拼接在一起，
+/// 原版的 Quick Play 块在加载器版本里照样生效。父版本不在扫描结果里（链断了）为 `None`。
+fn quick_play_supports(scan: &VersionScan) -> HashMap<String, Option<QuickPlaySupport>> {
+    let by_id: HashMap<&str, &VersionJson> = scan
+        .versions
+        .iter()
+        .map(|v| (v.id.as_str(), &v.json))
+        .collect();
+    scan.versions
+        .iter()
+        .map(|v| (v.id.clone(), chain_quick_play(&v.json, &by_id)))
+        .collect()
+}
+
+fn chain_quick_play(
+    json: &VersionJson,
+    by_id: &HashMap<&str, &VersionJson>,
+) -> Option<QuickPlaySupport> {
+    let mut support = QuickPlaySupport::default();
+    let mut current = json;
+    for _ in 0..MAX_INHERIT_DEPTH {
+        let layer = quick_play_support(current);
+        support.singleplayer |= layer.singleplayer;
+        support.multiplayer |= layer.multiplayer;
+        match current.inherits_from.as_deref() {
+            Some(parent) => current = by_id.get(parent)?,
+            None => return Some(support),
         }
     }
     None
@@ -934,6 +976,72 @@ pub(crate) mod tests {
         let by_id: HashMap<&str, &VersionJson> = HashMap::from([("1.5.2", &old)]);
         assert_eq!(declared_java(&child, &by_id), None);
         assert_eq!(declared_java(&old, &by_id), Some(LEGACY_JAVA_MAJOR));
+    }
+
+    /// 摘自官方 1.21.1 的游戏参数开头与两个直达块；其余块与此无关。
+    fn quick_play_vanilla_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","mainClass":"net.minecraft.client.main.Main",
+                "javaVersion":{{"component":"java-runtime-delta","majorVersion":21}},
+                "arguments":{{"game":["--username","${{auth_player_name}}",
+                    {{"rules":[{{"action":"allow","features":{{"is_quick_play_singleplayer":true}}}}],"value":["--quickPlaySingleplayer","${{quickPlaySingleplayer}}"]}},
+                    {{"rules":[{{"action":"allow","features":{{"is_quick_play_multiplayer":true}}}}],"value":["--quickPlayMultiplayer","${{quickPlayMultiplayer}}"]}}
+                ]}}}}"#
+        )
+    }
+
+    #[tokio::test]
+    async fn list_instances_reports_quick_play_support_along_the_inheritance_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &quick_play_vanilla_json("1.21.1"));
+        write_version(&game, "织布机", &fabric_json("织布机", "1.21.1"));
+        write_version(
+            &game,
+            "1.12.2",
+            r#"{"id":"1.12.2","type":"release","mainClass":"net.minecraft.client.main.Main",
+                "minecraftArguments":"--username ${auth_player_name} --version ${version_name}"}"#,
+        );
+        write_version(&game, "孤儿", &fabric_json("孤儿", "1.20.6"));
+
+        let list = aurora.list_instances().await.unwrap();
+        let support = |id: &str| -> Option<QuickPlaySupport> {
+            match &list.iter().find(|i| i.id == id).unwrap().version {
+                InstanceVersion::Ready(ready) => ready.quick_play,
+                InstanceVersion::Broken(reason) => panic!("{id} 不该损坏：{reason:?}"),
+            }
+        };
+        let both = QuickPlaySupport {
+            singleplayer: true,
+            multiplayer: true,
+        };
+        assert_eq!(support("1.21.1"), Some(both));
+        // 加载器层自己没有直达块，继承来的原版块照样算。
+        assert_eq!(support("织布机"), Some(both));
+        assert_eq!(
+            support("1.12.2"),
+            Some(QuickPlaySupport {
+                singleplayer: false,
+                multiplayer: true,
+            })
+        );
+        assert_eq!(support("孤儿"), None);
+    }
+
+    #[test]
+    fn quick_play_is_none_when_the_parent_version_is_missing() {
+        let child: VersionJson = serde_json::from_str(&fabric_json("f", "1.21.1")).unwrap();
+        let positional: VersionJson = serde_json::from_str(
+            r#"{"id":"1.5.2","type":"release","minecraftArguments":"${auth_player_name} ${auth_session}"}"#,
+        )
+        .unwrap();
+        let by_id: HashMap<&str, &VersionJson> = HashMap::from([("1.5.2", &positional)]);
+        assert_eq!(chain_quick_play(&child, &by_id), None);
+        assert_eq!(
+            chain_quick_play(&positional, &by_id),
+            Some(QuickPlaySupport::default())
+        );
     }
 
     #[tokio::test]

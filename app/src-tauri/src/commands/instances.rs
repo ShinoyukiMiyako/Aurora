@@ -314,6 +314,8 @@ pub struct InstanceDto {
     pub is_release: bool,
     /// 需要的 Java 主版本；继承链断了或 broken 时为 null。
     pub java_major: Option<u32>,
+    /// 支持哪些直达方式；继承链断了或 broken 时为 null。
+    pub quick_play: Option<QuickPlaySupportDto>,
     /// 工作目录 mods/ 下的 Mod 文件数；broken 或设置读不出时为 null。
     pub mod_count: Option<u32>,
     /// 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。
@@ -343,6 +345,13 @@ pub struct InstanceDto {
     pub playtime_min: u64,
     /// 上次游玩结束的 Unix 毫秒；没玩过为 null。
     pub last_played_at: Option<u64>,
+}
+
+/// 实例的版本支持哪些直达方式：进入存档（Quick Play，1.20 起）与加入服务器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct QuickPlaySupportDto {
+    pub singleplayer: bool,
+    pub multiplayer: bool,
 }
 
 /// 实例设置。读写同一形状；写入时不认识的字段直接报错。
@@ -638,6 +647,7 @@ fn instance_dto(
         release_type: None,
         is_release: false,
         java_major: None,
+        quick_play: None,
         mod_count: None,
         world_count: None,
         isolated: None,
@@ -669,6 +679,10 @@ fn instance_dto(
             dto.release_type = ready.release_type;
             dto.is_release = ready.is_release;
             dto.java_major = ready.java_major;
+            dto.quick_play = ready.quick_play.map(|support| QuickPlaySupportDto {
+                singleplayer: support.singleplayer,
+                multiplayer: support.multiplayer,
+            });
             dto.mod_count = ready.mod_count;
             dto.world_count = ready.world_count;
             dto.isolated = ready.isolated;
@@ -2459,6 +2473,10 @@ mod tests {
                 release_type: Some("release".into()),
                 is_release: true,
                 java_major: Some(21),
+                quick_play: Some(aurora_core::QuickPlaySupport {
+                    singleplayer: true,
+                    multiplayer: true,
+                }),
                 mod_count: Some(80),
                 world_count: Some(3),
                 isolated: Some(true),
@@ -2511,6 +2529,10 @@ mod tests {
         assert_eq!(value["world_count"], json!(3));
         assert_eq!(value["isolated"], json!(true));
         assert_eq!(value["memory_mb"], json!(6144));
+        assert_eq!(
+            value["quick_play"],
+            json!({ "singleplayer": true, "multiplayer": true })
+        );
 
         let broken = instance_dto(
             summary(
@@ -2527,6 +2549,25 @@ mod tests {
         assert_eq!(broken.last_crash_error.as_deref(), Some("崩溃记录坏了"));
         assert_eq!(broken.memory_mb, None);
         assert_eq!(broken.settings_error.as_deref(), Some("设置坏了"));
+        // 设置读不出不影响直达支持：它只看版本 JSON。
+        assert_eq!(
+            broken.quick_play,
+            Some(QuickPlaySupportDto {
+                singleplayer: true,
+                multiplayer: true,
+            })
+        );
+
+        // 版本 JSON 坏了的实例说不出支持什么，给 null，入口按不可用处理。
+        let mut missing_json = summary(
+            Readable::Read(None),
+            Readable::Read(None),
+            Readable::Read(VersionSettings::default()),
+        );
+        missing_json.version = InstanceVersion::Broken(aurora_core::BrokenReason::MissingJson);
+        let value = serde_json::to_value(instance_dto(missing_json, None, None)).unwrap();
+        assert_eq!(value["status"], json!("broken"));
+        assert_eq!(value["quick_play"], json!(null));
     }
 
     /// 导入中断留下的整合包标记在列表里报为 modpack，而不是「标记读不出来」。

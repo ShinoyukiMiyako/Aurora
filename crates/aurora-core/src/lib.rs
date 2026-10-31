@@ -121,8 +121,9 @@ pub use aurora_instance::{
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use aurora_launch::{
     CrashCategory, CrashDiagnosis, ExitReport, KillSwitch, LauncherLevel, LogBatchSink, LogEntry,
-    LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, SessionEnded, SessionOutcome,
-    SystemMemory, analyze, detect_crash, game_line_level, probe_system_memory,
+    LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, QuickPlayMode, QuickPlaySupport,
+    QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory, analyze, detect_crash,
+    game_line_level, probe_system_memory,
 };
 pub use aurora_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,
