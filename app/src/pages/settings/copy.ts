@@ -121,6 +121,22 @@ export const JAVA_COPY = {
   majorUsers: (n: number) => `${n} 个实例需要`,
   noMajors: "还没有实例用到需要下载的 Java，新建实例后这里会列出它们要的主版本。",
   enqueued: (major: number) => `已加入下载队列：Java ${major}`,
+  add: "添加 Java",
+  added: (major: number) => `已添加 Java ${major}`,
+  addedBody: (vendor: string, version: string) => `${vendor} ${version}`,
+  addFailed: "没能添加 Java",
+  pickFailed: "没能打开文件选择框",
+  incomplete: "不完整",
+  missingFiles: (files: readonly string[]) => `缺少 ${files.join("、")}，自动选择会跳过它`,
+  manualTitle: "手动添加的 Java",
+  manualDesc: "移除只删记录，不动磁盘文件",
+  manualDetail: (major: number, vendor: string, version: string) => `Java ${major} · ${vendor} ${version}`,
+  unrecognized: "识别不出",
+  unrecognizedDesc: "这个位置现在识别不出 Java，文件可能被移走了",
+  remove: "移除",
+  removed: "已移除手动添加的 Java",
+  defaultReset: "默认 Java 改回了自动选择",
+  removeFailed: "没能移除 Java",
 } as const;
 
 // ---------------------------------------------------------------- 游戏

@@ -4,8 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
-import { resetMocks } from "../../ipc/mock";
+import type { JavaInstallationDto } from "../../ipc/java";
+import { mockInvoke, resetMocks } from "../../ipc/mock";
+import { setMockJavaInstallations } from "../../ipc/mock/handlers/java";
 import { OverlayRoot } from "../../shell/overlay";
+import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { UpdatePanelMount } from "../../shell/UpdatePanel";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
@@ -13,12 +16,17 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { SettingsCommandsProvider, type SettingsCommands } from "./commands";
 import SettingsPage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 系统选择文件对话框只在 Tauri 里有：默认照真实实现在测试里拒绝，「添加 Java」的用例改成返回选中的文件
+vi.mock("../../shell/platform", async (orig) => {
+  const actual = await orig<typeof import("../../shell/platform")>();
+  return { ...actual, pickFile: vi.fn(actual.pickFile) };
+});
 
 let view: Rendered | undefined;
 let nav: NavApi;
@@ -312,6 +320,198 @@ describe("设置页：Java", () => {
     const java = launcher.state.tasks.filter((t) => t.kind === "java" && t.status !== "done");
     expect(java.map((t) => t.spec)).toEqual([{ command: "install_java", args: { requiredMajor: 25 } }]);
     expect(toasts()).toContainEqual({ tone: "info", title: "已加入下载队列：Java 25", body: undefined });
+  });
+});
+
+const JRE8 = "C:\\Program Files\\Java\\jre1.8.0_421\\bin\\java.exe";
+const MANUAL_LIST = 'ul[aria-label="手动添加的 Java"]';
+
+function installation(path: string, major: number, overrides: Partial<JavaInstallationDto> = {}): JavaInstallationDto {
+  return {
+    path,
+    version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` },
+    is_64bit: true,
+    vendor: "Eclipse Adoptium",
+    source: "registry",
+    missing_files: [],
+    ...overrides,
+  };
+}
+
+const pickNext = (path: string | null) => vi.mocked(pickFile).mockResolvedValueOnce(path);
+
+/** 「手动添加的 Java」区块里路径为 path 的那一行。 */
+function manualRow(path: string): HTMLElement {
+  const row = all(`${MANUAL_LIST} > li`).find((li) => li.textContent?.includes(path));
+  if (row === undefined) throw new Error(`手动添加的 Java 里没有 ${path}`);
+  return row;
+}
+
+function removeButton(path: string): HTMLButtonElement {
+  const found = [...manualRow(path).querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "移除");
+  if (found === undefined) throw new Error(`${path} 那一行没有「移除」`);
+  return found;
+}
+
+describe("设置页：Java · 手动添加与不完整的运行时", () => {
+  beforeEach(() => {
+    vi.mocked(pickFile).mockClear();
+    ipc.overrides.set("list_instances", () => [
+      instanceDto("生存", { java_major: 21 }),
+      instanceDto("怀旧", { java_major: 8, mc_version: "1.12.2" }),
+      instanceDto("新快照", { java_major: 25, mc_version: "26.1" }),
+    ]);
+  });
+
+  it("添加 Java：选中的 javaw.exe 交给 add_java_path，列表刷新出按 java.exe 记下的「手动添加」项，并提示加了哪个", async () => {
+    await mount("java");
+    const configReads = callsOf(ipc, "get_config").length;
+    pickNext("D:\\Java\\jdk-17.0.12\\bin\\javaw.exe");
+    await click(button("添加 Java"));
+    expect(vi.mocked(pickFile).mock.calls.map((c) => c[0])).toEqual([{ title: "选择 java.exe 或 javaw.exe", filter: { name: "Java 可执行文件", extensions: ["exe"] } }]);
+    expect(callsOf(ipc, "add_java_path")).toEqual([{ path: "D:\\Java\\jdk-17.0.12\\bin\\javaw.exe" }]);
+    expect(callsOf(ipc, "detect_java")).toHaveLength(2);
+    expect(callsOf(ipc, "get_config")).toHaveLength(configReads + 1);
+    const added = radio("Java 17");
+    expect(added.textContent).toContain("手动添加");
+    expect(added.textContent).toContain("D:\\Java\\jdk-17.0.12\\bin\\java.exe");
+    expect(added.disabled).toBe(false);
+    expect(toasts()).toContainEqual({ tone: "success", title: "已添加 Java 17", body: "Eclipse Adoptium 17.0.2" });
+    const row = manualRow("D:\\Java\\jdk-17.0.12\\bin\\java.exe");
+    expect(row.textContent).toContain("Java 17 · Eclipse Adoptium 17.0.2");
+    expect(row.textContent).not.toContain("不完整");
+    expect(all(`${MANUAL_LIST} > li`)).toHaveLength(1);
+  });
+
+  it("添加 Java：取消选择什么都不做；识别期间按钮转圈，结束后恢复", async () => {
+    await mount("java");
+    const before = toasts().length;
+    pickNext(null);
+    await click(button("添加 Java"));
+    expect(callsOf(ipc, "add_java_path")).toEqual([]);
+    expect(toasts()).toHaveLength(before);
+
+    const gate = deferred<void>();
+    ipc.overrides.set("add_java_path", async (args) => {
+      await gate.promise;
+      return mockInvoke("add_java_path", args);
+    });
+    pickNext("D:\\Java\\jdk-21\\bin\\java.exe");
+    await click(button("添加 Java"));
+    expect(button("添加 Java").getAttribute("aria-busy")).toBe("true");
+    await act(async () => {
+      gate.resolve();
+      await settle(20);
+    });
+    expect(button("添加 Java").getAttribute("aria-busy")).toBeNull();
+    expect(callsOf(ipc, "add_java_path")).toEqual([{ path: "D:\\Java\\jdk-21\\bin\\java.exe" }]);
+    expect(toasts()).toContainEqual({ tone: "success", title: "已添加 Java 21", body: "Eclipse Adoptium 21.0.2" });
+  });
+
+  it("添加 Java：后端拒绝时报「没能添加 Java」、正文是后端原文，列表与记录都不变", async () => {
+    await mount("java");
+    pickNext("D:\\Tools\\launcher.exe");
+    await click(button("添加 Java"));
+    pickNext("D:\\broken\\jdk-21\\bin\\java.exe");
+    await click(button("添加 Java"));
+    expect(callsOf(ipc, "add_java_path")).toEqual([{ path: "D:\\Tools\\launcher.exe" }, { path: "D:\\broken\\jdk-21\\bin\\java.exe" }]);
+    expect(toasts().filter((t) => t.tone === "error")).toEqual([
+      { tone: "error", title: "没能添加 Java", body: "只能添加 java.exe 或 javaw.exe: D:\\Tools\\launcher.exe" },
+      { tone: "error", title: "没能添加 Java", body: "这个 Java 缺少 release、lib/modules，可能没装完整: D:\\broken\\jdk-21\\bin\\java.exe" },
+    ]);
+    expect(callsOf(ipc, "detect_java")).toHaveLength(1);
+    expect(document.querySelector(MANUAL_LIST)).toBeNull();
+  });
+
+  it("不完整的运行时：标「不完整」并写出缺的文件，单选项禁用；只有它时照样提示还缺这个主版本", async () => {
+    const broken = "D:\\Java\\jdk-21-partial\\bin\\java.exe";
+    await mockInvoke("add_java_path", { path: broken });
+    setMockJavaInstallations([installation(broken, 21, { source: "manual", missing_files: ["release", "lib/modules"] }), installation(JRE8, 8)]);
+    await mount("java");
+    const tile = radio("Java 21");
+    expect(tile.textContent).toContain("不完整");
+    expect(tile.textContent).toContain("缺少 release、lib/modules，自动选择会跳过它");
+    expect(tile.disabled).toBe(true);
+    expect(radio("Java 8").disabled).toBe(false);
+    expect(text()).toContain("还缺 Java 25、Java 21，首次启动对应实例时会自动下载。");
+    const row = manualRow(broken);
+    expect(row.textContent).toContain("Java 21 · Eclipse Adoptium 21.0.5");
+    expect(row.textContent).toContain("不完整");
+    await click(tile);
+    expect(callsOf(ipc, "update_config")).toEqual([]);
+  });
+
+  it("已经设为默认的不完整运行时照常显示为选中；改回自动选择之后就不能再选它", async () => {
+    const broken = "D:\\Java\\jdk-21-partial\\bin\\java.exe";
+    setMockJavaInstallations([installation(broken, 21, { missing_files: ["lib/modules"] }), installation(JRE8, 8)]);
+    await mockInvoke("update_config", { defaultJava: broken });
+    await mount("java");
+    expect(radio("Java 21").getAttribute("aria-checked")).toBe("true");
+    expect(radio("Java 21").disabled).toBe(false);
+    await click(radio("自动选择"));
+    expect(callsOf(ipc, "update_config")).toEqual([{ defaultJava: "auto" }]);
+    expect(radio("Java 21").disabled).toBe(true);
+  });
+
+  it("托管的 Java 不完整时不算装了，「下载」照常可点；完整的才带原因禁用", async () => {
+    const managed = "D:\\Games\\Launcher\\runtime\\25\\bin\\java.exe";
+    setMockJavaInstallations([installation(managed, 25, { source: "managed", missing_files: ["lib/modules"] })]);
+    await mount("java");
+    expect(button("要下载的主版本").textContent).toContain("Java 25");
+    expect(contentButton("下载").getAttribute("aria-disabled")).toBeNull();
+    setMockJavaInstallations([installation(managed, 25, { source: "managed" })]);
+    await click(button("重新扫描"));
+    expect(contentButton("下载").getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("移除手动添加的 Java：用 { path } 调 remove_java_path；移除的正是默认 Java 时默认改回自动选择并写明", async () => {
+    const plain = "D:\\Java\\jdk-17\\bin\\java.exe";
+    const pinned = "E:\\Portable\\jdk-25\\bin\\java.exe";
+    await mockInvoke("add_java_path", { path: plain });
+    await mockInvoke("add_java_path", { path: pinned });
+    await mockInvoke("update_config", { defaultJava: pinned });
+    await mount("java");
+    expect(radio("Java 25").getAttribute("aria-checked")).toBe("true");
+    expect(all(`${MANUAL_LIST} > li`)).toHaveLength(2);
+
+    await click(removeButton(plain));
+    expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: plain }]);
+    expect(toasts()).toContainEqual({ tone: "success", title: "已移除手动添加的 Java", body: undefined });
+    expect(all(`${MANUAL_LIST} > li`)).toHaveLength(1);
+    expect(radio("Java 25").getAttribute("aria-checked")).toBe("true");
+
+    await click(removeButton(pinned));
+    expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: plain }, { path: pinned }]);
+    expect(toasts()).toContainEqual({ tone: "success", title: "已移除手动添加的 Java", body: "默认 Java 改回了自动选择" });
+    expect(radio("自动选择").getAttribute("aria-checked")).toBe("true");
+    expect(document.querySelector(MANUAL_LIST)).toBeNull();
+    expect(text()).not.toContain(pinned);
+  });
+
+  it("手动添加的记录这次识别不出：标「识别不出」并说明，不进单选列表，照样可以移除", async () => {
+    const gone = "D:\\Java\\jdk-17\\bin\\java.exe";
+    await mockInvoke("add_java_path", { path: gone });
+    setMockJavaInstallations([installation(JRE8, 8)]);
+    await mount("java");
+    const row = manualRow(gone);
+    expect(row.textContent).toContain("识别不出");
+    expect(row.textContent).toContain("这个位置现在识别不出 Java，文件可能被移走了");
+    expect(all('[role="radio"]').some((r) => r.textContent?.includes(gone))).toBe(false);
+    await click(removeButton(gone));
+    expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: gone }]);
+    expect(document.querySelector(MANUAL_LIST)).toBeNull();
+  });
+
+  it("移除失败：报「没能移除 Java」、正文是原文，记录还在", async () => {
+    const path = "D:\\Java\\jdk-17\\bin\\java.exe";
+    await mockInvoke("add_java_path", { path });
+    ipc.overrides.set("remove_java_path", () => {
+      throw new IpcError("io", "写入 config.json 失败: 拒绝访问");
+    });
+    await mount("java");
+    await click(removeButton(path));
+    expect(toasts()).toContainEqual({ tone: "error", title: "没能移除 Java", body: "写入 config.json 失败: 拒绝访问" });
+    expect(manualRow(path).textContent).toContain("Java 17");
   });
 });
 

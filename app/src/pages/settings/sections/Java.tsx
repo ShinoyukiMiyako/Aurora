@@ -1,4 +1,5 @@
-// Java：自动下载开关、默认 Java（自动选择或固定一个探测到的运行时）、按条件出现的提醒，以及手动下载运行时。
+// Java：自动下载开关、默认 Java（自动选择或固定一个探测到的运行时）、手动添加与移除 Java、按条件出现的提醒、
+// 以及手动下载运行时。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { JAVA_AUTO, type InstanceSummary } from "../../../domain/adapt";
@@ -12,6 +13,7 @@ import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { EmptyState } from "../../../ui/EmptyState";
+import { List, ListRow } from "../../../ui/ListRow";
 import { RadioTile } from "../../../ui/RadioTile";
 import { Select } from "../../../ui/Select";
 import { SettingRow } from "../../../ui/SettingRow";
@@ -21,7 +23,20 @@ import { Toggle } from "../../../ui/Toggle";
 import { JAVA_SOURCE_LABEL } from "../../../copy/settings";
 import { JAVA_COPY, LOAD_COPY } from "../copy";
 import { InstanceStack } from "../InstanceStack";
-import { hasManaged, instancesNeeding, javaNotes, joinMajors, majorsInUse, scanDiff, sortRuntimes, type JavaNote } from "../java-model";
+import {
+  hasManaged,
+  instancesNeeding,
+  isComplete,
+  javaNotes,
+  joinMajors,
+  majorsInUse,
+  manualJavas,
+  scanDiff,
+  selectableAsDefault,
+  sortRuntimes,
+  type JavaNote,
+  type ManualJava,
+} from "../java-model";
 import { useOnline } from "../../../state/online";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
@@ -38,6 +53,11 @@ function RuntimeTitle({ runtime }: { runtime: JavaInstallationDto }) {
         {runtime.is_64bit ? JAVA_COPY.bits64 : JAVA_COPY.bits32}
       </Tag>
       <Tag size="sm">{JAVA_SOURCE_LABEL[runtime.source]}</Tag>
+      {!isComplete(runtime) && (
+        <Tag size="sm" tone="warn">
+          {JAVA_COPY.incomplete}
+        </Tag>
+      )}
     </span>
   );
 }
@@ -47,6 +67,7 @@ function RuntimeDetail({ runtime, instances }: { runtime: JavaInstallationDto; i
   return (
     <span className={s.runtimeDetail}>
       <span className={s.monoLine}>{runtime.path}</span>
+      {!isComplete(runtime) && <span className={s.warnLine}>{JAVA_COPY.missingFiles(runtime.missing_files)}</span>}
       <span className={s.usersLine}>
         {users.length > 0 ? (
           <>
@@ -132,9 +153,11 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
             value: runtime.path,
             title: <RuntimeTitle runtime={runtime} />,
             description: <RuntimeDetail runtime={runtime} instances={instances} />,
+            disabled: !selectableAsDefault(runtime, write.value),
           })),
         ]}
       />
+      <ManualBlock extraPaths={settings.extraJavaPaths} runtimes={runtimes} />
       {notes.map((note) => (
         <Callout key={note.kind} tone="warn" icon="alert" announce>
           {noteText(note)}
@@ -144,12 +167,99 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
   );
 }
 
+function ManualRow({ entry }: { entry: ManualJava }) {
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const [removing, setRemoving] = useState(false);
+  const runtime = entry.runtime;
+  // 移除只删记录、随时可以再加回来，所以不二次确认
+  const remove = async () => {
+    setRemoving(true);
+    const result = await run(() => actions.removeJavaPath(entry.path), JAVA_COPY.removeFailed);
+    setRemoving(false);
+    if (result.ok) actions.toast("success", JAVA_COPY.removed, result.value.default_reset ? JAVA_COPY.defaultReset : undefined);
+  };
+  return (
+    <ListRow
+      title={
+        <span className={s.manualPath} title={entry.path}>
+          {entry.path}
+        </span>
+      }
+      meta={
+        runtime === null ? (
+          <span className={s.manualMeta}>
+            <Tag size="sm" tone="warn">
+              {JAVA_COPY.unrecognized}
+            </Tag>
+            {JAVA_COPY.unrecognizedDesc}
+          </span>
+        ) : (
+          <span className={s.manualMeta}>
+            {JAVA_COPY.manualDetail(runtime.version.major, runtime.vendor, runtime.version.raw)}
+            {!isComplete(runtime) && (
+              <Tag size="sm" tone="warn">
+                {JAVA_COPY.incomplete}
+              </Tag>
+            )}
+          </span>
+        )
+      }
+      trailing={
+        <Button size="sm" variant="ghost" loading={removing} onClick={() => void remove()}>
+          {JAVA_COPY.remove}
+        </Button>
+      }
+    />
+  );
+}
+
+/** 手动添加的记录：探测里识别不出的也列在这里，用户才找得到、删得掉。 */
+function ManualBlock({ extraPaths, runtimes }: { extraPaths: readonly string[]; runtimes: readonly JavaInstallationDto[] }) {
+  if (extraPaths.length === 0) return null;
+  return (
+    <div className={s.manualBlock}>
+      <span className={s.subsectionText}>
+        <span className={s.subheading}>{JAVA_COPY.manualTitle}</span>
+        <span className={s.mutedText}>{JAVA_COPY.manualDesc}</span>
+      </span>
+      <List aria-label={JAVA_COPY.manualTitle}>
+        {manualJavas(extraPaths, runtimes).map((entry) => (
+          <ManualRow key={entry.path} entry={entry} />
+        ))}
+      </List>
+    </div>
+  );
+}
+
+/** 「添加 Java」：系统选择文件对话框选一个 java.exe / javaw.exe，交给后端识别；用户取消什么都不做。 */
+function useAddJava() {
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const { pickFile } = useShell();
+  const [adding, setAdding] = useState(false);
+  const add = async () => {
+    const picked = await run(() => pickFile("java"), JAVA_COPY.pickFailed);
+    if (!picked.ok || picked.value === null) return;
+    const path = picked.value;
+    setAdding(true);
+    const result = await run(() => actions.addJavaPath(path), JAVA_COPY.addFailed);
+    setAdding(false);
+    if (result.ok) {
+      const java = result.value;
+      actions.toast("success", JAVA_COPY.added(java.version.major), JAVA_COPY.addedBody(java.vendor, java.version.raw));
+    }
+  };
+  return { adding, add };
+}
+
 function RuntimeCard() {
   const settings = useLoadedSettings();
   const actions = useLauncherActions();
   const run = useRunner();
   const java = useJavaRuntimes();
   const { scanning, rescan } = useRescan(java);
+  const { adding, add } = useAddJava();
   const autoDownload = useSettingWrite(settings.autoDownloadJava, JAVA_COPY.autoDownload, (autoDownloadJava: boolean) => actions.updateSettings({ autoDownloadJava }));
 
   let body: ReactNode;
@@ -193,9 +303,14 @@ function RuntimeCard() {
         subtitle={JAVA_COPY.subtitle}
         icon="java"
         actions={
-          <Button size="sm" icon="refresh" loading={scanning} onClick={rescan}>
-            {JAVA_COPY.rescan}
-          </Button>
+          <>
+            <Button size="sm" icon="plus" loading={adding} onClick={() => void add()}>
+              {JAVA_COPY.add}
+            </Button>
+            <Button size="sm" icon="refresh" loading={scanning} onClick={rescan}>
+              {JAVA_COPY.rescan}
+            </Button>
+          </>
         }
       />
       <SettingRow title={JAVA_COPY.autoDownload} description={JAVA_COPY.autoDownloadDesc}>

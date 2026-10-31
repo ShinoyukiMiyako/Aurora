@@ -3,7 +3,19 @@ import { instanceFromDto } from "../../domain/adapt";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import { instanceDto } from "../../test/launcher";
 import { dirName, hasBang, normalizePath, overAvailable, samePath, unrecorded } from "./game-model";
-import { hasManaged, javaNotes, joinMajors, majorsInUse, missingMajors, scanDiff, selectedRuntime, sortRuntimes } from "./java-model";
+import {
+  hasManaged,
+  isComplete,
+  javaNotes,
+  joinMajors,
+  majorsInUse,
+  manualJavas,
+  missingMajors,
+  scanDiff,
+  selectableAsDefault,
+  selectedRuntime,
+  sortRuntimes,
+} from "./java-model";
 
 function runtime(path: string, major: number, overrides: Partial<JavaInstallationDto> = {}): JavaInstallationDto {
   return {
@@ -61,6 +73,31 @@ describe("Java 分区推导", () => {
     const list = [runtime("a", 21), runtime("b", 17, { source: "managed" })];
     expect(hasManaged(list, 21)).toBe(false);
     expect(hasManaged(list, 17)).toBe(true);
+  });
+
+  it("不完整的运行时：不算已有的主版本、不算装了托管的，只有当前默认值才能留在可选里", () => {
+    const broken = runtime("C:/rt/21/bin/java.exe", 21, { source: "managed", missing_files: ["release", "lib/modules"] });
+    const complete = runtime("C:/jdk8/bin/java.exe", 8);
+    expect(isComplete(broken)).toBe(false);
+    expect(isComplete(complete)).toBe(true);
+    expect(missingMajors(instances, [broken, complete])).toEqual([25, 21]);
+    expect(javaNotes("auto", [broken, complete], instances, true)).toEqual([{ kind: "missing", majors: [25, 21], autoDownload: true }]);
+    expect(hasManaged([broken], 21)).toBe(false);
+    expect(selectableAsDefault(broken, "auto")).toBe(false);
+    expect(selectableAsDefault(broken, broken.path)).toBe(true);
+    expect(selectableAsDefault(complete, "auto")).toBe(true);
+  });
+
+  it("手动添加的记录按路径不分大小写配上探测结果，配不上的识别不出", () => {
+    const found = runtime("D:\\Java\\JDK-17\\bin\\java.exe", 17, { source: "manual" });
+    const managed = runtime("D:\\Games\\runtime\\21\\bin\\java.exe", 21, { source: "managed" });
+    const entries = manualJavas(["d:\\java\\jdk-17\\bin\\java.exe", "E:\\gone\\bin\\java.exe", "D:\\Games\\runtime\\21\\bin\\java.exe"], [found, managed]);
+    expect(entries).toEqual([
+      { path: "d:\\java\\jdk-17\\bin\\java.exe", runtime: found },
+      { path: "E:\\gone\\bin\\java.exe", runtime: null },
+      { path: "D:\\Games\\runtime\\21\\bin\\java.exe", runtime: managed },
+    ]);
+    expect(manualJavas([], [found])).toEqual([]);
   });
 
   it("重新扫描的差异按路径比较", () => {
