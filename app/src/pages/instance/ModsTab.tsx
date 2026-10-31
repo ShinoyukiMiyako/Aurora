@@ -27,7 +27,7 @@ import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
 import { Tooltip } from "../../ui/Tooltip";
-import { MODS_COPY, SOURCE_LABEL } from "./copy";
+import { LOCK_REASON, MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
 import { disabledFileName, enabledFileName, filterMods, isPendingModUpdate, modCounts, modRows, modTotals, removalRelations, updateTaskFiles, type ModFilter, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
@@ -87,6 +87,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const searchRef = useRef<HTMLInputElement>(null);
   const id = inst.id;
   const lock = lockReason(ops.locks.mods, "mods");
+  // 检查更新会把反查到的身份回写卷宗，后端照改动 Mod 占住实例：与安装、补全、改名、删除互斥，游戏运行不挡
+  const checkReason = ops.work === null ? undefined : LOCK_REASON.work.checkUpdates[ops.work];
 
   useEffect(() => registerFind(() => searchRef.current?.focus()), [registerFind]);
 
@@ -240,7 +242,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
               {MODS_COPY.updateAll(counts.outdated)}
             </Button>
           ) : (
-            <Button icon="download" loading={checkLoading} disabled={queryId === null} onClick={checkUpdates}>
+            <Button icon="download" loading={checkLoading} disabled={queryId === null} disabledReason={checkReason} onClick={checkUpdates}>
               {MODS_COPY.checkUpdates}
             </Button>
           )}

@@ -858,6 +858,18 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
   });
 
+  it("补全进行中：Mod 标签的「检查更新」带原因禁用，点了不再查", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
+    await open("mods");
+    // 检查更新会把反查到的身份回写卷宗，后端照改动 Mod 占住实例，与补全互斥
+    const asked = callsOf(ipc, "check_updates").length;
+    const check = button("检查更新");
+    await expectLockedWith(check, "安装任务正在写这个实例的文件夹，完成后才能检查更新");
+    click(check);
+    await flush();
+    expect(callsOf(ipc, "check_updates")).toHaveLength(asked);
+  });
+
   it("崩溃诊断：补全进行中改实例设置的一键尝试带原因禁用", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "repairing" } : i));
     await open("crash");

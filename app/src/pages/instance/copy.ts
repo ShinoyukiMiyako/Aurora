@@ -68,6 +68,11 @@ export const LOCK_REASON = {
       renaming: "正在重命名这个实例，完成后才能改设置",
       deleting: "正在删除这个实例",
     },
+    checkUpdates: {
+      installing: "安装任务正在写这个实例的文件夹，完成后才能检查更新",
+      renaming: "正在重命名这个实例，完成后才能检查更新",
+      deleting: "正在删除这个实例",
+    },
   },
 } as const;
 
