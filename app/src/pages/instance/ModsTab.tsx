@@ -9,7 +9,7 @@ import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
-import { useInstanceMods, type UpdateCandidate } from "../../state/queries/instance";
+import { useInstanceMods, type InstalledMod, type UpdateCandidate } from "../../state/queries/instance";
 import { invalidate, type ResourceResult } from "../../state/resource";
 import { progressTrack } from "../../state/tasks";
 import { Banner } from "../../ui/Banner";
@@ -79,6 +79,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const [sort, setSort] = useState<TableSort>({ key: "mod", direction: "asc" });
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const [toggling, setToggling] = useState<ReadonlySet<string>>(new Set());
+  // 启停成功后、重扫回来之前，行还是按旧文件名画的，盘上的文件已经改了名：记下新名字，只对记下时的那份列表有效。
+  // 否则这期间再点开关或移除，会拿旧名字去调后端：启停对着不存在的旧名是空转（后端照成功返回），移除直接报找不到文件
+  const [renamed, setRenamed] = useState<{ base: readonly InstalledMod[] | null; names: ReadonlyMap<string, string> }>({ base: null, names: new Map() });
   const [checking, setChecking] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const id = inst.id;
@@ -127,11 +131,27 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const { total, partial } = modTotals(inst, rows.length);
   const shownTotal = mods.status === "ready" ? total : inst.modCount;
   const isUpdating = (r: ModRow) => pending.has(r.fileName) || updatingFiles.has(enabledFileName(r.fileName));
+  const isToggling = (r: ModRow) => toggling.has(r.fileName);
+  const diskName = (r: ModRow): string => {
+    if (renamed.base !== modsData) return r.fileName;
+    const name = renamed.names.get(r.fileName);
+    return name === undefined ? r.fileName : name;
+  };
 
   const toggle = (r: ModRow) => {
+    // 上一次启停还没回来时不知道盘上是哪个名字，开关已带原因禁用，这里是第二道防线
+    if (toggling.has(r.fileName)) return;
     const next = !r.enabled;
+    const fileName = diskName(r);
+    const base = modsData;
     setOverrides((m) => new Map(m).set(r.fileName, next));
-    void run(() => actions.toggleMod(id, r.fileName, next), ACTION_ERROR.toggleMod).then((outcome) => {
+    setToggling((s) => new Set(s).add(r.fileName));
+    void run(() => actions.toggleMod(id, fileName, next), ACTION_ERROR.toggleMod).then((outcome) => {
+      setToggling((s) => {
+        const rest = new Set(s);
+        rest.delete(r.fileName);
+        return rest;
+      });
       if (!outcome.ok) {
         setOverrides((m) => {
           const copy = new Map(m);
@@ -140,8 +160,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         });
         return;
       }
+      const landed = next ? enabledFileName(fileName) : disabledFileName(fileName);
+      setRenamed((prev) => ({ base, names: new Map(prev.base === base ? prev.names : []).set(r.fileName, landed) }));
       if (next) actions.toast("info", MODS_COPY.enabledToast(r.name));
-      else actions.toast("info", MODS_COPY.disabledToast(r.name), MODS_COPY.disabledToastBody(disabledFileName(r.fileName)));
+      else actions.toast("info", MODS_COPY.disabledToast(r.name), MODS_COPY.disabledToastBody(landed));
     });
   };
 
@@ -170,19 +192,20 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const remove = (r: ModRow) => {
     void (async () => {
       const relations = removalRelations(r, rows);
+      const fileName = diskName(r);
       const ok = await confirm({
         title: MODS_COPY.removeTitle(r.name),
         tone: "danger",
         confirmLabel: MODS_COPY.removeConfirm,
         body: (
           <div className={styles.confirmBody}>
-            <p>{MODS_COPY.removeBody(r.fileName, r.size)}</p>
+            <p>{MODS_COPY.removeBody(fileName, r.size)}</p>
             {relations.broughtIn.length > 0 && <p>{MODS_COPY.removeBroughtIn(relations.broughtIn)}</p>}
             {relations.dependents.length > 0 && <p>{MODS_COPY.removeDependents(relations.dependents)}</p>}
           </div>
         ),
       });
-      if (ok) await run(() => actions.removeMod(id, r.fileName, r.name), ACTION_ERROR.removeMod);
+      if (ok) await run(() => actions.removeMod(id, fileName, r.name), ACTION_ERROR.removeMod);
     })();
   };
 
@@ -193,7 +216,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
   const checkLoading = checking || updates.status === "loading" || updates.refreshing;
   const compact = tier === "compact";
-  const columns = modColumns({ compact, lock, isUpdating, toggle, update, remove });
+  const columns = modColumns({ compact, lock, isUpdating, isToggling, toggle, update, remove });
 
   return (
     <div className={styles.stack}>
@@ -338,6 +361,7 @@ interface ColumnDeps {
   compact: boolean;
   lock: string | undefined;
   isUpdating(r: ModRow): boolean;
+  isToggling(r: ModRow): boolean;
   toggle(r: ModRow): void;
   update(r: ModRow): void;
   remove(r: ModRow): void;
@@ -357,7 +381,8 @@ function SourceTag({ row }: { row: ModRow }) {
   );
 }
 
-function modColumns({ compact, lock, isUpdating, toggle, update, remove }: ColumnDeps): TableColumn<ModRow>[] {
+function modColumns({ compact, lock, isUpdating, isToggling, toggle, update, remove }: ColumnDeps): TableColumn<ModRow>[] {
+  const toggleReason = (r: ModRow): string | undefined => (lock !== undefined ? lock : isToggling(r) ? MODS_COPY.togglePending : undefined);
   return [
     {
       key: "mod",
@@ -416,14 +441,16 @@ function modColumns({ compact, lock, isUpdating, toggle, update, remove }: Colum
       sortable: true,
       keepOpaque: true,
       // 锁住时开关自己用提示气泡写禁用原因；可用时悬停说明点了是停用还是启用
-      cell: (r) =>
-        lock === undefined ? (
+      cell: (r) => {
+        const reason = toggleReason(r);
+        return reason === undefined ? (
           <Tooltip content={MODS_COPY.toggleTip(r.enabled)}>
             <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} />
           </Tooltip>
         ) : (
-          <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={lock} />
-        ),
+          <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={reason} />
+        );
+      },
     },
     {
       key: "actions",

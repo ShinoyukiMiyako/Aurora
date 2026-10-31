@@ -1172,6 +1172,58 @@ describe("实例详情：Mod 管理", () => {
     expect(search.value).toBe("");
   });
 
+  it("停用后列表还没重扫回来又点回启用：按盘上已改好的文件名调后端，不对着旧名空转", async () => {
+    ipc.overrides.set("set_mod_enabled", (args) => {
+      const fileName = String(args.fileName);
+      return args.enabled === true ? fileName.replace(/\.disabled$/, "") : `${fileName}.disabled`;
+    });
+    await open("mods");
+    // 扫 mods 目录要读每个 jar 的元数据，大实例要好一阵：重扫期间行还是旧的 sodium.jar，开关是乐观值
+    const rescan = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => rescan.promise);
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    click(byRole("switch", "启用 Sodium"));
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toEqual([
+      { versionId: ID, fileName: "sodium.jar", enabled: false },
+      { versionId: ID, fileName: "sodium.jar.disabled", enabled: true },
+    ]);
+    expect(toastTitles()).toEqual(expect.arrayContaining(["已停用 Sodium", "已启用 Sodium"]));
+  });
+
+  it("停用后列表还没重扫回来就移除：确认框与后端都用盘上改好的文件名", async () => {
+    await open("mods");
+    const rescan = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => rescan.promise);
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    click(button("移除 Sodium"));
+    await flush();
+    expect(dialog().textContent).toContain("会删除 sodium.jar.disabled（1.2 MB），这一步不能回滚。");
+    click(button("移除", dialog()));
+    await flush();
+    expect(callsOf(ipc, "remove_mod")).toEqual([{ versionId: ID, fileName: "sodium.jar.disabled" }]);
+  });
+
+  it("停用请求还没回来时开关带原因禁用：第二下不发命令", async () => {
+    await open("mods");
+    const pending = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => pending.promise);
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    const toggle = byRole("switch", "启用 Sodium");
+    expect(toggle.getAttribute("aria-disabled")).toBe("true");
+    click(toggle);
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toHaveLength(1);
+    await act(async () => {
+      pending.resolve("sodium.jar.disabled");
+      await settle(20);
+    });
+    expect(byRole("switch", "启用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("自建实例的列表就是全部：摘要数与列表对不上时以列表为准，不说「其余由整合包统一管理」", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: 12 } : i));
     await open("mods");
