@@ -45,6 +45,10 @@ export type AuthErrorCode =
   | "XstsChildAccount"
   | "XstsUnknown"
   | "MinecraftProfileNotFound"
+  /** 微软一侧服务故障（5xx、429 或故障页），已按退避重试过；detail 为 { step: string; status: number }。 */
+  | "ServiceUnavailable"
+  /** Minecraft 服务拒绝了启动器所用的微软应用（client_id 未获批准）；没有 detail，重试只会得到同样的结果。 */
+  | "AppNotApproved"
   | "ReloginRequired"
   | "InvalidUsername"
   | "Yggdrasil"

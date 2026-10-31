@@ -1,4 +1,4 @@
-import type { AccountDto, AuthlibLoginResult, AuthServerDto, DeviceCode } from "../../accounts";
+import type { AccountDto, AccountStatus, AuthlibLoginResult, AuthServerDto, DeviceCode } from "../../accounts";
 import { IpcError } from "../../errors";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
@@ -350,6 +350,15 @@ export function hasMockAccount(uuid: string): boolean {
 
 export function isMockOfflineAccount(uuid: string): boolean {
   return store.offline.some((a) => a.uuid === uuid);
+}
+
+/** 给启动 mock 判定能否以离线方式进单人：账户名、是不是离线账户、登录是否已被判定失效。 */
+export function mockAccountFacts(uuid: string): { name: string; offline: boolean; status: AccountStatus } {
+  const offline = store.offline.find((a) => a.uuid === uuid);
+  if (offline !== undefined) return { name: offline.name, offline: true, status: offline.status };
+  const credential = store.credential.find((a) => a.uuid === uuid);
+  if (credential === undefined) throw new Error(`mock 里没有账户 ${uuid}`);
+  return { name: credential.name, offline: false, status: credential.status };
 }
 
 export function reset(): void {
