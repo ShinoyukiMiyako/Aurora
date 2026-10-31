@@ -356,11 +356,19 @@ fn resource_pack_order(options: &Path) -> Result<Vec<String>> {
         path: options.to_path_buf(),
         source,
     })?;
+    // 1.13 起本地资源包写成 `file/<文件名>`，没有前缀的是 `vanilla` 这类内置包；1.12.2 及更早只写
+    // 文件名、列表里不会有内置包。所以列表里一个带前缀的都没有时，按旧写法整份当文件名。
+    if !names.iter().any(|n| n.starts_with(PACK_FILE_PREFIX)) {
+        return Ok(names);
+    }
     Ok(names
         .into_iter()
-        .filter_map(|n| n.strip_prefix("file/").map(str::to_owned))
+        .filter_map(|n| n.strip_prefix(PACK_FILE_PREFIX).map(str::to_owned))
         .collect())
 }
+
+/// 1.13 起 `options.txt` 启用列表里本地资源包的 id 前缀。
+const PACK_FILE_PREFIX: &str = "file/";
 
 /// 当前启用的光影包文件名：Iris（及其 Forge 移植 Oculus）记在 `config/<mod>.properties`，
 /// OptiFine 记在 `optionsshaders.txt`。Iris 的配置优先：两者同时存在时游戏实际用的是 Iris。
@@ -656,6 +664,56 @@ mod tests {
         assert_eq!(unescape_property(r"樱花 Shaders.zip"), "樱花 Shaders.zip");
         assert_eq!(unescape_property(r"a\:b\=c\\d"), "a:b=c\\d");
         assert_eq!(unescape_property(r"bad\uZZ"), r"bad\uZZ");
+    }
+
+    /// 1.13 起启用列表里的本地资源包写成 `file/<文件名>`，内置包是 `vanilla` 之类的 id；1.12.2 及更早
+    /// 只写文件名、没有前缀。两种写法都要认出启用顺序。
+    #[test]
+    fn resource_pack_order_reads_both_prefixed_and_legacy_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("options.txt");
+        std::fs::write(
+            &path,
+            "resourcePacks:[\"Faithful 32x - 1.12.2.zip\",\"樱花材质\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resource_pack_order(&path).unwrap(),
+            vec!["Faithful 32x - 1.12.2.zip", "樱花材质"]
+        );
+
+        std::fs::write(
+            &path,
+            "resourcePacks:[\"vanilla\",\"file/Fresh.zip\",\"fabric\",\"file/Folder Pack\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resource_pack_order(&path).unwrap(),
+            vec!["Fresh.zip", "Folder Pack"]
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_options_mark_enabled_packs_in_their_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path();
+        write(&wd.join("resourcepacks").join("A.zip"), b"x");
+        write(&wd.join("resourcepacks").join("B.zip"), b"x");
+        write(&wd.join("resourcepacks").join("C.zip"), b"x");
+        write(
+            &wd.join("options.txt"),
+            b"invertYMouse:false\nresourcePacks:[\"C.zip\",\"A.zip\"]\nincompatibleResourcePacks:[]\n",
+        );
+        let content = read_instance_content(wd).await.unwrap();
+        let order: Vec<(&str, Option<u32>)> = content
+            .resource_packs
+            .iter()
+            .map(|r| (r.pack.file_name.as_str(), r.load_order))
+            .collect();
+        assert_eq!(
+            order,
+            vec![("A.zip", Some(2)), ("B.zip", None), ("C.zip", Some(1))]
+        );
     }
 
     #[test]
