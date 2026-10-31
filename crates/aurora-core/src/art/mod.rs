@@ -4,6 +4,7 @@
 //! 回落是设计内的正常路径，不打断用户，但每次回落的原因都以 warn 写进日志。
 //!
 //! - [`whitelist`]：允许读取的文件名单（17 张方块面 + 20 张默认皮肤）。
+//! - [`default_skin`]：没有自定义皮肤的玩家（离线账户）在原版里显示哪一套默认皮肤。
 //! - 材质源：候选游戏目录里最新的可信原版客户端 jar（选择规则见 `source`）。
 //! - 磁盘缓存：选中材质源后把名单内文件一次抽到 `<缓存目录>/vanilla-art/<版本>/`。
 //! - 全景：只认一张固定哈希的资源对象，直接从 `assets/objects` 读。
@@ -11,6 +12,7 @@
 //!
 //! [`TextureService`] 不依赖门面锁：长任务持锁时取图照常。它可以廉价克隆（内部是 `Arc`）。
 
+pub mod default_skin;
 mod disk_cache;
 mod image_rules;
 mod lru;
@@ -24,6 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aurora_auth::{SkinModel, SkinRef};
 
+pub use default_skin::{DefaultSkin, default_skin};
 pub use remote::{THUMB_HOSTS, ThumbError};
 pub use source::{JarOpener, default_opener};
 

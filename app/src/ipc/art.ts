@@ -20,13 +20,13 @@ export interface ArtStatusDto {
 
 export type SkinModel = "wide" | "slim";
 
-/** 远程皮肤就绪：sha1 是协议里皮肤路径的键，hat 表示头像要不要叠帽子层。 */
-export interface SkinInfoDto {
-  kind: "remote";
-  sha1: string;
-  model: SkinModel;
-  hat: boolean;
-}
+/**
+ * 远程皮肤就绪：sha1 是协议里皮肤路径的键，hat 表示头像要不要叠帽子层。
+ * 离线账户：它进游戏后显示的原版默认皮肤，path 在下面的默认皮肤名单里，从本机游戏文件读。
+ */
+export type SkinInfoDto =
+  | { kind: "remote"; sha1: string; model: SkinModel; hat: boolean }
+  | { kind: "default"; path: SkinTexture; model: SkinModel };
 
 // 下面两份名单与后端逐项一致（后端测试读本文件比对），名单外的路径后端一律以 400 拒绝。
 
@@ -92,7 +92,7 @@ export const THUMB_HOSTS = ["cdn.modrinth.com", "media.forgecdn.net", "launcherc
 /** 只读内存。应先订阅 onArtChanged 再调用，避免漏掉启动时那次刷新带来的变化。 */
 export const artStatus = (): Promise<ArtStatusDto> => invoke<ArtStatusDto>("art_status");
 
-/** 账户当前皮肤；离线账户、档案没有皮肤或下载失败时为 null（画剪影）。账户不存在报 AccountNotFound。 */
+/** 账户当前皮肤；离线账户给默认皮肤，正版与外置账户档案没有皮肤或下载失败时为 null（画剪影）。账户不存在报 AccountNotFound。 */
 export const skinInfo = (accountUuid: string): Promise<SkinInfoDto | null> =>
   invoke<SkinInfoDto | null>("skin_info", { accountUuid });
 

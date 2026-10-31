@@ -103,7 +103,9 @@ pub use updates::UpdateCandidate;
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
-pub use art::{ArtStatus, SkinInfo, TexResponse, TextureService, ThumbError};
+pub use art::{
+    ArtStatus, DefaultSkin, SkinInfo, TexResponse, TextureService, ThumbError, default_skin,
+};
 pub use auth::{AuthServerInfo, AuthlibLogin, AuthlibPending};
 
 // ---- 透传下层类型，让上层只依赖本 crate ----

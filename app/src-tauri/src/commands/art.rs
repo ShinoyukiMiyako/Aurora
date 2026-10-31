@@ -1,7 +1,9 @@
 //! 原版材质服务的命令：状态查询、账户皮肤、远程缩略图登记。图本身经 `aurora-tex` 协议取
 //! （见 [`crate::textures`]），这里只回答「有没有、用哪个键去取」。
 
-use aurora_core::{ArtStatus, SkinInfo, SkinModel, TextureService, ThumbError};
+use aurora_core::{
+    default_skin, Account, AccountType, ArtStatus, SkinInfo, SkinModel, TextureService, ThumbError,
+};
 use serde::Serialize;
 use serde_json::json;
 use tauri::State;
@@ -35,7 +37,8 @@ impl From<ArtStatus> for ArtStatusDto {
     }
 }
 
-/// 账户皮肤 DTO。`sha1` 用来拼协议地址 `/skin/<sha1>.png`。
+/// 账户皮肤 DTO。远程皮肤的 `sha1` 用来拼协议地址 `/skin/<sha1>.png`；默认皮肤的 `path` 是材质名单里的
+/// 路径，经 `/art/<path>.png` 从本机游戏文件读。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SkinInfoDto {
@@ -44,6 +47,10 @@ pub enum SkinInfoDto {
         model: SkinModel,
         /// 头像是否叠帽子层。
         hat: bool,
+    },
+    Default {
+        path: &'static str,
+        model: SkinModel,
     },
 }
 
@@ -98,8 +105,8 @@ pub async fn art_status(textures: State<'_, TextureService>) -> Result<ArtStatus
     Ok(textures.status().into())
 }
 
-/// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；离线账户、档案没有皮肤或下载失败时为 null，
-/// 界面画剪影（离线账户的原版默认皮肤推算规则尚未定稿，暂不提供）。
+/// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；离线账户返回它进游戏后显示的原版默认皮肤；
+/// 正版与外置账户档案没有皮肤或下载失败时为 null，界面画剪影。
 #[tauri::command]
 pub async fn skin_info(
     account_uuid: String,
@@ -110,10 +117,28 @@ pub async fn skin_info(
     let account = with_accounts(&facade, move |aurora| aurora.find_account(&lookup))
         .await?
         .ok_or_else(|| CommandError::from(aurora_core::AuthError::AccountNotFound(account_uuid)))?;
-    let Some(skin) = account.skin else {
-        return Ok(None);
+    let Some(skin) = account.skin.as_ref() else {
+        return skin_without_profile(&account);
     };
-    Ok(textures.skin_info(&skin).await.as_ref().map(skin_info_dto))
+    Ok(textures.skin_info(skin).await.as_ref().map(skin_info_dto))
+}
+
+/// 账户记录里没有远程皮肤时画什么。离线账户永远没有自定义皮肤，进游戏看到的必是按 UUID 选出的默认皮肤；
+/// 正版与外置账户没有皮肤也可能只是档案还没取到，按默认皮肤画会冒充它的真实外观，所以留给界面画剪影。
+fn skin_without_profile(account: &Account) -> Result<Option<SkinInfoDto>, CommandError> {
+    if account.account_type != AccountType::Offline {
+        return Ok(None);
+    }
+    let skin = default_skin(&account.uuid).ok_or_else(|| {
+        CommandError::new(
+            code::INTERNAL,
+            format!("离线账户的 UUID 不是 32 位十六进制：{}", account.uuid),
+        )
+    })?;
+    Ok(Some(SkinInfoDto::Default {
+        path: skin.path,
+        model: skin.model,
+    }))
 }
 
 /// 登记一张远程缩略图：下载并缓存后返回取图键，前端再经 `/thumb/<键>` 取图。
@@ -162,6 +187,61 @@ mod tests {
                 "model": "slim",
                 "hat": true
             })
+        );
+    }
+
+    #[test]
+    fn offline_account_without_skin_gets_its_in_game_default() {
+        // Steve 的离线 UUID 5627dd98-e6be-3c21-b8a8-e92344183641：原版里是宽臂 Efe
+        let steve = aurora_core::Account::new(
+            "5627dd98e6be3c21b8a8e92344183641",
+            "Steve",
+            aurora_core::AccountCredentials::Offline,
+        );
+        let dto = skin_without_profile(&steve).unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(dto).unwrap(),
+            json!({ "kind": "default", "path": "entity/player/wide/efe", "model": "wide" })
+        );
+
+        let alex = aurora_core::Account::new(
+            "36532b5ec4423dbba24cc7e55d0f979a",
+            "Alex",
+            aurora_core::AccountCredentials::Offline,
+        );
+        assert_eq!(
+            skin_without_profile(&alex).unwrap(),
+            Some(SkinInfoDto::Default {
+                path: "entity/player/slim/makena",
+                model: SkinModel::Slim,
+            })
+        );
+    }
+
+    #[test]
+    fn online_account_without_skin_stays_a_silhouette() {
+        let account = aurora_core::Account::new(
+            "5627dd98e6be3c21b8a8e92344183641",
+            "Steve",
+            aurora_core::AccountCredentials::Microsoft(aurora_core::MicrosoftCredentials {
+                refresh_token: "r".into(),
+                minecraft_token: None,
+                minecraft_expires_at: None,
+            }),
+        );
+        assert_eq!(skin_without_profile(&account).unwrap(), None);
+    }
+
+    #[test]
+    fn offline_account_with_a_broken_uuid_fails_loudly() {
+        let account = aurora_core::Account::new(
+            "not-a-uuid",
+            "Steve",
+            aurora_core::AccountCredentials::Offline,
+        );
+        assert_eq!(
+            skin_without_profile(&account).unwrap_err().code,
+            code::INTERNAL
         );
     }
 

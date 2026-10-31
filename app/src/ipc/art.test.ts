@@ -1,7 +1,9 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { defaultSkin } from "../flows/login/default-skin";
 import { artStatus, BLOCK_TEXTURES, isArtPath, onArtChanged, SKIN_TEXTURES, skinInfo, THUMB_HOSTS, thumbRegister, type ArtStatusDto } from "./art";
+import { createOfflineAccount } from "./accounts";
 import { IpcError } from "./errors";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
@@ -69,11 +71,19 @@ describe("材质 mock", () => {
     expect((await artStatus()).source).toBeNull();
   });
 
-  it("皮肤：存在的账户回 null（画剪影），未知账户报 AccountNotFound", async () => {
+  it("皮肤：正版账户回 null（画剪影），未知账户报 AccountNotFound", async () => {
     expect(await skinInfo("6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20")).toBeNull();
     const missing = await rejection(skinInfo("0".repeat(32)));
     expect(missing.code).toBe("AccountNotFound");
     expect(missing.detail).toEqual({ uuid: "0".repeat(32) });
+  });
+
+  it("皮肤：离线账户与后端一样给它进游戏后的默认皮肤，路径在默认皮肤名单里", async () => {
+    const account = await createOfflineAccount("Steve");
+    const skin = await skinInfo(account.uuid);
+    if (skin === null || skin.kind !== "default") throw new Error(`离线账户应有默认皮肤：${JSON.stringify(skin)}`);
+    expect(skin).toEqual(defaultSkin(account.uuid));
+    expect(SKIN_TEXTURES).toContain(skin.path);
   });
 
   it("缩略图：名单内主机返回地址的 SHA-1 作键", async () => {

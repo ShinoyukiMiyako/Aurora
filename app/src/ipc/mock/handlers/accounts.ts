@@ -345,6 +345,10 @@ export function hasMockAccount(uuid: string): boolean {
   return store.credential.some((a) => a.uuid === uuid) || store.offline.some((a) => a.uuid === uuid);
 }
 
+export function isMockOfflineAccount(uuid: string): boolean {
+  return store.offline.some((a) => a.uuid === uuid);
+}
+
 export function reset(): void {
   // 只停计时不拒绝：上一个用例留下的登录 Promise 没人等，拒绝它只会变成未处理的 rejection。
   if (activeLogin) clearTimeout(activeLogin.timer);
