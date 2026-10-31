@@ -35,6 +35,7 @@ const renders = vi.hoisted(() => ({
   SettingsTab: 0,
   LogsTab: 0,
   CrashTab: 0,
+  InstallStageTab: 0,
   LogConsole: 0,
   /** 变更历史卡：每次渲染调用一次 useHistory。 */
   HistoryCard: 0,
@@ -74,6 +75,10 @@ vi.mock("./LogsTab", async (orig) => {
 vi.mock("./CrashTab", async (orig) => {
   const mod = await orig<typeof import("./CrashTab")>();
   return { ...mod, CrashTab: counted("CrashTab", mod.CrashTab) };
+});
+vi.mock("./InstallStage", async (orig) => {
+  const mod = await orig<typeof import("./InstallStage")>();
+  return { ...mod, InstallStageTab: counted("InstallStageTab", mod.InstallStageTab) };
 });
 vi.mock("../../ui/Tabs", async (orig) => {
   const mod = await orig<typeof import("../../ui/Tabs")>();
@@ -353,6 +358,30 @@ describe("实例详情：本实例的进度在走", () => {
       const banner = OVERVIEW_COPY.installProgress("50%", formatSpeed(1_000_000), formatBytes(40_000));
       expect(document.body.textContent).toContain(banner);
     }
+    expect(renders).toEqual(before);
+  });
+
+  it.each<InstanceTab>(["overview", "settings"])("%s 标签：新建还没装好，20 次下载进度，头图、标签条与安装说明不重渲染，横幅与头图标签的百分比照常走", async (tab) => {
+    const name = "周末生存";
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.createInstance({ name, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "cherry_planks" });
+      await settle(20);
+    });
+    act(() => nav.go({ page: "instance", id: name, tab }));
+    await flush();
+    const task = launcher.state.tasks.find((t) => t.instanceId === name);
+    if (task === undefined || task.status !== "running") throw new Error("新建任务应在进行中");
+    expect(renders.InstallStageTab).toBeGreaterThan(0);
+    const before = { ...renders };
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: i, bytes: i * 1000, total_bytes: 40_000, speed: 1_000_000 });
+      });
+    }
+    expect(document.body.textContent).toContain(HERO_COPY.installing("50%"));
+    if (tab === "overview") expect(document.body.textContent).toContain(OVERVIEW_COPY.installProgress("50%", formatSpeed(1_000_000), formatBytes(40_000)));
     expect(renders).toEqual(before);
   });
 
