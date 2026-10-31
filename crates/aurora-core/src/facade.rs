@@ -272,6 +272,13 @@ impl Aurora {
         self.config.default_java = java;
     }
 
+    /// 设置启动前是否把这次用的 Java 设为 Windows 图形设置里的「高性能」。
+    ///
+    /// 关掉时不撤销已经写进 Windows 的值：那里分不出是谁写的，可能是用户自己在系统设置里改的。
+    pub fn set_prefer_dedicated_gpu(&mut self, enabled: bool) {
+        self.config.prefer_dedicated_gpu = enabled;
+    }
+
     /// 记下用户跳过的启动器版本。
     pub fn set_skipped_update_version(&mut self, version: Option<String>) {
         self.config.skipped_update_version = version;
@@ -516,6 +523,12 @@ mod tests {
 
         aurora.set_default_java(None);
         assert!(aurora.config().default_java.is_none());
+
+        assert!(!aurora.config().prefer_dedicated_gpu);
+        aurora.set_prefer_dedicated_gpu(true);
+        assert!(aurora.config().prefer_dedicated_gpu);
+        aurora.set_prefer_dedicated_gpu(false);
+        assert!(!aurora.config().prefer_dedicated_gpu);
     }
 
     #[test]
