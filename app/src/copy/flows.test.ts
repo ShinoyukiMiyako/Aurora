@@ -3,7 +3,7 @@ import { FAILURE_CODES, type FailureCode } from "../domain/types";
 import { APP_NAME } from "../lib/app-info";
 import { failureCopy, microsoftLoginFailure, TOAST_COPY, type FailureContext } from "./flows";
 
-/** 文案禁用词：语气词、客套、错别字与旧称。 */
+/** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
 const BANNED = [
   "您",
   "请稍候",
@@ -12,6 +12,30 @@ const BANNED = [
   "操作失败",
   "未知错误",
   "发生错误",
+  "确定",
+  "OK",
+  "好的",
+  "导致",
+  "引起",
+  "造成",
+  "元凶",
+  "罪魁祸首",
+  "问题出在",
+  "崩溃原因是",
+  "一键修复",
+  "敬请期待",
+  "即将推出",
+  "Coming soon",
+  "MOD",
+  "mod",
+  "Mojang 账户",
+  "MSA",
+  "盗版",
+  "本地账户",
+  "离线模式账户",
+  "第三方登录",
+  "验证码",
+  "授权码",
   "抱歉",
   "对不起",
   "哎呀",
@@ -61,6 +85,7 @@ describe("禁用词扫描本身", () => {
   it("能扫出语气词、客套与旧称，干净的句子扫不出东西", () => {
     expect(bannedIn(["请稍候，操作成功！", null, "已登录 Steve"])).toEqual(["请稍候：请稍候，操作成功！", "操作成功：请稍候，操作成功！", "！：请稍候，操作成功！"]);
     expect(bannedIn(["账号登陆失败"])).toEqual(["账号：账号登陆失败", "登陆：账号登陆失败"]);
+    expect(bannedIn(["一键修复 MOD 导致的问题", "Mod 已装好"])).toEqual(["导致：一键修复 MOD 导致的问题", "一键修复：一键修复 MOD 导致的问题", "MOD：一键修复 MOD 导致的问题"]);
   });
 });
 
