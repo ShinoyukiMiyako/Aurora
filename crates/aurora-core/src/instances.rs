@@ -882,6 +882,8 @@ pub(crate) mod tests {
                 java: None,
                 max_memory_mb: None,
                 warnings: Vec::new(),
+                exit_code_note: None,
+                scanned_files: Vec::new(),
             },
         )
         .await
