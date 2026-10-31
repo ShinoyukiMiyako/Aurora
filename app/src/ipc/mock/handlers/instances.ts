@@ -528,6 +528,8 @@ export function addMockInstance(
   modpack: InstanceModpackDto | null,
 ): void {
   if (find(id) !== undefined) throw new Error(`mock 实例 ${id} 已存在`);
+  // 与新建一样，不继承已经不在的同名旧实例留下的记录。
+  forgetMockLaunchRecords(id);
   instances.push({
     dto: readyDto(id, mcVersion, loader === null ? [] : [loader], 21, Date.now()),
     // 整合包导入的实例强制隔离，与后端写入的实例设置一致。
@@ -744,6 +746,9 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     fileCount: 0,
   };
   instances.push(instance);
+  // 与后端一样，名字下还留着的记录属于已经不在的同名旧实例（浏览器里刷新后游玩记录重新播种就会这样），新实例从零开始；
+  // 会话日志与崩溃报告在后端存于实例目录，新目录里本来就没有。
+  forgetMockLaunchRecords(name);
   try {
     if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
     stage(taskId, `查找原版 ${mcVersion}`);

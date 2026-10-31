@@ -24,6 +24,7 @@ import {
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
+import { reset as resetLaunchMock } from "./mock/handlers/launch";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -286,6 +287,19 @@ describe("mock：新建与补全", () => {
     expect(events.every((e) => e.task_id === "t-new")).toBe(true);
     const last = events.filter((e) => e.kind === "download").at(-1);
     expect(last).toMatchObject({ finished: 40, total: 40 });
+  });
+
+  it("新建的实例不继承已经不在的同名旧实例留下的游玩记录，别的实例的记录不动", async () => {
+    vi.useFakeTimers();
+    // 浏览器里刷新时实例从存储里恢复、游玩记录重新播种：删掉的 1.21 不在了，它的记录却又回来了
+    await deleteInstance("1.21");
+    resetLaunchMock();
+    const done = installVersion("t-again", "1.21.1", null, null, "1.21");
+    await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+    await done;
+    const list = await listInstances();
+    expect(list.find((i) => i.id === "1.21")).toMatchObject({ status: "ready", playtime_min: 0, last_played_at: null });
+    expect(list.find((i) => i.id === "1.20.1-Fabric")?.playtime_min).toBe(180);
   });
 
   it("名称、加载器问题在登记任务之前就拒绝", async () => {

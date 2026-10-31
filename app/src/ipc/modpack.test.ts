@@ -2,9 +2,10 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listen } from "./bridge";
 import { IpcError } from "./errors";
-import { getInstanceSettings, listInstances } from "./instances";
+import { deleteInstance, getInstanceSettings, listInstances } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
+import { reset as resetLaunchMock } from "./mock/handlers/launch";
 import { INSTANCE_NAME_MAX_CHARS, installModpack, previewModpack, summarizePlatformModpack, type ModpackSource } from "./modpack";
 import { CORE_EVENT, cancelTask, type CoreEvent } from "./tasks";
 
@@ -95,6 +96,16 @@ describe("整合包 mock", () => {
     const outcome = await installModpack("t-3", local, "  周末联机  ");
     expect(outcome.version_id).toBe("周末联机");
     expect(outcome.modpack).toMatchObject({ platform: null, project_id: null, version_id: null, name: "我的整合包", format: "modrinth" });
+  });
+
+  it("导入得到的实例不继承已经不在的同名旧实例留下的游玩记录，别的实例的记录不动", async () => {
+    // 浏览器里刷新时实例从存储里恢复、游玩记录重新播种：删掉的 1.21 不在了，它的记录却又回来了
+    await deleteInstance("1.21");
+    resetLaunchMock();
+    await installModpack("t-again", local, "1.21");
+    const list = await listInstances();
+    expect(list.find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 0, last_played_at: null });
+    expect(list.find((i) => i.id === "1.20.1-Fabric")?.playtime_min).toBe(180);
   });
 
   it("实例名规则与后端一致", async () => {
