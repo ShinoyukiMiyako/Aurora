@@ -614,6 +614,26 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
  * 后端在实例有活动任务时拒绝改名，所以这里换的只是已结束的任务（失败的可以重试）。
  */
 /**
+ * 换游戏目录后要重取的按需数据：实例 id 只在一个游戏目录里唯一，同名实例换了目录就是另一个；游玩统计按游戏目录分开记；
+ * 多人游戏列表读的是该目录下的 servers.dat。
+ */
+const GAME_DIR_SCOPED_RESOURCES = [
+  "mods",
+  "content",
+  "settings",
+  "history",
+  "crash",
+  "log",
+  "mod-updates",
+  "plan",
+  "match",
+  "installed-sources",
+  "memory-advice",
+  "play-stats",
+  "servers:known",
+] as const;
+
+/**
  * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
  * 没改成的记录由后端记着，之后读写游玩记录时补上。其余错误照常冒泡。
  */
@@ -2334,6 +2354,7 @@ export class LauncherStore {
       },
       async setGameDirectory(path) {
         await configIpc.setGameDirectory(path);
+        for (const prefix of GAME_DIR_SCOPED_RESOURCES) invalidateResources(prefix);
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
       async commitFirstRun(gameDir, extraDirectories) {

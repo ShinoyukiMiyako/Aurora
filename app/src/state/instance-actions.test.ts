@@ -4,6 +4,7 @@ import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import { resources } from "./resource";
 import { isActiveTask } from "./tasks";
 import type { LauncherStore } from "./store";
 
@@ -147,6 +148,23 @@ describe("游玩记录没跟上时改名、删除照成功处理", () => {
     });
     await expect(store.actions.deleteInstance("生存", 0)).rejects.toMatchObject({ code: "io" });
     expect(store.getState().toasts.map((t) => t.title)).not.toContain("已删除「生存」");
+  });
+});
+
+describe("切换游戏目录", () => {
+  it("按实例划分的数据、游玩统计与多人游戏列表都重取，与游戏目录无关的不动", async () => {
+    const fetched: string[] = [];
+    const watch = (key: string) => resources.subscribe(key, async () => fetched.push(key), () => undefined);
+    const keys = ["mods:生存", "content:生存", "settings:生存", "history:生存:checks", "play-stats:2024-07-01:2024-07-31", "installed-sources:[\"创造\",\"生存\"]", "match:modrinth:AANobbMI:mod:auto", "servers:known", "servers:pinned", "news"];
+    const stops = keys.map(watch);
+    await settle();
+    expect(fetched.sort()).toEqual([...keys].sort());
+    fetched.length = 0;
+    ipc.overrides.set("set_game_directory", () => null);
+    await store.actions.setGameDirectory("D:/Other/.minecraft");
+    await settle();
+    expect(fetched.sort()).toEqual(keys.filter((k) => k !== "servers:pinned" && k !== "news").sort());
+    for (const stop of stops) stop();
   });
 });
 
