@@ -10,11 +10,14 @@ import { PanoramaBackdrop } from "../art/panorama/PanoramaBackdrop";
 import { PetalCanvas } from "../art/petals/PetalCanvas";
 import type { PetalDowngrade } from "../art/petals/engine";
 import { Logo } from "../art/Logo";
+import { thumbRegister } from "../ipc/art";
 import { logDiagnostic } from "../ipc/diagnostics";
+import { createThumbResolver } from "../mc/art";
 import { useAppearance } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
 import { useLauncher } from "../state/launcher";
 import { routeKey, type Route } from "../state/route";
+import { RemoteImageProvider } from "../ui/remote-image";
 import styles from "./AppShell.module.css";
 import { ChromeProvider, type ChromeApi } from "./chrome";
 import { CommandPalette } from "./CommandPalette";
@@ -45,6 +48,9 @@ export interface AppShellProps {
 
 /** 首帧与窗口显示之后再预载其余页面，不和首屏抢主线程。 */
 export const PAGE_PRELOAD_DELAY_MS = 800;
+
+// 资源图标、资讯配图、服务器图标的地址解析：同一地址整个进程只向后端登记一次，所以解析函数只建一份
+const resolveRemoteImage = createThumbResolver(thumbRegister);
 
 export function AppShell({ pages, flows }: AppShellProps) {
   const { state } = useLauncher();
@@ -93,16 +99,18 @@ export function AppShell({ pages, flows }: AppShellProps) {
 
   return (
     <ChromeProvider value={chrome}>
-      <div ref={bindRoot} className={styles.app}>
-        <div className={styles.backdrop} aria-hidden="true">
-          <PanoramaBackdrop enabled={appearance.panorama} />
+      <RemoteImageProvider resolve={resolveRemoteImage}>
+        <div ref={bindRoot} className={styles.app}>
+          <div className={styles.backdrop} aria-hidden="true">
+            <PanoramaBackdrop enabled={appearance.panorama} />
+          </div>
+          {onboarding !== null ? <OnboardingFrame Flow={onboarding} /> : <MainFrame pages={pages} bindScroll={bindScroll} />}
+          <Toasts />
+          <LoginMount Flow={flows.login} />
+          <CreateInstanceMount Flow={flows.createInstance} />
+          <OverlayRoot />
         </div>
-        {onboarding !== null ? <OnboardingFrame Flow={onboarding} /> : <MainFrame pages={pages} bindScroll={bindScroll} />}
-        <Toasts />
-        <LoginMount Flow={flows.login} />
-        <CreateInstanceMount Flow={flows.createInstance} />
-        <OverlayRoot />
-      </div>
+      </RemoteImageProvider>
     </ChromeProvider>
   );
 }
