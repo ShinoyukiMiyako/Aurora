@@ -158,6 +158,41 @@ describe("装 Mod 期间实例的状态", () => {
   });
 });
 
+describe("一次装进几个实例", () => {
+  const targets = ["生存", "创造", "冒险"].map((instanceId) => ({ instanceId, fileVersionId: "v2", world: null }));
+  const infos = () => store.getState().toasts.filter((t) => t.tone === "info").map((t) => [t.title, t.body]);
+
+  it("某个实例的安装计划失败时，其余照常排上并通知，最后原样报出那一个的错误", async () => {
+    ipc.overrides.set("plan_install", (args) => {
+      if (args.versionId === "创造") throw new IpcError("network_failed", "Modrinth 连不上", { network: "connect" });
+      return plan({ projectId: "sodium", versionId: "v2" });
+    });
+    ipc.overrides.set("install_mod", () => deferred<unknown>().promise);
+    await expect(store.actions.installResource({ resourceType: "mod", platform: "modrinth", projectId: "sodium", name: "Sodium", targets })).rejects.toMatchObject({
+      code: "network_failed",
+      message: "Modrinth 连不上",
+    });
+    expect(store.getState().tasks.map((t) => [t.instanceId, t.spec.command])).toEqual([
+      ["生存", "install_mods"],
+      ["冒险", "install_mods"],
+    ]);
+    expect(infos()).toEqual([["已加入下载队列：Sodium", "装入 2 个实例，进度见下载任务"]]);
+  });
+
+  it("几个实例都失败时，错误里逐个写明实例与原因", async () => {
+    ipc.overrides.set("plan_install", (args) => {
+      if (args.versionId === "生存") return plan({ projectId: "sodium", versionId: "v2" });
+      throw new IpcError("mod_version_not_found", `${String(args.versionId)} 找不到这个版本`);
+    });
+    ipc.overrides.set("install_mod", () => deferred<unknown>().promise);
+    await expect(store.actions.installResource({ resourceType: "mod", platform: "modrinth", projectId: "sodium", name: "Sodium", targets })).rejects.toThrow(
+      "2 个实例没能加入下载队列：「创造」创造 找不到这个版本；「冒险」冒险 找不到这个版本",
+    );
+    expect(store.getState().tasks.map((t) => t.instanceId)).toEqual(["生存"]);
+    expect(infos()).toEqual([["已加入下载队列：Sodium", "装入「生存」"]]);
+  });
+});
+
 describe("全部更新", () => {
   it("多个可更新合成一个任务：标题写个数，逐个调 update_mod 并共用 taskId，完成只弹一条通知", async () => {
     ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);

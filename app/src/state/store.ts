@@ -2335,9 +2335,16 @@ export class LauncherStore {
       },
       async installResource(spec) {
         const enqueued: string[] = [];
+        // 某个实例的安装计划失败不挡其余实例：先把排得上的排上并照常通知，最后再报出没排上的。半路中断的话，
+        // 前面已排上的没有通知，后面的不再排，再点安装时前面的又报「已在下载队列里」
+        const failures: { instanceId: string; error: unknown }[] = [];
         for (const target of spec.targets) {
           if (spec.resourceType === "mod") {
-            const plan = await modsIpc.planInstall(target.instanceId, spec.platform, spec.projectId, target.fileVersionId);
+            const plan = await modsIpc.planInstall(target.instanceId, spec.platform, spec.projectId, target.fileVersionId).catch((error: unknown) => {
+              failures.push({ instanceId: target.instanceId, error });
+              return null;
+            });
+            if (plan === null) continue;
             const items = plan.items.filter((item) => !item.already_satisfied);
             if (items.length === 0) {
               store.pushToast("info", TASK_TOAST.alreadyInstalled(spec.name, target.instanceId).title);
@@ -2397,6 +2404,11 @@ export class LauncherStore {
         if (enqueued.length > 0) {
           const copy = TASK_TOAST.enqueued(spec.name, enqueued);
           store.pushToast("info", copy.title, copy.body);
+        }
+        // 只有一个没排上时原样抛出它的错误，错误码与联网判定照旧；几个时合成一句，逐个写明实例与原因
+        if (failures.length === 1) throw failures[0].error;
+        if (failures.length > 1) {
+          throw new Error(`${failures.length} 个实例没能加入下载队列：${failures.map((f) => `「${f.instanceId}」${describeError(f.error)}`).join("；")}`);
         }
       },
       async rollback(instanceId, eventId) {
