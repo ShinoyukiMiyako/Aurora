@@ -222,7 +222,7 @@ pub struct MarkerErrorDto {
 /// 实例的未完成状态。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IncompleteDto {
-    /// install（新建没装完）/ repair（补全没做完）/ unknown（标记文件读不出来）。
+    /// install（新建没装完）/ repair（补全没做完）/ modpack（整合包没导入完）/ unknown（标记文件读不出来）。
     pub kind: &'static str,
     /// pending（进行中，或启动器在进行中被关掉）/ failed / cancelled / unknown。
     pub outcome: &'static str,
@@ -488,6 +488,7 @@ fn incomplete_dto(marker: Readable<IncompleteMarker>) -> IncompleteDto {
                     }),
                 ),
                 IncompleteKind::Repair => ("repair", None),
+                IncompleteKind::Modpack { .. } => ("modpack", None),
             };
             IncompleteDto {
                 kind,
@@ -1924,6 +1925,36 @@ mod tests {
         assert_eq!(vanilla.mod_count, Some(0));
         assert_eq!(vanilla.playtime_min, 0);
         assert_eq!(vanilla.last_played_at, None);
+    }
+
+    /// 导入中断留下的整合包标记在列表里报为 modpack，而不是「标记读不出来」。
+    #[tokio::test]
+    async fn interrupted_modpack_import_lists_as_modpack_incomplete() {
+        let env = Env::new();
+        let dir = env.vanilla("整合包");
+        aurora_core::MarkerStore::for_version_dir(&dir)
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Modpack {
+                    task_id: "mp#1".into(),
+                },
+                1_700_000_000_000,
+            ))
+            .await
+            .unwrap();
+        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+            .await
+            .unwrap();
+        let pack = list.iter().find(|i| i.id == "整合包").unwrap();
+        assert_eq!(
+            pack.incomplete,
+            Some(IncompleteDto {
+                kind: "modpack",
+                outcome: "pending",
+                started_at: Some(1_700_000_000_000),
+                spec: None,
+                error: None,
+            })
+        );
     }
 
     #[tokio::test]

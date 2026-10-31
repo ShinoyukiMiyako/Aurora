@@ -138,9 +138,9 @@ pub use aurora_download::CancellationToken;
 pub use aurora_instance::{
     Disposer, GameMode, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec,
     InstanceContent, IsolationOverride, JavaSelection, LevelInfo, LevelSummary, MarkerError,
-    NameViolation, PackEntry, PinsViolation, RecycleBin, Resolution, ResolvedIsolation,
-    ResourcePackEntry, SettingsViolation, ShaderPackEntry, VersionSettings, WorldEntry,
-    is_safe_instance_id,
+    MarkerStore, NameViolation, PackEntry, PinsViolation, RecycleBin, Resolution,
+    ResolvedIsolation, ResourcePackEntry, SettingsViolation, ShaderPackEntry, VersionSettings,
+    WorldEntry, is_safe_instance_id,
 };
 pub use instance_install::{
     InstalledLoader, InstanceInstallOutcome, InstanceRequest, MarkerSettlement, RepairOutcome,

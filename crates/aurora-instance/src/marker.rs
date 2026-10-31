@@ -1,9 +1,10 @@
 //! 实例的「未完成」标记。
 //!
-//! 新建实例与修复实例都是长任务，中途可能失败、被取消，或者启动器被直接关掉。开始时在
+//! 新建实例、修复实例与整合包导入都是长任务，中途可能失败、被取消，或者启动器被直接关掉。开始时在
 //! `versions/<id>/.petalfall/incomplete.json` 写一份标记，成功后删除；没删掉就说明文件不完整。
 //! 标记里记下是哪一类操作、结局如何，界面据此给出「安装没有完成：原因」「补全被取消」这类说明，
-//! 修复时也据此决定是重新安装还是只补文件。
+//! 修复时也据此决定是重新安装、只补文件，还是根本补不回来。三类操作共用这一种格式：同一个路径上
+//! 只要有两套写法，读的一方就会把另一方的标记当成损坏。
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,9 @@ pub enum IncompleteKind {
     Install { spec: InstallSpec },
     /// 对已有实例补全文件。
     Repair,
+    /// 整合包导入为新实例。`task_id` 是导入任务的 id：任务被强行放弃、导入自己的清理没机会跑时，
+    /// 按它找回并删掉这次建出的目录，不误删别的导入。
+    Modpack { task_id: String },
 }
 
 /// 操作的结局。
@@ -190,6 +194,36 @@ mod tests {
         let value = serde_json::to_value(repair).unwrap();
         assert_eq!(value["kind"], "repair");
         assert!(value.get("spec").is_none());
+
+        let modpack = IncompleteMarker::pending(
+            IncompleteKind::Modpack {
+                task_id: "mp#7".into(),
+            },
+            2,
+        );
+        let value = serde_json::to_value(modpack).unwrap();
+        assert_eq!(value["kind"], "modpack");
+        assert_eq!(value["task_id"], "mp#7");
+        assert_eq!(value["outcome"], "pending");
+        assert_eq!(value["started_at"], 2);
+    }
+
+    /// 三类标记落在同一个文件上，任何一类写下的都必须能被同一个读取方读回原样。
+    #[tokio::test]
+    async fn every_kind_round_trips_through_the_same_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MarkerStore::for_version_dir(tmp.path());
+        for kind in [
+            install_marker().kind,
+            IncompleteKind::Repair,
+            IncompleteKind::Modpack {
+                task_id: "mp#1".into(),
+            },
+        ] {
+            let marker = IncompleteMarker::pending(kind, 1_700_000_000_001);
+            store.save(&marker).await.unwrap();
+            assert_eq!(store.load().await.unwrap(), Some(marker));
+        }
     }
 
     #[tokio::test]

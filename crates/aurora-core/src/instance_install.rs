@@ -350,6 +350,16 @@ impl Aurora {
             Some(IncompleteKind::Install { spec }) => {
                 RepairPlan::Reinstall(InstanceRequest::from_spec(id, &spec)?)
             }
+            // 导入写版本 JSON 在前、下载 Mod 与解出覆盖文件在后，中断时版本 JSON 往往已经可用；
+            // 照它补全只会补齐库文件，再把标记清掉，缺的 Mod 与配置却补不回来，实例就被当成了完好的。
+            Some(IncompleteKind::Modpack { .. }) => {
+                return Err(InstanceError::NotRepairable {
+                    id: id.to_owned(),
+                    reason: "整合包没有导入完，缺的 Mod 与配置补不回来，请删掉这个实例后重新导入"
+                        .to_owned(),
+                }
+                .into());
+            }
             Some(IncompleteKind::Repair) | None => {
                 match probe_version(self.game_dir(), id).await? {
                     VersionProbe::Found(_) => RepairPlan::Complete,
@@ -436,7 +446,7 @@ impl Aurora {
 }
 
 /// 当前 Unix 毫秒。系统时钟早于 1970 年时报错而不是记一个 0：标记的开始时间要拿来展示。
-fn now_millis() -> u64 {
+pub(crate) fn now_millis() -> u64 {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("系统时钟早于 1970-01-01");
@@ -678,6 +688,32 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(cancelled.outcome, IncompleteOutcome::Cancelled);
+    }
+
+    /// 整合包导入中断的实例即使版本 JSON 已经写好也不能按「补全」处理：报不可补全，标记原样留着。
+    #[tokio::test]
+    async fn interrupted_modpack_import_is_not_repairable_and_keeps_its_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let dir = write_version(aurora.game_dir(), "整合包", &vanilla_json("1.21.1"));
+        let store = MarkerStore::for_version_dir(&dir);
+        let marker = IncompleteMarker::pending(
+            IncompleteKind::Modpack {
+                task_id: "mp#1".into(),
+            },
+            1_700_000_000_000,
+        );
+        store.save(&marker).await.unwrap();
+
+        let err = aurora.begin_repair("整合包").await.unwrap_err();
+        match err {
+            CoreError::Instance(InstanceError::NotRepairable { id, reason }) => {
+                assert_eq!(id, "整合包");
+                assert!(reason.contains("重新导入"), "{reason}");
+            }
+            other => panic!("应报不可补全：{other:?}"),
+        }
+        assert_eq!(store.load().await.unwrap(), Some(marker));
     }
 
     #[tokio::test]

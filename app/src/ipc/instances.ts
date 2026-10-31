@@ -31,8 +31,8 @@ export interface InstallSpecDto {
 
 /** 实例的未完成状态：新建或补全中断、失败、被取消。 */
 export interface IncompleteDto {
-  /** install：新建没装完；repair：补全没做完；unknown：标记文件读不出来。 */
-  kind: "install" | "repair" | "unknown";
+  /** install：新建没装完；repair：补全没做完；modpack：整合包没导入完（补全补不回来）；unknown：标记文件读不出来。 */
+  kind: "install" | "repair" | "modpack" | "unknown";
   /** pending：进行中，或启动器在进行中被关掉了。 */
   outcome: "pending" | "failed" | "cancelled" | "unknown";
   started_at: number | null;

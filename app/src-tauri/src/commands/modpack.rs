@@ -328,16 +328,17 @@ mod tests {
         let registry = TaskRegistry::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let versions = dir.path().join(".minecraft").join("versions");
-        let meta = concat!(".", aurora_base::app_slug!());
-        // 模拟上一次被强行放弃的导入：未完成标记与导入时写的格式一致。
+        // 模拟上一次被强行放弃的导入：未完成标记与导入时写的同一种格式。
         for (instance, task) in [("半成品", "mp#2"), ("别人的", "other")] {
-            let marker_dir = versions.join(instance).join(meta);
-            std::fs::create_dir_all(&marker_dir).unwrap();
-            std::fs::write(
-                marker_dir.join("incomplete.json"),
-                serde_json::json!({"kind": "modpack", "task_id": task}).to_string(),
-            )
-            .unwrap();
+            aurora_core::MarkerStore::for_version_dir(&versions.join(instance))
+                .save(&aurora_core::IncompleteMarker::pending(
+                    aurora_core::IncompleteKind::Modpack {
+                        task_id: task.to_owned(),
+                    },
+                    1,
+                ))
+                .await
+                .unwrap();
         }
 
         let missing = dir.path().join("missing.mrpack");

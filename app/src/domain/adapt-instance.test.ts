@@ -87,6 +87,15 @@ describe("实例 DTO 适配：状态", () => {
     expect(inst.incomplete).toMatchObject({ kind: "repair", outcome: "cancelled", spec: { mcVersion: "1.20.1", loader: "forge", loaderVersion: "47.3.0" } });
   });
 
+  it("整合包导入中断的实例按损坏处理，原因指向删掉重新导入，不论结局是进行中还是失败", () => {
+    for (const outcome of ["pending", "failed", "cancelled"] as const) {
+      const inst = instanceFromDto(instanceDto("Pack", { incomplete: incomplete({ kind: "modpack", outcome, spec: null, error: null }) }), idle);
+      expect(inst).toMatchObject({ status: "broken", brokenReason: "整合包没有导入完，请删掉这个实例后重新导入" });
+      expect(inst.incomplete).toMatchObject({ kind: "modpack", outcome, spec: null });
+    }
+    expect(() => instanceFromDto(instanceDto("X", { incomplete: incomplete({ kind: "rift" as never }) }), idle)).toThrow();
+  });
+
   it("未知状态抛错", () => {
     expect(() => instanceFromDto(instanceDto("F", { status: "zombie" as InstanceDto["status"] }), idle)).toThrow("未知的实例状态：zombie");
   });

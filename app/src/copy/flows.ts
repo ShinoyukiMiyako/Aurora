@@ -833,7 +833,7 @@ export const NO_ACCOUNT_COPY = {
 // ---------------------------------------------------------------- 实例未完成
 
 type IncompleteInput = {
-  kind: "install" | "repair" | "unknown";
+  kind: "install" | "repair" | "modpack" | "unknown";
   outcome: "pending" | "failed" | "cancelled" | "unknown";
   error: { code: string; message: string } | null;
 };
@@ -844,6 +844,8 @@ export function incompleteReason(incomplete: IncompleteInput): string {
   if (incomplete.kind === "unknown" || incomplete.outcome === "unknown") {
     return incomplete.error === null ? "上次安装或补全没有完成，文件不完整" : `上次安装或补全没有完成：${incomplete.error.message}`;
   }
+  // 导入半途而废时缺的是整合包里的 Mod 与配置，补全补不回来，只能删掉重新导入。
+  if (incomplete.kind === "modpack") return "整合包没有导入完，请删掉这个实例后重新导入";
   const what = incomplete.kind === "install" ? "安装" : "补全";
   switch (incomplete.outcome) {
     case "pending":

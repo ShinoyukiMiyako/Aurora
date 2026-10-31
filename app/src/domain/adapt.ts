@@ -150,7 +150,7 @@ export function releaseTypeFromDto(value: string): ReleaseType {
 
 export function incompleteFromDto(dto: IncompleteDto): InstanceIncomplete {
   return {
-    kind: oneOf(dto.kind, ["install", "repair", "unknown"] as const, "未完成标记类型"),
+    kind: oneOf(dto.kind, ["install", "repair", "modpack", "unknown"] as const, "未完成标记类型"),
     outcome: oneOf(dto.outcome, ["pending", "failed", "cancelled", "unknown"] as const, "未完成标记结局"),
     startedAt: dto.started_at,
     spec: dto.spec === null ? null : { mcVersion: dto.spec.mc_version, loader: dto.spec.loader, loaderVersion: dto.spec.loader_version },

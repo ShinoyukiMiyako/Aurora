@@ -22,7 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aurora_download::DownloadTask;
 use aurora_instance::{
-    AURORA_META_DIR, IsolationOverride, VERSIONS_DIR, VersionSettings, VersionSettingsStore,
+    AURORA_META_DIR, IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore,
+    VERSIONS_DIR, VersionSettings, VersionSettingsStore,
 };
 use aurora_modpack::{
     CurseForgeFileRef, PackArchive, PackFormat, PackLoader, PackLoaderKind, RemoteFiles,
@@ -34,6 +35,7 @@ use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
 use crate::install::LoaderChoice;
+use crate::instance_install::now_millis;
 use crate::resources::{curseforge_download_url, is_safe_file_name};
 
 /// 实例名的最大字符数：界面上要完整显示，路径也不宜过长。
@@ -41,8 +43,6 @@ pub const INSTANCE_NAME_MAX_CHARS: usize = 32;
 
 /// 实例目录里的整合包信息文件名（在启动器元数据目录下）。
 const MODPACK_INFO_FILE: &str = "modpack.json";
-/// 未完成标记文件名（在启动器元数据目录下）。
-const INCOMPLETE_MARKER_FILE: &str = "incomplete.json";
 /// 整合包信息的格式版本；字段不兼容地变化时递增。
 const MODPACK_INFO_SCHEMA: u32 = 1;
 /// CurseForge 批量接口一次带多少个 id。接口文档没写上限，大整合包有四五百个文件，
@@ -195,14 +195,6 @@ pub async fn read_instance_modpack(version_dir: &Path) -> Result<Option<Instance
         .map_err(|source| CoreError::JsonFileInvalid { path, source })
 }
 
-#[derive(Serialize, Deserialize)]
-struct IncompleteMarker {
-    kind: String,
-    task_id: String,
-}
-
-const MARKER_KIND_MODPACK: &str = "modpack";
-
 /// 一个要下载的远程文件；Modrinth 清单可以给多个地址，前一个失败换下一个。
 #[derive(Debug)]
 struct RemoteDownload {
@@ -272,6 +264,9 @@ impl Aurora {
     ///
     /// 导入在自己的失败路径上已经会清理；这个入口给「任务在取消宽限期后被强行放弃」的情况用：
     /// 那时导入的 future 已被丢弃，清理代码没机会跑。
+    ///
+    /// 只认本任务写下的整合包标记。别的实例的标记（新建或补全没完成、别的导入）与读不出来的标记
+    /// 一律跳过：它们和这次清理无关，不能让一个坏掉的邻居挡住本该删掉的半成品。
     pub async fn discard_incomplete_modpack(&self, task_id: &str) -> Result<Option<String>> {
         let versions = self.game_dir().join(VERSIONS_DIR);
         let mut entries = match tokio::fs::read_dir(&versions).await {
@@ -295,10 +290,21 @@ impl Aurora {
                 })?
         {
             let dir = entry.path();
-            if read_marker(&dir)
-                .await?
-                .is_some_and(|m| m.task_id == task_id)
-            {
+            let marker = match MarkerStore::for_version_dir(&dir).load().await {
+                Ok(marker) => marker,
+                Err(err) => {
+                    tracing::warn!(dir = %dir.display(), error = %err, "清理导入半成品时跳过读不出未完成标记的目录");
+                    continue;
+                }
+            };
+            let ours = matches!(
+                marker,
+                Some(IncompleteMarker {
+                    kind: IncompleteKind::Modpack { task_id: ref marked },
+                    ..
+                }) if marked == task_id
+            );
+            if ours {
                 remove_instance_dir(&dir).await?;
                 return Ok(Some(entry.file_name().to_string_lossy().into_owned()));
             }
@@ -479,13 +485,7 @@ impl Aurora {
         let meta = version_dir.join(AURORA_META_DIR);
         let bytes = serde_json::to_vec_pretty(&info).map_err(CoreError::JsonSerialize)?;
         aurora_base::fs::atomic_write(meta.join(MODPACK_INFO_FILE), &bytes).await?;
-        let marker = meta.join(INCOMPLETE_MARKER_FILE);
-        tokio::fs::remove_file(&marker)
-            .await
-            .map_err(|source| aurora_base::Error::Io {
-                path: marker,
-                source,
-            })?;
+        MarkerStore::for_version_dir(version_dir).clear().await?;
         emit(
             events,
             CoreEvent::stage(format!("整合包已导入为实例 {name}")),
@@ -836,33 +836,16 @@ async fn create_instance_dir(version_dir: &Path, name: &str) -> Result<()> {
 }
 
 async fn write_marker(version_dir: &Path, task_id: &str) -> Result<()> {
-    let marker = IncompleteMarker {
-        kind: MARKER_KIND_MODPACK.to_owned(),
-        task_id: task_id.to_owned(),
-    };
-    let bytes = serde_json::to_vec(&marker).map_err(CoreError::JsonSerialize)?;
-    aurora_base::fs::atomic_write(
-        version_dir
-            .join(AURORA_META_DIR)
-            .join(INCOMPLETE_MARKER_FILE),
-        &bytes,
-    )
-    .await?;
+    let marker = IncompleteMarker::pending(
+        IncompleteKind::Modpack {
+            task_id: task_id.to_owned(),
+        },
+        now_millis(),
+    );
+    MarkerStore::for_version_dir(version_dir)
+        .save(&marker)
+        .await?;
     Ok(())
-}
-
-async fn read_marker(version_dir: &Path) -> Result<Option<IncompleteMarker>> {
-    let path = version_dir
-        .join(AURORA_META_DIR)
-        .join(INCOMPLETE_MARKER_FILE);
-    let bytes = match tokio::fs::read(&path).await {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
-    };
-    let marker: IncompleteMarker = serde_json::from_slice(&bytes)
-        .map_err(|source| CoreError::JsonFileInvalid { path, source })?;
-    Ok((marker.kind == MARKER_KIND_MODPACK).then_some(marker))
 }
 
 async fn remove_instance_dir(version_dir: &Path) -> Result<()> {
@@ -1058,10 +1041,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(settings.isolation, IsolationOverride::Enabled);
-        assert!(
-            !dir.join(AURORA_META_DIR)
-                .join(INCOMPLETE_MARKER_FILE)
-                .exists()
+        assert_eq!(
+            MarkerStore::for_version_dir(&dir).load().await.unwrap(),
+            None,
+            "导入成功后未完成标记删除"
         );
 
         let info = read_instance_modpack(&dir)
@@ -1294,13 +1277,56 @@ mod tests {
         ));
     }
 
+    /// 只删本任务的整合包半成品。排在它前面的邻居带着别的标记（新建失败、补全取消、读不出来的坏
+    /// 标记、目录之外的普通文件）时扫描照样走完，邻居和它们的标记原样留着。
     #[tokio::test]
     async fn discard_removes_only_the_instance_marked_by_that_task() {
+        use aurora_instance::{IncompleteOutcome, InstallSpec, MarkerError};
+
         let tmp = tempfile::tempdir().unwrap();
         let server = MockServer::start().await;
         let aurora = aurora(tmp.path(), &server);
         let versions = aurora.game_dir().join("versions");
-        for (name, task) in [("a", Some("t1")), ("b", Some("t2")), ("c", None)] {
+        std::fs::create_dir_all(&versions).unwrap();
+        std::fs::write(versions.join("a-file.txt"), b"not a dir").unwrap();
+        let failed_install = IncompleteMarker {
+            kind: IncompleteKind::Install {
+                spec: InstallSpec {
+                    mc_version: "1.21.1".into(),
+                    loader: None,
+                    loader_version: None,
+                },
+            },
+            outcome: IncompleteOutcome::Failed,
+            started_at: 1,
+            error: Some(MarkerError {
+                code: "download_failed".into(),
+                message: "下载失败".into(),
+            }),
+        };
+        let cancelled_repair = IncompleteMarker {
+            outcome: IncompleteOutcome::Cancelled,
+            ..IncompleteMarker::pending(IncompleteKind::Repair, 2)
+        };
+        for (name, marker) in [
+            ("b-install", &failed_install),
+            ("c-repair", &cancelled_repair),
+        ] {
+            let dir = versions.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            MarkerStore::for_version_dir(&dir)
+                .save(marker)
+                .await
+                .unwrap();
+        }
+        let corrupt = MarkerStore::for_version_dir(&versions.join("d-corrupt"));
+        std::fs::create_dir_all(corrupt.path().parent().unwrap()).unwrap();
+        std::fs::write(corrupt.path(), b"{").unwrap();
+        for (name, task) in [
+            ("x-pack", Some("t1")),
+            ("y-pack", Some("t2")),
+            ("z-plain", None),
+        ] {
             let dir = versions.join(name);
             std::fs::create_dir_all(&dir).unwrap();
             if let Some(task) = task {
@@ -1314,16 +1340,55 @@ mod tests {
                 .await
                 .unwrap()
                 .as_deref(),
-            Some("a")
+            Some("x-pack")
         );
-        assert!(!versions.join("a").exists());
-        assert!(versions.join("b").exists());
-        assert!(versions.join("c").exists());
+        assert!(!versions.join("x-pack").exists());
+        for kept in ["y-pack", "z-plain", "d-corrupt"] {
+            assert!(versions.join(kept).exists(), "{kept} 不该被删");
+        }
+        assert_eq!(
+            MarkerStore::for_version_dir(&versions.join("b-install"))
+                .load()
+                .await
+                .unwrap(),
+            Some(failed_install)
+        );
+        assert_eq!(
+            MarkerStore::for_version_dir(&versions.join("c-repair"))
+                .load()
+                .await
+                .unwrap(),
+            Some(cancelled_repair)
+        );
         assert_eq!(aurora.discard_incomplete_modpack("t9").await.unwrap(), None);
         assert_eq!(
-            read_instance_modpack(&versions.join("c")).await.unwrap(),
+            read_instance_modpack(&versions.join("z-plain"))
+                .await
+                .unwrap(),
             None
         );
+    }
+
+    /// 导入写下的标记就是实例列表读的那一种：导入中断后列表认得出它是整合包导入，而不是报标记损坏。
+    #[tokio::test]
+    async fn import_marker_is_read_by_the_instance_marker_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("versions").join("导入中");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, "mp#3").await.unwrap();
+        let marker = MarkerStore::for_version_dir(&dir)
+            .load()
+            .await
+            .unwrap()
+            .expect("应读到标记");
+        assert_eq!(
+            marker.kind,
+            IncompleteKind::Modpack {
+                task_id: "mp#3".into()
+            }
+        );
+        assert_eq!(marker.outcome, aurora_instance::IncompleteOutcome::Pending);
+        assert!(marker.started_at > 1_700_000_000_000);
     }
 
     /// 远程文件下载失败时换备用地址；没有备用地址的失败原样报出。
