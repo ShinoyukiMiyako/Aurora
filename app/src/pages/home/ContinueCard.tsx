@@ -2,7 +2,7 @@
 // 「换一个」切换当前实例时整块内容交叉淡入；被删除的实例在淡出期间直接不画（它的启动入口已不存在）。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { ACTION_ERROR, BOOT_SLICE_ERROR } from "../../copy/flows";
@@ -195,16 +195,9 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const now = useNow(30_000);
   const cover = instanceCover(inst);
 
+  // 游戏退出后状态层作废这个实例的存档缓存，这里订阅着就会重取，信息行里的存档名才是刚玩的那个
   const content = useInstanceContent(inst.placeholder ? null : inst.id);
   useReportOnce(content.status === "error" ? content.error : null, HOME_COPY.worldsError);
-  // 游戏退出后存档的最后游玩时刻变了：跟着实例的上次游玩时刻重读，信息行里的存档名才是刚玩的那个
-  const reload = content.reload;
-  const playedAt = useRef(inst.lastPlayedAt);
-  useEffect(() => {
-    if (playedAt.current === inst.lastPlayedAt) return;
-    playedAt.current = inst.lastPlayedAt;
-    if (!inst.placeholder) reload();
-  }, [inst.lastPlayedAt, inst.placeholder, reload]);
   const world = content.status === "ready" ? latestWorld(content.data.worlds) : null;
 
   const switchItems: MenuEntry[] = [

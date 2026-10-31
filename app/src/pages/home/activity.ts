@@ -184,12 +184,3 @@ export function totalPlaytime(instances: readonly InstanceSummary[]): { hours: n
   const minutes = real.reduce((t, i) => t + i.playtimeMin, 0);
   return { hours: Math.round(minutes / 60), count: real.length };
 }
-
-/** 游玩记录要不要重取：任一实例的累计时长或上次游玩时刻变了（游戏退出后实例列表刷新）。 */
-export function playSignature(instances: readonly InstanceSummary[]): string {
-  return instances
-    .filter((i) => !i.placeholder)
-    .map((i) => `${i.id}:${i.playtimeMin}:${i.lastPlayedAt === null ? "-" : i.lastPlayedAt}`)
-    .sort()
-    .join("|");
-}

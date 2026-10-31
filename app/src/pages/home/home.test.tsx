@@ -4,13 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { InstanceDto } from "../../ipc/instances";
 import { IpcError } from "../../ipc/errors";
+import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import type { KnownServerDto, NewsItemDto, PinnedServerDto, PlayDayDto, ServerStatusDto } from "../../state/queries/home";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import HomePage from "./index";
 import { world } from "./test-data";
@@ -299,20 +300,27 @@ describe("主页：游玩日历与洞察", () => {
     expect(text()).toContain("休息也是游戏的一部分。");
   });
 
-  it("游戏退出后实例的游玩时长变了：游玩记录重取；时长没变的刷新不重取", async () => {
+  it("游戏退出：游玩记录与大卡的存档重取，这一局新建的存档进信息行；单纯重扫实例列表不重取", async () => {
     await mount();
-    const before = callsOf(ipc, "play_stats").length;
+    const stats = callsOf(ipc, "play_stats").length;
+    const content = callsOf(ipc, "list_instance_content").length;
     await act(async () => {
       await launcher.actions.refreshInstances();
     });
     await flush();
-    expect(callsOf(ipc, "play_stats")).toHaveLength(before);
-    instances = instances.map((i) => (i.id === "生存" ? { ...i, playtime_min: i.playtime_min + 30, last_played_at: NOW } : i));
-    await act(async () => {
-      await launcher.actions.refreshInstances();
-    });
+    expect(callsOf(ipc, "play_stats")).toHaveLength(stats);
+    expect(callsOf(ipc, "list_instance_content")).toHaveLength(content);
+
+    ipc.overrides.set("list_instance_content", () => ({
+      resource_packs: [],
+      shader_packs: [],
+      worlds: [world("New World", { name: "海岛据点", last_played: NOW - 2 * MINUTE }), world("新家", { name: "山顶小屋", last_played: NOW })],
+    }));
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 30 * MINUTE }));
     await flush();
-    expect(callsOf(ipc, "play_stats")).toHaveLength(before + 1);
+    expect(callsOf(ipc, "play_stats")).toHaveLength(stats + 1);
+    expect(callsOf(ipc, "list_instance_content").slice(content)).toEqual([{ id: "生存" }]);
+    expect(text()).toContain("存档「山顶小屋」");
   });
 
   it("游玩记录读取失败：两张卡原位报错，重试再请求一次", async () => {
