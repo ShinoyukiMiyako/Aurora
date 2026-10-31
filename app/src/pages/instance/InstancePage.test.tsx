@@ -426,6 +426,16 @@ describe("实例详情：整合包没导入完", () => {
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
   });
 
+  it("头图启动胶囊写「重新导入整合包」，点了去发现页打开那个整合包，不发补全", async () => {
+    await open("overview");
+    expect(() => button("修复并启动")).toThrow();
+    click(button("重新导入整合包"));
+    await flush();
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "curseforge", projectId: "285109" } });
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
   it("设置页的补全行换成重新导入", async () => {
     await open("settings");
     expect(() => button("补全")).toThrow();

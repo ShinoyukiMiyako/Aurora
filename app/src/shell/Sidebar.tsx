@@ -16,7 +16,7 @@ import { ACTION_ERROR, AVATAR_LINE, LAUNCH_COPY, PAGE_LABEL, STOPPED_LABEL } fro
 import type { InstanceSummary } from "../domain/adapt";
 import { percent } from "../domain/format";
 import { InstanceAvatar } from "../launch/InstanceAvatar";
-import { launchView, type LaunchView } from "../launch/launchView";
+import { brokenAction, launchView, type LaunchView } from "../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
 import { TOOLTIP_TIMING, fade, springs } from "../lib/motion";
 import { clamp, isImeComposing } from "../lib/util";
@@ -595,8 +595,10 @@ export function pinLaunchItem(entry: Pick<LaunchEntry, "view" | "launch" | "canc
       return { label: LAUNCH_COPY.stopGame, icon: "stop", onSelect: entry.stop };
     case "crashed":
       return { label: LAUNCH_COPY.viewCrash, icon: "bug", onSelect: entry.openCrash };
-    case "broken":
-      return { label: LAUNCH_COPY.repairAndLaunch, icon: "wrench", onSelect: entry.launch };
+    case "broken": {
+      const action = brokenAction(entry.view);
+      return { label: action.label, icon: action.icon, onSelect: entry.launch };
+    }
     case "installing":
       return {
         label: SIDEBAR_COPY.installing,

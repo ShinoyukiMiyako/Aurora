@@ -52,7 +52,7 @@ describe("固定实例名称提示的第二行", () => {
     ["排队安装写名次", { kind: "installing", task: queuedTask, queuePosition: 2 }, AVATAR_LINE.queued(2)],
     ["安装中写百分比", { kind: "installing", task: { ...queuedTask, status: "running", progress: 0.5 }, queuePosition: null }, AVATAR_LINE.installing("50%")],
     ["后端在装、前端没有任务", { kind: "installing", task: null, queuePosition: null }, SIDEBAR_COPY.waitingInstall],
-    ["损坏", { kind: "broken", reason: "x" }, AVATAR_LINE.broken],
+    ["损坏", { kind: "broken", reason: "x", reimport: false }, AVATAR_LINE.broken],
   ];
   it.each(cases)("%s", (_name, view, expected) => {
     expect(pinLine(view, inst, T0)).toBe(expected);
@@ -91,7 +91,8 @@ describe("固定实例菜单的第一项", () => {
     expect(pinLaunchItem(entry({ kind: "loading", session, phase: "preparing" })).label).toBe(LAUNCH_COPY.cancel);
     expect(pinLaunchItem(entry({ kind: "running", session })).label).toBe(LAUNCH_COPY.stopGame);
     expect(pinLaunchItem(entry({ kind: "crashed", session })).label).toBe(LAUNCH_COPY.viewCrash);
-    expect(pinLaunchItem(entry({ kind: "broken", reason: "x" })).label).toBe(LAUNCH_COPY.repairAndLaunch);
+    expect(pinLaunchItem(entry({ kind: "broken", reason: "x", reimport: false })).label).toBe(LAUNCH_COPY.repairAndLaunch);
+    expect(pinLaunchItem(entry({ kind: "broken", reason: "x", reimport: true }))).toMatchObject({ label: "重新导入整合包", icon: "modpack" });
   });
 
   it("结束游戏走入口自己的确认，不直接调用", () => {

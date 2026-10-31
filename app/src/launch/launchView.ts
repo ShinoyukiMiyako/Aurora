@@ -1,8 +1,10 @@
 // 启动视图：一个实例此刻该怎么呈现启动入口。胶囊、状态岛、侧栏头像、卡片底栏都只读这一个判定，不另造状态机。
 // 同一实例既有会话又有自身状态（安装中、损坏）时会话优先：正在跑的游戏比「已损坏」更值得说。
 
-import { failureCopy, LAUNCH_STAGES, phaseLabel, SESSION_COPY, crashCategoryLabel, type FailureCopy } from "../copy/flows";
+import type { IconName } from "../art/Icon";
+import { failureCopy, LAUNCH_COPY, LAUNCH_STAGES, MODPACK_REIMPORT_COPY, phaseLabel, SESSION_COPY, crashCategoryLabel, type FailureCopy } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
+import { needsReimport } from "../domain/rules";
 import type { FailureCode, StopReason, Task } from "../domain/types";
 import { busyInstanceId, instanceTask, queuePosition } from "../state/selectors";
 import { isLoadingPhase, sessionPlayedMinutes, type SessionState } from "../state/session";
@@ -24,7 +26,12 @@ export type LaunchView =
       /** 排队中的名次（从 1 起）；进行中或没有任务为 null。 */
       queuePosition: number | null;
     }
-  | { kind: "broken"; reason: string };
+  | {
+      kind: "broken";
+      reason: string;
+      /** 整合包没导入完：补全补不回整合包里的 Mod 与配置，入口改为去重新导入，而不是修复并启动。 */
+      reimport: boolean;
+    };
 
 export type LaunchViewKind = LaunchView["kind"];
 
@@ -51,7 +58,7 @@ export function launchView(state: LauncherState, inst: InstanceSummary): LaunchV
   }
   if (inst.status === "broken") {
     if (inst.brokenReason === null) throw new Error(`实例 ${inst.id} 损坏但没有原因`);
-    return { kind: "broken", reason: inst.brokenReason };
+    return { kind: "broken", reason: inst.brokenReason, reimport: needsReimport(inst) };
   }
   const busy = busyInstanceId(state);
   return { kind: "ready", busyElsewhere: busy !== null && busy !== inst.id };
@@ -83,8 +90,13 @@ export function launchViewEqual(a: LaunchView, b: LaunchView): boolean {
     case "installing":
       return b.kind === "installing" && a.task === b.task && a.queuePosition === b.queuePosition;
     case "broken":
-      return b.kind === "broken" && a.reason === b.reason;
+      return b.kind === "broken" && a.reason === b.reason && a.reimport === b.reimport;
   }
+}
+
+/** 损坏实例入口上的那一个动作（胶囊、卡片、侧栏菜单、命令面板共用）：修复并启动，或者去重新导入整合包。 */
+export function brokenAction(view: Extract<LaunchView, { kind: "broken" }>): { label: string; icon: IconName } {
+  return view.reimport ? { label: MODPACK_REIMPORT_COPY.menuReimport, icon: "modpack" } : { label: LAUNCH_COPY.repairAndLaunch, icon: "wrench" };
 }
 
 /** 失败会话的文案；javaPinned 只影响 spawn_failed 的第二个按钮（实例设置固定了 Java 时才出现）。 */

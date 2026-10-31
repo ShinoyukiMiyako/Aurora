@@ -13,6 +13,7 @@ import { Icon, type IconName } from "../art/Icon";
 import { ACTION_ERROR, LAUNCH_COPY, LOADER_NAME, PAGE_LABEL, SETTINGS_SECTION_LABEL, accountKindLabel } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { InstanceAvatar } from "../launch/InstanceAvatar";
+import { brokenAction } from "../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
 import { fade, springs } from "../lib/motion";
 import { isImeComposing } from "../lib/util";
@@ -130,8 +131,10 @@ function currentInstanceEntry(entry: LaunchEntry): PaletteEntry | null {
     case "stopped":
     case "failed":
       return { ...base, id: "current:launch", label: LAUNCH_COPY.group(name), hint: PALETTE_COPY.currentHint, icon: "play", navigates: false, run: entry.launch };
-    case "broken":
-      return { ...base, id: "current:repair", label: LAUNCH_COPY.repairAndLaunch, icon: "wrench", navigates: false, run: entry.launch };
+    case "broken": {
+      const action = brokenAction(entry.view);
+      return { ...base, id: "current:repair", label: action.label, icon: action.icon, navigates: entry.view.reimport, run: entry.launch };
+    }
     case "loading":
       return { ...base, id: "current:cancel", label: PALETTE_COPY.cancelLaunch, icon: "x", keywords: ["cancel", "quxiao"], navigates: false, run: entry.cancel };
     case "running":

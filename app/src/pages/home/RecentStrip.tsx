@@ -7,6 +7,7 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative, percent } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
+import { brokenAction } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
@@ -105,8 +106,10 @@ function RecentLaunch({ instanceId }: { instanceId: string }) {
   switch (view.kind) {
     case "ready":
       return <IconButton icon="play" variant="secondary" size="sm" label={LAUNCH_COPY.group(instance.name)} onClick={launch} />;
-    case "broken":
-      return <IconButton icon="wrench" variant="secondary" size="sm" label={LAUNCH_COPY.repairAndLaunch} onClick={launch} />;
+    case "broken": {
+      const action = brokenAction(view);
+      return <IconButton icon={action.icon} variant="secondary" size="sm" label={action.label} onClick={launch} />;
+    }
     case "failed": {
       if (failure === null) throw new Error("启动失败的入口缺少失败文案");
       return <IconButton icon="alert" variant="secondary" size="sm" label={failure.fix.label} onClick={() => fix(failure.fix.kind)} />;

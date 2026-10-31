@@ -21,7 +21,7 @@ import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { useBreathPhase } from "./breath";
 import { instanceCover } from "./cover";
 import styles from "./LaunchCapsule.module.css";
-import { sessionDetail, sessionPhaseLabel, stageLabel, type LaunchView } from "./launchView";
+import { brokenAction, sessionDetail, sessionPhaseLabel, stageLabel, type LaunchView } from "./launchView";
 import { useLaunch, type LaunchEntry } from "./useLaunch";
 
 export type LaunchCapsuleSize = "md" | "lg";
@@ -222,13 +222,15 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
           {relaunch ? LAUNCH_COPY.relaunch : LAUNCH_COPY.launch}
         </button>
       );
-    case "broken":
+    case "broken": {
+      const action = brokenAction(face);
       return (
         <button type="button" className={styles.go} data-tone="warn" onClick={entry.launch}>
-          <Icon name="wrench" size={18} />
-          {LAUNCH_COPY.repairAndLaunch}
+          <Icon name={action.icon} size={18} />
+          {action.label}
         </button>
       );
+    }
     case "loading": {
       const s = face.session;
       const stopping = entry.stopping && entry.view.kind === "loading";

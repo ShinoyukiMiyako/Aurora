@@ -6,7 +6,7 @@ import type { LauncherState } from "../state/store";
 import { newTask } from "../state/tasks";
 import { avatarIndicator, ringGeometry } from "./InstanceAvatar";
 import { faceKey, holdFor, placedForProgress, placedForStage, FACE_HOLD_MS } from "./LaunchCapsule";
-import { launchFailure, launchView, sessionDetail, type LaunchView } from "./launchView";
+import { brokenAction, launchFailure, launchView, sessionDetail, type LaunchView } from "./launchView";
 
 const T0 = 1_720_000_000_000;
 const ACCOUNT = { uuid: "u-1", name: "Steve" };
@@ -80,8 +80,21 @@ describe("启动视图判定", () => {
   it("会话优先于实例自身状态：损坏的实例在加载时呈现加载", () => {
     const broken = inst("B", { status: "broken", brokenReason: "版本 JSON 缺失" });
     expect(launchView(state({ session: loading("B") }), broken).kind).toBe("loading");
-    expect(launchView(state({}), broken)).toEqual({ kind: "broken", reason: "版本 JSON 缺失" });
+    expect(launchView(state({}), broken)).toEqual({ kind: "broken", reason: "版本 JSON 缺失", reimport: false });
     expect(() => launchView(state({}), inst("X", { status: "broken" }))).toThrow("损坏但没有原因");
+  });
+
+  it("整合包没导入完的损坏实例：入口是重新导入整合包，不是修复并启动", () => {
+    const marker = (kind: "install" | "modpack") => ({ kind, outcome: "failed" as const, startedAt: null, spec: null, error: null });
+    const pack = launchView(state({}), inst("P", { status: "broken", brokenReason: "整合包没有导入完", incomplete: marker("modpack") }));
+    expect(pack).toEqual({ kind: "broken", reason: "整合包没有导入完", reimport: true });
+    if (pack.kind !== "broken") throw new Error("应为损坏视图");
+    expect(brokenAction(pack)).toEqual({ label: "重新导入整合包", icon: "modpack" });
+
+    const install = launchView(state({}), inst("I", { status: "broken", brokenReason: "安装没有完成", incomplete: marker("install") }));
+    if (install.kind !== "broken") throw new Error("应为损坏视图");
+    expect(install.reimport).toBe(false);
+    expect(brokenAction(install)).toEqual({ label: "修复并启动", icon: "wrench" });
   });
 
   it("另一实例占着游戏进程时就绪带 busyElsewhere；那个会话结束后不再算占用", () => {
@@ -160,7 +173,7 @@ describe("头像指示与胶囊换面", () => {
     const runningView = launchView(state({ session: running("A") }), inst("A"));
     expect(avatarIndicator(runningView, 24)).toEqual({ type: "none" });
     expect(avatarIndicator(runningView, 32)).toEqual({ type: "badge", tone: "ok" });
-    expect(avatarIndicator({ kind: "broken", reason: "x" }, 56)).toEqual({ type: "badge", tone: "warn" });
+    expect(avatarIndicator({ kind: "broken", reason: "x", reimport: false }, 56)).toEqual({ type: "badge", tone: "warn" });
     expect(avatarIndicator({ kind: "installing", task: null, queuePosition: null }, 44)).toEqual({ type: "queued" });
     expect(avatarIndicator({ kind: "ready", busyElsewhere: true }, 56)).toEqual({ type: "none" });
   });

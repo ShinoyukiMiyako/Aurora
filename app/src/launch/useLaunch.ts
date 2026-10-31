@@ -9,6 +9,7 @@ import { ACTION_ERROR, CONFIRM_COPY, type FailureCopy, type FailureFixKind } fro
 import { javaPinned, type InstanceSummary } from "../domain/adapt";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useInstanceSettings } from "../state/queries/instance";
+import { reimportRoute } from "../state/route";
 import { getInstance } from "../state/selectors";
 import { useLaunchHost } from "./host";
 import { launchFailure, launchView, launchViewEqual, type LaunchView } from "./launchView";
@@ -20,7 +21,7 @@ export interface LaunchEntry {
   stopping: boolean;
   /** failed 视图的文案与修复动作；其余视图为 null。 */
   failure: FailureCopy | null;
-  /** 启动（就绪、已结束、失败、崩溃后再启动）；损坏时由状态容器转成「修复并启动」。 */
+  /** 启动（就绪、已结束、失败、崩溃后再启动）；损坏时由状态容器转成「修复并启动」，整合包没导入完的去重新导入。 */
   launch(): void;
   /** 取消启动：加载阶段，不确认。 */
   cancel(): void;
@@ -55,10 +56,15 @@ export function useLaunch(instanceId: string): LaunchEntry {
 
   const name = inst.name;
   const isBroken = view.kind === "broken";
+  const reimport = view.kind === "broken" && view.reimport;
 
   const launch = useCallback(() => {
+    if (reimport) {
+      host.go(reimportRoute(inst));
+      return;
+    }
     void host.run(() => actions.launch(instanceId), isBroken ? ACTION_ERROR.repair : ACTION_ERROR.launch(name));
-  }, [actions, host, instanceId, isBroken, name]);
+  }, [actions, host, inst, instanceId, isBroken, name, reimport]);
 
   const endSession = useCallback(async () => {
     setStopping(true);
