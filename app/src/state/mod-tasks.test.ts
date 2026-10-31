@@ -2,8 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
 import type { InstallPlan, ModVersionInfo, UpdateCandidate } from "../ipc/mods";
+import { CORE_EVENT } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, deferred, resetRecorder, settle, startedStore } from "../test/launcher";
+import { bootOverrides, callsOf, deferred, emit, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { resources } from "./resource";
 import type { LauncherStore } from "./store";
 
@@ -210,5 +211,316 @@ describe("全部更新", () => {
       ["lithium-fabric-l1.jar", "l2"],
       ["iris-i1.jar", "i2"],
     ]);
+  });
+
+  /** 三个可更新，第三个（iris）第一次失败；返回失败的那个任务。 */
+  async function failOnIris(): Promise<string> {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => {
+      if (args.fileName === "iris-i1.jar") throw new IpcError("history_write_failed", "变更历史写入失败");
+      return { file_name: String(args.fileName), path: "", platform: "modrinth" };
+    });
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task.status).toBe("failed");
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    return task.id;
+  }
+
+  const successes = () => store.getState().toasts.filter((t) => t.tone === "success").map((t) => [t.title, t.body]);
+
+  it("重试时上次已经全部换好：这次一个都没更新，提示都已是最新，不报「已更新 3 个」", async () => {
+    const id = await failOnIris();
+    ipc.overrides.set("check_updates", () => []);
+    store.actions.retryTask(id);
+    await settle();
+    expect(store.getState().tasks[0].status).toBe("done");
+    expect(callsOf(ipc, "update_mod")).toHaveLength(3);
+    expect(successes()).toEqual([]);
+    const info = store.getState().toasts.filter((t) => t.tone === "info").map((t) => [t.title, t.body]);
+    expect(info).toEqual([["所有 Mod 都是最新的", "「生存」"]]);
+  });
+
+  it("重试时只剩一个要换：按这一次实际换的写，单个时写 Mod 名", async () => {
+    const id = await failOnIris();
+    ipc.overrides.set("check_updates", () => [candidate("iris", "i1", "i2")]);
+    store.actions.retryTask(id);
+    await settle();
+    expect(callsOf(ipc, "update_mod").slice(3).map((a) => a.fileName)).toEqual(["iris-i1.jar"]);
+    expect(successes()).toEqual([["已更新 iris", "「生存」· 旧版本已保留，可以回滚"]]);
+  });
+
+  it("重试时剩两个要换：写这一次换的个数", async () => {
+    const id = await failOnIris();
+    ipc.overrides.set("check_updates", () => [candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    store.actions.retryTask(id);
+    await settle();
+    expect(successes()).toEqual([["已更新 2 个 Mod", "「生存」· 旧版本已保留，可以回滚"]]);
+  });
+
+  it("从任务日志恢复的旧记录没有 Mod 名：只剩一个时写个数", async () => {
+    store.stop();
+    resetRecorder(ipc);
+    const items = [
+      { fileName: "sodium-s1.jar", platform: "modrinth", projectId: "sodium", modVersionId: "s2" },
+      { fileName: "iris-i1.jar", platform: "modrinth", projectId: "iris", modVersionId: "i2" },
+    ];
+    bootOverrides(ipc, {
+      journal: [
+        {
+          id: "task-old",
+          kind: "mod",
+          title: "更新 2 个 Mod",
+          detail: "「生存」",
+          instance_id: "生存",
+          status: "running",
+          progress: 0.5,
+          bytes: 0,
+          total_bytes: null,
+          speed_bps: 0,
+          attempt: 1,
+          error: null,
+          created_at: 1_719_000_000_000,
+          finished_at: null,
+          spec: { command: "update_mods", args: { versionId: "生存", items } },
+        },
+      ],
+    });
+    ipc.overrides.set("check_updates", () => [candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    store = await startedStore();
+    store.actions.retryTask("task-old");
+    await settle();
+    expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["iris-i1.jar"]);
+    expect(successes()).toEqual([["已更新 1 个 Mod", "「生存」· 旧版本已保留，可以回滚"]]);
+  });
+});
+
+describe("组合任务的取消", () => {
+  const installSodium = () =>
+    store.actions.installResource({
+      resourceType: "mod",
+      platform: "modrinth",
+      projectId: "sodium",
+      name: "Sodium",
+      targets: [{ instanceId: "生存", fileVersionId: "v2", world: null }],
+    });
+
+  it("某一项在取消宽限期内照常装完、后端按成功返回：不再开始下一项，任务落为已取消，Mod 列表重取", async () => {
+    ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }, { projectId: "lithium", versionId: "l1" }));
+    const first = deferred<unknown>();
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    // 取消到达时这一项正在运行（返回 true），后端随后不再记着这个 id
+    ipc.overrides.set("cancel_task", () => true);
+    await installSodium();
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task.status).toBe("running");
+    const mods = await cached("mods:生存");
+
+    await store.actions.cancelTask(task.id);
+    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth" });
+    await settle();
+
+    expect(callsOf(ipc, "install_mod").map((a) => a.projectId)).toEqual(["sodium"]);
+    expect(callsOf(ipc, "cancel_task")).toEqual([{ taskId: `${task.id}#1` }]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
+    expect(store.getState().toasts.map((t) => t.title)).toContain("已取消：安装 Sodium");
+    expect(store.getState().toasts.some((t) => t.tone === "success")).toBe(false);
+    // 第一项已经落进 mods 目录，列表不能停在取消前
+    expect(await readAgain("mods:生存", mods)).toBe(2);
+  });
+
+  it("全部更新：一项在宽限期内换好后不再更新其余的", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    const first = deferred<unknown>();
+    ipc.overrides.set("update_mod", (args) => (callsOf(ipc, "update_mod").length === 1 ? first.promise : { file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("cancel_task", () => true);
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [task] = store.getState().tasks;
+    await store.actions.cancelTask(task.id);
+    first.resolve({ file_name: "sodium-s2.jar", path: "", platform: "modrinth" });
+    await settle();
+    expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["sodium-s1.jar"]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
+  });
+
+  it("取消落在最后一项上、它在宽限期内做完：活已经干完，任务算完成", async () => {
+    ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }));
+    const last = deferred<unknown>();
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 2 ? last.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    ipc.overrides.set("cancel_task", () => true);
+    await installSodium();
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(callsOf(ipc, "install_mod")).toHaveLength(2);
+    await store.actions.cancelTask(task.id);
+    last.resolve({ file_name: "fabric-api-f1.jar", path: "", platform: "modrinth" });
+    await settle();
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["done"]);
+    expect(store.getState().toasts.filter((t) => t.tone === "success").map((t) => t.title)).toEqual(["已安装 Sodium 及 1 个前置"]);
+  });
+
+  it("删除实例时取消运行中的组合任务：同样不再开始下一项", async () => {
+    ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }));
+    const first = deferred<unknown>();
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    ipc.overrides.set("cancel_task", () => true);
+    ipc.overrides.set("delete_instance", () => ({ existed: true }));
+    await installSodium();
+    await settle();
+    const deleting = store.actions.deleteInstance("生存", 0);
+    await settle();
+    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth" });
+    await deleting;
+    await settle();
+    expect(callsOf(ipc, "install_mod")).toHaveLength(1);
+    expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "生存" }]);
+  });
+});
+
+describe("组合任务的进度按整体累计", () => {
+  /** 每次调用挂起，等测试逐个放行。 */
+  function pendingCalls(cmd: string): Deferred<unknown>[] {
+    const calls: Deferred<unknown>[] = [];
+    ipc.overrides.set(cmd, () => {
+      const d = deferred<unknown>();
+      calls.push(d);
+      return d.promise;
+    });
+    return calls;
+  }
+
+  it("全部更新：按各项声明大小折成整体，换项不归零，总量不变；上一项晚到的进度不算进下一项", async () => {
+    const sized = (projectId: string, current: string, latest: string, size: number): UpdateCandidate => ({
+      ...candidate(projectId, current, latest),
+      latest: version(projectId, latest, { file_size: size }),
+    });
+    ipc.overrides.set("check_updates", () => [sized("sodium", "s1", "s2", 100), sized("lithium", "l1", "l2", 300), sized("iris", "i1", "i2", 600)]);
+    const calls = pendingCalls("update_mod");
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [{ id }] = store.getState().tasks;
+    const seen: [number, number, number | null][] = [];
+    const snap = () => {
+      const t = store.getState().tasks[0];
+      seen.push([t.progress, t.bytes, t.totalBytes]);
+    };
+    const progress = (bytes: number, total: number) => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 1, finished: bytes === total ? 1 : 0, bytes, total_bytes: total, speed: 4096 });
+      snap();
+    };
+    const finish = async (i: number) => {
+      calls[i].resolve({ file_name: `${i}.jar`, path: "", platform: "modrinth" });
+      await settle();
+      snap();
+    };
+
+    snap();
+    progress(0, 100);
+    progress(50, 100);
+    progress(100, 100);
+    await finish(0);
+    progress(100, 100);
+    progress(150, 300);
+    progress(300, 300);
+    await finish(1);
+    progress(300, 600);
+    await finish(2);
+
+    expect(seen).toEqual([
+      [0, 0, 1000],
+      [0, 0, 1000],
+      [0.05, 50, 1000],
+      [0.1, 100, 1000],
+      [0.1, 100, 1000],
+      [0.1, 100, 1000],
+      [0.25, 250, 1000],
+      [0.4, 400, 1000],
+      [0.4, 400, 1000],
+      [0.7, 700, 1000],
+      [1, 1000, 1000],
+    ]);
+    expect(store.getState().tasks[0].status).toBe("done");
+  });
+
+  it("装 Mod：第一项连带下载了前置，按实际字节算进整体，不卡在主项自己的那一份", async () => {
+    const sized = plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" });
+    sized.items[0] = { ...sized.items[0], version: { ...sized.items[0].version, file_size: 1024 } };
+    sized.items[1] = { ...sized.items[1], version: { ...sized.items[1].version, file_size: 2048 } };
+    ipc.overrides.set("plan_install", () => sized);
+    const calls = pendingCalls("install_mod");
+    await store.actions.installResource({
+      resourceType: "mod",
+      platform: "modrinth",
+      projectId: "sodium",
+      name: "Sodium",
+      targets: [{ instanceId: "生存", fileVersionId: "v2", world: null }],
+    });
+    await settle();
+    const [{ id }] = store.getState().tasks;
+    const seen: [number, number, number | null][] = [];
+    const snap = () => {
+      const t = store.getState().tasks[0];
+      seen.push([t.progress, t.bytes, t.totalBytes]);
+    };
+    // 主项的命令按计划把 Sodium 与 Fabric API 一批下完
+    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 2, finished: 1, bytes: 1536, total_bytes: 3072, speed: 1 });
+    snap();
+    emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 2, finished: 2, bytes: 3072, total_bytes: 3072, speed: 1 });
+    snap();
+    calls[0].resolve(null);
+    await settle();
+    snap();
+    // 前置已经装好，第二项的命令无事可做
+    calls[1].resolve(null);
+    await settle();
+    snap();
+    expect(seen).toEqual([
+      [0.5, 1536, 3072],
+      [1, 3072, 3072],
+      [1, 3072, 3072],
+      [1, 3072, 3072],
+    ]);
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", doneBytes: 3072 });
+  });
+
+  it("装 Mod 时有一项不知道大小：按项数折，进度单调不减", async () => {
+    const unsized = plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }, { projectId: "lithium", versionId: "l1" });
+    unsized.items[1] = { ...unsized.items[1], version: { ...unsized.items[1].version, file_size: null } };
+    ipc.overrides.set("plan_install", () => unsized);
+    const calls = pendingCalls("install_mod");
+    await store.actions.installResource({
+      resourceType: "mod",
+      platform: "modrinth",
+      projectId: "sodium",
+      name: "Sodium",
+      targets: [{ instanceId: "生存", fileVersionId: "v2", world: null }],
+    });
+    await settle();
+    const [{ id }] = store.getState().tasks;
+    const seen: number[] = [];
+    const progress = (bytes: number, total: number) => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 1, finished: 0, bytes, total_bytes: total, speed: 1 });
+      seen.push(store.getState().tasks[0].progress);
+    };
+    progress(512, 1024);
+    calls[0].resolve(null);
+    await settle();
+    seen.push(store.getState().tasks[0].progress);
+    progress(0, 4096);
+    progress(4096, 4096);
+    calls[1].resolve(null);
+    await settle();
+    progress(1024, 1024);
+    calls[2].resolve(null);
+    await settle();
+
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", totalBytes: null });
+    const expected = [1 / 6, 1 / 3, 1 / 3, 2 / 3, 1];
+    expect(seen).toHaveLength(expected.length);
+    seen.forEach((value, i) => expect(value).toBeCloseTo(expected[i], 10));
   });
 });

@@ -62,7 +62,7 @@ import { invoke, type UnlistenFn } from "../ipc/bridge";
 import * as configIpc from "../ipc/config";
 import { lastCrash } from "../ipc/diagnostics";
 import { installMod, type InstallableResourceType, type ResourceInstallOutcomeDto } from "../ipc/discover";
-import { isCancelled, isIpcError } from "../ipc/errors";
+import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/errors";
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
 import * as instancesIpc from "../ipc/instances";
 import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
@@ -94,9 +94,12 @@ import {
   type SessionState,
 } from "./session";
 import {
+  applyCompositeDownload,
   applyTaskDownload,
   attemptTaskId,
   clearFinished,
+  completeCompositeStep,
+  compositeProgress,
   findDuplicate,
   isActiveTask,
   markCancelled,
@@ -106,9 +109,12 @@ import {
   newTask,
   restoreJournal,
   retryTask,
+  startComposite,
   taskByAttempt,
   tasksToStart,
   trimHistory,
+  type CompositeProgress,
+  type DownloadSnapshot,
   type TaskDraft,
 } from "./tasks";
 import {
@@ -208,7 +214,7 @@ type TaskMeta =
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
-  | { type: "updates"; instanceId: string; count: number };
+  | { type: "updates"; instanceId: string };
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -370,6 +376,9 @@ const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb
 /** 写整个实例目录的任务：期间实例算「安装中」。其余挂在实例上的任务（装、更新 Mod 与资源）只改动其中的 Mod 与资源，算 modifying。 */
 const INSTANCE_TASKS = new Set(["install_version", "install_modpack", "repair_instance"]);
 
+/** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
+const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
+
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
 
@@ -468,7 +477,7 @@ function metaFromSpec(task: Task): TaskMeta | null {
       return { type: "mods", instanceId: strArg(args, "versionId", command), name: items[0].title, dependencies: items.length - 1 };
     }
     case "update_mods":
-      return { type: "updates", instanceId: strArg(args, "versionId", command), count: updateItems(args).length };
+      return { type: "updates", instanceId: strArg(args, "versionId", command) };
     default:
       return null;
   }
@@ -479,6 +488,16 @@ interface ModItem {
   projectId: string;
   modVersionId: string;
   title: string;
+  /** 平台声明的文件大小（组合任务的进度按它折算）；平台没声明、或较早写入任务日志的记录没有这一项时为 null。 */
+  fileSize: number | null;
+}
+
+/** 组合任务一项的声明大小。较早写入任务日志的记录没有这个键，与平台没声明大小同样按 null 处理。 */
+function fileSizeArg(r: Record<string, unknown>, command: string): number | null {
+  if (!("fileSize" in r) || r.fileSize === null) return null;
+  const size = r.fileSize;
+  if (typeof size !== "number" || !Number.isFinite(size) || size < 0) throw new Error(`任务 ${command} 的 fileSize 应为非负数或 null：${String(size)}`);
+  return size;
 }
 
 function modItems(args: Record<string, unknown>): ModItem[] {
@@ -494,6 +513,7 @@ function modItems(args: Record<string, unknown>): ModItem[] {
       projectId: strArg(r, "projectId", "install_mods"),
       modVersionId: strArg(r, "modVersionId", "install_mods"),
       title: strArg(r, "title", "install_mods"),
+      fileSize: fileSizeArg(r, "install_mods"),
     };
   });
 }
@@ -503,6 +523,10 @@ interface UpdateItem {
   platform: Platform;
   projectId: string;
   modVersionId: string;
+  /** Mod 名（完成通知用）；较早写入任务日志的记录没有这一项，为 null。 */
+  title: string | null;
+  /** 新版本的声明大小，含义同 ModItem.fileSize。 */
+  fileSize: number | null;
 }
 
 function updateItems(args: Record<string, unknown>): UpdateItem[] {
@@ -518,8 +542,15 @@ function updateItems(args: Record<string, unknown>): UpdateItem[] {
       platform,
       projectId: strArg(r, "projectId", "update_mods"),
       modVersionId: strArg(r, "modVersionId", "update_mods"),
+      title: "title" in r ? strArg(r, "title", "update_mods") : null,
+      fileSize: fileSizeArg(r, "update_mods"),
     };
   });
+}
+
+/** 「全部更新」这一次尝试实际换掉的 Mod（重试时只含这一次换的）。 */
+interface UpdatesOutcome {
+  updated: UpdateItem[];
 }
 
 /**
@@ -806,6 +837,20 @@ export class LauncherStore {
   private journalState: "unread" | "read" | "invalid" = "unread";
   /** 首次启动向导的第一步已经提交（后端已记下向导完成）。 */
   private firstRunCommitted = false;
+  /**
+   * 已请求取消、还没落定的尝试（attemptTaskId）。后端只记「取消时不在运行」的 id：组合任务的某一项在取消宽限期内
+   * 照常做完时按成功返回，同一个 id 再登记拿到的是全新的令牌，下一项会照常开始。所以取消要由前端记着，每开始一项前查一次。
+   */
+  private readonly cancelRequested = new Set<string>();
+  /** 运行中组合任务的进度游标（按 attemptTaskId）：它的下载进度按整体折算，见 CompositeProgress。 */
+  private readonly composites = new Map<string, CompositeProgress>();
+  /**
+   * 实例正在被删除、完成后不再落地的任务（任务 id）。删除前取消它们，但取消可能没赶上：任务在取消宽限期内照常做完时，
+   * 写封面、写固定、弹「已就绪」都是对一个马上要删掉的实例做的，提示也会和结果对不上。
+   */
+  private readonly discardLanding = new Set<string>();
+  /** 固定服务器的读改写排成一条链：两次切换并发时，后一次要等前一次写完再读，否则先写的那台会被后写的覆盖。 */
+  private serverPinChain: Promise<void> = Promise.resolve();
 
   readonly actions: LauncherActions;
   private readonly net: NetworkMonitor;
@@ -1069,15 +1114,17 @@ export class LauncherStore {
     // 不带 task_id 的事件属于启动会话或非任务命令（离线用户名告警）；启动的进度走 launch-phase，日志走 game-log
     if (event.task_id === null) return;
     if (event.kind === "download") {
-      this.set((raw) => ({
-        tasks: applyTaskDownload(raw.tasks, event.task_id as string, {
-          total: event.total,
-          finished: event.finished,
-          bytes: event.bytes,
-          totalBytes: event.total_bytes,
-          speed: event.speed,
-        }),
-      }));
+      const attemptId = event.task_id;
+      const snapshot: DownloadSnapshot = { total: event.total, finished: event.finished, bytes: event.bytes, totalBytes: event.total_bytes, speed: event.speed };
+      const cursor = this.composites.get(attemptId);
+      if (cursor === undefined) {
+        this.set((raw) => ({ tasks: applyTaskDownload(raw.tasks, attemptId, snapshot) }));
+        return;
+      }
+      const next = applyCompositeDownload(this.raw.tasks, attemptId, cursor, snapshot);
+      if (next === null) return;
+      this.composites.set(attemptId, next.cursor);
+      this.set({ tasks: next.tasks });
       return;
     }
     if (event.kind === "warning") {
@@ -1225,7 +1272,7 @@ export class LauncherStore {
     }));
     this.tasksChanged();
     const ids = new Set(pending.map((t) => t.id));
-    await Promise.all(this.raw.tasks.filter((t) => ids.has(t.id) && t.status === "running").map((t) => tasksIpc.cancelTask(attemptTaskId(t))));
+    await Promise.all(this.raw.tasks.filter((t) => ids.has(t.id) && t.status === "running").map((t) => this.requestCancel(t)));
     await waitUntil(
       this.subscribe,
       () => !this.raw.tasks.some((t) => ids.has(t.id) && isActiveTask(t)),
@@ -1257,10 +1304,45 @@ export class LauncherStore {
     for (const task of tasksToStart(this.raw.tasks)) {
       this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id, Date.now()) }));
       const attempt = task.attempt;
+      const attemptId = attemptTaskId(task);
       this.execute(task).then(
-        (result) => this.onTaskDone(task.id, attempt, result),
-        (error: unknown) => this.onTaskFailed(task.id, attempt, error),
+        (result) => {
+          this.cancelRequested.delete(attemptId);
+          this.composites.delete(attemptId);
+          this.onTaskDone(task.id, attempt, result);
+        },
+        (error: unknown) => {
+          this.cancelRequested.delete(attemptId);
+          this.composites.delete(attemptId);
+          this.onTaskFailed(task.id, attempt, error);
+        },
       );
+    }
+  }
+
+  /** 请后端取消运行中的这一次尝试，并记下请求：组合任务据此不再开始下一项。返回后端此刻是否在运行它。 */
+  private requestCancel(task: Task): Promise<boolean> {
+    const attemptId = attemptTaskId(task);
+    this.cancelRequested.add(attemptId);
+    return tasksIpc.cancelTask(attemptId);
+  }
+
+  /**
+   * 逐项执行组合任务：每开始一项前查一次取消（见 cancelRequested），进度按各项的声明大小折成整体（见 CompositeProgress）。
+   * 游标留到这一次尝试落定才清：最后一项做完到任务落为完成之间晚到的进度也按组合任务的口径丢掉，不会把进度条拉回单项。
+   */
+  private async runSteps(attemptId: string, steps: readonly { size: number | null; run: () => Promise<unknown> }[]): Promise<void> {
+    const start = compositeProgress(steps.map((step) => step.size));
+    this.composites.set(attemptId, start);
+    this.set((raw) => ({ tasks: startComposite(raw.tasks, attemptId, start) }));
+    for (const step of steps) {
+      if (this.cancelRequested.has(attemptId)) throw new IpcError(CANCELLED_ERROR_CODE, "已取消");
+      await step.run();
+      const cursor = this.composites.get(attemptId);
+      if (cursor === undefined) throw new Error(`组合任务 ${attemptId} 的进度游标不见了`);
+      const next = completeCompositeStep(this.raw.tasks, attemptId, cursor);
+      this.composites.set(attemptId, next.cursor);
+      this.set({ tasks: next.tasks });
     }
   }
 
@@ -1268,20 +1350,31 @@ export class LauncherStore {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
-    // 组合任务逐个调后端命令，复用同一个 taskId。中途取消时后端记住这个 id，下一个立即以 cancelled 返回
+    // 组合任务逐个调后端命令，复用同一个 taskId
     if (command === "install_mods") {
       const versionId = strArg(args, "versionId", command);
-      for (const item of modItems(args)) {
-        await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
-      }
+      await this.runSteps(
+        taskId,
+        modItems(args).map((item) => ({ size: item.fileSize, run: () => installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId) })),
+      );
       return null;
     }
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
-      for (const item of task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args)) {
-        await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
-      }
-      return null;
+      const items = task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args);
+      const updated: UpdateItem[] = [];
+      await this.runSteps(
+        taskId,
+        items.map((item) => ({
+          size: item.fileSize,
+          run: async () => {
+            await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
+            updated.push(item);
+          },
+        })),
+      );
+      const outcome: UpdatesOutcome = { updated };
+      return outcome;
     }
     return invoke<unknown>(command, { ...args, taskId });
   }
@@ -1315,6 +1408,7 @@ export class LauncherStore {
     if (before.status !== "running" || before.attempt !== attempt) return;
     this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())) }));
     this.tasksChanged();
+    if (this.discardLanding.has(id)) return;
     this.background(ACTION_ERROR.landTask(before.title), this.landTask(before, result));
   }
 
@@ -1337,6 +1431,11 @@ export class LauncherStore {
     this.tasksChanged();
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫
     if (INSTANCE_TASKS.has(before.spec.command)) this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    // 组合任务停下之前做完的那几项已经落盘，Mod 列表与数目不能停在任务开始前
+    if (COMPOSITE_TASKS.has(before.spec.command) && before.instanceId !== null) {
+      this.modsChanged(before.instanceId);
+      this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    }
   }
 
   /** 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。 */
@@ -1472,8 +1571,16 @@ export class LauncherStore {
         return;
       }
       case "updates": {
+        // 重试时上一次尝试已经换掉的不再计入：通知只说这一次实际换了什么
+        const { updated } = result as UpdatesOutcome;
         this.modsChanged(meta.instanceId);
-        const copy = TASK_TOAST.modsUpdated(meta.count, meta.instanceId);
+        if (updated.length === 0) {
+          const latest = TASK_TOAST.modsAlreadyLatest(meta.instanceId);
+          this.pushToast("info", latest.title, latest.body);
+          return;
+        }
+        const only = updated.length === 1 ? updated[0].title : null;
+        const copy = only === null ? TASK_TOAST.modsUpdated(updated.length, meta.instanceId) : TASK_TOAST.modUpdated(only, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
@@ -1832,8 +1939,17 @@ export class LauncherStore {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
         // 取消排队中的新建任务后占位项随之消失，先记下它是不是占位
         const placeholder = store.instance(id).placeholder;
-        await store.cancelInstanceTasks(id);
-        if (!placeholder) await instancesIpc.deleteInstance(id);
+        const doomed = store.raw.tasks.filter((t) => isActiveTask(t) && t.instanceId === id).map((t) => t.id);
+        for (const taskId of doomed) store.discardLanding.add(taskId);
+        try {
+          await store.cancelInstanceTasks(id);
+          // 占位实例的取消没赶上时（安装在宽限期内做完，或取消到达前就失败、留下了未完成的目录），实例已经在盘上，
+          // 照样要删；赶上了的，后端已经删掉半成品。重扫一次按盘上的实际情况定
+          if (placeholder) await store.fetchInstances();
+          if (!placeholder || store.raw.scanned.some((i) => i.id === id)) await instancesIpc.deleteInstance(id);
+        } finally {
+          for (const taskId of doomed) store.discardLanding.delete(taskId);
+        }
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
@@ -1994,11 +2110,18 @@ export class LauncherStore {
               command: "update_mods",
               args: {
                 versionId: instanceId,
-                items: candidates.map((c) => ({ fileName: c.file_name, platform: c.latest.platform, projectId: c.latest.project_id, modVersionId: c.latest.version_id })),
+                items: candidates.map((c) => ({
+                  fileName: c.file_name,
+                  platform: c.latest.platform,
+                  projectId: c.latest.project_id,
+                  modVersionId: c.latest.version_id,
+                  title: c.title === null ? c.file_name : c.title,
+                  fileSize: c.latest.file_size,
+                })),
               },
             },
           },
-          { type: "updates", instanceId, count: candidates.length },
+          { type: "updates", instanceId },
           TASK_TEXT.updateAllTitle(candidates.length),
         );
       },
@@ -2036,6 +2159,7 @@ export class LauncherStore {
                       projectId: item.version.project_id,
                       modVersionId: item.version.version_id,
                       title: i === 0 ? spec.name : item.title === null ? item.version.name : item.title,
+                      fileSize: item.version.file_size,
                     })),
                   },
                 },
@@ -2123,7 +2247,7 @@ export class LauncherStore {
         }
         if (task.status !== "running") throw new Error(`任务 ${id} 已经结束`);
         // 运行中的任务由命令以 cancelled 返回后落态与通知
-        await tasksIpc.cancelTask(attemptTaskId(task));
+        await store.requestCancel(task);
       },
       async cancelAllTasks() {
         const active = store.raw.tasks.filter(isActiveTask);
@@ -2189,10 +2313,18 @@ export class LauncherStore {
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
       async togglePinServer(server) {
-        const current = await listPinnedServers();
-        const pinned = current.some((s) => s.address === server.address);
-        await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, server]);
-        invalidateResources("servers");
+        const run = store.serverPinChain.then(async () => {
+          const current = await listPinnedServers();
+          const pinned = current.some((s) => s.address === server.address);
+          await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, server]);
+          invalidateResources("servers");
+        });
+        // 链只负责排队：这一次的失败经下面的 await 照常抛给调用方，不挡后面排着的切换
+        store.serverPinChain = run.then(
+          () => undefined,
+          () => undefined,
+        );
+        await run;
       },
       async reload(slice) {
         await store.loadSlice(slice);
