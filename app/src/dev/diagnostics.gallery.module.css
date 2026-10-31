@@ -1,0 +1,7 @@
+.result {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  color: var(--sk-text-2);
+  word-break: break-all;
+  user-select: text;
+}
