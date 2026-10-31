@@ -13,9 +13,11 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
-use aurora_download::SourcePlan;
+use aurora_download::{CancellationToken, SourcePlan};
 use serde::Deserialize;
+use tokio::process::{Child, Command};
 
 use crate::context::InstallContext;
 use crate::error::{Error, Result, io_err, zip_err};
@@ -300,6 +302,7 @@ pub struct ForgeInstaller<'a> {
     java_path: PathBuf,
     side: String,
     sources: Option<SourcePlan>,
+    cancel: Option<CancellationToken>,
 }
 
 impl<'a> ForgeInstaller<'a> {
@@ -310,12 +313,20 @@ impl<'a> ForgeInstaller<'a> {
             java_path: java_path.into(),
             side: "client".to_owned(),
             sources: None,
+            cancel: None,
         }
     }
 
     /// installer 旁的 `.sha1` 校验文件按此方案在官方与镜像之间兜底抓取。
     pub fn with_sources(mut self, sources: SourcePlan) -> Self {
         self.sources = Some(sources);
+        self
+    }
+
+    /// 挂取消令牌：触发后不再起新的处理器，正在跑的处理器子进程被结束、等它真正退出后以
+    /// [`aurora_download::Error::Cancelled`] 返回。下载阶段的取消由上下文里的下载池自己负责。
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
         self
     }
 
@@ -484,6 +495,9 @@ impl<'a> ForgeInstaller<'a> {
             if !side_applies(processor.sides.as_ref(), &self.side) {
                 continue;
             }
+            if self.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+                return Err(aurora_download::Error::Cancelled.into());
+            }
             self.run_processor(processor, &values).await?;
             ran += 1;
         }
@@ -550,17 +564,24 @@ impl<'a> ForgeInstaller<'a> {
             args.push(substitute_arg(arg, values, self.cx.layout)?);
         }
 
-        let status = tokio::process::Command::new(&self.java_path)
+        let launch_error = |source| Error::JavaLaunch {
+            path: self.java_path.clone(),
+            source,
+        };
+        let mut command = processor_command(&self.java_path);
+        command
             .arg("-cp")
             .arg(&classpath)
             .arg(&main_class)
-            .args(&args)
-            .status()
+            .args(&args);
+        let mut child = command.spawn().map_err(launch_error)?;
+        let Some(status) = wait_or_kill(&mut child, self.cancel.as_ref())
             .await
-            .map_err(|source| Error::JavaLaunch {
-                path: self.java_path.clone(),
-                source,
-            })?;
+            .map_err(launch_error)?
+        else {
+            tracing::info!(jar = %processor.jar, "安装被取消，处理器子进程已结束");
+            return Err(aurora_download::Error::Cancelled.into());
+        };
         if !status.success() {
             return Err(Error::ProcessorFailed {
                 jar: processor.jar.clone(),
@@ -700,6 +721,47 @@ async fn extract_data_files(
         }
     }
     Ok(out)
+}
+
+/// 处理器子进程的命令骨架（参数由调用方补上）。
+///
+/// 丢弃即结束：取消宽限期满时安装的 future 会被整个丢弃，子进程不跟着结束的话，java 会在实例锁
+/// 已经放开之后继续往共享的 libraries 目录写产物，和紧接着的重试互相踩。不弹控制台：java.exe 是
+/// 控制台程序，从没有控制台的启动器里起它，Windows 会给每个处理器开一个黑框，玩家顺手关掉就等于
+/// 杀掉处理器。
+fn processor_command(java_path: &Path) -> Command {
+    let mut command = Command::new(java_path);
+    command.kill_on_drop(true);
+    configure_no_window(&mut command);
+    command
+}
+
+#[cfg(windows)]
+fn configure_no_window(command: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_no_window(_command: &mut Command) {}
+
+/// 等子进程退出并返回退出状态；取消令牌先触发时结束它，等它真正退出后返回 `None`。
+///
+/// 只发结束信号就返回是不够的：调用方随后会释放实例锁，那一刻处理器必须已经不在了。
+async fn wait_or_kill(
+    child: &mut Child,
+    cancel: Option<&CancellationToken>,
+) -> std::io::Result<Option<ExitStatus>> {
+    let Some(token) = cancel else {
+        return child.wait().await.map(Some);
+    };
+    tokio::select! {
+        status = child.wait() => status.map(Some),
+        () = token.cancelled() => {
+            child.kill().await?;
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1087,5 +1149,84 @@ mod tests {
             .install_for_instance(&format!("{}/forge-installer.jar", server.uri()), "x")
             .await
             .unwrap();
+    }
+
+    /// 一个三十秒左右才自己退出的子进程，代替不观察取消令牌、一跑好几秒的处理器。
+    fn long_running() -> Command {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        command
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    }
+
+    fn exits_with(code: u8) -> Command {
+        #[cfg(windows)]
+        let mut command = Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/C", &format!("exit {code}")]);
+        #[cfg(not(windows))]
+        let mut command = Command::new("sh");
+        #[cfg(not(windows))]
+        command.args(["-c", &format!("exit {code}")]);
+        command
+    }
+
+    #[test]
+    fn processor_command_is_killed_when_its_handle_is_dropped() {
+        assert!(processor_command(Path::new("java")).get_kill_on_drop());
+    }
+
+    /// 取消时正在跑的处理器被结束，而且返回那一刻它已经退出了（调用方紧接着就要释放实例锁）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_kills_the_running_processor_before_returning() {
+        let mut child = long_running().spawn().unwrap();
+        let token = CancellationToken::new();
+        let trigger = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            trigger.cancel();
+        });
+        let started = std::time::Instant::now();
+
+        let status = wait_or_kill(&mut child, Some(&token)).await.unwrap();
+
+        assert_eq!(status, None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "应在取消后立刻结束，实际等了 {:?}",
+            started.elapsed()
+        );
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "返回时子进程必须已经退出"
+        );
+    }
+
+    /// 没有取消时照常等处理器跑完，退出码原样交回；不挂令牌也一样。
+    #[tokio::test]
+    async fn a_finished_processor_reports_its_exit_code() {
+        let token = CancellationToken::new();
+        let mut child = exits_with(3).spawn().unwrap();
+        let status = wait_or_kill(&mut child, Some(&token))
+            .await
+            .unwrap()
+            .expect("没有取消，应拿到退出状态");
+        assert_eq!(status.code(), Some(3));
+
+        let mut child = exits_with(0).spawn().unwrap();
+        let status = wait_or_kill(&mut child, None).await.unwrap().unwrap();
+        assert!(status.success());
     }
 }

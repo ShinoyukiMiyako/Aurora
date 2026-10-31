@@ -206,9 +206,11 @@ impl Aurora {
                 choice.display_name()
             )),
         );
-        let summary = ForgeInstaller::new(cx, java_path)
-            .install(installer_url)
-            .await?;
+        let mut forge = ForgeInstaller::new(cx, java_path);
+        if let Some(token) = self.cancel_token() {
+            forge = forge.with_cancel(token.clone());
+        }
+        let summary = forge.install(installer_url).await?;
         emit(
             events,
             CoreEvent::stage(format!(

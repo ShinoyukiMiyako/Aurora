@@ -15,8 +15,9 @@ reqwest = { version = "0.13.4", default-features = false }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 运行时：异步落盘(fs/io-util)、并发池 spawn(rt)、进度 watch(sync)、Forge processors 子进程(process)。
-tokio = { version = "1", default-features = false, features = ["rt", "fs", "io-util", "sync", "process"] }
+# 运行时：异步落盘(fs/io-util)、并发池 spawn(rt)、进度 watch(sync)、Forge processors 子进程(process)，
+# 处理器退出与取消令牌二选一等待(macros 的 select!)。
+tokio = { version = "1", default-features = false, features = ["rt", "fs", "io-util", "sync", "process", "macros"] }
 thiserror = "2"
 tracing = "0.1"
 

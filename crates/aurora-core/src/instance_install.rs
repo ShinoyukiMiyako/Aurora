@@ -249,10 +249,13 @@ impl Aurora {
                         choice.display_name()
                     )),
                 );
-                let (embedded, summary) = ForgeInstaller::new(cx, java)
-                    .with_sources(self.config().download_source.source_plan())
-                    .install_for_instance(&url, id)
-                    .await?;
+                let mut forge = ForgeInstaller::new(cx, java)
+                    .with_sources(self.config().download_source.source_plan());
+                // 处理器不看下载池的令牌，单独挂上：取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
+                if let Some(token) = self.cancel_token() {
+                    forge = forge.with_cancel(token.clone());
+                }
+                let (embedded, summary) = forge.install_for_instance(&url, id).await?;
                 emit(
                     events,
                     CoreEvent::stage(format!(
