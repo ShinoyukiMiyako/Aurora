@@ -115,6 +115,17 @@ impl Aurora {
         })
     }
 
+    /// 以带应用版本的 User-Agent（`Petalfall/<应用版本>`）重建共享 HTTP 客户端。
+    ///
+    /// 构造时的客户端用的是 aurora-base 自己的 crate 版本，发版只改应用版本时它不会跟着变；镜像站按 UA
+    /// 统计与限流，一个永远不变的版本号让对方分不出新旧客户端。桌面应用在构造门面后、任何请求之前调用。
+    pub fn with_app_version(mut self, version: &str) -> Result<Self> {
+        self.http = aurora_base::http::build_client_with(
+            &aurora_base::http::HttpConfig::for_app_version(version),
+        )?;
+        Ok(self)
+    }
+
     /// 覆盖版本清单地址（默认按「版本列表源」策略取官方或镜像）。用于本地 mock 与集成测试。
     pub fn with_manifest_url(mut self, url: impl Into<String>) -> Self {
         self.manifest_url = url.into();
@@ -626,6 +637,41 @@ mod tests {
         assert_eq!(last.finished, 2);
         assert_eq!(last.total_bytes, Some(10));
         assert_eq!(last.bytes, 10);
+    }
+
+    /// 门面发出的请求带应用版本的 User-Agent；快照（克隆）共用同一个客户端，同样带着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requests_carry_the_app_version_in_user_agent() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ua"))
+            .and(header("user-agent", "Petalfall/2.3.0-beta.1"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let aurora = test_aurora().with_app_version("2.3.0-beta.1").unwrap();
+        let snapshot = aurora.clone();
+        for facade in [&aurora, &snapshot] {
+            let status = facade
+                .http()
+                .get(format!("{}/ua", server.uri()))
+                .send()
+                .await
+                .unwrap()
+                .status();
+            assert_eq!(status.as_u16(), 204, "UA 不是应用版本时 mock 回 404");
+        }
+        let default = test_aurora()
+            .http()
+            .get(format!("{}/ua", server.uri()))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(default.as_u16(), 404);
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub fn run() {
             // 坏文件改名留存、按默认配置启动，经过记成启动提示，由前端查询后告诉用户。数据目录定位不到、
             // 坏文件改不了名这类错误仍然冒泡终止，避免带着半初始化的门面继续跑。
             let (aurora, recovery) = tauri::async_runtime::block_on(Aurora::load_recovering())?;
+            let aurora = aurora.with_app_version(&app.package_info().version.to_string())?;
             let server_monitor = ServerMonitor::new(aurora.data_dir());
             app.manage(Facade::new(aurora));
             app.manage(commands::system::StartupNotices::from_recovery(recovery));
