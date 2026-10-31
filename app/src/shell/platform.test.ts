@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CORE_EVENT } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { callsOf, deferred, emit, resetRecorder } from "../test/launcher";
-import { gameDirectoryCommands, pickDirectory, pickFile, updaterCommands } from "./platform";
+import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile, updaterCommands } from "./platform";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
@@ -69,6 +69,25 @@ describe("启动器更新命令", () => {
       ["install_update", {}],
       ["set_install_on_exit", { enabled: true }],
     ]);
+  });
+});
+
+describe("启动器数据目录与日志目录", () => {
+  it("各调一次 open_folder，目标分别为 data_dir 与 launcher_logs，不带实例 id", async () => {
+    ipc.overrides.set("open_folder", () => null);
+    await launcherFolderCommands.openDataDirectory();
+    await launcherFolderCommands.openLauncherLogs();
+    expect(callsOf(ipc, "open_folder")).toEqual([
+      { target: "data_dir", id: null, world: null },
+      { target: "launcher_logs", id: null, world: null },
+    ]);
+  });
+
+  it("后端拒绝时原样抛出，不当作已打开", async () => {
+    ipc.overrides.set("open_folder", () => {
+      throw Object.assign(new Error("目录不存在"), { code: "instance_failed" });
+    });
+    await expect(launcherFolderCommands.openLauncherLogs()).rejects.toMatchObject({ code: "instance_failed" });
   });
 });
 

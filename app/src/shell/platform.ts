@@ -1,10 +1,11 @@
 // 设置页、首次启动向导与启动器更新要用、页面与流程又不能直接调用的宿主能力：系统选择文件夹对话框、
-// 其他游戏目录的登记与移除、启动器自更新的几条命令。这里给出真实实现，由 App 经各自的 Provider 注入；
+// 其他游戏目录的登记与移除、打开启动器数据目录与日志目录、启动器自更新的几条命令。这里给出真实实现，由 App 经各自的 Provider 注入；
 // 形状与页面、流程声明的接口一致，类型由 App 在注入处核对（外壳不引用 pages/ 与 flows/）。
 
 import { open } from "@tauri-apps/plugin-dialog";
 import { inTauri } from "../ipc/bridge";
 import { addGameDirectory, removeGameDirectory } from "../ipc/config";
+import { openFolder } from "../ipc/instances";
 import { checkUpdate, downloadUpdate, installUpdate, setInstallOnExit, type UpdateDto } from "../ipc/system";
 import { cancelTask, onCoreEvent } from "../ipc/tasks";
 
@@ -48,6 +49,19 @@ export const gameDirectoryCommands: GameDirectoryCommands = {
     // 记录本来就不在时后端返回 false；调用方随后刷新目录列表，以后端为准
     await removeGameDirectory(path);
   },
+};
+
+export interface LauncherFolderCommands {
+  /** 在系统文件管理器里打开启动器数据目录。 */
+  openDataDirectory(): Promise<void>;
+  /** 在系统文件管理器里打开启动器自己的日志目录。 */
+  openLauncherLogs(): Promise<void>;
+}
+
+// 这两个目标不属于任何实例，后端要求 id 传 null
+export const launcherFolderCommands: LauncherFolderCommands = {
+  openDataDirectory: () => openFolder("data_dir", null),
+  openLauncherLogs: () => openFolder("launcher_logs", null),
 };
 
 export interface UpdaterCommands {

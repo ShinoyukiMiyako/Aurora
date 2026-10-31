@@ -22,7 +22,7 @@ import { ErrorBoundary } from "./shell/ErrorBoundary";
 import { describeError, ErrorScreen } from "./shell/ErrorScreen";
 import { buildPageTable } from "./shell/nav";
 import { createPageRegistry, type PageRegistry } from "./shell/pages";
-import { gameDirectoryCommands, pickDirectory, updaterCommands } from "./shell/platform";
+import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, updaterCommands } from "./shell/platform";
 import { ShellProvider } from "./shell/shell";
 import { RevealWindow } from "./shell/window";
 import { AppearanceProvider } from "./state/appearance";
@@ -50,9 +50,8 @@ const FLOWS: ShellFlows = {
   createInstance: optionalFlow("create-instance", CREATE_INSTANCE_MODULES),
 };
 
-// 设置页与向导声明的宿主能力在这里换成真实实现。打开数据目录与启动器日志目录后端还没有对应的 open_folder 目标，
-// 沿用默认实现（以明确的错误拒绝）。
-const SETTINGS_HOST: SettingsCommands = { ...SETTINGS_COMMANDS, ...gameDirectoryCommands, pickDirectory };
+// 设置页与向导声明的宿主能力在这里换成真实实现
+const SETTINGS_HOST: SettingsCommands = { ...SETTINGS_COMMANDS, ...gameDirectoryCommands, ...launcherFolderCommands, pickDirectory };
 
 // 更新状态机跨页面挂载保留（检查过、下载中都不因切页丢失），整个应用只有一份
 const UPDATER = new UpdaterController(updaterCommands);
