@@ -174,7 +174,7 @@ pub async fn fetch_maven_versions(
     url: &str,
     policy: &RetryPolicy,
 ) -> Result<Vec<String>> {
-    let bytes = net::get_bytes_from(client, sources, url, policy).await?;
+    let bytes = net::get_bytes_from(client, sources, url, policy, "maven-metadata").await?;
     let xml = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
         reason: format!("{url} 不是 UTF-8 文本：{err}"),
     })?;

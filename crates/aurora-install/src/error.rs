@@ -32,6 +32,17 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// 元数据在每个下载源上都没取到（连不上、非 2xx、内容读不懂）。`attempts` 按尝试顺序记下每个候选
+    /// 地址与它失败的完整原因，界面据此能把每个源各自为什么失败都摆出来；`last` 是最后一个候选的原错误，
+    /// 原因链从它接着往下，上层沿链判断是不是断网时不会因为多包了一层而认不出。
+    #[error("{context} 在全部 {} 个下载源上都失败：{}", .attempts.len(), .attempts.join("；"))]
+    AllSourcesFailed {
+        context: String,
+        attempts: Vec<String>,
+        #[source]
+        last: Box<Error>,
+    },
+
     /// JSON 反序列化失败，`context` 标明是哪份报文。
     #[error("解析 JSON 失败: {context}")]
     Json {
@@ -129,6 +140,8 @@ impl RetryableError for Error {
             // 网络类：超时、建连、请求发送失败可重试；5xx / 429 当作瞬时故障。
             Error::Http { source, .. } => is_retryable_http(source),
             // 结构 / 解包 / 子进程 / 本地 IO 类：重试无意义或不安全，交由上层处置。
+            // 每个源都已各自重试过，整体再来一遍只是把同样的失败重演一次。
+            Error::AllSourcesFailed { .. } => false,
             Error::Json { .. }
             | Error::Zip { .. }
             | Error::Io { .. }
