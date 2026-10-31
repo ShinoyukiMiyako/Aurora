@@ -235,6 +235,37 @@ describe("省略说明与换行", () => {
   });
 });
 
+describe("筛选后为空", () => {
+  const NOTE = "当前筛选下没有日志行";
+  const note = () => scroller().querySelector(":scope > :not([data-index]):not([style])")?.textContent;
+
+  it("有日志、筛选后一行不剩：日志区里显示插槽内容，不渲染任何行", () => {
+    mount({ lines: [line(0, "info"), line(1, "warn")], level: "error", filteredEmpty: NOTE });
+    expect(rendered()).toHaveLength(0);
+    expect(scroller().textContent).toContain(NOTE);
+    expect(note()).toBe(NOTE);
+  });
+
+  it("筛选后还剩一行：不显示插槽内容", () => {
+    mount({ lines: [line(0, "info"), line(1, "error")], level: "error", filteredEmpty: NOTE });
+    expect(rendered()).toHaveLength(1);
+    expect(scroller().textContent).not.toContain(NOTE);
+  });
+
+  it("一行日志都没有：不算筛选后为空，插槽不出现", () => {
+    mount({ lines: [], level: "error", filteredEmpty: NOTE });
+    expect(scroller().textContent).not.toContain(NOTE);
+  });
+
+  it("切回全部：插槽消失、日志行回来", () => {
+    mount({ lines: [line(0, "info"), line(1, "info")], level: "warn", source: "all", filteredEmpty: NOTE });
+    expect(scroller().textContent).toContain(NOTE);
+    view?.rerender(ui({ lines: [line(0, "info"), line(1, "info")], level: "all", filteredEmpty: NOTE }));
+    expect(scroller().textContent).not.toContain(NOTE);
+    expect(rendered()).toHaveLength(2);
+  });
+});
+
 describe("复制", () => {
   it("复制当前筛选下显示的全部行，成功后原位显示行数", async () => {
     const onCopy = vi.fn(() => Promise.resolve());

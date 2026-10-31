@@ -91,6 +91,7 @@ function Demo() {
                 <FilterBar value={source} onChange={setSource} options={(["all", "launcher", "game"] as const).map((v) => ({ value: v, label: LOG_SOURCE_FILTER_LABEL[v] }))} />
               </>
             }
+            filteredEmpty="当前筛选下没有日志行"
             onCopy={fakeCopy}
             copyFeedbackMs={2000}
             onOpenFolder={() => undefined}

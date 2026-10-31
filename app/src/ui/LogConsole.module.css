@@ -101,6 +101,15 @@
   min-width: 100%;
 }
 
+/* 筛选后一行不剩：日志区顶端一行弱色说明，与日志行同样的左右内边距 */
+.filteredEmpty {
+  padding: var(--sk-space-8) var(--sk-space-16) 0;
+  color: var(--sk-text-2);
+  font-family: var(--sk-font);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
 /* 一行四列：时间 / 级别 / 来源 / 正文；左边框给级别第三种表达（文字、颜色之外） */
 .line {
   --log-tone: transparent;

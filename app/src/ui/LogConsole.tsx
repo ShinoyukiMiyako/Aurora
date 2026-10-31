@@ -6,6 +6,8 @@
 // 读屏：日志区 aria-live="off"（刷屏会淹没读屏），另设一个视觉隐藏的礼貌播报区，每 5 秒至多报一次新增错误数。
 // 级别同时以文字（INFO / WARN / ERROR）、颜色、左边框三种方式区分。
 // 筛选控件（两组分段控件）由页面放进 filters 插槽，筛选值经 level / source 传回；计数用 countLogLevels。
+// 有日志、但当前筛选下一行都不剩时，日志区里显示页面放进 filteredEmpty 插槽的一行弱色说明；
+// 一行日志都没有属于「从没启动过」，由页面换成空状态，不在这里处理。
 // 不闪烁的实时光标：游戏可能运行数小时，常驻动画违背克制原则。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -146,6 +148,8 @@ export interface LogConsoleProps {
   source: LogSourceFilter;
   /** 两组小号分段控件（级别、来源），由页面放入。 */
   filters?: ReactNode;
+  /** 有日志但当前筛选下一行不剩时，日志区里的一行说明（「当前筛选下没有日志行」）。 */
+  filteredEmpty?: ReactNode;
   /** 复制当前显示的行，契约同 CopyButton。 */
   onCopy: CopyHandler;
   /** 复制成功的原位反馈停留时长（毫秒）。 */
@@ -164,6 +168,7 @@ export function LogConsole({
   level,
   source,
   filters,
+  filteredEmpty,
   onCopy,
   copyFeedbackMs,
   onOpenFolder,
@@ -226,6 +231,7 @@ export function LogConsole({
   };
 
   const lastIndex = shown.length - 1;
+  const filteredOut = lines.length > 0 && filtered.length === 0;
 
   return (
     <div className={cx(styles.console, className)} data-wrap={wrap || undefined}>
@@ -269,6 +275,7 @@ export function LogConsole({
       )}
       <div className={styles.area}>
         <div ref={scrollRef} className={styles.scroller} role="log" aria-live="off" aria-label="日志输出" tabIndex={0} onScroll={onScroll} onKeyDown={onKeyDown}>
+          {filteredOut && filteredEmpty !== undefined && <div className={styles.filteredEmpty}>{filteredEmpty}</div>}
           <div className={styles.canvas} style={{ height: `${totalSize}px` }}>
             {virtualizer.getVirtualItems().map((item) => {
               const line = shown[item.index];
