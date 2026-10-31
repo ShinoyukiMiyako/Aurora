@@ -9,7 +9,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "../../state/queries/discover";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
 import { clearSnapshot } from "./session";
@@ -267,6 +267,41 @@ describe("发现页：搜索", () => {
     expect(card("资源 B").textContent).not.toContain("已装入");
   });
 
+  it("「已装入」逐个读各实例的 Mod 列表：同时在读的不超过 2 个，前面的读完后面的才接上", async () => {
+    const ids = ["甲", "乙", "丙", "丁", "戊"];
+    bootOverrides(ipc, { instances: ids.map((id) => instanceDto(id, { loaders: [{ kind: "fabric", version: "0.16.5" }] })), config: configDto({ selected_version: "甲" }) });
+    const waiting = new Map<string, Deferred<InstalledMod[]>>();
+    let inFlight = 0;
+    let peak = 0;
+    ipc.overrides.set("list_mods", (args) => {
+      const d = deferred<InstalledMod[]>();
+      waiting.set(String(args.versionId), d);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      return d.promise.finally(() => inFlight--);
+    });
+    await mount();
+    expect(callsOf(ipc, "list_mods").map((a) => a.versionId)).toEqual(["甲", "乙"]);
+    for (const id of ids) {
+      const d = waiting.get(id);
+      if (d === undefined) throw new Error(`「${id}」的 Mod 列表还没开始读`);
+      await act(async () => {
+        d.resolve(id === "丁" ? [installedMod("A")] : []);
+        await settle();
+      });
+    }
+    expect(callsOf(ipc, "list_mods").map((a) => a.versionId)).toEqual(ids);
+    expect(peak).toBe(2);
+    expect(card("资源 A").textContent).toContain("已装入 1 个实例");
+  });
+
+  it("结果里一个 Mod 都没有时不读任何实例的 Mod 列表", async () => {
+    pages = () => result([entry("R", { title: "材质", resource_type: "resource_pack", loaders: [] }), entry("P", { title: "整合包", resource_type: "modpack" })]);
+    await mount();
+    expect(cardTitles()).toEqual(["材质，查看详情", "整合包，查看详情"]);
+    expect(callsOf(ipc, "list_mods")).toEqual([]);
+  });
+
   it("滚到底部附近按游标接下一页，同一工程只留先到的一张，到底后提示", async () => {
     await mount();
     const near = observers.find((o) => o.options !== undefined && o.options.rootMargin === "0px 0px 600px 0px" && o.targets.length > 0);
@@ -425,6 +460,44 @@ describe("发现页：资源详情与安装", () => {
     expect(callsOf(ipc, "install_resource")).toHaveLength(0);
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "恢复联网后再安装"]);
     expect(openDialogs()).toHaveLength(1);
+  });
+
+  it("数据包：逐个读各实例的存档，同时在读的不超过 2 个；读完后按存档判定", async () => {
+    const ids = ["甲", "乙", "丙", "丁"];
+    const dp = entry("D1", { title: "地形", resource_type: "data_pack", loaders: [] });
+    const dv = modVersion("dp-1", { project_id: "D1", loaders: [] });
+    bootOverrides(ipc, { instances: ids.map((id) => instanceDto(id)), config: configDto({ selected_version: "甲" }) });
+    pages = () => result([dp]);
+    ipc.overrides.set("project_detail", () => detailOf(dp, { latest_version: dv }));
+    ipc.overrides.set("list_mod_versions", () => [dv]);
+    ipc.overrides.set("match_instances", () => ids.map((id) => match(id, { best_version: dv })));
+    const waiting = new Map<string, Deferred<unknown>>();
+    let inFlight = 0;
+    let peak = 0;
+    ipc.overrides.set("list_instance_content", (args) => {
+      const d = deferred<unknown>();
+      waiting.set(String(args.id), d);
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      return d.promise.finally(() => inFlight--);
+    });
+    await mount();
+    act(() => card("地形").click());
+    await flush();
+    expect(callsOf(ipc, "list_instance_content").map((a) => a.id)).toEqual(["甲", "乙"]);
+    const world = { dir_name: "w", level_status: "ok", level_error: null, name: "主世界", mode: null, last_played: null, size_bytes: 0, modified_at: null };
+    for (const id of ids) {
+      const d = waiting.get(id);
+      if (d === undefined) throw new Error(`「${id}」的存档还没开始读`);
+      await act(async () => {
+        d.resolve({ resource_packs: [], shader_packs: [], worlds: id === "乙" ? [] : [world] });
+        await settle();
+      });
+    }
+    expect(callsOf(ipc, "list_instance_content").map((a) => a.id)).toEqual(ids);
+    expect(peak).toBe(2);
+    expect(dialog().querySelector('[role="checkbox"][aria-label^="甲，兼容"]')?.getAttribute("aria-checked")).toBe("true");
+    expect(dialog().querySelector('[role="checkbox"][aria-label^="乙，不可用，还没有存档"]')).not.toBeNull();
   });
 
   it("路由带 open 时进页直接打开该资源的详情", async () => {

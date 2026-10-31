@@ -1,7 +1,7 @@
 // 发现页：跨 Modrinth / CurseForge 搜资源，点开详情装进实例；整合包装成新实例，本地整合包文件从头图右上角导入。
 // 页面持有界面上的筛选与分页累积；搜索结果、详情、版本、落位矩阵都是状态层的按需查询。
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { LOADER_NAME } from "../../copy/flows";
 import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
 import { useLoadingGate } from "../../lib/loading-gate";
@@ -44,7 +44,7 @@ import {
   withKind,
   type DiscoverFilters,
 } from "./model";
-import { ModSourcesProbe, useCollected } from "./probes";
+import { ModSourcesProbe, modSourcesProgress, PROBE_CONCURRENCY, probeWindow, useCollected, type ModSourcesState } from "./probes";
 import { ResultCard, SkeletonCard } from "./ResultCard";
 import { readSnapshot, writeSnapshot } from "./session";
 import { SearchHero, Toolbar } from "./Toolbar";
@@ -143,9 +143,15 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   };
   const open = (entry: SearchEntry) => setDetail({ platform: entry.platform, projectId: entry.project_id, sources: entry.sources });
 
-  // 「已装入 n 个实例」只对 Mod 有意义：结果里可能有 Mod 时才去读各实例的 Mod 列表
-  const [installed, report] = useCollected<ReadonlySet<string>>();
-  const probeInstances = filters.kind === "all" || filters.kind === "mod" ? state.instances.filter((i) => i.status === "ready" && !i.placeholder) : [];
+  // 「已装入 n 个实例」只对 Mod 有意义：结果里确实有 Mod 时才去读各实例的 Mod 列表，同时在读的有上限
+  const [modSources, report] = useCollected<ModSourcesState>();
+  const installed = useMemo(() => {
+    const out = new Map<string, ReadonlySet<string>>();
+    for (const [id, s] of modSources) if (s.status === "ready") out.set(id, s.sources);
+    return out;
+  }, [modSources]);
+  const probeIds = pages.hits.some((e) => e.resource_type === "mod") ? state.instances.filter((i) => i.status === "ready" && !i.placeholder).map((i) => i.id) : [];
+  const probing = probeWindow(probeIds, (id) => modSourcesProgress(modSources.get(id)), PROBE_CONCURRENCY);
 
   return (
     <>
@@ -184,8 +190,8 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
           </TabPanel>
         </EntranceBlock>
       </Page>
-      {probeInstances.map((i) => (
-        <ModSourcesProbe key={i.id} instanceId={i.id} onReport={report} />
+      {probing.map((id) => (
+        <ModSourcesProbe key={id} instanceId={id} onReport={report} />
       ))}
       <ResourceDetail target={detail} onClose={() => setDetail(null)} fitInstance={filters.fitInstance} online={online} />
       <ImportModpackDialog open={importOpen} onClose={() => setImportOpen(false)} online={online} />
