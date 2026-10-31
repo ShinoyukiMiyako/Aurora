@@ -98,22 +98,31 @@ fn push_library_tasks(
         );
     }
 
-    // 3) maven 简写式（无 downloads 块，靠 url + 坐标拼下载地址）。哈希/大小未知。
-    if lib.downloads.is_none()
-        && let Some(base) = &lib.url
-    {
-        let rel =
-            maven::artifact_path(&lib.name).ok_or_else(|| Error::InvalidLibraryCoordinate {
-                name: lib.name.clone(),
-            })?;
-        out.push(DownloadTask::new(
-            join_maven(base, &rel),
-            layout.library_path(&rel),
-        ));
+    // 3) maven 简写式（无 downloads 块，靠仓库地址 + 坐标拼下载地址）。哈希/大小未知。
+    //    没写仓库地址的按官方启动器的约定取 Mojang 的库仓库：旧版 Forge 的 launchwrapper 等就是
+    //    这样声明的。带 natives 却没有下载件的条目只有 natives 分类件，不凭坐标猜主件。
+    if lib.downloads.is_none() {
+        let base = match (&lib.url, &lib.natives) {
+            (Some(base), _) => Some(base.as_str()),
+            (None, None) => Some(MOJANG_LIBRARIES),
+            (None, Some(_)) => None,
+        };
+        if let Some(base) = base {
+            let rel =
+                maven::artifact_path(&lib.name).ok_or_else(|| Error::InvalidLibraryCoordinate {
+                    name: lib.name.clone(),
+                })?;
+            out.push(DownloadTask::new(
+                join_maven(base, &rel),
+                layout.library_path(&rel),
+            ));
+        }
     }
-    // 既无 downloads 又无 url 的库由加载器安装器本地产出（Forge 通用 jar），不下载。
     Ok(())
 }
+
+/// 版本 JSON 里没写仓库地址的库所在的仓库。
+const MOJANG_LIBRARIES: &str = "https://libraries.minecraft.net/";
 
 /// 旧式 natives 件的相对路径兜底：把当前平台 classifier 拼进坐标再算路径。
 fn native_coordinate_path(lib: &Library, ctx: &RuntimeContext) -> Option<String> {
@@ -269,13 +278,27 @@ mod tests {
     }
 
     #[test]
-    fn library_without_downloads_or_url_produces_no_task() {
-        // Forge 通用 jar 只在版本 JSON 里以裸 name 出现，由 processors 本地产出，不该下载。
+    fn library_without_downloads_or_url_comes_from_mojang_libraries() {
+        // 旧版 Forge 的 versionInfo 里 launchwrapper 只有坐标：按官方启动器的约定去 Mojang 的库仓库拉，
+        // 漏下它游戏就找不到主类。在盘上即用的判定交给补全批次（见 complete::skip_present_unverifiable）。
         let v = VersionJson::from_json_str(
-            r#"{"id":"forge","libraries":[{"name":"net.minecraftforge:forge:1.20.1-47.2.0:client"}]}"#,
+            r#"{"id":"1.7.10-Forge","libraries":[
+                {"name":"net.minecraft:launchwrapper:1.12","serverreq":true},
+                {"name":"org.lwjgl.lwjgl:lwjgl-platform:2.9.1","natives":{"windows":"natives-windows"}}
+            ]}"#,
         )
         .unwrap();
-        assert!(library_tasks(&v, &win64(), &layout()).unwrap().is_empty());
+        let tasks = library_tasks(&v, &win64(), &layout()).unwrap();
+        assert_eq!(tasks.len(), 1, "带 natives 却没有下载件的库不凭坐标猜主件");
+        assert_eq!(
+            tasks[0].url,
+            "https://libraries.minecraft.net/net/minecraft/launchwrapper/1.12/launchwrapper-1.12.jar"
+        );
+        assert_eq!(
+            tasks[0].dest,
+            PathBuf::from("/mc/libraries/net/minecraft/launchwrapper/1.12/launchwrapper-1.12.jar")
+        );
+        assert!(tasks[0].sha1.is_none() && tasks[0].size.is_none());
     }
 
     #[test]
