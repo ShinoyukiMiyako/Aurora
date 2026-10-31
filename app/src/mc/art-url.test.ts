@@ -14,6 +14,7 @@ import {
   thumbUrl,
 } from "./art";
 import { ART_PATHS, COVER_TEXTURES, coverTexture, DEFAULT_SKIN_PATHS } from "./whitelist";
+import { BLOCK_TEXTURES, SKIN_TEXTURES } from "../ipc/art";
 
 const WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
 const ORIGIN = "http://aurora-tex.localhost";
@@ -43,6 +44,11 @@ describe("白名单", () => {
     expect(faces.size).toBe(17);
     expect(DEFAULT_SKIN_PATHS).toHaveLength(20);
     expect(ART_PATHS.size).toBe(37);
+  });
+
+  // ipc/art.ts 的名单由后端测试逐项钉住；取图这边的名单与它对不上，就会请求到后端以 400 拒绝的路径。
+  it("与后端白名单逐项一致", () => {
+    expect([...ART_PATHS].sort()).toEqual([...BLOCK_TEXTURES, ...SKIN_TEXTURES].sort());
   });
 
   it("只有草方块分顶面与侧面，且只有它的顶面染色", () => {
