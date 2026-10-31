@@ -2020,24 +2020,35 @@ mod tests {
             "resolution": { "width": 1920, "height": 1080 },
             "fullscreen": false
         });
-        let saved = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", settings.clone())
-            .await
-            .unwrap();
+        let saved = set_instance_settings_with(
+            &env.facade,
+            &InstanceLocks::default(),
+            "1.21.1",
+            settings.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(serde_json::to_value(&saved).unwrap(), settings);
 
         let mut unknown = settings.clone();
         unknown["colour"] = json!("pink");
-        let err = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", unknown)
-            .await
-            .unwrap_err();
+        let err =
+            set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", unknown)
+                .await
+                .unwrap_err();
         assert_eq!(err.code, common::INVALID_ARGUMENT);
         assert_eq!(err.detail.unwrap()["field"], "settings");
 
         let mut bad_memory = settings.clone();
         bad_memory["memory_mb"] = json!(1000);
-        let err = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "1.21.1", bad_memory)
-            .await
-            .unwrap_err();
+        let err = set_instance_settings_with(
+            &env.facade,
+            &InstanceLocks::default(),
+            "1.21.1",
+            bad_memory,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, common::INVALID_ARGUMENT);
         assert_eq!(err.detail.unwrap()["field"], "memory_mb");
 
@@ -2050,9 +2061,10 @@ mod tests {
             .unwrap();
         assert_eq!(stored.memory_mb, Some(6144), "非法写入不改动文件");
 
-        let err = set_instance_settings_with(&env.facade, &InstanceLocks::default(), "不存在", settings)
-            .await
-            .unwrap_err();
+        let err =
+            set_instance_settings_with(&env.facade, &InstanceLocks::default(), "不存在", settings)
+                .await
+                .unwrap_err();
         assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
     }
 
@@ -2133,11 +2145,15 @@ mod tests {
         let locks = InstanceLocks::default();
 
         assert_eq!(
-            folder_path(facade, &locks, "game_dir", None, None).await.unwrap(),
+            folder_path(facade, &locks, "game_dir", None, None)
+                .await
+                .unwrap(),
             env.game_dir()
         );
         assert_eq!(
-            folder_path(facade, &locks, "data_dir", None, None).await.unwrap(),
+            folder_path(facade, &locks, "data_dir", None, None)
+                .await
+                .unwrap(),
             env.dir.path()
         );
         // 启动器日志目录还没写过日志时也先建出来，资源管理器打得开。
@@ -2186,7 +2202,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(field(err), (json!("world"), json!("not_found")));
-        let err = folder_path(facade, &locks, "mods", None, None).await.unwrap_err();
+        let err = folder_path(facade, &locks, "mods", None, None)
+            .await
+            .unwrap_err();
         assert_eq!(field(err), (json!("id"), json!("missing")));
         let err = folder_path(facade, &locks, "desktop", None, None)
             .await
