@@ -20,7 +20,7 @@ import { isImeComposing } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import type { FlowProps } from "../../state/flows";
-import { useLauncher, useNow } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useLoaderVersions, useManifest, useVersionRequirements } from "../../state/queries/catalog";
 import { canPinMore } from "../../state/selectors";
 import { Button } from "../../ui/Button";
@@ -64,7 +64,10 @@ const paneFade: Variants = {
 };
 
 export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"create-instance">) {
-  const { state, actions } = useLauncher();
+  const existing = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
+  const settings = useLauncherSelector((s) => s.settings);
+  const willPin = useLauncherSelector(canPinMore);
+  const actions = useLauncherActions();
   const { go } = useNav();
   const { confirm } = useShell();
   const run = useRunner();
@@ -129,7 +132,6 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   if (index < 0) throw new Error(`当前步骤 ${step} 不在可见步骤里`);
   const reached = Math.min(reachedRaw, visible.length - 1);
 
-  const existing = state.instances.map((i) => i.id);
   const nameError = instanceNameError(trimmed, existing);
   const valid: Readonly<Record<StepId, boolean>> = {
     name: nameError === null,
@@ -139,7 +141,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
     cover: true,
     confirm: false,
   };
-  const canCreate = valid.name && valid.version && valid.loaderVersion && state.settings !== null;
+  const canCreate = valid.name && valid.version && valid.loaderVersion && settings !== null;
 
   const previewId = trimmed;
 
@@ -280,9 +282,9 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
             loader={loader}
             loaderVersion={loaderVersion}
             cover={cover}
-            settings={state.settings}
+            settings={settings}
             requirements={requirements}
-            willPin={canPinMore(state)}
+            willPin={willPin}
             openAfter={openAfter}
             onOpenAfter={setOpenAfter}
             error={createError}

@@ -15,7 +15,7 @@ import { fade, springs } from "../../lib/motion";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorDetailOf } from "../../state/errors";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useNow } from "../../state/launcher";
 import { deviceCodeExpired, deviceCodeRemaining, type DeviceLogin, type LoginState } from "../../state/login";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -50,7 +50,7 @@ export function useCodeLifetime(device: DeviceLogin): number | null {
 }
 
 export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const { copyText } = useShell();
   const device = login.device;

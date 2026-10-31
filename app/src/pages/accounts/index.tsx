@@ -7,7 +7,7 @@ import { ACTION_ERROR, BOOT_SLICE_ERROR, SLOW_LOADING_HINT } from "../../copy/fl
 import type { AccountKind } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import type { PageProps } from "../../state/route";
 import { activeAccount } from "../../state/selectors";
 import { Banner } from "../../ui/Banner";
@@ -39,22 +39,26 @@ const OPEN_LOGIN_ERROR: Readonly<Record<AccountKind, string>> = {
 
 export default function AccountsPage(_props: PageProps<"accounts">) {
   const titleId = useId();
-  const { state, actions } = useLauncher();
+  const status = useLauncherSelector((s) => s.status.accounts);
+  const accounts = useLauncherSelector((s) => s.accounts);
+  const currentAccountId = useLauncherSelector((s) => s.currentAccountId);
+  // 账户切片读到之前当前账户 id 与列表还对不上，那时不去找当前账户
+  const me = useLauncherSelector((s) => (s.status.accounts.kind === "ready" ? activeAccount(s) : null));
+  const actions = useLauncherActions();
   const run = useRunner();
   const online = useOnline();
   const act = useAccountActions();
-  const status = state.status.accounts;
   const gate = useLoadingGate(status.kind === "loading");
   const skeleton = gate.view === "skeleton";
   const ready = status.kind === "ready" && !skeleton;
-  const current = ready ? activeAccount(state) : null;
+  const current = ready ? me : null;
   const offlineReason = online ? undefined : ACCOUNTS_COPY.offline.needsNetwork;
 
   const openLogin = (kind: AccountKind) => void run(() => actions.openLogin(kind), OPEN_LOGIN_ERROR[kind]);
 
   // 当前账户凭据失效时聚光卡上的「重新登录」是这一屏的主按钮
   const headerPrimary = current === null || current.status !== "expired";
-  const subtitle = !ready ? undefined : current === null ? ACCOUNTS_COPY.subtitleNone : ACCOUNTS_COPY.subtitle(state.accounts.length, current.name);
+  const subtitle = !ready ? undefined : current === null ? ACCOUNTS_COPY.subtitleNone : ACCOUNTS_COPY.subtitle(accounts.length, current.name);
 
   const header = (
     <PageHeader
@@ -67,7 +71,8 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
             placement="bottom-end"
             items={[
               { label: ACCOUNTS_COPY.menuOffline, icon: "user", onSelect: () => openLogin("offline") },
-              { label: ACCOUNTS_COPY.menuAuthlib, icon: "server", disabled: !online, hint: offlineReason, onSelect: () => openLogin("authlib") },
+              // 断网原因放悬停提示气泡，不占右侧提示位，免得把标签挤成省略号
+              { label: ACCOUNTS_COPY.menuAuthlib, icon: "server", disabled: !online, disabledReason: offlineReason, onSelect: () => openLogin("authlib") },
             ]}
             trigger={(props) => (
               <Button {...props} iconRight="chevron-down">
@@ -130,10 +135,10 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
       )}
       {ready && (
         <EntranceBlock as="section" className={styles.section}>
-          <SectionTitle hint={ACCOUNTS_COPY.count(state.accounts.length)}>{ACCOUNTS_COPY.allAccounts}</SectionTitle>
+          <SectionTitle hint={ACCOUNTS_COPY.count(accounts.length)}>{ACCOUNTS_COPY.allAccounts}</SectionTitle>
           <div className={styles.grid}>
-            {state.accounts.map((account) => (
-              <AccountCard key={account.uuid} account={account} current={account.uuid === state.currentAccountId} online={online} act={act} />
+            {accounts.map((account) => (
+              <AccountCard key={account.uuid} account={account} current={account.uuid === currentAccountId} online={online} act={act} />
             ))}
             <AddCard online={online} onAdd={openLogin} />
           </div>

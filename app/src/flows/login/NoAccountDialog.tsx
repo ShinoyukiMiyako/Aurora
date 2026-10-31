@@ -3,7 +3,7 @@
 
 import { ACTION_ERROR, NO_ACCOUNT_COPY } from "../../copy/flows";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions } from "../../state/launcher";
 import type { LoginIntent } from "../../state/login";
 import { Button } from "../../ui/Button";
 import { Modal } from "../../ui/Modal";
@@ -11,7 +11,7 @@ import { LOGIN_ERROR } from "../../copy/login";
 import styles from "./login.module.css";
 
 export function NoAccountDialog({ intent }: { intent: LoginIntent }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const close = () => void run(() => actions.closeLogin(), LOGIN_ERROR.close);
   return (

@@ -185,6 +185,12 @@ describe("设置页：骨架与分区导航", () => {
     expect(nav.route).toEqual({ page: "home" });
   });
 
+  it("分区导航每项写名称与一行说明，「常规」的说明涵盖启动后行为与语言", async () => {
+    await mount();
+    const items = all<HTMLButtonElement>('nav[aria-label="设置分区"] button').slice(0, 5);
+    expect(items.map((b) => b.textContent)).toEqual(["常规启动后行为、语言", "下载下载源与速度", "Java运行时与自动选择", "游戏内存、隔离与目录", "外观明暗、强调色、花瓣、动画"]);
+  });
+
   it("配置读不出来：内容列是错误卡，导航照常可点；重试成功后显示分区", async () => {
     let fail = true;
     ipc.overrides.set("get_config", async (args) => {
@@ -603,6 +609,27 @@ describe("设置页：关于与启动器更新", () => {
       { name: "前端依赖与字体", rows: [["@fontsource-variable/outfit", "5.3.0", "OFL-1.1"], ["react", "19.1.0", "MIT"]] },
       { name: "Rust 依赖", rows: [["serde", "1.0.219", "MIT OR Apache-2.0"]] },
     ]);
+  });
+
+  it("第三方许可：名称过长时截断，悬停提示给出全名；很长的许可证表达式原样完整写出", async () => {
+    const longName = "wasm-bindgen-backend-with-a-rather-long-crate-name";
+    const longLicense = "(MIT OR Apache-2.0) AND Unicode-DFS-2016 AND Apache-2.0 WITH LLVM-exception";
+    const fetchMock = vi.fn(async (_url: string) => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ packages: [{ ecosystem: "cargo", name: longName, version: "0.11.1+wasi-snapshot-preview1", license: longLicense }] }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    await click(rowButton("第三方许可", "查看"));
+    const [dialog] = openDialogs();
+    const row = dialog.querySelector("li");
+    if (row === null) throw new Error("许可列表是空的");
+    const [nameCell, versionCell, licenseCell] = [...row.children] as HTMLElement[];
+    expect(nameCell.textContent).toBe(longName);
+    expect(nameCell.title).toBe(longName);
+    expect(versionCell.textContent).toBe("0.11.1+wasi-snapshot-preview1");
+    expect(licenseCell.textContent).toBe(longLicense);
   });
 
   it("第三方许可清单读不出来：弹窗里写明原因，重试再读一次", async () => {

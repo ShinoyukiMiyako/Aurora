@@ -10,7 +10,7 @@ import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API } from "../../copy/flows";
 import type { AuthlibProfile, AuthServer } from "../../domain/adapt";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import type { AuthlibPrefill } from "../../state/login";
 import { usedAuthServers } from "../../state/selectors";
 import { Button } from "../../ui/Button";
@@ -39,11 +39,16 @@ function prefilledServer(prefill: AuthlibPrefill): { url: string; info: AuthServ
   return { url: prefill.serverUrl, info: { apiRoot: prefill.serverUrl, serverName: prefill.serverName, host: new URL(prefill.serverUrl).host } };
 }
 
+/** 两份「用过的验证服务器」逐项相同：账户列表换了新数组、内容没变时不让弹窗重渲染。 */
+function sameServers(a: readonly { serverUrl: string; serverName: string }[], b: readonly { serverUrl: string; serverName: string }[]): boolean {
+  return a.length === b.length && a.every((s, i) => s.serverUrl === b[i].serverUrl && s.serverName === b[i].serverName);
+}
+
 export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | null; dropped: string | null }) {
-  const { state, actions } = useLauncher();
+  const usedServers = useLauncherSelector((s) => usedAuthServers(s, [LITTLESKIN_API]), sameServers);
+  const actions = useLauncherActions();
   const run = useRunner();
   const [step, setStep] = useState<AuthlibStep>(prefill === null ? "server" : "login");
-  const usedServers = usedAuthServers(state, [LITTLESKIN_API]);
 
   // ---- 第一步：服务器
   const [serverInput, setServerInput] = useState(prefill !== null ? prefill.serverUrl : dropped !== null ? dropped : "");

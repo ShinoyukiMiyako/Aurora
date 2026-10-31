@@ -6,7 +6,7 @@ import { ACTION_ERROR } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { MANUAL_LOGIN } from "../../state/login";
 import { busyInstanceId } from "../../state/selectors";
 import { ACCOUNTS_COPY } from "./copy";
@@ -26,7 +26,11 @@ export interface AccountActions {
 }
 
 export function useAccountActions(): AccountActions {
-  const { state, actions } = useLauncher();
+  const accounts = useLauncherSelector((s) => s.accounts);
+  const currentAccountId = useLauncherSelector((s) => s.currentAccountId);
+  // 正在运行的游戏用的是哪个账户：删除确认要说明游戏不受影响
+  const gameAccount = useLauncherSelector((s) => (busyInstanceId(s) !== null && s.session !== null ? s.session.accountUuid : null));
+  const actions = useLauncherActions();
   const { confirm, copyText } = useShell();
   const run = useRunner();
   const [refreshing, setRefreshing] = useState<ReadonlySet<string>>(() => new Set());
@@ -34,9 +38,7 @@ export function useAccountActions(): AccountActions {
   const switchTo = (uuid: string) => void run(() => actions.selectAccount(uuid), ACTION_ERROR.selectAccount);
 
   const remove = (account: Account) => {
-    const session = state.session;
-    const usedByRunningGame = busyInstanceId(state) !== null && session !== null && session.accountUuid === account.uuid;
-    const copy = deleteConfirm(account, state.accounts, state.currentAccountId, usedByRunningGame);
+    const copy = deleteConfirm(account, accounts, currentAccountId, gameAccount === account.uuid);
     void confirm({ ...copy, tone: "danger" }).then((ok) => {
       if (ok) void run(() => actions.removeAccount(account.uuid), ACTION_ERROR.removeAccount);
     });

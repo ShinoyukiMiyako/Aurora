@@ -1,4 +1,4 @@
-// 登录流程：外壳在 useLauncher().state.login 非空时挂载，按登录种类换弹窗。
+// 登录流程：外壳在状态里的 login 非空时挂载，按登录种类换弹窗。
 // 关闭与各步动作都经状态容器（closeLogin、startMicrosoftLogin、addOfflineAccount…），弹窗自己不持有「开没开」。
 
 import type { FlowProps } from "../../state/flows";

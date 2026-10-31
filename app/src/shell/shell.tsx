@@ -12,7 +12,7 @@ import { endBreathWindow, startBreathWindow } from "../launch/breath";
 import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";
 import { bindArtStatus } from "../mc/binding";
 import type { CreateInstancePreset } from "../state/flows";
-import { useLauncher } from "../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { routeInstanceId, type Route } from "../state/route";
 import { activeTasks, pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
@@ -163,7 +163,17 @@ interface ConfirmRequest {
 }
 
 function ShellCore({ children }: { children: ReactNode }) {
-  const { state, actions } = useLauncher();
+  // 外壳根只订阅自己用到的几片：每 100 ms 的下载进度与每批游戏日志都不让它重渲染
+  const lastRename = useLauncherSelector((s) => s.lastRename);
+  const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
+  const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
+  const crashedId = useLauncherSelector((s) => (s.session !== null && s.session.phase === "crashed" ? s.session.instanceId : null));
+  const runningSince = useLauncherSelector((s) => (s.session !== null && s.session.phase === "running" ? s.session.runningSince : null));
+  const launchPrompt = useLauncherSelector((s) => s.launchPrompt);
+  const firstRun = useLauncherSelector((s) => s.firstRun);
+  const pins = useLauncherSelector(pinnedInstances, shallowArrayEqual);
+  const pendingTasks = useLauncherSelector((s) => activeTasks(s).length);
+  const actions = useLauncherActions();
   const run = useRunner();
   const overlay = useOverlayControls();
   const { scrimOpen } = useOverlayState();
@@ -207,12 +217,11 @@ function ShellCore({ children }: { children: ReactNode }) {
 
   // 改名不是删除：先把历史里的旧 id 换成新 id，再剪除失效项。改名与新列表同一次到达，
   // 渲染时就按改名后的历史算当前路由，不会有一帧落到实例库
-  const [appliedRename, setAppliedRename] = useState(() => (state.lastRename === null ? 0 : state.lastRename.seq));
-  const rename = state.lastRename !== null && state.lastRename.seq !== appliedRename ? state.lastRename : null;
+  const [appliedRename, setAppliedRename] = useState(() => (lastRename === null ? 0 : lastRename.seq));
+  const rename = lastRename !== null && lastRename.seq !== appliedRename ? lastRename : null;
   const viewHistory = rename === null ? history : renameInHistory(history, rename.from, rename.to);
 
-  const instancesReady = state.status.instances.kind === "ready";
-  const instanceIds = useMemo(() => new Set(state.instances.map((i) => i.id)), [state.instances]);
+  const instanceIds = useMemo(() => new Set(ids), [ids]);
   useEffect(() => {
     let next = historyRef.current;
     if (rename !== null) next = renameInHistory(next, rename.from, rename.to);
@@ -248,7 +257,7 @@ function ShellCore({ children }: { children: ReactNode }) {
   }, [current.seq, current.scrollTop, viewHistory.index]);
 
   // 打开该实例的崩溃诊断页即收起它的崩溃会话：诊断已经在页面上，状态岛不必再停着
-  const crashedHere = state.session !== null && state.session.phase === "crashed" && route.page === "instance" && route.tab === "crash" && route.id === state.session.instanceId;
+  const crashedHere = crashedId !== null && route.page === "instance" && route.tab === "crash" && route.id === crashedId;
   useEffect(() => {
     if (crashedHere) actions.dismissSession();
   }, [actions, crashedHere]);
@@ -281,7 +290,6 @@ function ShellCore({ children }: { children: ReactNode }) {
   }, []);
 
   // 另一实例占着游戏进程时再点启动：状态容器挂出 launchPrompt，这里弹替换确认并把回答交回
-  const launchPrompt = state.launchPrompt;
   const promptRef = useRef<typeof launchPrompt>(null);
   useEffect(() => {
     if (launchPrompt === null || promptRef.current === launchPrompt) return;
@@ -305,8 +313,9 @@ function ShellCore({ children }: { children: ReactNode }) {
   const updater = useUpdater();
   const updaterRef = useRef(updater);
   updaterRef.current = updater;
-  const stateRef = useRef(state);
-  stateRef.current = state;
+  // installUpdate 是引用稳定的回调：活动任务数经 ref 读，不进它的依赖
+  const pendingTasksRef = useRef(pendingTasks);
+  pendingTasksRef.current = pendingTasks;
   const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
   const openUpdatePanel = useCallback(() => {
     const api = updaterRef.current;
@@ -317,7 +326,7 @@ function ShellCore({ children }: { children: ReactNode }) {
   }, []);
   const closeUpdatePanel = useCallback(() => setUpdatePanelOpen(false), []);
   const installUpdate = useCallback(async () => {
-    const pending = activeTasks(stateRef.current).length;
+    const pending = pendingTasksRef.current;
     if (pending > 0) {
       const ok = await confirm({
         title: UPDATE_COPY.tasksConfirmTitle,
@@ -356,7 +365,7 @@ function ShellCore({ children }: { children: ReactNode }) {
 
   // ---------------------------------------------------------------- 全局快捷键
 
-  const shortcutState = { firstRun: state.firstRun, paletteOpen: palette.open, pins: pinnedInstances(state) };
+  const shortcutState = { firstRun, paletteOpen: palette.open, pins };
 
   /** 不是全局快捷键的按键：交给最后登记的、组合相同的页面快捷键；返回是否接手。 */
   const onPageKey = (event: KeyboardEvent): boolean => {
@@ -467,7 +476,6 @@ function ShellCore({ children }: { children: ReactNode }) {
   }, [actions, visible]);
 
   // 运行呼吸窗口：进入运行、或运行中窗口重新获得焦点时开始；失焦或不可见立即结束
-  const runningSince = state.session !== null && state.session.phase === "running" ? state.session.runningSince : null;
   const active = visible && focused;
   useEffect(() => {
     if (runningSince === null || !active) {

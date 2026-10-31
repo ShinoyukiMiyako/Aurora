@@ -90,7 +90,9 @@ function LicenseGroup({ title, packages }: { title: string; packages: readonly T
       <ul className={s.licenseList}>
         {packages.map((p) => (
           <li key={`${p.name}@${p.version}`} className={s.licenseRow}>
-            <span className={s.licenseName}>{p.name}</span>
+            <span className={s.licenseName} title={p.name}>
+              {p.name}
+            </span>
             <span className={s.licenseVersion}>{p.version}</span>
             <span className={s.licenseId}>{p.license}</span>
           </li>

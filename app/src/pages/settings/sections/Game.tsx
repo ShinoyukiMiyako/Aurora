@@ -7,7 +7,7 @@ import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
-import { useLauncher } from "../../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useDiscoveredGameDirectories, useGameDirectories, useMemoryAdvice, type GameDirectoryDto } from "../../../state/queries/catalog";
 import { invalidate } from "../../../state/resource";
 import { busyInstanceId, activeTasks } from "../../../state/selectors";
@@ -50,7 +50,8 @@ function CustomMemoryLine({ instances }: { instances: readonly InstanceSummary[]
 
 function MemoryCard() {
   const settings = useLoadedSettings();
-  const { state, actions } = useLauncher();
+  const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
   const run = useRunner();
   const advice = useMemoryAdvice(null);
   const memory = settings.memory;
@@ -117,7 +118,7 @@ function MemoryCard() {
             if (mb !== max.value) max.set(mb);
           }}
         />
-        <CustomMemoryLine instances={state.instances} />
+        <CustomMemoryLine instances={instances} />
         {!auto.value && overAvailable(manual, available, total) && (
           <Callout tone="warn" icon="alert" announce>
             {MEMORY_COPY.overAvailable(formatMemory(manual), formatMemory(available))}
@@ -138,7 +139,7 @@ function isolationOption(value: Isolation) {
 
 function IsolationCard() {
   const settings = useLoadedSettings();
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const write = useSettingWrite(settings.isolationPolicy, ISOLATION_COPY.setting, (isolationPolicy: Isolation) => actions.updateSettings({ isolationPolicy }));
   return (
     <Card>
@@ -165,7 +166,7 @@ function IsolationCard() {
 
 /** 切换游戏目录前的共同步骤：查「!」、二次确认、切换、刷新目录列表。 */
 function useSwitchDirectory() {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const { confirm } = useShell();
   const run = useRunner();
   return async (path: string, name: string = dirName(path)): Promise<void> => {
@@ -270,14 +271,15 @@ function DiscoveredBlock({ known, current }: { known: readonly GameDirectoryDto[
 
 function GameDirectoryCard() {
   const settings = useLoadedSettings();
-  const { state, actions } = useLauncher();
+  // 游戏在跑或有任务在下时不能换游戏目录
+  const busy = useLauncherSelector((s) => busyInstanceId(s) !== null || activeTasks(s).length > 0);
+  const actions = useLauncherActions();
   const run = useRunner();
   const commands = useSettingsCommands();
   const dirs = useGameDirectories();
   const discovered = useDiscoveredGameDirectories();
   const { copyText } = useShell();
   const switchTo = useSwitchDirectory();
-  const busy = busyInstanceId(state) !== null || activeTasks(state).length > 0;
   const busyReason = busy ? GAME_DIR_COPY.busyReason : undefined;
 
   const change = () =>

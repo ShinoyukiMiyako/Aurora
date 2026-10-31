@@ -1,5 +1,6 @@
-// 添加离线账户。左侧是按用户名算出的 UUID 着色的角色立绘（输入停顿后才换，免得每敲一个字闪一次），
-// 右侧是用户名、UUID 预览与说明。校验与后端同一套规则：错误不能提交，提醒照常可以提交。
+// 添加离线账户。左侧是这个用户名进游戏后的样子：按它的离线 UUID 选出的原版默认皮肤（输入停顿后才换，
+// 免得每敲一个字闪一次；本机游戏文件里读不到这套皮肤时是按 UUID 着色的剪影），右侧是用户名、UUID 预览与说明。
+// 校验与后端同一套规则：错误不能提交，提醒照常可以提交。
 // 「请输入用户名」只在提交、或输入过之后离开输入框才出现：刚打开弹窗就标红没有意义。
 
 import { useEffect, useRef, useState } from "react";
@@ -8,13 +9,14 @@ import { AccountFigure } from "../../art/skin/AccountFigure";
 import { ACTION_ERROR, OFFLINE_NAME_COPY } from "../../copy/flows";
 import { validateOfflineName, type OfflineNameCheck } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 import { Modal } from "../../ui/Modal";
 import { TextInput } from "../../ui/TextInput";
 import { LOGIN_ERROR, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import styles from "./login.module.css";
+import { defaultSkin } from "./default-skin";
 import { hyphenateUuid, offlineUuid } from "./offline-uuid";
 
 /** 立绘跟随输入的停顿时长（毫秒）。 */
@@ -42,17 +44,15 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 export function OfflineDialog() {
-  const { state, actions } = useLauncher();
+  const takenNames = useLauncherSelector((s) => s.accounts.map((a) => a.name), shallowArrayEqual);
+  const actions = useLauncherActions();
   const run = useRunner();
   const [name, setName] = useState("");
   const [touched, setTouched] = useState(false);
   // 输入过再清空、离开输入框才算碰过；只是点进来又点「取消」不该闪一下错误
   const edited = useRef(false);
   const [submitting, setSubmitting] = useState(false);
-  const check = validateOfflineName(
-    name,
-    state.accounts.map((a) => a.name),
-  );
+  const check = validateOfflineName(name, takenNames);
   const display = nameDisplay(name, check, touched);
   const figureName = useDebounced(name, FIGURE_DEBOUNCE_MS);
   const figureUuid = offlineUuid(figureName);
@@ -90,7 +90,7 @@ export function OfflineDialog() {
       <div className={styles.offline}>
         <div className={styles.stage} role="img" aria-label={figureName === "" ? OFFLINE_DIALOG_COPY.previewEmpty : OFFLINE_DIALOG_COPY.preview(figureName)}>
           <BlossomBranch width={150} height={96} dim className={styles.stageBranch} />
-          <AccountFigure uuid={figureUuid} skin={null} scale={5} className={styles.stageFigure} />
+          <AccountFigure uuid={figureUuid} skin={figureName === "" ? null : defaultSkin(figureUuid)} scale={5} className={styles.stageFigure} />
         </div>
         <div className={styles.offlineForm}>
           <Field

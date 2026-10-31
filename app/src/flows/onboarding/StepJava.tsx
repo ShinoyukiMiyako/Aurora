@@ -3,7 +3,7 @@
 import { useRef, useState } from "react";
 import { Spinner } from "../../art/Spinner";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useJavaRuntimes, type JavaInstallationDto } from "../../state/queries/catalog";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -47,12 +47,13 @@ function RuntimeRows({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
 
 /** 开关即时写入；写入中先显示新值，结束后回到状态层的值（失败即回到原值）。 */
 function AutoDownloadRow() {
-  const { state, actions } = useLauncher();
+  const settings = useLauncherSelector((s) => s.settings);
+  const actions = useLauncherActions();
   const run = useRunner();
   const [draft, setDraft] = useState<boolean | null>(null);
   const seq = useRef(0);
-  if (state.settings === null) throw new Error("向导要在配置读到之后渲染");
-  const checked = draft === null ? state.settings.autoDownloadJava : draft;
+  if (settings === null) throw new Error("向导要在配置读到之后渲染");
+  const checked = draft === null ? settings.autoDownloadJava : draft;
   const change = (next: boolean) => {
     const id = ++seq.current;
     setDraft(next);

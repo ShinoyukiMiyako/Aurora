@@ -5,7 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { UPDATE_COPY, UPDATE_FOUND_TOAST } from "../copy/updater";
-import { useLauncher } from "../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { AUTO_CHECK_DELAY_MS, AUTO_CHECK_INTERVAL_MS, autoCheckEnabled, updateToAnnounce } from "../state/updater/auto-check";
 import { canCheck } from "../state/updater/machine";
@@ -13,12 +13,13 @@ import { useUpdater } from "../state/updater/useUpdater";
 import { useRunner } from "./useRunner";
 
 export function useUpdaterAutoCheck(openUpdatePanel: () => void): void {
-  const { state, actions } = useLauncher();
+  const firstRun = useLauncherSelector((s) => s.firstRun);
+  const settings = useLauncherSelector((s) => s.settings);
+  const actions = useLauncherActions();
   const updater = useUpdater();
   const online = useOnline();
   const run = useRunner();
-  const settings = state.settings;
-  const enabled = autoCheckEnabled(updater.state, { firstRun: state.firstRun, checkUpdates: settings === null ? null : settings.checkUpdates });
+  const enabled = autoCheckEnabled(updater.state, { firstRun, checkUpdates: settings === null ? null : settings.checkUpdates });
 
   const [due, setDue] = useState(false);
   useEffect(() => {

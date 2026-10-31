@@ -538,10 +538,14 @@
   list-style: none;
 }
 
-/* 名称占剩余宽度；版本与许可证按内容定宽，长许可证表达式（MIT OR Apache-2.0）不挤掉名称 */
+/*
+ * 名称占剩余宽度，至少留 16 个字符；版本与许可证按内容定宽，但分别不超过整行的 25% 与 40%，超过就在本列内换行。
+ * 上限不能省：按内容定宽的列先于弹性列分到空间，没有上限时一长串许可证表达式（多段 OR、AND 再带 WITH 例外）
+ * 会把名称列挤成 0 宽。名称过长时截断，悬停看全名。
+ */
 .licenseRow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(16ch, 1fr) fit-content(25%) fit-content(40%);
   align-items: baseline;
   gap: var(--sk-space-12);
   padding: var(--sk-space-6) 0;
@@ -570,11 +574,14 @@
   line-height: var(--sk-lh-mono-sm);
   color: var(--sk-text-2);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
+/* 先在空格处换行；单个记号比整列还宽时才在记号中间断开 */
 .licenseId {
   color: var(--sk-text-2);
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .licensesLoading {

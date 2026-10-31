@@ -1,6 +1,6 @@
 // 关于页的「启动器更新」卡：一行状态（主句 + 次句）配一个按钮，其下是「自动检查更新」开关。
 
-import { useLauncher, useNow } from "../../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../../state/launcher";
 import { busyInstanceId } from "../../../state/selectors";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
@@ -53,7 +53,8 @@ function StatusLine({ view, onAction }: { view: CardView; onAction: () => void }
 
 export function UpdateCard() {
   const settings = useLoadedSettings();
-  const { state, actions } = useLauncher();
+  const gameRunning = useLauncherSelector((s) => busyInstanceId(s) !== null);
+  const actions = useLauncherActions();
   const run = useRunner();
   const online = useOnline();
   const now = useNow(RELATIVE_REFRESH_MS);
@@ -85,7 +86,7 @@ export function UpdateCard() {
       skippedVersion: settings.skippedUpdateVersion,
       now,
       online,
-      gameRunning: busyInstanceId(state) !== null,
+      gameRunning,
     });
     const onAction = () => {
       switch (view.button.action) {

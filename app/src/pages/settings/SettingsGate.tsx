@@ -4,7 +4,7 @@
 import type { ReactNode } from "react";
 import type { Settings } from "../../domain/adapt";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import type { SettingsSection } from "../../state/route";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -32,11 +32,12 @@ function SkeletonCard() {
 }
 
 export function SettingsGate({ section, children }: { section: SettingsSection; children: ReactNode }) {
-  const { state, actions } = useLauncher();
+  const status = useLauncherSelector((s) => s.status.settings);
+  const loaded = useLauncherSelector((s) => s.settings !== null);
+  const actions = useLauncherActions();
   const run = useRunner();
   // 外观分区只读写外观偏好，不依赖配置
   if (section === "appearance") return children;
-  const status = state.status.settings;
   if (status.kind === "error") {
     return (
       <Card>
@@ -55,7 +56,7 @@ export function SettingsGate({ section, children }: { section: SettingsSection; 
       </Card>
     );
   }
-  if (state.settings === null) {
+  if (!loaded) {
     return (
       <>
         <SkeletonCard />
@@ -67,7 +68,7 @@ export function SettingsGate({ section, children }: { section: SettingsSection; 
 }
 
 export function useLoadedSettings(): Settings {
-  const { state } = useLauncher();
-  if (state.settings === null) throw new Error("设置分区必须在配置读到之后渲染（经 SettingsGate）");
-  return state.settings;
+  const settings = useLauncherSelector((s) => s.settings);
+  if (settings === null) throw new Error("设置分区必须在配置读到之后渲染（经 SettingsGate）");
+  return settings;
 }

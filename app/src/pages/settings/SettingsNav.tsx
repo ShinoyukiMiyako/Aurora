@@ -5,7 +5,7 @@ import { motion } from "framer-motion";
 import { Icon } from "../../art/Icon";
 import { SETTINGS_SECTION_LABEL } from "../../copy/flows";
 import { springs } from "../../lib/motion";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherSelector } from "../../state/launcher";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../../state/route";
 import { Badge } from "../../ui/Badge";
 import { Card } from "../../ui/Card";
@@ -17,10 +17,10 @@ import s from "./settings.module.css";
 const PILL_ID = "settings-nav-pill";
 
 function useAboutHint(): { text: string; accent: boolean; dot: boolean } {
-  const { state } = useLauncher();
+  const loaded = useLauncherSelector((s) => s.settings !== null);
+  const skipped = useLauncherSelector((s) => (s.settings === null ? null : s.settings.skippedUpdateVersion));
   const updater = useUpdater();
-  const skipped = state.settings === null ? null : state.settings.skippedUpdateVersion;
-  const dot = state.settings !== null && showsUpdateDot(updater.state, skipped);
+  const dot = loaded && showsUpdateDot(updater.state, skipped);
   const update = phaseUpdate(updater.state.phase);
   if (dot && update !== null) return { text: aboutUpdateHint(update.version), accent: true, dot };
   if (updater.state.currentVersion === null) return { text: "", accent: false, dot };

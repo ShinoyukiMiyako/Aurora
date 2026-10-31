@@ -1,6 +1,9 @@
 // 下载任务页：完整交代下载队列。现在下得多快、三条并行通道各在下什么、谁在排队、每个任务的结局。
 // 标题栏的下载快览只管进行中的任务，这一页还负责历史（完成、失败及原因、取消）。
 // 状态筛选写在路由上：多个下载失败合并成一条通知时，通知的「查看」直接带着「失败与取消」进页。
+//
+// 订阅分两层：页面只订阅任务表的结构（增删、换状态），分组、筛选、页头与已结束的行只在结构变化时重排；
+// 下载进度每个任务约 100 ms 一次，只交给吞吐卡、通道卡与运行中的那一行，它们各自订阅自己要的那一片。
 
 import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL, SLOW_LOADING_HINT } from "../../copy/flows";
@@ -9,10 +12,9 @@ import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
-import { useLauncher, useNow } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import type { PageProps, TaskFilter } from "../../state/route";
-import { findInstance } from "../../state/selectors";
 import { isActiveTask, queuePosition } from "../../state/tasks";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -26,7 +28,6 @@ import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
 import { RELATIVE_TIME_REFRESH_MS } from "./constants";
 import { TASKS_COPY } from "./copy";
-import { useThroughput } from "./hooks";
 import { LanesCard } from "./LanesCard";
 import {
   bucketTasks,
@@ -38,16 +39,24 @@ import {
   filterRoute,
   overviewOf,
   rowMeta,
+  sameTaskLayout,
   TASK_FILTERS,
   taskGroups,
+  type RowMeta,
   type TaskBuckets,
 } from "./model";
 import styles from "./tasks.module.css";
 import { TaskRow } from "./TaskRow";
+import { ThroughputScope, useThroughputHistory } from "./throughput";
 import { ThroughputCard } from "./ThroughputCard";
 
 export default function TasksPage({ route }: PageProps<"tasks">) {
-  const { state, actions } = useLauncher();
+  // 运行中任务的对象在这里停在上一次结构变化时：它们的进度只由下面的进度部件读
+  const tasks = useLauncherSelector((s) => s.tasks, sameTaskLayout);
+  const slice = useLauncherSelector((s) => s.status.tasks);
+  const unseenFailures = useLauncherSelector((s) => s.unseenFailures);
+  const instanceIds = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
+  const actions = useLauncherActions();
   const nav = useNav();
   const { confirm, openCreateInstance } = useShell();
   const run = useRunner();
@@ -56,26 +65,23 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   const titleId = useId();
 
   const filter = filterOf(route);
-  const buckets = bucketTasks(state.tasks);
+  const buckets = bucketTasks(tasks);
   const counts = filterCounts(buckets);
   const active = [...buckets.running, ...buckets.queued];
-  const history = useThroughput(buckets.running);
 
-  // 确认框开着的时候任务可能已经自己结束了：确认后按最新的任务表判断还有没有可取消的
-  const latestTasks = useRef(state.tasks);
+  // 确认框开着的时候任务可能已经自己结束了：确认后按最新的任务表判断还有没有可取消的（状态变化属于结构，这里总是新的）
+  const latestTasks = useRef(tasks);
   useLayoutEffect(() => {
-    latestTasks.current = state.tasks;
+    latestTasks.current = tasks;
   });
   const stillActive = (id: string) => latestTasks.current.some((t) => t.id === id && isActiveTask(t));
 
   // 进到这一页即算看过全部失败；停在这一页期间新出现的失败也就在列表里，同样算看过
-  const unseenFailures = state.unseenFailures;
   useEffect(() => {
     if (unseenFailures > 0) actions.markFailuresSeen();
   }, [actions, unseenFailures]);
 
-  const slice = state.status.tasks;
-  const gate = useLoadingGate(slice.kind === "loading" && state.tasks.length === 0);
+  const gate = useLoadingGate(slice.kind === "loading" && tasks.length === 0);
   const showSkeleton = gate.view === "skeleton";
 
   const cancel = async (task: Task) => {
@@ -136,12 +142,9 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     ) : null;
 
   let body: ReactNode[];
-  if (state.tasks.length > 0) {
+  if (tasks.length > 0) {
     body = [
-      <EntranceBlock key="overview" className={styles.overview}>
-        <ThroughputCard overview={overviewOf(buckets)} history={history} />
-        <LanesCard running={buckets.running} queued={buckets.queued} />
-      </EntranceBlock>,
+      <TasksOverview key="overview" />,
       <EntranceBlock key="filter" className={styles.listHead}>
         <SegmentedControl
           ariaLabel={TASKS_COPY.filter.ariaLabel}
@@ -154,10 +157,9 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         key="list"
         buckets={buckets}
         filter={filter}
-        tasks={state.tasks}
+        tasks={tasks}
         now={now}
-        historyEta={(task) => etaSpeed(history, task)}
-        hasInstance={(id) => findInstance(state, id) !== undefined}
+        hasInstance={(id) => instanceIds.includes(id)}
         retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
         onCancel={(task) => void cancel(task)}
         onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
@@ -194,23 +196,35 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   }
 
   return (
-    <Page aria-labelledby={titleId}>
-      {header}
-      {offlineBanner}
-      {loadError}
-      {body}
-    </Page>
+    <ThroughputScope>
+      <Page aria-labelledby={titleId}>
+        {header}
+        {offlineBanner}
+        {loadError}
+        {body}
+      </Page>
+    </ThroughputScope>
+  );
+}
+
+// ---------------------------------------------------------------- 总览
+
+/** 吞吐卡与通道卡：读活动任务的实时进度与速度，每次进度更新都重渲染。 */
+function TasksOverview() {
+  const active = useLauncherSelector((s) => s.tasks.filter(isActiveTask), shallowArrayEqual);
+  const history = useThroughputHistory();
+  const buckets = bucketTasks(active);
+  return (
+    <EntranceBlock className={styles.overview}>
+      <ThroughputCard overview={overviewOf(buckets)} history={history} />
+      <LanesCard running={buckets.running} queued={buckets.queued} />
+    </EntranceBlock>
   );
 }
 
 // ---------------------------------------------------------------- 列表
 
-interface TaskListProps {
-  buckets: TaskBuckets;
-  filter: TaskFilter;
-  tasks: readonly Task[];
-  now: number;
-  historyEta(task: Task): number;
+interface RowHandlers {
   hasInstance(id: string): boolean;
   /** 重试眼下必然失败（断网）时的原因；能重试为 undefined。 */
   retryBlocked: string | undefined;
@@ -219,7 +233,39 @@ interface TaskListProps {
   onViewInstance(id: string): void;
 }
 
-function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, retryBlocked, onCancel, onRetry, onViewInstance }: TaskListProps) {
+interface TaskListProps extends RowHandlers {
+  buckets: TaskBuckets;
+  filter: TaskFilter;
+  tasks: readonly Task[];
+  now: number;
+}
+
+function PlacedTaskRow({ task, meta, handlers }: { task: Task; meta: RowMeta; handlers: RowHandlers }) {
+  return (
+    <TaskRow
+      task={task}
+      meta={meta}
+      hasInstance={task.instanceId !== null && handlers.hasInstance(task.instanceId)}
+      retryBlocked={handlers.retryBlocked}
+      onCancel={() => handlers.onCancel(task)}
+      onRetry={() => handlers.onRetry(task)}
+      onViewInstance={() => {
+        if (task.instanceId === null) throw new Error(`任务 ${task.id} 没有关联实例`);
+        handlers.onViewInstance(task.instanceId);
+      }}
+    />
+  );
+}
+
+/** 运行中的任务行：自己订阅这一个任务的实时进度，剩余时间按最近几秒的采样估。 */
+function RunningTaskRow({ id, now, handlers }: { id: string; now: number; handlers: RowHandlers }) {
+  const task = useLauncherSelector((s) => s.tasks.find((t) => t.id === id));
+  const history = useThroughputHistory();
+  if (task === undefined) throw new Error(`任务 ${id} 已不在任务表里，列表却还在画它`);
+  return <PlacedTaskRow task={task} meta={rowMeta(task, { queuePosition: null, etaSpeed: etaSpeed(history, task), now })} handlers={handlers} />;
+}
+
+function TaskList({ buckets, filter, tasks, now, ...handlers }: TaskListProps) {
   const idBase = useId();
   const groups = taskGroups(buckets, filter);
   if (groups.length === 0) {
@@ -234,25 +280,18 @@ function TaskList({ buckets, filter, tasks, now, historyEta, hasInstance, retryB
   return (
     <Card padding="none">
       {groups.map((group) => {
-        const rows = group.tasks.map((task) => (
-          <TaskRow
-            key={task.id}
-            task={task}
-            meta={rowMeta(task, {
-              queuePosition: task.status === "queued" ? queuePosition(tasks, task.id) : null,
-              etaSpeed: task.status === "running" ? historyEta(task) : 0,
-              now,
-            })}
-            hasInstance={task.instanceId !== null && hasInstance(task.instanceId)}
-            retryBlocked={retryBlocked}
-            onCancel={() => onCancel(task)}
-            onRetry={() => onRetry(task)}
-            onViewInstance={() => {
-              if (task.instanceId === null) throw new Error(`任务 ${task.id} 没有关联实例`);
-              onViewInstance(task.instanceId);
-            }}
-          />
-        ));
+        const rows = group.tasks.map((task) =>
+          task.status === "running" ? (
+            <RunningTaskRow key={task.id} id={task.id} now={now} handlers={handlers} />
+          ) : (
+            <PlacedTaskRow
+              key={task.id}
+              task={task}
+              meta={rowMeta(task, { queuePosition: task.status === "queued" ? queuePosition(tasks, task.id) : null, etaSpeed: 0, now })}
+              handlers={handlers}
+            />
+          ),
+        );
         if (group.label === null) {
           return (
             <List key={group.key} variant="flush" aria-label={TASKS_COPY.row.listLabel}>

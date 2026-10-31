@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { Settings } from "../../../domain/adapt";
 import { useNav } from "../../../shell/shell";
-import { useLauncher } from "../../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { activeTasks } from "../../../state/selectors";
 import { Button } from "../../../ui/Button";
 import { Card } from "../../../ui/Card";
@@ -24,7 +24,7 @@ const CONCURRENCY_MARKS = CONCURRENCY.marks.map((value) => ({ value, label: Stri
 
 function SourceCard() {
   const settings = useLoadedSettings();
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const files = useSettingWrite(settings.downloadSource, DOWNLOAD_COPY.fileSource, (downloadSource: SourcePolicy) => actions.updateSettings({ downloadSource }));
   const list = useSettingWrite(settings.versionListSource, DOWNLOAD_COPY.versionListSource, (versionListSource: SourcePolicy) =>
     actions.updateSettings({ versionListSource }),
@@ -70,7 +70,7 @@ function SourceCard() {
 
 function ConcurrencyRow() {
   const settings = useLoadedSettings();
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const write = useSettingWrite(settings.downloadConcurrency, DOWNLOAD_COPY.concurrency, (downloadConcurrency: number) => actions.updateSettings({ downloadConcurrency }));
   // 拖动期间读数实时跟随，松手才写入
   const [dragging, setDragging] = useState<number | null>(null);
@@ -96,9 +96,8 @@ function ConcurrencyRow() {
 }
 
 function TasksRow() {
-  const { state } = useLauncher();
+  const busy = useLauncherSelector((s) => activeTasks(s).length);
   const { go } = useNav();
-  const busy = activeTasks(state).length;
   return (
     <SettingRow title={DOWNLOAD_COPY.tasks} description={busy > 0 ? DOWNLOAD_COPY.tasksBusy(busy) : DOWNLOAD_COPY.tasksIdle}>
       <Button size="sm" variant="ghost" iconRight="arrow-right" onClick={() => go({ page: "tasks" })}>
