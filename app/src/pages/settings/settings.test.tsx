@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
-import { resetMocks } from "../../ipc/mock";
+import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { UpdatePanelMount } from "../../shell/UpdatePanel";
@@ -250,6 +250,25 @@ describe("设置页：常规", () => {
     expect(toasts()).toContainEqual({ tone: "success", title: "client_id 已保存", body: undefined });
     expect(document.querySelector('input[aria-label="微软登录 client_id"]')).toBeNull();
   });
+
+  it("client_id：保存还没回来时再按 Enter 不重复写入，只提示一次", async () => {
+    await mount("general");
+    await click(button("修改"));
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="微软登录 client_id"]');
+    if (input === null) throw new Error("没有展开 client_id 输入框");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, "00000000-aaaa-bbbb-cccc-000000000002");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const pending: (() => void)[] = [];
+    ipc.overrides.set("update_config", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+    for (let i = 0; i < 3; i++) act(() => void input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    await flush();
+    expect(callsOf(ipc, "update_config")).toEqual([{ clientId: "00000000-aaaa-bbbb-cccc-000000000002" }]);
+    for (const resolve of pending) act(() => resolve());
+    await flush();
+    expect(toasts().filter((t) => t.title === "client_id 已保存")).toHaveLength(1);
+  });
 });
 
 describe("设置页：下载", () => {
@@ -323,6 +342,46 @@ describe("设置页：游戏", () => {
     expect(text()).toContain("现在空闲 9 GB");
     await click(button("自动分配"));
     expect(callsOf(ipc, "update_config")).toEqual([{ memory: { max_mb: 4096, min_mb: null, auto: false } }]);
+  });
+
+  it("内存：关掉自动分配还没写完就调最大内存，第二次写入沿用「关」，不把自动分配写回去", async () => {
+    await mount("game");
+    const pending: (() => void)[] = [];
+    ipc.overrides.set("update_config", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+    await click(button("自动分配"));
+    const slider = document.querySelector<HTMLInputElement>('input[type="range"][aria-label="最大内存"]');
+    if (slider === null) throw new Error("没有最大内存滑杆");
+    expect(slider.disabled).toBe(false);
+    act(() => void slider.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(callsOf(ipc, "update_config")).toEqual([
+      { memory: { max_mb: 4096, min_mb: null, auto: false } },
+      { memory: { max_mb: 4608, min_mb: null, auto: false } },
+    ]);
+    for (const resolve of pending) act(() => resolve());
+    await flush();
+  });
+
+  it("内存：调了最大内存还没写完就打开自动分配，开关这次写入带上刚调的值", async () => {
+    await mockInvoke("update_config", { memory: { max_mb: 4096, min_mb: null, auto: false } });
+    await mount("game");
+    const pending: (() => void)[] = [];
+    ipc.overrides.set("update_config", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+    const slider = document.querySelector<HTMLInputElement>('input[type="range"][aria-label="最大内存"]');
+    if (slider === null) throw new Error("没有最大内存滑杆");
+    act(() => void slider.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await click(button("自动分配"));
+    expect(callsOf(ipc, "update_config")).toEqual([
+      { memory: { max_mb: 4608, min_mb: null, auto: false } },
+      { memory: { max_mb: 4608, min_mb: null, auto: true } },
+    ]);
+    for (const resolve of pending) act(() => resolve());
+    await flush();
   });
 
   it("其他文件夹：切换前二次确认，确认后切换并刷新列表；访问不到的不能切；移除只删记录", async () => {

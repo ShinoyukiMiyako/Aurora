@@ -6,6 +6,7 @@ import { AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OF
 import { validateOfflineName } from "../../domain/rules";
 import { DEVICE_CODE_EVENT } from "../../ipc/accounts";
 import { IpcError } from "../../ipc/errors";
+import { mockInvoke } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
@@ -393,6 +394,46 @@ describe("外置登录弹窗", () => {
     expect(selected.pendingId).toMatch(/^authlib-/);
     expect(launcher.state.login).toBeNull();
     expect(launcher.state.toasts[0]?.title).toBe(TOAST_COPY.authlibAdded("multi_alt", "skin.example.com").title);
+  });
+
+  it("登录还没回来时不能退回上一步换服务器：回来的角色属于这一次的服务器", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "skin.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const [username, password] = inputs();
+    typeInto(username, "multi@example.com");
+    typeInto(password, "secret");
+    const gate = deferred<void>();
+    ipc.overrides.set("authlib_login", async (args) => {
+      await gate.promise;
+      return mockInvoke("authlib_login", args);
+    });
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(true);
+    expect(button(AUTHLIB_DIALOG_COPY.changeServer).disabled).toBe(true);
+    act(() => button(AUTHLIB_DIALOG_COPY.back).click());
+    act(() => button(AUTHLIB_DIALOG_COPY.changeServer).click());
+    await flush();
+    expect(inputs().map((i) => i.value)).toEqual(["multi@example.com", "secret"]);
+    gate.resolve();
+    await flush();
+    expect([...document.querySelectorAll("[role='radio']")].map((r) => r.textContent)).toEqual(["multi_main", "multi_alt"]);
+    expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(false);
+
+    // 选定角色在途时同样不能退回登录这一步
+    const picking = deferred<void>();
+    ipc.overrides.set("select_authlib_profile", async (args) => {
+      await picking.promise;
+      return mockInvoke("select_authlib_profile", args);
+    });
+    act(() => button(AUTHLIB_COPY.pickProfile).click());
+    await flush();
+    expect(button(AUTHLIB_DIALOG_COPY.back).disabled).toBe(true);
+    picking.resolve();
+    await flush();
+    expect(launcher.state.login).toBeNull();
   });
 });
 

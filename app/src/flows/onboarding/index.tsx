@@ -7,7 +7,7 @@
 // 后端拒绝了游戏目录时停在（或回到）第一步，把原因写在输入框下。
 
 import { AnimatePresence, motion, useIsPresent, type Variants } from "framer-motion";
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { fade, springs } from "../../lib/motion";
@@ -173,15 +173,30 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
     return false;
   };
 
-  const next = async () => {
-    if (wizard.index === 0 && !(await commitStepOne())) return;
-    setWizard((w) => advance(w, "next"));
+  // 离开第一步要等提交回来：这期间再按 Enter、点步骤条也会各自提交一次、各自前进，连按两下 Enter 就越过了第二步，
+  // 点过步骤条的那次还会在已经换步之后照原目标跳转而抛错。同一时刻只放行一次换步，之后到的直接忽略。
+  const stepping = useRef(false);
+  const step = async (move: () => Promise<void>) => {
+    if (stepping.current) return;
+    stepping.current = true;
+    try {
+      await move();
+    } finally {
+      stepping.current = false;
+    }
   };
 
-  const jump = async (index: number) => {
-    if (wizard.index === 0 && index !== 0 && !(await commitStepOne())) return;
-    setWizard((w) => jumpTo(w, index));
-  };
+  const next = () =>
+    step(async () => {
+      if (wizard.index === 0 && !(await commitStepOne())) return;
+      setWizard((w) => advance(w, "next"));
+    });
+
+  const jump = (index: number) =>
+    step(async () => {
+      if (wizard.index === 0 && index !== 0 && !(await commitStepOne())) return;
+      setWizard((w) => jumpTo(w, index));
+    });
 
   const finish = async (via: FinishVia) => {
     setFinishing(via);

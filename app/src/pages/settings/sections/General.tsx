@@ -99,7 +99,8 @@ function ClientIdRow() {
   const value = draft.trim();
 
   const save = async () => {
-    if (value === "") return;
+    // 输入框里的 Enter 不受「保存」按钮加载态的约束，写入回来之前再按要在这里挡住
+    if (value === "" || saving) return;
     setSaving(true);
     const result = await run(() => actions.updateSettings({ clientId: value }), saveFailed(GENERAL_COPY.clientId));
     setSaving(false);

@@ -262,6 +262,41 @@ describe("首次启动向导：推进与收尾", () => {
     ]);
   });
 
+  it("第一步的提交还没回来时再按 Enter：只提交一次、只前进一步，不跳过 Java 这一步", async () => {
+    await mount();
+    const pending: (() => void)[] = [];
+    ipc.overrides.set("complete_first_run", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+    const enter = () =>
+      act(() => {
+        dirInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      });
+    enter();
+    enter();
+    enter();
+    await flush();
+    expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
+    for (const resolve of pending) act(() => resolve());
+    await flush();
+    expect(title()).toBe("看看这台电脑上的 Java");
+    expect(text()).toContain("第 2 步，共 4 步");
+  });
+
+  it("回到第一步改了目录、提交还没回来时点步骤条：不重复提交，提交回来后只前进到下一步", async () => {
+    await mount();
+    await click(button("下一步"));
+    await click(button("跳过"));
+    await click(railItem("游戏目录"));
+    await typePath("D:\\Games\\Petal");
+    const pending: (() => void)[] = [];
+    ipc.overrides.set("complete_first_run", () => new Promise<null>((resolve) => pending.push(() => resolve(null))));
+    act(() => button("下一步").click());
+    await click(railItem("账户"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual([DEFAULT_DIR, "D:\\Games\\Petal"]);
+    for (const resolve of pending) act(() => resolve());
+    await flush();
+    expect(title()).toBe("看看这台电脑上的 Java");
+  });
+
   it("离开第一步时其他启动器的文件夹还没探测完：照当时提交、不收下，收尾也不按后来的探测结果补交", async () => {
     let found: (dirs: { name: string; path: string }[]) => void = () => undefined;
     ipc.overrides.set("discover_game_directories", () => new Promise((resolve) => (found = resolve)));

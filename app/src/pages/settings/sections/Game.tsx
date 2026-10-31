@@ -29,7 +29,7 @@ import { GAME_DIR_COPY, ISOLATION_COPY, ISOLATION_OPTIONS, LOAD_COPY, MEMORY_COP
 import { dirName, hasBang, overAvailable, samePath, unrecorded } from "../game-model";
 import { InstanceStack } from "../InstanceStack";
 import { useLoadedSettings } from "../SettingsGate";
-import { useSettingWrite } from "../write";
+import { useSettingWrite, type SettingWrite } from "../write";
 import s from "../settings.module.css";
 
 type Isolation = Settings["isolationPolicy"];
@@ -55,8 +55,12 @@ function MemoryCard() {
   const run = useRunner();
   const advice = useMemoryAdvice(null);
   const memory = settings.memory;
-  const auto = useSettingWrite(memory.auto, MEMORY_COPY.auto, (value: boolean) => actions.updateSettings({ memory: { ...memory, auto: value } }));
-  const max = useSettingWrite(memory.maxMb, MEMORY_COPY.max, (maxMb: number) => actions.updateSettings({ memory: { ...memory, maxMb } }));
+  // 两项写的是同一组内存设置：一项还在写入时改另一项，要带上前一项正在写的值；按读到的旧配置拼整组，
+  // 后到的这次就把前一项改回去了（刚关掉的自动分配又被打开，或刚调的最大内存退回原值）
+  const auto: SettingWrite<boolean> = useSettingWrite(memory.auto, MEMORY_COPY.auto, (value: boolean) =>
+    actions.updateSettings({ memory: { ...memory, maxMb: max.value, auto: value } }),
+  );
+  const max: SettingWrite<number> = useSettingWrite(memory.maxMb, MEMORY_COPY.max, (maxMb: number) => actions.updateSettings({ memory: { ...memory, auto: auto.value, maxMb } }));
   const [dragging, setDragging] = useState<number | null>(null);
 
   if (advice.status === "error") {
