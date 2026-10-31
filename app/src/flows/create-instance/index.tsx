@@ -205,7 +205,6 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
     }
     const id = result.value;
     actions.toast("info", CREATE_COPY.started(trimmed), CREATE_COPY.startedBody);
-    void run(() => actions.selectInstance(id), ACTION_ERROR.selectInstance);
     onClose();
     if (openAfter) go({ page: "instance", id, tab: "overview" });
   };
