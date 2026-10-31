@@ -11,11 +11,11 @@ import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../te
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { AppShell, PAGE_PRELOAD_DELAY_MS, type ShellFlows } from "./AppShell";
-import { PAGE_ERROR_COPY } from "../copy/shell";
+import { DROP_COPY, PAGE_ERROR_COPY } from "../copy/shell";
 import type { PageTable } from "./nav";
 import { createPageRegistry, type PageRegistry } from "./pages";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
-import { WindowPortProvider, browserWindowPort, type WindowPort } from "./window";
+import { WindowPortProvider, browserWindowPort, type FileDropEvent, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -196,6 +196,22 @@ describe("外壳布局", () => {
     await mount();
     expect(pageShown()).toBe("home");
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it("文件拖过窗口时整窗显示放置提示", async () => {
+    let fire: ((event: FileDropEvent) => void) | null = null;
+    port = {
+      ...port,
+      onFileDrop: async (handler) => {
+        fire = handler;
+        return () => undefined;
+      },
+    };
+    await mount();
+    if (fire === null) throw new Error("外壳没有订阅文件拖放");
+    const send: (event: FileDropEvent) => void = fire;
+    act(() => send({ type: "enter", paths: ["D:\\pack.mrpack"] }));
+    expect(document.querySelector('[role="status"][data-hint="modpack"]')?.textContent).toBe(DROP_COPY.modpackHint);
   });
 
   it("没有新建实例模块时，打开请求立即收回", async () => {

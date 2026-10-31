@@ -107,6 +107,17 @@ export const TOASTS_COPY = {
   region: "通知",
 } as const;
 
+/** 窗口级文件拖放：放置提示与松开了别的文件时的说明。 */
+export const DROP_COPY = {
+  modpackHint: "松开以导入整合包",
+  notModpack: { title: "拖进来的不是整合包", body: "只认 .mrpack 和 CurseForge 导出的 .zip" },
+} as const;
+
+/** 系统选择文件对话框：标题与文件类型下拉里的名称。 */
+export const FILE_PICK_COPY = {
+  modpack: { title: "选择整合包文件", filter: "整合包" },
+} as const;
+
 /** 页面级错误边界：外壳之内只有这一处兜底，标题栏、侧栏、状态岛不受页面错误影响。 */
 export const PAGE_ERROR_COPY = {
   title: "这一页出错了",
@@ -139,4 +150,5 @@ export const SHELL_ACTION_ERROR = {
   skin: "账户皮肤读不出来",
   updater: "更新状态读不出来",
   pagePreload: "页面模块没能预载",
+  fileDrop: "文件拖放没有接上",
 } as const;

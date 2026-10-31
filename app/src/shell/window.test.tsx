@@ -51,6 +51,7 @@ function fakePort(): WindowPort & { show: ReturnType<typeof vi.fn> } {
     onResized: async () => () => {},
     onFocusChanged: async () => () => {},
     onCloseRequested: async () => () => {},
+    onFileDrop: async () => () => {},
   };
 }
 

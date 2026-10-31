@@ -228,6 +228,7 @@
   --sk-z-page: 1;
   --sk-z-main: 2;
   --sk-z-sidebar: 3;
+  --sk-z-drop: 4;
   --sk-z-overlay: 50;
   --sk-z-modal: 10;
   --sk-z-palette: 20;

@@ -28,6 +28,11 @@ export type Route =
       forInstance?: string;
       /** 进页后直接打开该资源的详情弹窗。 */
       open?: { platform: Platform; projectId: string };
+      /**
+       * 进页后直接打开本地整合包导入弹窗，并读取这个文件（.mrpack / .zip 的完整路径）。
+       * 窗口级拖放与选择文件都经它带入；页面接手后用 replace 去掉它，后退、前进不会再次打开弹窗。
+       */
+      importFile?: string;
     }
   /** filter：多个下载失败合并成一条通知时，「查看」直接切到「失败与取消」。 */
   | { page: "tasks"; filter?: TaskFilter }
@@ -77,7 +82,8 @@ export function sameRoute(a: Route, b: Route): boolean {
         a.kind === b.kind &&
         a.forInstance === b.forInstance &&
         a.open?.platform === b.open?.platform &&
-        a.open?.projectId === b.open?.projectId
+        a.open?.projectId === b.open?.projectId &&
+        a.importFile === b.importFile
       );
     case "tasks":
       return b.page === "tasks" && a.filter === b.filter;

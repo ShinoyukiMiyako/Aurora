@@ -1,5 +1,5 @@
 // 外壳布局：窗口背景层、左侧 84px 侧栏槽位、主列（标题栏 + 内容区），以及始终挂着的通知、登录流程、
-// 新建实例流程与浮层根（应用根元素的最后一个子元素）。首次启动时整窗换成向导：只留一条带徽记与窗口三键的标题条。
+// 新建实例流程、文件拖放提示与浮层根（应用根元素的最后一个子元素）。首次启动时整窗换成向导：只留一条带徽记与窗口三键的标题条。
 //
 // 页面与流程模块由 App 收集后传进来：外壳不引用 pages/ 与 flows/，依赖方向只从 App 指向两边。
 // 内容区按路由键挂载页面：同一实例换分页、设置换分区不重新挂载；每个页面各有一层错误边界。
@@ -30,6 +30,7 @@ import { Sidebar } from "./Sidebar";
 import { TitleBar, useReportedWindowFrame, WindowControls } from "./TitleBar";
 import { Toasts } from "./Toasts";
 import { useRunner } from "./useRunner";
+import { DropHint } from "./DropHint";
 import { useRevealWindow } from "./window";
 import { useAfterLaunch, useBackgroundAttention, useCloseGuard } from "./window-behavior";
 
@@ -54,7 +55,7 @@ const resolveRemoteImage = createThumbResolver(thumbRegister);
 
 export function AppShell({ pages, flows }: AppShellProps) {
   const { state } = useLauncher();
-  const { bindRoot, bindPageScroll } = useShell();
+  const { bindRoot, bindPageScroll, fileDropHint } = useShell();
   const { appearance, reduced } = useAppearance();
   const run = useRunner();
 
@@ -112,6 +113,7 @@ export function AppShell({ pages, flows }: AppShellProps) {
               <MainFrame key="main" pages={pages} bindScroll={bindScroll} />
             )}
           </AnimatePresence>
+          <DropHint hint={fileDropHint} />
           <Toasts />
           <LoginMount Flow={flows.login} />
           <CreateInstanceMount Flow={flows.createInstance} />
