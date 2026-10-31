@@ -596,6 +596,20 @@ describe("发现页：失败与离线", () => {
     expect(document.body.textContent).toContain("CurseForge 暂时没有响应，下面只有 Modrinth 的结果。");
   });
 
+  it("一个平台失败、另一个平台确实一条都没有：空状态上方照样说明失败的平台并可重试，不让人以为两个平台都没有", async () => {
+    let fail = true;
+    pages = () => (fail ? result([], { errors: [{ platform: "modrinth", message: "502" }] }) : result([entry("A")]));
+    await mount();
+    expect(document.body.textContent).toContain("Modrinth 暂时没有响应，下面只有 CurseForge 的结果。");
+    expect(document.body.textContent).toContain("没有符合条件的资源");
+    fail = false;
+    act(() => buttonByText("重试").click());
+    await flush();
+    expect(cardTitles()).toEqual(["资源 A，查看详情"]);
+    expect(document.body.textContent).not.toContain("暂时没有响应");
+    expect(searchCalls()).toHaveLength(2);
+  });
+
   it("断网时顶部提示；恢复联网后正在看的搜索立即重取", async () => {
     await mount();
     expect(searchCalls()).toHaveLength(1);
