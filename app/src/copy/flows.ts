@@ -480,7 +480,7 @@ export const TASK_STATUS_LABEL: Readonly<Record<TaskStatus, string>> = {
   cancelled: "已取消",
 };
 
-/** 任务类别标签。修复任务补的是游戏文件，归在「游戏」名下。 */
+/** 任务类别标签。修复任务补的是游戏文件，归在「游戏」名下；备份、导出与恢复都归在「存档」名下。 */
 export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   game: "游戏",
   loader: "加载器",
@@ -491,6 +491,8 @@ export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   shader: "光影",
   datapack: "数据包",
   repair: "游戏",
+  world_backup: "存档",
+  world_restore: "存档",
 };
 
 function versionWithLoader(mcVersion: string, loader: LoaderKind, loaderVersion: string | null, sep: string): string {
@@ -518,6 +520,11 @@ export const TASK_TEXT = {
   javaTitle: (major: number) => `下载 Java ${major}`,
   javaDetailPending: "Mojang 运行时 · 手动",
   javaDetail: (version: string) => `Mojang ${version} · 手动`,
+  backupTitle: (world: string) => `备份「${world}」`,
+  exportTitle: (world: string) => `导出「${world}」`,
+  restoreTitle: (world: string) => `恢复「${world}」`,
+  /** 备份、导出与恢复任务的详情：存档属于哪个实例。 */
+  backupDetail: (instance: string) => `「${instance}」`,
   queuePosition: (n: number) => `排队中 · 第 ${n} 位`,
   attempt: (k: number) => `第 ${k} 次尝试`,
 } as const;
@@ -534,6 +541,15 @@ export function taskFailureReason(error: { code: string; message: string }): str
       return "网络连接失败";
     case "hash_mismatch":
       return "下载到的文件和官方记录不一致";
+    case "world_in_use":
+      return "这个存档正被游戏打开";
+    case "world_backup_corrupt":
+      return "备份文件已损坏，无法恢复";
+    case "world_backup_not_found":
+      return "这份备份已经不在了";
+    // 原存档已进回收站、恢复出的副本留在临时目录：两个位置都在后端原文里，统一说法会把它们丢掉
+    case "world_restore_incomplete":
+      return error.message;
     default:
       return error.message;
   }
@@ -573,6 +589,18 @@ export const TASK_TOAST = {
     body: new Set(reasons).size === 1 ? reasons[0] : "原因各不相同",
   }),
   cancelled: (title: string) => ({ title: `已取消：${title}` }),
+  /** 备份、导出、恢复存档的任务失败：它们不是下载，不并进「n 个下载失败」。 */
+  worldFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
+  backupStarted: (world: string) => ({ title: `已开始备份「${world}」`, body: "进度可以在下载任务里查看" }),
+  worldBackedUp: (world: string, size: number, pruned: number) => ({
+    title: `已备份「${world}」`,
+    body: pruned > 0 ? `${formatBytes(size)} · 清理了 ${pruned} 份旧的自动备份` : formatBytes(size),
+  }),
+  worldExported: (world: string, path: string) => ({ title: `已导出「${world}」`, body: path }),
+  worldRestored: (world: string, previousInRecycleBin: boolean) =>
+    previousInRecycleBin ? { title: `已恢复「${world}」`, body: "原来的存档已移入回收站" } : { title: `已恢复「${world}」` },
+  viewBackupsAction: "查看备份",
+  openContainingAction: "打开所在文件夹",
   duplicate: (name: string) => ({ title: `${name} 已在下载队列里` }),
   /** 要装的 Mod 连同前置都已在实例里，不入队。 */
   alreadyInstalled: (name: string, instance: string) => ({ title: `${name} 已经装在「${instance}」里了` }),
@@ -612,6 +640,13 @@ export const TOAST_COPY = {
   /** 由启动拦截触发的登录或添加账户成功后，Toast 正文。 */
   continuingLaunch: (instance: string) => `正在启动「${instance}」`,
   viewCrashAction: "查看诊断",
+  /** 游戏退出后的自动备份有存档没备份成：正文是第一个失败存档的后端原文。 */
+  autoBackupFailed: (instance: string, message: string) => ({ title: `「${instance}」的自动备份没有完成`, body: message }),
+  /** 改名已完成，存档备份还留在旧名下。 */
+  backupsNotMoved: (name: string, path: string) => ({ title: `「${name}」的存档备份没能跟着改名`, body: `备份还在 ${path}` }),
+  backupDeleted: { title: "已删除一份备份", body: "已移入回收站" },
+  copyErrorAction: "复制错误原文",
+  openFolderAction: "打开文件夹",
 } as const;
 
 export function accountKindLabel(kind: AccountKind, authServer: string | null): string {
@@ -649,6 +684,10 @@ export const ACTION_ERROR = {
   rollback: "没能回滚",
   cancelTask: "没能取消任务",
   openFolder: "没能打开文件夹",
+  backupWorld: "没能开始备份存档",
+  restoreWorld: "没能开始恢复存档",
+  exportWorld: "没能开始导出存档",
+  deleteWorldBackup: "没能删除这份备份",
   installJava: "没能开始下载 Java",
   servers: "服务器列表没有保存",
   firstRun: "首次设置没有保存",
@@ -715,6 +754,12 @@ export const CONFIRM_COPY = {
       confirmLabel: "全部取消",
     };
   },
+  /** moment 为备份时刻「2026年10月31日 14:02」，标题限 20 字，所以时刻写在正文里。 */
+  restoreWorld: (world: string, moment: string) => ({
+    title: `恢复「${world}」的备份？`,
+    body: `存档会回到 ${moment} 备份时的样子，现在的存档会移入回收站，需要时可以从回收站找回。`,
+    confirmLabel: "恢复备份",
+  }),
   closeWithSession: `游戏会继续运行，但之后的日志和崩溃诊断不会被记录。`,
   closeWithTasks: (count: number) => `还有 ${count} 个下载没完成，关闭后会中断，下次打开可以重试。`,
   closeTitle: `关闭${APP_NAME}？`,
@@ -883,7 +928,11 @@ export const DELETE_INSTANCE_COPY = {
   worldsLead: "实例文件夹会移入回收站，其中的 ",
   worldsCount: (n: number) => `${n} 个存档`,
   worldsTail: (bytes: number) => `（共 ${formatBytes(bytes)}）也会一起删除：`,
-  backupHint: "想留着存档的话，先在概览里打开存档文件夹备份一份。",
+  /** 这个实例的存档还没有备份时的末句。 */
+  backupHint: "想留着存档的话，先在概览的存档菜单里选「备份存档」。",
+  /** 已有备份时的末句，分三段：前半句、备份目录（等宽、可选中）、后半句。 */
+  backupsKeptLead: (count: number) => `这些存档已有 ${count} 份备份，保留在 `,
+  backupsKeptTail: "，不会随实例删除。",
   noWorlds: "这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。",
   /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
   pendingTask: "正在进行的安装任务会先取消。",
