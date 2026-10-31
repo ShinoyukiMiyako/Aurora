@@ -3,9 +3,11 @@
 
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
+import type { Task, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
+import { isActiveTask } from "../../state/tasks";
 
 // ---------------------------------------------------------------- 上次崩溃
 
@@ -114,6 +116,71 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
   if (view === "broken") return "broken";
   if (view === "installing") return "installing";
   return null;
+}
+
+// ---------------------------------------------------------------- 新建与导入还没装好
+
+/** 新建实例与导入整合包：它们的任务挂在一个还没装好的实例名下。补全不在其中，补全的实例原本就装好过、内容都在。 */
+export const CREATE_COMMANDS: ReadonlySet<string> = new Set(["install_version", "install_modpack"]);
+
+/**
+ * 页面整份订阅时只取新建或导入任务的这几项。进度、速度每个任务约 100 ms 变一次，不在里面：
+ * 概览的安装横幅自己订阅进度，头图、标签条与标签内容不随它重渲染。
+ */
+export interface CreationRef {
+  id: string;
+  status: TaskStatus;
+  title: string;
+  modpack: boolean;
+  error: { code: string; message: string } | null;
+}
+
+/** 挂在这个实例名下的新建或导入任务：进行中的优先（重试还是同一个任务）；都已结束时取最近建的那个。 */
+export function creationRef(tasks: readonly Task[], instanceId: string): CreationRef | null {
+  let pick: Task | null = null;
+  for (const task of tasks) {
+    if (task.instanceId !== instanceId || !CREATE_COMMANDS.has(task.spec.command)) continue;
+    if (isActiveTask(task)) {
+      pick = task;
+      break;
+    }
+    if (pick === null || task.createdAt >= pick.createdAt) pick = task;
+  }
+  if (pick === null) return null;
+  return { id: pick.id, status: pick.status, title: pick.title, modpack: pick.spec.command === "install_modpack", error: pick.error };
+}
+
+export function creationRefEqual(a: CreationRef | null, b: CreationRef | null): boolean {
+  if (a === null || b === null) return a === b;
+  const sameError = a.error === null || b.error === null ? a.error === b.error : a.error.code === b.error.code && a.error.message === b.error.message;
+  return a.id === b.id && a.status === b.status && a.title === b.title && a.modpack === b.modpack && sameError;
+}
+
+/**
+ * 实例详情的标签此刻能不能画正常内容。
+ *
+ * - queued / running：新建或导入任务还在排队或在跑。占位项盘上没有目录；扫到了目录的，那也只是装了一半的现场。
+ * - landing：任务已经结束，结束后的那次重扫还没回来。扫到的是装好的实例、留着未完成标记的实例，还是什么都没有，扫完才知道。
+ * - failed：状态层在任务失败后仍留着占位项（盘上什么都没留下），给原因与重试。
+ * - none：实例装好了，或者是个扫得到的损坏实例（失败的新建会留下带未完成标记的目录，由损坏横幅给出原因与修复）。
+ */
+export type InstallStage =
+  | { kind: "none" }
+  | { kind: "queued" | "running"; title: string }
+  | { kind: "landing" }
+  | { kind: "failed"; taskId: string; modpack: boolean; error: { code: string; message: string } };
+
+export function installStage(inst: Pick<InstanceSummary, "id" | "placeholder" | "activity">, creation: CreationRef | null): InstallStage {
+  if (creation !== null && (creation.status === "queued" || creation.status === "running")) return { kind: creation.status, title: creation.title };
+  if (inst.placeholder) {
+    if (creation === null) throw new Error(`占位实例「${inst.id}」没有对应的新建或导入任务`);
+    if (creation.status !== "failed") return { kind: "landing" };
+    if (creation.error === null) throw new Error(`失败的任务 ${creation.id} 没有记下失败原因`);
+    return { kind: "failed", taskId: creation.id, modpack: creation.modpack, error: creation.error };
+  }
+  // 后端在新建、导入期间占着实例名，扫描结果里记着 installing；前端的任务却已经结束，说明这份扫描是任务结束前的
+  if (inst.activity === "installing") return { kind: "landing" };
+  return { kind: "none" };
 }
 
 // ---------------------------------------------------------------- 游玩

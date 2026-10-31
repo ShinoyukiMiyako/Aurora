@@ -9,6 +9,8 @@ import { LOGS_COPY } from "./copy";
 import {
   autoJavaPick,
   crashFixes,
+  creationRef,
+  creationRefEqual,
   deletableWorldCount,
   disabledFileName,
   effectiveJavaMajor,
@@ -17,6 +19,7 @@ import {
   filterMods,
   hasFlags,
   historyItems,
+  installStage,
   instanceFolderPath,
   instanceLocks,
   isCrashActive,
@@ -255,6 +258,88 @@ describe("概览横幅取最高严重度", () => {
     expect(overviewBanner("broken", false)).toBe("broken");
     expect(overviewBanner("installing", false)).toBe("installing");
     expect(overviewBanner("ready", false)).toBeNull();
+  });
+});
+
+describe("新建与导入还没装好", () => {
+  const T0 = 1_700_000_000_000;
+  const NAME = "周末生存";
+  const task = (id: string, command: string, status: Task["status"], over: Partial<Task> = {}): Task => ({
+    ...newTask({ id, kind: "game", title: `任务 ${id}`, detail: "", instanceId: NAME, spec: { command, args: {} } }, T0),
+    status,
+    ...over,
+  });
+  const failure = { code: "network_failed", message: "连接超时" };
+  const placeholder = { id: NAME, placeholder: true, activity: "installing" as const };
+  const scanned = (activity: "installing" | "repairing" | null) => ({ id: NAME, placeholder: false, activity });
+
+  it("只认挂在这个实例名下的新建与导入：补全、装 Mod 与别的实例的任务都不算", () => {
+    expect(creationRef([], NAME)).toBeNull();
+    const others = [
+      task("repair", "repair_instance", "running"),
+      task("mod", "install_mod", "running"),
+      task("other", "install_version", "running", { instanceId: "创造" }),
+      task("java", "install_java", "running", { instanceId: null }),
+    ];
+    expect(creationRef(others, NAME)).toBeNull();
+    expect(creationRef([...others, task("pack", "install_modpack", "queued")], NAME)).toEqual({ id: "pack", status: "queued", title: "任务 pack", modpack: true, error: null });
+  });
+
+  it("进行中的优先于更晚建的已结束任务；都结束时取最近建的，建的时刻相同取排在后面的", () => {
+    const failed = task("old", "install_version", "failed", { createdAt: T0 + 5, error: failure });
+    const running = task("now", "install_version", "running", { createdAt: T0 });
+    expect(creationRef([failed, running], NAME)?.id).toBe("now");
+    const done = task("done", "install_version", "done", { createdAt: T0 + 1 });
+    expect(creationRef([failed, done], NAME)?.id).toBe("old");
+    expect(creationRef([done, task("same", "install_version", "cancelled", { createdAt: T0 + 1 })], NAME)?.id).toBe("same");
+  });
+
+  it("页面订阅的那几项不变就算相等：进度、速度、字节数变了不让页面重渲染", () => {
+    const before = creationRef([task("t", "install_version", "running", { progress: 0, speedBps: 0 })], NAME);
+    const after = creationRef([task("t", "install_version", "running", { progress: 0.5, speedBps: 9_000_000, bytes: 4096 })], NAME);
+    expect(creationRefEqual(before, after)).toBe(true);
+    expect(creationRefEqual(before, creationRef([task("t", "install_version", "failed", { error: failure })], NAME))).toBe(false);
+    const failedA = creationRef([task("t", "install_version", "failed", { error: failure })], NAME);
+    const failedB = creationRef([task("t", "install_version", "failed", { error: { ...failure, message: "磁盘已满" } })], NAME);
+    expect(creationRefEqual(failedA, failedB)).toBe(false);
+    expect(creationRefEqual(null, null)).toBe(true);
+    expect(creationRefEqual(before, null)).toBe(false);
+  });
+
+  it("任务在排队或在跑：占位项与扫到了半成品目录的实例一样只给说明", () => {
+    const queued = creationRef([task("q", "install_version", "queued")], NAME);
+    const running = creationRef([task("r", "install_modpack", "running")], NAME);
+    expect(installStage(placeholder, queued)).toEqual({ kind: "queued", title: "任务 q" });
+    expect(installStage(placeholder, running)).toEqual({ kind: "running", title: "任务 r" });
+    expect(installStage(scanned("installing"), running)).toEqual({ kind: "running", title: "任务 r" });
+  });
+
+  it("占位项的任务结束、重扫还没回来：完成与取消都等扫描结果；失败给原因与要重试的任务", () => {
+    expect(installStage(placeholder, creationRef([task("t", "install_version", "done")], NAME))).toEqual({ kind: "landing" });
+    expect(installStage(placeholder, creationRef([task("t", "install_version", "cancelled")], NAME))).toEqual({ kind: "landing" });
+    expect(installStage(placeholder, creationRef([task("t", "install_modpack", "failed", { error: failure })], NAME))).toEqual({
+      kind: "failed",
+      taskId: "t",
+      modpack: true,
+      error: failure,
+    });
+  });
+
+  it("扫描里还记着后端在新建、导入，前端任务已经结束：这份扫描是旧的，等重扫", () => {
+    expect(installStage(scanned("installing"), creationRef([task("t", "install_version", "done")], NAME))).toEqual({ kind: "landing" });
+    expect(installStage(scanned("installing"), null)).toEqual({ kind: "landing" });
+  });
+
+  it("扫到的实例没有进行中的新建：装好的、失败留下的目录、正在补全的都画正常内容", () => {
+    const failed = creationRef([task("t", "install_version", "failed", { error: failure })], NAME);
+    expect(installStage(scanned(null), failed)).toEqual({ kind: "none" });
+    expect(installStage(scanned(null), null)).toEqual({ kind: "none" });
+    expect(installStage(scanned("repairing"), creationRef([task("t", "install_version", "done"), task("fix", "repair_instance", "running")], NAME))).toEqual({ kind: "none" });
+  });
+
+  it("占位项找不到它的任务、失败的任务没记原因：状态层的约定坏了，直接抛错", () => {
+    expect(() => installStage(placeholder, null)).toThrow("占位实例「周末生存」没有对应的新建或导入任务");
+    expect(() => installStage(placeholder, creationRef([task("t", "install_version", "failed")], NAME))).toThrow("失败的任务 t 没有记下失败原因");
   });
 });
 

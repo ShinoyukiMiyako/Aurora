@@ -1,6 +1,7 @@
 // 实例详情：头图 + 五个标签页（概览 / Mod / 设置 / 日志与历史 / 崩溃诊断）。
 // 同一实例换标签不重新挂载页面（页面按实例 id 挂载），标签内容跟着路由走；切标签用 replace，后退不逐格退标签。
 // 头图与标签条只用实例列表里的摘要先画出来，五个标签各自加载，任何一个都不等其他标签的数据。
+// 新建、导入还没装好时标签内容换成安装说明（见 InstallStage），装好、扫到实例后自动换回。
 
 import { useEffect, useId, useState } from "react";
 import { useNav, useShell } from "../../shell/shell";
@@ -17,9 +18,10 @@ import { launchView } from "../../launch/launchView";
 import { CrashTab } from "./CrashTab";
 import { PAGE_COPY } from "./copy";
 import { Hero } from "./Hero";
+import { InstallStageTab } from "./InstallStage";
 import styles from "./instance.module.css";
 import { LogsTab } from "./LogsTab";
-import { isCrashActive, pageViewEqual } from "./model";
+import { creationRef, creationRefEqual, installStage, isCrashActive, pageViewEqual } from "./model";
 import { ModsTab } from "./ModsTab";
 import { useInstanceOps } from "./ops";
 import { OverviewTab } from "./OverviewTab";
@@ -45,8 +47,10 @@ export default function InstancePage({ route }: PageProps<"instance">) {
   const view = useLauncherSelector((s) => launchView(s, getInstance(s, route.id)), pageViewEqual);
   const ops = useInstanceOps(inst);
   const [renaming, setRenaming] = useState(false);
-  // 新建或导入还没落盘的占位项没有实例目录，按需查询一律不发
-  const queryId = inst.placeholder ? null : inst.id;
+  const creation = useLauncherSelector((s) => creationRef(s.tasks, route.id), creationRefEqual);
+  const stage = installStage(inst, creation);
+  // 新建或导入还没装好：占位项盘上没有目录，扫到了的也只是装了一半的现场，按需查询一律不发
+  const queryId = stage.kind === "none" ? inst.id : null;
   const modded = inst.loader !== "vanilla";
   const crash = useLastCrash(queryId);
   const updates = useModUpdates(modded ? queryId : null);
@@ -97,11 +101,18 @@ export default function InstancePage({ route }: PageProps<"instance">) {
         <Tabs id={tabsId} value={route.tab} onChange={onTab} items={items} ariaLabel={PAGE_COPY.tabsLabel} />
       </div>
       <TabPanel tabsId={tabsId} value={route.tab} className={styles.panel}>
-        {route.tab === "overview" && <OverviewTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} updates={updates} onTab={onTab} />}
-        {route.tab === "mods" && <ModsTab inst={inst} queryId={queryId} ops={ops} updates={updates} />}
-        {route.tab === "settings" && <SettingsTab inst={inst} queryId={queryId} ops={ops} />}
-        {route.tab === "logs" && <LogsTab inst={inst} queryId={queryId} ops={ops} />}
-        {route.tab === "crash" && <CrashTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} onTab={onTab} />}
+        {/* 原版实例的 Mod 标签也换：装了一半的目录还没写版本 JSON，扫出来一律像原版，按加载器分流会把 Fabric 实例说成原版 */}
+        {stage.kind !== "none" ? (
+          <InstallStageTab tab={route.tab} instanceId={inst.id} stage={stage} />
+        ) : (
+          <>
+            {route.tab === "overview" && <OverviewTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} updates={updates} onTab={onTab} />}
+            {route.tab === "mods" && <ModsTab inst={inst} queryId={queryId} ops={ops} updates={updates} />}
+            {route.tab === "settings" && <SettingsTab inst={inst} queryId={queryId} ops={ops} />}
+            {route.tab === "logs" && <LogsTab inst={inst} queryId={queryId} ops={ops} />}
+            {route.tab === "crash" && <CrashTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} onTab={onTab} />}
+          </>
+        )}
       </TabPanel>
     </Page>
   );

@@ -3,20 +3,23 @@ import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
+import { IpcError } from "../../ipc/errors";
 import type { HistoryEvent } from "../../ipc/history";
-import type { InstanceContentDto, InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
+import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
-import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { CORE_EVENT } from "../../ipc/tasks";
-import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
+import { InstallStageTab } from "./InstallStage";
+import { creationRef, creationRefEqual, installStage } from "./model";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -480,15 +483,210 @@ describe("实例详情：新建还没落盘的实例", () => {
     expect(callsOf(ipc, "open_folder")).toEqual([]);
     expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
   });
+});
 
-  it("设置页实例管理里的「打开」带原因禁用，点了不发命令", async () => {
-    await openPlaceholder("settings");
-    const openButton = button("打开");
-    expect(openButton.getAttribute("aria-disabled")).toBe("true");
-    expect(await reasonOf(openButton)).toContain(pending);
-    click(openButton);
+describe("实例详情：新建与导入还没装好", () => {
+  const NAME = "周末生存";
+  const TITLE = "安装 1.21.1 + Fabric 0.16.10";
+  const AVAILABLE_LATER = "安装完成后可用";
+  const RUNNING = `正在${TITLE}，进度可以在下载任务里查看。`;
+  const SLOW = "比平时慢一些，仍在加载…";
+  const TABS: readonly InstanceTab[] = ["overview", "mods", "settings", "logs", "crash"];
+  /** 页面按需发的查询：盘上没有装好的实例目录时一条都不该发。 */
+  const QUERIES = new Set(["list_mods", "check_updates", "list_instance_content", "get_instance_settings", "memory_advice", "last_launch_log", "list_history", "rollback_checks", "last_crash"]);
+  const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
+  const queriesFor = (id: string) => ipc.calls.filter((c) => QUERIES.has(c.cmd) && Object.values(c.args).includes(id)).map((c) => c.cmd);
+  const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2 });
+  const fabric: InstanceDto["loaders"] = [{ kind: "fabric", version: "0.16.10" }];
+  /** 后端建好了目录、还在往里装：之后任何一次重扫都会扫到这样一份（占着实例名，未完成标记还在进行中）。 */
+  const halfInstalled = (): InstanceDto =>
+    instanceDto(NAME, {
+      status: "broken",
+      mc_version: null,
+      java_major: null,
+      mod_count: null,
+      world_count: null,
+      activity: "installing",
+      incomplete: { kind: "install", outcome: "pending", started_at: NOW, spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" }, error: null },
+    });
+  let install: Deferred<InstallResultDto>;
+
+  beforeEach(() => {
+    install = deferred<InstallResultDto>();
+    ipc.overrides.set("install_version", () => install.promise);
+    ipc.overrides.set("list_mods", (args) => (args.versionId === NAME ? [] : mods));
+  });
+
+  async function create(name: string, loader: "fabric" | "vanilla" = "fabric") {
+    await act(async () => {
+      await launcher.actions.createInstance({ name, mcVersion: "1.21.1", loader, loaderVersion: loader === "fabric" ? "0.16.10" : null, cover: "cherry_planks" });
+      await settle();
+    });
+  }
+
+  async function openCreating(tab: InstanceTab, loader: "fabric" | "vanilla" = "fabric") {
+    await open("overview");
+    await create(NAME, loader);
+    act(() => nav.go({ page: "instance", id: NAME, tab }));
     await flush();
-    expect(callsOf(ipc, "open_folder")).toEqual([]);
+  }
+
+  /** 安装到一半有一次无关的重扫（例如别的实例的任务结束）：扫到了半成品目录，实例不再是占位项。 */
+  async function rescanMidInstall() {
+    instances = [...instances, halfInstalled()];
+    await act(async () => {
+      await launcher.actions.reload("instances");
+      await settle(20);
+    });
+    const inst = launcher.state.instances.find((i) => i.id === NAME);
+    if (inst === undefined || inst.placeholder) throw new Error("重扫后应扫到半成品目录");
+  }
+
+  it.each(TABS)("%s 标签：占位期间过了 10 秒也不出骨架与慢提示，写明在装什么、进度去哪看，不发按需查询", async (tab) => {
+    await openCreating(tab);
+    expect(launcher.state.instances.find((i) => i.id === NAME)?.placeholder).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(11_000);
+    });
+    expect(skeletons()).toBe(0);
+    expect(text()).not.toContain(SLOW);
+    expect(text()).toContain(AVAILABLE_LATER);
+    if (tab === "overview") {
+      // 横幅写任务标题与进度，下面只说装好后有什么，不再重复一遍在装什么
+      expect(byRole("progressbar", TITLE).getAttribute("aria-valuenow")).toBe("0");
+      expect(text()).toContain("装好后这里会显示存档、Mod 与实例信息。");
+      expect(text()).not.toContain(RUNNING);
+    } else {
+      expect(text()).toContain(RUNNING);
+    }
+    expect(queriesFor(NAME)).toEqual([]);
+  });
+
+  it("「查看下载任务」去下载任务页", async () => {
+    await openCreating("settings");
+    click(button("查看下载任务"));
+    await flush();
+    expect(nav.route).toEqual({ page: "tasks" });
+  });
+
+  it("概览的安装进度跟着下载事件走：百分比、速度与总量", async () => {
+    await openCreating("overview");
+    const task = launcher.state.tasks.find((t) => t.instanceId === NAME);
+    if (task === undefined || task.status !== "running") throw new Error("新建任务应在进行中");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 20, bytes: 20_480, total_bytes: 40_960, speed: 1_048_576 }));
+    await flush();
+    expect(byRole("progressbar", TITLE).getAttribute("aria-valuenow")).toBe("50");
+    expect(text()).toContain("50% · 1.0 MB/s · 共 40.0 KB");
+  });
+
+  it("排在前面的任务占满了通道：写排队中，不说正在安装", async () => {
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await open("overview");
+    for (const name of ["甲", "乙", "丙"]) await create(name);
+    await create(NAME);
+    expect(launcher.state.tasks.find((t) => t.instanceId === NAME)?.status).toBe("queued");
+    act(() => nav.go({ page: "instance", id: NAME, tab: "logs" }));
+    await flush();
+    expect(text()).toContain("安装任务排队中，等前面的任务完成后自动开始，进度可以在下载任务里查看。");
+    expect(text()).not.toContain(RUNNING);
+  });
+
+  it("原版实例的 Mod 标签同样给安装说明：装了一半的目录扫出来都像原版，不按加载器提前下结论", async () => {
+    await openCreating("mods", "vanilla");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(11_000);
+    });
+    expect(text()).toContain(AVAILABLE_LATER);
+    expect(text()).toContain("正在安装 1.21.1，进度可以在下载任务里查看。");
+    expect(text()).not.toContain("原版实例不加载 Mod");
+    expect(skeletons()).toBe(0);
+  });
+
+  it("装到一半重扫扫到了半成品目录：仍是安装中的说明，不对半成品发查询；装好、重扫后留在实例页并换成正常内容", async () => {
+    await openCreating("mods");
+    await rescanMidInstall();
+    expect(text()).toContain(RUNNING);
+    expect(queriesFor(NAME)).toEqual([]);
+
+    instances = instances.map((i) => (i.id === NAME ? instanceDto(NAME, { loaders: fabric }) : i));
+    await act(async () => {
+      install.resolve(installResult());
+      await settle(20);
+    });
+    expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "mods" });
+    expect(text()).not.toContain(AVAILABLE_LATER);
+    expect(text()).toContain("还没有安装 Mod");
+    expect(queriesFor(NAME)).toContain("list_mods");
+    expect(skeletons()).toBe(0);
+  });
+
+  it("装到一半重扫扫到了半成品目录、之后安装失败：换成失败原因与「修复实例」，修复照当初的内容重装；头图菜单可以删除", async () => {
+    await openCreating("overview");
+    await rescanMidInstall();
+    expect(text()).toContain(AVAILABLE_LATER);
+
+    instances = instances.map((i) =>
+      i.id === NAME
+        ? instanceDto(NAME, {
+            status: "broken",
+            mc_version: null,
+            java_major: null,
+            incomplete: { kind: "install", outcome: "failed", started_at: NOW, spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" }, error: { code: "network_failed", message: "连接超时" } },
+          })
+        : i,
+    );
+    await act(async () => {
+      install.reject(new IpcError("network_failed", "连接超时"));
+      await settle(20);
+    });
+    expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "overview" });
+    expect(text()).not.toContain(AVAILABLE_LATER);
+    expect(text()).toContain("实例文件不完整，暂时无法启动");
+    expect(text()).toContain("安装没有完成：连接超时");
+
+    click(button("更多操作"));
+    const remove = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "删除实例");
+    if (remove === undefined) throw new Error("头图菜单里没有「删除实例」");
+    expect(remove.getAttribute("aria-disabled")).not.toBe("true");
+    keydown(document.activeElement === null ? document.body : document.activeElement, "Escape");
+
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    click(button("修复实例"));
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual([NAME]);
+  });
+
+  it("状态层在任务失败后留着占位项时：说明没装完与原因，「重试」把同一个任务重新排进队列", async () => {
+    let attempts = 0;
+    ipc.overrides.set("install_version", () => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new IpcError("network_failed", "连接超时")) : new Promise(() => undefined);
+    });
+    // 页面拿到的就是这样一份：占位项加上这个名字下的新建任务
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="crash" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await create(NAME);
+    expect(launcher.state.tasks.find((t) => t.instanceId === NAME)?.status).toBe("failed");
+    expect(text()).toContain("安装没有完成");
+    expect(text()).toContain("网络连接失败。可以重试，或到下载任务里查看。");
+
+    click(button("重试"));
+    await flush();
+    expect(attempts).toBe(2);
+    expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
+    expect(text()).toContain(RUNNING);
+    expect(text()).not.toContain("安装没有完成");
   });
 });
 

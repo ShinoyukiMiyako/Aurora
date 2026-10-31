@@ -161,7 +161,7 @@ function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: 
   );
 }
 
-function InstallingBanner({ instanceId }: { instanceId: string }) {
+export function InstallingBanner({ instanceId }: { instanceId: string }) {
   const { go } = useNav();
   // 进度每个任务约 100 ms 一次：横幅自己订阅本实例的任务，页面拿到的启动视图里的任务进度可能是旧的
   const task = useLauncherSelector((s) => instanceTask(s, instanceId));
