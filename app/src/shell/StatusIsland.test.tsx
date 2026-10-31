@@ -12,7 +12,7 @@ import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, set
 import { ISLAND_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
-import { downloadStageNote, islandSecond, islandTone, stageState, StatusIsland } from "./StatusIsland";
+import { downloadStageNote, islandSecond, islandTone, stageNote, stageState, StatusIsland } from "./StatusIsland";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -79,6 +79,14 @@ describe("阶段清单", () => {
   it("越过下载阶段且没有下载记录：写「无需下载」；还没到下载阶段不写", () => {
     expect(downloadStageNote(session({ stageIndex: 5, download: null }))).toBe(SESSION_COPY.noDownload);
     expect(downloadStageNote(session({ stageIndex: 1, download: null }))).toBeNull();
+  });
+
+  it("有启动器提醒的阶段写「N 条提醒」，没有的不写；下载阶段先写下载进度", () => {
+    const warned = session({ stageIndex: 5, download: null, stageWarnings: [0, 2, 0, 1, 0, 0, 0, 0] });
+    expect([0, 1, 2, 3, 4].map((i) => stageNote(warned, i))).toEqual([null, "2 条提醒", null, SESSION_COPY.noDownload, null]);
+    const quiet = session({ stageIndex: 4, download: { done: 3, total: 3, bytes: 0, totalBytes: null, speedBps: 0 }, stageWarnings: [0, 0, 0, 4, 0, 0, 0, 0] });
+    expect(stageNote(quiet, 3)).toBe("4 条提醒");
+    expect(() => stageNote(session({ stageWarnings: [] }), 1)).toThrow("没有提醒计数");
   });
 });
 

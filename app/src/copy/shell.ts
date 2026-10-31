@@ -27,6 +27,8 @@ export const ISLAND_COPY = {
   stagesLabel: "启动阶段",
   logLabel: "最新日志",
   fullLog: "完整日志",
+  /** 阶段清单一行的右侧：这一阶段启动器写了几条提醒（不中断启动，也不弹通知）。 */
+  stageWarnings: (count: number) => `${count} 条提醒`,
   /** compact 档第二段的短格式。 */
   shortCancelled: "已取消",
   shortEnded: "已结束",

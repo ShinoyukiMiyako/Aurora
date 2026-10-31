@@ -229,12 +229,26 @@ export function downloadStageNote(session: SessionState): string | null {
   return null;
 }
 
+/**
+ * 阶段清单一行的右侧：下载阶段写进度或「无需下载」；其余情况下这一阶段有启动器提醒（例如准备阶段检查项给出的警告）
+ * 时写「N 条提醒」。提醒只记在日志里、不弹通知，这里是它在界面上唯一的痕迹。
+ */
+export function stageNote(session: SessionState, index: number): string | null {
+  if (index === DOWNLOAD_STAGE) {
+    const note = downloadStageNote(session);
+    if (note !== null) return note;
+  }
+  const warned = session.stageWarnings[index];
+  if (warned === undefined) throw new Error(`启动阶段 ${index} 没有提醒计数`);
+  return warned > 0 ? ISLAND_COPY.stageWarnings(warned) : null;
+}
+
 function StageList({ session }: { session: SessionState }) {
-  const note = downloadStageNote(session);
   return (
     <ol className={styles.stages} aria-label={ISLAND_COPY.stagesLabel}>
       {LOADING_STAGES.map((label, i) => {
         const st = stageState(session.stageIndex, i);
+        const note = stageNote(session, i);
         return (
           <li key={label} className={styles.stage} data-state={st}>
             <span className={styles.stageDot} aria-hidden="true">
@@ -245,7 +259,7 @@ function StageList({ session }: { session: SessionState }) {
               )}
             </span>
             <span className={styles.stageLabel}>{label}</span>
-            {i === DOWNLOAD_STAGE && note !== null && <span className={styles.stageNote}>{note}</span>}
+            {note !== null && <span className={styles.stageNote}>{note}</span>}
           </li>
         );
       })}
