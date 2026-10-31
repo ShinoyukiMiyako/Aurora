@@ -15,6 +15,7 @@ import {
   planInstall,
   removeMod,
   setModEnabled,
+  starterMods,
   updateMod,
 } from "./mods";
 import { CORE_EVENT, cancelTask } from "./tasks";
@@ -339,5 +340,63 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
     const same = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "gvQqBUqZ", "lith-060");
     expect(same.items[0].already_satisfied).toBe(true);
     expect(await failure(planInstall(MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "nope"))).toMatchObject({ code: "mod_version_not_found" });
+  });
+});
+
+describe("开局 Mod", () => {
+  const ids = (list: { project_id: string }[]) => list.map((m) => m.project_id);
+
+  it("1.21.1 Fabric：开局表五项全可装，按表的顺序、API 在前，每项挑出与实例完全匹配的版本", async () => {
+    const result = await starterMods("fabric", "1.21.1");
+    expect(result.loader).toBe("fabric");
+    expect(result.mc_version).toBe("1.21.1");
+    expect(result.available.map((m) => [m.group, m.project_id, m.name, m.version.version_id])).toEqual([
+      ["api", "P7dR8mSH", "Fabric API", "fapi-0115"],
+      ["performance", "AANobbMI", "Sodium", "sodium-121"],
+      ["performance", "gvQqBUqZ", "Lithium", "lith-0143"],
+      ["performance", "uXXizFIs", "FerriteCore", "fc-702-fabric"],
+      ["performance", "nmDcB62a", "ModernFix", "mfix-5194-fabric"],
+    ]);
+    expect(result.missing).toEqual([]);
+  });
+
+  it("1.21.1 Quilt：只认标了 quilt 的版本，只有 Lithium 可装，其余按表的顺序进缺项", async () => {
+    const result = await starterMods("quilt", "1.21.1");
+    expect(ids(result.available)).toEqual(["gvQqBUqZ"]);
+    expect(result.missing.map((m) => [m.group, m.project_id, m.name, m.reason])).toEqual([
+      ["api", "qvIfYCYJ", "QFAPI", "no_version"],
+      ["performance", "AANobbMI", "Sodium", "no_version"],
+      ["performance", "uXXizFIs", "FerriteCore", "no_version"],
+    ]);
+  });
+
+  it("NeoForge 四项都有 neoforge 版本；Forge 的两项 1.21.1 都缺；只有测试通道的版本也照样挑出", async () => {
+    const neo = await starterMods("neoforge", "1.21.1");
+    expect(neo.available.map((m) => m.version.version_id)).toEqual(["sodium-121", "lith-0143", "fc-702-neoforge", "mfix-5194-neoforge"]);
+    expect(neo.available.every((m) => m.group === "performance")).toBe(true);
+
+    const forge = await starterMods("forge", "1.21.1");
+    expect(forge.available).toEqual([]);
+    expect(forge.missing.map((m) => [m.project_id, m.reason])).toEqual([
+      ["uXXizFIs", "no_version"],
+      ["nmDcB62a", "no_version"],
+    ]);
+    expect(ids((await starterMods("forge", "1.20.1")).available)).toEqual(["uXXizFIs", "nmDcB62a"]);
+
+    // QFAPI 在 1.21 上只发了内测版：没有更好的通道时取它，不当成缺项
+    const qfapi = (await starterMods("quilt", "1.21")).available.find((m) => m.project_id === "qvIfYCYJ");
+    expect(qfapi?.version).toMatchObject({ version_id: "qsl-1100", release_channel: "alpha" });
+  });
+
+  it("游戏版本去掉首尾空白后再查；LiteLoader、未知加载器与空版本号的 invalid_argument 带上契约里的 detail", async () => {
+    expect((await starterMods("fabric", " 1.21.1 ")).mc_version).toBe("1.21.1");
+    const lite = await failure(starterMods("liteloader" as never, "1.21.1"));
+    expect([lite.code, lite.detail]).toEqual(["invalid_argument", { field: "loader", reason: "unsupported" }]);
+    const unknown = await failure(starterMods("rift" as never, "1.21.1"));
+    expect([unknown.code, unknown.detail]).toEqual(["invalid_argument", { field: "loader", reason: "unknown" }]);
+    for (const blank of ["", "   "]) {
+      const empty = await failure(starterMods("fabric", blank));
+      expect([empty.code, empty.detail]).toEqual(["invalid_argument", { field: "mc_version", reason: "empty" }]);
+    }
   });
 });

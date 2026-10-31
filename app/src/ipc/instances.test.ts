@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError, isCancelled } from "./errors";
 import {
   checkInstanceName,
+  clearTemplate,
   deleteInstance,
   getInstanceSettings,
   getSidebarPins,
@@ -16,8 +17,11 @@ import {
   renameInstance,
   repairInstance,
   requiredJava,
+  saveInstanceAsTemplate,
   setInstanceSettings,
   setSidebarPins,
+  TEMPLATE_FILES,
+  templateInfo,
   versionRequirements,
   type InstanceSettingsDto,
 } from "./instances";
@@ -121,7 +125,7 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
     await listInstanceContent("a");
     await getSidebarPins();
     await setSidebarPins(["a"]);
-    await installVersion("t1", "1.21.1", "fabric", "0.16.10", "周末生存");
+    await installVersion("t1", "1.21.1", "fabric", "0.16.10", "周末生存", true);
     await repairInstance("t2", "a");
     await previewInstanceDeletion("a");
     await deleteInstance("a");
@@ -132,6 +136,9 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
     await versionRequirements("1.21.1");
     await openFolder("world", "a", "New World");
     await openFolder("game_dir", null);
+    await templateInfo();
+    await saveInstanceAsTemplate("a");
+    await clearTemplate();
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["list_instances", undefined],
       ["get_instance_settings", { id: "a" }],
@@ -139,7 +146,7 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
       ["list_instance_content", { id: "a" }],
       ["get_sidebar_pins", undefined],
       ["set_sidebar_pins", { pins: ["a"] }],
-      ["install_version", { taskId: "t1", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存" }],
+      ["install_version", { taskId: "t1", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存", useTemplate: true }],
       ["repair_instance", { taskId: "t2", id: "a" }],
       ["preview_instance_deletion", { id: "a" }],
       ["delete_instance", { id: "a" }],
@@ -150,6 +157,9 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
       ["version_requirements", { mcVersion: "1.21.1" }],
       ["open_folder", { target: "world", id: "a", world: "New World" }],
       ["open_folder", { target: "game_dir", id: null, world: null }],
+      ["template_info", undefined],
+      ["save_instance_as_template", { id: "a" }],
+      ["clear_template", undefined],
     ]);
   });
 });
@@ -280,6 +290,7 @@ describe("mock：新建与补全", () => {
       libraries: 40,
       assets: 0,
       natives: 0,
+      template: null,
     });
     const after = (await listInstances()).find((i) => i.id === "周末生存");
     expect(after).toMatchObject({ status: "ready", activity: null, incomplete: null, mc_version: "1.21.1", java_major: 21 });
@@ -425,5 +436,72 @@ describe("mock：实例设置", () => {
     }
     expect(await getInstanceSettings("1.21.1")).toEqual(next);
     expect((await rejection(setInstanceSettings("ghost", next))).code).toBe("version_not_installed");
+  });
+});
+
+describe("mock：新实例的默认设置", () => {
+  /** 装完一个实例并拿到结果；假时钟推进到安装结束。 */
+  async function install(name: string, mcVersion: string, loader: "fabric" | null, useTemplate: boolean | undefined) {
+    vi.useFakeTimers();
+    const done = installVersion(`t-${name}`, mcVersion, loader, null, name, useTemplate);
+    await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+    return done;
+  }
+
+  it("种子里没有默认设置；没进过游戏的实例保存时报 template_source_empty，detail 带实例 id 与白名单，模板不变", async () => {
+    expect(await templateInfo()).toEqual({ present: false, files: [], source_instance: null, saved_at: null, enabled: true });
+    const error = await rejection(saveInstanceAsTemplate("樱花生存"));
+    expect(error.code).toBe("template_source_empty");
+    expect(detail(error)).toEqual({ id: "樱花生存", files: ["options.txt", "servers.dat", "optionsof.txt", "optionsshaders.txt"] });
+    expect(TEMPLATE_FILES).toEqual(detail(error).files);
+    expect(error.message).toContain("进一次游戏后再保存");
+    expect((await templateInfo()).present).toBe(false);
+    expect((await rejection(saveInstanceAsTemplate("ghost"))).code).toBe("version_not_installed");
+  });
+
+  it("玩过的实例存为默认设置：记下来源与时刻；清除后回到没有", async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000 });
+    const saved = await saveInstanceAsTemplate("1.21");
+    expect(saved).toEqual({
+      present: true,
+      files: [
+        { name: "options.txt", size: 2048 },
+        { name: "servers.dat", size: 512 },
+      ],
+      source_instance: "1.21",
+      saved_at: 1_790_000_000_000,
+      enabled: true,
+    });
+    expect(await templateInfo()).toEqual(saved);
+    expect(await clearTemplate()).toEqual({ present: false, files: [], source_instance: null, saved_at: null, enabled: true });
+    expect((await templateInfo()).present).toBe(false);
+  });
+
+  it("新建时沿用：隔离的 Fabric 实例补上模板里的文件；原版正式版不隔离、跳过；没请求为 null；模板为空时跳过", async () => {
+    await saveInstanceAsTemplate("1.21");
+    expect((await install("模组生存", "1.21.1", "fabric", true)).template).toEqual({ status: "applied", copied: ["options.txt", "servers.dat"], kept: [] });
+    expect((await install("原版生存", "1.21.1", null, true)).template).toEqual({ status: "skipped", reason: "shared_working_dir" });
+    expect((await install("不沿用", "1.21.1", "fabric", false)).template).toBeNull();
+    expect((await install("旧任务", "1.21.1", "fabric", undefined)).template).toBeNull();
+    await clearTemplate();
+    expect((await install("没有模板", "1.21.1", "fabric", true)).template).toEqual({ status: "skipped", reason: "empty" });
+  });
+
+  it("useTemplate 只收布尔：别的类型在登记任务之前就以 invalid_argument 拒绝", async () => {
+    const error = await rejection(installVersion("t-bad", "1.21.1", null, null, "坏参数", "yes" as never));
+    expect(error.code).toBe("invalid_argument");
+    expect(detail(error).field).toBe("useTemplate");
+    expect((await listInstances()).some((i) => i.id === "坏参数")).toBe(false);
+  });
+
+  it("保存要占住实例：安装进行中报 instance_busy，游戏运行这类 modifying 兼容的活动不挡", async () => {
+    vi.useFakeTimers();
+    const pending = installVersion("t-busy", "1.21.1", "fabric", null, "装着呢");
+    await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+    const busy = await rejection(saveInstanceAsTemplate("装着呢"));
+    expect(busy.code).toBe("instance_busy");
+    expect(detail(busy)).toMatchObject({ id: "装着呢", activity: "installing" });
+    await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+    await pending;
   });
 });
