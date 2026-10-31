@@ -13,7 +13,10 @@ use aurora_launch::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::crashdiag::{CrashReport, read_tail_for_diagnosis, save_crash_report};
+use crate::crashdiag::{
+    CrashReport, CrashSource, ScanInput, find_crash_files, read_head_for_diagnosis,
+    read_tail_for_diagnosis, save_crash_report,
+};
 use crate::error::{CoreError, Result};
 use crate::launch::LaunchWarning;
 
@@ -165,12 +168,36 @@ impl GameRun {
                     .map(|(index, line)| (line.as_str(), index as u64 + 1))
                     .collect(),
             };
-            let mut crash = CrashReport::from_lines(&numbered);
+            // 游戏自己写下的崩溃报告与 JVM 错误日志：找不到是常态，读不了的跳过那一份并如实上报。
+            let mut extra: Vec<(CrashSource, String, String)> = Vec::new();
+            match find_crash_files(&info.working_dir, info.pid, info.clock.started_at()).await {
+                Ok(files) => {
+                    for (source, path) in [
+                        (CrashSource::CrashReport, files.crash_report),
+                        (CrashSource::HsErr, files.hs_err),
+                    ] {
+                        let Some(path) = path else { continue };
+                        match read_head_for_diagnosis(&path).await {
+                            Ok(text) => extra.push((source, path.display().to_string(), text)),
+                            Err(err) => problems.push(err),
+                        }
+                    }
+                }
+                Err(err) => problems.push(err),
+            }
+            let mut inputs = vec![ScanInput {
+                source: CrashSource::SessionLog,
+                path: log_path.as_ref().map(|path| path.display().to_string()),
+                lines: numbered,
+            }];
+            inputs.extend(extra.iter().map(|(source, path, text)| {
+                ScanInput::numbered(*source, Some(path.clone()), text)
+            }));
+            let mut crash = CrashReport::from_sources(&inputs, report.code);
             if let Err(err) = crash.join_suspects(&info.working_dir).await {
                 problems.push(err);
             }
             crash.at = Some(exited_at);
-            crash.exit_code = report.code;
             crash.session_started_at = log_path.as_ref().map(|_| info.clock.started_at());
             crash.java = Some(info.java.clone());
             crash.max_memory_mb = Some(info.max_memory_mb);
@@ -494,5 +521,96 @@ mod tests {
         let finished = started.run.finish().await.unwrap();
         assert_eq!(finished.exit.exit_code, Some(0));
         assert_eq!(finished.problems.len(), 1);
+    }
+
+    /// 落盘的崩溃报告本体（JSON）。
+    fn saved_crash(version_dir: &Path) -> serde_json::Value {
+        let bytes = std::fs::read(
+            version_dir
+                .join(aurora_instance::AURORA_META_DIR)
+                .join(crate::crashdiag::CRASH_REPORT_FILE),
+        )
+        .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["report"].clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn access_violation_without_log_clues_falls_back_to_a_native_crash() {
+        let started = start("cmd", &["/C", "exit -1073741819"]).await;
+        let finished = started.run.finish().await.unwrap();
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        assert_eq!(finished.exit.exit_code, Some(-1_073_741_819));
+        let report = saved_crash(&started.version_dir);
+        let clues = report["diagnoses"].as_array().unwrap();
+        assert_eq!(clues.len(), 1, "{clues:?}");
+        assert_eq!(clues[0]["category"], "native_crash");
+        assert_eq!(clues[0]["source"], "exit_code");
+        assert_eq!(clues[0]["detail"], "0xC0000005");
+        assert_eq!(clues[0]["line"], 0);
+        assert_eq!(clues[0]["matched"], "");
+        // 说明按退出码现算，不存；会话日志一项读报告时现找，也不存。
+        assert_eq!(report["exit_code_note"], serde_json::Value::Null);
+        assert_eq!(report["scanned_files"], serde_json::json!([]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crash_report_written_during_the_session_is_scanned() {
+        let started = start("cmd", &["/C", "exit 1"]).await;
+        let reports = started.root.join("crash-reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        let path = reports.join("crash-2026-10-31_12.00.00-client.txt");
+        std::fs::write(
+            &path,
+            "---- Minecraft Crash Report ----\nDescription: Unexpected error\n\njava.lang.OutOfMemoryError: Java heap space\n",
+        )
+        .unwrap();
+        let finished = started.run.finish().await.unwrap();
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        let report = saved_crash(&started.version_dir);
+        let clues = report["diagnoses"].as_array().unwrap();
+        assert_eq!(clues.len(), 1, "{clues:?}");
+        assert_eq!(clues[0]["category"], "out_of_memory");
+        assert_eq!(clues[0]["source"], "crash_report");
+        assert_eq!(clues[0]["line"], 4);
+        assert_eq!(
+            report["scanned_files"],
+            serde_json::json!([{ "kind": "crash_report", "path": path.display().to_string() }])
+        );
+        assert_eq!(report["exit_code"], 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_crash_files_become_problems_and_the_report_is_still_saved() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // crash-reports 是个文件而不是目录：列目录失败。
+        let started = start("cmd", &["/C", "exit 3"]).await;
+        std::fs::write(started.root.join("crash-reports"), b"not a dir").unwrap();
+        let finished = started.run.finish().await.unwrap();
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        assert!(crash_saved(&started.version_dir));
+
+        // hs_err 被别的进程独占打开：找得到、读不了，那一份跳过。
+        let started = start("cmd", &["/C", "exit 3"]).await;
+        let pid = started.run.pid().expect("进程已经起来");
+        let hs_err = started.root.join(format!("hs_err_pid{pid}.log"));
+        std::fs::write(&hs_err, "# C  [ig9icd64.dll+0x57a41c]\n").unwrap();
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&hs_err)
+            .unwrap();
+        let finished = started.run.finish().await.unwrap();
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        assert!(crash_saved(&started.version_dir));
+        let report = saved_crash(&started.version_dir);
+        assert_eq!(report["scanned_files"], serde_json::json!([]));
+        assert!(
+            report["diagnoses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|clue| clue["category"] != "intel_graphics_driver")
+        );
     }
 }
