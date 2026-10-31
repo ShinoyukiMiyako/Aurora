@@ -2,8 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
 import type { InstallPlan, ModVersionInfo, UpdateCandidate } from "../ipc/mods";
+import { CORE_EVENT } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, deferred, resetRecorder, settle, startedStore } from "../test/launcher";
+import { bootOverrides, callsOf, deferred, emit, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { resources } from "./resource";
 import type { LauncherStore } from "./store";
 
@@ -377,5 +378,108 @@ describe("组合任务的取消", () => {
     await settle();
     expect(callsOf(ipc, "install_mod")).toHaveLength(1);
     expect(callsOf(ipc, "delete_instance")).toEqual([{ id: "生存" }]);
+  });
+});
+
+describe("组合任务的进度按整体累计", () => {
+  /** 每次调用挂起，等测试逐个放行。 */
+  function pendingCalls(cmd: string): Deferred<unknown>[] {
+    const calls: Deferred<unknown>[] = [];
+    ipc.overrides.set(cmd, () => {
+      const d = deferred<unknown>();
+      calls.push(d);
+      return d.promise;
+    });
+    return calls;
+  }
+
+  it("全部更新：按各项声明大小折成整体，换项不归零，总量不变；上一项晚到的进度不算进下一项", async () => {
+    const sized = (projectId: string, current: string, latest: string, size: number): UpdateCandidate => ({
+      ...candidate(projectId, current, latest),
+      latest: version(projectId, latest, { file_size: size }),
+    });
+    ipc.overrides.set("check_updates", () => [sized("sodium", "s1", "s2", 100), sized("lithium", "l1", "l2", 300), sized("iris", "i1", "i2", 600)]);
+    const calls = pendingCalls("update_mod");
+    await store.actions.updateAllMods("生存");
+    await settle();
+    const [{ id }] = store.getState().tasks;
+    const seen: [number, number, number | null][] = [];
+    const snap = () => {
+      const t = store.getState().tasks[0];
+      seen.push([t.progress, t.bytes, t.totalBytes]);
+    };
+    const progress = (bytes: number, total: number) => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 1, finished: bytes === total ? 1 : 0, bytes, total_bytes: total, speed: 4096 });
+      snap();
+    };
+    const finish = async (i: number) => {
+      calls[i].resolve({ file_name: `${i}.jar`, path: "", platform: "modrinth" });
+      await settle();
+      snap();
+    };
+
+    snap();
+    progress(0, 100);
+    progress(50, 100);
+    progress(100, 100);
+    await finish(0);
+    progress(100, 100);
+    progress(150, 300);
+    progress(300, 300);
+    await finish(1);
+    progress(300, 600);
+    await finish(2);
+
+    expect(seen).toEqual([
+      [0, 0, 1000],
+      [0, 0, 1000],
+      [0.05, 50, 1000],
+      [0.1, 100, 1000],
+      [0.1, 100, 1000],
+      [0.1, 100, 1000],
+      [0.25, 250, 1000],
+      [0.4, 400, 1000],
+      [0.4, 400, 1000],
+      [0.7, 700, 1000],
+      [1, 1000, 1000],
+    ]);
+    expect(store.getState().tasks[0].status).toBe("done");
+  });
+
+  it("装 Mod 时有一项不知道大小：按项数折，进度单调不减", async () => {
+    const unsized = plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }, { projectId: "lithium", versionId: "l1" });
+    unsized.items[1] = { ...unsized.items[1], version: { ...unsized.items[1].version, file_size: null } };
+    ipc.overrides.set("plan_install", () => unsized);
+    const calls = pendingCalls("install_mod");
+    await store.actions.installResource({
+      resourceType: "mod",
+      platform: "modrinth",
+      projectId: "sodium",
+      name: "Sodium",
+      targets: [{ instanceId: "生存", fileVersionId: "v2", world: null }],
+    });
+    await settle();
+    const [{ id }] = store.getState().tasks;
+    const seen: number[] = [];
+    const progress = (bytes: number, total: number) => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, total: 1, finished: 0, bytes, total_bytes: total, speed: 1 });
+      seen.push(store.getState().tasks[0].progress);
+    };
+    progress(512, 1024);
+    calls[0].resolve(null);
+    await settle();
+    seen.push(store.getState().tasks[0].progress);
+    progress(0, 4096);
+    progress(4096, 4096);
+    calls[1].resolve(null);
+    await settle();
+    progress(1024, 1024);
+    calls[2].resolve(null);
+    await settle();
+
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", totalBytes: null });
+    const expected = [1 / 6, 1 / 3, 1 / 3, 2 / 3, 1];
+    expect(seen).toHaveLength(expected.length);
+    seen.forEach((value, i) => expect(value).toBeCloseTo(expected[i], 10));
   });
 });

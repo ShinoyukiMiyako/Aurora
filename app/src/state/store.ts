@@ -94,9 +94,12 @@ import {
   type SessionState,
 } from "./session";
 import {
+  applyCompositeDownload,
   applyTaskDownload,
   attemptTaskId,
   clearFinished,
+  completeCompositeStep,
+  compositeProgress,
   findDuplicate,
   isActiveTask,
   markCancelled,
@@ -106,9 +109,12 @@ import {
   newTask,
   restoreJournal,
   retryTask,
+  startComposite,
   taskByAttempt,
   tasksToStart,
   trimHistory,
+  type CompositeProgress,
+  type DownloadSnapshot,
   type TaskDraft,
 } from "./tasks";
 import {
@@ -482,6 +488,16 @@ interface ModItem {
   projectId: string;
   modVersionId: string;
   title: string;
+  /** 平台声明的文件大小（组合任务的进度按它折算）；平台没声明、或较早写入任务日志的记录没有这一项时为 null。 */
+  fileSize: number | null;
+}
+
+/** 组合任务一项的声明大小。较早写入任务日志的记录没有这个键，与平台没声明大小同样按 null 处理。 */
+function fileSizeArg(r: Record<string, unknown>, command: string): number | null {
+  if (!("fileSize" in r) || r.fileSize === null) return null;
+  const size = r.fileSize;
+  if (typeof size !== "number" || !Number.isFinite(size) || size < 0) throw new Error(`任务 ${command} 的 fileSize 应为非负数或 null：${String(size)}`);
+  return size;
 }
 
 function modItems(args: Record<string, unknown>): ModItem[] {
@@ -497,6 +513,7 @@ function modItems(args: Record<string, unknown>): ModItem[] {
       projectId: strArg(r, "projectId", "install_mods"),
       modVersionId: strArg(r, "modVersionId", "install_mods"),
       title: strArg(r, "title", "install_mods"),
+      fileSize: fileSizeArg(r, "install_mods"),
     };
   });
 }
@@ -508,6 +525,8 @@ interface UpdateItem {
   modVersionId: string;
   /** Mod 名（完成通知用）；较早写入任务日志的记录没有这一项，为 null。 */
   title: string | null;
+  /** 新版本的声明大小，含义同 ModItem.fileSize。 */
+  fileSize: number | null;
 }
 
 function updateItems(args: Record<string, unknown>): UpdateItem[] {
@@ -524,6 +543,7 @@ function updateItems(args: Record<string, unknown>): UpdateItem[] {
       projectId: strArg(r, "projectId", "update_mods"),
       modVersionId: strArg(r, "modVersionId", "update_mods"),
       title: "title" in r ? strArg(r, "title", "update_mods") : null,
+      fileSize: fileSizeArg(r, "update_mods"),
     };
   });
 }
@@ -822,6 +842,8 @@ export class LauncherStore {
    * 照常做完时按成功返回，同一个 id 再登记拿到的是全新的令牌，下一项会照常开始。所以取消要由前端记着，每开始一项前查一次。
    */
   private readonly cancelRequested = new Set<string>();
+  /** 运行中组合任务的进度游标（按 attemptTaskId）：它的下载进度按整体折算，见 CompositeProgress。 */
+  private readonly composites = new Map<string, CompositeProgress>();
   /**
    * 实例正在被删除、完成后不再落地的任务（任务 id）。删除前取消它们，但取消可能没赶上：任务在取消宽限期内照常做完时，
    * 写封面、写固定、弹「已就绪」都是对一个马上要删掉的实例做的，提示也会和结果对不上。
@@ -1092,15 +1114,17 @@ export class LauncherStore {
     // 不带 task_id 的事件属于启动会话或非任务命令（离线用户名告警）；启动的进度走 launch-phase，日志走 game-log
     if (event.task_id === null) return;
     if (event.kind === "download") {
-      this.set((raw) => ({
-        tasks: applyTaskDownload(raw.tasks, event.task_id as string, {
-          total: event.total,
-          finished: event.finished,
-          bytes: event.bytes,
-          totalBytes: event.total_bytes,
-          speed: event.speed,
-        }),
-      }));
+      const attemptId = event.task_id;
+      const snapshot: DownloadSnapshot = { total: event.total, finished: event.finished, bytes: event.bytes, totalBytes: event.total_bytes, speed: event.speed };
+      const cursor = this.composites.get(attemptId);
+      if (cursor === undefined) {
+        this.set((raw) => ({ tasks: applyTaskDownload(raw.tasks, attemptId, snapshot) }));
+        return;
+      }
+      const next = applyCompositeDownload(this.raw.tasks, attemptId, cursor, snapshot);
+      if (next === null) return;
+      this.composites.set(attemptId, next.cursor);
+      this.set({ tasks: next.tasks });
       return;
     }
     if (event.kind === "warning") {
@@ -1284,10 +1308,12 @@ export class LauncherStore {
       this.execute(task).then(
         (result) => {
           this.cancelRequested.delete(attemptId);
+          this.composites.delete(attemptId);
           this.onTaskDone(task.id, attempt, result);
         },
         (error: unknown) => {
           this.cancelRequested.delete(attemptId);
+          this.composites.delete(attemptId);
           this.onTaskFailed(task.id, attempt, error);
         },
       );
@@ -1301,31 +1327,52 @@ export class LauncherStore {
     return tasksIpc.cancelTask(attemptId);
   }
 
-  private assertNotCancelled(attemptId: string): void {
-    if (this.cancelRequested.has(attemptId)) throw new IpcError(CANCELLED_ERROR_CODE, "已取消");
+  /**
+   * 逐项执行组合任务：每开始一项前查一次取消（见 cancelRequested），进度按各项的声明大小折成整体（见 CompositeProgress）。
+   * 游标留到这一次尝试落定才清：最后一项做完到任务落为完成之间晚到的进度也按组合任务的口径丢掉，不会把进度条拉回单项。
+   */
+  private async runSteps(attemptId: string, steps: readonly { size: number | null; run: () => Promise<unknown> }[]): Promise<void> {
+    const start = compositeProgress(steps.map((step) => step.size));
+    this.composites.set(attemptId, start);
+    this.set((raw) => ({ tasks: startComposite(raw.tasks, attemptId, start) }));
+    for (const step of steps) {
+      if (this.cancelRequested.has(attemptId)) throw new IpcError(CANCELLED_ERROR_CODE, "已取消");
+      await step.run();
+      const cursor = this.composites.get(attemptId);
+      if (cursor === undefined) throw new Error(`组合任务 ${attemptId} 的进度游标不见了`);
+      const next = completeCompositeStep(this.raw.tasks, attemptId, cursor);
+      this.composites.set(attemptId, next.cursor);
+      this.set({ tasks: next.tasks });
+    }
   }
 
   private async execute(task: Task): Promise<unknown> {
     const taskId = attemptTaskId(task);
     const { command, args } = task.spec;
     if (!TASK_COMMANDS.has(command)) throw new Error(`任务日志里有不可重放的命令：${command}`);
-    // 组合任务逐个调后端命令，复用同一个 taskId；每开始一项前查一次取消（见 cancelRequested）
+    // 组合任务逐个调后端命令，复用同一个 taskId
     if (command === "install_mods") {
       const versionId = strArg(args, "versionId", command);
-      for (const item of modItems(args)) {
-        this.assertNotCancelled(taskId);
-        await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId);
-      }
+      await this.runSteps(
+        taskId,
+        modItems(args).map((item) => ({ size: item.fileSize, run: () => installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId) })),
+      );
       return null;
     }
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
+      const items = task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args);
       const updated: UpdateItem[] = [];
-      for (const item of task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args)) {
-        this.assertNotCancelled(taskId);
-        await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
-        updated.push(item);
-      }
+      await this.runSteps(
+        taskId,
+        items.map((item) => ({
+          size: item.fileSize,
+          run: async () => {
+            await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId);
+            updated.push(item);
+          },
+        })),
+      );
       const outcome: UpdatesOutcome = { updated };
       return outcome;
     }
@@ -2069,6 +2116,7 @@ export class LauncherStore {
                   projectId: c.latest.project_id,
                   modVersionId: c.latest.version_id,
                   title: c.title === null ? c.file_name : c.title,
+                  fileSize: c.latest.file_size,
                 })),
               },
             },
@@ -2111,6 +2159,7 @@ export class LauncherStore {
                       projectId: item.version.project_id,
                       modVersionId: item.version.version_id,
                       title: i === 0 ? spec.name : item.title === null ? item.version.name : item.title,
+                      fileSize: item.version.file_size,
                     })),
                   },
                 },
