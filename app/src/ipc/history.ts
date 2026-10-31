@@ -1,4 +1,4 @@
-// 实例的 Mod 变更历史、回滚与备份占用。事件按时间正序；rollbackChecks 与 listHistory 逐条对齐。
+// 实例的 Mod 变更历史与回滚。事件按时间正序；rollbackChecks 与 listHistory 逐条对齐。
 
 import { invoke } from "./bridge";
 

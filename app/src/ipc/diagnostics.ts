@@ -1,4 +1,4 @@
-// 诊断：最近一次崩溃报告、对一段日志做崩溃诊断、最近一次启动日志，以及前端自己的诊断日志。
+// 诊断：最近一次崩溃报告、最近一次启动日志，以及前端自己的诊断日志。
 
 import { invoke } from "./bridge";
 import type { LogLineDto } from "./launch";

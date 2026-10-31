@@ -1,4 +1,4 @@
-//! 实例的 Mod 变更历史、回滚与备份占用。
+//! 实例的 Mod 变更历史与回滚。
 
 use aurora_core::{HistoryEvent, RollbackCheck};
 use tauri::State;
