@@ -3,7 +3,7 @@ import { MotionConfig, type MotionValue } from "framer-motion";
 import { afterEach, describe, expect, it } from "vitest";
 import { render, type Rendered } from "../test/dom";
 import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress, visibleProgress } from "./ProgressBar";
-import { ProgressRing, RING_STROKE, ringHasLabel } from "./ProgressRing";
+import { ProgressRing, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -169,6 +169,7 @@ describe("ProgressRing", () => {
     [24, 2.5],
     [36, 3.5],
     [48, 4],
+    [84, 7],
   ] as const)("%i 档描边 %s", (size, stroke) => {
     expect(RING_STROKE[size]).toBe(stroke);
     view = render(<ProgressRing value={0.5} size={size} label="安装中" />);
@@ -179,11 +180,12 @@ describe("ProgressRing", () => {
     expect(Number(circles[1].getAttribute("stroke-dasharray"))).toBeCloseTo(2 * Math.PI * r, 5);
   });
 
-  it("只有 36 与 48 在圆心写百分数", () => {
+  it("36 及以上在圆心写百分数，更小的不写", () => {
     expect(ringHasLabel(16)).toBe(false);
     expect(ringHasLabel(24)).toBe(false);
     expect(ringHasLabel(36)).toBe(true);
     expect(ringHasLabel(48)).toBe(true);
+    expect(ringHasLabel(84)).toBe(true);
     view = render(<ProgressRing value={0.37} size={36} label="下载" />);
     expect(ring().textContent).toBe("37%");
     expect(ring().getAttribute("aria-valuenow")).toBe("37");
@@ -202,6 +204,37 @@ describe("ProgressRing", () => {
 
   it("进度为 0 时不画填充（圆头描边在零长度时会留下一个点）", () => {
     view = render(<ProgressRing value={0} size={20} label="排队中" />);
+    expect(ring().querySelectorAll("circle")).toHaveLength(1);
+  });
+
+  it("84 档写百分数：总进度 62.5% 四舍五入为 63%", () => {
+    view = render(<ProgressRing value={0.625} size={84} label="下载总进度" />);
+    expect(ring().textContent).toBe("63%");
+    expect(ring().getAttribute("aria-valuenow")).toBe("63");
+    expect(ring().getAttribute("data-size")).toBe("84");
+  });
+
+  it("没有可显示的进度（null）：只画轨道，圆心写占位，读屏不报数值", () => {
+    view = render(<ProgressRing value={null} size={84} tone="muted" label="下载总进度" />);
+    expect(ring().querySelectorAll("circle")).toHaveLength(1);
+    expect(RING_PLACEHOLDER).toBe("--");
+    expect(ring().textContent).toBe("--");
+    expect(ring().hasAttribute("aria-valuenow")).toBe(false);
+    expect(ring().getAttribute("aria-valuetext")).toBe("--");
+    expect(ring().hasAttribute("data-empty")).toBe(true);
+  });
+
+  it("从占位换成真实进度：画出填充、读屏报出目标值，圆心改为（平滑中的）百分数；小档位占位时圆心仍为空", () => {
+    view = render(<ProgressRing value={null} size={84} label="下载总进度" />);
+    view.rerender(<ProgressRing value={0.4} size={84} label="下载总进度" />);
+    expect(ring().querySelectorAll("circle")).toHaveLength(2);
+    expect(ring().getAttribute("aria-valuenow")).toBe("40");
+    expect(ring().hasAttribute("aria-valuetext")).toBe(false);
+    expect(ring().textContent).toMatch(/^\d+%$/);
+    expect(ring().hasAttribute("data-empty")).toBe(false);
+    view.unmount();
+    view = render(<ProgressRing value={null} size={24} label="下载" />);
+    expect(ring().textContent).toBe("");
     expect(ring().querySelectorAll("circle")).toHaveLength(1);
   });
 
