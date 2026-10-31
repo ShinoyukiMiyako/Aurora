@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{Error, Result};
-use crate::model::{Arguments, VersionJson};
+use crate::model::{Arguments, Logging, VersionJson};
 
 /// "按 id 取版本 JSON" 的抽象，解耦合并逻辑与版本来源。
 pub trait VersionProvider {
@@ -106,7 +106,14 @@ fn merge_chain(chain: &[VersionJson]) -> VersionJson {
         libraries,
         downloads: chain.iter().find_map(|v| v.downloads.clone()),
         java_version: chain.iter().find_map(|v| v.java_version.clone()),
-        logging: chain.iter().find_map(|v| v.logging.clone()),
+        // 按 side 逐键继承：Forge 的 version.json 带着空的 `"logging": {}`，整块取子版本会把原版的
+        // log4j 配置（含 Log4Shell 的缓解配置）丢掉。
+        logging: chain
+            .iter()
+            .find_map(|v| v.logging.as_ref().and_then(|l| l.client.clone()))
+            .map(|client| Logging {
+                client: Some(client),
+            }),
         release_type: first_some_str(|v| v.release_type.as_ref()),
         release_time: first_some_str(|v| v.release_time.as_ref()),
         time: first_some_str(|v| v.time.as_ref()),
@@ -179,6 +186,30 @@ mod tests {
             ]
         );
         assert!(merged.inherits_from.is_none());
+    }
+
+    /// Forge 的 version.json 带着空的 `"logging": {}`：它没有自己的日志配置，原版的 log4j 配置
+    /// （含 Log4Shell 的缓解配置）必须留在合并结果里；子版本真给了 client 配置时才覆盖。
+    #[test]
+    fn empty_child_logging_keeps_the_parent_client_config() {
+        let vanilla = v(r#"{
+            "id":"1.16.5","mainClass":"M",
+            "logging":{"client":{"argument":"-Dlog4j.configurationFile=${path}","type":"log4j2-xml",
+                "file":{"id":"client-1.12.xml","sha1":"bd65e7d2e3c237be76cfbef4c2405033d7f91521","size":888,"url":"https://piston-data.mojang.com/client-1.12.xml"}}}
+        }"#);
+        let forge = v(r#"{"id":"1.16.5-forge-36.2.39","inheritsFrom":"1.16.5","logging":{}}"#);
+        let merged = resolve(&forge, &provider(std::slice::from_ref(&vanilla))).unwrap();
+        let client = merged
+            .logging
+            .and_then(|l| l.client)
+            .expect("原版的 client 日志配置应保留");
+        assert_eq!(client.file.id, "client-1.12.xml");
+
+        let own = v(r#"{"id":"custom","inheritsFrom":"1.16.5",
+            "logging":{"client":{"argument":"-Dx=${path}","type":"log4j2-xml",
+                "file":{"id":"own.xml","sha1":"0","size":1,"url":"https://example.invalid/own.xml"}}}}"#);
+        let merged = resolve(&own, &provider(&[vanilla])).unwrap();
+        assert_eq!(merged.logging.unwrap().client.unwrap().file.id, "own.xml");
     }
 
     #[test]
