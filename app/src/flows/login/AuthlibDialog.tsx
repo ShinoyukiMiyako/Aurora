@@ -199,9 +199,10 @@ export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | 
       );
       break;
     case "login":
+      // 登录在途时不能退回去换服务器：回来的结果仍会把弹窗带到这次服务器的角色选择上
       footer = (
         <>
-          <Button variant="ghost" onClick={back}>
+          <Button variant="ghost" disabled={loggingIn} onClick={back}>
             {AUTHLIB_DIALOG_COPY.back}
           </Button>
           <Button variant="primary" loading={loggingIn} disabled={!canLogin} onClick={submitLogin}>
@@ -213,7 +214,7 @@ export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | 
     case "profile":
       footer = (
         <>
-          <Button variant="ghost" onClick={back}>
+          <Button variant="ghost" disabled={selecting} onClick={back}>
             {AUTHLIB_DIALOG_COPY.back}
           </Button>
           <Button variant="primary" loading={selecting} onClick={submitProfile}>
@@ -278,7 +279,7 @@ export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | 
                 <p className={styles.serverName}>{server.info.serverName}</p>
                 <p className={styles.serverUrl}>{server.info.apiRoot}</p>
               </div>
-              <Button variant="ghost" size="sm" onClick={back}>
+              <Button variant="ghost" size="sm" disabled={loggingIn} onClick={back}>
                 {AUTHLIB_DIALOG_COPY.changeServer}
               </Button>
             </div>
