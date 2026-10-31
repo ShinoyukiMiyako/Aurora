@@ -4,7 +4,7 @@
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
 import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskKind, TaskStatus } from "../domain/types";
 import type { NameRule } from "../ipc/instances";
-import { APP_NAME } from "../lib/app-info";
+import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 
 /** 启动失败（首帧之前出错）时错误页的文案。 */
 export const BOOT_FAILURE_COPY = {
@@ -76,6 +76,13 @@ export const SETTINGS_SECTION_LABEL = {
   appearance: "外观",
   about: "关于",
 } as const;
+
+/** 发布通道（由版本号推出，见 lib/app-info 的 buildInfo）：关于页的通道标与版本信息。 */
+export const RELEASE_CHANNEL_LABEL: Readonly<Record<ReleaseChannel, string>> = {
+  stable: "正式版",
+  beta: "测试版",
+  preview: "预览版",
+};
 
 /** 加载器的官方写法（英文专名保持官方大小写）。 */
 export const LOADER_NAME: Readonly<Record<LoaderKind, string>> = {
