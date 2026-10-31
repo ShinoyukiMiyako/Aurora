@@ -19,6 +19,10 @@ pub mod java;
 pub mod launch;
 pub mod modpack;
 pub mod mods;
+pub mod news;
+pub mod servers;
+pub mod system;
 pub mod tasks;
+pub mod updater;
 
 pub use error::CommandError;

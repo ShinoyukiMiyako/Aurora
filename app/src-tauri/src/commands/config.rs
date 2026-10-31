@@ -1,21 +1,39 @@
-//! 全局配置：读取、按字段更新与切换游戏目录。
+//! 全局配置：读取、按字段更新，以及游戏目录的并存、切换与检查。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use aurora_core::{Aurora, DownloadSourcePolicy, IsolationPolicy, MemorySettings};
-use serde::Serialize;
+use aurora_core::folders::{
+    default_game_dir, inspect_game_directory as inspect_dir, probe_dir, validate_game_dir,
+};
+use aurora_core::{
+    AfterLaunch, Aurora, CoreError, DownloadSourcePolicy, GameDirProblem, GameDirectoryEntry,
+    IsolationPolicy, MemorySettings, NamedDirectory,
+};
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::commands::CommandError;
 use crate::facade::Facade;
 
-/// 全局配置 DTO（设置页与主页需要读取的安全字段）。
+/// `default_java` 取这个值表示按版本自动选择。
+pub const DEFAULT_JAVA_AUTO: &str = "auto";
+
+/// 同时下载的文件数的取值范围（设置页滑杆 8-256，步进 8；后端只挡住会让下载池卡死或失控的值）。
+const CONCURRENCY_RANGE: std::ops::RangeInclusive<usize> = 1..=256;
+
+/// 最大堆的下限（MB），与设置页内存滑杆的最小值一致。
+const MIN_MAX_MEMORY_MB: u32 = 1024;
+
+/// 全局配置 DTO。
 ///
-/// 这些枚举在 aurora-core 已 derive Serialize 且为 snake_case，直接内嵌即得稳定的 JSON 表示。
+/// 枚举在 aurora-core 已 derive Serialize 且为 snake_case，直接内嵌即得稳定的 JSON 表示，
+/// 且与 `update_config` 的入参同名。
 #[derive(Debug, Serialize)]
 pub struct ConfigDto {
     /// 当前游戏目录（`.minecraft`）绝对路径。
     pub game_dir: String,
+    /// 数据目录下的默认游戏目录，「用回默认位置」用它。
+    pub default_game_dir: String,
     /// 数据目录绝对路径。
     pub data_dir: String,
     /// 文件下载源策略。
@@ -24,7 +42,7 @@ pub struct ConfigDto {
     pub version_list_source: DownloadSourcePolicy,
     /// 批量下载文件级并发上限。
     pub download_concurrency: usize,
-    /// 内存分配设置。
+    /// 内存分配设置（含是否自动分配）。
     pub memory: MemorySettings,
     /// 全局版本隔离档位。
     pub isolation_policy: IsolationPolicy,
@@ -32,14 +50,27 @@ pub struct ConfigDto {
     pub has_client_id: bool,
     /// 找不到匹配 Java 时是否自动下载。
     pub auto_download_java: bool,
-    /// 当前选中的实例 id；未选择时为 null。
+    /// 全局默认 Java：`"auto"` 或 java 可执行文件绝对路径。
+    pub default_java: String,
+    /// 游戏启动后启动器窗口的去留。
+    pub after_launch: AfterLaunch,
+    /// 是否自动检查启动器更新。
+    pub check_updates: bool,
+    /// 自定义缓存目录；未设置时为 null。
+    pub cache_directory: Option<String>,
+    /// 主页当前选中的实例 id；未选择时为 null。
     pub selected_version: Option<String>,
+    /// 用户跳过的启动器版本。
+    pub skipped_update_version: Option<String>,
+    /// 自动检查已提示过的启动器版本。
+    pub notified_update_version: Option<String>,
 }
 
 pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
     let config = aurora.config();
     ConfigDto {
         game_dir: aurora.game_dir().display().to_string(),
+        default_game_dir: default_game_dir(aurora.data_dir()).display().to_string(),
         data_dir: aurora.data_dir().display().to_string(),
         download_source: config.download_source,
         version_list_source: config.version_list_source,
@@ -48,7 +79,19 @@ pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
         isolation_policy: config.isolation_policy,
         has_client_id: config.msa_client_id.is_some(),
         auto_download_java: config.auto_download_java,
+        default_java: match &config.default_java {
+            Some(path) => path.display().to_string(),
+            None => DEFAULT_JAVA_AUTO.to_owned(),
+        },
+        after_launch: config.after_launch,
+        check_updates: config.check_updates,
+        cache_directory: config
+            .cache_directory
+            .as_ref()
+            .map(|dir| dir.display().to_string()),
         selected_version: config.selected_version.clone(),
+        skipped_update_version: config.skipped_update_version.clone(),
+        notified_update_version: config.notified_update_version.clone(),
     }
 }
 
@@ -57,82 +100,196 @@ pub(crate) async fn read_config(facade: &Facade) -> ConfigDto {
     config_dto(&*facade.read().await)
 }
 
-/// 读取全局配置（含游戏目录、内存、下载源策略、是否已配 client_id 等）。
+/// 读取全局配置。
 #[tauri::command]
 pub async fn get_config(facade: State<'_, Facade>) -> Result<ConfigDto, CommandError> {
     Ok(read_config(&facade).await)
 }
 
-/// 更新全局配置：每个给出的字段调对应 setter，最后落盘。字段全可选，未提供者不动。
+/// 内存设置入参：三个字段都必须给出。缺 `auto` 时若按默认值补上，界面上关掉的自动分配会被
+/// 悄悄打开，所以不复用配置文件那套带默认值的反序列化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryInput {
+    pub max_mb: u32,
+    pub min_mb: Option<u32>,
+    pub auto: bool,
+}
+
+/// 解析好的配置修改；`None` 的字段不动。
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct ConfigPatch {
+    download_source: Option<DownloadSourcePolicy>,
+    version_list_source: Option<DownloadSourcePolicy>,
+    download_concurrency: Option<usize>,
+    memory: Option<MemorySettings>,
+    isolation_policy: Option<IsolationPolicy>,
+    auto_download_java: Option<bool>,
+    cache_directory: Option<PathBuf>,
+    client_id: Option<String>,
+    selected_version: Option<String>,
+    after_launch: Option<AfterLaunch>,
+    check_updates: Option<bool>,
+    default_java: Option<Option<PathBuf>>,
+    skipped_update_version: Option<String>,
+    notified_update_version: Option<String>,
+}
+
+/// 未解析的配置修改，字段与 `update_config` 的入参一一对应。
+#[derive(Debug, Default)]
+pub(crate) struct RawConfigPatch {
+    pub download_source: Option<String>,
+    pub version_list_source: Option<String>,
+    pub download_concurrency: Option<usize>,
+    pub memory: Option<MemoryInput>,
+    pub isolation_policy: Option<String>,
+    pub auto_download_java: Option<bool>,
+    pub cache_directory: Option<String>,
+    pub client_id: Option<String>,
+    pub selected_version: Option<String>,
+    pub after_launch: Option<String>,
+    pub check_updates: Option<bool>,
+    pub default_java: Option<String>,
+    pub skipped_update_version: Option<String>,
+    pub notified_update_version: Option<String>,
+}
+
+/// 更新全局配置：字段全可选，未提供者不动。先把全部参数校验完再拿写锁：有一个非法就整体拒绝，
+/// 不会改了一半才报错，也不落盘。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn update_config(
     download_source: Option<String>,
     version_list_source: Option<String>,
     download_concurrency: Option<usize>,
-    memory: Option<MemorySettings>,
+    memory: Option<MemoryInput>,
     isolation_policy: Option<String>,
     auto_download_java: Option<bool>,
     cache_directory: Option<String>,
     client_id: Option<String>,
     selected_version: Option<String>,
+    after_launch: Option<String>,
+    check_updates: Option<bool>,
+    default_java: Option<String>,
+    skipped_update_version: Option<String>,
+    notified_update_version: Option<String>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
-    // 先把全部字符串参数解析完再拿写锁：有一个非法就整体拒绝，不会改了一半才报错。
-    let download_source = download_source
-        .as_deref()
-        .map(parse_download_source_policy)
-        .transpose()?;
-    let version_list_source = version_list_source
-        .as_deref()
-        .map(parse_download_source_policy)
-        .transpose()?;
-    let isolation_policy = isolation_policy
-        .as_deref()
-        .map(parse_isolation_policy)
-        .transpose()?;
+    let raw = RawConfigPatch {
+        download_source,
+        version_list_source,
+        download_concurrency,
+        memory,
+        isolation_policy,
+        auto_download_java,
+        cache_directory,
+        client_id,
+        selected_version,
+        after_launch,
+        check_updates,
+        default_java,
+        skipped_update_version,
+        notified_update_version,
+    };
+    update_config_with(&facade, raw).await
+}
 
+pub(crate) async fn update_config_with(
+    facade: &Facade,
+    raw: RawConfigPatch,
+) -> Result<(), CommandError> {
+    let patch = parse_patch(raw).await?;
     let mut aurora = facade.write().await;
-    if let Some(policy) = download_source {
-        aurora.set_download_source(policy);
-    }
-    if let Some(policy) = version_list_source {
-        aurora.set_version_list_source(policy)?;
-    }
-    if let Some(concurrency) = download_concurrency {
-        aurora.set_download_concurrency(concurrency);
-    }
-    if let Some(memory) = memory {
-        aurora.set_memory(memory);
-    }
-    if let Some(policy) = isolation_policy {
-        aurora.set_isolation_policy(policy);
-    }
-    if let Some(enabled) = auto_download_java {
-        aurora.set_auto_download_java(enabled);
-    }
-    if let Some(dir) = cache_directory {
-        aurora.set_cache_directory(Some(PathBuf::from(dir)));
-    }
-    if let Some(id) = client_id {
-        aurora.set_client_id(id);
-    }
-    if let Some(id) = selected_version {
-        aurora.set_selected_version(Some(id));
-    }
+    apply_patch(&mut aurora, patch)?;
     aurora.save_config().await?;
     Ok(())
 }
 
-/// 设置游戏目录（`.minecraft`）并落盘。
-#[tauri::command]
-pub async fn set_game_directory(
-    path: String,
-    facade: State<'_, Facade>,
-) -> Result<(), CommandError> {
-    let mut aurora = facade.write().await;
-    aurora.set_game_directory(PathBuf::from(path));
-    aurora.save_config().await?;
+async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
+    let default_java = match raw.default_java {
+        Some(value) => Some(parse_default_java(&value).await?),
+        None => None,
+    };
+    Ok(ConfigPatch {
+        download_source: raw
+            .download_source
+            .as_deref()
+            .map(parse_download_source_policy)
+            .transpose()?,
+        version_list_source: raw
+            .version_list_source
+            .as_deref()
+            .map(parse_download_source_policy)
+            .transpose()?,
+        download_concurrency: raw
+            .download_concurrency
+            .map(validate_concurrency)
+            .transpose()?,
+        memory: raw.memory.map(validate_memory).transpose()?,
+        isolation_policy: raw
+            .isolation_policy
+            .as_deref()
+            .map(parse_isolation_policy)
+            .transpose()?,
+        auto_download_java: raw.auto_download_java,
+        cache_directory: raw.cache_directory.map(PathBuf::from),
+        client_id: raw.client_id.map(validate_client_id).transpose()?,
+        selected_version: raw.selected_version,
+        after_launch: raw
+            .after_launch
+            .as_deref()
+            .map(parse_after_launch)
+            .transpose()?,
+        check_updates: raw.check_updates,
+        default_java,
+        skipped_update_version: raw.skipped_update_version,
+        notified_update_version: raw.notified_update_version,
+    })
+}
+
+fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandError> {
+    if let Some(policy) = patch.download_source {
+        aurora.set_download_source(policy);
+    }
+    if let Some(policy) = patch.version_list_source {
+        aurora.set_version_list_source(policy)?;
+    }
+    if let Some(concurrency) = patch.download_concurrency {
+        aurora.set_download_concurrency(concurrency);
+    }
+    if let Some(memory) = patch.memory {
+        aurora.set_memory(memory);
+    }
+    if let Some(policy) = patch.isolation_policy {
+        aurora.set_isolation_policy(policy);
+    }
+    if let Some(enabled) = patch.auto_download_java {
+        aurora.set_auto_download_java(enabled);
+    }
+    if let Some(dir) = patch.cache_directory {
+        aurora.set_cache_directory(Some(dir));
+    }
+    if let Some(id) = patch.client_id {
+        aurora.set_client_id(id);
+    }
+    if let Some(id) = patch.selected_version {
+        aurora.set_selected_version(Some(id));
+    }
+    if let Some(after) = patch.after_launch {
+        aurora.set_after_launch(after);
+    }
+    if let Some(enabled) = patch.check_updates {
+        aurora.set_check_updates(enabled);
+    }
+    if let Some(java) = patch.default_java {
+        aurora.set_default_java(java);
+    }
+    if let Some(version) = patch.skipped_update_version {
+        aurora.set_skipped_update_version(Some(version));
+    }
+    if let Some(version) = patch.notified_update_version {
+        aurora.set_notified_update_version(Some(version));
+    }
     Ok(())
 }
 
@@ -163,13 +320,259 @@ fn parse_isolation_policy(name: &str) -> Result<IsolationPolicy, CommandError> {
     }
 }
 
+fn parse_after_launch(name: &str) -> Result<AfterLaunch, CommandError> {
+    match name {
+        "keep" => Ok(AfterLaunch::Keep),
+        "minimize" => Ok(AfterLaunch::Minimize),
+        "close" => Ok(AfterLaunch::Close),
+        other => Err(CommandError::invalid_argument(format!(
+            "未知的启动后行为 {other}（支持 keep/minimize/close）"
+        ))),
+    }
+}
+
+fn validate_concurrency(value: usize) -> Result<usize, CommandError> {
+    if CONCURRENCY_RANGE.contains(&value) {
+        Ok(value)
+    } else {
+        Err(CommandError::invalid_argument(format!(
+            "同时下载的文件数须在 {} 到 {} 之间，收到 {value}",
+            CONCURRENCY_RANGE.start(),
+            CONCURRENCY_RANGE.end()
+        )))
+    }
+}
+
+fn validate_memory(input: MemoryInput) -> Result<MemorySettings, CommandError> {
+    if input.max_mb < MIN_MAX_MEMORY_MB {
+        return Err(CommandError::invalid_argument(format!(
+            "最大内存不能低于 {MIN_MAX_MEMORY_MB} MB，收到 {}",
+            input.max_mb
+        )));
+    }
+    if let Some(min) = input.min_mb {
+        if min == 0 || min > input.max_mb {
+            return Err(CommandError::invalid_argument(format!(
+                "最小内存须在 1 到最大内存 {} MB 之间，收到 {min}",
+                input.max_mb
+            )));
+        }
+    }
+    Ok(MemorySettings {
+        max_mb: input.max_mb,
+        min_mb: input.min_mb,
+        auto: input.auto,
+    })
+}
+
+fn validate_client_id(id: String) -> Result<String, CommandError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(CommandError::invalid_argument("client_id 不能为空"));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// `"auto"` 为自动选择；否则必须是存在的 java 可执行文件的绝对路径。
+async fn parse_default_java(value: &str) -> Result<Option<PathBuf>, CommandError> {
+    if value == DEFAULT_JAVA_AUTO {
+        return Ok(None);
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(CommandError::invalid_argument(format!(
+            "默认 Java 须是 \"{DEFAULT_JAVA_AUTO}\" 或 java 可执行文件的绝对路径，收到 {value}"
+        )));
+    }
+    let is_file = tokio::fs::metadata(&path)
+        .await
+        .is_ok_and(|meta| meta.is_file());
+    if !is_file {
+        return Err(CommandError::invalid_argument(format!(
+            "默认 Java 指向的文件不存在：{value}"
+        )));
+    }
+    Ok(Some(path))
+}
+
+// ---- 游戏目录 ----
+
+/// 一条游戏目录记录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GameDirectoryDto {
+    pub name: String,
+    pub path: String,
+    /// 是否为当前正在使用的目录。
+    pub is_current: bool,
+    /// 此刻能否访问；为假时记录仍保留。
+    pub available: bool,
+}
+
+/// 一条带名字的目录（探测结果与首次启动勾选项）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedDirectoryDto {
+    pub name: String,
+    pub path: String,
+}
+
+/// 候选目录的检查结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GameDirectoryInspectionDto {
+    pub exists: bool,
+    /// 已有 `versions` 文件夹（会直接接管已有游戏文件）。
+    pub has_versions: bool,
+}
+
+fn game_directory_dto(entry: GameDirectoryEntry) -> GameDirectoryDto {
+    GameDirectoryDto {
+        name: entry.name,
+        path: entry.path.display().to_string(),
+        is_current: entry.is_current,
+        available: entry.available,
+    }
+}
+
+fn named_dto(dir: NamedDirectory) -> NamedDirectoryDto {
+    NamedDirectoryDto {
+        name: dir.name,
+        path: dir.path.display().to_string(),
+    }
+}
+
+/// 把界面传来的带名目录校验成核心类型：路径按游戏目录规则校验，名字去空白后不能为空。
+pub(crate) fn parse_named_directory(
+    dto: NamedDirectoryDto,
+) -> Result<NamedDirectory, CommandError> {
+    let path = validate_game_dir(&dto.path)?;
+    let name = dto.name.trim();
+    if name.is_empty() {
+        return Err(CommandError::invalid_argument(format!(
+            "目录 {} 的名字不能为空",
+            path.display()
+        )));
+    }
+    Ok(NamedDirectory {
+        name: name.to_owned(),
+        path,
+    })
+}
+
+/// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达。
+#[tauri::command]
+pub async fn list_game_directories(
+    facade: State<'_, Facade>,
+) -> Result<Vec<GameDirectoryDto>, CommandError> {
+    let aurora = facade.snapshot().await;
+    Ok(aurora
+        .game_directories()
+        .await
+        .into_iter()
+        .map(game_directory_dto)
+        .collect())
+}
+
+/// 探测这台机器上尚未记录的其它启动器的 `.minecraft`。只报告不写入。
+#[tauri::command]
+pub async fn discover_game_directories(
+    facade: State<'_, Facade>,
+) -> Result<Vec<NamedDirectoryDto>, CommandError> {
+    let aurora = facade.snapshot().await;
+    Ok(aurora
+        .discover_game_directories()
+        .await
+        .into_iter()
+        .map(named_dto)
+        .collect())
+}
+
+/// 记下一个额外目录。同路径已记录时只更新名字；与当前目录相同时什么都不做。
+#[tauri::command]
+pub async fn add_game_directory(
+    name: String,
+    path: String,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    let dir = parse_named_directory(NamedDirectoryDto { name, path })?;
+    let mut aurora = facade.write().await;
+    aurora.add_game_directory(dir.name, dir.path);
+    aurora.save_config().await?;
+    Ok(())
+}
+
+/// 移除一个额外目录的记录（不动磁盘文件）。返回是否真的移除了一条。
+#[tauri::command]
+pub async fn remove_game_directory(
+    path: String,
+    facade: State<'_, Facade>,
+) -> Result<bool, CommandError> {
+    let mut aurora = facade.write().await;
+    let removed = aurora.remove_game_directory(Path::new(path.trim()));
+    if removed {
+        aurora.save_config().await?;
+    }
+    Ok(removed)
+}
+
+/// 切换当前游戏目录并落盘；原目录收进其它文件夹。目标必须是此刻可访问的目录。
+#[tauri::command]
+pub async fn set_game_directory(
+    path: String,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    set_game_directory_with(&facade, &path).await
+}
+
+pub(crate) async fn set_game_directory_with(
+    facade: &Facade,
+    raw: &str,
+) -> Result<(), CommandError> {
+    let target = validate_game_dir(raw)?;
+    // 探测在拿写锁之前：挂起的网络盘最多卡住这一个命令，不连累其它读配置的命令。
+    if !probe_dir(&target).await {
+        return Err(CoreError::InvalidGameDirectory {
+            path: target,
+            problem: GameDirProblem::Unavailable,
+        }
+        .into());
+    }
+    let mut aurora = facade.write().await;
+    aurora.switch_game_directory(target);
+    aurora.save_config().await?;
+    Ok(())
+}
+
+/// 检查一个候选目录：是否存在、是否已有游戏文件。路径须先通过游戏目录校验。
+#[tauri::command]
+pub async fn inspect_game_directory(
+    path: String,
+) -> Result<GameDirectoryInspectionDto, CommandError> {
+    let path = validate_game_dir(&path)?;
+    let inspection = inspect_dir(&path).await;
+    Ok(GameDirectoryInspectionDto {
+        exists: inspection.exists,
+        has_versions: inspection.has_versions,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::error::code;
+    use aurora_core::AuroraConfig;
+
+    fn facade_in(dir: &Path) -> Facade {
+        let aurora = Aurora::open(
+            AuroraConfig::default(),
+            dir.to_path_buf(),
+            dir.join("config.json"),
+        )
+        .unwrap();
+        Facade::new(aurora)
+    }
 
     #[test]
-    fn policy_strings_roundtrip_with_serde_names() {
+    fn enum_strings_roundtrip_with_serde_names() {
         for policy in [
             DownloadSourcePolicy::Auto,
             DownloadSourcePolicy::OfficialFirst,
@@ -194,6 +597,10 @@ mod tests {
                 policy
             );
         }
+        for after in [AfterLaunch::Keep, AfterLaunch::Minimize, AfterLaunch::Close] {
+            let name = serde_json::to_value(after).unwrap();
+            assert_eq!(parse_after_launch(name.as_str().unwrap()).unwrap(), after);
+        }
         assert_eq!(
             parse_download_source_policy("bmclapi").unwrap_err().code,
             code::INVALID_ARGUMENT
@@ -201,6 +608,247 @@ mod tests {
         assert_eq!(
             parse_isolation_policy("Disabled").unwrap_err().code,
             code::INVALID_ARGUMENT
+        );
+        assert_eq!(
+            parse_after_launch("Minimize").unwrap_err().code,
+            code::INVALID_ARGUMENT
+        );
+    }
+
+    #[test]
+    fn concurrency_and_memory_bounds_are_enforced() {
+        assert_eq!(validate_concurrency(1).unwrap(), 1);
+        assert_eq!(validate_concurrency(256).unwrap(), 256);
+        assert!(
+            validate_concurrency(0).is_err(),
+            "0 会让下载池永远拿不到许可"
+        );
+        assert!(validate_concurrency(257).is_err());
+
+        let ok = MemoryInput {
+            max_mb: 1024,
+            min_mb: Some(1024),
+            auto: false,
+        };
+        assert_eq!(
+            validate_memory(ok).unwrap(),
+            MemorySettings {
+                max_mb: 1024,
+                min_mb: Some(1024),
+                auto: false
+            }
+        );
+        for bad in [
+            MemoryInput {
+                max_mb: 1023,
+                min_mb: None,
+                auto: true,
+            },
+            MemoryInput {
+                max_mb: 4096,
+                min_mb: Some(4097),
+                auto: false,
+            },
+            MemoryInput {
+                max_mb: 4096,
+                min_mb: Some(0),
+                auto: false,
+            },
+        ] {
+            assert_eq!(
+                validate_memory(bad).unwrap_err().code,
+                code::INVALID_ARGUMENT
+            );
+        }
+    }
+
+    #[test]
+    fn memory_input_requires_every_field() {
+        let missing_auto = serde_json::json!({"max_mb": 4096, "min_mb": null});
+        assert!(serde_json::from_value::<MemoryInput>(missing_auto).is_err());
+        let camel = serde_json::json!({"maxMb": 4096, "min_mb": null, "auto": true});
+        assert!(serde_json::from_value::<MemoryInput>(camel).is_err());
+        let full = serde_json::json!({"max_mb": 4096, "min_mb": null, "auto": false});
+        assert!(!serde_json::from_value::<MemoryInput>(full).unwrap().auto);
+    }
+
+    /// 出参能原样作入参回传：拿 get_config 的值写回去，配置不变。
+    #[tokio::test]
+    async fn dto_values_roundtrip_through_update_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let java = dir.path().join("jdk").join("bin").join("java.exe");
+        std::fs::create_dir_all(java.parent().unwrap()).unwrap();
+        std::fs::write(&java, b"stub").unwrap();
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                after_launch: Some("close".into()),
+                check_updates: Some(false),
+                default_java: Some(java.display().to_string()),
+                memory: Some(MemoryInput {
+                    max_mb: 6144,
+                    min_mb: None,
+                    auto: false,
+                }),
+                download_concurrency: Some(32),
+                skipped_update_version: Some("0.2.0".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let dto = read_config(&facade).await;
+        assert_eq!(dto.after_launch, AfterLaunch::Close);
+        assert!(!dto.check_updates);
+        assert_eq!(dto.default_java, java.display().to_string());
+        assert!(!dto.memory.auto);
+        assert_eq!(dto.memory.max_mb, 6144);
+        assert_eq!(dto.download_concurrency, 32);
+        assert_eq!(dto.skipped_update_version.as_deref(), Some("0.2.0"));
+        assert_eq!(
+            dto.default_game_dir,
+            dir.path().join(".minecraft").display().to_string()
+        );
+
+        let as_json = serde_json::to_value(&dto).unwrap();
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                after_launch: Some(as_json["after_launch"].as_str().unwrap().to_owned()),
+                default_java: Some(as_json["default_java"].as_str().unwrap().to_owned()),
+                download_source: Some(as_json["download_source"].as_str().unwrap().to_owned()),
+                isolation_policy: Some(as_json["isolation_policy"].as_str().unwrap().to_owned()),
+                memory: Some(serde_json::from_value(as_json["memory"].clone()).unwrap()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(read_config(&facade).await).unwrap(),
+            as_json
+        );
+
+        // 落了盘：重新载入得到同样的配置。
+        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert_eq!(reloaded.after_launch, AfterLaunch::Close);
+        assert_eq!(reloaded.default_java.as_deref(), Some(java.as_path()));
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                default_java: Some(DEFAULT_JAVA_AUTO.into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(read_config(&facade).await.default_java, DEFAULT_JAVA_AUTO);
+    }
+
+    /// 任一字段非法整体拒绝：前面合法的字段也不生效，配置文件不写。
+    #[tokio::test]
+    async fn invalid_field_rejects_whole_patch_without_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        for raw in [
+            RawConfigPatch {
+                check_updates: Some(false),
+                default_java: Some("relative/java.exe".into()),
+                ..RawConfigPatch::default()
+            },
+            RawConfigPatch {
+                check_updates: Some(false),
+                default_java: Some(dir.path().join("missing.exe").display().to_string()),
+                ..RawConfigPatch::default()
+            },
+            RawConfigPatch {
+                check_updates: Some(false),
+                client_id: Some("   ".into()),
+                ..RawConfigPatch::default()
+            },
+            RawConfigPatch {
+                check_updates: Some(false),
+                download_concurrency: Some(0),
+                ..RawConfigPatch::default()
+            },
+        ] {
+            let err = update_config_with(&facade, raw).await.unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT);
+        }
+        assert!(read_config(&facade).await.check_updates);
+        assert!(!dir.path().join("config.json").exists());
+    }
+
+    #[tokio::test]
+    async fn set_game_directory_switches_and_rejects_bad_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        std::fs::create_dir_all(dir.path().join(".minecraft")).unwrap();
+        let target = dir.path().join("Games").join(".minecraft");
+        std::fs::create_dir_all(&target).unwrap();
+
+        set_game_directory_with(&facade, &target.display().to_string())
+            .await
+            .unwrap();
+        let dto = read_config(&facade).await;
+        assert_eq!(dto.game_dir, target.display().to_string());
+        let listed = facade.snapshot().await.game_directories().await;
+        assert_eq!(listed.len(), 2, "原默认目录收进其它文件夹");
+        assert!(listed[0].is_current);
+
+        let missing = dir.path().join("nowhere");
+        let err = set_game_directory_with(&facade, &missing.display().to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INVALID_GAME_DIRECTORY);
+        assert_eq!(err.detail.unwrap()["problem"], "unavailable");
+
+        let bang = dir.path().join("a!b");
+        let err = set_game_directory_with(&facade, &bang.display().to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(err.detail.unwrap()["problem"], "contains_bang");
+        assert_eq!(
+            read_config(&facade).await.game_dir,
+            target.display().to_string()
+        );
+    }
+
+    #[test]
+    fn named_directory_requires_name_and_valid_path() {
+        let path = std::env::temp_dir()
+            .join(".minecraft")
+            .display()
+            .to_string();
+        let parsed = parse_named_directory(NamedDirectoryDto {
+            name: " PCL2 ".into(),
+            path: path.clone(),
+        })
+        .unwrap();
+        assert_eq!(parsed.name, "PCL2");
+        assert_eq!(
+            parse_named_directory(NamedDirectoryDto {
+                name: " ".into(),
+                path,
+            })
+            .unwrap_err()
+            .code,
+            code::INVALID_ARGUMENT
+        );
+        assert_eq!(
+            parse_named_directory(NamedDirectoryDto {
+                name: "x".into(),
+                path: "relative".into(),
+            })
+            .unwrap_err()
+            .code,
+            code::INVALID_GAME_DIRECTORY
         );
     }
 }

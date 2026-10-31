@@ -1,6 +1,6 @@
 //! aurora-core（L4 门面）
 //!
-//! 组合下层各 crate，向 iced 前端与 CLI 暴露一套粗粒度异步 API：版本清单/发现、版本安装（原版 +
+//! 组合下层各 crate，向 Tauri 外壳与 CLI 暴露一套粗粒度异步 API：版本清单/发现、版本安装（原版 +
 //! Fabric/Quilt）、微软/离线账户、离线启动、资源聚合搜索，并持有全局配置（config.json）与统一的
 //! 进度/事件通道。目标是让上层只依赖本 crate 即可完成端到端流程。
 //!
@@ -9,6 +9,8 @@
 //! - [`error`]：门面统一错误 [`CoreError`]，各下层错误 `#[from]` 冒泡。
 //! - [`event`]：进度/事件模型（[`CoreEvent`] / [`EventSink`] / [`DownloadProgress`]）。
 //! - [`facade`]：门面结构 [`Aurora`] 与共享装配；各操作分散在 `versions`/`install`/`auth`/`launch`/`search`。
+//! - 系统设置相关：[`folders`]（游戏目录并存与首次启动）、[`memory`]（内存建议）、[`servers`]（固定服务器与
+//!   状态查询）、[`news`]（官方资讯）、[`updates`]（启动器更新端点排序）、[`java`]（Java 取用与运行时下载）。
 //!
 //! ```no_run
 //! # async fn demo() -> aurora_core::Result<()> {
@@ -31,21 +33,26 @@ pub mod deps;
 pub mod error;
 pub mod event;
 pub mod facade;
+pub mod folders;
 pub mod history;
 pub mod install;
 pub mod instance_install;
 pub mod instances;
 pub mod java;
 pub mod launch;
+pub mod launcher_update;
 pub mod ledger;
 pub mod loaders;
+pub mod memory;
 mod modfs;
 pub mod modpack;
 pub mod mods;
 pub mod modversions;
+pub mod news;
 pub mod playtime;
 pub mod resources;
 pub mod search;
+pub mod servers;
 pub mod session;
 pub mod updates;
 pub mod versions;
@@ -54,10 +61,13 @@ mod workdir;
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
 pub use compat::{Compatibility, InstalledCopy, InstanceMatch, MatchState};
-pub use config::{AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings};
+pub use config::{
+    AfterLaunch, AuroraConfig, ConfigStore, DownloadSourcePolicy, MemorySettings, NamedDirectory,
+    PinnedServer,
+};
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use deps::{InstallPlan, PlannedItem};
-pub use error::{CoreError, Result};
+pub use error::{CoreError, GameDirProblem, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
@@ -81,6 +91,10 @@ pub use modpack::{
     ModpackPreview, ModpackSource, read_instance_modpack, validate_instance_name,
 };
 pub use resources::{ResourceInstallOutcome, ResourceTarget};
+pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
+pub use launcher_update::{UpdateSource, order_update_sources};
+pub use news::{NewsFeed, NewsItem, NewsTag};
+pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 

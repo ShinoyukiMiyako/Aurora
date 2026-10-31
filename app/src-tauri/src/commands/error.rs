@@ -98,6 +98,28 @@ pub mod code {
     pub const JSON_FILE_INVALID: &str = "json_file_invalid";
     /// 系统时钟早于 1970 年。
     pub const SYSTEM_CLOCK: &str = "system_clock";
+    /// 请求远端内容源（资讯）失败，detail.url 为请求地址。
+    pub const NETWORK_FAILED: &str = "network_failed";
+    /// 远端内容源返回的内容解析不了，detail.url 为请求地址。
+    pub const FEED_INVALID: &str = "feed_invalid";
+    /// 游戏目录不能用，detail.path 与 detail.problem（empty / not_absolute / contains_bang / unavailable）。
+    pub const INVALID_GAME_DIRECTORY: &str = "invalid_game_directory";
+    /// 读不到本机物理内存信息。
+    pub const MEMORY_UNAVAILABLE: &str = "memory_unavailable";
+    /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey。
+    pub const UPDATER_UNSUPPORTED: &str = "updater_unsupported";
+    /// 检查更新失败（连不上更新源、清单不合法）。
+    pub const UPDATE_CHECK_FAILED: &str = "update_check_failed";
+    /// 还没有检查到可用更新就要求下载。
+    pub const UPDATE_NOT_AVAILABLE: &str = "update_not_available";
+    /// 更新包下载失败。
+    pub const UPDATE_DOWNLOAD_FAILED: &str = "update_download_failed";
+    /// 更新包签名校验不通过，已丢弃。
+    pub const UPDATE_SIGNATURE_INVALID: &str = "update_signature_invalid";
+    /// 更新包还没下好就要求安装。
+    pub const UPDATE_NOT_READY: &str = "update_not_ready";
+    /// 启动安装程序失败。
+    pub const UPDATE_INSTALL_FAILED: &str = "update_install_failed";
 }
 
 /// 序列化给前端的命令错误。
@@ -185,7 +207,7 @@ via_core_error!(
 );
 
 /// `source()` 链上每一层的描述（不含顶层，顶层已在 `message` 里）。
-fn source_chain(err: &dyn StdError) -> Vec<String> {
+pub(crate) fn source_chain(err: &dyn StdError) -> Vec<String> {
     let mut causes = Vec::new();
     let mut current = err.source();
     while let Some(cause) = current {
@@ -226,6 +248,11 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::JsonFileInvalid { .. } => code::JSON_FILE_INVALID,
         CoreError::JsonSerialize(_) => code::INTERNAL,
         CoreError::SystemClock(_) => code::SYSTEM_CLOCK,
+        CoreError::Fetch { .. } => code::NETWORK_FAILED,
+        CoreError::FeedParse { .. } => code::FEED_INVALID,
+        CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
+        CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
+        CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
     }
 }
 
@@ -417,6 +444,17 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         }
         CoreError::Base(BaseError::Io { path, .. }) => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
+        }
+        CoreError::Fetch { url, .. } | CoreError::FeedParse { url, .. } => {
+            detail.insert("url".to_owned(), json!(url));
+        }
+        CoreError::InvalidServerAddress { address, reason } => {
+            detail.insert("address".to_owned(), json!(address));
+            detail.insert("reason".to_owned(), json!(reason));
+        }
+        CoreError::InvalidGameDirectory { path, problem } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("problem".to_owned(), json!(problem.code()));
         }
         _ => {}
     }
@@ -616,6 +654,38 @@ mod tests {
 
         let cancelled: CommandError = CoreError::from(ModpackError::Cancelled).into();
         assert!(cancelled.is_cancelled());
+    }
+
+    #[test]
+    fn system_variants_map_to_codes_with_parameters() {
+        let dir: CommandError = CoreError::InvalidGameDirectory {
+            path: PathBuf::from("D:/a!b/.minecraft"),
+            problem: aurora_core::GameDirProblem::ContainsBang,
+        }
+        .into();
+        assert_eq!(dir.code, code::INVALID_GAME_DIRECTORY);
+        let detail = dir.detail.unwrap();
+        assert_eq!(detail["problem"], json!("contains_bang"));
+        assert_eq!(detail["path"], json!("D:/a!b/.minecraft"));
+
+        let address: CommandError = CoreError::InvalidServerAddress {
+            address: "h:0".into(),
+            reason: "端口须是 1 到 65535 的整数",
+        }
+        .into();
+        assert_eq!(address.code, code::INVALID_ARGUMENT);
+        assert_eq!(address.detail.unwrap()["address"], json!("h:0"));
+
+        let memory: CommandError = CoreError::MemoryUnavailable.into();
+        assert_eq!(memory.code, code::MEMORY_UNAVAILABLE);
+
+        let feed: CommandError = CoreError::FeedParse {
+            url: "https://x/news.json".into(),
+            source: serde_json::from_str::<serde_json::Value>("{").unwrap_err(),
+        }
+        .into();
+        assert_eq!(feed.code, code::FEED_INVALID);
+        assert_eq!(feed.detail.unwrap()["url"], json!("https://x/news.json"));
     }
 
     #[test]

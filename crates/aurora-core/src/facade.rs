@@ -1,5 +1,5 @@
 //! 门面结构 [`Aurora`]：持有全局配置、共享 HTTP 客户端与运行环境，组合下层 crate 对外提供粗粒度
-//! 异步 API。目标是让 iced 前端与 CLI 只依赖本 crate。
+//! 异步 API。目标是让 Tauri 外壳与 CLI 只依赖本 crate。
 //!
 //! 各操作（版本清单、安装、登录、启动、搜索）分散在同名子模块的 `impl Aurora` 块里，本文件只负责
 //! 结构定义、构造与共享的内部辅助（目录布局、下载池、并发上下文装配）。远端端点基址以字段持有，
@@ -24,7 +24,7 @@ use aurora_version::RuntimeContext;
 use tokio::sync::watch;
 
 use crate::appearance::{Appearance, AppearancePatch};
-use crate::config::{AuroraConfig, DownloadSourcePolicy, MemorySettings};
+use crate::config::{AfterLaunch, AuroraConfig, DownloadSourcePolicy, MemorySettings};
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink};
 
@@ -239,6 +239,36 @@ impl Aurora {
         self.config.sidebar_pins = pins;
     }
 
+    /// 设置游戏启动后启动器窗口的去留。
+    pub fn set_after_launch(&mut self, after: AfterLaunch) {
+        self.config.after_launch = after;
+    }
+
+    /// 设置是否自动检查启动器更新。
+    pub fn set_check_updates(&mut self, enabled: bool) {
+        self.config.check_updates = enabled;
+    }
+
+    /// 设置全局默认 Java：`None` 为按版本自动选择，否则固定为这个 java 可执行文件。
+    pub fn set_default_java(&mut self, java: Option<PathBuf>) {
+        self.config.default_java = java;
+    }
+
+    /// 记下用户跳过的启动器版本。
+    pub fn set_skipped_update_version(&mut self, version: Option<String>) {
+        self.config.skipped_update_version = version;
+    }
+
+    /// 记下自动检查已经提示过的启动器版本。
+    pub fn set_notified_update_version(&mut self, version: Option<String>) {
+        self.config.notified_update_version = version;
+    }
+
+    /// 可变访问配置，供本 crate 内按领域分文件的操作（固定服务器、游戏目录、首次启动）改写各自的字段。
+    pub(crate) fn config_mut(&mut self) -> &mut AuroraConfig {
+        &mut self.config
+    }
+
     // ---- 内部共享装配 ----
 
     /// 共享 HTTP 客户端（克隆廉价：内部 `Arc`）。
@@ -422,6 +452,7 @@ mod tests {
         aurora.set_memory(MemorySettings {
             max_mb: 8192,
             min_mb: Some(1024),
+            auto: false,
         });
         aurora.set_isolation_policy(IsolationPolicy::All);
 
@@ -431,7 +462,31 @@ mod tests {
         assert!(!cfg.auto_download_java);
         assert_eq!(cfg.memory.max_mb, 8192);
         assert_eq!(cfg.memory.min_mb, Some(1024));
+        assert!(!cfg.memory.auto);
         assert_eq!(cfg.isolation_policy, IsolationPolicy::All);
+    }
+
+    #[test]
+    fn system_setters_write_through() {
+        let mut aurora = test_aurora();
+        aurora.set_after_launch(AfterLaunch::Keep);
+        aurora.set_check_updates(false);
+        aurora.set_default_java(Some(PathBuf::from("C:/jdk/bin/java.exe")));
+        aurora.set_skipped_update_version(Some("0.3.0".to_owned()));
+        aurora.set_notified_update_version(Some("0.3.1".to_owned()));
+
+        let cfg = aurora.config();
+        assert_eq!(cfg.after_launch, AfterLaunch::Keep);
+        assert!(!cfg.check_updates);
+        assert_eq!(
+            cfg.default_java.as_deref(),
+            Some(Path::new("C:/jdk/bin/java.exe"))
+        );
+        assert_eq!(cfg.skipped_update_version.as_deref(), Some("0.3.0"));
+        assert_eq!(cfg.notified_update_version.as_deref(), Some("0.3.1"));
+
+        aurora.set_default_java(None);
+        assert!(aurora.config().default_java.is_none());
     }
 
     #[test]

@@ -14,12 +14,12 @@ aurora-install = { path = "../aurora-install" }
 aurora-modplatform = { path = "../aurora-modplatform" }
 aurora-modpack = { path = "../aurora-modpack" }
 aurora-launch = { path = "../aurora-launch" }
-# 仅用于在门面结构里持有由 aurora-base 工厂构建的 reqwest::Client 并克隆分发；本 crate 不直接调
-# reqwest 的方法，TLS/json 等特性由 aurora-base 统一开启（default-features=false 规避 native-tls）。
+# 门面里持有由 aurora-base 工厂构建的 reqwest::Client 并克隆分发；资讯直接用它发 GET（只用核心方法，
+# 不开 json 特性，自己走 serde_json）。TLS 等特性由 aurora-base 统一开启（default-features=false 规避 native-tls）。
 reqwest = { version = "0.13", default-features = false }
 # 门面里跑批量下载/安装(rt)、事件与日志 channel(sync)、Java 探测走 spawn_blocking(rt)、
-# 实例/历史/整合包落盘(fs、io-util)、进度事件节流(time)。
-tokio = { version = "1", default-features = false, features = ["rt", "sync", "fs", "io-util", "time"] }
+# 实例/历史/整合包落盘(fs、io-util)、进度事件节流与各类限时(time)、服务器状态查询的 TCP 连接(net)。
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "fs", "io-util", "time", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -39,6 +39,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 原版材质服务：校验客户端 jar 与全景对象的哈希、给远程皮肤与缩略图按地址取缓存键。
 sha1 = "0.11"
+# 内存建议读本机物理内存总量与空闲量；只开 system，只刷 RAM。版本与 aurora-launch 一致。
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 # 网络逻辑用 wiremock 本地 mock 验证（需真正后台运行时，multi_thread flavor）。

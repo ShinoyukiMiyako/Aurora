@@ -1,11 +1,14 @@
 //! Mojang `java_runtime` 清单的下载与安装（architecture.md aurora-java 小节 v1 项）。
 //!
-//! 流程：拉 `all.json`（平台 -> 组件 -> 条目）→ 按目标主版本挑组件 → 拉该组件的文件清单
-//! → 逐个文件按 raw 直链下载、sha1 校验后原子落盘。所有远端 URL 都先经 aurora-base 的镜像
-//! 改写（官方源直连或 BMCLAPI 镜像），HTTP 客户端由外部注入以便单测走本地 mock。
+//! 流程：拉 `all.json`（平台 -> 组件 -> 条目）→ 按目标主版本挑组件 → 拉该组件的文件清单，
+//! 得到一份 [`RuntimePlan`]（每个文件的落盘路径、官方直链、sha1 与大小）。
 //!
-//! sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 aurora-base 的 `HashMismatch`
-//! （可重试），于是一次损坏下载会自动重新拉取，而不是把坏文件留在盘上。
+//! 文件本身怎么下由调用方决定：有下载池的上层把计划转成批量下载任务（并发、换源、进度、已就绪
+//! 文件按 sha1 跳过），下完再调 [`RuntimePlan::finalize`] 建目录、设可执行位、建链接；
+//! [`JavaRuntimeInstaller::install`] 是不依赖下载池的逐文件版本，同样跳过 sha1 已对上的文件。
+//!
+//! 清单与逐文件下载的 sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 aurora-base 的
+//! `HashMismatch`（可重试），于是一次损坏下载会自动重新拉取，而不是把坏文件留在盘上。
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -96,8 +99,84 @@ pub struct FileDownloads {
 pub struct DownloadRef {
     /// 对象 sha1（下载后逐文件校验）。
     pub sha1: String,
+    /// 对象大小（字节）。清单通常都给，缺省时下载进度没有总字节数。
+    #[serde(default)]
+    pub size: Option<u64>,
     /// 对象直链（官方域名，下载前经镜像改写）。
     pub url: String,
+}
+
+/// 一次运行时安装要做的全部事情。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePlan {
+    /// 组件名，如 `java-runtime-gamma`。
+    pub component: String,
+    /// 组件版本（由清单声明的 `version.name` 解析）。
+    pub version: JavaVersion,
+    /// 安装后 java 可执行文件的绝对路径。
+    pub java_executable: PathBuf,
+    /// 要下载的文件，按清单里的相对路径排序。
+    pub files: Vec<RuntimeFile>,
+    /// 清单显式列出的目录（含空目录）。
+    pub directories: Vec<PathBuf>,
+    /// 符号链接（只有 mac/linux 运行时会出现）。
+    pub links: Vec<RuntimeLink>,
+}
+
+/// 计划里的一个文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeFile {
+    /// 落盘绝对路径。
+    pub path: PathBuf,
+    /// 官方直链（未经镜像改写；换源由下载方按自己的源策略做）。
+    pub url: String,
+    /// 期望 sha1。
+    pub sha1: String,
+    /// 期望大小（字节）。
+    pub size: Option<u64>,
+    /// 是否需要可执行权限（Unix 生效）。
+    pub executable: bool,
+}
+
+/// 计划里的一个符号链接。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLink {
+    /// 链接本身的绝对路径。
+    pub path: PathBuf,
+    /// 链接指向的目标（清单原样给出的相对路径）。
+    pub target: String,
+}
+
+impl RuntimePlan {
+    /// 文件下载完之后收尾：建清单里的目录、给可执行文件加权限、建符号链接。
+    ///
+    /// 可重复调用：目录已在不报错，同名旧链接先删再建，重装同一运行时不会因为残留而失败。
+    pub async fn finalize(&self) -> Result<()> {
+        for dir in &self.directories {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|source| aurora_base::Error::Io {
+                    path: dir.clone(),
+                    source,
+                })?;
+        }
+        for file in &self.files {
+            set_executable(&file.path, file.executable)?;
+        }
+        for link in &self.links {
+            create_symlink(&link.target, &link.path)?;
+        }
+        Ok(())
+    }
+
+    /// 安装产物描述。
+    pub fn installed(&self) -> InstalledRuntime {
+        InstalledRuntime {
+            component: self.component.clone(),
+            version: self.version.clone(),
+            java_executable: self.java_executable.clone(),
+        }
+    }
 }
 
 /// 一次成功安装的结果。
@@ -168,8 +247,49 @@ impl JavaRuntimeInstaller {
         parse_json(&bytes, "java-runtime all.json")
     }
 
-    /// 为当前平台安装匹配 `required_major` 的运行时到 `install_dir`。
-    pub async fn install(&self, required_major: u32, install_dir: &Path) -> Result<InstalledRuntime> {
+    /// 为当前平台给出安装匹配 `required_major` 的运行时到 `install_dir` 的计划。
+    pub async fn plan(&self, required_major: u32, install_dir: &Path) -> Result<RuntimePlan> {
+        self.plan_for_platform(required_major, current_platform(), install_dir)
+            .await
+    }
+
+    /// 显式指定平台键的计划入口（测试用 `windows-x64` 注入，避开真实平台判定）。
+    pub async fn plan_for_platform(
+        &self,
+        required_major: u32,
+        platform: &str,
+        install_dir: &Path,
+    ) -> Result<RuntimePlan> {
+        let manifest = self.fetch_manifest().await?;
+        let platform_map = manifest
+            .get(platform)
+            .ok_or_else(|| Error::UnsupportedPlatform(platform.to_owned()))?;
+        let (component_name, component) =
+            select_component(platform_map, required_major).ok_or(Error::NoRuntimeForMajor {
+                major: required_major,
+            })?;
+
+        let files = self.fetch_component_files(component).await?;
+        let java_rel = locate_java_executable(&files).ok_or(Error::MissingJavaExecutable)?;
+        let version =
+            JavaVersion::parse(&component.version.name).ok_or_else(|| Error::JavaVersionParse {
+                output: component.version.name.clone(),
+            })?;
+        Ok(build_plan(
+            component_name,
+            version,
+            install_dir,
+            &files,
+            install_dir.join(java_rel),
+        ))
+    }
+
+    /// 为当前平台安装匹配 `required_major` 的运行时到 `install_dir`：逐文件下载，sha1 已对上的跳过。
+    pub async fn install(
+        &self,
+        required_major: u32,
+        install_dir: &Path,
+    ) -> Result<InstalledRuntime> {
         self.install_for_platform(required_major, current_platform(), install_dir)
             .await
     }
@@ -181,28 +301,12 @@ impl JavaRuntimeInstaller {
         platform: &str,
         install_dir: &Path,
     ) -> Result<InstalledRuntime> {
-        let manifest = self.fetch_manifest().await?;
-        let platform_map = manifest
-            .get(platform)
-            .ok_or_else(|| Error::UnsupportedPlatform(platform.to_owned()))?;
-        let (component_name, component) = select_component(platform_map, required_major)
-            .ok_or(Error::NoRuntimeForMajor {
-                major: required_major,
-            })?;
-
-        let files = self.fetch_component_files(component).await?;
-        self.download_files(&files, install_dir).await?;
-
-        let java_rel = locate_java_executable(&files).ok_or(Error::MissingJavaExecutable)?;
-        let version =
-            JavaVersion::parse(&component.version.name).ok_or_else(|| Error::JavaVersionParse {
-                output: component.version.name.clone(),
-            })?;
-        Ok(InstalledRuntime {
-            component: component_name.to_owned(),
-            version,
-            java_executable: install_dir.join(java_rel),
-        })
+        let plan = self
+            .plan_for_platform(required_major, platform, install_dir)
+            .await?;
+        self.download_missing(&plan).await?;
+        plan.finalize().await?;
+        Ok(plan.installed())
     }
 
     /// 拉取并校验某组件的文件清单（含对清单自身的 sha1 校验）。
@@ -214,9 +318,9 @@ impl JavaRuntimeInstaller {
         parse_json(&bytes, "java-runtime component manifest")
     }
 
-    /// 逐个文件下载落盘：目录建目录、文件校验后原子写、链接建符号链接。
-    async fn download_files(&self, files: &ComponentFiles, install_dir: &Path) -> Result<()> {
-        for (rel, entry) in &files.files {
+    /// 逐个文件下载计划里还没就绪的文件：已存在且 sha1 对上的直接跳过，其余校验后原子写。
+    async fn download_missing(&self, plan: &RuntimePlan) -> Result<()> {
+        for file in &plan.files {
             if self
                 .cancel
                 .as_ref()
@@ -224,29 +328,12 @@ impl JavaRuntimeInstaller {
             {
                 return Err(Error::Cancelled);
             }
-            let target = install_dir.join(rel_to_path(rel));
-            match entry {
-                FileEntry::Directory => {
-                    tokio::fs::create_dir_all(&target)
-                        .await
-                        .map_err(|source| aurora_base::Error::Io {
-                            path: target.clone(),
-                            source,
-                        })?;
-                }
-                FileEntry::File {
-                    downloads,
-                    executable,
-                } => {
-                    let url = mirror::rewrite(&downloads.raw.url, self.source)?;
-                    let bytes = self.get_verified_bytes(&url, &downloads.raw.sha1).await?;
-                    aurora_base::fs::atomic_write(&target, &bytes).await?;
-                    set_executable(&target, *executable)?;
-                }
-                FileEntry::Link { target: link_target } => {
-                    create_symlink(link_target, &target)?;
-                }
+            if is_ready(&file.path, &file.sha1).await {
+                continue;
             }
+            let url = mirror::rewrite(&file.url, self.source)?;
+            let bytes = self.get_verified_bytes(&url, &file.sha1).await?;
+            aurora_base::fs::atomic_write(&file.path, &bytes).await?;
         }
         Ok(())
     }
@@ -360,6 +447,53 @@ fn best_entry(entries: &[RuntimeComponent]) -> Option<&RuntimeComponent> {
         .max_by(|a, b| JavaVersion::parse(&a.version.name).cmp(&JavaVersion::parse(&b.version.name)))
 }
 
+/// 已存在且 sha1 与期望一致的文件视为就绪。读不了或对不上都当未就绪，交给下载覆盖。
+async fn is_ready(path: &Path, expected_sha1: &str) -> bool {
+    path.is_file()
+        && aurora_base::fs::verify_sha1(path, expected_sha1)
+            .await
+            .is_ok()
+}
+
+/// 把组件文件清单摊成计划：相对路径落到 `install_dir` 下，清单的 BTreeMap 顺序即计划顺序。
+fn build_plan(
+    component: &str,
+    version: JavaVersion,
+    install_dir: &Path,
+    files: &ComponentFiles,
+    java_executable: PathBuf,
+) -> RuntimePlan {
+    let mut plan = RuntimePlan {
+        component: component.to_owned(),
+        version,
+        java_executable,
+        files: Vec::new(),
+        directories: Vec::new(),
+        links: Vec::new(),
+    };
+    for (rel, entry) in &files.files {
+        let path = install_dir.join(rel_to_path(rel));
+        match entry {
+            FileEntry::Directory => plan.directories.push(path),
+            FileEntry::File {
+                downloads,
+                executable,
+            } => plan.files.push(RuntimeFile {
+                path,
+                url: downloads.raw.url.clone(),
+                sha1: downloads.raw.sha1.clone(),
+                size: downloads.raw.size,
+                executable: *executable,
+            }),
+            FileEntry::Link { target } => plan.links.push(RuntimeLink {
+                path,
+                target: target.clone(),
+            }),
+        }
+    }
+    plan
+}
+
 /// 从文件清单里定位 java 可执行文件的相对路径（`bin/java` 或 `bin/java.exe`）。
 fn locate_java_executable(files: &ComponentFiles) -> Option<PathBuf> {
     files
@@ -429,11 +563,17 @@ fn set_executable(_path: &Path, _executable: bool) -> Result<()> {
     Ok(())
 }
 
-/// 建立符号链接（Windows 运行时清单不含链接，此路为跨平台完整性兜底）。
+/// 建立符号链接（Windows 运行时清单不含链接，此路为跨平台完整性兜底）。同名旧链接先删掉。
 fn create_symlink(target: &str, link: &Path) -> Result<()> {
     if let Some(parent) = link.parent() {
         std::fs::create_dir_all(parent).map_err(|source| aurora_base::Error::Io {
             path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    if std::fs::symlink_metadata(link).is_ok() {
+        std::fs::remove_file(link).map_err(|source| aurora_base::Error::Io {
+            path: link.to_path_buf(),
             source,
         })?;
     }
@@ -699,6 +839,98 @@ mod tests {
         assert!(err.is_cancelled(), "应为取消，实际：{err:?}");
         assert!(cancelled_at.elapsed() < Duration::from_millis(1000));
         assert!(!dir.path().join("bin").join("java.exe").exists());
+    }
+
+    /// 计划给出每个文件的落盘路径、官方直链、sha1 与大小，且只拉清单、不下任何对象文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plan_lists_files_without_downloading_objects() {
+        let server = MockServer::start().await;
+        let (gamma_java, gamma_lib) = mount_full_manifest(&server).await;
+        let base = server.uri();
+        let client = aurora_base::http::build_client().unwrap();
+        let installer = fast_installer(client, &base);
+        let dir = tempfile::tempdir().unwrap();
+
+        let plan = installer
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .expect("计划应成功");
+
+        assert_eq!(plan.component, "java-runtime-gamma");
+        assert_eq!(
+            plan.java_executable,
+            dir.path().join("bin").join("java.exe")
+        );
+        assert_eq!(plan.directories, vec![dir.path().join("bin")]);
+        assert!(plan.links.is_empty());
+        assert_eq!(
+            plan.files,
+            vec![
+                RuntimeFile {
+                    path: dir.path().join("bin").join("java.exe"),
+                    url: format!("{base}/objects/gamma-java"),
+                    sha1: sha1_hex(&gamma_java),
+                    size: Some(gamma_java.len() as u64),
+                    executable: true,
+                },
+                RuntimeFile {
+                    path: dir.path().join("lib").join("rt"),
+                    url: format!("{base}/objects/gamma-lib"),
+                    sha1: sha1_hex(&gamma_lib),
+                    size: Some(gamma_lib.len() as u64),
+                    executable: false,
+                },
+            ]
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.url.path().starts_with("/objects/")),
+            "计划阶段不应下载对象文件"
+        );
+        assert!(!dir.path().join("bin").exists(), "计划阶段不落盘");
+
+        plan.finalize().await.unwrap();
+        assert!(dir.path().join("bin").is_dir(), "收尾应建出清单里的目录");
+    }
+
+    /// 第二次安装同一运行时：sha1 已对上的文件一个都不重下；只有被改坏的那个会重下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reinstall_skips_files_already_in_place() {
+        let server = MockServer::start().await;
+        mount_full_manifest(&server).await;
+        let client = aurora_base::http::build_client().unwrap();
+        let installer = fast_installer(client, &server.uri());
+        let dir = tempfile::tempdir().unwrap();
+        let object_requests = |requests: &[Request]| {
+            requests
+                .iter()
+                .filter(|r| r.url.path().starts_with("/objects/"))
+                .count()
+        };
+
+        installer
+            .install_for_platform(17, "windows-x64", dir.path())
+            .await
+            .unwrap();
+        let after_first = object_requests(&server.received_requests().await.unwrap());
+        assert_eq!(after_first, 2);
+
+        installer
+            .install_for_platform(17, "windows-x64", dir.path())
+            .await
+            .unwrap();
+        let after_second = object_requests(&server.received_requests().await.unwrap());
+        assert_eq!(after_second, 2, "已就绪的文件不应再请求");
+
+        std::fs::write(dir.path().join("lib").join("rt"), b"tampered").unwrap();
+        installer
+            .install_for_platform(17, "windows-x64", dir.path())
+            .await
+            .unwrap();
+        let after_third = object_requests(&server.received_requests().await.unwrap());
+        assert_eq!(after_third, 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "title": "Halloween on Realms",
+      "tag": "News",
+      "category": "Minecraft: Java Edition",
+      "date": "2026-10-30",
+      "text": "12 new maps to send a shiver down your spine!",
+      "playPageImage": {
+        "title": "halloweenralms_700x466.jpg",
+        "url": "/v2/images/halloweenralms700x466.jpg"
+      },
+      "newsPageImage": {
+        "title": "halloweenrealms_772x350.jpg",
+        "url": "/v2/images/halloweenrealms772x350.jpg",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/halloween-on-realms?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "Java",
+        "News page"
+      ],
+      "id": "82411625b4ff68af6a5d7cefed84c45ec777208b9dadab44ec6bd571882a547c",
+      "needsTranslation": false
+    },
+    {
+      "title": "Rob a Mob",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-29",
+      "text": "Plan the perfect heist in Rob a Mob, a new collect-and-steal adventure. Hunt valuable mobs, discover rare mutations, and build your collection. Unlock PvP to raid rival bases and steal their best mobs. Just remember to defend your mobs too!",
+      "playPageImage": {
+        "title": "RAM_Launcher_700x466.png",
+        "url": "/v2/images/RAMLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "RAM_Launcher_772x350.png",
+        "url": "/v2/images/RAMLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/rob-a-mob?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "969063a1cd030be04ef07c7614fec88d9f1d45237ad5baac8d5b73dcf731c767",
+      "needsTranslation": true
+    },
+    {
+      "title": "Enter the Marketplace, if you dare",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-20",
+      "text": "Looking for a scary good time? Explore seven frightfully fun Spooky Spotlight packs! Discover creepy creatures, eerie environments, jarring jump scares, and chilling challenges. What are you waiting for? Enter the Marketplace...if you dare! ",
+      "playPageImage": {
+        "title": "MKPL_SpookySpotlight_Launcher_700x466.png",
+        "url": "/v2/images/MKPLSpookySpotlightLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "MKPL_SpookySpotlight_Launcher_772x350.png",
+        "url": "/v2/images/MKPLSpookySpotlightLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://minecraft.net/article/marketplace-spotlight-october-2026?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "aa44585aa5999900c6a678f221a145b930b5cf5106cbf43e91a9718ad97971e5",
+      "needsTranslation": true
+    },
+    {
+      "title": "Avatar Legends add-on  ",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-16",
+      "text": "Become the Avatar in Minecraft! Discover temples, master the elements, and even unlock the Avatar State. Dress for the occasion with the Blue Spirit mask Character Creator item, available for free in the Marketplace, for a limited time!",
+      "playPageImage": {
+        "title": "AvatarLegends_Launcher_700x466.png",
+        "url": "/v2/images/AvatarLegendsLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "AvatarLegends_Launcher_772x350.png",
+        "url": "/v2/images/AvatarLegendsLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/avatar-legends-add-on?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "b456b9804ffc7e0236e5ff65ea2a0fc36043270ac6ad6e7e660f4e0958dc8dba",
+      "needsTranslation": true
+    },
+    {
+      "title": "Minecraft Realms  ",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-08",
+      "text": "Bring your Wilderness Bound expedition into Minecraft Realms! Gather up to 10 explorers from any Bedrock platform for an expedition through the dappled forest. Subscribe today!",
+      "playPageImage": {
+        "title": "MCV_FallDrop_Realms_Primary_MinecraftLauncher_700x466.png",
+        "url": "/v2/images/MCVFallDropRealmsPrimaryMinecraftLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "MCV_FallDrop_Realms_Primary_MinecraftLauncher_772x350.png",
+        "url": "/v2/images/MCVFallDropRealmsPrimaryMinecraftLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/wilderness-bound-realms?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "dd69791f65d7b210ed1ebc68adb0124f27491396e021a90926b8cfd1911703a2",
+      "needsTranslation": true
+    },
+    {
+      "title": "Minecraft Dungeons II is live",
+      "tag": "News",
+      "category": "Minecraft Dungeons II",
+      "date": "2026-09-28",
+      "text": "Time to brave the unknown and save the day!",
+      "playPageImage": {
+        "title": "dungeons_launch_700x466.jpg",
+        "url": "/v2/images/dungeonslaunch700x466.jpg"
+      },
+      "newsPageImage": {
+        "title": "dungeons_launch_772x350.jpg",
+        "url": "/v2/images/dungeonslaunch772x350.jpg",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/minecraft-dungeons-ii-is-live?OCID=Launcher",
+      "cardBorder": true,
+      "articleBody": "",
+      "newsType": [
+        "Dungeons",
+        "DungeonsII",
+        "News page"
+      ],
+      "id": "24bf2eef916f4b81af8e781a968b8e7768ac7d829d7426f099203f62d4e99490",
+      "needsTranslation": false
+    },
+    {
+      "title": "New on Java Realms: Grinding & Galaxy",
+      "tag": "News",
+      "category": "Minecraft: Java Edition",
+      "date": "2026-09-28",
+      "text": "9 maps to entertain you this autumn.",
+      "playPageImage": {
+        "title": "jr-sep-700x466.jpg",
+        "url": "/v2/images/jrsep700x466.jpg"
+      },
+      "newsPageImage": {
+        "title": "jr-sep-772x350.jpg",
+        "url": "/v2/images/jrsep772x350.jpg",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/new-on-java-realms--grinding-and-galaxy?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "Java",
+        "News page"
+      ],
+      "id": "78414c42c91674ca52934326ba3713477483080ed92e37d21c1f0f183646a80e",
+      "needsTranslation": false
+    },
+    {
+      "title": "Camp Out Challenge",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-09-26",
+      "text": "Head into the wild to place 200M cushions and 50M straw beds in our community challenge! Place 50% of both to unlock 2 free Character Creator items and a java skin, or place them all before Friday October 2 at 10 AM PT for MORE rewards for all players!",
+      "playPageImage": {
+        "title": "MCLauncher_700x466.png",
+        "url": "/v2/images/MCLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "MCLauncher_772x350.png",
+        "url": "/v2/images/MCLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/camp-out-community-challenge?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "Java",
+        "News page",
+        "Bedrock"
+      ],
+      "id": "deb8f187feb8d44c54ab18e21949f528428953e2baf90bc6a36eaba136aaa8c9",
+      "needsTranslation": true
+    }
+  ]
+}
