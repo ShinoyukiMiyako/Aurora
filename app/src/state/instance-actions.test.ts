@@ -127,3 +127,81 @@ describe("删除实例时取消它的全部任务", () => {
     expect(store.getState().instances.map((i) => i.id)).toEqual(["创造"]);
   });
 });
+
+describe("新建实例入队即成为当前实例，侧栏有空位时安装期间就固定", () => {
+  const spec = { name: "新世界", mcVersion: "1.21.1", loader: "vanilla" as const, loaderVersion: null, cover: "grass" };
+  let install: Deferred<{ id: string }>;
+
+  async function restart(pins: string[]): Promise<void> {
+    store.stop();
+    resetRecorder(ipc);
+    bootOverrides(ipc, { pins });
+    instances = [instanceDto("生存"), instanceDto("创造")];
+    ipc.overrides.set("list_instances", () => instances);
+    install = deferred<{ id: string }>();
+    ipc.overrides.set("install_version", () => install.promise);
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    store = await startedStore();
+  }
+
+  async function finish(): Promise<void> {
+    instances = [...instances, instanceDto("新世界")];
+    install.resolve({ id: "新世界" });
+    await settle();
+  }
+
+  it("有空位：占位项排在侧栏末尾并设为当前实例；装好后写进固定列表", async () => {
+    await restart(["生存"]);
+    await store.actions.createInstance(spec);
+    expect(store.getState().selectedInstanceId).toBe("新世界");
+    expect(callsOf(ipc, "update_config")).toEqual([{ selectedVersion: "新世界" }]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+    expect(store.getState().instances.find((i) => i.id === "新世界")).toMatchObject({ placeholder: true, pinned: true, status: "installing" });
+    // 实例目录装好前后端不认这个 id，不写固定列表
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+
+    await finish();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "新世界"] }]);
+    expect(store.getState().sidebarPins).toEqual(["生存", "新世界"]);
+  });
+
+  it("侧栏已满 5 个：不固定，装好后也不固定", async () => {
+    await restart(["a", "b", "c", "d", "e"]);
+    await store.actions.createInstance(spec);
+    expect(store.getState().sidebarPins).toEqual(["a", "b", "c", "d", "e"]);
+    await finish();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+  });
+
+  it("安装期间取消固定：只改装好后的打算，不调后端；拖动排序不把占位项写进固定列表", async () => {
+    await restart(["生存"]);
+    await store.actions.createInstance(spec);
+    await store.actions.setSidebarPins(["新世界", "生存"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存"] }]);
+    await store.actions.togglePin("新世界");
+    expect(store.getState().sidebarPins).toEqual(["生存"]);
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(1);
+    await finish();
+    expect(callsOf(ipc, "set_sidebar_pins")).toHaveLength(1);
+  });
+
+  it("新建流程收尾再设一次当前实例时不重复写配置", async () => {
+    await restart([]);
+    await store.actions.createInstance(spec);
+    await store.actions.selectInstance("新世界");
+    expect(callsOf(ipc, "update_config")).toEqual([{ selectedVersion: "新世界" }]);
+    await store.actions.selectInstance("生存");
+    expect(callsOf(ipc, "update_config")).toEqual([{ selectedVersion: "新世界" }, { selectedVersion: "生存" }]);
+  });
+
+  it("占位项占着第 5 个位置时，再固定别的实例按已满处理", async () => {
+    await restart(["a", "b", "c", "d"]);
+    await store.actions.createInstance(spec);
+    await store.actions.togglePin("创造");
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([]);
+    expect(store.getState().toasts.map((t) => t.tone)).toContain("warning");
+  });
+});

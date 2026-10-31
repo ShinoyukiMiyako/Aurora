@@ -178,7 +178,19 @@ export type AuthlibLoginOutcome =
 
 /** 入队时记下的、完成落地要用的上下文。任务日志不保存它：重启后恢复的任务按命令参数推出能推出的部分。 */
 type TaskMeta =
-  | { type: "create"; name: string; mcVersion: string; loader: LoaderKind; loaderVersion: string | null; cover: string | null }
+  | {
+      type: "create";
+      name: string;
+      mcVersion: string;
+      loader: LoaderKind;
+      loaderVersion: string | null;
+      cover: string | null;
+      /**
+       * 入队时侧栏还有空位：安装期间占位项就显示在侧栏末尾（带安装进度）。实例目录装好之前后端不认这个 id，
+       * 所以安装期间只在派生状态里固定，装好后再写进侧栏固定列表。
+       */
+      autoPin: boolean;
+    }
   | {
       type: "modpack";
       name: string;
@@ -225,6 +237,7 @@ export interface LauncherState {
   instances: InstanceSummary[];
   /** 主页「继续游玩」与快捷启动指向的实例；配置里的实例已不存在时为 null。 */
   selectedInstanceId: string | null;
+  /** 侧栏固定的实例，按顺序；末尾含安装中、入队时侧栏还有空位而自动固定的新实例。 */
   sidebarPins: string[];
   firstRun: boolean | null;
   session: SessionState | null;
@@ -410,6 +423,8 @@ function metaFromSpec(task: Task): TaskMeta | null {
         loader: loaderOfArg(nullableStrArg(args, "loader", command)),
         loaderVersion: nullableStrArg(args, "loaderVersion", command),
         cover: null,
+        // 重启后恢复的新建任务不知道当时侧栏的余量：按「有空位就固定」处理
+        autoPin: true,
       };
     case "install_modpack":
       return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
@@ -517,12 +532,14 @@ function deriveState(raw: RawState): LauncherState {
     };
   });
   const known = new Set(instances.map((i) => i.id.toLowerCase()));
+  const sidebarPins = [...raw.pins];
   for (const task of raw.tasks) {
     if (!isActiveTask(task)) continue;
     const meta = raw.taskMeta[task.id];
     if (meta === undefined || (meta.type !== "create" && meta.type !== "modpack")) continue;
     if (known.has(meta.name.toLowerCase())) continue;
     known.add(meta.name.toLowerCase());
+    if (meta.type === "create" && meta.autoPin && sidebarPins.length < SIDEBAR_PIN_LIMIT && !sidebarPins.includes(meta.name)) sidebarPins.push(meta.name);
     instances.push({
       id: meta.name,
       name: meta.name,
@@ -534,7 +551,7 @@ function deriveState(raw: RawState): LauncherState {
       javaMajor: null,
       description: null,
       cover: meta.cover,
-      pinned: raw.pins.includes(meta.name),
+      pinned: sidebarPins.includes(meta.name),
       status: "installing",
       brokenReason: null,
       createdAt: task.createdAt,
@@ -562,7 +579,7 @@ function deriveState(raw: RawState): LauncherState {
     currentAccountId: raw.currentAccountId,
     instances,
     selectedInstanceId: selected !== null && instances.some((i) => i.id === selected) ? selected : null,
-    sidebarPins: raw.pins,
+    sidebarPins,
     firstRun: raw.firstRun,
     session: raw.session,
     tasks: raw.tasks,
@@ -1143,15 +1160,26 @@ export class LauncherStore {
     return { label: TASK_TOAST.launchAction, run: () => this.actions.launch(instanceId), errorTitle: ACTION_ERROR.launch(instanceId) };
   }
 
-  /** 新建、导入的实例：写封面、侧栏没满时自动固定。 */
-  private async settleNewInstance(id: string, cover: string | null): Promise<void> {
+  /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。 */
+  private async settleNewInstance(id: string, cover: string | null, pin: boolean): Promise<void> {
     if (cover !== null) {
       const current = instanceSettingsFromDto(await instancesIpc.getInstanceSettings(id));
       await instancesIpc.setInstanceSettings(id, instanceSettingsToDto({ ...current, cover }));
     }
     const pins = this.raw.pins;
-    if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+    if (pin && pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
     await this.fetchInstances();
+  }
+
+  /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
+  private pendingCreate(id: string): { taskId: string; meta: Extract<TaskMeta, { type: "create" }> } | null {
+    if (this.raw.scanned.some((i) => i.id === id)) return null;
+    for (const task of this.raw.tasks) {
+      if (!isActiveTask(task)) continue;
+      const meta = this.raw.taskMeta[task.id];
+      if (meta !== undefined && meta.type === "create" && meta.name === id) return { taskId: task.id, meta };
+    }
+    return null;
   }
 
   /** 任务完成后的落地与通知（任务完成一律弹，不论用户此时在哪一页）。 */
@@ -1170,14 +1198,14 @@ export class LauncherStore {
     switch (meta.type) {
       case "create": {
         const id = (result as InstallResultDto).id;
-        await this.settleNewInstance(id, meta.cover);
+        await this.settleNewInstance(id, meta.cover, meta.autoPin);
         const copy = TASK_TOAST.ready(id);
         this.pushToast("success", copy.title, copy.body, this.launchAction(id));
         return;
       }
       case "modpack": {
         const id = (result as ModpackInstallOutcomeDto).version_id;
-        await this.settleNewInstance(id, meta.cover);
+        await this.settleNewInstance(id, meta.cover, true);
         // 重启后恢复的导入任务不知道 Mod 数，正文省略
         const copy = TASK_TOAST.imported(id, meta.modCount);
         this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, this.launchAction(id));
@@ -1502,24 +1530,36 @@ export class LauncherStore {
 
       // ---- 实例
       async selectInstance(id) {
+        // 已经是当前实例时不再写配置（新建实例入队时已设过，新建流程收尾可能再设一次）
+        if (store.raw.settings !== null && store.raw.settings.selectedVersion === id) return;
         await configIpc.updateConfig({ selectedVersion: id });
         store.set((raw) => ({ settings: raw.settings === null ? null : { ...raw.settings, selectedVersion: id } }));
       },
       async togglePin(id) {
-        const pins = store.raw.pins;
-        if (!pins.includes(id) && pins.length >= SIDEBAR_PIN_LIMIT) {
+        // 侧栏显示的固定项含安装中自动固定的新实例，上限按显示的算
+        const shown = store.getState().sidebarPins;
+        if (!shown.includes(id) && shown.length >= SIDEBAR_PIN_LIMIT) {
           store.pushToast("warning", TOAST_COPY.pinLimit);
           return;
         }
+        const pending = store.pendingCreate(id);
+        if (pending !== null) {
+          // 还在安装的新实例后端不认，只改它装好后要不要固定
+          store.set((raw) => ({ taskMeta: { ...raw.taskMeta, [pending.taskId]: { ...pending.meta, autoPin: !shown.includes(id) } } }));
+          return;
+        }
+        const pins = store.raw.pins;
         const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
         store.set({ pins: await instancesIpc.setSidebarPins(next) });
       },
       async setSidebarPins(ids) {
+        // 安装中自动固定的新实例总排在末尾，不写进固定列表（装好后才写）
+        const persisted = ids.filter((id) => store.pendingCreate(id) === null);
         const before = store.raw.pins;
-        store.set({ pins: ids });
+        store.set({ pins: persisted });
         // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
         try {
-          store.set({ pins: await instancesIpc.setSidebarPins(ids) });
+          store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
         } catch (error) {
           store.set({ pins: before });
           throw error;
@@ -1530,7 +1570,8 @@ export class LauncherStore {
         if (nameError !== null) throw new Error(nameError);
         if (spec.loader !== "vanilla" && spec.loaderVersion === null) throw new Error(`${spec.loader} 实例需要加载器版本`);
         const loader = spec.loader === "vanilla" ? null : spec.loader;
-        store.enqueue(
+        const autoPin = store.getState().sidebarPins.length < SIDEBAR_PIN_LIMIT;
+        const task = store.enqueue(
           {
             kind: "game",
             title: TASK_TEXT.createTitle(spec.mcVersion, spec.loader, spec.loaderVersion),
@@ -1538,9 +1579,11 @@ export class LauncherStore {
             instanceId: spec.name,
             spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name } },
           },
-          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover },
+          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover, autoPin },
           spec.name,
         );
+        // 新实例即成为当前实例：主页「继续游玩」显示它的安装进度
+        if (task !== null) await actions.selectInstance(spec.name);
         return spec.name;
       },
       async installModpack(spec) {
