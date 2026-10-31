@@ -1,7 +1,7 @@
 import { IpcError } from "../../errors";
 import type { GpuAdaptersDto, InstalledRuntimeDto, JavaInstallationDto, JavaPathProblem, JavaVersionDto, RemoveJavaPathDto } from "../../java";
 import { JAVA_PATH_INVALID, JAVA_RUNTIME_INCOMPLETE } from "../../java";
-import type { MockArgs, MockHandlers } from "../types";
+import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { addMockExtraJavaPath, MOCK_DATA_DIR, removeMockExtraJavaPath, requireString, samePath, setMockJavaPaths, tauriArgError } from "./config";
 import { simulateMockDownload } from "./system";
 import { beginMockTask, endMockTask } from "./tasks";
@@ -166,3 +166,12 @@ export function reset(): void {
   replaceInstallations(seedInstallations());
   gpu = seedGpuAdapters();
 }
+
+// 配置里的手动 Java 与默认 Java 会随配置快照留下；探测结果不一起留，刷新后它们就对不上探测结果，手动项会显示成识别不出。
+export const persist: MockPersist = {
+  version: 1,
+  snapshot: (): JavaInstallationDto[] => installations,
+  restore: (data) => {
+    setMockJavaInstallations(data as JavaInstallationDto[]);
+  },
+};

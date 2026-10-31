@@ -76,12 +76,14 @@ describe("mock 持久化", () => {
       projectId: "faithful-32x",
       fileVersionId: "f32-1211",
     });
+    await first.mockInvoke("add_java_path", { path: "D:\\Portable\\jdk-17\\bin\\javaw.exe" });
     expect(storage.keys()).toEqual([
       "slug.mock.accounts",
       "slug.mock.appearance",
       "slug.mock.config",
       "slug.mock.discover",
       "slug.mock.instances",
+      "slug.mock.java",
       "slug.mock.mods",
       "slug.mock.system",
     ]);
@@ -93,6 +95,12 @@ describe("mock 持久化", () => {
     expect(await second.mockInvoke("is_first_run")).toBe(false);
     expect(await second.mockInvoke("get_appearance")).toEqual({ mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true });
     expect(await second.mockInvoke<{ download_concurrency: number }>("get_config")).toMatchObject({ download_concurrency: 16 });
+    // 手动添加的 Java 在配置与探测结果里都还在，不会刷新后变成识别不出。
+    const manualExe = "D:\\Portable\\jdk-17\\bin\\java.exe";
+    expect(await second.mockInvoke<{ extra_java_paths: string[] }>("get_config")).toMatchObject({ extra_java_paths: [manualExe] });
+    const detected = await second.mockInvoke<{ path: string; source: string; version: { major: number } }[]>("detect_java");
+    expect(detected.filter((j) => j.source === "manual").map((j) => [j.path, j.version.major])).toEqual([[manualExe, 17]]);
+    expect(detected).toHaveLength(3);
     expect((await second.mockInvoke<{ name: string }>("current_account"))?.name).toBe("Steve");
     const ids = (await second.mockInvoke<{ id: string; mod_count: number | null }[]>("list_instances")).map((i) => [i.id, i.mod_count]);
     expect(ids).toContainEqual(["樱花二周目", 12]);
