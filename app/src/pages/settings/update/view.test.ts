@@ -58,6 +58,12 @@ describe("更新卡各阶段", () => {
     expect([unsupported.title, unsupported.sub, unsupported.button.disabled]).toEqual(["当前环境不支持自动更新", "开发环境或调试模式下不检查更新", true]);
   });
 
+  it("不支持更新的原因分开说：发布构建没配签名公钥时不说成是开发环境", () => {
+    const pubkey = updateCardView(state({ kind: "unsupported", reason: "missing_pubkey" }), CTX);
+    expect([pubkey.title, pubkey.sub, pubkey.button.disabled]).toEqual(["当前环境不支持自动更新", "这个版本没有配置更新签名公钥，验不了更新包，所以不检查更新", true]);
+    expect(() => updateCardView(state({ kind: "unsupported", reason: null }), CTX)).toThrow("没有给出原因");
+  });
+
   it("后端信息到达之前不该渲染", () => {
     expect(() => updateCardView({ ...INITIAL_UPDATER_STATE }, CTX)).toThrow("更新信息到达之前");
   });

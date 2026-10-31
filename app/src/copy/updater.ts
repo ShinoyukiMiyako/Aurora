@@ -29,7 +29,11 @@ export const UPDATE_COPY = {
   checkFailed: "检查更新失败",
   retry: "重试",
   unsupported: "当前环境不支持自动更新",
-  unsupportedSub: "开发环境或调试模式下不检查更新",
+  /** 不支持的原因：调试构建不检查更新；发布构建没配签名公钥时验不了更新包，同样不检查。 */
+  unsupportedSub: {
+    debug_build: "开发环境或调试模式下不检查更新",
+    missing_pubkey: "这个版本没有配置更新签名公钥，验不了更新包，所以不检查更新",
+  },
   installingCard: "正在启动安装程序…",
   downloadFailedCard: (reason: string) => `下载失败：${reason}`,
   // 更新面板

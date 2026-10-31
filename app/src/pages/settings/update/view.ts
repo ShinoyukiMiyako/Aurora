@@ -55,8 +55,11 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
   });
 
   switch (phase.kind) {
-    case "unsupported":
-      return view(UPDATE_COPY.unsupported, UPDATE_COPY.unsupportedSub, button(UPDATE_COPY.check, "secondary", "check", { disabled: true }));
+    case "unsupported": {
+      // 后端只在不支持时给原因；不支持却没有原因属于后端违约
+      if (phase.reason === null) throw new Error("updater_info 报告不支持更新却没有给出原因");
+      return view(UPDATE_COPY.unsupported, UPDATE_COPY.unsupportedSub[phase.reason], button(UPDATE_COPY.check, "secondary", "check", { disabled: true }));
+    }
     case "idle": {
       if (state.currentVersion === null) throw new Error("更新信息到达之前不该渲染更新卡");
       return view(UPDATE_COPY.current(state.currentVersion), ctx.checkUpdates ? UPDATE_COPY.autoOn : UPDATE_COPY.autoOff, check());
