@@ -881,9 +881,12 @@ pub(crate) async fn set_sidebar_pins_with(
         .validate_sidebar_pins(&pins)
         .await
         .map_err(instance_error)?;
-    let mut aurora = facade.write().await;
-    aurora.set_sidebar_pins(pins.clone());
-    aurora.save_config().await?;
+    facade
+        .update(|aurora| {
+            aurora.set_sidebar_pins(pins.clone());
+            Ok::<_, CommandError>(())
+        })
+        .await?;
     Ok(pins)
 }
 
@@ -1119,10 +1122,9 @@ pub(crate) async fn delete_instance_with(
         .forget_play_records(id)
         .await
         .map_err(instance_error)?;
-    let mut aurora = facade.write().await;
-    if aurora.forget_instance(id) {
-        aurora.save_config().await?;
-    }
+    facade
+        .update_if_changed(|aurora| aurora.forget_instance(id))
+        .await?;
     Ok(DeleteOutcomeDto { existed })
 }
 
@@ -1164,10 +1166,9 @@ pub(crate) async fn rename_instance_with(
         .rename_play_records(id, new_name)
         .await
         .map_err(instance_error)?;
-    let mut aurora = facade.write().await;
-    if aurora.rename_instance_refs(id, new_name) {
-        aurora.save_config().await?;
-    }
+    facade
+        .update_if_changed(|aurora| aurora.rename_instance_refs(id, new_name))
+        .await?;
     Ok(RenameOutcomeDto {
         id: new_name.to_owned(),
     })
@@ -1717,12 +1718,14 @@ mod tests {
         let env = Env::new();
         let dir = env.vanilla("旧档");
         env.vanilla("留下");
-        {
-            let mut aurora = env.facade.write().await;
-            aurora.set_sidebar_pins(vec!["旧档".into(), "留下".into()]);
-            aurora.set_selected_version(Some("旧档".into()));
-            aurora.save_config().await.unwrap();
-        }
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["旧档".into(), "留下".into()]);
+                aurora.set_selected_version(Some("旧档".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
         let locks = InstanceLocks::default();
 
         let preview = preview_dto(
@@ -1800,12 +1803,14 @@ mod tests {
         let env = Env::new();
         let dir = env.vanilla("1.21.1");
         std::fs::write(dir.join("1.21.1.jar"), b"jar").unwrap();
-        {
-            let mut aurora = env.facade.write().await;
-            aurora.set_sidebar_pins(vec!["1.21.1".into()]);
-            aurora.set_selected_version(Some("1.21.1".into()));
-            aurora.save_config().await.unwrap();
-        }
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["1.21.1".into()]);
+                aurora.set_selected_version(Some("1.21.1".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
         let locks = InstanceLocks::default();
 
         let outcome = rename_instance_with(&env.facade, &locks, "1.21.1", "生存")

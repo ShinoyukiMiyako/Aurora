@@ -57,10 +57,12 @@ pub(crate) async fn set_pinned_servers_with(
             address: dto.address,
         })
         .collect();
-    let mut aurora = facade.write().await;
-    aurora.set_pinned_servers(servers)?;
-    aurora.save_config().await?;
-    Ok(aurora.pinned_servers().iter().map(pinned_dto).collect())
+    facade
+        .update(|aurora| {
+            aurora.set_pinned_servers(servers)?;
+            Ok(aurora.pinned_servers().iter().map(pinned_dto).collect())
+        })
+        .await
 }
 
 /// 游戏多人游戏列表里的服务器（游戏目录根与各版本目录的 servers.dat 合并去重），带是否已固定。

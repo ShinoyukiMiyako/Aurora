@@ -199,10 +199,7 @@ pub(crate) async fn update_config_with(
     raw: RawConfigPatch,
 ) -> Result<(), CommandError> {
     let patch = parse_patch(raw).await?;
-    let mut aurora = facade.write().await;
-    apply_patch(&mut aurora, patch)?;
-    aurora.save_config().await?;
-    Ok(())
+    facade.update(|aurora| apply_patch(aurora, patch)).await
 }
 
 async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
@@ -493,11 +490,24 @@ pub async fn add_game_directory(
     path: String,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
-    let dir = parse_named_directory(NamedDirectoryDto { name, path })?;
-    let mut aurora = facade.write().await;
-    aurora.add_game_directory(dir.name, dir.path);
-    aurora.save_config().await?;
-    Ok(())
+    add_game_directory_with(&facade, &name, &path).await
+}
+
+pub(crate) async fn add_game_directory_with(
+    facade: &Facade,
+    name: &str,
+    path: &str,
+) -> Result<(), CommandError> {
+    let dir = parse_named_directory(NamedDirectoryDto {
+        name: name.to_owned(),
+        path: path.to_owned(),
+    })?;
+    facade
+        .update(|aurora| {
+            aurora.add_game_directory(dir.name, dir.path);
+            Ok::<_, CommandError>(())
+        })
+        .await
 }
 
 /// 移除一个额外目录的记录（不动磁盘文件）。返回是否真的移除了一条。
@@ -506,12 +516,9 @@ pub async fn remove_game_directory(
     path: String,
     facade: State<'_, Facade>,
 ) -> Result<bool, CommandError> {
-    let mut aurora = facade.write().await;
-    let removed = aurora.remove_game_directory(Path::new(path.trim()));
-    if removed {
-        aurora.save_config().await?;
-    }
-    Ok(removed)
+    Ok(facade
+        .update_if_changed(|aurora| aurora.remove_game_directory(Path::new(path.trim())))
+        .await?)
 }
 
 /// 切换当前游戏目录并落盘；原目录收进其它文件夹。目标必须是此刻可访问的目录。
@@ -539,10 +546,12 @@ pub(crate) async fn set_game_directory_with(
         }
         .into());
     }
-    let mut aurora = facade.write().await;
-    aurora.switch_game_directory(target);
-    aurora.save_config().await?;
-    Ok(())
+    facade
+        .update(|aurora| {
+            aurora.switch_game_directory(target);
+            Ok::<_, CommandError>(())
+        })
+        .await
 }
 
 /// 检查一个候选目录：是否存在、是否已有游戏文件。路径须先通过游戏目录校验。
@@ -786,6 +795,36 @@ mod tests {
         }
         assert!(read_config(&facade).await.check_updates);
         assert!(!dir.path().join("config.json").exists());
+    }
+
+    /// 存盘失败：命令报错，门面里的配置保持原值，下载源、并发这类后续命令马上要读的值不会悄悄生效。
+    #[tokio::test]
+    async fn failed_save_leaves_the_running_config_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config.json")).unwrap();
+        let facade = facade_in(dir.path());
+
+        let err = update_config_with(
+            &facade,
+            RawConfigPatch {
+                download_source: Some("mirror_first".into()),
+                download_concurrency: Some(8),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::IO);
+        let dto = read_config(&facade).await;
+        assert_eq!(dto.download_source, DownloadSourcePolicy::Auto);
+        assert_eq!(dto.download_concurrency, 64);
+
+        let extra = dir.path().join("PCL2").join(".minecraft");
+        let err = add_game_directory_with(&facade, "PCL2", &extra.display().to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::IO);
+        assert_eq!(facade.snapshot().await.game_directories().await.len(), 1);
     }
 
     #[tokio::test]

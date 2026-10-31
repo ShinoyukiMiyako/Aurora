@@ -74,10 +74,12 @@ pub(crate) async fn complete_first_run_with(
         .collect::<Result<Vec<_>, _>>()?;
     // 建目录在拿写锁之前：盘慢或挂起时不连累其它命令。
     ensure_game_dir(&game_dir).await?;
-    let mut aurora = facade.write().await;
-    aurora.complete_first_run(game_dir, extras);
-    aurora.save_config().await?;
-    Ok(())
+    facade
+        .update(|aurora| {
+            aurora.complete_first_run(game_dir, extras);
+            Ok::<_, CommandError>(())
+        })
+        .await
 }
 
 #[cfg(test)]
