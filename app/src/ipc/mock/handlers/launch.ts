@@ -20,6 +20,7 @@ import {
 } from "../../launch";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
+import { acquireMockInstance, type MockInstanceHold } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 const MOCK_PID = 4242;
@@ -63,6 +64,8 @@ interface Occupant {
   phase: BusyDetail["phase"];
   startedAt: number;
   runningSince: number;
+  /** 实例占用：从启动一直持有到游戏退出，期间改名、删除、补全被拒绝，Mod 与设置的改动照常。 */
+  hold: MockInstanceHold;
 }
 
 interface PendingFailure {
@@ -179,9 +182,16 @@ async function launchGame(args: MockArgs): Promise<{ pid: number }> {
   const name = optionalStringArg("launch_game", args, "offlineName");
   if ((uuid === null) === (name === null)) throw new IpcError("invalid_argument", "启动需提供 account_uuid 与 offline_name 二者之一");
   if (occupant) throw busy(occupant);
-  beginMockTask(taskId);
+  // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），最后登记任务。
+  const hold = acquireMockInstance(versionId, "launching");
+  try {
+    beginMockTask(taskId);
+  } catch (error) {
+    hold.release();
+    throw error;
+  }
   const startedAt = Date.now();
-  occupant = { versionId, phase: "loading", startedAt, runningSince: startedAt };
+  occupant = { versionId, phase: "loading", startedAt, runningSince: startedAt, hold };
   logs.set(versionId, { path: `D:/mc/versions/${versionId}/logs/latest.log`, started_at: startedAt, lines: [], omitted: 0, ended: null });
   const failure = pendingFailure;
   pendingFailure = null;
@@ -206,11 +216,13 @@ async function launchGame(args: MockArgs): Promise<{ pid: number }> {
     }
   } catch (error) {
     occupant = null;
+    hold.release();
     throw error;
   } finally {
     endMockTask(taskId);
   }
-  occupant = { versionId, phase: "running", startedAt, runningSince: Date.now() };
+  hold.setActivity("running");
+  occupant = { versionId, phase: "running", startedAt, runningSince: Date.now(), hold };
   emitPhase(taskId, STAGES.length - 1);
   pushLines(versionId, [line("game", "info", "[12:00:00] [main/INFO]: Loading Minecraft")]);
   return { pid: MOCK_PID };
@@ -260,6 +272,8 @@ function finishGame(exitCode: number | null, killed: boolean, durationMs: number
       warnings: [],
     });
   }
+  // 收尾记账写完后放开占用，再推退出事件：前端收到退出时已经可以改名、删除
+  occupant.hold.release();
   occupant = null;
   const payload: GameExitEvent = { version_id: versionId, exit_code: exitCode, crashed, killed, duration_ms: durationMs };
   emitMockEvent(GAME_EXIT_EVENT, payload);
@@ -293,6 +307,45 @@ export function mockLaunchLog(versionId: string): LaunchLogDto | null {
 export function mockCrashReport(versionId: string): CrashReportDto | null {
   const report = crashes.get(versionId);
   return report === undefined ? null : report;
+}
+
+/**
+ * 实例删除后去掉它的游玩记录、会话日志与崩溃报告，之后新建的同名实例从零开始。后端的游玩记录在数据目录里按实例 id 记，
+ * 删除时显式清掉；日志与崩溃报告在实例目录里，随目录一起没了。只剩这个实例的日子一并删掉，免得统计里多出零分钟的一天。
+ */
+export function forgetMockLaunchRecords(versionId: string): void {
+  playTotals.delete(versionId);
+  for (const [date, day] of [...playDays.entries()]) {
+    day.delete(versionId);
+    if (day.size === 0) playDays.delete(date);
+  }
+  logs.delete(versionId);
+  crashes.delete(versionId);
+}
+
+/** 实例目录改名后，日志与报告里记的路径指向新目录。 */
+function relocated(path: string, from: string, to: string): string {
+  return path.replace(`/versions/${from}/`, `/versions/${to}/`);
+}
+
+function moveKey<V>(map: Map<string, V>, from: string, to: string, adjust: (value: V) => V = (value) => value): void {
+  const value = map.get(from);
+  if (value === undefined) return;
+  map.delete(from);
+  map.set(to, adjust(value));
+}
+
+/**
+ * 实例改名后它的游玩记录、会话日志与崩溃报告跟到新名字下：游玩记录由后端显式迁移，日志与报告随实例目录一起改名。
+ * 新名字下原有的记录先清掉，与后端迁移游玩记录的做法一致。
+ */
+export function renameMockLaunchRecords(from: string, to: string): void {
+  if (from === to) return;
+  forgetMockLaunchRecords(to);
+  moveKey(playTotals, from, to);
+  for (const day of playDays.values()) moveKey(day, from, to);
+  moveKey(logs, from, to, (log) => ({ ...log, path: relocated(log.path, from, to) }));
+  moveKey(crashes, from, to, (report) => ({ ...report, log_path: report.log_path === null ? null : relocated(report.log_path, from, to) }));
 }
 
 function rankMinutes(totals: Map<string, number>): InstanceMinutesDto[] {

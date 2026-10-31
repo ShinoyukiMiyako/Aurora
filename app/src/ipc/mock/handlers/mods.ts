@@ -24,7 +24,7 @@ import { byCodeUnit, findMockSource, newestFirst, sourceVersions, type MockProje
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { argReader, parsePlatform as parsePlatformArg, runMockTask, simulateDownload } from "./discover";
-import { mockInstanceFacts, mockInstanceIds } from "./instances";
+import { acquireMockInstance, mockInstanceFacts, mockInstanceIds, withMockInstance } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 const DISABLED_SUFFIX = ".disabled";
@@ -549,6 +549,7 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
   const platform = parsePlatformArg(read.string("platform"));
   const projectId = read.string("projectId");
   const modVersionId = read.string("modVersionId");
+  const hold = acquireMockInstance(versionId, "modifying");
   return runMockTask(taskId, async () => {
     const instance = mockInstance(versionId);
     stage(taskId, `准备从 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 安装模组到 ${versionId}`);
@@ -564,7 +565,7 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
     place(instance, result.items);
     stage(taskId, `模组 ${main.file_name} 已安装`);
     return { file_name: main.file_name, path: `${mockModsDir(versionId)}/${main.file_name}`, platform: main.platform };
-  });
+  }).finally(() => hold.release());
 }
 
 /**
@@ -592,42 +593,58 @@ export const handlers: MockHandlers = {
     const id = requireString(args.versionId, "versionId");
     return listMods(id, mockInstance(id));
   },
+  // 改动 Mod 与后端一样先校验参数、再占住实例（modifying）：与改名、删除、新建、补全互斥，与运行中的游戏兼容
   set_mod_enabled: (args) => {
     const id = requireString(args.versionId, "versionId");
-    const instance = mockInstance(id);
     const fileName = modFileName(args, id);
     if (typeof args.enabled !== "boolean") throw new Error("set_mod_enabled 缺少布尔参数 enabled");
-    busyCheck(id, fileName);
-    const key = ledgerKey(fileName);
-    const target = args.enabled ? key : `${key}${DISABLED_SUFFIX}`;
-    // 与后端一致：已是目标状态就原样返回，不动文件。
-    if (target === fileName) return `${mockModsDir(id)}/${fileName}`;
-    const targetPath = `${mockModsDir(id)}/${target}`;
-    if (hasFile(instance, target)) throw new IpcError("mod_state_conflict", `模组启禁状态切换失败: 目标文件已存在 ${targetPath}`);
-    const file = instance.files.find((f) => f.file_name === fileName);
-    if (!file) throw new IpcError("mod_platform_failed", `文件 IO 失败: ${targetPath}`);
-    file.file_name = target;
-    return targetPath;
+    const enabled = args.enabled;
+    return withMockInstance(id, "modifying", () => {
+      const instance = mockInstance(id);
+      busyCheck(id, fileName);
+      const key = ledgerKey(fileName);
+      const target = enabled ? key : `${key}${DISABLED_SUFFIX}`;
+      // 与后端一致：已是目标状态就原样返回，不动文件。
+      if (target === fileName) return `${mockModsDir(id)}/${fileName}`;
+      const targetPath = `${mockModsDir(id)}/${target}`;
+      if (hasFile(instance, target)) throw new IpcError("mod_state_conflict", `模组启禁状态切换失败: 目标文件已存在 ${targetPath}`);
+      const file = instance.files.find((f) => f.file_name === fileName);
+      if (!file) throw new IpcError("mod_platform_failed", `文件 IO 失败: ${targetPath}`);
+      file.file_name = target;
+      return targetPath;
+    });
   },
   remove_mod: (args) => {
     const id = requireString(args.versionId, "versionId");
-    const instance = mockInstance(id);
     const fileName = modFileName(args, id);
-    if (!hasFile(instance, fileName)) throw refuse(`${mockModsDir(id)}/${fileName}`, `mods 目录里没有 ${fileName}，可能已被移除`);
-    busyCheck(id, fileName);
-    instance.files = instance.files.filter((f) => f.file_name !== fileName);
-    const key = ledgerKey(fileName);
-    if (!present(instance, key)) instance.ledger = instance.ledger.filter((r) => r.file_name !== key);
-    const at = nowSeconds();
-    instance.history.push({ kind: "remove", id: nextEventId(instance.history, at), at, files: [fileName] });
+    withMockInstance(id, "modifying", () => {
+      const instance = mockInstance(id);
+      if (!hasFile(instance, fileName)) throw refuse(`${mockModsDir(id)}/${fileName}`, `mods 目录里没有 ${fileName}，可能已被移除`);
+      busyCheck(id, fileName);
+      instance.files = instance.files.filter((f) => f.file_name !== fileName);
+      const key = ledgerKey(fileName);
+      if (!present(instance, key)) instance.ledger = instance.ledger.filter((r) => r.file_name !== key);
+      const at = nowSeconds();
+      instance.history.push({ kind: "remove", id: nextEventId(instance.history, at), at, files: [fileName] });
+    });
   },
-  check_updates: (args) => checkUpdates(mockInstance(args.versionId)),
+  // 查更新会把反查到的身份回写卷宗，同样占住实例
+  check_updates: (args) => {
+    const id = requireString(args.versionId, "versionId");
+    return withMockInstance(id, "modifying", () => checkUpdates(mockInstance(id)));
+  },
   update_mod: async (args): Promise<ModUpdateOutcomeDto> => {
     const taskId = requireString(args.taskId, "taskId");
     const id = requireString(args.versionId, "versionId");
     const fileName = requireNonEmpty(args.fileName, "fileName");
     const modVersionId = requireNonEmpty(args.modVersionId, "modVersionId");
-    beginMockTask(taskId);
+    const hold = acquireMockInstance(id, "modifying");
+    try {
+      beginMockTask(taskId);
+    } catch (error) {
+      hold.release();
+      throw error;
+    }
     try {
       const instance = mockInstance(id);
       const row = instance.ledger.find((r) => r.file_name === ledgerKey(fileName));
@@ -644,6 +661,7 @@ export const handlers: MockHandlers = {
       return { file_name: main.file_name, path: `${mockModsDir(id)}/${main.file_name}`, platform: main.platform };
     } finally {
       endMockTask(taskId);
+      hold.release();
     }
   },
   list_mod_versions: (args) => {
