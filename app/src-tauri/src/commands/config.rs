@@ -568,9 +568,10 @@ pub(crate) async fn set_game_directory_with(
         }
         .into());
     }
+    let current = facade.snapshot().await.probe_current_game_dir().await;
     facade
         .update(|aurora| {
-            aurora.switch_game_directory(target);
+            aurora.switch_game_directory(target, &current);
             Ok::<_, CommandError>(())
         })
         .await

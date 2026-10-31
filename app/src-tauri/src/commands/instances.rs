@@ -2057,9 +2057,10 @@ mod tests {
     }
 
     async fn switch_game_dir(env: &Env, game_dir: &Path) {
+        let current = env.facade.snapshot().await.probe_current_game_dir().await;
         env.facade
             .update(|aurora| {
-                aurora.switch_game_directory(game_dir);
+                aurora.switch_game_directory(game_dir, &current);
                 Ok::<_, CommandError>(())
             })
             .await

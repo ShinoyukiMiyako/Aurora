@@ -53,6 +53,13 @@ pub struct FirstRunBaseline {
     current_exists: bool,
 }
 
+/// 切换游戏目录之前对当前目录做的一次限时探测，由 [`Aurora::probe_current_game_dir`] 取得。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentDirProbe {
+    path: PathBuf,
+    exists: bool,
+}
+
 /// 对一个候选目录的检查结果，供首次启动向导提示「这里已经有游戏文件」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameDirectoryInspection {
@@ -246,12 +253,24 @@ impl Aurora {
         extras.len() != before
     }
 
+    /// 限时探测此刻的当前目录在不在盘上，交给 [`Aurora::switch_game_directory`]。
+    ///
+    /// 要在拿门面写锁之前做：玩家多半正是因为当前目录所在的网络盘断了才要切走，对它同步 `is_dir`
+    /// 会卡上几十秒，持着写锁卡住，所有读配置的命令跟着排队，整个界面停住。
+    pub async fn probe_current_game_dir(&self) -> CurrentDirProbe {
+        let path = self.game_dir().to_path_buf();
+        let exists = probe_dir(&path).await;
+        CurrentDirProbe { path, exists }
+    }
+
     /// 把某个目录提为当前游戏目录。
     ///
     /// 原来的当前目录若在盘上存在就收进额外目录，否则切过去就再也找不回来了；从没建出来过的
-    /// 默认目录不收，免得列表里多一条永远不可达的记录。
-    pub fn switch_game_directory(&mut self, path: impl Into<PathBuf>) {
-        let previous_exists = self.game_dir().is_dir();
+    /// 默认目录不收，免得列表里多一条永远不可达的记录。在不在盘上看 `probe`（见
+    /// [`Aurora::probe_current_game_dir`]），这里不碰磁盘。探测之后当前目录已被换过时，探测结果
+    /// 说的不是它，按存在处理：多留一条不可达的记录无害，丢掉一个有存档的目录就找不回来了。
+    pub fn switch_game_directory(&mut self, path: impl Into<PathBuf>, probe: &CurrentDirProbe) {
+        let previous_exists = probe.exists || !same_path(&probe.path, self.game_dir());
         self.replace_current_directory(path.into(), previous_exists);
     }
 
@@ -445,8 +464,8 @@ mod tests {
     }
 
     /// 切换把原当前目录（在盘上存在时）收进额外目录，目标从额外目录里摘掉。
-    #[test]
-    fn switch_keeps_existing_previous_directory_reachable() {
+    #[tokio::test]
+    async fn switch_keeps_existing_previous_directory_reachable() {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join("Games").join(".minecraft");
         std::fs::create_dir_all(&current).unwrap();
@@ -456,7 +475,8 @@ mod tests {
             vec![named("PCL2", "E:\\PCL2\\.minecraft")],
         );
 
-        aurora.switch_game_directory("E:\\PCL2\\.minecraft");
+        let probe = aurora.probe_current_game_dir().await;
+        aurora.switch_game_directory("E:\\PCL2\\.minecraft", &probe);
 
         assert_eq!(aurora.game_dir(), Path::new("E:\\PCL2\\.minecraft"));
         assert_eq!(
@@ -468,33 +488,86 @@ mod tests {
     }
 
     /// 从没建出来过的默认目录不收进额外目录，免得列表里多一条永远不可达的记录。
-    #[test]
-    fn switch_drops_never_created_previous_directory() {
+    #[tokio::test]
+    async fn switch_drops_never_created_previous_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let default_dir = default_game_dir(tmp.path());
         let mut aurora = aurora_at(tmp.path(), &default_dir, Vec::new());
         let target = tmp.path().join("elsewhere");
 
-        aurora.switch_game_directory(&target);
+        let probe = aurora.probe_current_game_dir().await;
+        aurora.switch_game_directory(&target, &probe);
 
         assert_eq!(aurora.game_dir(), target);
         assert!(aurora.config().extra_game_directories.is_empty());
     }
 
-    #[test]
-    fn switching_to_the_same_directory_is_a_no_op() {
+    #[tokio::test]
+    async fn switching_to_the_same_directory_is_a_no_op() {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join(".minecraft");
         std::fs::create_dir_all(&current).unwrap();
         let mut aurora = aurora_at(tmp.path(), &current, Vec::new());
 
-        aurora.switch_game_directory(&current);
-        aurora.switch_game_directory(current.display().to_string().to_uppercase());
+        let probe = aurora.probe_current_game_dir().await;
+        aurora.switch_game_directory(&current, &probe);
+        aurora.switch_game_directory(current.display().to_string().to_uppercase(), &probe);
 
         assert!(aurora.config().extra_game_directories.is_empty());
         assert!(
             aurora.config().game_directory.is_none(),
             "没有真正切换就不写配置"
+        );
+    }
+
+    /// 切换时不看盘，只认拿锁之前那次探测：探测时还在、切换前一刻断开的网络盘目录照样收下，探测时就不在的
+    /// 不收。切换自己去访问磁盘的话，挂起的网络盘会让它持着门面写锁一直卡着。
+    #[tokio::test]
+    async fn switch_decides_from_the_probe_taken_before_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("NAS").join(".minecraft");
+        std::fs::create_dir_all(&current).unwrap();
+        let mut aurora = aurora_at(tmp.path(), &current, Vec::new());
+        let probe = aurora.probe_current_game_dir().await;
+        std::fs::remove_dir_all(tmp.path().join("NAS")).unwrap();
+
+        let local = tmp.path().join("Local");
+        aurora.switch_game_directory(&local, &probe);
+        assert_eq!(aurora.game_dir(), local);
+        assert_eq!(
+            aurora.config().extra_game_directories,
+            vec![named("NAS", current.clone())]
+        );
+
+        let missing = aurora.probe_current_game_dir().await;
+        std::fs::create_dir_all(&local).unwrap();
+        aurora.switch_game_directory(&current, &missing);
+        assert_eq!(aurora.game_dir(), current);
+        assert!(
+            aurora.config().extra_game_directories.is_empty(),
+            "探测时不在的目录不收：{:?}",
+            aurora.config().extra_game_directories
+        );
+    }
+
+    /// 探测之后当前目录已被别的命令换掉：探测说的不是它，宁可多留一条记录，也不把它当成不存在丢掉。
+    #[tokio::test]
+    async fn stale_probe_keeps_the_directory_it_did_not_look_at() {
+        let tmp = tempfile::tempdir().unwrap();
+        let never_created = default_game_dir(tmp.path());
+        let mut aurora = aurora_at(tmp.path(), &never_created, Vec::new());
+        let stale = aurora.probe_current_game_dir().await;
+
+        let games = tmp.path().join("Games").join(".minecraft");
+        aurora.switch_game_directory(&games, &stale);
+        assert!(aurora.config().extra_game_directories.is_empty());
+
+        let target = tmp.path().join("Other");
+        aurora.switch_game_directory(&target, &stale);
+        assert_eq!(aurora.game_dir(), target);
+        assert_eq!(
+            aurora.config().extra_game_directories,
+            vec![named("Games", games)]
         );
     }
 
