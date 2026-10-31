@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getConfig, setGameDirectory } from "../config";
 import { lastCrash, lastLaunchLog } from "../diagnostics";
 import { installMod, installResource } from "../discover";
 import { IpcError } from "../errors";
@@ -191,6 +192,67 @@ describe("mock 改名与删除带上游玩记录、崩溃报告与会话日志",
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS * (MOCK_INSTALL_STEPS + 2));
     await installing;
     expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 0, last_played_at: null, last_crash_at: null });
+  });
+});
+
+/** 种子数据的假磁盘上存在的另一个游戏目录。 */
+const OTHER_DIR = "D:\\HMCL\\.minecraft";
+
+describe("mock 的游玩记录与后端一样按游戏目录区分", () => {
+  it("换到另一个游戏目录：同名实例从零算起；在那边玩、改名、删除都不动原目录的记录", async () => {
+    const home = (await getConfig()).game_dir;
+    const before = await minutesOf(FABRIC);
+    const vanilla = await minutesOf("1.21");
+    if (before === null || vanilla === null) throw new Error(`种子数据里 ${FABRIC} 与 1.21 应当玩过`);
+
+    await setGameDirectory(OTHER_DIR);
+    expect((await listInstances()).find((i) => i.id === FABRIC)).toMatchObject({ playtime_min: 0, last_played_at: null });
+    expect(await playStats({ from: "2000-01-01", to: "2099-12-31" })).toMatchObject({ days: [], total_minutes: 0, instances: [] });
+
+    await launchGame(offline(FABRIC, "t-other"));
+    endMockGame(0, 10 * MINUTE);
+    expect(await minutesOf(FABRIC)).toBe(10);
+    await renameInstance(FABRIC, "那边的");
+    expect(await minutesOf("那边的")).toBe(10);
+    expect(await minutesOf(FABRIC)).toBeNull();
+
+    await setGameDirectory(home);
+    expect(await minutesOf(FABRIC)).toBe(before);
+    expect(await minutesOf("那边的")).toBeNull();
+    expect((await listInstances()).find((i) => i.id === "那边的")).toMatchObject({ playtime_min: 0, last_played_at: null });
+
+    await setGameDirectory(OTHER_DIR);
+    await deleteInstance("1.21");
+    await setGameDirectory(home);
+    expect(await minutesOf("1.21")).toBe(vanilla);
+    expect(await minutesOf(FABRIC)).toBe(before);
+  });
+
+  it("游戏运行期间换了游戏目录：这一局记回启动时的游戏目录", async () => {
+    const home = (await getConfig()).game_dir;
+    const before = await minutesOf("1.21");
+    if (before === null) throw new Error("种子数据里 1.21 应当玩过");
+
+    await launchGame(offline("1.21", "t-run"));
+    await setGameDirectory(OTHER_DIR);
+    endMockGame(0, 7 * MINUTE);
+    expect(await minutesOf("1.21")).toBeNull();
+
+    await setGameDirectory(home);
+    expect(await minutesOf("1.21")).toBe(before + 7);
+  });
+
+  it("游戏目录写法不同（大小写、斜杠方向、末尾分隔符）仍是同一本记录", async () => {
+    const home = (await getConfig()).game_dir;
+    await setGameDirectory("d:/hmcl/.minecraft/");
+    await launchGame(offline("1.21", "t-alias"));
+    endMockGame(0, 4 * MINUTE);
+
+    await setGameDirectory(home);
+    await setGameDirectory(OTHER_DIR);
+    expect((await getConfig()).game_dir).toBe(OTHER_DIR);
+    expect(await minutesOf("1.21")).toBe(4);
+    expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 4 });
   });
 });
 

@@ -1,6 +1,7 @@
 // 启动链路的假后端：八阶段推进、同一时间只运行一个游戏、结束与退出、游玩统计。
 // 游戏不会自己退出：浏览器里看界面时用 endMockGame 模拟正常退出或崩溃，用 failNextMockLaunch 模拟启动失败。
 
+import type { ConfigDto } from "../../config";
 import type { CrashReportDto, LaunchLogDto, SessionOutcome } from "../../diagnostics";
 import { IpcError } from "../../errors";
 import {
@@ -20,6 +21,7 @@ import {
 } from "../../launch";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
+import { handlers as configHandlers, samePath } from "./config";
 import { acquireMockInstance, type MockInstanceHold } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -66,6 +68,8 @@ interface Occupant {
   runningSince: number;
   /** 实例占用：从启动一直持有到游戏退出，期间改名、删除、补全被拒绝，Mod 与设置的改动照常。 */
   hold: MockInstanceHold;
+  /** 启动时的游戏目录：这一局记在它下面，游戏运行期间换了游戏目录也记回这里。 */
+  gameDir: string;
 }
 
 interface PendingFailure {
@@ -78,10 +82,35 @@ let occupant: Occupant | null = null;
 let pendingFailure: PendingFailure | null = null;
 let logs = new Map<string, LaunchLogDto>();
 let crashes = new Map<string, CrashReportDto>();
-/** 本地日期 -> 实例 id -> 毫秒。 */
-let playDays = new Map<string, Map<string, number>>();
-/** 实例 id -> 累计毫秒与上次游玩结束时刻；与后端一样，累计不受每日记录的保留窗口影响。 */
-let playTotals = new Map<string, { totalMs: number; lastPlayedAt: number }>();
+
+/** 一个游戏目录的游玩记录。 */
+interface PlayBook {
+  /** 记下时的游戏目录；与后端一样，比对时不分大小写与斜杠方向、忽略末尾分隔符。 */
+  gameDir: string;
+  /** 本地日期 -> 实例 id -> 毫秒。 */
+  days: Map<string, Map<string, number>>;
+  /** 实例 id -> 累计毫秒与上次游玩结束时刻；与后端一样，累计不受每日记录的保留窗口影响。 */
+  totals: Map<string, { totalMs: number; lastPlayedAt: number }>;
+}
+
+/**
+ * 与后端一样按游戏目录分开记：实例 id 只在一个游戏目录里唯一，换了游戏目录，同名的是另一个实例，不继承这边的时长。
+ * 列表、统计、改名与删除只看当前游戏目录。
+ */
+let playBooks: PlayBook[] = [];
+
+function mockConfig(): ConfigDto {
+  return configHandlers.get_config({}) as ConfigDto;
+}
+
+function findBook(gameDir: string): PlayBook | undefined {
+  return playBooks.find((book) => samePath(book.gameDir, gameDir));
+}
+
+/** 当前游戏目录的记录；没记过时为 undefined：改名、删除、列表与统计不凭空开一本空账，与后端一致。 */
+function currentBook(): PlayBook | undefined {
+  return findBook(mockConfig().game_dir);
+}
 
 function localDate(at: number): string {
   const d = new Date(at);
@@ -95,25 +124,32 @@ function accumulate(map: Map<string, number>, key: string, ms: number): void {
   map.set(key, before === undefined ? ms : before + ms);
 }
 
-function addPlay(versionId: string, at: number, ms: number): void {
-  const before = playTotals.get(versionId);
-  playTotals.set(versionId, {
+/** 记一局：这个游戏目录没记过时新开一本。 */
+function addPlay(gameDir: string, versionId: string, at: number, ms: number): void {
+  let book = findBook(gameDir);
+  if (book === undefined) {
+    book = { gameDir, days: new Map(), totals: new Map() };
+    playBooks.push(book);
+  }
+  const before = book.totals.get(versionId);
+  book.totals.set(versionId, {
     totalMs: before === undefined ? ms : before.totalMs + ms,
     lastPlayedAt: before === undefined ? at : Math.max(before.lastPlayedAt, at),
   });
   const date = localDate(at);
-  let day = playDays.get(date);
+  let day = book.days.get(date);
   if (day === undefined) {
     day = new Map<string, number>();
-    playDays.set(date, day);
+    book.days.set(date, day);
   }
   accumulate(day, versionId, ms);
 }
 
 // 近两周断续的游玩，让日历与洞察在浏览器里打开时不是空的。
-function seedPlay(): Map<string, Map<string, number>> {
-  playDays = new Map();
-  playTotals = new Map();
+function seedPlay(): void {
+  playBooks = [];
+  // 种子实例记在默认游戏目录下而不是当前目录：复位时配置可能还停在换过的目录上，这样不依赖各领域复位的先后。
+  const home = mockConfig().default_game_dir;
   const now = Date.now();
   // 实例 id 与实例 mock 的种子一致，实例列表里的游玩时长与这里的日历对得上。
   const pattern: [number, string, number][] = [
@@ -124,8 +160,7 @@ function seedPlay(): Map<string, Map<string, number>> {
     [7, "1.20.1-Fabric", 55],
     [11, "1.21", 15],
   ];
-  for (const [daysAgo, versionId, minutes] of pattern) addPlay(versionId, now - daysAgo * DAY_MS, minutes * MS_PER_MINUTE);
-  return playDays;
+  for (const [daysAgo, versionId, minutes] of pattern) addPlay(home, versionId, now - daysAgo * DAY_MS, minutes * MS_PER_MINUTE);
 }
 
 function emitPhase(taskId: string, stageIndex: number, download?: LaunchPhaseEvent["download"]): void {
@@ -191,7 +226,9 @@ async function launchGame(args: MockArgs): Promise<{ pid: number }> {
     throw error;
   }
   const startedAt = Date.now();
-  occupant = { versionId, phase: "loading", startedAt, runningSince: startedAt, hold };
+  // 与后端一样取启动这一刻的游戏目录（启动用的是那一刻的门面快照）。
+  const gameDir = mockConfig().game_dir;
+  occupant = { versionId, phase: "loading", startedAt, runningSince: startedAt, hold, gameDir };
   logs.set(versionId, { path: `D:/mc/versions/${versionId}/logs/latest.log`, started_at: startedAt, lines: [], omitted: 0, ended: null });
   const failure = pendingFailure;
   pendingFailure = null;
@@ -222,7 +259,7 @@ async function launchGame(args: MockArgs): Promise<{ pid: number }> {
     endMockTask(taskId);
   }
   hold.setActivity("running");
-  occupant = { versionId, phase: "running", startedAt, runningSince: Date.now(), hold };
+  occupant = { versionId, phase: "running", startedAt, runningSince: Date.now(), hold, gameDir };
   emitPhase(taskId, STAGES.length - 1);
   pushLines(versionId, [line("game", "info", "[12:00:00] [main/INFO]: Loading Minecraft")]);
   return { pid: MOCK_PID };
@@ -246,7 +283,7 @@ function finishGame(exitCode: number | null, killed: boolean, durationMs: number
   pushLines(versionId, [line("launcher", crashed ? "error" : "info", `游戏${crashed ? "异常" : ""}退出（退出码 ${code}）`)]);
   endLog(versionId, outcome);
   const exitedAt = Date.now();
-  addPlay(versionId, exitedAt, durationMs);
+  addPlay(occupant.gameDir, versionId, exitedAt, durationMs);
   if (crashed) {
     const matched = CRASH_TAIL[CRASH_TAIL.length - 1];
     const hit = log.lines.findIndex((l) => l.text === matched);
@@ -292,9 +329,11 @@ export function failNextMockLaunch(code: string, params: Record<string, string |
 }
 
 /** 诊断 mock 读取用。 */
-/** 某实例的累计游玩（分钟向下取整）与上次游玩；没玩过为 null。实例 mock 的列表据此给出游玩时长。 */
+/** 当前游戏目录里某实例的累计游玩（分钟向下取整）与上次游玩；没玩过为 null。实例 mock 的列表据此给出游玩时长。 */
 export function mockPlaySummary(versionId: string): { playtime_min: number; last_played_at: number } | null {
-  const total = playTotals.get(versionId);
+  const book = currentBook();
+  if (book === undefined) return null;
+  const total = book.totals.get(versionId);
   if (total === undefined) return null;
   return { playtime_min: Math.floor(total.totalMs / MS_PER_MINUTE), last_played_at: total.lastPlayedAt };
 }
@@ -309,16 +348,23 @@ export function mockCrashReport(versionId: string): CrashReportDto | null {
   return report === undefined ? null : report;
 }
 
+/** 去掉一个游戏目录里某实例的累计与每日记录。只剩这个实例的日子一并删掉，免得统计里多出零分钟的一天。 */
+function forgetPlay(book: PlayBook, versionId: string): void {
+  book.totals.delete(versionId);
+  for (const [date, day] of [...book.days.entries()]) {
+    day.delete(versionId);
+    if (day.size === 0) book.days.delete(date);
+  }
+}
+
 /**
- * 实例删除后去掉它的游玩记录、会话日志与崩溃报告，之后新建的同名实例从零开始。后端的游玩记录在数据目录里按实例 id 记，
- * 删除时显式清掉；日志与崩溃报告在实例目录里，随目录一起没了。只剩这个实例的日子一并删掉，免得统计里多出零分钟的一天。
+ * 实例删除后去掉它的游玩记录、会话日志与崩溃报告，之后新建的同名实例从零开始。后端的游玩记录在数据目录里按游戏目录与
+ * 实例 id 记，删除时显式清掉当前游戏目录下的那一份，别的游戏目录里的同名实例不受影响；日志与崩溃报告在实例目录里，随目录
+ * 一起没了。
  */
 export function forgetMockLaunchRecords(versionId: string): void {
-  playTotals.delete(versionId);
-  for (const [date, day] of [...playDays.entries()]) {
-    day.delete(versionId);
-    if (day.size === 0) playDays.delete(date);
-  }
+  const book = currentBook();
+  if (book !== undefined) forgetPlay(book, versionId);
   logs.delete(versionId);
   crashes.delete(versionId);
 }
@@ -336,14 +382,17 @@ function moveKey<V>(map: Map<string, V>, from: string, to: string, adjust: (valu
 }
 
 /**
- * 实例改名后它的游玩记录、会话日志与崩溃报告跟到新名字下：游玩记录由后端显式迁移，日志与报告随实例目录一起改名。
- * 新名字下原有的记录先清掉，与后端迁移游玩记录的做法一致。
+ * 实例改名后它的游玩记录、会话日志与崩溃报告跟到新名字下：游玩记录由后端显式迁移（只迁当前游戏目录下的），日志与报告随
+ * 实例目录一起改名。新名字下原有的记录先清掉，与后端迁移游玩记录的做法一致。
  */
 export function renameMockLaunchRecords(from: string, to: string): void {
   if (from === to) return;
   forgetMockLaunchRecords(to);
-  moveKey(playTotals, from, to);
-  for (const day of playDays.values()) moveKey(day, from, to);
+  const book = currentBook();
+  if (book !== undefined) {
+    moveKey(book.totals, from, to);
+    for (const day of book.days.values()) moveKey(day, from, to);
+  }
   moveKey(logs, from, to, (log) => ({ ...log, path: relocated(log.path, from, to) }));
   moveKey(crashes, from, to, (report) => ({ ...report, log_path: report.log_path === null ? null : relocated(report.log_path, from, to) }));
 }
@@ -376,7 +425,10 @@ function playStats(args: MockArgs): PlayStatsDto {
   }
   const totals = new Map<string, number>();
   const days: PlayDayDto[] = [];
-  for (const [date, perInstance] of [...playDays.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+  // 统计只看当前游戏目录；没记过的目录与后端一样读作一本空账。
+  const book = currentBook();
+  const recorded = book === undefined ? [] : [...book.days.entries()];
+  for (const [date, perInstance] of recorded.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     if (date < from || date > to) continue;
     let dayMs = 0;
     for (const [id, ms] of perInstance) {
