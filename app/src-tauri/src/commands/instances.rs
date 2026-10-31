@@ -22,7 +22,6 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
-use crate::commands::error::code as common_code;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -197,27 +196,11 @@ fn busy(id: &str, activity: InstanceActivity) -> CommandError {
 
 // ---------------------------------------------------------------- 错误映射
 
-/// 实例领域的门面错误：参数类问题报 `invalid_argument` 并在 detail 里给出字段与规则，依赖冲突单独成码，
-/// 其余照通用映射，并补上实例 id 等定位信息。
+/// 实例领域的门面错误：依赖冲突单独成码，其余照通用映射（参数类问题在那里统一报 `invalid_argument`），
+/// 并补上实例 id 等定位信息。
 fn instance_error(err: CoreError) -> CommandError {
     let message = err.to_string();
     let (code, detail) = match &err {
-        CoreError::Instance(InstanceError::InvalidId { id }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": "id", "reason": "unsafe_id", "id": id }),
-        ),
-        CoreError::Instance(InstanceError::InvalidName { name, violation }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": "name", "rule": violation.code(), "name": name }),
-        ),
-        CoreError::Instance(InstanceError::InvalidSettings { field, reason }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": field, "reason": reason }),
-        ),
-        CoreError::Instance(InstanceError::InvalidPins { reason, id }) => (
-            common_code::INVALID_ARGUMENT,
-            json!({ "field": "pins", "reason": reason.code(), "id": id }),
-        ),
         CoreError::Instance(InstanceError::HasDependents { id, dependents }) => (
             code::INSTANCE_HAS_DEPENDENTS,
             json!({ "id": id, "dependents": dependents }),
@@ -1163,7 +1146,8 @@ pub async fn preview_instance_deletion(
 }
 
 /// 把实例移入回收站，并从侧栏固定、当前选中与游玩记录里去掉它。实例在忙报 `instance_busy`，被依赖报
-/// `instance_has_dependents`；目录已不在时只清引用与记录、返回 `existed: false`。
+/// `instance_has_dependents`；目录已不在时只清引用与记录、返回 `existed: false`。目录与引用都已清掉、
+/// 只有游玩记录没清成时报 `play_records_failed`。
 #[tauri::command]
 pub async fn delete_instance(
     app: AppHandle,
@@ -1189,18 +1173,47 @@ pub(crate) async fn delete_instance_with(
         .await
         .map_err(instance_error)?;
     // 目录已不在（重复删除、在启动器外删掉）时也清：残留的记录会被之后新建的同名实例继承。
-    snapshot
-        .forget_play_records(id)
-        .await
-        .map_err(instance_error)?;
-    facade
+    let records = snapshot.forget_play_records(id).await;
+    let refs = facade
         .update_if_changed(|aurora| aurora.forget_instance(id))
-        .await?;
+        .await;
+    follow_up(refs, records, |err| {
+        play_records_failed(err, "实例已删除", json!({ "id": id }))
+    })?;
     Ok(DeleteOutcomeDto { existed })
+}
+
+/// 目录操作完成后的两步收尾：配置里的侧栏固定与当前选中、游玩记录。两步互不拦着，一步失败另一步照做：
+/// 记录没跟上就不改引用的话，侧栏固定与当前选中会一直指着已经不在的实例，重试也只会报实例不存在。
+/// 两步都失败时报引用的错误（界面上看得见的是它），记录的错误留在日志里，门面已记下待补。
+fn follow_up(
+    refs: Result<bool, CoreError>,
+    records: aurora_core::Result<()>,
+    records_failed: impl FnOnce(CoreError) -> CommandError,
+) -> Result<(), CommandError> {
+    match (refs, records) {
+        (Ok(_), Ok(())) => Ok(()),
+        (Ok(_), Err(err)) => Err(records_failed(err)),
+        (Err(refs), Ok(())) => Err(refs.into()),
+        (Err(refs), Err(records)) => {
+            tracing::error!(error = %records, "游玩记录也没能跟着改，已记下待补");
+            Err(refs.into())
+        }
+    }
+}
+
+/// 改名、删除本身已经做完、只差游玩记录：单独成码，前端照成功处理（刷新列表、迁移界面状态）再提示。
+fn play_records_failed(err: CoreError, done: &str, extra: Value) -> CommandError {
+    let mut mapped = CommandError::from(err);
+    mapped.code = code::PLAY_RECORDS_FAILED;
+    mapped.message = format!("{done}，但游玩记录没能跟着改：{}", mapped.message);
+    merge_detail(&mut mapped, extra);
+    mapped
 }
 
 /// 实例改名：目录、版本 JSON（文件名与 id）、jar、natives、游玩记录、侧栏固定与当前选中一起改。
 /// 新名字按命名规则校验（报 `invalid_argument`，detail.rule 为规则码）；实例在忙报 `instance_busy`。
+/// 目录与引用都已改好、只有游玩记录没跟上时报 `play_records_failed`，detail.renamed_to 为新名字。
 #[tauri::command]
 pub async fn rename_instance(
     app: AppHandle,
@@ -1233,13 +1246,17 @@ pub(crate) async fn rename_instance_with(
         .await
         .map_err(instance_error)?;
     // 游玩记录以实例 id 为键，不跟着挪的话改名后的实例在列表与统计里就成了从没玩过。
-    snapshot
-        .rename_play_records(id, new_name)
-        .await
-        .map_err(instance_error)?;
-    facade
+    let records = snapshot.rename_play_records(id, new_name).await;
+    let refs = facade
         .update_if_changed(|aurora| aurora.rename_instance_refs(id, new_name))
-        .await?;
+        .await;
+    follow_up(refs, records, |err| {
+        play_records_failed(
+            err,
+            &format!("实例已改名为「{new_name}」"),
+            json!({ "id": id, "renamed_to": new_name }),
+        )
+    })?;
     Ok(RenameOutcomeDto {
         id: new_name.to_owned(),
     })
@@ -1862,6 +1879,52 @@ mod tests {
         assert!(!again.existed);
     }
 
+    /// 上次关闭启动器时留下的整合包导入半成品：新进程里没有任务占着它，列表照常列出（整合包标记、结局停在
+    /// 进行中、没有在做的事），名字一直占着；可以直接删除，删掉后同一个名字能重新导入或新建。
+    #[tokio::test]
+    async fn half_import_left_by_a_closed_launcher_is_listed_and_deletable() {
+        let env = Env::new();
+        let dir = env.game_dir().join("versions").join("RLCraft");
+        aurora_core::MarkerStore::for_version_dir(&dir)
+            .save(&IncompleteMarker::pending(
+                IncompleteKind::Modpack {
+                    task_id: "mp#9".into(),
+                },
+                1_761_800_000_000,
+            ))
+            .await
+            .unwrap();
+        let locks = InstanceLocks::default();
+
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(list.len(), 1);
+        let entry = &list[0];
+        assert_eq!(entry.id, "RLCraft");
+        assert_eq!(entry.status, "broken");
+        assert_eq!(entry.activity, None);
+        let incomplete = entry.incomplete.as_ref().unwrap();
+        assert_eq!(
+            (incomplete.kind, incomplete.outcome),
+            ("modpack", "pending")
+        );
+        assert_eq!(incomplete.started_at, Some(1_761_800_000_000));
+
+        let snapshot = env.facade.snapshot().await;
+        assert!(snapshot.ensure_modpack_name_free("rlcraft").await.is_err());
+
+        let deleted = delete_instance_with(&env.facade, &locks, "RLCraft", Remove)
+            .await
+            .unwrap();
+        assert!(deleted.existed);
+        assert!(!dir.exists());
+        snapshot.ensure_modpack_name_free("RLCraft").await.unwrap();
+        snapshot.check_new_instance_name("RLCraft").await.unwrap();
+        assert!(list_instances_with(&env.facade, &locks)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
     async fn get_pins(env: &Env) -> Vec<String> {
         env.facade
             .snapshot()
@@ -1993,20 +2056,163 @@ mod tests {
         assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["别的"]);
     }
 
-    /// 游玩记录读不出来时改名照样把文件改完，但命令报错，不假装一切正常。
+    async fn switch_game_dir(env: &Env, game_dir: &Path) {
+        env.facade
+            .update(|aurora| {
+                aurora.switch_game_directory(game_dir);
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+    }
+
+    /// 游玩记录按游戏目录分开：换到另一个游戏目录后同名实例从零算起；在那边改名、删除，不动原目录的记录。
     #[tokio::test]
-    async fn rename_reports_unreadable_play_records() {
+    async fn play_records_are_kept_apart_per_game_directory() {
+        let env = Env::new();
+        env.vanilla("周末生存");
+        let home = env.game_dir();
+        let other = env.dir.path().join("另一个").join(".minecraft");
+        let twin = other.join("versions").join("周末生存");
+        std::fs::create_dir_all(&twin).unwrap();
+        std::fs::write(
+            twin.join("周末生存.json"),
+            r#"{"id":"周末生存","type":"release","mainClass":"M"}"#,
+        )
+        .unwrap();
+        // 只按实例 id 记的旧记录：读到时归到当时的当前游戏目录。
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"周末生存":{"total_ms":5400000,"last_played_at":1761832800000}},
+                "days":{"2026-10-30":{"instances":{"周末生存":5400000}}}}}"#,
+        );
+        let locks = InstanceLocks::default();
+        let played = |list: &[InstanceDto]| {
+            let entry = list.iter().find(|i| i.id == "周末生存").unwrap();
+            (entry.playtime_min, entry.last_played_at)
+        };
+        let day = || aurora_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap();
+
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(played(&list), (90, Some(1_761_832_800_000)));
+
+        switch_game_dir(&env, &other).await;
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(played(&list), (0, None), "另一个游戏目录里的同名实例不继承");
+        let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
+        assert_eq!((stats.days.len(), stats.total_minutes), (0, 0));
+
+        rename_instance_with(&env.facade, &locks, "周末生存", "改了名")
+            .await
+            .unwrap();
+        delete_instance_with(&env.facade, &locks, "改了名", Remove)
+            .await
+            .unwrap();
+
+        switch_game_dir(&env, &home).await;
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(played(&list), (90, Some(1_761_832_800_000)));
+        let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
+        assert_eq!(stats.total_minutes, 90);
+        assert_eq!(stats.instances[0].version_id, "周末生存");
+    }
+
+    /// 游玩记录读不出来：改名、删除照样把文件与配置里的侧栏固定、当前选中改完（磁盘与门面都改），命令以
+    /// play_records_failed 报告只差游玩记录没跟上，不假装一切正常，坏文件原样留着。
+    #[tokio::test]
+    async fn unreadable_play_records_do_not_hold_back_the_references() {
         let env = Env::new();
         let dir = env.vanilla("a");
+        env.vanilla("留下");
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["a".into(), "留下".into()]);
+                aurora.set_selected_version(Some("a".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
         write_playtime(&env, "{ broken");
         let locks = InstanceLocks::default();
+
         let err = rename_instance_with(&env.facade, &locks, "a", "b")
             .await
             .unwrap_err();
-        assert_eq!(err.code, common::INSTANCE_FAILED);
+        assert_eq!(err.code, code::PLAY_RECORDS_FAILED);
+        assert!(
+            err.message.starts_with("实例已改名为「b」"),
+            "{}",
+            err.message
+        );
+        assert!(err.message.contains("游玩记录"), "{}", err.message);
+        let detail = err.detail.unwrap();
+        assert_eq!(
+            (&detail["id"], &detail["renamed_to"]),
+            (&json!("a"), &json!("b"))
+        );
+        assert!(!detail["causes"].as_array().unwrap().is_empty());
         assert!(!dir.exists());
         assert!(env.game_dir().join("versions").join("b").is_dir());
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["b".to_owned(), "留下".to_owned()]);
+        assert_eq!(saved.selected_version.as_deref(), Some("b"));
+        assert_eq!(
+            get_pins(&env).await,
+            vec!["b".to_owned(), "留下".to_owned()]
+        );
+        assert_eq!((locks.activity("a"), locks.activity("b")), (None, None));
+
+        let err = delete_instance_with(&env.facade, &locks, "b", Remove)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::PLAY_RECORDS_FAILED);
+        assert!(err.message.starts_with("实例已删除"), "{}", err.message);
+        assert_eq!(err.detail.unwrap()["id"], "b");
+        assert!(!env.game_dir().join("versions").join("b").exists());
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["留下".to_owned()]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(get_pins(&env).await, vec!["留下".to_owned()]);
         assert_eq!(locks.activity("b"), None);
+        assert_eq!(
+            std::fs::read_to_string(env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE))
+                .unwrap(),
+            "{ broken"
+        );
+    }
+
+    /// 配置存不下时改名报配置的错，游玩记录照样跟着新名字走：两步收尾互不拦着。
+    #[tokio::test]
+    async fn play_records_follow_the_rename_even_when_the_config_cannot_be_saved() {
+        let env = Env::new();
+        env.vanilla("a");
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["a".into()]);
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},
+                "days":{"2026-10-30":{"instances":{"a":600000}}}}}"#,
+        );
+        let config = env.dir.path().join("config.json");
+        std::fs::remove_file(&config).unwrap();
+        std::fs::create_dir(&config).unwrap();
+        let locks = InstanceLocks::default();
+
+        let err = rename_instance_with(&env.facade, &locks, "a", "b")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::IO);
+        assert!(env.game_dir().join("versions").join("b").is_dir());
+        let summaries = env.facade.snapshot().await.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!(summaries["b"].playtime_min, 10);
     }
 
     #[tokio::test]

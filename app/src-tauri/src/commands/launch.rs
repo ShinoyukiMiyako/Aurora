@@ -405,7 +405,7 @@ pub async fn stop_game(running: State<'_, RunningGame>) -> Result<(), CommandErr
     Ok(())
 }
 
-/// 一段本地日期区间（两端都含）的游玩统计。
+/// 当前游戏目录在一段本地日期区间（两端都含）的游玩统计。
 #[tauri::command]
 pub async fn play_stats(
     range: PlayRangeArg,

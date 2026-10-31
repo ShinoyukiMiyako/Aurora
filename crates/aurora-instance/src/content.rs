@@ -265,10 +265,24 @@ fn count_worlds_in(saves: &Path) -> Result<u32> {
     let Some(entries) = read_dir_entries(saves)? else {
         return Ok(0);
     };
+    count_world_entries(&entries)
+}
+
+/// 列表页对每个实例都数一遍存档，类型取列目录时已经拿到的信息，不再逐个 stat：多一次系统调用就多一处
+/// 条目在两步之间被删掉的空档。平台需要补查类型时条目已经不在，就当它不在。
+fn count_world_entries(entries: &[std::fs::DirEntry]) -> Result<u32> {
     let mut count = 0;
     for entry in entries {
-        if metadata(&entry.path())?.is_dir() {
-            count += 1;
+        match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => count += 1,
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: entry.path(),
+                    source,
+                });
+            }
         }
     }
     Ok(count)
@@ -523,6 +537,24 @@ mod tests {
 
         assert_eq!(count_worlds(&saves).await.unwrap(), 3);
         assert_eq!(list_worlds(&saves).await.unwrap().len(), 3);
+    }
+
+    /// 列出存档目录之后、读条目类型之前有存档被删掉（玩家正在删存档、游戏正在写）：计数照常给出，
+    /// 不让整张实例列表失败。类型取自列目录时拿到的信息，所以按列目录那一刻计数。
+    #[test]
+    fn world_count_survives_an_entry_vanishing_after_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let saves = tmp.path().join("saves");
+        for name in ["生存", "creative", "删掉的"] {
+            std::fs::create_dir_all(saves.join(name)).unwrap();
+        }
+        write(&saves.join("note.txt"), b"not a world");
+        let entries = read_dir_entries(&saves).unwrap().unwrap();
+        assert_eq!(entries.len(), 4);
+
+        std::fs::remove_dir(saves.join("删掉的")).unwrap();
+        assert_eq!(count_world_entries(&entries).unwrap(), 3);
+        assert_eq!(count_worlds_in(&saves).unwrap(), 2);
     }
 
     #[tokio::test]

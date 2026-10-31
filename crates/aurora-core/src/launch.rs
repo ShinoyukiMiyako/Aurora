@@ -741,6 +741,7 @@ impl Aurora {
                 version_dir: chain.target.dir.clone(),
                 working_dir,
                 data_dir: self.data_dir().to_path_buf(),
+                game_dir: self.game_dir().to_path_buf(),
                 clock: reporter.clock,
                 running_since: reporter.clock.now(),
                 java: crate::session::JavaUsed {
