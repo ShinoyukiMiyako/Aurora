@@ -26,6 +26,11 @@ export interface TooltipProps {
   /** 允许折行（长说明文字），最大宽 260。 */
   wrap?: boolean;
   disabled?: boolean;
+  /**
+   * 为真时立即显示，转为假时收起这一次显示；不影响悬停与聚焦照常触发。
+   * 给焦点不落在触发元素自身上的场合用：菜单以 aria-activedescendant 高亮的项从不获得焦点，聚焦触发不了提示。
+   */
+  open?: boolean;
   /** 单个可聚焦元素；气泡锚定在它身上，并通过 aria-describedby 关联。 */
   children: ReactElement<{ "aria-describedby"?: string }>;
 }
@@ -35,7 +40,7 @@ let lastHiddenAt = Number.NEGATIVE_INFINITY;
 
 const DEFAULT_OFFSET: Record<TooltipSide, number> = { top: 8, bottom: 8, left: 12, right: 12 };
 
-export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.delay, offset, wrap = false, disabled = false, children }: TooltipProps) {
+export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.delay, offset, wrap = false, disabled = false, open: forced, children }: TooltipProps) {
   const root = useOverlayRoot();
   const id = useId();
   const hostRef = useRef<HTMLSpanElement>(null);
@@ -86,6 +91,20 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
   useEffect(() => {
     if (disabled) hideNow();
   }, [disabled, hideNow]);
+
+  // 只收起由 open 打开的那一次：open 一直为假时，悬停与聚焦打开的气泡不该被它关掉
+  const forcedShown = useRef(false);
+  useLayoutEffect(() => {
+    if (forced === true) {
+      forcedShown.current = true;
+      show(true);
+      return;
+    }
+    if (!forcedShown.current) return;
+    forcedShown.current = false;
+    hideNow();
+    // show 每次渲染都是新函数，不列进依赖：只跟随 open 的变化
+  }, [forced, hideNow]);
 
   useEscapeListener(anchor !== null, hideNow);
 
