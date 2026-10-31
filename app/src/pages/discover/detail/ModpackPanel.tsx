@@ -175,6 +175,15 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
     if (result.ok) setCreatedId(result.value);
   };
 
+  // 与安装同一个口径：断网时重试必然又失败一次，白白多出一次尝试
+  const retry = (taskId: string) => {
+    if (!online) {
+      actions.toast("warning", SEARCH_COPY.offlineInstall, SEARCH_COPY.offlineInstallBody);
+      return;
+    }
+    actions.retryTask(taskId);
+  };
+
   const openInstance = () => {
     if (createdId === null) throw new Error("还没有新实例");
     onClose();
@@ -199,7 +208,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
           <Button variant="ghost" onClick={onClose}>
             {MODPACK_COPY.close}
           </Button>
-          <Button variant="primary" icon="refresh" onClick={() => actions.retryTask(progress.taskId)}>
+          <Button variant="primary" icon="refresh" onClick={() => retry(progress.taskId)}>
             {MODPACK_COPY.retry}
           </Button>
         </>

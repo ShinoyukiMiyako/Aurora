@@ -787,6 +787,36 @@ describe("发现页：整合包", () => {
     expect(buttonByText("查看实例", dialog())).toBeDefined();
   });
 
+  it("平台整合包导入失败后断网：面板的重试与安装一样只提示恢复联网后再装，不把任务重新排进队列", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    ipc.overrides.set("install_modpack", () => {
+      throw new IpcError("network_failed", "连接 cdn.modrinth.com 失败");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    act(() => card("樱落").click());
+    await flush();
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.status)).toEqual(["failed"]);
+
+    online = false;
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    act(() => buttonByText("重试", dialog()).click());
+    await flush();
+    expect(launcher.state.tasks.map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
+    expect(callsOf(ipc, "install_modpack")).toHaveLength(1);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "恢复联网后再安装"]);
+  });
+
   it("平台整合包的名称按去掉首尾空格后的样子校验：前面多个空格撞上已有实例就报重名，末尾多个空格照常装、装成去掉空格的名字", async () => {
     const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
     const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
