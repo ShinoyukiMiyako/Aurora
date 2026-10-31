@@ -3,7 +3,7 @@
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
-import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
 import { useNav, useShell } from "../../shell/shell";
@@ -38,9 +38,11 @@ import {
   isolationByPolicy,
   javaFit,
   JVM_PRESET_KEYS,
+  needsReimport,
   overridesHeap,
   parseDimension,
   presetFlags,
+  reimportRoute,
   RESOLUTION_LIMITS,
   RESOLUTION_PRESETS,
   toggleFlags,
@@ -489,6 +491,7 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
 function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) {
   const { state } = useLauncher();
   const { tier } = useShell();
+  const { go } = useNav();
   const [name, setName] = useState(inst.name);
   const [renaming, setRenaming] = useState(false);
   // 头图那边也能改名：名字从外部变了就跟着同步
@@ -536,11 +539,19 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             {SETTINGS_COPY.open}
           </Button>
         </SettingRow>
-        <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
-          <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
-            {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
-          </Button>
-        </SettingRow>
+        {needsReimport(inst) ? (
+          <SettingRow title={MODPACK_REIMPORT_COPY.menuReimport} description={MODPACK_REIMPORT_COPY.note}>
+            <Button size="sm" icon="modpack" onClick={() => go(reimportRoute(inst))}>
+              {MODPACK_REIMPORT_COPY.reimport}
+            </Button>
+          </SettingRow>
+        ) : (
+          <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
+            <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
+              {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
+            </Button>
+          </SettingRow>
+        )}
       </div>
       <div className={styles.dangerZone} data-stack={tier === "compact" || undefined}>
         <div className={styles.dangerText}>

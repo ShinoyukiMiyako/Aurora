@@ -256,6 +256,41 @@ describe("实例库：动作", () => {
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
   });
 
+  it("整合包没导入完的实例不进修复横幅，卡片底栏给「重新导入」与「删除」而不是「修复并启动」", async () => {
+    const incomplete = { kind: "modpack" as const, outcome: "failed" as const, started_at: NOW - HOUR, spec: null, error: { code: "network_failed", message: "连接被重置" } };
+    instances = [
+      ...instances,
+      instanceDto("RLCraft", {
+        status: "broken",
+        broken_reason: null,
+        incomplete,
+        modpack: { platform: "modrinth", project_id: "rlc", version_id: "v293", name: "RLCraft", version: "2.9.3" },
+      }),
+      instanceDto("本地包", { status: "broken", broken_reason: null, incomplete, modpack: null }),
+    ];
+    await mount();
+    // 横幅只数补全能修好的那一个
+    expect(document.body.textContent).toContain("1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。");
+    const card = byText<HTMLButtonElement>("article button", "RLCraft").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    expect(card.textContent).toContain("整合包没有导入完，请删掉这个实例后重新导入");
+    expect([...card.querySelectorAll("button")].map((b) => b.textContent)).not.toContain("修复并启动");
+    click(byText("button", LIBRARY_COPY.repairOne));
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+    click(byText("button", "重新导入", card));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "modrinth", projectId: "rlc" } });
+    const local = byText<HTMLButtonElement>("article button", "本地包").closest("article");
+    if (local === null) throw new Error("找不到卡片");
+    click(byText("button", "重新导入", local));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack" });
+    ipc.overrides.set("preview_instance_deletion", (args) => ({ id: args.id, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
+    click(byText("button", "删除", local));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([{ id: "本地包" }]);
+    expect(document.querySelector('[role="dialog"] h2')?.textContent).toBe("删除「本地包」？");
+  });
+
   it("图钉：追加到固定列表末尾并通知；已固定的取消固定", async () => {
     await mount();
     click(byLabel("把「机械动力」固定到侧栏"));

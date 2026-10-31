@@ -2,6 +2,7 @@
 
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
+import { needsReimport } from "../instance/model";
 
 export type LoaderFilter = "all" | LoaderKind;
 export type SortKey = "recent" | "name" | "playtime";
@@ -79,8 +80,9 @@ export function totalPlaytime(list: readonly InstanceSummary[]): number {
   return list.reduce((sum, inst) => sum + inst.playtimeMin, 0);
 }
 
+/** 修复横幅列出的实例：补全能修好的损坏实例。整合包没导入完的补全补不回来，各自在卡片上给重新导入。 */
 export function brokenInstances(list: readonly InstanceSummary[]): InstanceSummary[] {
-  return list.filter((inst) => inst.status === "broken");
+  return list.filter((inst) => inst.status === "broken" && !needsReimport(inst));
 }
 
 /** 网格的顺序签名：只有顺序或成员变化时才触发布局动画，窗口缩放、分档切换不触发。 */

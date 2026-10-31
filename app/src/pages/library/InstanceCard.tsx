@@ -178,7 +178,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       </div>
 
       <div className={styles.foot}>
-        {live ? <CardStatus instanceId={id} /> : <div className={styles.status} />}
+        {live ? <CardStatus inst={inst} /> : <div className={styles.status} />}
         <MoreMenu size="sm" label={LIBRARY_COPY.moreLabel(name)} items={menu} />
       </div>
     </Card>

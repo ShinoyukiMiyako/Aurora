@@ -362,6 +362,43 @@ describe("实例详情：后端正在改动实例", () => {
   });
 });
 
+describe("实例详情：整合包没导入完", () => {
+  beforeEach(() => {
+    instances = instances.map((i) =>
+      i.id === ID
+        ? {
+            ...i,
+            status: "broken",
+            incomplete: { kind: "modpack", outcome: "failed", started_at: NOW - DAY, spec: null, error: { code: "network_failed", message: "连接被重置" } },
+            modpack: { platform: "curseforge", project_id: "285109", version_id: "4", name: "RLCraft", version: "2.9.3" },
+          }
+        : i,
+    );
+  });
+
+  it("概览横幅与头图菜单不给补全，改为重新导入与删除", async () => {
+    await open("overview");
+    expect(text()).toContain("整合包没有导入完，请删掉这个实例后重新导入");
+    expect(() => button("修复实例")).toThrow();
+    click(button("更多操作"));
+    const labels = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(textOf);
+    expect(labels).not.toContain("补全游戏文件");
+    expect(labels).toContain("重新导入整合包");
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    click(button("重新导入"));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "curseforge", projectId: "285109" } });
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("设置页的补全行换成重新导入", async () => {
+    await open("settings");
+    expect(() => button("补全")).toThrow();
+    expect(text()).toContain("整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。");
+    click(button("重新导入"));
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack", open: { platform: "curseforge", projectId: "285109" } });
+  });
+});
+
 describe("实例详情：概览", () => {
   it("存档按最近游玩排序，极限模式标红；资源包与光影按加载顺序列出", async () => {
     await open("overview");

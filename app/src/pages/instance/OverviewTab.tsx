@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, crashCategoryLabel } from "../../copy/flows";
+import { ACTION_ERROR, crashCategoryLabel, MODPACK_REIMPORT_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
 import type { LaunchView } from "../../launch/launchView";
@@ -43,7 +43,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
-import { chosenRuntime, modRows, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
+import { chosenRuntime, modRows, needsReimport, overviewBanner, peekLayout, peekPerRow, reimportRoute, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { ModuleError } from "./parts";
 
@@ -69,7 +69,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
     <div className={styles.stack}>
       {banner === "failed" && <FailedBanner inst={inst} />}
       {banner === "crashed" && crash.status === "ready" && crash.data !== null && <CrashBanner report={crash.data} onTab={onTab} />}
-      {banner === "broken" && view.kind === "broken" && <BrokenBanner reason={view.reason} ops={ops} />}
+      {banner === "broken" && view.kind === "broken" && (needsReimport(inst) ? <ReimportBanner inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner reason={view.reason} ops={ops} />)}
       {banner === "installing" && view.kind === "installing" && <InstallingBanner view={view} />}
       <StatsCard inst={inst} content={content} outdated={outdated} />
       <div className={styles.overviewGrid}>
@@ -129,6 +129,30 @@ function CrashBanner({ report, onTab }: { report: CrashReportDto; onTab(tab: Ins
 function BrokenBanner({ reason, ops }: { reason: string; ops: InstanceOps }) {
   return (
     <Banner tone="warn" icon="alert" title={OVERVIEW_COPY.brokenTitle} actions={<Button icon="wrench" disabledReason={lockReason(ops.locks.repair, "repair")} onClick={ops.repair}>{OVERVIEW_COPY.repair}</Button>}>
+      {reason}
+    </Banner>
+  );
+}
+
+/** 整合包没导入完：补全补不回来，横幅改给重新导入与删除。 */
+function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: string; ops: InstanceOps }) {
+  const { go } = useNav();
+  return (
+    <Banner
+      tone="warn"
+      icon="alert"
+      title={OVERVIEW_COPY.brokenTitle}
+      actions={
+        <>
+          <Button icon="modpack" onClick={() => go(reimportRoute(inst))}>
+            {MODPACK_REIMPORT_COPY.reimport}
+          </Button>
+          <Button variant="danger" icon="trash" disabledReason={lockReason(ops.locks.delete, "delete")} onClick={ops.remove}>
+            {MODPACK_REIMPORT_COPY.deleteInstance}
+          </Button>
+        </>
+      }
+    >
       {reason}
     </Banner>
   );

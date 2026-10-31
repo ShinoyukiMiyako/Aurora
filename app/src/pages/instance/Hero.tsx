@@ -4,14 +4,14 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
-import { TOAST_COPY } from "../../copy/flows";
+import { MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { isImeComposing } from "../../lib/util";
 import { instanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import type { LaunchView } from "../../launch/launchView";
-import { useShell } from "../../shell/shell";
+import { useNav, useShell } from "../../shell/shell";
 import { useLauncher } from "../../state/launcher";
 import { canPinMore } from "../../state/selectors";
 import { Card } from "../../ui/Card";
@@ -24,6 +24,7 @@ import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
 import { HERO_COPY } from "./copy";
 import styles from "./instance.module.css";
+import { needsReimport, reimportRoute } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 
 /** 头图高度：wide 档多给 20，方块 compact 档缩到 64。 */
@@ -44,6 +45,7 @@ export interface HeroProps {
 export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange }: HeroProps) {
   const { state } = useLauncher();
   const { tier } = useShell();
+  const { go } = useNav();
   const cover = instanceCover(inst);
   const pinBlocked = !inst.pinned && !canPinMore(state);
   const renameReason = lockReason(ops.locks.rename, "rename");
@@ -57,7 +59,9 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
     ...(compact ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), hint: pinBlocked ? TOAST_COPY.pinLimit : undefined, onSelect: ops.togglePin }] : []),
     { label: HERO_COPY.openFolder, icon: "folder", onSelect: () => ops.openFolder("instance") },
     { kind: "separator" },
-    { label: HERO_COPY.repair, icon: "wrench", disabled: repairReason !== undefined, hint: repairReason, onSelect: ops.repair },
+    needsReimport(inst)
+      ? { label: MODPACK_REIMPORT_COPY.menuReimport, icon: "modpack", onSelect: () => go(reimportRoute(inst)) }
+      : { label: HERO_COPY.repair, icon: "wrench", disabled: repairReason !== undefined, hint: repairReason, onSelect: ops.repair },
     { kind: "separator" },
     { label: HERO_COPY.delete, icon: "trash", danger: true, disabled: deleteReason !== undefined, hint: deleteReason, onSelect: ops.remove },
   ];

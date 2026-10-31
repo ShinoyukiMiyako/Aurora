@@ -882,3 +882,14 @@ export const DELETE_INSTANCE_COPY = {
   pendingTask: "正在进行的安装任务会先取消。",
   confirmLabel: (worlds: number) => (worlds > 0 ? `删除实例和 ${worlds} 个存档` : "删除实例"),
 } as const;
+
+// ---------------------------------------------------------------- 整合包没导入完
+
+/** 整合包导入中断的实例补全补不回来：实例库卡片、头图菜单、概览横幅与实例管理卡都改给这两个入口。 */
+export const MODPACK_REIMPORT_COPY = {
+  reimport: "重新导入",
+  menuReimport: "重新导入整合包",
+  delete: "删除",
+  deleteInstance: "删除实例",
+  note: "整合包没有导入完，缺的 Mod 与配置补全补不回来，删掉这个实例后重新导入。",
+} as const;
