@@ -2168,6 +2168,84 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_still_warns_about_a_long_player_name() {
+        // 降级不经账户验证，但交给游戏的角色名照旧是账户档案名：超长名的提醒不能因为跳过了续期而漏掉。
+        const NEW_VERSION: &str = "1.21.1";
+        const LONG_NAME: &str = "PetalPlayerLongName01";
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        let dir = fx
+            .root
+            .join(".minecraft")
+            .join("versions")
+            .join(NEW_VERSION);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{NEW_VERSION}.json")),
+            format!(
+                r#"{{"id":"{NEW_VERSION}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-delta","majorVersion":17}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{NEW_VERSION}.jar")), b"jar").unwrap();
+        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(&server));
+        let mut account = stale_microsoft();
+        account.name = LONG_NAME.to_owned();
+        let stored = aurora.store_account_for_test(account).unwrap();
+        let java = fake_java(&fx.root, 17, 3);
+        let request = || LaunchRequest {
+            version_id: NEW_VERSION.to_owned(),
+            ..stored_request(stored.clone())
+        };
+
+        let (result, _) = launch_request(&aurora, request(), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        let (result, events) = launch_fallback(&aurora, request(), java).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        let mut stage = None;
+        let mut warns = Vec::new();
+        for event in &events {
+            match event {
+                LaunchEvent::Stage(s) => stage = Some(s.index()),
+                LaunchEvent::Log {
+                    level: LauncherLevel::Warn,
+                    text,
+                    ..
+                } => warns.push((stage, text.clone())),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            warns,
+            vec![
+                (
+                    Some(0),
+                    format!("以离线方式进单人：{LONG_NAME} 这一局不经账户验证，只能玩单人游戏")
+                ),
+                (
+                    Some(0),
+                    format!(
+                        "角色名 {LONG_NAME} 有 21 个字符，Minecraft 1.20.3 及更新的版本只认 16 个以内，进入存档或服务器时会被拒绝"
+                    )
+                ),
+            ]
+        );
+
+        let finished = run.finish().await.unwrap();
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        let crash = aurora
+            .last_crash(NEW_VERSION)
+            .await
+            .unwrap()
+            .expect("崩溃应落盘");
+        assert_eq!(crash.warnings, vec![LaunchWarning::LongPlayerName]);
+        assert_eq!(crash.exit_code, Some(3));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verified_launch_clears_the_recorded_failure() {
         let down = wiremock::MockServer::start().await;
         mount_token(&down, outage_page()).await;
