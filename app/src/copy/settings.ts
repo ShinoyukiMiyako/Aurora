@@ -19,7 +19,9 @@ export const ACCENT_OPTIONS: readonly { value: AccentName; label: string }[] = [
 /** 探测到的 Java 从哪里来，显示为运行时旁的来源标签。 */
 export const JAVA_SOURCE_LABEL: Readonly<Record<JavaSource, string>> = {
   managed: "托管",
+  manual: "手动添加",
   registry: "注册表",
+  java_home: "JAVA_HOME",
   common_dir: "常用目录",
   path: "PATH",
 };

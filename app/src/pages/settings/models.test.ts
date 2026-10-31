@@ -12,6 +12,7 @@ function runtime(path: string, major: number, overrides: Partial<JavaInstallatio
     is_64bit: true,
     vendor: "Eclipse Adoptium",
     source: "registry",
+    missing_files: [],
     ...overrides,
   };
 }

@@ -172,7 +172,7 @@ function modDto(fileName: string, name: string, over: Partial<InstalledMod> = {}
 }
 
 function java(path: string, major: number): JavaInstallationDto {
-  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry" };
+  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [] };
 }
 
 function contentDto(): InstanceContentDto {
