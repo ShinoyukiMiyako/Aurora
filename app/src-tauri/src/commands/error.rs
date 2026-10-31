@@ -137,6 +137,8 @@ pub mod code {
     pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
     /// 要改的服务器不在固定列表里。detail：`{ address }`。
     pub const SERVER_NOT_PINNED: &str = "server_not_pinned";
+    /// 实例的版本不支持这种直达方式。detail：`{ version_id, mode: "singleplayer" | "multiplayer" }`。
+    pub const QUICK_PLAY_UNSUPPORTED: &str = "quick_play_unsupported";
 }
 
 /// 序列化给前端的命令错误。
@@ -256,6 +258,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::Instance(e) => instance_code(e),
         CoreError::Java(_) => code::JAVA_FAILED,
         CoreError::Auth(e) => auth_code(e),
+        CoreError::Launch(LaunchError::QuickPlayUnsupported { .. }) => code::QUICK_PLAY_UNSUPPORTED,
         CoreError::Launch(_) => code::LAUNCH_FAILED,
         CoreError::ModPlatform(e) => mod_platform_code(e),
         CoreError::ConfigIo { .. } => code::CONFIG_IO,
@@ -521,6 +524,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::ServerNotPinned { address } => {
             detail.insert("address".to_owned(), json!(address));
         }
+        CoreError::Launch(LaunchError::QuickPlayUnsupported { version, mode }) => {
+            detail.insert("version_id".to_owned(), json!(version));
+            detail.insert("mode".to_owned(), json!(mode.as_str()));
+        }
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
@@ -764,6 +771,37 @@ mod tests {
             not_pinned.detail,
             Some(json!({ "address": "play.example.cn:25566" }))
         );
+
+        for (mode, name, message) in [
+            (
+                aurora_core::QuickPlayMode::Singleplayer,
+                "singleplayer",
+                "版本 1.12.2 不支持直接进入存档（1.20 之前的版本没有 Quick Play）",
+            ),
+            (
+                aurora_core::QuickPlayMode::Multiplayer,
+                "multiplayer",
+                "版本 1.12.2 不支持直接加入服务器",
+            ),
+        ] {
+            let unsupported: CommandError = LaunchError::QuickPlayUnsupported {
+                version: "1.12.2".into(),
+                mode,
+            }
+            .into();
+            assert_eq!(unsupported.code, "quick_play_unsupported");
+            assert_eq!(unsupported.message, message);
+            assert_eq!(
+                unsupported.detail,
+                Some(json!({ "version_id": "1.12.2", "mode": name }))
+            );
+        }
+        // 启动链路的其余失败仍是 launch_failed。
+        let other: CommandError = LaunchError::MissingMainClass {
+            version: "x".into(),
+        }
+        .into();
+        assert_eq!(other.code, code::LAUNCH_FAILED);
 
         let memory: CommandError = CoreError::MemoryUnavailable.into();
         assert_eq!(memory.code, code::MEMORY_UNAVAILABLE);

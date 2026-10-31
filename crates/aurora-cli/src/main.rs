@@ -411,6 +411,7 @@ async fn launch(
         },
         launcher_version: env!("CARGO_PKG_VERSION").to_owned(),
         game_log: Some(log_tx),
+        quick_play: None,
     };
     let launched = aurora.launch(request, &events).await;
     drop(events);

@@ -79,7 +79,7 @@ pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
-    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
+    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning, QuickPlay,
     resolve_memory,
 };
 pub use launcher_update::{UpdateSource, order_update_sources};
