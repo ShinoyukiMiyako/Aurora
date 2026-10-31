@@ -40,7 +40,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | L2 | `aurora-install` | 原版、Fabric、Quilt、Forge、NeoForge 安装（含 Forge 处理器子进程），库、资源与 natives 补全 | base, version, download |
 | L2 | `aurora-modplatform` | Modrinth v2 与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存 | base, download |
 | L2 | `aurora-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录 | instance |
-| L3 | `aurora-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector）、游戏进程管理、会话日志、崩溃判定 | base, auth, version, java, instance |
+| L3 | `aurora-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector）、游戏进程管理、会话日志、崩溃判定 | base, auth, version, instance |
 | L4 | `aurora-core` | 门面 `Aurora`：配置、实例、安装、整合包、Mod 与历史、发现、Java、账户、启动、崩溃诊断、游玩统计、新闻、服务器状态、外观、自更新检查 | 以上全部 |
 | 外层 | `aurora-cli` | 调试命令行，用于端到端冒烟 | core, base |
 | 外层 | `aurora-tauri` | 桌面外壳 | core, base |
@@ -54,10 +54,12 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 `aurora-tauri` 用读写锁持有一个常驻的 `Aurora` 实例（`facade.rs`）。命令按需要选择三种用法：
 
 - `read`：只在内存里读配置，拿到锁就用，用的过程中不跨任何慢 await。
-- `write`：修改配置，改完落盘后立即放锁。
+- `update`：修改配置。改动落在门面的副本上，落盘成功才换进门面；落盘失败或改到一半报错时门面原样不动，失败的修改不会留在内存里，也不会被下一次无关的保存捎带写进文件。`update_if_changed` 在配置没有变化时不落盘。没有直接拿写锁改配置的入口。
 - `snapshot`：要联网、扫描磁盘或运行子进程时，先克隆一份门面再放锁，在副本上执行。门面的克隆开销很小。
 
 长任务在快照上挂取消令牌（`Aurora::with_cancel`），常驻门面上从不挂令牌。令牌会传到下载池、整合包解压和 Forge 处理器：下载在文件粒度停下并清理临时文件；处理器子进程被结束，并等它真正退出后才返回。
+
+快照之间共享的磁盘资源另有进程级的排队：下载引擎按目标路径加锁，同一目标的并发下载排队，后到的一方等前一方落位后按 sha1 认出已就绪直接跳过；Forge 与 NeoForge 安装整个进程同时只跑一个（处理器的产物直接写进共享的 libraries）。两处等待期间都响应取消。
 
 ## Tauri 外壳（app/src-tauri）
 
@@ -65,6 +67,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | --- | --- |
 | `lib.rs` | 装配：日志、插件、managed state、命令注册（按领域分块） |
 | `commands/<领域>.rs` | 一个领域一个文件：accounts、appearance、art、config、diagnostics、discover、history、instances、java、launch、mods、modpack、news、servers、system、tasks、updater |
+| `commands/system.rs` 的 `StartupNotices` | 启动时遇到、但不妨碍继续运行的问题（见下文「启动提示」），setup 时装进 managed state |
 | `commands/error.rs` | 门面错误到 `{ code, message, detail? }` 的映射与错误码表 |
 | `facade.rs` | 门面的读写锁与快照规矩 |
 | `tasks.rs` | 长任务登记与取消（`TaskRegistry`）、前端任务表的持久化（`TaskJournal`） |
@@ -97,7 +100,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 1. 命令开头调用 `TaskRegistry::register`。同一个 id 已在运行时报 `task_conflict`。
 2. 进度通过 `aurora://core-event` 推送，负载里带 `task_id`，前端的下载队列据此把进度归到对应任务。
-3. `cancel_task(taskId)` 触发令牌，命令必须在 1000 ms（`CANCEL_DEADLINE`）内以 `cancelled` 返回。个别不观察令牌的阶段，由 `TaskHandle::run` 在宽限期满后放弃。被放弃的整合包导入会按未完成标记里的任务 id 再清理一次。
+3. `cancel_task(taskId)` 触发令牌，命令必须在 1000 ms（`CANCEL_DEADLINE`）内以 `cancelled` 返回。个别不观察令牌的阶段，由 `TaskHandle::run` 在宽限期满后放弃。失败或被放弃的整合包导入按命令层占住的实例名清理半成品（`discard_modpack_import`），不看未完成标记里记的是哪个任务；删不掉时把标记落成 `failed` 或 `cancelled`（`settle_modpack_import`），不留 `pending`。还没占到实例名就失败的导入不碰任何实例。
 4. 前端任务表通过 `save_task_journal` / `load_task_journal` 整份原子写入 `<数据目录>/tasks.json`。后端不解读其中的内容。
 
 ### 实例互斥
@@ -110,9 +113,13 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `repairing` | 补全实例 | 互斥 |
 | `renaming` / `deleting` | 改名（新旧两个名字都占）、删除 | 互斥 |
 | `launching` -> `running` | 启动命令，从启动一直持有到游戏退出 | 只与 `modifying` 兼容 |
-| `modifying` | 装、删、启停、更新、回滚 Mod，装资源包、光影、数据包 | 与自身、`launching`、`running` 兼容 |
+| `modifying` | 装、删、启停、更新、回滚 Mod，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录 | 与自身、`launching`、`running` 兼容 |
 
 游戏运行时仍然可以改动 Mod。被游戏占用的文件由门面在动手前检测，检测到时报 `mod_file_busy`。`list_instances` 返回的 `activity` 就来自这张表，前端刷新之后也能据此知道哪个实例正在安装。
+
+`install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。
+
+`open_folder` 的目标里，`game_dir`、`data_dir`（数据目录）与 `launcher_logs`（启动器日志目录）不属于任何实例，`id` 传 `null`；其余目标都要实例 id。
 
 ### 事件
 
@@ -127,9 +134,17 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 事件名前缀里的 `aurora` 是内部代号，不随产品名变化。
 
+游戏退出后，输出读取器最多再等 2 秒（`aurora_launch::OUTPUT_DRAIN_DEADLINE`）读完管道：游戏拉起的辅助进程会继承输出管道，等它关闭可能永远等不到。超时就结束读取器，`aurora://game-exit` 照常发出，会话日志与启动器日志各记一条警告。
+
+### 启动提示
+
+`config.json` 解析失败时，启动不中断：坏文件改名为 `config.json.broken-<本地时间>`（重名时追加 `-2`、`-3`）留作现场，按默认配置启动，首次启动向导会重新出现。这次处置记进 `StartupNotices`，前端启动后调用一次 `startup_notices`，按 `kind` 显示通知（`config_reset` 带留存路径与解析错误，通知给出「打开目录」）。坏文件的完整路径与错误同时写进启动器日志。
+
 ### 浏览器与测试里的模拟后端
 
 `ipc/bridge.ts` 是全项目唯一引入 `@tauri-apps/api/core` 和 `@tauri-apps/api/event` 的文件。它在每次调用时判断运行环境：在 Tauri 窗口里走真实命令；在纯浏览器（`pnpm dev`）和 vitest 里，动态加载 `ipc/mock`。模拟后端尽量复刻真实后端的参数校验、错误码和状态变化，方便调界面和测试前端，但不能替代 Rust 侧的测试。真机运行时不会加载这个分块。
+
+开发构建在纯浏览器里运行时，`main.tsx` 在第一条命令之前调用 `enableMockPersistence(localStorage, APP_SLUG)`：首次启动是否完成、配置、外观、账户、实例与 Mod 的状态存进键 `<slug>.mock.<领域>`，刷新页面后接着上次的状态。存下的数据读不出或快照版本不符时启动直接报错，在控制台执行 `__sk.resetMockData()` 恢复种子数据并刷新。vitest 不启用持久化。
 
 ## 前端（app/src）
 
@@ -169,10 +184,11 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | 路径 | 内容 |
 | --- | --- |
 | `config.json` | 全局配置 |
+| `config.json.broken-<本地时间>` | 解析失败的配置原样留存（见「启动提示」） |
 | `credentials.bin` | 账户令牌，DPAPI 加密 |
 | `offline_accounts.json` | 离线账户 |
 | `tasks.json` | 前端任务表 |
-| `playtime.json` | 游玩时长 |
+| `playtime.json` | 游玩时长；实例改名时记录随之迁到新名字，删除实例时一并清掉 |
 | `java-probe-cache.json` | Java 识别缓存，按可执行文件指纹记录 |
 | `runtime/<主版本>/` | 托管 Java 运行时 |
 | `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件 |
