@@ -57,8 +57,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const known = useKnownServers();
   const online = useOnline();
   const gate = useLoadingGate(pinned.status === "loading");
-  // 挑选弹窗打开过才挂上，之后保持挂载好播完关闭的退场。从没打开过时不挂：关着的弹窗挂在页面里，
-  // 会让外层 AnimatePresence 的退场一直等不到结束（首次启动时外壳从主界面切到向导就卡在这一步）。
+  // 挑选弹窗打开过才挂上，之后保持挂载好播完关闭的退场。
   // 每次打开换一个 session，弹窗里「刚点过」的记录随之清空
   const [picker, setPicker] = useState<{ session: number; open: boolean } | null>(null);
   const openPicker = () => setPicker((p) => ({ session: p === null ? 1 : p.session + 1, open: true }));

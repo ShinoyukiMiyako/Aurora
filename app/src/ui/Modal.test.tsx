@@ -324,4 +324,55 @@ describe("Modal 随父级退场", () => {
 
     await vi.waitFor(() => expect(dialogs()).toHaveLength(0), { timeout: 3000, interval: 20 });
   });
+
+  // 关着的弹窗常挂在页面里（例如打开过一次的详情弹窗）。页面整体退场时它没有任何东西要播，不能拖住父级：
+  // mode="wait" 下父级退场播不完，下一屏就永远挂不上。
+  it("关着的弹窗挂在退场的子树里：父级照常退场完，mode=wait 的下一屏能挂上", async () => {
+    const handles: { swap?: () => void } = {};
+    function Page() {
+      return (
+        <div data-testid="page">
+          <Modal open={false} title="资讯详情" onClose={() => undefined}>
+            正文
+          </Modal>
+        </div>
+      );
+    }
+    function Host() {
+      const [screen, setScreen] = useState<"home" | "wizard">("home");
+      handles.swap = () => setScreen("wizard");
+      return <AnimatePresence mode="wait">{screen === "home" ? <Page key="home" /> : <p key="wizard">向导</p>}</AnimatePresence>;
+    }
+    mount(<Host />);
+    expect(document.querySelector('[data-testid="page"]')).not.toBeNull();
+    act(() => handles.swap?.());
+    await vi.waitFor(() => expect(document.body.textContent).toContain("向导"), { timeout: 3000, interval: 20 });
+    expect(document.querySelector('[data-testid="page"]')).toBeNull();
+  });
+
+  it("开过又关上的弹窗也一样不拖住父级", async () => {
+    const handles: { close?: () => void; swap?: () => void } = {};
+    function Page() {
+      const [open, setOpen] = useState(true);
+      handles.close = () => setOpen(false);
+      return (
+        <div data-testid="page">
+          <Modal open={open} title="资讯详情" onClose={() => setOpen(false)}>
+            正文
+          </Modal>
+        </div>
+      );
+    }
+    function Host() {
+      const [screen, setScreen] = useState<"home" | "wizard">("home");
+      handles.swap = () => setScreen("wizard");
+      return <AnimatePresence mode="wait">{screen === "home" ? <Page key="home" /> : <p key="wizard">向导</p>}</AnimatePresence>;
+    }
+    mount(<Host />);
+    expect(dialogs()).toHaveLength(1);
+    act(() => handles.close?.());
+    await vi.waitFor(() => expect(dialogs()).toHaveLength(0), { timeout: 3000, interval: 20 });
+    act(() => handles.swap?.());
+    await vi.waitFor(() => expect(document.body.textContent).toContain("向导"), { timeout: 3000, interval: 20 });
+  });
 });

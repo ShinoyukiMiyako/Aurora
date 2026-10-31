@@ -7,7 +7,9 @@
 //   遮罩点击只在指针按下与抬起都落在遮罩上时成立，在弹窗里拖选文字、松手落在遮罩上不会误关。
 // - dismissible=false 只用于误关会丢失不可恢复进度的流程：Esc 与点遮罩无效、不显示关闭按钮，底栏必须有显式的取消。
 // - 关闭时保持挂载、把 open 置为 false 即可播放退场；父组件条件渲染时把父级包在 AnimatePresence 里，
-//   内部的 AnimatePresence 开了 propagate，会跟着一起播退场。
+//   弹窗开着（或正在退场）时内部的 AnimatePresence 开 propagate，会跟着一起播退场，父级等它播完。
+//   关着的弹窗不挂 propagate：开着 propagate 的 AnimatePresence 会登记成父级退场要等的一员，却只在自己的子元素
+//   退场完时才报完成，没有子元素就永远不报，父级退场因此永远完不成（mode="wait" 时下一屏永远挂不上）。
 // - 回调一律经 ref 读取，effect 只依赖 open：父组件每次重渲染都传新的 onClose 时，若 effect 依赖它就会反复重建，
 //   重建时把焦点抢回弹窗本身，输入框每打一个字就丢一次焦点。
 
@@ -67,11 +69,20 @@ export function Modal(props: ModalProps) {
   // 退场期间每次重渲染都会把「退场中的旧弹窗」与「仍在场的新弹窗」并排渲染成两个同 key 的子元素。
   // 父级退场即视同关闭，只留退场中的那一份。没有父级 AnimatePresence 时 useIsPresent 恒为 true。
   const parentPresent = useIsPresent();
+  // 弹窗框还挂着（开着，或关上后退场还没播完）：只有这时才有东西要随父级退场
+  const [framed, setFramed] = useState(open);
+  if (open && !framed) setFramed(true);
   useEscapeLayer(open, onClose, { kind: "modal", dismissible });
   return (
     <>
       <FocusReturnPoint active={open} />
-      {root && createPortal(<AnimatePresence propagate>{open && parentPresent && <ModalFrame key={generation} {...props} />}</AnimatePresence>, root)}
+      {root &&
+        createPortal(
+          <AnimatePresence propagate={framed} onExitComplete={() => setFramed(false)}>
+            {open && parentPresent && <ModalFrame key={generation} {...props} />}
+          </AnimatePresence>,
+          root,
+        )}
     </>
   );
 }
