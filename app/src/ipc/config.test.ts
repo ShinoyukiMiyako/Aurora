@@ -221,6 +221,39 @@ describe("界面语言", () => {
     vi.resetModules();
     const third = await import("./mock");
     expect(() => third.enableMockPersistence(stale, "slug")).toThrow(`快照版本是 ${snapshot.version - 1}，当前是 ${snapshot.version}`);
-    expect(snapshot.version).toBe(2);
+    expect(snapshot.version).toBe(3);
+  });
+});
+
+describe("存档备份设置", () => {
+  it("种子：自动备份开着，每个存档留 5 份、总量上限 20 GB；补丁三项一起写", async () => {
+    expect((await getConfig()).world_backup).toEqual({ auto: true, keep_per_world: 5, max_total_gb: 20 });
+    await updateConfig({ worldBackup: { auto: false, keep_per_world: 10, max_total_gb: 50 } });
+    expect((await getConfig()).world_backup).toEqual({ auto: false, keep_per_world: 10, max_total_gb: 50 });
+  });
+
+  it("取值范围的两端可以写，越界报 invalid_argument 并指明字段，同一补丁里的别的字段也不生效", async () => {
+    await updateConfig({ worldBackup: { auto: true, keep_per_world: 1, max_total_gb: 1000 } });
+    await updateConfig({ worldBackup: { auto: true, keep_per_world: 50, max_total_gb: 1 } });
+    expect((await getConfig()).world_backup).toEqual({ auto: true, keep_per_world: 50, max_total_gb: 1 });
+    for (const [patch, field] of [
+      [{ auto: true, keep_per_world: 0, max_total_gb: 20 }, "world_backup.keep_per_world"],
+      [{ auto: true, keep_per_world: 51, max_total_gb: 20 }, "world_backup.keep_per_world"],
+      [{ auto: true, keep_per_world: 5, max_total_gb: 0 }, "world_backup.max_total_gb"],
+      [{ auto: true, keep_per_world: 5, max_total_gb: 1001 }, "world_backup.max_total_gb"],
+    ] as const) {
+      const error = await rejection(updateConfig({ afterLaunch: "close", worldBackup: patch }));
+      expect(error.code, JSON.stringify(patch)).toBe("invalid_argument");
+      expect((error.detail as { field: string }).field, JSON.stringify(patch)).toBe(field);
+    }
+    expect(await getConfig()).toMatchObject({ after_launch: "minimize", world_backup: { auto: true, keep_per_world: 50, max_total_gb: 1 } });
+  });
+
+  it("缺字段、多字段或类型不对是 Tauri 参数错误，归为 unknown", async () => {
+    for (const raw of [{ auto: true, keep_per_world: 5 }, { auto: true, keep_per_world: 5, max_total_gb: 20, extra: 1 }, { auto: "yes", keep_per_world: 5, max_total_gb: 20 }, { auto: true, keep_per_world: 2.5, max_total_gb: 20 }]) {
+      const error = await rejection(invoke("update_config", { worldBackup: raw }));
+      expect(error.code, JSON.stringify(raw)).toBe("unknown");
+    }
+    expect((await getConfig()).world_backup).toEqual({ auto: true, keep_per_world: 5, max_total_gb: 20 });
   });
 });

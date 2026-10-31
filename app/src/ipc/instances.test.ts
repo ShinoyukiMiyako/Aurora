@@ -1,9 +1,13 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError, isCancelled } from "./errors";
+import { updateConfig } from "./config";
 import {
+  backupWorld,
   checkInstanceName,
   deleteInstance,
+  deleteWorldBackup,
+  exportWorld,
   getInstanceSettings,
   getSidebarPins,
   installVersion,
@@ -11,11 +15,13 @@ import {
   listInstances,
   listLoaderVersions,
   listManifest,
+  listWorldBackups,
   openFolder,
   previewInstanceDeletion,
   renameInstance,
   repairInstance,
   requiredJava,
+  restoreWorldBackup,
   setInstanceSettings,
   setSidebarPins,
   versionRequirements,
@@ -23,7 +29,7 @@ import {
 } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
+import { acquireMockInstance, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
 import { reset as resetLaunchMock } from "./mock/handlers/launch";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
@@ -150,6 +156,22 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
       ["version_requirements", { mcVersion: "1.21.1" }],
       ["open_folder", { target: "world", id: "a", world: "New World" }],
       ["open_folder", { target: "game_dir", id: null, world: null }],
+    ]);
+  });
+
+  it("存档备份五条命令：长任务带 taskId，其余只带实例、存档与备份文件名", async () => {
+    vi.mocked(tauriInvoke).mockResolvedValue(null);
+    await backupWorld("t-b", "a", "New World");
+    await listWorldBackups("a", "New World");
+    await restoreWorldBackup("t-r", "a", "New World", "1730000000000-auto.zip");
+    await deleteWorldBackup("a", "New World", "1730000000000-auto.zip");
+    await exportWorld("t-e", "a", "New World", "D:\\导出\\New World.zip");
+    expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
+      ["backup_world", { taskId: "t-b", id: "a", world: "New World" }],
+      ["list_world_backups", { id: "a", world: "New World" }],
+      ["restore_world_backup", { taskId: "t-r", id: "a", world: "New World", file: "1730000000000-auto.zip" }],
+      ["delete_world_backup", { id: "a", world: "New World", file: "1730000000000-auto.zip" }],
+      ["export_world", { taskId: "t-e", id: "a", world: "New World", dest: "D:\\导出\\New World.zip" }],
     ]);
   });
 });
@@ -425,5 +447,182 @@ describe("mock：实例设置", () => {
     }
     expect(await getInstanceSettings("1.21.1")).toEqual(next);
     expect((await rejection(setInstanceSettings("ghost", next))).code).toBe("version_not_installed");
+  });
+});
+
+describe("mock：存档备份", () => {
+  /** 一次假打包（MOCK_INSTALL_STEPS 步）走完，多给一步余量。 */
+  const PACK_SPAN_MS = MOCK_STEP_MS * (MOCK_INSTALL_STEPS + 1);
+  const MB = 1_048_576;
+  const ID = "樱花生存";
+  const WORLD = "New World";
+
+  async function backupDone(taskId: string): Promise<Awaited<ReturnType<typeof backupWorld>>> {
+    const done = backupWorld(taskId, ID, WORLD);
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    return done;
+  }
+
+  it("种子：两份自动一份手动，新的在前；隔离实例的备份在 instances/<id>/<存档> 下", async () => {
+    const list = await listWorldBackups(ID, WORLD);
+    expect(list.scope).toBe("instance");
+    expect(list.dir).toBe(`D:/Games/.minecraft/.petalfall/backups/instances/${ID}/${WORLD}`);
+    expect(list.backups.map((b) => b.kind)).toEqual(["auto", "manual", "auto"]);
+    const times = list.backups.map((b) => b.created_at);
+    expect([...times].sort((a, b) => b - a)).toEqual(times);
+    expect(new Set(times).size).toBe(3);
+    expect(list.total_bytes).toBe((172 + 168 + 160) * MB);
+    expect(list.backups.map((b) => b.level_name)).toEqual(["樱花谷", "樱花谷", "樱花村"]);
+  });
+
+  it("没有备份的存档、已经不在的存档都列出空表；不隔离的实例归在 shared 下；文件夹名不安全报 invalid_argument", async () => {
+    expect(await listWorldBackups("1.21.1-Fabric", "生存")).toMatchObject({ backups: [], total_bytes: 0, scope: "instance" });
+    expect((await listWorldBackups(ID, "删掉了的存档")).backups).toEqual([]);
+    // 1.21.1 是原版正式版，跟随全局时不隔离
+    expect(await listWorldBackups("1.21.1", "x")).toMatchObject({ scope: "shared", dir: "D:/Games/.minecraft/.petalfall/backups/shared/x" });
+    for (const world of ["../New World", "a/b", "", ".hidden"]) {
+      const error = await rejection(listWorldBackups(ID, world));
+      expect(error.code, world).toBe("invalid_argument");
+      expect(detail(error).field, world).toBe("world");
+    }
+    expect((await rejection(listWorldBackups("ghost", WORLD))).code).toBe("version_not_installed");
+  });
+
+  it("手动备份：进度事件带 task_id，结束后多一份 manual，记下当时的存档名；不存在的存档报 world_not_found", async () => {
+    vi.useFakeTimers();
+    const events: CoreEvent[] = [];
+    await onCoreEvent((e) => events.push(e));
+    const outcome = await backupDone("t-backup");
+    expect(outcome.pruned).toBe(0);
+    expect(outcome.backup).toMatchObject({ kind: "manual", level_name: "樱花谷", size_bytes: Math.round(180 * MB * 0.9) });
+    expect(outcome.backup.file).toBe(`${outcome.backup.created_at}-manual.zip`);
+    const list = await listWorldBackups(ID, WORLD);
+    expect(list.backups).toHaveLength(4);
+    expect(list.backups[0]).toEqual(outcome.backup);
+    const downloads = events.filter((e) => e.kind === "download");
+    expect(downloads).toHaveLength(MOCK_INSTALL_STEPS);
+    expect(events.every((e) => e.task_id === "t-backup")).toBe(true);
+    expect(downloads.at(-1)).toMatchObject({ finished: 24, total: 24 });
+
+    const error = await rejection(backupWorld("t-missing", ID, "没有这个存档"));
+    expect(error.code).toBe("world_not_found");
+    expect(detail(error)).toEqual({ version_id: ID, world: "没有这个存档" });
+  });
+
+  it("游戏运行中：备份、恢复、导出都报 instance_busy，activity 为 running；与改动 Mod 并行不报错", async () => {
+    vi.useFakeTimers();
+    const running = acquireMockInstance(ID, "running");
+    const [first] = (await listWorldBackups(ID, WORLD)).backups;
+    for (const attempt of [backupWorld("t1", ID, WORLD), restoreWorldBackup("t2", ID, WORLD, first.file), exportWorld("t3", ID, WORLD, "D:\\out\\a.zip")]) {
+      const error = await rejection(attempt);
+      expect(error.code).toBe("instance_busy");
+      expect(detail(error)).toMatchObject({ id: ID, activity: "running" });
+    }
+    running.release();
+
+    const done = backupWorld("t4", ID, WORLD);
+    await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+    // 备份进行中：改动 Mod 照样能占，两件并行时列表里报 backing_up；改名与第二份备份被挡
+    const modifying = acquireMockInstance(ID, "modifying");
+    expect((await listInstances()).find((i) => i.id === ID)?.activity).toBe("backing_up");
+    expect(detail(await rejection(renameInstance(ID, "x")))).toMatchObject({ activity: "backing_up" });
+    expect(detail(await rejection(backupWorld("t5", ID, WORLD)))).toMatchObject({ activity: "backing_up" });
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    expect((await done).backup.kind).toBe("manual");
+    expect((await listInstances()).find((i) => i.id === ID)?.activity).toBe("modifying");
+    modifying.release();
+    expect((await listInstances()).find((i) => i.id === ID)?.activity).toBeNull();
+  });
+
+  it("清理：每个存档的自动备份超过保留份数时删最旧的，手动备份不动", async () => {
+    vi.useFakeTimers();
+    await updateConfig({ worldBackup: { auto: true, keep_per_world: 1, max_total_gb: 20 } });
+    const [newestAuto, manual, oldestAuto] = (await listWorldBackups(ID, WORLD)).backups;
+    const outcome = await backupDone("t-keep");
+    expect(outcome.pruned).toBe(1);
+    expect((await listWorldBackups(ID, WORLD)).backups.map((b) => b.file)).toEqual([outcome.backup.file, newestAuto.file, manual.file]);
+    expect(oldestAuto.kind).toBe("auto");
+  });
+
+  it("清理：总量超过上限时从最旧的自动备份删起，删到不超为止；手动备份再多也不删", async () => {
+    vi.useFakeTimers();
+    await updateConfig({ worldBackup: { auto: true, keep_per_world: 50, max_total_gb: 1 } });
+    const [newestAuto, , oldestAuto] = (await listWorldBackups(ID, WORLD)).backups;
+    // 种子 500 MB，每份手动 162 MB：前三份写完 986 MB 不超 1 GB，第四份写完 1148 MB 超了，删掉最旧的那份自动（160 MB）就够
+    for (const taskId of ["t-1", "t-2", "t-3"]) expect((await backupDone(taskId)).pruned).toBe(0);
+    expect((await backupDone("t-4")).pruned).toBe(1);
+    const list = await listWorldBackups(ID, WORLD);
+    expect(list.backups.map((b) => b.kind)).toEqual(["manual", "manual", "manual", "manual", "auto", "manual"]);
+    expect(list.backups.map((b) => b.file)).toContain(newestAuto.file);
+    expect(list.backups.map((b) => b.file)).not.toContain(oldestAuto.file);
+    expect(list.total_bytes).toBeLessThanOrEqual(1024 * MB);
+    // 手动备份撑着总量：再写一份只能删那唯一的自动备份，删完就停，手动备份一份不少
+    expect((await backupDone("t-5")).pruned).toBe(1);
+    expect((await backupDone("t-6")).pruned).toBe(0);
+    const left = (await listWorldBackups(ID, WORLD)).backups;
+    expect(left.map((b) => b.kind)).toEqual(Array.from({ length: 7 }, () => "manual"));
+  });
+
+  it("恢复：备份表里没有这一份报 world_backup_not_found；成功后存档换成备份时的样子，原存档进回收站", async () => {
+    vi.useFakeTimers();
+    const error = await rejection(restoreWorldBackup("t-gone", ID, WORLD, "1-auto.zip"));
+    expect(error.code).toBe("world_backup_not_found");
+    expect(detail(error)).toEqual({ id: ID, world: WORLD, file: "1-auto.zip" });
+
+    const oldest = (await listWorldBackups(ID, WORLD)).backups[2];
+    const done = restoreWorldBackup("t-restore", ID, WORLD, oldest.file);
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    expect(await done).toEqual({ world: WORLD, previous_in_recycle_bin: true });
+    expect((await listInstanceContent(ID)).worlds.find((w) => w.dir_name === WORLD)).toMatchObject({ name: "樱花村", last_played: oldest.created_at });
+    // 恢复不动备份表
+    expect((await listWorldBackups(ID, WORLD)).backups).toHaveLength(3);
+  });
+
+  it("取消：进行中的备份以 cancelled 拒绝，备份表不变、实例放开", async () => {
+    vi.useFakeTimers();
+    const failed = rejection(backupWorld("t-cancel", ID, WORLD));
+    await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+    expect(await cancelTask("t-cancel")).toBe(true);
+    await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+    expect(isCancelled(await failed)).toBe(true);
+    expect((await listWorldBackups(ID, WORLD)).backups).toHaveLength(3);
+    expect((await listInstances()).find((i) => i.id === ID)?.activity).toBeNull();
+  });
+
+  it("删除一份备份：从表里摘掉，再删同一份报 world_backup_not_found；不占实例，游戏运行中也能删", async () => {
+    const [first, second, third] = (await listWorldBackups(ID, WORLD)).backups;
+    const running = acquireMockInstance(ID, "running");
+    await deleteWorldBackup(ID, WORLD, first.file);
+    running.release();
+    expect((await listWorldBackups(ID, WORLD)).backups.map((b) => b.file)).toEqual([second.file, third.file]);
+    const again = await rejection(deleteWorldBackup(ID, WORLD, first.file));
+    expect(again.code).toBe("world_backup_not_found");
+    expect(detail(again)).toEqual({ id: ID, world: WORLD, file: first.file });
+  });
+
+  it("导出：目标不是 .zip 或不是绝对路径报 invalid_argument（field 为 dest），不登记任务；成功给出路径与大小", async () => {
+    vi.useFakeTimers();
+    for (const dest of ["D:\\out\\a.rar", "out\\a.zip"]) {
+      const error = await rejection(exportWorld("t-bad", ID, WORLD, dest));
+      expect(error.code, dest).toBe("invalid_argument");
+      expect(detail(error).field, dest).toBe("dest");
+    }
+    // 参数错的那两次没登记任务：同一个 taskId 还能用
+    const done = exportWorld("t-bad", ID, WORLD, "D:\\out\\樱花谷.ZIP");
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    expect(await done).toEqual({ path: "D:\\out\\樱花谷.ZIP", size_bytes: Math.round(180 * MB * 0.9) });
+    expect((await listWorldBackups(ID, WORLD)).backups).toHaveLength(3);
+  });
+
+  it("删除预览带上备份目录与份数；删除实例不动备份，改名时备份跟着挪到新名字下", async () => {
+    expect(await previewInstanceDeletion(ID)).toMatchObject({ backups_dir: `D:/Games/.minecraft/.petalfall/backups/instances/${ID}`, backup_count: 3 });
+    expect(await previewInstanceDeletion("1.21")).toMatchObject({ backups_dir: "D:/Games/.minecraft/.petalfall/backups/instances/1.21", backup_count: 0 });
+    await renameInstance(ID, "樱花谷存档");
+    expect((await listWorldBackups("樱花谷存档", WORLD)).backups).toHaveLength(3);
+    expect((await previewInstanceDeletion("樱花谷存档")).backup_count).toBe(3);
+    await deleteInstance("樱花谷存档");
+    // 备份留在原处：别的实例改成这个名字后，预览里数到的就是留下的那几份
+    await renameInstance("RLCraft", "樱花谷存档");
+    expect((await previewInstanceDeletion("樱花谷存档")).backup_count).toBe(3);
   });
 });

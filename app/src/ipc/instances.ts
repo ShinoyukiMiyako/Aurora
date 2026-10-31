@@ -3,7 +3,8 @@
 //
 // 会改动实例目录的命令（新建、整合包导入、补全、改名、删除，以及装、删、启停、更新、回滚 Mod 与装资源）
 // 在实例正忙时以 instance_busy 拒绝，detail.activity 指出正在做的事（Mod 与资源的改动彼此、与运行中的
-// 游戏可以并行，记为 modifying）；被别的实例经 inheritsFrom 依赖时以 instance_has_dependents 拒绝。参数类问题一律是
+// 游戏可以并行，记为 modifying；备份、恢复、导出存档记为 backing_up，只与 modifying 并行）；被别的实例经 inheritsFrom
+// 依赖时以 instance_has_dependents 拒绝。参数类问题一律是
 // invalid_argument，detail.field 指出哪一项：名称问题带 detail.rule（见 NameRule），侧栏固定带
 // detail.reason（too_many / duplicate / not_found）与 detail.id。
 
@@ -17,7 +18,7 @@ export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forg
 export type DetectedLoaderKind = LoaderChoice | "optifine" | "liteloader";
 
 /** 实例此刻在做的事。 */
-export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying";
+export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "backing_up";
 
 export interface LoaderDto {
   kind: DetectedLoaderKind;
@@ -164,6 +165,55 @@ export interface DeletionPreviewDto {
   dependents: string[];
   /** 非空时删除会以 instance_busy 拒绝。 */
   activity: InstanceActivity | null;
+  /** 这个实例的存档备份所在的目录（instances/<id>），删除实例不动它。 */
+  backups_dir: string;
+  /** 这个实例各存档的备份份数之和；为 0 时 backups_dir 可能还不存在。 */
+  backup_count: number;
+}
+
+// ---------------------------------------------------------------- 存档备份
+
+/** auto：退出游戏后自动备份的，会按保留份数与总量上限清理；manual：手动备份的，不会被自动清理。 */
+export type BackupKind = "auto" | "manual";
+
+export interface WorldBackupDto {
+  /** 备份目录里的 zip 文件名；恢复与删除按它指认是哪一份。 */
+  file: string;
+  kind: BackupKind;
+  /** 备份时刻（毫秒时间戳）。 */
+  created_at: number;
+  /** zip 在盘上的字节数。 */
+  size_bytes: number;
+  /** 备份时 level.dat 里的存档名；读不出为 null。 */
+  level_name: string | null;
+}
+
+export interface WorldBackupListDto {
+  world: string;
+  /** instance：隔离实例自己的存档；shared：共用 .minecraft/saves 的存档，所有不隔离的实例看到同一份。 */
+  scope: "instance" | "shared";
+  /** 这个存档的备份目录（绝对路径）；还没有备份时可能还不存在。 */
+  dir: string;
+  /** 新的在前。 */
+  backups: WorldBackupDto[];
+  total_bytes: number;
+}
+
+export interface BackupResultDto {
+  backup: WorldBackupDto;
+  /** 这次写完后按保留规则清掉的旧自动备份份数。 */
+  pruned: number;
+}
+
+export interface RestoreResultDto {
+  world: string;
+  /** 恢复前的存档是否移进了回收站；存档目录原本不存在时为 false。 */
+  previous_in_recycle_bin: boolean;
+}
+
+export interface ExportResultDto {
+  path: string;
+  size_bytes: number;
 }
 
 export interface InstallResultDto {
@@ -307,6 +357,12 @@ export const repairInstance = (taskId: string, id: string): Promise<RepairResult
  */
 export const PLAY_RECORDS_FAILED_ERROR_CODE = "play_records_failed";
 
+/**
+ * 改名本身已经完成，只是存档备份没能从旧名下挪过来：照成功处理再提示。detail 为 { id, renamed_to, path }，
+ * path 是留在旧名下的备份目录。备份与游玩记录都没跟上时报的是 PLAY_RECORDS_FAILED_ERROR_CODE。
+ */
+export const WORLD_BACKUPS_NOT_MOVED_ERROR_CODE = "world_backups_not_moved";
+
 export const previewInstanceDeletion = (id: string): Promise<DeletionPreviewDto> =>
   invoke<DeletionPreviewDto>("preview_instance_deletion", { id });
 
@@ -338,6 +394,32 @@ export interface VersionRequirementsDto {
 /** 新建这个游戏版本要的 Java 主版本与下载体积。版本清单不带这两项，按选中的版本逐个查；后端按版本缓存。 */
 export const versionRequirements = (mcVersion: string): Promise<VersionRequirementsDto> =>
   invoke<VersionRequirementsDto>("version_requirements", { mcVersion });
+
+/**
+ * 长任务：把存档打包成一份手动备份，写完按保留规则清理旧的自动备份。实例启动中或游戏中以 instance_busy 拒绝
+ * （detail.activity 为 launching / running）；存档正被别的程序打开以 world_in_use 拒绝。
+ */
+export const backupWorld = (taskId: string, id: string, world: string): Promise<BackupResultDto> =>
+  invoke<BackupResultDto>("backup_world", { taskId, id, world });
+
+/** 某个存档的全部备份，新的在前。只读，不占实例；存档文件夹已经不在时照常列出它留下的备份。 */
+export const listWorldBackups = (id: string, world: string): Promise<WorldBackupListDto> =>
+  invoke<WorldBackupListDto>("list_world_backups", { id, world });
+
+/**
+ * 长任务：用一份备份替换现在的存档，现在的存档移入回收站。file 不在备份表里时以 world_backup_not_found 拒绝；
+ * 备份校验不过（含越出存档目录的条目）以 world_backup_corrupt 拒绝，这时现在的存档原样不动。
+ */
+export const restoreWorldBackup = (taskId: string, id: string, world: string, file: string): Promise<RestoreResultDto> =>
+  invoke<RestoreResultDto>("restore_world_backup", { taskId, id, world, file });
+
+/** 把一份备份移入回收站并从备份表里去掉。不占实例，可以在游戏运行时做。 */
+export const deleteWorldBackup = (id: string, world: string, file: string): Promise<void> =>
+  invoke<void>("delete_world_backup", { id, world, file });
+
+/** 长任务：把存档打包到 dest（绝对路径、扩展名 .zip、父目录存在）；已有同名文件时覆盖。 */
+export const exportWorld = (taskId: string, id: string, world: string, dest: string): Promise<ExportResultDto> =>
+  invoke<ExportResultDto>("export_world", { taskId, id, world, dest });
 
 /** 用系统文件管理器打开文件夹；路径由后端按实例 id 解析。 */
 export const openFolder = (target: FolderTarget, id: string | null, world: string | null = null): Promise<void> =>
