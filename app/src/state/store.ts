@@ -1754,7 +1754,7 @@ export class LauncherStore {
       this.background(ACTION_ERROR.selectInstance, this.actions.selectInstance(instanceId));
     }
     // 启动的结局（失败码、取消）是会话状态的一部分，不是异常：在这里转成会话；其余错误清掉乐观会话后原样抛出
-    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null }).then(
+    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null, offlineFallback: false }).then(
       () => {
         const s = this.raw.session;
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });

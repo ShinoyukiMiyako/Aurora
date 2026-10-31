@@ -5,7 +5,9 @@ import { lastCrash, lastLaunchLog } from "./diagnostics";
 import { IpcError } from "./errors";
 import {
   BUSY_ERROR_CODE,
+  OFFLINE_FALLBACK_FIELD,
   launchGame,
+  offlineFallbackRefusal,
   onGameExit,
   onGameLog,
   onLaunchPhase,
@@ -43,7 +45,7 @@ function today(): string {
 }
 
 function offline(versionId: string, taskId: string): LaunchArgs {
-  return { taskId, versionId, accountUuid: null, offlineName: "Steve" };
+  return { taskId, versionId, accountUuid: null, offlineName: "Steve", offlineFallback: false };
 }
 
 async function recordEvents() {
@@ -230,20 +232,42 @@ describe("游玩统计 mock", () => {
   });
 });
 
+describe("降级启动的拒绝细节", () => {
+  const refused = (detail: unknown) => new IpcError("invalid_argument", "Steve 不能以离线方式进单人", detail);
+
+  it("invalid_argument 且 field 为 offlineFallback 时取出 reason 与账户名", () => {
+    for (const reason of ["offline_account", "relogin_required", "no_recent_failure"] as const) {
+      expect(offlineFallbackRefusal(refused({ field: OFFLINE_FALLBACK_FIELD, reason, account: "Steve" }))).toEqual({ field: "offlineFallback", reason, account: "Steve" });
+    }
+  });
+
+  it("别的错误不是降级拒绝：别的码、别的 field、没有 detail、前端自己的 Error", () => {
+    expect(offlineFallbackRefusal(new IpcError("account_service_down", "x", { field: OFFLINE_FALLBACK_FIELD, reason: "relogin_required", account: "Steve" }))).toBeNull();
+    expect(offlineFallbackRefusal(refused({ field: "accountUuid", reason: "relogin_required", account: "Steve" }))).toBeNull();
+    expect(offlineFallbackRefusal(refused(undefined))).toBeNull();
+    expect(offlineFallbackRefusal(new Error("invalid_argument"))).toBeNull();
+  });
+
+  it("field 对上了而 reason 或账户名不合契约时直接抛出", () => {
+    expect(() => offlineFallbackRefusal(refused({ field: OFFLINE_FALLBACK_FIELD, reason: "expired", account: "Steve" }))).toThrow("降级启动的拒绝细节不合契约");
+    expect(() => offlineFallbackRefusal(refused({ field: OFFLINE_FALLBACK_FIELD, reason: "relogin_required" }))).toThrow("降级启动的拒绝细节不合契约");
+  });
+});
+
 describe("Tauri 窗口里", () => {
   beforeEach(() => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
-  it("launchGame 只传实例、账户与取消句柄；playStats 传 range 对象", async () => {
+  it("launchGame 只传实例、账户、降级标记与取消句柄；playStats 传 range 对象", async () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce({ pid: 7 }).mockResolvedValueOnce(null).mockResolvedValueOnce({});
-    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这四项。
+    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这五项。
     const extra = { ...offline("1.21", "t-run"), maxMemoryMb: 4096 } as unknown as LaunchArgs;
     expect(await launchGame(extra)).toEqual({ pid: 7 });
     await stopGame();
     await playStats({ from: "2026-10-01", to: "2026-10-31" });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
-      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineName: "Steve" }],
+      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineFallback: false, offlineName: "Steve" }],
       ["stop_game", undefined],
       ["play_stats", { range: { from: "2026-10-01", to: "2026-10-31" } }],
     ]);
