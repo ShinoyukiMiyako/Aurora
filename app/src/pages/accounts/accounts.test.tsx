@@ -202,6 +202,21 @@ describe("账户页：当前账户与列表", () => {
   });
 });
 
+describe("账户页：皮肤", () => {
+  it("皮肤查询失败：舞台照常画剪影立绘，不弹通知，原因写进控制台", async () => {
+    ipc.overrides.set("skin_info", () => {
+      throw new IpcError("io", "账户文件读不出来");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await mount();
+    const figures = [...page().querySelectorAll('[data-sk-art="skin"]')];
+    // 聚光卡一个，两张账户卡各一个
+    expect(figures.map((f) => f.getAttribute("data-art"))).toEqual(["silhouette", "silhouette", "silhouette"]);
+    expect(launcher.state.toasts).toEqual([]);
+    expect(warn.mock.calls.some(([message]) => String(message).includes("皮肤信息读不出来"))).toBe(true);
+  });
+});
+
 describe("账户页：删除", () => {
   it("删除当前微软账户：确认正文写清切到谁与要重新登录，确认后删除并由状态层通知", async () => {
     await mount();

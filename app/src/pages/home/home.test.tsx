@@ -568,13 +568,18 @@ describe("主页：固定的服务器", () => {
 });
 
 describe("主页：账户皮肤", () => {
-  it("皮肤查询失败：照常画剪影立绘，错误经统一处理报告一次", async () => {
+  it("皮肤查询失败：照常画剪影立绘，不弹通知，原因写进控制台", async () => {
+    const failure = new IpcError("io", "账户文件读不出来");
     ipc.overrides.set("skin_info", () => {
-      throw new IpcError("io", "账户文件读不出来");
+      throw failure;
     });
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await mount();
     expect(document.querySelector('[data-sk-art="skin"]')?.getAttribute("data-art")).toBe("silhouette");
-    expect(launcher.state.toasts.map((t) => t.title)).toEqual(["账户皮肤读不出来"]);
+    expect(launcher.state.toasts).toEqual([]);
+    const skinWarnings = warn.mock.calls.filter(([message]) => String(message).includes("皮肤"));
+    expect(skinWarnings).toHaveLength(1);
+    expect(skinWarnings[0][1]).toBeInstanceOf(IpcError);
+    expect((skinWarnings[0][1] as IpcError).message).toBe("账户文件读不出来");
   });
 });

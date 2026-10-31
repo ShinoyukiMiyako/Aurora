@@ -1,5 +1,6 @@
 // 问候卡：日期、问候与当前账户、下载摘要、今天与连续游玩、当前账户的角色立绘（脚下是花瓣地面）。
 
+import { useEffect } from "react";
 import { Icon, type IconName } from "../../art/Icon";
 import { PetalGround } from "../../art/illustrations/PetalGround";
 import { AccountFigure } from "../../art/skin/AccountFigure";
@@ -24,7 +25,6 @@ import { minutesOn, streakDays } from "./activity";
 import { HOME_COPY, greeting } from "./copy";
 import { SKELETON_SIZE } from "./layout";
 import type { PlayView } from "./play-view";
-import { useReportOnce } from "./report";
 import s from "./home.module.css";
 
 const ACCOUNT_ICON: Readonly<Record<Account["kind"], IconName>> = { microsoft: "shield", offline: "user", authlib: "server" };
@@ -48,7 +48,12 @@ export function GreetingCard({ span, play }: GreetingCardProps) {
   const taskProgress = tasks.length === 0 ? null : tasks.reduce((t, task) => t + task.progress, 0) / tasks.length;
 
   const skin = useSkinInfo(account === null ? null : account.uuid);
-  useReportOnce(skin.status === "error" ? skin.error : null, HOME_COPY.skinError);
+  const skinError = skin.status === "error" ? skin.error : null;
+  useEffect(() => {
+    // 皮肤拿不到时画剪影立绘是既定的回落，不弹通知（网络失败、没有皮肤后端已经折成「没有皮肤」）；
+    // 走到这里的是账户库读取一类的真错误，原因留在控制台，便于排查
+    if (skinError !== null) console.warn("[home] 当前账户的皮肤信息读不出来，立绘显示剪影", skinError);
+  }, [skinError]);
 
   const accountLine = () => {
     if (accounts.kind === "loading") {
