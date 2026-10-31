@@ -455,7 +455,8 @@ function FixRow({
       note = CRASH_PAGE_COPY.javaDownloadNote(fix.major);
       action = button(CRASH_PAGE_COPY.downloadJava(fix.major), () => {
         setBusy(true);
-        void run(() => actions.installJava(fix.major), ACTION_ERROR.installJava).then((outcome) => {
+        // 日志指明要这个主版本，自动选择未必挑得到它（游戏版本要求的可能更低），装好后固定给这个实例
+        void run(() => actions.installJava(fix.major, { pinFor: inst.id }), ACTION_ERROR.installJava).then((outcome) => {
           setBusy(false);
           if (outcome.ok) onDone({ note: CRASH_PAGE_COPY.javaQueued, undo: null });
         });

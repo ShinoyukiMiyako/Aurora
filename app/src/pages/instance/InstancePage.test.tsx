@@ -800,6 +800,21 @@ describe("实例详情：崩溃诊断", () => {
     expect(text()).toContain("当前最大内存 4 GB（跟随全局），只改这个实例");
   });
 
+  it("Java 版本不匹配、本机没有要求的版本：下载 Java N，装好后固定给这个实例", async () => {
+    crash = report([{ category: "java_version_mismatch", detail: "has been compiled by a more recent version of the Java Runtime (class file version 66.0)" }], NOW - 60_000);
+    ipc.overrides.set("install_java", () => ({ component: "java-runtime-delta", version: { major: 22, minor: 0, security: 2, build: 9, raw: "22.0.2+9" }, java_executable: "C:/Petal/runtime/22/bin/java.exe" }));
+    await open("crash");
+    expect(text()).toContain("本机没有 Java 22，下载好后这个实例固定用它");
+    click(button("下载 Java 22"));
+    await flush();
+    expect(callsOf(ipc, "install_java").map((a) => a.requiredMajor)).toEqual([22]);
+    expect(text()).toContain("已加入下载队列，下载好后这个实例固定用它");
+    const pinned = callsOf(ipc, "set_instance_settings").map((a) => (a.settings as InstanceSettingsDto).java);
+    expect(pinned).toEqual(["C:/Petal/runtime/22/bin/java.exe"]);
+    expect(callsOf(ipc, "set_instance_settings")[0].id).toBe(ID);
+    expect(toastTitles()).toContain("Java 22 已就绪");
+  });
+
   it("复制报告路径：写入成功原位换成「已复制」；失败只报一次错，按钮保持原样", async () => {
     crash = report([{ category: "out_of_memory" }], NOW - 60_000);
     const writeText = vi.fn(() => Promise.resolve());
