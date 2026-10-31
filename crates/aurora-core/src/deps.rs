@@ -333,9 +333,9 @@ impl Aurora {
             return Ok(Resolved::Chosen(Box::new(version), true));
         }
 
-        // 把实例事实作为过滤条件带下去。这不是为了省流量：CurseForge 的文件端点是分页的，只取首页，
-        // 一个动辄几百个文件的前置不带条件查，首页可能一个适配本实例的文件都没有，结果是「明明有版本
-        // 却报没有适配版本」。
+        // 把实例事实作为过滤条件带下去。这不是为了省流量：CurseForge 的文件列表最多翻 10 页（500 个文件），
+        // 文件更多的前置不带条件查会被截断，截掉的部分可能正好有唯一适配本实例的文件，结果是「明明有版本
+        // 却报没有适配版本」；带上条件，平台先筛过再分页。缓存里有完整的不过滤列表时由它本地代答。
         let game_versions: Vec<String> = facts.mc_version.clone().into_iter().collect();
         let candidates = self
             .list_mod_versions(platform, dep_project, &game_versions, &facts.mod_loaders)
