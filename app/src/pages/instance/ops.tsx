@@ -5,7 +5,7 @@ import { ACTION_ERROR } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { instanceNameError } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { busyInstanceId } from "../../state/selectors";
 import type { LauncherActions } from "../../state/store";
 import { HERO_COPY, LOCK_REASON, OVERVIEW_COPY } from "./copy";
@@ -43,14 +43,15 @@ export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | 
 }
 
 export function useInstanceOps(inst: InstanceSummary): InstanceOps {
-  const { state, actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const deleteInstance = useDeleteInstance();
-  const busy = busyInstanceId(state) === inst.id;
+  const id = inst.id;
+  const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
+  // 改名校验要全部实例名；只订阅名字，别的实例的进度与状态变化不让页面重渲染
+  const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const installing = inst.status === "installing";
   const locks = instanceLocks(busy, installing, inst.activity === "modifying");
-  const ids = state.instances.map((i) => i.id);
-  const id = inst.id;
   const name = inst.name;
 
   const nameError = (next: string) => (next.trim() === name ? null : instanceNameError(next.trim(), ids, id));

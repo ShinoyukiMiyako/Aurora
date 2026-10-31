@@ -13,7 +13,7 @@ import { instanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
 import { canPinMore } from "../../state/selectors";
 import { Card } from "../../ui/Card";
@@ -44,11 +44,10 @@ export interface HeroProps {
 }
 
 export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange }: HeroProps) {
-  const { state } = useLauncher();
   const { tier } = useShell();
   const { go } = useNav();
   const cover = instanceCover(inst);
-  const pinBlocked = !inst.pinned && !canPinMore(state);
+  const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");

@@ -1,7 +1,7 @@
 // 几个标签页共用的派生数据：要求的 Java 主版本、Java 选择、生效内存。查询经状态层的资源缓存，多处同时要只发一次请求。
 
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherSelector } from "../../state/launcher";
 import { useJavaRuntimes, useMemoryAdvice, useRequiredJava, type JavaInstallationDto, type MemoryAdviceDto } from "../../state/queries/catalog";
 import type { ResourceResult } from "../../state/resource";
 import { autoJavaPick, effectiveMemoryMb, javaChoice, type AutoJavaPick, type JavaChoice } from "./model";
@@ -26,20 +26,20 @@ export interface JavaInfo {
 
 /** 这个实例此刻的 Java 选择；要求的版本读不出来时 value 为 null。 */
 export function useJavaInfo(inst: InstanceSummary, settings: ResourceResult<InstanceSettings>): Loadable<JavaInfo | null> {
-  const { state } = useLauncher();
+  const global = useLauncherSelector((s) => s.settings);
   const runtimes = useJavaRuntimes();
   const required = useRequiredMajor(inst);
   if (settings.status === "error") return { status: "error", error: settings.error, reload: settings.reload };
   if (runtimes.status === "error") return { status: "error", error: runtimes.error, reload: runtimes.reload };
   if (required.status === "error") return required;
-  if (settings.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready" || state.settings === null) return { status: "loading" };
+  if (settings.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready" || global === null) return { status: "loading" };
   if (required.value === null) return { status: "ready", value: null };
   return {
     status: "ready",
     value: {
       required: required.value,
-      choice: javaChoice(settings.data.java, runtimes.data, required.value, state.settings.defaultJava, JAVA_AUTO),
-      autoPick: autoJavaPick(runtimes.data, required.value, state.settings.defaultJava, JAVA_AUTO),
+      choice: javaChoice(settings.data.java, runtimes.data, required.value, global.defaultJava, JAVA_AUTO),
+      autoPick: autoJavaPick(runtimes.data, required.value, global.defaultJava, JAVA_AUTO),
       runtimes: runtimes.data,
     },
   };
@@ -53,15 +53,15 @@ export interface MemoryInfo {
 }
 
 export function useMemoryInfo(inst: InstanceSummary, settings: ResourceResult<InstanceSettings>, queryId: string | null): Loadable<MemoryInfo> {
-  const { state } = useLauncher();
+  const global = useLauncherSelector((s) => s.settings);
   const advice = useMemoryAdvice(queryId === null ? null : inst.id);
   if (settings.status === "error") return { status: "error", error: settings.error, reload: settings.reload };
   if (advice.status === "error") return { status: "error", error: advice.error, reload: advice.reload };
-  if (settings.status !== "ready" || advice.status !== "ready" || state.settings === null) return { status: "loading" };
+  if (settings.status !== "ready" || advice.status !== "ready" || global === null) return { status: "loading" };
   return {
     status: "ready",
     value: {
-      effectiveMb: effectiveMemoryMb(settings.data.memoryMb, state.settings.memory, advice.data.recommended_mb),
+      effectiveMb: effectiveMemoryMb(settings.data.memoryMb, global.memory, advice.data.recommended_mb),
       followsGlobal: settings.data.memoryMb === null,
       advice: advice.data,
     },

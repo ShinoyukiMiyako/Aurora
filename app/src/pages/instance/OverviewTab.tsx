@@ -13,7 +13,7 @@ import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useNow } from "../../state/launcher";
 import {
   useInstanceContent,
   useInstanceMods,
@@ -428,7 +428,7 @@ function ModsPeekCard({
 }) {
   const { openCreateInstance } = useShell();
   const { go } = useNav();
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const vanilla = inst.loader === "vanilla";
   const load = useModuleView(mods);

@@ -11,7 +11,7 @@ import { needsReimport } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useInstanceSettings } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute } from "../../state/route";
@@ -67,7 +67,7 @@ interface SettingsEditor {
 }
 
 function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings>): SettingsEditor | null {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const [patch, setPatch] = useState<Partial<InstanceSettings>>({});
   const data = settings.status === "ready" ? settings.data : null;
@@ -155,7 +155,7 @@ function MemoryCard({
   memory: ReturnType<typeof useMemoryInfo>;
   placeholder: Placeholder;
 }) {
-  const { state } = useLauncher();
+  const global = useLauncherSelector((s) => s.settings);
   const { go } = useNav();
   const custom = editor !== null && editor.value.memoryMb !== null;
   const saved = editor === null ? null : editor.value.memoryMb;
@@ -165,7 +165,7 @@ function MemoryCard({
   const body = (() => {
     if (placeholder === "pending") return null;
     if (placeholder === null && memory.status === "error") return <ModuleError title={SETTINGS_COPY.memoryError} error={memory.error} onRetry={memory.reload} />;
-    if (placeholder !== null || memory.status !== "ready" || editor === null || state.settings === null) return <Skeleton shape="text" lines={3} />;
+    if (placeholder !== null || memory.status !== "ready" || editor === null || global === null) return <Skeleton shape="text" lines={3} />;
     const info: MemoryInfo = memory.value;
     const recommended = info.advice.recommended_mb;
     const mods = inst.modCount === null ? 0 : inst.modCount;
@@ -174,7 +174,7 @@ function MemoryCard({
         <div className={styles.followBox}>
           <div className={styles.followText}>
             <span className={styles.followValue}>{formatMemory(info.effectiveMb)}</span>
-            <span className={styles.soft}>{state.settings.memory.auto ? SETTINGS_COPY.followAuto : SETTINGS_COPY.followFixed}</span>
+            <span className={styles.soft}>{global.memory.auto ? SETTINGS_COPY.followAuto : SETTINGS_COPY.followFixed}</span>
           </div>
           <Button variant="ghost" size="sm" iconRight="arrow-right" onClick={() => go({ page: "settings", section: "game" })}>
             {SETTINGS_COPY.globalSettings}
@@ -226,7 +226,7 @@ function MemoryCard({
 const FIT_ICON = { match: "check-circle", higher: "alert", lower: "x-circle" } as const;
 
 function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; editor: SettingsEditor | null; java: ReturnType<typeof useJavaInfo>; placeholder: Placeholder }) {
-  const { state } = useLauncher();
+  const global = useLauncherSelector((s) => s.settings);
   const subtitle =
     java.status === "ready" && java.value !== null && inst.mcVersion !== null
       ? SETTINGS_COPY.javaSubtitle(inst.mcVersion, java.value.required)
@@ -237,7 +237,7 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
   const body = (() => {
     if (placeholder === "pending") return null;
     if (placeholder === null && java.status === "error") return <ModuleError title={SETTINGS_COPY.javaError} error={java.error} onRetry={java.reload} />;
-    if (placeholder !== null || java.status !== "ready" || editor === null || state.settings === null) {
+    if (placeholder !== null || java.status !== "ready" || editor === null || global === null) {
       return (
         <>
           <Skeleton shape="block" width="100%" height={36} radius="md" />
@@ -267,7 +267,7 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
     return (
       <>
         <Select value={value} onChange={(next) => void editor.save({ java: next })} options={options} block ariaLabel={SETTINGS_COPY.javaSelect} />
-        <JavaState info={info} autoDownload={state.settings.autoDownloadJava} onUseAuto={() => void editor.save({ java: JAVA_AUTO })} />
+        <JavaState info={info} autoDownload={global.autoDownloadJava} onUseAuto={() => void editor.save({ java: JAVA_AUTO })} />
       </>
     );
   })();
@@ -318,7 +318,7 @@ function JavaState({ info, autoDownload, onUseAuto }: { info: JavaInfo; autoDown
 // ---------------------------------------------------------------- JVM 参数
 
 function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | null }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const saved = editor.value.jvmArgs;
   const [draft, setDraft] = useState(saved);
   const [saving, setSaving] = useState(false);
@@ -401,9 +401,8 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
 // ---------------------------------------------------------------- 版本隔离与窗口
 
 function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsEditor }) {
-  const { state } = useLauncher();
+  const policy = useLauncherSelector((state) => (state.settings === null ? null : state.settings.isolationPolicy));
   const s = editor.value;
-  const policy = state.settings === null ? null : state.settings.isolationPolicy;
   // 跟随全局时说此刻实际隔离与否：列表里后端给的生效值算上了「版本目录里已有 mods 或 saves 就强制隔离」，
   // 前端看不到目录、推断不出这一条；后端没给出（实例设置读不出）时才按全局策略推断
   const followIsolated = policy === null ? null : inst.isolated === null ? isolationByPolicy(policy, inst) : inst.isolated;
@@ -522,7 +521,8 @@ function ResolutionRow({ editor }: { editor: SettingsEditor }) {
 // ---------------------------------------------------------------- 实例管理
 
 function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) {
-  const { state } = useLauncher();
+  const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
+  const gameDir = useLauncherSelector((s) => (s.settings === null ? null : s.settings.gameDir));
   const { tier } = useShell();
   const { go } = useNav();
   const [name, setName] = useState(inst.name);
@@ -534,8 +534,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
-  const pinBlocked = !inst.pinned && !canPinMore(state);
-  const folder = state.settings === null ? null : instanceFolderPath(state.settings.gameDir, inst.id);
+  const folder = gameDir === null ? null : instanceFolderPath(gameDir, inst.id);
 
   const saveName = () => {
     if (!changed || error !== null || renaming) return;

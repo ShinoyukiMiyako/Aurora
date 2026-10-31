@@ -15,7 +15,7 @@ import { javaMajorFromClassVersion } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncher, useNow } from "../../state/launcher";
+import { useLauncherActions, useNow } from "../../state/launcher";
 import { useJavaRuntimes } from "../../state/queries/catalog";
 import { useInstanceMods, useInstanceSettings, type CrashClueDto, type CrashReportDto, type InstalledMod } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
@@ -49,7 +49,7 @@ export interface CrashTabProps {
 }
 
 export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab }: CrashTabProps) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   // 从「查看诊断」进来时收起崩溃态：报告已经落盘，不会丢
   const crashed = view.kind === "crashed";
   useEffect(() => {
@@ -366,7 +366,7 @@ function FixRow({
   onUndone(): void;
   onTab(tab: InstanceTab): void;
 }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const { go } = useNav();
   const run = useRunner();
   const { copyText } = useShell();
@@ -547,7 +547,7 @@ function FixRow({
 // ---------------------------------------------------------------- 日志指向的 Mod
 
 function SuspectsCard({ inst, ops, report, mods }: { inst: InstanceSummary; ops: InstanceOps; report: CrashReportDto; mods: ResourceResult<InstalledMod[]> }) {
-  const { actions } = useLauncher();
+  const actions = useLauncherActions();
   const run = useRunner();
   const lock = lockReason(ops.locks.mods, "mods");
 

@@ -8,7 +8,7 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
-import { useLauncher } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useInstanceMods, type UpdateCandidate } from "../../state/queries/instance";
 import { invalidate, type ResourceResult } from "../../state/resource";
 import { Banner } from "../../ui/Banner";
@@ -67,7 +67,7 @@ function VanillaMods({ inst }: { inst: InstanceSummary }) {
 }
 
 function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
-  const { state, actions } = useLauncher();
+  const actions = useLauncherActions();
   const { tier, confirm, registerFind } = useShell();
   const { go } = useNav();
   const run = useRunner();
@@ -110,8 +110,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     }
   }, [actions, checking, run, updates]);
 
-  const updateTasks = state.tasks.filter(
-    (t) => t.instanceId === id && t.spec.command === "update_mod" && (t.status === "queued" || t.status === "running"),
+  // 只订阅本实例排队与进行中的更新任务：它们的进度条要跟着走，别的任务的进度不让整张表重渲染
+  const updateTasks = useLauncherSelector(
+    (s) => s.tasks.filter((t) => t.instanceId === id && t.spec.command === "update_mod" && (t.status === "queued" || t.status === "running")),
+    shallowArrayEqual,
   );
   const updatingFiles = new Set(updateTasks.map((t) => String(t.spec.args.fileName)));
   const rows = modsData === null ? [] : modRows(modsData, updates.status === "ready" ? updates.data : null).map((r) => {
