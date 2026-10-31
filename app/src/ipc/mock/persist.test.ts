@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+// 整个假后端几十个模块：静态导入让首次转换在收集测试文件时完成，不计入用例的超时。否则第一个用例里的
+// reload() 要现场转换整张模块图，CPU 满载时这一步就要四五秒，用例在 5 秒超时边上随机失败；之后的 reload()
+// 只是重新求值，几十毫秒。
+import "./index";
 
 /** 内存里的 Storage：可以让写入失败，模拟配额满或站点数据被禁用。 */
 class MemoryStorage implements Storage {
