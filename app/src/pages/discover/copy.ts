@@ -61,7 +61,6 @@ export const SEARCH_COPY = {
   clearFilters: "清除筛选",
   onlyModrinthUnmapped: "仅 Modrinth（这个分类在 CurseForge 没有对应）",
   onlyModrinthKeyMissing: "仅 Modrinth（没有配置 CurseForge 密钥）",
-  slow: "比平时慢一些，仍在加载…",
   end: "已经到底了",
   tooMany: "结果太多，换个更具体的关键词试试",
   nextFailed: "下一页没加载出来",

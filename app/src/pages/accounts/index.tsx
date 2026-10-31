@@ -3,7 +3,7 @@
 // 所以从标题栏、启动拦截发起的登录进到本页同样可见。
 
 import { useId } from "react";
-import { ACTION_ERROR, BOOT_SLICE_ERROR } from "../../copy/flows";
+import { ACTION_ERROR, BOOT_SLICE_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { AccountKind } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useRunner } from "../../shell/useRunner";
@@ -165,7 +165,7 @@ function LoadingSkeleton({ slow }: { slow: boolean }) {
           </Card>
         ))}
       </div>
-      {slow && <p className={styles.slowHint}>{ACCOUNTS_COPY.slow}</p>}
+      {slow && <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p>}
     </div>
   );
 }

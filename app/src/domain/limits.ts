@@ -18,8 +18,6 @@ export const FAILURE_TOAST_MERGE_MS = 10000;
 
 /** 发起微软登录后多久仍未收到设备码即判为失败。 */
 export const DEVICE_CODE_FETCH_TIMEOUT_MS = 15000;
-/** 外置登录服务器元数据探测的时限。 */
-export const ALI_PROBE_TIMEOUT_MS = 10000;
 
 /** 各色调通知的自动消失时长；null 表示不自动消失。 */
 export const TOAST_TTL_MS = { info: 5000, success: 5000, warning: 8000, error: null } as const;

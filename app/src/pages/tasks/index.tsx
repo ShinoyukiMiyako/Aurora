@@ -3,7 +3,7 @@
 // 状态筛选写在路由上：多个下载失败合并成一条通知时，通知的「查看」直接带着「失败与取消」进页。
 
 import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from "react";
-import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL } from "../../copy/flows";
+import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { Task } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
@@ -284,7 +284,7 @@ function TasksSkeleton({ slow }: { slow: boolean }) {
         <Skeleton shape="block" width="100%" height={188} radius="lg" />
         <Skeleton shape="block" width="100%" height={188} radius="lg" />
       </EntranceBlock>
-      {slow && <p className={styles.slowHint}>{TASKS_COPY.slow}</p>}
+      {slow && <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p>}
     </>
   );
 }

@@ -1,6 +1,7 @@
 // 本页几个模块共用的小件：模块级加载门与错误态。
 
 import type { ReactNode } from "react";
+import { SLOW_LOADING_HINT } from "../../copy/flows";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { describeError } from "../../state/errors";
 import type { ResourceResult } from "../../state/resource";
@@ -21,7 +22,7 @@ export function useModuleView(resource: ResourceResult<unknown>): { view: "pendi
 
 /** 骨架下方的「比平时慢一些」：同一轮加载超过 10 s 才出现。 */
 export function SlowHint({ slow }: { slow: boolean }) {
-  return slow ? <p className={styles.slowHint}>{OVERVIEW_COPY.slow}</p> : null;
+  return slow ? <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p> : null;
 }
 
 /** 模块原位的错误：出错插画 + 一句说明 + 后端原因原文 + 重试；其他模块不受影响。 */

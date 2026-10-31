@@ -2,7 +2,7 @@
 // 页面持有界面上的筛选与分页累积；搜索结果、详情、版本、落位矩阵都是状态层的按需查询。
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { LOADER_NAME } from "../../copy/flows";
+import { LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
 import { useLoadingGate } from "../../lib/loading-gate";
@@ -286,7 +286,7 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
         <div className={styles.grid} aria-busy="true">
           {gate.view === "skeleton" && Array.from({ length: PAGE_SIZE }, (_, i) => <SkeletonCard key={i} />)}
         </div>
-        {gate.slow && <p className={styles.listNote}>{SEARCH_COPY.slow}</p>}
+        {gate.slow && <p className={styles.listNote}>{SLOW_LOADING_HINT}</p>}
       </>
     );
   }
@@ -356,7 +356,7 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
         {pages.loadingNext && (
           <span className={styles.listNote}>
             <Spinner size={16} />
-            {slowNext ? SEARCH_COPY.slow : SEARCH_COPY.searching}
+            {slowNext ? SLOW_LOADING_HINT : SEARCH_COPY.searching}
           </span>
         )}
         {pages.nextError !== null && (

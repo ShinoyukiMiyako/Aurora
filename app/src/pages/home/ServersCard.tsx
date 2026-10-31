@@ -7,7 +7,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
-import { ACTION_ERROR } from "../../copy/flows";
+import { ACTION_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
@@ -111,7 +111,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
               <Skeleton shape="text" lines={3} />
             </span>
           ))}
-          {gate.slow && <span className={s.slowHint}>{HOME_COPY.slow}</span>}
+          {gate.slow && <span className={s.slowHint}>{SLOW_LOADING_HINT}</span>}
         </div>
       );
     }

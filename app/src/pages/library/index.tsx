@@ -5,7 +5,7 @@
 import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
 import { useEffect, useId, useMemo, useRef } from "react";
 import { Icon } from "../../art/Icon";
-import { ACTION_ERROR, LOADER_NAME } from "../../copy/flows";
+import { ACTION_ERROR, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { fade, springs } from "../../lib/motion";
@@ -168,7 +168,7 @@ export default function LibraryPage() {
           <EntranceBlock className={styles.grid} aria-busy="true" aria-label={LIBRARY_COPY.loadingLabel}>
             {gate.view === "skeleton" && Array.from({ length: SKELETON_CARDS[tier] }, (_, i) => <SkeletonCard key={i} />)}
           </EntranceBlock>
-          {gate.slow && <p className={styles.slowHint}>{LIBRARY_COPY.slow}</p>}
+          {gate.slow && <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p>}
         </>
       ) : slice.kind === "error" ? (
         <EntranceBlock>

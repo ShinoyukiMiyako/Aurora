@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { hueOf } from "../../art/illustrations/seed";
+import { SLOW_LOADING_HINT } from "../../copy/flows";
 import { formatDate, formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { cx } from "../../lib/util";
@@ -63,7 +64,7 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
               <Skeleton shape="text" lines={2} />
             </span>
           ))}
-          {gate.slow && <span className={s.slowHint}>{HOME_COPY.slow}</span>}
+          {gate.slow && <span className={s.slowHint}>{SLOW_LOADING_HINT}</span>}
         </div>
       );
     }

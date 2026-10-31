@@ -2,7 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { CONFIRM_COPY, DELETE_INSTANCE_COPY, TOAST_COPY } from "../../copy/flows";
+import { CONFIRM_COPY, DELETE_INSTANCE_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
 import type { InstanceDto, WorldDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
@@ -295,11 +295,11 @@ describe("实例库：筛选、搜索与空状态", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(9_999);
     });
-    expect(document.body.textContent).not.toContain(LIBRARY_COPY.slow);
+    expect(document.body.textContent).not.toContain(SLOW_LOADING_HINT);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    expect(document.body.textContent).toContain(LIBRARY_COPY.slow);
+    expect(document.body.textContent).toContain(SLOW_LOADING_HINT);
   });
 
   it("列表读取失败：显示原因，重试重新读取", async () => {

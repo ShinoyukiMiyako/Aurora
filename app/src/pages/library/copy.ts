@@ -74,5 +74,4 @@ export const LIBRARY_COPY = {
 
   gridLabel: "实例",
   loadingLabel: "正在读取实例列表",
-  slow: "比平时慢一些，仍在加载…",
 } as const;

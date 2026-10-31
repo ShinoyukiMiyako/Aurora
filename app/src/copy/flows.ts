@@ -20,6 +20,9 @@ export const BOOT_FAILURE_COPY = {
   },
 } as const;
 
+/** 加载持续超过 SLOW_HINT_MS 时在加载态下方追加的一句，各页面与模块共用。 */
+export const SLOW_LOADING_HINT = "比平时慢一些，仍在加载…";
+
 /** 错误页上的按钮文案。 */
 export const ERROR_SCREEN_ACTIONS = {
   reload: "重新加载",
@@ -672,14 +675,6 @@ export const BOOT_SLICE_ERROR = {
 export const CONFIRM_COPY = {
   cancel: "取消",
   keepDownloading: "继续下载",
-  deleteInstance: (name: string, worlds: number) => ({
-    title: `删除「${name}」？`,
-    body:
-      worlds > 0
-        ? `${worlds} 个存档会移入回收站，Mod、配置和截图会被删除，无法恢复。`
-        : "这个实例没有存档。Mod、配置和截图会被删除，无法恢复。",
-    confirmLabel: "删除实例",
-  }),
   stopGame: (name: string) => ({
     title: "结束游戏？",
     body: `会直接结束「${name}」的游戏进程，没保存的进度可能丢失。正常退出请在游戏菜单里保存并退出。`,

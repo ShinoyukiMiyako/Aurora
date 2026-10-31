@@ -5,7 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
-import { ACTION_ERROR, BOOT_SLICE_ERROR } from "../../copy/flows";
+import { ACTION_ERROR, BOOT_SLICE_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
@@ -107,7 +107,7 @@ function HeroSkeleton({ pending, slow }: { pending: boolean; slow: boolean }) {
         <div className={s.heroActions}>
           <Skeleton shape="block" width="50%" height={SKELETON_SIZE.capsule} radius="pill" />
         </div>
-        {slow && <span className={s.slowHint}>{HOME_COPY.slow}</span>}
+        {slow && <span className={s.slowHint}>{SLOW_LOADING_HINT}</span>}
       </div>
       <span className={s.heroBlock}>
         <Skeleton shape="square" size={block} />

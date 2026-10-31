@@ -129,7 +129,6 @@ export const HOME_COPY = {
   serverMore: (name: string) => `${name} 的更多操作`,
 
   // ---- 共用
-  slow: "比平时慢一些，仍在加载…",
   worldsError: "存档列表读不出来",
 } as const;
 
