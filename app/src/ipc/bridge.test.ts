@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -33,16 +34,22 @@ describe("浏览器与测试环境走 mock", () => {
     expect(tauriInvoke).not.toHaveBeenCalled();
   });
 
-  // 各领域的 mock 各自登记命令，这里只钉住基础层负责的五条。
-  it("mock 登记了基础层负责的五条命令", () => {
-    expect(mockCommands()).toEqual(expect.arrayContaining(["cancel_task", "get_appearance", "load_task_journal", "save_task_journal", "set_appearance"]));
+  // 浏览器里跑界面时每条真命令都要有 mock，mock 也不能登记后端没有的命令：
+  // 两边以 generate_handler! 的注册表为准逐条对齐。
+  it("mock 与后端注册的命令一一对应", () => {
+    const lib = readFileSync(new URL("../../src-tauri/src/lib.rs", import.meta.url), "utf8");
+    const block = lib.slice(lib.indexOf("generate_handler!["), lib.indexOf("])", lib.indexOf("generate_handler![")));
+    const registered = [...block.matchAll(/commands::\w+::(\w+)/g)].map((m) => m[1]).sort();
+    expect(registered.length).toBeGreaterThan(80);
+    expect(new Set(registered).size).toBe(registered.length);
+    expect(mockCommands()).toEqual(registered);
   });
 
   it("未实现的命令直接抛错，不返回空值", async () => {
-    const error = await invoke("list_instances").catch((e: unknown) => e);
+    const error = await invoke("no_such_command").catch((e: unknown) => e);
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(IpcError);
-    expect((error as Error).message).toBe("mock 未实现 list_instances");
+    expect((error as Error).message).toBe("mock 未实现 no_such_command");
   });
 
   it("外观读写：补丁合并进完整状态，返回值与后续读取一致", async () => {
@@ -149,12 +156,12 @@ describe("Tauri 窗口里走真命令", () => {
   it("长命令带 taskId，参数键与 Rust 形参一致", async () => {
     for (let i = 0; i < 4; i++) vi.mocked(tauriInvoke).mockResolvedValueOnce(null);
     await installJava("t-java", 21);
-    await installVersion("t-ver", "1.21.1", "fabric", "0.16.9");
+    await installVersion("t-ver", "1.21.1", "fabric", "0.16.9", "周末生存");
     await installMod("t-mod", "1.21.1-fabric", "modrinth", "AANobbMI", "mv1");
     await launchGame({ taskId: "t-run", versionId: "1.21.1", accountUuid: null, offlineName: "Steve" });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["install_java", { taskId: "t-java", requiredMajor: 21 }],
-      ["install_version", { taskId: "t-ver", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9" }],
+      ["install_version", { taskId: "t-ver", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9", targetName: "周末生存" }],
       ["install_mod", { taskId: "t-mod", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1" }],
       ["launch_game", { taskId: "t-run", versionId: "1.21.1", accountUuid: null, offlineName: "Steve" }],
     ]);
