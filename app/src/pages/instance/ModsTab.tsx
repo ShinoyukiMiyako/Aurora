@@ -25,6 +25,7 @@ import { Table, type TableColumn, type TableSort } from "../../ui/Table";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
+import { Tooltip } from "../../ui/Tooltip";
 import { MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
 import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, modTotals, removalRelations, type ModFilter, type ModRow } from "./model";
@@ -408,7 +409,15 @@ function modColumns({ compact, lock, isUpdating, toggle, update, remove }: Colum
       width: 64,
       sortable: true,
       keepOpaque: true,
-      cell: (r) => <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={lock} />,
+      // 锁住时开关自己用提示气泡写禁用原因；可用时悬停说明点了是停用还是启用
+      cell: (r) =>
+        lock === undefined ? (
+          <Tooltip content={MODS_COPY.toggleTip(r.enabled)}>
+            <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} />
+          </Tooltip>
+        ) : (
+          <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={lock} />
+        ),
     },
     {
       key: "actions",
