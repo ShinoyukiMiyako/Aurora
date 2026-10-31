@@ -69,7 +69,7 @@ pub use config::{
     AfterLaunch, AuroraConfig, ConfigFieldReset, ConfigRecovery, ConfigStore, DownloadSourcePolicy,
     MemorySettings, NamedDirectory, PinnedServer,
 };
-pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
+pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog, ScannedFile};
 pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, GameDirProblem, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
@@ -120,9 +120,10 @@ pub use aurora_instance::{
 };
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use aurora_launch::{
-    CrashCategory, CrashDiagnosis, ExitReport, KillSwitch, LauncherLevel, LogBatchSink, LogEntry,
-    LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, SessionEnded, SessionOutcome,
-    SystemMemory, analyze, detect_crash, game_line_level, probe_system_memory,
+    CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, ExitReport, KillSwitch,
+    LauncherLevel, LogBatchSink, LogEntry, LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier,
+    SessionEnded, SessionOutcome, SystemMemory, analyze, detect_crash, game_line_level,
+    probe_system_memory,
 };
 pub use aurora_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,
