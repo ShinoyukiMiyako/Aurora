@@ -103,6 +103,29 @@ impl Default for MemorySettings {
     }
 }
 
+/// 存档备份设置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldBackupSettings {
+    /// 游戏退出后是否自动备份这次玩过的存档。默认开：备份的价值在零操作兜底，等玩家想起来手动备份
+    /// 往往已经晚了。
+    pub auto: bool,
+    /// 每个存档保留的自动备份份数；手动备份不受它限制。
+    pub keep_per_world: u32,
+    /// 全部备份的总量上限（GB，按 1024^3 字节计），超过后先删最旧的自动备份。
+    pub max_total_gb: u32,
+}
+
+impl Default for WorldBackupSettings {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            keep_per_world: 5,
+            max_total_gb: 20,
+        }
+    }
+}
+
 /// 游戏启动后启动器窗口的去留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,6 +217,8 @@ pub struct AuroraConfig {
     pub notified_update_version: Option<String>,
     /// 界面语言。旧配置没有这一项时取默认的简体中文。
     pub language: UiLanguage,
+    /// 存档备份。旧配置没有这一项时取默认值。
+    pub world_backup: WorldBackupSettings,
 }
 
 impl Default for AuroraConfig {
@@ -220,6 +245,7 @@ impl Default for AuroraConfig {
             skipped_update_version: None,
             notified_update_version: None,
             language: UiLanguage::default(),
+            world_backup: WorldBackupSettings::default(),
         }
     }
 }
@@ -515,6 +541,73 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["language"], "en-US");
         assert_eq!(store.load().await.unwrap().language, UiLanguage::EnUs);
+    }
+
+    /// 旧配置没有 world_backup 时按默认值载入：自动备份开、每个存档 5 份、总量 20 GB。
+    #[tokio::test]
+    async fn world_backup_defaults_for_old_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 16, "language": "en-US"}"#,
+        )
+        .await
+        .unwrap();
+        let loaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(
+            loaded.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 5,
+                max_total_gb: 20,
+            }
+        );
+        assert_eq!(loaded.download_concurrency, 16);
+        assert_eq!(loaded.language, UiLanguage::EnUs);
+    }
+
+    /// world_backup 只写了一部分时，缺的那几项取默认值；写过之后原样落盘、原样读回。
+    #[tokio::test]
+    async fn partial_world_backup_fills_defaults_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(&path, br#"{"world_backup": {"keep_per_world": 1}}"#)
+            .await
+            .unwrap();
+        let store = ConfigStore::at(&path);
+        let mut loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 1,
+                max_total_gb: 20,
+            }
+        );
+
+        tokio::fs::write(&path, br#"{"world_backup": {"auto": false}}"#)
+            .await
+            .unwrap();
+        let off = store.load().await.unwrap().world_backup;
+        assert_eq!(
+            (off.auto, off.keep_per_world, off.max_total_gb),
+            (false, 5, 20)
+        );
+
+        loaded.world_backup = WorldBackupSettings {
+            auto: false,
+            keep_per_world: 50,
+            max_total_gb: 1000,
+        };
+        store.save(&loaded).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["world_backup"],
+            serde_json::json!({ "auto": false, "keep_per_world": 50, "max_total_gb": 1000 })
+        );
+        assert_eq!(store.load().await.unwrap(), loaded);
     }
 
     /// 不认识的语言（新版本才有的译文）不让整份配置失败：语言退回简体中文，其余照常。
