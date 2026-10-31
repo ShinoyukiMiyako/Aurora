@@ -145,6 +145,12 @@ impl Aurora {
 
     /// CurseForge 客户端；未配置 API key 时报 [`aurora_modplatform::Error::CurseForgeKeyMissing`]。
     pub(crate) fn curseforge_client(&self) -> Result<CurseForgeClient> {
+        #[cfg(test)]
+        if let Some(key) = self.injected_curseforge_key() {
+            return Ok(
+                CurseForgeClient::new(self.http(), key).with_base_url(self.curseforge_base())
+            );
+        }
         Ok(CurseForgeClient::from_env(self.http())?.with_base_url(self.curseforge_base()))
     }
 }

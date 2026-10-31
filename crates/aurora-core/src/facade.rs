@@ -54,6 +54,10 @@ pub struct Aurora {
     /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
     /// 各自新建的门面（含测试）互不串用。
     pub(crate) mod_versions: crate::modversions::SharedVersionCache,
+    /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
+    /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
+    #[cfg(test)]
+    curseforge_key: Option<String>,
 }
 
 impl Aurora {
@@ -105,6 +109,8 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            #[cfg(test)]
+            curseforge_key: None,
         })
     }
 
@@ -423,6 +429,7 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            curseforge_key: None,
         }
     }
 
@@ -439,6 +446,16 @@ impl Aurora {
     pub(crate) fn with_curseforge_base(mut self, url: impl Into<String>) -> Self {
         self.curseforge_base = url.into();
         self
+    }
+
+    /// 让 CurseForge 客户端用这个 key，不读进程环境。
+    pub(crate) fn with_curseforge_key(mut self, key: impl Into<String>) -> Self {
+        self.curseforge_key = Some(key.into());
+        self
+    }
+
+    pub(crate) fn injected_curseforge_key(&self) -> Option<&str> {
+        self.curseforge_key.as_deref()
     }
 }
 

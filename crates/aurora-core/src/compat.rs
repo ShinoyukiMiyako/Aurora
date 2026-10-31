@@ -14,7 +14,7 @@
 //! 资源包、光影、数据包也走同一张矩阵，但只判 MC 版本一维（[`classify_game_version`]）：它们由游戏本体
 //! （光影由 Iris / OptiFine）读取，与实例装的 Mod 加载器无关。
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -353,6 +353,10 @@ pub(crate) fn instance_mod_loaders(version: &DiscoveredVersion) -> Vec<ModLoader
         .collect()
 }
 
+/// 按 MC 版本补拉 CurseForge 文件页时同时在途的请求数：实例用到的 MC 版本可能有十来种，
+/// 一起发会撞上平台限流，逐个发又让玩家多等好几个网络来回。
+const CURSEFORGE_PAGE_FETCHES: usize = 4;
+
 impl Aurora {
     /// 为某工程算出全部已装实例的匹配矩阵，按「兼容 > 可能可行 > 已安装 > 不兼容」排序，
     /// 同档内按实例 id 字典序，保证顺序稳定（UI 默认选中第一项）。
@@ -363,7 +367,8 @@ impl Aurora {
     /// `resource_type` 决定判定口径：Mod 看加载器与 MC 版本，资源包、光影、数据包只看 MC 版本。
     /// 整合包与插件不装进已有实例，传入即报 [`CoreError::InvalidResourceTarget`]。
     ///
-    /// 工程版本列表整场只拉一次，之后每个实例都在本地判定；逐实例的「装没装」要读卷宗与扫 mods 目录，
+    /// 工程版本列表整场只拉一次（CurseForge 另按 MC 版本补拉，见 `match_candidates`），之后每个实例都在本地
+    /// 判定；逐实例的「装没装」要读卷宗与扫 mods 目录，
     /// 有界并发执行。逐实例发请求会让装了十来个实例的玩家在点开安装弹层时等上十几个网络来回，还会
     /// 撞上平台限流把后半截请求打成失败。
     pub async fn match_instances(
@@ -384,31 +389,32 @@ impl Aurora {
         if scan.versions.is_empty() {
             return Ok(Vec::new());
         }
+        let mc_versions: BTreeSet<String> = scan
+            .versions
+            .iter()
+            .filter_map(instance_mc_version)
+            .collect();
 
         let (versions, pinned) = match mod_version_id {
             Some(id) => (
                 vec![self.get_mod_version(platform, project_id, id).await?],
                 true,
             ),
-            None => {
-                let mut versions = self
-                    .list_mod_versions(platform, project_id, &[], &[])
-                    .await?;
-                // 择优依赖倒序，就地保证一次，不把本函数的正确性押在上游的排序承诺上。
-                sort_by_published_desc(&mut versions);
-                (versions, false)
-            }
+            None => (
+                self.match_candidates(platform, project_id, &mc_versions)
+                    .await?,
+                false,
+            ),
         };
         let versions = Arc::new(versions);
         // 资源包、光影、数据包没有卷宗，只能拿盘上的文件去对平台的版本文件，认出装的是哪个版本。
         // 指定了版本时也要整份列表：盘上装的若是别的版本，前端要据此判「可更新」而不是「未安装」。
         // 版本下拉刚拉过这份列表，这里多半命中版本列表缓存。
         let known = if pinned && resource_type != ResourceType::Mod {
-            let mut all = self
-                .list_mod_versions(platform, project_id, &[], &[])
-                .await?;
-            sort_by_published_desc(&mut all);
-            Arc::new(all)
+            Arc::new(
+                self.match_candidates(platform, project_id, &mc_versions)
+                    .await?,
+            )
         } else {
             versions.clone()
         };
@@ -457,6 +463,50 @@ impl Aurora {
                 .then_with(|| a.version_id.cmp(&b.version_id))
         });
         Ok(matches)
+    }
+
+    /// 落位矩阵的候选版本，发布时间倒序。
+    ///
+    /// CurseForge 的文件列表按页给、一页最多 50 个，不带过滤只拿到最新的 50 个：文件多的工程（上千个文件），
+    /// 老 MC 版本的文件全在页外，那些实例会被误判为不兼容，装着的旧版资源包也认不出。所以 CurseForge
+    /// 另外按实例用到的每个 MC 版本各拉一页（平台按 gameVersion 过滤，结果同样进版本列表缓存），
+    /// 按版本 id 去重合并。请求数随 MC 版本的种数而不是实例数增长。Modrinth 的版本列表不分页，一次即全量。
+    async fn match_candidates(
+        &self,
+        platform: Platform,
+        project_id: &str,
+        mc_versions: &BTreeSet<String>,
+    ) -> Result<Vec<ModVersionInfo>> {
+        let mut versions = self
+            .list_mod_versions(platform, project_id, &[], &[])
+            .await?;
+        if platform == Platform::CurseForge && !mc_versions.is_empty() {
+            let aurora = self.clone();
+            let project = project_id.to_owned();
+            let pages = bounded_map(
+                mc_versions.iter().cloned().collect(),
+                CURSEFORGE_PAGE_FETCHES,
+                move |mc| {
+                    let aurora = aurora.clone();
+                    let project = project.clone();
+                    async move {
+                        aurora
+                            .list_mod_versions(Platform::CurseForge, &project, &[mc], &[])
+                            .await
+                    }
+                },
+            )
+            .await?;
+            let mut seen: HashSet<String> = versions.iter().map(|v| v.version_id.clone()).collect();
+            for version in pages.into_iter().flatten() {
+                if seen.insert(version.version_id.clone()) {
+                    versions.push(version);
+                }
+            }
+        }
+        // 择优依赖倒序，就地保证一次，不把本函数的正确性押在上游的排序承诺上。
+        sort_by_published_desc(&mut versions);
+        Ok(versions)
     }
 
     /// 该工程是否已装在这个实例里，按资源类型去游戏读取它的位置找：Mod 在卷宗与 mods 目录，
@@ -712,7 +762,7 @@ mod tests {
     use crate::config::AuroraConfig;
     use crate::ledger::{Ledger, LedgerEntry, LedgerStore};
     use aurora_modplatform::ReleaseChannel;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn version(loaders: &[ModLoader], game_versions: &[&str]) -> ModVersionInfo {
@@ -1508,6 +1558,83 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// CurseForge 的文件列表一页最多 50 个：文件多的工程，老 MC 版本的文件全在第一页之外。
+    /// 1.12.2 实例在平台上有对得上的文件，矩阵必须认得出来，不能只看第一页就判不兼容。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_files_beyond_the_first_page_still_match_older_instances() {
+        let server = MockServer::start().await;
+        let newest: Vec<serde_json::Value> = (0..50)
+            .map(|k| {
+                serde_json::json!({
+                    "id": 5000 + k, "modId": 238222, "displayName": format!("JEI 15.{k}"),
+                    "fileName": format!("jei-1.20.1-15.{k}.jar"), "releaseType": 1,
+                    "fileDate": format!("2026-03-{:02}T00:00:00Z", 1 + k % 28),
+                    "gameVersions": ["1.20.1", "Forge"]
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param_is_missing("gameVersion"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": newest })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", "1.20.1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": newest })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .and(query_param("gameVersion", "1.12.2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{
+                    "id": 2001, "modId": 238222, "displayName": "JEI 4.16",
+                    "fileName": "jei_1.12.2-4.16.1.jar", "releaseType": 1,
+                    "fileDate": "2020-06-01T00:00:00Z", "gameVersions": ["1.12.2", "Forge"]
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        put_instance(&mc, "老整合", "1.12.2", FORGE_LIB).await;
+        put_instance(&mc, "新整合", "1.20.1", FORGE_LIB).await;
+        let aurora = isolated(&mc, server.uri())
+            .with_curseforge_base(server.uri())
+            .with_curseforge_key("test-key");
+
+        let matches = aurora
+            .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
+            .await
+            .unwrap();
+        let by_id = |id: &str| matches.iter().find(|m| m.version_id == id).unwrap();
+        assert_eq!(by_id("老整合").state, MatchState::Compatible);
+        assert_eq!(
+            by_id("老整合").best_version.as_ref().unwrap().version_id,
+            "2001"
+        );
+        assert_eq!(by_id("新整合").state, MatchState::Compatible);
+        assert_eq!(
+            by_id("新整合").best_version.as_ref().unwrap().game_versions,
+            vec!["1.20.1".to_owned()]
+        );
+
+        // 同一场里再开一次走版本列表缓存，不再发请求（上面的 expect(1) 在服务器析构时核对）。
+        aurora
+            .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
+            .await
+            .unwrap();
     }
 
     /// Modrinth 给资源包版本标的加载器是 `minecraft`，不是 Mod 加载器。
