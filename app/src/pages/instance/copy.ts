@@ -153,6 +153,7 @@ export const OVERVIEW_COPY = {
   packInactive: "资源包 · 未启用",
   packsFoot: (loader: LoaderKind, mc: string) => `${joinMixed(LOADER_NAME[loader], mc)} 的资源可以在发现页按版本筛选。`,
   packsError: "读不到资源包与光影",
+  slow: "比平时慢一些，仍在加载…",
 } as const;
 
 // ---------------------------------------------------------------- Mod 管理

@@ -164,9 +164,12 @@ export default function LibraryPage() {
       )}
 
       {gate.view !== "content" || slice.kind === "loading" ? (
-        <EntranceBlock className={styles.grid} aria-busy="true" aria-label={LIBRARY_COPY.loadingLabel}>
-          {gate.view === "skeleton" && Array.from({ length: SKELETON_CARDS[tier] }, (_, i) => <SkeletonCard key={i} />)}
-        </EntranceBlock>
+        <>
+          <EntranceBlock className={styles.grid} aria-busy="true" aria-label={LIBRARY_COPY.loadingLabel}>
+            {gate.view === "skeleton" && Array.from({ length: SKELETON_CARDS[tier] }, (_, i) => <SkeletonCard key={i} />)}
+          </EntranceBlock>
+          {gate.slow && <p className={styles.slowHint}>{LIBRARY_COPY.slow}</p>}
+        </>
       ) : slice.kind === "error" ? (
         <EntranceBlock>
           <EmptyState

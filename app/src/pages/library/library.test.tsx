@@ -289,6 +289,19 @@ describe("实例库：筛选、搜索与空状态", () => {
     expect(cardNames()).toHaveLength(4);
   });
 
+  it("列表超过 10 秒还没读到：骨架下方追加「比平时慢一些」", async () => {
+    ipc.overrides.set("list_instances", () => deferred<InstanceDto[]>().promise);
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_999);
+    });
+    expect(document.body.textContent).not.toContain(LIBRARY_COPY.slow);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(document.body.textContent).toContain(LIBRARY_COPY.slow);
+  });
+
   it("列表读取失败：显示原因，重试重新读取", async () => {
     let fail = true;
     ipc.overrides.set("list_instances", () => {

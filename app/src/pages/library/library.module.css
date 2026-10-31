@@ -357,3 +357,11 @@
   justify-content: center;
   gap: var(--sk-space-10);
 }
+
+/* 列表读得特别慢时骨架下方的一行说明 */
+.slowHint {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}

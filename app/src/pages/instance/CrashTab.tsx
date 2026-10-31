@@ -36,7 +36,7 @@ import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
 import { crashFixes, crashFixKey, matchSuspect, modName, type CrashFix } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface CrashTabProps {
   inst: InstanceSummary;
@@ -55,14 +55,17 @@ export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab }
   useEffect(() => {
     if (crashed) actions.dismissSession();
   }, [actions, crashed]);
+  const load = useModuleView(crash);
 
-  if (crash.status === "loading") {
+  if (load.view === "pending" || load.view === "skeleton") {
     return (
       <Card padding="lg">
-        <Skeleton shape="text" lines={4} />
+        {load.view === "skeleton" && <Skeleton shape="text" lines={4} />}
+        <SlowHint slow={load.slow} />
       </Card>
     );
   }
+  if (crash.status === "loading") throw new Error("加载门放行时崩溃报告不可能还在读取");
   if (crash.status === "error") {
     return (
       <Card padding="lg">

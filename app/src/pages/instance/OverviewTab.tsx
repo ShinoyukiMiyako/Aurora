@@ -45,7 +45,7 @@ import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
 import { chosenRuntime, modRows, modTotals, needsReimport, overviewBanner, peekLayout, peekPerRow, reimportRoute, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface OverviewTabProps {
   inst: InstanceSummary;
@@ -197,6 +197,7 @@ function StatsCard({
   const hours = Math.floor(inst.playtimeMin / 60);
   const minutes = inst.playtimeMin % 60;
   const modded = inst.loader !== "vanilla";
+  const worlds = useModuleView(content);
   const worldsBytes = content.status === "ready" ? content.data.worlds.reduce((sum, w) => sum + w.size_bytes, 0) : 0;
 
   const modDelta = !modded
@@ -232,7 +233,7 @@ function StatsCard({
         ) : (
           <StatTile icon="box" label={OVERVIEW_COPY.statMods} value={String(modTotal)} unit={OVERVIEW_COPY.modsUnit} delta={modDelta} />
         )}
-        {content.status === "ready" ? (
+        {worlds.view === "ready" && content.status === "ready" ? (
           <StatTile
             icon="globe"
             label={OVERVIEW_COPY.statWorlds}
@@ -240,12 +241,10 @@ function StatsCard({
             unit={OVERVIEW_COPY.worldsUnit}
             delta={{ direction: "flat", text: content.data.worlds.length > 0 ? OVERVIEW_COPY.worldsSize(worldsBytes) : OVERVIEW_COPY.worldsNone }}
           />
-        ) : content.status === "error" ? (
+        ) : worlds.view === "error" ? (
           <StatTile icon="globe" label={OVERVIEW_COPY.statWorlds} kind="text" value={OVERVIEW_COPY.worldsError} />
         ) : (
-          <div className={styles.statSkeleton}>
-            <Skeleton shape="text" lines={3} />
-          </div>
+          <div className={styles.statSkeleton}>{worlds.view === "skeleton" && <Skeleton shape="text" lines={3} />}</div>
         )}
       </StatGrid>
     </Card>
@@ -266,11 +265,12 @@ const MODE_TILE: Readonly<Record<keyof typeof MODE_LABEL, WorldMode | null>> = {
 function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
   const now = useNow(30_000);
   const [expanded, setExpanded] = useState(false);
+  const load = useModuleView(content);
   const worlds = content.status === "ready" ? sortWorlds(content.data.worlds) : [];
   const total = worlds.reduce((sum, w) => sum + w.size_bytes, 0);
   const shown = expanded ? worlds : worlds.slice(0, WORLDS_PREVIEW);
   const subtitle =
-    content.status !== "ready" ? undefined : worlds.length > 0 ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total) : OVERVIEW_COPY.worldsEmptySubtitle;
+    load.view !== "ready" ? undefined : worlds.length > 0 ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total) : OVERVIEW_COPY.worldsEmptySubtitle;
 
   return (
     <Card>
@@ -280,10 +280,10 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
         subtitle={subtitle}
         actions={<IconButton icon="folder" label={OVERVIEW_COPY.openSaves} size="sm" onClick={() => ops.openFolder("saves")} />}
       />
-      {content.status === "loading" && <RowSkeletons rows={3} />}
-      {content.status === "error" && <ModuleError title={OVERVIEW_COPY.worldsError} error={content.error} onRetry={content.reload} />}
-      {content.status === "ready" && worlds.length === 0 && <EmptyState compact scene="map" title={OVERVIEW_COPY.worldsEmptyTitle} body={OVERVIEW_COPY.worldsEmptyBody} />}
-      {content.status === "ready" && worlds.length > 0 && (
+      {load.view === "skeleton" && <RowSkeletons rows={3} slow={load.slow} />}
+      {load.view === "error" && content.status === "error" && <ModuleError title={OVERVIEW_COPY.worldsError} error={content.error} onRetry={content.reload} />}
+      {load.view === "ready" && worlds.length === 0 && <EmptyState compact scene="map" title={OVERVIEW_COPY.worldsEmptyTitle} body={OVERVIEW_COPY.worldsEmptyBody} />}
+      {load.view === "ready" && worlds.length > 0 && (
         <>
           <ul className={styles.rows}>
             {shown.map((w, i) => {
@@ -430,11 +430,12 @@ function ModsPeekCard({
   const { actions } = useLauncher();
   const run = useRunner();
   const vanilla = inst.loader === "vanilla";
+  const load = useModuleView(mods);
   const rows: ModRow[] = mods.status === "ready" ? modRows(mods.data, updates.status === "ready" ? updates.data : null) : [];
   const { total, partial } = modTotals(inst, rows.length);
   const outdated = rows.filter((r) => r.update !== null);
 
-  const subtitle = vanilla || mods.status !== "ready" || rows.length === 0 ? undefined : partial ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
+  const subtitle = vanilla || load.view !== "ready" || rows.length === 0 ? undefined : partial ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
 
   return (
     <Card>
@@ -461,12 +462,11 @@ function ModsPeekCard({
         >
           {OVERVIEW_COPY.vanillaPeek}
         </Callout>
-      ) : mods.status === "loading" ? (
-        <div className={styles.peek}>
-          {Array.from({ length: 12 }, (_, i) => (
-            <Skeleton key={i} shape="square" size={44} />
-          ))}
-        </div>
+      ) : load.view === "pending" || load.view === "skeleton" ? (
+        <>
+          <div className={styles.peek}>{load.view === "skeleton" && Array.from({ length: 12 }, (_, i) => <Skeleton key={i} shape="square" size={44} />)}</div>
+          <SlowHint slow={load.slow} />
+        </>
       ) : mods.status === "error" ? (
         <ModuleError title={OVERVIEW_COPY.modsError} error={mods.error} onRetry={mods.reload} />
       ) : rows.length === 0 ? (
@@ -550,13 +550,14 @@ function PacksCard({ inst, content }: { inst: InstanceSummary; content: Resource
   const { go } = useNav();
   const vanilla = inst.loader === "vanilla";
   const discover = () => go({ page: "discover", kind: "resourcepack", forInstance: inst.id });
+  const load = useModuleView(content);
 
   return (
     <Card>
       <CardHeader icon="image" title={OVERVIEW_COPY.packsTitle} actions={<IconButton icon="compass" label={OVERVIEW_COPY.findPacks} size="sm" onClick={discover} />} />
-      {content.status === "loading" && <RowSkeletons rows={2} />}
-      {content.status === "error" && <ModuleError title={OVERVIEW_COPY.packsError} error={content.error} onRetry={content.reload} />}
-      {content.status === "ready" && (
+      {load.view === "skeleton" && <RowSkeletons rows={2} slow={load.slow} />}
+      {load.view === "error" && content.status === "error" && <ModuleError title={OVERVIEW_COPY.packsError} error={content.error} onRetry={content.reload} />}
+      {load.view === "ready" && content.status === "ready" && (
         <ul className={styles.rows}>
           {(() => {
             const active = content.data.shader_packs.find((s) => s.active);
@@ -614,7 +615,7 @@ function PacksCard({ inst, content }: { inst: InstanceSummary; content: Resource
   );
 }
 
-function RowSkeletons({ rows }: { rows: number }) {
+function RowSkeletons({ rows, slow }: { rows: number; slow: boolean }) {
   return (
     <div className={styles.rows}>
       {Array.from({ length: rows }, (_, i) => (
@@ -625,6 +626,7 @@ function RowSkeletons({ rows }: { rows: number }) {
           </div>
         </div>
       ))}
+      <SlowHint slow={slow} />
     </div>
   );
 }

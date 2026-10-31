@@ -449,6 +449,34 @@ describe("实例详情：概览", () => {
     expect(text()).toContain("资源包 · 加载顺序 1");
   });
 
+  it("存档读得慢才出骨架，超过 10 秒追加「比平时慢」；读到后换成存档列表", async () => {
+    const pending = deferred<InstanceContentDto>();
+    ipc.overrides.set("list_instance_content", () => pending.promise);
+    await open("overview");
+    // 其余查询都已读完，骨架只会来自等着内容列表的存档卡、资源包卡与四格数据的存档格
+    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(skeletons()).toBe(0);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(skeletons()).toBeGreaterThan(0);
+    expect(text()).not.toContain("比平时慢一些，仍在加载…");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(text()).toContain("比平时慢一些，仍在加载…");
+    await act(async () => {
+      pending.resolve(contentDto());
+      await settle(20);
+    });
+    expect(text()).toContain("2 个世界 · 3.0 MB");
+    expect(text()).not.toContain("比平时慢一些，仍在加载…");
+  });
+
   it("实例信息按生效值写 Java 与内存：自动挑到本机的 Java 21，跟随全局的固定 4 GB", async () => {
     await open("overview");
     expect(text()).toContain("自动 · Java 21 · 要求 21");

@@ -30,7 +30,7 @@ import { MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
 import { disabledFileName, enabledFileName, filterMods, modCounts, modRows, modTotals, removalRelations, type ModFilter, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
-import { ModuleError } from "./parts";
+import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface ModsTabProps {
   inst: InstanceSummary;
@@ -72,6 +72,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const { go } = useNav();
   const run = useRunner();
   const mods = useInstanceMods(queryId);
+  const load = useModuleView(mods);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ModFilter>("all");
   const [sort, setSort] = useState<TableSort>({ key: "mod", direction: "asc" });
@@ -243,7 +244,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
       {ops.locks.mods !== null && <Banner tone="info" title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : MODS_COPY.bannerInstalling} />}
 
-      {mods.status === "loading" && (
+      {load.view === "skeleton" && (
         <Card padding="none">
           <div className={styles.tableSkeleton}>
             {Array.from({ length: SKELETON_ROWS }, (_, i) => (
@@ -254,10 +255,11 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
                 </div>
               </div>
             ))}
+            <SlowHint slow={load.slow} />
           </div>
         </Card>
       )}
-      {mods.status === "error" && (
+      {load.view === "error" && mods.status === "error" && (
         <Card padding="lg">
           <ModuleError
             title={MODS_COPY.errorTitle}
@@ -271,7 +273,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           />
         </Card>
       )}
-      {mods.status === "ready" && rows.length === 0 && (
+      {load.view === "ready" && rows.length === 0 && (
         <Card padding="lg">
           <EmptyState
             scene="enchanted-book"
@@ -286,7 +288,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           />
         </Card>
       )}
-      {mods.status === "ready" && rows.length > 0 && (
+      {load.view === "ready" && rows.length > 0 && (
         <Card padding="none" className={styles.modCard}>
           <Table
             label={MODS_COPY.tableLabel}
