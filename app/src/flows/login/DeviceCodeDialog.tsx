@@ -8,10 +8,11 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { Spinner } from "../../art/Spinner";
-import { ACTION_ERROR, MICROSOFT_LOGIN_COPY, TOAST_COPY, microsoftLoginFailure, type LoginFailureAction } from "../../copy/flows";
+import { ACTION_ERROR, MICROSOFT_LOGIN_COPY, microsoftLoginFailure, type LoginFailureAction } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { fade, springs } from "../../lib/motion";
+import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorDetailOf } from "../../state/errors";
 import { useLauncher, useNow } from "../../state/launcher";
@@ -49,6 +50,7 @@ export function useCodeLifetime(device: DeviceLogin): number | null {
 export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
   const { actions } = useLauncher();
   const run = useRunner();
+  const { copyText } = useShell();
   const device = login.device;
   const now = useNow(1000);
   const totalMs = useCodeLifetime(device);
@@ -96,8 +98,8 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
             icon="external"
             data-autofocus=""
             onClick={() =>
-              void run(() => navigator.clipboard.writeText(device.userCode), TOAST_COPY.copyFailed).then((result) => {
-                if (result.ok) void run(() => openExternal(device.verificationUri), LOGIN_ERROR.openPage);
+              void copyText(device.userCode).then((copied) => {
+                if (copied) void run(() => openExternal(device.verificationUri), LOGIN_ERROR.openPage);
               })
             }
           >
@@ -129,7 +131,7 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
             void run(() => actions.openLogin("offline", login.intent), ACTION_ERROR.addOffline);
             return;
           case "copy_error":
-            void run(() => navigator.clipboard.writeText(errorDetailOf(device.code, device.message, device.detail)), TOAST_COPY.copyFailed);
+            void copyText(errorDetailOf(device.code, device.message, device.detail));
             return;
           case "close":
             close();
@@ -271,13 +273,13 @@ export function CodeCells({ code, expired }: { code: string; expired: boolean })
 }
 
 function CopyLink({ text }: { text: string }) {
-  const run = useRunner();
+  const { copyText } = useShell();
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   const copy = () =>
-    void run(() => navigator.clipboard.writeText(text), TOAST_COPY.copyFailed).then((result) => {
-      if (!result.ok) return;
+    void copyText(text).then((ok) => {
+      if (!ok) return;
       setCopied(true);
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
