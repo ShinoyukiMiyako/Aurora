@@ -1803,7 +1803,7 @@ export class LauncherStore {
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
-        for (const prefix of ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "deletion"]) invalidateResources(`${prefix}:${id}`);
+        for (const prefix of ["mods", "content", "history", "crash", "log", "settings", "mod-updates"]) invalidateResources(`${prefix}:${id}`);
         const copy = TOAST_COPY.instanceDeleted(id, worldCount);
         store.pushToast("info", copy.title, copy.body);
       },

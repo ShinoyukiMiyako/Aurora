@@ -98,8 +98,4 @@ export const handlers: MockHandlers = {
     if (eventId.trim() === "") throw new IpcError("invalid_argument", "event_id 不能为空");
     rollback(versionId, mockInstance(versionId), eventId);
   },
-  backup_size: (args) =>
-    mockInstance(args.versionId)
-      .files.filter((f) => f.file_name.endsWith(BACKUP_SUFFIX))
-      .reduce((sum, f) => sum + f.size, 0),
 };

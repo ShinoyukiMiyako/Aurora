@@ -57,16 +57,6 @@ pub(crate) async fn rollback_with(
         .map_err(mods_error)
 }
 
-/// 实例 mods 目录下全部 `.old` 备份占用的字节数。
-#[tauri::command]
-pub async fn backup_size(
-    version_id: String,
-    facade: State<'_, Facade>,
-) -> Result<u64, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.backup_size(&version_id).await?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

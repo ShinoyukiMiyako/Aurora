@@ -2,14 +2,14 @@
 
 import { instanceSettingsFromDto, type InstanceSettings } from "../../domain/adapt";
 import { lastCrash, lastLaunchLog, type CrashReportDto, type LaunchLogDto } from "../../ipc/diagnostics";
-import { backupSize, listHistory, rollbackChecks, type HistoryEvent, type RollbackCheck } from "../../ipc/history";
-import { getInstanceSettings, listInstanceContent, previewInstanceDeletion, type DeletionPreviewDto, type InstanceContentDto } from "../../ipc/instances";
+import { listHistory, rollbackChecks, type HistoryEvent, type RollbackCheck } from "../../ipc/history";
+import { getInstanceSettings, listInstanceContent, type InstanceContentDto } from "../../ipc/instances";
 import { checkUpdates, listMods, type InstalledMod, type UpdateCandidate } from "../../ipc/mods";
 import { useResource, type ResourceResult } from "../resource";
 
 export type { CrashClueDto, CrashReportDto, CrashSuspectDto, LaunchLogDto } from "../../ipc/diagnostics";
 export type { HistoryEvent, RollbackCheck } from "../../ipc/history";
-export type { DeletionPreviewDto, InstanceContentDto, PackDto, ResourcePackDto, ShaderPackDto, WorldDto } from "../../ipc/instances";
+export type { InstanceContentDto, PackDto, ResourcePackDto, ShaderPackDto, WorldDto } from "../../ipc/instances";
 export type { InstalledMod, ModMetadata, ModSource, UpdateCandidate } from "../../ipc/mods";
 
 /** key 为 null 时不请求：实例还没装好（占位项）或调用方暂时不需要。 */
@@ -43,11 +43,6 @@ export function useRollbackChecks(id: string | null): ResourceResult<RollbackChe
   return useResource(key("history", id, "checks"), () => rollbackChecks(need(id)));
 }
 
-/** history:<id>:backup —— 旧版本备份占用的字节数。 */
-export function useBackupSize(id: string | null): ResourceResult<number> {
-  return useResource(key("history", id, "backup"), () => backupSize(need(id)));
-}
-
 /** crash:<id> —— 最近一次崩溃报告；没有崩溃过为 null。下一次崩溃时失效。 */
 export function useLastCrash(id: string | null): ResourceResult<CrashReportDto | null> {
   return useResource(key("crash", id), () => lastCrash(need(id)));
@@ -61,11 +56,6 @@ export function useLastLaunchLog(id: string | null): ResourceResult<LaunchLogDto
 /** mod-updates:<id> —— 平台上有新版本的 Mod；装、更新、移除 Mod 后失效。 */
 export function useModUpdates(id: string | null): ResourceResult<UpdateCandidate[]> {
   return useResource(key("mod-updates", id), () => checkUpdates(need(id)));
-}
-
-/** deletion:<id> —— 删除确认要的存档数与体积。 */
-export function useDeletionPreview(id: string | null): ResourceResult<DeletionPreviewDto> {
-  return useResource(key("deletion", id), () => previewInstanceDeletion(need(id)));
 }
 
 function need(id: string | null): string {
