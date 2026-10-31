@@ -77,6 +77,8 @@ let logs = new Map<string, LaunchLogDto>();
 let crashes = new Map<string, CrashReportDto>();
 /** 本地日期 -> 实例 id -> 毫秒。 */
 let playDays = new Map<string, Map<string, number>>();
+/** 实例 id -> 累计毫秒与上次游玩结束时刻；与后端一样，累计不受每日记录的保留窗口影响。 */
+let playTotals = new Map<string, { totalMs: number; lastPlayedAt: number }>();
 
 function localDate(at: number): string {
   const d = new Date(at);
@@ -91,6 +93,11 @@ function accumulate(map: Map<string, number>, key: string, ms: number): void {
 }
 
 function addPlay(versionId: string, at: number, ms: number): void {
+  const before = playTotals.get(versionId);
+  playTotals.set(versionId, {
+    totalMs: before === undefined ? ms : before.totalMs + ms,
+    lastPlayedAt: before === undefined ? at : Math.max(before.lastPlayedAt, at),
+  });
   const date = localDate(at);
   let day = playDays.get(date);
   if (day === undefined) {
@@ -103,13 +110,15 @@ function addPlay(versionId: string, at: number, ms: number): void {
 // 近两周断续的游玩，让日历与洞察在浏览器里打开时不是空的。
 function seedPlay(): Map<string, Map<string, number>> {
   playDays = new Map();
+  playTotals = new Map();
   const now = Date.now();
+  // 实例 id 与实例 mock 的种子一致，实例列表里的游玩时长与这里的日历对得上。
   const pattern: [number, string, number][] = [
-    [1, "1.20.1-fabric", 95],
+    [1, "1.20.1-Fabric", 95],
     [2, "1.21", 40],
-    [2, "1.20.1-fabric", 30],
+    [2, "1.20.1-Fabric", 30],
     [4, "1.21", 120],
-    [7, "1.20.1-fabric", 55],
+    [7, "1.20.1-Fabric", 55],
     [11, "1.21", 15],
   ];
   for (const [daysAgo, versionId, minutes] of pattern) addPlay(versionId, now - daysAgo * DAY_MS, minutes * MS_PER_MINUTE);
@@ -269,6 +278,13 @@ export function failNextMockLaunch(code: string, params: Record<string, string |
 }
 
 /** 诊断 mock 读取用。 */
+/** 某实例的累计游玩（分钟向下取整）与上次游玩；没玩过为 null。实例 mock 的列表据此给出游玩时长。 */
+export function mockPlaySummary(versionId: string): { playtime_min: number; last_played_at: number } | null {
+  const total = playTotals.get(versionId);
+  if (total === undefined) return null;
+  return { playtime_min: Math.floor(total.totalMs / MS_PER_MINUTE), last_played_at: total.lastPlayedAt };
+}
+
 export function mockLaunchLog(versionId: string): LaunchLogDto | null {
   const log = logs.get(versionId);
   return log === undefined ? null : log;

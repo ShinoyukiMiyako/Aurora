@@ -21,6 +21,7 @@ import type { PlatformId } from "../../discover";
 import { CORE_EVENT } from "../../tasks";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
+import { mockInstanceFacts, mockInstanceIds } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 const DISABLED_SUFFIX = ".disabled";
@@ -209,11 +210,16 @@ let instances = seedInstances();
 
 // ---- 与 history.ts 共用的工具 ----
 
+/** 实例是否存在以实例 mock 为准；这里只保存 Mod 一侧的状态，没种过数据的实例按空 mods 目录起步。 */
 export function mockInstance(versionId: unknown): MockInstance {
   const id = requireString(versionId, "versionId");
-  const instance = instances.get(id);
-  if (!instance) throw new IpcError("version_not_installed", `本地未安装版本 ${id}`);
-  return instance;
+  const facts = mockInstanceFacts(id);
+  if (facts === null) throw new IpcError("version_not_installed", `本地未安装版本 ${id}`, { id });
+  const known = instances.get(id);
+  if (known) return known;
+  const fresh: MockInstance = { mc_version: facts.mc_version, loaders: facts.loaders.filter(isModLoader), files: [], ledger: [], history: [] };
+  instances.set(id, fresh);
+  return fresh;
 }
 
 export function mockModsDir(versionId: string): string {
@@ -598,7 +604,9 @@ export const handlers: MockHandlers = {
     const projectId = requireNonEmpty(args.projectId, "projectId");
     const pinned = args.modVersionId === null || args.modVersionId === undefined ? null : requireNonEmpty(args.modVersionId, "modVersionId");
     const versions = pinned === null ? project(platform, projectId).versions : [findVersion(platform, projectId, pinned)];
-    const rows: InstanceMatch[] = [...instances.entries()].map(([id, instance]) => {
+    const ready = mockInstanceIds().filter((id) => mockInstanceFacts(id) !== null);
+    const rows: InstanceMatch[] = ready.map((id) => {
+      const instance = mockInstance(id);
       let compatibility: Compatibility;
       let best: ModVersionInfo | null;
       if (pinned === null) [compatibility, best] = pickBest(versions, instance);

@@ -8,13 +8,10 @@ import type { InstanceNameRule, ModpackInstallOutcomeDto, ModpackPreviewDto, Mod
 import { INSTANCE_NAME_MAX_CHARS } from "../../modpack";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, findCatalogueItem, parsePlatform, runMockTask, simulateDownload } from "./discover";
+import { addMockInstance, mockInstanceIds } from "./instances";
 
-/** 假游戏目录里已有的版本目录名。 */
-const SEED_VERSIONS = ["1.21.1", "1.21.1-Fabric", "生存"];
 /** mock 整合包都要求的游戏版本。 */
 const MOCK_MINECRAFT = "1.21.1";
-
-let versions: string[] = [...SEED_VERSIONS];
 
 const RULE_TEXT: Record<InstanceNameRule, string> = {
   empty: "名字不能为空",
@@ -125,11 +122,12 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
     if ("rule" in checked) throw nameError(raw, checked.rule);
     const name = checked.name;
     const lower = name.toLowerCase();
-    if (lower === MOCK_MINECRAFT.toLowerCase() || versions.some((v) => v.toLowerCase() === lower)) throw nameError(name, "duplicate");
+    // 已占用的名字以实例 mock 为准，导入成功的实例也记进那里。
+    if (lower === MOCK_MINECRAFT.toLowerCase() || mockInstanceIds().some((v) => v.toLowerCase() === lower)) throw nameError(name, "duplicate");
 
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取整合包 ${pack.name}：48 个远程文件，57 个覆盖文件` });
     await simulateDownload(taskId, `${pack.name} 的 48 个文件`, 96_468_992);
-    versions = [...versions, name];
+    addMockInstance(name, MOCK_MINECRAFT, { kind: "fabric", version: "0.16.9" });
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `整合包已导入为实例 ${name}` });
     return {
       version_id: name,
@@ -156,7 +154,3 @@ export const handlers: MockHandlers = {
   preview_modpack: previewModpack,
   install_modpack: installModpack,
 };
-
-export function reset(): void {
-  versions = [...SEED_VERSIONS];
-}

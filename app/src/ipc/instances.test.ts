@@ -154,7 +154,11 @@ describe("mock：列表、内容与元数据", () => {
   it("列表按小写 id 排序，就绪与损坏的实例字段各自成立", async () => {
     const list = await listInstances();
     // 码位顺序：数字 < 拉丁字母 < 汉字（樱 U+6A31 在 没 U+6CA1 之前），与后端一致，不按语言区域排。
-    expect(list.map((i) => i.id)).toEqual(["1.21.1", "RLCraft", "樱花生存", "没装完"]);
+    expect(list.map((i) => i.id)).toEqual(["1.20.1-Fabric", "1.20.1-Forge", "1.21", "1.21.1", "1.21.1-Fabric", "RLCraft", "樱花生存", "没装完"]);
+    // 游玩时长取自启动 mock 的种子：1.20.1-Fabric 玩过 95 + 30 + 55 分钟，1.21 玩过 40 + 120 + 15 分钟。
+    expect(list.find((i) => i.id === "1.20.1-Fabric")?.playtime_min).toBe(180);
+    expect(list.find((i) => i.id === "1.21")?.playtime_min).toBe(175);
+    expect(list.find((i) => i.id === "1.21")?.last_played_at).toBeGreaterThan(0);
     const fabric = list.find((i) => i.id === "樱花生存");
     expect(fabric).toMatchObject({
       status: "ready",
@@ -165,6 +169,8 @@ describe("mock：列表、内容与元数据", () => {
       description: "和朋友的周末服务器",
       cover: "cherry_planks",
       activity: null,
+      playtime_min: 0,
+      last_played_at: null,
     });
     const broken = list.find((i) => i.id === "没装完");
     expect(broken).toMatchObject({ status: "broken", mod_count: null, mc_version: null });

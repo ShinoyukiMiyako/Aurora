@@ -17,6 +17,7 @@ import {
   updateMod,
 } from "./mods";
 import { CORE_EVENT, cancelTask } from "./tasks";
+import { deleteInstance } from "./instances";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -58,7 +59,15 @@ describe("实例 Mod 列表", () => {
 
   it("未安装的实例报 version_not_installed", async () => {
     const error = await failure(listMods("ghost"));
-    expect(error).toMatchObject({ code: "version_not_installed", message: "本地未安装版本 ghost" });
+    expect(error).toMatchObject({ code: "version_not_installed", message: "本地未安装版本 ghost", detail: { id: "ghost" } });
+    // 版本 JSON 损坏的实例与后端一样按未安装处理。
+    expect(await failure(listMods("没装完"))).toMatchObject({ code: "version_not_installed" });
+  });
+
+  it("实例以实例 mock 为准：列表里有、没种过 Mod 的实例是空 mods 目录，删掉后报未安装", async () => {
+    expect(await listMods("樱花生存")).toEqual([]);
+    await deleteInstance("樱花生存");
+    expect(await failure(listMods("樱花生存"))).toMatchObject({ code: "version_not_installed" });
   });
 
   it("启停改文件名并返回新路径；已是目标状态不动；文件不在如实报错", async () => {
@@ -203,16 +212,22 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
 
   it("矩阵四态按档位排序，不兼容带原因，已装带出已装版本", async () => {
     const matrix = await matchInstances("modrinth", "AANobbMI", null);
+    // 矩阵覆盖实例 mock 里全部可用的实例（损坏的「没装完」不在其中）。
     expect(matrix.map((m) => [m.version_id, m.state])).toEqual([
       ["1.20.1-Fabric", "installed"],
       ["1.20.1-Forge", "incompatible"],
       ["1.21", "incompatible"],
+      ["1.21.1", "incompatible"],
+      ["1.21.1-Fabric", "incompatible"],
+      ["RLCraft", "incompatible"],
+      ["樱花生存", "incompatible"],
     ]);
     expect(matrix[0].installed).toEqual({ file_name: "AANobbMI-0.5.3.jar", version_id: "sodium-053", version_number: "0.5.3" });
     expect(matrix[0].best_version?.version_id).toBe("sodium-060");
     expect(matrix[1].compatibility).toEqual({ kind: "mismatch", reason: "需要 Fabric/NeoForge，该实例装的是 Forge" });
     expect(matrix[2].compatibility).toEqual({ kind: "mismatch", reason: "该实例未安装 Mod 加载器" });
     expect(matrix[2].best_version).toBeNull();
+    expect(matrix[4].compatibility).toEqual({ kind: "mismatch", reason: "不支持 MC 1.21.1" });
 
     // 指定版本：整个矩阵只按它判。
     const pinned = await matchInstances("modrinth", "mOgUt4GM", "mm-7");
@@ -220,6 +235,10 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       ["1.20.1-Fabric", "maybe", "unknown"],
       ["1.20.1-Forge", "maybe", "unknown"],
       ["1.21", "incompatible", "mismatch"],
+      ["1.21.1", "incompatible", "mismatch"],
+      ["1.21.1-Fabric", "incompatible", "mismatch"],
+      ["RLCraft", "incompatible", "mismatch"],
+      ["樱花生存", "incompatible", "mismatch"],
     ]);
     expect(pinned[2].compatibility).toEqual({ kind: "mismatch", reason: "不支持 MC 1.21" });
   });

@@ -19,6 +19,7 @@ import {
 } from "../../instances";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
+import { mockPlaySummary } from "./launch";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与上限在这里按后端各写一份。
@@ -63,7 +64,7 @@ const LOADER_NAMES: Record<LoaderChoice, string> = {
 // ---------------------------------------------------------------- 假数据
 
 interface MockInstance {
-  dto: Omit<InstanceDto, "activity" | "description" | "cover">;
+  dto: Omit<InstanceDto, "activity" | "description" | "cover" | "playtime_min" | "last_played_at">;
   settings: InstanceSettingsDto;
   /** 传统布局的加载器版本经 inheritsFrom 指向的原版实例。 */
   inheritsFrom: string | null;
@@ -161,6 +162,64 @@ function seedInstances(): MockInstance[] {
       },
       sizeBytes: 420 * MB,
       fileCount: 1830,
+    },
+    // 下面四个实例是 Mod、发现与启动各自 mock 里种好数据的实例：浏览器里从实例列表点进去，各页看到的是同一批实例。
+    {
+      dto: readyDto("1.20.1-Fabric", "1.20.1", [{ kind: "fabric", version: "0.15.11" }], 17, 4, now - 60 * DAY),
+      settings: defaultSettings(),
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 96 * MB,
+      fileCount: 410,
+    },
+    {
+      dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, 0, now - 55 * DAY),
+      settings: defaultSettings(),
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 120 * MB,
+      fileCount: 520,
+    },
+    {
+      dto: readyDto("1.21", "1.21", [], 21, 0, now - 50 * DAY),
+      settings: defaultSettings(),
+      inheritsFrom: null,
+      content: emptyContent(),
+      sizeBytes: 30 * MB,
+      fileCount: 4,
+    },
+    {
+      dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, 0, now - 20 * DAY),
+      settings: defaultSettings(),
+      inheritsFrom: null,
+      content: {
+        resource_packs: [],
+        shader_packs: [],
+        worlds: [
+          {
+            dir_name: "新的世界",
+            level_status: "ok",
+            level_error: null,
+            name: "新的世界",
+            mode: "survival",
+            last_played: now - 3 * DAY,
+            size_bytes: 40 * MB,
+            modified_at: now - 3 * DAY,
+          },
+          {
+            dir_name: "生存",
+            level_status: "ok",
+            level_error: null,
+            name: "生存",
+            mode: "survival",
+            last_played: now - 8 * DAY,
+            size_bytes: 85 * MB,
+            modified_at: now - 8 * DAY,
+          },
+        ],
+      },
+      sizeBytes: 210 * MB,
+      fileCount: 900,
     },
     {
       dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, 182, now - 90 * DAY),
@@ -334,12 +393,48 @@ function ensureNoDependents(id: string): void {
 }
 
 function toDto(instance: MockInstance): InstanceDto {
+  const play = mockPlaySummary(instance.dto.id);
   return {
     ...instance.dto,
     description: instance.settings.description,
     cover: instance.settings.cover,
     activity: activityOf(instance.dto.id),
+    playtime_min: play === null ? 0 : play.playtime_min,
+    last_played_at: play === null ? null : play.last_played_at,
   };
+}
+
+/** 版本 JSON 可用的实例的游戏版本与加载器；不存在或损坏为 null（后端对这样的实例报 version_not_installed）。 */
+export function mockInstanceFacts(id: string): { mc_version: string; loaders: string[] } | null {
+  const found = find(id);
+  if (found === undefined || found.dto.status !== "ready" || found.dto.mc_version === null) return null;
+  return { mc_version: found.dto.mc_version, loaders: found.dto.loaders.map((l) => l.kind) };
+}
+
+/** 别的领域 mock 新建出的实例（整合包导入）记进实例列表，与后端「导入后 list_instances 能看到」一致。 */
+export function addMockInstance(id: string, mcVersion: string, loader: InstanceDto["loaders"][number] | null): void {
+  if (find(id) !== undefined) throw new Error(`mock 实例 ${id} 已存在`);
+  instances.push({
+    dto: readyDto(id, mcVersion, loader === null ? [] : [loader], 21, 0, Date.now()),
+    // 整合包导入的实例强制隔离，与后端写入的实例设置一致。
+    settings: { ...defaultSettings(), isolation: "enabled" },
+    inheritsFrom: null,
+    content: emptyContent(),
+    sizeBytes: 0,
+    fileCount: 0,
+  });
+}
+
+/** 实例存档的目录名；实例不存在或损坏为 null。 */
+export function mockInstanceWorlds(id: string): string[] | null {
+  if (mockInstanceFacts(id) === null) return null;
+  const found = find(id);
+  return found === undefined ? null : found.content.worlds.map((w) => w.dir_name);
+}
+
+/** 全部实例 id（含损坏的），按种子与新建的先后。 */
+export function mockInstanceIds(): string[] {
+  return instances.map((i) => i.dto.id);
 }
 
 function loaderChoice(raw: string): LoaderChoice {

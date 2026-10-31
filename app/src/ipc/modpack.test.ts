@@ -2,6 +2,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listen } from "./bridge";
 import { IpcError } from "./errors";
+import { getInstanceSettings, listInstances } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { INSTANCE_NAME_MAX_CHARS, installModpack, previewModpack, type ModpackSource } from "./modpack";
@@ -56,6 +57,9 @@ describe("整合包 mock", () => {
     expect(outcome.version_id).toBe("Fabulously Optimized");
     expect(outcome.version_dir).toBe("D:/Games/.minecraft/versions/Fabulously Optimized");
     expect(outcome.modpack).toMatchObject({ format: "modrinth", platform: "modrinth", project_id: "1KVo5zza", version_id: "v14", name: "Fabulously Optimized" });
+    // 导入的实例出现在实例列表里，设置为强制隔离。
+    expect((await listInstances()).map((i) => i.id)).toContain("Fabulously Optimized");
+    expect((await getInstanceSettings("Fabulously Optimized")).isolation).toBe("enabled");
     expect(events.every((e) => e.task_id === "t-1")).toBe(true);
     expect(events.at(-1)).toEqual({ task_id: "t-1", kind: "stage", message: "整合包已导入为实例 Fabulously Optimized" });
 
@@ -81,7 +85,8 @@ describe("整合包 mock", () => {
       ["pack.", "illegal_char"],
       ["CON", "reserved"],
       ["com1.txt", "reserved"],
-      ["生存", "duplicate"],
+      ["樱花生存", "duplicate"],
+      ["1.21.1-fabric", "duplicate"],
       ["1.21.1", "duplicate"],
     ];
     for (const [name, rule] of cases) {

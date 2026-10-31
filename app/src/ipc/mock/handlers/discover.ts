@@ -21,6 +21,7 @@ import type { ModLoader } from "../../mods";
 import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
+import { mockInstanceWorlds } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 /** 假游戏目录；只用来拼返回给界面的路径。 */
@@ -34,7 +35,6 @@ const LOADERS: readonly ModLoader[] = ["fabric", "quilt", "forge", "neoforge", "
 const SORTS: readonly SortField[] = ["relevance", "downloads", "follows", "newest", "updated"];
 const CATEGORY_KEY = /^[a-z0-9-]{1,64}$/;
 /** 已有存档的实例（数据包只能装进存在的存档）。 */
-const WORLDS: Record<string, string[]> = { "1.21.1-Fabric": ["新的世界", "生存"] };
 
 export interface CatalogueItem {
   entry: SearchEntry;
@@ -457,10 +457,18 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
   const projectId = read.string("projectId");
   const modVersionId = read.string("modVersionId");
   return runMockTask(taskId, async () => {
+    requireInstalled(versionId);
     const file_name = fileNameFor(platform, projectId, modVersionId, "jar");
     await simulateDownload(taskId, file_name, 1_048_576);
     return { file_name, path: `${MOCK_GAME_DIR}/versions/${versionId}/mods/${file_name}`, platform };
   });
+}
+
+/** 实例以实例 mock 为准：不存在或损坏报 version_not_installed，与后端解析工作目录时一致；返回它的存档目录名。 */
+function requireInstalled(versionId: string): string[] {
+  const worlds = mockInstanceWorlds(versionId);
+  if (worlds === null) throw new IpcError("version_not_installed", `本地未安装版本 ${versionId}`, { id: versionId });
+  return worlds;
 }
 
 const RESOURCE_DIRS: Record<InstallableResourceType, string> = {
@@ -484,8 +492,8 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
   return runMockTask(taskId, async () => {
     if (resourceType === "data_pack" && world === null) throw invalid("安装目标不对：数据包要指明装进哪个存档");
     if (resourceType !== "data_pack" && world !== null) throw invalid("安装目标不对：只有数据包需要指定存档");
-    const worlds = WORLDS[versionId];
-    if (world !== null && (worlds === undefined || !worlds.includes(world))) {
+    const worlds = requireInstalled(versionId);
+    if (world !== null && !worlds.includes(world)) {
       throw new IpcError("world_not_found", `实例 ${versionId} 里没有存档 ${world}`, { version_id: versionId, world });
     }
     const file_name = fileNameFor(platform, projectId, fileVersionId, resourceType === "mod" ? "jar" : "zip");
