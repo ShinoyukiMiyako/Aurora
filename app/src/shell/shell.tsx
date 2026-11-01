@@ -13,7 +13,7 @@ import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../lau
 import { bindArtStatus } from "../mc/binding";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
-import { routeInstanceId, type Route } from "../state/route";
+import { routeInstanceId, sameRoute, type Route } from "../state/route";
 import { activeTasks, pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
 import type { Toast } from "../state/toasts";
@@ -266,6 +266,15 @@ function ShellCore({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (crashedHere) actions.dismissSession();
   }, [actions, crashedHere]);
+
+  // 人已经在错误通知指向的页面上：要说的页面都说了，错误通知又不自动消失，留着只会挡住页面上的控件
+  const toasts = useLauncherSelector((s) => s.toasts);
+  useEffect(() => {
+    for (const toast of toasts) {
+      const action = toast.action;
+      if (toast.tone === "error" && action !== undefined && "to" in action && sameRoute(action.to, route)) actions.dismissToast(toast.id);
+    }
+  }, [actions, route, toasts]);
 
   // ---------------------------------------------------------------- 确认框
 

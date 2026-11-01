@@ -269,6 +269,29 @@ describe("外壳：通知动作", () => {
     expect(launcher.state.toasts).toEqual([]);
     expect(nav.route).toEqual({ page: "tasks", filter: "failed" });
   });
+
+  it("人已经到了通知指向的页面：这条收起，指向别处的留着", async () => {
+    await mount();
+    act(() => {
+      launcher.actions.toast("error", "「生存」崩溃了", undefined, { action: { label: "查看诊断", to: { page: "instance", id: "生存", tab: "crash" } } });
+      launcher.actions.toast("error", "「创造」崩溃了", undefined, { action: { label: "查看诊断", to: { page: "instance", id: "创造", tab: "crash" } } });
+      launcher.actions.toast("error", "没有动作");
+    });
+    act(() => nav.go({ page: "instance", id: "生存", tab: "crash" }));
+    await flush();
+    expect(launcher.state.toasts.map((t) => t.title)).toEqual(["「创造」崩溃了", "没有动作"]);
+  });
+
+  it("页面已经开着时新来的通知也不再指回这里", async () => {
+    await mount();
+    act(() => nav.go({ page: "instance", id: "生存", tab: "crash" }));
+    await flush();
+    act(() => {
+      launcher.actions.toast("error", "「生存」崩溃了", undefined, { action: { label: "查看诊断", to: { page: "instance", id: "生存", tab: "crash" } } });
+    });
+    await flush();
+    expect(launcher.state.toasts).toEqual([]);
+  });
 });
 
 describe("外壳：最小化期间的通知", () => {
