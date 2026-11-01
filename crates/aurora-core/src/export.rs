@@ -1,6 +1,7 @@
 //! 把实例导出为 Modrinth `.mrpack`。
 //!
 //! 预览与导出共用同一次规划，导出总是重新规划、不信任前端带回的任何清单：两者之间磁盘随时可能变。
+//! 预览要列出每个额外项的体积，遍历全部；导出只遍历勾选的，存档可能很大，没勾的不该白走一遍盘。
 //!
 //! 1. 判定写不写得成：实例要装完整、认得出游戏版本，加载器只能是 Fabric、Quilt、Forge、NeoForge 之一
 //!    且认得出版本。
@@ -13,7 +14,7 @@
 //!
 //! 写包在阻塞线程里进行，先写到目标旁边的临时文件，回读校验通过后才换到目标位置。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -165,6 +166,8 @@ pub struct ExportExtraStat {
     pub bytes: u64,
     /// 界面上是否默认勾选：有文件就勾，存档体积可能很大、只有地图类整合包需要，默认不勾。
     pub default_selected: bool,
+    /// 这一项里名字不能安全写进整合包的文件（实例相对的正斜杠路径），勾上才算这次导出会跳过的。
+    pub skipped: Vec<String>,
 }
 
 /// 导出前的预览。
@@ -180,8 +183,8 @@ pub struct ModpackExportPreview {
     pub bundled: Vec<ExportBundledMod>,
     pub disabled: Vec<ExportBundledMod>,
     pub extras: Vec<ExportExtraStat>,
-    /// 名字不能安全写进整合包、不会打包的文件（实例相对的正斜杠路径）。
-    pub skipped: Vec<String>,
+    /// mods 目录里名字不能安全写进整合包的文件（实例相对的正斜杠路径）。不看勾选，导出时总会跳过。
+    pub mod_skipped: Vec<String>,
 }
 
 /// 一次导出的结果。
@@ -314,6 +317,7 @@ struct ExportPlan {
     indexed: Vec<(ExportIndexedMod, IndexFile)>,
     bundled: Vec<(ExportBundledMod, PlannedFile)>,
     disabled: Vec<(ExportBundledMod, PlannedFile)>,
+    /// 这次规划要的额外项；没要的不在里面，也没有遍历过。
     extras: BTreeMap<ExportExtra, CollectedExtra>,
     /// mods 目录里名字写不进整合包的文件。
     mod_skipped: Vec<String>,
@@ -321,22 +325,20 @@ struct ExportPlan {
 
 impl ExportPlan {
     fn preview(&self) -> ModpackExportPreview {
-        let mut skipped = self.mod_skipped.clone();
-        let extras = ExportExtra::ALL
+        let extras = self
+            .extras
             .iter()
-            .map(|&extra| {
-                let collected = &self.extras[&extra];
-                skipped.extend(collected.skipped.iter().cloned());
+            .map(|(&extra, collected)| {
                 let files = collected.files.len() as u64;
                 ExportExtraStat {
                     extra,
                     files,
                     bytes: collected.files.iter().map(|f| f.size).sum(),
                     default_selected: extra != ExportExtra::Saves && files > 0,
+                    skipped: collected.skipped.clone(),
                 }
             })
             .collect();
-        skipped.sort();
         ModpackExportPreview {
             name: self.name.clone(),
             version: self.version.clone(),
@@ -346,7 +348,7 @@ impl ExportPlan {
             bundled: self.bundled.iter().map(|(m, _)| m.clone()).collect(),
             disabled: self.disabled.iter().map(|(m, _)| m.clone()).collect(),
             extras,
-            skipped,
+            mod_skipped: self.mod_skipped.clone(),
         }
     }
 }
@@ -369,7 +371,10 @@ impl Aurora {
     /// 导出前的预览：能不能导出、默认名称与版本、哪些 Mod 走索引、哪些要打包、各额外项的大小。
     /// 只读，要联网问 Modrinth。
     pub async fn preview_modpack_export(&self, id: &str) -> Result<ModpackExportPreview> {
-        Ok(self.plan_export(id, None, None).await?.preview())
+        Ok(self
+            .plan_export(id, &ExportExtra::ALL, None, None)
+            .await?
+            .preview())
     }
 
     /// 把实例导出为 `.mrpack`，写到 `target` 的目标位置（已有同名文件时替换）。
@@ -384,8 +389,9 @@ impl Aurora {
         events: Option<&EventSink>,
     ) -> Result<ModpackExportOutcome> {
         self.ensure_not_cancelled()?;
-        let plan = self.plan_export(id, Some(target), events).await?;
-        let selected: HashSet<ExportExtra> = options.extras.iter().copied().collect();
+        let plan = self
+            .plan_export(id, &options.extras, Some(target), events)
+            .await?;
 
         let mut skipped = plan.mod_skipped.clone();
         let mut overrides: Vec<PlannedFile> = Vec::new();
@@ -396,11 +402,9 @@ impl Aurora {
         } else {
             0
         };
-        for (extra, collected) in &plan.extras {
-            if selected.contains(extra) {
-                overrides.extend(collected.files.iter().cloned());
-                skipped.extend(collected.skipped.iter().cloned());
-            }
+        for collected in plan.extras.values() {
+            overrides.extend(collected.files.iter().cloned());
+            skipped.extend(collected.skipped.iter().cloned());
         }
         overrides.sort_by(|a, b| a.path.cmp(&b.path));
         skipped.sort();
@@ -550,9 +554,11 @@ impl Aurora {
         }
     }
 
+    /// `extras` 是要遍历的额外项，别的额外项不碰盘。
     async fn plan_export(
         &self,
         id: &str,
+        extras: &[ExportExtra],
         target: Option<&ModpackExportTarget>,
         events: Option<&EventSink>,
     ) -> Result<ExportPlan> {
@@ -617,10 +623,11 @@ impl Aurora {
             })
             .unwrap_or_default();
         let working_dir = dirs.working_dir.clone();
+        let wanted: BTreeSet<ExportExtra> = extras.iter().copied().collect();
         let extras = tokio::task::spawn_blocking(move || {
-            ExportExtra::ALL
-                .iter()
-                .map(|&extra| Ok((extra, collect_extra(&working_dir, extra, &excluded)?)))
+            wanted
+                .into_iter()
+                .map(|extra| Ok((extra, collect_extra(&working_dir, extra, &excluded)?)))
                 .collect::<std::result::Result<BTreeMap<_, _>, aurora_base::Error>>()
         })
         .await??;
@@ -851,6 +858,7 @@ async fn list_mods(mods_dir: &Path) -> Result<ModListing> {
     listing
         .disabled
         .sort_by(|a, b| a.file.path.cmp(&b.file.path));
+    listing.skipped.sort();
     Ok(listing)
 }
 
@@ -1342,7 +1350,17 @@ mod tests {
                 (ExportExtra::Saves, 1, 5, false),
             ]
         );
-        assert_eq!(preview.skipped, vec!["config/nul.json"]);
+        assert!(preview.mod_skipped.is_empty());
+        let skipped: Vec<_> = preview
+            .extras
+            .iter()
+            .filter(|s| !s.skipped.is_empty())
+            .map(|s| (s.extra, s.skipped.clone()))
+            .collect();
+        assert_eq!(
+            skipped,
+            vec![(ExportExtra::Config, vec!["config/nul.json".to_owned()])]
+        );
 
         let ledger_requests = requests_to(&fixture.server, "/versions").await;
         assert_eq!(ledger_requests.len(), 1);
@@ -1919,6 +1937,95 @@ mod tests {
         assert_eq!((last.total, last.finished), (4, 4));
         assert_eq!(last.bytes, override_bytes);
         assert_eq!(last.total_bytes, Some(override_bytes));
+    }
+
+    /// 弹窗按预览给的分项和当前勾选算「会跳过几个」，这里钉死它与导出结果同一口径：
+    /// mods 目录的总算，额外项的只算勾上的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skipped_files_of_unselected_extras_are_not_reported() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        fixture.write("mods/con.jar", b"reserved");
+        fixture.write("mods/aux.jar", b"reserved");
+        fixture.write("saves/World/prn.dat", b"reserved");
+
+        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        assert_eq!(preview.mod_skipped, vec!["mods/aux.jar", "mods/con.jar"]);
+
+        let cases: [(&[ExportExtra], &[&str]); 4] = [
+            (&[], &["mods/aux.jar", "mods/con.jar"]),
+            (
+                &[ExportExtra::Config],
+                &["config/nul.json", "mods/aux.jar", "mods/con.jar"],
+            ),
+            (
+                &[ExportExtra::Saves],
+                &["mods/aux.jar", "mods/con.jar", "saves/World/prn.dat"],
+            ),
+            (
+                &ExportExtra::ALL,
+                &[
+                    "config/nul.json",
+                    "mods/aux.jar",
+                    "mods/con.jar",
+                    "saves/World/prn.dat",
+                ],
+            ),
+        ];
+        for (index, (selected, expected)) in cases.into_iter().enumerate() {
+            let target = ModpackExportTarget::new(fixture.root.join(format!("跳过{index}.mrpack")));
+            let outcome = fixture
+                .aurora
+                .export_modpack(ID, &options(selected.to_vec(), false), &target, None)
+                .await
+                .unwrap();
+            assert_eq!(outcome.skipped, expected, "勾选 {selected:?}");
+
+            let mut counted = preview.mod_skipped.clone();
+            for stat in preview
+                .extras
+                .iter()
+                .filter(|s| selected.contains(&s.extra))
+            {
+                counted.extend(stat.skipped.iter().cloned());
+            }
+            counted.sort();
+            assert_eq!(counted, outcome.skipped, "勾选 {selected:?}");
+        }
+    }
+
+    /// 存档可能很大：导出只遍历勾选的额外项，勾重了也只走一遍，预览才遍历全部。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn planning_walks_only_the_requested_extras() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let walked = |plan: &ExportPlan| plan.extras.keys().copied().collect::<Vec<_>>();
+
+        let none = fixture.aurora.plan_export(ID, &[], None, None).await;
+        assert_eq!(walked(&none.unwrap()), Vec::<ExportExtra>::new());
+
+        let some = fixture
+            .aurora
+            .plan_export(
+                ID,
+                &[
+                    ExportExtra::Options,
+                    ExportExtra::Config,
+                    ExportExtra::Options,
+                ],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(walked(&some), [ExportExtra::Config, ExportExtra::Options]);
+        assert_eq!(some.extras[&ExportExtra::Config].files.len(), 2);
+        assert_eq!(some.extras[&ExportExtra::Options].files.len(), 1);
+
+        let all = fixture
+            .aurora
+            .plan_export(ID, &ExportExtra::ALL, None, None);
+        assert_eq!(walked(&all.await.unwrap()), ExportExtra::ALL);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

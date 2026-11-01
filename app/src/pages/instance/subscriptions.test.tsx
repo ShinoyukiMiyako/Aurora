@@ -528,8 +528,8 @@ describe("实例详情的弹窗：本实例运行中、另一个实例在补全"
       indexed: [],
       bundled: [],
       disabled: [],
-      extras: EXPORT_EXTRAS.map((extra) => ({ extra, files: extra === "config" ? 3 : 0, bytes: extra === "config" ? 4096 : 0, default_selected: extra === "config" })),
-      skipped: [],
+      extras: EXPORT_EXTRAS.map((extra) => ({ extra, files: extra === "config" ? 3 : 0, bytes: extra === "config" ? 4096 : 0, default_selected: extra === "config", skipped: [] })),
+      mod_skipped: [],
     }));
     await open("overview");
     const taskId = await busyAround();

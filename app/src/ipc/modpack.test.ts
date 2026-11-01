@@ -425,7 +425,8 @@ describe("导出整合包 mock", () => {
       // 这个实例没有存档：0 个文件，不勾
       ["saves", 0, false],
     ]);
-    expect(preview.skipped).toEqual([]);
+    expect(preview.mod_skipped).toEqual([]);
+    expect(preview.extras.flatMap((e) => e.skipped)).toEqual([]);
   });
 
   it("预览：整合包实例默认取记下的名字与版本；有存档时存档也不默认勾选", async () => {
@@ -434,7 +435,7 @@ describe("导出整合包 mock", () => {
     expect(pack.indexed).toEqual([]);
     expect(pack.bundled).toHaveLength(182);
     const worlds = await previewModpackExport("1.21.1-Fabric");
-    expect(worlds.extras.find((e) => e.extra === "saves")).toEqual({ extra: "saves", files: 2, bytes: 80 * 1_048_576, default_selected: false });
+    expect(worlds.extras.find((e) => e.extra === "saves")).toEqual({ extra: "saves", files: 2, bytes: 80 * 1_048_576, default_selected: false, skipped: [] });
   });
 
   it("预览：实例不存在报 version_not_installed，没装完的报 modpack_export_unsupported 与原因", async () => {
