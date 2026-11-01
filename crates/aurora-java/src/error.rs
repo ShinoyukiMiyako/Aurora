@@ -58,6 +58,19 @@ pub enum Error {
     /// 调用方经取消令牌放弃了本次运行时下载。
     #[error("Java 运行时下载已取消")]
     Cancelled,
+
+    /// 同一份清单在两个及以上下载源上都没取到。
+    ///
+    /// `attempts` 按尝试顺序给出每个源的地址与它的完整失败原因（错误本身接上 `source()` 链），
+    /// 排障时一眼能看出是官方源、镜像还是两边都出了问题；`last` 是最后一个源的原错误，
+    /// 原因链从它接着往下，上层据此仍能判出是否属于网络不通。
+    #[error("{context} 在全部 {} 个下载源上都失败：{}", .attempts.len(), .attempts.join("；"))]
+    AllSourcesFailed {
+        context: &'static str,
+        attempts: Vec<String>,
+        #[source]
+        last: Box<Error>,
+    },
 }
 
 impl Error {
@@ -86,6 +99,8 @@ impl RetryableError for Error {
             | Error::MissingJavaExecutable => false,
             // 取消是调用方的决定，重试违背它。
             Error::Cancelled => false,
+            // 每个源内部已按策略重试过，整体再来一轮只会把同样的失败重演一遍。
+            Error::AllSourcesFailed { .. } => false,
         }
     }
 }
@@ -101,5 +116,40 @@ fn is_retryable_http(err: &reqwest::Error) -> bool {
             status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn all_sources_failed_lists_every_attempt_in_order_and_is_final() {
+        let err = Error::AllSourcesFailed {
+            context: "Java 运行时总清单",
+            attempts: vec![
+                "https://a/all.json：HTTP 请求失败: https://a/all.json".to_owned(),
+                "https://b/all.json：Java 运行时清单不含平台 x".to_owned(),
+            ],
+            last: Box::new(Error::UnsupportedPlatform("x".to_owned())),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "Java 运行时总清单 在全部 2 个下载源上都失败：\
+             https://a/all.json：HTTP 请求失败: https://a/all.json；\
+             https://b/all.json：Java 运行时清单不含平台 x"
+        );
+        let last = err
+            .source()
+            .and_then(|s| s.downcast_ref::<Box<Error>>())
+            .expect("原因链第一层应是最后一个源的原错误");
+        assert!(matches!(last.as_ref(), Error::UnsupportedPlatform(p) if p == "x"));
+        assert!(
+            !err.is_retryable(),
+            "各源已各自重试过，聚合错误不应再整体重试"
+        );
+        assert!(!err.is_cancelled());
     }
 }

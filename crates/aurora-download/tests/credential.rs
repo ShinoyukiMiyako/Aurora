@@ -10,6 +10,7 @@ use aurora_base::retry::RetryPolicy;
 use aurora_download::{
     ChunkConfig, ChunkPlan, CredentialRealm, CredentialScope, DownloadConfig, DownloadCredential,
     DownloadTask, Downloader, Error, MirrorSource, SourceHealth, SourcePlan, SourceResolver,
+    WatchdogConfig,
 };
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -62,6 +63,7 @@ fn config(chunk: ChunkConfig, sources: SourcePlan) -> DownloadConfig {
         chunk,
         retry: fast_policy(),
         sources,
+        watchdog: WatchdogConfig::default(),
     }
 }
 

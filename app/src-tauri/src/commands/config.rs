@@ -258,7 +258,7 @@ fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandErr
         aurora.set_download_source(policy);
     }
     if let Some(policy) = patch.version_list_source {
-        aurora.set_version_list_source(policy)?;
+        aurora.set_version_list_source(policy);
     }
     if let Some(concurrency) = patch.download_concurrency {
         aurora.set_download_concurrency(concurrency);

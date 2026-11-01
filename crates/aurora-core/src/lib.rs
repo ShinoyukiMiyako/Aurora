@@ -57,6 +57,7 @@ pub mod resources;
 pub mod search;
 pub mod servers;
 pub mod session;
+mod sources;
 pub mod updates;
 pub mod versions;
 mod workdir;

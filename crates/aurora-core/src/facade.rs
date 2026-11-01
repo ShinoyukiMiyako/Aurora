@@ -10,12 +10,14 @@
 //! 经它装配的下载池与 Java 下载都会响应取消。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aurora_auth::MsaEndpoints;
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
-    CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader,
+    CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader, MirrorResolver,
+    SourceHealth, SourceResolver, SourceSpeedCache,
 };
 use aurora_install::{GameLayout, InstallContext, VERSION_MANIFEST_V2};
 use aurora_instance::IsolationPolicy;
@@ -45,6 +47,7 @@ pub struct Aurora {
     game_dir: PathBuf,
     config_path: PathBuf,
     // 远端端点基址：生产默认，测试注入 mock。
+    /// 版本清单的官方地址；在官方与镜像之间选源交给源计划。
     manifest_url: String,
     modrinth_base: String,
     curseforge_base: String,
@@ -57,6 +60,13 @@ pub struct Aurora {
     /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
     /// 各自新建的门面（含测试）互不串用。
     pub(crate) mod_versions: crate::modversions::SharedVersionCache,
+    /// 下载源测速结论。放在门面上随快照共享：各长任务生成下载计划时共用一份未过期的结论，
+    /// TTL 内不重复探测。
+    pub(crate) source_speed: Arc<SourceSpeedCache>,
+    /// 把官方地址改写到各下载源的解析器；生产为镜像改写表，测试把两个源钉到不同的本地 mock。
+    pub(crate) source_resolver: Arc<dyn SourceResolver>,
+    /// 下载源健康表。跨池、跨任务共享：一个任务刚证明某个源不通，紧接着的任务不必把同一轮重试再赔一遍。
+    source_health: Arc<SourceHealth>,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -97,10 +107,6 @@ impl Aurora {
             .game_directory
             .clone()
             .unwrap_or_else(|| data_dir.join(aurora_instance::MINECRAFT_DIR_NAME));
-        // 版本清单地址随「版本列表源」策略选官方或镜像。
-        let manifest_url = config
-            .version_list_source
-            .rewrite_primary(VERSION_MANIFEST_V2)?;
         Ok(Self {
             config,
             http,
@@ -109,7 +115,7 @@ impl Aurora {
             data_dir,
             game_dir,
             config_path,
-            manifest_url,
+            manifest_url: VERSION_MANIFEST_V2.to_owned(),
             modrinth_base: aurora_modplatform::MODRINTH_BASE.to_owned(),
             curseforge_base: aurora_modplatform::CURSEFORGE_BASE.to_owned(),
             fabric_base: "https://meta.fabricmc.net".to_owned(),
@@ -118,6 +124,9 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            source_speed: Arc::new(SourceSpeedCache::new(VERSION_MANIFEST_V2)),
+            source_resolver: Arc::new(MirrorResolver),
+            source_health: Arc::new(SourceHealth::new()),
             #[cfg(test)]
             curseforge_key: None,
             #[cfg(test)]
@@ -125,7 +134,7 @@ impl Aurora {
         })
     }
 
-    /// 覆盖版本清单地址（默认按「版本列表源」策略取官方或镜像）。用于本地 mock 与集成测试。
+    /// 覆盖版本清单地址（默认官方地址）。用于本地 mock 与集成测试。
     pub fn with_manifest_url(mut self, url: impl Into<String>) -> Self {
         self.manifest_url = url.into();
         self
@@ -213,13 +222,9 @@ impl Aurora {
         self.config.download_source = policy;
     }
 
-    /// 设置版本列表源策略，并据此重算版本清单地址。
-    ///
-    /// 清单地址在构造时按此策略一次性改写为官方或镜像；只改配置字段不会生效，故这里同步重算。
-    pub fn set_version_list_source(&mut self, policy: DownloadSourcePolicy) -> Result<()> {
-        self.manifest_url = policy.rewrite_primary(VERSION_MANIFEST_V2)?;
+    /// 设置版本列表源策略（下次取版本清单即生效：清单地址恒为官方地址，选源在取的时候按源计划做）。
+    pub fn set_version_list_source(&mut self, policy: DownloadSourcePolicy) {
         self.config.version_list_source = policy;
-        Ok(())
     }
 
     /// 设置批量下载的文件级并发上限。
@@ -319,14 +324,23 @@ impl Aurora {
         GameLayout::new(&self.game_dir)
     }
 
+    /// 按文件下载源策略生成的单文件引擎配置。只读测速缓存，不发请求：自动档要先经
+    /// [`prepare_sources`](Self::prepare_sources) 测过，顺序才是实测的。
+    pub(crate) fn download_config(&self) -> DownloadConfig {
+        DownloadConfig {
+            sources: self.source_plan(self.config.download_source),
+            ..DownloadConfig::default()
+        }
+    }
+
     /// 按当前配置的下载源策略与并发上限装配一个批量下载池；门面挂了取消令牌时池也挂上。
     pub(crate) fn download_pool(&self) -> DownloadPool {
-        let config = DownloadConfig {
-            sources: self.config.download_source.source_plan(),
-            ..DownloadConfig::default()
-        };
-        let downloader = Downloader::new(self.http.clone(), config)
-            .with_manual_redirect_client(self.http_manual.clone());
+        let downloader = Downloader::with_health(
+            self.http.clone(),
+            self.download_config(),
+            self.source_health().clone(),
+        )
+        .with_manual_redirect_client(self.http_manual.clone());
         let pool = DownloadPool::new(downloader, self.config.download_concurrency);
         match &self.cancel {
             Some(token) => pool.with_cancel(token.clone()),
@@ -362,7 +376,7 @@ impl Aurora {
     pub(crate) fn java_installer(&self, manifest_url: &str) -> JavaRuntimeInstaller {
         let installer = JavaRuntimeInstaller::new(self.http())
             .with_manifest_url(manifest_url)
-            .with_source(self.config().download_source.primary_mirror());
+            .with_source(self.preferred_source(self.config().download_source));
         match &self.cancel {
             Some(token) => installer.with_cancel(token.clone()),
             None => installer,
@@ -385,7 +399,12 @@ impl Aurora {
         RetryPolicy::default()
     }
 
-    /// 版本清单地址（已按版本列表源策略改写）。
+    /// 门面共享的下载源健康表。
+    pub(crate) fn source_health(&self) -> &Arc<SourceHealth> {
+        &self.source_health
+    }
+
+    /// 版本清单的官方地址（测试里是注入的 mock 地址）；具体请求哪个源由源计划改写得出。
     pub(crate) fn manifest_url(&self) -> &str {
         &self.manifest_url
     }
@@ -449,9 +468,37 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            // 默认测速指向一个不会应答的本机地址且 1 毫秒即超时：走到生成下载计划的既有测试不连真实网络，
+            // 也不吃 Windows 上连接被拒要等秒级的延迟；探针全超时即按兜底顺序、不写缓存。
+            source_speed: Arc::new(SourceSpeedCache::with_probe(
+                VERSION_MANIFEST_V2,
+                Arc::new(UnansweredProbe),
+                Duration::from_secs(10 * 60),
+                Duration::from_millis(1),
+            )),
+            source_resolver: Arc::new(MirrorResolver),
+            source_health: Arc::new(SourceHealth::new()),
             curseforge_key: None,
             curseforge_cdn_scope: None,
         }
+    }
+
+    /// 换掉下载源解析器与测速缓存（两者用同一个解析器），把官方与镜像钉到不同的本地 mock；健康表换新。
+    pub(crate) fn with_source_routes(
+        mut self,
+        resolver: Arc<dyn SourceResolver>,
+        ttl: Duration,
+        probe_timeout: Duration,
+    ) -> Self {
+        self.source_speed = Arc::new(SourceSpeedCache::with_probe(
+            VERSION_MANIFEST_V2,
+            resolver.clone(),
+            ttl,
+            probe_timeout,
+        ));
+        self.source_resolver = resolver;
+        self.source_health = Arc::new(SourceHealth::new());
+        self
     }
 
     pub(crate) fn with_modrinth_base(mut self, url: impl Into<String>) -> Self {
@@ -492,6 +539,21 @@ impl Aurora {
         &self,
     ) -> Option<&aurora_download::CredentialScope> {
         self.curseforge_cdn_scope.as_ref()
+    }
+}
+
+/// 测试门面默认的测速解析器：所有源都解析到同一个没人应答的本机地址。
+#[cfg(test)]
+struct UnansweredProbe;
+
+#[cfg(test)]
+impl SourceResolver for UnansweredProbe {
+    fn resolve(
+        &self,
+        _url: &str,
+        _source: aurora_download::MirrorSource,
+    ) -> aurora_download::Result<String> {
+        Ok("http://127.0.0.1:9/probe".to_owned())
     }
 }
 
@@ -553,21 +615,35 @@ mod tests {
         assert!(aurora.config().default_java.is_none());
     }
 
+    /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。
     #[test]
-    fn set_version_list_source_rederives_manifest_url() {
+    fn set_version_list_source_keeps_official_manifest_and_reorders_plan() {
         let mut aurora = test_aurora();
-        aurora
-            .set_version_list_source(DownloadSourcePolicy::MirrorFirst)
-            .expect("改写清单地址");
+        aurora.set_version_list_source(DownloadSourcePolicy::MirrorFirst);
         assert_eq!(
             aurora.config().version_list_source,
             DownloadSourcePolicy::MirrorFirst
         );
-        // 清单地址应等于按新策略改写的结果；删掉 setter 里的重算行会退回默认地址，此断言即挂。
-        let expected = DownloadSourcePolicy::MirrorFirst
-            .rewrite_primary(VERSION_MANIFEST_V2)
-            .expect("镜像改写");
-        assert_eq!(aurora.manifest_url(), expected);
+        assert_eq!(aurora.manifest_url(), VERSION_MANIFEST_V2);
+        let candidates = aurora
+            .source_plan(aurora.config().version_list_source)
+            .candidates(aurora.manifest_url())
+            .unwrap();
+        assert_eq!(
+            candidates,
+            vec![
+                "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json".to_owned(),
+                VERSION_MANIFEST_V2.to_owned(),
+            ]
+        );
+
+        aurora.set_version_list_source(DownloadSourcePolicy::OfficialFirst);
+        let first = aurora
+            .source_plan(aurora.config().version_list_source)
+            .candidates(aurora.manifest_url())
+            .unwrap()
+            .remove(0);
+        assert_eq!(first, VERSION_MANIFEST_V2);
     }
 
     #[test]

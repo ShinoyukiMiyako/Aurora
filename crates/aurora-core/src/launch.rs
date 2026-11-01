@@ -988,6 +988,7 @@ impl Aurora {
         reporter
             .info(format!("旧版资源目录缺少 {missing} 个文件，补全游戏文件"))
             .await;
+        self.prepare_sources().await?;
         let http = self.http();
         let pool = self.download_pool();
         let policy = self.retry_policy();
@@ -1053,6 +1054,7 @@ impl Aurora {
         files: Vec<DownloadTask>,
         reporter: &mut Reporter<'_>,
     ) -> Result<BatchReport, LaunchFailed> {
+        self.prepare_sources().await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<CoreEvent>();
         let pool = self.download_pool_reporting(Some(&tx));
         drop(tx);
@@ -1082,6 +1084,7 @@ impl Aurora {
     ) -> Result<JavaInstallation, LaunchFailed> {
         reporter.info(format!("下载 Java {major} 托管运行时")).await;
         let install_dir = crate::java::runtime_install_dir(self.data_dir(), major);
+        self.prepare_sources().await?;
         let plan = self
             .java_installer(manifest_url)
             .plan(major, &install_dir)
@@ -1143,7 +1146,7 @@ impl Aurora {
         reporter: &mut Reporter<'_>,
     ) -> Result<PathBuf, LaunchFailed> {
         let dir = crate::authlib::agent_dir(self.data_dir());
-        let urls = crate::authlib::latest_urls(&self.config().download_source.mirror_order());
+        let urls = crate::authlib::latest_urls(&self.source_order(self.config().download_source));
         let release = match crate::authlib::fetch_latest(&self.http(), &urls).await {
             Ok(release) => release,
             Err(err) => {
@@ -1321,11 +1324,14 @@ fn classify_download(report: &BatchReport, planned: usize, game_dir: &Path) -> L
 }
 
 /// 拉运行时清单或收尾（建目录、链接、可执行位）失败。取消照原样冒泡，连不上清单算离线。
+///
+/// 离线与否沿原因链找 HTTP 层错误，而不是只认某个变体：清单在多个源之间回退时，HTTP 错误包在
+/// 聚合错误的下层，只看顶层会把「每个源都连不上」误判成文件问题。
 fn java_download_failure(major: u32, err: aurora_java::Error) -> LaunchFailed {
     if err.is_cancelled() {
         return CoreError::from(err).into();
     }
-    let code = if matches!(err, aurora_java::Error::Http { .. }) {
+    let code = if has_http_cause(&err) {
         FailureCode::FilesOffline
     } else {
         FailureCode::FilesFailed
@@ -1335,6 +1341,18 @@ fn java_download_failure(major: u32, err: aurora_java::Error) -> LaunchFailed {
         .param("reason", err.to_string())
         .caused_by(err)
         .into()
+}
+
+/// 错误自身或其原因链上有没有 HTTP 层错误。
+fn has_http_cause(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(layer) = current {
+        if layer.is::<reqwest::Error>() {
+            return true;
+        }
+        current = layer.source();
+    }
+    false
 }
 
 /// 换源下载全部失败时，真正的原因在最后一个源的错误里。
@@ -1849,6 +1867,61 @@ mod tests {
                 .with_size(2048),
             error,
         }
+    }
+
+    /// 拉 Java 运行时清单失败：HTTP 层错误（不论直接还是压在逐源回退的聚合错误下面）判离线，
+    /// 内容读不懂判文件失败。
+    #[tokio::test]
+    async fn java_manifest_failures_are_classified_by_http_cause() {
+        let all_sources_failed = |last: aurora_java::Error| aurora_java::Error::AllSourcesFailed {
+            context: "Java 运行时总清单",
+            attempts: vec![
+                "https://piston-meta.mojang.com/all.json：HTTP 请求失败".to_owned(),
+                format!("https://bmclapi2.bangbang93.com/all.json：{last}"),
+            ],
+            last: Box::new(last),
+        };
+
+        let http = aurora_base::http::build_client().unwrap();
+        let unreachable = || async {
+            aurora_java::Error::Http {
+                url: "::not-a-url".into(),
+                source: http.get("::not-a-url").send().await.unwrap_err(),
+            }
+        };
+        let code_of = |failed: LaunchFailed| match failed {
+            LaunchFailed::Failure(failure) => failure.code,
+            LaunchFailed::Core(err) => panic!("应归为可处理的失败，实际：{err:?}"),
+        };
+
+        assert_eq!(
+            code_of(java_download_failure(17, unreachable().await)),
+            FailureCode::FilesOffline
+        );
+        let garbled = aurora_java::Error::Json {
+            context: "all.json".into(),
+            source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
+        };
+        assert_eq!(
+            code_of(java_download_failure(17, garbled)),
+            FailureCode::FilesFailed
+        );
+        // 两个源都没取到：最后一个源连不上仍判离线，最后一个源回的是读不懂的内容判文件失败。
+        assert_eq!(
+            code_of(java_download_failure(
+                17,
+                all_sources_failed(unreachable().await)
+            )),
+            FailureCode::FilesOffline
+        );
+        let garbled = aurora_java::Error::Json {
+            context: "all.json".into(),
+            source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
+        };
+        assert_eq!(
+            code_of(java_download_failure(17, all_sources_failed(garbled))),
+            FailureCode::FilesFailed
+        );
     }
 
     #[tokio::test]

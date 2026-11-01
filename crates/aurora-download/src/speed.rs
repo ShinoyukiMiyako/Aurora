@@ -15,9 +15,10 @@ use crate::source::{MirrorResolver, SourceResolver, order_by_latency, probe_late
 /// 连接超时。
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// 测速结论的有效期。一次装机短则几分钟长则几十分钟，半小时保证同一次装机只探一轮；再长就会把人
-/// 锁在过期结论上（换了网络、镜像临时挂了都属此列）。
-const SPEED_TTL: Duration = Duration::from_secs(30 * 60);
+/// 测速结论的有效期。玩家会换网络（家宽、校园网、热点、代理），BMCLAPI 背后的节点状况也变得快，
+/// 半小时前测出的快慢已不足为凭。测速只在生成下载计划时发生，一次装机在开头测一轮、之后各处共用
+/// 这份结论，所以缩短有效期不会让同一次装机多测；过期后下一次生成计划时重测，代价是一轮几百毫秒的探针。
+const SPEED_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// 下载源测速结论的进程内缓存。
 ///
@@ -43,7 +44,7 @@ struct Measurement {
 }
 
 impl SourceSpeedCache {
-    /// 生产构造：按镜像改写表把 `sample_url` 解析到各源，探针超时 3 秒，结论有效 30 分钟。
+    /// 生产构造：按镜像改写表把 `sample_url` 解析到各源，探针超时 3 秒，结论有效 10 分钟。
     ///
     /// `sample_url` 应选两侧都最热、且在镜像改写表里有对应条目的官方地址（如版本清单）：镜像对
     /// 冷门产物是回源拉取，拿它测出来的是回源耗时而不是线路质量；没有镜像条目的地址在两个源上解析
@@ -94,7 +95,7 @@ impl SourceSpeedCache {
     ///
     /// 有一轮探测在途时，后到的调用等它测完直接用它的结论（最多多等一个探针超时），不叠第二轮。
     /// 探针全部超时或非 2xx 时返回 `fallback` 且不写缓存：那时排出来的只是入参原序，不是测量结果，
-    /// 缓存它等于把噪声当结论用半小时。单个源探不通不是错误，它在结果里沉底。
+    /// 缓存它等于把噪声当结论用十分钟。单个源探不通不是错误，它在结果里沉底。
     ///
     /// 返回 `Err` 只有两种情况：样本地址在某个源上解析失败（此时不发任何探针），或探测后台任务
     /// 异常终止。
@@ -170,5 +171,20 @@ impl SourceSpeedCache {
     fn lock(&self) -> MutexGuard<'_, Option<Measurement>> {
         // 锁内只有整值赋值与查找，不会留下半截状态；别处 panic 毒化了锁，照常读写即可。
         self.latest.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_cache_keeps_conclusions_for_ten_minutes() {
+        let cache = SourceSpeedCache::new(
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
+        );
+        assert_eq!(cache.ttl, Duration::from_secs(600));
+        assert_eq!(cache.probe_timeout, Duration::from_secs(3));
+        assert!(!cache.is_fresh(), "刚建好时没有结论");
     }
 }

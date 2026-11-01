@@ -76,6 +76,18 @@ pub enum Error {
         last: Box<Error>,
     },
 
+    /// 吞吐看门狗判定当前下载终点过慢，且向原地址要不到另一个终点（或换终点次数已用尽）。
+    /// 换源编排据此换下一个源；已是最后一个源时关掉看门狗续传，所以它不会成为一批下载的最终错误。
+    #[error(
+        "下载终点过慢: {url}（最近 {window_secs} 秒平均 {bytes_per_sec} 字节/秒，低于 {threshold} 字节/秒）"
+    )]
+    SlowEndpoint {
+        url: String,
+        bytes_per_sec: u64,
+        threshold: u64,
+        window_secs: u64,
+    },
+
     /// 调用方经取消令牌放弃了本次下载；返回前已清掉该文件的临时文件与分片。
     #[error("下载已取消")]
     Cancelled,
@@ -156,6 +168,8 @@ impl RetryableError for Error {
             | Error::TaskJoin(_)
             | Error::Internal { .. }
             | Error::AllSourcesExhausted { .. } => false,
+            // 同一个源上重试只会被打回同一个慢终点；换终点已在引擎内做过，接下来该换源。
+            Error::SlowEndpoint { .. } => false,
             // 取消是调用方的决定，重试或换源都违背它。
             Error::Cancelled => false,
             // 密钥被拒、密钥本身不合法、跳转成环，换个时机再来结果都一样。
@@ -410,6 +424,27 @@ mod tests {
             }
             .credential_rejection(),
             None
+        );
+    }
+
+    #[test]
+    fn slow_endpoint_is_terminal_and_counts_against_the_host() {
+        let err = Error::SlowEndpoint {
+            url: "https://node.example/f.jar?s=sig&e=1".into(),
+            bytes_per_sec: 2048,
+            threshold: 32768,
+            window_secs: 15,
+        };
+        assert!(!err.is_retryable(), "同一源上重试只会回到同一个慢终点");
+        assert_eq!(err.http_status(), None);
+        assert!(
+            crate::health::is_host_fault(err.http_status()),
+            "慢记作主机故障"
+        );
+        assert!(!err.is_cancelled());
+        assert_eq!(
+            err.to_string(),
+            "下载终点过慢: https://node.example/f.jar?s=sig&e=1（最近 15 秒平均 2048 字节/秒，低于 32768 字节/秒）"
         );
     }
 
