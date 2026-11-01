@@ -155,6 +155,11 @@ describe("会话第二行文案", () => {
     expect(sessionDetail(sessionCrashClue(crashed, "A", { status: "unavailable" }), T0)).toBe("没有匹配到已知原因");
   });
 
+  it("线索只有退出码兜底：写「退出码指向」，日志里并没有规则命中", () => {
+    const crashed = sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000);
+    expect(sessionDetail(sessionCrashClue(crashed, "A", { status: "known", category: "native_crash" }), T0)).toBe("退出码指向进程异常退出");
+  });
+
   it("spawn_failed 的第二个按钮只在实例固定了 Java 时出现；账户名取自会话", () => {
     const failed = sessionFailed(loading("A"), "launch-1", { code: "spawn_failed", params: { message: "CreateProcess error=2" } }, T0);
     const view = launchView(state({ session: failed }), inst("A")) as Extract<LaunchView, { kind: "failed" }>;
