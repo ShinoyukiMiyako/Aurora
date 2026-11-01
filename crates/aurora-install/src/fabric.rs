@@ -193,26 +193,8 @@ impl<'a> LoaderInstaller<'a> {
             })
     }
 
-    /// 取指定 game+loader 的 profile 版本 JSON 原始字节。
-    pub async fn fetch_profile_json(
-        &self,
-        game_version: &str,
-        loader_version: &str,
-    ) -> Result<Vec<u8>> {
-        net::get_bytes_from(
-            self.cx.client,
-            self.sources.as_ref(),
-            &self.url(&format!(
-                "loader/{game_version}/{loader_version}/profile/json"
-            )),
-            self.cx.policy,
-            self.cx.cancel,
-            "加载器 profile",
-        )
-        .await
-    }
-
-    /// 取 profile 版本 JSON 并解析。`loader_version` 为 None 时自动选推荐版；返回实际用的 loader 版本。
+    /// 取 profile 版本 JSON 并解析，返回原始字节、解析结果与实际用的 loader 版本。`loader_version` 为
+    /// None 时自动选推荐版。取到就当场解析，某个源回的内容读不懂时换下一个源。
     pub async fn fetch_profile(
         &self,
         game_version: &str,
@@ -222,10 +204,21 @@ impl<'a> LoaderInstaller<'a> {
             Some(v) => v.to_owned(),
             None => self.latest_loader(game_version).await?.version,
         };
-        let raw = self
-            .fetch_profile_json(game_version, &loader_version)
-            .await?;
-        let version = net::parse_json(&raw, "加载器 profile JSON")?;
+        let (raw, version) = net::get_decoded_from(
+            self.cx.client,
+            self.sources.as_ref(),
+            &self.url(&format!(
+                "loader/{game_version}/{loader_version}/profile/json"
+            )),
+            self.cx.policy,
+            self.cx.cancel,
+            "加载器 profile",
+            |raw| {
+                let version = net::parse_json(&raw, "加载器 profile JSON")?;
+                Ok((raw, version))
+            },
+        )
+        .await?;
         Ok((raw, version, loader_version))
     }
 
@@ -311,6 +304,44 @@ mod tests {
         let chosen = installer.latest_loader("1.21").await.unwrap();
         assert_eq!(chosen.version, "0.15.11", "应跳过 beta 选稳定版");
         assert!(chosen.stable);
+    }
+
+    /// 第一个源回 200 的错误页：不把它当成 profile 交给调用方，换下一个源取到真正的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_garbled_profile_from_one_source_moves_on_to_the_next() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/garbled"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>维护中</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let profile = r#"{"id":"fabric-loader-0.15.11-1.21","inheritsFrom":"1.21"}"#;
+        Mock::given(method("GET"))
+            .and(path("/clean"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(profile))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let (raw, version, loader) = LoaderInstaller::fabric(cx)
+            .with_sources(crate::net::tests::plan_between(
+                &server, "/garbled", "/clean",
+            ))
+            .fetch_profile("1.21", Some("0.15.11"))
+            .await
+            .unwrap();
+
+        assert_eq!(version.id, "fabric-loader-0.15.11-1.21");
+        assert_eq!(loader, "0.15.11");
+        assert_eq!(raw, profile.as_bytes(), "落盘要的是原始字节");
     }
 
     /// Quilt meta 不给 stable 字段：按版本号推断，推荐版跳过 beta。

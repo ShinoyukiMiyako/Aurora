@@ -71,25 +71,7 @@ pub(crate) fn candidates(sources: Option<&SourcePlan>, url: &str) -> Result<Vec<
     }
 }
 
-/// 依次尝试各候选地址，返回第一个成功的响应体。取消不换源：它是调用方的决定，不是这个源的故障。
-///
-/// 全部失败时：只有一个候选就原样返回它的错误（没有换源可言，多包一层只会让上层的错误映射认不出它）；
-/// 两个及以上返回 [`Error::AllSourcesFailed`]，按尝试顺序带上每个候选的失败原因。
-pub(crate) async fn get_bytes_from(
-    client: &reqwest::Client,
-    sources: Option<&SourcePlan>,
-    url: &str,
-    policy: &RetryPolicy,
-    cancel: Option<&CancellationToken>,
-    context: &str,
-) -> Result<Vec<u8>> {
-    first_success(client, sources, url, policy, cancel, context, Ok).await
-}
-
 /// GET 并用 serde_json 反序列化（失败时带上报文上下文），按下载源方案在候选地址间兜底。
-///
-/// 每个候选取到字节就当场解析，解析失败也换下一个：镜像偶尔回一页错误提示或截断的报文，状态码却是
-/// 200，只看传输成败会把这份读不懂的内容当成功交出去，另一个源明明有好的也用不上。
 pub(crate) async fn get_json_from<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
@@ -98,14 +80,20 @@ pub(crate) async fn get_json_from<T: serde::de::DeserializeOwned>(
     cancel: Option<&CancellationToken>,
     context: &str,
 ) -> Result<T> {
-    first_success(client, sources, url, policy, cancel, context, |bytes| {
+    get_decoded_from(client, sources, url, policy, cancel, context, |bytes| {
         parse_json(&bytes, context)
     })
     .await
 }
 
-/// 逐个候选取字节并交给 `decode`，返回第一个取到且解码成功的结果；取消与失败的规则见 [`get_bytes_from`]。
-async fn first_success<T>(
+/// 依次尝试各候选地址，取到字节就当场交给 `decode`，返回第一个解码成功的结果。
+///
+/// 解码失败也换下一个：镜像偶尔回一页错误提示或截断的报文，状态码却是 200，只看传输成败会把这份读不懂
+/// 的内容当成功交出去，另一个源明明有好的也用不上。取消不换源：它是调用方的决定，不是这个源的故障。
+///
+/// 全部失败时：只有一个候选就原样返回它的错误（没有换源可言，多包一层只会让上层的错误映射认不出它）；
+/// 两个及以上返回 [`Error::AllSourcesFailed`]，按尝试顺序带上每个候选的失败原因。
+pub(crate) async fn get_decoded_from<T>(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
     url: &str,
@@ -164,7 +152,7 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8], context: 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use aurora_base::mirror::MirrorSource;
     use aurora_base::retry::RetryableError;
@@ -222,7 +210,7 @@ mod tests {
         }
     }
 
-    fn plan_between(server: &MockServer, official: &str, mirror: &str) -> SourcePlan {
+    pub(crate) fn plan_between(server: &MockServer, official: &str, mirror: &str) -> SourcePlan {
         SourcePlan::with_resolver(
             vec![MirrorSource::Official, MirrorSource::BmclApi],
             Arc::new(Fixed {
@@ -242,6 +230,17 @@ mod tests {
     }
 
     const UPSTREAM: &str = "https://x.invalid/a";
+
+    async fn get_bytes_from(
+        client: &reqwest::Client,
+        sources: Option<&SourcePlan>,
+        url: &str,
+        policy: &RetryPolicy,
+        cancel: Option<&CancellationToken>,
+        context: &str,
+    ) -> Result<Vec<u8>> {
+        get_decoded_from(client, sources, url, policy, cancel, context, Ok).await
+    }
 
     /// 第一个候选 503 时换第二个取到；只有一个候选时失败原样返回它自己的 Http 错误，不包聚合层。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
