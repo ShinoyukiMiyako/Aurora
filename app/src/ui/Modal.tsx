@@ -2,7 +2,7 @@
 // 只读的补充信息用 Popover；单句确认用 ConfirmDialog。只允许 ConfirmDialog 叠在一个 Modal 之上。
 //
 // - 打开时焦点进入：带 data-autofocus（或 autoFocus）的子元素优先，否则聚焦弹窗本身；Tab 在弹窗内循环；
-//   关闭后焦点还给打开前的元素。
+//   关闭后焦点还给打开前的元素；它已不在文档中时落到它所在的区域（见 focus-return.tsx）。
 // - closeOnScrim（默认 true）：展示类点遮罩关闭；含输入的流程类传 false，点遮罩不关，Esc 与关闭按钮照常可关。
 //   遮罩点击只在指针按下与抬起都落在遮罩上时成立，在弹窗里拖选文字、松手落在遮罩上不会误关。
 // - dismissible=false 只用于误关会丢失不可恢复进度的流程：Esc 与点遮罩无效、不显示关闭按钮，底栏必须有显式的取消。

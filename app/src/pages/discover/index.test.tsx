@@ -1504,6 +1504,29 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(callsOf(ipc, "install_modpack")).toMatchObject([{ source: { kind: "file", path: BLOCKED_PACK }, name: "周末联机", excludedOptional: [] }]);
   });
 
+  it("「继续导入」：「查看这些文件」被重新读取换掉，焦点落回确认步的第一个控件，不掉回 body，也不停在关闭按钮上", async () => {
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    const view = buttonByText("查看这些文件", dialog());
+    act(() => view.focus());
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+
+    const gate = deferred<void>();
+    ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => mockInvoke("preview_modpack", args)));
+    await clickIn(blockedDialog(), "继续导入");
+    expect(view.isConnected).toBe(false);
+    expect(dialog().textContent).toContain("正在重新读取 blocked-pack.zip…");
+    expect(document.activeElement).toBe(buttonByText("换封面", dialog()));
+
+    // 读完之后焦点不被新内容打断
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(document.activeElement).toBe(buttonByText("换封面", dialog()));
+  });
+
   it("选文件夹时取消什么都不变；选的文件夹读不了时原位写出后端原文，列表状态不变；别的失败交给外层通知", async () => {
     const { IpcError } = await import("../../ipc/errors");
     await mount({ page: "discover", importFile: BLOCKED_PACK });

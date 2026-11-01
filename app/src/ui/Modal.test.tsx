@@ -2,7 +2,7 @@
 import { AnimatePresence } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OverlayProvider, OverlayRoot } from "../shell/overlay";
+import { FOCUS_FALLBACK_ATTR, OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -173,6 +173,83 @@ describe("Esc 与叠放", () => {
     keydown(document.activeElement as Element, "Escape");
     expect(onModalClose).toHaveBeenCalledTimes(1);
     expect(onConfirmClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("第二层关闭时打开它的按钮一并被换掉：焦点落到底层弹窗里同一区域的控件上，不落到底层的关闭按钮，也不掉回 body", () => {
+    function Replaced() {
+      const [inner, setInner] = useState(false);
+      const [done, setDone] = useState(false);
+      return (
+        <Modal open onClose={() => undefined} title="确认导入">
+          <div>
+            <TextInput value="" onChange={() => undefined} aria-label="实例名" />
+            {done ? <p>正在重新读取</p> : <p><Button onClick={() => setInner(true)}>查看这些文件</Button></p>}
+          </div>
+          <Modal
+            open={inner}
+            onClose={() => setInner(false)}
+            title="清单"
+            footer={
+              <Button
+                onClick={() => {
+                  setInner(false);
+                  setDone(true);
+                }}
+              >
+                继续导入
+              </Button>
+            }
+          />
+        </Modal>
+      );
+    }
+    // 与外壳一样带着内容区滚动容器：它在底层弹窗的圈定之外，退回它的话焦点会被拉到底层头部的「关闭」
+    mount(
+      <div tabIndex={-1} {...{ [FOCUS_FALLBACK_ATTR]: "" }}>
+        <Replaced />
+      </div>,
+    );
+    const open = byText("查看这些文件");
+    act(() => open.focus());
+    click(open);
+    expect(dialogs()).toHaveLength(2);
+    click(byText("继续导入"));
+    expect(open.isConnected).toBe(false);
+    expect(document.activeElement).toBe(document.querySelector('input[aria-label="实例名"]'));
+  });
+
+  it("第二层关闭时底层整步换了内容：焦点落到底层弹窗容器本身，Tab 从弹窗内继续", () => {
+    function StepChanged() {
+      const [inner, setInner] = useState(false);
+      const [done, setDone] = useState(false);
+      return (
+        <Modal open onClose={() => undefined} title="确认导入">
+          {done ? <p key="done">已完成</p> : <div key="step"><Button onClick={() => setInner(true)}>查看这些文件</Button></div>}
+          <Modal
+            open={inner}
+            onClose={() => setInner(false)}
+            title="清单"
+            footer={
+              <Button
+                onClick={() => {
+                  setInner(false);
+                  setDone(true);
+                }}
+              >
+                继续导入
+              </Button>
+            }
+          />
+        </Modal>
+      );
+    }
+    mount(<StepChanged />);
+    const open = byText("查看这些文件");
+    act(() => open.focus());
+    click(open);
+    click(byText("继续导入"));
+    const under = dialogs().find((d) => d.getAttribute("aria-labelledby") !== null && d.textContent?.includes("确认导入"));
+    expect(document.activeElement).toBe(under);
   });
 
   it("叠在弹窗上的第二层遮罩透明；底层遮罩照常压暗", () => {
