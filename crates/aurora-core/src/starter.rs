@@ -598,20 +598,21 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        mount_versions(
-            &server,
-            "uXXizFIs",
-            "forge",
-            serde_json::json!([version(
-                "ferrite",
-                "uXXizFIs",
-                "7.0.0",
-                "release",
-                "2026-01-01T00:00:00Z",
-                &["forge"]
-            )]),
-        )
-        .await;
+        // 不约定请求次数：调用在第一个失败处短路，同批的查询可能还没发出就被丢弃，到没到都合法。
+        Mock::given(method("GET"))
+            .and(path("/v2/project/uXXizFIs/version"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([version(
+                    "ferrite",
+                    "uXXizFIs",
+                    "7.0.0",
+                    "release",
+                    "2026-01-01T00:00:00Z",
+                    &["forge"]
+                )])),
+            )
+            .mount(&server)
+            .await;
 
         let err = aurora(&server)
             .starter_mods(ModLoader::Forge, "1.21.1")
