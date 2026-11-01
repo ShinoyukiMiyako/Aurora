@@ -56,8 +56,11 @@ export const K_YIELD = 8;
 export const K_RETURN = 2.5;
 /** 单帧模拟步长上限 s：掉帧或调试器断点之后不让花瓣瞬移。 */
 export const DT_MAX = 0.05;
-/** 两次绘制的最小间隔 ms：120 Hz 及以上的显示器隔帧绘制，省一半功耗，肉眼看不出差别。 */
-export const MIN_DRAW_MS = 12;
+/**
+ * 绘制节拍 ms，约 62 fps：花瓣飘得慢，跟满高刷只是多耗电。取 16 而不是 16.67：60 Hz 屏的帧间隔正好贴着
+ * 16.67，时间戳稍有抖动就会被判成没到点，平白少画一帧。
+ */
+export const DRAW_INTERVAL_MS = 16;
 /** 夜樱下各层不透明度的系数：深底上同样的不透明度显得更亮。 */
 export const NIGHT_ALPHA = 0.8;
 /** 落出底边多少 px 后回收。 */
@@ -186,6 +189,16 @@ export function respawnAtTop(p: Petal, layer: LayerIndex, bounds: Bounds, rand: 
 
 export function clampDt(elapsedMs: number): number {
   return Math.min(DT_MAX, Math.max(0, elapsedMs / 1000));
+}
+
+/**
+ * 节拍 due 上的这一帧在 now 画完后，下一拍的时刻。沿节拍累加而不是从 now 起算：帧间隔略短于节拍的屏
+ * （70、75 Hz）从 now 起算只能每两帧画一次，掉到 37 fps 上下，70 Hz 时绘制间隔还会越过慢窗口的线；累加
+ * 则让这一拍晚到的部分抵给下一拍。落后整拍以上（卡顿、恢复播放）不补画，从 now 重新起拍。
+ */
+export function nextDrawAt(due: number, now: number): number {
+  const next = due + DRAW_INTERVAL_MS;
+  return next > now ? next : now + DRAW_INTERVAL_MS;
 }
 
 /** 与帧率无关的指数平滑系数。 */

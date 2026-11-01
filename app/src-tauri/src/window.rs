@@ -74,8 +74,9 @@ async fn show_if_still_hidden<E: Display>(
             }
             true
         }
+        // 这个读取只在窗口已销毁或事件循环已退出时失败，时限内正常关窗就会走到这里：没有窗口要兜底，也不是故障。
         Err(err) => {
-            tracing::error!(error = %err, "读取主窗口可见性失败，无法判断是否需要兜底显示");
+            tracing::debug!(error = %err, "读取主窗口可见性失败，按窗口已关闭处理");
             false
         }
     }
@@ -148,12 +149,23 @@ mod tests {
         assert_eq!(shown.get(), 0);
     }
 
+    /// 启动后三秒内正常关窗，可见性就读不出来了。这是常态，不能在日志里多一条 ERROR 让人以为出了故障，
+    /// 失败原因留在 debug 级。
     #[tokio::test]
-    async fn unreadable_visibility_does_not_force_show() {
+    async fn unreadable_visibility_means_the_window_closed() {
+        let captured = crate::tests::Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
         let shown = Cell::new(0);
         let forced = show_if_still_hidden(
             Duration::from_millis(1),
-            || Err::<bool, _>("窗口已销毁".to_owned()),
+            || Err::<bool, _>("failed to receive message from webview".to_owned()),
             || {
                 shown.set(shown.get() + 1);
                 Ok(())
@@ -162,6 +174,15 @@ mod tests {
         .await;
         assert!(!forced);
         assert_eq!(shown.get(), 0);
+
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(!log.contains("ERROR"), "{log}");
+        assert!(log.contains("DEBUG"), "{log}");
+        assert!(log.contains("读取主窗口可见性失败"), "{log}");
+        assert!(
+            log.contains("failed to receive message from webview"),
+            "{log}"
+        );
     }
 
     /// 窗口配置是首帧不闪白与尺寸规格的落点，钉住每个键的取值。

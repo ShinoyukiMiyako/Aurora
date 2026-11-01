@@ -293,7 +293,7 @@ mod tests {
 
     /// 收集日志输出的写入端。
     #[derive(Clone, Default)]
-    struct Captured(Arc<Mutex<Vec<u8>>>);
+    pub(crate) struct Captured(pub(crate) Arc<Mutex<Vec<u8>>>);
 
     impl std::io::Write for Captured {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
