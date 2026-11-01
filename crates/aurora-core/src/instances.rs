@@ -18,8 +18,9 @@ use aurora_instance::{
     AURORA_META_DIR, BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker,
     InstanceContent, MarkerStore, PinsViolation, VersionProbe, VersionScan, VersionSettings,
     VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_worlds,
-    dir_footprint, discover_versions, is_backup_file_name, is_safe_instance_id, list_version_dirs,
-    list_worlds, probe_version, read_instance_content, resolve_isolation,
+    dir_footprint, discover_versions, has_existing_mods_or_saves, is_backup_file_name,
+    is_safe_instance_id, list_version_dirs, list_worlds, probe_version, read_instance_content,
+    resolve_isolation,
 };
 use aurora_launch::{QuickPlaySupport, quick_play_support};
 use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
@@ -30,6 +31,7 @@ use crate::InstanceError;
 use crate::crashdiag::last_crash_at;
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
+use crate::modfs::try_exists;
 use crate::modpack::{InstanceModpack, read_instance_modpack};
 use crate::workdir::read_version_json;
 
@@ -162,11 +164,13 @@ impl Aurora {
     /// 与创建时间一次给齐。
     ///
     /// Mod 数只数 `mods/` 下的文件，不解析 jar；存档数只数 `saves/` 下的文件夹，不读 level.dat；
-    /// 版本 JSON 解析走进程内缓存，文件没变就不重读。
+    /// 版本 JSON 解析走进程内缓存，文件没变就不重读。只给别的实例当基底的加载器版本不列出。
     pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
-        let scan = discover_versions(self.game_dir()).await?;
+        let mut scan = discover_versions(self.game_dir()).await?;
+        // 先算再隐藏：这两项要沿继承链走，隐藏的加载器版本可能正是链上的一环。
         let javas = java_majors(&scan);
         let quick_plays = quick_play_supports(&scan);
+        hide_loader_bases(&mut scan).await;
         let mut entries: Vec<Entry> = scan
             .versions
             .into_iter()
@@ -721,6 +725,91 @@ impl Aurora {
     }
 }
 
+/// 从扫描结果里去掉只给别的实例当基底的加载器版本。实例库与安装目标都经这里取实例。
+///
+/// 安装器把加载器装在自己的版本目录里（`neoforge-21.1.265`），这一层玩家没建过，列出来就像凭空多了一个实例。
+/// 这里只改这份结果：目录不删，继承链、依赖检查、实例占用与查重都不看它。原版基底不动，玩家能在它上面看到
+/// 正被哪个实例使用。
+///
+/// 没有实例在用的不隐藏：别的启动器的游戏目录里，这样的目录就是玩家在玩的版本。读不出来的也不隐藏：
+/// 宁可多列一个，也不把看不清的目录藏起来。
+pub(crate) async fn hide_loader_bases(scan: &mut VersionScan) {
+    let candidates: Vec<&DiscoveredVersion> = scan
+        .versions
+        .iter()
+        .filter(|version| is_natural_loader_version(version))
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let packs = pack_loader_sources(scan).await;
+    let mut hidden = HashSet::new();
+    for version in candidates {
+        let copied_by_pack = version.json.inherits_from.as_deref().is_some_and(|base| {
+            packs
+                .iter()
+                .any(|(minecraft, loaders)| minecraft == base && *loaders == version.loaders)
+        });
+        if !copied_by_pack && dependents_in(scan, &version.id).is_empty() {
+            continue;
+        }
+        match has_instance_traces(&version.dir).await {
+            Ok(false) => {
+                hidden.insert(version.id.clone());
+            }
+            Ok(true) => {}
+            Err(err) => {
+                let error = error_with_causes(&err);
+                tracing::warn!(id = %version.id, %error, "读不出实例痕迹，加载器版本照常列出");
+            }
+        }
+    }
+    scan.versions
+        .retain(|version| !hidden.contains(&version.id));
+}
+
+/// 版本目录是不是加载器安装器落下的样子：继承着别的版本，目录名里带着加载器的版本号
+/// （`neoforge-21.1.265`、`1.20.1-forge-47.2.0`、`fabric-loader-0.16.10-1.21.1`）。
+fn is_natural_loader_version(version: &DiscoveredVersion) -> bool {
+    let inherits = version
+        .json
+        .inherits_from
+        .as_deref()
+        .is_some_and(|parent| !parent.trim().is_empty());
+    inherits
+        && version.loaders.iter().any(|loader| {
+            loader
+                .version
+                .as_deref()
+                .is_some_and(|number| version.id.contains(number))
+        })
+}
+
+/// 导入出的整合包实例用的是哪个加载器版本：(原版 id, 加载器)。
+///
+/// 导入把加载器 JSON 复制成实例 JSON，`inheritsFrom` 指向原版，盘上没有从实例到加载器版本的引用，只能这样
+/// 对回去。原版 id 取整合包记录：重新安装加载器之后实例 JSON 是合并的，不再继承原版。
+async fn pack_loader_sources(scan: &VersionScan) -> Vec<(String, &[LoaderInfo])> {
+    let mut sources = Vec::new();
+    for version in scan.versions.iter().filter(|v| v.has_mod_loader()) {
+        match read_instance_modpack(&version.dir).await {
+            Ok(Some(pack)) => sources.push((pack.minecraft, version.loaders.as_slice())),
+            Ok(None) => {}
+            Err(err) => {
+                let error = error_with_causes(&err);
+                tracing::warn!(id = %version.id, %error, "整合包信息读不出来，认不出它用的加载器版本");
+            }
+        }
+    }
+    sources
+}
+
+/// 目录上有没有当实例用过的痕迹：启动器只往实例的元数据目录里写东西（设置、卷宗、会话日志、安装记录、未完成
+/// 标记），自带 `mods`、`saves` 时里面是玩家的东西。
+async fn has_instance_traces(dir: &Path) -> Result<bool> {
+    Ok(has_existing_mods_or_saves(dir).await? || try_exists(&dir.join(AURORA_META_DIR)).await?)
+}
+
 /// 经 `inheritsFrom` 直接依赖 `id` 的实例。不分大小写，与实例锁、[`Aurora::inheritance_chain`] 判环和 Windows 的
 /// 目录名同一口径：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样靠这个目录运行。
 fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
@@ -1256,6 +1345,308 @@ pub(crate) mod tests {
             })
         );
         assert_eq!(support("孤儿"), None);
+    }
+
+    const NATURAL_NEOFORGE: &str = "neoforge-21.1.265";
+
+    /// NeoForge 安装器写的版本 JSON：版本号在启动参数里。
+    fn neoforge_json(id: &str, parent: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","inheritsFrom":"{parent}","type":"release",
+                "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "arguments":{{"game":["--fml.neoForgeVersion","21.1.265"],"jvm":[]}},
+                "libraries":[{{"name":"net.neoforged:bus:8.0.5"}}]}}"#
+        )
+    }
+
+    /// 导入整合包时写进实例元数据目录的记录。
+    fn write_pack_info(instance_dir: &Path, minecraft: &str) {
+        let meta = instance_dir.join(AURORA_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("modpack.json"),
+            serde_json::to_vec(&json!({
+                "schema": 1, "format": "modrinth", "platform": null, "project_id": null,
+                "version_id": null, "name": "周末整合包", "version": "1.0.0",
+                "minecraft": minecraft,
+                "loader": {"kind": "neoforge", "version": "21.1.265"},
+                "remote_files": 0, "override_files": 0, "installed_at": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    async fn listed_ids(aurora: &Aurora) -> Vec<String> {
+        let list = aurora.list_instances().await.unwrap();
+        list.into_iter().map(|instance| instance.id).collect()
+    }
+
+    /// 导入 NeoForge 整合包后盘上的样子：实例 JSON 是加载器 JSON 的副本，继承原版，没有谁继承加载器版本。
+    /// 玩家只建了一个实例，列表里就只多这一个；原版基底照常列出，加载器版本的目录留着，名字也还占着。
+    #[tokio::test]
+    async fn natural_loader_version_behind_an_imported_pack_stays_out_of_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let natural = write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
+        write_pack_info(&pack, "1.21.1");
+
+        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "周末整合包"]);
+
+        assert!(natural.join(format!("{NATURAL_NEOFORGE}.json")).is_file());
+        let names = aurora.instance_names().await.unwrap();
+        assert!(
+            names.iter().any(|name| name == NATURAL_NEOFORGE),
+            "{names:?}"
+        );
+        let err = aurora
+            .check_new_instance_name(NATURAL_NEOFORGE)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::Instance(InstanceError::InvalidName {
+                    violation: NameViolation::Duplicate,
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// 整合包实例重新安装过加载器后版本 JSON 是合并的，不再继承原版；它仍是从这个加载器版本来的。
+    #[tokio::test]
+    async fn natural_loader_version_stays_hidden_after_the_pack_reinstalls_its_loader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        let merged = r#"{"id":"周末整合包","clientVersion":"1.21.1","type":"release",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--fml.neoForgeVersion","21.1.265"],"jvm":[]},
+            "libraries":[{"name":"net.neoforged:bus:8.0.5"}]}"#;
+        let pack = write_version(&game, "周末整合包", merged);
+        write_pack_info(&pack, "1.21.1");
+
+        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "周末整合包"]);
+    }
+
+    /// 被继承的自然加载器版本不列出，但它仍是继承链上的一环：Java 与直达方式穿过它算到原版，删除与改名
+    /// 照样被依赖检查挡住。
+    #[tokio::test]
+    async fn hidden_loader_version_stays_on_the_chain_and_behind_the_dependents_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &quick_play_vanilla_json("1.21.1"));
+        let natural = write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        write_version(
+            &game,
+            "光影叠加",
+            &format!(r#"{{"id":"光影叠加","inheritsFrom":"{NATURAL_NEOFORGE}","type":"release"}}"#),
+        );
+
+        let list = aurora.list_instances().await.unwrap();
+        let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["1.21.1", "光影叠加"]);
+        let InstanceVersion::Ready(on_top) = &list[1].version else {
+            panic!("叠在加载器版本上的实例应可用：{:?}", list[1].version);
+        };
+        assert_eq!(on_top.java_major, Some(21));
+        assert_eq!(
+            on_top.quick_play,
+            Some(QuickPlaySupport {
+                singleplayer: true,
+                multiplayer: true,
+            })
+        );
+
+        assert_eq!(
+            aurora.inheritance_chain("光影叠加").await.unwrap(),
+            [NATURAL_NEOFORGE, "1.21.1"]
+        );
+        let preview = aurora.deletion_preview(NATURAL_NEOFORGE).await.unwrap();
+        assert_eq!(preview.dependents, ["光影叠加"]);
+        for refused in [
+            aurora
+                .delete_instance_files(NATURAL_NEOFORGE, RecordingDisposer::default())
+                .await
+                .map(|_| ()),
+            aurora
+                .rename_instance_files(NATURAL_NEOFORGE, "新名字")
+                .await,
+        ] {
+            let err = refused.unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Instance(InstanceError::HasDependents { dependents, .. })
+                        if dependents == &["光影叠加".to_owned()]
+                ),
+                "{err:?}"
+            );
+        }
+        assert!(natural.is_dir(), "目录不该被动过");
+    }
+
+    /// 这些目录都是玩家的：官方安装器装的版本没有谁继承它，它就是玩家在玩的那个，玩家建了个同款加载器的实例
+    /// 也不改变这一点。下面几个被别的实例继承着，但目录上有东西说明它是实例，或者名字压根不是加载器版本。
+    #[tokio::test]
+    async fn loader_versions_that_belong_to_the_player_stay_in_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+
+        let official = "fabric-loader-0.16.10-1.21.1";
+        write_version(&game, official, &fabric_json(official, "1.21.1"));
+        let built = write_version(
+            &game,
+            "周末生存",
+            r#"{"id":"周末生存","clientVersion":"1.21.1","type":"release",
+                "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries":[{"name":"net.fabricmc:fabric-loader:0.16.10"}]}"#,
+        );
+        aurora_instance::InstallRecordStore::for_version_dir(&built)
+            .save(&InstallSpec {
+                mc_version: "1.21.1".into(),
+                loader: Some("fabric".into()),
+                loader_version: Some("0.16.10".into()),
+                use_template: false,
+            })
+            .await
+            .unwrap();
+
+        let configured = write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        VersionSettingsStore::for_version_dir(&configured)
+            .save(&VersionSettings {
+                description: Some("玩家写过介绍".into()),
+                ..VersionSettings::default()
+            })
+            .await
+            .unwrap();
+        let with_saves = "fabric-loader-0.15.11-1.21.1";
+        let dir = write_version(
+            &game,
+            with_saves,
+            &fabric_json(with_saves, "1.21.1").replace("0.16.10", "0.15.11"),
+        );
+        std::fs::create_dir_all(dir.join("saves").join("新世界")).unwrap();
+        // 名字是加载器版本的样子，但版本 JSON 是合并的：这是新建实例写出的样子，玩家可以这样起名。
+        let named_like_one = "fabric-loader-0.14.0-1.21.1";
+        write_version(
+            &game,
+            named_like_one,
+            &format!(
+                r#"{{"id":"{named_like_one}","clientVersion":"1.21.1","type":"release",
+                    "libraries":[{{"name":"net.fabricmc:fabric-loader:0.14.0"}}]}}"#
+            ),
+        );
+        write_version(&game, "我的存档版", &fabric_json("我的存档版", "1.21.1"));
+        // 整合包只认出自己用的那个加载器版本：同一原版上的别的加载器、别的原版上的同款加载器都不是。
+        let pack = write_version(&game, "同原版的包", &neoforge_json("同原版的包", "1.21.1"));
+        write_pack_info(&pack, "1.21.1");
+        let pack = write_version(
+            &game,
+            "同加载器的包",
+            &fabric_json("同加载器的包", "1.20.1"),
+        );
+        write_pack_info(&pack, "1.20.1");
+        for (index, parent) in [NATURAL_NEOFORGE, with_saves, named_like_one, "我的存档版"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = format!("叠加{index}");
+            write_version(
+                &game,
+                &id,
+                &format!(r#"{{"id":"{id}","inheritsFrom":"{parent}","type":"release"}}"#),
+            );
+        }
+
+        assert_eq!(
+            listed_ids(&aurora).await,
+            [
+                "1.21.1",
+                named_like_one,
+                with_saves,
+                official,
+                NATURAL_NEOFORGE,
+                "叠加0",
+                "叠加1",
+                "叠加2",
+                "叠加3",
+                "同加载器的包",
+                "同原版的包",
+                "周末生存",
+                "我的存档版",
+            ]
+        );
+    }
+
+    /// 不再有实例用它时它回到列表：这时它只是一个完整可用的版本，玩家也才有地方删掉它。
+    #[tokio::test]
+    async fn natural_loader_version_returns_once_nothing_uses_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
+        write_pack_info(&pack, "1.21.1");
+        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "周末整合包"]);
+
+        std::fs::remove_dir_all(&pack).unwrap();
+
+        assert_eq!(listed_ids(&aurora).await, ["1.21.1", NATURAL_NEOFORGE]);
+    }
+
+    /// 整合包记录读不懂时认不出它从哪来：宁可多列一个，也不把看不清的目录藏起来，列表照常返回。
+    #[tokio::test]
+    async fn unreadable_pack_record_never_hides_a_loader_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
+        let meta = pack.join(AURORA_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("modpack.json"), b"{oops").unwrap();
+
+        assert_eq!(
+            listed_ids(&aurora).await,
+            ["1.21.1", NATURAL_NEOFORGE, "周末整合包"]
+        );
     }
 
     #[test]

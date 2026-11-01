@@ -1127,6 +1127,57 @@ mod tests {
         assert_eq!(locks.activity("fabric-loader-0.15.0-1.20.1"), None);
     }
 
+    /// 自然加载器版本不进实例列表，占用照算：链上的实例启动时它被占住，查得到是谁在用，删除照样被挡；
+    /// 列表里的原版基底照常带着 used_by。
+    #[tokio::test]
+    async fn loader_version_left_out_of_the_list_is_still_occupied_by_its_dependents() {
+        use crate::commands::instances::{delete_instance_with, list_instances_with};
+        const NATURAL: &str = "fabric-loader-0.15.0-1.20.1";
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(
+            dir.path(),
+            &[("1.20.1", None), ("OptiFabric", Some(NATURAL))],
+        );
+        let natural_dir = dir.path().join(".minecraft").join("versions").join(NATURAL);
+        std::fs::create_dir_all(&natural_dir).unwrap();
+        std::fs::write(
+            natural_dir.join(format!("{NATURAL}.json")),
+            json!({
+                "id": NATURAL, "inheritsFrom": "1.20.1", "type": "release",
+                "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries": [{ "name": "net.fabricmc:fabric-loader:0.15.0" }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let aurora = facade.snapshot().await;
+        let locks = InstanceLocks::default();
+        let slot = RunningGame::default();
+
+        let launching = reserve_launch(&slot, &locks, &aurora, "OptiFabric")
+            .await
+            .unwrap();
+
+        let list = list_instances_with(&facade, &locks).await.unwrap();
+        let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["1.20.1", "OptiFabric"]);
+        assert_eq!(list[0].used_by.as_deref(), Some("OptiFabric"));
+        assert_eq!(
+            locks.occupancy(NATURAL),
+            (
+                Some(InstanceActivity::Inherited),
+                Some("OptiFabric".to_owned())
+            )
+        );
+        let err = delete_instance_with(&facade, &locks, NATURAL, NeverDispose)
+            .await
+            .unwrap_err();
+        assert_eq!(err.detail.unwrap()["used_by"], json!("OptiFabric"));
+
+        drop(launching);
+        assert_eq!(locks.occupancy(NATURAL), (None, None));
+    }
+
     /// 测试里走不到真正的删除：基底被占着时删除命令必须在动目录之前就拒绝。
     struct NeverDispose;
 

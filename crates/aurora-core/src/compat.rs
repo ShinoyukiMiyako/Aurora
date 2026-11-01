@@ -27,6 +27,7 @@ use serde::Serialize;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
+use crate::instances::hide_loader_bases;
 use crate::modfs::{bounded_map, ledger_key, local_concurrency, try_exists};
 use crate::modversions::sort_by_published_desc;
 
@@ -400,7 +401,8 @@ impl Aurora {
         }
         // 先扫本地：一个实例都没有时连网络都不必打。矩阵本来就要覆盖全部实例，这里的全量扫描是
         // 必需而不是浪费。
-        let scan = discover_versions(self.game_dir()).await?;
+        let mut scan = discover_versions(self.game_dir()).await?;
+        hide_loader_bases(&mut scan).await;
         if scan.versions.is_empty() {
             return Ok(Vec::new());
         }
@@ -1453,6 +1455,39 @@ mod tests {
             Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
         aurora.set_isolation_policy(aurora_instance::IsolationPolicy::All);
         aurora.with_modrinth_base(base)
+    }
+
+    /// 安装目标与实例库同一口径：只给别的实例当基底的加载器版本不出现在矩阵里，原版基底照常出现。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn match_instances_leaves_out_natural_loader_versions() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/sodium/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SODIUM_VERSIONS))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let base = mc.join("versions").join("1.20.1");
+        tokio::fs::create_dir_all(&base).await.unwrap();
+        tokio::fs::write(
+            base.join("1.20.1.json"),
+            r#"{"id":"1.20.1","type":"release","mainClass":"m"}"#,
+        )
+        .await
+        .unwrap();
+        let natural = "fabric-loader-0.15.11-1.20.1";
+        put_instance(&mc, natural, "1.20.1", FABRIC_LIB).await;
+        put_instance(&mc, "叠在上面的实例", natural, FABRIC_LIB).await;
+
+        let matches = isolated(&mc, server.uri())
+            .match_instances(Platform::Modrinth, "sodium", ResourceType::Mod, None)
+            .await
+            .unwrap();
+
+        let mut ids: Vec<&str> = matches.iter().map(|m| m.version_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["1.20.1", "叠在上面的实例"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
