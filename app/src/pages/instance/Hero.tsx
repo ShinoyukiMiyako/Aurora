@@ -163,6 +163,9 @@ function InstallingTag({ instanceId }: { instanceId: string }) {
 function RenameField({ inst, ops, onDone }: { inst: InstanceSummary; ops: InstanceOps; onDone(): void }) {
   const [draft, setDraft] = useState(inst.name);
   const [saving, setSaving] = useState(false);
+  // 保存按钮聚焦着时变得不可用（改名进行中，或改名失败时名字已被改得不合法）都要留住焦点：原生禁用会把
+  // 焦点丢回 body。没聚焦时名字不合法照旧原生禁用，离开 Tab 序列。
+  const [saveFocused, setSaveFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const error = ops.nameError(draft);
 
@@ -203,7 +206,17 @@ function RenameField({ inst, ops, onDone }: { inst: InstanceSummary; ops: Instan
         onKeyDown={onKeyDown}
         className={styles.renameInput}
       />
-      <IconButton icon="check" label={HERO_COPY.saveName} size="sm" variant="secondary" disabled={error !== null || saving} focusableWhenDisabled={saving} onClick={commit} />
+      <IconButton
+        icon="check"
+        label={HERO_COPY.saveName}
+        size="sm"
+        variant="secondary"
+        disabled={error !== null || saving}
+        focusableWhenDisabled={saving || saveFocused}
+        onFocus={() => setSaveFocused(true)}
+        onBlur={() => setSaveFocused(false)}
+        onClick={commit}
+      />
       <IconButton icon="x" label={HERO_COPY.cancelRename} size="sm" onClick={onDone} />
       {error !== null && (
         <span className={styles.renameError} role="alert">

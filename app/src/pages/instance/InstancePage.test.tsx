@@ -393,6 +393,40 @@ describe("实例详情：头图与标签", () => {
     await flush();
     expect(callsOf(ipc, "rename_instance")).toHaveLength(1);
   });
+
+  it("改名进行中名字变成不合法、改名随后失败：保存按钮仍是可聚焦的禁用，焦点不丢回 body", async () => {
+    onTestFinished(emulateFocusFixup());
+    const pending = deferred<{ id: string }>();
+    ipc.overrides.set("rename_instance", () => pending.promise);
+    await open("overview");
+    const scope = document.querySelector("h1")?.closest("section");
+    if (!scope) throw new Error("没有头图");
+    keydown(scope, "F2");
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="实例名称"]');
+    if (input === null) throw new Error("F2 没有进入改名");
+    typeInto(input, "樱花生存二周目");
+    const save = button("保存名称");
+    act(() => save.focus());
+    act(() => {
+      save.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await flush();
+    typeInto(input, "创造");
+    expect(text()).toContain("已经有同名的实例了，换一个吧");
+
+    pending.reject(new IpcError("io", "改名失败"));
+    await flush();
+
+    expect(button("保存名称")).toBe(save);
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(save);
+    act(() => {
+      save.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await flush();
+    expect(callsOf(ipc, "rename_instance")).toHaveLength(1);
+  });
 });
 
 describe("实例详情：后端正在改动实例", () => {
