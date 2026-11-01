@@ -31,8 +31,8 @@ pub use detect::{
 pub use error::{Error, Result};
 pub use registry::{RegistryHive, RegistryReader, WindowsRegistry};
 pub use runtime::{
-    InstalledRuntime, JavaRuntimeInstaller, MOJANG_JAVA_RUNTIME_ALL, RuntimeFile, RuntimeLink,
-    RuntimePlan, SourceRewriter, current_platform,
+    CandidateOrder, InstalledRuntime, JavaRuntimeInstaller, MOJANG_JAVA_RUNTIME_ALL, RuntimeFile,
+    RuntimeLink, RuntimePlan, SourceRewriter, current_platform,
 };
 pub use select::{rank_for_major, select_for_major};
 pub use version::{JavaVersion, ProbedJava, parse_java_version_output};

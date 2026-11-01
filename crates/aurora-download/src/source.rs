@@ -13,6 +13,7 @@ use aurora_base::mirror::{self, MirrorSource};
 use tokio::task::JoinSet;
 
 use crate::error::{Error, Result};
+use crate::health::SourceHealth;
 
 /// 把「官方 URL + 下载源」解析为该源上的具体请求 URL。
 pub trait SourceResolver: Send + Sync {
@@ -35,6 +36,9 @@ pub struct SourcePlan {
     /// 按优先级排列的下载源，引擎从头到尾依次尝试。
     pub sources: Vec<MirrorSource>,
     resolver: Arc<dyn SourceResolver>,
+    /// 挂了健康表时，候选里冷却中的主机沉底。下载引擎自己持有健康表，不走这里；走这里的是不经引擎的
+    /// 元数据抓取。
+    health: Option<Arc<SourceHealth>>,
 }
 
 impl std::fmt::Debug for SourcePlan {
@@ -58,12 +62,23 @@ impl SourcePlan {
         Self {
             sources,
             resolver: Arc::new(MirrorResolver),
+            health: None,
         }
     }
 
     /// 注入自定义解析器构造（测试或特殊源改写场景）。
     pub fn with_resolver(sources: Vec<MirrorSource>, resolver: Arc<dyn SourceResolver>) -> Self {
-        Self { sources, resolver }
+        Self {
+            sources,
+            resolver,
+            health: None,
+        }
+    }
+
+    /// 让 [`candidates`](Self::candidates) 按这张健康表把冷却中的主机排到后面。
+    pub fn with_health(mut self, health: Arc<SourceHealth>) -> Self {
+        self.health = Some(health);
+        self
     }
 
     /// 把一个官方 URL 展开为按优先级排列、去重后的候选 URL 列表。
@@ -81,7 +96,10 @@ impl SourcePlan {
         if out.is_empty() {
             out.push(url.to_owned());
         }
-        Ok(out)
+        Ok(match &self.health {
+            Some(health) => health.prioritize(out),
+            None => out,
+        })
     }
 }
 
@@ -149,6 +167,34 @@ pub async fn probe_latencies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_with_health_sinks_a_tripped_host_and_keeps_the_rest_in_order() {
+        let official = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+        let mirror = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
+        let health = Arc::new(SourceHealth::new());
+        let mirror_first = || vec![MirrorSource::BmclApi, MirrorSource::Official];
+        let plan = SourcePlan::new(mirror_first()).with_health(health.clone());
+        assert_eq!(
+            plan.candidates(official).unwrap(),
+            vec![mirror.to_owned(), official.to_owned()],
+            "都健康时保留原序"
+        );
+
+        for _ in 0..3 {
+            health.record_failure(mirror, true);
+        }
+
+        assert_eq!(
+            plan.candidates(official).unwrap(),
+            vec![official.to_owned(), mirror.to_owned()]
+        );
+        assert_eq!(
+            SourcePlan::new(mirror_first()).candidates(official).unwrap(),
+            vec![mirror.to_owned(), official.to_owned()],
+            "没挂健康表的方案不受影响"
+        );
+    }
 
     #[test]
     fn candidates_dedup_unmapped_host_to_single() {

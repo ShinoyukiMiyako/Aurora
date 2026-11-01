@@ -201,6 +201,9 @@ pub struct InstalledRuntime {
 pub type SourceRewriter =
     Arc<dyn Fn(&str, MirrorSource) -> aurora_base::Result<String> + Send + Sync>;
 
+/// 候选地址展开后的再排序，见 [`JavaRuntimeInstaller::with_candidate_order`]。
+pub type CandidateOrder = Arc<dyn Fn(Vec<String>) -> Vec<String> + Send + Sync>;
+
 /// Mojang Java 运行时安装器。
 ///
 /// 持有注入的 HTTP 客户端、清单地址、源顺序、地址改写与重试策略。清单地址与改写都可注入，
@@ -211,6 +214,7 @@ pub struct JavaRuntimeInstaller {
     manifest_url: String,
     sources: Vec<MirrorSource>,
     rewriter: SourceRewriter,
+    candidate_order: Option<CandidateOrder>,
     policy: RetryPolicy,
     cancel: Option<CancellationToken>,
 }
@@ -223,6 +227,7 @@ impl JavaRuntimeInstaller {
             manifest_url: MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             sources: vec![MirrorSource::Official, MirrorSource::BmclApi],
             rewriter: Arc::new(mirror::rewrite),
+            candidate_order: None,
             policy: RetryPolicy::default(),
             cancel: None,
         }
@@ -253,6 +258,12 @@ impl JavaRuntimeInstaller {
     /// 覆盖地址改写（测试把官方源与镜像钉到不同的本地 mock）。
     pub fn with_rewriter(mut self, rewriter: SourceRewriter) -> Self {
         self.rewriter = rewriter;
+        self
+    }
+
+    /// 候选地址展开后再排一次序。aurora-java 不依赖下载引擎，门面经它把源健康表接进来，冷却中的主机排到后面。
+    pub fn with_candidate_order(mut self, order: CandidateOrder) -> Self {
+        self.candidate_order = Some(order);
         self
     }
 
@@ -324,7 +335,7 @@ impl JavaRuntimeInstaller {
     }
 
     /// 按源顺序把官方地址展开成候选请求地址，去重保序：改写结果相同的源（地址不在镜像表里）只试一次。
-    fn candidates(&self, url: &str) -> Result<Vec<String>> {
+    pub fn candidates(&self, url: &str) -> Result<Vec<String>> {
         let mut out: Vec<String> = Vec::with_capacity(self.sources.len());
         for &source in &self.sources {
             let resolved = (self.rewriter)(url, source)?;
@@ -332,7 +343,10 @@ impl JavaRuntimeInstaller {
                 out.push(resolved);
             }
         }
-        Ok(out)
+        Ok(match &self.candidate_order {
+            Some(order) => order(out),
+            None => out,
+        })
     }
 
     /// 逐个候选执行 `fetch`，返回第一个成功的结果。
@@ -1504,6 +1518,21 @@ mod tests {
             .iter()
             .filter(|r| r.url.path() == p)
             .count()
+    }
+
+    #[test]
+    fn candidate_order_hook_reorders_the_expanded_candidates() {
+        let client = aurora_base::http::build_client().unwrap();
+        let installer =
+            JavaRuntimeInstaller::new(client).with_candidate_order(Arc::new(|mut candidates| {
+                candidates.reverse();
+                candidates
+            }));
+
+        let candidates = installer.candidates(MOJANG_JAVA_RUNTIME_ALL).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[1], MOJANG_JAVA_RUNTIME_ALL, "官方源被排到了后面");
     }
 
     #[test]

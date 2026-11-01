@@ -424,9 +424,11 @@ impl Aurora {
 
     /// 按当前下载源策略装配 Java 运行时安装器；门面挂了取消令牌时安装器也挂上。
     pub(crate) fn java_installer(&self, manifest_url: &str) -> JavaRuntimeInstaller {
+        let health = self.source_health().clone();
         let installer = JavaRuntimeInstaller::new(self.http())
             .with_manifest_url(manifest_url)
-            .with_source(self.preferred_source(self.config().download_source));
+            .with_source(self.preferred_source(self.config().download_source))
+            .with_candidate_order(Arc::new(move |candidates| health.prioritize(candidates)));
         match &self.cancel {
             Some(token) => installer.with_cancel(token.clone()),
             None => installer,
