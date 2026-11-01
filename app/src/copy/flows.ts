@@ -297,7 +297,7 @@ const LOADER_LIBRARY_MISSING_REASON = `加载器自带的文件缺失或已损�
 /** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
 const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
 /** 启动时续期与登录弹窗碰到的是同一个拒绝，标题、正文与去设置的按钮共用。 */
-const APP_NOT_APPROVED = {
+export const APP_NOT_APPROVED = {
   title: "登录应用未获批准",
   body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
   fixLabel: "打开设置",

@@ -9,6 +9,7 @@
 
 import {
   ACTION_ERROR,
+  APP_NOT_APPROVED,
   BOOT_SLICE_ERROR,
   CONFIRM_COPY,
   DEVICE_CODE_TIMEOUT_CODE,
@@ -356,7 +357,7 @@ export interface LauncherActions {
    * 刷新名字、皮肤与令牌。凭据被判失效不是操作失败：账户重新读出来已是 expired，原位显示「重新登录」，
    * 返回 "expired" 而不抛错；其余失败原样抛出。
    */
-  refreshAccount(uuid: string): Promise<"refreshed" | "expired">;
+  refreshAccount(uuid: string): Promise<"refreshed" | "expired" | "not_approved">;
   addOfflineAccount(name: string): Promise<Account>;
   openLogin(kind: LoginKind, intent?: LoginIntent): Promise<void>;
   /** 拖进窗口的外置登录服务器链接：打开外置登录弹窗，填好这个地址并自动探测服务器。 */
@@ -506,6 +507,7 @@ const OPEN_URL_COMMAND = "plugin:opener|open_url";
 
 /** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
+const APP_NOT_APPROVED_CODE = "AppNotApproved";
 
 /** 读写本机文件失败的错误码；认领时多半是选的文件夹读不了。 */
 const IO_ERROR_CODE = "io";
@@ -2506,11 +2508,14 @@ export class LauncherStore {
           () => "refreshed" as const,
           (error: unknown) => {
             if (isIpcError(error) && error.code === RELOGIN_REQUIRED_CODE) return "expired" as const;
+            if (isIpcError(error) && error.code === APP_NOT_APPROVED_CODE) return "not_approved" as const;
             throw error;
           },
         );
         await store.fetchAccounts();
         if (outcome === "refreshed") invalidateResources(`skin:${uuid}`);
+        // 通用错误通知只有后端原文，玩家看不到换 client_id 的入口
+        if (outcome === "not_approved") store.pushToast("error", APP_NOT_APPROVED.title, APP_NOT_APPROVED.body, { label: APP_NOT_APPROVED.fixLabel, to: { page: "settings", section: "general" } });
         return outcome;
       },
       async addOfflineAccount(name) {

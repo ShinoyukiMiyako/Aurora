@@ -66,6 +66,15 @@ describe("刷新账户", () => {
     expect(await other()).toBe(1);
   });
 
+  it("应用未获批准：通知说清是 client_id 的事并给去设置的入口，不当成账户失效，也不算失败", async () => {
+    ipc.overrides.set("refresh_account", () => {
+      throw new IpcError("AppNotApproved", "Invalid app registration");
+    });
+    expect(await store.actions.refreshAccount("ms-1")).toBe("not_approved");
+    expect(store.getState().accounts.find((a) => a.uuid === "ms-1")?.status).not.toBe("expired");
+    expect(store.getState().toasts).toMatchObject([{ tone: "error", title: "登录应用未获批准", action: { label: "打开设置", to: { page: "settings", section: "general" } } }]);
+  });
+
   it("其余失败原样抛出", async () => {
     ipc.overrides.set("refresh_account", () => {
       throw new IpcError("Http", "网络连接失败");
