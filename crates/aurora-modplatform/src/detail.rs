@@ -2,16 +2,17 @@
 //!
 //! 一次详情要拼几样东西：工程本体、作者、全部版本（取最新版本与文件大小）、最新版本的必需前置
 //! （前置的名称、图标、作者、版本号）。能批量的请求都批量发（Modrinth 的 `/projects`、`/teams`、
-//! `/versions`，CurseForge 的 `POST /v1/mods`），一次详情的请求数是常数，不随前置个数增长。
+//! `/versions`、`/organizations`，CurseForge 的 `POST /v1/mods`），一次详情的请求数是常数，不随前置
+//! 个数增长。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
 use crate::curseforge::{CurseForgeClient, CurseForgeMod};
 use crate::error::Result;
 use crate::model::{DependencyKind, ModLoader, Platform, ResourceType, hue_from_rgb};
-use crate::modrinth::{ModrinthClient, primary_author, split_modrinth_tags};
+use crate::modrinth::{ModrinthClient, ModrinthProject, primary_author, split_modrinth_tags};
 use crate::version::{ModVersionInfo, ReleaseChannel, parse_loader_name};
 
 /// 介绍正文的格式：Modrinth 给 Markdown，CurseForge 只给 HTML。
@@ -128,6 +129,29 @@ fn required_dependencies(latest: Option<&ModVersionInfo>) -> Vec<(Option<String>
     out
 }
 
+/// 工程的展示作者，与搜索卡片同一口径：组织工程显示组织名，个人工程显示 `owner` 给出的所有者。
+///
+/// 组织工程的所有者挂在组织的团队上，项目团队里没有 Owner，`ordering` 又常常并列，从成员里挑只会
+/// 挑到某个维护者，所以组织名取不到时宁可留空。
+fn project_author(
+    project: &ModrinthProject,
+    org_names: &HashMap<String, String>,
+    owner: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let Some(organization) = &project.organization else {
+        return owner();
+    };
+    let name = org_names.get(organization).cloned();
+    if name.is_none() {
+        tracing::warn!(
+            project = %project.id,
+            %organization,
+            "Modrinth 组织查不到，作者留空"
+        );
+    }
+    name
+}
+
 /// Modrinth 工程详情。
 pub async fn modrinth_detail(client: &ModrinthClient, id_or_slug: &str) -> Result<ProjectDetail> {
     let (project, members, versions) = tokio::join!(
@@ -136,7 +160,7 @@ pub async fn modrinth_detail(client: &ModrinthClient, id_or_slug: &str) -> Resul
         client.versions(id_or_slug, &[], &[]),
     );
     let project = project?;
-    let author = primary_author(&members?);
+    let members = members?;
     let latest = pick_latest(
         versions?
             .iter()
@@ -176,8 +200,25 @@ pub async fn modrinth_detail(client: &ModrinthClient, id_or_slug: &str) -> Resul
 
     let dep_ids: Vec<String> = dep_refs.iter().map(|(p, _)| p.clone()).collect();
     let dep_projects = client.projects(&dep_ids).await?;
-    let team_ids: Vec<String> = dep_projects.iter().filter_map(|p| p.team.clone()).collect();
-    let teams = client.teams(&team_ids).await?;
+    // 组织工程的作者是组织名，它的项目团队里也没有所有者，不必查。
+    let team_ids: Vec<String> = dep_projects
+        .iter()
+        .filter(|p| p.organization.is_none())
+        .filter_map(|p| p.team.clone())
+        .collect();
+    let org_ids: Vec<String> = std::iter::once(&project)
+        .chain(&dep_projects)
+        .filter_map(|p| p.organization.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let (teams, organizations) =
+        tokio::join!(client.teams(&team_ids), client.organizations(&org_ids));
+    let teams = teams?;
+    let org_names: HashMap<String, String> = organizations?
+        .into_iter()
+        .map(|org| (org.id, org.name))
+        .collect();
     let author_of_team: HashMap<String, String> = teams
         .iter()
         .filter_map(|members| {
@@ -196,10 +237,11 @@ pub async fn modrinth_detail(client: &ModrinthClient, id_or_slug: &str) -> Resul
                 project_id: dep.id.clone(),
                 title: dep.title.clone(),
                 icon_url: dep.icon_url.clone(),
-                author: dep
-                    .team
-                    .as_ref()
-                    .and_then(|t| author_of_team.get(t).cloned()),
+                author: project_author(dep, &org_names, || {
+                    dep.team
+                        .as_ref()
+                        .and_then(|t| author_of_team.get(t).cloned())
+                }),
                 latest_version: version.clone(),
             })
         })
@@ -217,7 +259,7 @@ pub async fn modrinth_detail(client: &ModrinthClient, id_or_slug: &str) -> Resul
         summary: project.description.clone(),
         body: project.body.clone().unwrap_or_default(),
         body_format: BodyFormat::Markdown,
-        author,
+        author: project_author(&project, &org_names, || primary_author(&members)),
         downloads: project.downloads,
         follows: Some(project.followers),
         icon_url: project.icon_url.clone(),
@@ -483,6 +525,214 @@ mod tests {
             Some("https://modrinth.com/mod/sodium")
         );
         assert!(detail.distribution_allowed);
+    }
+
+    /// Sodium 的实际工程与成员响应（删去无关字段）：工程归组织所有，项目团队里没有 Owner，
+    /// `ordering` 全是 0，排第一的是维护者 IMS。
+    async fn mount_sodium(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/project/sodium"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "AANobbMI", "slug": "sodium", "title": "Sodium", "description": "d",
+                "project_type": "mod", "downloads": 258414700, "followers": 42388,
+                "team": "4reLOAKe", "organization": "LjcZDkRW"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/sodium/members"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"role": "Maintainer", "team_id": "4reLOAKe", "user": {"username": "IMS"},
+                 "accepted": true, "ordering": 0},
+                {"role": "Project Lead", "team_id": "4reLOAKe", "user": {"username": "jellysquid3"},
+                 "accepted": true, "ordering": 0},
+                {"role": "Maintainer", "team_id": "4reLOAKe", "user": {"username": "douira"},
+                 "accepted": true, "ordering": 0}
+            ])))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/sodium/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(server)
+            .await;
+    }
+
+    /// `/v3/organizations` 的实际响应（删去无关字段）。
+    fn caffeinemc_org() -> serde_json::Value {
+        serde_json::json!({
+            "id": "LjcZDkRW", "slug": "caffeinemc", "name": "CaffeineMC", "team_id": "UeUe8L5g"
+        })
+    }
+
+    fn modrinth_client(server: &MockServer) -> ModrinthClient {
+        ModrinthClient::new(aurora_base::http::build_client().unwrap())
+            .with_base_url(server.uri())
+            .with_retry(no_retry())
+    }
+
+    /// 同一个工程，详情与搜索卡片显示同一个作者：组织名，不是成员里排第一的 IMS，也不是组织所有者。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn organization_project_detail_shows_same_author_as_search_card() {
+        let server = MockServer::start().await;
+        mount_sodium(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v3/organizations"))
+            .and(query_param("ids", r#"["LjcZDkRW"]"#))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([caffeinemc_org()])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let hit: crate::modrinth::ModrinthHit = serde_json::from_value(serde_json::json!({
+            "project_id": "AANobbMI", "project_type": "mod", "all_project_types": ["mod"],
+            "slug": "sodium", "author": "jellysquid3", "author_id": "TEZXhE2U",
+            "organization": "CaffeineMC", "organization_id": "LjcZDkRW", "title": "Sodium",
+            "description": "d", "downloads": 258125185, "follows": 42362,
+            "date_modified": "2026-10-15T17:51:36.063140+00:00"
+        }))
+        .unwrap();
+        let card = hit.to_search_hit(&[ResourceType::Mod]);
+        let detail = modrinth_detail(&modrinth_client(&server), "sodium")
+            .await
+            .unwrap();
+
+        assert_eq!(detail.author.as_deref(), Some("CaffeineMC"));
+        assert_eq!(detail.author, card.author);
+    }
+
+    /// 前置行与详情同一口径：组织工程显示组织名，个人工程显示所有者；只有个人工程才查团队。
+    /// Sodium Extra 与它的两个前置都是实际工程。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dependency_authors_follow_the_same_rule_as_the_project() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/sodium-extra"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "PtjYWJkn", "slug": "sodium-extra", "title": "Sodium Extra",
+                "description": "d", "project_type": "mod", "downloads": 1,
+                "team": "EfhDgRdO", "organization": null
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/sodium-extra/members"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"role": "Owner", "team_id": "EfhDgRdO", "user": {"username": "FlashyReese"},
+                 "accepted": true, "ordering": 0}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/sodium-extra/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                version_json(
+                    "rel",
+                    "0.6.1",
+                    "release",
+                    "2026-10-01T00:00:00Z",
+                    serde_json::json!([
+                        {"project_id": "AANobbMI", "dependency_type": "required"},
+                        {"project_id": "P7dR8mSH", "dependency_type": "required"}
+                    ])
+                )
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .and(query_param("ids", r#"["AANobbMI","P7dR8mSH"]"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "AANobbMI", "slug": "sodium", "title": "Sodium", "description": "d",
+                 "project_type": "mod", "downloads": 1, "team": "4reLOAKe",
+                 "organization": "LjcZDkRW"},
+                {"id": "P7dR8mSH", "slug": "fabric-api", "title": "Fabric API", "description": "d",
+                 "project_type": "mod", "downloads": 1, "team": "BZoBsPo6", "organization": null}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/teams"))
+            .and(query_param("ids", r#"["BZoBsPo6"]"#))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([[
+                    {"role": "Member", "team_id": "BZoBsPo6", "user": {"username": "Player7457"},
+                     "accepted": true, "ordering": 0},
+                    {"role": "Owner", "team_id": "BZoBsPo6", "user": {"username": "modmuss50"},
+                     "accepted": true, "ordering": 0}
+                ]])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/organizations"))
+            .and(query_param("ids", r#"["LjcZDkRW"]"#))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([caffeinemc_org()])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let detail = modrinth_detail(&modrinth_client(&server), "sodium-extra")
+            .await
+            .unwrap();
+
+        assert_eq!(detail.author.as_deref(), Some("FlashyReese"));
+        let dep_authors: Vec<(&str, Option<&str>)> = detail
+            .dependencies
+            .iter()
+            .map(|d| (d.title.as_str(), d.author.as_deref()))
+            .collect();
+        assert_eq!(
+            dep_authors,
+            vec![
+                ("Sodium", Some("CaffeineMC")),
+                ("Fabric API", Some("modmuss50"))
+            ]
+        );
+    }
+
+    /// 组织查不到时作者留空：项目团队里没有所有者，退回成员只会把维护者写成作者。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_organization_leaves_author_empty_instead_of_a_team_member() {
+        let server = MockServer::start().await;
+        mount_sodium(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v3/organizations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let detail = modrinth_detail(&modrinth_client(&server), "sodium")
+            .await
+            .unwrap();
+
+        assert_eq!(detail.author, None);
+    }
+
+    /// 组织接口失败照常冒泡，不能当成查不到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn organization_lookup_failure_bubbles() {
+        let server = MockServer::start().await;
+        mount_sodium(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v3/organizations"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let err = modrinth_detail(&modrinth_client(&server), "sodium")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::error::Error::Status { status: 500, .. }
+        ));
     }
 
     /// CurseForge 详情：正文是 HTML；加载器与版本取自文件索引；前置一次批量取回；

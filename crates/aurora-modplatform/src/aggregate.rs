@@ -2,8 +2,8 @@
 //!
 //! 同一份查询并行发往 Modrinth 与 CurseForge，两边各自按平台的排序给出一窗结果，这里再把两窗
 //! 交织成一页：按下载量或更新时间排序时比较数值，其余排序两边轮流出（各平台的相关度、关注数互相
-//! 不可比）。两平台的同一工程只在「标题归一化后相等」且「作者归一化后相等」时合成一条，
-//! 主来源取 Modrinth（有文件哈希，便于日后识别与更新），下载与关注取两边之和。
+//! 不可比）。两平台的同一工程只在「标题归一化后相等」且「作者归一化后对得上」时合成一条（组织工程的
+//! 组织名与所有者都算数），主来源取 Modrinth（有文件哈希，便于日后识别与更新），下载与关注取两边之和。
 //!
 //! 分页靠 [`SearchCursor`]：每页恰好 `limit` 条（两边都到底时除外），没用上的命中留到下一页重取；
 //! 被合并进本页、但在另一平台还排在偏移之后的条目记进游标，下一页遇到时跳过，不会重复出现。
@@ -228,16 +228,25 @@ pub fn normalize_for_merge(text: &str) -> String {
         .collect()
 }
 
-/// 两条命中是否该合成一张卡：标题与作者归一化后都相等，且都不为空。作者未知不合并——
-/// 合并依赖两个条件同时成立，缺一个就无从判断。
+/// 两条命中是否该合成一张卡：标题归一化后相等，作者名归一化后有一个对得上，且都不为空。作者未知
+/// 不合并——合并依赖两个条件同时成立，缺一个就无从判断。
 pub fn should_merge(a: &SearchHit, b: &SearchHit) -> bool {
-    merge_key(a).is_some_and(|key| merge_key(b).as_ref() == Some(&key))
+    let title = normalize_for_merge(&a.title);
+    if title.is_empty() || title != normalize_for_merge(&b.title) {
+        return false;
+    }
+    let names = merge_authors(a);
+    merge_authors(b).iter().any(|name| names.contains(name))
 }
 
-fn merge_key(hit: &SearchHit) -> Option<(String, String)> {
-    let title = normalize_for_merge(&hit.title);
-    let author = normalize_for_merge(hit.author.as_deref()?);
-    (!title.is_empty() && !author.is_empty()).then_some((title, author))
+/// 参与合并比对的作者名：展示作者加上所有者。同一组织工程在另一平台可能挂组织名，也可能挂个人名。
+fn merge_authors(hit: &SearchHit) -> Vec<String> {
+    [&hit.author, &hit.owner]
+        .into_iter()
+        .filter_map(|name| name.as_deref())
+        .map(normalize_for_merge)
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// 一个平台这一次请求取回的原始结果。
@@ -628,6 +637,7 @@ mod tests {
             title: title.to_owned(),
             description: String::new(),
             author: author.map(str::to_owned),
+            owner: None,
             downloads,
             follows: (platform == Platform::Modrinth).then_some(10),
             icon_url: None,
@@ -688,6 +698,26 @@ mod tests {
         let zh_a = hit(Platform::Modrinth, "z1", "机械动力：齿轮", Some("作者"), 1);
         let zh_b = hit(Platform::CurseForge, "z2", "机械动力 齿轮", Some("作者"), 1);
         assert!(should_merge(&zh_a, &zh_b));
+    }
+
+    /// 组织工程的组织名与所有者都能对上另一平台的作者，别的名字对不上；只有所有者一样但标题不同也不合。
+    #[test]
+    fn organization_hit_merges_under_either_of_its_names() {
+        let mut mr = hit(
+            Platform::Modrinth,
+            "AANobbMI",
+            "Sodium",
+            Some("CaffeineMC"),
+            1,
+        );
+        mr.owner = Some("jellysquid3".to_owned());
+        let cf = |author: &str, title: &str| hit(Platform::CurseForge, "1", title, Some(author), 1);
+
+        assert!(should_merge(&mr, &cf("caffeine mc", "Sodium")));
+        assert!(should_merge(&mr, &cf("JellySquid3", "Sodium")));
+        assert!(should_merge(&cf("JellySquid3", "Sodium"), &mr));
+        assert!(!should_merge(&mr, &cf("someone", "Sodium")));
+        assert!(!should_merge(&mr, &cf("JellySquid3", "Lithium")));
     }
 
     #[test]
@@ -808,6 +838,47 @@ mod tests {
                     .join("+")
             })
             .collect()
+    }
+
+    /// 组织工程在 CurseForge 上挂在所有者个人名下：卡片显示组织名，两边照样合成一张。
+    /// Modrinth 一侧的结构取自 `/v2/search` 的实际响应。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn organization_project_still_merges_with_listing_under_its_owner() {
+        let server = MockServer::start().await;
+        mount_modrinth_page(
+            &server,
+            0,
+            serde_json::json!([{
+                "project_id": "AANobbMI", "project_type": "mod", "all_project_types": ["mod"],
+                "slug": "sodium", "author": "jellysquid3", "author_id": "TEZXhE2U",
+                "organization": "CaffeineMC", "organization_id": "LjcZDkRW", "title": "Sodium",
+                "description": "d", "downloads": 258125185, "follows": 42362,
+                "date_modified": "2026-10-15T17:51:36.063140+00:00"
+            }]),
+            1,
+        )
+        .await;
+        mount_curseforge_page(
+            &server,
+            0,
+            curseforge_mods(&[(394468, "Sodium", "JellySquid3", 40, 6)]),
+            1,
+        )
+        .await;
+
+        let (modrinth, curseforge) = clients(&server);
+        let query = SearchQuery::new("sodium").with_paging(4, 0);
+        let page = aggregate_search(
+            Some(&modrinth),
+            CurseForgeSource::Enabled(&curseforge),
+            &query,
+            None,
+        )
+        .await;
+
+        assert!(page.is_complete());
+        assert_eq!(ids(&page), vec!["AANobbMI+394468"]);
+        assert_eq!(page.hits[0].author.as_deref(), Some("CaffeineMC"));
     }
 
     /// 每页恰好 limit 条：两边轮流出；合并卡吸收了 CurseForge 窗口后部的同名工程，下一页遇到时

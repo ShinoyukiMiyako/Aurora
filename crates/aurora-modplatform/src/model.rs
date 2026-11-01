@@ -382,8 +382,11 @@ pub struct SearchHit {
     pub title: String,
     /// 简介。
     pub description: String,
-    /// 作者名（取主要作者）。
+    /// 展示用的作者：组织工程为组织名，否则取主要作者。
     pub author: Option<String>,
+    /// 工程的个人所有者（只有 Modrinth 给得出）。不展示，只用于跨平台合并：组织工程的 `author` 是
+    /// 组织名，而同一工程在另一平台可能挂在这个人名下。
+    pub owner: Option<String>,
     /// 下载量。
     pub downloads: u64,
     /// 关注数（CurseForge 无此概念，为 `None`）。

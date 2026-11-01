@@ -53,8 +53,8 @@ pub use version::{ModDependency, ModVersionInfo, ReleaseChannel, parse_loader_na
 
 pub use modrinth::{
     MODRINTH_BASE, ModrinthChangelog, ModrinthClient, ModrinthDependency, ModrinthFile,
-    ModrinthGalleryImage, ModrinthHashes, ModrinthHit, ModrinthProject, ModrinthSearchResponse,
-    ModrinthTeamMember, ModrinthUser, ModrinthVersion, primary_author,
+    ModrinthGalleryImage, ModrinthHashes, ModrinthHit, ModrinthOrganization, ModrinthProject,
+    ModrinthSearchResponse, ModrinthTeamMember, ModrinthUser, ModrinthVersion, primary_author,
 };
 
 pub use curseforge::{
