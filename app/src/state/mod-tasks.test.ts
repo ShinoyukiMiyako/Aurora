@@ -666,6 +666,55 @@ describe("批量启停与移除", () => {
     await expect(store.actions.removeMods("生存", [])).rejects.toThrow("至少要有一个 Mod");
     expect(callsOf(ipc, "remove_mod")).toHaveLength(3);
   });
+
+  describe("文件读写失败时正文写原因链里真正的原因", () => {
+    const REFUSED = "mods 目录里没有 ghost.jar，可能已被移除";
+    const DENIED = "拒绝访问。 (os error 5)";
+    /** 后端 refuse 的形状：正文只有路径，拒绝原因借 Io 错误挂在原因链上。 */
+    const refused = (path: string, reason: string) => ({ code: "io", message: `文件 IO 失败: ${path}`, detail: { path, causes: [reason] } });
+    /** 启停改名失败走平台层：同样的正文，错误码是 mod_platform_failed，也不带 detail.path。 */
+    const renameFailed = (path: string, reason: string) => ({ code: "mod_platform_failed", message: `文件 IO 失败: ${path}`, detail: { causes: [reason] } });
+    const failedToggle = (error: { code: string; message: string; detail?: unknown }, i: number) => ({ status: "error", file_name: `${i}.jar`, error });
+
+    it("批量停用被后端拒绝：写拒绝原因，不写路径", async () => {
+      ipc.overrides.set("set_mods_enabled", () => [failedToggle(refused("D:/mc/mods/ghost.jar", REFUSED), 0)]);
+      await store.actions.toggleMods("生存", ["ghost.jar"], false);
+      expect(infoAndWarnings()).toEqual([["warning", "1 个 Mod 没能停用", REFUSED]]);
+    });
+
+    it("批量启用改名失败：路径逐项不同但原因相同，写那条原因，不说原因各不相同", async () => {
+      ipc.overrides.set("set_mods_enabled", () => [renameFailed("D:/mc/mods/a.jar", DENIED), renameFailed("D:/mc/mods/b.jar", DENIED)].map(failedToggle));
+      await store.actions.toggleMods("生存", ["a.jar.disabled", "b.jar.disabled"], true);
+      expect(infoAndWarnings()).toEqual([["warning", "2 个 Mod 没能启用", DENIED]]);
+    });
+
+    it("原因真的不止一种时才说各不相同", async () => {
+      ipc.overrides.set("set_mods_enabled", () => [refused("D:/mc/mods/ghost.jar", REFUSED), renameFailed("D:/mc/mods/a.jar", DENIED)].map(failedToggle));
+      await store.actions.toggleMods("生存", ["ghost.jar", "a.jar"], false);
+      expect(infoAndWarnings()).toEqual([["warning", "2 个 Mod 没能停用", "原因各不相同"]]);
+    });
+
+    it("批量移除被后端拒绝：写拒绝原因；两项同一条系统错误只写一次", async () => {
+      ipc.overrides.set("remove_mod", (args) => {
+        const { code, message, detail } = refused(`D:/mc/mods/${String(args.fileName)}`, args.fileName === "ghost.jar" ? REFUSED : DENIED);
+        throw new IpcError(code, message, detail);
+      });
+      await store.actions.removeMods("生存", [{ fileName: "ghost.jar", name: "Ghost" }]);
+      expect(infoAndWarnings().at(-1)).toEqual(["warning", "1 个 Mod 没能移除", REFUSED]);
+      await store.actions.removeMods("生存", [
+        { fileName: "a.jar", name: "A" },
+        { fileName: "b.jar", name: "B" },
+      ]);
+      expect(infoAndWarnings().at(-1)).toEqual(["warning", "2 个 Mod 没能移除", DENIED]);
+    });
+
+    it("添加本地 Mod 走同一份通知：落盘失败同样写系统错误", async () => {
+      const failed = (source: string) => ({ status: "error", source, error: refused(`D:/mc/mods/${source}.jar`, DENIED) });
+      ipc.overrides.set("add_local_mods", () => [failed("a"), failed("b")]);
+      await store.actions.addLocalMods("生存", ["a", "b"]);
+      expect(infoAndWarnings().at(-1)).toEqual(["warning", "2 个 Mod 没能添加", DENIED]);
+    });
+  });
 });
 
 describe("忽略与恢复检查更新", () => {

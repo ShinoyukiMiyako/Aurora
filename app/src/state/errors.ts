@@ -47,6 +47,26 @@ export function describeErrorRecord(record: { code: string; message: string; det
   return describeError(new IpcError(record.code, record.message, record.detail));
 }
 
+/** 后端文件读写失败的正文：只写路径，原因在 detail.causes。几个 crate 的 Io 错误都是这一句，错误码却不同。 */
+const IO_FAILURE_PREFIX = "文件 IO 失败: ";
+
+function causesOf(detail: unknown): string[] {
+  if (typeof detail !== "object" || detail === null) return [];
+  const { causes } = detail as Record<string, unknown>;
+  return Array.isArray(causes) ? causes.map(String) : [];
+}
+
+/**
+ * 批量动作里一项失败的原因。文件读写失败的正文只说了是哪个文件，后端借 Io 错误承载的拒绝原因和系统错误都在原因链里，
+ * 路径又逐项不同，按正文比较时同一种原因也成了「各不相同」。不按错误码判：启停改名失败报的是 mod_platform_failed，
+ * 同一个码下还有 HTTP、JSON 这些正文说得清的失败。其余错误的原因链只是更底层的细节，照写正文。
+ */
+export function itemFailureReason(record: { code: string; message: string; detail?: unknown }): string {
+  if (!record.message.startsWith(IO_FAILURE_PREFIX)) return record.message;
+  const causes = causesOf(record.detail);
+  return causes.length === 0 ? record.message : causes.join("：");
+}
+
 /** 任务失败记录用的 { code, message }：前端自身的 Error 没有错误码，记为 unknown。 */
 export function errorRecord(error: unknown): { code: string; message: string } {
   if (isIpcError(error)) {
