@@ -878,8 +878,14 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false });
         break;
       }
-      default:
-        throw new Error(`未知的崩溃诊断类别：${String(clue.category)}`);
+      case "loopback_unavailable":
+        // 卡在玩家系统的临时目录或安全软件上，实例设置与任务都够不着，线索卡的解释就是全部办法
+        break;
+      default: {
+        // 类型上已穷尽：新增类别漏写分支时这里编译不过；运行期到这里的是发布缺陷，不静默跳过
+        const unknown: never = clue.category;
+        throw new Error(`未知的崩溃诊断类别：${String(unknown)}`);
+      }
     }
   }
   fixes.push({ kind: "compare_log" });
