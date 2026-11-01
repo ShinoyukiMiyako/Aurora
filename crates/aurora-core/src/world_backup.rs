@@ -1357,7 +1357,8 @@ mod tests {
         assert_eq!(snapshot(&dir), before);
     }
 
-    #[tokio::test]
+    /// 时钟暂停：取消后还剩多少时限只看定时器先后，机器满载不会把排队的调度算进去。
+    #[tokio::test(start_paused = true)]
     async fn waiting_for_a_busy_world_responds_to_cancellation() {
         let tmp = tempfile::tempdir().unwrap();
         let aurora = aurora_at(tmp.path());
