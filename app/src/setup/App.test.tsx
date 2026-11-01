@@ -145,7 +145,7 @@ describe("发起安装", () => {
     await seeHeading(copy.installed.kind.upgrade.title("0.1.0"));
     button(copy.installed.update).click();
     await seeHeading(copy.installing.title.upgrade("0.2.0"));
-    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[{ mode: "upgrade", dir: null, desktopShortcut: true }]]), WAIT);
+    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[{ mode: "upgrade", dir: null, desktopShortcut: false }]]), WAIT);
     expect(fake.callsOf("checkDir")).toEqual([]);
   });
 
@@ -154,7 +154,7 @@ describe("发起安装", () => {
     await seeHeading(copy.installed.kind.same.title("0.1.0"));
     button(copy.installed.reinstall).click();
     await seeHeading(copy.installing.title.repair(""));
-    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[{ mode: "repair", dir: null, desktopShortcut: true }]]), WAIT);
+    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[{ mode: "repair", dir: null, desktopShortcut: false }]]), WAIT);
   });
 
   it("目录没过校验时退回选目录页，不调 install", async () => {

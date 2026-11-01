@@ -118,7 +118,8 @@ function requestInstall(state: SetupState, event: Extract<SetupEvent, { type: "i
     const plan: InstallPlan = { mode: "fresh", dir: event.check.normalized, desktopShortcut: state.desktopShortcut };
     return startInstall({ ...state, plan, origin, keptData: event.check.hasConfig }, event.running);
   }
-  const plan: InstallPlan = { mode: event.mode, dir: null, desktopShortcut: state.desktopShortcut };
+  // 这两种模式没有快捷方式的选项，NSIS 却总会建一个：传 false 让 Rust 删掉本来没有的，用户删过的不会被装回来
+  const plan: InstallPlan = { mode: event.mode, dir: null, desktopShortcut: false };
   return startInstall({ ...state, plan, origin, keptData: true }, event.running);
 }
 

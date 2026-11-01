@@ -69,10 +69,10 @@ describe("发起安装", () => {
     expect(started.run).toBe(1);
   });
 
-  it("升级和修复都不带目录", () => {
-    expect(replay([probed(existingOf("upgrade")), upgrade()]).plan).toEqual<InstallPlan>({ mode: "upgrade", dir: null, desktopShortcut: true });
-    expect(replay([probed(existingOf("same")), repair()]).plan).toEqual<InstallPlan>({ mode: "repair", dir: null, desktopShortcut: true });
-    expect(replay([probed(existingOf("broken")), repair()]).plan).toEqual<InstallPlan>({ mode: "repair", dir: null, desktopShortcut: true });
+  it("升级和修复都不带目录，也不要快捷方式：用户删过的不能被装回来", () => {
+    expect(replay([probed(existingOf("upgrade")), upgrade()]).plan).toEqual<InstallPlan>({ mode: "upgrade", dir: null, desktopShortcut: false });
+    expect(replay([probed(existingOf("same")), repair()]).plan).toEqual<InstallPlan>({ mode: "repair", dir: null, desktopShortcut: false });
+    expect(replay([probed(existingOf("broken")), repair()]).plan).toEqual<InstallPlan>({ mode: "repair", dir: null, desktopShortcut: false });
   });
 
   it("启动器还开着时停在 blocked，不开始安装", () => {

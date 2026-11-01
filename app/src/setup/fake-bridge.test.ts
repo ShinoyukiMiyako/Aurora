@@ -33,8 +33,8 @@ describe("fakeFromQuery", () => {
   });
 
   it("?mode= 选安装种类，升级和修复都不带目录", () => {
-    expect(fakeFromQuery("?state=done&mode=upgrade").initial.plan).toEqual({ mode: "upgrade", dir: null, desktopShortcut: true });
-    expect(fakeFromQuery("?state=installing&mode=repair").initial.plan).toEqual({ mode: "repair", dir: null, desktopShortcut: true });
+    expect(fakeFromQuery("?state=done&mode=upgrade").initial.plan).toEqual({ mode: "upgrade", dir: null, desktopShortcut: false });
+    expect(fakeFromQuery("?state=installing&mode=repair").initial.plan).toEqual({ mode: "repair", dir: null, desktopShortcut: false });
   });
 
   it("?lang= 原样带出，?elevated 与 ?interrupted 进探测结果", async () => {
