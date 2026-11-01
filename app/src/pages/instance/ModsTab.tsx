@@ -371,7 +371,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const columns = modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold });
   // 选中的行有启停还没回来时盘上是哪个名字未知，批量动作和开关一样带原因等它
   const batchLock = lock === undefined && selectedRows.some((r) => toggling.has(r.fileName)) ? MODS_COPY.togglePending : lock;
-  const batch = selectedRows.length > 0 ? batchAvailability(selectedRows, batchLock) : null;
+  const batch = selectedRows.length > 0 ? batchAvailability(selectedRows, batchLock, isUpdating) : null;
   // 进行中的那个按钮转圈，其余批量按钮在它结束前一并禁用
   const batchBlocked = (action: BatchAction) => batchBusy !== null && batchBusy !== action;
   // 减少动画时只去掉位移与形变，200 ms 的淡入照常保留
@@ -399,7 +399,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
               icon="download"
               disabled={batchBlocked("update")}
               focusableWhenDisabled
-              disabledReason={batch.update}
+              // 确认之后勾选项随即都算在更新：别让转圈的按钮中途换成带原因禁用
+              disabledReason={batchBusy === "update" ? undefined : batch.update}
               loading={batchBusy === "update"}
               onClick={() => openPreview(new Set(selectedRows.map((r) => r.fileName)))}
             >

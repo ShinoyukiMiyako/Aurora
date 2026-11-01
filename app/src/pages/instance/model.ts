@@ -541,13 +541,15 @@ export interface BatchAvailability {
   remove: string | undefined;
 }
 
-export function batchAvailability(selected: readonly ModRow[], lock: string | undefined): BatchAvailability {
+export function batchAvailability(selected: readonly ModRow[], lock: string | undefined, isUpdating: (row: ModRow) => boolean): BatchAvailability {
   if (selected.length === 0) throw new Error("没有选中的 Mod 时不显示批量操作条");
   if (lock !== undefined) return { enable: lock, disable: lock, update: lock, remove: lock };
+  // 已在更新的不进更新预览：选中的可更新项全在更新时打开也是一张空表
+  const updatable = selected.filter((r) => r.update !== null);
   return {
     enable: selected.every((r) => r.enabled) ? MODS_COPY.batchAllEnabled : undefined,
     disable: selected.every((r) => !r.enabled) ? MODS_COPY.batchAllDisabled : undefined,
-    update: selected.every((r) => r.update === null) ? MODS_COPY.batchNoUpdates : undefined,
+    update: updatable.length === 0 ? MODS_COPY.batchNoUpdates : updatable.every(isUpdating) ? MODS_COPY.batchAllUpdating : undefined,
     remove: undefined,
   };
 }

@@ -387,6 +387,7 @@ export const MODS_COPY = {
   batchAllEnabled: "选中的 Mod 都已启用",
   batchAllDisabled: "选中的 Mod 都已停用",
   batchNoUpdates: "选中的 Mod 都没有可用的更新",
+  batchAllUpdating: "选中的 Mod 都已在更新",
   batchRemoveTitle: (count: number) => `移除 ${count} 个 Mod？`,
   batchRemoveBody: (count: number, size: number) => `会删除选中的 ${count} 个文件（共 ${formatBytes(size)}），这一步不能回滚。以后可以从发现页重新安装。`,
   batchRemoveDependents: (names: readonly string[]) => `${names.join("、")} 把其中的 Mod 作为前置，移除后可能无法加载。`,

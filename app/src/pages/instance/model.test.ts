@@ -663,17 +663,30 @@ describe("Mod 安装时间、新增标注与更新检查设置", () => {
       [candidate("on1.jar", "2.0")],
     );
     const pick = (...names: string[]) => rows.filter((r) => names.includes(r.name));
-    expect(batchAvailability(pick("On1", "On2"), undefined)).toEqual({ enable: MODS_COPY.batchAllEnabled, disable: undefined, update: undefined, remove: undefined });
-    expect(batchAvailability(pick("Off1", "Off2"), undefined)).toEqual({
+    const nothingUpdating = () => false;
+    expect(batchAvailability(pick("On1", "On2"), undefined, nothingUpdating)).toEqual({ enable: MODS_COPY.batchAllEnabled, disable: undefined, update: undefined, remove: undefined });
+    expect(batchAvailability(pick("Off1", "Off2"), undefined, nothingUpdating)).toEqual({
       enable: undefined,
       disable: MODS_COPY.batchAllDisabled,
       update: MODS_COPY.batchNoUpdates,
       remove: undefined,
     });
-    expect(batchAvailability(pick("On2", "Off1"), undefined)).toEqual({ enable: undefined, disable: undefined, update: MODS_COPY.batchNoUpdates, remove: undefined });
+    expect(batchAvailability(pick("On2", "Off1"), undefined, nothingUpdating)).toEqual({ enable: undefined, disable: undefined, update: MODS_COPY.batchNoUpdates, remove: undefined });
     const lock = "游戏正在运行";
-    expect(batchAvailability(pick("On1", "Off1"), lock)).toEqual({ enable: lock, disable: lock, update: lock, remove: lock });
-    expect(() => batchAvailability([], undefined)).toThrow("没有选中的 Mod");
+    expect(batchAvailability(pick("On1", "Off1"), lock, nothingUpdating)).toEqual({ enable: lock, disable: lock, update: lock, remove: lock });
+    expect(() => batchAvailability([], undefined, nothingUpdating)).toThrow("没有选中的 Mod");
+  });
+
+  it("批量更新只看选中项里可更新的那些：它们都已在更新时带原因禁用，没有可更新的仍说没有可用的更新，还有一个没在更新就可用", () => {
+    const rows = modRows([named("a.jar", "A"), named("b.jar", "B"), named("c.jar", "C")], [candidate("a.jar", "2.0"), candidate("b.jar", "2.0")]);
+    const pick = (...names: string[]) => rows.filter((r) => names.includes(r.name));
+    const updating = (r: { name: string }) => r.name === "A";
+    expect(batchAvailability(pick("A"), undefined, updating).update).toBe(MODS_COPY.batchAllUpdating);
+    expect(batchAvailability(pick("A", "C"), undefined, updating).update).toBe(MODS_COPY.batchAllUpdating);
+    expect(batchAvailability(pick("A", "B"), undefined, updating).update).toBeUndefined();
+    expect(batchAvailability(pick("C"), undefined, updating).update).toBe(MODS_COPY.batchNoUpdates);
+    // 锁住时沿用锁定原因：结束游戏之前说不上「在更新」
+    expect(batchAvailability(pick("A"), "游戏正在运行", updating).update).toBe("游戏正在运行");
   });
 
   it("批量移除的两层关系只说没被一起选中的", () => {
