@@ -25,6 +25,18 @@ describe("全局设置的适配：界面语言", () => {
   });
 });
 
+describe("全局设置的适配：跳过首次无障碍引导", () => {
+  it("开与关都原样进 Settings，不被默认值盖掉", () => {
+    expect(settingsFromDto(configDto({ skip_accessibility_onboarding: true })).skipAccessibilityOnboarding).toBe(true);
+    expect(settingsFromDto(configDto({ skip_accessibility_onboarding: false })).skipAccessibilityOnboarding).toBe(false);
+  });
+
+  it("补丁键是 skipAccessibilityOnboarding，false 也写出去；没给时不出现这个键", () => {
+    expect(settingsPatchToConfig({ skipAccessibilityOnboarding: false })).toEqual({ skipAccessibilityOnboarding: false });
+    expect("skipAccessibilityOnboarding" in settingsPatchToConfig({ checkUpdates: false })).toBe(false);
+  });
+});
+
 describe("全局设置的适配：存档备份", () => {
   it("三项转成驼峰进 Settings，取值原样", () => {
     expect(settingsFromDto(configDto({ world_backup: { auto: false, keep_per_world: 1, max_total_gb: 1000 } })).worldBackup).toEqual({
