@@ -2,7 +2,7 @@
 // 同一实例既有会话又有自身状态（安装中、损坏）时会话优先：正在跑的游戏比「已损坏」更值得说。
 
 import type { IconName } from "../art/Icon";
-import { failureCopy, joinMixed, LAUNCH_COPY, LAUNCH_STAGES, MODPACK_REIMPORT_COPY, phaseLabel, SESSION_COPY, crashCategoryLabel, type FailureCopy } from "../copy/flows";
+import { failureCopy, LAUNCH_COPY, LAUNCH_STAGES, MODPACK_REIMPORT_COPY, phaseLabel, SESSION_COPY, crashCategoryLabel, type FailureCopy } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { needsReimport } from "../domain/rules";
 import type { FailureCode, StopReason, Task } from "../domain/types";
@@ -136,9 +136,7 @@ export function sessionDetail(session: SessionState, now: number): string | null
       const crash = session.crash;
       if (crash === null || crash.status === "pending") return null;
       if (crash.status === "unavailable" || crash.category === null) return SESSION_COPY.noClue;
-      const label = crashCategoryLabel(crash.category);
-      // native_crash 只由退出码兜底给出：规则在日志里一条都没命中，这时写「日志指向」就和诊断页自相矛盾
-      return crash.category === "native_crash" ? joinMixed("退出码指向", label) : SESSION_COPY.crashClue(label);
+      return SESSION_COPY.crashClue(crashCategoryLabel(crash.category));
     }
   }
 }
