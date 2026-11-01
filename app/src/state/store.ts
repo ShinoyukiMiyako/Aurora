@@ -903,6 +903,11 @@ export class LauncherStore {
   /** 账户读取的发出序号与已采纳的最晚序号（见 fetchAccounts）。 */
   private accountsIssued = 0;
   private accountsApplied = 0;
+  /** 全局设置与侧栏固定读取的发出序号与已采纳的最晚序号（见 fetchSettings、fetchPins）。 */
+  private settingsIssued = 0;
+  private settingsApplied = 0;
+  private pinsIssued = 0;
+  private pinsApplied = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
   /**
@@ -1062,8 +1067,16 @@ export class LauncherStore {
     );
   }
 
+  /**
+   * 读全局设置。启动加载、改设置、换游戏目录、删除与改名都会读，先发出的那次可能后回来，读到的是更早的配置，
+   * 照单采纳会把当前实例等设置改回去：与实例重扫一样只采纳比已采纳的那次更晚发出的结果。
+   */
   private async fetchSettings(): Promise<void> {
-    this.set({ settings: settingsFromDto(await configIpc.getConfig()) });
+    const seq = ++this.settingsIssued;
+    const settings = settingsFromDto(await configIpc.getConfig());
+    if (seq <= this.settingsApplied) return;
+    this.settingsApplied = seq;
+    this.set({ settings });
   }
 
   /**
@@ -1103,8 +1116,13 @@ export class LauncherStore {
     this.set((raw) => ({ ...scanned, ...(extra === undefined ? {} : extra(raw)) }));
   }
 
+  /** 读侧栏固定。与 fetchSettings 同理，只采纳比已采纳的那次更晚发出的结果。 */
   private async fetchPins(): Promise<void> {
-    this.set({ pins: await instancesIpc.getSidebarPins() });
+    const seq = ++this.pinsIssued;
+    const pins = await instancesIpc.getSidebarPins();
+    if (seq <= this.pinsApplied) return;
+    this.pinsApplied = seq;
+    this.set({ pins });
   }
 
   /**
