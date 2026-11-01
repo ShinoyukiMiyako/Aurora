@@ -7,7 +7,8 @@
 //! - [`select`]：按版本 JSON 的 `javaVersion.majorVersion` 挑选最合适的 Java
 //!   （主版本正确 > 64 位 > 版本号高）。
 //! - [`runtime`]：从 Mojang `java_runtime` 清单给出指定主版本运行时的安装计划（[`RuntimePlan`]），
-//!   或直接逐文件安装；远端地址走注入的 HTTP 客户端与 aurora-base 的镜像改写。
+//!   或直接逐文件安装；远端地址走注入的 HTTP 客户端与 aurora-base 的镜像改写，两份清单在
+//!   官方源与镜像之间逐源回退。
 //!
 //! 错误统一归口到 [`Error`]，下游可用 `#[from] aurora_java::Error` 一处冒泡。
 
@@ -25,7 +26,7 @@ pub use detect::{
 pub use error::{Error, Result};
 pub use runtime::{
     InstalledRuntime, JavaRuntimeInstaller, MOJANG_JAVA_RUNTIME_ALL, RuntimeFile, RuntimeLink,
-    RuntimePlan, current_platform,
+    RuntimePlan, SourceRewriter, current_platform,
 };
 pub use select::{rank_for_major, select_for_major};
 pub use version::{JavaVersion, ProbedJava, parse_java_version_output};
