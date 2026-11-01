@@ -805,6 +805,38 @@ mod tests {
         assert_eq!(store.load().await.unwrap(), bound);
     }
 
+    /// 固定服务器这一层只认自己的字段、不拒绝别的键：版本之间互相降级时，整份配置不能因为条目多了一个键就读不出来。
+    /// 这一层的未知键不进顶层的保留区，写回时丢掉，代价只是「加入」再问一次用哪个实例。
+    #[tokio::test]
+    async fn pinned_server_with_a_key_from_another_version_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{"pinned_servers": [{"name": "家", "address": "10.0.0.2:25570", "instance": "生存", "favorite": true}], "download_concurrency": 8}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.pinned_servers,
+            vec![PinnedServer {
+                name: "家".to_owned(),
+                address: "10.0.0.2:25570".to_owned(),
+                instance: Some("生存".to_owned()),
+            }]
+        );
+        assert_eq!(loaded.download_concurrency, 8);
+
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["pinned_servers"],
+            serde_json::json!([{"name": "家", "address": "10.0.0.2:25570", "instance": "生存"}])
+        );
+    }
+
     /// 三档的兜底顺序：只有尽量官方把官方放前面，自动测不出来时与尽量镜像同为镜像在前。
     #[test]
     fn fallback_order_of_each_policy() {
