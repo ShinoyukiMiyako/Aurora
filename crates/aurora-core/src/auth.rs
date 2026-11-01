@@ -768,7 +768,15 @@ impl Aurora {
             Err(err) if is_rejected_token(&err) => return self.expire(account).await,
             Err(err) => return Err(err.into()),
         };
-        let skin = profile_skin_or_warn(&client, &account.uuid).await;
+        // 档案取不到（连不上、服务器出错）时皮肤保持原样，不因一次连不上就清掉；角色在服务器上
+        // 已不存在时才清。
+        let profile = match client.session_profile(&account.uuid).await {
+            Ok(profile) => Some(profile),
+            Err(err) => {
+                tracing::warn!(uuid = %account.uuid, error = %err, "刷新令牌后取外置角色档案失败，皮肤保持原样");
+                None
+            }
+        };
         let name = resp.selected_profile.map(|p| p.name);
         let uuid = account.uuid.clone();
         let api_root = creds.api_root.clone();
@@ -784,7 +792,11 @@ impl Aurora {
                 if let Some(name) = name {
                     stored.name = name;
                 }
-                stored.skin = skin;
+                match profile {
+                    Some(Some(profile)) => stored.skin = profile.skin,
+                    Some(None) => stored.skin = None,
+                    None => {}
+                }
                 stored.status = AccountStatus::Ok;
                 stored.last_verified_at = Some(unix_millis());
             })
@@ -1328,6 +1340,7 @@ mod tests {
         const PROFILE_DOWN: &str = "4444444444444444dddddddddddddddd";
         const ABANDONED_LAUNCH: &str = "5555555555555555eeeeeeeeeeeeeeee";
         const CANCELLED_REFRESH: &str = "6666666666666666ffffffffffffffff";
+        const ROTATED_PROFILE_DOWN: &str = "7777777777777777aaaaaaaaaaaaaaaa";
 
         fn logged_in(outcome: AuthlibLogin) -> Account {
             match outcome {
@@ -2088,6 +2101,73 @@ mod tests {
             assert_eq!(refreshed.skin, Some(skin));
             assert_eq!(refreshed.credentials, before.credentials);
             assert!(refreshed.last_verified_at >= before.last_verified_at);
+        }
+
+        /// 令牌失效、刷新成功换了新令牌，会话服务器却查不到档案（连不上）：名字取刷新回音里的，皮肤保持原样，
+        /// 不因一次连不上就把皮肤清掉。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rotated_authlib_refresh_keeps_skin_when_profile_is_unavailable() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "accessToken": "rotated", "clientToken": "cli",
+                    "selectedProfile": { "id": ROTATED_PROFILE_DOWN, "name": "HeroRenamed" }
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/sessionserver/session/minecraft/profile/{ROTATED_PROFILE_DOWN}"
+                )))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let skin = SkinRef {
+                url: "https://skins.example/hero.png".into(),
+                model: SkinModel::Slim,
+            };
+            aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "acc".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: ROTATED_PROFILE_DOWN.into(),
+                        name: "Hero".into(),
+                    },
+                    Some(skin.clone()),
+                ))
+                .unwrap();
+
+            let refreshed = aurora.refresh_account(ROTATED_PROFILE_DOWN).await.unwrap();
+            assert_eq!(refreshed.name, "HeroRenamed");
+            assert_eq!(refreshed.skin, Some(skin), "档案取不到时皮肤不该被清掉");
+            let AccountCredentials::AuthlibInjector(creds) = &refreshed.credentials else {
+                panic!("应仍是外置账户：{:?}", refreshed.credentials);
+            };
+            assert_eq!(creds.access_token, "rotated");
+            let stored = aurora_at(tmp.path())
+                .find_account(ROTATED_PROFILE_DOWN)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored, refreshed);
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
