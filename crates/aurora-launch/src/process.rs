@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
-use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog};
+use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog, SessionOutcome};
 
 /// 崩溃判定缓存的最近游戏输出行数。
 pub const RECENT_LINE_CAPACITY: usize = 500;
@@ -32,6 +32,9 @@ pub const LOG_BATCH_MAX_LINES: usize = 200;
 /// 关闭；一直等下去的话退出报告永远出不来，占用槽与实例锁也一直放不掉。正常退出时管道里剩下的
 /// 只有缓冲中的最后几行，远用不了这么久。
 pub const OUTPUT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
+/// 单行游戏输出最多保留的字节数，超出的部分丢弃、只记字节数。Mod 会打印几 MB 不带换行的转储，
+/// 整段留着的话读取端、环形缓冲、会话日志与推给界面的批次都要背着它；正常的日志行远到不了这么长。
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// 日志来源流。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +50,7 @@ pub struct LogLine {
     /// 读到这一行时的 Unix 毫秒。
     pub at: u64,
     pub stream: LogStream,
+    /// 至多 [`MAX_LINE_BYTES`] 字节的原文；超出时末尾接上注明丢弃字节数的截断说明。
     pub text: String,
 }
 
@@ -121,7 +125,7 @@ impl GameSession {
         let mut terminated_by_launcher = false;
         let status = loop {
             tokio::select! {
-                status = self.child.wait() => break status.map_err(LaunchError::Wait)?,
+                status = self.child.wait() => break status,
                 Some(ack) = self.kill_rx.recv() => {
                     // 先置位再结束：即便结束动作本身失败，这次意图也已记录，退出不会被误判成崩溃。
                     terminated_by_launcher = true;
@@ -131,66 +135,171 @@ impl GameSession {
                 }
             }
         };
-        let drained = drain_readers(std::mem::take(&mut self.readers)).await?;
-        let mut outcome = self.pump.await.map_err(LaunchError::Join)?;
-        if !drained {
-            let text = format!(
-                "游戏已退出，但输出管道在 {} 秒内没有关闭（多半是游戏拉起的进程还开着它），之后的输出不再记录",
-                OUTPUT_DRAIN_DEADLINE.as_secs()
-            );
-            tracing::warn!("{text}");
-            if let Some(writer) = outcome.log.as_mut()
-                && let Err(err) = writer
-                    .write(
-                        self.clock.now(),
-                        LogSource::Launcher,
-                        Some(LauncherLevel::Warn),
-                        &text,
-                    )
-                    .await
-            {
-                tracing::warn!(error = %err, "会话日志写入失败，本次会话停止写日志");
-                outcome.log = None;
-            }
-        }
-        Ok(SessionEnd {
-            report: ExitReport {
-                code: status.code(),
-                success: status.success(),
-                recent_lines: outcome.recent.into_iter().collect(),
-                terminated_by_launcher,
-            },
-            log: outcome.log,
-        })
+        let exited = Exited {
+            status,
+            terminated_by_launcher,
+        };
+        conclude(
+            exited,
+            self.clock,
+            std::mem::take(&mut self.readers),
+            self.pump,
+            OUTPUT_DRAIN_DEADLINE,
+        )
+        .await
     }
 }
 
-/// 等读取任务读完各自的流，最多等 [`OUTPUT_DRAIN_DEADLINE`]；超时就结束它们。读取任务结束时放掉
-/// 各自的发送端，汇流任务随之收尾。返回是否在时限内读完。
-async fn drain_readers(mut readers: Vec<JoinHandle<()>>) -> Result<bool> {
-    let finished = tokio::time::timeout(OUTPUT_DRAIN_DEADLINE, async {
-        for reader in &mut readers {
-            reader.await.map_err(LaunchError::Join)?;
+/// 等进程退出的结果。等待本身可能失败，那时退出码无从得知。
+struct Exited {
+    status: std::io::Result<ExitStatus>,
+    terminated_by_launcher: bool,
+}
+
+/// 进程等完之后收尾：读完（或限时结束）两条输出流、收回汇流任务、产出退出报告。等待的结果由调用方
+/// 传入，与真实子进程无关，收尾的每条路径都能确定地测到。
+///
+/// 等待本身失败、或后台任务异常结束时同样走完收尾，会话日志写下原因与结局并落盘之后才报错：提前返回
+/// 的话读取与汇流任务被扔在后台，日志缓冲里最后那几行与结局行都不会落盘。一切正常时日志保持打开交还
+/// 调用方，由它追加退出行再关闭。
+async fn conclude(
+    exited: Exited,
+    clock: SessionClock,
+    readers: Vec<JoinHandle<()>>,
+    pump: JoinHandle<PumpOutcome>,
+    drain_deadline: Duration,
+) -> Result<SessionEnd> {
+    let drain = drain_readers(readers, drain_deadline).await;
+    // 读取任务此时都已结束、发送端全部放掉，汇流任务一定会收尾。
+    let (recent, mut log, pump_failure) = match pump.await {
+        Ok(outcome) => (outcome.recent, outcome.log, None),
+        // 会话日志在汇流任务手里，随它一起没了，无从收尾。
+        Err(err) => (VecDeque::new(), None, Some(LaunchError::Join(err))),
+    };
+    if matches!(drain, Ok(false)) {
+        // 等待失败时不知道游戏退没退，不说「已退出」。
+        let lead = if exited.status.is_ok() {
+            "游戏已退出，但"
+        } else {
+            ""
+        };
+        let text = format!(
+            "{lead}输出管道在 {} 秒内没有关闭（多半是游戏拉起的进程还开着它），之后的输出不再记录",
+            drain_deadline.as_secs()
+        );
+        tracing::warn!("{text}");
+        if let Some(writer) = log.as_mut()
+            && let Err(err) = writer
+                .write(
+                    clock.now(),
+                    LogSource::Launcher,
+                    Some(LauncherLevel::Warn),
+                    &text,
+                )
+                .await
+        {
+            tracing::warn!(error = %err, "会话日志写入失败，本次会话停止写日志");
+            log = None;
+        }
+    }
+    let Exited {
+        status,
+        terminated_by_launcher,
+    } = exited;
+    let report = ExitReport {
+        code: status.as_ref().ok().and_then(ExitStatus::code),
+        success: status.as_ref().is_ok_and(ExitStatus::success),
+        recent_lines: recent.into_iter().collect(),
+        terminated_by_launcher,
+    };
+    // 等待本身的失败排第一：退出码因它而缺失，是这次收尾不正常的根由；后台任务的异常排在其后。
+    let mut failures = status
+        .err()
+        .map(LaunchError::Wait)
+        .into_iter()
+        .chain(drain.err())
+        .chain(pump_failure);
+    let Some(failure) = failures.next() else {
+        return Ok(SessionEnd { report, log });
+    };
+    for other in failures {
+        tracing::error!(error = %error_chain(&other), "游戏会话收尾时另有失败");
+    }
+    if let Some(log) = log {
+        settle_log_after_failure(log, clock.now(), &failure, &report).await;
+    }
+    Err(failure)
+}
+
+/// 收尾不正常时调用方拿不到会话日志，没人会再替它写结局：在这里写下原因与结局并落盘。结局与正常
+/// 收尾时的判法一致：玩家结束的算结束，拿不到退出码按崩溃判定的规则算异常结束。
+async fn settle_log_after_failure(
+    mut log: SessionLog,
+    at: u64,
+    failure: &LaunchError,
+    report: &ExitReport,
+) {
+    let code = report
+        .code
+        .map_or_else(|| "未知".to_owned(), |code| code.to_string());
+    let text = format!("{}（退出码 {code}）", error_chain(failure));
+    let outcome = if report.terminated_by_launcher {
+        SessionOutcome::Killed
+    } else if detect_crash(report) {
+        SessionOutcome::Crashed
+    } else {
+        SessionOutcome::Exited
+    };
+    let settled = async move {
+        log.write(at, LogSource::Launcher, Some(LauncherLevel::Error), &text)
+            .await?;
+        log.finish(at, outcome).await
+    }
+    .await;
+    if let Err(err) = settled {
+        tracing::warn!(error = %err, "会话日志收尾失败，这份日志缺少结局");
+    }
+}
+
+/// 错误连同原因链拼成一行，写进会话日志给人看。
+fn error_chain(err: &LaunchError) -> String {
+    std::iter::successors(Some(err as &dyn std::error::Error), |e| e.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("：")
+}
+
+/// 等读取任务读完各自的流，最多等 `deadline`；超时或有一个异常结束时，其余没读完的都结束掉，不留在
+/// 后台占着管道。读取任务结束时放掉各自的发送端，汇流任务随之收尾。返回是否在时限内读完。
+async fn drain_readers(readers: Vec<JoinHandle<()>>, deadline: Duration) -> Result<bool> {
+    // 收回结果的读取任务立即移出：JoinHandle 交出结果之后再 await 会 panic。
+    let mut pending = VecDeque::from(readers);
+    let finished = tokio::time::timeout(deadline, async {
+        while let Some(reader) = pending.front_mut() {
+            let joined = reader.await;
+            pending.pop_front();
+            joined.map_err(LaunchError::Join)?;
         }
         Ok::<(), LaunchError>(())
     })
     .await;
-    match finished {
-        Ok(result) => result.map(|()| true),
-        Err(_elapsed) => {
-            for reader in &readers {
-                reader.abort();
-            }
-            for reader in readers {
-                match reader.await {
-                    Ok(()) => {}
-                    Err(err) if err.is_cancelled() => {}
-                    Err(err) => return Err(LaunchError::Join(err)),
-                }
-            }
-            Ok(false)
+    let mut result = match finished {
+        Ok(Ok(())) => return Ok(true),
+        Ok(Err(err)) => Err(err),
+        Err(_elapsed) => Ok(false),
+    };
+    for reader in &pending {
+        reader.abort();
+    }
+    for reader in pending {
+        match reader.await {
+            Ok(()) => {}
+            Err(err) if err.is_cancelled() => {}
+            Err(err) if result.is_ok() => result = Err(LaunchError::Join(err)),
+            Err(err) => tracing::error!(error = %err, "游戏输出读取任务异常结束"),
         }
     }
+    result
 }
 
 /// 发出结束信号。进程恰好已经自己退出时，系统会拒绝结束一个已退出的进程，这不是失败。
@@ -285,6 +394,7 @@ pub fn detect_crash(report: &ExitReport) -> bool {
 
 /// 逐行读一条输出流。按字节读、有损解码：JVM 的本地层（如致命错误头）按系统代码页输出，
 /// 一个非 UTF-8 字节就会让按字符串读的读取端报错退出，从此没人读这条管道，游戏随之卡死。
+/// 单行超过 [`MAX_LINE_BYTES`] 的部分边读边丢，读取照常往下走。
 fn spawn_reader<R>(
     reader: R,
     stream: LogStream,
@@ -296,33 +406,155 @@ where
 {
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
-        let mut buf = Vec::new();
+        let mut lines = LineSplitter::new();
+        let mut emit = |text: String| {
+            let line = LogLine {
+                at: clock.now(),
+                stream,
+                text,
+            };
+            // 汇流任务只会在两个读取端都结束后才退出，这里发送失败说明它异常死掉了；
+            // 继续读空管道，至少别让游戏卡住。
+            if tx.send(line).is_err() {
+                tracing::warn!(?stream, "游戏输出汇流任务已退出，丢弃后续输出");
+            }
+        };
         loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                        buf.pop();
-                    }
-                    let line = LogLine {
-                        at: clock.now(),
-                        stream,
-                        text: String::from_utf8_lossy(&buf).into_owned(),
-                    };
-                    // 汇流任务只会在两个读取端都结束后才退出，这里发送失败说明它异常死掉了；
-                    // 继续读空管道，至少别让游戏卡住。
-                    if tx.send(line).is_err() {
-                        tracing::warn!(?stream, "游戏输出汇流任务已退出，丢弃后续输出");
-                    }
-                }
+            let chunk = match reader.fill_buf().await {
+                Ok(chunk) => chunk,
                 Err(err) => {
                     tracing::warn!(error = %err, ?stream, "读取游戏输出失败，停止读取这条流");
                     break;
                 }
+            };
+            if chunk.is_empty() {
+                break;
             }
+            let consumed = chunk.len();
+            lines.feed(chunk, &mut emit);
+            reader.consume(consumed);
+        }
+        // 流尾没有换行的最后一段（以及读取出错前已经读到的半行）也是真实输出。
+        if let Some(text) = lines.take_pending() {
+            emit(text);
         }
     })
+}
+
+/// 把字节流切成行：去掉行尾的 `\r`，单行只留前 [`MAX_LINE_BYTES`] 字节，其余的只计数。
+struct LineSplitter {
+    /// 当前行已留下的字节。容量一次给足上限且从不越过，长行不会让它增长。
+    kept: Vec<u8>,
+    /// 当前行超出上限、没有留下的字节数。
+    dropped: u64,
+    /// 当前行末尾连续的 `\r` 个数（不论落在留下的还是丢掉的部分），行结束时它们不算正文。
+    trailing_cr: u64,
+    /// 当前行是否已经读到过字节；区分「空行」与「什么都没读到」。
+    pending: bool,
+}
+
+impl LineSplitter {
+    fn new() -> Self {
+        Self {
+            kept: Vec::with_capacity(MAX_LINE_BYTES),
+            dropped: 0,
+            trailing_cr: 0,
+            pending: false,
+        }
+    }
+
+    /// 喂一段字节；这段里每结束一行就交给 `emit` 一次。
+    fn feed(&mut self, mut chunk: &[u8], emit: &mut impl FnMut(String)) {
+        while let Some(newline) = chunk.iter().position(|&b| b == b'\n') {
+            self.push(&chunk[..newline]);
+            emit(self.finish_line());
+            chunk = &chunk[newline + 1..];
+        }
+        self.push(chunk);
+    }
+
+    /// 流结束时还没收尾的半行。
+    fn take_pending(&mut self) -> Option<String> {
+        self.pending.then(|| self.finish_line())
+    }
+
+    fn push(&mut self, segment: &[u8]) {
+        if segment.is_empty() {
+            return;
+        }
+        self.pending = true;
+        let crs = segment.iter().rev().take_while(|&&b| b == b'\r').count() as u64;
+        self.trailing_cr = if crs == segment.len() as u64 {
+            self.trailing_cr + crs
+        } else {
+            crs
+        };
+        if self.dropped > 0 {
+            self.dropped += segment.len() as u64;
+            return;
+        }
+        let room = MAX_LINE_BYTES - self.kept.len();
+        let (keep, rest) = segment.split_at(room.min(segment.len()));
+        self.kept.extend_from_slice(keep);
+        if let Some(&first_dropped) = rest.first() {
+            // 上限正好切在一个 UTF-8 字符中间时退到这个字符之前，免得留下的部分以替换符收尾；
+            // 被退掉的字节一并算进丢弃数。不是合法 UTF-8 的（如按系统代码页输出的）不退。
+            let mut cut = self.kept.len();
+            let tail_start = cut.saturating_sub(3);
+            if is_utf8_continuation(first_dropped)
+                && let Some(lead) = self.kept[tail_start..]
+                    .iter()
+                    .rposition(|&b| !is_utf8_continuation(b))
+                    .map(|offset| tail_start + offset)
+                && utf8_width(self.kept[lead]).is_some_and(|width| lead + width > cut)
+            {
+                cut = lead;
+            }
+            self.dropped = (self.kept.len() - cut + rest.len()) as u64;
+            self.kept.truncate(cut);
+        }
+    }
+
+    fn finish_line(&mut self) -> String {
+        // 行尾的 `\r` 全落在丢掉的部分里时，丢掉的其实只是换行符，这一行并没有超长。
+        let dropped = self.dropped.saturating_sub(self.trailing_cr);
+        if dropped == 0 {
+            let in_kept = usize::try_from(self.trailing_cr - self.dropped)
+                .expect("留下的 \\r 不超过留下的字节数");
+            self.kept.truncate(self.kept.len() - in_kept);
+        }
+        let mut text = String::from_utf8_lossy(&self.kept).into_owned();
+        if dropped > 0 {
+            text.push_str(&truncation_note(dropped));
+        }
+        self.kept.clear();
+        self.dropped = 0;
+        self.trailing_cr = 0;
+        self.pending = false;
+        text
+    }
+}
+
+fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+/// 以 `lead` 开头的 UTF-8 多字节字符占几个字节；不是多字节字符的首字节时为 `None`。
+fn utf8_width(lead: u8) -> Option<usize> {
+    match lead {
+        0xC2..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF4 => Some(4),
+        _ => None,
+    }
+}
+
+/// 超长行末尾的说明。会话日志、崩溃判定缓存与界面拿到的都是同一行文本，说明随行走，三处一致。
+fn truncation_note(dropped: u64) -> String {
+    format!(
+        "…（这一行超过 {} KB，其余 {dropped} 字节没有记录）",
+        MAX_LINE_BYTES / 1024
+    )
 }
 
 struct PumpOutcome {
@@ -494,6 +726,463 @@ mod tests {
         assert_eq!(all, (0..total as u64).collect::<Vec<_>>());
     }
 
+    /// Mod 打印几 MB 不带换行的转储：这一行只留前 64 KB 并注明丢掉的字节数，后面的行照常读到。
+    #[tokio::test]
+    async fn overlong_line_is_capped_and_the_next_line_survives() {
+        const LONG: usize = 5 * 1024 * 1024;
+        let mut data = vec![b'x'; LONG];
+        data.extend_from_slice(b"\r\nAFTER_LONG_LINE\r\n");
+        let clock = SessionClock::start().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_reader(std::io::Cursor::new(data), LogStream::Stdout, clock, tx)
+            .await
+            .unwrap();
+        let mut lines = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line.text);
+        }
+        assert_eq!(lines.len(), 2);
+        let note = "…（这一行超过 64 KB，其余 5177344 字节没有记录）";
+        // 先比长度：修复前这一行有 5 MB，直接比内容会把整行打进失败信息。
+        assert_eq!(lines[0].len(), 64 * 1024 + note.len());
+        let (kept, tail) = lines[0].split_at(64 * 1024);
+        assert!(kept.bytes().all(|b| b == b'x'));
+        assert_eq!(tail, note);
+        assert_eq!(lines[1], "AFTER_LONG_LINE");
+    }
+
+    fn split_all(chunks: &[&[u8]]) -> (Vec<String>, LineSplitter) {
+        let mut splitter = LineSplitter::new();
+        let mut out = Vec::new();
+        for chunk in chunks {
+            splitter.feed(chunk, &mut |text| out.push(text));
+        }
+        if let Some(text) = splitter.take_pending() {
+            out.push(text);
+        }
+        (out, splitter)
+    }
+
+    /// `len` 个 `fill` 接上 `tail`，整串一次喂进去。
+    fn split(fill: u8, len: usize, tail: &[u8]) -> Vec<String> {
+        let mut bytes = vec![fill; len];
+        bytes.extend_from_slice(tail);
+        split_all(&[bytes.as_slice()]).0
+    }
+
+    #[test]
+    fn splitter_cuts_exactly_at_the_cap() {
+        let max = MAX_LINE_BYTES;
+        let a = |len| "a".repeat(len);
+        // 正好上限：整行留下，不加说明。
+        assert_eq!(split(b'a', max, b"\n"), [a(max)]);
+        // 多 1 字节：丢 1 字节。
+        assert_eq!(split(b'a', max + 1, b"\n"), [a(max) + &truncation_note(1)]);
+        // 越过上限的只有行尾的 \r：那是换行符，不算超长。
+        assert_eq!(split(b'a', max, b"\r\n"), [a(max)]);
+        assert_eq!(split(b'a', max, b"\r\r\n"), [a(max)]);
+        // 行尾的 \r 跨在上限两侧：留下的那个也去掉。
+        assert_eq!(split(b'a', max - 1, b"\r\r\r\n"), [a(max - 1)]);
+        // 行中的 \r 是正文；空行照样是一行；流尾没有换行的半行也交出。
+        assert_eq!(split(b'a', 1, b"\rb\n\n\r\nlast"), ["a\rb", "", "", "last"]);
+        assert!(split(b'a', 0, b"").is_empty());
+        assert_eq!(split(b'a', 0, b"\r"), [""]);
+    }
+
+    #[test]
+    fn splitter_does_not_cut_a_utf8_char_in_half() {
+        let max = MAX_LINE_BYTES;
+        // 「中」从上限前 1 字节开始：整个字退到截断处之后，丢弃数是「中文」的 6 个字节。
+        assert_eq!(
+            split(b'a', max - 1, "中文\n".as_bytes()),
+            ["a".repeat(max - 1) + &truncation_note(6)]
+        );
+        // 字正好在上限处收尾：一个字节都不多退。
+        assert_eq!(
+            split(b'a', max - 3, "中文\n".as_bytes()),
+            ["a".repeat(max - 3) + "中" + &truncation_note(3)]
+        );
+        // 按系统代码页输出的 GBK 字节不是 UTF-8，不退，照常有损解码。
+        assert_eq!(
+            split(b'a', max - 1, b"\xd6\xd0\n"),
+            ["a".repeat(max - 1) + "\u{FFFD}" + &truncation_note(1)]
+        );
+    }
+
+    #[test]
+    fn splitter_holds_at_most_the_cap_while_a_long_line_streams() {
+        let mut splitter = LineSplitter::new();
+        let capacity = splitter.kept.capacity();
+        let mut out = Vec::new();
+        let block = vec![b'z'; 8 * 1024];
+        // 5 MB 分成 8 KB 一块送进来，和读取端从管道里拿到的形状一样。
+        for _ in 0..640 {
+            splitter.feed(&block, &mut |text| out.push(text));
+        }
+        assert!(out.is_empty(), "还没读到换行，不该交出行");
+        assert_eq!(splitter.kept.len(), MAX_LINE_BYTES);
+        assert_eq!(splitter.kept.capacity(), capacity, "长行不应让缓冲增长");
+        assert_eq!(splitter.dropped, (640 * 8 * 1024 - MAX_LINE_BYTES) as u64);
+        splitter.feed(b"\nnext\n", &mut |text| out.push(text));
+        assert_eq!(out.len(), 2);
+        assert!(out[0].ends_with(&truncation_note((640 * 8 * 1024 - MAX_LINE_BYTES) as u64)));
+        assert_eq!(out[1], "next");
+        assert!(splitter.kept.is_empty() && splitter.dropped == 0);
+    }
+
+    /// 与分块无关：同一串字节无论怎么切成块喂进去，切出的行都与按整行算出的结果相同。
+    #[test]
+    fn splitter_output_does_not_depend_on_chunk_boundaries() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+            | 1;
+        let mut state = seed;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        let max = MAX_LINE_BYTES;
+        let mut stream = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..40 {
+            // 长度集中在上限附近，夹带多字节字符与行尾 \r。
+            let len = match next(4) {
+                0 => next(64),
+                1 => max - 4 + next(8),
+                2 => max + next(3 * max),
+                _ => next(max),
+            };
+            let mut line: Vec<u8> = Vec::with_capacity(len + 8);
+            while line.len() < len {
+                if next(10) == 0 {
+                    line.extend_from_slice("樱".as_bytes());
+                } else {
+                    line.push(b'a' + next(26) as u8);
+                }
+            }
+            let crs = next(3);
+            let body_len = line.len();
+            line.extend(std::iter::repeat_n(b'\r', crs));
+            expected.push(reference_line(&line[..body_len]));
+            stream.extend_from_slice(&line);
+            stream.push(b'\n');
+        }
+        let mut chunks = Vec::new();
+        let mut rest = stream.as_slice();
+        while !rest.is_empty() {
+            let take = (1 + next(20_000)).min(rest.len());
+            let (head, tail) = rest.split_at(take);
+            chunks.push(head);
+            rest = tail;
+        }
+        let (lines, _) = split_all(&chunks);
+        assert_eq!(lines.len(), expected.len(), "seed {seed}");
+        for (index, (got, want)) in lines.iter().zip(&expected).enumerate() {
+            assert!(got == want, "seed {seed}：第 {index} 行不一致");
+        }
+    }
+
+    /// 按整行直接算（测试数据都是合法 UTF-8）：留到上限以内最后一个字符边界，其余计入说明。
+    fn reference_line(body: &[u8]) -> String {
+        let text = std::str::from_utf8(body).unwrap();
+        if text.len() <= MAX_LINE_BYTES {
+            return text.to_owned();
+        }
+        let cut = text.floor_char_boundary(MAX_LINE_BYTES);
+        format!(
+            "{}{}",
+            &text[..cut],
+            truncation_note((text.len() - cut) as u64)
+        )
+    }
+
+    /// 会话日志、崩溃判定缓存与推给界面的批次拿到的是同一行截断后的文本。
+    #[tokio::test]
+    async fn capped_line_reads_the_same_in_log_recent_and_forward() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(tmp.path(), "t", clock.started_at())
+            .await
+            .unwrap();
+        let mut data = vec![b'q'; MAX_LINE_BYTES * 3];
+        data.extend_from_slice(b"\nTAIL\n");
+        let (line_tx, line_rx) = mpsc::unbounded_channel();
+        let (fwd_tx, mut fwd_rx) = mpsc::unbounded_channel();
+        let reader = spawn_reader(
+            std::io::Cursor::new(data),
+            LogStream::Stdout,
+            clock,
+            line_tx,
+        );
+        let outcome = pump(line_rx, Some(log), Some(fwd_tx)).await;
+        reader.await.unwrap();
+
+        let expected = "q".repeat(MAX_LINE_BYTES) + &truncation_note((MAX_LINE_BYTES * 2) as u64);
+        let mut forwarded = Vec::new();
+        while let Ok(batch) = fwd_rx.try_recv() {
+            forwarded.extend(batch.into_iter().map(|line| line.text));
+        }
+        assert_eq!(forwarded, [expected.clone(), "TAIL".to_owned()]);
+        let recent: Vec<&str> = outcome.recent.iter().map(String::as_str).collect();
+        assert_eq!(recent, [expected.as_str(), "TAIL"]);
+        let path = outcome
+            .log
+            .unwrap()
+            .finish(clock.now(), SessionOutcome::Exited)
+            .await
+            .unwrap();
+        let tail = crate::logfile::read_log_tail(&path, 1 << 20, 10)
+            .await
+            .unwrap();
+        let logged: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(logged, [expected.as_str(), "TAIL"]);
+    }
+
+    /// 一局会话的输出端：stdout 读一段内存里的字节，stderr 立即读完，会话日志写进临时目录。
+    struct Output {
+        _tmp: tempfile::TempDir,
+        dir: std::path::PathBuf,
+        clock: SessionClock,
+        readers: Vec<JoinHandle<()>>,
+        pump: JoinHandle<PumpOutcome>,
+    }
+
+    async fn output(stdout: &'static [u8]) -> Output {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(&dir, "t", clock.started_at())
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let readers = vec![
+            spawn_reader(stdout, LogStream::Stdout, clock, tx.clone()),
+            spawn_reader(&b""[..], LogStream::Stderr, clock, tx),
+        ];
+        let pump_task = tokio::spawn(pump(rx, Some(log), None));
+        Output {
+            _tmp: tmp,
+            dir,
+            clock,
+            readers,
+            pump: pump_task,
+        }
+    }
+
+    type Logged = (LogSource, Option<LauncherLevel>, String);
+
+    async fn read_back(dir: &Path) -> (Vec<Logged>, Option<SessionOutcome>) {
+        let tail =
+            crate::logfile::read_log_tail(&dir.join(crate::logfile::LATEST_LOG), 1 << 20, 100)
+                .await
+                .unwrap();
+        let lines = tail
+            .entries
+            .into_iter()
+            .map(|e| (e.source, e.level, e.text))
+            .collect();
+        (lines, tail.ended.map(|ended| ended.outcome))
+    }
+
+    fn clean_exit() -> ExitStatus {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(0)
+    }
+
+    fn game(text: &str) -> Logged {
+        (LogSource::Game, None, text.to_owned())
+    }
+
+    fn launcher_error(text: &str) -> Logged {
+        (
+            LogSource::Launcher,
+            Some(LauncherLevel::Error),
+            text.to_owned(),
+        )
+    }
+
+    /// 正常退出：日志保持打开交还调用方，读到的行都在报告里。
+    #[tokio::test]
+    async fn conclude_hands_back_the_open_log_on_a_clean_exit() {
+        let out = output(b"LINE_ONE\nLINE_TWO\n").await;
+        let exited = Exited {
+            status: Ok(clean_exit()),
+            terminated_by_launcher: false,
+        };
+        let end = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(end.report.code, Some(0));
+        assert!(end.report.success);
+        assert_eq!(end.report.recent_lines, ["LINE_ONE", "LINE_TWO"]);
+        let log = end.log.expect("日志应保持打开交还调用方");
+        assert_eq!(log.lines(), 2);
+        // 结局由调用方写：此时文件里还没有结局行。
+        drop(log);
+        assert_eq!(read_back(&out.dir).await.1, None);
+    }
+
+    /// 等待进程本身失败：照样读完输出、写下原因与结局并落盘，再把等待的错误报上去。
+    #[tokio::test]
+    async fn wait_failure_still_settles_the_session_log() {
+        let out = output(b"LINE_ONE\nLINE_TWO\n").await;
+        let exited = Exited {
+            status: Err(std::io::Error::other("句柄已失效")),
+            terminated_by_launcher: false,
+        };
+        let err = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await
+        .err()
+        .expect("等待失败应报错");
+        let LaunchError::Wait(source) = &err else {
+            panic!("应报等待失败：{err:?}");
+        };
+        assert_eq!(source.to_string(), "句柄已失效");
+        let (lines, ended) = read_back(&out.dir).await;
+        assert_eq!(
+            lines,
+            [
+                game("LINE_ONE"),
+                game("LINE_TWO"),
+                launcher_error("等待游戏进程结束失败：句柄已失效（退出码 未知）"),
+            ]
+        );
+        // 拿不到退出码按异常结束记，与崩溃判定的规则一致。
+        assert_eq!(ended, Some(SessionOutcome::Crashed));
+    }
+
+    /// 玩家点过结束之后等待失败：结局记为玩家结束，不是崩溃。
+    #[tokio::test]
+    async fn wait_failure_after_a_kill_request_ends_as_killed() {
+        let out = output(b"").await;
+        let exited = Exited {
+            status: Err(std::io::Error::other("句柄已失效")),
+            terminated_by_launcher: true,
+        };
+        let err = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await
+        .err()
+        .expect("等待失败应报错");
+        assert!(matches!(err, LaunchError::Wait(_)), "{err:?}");
+        let (lines, ended) = read_back(&out.dir).await;
+        assert_eq!(
+            lines,
+            [launcher_error(
+                "等待游戏进程结束失败：句柄已失效（退出码 未知）"
+            )]
+        );
+        assert_eq!(ended, Some(SessionOutcome::Killed));
+    }
+
+    /// 读取任务异常结束：退出码照样记下，日志写下原因与结局，再报出异常。
+    #[tokio::test]
+    async fn crashed_reader_still_settles_the_session_log() {
+        let out = output(b"LINE\n").await;
+        let mut readers = out.readers;
+        let crashed: JoinHandle<()> = tokio::spawn(async { panic!("模拟读取任务崩溃") });
+        readers.push(crashed);
+        let exited = Exited {
+            status: Ok(clean_exit()),
+            terminated_by_launcher: false,
+        };
+        let err = conclude(exited, out.clock, readers, out.pump, Duration::from_secs(5))
+            .await
+            .err()
+            .expect("读取任务异常结束应报错");
+        assert!(
+            matches!(&err, LaunchError::Join(join) if join.is_panic()),
+            "{err:?}"
+        );
+        let (lines, ended) = read_back(&out.dir).await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], game("LINE"));
+        let (source, level, text) = &lines[1];
+        assert_eq!(
+            (*source, *level),
+            (LogSource::Launcher, Some(LauncherLevel::Error))
+        );
+        assert!(text.starts_with("游戏会话的后台任务异常结束："), "{text}");
+        assert!(text.contains("模拟读取任务崩溃"), "{text}");
+        assert!(text.ends_with("（退出码 0）"), "{text}");
+        // 游戏自己是正常退出的。
+        assert_eq!(ended, Some(SessionOutcome::Exited));
+    }
+
+    /// 一条流先读完、另一条被别的进程开着：限时到了只结束没读完的那个，已经收回的不再去等。
+    #[tokio::test]
+    async fn drain_deadline_with_one_stream_already_closed() {
+        let held = std::sync::Arc::new(());
+        let witness = held.clone();
+        let readers = vec![
+            tokio::spawn(async {}),
+            tokio::spawn(async move {
+                let _held = witness;
+                std::future::pending::<()>().await;
+            }),
+        ];
+        let drained = drain_readers(readers, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert!(!drained);
+        assert_eq!(
+            std::sync::Arc::strong_count(&held),
+            1,
+            "没读完的读取任务应已结束"
+        );
+    }
+
+    /// 一个读取任务异常结束：报出异常，另一个不留在后台继续占着管道。
+    #[tokio::test]
+    async fn drain_reports_a_crashed_reader_and_stops_the_rest() {
+        let held = std::sync::Arc::new(());
+        let witness = held.clone();
+        let crashed: JoinHandle<()> = tokio::spawn(async { panic!("模拟读取任务崩溃") });
+        let readers = vec![
+            crashed,
+            tokio::spawn(async move {
+                let _held = witness;
+                std::future::pending::<()>().await;
+            }),
+        ];
+        let err = drain_readers(readers, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, LaunchError::Join(join) if join.is_panic()),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::sync::Arc::strong_count(&held),
+            1,
+            "其余读取任务应已结束"
+        );
+    }
+
     #[cfg(windows)]
     fn command(program: &str, args: &[&str]) -> LaunchCommand {
         LaunchCommand {
@@ -547,7 +1236,7 @@ mod tests {
         let log = end.log.expect("日志应保持打开交还调用方");
         assert_eq!(log.lines(), 1);
         let path = log
-            .finish(clock.now(), crate::logfile::SessionOutcome::Crashed)
+            .finish(clock.now(), SessionOutcome::Crashed)
             .await
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();
@@ -622,7 +1311,7 @@ mod tests {
         );
         let log = end.log.expect("日志应保持打开交还调用方");
         let path = log
-            .finish(clock.now(), crate::logfile::SessionOutcome::Exited)
+            .finish(clock.now(), SessionOutcome::Exited)
             .await
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();
