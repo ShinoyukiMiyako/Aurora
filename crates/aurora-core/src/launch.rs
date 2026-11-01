@@ -2673,8 +2673,11 @@ mod tests {
 
         let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
         assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
-        let lines: Vec<(Option<LauncherLevel>, &str)> =
-            log.lines.iter().map(|l| (l.level, l.text.as_str())).collect();
+        let lines: Vec<(Option<LauncherLevel>, &str)> = log
+            .lines
+            .iter()
+            .map(|l| (l.level, l.text.as_str()))
+            .collect();
         assert!(
             lines.contains(&(Some(LauncherLevel::Info), LaunchStage::SpawnProcess.label())),
             "{lines:?}"
