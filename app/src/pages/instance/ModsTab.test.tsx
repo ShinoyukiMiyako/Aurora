@@ -316,6 +316,54 @@ describe("安装时间与新增标注", () => {
     const ICON_BUTTON = 30;
     expect(Number(px[1]) - 2 * CELL_PADDING).toBeGreaterThanOrEqual(UPDATE_BUTTON + ICON_BUTTON + ICON_BUTTON + 2 * GAP);
   });
+
+  // 排序时表头里排着文字、间距 4 与排序图标，外加单元格左右各 12。中文落到雅黑上 1em，拉丁字母都比 1em 窄，一律按 1em 算。
+  // 每列再余 2：非整数缩放下列宽、内边距与字宽各自取整，贴边的列能否放下全看取整方向
+  it("任何一列排序时，三档的表头都放得下文字、间距与排序图标，不被省略", async () => {
+    await open();
+    const FONT_PX = 12;
+    const CELL_PADDING = 12;
+    const GAP = 4;
+    const MIN_SLACK = 2;
+    const TIERS = [
+      ["compact", "hideCompact"],
+      ["regular", "hideRegular"],
+      ["wide", "hideWide"],
+    ] as const;
+    const allHeaders = () => [...grid().querySelectorAll<HTMLElement>('[role="columnheader"]')];
+    const sortable = allHeaders().filter((h) => h.hasAttribute("aria-sort"));
+    expect(sortable.map(textOf)).toEqual(["Mod", "来源", "安装时间", "启用"]);
+
+    const slacks: Record<string, number> = {};
+    for (const label of sortable.map(textOf)) {
+      const headerOf = () => {
+        const found = allHeaders().find((h) => h.textContent === label);
+        if (found === undefined) throw new Error(`找不到表头 ${label}`);
+        return found;
+      };
+      const sortButton = headerOf().querySelector("button");
+      if (sortButton === null) throw new Error(`表头 ${label} 没有排序按钮`);
+      click(sortButton);
+      const icon = headerOf().querySelector("svg");
+      if (icon === null) throw new Error(`表头 ${label} 排序后没有排序图标`);
+      const needed = textOf(headerOf()).length * FONT_PX + GAP + Number(icon.getAttribute("width")) + 2 * CELL_PADDING;
+
+      for (const [tier, hidden] of TIERS) {
+        const headers = allHeaders().filter((h) => h.dataset[hidden] === undefined);
+        const at = headers.indexOf(headerOf());
+        if (at < 0) continue;
+        const template = grid().style.getPropertyValue(`--table-cols-${tier}`).match(/minmax\([^)]*\)|\S+/g);
+        if (template === null) throw new Error(`表格没有 ${tier} 档的列模板`);
+        expect(template).toHaveLength(headers.length);
+        const px = /^(?:minmax\()?(\d+)px/.exec(template[at]);
+        if (px === null) throw new Error(`${label} 列在 ${tier} 档没有确定的下限：${template[at]}`);
+        slacks[`${tier}/${label}`] = Number(px[1]) - needed;
+      }
+    }
+
+    expect(Object.keys(slacks)).toEqual(["compact/Mod", "regular/Mod", "wide/Mod", "regular/来源", "wide/来源", "regular/安装时间", "wide/安装时间", "compact/启用", "regular/启用", "wide/启用"]);
+    expect(Object.entries(slacks).filter(([, slack]) => slack < MIN_SLACK)).toEqual([]);
+  });
 });
 
 describe("批量操作", () => {
