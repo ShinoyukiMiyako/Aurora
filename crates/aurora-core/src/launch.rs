@@ -954,8 +954,7 @@ impl Aurora {
         if self.is_cancelled() {
             return Err(CoreError::from(aurora_download::Error::Cancelled).into());
         }
-        let log = reporter.log.take();
-        let session = spawn_game(&command, reporter.clock, log, game_log)?;
+        let session = spawn_game(&command, reporter.clock, &mut reporter.log, game_log)?;
         let pid = session.id();
         let _ = reporter
             .events
@@ -1633,7 +1632,7 @@ async fn quick_play_target(
 fn spawn_game(
     command: &LaunchCommand,
     clock: SessionClock,
-    log: Option<SessionLog>,
+    log: &mut Option<SessionLog>,
     game_log: Option<LogBatchSink>,
 ) -> Result<GameSession, LaunchFailed> {
     aurora_launch::spawn(command, clock, log, game_log).map_err(|err| {
@@ -2648,6 +2647,41 @@ mod tests {
             failure.message,
             "实例指定的 Java 17 无法运行 Minecraft 1.21.1，至少需要 Java 21"
         );
+    }
+
+    /// 进程起不来时会话日志不能跟着丢：写缓冲里攒着这次启动的全部阶段，而日志页正是玩家排查 spawn_failed 的地方。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_failure_keeps_a_finished_session_log() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_version(&mc, 17, true);
+        // 命令行超过 Windows 的长度上限：Java 探测照常通过，到拉起进程这一步才被系统拒绝。
+        aurora_instance::VersionSettingsStore::for_version_dir(
+            &mc.join(VERSIONS_DIR).join(VERSION),
+        )
+        .save(&VersionSettings {
+            jvm_args: format!("-Dpadding={}", "x".repeat(40_000)),
+            ..VersionSettings::default()
+        })
+        .await
+        .unwrap();
+
+        let (result, events) = launch(&fx.aurora, fake_java(&fx.root, 17, 0)).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::SpawnFailed);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6]);
+
+        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
+        let lines: Vec<(Option<LauncherLevel>, &str)> =
+            log.lines.iter().map(|l| (l.level, l.text.as_str())).collect();
+        assert!(
+            lines.contains(&(Some(LauncherLevel::Info), LaunchStage::SpawnProcess.label())),
+            "{lines:?}"
+        );
+        let last = lines.last().expect("日志里应有这次启动的记录");
+        assert_eq!(last.0, Some(LauncherLevel::Error));
+        assert!(last.1.starts_with("启动失败：无法启动 "), "{}", last.1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
