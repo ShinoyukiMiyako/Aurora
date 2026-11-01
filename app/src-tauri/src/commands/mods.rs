@@ -1,5 +1,5 @@
-//! 实例内的 Mod：列表、启停（含批量）、移除、更新检查设置、更新检查、更新日志与更新；下载页的版本列表、
-//! 落位矩阵与安装计划。
+//! 实例内的 Mod：列表、启停（含批量）、添加本地 jar、移除、更新检查设置、更新检查、更新日志与更新；下载页的
+//! 版本列表、落位矩阵与安装计划。
 //!
 //! 改动 mods 目录的命令（启停、移除、更新）在后端再守一道「游戏运行中不许改」：门面在动第一个文件前
 //! 探测占用，命中时这里报 [`MOD_FILE_BUSY`]，前端据此提示先关游戏，而不是把它当成普通 IO 故障。
@@ -8,6 +8,7 @@
 //! 实例名算好路径再写文件、卷宗与历史，同时被改名或删除的话会按旧路径把实例目录重新建出来。
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use aurora_core::modversions::ModVersionList;
 use aurora_core::{
@@ -162,6 +163,61 @@ fn validate_file_names(file_names: &[String]) -> Result<(), CommandError> {
         }
     }
     Ok(())
+}
+
+/// 添加本地 jar 时一个文件的结果；失败项带上与命令错误同形状的 `error`。
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum LocalModResultDto {
+    Ok { source: String, file_name: String },
+    Error { source: String, error: CommandError },
+}
+
+/// 把玩家拖进来的本地 jar 复制进实例的 mods 目录，逐个给出结果（顺序同入参）。单个文件被拒
+/// （`local_mod_refused`，message 可以直接给玩家看）不影响其余；整次调用只在参数不合法、实例被占或实例
+/// 本身解析不了时失败。
+#[tauri::command]
+pub async fn add_local_mods(
+    version_id: String,
+    paths: Vec<String>,
+    facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<Vec<LocalModResultDto>, CommandError> {
+    add_local_mods_with(&facade, &locks, &version_id, &paths).await
+}
+
+pub(crate) async fn add_local_mods_with(
+    facade: &Facade,
+    locks: &InstanceLocks,
+    version_id: &str,
+    paths: &[String],
+) -> Result<Vec<LocalModResultDto>, CommandError> {
+    if paths.is_empty() {
+        return Err(CommandError::invalid_argument("paths 不能为空"));
+    }
+    if paths.iter().any(|path| path.trim().is_empty()) {
+        return Err(CommandError::invalid_argument("paths 里有空路径"));
+    }
+    let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
+    let aurora = facade.snapshot().await;
+    let sources: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+    let outcomes = aurora
+        .add_local_mods(version_id, &sources)
+        .await
+        .map_err(mods_error)?;
+    Ok(outcomes
+        .into_iter()
+        .map(|outcome| {
+            let source = outcome.source.display().to_string();
+            match outcome.result {
+                Ok(file_name) => LocalModResultDto::Ok { source, file_name },
+                Err(err) => LocalModResultDto::Error {
+                    source,
+                    error: mods_error(err),
+                },
+            }
+        })
+        .collect())
 }
 
 /// 设置某个 Mod 的更新检查：`hold` 为 `{ kind: "ignored" }` 或 `{ kind: "pinned", version_id }`，
@@ -1164,6 +1220,89 @@ mod tests {
             Some(UpdateHold::Ignored)
         );
         assert_eq!(locks.activity(VERSION_ID), Some(InstanceActivity::Running));
+    }
+
+    /// 拖进来的 jar 逐项给结果：被拒的那一项带上给玩家看的原因（走专门的错误码，不是一句「文件 IO 失败」），其余照常落盘。
+    #[tokio::test]
+    async fn add_local_mods_reports_each_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        put_jars(&mods_dir, &["taken.jar"]).await;
+        let downloads = tmp.path().join("downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        put_jars(&downloads, &["taken.jar", "fresh.jar"]).await;
+        let taken = downloads.join("taken.jar").display().to_string();
+        let fresh = downloads.join("fresh.jar").display().to_string();
+        let locks = InstanceLocks::default();
+
+        let results =
+            add_local_mods_with(&facade, &locks, VERSION_ID, &[taken.clone(), fresh.clone()])
+                .await
+                .unwrap();
+
+        let reported = serde_json::to_value(&results).unwrap();
+        assert_eq!(reported[0]["status"], json!("error"));
+        assert_eq!(reported[0]["source"], json!(taken));
+        assert_eq!(reported[0]["error"]["code"], json!(code::LOCAL_MOD_REFUSED));
+        assert_eq!(
+            reported[0]["error"]["message"],
+            json!("mods 目录里已有 taken.jar，先移除它再添加")
+        );
+        assert_eq!(reported[1]["status"], json!("ok"));
+        assert_eq!(reported[1]["source"], json!(fresh));
+        assert_eq!(reported[1]["file_name"], json!("fresh.jar"));
+        assert!(mods_dir.join("fresh.jar").exists());
+        assert_eq!(locks.activity(VERSION_ID), None);
+    }
+
+    /// 与其它 Mod 改动一样占住实例：改名进行中整次报 instance_busy，一个文件都不动；游戏运行不挡后端（界面另行禁用）。
+    #[tokio::test]
+    async fn add_local_mods_holds_the_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        let downloads = tmp.path().join("downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        put_jars(&downloads, &["a.jar"]).await;
+        let batch = [downloads.join("a.jar").display().to_string()];
+        let locks = InstanceLocks::default();
+
+        let renaming = locks
+            .acquire(VERSION_ID, InstanceActivity::Renaming)
+            .unwrap();
+        let err = add_local_mods_with(&facade, &locks, VERSION_ID, &batch)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], json!("renaming"));
+        assert!(!mods_dir.join("a.jar").exists());
+        drop(renaming);
+
+        add_local_mods_with(&facade, &locks, VERSION_ID, &batch)
+            .await
+            .unwrap();
+        assert!(mods_dir.join("a.jar").exists());
+    }
+
+    /// 入参不合法时在占锁之前拒绝：改名进行中也报参数错误而不是 instance_busy。
+    #[tokio::test]
+    async fn add_local_mods_rejects_bad_arguments_before_taking_the_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, _) = facade_with_instance(tmp.path()).await;
+        let locks = InstanceLocks::default();
+        let _renaming = locks
+            .acquire(VERSION_ID, InstanceActivity::Renaming)
+            .unwrap();
+
+        for (paths, message) in [
+            (names(&[]), "paths 不能为空"),
+            (names(&["D:\\a.jar", "  "]), "paths 里有空路径"),
+        ] {
+            let err = add_local_mods_with(&facade, &locks, VERSION_ID, &paths)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "{paths:?}");
+            assert_eq!(err.message, message);
+        }
     }
 
     /// 批量入参不合法时以 invalid_argument 拒绝，且在占锁之前：改名进行中也报参数错误而不是 instance_busy。
