@@ -59,7 +59,7 @@ describe("更新卡各阶段", () => {
   });
 
   it("检查失败是网络层的：主句按种类写中文说明，英文原文放进可选中的次句，按钮仍是重试", () => {
-    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    const raw = "error sending request for url (https://petalfall.org/updates/latest.json)";
     const connect = updateCardView(state({ kind: "check_failed", message: raw, network: "connect" }), CTX);
     expect([connect.title, connect.sub, connect.subIsError, connect.button.label, connect.button.action]).toEqual(["连不上更新服务器", raw, true, "重试", "check"]);
     const timeout = updateCardView(state({ kind: "check_failed", message: raw, network: "timeout" }), CTX);
@@ -67,7 +67,7 @@ describe("更新卡各阶段", () => {
   });
 
   it("更新域名 TLS 不通时后端标 connect：主句全是中文，也不把原因说成用户的网络", () => {
-    const { title } = updateCardView(state({ kind: "check_failed", message: "检查更新失败：error sending request", network: "connect" }), CTX);
+    const { title } = updateCardView(state({ kind: "check_failed", message: "error sending request", network: "connect" }), CTX);
     expect(title).not.toMatch(/[A-Za-z]/);
     expect(title).not.toContain("网络");
   });

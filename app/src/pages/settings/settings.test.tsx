@@ -1188,7 +1188,7 @@ describe("设置页：关于与启动器更新", () => {
   });
 
   it("检查失败是网络层的：主句写中文说明，英文原文放进可选中的细节", async () => {
-    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    const raw = "error sending request for url (https://petalfall.org/updates/latest.json)";
     ipc.overrides.set("check_update", () => {
       throw new IpcError("update_check_failed", raw, { network: "connect", causes: ["client error (Connect)"] });
     });

@@ -591,6 +591,7 @@ fn per_second(bytes: u64, elapsed: Duration) -> u64 {
 }
 
 /// 插件错误转命令错误。签名相关的失败无论出现在哪一步都单独成码：前端要明确告诉用户包被拒了。
+/// `message` 只放原因：是哪个动作失败由界面的主句或通知标题说，这里再带上就重复了；`action` 只进日志。
 fn updater_error(
     fallback: &'static str,
     action: &str,
@@ -604,7 +605,7 @@ fn updater_error(
         }
         _ => fallback,
     };
-    let message = format!("{action}：{err}");
+    let message = err.to_string();
     let causes = source_chain(&err);
     let mut detail = Map::new();
     if let Some(endpoints) = endpoints {
@@ -622,7 +623,7 @@ fn updater_error(
     if !causes.is_empty() {
         detail.insert("causes".to_owned(), json!(causes));
     }
-    tracing::warn!(code, %message, ?causes, "更新命令失败");
+    tracing::warn!(code, action, %message, ?causes, "更新命令失败");
     CommandError {
         code,
         message,
@@ -871,7 +872,10 @@ mod tests {
             tauri_plugin_updater::Error::SignatureUtf8("bad".into()),
         );
         assert_eq!(err.code, code::UPDATE_SIGNATURE_INVALID);
-        assert!(err.message.starts_with("下载更新失败："));
+        assert_eq!(
+            err.message,
+            tauri_plugin_updater::Error::SignatureUtf8("bad".into()).to_string()
+        );
 
         let endpoints = vec![PRIMARY_ENDPOINT.to_owned()];
         let err = updater_error(
@@ -882,6 +886,73 @@ mod tests {
         );
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         assert_eq!(err.detail.unwrap()["endpoints"], json!([PRIMARY_ENDPOINT]));
+    }
+
+    /// 界面的主句已经说了是哪个动作失败，message 再带上就成了「检查更新失败 / 检查更新失败：...」。
+    #[test]
+    fn message_is_the_cause_without_the_action() {
+        let actions = [
+            (code::UPDATE_CHECK_FAILED, "检查更新失败"),
+            (code::UPDATE_DOWNLOAD_FAILED, "下载更新失败"),
+            (code::UPDATE_INSTALL_FAILED, "启动更新安装失败"),
+        ];
+        for (fallback, action) in actions {
+            let err = updater_error(
+                fallback,
+                action,
+                None,
+                tauri_plugin_updater::Error::TargetNotFound("windows-x86_64".into()),
+            );
+            assert_eq!(err.code, fallback);
+            assert_eq!(
+                err.message,
+                "the platform `windows-x86_64` was not found in the response `platforms` object"
+            );
+        }
+    }
+
+    /// 下载时连不上同样标 detail.network，前端据此写中文原因，原文留在 message；
+    /// 下载回了错误状态码时插件报 Network 变体，那是拿到了响应，不算网络层失败。
+    #[tokio::test]
+    async fn download_failures_mark_network_kind_the_same_way() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/Petalfall-setup.exe",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        let refused = aurora_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_err();
+        let raw = refused.to_string();
+
+        let err = updater_error(
+            code::UPDATE_DOWNLOAD_FAILED,
+            "下载更新失败",
+            None,
+            tauri_plugin_updater::Error::Reqwest(refused),
+        );
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(err.message, raw);
+        assert_eq!(err.detail.unwrap()["network"], json!("connect"));
+
+        let err = updater_error(
+            code::UPDATE_DOWNLOAD_FAILED,
+            "下载更新失败",
+            None,
+            tauri_plugin_updater::Error::Network(
+                "Download request failed with status: 503 Service Unavailable".into(),
+            ),
+        );
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(
+            err.message,
+            "`Download request failed with status: 503 Service Unavailable`"
+        );
+        assert_eq!(err.detail, None);
     }
 
     /// 更新源都连不上时插件把最后一个 reqwest 错误包成 `Reqwest` 返回；它是 transparent 变体，
@@ -1090,6 +1161,7 @@ mod tests {
             .send()
             .await
             .unwrap_err();
+        let raw = cut_off.to_string();
 
         let err = updater_error(
             code::UPDATE_CHECK_FAILED,
@@ -1098,7 +1170,7 @@ mod tests {
             tauri_plugin_updater::Error::Reqwest(cut_off),
         );
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
-        assert!(err.message.starts_with("检查更新失败："), "{}", err.message);
+        assert_eq!(err.message, raw);
         assert_eq!(err.detail.unwrap()["network"], json!("connect"));
     }
 }

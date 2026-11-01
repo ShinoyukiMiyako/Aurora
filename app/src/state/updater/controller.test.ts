@@ -74,7 +74,7 @@ describe("UpdaterController", () => {
   });
 
   it("网络层失败：记下 detail.network 的种类，原文照旧留在 message", async () => {
-    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    const raw = "error sending request for url (https://petalfall.org/updates/latest.json)";
     const failWith = (network: string) => async () => Promise.reject(new IpcError("update_check_failed", raw, { endpoints: ["https://petalfall.org/updates/latest.json"], network }));
     const connect = controllerWith(fakePort({ check: failWith("connect") }));
     await connect.check();
