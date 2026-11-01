@@ -309,6 +309,9 @@ fn wait_output_with_timeout(mut cmd: Command, path: &Path, timeout: Duration) ->
 ///
 /// 两路输出各起一个线程读：子进程把任一管道写满就会阻塞，只读一路可能把它卡死。主线程按短间隔
 /// `try_wait`，到点先结束进程、再 `wait` 确认它已退出，才返回超时错误——不留孤儿 JVM。
+///
+/// 进程退出不等于输出读完：它派生的后代（例如 JAVA_TOOL_OPTIONS 挂上的代理拉起的进程）会继承管道，
+/// 握着写端时读线程一直等不到结尾。所以「进程已退出且两路都读完」才算结束，时限对两者一起生效。
 fn collect_output_with_timeout(
     child: &mut Child,
     path: &Path,
@@ -317,19 +320,27 @@ fn collect_output_with_timeout(
     let stdout = spawn_pipe_reader(child.stdout.take(), path)?;
     let stderr = spawn_pipe_reader(child.stderr.take(), path)?;
     let deadline = Instant::now() + timeout;
+    let mut exited = false;
     loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => break,
-            Ok(None) => {}
-            Err(source) => {
-                end_child(child, path);
-                return Err(exec_error(path, source));
+        if !exited {
+            match child.try_wait() {
+                Ok(Some(_status)) => exited = true,
+                Ok(None) => {}
+                Err(source) => {
+                    end_child(child, path);
+                    return Err(exec_error(path, source));
+                }
             }
+        }
+        if exited && stdout.is_finished() && stderr.is_finished() {
+            break;
         }
         let now = Instant::now();
         if now >= deadline {
-            child.kill().map_err(|source| exec_error(path, source))?;
-            child.wait().map_err(|source| exec_error(path, source))?;
+            if !exited {
+                child.kill().map_err(|source| exec_error(path, source))?;
+                child.wait().map_err(|source| exec_error(path, source))?;
+            }
             // 读线程不 join：若子进程派生的进程还握着管道，join 会跟着卡住；进程已结束，它们会自行收尾。
             return Err(Error::JavaProbeTimeout {
                 path: path.to_path_buf(),
@@ -1000,12 +1011,38 @@ mod tests {
 
     /// 被重新拉起时当作挂住的 java。不带环境变量时立即返回，`--include-ignored` 跑全量也不会白等。
     const HANG_HELPER_ENV: &str = "AURORA_JAVA_PROBE_HANG_HELPER";
+    /// 挂住多少秒；不给时 60 秒。留下的后代进程用短一些的值，测试结束后不久就自己退出。
+    const HANG_SECS_ENV: &str = "AURORA_JAVA_PROBE_HANG_SECS";
+    /// 被重新拉起时派生一个挂住的后代进程（继承输出管道）后立即退出。
+    const ORPHAN_HELPER_ENV: &str = "AURORA_JAVA_PROBE_ORPHAN_HELPER";
+    /// 后代进程握着管道的时长：要明显长于超时加余量，修复前测试才会因等它而超时。
+    const ORPHAN_HOLDS_PIPES_SECS: &str = "8";
 
     #[test]
     #[ignore = "只供超时测试重新拉起本测试二进制时运行"]
     fn hung_java_helper() {
         if std::env::var_os(HANG_HELPER_ENV).is_some() {
-            std::thread::sleep(Duration::from_secs(60));
+            let secs: u64 = match std::env::var(HANG_SECS_ENV) {
+                Ok(text) => text.parse().expect("挂住秒数是测试自己给的整数"),
+                Err(_) => 60,
+            };
+            std::thread::sleep(Duration::from_secs(secs));
+        }
+    }
+
+    #[test]
+    #[ignore = "只供超时测试重新拉起本测试二进制时运行"]
+    #[allow(
+        clippy::zombie_processes,
+        reason = "故意不等后代进程：要的就是父进程先退出、后代还握着继承来的输出管道"
+    )]
+    fn orphaning_java_helper() {
+        if std::env::var_os(ORPHAN_HELPER_ENV).is_some() {
+            let mut descendant = hung_java_command();
+            descendant
+                .env_remove(ORPHAN_HELPER_ENV)
+                .env(HANG_SECS_ENV, ORPHAN_HOLDS_PIPES_SECS);
+            descendant.spawn().unwrap();
         }
     }
 
@@ -1085,6 +1122,32 @@ mod tests {
         assert!(
             out.contains("detect::tests::hung_java_helper: test"),
             "{out}"
+        );
+    }
+
+    /// 进程自己退出了，派生的后代还握着继承来的输出管道：等输出同样受时限约束，不会跟着后代一起挂住。
+    #[test]
+    fn exited_process_whose_descendant_holds_the_pipes_still_times_out() {
+        let exe = std::env::current_exe().unwrap();
+        let mut cmd = Command::new(&exe);
+        cmd.args([
+            "--ignored",
+            "--exact",
+            "detect::tests::orphaning_java_helper",
+            "--test-threads=1",
+        ])
+        .env(ORPHAN_HELPER_ENV, "1");
+        let started = Instant::now();
+        let outcome = wait_output_with_timeout(cmd, &exe, ONE_SECOND);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < ONE_SECOND + TIMEOUT_SLACK,
+            "被后代进程握着的管道拖住：{elapsed:?}"
+        );
+        assert!(
+            matches!(&outcome, Err(Error::JavaProbeTimeout { path, timeout_secs: 1 }) if path == &exe),
+            "{outcome:?}"
         );
     }
 
