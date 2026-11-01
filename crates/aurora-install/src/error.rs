@@ -126,6 +126,21 @@ pub enum Error {
         problem: aurora_version::UnsafePath,
     },
 
+    /// 加载器安装器自带的库（版本 JSON 里声明了下载件、地址留空）缺失或已损坏。它只在安装加载器时从
+    /// installer 里解出或由处理器生成，没有地址可以重新下载。
+    #[error(
+        "加载器自带的库 {} 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器",
+        file_label(path)
+    )]
+    LoaderLibraryMissing { path: PathBuf },
+}
+
+/// 报错正文里只写文件名：完整路径太长，放进错误详情。
+fn file_label(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// crate 级 `Result` 别名。
@@ -155,8 +170,8 @@ impl RetryableError for Error {
             | Error::ProcessorMainClassMissing { .. }
             | Error::JavaLaunch { .. }
             | Error::ProcessorFailed { .. } => false,
-            // 路径越界是文件内容本身的问题，重下同一份文件结果不变。
-            Error::UnsafePath { .. } => false,
+            // 路径越界与加载器自带库缺失都是文件内容本身的问题，重下同一份文件结果不变。
+            Error::UnsafePath { .. } | Error::LoaderLibraryMissing { .. } => false,
         }
     }
 }

@@ -536,6 +536,8 @@ export function taskFailureReason(error: { code: string; message: string }): str
       return "下载到的文件和官方记录不一致";
     case "install_unsafe_path":
       return "版本文件里有指向游戏目录之外的路径，已拒绝写入";
+    case "loader_library_missing":
+      return "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器";
     default:
       return error.message;
   }

@@ -617,6 +617,7 @@ impl Aurora {
             files: missing_files(plan.files).await?,
             asset_index_missing: plan.asset_index_missing,
         };
+        aurora_install::complete::reject_missing_bundled(&plan.files)?;
         let authlib = match &account.credentials {
             AccountCredentials::AuthlibInjector(creds) => Some(creds.api_root.clone()),
             _ => None,
@@ -1926,6 +1927,43 @@ mod tests {
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::VersionBroken);
         assert!(failure.params.contains_key("reason"));
+    }
+
+    /// 加载器安装器自带的库（版本 JSON 里地址留空）被删掉后启动：报只能重装加载器，不把空地址交给下载池
+    /// 去报地址解析失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deleted_bundled_loader_library_stops_launch_with_loader_library_missing() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_version(&mc, 17, true);
+        let json = serde_json::json!({
+            "id": VERSION,
+            "type": "release",
+            "mainClass": "cpw.mods.modlauncher.Launcher",
+            "javaVersion": {"component": "java-runtime-gamma", "majorVersion": 17},
+            "libraries": [{
+                "name": "net.minecraftforge:forge:1.20.1-47.2.0:universal",
+                "downloads": {"artifact": {
+                    "path": "net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-universal.jar",
+                    "url": "", "sha1": "0".repeat(40), "size": 4
+                }}
+            }]
+        });
+        let dir = mc.join("versions").join(VERSION);
+        std::fs::write(dir.join(format!("{VERSION}.json")), json.to_string()).unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, _) = launch(&fx.aurora, java).await;
+
+        let expected = mc
+            .join("libraries")
+            .join("net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-universal.jar");
+        match result {
+            Err(LaunchFailed::Core(CoreError::Install(
+                aurora_install::Error::LoaderLibraryMissing { path },
+            ))) => assert_eq!(path, expected),
+            other => panic!("应报加载器自带的库缺失：{:?}", other.err()),
+        }
     }
 
     #[test]

@@ -138,6 +138,8 @@ pub mod code {
     /// 版本 JSON 或资源索引给出的路径会落到游戏目录之外，已拒绝写入。detail：`{ entry, path }`，原因链里是
     /// 哪一种越界（`..` 段、绝对路径、盘符……）。
     pub const INSTALL_UNSAFE_PATH: &str = "install_unsafe_path";
+    /// 加载器安装器自带的库（版本 JSON 里地址留空）缺失或已损坏，只能重装加载器补回。detail：`{ path }`。
+    pub const LOADER_LIBRARY_MISSING: &str = "loader_library_missing";
 }
 
 /// 序列化给前端的命令错误。
@@ -332,6 +334,7 @@ fn install_code(err: &InstallError) -> &'static str {
         InstallError::LoaderVersionNotFound { .. } => code::LOADER_VERSION_NOT_FOUND,
         InstallError::Download(_) => code::DOWNLOAD_FAILED,
         InstallError::UnsafePath { .. } => code::INSTALL_UNSAFE_PATH,
+        InstallError::LoaderLibraryMissing { .. } => code::LOADER_LIBRARY_MISSING,
         _ => code::INSTALL_FAILED,
     }
 }
@@ -526,6 +529,9 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::Install(InstallError::UnsafePath { entry, path, .. }) => {
             detail.insert("entry".to_owned(), json!(entry));
             detail.insert("path".to_owned(), json!(path));
+        }
+        CoreError::Install(InstallError::LoaderLibraryMissing { path }) => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         _ => {}
     }
@@ -981,6 +987,24 @@ mod tests {
             }))
         );
         assert!(!dir.path().join("escaped.jar").exists());
+    }
+
+    #[test]
+    fn missing_loader_libraries_map_to_loader_library_missing() {
+        let path = PathBuf::from(
+            "C:/mc/libraries/net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39.jar",
+        );
+        let missing: CommandError =
+            InstallError::LoaderLibraryMissing { path: path.clone() }.into();
+        assert_eq!(missing.code, code::LOADER_LIBRARY_MISSING);
+        assert_eq!(
+            missing.message,
+            "加载器自带的库 forge-1.16.5-36.2.39.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器"
+        );
+        assert_eq!(
+            missing.detail,
+            Some(json!({ "path": path.display().to_string() }))
+        );
     }
 
     #[test]
