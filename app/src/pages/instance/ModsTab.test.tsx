@@ -9,6 +9,7 @@ import type { InstanceDto } from "../../ipc/instances";
 import type { InstalledMod, ModChangelog, ModSource, UpdateCandidate } from "../../ipc/mods";
 import { ACTION_ERROR } from "../../copy/flows";
 import { DROP_COPY } from "../../copy/shell";
+import { LOADING_DELAY_MS } from "../../domain/limits";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "../../shell/window";
@@ -1134,5 +1135,173 @@ describe("更新预览", () => {
     await flush();
     const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
     expect((composite[0].spec.args.items as { fileName: string }[]).map((i) => i.fileName)).toEqual(["fabric-api.jar", "handmade.jar", "sodium.jar"]);
+  });
+});
+
+describe("切到 Mod 页与回到前台时重读 mods 目录", () => {
+  const OLD_NAMES = ["Fabric API", "Handmade", "Iris", "Sodium"];
+  const dropInJar = () => {
+    mods = [...mods, modDto("lithium.jar", "Lithium")];
+  };
+  const switchTo = (tab: InstanceTab) => act(() => nav.go({ page: "instance", id: ID, tab }));
+  const focusWindow = () => act(() => window.dispatchEvent(new Event("focus")));
+  const lists = () => callsOf(ipc, "list_mods").length;
+  const scans = () => callsOf(ipc, "list_instances").length;
+  const pastLoadingDelay = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+    });
+
+  /** 摘要行的总数。 */
+  function total(): number {
+    const el = document.querySelector('[class*="modTotal"] b');
+    if (el === null) throw new Error("摘要行没有总数");
+    return Number(textOf(el));
+  }
+
+  /** 标签条上 Mod 标签的角标：读实例摘要，不读列表。 */
+  function badge(): number {
+    const tab = [...document.querySelectorAll('[role="tab"]')].find((t) => textOf(t).startsWith("Mod"));
+    if (tab === undefined) throw new Error("没有 Mod 标签");
+    return Number(textOf(tab).replace("Mod", ""));
+  }
+
+  beforeEach(() => {
+    // 替身按真实后端的口径：摘要里的数字现数，列表每次都是一份新数组，内容没变也一样
+    ipc.overrides.set("list_instances", () => instances.map((i) => ({ ...i, mod_count: mods.length })));
+    ipc.overrides.set("list_mods", () => structuredClone(mods));
+  });
+
+  it("开着应用往 mods 放了 jar：切到 Mod 页就列出来，总数与标签角标一起跟上", async () => {
+    await open("overview");
+    expect(badge()).toBe(4);
+    dropInJar();
+    switchTo("mods");
+    await flush();
+    expect(gridNames()).toEqual(["Fabric API", "Handmade", "Iris", "Lithium", "Sodium"]);
+    expect(total()).toBe(5);
+    expect(badge()).toBe(5);
+  });
+
+  it("窗口回到前台、Mod 页在前台：实例重扫还在节流里，列表与角标照样都跟上", async () => {
+    await open();
+    expect(badge()).toBe(4);
+    dropInJar();
+    focusWindow();
+    await flush();
+    expect(gridNames()).toEqual(["Fabric API", "Handmade", "Iris", "Lithium", "Sodium"]);
+    expect(total()).toBe(5);
+    expect(badge()).toBe(5);
+  });
+
+  it("文件被挪走也一样：总数与角标一起减下来", async () => {
+    await open("overview");
+    mods = mods.filter((m) => m.file_name !== "handmade.jar");
+    switchTo("mods");
+    await flush();
+    expect(gridNames()).toEqual(["Fabric API", "Iris", "Sodium"]);
+    expect(total()).toBe(3);
+    expect(badge()).toBe(3);
+  });
+
+  it("重读途中不闪骨架：旧列表一直在，途中勾的选择在新列表回来后还在", async () => {
+    await open("overview");
+    const rescan = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => rescan.promise);
+    switchTo("mods");
+    await flush();
+    await pastLoadingDelay();
+    expect(document.querySelector('[class*="tableSkeleton"]')).toBeNull();
+    expect(gridNames()).toEqual(OLD_NAMES);
+    click(find("checkbox", "选择 Sodium"));
+    dropInJar();
+    rescan.resolve(structuredClone(mods));
+    await flush();
+    expect(gridNames()).toContain("Lithium");
+    expect(textOf(document.body)).toContain("已选 1 个");
+  });
+
+  it("第一次打开 Mod 页只读一次；初次加载的骨架照常", async () => {
+    const first = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => first.promise);
+    await open();
+    await pastLoadingDelay();
+    expect(lists()).toBe(1);
+    expect(document.querySelector('[class*="tableSkeleton"]')).not.toBeNull();
+    first.resolve(structuredClone(mods));
+    await pastLoadingDelay();
+    expect(lists()).toBe(1);
+    expect(gridNames()).toEqual(OLD_NAMES);
+  });
+
+  it("点回窗口时同时切了页：回到前台的那次重读已经在路上，不再多读", async () => {
+    await open("overview");
+    const before = lists();
+    focusWindow();
+    switchTo("mods");
+    await flush();
+    expect(lists()).toBe(before + 1);
+  });
+
+  it("每切回来一次读一次；盘上没变时不多扫实例列表", async () => {
+    await open();
+    const before = { lists: lists(), scans: scans() };
+    switchTo("overview");
+    await flush();
+    switchTo("mods");
+    await flush();
+    expect(lists()).toBe(before.lists + 1);
+    expect(scans()).toBe(before.scans);
+  });
+
+  it("列表与摘要常年对不上（整合包只列出代表）：只在列表数字变了时补扫，重读不跟着反复扫", async () => {
+    ipc.overrides.set("list_instances", () => instances.map((i) => ({ ...i, mod_count: 80 })));
+    await open();
+    const settled = scans();
+    focusWindow();
+    await flush();
+    expect(scans()).toBe(settled);
+    dropInJar();
+    focusWindow();
+    await flush();
+    expect(scans()).toBe(settled + 1);
+  });
+
+  it("内容没变的重读落在启停途中：开关不闪回，启停回来后仍按盘上的新名字操作", async () => {
+    await open();
+    const toggled = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => toggled.promise);
+    click(find("switch", "停用 Sodium"));
+    focusWindow();
+    await flush();
+    expect(find("switch", "启用 Sodium").getAttribute("aria-checked")).toBe("false");
+
+    ipc.overrides.set("list_mods", () => new Promise(() => undefined));
+    toggled.resolve("sodium.jar.disabled");
+    await flush();
+    click(button("移除 Sodium"));
+    await flush();
+    expect(textOf(dialog())).toContain("sodium.jar.disabled");
+    click(button("移除", dialog()));
+    await flush();
+    expect(callsOf(ipc, "remove_mod")).toEqual([{ versionId: ID, fileName: "sodium.jar.disabled" }]);
+  });
+
+  it("重读失败：原位报错，点重试回来时选择还在", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Handmade"));
+    ipc.overrides.set("list_mods", () => {
+      throw new IpcError("io", "文件 IO 失败: mods", { causes: ["拒绝访问"] });
+    });
+    focusWindow();
+    await flush();
+    expect(textOf(document.body)).toContain("文件 IO 失败: mods");
+
+    ipc.overrides.set("list_mods", () => structuredClone(mods));
+    click(button("重试"));
+    await flush();
+    expect(gridNames()).toEqual(OLD_NAMES);
+    expect(textOf(document.body)).toContain("已选 2 个");
   });
 });

@@ -169,9 +169,26 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     barMounted.current = true;
   }, []);
 
+  // 玩家可能刚在资源管理器里动过 mods 目录：页面按标签挂载，切过来就重读一次；回到前台的重读在状态层
+  const { refresh } = mods;
+  useEffect(() => {
+    if (queryId !== null) refresh();
+  }, [queryId, refresh]);
+
   // 列表换了一份（启停后的重扫）就以磁盘为准，丢掉乐观的开关值
   const modsData = mods.status === "ready" ? mods.data : null;
   useEffect(() => setOverrides(new Map()), [modsData]);
+
+  // 标签角标与库卡片读实例摘要，回到前台时的重扫有节流：列表数出来和摘要对不上就补扫一次，不然这一页写 13、角标写 12。
+  // 只在数字变了时比对：整合包的列表可以少于摘要，常年对不上也不能每重读一次就扫一次
+  const listed = modsData === null ? null : modsData.length;
+  const summaryCount = useRef(inst.modCount);
+  useLayoutEffect(() => {
+    summaryCount.current = inst.modCount;
+  });
+  useEffect(() => {
+    if (listed !== null && listed !== summaryCount.current) void run(() => actions.refreshInstances(), ACTION_ERROR.refreshInstances);
+  }, [actions, listed, run]);
 
   // 「检查更新」是玩家主动发起的：查完没有更新要告诉一声，离线要说清楚
   useEffect(() => {
@@ -199,9 +216,9 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const activeFilter: ModFilter = filter === "ignored" && counts.ignored === 0 ? "all" : filter;
   if (modsData !== null && activeFilter !== filter) setFilter(activeFilter);
   const shown = sortRows(filterMods(rows, query, activeFilter), sort);
-  // 选择只作用于当前列出的行：筛选、搜索变了或列表重扫后不再列出的行从选择里剔除
+  // 选择只作用于当前列出的行：筛选、搜索变了或列表重扫后不再列出的行从选择里剔除。重读失败时列表整个读不出来，不算这些行没了
   const selectedRows = shown.filter((r) => selected.has(r.fileName));
-  if (selectedRows.length !== selected.size) setSelected(new Set(selectedRows.map((r) => r.fileName)));
+  if (modsData !== null && selectedRows.length !== selected.size) setSelected(new Set(selectedRows.map((r) => r.fileName)));
   const { total, partial } = modTotals(inst, rows.length);
   const shownTotal = mods.status === "ready" ? total : inst.modCount;
   const isUpdating = (r: ModRow) => pending.has(r.fileName) || updatingFiles.has(enabledFileName(r.fileName));

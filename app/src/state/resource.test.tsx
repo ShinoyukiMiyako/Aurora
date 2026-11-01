@@ -222,6 +222,71 @@ describe("资源缓存：按前缀失效", () => {
   });
 });
 
+describe("资源缓存：后台重读", () => {
+  it("手上没有在途请求：重取一次，期间保留旧数据，回来后换成新的", async () => {
+    const cache = new ResourceCache();
+    const next = deferred<string>();
+    const fetcher = vi.fn<() => Promise<string>>().mockResolvedValueOnce("v1").mockReturnValueOnce(next.promise);
+    const off = cache.subscribe("mods:A", fetcher, () => undefined);
+    await tick();
+
+    cache.refresh("mods:A");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(cache.snapshot("mods:A")).toMatchObject({ status: "ready", data: "v1", refreshing: true });
+    next.resolve("v2");
+    await tick();
+    expect(cache.snapshot("mods:A")).toMatchObject({ status: "ready", data: "v2", refreshing: false });
+    off();
+  });
+
+  it("初次加载还在路上：不再发请求，也不作废它，结果照常采纳", async () => {
+    const cache = new ResourceCache();
+    const first = deferred<string>();
+    const fetcher = vi.fn(() => first.promise);
+    const off = cache.subscribe("mods:A", fetcher, () => undefined);
+
+    cache.refresh("mods:A");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(cache.snapshot("mods:A").status).toBe("loading");
+    first.resolve("v1");
+    await tick();
+    expect(cache.snapshot("mods:A")).toMatchObject({ status: "ready", data: "v1" });
+    off();
+  });
+
+  it("后台重取还在路上时同样搭它的车；reload 才作废它", async () => {
+    const cache = new ResourceCache();
+    const [second, third] = [deferred<string>(), deferred<string>()];
+    const fetcher = vi.fn<() => Promise<string>>().mockResolvedValueOnce("v1").mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise);
+    const off = cache.subscribe("mods:A", fetcher, () => undefined);
+    await tick();
+
+    cache.refresh("mods:A");
+    cache.refresh("mods:A");
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    cache.reload("mods:A");
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    second.resolve("过期");
+    third.resolve("v3");
+    await tick();
+    expect(cache.snapshot("mods:A")).toMatchObject({ status: "ready", data: "v3" });
+    off();
+  });
+
+  it("没有订阅过的 key 是调用方的错：直接报错；条件查询的 refresh 同样不许调", async () => {
+    expect(() => new ResourceCache().refresh("nope")).toThrow("还没有被订阅过");
+    const cache = new ResourceCache();
+    let result: ResourceResult<number> | null = null;
+    function Off() {
+      result = useResource<number>(null, () => Promise.resolve(1), cache);
+      return null;
+    }
+    render(<Off />);
+    await tick();
+    expect(() => (result as unknown as ResourceResult<number>).refresh()).toThrow("未启用的查询不能重读");
+  });
+});
+
 describe("资源缓存：出错的条目没人看了就丢掉，再有人要时重新请求", () => {
   /** 让出一个宏任务：出错条目的清理排在这之后。 */
   const macrotask = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));

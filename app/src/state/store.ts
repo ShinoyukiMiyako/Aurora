@@ -86,7 +86,7 @@ import * as modsIpc from "../ipc/mods";
 import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServerInstance, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
 import type { CoreEvent } from "../ipc/tasks";
-import { describeError, errorRecord } from "./errors";
+import { describeError, errorRecord, itemFailureReason } from "./errors";
 import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type LoginState } from "./login";
 import { network as appNetwork, type NetworkMonitor } from "./online";
 import { MODPACK_SUMMARY_RESOURCE } from "./queries/discover";
@@ -850,10 +850,10 @@ const GAME_DIR_SCOPED_RESOURCES = [
 const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "mod-changelog", "plan", "memory-advice", WORLD_BACKUPS_RESOURCE] as const;
 
 /** 批量动作里失败几项的通知正文：后端给的原因只有一种时照写原文，不止一种时不挑一条代表全部。 */
-function batchFailureReason(messages: readonly string[]): string {
-  const distinct = new Set(messages);
-  if (distinct.size === 0) throw new Error("没有失败项却要写失败原因");
-  return distinct.size === 1 ? messages[0] : TOAST_COPY.mixedReasons;
+function batchFailureReason(errors: readonly { code: string; message: string; detail?: unknown }[]): string {
+  const distinct = [...new Set(errors.map(itemFailureReason))];
+  if (distinct.length === 0) throw new Error("没有失败项却要写失败原因");
+  return distinct.length === 1 ? distinct[0] : TOAST_COPY.mixedReasons;
 }
 
 /**
@@ -3037,7 +3037,7 @@ export class LauncherStore {
         store.assertModsEditable(instanceId);
         const results = await modsIpc.setModsEnabled(instanceId, fileNames, enabled);
         invalidateResources(`mods:${instanceId}`);
-        const failed = results.flatMap((r) => (r.status === "error" ? [r.error.message] : []));
+        const failed = results.flatMap((r) => (r.status === "error" ? [r.error] : []));
         if (failed.length > 0) {
           store.pushToast("warning", TOAST_COPY.modsToggleFailed(failed.length, enabled), batchFailureReason(failed));
           return;
@@ -3060,7 +3060,7 @@ export class LauncherStore {
         }
         await store.fetchInstances();
         const added = results.flatMap((r) => (r.status === "ok" ? [r.file_name] : []));
-        const failed = results.flatMap((r) => (r.status === "error" ? [r.error.message] : []));
+        const failed = results.flatMap((r) => (r.status === "error" ? [r.error] : []));
         if (failed.length > 0) store.pushToast("warning", TOAST_COPY.modsAddFailed(added.length, failed.length), batchFailureReason(failed));
         else store.pushToast("success", added.length === 1 ? TOAST_COPY.modAdded(added[0]) : TOAST_COPY.modsAdded(added.length));
       },
@@ -3127,14 +3127,14 @@ export class LauncherStore {
       async removeMods(instanceId, files) {
         if (files.length === 0) throw new Error("批量移除至少要有一个 Mod");
         store.assertModsEditable(instanceId);
-        const failed: string[] = [];
+        const failed: IpcError[] = [];
         try {
           for (const file of files) {
             try {
               await modsIpc.removeMod(instanceId, file.fileName);
             } catch (err) {
               if (!isIpcError(err)) throw err;
-              failed.push(err.message);
+              failed.push(err);
             }
           }
         } finally {

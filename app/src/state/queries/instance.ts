@@ -7,7 +7,7 @@ import { listHistory, rollbackChecks, type HistoryEvent, type RollbackCheck } fr
 import { getInstanceSettings, listInstanceContent, type InstanceContentDto } from "../../ipc/instances";
 import { previewModpackExport, type ModpackExportPreviewDto } from "../../ipc/modpack";
 import { checkUpdates, listMods, modUpdateChangelog, type InstalledMod, type ModChangelog, type UpdateCandidate } from "../../ipc/mods";
-import { invalidate, useResource, type ResourceResult } from "../resource";
+import { invalidate, resources, useResource, type ResourceResult } from "../resource";
 
 export type { CrashClueDto, CrashReportDto, CrashSuspectDto, LaunchLogDto } from "../../ipc/diagnostics";
 export type { HistoryEvent, RollbackCheck } from "../../ipc/history";
@@ -22,9 +22,19 @@ function key(prefix: string, id: string | null, suffix?: string): string | null 
   return suffix === undefined ? `${prefix}:${id}` : `${prefix}:${id}:${suffix}`;
 }
 
-/** mods:<id> —— 启停、移除、更新、回滚后失效。 */
+/**
+ * 重读回来内容没变就沿用手上那一份：Mod 页的乐观开关与改名记录都绑在列表的身份上，切页和回到前台的重读
+ * 大多什么都没变，换一份新数组会让它们提前作废，进行中的开关闪回去。
+ */
+async function readMods(id: string): Promise<InstalledMod[]> {
+  const fresh = await listMods(id);
+  const held = resources.snapshot(`mods:${id}`).data as InstalledMod[] | undefined;
+  return held !== undefined && JSON.stringify(held) === JSON.stringify(fresh) ? held : fresh;
+}
+
+/** mods:<id> —— 启停、移除、更新、回滚后失效；玩家也会在启动器外改 mods 目录，切到 Mod 页与窗口回到前台时重读。 */
 export function useInstanceMods(id: string | null): ResourceResult<InstalledMod[]> {
-  return useResource(key("mods", id), () => listMods(need(id)));
+  return useResource(key("mods", id), () => readMods(need(id)));
 }
 
 /** content:<id> —— 资源包、光影、存档；装资源包、光影、数据包后与游戏退出后失效。 */

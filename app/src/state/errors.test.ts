@@ -1,6 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { IpcError } from "../ipc/errors";
-import { describeError, errorDetail, errorDetailOf, networkFailureOf } from "./errors";
+import { describeError, errorDetail, errorDetailOf, itemFailureReason, networkFailureOf } from "./errors";
+
+describe("批量动作里一项失败的原因", () => {
+  it("正文只有「文件 IO 失败: 路径」时写原因链，多层按后端的写法用全角冒号接起来", () => {
+    expect(itemFailureReason({ code: "io", message: "文件 IO 失败: D:/mods/a.jar", detail: { causes: ["a.jar 不是 mods 目录里的 Mod 文件名"] } })).toBe("a.jar 不是 mods 目录里的 Mod 文件名");
+    expect(itemFailureReason({ code: "mod_platform_failed", message: "文件 IO 失败: D:/mods/a.jar", detail: { causes: ["读不出压缩包", "磁盘已满"] } })).toBe("读不出压缩包：磁盘已满");
+  });
+
+  it("读写失败却没有原因链（边界）：照写正文，不编一条原因", () => {
+    expect(itemFailureReason({ code: "mod_platform_failed", message: "文件 IO 失败: D:/mods/a.jar" })).toBe("文件 IO 失败: D:/mods/a.jar");
+    expect(itemFailureReason({ code: "io", message: "文件 IO 失败: D:/mods/a.jar", detail: { causes: [] } })).toBe("文件 IO 失败: D:/mods/a.jar");
+  });
+
+  it("正文本身说得清的错误照写正文：原因链是更底层的细节", () => {
+    expect(itemFailureReason({ code: "json_file_invalid", message: "读不懂卷宗 ledger.json", detail: { causes: ["expected value at line 1 column 1"] } })).toBe("读不懂卷宗 ledger.json");
+    expect(itemFailureReason({ code: "mod_file_busy", message: "sodium.jar 正被其它程序占用（游戏可能正在运行），结束游戏后再试", detail: { path: "D:/mods/sodium.jar" } })).toBe(
+      "sodium.jar 正被其它程序占用（游戏可能正在运行），结束游戏后再试",
+    );
+  });
+});
 
 describe("网络层失败的种类", () => {
   it("只认后端标在 detail.network 里的 connect 与 timeout；其余都不算", () => {
