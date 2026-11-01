@@ -1,3 +1,4 @@
+import { Spinner } from "../../art/Spinner";
 import { Button } from "../../ui/Button";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
@@ -9,6 +10,7 @@ export interface BlockedProps {
   onBack(): void;
 }
 
+/** 说明里写了「会自动继续」，页面没有别的动静时，转动的指示让人看得出它确实在等。 */
 export function Blocked({ copy, onCheckAgain, onBack }: BlockedProps) {
   return (
     <Frame
@@ -22,6 +24,8 @@ export function Blocked({ copy, onCheckAgain, onBack }: BlockedProps) {
           </Button>
         </>
       }
-    />
+    >
+      <Spinner size={24} decorative />
+    </Frame>
   );
 }
