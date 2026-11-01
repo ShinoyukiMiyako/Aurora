@@ -134,6 +134,7 @@ const BANNED = [
   "登陆",
   "模组",
   "MOD",
+  "Mod 加载器",
   "本启动器",
   "我们",
   "知道了",
@@ -205,22 +206,9 @@ const COPY_SOURCES = import.meta.glob<string>(["./*.ts", "../pages/*/copy.ts", "
   eager: true,
 });
 
-/**
- * 本轮之前就在的叫法，等产品拍板再改（界面规范的页面表格里也这样写，与禁用词表互相矛盾）。
- * 每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。
- */
+/** 还没改掉的旧叫法。每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。 */
 const LEGACY: readonly { file: string; text: string; why: string }[] = [
-  { file: "../pages/instance/copy.ts", text: "自建模组实例", why: "实例类型的旧称" },
-  { file: "../pages/instance/copy.ts", text: "原版实例不加载 Mod。想装 Sodium、JEI 这类模组，可以新建一个 Fabric 或 NeoForge 实例。", why: "实例类型的旧称" },
-  { file: "../pages/instance/copy.ts", text: "新建模组实例", why: "实例类型的旧称" },
-  { file: "../pages/instance/copy.ts", text: "模组版本隔离", why: "版本隔离策略的旧称" },
-  { file: "../pages/instance/copy.ts", text: "模组与快照版本隔离", why: "版本隔离策略的旧称" },
-  { file: "../pages/instance/copy.ts", text: "光影包 · 需要 Iris 或 OptiFine", why: "光影的旧称" },
-  { file: "../pages/instance/copy.ts", text: "可在发现页安装光影包", why: "光影的旧称" },
-  { file: "../pages/instance/copy.ts", text: "分配给 Java 虚拟机的最大堆内存", why: "最大内存的旧称" },
-  { file: "../pages/instance/copy.ts", text: "还原", why: "JVM 参数编辑框放弃未保存改动的按钮" },
-  { file: "../flows/create-instance/copy.ts", text: "Forge 的继任者，新版本大型模组的主力", why: "加载器介绍里的旧称" },
-  { file: "../flows/create-instance/copy.ts", text: "模组尝鲜", why: "实例名示例里的旧称" },
+  { file: "../pages/instance/copy.ts", text: "自建模组实例", why: "实例类型的旧称，头图用例还钉着这个字面量" },
 ];
 
 /** 本来就该这么写的例外；text 是源码里的原样（转义保留）。同样要求还能在原文件里找到。 */

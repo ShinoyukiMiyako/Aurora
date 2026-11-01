@@ -228,7 +228,7 @@ export const OVERVIEW_COPY = {
   modsPartial: (total: number, shown: number) => `共 ${total} 个 · 这里展示 ${shown} 个代表`,
   modsCount: (total: number) => `共 ${total} 个`,
   manage: "管理",
-  vanillaPeek: "原版实例不加载 Mod。想装 Sodium、JEI 这类模组，可以新建一个 Fabric 或 NeoForge 实例。",
+  vanillaPeek: "原版实例不加载 Mod。想装 Sodium、JEI 这类 Mod，可以新建一个 Fabric 或 NeoForge 实例。",
   newInstance: "新建实例",
   noModsPeek: "还没有装任何 Mod。",
   findMods: "去发现找 Mod",
@@ -241,9 +241,9 @@ export const OVERVIEW_COPY = {
   packsTitle: "资源包与光影",
   findPacks: "去发现获取资源包与光影",
   noShader: "未启用光影",
-  shaderSub: "光影包 · 需要 Iris 或 OptiFine",
+  shaderSub: "光影 · 需要 Iris 或 OptiFine",
   shaderVanilla: "原版无法加载光影",
-  shaderHint: "可在发现页安装光影包",
+  shaderHint: "可在发现页安装光影",
   shaderActive: "已启用",
   noResourcePack: "未添加资源包",
   vanillaTextures: "使用原版材质",
@@ -349,7 +349,7 @@ export const MODS_COPY = {
 
   vanillaTitle: "原版实例不加载 Mod",
   vanillaBody: (name: string) => `「${name}」没有安装加载器。想装 Mod，可以新建一个带 Fabric、Quilt 或 NeoForge 的实例，原版存档可以复制过去继续玩。`,
-  vanillaAction: "新建模组实例",
+  vanillaAction: "新建实例",
   emptyTitle: "还没有安装 Mod",
   emptyBody: "到发现页挑几个，安装时选这个实例，前置会自动一起装上。",
   emptyAction: "去发现",
@@ -421,7 +421,7 @@ export const SETTINGS_COPY = {
   runningNote: "游戏正在运行，这里的改动会在下次启动时生效。",
 
   memoryTitle: "内存",
-  memorySubtitle: "分配给 Java 虚拟机的最大堆内存",
+  memorySubtitle: "分配给 Java 虚拟机的最大内存",
   memoryMode: "内存分配方式",
   follow: "跟随全局",
   custom: "为这个实例单独设置",
@@ -473,7 +473,7 @@ export const SETTINGS_COPY = {
   needsJava: (major: number) => `需 Java ${major}`,
   heapOverride: "这里的 -Xmx / -Xms 会覆盖上面的内存设置",
   saveHint: "Ctrl + Enter 保存",
-  restore: "还原",
+  restore: "放弃改动",
   saveArgs: "保存参数",
   jvmSaved: "JVM 参数已保存",
   jvmSavedBody: "下次启动生效",
@@ -527,9 +527,9 @@ export const SETTINGS_COPY = {
 /** 全局版本隔离策略的说法（实例设置「跟随全局」时引用）。 */
 export const ISOLATION_POLICY_LABEL = {
   disabled: "不隔离",
-  mod_loaders_only: "模组版本隔离",
+  mod_loaders_only: "Mod 版本隔离",
   non_release_only: "快照版本隔离",
-  mod_loaders_and_non_release: "模组与快照版本隔离",
+  mod_loaders_and_non_release: "Mod 与快照版本隔离",
   all: "全部版本隔离",
 } as const;
 

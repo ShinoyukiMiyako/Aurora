@@ -26,7 +26,7 @@ export const LOADER_DESCRIPTION: Readonly<Record<LoaderKind, string>> = {
   fabric: "轻量、跟版本快，性能优化类 Mod 最多",
   quilt: "Fabric 的分支，能装大部分 Fabric Mod",
   forge: "历史最久，老版本与大型整合包的首选",
-  neoforge: "Forge 的继任者，新版本大型模组的主力",
+  neoforge: "Forge 的继任者，新版本大型 Mod 的主力",
 };
 
 const listNames = (loaders: readonly LoaderKind[]) => loaders.map((k) => LOADER_NAME[k]).join("、");
@@ -56,7 +56,7 @@ export const CREATE_COPY = {
     placeholder: "例如：周末生存",
     hint: "之后可以在实例详情里随时改名",
     ideasLabel: "没想好？试试",
-    ideas: ["周末生存", "建筑创造", "和朋友联机", "模组尝鲜", "空岛挑战"],
+    ideas: ["周末生存", "建筑创造", "和朋友联机", "Mod 尝鲜", "空岛挑战"],
     roadmap: "接下来依次选择游戏版本、加载器和封面，左侧随时能跳回已经走过的步骤。",
   },
 

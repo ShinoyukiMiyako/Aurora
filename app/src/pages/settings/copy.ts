@@ -187,9 +187,9 @@ export const ISOLATION_COPY = {
 
 export const ISOLATION_OPTIONS = [
   { value: "disabled", label: "关闭隔离", desc: "所有实例共用同一个目录，Mod 与配置可能互相串味（已有 mods 或 saves 的实例仍会单独存放）" },
-  { value: "mod_loaders_only", label: "仅 Mod 加载器版本", desc: "装了加载器的实例各自独立，原版共用一份" },
+  { value: "mod_loaders_only", label: "仅加载器版本", desc: "装了加载器的实例各自独立，原版共用一份" },
   { value: "non_release_only", label: "仅非正式版本", desc: "快照与远古版本各自独立，正式版共用一份" },
-  { value: "mod_loaders_and_non_release", label: "Mod 加载器与非正式版本", desc: "装了加载器的实例和快照各自独立存放存档、配置与资源包，纯原版正式版共用一份" },
+  { value: "mod_loaders_and_non_release", label: "加载器与非正式版本", desc: "装了加载器的实例和快照各自独立存放存档、配置与资源包，纯原版正式版共用一份" },
   { value: "all", label: "全部隔离", desc: "每个实例都有自己的 .minecraft，互不影响，占用空间最多" },
 ] as const;
 
