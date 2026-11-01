@@ -987,7 +987,7 @@ export const handlers: MockHandlers = {
     try {
       const instance = mockInstance(id);
       const row = instance.ledger.find((r) => r.file_name === ledgerKey(fileName));
-      if (!row) throw refuse(`${mockModsDir(id)}/${fileName}`, `${fileName} 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）`);
+      if (!row) throw refuse(`${mockModsDir(id)}/${fileName}`, `${fileName} 没有平台来源记录，无法自动更新（先检查更新识别它）`);
       stage(taskId, step, `准备把 ${fileName} 更新到版本 ${modVersionId}`);
       const result = plan(instance, findVersion(row.platform, row.project_id, modVersionId));
       // 真实后端在下载阶段观察取消；这里让出一次事件循环，给 cancel_task 留出到达的机会。

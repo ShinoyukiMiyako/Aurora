@@ -3,9 +3,9 @@
 import { APP_NAME } from "../lib/app-info";
 
 export const UPDATE_COPY = {
-  cardTitle: "启动器更新",
+  cardTitle: `${APP_NAME}更新`,
   autoCheck: "自动检查更新",
-  autoCheckDesc: "打开启动器时检查一次，之后每 12 小时检查一次",
+  autoCheckDesc: `打开${APP_NAME}时检查一次，之后每 12 小时检查一次`,
   current: (v: string) => `当前是 ${v}`,
   autoOn: "已开启启动时自动检查",
   autoOff: "自动检查已关闭",
@@ -48,7 +48,7 @@ export const UPDATE_COPY = {
   background: "后台下载",
   cancelDownload: "取消下载",
   readyNote: "新版本已经下好了。",
-  gameRunning: "游戏正在运行。安装会关闭启动器，游戏日志与崩溃诊断会中断，结束游戏后再安装。",
+  gameRunning: `游戏正在运行。安装会关闭${APP_NAME}，游戏日志与崩溃诊断会中断，结束游戏后再安装。`,
   gameRunningReason: "游戏正在运行，结束游戏后再安装",
   installOnExit: "退出时安装",
   installOnExitNote: (v: string) => `关闭${APP_NAME}时会自动安装 ${v}。`,

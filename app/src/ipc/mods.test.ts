@@ -293,7 +293,7 @@ describe("更新检查与更新", () => {
 
   it("来源不明的文件不能更新；被占用时报 mod_file_busy", async () => {
     const unknown = await failure(updateMod("task-u5", MOCK_MOD_INSTANCE, "handmade-1.0.jar", "x"));
-    expect(unknown.detail).toEqual({ causes: ["handmade-1.0.jar 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）"] });
+    expect(unknown.detail).toEqual({ causes: ["handmade-1.0.jar 没有平台来源记录，无法自动更新（先检查更新识别它）"] });
     setMockModFileBusy(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", true);
     expect(await failure(updateMod("task-u6", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060"))).toMatchObject({ code: "mod_file_busy" });
   });

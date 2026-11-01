@@ -227,7 +227,7 @@ impl Aurora {
             refuse(
                 &path,
                 std::io::ErrorKind::NotFound,
-                format!("{file_name} 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）"),
+                format!("{file_name} 没有平台来源记录，无法自动更新（先检查更新识别它）"),
             )
         })?;
         let (platform, project_id) = (entry.platform, entry.project_id.clone());

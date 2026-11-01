@@ -10,6 +10,7 @@ import type { HistoryEvent } from "../../ipc/history";
 import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, TemplateInfoDto, WorldBackupDto, WorldBackupListDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
+import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickSaveFile } from "../../shell/platform";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
@@ -2088,7 +2089,7 @@ describe("实例详情：日志与历史", () => {
     expect(row()).toBe(first);
     expect(byRole("radio", /^错误/).textContent).toBe("错误1");
     // 唯一的错误行来自游戏：只看启动器的错误时一行不剩，说明写在日志区里
-    click(byRole("radio", "启动器"));
+    click(byRole("radio", APP_NAME));
     expect(byRole("radio", /^错误/).textContent).toBe("错误0");
     click(byRole("radio", /^错误/));
     expect(document.querySelector('[role="log"]')?.textContent).toContain("当前筛选下没有日志行");

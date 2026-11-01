@@ -9,6 +9,7 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { GAME_LOG_EVENT } from "../../ipc/launch";
 import { resetMocks } from "../../ipc/mock";
 import { CORE_EVENT } from "../../ipc/tasks";
+import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
@@ -68,7 +69,7 @@ const SECTIONS: readonly { section: Exclude<SettingsSection, "general">; heading
   { section: "java", heading: "Java 运行时" },
   { section: "game", heading: "游戏目录" },
   { section: "appearance", heading: "明暗" },
-  { section: "about", heading: "启动器更新" },
+  { section: "about", heading: `${APP_NAME}更新` },
 ];
 
 describe("设置页按片订阅", () => {
