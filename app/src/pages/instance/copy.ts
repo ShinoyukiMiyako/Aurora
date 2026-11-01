@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { cluePointer, CRASH_SOURCE_LABEL, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
+import { cluePointer, CRASH_SOURCE_LABEL, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -233,7 +233,7 @@ export const OVERVIEW_COPY = {
   vanillaTextures: "使用原版材质",
   packOrder: (order: number) => `资源包 · 加载顺序 ${order}`,
   packInactive: "资源包 · 未启用",
-  packsFoot: (loader: LoaderKind, mc: string) => `${joinMixed(LOADER_NAME[loader], mc)} 的资源可以在发现页按版本筛选。`,
+  packsFoot: (loader: LoaderKind, mc: string) => `${LOADER_NAME[loader]} ${mc} 的资源可以在发现页按版本筛选。`,
   packsError: "读不到资源包与光影",
 } as const;
 

@@ -125,6 +125,11 @@ describe("插值贴着中文时的混排", () => {
     expect(TOAST_COPY.settingChanged("生存", "内存", "6 GB").title).toBe("「生存」的内存已改为 6 GB");
   });
 
+  it("概览资源包卡的脚注：加载器与版本号之间空一格，英文加载器与原版都一样", () => {
+    expect(OVERVIEW_COPY.packsFoot("fabric", "1.21.1")).toBe("Fabric 1.21.1 的资源可以在发现页按版本筛选。");
+    expect(OVERVIEW_COPY.packsFoot("vanilla", "1.21.1")).toBe("原版 1.21.1 的资源可以在发现页按版本筛选。");
+  });
+
   it("发现页空状态：类型名是 Mod 时补空格，中文类型名不加", () => {
     expect(SEARCH_COPY.emptyWithQuery("钠", "mod")).toBe("没有找到与「钠」相关的 Mod");
     expect(SEARCH_COPY.emptyWithQuery("钠", "all")).toBe("没有找到与「钠」相关的资源");
