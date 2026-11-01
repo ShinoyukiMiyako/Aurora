@@ -11,7 +11,8 @@ export type JavaNote =
   | { kind: "pinned" }
   /** 固定的路径已不在扫描结果里：跟随全局的实例启动时会按这个路径找 Java 并失败，不会悄悄改用别的。 */
   | { kind: "pinnedMissing"; path: string }
-  | { kind: "missing"; majors: number[]; autoDownload: boolean }
+  /** remedy 是缺的主版本怎样补上。固定了默认 Java 时启动一律按固定路径走，自动下载开着也不会下。 */
+  | { kind: "missing"; majors: number[]; remedy: "auto" | "manual" | "pinned" }
   | { kind: "bits32" };
 
 /** 主版本降序；同主版本按小版本、补丁号降序，路径兜底保证顺序稳定。 */
@@ -92,12 +93,14 @@ export function selectedRuntime(defaultJava: string, runtimes: readonly JavaInst
   return found === undefined ? null : found;
 }
 
+/** 按后果从重到轻排：一张卡片至多一条说明块，排在最前的那条写成说明块，其余逐行列在它下面。 */
 export function javaNotes(defaultJava: string, runtimes: readonly JavaInstallationDto[], instances: readonly InstanceSummary[], autoDownload: boolean): JavaNote[] {
   const notes: JavaNote[] = [];
+  const pinned = defaultJava !== JAVA_AUTO;
   const selected = selectedRuntime(defaultJava, runtimes);
-  if (defaultJava !== JAVA_AUTO) notes.push(selected === null ? { kind: "pinnedMissing", path: defaultJava } : { kind: "pinned" });
+  if (pinned) notes.push(selected === null ? { kind: "pinnedMissing", path: defaultJava } : { kind: "pinned" });
   const missing = missingMajors(instances, runtimes);
-  if (missing.length > 0) notes.push({ kind: "missing", majors: missing, autoDownload });
+  if (missing.length > 0) notes.push({ kind: "missing", majors: missing, remedy: pinned ? "pinned" : autoDownload ? "auto" : "manual" });
   if (selected !== null && !selected.is_64bit) notes.push({ kind: "bits32" });
   return notes;
 }

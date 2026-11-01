@@ -422,6 +422,54 @@ describe("设置页：Java", () => {
     });
   });
 
+  describe("同一张卡里的提醒", () => {
+    // 假后端只接受它自己列出的路径：沿用它的 Java 8，把扫描结果改成 32 位
+    const X86 = "C:\\Program Files\\Java\\jre1.8.0_421\\bin\\java.exe";
+    const x86 = {
+      path: X86,
+      version: { major: 8, minor: 0, security: 421, build: 9, raw: "1.8.0_421" },
+      is_64bit: false,
+      vendor: "Oracle",
+      source: "registry",
+      missing_files: [],
+    };
+    /** 说明块带色调，提醒行没有；两者都要播报。 */
+    const callouts = () => all('[role="alert"][data-tone]');
+    const reminderRows = () => all('[role="alert"]:not([data-tone])').map((el) => el.textContent);
+    const missingPinned = "还缺 Java 25、Java 21。默认 Java 固定后不会自动下载，可以在下面手动下载，再到实例设置里单独指定。";
+    const bits32 = "32 位 Java 最多只能用约 1.5 GB 内存，装 Mod 的实例很容易内存不足。";
+
+    it("固定了 32 位 Java 又缺版本：只有一条说明块写固定的后果，其余逐行列在下面", async () => {
+      ipc.overrides.set("detect_java", () => [x86]);
+      await mockInvoke("update_config", { defaultJava: X86 });
+      await mount("java");
+      expect(callouts().map((el) => el.dataset.tone)).toEqual(["warn"]);
+      expect(callouts()[0].textContent).toContain("固定成单一 Java 后");
+      expect(reminderRows()).toEqual([missingPinned, bits32]);
+      expect(text()).not.toContain("首次启动对应实例时会自动下载");
+    });
+
+    it("固定的 Java 找不到又缺版本：说明块留给找不到，两个按钮还在，缺版本写成提醒行", async () => {
+      ipc.overrides.set("detect_java", () => []);
+      await mockInvoke("update_config", { defaultJava: X86 });
+      await mount("java");
+      expect(callouts()).toHaveLength(1);
+      expect(callouts()[0].textContent).toContain("默认 Java 已经找不到了，跟随全局的实例会启动失败");
+      expect(callouts()[0].textContent).toContain(X86);
+      expect([...callouts()[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["改回自动选择"]);
+      expect(reminderRows()).toEqual(["还缺 Java 25、Java 21、Java 8。默认 Java 固定后不会自动下载，可以在下面手动下载，再到实例设置里单独指定。"]);
+    });
+
+    it("改回自动选择后只剩缺版本一条，回到说明块，也回到按开关写的文案", async () => {
+      ipc.overrides.set("detect_java", () => [x86]);
+      await mockInvoke("update_config", { defaultJava: X86 });
+      await mount("java");
+      await click(radio("自动选择"));
+      expect(callouts().map((el) => el.textContent)).toEqual(["还缺 Java 25、Java 21，首次启动对应实例时会自动下载。"]);
+      expect(reminderRows()).toEqual([]);
+    });
+  });
+
   it("重新扫描：再发一次探测，完成后报告找到的个数", async () => {
     await mount("java");
     expect(callsOf(ipc, "detect_java")).toHaveLength(1);

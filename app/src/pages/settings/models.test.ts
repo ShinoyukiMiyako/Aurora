@@ -63,7 +63,7 @@ describe("Java 分区推导", () => {
     const all = [runtime("C:/jdk25/java.exe", 25), runtime("C:/jdk21/java.exe", 21), x86];
     expect(javaNotes("auto", all, instances, true)).toEqual([]);
     expect(javaNotes("C:/x86/java.exe", all, instances, true)).toEqual([{ kind: "pinned" }, { kind: "bits32" }]);
-    expect(javaNotes("auto", all.slice(0, 2), instances, false)).toEqual([{ kind: "missing", majors: [8], autoDownload: false }]);
+    expect(javaNotes("auto", all.slice(0, 2), instances, false)).toEqual([{ kind: "missing", majors: [8], remedy: "manual" }]);
     // 固定的路径已不在探测结果里：换成带路径的「找不到」提醒，通用的「固定」提醒不再出现，也不臆测位数
     expect(javaNotes("D:/gone/java.exe", all, instances, true)).toEqual([{ kind: "pinnedMissing", path: "D:/gone/java.exe" }]);
     expect(selectedRuntime("D:/gone/java.exe", all)).toBeNull();
@@ -75,9 +75,22 @@ describe("Java 分区推导", () => {
     const all = [runtime("C:/jdk25/java.exe", 25), runtime("C:/jdk21/java.exe", 21)];
     expect(javaNotes(gone, all, instances, false)).toEqual([
       { kind: "pinnedMissing", path: gone },
-      { kind: "missing", majors: [8], autoDownload: false },
+      { kind: "missing", majors: [8], remedy: "pinned" },
     ]);
     expect(javaNotes(gone, [], [], true)).toEqual([{ kind: "pinnedMissing", path: gone }]);
+  });
+
+  it("提醒按后果从重到轻排：固定的提醒在前，缺版本次之，32 位最后；自动选择下只可能有缺版本这一条", () => {
+    const x86 = runtime("C:/x86/java.exe", 8, { is_64bit: false });
+    expect(javaNotes(x86.path, [x86], instances, true)).toEqual([{ kind: "pinned" }, { kind: "missing", majors: [25, 21], remedy: "pinned" }, { kind: "bits32" }]);
+    expect(javaNotes("auto", [x86], instances, true)).toEqual([{ kind: "missing", majors: [25, 21], remedy: "auto" }]);
+  });
+
+  it("固定了默认 Java 时缺版本不再指望自动下载：启动一律按固定路径走，开着自动下载也不会下", () => {
+    const jdk21 = runtime("C:/jdk21/java.exe", 21);
+    for (const autoDownload of [true, false]) {
+      expect(javaNotes(jdk21.path, [jdk21], instances, autoDownload)).toEqual([{ kind: "pinned" }, { kind: "missing", majors: [25, 8], remedy: "pinned" }]);
+    }
   });
 
   it("托管运行时只认 managed 来源", () => {
@@ -92,7 +105,7 @@ describe("Java 分区推导", () => {
     expect(runtimeComplete(broken)).toBe(false);
     expect(runtimeComplete(complete)).toBe(true);
     expect(missingMajors(instances, [broken, complete])).toEqual([25, 21]);
-    expect(javaNotes("auto", [broken, complete], instances, true)).toEqual([{ kind: "missing", majors: [25, 21], autoDownload: true }]);
+    expect(javaNotes("auto", [broken, complete], instances, true)).toEqual([{ kind: "missing", majors: [25, 21], remedy: "auto" }]);
     expect(hasManaged([broken], 21)).toBe(false);
     expect(selectableAsDefault(broken, "auto")).toBe(false);
     expect(selectableAsDefault(broken, broken.path)).toBe(true);

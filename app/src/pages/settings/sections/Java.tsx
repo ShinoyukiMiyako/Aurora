@@ -2,6 +2,7 @@
 // 手动下载运行时，以及让游戏用独立显卡。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Icon } from "../../../art/Icon";
 import { JAVA_AUTO, type InstanceSummary } from "../../../domain/adapt";
 import { runtimeComplete } from "../../../domain/rules";
 import { useShell } from "../../../shell/shell";
@@ -9,6 +10,7 @@ import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useGpuAdapters, useJavaRuntimes, type JavaInstallationDto } from "../../../state/queries/catalog";
+import { announceRole } from "../../../ui/Banner";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
@@ -83,12 +85,16 @@ function RuntimeDetail({ runtime, instances }: { runtime: JavaInstallationDto; i
   );
 }
 
-function noteText(note: Exclude<JavaNote, { kind: "pinnedMissing" }>): string {
+const MISSING_TEXT = { auto: JAVA_COPY.missingAuto, manual: JAVA_COPY.missingManual, pinned: JAVA_COPY.missingPinned } as const;
+
+function noteText(note: JavaNote): string {
   switch (note.kind) {
     case "pinned":
       return JAVA_COPY.pinnedNote;
+    case "pinnedMissing":
+      return JAVA_COPY.pinnedMissing;
     case "missing":
-      return note.autoDownload ? JAVA_COPY.missingAuto(joinMajors(note.majors)) : JAVA_COPY.missingManual(joinMajors(note.majors));
+      return MISSING_TEXT[note.remedy](joinMajors(note.majors));
     case "bits32":
       return JAVA_COPY.bits32Note;
   }
@@ -122,6 +128,36 @@ function PinnedMissingNote({ path, onUseAuto, onPickAgain }: { path: string; onU
         {path}
       </span>
     </Callout>
+  );
+}
+
+/**
+ * 卡片里的提醒：一张卡片至多一条说明块，最要紧的那条写成说明块，其余逐行列在下面。行不限两行，也和说明块一样要播报。
+ * notes 由 javaNotes 按后果排好。
+ */
+function JavaNotes({ notes, onUseAuto, onPickAgain }: { notes: readonly JavaNote[]; onUseAuto(): void; onPickAgain: (() => void) | null }) {
+  if (notes.length === 0) return null;
+  const [lead, ...rest] = notes;
+  return (
+    <>
+      {lead.kind === "pinnedMissing" ? (
+        <PinnedMissingNote path={lead.path} onUseAuto={onUseAuto} onPickAgain={onPickAgain} />
+      ) : (
+        <Callout tone="warn" icon="alert" announce>
+          {noteText(lead)}
+        </Callout>
+      )}
+      {rest.length > 0 && (
+        <div className={s.noteRows}>
+          {rest.map((note) => (
+            <div key={note.kind} className={s.noteRow} role={announceRole("warn", true)}>
+              <Icon name="alert" size={16} className={s.noteIcon} />
+              <span>{noteText(note)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -211,15 +247,7 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
       )}
       {/* 空状态时也要有：手动记下的路径探测不出来时，只有这里还能看到并移除它 */}
       <ManualBlock extraPaths={settings.extraJavaPaths} runtimes={runtimes} />
-      {notes.map((note) =>
-        note.kind === "pinnedMissing" ? (
-          <PinnedMissingNote key={note.kind} path={note.path} onUseAuto={() => write.set(JAVA_AUTO)} onPickAgain={pickable ? pickAgain : null} />
-        ) : (
-          <Callout key={note.kind} tone="warn" icon="alert" announce>
-            {noteText(note)}
-          </Callout>
-        ),
-      )}
+      <JavaNotes notes={notes} onUseAuto={() => write.set(JAVA_AUTO)} onPickAgain={pickable ? pickAgain : null} />
     </>
   );
 }
