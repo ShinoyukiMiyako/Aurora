@@ -35,6 +35,7 @@ import {
   confirmJava,
   instancePath,
   loaderOptions,
+  loaderVersionNote,
   STARTER_API,
   starterGroup,
   type ConfirmJava,
@@ -377,7 +378,7 @@ function LoaderVersionList({
     <div role="radiogroup" aria-label={CREATE_COPY.loaderVersion.listLabel(loader)} className={styles.list} onKeyDown={roving.onKeyDown}>
       {items.map((v, i) => {
         const on = v.version === value;
-        const sub = i === 0 ? CREATE_COPY.loaderVersion.newest : v.stable ? CREATE_COPY.loaderVersion.older : CREATE_COPY.loaderVersion.betaNote;
+        const sub = CREATE_COPY.loaderVersion[loaderVersionNote(v, recommended)];
         return (
           <button
             key={v.version}
