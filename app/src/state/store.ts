@@ -1585,6 +1585,9 @@ export class LauncherStore {
     // 没人订阅的缓存条目随之丢弃，之后重新挂载的页面会重取，不靠页面自己观察签名变化
     invalidateResources(`log:${id}`);
     invalidateResources(`content:${id}`);
+    // 玩家常常在资源管理器里往 mods 目录放了文件就直接启动：诊断页要拿日志点名的 Mod 对列表，旧列表里没有它，
+    // 开关与「停用」就都出不来
+    invalidateResources(`mods:${id}`);
     invalidateResources("play-stats");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
