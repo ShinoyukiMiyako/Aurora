@@ -110,6 +110,14 @@ describe("以离线方式进单人：状态容器", () => {
     expect(infoToasts(store)).toEqual([]);
   });
 
+  it("外置登录账户遇到服务故障：会话记下账户类型，失败通知不写微软", async () => {
+    const store = await storeWith(YOZAKURA, "Yozakura", "authlib_injector");
+    failNextMockLaunch("account_service_down", { account: "Yozakura", status: 503 });
+    await store.actions.launch("生存");
+    expect(store.getState().session).toMatchObject({ phase: "failed", accountKind: "authlib", failure: { code: "account_service_down" } });
+    expect(store.getState().toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body, t.action?.label])).toEqual([["「生存」启动失败", "登录服务暂时不可用", "重试"]]);
+  });
+
   it("账户已被判定需要重新登录而被拒绝降级：会话改为 failed(account_relogin)，失败卡给出「重新登录」", async () => {
     const store = await storeWith(YOZAKURA, "Yozakura", "authlib_injector");
     failNextMockLaunch("account_service_down", { account: "Yozakura", status: 503 });

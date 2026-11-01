@@ -9,7 +9,7 @@ import { faceKey, fillOf, holdFor, placedForProgress, placedForStage, FACE_HOLD_
 import { brokenAction, launchFailure, launchView, sessionDetail, type LaunchView } from "./launchView";
 
 const T0 = 1_720_000_000_000;
-const ACCOUNT = { uuid: "u-1", name: "Steve" };
+const ACCOUNT = { uuid: "u-1", name: "Steve", kind: "microsoft" as const };
 
 function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSummary {
   return {

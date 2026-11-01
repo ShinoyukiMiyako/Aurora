@@ -82,7 +82,7 @@ const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
   spawn_failed: { message: "CreateProcess error=2" },
 };
 
-const ctx = (accountName: string): FailureContext => ({ accountName, javaPinned: false });
+const ctx = (accountName: string): FailureContext => ({ accountName, accountKind: "microsoft", javaPinned: false });
 
 // 账户名的边界：1 个字符、16 个字符（离线用户名上限）、带下划线与数字，再加一个随机名
 const randomName = `Player_${Math.floor(Math.random() * 1_000_000)}`;
@@ -163,6 +163,16 @@ describe("启动失败：账户验证暂时不可用", () => {
       secondary: { kind: "launch_offline_once", label: "以离线方式进单人" },
     });
     expect(copy.title.length).toBeLessThanOrEqual(16);
+  });
+
+  it.each(NAMES)("外置登录账户（%s）遇到服务故障：不写微软，重试与以离线方式进单人照旧", (name) => {
+    const copy = failureCopy("account_service_down", PARAMS.account_service_down, { ...ctx(name), accountKind: "authlib" });
+    expect(copy).toEqual({
+      title: "登录服务暂时不可用",
+      body: `登录服务出了故障，不是 ${name} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+      fix: { kind: "retry", label: "重试" },
+      secondary: { kind: "launch_offline_once", label: "以离线方式进单人" },
+    });
   });
 
   it("account_service_down 不读插值参数：缺 account 与 status 也给出同样的文案", () => {

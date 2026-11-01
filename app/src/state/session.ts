@@ -2,7 +2,7 @@
 // 迟到的旧事件原样丢弃。进度按八阶段表的区间计算，阶段 3 按字节线性推进，结果与旧值取最大（单调不减）。
 
 import { SESSION_LOG_LIMIT } from "../domain/limits";
-import { FAILURE_CODES, type FailureCode, type LogLine, type Session, type SessionDownload, type SessionPhase } from "../domain/types";
+import { FAILURE_CODES, type AccountKind, type FailureCode, type LogLine, type Session, type SessionDownload, type SessionPhase } from "../domain/types";
 import type { CrashCategoryName } from "../copy/flows";
 import type { LaunchPhaseName, QuickPlayArg } from "../ipc/launch";
 
@@ -16,6 +16,8 @@ export interface SessionState extends Session {
   accountUuid: string;
   /** 本次所用账户的名字：失败文案要写它，账户随后被删除时也不丢。 */
   accountName: string;
+  /** 本次所用账户的类型：服务故障的失败文案按它说是谁的故障，与名字一样不随账户删除丢失。 */
+  accountKind: AccountKind;
   /** 这次启动直达的世界或服务器；普通启动为 null。失败后「重试」带着它再来一次。 */
   quickPlay: QuickPlayArg | null;
   crash: SessionCrash | null;
@@ -62,12 +64,13 @@ export function stageProgress(stageIndex: number, download: SessionDownload | nu
   return start;
 }
 
-export function startSession(instanceId: string, taskId: string, account: { uuid: string; name: string }, now: number, quickPlay: QuickPlayArg | null): SessionState {
+export function startSession(instanceId: string, taskId: string, account: { uuid: string; name: string; kind: AccountKind }, now: number, quickPlay: QuickPlayArg | null): SessionState {
   return {
     instanceId,
     taskId,
     accountUuid: account.uuid,
     accountName: account.name,
+    accountKind: account.kind,
     quickPlay,
     phase: "preparing",
     progress: 0,

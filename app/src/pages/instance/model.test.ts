@@ -211,7 +211,7 @@ describe("工作目录与实例设置的锁", () => {
 
 describe("整页订阅的启动视图", () => {
   const T0 = 1_700_000_000_000;
-  const account = { uuid: "u", name: "Steve" };
+  const account = { uuid: "u", name: "Steve", kind: "microsoft" as const };
   const repair = (status: Task["status"], progress: number, speedBps: number, id = "repair-1"): Task => ({
     ...newTask({ id, kind: "game", title: "补全 生存", detail: "", instanceId: "生存", spec: { command: "repair", args: { versionId: "生存" } } }, T0),
     status,

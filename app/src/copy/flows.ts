@@ -253,6 +253,8 @@ export interface FailureCopy {
 export interface FailureContext {
   /** 本次启动所用账户的名字。 */
   accountName: string;
+  /** 本次启动所用账户的类型：外置登录账户的故障不是微软的故障。 */
+  accountKind: AccountKind;
   /** 实例设置里固定了 Java 路径（不是 auto）。 */
   javaPinned: boolean;
 }
@@ -335,13 +337,15 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
         secondary: OFFLINE_ONCE,
       };
     // 不读插值参数：status 只供排查，缺了也不该让失败卡抛错
-    case "account_service_down":
+    case "account_service_down": {
+      const microsoft = ctx.accountKind === "microsoft";
       return {
-        title: "微软登录服务暂时不可用",
-        body: `微软的登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+        title: microsoft ? "微软登录服务暂时不可用" : "登录服务暂时不可用",
+        body: `${microsoft ? "微软的" : ""}登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
         fix: RETRY,
         secondary: OFFLINE_ONCE,
       };
+    }
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
     case "files_failed":
