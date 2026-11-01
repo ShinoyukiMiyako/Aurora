@@ -32,6 +32,9 @@ pub const LOG_BATCH_MAX_LINES: usize = 200;
 /// 关闭；一直等下去的话退出报告永远出不来，占用槽与实例锁也一直放不掉。正常退出时管道里剩下的
 /// 只有缓冲中的最后几行，远用不了这么久。
 pub const OUTPUT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
+/// 单行游戏输出最多保留的字节数，超出的部分丢弃、只记字节数。Mod 会打印几 MB 不带换行的转储，
+/// 整段留着的话读取端、环形缓冲、会话日志与推给界面的批次都要背着它；正常的日志行远到不了这么长。
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// 日志来源流。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +50,7 @@ pub struct LogLine {
     /// 读到这一行时的 Unix 毫秒。
     pub at: u64,
     pub stream: LogStream,
+    /// 至多 [`MAX_LINE_BYTES`] 字节的原文；超出时末尾接上注明丢弃字节数的截断说明。
     pub text: String,
 }
 
@@ -285,6 +289,7 @@ pub fn detect_crash(report: &ExitReport) -> bool {
 
 /// 逐行读一条输出流。按字节读、有损解码：JVM 的本地层（如致命错误头）按系统代码页输出，
 /// 一个非 UTF-8 字节就会让按字符串读的读取端报错退出，从此没人读这条管道，游戏随之卡死。
+/// 单行超过 [`MAX_LINE_BYTES`] 的部分边读边丢，读取照常往下走。
 fn spawn_reader<R>(
     reader: R,
     stream: LogStream,
@@ -296,33 +301,155 @@ where
 {
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
-        let mut buf = Vec::new();
+        let mut lines = LineSplitter::new();
+        let mut emit = |text: String| {
+            let line = LogLine {
+                at: clock.now(),
+                stream,
+                text,
+            };
+            // 汇流任务只会在两个读取端都结束后才退出，这里发送失败说明它异常死掉了；
+            // 继续读空管道，至少别让游戏卡住。
+            if tx.send(line).is_err() {
+                tracing::warn!(?stream, "游戏输出汇流任务已退出，丢弃后续输出");
+            }
+        };
         loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
-                        buf.pop();
-                    }
-                    let line = LogLine {
-                        at: clock.now(),
-                        stream,
-                        text: String::from_utf8_lossy(&buf).into_owned(),
-                    };
-                    // 汇流任务只会在两个读取端都结束后才退出，这里发送失败说明它异常死掉了；
-                    // 继续读空管道，至少别让游戏卡住。
-                    if tx.send(line).is_err() {
-                        tracing::warn!(?stream, "游戏输出汇流任务已退出，丢弃后续输出");
-                    }
-                }
+            let chunk = match reader.fill_buf().await {
+                Ok(chunk) => chunk,
                 Err(err) => {
                     tracing::warn!(error = %err, ?stream, "读取游戏输出失败，停止读取这条流");
                     break;
                 }
+            };
+            if chunk.is_empty() {
+                break;
             }
+            let consumed = chunk.len();
+            lines.feed(chunk, &mut emit);
+            reader.consume(consumed);
+        }
+        // 流尾没有换行的最后一段（以及读取出错前已经读到的半行）也是真实输出。
+        if let Some(text) = lines.take_pending() {
+            emit(text);
         }
     })
+}
+
+/// 把字节流切成行：去掉行尾的 `\r`，单行只留前 [`MAX_LINE_BYTES`] 字节，其余的只计数。
+struct LineSplitter {
+    /// 当前行已留下的字节。容量一次给足上限且从不越过，长行不会让它增长。
+    kept: Vec<u8>,
+    /// 当前行超出上限、没有留下的字节数。
+    dropped: u64,
+    /// 当前行末尾连续的 `\r` 个数（不论落在留下的还是丢掉的部分），行结束时它们不算正文。
+    trailing_cr: u64,
+    /// 当前行是否已经读到过字节；区分「空行」与「什么都没读到」。
+    pending: bool,
+}
+
+impl LineSplitter {
+    fn new() -> Self {
+        Self {
+            kept: Vec::with_capacity(MAX_LINE_BYTES),
+            dropped: 0,
+            trailing_cr: 0,
+            pending: false,
+        }
+    }
+
+    /// 喂一段字节；这段里每结束一行就交给 `emit` 一次。
+    fn feed(&mut self, mut chunk: &[u8], emit: &mut impl FnMut(String)) {
+        while let Some(newline) = chunk.iter().position(|&b| b == b'\n') {
+            self.push(&chunk[..newline]);
+            emit(self.finish_line());
+            chunk = &chunk[newline + 1..];
+        }
+        self.push(chunk);
+    }
+
+    /// 流结束时还没收尾的半行。
+    fn take_pending(&mut self) -> Option<String> {
+        self.pending.then(|| self.finish_line())
+    }
+
+    fn push(&mut self, segment: &[u8]) {
+        if segment.is_empty() {
+            return;
+        }
+        self.pending = true;
+        let crs = segment.iter().rev().take_while(|&&b| b == b'\r').count() as u64;
+        self.trailing_cr = if crs == segment.len() as u64 {
+            self.trailing_cr + crs
+        } else {
+            crs
+        };
+        if self.dropped > 0 {
+            self.dropped += segment.len() as u64;
+            return;
+        }
+        let room = MAX_LINE_BYTES - self.kept.len();
+        let (keep, rest) = segment.split_at(room.min(segment.len()));
+        self.kept.extend_from_slice(keep);
+        if let Some(&first_dropped) = rest.first() {
+            // 上限正好切在一个 UTF-8 字符中间时退到这个字符之前，免得留下的部分以替换符收尾；
+            // 被退掉的字节一并算进丢弃数。不是合法 UTF-8 的（如按系统代码页输出的）不退。
+            let mut cut = self.kept.len();
+            let tail_start = cut.saturating_sub(3);
+            if is_utf8_continuation(first_dropped)
+                && let Some(lead) = self.kept[tail_start..]
+                    .iter()
+                    .rposition(|&b| !is_utf8_continuation(b))
+                    .map(|offset| tail_start + offset)
+                && utf8_width(self.kept[lead]).is_some_and(|width| lead + width > cut)
+            {
+                cut = lead;
+            }
+            self.dropped = (self.kept.len() - cut + rest.len()) as u64;
+            self.kept.truncate(cut);
+        }
+    }
+
+    fn finish_line(&mut self) -> String {
+        // 行尾的 `\r` 全落在丢掉的部分里时，丢掉的其实只是换行符，这一行并没有超长。
+        let dropped = self.dropped.saturating_sub(self.trailing_cr);
+        if dropped == 0 {
+            let in_kept = usize::try_from(self.trailing_cr - self.dropped)
+                .expect("留下的 \\r 不超过留下的字节数");
+            self.kept.truncate(self.kept.len() - in_kept);
+        }
+        let mut text = String::from_utf8_lossy(&self.kept).into_owned();
+        if dropped > 0 {
+            text.push_str(&truncation_note(dropped));
+        }
+        self.kept.clear();
+        self.dropped = 0;
+        self.trailing_cr = 0;
+        self.pending = false;
+        text
+    }
+}
+
+fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0xC0 == 0x80
+}
+
+/// 以 `lead` 开头的 UTF-8 多字节字符占几个字节；不是多字节字符的首字节时为 `None`。
+fn utf8_width(lead: u8) -> Option<usize> {
+    match lead {
+        0xC2..=0xDF => Some(2),
+        0xE0..=0xEF => Some(3),
+        0xF0..=0xF4 => Some(4),
+        _ => None,
+    }
+}
+
+/// 超长行末尾的说明。会话日志、崩溃判定缓存与界面拿到的都是同一行文本，说明随行走，三处一致。
+fn truncation_note(dropped: u64) -> String {
+    format!(
+        "…（这一行超过 {} KB，其余 {dropped} 字节没有记录）",
+        MAX_LINE_BYTES / 1024
+    )
 }
 
 struct PumpOutcome {
@@ -492,6 +619,222 @@ mod tests {
         );
         let all: Vec<u64> = batches.iter().flatten().map(|l| l.at).collect();
         assert_eq!(all, (0..total as u64).collect::<Vec<_>>());
+    }
+
+    /// Mod 打印几 MB 不带换行的转储：这一行只留前 64 KB 并注明丢掉的字节数，后面的行照常读到。
+    #[tokio::test]
+    async fn overlong_line_is_capped_and_the_next_line_survives() {
+        const LONG: usize = 5 * 1024 * 1024;
+        let mut data = vec![b'x'; LONG];
+        data.extend_from_slice(b"\r\nAFTER_LONG_LINE\r\n");
+        let clock = SessionClock::start().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_reader(std::io::Cursor::new(data), LogStream::Stdout, clock, tx)
+            .await
+            .unwrap();
+        let mut lines = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line.text);
+        }
+        assert_eq!(lines.len(), 2);
+        let note = "…（这一行超过 64 KB，其余 5177344 字节没有记录）";
+        // 先比长度：修复前这一行有 5 MB，直接比内容会把整行打进失败信息。
+        assert_eq!(lines[0].len(), 64 * 1024 + note.len());
+        let (kept, tail) = lines[0].split_at(64 * 1024);
+        assert!(kept.bytes().all(|b| b == b'x'));
+        assert_eq!(tail, note);
+        assert_eq!(lines[1], "AFTER_LONG_LINE");
+    }
+
+    fn split_all(chunks: &[&[u8]]) -> (Vec<String>, LineSplitter) {
+        let mut splitter = LineSplitter::new();
+        let mut out = Vec::new();
+        for chunk in chunks {
+            splitter.feed(chunk, &mut |text| out.push(text));
+        }
+        if let Some(text) = splitter.take_pending() {
+            out.push(text);
+        }
+        (out, splitter)
+    }
+
+    /// `len` 个 `fill` 接上 `tail`，整串一次喂进去。
+    fn split(fill: u8, len: usize, tail: &[u8]) -> Vec<String> {
+        let mut bytes = vec![fill; len];
+        bytes.extend_from_slice(tail);
+        split_all(&[bytes.as_slice()]).0
+    }
+
+    #[test]
+    fn splitter_cuts_exactly_at_the_cap() {
+        let max = MAX_LINE_BYTES;
+        let a = |len| "a".repeat(len);
+        // 正好上限：整行留下，不加说明。
+        assert_eq!(split(b'a', max, b"\n"), [a(max)]);
+        // 多 1 字节：丢 1 字节。
+        assert_eq!(split(b'a', max + 1, b"\n"), [a(max) + &truncation_note(1)]);
+        // 越过上限的只有行尾的 \r：那是换行符，不算超长。
+        assert_eq!(split(b'a', max, b"\r\n"), [a(max)]);
+        assert_eq!(split(b'a', max, b"\r\r\n"), [a(max)]);
+        // 行尾的 \r 跨在上限两侧：留下的那个也去掉。
+        assert_eq!(split(b'a', max - 1, b"\r\r\r\n"), [a(max - 1)]);
+        // 行中的 \r 是正文；空行照样是一行；流尾没有换行的半行也交出。
+        assert_eq!(split(b'a', 1, b"\rb\n\n\r\nlast"), ["a\rb", "", "", "last"]);
+        assert!(split(b'a', 0, b"").is_empty());
+        assert_eq!(split(b'a', 0, b"\r"), [""]);
+    }
+
+    #[test]
+    fn splitter_does_not_cut_a_utf8_char_in_half() {
+        let max = MAX_LINE_BYTES;
+        // 「中」从上限前 1 字节开始：整个字退到截断处之后，丢弃数是「中文」的 6 个字节。
+        assert_eq!(
+            split(b'a', max - 1, "中文\n".as_bytes()),
+            ["a".repeat(max - 1) + &truncation_note(6)]
+        );
+        // 字正好在上限处收尾：一个字节都不多退。
+        assert_eq!(
+            split(b'a', max - 3, "中文\n".as_bytes()),
+            ["a".repeat(max - 3) + "中" + &truncation_note(3)]
+        );
+        // 按系统代码页输出的 GBK 字节不是 UTF-8，不退，照常有损解码。
+        assert_eq!(
+            split(b'a', max - 1, b"\xd6\xd0\n"),
+            ["a".repeat(max - 1) + "\u{FFFD}" + &truncation_note(1)]
+        );
+    }
+
+    #[test]
+    fn splitter_holds_at_most_the_cap_while_a_long_line_streams() {
+        let mut splitter = LineSplitter::new();
+        let capacity = splitter.kept.capacity();
+        let mut out = Vec::new();
+        let block = vec![b'z'; 8 * 1024];
+        // 5 MB 分成 8 KB 一块送进来，和读取端从管道里拿到的形状一样。
+        for _ in 0..640 {
+            splitter.feed(&block, &mut |text| out.push(text));
+        }
+        assert!(out.is_empty(), "还没读到换行，不该交出行");
+        assert_eq!(splitter.kept.len(), MAX_LINE_BYTES);
+        assert_eq!(splitter.kept.capacity(), capacity, "长行不应让缓冲增长");
+        assert_eq!(splitter.dropped, (640 * 8 * 1024 - MAX_LINE_BYTES) as u64);
+        splitter.feed(b"\nnext\n", &mut |text| out.push(text));
+        assert_eq!(out.len(), 2);
+        assert!(out[0].ends_with(&truncation_note((640 * 8 * 1024 - MAX_LINE_BYTES) as u64)));
+        assert_eq!(out[1], "next");
+        assert!(splitter.kept.is_empty() && splitter.dropped == 0);
+    }
+
+    /// 与分块无关：同一串字节无论怎么切成块喂进去，切出的行都与按整行算出的结果相同。
+    #[test]
+    fn splitter_output_does_not_depend_on_chunk_boundaries() {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
+            | 1;
+        let mut state = seed;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        let max = MAX_LINE_BYTES;
+        let mut stream = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..40 {
+            // 长度集中在上限附近，夹带多字节字符与行尾 \r。
+            let len = match next(4) {
+                0 => next(64),
+                1 => max - 4 + next(8),
+                2 => max + next(3 * max),
+                _ => next(max),
+            };
+            let mut line: Vec<u8> = Vec::with_capacity(len + 8);
+            while line.len() < len {
+                if next(10) == 0 {
+                    line.extend_from_slice("樱".as_bytes());
+                } else {
+                    line.push(b'a' + next(26) as u8);
+                }
+            }
+            let crs = next(3);
+            let body_len = line.len();
+            line.extend(std::iter::repeat_n(b'\r', crs));
+            expected.push(reference_line(&line[..body_len]));
+            stream.extend_from_slice(&line);
+            stream.push(b'\n');
+        }
+        let mut chunks = Vec::new();
+        let mut rest = stream.as_slice();
+        while !rest.is_empty() {
+            let take = (1 + next(20_000)).min(rest.len());
+            let (head, tail) = rest.split_at(take);
+            chunks.push(head);
+            rest = tail;
+        }
+        let (lines, _) = split_all(&chunks);
+        assert_eq!(lines.len(), expected.len(), "seed {seed}");
+        for (index, (got, want)) in lines.iter().zip(&expected).enumerate() {
+            assert!(got == want, "seed {seed}：第 {index} 行不一致");
+        }
+    }
+
+    /// 按整行直接算（测试数据都是合法 UTF-8）：留到上限以内最后一个字符边界，其余计入说明。
+    fn reference_line(body: &[u8]) -> String {
+        let text = std::str::from_utf8(body).unwrap();
+        if text.len() <= MAX_LINE_BYTES {
+            return text.to_owned();
+        }
+        let cut = text.floor_char_boundary(MAX_LINE_BYTES);
+        format!(
+            "{}{}",
+            &text[..cut],
+            truncation_note((text.len() - cut) as u64)
+        )
+    }
+
+    /// 会话日志、崩溃判定缓存与推给界面的批次拿到的是同一行截断后的文本。
+    #[tokio::test]
+    async fn capped_line_reads_the_same_in_log_recent_and_forward() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(tmp.path(), "t", clock.started_at())
+            .await
+            .unwrap();
+        let mut data = vec![b'q'; MAX_LINE_BYTES * 3];
+        data.extend_from_slice(b"\nTAIL\n");
+        let (line_tx, line_rx) = mpsc::unbounded_channel();
+        let (fwd_tx, mut fwd_rx) = mpsc::unbounded_channel();
+        let reader = spawn_reader(
+            std::io::Cursor::new(data),
+            LogStream::Stdout,
+            clock,
+            line_tx,
+        );
+        let outcome = pump(line_rx, Some(log), Some(fwd_tx)).await;
+        reader.await.unwrap();
+
+        let expected = "q".repeat(MAX_LINE_BYTES) + &truncation_note((MAX_LINE_BYTES * 2) as u64);
+        let mut forwarded = Vec::new();
+        while let Ok(batch) = fwd_rx.try_recv() {
+            forwarded.extend(batch.into_iter().map(|line| line.text));
+        }
+        assert_eq!(forwarded, [expected.clone(), "TAIL".to_owned()]);
+        let recent: Vec<&str> = outcome.recent.iter().map(String::as_str).collect();
+        assert_eq!(recent, [expected.as_str(), "TAIL"]);
+        let path = outcome
+            .log
+            .unwrap()
+            .finish(clock.now(), crate::logfile::SessionOutcome::Exited)
+            .await
+            .unwrap();
+        let tail = crate::logfile::read_log_tail(&path, 1 << 20, 10)
+            .await
+            .unwrap();
+        let logged: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(logged, [expected.as_str(), "TAIL"]);
     }
 
     #[cfg(windows)]
