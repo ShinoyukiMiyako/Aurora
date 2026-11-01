@@ -2,7 +2,7 @@
 //! 以及新建页要的版本清单、加载器版本与所需 Java。
 //!
 //! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，装、删、启停、
-//! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
+//! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档与删除存档备份）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
 //! 并在 detail 里带上正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏、与存档备份之间可以并行
 //! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动、补全与导入整合包期间，实例继承链上的
 //! 基底版本（客户端 jar 与 natives 所在的原版）以 inherited 一并占住，删除、改名、补全基底报
@@ -49,7 +49,7 @@ pub enum InstanceActivity {
     Launching,
     Running,
     /// 装、删、启停、更新、回滚 Mod，往实例里装资源包、光影、数据包，查更新时回写卷宗，写实例设置，
-    /// 或为打开文件夹建出工作目录下的子目录。
+    /// 删除存档备份，或为打开文件夹建出工作目录下的子目录。
     Modifying,
     /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到退出、补全、导入整合包
     /// 期间都要读写这里的客户端 jar 与 natives。只经 [`InstanceLocks::acquire_with_bases`] 占，
@@ -1972,8 +1972,9 @@ async fn ensure_dir(dir: &Path) -> Result<(), CommandError> {
 //
 // 备份放在游戏目录下的启动器元数据区，按实例与存档文件夹名分目录；不隔离、共用游戏目录 saves 的存档
 // 归在共用的一份下，几个实例看到的是同一批备份。备份、恢复、导出是长任务，占住实例做「备份」：
-// 与启动、运行、改名、删除、新建、补全互斥，与 Mod 改动、被别的实例当作基底并行。列表与删除备份不碰存档
-// 本身，不占实例。
+// 与启动、运行、改名、删除、新建、补全互斥，与 Mod 改动、被别的实例当作基底并行。它们只碰存档与备份区，
+// 用不到基底的客户端 jar 与 natives，所以不占基底：基底这期间可以补全，删除与改名有依赖检查挡着。
+// 列表不占实例；删除备份只碰备份区，以「改动」占住实例，挡开改名时挪走备份目录。
 
 /// 一份存档备份。
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2300,9 +2301,10 @@ pub(crate) async fn list_world_backups_with(
 }
 
 /// 用一份备份替换现在的存档：先解压到临时目录并确认 level.dat 读得出，再把现在的存档移入回收站、换上新的。
-/// 长任务，可取消；取消或失败时现在的存档原样不动。占用规则与 `backup_world` 相同。备份不在报
-/// `world_backup_not_found`，备份损坏或有越界条目报 `world_backup_corrupt`；原存档已进回收站、新的没放到位时报
-/// `world_restore_incomplete`，detail.staged 为恢复出的副本。
+/// 长任务，解压期间可取消，取消或失败时现在的存档原样不动；开始换存档之后不再响应取消，换完才返回，结果按
+/// 实际报。占用规则与 `backup_world` 相同。备份不在报 `world_backup_not_found`，备份损坏或有越界条目报
+/// `world_backup_corrupt`；原存档已进回收站、新的没放到位时报 `world_restore_incomplete`，detail.staged 为恢复
+/// 出的副本。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_world_backup(
@@ -2349,35 +2351,37 @@ pub(crate) async fn restore_world_backup_with(
     check_instance_id(id)?;
     check_world(world)?;
     check_backup_file(file)?;
-    let (_guard, task, aurora) = begin_world_task(env, task_id, id, true).await?;
-    let outcome = task
-        .run(async {
-            aurora
-                .restore_world_backup(id, world, file, disposer, Some(events))
-                .await
-                .map_err(instance_error)
-        })
-        .await?;
+    let (_guard, _task, aurora) = begin_world_task(env, task_id, id, true).await?;
+    // 不走 TaskHandle::run：解压阶段自己看令牌，取消时很快停下；换存档一旦开始就停不下来了，宽限期满丢弃
+    // future 只是不再等它，后台线程照样换完，用户却收到「已取消」，实例也放开了，半途就能启动游戏。
+    // 新副本没能就位时也得照实报出它在哪，不能被 run 盖成取消。
+    let outcome = aurora
+        .restore_world_backup(id, world, file, disposer, Some(events))
+        .await
+        .map_err(instance_error)?;
     Ok(RestoreResultDto {
         world: outcome.world,
         previous_in_recycle_bin: outcome.previous_in_recycle_bin,
     })
 }
 
-/// 把一份备份移入回收站并从备份列表里去掉。可以从回收站找回，所以不需要确认。不占实例：只碰备份区，
-/// 与同一存档的备份、恢复由门面按存档排队。备份不在报 `world_backup_not_found`。
+/// 把一份备份移入回收站并从备份列表里去掉。可以从回收站找回，所以不需要确认。只碰备份区，以「改动」占住实例：
+/// 游戏运行中、备份进行中照常能删（与同一存档的备份、恢复由门面按存档排队），改名、删除实例、新建、补全进行中
+/// 报 `instance_busy`。备份不在报 `world_backup_not_found`。
 #[tauri::command]
 pub async fn delete_world_backup(
     id: String,
     world: String,
     file: String,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<(), CommandError> {
-    delete_world_backup_with(&facade, &id, &world, &file, RecycleBin).await
+    delete_world_backup_with(&facade, &locks, &id, &world, &file, RecycleBin).await
 }
 
 pub(crate) async fn delete_world_backup_with(
     facade: &Facade,
+    locks: &InstanceLocks,
     id: &str,
     world: &str,
     file: &str,
@@ -2385,6 +2389,9 @@ pub(crate) async fn delete_world_backup_with(
 ) -> Result<(), CommandError> {
     check_world(world)?;
     check_backup_file(file)?;
+    // 备份目录按实例名放，改名时整个挪走，挪的时候不看存档锁：不占住实例的话，这边删到一半，清单会按旧路径
+    // 重新写出来，挪过去的清单里却还记着删掉的那份。
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
     aurora
         .delete_world_backup(id, world, file, disposer)
@@ -4409,6 +4416,40 @@ mod tests {
 
     // ---- 存档备份的命令 ----
 
+    /// 备份、恢复、导出存档不占基底：占住的只有实例自己，基底这期间照样能补全；基底的删除与改名由依赖检查挡着，
+    /// 不靠实例锁。
+    #[tokio::test]
+    async fn world_tasks_leave_the_base_free() {
+        let env = Env::new();
+        env.vanilla("1.20.1");
+        let instance = env.version(
+            "织布",
+            r#"{"id":"织布","inheritsFrom":"1.20.1","type":"release","mainClass":"K"}"#,
+        );
+        write_world(&instance.join("saves"), "新的世界", b"region-v1");
+        let w = WorldEnv::new();
+
+        let held = begin_world_task(&w.with(&env), "t", "织布", false)
+            .await
+            .unwrap();
+        assert_eq!(w.locks.activity("织布"), Some(InstanceActivity::BackingUp));
+        assert_eq!(w.locks.occupancy("1.20.1"), (None, None));
+        drop(
+            w.locks
+                .acquire("1.20.1", InstanceActivity::Repairing)
+                .unwrap(),
+        );
+        let err = delete_instance_with(&env.facade, &w.locks, "1.20.1", Remove)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_HAS_DEPENDENTS);
+        let err = rename_instance_with(&env.facade, &w.locks, "1.20.1", "底座")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_HAS_DEPENDENTS);
+        drop(held);
+    }
+
     /// 测试里不往用户回收站塞东西：记下交来的路径再删掉，文件与目录都收。
     #[derive(Clone, Default)]
     struct Recorder(Arc<Mutex<Vec<PathBuf>>>);
@@ -4814,9 +4855,16 @@ mod tests {
                 list_world_backups_with(&env.facade, "生存", world)
                     .await
                     .unwrap_err(),
-                delete_world_backup_with(&env.facade, "生存", world, "1-auto.zip", Remove)
-                    .await
-                    .unwrap_err(),
+                delete_world_backup_with(
+                    &env.facade,
+                    &w.locks,
+                    "生存",
+                    world,
+                    "1-auto.zip",
+                    Remove,
+                )
+                .await
+                .unwrap_err(),
             ] {
                 assert_eq!(err.code, common::INVALID_ARGUMENT, "{world:?}");
                 assert_eq!(err.detail.unwrap()["field"], "world", "{world:?}");
@@ -5105,6 +5153,144 @@ mod tests {
         assert!(!registry.is_running("rs-big"));
     }
 
+    /// 处置存档时停住等测试放行：回收站收下一个大存档要好几秒，取消就落在这段时间里。放行后删掉存档；
+    /// `squat` 为真时再在原处建出一个非空目录，让恢复出的副本改名就位失败。
+    #[derive(Clone, Default)]
+    struct HeldDisposer {
+        entered: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+        squat: bool,
+    }
+
+    impl Disposer for HeldDisposer {
+        fn dispose(&self, path: &Path) -> Result<(), InstanceError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.entered.store(true, SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !self.release.load(SeqCst) {
+                assert!(Instant::now() < deadline, "测试一直没有放行");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let io = |source| InstanceError::Io {
+                path: path.to_path_buf(),
+                source,
+            };
+            std::fs::remove_dir_all(path).map_err(io)?;
+            if self.squat {
+                std::fs::create_dir_all(path.join("抢占")).map_err(io)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// 备份一个存档再改掉它，发起恢复，等恢复走到处置现在的存档时取消，过了取消时限才放行。
+    /// 返回放行前任务是否已结束、那时实例的占用、任务的结果与现在的存档。
+    async fn cancel_restore_mid_swap(
+        env: &Env,
+        disposer: HeldDisposer,
+    ) -> (
+        bool,
+        Option<InstanceActivity>,
+        Result<RestoreResultDto, CommandError>,
+        PathBuf,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let world = env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        std::fs::write(world.join("region").join("r.0.0.mca"), b"region-v2").unwrap();
+
+        let facade = env.facade.clone();
+        let registry = Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let game = Arc::new(GameSlot::default());
+        let (r, l, g, d) = (
+            registry.clone(),
+            locks.clone(),
+            game.clone(),
+            disposer.clone(),
+        );
+        let file = made.backup.file;
+        let restore = tokio::spawn(async move {
+            let ctx = WorldTaskEnv {
+                facade: &facade,
+                tasks: &r,
+                locks: &l,
+                game: &g,
+            };
+            let (events, _rx) = sink();
+            restore_world_backup_with(&ctx, "rs-swap", "生存", "新的世界", &file, d, &events).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !disposer.entered.load(SeqCst) {
+            assert!(Instant::now() < deadline, "恢复没有走到处置存档");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        assert!(registry.cancel("rs-swap"));
+        tokio::time::sleep(CANCEL_DEADLINE + Duration::from_millis(200)).await;
+        let finished_early = restore.is_finished();
+        let activity = locks.activity("生存");
+        disposer.release.store(true, SeqCst);
+        let outcome = restore.await.unwrap();
+        assert_eq!(locks.activity("生存"), None);
+        assert!(!registry.is_running("rs-swap"));
+        (finished_early, activity, outcome, world)
+    }
+
+    /// 取消落在处置现在的存档之后：换存档已经停不下来，不能告诉用户取消了、放开实例让人在半途启动游戏。
+    /// 一直等到换完，实例全程占着，结果按成功报（取消晚了一步）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_restore_mid_swap_waits_for_the_swap_to_finish() {
+        let env = Env::new();
+        let (finished_early, activity, outcome, world) =
+            cancel_restore_mid_swap(&env, HeldDisposer::default()).await;
+
+        assert!(!finished_early, "存档还没换完，任务不该先结束");
+        assert_eq!(activity, Some(InstanceActivity::BackingUp));
+        assert_eq!(
+            outcome.unwrap(),
+            RestoreResultDto {
+                world: "新的世界".into(),
+                previous_in_recycle_bin: true,
+            }
+        );
+        assert_eq!(
+            std::fs::read(world.join("region").join("r.0.0.mca")).unwrap(),
+            b"region-v1"
+        );
+    }
+
+    /// 取消之后才在就位那一步失败：这不是取消造成的，原存档已进回收站，恢复出的副本是用户唯一的新副本，
+    /// 要照实报 world_restore_incomplete 并带上它的位置，不能被盖成 cancelled。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restore_left_unplaced_after_cancel_still_reports_where_the_copy_is() {
+        let env = Env::new();
+        let disposer = HeldDisposer {
+            squat: true,
+            ..HeldDisposer::default()
+        };
+        let (_, _, outcome, world) = cancel_restore_mid_swap(&env, disposer).await;
+
+        let err = outcome.unwrap_err();
+        assert_eq!(err.code, common::WORLD_RESTORE_INCOMPLETE);
+        let staged = world
+            .parent()
+            .unwrap()
+            .join(format!("新的世界.{}-restore", aurora_base::brand::APP_SLUG));
+        assert_eq!(
+            err.detail.unwrap()["staged"],
+            json!(staged.display().to_string())
+        );
+        assert_eq!(
+            std::fs::read(staged.join("region").join("r.0.0.mca")).unwrap(),
+            b"region-v1"
+        );
+    }
+
     /// 恢复：现在的存档交给 disposer（生产环境是回收站），换上备份时的样子；备份不在报 world_backup_not_found。
     #[tokio::test]
     async fn restore_hands_the_current_world_to_the_disposer_and_puts_the_backup_back() {
@@ -5212,7 +5398,7 @@ mod tests {
             .unwrap();
     }
 
-    /// 删除备份：zip 交给 disposer，从列表里摘掉；再删一次报 world_backup_not_found。游戏运行中也能删（不占实例）。
+    /// 删除备份：zip 交给 disposer，从列表里摘掉；再删一次报 world_backup_not_found。游戏运行中也能删。
     #[tokio::test]
     async fn deleting_a_backup_disposes_the_zip_and_drops_it_from_the_list() {
         let env = Env::new();
@@ -5231,6 +5417,7 @@ mod tests {
         let disposer = Recorder::default();
         delete_world_backup_with(
             &env.facade,
+            &w.locks,
             "生存",
             "新的世界",
             &first.backup.file,
@@ -5249,6 +5436,7 @@ mod tests {
 
         let err = delete_world_backup_with(
             &env.facade,
+            &w.locks,
             "生存",
             "新的世界",
             &first.backup.file,
@@ -5258,6 +5446,50 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, common::WORLD_BACKUP_NOT_FOUND);
         assert_eq!(err.detail.unwrap()["file"], json!(first.backup.file));
+    }
+
+    /// 备份按实例名分目录放，改名时整个挪走：改名进行中删备份报 instance_busy，zip 不动；备份进行中不受影响。
+    #[tokio::test]
+    async fn deleting_a_backup_waits_for_a_rename_of_the_instance() {
+        let env = Env::new();
+        env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        let file = made.backup.file;
+        let disposer = Recorder::default();
+        let delete = || {
+            delete_world_backup_with(
+                &env.facade,
+                &w.locks,
+                "生存",
+                "新的世界",
+                &file,
+                disposer.clone(),
+            )
+        };
+
+        let renaming = w.locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = delete().await.unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], "renaming");
+        assert!(disposer.disposed().is_empty());
+        drop(renaming);
+
+        let backing_up = w
+            .locks
+            .acquire("生存", InstanceActivity::BackingUp)
+            .unwrap();
+        delete().await.unwrap();
+        assert_eq!(disposer.disposed().len(), 1);
+        assert_eq!(
+            w.locks.activity("生存"),
+            Some(InstanceActivity::BackingUp),
+            "删完放开自己那一份"
+        );
+        drop(backing_up);
     }
 
     /// 共用存档：另一个不隔离的实例在把存档打进整合包时，恢复同样报 instance_busy，detail 指向那个实例、活动为
@@ -5532,6 +5764,90 @@ mod tests {
             .unwrap();
         assert!(!env.game_dir().join("versions").join("b").exists());
         assert!(moved.join("新的世界").join(&made.backup.file).is_file());
+    }
+
+    /// 一个什么都绑着的实例：改名（含只改大小写）时侧栏固定、当前选中、固定服务器的绑定、游玩记录与存档备份一起跟到
+    /// 新名字，落到盘上；别的实例的绑定不动。删除时前四样清掉，备份留下。
+    #[tokio::test]
+    async fn rename_and_delete_keep_every_reference_in_step() {
+        let env = Env::new();
+        env.isolated_world("周末生存", "新的世界");
+        env.vanilla("别的");
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"周末生存":{"total_ms":5400000,"last_played_at":1761832800000}},
+                "days":{"2026-10-30":{"instances":{"周末生存":5400000}}}}}"#,
+        );
+        let server = |address: &str, instance: &str| aurora_core::PinnedServer {
+            name: address.to_owned(),
+            address: address.to_owned(),
+            instance: Some(instance.to_owned()),
+        };
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["周末生存".into(), "别的".into()]);
+                aurora.set_selected_version(Some("周末生存".into()));
+                aurora.set_pinned_servers(vec![
+                    server("home.example", "周末生存"),
+                    server("other.example", "别的"),
+                ])?;
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(&env), "bk", "周末生存", "新的世界", &events)
+            .await
+            .unwrap();
+
+        for name in ["Weekend", "WEEKEND"] {
+            rename_instance_with(
+                &env.facade,
+                &w.locks,
+                &env.saved_config().await.selected_version.unwrap(),
+                name,
+            )
+            .await
+            .unwrap();
+            let saved = env.saved_config().await;
+            assert_eq!(saved.sidebar_pins, vec![name.to_owned(), "别的".to_owned()]);
+            assert_eq!(saved.selected_version.as_deref(), Some(name));
+            assert_eq!(saved.pinned_servers[0].instance.as_deref(), Some(name));
+            assert_eq!(saved.pinned_servers[1].instance.as_deref(), Some("别的"));
+            let summaries = env.facade.snapshot().await.play_summaries().await.unwrap();
+            assert_eq!(summaries.keys().collect::<Vec<_>>(), vec![name]);
+            assert_eq!(summaries[name].playtime_min, 90);
+            let listed = list_world_backups_with(&env.facade, name, "新的世界")
+                .await
+                .unwrap();
+            assert_eq!(listed.backups, vec![made.backup.clone()]);
+        }
+
+        delete_instance_with(&env.facade, &w.locks, "WEEKEND", Remove)
+            .await
+            .unwrap();
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["别的".to_owned()]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(saved.pinned_servers[0].instance, None);
+        assert_eq!(saved.pinned_servers[1].instance.as_deref(), Some("别的"));
+        assert!(env
+            .facade
+            .snapshot()
+            .await
+            .play_summaries()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(env
+            .backups_root()
+            .join("instances")
+            .join("WEEKEND")
+            .join("新的世界")
+            .join(&made.backup.file)
+            .is_file());
     }
 
     /// 只差备份没挪成：报 world_backups_not_moved，detail.renamed_to 为新名字、path 为留在旧名下的备份目录，

@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, Result};
 use crate::level::{LevelDatError, LevelSummary, parse_level_dat};
+use crate::world_backup::RESTORE_SUFFIX;
 
 /// 存档的 `level.dat` 读取情况。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +201,9 @@ fn worlds_in(saves: &Path) -> Result<Vec<WorldEntry>> {
 fn worlds_from_entries(entries: Vec<std::fs::DirEntry>) -> Result<Vec<WorldEntry>> {
     let mut worlds = Vec::new();
     for entry in entries {
+        if is_staged_restore(&entry) {
+            continue;
+        }
         let path = entry.path();
         match entry.file_type() {
             Ok(file_type) if file_type.is_dir() => {}
@@ -243,6 +247,14 @@ fn worlds_from_entries(entries: Vec<std::fs::DirEntry>) -> Result<Vec<WorldEntry
             .then_with(|| a.dir_name.cmp(&b.dir_name))
     });
     Ok(worlds)
+}
+
+/// 恢复存档时解出的副本：与存档同在 saves 下，换上之前不算存档。
+fn is_staged_restore(entry: &std::fs::DirEntry) -> bool {
+    entry
+        .file_name()
+        .to_string_lossy()
+        .ends_with(RESTORE_SUFFIX)
 }
 
 fn read_with_metadata(path: &Path) -> std::io::Result<(Vec<u8>, std::fs::Metadata)> {
@@ -296,6 +308,9 @@ fn count_worlds_in(saves: &Path) -> Result<u32> {
 fn count_world_entries(entries: &[std::fs::DirEntry]) -> Result<u32> {
     let mut count = 0;
     for entry in entries {
+        if is_staged_restore(entry) {
+            continue;
+        }
         match entry.file_type() {
             Ok(file_type) if file_type.is_dir() => count += 1,
             Ok(_) => {}
@@ -586,6 +601,29 @@ mod tests {
         std::fs::remove_dir(saves.join("删掉的")).unwrap();
         assert_eq!(count_world_entries(&entries).unwrap(), 3);
         assert_eq!(count_worlds_in(&saves).unwrap(), 2);
+    }
+
+    /// 恢复存档时解出的副本放在 saves 下，换上之前它不是一个存档：列表与计数都不算它，否则恢复进行中界面上会多出
+    /// 一个同名的存档，还能点进去。
+    #[test]
+    fn a_world_being_restored_is_neither_listed_nor_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let saves = tmp.path().join("saves");
+        write(
+            &saves.join("生存").join("level.dat"),
+            &level_dat("生存", 0, false, 2_000),
+        );
+        write(
+            &saves
+                .join(format!("生存{}", crate::world_backup::RESTORE_SUFFIX))
+                .join("level.dat"),
+            &level_dat("生存", 0, false, 1_000),
+        );
+
+        assert_eq!(count_worlds_in(&saves).unwrap(), 1);
+        let worlds = worlds_in(&saves).unwrap();
+        let names: Vec<&str> = worlds.iter().map(|w| w.dir_name.as_str()).collect();
+        assert_eq!(names, vec!["生存"]);
     }
 
     /// 列出存档目录之后有存档被删掉（玩家在游戏里删存档）：其余存档照常列出，不让整个内容页失败；
