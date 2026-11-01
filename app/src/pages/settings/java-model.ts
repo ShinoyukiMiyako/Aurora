@@ -50,7 +50,7 @@ export function hasManaged(runtimes: readonly JavaInstallationDto[], major: numb
 
 /** 不完整的运行时不能选作默认 Java；已经是当前默认值的除外，照常显示为选中，让人看清现状。 */
 export function selectableAsDefault(runtime: JavaInstallationDto, current: string): boolean {
-  return runtimeComplete(runtime) || runtime.path === current;
+  return runtimeComplete(runtime) || samePath(runtime.path, current);
 }
 
 export interface ManualJava {
@@ -86,10 +86,10 @@ export function gpuSummary(dto: GpuAdaptersDto): GpuSummary {
   return { kind: "other" };
 }
 
-/** 默认 Java 指向的运行时；自动选择或路径已不在探测结果里时为 null。 */
+/** 默认 Java 指向的运行时；自动选择或路径已不在探测结果里时为 null。按路径规则比较：Windows 上只差大小写的是同一个文件。 */
 export function selectedRuntime(defaultJava: string, runtimes: readonly JavaInstallationDto[]): JavaInstallationDto | null {
   if (defaultJava === JAVA_AUTO) return null;
-  const found = runtimes.find((r) => r.path === defaultJava);
+  const found = runtimes.find((r) => samePath(r.path, defaultJava));
   return found === undefined ? null : found;
 }
 

@@ -172,6 +172,11 @@ describe("确认步的 Java", () => {
     expect(confirmJava(21, all, "E:/gone/bin/java.exe")).toEqual({ kind: "pinnedMissing", required: 21, requiredInstalled: true });
     expect(confirmJava(21, [], "E:/gone/bin/java.exe")).toEqual({ kind: "pinnedMissing", required: 21, requiredInstalled: false });
   });
+
+  it("固定的路径与扫描结果只差大小写或分隔符：Windows 上是同一个文件，不报找不到", () => {
+    const jdk = runtime("C:\\Program Files\\Java\\JDK-21\\bin\\java.exe", 21, "Eclipse Adoptium");
+    expect(confirmJava(21, [jdk], "c:/program files/java/jdk-21/bin/java.exe")).toEqual({ kind: "installed", major: 21, vendor: "Eclipse Adoptium" });
+  });
 });
 
 describe("文案", () => {

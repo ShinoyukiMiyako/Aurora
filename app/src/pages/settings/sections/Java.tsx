@@ -36,6 +36,7 @@ import {
   manualJavas,
   scanDiff,
   selectableAsDefault,
+  selectedRuntime,
   sortRuntimes,
   type JavaNote,
   type ManualJava,
@@ -195,6 +196,7 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
   const write = useSettingWrite(settings.defaultJava, JAVA_COPY.defaultJava, (defaultJava: string) => actions.updateSettings({ defaultJava }));
   const majors = majorsInUse(instances);
   const sorted = sortRuntimes(runtimes);
+  const selected = selectedRuntime(write.value, runtimes);
   const notes = javaNotes(write.value, runtimes, instances, settings.autoDownloadJava);
   const listRef = useRef<HTMLDivElement>(null);
   // 不完整的运行时被禁用了，焦点落不上去；全是这种时没有可重新选的，只剩改回自动选择
@@ -220,7 +222,7 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
             /* 注册表、PATH、常用目录与托管目录加起来，一台机器扫出六七个运行时并不少见 */
             openEnded
             columns={tier === "wide" ? 2 : 1}
-            value={write.value}
+            value={selected === null ? write.value : selected.path}
             onChange={write.set}
             options={[
               {

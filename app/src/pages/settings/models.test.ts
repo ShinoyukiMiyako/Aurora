@@ -80,6 +80,14 @@ describe("Java 分区推导", () => {
     expect(javaNotes(gone, [], [], true)).toEqual([{ kind: "pinnedMissing", path: gone }]);
   });
 
+  it("固定的路径与扫描结果只差大小写或分隔符：Windows 上是同一个文件，不报找不到，也不把它当不完整的外人", () => {
+    const jdk = runtime("C:\\Program Files\\Java\\JDK-21\\bin\\java.exe", 21, { missing_files: ["release"] });
+    const pinned = "c:/program files/java/jdk-21/bin/java.exe";
+    expect(selectedRuntime(pinned, [jdk])).toBe(jdk);
+    expect(javaNotes(pinned, [jdk], [], true)).toEqual([{ kind: "pinned" }]);
+    expect(selectableAsDefault(jdk, pinned)).toBe(true);
+  });
+
   it("提醒按后果从重到轻排：固定的提醒在前，缺版本次之，32 位最后；自动选择下只可能有缺版本这一条", () => {
     const x86 = runtime("C:/x86/java.exe", 8, { is_64bit: false });
     expect(javaNotes(x86.path, [x86], instances, true)).toEqual([{ kind: "pinned" }, { kind: "missing", majors: [25, 21], remedy: "pinned" }, { kind: "bits32" }]);

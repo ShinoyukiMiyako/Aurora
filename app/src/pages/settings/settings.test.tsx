@@ -384,6 +384,13 @@ describe("设置页：Java", () => {
       expect(text()).not.toContain(warnTitle);
     });
 
+    it("扫描结果里的路径只差大小写：不报找不到，列表里照常选中它", async () => {
+      ipc.overrides.set("detect_java", () => [{ ...jdk21, path: JRE8.toUpperCase(), version: { major: 8, minor: 0, security: 421, build: 9, raw: "1.8.0_421" } }]);
+      await mount("java");
+      expect(radio("Java 8").getAttribute("aria-checked")).toBe("true");
+      expect(text()).not.toContain(warnTitle);
+    });
+
     it("「重新选择」把焦点移到列表里第一个运行时，不改写设置", async () => {
       ipc.overrides.set("detect_java", () => [jdk21]);
       await mount("java");
