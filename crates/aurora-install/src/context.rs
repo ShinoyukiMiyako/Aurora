@@ -3,10 +3,13 @@
 //! 各安装器（原版 / Fabric / Quilt / Forge）都需要同一组协作对象：注入的 HTTP 客户端（读元数据）、
 //! aurora-download 并发池（下文件）、目录布局、运行环境与重试策略。[`InstallContext`] 把它们打成一束
 //! 借用引用（整体 `Copy`，按值传递零成本），避免每个方法拖一长串参数。
+//!
+//! 取消令牌也在这一束里：下文件由下载池自己的令牌停下，读元数据、Forge 排队与处理器子进程不经过
+//! 下载池，各自从这里拿令牌。挂在上下文上而不是各安装器上，造上下文的地方给一次就覆盖整条链路。
 
 use aurora_base::http::network_failure;
 use aurora_base::retry::RetryPolicy;
-use aurora_download::{DownloadPool, DownloadProgress, DownloadTask};
+use aurora_download::{CancellationToken, DownloadPool, DownloadProgress, DownloadTask};
 use aurora_version::RuntimeContext;
 use tokio::sync::watch;
 
@@ -26,10 +29,13 @@ pub struct InstallContext<'a> {
     pub runtime: &'a RuntimeContext,
     /// 元数据抓取的退避重试策略（文件下载自有 aurora-download 的策略）。
     pub policy: &'a RetryPolicy,
+    /// 安装的取消令牌：元数据抓取（等连接、读响应体、退避）、Forge 安装排队与处理器子进程都看它。
+    /// 应与 `pool` 上挂的是同一个令牌。
+    pub cancel: Option<&'a CancellationToken>,
 }
 
 impl<'a> InstallContext<'a> {
-    /// 组装上下文。
+    /// 组装上下文，不挂取消令牌（需要时再接 [`with_cancel`](Self::with_cancel)）。
     pub fn new(
         client: &'a reqwest::Client,
         pool: &'a DownloadPool,
@@ -43,7 +49,14 @@ impl<'a> InstallContext<'a> {
             layout,
             runtime,
             policy,
+            cancel: None,
         }
+    }
+
+    /// 挂上取消令牌；传 `None` 表示不可取消。
+    pub fn with_cancel(mut self, cancel: Option<&'a CancellationToken>) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// 跑一批下载并把「有文件最终失败」收敛为 [`Error::BatchIncomplete`]。

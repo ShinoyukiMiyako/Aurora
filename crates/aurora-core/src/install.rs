@@ -89,7 +89,14 @@ impl Aurora {
         let pool = self.download_pool_reporting(events);
         let policy = self.retry_policy();
         let http = self.http();
-        let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
+        let cx = make_context(
+            &http,
+            &pool,
+            &layout,
+            self.runtime(),
+            &policy,
+            self.cancel_token(),
+        );
 
         emit(events, CoreEvent::stage(format!("开始安装原版 {id}")));
         let vanilla = VanillaInstaller::new(cx)
@@ -206,11 +213,9 @@ impl Aurora {
                 choice.display_name()
             )),
         );
-        let mut forge = ForgeInstaller::new(cx, java_path);
-        if let Some(token) = self.cancel_token() {
-            forge = forge.with_cancel(token.clone());
-        }
-        let summary = forge.install(installer_url).await?;
+        let summary = ForgeInstaller::new(cx, java_path)
+            .install(installer_url)
+            .await?;
         emit(
             events,
             CoreEvent::stage(format!(

@@ -131,7 +131,14 @@ impl Aurora {
                         let pool = self.download_pool();
                         let policy = self.retry_policy();
                         let http = self.http();
-                        let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
+                        let cx = make_context(
+                            &http,
+                            &pool,
+                            &layout,
+                            self.runtime(),
+                            &policy,
+                            self.cancel_token(),
+                        );
                         let (flavor, base) = flavor_and_base(endpoints, loader);
                         let loaders = LoaderInstaller::with_flavor(cx, flavor)
                             .with_base_url(base)
@@ -243,7 +250,14 @@ impl Aurora {
         let pool = self.download_pool();
         let policy = self.retry_policy();
         let http = self.http();
-        let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
+        let cx = make_context(
+            &http,
+            &pool,
+            &layout,
+            self.runtime(),
+            &policy,
+            self.cancel_token(),
+        );
         let installer = VanillaInstaller::new(cx).with_manifest_url(self.manifest_url());
         let entry = installer.find_entry(mc_version).await?;
         let json = installer.fetch_version_json(&entry).await?;
@@ -275,7 +289,14 @@ impl Aurora {
                     let pool = self.download_pool();
                     let policy = self.retry_policy();
                     let http = self.http();
-                    let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
+                    let cx = make_context(
+                        &http,
+                        &pool,
+                        &layout,
+                        self.runtime(),
+                        &policy,
+                        self.cancel_token(),
+                    );
                     let (flavor, base) = flavor_and_base(endpoints, loader);
                     let versions = LoaderInstaller::with_flavor(cx, flavor)
                         .with_base_url(base)
@@ -323,6 +344,7 @@ impl Aurora {
                         Some(&sources),
                         &endpoints.forge_metadata,
                         &policy,
+                        self.cancel_token(),
                     )
                     .await?;
                     forge_builds(&versions)
@@ -333,6 +355,7 @@ impl Aurora {
                         Some(&sources),
                         &endpoints.neoforge_metadata,
                         &policy,
+                        self.cancel_token(),
                     )
                     .await?;
                     let legacy = fetch_maven_versions(
@@ -340,6 +363,7 @@ impl Aurora {
                         Some(&sources),
                         &endpoints.neoforge_legacy_metadata,
                         &policy,
+                        self.cancel_token(),
                     )
                     .await?;
                     neoforge_builds(&modern, &legacy)
@@ -799,5 +823,57 @@ mod tests {
         );
         assert_eq!(cache_name("fabric-loaders-../x"), None);
         assert_eq!(cache_name("fabric-loaders-a b"), None);
+    }
+
+    /// 快照上的取消令牌一直传到加载器列表的元数据抓取（Fabric meta 经安装上下文，Forge 的 Maven
+    /// 元数据直接传）：端点迟迟不回时 1 秒内以已取消返回，也不退回缓存冒充结果。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_loader_listing_returns_promptly_instead_of_the_cache() {
+        use aurora_download::CancellationToken;
+        use std::time::{Duration, Instant};
+
+        let server = MockServer::start().await;
+        mount_all(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let cases = [
+            (LoaderChoice::Forge, "1.20.1"),
+            (LoaderChoice::Fabric, "1.21.1"),
+        ];
+        // 先在线拉一遍，让缓存里有可退的数据。
+        for (loader, mc) in cases {
+            aurora
+                .list_loader_versions_at(&endpoints(&server), loader, mc)
+                .await
+                .unwrap();
+        }
+
+        let stalled = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+            .mount(&stalled)
+            .await;
+        let stalled_endpoints = endpoints(&stalled);
+        for (loader, mc) in cases {
+            let token = CancellationToken::new();
+            let snapshot = aurora.clone().with_cancel(token.clone());
+            let listing = snapshot.list_loader_versions_at(&stalled_endpoints, loader, mc);
+            tokio::pin!(listing);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), &mut listing)
+                    .await
+                    .is_err(),
+                "{loader:?}：端点没回应前不该结束"
+            );
+            let cancelled_at = Instant::now();
+            token.cancel();
+            let err = listing.await.unwrap_err();
+            assert!(err.is_cancelled(), "{loader:?}：实际 {err:?}");
+            assert!(
+                cancelled_at.elapsed() < Duration::from_secs(1),
+                "{loader:?}：取消后等了 {:?}",
+                cancelled_at.elapsed()
+            );
+        }
     }
 }

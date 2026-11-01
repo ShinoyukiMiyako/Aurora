@@ -8,14 +8,34 @@
 //! 调用方给了下载源调度方案时，按它把官方地址展开成候选（官方 / 镜像，按策略排序），逐个尝试：
 //! 国内直连 meta.fabricmc.net、maven.minecraftforge.net 经常不通，单源抓取会让加载器列表与安装
 //! 直接失败，而文件下载早已有镜像兜底。
+//!
+//! 给了取消令牌时，等连接、等响应头、读响应体与两次尝试之间的退避都看它：令牌一触发就丢下进行中的
+//! 请求返回已取消。元数据只进内存、不落盘，半途丢下请求没有要清理的东西；不看令牌的话，一次卡住的
+//! 抓取要等满客户端超时加整轮退避才返回，远超取消时限。
 
 use aurora_base::retry::{RetryPolicy, retry_async};
-use aurora_download::SourcePlan;
+use aurora_download::{CancellationToken, SourcePlan};
 
 use crate::error::{Error, Result};
 
-/// 带退避重试地 GET 一个 URL 的响应体字节。
+/// 带退避重试地 GET 一个 URL 的响应体字节；`cancel` 触发即以已取消返回。
 pub(crate) async fn get_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    policy: &RetryPolicy,
+    cancel: Option<&CancellationToken>,
+) -> Result<Vec<u8>> {
+    let fetch = fetch_with_retry(client, url, policy);
+    let Some(token) = cancel else {
+        return fetch.await;
+    };
+    match token.run_until_cancelled(fetch).await {
+        Some(result) => result,
+        None => Err(aurora_download::Error::Cancelled.into()),
+    }
+}
+
+async fn fetch_with_retry(
     client: &reqwest::Client,
     url: &str,
     policy: &RetryPolicy,
@@ -52,16 +72,19 @@ pub(crate) fn candidates(sources: Option<&SourcePlan>, url: &str) -> Result<Vec<
 }
 
 /// 依次尝试各候选地址，返回第一个成功的响应体；全部失败时返回最后一个候选的错误。
+/// 取消不换源：它是调用方的决定，不是这个源的故障。
 pub(crate) async fn get_bytes_from(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
     url: &str,
     policy: &RetryPolicy,
+    cancel: Option<&CancellationToken>,
 ) -> Result<Vec<u8>> {
     let mut last = None;
     for candidate in candidates(sources, url)? {
-        match get_bytes(client, &candidate, policy).await {
+        match get_bytes(client, &candidate, policy, cancel).await {
             Ok(bytes) => return Ok(bytes),
+            Err(err) if err.is_cancelled() => return Err(err),
             Err(err) => {
                 tracing::warn!(url = %candidate, error = %err, "元数据抓取失败，换下一个下载源");
                 last = Some(err);
@@ -76,9 +99,10 @@ pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
     policy: &RetryPolicy,
+    cancel: Option<&CancellationToken>,
     context: &str,
 ) -> Result<T> {
-    let bytes = get_bytes(client, url, policy).await?;
+    let bytes = get_bytes(client, url, policy, cancel).await?;
     parse_json(&bytes, context)
 }
 
@@ -88,9 +112,10 @@ pub(crate) async fn get_json_from<T: serde::de::DeserializeOwned>(
     sources: Option<&SourcePlan>,
     url: &str,
     policy: &RetryPolicy,
+    cancel: Option<&CancellationToken>,
     context: &str,
 ) -> Result<T> {
-    let bytes = get_bytes_from(client, sources, url, policy).await?;
+    let bytes = get_bytes_from(client, sources, url, policy, cancel).await?;
     parse_json(&bytes, context)
 }
 
@@ -106,9 +131,25 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8], context: 
 mod tests {
     use super::*;
     use aurora_base::mirror::MirrorSource;
-    use std::time::Duration;
+    use aurora_download::SourceResolver;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 官方源与镜像各自改写成给定地址，让两个候选都落在本地端点上。
+    #[derive(Debug)]
+    struct Fixed(Vec<String>);
+    impl SourceResolver for Fixed {
+        fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+            Ok(match source {
+                MirrorSource::Official => self.0[0].clone(),
+                MirrorSource::BmclApi => self.0[1].clone(),
+            })
+        }
+    }
 
     fn fast_policy() -> RetryPolicy {
         RetryPolicy {
@@ -143,20 +184,6 @@ mod tests {
     /// 第一个候选失败时换下一个；全部失败时报最后一个的错误，不吞。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_bytes_from_falls_back_to_next_candidate() {
-        use aurora_download::SourceResolver;
-        use std::sync::Arc;
-
-        #[derive(Debug)]
-        struct Fixed(Vec<String>);
-        impl SourceResolver for Fixed {
-            fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
-                Ok(match source {
-                    MirrorSource::Official => self.0[0].clone(),
-                    MirrorSource::BmclApi => self.0[1].clone(),
-                })
-            }
-        }
-
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/broken"))
@@ -178,9 +205,15 @@ mod tests {
             vec![MirrorSource::Official, MirrorSource::BmclApi],
             resolver.clone(),
         );
-        let body = get_bytes_from(&client, Some(&plan), "https://x.invalid/a", &fast_policy())
-            .await
-            .unwrap();
+        let body = get_bytes_from(
+            &client,
+            Some(&plan),
+            "https://x.invalid/a",
+            &fast_policy(),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(body, b"ok");
 
         let only_broken = SourcePlan::with_resolver(vec![MirrorSource::Official], resolver);
@@ -189,9 +222,220 @@ mod tests {
             Some(&only_broken),
             "https://x.invalid/a",
             &fast_policy(),
+            None,
         )
         .await
         .unwrap_err();
         assert!(matches!(err, Error::Http { ref url, .. } if url.ends_with("/broken")));
+    }
+
+    /// 两次尝试之间的退避长到测试期间等不完，取消落在退避里时看得出有没有被打断。
+    fn slow_backoff_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_secs(30),
+            max_delay: Duration::from_secs(30),
+            multiplier: 1.0,
+            jitter: false,
+        }
+    }
+
+    /// 一次手写的应答：声明 `declared` 字节，只写出 `body`；`hold` 为写完后挂住连接的时长。
+    struct RawReply {
+        declared: usize,
+        body: Vec<u8>,
+        hold: Duration,
+    }
+
+    /// 按连接顺序逐个交出 `replies` 的 HTTP 端点。wiremock 造不出「响应头发完、响应体只到一半」，
+    /// 读响应体途中断开或卡住只能这样模拟。返回地址与已接受的连接数。
+    fn raw_server(replies: Vec<RawReply>) -> (String, Arc<AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/meta.json", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        std::thread::spawn(move || {
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let status = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    reply.declared
+                );
+                stream.write_all(status.as_bytes()).unwrap();
+                stream.write_all(&reply.body).unwrap();
+                stream.flush().unwrap();
+                std::thread::sleep(reply.hold);
+            }
+        });
+        (url, accepted)
+    }
+
+    /// 让抓取先跑 `before` 这么久（期间不该自己结束），再触发取消；返回结果与从触发到返回的用时。
+    async fn cancel_midway(
+        fetch: impl std::future::Future<Output = Result<Vec<u8>>>,
+        token: &CancellationToken,
+        before: Duration,
+    ) -> (Result<Vec<u8>>, Duration) {
+        tokio::pin!(fetch);
+        assert!(
+            tokio::time::timeout(before, &mut fetch).await.is_err(),
+            "触发取消之前抓取不该自己结束"
+        );
+        let cancelled_at = Instant::now();
+        token.cancel();
+        let result = fetch.await;
+        (result, cancelled_at.elapsed())
+    }
+
+    fn assert_cancelled_promptly(result: Result<Vec<u8>>, waited: Duration) {
+        let err = result.expect_err("取消后应以错误返回");
+        assert!(err.is_cancelled(), "应为已取消，实际：{err:?}");
+        assert!(
+            waited < Duration::from_secs(1),
+            "取消后应在 1 秒内返回，实际等了 {waited:?}"
+        );
+    }
+
+    /// 服务器迟迟不回响应头：取消立刻生效，不等满客户端超时。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_waiting_for_the_response_returns_within_a_second() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/slow.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("{}")
+                    .set_delay(Duration::from_secs(10)),
+            )
+            .mount(&server)
+            .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let token = CancellationToken::new();
+        let url = format!("{}/slow.json", server.uri());
+
+        let policy = fast_policy();
+        let fetch = get_bytes(&client, &url, &policy, Some(&token));
+        let (result, waited) = cancel_midway(fetch, &token, Duration::from_millis(300)).await;
+        assert_cancelled_promptly(result, waited);
+    }
+
+    /// 响应头已到、响应体只来了一截就卡住：读响应体期间同样响应取消。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_the_body_is_stalled_returns_within_a_second() {
+        let (url, _) = raw_server(vec![RawReply {
+            declared: 1000,
+            body: b"{\"versions\":".to_vec(),
+            hold: Duration::from_secs(10),
+        }]);
+        let client = aurora_base::http::build_client().unwrap();
+        let token = CancellationToken::new();
+
+        let policy = fast_policy();
+        let fetch = get_bytes(&client, &url, &policy, Some(&token));
+        let (result, waited) = cancel_midway(fetch, &token, Duration::from_millis(300)).await;
+        assert_cancelled_promptly(result, waited);
+    }
+
+    /// 第一次 503 后进入 30 秒的退避：取消打断退避，不再发第二次请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_during_backoff_returns_within_a_second_without_retrying() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/busy.json"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let token = CancellationToken::new();
+        let url = format!("{}/busy.json", server.uri());
+
+        let policy = slow_backoff_policy();
+        let fetch = get_bytes(&client, &url, &policy, Some(&token));
+        tokio::pin!(fetch);
+        // 等第一次请求真正落到服务器、拿到 503 进入退避之后再取消，量的才是退避期间的响应。
+        let first_answered = async {
+            while server.received_requests().await.unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        tokio::select! {
+            _ = &mut fetch => panic!("退避 30 秒期间抓取不该自己结束"),
+            () = first_answered => {}
+        }
+        let cancelled_at = Instant::now();
+        token.cancel();
+        let result = fetch.await;
+        assert_cancelled_promptly(result, cancelled_at.elapsed());
+    }
+
+    /// 令牌在抓取开始前就已触发：一个请求都不发。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_already_cancelled_token_sends_no_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let err = get_json::<serde_json::Value>(
+            &client,
+            &format!("{}/a.json", server.uri()),
+            &fast_policy(),
+            Some(&token),
+            "版本清单",
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_cancelled(), "实际：{err:?}");
+    }
+
+    /// 第一个候选卡住时取消：直接以已取消返回，不再去试下一个候选。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_does_not_fall_back_to_the_next_candidate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/stuck"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/spare"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let plan = SourcePlan::with_resolver(
+            vec![MirrorSource::Official, MirrorSource::BmclApi],
+            Arc::new(Fixed(vec![
+                format!("{}/stuck", server.uri()),
+                format!("{}/spare", server.uri()),
+            ])),
+        );
+        let token = CancellationToken::new();
+        let policy = fast_policy();
+
+        let fetch = get_bytes_from(
+            &client,
+            Some(&plan),
+            "https://x.invalid/a",
+            &policy,
+            Some(&token),
+        );
+        let (result, waited) = cancel_midway(fetch, &token, Duration::from_millis(300)).await;
+        assert_cancelled_promptly(result, waited);
     }
 }

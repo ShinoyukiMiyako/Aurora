@@ -148,6 +148,7 @@ impl<'a> LoaderInstaller<'a> {
             self.sources.as_ref(),
             &self.url("game"),
             self.cx.policy,
+            self.cx.cancel,
             "游戏版本列表",
         )
         .await
@@ -160,6 +161,7 @@ impl<'a> LoaderInstaller<'a> {
             self.sources.as_ref(),
             &self.url(&format!("loader/{game_version}")),
             self.cx.policy,
+            self.cx.cancel,
             "loader 列表",
         )
         .await?;
@@ -203,6 +205,7 @@ impl<'a> LoaderInstaller<'a> {
                 "loader/{game_version}/{loader_version}/profile/json"
             )),
             self.cx.policy,
+            self.cx.cancel,
         )
         .await
     }

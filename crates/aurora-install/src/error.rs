@@ -160,6 +160,14 @@ fn is_retryable_http(err: &reqwest::Error) -> bool {
     }
 }
 
+impl Error {
+    /// 是否由取消令牌引起。取消一律以 [`aurora_download::Error::Cancelled`] 冒上来，不论停在下载、
+    /// 元数据抓取、排队还是处理器上；换源与兜底逻辑据此不把它当成某个源的故障。
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Error::Download(inner) if inner.is_cancelled())
+    }
+}
+
 /// 把 std::io 错误包成携带路径的 crate 错误。
 pub(crate) fn io_err(path: impl Into<PathBuf>, source: std::io::Error) -> Error {
     Error::Io {

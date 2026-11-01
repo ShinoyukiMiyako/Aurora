@@ -308,12 +308,15 @@ enum Target<'t> {
 static FORGE_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Forge/NeoForge 安装器。需注入 java 可执行文件路径以运行处理器。
+///
+/// 取消看上下文里的令牌（[`InstallContext::with_cancel`]）：触发后 `.sha1` 抓取与排队立刻停下，
+/// 不再起新的处理器，正在跑的处理器子进程被结束、等它真正退出后以
+/// [`aurora_download::Error::Cancelled`] 返回。下载阶段的取消由上下文里的下载池自己负责。
 pub struct ForgeInstaller<'a> {
     cx: InstallContext<'a>,
     java_path: PathBuf,
     side: String,
     sources: Option<SourcePlan>,
-    cancel: Option<CancellationToken>,
 }
 
 impl<'a> ForgeInstaller<'a> {
@@ -324,7 +327,6 @@ impl<'a> ForgeInstaller<'a> {
             java_path: java_path.into(),
             side: "client".to_owned(),
             sources: None,
-            cancel: None,
         }
     }
 
@@ -334,16 +336,9 @@ impl<'a> ForgeInstaller<'a> {
         self
     }
 
-    /// 挂取消令牌：触发后不再起新的处理器，正在跑的处理器子进程被结束、等它真正退出后以
-    /// [`aurora_download::Error::Cancelled`] 返回。下载阶段的取消由上下文里的下载池自己负责。
-    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
-        self.cancel = Some(token);
-        self
-    }
-
     /// 等到轮到自己安装（见 [`FORGE_INSTALL`]）；等待期间照样响应取消。
     async fn exclusive(&self) -> Result<tokio::sync::MutexGuard<'static, ()>> {
-        let Some(token) = &self.cancel else {
+        let Some(token) = self.cx.cancel else {
             return Ok(FORGE_INSTALL.lock().await);
         };
         tokio::select! {
@@ -391,6 +386,7 @@ impl<'a> ForgeInstaller<'a> {
         let mut task = aurora_download::DownloadTask::new(installer_url, dest.clone());
         match self.installer_sha1(installer_url).await {
             Ok(sha1) => task = task.with_sha1(sha1),
+            Err(err) if err.is_cancelled() => return Err(err),
             // 拿不到校验值只影响复用：没有 sha1 时下载引擎每次都重下，安装本身照常进行。
             Err(err) => {
                 tracing::warn!(url = installer_url, error = %err, "取不到 installer 的 sha1，本次不复用缓存")
@@ -413,6 +409,7 @@ impl<'a> ForgeInstaller<'a> {
             self.sources.as_ref(),
             &format!("{installer_url}.sha1"),
             self.cx.policy,
+            self.cx.cancel,
         )
         .await?;
         let text = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
@@ -532,7 +529,7 @@ impl<'a> ForgeInstaller<'a> {
             if !side_applies(processor.sides.as_ref(), &self.side) {
                 continue;
             }
-            if self.cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
+            if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
                 return Err(aurora_download::Error::Cancelled.into());
             }
             self.run_processor(processor, &values).await?;
@@ -613,7 +610,7 @@ impl<'a> ForgeInstaller<'a> {
             .arg(&main_class)
             .args(&args);
         let mut child = command.spawn().map_err(launch_error)?;
-        let Some(status) = wait_or_kill(&mut child, self.cancel.as_ref())
+        let Some(status) = wait_or_kill(&mut child, self.cx.cancel)
             .await
             .map_err(launch_error)?
         else {
@@ -1309,8 +1306,9 @@ mod tests {
         let running = FORGE_INSTALL.lock().await;
         let token = CancellationToken::new();
         let cancelled = {
-            let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
-            let forge = ForgeInstaller::new(cx, "java").with_cancel(token.clone());
+            let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+                .with_cancel(Some(&token));
+            let forge = ForgeInstaller::new(cx, "java");
             let attempt = forge.install_for_instance(&url, "排队的");
             tokio::pin!(attempt);
             assert!(
@@ -1598,5 +1596,59 @@ mod tests {
         let mut child = exits_with(0).spawn().unwrap();
         let status = wait_or_kill(&mut child, None).await.unwrap().unwrap();
         assert!(status.success());
+    }
+
+    /// installer 的 `.sha1` 迟迟不回时取消：1 秒内以已取消返回，不当成「拿不到校验值」接着下 installer。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_fetching_the_installer_sha1_stops_the_install() {
+        use std::time::{Duration, Instant};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar.sha1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("0".repeat(40))
+                    .set_delay(Duration::from_secs(10)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(legacy_installer_bytes()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let f = fixture();
+        let token = CancellationToken::new();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_cancel(Some(&token));
+        let forge = ForgeInstaller::new(cx, "java");
+        let url = format!("{}/forge-installer.jar", server.uri());
+        let attempt = forge.install_for_instance(&url, "x");
+        tokio::pin!(attempt);
+
+        // 等 `.sha1` 请求真正落到服务器（排队等别的 Forge 安装的时间不算）再取消。
+        let sha1_requested = async {
+            while server.received_requests().await.unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut attempt => panic!(".sha1 还没回来，安装不该结束"),
+            () = sha1_requested => {}
+        }
+        let cancelled_at = Instant::now();
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(1),
+            "实际等了 {:?}",
+            cancelled_at.elapsed()
+        );
     }
 }

@@ -58,6 +58,7 @@ impl<'a> VanillaInstaller<'a> {
             self.cx.client,
             &self.manifest_url,
             self.cx.policy,
+            self.cx.cancel,
             "版本清单",
         )
         .await
@@ -89,7 +90,14 @@ impl<'a> VanillaInstaller<'a> {
 
     /// 只把版本 JSON 读进内存、不落盘：安装前查看它要求的 Java 主版本之类信息时用。
     pub async fn fetch_version_json(&self, entry: &ManifestVersion) -> Result<VersionJson> {
-        net::get_json(self.cx.client, &entry.url, self.cx.policy, "版本 JSON").await
+        net::get_json(
+            self.cx.client,
+            &entry.url,
+            self.cx.policy,
+            self.cx.cancel,
+            "版本 JSON",
+        )
+        .await
     }
 
     /// 下载版本 JSON 到 `dest`（带 sha1 校验，走下载池的镜像兜底），读回并解析。
