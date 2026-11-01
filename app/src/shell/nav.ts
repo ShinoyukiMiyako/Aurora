@@ -4,7 +4,7 @@
 
 import type { ComponentType } from "react";
 import { FLOW_NAMES, isFlowName, type FlowName, type FlowProps } from "../state/flows";
-import { HOME_ROUTE, LIBRARY_ROUTE, PAGE_IDS, isPageId, routeInstanceId, sameRoute, type PageId, type PageProps, type Route } from "../state/route";
+import { HOME_ROUTE, LIBRARY_ROUTE, PAGE_IDS, isPageId, renamedRoute, routeInstanceId, sameRoute, type PageId, type PageProps, type Route } from "../state/route";
 
 export type { DiscoverKind, InstanceTab, PageId, PageProps, Route, RouteOf, SettingsSection, TaskFilter } from "../state/route";
 export { INSTANCE_TABS, PAGE_IDS, SETTINGS_SECTIONS, routeInstanceId, routeKey, sameRoute } from "../state/route";
@@ -103,12 +103,7 @@ export function pruneHistory(history: NavHistory, alive: (route: Route) => boole
 /** 实例改名后把历史里指向旧 id 的项换成新 id（改名不是删除，不能剪掉）。 */
 export function renameInHistory(history: NavHistory, from: string, to: string): NavHistory {
   if (!history.entries.some((e) => routeInstanceId(e.route) === from)) return history;
-  const rename = (route: Route): Route => {
-    if (route.page === "instance" && route.id === from) return { ...route, id: to };
-    if (route.page === "discover" && route.forInstance === from) return { ...route, forInstance: to };
-    return route;
-  };
-  return { ...history, entries: history.entries.map((e) => ({ ...e, route: rename(e.route) })) };
+  return { ...history, entries: history.entries.map((e) => ({ ...e, route: renamedRoute(e.route, from, to) })) };
 }
 
 /** 剪除生效前的那一帧：当前路由指向的实例已不存在时按实例库渲染，页面永远拿不到不存在的 id。 */

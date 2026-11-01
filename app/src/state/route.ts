@@ -72,6 +72,13 @@ export function routeInstanceId(route: Route): string | null {
   return null;
 }
 
+/** 实例改名后的路由：指向旧 id 的换成新 id，别的原样返回。 */
+export function renamedRoute(route: Route, from: string, to: string): Route {
+  if (route.page === "instance" && route.id === from) return { ...route, id: to };
+  if (route.page === "discover" && route.forInstance === from) return { ...route, forInstance: to };
+  return route;
+}
+
 /** 重新导入整合包去哪：记得平台来源就直接打开那个整合包的详情，从本地文件导入的（或记录没写下来的）回到发现页的整合包。 */
 export function reimportRoute(inst: Pick<InstanceSummary, "modpack">): Route {
   const pack = inst.modpack;

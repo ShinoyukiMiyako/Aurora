@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   EMPTY_TOASTS,
+  detachToasts,
   dismissToast,
   expireToasts,
+  instanceAction,
   nextToastDeadline,
   pauseToasts,
   pushToast,
   resumeToasts,
+  retargetToasts,
   toastCountdown,
   toastTtl,
+  type ToastAction,
   type ToastInput,
   type ToastsState,
 } from "./toasts";
@@ -108,5 +112,72 @@ describe("通知暂停", () => {
     expect(toastCountdown(s.items[0], T0 + 99_999)).toEqual({ fraction: 0.5, remainingMs: 4000, paused: true });
     const e = push(EMPTY_TOASTS, { tone: "error", title: "E" });
     expect(toastCountdown(e.items[0], T0)).toBeNull();
+  });
+});
+
+describe("实例改名与删除时迁移动作", () => {
+  const launched: string[] = [];
+  const launch = (instanceId: string): ToastAction =>
+    instanceAction(instanceId, (id) => ({
+      label: "启动",
+      run: () => {
+        launched.push(id);
+      },
+      errorTitle: `「${id}」启动失败`,
+    }));
+  const crashPage = (id: string): ToastAction => ({ label: "查看诊断", to: { page: "instance", id, tab: "crash" } });
+  const actionOf = (state: ToastsState, title: string): ToastAction | undefined => state.items.find((t) => t.title === title)?.action;
+
+  it("闭包动作按新 id 重造，路由动作改写 id；改完还能接着改", async () => {
+    let s = push(EMPTY_TOASTS, { tone: "success", title: "就绪", action: launch("生存") });
+    s = push(s, { tone: "error", title: "崩溃", action: crashPage("生存") });
+    s = retargetToasts(retargetToasts(s, "生存", "生存二"), "生存二", "生存三");
+
+    const ready = actionOf(s, "就绪");
+    if (ready === undefined || !("run" in ready)) throw new Error("就绪通知应还带命令动作");
+    await ready.run();
+    expect(launched.at(-1)).toBe("生存三");
+    expect(ready.errorTitle).toBe("「生存三」启动失败");
+    expect(actionOf(s, "崩溃")).toEqual({ label: "查看诊断", to: { page: "instance", id: "生存三", tab: "crash" } });
+  });
+
+  it("发现页的适配实例算指向实例；不指向实例的路由与命令不动", () => {
+    const reopen: ToastAction = { label: "重试", run: () => undefined, errorTitle: "下载失败" };
+    const tasks: ToastAction = { label: "查看", to: { page: "tasks", filter: "failed" } };
+    let s = push(EMPTY_TOASTS, { tone: "info", title: "发现", action: { label: "去看看", to: { page: "discover", forInstance: "生存" } } });
+    s = push(s, { tone: "error", title: "下载", action: reopen });
+    s = push(s, { tone: "error", title: "失败", action: tasks });
+    s = retargetToasts(s, "生存", "生存二");
+    expect(actionOf(s, "发现")).toEqual({ label: "去看看", to: { page: "discover", forInstance: "生存二" } });
+    expect(actionOf(s, "下载")).toBe(reopen);
+    expect(actionOf(s, "失败")).toBe(tasks);
+  });
+
+  it("只换动作：id、文案、寿命与别的实例的通知都不动", () => {
+    let s = push(EMPTY_TOASTS, { tone: "success", title: "「生存」已就绪", action: launch("生存") });
+    s = push(s, { tone: "success", title: "「创造」已就绪", action: launch("创造") }, T0 + 100);
+    const [mine, other] = s.items;
+    const next = retargetToasts(s, "生存", "生存二");
+    expect(next.items[0]).toMatchObject({ id: mine.id, title: "「生存」已就绪", createdAt: T0, deadline: mine.deadline, action: { instance: { id: "生存二" } } });
+    expect(next.items[1]).toBe(other);
+  });
+
+  it("没有通知指向这个实例：原样返回同一份状态", () => {
+    const s = push(EMPTY_TOASTS, { tone: "success", title: "就绪", action: launch("创造") });
+    expect(retargetToasts(s, "生存", "生存二")).toBe(s);
+    expect(detachToasts(s, "生存")).toBe(s);
+    expect(retargetToasts(EMPTY_TOASTS, "生存", "生存二")).toBe(EMPTY_TOASTS);
+  });
+
+  it("删除：指向它的通知留着、动作摘掉，别的不动", () => {
+    let s = push(EMPTY_TOASTS, { tone: "success", title: "就绪", action: launch("生存") });
+    s = push(s, { tone: "error", title: "崩溃", action: crashPage("生存") });
+    s = push(s, { tone: "success", title: "另一个", action: launch("创造") });
+    const next = detachToasts(s, "生存");
+    expect(next.items.map((t) => [t.title, t.action?.label])).toEqual([
+      ["就绪", undefined],
+      ["崩溃", undefined],
+      ["另一个", "启动"],
+    ]);
   });
 });

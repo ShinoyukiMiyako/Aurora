@@ -267,6 +267,31 @@ describe("外壳：通知动作", () => {
     expect(launcher.state.toasts).toEqual([]);
     expect(nav.route).toEqual({ page: "tasks", filter: "failed" });
   });
+
+  it("改名后点击留着的「查看诊断」：落到新名字的崩溃页，不被当成已删除的实例送回实例库", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    ipc.overrides.set("last_crash", () => null);
+    ipc.overrides.set("rename_instance", () => {
+      instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+      return { id: "生存二" };
+    });
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 1000 }));
+    await flush();
+
+    await act(async () => {
+      await launcher.actions.renameInstance("生存", "生存二");
+    });
+    await flush();
+    const toast = launcher.state.toasts.find((t) => t.title === "「生存」崩溃了");
+    if (toast === undefined) throw new Error("崩溃通知应还留着");
+    act(() => shell.runToastAction(toast));
+
+    expect(nav.route).toEqual({ page: "instance", id: "生存二", tab: "crash" });
+  });
 });
 
 describe("外壳：写剪贴板", () => {

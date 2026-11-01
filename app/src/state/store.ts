@@ -133,13 +133,16 @@ import {
   type TaskDraft,
 } from "./tasks";
 import {
+  detachToasts,
   dismissToast,
   EMPTY_TOASTS,
   expireToasts,
+  instanceAction,
   nextToastDeadline,
   pauseToasts,
   pushToast,
   resumeToasts,
+  retargetToasts,
   type Toast,
   type ToastAction,
   type ToastPauseReason,
@@ -859,14 +862,16 @@ function renamedTo(err: IpcError): string {
 }
 
 /**
- * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
+ * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字，行上写的实例名也一样。
  * 后端拒绝的是正占着实例的任务，这里换的是还没开始的（排队中）与已结束的（失败的可以重试）。
+ * 标题只有补全任务写的是实例：别的写 Mod 或存档名，存档与实例同名时也不能跟着改。
  */
 function renamedTask(task: Task, from: string, to: string): Task {
   if (task.instanceId !== from) return task;
   const key = INSTANCE_ARG[task.spec.command];
   const args = key !== undefined && task.spec.args[key] === from ? { ...task.spec.args, [key]: to } : task.spec.args;
-  return { ...task, instanceId: to, spec: { ...task.spec, args } };
+  const title = task.spec.command === "repair_instance" ? TASK_TEXT.repairTitle(to) : task.title;
+  return { ...task, instanceId: to, title, detail: TASK_TEXT.renamedDetail(task.detail, from, to), spec: { ...task.spec, args } };
 }
 
 /** 入队上下文里指向实例的字段：落地时的失效、通知文案与装好后的启动、固定都按它走。 */
@@ -1984,7 +1989,7 @@ export class LauncherStore {
   }
 
   private launchAction(instanceId: string): ToastAction {
-    return { label: TASK_TOAST.launchAction, run: () => this.actions.launch(instanceId), errorTitle: ACTION_ERROR.launch(instanceId) };
+    return instanceAction(instanceId, (id) => ({ label: TASK_TOAST.launchAction, run: () => this.actions.launch(id), errorTitle: ACTION_ERROR.launch(id) }));
   }
 
   /** 新建、导入的实例：写封面；要固定且侧栏此刻没满时追加到固定列表末尾。重扫结果与撤下占位项在同一次更新里。 */
@@ -2060,6 +2065,7 @@ export class LauncherStore {
       taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, from, to)])),
       // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
       session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
+      toasts: retargetToasts(raw.toasts, from, to),
       login: renamedLogin(raw.login, from, to),
       launchPrompt:
         raw.launchPrompt === null
@@ -2375,7 +2381,7 @@ export class LauncherStore {
     this.set({ session: failed });
     // 通知的操作是修复动作的第一个按钮。javaPinned 只影响第二个按钮，这里不读实例设置
     const copy = failureCopy(code, params, { accountName: s.accountName, accountKind: s.accountKind, javaPinned: false });
-    const action: ToastAction = { label: copy.fix.label, ...this.fixTarget(failed, copy.fix.kind) };
+    const action = instanceAction(failed.instanceId, (instanceId) => ({ label: copy.fix.label, ...this.fixTarget({ ...failed, instanceId }, copy.fix.kind) }));
     this.pushToast("error", TOAST_COPY.launchFailed(s.instanceId), copy.title, action);
   }
 
@@ -2747,6 +2753,7 @@ export class LauncherStore {
         }
         const s = store.raw.session;
         if (s !== null && s.instanceId === id) store.set({ session: null });
+        store.set((raw) => ({ toasts: detachToasts(raw.toasts, id) }));
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
         for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
         // 后端随删除清掉了它的游玩记录，日历与洞察不能还算着它；记住它的固定服务器也一并忘掉了
