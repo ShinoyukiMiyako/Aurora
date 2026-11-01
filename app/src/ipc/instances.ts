@@ -18,8 +18,8 @@ export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forg
 export type DetectedLoaderKind = LoaderChoice | "optifine" | "liteloader";
 
 /**
- * 实例此刻在做的事。inherited：别的实例正以它为基底（在那个实例的 inheritsFrom 链上），那个实例启动到退出、
- * 补全或导入整合包期间，这个实例的删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
+ * 实例此刻在做的事。inherited：别的实例正以它为基底（在那个实例的 inheritsFrom 链上），那个实例启动到游戏退出、
+ * 补全或导入整合包期间，这个实例的启动、删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
  */
 export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "inherited" | "backing_up";
 

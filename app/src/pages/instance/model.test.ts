@@ -219,31 +219,32 @@ describe("存档行「进入」的禁用原因", () => {
   const legacy = { singleplayer: false, multiplayer: true };
 
   it("可用：就绪、版本支持、这一局没在跑；别的实例占着游戏进程不算", () => {
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "ready", false)).toBeNull();
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "ready", false)).toBeNull();
     // 已结束、失败、崩溃的会话不挡再次进入
-    for (const view of ["stopped", "failed", "crashed"] as const) expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, view, false)).toBeNull();
+    for (const view of ["stopped", "failed", "crashed"] as const) expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, view, false)).toBeNull();
   });
 
-  it("自上而下取第一条：安装中 > 损坏 > 版本信息不完整 > 版本不支持 > 备份中 > 正在启动 > 正在运行", () => {
-    expect(enterWorldBlock({ status: "installing", quickPlay: null, activity: null }, "loading", false)).toBe("installing");
-    expect(enterWorldBlock({ status: "broken", quickPlay: null, activity: null }, "running", false)).toBe("broken");
-    expect(enterWorldBlock({ status: "ready", quickPlay: null, activity: null }, "running", false)).toBe("unknownVersion");
-    expect(enterWorldBlock({ status: "ready", quickPlay: legacy, activity: "backing_up" }, "ready", true)).toBe("legacy");
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "backing_up" }, "running", false)).toBe("backingUp");
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "loading", true)).toBe("backingUp");
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "loading", false)).toBe("launching");
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "running", false)).toBe("running");
+  it("自上而下取第一条：安装中 > 损坏 > 版本信息不完整 > 版本不支持 > 备份中 > 被当作基底 > 正在启动 > 正在运行", () => {
+    expect(enterWorldBlock({ status: "installing", quickPlay: null, activity: null, usedBy: null }, "loading", false)).toBe("installing");
+    expect(enterWorldBlock({ status: "broken", quickPlay: null, activity: null, usedBy: null }, "running", false)).toBe("broken");
+    expect(enterWorldBlock({ status: "ready", quickPlay: null, activity: null, usedBy: null }, "running", false)).toBe("unknownVersion");
+    expect(enterWorldBlock({ status: "ready", quickPlay: legacy, activity: "backing_up", usedBy: null }, "ready", true)).toBe("legacy");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "backing_up", usedBy: "FAB" }, "running", false)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "loading", true)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "inherited", usedBy: "FAB" }, "ready", false)).toBe("inherited");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "loading", false)).toBe("launching");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "running", false)).toBe("running");
   });
 
   it("只看单人位：能加入服务器、不能进存档的版本照样禁用", () => {
-    expect(enterWorldBlock({ status: "ready", quickPlay: { singleplayer: false, multiplayer: false }, activity: null }, "ready", false)).toBe("legacy");
-    expect(enterWorldBlock({ status: "ready", quickPlay: { singleplayer: true, multiplayer: false }, activity: null }, "ready", false)).toBeNull();
+    expect(enterWorldBlock({ status: "ready", quickPlay: { singleplayer: false, multiplayer: false }, activity: null, usedBy: null }, "ready", false)).toBe("legacy");
+    expect(enterWorldBlock({ status: "ready", quickPlay: { singleplayer: true, multiplayer: false }, activity: null, usedBy: null }, "ready", false)).toBeNull();
   });
 
   it("备份中：后端报 backing_up，或前端已有排着、进行中的存档任务；改 Mod 不挡", () => {
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "backing_up" }, "ready", false)).toBe("backingUp");
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "ready", true)).toBe("backingUp");
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "modifying" }, "ready", false)).toBeNull();
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "backing_up", usedBy: null }, "ready", false)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "ready", true)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "modifying", usedBy: null }, "ready", false)).toBeNull();
   });
 });
 

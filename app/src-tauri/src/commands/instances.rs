@@ -4,9 +4,9 @@
 //! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，装、删、启停、
 //! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档与删除存档备份）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
 //! 并在 detail 里带上正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏、与存档备份之间可以并行
-//! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动、补全与导入整合包期间，实例继承链上的
-//! 基底版本（客户端 jar 与 natives 所在的原版）以 inherited 一并占住，删除、改名、补全基底报
-//! `instance_busy` 并带上正在用它的实例。
+//! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动到游戏退出、补全与导入整合包期间，实例继承链上的
+//! 基底版本（客户端 jar 与 natives 所在的原版）以 inherited 一并占住，启动、删除、改名、补全基底报
+//! `instance_busy` 并带上正在用它的实例；基底自己开着游戏时，这几件事反过来被基底挡住。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -51,11 +51,12 @@ pub enum InstanceActivity {
     /// 装、删、启停、更新、回滚 Mod，往实例里装资源包、光影、数据包，查更新时回写卷宗，写实例设置，
     /// 删除存档备份，或为打开文件夹建出工作目录下的子目录。
     Modifying,
-    /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到退出、补全、导入整合包
+    /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到游戏退出、补全、导入整合包
     /// 期间都要读写这里的客户端 jar 与 natives。只经 [`InstanceLocks::acquire_with_bases`] 占，
     /// 占用里记着是哪个实例在用。
     Inherited,
-    /// 备份、恢复或导出存档；游戏退出后的自动备份由启动命令把「运行」转成它，备份完才释放。
+    /// 备份、恢复或导出存档；游戏退出后的自动备份由启动命令把「运行」转成它，备份完才释放，基底在转的时候
+    /// 就放开（[`ChainGuard::into_backup`]）。
     BackingUp,
 }
 
@@ -78,22 +79,26 @@ impl InstanceActivity {
     ///
     /// Mod、资源与设置的改动只往实例目录里加删、改写文件，彼此不冲突；游戏运行中仍允许改动，
     /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、新建、补全会挪走或重写整个目录，
-    /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。被别的实例当作基底时，基底自己照样能
-    /// 启动、改动、备份，几个实例也可以同时以它为基底；挪走或重写它的目录则会让那些实例丢掉客户端 jar
-    /// 与 natives。
+    /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。被别的实例当作基底时，基底照样能改动、备份，
+    /// 几个实例也可以同时以它为基底；挪走或重写它的目录则会让那些实例丢掉客户端 jar 与 natives。基底自己的
+    /// 启动与运行也与基底占用互斥：游戏映射着 natives，补全或导入要重写它们时会写到一半报 IO 错误，提前报
+    /// `instance_busy` 比让任务半路失败好。占用槽全局只跑一个游戏，「基底运行时启动加载器实例」本来就走不到，
+    /// 被挡住的只有补全与导入。
     ///
     /// 备份与恢复只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交；游戏开着时
-    /// 存档随时在写，打包出来的是半截，恢复则会被游戏下次保存覆盖，所以与启动、运行互斥。它与「运行」的
-    /// 兼容集合相同，游戏退出后可以原地从「运行」转成它。数据包写进存档目录，是改动里的例外，由
+    /// 存档随时在写，打包出来的是半截，恢复则会被游戏下次保存覆盖，所以与启动、运行互斥。它的兼容集合比
+    /// 「运行」宽，游戏退出后可以原地从「运行」转成它。数据包写进存档目录，是改动里的例外，由
     /// [`InstanceLocks::write_saves`] 另记一笔，两边互相看。
     fn compatible_with(self, other: Self) -> bool {
         use InstanceActivity::{BackingUp, Inherited, Launching, Modifying, Running};
         matches!(
             (self, other),
             (
-                Modifying | Inherited,
+                Modifying,
                 Modifying | Launching | Running | BackingUp | Inherited
-            ) | (Launching | Running | BackingUp, Modifying | Inherited)
+            ) | (Launching | Running | BackingUp, Modifying)
+                | (Inherited, Modifying | BackingUp | Inherited)
+                | (BackingUp, Inherited)
         )
     }
 
@@ -364,7 +369,7 @@ pub struct InstanceGuard {
 
 impl InstanceGuard {
     /// 改记正在做的事（启动成功后由「启动」转为「运行」，游戏退出后由「运行」转为「备份」）。只用于
-    /// 兼容关系相同的两件事之间转换，所以不重新检查冲突。
+    /// 转向兼容集合不比原来窄的事，这时不会新出冲突，所以不重新检查。
     pub fn set_activity(&self, activity: InstanceActivity) {
         let mut table = lock_table(&self.table);
         let hold = table
@@ -420,6 +425,13 @@ impl ChainGuard {
     /// 改记实例自己正在做的事，基底的占用不变；约束同 [`InstanceGuard::set_activity`]。
     pub fn set_activity(&self, activity: InstanceActivity) {
         self.own.set_activity(activity);
+    }
+
+    /// 游戏退出、转去自动备份：实例自己原地转成「备份」，基底当即放开。自动备份只读实例自己的版本 JSON、设置与
+    /// 存档，不碰基底的目录；基底留到备份做完的话，这段时间里基底启动不了。
+    pub fn into_backup(self) -> InstanceGuard {
+        self.own.set_activity(InstanceActivity::BackingUp);
+        self.own
     }
 }
 
@@ -4230,12 +4242,15 @@ mod tests {
         assert_eq!(locks.activity("pack"), None);
     }
 
-    /// 被当作基底：与基底自己的启动、运行、改动以及别的实例对它的占用兼容，与挪走或重写目录的事互斥，
-    /// 两个方向都是。并行时报基底自己的事，只剩基底占用时才报 inherited。
+    /// 被当作基底：与基底自己的改动、备份以及别的实例对它的占用兼容；与挪走或重写目录的事互斥，与基底自己的
+    /// 启动、运行也互斥（游戏映射着 natives，这时补全或导入要重写它们会中途报 IO 错误），两个方向都是。并行时报
+    /// 基底自己的事，只剩基底占用时才报 inherited。
     #[test]
-    fn inherited_bases_coexist_with_running_and_modifying_but_exclude_directory_rewrites() {
+    fn inherited_bases_exclude_the_bases_own_game_and_directory_rewrites() {
         use InstanceActivity::*;
-        let exclusive = [Installing, Repairing, Renaming, Deleting];
+        let exclusive = [
+            Installing, Repairing, Renaming, Deleting, Launching, Running,
+        ];
         let locks = InstanceLocks::default();
         let bases = ["1.20.1".to_owned()];
 
@@ -4258,14 +4273,14 @@ mod tests {
                 "{activity:?}"
             );
         }
-        let game = locks.acquire("1.20.1", Launching).unwrap();
+        let backup = locks.acquire("1.20.1", BackingUp).unwrap();
         let modifying = locks.acquire("1.20.1", Modifying).unwrap();
         assert_eq!(
             locks.activity("1.20.1"),
-            Some(Launching),
+            Some(BackingUp),
             "基底自己的事排在前面"
         );
-        drop(game);
+        drop(backup);
         assert_eq!(locks.activity("1.20.1"), Some(Modifying));
         drop(modifying);
 
@@ -4276,14 +4291,18 @@ mod tests {
         assert_eq!(locks.activity("1.20.1"), None);
         assert_eq!(locks.activity("Quilt"), None);
 
-        // 反过来：基底正在被挪走或重写时，以它为基底的占用被拒，实例自己已占到的一并放开。
+        // 反过来：基底正被挪走、重写，或者开着游戏时，以它为基底的占用被拒，实例自己已占到的一并放开。
         for activity in exclusive {
             let held = locks.acquire("1.20.1", activity).unwrap();
             let err = locks
-                .acquire_with_bases("Fabric", Launching, &bases)
+                .acquire_with_bases("Fabric", Repairing, &bases)
                 .err()
                 .unwrap();
-            assert_eq!(err.detail.unwrap()["id"], "1.20.1", "{activity:?}");
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "1.20.1", "activity": activity }),
+                "{activity:?}"
+            );
             assert_eq!(locks.activity("Fabric"), None, "{activity:?}");
             drop(held);
         }
@@ -4364,7 +4383,7 @@ mod tests {
         assert!(idle > 0 && used > 0, "两种状态都该看到过：{idle} / {used}");
     }
 
-    /// 基底自己也在运行或改动时，被拒的删除、改名、补全报它自己的事，与列表里的 activity 一致，
+    /// 基底自己也在备份或改动时，被拒的删除、改名、补全报它自己的事，与列表里的 activity 一致，
     /// 不随哪一份占用先到而变：实例自己的事优先，其次 modifying，最后 inherited。
     #[test]
     fn busy_reports_the_same_activity_the_list_shows() {
@@ -4373,18 +4392,18 @@ mod tests {
         let bases = ["1.20.1".to_owned()];
         let fabric = locks.acquire_with_bases("Fabric", Running, &bases).unwrap();
         let modifying = locks.acquire("1.20.1", Modifying).unwrap();
-        let game = locks.acquire("1.20.1", Running).unwrap();
+        let backup = locks.acquire("1.20.1", BackingUp).unwrap();
         for activity in [Deleting, Renaming, Repairing, Installing] {
             let err = locks.acquire("1.20.1", activity).err().unwrap();
-            assert_eq!(locks.activity("1.20.1"), Some(Running));
+            assert_eq!(locks.activity("1.20.1"), Some(BackingUp));
             assert_eq!(
                 err.detail.unwrap(),
-                json!({ "id": "1.20.1", "activity": "running" }),
+                json!({ "id": "1.20.1", "activity": "backing_up" }),
                 "{activity:?}"
             );
-            assert_eq!(err.message, "实例 1.20.1 正在运行，请稍后再试");
+            assert_eq!(err.message, "实例 1.20.1 正在备份或恢复存档，请稍后再试");
         }
-        drop(game);
+        drop(backup);
         let err = locks.acquire("1.20.1", Deleting).err().unwrap();
         assert_eq!(
             err.detail.unwrap(),
@@ -4453,8 +4472,8 @@ mod tests {
         assert_eq!(locks.activity("pack"), None);
     }
 
-    /// 兼容矩阵是一张对称的表：新建、补全、改名、删除与一切互斥；启动、运行、备份只与改动、基底占用并行；
-    /// 改动与基底占用除上面那四件之外都能并行。
+    /// 兼容矩阵是一张对称的表：新建、补全、改名、删除与一切互斥；启动、运行只与改动并行；备份与改动、基底占用
+    /// 并行；基底占用与改动、备份和它自己并行；改动除上面那四件之外都能并行。
     #[test]
     fn compatibility_matrix_is_the_symmetric_table() {
         use InstanceActivity::*;
@@ -4465,8 +4484,10 @@ mod tests {
         let table = |activity| -> &[InstanceActivity] {
             match activity {
                 Installing | Repairing | Renaming | Deleting => &[],
-                Launching | Running | BackingUp => &[Modifying, Inherited],
-                Modifying | Inherited => &[Launching, Running, BackingUp, Modifying, Inherited],
+                Launching | Running => &[Modifying],
+                BackingUp => &[Modifying, Inherited],
+                Inherited => &[BackingUp, Modifying, Inherited],
+                Modifying => &[Launching, Running, BackingUp, Modifying, Inherited],
             }
         };
         for a in all {
@@ -4482,7 +4503,7 @@ mod tests {
     }
 
     /// 基底的存档备份与别的实例以它为基底互不相干，两个方向都能并行：并行时报备份，used_by 照旧，备份放开后
-    /// 回到 inherited。游戏退出转自动备份时，无论转的是基底自己还是用它的实例，基底占用都不受影响。
+    /// 回到 inherited。用它的实例退出后转去自动备份时基底当即放开：备份只碰实例自己的存档，基底这时要启动、补全都行。
     #[test]
     fn backing_up_a_base_coexists_with_the_instances_that_inherit_it() {
         use InstanceActivity::*;
@@ -4510,23 +4531,33 @@ mod tests {
             .unwrap();
         assert_eq!(locks.occupancy("1.20.1"), backing_up);
         drop(backup);
-
-        let game = locks.acquire("1.20.1", Launching).unwrap();
-        game.set_activity(Running);
-        game.set_activity(BackingUp);
-        assert_eq!(locks.occupancy("1.20.1"), backing_up);
-        drop(game);
         assert_eq!(locks.occupancy("1.20.1"), inherited);
         drop(fabric);
         assert_eq!(locks.occupancy("1.20.1"), (None, None));
 
+        // 基底自己的游戏退出转成备份后，以它为基底的占用才进得来。
+        let game = locks.acquire("1.20.1", Running).unwrap();
+        assert!(locks
+            .acquire_with_bases("Fabric", Repairing, &bases)
+            .is_err());
+        game.set_activity(BackingUp);
+        let fabric = locks
+            .acquire_with_bases("Fabric", Repairing, &bases)
+            .unwrap();
+        assert_eq!(locks.occupancy("1.20.1"), backing_up);
+        drop(fabric);
+        drop(game);
+        assert_eq!(locks.occupancy("1.20.1"), (None, None));
+
         let chain = locks.acquire_with_bases("Fabric", Running, &bases).unwrap();
-        chain.set_activity(BackingUp);
+        let backup = chain.into_backup();
         assert_eq!(locks.activity("Fabric"), Some(BackingUp));
         assert_eq!(locks.holding(BackingUp), vec!["Fabric".to_owned()]);
-        assert_eq!(locks.occupancy("1.20.1"), inherited);
-        drop(chain);
-        assert_eq!(locks.occupancy("1.20.1"), (None, None));
+        assert_eq!(locks.occupancy("1.20.1"), (None, None), "基底当即放开");
+        drop(locks.acquire("1.20.1", Launching).unwrap());
+        let err = locks.acquire("Fabric", Launching).err().unwrap();
+        assert_eq!(err.detail.unwrap()["activity"], "backing_up");
+        drop(backup);
         assert!(locks.holding(BackingUp).is_empty());
     }
 

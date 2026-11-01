@@ -168,13 +168,14 @@ export interface BusySession {
   phase: "loading" | "running";
 }
 
-/** 某个实例此刻为什么不能拿来加入：它自己正在启动或运行，或者存档正在备份、恢复或导出（后端拒绝启动）。 */
-export type JoinBlock = { kind: "busy"; phase: BusySession["phase"] } | { kind: "backingUp" };
+/** 某个实例此刻为什么不能拿来加入：它自己正在启动或运行，存档正在备份、恢复或导出，或者别的实例正以它为基底（后两种后端拒绝启动）。 */
+export type JoinBlock = { kind: "busy"; phase: BusySession["phase"] } | { kind: "backingUp" } | { kind: "inherited"; usedBy: string };
 
 /** 能拿来加入为 null。别的实例占着游戏进程不算：照常启动，由启动拦截弹替换确认。savesBusy 是存档正忙的实例 id。 */
-export function joinBlock(instanceId: string, busy: BusySession | null, savesBusy: readonly string[]): JoinBlock | null {
-  if (busy !== null && busy.instanceId === instanceId) return { kind: "busy", phase: busy.phase };
-  if (savesBusy.includes(instanceId)) return { kind: "backingUp" };
+export function joinBlock(inst: Pick<InstanceSummary, "id" | "usedBy">, busy: BusySession | null, savesBusy: readonly string[]): JoinBlock | null {
+  if (busy !== null && busy.instanceId === inst.id) return { kind: "busy", phase: busy.phase };
+  if (savesBusy.includes(inst.id)) return { kind: "backingUp" };
+  if (inst.usedBy !== null) return { kind: "inherited", usedBy: inst.usedBy };
   return null;
 }
 
@@ -185,6 +186,8 @@ export type JoinPlan =
   | { kind: "busy"; instanceId: string; phase: BusySession["phase"] }
   /** 记住的实例正在备份、恢复或导出存档：按钮带原因禁用。 */
   | { kind: "backingUp"; instanceId: string }
+  /** 记住的实例正被别的实例当作基底：按钮带原因禁用。 */
+  | { kind: "inherited"; instanceId: string; usedBy: string }
   /** 没记住，或记住的实例已经不在、损坏、在安装、版本不支持：弹实例选择。 */
   | { kind: "pick" };
 
@@ -196,7 +199,6 @@ export function joinPlan(remembered: string | null, instances: readonly Instance
   if (remembered === null) return { kind: "pick" };
   const inst = instances.find((i) => i.id === remembered);
   if (inst === undefined || !canJoinWith(inst)) return { kind: "pick" };
-  const block = joinBlock(inst.id, busy, savesBusy);
-  if (block === null) return { kind: "direct", instanceId: inst.id };
-  return block.kind === "busy" ? { kind: "busy", instanceId: inst.id, phase: block.phase } : { kind: "backingUp", instanceId: inst.id };
+  const block = joinBlock(inst, busy, savesBusy);
+  return block === null ? { kind: "direct", instanceId: inst.id } : { ...block, instanceId: inst.id };
 }

@@ -175,6 +175,7 @@ export const OVERVIEW_COPY = {
     unknownVersion: "这个实例的版本信息不完整",
     legacy: "1.20 之前的版本不能直接进入存档",
     backingUp: "正在备份或恢复存档，完成后再启动",
+    inherited: "别的实例正在使用它，结束后才能启动",
     launching: "正在启动这个实例",
     running: "游戏正在运行",
   },

@@ -143,7 +143,7 @@ export interface Task {
 
 /**
  * 后端实例锁表里一个实例可能被占着做的事（instance_busy 的 detail.activity，实例列表的 activity 同一套取值）。
- * inherited：别的实例正以它为基底（那个实例启动到退出、补全、导入整合包期间），它的删除、改名、补全被拒。
+ * inherited：别的实例正以它为基底（那个实例启动到游戏退出、补全、导入整合包期间），它的启动、删除、改名、补全被拒。
  * backing_up：备份、恢复或导出存档（含游戏退出后的自动备份），只与 Mod 改动、被当作基底兼容。
  */
 export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"] as const;

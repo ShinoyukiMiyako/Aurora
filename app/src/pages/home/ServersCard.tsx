@@ -330,10 +330,12 @@ interface ServerRowViewProps {
 }
 
 /**
- * 不能拿来加入的原因：占着游戏进程的实例再启动是空操作，加载阶段写「正在启动」；存档在备份或恢复时后端拒绝启动。
+ * 不能拿来加入的原因：占着游戏进程的实例再启动是空操作，加载阶段写「正在启动」；存档在备份或恢复、别的实例正以它
+ * 为基底时后端拒绝启动。
  */
 function blockReason(instanceId: string, block: JoinBlock): string {
   if (block.kind === "backingUp") return HOME_COPY.joinBackingUp(instanceId);
+  if (block.kind === "inherited") return HOME_COPY.joinInherited(instanceId, block.usedBy);
   return block.phase === "running" ? HOME_COPY.joinRunning(instanceId) : HOME_COPY.joinLaunching(instanceId);
 }
 
@@ -376,12 +378,7 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, savesB
     await quickPlay(instanceId);
   };
   const forget = () => void run(() => actions.setPinnedServerInstance(row.address, null), HOME_COPY.saveJoinError);
-  const joinBlocked =
-    join.kind === "busy"
-      ? blockReason(join.instanceId, { kind: "busy", phase: join.phase })
-      : join.kind === "backingUp"
-        ? blockReason(join.instanceId, { kind: "backingUp" })
-        : undefined;
+  const joinBlocked = join.kind === "direct" || join.kind === "pick" ? undefined : blockReason(join.instanceId, join);
 
   useEffect(() => {
     if (!copied) return;
@@ -494,7 +491,8 @@ function JoinPicker({ id, open, anchor, server, candidates, selectedInstanceId, 
   // 开着的时候实例列表可能变了（被删除、开始安装）：选中的那一项不在候选里就退回默认
   const current = choice !== null && candidates.some((c) => c.id === choice) ? choice : defaultJoinChoice(candidates, selectedInstanceId);
   // 默认选中的当前实例常常就是正在运行的那个：照常列出、可以改选，只是不能拿它加入
-  const block = current === null ? null : joinBlock(current, busy, savesBusy);
+  const chosen = candidates.find((c) => c.id === current);
+  const block = chosen === undefined ? null : joinBlock(chosen, busy, savesBusy);
   const blocked = current === null || block === null ? undefined : blockReason(current, block);
   return (
     <Popover id={id} open={open} anchor={anchor} onClose={onClose} placement="bottom-end" autoFocus aria-label={HOME_COPY.joinPickerLabel(server)} className={s.joinPanel}>

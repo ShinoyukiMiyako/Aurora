@@ -5,7 +5,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
-import { CONFIRM_COPY, LAUNCH_COPY } from "../copy/flows";
+import { CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY } from "../copy/flows";
 import { STOPPED_LINGER_MS } from "../domain/limits";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
@@ -212,6 +212,44 @@ describe("就绪面的带原因禁用", () => {
     await refreshWith(null);
     expect(buttonByText(LAUNCH_COPY.launch)).toBe(go);
     expect(document.activeElement).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBeNull();
+    pressEnter(go);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+  });
+});
+
+describe("被别的实例当作基底时的启动", () => {
+  const refreshWith = async (over: { activity: "inherited" | null; used_by: string | null }) => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", over)]);
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+  };
+
+  it("「启动」保持可聚焦、读出不可用，点击不启动，提示写明是谁在用；放开后不换节点", async () => {
+    const go = buttonByText(LAUNCH_COPY.launch);
+    act(() => go.focus());
+
+    await refreshWith({ activity: "inherited", used_by: "Fabric 1.20.1" });
+    expect(buttonByText(LAUNCH_COPY.launch)).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      go.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = go.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe(INSTANCE_IN_USE_COPY.launch("Fabric 1.20.1"));
+    pressEnter(go);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+
+    await refreshWith({ activity: null, used_by: null });
+    expect(buttonByText(LAUNCH_COPY.launch)).toBe(go);
     expect(go.getAttribute("aria-disabled")).toBeNull();
     pressEnter(go);
     await flush();

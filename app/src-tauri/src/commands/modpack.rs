@@ -250,7 +250,8 @@ pub(crate) async fn preview_modpack_with(
 ///
 /// 实例名一定下来（平台整合包要先下载完才知道清单里的名字）就以「安装」占住，直到导入结束、半成品
 /// 清理完：这期间启动、改名、删除这个实例都报 `instance_busy`，列表里它的 activity 为 installing。
-/// 整合包要求的原版同时以 inherited 占住，删除、改名、补全它报 `instance_busy`（detail.used_by 为实例名）。
+/// 整合包要求的原版同时以 inherited 占住，启动、删除、改名、补全它报 `instance_busy`（detail.used_by 为实例名）；
+/// 原版自己开着游戏时导入报 `instance_busy`（detail.id 为原版），这时写不动它的 natives。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_modpack(
@@ -1178,6 +1179,47 @@ mod tests {
             .exists());
         assert!(!registry.is_running("mp-busy"));
         assert_eq!(locks.activity("撞名"), Some(InstanceActivity::Renaming));
+    }
+
+    /// 整合包要的原版自己开着游戏时，导入在建目录前以 instance_busy 拒绝，detail 说的是原版在运行：游戏映射着
+    /// natives，放它过去的话写到 natives 才报 IO 错误，还要清理半成品。
+    #[tokio::test]
+    async fn import_onto_a_base_running_its_own_game_is_refused_before_creating_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let pack = dir.path().join("pack.mrpack");
+        write_vanilla_pack(&pack);
+        let _game = locks.acquire("test", InstanceActivity::Running).unwrap();
+
+        let err = install_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "mp-base-running",
+            file(&pack.display().to_string()),
+            Some("周末联机"),
+            None,
+            &sink,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            serde_json::json!({ "id": "test", "activity": "running" })
+        );
+        assert!(!dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("周末联机")
+            .exists());
+        assert_eq!(locks.activity("周末联机"), None, "实例名的占用随之放开");
+        assert_eq!(locks.activity("test"), Some(InstanceActivity::Running));
     }
 
     /// 导入进行中实例名一直以「安装」占着：列表里 activity 为 installing，删除与改名报 instance_busy，

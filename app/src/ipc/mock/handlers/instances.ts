@@ -501,19 +501,26 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
 
 /**
  * 两件事能否同时在一个实例上进行，与后端 InstanceActivity::compatible_with 同一张表：Mod、资源与设置的改动彼此兼容，
- * 也与启动、运行中的游戏、存档备份兼容；被别的实例当作基底时，基底自己照样能启动、改动、备份存档，几个实例也能同时以它为基底；
- * 备份要读整个存档，游戏开着会边写边打包，所以与启动、运行互斥，同一实例也只备份一份，兼容集合与运行相同，游戏退出后才能原地转过去；
- * 新建、补全、改名、删除会挪走或重写整个目录，与任何事都互斥。
+ * 也与启动、运行中的游戏、存档备份兼容；被别的实例当作基底时，基底照样能改动、备份存档，几个实例也能同时以它为基底，基底自己的
+ * 启动、运行与之互斥（游戏映射着 natives，用它的实例写不了）；备份要读整个存档，游戏开着会边写边打包，所以与启动、运行互斥，
+ * 同一实例也只备份一份，兼容集合比运行宽，游戏退出后才能原地转过去；新建、补全、改名、删除会挪走或重写整个目录，与任何事都互斥。
  */
 function compatible(a: InstanceActivity, b: InstanceActivity): boolean {
-  if (a === "modifying" || a === "inherited") return b === "modifying" || b === "launching" || b === "running" || b === "backing_up" || b === "inherited";
-  return (a === "launching" || a === "running" || a === "backing_up") && (b === "modifying" || b === "inherited");
+  if (a === "modifying") return b === "modifying" || b === "launching" || b === "running" || b === "backing_up" || b === "inherited";
+  if (a === "inherited") return b === "modifying" || b === "backing_up" || b === "inherited";
+  if (a === "backing_up") return b === "modifying" || b === "inherited";
+  return (a === "launching" || a === "running") && b === "modifying";
 }
 
-/** 实例上的一份占用。release 放开它；setActivity 只用于兼容关系相同的两件事之间改记（启动转为运行）。 */
+/** 实例上的一份占用。release 放开它；setActivity 只用于转向兼容集合不比原来窄的事（启动转运行、运行转备份）。 */
 export interface MockInstanceHold {
   release(): void;
   setActivity(activity: InstanceActivity): void;
+}
+
+/** 实例连同基底的占用。intoBackup 是后端的 into_backup：游戏退出转自动备份，实例原地转成备份，基底当即放开。 */
+export interface MockChainHold extends MockInstanceHold {
+  intoBackup(): void;
 }
 
 /** instance_busy 的形状与后端 busy() 一致：detail 带实例 id 与正在做的事，基底占用再带正在用它的实例。 */
@@ -535,10 +542,10 @@ export function acquireMockInstance(id: string, activity: InstanceActivity): Moc
  * 再依次占基底，任一处冲突报 instance_busy（基底被占时 detail.id 是那个基底），已占到的一并放开；与 id 同名或
  * 彼此只差大小写的基底只占一次。setActivity 只改实例自己那一份。
  */
-export function acquireMockInstanceWithBases(id: string, activity: InstanceActivity, bases: readonly string[]): MockInstanceHold {
+export function acquireMockInstanceWithBases(id: string, activity: InstanceActivity, bases: readonly string[]): MockChainHold {
   const own = acquireMockInstance(id, activity);
   const keys = new Set([id.toLowerCase()]);
-  const held: MockInstanceHold[] = [];
+  let held: MockInstanceHold[] = [];
   try {
     for (const base of bases) {
       const key = base.toLowerCase();
@@ -557,6 +564,11 @@ export function acquireMockInstanceWithBases(id: string, activity: InstanceActiv
       own.release();
     },
     setActivity: (next) => own.setActivity(next),
+    intoBackup: () => {
+      own.setActivity("backing_up");
+      for (const h of held) h.release();
+      held = [];
+    },
   };
 }
 

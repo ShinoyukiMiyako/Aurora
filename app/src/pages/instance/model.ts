@@ -99,21 +99,22 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
 
 // ---------------------------------------------------------------- 存档直达
 
-export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | "launching" | "running";
+export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | "inherited" | "launching" | "running";
 
 /**
  * 存档行「进入」此刻为什么不能点；能点为 null。自上而下取第一条：实例自身的状态先于版本能力，版本能力先于进行中的
  * 备份与这一局的会话。另一个实例占着游戏进程时照常能点，由启动拦截弹替换确认。
  *
- * 备份或恢复期间后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的存档任务：后端还没
- * 报 backing_up 时就点进入，会正好撞上马上要占实例的那个任务。
+ * 备份或恢复期间、别的实例正以它为基底时后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的
+ * 存档任务：后端还没报 backing_up 时就点进入，会正好撞上马上要占实例的那个任务。
  */
-export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPlay" | "activity">, view: LaunchViewKind, worldTask: boolean): EnterWorldBlock | null {
+export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPlay" | "activity" | "usedBy">, view: LaunchViewKind, worldTask: boolean): EnterWorldBlock | null {
   if (inst.status === "installing") return "installing";
   if (inst.status === "broken") return "broken";
   if (inst.quickPlay === null) return "unknownVersion";
   if (!inst.quickPlay.singleplayer) return "legacy";
   if (inst.activity === "backing_up" || worldTask) return "backingUp";
+  if (inst.usedBy !== null) return "inherited";
   if (view === "loading") return "launching";
   if (view === "running") return "running";
   return null;
