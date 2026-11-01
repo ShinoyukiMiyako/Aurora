@@ -173,7 +173,7 @@ function MemoryCard({
     if (placeholder !== null || memory.status !== "ready" || editor === null || global === null) return <Skeleton shape="text" lines={3} />;
     const info: MemoryInfo = memory.value;
     const recommended = info.advice.recommended_mb;
-    const mods = inst.modCount === null ? 0 : inst.modCount;
+    const mods = inst.modCount;
     if (!custom || draft === null) {
       return (
         <div className={styles.followBox}>
@@ -187,7 +187,8 @@ function MemoryCard({
         </div>
       );
     }
-    const below = draft < recommended;
+    // Mod 数不出来时这个建议值没有依据：宁可不给判断，也不说「0 个 Mod」
+    const below = mods !== null && draft < recommended;
     return (
       <MemorySlider
         value={draft}
@@ -195,8 +196,8 @@ function MemoryCard({
         onCommit={(mb) => void editor.save({ memoryMb: mb })}
         disabled={editor.locked !== undefined}
         totalMb={info.advice.total_mb}
-        recommended={{ mb: recommended, tip: SETTINGS_COPY.recommendTip(mods, recommended) }}
-        notes={[below ? SETTINGS_COPY.belowRecommended(mods, recommended) : SETTINGS_COPY.enough(recommended)]}
+        recommended={mods === null ? undefined : { mb: recommended, tip: SETTINGS_COPY.recommendTip(mods, recommended) }}
+        notes={mods === null ? [] : [below ? SETTINGS_COPY.belowRecommended(mods, recommended) : SETTINGS_COPY.enough(recommended)]}
         notesTone={below ? "warn" : "default"}
         ariaLabel={SETTINGS_COPY.memorySlider}
       />

@@ -2161,6 +2161,21 @@ describe("实例详情：设置", () => {
     expect((saved[0].settings as InstanceSettingsDto).memory_mb).toBe(4096);
   });
 
+  it("单独设置的内存：Mod 数得出来时按它给建议", async () => {
+    settings = { ...settings, memory_mb: 4096 };
+    await open("settings");
+    expect(text()).toContain("2 个 Mod 建议至少 6 GB");
+  });
+
+  it("单独设置的内存：Mod 数不出来时不拿 0 个 Mod 下判断", async () => {
+    settings = { ...settings, memory_mb: 4096 };
+    instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: null, dir_error: "文件 IO 失败: mods：拒绝访问" } : i));
+    await open("settings");
+    expect(text()).toContain("占系统内存 13%（共 32 GB）");
+    expect(text()).not.toContain("个 Mod 建议至少");
+    expect(text()).not.toContain("当前足够");
+  });
+
   it("删除实例：确认框按后端预览列出会一起移入回收站的存档，确认后删除", async () => {
     await open("settings");
     click(button("删除实例"));
