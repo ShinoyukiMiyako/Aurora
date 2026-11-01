@@ -22,6 +22,7 @@ use tokio::process::{Child, Command};
 use crate::complete;
 use crate::context::InstallContext;
 use crate::error::{Error, ProcessorOutput, Result, io_err, zip_err};
+use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
 use aurora_version::VersionJson;
@@ -479,6 +480,9 @@ impl<'a> ForgeInstaller<'a> {
                     reason: "install_profile 缺 minecraft".to_owned(),
                 })?;
         let json_entry = profile.json.clone().expect("已判定 json 存在");
+        // 两个 id 都来自远端 installer，随后原样拼进 versions/<id>/ 下的路径。
+        checked_segment(&version_id, || "Forge install_profile 的版本 id".to_owned())?;
+        checked_segment(&minecraft, || "Forge install_profile 的游戏版本".to_owned())?;
 
         // 解出内联 version.json；传统布局原样落盘，按实例安装交给调用方。
         let version_bytes =
@@ -698,6 +702,7 @@ impl<'a> ForgeInstaller<'a> {
                 source,
             })?;
         let id = embedded.id.clone();
+        checked_segment(&id, || "Forge versionInfo 的版本 id".to_owned())?;
         if let Target::Standalone = target {
             aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
         }
@@ -811,17 +816,15 @@ async fn extract_bundled_libraries(
             .as_ref()
             .and_then(|d| d.artifact.as_ref())
             .expect("is_bundled 已保证带下载件");
-        let rel = artifact
-            .path
-            .clone()
-            .or_else(|| crate::maven::artifact_path(&lib.name))
-            .ok_or_else(|| Error::InvalidLibraryCoordinate {
-                name: lib.name.clone(),
-            })?;
+        // 路径与 sha1 来自同一份远端 installer，sha1 拦不住越界路径，落盘前逐段校验。
+        let rel = match &artifact.path {
+            Some(path) => path.clone(),
+            None => crate::layout::coordinate_path(&lib.name)?,
+        };
         if !seen.insert(rel.clone()) {
             continue;
         }
-        let dest = layout.library_path(&rel);
+        let dest = layout.checked_library_path(&lib.name, &rel)?;
         if file_matches_sha1(&dest, &artifact.sha1).await? {
             continue;
         }
@@ -1711,6 +1714,148 @@ mod tests {
             std::fs::read(f.layout.library_path(shim_path)).unwrap(),
             shim
         );
+    }
+
+    /// installer 自带库的路径与 sha1 出自同一份远端文件，sha1 拦不住越界：直给的路径或由坐标算出的
+    /// 路径能走出库目录时报路径越界，库目录外什么都不写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bundled_libraries_escaping_the_libraries_dir_are_rejected() {
+        let payload: &[u8] = b"escaped-bytes";
+        let cases = [
+            (
+                serde_json::json!({
+                    "name": "net.minecraftforge:forge:1.16.5-36.2.39",
+                    "downloads": {"artifact": {
+                        "path": "../escaped.jar", "url": "",
+                        "sha1": sha1_hex(payload), "size": payload.len()
+                    }}
+                }),
+                "maven/../escaped.jar",
+            ),
+            (
+                serde_json::json!({
+                    "name": "evil:x:1/../../../escaped",
+                    "downloads": {"artifact": {
+                        "url": "", "sha1": sha1_hex(payload), "size": payload.len()
+                    }}
+                }),
+                "maven/evil/x/1/../../../escaped/x-1/../../../escaped.jar",
+            ),
+        ];
+        for (library, entry) in cases {
+            let profile = serde_json::json!({
+                "spec": 0,
+                "version": "1.16.5-forge-36.2.39",
+                "minecraft": "1.16.5",
+                "json": "/version.json",
+                "data": {},
+                "processors": [],
+                "libraries": [library]
+            });
+            let version = serde_json::json!({
+                "id": "1.16.5-forge-36.2.39", "inheritsFrom": "1.16.5", "libraries": []
+            });
+            let f = fixture();
+            let installer = write_installer(
+                &f.root,
+                &[
+                    ("install_profile.json", profile.to_string().as_bytes()),
+                    ("version.json", version.to_string().as_bytes()),
+                    (entry, payload),
+                ],
+            );
+
+            let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+            let err = ForgeInstaller::new(cx, "java")
+                .install_from_installer(&installer)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(err, Error::UnsafePath { .. }),
+                "{entry}：实际 {err:?}"
+            );
+            assert!(
+                !f.root.join("escaped.jar").exists(),
+                "{entry}：库目录外不该写出文件"
+            );
+            assert!(
+                !f.layout.libraries_dir().exists(),
+                "{entry}：库目录里也不该有东西"
+            );
+        }
+    }
+
+    /// install_profile 与 versionInfo 里的版本 id、游戏版本原样拼进 versions/<id>/：能走出版本目录的
+    /// 一律报路径越界，什么都不写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_version_ids_escaping_the_versions_dir_are_rejected() {
+        let modern = |version: &str, minecraft: &str| {
+            let profile = serde_json::json!({
+                "spec": 0, "version": version, "minecraft": minecraft, "json": "/version.json",
+                "data": {}, "processors": [], "libraries": []
+            });
+            let embedded =
+                serde_json::json!({ "id": version, "inheritsFrom": minecraft, "libraries": [] });
+            vec![
+                (
+                    "install_profile.json".to_owned(),
+                    profile.to_string().into_bytes(),
+                ),
+                ("version.json".to_owned(), embedded.to_string().into_bytes()),
+            ]
+        };
+        let legacy = |id: &str| {
+            let profile = serde_json::json!({
+                "install": {
+                    "path": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                    "filePath": "forge-universal.jar",
+                    "minecraft": "1.7.10",
+                    "target": id
+                },
+                "versionInfo": { "id": id, "inheritsFrom": "1.7.10", "libraries": [] }
+            });
+            vec![
+                (
+                    "install_profile.json".to_owned(),
+                    profile.to_string().into_bytes(),
+                ),
+                ("forge-universal.jar".to_owned(), b"universal".to_vec()),
+            ]
+        };
+        let cases = [
+            (r"..\escaped", modern(r"..\escaped", "1.16.5")),
+            ("../escaped", modern("../escaped", "1.16.5")),
+            ("../escaped", modern("1.16.5-forge-36.2.39", "../escaped")),
+            ("../escaped", legacy("../escaped")),
+        ];
+        for (bad, entries) in cases {
+            let f = fixture();
+            let named: Vec<(&str, &[u8])> = entries
+                .iter()
+                .map(|(n, b)| (n.as_str(), b.as_slice()))
+                .collect();
+            let installer = write_installer(&f.root, &named);
+            let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+            let err = ForgeInstaller::new(cx, "java")
+                .install_from_installer(&installer)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, Error::UnsafePath { path, .. } if path == bad),
+                "{bad}：实际 {err:?}"
+            );
+            assert!(
+                !f.root.join("escaped.json").exists(),
+                "{bad}：版本目录外不该写出文件"
+            );
+            assert!(
+                !f.root.join("versions").exists(),
+                "{bad}：versions 下也不该有东西"
+            );
+            assert!(!f.layout.libraries_dir().exists(), "{bad}：不该解出任何库");
+        }
     }
 
     /// installer 里那份 jar 与库条目声明的 sha1 对不上：照实报错，不把坏文件留在库目录里。

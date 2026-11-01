@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use crate::context::InstallContext;
 use crate::error::{Error, Result};
+use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
 use aurora_version::VersionJson;
@@ -238,6 +239,8 @@ impl<'a> LoaderInstaller<'a> {
         let (raw, version, loader_version) =
             self.fetch_profile(game_version, loader_version).await?;
         let id = version.id.clone();
+        // id 来自加载器 meta，原样拼进 versions/<id>/<id>.json。
+        checked_segment(&id, || "加载器 profile 的版本 id".to_owned())?;
 
         // 原样落盘 profile JSON（保留未建模字段），再下加载器库。
         let json_path = self.cx.layout.version_json(&id);
@@ -451,5 +454,52 @@ mod tests {
         let lib =
             layout.library_path("net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar");
         assert_eq!(std::fs::read(lib).unwrap(), b"fabric-loader-jar");
+    }
+
+    /// meta 给出的 profile id 原样拼进 versions/<id>/<id>.json：能走出版本目录的报路径越界，
+    /// 什么都不写、也不去下加载器库。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_rejects_a_profile_id_escaping_the_versions_dir() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let profile = format!(
+            r#"{{"id":"../escaped","inheritsFrom":"1.21","mainClass":"Knot",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.11","url":"{base}/"}}]}}"#
+        );
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/1.21/0.15.11/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(profile))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jar".to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let err = LoaderInstaller::fabric(cx)
+            .with_base_url(&base)
+            .install("1.21", Some("0.15.11"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::UnsafePath { path, .. } if path == "../escaped"),
+            "实际 {err:?}"
+        );
+        assert!(!dir.path().join("escaped.json").exists());
+        assert!(!dir.path().join("versions").exists());
+        assert!(!layout.libraries_dir().exists());
     }
 }

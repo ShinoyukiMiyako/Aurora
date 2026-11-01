@@ -18,8 +18,7 @@ use aurora_version::{Library, RuntimeContext, VersionJson, select_libraries};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result, io_err, zip_err};
-use crate::layout::GameLayout;
-use crate::maven;
+use crate::layout::{GameLayout, coordinate_path};
 
 /// 无显式 exclude 时的默认排除前缀：签名/清单目录不属于运行时动态库。
 const DEFAULT_EXCLUDES: &[&str] = &["META-INF/"];
@@ -69,11 +68,11 @@ pub async fn extract_all_natives(
         if !lib.is_native() {
             continue;
         }
-        let Some(rel) = native_jar_relpath(lib, ctx) else {
+        let Some(rel) = native_jar_relpath(lib, ctx)? else {
             continue;
         };
         jobs.push(NativeJob {
-            jar: layout.library_path(&rel),
+            jar: layout.checked_library_path(&lib.name, &rel)?,
             excludes: effective_excludes(lib),
             sha1: native_jar_sha1(lib, ctx),
         });
@@ -165,17 +164,22 @@ fn native_jar_sha1(lib: &Library, ctx: &RuntimeContext) -> Option<String> {
         .map(|a| a.sha1.clone())
 }
 
-/// 某 native 库当前平台对应 jar 的相对仓库路径。
-fn native_jar_relpath(lib: &Library, ctx: &RuntimeContext) -> Option<String> {
+/// 某 native 库当前平台对应 jar 的相对仓库路径；当前平台没有对应 classifier 时为 `None`。
+///
+/// 坐标兜底与下载计划用同一份逐段校验：缺段报坐标非法、越界报路径越界，与下载时一致，
+/// 不再悄悄跳过（natives 缺了游戏会直接崩）。
+fn native_jar_relpath(lib: &Library, ctx: &RuntimeContext) -> Result<Option<String>> {
     if lib.natives.is_some() {
         // 旧式：从 classifiers 里挑当前平台件。
         if let Some(artifact) = lib.native_artifact(ctx)
             && let Some(path) = &artifact.path
         {
-            return Some(path.clone());
+            return Ok(Some(path.clone()));
         }
-        let classifier = lib.native_classifier(ctx)?;
-        return maven::artifact_path(&format!("{}:{classifier}", lib.name));
+        let Some(classifier) = lib.native_classifier(ctx) else {
+            return Ok(None);
+        };
+        return coordinate_path(&format!("{}:{classifier}", lib.name)).map(Some);
     }
     // 新式：classifier 已在 name 里，直接用主件路径或坐标。
     if let Some(path) = lib
@@ -184,9 +188,9 @@ fn native_jar_relpath(lib: &Library, ctx: &RuntimeContext) -> Option<String> {
         .and_then(|d| d.artifact.as_ref())
         .and_then(|a| a.path.clone())
     {
-        return Some(path);
+        return Ok(Some(path));
     }
-    maven::artifact_path(&lib.name)
+    coordinate_path(&lib.name).map(Some)
 }
 
 /// 库的有效 exclude 前缀：优先用其 `extract.exclude`，未声明则用默认（排除 META-INF）。
@@ -316,6 +320,51 @@ mod tests {
         assert_eq!(
             std::fs::read(layout.natives_dir("1.21").join("lwjgl.dll")).unwrap(),
             b"fake-dll-bytes"
+        );
+    }
+
+    /// natives jar 的路径（直给的或由坐标算出的）能走出库目录时报路径越界，不去读库目录外的文件；
+    /// 坐标缺段报坐标非法，不再悄悄跳过这个 native。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_jar_paths_escaping_the_libraries_dir_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        // 库目录外放一个真能解出 dll 的 jar：校验漏掉时它会被解进 natives 目录。
+        build_test_jar(&dir.path().join("escaped.jar"));
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let cases = [
+            r#"{"name":"org.lwjgl:lwjgl:3.3.3:natives-windows","downloads":{"artifact":{"path":"../escaped.jar","sha1":"x","size":1,"url":"u"}}}"#,
+            r#"{"name":"org.lwjgl:lwjgl-platform:2.9.4","natives":{"windows":"natives-windows"},"downloads":{"classifiers":{"natives-windows":{"path":"../escaped.jar","sha1":"x","size":1,"url":"u"}}}}"#,
+            r#"{"name":"evil:x:1/../../../escaped:natives-windows"}"#,
+            r#"{"name":"org.lwjgl:lwjgl-platform:2.9.4","natives":{"windows":"../../natives-windows"}}"#,
+        ];
+        for lib in cases {
+            let version =
+                VersionJson::from_json_str(&format!(r#"{{"id":"1.21","libraries":[{lib}]}}"#))
+                    .unwrap();
+            let err = extract_all_natives(&version, &ctx, &layout, "1.21")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::UnsafePath { .. }),
+                "{lib}：实际 {err:?}"
+            );
+            assert!(
+                !layout.natives_dir("1.21").exists(),
+                "{lib}：不该解出任何文件"
+            );
+        }
+
+        let malformed = VersionJson::from_json_str(
+            r#"{"id":"1.21","libraries":[{"name":"lwjgl-platform","natives":{"windows":"natives-windows"}}]}"#,
+        )
+        .unwrap();
+        let err = extract_all_natives(&malformed, &ctx, &layout, "1.21")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::InvalidLibraryCoordinate { name } if name == "lwjgl-platform:natives-windows"),
+            "实际 {err:?}"
         );
     }
 

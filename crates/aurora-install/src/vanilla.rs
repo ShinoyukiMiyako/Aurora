@@ -12,6 +12,7 @@ use aurora_version::{ManifestVersion, VersionJson, VersionManifest};
 use crate::complete;
 use crate::context::InstallContext;
 use crate::error::{Error, Result, io_err};
+use crate::layout::checked_segment;
 use crate::net;
 
 /// 官方版本清单地址（BMCLAPI 同结构镜像，元数据抓取不改写，按需由调用方传入镜像地址）。
@@ -83,6 +84,8 @@ impl<'a> VanillaInstaller<'a> {
 
     /// 按清单条目安装原版：下版本 JSON、落盘、解析后补全全部文件。
     pub async fn install_entry(&self, entry: &ManifestVersion) -> Result<VanillaSummary> {
+        // 清单可能来自镜像，id 原样拼进 versions/<id>/<id>.json。
+        checked_segment(&entry.id, || "版本清单里的版本 id".to_owned())?;
         let dest = self.cx.layout.version_json(&entry.id);
         let version = self.download_version_json(entry, &dest).await?;
         self.install_files(&version).await

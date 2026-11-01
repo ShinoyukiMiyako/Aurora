@@ -206,3 +206,55 @@ async fn full_vanilla_install_lands_every_artifact() {
     let again = installer.install("1.21").await.expect("重复安装应成功");
     assert_eq!(again, summary);
 }
+
+/// 版本清单（可能来自镜像）给出的 id 原样拼进 versions/<id>/<id>.json：能走出版本目录的报路径越界，
+/// 不去下版本 JSON，什么都不写。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_ids_escaping_the_versions_dir_are_rejected() {
+    let server = MockServer::start().await;
+    let base = server.uri();
+    let manifest = format!(
+        r#"{{"latest":{{"release":"1.21","snapshot":"1.21"}},"versions":[
+            {{"id":"../escaped","type":"release","url":"{base}/escaped.json",
+              "time":"2024-06-13T08:24:03+00:00","releaseTime":"2024-06-13T08:24:03+00:00"}}
+        ]}}"#
+    );
+    Mock::given(method("GET"))
+        .and(path("/manifest.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(manifest))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/escaped.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"id":"../escaped"}"#))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = aurora_base::http::build_client().unwrap();
+    let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
+    let dir = tempfile::tempdir().unwrap();
+    let layout = GameLayout::new(dir.path());
+    let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+    let policy = RetryPolicy {
+        max_attempts: 1,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        jitter: false,
+    };
+    let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+    let err = VanillaInstaller::new(cx)
+        .with_manifest_url(format!("{base}/manifest.json"))
+        .install("../escaped")
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, aurora_install::Error::UnsafePath { path, .. } if path == "../escaped"),
+        "实际 {err:?}"
+    );
+    assert!(!dir.path().join("escaped.json").exists());
+    assert!(!dir.path().join("versions").exists());
+}
