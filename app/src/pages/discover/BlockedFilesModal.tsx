@@ -6,6 +6,7 @@
 import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { fade } from "../../lib/motion";
+import { cx } from "../../lib/util";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions } from "../../state/launcher";
 import type { BlockedFileDto, ClaimReportDto } from "../../state/store";
@@ -161,7 +162,7 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
       size="md"
       footer={
         <>
-          <span className={styles.footNote}>{BLOCKED_COPY.footNote}</span>
+          <span className={cx(styles.footNote, styles.blockedFootNote)}>{BLOCKED_COPY.footNote}</span>
           <Button variant="ghost" onClick={close}>
             {BLOCKED_COPY.close}
           </Button>

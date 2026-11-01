@@ -300,9 +300,17 @@
   color: var(--sk-text);
 }
 
+/* 落点与底栏说明都是要读到的信息：text-3 只给装饰与禁用 */
 .blockedDest {
   font-size: var(--sk-fs-caption);
-  color: var(--sk-text-3);
+  color: var(--sk-text-2);
+}
+
+/* 叠在共用的 footNote 上：清单底栏的说明是 12 号 text-2 */
+.blockedFootNote {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
 }
 
 /* 淡入淡出的标签外层：不成块、不占额外间距 */

@@ -1304,6 +1304,9 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(blockedDialog().textContent).toContain("这 2 个文件的作者不允许启动器直接下载。到 CurseForge 网页下载后，回到这里重新检查。");
     expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
     expect(blockedDialog().textContent).toContain("下载好后选文件所在的文件夹");
+    // 底栏说明叠上清单自己的 12 号 text-2 样式，不沿用共用说明的 text-3
+    const footNote = [...blockedDialog().querySelectorAll("span")].find((s) => s.textContent === "下载好后选文件所在的文件夹");
+    expect(footNote?.className.split(" ").some((c) => c.includes("blockedFootNote"))).toBe(true);
 
     await clickIn(blockedDialog(), "我已下载，重新检查");
     expect(pickFolder.mock.calls).toEqual([[MOCK_DOWNLOADS_DIR, "选择下载好的文件所在的文件夹"]]);
