@@ -699,6 +699,7 @@
   padding-left: var(--cr-option-indent);
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
+  overflow-wrap: anywhere;
 }
 
 .optionLine {
