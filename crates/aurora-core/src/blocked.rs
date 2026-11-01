@@ -4,7 +4,10 @@
 //! sha1 或 fileFingerprint 校验过才算数。暂存位按文件 id 分、不按整合包分，导入后也不删：同一个文件在别的
 //! 整合包里、或这个整合包再导入一次时都能直接用，不用让用户再下载一遍。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 use aurora_modplatform::curseforge::file_page_url;
 use aurora_modplatform::{
@@ -125,6 +128,25 @@ async fn verify_path(path: &Path, file: &BlockedFile) -> Result<Check> {
     })
 }
 
+/// 文件的大小与修改时间：没变就算还是校验过的那一份。
+type FileStamp = (u64, SystemTime);
+
+/// 校验通过的暂存副本。摘要在面板每次打开、切版本时都要问一遍，几百 MB 的本体重算一次要整份读完。
+/// 暂存位是这个程序私有的目录，大小与修改时间都没变就当没动过；副本只有几份，不必清理。
+static VERIFIED_SLOTS: LazyLock<Mutex<HashMap<PathBuf, FileStamp>>> = LazyLock::new(Mutex::default);
+
+fn verified_stamp(slot: &Path) -> Option<FileStamp> {
+    let verified = VERIFIED_SLOTS.lock().expect("暂存副本校验表的锁已中毒");
+    verified.get(slot).copied()
+}
+
+fn remember_verified(slot: &Path, stamp: FileStamp) {
+    VERIFIED_SLOTS
+        .lock()
+        .expect("暂存副本校验表的锁已中毒")
+        .insert(slot.to_path_buf(), stamp);
+}
+
 fn io_error(path: &Path, source: std::io::Error) -> CoreError {
     aurora_base::Error::Io {
         path: path.to_path_buf(),
@@ -175,14 +197,22 @@ impl Aurora {
     pub(crate) async fn claimed_copy(&self, file: &BlockedFile) -> Result<Option<PathBuf>> {
         ensure_safe_name(file)?;
         let slot = self.claim_slot(file);
-        match tokio::fs::metadata(&slot).await {
-            Ok(meta) if meta.is_file() => {}
+        let stamp = match tokio::fs::metadata(&slot).await {
+            Ok(meta) if meta.is_file() => meta.modified().ok().map(|at| (meta.len(), at)),
             Ok(_) => return Ok(None),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(io_error(&slot, source)),
+        };
+        if stamp.is_some() && verified_stamp(&slot) == stamp {
+            return Ok(Some(slot));
         }
         match verify_path(&slot, file).await? {
-            Check::Match => Ok(Some(slot)),
+            Check::Match => {
+                if let Some(stamp) = stamp {
+                    remember_verified(&slot, stamp);
+                }
+                Ok(Some(slot))
+            }
             Check::Mismatch | Check::Unverifiable => {
                 tracing::warn!(slot = %slot.display(), file_id = file.file_id, "暂存位里的副本与平台给的哈希对不上，不算认领");
                 Ok(None)
@@ -524,6 +554,31 @@ mod tests {
         assert_eq!(aurora.claimed_copy(&file).await.unwrap(), None);
         std::fs::write(&slot, b"good").unwrap();
         assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot));
+    }
+
+    /// 面板每次打开都要问暂存副本：校验过、文件没动就不再整份读一遍。这里改内容时保住大小与修改时间，
+    /// 还算认领就说明没有重算；修改时间一变就重算，换过的文件不能沿用上次的结论。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_verified_slot_copy_is_not_hashed_again_until_it_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora(tmp.path());
+        let file = blocked(10, "x.jar", b"good");
+        let slot = aurora.claim_slot(&file);
+        std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        std::fs::write(&slot, b"good").unwrap();
+        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot.clone()));
+
+        let verified_at = std::fs::metadata(&slot).unwrap().modified().unwrap();
+        let rewrite = |content: &[u8], modified: std::time::SystemTime| {
+            std::fs::write(&slot, content).unwrap();
+            let handle = std::fs::File::options().write(true).open(&slot).unwrap();
+            handle.set_modified(modified).unwrap();
+        };
+        rewrite(b"evil", verified_at);
+        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot.clone()));
+
+        rewrite(b"evil", verified_at + std::time::Duration::from_secs(2));
+        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), None);
     }
 
     /// 流式哈希按 64 KiB 分块读：这些大小让最后一块分别是不满、正好满、多出一字节，0 字节则是第一次读就到
