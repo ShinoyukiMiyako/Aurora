@@ -161,6 +161,90 @@ describe("固定 Java 引起的启动失败：修复动作改对固定的那一�
   });
 });
 
+describe("加载器自带的库缺失", () => {
+  const MISSING = "加载器自带的库 forge-1.20.1-47.2.0-universal.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器";
+  const missing = () => new IpcError("loader_library_missing", MISSING, { path: "D:/mc/libraries/forge-1.20.1-47.2.0-universal.jar" });
+  const repaired = { reinstalled: true, libraries: 3, assets: 0, natives: 0 };
+
+  async function launchFails(): Promise<void> {
+    instances = [instanceDto("生存", { mc_version: "1.20.1", loaders: [{ kind: "forge", version: "47.2.0" }] })];
+    await store.actions.reload("instances");
+    ipc.overrides.set("launch_game", () => {
+      throw missing();
+    });
+    await store.actions.launch("生存");
+  }
+
+  function runnable(target: ReturnType<LauncherStore["actions"]["failureFix"]>): { run(): Promise<void> } {
+    if (!("run" in target)) throw new Error("重新安装加载器应是命令类修复动作");
+    return target;
+  }
+
+  it("启动失败：会话停在失败卡上，通知的动作是重新安装加载器，不是一条走不下去的报错", async () => {
+    await launchFails();
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "loader_library_missing" } });
+    const toast = store.getState().toasts.find((t) => t.tone === "error");
+    expect(toast).toMatchObject({ title: "「生存」启动失败", body: "加载器文件缺失", action: { label: "重新安装加载器" } });
+  });
+
+  it("修复动作排一个补全任务，命令带上 reinstallLoader；装好后通知说清装的是加载器，并给启动入口", async () => {
+    await launchFails();
+    ipc.overrides.set("repair_instance", () => repaired);
+    await runnable(store.actions.failureFix("reinstall_loader")).run();
+    expect(store.getState().tasks.find((t) => t.spec.command === "repair_instance")).toMatchObject({
+      kind: "repair",
+      title: "重新安装「生存」的加载器",
+      detail: "1.20.1 · Forge 47.2.0",
+      instanceId: "生存",
+      spec: { args: { id: "生存", reinstallLoader: true } },
+    });
+    await settle();
+    const [call] = callsOf(ipc, "repair_instance");
+    expect(call).toMatchObject({ id: "生存", reinstallLoader: true });
+    expect(call.taskId).toEqual(expect.any(String));
+    const toast = store.getState().toasts.find((t) => t.tone === "success");
+    expect(toast).toMatchObject({ title: "「生存」的加载器已重新安装", action: { label: "启动" } });
+  });
+
+  it("重装失败：通知写任务标题与后端原文；重试仍是重装，不退回普通补全", async () => {
+    await launchFails();
+    const failing = () => {
+      throw new IpcError("loader_version_not_found", "Forge 没有适用于 1.20.1 的可用 loader 版本");
+    };
+    ipc.overrides.set("repair_instance", failing);
+    await runnable(store.actions.failureFix("reinstall_loader")).run();
+    await settle();
+    const task = store.getState().tasks.find((t) => t.spec.command === "repair_instance");
+    if (task === undefined) throw new Error("应留下失败的重装任务");
+    expect(task.status).toBe("failed");
+    expect(store.getState().toasts.find((t) => t.title === "下载失败：重新安装「生存」的加载器")).toMatchObject({ body: "Forge 没有适用于 1.20.1 的可用 loader 版本", action: { label: "重试" } });
+
+    ipc.overrides.set("repair_instance", () => repaired);
+    store.actions.retryTask(task.id);
+    await settle();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.reinstallLoader)).toEqual([true, true]);
+  });
+
+  it("游戏正在运行时不排重装：入口本该禁用，走到这里按编程错误抛出", async () => {
+    instances = [instanceDto("生存", { mc_version: "1.20.1", loaders: [{ kind: "forge", version: "47.2.0" }] })];
+    await store.actions.reload("instances");
+    ipc.overrides.set("launch_game", () => deferred<unknown>().promise);
+    void store.actions.launch("生存");
+    await settle();
+    await expect(store.actions.repairInstance("生存", { reinstallLoader: true })).rejects.toThrow("「生存」的游戏正在运行，先结束游戏");
+    expect(store.getState().tasks.filter((t) => t.spec.command === "repair_instance")).toEqual([]);
+  });
+
+  it("普通补全的命令不带 reinstallLoader：任务标题与完成通知照旧", async () => {
+    ipc.overrides.set("repair_instance", () => ({ ...repaired, reinstalled: false }));
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(callsOf(ipc, "repair_instance").map((a) => "reinstallLoader" in a)).toEqual([false]);
+    expect(store.getState().tasks[0]).toMatchObject({ title: "补全「生存」的游戏文件" });
+    expect(store.getState().toasts.find((t) => t.tone === "success")).toMatchObject({ title: "「生存」已修复" });
+  });
+});
+
 describe("改名迁移启动会话", () => {
   it("启动失败的会话随改名换成新 id：重试按新名字启动，查看日志也落到新名字", async () => {
     ipc.overrides.set("launch_game", () => {

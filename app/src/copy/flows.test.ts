@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, failureCopy, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -80,6 +80,7 @@ const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
   files_failed: { count: 2, reason: "连接超时" },
   disk_full: { drive: "D:", needed_bytes: 1024 },
   version_broken: {},
+  loader_library_missing: { path: "D:/mc/libraries/forge-1.20.1-47.2.0-universal.jar" },
   spawn_failed: { message: "CreateProcess error=2" },
 };
 
@@ -215,6 +216,29 @@ describe("启动失败：账户验证暂时不可用", () => {
     });
     expect(offering).toEqual(["account_refresh_network", "account_service_down"]);
     expect(failureCopy("account_relogin", PARAMS.account_relogin, ctx("Steve"))).toMatchObject({ fix: { kind: "relogin", label: "重新登录" }, secondary: null });
+  });
+
+  it("加载器文件缺失：失败卡的修复动作是重新安装加载器，正文与任务失败原因同一句", () => {
+    const copy = failureCopy("loader_library_missing", PARAMS.loader_library_missing, ctx("Steve"));
+    expect(copy).toEqual({
+      title: "加载器文件缺失",
+      body: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器。",
+      fix: { kind: "reinstall_loader", label: "重新安装加载器" },
+      secondary: null,
+    });
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+    expect(copy.body).toBe(`${taskFailureReason({ code: "loader_library_missing", message: "后端原文" })}。`);
+    expect(bannedIn([copy.title, copy.body, copy.fix.label, TASK_TEXT.reinstallLoaderTitle("生存"), TASK_TOAST.loaderReinstalled("生存").title, ACTION_ERROR.reinstallLoader])).toEqual([]);
+  });
+
+  it("重新安装加载器的禁用原因：占用矩阵与补全一样，说的是这件事", () => {
+    const reason = (lock: Parameters<typeof lockReason>[0]) => lockReason(lock, "reinstallLoader");
+    expect(reason(null)).toBeUndefined();
+    expect(reason("running")).toBe("游戏正在运行，先结束游戏");
+    expect(reason("installing")).toBe("进行中");
+    expect(reason("modifying")).toBe("正在改动这个实例的 Mod、资源或设置，完成后才能重新安装加载器");
+    expect(reason("backing_up")).toBe("正在备份或恢复这个实例的存档，完成后才能重新安装加载器");
+    expect(reason({ kind: "inherited", usedBy: "整合包" })).toBe("实例「整合包」正在使用它，结束后才能重新安装加载器");
   });
 
   it("以离线方式启动的通知：标题带实例名，正文说明只能玩单人", () => {

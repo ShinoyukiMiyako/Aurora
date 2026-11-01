@@ -703,6 +703,12 @@ export function addMockInstance(
   });
 }
 
+/** 模拟加载器自带的库被删后补全失败：留下与后端同形的未完成标记。 */
+export function loseMockLoaderLibrary(id: string, fileName: string): void {
+  const message = `加载器自带的库 ${fileName} 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器`;
+  requireInstance(id).dto.incomplete = { kind: "repair", outcome: "failed", started_at: Date.now(), spec: null, error: { code: "loader_library_missing", message } };
+}
+
 /** 给实例加一个空存档（模拟游戏里新建的）。 */
 export function addMockWorld(id: string, world: string): void {
   const instance = requireInstance(id);
@@ -1016,9 +1022,41 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
   }
 }
 
+/** reinstallLoader 与后端的 Option<bool> 形参一致：缺省等于 false，给了就必须是布尔。 */
+function reinstallLoaderArg(args: MockArgs): boolean {
+  const value = args.reinstallLoader;
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") throw invalid("reinstallLoader", "type", `reinstallLoader 应为布尔值：${JSON.stringify(value)}`);
+  return value;
+}
+
+/** 能原样装回的加载器，与后端 reinstallable_loader 同一套判定；装不回时给写进不可补全原因的说明。 */
+function reinstallableMockLoader(loaders: InstanceDto["loaders"]): { kind: LoaderChoice; version: string } | string {
+  const external = loaders.find((l) => l.kind === "optifine" || l.kind === "liteloader");
+  if (external !== undefined) return `装着 ${external.kind === "optifine" ? "OptiFine" : "LiteLoader"}，重新安装只能装回 Fabric、Quilt、Forge 或 NeoForge，它会丢失`;
+  const primary = (["neoforge", "forge", "fabric", "quilt"] as const).flatMap((kind) => {
+    const found = loaders.find((l) => l.kind === kind);
+    return found === undefined ? [] : [{ kind, version: found.version }];
+  })[0];
+  if (primary === undefined) return "没有装加载器，不需要重新安装";
+  if (primary.version === null) return `读不出 ${LOADER_NAMES[primary.kind]} 的版本号，无法原样装回`;
+  return { kind: primary.kind, version: primary.version };
+}
+
+/** 重新安装加载器要装回的内容，与后端 loader_reinstall_request 一致，定不出来时报同样的不可补全。 */
+function mockLoaderReinstallSpec(instance: MockInstance): NonNullable<IncompleteDto["spec"]> {
+  const { id, loaders, mc_version: mcVersion } = instance.dto;
+  const refuse = (reason: string) => new IpcError("instance_failed", `实例 ${id} 无法补全：${reason}`, { id, reason });
+  const loader = reinstallableMockLoader(loaders);
+  if (typeof loader === "string") throw refuse(loader);
+  if (mcVersion === null) throw refuse("读不出游戏版本号，无法原样装回");
+  return { mc_version: mcVersion, loader: loader.kind, loader_version: loader.version };
+}
+
 async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
+  const reinstallLoader = reinstallLoaderArg(args);
   const instance = requireInstance(id);
   // 与后端一样，补全期间连同继承链上的基底一起占住：补全要读写基底里的客户端 jar 与 natives。
   const repairHold = acquireMockInstanceWithBases(id, "repairing", mockInheritanceChain(id));
@@ -1034,11 +1072,14 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
       const reason = "整合包没有导入完，缺的 Mod 与配置补不回来，请删掉这个实例后重新导入";
       throw new IpcError("instance_failed", `实例 ${id} 无法补全：${reason}`, { id, reason });
     }
-    const spec = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
-    if (instance.dto.status === "broken" && spec === null) {
+    const marked = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;
+    if (instance.dto.status === "broken" && marked === null) {
       const reason = `${instance.dto.broken_reason ?? "版本 JSON 不可用"}，也没有记下当初装的是什么`;
       throw new IpcError("instance_failed", `实例 ${id} 无法补全：${reason}`, { id, reason });
     }
+    // 与后端一样：上次补全败在加载器自带的库上时，不带参数的补全也走重装，否则只会原样失败；装不回的照旧补全
+    const stuck = instance.dto.incomplete?.error?.code === "loader_library_missing" && typeof reinstallableMockLoader(instance.dto.loaders) !== "string";
+    const spec = marked !== null ? marked : reinstallLoader || stuck ? mockLoaderReinstallSpec(instance) : null;
     const startedAt = Date.now();
     instance.dto.incomplete = spec
       ? { kind: "install", outcome: "pending", started_at: startedAt, spec, error: null }

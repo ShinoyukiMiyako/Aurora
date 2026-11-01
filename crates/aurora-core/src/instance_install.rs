@@ -10,7 +10,8 @@
 //! 界面据此显示「安装没有完成」），取消则经 [`Aurora::abandon_instance`] 把整个目录丢掉。
 //!
 //! 补全先经 [`Aurora::begin_repair`] 看标记定方案：标记里记着当初的安装内容（安装没完成）就照着重装，
-//! 否则按现有版本 JSON 补齐缺失的文件。
+//! 否则按现有版本 JSON 补齐缺失的文件。加载器自带的库补不回来，要经 [`Aurora::begin_loader_reinstall`]
+//! 把版本 JSON 里读出的加载器原样重装一遍，走的是同一条安装链路。
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,10 +21,11 @@ use aurora_install::{
     forge_installer_url, merge_for_instance, neoforge_installer_url, write_instance_json,
 };
 use aurora_instance::{
-    AURORA_META_DIR, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec, MarkerError,
-    MarkerStore, NameViolation, VersionProbe, discover_versions, probe_version,
+    AURORA_META_DIR, DiscoveredVersion, IncompleteKind, IncompleteMarker, IncompleteOutcome,
+    InstallSpec, MarkerError, MarkerStore, NameViolation, VersionProbe, discover_versions,
+    probe_version,
 };
-use aurora_version::{VersionJson, resolve};
+use aurora_version::{LoaderInfo, LoaderKind, VersionJson, identify_mc_version, resolve};
 
 use crate::InstanceError;
 use crate::error::{CoreError, Result};
@@ -31,6 +33,7 @@ use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::{Aurora, make_context};
 use crate::install::LoaderChoice;
 use crate::instances::{LEGACY_JAVA_MAJOR, broken_reason_text, inheritance_root};
+use crate::launch::FailureCode;
 use crate::template::TemplateOutcome;
 
 /// 安装过程中原版 JSON 的暂存位置（实例元数据目录里）。合并后的 JSON 写好即删除。
@@ -130,7 +133,7 @@ pub struct InstanceInstallOutcome {
 /// 补全的方案。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepairPlan {
-    /// 当初的安装没有完成：照记下的内容重装。
+    /// 重装：当初的安装没有完成时照记下的内容，重新安装加载器时照版本 JSON 读出的内容。
     Reinstall(InstanceRequest),
     /// 按现有版本 JSON 补齐文件。
     Complete,
@@ -383,6 +386,24 @@ impl Aurora {
     ///
     /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，不可用就无从下手，报不可补全。
     pub async fn begin_repair(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
+        self.plan_repair(id, false).await
+    }
+
+    /// 定「重新安装加载器」的方案并写下未完成标记：游戏版本、加载器与它的版本号照现有版本 JSON 原样装回，
+    /// 不请求套默认设置，实例里的 Mod、配置与存档都不碰。标记记成安装：中途失败或取消后，普通补全照着这份
+    /// 内容接着重装。
+    ///
+    /// 标记里记着安装内容的照它重装，整合包没导入完的报不可补全，都与 [`Aurora::begin_repair`] 一样；定不出
+    /// 能原样装回的内容时报不可补全，标记不动。
+    pub async fn begin_loader_reinstall(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
+        self.plan_repair(id, true).await
+    }
+
+    async fn plan_repair(
+        &self,
+        id: &str,
+        reinstall_loader: bool,
+    ) -> Result<(RepairPlan, IncompleteMarker)> {
         let dir = self.existing_instance_dir(id).await?;
         let store = MarkerStore::for_version_dir(&dir);
         let previous = match store.load().await {
@@ -392,6 +413,10 @@ impl Aurora {
                 None
             }
         };
+        // 上次补全已经查实加载器自带的库只能重装补回：再照版本 JSON 补一遍只会原样失败，实例库、启动胶囊
+        // 与任务重试的入口都带不上「重装」这个意思，所以由看标记定方案的这一步替它们换掉。装不回的照旧补全：
+        // 玩家可能已经把文件放回去了，这是清掉标记的唯一办法；没放回去时照样报缺失。
+        let stuck = previous.as_ref().is_some_and(lost_loader_library);
         let plan = match previous.map(|marker| marker.kind) {
             Some(IncompleteKind::Install { spec }) => {
                 RepairPlan::Reinstall(InstanceRequest::from_spec(id, &spec)?)
@@ -408,6 +433,12 @@ impl Aurora {
             }
             Some(IncompleteKind::Repair) | None => {
                 match probe_version(self.game_dir(), id).await? {
+                    VersionProbe::Found(version)
+                        if reinstall_loader
+                            || (stuck && reinstallable_loader(&version.loaders).is_ok()) =>
+                    {
+                        RepairPlan::Reinstall(self.loader_reinstall_request(&version).await?)
+                    }
                     VersionProbe::Found(_) => RepairPlan::Complete,
                     VersionProbe::Broken(broken) => {
                         return Err(InstanceError::NotRepairable {
@@ -432,6 +463,45 @@ impl Aurora {
         store.save(&marker).await?;
         tracing::info!(id, plan = ?plan, "开始补全实例");
         Ok((plan, marker))
+    }
+
+    /// 从现有版本 JSON 还原「把加载器原样装回」要的内容。在写标记之前调：定不出来的实例不留下一份照猜测写的
+    /// 安装标记，版本号不安全的也在这里拒掉。
+    async fn loader_reinstall_request(
+        &self,
+        version: &DiscoveredVersion,
+    ) -> Result<InstanceRequest> {
+        let id = version.id.as_str();
+        let refuse = |reason: String| -> CoreError {
+            InstanceError::NotRepairable {
+                id: id.to_owned(),
+                reason,
+            }
+            .into()
+        };
+        let (loader, loader_version) = reinstallable_loader(&version.loaders).map_err(refuse)?;
+        // 看继承链根而不是 inheritsFrom：加载器版本可能叠在另一个加载器版本上，改过名的原版基底 id 是玩家起的
+        // 名字，版本号只在 clientVersion 里。基底已经不在时只剩 inheritsFrom 写的那个 id 可用。
+        let scan = discover_versions(self.game_dir()).await?;
+        let root = inheritance_root(&scan, id);
+        let base = scan
+            .versions
+            .iter()
+            .find(|v| v.id == root)
+            .map_or(&version.json, |v| &v.json);
+        let mc = identify_mc_version(base);
+        let mc_version = mc
+            .value
+            .filter(|_| mc.reliable)
+            .ok_or_else(|| refuse("读不出游戏版本号，无法原样装回".to_owned()))?;
+        let request = InstanceRequest {
+            mc_version,
+            loader: Some(loader),
+            loader_version: Some(loader_version),
+            use_template: false,
+        };
+        request.validate()?;
+        Ok(request)
     }
 
     /// 按方案补全实例。
@@ -496,6 +566,52 @@ impl Aurora {
                 })
             }
         }
+    }
+}
+
+/// 这份标记记着上次败在加载器自带的库上（码与命令报给前端的启动失败码同一个）。
+fn lost_loader_library(marker: &IncompleteMarker) -> bool {
+    marker
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == FailureCode::LoaderLibraryMissing.as_str())
+}
+
+/// 能原样装回的加载器与它的版本号；装不回时给出写进不可补全原因的说明。
+///
+/// OptiFine、LiteLoader 是外部安装器写进版本 JSON 的，这里装不了，叠在别的加载器上时重装也会把它们丢掉。
+/// 读不出版本号的同样不装：Fabric / Quilt 缺版本号时安装器会改装推荐版，版本号就变了。
+fn reinstallable_loader(
+    loaders: &[LoaderInfo],
+) -> std::result::Result<(LoaderChoice, String), String> {
+    if let Some(external) = loaders
+        .iter()
+        .find(|l| matches!(l.kind, LoaderKind::OptiFine | LoaderKind::LiteLoader))
+    {
+        return Err(format!(
+            "装着 {}，重新安装只能装回 Fabric、Quilt、Forge 或 NeoForge，它会丢失",
+            external.kind.as_str()
+        ));
+    }
+    // NeoForge 排在 Forge 前面，与界面取主加载器同序：1.20.1 的 NeoForge 探测时也会命中 Forge。
+    let primary = [
+        (LoaderKind::NeoForge, LoaderChoice::NeoForge),
+        (LoaderKind::Forge, LoaderChoice::Forge),
+        (LoaderKind::Fabric, LoaderChoice::Fabric),
+        (LoaderKind::Quilt, LoaderChoice::Quilt),
+    ]
+    .into_iter()
+    .find_map(|(kind, choice)| {
+        let found = loaders.iter().find(|l| l.kind == kind)?;
+        Some((choice, found.version.clone()))
+    });
+    match primary {
+        None => Err("没有装加载器，不需要重新安装".to_owned()),
+        Some((choice, None)) => Err(format!(
+            "读不出 {} 的版本号，无法原样装回",
+            choice.display_name()
+        )),
+        Some((choice, Some(version))) => Ok((choice, version)),
     }
 }
 
@@ -1027,6 +1143,362 @@ mod tests {
             ),
             "实际：{err:?}"
         );
+    }
+
+    /// 实例目录里的 Fabric 版本 JSON：`clientVersion` 记着原版版本号，改过名也认得出。
+    fn fabric_instance_json(id: &str, loader: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","clientVersion":"1.21.1",
+                "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:{loader}"}}]}}"#
+        )
+    }
+
+    /// 重新安装加载器照原样把版本 JSON 与加载器装回：Mod、配置、存档一个字节不动，默认设置也不套，
+    /// 否则玩家的 options.txt 之外的文件会被模板补进来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reinstalling_the_loader_rewrites_it_and_leaves_player_files_alone() {
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+        put_template(&aurora, &[("servers.dat", b"template")]);
+        let dir = write_version(
+            aurora.game_dir(),
+            "周末生存",
+            &fabric_instance_json("周末生存", "0.16.10"),
+        );
+        let world: Vec<u8> = (0..fastrand::usize(1..2048))
+            .map(|_| fastrand::u8(..))
+            .collect();
+        let kept: [(&str, &[u8]); 4] = [
+            ("mods/sodium.jar", b"mod-bytes"),
+            ("config/sodium.toml", b"[sodium]\nfog = false\n"),
+            ("saves/新世界/level.dat", &world),
+            ("options.txt", b"fov:90"),
+        ];
+        for (path, bytes) in kept {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, bytes).unwrap();
+        }
+
+        let (plan, marker) = aurora.begin_loader_reinstall("周末生存").await.unwrap();
+        let expected = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+        assert_eq!(plan, RepairPlan::Reinstall(expected.clone()));
+        let on_disk = MarkerStore::for_version_dir(&dir)
+            .load()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            on_disk.kind,
+            IncompleteKind::Install {
+                spec: expected.spec()
+            },
+            "中途失败时补全要照着这份内容接着重装"
+        );
+        assert_eq!(on_disk.outcome, IncompleteOutcome::Pending);
+
+        let outcome = aurora
+            .repair_instance("周末生存", &plan, None)
+            .await
+            .unwrap();
+        aurora
+            .settle_instance_marker("周末生存", marker, MarkerSettlement::Succeeded)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            RepairOutcome {
+                reinstalled: true,
+                libraries: 1,
+                assets: 0,
+                natives: 0
+            }
+        );
+        assert!(!marker_path(&dir).exists(), "重装成功后标记清掉");
+        let json: VersionJson =
+            serde_json::from_slice(&std::fs::read(dir.join("周末生存.json")).unwrap()).unwrap();
+        assert_eq!(json.client_version.as_deref(), Some("1.21.1"));
+        assert_eq!(
+            json.libraries
+                .iter()
+                .map(|l| l.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["net.example:loader:0.16.10"],
+            "版本 JSON 换成了加载器服务给的那一份"
+        );
+        for (path, bytes) in kept {
+            assert_eq!(std::fs::read(dir.join(path)).unwrap(), bytes, "{path}");
+        }
+        assert!(!dir.join("servers.dat").exists(), "重装不套默认设置");
+    }
+
+    /// 版本号照现有版本 JSON 读：改过名的基底只在 clientVersion 里记着版本号，1.20.1 的 NeoForge 探测时
+    /// 同时命中 Forge，都不能读错，否则重装的就是另一个游戏版本或另一个加载器。
+    #[tokio::test]
+    async fn the_loader_to_reinstall_is_read_from_the_version_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(
+            &game,
+            "我的原版",
+            r#"{"id":"我的原版","type":"release","clientVersion":"1.20.1","mainClass":"M"}"#,
+        );
+        for (id, json, mc, loader, version) in [
+            (
+                "Forge",
+                r#"{"id":"Forge","type":"release","clientVersion":"1.20.1","mainClass":"M",
+                    "libraries":[{"name":"net.minecraftforge:forge:1.20.1-47.2.0:client"}]}"#,
+                "1.20.1",
+                LoaderChoice::Forge,
+                "47.2.0",
+            ),
+            (
+                "NeoForge",
+                r#"{"id":"NeoForge","type":"release","clientVersion":"1.21.1","mainClass":"M",
+                    "libraries":[{"name":"net.neoforged:neoforge:21.1.77-beta:universal"}]}"#,
+                "1.21.1",
+                LoaderChoice::NeoForge,
+                "21.1.77-beta",
+            ),
+            (
+                "NeoForge 旧版",
+                r#"{"id":"NeoForge 旧版","type":"release","clientVersion":"1.20.1","mainClass":"M",
+                    "arguments":{"game":["--fml.forgeVersion","47.1.106"],"jvm":[]},
+                    "libraries":[{"name":"net.neoforged:forge:1.20.1-47.1.106:universal"}]}"#,
+                "1.20.1",
+                LoaderChoice::NeoForge,
+                "47.1.106",
+            ),
+            (
+                "Quilt",
+                r#"{"id":"Quilt","type":"release","clientVersion":"1.20.1","mainClass":"M",
+                    "libraries":[{"name":"org.quiltmc:quilt-loader:0.26.0-beta.1"}]}"#,
+                "1.20.1",
+                LoaderChoice::Quilt,
+                "0.26.0-beta.1",
+            ),
+            (
+                "传统布局",
+                r#"{"id":"传统布局","inheritsFrom":"我的原版","type":"release","mainClass":"M",
+                    "libraries":[{"name":"net.fabricmc:fabric-loader:0.15.11"}]}"#,
+                "1.20.1",
+                LoaderChoice::Fabric,
+                "0.15.11",
+            ),
+            (
+                "基底不在了",
+                r#"{"id":"基底不在了","inheritsFrom":"1.19.4","type":"release","mainClass":"M",
+                    "libraries":[{"name":"net.fabricmc:fabric-loader:0.15.11"}]}"#,
+                "1.19.4",
+                LoaderChoice::Fabric,
+                "0.15.11",
+            ),
+        ] {
+            write_version(&game, id, json);
+            let (plan, _) = aurora.begin_loader_reinstall(id).await.unwrap();
+            assert_eq!(
+                plan,
+                RepairPlan::Reinstall(request(mc, Some(loader), Some(version))),
+                "{id}"
+            );
+        }
+    }
+
+    /// 定不出能原样装回的内容时报不可补全，动手之前就停下，原有的标记不被覆盖：实例不会因为点了一下就多出
+    /// 一份照着猜测内容写的安装标记。
+    #[tokio::test]
+    async fn loaders_that_cannot_be_put_back_as_they_were_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        for (id, json, reason) in [
+            (
+                "原版",
+                r#"{"id":"原版","type":"release","clientVersion":"1.21.1","mainClass":"M"}"#,
+                "没有装加载器",
+            ),
+            (
+                "光影",
+                r#"{"id":"光影","type":"release","clientVersion":"1.21.1","mainClass":"M",
+                    "libraries":[{"name":"optifine:OptiFine:1.21.1_HD_U_J1"}]}"#,
+                "OptiFine",
+            ),
+            (
+                "叠层",
+                r#"{"id":"叠层","type":"release","clientVersion":"1.20.1","mainClass":"M",
+                    "libraries":[{"name":"net.minecraftforge:forge:1.20.1-47.2.0"},
+                                 {"name":"optifine:OptiFine:1.20.1_HD_U_I6"}]}"#,
+                "OptiFine",
+            ),
+            (
+                "老旧",
+                r#"{"id":"老旧","type":"release","clientVersion":"1.7.10","mainClass":"M",
+                    "minecraftArguments":"--tweakClass com.mumfrey.liteloader.launch.LiteLoaderTweaker",
+                    "libraries":[{"name":"com.mumfrey:liteloader:1.7.10"}]}"#,
+                "LiteLoader",
+            ),
+            (
+                "无版本号",
+                r#"{"id":"无版本号","type":"release","clientVersion":"1.21.1",
+                    "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient"}"#,
+                "读不出 Fabric 的版本号",
+            ),
+            (
+                "不知版本",
+                r#"{"id":"不知版本","type":"release","mainClass":"M",
+                    "libraries":[{"name":"net.fabricmc:fabric-loader:0.15.11"}]}"#,
+                "读不出游戏版本号",
+            ),
+            // 版本号是从目录名里抠出来的：猜错了就成了另一个游戏版本。
+            (
+                "魔改1.20",
+                r#"{"id":"魔改1.20","type":"release","mainClass":"M",
+                    "libraries":[{"name":"net.fabricmc:fabric-loader:0.15.11"}]}"#,
+                "读不出游戏版本号",
+            ),
+        ] {
+            let dir = write_version(&game, id, json);
+            let store = MarkerStore::for_version_dir(&dir);
+            let earlier = IncompleteMarker {
+                error: Some(MarkerError {
+                    code: "network_failed".into(),
+                    message: "连不上".into(),
+                }),
+                outcome: IncompleteOutcome::Failed,
+                ..IncompleteMarker::pending(IncompleteKind::Repair, 1_700_000_000_000)
+            };
+            store.save(&earlier).await.unwrap();
+
+            match aurora.begin_loader_reinstall(id).await.unwrap_err() {
+                CoreError::Instance(InstanceError::NotRepairable {
+                    id: got,
+                    reason: why,
+                }) => {
+                    assert_eq!(got, id);
+                    assert!(why.contains(reason), "{id}：{why}");
+                }
+                other => panic!("{id} 应报不可补全：{other:?}"),
+            }
+            assert_eq!(store.load().await.unwrap(), Some(earlier), "{id}");
+        }
+    }
+
+    /// 版本号来自本地版本 JSON，同样会拼进安装器地址：不是单个安全路径段时在写下标记之前就拒掉。
+    #[tokio::test]
+    async fn an_unsafe_loader_version_in_the_version_json_is_refused_before_any_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let dir = write_version(
+            aurora.game_dir(),
+            "手改过",
+            &fabric_instance_json("手改过", ".."),
+        );
+        let err = aurora.begin_loader_reinstall("手改过").await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::Install(aurora_install::Error::UnsafePath { .. })
+            ),
+            "实际：{err:?}"
+        );
+        assert!(!marker_path(&dir).exists());
+    }
+
+    /// 安装没完成的实例照标记里记下的内容重装（标记里可能记着开局要套默认设置），不去读可能还没写出来的版本 JSON；
+    /// 整合包没导入完的缺的是整合包内容，重装加载器补不回来。
+    #[tokio::test]
+    async fn loader_reinstall_defers_to_what_the_marker_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let wanted = InstanceRequest {
+            use_template: true,
+            ..request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"))
+        };
+        aurora.create_instance_dir("半成品", &wanted).await.unwrap();
+        let (plan, _) = aurora.begin_loader_reinstall("半成品").await.unwrap();
+        assert_eq!(plan, RepairPlan::Reinstall(wanted));
+
+        let dir = write_version(
+            aurora.game_dir(),
+            "整合包",
+            &fabric_instance_json("整合包", "0.16.10"),
+        );
+        let store = MarkerStore::for_version_dir(&dir);
+        let marker = IncompleteMarker::pending(
+            IncompleteKind::Modpack {
+                task_id: "mp#1".into(),
+            },
+            1_700_000_000_000,
+        );
+        store.save(&marker).await.unwrap();
+        match aurora.begin_loader_reinstall("整合包").await.unwrap_err() {
+            CoreError::Instance(InstanceError::NotRepairable { reason, .. }) => {
+                assert!(reason.contains("重新导入"), "{reason}");
+            }
+            other => panic!("应报不可补全：{other:?}"),
+        }
+        assert_eq!(store.load().await.unwrap(), Some(marker));
+    }
+
+    /// 上次补全败在加载器自带的库上时，普通补全直接换成重装：「修复并启动」「重试」「全部修复」都走这里，
+    /// 否则每一个都原样失败，玩家在实例库里点不出去。别的失败照旧按版本 JSON 补全。
+    #[tokio::test]
+    async fn repair_after_a_lost_loader_library_reinstalls_the_loader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let dir = write_version(
+            aurora.game_dir(),
+            "周末生存",
+            &fabric_instance_json("周末生存", "0.16.10"),
+        );
+        let store = MarkerStore::for_version_dir(&dir);
+        let failed_with = |code: &str| IncompleteMarker {
+            error: Some(MarkerError {
+                code: code.to_owned(),
+                message: "原文".into(),
+            }),
+            outcome: IncompleteOutcome::Failed,
+            ..IncompleteMarker::pending(IncompleteKind::Repair, 1_700_000_000_000)
+        };
+
+        store.save(&failed_with("network_failed")).await.unwrap();
+        let (plan, _) = aurora.begin_repair("周末生存").await.unwrap();
+        assert_eq!(plan, RepairPlan::Complete);
+
+        store
+            .save(&failed_with("loader_library_missing"))
+            .await
+            .unwrap();
+        let (plan, _) = aurora.begin_repair("周末生存").await.unwrap();
+        assert_eq!(
+            plan,
+            RepairPlan::Reinstall(request(
+                "1.21.1",
+                Some(LoaderChoice::Fabric),
+                Some("0.16.10")
+            ))
+        );
+
+        // 装不回的加载器照旧补全：玩家把文件放回去之后，这是清掉标记的唯一办法。
+        let optifine = write_version(
+            aurora.game_dir(),
+            "光影",
+            r#"{"id":"光影","type":"release","clientVersion":"1.21.1","mainClass":"M",
+                "libraries":[{"name":"optifine:OptiFine:1.21.1_HD_U_J1"}]}"#,
+        );
+        MarkerStore::for_version_dir(&optifine)
+            .save(&failed_with("loader_library_missing"))
+            .await
+            .unwrap();
+        let (plan, _) = aurora.begin_repair("光影").await.unwrap();
+        assert_eq!(plan, RepairPlan::Complete);
     }
 
     #[tokio::test]

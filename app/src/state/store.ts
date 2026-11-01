@@ -381,7 +381,8 @@ export interface LauncherActions {
   deleteInstance(id: string, worldCount: number): Promise<void>;
   renameInstance(id: string, name: string): Promise<string>;
   updateInstanceSettings(id: string, patch: Partial<InstanceSettings>): Promise<InstanceSettings>;
-  repairInstance(id: string, opts?: { launchAfter?: boolean }): Promise<void>;
+  /** reinstallLoader：把加载器原样重装一遍，走同一个补全任务；游戏版本、Mod、配置与存档都不变。 */
+  repairInstance(id: string, opts?: { launchAfter?: boolean; reinstallLoader?: boolean }): Promise<void>;
   /** 把实例的设置文件存为新实例的默认设置；成功后默认设置的查询失效并通知。 */
   saveInstanceAsTemplate(id: string): Promise<void>;
   clearTemplate(): Promise<void>;
@@ -2138,7 +2139,8 @@ export class LauncherStore {
           await this.actions.launch(id);
           return;
         }
-        this.pushToast("success", TASK_TOAST.repaired(id).title, undefined, this.launchAction(id));
+        const copy = task.spec.args.reinstallLoader === true ? TASK_TOAST.loaderReinstalled(id) : TASK_TOAST.repaired(id);
+        this.pushToast("success", copy.title, undefined, this.launchAction(id));
         return;
       }
       case "java": {
@@ -2397,6 +2399,8 @@ export class LauncherStore {
       }
       case "repair":
         return { run: () => this.actions.repairInstance(instanceId), errorTitle: ACTION_ERROR.repair };
+      case "reinstall_loader":
+        return { run: () => this.actions.repairInstance(instanceId, { reinstallLoader: true }), errorTitle: ACTION_ERROR.reinstallLoader };
       case "download_java": {
         const major = s.failure === null ? undefined : s.failure.params.major;
         if (typeof major !== "number") throw new Error("java_missing 缺少 major");
@@ -2799,7 +2803,7 @@ export class LauncherStore {
       },
       async repairInstance(id, opts = {}) {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
-        store.enqueueRepair(id, opts.launchAfter === true, []);
+        store.enqueueRepair(id, opts.launchAfter === true, [], opts.reinstallLoader === true);
       },
       async saveInstanceAsTemplate(id) {
         await instancesIpc.saveInstanceAsTemplate(id);
@@ -3292,8 +3296,11 @@ export class LauncherStore {
     await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
   }
 
-  /** 排一个补全任务；同一件事已在队列里时提示重复并返回 null。starter 为补全好之后接着装的开局 Mod。 */
-  private enqueueRepair(id: string, launchAfter: boolean, starter: StarterPick[]): Task | null {
+  /**
+   * 排一个补全任务；同一件事已在队列里时提示重复并返回 null。starter 为补全好之后接着装的开局 Mod。reinstallLoader 记在命令
+   * 参数里，任务重试、重启后恢复都原样带着；不重装时不写这个键，后端按缺省的补全处理。
+   */
+  private enqueueRepair(id: string, launchAfter: boolean, starter: StarterPick[], reinstallLoader: boolean): Task | null {
     const inst = this.instance(id);
     const spec = inst.incomplete === null ? null : inst.incomplete.spec;
     const mcVersion = inst.mcVersion !== null ? inst.mcVersion : spec === null ? null : spec.mcVersion;
@@ -3304,7 +3311,13 @@ export class LauncherStore {
           ? TASK_TEXT.repairDetail(mcVersion, inst.loader, inst.loaderVersion)
           : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
     return this.enqueue(
-      { kind: "repair", title: TASK_TEXT.repairTitle(id), detail, instanceId: id, spec: { command: "repair_instance", args: { id, ...starterArgs(starter) } } },
+      {
+        kind: "repair",
+        title: reinstallLoader ? TASK_TEXT.reinstallLoaderTitle(id) : TASK_TEXT.repairTitle(id),
+        detail,
+        instanceId: id,
+        spec: { command: "repair_instance", args: { id, ...starterArgs(starter), ...(reinstallLoader ? { reinstallLoader } : {}) } },
+      },
       { type: "repair", launchAfter, starter },
       id,
     );
@@ -3328,7 +3341,7 @@ export class LauncherStore {
   private retryAsRepair(task: Task, instanceId: string): boolean {
     const meta = this.metaOf(task);
     const starter = meta !== null && meta.type === "create" ? meta.starter : [];
-    if (this.enqueueRepair(instanceId, false, starter) === null) return false;
+    if (this.enqueueRepair(instanceId, false, starter, false) === null) return false;
     this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
     this.tasksChanged();
     return true;

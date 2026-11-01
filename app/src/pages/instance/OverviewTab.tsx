@@ -5,10 +5,10 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, crashCategoryLabel, lockReason, MODPACK_REIMPORT_COPY, modpackLabel } from "../../copy/flows";
+import { ACTION_ERROR, crashCategoryLabel, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
-import { needsReimport } from "../../domain/rules";
+import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { cx } from "../../lib/util";
@@ -90,7 +90,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
     <div className={styles.stack}>
       {banner === "failed" && <FailedBanner inst={inst} />}
       {banner === "crashed" && crash.status === "ready" && crash.data !== null && <CrashBanner report={crash.data} onTab={onTab} />}
-      {banner === "broken" && view.kind === "broken" && (needsReimport(inst) ? <ReimportBanner inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner reason={view.reason} ops={ops} />)}
+      {banner === "broken" && view.kind === "broken" && (needsReimport(inst) ? <ReimportBanner inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner inst={inst} reason={view.reason} ops={ops} />)}
       {banner === "installing" && view.kind === "installing" && <InstallingBanner instanceId={inst.id} />}
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div className={styles.overviewGrid}>
@@ -147,9 +147,26 @@ function CrashBanner({ report, onTab }: { report: CrashReportDto; onTab(tab: Ins
   );
 }
 
-function BrokenBanner({ reason, ops }: { reason: string; ops: InstanceOps }) {
+function BrokenBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: string; ops: InstanceOps }) {
+  // 原因写着要重新安装加载器时按钮照着说：普通的「修复实例」看上去又是刚失败过的那件事
+  const reinstall = lostLoaderLibrary(inst) && canReinstallLoader(inst);
   return (
-    <Banner tone="warn" icon="alert" title={OVERVIEW_COPY.brokenTitle} actions={<Button icon="wrench" disabledReason={lockReason(ops.locks.repair, "repair")} onClick={ops.repair}>{OVERVIEW_COPY.repair}</Button>}>
+    <Banner
+      tone="warn"
+      icon="alert"
+      title={OVERVIEW_COPY.brokenTitle}
+      actions={
+        reinstall ? (
+          <Button icon="wrench" disabledReason={lockReason(ops.locks.repair, "reinstallLoader")} onClick={ops.reinstallLoader}>
+            {REINSTALL_LOADER_LABEL}
+          </Button>
+        ) : (
+          <Button icon="wrench" disabledReason={lockReason(ops.locks.repair, "repair")} onClick={ops.repair}>
+            {OVERVIEW_COPY.repair}
+          </Button>
+        )
+      }
+    >
       {reason}
     </Banner>
   );

@@ -49,6 +49,7 @@ export const FAILURE_CODES = [
   "files_failed",
   "disk_full",
   "version_broken",
+  "loader_library_missing",
   "spawn_failed",
 ] as const;
 export type FailureCode = (typeof FAILURE_CODES)[number];

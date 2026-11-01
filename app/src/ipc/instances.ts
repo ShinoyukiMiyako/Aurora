@@ -417,9 +417,13 @@ export const saveInstanceAsTemplate = (id: string): Promise<TemplateInfoDto> => 
 /** 删掉默认设置，返回删完之后的状态（present 为 false）。本来就没有也算成功。 */
 export const clearTemplate = (): Promise<TemplateInfoDto> => invoke<TemplateInfoDto>("clear_template");
 
-/** 长任务：补全实例文件；新建没装完的实例照当初的内容重装。可取消。 */
-export const repairInstance = (taskId: string, id: string): Promise<RepairResultDto> =>
-  invoke<RepairResultDto>("repair_instance", { taskId, id });
+/**
+ * 长任务：补全实例文件；新建没装完的实例照当初的内容重装。可取消。reinstallLoader 把版本 JSON 里读出的加载器原样重装一遍，
+ * 版本号、Mod、配置与存档不变；读不出能原样装回的内容（原版、叠着 OptiFine 或 LiteLoader、版本号读不出来）时报 instance_failed。
+ * 上次补全败在 loader_library_missing 时，不带它也走重装。
+ */
+export const repairInstance = (taskId: string, id: string, opts: { reinstallLoader?: true } = {}): Promise<RepairResultDto> =>
+  invoke<RepairResultDto>("repair_instance", { taskId, id, ...opts });
 
 /**
  * 改名或删除本身已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改：照成功处理（刷新列表、

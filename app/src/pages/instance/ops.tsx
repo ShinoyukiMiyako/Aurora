@@ -44,6 +44,7 @@ export interface InstanceOps {
   /** 此刻不能确认更新 Mod 的原因：既要换 jar（游戏运行、补全挡着），也要占住实例（改名、删除挡着）。能更新为 undefined。 */
   updateReason: string | undefined;
   repair(): void;
+  reinstallLoader(): void;
   remove(): void;
 }
 
@@ -113,6 +114,12 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     });
   };
 
+  const reinstallLoader = () => {
+    void run(() => actions.repairInstance(id, { reinstallLoader: true }), ACTION_ERROR.reinstallLoader).then((outcome) => {
+      if (outcome.ok) actions.toast("info", OVERVIEW_COPY.reinstallLoaderStarted(name), OVERVIEW_COPY.repairStartedBody);
+    });
+  };
+
   const remove = () => {
     void deleteInstance(inst);
   };
@@ -133,6 +140,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     updateHoldReason,
     updateReason: modsLock !== undefined ? modsLock : updateHoldReason,
     repair,
+    reinstallLoader,
     remove,
   };
 }
