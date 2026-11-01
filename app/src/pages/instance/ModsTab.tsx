@@ -6,7 +6,7 @@
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, lockReason, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatDate } from "../../domain/format";
 import { fade } from "../../lib/motion";
@@ -136,7 +136,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     focusLeftWithBar.current = node.contains(document.activeElement);
   }, []);
   const id = inst.id;
-  const lock = lockReason(ops.locks.mods, "mods");
+  const lock = ops.modsReason;
   // 检查更新会把反查到的身份回写卷宗，后端照改动 Mod 占住实例：与安装、补全、改名、删除互斥，游戏运行不挡
   const checkReason = ops.work === null ? undefined : LOCK_REASON.work.checkUpdates[ops.work];
   const holdLock = ops.updateHoldReason;
@@ -539,7 +539,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
       )}
 
       {preview !== null && (
-        <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} lock={ops.updateReason} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
+        <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} lock={ops.modsReason} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
       )}
     </div>
   );

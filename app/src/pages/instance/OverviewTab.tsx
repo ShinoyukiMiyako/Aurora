@@ -587,7 +587,7 @@ function ModsPeekCard({
                 <Button
                   size="sm"
                   icon="download"
-                  disabledReason={lockReason(ops.locks.mods, "mods")}
+                  disabledReason={ops.modsReason}
                   loading={updating}
                   onClick={() => setPreview((p) => ({ key: p === null ? 0 : p.key + 1, open: true }))}
                 >
@@ -609,7 +609,7 @@ function ModsPeekCard({
           open={preview.open}
           queryId={queryId}
           rows={outdated}
-          lock={ops.updateReason}
+          lock={ops.modsReason}
           onClose={() => setPreview((p) => (p === null ? p : { ...p, open: false }))}
           onConfirm={(picked) => {
             setPreview((p) => (p === null ? p : { ...p, open: false }));

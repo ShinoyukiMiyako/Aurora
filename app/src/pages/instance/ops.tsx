@@ -41,8 +41,8 @@ export interface InstanceOps {
   exportSavesReason: string | undefined;
   /** 更新检查设置此刻改不了的原因：只写卷宗不碰 jar，游戏运行不挡；但要占住实例，安装、补全、改名、删除挡着。能改为 undefined。 */
   updateHoldReason: string | undefined;
-  /** 此刻不能确认更新 Mod 的原因：既要换 jar（游戏运行、补全挡着），也要占住实例（改名、删除挡着）。能更新为 undefined。 */
-  updateReason: string | undefined;
+  /** 此刻不能改动 Mod 的原因（启停、更新、移除、回滚）：既要换 jar（游戏运行、补全挡着），也要占住实例（改名、删除挡着）。能改动为 undefined。 */
+  modsReason: string | undefined;
   repair(): void;
   reinstallLoader(): void;
   remove(): void;
@@ -138,7 +138,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     exportReason: exportReason(inst, work),
     exportSavesReason: exportSavesReason(inst, busy),
     updateHoldReason,
-    updateReason: modsLock !== undefined ? modsLock : updateHoldReason,
+    modsReason: modsLock !== undefined ? modsLock : updateHoldReason,
     repair,
     reinstallLoader,
     remove,

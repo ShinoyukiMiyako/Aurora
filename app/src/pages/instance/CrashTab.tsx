@@ -525,7 +525,7 @@ function FixRow({
   const { copyText } = useShell();
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const modLock = lockReason(ops.locks.mods, "mods");
+  const modLock = ops.modsReason;
   const repairLock = lockReason(ops.locks.repair, "repair");
   const settingsLock = ops.settingsReason;
 
@@ -722,7 +722,7 @@ function FixRow({
 
 function SuspectsCard({ ops, report, mods, switches }: { ops: InstanceOps; report: CrashReportDto; mods: ResourceResult<InstalledMod[]>; switches: ModSwitches }) {
   const actions = useLauncherActions();
-  const lock = lockReason(ops.locks.mods, "mods");
+  const lock = ops.modsReason;
 
   const toggle = (mod: InstalledMod) => {
     const name = modName(mod);

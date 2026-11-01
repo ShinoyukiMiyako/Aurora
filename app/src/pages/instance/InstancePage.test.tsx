@@ -1580,6 +1580,19 @@ describe("实例详情：Mod 管理", () => {
     expect(callsOf(ipc, "set_mod_enabled")).toHaveLength(1);
   });
 
+  it.each(["renaming", "deleting"] as const)("后端报 %s：行内开关与移除提前禁用，不等 instance_busy", async (activity) => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity } : i));
+    await open("mods");
+    expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBe("true");
+    const remove = button("移除 Sodium");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    click(byRole("switch", "停用 Sodium"));
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it("开关的启停还没回来：移除带原因禁用、点了不开确认框，回来后恢复", async () => {
     const pending = deferred<string>();
     ipc.overrides.set("set_mod_enabled", () => pending.promise);

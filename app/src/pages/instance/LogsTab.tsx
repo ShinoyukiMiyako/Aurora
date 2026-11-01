@@ -3,7 +3,7 @@
 
 import { useMemo, useState } from "react";
 import { Icon } from "../../art/Icon";
-import { ACTION_ERROR, lockReason, phaseLabel } from "../../copy/flows";
+import { ACTION_ERROR, phaseLabel } from "../../copy/flows";
 import { logLineFromDto, type InstanceSummary } from "../../domain/adapt";
 import { clock, formatDate, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
@@ -202,7 +202,7 @@ function TimelineItem({ item, queryId, ops }: { item: HistoryItem; queryId: stri
   const [busy, setBusy] = useState(false);
   const kind = item.event.kind;
   const files = item.files.slice(0, FILE_CHIPS);
-  const lock = lockReason(ops.locks.mods, "mods");
+  const lock = ops.modsReason;
 
   const rollback = () => {
     if (queryId === null) return;
