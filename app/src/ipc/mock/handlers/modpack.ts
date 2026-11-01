@@ -529,6 +529,7 @@ function planExport(id: string): ModpackExportPreviewDto {
     disabled,
     extras,
     mod_skipped: [],
+    disabled_skipped: [],
   };
 }
 
@@ -665,7 +666,7 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
       override_files: files,
       bundled_mods: plan.bundled.map((m) => m.file_name),
       disabled_mods: carried.length,
-      skipped: [...plan.mod_skipped, ...extras.flatMap((e) => e.skipped)].sort(),
+      skipped: [...plan.mod_skipped, ...(options.include_disabled ? plan.disabled_skipped : []), ...extras.flatMap((e) => e.skipped)].sort(),
     };
   })
     .then((outcome) => {

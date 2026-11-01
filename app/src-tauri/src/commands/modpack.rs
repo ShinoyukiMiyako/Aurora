@@ -552,6 +552,7 @@ pub struct ModpackExportPreviewDto {
     pub disabled: Vec<ExportBundledModDto>,
     pub extras: Vec<ExportExtraStatDto>,
     pub mod_skipped: Vec<String>,
+    pub disabled_skipped: Vec<String>,
 }
 
 /// 只写进索引的 Mod。
@@ -887,6 +888,7 @@ fn export_preview_dto(preview: ModpackExportPreview) -> ModpackExportPreviewDto 
             })
             .collect(),
         mod_skipped: preview.mod_skipped,
+        disabled_skipped: preview.disabled_skipped,
     }
 }
 
@@ -2084,6 +2086,7 @@ mod tests {
         let facade = facade_in(dir.path(), &server.uri());
         let instance = export_instance(dir.path());
         std::fs::write(instance.join("mods").join("con.jar"), b"reserved").unwrap();
+        std::fs::write(instance.join("mods").join("aux.jar.disabled"), b"reserved").unwrap();
         std::fs::write(instance.join("config").join("nul.json"), b"reserved").unwrap();
         let registry = TaskRegistry::default();
         let locks = InstanceLocks::default();
@@ -2112,6 +2115,10 @@ mod tests {
         assert_eq!(wire["extras"][6]["extra"], "saves");
         assert_eq!(wire["extras"][6]["skipped"], serde_json::json!([]));
         assert_eq!(wire["mod_skipped"], serde_json::json!(["mods/con.jar"]));
+        assert_eq!(
+            wire["disabled_skipped"],
+            serde_json::json!(["mods/aux.jar.disabled"])
+        );
 
         let destination = dir.path().join("樱花林 1.0.0.mrpack");
         let outcome = export_modpack_with(

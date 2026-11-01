@@ -80,9 +80,17 @@ export function bundledTotals(preview: ModpackExportPreviewDto, draft: Pick<Draf
   };
 }
 
-/** 这次导出会跳过的文件数：mods 目录里的总算，额外项的只算勾上的，与导出结果的 skipped 同一口径。 */
-export function skippedCount(preview: ModpackExportPreviewDto, extras: ReadonlySet<ExportExtra>): number {
-  return preview.extras.filter((e) => extras.has(e.extra)).reduce((n, e) => n + e.skipped.length, preview.mod_skipped.length);
+/** 这次带不带停用的 Mod：一个能带的都没有时不给勾选框，勾选留在草稿里也不算。 */
+function carriesDisabled(preview: ModpackExportPreviewDto, draft: Pick<Draft, "includeDisabled">): boolean {
+  return draft.includeDisabled && preview.disabled.length > 0;
+}
+
+/**
+ * 这次导出会跳过的文件数，与导出结果的 skipped 同一口径：启用的 jar 总算，停用的 jar 带上才算，额外项的只算勾上的。
+ */
+export function skippedCount(preview: ModpackExportPreviewDto, extras: ReadonlySet<ExportExtra>, includeDisabled: boolean): number {
+  const mods = preview.mod_skipped.length + (includeDisabled ? preview.disabled_skipped.length : 0);
+  return preview.extras.filter((e) => extras.has(e.extra)).reduce((n, e) => n + e.skipped.length, mods);
 }
 
 /** 这次实际打包的额外项：存档被占着时勾选留在草稿里，放开后恢复，这一次不算。 */
@@ -142,7 +150,7 @@ export function ExportModpackModal({ inst, lockReason, savesReason, onClose }: E
       version: draft.version.trim(),
       summary: summary === "" ? null : summary,
       extras: EXPORT_EXTRAS.filter((e) => effectiveExtras(draft.extras, savesReason).has(e)),
-      include_disabled: draft.includeDisabled && preview.data.disabled.length > 0,
+      include_disabled: carriesDisabled(preview.data, draft),
     };
     onClose();
     await run(() => actions.exportModpack(inst.id, options), ACTION_ERROR.exportModpack);
@@ -201,7 +209,7 @@ function ExportForm({ preview, draft, savesReason, onDraft }: ExportFormProps) {
   const [listOpen, setListOpen] = useState(false);
   const extras = effectiveExtras(draft.extras, savesReason);
   const totals = bundledTotals(preview, { extras, includeDisabled: draft.includeDisabled });
-  const skipped = skippedCount(preview, extras);
+  const skipped = skippedCount(preview, extras, carriesDisabled(preview, draft));
 
   const toggleExtra = (extra: ExportExtra, on: boolean) => {
     const next = new Set(draft.extras);

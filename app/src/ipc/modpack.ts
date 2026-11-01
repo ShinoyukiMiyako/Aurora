@@ -270,8 +270,10 @@ export interface ModpackExportPreviewDto {
   bundled: ExportBundledModDto[];
   disabled: ExportBundledModDto[];
   extras: ExportExtraStatDto[];
-  /** mods 目录里名字不能安全写进整合包的文件（正斜杠相对路径）；不看勾选，导出时总会跳过。 */
+  /** mods 目录里启用的 jar 中名字不能安全写进整合包的文件（正斜杠相对路径）；不看勾选，导出时总会跳过。 */
   mod_skipped: string[];
+  /** 停用的 jar 中名字不能安全写进整合包的文件；带上停用的 Mod 时才算这次导出会跳过的。 */
+  disabled_skipped: string[];
 }
 
 /** 嵌套对象的键是 snake_case；后端拒绝不认识的键。 */
