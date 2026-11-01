@@ -315,6 +315,8 @@ export interface Overview {
   total: number;
   /** 0-1；没有总量已知的活动任务时为 null（进度环圆心写「--」，而不是一个没有意义的 0%）。 */
   fraction: number | null;
+  /** 有活动任务且全是本地读写（导出、备份、恢复）：这时字节不是下载来的。 */
+  localOnly: boolean;
 }
 
 export function overviewOf(b: TaskBuckets): Overview {
@@ -328,7 +330,8 @@ export function overviewOf(b: TaskBuckets): Overview {
   }
   const speed = b.running.reduce((sum, t) => sum + t.speedBps, 0);
   const label: OverviewLabel = b.running.length > 0 ? "running" : active.length > 0 ? "waiting" : "idle";
-  return { label, speed, downloaded, total, fraction: total > 0 ? downloaded / total : null };
+  const localOnly = active.length > 0 && !active.some((t) => DOWNLOADS_WHEN_RUNNING[t.kind]);
+  return { label, speed, downloaded, total, fraction: total > 0 ? downloaded / total : null, localOnly };
 }
 
 /** 总览副行：剩余字节与剩余时间；没有任何下载流量时写「等待数据」。 */
