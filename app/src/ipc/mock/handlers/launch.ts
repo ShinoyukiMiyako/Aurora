@@ -372,13 +372,20 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   if (quickPlay !== null) checkQuickPlay(versionId, quickPlay);
   lastQuickPlay = quickPlay;
   if (occupant) throw busy(occupant);
-  // 后端在开局取账户身份时才拒绝，那时已占了槽与实例，但一失败就全部放开；这里在占用之前拒绝，对外可见的状态相同。
-  const offlineAs = offlineFallback ? admitOfflineFallback(uuid, name) : null;
   // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），最后登记任务。
   const hold = acquireMockInstance(versionId, "launching");
   try {
     beginMockTask(taskId);
   } catch (error) {
+    hold.release();
+    throw error;
+  }
+  // 后端在占住槽与实例之后、开局取账户身份时才判定（并消耗那条失败记录），被拒就全部放开：占用失败的降级不能把记录用掉
+  let offlineAs: string | null;
+  try {
+    offlineAs = offlineFallback ? admitOfflineFallback(uuid, name) : null;
+  } catch (error) {
+    endMockTask(taskId);
     hold.release();
     throw error;
   }
