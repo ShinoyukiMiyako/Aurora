@@ -135,6 +135,8 @@ export interface Task {
   transferredBytes: number | null;
   /** 当前这一批迄今读到的网络字节，只用来算下一条快照又传了多少，不落盘；组合任务的这个数按项记在进度游标里。 */
   batchTransferred: number;
+  /** 当前这一批的文件数：有文件没声明大小时 totalBytes 是 null，前后两批只能靠它区分，不落盘；组合任务不用它，恒为 0。 */
+  batchFiles: number;
   speedBps: number;
   /** 这一次尝试开始运行的时刻；排队中、还没开始过为 null。「用时」是 finishedAt 减去它，不含排队等待。 */
   startedAt: number | null;

@@ -67,8 +67,31 @@ describe("下载队列：纯函数", () => {
     expect(progressTrack(a)).toBe(progressTrack({ ...a, bytes: 500, progress: 0.5 }));
     expect(progressTrack(a)).not.toBe(progressTrack({ ...a, totalBytes: 4000 }));
     expect(progressTrack(a)).not.toBe(progressTrack({ ...a, attempt: 2 }));
-    expect(progressTrack({ ...a, totalBytes: 0 })).toBe("t#1:0");
-    expect(progressTrack({ ...a, totalBytes: null })).toBe("t#1:count");
+    expect(progressTrack({ ...a, totalBytes: 0 })).toBe("t#1:0:0");
+    expect(progressTrack({ ...a, totalBytes: null })).toBe("t#1:count:0");
+  });
+
+  it("进度条标识：声明大小都未知的前后两批按文件数分开", () => {
+    // 真实的 Fabric 安装：先是 1 个文件的版本 JSON，接着 75 个文件的本体与库，加载器的库没声明大小，两批的总字节都是未知
+    const snap = (total: number, finished: number, bytes: number) => ({ total, finished, bytes, totalBytes: null, transferred: bytes, speed: 0 });
+    const json = applyTaskDownload([task("t1", { status: "running" })], "t1#1", snap(1, 1, 35_014));
+    expect(json[0].progress).toBe(1);
+    const libraries = applyTaskDownload(json, "t1#1", snap(75, 0, 0));
+    expect(libraries[0].progress).toBe(0);
+    expect(progressTrack(libraries[0])).not.toBe(progressTrack(json[0]));
+    const more = applyTaskDownload(libraries, "t1#1", snap(75, 30, 40_000_000));
+    expect(more[0].progress).toBeCloseTo(0.4, 10);
+    expect(progressTrack(more[0])).toBe(progressTrack(libraries[0]));
+  });
+
+  it("新批次的第一条快照已经下了比上一批多的字节：文件数变了也从头算起", () => {
+    // 进度事件有节流，新批次的 0 字节那一条可能根本发不出来
+    const snap = (total: number, finished: number, bytes: number) => ({ total, finished, bytes, totalBytes: null, transferred: bytes, speed: 0 });
+    const json = applyTaskDownload([task("t1", { status: "running" })], "t1#1", snap(1, 1, 35_014));
+    const libraries = applyTaskDownload(json, "t1#1", snap(75, 15, 5_000_000));
+    expect(libraries[0].progress).toBeCloseTo(0.2, 10);
+    expect(libraries[0].doneBytes).toBe(5_035_014);
+    expect(progressTrack(libraries[0])).not.toBe(progressTrack(json[0]));
   });
 
   it("调度按数组顺序取最靠前的 queued，同时最多 3 个在跑", () => {
