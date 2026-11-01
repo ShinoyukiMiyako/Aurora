@@ -23,6 +23,11 @@ export function activeTasks(state: LauncherState): Task[] {
   return state.tasks.filter(isActiveTask);
 }
 
+/** 活动任务里下载类的个数：本地打包与备份不能说成下载。 */
+export function activeDownloads(state: LauncherState): number {
+  return activeTasks(state).filter((t) => DOWNLOADS_WHEN_RUNNING[t.kind]).length;
+}
+
 export function findInstance(state: Pick<LauncherState, "instances">, id: string): InstanceSummary | undefined {
   return state.instances.find((i) => i.id === id);
 }
@@ -128,5 +133,5 @@ export function usedAuthServers(state: LauncherState, except: readonly string[])
 export function closeNeedsConfirm(state: LauncherState): { session: boolean; tasks: number; downloads: number; backups: number } {
   const tasks = activeTasks(state);
   const backups = state.instances.filter((inst) => inst.activity === "backing_up" && !tasks.some((t) => t.instanceId === inst.id)).length;
-  return { session: busyInstanceId(state) !== null, tasks: tasks.length, downloads: tasks.filter((t) => DOWNLOADS_WHEN_RUNNING[t.kind]).length, backups };
+  return { session: busyInstanceId(state) !== null, tasks: tasks.length, downloads: activeDownloads(state), backups };
 }

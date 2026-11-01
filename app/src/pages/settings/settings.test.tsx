@@ -1042,10 +1042,24 @@ describe("设置页：关于与启动器更新", () => {
     await act(async () => {
       await launcher.actions.installJava(17);
     });
-    await click(all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === "改为现在安装") as HTMLButtonElement);
-    const titles = all(OPEN_DIALOG + ' h2').map((h) => h.textContent);
-    expect(titles).toContain("还有下载没完成");
+    const switchNow = () => all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === "改为现在安装") as HTMLButtonElement;
+    const confirmButton = (label: string) => {
+      const found = all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === label);
+      if (found === undefined) throw new Error(`确认框里没有「${label}」`);
+      return found;
+    };
+    await click(switchNow());
+    expect(all(OPEN_DIALOG + ' h2').map((h) => h.textContent)).toContain("重启并安装更新？");
+    expect(text()).toContain("还有 1 个下载任务，重启会中断它们，之后需要重新开始。");
+    expect(confirmButton("重启并安装").dataset.variant).toBe("danger");
     expect(callsOf(ipc, "install_update")).toHaveLength(0);
+
+    // 选「继续下载」回到面板，什么都不装；确认后才装
+    await click(confirmButton("继续下载"));
+    expect(callsOf(ipc, "install_update")).toHaveLength(0);
+    await click(switchNow());
+    await click(confirmButton("重启并安装"));
+    expect(callsOf(ipc, "install_update")).toHaveLength(1);
   });
 
   it("跳过此版本：写入配置并收起面板，卡片标注跳过", async () => {
