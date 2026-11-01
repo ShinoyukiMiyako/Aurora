@@ -459,6 +459,28 @@ describe("下载任务页：进行中", () => {
     return launcher.state.tasks.map((t) => t.id);
   }
 
+  it("备份存档在跑：行与通道的进度条读屏只说进度，不说成下载", async () => {
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-backup", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args: { id: "生存", world: "旧世界" } },
+        }),
+      ],
+    });
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    await mount();
+    act(() => buttonIn(row("备份「旧世界」"), "重试").click());
+    await flush();
+    const labels = [...page().querySelectorAll('[role="progressbar"]')].map((bar) => bar.getAttribute("aria-label"));
+    expect(labels.filter((label) => label === "备份「旧世界」 的进度")).toHaveLength(2);
+    expect(labels.filter((label) => label !== null && label.includes("下载进度"))).toEqual([]);
+  });
+
   it("三条通道各放一个运行中的任务，第四个排队；副标题与排队说明给出数量", async () => {
     const ids = await fourJavaTasks();
     expect(page().textContent).toContain("3 个下载中，1 个排队 · 最多 3 个并行");

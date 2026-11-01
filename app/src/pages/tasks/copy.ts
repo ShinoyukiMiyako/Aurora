@@ -31,7 +31,7 @@ export const TASKS_COPY = {
     idle: "空闲",
     queued: (count: number) => `还有 ${count} 个在排队，空出通道后按加入顺序开始`,
     none: "没有排队的任务",
-    progressLabel: (title: string) => `${title} 的下载进度`,
+    progressLabel: (title: string) => `${title} 的进度`,
   },
 
   filter: {
@@ -54,7 +54,7 @@ export const TASKS_COPY = {
     viewBlocked: "查看这些文件",
     viewInstance: "查看实例",
     failedTag: "失败",
-    progressLabel: (title: string) => `${title} 的下载进度`,
+    progressLabel: (title: string) => `${title} 的进度`,
     sizePending: "大小待定",
     waitingData: "等待数据",
     transfer: (done: string, total: string) => `${done} / ${total}`,
