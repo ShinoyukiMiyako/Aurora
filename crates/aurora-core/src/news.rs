@@ -846,7 +846,7 @@ mod tests {
         include_str!("../tests/fixtures/launchercontent/javaPatchNotes.json");
     const RELEASES_FIXTURE: &str = include_str!("../tests/fixtures/github/releases.json");
     const BASE: &str = "https://launchercontent.mojang.com";
-    const RELEASES_PATH: &str = "/repos/ShinoyukiMiyako/Aurora/releases";
+    const RELEASES_PATH: &str = "/repos/ShinoyukiMiyako/Petalfall/releases";
     /// 2026-10-30T00:00:00Z。
     const OCT_30: u64 = 1_793_318_400_000;
     const DAY: u64 = 86_400_000;

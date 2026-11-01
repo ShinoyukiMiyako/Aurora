@@ -576,7 +576,7 @@ versions/<实例名>/
 | 中文名 | 落樱 | `APP_NAME` | `app_name!()` / `APP_NAME` |
 | 英文名 | Petalfall | `APP_NAME_EN` | `app_name_en!()` / `APP_NAME_EN` |
 | slug | petalfall | `APP_SLUG` | `app_slug!()` / `APP_SLUG` |
-| 仓库地址 | https://github.com/ShinoyukiMiyako/Aurora | `REPO_URL` | `REPO_URL` |
+| 仓库地址 | https://github.com/ShinoyukiMiyako/Petalfall | `REPO_URL` | `REPO_URL` |
 
 前端常量定义在 `app/src/lib/app-info.ts`，Rust 常量定义在 `aurora-base` 的 `brand` 模块。Rust 用宏的形式提供，是为了能放进 `concat!`：User-Agent、元数据目录名、崩溃规则表都是编译期拼接的 `&'static str`。两边的取值由上面的品牌一致性测试保证相同；仓库地址另由 `aurora-tauri` 资讯命令的测试 `repo_url_matches_frontend` 钉住（启动器资讯读这个仓库的 GitHub Releases）。
 
