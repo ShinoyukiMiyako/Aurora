@@ -296,13 +296,6 @@ pub(crate) async fn read_tail_for_diagnosis(path: &Path) -> Result<LogTail> {
     Ok(read_log_tail(path, CRASH_LOG_TAIL_BYTES, usize::MAX).await?)
 }
 
-/// 这一次崩溃时游戏留下的文件。
-#[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct CrashFiles {
-    pub hs_err: Option<PathBuf>,
-    pub crash_report: Option<PathBuf>,
-}
-
 /// 文件修改时间的 Unix 毫秒。早于 1970 年的时间戳（文件系统或复制工具写坏的）按 0 算，它必然早于
 /// 任何一次会话，结论与「不是这一次写的」一致。
 fn modified_millis(meta: &std::fs::Metadata, path: &Path) -> Result<u64> {
@@ -328,33 +321,42 @@ async fn metadata_if_exists(path: &Path) -> Result<Option<std::fs::Metadata>> {
     }
 }
 
-/// 找这一次会话留下的 hs_err 与崩溃报告。
+/// 找这一次会话留下的 hs_err。两份文件各找各的：一份找不了不该连累另一份已经找到的。
 ///
-/// hs_err 只认工作目录下文件名里 pid 与这次进程一致的那份：JVM 不会覆盖别的 pid 的旧文件，工作目录里
+/// 只认工作目录下文件名里 pid 与这次进程一致的那份：JVM 不会覆盖别的 pid 的旧文件，工作目录里
 /// 常年躺着几份往日的 hs_err。pid 会被系统复用，所以还要求修改时间不早于会话开始。JVM 写不了工作目录时
-/// 会退到系统临时目录，那里不扫：临时目录是所有程序共用的，按 pid 认很容易认错。崩溃报告取
-/// `crash-reports/` 下会话开始后写下的最新一份。两个目录与文件不存在都不是错误。
-pub(crate) async fn find_crash_files(
+/// 会退到系统临时目录，那里不扫：临时目录是所有程序共用的，按 pid 认很容易认错。pid 未知时不找，
+/// 文件不存在不是错误。
+pub(crate) async fn find_hs_err(
     working_dir: &Path,
     pid: Option<u32>,
     session_started_at: u64,
-) -> Result<CrashFiles> {
-    let since = session_started_at.saturating_sub(MTIME_SLACK_MS);
-    let mut files = CrashFiles::default();
-    if let Some(pid) = pid {
-        let path = working_dir.join(format!("hs_err_pid{pid}.log"));
-        if let Some(meta) = metadata_if_exists(&path).await?
-            && meta.is_file()
-            && modified_millis(&meta, &path)? >= since
-        {
-            files.hs_err = Some(path);
+) -> Result<Option<PathBuf>> {
+    let Some(pid) = pid else {
+        return Ok(None);
+    };
+    let path = working_dir.join(format!("hs_err_pid{pid}.log"));
+    let found = match metadata_if_exists(&path).await? {
+        Some(meta) => {
+            meta.is_file()
+                && modified_millis(&meta, &path)?
+                    >= session_started_at.saturating_sub(MTIME_SLACK_MS)
         }
-    }
+        None => false,
+    };
+    Ok(found.then_some(path))
+}
 
+/// 找这一次会话留下的崩溃报告：`crash-reports/` 下会话开始后写下的最新一份。目录不存在不是错误。
+pub(crate) async fn find_crash_report(
+    working_dir: &Path,
+    session_started_at: u64,
+) -> Result<Option<PathBuf>> {
+    let since = session_started_at.saturating_sub(MTIME_SLACK_MS);
     let dir = working_dir.join(CRASH_REPORTS_DIR);
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
     };
     let io_err = |source| aurora_base::Error::Io {
@@ -384,8 +386,7 @@ pub(crate) async fn find_crash_files(
             newest = Some((modified, path));
         }
     }
-    files.crash_report = newest.map(|(_, path)| path);
-    Ok(files)
+    Ok(newest.map(|(_, path)| path))
 }
 
 /// 读 hs_err 或崩溃报告的开头供诊断。它们由 JVM 与游戏按系统默认编码写，可能不是 UTF-8，按有损解码读。
@@ -858,61 +859,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn find_crash_files_takes_only_this_sessions_files() {
+    async fn crash_file_finders_take_only_this_sessions_files() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         let started = now_ms();
         const MINUTE: u64 = 60_000;
 
         // 什么都没有：两个都找不到，也不是错误。
-        assert_eq!(
-            find_crash_files(dir, Some(4242), started).await.unwrap(),
-            CrashFiles::default()
-        );
+        assert_eq!(find_hs_err(dir, Some(4242), started).await.unwrap(), None);
+        assert_eq!(find_crash_report(dir, started).await.unwrap(), None);
 
         let ours = dir.join("hs_err_pid4242.log");
         put_file_at(&ours, "# A fatal error", started + 5_000);
         put_file_at(&dir.join("hs_err_pid99.log"), "old", started - 60 * MINUTE);
-        let found = find_crash_files(dir, Some(4242), started).await.unwrap();
-        assert_eq!(found.hs_err, Some(ours.clone()));
+        assert_eq!(
+            find_hs_err(dir, Some(4242), started).await.unwrap(),
+            Some(ours.clone())
+        );
         // 别的 pid 的旧文件不认；pid 未知时不找。
-        assert_eq!(
-            find_crash_files(dir, Some(99), started)
-                .await
-                .unwrap()
-                .hs_err,
-            None
-        );
-        assert_eq!(
-            find_crash_files(dir, None, started).await.unwrap().hs_err,
-            None
-        );
+        assert_eq!(find_hs_err(dir, Some(99), started).await.unwrap(), None);
+        assert_eq!(find_hs_err(dir, None, started).await.unwrap(), None);
         // pid 对得上但写在会话开始前 10 分钟：pid 被复用了，不是这一次的。
         put_file_at(&ours, "# A fatal error", started - 10 * MINUTE);
-        assert_eq!(
-            find_crash_files(dir, Some(4242), started)
-                .await
-                .unwrap()
-                .hs_err,
-            None
-        );
+        assert_eq!(find_hs_err(dir, Some(4242), started).await.unwrap(), None);
         // 2 秒的修改时间精度余量：恰在余量边上算，再早 1 毫秒不算。
         put_file_at(&ours, "x", started - MTIME_SLACK_MS);
         assert_eq!(
-            find_crash_files(dir, Some(4242), started)
-                .await
-                .unwrap()
-                .hs_err,
+            find_hs_err(dir, Some(4242), started).await.unwrap(),
             Some(ours.clone())
         );
         put_file_at(&ours, "x", started - MTIME_SLACK_MS - 1);
-        assert_eq!(
-            find_crash_files(dir, Some(4242), started)
-                .await
-                .unwrap()
-                .hs_err,
-            None
-        );
+        assert_eq!(find_hs_err(dir, Some(4242), started).await.unwrap(), None);
 
         let reports = dir.join(CRASH_REPORTS_DIR);
         put_file_at(
@@ -931,14 +908,10 @@ mod tests {
         put_file_at(&reports.join("notes.txt"), "x", started + 9_000);
         put_file_at(&reports.join("crash-a.log"), "x", started + 9_000);
         std::fs::create_dir_all(reports.join("crash-folder.txt")).unwrap();
-        let found = find_crash_files(dir, Some(4242), started).await.unwrap();
-        assert_eq!(found.crash_report, Some(newest));
+        assert_eq!(find_crash_report(dir, started).await.unwrap(), Some(newest));
         // 会话开始后一份都没有：不拿旧的凑数。
         assert_eq!(
-            find_crash_files(dir, None, started + 60 * MINUTE)
-                .await
-                .unwrap()
-                .crash_report,
+            find_crash_report(dir, started + 60 * MINUTE).await.unwrap(),
             None
         );
     }
