@@ -30,8 +30,8 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use aurora_base::PathLocks;
 use aurora_base::fs::Sha1Hasher;

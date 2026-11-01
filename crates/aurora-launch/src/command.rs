@@ -820,7 +820,10 @@ mod tests {
             "arguments":{"game":["--tweakClass","x.Tweaker"]}}"#;
         let args = build_with_resolution(json, None);
         let at = |flag: &str| args.iter().position(|a| a == flag);
-        assert!(at("--username").unwrap() < at("--tweakClass").unwrap(), "{args:?}");
+        assert!(
+            at("--username").unwrap() < at("--tweakClass").unwrap(),
+            "{args:?}"
+        );
         assert_eq!(value_after(&args, "--version"), ["1.12.2"]);
     }
 

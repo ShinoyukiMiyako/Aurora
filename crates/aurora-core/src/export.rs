@@ -825,7 +825,10 @@ async fn exportable(version: &DiscoveredVersion) -> Result<(String, Option<PackL
     }
     // 1.20.1 的 NeoForge 沿用 Forge 的坐标与启动参数，探测同时命中两个。探测照实列着（这时 Forge 的 Mod 也能装），
     // 写进整合包的只有 NeoForge。
-    let neoforge = version.loaders.iter().any(|l| l.kind == LoaderKind::NeoForge);
+    let neoforge = version
+        .loaders
+        .iter()
+        .any(|l| l.kind == LoaderKind::NeoForge);
     let mut writable = version.loaders.iter().filter_map(|l| {
         let kind = match l.kind {
             LoaderKind::Fabric => PackLoaderKind::Fabric,

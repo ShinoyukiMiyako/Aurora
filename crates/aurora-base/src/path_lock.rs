@@ -53,7 +53,10 @@ mod tests {
     fn the_same_path_shares_one_lock_whatever_the_case() {
         let locks = PathLocks::new();
         let held = locks.slot(Path::new("D:/Games/Natives"));
-        assert!(Arc::ptr_eq(&held, &locks.slot(Path::new("d:/games/natives"))));
+        assert!(Arc::ptr_eq(
+            &held,
+            &locks.slot(Path::new("d:/games/natives"))
+        ));
         assert!(!Arc::ptr_eq(&held, &locks.slot(Path::new("D:/Games/别的"))));
     }
 
