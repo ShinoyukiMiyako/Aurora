@@ -222,16 +222,15 @@ export function InstallingBanner({ instanceId }: { instanceId: string }) {
 function PlaytimeTile({ minutes, createdAt, now }: { minutes: number; createdAt: number | null; now: number }) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
+  // 创建时间读不出来时算不了平均，但玩过就是玩过，不能写成还没开始玩
+  const note = minutes === 0 ? OVERVIEW_COPY.notStarted : createdAt === null ? null : OVERVIEW_COPY.perWeek(weeklyHours(minutes, createdAt, now));
   return (
     <StatTile
       icon="clock"
       label={OVERVIEW_COPY.statPlaytime}
       value={String(hours > 0 ? hours : rest)}
       unit={hours > 0 ? OVERVIEW_COPY.hoursUnit(rest) : OVERVIEW_COPY.minutesUnit}
-      delta={{
-        direction: "flat",
-        text: minutes === 0 || createdAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.perWeek(weeklyHours(minutes, createdAt, now)),
-      }}
+      delta={note === null ? undefined : { direction: "flat", text: note }}
     />
   );
 }

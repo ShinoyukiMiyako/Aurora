@@ -386,6 +386,14 @@ describe("实例详情：头图与标签", () => {
     expect(text()).not.toContain("读不出来");
   });
 
+  it("玩过但创建时间读不出来：不写还没开始玩，也不写平均每周", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: 125, created_at: null } : i));
+    await open("overview");
+    expect(byRole("group", "累计游玩 2 小时 5 分").textContent).toBe("累计游玩2小时 5 分");
+    expect(text()).not.toContain("还没开始玩");
+    expect(text()).not.toContain("平均每周");
+  });
+
   it("实例目录读不出：Mod 数写读不出来，原因写在四格下面；与游玩记录同时坏时一条提示里各占一行", async () => {
     instances = instances.map((i) =>
       i.id === ID ? { ...i, mod_count: null, world_count: null, isolated: null, dir_error: "文件 IO 失败: mods：拒绝访问", playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" } : i,
