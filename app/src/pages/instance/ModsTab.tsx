@@ -693,7 +693,8 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
     {
       key: "enabled",
       header: MODS_COPY.colEnabled,
-      width: 64,
+      // 排序时文字 24、间距 4、排序图标 14，加单元格左右各 12 正好 66。多留 2：非整数缩放下列宽、内边距与字宽各自取整，贴边能否放下全看取整方向
+      width: 68,
       sortable: true,
       keepOpaque: true,
       // 锁住时开关自己用提示气泡写禁用原因；可用时悬停说明点了是停用还是启用。外层常驻：原因来去时开关不重挂，焦点不掉回 body
