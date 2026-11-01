@@ -375,9 +375,9 @@ impl<'a> ForgeInstaller<'a> {
     /// 校验通过的旧文件直接复用，不再重下几十 MB。
     async fn download_installer(&self, installer_url: &str) -> Result<PathBuf> {
         let file_name = installer_url.rsplit('/').next().unwrap_or("installer.jar");
-        // 地址里的加载器版本号来自远端版本列表或整合包清单，原样成了文件名：带反斜杠或 `..` 时
-        // 在 Windows 上会落到缓存目录之外。
-        checked_segment(file_name, || "加载器安装器".to_owned())?;
+        // 地址由加载器版本号拼出，版本号来自远端版本列表或导入的整合包，原样成了文件名：Windows 上
+        // 反斜杠也是分隔符，带 `..` 时会落到缓存目录之外。
+        checked_segment(file_name, || "Forge 安装器的缓存文件名".to_owned())?;
         let dest = self.installer_cache_dir().join(file_name);
         let mut task = aurora_download::DownloadTask::new(installer_url, dest.clone());
         match self.installer_sha1(installer_url).await {
@@ -849,7 +849,7 @@ async fn extract_data_files(
     tmp_dir: &Path,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
-    for (index, sided) in data.values().enumerate() {
+    for (index, (key, sided)) in data.iter().enumerate() {
         let raw = sided_value(sided, side);
         if let DataValue::ExtractedFile(path) = classify_data_value(raw) {
             if out.contains_key(&path) {
@@ -857,6 +857,12 @@ async fn extract_data_files(
             }
             // 用 zip 内条目的文件名 + 序号避免重名碰撞。
             let file_name = path.rsplit('/').next().unwrap_or("data.bin");
+            // 文件名出自远端 installer，Windows 上反斜杠也是分隔符，`..` 能藏在里面走出临时目录。
+            aurora_version::check_path_segment(file_name).map_err(|problem| Error::UnsafePath {
+                entry: format!("Forge 安装器的数据项 {key}"),
+                path: path.clone(),
+                problem,
+            })?;
             let dest = tmp_dir.join(format!("{index}-{file_name}"));
             extract_zip_entry_to_async(installer, path.trim_start_matches('/'), &dest).await?;
             out.insert(path, dest);
@@ -1845,6 +1851,90 @@ mod tests {
         }
     }
 
+    /// data 表里 `/jar 内路径` 的文件名原样拼进临时目录：Windows 上反斜杠也是分隔符，`..` 能藏在
+    /// 文件名里走出临时目录。这种取值报路径越界，临时目录外什么都不写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn data_files_escaping_the_scratch_dir_are_rejected() {
+        let data_path = r"/data/..\..\..\..\..\escaped.lzma";
+        let profile = serde_json::json!({
+            "spec": 0, "version": "1.16.5-forge-36.2.39", "minecraft": "1.16.5",
+            "json": "/version.json",
+            "data": {"BINPATCH": {"client": data_path, "server": data_path}},
+            "processors": [], "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "1.16.5-forge-36.2.39", "inheritsFrom": "1.16.5", "libraries": []
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+                (data_path.trim_start_matches('/'), b"escaped-bytes"),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let err = ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Backslash }
+                    if entry == "Forge 安装器的数据项 BINPATCH" && path == data_path
+            ),
+            "实际：{err:?}"
+        );
+        // 校验漏掉时，第一个 `..` 抵掉加了序号前缀的那一段，其余四个把文件从 versions/<id>/ 下的
+        // 临时目录送回游戏目录根下。
+        assert!(!f.root.join("escaped.lzma").exists());
+        assert!(!f.root.join("versions").join("escaped.lzma").exists());
+    }
+
+    /// installer 地址由加载器版本号拼出，版本号可以来自导入的整合包：最后一段原样当缓存文件名，Windows 上
+    /// 反斜杠也是分隔符，`..` 藏在里面能把下到的文件写到缓存目录之外。这种地址报路径越界，不发请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installer_file_names_escaping_the_cache_dir_are_rejected() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"installer".to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let file_name = r"forge-1.20.1-..\..\..\escaped-installer.jar";
+        let f = fixture();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+
+        let err = ForgeInstaller::new(cx, "java")
+            .install(&format!("{}/{file_name}", server.uri()))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Backslash }
+                    if entry == "Forge 安装器的缓存文件名" && path == file_name
+            ),
+            "实际：{err:?}"
+        );
+        assert!(!f.root.join("escaped-installer.jar").exists());
+        assert!(
+            !f.root
+                .parent()
+                .unwrap()
+                .join("escaped-installer.jar")
+                .exists()
+        );
+    }
+
     /// installer 里那份 jar 与库条目声明的 sha1 对不上：照实报错，不把坏文件留在库目录里。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_embedded_library_with_a_wrong_sha1_is_rejected() {
@@ -2488,7 +2578,7 @@ mod tests {
                 path,
                 problem,
             } => {
-                assert_eq!(entry, "加载器安装器");
+                assert_eq!(entry, "Forge 安装器的缓存文件名");
                 assert_eq!(path, file_name);
                 assert_eq!(problem, aurora_version::UnsafePath::Backslash);
             }
