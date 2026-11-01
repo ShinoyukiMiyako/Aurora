@@ -14,6 +14,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
+use aurora_download::DownloadCredential;
 use aurora_modpack::{PackFormat, PackLoader, PackManifest};
 use aurora_modplatform::Platform;
 
@@ -95,7 +96,15 @@ impl Aurora {
         let (_, task) = self
             .platform_file_task(platform, project_id, version_id, Path::new(""), "")
             .await?;
-        let pack = read_remote_pack(&self.http(), &task.url, platform).await?;
+        // CurseForge 的包本体在 forgecdn 上，范围读取与导入时的下载一样要带下载密钥。
+        let reader = match &task.credential {
+            Some(credential) => RangeClient::Credentialed {
+                client: self.http_manual(),
+                credential: credential.clone(),
+            },
+            None => RangeClient::Shared(self.http()),
+        };
+        let pack = read_remote_pack(&reader, &task.url, platform).await?;
         let remote = self
             .remote_facts(&pack.manifest.remote, BlockedProbe::Skip)
             .await?;
@@ -103,12 +112,17 @@ impl Aurora {
     }
 }
 
+/// 范围请求怎么发：不带凭据走共享客户端；带凭据走不自动跳转的客户端，跳转逐跳判定带不带密钥。
+enum RangeClient {
+    Shared(reqwest::Client),
+    Credentialed {
+        client: reqwest::Client,
+        credential: DownloadCredential,
+    },
+}
+
 /// 取尾部找到中央目录，再只取清单那一个条目解析。
-async fn read_remote_pack(
-    http: &reqwest::Client,
-    url: &str,
-    platform: Platform,
-) -> Result<RemotePack> {
+async fn read_remote_pack(http: &RangeClient, url: &str, platform: Platform) -> Result<RemotePack> {
     let (tail, total) = fetch_range(http, url, format!("bytes=-{TAIL_BYTES}")).await?;
     let tail_start = total
         .checked_sub(tail.len() as u64)
@@ -182,19 +196,33 @@ fn remote(url: &str, reason: impl Into<String>) -> CoreError {
 
 /// 取一段范围（`bytes=a-b` 或尾部 `bytes=-n`），返回内容与 Content-Range 里的文件总长。
 /// 回的不是 206 说明服务器没按范围给，连同响应体一起丢掉，不把整包读下来。
-async fn fetch_range(http: &reqwest::Client, url: &str, range: String) -> Result<(Vec<u8>, u64)> {
+async fn fetch_range(http: &RangeClient, url: &str, range: String) -> Result<(Vec<u8>, u64)> {
     let fetch_error = |source| CoreError::Fetch {
         url: url.to_owned(),
         source,
     };
-    let response = http
-        .get(url)
-        .header(reqwest::header::RANGE, range.as_str())
-        .timeout(RANGE_TIMEOUT)
-        .send()
+    let response = match http {
+        RangeClient::Shared(client) => client
+            .get(url)
+            .header(reqwest::header::RANGE, range.as_str())
+            .timeout(RANGE_TIMEOUT)
+            .send()
+            .await
+            .map_err(fetch_error)?,
+        // 逐跳的请求由下载层构造，没法挂单请求时限，改在外面限住整条跳转链；读响应体仍受客户端的读超时兜底。
+        RangeClient::Credentialed { client, credential } => tokio::time::timeout(
+            RANGE_TIMEOUT,
+            aurora_download::credentialed_get(client, credential, url, Some(range.as_str())),
+        )
         .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(fetch_error)?;
+        .map_err(|_| {
+            remote(
+                url,
+                format!("{range} 超过 {} 秒没有响应", RANGE_TIMEOUT.as_secs()),
+            )
+        })??,
+    };
+    let response = response.error_for_status().map_err(fetch_error)?;
     if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(remote(
             url,
@@ -225,7 +253,7 @@ fn le32(bytes: &[u8], at: usize) -> u32 {
 
 /// 从尾部倒着找 EOCD，读出中央目录；目录不全在尾部时再取一次。
 async fn central_directory(
-    http: &reqwest::Client,
+    http: &RangeClient,
     url: &str,
     tail: &[u8],
     tail_start: u64,
@@ -294,7 +322,7 @@ fn parse_central_directory(
 }
 
 /// 取一个条目的数据并解压。本地头里的扩展字段长度可能与目录里的不同，所以先读本地头再定数据起点。
-async fn read_entry(http: &reqwest::Client, url: &str, entry: &CentralEntry) -> Result<Vec<u8>> {
+async fn read_entry(http: &RangeClient, url: &str, entry: &CentralEntry) -> Result<Vec<u8>> {
     if entry.uncompressed > MANIFEST_MAX_BYTES {
         return Err(remote(
             url,
@@ -632,7 +660,7 @@ mod tests {
             .with_base_url(server.uri());
 
         let pack = read_remote_pack(
-            &http,
+            &RangeClient::Shared(http.clone()),
             &format!("{}/pack.zip", server.uri()),
             Platform::CurseForge,
         )
@@ -659,6 +687,115 @@ mod tests {
         assert_eq!(
             (summary.override_files, summary.override_bytes),
             (3, 120 + 30 + 6)
+        );
+        server.verify().await;
+    }
+
+    /// CurseForge 的包本体在 forgecdn 上：摘要的每个范围请求都带下载密钥（CDN 只认带密钥的请求），
+    /// CDN 拒绝密钥时报密钥被拒、只请求一次，不当作普通的读取失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_summary_range_reads_carry_the_download_key() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        for (file_id, file_name) in [(4_712_000u32, "pack.zip"), (4_712_999, "locked.zip")] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/mods/394468/files/{file_id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"data": {
+                        "id": file_id, "modId": 394468, "displayName": "All of Create",
+                        "fileName": file_name, "hashes": [], "fileLength": 1,
+                        "downloadUrl": format!("{uri}/cdn/{file_name}"), "gameVersions": ["1.20.1"]
+                    }}),
+                ))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/cdn/pack.zip"))
+            .and(header("x-api-key", "k"))
+            .respond_with(RangeServer {
+                body: Arc::new(curseforge_zip(&curseforge_manifest())),
+                ranges: true,
+                served_bytes: Arc::new(AtomicUsize::new(0)),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/cdn/locked.zip"))
+            .and(header("x-api-key", "k"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    curseforge_file(4_712_001, 328085, "create-0.5.1.jar", 13_000_000),
+                    curseforge_file(4_712_002, 306612, "jei-15.2.jar", 1_250_000),
+                    curseforge_file(4_712_003, 457570, "create-textures.zip", 8_000_000),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                { "id": 328085, "name": "Create", "slug": "create", "summary": "", "classId": 6 },
+                { "id": 306612, "name": "JEI", "slug": "jei", "summary": "", "classId": 6 },
+                { "id": 457570, "name": "Textures", "slug": "textures", "summary": "", "classId": 12 }
+            ]})))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let port = server.address().port();
+        let aurora = aurora_at(tmp.path())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ));
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712000")
+            .await
+            .unwrap();
+        assert_eq!(summary.name, "All of Create");
+        assert_eq!((summary.remote_files, summary.mod_files), (3, 3));
+        let pack_reads: Vec<_> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/cdn/pack.zip")
+            .collect();
+        assert_eq!(
+            pack_reads.len(),
+            3,
+            "包尾、清单条目的本地头、清单数据各一次"
+        );
+        assert!(
+            pack_reads.iter().all(|request| request
+                .headers
+                .get("x-api-key")
+                .map(|v| v.to_str().unwrap())
+                == Some("k")),
+            "每个范围请求都带密钥"
+        );
+
+        let err = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712999")
+            .await
+            .unwrap_err();
+        let CoreError::Download(download) = &err else {
+            panic!("应报下载错误，实为 {err:?}");
+        };
+        assert!(
+            matches!(download, aurora_download::Error::CredentialRejected { url, status: 401, .. } if url == &format!("{uri}/cdn/locked.zip")),
+            "{download:?}"
         );
         server.verify().await;
     }

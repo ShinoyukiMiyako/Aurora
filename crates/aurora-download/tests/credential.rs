@@ -716,3 +716,63 @@ async fn credentialed_task_needs_the_manual_client() {
     assert!(!health.is_tripped(&url));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+/// 引擎之外的单次读取：起点在作用域内带头，302 到作用域外的终点摘掉；Range 两跳都带同一个值；
+/// 终点的状态原样交回。带了头的一跳回 401 报 CredentialRejected，url 是这一跳。
+#[tokio::test]
+async fn credentialed_get_follows_hops_with_the_same_rules_as_tasks() {
+    let origin = MockServer::start().await;
+    let cdn = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/pack.zip"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("location", format!("{}/pack.zip", cdn.uri())),
+        )
+        .mount(&origin)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/pack.zip"))
+        .and(header("range", "bytes=-22"))
+        .respond_with(ResponseTemplate::new(206).set_body_string("tail"))
+        .expect(1)
+        .mount(&cdn)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/locked.zip"))
+        .and(header(KEY_HEADER, KEY))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&origin)
+        .await;
+
+    let manual = manual_client();
+    let credential = credential_for(&origin);
+    let response = aurora_download::credentialed_get(
+        &manual,
+        &credential,
+        &format!("{}/pack.zip", origin.uri()),
+        Some("bytes=-22"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status().as_u16(), 206);
+    assert_eq!(response.text().await.unwrap(), "tail");
+    let first = requests_to(&origin, "/pack.zip").await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(key_of(&first[0]), Some(KEY));
+    assert_eq!(first[0].headers.get("range").unwrap(), "bytes=-22");
+    let second = requests_to(&cdn, "/pack.zip").await;
+    assert_eq!(second.len(), 1);
+    assert_eq!(key_of(&second[0]), None, "作用域外的一跳不带密钥");
+
+    let locked = format!("{}/locked.zip", origin.uri());
+    let err = aurora_download::credentialed_get(&manual, &credential, &locked, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::CredentialRejected { realm: CredentialRealm::CurseForge, url, status: 401 } if url == &locked),
+        "{err:?}"
+    );
+    origin.verify().await;
+    cdn.verify().await;
+}

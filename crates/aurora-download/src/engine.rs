@@ -812,6 +812,20 @@ async fn follow_redirects(
     }
 }
 
+/// 引擎之外的少量带凭据读取（如整合包摘要按范围读包尾）用的单次 GET：与下载任务同一套逐跳规则，
+/// 每一跳按作用域决定带不带密钥，`range` 每一跳都带同一个值，带了密钥的那一跳回 401 报
+/// [`Error::CredentialRejected`]。`client` 必须是不自动跳转的客户端
+/// （`aurora_base::http::build_manual_redirect_client`），否则 reqwest 会把密钥原样带到跳转的下一跳。
+/// 返回跳转链末端的响应，状态码交给调用方判定。
+pub async fn credentialed_get(
+    client: &reqwest::Client,
+    credential: &DownloadCredential,
+    url: &str,
+    range: Option<&str>,
+) -> Result<reqwest::Response> {
+    follow_redirects(client, credential, url, range, None).await
+}
+
 /// 引擎替客户端跟随的跳转状态码。300（多选）与 304（未修改）不是跳转到别处的指令，原样交回。
 fn is_followed_redirect(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)

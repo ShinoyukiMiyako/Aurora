@@ -304,6 +304,11 @@ impl Aurora {
         self.http.clone()
     }
 
+    /// 不自动跳转的客户端，带下载凭据的请求由调用方逐跳跟随（克隆廉价：内部 `Arc`）。
+    pub(crate) fn http_manual(&self) -> reqwest::Client {
+        self.http_manual.clone()
+    }
+
     /// 运行环境快照。
     pub(crate) fn runtime(&self) -> &RuntimeContext {
         &self.runtime

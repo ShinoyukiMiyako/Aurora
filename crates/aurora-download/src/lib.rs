@@ -47,7 +47,7 @@ pub mod task;
 
 pub use chunk::{Chunk, ChunkConfig, ChunkPlan};
 pub use credential::{CredentialRealm, CredentialScope, DownloadCredential};
-pub use engine::{DownloadConfig, Downloader};
+pub use engine::{DownloadConfig, Downloader, credentialed_get};
 pub use error::{Error, Result};
 pub use health::{SourceHealth, is_host_fault};
 pub use pool::{BatchReport, DownloadPool, TaskFailure};
