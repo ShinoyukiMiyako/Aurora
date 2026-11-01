@@ -1319,6 +1319,21 @@ describe("实例详情：版本隔离说明", () => {
     await open("settings", "创造");
     expect(text()).toContain("这个实例与其他未隔离的实例共用存档与配置。");
   });
+
+  it("设成关闭、但实例文件夹里已有存档或 Mod：后端仍然隔离，说明写实情，不写共用", async () => {
+    settings = { ...settings, isolation: "disabled" };
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: true } : i));
+    await open("settings", "创造");
+    expect(text()).toContain("这个实例的文件夹里已有存档或 Mod，仍然单独存放。");
+    expect(text()).not.toContain("与其他未隔离的实例共用 .minecraft 下的存档与配置。");
+  });
+
+  it("设成关闭且后端确实不隔离：写共用", async () => {
+    settings = { ...settings, isolation: "disabled" };
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: false } : i));
+    await open("settings", "创造");
+    expect(text()).toContain("与其他未隔离的实例共用 .minecraft 下的存档与配置。");
+  });
 });
 
 describe("实例详情：整合包没导入完", () => {

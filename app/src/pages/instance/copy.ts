@@ -473,6 +473,7 @@ export const SETTINGS_COPY = {
     `跟随全局：${policy}。${isolated ? "这个实例会独立存放存档与配置。" : "这个实例与其他未隔离的实例共用存档与配置。"}`,
   isolationOnNote: "存档、配置与资源包放在实例自己的文件夹里。",
   isolationOffNote: "与其他未隔离的实例共用 .minecraft 下的存档与配置。",
+  isolationOffForcedNote: "这个实例的文件夹里已有存档或 Mod，仍然单独存放。",
   resolution: "窗口分辨率",
   resolutionNote: "宽 320 到 7680、高 240 到 4320。",
   resolutionWidth: "窗口宽度",
