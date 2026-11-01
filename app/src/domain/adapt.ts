@@ -162,7 +162,7 @@ export interface InstanceSummary {
   lastCrashError: string | null;
   /** 后端此刻在这个实例上做的事。 */
   activity: InstanceActivity | null;
-  /** 正以它为基底的实例（启动到退出、补全或导入整合包期间）；这时它的改名、补全、删除会被后端拒绝。没被当作基底时为 null。 */
+  /** 正以它为基底的实例（启动到游戏退出、补全或导入整合包期间）；这时它的启动、改名、补全、删除会被后端拒绝。没被当作基底时为 null。 */
   usedBy: string | null;
   settingsError: string | null;
   incomplete: InstanceIncomplete | null;

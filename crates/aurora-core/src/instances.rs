@@ -714,12 +714,29 @@ enum Undo {
 }
 
 fn rename_blocking(old_dir: &Path, new_dir: &Path, old: &str, new: &str) -> Result<()> {
+    rename_with(old_dir, new_dir, old, new, |staged| {
+        std::fs::remove_file(staged)
+    })
+}
+
+/// `remove_staged` 删暂存的旧 JSON，由参数给出：删不掉的情形在用例的文件系统上造不出来。
+fn rename_with(
+    old_dir: &Path,
+    new_dir: &Path,
+    old: &str,
+    new: &str,
+    remove_staged: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     let mut done = Vec::new();
     let outcome = rename_steps(old_dir, new_dir, old, new, &mut done);
     match outcome {
         Ok(staged) => {
-            if let Some(staged) = staged {
-                std::fs::remove_file(&staged).map_err(|source| io_error(&staged, source))?;
+            // 到这一步目录、JSON、jar 与 natives 都已是新名字，回滚不了也不该回滚；这里报错的话调用方不再同步
+            // 游玩记录、备份与配置引用。留下的暂存文件在元数据目录里，不影响实例，下次改名时被覆盖。
+            if let Some(staged) = staged
+                && let Err(err) = remove_staged(&staged)
+            {
+                tracing::warn!(path = %staged.display(), error = %err, "改名已完成，删除暂存的旧版本 JSON 失败");
             }
             Ok(())
         }
@@ -1474,6 +1491,28 @@ pub(crate) mod tests {
         );
         assert!(dir.join("a.json").is_file(), "失败后目录与 JSON 应还原");
         assert!(!aurora.game_dir().join("versions").join("c").exists());
+    }
+
+    /// 改名已经全部做完、只剩删暂存的旧 JSON：删不掉不能报错，目录已是新名字，报错的话调用方就不再同步游玩
+    /// 记录、备份与配置引用，它们全都还指着旧名字。
+    #[test]
+    fn rename_succeeds_when_the_staged_json_cannot_be_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old_dir = write_version(tmp.path(), "旧名", &vanilla_json("旧名"));
+        std::fs::write(old_dir.join("旧名.jar"), b"jar").unwrap();
+        let new_dir = tmp.path().join("versions").join("新名");
+
+        rename_with(&old_dir, &new_dir, "旧名", "新名", |staged| {
+            assert!(staged.is_file(), "暂存文件应在：{}", staged.display());
+            Err(std::io::ErrorKind::PermissionDenied.into())
+        })
+        .unwrap();
+
+        assert!(!old_dir.exists());
+        assert_eq!(std::fs::read(new_dir.join("新名.jar")).unwrap(), b"jar");
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(new_dir.join("新名.json")).unwrap()).unwrap();
+        assert_eq!(json["id"], "新名");
     }
 
     /// 继承链、实例锁与 Windows 的目录名都不分大小写：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样

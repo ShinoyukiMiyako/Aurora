@@ -6,8 +6,8 @@
 //! 启动的 `task_id` 只是取消句柄：加载阶段可经 `cancel_task` 取消，启动不进前端下载队列。阶段经
 //! [`LAUNCH_PHASE_EVENT`] 推送，启动器日志与游戏输出一并经 [`GAME_LOG_EVENT`] 成批推送；进程起来后
 //! 命令即返回，监控任务等它退出，收尾记账写完后先放开占用槽、再推 [`GAME_EXIT_EVENT`]——前端收到退出
-//! 事件就可能立刻启动下一个实例。开着自动备份时，实例占用在退出事件之前转成「备份」，把这次玩过的存档各
-//! 备份一份后才放开，结果经 [`WORLD_BACKUP_EVENT`] 推送。
+//! 事件就可能立刻启动下一个实例。开着自动备份时，实例占用在退出事件之前转成「备份」、基底随之放开，把这次
+//! 玩过的存档各备份一份后才放开实例，结果经 [`WORLD_BACKUP_EVENT`] 推送。
 
 use std::future::Future;
 use std::time::SystemTime;
@@ -349,9 +349,9 @@ struct Watched {
 
 /// 监控一局游戏：收尾后先放开占用槽，再推退出事件。
 ///
-/// 关着自动备份时实例与基底的占用同占用槽一起放开。开着时实例自己的占用先原地转成「备份」再放开占用槽：
-/// 中间不留空档，备份期间实例不会被改名、删除或再次启动；退出事件照常先推（前端据此离开运行态），备份做完
-/// 才放开实例与基底、推备份事件。
+/// 关着自动备份时实例与基底的占用同占用槽一起放开。开着时实例自己的占用先原地转成「备份」、基底放开，再放开
+/// 占用槽：中间不留空档，备份期间实例不会被改名、删除或再次启动，基底却能启动；退出事件照常先推（前端据此离开
+/// 运行态），备份做完才放开实例、推备份事件。
 async fn watch(
     facade: &Facade,
     watched: Watched,
@@ -373,7 +373,7 @@ async fn watch(
         emit_exit(exit);
         return;
     }
-    instance.set_activity(InstanceActivity::BackingUp);
+    let instance = instance.into_backup();
     release_slot();
     emit_exit(exit);
     // 不挂取消令牌：自动备份不是前端发起的任务，没有能取消它的入口。
@@ -386,8 +386,8 @@ async fn watch(
     emit_backup(world_backup_event(&version_id, outcome));
 }
 
-/// 实例与它基底的占用随进程寿命：游戏退出、收尾记账（与开着时的自动备份）做完后放开，删除、改名、补全它们
-/// 在这期间被拒绝。
+/// 实例与它基底的占用随进程寿命：游戏退出、收尾记账做完后放开基底，开着自动备份时实例留到备份做完。删除、
+/// 改名、补全它们在这期间被拒绝。
 fn spawn_watch(
     app: AppHandle,
     ticket: SlotTicket,
@@ -1002,6 +1002,74 @@ mod tests {
             .is_ok());
     }
 
+    /// 基底自己开着游戏时，补全以它为基底的实例在动文件之前报 instance_busy，detail 说的是基底在做什么；反过来
+    /// 基底的启动在实例补全期间被拒，detail 指出是谁在用它，占用槽没被留下。互斥之前要等写到 natives 才报 IO 错误。
+    #[tokio::test]
+    async fn a_base_with_its_own_game_and_an_instance_on_top_of_it_exclude_each_other() {
+        use crate::commands::instances::repair_instance_with;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(
+            dir.path(),
+            &[("1.20.1", None), ("Fabric 生存", Some("1.20.1"))],
+        );
+        let aurora = facade.snapshot().await;
+        let running = RunningGame::default();
+        let locks = InstanceLocks::default();
+        let tasks = TaskRegistry::default();
+        let (sink, _rx) = mpsc::unbounded_channel::<aurora_core::CoreEvent>();
+
+        let (reservation, game) = reserve_launch(&running, &locks, &aurora, "1.20.1")
+            .await
+            .unwrap();
+        let err = repair_instance_with(&facade, &tasks, &locks, "r", "Fabric 生存", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "launching" })
+        );
+        assert!(!tasks.is_running("r"), "被拒的补全不占任务 id");
+        assert_eq!(
+            locks.activity("Fabric 生存"),
+            None,
+            "实例自己的占用随之放开"
+        );
+        game.set_activity(InstanceActivity::Running);
+        let err = repair_instance_with(&facade, &tasks, &locks, "r", "Fabric 生存", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "running" })
+        );
+        drop(reservation);
+        drop(game);
+
+        let repairing = locks
+            .acquire_with_bases(
+                "Fabric 生存",
+                InstanceActivity::Repairing,
+                &["1.20.1".to_owned()],
+            )
+            .unwrap();
+        let err = reserve_launch(&running, &locks, &aurora, "1.20.1")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric 生存" })
+        );
+        drop(repairing);
+        assert!(
+            reserve_launch(&running, &locks, &aurora, "1.20.1")
+                .await
+                .is_ok(),
+            "占用槽没被留下"
+        );
+    }
+
     /// 同一个原版上的两个加载器实例各自占着它，互不冲突；两边都结束后原版才放开。前端与占用槽保证
     /// 同一时间只跑一个游戏，这里各用一个占用槽，单看实例互斥这一层。
     #[tokio::test]
@@ -1310,10 +1378,10 @@ mod tests {
         assert!(list.backups.is_empty(), "会话前写过的存档不备份");
     }
 
-    /// 加载器实例退出后转去自动备份：基底照旧记着「被使用」，跟着实例一直占到备份做完才放开，备份事件推出时
-    /// 两边都已放开。
+    /// 加载器实例退出后转去自动备份：备份只读实例自己的版本 JSON、设置与存档，基底在占用槽放开之前就放开，基底
+    /// 这时能启动；实例自己一直占到备份做完。
     #[tokio::test]
-    async fn auto_backup_keeps_the_base_held_until_the_instance_is_released() {
+    async fn auto_backup_frees_the_base_before_the_slot_and_holds_only_the_instance() {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path(), true);
         let started = SystemTime::now();
@@ -1340,17 +1408,22 @@ mod tests {
                 instance: guard,
             },
             async { finished("Fabric 生存") },
-            || {},
+            || assert_eq!(locks.activity("1.20.1"), None, "放开占用槽时基底已放开"),
             |_| {
                 assert_eq!(
                     locks.activity("Fabric 生存"),
                     Some(InstanceActivity::BackingUp)
                 );
-                assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
+                assert_eq!(locks.occupancy("1.20.1"), (None, None));
+                // 前端收到退出事件就可能启动基底，这时实例还在备份。
+                drop(
+                    locks
+                        .acquire("1.20.1", InstanceActivity::Launching)
+                        .unwrap(),
+                );
             },
             |backup| {
                 assert_eq!(locks.activity("Fabric 生存"), None);
-                assert_eq!(locks.activity("1.20.1"), None, "基底随实例一起放开");
                 *backed_up.borrow_mut() = Some(backup.backed_up);
             },
         )

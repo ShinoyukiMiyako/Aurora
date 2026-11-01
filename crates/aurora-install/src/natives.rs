@@ -14,9 +14,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use aurora_download::CancellationToken;
 use aurora_version::{Library, RuntimeContext, VersionJson, select_libraries};
 use serde::{Deserialize, Serialize};
 
+use crate::dir_lock::lock_dir;
 use crate::error::{Error, Result, io_err, zip_err};
 use crate::layout::{GameLayout, coordinate_path};
 
@@ -55,11 +57,15 @@ struct Stamp {
 /// `target_id` 是 natives 的落点版本（原版安装即版本自身；加载器版本则复用其原版的 natives 目录）。
 /// 返回 natives 目录里由本函数管理的文件数。任一 native jar 缺失或损坏都会冒泡（natives 缺失会
 /// 直接导致游戏崩溃，不容静默跳过）。
+///
+/// 同一目录上的解压一个接一个来（见 [`crate::dir_lock`]），等待期间响应 `cancel`：以同一个原版为基底的几个任务
+/// 都会走到这里。解压本身不看令牌，开始了就做完，不留半截的目录。
 pub async fn extract_all_natives(
     version: &VersionJson,
     ctx: &RuntimeContext,
     layout: &GameLayout,
     target_id: &str,
+    cancel: Option<&CancellationToken>,
 ) -> Result<u32> {
     // 先在异步上下文里把「哪些 jar、排除什么、解到哪」算清楚，再把纯同步解压交给阻塞线程池。
     let dest = layout.natives_dir(target_id);
@@ -81,14 +87,18 @@ pub async fn extract_all_natives(
         return Ok(0);
     }
 
-    tokio::task::spawn_blocking(move || extract_with_stamp(&jobs, &dest))
-        .await
-        .map_err(|join| {
-            io_err(
-                PathBuf::from("<natives>"),
-                io::Error::other(format!("natives 解压任务异常终止: {join}")),
-            )
-        })?
+    let turn = lock_dir(&dest, cancel).await?;
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        extract_with_stamp(&jobs, &dest)
+    })
+    .await
+    .map_err(|join| {
+        io_err(
+            PathBuf::from("<natives>"),
+            io::Error::other(format!("natives 解压任务异常终止: {join}")),
+        )
+    })?
 }
 
 /// 戳记一致且解出的文件都在时直接沿用，否则重新解压并刷新戳记。
@@ -313,7 +323,7 @@ mod tests {
         put_native_jar(&layout);
         let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
 
-        let count = extract_all_natives(&new_style_version("x"), &ctx, &layout, "1.21")
+        let count = extract_all_natives(&new_style_version("x"), &ctx, &layout, "1.21", None)
             .await
             .unwrap();
         assert_eq!(count, 1);
@@ -342,7 +352,7 @@ mod tests {
             let version =
                 VersionJson::from_json_str(&format!(r#"{{"id":"1.21","libraries":[{lib}]}}"#))
                     .unwrap();
-            let err = extract_all_natives(&version, &ctx, &layout, "1.21")
+            let err = extract_all_natives(&version, &ctx, &layout, "1.21", None)
                 .await
                 .unwrap_err();
             assert!(
@@ -359,12 +369,55 @@ mod tests {
             r#"{"id":"1.21","libraries":[{"name":"lwjgl-platform","natives":{"windows":"natives-windows"}}]}"#,
         )
         .unwrap();
-        let err = extract_all_natives(&malformed, &ctx, &layout, "1.21")
+        let err = extract_all_natives(&malformed, &ctx, &layout, "1.21", None)
             .await
             .unwrap_err();
         assert!(
             matches!(&err, Error::InvalidLibraryCoordinate { name } if name == "lwjgl-platform:natives-windows"),
             "实际 {err:?}"
+        );
+    }
+
+    /// 两个补全或导入同时落到同一个基底，后到的一方在先到的一方解到一半时开始：先到的一方返回之后这个目录
+    /// 不能再被改写。启动与导入过了这一步就直接用它，JVM 映射着的 dll 被截断重写，轻则游戏崩，重则写的一方报 IO 错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_later_extraction_does_not_rewrite_what_the_first_one_returned() {
+        const DLL_LEN: usize = 64 * 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        let jar_path = layout.library_path("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar");
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        let mut writer = zip::ZipWriter::new(File::create(&jar_path).unwrap());
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("lwjgl.dll", opts).unwrap();
+        writer.write_all(&vec![7u8; DLL_LEN]).unwrap();
+        writer.finish().unwrap();
+
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let version = new_style_version("aaa");
+        let dll = layout.natives_dir("1.21").join("lwjgl.dll");
+        let first = async {
+            extract_all_natives(&version, &ctx, &layout, "1.21", None)
+                .await
+                .unwrap();
+            // 留一份记号：之后还有谁往这个文件写，记号就没了。
+            std::fs::write(&dll, b"in use").unwrap();
+        };
+        let second = async {
+            while std::fs::metadata(&dll).map_or(0, |meta| meta.len()) < (DLL_LEN / 4) as u64 {
+                tokio::task::yield_now().await;
+            }
+            extract_all_natives(&version, &ctx, &layout, "1.21", None)
+                .await
+                .unwrap();
+        };
+        tokio::join!(first, second);
+        let bytes = std::fs::read(&dll).unwrap();
+        assert!(
+            bytes == b"in use",
+            "先到的一方返回之后 dll 被改写了，现在 {} 字节",
+            bytes.len()
         );
     }
 
@@ -379,7 +432,7 @@ mod tests {
         let dll = layout.natives_dir("1.21").join("lwjgl.dll");
         let (ctx, layout) = (&ctx, &layout);
         let run = |sha1: &'static str| async move {
-            extract_all_natives(&new_style_version(sha1), ctx, layout, "1.21")
+            extract_all_natives(&new_style_version(sha1), ctx, layout, "1.21", None)
                 .await
                 .unwrap()
         };

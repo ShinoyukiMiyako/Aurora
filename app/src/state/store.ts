@@ -123,6 +123,7 @@ import {
   newTask,
   restoreJournal,
   retryTask,
+  sharedSavesKeys,
   startComposite,
   taskByAttempt,
   tasksToStart,
@@ -1729,7 +1730,7 @@ export class LauncherStore {
   }
 
   private pump(): void {
-    for (const task of tasksToStart(this.raw.tasks)) {
+    for (const task of tasksToStart(this.raw.tasks, sharedSavesKeys(this.raw.scanned))) {
       this.set((raw) => ({ tasks: markRunning(raw.tasks, task.id, Date.now()) }));
       const attempt = task.attempt;
       const attemptId = attemptTaskId(task);

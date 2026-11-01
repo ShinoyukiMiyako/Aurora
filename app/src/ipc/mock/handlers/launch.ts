@@ -33,7 +33,7 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { mockAccountFacts } from "./accounts";
 import { handlers as configHandlers, mockWorldBackupSettings, requireStruct, samePath, tauriArgError } from "./config";
-import { acquireMockInstanceWithBases, autoBackupMockWorlds, ensureMockSavesFreeForLaunch, mockInheritanceChain, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstanceWithBases, autoBackupMockWorlds, ensureMockSavesFreeForLaunch, mockInheritanceChain, mockInstanceQuickPlay, mockInstanceWorlds, type MockChainHold } from "./instances";
 import { serverKey } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -138,7 +138,7 @@ interface Occupant {
   startedAt: number;
   runningSince: number;
   /** 实例占用：从启动一直持有到游戏退出，期间改名、删除、补全被拒绝，Mod 与设置的改动照常。 */
-  hold: MockInstanceHold;
+  hold: MockChainHold;
   /** 启动时的游戏目录：这一局记在它下面，游戏运行期间换了游戏目录也记回这里。 */
   gameDir: string;
   /** 这一局进过的存档，退出后的自动备份只备份它们。mock 没有 level.dat 的修改时间，知道的只有直达的那一个。 */
@@ -377,7 +377,8 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   if ((uuid === null) === (name === null)) throw new IpcError("invalid_argument", "启动需提供 account_uuid 与 offline_name 二者之一");
   if (occupant) throw busy(occupant);
   // 与后端同序：先占全局唯一的游戏槽，再连同继承链上的基底占住实例（新建、补全、改名、删除进行中报 instance_busy），
-  // 再查别的不隔离实例有没有在备份、存档有没有正被打进整合包，最后登记任务；基底一直占到游戏退出，游戏期间要读它的客户端 jar 与 natives。
+  // 再查别的不隔离实例有没有在备份、存档有没有正被打进整合包，最后登记任务；基底一直占到游戏退出，游戏期间要读它的客户端 jar 与 natives，
+  // 转去自动备份时放开：备份只碰实例自己的存档。
   const hold = acquireMockInstanceWithBases(versionId, "launching", mockInheritanceChain(versionId));
   try {
     ensureMockSavesFreeForLaunch(versionId);
@@ -488,8 +489,8 @@ function finishGame(exitCode: number | null, killed: boolean, durationMs: number
   const { hold, played } = occupant;
   const auto = mockWorldBackupSettings().auto;
   // 收尾记账写完后再推退出事件，与后端同序：关着自动备份时占用同游戏槽一起放开，前端收到退出时已经可以改名、删除；
-  // 开着时实例原地转成备份，基底跟着留到备份做完，这期间实例不能改名、删除或再次启动
-  if (auto) hold.setActivity("backing_up");
+  // 开着时实例原地转成备份、基底当即放开，这期间实例不能改名、删除或再次启动，基底能启动
+  if (auto) hold.intoBackup();
   else hold.release();
   occupant = null;
   const payload: GameExitEvent = { version_id: versionId, exit_code: exitCode, crashed, killed, duration_ms: durationMs };

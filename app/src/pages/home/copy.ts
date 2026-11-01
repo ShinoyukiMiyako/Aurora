@@ -134,6 +134,7 @@ export const HOME_COPY = {
   joinRunning: (instance: string) => `「${instance}」正在运行`,
   joinLaunching: (instance: string) => `「${instance}」正在启动`,
   joinBackingUp: (instance: string) => `「${instance}」正在备份或恢复存档，完成后再加入`,
+  joinInherited: (instance: string, user: string) => `「${instance}」正被实例「${user}」使用，结束后再加入`,
   joinPickerLabel: (server: string) => `选择用来加入「${server}」的实例`,
   joinPickerTitle: "用哪个实例加入",
   /** 实例选择里每项的版本小字；原版只写版本号。 */

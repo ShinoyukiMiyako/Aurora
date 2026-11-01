@@ -5,7 +5,7 @@
 // 超时（10 s）由动作本身以错误结束，经统一错误处理弹「无法结束游戏进程」，入口回到原状态。
 
 import { useCallback, useEffect, useState } from "react";
-import { ACTION_ERROR, CONFIRM_COPY, LAUNCH_COPY, lockReason, type FailureCopy, type FailureFixKind } from "../copy/flows";
+import { ACTION_ERROR, CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY, lockReason, type FailureCopy, type FailureFixKind } from "../copy/flows";
 import { javaPinned, type InstanceSummary } from "../domain/adapt";
 import { locksOf } from "../domain/instance-locks";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
@@ -24,8 +24,8 @@ export interface LaunchEntry {
   /** failed 视图的文案与修复动作；其余视图为 null。 */
   failure: FailureCopy | null;
   /**
-   * 此刻不能启动的原因：存档正在备份、恢复或导出，后端会以 instance_busy 拒绝。入口据此带原因禁用启动与重新启动，
-   * 取消、结束、查看诊断不受影响；能启动为 null。
+   * 此刻不能启动的原因：存档正在备份、恢复或导出，或者别的实例正以它为基底，后端会以 instance_busy 拒绝。入口据此
+   * 带原因禁用启动与重新启动，取消、结束、查看诊断不受影响；能启动为 null。
    */
   blocked: string | null;
   /**
@@ -126,9 +126,10 @@ export function useLaunch(instanceId: string): LaunchEntry {
     [actions, host, name],
   );
 
-  const blocked = busySaves ? LAUNCH_COPY.savesBusy : null;
-  // 损坏视图下这个实例没有活动会话，会话这一项恒为 false
-  const repairReason = isBroken && !reimport ? lockReason(locksOf(inst, false).repair, "repair") : undefined;
+  // 启动入口只在这个实例没有活动会话时才问这两项，损坏视图同样，会话这一项恒为 false
+  const locks = locksOf(inst, false);
+  const blocked = busySaves ? LAUNCH_COPY.savesBusy : locks.launch === null ? null : INSTANCE_IN_USE_COPY.launch(locks.launch.usedBy);
+  const repairReason = isBroken && !reimport ? lockReason(locks.repair, "repair") : undefined;
   const repairBlocked = repairReason === undefined ? null : repairReason;
   return { instance: inst, view, stopping, failure, blocked, repairBlocked, launch, quickPlay, cancel, stop, dismiss, openCrash, openLogs, fix };
 }

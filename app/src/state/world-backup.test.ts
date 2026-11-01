@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
 import type { BackupResultDto, ExportResultDto, InstanceDto, RestoreResultDto } from "../ipc/instances";
 import { WORLD_BACKUP_EVENT, type WorldBackupEvent } from "../ipc/launch";
+import type { ModpackExportOptions } from "../ipc/modpack";
 import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
@@ -15,6 +16,7 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const MB = 1_048_576;
+const PACK_WITH_SAVES: ModpackExportOptions = { destination: "D:/分享/包.mrpack", name: "包", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false };
 
 let instances: InstanceDto[];
 let store: LauncherStore;
@@ -101,6 +103,30 @@ describe("备份、导出与恢复入队", () => {
     expect(summary("生存")).toEqual(["backing_up", "基于生存"]);
     expect(summary("创造")).toEqual(["backing_up", null]);
     expect(summary("冒险")).toEqual(["running", null]);
+  });
+
+  it("不隔离的实例共用存档：甲在备份时乙的导出整合包留在队里，备份结束才发命令，不撞后端的 instance_busy", async () => {
+    ipc.overrides.set("export_modpack", () => new Promise(() => undefined));
+    await store.actions.backupWorld("生存", "w1", "旧世界");
+    await store.actions.exportModpack("创造", PACK_WITH_SAVES);
+    await settle();
+    expect(callsOf(ipc, "backup_world")).toHaveLength(1);
+    expect(callsOf(ipc, "export_modpack")).toEqual([]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["running", "queued"]);
+
+    pending.resolve(backupResult(0));
+    await settle();
+    expect(callsOf(ipc, "export_modpack")).toHaveLength(1);
+  });
+
+  it("导出的实例是隔离的：与别的实例的备份不相干，一起开始", async () => {
+    instances = [instanceDto("生存"), instanceDto("创造", { isolated: true })];
+    await store.actions.refreshInstances();
+    ipc.overrides.set("export_modpack", () => new Promise(() => undefined));
+    await store.actions.backupWorld("生存", "w1", "旧世界");
+    await store.actions.exportModpack("创造", PACK_WITH_SAVES);
+    await settle();
+    expect(callsOf(ipc, "export_modpack")).toHaveLength(1);
   });
 
   it("同一实例上两个存档排在一起：一个做完才开始下一个，不撞后端的 instance_busy", async () => {

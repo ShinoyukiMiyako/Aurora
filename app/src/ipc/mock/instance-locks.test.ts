@@ -86,11 +86,11 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
     repairing: [],
     renaming: [],
     deleting: [],
-    launching: ["modifying", "inherited"],
-    running: ["modifying", "inherited"],
+    launching: ["modifying"],
+    running: ["modifying"],
     backing_up: ["modifying", "inherited"],
     modifying: ["modifying", "launching", "running", "backing_up", "inherited"],
-    inherited: ["modifying", "launching", "running", "backing_up", "inherited"],
+    inherited: ["modifying", "backing_up", "inherited"],
   };
   /** inherited 只能经基底占用拿到：让另一个实例以 target 为基底。 */
   const take = (target: string, activity: Activity, user: string) =>
@@ -130,15 +130,29 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
     await expect(renameInstance(FABRIC, "改个名")).resolves.toEqual({ id: "改个名" });
   });
 
-  it("基底自己也在运行：被拒的删除报它自己的事，与列表一致，不随哪份占用先到而变", async () => {
+  it("基底自己也在备份：被拒的删除报它自己的事，与列表一致，不随哪份占用先到而变", async () => {
     const chain = acquireMockInstanceWithBases(FABRIC, "running", ["1.21"]);
-    const game = acquireMockInstance("1.21", "running");
-    expect(await activityOf("1.21")).toBe("running");
-    expect(await busy(deleteInstance("1.21"))).toEqual(["实例 1.21 正在运行，请稍后再试", { id: "1.21", activity: "running" }]);
-    game.release();
+    const backup = acquireMockInstance("1.21", "backing_up");
+    expect(await activityOf("1.21")).toBe("backing_up");
+    expect(await busy(deleteInstance("1.21"))).toEqual(["实例 1.21 正在备份或恢复存档，请稍后再试", { id: "1.21", activity: "backing_up" }]);
+    backup.release();
     expect(await busy(deleteInstance("1.21"))).toEqual([`实例 1.21 正在被实例 ${FABRIC} 使用，请稍后再试`, { id: "1.21", activity: "inherited", used_by: FABRIC }]);
     chain.release();
     expect(await activityOf("1.21")).toBeNull();
+  });
+
+  it("基底开着自己的游戏时补全它上面的实例报基底在运行；反过来实例在用基底时基底启动不了，占用槽没被留下", async () => {
+    addMockInstance("导入的包", "1.21", { kind: "fabric", version: "0.16.10" }, null);
+    await launchGame(offline("1.21", "t-base"));
+    expect(await busy(repairInstance("t-repair", "导入的包"))).toEqual(["实例 1.21 正在运行，请稍后再试", { id: "1.21", activity: "running" }]);
+    expect(await activityOf("导入的包")).toBeNull();
+    endMockGame(0, MINUTE);
+
+    const chain = acquireMockInstanceWithBases("导入的包", "repairing", ["1.21"]);
+    expect(await busy(launchGame(offline("1.21", "t-blocked")))).toEqual([`实例 1.21 正在被实例 导入的包 使用，请稍后再试`, { id: "1.21", activity: "inherited", used_by: "导入的包" }]);
+    chain.release();
+    await launchGame(offline("1.21", "t-free"));
+    endMockGame(0, MINUTE);
   });
 
   it("启动失败或被取消：占用随之放开", async () => {
@@ -356,7 +370,7 @@ describe("mock 的游戏退出后自动备份与后端同序", () => {
     return events;
   }
 
-  it("退出事件先到，实例原地转成备份、基底留到备份做完，之后才放开并推备份事件", async () => {
+  it("退出事件先到，实例原地转成备份，备份做完才放开并推备份事件", async () => {
     const order: string[] = [];
     await onGameExit(() => order.push("exit"));
     const events = await backupEvents();
@@ -378,15 +392,19 @@ describe("mock 的游戏退出后自动备份与后端同序", () => {
     expect((await listWorldBackups(ISOLATED, WORLD)).backups[0].kind).toBe("auto");
   });
 
-  it("加载器实例：备份期间基底仍报 inherited，备份做完才放开", async () => {
+  it("加载器实例：转去备份时基底当即放开，这时能启动基底；实例自己占到备份做完", async () => {
     addMockInstance("导入的包", "1.21", { kind: "fabric", version: "0.16.10" }, null);
     await launchGame(offline("导入的包", "t-chain"));
+    expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ activity: "inherited", used_by: "导入的包" });
     const finish = pauseNextMockAutoBackup();
     endMockGame(0, MINUTE);
-    expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ activity: "inherited", used_by: "导入的包" });
-    expect(await activityOf("导入的包")).toBe("backing_up");
-    finish();
     expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ activity: null, used_by: null });
+    expect(await activityOf("导入的包")).toBe("backing_up");
+    await launchGame(offline("1.21", "t-base"));
+    expect(await activityOf("1.21")).toBe("running");
+    finish();
+    expect(await activityOf("导入的包")).toBeNull();
+    endMockGame(0, MINUTE);
   });
 
   it("这一局没有进存档：没有要备份的，备份事件照样推，列表是空的", async () => {

@@ -18,6 +18,7 @@ use aurora_download::DownloadTask;
 use aurora_version::{AssetLayout, AssetObjectsIndex, VersionJson};
 
 use crate::context::InstallContext;
+use crate::dir_lock::lock_dir;
 use crate::error::{Error, Result, io_err};
 use crate::layout::{checked_segment, materialized_asset_path};
 use crate::natives;
@@ -88,7 +89,8 @@ pub async fn ensure_complete(
     };
 
     // natives 解压到 target 版本的 natives 目录。
-    let natives = natives::extract_all_natives(version, cx.runtime, cx.layout, target_id).await?;
+    let natives =
+        natives::extract_all_natives(version, cx.runtime, cx.layout, target_id, cx.cancel).await?;
 
     Ok(CompletionReport {
         client_jar,
@@ -199,7 +201,8 @@ async fn read_asset_index(
 /// 对 virtual / map_to_resources 布局，把 objects 里的对象按逻辑名物化到展开目录。
 ///
 /// 这两种布局只出现在 1.7.2 及更早的版本，一份索引几百到上千个对象，每次补全都会走到这里；
-/// 目标已存在且大小与索引一致的直接跳过，整段放到阻塞线程池里用同步 IO 做完。
+/// 目标已存在且大小与索引一致的直接跳过，整段放到阻塞线程池里用同步 IO 做完。展开目录按资源索引共用，
+/// 同一目录上的展开一个接一个来（见 [`crate::dir_lock`]）。
 async fn materialize_assets(
     cx: InstallContext<'_>,
     version: &VersionJson,
@@ -232,14 +235,18 @@ async fn materialize_assets(
             ))
         })
         .collect::<Result<_>>()?;
-    tokio::task::spawn_blocking(move || copy_missing(&jobs))
-        .await
-        .map_err(|join| {
-            io_err(
-                PathBuf::from("<assets>"),
-                std::io::Error::other(format!("资源物化任务异常终止: {join}")),
-            )
-        })?
+    let turn = lock_dir(&target_dir, cx.cancel).await?;
+    tokio::task::spawn_blocking(move || {
+        let _turn = turn;
+        copy_missing(&jobs)
+    })
+    .await
+    .map_err(|join| {
+        io_err(
+            PathBuf::from("<assets>"),
+            std::io::Error::other(format!("资源物化任务异常终止: {join}")),
+        )
+    })?
 }
 
 /// 逐个把对象拷到展开目录；目标已存在且大小相符的跳过。
@@ -332,6 +339,45 @@ mod tests {
             std::fs::read(target.join("sub").join("b.txt")).unwrap(),
             b"BBBBBB"
         );
+    }
+
+    /// 两个任务同时展开同一份旧版资源，后到的一方在先到的一方拷到一半时开始：展开目录是共享的，后到的一方不能
+    /// 把拷到一半的文件当成已就绪提前返回，也不能撞上它报错，要等它拷完。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_later_materialization_waits_for_the_file_being_copied() {
+        const OBJECT_LEN: usize = 256 * 1024 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = RetryPolicy::default();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let path = layout.asset_object_path("aa11");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![b'x'; OBJECT_LEN]).unwrap();
+        let index = virtual_index(&[("big.bin", "aa11", OBJECT_LEN as u64)]);
+        let version = version_with(Some("pre-1.6"), None);
+        let dest = layout.asset_virtual_dir("pre-1.6").unwrap().join("big.bin");
+
+        let first_done = std::sync::atomic::AtomicBool::new(false);
+        let first = async {
+            materialize_assets(cx, &version, &index).await.unwrap();
+            first_done.store(true, std::sync::atomic::Ordering::SeqCst);
+        };
+        let second = async {
+            while !dest.exists() {
+                tokio::task::yield_now().await;
+            }
+            materialize_assets(cx, &version, &index).await.unwrap();
+            assert!(
+                first_done.load(std::sync::atomic::Ordering::SeqCst),
+                "后到的一方在文件拷完之前就返回了"
+            );
+        };
+        tokio::join!(first, second);
+        assert_eq!(std::fs::metadata(&dest).unwrap().len(), OBJECT_LEN as u64);
     }
 
     /// 只有坐标和仓库地址的库在盘上就算就绪，补全不再按坐标重拉（旧版 Forge 的通用 jar 在仓库里是

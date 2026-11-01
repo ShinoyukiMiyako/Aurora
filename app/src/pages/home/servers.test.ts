@@ -193,11 +193,19 @@ describe("加入服务器用的实例", () => {
     expect(joinPlan("旧版", instances, null, ["最近"])).toEqual({ kind: "direct", instanceId: "旧版" });
   });
 
-  it("实例选择里选中的那一个能不能拿来加入：正在启动或运行、在备份或恢复存档时各有原因，别的实例占着不算", () => {
-    expect(joinBlock("旧版", null, [])).toBeNull();
-    expect(joinBlock("旧版", { instanceId: "最近", phase: "running" }, ["最近"])).toBeNull();
-    expect(joinBlock("旧版", { instanceId: "旧版", phase: "loading" }, [])).toEqual({ kind: "busy", phase: "loading" });
-    expect(joinBlock("旧版", null, ["旧版"])).toEqual({ kind: "backingUp" });
+  it("记住的实例正被别的实例当作基底：带原因禁用，写明是谁在用", () => {
+    const based = instances.map((i) => (i.id === "旧版" ? { ...i, usedBy: "周末联机" } : i));
+    expect(joinPlan("旧版", based, null, [])).toEqual({ kind: "inherited", instanceId: "旧版", usedBy: "周末联机" });
+    expect(joinPlan("旧版", based, null, ["旧版"])).toEqual({ kind: "backingUp", instanceId: "旧版" });
+  });
+
+  it("实例选择里选中的那一个能不能拿来加入：正在启动或运行、在备份或恢复存档、被当作基底时各有原因，别的实例占着不算", () => {
+    const old = { id: "旧版", usedBy: null };
+    expect(joinBlock(old, null, [])).toBeNull();
+    expect(joinBlock(old, { instanceId: "最近", phase: "running" }, ["最近"])).toBeNull();
+    expect(joinBlock(old, { instanceId: "旧版", phase: "loading" }, [])).toEqual({ kind: "busy", phase: "loading" });
+    expect(joinBlock(old, null, ["旧版"])).toEqual({ kind: "backingUp" });
+    expect(joinBlock({ id: "旧版", usedBy: "周末联机" }, null, [])).toEqual({ kind: "inherited", usedBy: "周末联机" });
   });
 
   it("没记住、记住的已不在、损坏、在安装、版本不支持：都按没记住弹实例选择", () => {
