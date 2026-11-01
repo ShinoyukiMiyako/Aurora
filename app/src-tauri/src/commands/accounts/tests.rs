@@ -279,7 +279,7 @@ mod microsoft {
         login
     }
 
-    /// 设备码轮询期间门面不被占用：读命令 50 ms 内返回，写锁也能立即拿到。
+    /// 设备码轮询期间门面不被占用：读命令不用排队，写锁也能立即拿到。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn device_code_polling_does_not_hold_the_facade() {
         let server = pending_forever_server().await;
@@ -288,13 +288,13 @@ mod microsoft {
         let slot = Arc::new(MicrosoftLoginSlot::default());
         let login = start_login(&facade, &slot).await;
 
-        let started = Instant::now();
-        let config = crate::commands::config::read_config(&facade).await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(50),
-            "读命令耗时 {elapsed:?}"
-        );
+        // 服务端一直不给结果，轮询要是占着门面，读命令就等不到头。
+        let config = tokio::time::timeout(
+            Duration::from_secs(15),
+            crate::commands::config::read_config(&facade),
+        )
+        .await
+        .expect("轮询期间读命令被门面锁挡住了");
         assert!(config.has_client_id);
         assert!(facade.is_unlocked(), "轮询期间不应有人持有门面锁");
 
