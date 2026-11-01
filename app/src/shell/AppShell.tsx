@@ -204,7 +204,7 @@ const PageView = memo(function PageView({ route, pages }: { route: Route; pages:
 function OnboardingFrame({ Flow }: { Flow: ComponentType<FlowProps<"onboarding">> }) {
   const frame = useReportedWindowFrame();
   return (
-    <div className={styles.onboarding}>
+    <div className={styles.onboarding} data-sk-onboarding="">
       <header className={styles.strip} data-tauri-drag-region="deep" data-blurred={!frame.focused || undefined}>
         <Logo size={20} className={styles.stripLogo} />
         <WindowControls maximized={frame.maximized} />
