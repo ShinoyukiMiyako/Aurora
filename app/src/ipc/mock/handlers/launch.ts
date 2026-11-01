@@ -33,7 +33,7 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { mockAccountFacts } from "./accounts";
 import { handlers as configHandlers, mockWorldBackupSettings, requireStruct, samePath, tauriArgError } from "./config";
-import { acquireMockInstanceWithBases, autoBackupMockWorlds, ensureMockSharedWorldsSettled, mockInheritanceChain, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstanceWithBases, autoBackupMockWorlds, ensureMockSavesFreeForLaunch, mockInheritanceChain, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { serverKey } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -375,10 +375,10 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   if ((uuid === null) === (name === null)) throw new IpcError("invalid_argument", "启动需提供 account_uuid 与 offline_name 二者之一");
   if (occupant) throw busy(occupant);
   // 与后端同序：先占全局唯一的游戏槽，再连同继承链上的基底占住实例（新建、补全、改名、删除进行中报 instance_busy），
-  // 共用存档再查别的实例有没有在备份，最后登记任务；基底一直占到游戏退出，游戏期间要读它的客户端 jar 与 natives。
+  // 再查别的不隔离实例有没有在备份、存档有没有正被打进整合包，最后登记任务；基底一直占到游戏退出，游戏期间要读它的客户端 jar 与 natives。
   const hold = acquireMockInstanceWithBases(versionId, "launching", mockInheritanceChain(versionId));
   try {
-    ensureMockSharedWorldsSettled(versionId);
+    ensureMockSavesFreeForLaunch(versionId);
     beginMockTask(taskId);
   } catch (error) {
     hold.release();

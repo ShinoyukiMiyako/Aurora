@@ -24,7 +24,7 @@ import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { findMockSource, findMockVersion, mockProjects, newestFirst, sourceVersions, sourcesGameVersions, sourcesLoaders, type MockProject, type MockSource } from "../catalog";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { acquireMockInstance, mockInstanceWorlds, recordMockPack } from "./instances";
+import { acquireMockInstance, ensureMockSavesFreeForWriting, markMockSavesWritten, mockInstanceWorlds, recordMockPack } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 /** 假游戏目录；只用来拼返回给界面的路径。 */
@@ -392,6 +392,20 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
   const fileVersionId = read.string("fileVersionId");
   // 与后端同序：全部入参解析完再占住实例（modifying），之后登记任务
   const hold = acquireMockInstance(versionId, "modifying");
+  // 数据包写进存档目录，与后端一样先记下再查备份、恢复与读存档的导出
+  const unmark = resourceType === "data_pack" ? markMockSavesWritten(versionId) : () => undefined;
+  const release = () => {
+    unmark();
+    hold.release();
+  };
+  if (resourceType === "data_pack") {
+    try {
+      ensureMockSavesFreeForWriting(versionId);
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
   return runMockTask(taskId, async () => {
     if (resourceType === "data_pack" && world === null) throw invalid("安装目标不对：数据包要指明装进哪个存档");
     if (resourceType !== "data_pack" && world !== null) throw invalid("安装目标不对：只有数据包需要指定存档");
@@ -418,7 +432,7 @@ function installResource(args: MockArgs): Promise<ResourceInstallOutcomeDto> {
       resource_type: resourceType,
       world,
     };
-  }).finally(() => hold.release());
+  }).finally(release);
 }
 
 export const handlers: MockHandlers = {

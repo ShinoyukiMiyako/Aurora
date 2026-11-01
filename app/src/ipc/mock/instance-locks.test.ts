@@ -20,11 +20,12 @@ import {
   setSidebarPins,
 } from "../instances";
 import { launchGame, onGameExit, onWorldBackup, playStats, type WorldBackupEvent } from "../launch";
+import { exportModpack, type ModpackExportOptions } from "../modpack";
 import { checkUpdates, removeMod, setModEnabled, updateMod } from "../mods";
 import { cancelTask } from "../tasks";
 import { resetMocks } from ".";
 import { clearMockEventListeners } from "./events";
-import { acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, addMockWorld, failNextMockBackupsMove, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
+import { acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, addMockWorld, failNextMockBackupsMove, markMockSavesWritten, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
 import { endMockGame, failNextMockPlayRecords, pauseNextMockAutoBackup } from "./handlers/launch";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./handlers/tasks";
 
@@ -405,6 +406,77 @@ describe("mock 的游戏退出后自动备份与后端同序", () => {
     expect(await activityOf(ISOLATED)).toBeNull();
     expect(events).toEqual([]);
     expect((await listWorldBackups(ISOLATED, WORLD)).backups).toHaveLength(before);
+  });
+});
+
+describe("mock 的存档读写互斥与后端同序", () => {
+  /** 樱花生存是隔离实例，种子里带着 New World 这个存档；1.21 与 1.21.1 不隔离，共用一份 saves。 */
+  const ISOLATED = "樱花生存";
+  const WORLD = "New World";
+  const SHARED_A = "1.21";
+  const SHARED_B = "1.21.1";
+  const OPTIONS: ModpackExportOptions = { destination: "D:/分享/周末包.mrpack", name: "周末包", version: "1.0.0", summary: null, extras: [], include_disabled: false };
+
+  const withSaves = (taskId: string, id = ISOLATED) => exportModpack(taskId, id, { ...OPTIONS, extras: ["saves"] });
+  const dataPack = (taskId: string, versionId = ISOLATED) =>
+    installResource({ taskId, versionId, resourceType: "data_pack", world: WORLD, platform: "modrinth", projectId: "x", fileVersionId: "y" });
+
+  it.each(["launching", "running", "backing_up"] as const)("实例报着 %s：带存档的导出报 instance_busy，没勾存档的照常导出", async (activity) => {
+    const hold = acquireMockInstance(ISOLATED, activity);
+    expect((await rejection(withSaves("t-saves"))).detail).toEqual({ id: ISOLATED, activity });
+    expect((await exportModpack("t-plain", ISOLATED, OPTIONS)).path).toBe(OPTIONS.destination);
+    hold.release();
+    expect((await withSaves("t-again")).path).toBe(OPTIONS.destination);
+  });
+
+  it("共用存档：别的实例开着游戏或在装数据包时带存档导出被挡，detail 指向它；隔离实例不受影响", async () => {
+    const game = acquireMockInstance(SHARED_B, "running");
+    expect((await rejection(withSaves("t-game", SHARED_A))).detail).toEqual({ id: SHARED_B, activity: "running" });
+    expect((await withSaves("t-isolated")).path).toBe(OPTIONS.destination);
+    game.release();
+
+    const unmark = markMockSavesWritten(SHARED_B);
+    const written = await rejection(withSaves("t-written", SHARED_A));
+    expect([written.message, written.detail]).toEqual([`实例 ${SHARED_B} 正在往存档里装数据包，请稍后再试`, { id: SHARED_B, activity: "modifying" }]);
+    unmark();
+    expect((await withSaves("t-settled", SHARED_A)).path).toBe(OPTIONS.destination);
+  });
+
+  it("装数据包：备份中报 backing_up；存档正被读进整合包时报 modifying 并写明在导出；没勾存档的导出不挡", async () => {
+    const backup = acquireMockInstance(ISOLATED, "backing_up");
+    expect((await rejection(dataPack("t-backup"))).detail).toEqual({ id: ISOLATED, activity: "backing_up" });
+    backup.release();
+
+    const plain = exportModpack("t-plain", ISOLATED, OPTIONS);
+    expect((await rejection(dataPack("t-beside-plain"))).code).not.toBe("instance_busy");
+    await plain;
+
+    const reading = withSaves("t-read");
+    const blocked = await rejection(dataPack("t-beside-saves"));
+    expect([blocked.message, blocked.detail]).toEqual([`实例 ${ISOLATED} 正在导出带存档的整合包，请稍后再试`, { id: ISOLATED, activity: "modifying" }]);
+    await reading;
+  });
+
+  it("正在装数据包：备份与带存档的导出都报 instance_busy，写明在装数据包，结束后放开", async () => {
+    const unmark = markMockSavesWritten(ISOLATED);
+    const expected = [`实例 ${ISOLATED} 正在往存档里装数据包，请稍后再试`, { id: ISOLATED, activity: "modifying" }];
+    expect(await busy(backupWorld("t-backup", ISOLATED, WORLD))).toEqual(expected);
+    expect(await busy(withSaves("t-saves"))).toEqual(expected);
+    unmark();
+    vi.useFakeTimers();
+    const done = backupWorld("t-after", ISOLATED, WORLD);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    await done;
+  });
+
+  it("存档正被读进整合包：本实例不能启动，报 modifying 并写明在导出；读完放开", async () => {
+    const reading = withSaves("t-read");
+    const blocked = await rejection(launchGame(offline(ISOLATED, "t-launch")));
+    expect(blocked.message).toBe(`实例 ${ISOLATED} 正在导出带存档的整合包，请稍后再试`);
+    expect(blocked.detail).toEqual({ id: ISOLATED, activity: "modifying" });
+    await reading;
+    await launchGame(offline(ISOLATED, "t-after"));
+    endMockGame(0, MINUTE);
   });
 });
 

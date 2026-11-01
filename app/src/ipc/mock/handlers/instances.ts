@@ -610,12 +610,6 @@ function hold(id: string, activity: InstanceActivity, usedBy: string | null): Mo
   };
 }
 
-/** 实例此刻有没有人占着做 activity：与后端按活动查占用同一口径，键不分大小写。 */
-export function mockInstanceHeldFor(id: string, activity: InstanceActivity): boolean {
-  const held = holds.get(id.toLowerCase());
-  return held !== undefined && held.some((h) => h.activity === activity);
-}
-
 /** 占着实例执行 work，结束（含异步完成与失败）即放开；同步的处理函数仍同步返回。 */
 export function withMockInstance<T>(id: string, activity: InstanceActivity, work: () => T): T {
   const hold = acquireMockInstance(id, activity);
@@ -1231,32 +1225,77 @@ export function ensureMockSharedWorldsSettled(id: string): void {
 
 /** 存档正被导出整合包整份读走的实例（原样 id，同一实例可有多份），与后端互斥表里那份记录同一口径。 */
 const savesReaders: string[] = [];
+/** 正往存档里装数据包的实例，同上。 */
+const savesWriters: string[] = [];
 
-/** 记下实例的存档正被整份读走（导出整合包勾了存档），返回撤销函数；与后端一样先记下、再查备份与恢复。 */
-export function markMockSavesRead(id: string): () => void {
-  savesReaders.push(id);
+function markSaves(marked: string[], id: string): () => void {
+  marked.push(id);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    savesReaders.splice(savesReaders.indexOf(id), 1);
+    marked.splice(marked.indexOf(id), 1);
   };
 }
 
-function savesBeingExported(id: string): IpcError {
-  return new IpcError("instance_busy", `实例 ${id} 正在导出带存档的整合包，请稍后再试`, { id, activity: "modifying" });
+/** 记下实例的存档正被整份读走（导出整合包勾了存档），返回撤销函数；与后端一样先记下、再查备份与恢复。 */
+export function markMockSavesRead(id: string): () => void {
+  return markSaves(savesReaders, id);
+}
+
+/** 记下实例正往存档里写（装数据包），返回撤销函数；与后端一样先记下、再查备份、恢复与读存档的导出。 */
+export function markMockSavesWritten(id: string): () => void {
+  return markSaves(savesWriters, id);
+}
+
+/** 与后端 saves_holder 一致：marked 里和实例 id 用同一份存档的那个实例，它自己或同为不隔离的实例。 */
+function savesHolder(id: string, marked: readonly string[]): string | undefined {
+  // 没有记录时不看自己的存档作用域：每次恢复、备份都会经过这里
+  if (marked.length === 0) return undefined;
+  const key = id.toLowerCase();
+  const own = marked.find((other) => other.toLowerCase() === key);
+  if (own !== undefined) return own;
+  if (isolatedOf(requireInstance(id))) return undefined;
+  return marked.find((other) => !isolatedOf(requireInstance(other)));
+}
+
+/** 导出整合包与装数据包对外都是「改动中」，所以 activity 报 modifying，正文写明在做什么。 */
+function savesBusy(id: string, message: string): IpcError {
+  return new IpcError("instance_busy", message, { id, activity: "modifying" });
 }
 
 /** 与后端同序：恢复要替换存档，本实例或共用这份存档的另一个不隔离实例正在导出带存档的整合包时报 instance_busy。 */
 function ensureSavesNotRead(id: string): void {
-  // 没有导出在读存档时不看自己的存档作用域：每次恢复都会经过这里
-  if (savesReaders.length === 0) return;
-  const key = id.toLowerCase();
-  const own = savesReaders.find((reader) => reader.toLowerCase() === key);
-  if (own !== undefined) throw savesBeingExported(own);
-  if (isolatedOf(requireInstance(id))) return;
-  const shared = savesReaders.find((reader) => !isolatedOf(requireInstance(reader)));
-  if (shared !== undefined) throw savesBeingExported(shared);
+  const reader = savesHolder(id, savesReaders);
+  if (reader !== undefined) throw savesBusy(reader, `实例 ${reader} 正在导出带存档的整合包，请稍后再试`);
+}
+
+/** 备份、恢复、导出存档与带存档的导出整合包：本实例或共用这份存档的实例正在装数据包时报 instance_busy。 */
+function ensureSavesNotWritten(id: string): void {
+  const writer = savesHolder(id, savesWriters);
+  if (writer !== undefined) throw savesBusy(writer, `实例 ${writer} 正在往存档里装数据包，请稍后再试`);
+}
+
+/** 与后端 ensure_saves_settled_for_reading 一致：导出整合包要把存档整份读走，存档会变的时候报 instance_busy。 */
+export function ensureMockSavesSettledForReading(id: string): void {
+  const own = heldActivity(requireInstance(id), ["launching", "running", "backing_up"]);
+  if (own !== null) throw busyError(id, own);
+  ensureSharedWorldFree(id);
+  ensureMockSharedWorldsSettled(id);
+  ensureSavesNotWritten(id);
+}
+
+/** 与后端 ensure_saves_free_for_writing 一致：备份、恢复或读存档的导出进行中不能往存档里写。 */
+export function ensureMockSavesFreeForWriting(id: string): void {
+  if (heldActivity(requireInstance(id), ["backing_up"]) !== null) throw busyError(id, "backing_up");
+  ensureMockSharedWorldsSettled(id);
+  ensureSavesNotRead(id);
+}
+
+/** 与后端 ensure_saves_free_for_launch 一致：别的不隔离实例在备份，或存档正被打进整合包时不能启动。 */
+export function ensureMockSavesFreeForLaunch(id: string): void {
+  ensureMockSharedWorldsSettled(id);
+  ensureSavesNotRead(id);
 }
 
 /**
@@ -1268,6 +1307,7 @@ async function worldTask<T>(taskId: string, id: string, replacesSaves: boolean, 
   try {
     ensureSharedWorldFree(id);
     if (replacesSaves) ensureSavesNotRead(id);
+    ensureSavesNotWritten(id);
     beginMockTask(taskId);
   } catch (error) {
     release();
@@ -1669,6 +1709,7 @@ export function reset(): void {
   holds.clear();
   pendingBackupsMoveFailure = null;
   savesReaders.length = 0;
+  savesWriters.length = 0;
   mockRevealedPaths.length = 0;
   exportedFiles.clear();
 }
