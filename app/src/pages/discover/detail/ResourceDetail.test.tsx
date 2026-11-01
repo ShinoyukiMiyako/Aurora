@@ -9,7 +9,7 @@ import { IpcError } from "../../../ipc/errors";
 import { OverlayRoot } from "../../../shell/overlay";
 import { ShellProvider } from "../../../shell/shell";
 import { LauncherProvider } from "../../../state/launcher";
-import type { ProjectDetail } from "../../../state/queries/discover";
+import type { InstanceMatch, ProjectDetail } from "../../../state/queries/discover";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../../test/launcher";
@@ -178,6 +178,89 @@ describe("资源详情：头图标签行", () => {
     });
     expect(heroTitle()).toBe("Sodium（CurseForge）");
     expect(heroTags()[0]).toBe("Mod");
+  });
+});
+
+describe("资源详情：默认勾选", () => {
+  const fabric = { loaders: [{ kind: "fabric" as const, version: "0.16.5" }] };
+  const SINGLE: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" };
+  const best = modVersion("modrinth-v1", { project_id: "AANobbMI" });
+  const checked = (instance: string) => target(instance).getAttribute("aria-checked");
+
+  /** 实例列表已经读到之后才打开详情：用户点开卡片时都是这样。 */
+  async function openAfterBoot() {
+    const app = (open: DetailTarget | null) => (
+      <LauncherProvider>
+        <ShellProvider>
+          <ResourceDetail target={open} onClose={() => undefined} fitInstance={null} online />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    );
+    view = render(app(null));
+    await flush();
+    view.rerender(app(SINGLE));
+    await flush();
+  }
+
+  /** 看过一次这个资源，缓存里留下只有「生存」的矩阵；之后建好新实例并选中它，再打开同一个资源。 */
+  async function reopenAfterCreating(reloaded: Deferred<InstanceMatch[]>) {
+    bootOverrides(ipc, { instances: [instanceDto("生存", fabric)], config: configDto({ selected_version: "生存" }) });
+    ipc.overrides.set("match_instances", () => [match("生存", { best_version: best })]);
+    await openAfterBoot();
+    view?.unmount();
+
+    bootOverrides(ipc, { instances: [instanceDto("生存", fabric), instanceDto("新世界", fabric)], config: configDto({ selected_version: "新世界" }) });
+    ipc.overrides.set("match_instances", () => reloaded.promise);
+    await openAfterBoot();
+  }
+
+  it("缓存的矩阵早于新实例：等重取回来覆盖到它再落定，新实例第一次打开就被勾上", async () => {
+    const reloaded = deferred<InstanceMatch[]>();
+    await reopenAfterCreating(reloaded);
+    expect(checked("新世界")).toBe("false");
+    expect(dialog().textContent).toContain("勾选右侧的实例后安装");
+
+    await act(async () => {
+      reloaded.resolve([match("生存", { best_version: best }), match("新世界", { best_version: best })]);
+      await settle();
+    });
+    expect([checked("新世界"), checked("生存")]).toEqual(["true", "false"]);
+    expect(dialog().textContent).toContain("已选 1 个实例");
+  });
+
+  it("等重取期间用户自己勾了别的实例：默认勾选不再落定，不盖掉用户的选择", async () => {
+    const reloaded = deferred<InstanceMatch[]>();
+    await reopenAfterCreating(reloaded);
+    act(() => target("生存").click());
+    await act(async () => {
+      reloaded.resolve([match("生存", { best_version: best }), match("新世界", { best_version: best })]);
+      await settle();
+    });
+    expect([checked("新世界"), checked("生存")]).toEqual(["false", "true"]);
+  });
+
+  it("重取后矩阵里仍没有的实例不拦着默认勾选，也不反复重取", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存", fabric), instanceDto("占位", fabric)], config: configDto({ selected_version: "生存" }) });
+    ipc.overrides.set("match_instances", () => [match("生存", { best_version: best })]);
+    await openAfterBoot();
+    expect([checked("生存"), checked("占位")]).toEqual(["true", "false"]);
+    expect(callsOf(ipc, "match_instances")).toHaveLength(2);
+  });
+
+  it("实例列表还没读到时不落定：矩阵先到也要等列表，当前实例照样被勾上", async () => {
+    const list = deferred<ReturnType<typeof instanceDto>[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    ipc.overrides.set("match_instances", () => [match("生存", { best_version: best })]);
+    ipc.overrides.set("get_config", () => configDto({ selected_version: "生存" }));
+    await mount(SINGLE);
+    expect(callsOf(ipc, "match_instances")).toHaveLength(1);
+
+    await act(async () => {
+      list.resolve([instanceDto("生存", fabric)]);
+      await settle();
+    });
+    expect(checked("生存")).toBe("true");
   });
 });
 
