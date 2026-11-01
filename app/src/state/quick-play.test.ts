@@ -162,6 +162,40 @@ describe("直达走与启动相同的拦截链", () => {
     await retry.run();
     expect(callsOf(ipc, "launch_game").map((a) => a.quickPlay)).toEqual([SERVER, SERVER]);
   });
+
+  it("登录失效后「重新登录」：登录意图带着这一局的 quickPlay，登录成功后继续的仍是同一个直达目标", async () => {
+    accounts = [
+      accountDto({ uuid: "ls-1", name: "Yuki", account_type: "authlib_injector", auth_server: "LittleSkin", server_url: "https://littleskin.example/api/yggdrasil", username: "yuki@example.com" }),
+    ];
+    const s = await boot();
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("account_relogin", "Yuki 的登录已失效", { account: "Yuki" });
+    });
+    await s.actions.quickPlay("生存", SERVER);
+    expect(s.getState().session).toMatchObject({ phase: "failed", quickPlay: SERVER, failure: { code: "account_relogin" } });
+    const relogin = s.actions.failureFix("relogin");
+    if (!("run" in relogin)) throw new Error("重新登录应是命令类修复动作");
+    await relogin.run();
+    expect(s.getState().login).toMatchObject({ kind: "authlib", intent: { kind: "launch", instanceId: "生存", quickPlay: SERVER } });
+  });
+
+  it("指定的 Java 不在了「改为自动选择」：改完设置立即重新启动，带着同一个 quickPlay", async () => {
+    const s = await boot();
+    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "C:/jdk/bin/java.exe", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("java_pinned_missing", "指定的 Java 不存在", { path: "C:/jdk/bin/java.exe" });
+    });
+    await s.actions.quickPlay("生存", WORLD);
+    expect(s.getState().session).toMatchObject({ phase: "failed", quickPlay: WORLD, failure: { code: "java_pinned_missing" } });
+    const auto = s.actions.failureFix("auto_java");
+    if (!("run" in auto)) throw new Error("改为自动选择应是命令类修复动作");
+    ipc.overrides.set("launch_game", () => ({ pid: 2 }));
+    await auto.run();
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([expect.objectContaining({ id: "生存", settings: expect.objectContaining({ java: "auto" }) })]);
+    expect(callsOf(ipc, "launch_game").map((a) => a.quickPlay)).toEqual([WORLD, WORLD]);
+  });
 });
 
 describe("固定服务器记住的实例", () => {
