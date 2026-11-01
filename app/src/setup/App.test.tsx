@@ -113,6 +113,35 @@ describe("启动", () => {
     await vi.waitFor(() => expect(fake.callsOf("windowReady")).toHaveLength(1), WAIT);
   });
 
+  it("视图渲染时抛错也进致命错误页并显示窗口，不留一个没有任何按钮的空白窗口", async () => {
+    const fake = createFakeBridge();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const broken: typeof copy = {
+      ...copy,
+      get welcome(): typeof copy.welcome {
+        throw new Error("欢迎页渲染炸了");
+      },
+    };
+    mount(<App bridge={fake} copy={broken} />);
+    await seeHeading(copy.fatal.title);
+    expect(document.querySelector("pre")?.textContent).toContain("欢迎页渲染炸了");
+    expect(buttonNamed(copy.fatal.close)).toBeDefined();
+    expect(buttonNamed(copy.frame.close)).toBeDefined();
+    await vi.waitFor(() => expect(fake.callsOf("windowReady")).toHaveLength(1), WAIT);
+    expect(fake.callsOf("probe")).toHaveLength(1);
+    expect(consoleError).toHaveBeenCalledWith("引导程序渲染出错", expect.any(Error));
+  });
+
+  it("状态缺值的渲染断言也进致命错误页，并且不会带着残缺状态发起安装", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fake = createFakeBridge();
+    const noPlan = replay([{ type: "probed", probe: FAKE_PROBE }]);
+    mount(<App bridge={fake} copy={copy} initial={{ ...noPlan, view: "installing", plan: null, run: 1 }} />);
+    await seeHeading(copy.fatal.title);
+    expect(document.querySelector("pre")?.textContent).toContain("视图 installing 缺少安装计划");
+    expect(fake.callsOf("install")).toHaveLength(0);
+  });
+
   it("StrictMode 下探测和安装也只各调一次", async () => {
     const fake = createFakeBridge({ outcome: "hang", progress: [] });
     mount(

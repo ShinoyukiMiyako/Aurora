@@ -6,6 +6,7 @@ import { MotionConfig } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { ISSUES_URL } from "../lib/app-info";
 import { rootTransition } from "../lib/motion";
+import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import type { SetupBridge } from "./bridge";
 import { isFailure, type InstallMode } from "./contract";
@@ -305,7 +306,7 @@ export interface AppProps {
   initial?: SetupState;
 }
 
-export default function App({ bridge, copy, initial = initialState }: AppProps) {
+function SetupRoot({ bridge, copy, initial = initialState }: AppProps) {
   const flow = useSetupFlow(bridge, initial);
   const { state, dispatch, attempt } = flow;
   const reduced = useReducedMotionPreference();
@@ -339,5 +340,20 @@ export default function App({ bridge, copy, initial = initialState }: AppProps) 
         </FrameChromeProvider>
       </OverlayProvider>
     </MotionConfig>
+  );
+}
+
+/**
+ * 渲染出错时 React 会卸掉整棵树，窗口只剩底色，连关闭按钮都没有，3 秒兜底显示出来的也是这个空窗口。
+ * 从 fatal 重新挂载一遍：错误原文、窗口显示、关窗监听都走正常路径。
+ */
+export default function App({ bridge, copy, initial = initialState }: AppProps) {
+  return (
+    <ErrorBoundary
+      onError={(error) => console.error("引导程序渲染出错", error)}
+      fallback={(error) => <SetupRoot bridge={bridge} copy={copy} initial={reduce(initial, { type: "crashed", detail: describeError(error) })} />}
+    >
+      <SetupRoot bridge={bridge} copy={copy} initial={initial} />
+    </ErrorBoundary>
   );
 }

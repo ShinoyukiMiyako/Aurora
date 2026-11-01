@@ -50,10 +50,12 @@ impl Interface {
             .first()
             .ok_or("tauri.conf.json 没有配置窗口")?
             .clone();
+        let page = Arc::clone(context);
         // 必须在事件循环开始前经 &App 建窗：这条路把建窗错误作为 Err 返回。经 AppHandle 建窗时错误只进日志，
         // 进程会留在后台，一个窗口也没有。
         let window = WebviewWindowBuilder::from_config(&app, &config)?
             .data_directory(webview_data.path().to_path_buf())
+            .on_navigation(move |_| page.allows_navigation())
             .build()?;
         Ok(Self {
             app,
