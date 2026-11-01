@@ -2305,6 +2305,8 @@ export class LauncherStore {
       (launched) => {
         const s = this.raw.session;
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });
+        // 启动途中自动下载的托管运行时不经过 Java 任务，本机 Java 列表要在这里失效
+        invalidateResources("java");
         if (launched.offline) {
           const copy = TOAST_COPY.offlineLaunched(instanceId);
           this.pushToast("info", copy.title, copy.body);

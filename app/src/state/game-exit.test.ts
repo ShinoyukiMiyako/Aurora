@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GAME_EXIT_EVENT, type GameExitEvent } from "../ipc/launch";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, emit, resetRecorder, settle, startedStore } from "../test/launcher";
+import { accountDto, bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
 import { resources } from "./resource";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -61,6 +61,24 @@ describe("游戏退出后的缓存失效", () => {
     await settle();
     expect(fetcher).toHaveBeenCalledTimes(2);
     unsubscribe();
+    store.stop();
+  });
+});
+
+describe("启动途中下载的托管运行时", () => {
+  it("游戏起来后本机 Java 列表重新探测，界面不再说启动时下载", async () => {
+    bootOverrides(ipc, { accounts: [accountDto()], instances: [instanceDto("生存")] });
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    const store = await startedStore();
+    let runtimes: string[] = [];
+    const detect = () => Promise.resolve(runtimes);
+    expect(await resources.read("java", detect)).toEqual([]);
+
+    runtimes = ["runtime/8/bin/java.exe"];
+    await store.actions.launch("生存");
+    await settle();
+
+    expect(await resources.read("java", detect)).toEqual(["runtime/8/bin/java.exe"]);
     store.stop();
   });
 });
