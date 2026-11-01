@@ -79,7 +79,7 @@ describe("备份、导出与恢复入队", () => {
     expect(task).toMatchObject({ kind: "world_backup", title: "备份「旧世界」", detail: "「生存」", instanceId: "生存", status: "running" });
     expect(task.spec).toEqual({ command: "backup_world", args: { id: "生存", world: "w1" } });
     expect(callsOf(ipc, "backup_world")).toEqual([{ id: "生存", world: "w1", taskId: `${task.id}#1` }]);
-    expect(toasts()).toContainEqual(["info", "已开始备份「旧世界」", "进度可以在下载任务里查看"]);
+    expect(toasts()).toContainEqual(["info", "已开始备份「旧世界」", "进度见下载任务"]);
     // 备份期间实例只算改动中，不画成安装中
     const inst = store.getState().instances.find((i) => i.id === "生存");
     expect(inst).toMatchObject({ status: "ready", activity: "modifying" });
@@ -246,7 +246,7 @@ describe("游戏退出后的自动备份", () => {
     expect(store.getState().toasts).toEqual([]);
   });
 
-  it("有存档没备份成：error 通知，正文是第一个失败的原文；「复制错误原文」写进全部失败与详情", async () => {
+  it("有存档没备份成：error 通知，正文是第一个失败的原文；「复制错误信息」写进全部失败与详情", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const writeText = vi.fn(() => Promise.resolve());
     vi.stubGlobal("navigator", { clipboard: { writeText } });
@@ -262,7 +262,7 @@ describe("游戏退出后的自动备份", () => {
     );
     await settle();
     expect(toasts()).toEqual([["error", "「生存」的自动备份没有完成", "这个存档正被游戏打开，退出游戏后再试"]]);
-    expect(toast("「生存」的自动备份没有完成").action?.label).toBe("复制错误原文");
+    expect(toast("「生存」的自动备份没有完成").action?.label).toBe("复制错误信息");
     await runAction("「生存」的自动备份没有完成");
     expect(writeText).toHaveBeenCalledWith('w2：这个存档正被游戏打开，退出游戏后再试\n{"path":"D:/saves/w2"}\nw3：磁盘已满');
     expect(error).toHaveBeenCalledTimes(2);

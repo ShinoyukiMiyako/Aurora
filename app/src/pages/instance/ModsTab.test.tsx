@@ -3,6 +3,7 @@
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { formatDate } from "../../domain/format";
 import { IpcError } from "../../ipc/errors";
 import type { InstanceDto } from "../../ipc/instances";
 import type { InstalledMod, ModChangelog, ModSource, UpdateCandidate } from "../../ipc/mods";
@@ -261,6 +262,26 @@ describe("安装时间与新增标注", () => {
     expect(gridNames()).toEqual(["Sodium", "Handmade", "Fabric API", "Iris"]);
     click(installed);
     expect(gridNames()).toEqual(["Fabric API", "Iris", "Handmade", "Sodium"]);
+  });
+
+  // jsdom 不做布局，按字形宽度核算：等宽字体的数字 0.6em，中文落到雅黑上 1em；单元格左右各留 12
+  it("「安装时间」列放得下最宽的日期，日期不被截断", async () => {
+    await open();
+    const headers = [...grid().querySelectorAll<HTMLElement>('[role="columnheader"]')].filter((h) => h.dataset.hideRegular === undefined);
+    const at = headers.findIndex((h) => h.textContent === "安装时间");
+    expect(at).toBeGreaterThan(0);
+    const template = grid().style.getPropertyValue("--table-cols-regular").match(/minmax\([^)]*\)|\S+/g);
+    if (template === null) throw new Error("表格没有 regular 档的列模板");
+    expect(template).toHaveLength(headers.length);
+    const px = /^(\d+)px$/.exec(template[at]);
+    if (px === null) throw new Error(`「安装时间」列不是固定宽：${template[at]}`);
+
+    const MONO_PX = 12;
+    const CELL_PADDING = 12;
+    const widthOf = (text: string) => [...text].reduce((w, ch) => w + (/[0-9]/.test(ch) ? 0.6 : 1) * MONO_PX, 0);
+    const widest = formatDate(new Date(2026, 11, 28).getTime());
+    expect(widest).toBe("2026年12月28日");
+    expect(Number(px[1]) - 2 * CELL_PADDING).toBeGreaterThanOrEqual(widthOf(widest));
   });
 });
 

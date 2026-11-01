@@ -69,7 +69,7 @@ describe("手动添加的 Java", () => {
     const relative = await rejection("  jdk-21\\bin\\java.exe ");
     expect([relative.code, relative.message, relative.detail]).toEqual([
       JAVA_PATH_INVALID,
-      "Java 路径须是绝对路径: jdk-21\\bin\\java.exe",
+      "Java 路径须是绝对路径：jdk-21\\bin\\java.exe",
       { path: "jdk-21\\bin\\java.exe", reason: "not_absolute" },
     ]);
     const notJava = await rejection("D:\\Java\\jdk-21\\bin\\javac.exe");

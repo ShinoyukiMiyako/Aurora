@@ -105,7 +105,7 @@ const PROBLEM_TEXT: Readonly<Record<PathOnlyProblem, string>> = {
 };
 
 function invalidJavaPath(path: string, reason: PathOnlyProblem): IpcError {
-  return new IpcError(JAVA_PATH_INVALID, `${PROBLEM_TEXT[reason]}: ${path}`, { path, reason });
+  return new IpcError(JAVA_PATH_INVALID, `${PROBLEM_TEXT[reason]}：${path}`, { path, reason });
 }
 
 function fileNameOf(path: string): { dir: string; name: string } {
@@ -122,7 +122,7 @@ function inspectManual(input: string): JavaInstallationDto {
   if (lower !== "java.exe" && lower !== "javaw.exe") throw invalidJavaPath(path, "not_java_executable");
   const exe = lower === "javaw.exe" ? `${dir}java.exe` : path;
   if (BROKEN_SEGMENT.test(exe)) {
-    throw new IpcError(JAVA_RUNTIME_INCOMPLETE, `这个 Java 缺少 ${BROKEN_MISSING.join("、")}，可能没装完整: ${exe}`, { path: exe, missing: [...BROKEN_MISSING] });
+    throw new IpcError(JAVA_RUNTIME_INCOMPLETE, `这个 Java 缺少 ${BROKEN_MISSING.join("、")}，可能没装完整：${exe}`, { path: exe, missing: [...BROKEN_MISSING] });
   }
   const matched = MAJOR_IN_PATH.exec(exe);
   const major = matched === null ? FALLBACK_MAJOR : Number(matched[1]);

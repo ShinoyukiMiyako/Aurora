@@ -270,7 +270,8 @@ export const WORLD_BACKUP_COPY = {
   worldBusy: "这个存档正在备份或恢复",
 
   exportDialogTitle: (world: string) => `导出「${world}」`,
-  exportFilter: "存档压缩包",
+  /** Windows 的类型下拉原样显示过滤名，不会自己补扩展名，所以写进名字里。 */
+  exportFilter: "存档压缩包（*.zip）",
 
   modalTitle: (world: string) => `「${world}」的备份`,
   modalSubtitle: (count: number, bytes: number) => `${count} 份 · 共 ${formatBytes(bytes)}`,

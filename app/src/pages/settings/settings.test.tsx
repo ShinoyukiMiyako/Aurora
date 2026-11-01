@@ -416,8 +416,8 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
     await click(button("添加 Java"));
     expect(callsOf(ipc, "add_java_path")).toEqual([{ path: "D:\\Tools\\launcher.exe" }, { path: "D:\\broken\\jdk-21\\bin\\java.exe" }]);
     expect(toasts().filter((t) => t.tone === "error")).toEqual([
-      { tone: "error", title: "没能添加 Java", body: "只能添加 java.exe 或 javaw.exe: D:\\Tools\\launcher.exe" },
-      { tone: "error", title: "没能添加 Java", body: "这个 Java 缺少 release、lib/modules，可能没装完整: D:\\broken\\jdk-21\\bin\\java.exe" },
+      { tone: "error", title: "没能添加 Java", body: "只能添加 java.exe 或 javaw.exe：D:\\Tools\\launcher.exe" },
+      { tone: "error", title: "没能添加 Java", body: "这个 Java 缺少 release、lib/modules，可能没装完整：D:\\broken\\jdk-21\\bin\\java.exe" },
     ]);
     expect(callsOf(ipc, "detect_java")).toHaveLength(1);
     expect(document.querySelector(MANUAL_LIST)).toBeNull();
