@@ -65,7 +65,7 @@ export interface QuickPlaySupportDto {
 
 export interface InstanceDto {
   id: string;
-  /** ready：版本 JSON 可用；broken：缺失或损坏，原因见 broken_reason。 */
+  /** ready：版本 JSON 可用；broken：缺失或损坏，原因见 broken_reason。只说版本 JSON，安装写到一半时也是 ready：判断能不能用要同时看 incomplete 为空。 */
   status: "ready" | "broken";
   broken_reason: string | null;
   /** 原版版本号；识别不出或 broken 时为 null。 */

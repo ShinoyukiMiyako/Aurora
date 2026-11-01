@@ -556,7 +556,8 @@ pub struct VersionRequirementsDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InstanceDto {
     pub id: String,
-    /// ready：版本 JSON 可用；broken：缺失或损坏，见 broken_reason。
+    /// ready：版本 JSON 可用；broken：缺失或损坏，见 broken_reason。只说版本 JSON，安装写到一半时也是 ready：
+    /// 判断能不能用要同时看 incomplete 为空。
     pub status: &'static str,
     pub broken_reason: Option<String>,
     /// 原版版本号；识别不出或 broken 时为 null。
