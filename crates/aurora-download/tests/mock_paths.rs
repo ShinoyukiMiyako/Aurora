@@ -851,16 +851,18 @@ async fn corrupted_retry_does_not_double_count_progress_bytes() {
 
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = hits.clone();
+    let (release_retry, retry_held) = std::sync::mpsc::channel::<()>();
+    let retry_held = std::sync::Mutex::new(retry_held);
     Mock::given(method("GET"))
         .and(path("/file"))
         .respond_with(move |_req: &Request| {
             if counter.fetch_add(1, Ordering::SeqCst) == 0 {
                 ResponseTemplate::new(200).set_body_string(bad)
             } else {
-                // 重下那一遍故意慢一点，留出窗口观察两次尝试之间的进度。
-                ResponseTemplate::new(200)
-                    .set_body_string(good)
-                    .set_delay(Duration::from_millis(400))
+                // 重下那一遍扣到用例看完进度才答，两次尝试之间的窗口不靠响应延迟。
+                // 用例失败退出时放行端跟着丢弃，recv 出错，mock 的服务线程照样放开。
+                let _ = retry_held.lock().unwrap().recv();
+                ResponseTemplate::new(200).set_body_string(good)
             }
         })
         .mount(&server)
@@ -873,20 +875,20 @@ async fn corrupted_retry_does_not_double_count_progress_bytes() {
         .with_size(size);
     let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
     let pool = DownloadPool::new(downloader, 1).with_sample_interval(Duration::from_millis(10));
-    let (tx, rx) = watch::channel(DownloadProgress::default());
+    let (tx, mut rx) = watch::channel(DownloadProgress::default());
     let download = tokio::spawn(async move { pool.download_all(vec![task], Some(tx)).await });
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while hits.load(Ordering::SeqCst) < 2 {
         assert!(std::time::Instant::now() < deadline, "等不到重下请求");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(
-        rx.borrow().bytes,
-        0,
-        "坏的那一遍作废后，进度应立即退回，而不是带着它等重下"
-    );
+    // 重下的回音还扣着，进度里只可能有坏的那一遍；它退不回 0 就是带着它在等重下。
+    tokio::time::timeout(Duration::from_secs(15), rx.wait_for(|p| p.bytes == 0))
+        .await
+        .expect("坏的那一遍作废后，进度应立即退回，而不是带着它等重下")
+        .expect("下载还没结束，进度通道不会关");
+    release_retry.send(()).expect("mock 还在等放行");
 
     let report = download
         .await

@@ -1521,21 +1521,75 @@ mod tests {
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
         }
 
+        /// 把响应扣在 mock 里，请求一到先报到，等用例放行才答。
+        ///
+        /// 用它按事件排先后，不靠响应延迟凑窗口：机器满载时用例走到下一步可能比延迟还久，响应抢先回来，
+        /// 要造的局面就没了。扣着的时候这台 mock 的服务线程停在这里，`received_requests` 也拿不到锁，
+        /// 所以到没到看 [`ReplyGate::arrived`]。
+        struct HeldReply {
+            reply: ResponseTemplate,
+            arrived: tokio::sync::mpsc::UnboundedSender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl wiremock::Respond for HeldReply {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                // 两处出错都只说明用例已经失败退出、闸被丢掉了，这时放开服务线程，mock 才收得了尾。
+                let _ = self.arrived.send(());
+                let _ = self.release.lock().unwrap().recv();
+                self.reply.clone()
+            }
+        }
+
+        /// 用例手里的那一头。声明在 `MockServer` 之后：用例中途失败时它先丢，服务线程先放开。
+        struct ReplyGate {
+            arrived: tokio::sync::mpsc::UnboundedReceiver<()>,
+            release: std::sync::mpsc::Sender<()>,
+        }
+
+        impl ReplyGate {
+            /// 等到被扣的请求到达，超时即失败。
+            async fn arrived(&mut self) {
+                tokio::time::timeout(Duration::from_secs(15), self.arrived.recv())
+                    .await
+                    .expect("15 秒内没等到要扣下的请求")
+                    .expect("应答器不会先于用例消失");
+            }
+
+            /// 放一个响应回去。
+            fn release(&self) {
+                self.release.send(()).expect("应答器不会先于用例消失");
+            }
+        }
+
+        fn hold(reply: ResponseTemplate) -> (HeldReply, ReplyGate) {
+            let (arrived_tx, arrived_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            (
+                HeldReply {
+                    reply,
+                    arrived: arrived_tx,
+                    release: std::sync::Mutex::new(release_rx),
+                },
+                ReplyGate {
+                    arrived: arrived_rx,
+                    release: release_tx,
+                },
+            )
+        }
+
         /// 续期在网络上等回音的时候用户重新登录了同一个账户：旧 refresh token 随后被判失效，
         /// 但库里已换成新登录的凭据，新账户不能跟着被标成需要重新登录。
         /// 把 expire 里「凭据仍是被拒的那份」这一判断去掉，本用例即挂。
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn rejection_of_old_credentials_does_not_expire_a_fresh_relogin() {
             let server = MockServer::start().await;
+            let (reply, mut gate) = hold(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_grant", "error_description": "refresh token 已失效"
+            })));
             Mock::given(method("POST"))
                 .and(path("/token"))
-                .respond_with(
-                    ResponseTemplate::new(400)
-                        .set_body_json(json!({
-                            "error": "invalid_grant", "error_description": "refresh token 已失效"
-                        }))
-                        .set_delay(Duration::from_millis(400)),
-                )
+                .respond_with(reply)
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
@@ -1554,17 +1608,18 @@ mod tests {
             let stale = aurora.store_login(ms_account("dead-refresh", 1)).unwrap();
 
             // 等续期请求真正到了令牌端点（库里的旧凭据已经读出）才重新登录。按固定时延排先后的话，
-            // 机器满载时读库会晚于重新登录，续期直接拿到新凭据、根本不发请求。
+            // 机器满载时读库会晚于重新登录，续期直接拿到新凭据、根本不发请求。新登录落盘之后才放令牌端点
+            // 回话，拒绝一定落在新凭据之后。
             let relogin = async {
-                while server.received_requests().await.unwrap().is_empty() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
+                gate.arrived().await;
                 let aurora = aurora.clone();
                 let fresh = ms_account("new-refresh", u64::MAX);
-                tokio::task::spawn_blocking(move || aurora.store_login(fresh))
+                let stored = tokio::task::spawn_blocking(move || aurora.store_login(fresh))
                     .await
                     .unwrap()
-                    .unwrap()
+                    .unwrap();
+                gate.release();
+                stored
             };
             let (refreshed, _) = tokio::join!(aurora.ensure_account_fresh(&stale), relogin);
             let err = refreshed.unwrap_err();
@@ -2571,17 +2626,14 @@ mod tests {
                 })))
                 .mount(&server)
                 .await;
+            let (reply, mut gate) = hold(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "rotated", "clientToken": "cli",
+                "selectedProfile": { "id": ABANDONED_LAUNCH, "name": "Hero" }
+            })));
             Mock::given(method("POST"))
                 .and(path("/authserver/refresh"))
                 .and(body_partial_json(json!({ "accessToken": "stale" })))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_json(json!({
-                            "accessToken": "rotated", "clientToken": "cli",
-                            "selectedProfile": { "id": ABANDONED_LAUNCH, "name": "Hero" }
-                        }))
-                        .set_delay(Duration::from_millis(300)),
-                )
+                .respond_with(reply)
                 .expect(1)
                 .mount(&server)
                 .await;
@@ -2610,9 +2662,10 @@ mod tests {
                 let aurora = aurora.clone();
                 tokio::spawn(async move { aurora.ensure_account_fresh(&account).await })
             };
-            until_requested(&server, "/authserver/refresh").await;
+            gate.arrived().await;
             launch.abort();
             assert!(launch.await.unwrap_err().is_cancelled());
+            gate.release();
 
             let stored = until_stored(tmp.path(), ABANDONED_LAUNCH, |a| {
                 stored_authlib_token(a) != "stale"
@@ -2629,16 +2682,13 @@ mod tests {
         async fn cancelled_launch_still_persists_the_rotated_microsoft_refresh_token() {
             let server = MockServer::start().await;
             mount_full_login(&server, 200).await;
-            // 让 XBL 慢一拍：取消落在令牌端点轮换之后、整条链跑完之前。
+            // 扣住 XBL 的回音：取消落在令牌端点轮换之后、整条链跑完之前。
+            let (reply, mut gate) = hold(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xbl", "DisplayClaims": { "xui": [ { "uhs": "theuhs" } ] }
+            })));
             Mock::given(method("POST"))
                 .and(path("/xbl"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_json(json!({
-                            "Token": "xbl", "DisplayClaims": { "xui": [ { "uhs": "theuhs" } ] }
-                        }))
-                        .set_delay(Duration::from_millis(400)),
-                )
+                .respond_with(reply)
                 .with_priority(1)
                 .mount(&server)
                 .await;
@@ -2661,9 +2711,10 @@ mod tests {
                 let snapshot = aurora.clone().with_cancel(token.clone());
                 tokio::spawn(async move { snapshot.ensure_account_fresh(&stale).await })
             };
-            until_requested(&server, "/xbl").await;
+            gate.arrived().await;
             token.cancel();
-            let returned = tokio::time::timeout(Duration::from_millis(200), launch)
+            // XBL 的回音还扣着：调用方要是在等续期跑完，这里永远等不到。
+            let returned = tokio::time::timeout(Duration::from_secs(15), launch)
                 .await
                 .expect("取消后调用方应立刻返回，不等续期跑完")
                 .unwrap();
@@ -2671,6 +2722,7 @@ mod tests {
                 returned.as_ref().is_err_and(CoreError::is_cancelled),
                 "{returned:?}"
             );
+            gate.release();
 
             // 新 refresh token 一到手就写回了，这里要等到整条链跑完。
             let stored = until_stored(tmp.path(), MS_UUID, |a| {
@@ -2693,16 +2745,13 @@ mod tests {
                 })))
                 .mount(&server)
                 .await;
+            let (reply, mut gate) = hold(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "rotated", "clientToken": "cli",
+                "selectedProfile": { "id": CANCELLED_REFRESH, "name": "Hero" }
+            })));
             Mock::given(method("POST"))
                 .and(path("/authserver/refresh"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_json(json!({
-                            "accessToken": "rotated", "clientToken": "cli",
-                            "selectedProfile": { "id": CANCELLED_REFRESH, "name": "Hero" }
-                        }))
-                        .set_delay(Duration::from_millis(300)),
-                )
+                .respond_with(reply)
                 .expect(1)
                 .mount(&server)
                 .await;
@@ -2743,9 +2792,10 @@ mod tests {
                 let snapshot = aurora.clone().with_cancel(token.clone());
                 tokio::spawn(async move { snapshot.refresh_account(CANCELLED_REFRESH).await })
             };
-            until_requested(&server, "/authserver/refresh").await;
+            gate.arrived().await;
             token.cancel();
-            let returned = tokio::time::timeout(Duration::from_millis(200), refresh)
+            // 刷新的回音还扣着：调用方要是在等它，这里永远等不到。
+            let returned = tokio::time::timeout(Duration::from_secs(15), refresh)
                 .await
                 .expect("取消后调用方应立刻返回")
                 .unwrap();
@@ -2753,6 +2803,7 @@ mod tests {
                 returned.as_ref().is_err_and(CoreError::is_cancelled),
                 "{returned:?}"
             );
+            gate.release();
             let stored = until_stored(tmp.path(), CANCELLED_REFRESH, |a| {
                 stored_authlib_token(a) != "stale"
             })
@@ -2944,49 +2995,60 @@ mod tests {
 
         /// 留存名已被占用（同一秒里又坏了一次）：另取 `-2`，先前那份不被顶掉。Windows 上的 rename 会
         /// 直接覆盖已存在的目标，去掉占用检查本用例即挂。
+        ///
+        /// 留存名取自系统时钟，没有注入口，用例只能把接下来几秒的名字先占上。机器满载时读库可能排到这几秒
+        /// 之后，那一轮的头一个候选没被占用，什么也说明不了，换个目录重来。
         #[test]
         fn preserving_never_overwrites_an_earlier_copy() {
             use chrono::{Datelike, Local, Timelike};
-            let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
-            let credentials = tmp.path().join(CREDENTIALS_FILE);
-            // 从现在起往后几秒的留存名都先占上，不论用例跑到哪一秒，头一个候选都已被占用。
-            let start = Local::now();
-            let occupied: Vec<_> = (0..3)
-                .map(|offset| {
-                    let at = start + chrono::Duration::seconds(offset);
-                    let name = format!(
-                        "{CREDENTIALS_FILE}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
-                        at.year(),
-                        at.month(),
-                        at.day(),
-                        at.hour(),
-                        at.minute(),
-                        at.second()
-                    );
-                    let path = tmp.path().join(name);
-                    std::fs::write(&path, format!("earlier {offset}")).unwrap();
-                    path
-                })
-                .collect();
-            std::fs::write(&credentials, b"broken again").unwrap();
+            const OCCUPIED_SECONDS: i64 = 5;
+            for _ in 0..50 {
+                let tmp = tempfile::tempdir().unwrap();
+                let aurora = aurora_at(tmp.path());
+                let credentials = tmp.path().join(CREDENTIALS_FILE);
+                let start = Local::now();
+                let occupied: Vec<_> = (0..OCCUPIED_SECONDS)
+                    .map(|offset| {
+                        let at = start + chrono::Duration::seconds(offset);
+                        let name = format!(
+                            "{CREDENTIALS_FILE}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
+                            at.year(),
+                            at.month(),
+                            at.day(),
+                            at.hour(),
+                            at.minute(),
+                            at.second()
+                        );
+                        let path = tmp.path().join(name);
+                        std::fs::write(&path, format!("earlier {offset}")).unwrap();
+                        path
+                    })
+                    .collect();
+                std::fs::write(&credentials, b"broken again").unwrap();
 
-            aurora.accounts().unwrap();
-            let all = preserved_credentials(tmp.path());
-            assert_eq!(all.len(), occupied.len() + 1, "{all:?}");
-            for (offset, path) in occupied.iter().enumerate() {
-                assert_eq!(
-                    std::fs::read_to_string(path).unwrap(),
-                    format!("earlier {offset}")
+                aurora.accounts().unwrap();
+                // 全程不到 OCCUPIED_SECONDS - 1 秒，取名时的那一秒才一定落在占好的名字里。
+                if Local::now() - start >= chrono::Duration::seconds(OCCUPIED_SECONDS - 1) {
+                    continue;
+                }
+                let all = preserved_credentials(tmp.path());
+                assert_eq!(all.len(), occupied.len() + 1, "{all:?}");
+                for (offset, path) in occupied.iter().enumerate() {
+                    assert_eq!(
+                        std::fs::read_to_string(path).unwrap(),
+                        format!("earlier {offset}")
+                    );
+                }
+                let fresh = all.iter().find(|p| !occupied.contains(p)).unwrap();
+                assert!(
+                    fresh.to_str().unwrap().ends_with("-2"),
+                    "头一个候选被占用时应追加 -2：{}",
+                    fresh.display()
                 );
+                assert_eq!(std::fs::read(fresh).unwrap(), b"broken again");
+                return;
             }
-            let fresh = all.iter().find(|p| !occupied.contains(p)).unwrap();
-            assert!(
-                fresh.to_str().unwrap().ends_with("-2"),
-                "头一个候选被占用时应追加 -2：{}",
-                fresh.display()
-            );
-            assert_eq!(std::fs::read(fresh).unwrap(), b"broken again");
+            panic!("连续 50 轮读库都没赶在占好的几秒之内，判断不了留存名的占用");
         }
 
         /// 读文件本身失败（这里是同名目录占着凭据库的位置）不是坏文件：照实报错，什么都不挪。

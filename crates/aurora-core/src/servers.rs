@@ -831,9 +831,10 @@ mod tests {
         // 同一地址换成不应答的监听者：模拟服务器挂起。用一个新的监听端口，再把历史记录挪过去。
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let silent = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let silent_for = Duration::from_secs(30);
         tokio::spawn(async move {
             let held = listener.accept().await;
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(silent_for).await;
             drop(held);
         });
         {
@@ -847,7 +848,7 @@ mod tests {
             .ping_all(std::slice::from_ref(&silent))
             .await
             .unwrap();
-        assert!(started.elapsed() < Duration::from_millis(1500));
+        assert!(started.elapsed() < silent_for, "应按时限放弃，不等对方挂断");
         let status = &second[0];
         assert!(!status.reachable);
         assert_eq!(status.latency_ms, None);

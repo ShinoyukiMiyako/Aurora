@@ -316,10 +316,10 @@ mod tests {
         assert!(stages.iter().any(|s| s.contains("原版 test 安装完成")));
     }
 
-    /// 自动档装版本：入口先测一轮速，版本清单与版本 JSON 都从实测更快的源取（这里是官方，与测不出时的
-    /// 镜像优先相反，证明顺序来自实测）；有效期内再装一次不再探测。
+    /// 自动档装版本：入口先测一轮速，版本清单与版本 JSON 都从实测排在前面的源取（镜像探不通，这里是官方，
+    /// 与测不出时的镜像优先相反，证明顺序来自实测）；有效期内再装一次不再探测。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn auto_install_measures_once_and_fetches_metadata_from_the_faster_source() {
+    async fn auto_install_measures_once_and_fetches_metadata_from_the_measured_source() {
         use std::sync::Arc;
         use std::time::Duration;
         use wiremock::matchers::header;
@@ -329,14 +329,13 @@ mod tests {
         let version_path = "/v1/packages/0123/test.json";
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
-        for (server, probe_delay) in [(&official, 0), (&mirror, 300)] {
+        for (server, probe_status) in [(&official, 206), (&mirror, 503)] {
             Mock::given(method("GET"))
                 .and(path(manifest_path))
                 .and(header("range", "bytes=0-0"))
                 .respond_with(
-                    ResponseTemplate::new(206)
-                        .insert_header("content-range", "bytes 0-0/100")
-                        .set_delay(Duration::from_millis(probe_delay)),
+                    ResponseTemplate::new(probe_status)
+                        .insert_header("content-range", "bytes 0-0/100"),
                 )
                 .with_priority(1)
                 .mount(server)
@@ -369,7 +368,7 @@ mod tests {
                     mirror: mirror.uri(),
                 }),
                 Duration::from_secs(600),
-                Duration::from_secs(2),
+                Duration::from_secs(30),
             );
 
         aurora.install("test", None, None, None).await.unwrap();

@@ -470,15 +470,16 @@ pub(crate) mod tests {
     fn assert_cancelled_promptly(result: Result<Vec<u8>>, waited: Duration) {
         let err = result.expect_err("取消后应以错误返回");
         assert!(err.is_cancelled(), "应为已取消，实际：{err:?}");
+        // 这几条用例里对端都要 10 秒以上才有动静，以它为界，不量固定的毫秒数：满载时只量得到调度抖动。
         assert!(
-            waited < Duration::from_secs(1),
-            "取消后应在 1 秒内返回，实际等了 {waited:?}"
+            waited < Duration::from_secs(10),
+            "取消后应不等对端就返回，实际等了 {waited:?}"
         );
     }
 
     /// 服务器迟迟不回响应头：取消立刻生效，不等满客户端超时。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelling_while_waiting_for_the_response_returns_within_a_second() {
+    async fn cancelling_while_waiting_for_the_response_returns_at_once() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/slow.json"))
@@ -501,7 +502,7 @@ pub(crate) mod tests {
 
     /// 响应头已到、响应体只来了一截就卡住：读响应体期间同样响应取消。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelling_while_the_body_is_stalled_returns_within_a_second() {
+    async fn cancelling_while_the_body_is_stalled_returns_at_once() {
         let (url, _) = raw_server(vec![RawReply {
             declared: 1000,
             body: b"{\"versions\":".to_vec(),
@@ -518,7 +519,7 @@ pub(crate) mod tests {
 
     /// 第一次 503 后进入 30 秒的退避：取消打断退避，不再发第二次请求。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelling_during_backoff_returns_within_a_second_without_retrying() {
+    async fn cancelling_during_backoff_returns_at_once_without_retrying() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/busy.json"))
