@@ -14,6 +14,7 @@
 //! - [`identify`]：版本号多级回退识别。
 //! - [`availability`]：可用性检查。
 //! - [`assets`]：资源索引（objects）模型与布局判定。
+//! - [`relpath`]：远端给出的相对路径（库路径、坐标各段、资源逻辑名）能否安全拼进游戏目录。
 //!
 //! 错误统一归口到 [`Error`]，下游可 `#[from]` 冒泡。
 
@@ -25,6 +26,7 @@ pub mod loader;
 pub mod manifest;
 pub mod merge;
 pub mod model;
+pub mod relpath;
 pub mod rules;
 
 pub use error::{Error, Result};
@@ -40,4 +42,5 @@ pub use model::{
     JavaVersion, Library, LibraryDownloads, Logging, LoggingConfig, LoggingFile, MavenCoordinate,
     VersionJson, select_libraries,
 };
+pub use relpath::{UnsafePath, check_path_segment, check_relative_path};
 pub use rules::{OsName, OsRule, Rule, RuleAction, RuntimeContext, evaluate_rules};
