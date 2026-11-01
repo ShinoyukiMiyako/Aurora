@@ -46,7 +46,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { CRASH_PAGE_COPY, MODS_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
-import { cluesFromExitCodeOnly, crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
+import { crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -183,7 +183,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
           </span>
           <h2 className={styles.crashTitle}>
             {unique.length > 0 ? CRASH_PAGE_COPY.clueCount(report.diagnoses.length) : CRASH_COPY.noClueTitle}
-            <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique, cluesFromExitCodeOnly(report)) : `，${CRASH_COPY.noClueExplain}`}</span>
+            <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique) : `，${CRASH_COPY.noClueExplain}`}</span>
           </h2>
           {report.log_path !== null && (
             <span className={styles.crashPath}>

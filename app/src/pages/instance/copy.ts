@@ -2,13 +2,10 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { CRASH_SOURCE_LABEL, joinCrashLabels, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
+import { cluePointer, CRASH_SOURCE_LABEL, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
-
-/** 崩溃摘要句的开头：规则命中只是线索；线索全部只来自退出码时不说日志。 */
-const cluePointer = (exitCodeOnly: boolean) => (exitCodeOnly ? "退出码指向" : "日志指向");
 
 export const PAGE_COPY = {
   tabsLabel: "实例详情",
@@ -34,7 +31,7 @@ export const HERO_COPY = {
   installing: (pct: string) => `安装中 ${pct}`,
   installingQueued: "等待安装",
   /** 后端报告实例在备份、恢复或导出存档（游戏退出后的自动备份也算）。 */
-  backingUp: "正在备份存档",
+  backingUp: "正在备份存档…",
   lastCrash: "上次崩溃",
   pin: "固定到侧栏",
   unpin: "从侧栏取消固定",
@@ -150,16 +147,16 @@ export const OVERVIEW_COPY = {
   brokenTitle: "实例文件不完整，暂时无法启动",
   repair: "修复实例",
   repairStarted: (name: string) => `开始补全「${name}」`,
-  repairStartedBody: "进度可以在下载任务里查看",
+  repairStartedBody: "进度见下载任务",
   queuedTitle: "安装任务排队中",
   queuedBody: "等前面的任务完成后自动开始",
   installProgress: (pct: string, speed: string, total: string | null) => (total === null ? `${pct} · ${speed}` : `${pct} · ${speed} · 共 ${total}`),
   viewTasks: "查看下载任务",
   failedTitle: (title: string) => `上次启动失败：${title}`,
   crashTitle: (relative: string) => `上次启动崩溃了 · ${relative}`,
-  crashBody: (label: string, exitCodeOnly: boolean) => `${joinMixed(cluePointer(exitCodeOnly), label)}，诊断里有可以一键尝试的办法。`,
+  crashBody: (label: string) => `${cluePointer([label])}，诊断里有可以一键尝试的办法。`,
   crashBodyNoClue: "没有匹配到已知原因，可以对照完整日志排查。",
-  crashBodyPending: "正在读取崩溃报告。",
+  crashBodyPending: "正在读取崩溃报告…",
   viewCrash: "查看诊断",
 
   statPlaytime: "累计游玩",
@@ -231,7 +228,7 @@ export const OVERVIEW_COPY = {
   modsPartial: (total: number, shown: number) => `共 ${total} 个 · 这里展示 ${shown} 个代表`,
   modsCount: (total: number) => `共 ${total} 个`,
   manage: "管理",
-  vanillaPeek: "原版实例不加载 Mod。想装 Sodium、JEI 这类模组，可以新建一个 Fabric 或 NeoForge 实例。",
+  vanillaPeek: "原版实例不加载 Mod。想装 Sodium、JEI 这类 Mod，可以新建一个 Fabric 或 NeoForge 实例。",
   newInstance: "新建实例",
   noModsPeek: "还没有装任何 Mod。",
   findMods: "去发现找 Mod",
@@ -244,9 +241,9 @@ export const OVERVIEW_COPY = {
   packsTitle: "资源包与光影",
   findPacks: "去发现获取资源包与光影",
   noShader: "未启用光影",
-  shaderSub: "光影包 · 需要 Iris 或 OptiFine",
+  shaderSub: "光影 · 需要 Iris 或 OptiFine",
   shaderVanilla: "原版无法加载光影",
-  shaderHint: "可在发现页安装光影包",
+  shaderHint: "可在发现页安装光影",
   shaderActive: "已启用",
   noResourcePack: "未添加资源包",
   vanillaTextures: "使用原版材质",
@@ -352,7 +349,7 @@ export const MODS_COPY = {
 
   vanillaTitle: "原版实例不加载 Mod",
   vanillaBody: (name: string) => `「${name}」没有安装加载器。想装 Mod，可以新建一个带 Fabric、Quilt 或 NeoForge 的实例，原版存档可以复制过去继续玩。`,
-  vanillaAction: "新建模组实例",
+  vanillaAction: "新建实例",
   emptyTitle: "还没有安装 Mod",
   emptyBody: "到发现页挑几个，安装时选这个实例，前置会自动一起装上。",
   emptyAction: "去发现",
@@ -425,7 +422,7 @@ export const SETTINGS_COPY = {
   runningNote: "游戏正在运行，这里的改动会在下次启动时生效。",
 
   memoryTitle: "内存",
-  memorySubtitle: "分配给 Java 虚拟机的最大堆内存",
+  memorySubtitle: "分配给 Java 虚拟机的最大内存",
   memoryMode: "内存分配方式",
   follow: "跟随全局",
   custom: "为这个实例单独设置",
@@ -477,7 +474,7 @@ export const SETTINGS_COPY = {
   needsJava: (major: number) => `需 Java ${major}`,
   heapOverride: "这里的 -Xmx / -Xms 会覆盖上面的内存设置",
   saveHint: "Ctrl + Enter 保存",
-  restore: "还原",
+  restore: "放弃改动",
   saveArgs: "保存参数",
   jvmSaved: "JVM 参数已保存",
   jvmSavedBody: "下次启动生效",
@@ -531,9 +528,9 @@ export const SETTINGS_COPY = {
 /** 全局版本隔离策略的说法（实例设置「跟随全局」时引用）。 */
 export const ISOLATION_POLICY_LABEL = {
   disabled: "不隔离",
-  mod_loaders_only: "模组版本隔离",
+  mod_loaders_only: "Mod 版本隔离",
   non_release_only: "快照版本隔离",
-  mod_loaders_and_non_release: "模组与快照版本隔离",
+  mod_loaders_and_non_release: "Mod 与快照版本隔离",
   all: "全部版本隔离",
 } as const;
 
@@ -566,7 +563,7 @@ export const LOGS_COPY = {
   historyEmptyTitle: "还没有变更",
   historyEmptyBody: "装 Mod、更新、移除之后，每一步都会留下记录，更新可以一键回滚。",
   historyError: "读不到变更历史",
-  reverted: "已撤销",
+  reverted: "已回滚",
   rollbackTo: (version: string) => `回滚到 ${version}`,
   rollback: "回滚",
   showEarlier: (n: number) => `显示更早的 ${n} 条`,
@@ -593,7 +590,7 @@ export const CRASH_PAGE_COPY = {
   copyPath: "复制报告路径",
   fullLog: "完整日志",
   clueCount: (n: number) => `找到 ${n} 条线索`,
-  clueTail: (labels: readonly string[], exitCodeOnly: boolean) => `，${joinMixed(cluePointer(exitCodeOnly), joinCrashLabels(labels))}`,
+  clueTail: (labels: readonly string[]) => `，${cluePointer(labels)}`,
   stale: (relative: string) => `这是${relative}的崩溃，之后已经正常启动过。`,
   runningAgain: "游戏正在运行；如果再次崩溃，这里会换成新的诊断。",
   /** 会话日志是默认来源，不写来源名；其余来源写在行号前。 */
@@ -645,8 +642,8 @@ export const CRASH_PAGE_COPY = {
   driverSteps: "查看处理办法",
   driverNote: "没有自动修复，按下面三步排查",
   driverStep1: "到显卡厂商官网更新驱动",
-  driverStep2: "打开 Windows 图形设置（Windows 10：设置 → 系统 → 显示 → 图形设置；Windows 11：设置 → 系统 → 屏幕 → 显示卡），把 javaw.exe 设为「高性能」",
-  copyJavaw: "复制 javaw.exe 路径",
+  driverStep2: "打开 Windows 图形设置（Windows 10：设置 → 系统 → 显示 → 图形设置；Windows 11：设置 → 系统 → 屏幕 → 显示卡），把 java.exe 设为「高性能」",
+  copyJavaw: "复制 java.exe 路径",
   memoryItem: "内存",
   javaItem: "Java",
 

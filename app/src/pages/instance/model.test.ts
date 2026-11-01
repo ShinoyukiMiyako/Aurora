@@ -12,7 +12,6 @@ import {
   autoJavaPick,
   batchAvailability,
   batchRemovalRelations,
-  cluesFromExitCodeOnly,
   crashFixes,
   crashFixKey,
   creationRef,
@@ -776,15 +775,6 @@ describe("变更历史", () => {
   it("对不上检查结果的事件按不可回滚、没有原因处理", () => {
     const items = historyItems(events, checks, LOGS_COPY);
     expect(items[0]).toMatchObject({ canRollback: false, blockedReason: null });
-  });
-});
-
-describe("线索的来源", () => {
-  it("全部只来自退出码才算；混着日志线索的、没有线索的都不算", () => {
-    expect(cluesFromExitCodeOnly(report([clue("native_crash", { source: "exit_code" })]))).toBe(true);
-    expect(cluesFromExitCodeOnly(report([clue("native_crash", { source: "exit_code" }), clue("out_of_memory", { source: "crash_report" })]))).toBe(false);
-    expect(cluesFromExitCodeOnly(report([clue("out_of_memory")]))).toBe(false);
-    expect(cluesFromExitCodeOnly(report([]))).toBe(false);
   });
 });
 

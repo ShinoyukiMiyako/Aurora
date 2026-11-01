@@ -134,6 +134,7 @@ const BANNED = [
   "登陆",
   "模组",
   "MOD",
+  "Mod 加载器",
   "本启动器",
   "我们",
   "知道了",
@@ -192,6 +193,8 @@ function lint(file: string, source: string): string[] {
   for (const { line, text } of stringLiterals(source)) {
     if (!CJK.test(text)) continue;
     for (const word of BANNED) if (text.includes(word)) out.push(`${file}:${line}：禁用词「${word}」：${text}`);
+    // 术语表里「撤销」只指刚做的一键调整的复原，也就是诊断页那一个按钮
+    if (text.includes("撤销") && text !== "撤销") out.push(`${file}:${line}：「撤销」只用于一键调整的复原：${text}`);
     for (const issue of punctuationIssues(text)) out.push(`${file}:${line}：${issue}：${text}`);
   }
   return out;
@@ -203,22 +206,9 @@ const COPY_SOURCES = import.meta.glob<string>(["./*.ts", "../pages/*/copy.ts", "
   eager: true,
 });
 
-/**
- * 本轮之前就在的叫法，等产品拍板再改（界面规范的页面表格里也这样写，与禁用词表互相矛盾）。
- * 每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。
- */
+/** 还没改掉的旧叫法。每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。 */
 const LEGACY: readonly { file: string; text: string; why: string }[] = [
-  { file: "../pages/instance/copy.ts", text: "自建模组实例", why: "实例类型的旧称" },
-  { file: "../pages/instance/copy.ts", text: "原版实例不加载 Mod。想装 Sodium、JEI 这类模组，可以新建一个 Fabric 或 NeoForge 实例。", why: "实例类型的旧称" },
-  { file: "../pages/instance/copy.ts", text: "新建模组实例", why: "实例类型的旧称" },
-  { file: "../pages/instance/copy.ts", text: "模组版本隔离", why: "版本隔离策略的旧称" },
-  { file: "../pages/instance/copy.ts", text: "模组与快照版本隔离", why: "版本隔离策略的旧称" },
-  { file: "../pages/instance/copy.ts", text: "光影包 · 需要 Iris 或 OptiFine", why: "光影的旧称" },
-  { file: "../pages/instance/copy.ts", text: "可在发现页安装光影包", why: "光影的旧称" },
-  { file: "../pages/instance/copy.ts", text: "分配给 Java 虚拟机的最大堆内存", why: "最大内存的旧称" },
-  { file: "../pages/instance/copy.ts", text: "还原", why: "JVM 参数编辑框放弃未保存改动的按钮" },
-  { file: "../flows/create-instance/copy.ts", text: "Forge 的继任者，新版本大型模组的主力", why: "加载器介绍里的旧称" },
-  { file: "../flows/create-instance/copy.ts", text: "模组尝鲜", why: "实例名示例里的旧称" },
+  { file: "../pages/instance/copy.ts", text: "自建模组实例", why: "实例类型的旧称，头图用例还钉着这个字面量" },
 ];
 
 /** 本来就该这么写的例外；text 是源码里的原样（转义保留）。同样要求还能在原文件里找到。 */
@@ -263,6 +253,8 @@ describe("文案检查本身", () => {
       'const bad1 = "请稍候...";',
       'const bad2 = "安装Sodium完成！";',
       'const bad3 = "“生存”已就绪 ，下次启动生效";',
+      'const undo = "撤销";',
+      'const bad4 = "关掉后不会撤销这项设置";',
       'const date = "2026年10月30日";',
       "const sep = (a: string) => `更新 0.5.8 → 0.6.0 · 「${a}」 · 已就绪`;",
     ].join("\n");
@@ -274,6 +266,7 @@ describe("文案检查本身", () => {
       "x.ts:3：中西文之间加空格：m完：安装Sodium完成！",
       "x.ts:4：引号用直角引号：“生存”已就绪 ，下次启动生效",
       "x.ts:4：全角标点旁不加空格： ，：“生存”已就绪 ，下次启动生效",
+      "x.ts:6：「撤销」只用于一键调整的复原：关掉后不会撤销这项设置",
     ]);
   });
 });
@@ -332,6 +325,8 @@ describe("任务失败原因与后端码表对齐", () => {
       world_backup_not_found: "这份备份已经不在了",
       world_backup_corrupt: "备份文件已损坏，无法恢复",
       world_in_use: "这个存档正被游戏打开",
+      install_unsafe_path: "版本文件里有指向游戏目录之外的路径，已拒绝写入",
+      loader_library_missing: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器",
     });
   });
 

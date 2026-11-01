@@ -149,12 +149,12 @@ export const GPU_COPY = {
   toggle: "让游戏用独立显卡",
   descSwitchable: (name: string) => `启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」，游戏会用 ${name}`,
   descSingle: "这台电脑只找到一块显卡，开着也不会换显卡",
-  descLoading: "正在读取显卡信息",
+  descLoading: "正在读取显卡信息…",
   descGeneric: "启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」",
   dualNote: (powerSaving: string, highPerformance: string) =>
     `这台电脑有两块显卡：${powerSaving} 和 ${highPerformance}。笔记本常默认用省电的那块跑游戏，帧数会低不少。`,
   revertNote:
-    "关掉后不会撤销已经写进 Windows 的设置；要改回，到 Windows 设置 → 系统 → 屏幕 → 显示卡（Windows 10：系统 → 显示 → 图形设置）里把 java.exe 改回「让 Windows 决定」。",
+    "关掉后，已经写进 Windows 的设置不会自动改回；要改回，到 Windows 设置 → 系统 → 屏幕 → 显示卡（Windows 10：系统 → 显示 → 图形设置）里把 java.exe 改回「让 Windows 决定」。",
   readFailed: "读不到显卡信息",
 } as const;
 
@@ -188,9 +188,9 @@ export const ISOLATION_COPY = {
 
 export const ISOLATION_OPTIONS = [
   { value: "disabled", label: "关闭隔离", desc: "所有实例共用同一个目录，Mod 与配置可能互相串味（已有 mods 或 saves 的实例仍会单独存放）" },
-  { value: "mod_loaders_only", label: "仅 Mod 加载器版本", desc: "装了加载器的实例各自独立，原版共用一份" },
+  { value: "mod_loaders_only", label: "仅加载器版本", desc: "装了加载器的实例各自独立，原版共用一份" },
   { value: "non_release_only", label: "仅非正式版本", desc: "快照与远古版本各自独立，正式版共用一份" },
-  { value: "mod_loaders_and_non_release", label: "Mod 加载器与非正式版本", desc: "装了加载器的实例和快照各自独立存放存档、配置与资源包，纯原版正式版共用一份" },
+  { value: "mod_loaders_and_non_release", label: "加载器与非正式版本", desc: "装了加载器的实例和快照各自独立存放存档、配置与资源包，纯原版正式版共用一份" },
   { value: "all", label: "全部隔离", desc: "每个实例都有自己的 .minecraft，互不影响，占用空间最多" },
 ] as const;
 

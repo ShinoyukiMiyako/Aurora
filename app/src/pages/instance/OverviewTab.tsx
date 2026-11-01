@@ -50,7 +50,6 @@ import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
 import {
   chosenRuntime,
-  cluesFromExitCodeOnly,
   enterWorldBlock,
   isPendingModUpdate,
   modRows,
@@ -143,7 +142,7 @@ function CrashBanner({ report, onTab }: { report: CrashReportDto; onTab(tab: Ins
       title={OVERVIEW_COPY.crashTitle(formatRelative(report.at, now))}
       actions={<Button onClick={() => onTab("crash")}>{OVERVIEW_COPY.viewCrash}</Button>}
     >
-      {first === undefined ? OVERVIEW_COPY.crashBodyNoClue : OVERVIEW_COPY.crashBody(crashCategoryLabel(first.category), cluesFromExitCodeOnly(report))}
+      {first === undefined ? OVERVIEW_COPY.crashBodyNoClue : OVERVIEW_COPY.crashBody(crashCategoryLabel(first.category))}
     </Banner>
   );
 }

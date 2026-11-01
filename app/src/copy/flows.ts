@@ -190,7 +190,7 @@ export const SESSION_COPY = {
   running: (elapsedMs: number) => `已运行 ${formatElapsed(elapsedMs)}`,
   cancelledDetail: "已下载的文件会保留",
   played: (minutes: number) => (minutes < 1 ? "本次游玩不到 1 分钟" : `本次游玩 ${Math.floor(minutes)} 分钟`),
-  crashClue: (label: string) => joinMixed("日志指向", label),
+  crashClue: (label: string) => cluePointer([label]),
   noClue: "没有匹配到已知原因",
   /** 阶段清单里跳过下载时该行右侧的说明。 */
   noDownload: "无需下载",
@@ -326,9 +326,10 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     }
     case "account_relogin":
       return { title: "需要重新登录", body: `${ctx.accountName} 的登录已失效。`, fix: { kind: "relogin", label: "重新登录" }, secondary: null };
+    // 微软与外置登录账户续期时连不上都走这里，文案不写账户类型
     case "account_refresh_network":
       return {
-        title: "无法验证微软账户",
+        title: "无法验证账户",
         body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
         fix: RETRY,
         secondary: OFFLINE_ONCE,
@@ -554,13 +555,20 @@ export function joinCrashLabels(labels: readonly string[]): string {
   return joinMixed(`${labels[0]}、${labels[1]}`, "等", `${labels.length} 类问题`);
 }
 
+/**
+ * 崩溃通用句式的主干：「日志指向 A 与 B」。native_crash 是退出码兜底，不来自任何一行日志，
+ * 线索只有它时写「退出码指向」，否则紧接着的解释「日志里没有匹配到已知原因」就和这句对不上。
+ */
+export function cluePointer(labels: readonly string[]): string {
+  const onlyExitCode = labels.every((label) => label === CRASH_CATEGORY.native_crash.label);
+  return joinMixed(onlyExitCode ? "退出码指向" : "日志指向", joinCrashLabels(labels));
+}
+
 export const CRASH_COPY = {
   noClueTitle: "没有匹配到已知原因",
   noClueExplain: "可以对照完整日志排查，崩溃前的警告往往能找到更早的源头。",
   headline: (categories: readonly string[]) =>
-    categories.length === 0
-      ? "没有匹配到已知原因"
-      : joinMixed(`找到 ${categories.length} 条线索，日志指向`, joinCrashLabels(categories.map(crashCategoryLabel))),
+    categories.length === 0 ? "没有匹配到已知原因" : `找到 ${categories.length} 条线索，${cluePointer(categories.map(crashCategoryLabel))}`,
   exitLine: (relative: string, exitCode: number | null, note: ExitCodeNoteDto | null) => {
     if (exitCode === null) return `${relative}崩溃 · 退出码未知`;
     if (note === null) return `${relative}崩溃 · 退出码 ${exitCode}`;
@@ -862,7 +870,7 @@ export const TOAST_COPY = {
   accountDeleted: (name: string) => `已删除账户 ${name}`,
   accountSwitched: (name: string) => `已切换到 ${name}`,
   instanceSelected: (name: string) => ({ title: `「${name}」已设为当前实例`, body: "主页的「继续游玩」会显示它" }),
-  settingChanged: (name: string, item: string, value: string) => ({ title: `「${name}」的${item}已改为 ${value}`, body: "下次启动生效" }),
+  settingChanged: (name: string, item: string, value: string) => ({ title: joinMixed(`「${name}」的`, item, `已改为 ${value}`), body: "下次启动生效" }),
   networkRestored: (failed: number) => (failed === 0 ? { title: "网络已恢复" } : { title: "网络已恢复", body: `有 ${failed} 个下载失败` }),
   retryAllAction: "全部重试",
   copyFailed: "复制失败",
@@ -943,7 +951,7 @@ export const ACTION_ERROR = {
   readInstanceSettings: "实例设置读不出来",
   subscribe: "后端事件订阅失败",
   /** 任务本身已完成，完成后的落地（写封面、固定、刷新列表）出错。 */
-  landTask: (title: string) => `${title}已完成，后续设置没有写入`,
+  landTask: (title: string) => joinMixed(title, "已完成，后续设置没有写入"),
 } as const;
 
 /** 启动时首查各切片失败的通知标题。 */
@@ -957,6 +965,11 @@ export const BOOT_SLICE_ERROR = {
 } as const;
 
 // ---------------------------------------------------------------- 确认对话框
+
+/** 放进「」里的文字：任务标题自己带直角引号（补全「生存」的游戏文件）时，内层换成『』。 */
+function quoted(text: string): string {
+  return `「${text.replaceAll("「", "『").replaceAll("」", "』")}」`;
+}
 
 export const CONFIRM_COPY = {
   cancel: "取消",
@@ -977,12 +990,12 @@ export const CONFIRM_COPY = {
     confirmLabel: "结束并启动",
   }),
   cancelCreate: (taskTitle: string, instance: string) => ({
-    title: `取消「${taskTitle}」？`,
+    title: `取消${quoted(taskTitle)}？`,
     body: `「${instance}」还没装好，取消后这个实例会被删除。`,
     confirmLabel: "取消任务",
   }),
   cancelRepair: (taskTitle: string, instance: string) => ({
-    title: `取消「${taskTitle}」？`,
+    title: `取消${quoted(taskTitle)}？`,
     body: `「${instance}」会停在文件不完整的状态，之后可以再点「修复实例」。`,
     confirmLabel: "取消任务",
   }),

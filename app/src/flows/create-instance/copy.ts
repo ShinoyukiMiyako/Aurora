@@ -26,7 +26,7 @@ export const LOADER_DESCRIPTION: Readonly<Record<LoaderKind, string>> = {
   fabric: "轻量、跟版本快，性能优化类 Mod 最多",
   quilt: "Fabric 的分支，能装大部分 Fabric Mod",
   forge: "历史最久，老版本与大型整合包的首选",
-  neoforge: "Forge 的继任者，新版本大型模组的主力",
+  neoforge: "Forge 的继任者，新版本大型 Mod 的主力",
 };
 
 const listNames = (loaders: readonly LoaderKind[]) => loaders.map((k) => LOADER_NAME[k]).join("、");
@@ -47,7 +47,7 @@ export const CREATE_COPY = {
   back: "上一步",
   next: "下一步",
   create: "创建并开始安装",
-  creating: "正在创建",
+  creating: "正在创建…",
 
   name: {
     title: "给实例起个名字",
@@ -56,7 +56,7 @@ export const CREATE_COPY = {
     placeholder: "例如：周末生存",
     hint: "之后可以在实例详情里随时改名",
     ideasLabel: "没想好？试试",
-    ideas: ["周末生存", "建筑创造", "和朋友联机", "模组尝鲜", "空岛挑战"],
+    ideas: ["周末生存", "建筑创造", "和朋友联机", "Mod 尝鲜", "空岛挑战"],
     roadmap: "接下来依次选择游戏版本、加载器和封面，左侧随时能跳回已经走过的步骤。",
   },
 
@@ -145,7 +145,7 @@ export const CREATE_COPY = {
       templateFrom: (source: string | null, savedAt: number | null, now: number) =>
         source === null ? "取自数据目录里的默认设置" : savedAt === null ? `取自「${source}」` : `取自「${source}」，${formatRelative(savedAt, now)}保存`,
       templateBlocked: {
-        loading: "正在读取默认设置",
+        loading: "正在读取默认设置…",
         disabled: "新建实例时沿用默认设置已在配置里关闭。",
         empty: "还没有默认设置。可以在任一实例的设置里把它保存为默认。",
         shared: "这个实例与其他未隔离的实例共用 .minecraft 里的设置，用不上默认设置。",
@@ -173,7 +173,7 @@ export const CREATE_COPY = {
         ];
       },
       noneAvailable: (mcVersion: string) => `这几个 Mod 都还没有适配 ${mcVersion}`,
-      loading: "正在查询能装的版本",
+      loading: "正在查询能装的版本…",
       loadError: (message: string) => `查不到能装的版本：${message}`,
       footnote: "勾选的 Mod 会在实例装好后接着下载，在下载任务里占一行；没装上也不影响实例本身。",
     },
