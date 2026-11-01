@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TASK_TEXT } from "../copy/flows";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { TaskRecordDto } from "../ipc/tasks";
@@ -510,6 +511,95 @@ describe("改名迁移任务", () => {
     const [task] = store.getState().tasks;
     expect(task.instanceId).toBe("生存二");
     expect(task.spec.args).toEqual({ ...args, [key]: "生存二" });
+  });
+
+  it.each([
+    ["新建", (name: string) => TASK_TEXT.createDetail(name)],
+    ["装 Mod 带前置", (name: string) => TASK_TEXT.installDetail(name, 2)],
+    ["装资源", (name: string) => TASK_TEXT.installDetail(name, 0)],
+    ["更新一个 Mod", (name: string) => TASK_TEXT.updateDetail("1.0", "2.0", name)],
+    ["批量更新", (name: string) => TASK_TEXT.updateAllDetail(name)],
+    ["开局 Mod", (name: string) => TASK_TEXT.starterDetail(name)],
+    ["存档任务", (name: string) => TASK_TEXT.backupDetail(name)],
+    ["导出整合包", (name: string) => TASK_TEXT.exportDetail("1.0.0", name)],
+  ])("%s的详情：任务行与写回的任务日志都换成新名字，别的字样原样", async (_name, detail) => {
+    store.stop();
+    resetRecorder(ipc);
+    const record: TaskRecordDto = {
+      id: "task-old",
+      kind: "mod",
+      title: "上次的任务",
+      detail: detail("生存"),
+      instance_id: "生存",
+      status: "failed",
+      progress: 0,
+      bytes: 0,
+      total_bytes: null,
+      speed_bps: 0,
+      attempt: 1,
+      error: { code: "interrupted", message: "关闭时中断" },
+      created_at: 1_719_000_000_000,
+      finished_at: 1_719_000_000_500,
+      spec: { command: "update_mods", args: { versionId: "生存", items: [] } },
+    };
+    bootOverrides(ipc, { journal: [record] });
+    ipc.overrides.set("list_instances", () => instances);
+    renameOnDisk("生存", "生存二");
+    store = await startedStore();
+    await store.actions.renameInstance("生存", "生存二");
+
+    expect(store.getState().tasks[0].detail).toBe(detail("生存二"));
+    await store.actions.flushTaskJournal();
+    const saved = callsOf(ipc, "save_task_journal").at(-1)?.tasks as TaskRecordDto[];
+    expect(saved[0].detail).toBe(detail("生存二"));
+  });
+
+  it("真实入队的任务：详情写新名字，版本号与前置数不动；别的实例的任务不动", async () => {
+    ipc.overrides.set("install_resource", () => {
+      throw new IpcError("download_failed", "下载源暂时不可用");
+    });
+    const failShader = (instanceId: string) =>
+      store.actions.installResource({ resourceType: "shader", platform: "modrinth", projectId: "bsl", name: "BSL", targets: [{ instanceId, fileVersionId: "b1", world: null }] });
+    await failShader("生存");
+    await failShader("创造");
+    await settle();
+
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+
+    expect(store.getState().tasks.map((t) => [t.instanceId, t.title, t.detail])).toEqual([
+      ["生存二", "安装 BSL", "到「生存二」"],
+      ["创造", "安装 BSL", "到「创造」"],
+    ]);
+  });
+
+  it("新名字里的 $ 照字面写进详情，不当替换占位符", async () => {
+    await store.actions.backupWorld("生存", "w1", "旧世界");
+    await settle();
+    renameOnDisk("生存", "生存$&二");
+    await store.actions.renameInstance("生存", "生存$&二");
+    expect(store.getState().tasks[0].detail).toBe("「生存$&二」");
+  });
+
+  it("存档与实例同名：备份任务的标题说的是存档，不跟着改；详情说的是实例，改", async () => {
+    await store.actions.backupWorld("生存", "生存", "生存");
+    await settle();
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    expect(store.getState().tasks[0]).toMatchObject({ title: "备份「生存」", detail: "「生存二」" });
+  });
+
+  it("补全任务的标题写的是实例：跟着换成新名字，详情里的版本不动", async () => {
+    ipc.overrides.set("repair_instance", () => {
+      throw new IpcError("download_failed", "下载源暂时不可用");
+    });
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(store.getState().tasks[0]).toMatchObject({ status: "failed", title: "补全「生存」的游戏文件", detail: "1.21.1" });
+
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    expect(store.getState().tasks[0]).toMatchObject({ title: "补全「生存二」的游戏文件", detail: "1.21.1" });
   });
 
   it("失败的新建留下的半成品改了名：重试按新名字补全，不在旧名字下再装一份", async () => {

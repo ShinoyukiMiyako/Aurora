@@ -707,9 +707,12 @@ function versionWithLoader(mcVersion: string, loader: LoaderKind, loaderVersion:
   return `${mcVersion}${sep}${LOADER_NAME[loader]} ${loaderVersion}`;
 }
 
+/** 任务详情里写实例名的写法。改名时 renamedDetail 靠它认出句子里的实例名，两边必须是同一种写法。 */
+const instanceMention = (name: string): string => `「${name}」`;
+
 export const TASK_TEXT = {
   createTitle: (mcVersion: string, loader: LoaderKind, loaderVersion: string | null) => `安装 ${versionWithLoader(mcVersion, loader, loaderVersion, " + ")}`,
-  createDetail: (name: string) => `新实例「${name}」`,
+  createDetail: (name: string) => `新实例${instanceMention(name)}`,
   modpackTitle: (name: string) => `导入整合包 ${name}`,
   modpackDetail: (version: string, modCount: number | null) => (modCount === null ? version : `${version} · ${modCount} 个 Mod`),
   repairTitle: (name: string) => `补全「${name}」的游戏文件`,
@@ -718,14 +721,14 @@ export const TASK_TEXT = {
   repairDetailUnknown: "游戏版本读不出来",
   installTitle: (name: string) => `安装 ${name}`,
   installDetail: (instance: string, dependencies: number) =>
-    dependencies > 0 ? `到「${instance}」，含 ${dependencies} 个前置` : `到「${instance}」`,
+    dependencies > 0 ? `到${instanceMention(instance)}，含 ${dependencies} 个前置` : `到${instanceMention(instance)}`,
   updateTitle: (modName: string) => `更新 ${modName}`,
-  updateDetail: (from: string, to: string, instance: string) => `${from} → ${to} · 「${instance}」`,
+  updateDetail: (from: string, to: string, instance: string) => `${from} → ${to} · ${instanceMention(instance)}`,
   updateAllTitle: (count: number) => `更新 ${count} 个 Mod`,
-  updateAllDetail: (instance: string) => `「${instance}」`,
+  updateAllDetail: instanceMention,
   /** 新实例就绪后接着装的开局 Mod（一个组合任务）。 */
   starterTitle: (count: number) => `装上 ${count} 个开局 Mod`,
-  starterDetail: (instance: string) => `「${instance}」`,
+  starterDetail: instanceMention,
   javaTitle: (major: number) => `下载 Java ${major}`,
   javaDetailPending: "Mojang 运行时 · 手动",
   javaDetail: (version: string) => `Mojang ${version} · 手动`,
@@ -733,9 +736,14 @@ export const TASK_TEXT = {
   exportWorldTitle: (world: string) => `导出「${world}」`,
   restoreTitle: (world: string) => `恢复「${world}」`,
   /** 备份、导出与恢复任务的详情：存档属于哪个实例。 */
-  backupDetail: (instance: string) => `「${instance}」`,
+  backupDetail: instanceMention,
   exportTitle: (name: string) => `导出整合包 ${name}`,
-  exportDetail: (version: string, instance: string) => `${version} · 「${instance}」`,
+  exportDetail: (version: string, instance: string) => `${version} · ${instanceMention(instance)}`,
+  /**
+   * 实例改名后的详情：只换句子里的实例名。详情是写进任务日志的整句文案，版本号与前置数没有全都留在命令参数里，
+   * 重启恢复的任务也没有入队上下文，所以不能按新名字重新生成。
+   */
+  renamedDetail: (detail: string, from: string, to: string) => detail.split(instanceMention(from)).join(instanceMention(to)),
   queuePosition: (n: number) => `排队中 · 第 ${n} 位`,
   attempt: (k: number) => `第 ${k} 次尝试`,
 } as const;

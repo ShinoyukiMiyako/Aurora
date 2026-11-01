@@ -860,14 +860,16 @@ function renamedTo(err: IpcError): string {
 }
 
 /**
- * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
+ * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字，行上写的实例名也一样。
  * 后端拒绝的是正占着实例的任务，这里换的是还没开始的（排队中）与已结束的（失败的可以重试）。
+ * 标题只有补全任务写的是实例：别的写 Mod 或存档名，存档与实例同名时也不能跟着改。
  */
 function renamedTask(task: Task, from: string, to: string): Task {
   if (task.instanceId !== from) return task;
   const key = INSTANCE_ARG[task.spec.command];
   const args = key !== undefined && task.spec.args[key] === from ? { ...task.spec.args, [key]: to } : task.spec.args;
-  return { ...task, instanceId: to, spec: { ...task.spec, args } };
+  const title = task.spec.command === "repair_instance" ? TASK_TEXT.repairTitle(to) : task.title;
+  return { ...task, instanceId: to, title, detail: TASK_TEXT.renamedDetail(task.detail, from, to), spec: { ...task.spec, args } };
 }
 
 /** 入队上下文里指向实例的字段：落地时的失效、通知文案与装好后的启动、固定都按它走。 */
