@@ -240,7 +240,8 @@ function StatsCard({
           unit={hours > 0 ? OVERVIEW_COPY.hoursUnit(minutes) : OVERVIEW_COPY.minutesUnit}
           delta={{
             direction: "flat",
-            text: inst.playtimeMin === 0 || inst.createdAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.perWeek(weeklyHours(inst.playtimeMin, inst.createdAt, now)),
+            // 看「玩没玩过」而不是累计分钟：累计按分钟取整，不足一分钟的一局也是玩过，旁边一格写着上次游玩
+            text: inst.lastPlayedAt === null || inst.createdAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.perWeek(weeklyHours(inst.playtimeMin, inst.createdAt, now)),
           }}
         />
         <StatTile
