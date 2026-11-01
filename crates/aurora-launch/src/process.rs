@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
-use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog};
+use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog, SessionOutcome};
 
 /// 崩溃判定缓存的最近游戏输出行数。
 pub const RECENT_LINE_CAPACITY: usize = 500;
@@ -125,7 +125,7 @@ impl GameSession {
         let mut terminated_by_launcher = false;
         let status = loop {
             tokio::select! {
-                status = self.child.wait() => break status.map_err(LaunchError::Wait)?,
+                status = self.child.wait() => break status,
                 Some(ack) = self.kill_rx.recv() => {
                     // 先置位再结束：即便结束动作本身失败，这次意图也已记录，退出不会被误判成崩溃。
                     terminated_by_launcher = true;
@@ -135,39 +135,138 @@ impl GameSession {
                 }
             }
         };
-        let drained =
-            drain_readers(std::mem::take(&mut self.readers), OUTPUT_DRAIN_DEADLINE).await?;
-        let mut outcome = self.pump.await.map_err(LaunchError::Join)?;
-        if !drained {
-            let text = format!(
-                "游戏已退出，但输出管道在 {} 秒内没有关闭（多半是游戏拉起的进程还开着它），之后的输出不再记录",
-                OUTPUT_DRAIN_DEADLINE.as_secs()
-            );
-            tracing::warn!("{text}");
-            if let Some(writer) = outcome.log.as_mut()
-                && let Err(err) = writer
-                    .write(
-                        self.clock.now(),
-                        LogSource::Launcher,
-                        Some(LauncherLevel::Warn),
-                        &text,
-                    )
-                    .await
-            {
-                tracing::warn!(error = %err, "会话日志写入失败，本次会话停止写日志");
-                outcome.log = None;
-            }
-        }
-        Ok(SessionEnd {
-            report: ExitReport {
-                code: status.code(),
-                success: status.success(),
-                recent_lines: outcome.recent.into_iter().collect(),
-                terminated_by_launcher,
-            },
-            log: outcome.log,
-        })
+        let exited = Exited {
+            status,
+            terminated_by_launcher,
+        };
+        conclude(
+            exited,
+            self.clock,
+            std::mem::take(&mut self.readers),
+            self.pump,
+            OUTPUT_DRAIN_DEADLINE,
+        )
+        .await
     }
+}
+
+/// 等进程退出的结果。等待本身可能失败，那时退出码无从得知。
+struct Exited {
+    status: std::io::Result<ExitStatus>,
+    terminated_by_launcher: bool,
+}
+
+/// 进程等完之后收尾：读完（或限时结束）两条输出流、收回汇流任务、产出退出报告。等待的结果由调用方
+/// 传入，与真实子进程无关，收尾的每条路径都能确定地测到。
+///
+/// 等待本身失败、或后台任务异常结束时同样走完收尾，会话日志写下原因与结局并落盘之后才报错：提前返回
+/// 的话读取与汇流任务被扔在后台，日志缓冲里最后那几行与结局行都不会落盘。一切正常时日志保持打开交还
+/// 调用方，由它追加退出行再关闭。
+async fn conclude(
+    exited: Exited,
+    clock: SessionClock,
+    readers: Vec<JoinHandle<()>>,
+    pump: JoinHandle<PumpOutcome>,
+    drain_deadline: Duration,
+) -> Result<SessionEnd> {
+    let drain = drain_readers(readers, drain_deadline).await;
+    // 读取任务此时都已结束、发送端全部放掉，汇流任务一定会收尾。
+    let (recent, mut log, pump_failure) = match pump.await {
+        Ok(outcome) => (outcome.recent, outcome.log, None),
+        // 会话日志在汇流任务手里，随它一起没了，无从收尾。
+        Err(err) => (VecDeque::new(), None, Some(LaunchError::Join(err))),
+    };
+    if matches!(drain, Ok(false)) {
+        // 等待失败时不知道游戏退没退，不说「已退出」。
+        let lead = if exited.status.is_ok() {
+            "游戏已退出，但"
+        } else {
+            ""
+        };
+        let text = format!(
+            "{lead}输出管道在 {} 秒内没有关闭（多半是游戏拉起的进程还开着它），之后的输出不再记录",
+            drain_deadline.as_secs()
+        );
+        tracing::warn!("{text}");
+        if let Some(writer) = log.as_mut()
+            && let Err(err) = writer
+                .write(
+                    clock.now(),
+                    LogSource::Launcher,
+                    Some(LauncherLevel::Warn),
+                    &text,
+                )
+                .await
+        {
+            tracing::warn!(error = %err, "会话日志写入失败，本次会话停止写日志");
+            log = None;
+        }
+    }
+    let Exited {
+        status,
+        terminated_by_launcher,
+    } = exited;
+    let report = ExitReport {
+        code: status.as_ref().ok().and_then(ExitStatus::code),
+        success: status.as_ref().is_ok_and(ExitStatus::success),
+        recent_lines: recent.into_iter().collect(),
+        terminated_by_launcher,
+    };
+    // 等待本身的失败排第一：退出码因它而缺失，是这次收尾不正常的根由；后台任务的异常排在其后。
+    let mut failures = status
+        .err()
+        .map(LaunchError::Wait)
+        .into_iter()
+        .chain(drain.err())
+        .chain(pump_failure);
+    let Some(failure) = failures.next() else {
+        return Ok(SessionEnd { report, log });
+    };
+    for other in failures {
+        tracing::error!(error = %error_chain(&other), "游戏会话收尾时另有失败");
+    }
+    if let Some(log) = log {
+        settle_log_after_failure(log, clock.now(), &failure, &report).await;
+    }
+    Err(failure)
+}
+
+/// 收尾不正常时调用方拿不到会话日志，没人会再替它写结局：在这里写下原因与结局并落盘。结局与正常
+/// 收尾时的判法一致：玩家结束的算结束，拿不到退出码按崩溃判定的规则算异常结束。
+async fn settle_log_after_failure(
+    mut log: SessionLog,
+    at: u64,
+    failure: &LaunchError,
+    report: &ExitReport,
+) {
+    let code = report
+        .code
+        .map_or_else(|| "未知".to_owned(), |code| code.to_string());
+    let text = format!("{}（退出码 {code}）", error_chain(failure));
+    let outcome = if report.terminated_by_launcher {
+        SessionOutcome::Killed
+    } else if detect_crash(report) {
+        SessionOutcome::Crashed
+    } else {
+        SessionOutcome::Exited
+    };
+    let settled = async move {
+        log.write(at, LogSource::Launcher, Some(LauncherLevel::Error), &text)
+            .await?;
+        log.finish(at, outcome).await
+    }
+    .await;
+    if let Err(err) = settled {
+        tracing::warn!(error = %err, "会话日志收尾失败，这份日志缺少结局");
+    }
+}
+
+/// 错误连同原因链拼成一行，写进会话日志给人看。
+fn error_chain(err: &LaunchError) -> String {
+    std::iter::successors(Some(err as &dyn std::error::Error), |e| e.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("：")
 }
 
 /// 等读取任务读完各自的流，最多等 `deadline`；超时或有一个异常结束时，其余没读完的都结束掉，不留在
@@ -833,7 +932,7 @@ mod tests {
         let path = outcome
             .log
             .unwrap()
-            .finish(clock.now(), crate::logfile::SessionOutcome::Exited)
+            .finish(clock.now(), SessionOutcome::Exited)
             .await
             .unwrap();
         let tail = crate::logfile::read_log_tail(&path, 1 << 20, 10)
@@ -841,6 +940,197 @@ mod tests {
             .unwrap();
         let logged: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
         assert_eq!(logged, [expected.as_str(), "TAIL"]);
+    }
+
+    /// 一局会话的输出端：stdout 读一段内存里的字节，stderr 立即读完，会话日志写进临时目录。
+    struct Output {
+        _tmp: tempfile::TempDir,
+        dir: std::path::PathBuf,
+        clock: SessionClock,
+        readers: Vec<JoinHandle<()>>,
+        pump: JoinHandle<PumpOutcome>,
+    }
+
+    async fn output(stdout: &'static [u8]) -> Output {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(&dir, "t", clock.started_at())
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let readers = vec![
+            spawn_reader(stdout, LogStream::Stdout, clock, tx.clone()),
+            spawn_reader(&b""[..], LogStream::Stderr, clock, tx),
+        ];
+        let pump_task = tokio::spawn(pump(rx, Some(log), None));
+        Output {
+            _tmp: tmp,
+            dir,
+            clock,
+            readers,
+            pump: pump_task,
+        }
+    }
+
+    type Logged = (LogSource, Option<LauncherLevel>, String);
+
+    async fn read_back(dir: &Path) -> (Vec<Logged>, Option<SessionOutcome>) {
+        let tail =
+            crate::logfile::read_log_tail(&dir.join(crate::logfile::LATEST_LOG), 1 << 20, 100)
+                .await
+                .unwrap();
+        let lines = tail
+            .entries
+            .into_iter()
+            .map(|e| (e.source, e.level, e.text))
+            .collect();
+        (lines, tail.ended.map(|ended| ended.outcome))
+    }
+
+    fn clean_exit() -> ExitStatus {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(0)
+    }
+
+    fn game(text: &str) -> Logged {
+        (LogSource::Game, None, text.to_owned())
+    }
+
+    fn launcher_error(text: &str) -> Logged {
+        (
+            LogSource::Launcher,
+            Some(LauncherLevel::Error),
+            text.to_owned(),
+        )
+    }
+
+    /// 正常退出：日志保持打开交还调用方，读到的行都在报告里。
+    #[tokio::test]
+    async fn conclude_hands_back_the_open_log_on_a_clean_exit() {
+        let out = output(b"LINE_ONE\nLINE_TWO\n").await;
+        let exited = Exited {
+            status: Ok(clean_exit()),
+            terminated_by_launcher: false,
+        };
+        let end = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(end.report.code, Some(0));
+        assert!(end.report.success);
+        assert_eq!(end.report.recent_lines, ["LINE_ONE", "LINE_TWO"]);
+        let log = end.log.expect("日志应保持打开交还调用方");
+        assert_eq!(log.lines(), 2);
+        // 结局由调用方写：此时文件里还没有结局行。
+        drop(log);
+        assert_eq!(read_back(&out.dir).await.1, None);
+    }
+
+    /// 等待进程本身失败：照样读完输出、写下原因与结局并落盘，再把等待的错误报上去。
+    #[tokio::test]
+    async fn wait_failure_still_settles_the_session_log() {
+        let out = output(b"LINE_ONE\nLINE_TWO\n").await;
+        let exited = Exited {
+            status: Err(std::io::Error::other("句柄已失效")),
+            terminated_by_launcher: false,
+        };
+        let err = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await
+        .err()
+        .expect("等待失败应报错");
+        let LaunchError::Wait(source) = &err else {
+            panic!("应报等待失败：{err:?}");
+        };
+        assert_eq!(source.to_string(), "句柄已失效");
+        let (lines, ended) = read_back(&out.dir).await;
+        assert_eq!(
+            lines,
+            [
+                game("LINE_ONE"),
+                game("LINE_TWO"),
+                launcher_error("等待游戏进程结束失败：句柄已失效（退出码 未知）"),
+            ]
+        );
+        // 拿不到退出码按异常结束记，与崩溃判定的规则一致。
+        assert_eq!(ended, Some(SessionOutcome::Crashed));
+    }
+
+    /// 玩家点过结束之后等待失败：结局记为玩家结束，不是崩溃。
+    #[tokio::test]
+    async fn wait_failure_after_a_kill_request_ends_as_killed() {
+        let out = output(b"").await;
+        let exited = Exited {
+            status: Err(std::io::Error::other("句柄已失效")),
+            terminated_by_launcher: true,
+        };
+        let err = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await
+        .err()
+        .expect("等待失败应报错");
+        assert!(matches!(err, LaunchError::Wait(_)), "{err:?}");
+        let (lines, ended) = read_back(&out.dir).await;
+        assert_eq!(
+            lines,
+            [launcher_error(
+                "等待游戏进程结束失败：句柄已失效（退出码 未知）"
+            )]
+        );
+        assert_eq!(ended, Some(SessionOutcome::Killed));
+    }
+
+    /// 读取任务异常结束：退出码照样记下，日志写下原因与结局，再报出异常。
+    #[tokio::test]
+    async fn crashed_reader_still_settles_the_session_log() {
+        let out = output(b"LINE\n").await;
+        let mut readers = out.readers;
+        let crashed: JoinHandle<()> = tokio::spawn(async { panic!("模拟读取任务崩溃") });
+        readers.push(crashed);
+        let exited = Exited {
+            status: Ok(clean_exit()),
+            terminated_by_launcher: false,
+        };
+        let err = conclude(exited, out.clock, readers, out.pump, Duration::from_secs(5))
+            .await
+            .err()
+            .expect("读取任务异常结束应报错");
+        assert!(
+            matches!(&err, LaunchError::Join(join) if join.is_panic()),
+            "{err:?}"
+        );
+        let (lines, ended) = read_back(&out.dir).await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], game("LINE"));
+        let (source, level, text) = &lines[1];
+        assert_eq!(
+            (*source, *level),
+            (LogSource::Launcher, Some(LauncherLevel::Error))
+        );
+        assert!(text.starts_with("游戏会话的后台任务异常结束："), "{text}");
+        assert!(text.contains("模拟读取任务崩溃"), "{text}");
+        assert!(text.ends_with("（退出码 0）"), "{text}");
+        // 游戏自己是正常退出的。
+        assert_eq!(ended, Some(SessionOutcome::Exited));
     }
 
     /// 一条流先读完、另一条被别的进程开着：限时到了只结束没读完的那个，已经收回的不再去等。
@@ -946,7 +1236,7 @@ mod tests {
         let log = end.log.expect("日志应保持打开交还调用方");
         assert_eq!(log.lines(), 1);
         let path = log
-            .finish(clock.now(), crate::logfile::SessionOutcome::Crashed)
+            .finish(clock.now(), SessionOutcome::Crashed)
             .await
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();
@@ -1021,7 +1311,7 @@ mod tests {
         );
         let log = end.log.expect("日志应保持打开交还调用方");
         let path = log
-            .finish(clock.now(), crate::logfile::SessionOutcome::Exited)
+            .finish(clock.now(), SessionOutcome::Exited)
             .await
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();
