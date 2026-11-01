@@ -419,6 +419,55 @@ describe("忽略更新", () => {
   });
 });
 
+describe("行标注的位置", () => {
+  const rowEl = (name: string): HTMLElement => {
+    const row = [...grid().querySelectorAll<HTMLElement>('[role="row"][data-row-index]')].find((r) => {
+      const title = r.querySelector('[class*="modName"]');
+      return title !== null && title.textContent === name;
+    });
+    if (row === undefined) throw new Error(`没有 ${name} 这一行`);
+    return row;
+  };
+  /** Mod 列第二行的标注，按显示顺序。 */
+  const modTags = (name: string): string[] => {
+    const sub = rowEl(name).querySelector('[class*="modSub"]');
+    if (sub === null) throw new Error(`${name} 这一行没有第二行`);
+    return [...sub.querySelectorAll("span[data-tone]")].map(textOf);
+  };
+  const versionTags = (name: string): string[] => {
+    const cell = rowEl(name).querySelector('[class*="versionCell"]');
+    if (cell === null) throw new Error(`${name} 这一行没有版本列`);
+    return [...cell.querySelectorAll("span[data-tone]")].map(textOf);
+  };
+  const pinSodium = () => {
+    mods = mods.map((m) => (m.file_name === "sodium.jar" && m.source !== null ? { ...m, source: { ...m.source, update_hold: { kind: "pinned", version_id: "AANobbMI-1.1" } } } : m));
+  };
+
+  it("宽档：不检查更新与已锁定版本占版本列第二行、顶替「可更新到」；Mod 列只留新增与前置", async () => {
+    pinSodium();
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "1.0", "0.93.0")];
+    await open();
+    expect(versionTags("Iris")).toEqual(["不检查更新"]);
+    expect(modTags("Iris")).toEqual([]);
+    expect(versionTags("Sodium")).toEqual(["已锁定版本"]);
+    expect(modTags("Sodium")).toEqual(["新增"]);
+    expect(versionTags("Fabric API")).toEqual(["可更新到 0.93.0"]);
+    expect(modTags("Fabric API")).toEqual(["前置 · 由 Sodium 带入"]);
+  });
+
+  it("紧凑档：按来源、可更新到 / 不检查更新 / 已锁定版本、新增、前置排，最多 3 个", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    pinSodium();
+    mods = mods.map((m) => (m.file_name === "fabric-api.jar" && m.source !== null ? { ...m, source: { ...m.source, installed_at: Math.floor((NOW - DAY) / 1000) } } : m));
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "1.0", "0.93.0")];
+    await open();
+    expect(modTags("Fabric API")).toEqual(["Modrinth", "可更新到 0.93.0", "新增"]);
+    expect(modTags("Sodium")).toEqual(["Modrinth", "已锁定版本", "新增"]);
+    expect(modTags("Iris")).toEqual(["Modrinth", "不检查更新"]);
+    expect(modTags("Handmade")).toEqual(["本地文件", "新增"]);
+  });
+});
+
 describe("更新预览", () => {
   beforeEach(() => {
     updates = [

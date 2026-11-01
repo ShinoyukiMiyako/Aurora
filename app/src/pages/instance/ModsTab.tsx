@@ -4,7 +4,7 @@
 // 忽略更新只改记录、不碰 jar，只在补全时禁用。
 
 import { motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
@@ -511,6 +511,54 @@ function SourceTag({ row }: { row: ModRow }) {
   );
 }
 
+/**
+ * 更新状态那一格：设了更新检查（不检查更新、已锁定版本）时顶替「可更新到」，玩家先要知道这行的更新被自己管着；
+ * 都没有为 null。
+ */
+function statusTag(row: ModRow): ReactElement | null {
+  if (row.hold !== null) {
+    return (
+      <Tag key="status" size="sm">
+        {row.hold.kind === "ignored" ? MODS_COPY.ignoredTag : MODS_COPY.pinnedTag}
+      </Tag>
+    );
+  }
+  if (row.update === null) return null;
+  return (
+    <Tag key="status" size="sm" tone="accent" icon="sparkle">
+      {MODS_COPY.updateTo(row.update.latest.version_number)}
+    </Tag>
+  );
+}
+
+/** 紧凑档一行放不下更多标注：版本列与来源列都隐藏了，它们的标注挪进来后整行最多留这么几个。 */
+const COMPACT_TAG_LIMIT = 3;
+
+/** Mod 列第二行的标注。紧凑档按来源、更新状态、新增、前置排，截到上限；其余档来源与更新状态各有自己的列，这里只放新增与前置。 */
+function modSubTags(row: ModRow, compact: boolean, now: number): ReactElement[] {
+  const tags: ReactElement[] = [];
+  if (compact) {
+    tags.push(<SourceTag key="source" row={row} />);
+    const status = statusTag(row);
+    if (status !== null) tags.push(status);
+  }
+  if (isNewMod(row, now)) {
+    tags.push(
+      <Tag key="new" size="sm" tone="info">
+        {MODS_COPY.newTag}
+      </Tag>,
+    );
+  }
+  if (row.dependencyOf !== null) {
+    tags.push(
+      <Tag key="dependency" size="sm" tone="info" icon="link">
+        {MODS_COPY.dependencyOf(row.dependencyOf)}
+      </Tag>,
+    );
+  }
+  return compact ? tags.slice(0, COMPACT_TAG_LIMIT) : tags;
+}
+
 /** 行的更多菜单：有来源且没设置时可以忽略更新，忽略或锁定过的恢复检查；本地文件没有来源，忽略项禁用并写原因。 */
 function holdMenu(r: ModRow, holdLock: string | undefined, setHold: ColumnDeps["setHold"]): MenuEntry[] {
   const lockProps = holdLock === undefined ? {} : { disabled: true, disabledReason: holdLock };
@@ -545,23 +593,7 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, toggle, update, 
             </span>
             <span className={styles.modSub}>
               {r.summary !== null && <span className={styles.ellipsis}>{r.summary}</span>}
-              {compact && <SourceTag row={r} />}
-              {compact && r.update !== null && (
-                <Tag size="sm" tone="accent" icon="sparkle">
-                  {MODS_COPY.updateTo(r.update.latest.version_number)}
-                </Tag>
-              )}
-              {isNewMod(r, now) && (
-                <Tag size="sm" tone="info">
-                  {MODS_COPY.newTag}
-                </Tag>
-              )}
-              {r.hold !== null && <Tag size="sm">{r.hold.kind === "ignored" ? MODS_COPY.ignoredTag : MODS_COPY.pinnedTag}</Tag>}
-              {r.dependencyOf !== null && (
-                <Tag size="sm" tone="info" icon="link">
-                  {MODS_COPY.dependencyOf(r.dependencyOf)}
-                </Tag>
-              )}
+              {modSubTags(r, compact, now)}
               {!compact && r.summary === null && <span className={styles.modFile}>{r.fileName}</span>}
             </span>
           </div>
@@ -576,11 +608,7 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, toggle, update, 
       cell: (r) => (
         <div className={styles.versionCell}>
           <span className={styles.modVersion}>{r.version === null ? MODS_COPY.versionUnknown : r.version}</span>
-          {r.update !== null && (
-            <Tag size="sm" tone="accent" icon="sparkle">
-              {MODS_COPY.updateTo(r.update.latest.version_number)}
-            </Tag>
-          )}
+          {statusTag(r)}
         </div>
       ),
     },
