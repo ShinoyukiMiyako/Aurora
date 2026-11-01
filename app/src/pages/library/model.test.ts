@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { InstanceSummary } from "../../domain/adapt";
+import type { GameDirectoryDto } from "../../state/queries/catalog";
 import { LIBRARY_COPY } from "./copy";
-import { brokenInstances, DEFAULT_VIEW, isFiltered, loaderCounts, matchesView, orderSignature, sortInstances, totalPlaytime, visibleInstances } from "./model";
+import {
+  brokenInstances,
+  DEFAULT_VIEW,
+  directoryOptions,
+  isFiltered,
+  loaderCounts,
+  matchesView,
+  orderSignature,
+  sortInstances,
+  switchSuggestion,
+  totalPlaytime,
+  visibleInstances,
+} from "./model";
 
 function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSummary {
   return {
@@ -137,7 +150,79 @@ describe("统计与签名", () => {
   });
 });
 
+function dir(name: string, version_count: number | null, overrides: Partial<GameDirectoryDto> = {}): GameDirectoryDto {
+  return { name, path: `D:\\${name}\\.minecraft`, is_current: false, available: true, version_count, ...overrides };
+}
+
+const current = dir("默认目录", 0, { is_current: true });
+
+describe("switchSuggestion", () => {
+  it("取其它目录里版本最多的，一样多时取记录在前的", () => {
+    const list = [current, dir("官方", 3), dir("PCL2", 12), dir("HMCL", 12)];
+    expect(switchSuggestion(list)).toEqual({ dir: list[2], versions: 12 });
+  });
+
+  it("当前目录再多也不算：已经在这里了", () => {
+    expect(switchSuggestion([dir("默认目录", 40, { is_current: true }), dir("官方", 1)])?.dir.name).toBe("官方");
+    expect(switchSuggestion([dir("默认目录", 40, { is_current: true })])).toBeNull();
+  });
+
+  it("访问不到的目录切不过去，版本数读不到与 0 个版本都不算有东西", () => {
+    expect(switchSuggestion([current, dir("移动硬盘", 30, { available: false })])).toBeNull();
+    expect(switchSuggestion([current, dir("读不到", null)])).toBeNull();
+    expect(switchSuggestion([current, dir("空的", 0)])).toBeNull();
+    expect(switchSuggestion([current, dir("移动硬盘", 30, { available: false }), dir("读不到", null), dir("官方", 1)])?.dir.name).toBe("官方");
+  });
+
+  it("没有目录记录时没有可推荐的", () => {
+    expect(switchSuggestion([])).toBeNull();
+  });
+});
+
+describe("directoryOptions", () => {
+  const list = [dir("默认目录", 7, { is_current: true }), dir("PCL2", 12), dir("读不到", null), dir("移动硬盘", null, { available: false })];
+
+  it("标签只写目录名，版本数放第二行，读不到时明说，不写 0", () => {
+    expect(directoryOptions(list, false, null).map((o) => [o.label, o.hint, o.disabled])).toEqual([
+      ["默认目录", "7 个版本", undefined],
+      ["PCL2", "12 个版本", undefined],
+      ["读不到", "版本数读不到", undefined],
+      ["移动硬盘", "位置访问不到，无法切过去", true],
+    ]);
+  });
+
+  it("值是路径：两个目录重名时也分得开", () => {
+    const twins = [dir("HMCL", 1, { is_current: true, path: "D:\\a" }), dir("HMCL", 2, { path: "D:\\b" })];
+    expect(directoryOptions(twins, false, null).map((o) => o.value)).toEqual(["D:\\a", "D:\\b"]);
+  });
+
+  it("当前目录的版本数跟实例列表走，别的目录不受影响；0 个实例不是读不到", () => {
+    expect(directoryOptions(list, false, 9).slice(0, 2).map((o) => o.hint)).toEqual(["9 个版本", "12 个版本"]);
+    expect(directoryOptions(list, false, 0)[0].hint).toBe("0 个版本");
+  });
+
+  it("有游戏或任务在进行时别的目录都切不了，原因优先于访问不到；当前目录不受影响", () => {
+    expect(directoryOptions(list, true, 7).map((o) => [o.hint, o.disabled])).toEqual([
+      ["7 个版本", undefined],
+      ["有游戏或下载在进行，结束后再切换", true],
+      ["有游戏或下载在进行，结束后再切换", true],
+      ["有游戏或下载在进行，结束后再切换", true],
+    ]);
+  });
+
+  it("当前目录访问不到也不禁用：它不是切过去的目标", () => {
+    const [option] = directoryOptions([dir("默认目录", null, { is_current: true, available: false })], false, null);
+    expect([option.hint, option.disabled]).toEqual(["版本数读不到", undefined]);
+  });
+});
+
 describe("文案", () => {
+  it("目录空状态的主按钮：中西文之间留空格，中文名不留", () => {
+    expect(LIBRARY_COPY.switchEmptyAction("PCL2")).toBe("切到 PCL2");
+    expect(LIBRARY_COPY.switchEmptyAction("官方启动器")).toBe("切到官方启动器");
+    expect(LIBRARY_COPY.switchEmptyBody("PCL2", 12)).toBe("「PCL2」里有 12 个版本，切过去就能玩，文件不会被移动。");
+  });
+
   it("筛选无结果的正文：带加载器时中西文之间留空格，原版不留", () => {
     expect(LIBRARY_COPY.noMatchQuery("abc", "fabric")).toBe("没有名字里带「abc」的 Fabric 实例。");
     expect(LIBRARY_COPY.noMatchQuery("abc", null)).toBe("没有名字里带「abc」的实例。");

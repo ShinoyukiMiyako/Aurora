@@ -1,8 +1,12 @@
 // 实例库的筛选、搜索、排序与统计：纯函数，页面与测试共用。
 
+import { gameDirSwitchReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
 import { needsReimport } from "../../domain/rules";
+import type { GameDirectoryDto } from "../../state/queries/catalog";
+import type { SelectOption } from "../../ui/Select";
+import { LIBRARY_COPY } from "./copy";
 
 export type LoaderFilter = "all" | LoaderKind;
 export type SortKey = "recent" | "name" | "playtime";
@@ -99,6 +103,39 @@ export function totalPlaytime(list: readonly InstanceSummary[]): number | null {
 /** 修复横幅列出的实例：补全能修好的损坏实例。整合包没导入完的补全补不回来，各自在卡片上给重新导入。 */
 export function brokenInstances(list: readonly InstanceSummary[]): InstanceSummary[] {
   return list.filter((inst) => inst.status === "broken" && !needsReimport(inst));
+}
+
+export interface SwitchSuggestion {
+  dir: GameDirectoryDto;
+  versions: number;
+}
+
+/**
+ * 当前目录没有实例时值得切过去的目录：其它可达目录里版本最多的，一样多时取记录在前的。
+ * 读不到版本数的不算：说不上里面有东西，就不该让人专门切过去。
+ */
+export function switchSuggestion(dirs: readonly GameDirectoryDto[]): SwitchSuggestion | null {
+  let best: SwitchSuggestion | null = null;
+  for (const dir of dirs) {
+    const versions = dir.version_count;
+    if (dir.is_current || !dir.available || versions === null || versions === 0) continue;
+    if (best === null || versions > best.versions) best = { dir, versions };
+  }
+  return best;
+}
+
+/**
+ * 目录选择的选项：标签只写目录名（触发器上显示的就是它），版本数放第二行；切不过去的禁用，第二行换成原因。
+ * 当前目录的数取实例列表（instanceCount，读到之前为 null）：目录列表只在切换和回到本页时重读，新建、删除实例后还是旧数。
+ */
+export function directoryOptions(dirs: readonly GameDirectoryDto[], busy: boolean, instanceCount: number | null): SelectOption<string>[] {
+  return dirs.map((dir) => {
+    const option = { value: dir.path, label: dir.name };
+    const blocked = dir.is_current ? undefined : gameDirSwitchReason(busy, dir.available);
+    if (blocked !== undefined) return { ...option, hint: blocked, disabled: true };
+    const versions = dir.is_current && instanceCount !== null ? instanceCount : dir.version_count;
+    return { ...option, hint: versions === null ? LIBRARY_COPY.dirVersionsUnknown : LIBRARY_COPY.dirVersions(versions) };
+  });
 }
 
 /** 网格的顺序签名：只有顺序或成员变化时才触发布局动画，窗口缩放、分档切换不触发。 */
