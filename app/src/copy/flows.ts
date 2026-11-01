@@ -1140,6 +1140,8 @@ export const AUTHLIB_COPY = {
   next: "下一步",
   unreachable: { title: "连不上这个地址", body: "检查地址是否正确，或稍后重试。" },
   notYggdrasil: { title: "这个地址不是外置登录服务器", body: "需要支持 authlib-injector 的认证服务器地址，皮肤站的说明页里一般会给出。" },
+  serverDown: { title: "这个服务器暂时不可用", body: "服务器那边出了故障，地址没有问题。稍后重试。" },
+  loginServiceDown: { title: "登录服务暂时不可用", body: "服务器那边出了故障，不是账户或密码的问题。稍后重试。" },
   username: "邮箱或用户名",
   password: "密码",
   passwordNote: `密码只用于这一次登录，${APP_NAME}不会保存`,

@@ -21,12 +21,14 @@ export interface InlineProblem {
   body: string;
 }
 
-/** 探测服务器失败里能原位提示的三种：连不上、不是外置登录服务器、地址无效。其余为 null，交给外层统一处理。 */
+/** 探测服务器失败里能原位提示的四种：连不上、服务器故障、不是外置登录服务器、地址无效。其余为 null，交给外层统一处理。 */
 export function probeProblem(error: unknown): InlineProblem | null {
   const { code, message } = errorRecord(error);
   switch (code) {
     case "Http":
       return AUTHLIB_COPY.unreachable;
+    case "ServiceUnavailable":
+      return AUTHLIB_COPY.serverDown;
     case "NotYggdrasilServer":
       return AUTHLIB_COPY.notYggdrasil;
     case "invalid_argument":
@@ -41,6 +43,8 @@ export type LoginProblem =
   | { kind: "credentials" }
   /** 网络失败：可以原样重试。 */
   | { kind: "network" }
+  /** 认证服务器 5xx 或限流：账户与密码没错，可以原样重试。 */
+  | { kind: "service_down" }
   | { kind: "no_profile" }
   /** 认证服务器拒绝了这次登录（被封禁、请求过于频繁等）：原位显示服务器给的说明。 */
   | { kind: "rejected"; message: string };
@@ -50,6 +54,7 @@ export function loginProblem(error: unknown): LoginProblem | null {
   const { code, message } = errorRecord(error);
   if (code === "Yggdrasil" && detailField(error, "error") === "ForbiddenOperationException") return { kind: "credentials" };
   if (code === "Http") return { kind: "network" };
+  if (code === "ServiceUnavailable") return { kind: "service_down" };
   if (code === "YggdrasilNoProfile") return { kind: "no_profile" };
   if (code !== "Yggdrasil") return null;
   const serverMessage = detailField(error, "error_message");
