@@ -108,15 +108,16 @@ describe("Thumb", () => {
     expect(() => render(<Thumb url="https://cdn.modrinth.com/a.png" kind="mod" hue={1} size={32} />)).toThrow("RemoteImageProvider");
   });
 
-  it("进入视口（外扩 200 px）前只显示骨架、不解析；进入后解析、取图并画出像素风图标", async () => {
+  it("进入视口（外扩 200 px）前是静止的占位、不解析；进入后才有扫光，解析、取图并画出像素风图标", async () => {
     const resolve = vi.fn(async (url: string) => `http://aurora-tex.localhost/thumb/${url.length}`);
     view = render(withResolver(resolve, <Thumb url="https://cdn.modrinth.com/data/x/icon.png" kind="mod" hue={1} size={48} alt="钠" />));
-    expect(thumb().dataset.view).toBe("loading");
+    expect(thumb().dataset.view).toBe("pending");
     expect(observers[0].options?.rootMargin).toBe("200px");
     await settle();
     expect(resolve).not.toHaveBeenCalled();
 
     enterViewport();
+    expect(thumb().dataset.view).toBe("loading");
     await settle();
     expect(resolve).toHaveBeenCalledWith("https://cdn.modrinth.com/data/x/icon.png");
     expect(fetchMock).toHaveBeenCalledWith("http://aurora-tex.localhost/thumb/40", { mode: "cors" });
