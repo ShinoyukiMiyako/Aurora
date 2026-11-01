@@ -135,7 +135,8 @@ impl GameSession {
                 }
             }
         };
-        let drained = drain_readers(std::mem::take(&mut self.readers)).await?;
+        let drained =
+            drain_readers(std::mem::take(&mut self.readers), OUTPUT_DRAIN_DEADLINE).await?;
         let mut outcome = self.pump.await.map_err(LaunchError::Join)?;
         if !drained {
             let text = format!(
@@ -169,32 +170,37 @@ impl GameSession {
     }
 }
 
-/// 等读取任务读完各自的流，最多等 [`OUTPUT_DRAIN_DEADLINE`]；超时就结束它们。读取任务结束时放掉
-/// 各自的发送端，汇流任务随之收尾。返回是否在时限内读完。
-async fn drain_readers(mut readers: Vec<JoinHandle<()>>) -> Result<bool> {
-    let finished = tokio::time::timeout(OUTPUT_DRAIN_DEADLINE, async {
-        for reader in &mut readers {
-            reader.await.map_err(LaunchError::Join)?;
+/// 等读取任务读完各自的流，最多等 `deadline`；超时或有一个异常结束时，其余没读完的都结束掉，不留在
+/// 后台占着管道。读取任务结束时放掉各自的发送端，汇流任务随之收尾。返回是否在时限内读完。
+async fn drain_readers(readers: Vec<JoinHandle<()>>, deadline: Duration) -> Result<bool> {
+    // 收回结果的读取任务立即移出：JoinHandle 交出结果之后再 await 会 panic。
+    let mut pending = VecDeque::from(readers);
+    let finished = tokio::time::timeout(deadline, async {
+        while let Some(reader) = pending.front_mut() {
+            let joined = reader.await;
+            pending.pop_front();
+            joined.map_err(LaunchError::Join)?;
         }
         Ok::<(), LaunchError>(())
     })
     .await;
-    match finished {
-        Ok(result) => result.map(|()| true),
-        Err(_elapsed) => {
-            for reader in &readers {
-                reader.abort();
-            }
-            for reader in readers {
-                match reader.await {
-                    Ok(()) => {}
-                    Err(err) if err.is_cancelled() => {}
-                    Err(err) => return Err(LaunchError::Join(err)),
-                }
-            }
-            Ok(false)
+    let mut result = match finished {
+        Ok(Ok(())) => return Ok(true),
+        Ok(Err(err)) => Err(err),
+        Err(_elapsed) => Ok(false),
+    };
+    for reader in &pending {
+        reader.abort();
+    }
+    for reader in pending {
+        match reader.await {
+            Ok(()) => {}
+            Err(err) if err.is_cancelled() => {}
+            Err(err) if result.is_ok() => result = Err(LaunchError::Join(err)),
+            Err(err) => tracing::error!(error = %err, "游戏输出读取任务异常结束"),
         }
     }
+    result
 }
 
 /// 发出结束信号。进程恰好已经自己退出时，系统会拒绝结束一个已退出的进程，这不是失败。
@@ -835,6 +841,56 @@ mod tests {
             .unwrap();
         let logged: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
         assert_eq!(logged, [expected.as_str(), "TAIL"]);
+    }
+
+    /// 一条流先读完、另一条被别的进程开着：限时到了只结束没读完的那个，已经收回的不再去等。
+    #[tokio::test]
+    async fn drain_deadline_with_one_stream_already_closed() {
+        let held = std::sync::Arc::new(());
+        let witness = held.clone();
+        let readers = vec![
+            tokio::spawn(async {}),
+            tokio::spawn(async move {
+                let _held = witness;
+                std::future::pending::<()>().await;
+            }),
+        ];
+        let drained = drain_readers(readers, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert!(!drained);
+        assert_eq!(
+            std::sync::Arc::strong_count(&held),
+            1,
+            "没读完的读取任务应已结束"
+        );
+    }
+
+    /// 一个读取任务异常结束：报出异常，另一个不留在后台继续占着管道。
+    #[tokio::test]
+    async fn drain_reports_a_crashed_reader_and_stops_the_rest() {
+        let held = std::sync::Arc::new(());
+        let witness = held.clone();
+        let crashed: JoinHandle<()> = tokio::spawn(async { panic!("模拟读取任务崩溃") });
+        let readers = vec![
+            crashed,
+            tokio::spawn(async move {
+                let _held = witness;
+                std::future::pending::<()>().await;
+            }),
+        ];
+        let err = drain_readers(readers, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, LaunchError::Join(join) if join.is_panic()),
+            "{err:?}"
+        );
+        assert_eq!(
+            std::sync::Arc::strong_count(&held),
+            1,
+            "其余读取任务应已结束"
+        );
     }
 
     #[cfg(windows)]
