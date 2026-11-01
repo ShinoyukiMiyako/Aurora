@@ -48,7 +48,6 @@ class OverlayRegistry {
   private escapeListeners = new Set<() => void>();
   private listeners = new Set<() => void>();
   private seq = 0;
-  private suspended = 0;
   private snapshot: OverlaySnapshot = { depth: 0, scrimOpen: false };
   root: HTMLElement | null = null;
 
@@ -118,20 +117,7 @@ class OverlayRegistry {
   }
 
   isTopTrap(container: HTMLElement): boolean {
-    return this.suspended === 0 && this.traps[this.traps.length - 1] === container;
-  }
-
-  /**
-   * 暂停全部焦点圈定执行 fn。浮层卸载时 React 先跑焦点归还的清理、后撤圈定的监听（或顺序反过来），
-   * 归还时焦点落到浮层根之外，仍在监听的圈定会把它当成「焦点逃出弹窗」再拉回即将移除的弹窗，焦点就丢到 body。
-   */
-  withTrapsSuspended(fn: () => void): void {
-    this.suspended++;
-    try {
-      fn();
-    } finally {
-      this.suspended--;
-    }
+    return this.traps[this.traps.length - 1] === container;
   }
 }
 
