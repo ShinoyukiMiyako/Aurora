@@ -6,7 +6,7 @@ use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
-use zip::read::ZipFile;
+use zip::read::{ZipFile, read_zipfile_from_stream};
 use zip::result::ZipError;
 
 use crate::error::{Error, Result};
@@ -230,6 +230,52 @@ pub fn decode_entry_name(raw: &[u8]) -> Option<String> {
         .map(|name| name.into_owned())
 }
 
+/// 解开一段按范围取回来的条目数据。平台整合包摘要不下载整包，只取清单那一段；走这里才与读包是同一套解压
+/// 实现，同一个包不会在发现页读不出来、导入时却能装。解压后超过 `limit` 字节或 CRC 对不上都报错。
+///
+/// 除 `data` 外的参数取自中央目录。流式读取要从本地头开始：按这些字段拼一个最小的头，省得再向服务器要一次
+/// 文件名与扩展字段；大小已经写在头里，数据描述符标志要清掉。
+pub fn decompress_entry(
+    method: u16,
+    flags: u16,
+    crc32: u32,
+    data: &[u8],
+    uncompressed: u64,
+    limit: u64,
+) -> std::result::Result<Vec<u8>, ZipError> {
+    const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
+    const VERSION_NEEDED: u16 = 20;
+    const USES_DATA_DESCRIPTOR: u16 = 1 << 3;
+    let too_large = || ZipError::InvalidArchive("条目超过 4 GiB".into());
+    let compressed = u32::try_from(data.len()).map_err(|_| too_large())?;
+    let size = u32::try_from(uncompressed).map_err(|_| too_large())?;
+
+    let mut header = Vec::with_capacity(31);
+    header.extend(LOCAL_SIGNATURE.to_le_bytes());
+    header.extend(VERSION_NEEDED.to_le_bytes());
+    header.extend((flags & !USES_DATA_DESCRIPTOR).to_le_bytes());
+    header.extend(method.to_le_bytes());
+    header.extend([0u8; 4]); // 修改时间与日期
+    header.extend(crc32.to_le_bytes());
+    header.extend(compressed.to_le_bytes());
+    header.extend(size.to_le_bytes());
+    header.extend(1u16.to_le_bytes()); // 文件名长度
+    header.extend(0u16.to_le_bytes()); // 扩展字段长度
+    header.push(b'x');
+
+    let mut stream = header.as_slice().chain(data);
+    let file = read_zipfile_from_stream(&mut stream)?
+        .ok_or_else(|| ZipError::InvalidArchive("拼出的本地头没被认出来".into()))?;
+    let mut out = Vec::new();
+    file.take(limit + 1).read_to_end(&mut out)?;
+    if out.len() as u64 > limit {
+        return Err(ZipError::InvalidArchive(
+            format!("解压后超过 {limit} 字节").into(),
+        ));
+    }
+    Ok(out)
+}
+
 fn read_manifest(
     archive: &mut ZipArchive<BufReader<File>>,
     index: usize,
@@ -344,6 +390,39 @@ mod tests {
         assert_eq!(decode_entry_name(b"").as_deref(), Some(""));
         // 0xFF 既不能起头 UTF-8 也不能起头 GBK：交回调用方用各自的兜底。
         assert_eq!(decode_entry_name(b"mods/\xff.jar"), None);
+    }
+
+    /// 中央目录的字段直接交给 decompress_entry：数据描述符标志不影响解压，超过上限与不认识的方式都报错。
+    #[test]
+    fn range_read_entries_decompress_within_the_limit() {
+        let body = vec![b'x'; 10_000];
+        let mut writer = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("a", options).unwrap();
+        io::Write::write_all(&mut writer, &body).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let mut archive = ZipArchive::new(io::Cursor::new(&bytes)).unwrap();
+        let file = archive.by_index_raw(0).unwrap();
+        let start = usize::try_from(file.data_start().unwrap()).unwrap();
+        let len = usize::try_from(file.compressed_size()).unwrap();
+        let crc = file.crc32();
+        let data = &bytes[start..start + len];
+        const DEFLATED: u16 = 8;
+        const DATA_DESCRIPTOR: u16 = 1 << 3;
+
+        assert_eq!(
+            decompress_entry(DEFLATED, DATA_DESCRIPTOR, crc, data, 10_000, 10_000).unwrap(),
+            body
+        );
+        assert!(matches!(
+            decompress_entry(DEFLATED, 0, crc, data, 10_000, 9_999),
+            Err(ZipError::InvalidArchive(_))
+        ));
+        assert!(matches!(
+            decompress_entry(93, 0, crc, data, 10_000, 10_000),
+            Err(ZipError::CompressionMethodNotSupported(93))
+        ));
     }
 
     #[test]
