@@ -807,10 +807,7 @@ mod tests {
         }
         .into();
         assert_eq!(outage.code, "ServiceUnavailable");
-        assert_eq!(
-            outage.message,
-            "微软登录服务暂时不可用（XSTS 授权：HTTP 503）"
-        );
+        assert_eq!(outage.message, "登录服务暂时不可用（XSTS 授权：HTTP 503）");
         let detail = outage.detail.unwrap();
         assert_eq!(detail, json!({ "step": "XSTS 授权", "status": 503 }));
         // 不是本机网络问题：不带 network，前端不去探测连通性。

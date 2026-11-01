@@ -493,7 +493,8 @@ impl MicrosoftAuth {
 }
 
 /// 5xx 与 429 判为服务端故障。各端点在故障或限流时的响应体没有文档，只能按状态码类别认。
-fn service_unavailable(status: StatusCode, step: &'static str) -> Option<AuthError> {
+/// Yggdrasil 客户端同样用它：皮肤站故障时回的多半也是 HTML 故障页。
+pub(crate) fn service_unavailable(status: StatusCode, step: &'static str) -> Option<AuthError> {
     (status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS).then(|| {
         AuthError::ServiceUnavailable {
             step,

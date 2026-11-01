@@ -753,8 +753,7 @@ mod tests {
         params.insert("status".to_owned(), json!(503));
         let failure = LaunchFailure {
             code: FailureCode::AccountServiceDown,
-            message: "刷新 PetalPlayer 的登录失败：微软登录服务暂时不可用（刷新令牌：HTTP 503）"
-                .into(),
+            message: "刷新 PetalPlayer 的登录失败：登录服务暂时不可用（刷新令牌：HTTP 503）".into(),
             params,
             source: Some(aurora_core::CoreError::Auth(
                 aurora_core::AuthError::ServiceUnavailable {
@@ -770,7 +769,7 @@ mod tests {
             Some(json!({
                 "account": "PetalPlayer",
                 "status": 503,
-                "causes": ["微软登录服务暂时不可用（刷新令牌：HTTP 503）"]
+                "causes": ["登录服务暂时不可用（刷新令牌：HTTP 503）"]
             }))
         );
     }

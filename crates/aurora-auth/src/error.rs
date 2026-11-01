@@ -80,8 +80,9 @@ pub enum AuthError {
     #[error("登录凭据已失效，需要重新登录")]
     ReloginRequired,
 
-    /// 微软登录链某一步遇到服务端故障：5xx、429，或返回的是故障页。可重试。
-    #[error("微软登录服务暂时不可用（{step}：HTTP {status}）")]
+    /// 微软登录链或 Yggdrasil 外置登录某一步遇到服务端故障：5xx、429，或返回的是故障页。可重试。
+    /// 原文不写是哪家的服务：微软与外置登录共用这个变体，`step` 已经说明是哪一步。
+    #[error("登录服务暂时不可用（{step}：HTTP {status}）")]
     ServiceUnavailable { step: &'static str, status: u16 },
 
     /// Minecraft 服务拒绝了启动器所用的微软应用：login_with_xbox 返回 403，且响应体含 Invalid app registration。
