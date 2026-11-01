@@ -27,10 +27,15 @@ export interface RadioTileProps<T extends string> {
   ariaLabel?: string;
   disabled?: boolean;
   className?: string;
+  /**
+   * 选项来自本机扫描这类运行时数据（默认 Java 列表里的每个运行时），个数由用户的机器决定，不是界面能定下的：
+   * 不设 6 个的上限，下限照旧。界面自己列出的选项组不要开它，超过 6 个应改用 Select。
+   */
+  openEnded?: boolean;
 }
 
-export function RadioTile<T extends string>({ value, onChange, options, columns, ariaLabel, disabled = false, className }: RadioTileProps<T>) {
-  assertRadioCount("RadioTile", options.length);
+export function RadioTile<T extends string>({ value, onChange, options, columns, ariaLabel, disabled = false, className, openEnded = false }: RadioTileProps<T>) {
+  assertRadioCount("RadioTile", options.length, openEnded);
   const name = useGroupName("RadioTile", ariaLabel);
   const roving = useRovingGroup(options, value, onChange, disabled);
   const cols = columns ?? Math.min(options.length, 3);

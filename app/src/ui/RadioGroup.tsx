@@ -18,7 +18,12 @@ export interface RadioOption<T extends string> {
 export const RADIO_MIN_OPTIONS = 2;
 export const RADIO_MAX_OPTIONS = 6;
 
-export function assertRadioCount(component: string, count: number): void {
+/** openEnded：选项个数由运行时数据决定（见 RadioTile 的同名属性），只查下限。 */
+export function assertRadioCount(component: string, count: number, openEnded = false): void {
+  if (openEnded) {
+    if (count < RADIO_MIN_OPTIONS) throw new Error(`${component} 至少需要 ${RADIO_MIN_OPTIONS} 个选项，收到 ${count} 个`);
+    return;
+  }
   if (count < RADIO_MIN_OPTIONS || count > RADIO_MAX_OPTIONS)
     throw new Error(`${component} 需要 ${RADIO_MIN_OPTIONS} 到 ${RADIO_MAX_OPTIONS} 个选项，收到 ${count} 个`);
 }

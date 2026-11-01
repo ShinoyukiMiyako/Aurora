@@ -157,6 +157,8 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
           <RadioTile<string>
             className={s.javaList}
             ariaLabel={JAVA_COPY.defaultJava}
+            /* 注册表、PATH、常用目录与托管目录加起来，一台机器扫出六七个运行时并不少见 */
+            openEnded
             columns={tier === "wide" ? 2 : 1}
             value={write.value}
             onChange={write.set}
