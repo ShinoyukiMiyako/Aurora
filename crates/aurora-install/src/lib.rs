@@ -36,6 +36,7 @@ pub mod vanilla;
 
 mod dir_lock;
 mod net;
+mod process_tree;
 
 pub use complete::{CompletionReport, ensure_complete};
 pub use context::InstallContext;

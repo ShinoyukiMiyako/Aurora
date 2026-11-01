@@ -24,9 +24,15 @@ tracing = "0.1"
 # 版本 JSON 安装途中的临时名要带随机后缀，与 aurora-base 原子写同一选择。
 fastrand = "2"
 
-# 处理器输出按系统 ANSI 代码页解码（MultiByteToWideChar）。
+# 处理器输出按系统 ANSI 代码页解码（MultiByteToWideChar）；处理器放进 Job 对象，取消时连它的子进程一起结束。
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # 集成测试用 wiremock（需真正后台运行时），补 macros/rt-multi-thread；收尾时限的用例暂停时钟，补 test-util。

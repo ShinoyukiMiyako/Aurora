@@ -28,6 +28,7 @@ use crate::error::{Error, ProcessorOutput, Result, io_err, zip_err};
 use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
+use crate::process_tree::ProcessTree;
 use aurora_version::VersionJson;
 
 /// install_profile.json 模型（现代与 legacy 字段并存，按 `installer 是否含 install/processors` 分流）。
@@ -616,6 +617,10 @@ impl<'a> ForgeInstaller<'a> {
             .arg(&main_class)
             .args(&args);
         let mut child = command.spawn().map_err(launch_error)?;
+        // 放不进去只是退回到只结束处理器本身，不值得因此让安装失败
+        let _tree = ProcessTree::adopt(&child)
+            .inspect_err(|err| tracing::warn!(jar = %processor.jar, %err, "处理器的进程树没能接管"))
+            .ok();
         let capture = OutputCapture::start(&mut child);
         let status = match wait_or_kill(&mut child, self.cx.cancel).await {
             Ok(Some(status)) => status,
@@ -2740,6 +2745,64 @@ mod tests {
 
         assert!(err.is_cancelled(), "实际：{err:?}");
         assert!(!f.layout.version_dir("1.20.1-forge-47.2.0").exists());
+    }
+
+    /// 处理器自己起的子进程也要一起结束：否则它接着写产物、占着管道，返回之后实例锁已经放开了。
+    /// 孙进程活着时占着当前目录，目录删不掉，用这一点判断它还在不在。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_processor_ends_the_processes_it_started() {
+        use std::time::{Duration, Instant};
+
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let cwd = f.root.join("grandchild-cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let started = f.root.join("processor-started");
+        let java = f.root.join("spawning-java.cmd");
+        std::fs::write(
+            &java,
+            format!(
+                "@echo off\r\ncd /d \"{}\"\r\necho up> \"{}\"\r\nping -n 60 127.0.0.1 > nul\r\n",
+                cwd.display(),
+                started.display()
+            ),
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_cancel(Some(&token));
+        let forge = ForgeInstaller::new(cx, &java);
+        let attempt = forge.install_from_installer(&installer);
+        tokio::pin!(attempt);
+
+        let script_started = async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // 脚本写完标记才起 ping，给它一点时间
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        };
+        tokio::select! {
+            outcome = &mut attempt => panic!("处理器还在跑，安装不该结束：{outcome:?}"),
+            () = script_started => {}
+        }
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+        assert!(err.is_cancelled(), "实际：{err:?}");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while let Err(err) = std::fs::remove_dir(&cwd) {
+            assert!(Instant::now() < deadline, "孙进程还占着目录：{err}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     const DEPENDENCY: &str = "org.example:dep:1";
