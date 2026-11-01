@@ -14,6 +14,8 @@ export type CrashCategory =
   | "native_library_missing"
   | "graphics_driver"
   | "corrupted_jar"
+  /** Java 建不起本机回环连接。 */
+  | "loopback_unavailable"
   | "game_version_mismatch"
   | "optifine_incompatible"
   | "intel_graphics_driver"

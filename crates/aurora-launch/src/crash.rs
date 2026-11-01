@@ -42,6 +42,8 @@ pub enum CrashCategory {
     GraphicsDriver,
     /// 游戏或库文件损坏（jar 不完整 / 被修改）。
     CorruptedJar,
+    /// Java 建不起本机回环连接，用到网络选择器的 Mod 起不来，多半是临时目录的问题。
+    LoopbackUnavailable,
     /// 进程死在原生代码里而日志里没有已知原因；只由 JVM 错误头或退出码兜底产出，不进规则表。
     NativeCrash,
 }
@@ -290,6 +292,14 @@ const RULES: &[Rule] = &[
             aurora_base::app_name!(),
             "重新校验并补全文件，或删除损坏的 jar 后重新下载。"
         ),
+    },
+    Rule {
+        category: CrashCategory::LoopbackUnavailable,
+        patterns: &["unable to establish loopback connection"],
+        regex: None,
+        extract: None,
+        summary: "Java 建不起本机回环连接",
+        advice: "确认环境变量 TEMP 指向的文件夹存在、可写，路径不要太长；安全软件拦截时也会这样，可以把 Java 加入白名单再试。",
     },
 ];
 
@@ -879,6 +889,20 @@ mod tests {
         ] {
             assert_absent(log, CrashCategory::JvmArgsInvalid);
         }
+    }
+
+    /// Windows 上 NIO 的 Selector 靠临时目录里的 AF_UNIX 套接字建回环管道，用到 Netty 或 java.net.http 的 Mod
+    /// 在这里失败时只留下这一句。
+    #[test]
+    fn loopback_failure_points_at_the_temp_directory() {
+        let log = "Caused by: io.netty.channel.ChannelException: failed to open a new selector
+                   Caused by: java.io.IOException: Unable to establish loopback connection
+                   	at java.base/sun.nio.ch.PipeImpl.<init>(PipeImpl.java:175)";
+        let diags = analyze(log, Some(1));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::LoopbackUnavailable);
+        assert_eq!(diags[0].line, 1);
+        assert!(diags[0].advice.contains("TEMP"), "{}", diags[0].advice);
     }
 
     /// 真实 JVM 崩溃：写完 hs_err 后进程以退出码 1 结束，退出码兜底打不中。

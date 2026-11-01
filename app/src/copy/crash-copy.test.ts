@@ -24,9 +24,9 @@ const ACCESS_VIOLATION: ExitCodeNoteDto = { code: -1073741819, hex: "0xC0000005"
 const STACK_OVERRUN: ExitCodeNoteDto = { code: -1073740791, hex: "0xC0000409", kind: "stack_buffer_overrun", summary: "紧急中止" };
 
 describe("崩溃诊断文案", () => {
-  it("14 类诊断按后端规则优先级排好，各有标签与标题", () => {
-    expect(CRASH_CATEGORIES).toHaveLength(14);
-    expect(new Set(CRASH_CATEGORIES).size).toBe(14);
+  it("15 类诊断按后端规则优先级排好，各有标签与标题", () => {
+    expect(CRASH_CATEGORIES).toHaveLength(15);
+    expect(new Set(CRASH_CATEGORIES).size).toBe(15);
     expect(CRASH_CATEGORIES.map((c) => crashCategoryLabel(c))).toEqual([
       "Java 版本不匹配",
       "内存不足",
@@ -41,6 +41,7 @@ describe("崩溃诊断文案", () => {
       "Intel 显卡驱动",
       "显卡驱动",
       "文件损坏",
+      "本机连接失败",
       "进程异常退出",
     ]);
     expect(CRASH_CATEGORY.out_of_memory.title).toBe("游戏内存不够用了");
@@ -50,6 +51,7 @@ describe("崩溃诊断文案", () => {
     expect(CRASH_CATEGORY.optifine_incompatible.title).toBe("OptiFine 与当前加载器不兼容");
     expect(CRASH_CATEGORY.intel_graphics_driver.title).toBe("Intel 集成显卡驱动出错");
     expect(CRASH_CATEGORY.native_crash.title).toBe("游戏进程异常退出");
+    expect(CRASH_CATEGORY.loopback_unavailable.explain(BLANK)).toContain("TEMP");
   });
 
   it("JVM 自己接住原生异常时按错误头里的异常码解释，不拿退出码 1 说事", () => {

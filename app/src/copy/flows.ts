@@ -404,6 +404,7 @@ export const CRASH_CATEGORIES = [
   "intel_graphics_driver",
   "graphics_driver",
   "corrupted_jar",
+  "loopback_unavailable",
   "native_crash",
 ] as const;
 export type CrashCategoryName = (typeof CRASH_CATEGORIES)[number];
@@ -538,6 +539,11 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     label: "文件损坏",
     title: "游戏或 Mod 文件损坏",
     explain: () => "有 jar 文件不完整或被改动过。",
+  },
+  loopback_unavailable: {
+    label: "本机连接失败",
+    title: "Java 建不起本机连接",
+    explain: () => "用到网络的 Mod 起不来，这通常和临时目录有关。确认环境变量 TEMP 指向的文件夹存在、可写，路径不要太长；安全软件拦截时也会这样。",
   },
   jvm_args_invalid: {
     label: "JVM 参数有误",
