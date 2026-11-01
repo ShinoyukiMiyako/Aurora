@@ -36,12 +36,12 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | L1 | `aurora-auth` | 微软登录（设备码、XBL、XSTS、Minecraft 令牌）、离线账户、Yggdrasil 外置登录、DPAPI 凭据存储 | base |
 | L1 | `aurora-java` | 本机 Java 探测（托管目录、手动添加、注册表 HKLM 与 HKCU、JAVA_HOME、常见目录、PATH）与识别缓存、单次 `java -version` 限时 10 秒、运行时完整性检查、按主版本挑选（跳过不完整的）、Mojang 托管运行时的清单与安装计划 | base |
 | L1 | `aurora-download` | 单文件下载引擎（Range 分块、分片续传、按源重试）、批量并发池、换源调度、测速、主机熔断、吞吐看门狗、带作用域的下载凭据、取消令牌 | base |
-| L2 | `aurora-instance` | 实例发现、命名规则、实例设置、未完成标记、版本隔离判定、存档与资源包读取、移入回收站；只读写本地文件 | base, version |
+| L2 | `aurora-instance` | 实例发现、命名规则、实例设置、未完成标记、版本隔离判定、存档与资源包读取、存档备份的文件层（打包、清单、保留策略、恢复、改名搬运）、移入回收站；只读写本地文件 | base, version |
 | L2 | `aurora-install` | 原版、Fabric、Quilt、Forge、NeoForge 安装（含 Forge 处理器子进程），库、资源与 natives 补全 | base, version, download |
-| L2 | `aurora-modplatform` | Modrinth v2 与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存 | base, download |
-| L2 | `aurora-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录 | instance, version |
-| L3 | `aurora-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector）、游戏进程管理、会话日志、崩溃判定 | base, auth, version, instance |
-| L4 | `aurora-core` | 门面 `Aurora`：配置、实例、安装、整合包、Mod 与历史、发现、Java、账户、启动、崩溃诊断、游玩统计、新闻、服务器状态、外观、自更新检查 | 以上全部 |
+| L2 | `aurora-modplatform` | Modrinth v2 与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存、CurseForge 的 CDN 下载凭据与文件指纹 | base, download |
+| L2 | `aurora-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录；把导出清单写成 `.mrpack` 并回读校验 | instance, version |
+| L3 | `aurora-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector、Quick Play）、游戏进程管理、会话日志、崩溃判定与退出码对照、启动前提醒的判断 | base, auth, version, instance |
+| L4 | `aurora-core` | 门面 `Aurora`：配置、实例、安装、下载源计划、整合包导入与导出、受限文件认领、Mod 与历史、发现、Java、账户、启动、崩溃诊断、存档备份、新实例默认设置与开局 Mod、游玩统计、新闻、服务器状态、外观、自更新检查 | 以上全部 |
 | 外层 | `aurora-cli` | 调试命令行，用于端到端冒烟 | core, base |
 | 外层 | `aurora-tauri` | 桌面外壳 | core, base |
 
@@ -151,13 +151,34 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 - `detail` 放分支需要的结构化参数（如 `field`、`rule`、`activity`、`path`）和完整原因链，用于「复制错误原文」和排查问题。
 - 网络层失败另在 `detail.network` 里标明是哪一种：`connect`（DNS 解析失败、连接被拒、TLS 握手失败）或 `timeout`。命令层沿原因链找到 HTTP 客户端的错误后判定（`aurora_base::http::network_failure`），不靠错误文本匹配。
 
+功能相关的错误码与它们的 `detail`（账户错误与启动失败码见「账户续期」）：
+
+| 码 | 什么时候报 | `detail` |
+| --- | --- | --- |
+| `curseforge_key_rejected` | CurseForge 拒绝了下载密钥（带密钥的那一跳回 401） | `{ realm: "curseforge", url, status }`，`url` 是被拒的那一跳 |
+| `distribution_blocked` | 作者不允许第三方下载的文件，要到网页手动下载 | `{ files }`，元素形状同 `claim_blocked_files` 的入参 |
+| `modpack_unsupported_compression` | 要解的条目用了不支持的压缩方式 | `{ path, entry, method }` |
+| `modpack_export_unsupported` | 这个实例写不成 `.mrpack` | `{ id, reason, loader? }`，`reason` 取 `version_unknown`、`loader_unsupported`、`loader_version_unknown`、`multiple_loaders`、`incomplete` |
+| `modpack_export_check_failed` | 导出的包没通过回读校验，产物已删除 | `{ path, reason }` |
+| `template_source_empty` | 实例工作目录里没有可保存的设置文件 | `{ id, files }`，`files` 为白名单 |
+| `world_backup_not_found` | 要恢复或删除的备份不在清单里，或已不在盘上 | `{ id, world, file }` |
+| `world_backup_corrupt` | 备份读不出、有越界或符号链接条目、解出来没有可读的 level.dat；现在的存档没动 | `{ path, reason, entry? }` |
+| `world_in_use` | 存档正被游戏打开（`session.lock` 被占着） | `{ path }` |
+| `world_restore_incomplete` | 原存档已进回收站，恢复出的副本没能放到位 | `{ path, staged }`，`staged` 是唯一解出来的副本，不删 |
+| `world_backups_not_moved` | 改名已完成，只差存档备份没挪过去，前端照成功处理再提示 | `{ id, renamed_to, path }`，`path` 是留在旧名下的备份目录 |
+| `server_not_pinned` | 要改的服务器不在固定列表里 | `{ address }` |
+| `quick_play_unsupported` | 实例的版本不支持这种直达方式 | `{ version_id, mode }`，`mode` 取 `singleplayer`、`multiplayer` |
+| `java_path_invalid` | 手动添加的路径不是可用的 java 可执行文件 | `{ path, reason }` |
+| `java_runtime_incomplete` | 手动添加的 Java 缺运行时文件 | `{ path, missing }` |
+| `gpu_query_failed` | 枚举显卡失败 | `{ hresult, causes }` |
+
 前端的 `ipc/errors.ts` 把所有 rejection 统一成 `IpcError`。Tauri 自身产生的纯字符串错误归为 `unknown`。
 
 `download_update` 在两种情况下报 `update_not_available`：还没检查到更新；下载期间又检查了一次、换了版本或已无更新（`message` 写明新旧版本）。后者这次下载的包已丢弃，不会配着新版本的信息在退出时或立即安装时装上旧包，按最新的检查结果重新下载即可。
 
 ### 长任务
 
-需要较长时间的命令（新建实例、补全、导入整合包、装 Mod 与资源、更新 Mod、装 Java、启动游戏）都带一个由前端分配的 `task_id`。启动游戏的 `task_id` 只作为加载阶段的取消句柄使用，不进入前端的下载队列，阶段进度经 `aurora://launch-phase` 推送。
+需要较长时间的命令（新建实例、补全、导入与导出整合包、装 Mod 与资源、更新 Mod、装 Java、备份、恢复与导出存档、启动游戏）都带一个由前端分配的 `task_id`。启动游戏的 `task_id` 只作为加载阶段的取消句柄使用，不进入前端的下载队列，阶段进度经 `aurora://launch-phase` 推送。
 
 1. 命令开头调用 `TaskRegistry::register`。同一个 id 已在运行时报 `task_conflict`。
 2. 进度通过 `aurora://core-event` 推送，负载里带 `task_id`，前端的下载队列据此把进度归到对应任务。作为组合任务的一项调用时（见下文），命令另收可选参数 `step`（第几项，从 0 计），原样标在这次调用的每条事件上。
@@ -194,7 +215,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 备份、导出与恢复存档只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交，所以兼容；游戏开着时存档随时在写，所以与启动、运行互斥。导出整合包对外是 `modifying`，但可能把存档一起打包，与备份、恢复另有两条互斥：实例报着 `backing_up` 时导出报 `instance_busy`；勾了存档时导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出，`ensure_saves_not_read`），只读存档的备份与导出存档不受影响。两边都先写自己的记录再查对方，同时发起时至少挡下一方。导出整合包与运行中的游戏兼容：勾了存档时读到的是游戏此刻盘上的存档，`session.lock` 跳过。不隔离的实例共用游戏目录的 saves，实例锁只管自己这个实例，所以这些检查还要看共用同一份存档的别的实例：别的实例正开着游戏时备份、导出或恢复这份存档，别的实例占着 `backing_up` 时启动或导出整合包，别的实例正把存档读进整合包时恢复，都报 `instance_busy`，`detail.id` 指向挡路的那个实例。
 
-`install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。CurseForge 上禁止第三方分发的文件，装 Mod、装资源与导入整合包都报 `distribution_blocked`（带文件名），空白的 `downloadUrl` 按缺失处理、先走 download-url 兜底。
+`install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。CurseForge 上禁止第三方分发的文件，装 Mod、装资源与导入整合包都报 `distribution_blocked`（`detail.files` 列出每个文件，认领见「导入与导出整合包」），空白的 `downloadUrl` 按缺失处理、先走 download-url 兜底。
 
 聚合搜索某个平台这一页请求失败时，下一页游标里这个平台原地不动，先前记下的吸收项（已并进合并卡、还排在偏移之后的工程 id）照旧带着，重试那一页时这些工程不会作为单平台条目再出现一次。
 
@@ -206,7 +227,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 安装 Mod 的依赖解析沿用实例里已装的前置时，那一版在平台上下架（`mod_version_not_found`）不再让整个计划失败：按已满足处理，计划项带 `delisted: true`，版本视图由卷宗拼出（版本 id、工程、平台、文件名、版本号可信，其余平台元数据为空），下层前置不展开，也不去平台另挑一版顶替；钉了版本、实例装的正是那一版时同样处理，装的是别的版本时仍报指定的版本已不存在。其余平台错误与网络故障照常冒泡。没有 CurseForge API key 时 `check_updates` 跳过 CurseForge 来源的那一段，照常给出 Modrinth 部分的结果。扫描 mods 目录时读不了的 jar（被占用、打开失败等瞬时 IO 错误）不把「无元数据」写进缓存，下一轮重新解析；CRC 不符、压缩流损坏、文件截断这类同一份字节每次都失败的照常缓存。
 
-`launch_game` 带必填参数 `offlineFallback`，出参为 `{ pid, offline }`。为 true 时以离线方式进单人：不刷新也不校验登录，不下载、不注入 authlib-injector，用账户上次登录时的档案名与 uuid 加离线令牌（`accessToken` 为 `0`，`userType` 为 `legacy`）进游戏，只保证单人游戏，账户库不写；启动器日志记一条警告。能否放行由门面凭自己记下的「这个账户最近一次账户类启动失败」判定，不信前端：记录挂在 `Aurora` 的共享句柄上，只在内存里，快照共用、重开门面即清空，判定时取出即消耗，经验证跑起来的一局清掉它；只记 `account_relogin`、`account_refresh_network`、`account_service_down` 三种失败码，续期原样报出的账户错误、取消、文件或 Java 失败都不动它。上次是 `account_service_down` 或 `account_refresh_network` 才放行；离线账户、已失效账户、上次是 `account_relogin` 或没有记录时报 `invalid_argument`，`detail` 为 `{ field: "offlineFallback", reason, account }`，`reason` 取 `offline_account`、`relogin_required`、`no_recent_failure`。降级启动与普通启动走同一条阶段链路，取消与实例互斥不变。
+`launch_game` 带必填参数 `offlineFallback` 与 `quickPlay`（普通启动传 false 与 null，`quickPlay` 见「直达游戏」），出参为 `{ pid, offline }`。`offlineFallback` 为 true 时以离线方式进单人：不刷新也不校验登录，不下载、不注入 authlib-injector，用账户上次登录时的档案名与 uuid 加离线令牌（`accessToken` 为 `0`，`userType` 为 `legacy`）进游戏，只保证单人游戏，账户库不写；启动器日志记一条警告。能否放行由门面凭自己记下的「这个账户最近一次账户类启动失败」判定，不信前端：记录挂在 `Aurora` 的共享句柄上，只在内存里，快照共用、重开门面即清空，判定时取出即消耗，经验证跑起来的一局清掉它；只记 `account_relogin`、`account_refresh_network`、`account_service_down` 三种失败码，续期原样报出的账户错误、取消、文件或 Java 失败都不动它。上次是 `account_service_down` 或 `account_refresh_network` 才放行；离线账户、已失效账户、上次是 `account_relogin` 或没有记录时报 `invalid_argument`，`detail` 为 `{ field: "offlineFallback", reason, account }`，`reason` 取 `offline_account`、`relogin_required`、`no_recent_failure`。降级启动与普通启动走同一条阶段链路，取消与实例互斥不变。
 
 微软登录链各步（设备码、轮询、刷新令牌、XBL、XSTS、Minecraft 登录、档案）与外置验证服务器的认证、刷新、校验、登出遇到 5xx、429 或故障页时，先判状态码再解析响应体，按退避重试过仍不行就报 `ServiceUnavailable`，`detail` 为 `{ step, status }`；它的原因链上没有 HTTP 客户端错误，不带 `detail.network`，不触发连通性探测。启动续期遇到它时失败码为 `account_service_down`，账户库不动；只有服务器明确判定凭据失效（`account_relogin`）才把账户标成需要重登。Minecraft 服务以 403 且响应体含 Invalid app registration 拒绝启动器所用的微软应用时报 `AppNotApproved`，不重试、不带 `detail`；重新登录解决不了，启动续期遇到它时按账户错误码原样报出。
 
@@ -228,6 +249,72 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 `prefer_dedicated_gpu` 开着时，启动在定下 Java 之后、拉起游戏之前，把这次用的 java 可执行文件写进当前用户的 `Software\Microsoft\DirectX\UserGpuPreferences`（Windows 图形设置记按程序显卡偏好的位置）：值名是完整路径，取值里的 `GpuPreference` 改成 `2`（高性能），其余片段原样保留，已经是高性能时不写。写不进去只在启动日志里记一条警告，游戏按 Windows 默认的显卡启动；关掉开关不撤销已写的值。
 
+### 存档备份
+
+备份放在游戏目录的元数据区（路径见「磁盘布局」），不放进实例目录：删除实例、重装启动器都不会带走备份，而且与存档同盘。`aurora-instance` 的 `world_backup` 只做文件操作，`aurora-core` 的 `world_backup.rs` 负责解析存档归属、进程内排队、进度与取消。快照之间共享两把锁：按存档备份目录的锁在整个备份、恢复、导出、删除期间持有，备份根的锁在清单读改写与清理期间持有。不隔离的实例共用同一份存档，靠它们排队，等锁期间响应取消。
+
+| 命令 | 长任务 | 占用 | 说明 |
+| --- | --- | --- | --- |
+| `backup_world` | 是 | `backing_up` | 手动备份 `saves/<world>`，出参 `{ backup, pruned }` |
+| `list_world_backups` | 否 | 不占 | 新的在前；存档文件夹已经不在也照常列出；`scope` 为 `instance` 或 `shared` |
+| `restore_world_backup` | 是 | `backing_up` | 用一份备份替换现在的存档，出参 `{ world, previous_in_recycle_bin }` |
+| `delete_world_backup` | 否 | 不占 | zip 移入回收站再从清单摘掉；只碰备份区，与同一存档的备份、恢复由门面排队 |
+| `export_world` | 是 | `backing_up` | 打包到系统保存对话框选的 `.zip`，已存在则覆盖；出参 `{ path, size_bytes }`，写成的路径记进 `ExportedFiles`，「打开所在文件夹」才放行 |
+
+三个长任务开头相同（`begin_world_task`）：占住 `backing_up`，查共用存档有没有被别的实例的游戏占着，恢复还要查有没有导出整合包在读存档，最后登记任务。被拒的调用不占任务 id。
+
+- 打包：一层存档文件夹加其内容，deflate 压缩，跳过 `session.lock`（游戏持有排他锁，读不出来，恢复后游戏也会重建）。备份先写 `.part`，打包前先确认清单读得懂，打完记不进清单时删掉刚打好的 zip 再报错。存档是否被游戏打开靠试拿 `session.lock` 的排他锁判断（`world_in_use`）：1.16 起游戏持有这把锁，更早的版本探测不到，靠实例互斥兜底。
+- 恢复：先把条目全部校验一遍（越界、绝对路径、盘符、符号链接、Windows 上不能落盘的名字、多个顶层目录都拒绝，报 `world_backup_corrupt`），解到同级临时目录 `<saves>/<存档>.petalfall-restore`，确认 level.dat 读得出，再把现在的存档交给回收站，最后改名就位。取消或失败时现在的存档原样不动。原存档已进回收站、改名失败时报 `world_restore_incomplete`，临时目录保留。
+- 自动备份：`world_backup.auto` 开着时，游戏退出后监控任务把实例的 `running` 原地转成 `backing_up`，放开占用槽，推 `aurora://game-exit`，再备份这一局进过的存档（level.dat 修改时刻晚于会话开始，`auto_backup_after_session`），做完才放开实例与基底，推 `aurora://world-backup`。这条事件每局都推，没进过存档时两个列表都空：前端靠它知道实例已放开。自动备份不是前端发起的任务，不挂取消令牌。单个存档失败只进 `failed`，整场没能开始时 `world` 为 `*`，都记 error 日志。
+- 保留策略（`plan_prune`）：只在自动备份开着时清理，只删自动备份。先按每个存档留最新的 `keep_per_world` 份，全部备份（含手动）总量仍超过 `max_total_gb` 时，按时间从旧到新继续删自动备份，直到不超或没有可删的。刚写成的那一份不删。清理失败只发一条告警，下次再试。`update_config` 收 `worldBackup` 时校验 `keep_per_world` 为 1 到 50、`max_total_gb` 为 1 到 1000，超出报 `invalid_argument`（`detail` 为 `{ field, value }`）。
+- 改名与删除：隔离实例改名时 `instances/<旧名>` 并进 `instances/<新名>`（`merge_scope_dir`，撞名时毫秒加 1），共用存档的备份不动。没挪成报 `world_backups_not_moved`。删除实例不删备份，`preview_instance_deletion` 带上 `backups_dir` 与 `backup_count`。
+
+前端的任务类型是 `world_backup`（备份与导出存档）与 `world_restore`。
+
+### 新实例的默认设置与开局 Mod
+
+默认设置（模板）放在 `<数据目录>/templates/default/`，只认白名单里的文件（`TEMPLATE_FILES`：`options.txt`、`servers.dat`、`optionsof.txt`、`optionsshaders.txt`），手放的别的东西不会带进实例。
+
+- `save_instance_as_template(id)` 占 `modifying`，从实例工作目录复制白名单文件，一个都没有时报 `template_source_empty`。文件先写暂存目录、再整体换下旧目录，中途失败时旧模板完好，上次中断留下的半成品下次读写时恢复。
+- `template_info` 给出 `{ present, files, source_instance, saved_at, enabled }`，`clear_template` 清空，两者与保存都返回这个形状。
+- 套用（`Aurora::apply_template`）只补缺：实例里已有的文件原样不动，键位也不逐行合并。`install_version` 带 `useTemplate: true` 时在实例装好后套用，结果在出参的 `template` 里；缺省按 false，旧任务表里重放的新建任务没有这个键。整合包导入在解出覆盖文件之后套一次，包里自带的 `options.txt` 以包为准，缺的文件由模板补上。不隔离的实例共用游戏目录根下的设置，跳过；`new_instance_template` 关掉时一律跳过。
+
+`starter_mods(loader, mcVersion)` 按 `starter.rs` 里每个加载器一张的小表（前置 API 与性能优化，只记 Modrinth 工程 id）逐项查适配版本，出参 `{ loader, mc_version, available, missing }`，两张表都按开局表的顺序。版本走 5 分钟的版本缓存，只收兼容判定为确凿匹配的版本。工程在平台上不存在（404）或没有适配版本时进 `missing` 并写明原因；其他失败让整个调用失败，不交回半张表。认不出的加载器、LiteLoader 与空的 MC 版本报 `invalid_argument`。勾选的开局 Mod 在实例就绪后由组合任务 `install_mods` 安装，这一步失败不影响实例本身。
+
+### 直达游戏（Quick Play）
+
+`launch_game` 的参数 `quickPlay` 让游戏起来后直接进入存档或加入服务器，取值为 `{ kind: "singleplayer", world_dir_name }`、`{ kind: "multiplayer", address }`，普通启动传 `null`；多余的字段直接报错。`world_dir_name` 是 `saves/` 下的文件夹名，不是存档里写的显示名。
+
+- 支持与否只看版本 JSON（`aurora_launch::quick_play_support`），不按版本号判断：`arguments.game` 里有以 `is_quick_play_singleplayer`、`is_quick_play_multiplayer` 为条件的参数块就置上对应 feature 并填入占位符。Realms 与记录路径两个 feature 永远不置。实例列表的 `quick_play`（`{ singleplayer, multiplayer }`，继承链断了或损坏时为 null）让前端提前禁用入口。
+- 没有这些块、但启动参数是 joptsimple 形式的版本（新式 `arguments.game`，或旧式参数里有 `--username`），多人改为追加 `--server <host> --port <port>`（`legacy_server_args`）。`minecraftArguments` 的版本先拼 `--width` / `--height`，后拼 `--server` / `--port`，都在玩家自定义参数之前。单人报 `quick_play_unsupported`；更早的位置参数式版本两种都不支持。
+- 校验放在校验游戏文件阶段：版本不支持报 `quick_play_unsupported`，存档不在报 `world_not_found`，地址写错报 `invalid_argument`（`detail.address`），不会先下载一堆文件再告诉玩家进不去。
+- 主页固定的服务器可以记住「加入」用的实例（`PinnedServer.instance`）。`set_pinned_server_instance(address, instance)` 按地址的身份找固定项（没写端口等于 25565），只改配置、不占实例，返回整份固定列表；不在列表里报 `server_not_pinned`，实例不存在报 `version_not_installed`。实例改名时绑定跟着改，删除时清空。
+
+`offlineFallback` 与 `quickPlay` 可以同时传。前端以离线方式进单人时沿用失败那一局的单人直达目标，服务器目标丢掉，按普通启动进标题画面：离线方式只保证单人游戏。
+
+### 导入与导出整合包
+
+导入：
+
+- `preview_modpack` 除清单概况外列出 `mods`（导入后落进 `mods/` 的每个文件）、`optional_extras`（不直接落进 `mods/` 的可选文件）与 `blocked_files`（还没认领到的受限文件）。Modrinth 清单里 `env.client` 为 `optional` 的文件算可选。`install_modpack` 的可选参数 `excludedOptional` 列出取消勾选的文件（取预览给的 `path`），它们不进下载计划；列的不是可选文件时报 `invalid_argument`，清单不变。
+- 条目名解码（`aurora-modpack` 的 `archive.rs`）：依次按 UTF-8、GBK、CP437 解。zip 库只看 UTF-8 标志，没有标志就按 CP437 解，而中文系统上的老打包工具（资源管理器的压缩文件夹、旧版 WinRAR）不设标志、写的是 GBK。解码后才判重，同一层里解码后同名的条目报 `modpack_manifest_invalid`，不互相覆盖。平台整合包摘要自己读中央目录，用同一个 `decode_entry_name`，数出来的 Mod 与本地读包一致。
+- 压缩方式：`zip` 依赖只开纯 Rust 后端（deflate、deflate64、bzip2、lzma、xz、ppmd、shrink / reduce / implode），不开 zstd（要编 C）。列条目时用 `by_index_raw`，不建解压器：不在覆盖层里的条目用什么压缩方式都与安装无关。真正要解的条目在读包时先打开一次，不支持的方式报 `modpack_unsupported_compression`，不拖到装到一半，也不再说成文件损坏。
+- 受限文件：作者不允许第三方下载的文件在本地预览阶段就查出来列进 `blocked_files`，`distribution_blocked` 的 `detail.files` 给出同样的清单（`project_id`、`file_id`、`file_name`、`web_url`、`destination`、`sha1`、`fingerprint`、`size`）。用户到网页下载后，`claim_blocked_files(folder, files)` 从所选文件夹认领：只看顶层的普通文件，文件名相同（不分大小写）或大小正好相同的才算候选（浏览器会把重名下载改成 `foo (1).jar`），按 sha1、没有 sha1 时按 fingerprint 校验，校验过的副本复制进暂存位，用户文件夹里的原文件不动，不联网、不占实例。出参 `{ claimed, missing }`。暂存位按文件 id 分、不按整合包分，导入后也不删，同一个文件在别的整合包里能直接用。`downloads_folder` 给出系统下载文件夹作为默认位置。认领后重走导入；单装的 Mod 与资源认领过时同样改用暂存副本。
+
+导出（`aurora-core` 的 `export.rs`、`aurora-modpack` 的 `writer.rs`）：
+
+- `preview_modpack_export(id)` 只读，不占实例、不登记任务，要联网问 Modrinth；给出能不能导出、默认名称与版本、哪些 Mod 走索引、哪些要打包、各额外项的大小。导出总是按此刻的盘面重新规划，不信任前端带回的清单。
+- `export_modpack(taskId, id, options)` 是长任务，任务类型 `modpack_export`，占 `modifying`，进度经 `aurora://core-event`。`options` 的键用 snake_case（`destination`、`name`、`version`、`summary`、`extras`、`include_disabled`），写错的键直接失败，`destination` 须是扩展名为 `.mrpack` 的绝对路径。
+- Mod 的去向：mods 目录直接子项里启用的 jar 逐个算 sha1。卷宗记为 Modrinth 的先按版本 id 取回版本、在文件里认 sha1，认不出的、卷宗没有的、卷宗是 CurseForge 的再按哈希反查。查到、且平台给的 sha512、大小与下载地址都能写进清单的只写索引，其余的原样打包进 `overrides/`，并在结果里列出来。清单里的下载地址只收 Modrinth 格式约定的四个主机，CurseForge 的地址不写。停用的 Mod 由 `include_disabled` 决定，带上时以停用状态打包。
+- 额外项（`extras`）只从白名单收集：`config`、`defaultconfigs`、`kubejs`、`resourcepacks`、`shaderpacks`、`options`、`saves`，存档默认不选。跳过启动器元数据目录、`.old` 备份、`session.lock`、符号链接与目录联接；日志、崩溃报告、natives、版本 jar 与 JSON 不在白名单里，结构上进不了包。
+- 落位：先写到目标旁边的临时文件，用读包的同一套代码读回来逐项比对，通过后才改名到目标位置；回读不过报 `modpack_export_check_failed`。失败或取消时临时文件已删，目标文件不动，取消宽限期满时由命令层在任务之外清掉（`ModpackExportTarget::discard`）。写成的路径记进 `ExportedFiles`。
+
+### 崩溃诊断与启动提醒
+
+诊断不只看会话日志，还扫这一局留下的两份文件（`crashdiag.rs`）：工作目录下 pid 对得上、修改时间不早于会话开始的 `hs_err_pid<pid>.log`，以及 `crash-reports/` 下会话开始后最新的一份崩溃报告。Forge 崩溃报告的 Suspected Mods 段并入可疑 Mod，对到 mods 目录里的文件。`last_crash` 的报告带 `exit_code_note`（退出码对照：`0xC0000005`、`0xC0000409` 与 1，表外的码为 null）与 `scanned_files`（参与扫描的文件），线索带来源。规则一条都没命中、退出码是访问冲突或紧急中止时，给出类别 `native_crash` 的线索；退出码 1 太笼统，只给说明不给线索。`last-crash.json` 的格式版本是 2，旧的 1 版照常读。
+
+启动前的几项判断只提醒、不阻断（`aurora_launch::precheck`），写进启动日志，也记进这一局的崩溃报告（`warnings`）：`game_path`（路径含非 ASCII 或 `!`）、`onedrive_folder`、`icloud_folder`（工作目录在同步文件夹里）、`long_player_name`（角色名超过 16 个字符而游戏是 1.20.3 或更新）、`jvm_memory_unit`、`jvm_min_over_max`、`jvm_max_too_low`（自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法不对、最小堆大于最大堆、最大堆低于 512 MB）。
+
 ### 事件
 
 | 事件 | 负载 |
@@ -236,6 +323,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `aurora://launch-phase` | 启动阶段与阶段内的下载进度 |
 | `aurora://game-log` | 启动器日志与游戏进程的 stdout / stderr，成批推送 |
 | `aurora://game-exit` | 游戏退出（收尾记账已写完）：退出码、是否崩溃、是否由启动器结束 |
+| `aurora://world-backup` | 游戏退出后的自动备份做完了：`{ instance_id, backed_up, failed }`，`failed` 的元素为 `{ world, error }`；开着自动备份时每局都推 |
 | `aurora://device-code` | 微软设备码登录的 user_code 与验证网址 |
 | `aurora://art-changed` | 原版材质源或全景的可用性变化，前端据此清空位图缓存并重绘 |
 | `aurora://window-drop` | 拖进、拖出、松开在主窗口上：`{ type: "enter" \| "drop", content }` 或 `{ type: "leave" }`，`content` 为 `{ kind: "files", paths }` 或 `{ kind: "auth_server", url }` |
@@ -260,7 +348,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 - `style-src` 保留 `'unsafe-inline'`：framer-motion 的 `AnimatePresence mode="popLayout"` 会插入一个空 `<style>` 再 `insertRule`，严格策略下退出中的元素不再脱离文档流。React 与 framer-motion 改行内样式走 CSSOM，不受 `style-src` 约束。
 - 桌面端 `pnpm tauri dev` 直接加载开发服务器，不注入策略；涉及策略的改动要用 `pnpm tauri build --debug --no-bundle` 产出的构建验证。
 
-主窗口的能力文件（`capabilities/default.json`）不用 `core:default`，只逐条授予前端实际调用的命令：事件的 listen、unlisten；窗口的 is_maximized、is_minimized、is_focused、minimize、toggle_maximize、internal_toggle_maximize（拖动区双击）、close、destroy、start_dragging、show、request_user_attention；webview 的 internal_toggle_devtools（只编译进调试构建）；opener 与 dialog 见下文。其余命令都会被拒（`<plugin>.<cmd> not allowed`）：新调用 `@tauri-apps/api` 的其他接口（例如 setTitle、emit、path、app.getVersion）时要在能力文件里加上对应的 allow 项，并同步 `window.rs` 的能力测试。`window.rs` 另有一条策略回归测试，删掉策略或误放开时必挂。
+主窗口的能力文件（`capabilities/default.json`）不用 `core:default`，只逐条授予前端实际调用的命令：事件的 listen、unlisten；窗口的 is_maximized、is_minimized、is_focused、minimize、toggle_maximize、internal_toggle_maximize（拖动区双击）、close、destroy、start_dragging、show、request_user_attention；webview 的 internal_toggle_devtools（只编译进调试构建）；opener 与 dialog 见下文。其余命令都会被拒（`<plugin>.<cmd> not allowed`）：新调用 `@tauri-apps/api` 的其他接口（例如 setTitle、emit、path、app.getVersion）时要在能力文件里加上对应的 allow 项，并同步 `window.rs` 的能力测试：它把能力文件的全集与期望清单（现为 18 条）比对，多一条少一条都挂。`window.rs` 另有一条策略回归测试，删掉策略或误放开时必挂。
 
 真机验证时不碰本机的真实数据：把 `LOCALAPPDATA`（数据目录）、`APPDATA`（默认游戏目录）与 `WEBVIEW2_USER_DATA_FOLDER`（WebView2 用户数据目录；Tauri 定位它用的是已知文件夹 API，不认 `LOCALAPPDATA`）都指到系统临时目录；需要远程调试时经 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<端口>` 追加参数。
 
@@ -282,7 +370,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 `ipc/bridge.ts` 是全项目唯一引入 `@tauri-apps/api/core` 和 `@tauri-apps/api/event` 的文件。它在每次调用时判断运行环境：在 Tauri 窗口里走真实命令；在纯浏览器（`pnpm dev`）和 vitest 里，动态加载 `ipc/mock`。模拟后端尽量复刻真实后端的参数校验、错误码和状态变化，方便调界面和测试前端，但不能替代 Rust 侧的测试。真机运行时不会加载这个分块。
 
-插件命令（如 `plugin:opener|open_url`）同样经 `bridge.ts` 调用，模拟后端有同名的处理。`bridge.test.ts` 检查模拟后端的命令与 `generate_handler!` 注册的命令一一对应，插件命令则必须在 `capabilities/default.json` 里有对应的权限。opener 插件只授予 `opener:allow-open-url` 与 `opener:allow-default-urls`（http、https、mailto、tel），不用 `opener:default`：它连带授予不受路径范围约束的 `reveal_item_in_dir`。打开文件夹走后端的 `open_folder`；在文件管理器里定位并选中走后端的 `reveal_in_folder`，只放行启动器自己产出的路径（当前游戏目录的存档备份区，这次运行里导出的存档与整合包），别的路径报 `invalid_argument`。dialog 插件只授予 `dialog:allow-open` 与 `dialog:allow-save`（`shell/platform.ts` 的选择文件与保存文件对话框）。
+插件命令（如 `plugin:opener|open_url`）同样经 `bridge.ts` 调用，模拟后端有同名的处理。`bridge.test.ts` 检查模拟后端的命令与 `generate_handler!` 注册的命令一一对应，插件命令则必须在 `capabilities/default.json` 里有对应的权限。opener 插件只授予 `opener:allow-open-url` 与 `opener:allow-default-urls`（http、https、mailto、tel），不用 `opener:default`：它连带授予不受路径范围约束的 `reveal_item_in_dir`。打开文件夹走后端的 `open_folder`；在文件管理器里定位并选中走后端的 `reveal_in_folder`，只放行启动器自己产出的路径（当前游戏目录的存档备份区，这次运行里导出的存档与整合包），别的路径报 `invalid_argument`。dialog 插件只授予 `dialog:allow-open` 与 `dialog:allow-save`（`shell/platform.ts` 的选择文件与保存文件对话框）。保存对话框只有 `pickSaveFile` 一份实现，页面经两条路拿到它：外壳的 `useShell().saveFile`（导出整合包），`App.tsx` 注入的 `PickSaveFileProvider`（`pages/instance/save-file.ts`，导出存档）。
 
 开发构建在纯浏览器里运行时，`main.tsx` 在第一条命令之前调用 `enableMockPersistence(localStorage, APP_SLUG)`：首次启动是否完成、配置、外观、账户、实例、Mod 与 Java 探测结果的状态存进键 `<slug>.mock.<领域>`，刷新页面后接着上次的状态。存下的数据读不出或快照版本不符时启动直接报错，在控制台执行 `__sk.resetMockData()` 恢复种子数据并刷新。vitest 不启用持久化。
 
@@ -350,7 +438,18 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `java-probe-cache.json` | Java 识别缓存，按可执行文件指纹记录识别结果与识别失败的原因（`exec` / `timeout` / `parse`）。全量探测时，指纹没变、失败不到 10 分钟的候选不再拉起 JVM；单个识别（启动取 Java、添加 Java）不看失败记录。运行时文件是否齐全不进缓存，每次现查 |
 | `runtime/<主版本>/` | 托管 Java 运行时 |
 | `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件 |
-| `cache/` | 下载缓存（例如平台整合包，导入结束后删除） |
+| `cache/` | 下载缓存（例如平台整合包，导入结束后删除）；`modpacks/claims/curseforge-<文件 id>/<文件名>` 是认领到的受限文件，导入后不删。设了 `cache_directory` 时改在那里 |
+| `templates/default/` | 新实例的默认设置：白名单里的文件加元数据 `template.json`（来源实例、保存时刻） |
+
+`config.json` 里新增的字段都带默认值，旧文件照常读入：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `extra_java_paths` | 空 | 手动添加的 Java，一律存成规范化后的 java.exe 路径，只经 `add_java_path` / `remove_java_path` 改 |
+| `prefer_dedicated_gpu` | `false` | 启动前把这次用的 Java 设为 Windows 图形设置里的高性能 |
+| `new_instance_template` | `true` | 新实例是否沿用默认设置。不进 `ConfigDto`，读取经 `template_info.enabled`，没有写入命令 |
+| `world_backup` | `{ auto: true, keep_per_world: 5, max_total_gb: 20 }` | 存档备份。段里不认识的键读入时保留、落盘时写回 |
+| `pinned_servers[].instance` | 无 | 「加入」时记住的实例 id。条目层不认识的键不保留 |
 
 ### 游戏目录
 
@@ -367,10 +466,23 @@ versions/<实例名>/
     ├── ledger.json        Mod 卷宗：mods 目录里每个 jar 的平台来源与版本
     ├── history.json       Mod 变更历史，只追加，作为回滚的凭据
     ├── modpack.json       从整合包导入的实例记录的整合包信息
+    ├── last-crash.json    最近一次崩溃报告
     └── staging/           装 Mod 时的暂存区（不隔离的实例改用游戏目录下的 .petalfall/staging）
 ```
 
 卷宗与历史始终跟着实例目录走，不随隔离设置变化。否则关掉隔离之后，几个实例会共用同一份记录。
+
+存档备份放在游戏目录根下的元数据区，与实例目录分开：
+
+```
+.petalfall/backups/
+├── instances/<实例 id>/<存档文件夹名>/   隔离实例的存档
+│   ├── index.json                        备份清单（格式版本 1，经原子写入）
+│   └── <unix 毫秒>-<auto|manual>.zip
+└── shared/<存档文件夹名>/                不隔离的实例共用 saves 的存档
+```
+
+名叫 shared 的实例也撞不上共用作用域。清单里不记实例 id，实例改名只挪目录。
 
 - **未完成标记**：新建实例、补全和整合包导入都使用同一种格式（`kind` 为 `install`、`repair` 或 `modpack`，另有 `outcome`、`started_at`、`error`）。列表据此显示「安装没有完成」之类的原因。补全据此决定怎么处理：`install` 按记下的内容重装，`repair` 补齐文件，`modpack` 报不可补全并提示重新导入。
 - **Mod 备份与回滚**：更新 Mod 时，旧文件改名为 `<文件名>.old` 保留在 mods 目录。同名备份已存在时取 `<文件名>.2.old`、`.3.old`，依次类推。实际的备份名记在历史事件的 `backup_file` 里。一个 Mod 连续更新形成一条链，只能从最近的一次往回滚。
