@@ -243,20 +243,24 @@ pub async fn scan_mods_dir_cached(
 /// 元数据」缓存下来，这个 jar 在文件被改动之前会一直显示为无元数据。zip 读出的 io 错误里，数据本身
 /// 坏掉的三种（校验和不对、压缩流损坏、文件被截断）对同一份字节每次都一样，与描述文件内容损坏一样
 /// 是确定性的结果，可以缓存。
+///
+/// 打开失败与 zip 读出的 io 错误按同一条线分：描述文件内容不对也会以 io 错误报出（mods.toml 不是合法
+/// UTF-8 时报 `InvalidData`），只看错误类别的话，这个 jar 每一轮扫描都会被重开重解析。
 fn is_transient_read_failure(error: &Error) -> bool {
-    match error {
-        Error::Base(aurora_base::Error::Io { .. }) => true,
+    let source = match error {
+        Error::Base(aurora_base::Error::Io { source, .. }) => source,
         Error::Zip {
             source: zip::result::ZipError::Io(source),
             ..
-        } => !matches!(
-            source.kind(),
-            std::io::ErrorKind::InvalidData
-                | std::io::ErrorKind::InvalidInput
-                | std::io::ErrorKind::UnexpectedEof
-        ),
-        _ => false,
-    }
+        } => source,
+        _ => return false,
+    };
+    !matches!(
+        source.kind(),
+        std::io::ErrorKind::InvalidData
+            | std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::UnexpectedEof
+    )
 }
 
 /// 把一个待解析项投进阻塞线程池。任务把候选项一并带回，省得再按下标回查。
@@ -1932,6 +1936,42 @@ authors="Snownee, TrainGuys"
         assert_eq!(entry.metadata, None);
         assert_eq!(entry.stamp.size, std::fs::metadata(&broken).unwrap().len());
         assert_eq!(entry.stamp.mtime_ms, 1_000_000);
+    }
+
+    /// mods.toml 不是合法 UTF-8 也是描述文件内容坏了，与 JSON 写坏同属确定性的结果：缓存下来，
+    /// 不能因为它报出来的是 io 错误就当成读盘故障、每一轮都重开这个 jar。
+    #[tokio::test]
+    async fn non_utf8_mods_toml_is_cached_like_other_descriptor_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let broken = dir.path().join("gbk-toml.jar");
+        build_jar(
+            &broken,
+            &[(
+                FORGE_DESCRIPTOR,
+                b"modLoader=\"javafml\"\n# \xd6\xd0\xce\xc4\n",
+            )],
+        );
+        std::fs::File::options()
+            .write(true)
+            .open(&broken)
+            .unwrap()
+            .set_modified(epoch_plus(2_000))
+            .unwrap();
+
+        let mods = scan_mods_dir_cached(dir.path(), Some(&cache))
+            .await
+            .unwrap();
+        assert_eq!(mods.len(), 1);
+        assert!(mods[0].metadata.is_none());
+        let persisted: ModMetadataCache =
+            serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        let entry = persisted
+            .entries
+            .get("gbk-toml.jar")
+            .expect("mods.toml 编码不对是确定性的结果，应当缓存");
+        assert_eq!(entry.metadata, None);
+        assert_eq!(entry.stamp.mtime_ms, 2_000_000);
     }
 
     #[test]
