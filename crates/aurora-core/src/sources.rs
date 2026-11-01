@@ -85,7 +85,8 @@ pub(crate) mod tests {
 
     /// 测速样本（版本清单）的路径；两台 mock 只认带 `Range: bytes=0-0` 的探针。
     const SAMPLE_PATH: &str = "/mc/game/version_manifest_v2.json";
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+    /// 只是兜底，机器再满载也碰不到：这里的用例都不靠超时分出结果。
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
     const LONG_TTL: Duration = Duration::from_secs(600);
 
     /// 官方地址钉到一台 mock、镜像钉到另一台，保留原路径。
@@ -170,12 +171,14 @@ pub(crate) mod tests {
         ResponseTemplate::new(206).insert_header("content-range", "bytes 0-0/100")
     }
 
-    /// 官方慢、镜像快：自动档测速后镜像在前，下载引擎拿到的方案同序。
+    /// 官方探不通、镜像答得上：自动档测速后镜像在前，下载引擎拿到的方案同序。
+    /// 时延谁大谁小的比较由 aurora-download 的测速用例钉住，这里只看结论接到了各处，
+    /// 所以让一方探不通，先后不用跟调度抖动赛跑。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn auto_puts_the_faster_mirror_first() {
+    async fn auto_puts_the_mirror_first_when_only_it_answers() {
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
-        mount_probe(&official, partial().set_delay(Duration::from_millis(300))).await;
+        mount_probe(&official, ResponseTemplate::new(503)).await;
         mount_probe(&mirror, partial()).await;
         let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
 
@@ -193,13 +196,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// 官方快、镜像慢：排在前面的是官方，证明顺序来自实测而不是兜底（兜底是镜像在前）。
+    /// 官方答得上、镜像探不通：排在前面的是官方，证明顺序来自实测而不是兜底（兜底是镜像在前）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn auto_puts_the_faster_official_first() {
+    async fn auto_puts_the_official_first_when_only_it_answers() {
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
         mount_probe(&official, partial()).await;
-        mount_probe(&mirror, partial().set_delay(Duration::from_millis(300))).await;
+        mount_probe(&mirror, ResponseTemplate::new(503)).await;
         let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
 
         aurora.prepare_sources().await.unwrap();
@@ -269,41 +272,34 @@ pub(crate) mod tests {
         }
     }
 
-    /// 有效期内连续生成两次计划只测一轮；过了有效期再生成就重测。
+    /// 有效期内连续生成两次计划只测一轮；过了有效期再生成就重测。有效期取 0 即测完当场过期，
+    /// 两次生成之间隔多久都一样。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn measurement_is_reused_within_ttl_and_redone_after() {
-        let official = MockServer::start().await;
-        let mirror = MockServer::start().await;
-        mount_probe(&official, partial()).await;
-        mount_probe(&mirror, partial()).await;
-        let aurora = aurora_between(
-            &official,
-            &mirror,
-            DownloadSourcePolicy::Auto,
-            Duration::from_millis(100),
-        );
+        for (ttl, rounds) in [(LONG_TTL, 1), (Duration::ZERO, 2)] {
+            let official = MockServer::start().await;
+            let mirror = MockServer::start().await;
+            mount_probe(&official, partial()).await;
+            mount_probe(&mirror, partial()).await;
+            let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, ttl);
 
-        aurora.prepare_sources().await.unwrap();
-        aurora.prepare_sources().await.unwrap();
-        assert_eq!(
-            (probe_count(&official).await, probe_count(&mirror).await),
-            (1, 1)
-        );
-
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        aurora.prepare_sources().await.unwrap();
-        assert_eq!(
-            (probe_count(&official).await, probe_count(&mirror).await),
-            (2, 2)
-        );
+            aurora.prepare_sources().await.unwrap();
+            aurora.prepare_sources().await.unwrap();
+            assert_eq!(
+                (probe_count(&official).await, probe_count(&mirror).await),
+                (rounds, rounds),
+                "{ttl:?}"
+            );
+        }
     }
 
-    /// 镜像实测更快、但在共享健康表上已经熔断：下载这一个文件时镜像沉底，请求只落在官方上。
+    /// 实测镜像排在前面（官方探不通）、但它在共享健康表上已经熔断：下载这一个文件时镜像沉底，
+    /// 请求只落在官方上。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tripped_source_sinks_below_the_measured_order() {
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
-        mount_probe(&official, partial().set_delay(Duration::from_millis(300))).await;
+        mount_probe(&official, ResponseTemplate::new(503)).await;
         mount_probe(&mirror, partial()).await;
         let file_path = "/com/example/lib/1.0/lib-1.0.jar";
         for server in [&official, &mirror] {
@@ -373,34 +369,32 @@ pub(crate) mod tests {
         );
     }
 
-    /// 测速途中任务被取消：不等探针超时（这里两个探针都要 2 秒才答），立即以取消返回，也不写缓存。
+    /// 测速途中任务被取消：不等探针，立即以取消返回，也不写缓存。两个探针都答不上来，等它们的话
+    /// 只会等到超时、按测不出正常返回，下面的 `expect_err` 就过不去。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancel_during_measurement_returns_at_once_without_caching() {
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
-        mount_probe(&official, partial().set_delay(Duration::from_secs(2))).await;
-        mount_probe(&mirror, partial().set_delay(Duration::from_secs(2))).await;
+        mount_probe(&official, partial().set_delay(PROBE_TIMEOUT * 2)).await;
+        mount_probe(&mirror, partial().set_delay(PROBE_TIMEOUT * 2)).await;
         let token = aurora_download::CancellationToken::new();
         let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL)
             .with_cancel(token.clone());
-        let canceller = {
-            let token = token.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                token.cancel();
+        let cancel_once_probing = async {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while probe_count(&official).await + probe_count(&mirror).await < 2 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
             })
+            .await
+            .expect("15 秒内探针没有发出");
+            token.cancel();
         };
 
-        let started = std::time::Instant::now();
-        let err = aurora
-            .prepare_sources()
-            .await
-            .expect_err("取消后不该当作测完返回");
-        let elapsed = started.elapsed();
-        canceller.await.unwrap();
+        let (measured, ()) = tokio::join!(aurora.prepare_sources(), cancel_once_probing);
 
+        let err = measured.expect_err("取消后不该当作测完返回");
         assert!(err.is_cancelled(), "实际：{err:?}");
-        assert!(elapsed < Duration::from_millis(1000), "耗时 {elapsed:?}");
         assert!(!aurora.source_speed.is_fresh(), "取消的一轮不留结论");
     }
 
@@ -410,7 +404,7 @@ pub(crate) mod tests {
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
         mount_probe(&official, partial()).await;
-        mount_probe(&mirror, partial().set_delay(Duration::from_millis(300))).await;
+        mount_probe(&mirror, ResponseTemplate::new(503)).await;
         let config = AuroraConfig {
             download_source: DownloadSourcePolicy::MirrorFirst,
             version_list_source: DownloadSourcePolicy::Auto,
