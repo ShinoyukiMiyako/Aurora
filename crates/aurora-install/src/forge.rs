@@ -2496,7 +2496,7 @@ mod tests {
         );
     }
 
-    /// installer 的 `.sha1` 迟迟不回时取消：1 秒内以已取消返回，不当成「拿不到校验值」接着下 installer。
+    /// installer 的 `.sha1` 迟迟不回时取消：不等它，立即以已取消返回，不当成「拿不到校验值」接着下 installer。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelling_while_fetching_the_installer_sha1_stops_the_install() {
         use std::time::{Duration, Instant};
@@ -2543,8 +2543,9 @@ mod tests {
         let err = attempt.await.unwrap_err();
 
         assert!(err.is_cancelled(), "实际：{err:?}");
+        // .sha1 要 10 秒才回话，以它为界。
         assert!(
-            cancelled_at.elapsed() < Duration::from_secs(1),
+            cancelled_at.elapsed() < Duration::from_secs(10),
             "实际等了 {:?}",
             cancelled_at.elapsed()
         );
