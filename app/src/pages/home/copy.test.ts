@@ -29,7 +29,7 @@ describe("问候与日期行", () => {
     expect(HOME_COPY.weekDelta(12)).toBe("较前 7 天 +12%");
     expect(HOME_COPY.weekDelta(0)).toBe("较前 7 天 +0%");
     expect(HOME_COPY.weekDelta(-8)).toBe("较前 7 天 -8%");
-    expect(HOME_COPY.online(25_000, 200_000)).toBe("2.5 万 / 20 万 在线");
+    expect(HOME_COPY.online(25_000, 200_000)).toBe("2.5 万/20 万 在线");
     expect(HOME_COPY.calendarSubtitle(2026, 10, 18, 2480)).toBe("2026年10月 · 18 天 · 共 41 小时 20 分钟");
   });
 });

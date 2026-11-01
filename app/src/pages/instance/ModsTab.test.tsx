@@ -640,7 +640,7 @@ describe("更新预览", () => {
     await open();
     click(button("全部更新 · 3"));
     await flush();
-    expect(textOf(dialog())).toContain("已勾选 3 / 3");
+    expect(textOf(dialog())).toContain("已勾选 3/3");
     expect(find("checkbox", "全选", dialog()).getAttribute("aria-checked")).toBe("true");
     // 旧版本缺失写「版本未知」，测试版与预览版各带标签
     expect(textOf(dialog())).toContain("版本未知 → 0.2.0-beta.1");
@@ -648,7 +648,7 @@ describe("更新预览", () => {
     expect(textOf(dialog())).toContain("预览版");
 
     click(find("checkbox", "选择 Handmade", dialog()));
-    expect(textOf(dialog())).toContain("已勾选 2 / 3");
+    expect(textOf(dialog())).toContain("已勾选 2/3");
     expect(find("checkbox", "全选", dialog()).getAttribute("aria-checked")).toBe("mixed");
     click(button("更新 2 个", dialog()));
     await flush();
@@ -680,7 +680,7 @@ describe("更新预览", () => {
     click(find("checkbox", "选择 Handmade"));
     click(button("更新"));
     await flush();
-    expect(textOf(dialog())).toContain("已勾选 2 / 2");
+    expect(textOf(dialog())).toContain("已勾选 2/2");
     expect(textOf(dialog())).not.toContain("Sodium");
     click(button("更新 2 个", dialog()));
     await flush();
@@ -707,7 +707,7 @@ describe("更新预览", () => {
     expect(button("更新").getAttribute("aria-disabled")).toBeNull();
     click(button("更新"));
     await flush();
-    expect(textOf(dialog())).toContain("已勾选 1 / 1");
+    expect(textOf(dialog())).toContain("已勾选 1/1");
   });
 
   it("单个更新还在查可更新项时确认批量更新：那一行继续转圈，批量入队之后也不松开", async () => {
@@ -739,9 +739,9 @@ describe("更新预览", () => {
     click(find("checkbox", "选择 Iris"));
     click(button("更新"));
     await flush();
-    expect(textOf(dialog())).toContain("已勾选 1 / 1");
+    expect(textOf(dialog())).toContain("已勾选 1/1");
     click(find("checkbox", "全选", dialog()));
-    expect(textOf(dialog())).toContain("已勾选 0 / 1");
+    expect(textOf(dialog())).toContain("已勾选 0/1");
     const confirm = button("更新 0 个", dialog());
     expect(confirm.getAttribute("aria-disabled")).toBe("true");
     click(confirm);
@@ -794,14 +794,14 @@ describe("更新预览", () => {
     expect(textOf(dialog())).toContain("修了前置加载顺序");
     expect(textOf(dialog())).not.toContain("更新日志没能取到");
     // 日志失败不影响勾选与确认
-    expect(textOf(dialog())).toContain("已勾选 3 / 3");
+    expect(textOf(dialog())).toContain("已勾选 3/3");
   });
 
   it("概览页的「全部更新」打开同一个预览，确认后才入队", async () => {
     await open("overview");
     click(button("全部更新"));
     await flush();
-    expect(textOf(dialog())).toContain("已勾选 3 / 3");
+    expect(textOf(dialog())).toContain("已勾选 3/3");
     expect(launcher.state.tasks).toEqual([]);
     click(button("更新 3 个", dialog()));
     await flush();

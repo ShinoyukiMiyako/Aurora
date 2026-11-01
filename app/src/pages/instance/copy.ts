@@ -387,7 +387,7 @@ export const UPDATE_PREVIEW_COPY = {
   title: "更新 Mod",
   subtitle: "勾选要更新的 Mod。旧版本会保留，之后可以在历史里回滚。",
   selectAll: "全选",
-  picked: (picked: number, total: number) => `已勾选 ${picked} / ${total}`,
+  picked: (picked: number, total: number) => `已勾选 ${picked}/${total}`,
   pick: (name: string) => `选择 ${name}`,
   versions: (from: string, to: string) => `${from} → ${to}`,
   changelog: "更新日志",

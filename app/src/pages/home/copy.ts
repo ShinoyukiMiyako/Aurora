@@ -121,7 +121,7 @@ export const HOME_COPY = {
   serversEmptyBody: "点右上角的加号，从服务器列表里挑几个。",
   pinnedError: "固定的服务器读不出来",
   pingError: (reason: string) => `延迟测不出来：${reason}`,
-  online: (online: number, max: number) => `${formatCount(online)} / ${formatCount(max)} 在线`,
+  online: (online: number, max: number) => `${formatCount(online)}/${formatCount(max)} 在线`,
   lastOnline: (relative: string, online: number) => `上次 ${relative}在线 ${formatCount(online)}`,
   latency: (ms: number) => `${ms} ms`,
   unreachable: "连不上",

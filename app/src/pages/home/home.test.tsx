@@ -514,7 +514,7 @@ describe("主页：固定的服务器", () => {
   it("行写在线人数与延迟；加号从多人列表里固定，更多菜单取消固定", async () => {
     await mount();
     expect(text()).toContain("1 个 · 在线人数与延迟");
-    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("127/500 在线");
     expect(text()).toContain("38 ms");
     await openMenu(buttonByLabel("固定服务器"));
     expect(menuItems().map((el) => el.textContent)).toEqual(["本地localhost"]);
@@ -720,7 +720,7 @@ describe("主页：固定的服务器", () => {
     expect(text()).not.toContain("38 ms");
     expect(signals()).toEqual(["paused", "paused"]);
     expect(document.querySelectorAll("[data-on]")).toHaveLength(0);
-    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("127/500 在线");
     expect(text()).toContain("上次 2 小时前在线 1.2 万");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3 * 60_000);

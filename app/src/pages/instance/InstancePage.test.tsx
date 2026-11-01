@@ -1578,7 +1578,7 @@ describe("实例详情：Mod 管理", () => {
     click(button("全部更新 · 2"));
     await flush();
     // 先到更新预览：默认全选，确认前不入队
-    expect(dialog().textContent).toContain("已勾选 2 / 2");
+    expect(dialog().textContent).toContain("已勾选 2/2");
     expect(launcher.state.tasks).toEqual([]);
     click(button("更新 2 个", dialog()));
     await flush();
