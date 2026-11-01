@@ -319,6 +319,7 @@ describe("启动失败的修复动作", () => {
     expect(instance.label).toBe("改为自动选择");
     expect(failureToastLabel(instance)).toBe("改为自动");
     expect(failureToastLabel({ kind: "download_java", label: "下载 Java 21" })).toBe("下载 Java 21");
+    expect(failureToastLabel({ kind: "reinstall_loader", label: "重新安装加载器" })).toBe("重新安装");
   });
 });
 

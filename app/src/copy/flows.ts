@@ -317,6 +317,8 @@ export function failureToastLabel(fix: FailureFix): string {
       return "改为自动";
     case "auto_default_java":
       return "改回自动";
+    case "reinstall_loader":
+      return "重新安装";
     default:
       return fix.label;
   }

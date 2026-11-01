@@ -368,7 +368,7 @@ describe("实例详情：头图与标签", () => {
   it("游玩记录读不出：眉题、累计游玩与上次游玩都写读不到，原因写在四格下面，不写 0 分钟与从未", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败: playtime.json" } : i));
     await open("overview");
-    expect(document.querySelector("h1")?.parentElement?.textContent).toContain("自建模组实例 · 游玩时长读不到");
+    expect(document.querySelector("h1")?.parentElement?.textContent).toContain("自建 Mod 实例 · 游玩时长读不到");
     expect(byRole("group", "累计游玩 读不到").textContent).toBe("累计游玩读不到");
     expect(byRole("group", "上次游玩 读不到").textContent).toBe("上次游玩读不到");
     expect(text()).toContain("游玩记录读不出来：解析 游玩记录 失败: playtime.json");

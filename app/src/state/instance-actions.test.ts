@@ -184,7 +184,7 @@ describe("加载器自带的库缺失", () => {
     await launchFails();
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "loader_library_missing" } });
     const toast = store.getState().toasts.find((t) => t.tone === "error");
-    expect(toast).toMatchObject({ title: "「生存」启动失败", body: "加载器文件缺失", action: { label: "重新安装加载器" } });
+    expect(toast).toMatchObject({ title: "「生存」启动失败", body: "加载器文件缺失", action: { label: "重新安装" } });
   });
 
   it("修复动作排一个补全任务，命令带上 reinstallLoader；装好后通知说清装的是加载器，并给启动入口", async () => {
@@ -684,6 +684,19 @@ describe("改名迁移任务", () => {
     renameOnDisk("生存", "生存二");
     await store.actions.renameInstance("生存", "生存二");
     expect(store.getState().tasks[0]).toMatchObject({ title: "补全「生存二」的游戏文件", detail: "1.21.1" });
+  });
+
+  it("重新安装加载器的任务改名后标题还是重新安装加载器，不变成补全", async () => {
+    ipc.overrides.set("repair_instance", () => {
+      throw new IpcError("download_failed", "下载源暂时不可用");
+    });
+    await store.actions.repairInstance("生存", { reinstallLoader: true });
+    await settle();
+    expect(store.getState().tasks[0]).toMatchObject({ status: "failed", title: "重新安装「生存」的加载器" });
+
+    renameOnDisk("生存", "生存二");
+    await store.actions.renameInstance("生存", "生存二");
+    expect(store.getState().tasks[0]).toMatchObject({ title: "重新安装「生存二」的加载器", spec: { args: { id: "生存二", reinstallLoader: true } } });
   });
 
   it("失败的新建留下的半成品改了名：重试按新名字补全，不在旧名字下再装一份", async () => {

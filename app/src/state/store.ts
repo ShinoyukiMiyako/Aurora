@@ -873,7 +873,7 @@ function renamedTask(task: Task, from: string, to: string): Task {
   if (task.instanceId !== from) return task;
   const key = INSTANCE_ARG[task.spec.command];
   const args = key !== undefined && task.spec.args[key] === from ? { ...task.spec.args, [key]: to } : task.spec.args;
-  const title = task.spec.command === "repair_instance" ? TASK_TEXT.repairTitle(to) : task.title;
+  const title = task.spec.command !== "repair_instance" ? task.title : task.spec.args.reinstallLoader === true ? TASK_TEXT.reinstallLoaderTitle(to) : TASK_TEXT.repairTitle(to);
   return { ...task, instanceId: to, title, detail: TASK_TEXT.renamedDetail(task.detail, from, to), spec: { ...task.spec, args } };
 }
 
