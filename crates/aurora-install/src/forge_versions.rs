@@ -175,11 +175,28 @@ pub async fn fetch_maven_versions(
     policy: &RetryPolicy,
     cancel: Option<&CancellationToken>,
 ) -> Result<Vec<String>> {
-    let bytes = net::get_bytes_from(client, sources, url, policy, cancel, "maven-metadata").await?;
-    let xml = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
-        reason: format!("{url} 不是 UTF-8 文本：{err}"),
-    })?;
-    Ok(parse_maven_versions(&xml))
+    net::get_decoded_from(
+        client,
+        sources,
+        url,
+        policy,
+        cancel,
+        "maven-metadata",
+        |bytes| {
+            let xml = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
+                reason: format!("{url} 不是 UTF-8 文本：{err}"),
+            })?;
+            // 读不出版本的多半是镜像回的错误页，不能当成空列表：调用方会把它写进缓存，盖掉上次的好列表。
+            let versions = parse_maven_versions(&xml);
+            if versions.is_empty() {
+                return Err(Error::UnsupportedInstallProfile {
+                    reason: format!("{url} 里没有版本号"),
+                });
+            }
+            Ok(versions)
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -188,6 +205,52 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// 第一个源回 200 的错误页读不出版本：换下一个源。空列表交出去的话，调用方还会把它写进缓存，
+    /// 把上次的好列表盖掉；每个源都读不出版本时要报错。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_garbled_metadata_page_moves_on_to_the_next_source() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/garbled"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>维护中</html>"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/clean"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "<metadata><versioning><versions><version>1.20.1-47.2.0</version></versions></versioning></metadata>",
+            ))
+            .mount(&server)
+            .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let policy = RetryPolicy {
+            max_attempts: 1,
+            initial_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(1),
+            multiplier: 1.0,
+            jitter: false,
+        };
+        let url = "https://maven.invalid/maven-metadata.xml";
+
+        let plan = crate::net::tests::plan_between(&server, "/garbled", "/clean");
+        let versions = fetch_maven_versions(&client, Some(&plan), url, &policy, None)
+            .await
+            .unwrap();
+        assert_eq!(versions, strings(&["1.20.1-47.2.0"]));
+
+        let plan = crate::net::tests::plan_between(&server, "/garbled", "/garbled");
+        let err = fetch_maven_versions(&client, Some(&plan), url, &policy, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, Error::UnsupportedInstallProfile { reason } if reason.contains("没有版本号")),
+            "实际：{err:?}"
+        );
     }
 
     #[test]

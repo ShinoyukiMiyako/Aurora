@@ -400,29 +400,16 @@ impl<'a> ForgeInstaller<'a> {
     }
 
     async fn installer_sha1(&self, installer_url: &str) -> Result<String> {
-        let bytes = net::get_bytes_from(
+        net::get_decoded_from(
             self.cx.client,
             self.sources.as_ref(),
             &format!("{installer_url}.sha1"),
             self.cx.policy,
             self.cx.cancel,
             "installer 的 sha1",
+            parse_sha1_file,
         )
-        .await?;
-        let text = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
-            reason: format!("installer 的 .sha1 不是文本: {err}"),
-        })?;
-        let sha1 = text
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if sha1.len() != 40 || !sha1.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Error::UnsupportedInstallProfile {
-                reason: format!("installer 的 .sha1 内容不是 sha1：{text}"),
-            });
-        }
-        Ok(sha1)
+        .await
     }
 
     /// 安装成功后删掉 installer 与空了的缓存目录。删不掉不影响安装结果，只记日志。
@@ -790,6 +777,24 @@ async fn extract_zip_entry_to_async(archive: &Path, entry: &str, dest: &Path) ->
     let bytes = read_zip_entry_async(archive, entry).await?;
     aurora_base::fs::atomic_write(dest, &bytes).await?;
     Ok(())
+}
+
+/// 解析 Maven 旁的 `.sha1` 文件：取第一段，必须是 40 位十六进制。
+fn parse_sha1_file(bytes: Vec<u8>) -> Result<String> {
+    let text = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
+        reason: format!("installer 的 .sha1 不是文本: {err}"),
+    })?;
+    let sha1 = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if sha1.len() != 40 || !sha1.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::UnsupportedInstallProfile {
+            reason: format!("installer 的 .sha1 内容不是 sha1：{text}"),
+        });
+    }
+    Ok(sha1)
 }
 
 /// 库条目声明了下载件、地址却留空：这类库由 installer 自带。
@@ -1589,6 +1594,50 @@ mod tests {
             .unwrap();
     }
 
+    /// 第一个源的 `.sha1` 是错误页：换下一个源取到校验值，缓存里的 installer 照样复用，不重下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_garbled_sha1_page_moves_on_to_the_next_source() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let installer = legacy_installer_bytes();
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(installer.clone()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/garbled"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>维护中</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/clean"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sha1_hex(&installer)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let f = fixture();
+        let cache = f
+            .root
+            .join(concat!(".", aurora_base::app_slug!(), "-cache"));
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("forge-installer.jar"), &installer).unwrap();
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        ForgeInstaller::new(cx, "java")
+            .with_sources(crate::net::tests::plan_between(
+                &server, "/garbled", "/clean",
+            ))
+            .install_for_instance(&format!("{}/forge-installer.jar", server.uri()), "x")
+            .await
+            .unwrap();
+    }
+
     /// 另一个 Forge 安装正在进行时，新的安装原地等着、不碰共享的 installer 缓存与库；前一个结束后
     /// 它照常装完。等待中取消立刻以已取消返回。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1738,7 +1787,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_library_left_for_the_processors_is_not_required_in_the_installer() {
         let patched: &[u8] = b"patched-client";
-        let patched_path = "net/minecraftforge/forge/1.21.1-52.0.30/forge-1.21.1-52.0.30-client.jar";
+        let patched_path =
+            "net/minecraftforge/forge/1.21.1-52.0.30/forge-1.21.1-52.0.30-client.jar";
         let library = serde_json::json!({
             "name": "net.minecraftforge:forge:1.21.1-52.0.30:client",
             "downloads": {"artifact": {
@@ -2382,7 +2432,10 @@ mod tests {
 
         let err = install_with(&f, &java, &installer).await.unwrap_err();
 
-        assert!(matches!(err, Error::ProcessorFailed { .. }), "实际：{err:?}");
+        assert!(
+            matches!(err, Error::ProcessorFailed { .. }),
+            "实际：{err:?}"
+        );
         let scratch = f.layout.version_dir("1.20.1-forge-47.2.0").join(concat!(
             ".",
             aurora_base::app_slug!(),
