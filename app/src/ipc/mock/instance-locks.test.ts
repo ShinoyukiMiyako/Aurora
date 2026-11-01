@@ -77,6 +77,38 @@ async function minutesOf(id: string): Promise<number | null> {
 }
 
 describe("mock 的实例占用与后端同一张兼容表", () => {
+  const ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"] as const;
+  type Activity = (typeof ACTIVITIES)[number];
+  /** 已有 held 时还能再占的事：改名、删除、新建、补全与一切互斥。 */
+  const COMPATIBLE: Readonly<Record<Activity, readonly Activity[]>> = {
+    installing: [],
+    repairing: [],
+    renaming: [],
+    deleting: [],
+    launching: ["modifying", "inherited"],
+    running: ["modifying", "inherited"],
+    backing_up: ["modifying", "inherited"],
+    modifying: ["modifying", "launching", "running", "backing_up", "inherited"],
+    inherited: ["modifying", "launching", "running", "backing_up", "inherited"],
+  };
+  /** inherited 只能经基底占用拿到：让另一个实例以 target 为基底。 */
+  const take = (target: string, activity: Activity, user: string) =>
+    activity === "inherited" ? acquireMockInstanceWithBases(user, "modifying", [target]) : acquireMockInstance(target, activity);
+
+  it.each(ACTIVITIES)("已占着 %s 时九种事逐一判定，与后端 compatible_with 的矩阵一致；被拒时 detail 报占着的那件事", (held) => {
+    for (const wanted of ACTIVITIES) {
+      const first = take("矩阵", held, "用它的甲");
+      if (COMPATIBLE[held].includes(wanted)) {
+        take("矩阵", wanted, "用它的乙").release();
+      } else {
+        expect(() => take("矩阵", wanted, "用它的乙")).toThrow(
+          expect.objectContaining({ code: "instance_busy", detail: held === "inherited" ? { id: "矩阵", activity: held, used_by: "用它的甲" } : { id: "矩阵", activity: held } }),
+        );
+      }
+      first.release();
+    }
+  });
+
   it("游戏运行中：列表报 running；写设置、查更新、建工作子目录照常进行；改名与删除报 instance_busy", async () => {
     await launchGame(offline(FABRIC, "t-launch"));
     expect(await activityOf(FABRIC)).toBe("running");
