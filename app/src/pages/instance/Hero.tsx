@@ -152,7 +152,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
           </div>
         </Cover>
       </div>
-      <AnimatePresence>{exporting && <ExportModpackModal key="export" inst={inst} lockReason={exportReason} onClose={() => setExporting(false)} />}</AnimatePresence>
+      <AnimatePresence>{exporting && <ExportModpackModal key="export" inst={inst} lockReason={exportReason} savesReason={ops.exportSavesReason} onClose={() => setExporting(false)} />}</AnimatePresence>
     </Card>
   );
 }

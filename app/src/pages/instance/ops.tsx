@@ -37,21 +37,30 @@ export interface InstanceOps {
   settingsReason: string | undefined;
   /** 此刻不能导出整合包的原因；能导出为 undefined。菜单项与导出弹窗的主按钮共用它。 */
   exportReason: string | undefined;
+  /** 此刻不能把存档带进整合包的原因；能带为 undefined。 */
+  exportSavesReason: string | undefined;
   repair(): void;
   remove(): void;
 }
 
 /**
- * 导出读的是此刻的文件，与「改动中」同属一类：游戏运行、装 Mod 都不挡；安装、补全、改名、删除会挪走或重写目录，挡住。
+ * 导出读的是此刻的文件，与「改动中」同属一类：游戏运行、存档备份、装 Mod 都不挡；安装、补全、改名、删除会挪走或重写目录，挡住。
  * 占位项的目录还没落盘，损坏的实例写不出可用的整合包。
  */
 export function exportReason(inst: InstanceSummary, work: WorkLock | null): string | undefined {
   if (inst.placeholder) return LOCK_REASON.export.placeholder;
   if (work !== null) return LOCK_REASON.export[work];
-  // 改 Mod 与存档备份互相兼容，导出却可能连存档一起打包：备份或恢复正在写存档时不能导出
-  if (inst.activity === "backing_up") return LOCK_REASON.export.backingUp;
   if (inst.status === "broken") return LOCK_REASON.export.broken;
   return undefined;
+}
+
+/**
+ * 带上存档要把存档整份读走，后端在存档会变的时候以 instance_busy 拒绝：游戏启动或运行中，或者正在备份、恢复。
+ * 这里提前禁用那一项；共用存档时别的实例挡住的情况要看隔离，这里不判，由后端报。
+ */
+export function exportSavesReason(inst: Pick<InstanceSummary, "activity">, busy: boolean): string | undefined {
+  if (inst.activity === "backing_up") return LOCK_REASON.export.savesBackingUp;
+  return busy || inst.activity === "launching" || inst.activity === "running" ? LOCK_REASON.export.savesInGame : undefined;
 }
 
 export function useInstanceOps(inst: InstanceSummary): InstanceOps {
@@ -114,6 +123,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     folderReason,
     settingsReason,
     exportReason: exportReason(inst, work),
+    exportSavesReason: exportSavesReason(inst, busy),
     repair,
     remove,
   };

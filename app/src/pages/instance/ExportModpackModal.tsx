@@ -85,14 +85,24 @@ export function skippedCount(preview: ModpackExportPreviewDto, extras: ReadonlyS
   return preview.extras.filter((e) => extras.has(e.extra)).reduce((n, e) => n + e.skipped.length, preview.mod_skipped.length);
 }
 
+/** 这次实际打包的额外项：存档被占着时勾选留在草稿里，放开后恢复，这一次不算。 */
+export function effectiveExtras(extras: ReadonlySet<ExportExtra>, savesReason: string | undefined): ReadonlySet<ExportExtra> {
+  if (savesReason === undefined || !extras.has("saves")) return extras;
+  const next = new Set(extras);
+  next.delete("saves");
+  return next;
+}
+
 export interface ExportModpackModalProps {
   inst: InstanceSummary;
   /** 实例此刻不能导出的原因（与头图菜单项同一条）；打开期间实例被锁时主按钮据此禁用，已填的内容保留。 */
   lockReason: string | undefined;
+  /** 此刻不能带上存档的原因：只禁用存档这一项，别的内容照常导出。 */
+  savesReason: string | undefined;
   onClose(): void;
 }
 
-export function ExportModpackModal({ inst, lockReason, onClose }: ExportModpackModalProps) {
+export function ExportModpackModal({ inst, lockReason, savesReason, onClose }: ExportModpackModalProps) {
   const { saveFile } = useShell();
   const run = useRunner();
   const actions = useLauncherActions();
@@ -131,7 +141,7 @@ export function ExportModpackModal({ inst, lockReason, onClose }: ExportModpackM
       name: draft.name.trim(),
       version: draft.version.trim(),
       summary: summary === "" ? null : summary,
-      extras: EXPORT_EXTRAS.filter((e) => draft.extras.has(e)),
+      extras: EXPORT_EXTRAS.filter((e) => effectiveExtras(draft.extras, savesReason).has(e)),
       include_disabled: draft.includeDisabled && preview.data.disabled.length > 0,
     };
     onClose();
@@ -166,7 +176,7 @@ export function ExportModpackModal({ inst, lockReason, onClose }: ExportModpackM
             {errorRecord(preview.error).message}
           </Callout>
         ) : confirming ? (
-          <ExportForm preview={preview.data} draft={draft} onDraft={setDraft} />
+          <ExportForm preview={preview.data} draft={draft} savesReason={savesReason} onDraft={setDraft} />
         ) : (
           <div className={styles.reading} aria-busy="true">
             <Spinner size={24} />
@@ -181,15 +191,17 @@ export function ExportModpackModal({ inst, lockReason, onClose }: ExportModpackM
 interface ExportFormProps {
   preview: ModpackExportPreviewDto;
   draft: Draft;
+  savesReason: string | undefined;
   onDraft(next: Draft): void;
 }
 
-function ExportForm({ preview, draft, onDraft }: ExportFormProps) {
+function ExportForm({ preview, draft, savesReason, onDraft }: ExportFormProps) {
   const { tier } = useShell();
   const compact = tier === "compact";
   const [listOpen, setListOpen] = useState(false);
-  const totals = bundledTotals(preview, draft);
-  const skipped = skippedCount(preview, draft.extras);
+  const extras = effectiveExtras(draft.extras, savesReason);
+  const totals = bundledTotals(preview, { extras, includeDisabled: draft.includeDisabled });
+  const skipped = skippedCount(preview, extras);
 
   const toggleExtra = (extra: ExportExtra, on: boolean) => {
     const next = new Set(draft.extras);
@@ -219,13 +231,14 @@ function ExportForm({ preview, draft, onDraft }: ExportFormProps) {
             const stat = statOf(preview, extra);
             const present = stat.files > 0;
             const missing = extra === "options" ? EXPORT_COPY.missingOptions : EXPORT_COPY.missingFolder;
+            const held = extra === "saves" ? savesReason : undefined;
             return (
               <li key={extra} className={styles.extraRow} data-compact={compact ? "" : undefined}>
                 <Checkbox
-                  checked={present && draft.extras.has(extra)}
+                  checked={present && extras.has(extra)}
                   onChange={(on) => toggleExtra(extra, on)}
                   label={EXPORT_COPY.extra[extra]}
-                  disabledReason={present ? undefined : missing}
+                  disabledReason={present ? held : missing}
                 />
                 <span className={styles.extraStat}>{present ? EXPORT_COPY.fileStat(stat.files, stat.bytes) : EXPORT_COPY.none}</span>
                 {extra === "saves" && <span className={styles.extraHint}>{EXPORT_COPY.savesHint}</span>}

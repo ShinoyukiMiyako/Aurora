@@ -124,7 +124,7 @@ export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world",
 
 /**
  * 两个任务挂在同一实例（不分大小写，与后端的锁键一致）上，后端不让它们同时进行：至少一个要写整个目录；或都是存档任务
- * （backing_up 彼此互斥）；或一个是存档任务、一个是导出整合包（备份、恢复进行中不能导出，勾了存档的导出进行中不能恢复）。
+ * （backing_up 彼此互斥）；或一个是存档任务、一个是导出整合包（后端只拒勾了存档的导出，这里不拆开导出参数，一律排开）。
  * 不隔离的实例共用存档时后端还会跨实例拒绝，那要看实例的隔离，这里不判，撞上了按 instance_busy 失败，可以重试。
  */
 function excludes(a: Task, b: Task): boolean {

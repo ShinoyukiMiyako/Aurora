@@ -15,7 +15,7 @@ import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../..
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
-import { bundledTotals, defaultExportFileName, skippedCount } from "./ExportModpackModal";
+import { bundledTotals, defaultExportFileName, effectiveExtras, skippedCount } from "./ExportModpackModal";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -246,6 +246,15 @@ describe("导出整合包弹窗：纯函数", () => {
     expect(bundledTotals(dto, { extras: new Set(["config", "saves"]), includeDisabled: true })).toEqual({ files: 37 + 2 + 1 + 1, bytes: 412 * 1024 + 80 * MB + 4096 + 2 * MB });
   });
 
+  it("实际打包的额外项：存档被占着时不算存档，草稿不变；别的项与没占着时原样", () => {
+    const draft = new Set<ExportExtra>(["config", "saves"]);
+    expect([...effectiveExtras(draft, "游戏开着")]).toEqual(["config"]);
+    expect([...draft]).toEqual(["config", "saves"]);
+    expect(effectiveExtras(draft, undefined)).toBe(draft);
+    const noSaves = new Set<ExportExtra>(["config"]);
+    expect(effectiveExtras(noSaves, "游戏开着")).toBe(noSaves);
+  });
+
   it("会跳过的文件数：mods 目录里的总算，额外项的只算勾上的", () => {
     const dto = previewDto({ mod_skipped: ["mods/a:b.jar"], extras: extrasSkipping({ config: ["config/a:b.json", "config/c?.toml"], saves: ["saves/w/c?.dat"] }) });
     expect(skippedCount(dto, new Set())).toBe(1);
@@ -417,6 +426,59 @@ describe("导出整合包弹窗", () => {
     expect(dialog().textContent).toContain("2 个文件的名字在 Windows 上不安全，不会打包");
     click(checkbox("存档（saves）"));
     expect(dialog().textContent).toContain("1 个文件的名字在 Windows 上不安全，不会打包");
+  });
+
+  it.each<[string, InstanceDto["activity"], string]>([
+    ["启动中", "launching", "游戏开着时存档随时在写，退出后才能带上存档"],
+    ["游戏运行中", "running", "游戏开着时存档随时在写，退出后才能带上存档"],
+    ["正在备份或恢复存档", "backing_up", "正在备份或恢复存档，完成后才能带上存档"],
+  ])("%s：存档这一项带原因禁用，点了勾不上，别的内容照常导出", async (_case, activity, reason) => {
+    vi.mocked(pickSaveFile).mockResolvedValueOnce("D:\\分享\\周末包.mrpack");
+    instances = instances.map((i) => ({ ...i, activity }));
+    await openPage();
+    await openExport();
+    const saves = checkbox("存档（saves）");
+    expect(saves.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      saves.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = saves.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("存档项悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe(reason);
+    click(saves);
+    expect(saves.getAttribute("aria-checked")).toBe("false");
+    expect(button("导出整合包", dialog()).getAttribute("aria-disabled")).toBeNull();
+    await act(async () => {
+      button("导出整合包", dialog()).click();
+      await settle();
+    });
+    const calls = callsOf(ipc, "export_modpack");
+    expect(calls).toHaveLength(1);
+    expect((calls[0].options as { extras: string[] }).extras).toEqual(["config", "resourcepacks", "shaderpacks", "options"]);
+  });
+
+  it("勾了存档之后游戏启动：这一次不算存档，统计跟着变；游戏退出后勾选回来", async () => {
+    await openPage();
+    await openExport();
+    click(checkbox("存档（saves）"));
+    expect(bundledValue()).toMatch(/^44 个文件 · /);
+    instances = instances.map((i) => ({ ...i, activity: "running" }));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+    expect(checkbox("存档（saves）").getAttribute("aria-checked")).toBe("false");
+    expect(bundledValue()).toMatch(/^42 个文件 · /);
+    instances = instances.map((i) => ({ ...i, activity: null }));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+    expect(checkbox("存档（saves）").getAttribute("aria-checked")).toBe("true");
+    expect(bundledValue()).toMatch(/^44 个文件 · /);
   });
 
   it("跳过的文件全在没勾的额外项里：不显示说明，勾上才出现，再取消又消失", async () => {
