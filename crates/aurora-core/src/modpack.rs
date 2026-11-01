@@ -256,6 +256,13 @@ impl PreparedModpack {
         &self.name
     }
 
+    /// 导入出的实例将继承的原版 id（客户端 jar 与 natives 所在的版本目录）：有加载器时实例 JSON 是
+    /// 加载器 JSON 的副本，它的 `inheritsFrom` 就是这个原版；导入也正是把原版装在这个自然版本目录里。
+    /// 调用方据此在导入期间占住它，不必等实例 JSON 写出来再扫。
+    pub fn base_version(&self) -> &str {
+        &self.archive.manifest.minecraft
+    }
+
     /// 不导入了：删掉平台整合包的下载缓存，本地文件不动。
     pub async fn discard(self) {
         remove_pack_cache(self.cache_dir.as_deref()).await;
@@ -1353,8 +1360,15 @@ mod tests {
         );
         let aurora = aurora(tmp.path(), &server);
 
+        let prepared = aurora
+            .prepare_modpack(&ModpackSource::File { path: pack }, None, None)
+            .await
+            .unwrap();
+        // 导入前预告的基底就是写出的实例 JSON 继承的那个原版，调用方据此在导入期间占住它。
+        let base = prepared.base_version().to_owned();
+        assert_eq!(base, "test");
         let outcome = aurora
-            .install_modpack(&ModpackSource::File { path: pack }, None, "task-f", None)
+            .import_modpack(prepared, "task-f", None)
             .await
             .unwrap();
         assert_eq!(outcome.version_id, "测试包");
@@ -1362,7 +1376,11 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("测试包.json")).unwrap()).unwrap();
         assert_eq!(json["id"], "测试包");
-        assert_eq!(json["inheritsFrom"], "test");
+        assert_eq!(json["inheritsFrom"], base.as_str());
+        assert_eq!(
+            aurora.inheritance_chain("测试包").await.unwrap(),
+            vec![base.clone()]
+        );
         assert_eq!(
             json["mainClass"],
             "net.fabricmc.loader.impl.launch.knot.KnotClient"
