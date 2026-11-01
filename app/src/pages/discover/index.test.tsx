@@ -1781,6 +1781,28 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.toasts.find((t) => t.title === "没能打开网页")?.body).toBe("没有默认浏览器");
   });
 
+  it("介绍末尾的「在网页上打开」用系统浏览器打开工程页，打不开时报出来", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const mod = entry("M1", { title: "有工程页", resource_type: "mod", loaders: ["fabric"] });
+    const url = "https://modrinth.com/mod/sodium";
+    pages = () => result([mod]);
+    ipc.overrides.set("project_detail", () => detailOf(mod, { page_url: url }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [], truncated: false }));
+    await mount();
+    act(() => card("有工程页").click());
+    await flush();
+
+    await clickIn(dialog(), "在网页上打开");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url }]);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+
+    ipc.overrides.set("plugin:opener|open_url", () => {
+      throw new IpcError("internal", "没有默认浏览器");
+    });
+    await clickIn(dialog(), "在网页上打开");
+    expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body])).toEqual([["没能打开网页", "没有默认浏览器"]]);
+  });
+
   describe("整合包本体要手动下载时的提前说明", () => {
     const NOTE = "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。";
     const SUMMARY_FAILED = "整合包清单没能提前读出来";

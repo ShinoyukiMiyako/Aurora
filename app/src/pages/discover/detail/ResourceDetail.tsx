@@ -9,7 +9,8 @@ import { LOADER_NAME } from "../../../copy/flows";
 import { formatBytes, formatCount, formatDate, formatRelative } from "../../../domain/format";
 import { useLoadingGate } from "../../../lib/loading-gate";
 import type { Platform } from "../../../domain/types";
-import { useLauncherSelector, useNow } from "../../../state/launcher";
+import { useRunner } from "../../../shell/useRunner";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
 import { useModVersions, useProjectDetail, type DependencyProject, type HitSource, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
@@ -30,7 +31,7 @@ import { Tag } from "../../../ui/Tag";
 import { RichText } from "../../../ui/RichText";
 import { parseBody } from "../../../ui/richtext-parse";
 import { Thumb } from "../../../ui/Thumb";
-import { DETAIL_COPY, KIND_LABEL, PLATFORM_LABEL, SEARCH_COPY } from "../copy";
+import { BLOCKED_COPY, DETAIL_COPY, KIND_LABEL, PLATFORM_LABEL, SEARCH_COPY } from "../copy";
 import { categoryDisplay, entryHue, parsePlatformTime, projectOrigins, resourceKindOf } from "../model";
 import { dotLoaders } from "../ResultCard";
 import { fitsAnyInstance, gameVersionSummary, sortGameVersions } from "../versions";
@@ -426,6 +427,8 @@ function StatsBar({ detail }: { detail: ProjectDetail }) {
 
 function IntroTab({ detail, onOpenDependency }: { detail: ProjectDetail; onOpenDependency: (dep: DependencyProject) => void }) {
   const instances = useLauncherSelector((s) => s.instances);
+  const actions = useLauncherActions();
+  const run = useRunner();
   const manifest = useManifest();
   const blocks = useMemo(() => parseBody(detail.body, detail.body_format), [detail.body, detail.body_format]);
   const kind = resourceKindOf(detail.resource_type);
@@ -433,6 +436,7 @@ function IntroTab({ detail, onOpenDependency }: { detail: ProjectDetail; onOpenD
   const gameVersions = sortGameVersions(detail.game_versions, order);
   const owned = new Set(instances.flatMap((i) => (i.status === "ready" && i.mcVersion !== null ? [i.mcVersion] : [])));
   const loaders = dotLoaders(detail.loaders);
+  const pageUrl = detail.page_url;
   return (
     <div className={styles.intro}>
       {blocks.length > 0 ? <RichText blocks={blocks} /> : <p className={styles.bodyParagraph}>{detail.summary === "" ? DETAIL_COPY.noBody : detail.summary}</p>}
@@ -477,11 +481,10 @@ function IntroTab({ detail, onOpenDependency }: { detail: ProjectDetail; onOpenD
           </List>
         </section>
       )}
-      {detail.page_url !== null && (
-        <a className={styles.pageLink} href={detail.page_url} target="_blank" rel="noreferrer noopener">
-          <Icon name="external" size={14} />
+      {pageUrl !== null && (
+        <Button className={styles.pageLink} size="sm" variant="ghost" icon="external" onClick={() => void run(() => actions.openExternal(pageUrl), BLOCKED_COPY.openFailed)}>
           {DETAIL_COPY.externalPage}
-        </a>
+        </Button>
       )}
     </div>
   );
