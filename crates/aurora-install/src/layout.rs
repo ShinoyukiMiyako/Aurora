@@ -92,6 +92,12 @@ impl GameLayout {
         Some(self.library_path(&rel))
     }
 
+    /// 由 maven 坐标算出其在 `libraries/` 下的落点，错误按 [`coordinate_path`] 区分：缺段报坐标非法，
+    /// 有能走出库目录的段报 [`Error::UnsafePath`]。
+    pub fn checked_coordinate_path(&self, coordinate: &str) -> Result<PathBuf> {
+        Ok(self.library_path(&coordinate_path(coordinate)?))
+    }
+
     /// `assets/` 根目录。
     pub fn assets_dir(&self) -> PathBuf {
         self.root.join("assets")

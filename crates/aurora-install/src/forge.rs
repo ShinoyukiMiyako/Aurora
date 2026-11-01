@@ -153,8 +153,7 @@ fn resolve_data(
         let raw = sided_value(sided, side);
         let value = match classify_data_value(raw) {
             DataValue::Coordinate(coord) => layout
-                .library_path_for_coordinate(&coord)
-                .ok_or_else(|| Error::InvalidLibraryCoordinate { name: coord })?
+                .checked_coordinate_path(&coord)?
                 .to_string_lossy()
                 .into_owned(),
             DataValue::ExtractedFile(path) => extracted
@@ -206,10 +205,7 @@ fn substitute_arg(
     if len >= 2 && bytes[0] == b'[' && bytes[len - 1] == b']' {
         let coord = &arg[1..len - 1];
         return Ok(layout
-            .library_path_for_coordinate(coord)
-            .ok_or_else(|| Error::InvalidLibraryCoordinate {
-                name: coord.to_owned(),
-            })?
+            .checked_coordinate_path(coord)?
             .to_string_lossy()
             .into_owned());
     }
@@ -229,11 +225,7 @@ fn build_classpath(
 ) -> Result<String> {
     let mut parts = Vec::with_capacity(classpath.len() + 1);
     for coord in classpath.iter().chain(std::iter::once(&jar.to_owned())) {
-        let path = layout.library_path_for_coordinate(coord).ok_or_else(|| {
-            Error::InvalidLibraryCoordinate {
-                name: coord.clone(),
-            }
-        })?;
+        let path = layout.checked_coordinate_path(coord)?;
         parts.push(path.to_string_lossy().into_owned());
     }
     Ok(parts.join(&classpath_separator().to_string()))
@@ -594,13 +586,7 @@ impl<'a> ForgeInstaller<'a> {
             return Ok(false);
         }
 
-        let jar_path = self
-            .cx
-            .layout
-            .library_path_for_coordinate(&processor.jar)
-            .ok_or_else(|| Error::InvalidLibraryCoordinate {
-                name: processor.jar.clone(),
-            })?;
+        let jar_path = self.cx.layout.checked_coordinate_path(&processor.jar)?;
         let manifest = read_zip_entry_async(&jar_path, "META-INF/MANIFEST.MF").await?;
         let main_class =
             parse_main_class(&String::from_utf8_lossy(&manifest)).ok_or_else(|| {
@@ -725,11 +711,7 @@ impl<'a> ForgeInstaller<'a> {
                 .ok_or_else(|| Error::UnsupportedInstallProfile {
                     reason: "legacy install 缺 filePath".to_owned(),
                 })?;
-        let dest = self
-            .cx
-            .layout
-            .library_path_for_coordinate(&coord)
-            .ok_or_else(|| Error::InvalidLibraryCoordinate { name: coord })?;
+        let dest = self.cx.layout.checked_coordinate_path(&coord)?;
         extract_zip_entry_to_async(installer, file_path.trim_start_matches('/'), &dest).await?;
 
         // versionInfo 里的 Forge 库条目只有坐标和仓库地址，仓库里那个坐标并没有文件（只有
@@ -1257,6 +1239,41 @@ mod tests {
         };
         let expected = [p("a.b:one:1"), p("a.b:two:2"), p("a.b:main:3")].join(&sep);
         assert_eq!(got, expected);
+    }
+
+    /// 处理器参数、data 表与 classpath 里的坐标有能走出库目录的段时，与下载计划一样报路径越界
+    /// （命令层 install_unsafe_path），不混进「坐标非法」；缺段的坐标仍报坐标非法。
+    #[test]
+    fn processor_coordinates_escaping_the_libraries_dir_report_unsafe_path() {
+        let l = layout();
+        let values = BTreeMap::new();
+        let escaping = "evil:..:1";
+        let is_unsafe = |result: Result<String>| match result {
+            Err(Error::UnsafePath { entry, problem, .. }) => {
+                assert_eq!(entry, format!("库 {escaping}"));
+                assert_eq!(problem, aurora_version::UnsafePath::DotSegment);
+            }
+            other => panic!("应报路径越界，实际：{other:?}"),
+        };
+        is_unsafe(substitute_arg(&format!("[{escaping}]"), &values, &l));
+        is_unsafe(build_classpath(escaping, &[], &l));
+        is_unsafe(build_classpath("a.b:main:3", &[escaping.to_owned()], &l));
+        let data = BTreeMap::from([(
+            "MAPPINGS".to_owned(),
+            SidedData {
+                client: format!("[{escaping}]"),
+                server: String::new(),
+            },
+        )]);
+        is_unsafe(
+            resolve_data(&data, "client", &l, &BTreeMap::new())
+                .map(|values| values["MAPPINGS"].clone()),
+        );
+
+        assert!(matches!(
+            substitute_arg("[only:two]", &values, &l),
+            Err(Error::InvalidLibraryCoordinate { name }) if name == "only:two"
+        ));
     }
 
     #[test]
