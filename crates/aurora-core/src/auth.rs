@@ -1491,6 +1491,63 @@ mod tests {
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
         }
 
+        /// 把响应扣在 mock 里，请求一到先报到，等用例放行才答。
+        ///
+        /// 用它按事件排先后，不靠响应延迟凑窗口：机器满载时用例走到下一步可能比延迟还久，响应抢先回来，
+        /// 要造的局面就没了。扣着的时候这台 mock 的服务线程停在这里，`received_requests` 也拿不到锁，
+        /// 所以到没到看 [`ReplyGate::arrived`]。
+        struct HeldReply {
+            reply: ResponseTemplate,
+            arrived: tokio::sync::mpsc::UnboundedSender<()>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+
+        impl wiremock::Respond for HeldReply {
+            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+                // 两处出错都只说明用例已经失败退出、闸被丢掉了，这时放开服务线程，mock 才收得了尾。
+                let _ = self.arrived.send(());
+                let _ = self.release.lock().unwrap().recv();
+                self.reply.clone()
+            }
+        }
+
+        /// 用例手里的那一头。声明在 `MockServer` 之后：用例中途失败时它先丢，服务线程先放开。
+        struct ReplyGate {
+            arrived: tokio::sync::mpsc::UnboundedReceiver<()>,
+            release: std::sync::mpsc::Sender<()>,
+        }
+
+        impl ReplyGate {
+            /// 等到被扣的请求到达，超时即失败。
+            async fn arrived(&mut self) {
+                tokio::time::timeout(Duration::from_secs(15), self.arrived.recv())
+                    .await
+                    .expect("15 秒内没等到要扣下的请求")
+                    .expect("应答器不会先于用例消失");
+            }
+
+            /// 放一个响应回去。
+            fn release(&self) {
+                self.release.send(()).expect("应答器不会先于用例消失");
+            }
+        }
+
+        fn hold(reply: ResponseTemplate) -> (HeldReply, ReplyGate) {
+            let (arrived_tx, arrived_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            (
+                HeldReply {
+                    reply,
+                    arrived: arrived_tx,
+                    release: std::sync::Mutex::new(release_rx),
+                },
+                ReplyGate {
+                    arrived: arrived_rx,
+                    release: release_tx,
+                },
+            )
+        }
+
         /// 续期在网络上等回音的时候用户重新登录了同一个账户：旧 refresh token 随后被判失效，
         /// 但库里已换成新登录的凭据，新账户不能跟着被标成需要重新登录。
         /// 把 expire 里「凭据仍是被拒的那份」这一判断去掉，本用例即挂。
@@ -2232,63 +2289,6 @@ mod tests {
             })
             .await
             .unwrap_or_else(|_| panic!("15 秒内没等到 {endpoint} 的请求"));
-        }
-
-        /// 把响应扣在 mock 里，请求一到先报到，等用例放行才答。
-        ///
-        /// 用它按事件排先后，不靠响应延迟凑窗口：机器满载时用例走到下一步可能比延迟还久，响应抢先回来，
-        /// 要造的局面就没了。扣着的时候这台 mock 的服务线程停在这里，`received_requests` 也拿不到锁，
-        /// 所以到没到看 [`ReplyGate::arrived`]。
-        struct HeldReply {
-            reply: ResponseTemplate,
-            arrived: tokio::sync::mpsc::UnboundedSender<()>,
-            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
-        }
-
-        impl wiremock::Respond for HeldReply {
-            fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
-                // 两处出错都只说明用例已经失败退出、闸被丢掉了，这时放开服务线程，mock 才收得了尾。
-                let _ = self.arrived.send(());
-                let _ = self.release.lock().unwrap().recv();
-                self.reply.clone()
-            }
-        }
-
-        /// 用例手里的那一头。声明在 `MockServer` 之后：用例中途失败时它先丢，服务线程先放开。
-        struct ReplyGate {
-            arrived: tokio::sync::mpsc::UnboundedReceiver<()>,
-            release: std::sync::mpsc::Sender<()>,
-        }
-
-        impl ReplyGate {
-            /// 等到被扣的请求到达，超时即失败。
-            async fn arrived(&mut self) {
-                tokio::time::timeout(Duration::from_secs(15), self.arrived.recv())
-                    .await
-                    .expect("15 秒内没等到要扣下的请求")
-                    .expect("应答器不会先于用例消失");
-            }
-
-            /// 放一个响应回去。
-            fn release(&self) {
-                self.release.send(()).expect("应答器不会先于用例消失");
-            }
-        }
-
-        fn hold(reply: ResponseTemplate) -> (HeldReply, ReplyGate) {
-            let (arrived_tx, arrived_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
-            (
-                HeldReply {
-                    reply,
-                    arrived: arrived_tx,
-                    release: std::sync::Mutex::new(release_rx),
-                },
-                ReplyGate {
-                    arrived: arrived_rx,
-                    release: release_tx,
-                },
-            )
         }
 
         /// 等到库里的账户满足 `done`，超时即失败。续期在后台跑完落盘，调用方那时早已返回。
