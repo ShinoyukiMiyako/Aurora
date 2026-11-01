@@ -3,6 +3,7 @@
 
 import { isForgeBuiltinProvider } from "../../copy/flows";
 import type { InstanceSummary, Settings } from "../../domain/adapt";
+import { samePath } from "../../domain/paths";
 import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskError, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
@@ -271,7 +272,7 @@ export type AutoJavaPick =
 
 export function autoJavaPick(runtimes: readonly JavaInstallationDto[], required: number, defaultJava: string, javaAuto: string): AutoJavaPick {
   if (defaultJava !== javaAuto) {
-    const runtime = runtimes.find((r) => r.path === defaultJava);
+    const runtime = runtimes.find((r) => samePath(r.path, defaultJava));
     return { kind: "global", path: defaultJava, runtime: runtime === undefined ? null : runtime };
   }
   const best = bestLocalRuntime(runtimes, required);
@@ -285,7 +286,7 @@ export type JavaChoice =
 
 export function javaChoice(settingsJava: string, runtimes: readonly JavaInstallationDto[], required: number, defaultJava: string, javaAuto: string): JavaChoice {
   if (settingsJava === javaAuto) return { auto: true, pick: autoJavaPick(runtimes, required, defaultJava, javaAuto) };
-  const runtime = runtimes.find((r) => r.path === settingsJava);
+  const runtime = runtimes.find((r) => samePath(r.path, settingsJava));
   return { auto: false, path: settingsJava, runtime: runtime === undefined ? null : runtime };
 }
 

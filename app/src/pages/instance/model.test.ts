@@ -442,6 +442,13 @@ describe("Java 选择", () => {
     expect(autoJavaPick(runtimes, 17, "C:/gone", "auto")).toEqual({ kind: "global", path: "C:/gone", runtime: null });
   });
 
+  it("路径按路径规则比较：只差大小写或分隔符的是同一个 Java，不当成缺失", () => {
+    const list = [java("D:/Java/jdk-21/bin/java.exe", 21, 0)];
+    expect(autoJavaPick(list, 17, "d:\\java\\JDK-21\\bin\\java.exe", "auto")).toEqual({ kind: "global", path: "d:\\java\\JDK-21\\bin\\java.exe", runtime: list[0] });
+    expect(javaChoice("D:\\Java/jdk-21\\bin/java.exe", list, 17, "auto", "auto")).toEqual({ auto: false, path: "D:\\Java/jdk-21\\bin/java.exe", runtime: list[0] });
+    expect(javaChoice("D:/Java/jdk-17/bin/java.exe", list, 17, "auto", "auto")).toEqual({ auto: false, path: "D:/Java/jdk-17/bin/java.exe", runtime: null });
+  });
+
   it("固定路径对不上本机列表时 runtime 为 null；JVM 预设判断回落到要求版本", () => {
     const missing = javaChoice("C:/gone/java.exe", runtimes, 17, "auto", "auto");
     expect(missing).toEqual({ auto: false, path: "C:/gone/java.exe", runtime: null });
