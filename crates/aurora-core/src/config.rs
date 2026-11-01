@@ -12,7 +12,8 @@
 //!
 //! 枚举字段按字段前向兼容：降级后遇到新版本写入的取值，只把那一项退回默认，其余设置照常读入，
 //! 文件原样不动（见 [`ConfigFieldReset`]）。整份当坏文件处理的只剩不是合法 JSON 与类型对不上。
-//! 不认识的顶层设置原样留在 [`AuroraConfig::unrecognized`] 里，落盘时写回。
+//! 不认识的顶层设置原样留在 [`AuroraConfig::unrecognized`] 里，外观、内存段里不认识的键留在
+//! [`AuroraConfig::carried_over`] 里，落盘时都原样写回。
 
 use std::path::{Path, PathBuf};
 
@@ -201,6 +202,9 @@ pub struct AuroraConfig {
     /// 升回去只能重设一遍。
     #[serde(flatten)]
     pub unrecognized: serde_json::Map<String, Value>,
+    /// 文件里有、内存里的设置表示不了的内容，只经 [`ConfigStore`] 进出文件，见 [`CarriedOver`]。
+    #[serde(skip)]
+    pub carried_over: CarriedOver,
 }
 
 impl Default for AuroraConfig {
@@ -228,7 +232,71 @@ impl Default for AuroraConfig {
             notified_update_version: None,
             language: UiLanguage::default(),
             unrecognized: serde_json::Map::new(),
+            carried_over: CarriedOver::default(),
         }
+    }
+}
+
+/// 从 config.json 读进来、内存里的设置表示不了、落盘时要原样带回去的内容：外观段、内存段里这个版本
+/// 不认识的键（多半是更新的版本写的）。
+///
+/// 不放进 [`Appearance`] 与 [`MemorySettings`] 自己身上：这两个值原样进 IPC 出参，内存设置还会被设置页
+/// 整份替换，放在段里要么漏给前端，要么被一次替换冲掉。它也不参与配置的序列化，只由 [`ConfigStore`]
+/// 读入时收下、落盘时写回各自的段。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CarriedOver {
+    appearance: serde_json::Map<String, Value>,
+    memory: serde_json::Map<String, Value>,
+}
+
+impl CarriedOver {
+    /// 从读进来的 JSON 树上收下各段不认识的键。
+    fn collect(tree: &Value) -> serde_json::Result<Self> {
+        Ok(Self {
+            appearance: unrecognized_keys::<Appearance>(tree.get("appearance"))?,
+            memory: unrecognized_keys::<MemorySettings>(tree.get("memory"))?,
+        })
+    }
+
+    /// 把收下的键写回要落盘的 JSON 树，与同段认识的键并排。
+    fn restore_into(&self, tree: &mut Value) -> serde_json::Result<()> {
+        for (section, keys) in [("appearance", &self.appearance), ("memory", &self.memory)] {
+            if keys.is_empty() {
+                continue;
+            }
+            let object = tree
+                .get_mut(section)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    <serde_json::Error as serde::ser::Error>::custom(format!(
+                        "配置的 {section} 段没有序列化成对象，带不回不认识的键"
+                    ))
+                })?;
+            for (key, value) in keys {
+                // 收下时已经排除了认识的键，不会重名；万一重名，以内存里的设置为准。
+                object.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 一段设置里这个版本不认识的键。认不认识交给段自己的反序列化：flatten 进来的结构先领走自己的字段，
+/// 剩下的才归保留区，与整份配置的解析是同一套规则。段缺省、或写成 serde 也接受的数组形式（没有键名）时
+/// 没有要收的键。
+fn unrecognized_keys<S: DeserializeOwned>(
+    section: Option<&Value>,
+) -> serde_json::Result<serde_json::Map<String, Value>> {
+    #[derive(Deserialize)]
+    struct Split<S> {
+        #[serde(flatten)]
+        _known: S,
+        #[serde(flatten)]
+        rest: serde_json::Map<String, Value>,
+    }
+    match section {
+        Some(object @ Value::Object(_)) => Ok(Split::<S>::deserialize(object)?.rest),
+        _ => Ok(serde_json::Map::new()),
     }
 }
 
@@ -365,18 +433,22 @@ impl ConfigStore {
             path: self.path.clone(),
             source,
         };
-        // 先整份严格解析：读得出来的文件走不到下面，结构损坏时也报这里带行列的原错误。
-        let strict = match serde_json::from_slice::<AuroraConfig>(bytes) {
-            Ok(config) => return Ok((config, Vec::new())),
-            Err(err) => err,
-        };
+        // 先整份严格解析：读得出来的文件不必摘取值，结构损坏时也报这里带行列的原错误。
+        let strict = serde_json::from_slice::<AuroraConfig>(bytes);
         let mut tree: Value = serde_json::from_slice(bytes).map_err(parse_error)?;
-        let resets = take_unknown_enum_values(&mut tree);
-        if resets.is_empty() {
-            return Err(parse_error(strict));
-        }
-        // 退回之后仍对不上就是结构损坏。报退回之后的错误：严格解析的那个多半指向刚退回的取值，不是原因。
-        let config = serde_json::from_value(tree).map_err(parse_error)?;
+        let (mut config, resets) = match strict {
+            Ok(config) => (config, Vec::new()),
+            Err(strict) => {
+                let resets = take_unknown_enum_values(&mut tree);
+                if resets.is_empty() {
+                    return Err(parse_error(strict));
+                }
+                // 退回之后仍对不上就是结构损坏。报退回之后的错误：严格解析的那个多半指向刚退回的取值，不是原因。
+                let config = AuroraConfig::deserialize(&tree).map_err(parse_error)?;
+                (config, resets)
+            }
+        };
+        config.carried_over = CarriedOver::collect(&tree).map_err(parse_error)?;
         for reset in &resets {
             tracing::warn!(
                 path = %self.path.display(),
@@ -451,9 +523,14 @@ impl ConfigStore {
         Ok(candidate)
     }
 
-    /// 持久化配置（原子写入，带父目录创建）。
+    /// 持久化配置（原子写入，带父目录创建）。读入时收下的各段不认识的键一并写回。
     pub async fn save(&self, config: &AuroraConfig) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(config).map_err(CoreError::ConfigSerialize)?;
+        let mut tree = serde_json::to_value(config).map_err(CoreError::ConfigSerialize)?;
+        config
+            .carried_over
+            .restore_into(&mut tree)
+            .map_err(CoreError::ConfigSerialize)?;
+        let bytes = serde_json::to_vec_pretty(&tree).map_err(CoreError::ConfigSerialize)?;
         aurora_base::fs::atomic_write(&self.path, &bytes).await?;
         Ok(())
     }
@@ -1059,6 +1136,228 @@ mod tests {
         assert_eq!(raw["recent_searches"], serde_json::json!(["sodium", ""]));
         assert_eq!(raw["appearance"]["accent"], "moss");
         assert_eq!(store.load().await.unwrap(), config);
+    }
+
+    /// 降级之后读到外观、内存段里新版本才有的键：照常读入、不算任何处置。改一项别的设置整份落盘时，
+    /// 这些键与值原样写回；之后改同段里认识的键，认识的键按新值写，不认识的照旧留着。
+    #[tokio::test]
+    async fn unrecognized_nested_keys_survive_saves() {
+        use crate::appearance::{AccentColor, AppearanceMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{
+                "download_concurrency": 16,
+                "appearance": {
+                    "accent": "moss",
+                    "glow": {"strength": 0.5, "tint": null},
+                    "petal_density": 0,
+                    "": ""
+                },
+                "memory": {"max_mb": 6144, "auto": false, "gc": "zgc", "reserve_mb": [512, 1024]}
+            }"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (mut config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(config.appearance.accent, AccentColor::Moss);
+        assert_eq!(
+            config.memory,
+            MemorySettings {
+                max_mb: 6144,
+                min_mb: None,
+                auto: false,
+            }
+        );
+        let glow = serde_json::json!({"strength": 0.5, "tint": null});
+
+        config.download_concurrency = 32;
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["download_concurrency"], 32);
+        assert_eq!(
+            raw["appearance"],
+            serde_json::json!({
+                "mode": "day",
+                "accent": "moss",
+                "petals": true,
+                "panorama": false,
+                "reduce_motion": false,
+                "glow": glow,
+                "petal_density": 0,
+                "": ""
+            })
+        );
+        assert_eq!(
+            raw["memory"],
+            serde_json::json!({
+                "max_mb": 6144,
+                "min_mb": null,
+                "auto": false,
+                "gc": "zgc",
+                "reserve_mb": [512, 1024]
+            })
+        );
+
+        let mut config = store.load().await.unwrap();
+        config.appearance.mode = AppearanceMode::Night;
+        config.appearance.accent = AccentColor::Sakura;
+        config.memory = MemorySettings {
+            max_mb: 1024,
+            min_mb: Some(512),
+            auto: true,
+        };
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["appearance"]["mode"], "night");
+        assert_eq!(raw["appearance"]["accent"], "sakura");
+        assert_eq!(raw["appearance"]["glow"], glow);
+        assert_eq!(raw["appearance"]["petal_density"], 0);
+        assert_eq!(raw["appearance"][""], "");
+        assert_eq!(
+            raw["memory"],
+            serde_json::json!({
+                "max_mb": 1024,
+                "min_mb": 512,
+                "auto": true,
+                "gc": "zgc",
+                "reserve_mb": [512, 1024]
+            })
+        );
+        assert_eq!(store.load().await.unwrap(), config);
+    }
+
+    /// 嵌套段里不认识的键只在落盘时带上：外观的读取值与补丁合并结果、内存设置的值里都没有它们（这些值原样
+    /// 进 IPC 出参）。设置页提交内存时整份替换内存设置，也不会把它们冲掉。
+    #[tokio::test]
+    async fn unrecognized_nested_keys_stay_out_of_section_values() {
+        use crate::appearance::AppearancePatch;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{
+                "appearance": {"mode": "night", "glow": true},
+                "memory": {"max_mb": 6144, "gc": "zgc"}
+            }"#,
+        )
+        .await
+        .unwrap();
+        let config = ConfigStore::at(&path).load().await.unwrap();
+        let mut aurora = Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        let appearance_keys = ["accent", "mode", "panorama", "petals", "reduce_motion"];
+        let keys = |value: Value| -> Vec<String> {
+            value.as_object().unwrap().keys().cloned().collect()
+        };
+        assert_eq!(
+            keys(serde_json::to_value(aurora.appearance()).unwrap()),
+            appearance_keys
+        );
+        let merged = aurora.set_appearance(AppearancePatch {
+            petals: Some(false),
+            ..AppearancePatch::default()
+        });
+        assert_eq!(keys(serde_json::to_value(merged).unwrap()), appearance_keys);
+        assert_eq!(
+            keys(serde_json::to_value(aurora.config().memory).unwrap()),
+            ["auto", "max_mb", "min_mb"]
+        );
+
+        aurora.set_memory(MemorySettings {
+            max_mb: 2048,
+            min_mb: Some(512),
+            auto: true,
+        });
+        assert_eq!(
+            keys(serde_json::to_value(aurora.config().memory).unwrap()),
+            ["auto", "max_mb", "min_mb"]
+        );
+        aurora.save_config().await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["appearance"]["mode"], "night");
+        assert_eq!(raw["appearance"]["petals"], false);
+        assert_eq!(raw["appearance"]["glow"], true);
+        assert_eq!(
+            raw["memory"],
+            serde_json::json!({"max_mb": 2048, "min_mb": 512, "auto": true, "gc": "zgc"})
+        );
+    }
+
+    /// 段是空对象或整段缺省时没有要带的键：写回的就是全默认的段，不多出任何东西。
+    #[tokio::test]
+    async fn empty_or_missing_sections_carry_nothing() {
+        for bytes in [
+            br#"{"appearance": {}, "memory": {}}"#.as_slice(),
+            br#"{"download_concurrency": 8}"#.as_slice(),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            tokio::fs::write(&path, bytes).await.unwrap();
+            let store = ConfigStore::at(&path);
+            let config = store.load().await.unwrap();
+            store.save(&config).await.unwrap();
+            let raw: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            assert_eq!(
+                raw["appearance"],
+                serde_json::to_value(Appearance::default()).unwrap()
+            );
+            assert_eq!(
+                raw["memory"],
+                serde_json::to_value(MemorySettings::default()).unwrap()
+            );
+        }
+    }
+
+    /// 段写成 serde 也接受的数组形式时没有键名可收：照常读入，不因收键而变成读不出来。
+    #[tokio::test]
+    async fn array_form_section_still_loads() {
+        use crate::appearance::{AccentColor, AppearanceMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"appearance": ["night", "moss", false, true, true]}"#,
+        )
+        .await
+        .unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(config.appearance.mode, AppearanceMode::Night);
+        assert_eq!(config.appearance.accent, AccentColor::Moss);
+        assert_eq!(config.carried_over, CarriedOver::default());
+    }
+
+    /// 同一段里既有不认识的取值又有不认识的键：取值按默认启动并报出，不认识的键照样收下、落盘时写回。
+    #[tokio::test]
+    async fn unrecognized_nested_keys_are_kept_alongside_enum_fallbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"appearance": {"mode": "dusk", "glow": true}, "memory": {"gc": "zgc"}}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (mut config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![("appearance.mode", "dusk".to_owned())]
+        );
+        config.check_updates = false;
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["check_updates"], false);
+        assert_eq!(raw["appearance"]["glow"], true);
+        assert_eq!(raw["memory"]["gc"], "zgc");
+        assert_eq!(raw["memory"]["max_mb"], 4096);
     }
 
     /// 字段级退回与不认识的设置同时出现：枚举退回默认，不认识的设置照样留着，两者互不影响。
