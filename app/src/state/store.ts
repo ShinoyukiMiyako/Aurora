@@ -469,6 +469,9 @@ export interface LauncherActions {
 
 // ---------------------------------------------------------------- 常量与工具
 
+/** 跑 Forge 系安装器时缺 Java 由后端自己下载，这些任务不管成败都可能多出一个运行时。 */
+const MAY_DOWNLOAD_JAVA = new Set(["install_version", "install_modpack", "repair_instance"]);
+
 /** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 与 update_mods 是前端的组合任务。 */
 const TASK_COMMANDS = new Set([
   "install_version",
@@ -1586,6 +1589,8 @@ export class LauncherStore {
     invalidateResources(`log:${id}`);
     invalidateResources(`content:${id}`);
     invalidateResources("play-stats");
+    // 启动时缺 Java，后端也会自己下载运行时
+    invalidateResources("java");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
   }
@@ -1727,17 +1732,22 @@ export class LauncherStore {
       const attemptId = attemptTaskId(task);
       this.execute(task).then(
         (result) => {
-          this.cancelRequested.delete(attemptId);
-          this.composites.delete(attemptId);
+          this.attemptSettled(task, attemptId);
           this.onTaskDone(task.id, attempt, result);
         },
         (error: unknown) => {
-          this.cancelRequested.delete(attemptId);
-          this.composites.delete(attemptId);
+          this.attemptSettled(task, attemptId);
           this.onTaskFailed(task.id, attempt, error);
         },
       );
     }
+  }
+
+  /** 一次尝试落定，成败都走这里。 */
+  private attemptSettled(task: Task, attemptId: string): void {
+    this.cancelRequested.delete(attemptId);
+    this.composites.delete(attemptId);
+    if (MAY_DOWNLOAD_JAVA.has(task.spec.command)) invalidateResources("java");
   }
 
   /** 请后端取消运行中的这一次尝试，并记下请求：组合任务据此不再开始下一项。返回后端此刻是否在运行它。 */
