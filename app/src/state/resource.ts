@@ -26,6 +26,8 @@ export type ResourceResult<T> = (
 ) & {
   /** 重新请求（「重试」按钮用）。 */
   reload(): void;
+  /** 后台重读（见 ResourceCache.refresh）：已有请求在路上时不再发，也不作废它。 */
+  refresh(): void;
 };
 
 interface Entry {
@@ -142,6 +144,16 @@ export class ResourceCache {
   }
 
   /**
+   * 不是玩家点的重读（切回页面时看看盘上变了没有）：已有请求在路上就等它。reload 会作废在途的那次，
+   * 初次加载的骨架要从头等，回到前台与切页撞在一起时也多读一遍。
+   */
+  refresh(key: string): void {
+    const entry = this.entries.get(key);
+    if (entry === undefined) throw new Error(`资源 ${key} 还没有被订阅过，不能重读`);
+    if (!entry.inFlight) this.fetch(key, entry);
+  }
+
+  /**
    * 只这一次换用 fetcher 重取，例如用户点「重试」时要后端跳过退避立即重取的那一次；
    * 之后的失效重取与 reload 仍用订阅时登记的 fetcher，取的必须是同一份数据。
    */
@@ -217,5 +229,9 @@ export function useResource<T>(key: string | null, fetcher: () => Promise<T>, ca
     if (key === null) throw new Error("未启用的查询不能重载");
     cache.reload(key);
   }, [cache, key]);
-  return { ...snap, reload } as ResourceResult<T>;
+  const refresh = useCallback(() => {
+    if (key === null) throw new Error("未启用的查询不能重读");
+    cache.refresh(key);
+  }, [cache, key]);
+  return { ...snap, reload, refresh } as ResourceResult<T>;
 }
