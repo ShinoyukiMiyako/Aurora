@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::rules::{Rule, RuntimeContext, evaluate_rules};
 
+/// 13w25a 的发布日期。ISO-8601 按字符串比较，只比到日就够：前一个版本 13w24b 早了三天。
+const WINDOW_SIZE_ARGS_SINCE: &str = "2013-06-17";
+
 /// 一个版本 JSON 的完整域模型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionJson {
@@ -117,6 +120,14 @@ impl VersionJson {
     /// 该版本的资源是否铺在工作目录的 `resources` 下（pre-1.6 索引的 map_to_resources 布局）。
     pub fn maps_assets_to_resources(&self) -> bool {
         self.assets.as_deref() == Some("pre-1.6")
+    }
+
+    /// 客户端是否认 `--width` / `--height`。13w25a 才加上这两个选项，更早的快照遇到未知选项直接退出。
+    /// 没有发布时间的自定义版本 JSON 按认处理：它们基本都是新版本改的。
+    pub fn accepts_window_size_args(&self) -> bool {
+        self.release_time
+            .as_deref()
+            .is_none_or(|released| released >= WINDOW_SIZE_ARGS_SINCE)
     }
 }
 

@@ -424,9 +424,10 @@ impl<'a> CommandBuilder<'a> {
             Vec::new()
         };
         let mut game_args: Vec<String> = game_templates.iter().map(|t| ph.substitute(t)).collect();
-        // 旧式 minecraftArguments 不带窗口尺寸，新式参数靠 has_custom_resolution 条件块带上；
-        // 游戏 1.6 起都认 --width / --height，模板里没有时补一份。
+        // 旧式 minecraftArguments 不带窗口尺寸，新式参数靠 has_custom_resolution 条件块带上，
+        // 模板里没有时补一份。
         if let Some((width, height)) = self.resolution
+            && self.version.accepts_window_size_args()
             && !game_args
                 .iter()
                 .any(|arg| arg == "--width" || arg == "--height")
@@ -660,6 +661,41 @@ mod tests {
         // 没设分辨率：不凭空加尺寸参数，交给游戏自己的默认窗口。
         let args = build_with_resolution(legacy, None);
         assert!(!args.iter().any(|a| a == "--width" || a == "--height"));
+    }
+
+    /// 13w25a 之前的 Main 不认窗口尺寸选项，遇到未知选项直接退出，默认分辨率也会让这些快照起不来。
+    /// 13w24b 的模板和 1.6 已经一样，只能按发布时间分。
+    #[test]
+    fn versions_before_13w25a_never_get_the_resolution_appended() {
+        for (id, released) in [
+            ("13w16a", "2013-04-21T12:49:30+00:00"),
+            ("13w24b", "2013-06-14T12:19:13+00:00"),
+        ] {
+            let json = serde_json::json!({
+                "id": id, "mainClass": "net.minecraft.client.main.Main",
+                "releaseTime": released,
+                "minecraftArguments": "--username ${auth_player_name}",
+            })
+            .to_string();
+            let args = build_with_resolution(&json, Some((1280, 720)));
+            assert!(
+                !args.iter().any(|a| a == "--width" || a == "--height"),
+                "{id}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_is_appended_from_13w25a_on() {
+        let json = serde_json::json!({
+            "id": "13w25a", "mainClass": "net.minecraft.client.main.Main",
+            "releaseTime": "2013-06-17T14:08:06+00:00",
+            "minecraftArguments": "--username ${auth_player_name}",
+        })
+        .to_string();
+        let args = build_with_resolution(&json, Some((1280, 720)));
+        assert_eq!(value_after(&args, "--width"), vec!["1280"]);
+        assert_eq!(value_after(&args, "--height"), vec!["720"]);
     }
 
     /// 新式参数自带 has_custom_resolution 条件块：只出现一份，不重复追加。
