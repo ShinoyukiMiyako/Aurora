@@ -92,7 +92,12 @@ where
                 status: status.as_u16(),
             });
         }
-        response.json::<T>().await.map_err(|source| Error::Http {
+        // 先收齐再解析：reqwest 的 json() 把读体中断和解析失败都报成 decode 类，前者值得重试，后者不值得。
+        let body = response.bytes().await.map_err(|source| Error::Http {
+            context: context.to_string(),
+            source,
+        })?;
+        serde_json::from_slice(&body).map_err(|source| Error::Json {
             context: context.to_string(),
             source,
         })
@@ -103,6 +108,87 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 按连接顺序写出 `replies` 里的（声明长度，实际正文）后关闭连接，wiremock 造不出响应体只到一半。
+    /// 返回地址与已接受的连接数。
+    fn raw_server(replies: Vec<(usize, Vec<u8>)>) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/search", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        std::thread::spawn(move || {
+            for (declared, body) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let status = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(status.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (url, accepted)
+    }
+
+    fn two_attempts() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            jitter: false,
+        }
+    }
+
+    /// 响应体读到一半连接断开：搜索、版本列表不该因一次断开直接报错，再试一次就拿到完整内容。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_body_cut_off_midway_is_retried() {
+        let full = br#"{"hits":7}"#.to_vec();
+        let (url, accepted) = raw_server(vec![
+            (full.len(), full[..4].to_vec()),
+            (full.len(), full.clone()),
+        ]);
+        let client = aurora_base::http::build_client().unwrap();
+
+        let value: serde_json::Value = send_json(&two_attempts(), "测试", || client.get(url.as_str()))
+            .await
+            .unwrap();
+
+        assert_eq!(value["hits"], 7);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+    }
+
+    /// 完整收到但解析不了是确定性失败：报 Json，不重试。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_complete_but_unparsable_body_is_json_and_not_retried() {
+        let garbage = b"<html>oops</html>".to_vec();
+        let (url, accepted) = raw_server(vec![
+            (garbage.len(), garbage.clone()),
+            (garbage.len(), garbage),
+        ]);
+        let client = aurora_base::http::build_client().unwrap();
+
+        let err = send_json::<serde_json::Value, _>(&two_attempts(), "测试", || {
+            client.get(url.as_str())
+        })
+        .await
+        .unwrap_err();
+
+        match err {
+            Error::Json { context, .. } => assert_eq!(context, "测试"),
+            other => panic!("应为 Json，实际 {other:?}"),
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "不该重试");
+    }
 
     fn full_bucket(at: Instant) -> TokenBucket {
         TokenBucket {

@@ -90,9 +90,10 @@ impl RetryableError for Error {
 /// 判断 reqwest 传输层错误是否属于「再试一次可能就好」的瞬时故障。
 ///
 /// 明确排除 `is_status`（状态类错误由 [`Error::Status`] 单独承载并分级）与 `is_builder`
-/// （构造问题，重试无益）。
+/// （构造问题，重试无益）。读响应体时连接断开 reqwest 报 decode 类，JSON 解析失败另走 [`Error::Json`]，
+/// 所以这里的 decode 只会是传输故障。
 fn is_transient_reqwest(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
+    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
 }
 
 #[cfg(test)]
