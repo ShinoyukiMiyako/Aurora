@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, failureCopy, failureToastLabel, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -158,6 +158,21 @@ describe("取消实例级任务的确认", () => {
     expect(copy.body).toBe("「生存」会停在文件不完整的状态，之后可以再点「修复实例」。");
     expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.createTitle("1.21.1", "vanilla", null), "周末生存").title).toBe("取消「安装 1.21.1」？");
     expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.modpackTitle("RLCraft"), "RLCraft").title).toBe("取消「导入整合包 RLCraft」？");
+  });
+});
+
+describe("删除被别的实例依赖的实例", () => {
+  const body = (dependents: readonly string[]) => DELETE_INSTANCE_COPY.hasDependents("1.21.1", dependents).body;
+
+  it("标题说不能删，正文点名依赖它的实例；超过两个时只点两个、写明总数", () => {
+    expect(DELETE_INSTANCE_COPY.hasDependents("1.21.1", ["甲"]).title).toBe("不能删除「1.21.1」");
+    expect(body(["甲"])).toBe("实例「甲」依赖它，要先删除依赖它的实例");
+    expect(body(["甲", "乙"])).toBe("实例「甲」「乙」依赖它，要先删除依赖它的实例");
+    expect(body(["甲", "乙", "丙"])).toBe("实例「甲」「乙」等 3 个依赖它，要先删除依赖它的实例");
+  });
+
+  it("没有依赖却走到这句是调用方的错：不写出一句没有主语的话", () => {
+    expect(() => body([])).toThrow("没有实例依赖「1.21.1」");
   });
 });
 

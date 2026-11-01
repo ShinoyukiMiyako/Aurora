@@ -32,7 +32,8 @@ interface KeptBackups {
 
 /**
  * 返回的函数走完整个删除：先向后端要删除预览（会一起移入回收站的存档以它为准，共用目录里的存档不随实例删除），
- * 再弹危险确认，确认后删除。预览与删除的失败都经外层统一错误处理报告，确认框取消就什么也不做。
+ * 再弹危险确认，确认后删除。预览里有实例依赖它时后端一定拒绝，这时只说明原因，不弹确认框让玩家白确认一次。
+ * 预览与删除的失败都经外层统一错误处理报告，确认框取消就什么也不做。
  */
 export function useDeleteInstance(): (inst: InstanceSummary) => Promise<void> {
   // 只订阅挂着未完成任务的实例 id：实例库每张卡都调用这个钩子，订阅任务本身会让它们随下载进度重渲染
@@ -48,6 +49,11 @@ export function useDeleteInstance(): (inst: InstanceSummary) => Promise<void> {
     if (!inst.placeholder) {
       const preview = await run(() => actions.previewInstanceDeletion(id), ACTION_ERROR.deleteInstance(name));
       if (!preview.ok) return;
+      if (preview.value.dependents.length > 0) {
+        const copy = DELETE_INSTANCE_COPY.hasDependents(name, preview.value.dependents);
+        actions.toast("warning", copy.title, copy.body);
+        return;
+      }
       worlds = preview.value.worlds;
       backups = { count: preview.value.backup_count, dir: preview.value.backups_dir };
     }

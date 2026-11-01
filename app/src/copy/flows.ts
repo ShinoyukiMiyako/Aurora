@@ -1317,6 +1317,16 @@ export const DELETE_INSTANCE_COPY = {
   /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
   pendingTask: "正在进行的安装任务会先取消。",
   confirmLabel: (worlds: number) => (worlds > 0 ? `删除实例和 ${worlds} 个存档` : "删除实例"),
+  /** 删除预览看出有实例经继承依赖它：这时删不了，不进确认框。Toast 正文放不下更多名字，只点两个。 */
+  hasDependents: (name: string, dependents: readonly string[]) => {
+    if (dependents.length === 0) throw new Error(`没有实例依赖「${name}」，不该走到这句`);
+    const named = dependents
+      .slice(0, 2)
+      .map((d) => `「${d}」`)
+      .join("");
+    const rest = dependents.length > 2 ? `等 ${dependents.length} 个` : "";
+    return { title: `不能删除「${name}」`, body: `实例${named}${rest}依赖它，要先删除依赖它的实例` };
+  },
 } as const;
 
 // ---------------------------------------------------------------- 整合包没导入完

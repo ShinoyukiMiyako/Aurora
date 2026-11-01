@@ -2271,6 +2271,16 @@ describe("实例详情：设置", () => {
     expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
   });
 
+  it("有实例依赖它：预览里就看出删不了，不弹确认框，直接说明是谁依赖它，不发删除", async () => {
+    ipc.overrides.set("preview_instance_deletion", () => ({ id: ID, worlds: [], size_bytes: 0, file_count: 0, dependents: ["Fabric 整合"], activity: null }));
+    await open("settings");
+    click(button("删除实例"));
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(launcher.state.toasts.at(-1)).toMatchObject({ tone: "warning", title: `不能删除「${ID}」`, body: "实例「Fabric 整合」依赖它，要先删除依赖它的实例" });
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
+  });
+
   it("实例上还挂着任务：确认框说明会先取消任务", async () => {
     ipc.overrides.set("preview_instance_deletion", () => ({ id: ID, worlds: [], size_bytes: 0, file_count: 0, dependents: [], activity: null }));
     ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
