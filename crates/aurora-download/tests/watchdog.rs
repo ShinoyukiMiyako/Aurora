@@ -511,6 +511,55 @@ async fn a_source_that_keeps_sending_the_same_slow_node_is_left_for_the_next_sou
     );
 }
 
+/// 分发入口每次跳转都给同一个慢节点签上新的签名与过期时间：节点没换，地址却逐字不同。
+/// 认出是同一个节点就换源，不在它上面再白等一个窗口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_re_signed_address_of_the_same_slow_node_is_not_a_new_endpoint() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let slow = Endpoint::start(body.clone(), probe_then_drip).await;
+    let mirror = Endpoint::start(body.clone(), probe_then_fast).await;
+    let origin = redirector(
+        "/f.jar",
+        &slow.url("/node/f.jar?s=first&e=1"),
+        &slow.url("/node/f.jar?s=second&e=2"),
+    )
+    .await;
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: format!("{}/f.jar", origin.uri()),
+            mirror: mirror.url("/f.jar"),
+        }),
+    );
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), sources));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("应在第二个源上下完");
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        origin_gets(&origin).await,
+        2,
+        "首次取终点 + 判慢后重取一次，认出还是同一个节点就不再问"
+    );
+    assert_eq!(
+        slow.requests(),
+        vec![None, Some(0), None],
+        "同一个慢节点只滴灌过一次"
+    );
+    assert_eq!(mirror.range_starts(), vec![0, MIB], "第二个源上从头下完");
+    only_dest_left(dir.path(), &dest);
+}
+
 /// 只有一个候选、第一次连接慢后面快：判慢后原地址换不出新终点，作为最后一个源关掉看门狗再来，
 /// 照样下完。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -552,6 +601,118 @@ async fn the_last_source_finishes_with_the_watchdog_off() {
             Some(0),
             Some(MIB),
         ]
+    );
+    assert!(elapsed < Duration::from_secs(10), "耗时 {elapsed:?}");
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 没有 sha1 的文件在唯一的源上判慢：关掉看门狗续传时，已下完的分片照样复用。分片是同一个源写的，
+/// 换源前那条「没有 sha1 就清分片」的纪律不适用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_last_source_keeps_finished_chunks_of_a_file_without_sha1() {
+    let total = 3 * MIB;
+    let body = payload(total);
+    let node = Endpoint::start(body.clone(), |start, seen| match start {
+        None => Pace::HeadOnly,
+        Some(start) if start == 2 * MIB && !seen.contains(&Some(2 * MIB)) => {
+            Pace::DripTail(DRIP_ALL)
+        }
+        Some(_) => Pace::Fast,
+    })
+    .await;
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), single_source()));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("nosha.jar");
+    let task = DownloadTask::new(node.url("/nosha.jar"), &dest).with_size(total);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("最后一个源上慢也要下完");
+
+    assert_eq!(std::fs::read(&dest).unwrap(), *body);
+    assert_eq!(
+        node.requests(),
+        vec![
+            // 看门狗盯着的一轮：探测、前两片快放、第三片滴灌被判慢、向原地址重取终点仍是自己。
+            None,
+            Some(0),
+            Some(MIB),
+            Some(2 * MIB),
+            None,
+            // 关掉看门狗的一轮：探测、首片照例重下、第二片复用、只续第三片。
+            None,
+            Some(0),
+            Some(2 * MIB),
+        ]
+    );
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 第一个源只是慢、后面的源根本没有这个文件（镜像还没同步到的新版本就是这样）：换源失败后回到慢源，
+/// 关掉看门狗在它上面下完，而不是把一个本来下得完的文件判成装不上。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_source_is_finished_with_the_watchdog_off_when_every_later_source_fails() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let node = Endpoint::start(body.clone(), |start, seen| match start {
+        None => Pace::HeadOnly,
+        Some(_) if seen.iter().all(Option::is_none) => Pace::DripTail(DRIP_ALL),
+        Some(_) => Pace::Fast,
+    })
+    .await;
+    let mirror = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/f.jar"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mirror)
+        .await;
+    let official_url = node.url("/f.jar");
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: official_url.clone(),
+            mirror: format!("{}/f.jar", mirror.uri()),
+        }),
+    );
+    let health = Arc::new(SourceHealth::with_policy(1, Duration::from_secs(60)));
+    let downloader = Downloader::with_health(
+        client(),
+        config(one_at_a_time(MIB), sources),
+        health.clone(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    let started = Instant::now();
+    downloader
+        .download(&task)
+        .await
+        .expect("后面的源都失败时，慢源上关掉看门狗也要下完");
+    let elapsed = started.elapsed();
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        node.requests(),
+        vec![
+            // 看门狗盯着的一轮：探测、首片滴灌被判慢、向原地址重取终点仍是自己。
+            None,
+            Some(0),
+            None,
+            // 镜像 404 之后回到这里、关掉看门狗的一轮：探测、首片重下、第二片。
+            None,
+            Some(0),
+            Some(MIB),
+        ]
+    );
+    assert!(origin_gets(&mirror).await >= 1, "镜像确实试过");
+    assert!(
+        !health.is_tripped(&official_url),
+        "慢源最后下成了，之前记的故障一笔勾销"
     );
     assert!(elapsed < Duration::from_secs(10), "耗时 {elapsed:?}");
     only_dest_left(dir.path(), &dest);

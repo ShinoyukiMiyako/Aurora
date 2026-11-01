@@ -14,7 +14,8 @@
 //!    不把刚写完的文件再读一遍；落盘是否 fsync 见 [`Landing`]。
 //! 7. 大文件的网络传输段由吞吐看门狗盯着（见 [`crate::watchdog`]）：终点慢到窗口平均低于阈值，
 //!    就向原地址重新取一个终点，已完整的分片保留、只续传没下完的；取不到新终点即换源；已是最后
-//!    一个源时关掉看门狗在当前终点上续传，慢也装上。合并、校验、落位不计时。
+//!    一个源时关掉看门狗在当前终点上续传，后面的源都失败时回到先前判慢的源关掉看门狗下完，慢也装上。
+//!    合并、校验、落位不计时。
 //!
 //! 同一个目标路径的下载在进程内串行（[`lock_dest`]）：两次安装同时落同一个共享文件时，后到的一方
 //! 等前一方落位后再做第 1 步，通常直接跳过。
@@ -164,6 +165,9 @@ impl Downloader {
             .health
             .prioritize(self.config.sources.candidates(&task.url)?);
         let mut last_err: Option<Error> = None;
+        // 第一个因为慢而让给后面的源。后面的源若全都失败（镜像还没同步到的新文件回 404 就是这样），
+        // 它是唯一真在送数据的源，要回到它关掉看门狗下完：慢也比装不上强。
+        let mut slow_left: Option<&String> = None;
         for (index, url) in candidates.iter().enumerate() {
             let mut outcome = self.fetch_from(url, task, file, cancel, Watch::On).await;
             if index + 1 == candidates.len() && matches!(outcome, Err(Error::SlowEndpoint { .. })) {
@@ -199,6 +203,9 @@ impl Downloader {
                     return Err(err);
                 }
                 Err(err) => {
+                    if slow_left.is_none() && matches!(err, Error::SlowEndpoint { .. }) {
+                        slow_left = Some(url);
+                    }
                     // 4xx 只说明「这个源没有这个文件」，换源即可，不能记在主机头上。
                     self.health
                         .record_failure(url, is_host_fault(err.http_status()));
@@ -217,6 +224,41 @@ impl Downloader {
                         http_status = ?err.http_status(),
                         error = %err,
                         "该下载源尝试耗尽，切换下一个源"
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
+        // 最后一个源判慢时已在循环里关掉看门狗续传过，留在这里的只可能是更早的源。
+        if let Some(url) = slow_left {
+            tracing::warn!(
+                file = %task.dest.display(),
+                %url,
+                "其余下载源都失败，回到慢的那个源关掉看门狗下完"
+            );
+            // 同换源前的分片纪律：没有 sha1 兜底时，最后一个源留下的分片不能拼进这个源的文件。
+            if task.sha1.is_none() {
+                self.remove_parts(task).await;
+            }
+            match self.fetch_from(url, task, file, cancel, Watch::Off).await {
+                Ok(len) => {
+                    self.health.record_success(url);
+                    return Ok(len);
+                }
+                Err(Error::Cancelled) => {
+                    self.discard_leftovers(task).await;
+                    return Err(Error::Cancelled);
+                }
+                Err(err @ Error::CredentialRejected { .. }) => return Err(err),
+                Err(err) => {
+                    self.health
+                        .record_failure(url, is_host_fault(err.http_status()));
+                    tracing::warn!(
+                        file = %task.dest.display(),
+                        %url,
+                        http_status = ?err.http_status(),
+                        error = %err,
+                        "回到慢源关掉看门狗后仍失败"
                     );
                     last_err = Some(err);
                 }
@@ -657,8 +699,8 @@ impl Downloader {
     /// 看门狗判慢后向原地址重新取终点。BMCLAPI 这类分发入口每次请求都可能跳到不同节点，再问一次
     /// 往往就能换到快的；节点地址带签名与过期参数，只在这一次尝试里用，不跨文件留存。
     ///
-    /// 换出了新终点就返回它。原地址仍跳回同一个终点（没有跳转的源就是这样）或换终点次数已用尽，
-    /// 返回 [`Error::SlowEndpoint`] 交给换源；重新取终点本身失败，原样返回那个错误。
+    /// 换出了新终点就返回它。原地址仍跳回同一个节点（见 [`same_node`]；没有跳转的源就是这样）
+    /// 或换终点次数已用尽，返回 [`Error::SlowEndpoint`] 交给换源；重新取终点本身失败，原样返回那个错误。
     async fn next_endpoint(
         &self,
         origin: &str,
@@ -709,7 +751,7 @@ impl Downloader {
                 return Err(err);
             }
         };
-        if next == slow {
+        if same_node(&next, slow) {
             tracing::warn!(
                 file = %dest,
                 url = %origin,
@@ -913,6 +955,17 @@ impl<'a> Landing<'a> {
             Some((expected, hasher)) => hasher.verify(expected),
             None => Ok(()),
         }
+    }
+}
+
+/// 两个下载地址是否落在同一个节点上：比协议、主机与端口，不比路径和查询串。
+///
+/// BMCLAPI 每次跳转都给节点地址签上新的签名与过期时间，同一个节点两次跳出来的完整地址也不一样，
+/// 逐字比较认不出「节点没换」，会在同一个慢节点上再白等一个窗口。解析不了的地址只能逐字比。
+fn same_node(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin(),
+        _ => a == b,
     }
 }
 
@@ -1571,6 +1624,36 @@ mod tests {
             transfer_for(&excluded, "https://cdn.modrinth.com/a.jar", Some(1 << 20)),
             Transfer::Chunked { total: 1 << 20 }
         );
+    }
+
+    #[test]
+    fn same_node_compares_scheme_host_and_port_only() {
+        let node = "https://bmclapi1.sakura.sld.tw/maven/a.jar?s=first&e=100";
+        assert!(
+            same_node(
+                node,
+                "https://bmclapi1.sakura.sld.tw/maven/a.jar?s=second&e=200"
+            ),
+            "重签的地址仍是同一个节点"
+        );
+        assert!(
+            same_node(node, "https://bmclapi1.sakura.sld.tw:443/other/b.jar"),
+            "默认端口写不写都一样，路径不同也是同一个节点"
+        );
+        assert!(!same_node(
+            node,
+            "https://bmclapi3.hurtmc.com/maven/a.jar?s=first&e=100"
+        ));
+        assert!(!same_node(
+            node,
+            "https://bmclapi1.sakura.sld.tw:4000/maven/a.jar"
+        ));
+        assert!(!same_node(
+            node,
+            "http://bmclapi1.sakura.sld.tw/maven/a.jar"
+        ));
+        assert!(same_node("not a url", "not a url"), "解析不了时逐字比");
+        assert!(!same_node("not a url", "not a url?s=2"));
     }
 
     #[test]
