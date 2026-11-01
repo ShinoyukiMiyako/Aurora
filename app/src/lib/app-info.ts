@@ -3,7 +3,7 @@
 // 构建信息与第三方许可清单由构建脚本生成（scripts/build-info.mjs、scripts/third-party-licenses.mjs），这里只给读取入口。
 
 import type { BuildInfo } from "../../scripts/build-info.mjs";
-import { THIRD_PARTY_LICENSES_FILE } from "../../scripts/licenses-file.mjs";
+import { LICENSE_TEXT_FILE, THIRD_PARTY_LICENSES_FILE } from "../../scripts/licenses-file.mjs";
 import type { ThirdPartyManifest } from "../../scripts/third-party-licenses.mjs";
 
 export type { BuildInfo, ReleaseChannel } from "../../scripts/build-info.mjs";
@@ -31,10 +31,21 @@ export function buildInfo(): BuildInfo {
 /** 第三方许可清单在产物根目录下的文件名（构建时由 vite.config.ts 写出）。 */
 export { THIRD_PARTY_LICENSES_FILE };
 
+/** 协议全文在产物根目录下的文件名（只有引导程序的构建写出它）。 */
+export { LICENSE_TEXT_FILE };
+
 /** 第三方许可清单：体积大、只有关于页用到，用到时才去读。 */
 export async function loadThirdPartyLicenses(): Promise<ThirdPartyManifest> {
   const url = `${import.meta.env.BASE_URL}${THIRD_PARTY_LICENSES_FILE}`;
   const response = await fetch(url);
   if (!response.ok) throw new Error(`第三方许可清单读不出来：${url} 返回 ${response.status}`);
   return (await response.json()) as ThirdPartyManifest;
+}
+
+/** 协议全文：只有引导程序的产物带这个文件。 */
+export async function loadLicenseText(): Promise<string> {
+  const url = `${import.meta.env.BASE_URL}${LICENSE_TEXT_FILE}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`协议全文读不出来：${url} 返回 ${response.status}`);
+  return response.text();
 }
