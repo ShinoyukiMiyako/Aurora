@@ -383,6 +383,8 @@ impl<'a> ForgeInstaller<'a> {
     /// 校验通过的旧文件直接复用，不再重下几十 MB。
     async fn download_installer(&self, installer_url: &str) -> Result<PathBuf> {
         let file_name = installer_url.rsplit('/').next().unwrap_or("installer.jar");
+        // 地址由加载器版本号拼出，版本号可以来自导入的整合包；Windows 上反斜杠也是分隔符。
+        checked_segment(file_name, || "Forge 安装器的缓存文件名".to_owned())?;
         let dest = self.installer_cache_dir().join(file_name);
         let mut task = aurora_download::DownloadTask::new(installer_url, dest.clone());
         match self.installer_sha1(installer_url).await {
@@ -1873,6 +1875,46 @@ mod tests {
         // 临时目录送回游戏目录根下。
         assert!(!f.root.join("escaped.lzma").exists());
         assert!(!f.root.join("versions").join("escaped.lzma").exists());
+    }
+
+    /// installer 地址由加载器版本号拼出，版本号可以来自导入的整合包：最后一段原样当缓存文件名，Windows 上
+    /// 反斜杠也是分隔符，`..` 藏在里面能把下到的文件写到缓存目录之外。这种地址报路径越界，不发请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installer_file_names_escaping_the_cache_dir_are_rejected() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"installer".to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let file_name = r"forge-1.20.1-..\..\..\escaped-installer.jar";
+        let f = fixture();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+
+        let err = ForgeInstaller::new(cx, "java")
+            .install(&format!("{}/{file_name}", server.uri()))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Backslash }
+                    if entry == "Forge 安装器的缓存文件名" && path == file_name
+            ),
+            "实际：{err:?}"
+        );
+        assert!(!f.root.join("escaped-installer.jar").exists());
+        assert!(
+            !f.root
+                .parent()
+                .unwrap()
+                .join("escaped-installer.jar")
+                .exists()
+        );
     }
 
     /// installer 里那份 jar 与库条目声明的 sha1 对不上：照实报错，不把坏文件留在库目录里。
