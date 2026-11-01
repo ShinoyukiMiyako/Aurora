@@ -72,13 +72,16 @@ fn lock_account_db() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// 续期闸的键：数据目录与账户 uuid。
+type GateKey = (PathBuf, String);
+
 /// 每个账户一把续期闸：同一账户的续期（启动前的静默续期、账户页的手动刷新）一个接一个来。
 ///
 /// 外置登录的刷新会让旧令牌当场作废，两次续期同时拿同一个旧令牌去刷，后到的一方必被服务器以
 /// 「令牌无效」拒绝，账户就被误判成需要重新登录。排在后面的一方拿到闸后先重读库里的凭据，
 /// 别人刚续出的新令牌直接接着用。键带上数据目录：闸管的是同一份凭据库里的同一个账户，另一个目录里
 /// uuid 相同的账户令牌各是各的，不该排在一起。表项只增不删：一个进程里出现过的账户屈指可数。
-static REFRESH_GATES: LazyLock<Mutex<HashMap<(PathBuf, String), Arc<AsyncMutex<()>>>>> =
+static REFRESH_GATES: LazyLock<Mutex<HashMap<GateKey, Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 凭据库读不出来时做的处置：原文件改名留存，按空凭据库继续。供启动提示告诉用户。
