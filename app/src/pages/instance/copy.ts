@@ -639,6 +639,8 @@ export const CRASH_PAGE_COPY = {
   findOnDiscover: "去发现页查找",
   findOnDiscoverNote: "在发现页找缺失的前置，安装目标预选这个实例",
   findModVersionNote: "在发现页找适配这个实例的版本，安装目标预选这个实例",
+  viewMods: "查看 Mod",
+  viewModNote: (name: string) => `别的 Mod 要靠 ${name} 才能启动，到 Mod 页更新它，不建议停用`,
   disableMod: (name: string) => `停用 ${name}`,
   disableOptifine: "停用 OptiFine",
   disableModNote: "先停用它再启动一次，看看问题是否还在",

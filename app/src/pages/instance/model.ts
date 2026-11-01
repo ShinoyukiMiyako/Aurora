@@ -688,6 +688,9 @@ export function modsByDetail(detail: string, mods: readonly InstalledMod[]): Ins
 
 // ---------------------------------------------------------------- 崩溃：一键尝试
 
+/** 会推荐停用某个 Mod 的线索类别。 */
+type DisableCategory = "mixin_failure" | "corrupted_jar" | "game_version_mismatch" | "optifine_incompatible";
+
 export type CrashFix =
   | { kind: "raise_memory"; currentMb: number; targetMb: number; followsGlobal: boolean }
   | { kind: "memory_at_cap"; totalMb: number }
@@ -702,9 +705,11 @@ export type CrashFix =
   | { kind: "enable_mod"; fileName: string; name: string }
   | { kind: "search_dependency"; category: "missing_dependency" | "missing_language_provider"; detail: string }
   | { kind: "find_dependency" }
-  /** Mod 要求别的游戏或加载器版本、又对不上唯一一个已装 Mod：去发现页按 detail 找适配的版本，没有 detail 时不带关键词。 */
-  | { kind: "find_mod_version"; detail: string | null }
-  | { kind: "disable_mod"; category: "mixin_failure" | "corrupted_jar" | "game_version_mismatch" | "optifine_incompatible"; fileName: string; name: string }
+  /** 要换版本的 Mod 对不上唯一一个已装 Mod：去发现页按 detail 找适配的版本，没有 detail 时不带关键词。 */
+  | { kind: "find_mod_version"; category: "game_version_mismatch" | "dependency_version_mismatch"; detail: string | null }
+  | { kind: "disable_mod"; category: DisableCategory; fileName: string; name: string }
+  /** 线索指向的 Mod 是别的 Mod 的前置：停用它会连带一批 Mod 起不来，带去 Mod 页更新或查看。 */
+  | { kind: "view_mod"; category: DisableCategory | "dependency_version_mismatch"; fileName: string; name: string }
   | { kind: "keep_latest"; disable: { fileName: string; name: string }[] }
   | { kind: "repair"; category: "native_library_missing" | "corrupted_jar"; changeGameDir: boolean }
   /** category 是这份报告里第一条显卡或本地崩溃类线索的类别，三类共用这一条。 */
@@ -758,6 +763,9 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
     keys.add(key);
     fixes.push(fix);
   };
+  // 一键停用都走这里
+  const pushDisable = (category: DisableCategory, mod: InstalledMod) =>
+    push({ kind: "disable_mod", category, fileName: mod.file_name, name: modName(mod) });
   const seen = new Set<string>();
   for (const clue of report.diagnoses) {
     if (seen.has(clue.category)) continue;
@@ -813,20 +821,27 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         break;
       case "game_version_mismatch": {
         const hits = clue.detail === null ? [] : modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
-        if (hits.length === 1) push({ kind: "disable_mod", category: "game_version_mismatch", fileName: hits[0].file_name, name: modName(hits[0]) });
-        else push({ kind: "find_mod_version", detail: clue.detail });
+        if (hits.length === 1) pushDisable("game_version_mismatch", hits[0]);
+        else push({ kind: "find_mod_version", category: "game_version_mismatch", detail: clue.detail });
+        break;
+      }
+      case "dependency_version_mismatch": {
+        // 找不到时多半打包在别的 Mod 里，列表上没有这一行可看
+        const hits = clue.detail === null ? [] : modsByDetail(clue.detail, ctx.mods);
+        if (hits.length === 0) push({ kind: "find_mod_version", category: "dependency_version_mismatch", detail: clue.detail });
+        else push({ kind: "view_mod", category: "dependency_version_mismatch", fileName: hits[0].file_name, name: modName(hits[0]) });
         break;
       }
       case "optifine_incompatible": {
         const hits = enabledOptifine(ctx.mods);
-        if (hits.length === 1) push({ kind: "disable_mod", category: "optifine_incompatible", fileName: hits[0].file_name, name: modName(hits[0]) });
+        if (hits.length === 1) pushDisable("optifine_incompatible", hits[0]);
         break;
       }
       case "mixin_failure": {
         // 对应到多个或对应不上时不出按钮，交给「日志指向的 Mod」逐个开关
         if (clue.detail === null) break;
         const hits = modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
-        if (hits.length === 1) push({ kind: "disable_mod", category: "mixin_failure", fileName: hits[0].file_name, name: modName(hits[0]) });
+        if (hits.length === 1) pushDisable("mixin_failure", hits[0]);
         break;
       }
       case "duplicate_mod": {
@@ -848,7 +863,7 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         break;
       case "corrupted_jar": {
         const mod = corruptedModFile(clue.matched, ctx.mods);
-        if (mod !== null && mod.enabled) push({ kind: "disable_mod", category: "corrupted_jar", fileName: mod.file_name, name: modName(mod) });
+        if (mod !== null && mod.enabled) pushDisable("corrupted_jar", mod);
         else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false });
         break;
       }
@@ -868,6 +883,7 @@ export function crashFixKey(fix: CrashFix): string {
       return `${fix.kind}:${fix.major}`;
     case "enable_mod":
     case "disable_mod":
+    case "view_mod":
       return `${fix.kind}:${fix.fileName}`;
     case "search_dependency":
       return `${fix.kind}:${fix.detail.toLowerCase()}`;

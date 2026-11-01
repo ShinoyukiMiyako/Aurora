@@ -885,16 +885,33 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
   });
 
   it("版本不符：对不上、只对上停用着的、对上多个时改去发现页按 detail 查找；没有 detail 时不带关键词", () => {
+    const category = "game_version_mismatch";
     expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "iris" })]), ctx({ mods: [mod("sodium-1.jar")] })))).toEqual([
-      { kind: "find_mod_version", detail: "iris" },
+      { kind: "find_mod_version", category, detail: "iris" },
     ]);
     expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "sodium" })]), ctx({ mods: [mod("sodium-1.jar.disabled")] })))).toEqual([
-      { kind: "find_mod_version", detail: "sodium" },
+      { kind: "find_mod_version", category, detail: "sodium" },
     ]);
     expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "sodium" })]), ctx({ mods: [mod("sodium-1.jar"), mod("sodium-2.jar")] })))).toEqual([
-      { kind: "find_mod_version", detail: "sodium" },
+      { kind: "find_mod_version", category, detail: "sodium" },
     ]);
-    expect(only(crashFixes(report([clue("game_version_mismatch")]), ctx({ mods: [mod("sodium-1.jar")] })))).toEqual([{ kind: "find_mod_version", detail: null }]);
+    expect(only(crashFixes(report([clue("game_version_mismatch")]), ctx({ mods: [mod("sodium-1.jar")] })))).toEqual([{ kind: "find_mod_version", category, detail: null }]);
+  });
+
+  describe("前置版本不对", () => {
+    const api = mod("fabric-api-0.83.0.jar", {}, { mod_id: "fabric-api", name: "Fabric API" });
+
+    it("前置装着：带去 Mod 页，不给停用", () => {
+      expect(only(crashFixes(report([clue("dependency_version_mismatch", { detail: "fabric-api" })]), ctx({ mods: [api] })))).toEqual([
+        { kind: "view_mod", category: "dependency_version_mismatch", fileName: "fabric-api-0.83.0.jar", name: "Fabric API" },
+      ]);
+    });
+
+    it("前置不在 Mod 列表里（打包在别的 Mod 里）：去发现页按 detail 查找", () => {
+      expect(only(crashFixes(report([clue("dependency_version_mismatch", { detail: "cloth-config" })]), ctx({ mods: [api] })))).toEqual([
+        { kind: "find_mod_version", category: "dependency_version_mismatch", detail: "cloth-config" },
+      ]);
+    });
   });
 
   it("OptiFine 不兼容：文件名或 mod id 带 optifine 的已启用 Mod 恰好一个才给停用按钮", () => {

@@ -24,15 +24,16 @@ const ACCESS_VIOLATION: ExitCodeNoteDto = { code: -1073741819, hex: "0xC0000005"
 const STACK_OVERRUN: ExitCodeNoteDto = { code: -1073740791, hex: "0xC0000409", kind: "stack_buffer_overrun", summary: "紧急中止" };
 
 describe("崩溃诊断文案", () => {
-  it("15 类诊断按后端规则优先级排好，各有标签与标题", () => {
-    expect(CRASH_CATEGORIES).toHaveLength(15);
-    expect(new Set(CRASH_CATEGORIES).size).toBe(15);
+  it("16 类诊断按后端规则优先级排好，各有标签与标题", () => {
+    expect(CRASH_CATEGORIES).toHaveLength(16);
+    expect(new Set(CRASH_CATEGORIES).size).toBe(16);
     expect(CRASH_CATEGORIES.map((c) => crashCategoryLabel(c))).toEqual([
       "Java 版本不匹配",
       "内存不足",
       "JVM 参数有误",
       "缺少语言支持",
       "版本不符",
+      "前置版本不对",
       "缺少前置",
       "OptiFine 不兼容",
       "Mixin 注入失败",
@@ -94,6 +95,9 @@ describe("崩溃诊断文案", () => {
   it("版本不符、OptiFine、Intel 显卡驱动：有 detail 插进句子，没有时用通用句", () => {
     expect(CRASH_CATEGORY.game_version_mismatch.explain({ ...BLANK, detail: "sodium" })).toBe("日志指向 sodium 需要另一个版本的 Minecraft 或加载器。");
     expect(CRASH_CATEGORY.game_version_mismatch.explain(BLANK)).toBe("日志里有 Mod 不支持当前的游戏版本或加载器版本。");
+    expect(CRASH_CATEGORY.dependency_version_mismatch.title).toBe("前置 Mod 的版本不对");
+    expect(CRASH_CATEGORY.dependency_version_mismatch.explain({ ...BLANK, detail: "fabric-api" })).toBe("日志指向 fabric-api 已经装了，只是版本不对。");
+    expect(CRASH_CATEGORY.dependency_version_mismatch.explain(BLANK)).toBe("日志里有前置 Mod 已经装了，只是版本不对。");
     expect(CRASH_CATEGORY.optifine_incompatible.explain({ ...BLANK, detail: "OptiFine_1.20.1_HD_U_I6" })).toBe(
       "日志指向 OptiFine 与这个实例的加载器版本对不上。OptiFine 只支持特定版本的 Forge，在 Fabric 与 Quilt 上还要另装转接 Mod。",
     );

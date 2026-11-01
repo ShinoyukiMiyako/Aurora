@@ -8,6 +8,8 @@ export type CrashCategory =
   | "out_of_memory"
   /** Java 不接受自定义的 JVM 参数。 */
   | "jvm_args_invalid"
+  /** 前置 Mod 装着，只是版本不满足要求；缺失才算 missing_dependency。 */
+  | "dependency_version_mismatch"
   | "missing_dependency"
   | "mixin_failure"
   | "duplicate_mod"
