@@ -1874,6 +1874,29 @@ describe("实例详情：崩溃诊断", () => {
       expect(byRole("switch", "启用 Sodium").getAttribute("aria-disabled")).toBeNull();
     });
 
+    it("同一帧里连点两下开关：开关还没重渲染成禁用，第二下也不发命令", async () => {
+      crash = { ...report([{ category: "mixin_failure" }], NOW - 60_000), suspects: SUSPECT_SODIUM };
+      const disk = modDisk();
+      await open("crash");
+      const pending = deferred<string>();
+      ipc.overrides.set("set_mod_enabled", () => pending.promise);
+      const toggle = byRole("switch", "停用 Sodium");
+      act(() => {
+        toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+      await flush();
+      expect(callsOf(ipc, "set_mod_enabled")).toEqual([{ versionId: ID, fileName: "sodium.jar", enabled: false }]);
+      disk.files.delete("sodium.jar");
+      disk.files.add("sodium.jar.disabled");
+      await act(async () => {
+        pending.resolve("sodium.jar.disabled");
+        await settle(20);
+      });
+      expect(callsOf(ipc, "set_mod_enabled")).toHaveLength(1);
+      expect(toastTitles()).toEqual(["已停用 Sodium"]);
+    });
+
     it("停用后列表还没重扫回来又点回启用：按盘上已改好的文件名调后端，不报冲突", async () => {
       crash = { ...report([{ category: "mixin_failure" }], NOW - 60_000), suspects: SUSPECT_SODIUM };
       const disk = modDisk();
