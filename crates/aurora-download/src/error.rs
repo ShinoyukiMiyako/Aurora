@@ -79,7 +79,7 @@ pub enum Error {
     /// 吞吐看门狗判定当前下载终点过慢，且向原地址要不到另一个终点（或换终点次数已用尽）。
     /// 换源编排据此换下一个源；已是最后一个源时关掉看门狗续传，所以它不会成为一批下载的最终错误。
     #[error(
-        "下载终点过慢: {url}（最近 {window_secs} 秒平均 {bytes_per_sec} 字节/秒，低于 {threshold} 字节/秒）"
+        "下载终点过慢：{url}（最近 {window_secs} 秒平均 {bytes_per_sec} 字节/秒，低于 {threshold} 字节/秒）"
     )]
     SlowEndpoint {
         url: String,
@@ -444,7 +444,7 @@ mod tests {
         assert!(!err.is_cancelled());
         assert_eq!(
             err.to_string(),
-            "下载终点过慢: https://node.example/f.jar?s=sig&e=1（最近 15 秒平均 2048 字节/秒，低于 32768 字节/秒）"
+            "下载终点过慢：https://node.example/f.jar?s=sig&e=1（最近 15 秒平均 2048 字节/秒，低于 32768 字节/秒）"
         );
     }
 
