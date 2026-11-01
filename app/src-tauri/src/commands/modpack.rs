@@ -2447,6 +2447,28 @@ mod tests {
         );
         assert!(!destination.exists());
         drop(reservation);
+
+        let writing = locks.write_saves(EXPORT_ID);
+        let err = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            &GameSlot::default(),
+            "ex-writing",
+            EXPORT_ID,
+            args(true),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": EXPORT_ID, "activity": "modifying" }))
+        );
+        assert!(err.message.contains("装数据包"), "{}", err.message);
+        assert!(!destination.exists());
+        drop(writing);
     }
 
     /// 不隔离的实例共用游戏目录的 saves：另一个不隔离的实例正在备份或恢复存档时，导出同样报 instance_busy，

@@ -84,7 +84,8 @@ impl InstanceActivity {
     ///
     /// 备份与恢复只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交；游戏开着时
     /// 存档随时在写，打包出来的是半截，恢复则会被游戏下次保存覆盖，所以与启动、运行互斥。它与「运行」的
-    /// 兼容集合相同，游戏退出后可以原地从「运行」转成它。
+    /// 兼容集合相同，游戏退出后可以原地从「运行」转成它。数据包写进存档目录，是改动里的例外，由
+    /// [`InstanceLocks::write_saves`] 另记一笔，两边互相看。
     fn compatible_with(self, other: Self) -> bool {
         use InstanceActivity::{BackingUp, Inherited, Launching, Modifying, Running};
         matches!(
@@ -130,6 +131,24 @@ struct LockTable {
     /// 存档正被整份读走的实例（导出整合包勾了存档），每份记下号与原样 id。与占用分开记：导出对外仍是
     /// 「改动中」，与备份兼容，只有要替换存档的恢复需要看它。
     saves_readers: HashMap<String, Vec<(u64, String)>>,
+    /// 正往存档目录里写东西的实例（装数据包），记法同上。对外同样是「改动中」，备份、恢复与带存档的导出看它。
+    saves_writers: HashMap<String, Vec<(u64, String)>>,
+}
+
+/// 存档正被做什么。
+#[derive(Clone, Copy)]
+enum SavesUse {
+    Read,
+    Write,
+}
+
+impl LockTable {
+    fn saves_marks(&mut self, kind: SavesUse) -> &mut HashMap<String, Vec<(u64, String)>> {
+        match kind {
+            SavesUse::Read => &mut self.saves_readers,
+            SavesUse::Write => &mut self.saves_writers,
+        }
+    }
 }
 
 /// 实例级互斥表（managed state）。键不分大小写：Windows 上 `ABC` 与 `abc` 是同一个目录。
@@ -272,27 +291,47 @@ impl InstanceLocks {
     ///
     /// 导出先记下、再查有没有备份或恢复在做；恢复先占 BackingUp、再看这份记录。两边都是先写自己的、再读对方的，
     /// 同一时刻发起时至少有一方会看到另一方，不会两边都放行。
-    pub fn read_saves(&self, id: &str) -> SavesReadGuard {
+    pub fn read_saves(&self, id: &str) -> SavesGuard {
+        self.mark_saves(id, SavesUse::Read)
+    }
+
+    /// 记下实例 `id` 正往存档目录里写东西（装数据包）；返回的守卫被丢弃即撤销。备份、恢复与带存档的导出开始前
+    /// 看这份记录，写法同 [`read_saves`](Self::read_saves)：先写自己的、再读对方的。
+    pub fn write_saves(&self, id: &str) -> SavesGuard {
+        self.mark_saves(id, SavesUse::Write)
+    }
+
+    fn mark_saves(&self, id: &str, kind: SavesUse) -> SavesGuard {
         let key = lock_key(id);
         let mut table = lock_table(&self.table);
         let token = table.next;
         table.next += 1;
         table
-            .saves_readers
+            .saves_marks(kind)
             .entry(key.clone())
             .or_default()
             .push((token, id.to_owned()));
-        SavesReadGuard {
+        SavesGuard {
             table: self.table.clone(),
             key,
             token,
+            kind,
         }
     }
 
     /// 此刻存档正被整份读走的实例（原样的 id，每个实例一次）。
     pub fn reading_saves(&self) -> Vec<String> {
+        self.marked_saves(SavesUse::Read)
+    }
+
+    /// 此刻正往存档目录里写东西的实例（原样的 id，每个实例一次）。
+    pub fn writing_saves(&self) -> Vec<String> {
+        self.marked_saves(SavesUse::Write)
+    }
+
+    fn marked_saves(&self, kind: SavesUse) -> Vec<String> {
         lock_table(&self.table)
-            .saves_readers
+            .saves_marks(kind)
             .values()
             .filter_map(|marks| marks.first().map(|(_, id)| id.clone()))
             .collect()
@@ -337,20 +376,22 @@ impl InstanceGuard {
     }
 }
 
-/// 一份「存档正被整份读走」的记录；丢弃即撤销。
-pub struct SavesReadGuard {
+/// 一份「存档正被读走或写入」的记录；丢弃即撤销。
+pub struct SavesGuard {
     table: Arc<Mutex<LockTable>>,
     key: String,
     token: u64,
+    kind: SavesUse,
 }
 
-impl Drop for SavesReadGuard {
+impl Drop for SavesGuard {
     fn drop(&mut self) {
         let mut table = lock_table(&self.table);
-        if let Some(marks) = table.saves_readers.get_mut(&self.key) {
+        let all = table.saves_marks(self.kind);
+        if let Some(marks) = all.get_mut(&self.key) {
             marks.retain(|(token, _)| *token != self.token);
             if marks.is_empty() {
-                table.saves_readers.remove(&self.key);
+                all.remove(&self.key);
             }
         }
     }
@@ -2180,7 +2221,22 @@ pub(crate) async fn ensure_saves_settled_for_reading(
         return Err(busy(id, activity));
     }
     ensure_shared_world_free(aurora, game, id).await?;
-    ensure_shared_worlds_settled(aurora, locks, id).await
+    ensure_shared_worlds_settled(aurora, locks, id).await?;
+    ensure_saves_not_written(aurora, locks, id).await
+}
+
+/// 装数据包写的是 `saves/<存档>/datapacks`：本实例或共用这份存档的实例在备份、恢复或把存档打进整合包时，写进去
+/// 的文件会让打包读到半截、让恢复的改名就位失败。调用方已占住自己并记下正在写存档。
+pub(crate) async fn ensure_saves_free_for_writing(
+    aurora: &Aurora,
+    locks: &InstanceLocks,
+    id: &str,
+) -> Result<(), CommandError> {
+    if locks.occupancy(id).0 == Some(InstanceActivity::BackingUp) {
+        return Err(busy(id, InstanceActivity::BackingUp));
+    }
+    ensure_shared_worlds_settled(aurora, locks, id).await?;
+    ensure_saves_not_read(aurora, locks, id).await
 }
 
 /// 启动前的存档检查：别的不隔离实例在备份或恢复共用存档，或者本实例、共用这份存档的实例正把存档打进整合包时，
@@ -2201,31 +2257,59 @@ async fn ensure_saves_not_read(
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
-    let readers = locks.reading_saves();
-    // 没有导出在读存档时不碰盘：每次恢复都会经过这里。
-    if readers.is_empty() {
-        return Ok(());
+    match saves_holder(aurora, id, locks.reading_saves()).await? {
+        Some(reader) => Err(saves_busy(
+            &reader,
+            format!("实例 {reader} 正在导出带存档的整合包，请稍后再试"),
+        )),
+        None => Ok(()),
     }
-    if let Some(own) = readers.iter().find(|r| lock_key(r) == lock_key(id)) {
-        return Err(saves_being_exported(own));
-    }
-    if aurora.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
-        return Ok(());
-    }
-    for other in readers {
-        if aurora.world_scope(&other).await.map_err(instance_error)? == WorldScope::Shared {
-            return Err(saves_being_exported(&other));
-        }
-    }
-    Ok(())
 }
 
-fn saves_being_exported(id: &str) -> CommandError {
-    CommandError::new(
-        code::INSTANCE_BUSY,
-        format!("实例 {id} 正在导出带存档的整合包，请稍后再试"),
-    )
-    .with_detail(json!({ "id": id, "activity": InstanceActivity::Modifying }))
+/// 备份、恢复、导出存档与带存档的导出整合包：本实例或共用这份存档的实例正在往存档里装数据包时报
+/// instance_busy，detail 指向装数据包的那个实例。
+async fn ensure_saves_not_written(
+    aurora: &Aurora,
+    locks: &InstanceLocks,
+    id: &str,
+) -> Result<(), CommandError> {
+    match saves_holder(aurora, id, locks.writing_saves()).await? {
+        Some(writer) => Err(saves_busy(
+            &writer,
+            format!("实例 {writer} 正在往存档里装数据包，请稍后再试"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `marked` 里和实例 `id` 用同一份存档的那个实例：它自己，或者同为不隔离的实例。
+async fn saves_holder(
+    aurora: &Aurora,
+    id: &str,
+    marked: Vec<String>,
+) -> Result<Option<String>, CommandError> {
+    // 没有记录时不碰盘：每次恢复、备份都会经过这里。
+    if marked.is_empty() {
+        return Ok(None);
+    }
+    if let Some(own) = marked.iter().find(|m| lock_key(m) == lock_key(id)) {
+        return Ok(Some(own.clone()));
+    }
+    if aurora.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
+        return Ok(None);
+    }
+    for other in marked {
+        if aurora.world_scope(&other).await.map_err(instance_error)? == WorldScope::Shared {
+            return Ok(Some(other));
+        }
+    }
+    Ok(None)
+}
+
+/// 导出整合包与装数据包对外都是「改动中」，所以 activity 报 modifying，正文写明在做什么。
+fn saves_busy(id: &str, message: String) -> CommandError {
+    CommandError::new(code::INSTANCE_BUSY, message)
+        .with_detail(json!({ "id": id, "activity": InstanceActivity::Modifying }))
 }
 
 /// 备份、恢复、导出这三个长任务要用的共享状态。
@@ -2251,6 +2335,7 @@ async fn begin_world_task<'a>(
     if replaces_saves {
         ensure_saves_not_read(&snapshot, env.locks, id).await?;
     }
+    ensure_saves_not_written(&snapshot, env.locks, id).await?;
     let task = env.tasks.register(task_id)?;
     let aurora = snapshot.with_cancel(task.token().clone());
     Ok((guard, task, aurora))
@@ -5577,6 +5662,109 @@ mod tests {
         assert!(w.locks.reading_saves().is_empty());
         let after = restore("乙", "共用", "rs-after").await.unwrap_err();
         assert_eq!(after.code, code::WORLD_BACKUP_NOT_FOUND);
+    }
+
+    /// 数据包写进存档目录：本实例或共用这份存档的实例在装数据包时，备份、恢复、导出存档都报 instance_busy，
+    /// detail 指向装数据包的实例，被拒时不占实例、不登记任务。隔离的实例不受影响。
+    #[tokio::test]
+    async fn world_tasks_wait_for_a_datapack_install() {
+        let env = Env::new();
+        env.shared_world("甲", "共用");
+        env.vanilla("乙");
+        env.isolated_world("丙", "自己的");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let ctx = w.with(&env);
+        let dest = env.dir.path().join("导出.zip");
+        let dest = dest.to_str().unwrap();
+
+        let writing = w.locks.write_saves("甲");
+        for id in ["甲", "乙"] {
+            let backup = backup_world_with(&ctx, "bk", id, "共用", &events)
+                .await
+                .unwrap_err();
+            let restore = restore_world_backup_with(
+                &ctx,
+                "rs",
+                id,
+                "共用",
+                "1-manual.zip",
+                Recorder::default(),
+                &events,
+            )
+            .await
+            .unwrap_err();
+            let export = export_world_with(&ctx, "ex", id, "共用", dest, &events)
+                .await
+                .unwrap_err();
+            for err in [backup, restore, export] {
+                assert_eq!(err.code, code::INSTANCE_BUSY, "{id}");
+                assert_eq!(
+                    err.detail,
+                    Some(json!({ "id": "甲", "activity": "modifying" })),
+                    "{id}"
+                );
+                assert!(err.message.contains("装数据包"), "{}", err.message);
+            }
+            assert_eq!(w.locks.activity(id), None, "被拒绝时实例占用随之放开");
+        }
+        assert!(!w.registry.is_running("bk"));
+        backup_world_with(&ctx, "bk-iso", "丙", "自己的", &events)
+            .await
+            .unwrap();
+        drop(writing);
+
+        assert!(w.locks.writing_saves().is_empty());
+        backup_world_with(&ctx, "bk-after", "乙", "共用", &events)
+            .await
+            .unwrap();
+    }
+
+    /// 反方向：备份或恢复在做，或者存档正被打进整合包时，装数据包等它们做完。隔离的实例在备份不挡，
+    /// 记录随被拒的返回撤销。
+    #[tokio::test]
+    async fn datapack_writers_wait_for_world_tasks() {
+        let env = Env::new();
+        env.shared_world("甲", "共用");
+        env.vanilla("乙");
+        env.isolated_world("丙", "自己的");
+        let locks = InstanceLocks::default();
+        let aurora = env.facade.snapshot().await;
+        ensure_saves_free_for_writing(&aurora, &locks, "乙")
+            .await
+            .unwrap();
+
+        let backing = locks.acquire("甲", InstanceActivity::BackingUp).unwrap();
+        for id in ["甲", "乙"] {
+            let err = ensure_saves_free_for_writing(&aurora, &locks, id)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{id}");
+            assert_eq!(
+                err.detail,
+                Some(json!({ "id": "甲", "activity": "backing_up" })),
+                "{id}"
+            );
+        }
+        ensure_saves_free_for_writing(&aurora, &locks, "丙")
+            .await
+            .unwrap();
+        drop(backing);
+
+        let reading = locks.read_saves("乙");
+        let err = ensure_saves_free_for_writing(&aurora, &locks, "甲")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": "乙", "activity": "modifying" }))
+        );
+        assert!(
+            err.message.contains("导出带存档的整合包"),
+            "{}",
+            err.message
+        );
+        drop(reading);
     }
 
     /// 「打开所在文件夹」只放行启动器自己产出的路径：存档备份区里的（按真实路径比，`..` 绕不出去），与这次运行里
