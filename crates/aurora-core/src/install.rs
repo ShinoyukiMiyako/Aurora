@@ -85,6 +85,7 @@ impl Aurora {
         loader_version: Option<&str>,
         events: Option<&EventSink>,
     ) -> Result<InstallOutcome> {
+        self.prepare_sources().await?;
         let layout = self.layout();
         let pool = self.download_pool_reporting(events);
         let policy = self.retry_policy();
@@ -94,6 +95,7 @@ impl Aurora {
         emit(events, CoreEvent::stage(format!("开始安装原版 {id}")));
         let vanilla = VanillaInstaller::new(cx)
             .with_manifest_url(self.manifest_url())
+            .with_sources(self.source_plan(self.config().version_list_source))
             .install(id)
             .await?;
         emit(

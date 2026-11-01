@@ -195,6 +195,7 @@ impl Aurora {
     ) -> Result<InstanceInstallOutcome> {
         request.validate()?;
         let dir = self.existing_instance_dir(id).await?;
+        self.prepare_sources().await?;
         let layout = self.layout();
         let pool = self.download_pool_reporting(events);
         let policy = self.retry_policy();
@@ -203,7 +204,9 @@ impl Aurora {
         let mc = request.mc_version.as_str();
 
         emit(events, CoreEvent::stage(format!("查找原版 {mc}")));
-        let vanilla_installer = VanillaInstaller::new(cx).with_manifest_url(self.manifest_url());
+        let vanilla_installer = VanillaInstaller::new(cx)
+            .with_manifest_url(self.manifest_url())
+            .with_sources(self.source_plan(self.config().version_list_source));
         let entry = vanilla_installer.find_entry(mc).await?;
         let staged = dir.join(AURORA_META_DIR).join(STAGED_VANILLA_JSON);
         let vanilla = vanilla_installer
@@ -223,7 +226,7 @@ impl Aurora {
                 );
                 let (_, profile, version) = LoaderInstaller::with_flavor(cx, flavor)
                     .with_base_url(base)
-                    .with_sources(self.config().version_list_source.source_plan())
+                    .with_sources(self.source_plan(self.config().version_list_source))
                     .fetch_profile(mc, request.loader_version.as_deref())
                     .await?;
                 (
@@ -256,7 +259,7 @@ impl Aurora {
                     )),
                 );
                 let mut forge = ForgeInstaller::new(cx, java)
-                    .with_sources(self.config().download_source.source_plan());
+                    .with_sources(self.source_plan(self.config().download_source));
                 // 处理器不看下载池的令牌，单独挂上：取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
                 if let Some(token) = self.cancel_token() {
                     forge = forge.with_cancel(token.clone());
@@ -429,6 +432,7 @@ impl Aurora {
                 let merged = resolve(&target.json, &provider)?;
                 // 传统布局的加载器版本，客户端 jar 与 natives 在继承链根（原版）的目录里。
                 let root = inheritance_root(&scan, id);
+                self.prepare_sources().await?;
                 let layout = self.layout();
                 let pool = self.download_pool_reporting(events);
                 let policy = self.retry_policy();

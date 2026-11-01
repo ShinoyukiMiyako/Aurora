@@ -203,6 +203,7 @@ impl<'a> LoaderInstaller<'a> {
                 "loader/{game_version}/{loader_version}/profile/json"
             )),
             self.cx.policy,
+            "加载器 profile",
         )
         .await
     }

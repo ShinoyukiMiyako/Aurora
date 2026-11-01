@@ -15,8 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_base::mirror::{self, MirrorSource};
-use aurora_download::SourcePlan;
+use aurora_base::mirror::MirrorSource;
 use aurora_instance::IsolationPolicy;
 use chrono::{Datelike, Local, Timelike};
 use serde::de::DeserializeOwned;
@@ -29,13 +28,13 @@ use crate::facade::Aurora;
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
 ///
-/// 静态候选顺序：`OfficialFirst`/`Auto` 官方优先、镜像兜底；`MirrorFirst` 镜像优先、官方兜底。
-/// `Auto` 语义为「自动测速」——其静态顺序同官方优先，运行期可用 [`SourcePlan::reorder_by_speed`]
-/// 按实测时延重排（门面未在每次下载前强制测速，以免为小文件引入探测延迟）。
+/// `OfficialFirst` 官方优先、镜像兜底；`MirrorFirst` 镜像优先、官方兜底。
+/// `Auto` 在生成下载计划前测一次各源首字节时间，按快慢排序，结论进程内保留 10 分钟；测不出来时
+/// 镜像优先；熔断中的主机由下载引擎沉底。具体顺序由门面的源计划给出，这里只定兜底顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadSourcePolicy {
-    /// 自动测速（默认）：静态顺序官方优先，可运行期测速重排。
+    /// 自动（默认）：按测速结果在官方源与镜像之间择优，测不出来时镜像优先。
     #[default]
     Auto,
     /// 尽量官方：官方优先，镜像兜底。
@@ -45,36 +44,19 @@ pub enum DownloadSourcePolicy {
 }
 
 impl DownloadSourcePolicy {
-    /// 该策略下按优先级排列的镜像源列表。
+    /// 没有测速结论时的兜底顺序。
+    ///
+    /// `Auto` 测不出来时镜像在前：两个源都探不通多半是网络整体不佳，这时国内玩家直连官方 CDN 的成功率
+    /// 远不如 BMCLAPI，而镜像真不通时引擎换到官方也只多赔一轮重试。
     pub fn mirror_order(self) -> Vec<MirrorSource> {
         match self {
-            DownloadSourcePolicy::Auto | DownloadSourcePolicy::OfficialFirst => {
+            DownloadSourcePolicy::OfficialFirst => {
                 vec![MirrorSource::Official, MirrorSource::BmclApi]
             }
-            DownloadSourcePolicy::MirrorFirst => {
+            DownloadSourcePolicy::Auto | DownloadSourcePolicy::MirrorFirst => {
                 vec![MirrorSource::BmclApi, MirrorSource::Official]
             }
         }
-    }
-
-    /// 该策略的首选源（用于不走 [`SourcePlan`] 换源的单源抓取，如 Java 运行时清单）。
-    pub fn primary_mirror(self) -> MirrorSource {
-        match self {
-            DownloadSourcePolicy::MirrorFirst => MirrorSource::BmclApi,
-            DownloadSourcePolicy::Auto | DownloadSourcePolicy::OfficialFirst => {
-                MirrorSource::Official
-            }
-        }
-    }
-
-    /// 构造该策略对应的下载源调度方案。
-    pub fn source_plan(self) -> SourcePlan {
-        SourcePlan::new(self.mirror_order())
-    }
-
-    /// 把一个官方 URL 按该策略的首选源改写（首选官方时原样返回）。
-    pub fn rewrite_primary(self, url: &str) -> Result<String> {
-        Ok(mirror::rewrite(url, self.primary_mirror())?)
     }
 }
 
@@ -581,8 +563,9 @@ mod tests {
         assert_eq!(reloaded, config);
     }
 
+    /// 三档的兜底顺序：只有尽量官方把官方放前面，自动测不出来时与尽量镜像同为镜像在前。
     #[test]
-    fn source_policy_orders_mirrors() {
+    fn fallback_order_of_each_policy() {
         assert_eq!(
             DownloadSourcePolicy::OfficialFirst.mirror_order(),
             vec![MirrorSource::Official, MirrorSource::BmclApi]
@@ -591,47 +574,9 @@ mod tests {
             DownloadSourcePolicy::MirrorFirst.mirror_order(),
             vec![MirrorSource::BmclApi, MirrorSource::Official]
         );
-        // 自动测速的静态顺序同官方优先。
         assert_eq!(
             DownloadSourcePolicy::Auto.mirror_order(),
-            vec![MirrorSource::Official, MirrorSource::BmclApi]
-        );
-        assert_eq!(
-            DownloadSourcePolicy::MirrorFirst.primary_mirror(),
-            MirrorSource::BmclApi
-        );
-        assert_eq!(
-            DownloadSourcePolicy::Auto.primary_mirror(),
-            MirrorSource::Official
-        );
-    }
-
-    #[test]
-    fn source_plan_candidate_order_follows_policy() {
-        // 尽量镜像：Mojang 库 URL 的首选候选应是 BMCLAPI。
-        let plan = DownloadSourcePolicy::MirrorFirst.source_plan();
-        let got = plan
-            .candidates("https://libraries.minecraft.net/foo/bar.jar")
-            .unwrap();
-        assert_eq!(got[0], "https://bmclapi2.bangbang93.com/maven/foo/bar.jar");
-        assert_eq!(got[1], "https://libraries.minecraft.net/foo/bar.jar");
-    }
-
-    #[test]
-    fn rewrite_primary_maps_manifest_to_mirror_only_when_mirror_first() {
-        let manifest = aurora_install::VERSION_MANIFEST_V2;
-        assert_eq!(
-            DownloadSourcePolicy::MirrorFirst
-                .rewrite_primary(manifest)
-                .unwrap(),
-            "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"
-        );
-        // 官方优先/自动时清单地址原样。
-        assert_eq!(
-            DownloadSourcePolicy::OfficialFirst
-                .rewrite_primary(manifest)
-                .unwrap(),
-            manifest
+            vec![MirrorSource::BmclApi, MirrorSource::Official]
         );
     }
 
