@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOAST_COPY } from "../copy/flows";
 import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
+import type { ModpackExportOptions } from "../ipc/modpack";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
 import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
@@ -14,6 +15,8 @@ import { OverlayRoot } from "./overlay";
 import { pickSaveFile } from "./platform";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
 import { browserWindowPort, WindowPortProvider, type WindowPort } from "./window";
+
+const PACK: ModpackExportOptions = { destination: "D:/分享/包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false };
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -88,6 +91,34 @@ describe("外壳：重启并安装更新", () => {
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("还有 1 个任务，重启会中断它们，之后需要重新开始。");
     expect(button("重启并安装").dataset.variant).toBe("danger");
     act(() => button("取消").click());
+    await flush();
+    expect(callsOf(ipc, "install_update")).toHaveLength(0);
+  });
+
+  it("只有打包：同样不说成下载，取消键是「取消」", async () => {
+    ipc.overrides.set("export_modpack", () => new Promise(() => {}));
+    await mount();
+    act(() => void launcher.actions.exportModpack("生存", PACK));
+    await flush();
+    act(() => void shell.installUpdate());
+    await flush();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("还有 1 个任务，重启会中断它们，之后需要重新开始。");
+    act(() => button("取消").click());
+    await flush();
+    expect(callsOf(ipc, "install_update")).toHaveLength(0);
+  });
+
+  it("下载与备份都有：个数连备份一起算、正文不写下载，取消键是「继续下载」", async () => {
+    ipc.overrides.set("backup_world", () => new Promise(() => {}));
+    ipc.overrides.set("install_java", () => new Promise(() => {}));
+    await mount();
+    act(() => void launcher.actions.backupWorld("生存", "w1", "旧世界"));
+    act(() => void launcher.actions.installJava(21));
+    await flush();
+    act(() => void shell.installUpdate());
+    await flush();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("还有 2 个任务，重启会中断它们，之后需要重新开始。");
+    act(() => button("继续下载").click());
     await flush();
     expect(callsOf(ipc, "install_update")).toHaveLength(0);
   });
