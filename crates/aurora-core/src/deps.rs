@@ -482,15 +482,23 @@ pub(crate) fn project_gone(err: &CoreError) -> bool {
 ///
 /// 显式再排一次而不是依赖上游返回顺序：择优的全部意义就是「最新」，这条前提不该跨模块靠约定维持。
 /// 判定不为 Mismatch 即可用——[`Compatibility::Unknown`]（平台没给元数据）按放行处理，与落位层的
-/// 软提示口径一致。
+/// 软提示口径一致。通道从最稳定的挑起，与更新检查、开局 Mod 同一条底线：玩家没选过测试版，不能因为
+/// 它是某个 Mod 的前置就带进来。
 fn pick_latest_compatible(
     mut candidates: Vec<ModVersionInfo>,
     facts: &InstanceFacts,
 ) -> Option<ModVersionInfo> {
     sort_by_published_desc(&mut candidates);
-    candidates
-        .into_iter()
-        .find(|version| !matches!(judge(version, facts), Compatibility::Mismatch { .. }))
+    candidates.retain(|version| !matches!(judge(version, facts), Compatibility::Mismatch { .. }));
+    let best = ReleaseChannel::Alpha
+        .admitted()
+        .iter()
+        .find_map(|channel| {
+            candidates
+                .iter()
+                .position(|version| version.release_channel == *channel)
+        })?;
+    Some(candidates.swap_remove(best))
 }
 
 /// 按实例事实判定某版本是否可用。MC 版本识别不出时交 `None` 给 [`classify`]：只判加载器，落在
@@ -2126,5 +2134,52 @@ mod tests {
 
         assert!(pick_latest_compatible(vec![incompatible], &facts).is_none());
         assert!(pick_latest_compatible(Vec::new(), &facts).is_none());
+    }
+
+    /// 新装的前置与更新检查同一条底线：有正式版就不把测试版带进来，没有才退到测试版、内测版。
+    #[test]
+    fn pick_latest_compatible_prefers_the_most_stable_channel() {
+        let facts = InstanceFacts {
+            mc_version: Some("1.20.1".to_owned()),
+            loaders: vec!["fabric".to_owned()],
+            mod_loaders: vec![ModLoader::Fabric],
+        };
+        let build = |id: &str, channel: ReleaseChannel, date: &str| {
+            let mut item = version("fabric-api", id);
+            item.loaders = vec![ModLoader::Fabric];
+            item.release_channel = channel;
+            item.date_published = date.to_owned();
+            item
+        };
+        let alpha = build("alpha", ReleaseChannel::Alpha, "2026-09-01T00:00:00Z");
+        let beta = build("beta", ReleaseChannel::Beta, "2026-06-01T00:00:00Z");
+        let old_release = build("r1", ReleaseChannel::Release, "2025-01-01T00:00:00Z");
+        let new_release = build("r2", ReleaseChannel::Release, "2026-01-01T00:00:00Z");
+
+        let id = |list: Vec<ModVersionInfo>| {
+            pick_latest_compatible(list, &facts).map(|picked| picked.version_id)
+        };
+        assert_eq!(
+            id(vec![
+                alpha.clone(),
+                old_release,
+                beta.clone(),
+                new_release.clone()
+            ])
+            .as_deref(),
+            Some("r2")
+        );
+        assert_eq!(
+            id(vec![alpha.clone(), beta]).as_deref(),
+            Some("beta"),
+            "没有正式版时取测试版，不取更新的内测版"
+        );
+        assert_eq!(id(vec![alpha]).as_deref(), Some("alpha"));
+
+        // 正式版不适配这个实例时不算数，退到适配的测试版。
+        let mut wrong_loader = new_release;
+        wrong_loader.loaders = vec![ModLoader::Forge];
+        let beta = build("beta", ReleaseChannel::Beta, "2026-06-01T00:00:00Z");
+        assert_eq!(id(vec![wrong_loader, beta]).as_deref(), Some("beta"));
     }
 }
