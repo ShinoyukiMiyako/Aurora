@@ -2,10 +2,13 @@
 //!
 //! 现代 Forge（1.13+）与 NeoForge 走同构逻辑：installer jar 内含 `install_profile.json`（声明
 //! 一批处理器 JVM 调用与一张 data 占位符表）加一份 `version.json`（最终版本描述）。安装 =
-//! 解出 version.json 落盘 → 下载 install_profile 与 version 声明的库 → 把 data 表按目标 side
+//! 解出 version.json → 下载 install_profile 与 version 声明的库 → 把 data 表按目标 side
 //! 塌缩并解析 `[maven坐标]`/`/jar内路径`/`'字面量'` 三种取值 → 逐个处理器把 `{占位符}` 替换成
-//! 实际值后调 java 运行 → 校验各处理器 outputs 的 sha1。旧版 Forge（install_profile 带 `install`
-//! 字段而无 processors）则直接把 `versionInfo` 落盘、从 zip 解出通用 jar，不跑处理器。
+//! 实际值后调 java 运行 → 校验各处理器 outputs 的 sha1 → version.json 落盘。旧版 Forge
+//! （install_profile 带 `install` 字段而无 processors）则从 zip 解出通用 jar、下完库后把
+//! `versionInfo` 落盘，不跑处理器。
+//!
+//! 版本 JSON 都是最后一步：版本列表只凭它认版本，失败或取消时这个版本就是没装上。
 //!
 //! 占位符替换、data 塌缩、classpath 组装、Main-Class 解析都抽成纯函数，表驱动单测覆盖；真正的
 //! java 子进程执行与库下载是集成层，本模块负责把它们按 install_profile 的语义正确编排。
@@ -285,7 +288,8 @@ pub fn neoforge_installer_url(neoforge_version: &str) -> String {
 /// 安装产物落在哪里。
 #[derive(Debug, Clone, Copy)]
 enum Target<'t> {
-    /// 传统布局：版本 JSON 写到 `versions/<forge 版本 id>/`，处理器读原版目录里的客户端 jar。
+    /// 传统布局：全部就绪后版本 JSON 写到 `versions/<forge 版本 id>/`，处理器读原版目录里的客户端 jar，
+    /// 临时文件放在 installer 缓存目录下。
     Standalone,
     /// 按实例安装：版本 JSON 不落盘（交给调用方与原版合并后写进实例目录），处理器读实例目录里的
     /// 客户端 jar，临时文件也放在实例目录下。
@@ -441,7 +445,7 @@ impl<'a> ForgeInstaller<'a> {
         }
     }
 
-    /// 现代安装：解出 version.json、下库、跑处理器。
+    /// 现代安装：解出 version.json、下库、跑处理器，全部成功后版本 JSON 才落盘（传统布局）。
     async fn install_modern(
         &self,
         installer: &Path,
@@ -467,14 +471,10 @@ impl<'a> ForgeInstaller<'a> {
         checked_segment(&version_id, || "Forge install_profile 的版本 id".to_owned())?;
         checked_segment(&minecraft, || "Forge install_profile 的游戏版本".to_owned())?;
 
-        // 解出内联 version.json；传统布局原样落盘，按实例安装交给调用方。
+        // 解出内联 version.json。
         let version_bytes =
             read_zip_entry_async(installer, json_entry.trim_start_matches('/')).await?;
         let embedded: VersionJson = net::parse_json(&version_bytes, "Forge version.json")?;
-        if let Target::Standalone = target {
-            let json_path = self.cx.layout.version_json(&version_id);
-            aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
-        }
 
         // 下载 install_profile 与 version.json 声明的库。下载地址留空的是 installer 自带的
         // （放在 `maven/` 下），从 installer 解出，不进下载批次：空地址交给下载引擎只会整批失败。
@@ -490,16 +490,13 @@ impl<'a> ForgeInstaller<'a> {
         .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
-        // 解出 data 表里 `/jar 内路径` 型取值到独立临时目录。
-        let scratch_owner = match target {
-            Target::Standalone => version_id.as_str(),
-            Target::Instance(id) => id,
+        // 解出 data 表里 `/jar 内路径` 型取值到独立临时目录。传统布局不放进版本目录：它在版本 JSON
+        // 就位之前不该出现，安装的 future 被整个丢弃时临时目录也来不及清，会在版本列表里留下一行。
+        let scratch_parent = match target {
+            Target::Standalone => self.installer_cache_dir(),
+            Target::Instance(id) => self.cx.layout.version_dir(id),
         };
-        let tmp_dir = self.cx.layout.version_dir(scratch_owner).join(concat!(
-            ".",
-            aurora_base::app_slug!(),
-            "-forge-tmp"
-        ));
+        let tmp_dir = scratch_parent.join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
         let minecraft_jar = match target {
             Target::Standalone => self.cx.layout.version_jar(&minecraft),
             Target::Instance(id) => self.cx.layout.version_jar(id),
@@ -512,13 +509,20 @@ impl<'a> ForgeInstaller<'a> {
         if let Err(err) = tokio::fs::remove_dir_all(&tmp_dir).await {
             tracing::debug!(dir = %tmp_dir.display(), %err, "清理 Forge 安装临时目录失败");
         }
+        let processors = ran?;
+
+        // 传统布局原样落盘，按实例安装交给调用方。
+        if let Target::Standalone = target {
+            let json_path = self.cx.layout.version_json(&version_id);
+            aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
+        }
 
         Ok((
             embedded,
             ForgeSummary {
                 id: version_id,
                 libraries,
-                processors: ran?,
+                processors,
             },
         ))
     }
@@ -669,7 +673,7 @@ impl<'a> ForgeInstaller<'a> {
         Ok(true)
     }
 
-    /// legacy 安装：versionInfo 落盘（传统布局）、解出通用 jar、下 versionInfo 里的库。
+    /// legacy 安装：解出通用 jar、下 versionInfo 里的库，全部成功后 versionInfo 才落盘（传统布局）。
     async fn install_legacy(
         &self,
         installer: &Path,
@@ -694,9 +698,6 @@ impl<'a> ForgeInstaller<'a> {
             })?;
         let id = embedded.id.clone();
         checked_segment(&id, || "Forge versionInfo 的版本 id".to_owned())?;
-        if let Target::Standalone = target {
-            aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
-        }
 
         // 从 installer zip 解出通用 jar 到其 maven 落点。
         let install = profile.install.as_ref().expect("已判定 install 存在");
@@ -725,6 +726,10 @@ impl<'a> ForgeInstaller<'a> {
         )?)
         .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
+
+        if let Target::Standalone = target {
+            aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
+        }
 
         Ok((
             embedded,
@@ -2336,6 +2341,36 @@ mod tests {
         }
     }
 
+    /// 代替 java 的脚本：写下 `started` 后一直跑，代替正在干活、不观察取消令牌的处理器。
+    ///
+    /// 不能靠子命令拖时间：结束的只是脚本本身，还活着的子命令占着管道，Windows 上读管道在阻塞线程
+    /// 里，测试运行时收尾时要等它退出。
+    fn hanging_java(dir: &Path, started: &Path) -> PathBuf {
+        let started = started.display();
+        #[cfg(windows)]
+        {
+            let path = dir.join("hanging-java.cmd");
+            std::fs::write(
+                &path,
+                format!("@echo off\r\necho up> \"{started}\"\r\n:spin\r\ngoto spin\r\n"),
+            )
+            .unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("hanging-java");
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho up > '{started}'\nexec sleep 30\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+    }
+
     async fn install_with(f: &Fixture, java: &Path, installer: &Path) -> Result<ForgeSummary> {
         let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
         ForgeInstaller::new(cx, java)
@@ -2436,12 +2471,244 @@ mod tests {
             matches!(err, Error::ProcessorFailed { .. }),
             "实际：{err:?}"
         );
-        let scratch = f.layout.version_dir("1.20.1-forge-47.2.0").join(concat!(
-            ".",
-            aurora_base::app_slug!(),
-            "-forge-tmp"
-        ));
+        let scratch = f
+            .root
+            .join(concat!(".", aurora_base::app_slug!(), "-cache"))
+            .join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
         assert!(!scratch.exists(), "临时目录应被清掉：{}", scratch.display());
+    }
+
+    /// 处理器失败时这个 Forge 版本就是没装上：不留版本 JSON，版本目录也不出现。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_processor_leaves_no_version_behind() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let java = fake_java(&f.root, "out", "err", 3);
+
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::ProcessorFailed { .. }),
+            "实际：{err:?}"
+        );
+        assert!(!f.layout.version_dir("1.20.1-forge-47.2.0").exists());
+    }
+
+    /// 取消时正在跑的处理器被结束，同样不留版本 JSON 与版本目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_running_processor_leaves_no_version_behind() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let started = f.root.join("processor-started");
+        let java = hanging_java(&f.root, &started);
+        let token = CancellationToken::new();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_cancel(Some(&token));
+        let forge = ForgeInstaller::new(cx, &java);
+        let attempt = forge.install_from_installer(&installer);
+        tokio::pin!(attempt);
+
+        let processor_started = async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            outcome = &mut attempt => panic!("处理器还在跑，安装不该结束：{outcome:?}"),
+            () = processor_started => {}
+        }
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert!(!f.layout.version_dir("1.20.1-forge-47.2.0").exists());
+    }
+
+    const DEPENDENCY: &str = "org.example:dep:1";
+    const DEPENDENCY_PATH: &str = "/org/example/dep/1/dep-1.jar";
+
+    /// 现代 installer：version.json 声明了一个要从 `repository` 下载的库。返回 installer 与版本 id。
+    fn modern_installer_needing(f: &Fixture, repository: &str) -> (PathBuf, &'static str) {
+        let id = "1.16.5-forge-36.2.39";
+        let profile = serde_json::json!({
+            "spec": 0, "version": id, "minecraft": "1.16.5", "json": "/version.json",
+            "data": {}, "processors": [], "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": id, "inheritsFrom": "1.16.5",
+            "libraries": [{ "name": DEPENDENCY, "url": repository }]
+        });
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+            ],
+        );
+        (installer, id)
+    }
+
+    /// 旧版 installer：versionInfo 声明了一个要从 `repository` 下载的库。返回 installer 与版本 id。
+    fn legacy_installer_needing(f: &Fixture, repository: &str) -> (PathBuf, &'static str) {
+        let id = "1.7.10-Forge10.13.4.1614-1.7.10";
+        let profile = serde_json::json!({
+            "install": {
+                "path": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                "filePath": "forge-universal.jar"
+            },
+            "versionInfo": {
+                "id": id, "inheritsFrom": "1.7.10",
+                "libraries": [{ "name": DEPENDENCY, "url": repository }]
+            }
+        });
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("forge-universal.jar", b"universal"),
+            ],
+        );
+        (installer, id)
+    }
+
+    /// 现代与旧版两条路：库下不下来时不留版本 JSON，版本目录也不出现。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_library_download_leaves_no_version_behind() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(DEPENDENCY_PATH))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let repository = format!("{}/", server.uri());
+
+        for build in [modern_installer_needing, legacy_installer_needing] {
+            let f = fixture();
+            let (installer, id) = build(&f, &repository);
+
+            let err = install_with(&f, Path::new("java"), &installer)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(err, Error::BatchIncomplete { .. }),
+                "{id}：{err:?}"
+            );
+            assert!(!f.layout.version_dir(id).exists(), "{id}");
+        }
+    }
+
+    /// 现代与旧版两条路：取消发生在下库的途中，同样不留版本 JSON 与版本目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_the_library_download_leaves_no_version_behind() {
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for build in [modern_installer_needing, legacy_installer_needing] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(DEPENDENCY_PATH))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(b"dep".to_vec())
+                        .set_delay(Duration::from_secs(30)),
+                )
+                .mount(&server)
+                .await;
+            let f = fixture();
+            let (installer, id) = build(&f, &format!("{}/", server.uri()));
+            let token = CancellationToken::new();
+            let pool = aurora_download::DownloadPool::new(
+                aurora_download::Downloader::with_defaults(f.client.clone()),
+                2,
+            )
+            .with_cancel(token.clone());
+            let cx = InstallContext::new(&f.client, &pool, &f.layout, &f.runtime, &f.policy)
+                .with_cancel(Some(&token));
+            let forge = ForgeInstaller::new(cx, "java");
+            let attempt = forge.install_from_installer(&installer);
+            tokio::pin!(attempt);
+
+            let library_requested = async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::select! {
+                outcome = &mut attempt => panic!("{id}：库还没回来，安装不该结束：{outcome:?}"),
+                () = library_requested => {}
+            }
+            token.cancel();
+            let err = attempt.await.unwrap_err();
+
+            assert!(err.is_cancelled(), "{id}：{err:?}");
+            assert!(!f.layout.version_dir(id).exists(), "{id}");
+        }
+    }
+
+    /// 全部就绪后版本 JSON 才落位：现代走 installer 里那份的原始字节（保留未建模字段），旧版走内联的
+    /// versionInfo；版本目录里只有它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_install_lands_the_version_json_last() {
+        let id = "1.16.5-forge-36.2.39";
+        let profile = serde_json::json!({
+            "spec": 0, "version": id, "minecraft": "1.16.5", "json": "/version.json",
+            "data": {"BINPATCH": {"client": "/data/client.lzma", "server": "/data/server.lzma"}},
+            "processors": [], "libraries": []
+        });
+        let version = format!(
+            "{{\n  \"id\": \"{id}\",\n  \"inheritsFrom\": \"1.16.5\",\n  \"notModelled\": true\n}}"
+        );
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.as_bytes()),
+                ("data/client.lzma", b"patches"),
+            ],
+        );
+        install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(f.layout.version_json(id)).unwrap(),
+            version.as_bytes()
+        );
+        let entries: Vec<String> = std::fs::read_dir(f.layout.version_dir(id))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec![format!("{id}.json")]);
+
+        let f = fixture();
+        let (installer, id) = legacy_installer_needing(&f, "http://unused.invalid/");
+        put(&library(&f, DEPENDENCY), b"dep");
+        install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap();
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(f.layout.version_json(id)).unwrap()).unwrap();
+        assert_eq!(on_disk["id"], id);
+        assert_eq!(on_disk["inheritsFrom"], "1.7.10");
     }
 
     /// 没有声明产物的处理器没有可比的东西，每次都执行（官方 installer 同样如此）。
