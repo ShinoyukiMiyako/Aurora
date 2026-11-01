@@ -804,7 +804,7 @@ const TEMPLATE_SKIP_REASON: Readonly<Record<TemplateSkipReason, string>> = {
 };
 
 export const TASK_TOAST = {
-  ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以开始游戏了" }),
+  ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以启动游戏了" }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
   repaired: (name: string) => ({ title: `「${name}」已修复` }),
   modInstalled: (mod: string, dependencies: number, instance: string) => ({

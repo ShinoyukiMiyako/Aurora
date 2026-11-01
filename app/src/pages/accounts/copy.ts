@@ -22,7 +22,7 @@ export const ACCOUNTS_COPY = {
   kvLastVerified: "上次验证",
   kvAdded: "添加日期",
   method: {
-    microsoft: "微软设备码登录",
+    microsoft: "微软账户登录",
     authlib: (server: string) => `${server} 的 Yggdrasil 验证`,
     offline: "不经过验证，只用于单人与离线服务器",
   },

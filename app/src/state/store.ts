@@ -2508,7 +2508,7 @@ export class LauncherStore {
           store.set({
             login: {
               ...login,
-              device: { status: "failed", code: DEVICE_CODE_TIMEOUT_CODE, message: `${DEVICE_CODE_FETCH_TIMEOUT_MS / 1000} 秒内没有收到设备码`, detail: null },
+              device: { status: "failed", code: DEVICE_CODE_TIMEOUT_CODE, message: `${DEVICE_CODE_FETCH_TIMEOUT_MS / 1000} 秒内没有收到代码`, detail: null },
             },
           });
           store.background(ACTION_ERROR.cancelLogin, accountsIpc.cancelMicrosoftLogin());
