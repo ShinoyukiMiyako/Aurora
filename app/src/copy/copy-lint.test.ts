@@ -318,6 +318,7 @@ const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "../pages/tasks/copy.ts", text: `${HOLE} / ${HOLE}`, why: "两边是带单位的字节量，贴在一起的 MB/612 读着像速率" },
   { file: "../ui/ConfirmDialog.tsx", text: "确定", why: "列的就是确认键不许用的泛称" },
   { file: "../pages/settings/commands.ts", text: "打开启动器日志目录", why: "设置页没接上真实命令时抛给开发者的动作名" },
+  { file: "../state/errors.ts", text: "文件 IO 失败: ", why: "比对后端 Io 错误正文的前缀，不是界面文案，半角冒号是后端的原样" },
 ];
 
 function isExempt(entry: string): boolean {

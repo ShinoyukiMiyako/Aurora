@@ -262,7 +262,7 @@ describe("崩溃诊断：Java 建不起本机连接", () => {
     await open("crash");
     expect(text()).toContain("找到 1 条线索，日志指向本机连接失败");
     expect(text()).toContain("Java 建不起本机连接");
-    expect(text()).toContain("确认环境变量 TEMP 指向的文件夹存在、可写");
+    expect(text()).toContain("写进临时目录的文件会被系统重定向，Java 连不上自己");
     expect(text()).toContain("java.io.IOException: Unable to establish loopback connection");
     expect(text()).toContain("命中的日志行 · 第 42 行");
 
