@@ -13,7 +13,7 @@
 //! 再取一次。清单是装运行时的第一步，单源抓取会让官方源一抽风整个 Java 安装就失败，而运行时
 //! 文件本身早已有换源兜底。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -486,8 +486,15 @@ fn build_plan(
         directories: Vec::new(),
         links: Vec::new(),
     };
+    let links: BTreeSet<&str> = files
+        .files
+        .iter()
+        .filter(|(_, entry)| matches!(entry, FileEntry::Link { .. }))
+        .map(|(rel, _)| rel.as_str())
+        .collect();
     for (rel, entry) in &files.files {
         let path = install_dir.join(rel_to_path(rel)?);
+        check_not_under_link(rel, &links)?;
         match entry {
             FileEntry::Directory => plan.directories.push(path),
             FileEntry::File {
@@ -501,7 +508,7 @@ fn build_plan(
                 executable: *executable,
             }),
             FileEntry::Link { target } => {
-                check_link_target(rel, target)?;
+                check_link_target(rel, target, &links)?;
                 plan.links.push(RuntimeLink {
                     path,
                     target: target.clone(),
@@ -565,9 +572,28 @@ fn unsafe_reason(rel: &str) -> Option<&'static str> {
     })
 }
 
+/// 清单条目不能放在另一条链接底下：`up -> ..` 之后的 `up/x.dll`，路径逐段看都在目录里，写入时却跟着
+/// 链接走到了别处。真实清单（全部 mac、linux 组件）没有这种写法。
+fn check_not_under_link(rel: &str, links: &BTreeSet<&str>) -> Result<()> {
+    let under_link = rel
+        .match_indices('/')
+        .any(|(end, _)| links.contains(&rel[..end]));
+    if under_link {
+        return Err(Error::UnsafeRuntimePath {
+            path: rel.to_owned(),
+            reason: "穿过了清单里的符号链接",
+        });
+    }
+    Ok(())
+}
+
 /// 符号链接的目标相对链接所在目录解析（mac 运行时里 `../Home/lib/libjli.dylib` 这类），按段推演后不能
 /// 越过安装目录的根，也不能是绝对路径或带盘符、反斜杠。
-fn check_link_target(link: &str, target: &str) -> Result<()> {
+///
+/// 按段推演的前提是途中没有别的链接：走进一条链接后，再往下的落点取决于它指向哪里，所以目标中途穿过
+/// `links` 里的条目也算越界。目标最后一段正好是另一条链接没有问题，每条链接各自验过，串起来也出不了
+/// 目录。真实清单里的链接都不穿过别的链接。
+fn check_link_target(link: &str, target: &str, links: &BTreeSet<&str>) -> Result<()> {
     let escapes = || Error::UnsafeRuntimeLink {
         path: link.to_owned(),
         target: target.to_owned(),
@@ -575,13 +601,21 @@ fn check_link_target(link: &str, target: &str) -> Result<()> {
     if target.is_empty() || target.starts_with('/') || target.contains(['\\', ':']) {
         return Err(escapes());
     }
-    // 链接自身所在目录的深度：`a/b/link` 在第 2 层。
-    let mut depth = link.split('/').count() - 1;
-    for segment in target.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => depth = depth.checked_sub(1).ok_or_else(escapes)?,
-            _ => depth += 1,
+    // 从链接自身所在目录出发：`a/b/link` 从 `a/b` 开始走。
+    let mut at: Vec<&str> = link.split('/').collect();
+    at.pop();
+    let mut segments = target
+        .split('/')
+        .filter(|segment| !matches!(*segment, "" | "."))
+        .peekable();
+    while let Some(segment) = segments.next() {
+        if segment == ".." {
+            at.pop().ok_or_else(escapes)?;
+            continue;
+        }
+        at.push(segment);
+        if segments.peek().is_some() && links.contains(at.join("/").as_str()) {
+            return Err(escapes());
         }
     }
     Ok(())
@@ -1253,8 +1287,83 @@ mod tests {
                 },
             ]
         );
-        assert!(check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../..").is_ok());
-        assert!(check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../../..").is_err());
+        let no_links = BTreeSet::new();
+        assert!(
+            check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../..", &no_links).is_ok()
+        );
+        assert!(
+            check_link_target(
+                "jre.bundle/Contents/Home/lib/jli",
+                "../../../../..",
+                &no_links
+            )
+            .is_err()
+        );
+    }
+
+    fn plan_of(files: serde_json::Value) -> Result<RuntimePlan> {
+        let files: ComponentFiles =
+            serde_json::from_value(serde_json::json!({ "files": files })).unwrap();
+        let root = PathBuf::from("/rt");
+        build_plan(
+            "java-runtime-gamma",
+            JavaVersion::parse("17.0.8").unwrap(),
+            &root,
+            &files,
+            root.join("bin/java"),
+        )
+    }
+
+    /// 按段推演只在途中没有别的链接时才算数：先放一条合法的链接指到根上，再经它往外走，或者把文件放到
+    /// 链接底下，逐段看都在目录里，实际会落到运行时目录之外。
+    #[test]
+    fn going_through_another_link_is_rejected() {
+        let err = plan_of(serde_json::json!({
+            "a/b/up": {"type": "link", "target": "../.."},
+            "t": {"type": "link", "target": "a/b/up/.."}
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::UnsafeRuntimeLink { path, target }
+                if path == "t" && target == "a/b/up/.."),
+            "实际：{err:?}"
+        );
+
+        for (entry, kind) in [
+            (
+                "up/evil.dll",
+                serde_json::json!({"type": "file", "downloads": {"raw": {
+                    "sha1": "a", "size": 1, "url": "https://x/evil"
+                }}}),
+            ),
+            ("up/lib", serde_json::json!({"type": "directory"})),
+            (
+                "up/link",
+                serde_json::json!({"type": "link", "target": "x"}),
+            ),
+        ] {
+            let err = plan_of(serde_json::json!({
+                "up": {"type": "link", "target": "bin"},
+                entry: kind
+            }))
+            .unwrap_err();
+            assert!(
+                matches!(&err, Error::UnsafeRuntimePath { path, reason }
+                    if path == entry && *reason == "穿过了清单里的符号链接"),
+                "{entry}: {err:?}"
+            );
+        }
+    }
+
+    /// 链接的目标本身是另一条链接没有问题：每条链接各自验过，串起来也出不了目录。
+    #[test]
+    fn a_link_ending_on_another_link_is_kept() {
+        let plan = plan_of(serde_json::json!({
+            "legal/java.desktop/LICENSE": {"type": "link", "target": "../java.base/LICENSE"},
+            "legal/java.base/LICENSE": {"type": "link", "target": "../shared/LICENSE"}
+        }))
+        .unwrap();
+        assert_eq!(plan.links.len(), 2);
     }
 
     // ---- 逐源回退：两台 mock 分别扮演官方源与镜像 ----
