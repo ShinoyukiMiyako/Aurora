@@ -88,14 +88,15 @@ struct Rule {
 ///   安装了的版本 1.20.4 不对！`；
 /// - Quilt Loader：`36 mods requires version [0.25.0, ∞) of quilt_loader, which is missing!`，主语可能是「N 个
 ///   Mod」，点不出是谁；
-/// - Forge / NeoForge：`\tMod ID: 'minecraft', Requested by: 'sodium', Expected range: '[1.20.4]', Actual version: '1.20.1'`。
+/// - Forge / NeoForge：`\tMod ID: 'minecraft', Requested by: 'sodium', Expected range: '[1.20.4]', Actual version: '1.20.1'`，
+///   `Mod ID` 也可能是加载器自己（`forge`、`neoforge`，以及 Forge 的 `fml`）。
 ///
 /// 依赖 Java 的同类报错不归这里（那是换 Java 的事），Mod 之间的版本不符归 [`DEPENDENCY_VERSION_MISMATCH`]。
 ///
 /// Fabric Loader 给玩家看的说明按系统语言翻译，同一次失败它还会写一行不翻译的原因
 /// `HARD_DEP_INCOMPATIBLE_PRESELECTED sodium 0.8.13 {depends minecraft @ [1.21]}`，最后一个分支认这种写法，
 /// 任何语言下都有。
-const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'|hard_dep(?:_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends (?:minecraft|fabricloader|quilt_loader) @";
+const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge|fml)', requested by: '([a-z0-9_\-]+)'|hard_dep(?:_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends (?:minecraft|fabricloader|quilt_loader) @";
 
 /// 前置 Mod 装着、版本不对，每种日志写法一个分支，捕获的都是这个前置的 id：
 /// - Fabric Loader：`Mod 'YACL' (yacl) 3.6.6 requires version 0.92.0 or later of mod 'Fabric API' (fabric-api), but only
@@ -395,6 +396,10 @@ impl CompiledRule {
         match self.rule.category {
             CrashCategory::DependencyVersionMismatch => wrong,
             CrashCategory::MissingDependency => !wrong,
+            // Forge 的要求方可能是平台自己（`Requested by: 'minecraft'`）：点名它，界面就会让玩家去找 Minecraft 这个 Mod 的新版本。
+            CrashCategory::GameVersionMismatch => {
+                !NON_MOD_TOKENS.contains(&id.to_ascii_lowercase().as_str())
+            }
             _ => true,
         }
     }
@@ -1630,7 +1635,7 @@ More details:\n\
         );
     }
 
-    /// Forge 把游戏与加载器的版本要求也列在这一段，整体那一行不能再算一条缺少前置；`fml` 这种平台 id 也不是谁的前置。
+    /// Forge 把游戏与加载器的版本要求也列在这一段，整体那一行不能再算一条缺少前置。
     #[test]
     fn dependency_summary_gives_way_to_a_version_clue() {
         let game = "Missing or unsupported mandatory dependencies:\n\
@@ -1639,11 +1644,47 @@ More details:\n\
             analyze(game, Some(1)).iter().map(|d| d.category).collect();
         assert_eq!(categories, vec![CrashCategory::GameVersionMismatch]);
 
-        let platform = "Missing or unsupported mandatory dependencies:\n\
-            \tMod ID: 'fml', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'";
-        assert_absent(platform, CrashCategory::DependencyVersionMismatch);
         // 说不清是哪一种时它是唯一的线索，照旧算一条。
-        assert_eq!(primary(platform, CrashCategory::MissingDependency).line, 0);
+        let alone = "Missing or unsupported mandatory dependencies:";
+        assert_eq!(primary(alone, CrashCategory::MissingDependency).line, 0);
+    }
+
+    /// `fml` 是 Forge 自己：它的版本要求没满足是加载器版本不够，到发现页搜不到，不是缺前置；没登记成 Mod 时实际版本写 [MISSING]。
+    #[test]
+    fn forge_fml_requirement_is_a_loader_version_mismatch() {
+        for actual in ["46.0.14", "[MISSING]"] {
+            let log = format!(
+                "Missing or unsupported mandatory dependencies:\n\
+                 \tMod ID: 'fml', Requested by: 'create', Expected range: '[47,)', Actual version: '{actual}'"
+            );
+            let diags = analyze(&log, Some(1));
+            assert_eq!(diags.len(), 1, "{diags:?}");
+            assert_eq!(diags[0].category, CrashCategory::GameVersionMismatch);
+            assert_eq!(diags[0].detail.as_deref(), Some("create"));
+            assert_eq!(diags[0].line, 1);
+        }
+    }
+
+    /// 要求方可能是平台自己，它不是能换版本或停用的 Mod：线索不点名它，往下有点得出的 Mod 就取那一个。
+    #[test]
+    fn version_clue_never_names_a_platform_as_the_mod() {
+        for requested in [
+            "\tMod ID: 'fml', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'",
+            "\tMod ID: 'forge', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'",
+            "\tMod ID: 'minecraft', Requested by: 'neoforge', Expected range: '[1.21]', Actual version: '1.20.1'",
+        ] {
+            let diag = primary(requested, CrashCategory::GameVersionMismatch);
+            assert_eq!(diag.detail, None, "{requested}");
+        }
+
+        let lines = [
+            "\tMod ID: 'fml', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'",
+            "\tMod ID: 'forge', Requested by: 'create', Expected range: '[47,)', Actual version: '46'",
+        ];
+        let diags = analyze_lines(&lines);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].line, 0);
+        assert_eq!(diags[0].detail.as_deref(), Some("create"));
     }
 
     /// 前置装着、版本也对，只是被别的限制挡住：这一行是连带，不是又缺了一个。
