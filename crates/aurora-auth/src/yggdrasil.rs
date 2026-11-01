@@ -142,6 +142,13 @@ impl YggdrasilClient {
             let (status, text) = self
                 .post("authserver/authenticate", &payload, "Yggdrasil 认证")
                 .await?;
+            // 限流时服务器多半会用错误体说明白，登录弹窗要原位显示这句话；带着密码再试几轮只会把限流
+            // 拖长。启动续期那几个端点不走这里：那边要的是落成服务故障，好给出离线进单人。
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && let err @ AuthError::Yggdrasil { .. } = yggdrasil_error(&text, "Yggdrasil 认证")
+            {
+                return Err(err);
+            }
             if let Some(err) = service_unavailable(status, "Yggdrasil 认证") {
                 return Err(err);
             }
@@ -776,6 +783,38 @@ mod tests {
             !message.contains("微软"),
             "外置登录的故障不能说成微软：{message}"
         );
+    }
+
+    /// 认证接口限流时服务器会用错误体说明白，登录弹窗要原位显示这句话；带着密码再试几轮只会把限流拖长。
+    /// 没有错误体的 429 仍是服务故障，见上一条用例。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn throttled_login_keeps_the_servers_words_and_is_not_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/authserver/authenticate"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                "error": "TooManyRequests",
+                "errorMessage": "请求过于频繁，请稍后再试"
+            })))
+            .mount(&server)
+            .await;
+        let client = client_for(&server).with_retry(RetryPolicy {
+            max_attempts: 3,
+            ..no_retry()
+        });
+
+        let err = client.authenticate("u", "p", None).await.unwrap_err();
+        match err {
+            AuthError::Yggdrasil {
+                error,
+                error_message,
+            } => {
+                assert_eq!(error, "TooManyRequests");
+                assert_eq!(error_message, "请求过于频繁，请稍后再试");
+            }
+            other => panic!("期望 Yggdrasil，得到 {other:?}"),
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 
     /// 4xx 仍按 Yggdrasil 的错误体解析，凭据错误照旧是凭据错误。
