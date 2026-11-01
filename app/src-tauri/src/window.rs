@@ -178,6 +178,10 @@ mod tests {
     /// 约束，`opener:default` 会连它一起授予，页面里一段注入的脚本就能让资源管理器定位到任意路径。
     /// 核心权限也逐条列出、不用 `core:default`：整套默认集还放行路径解析、事件发送、菜单、托盘等命令，
     /// 前端一条都不用，页面里注入的脚本却能借它们探路径、伪造事件。
+    ///
+    /// 授予清单按全集比对，不只查缺：只查缺时，单独加一条 `core:event:allow-emit` 或
+    /// `core:path:allow-resolve-directory` 测试照样通过，收窄就悄悄退回去了。新调用 `@tauri-apps/api` 的接口时，
+    /// 能力文件与这里的清单一起改。
     #[test]
     fn capability_grants_every_window_api_the_shell_uses() {
         let cap: serde_json::Value =
@@ -189,7 +193,7 @@ mod tests {
             .iter()
             .map(|p| p.as_str().unwrap())
             .collect();
-        for needed in [
+        let mut expected = vec![
             "core:event:allow-listen",
             "core:event:allow-unlisten",
             "core:window:allow-is-maximized",
@@ -203,12 +207,12 @@ mod tests {
             "core:window:allow-start-dragging",
             "core:window:allow-show",
             "core:window:allow-request-user-attention",
+            // 调试构建里 Ctrl+Shift+I 的注入脚本调用它；发布构建不编译这条命令，授权没有作用。
+            "core:webview:allow-internal-toggle-devtools",
             "opener:allow-open-url",
             "opener:allow-default-urls",
             "dialog:allow-open",
-        ] {
-            assert!(granted.contains(&needed), "能力文件缺少 {needed}");
-        }
+        ];
         for unneeded in ["opener:default", "opener:allow-reveal-item-in-dir"] {
             assert!(
                 !granted.contains(&unneeded),
@@ -228,10 +232,21 @@ mod tests {
             defaults.is_empty(),
             "WebView 不该拿到整套默认权限集：{defaults:?}"
         );
+        let mut granted = granted;
+        granted.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            granted, expected,
+            "能力文件的授予清单与前端实际调用的命令不一致"
+        );
     }
 
     /// 内嵌前端的内容安全策略：脚本只认打包进来的文件，页面只能连 IPC 与材质协议。策略被删掉或误放开
     /// 时，注入进页面的一段文字就能执行脚本、把数据发到任意主机。
+    ///
+    /// 每条指令按来源全集比对，也不许多出指令：只拦 `*`、`https:` 这类通配时，往 script-src 或
+    /// connect-src 里加一个具体的远端主机测试照样通过，而页面本来就不直连任何远端（远端图片由后端下载、
+    /// 经材质协议提供）。新增运行期来源时，策略与这里一起改。
     #[test]
     fn content_security_policy_stays_strict() {
         let conf: serde_json::Value =
@@ -239,34 +254,42 @@ mod tests {
         let csp = conf["app"]["security"]["csp"]
             .as_object()
             .expect("app.security.csp 应是按指令写的对象");
-        let directive = |name: &str| -> Vec<&str> {
-            csp.get(name)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_else(|| panic!("内容安全策略缺少 {name}"))
-                .split_whitespace()
-                .collect()
-        };
-        assert_eq!(directive("default-src"), ["'none'"]);
-        let script = directive("script-src");
-        for loose in ["'unsafe-inline'", "'unsafe-eval'", "*", "data:", "blob:"] {
-            assert!(!script.contains(&loose), "script-src 不该放开 {loose}");
-        }
-        let connect = directive("connect-src");
+        let actual: std::collections::BTreeMap<&str, Vec<&str>> = csp
+            .iter()
+            .map(|(name, value)| {
+                let mut sources: Vec<&str> = value
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{name} 应是空格分隔的来源串"))
+                    .split_whitespace()
+                    .collect();
+                sources.sort_unstable();
+                (name.as_str(), sources)
+            })
+            .collect();
         let texture_host = format!("http://{}.localhost", crate::textures::SCHEME);
         let texture_scheme = format!("{}:", crate::textures::SCHEME);
-        for needed in [
+        let mut connect = vec![
+            "'self'",
             "ipc:",
             "http://ipc.localhost",
-            texture_host.as_str(),
             texture_scheme.as_str(),
-        ] {
-            assert!(connect.contains(&needed), "connect-src 缺少 {needed}");
-        }
-        for loose in ["*", "http:", "https:"] {
-            assert!(!connect.contains(&loose), "connect-src 不该放开 {loose}");
-        }
-        for name in ["base-uri", "form-action", "frame-ancestors"] {
-            assert_eq!(directive(name), ["'none'"], "{name} 应为 'none'");
-        }
+            texture_host.as_str(),
+            // 服务器图标是 data: 地址，同样经 fetch 取字节画进 canvas。
+            "data:",
+        ];
+        connect.sort_unstable();
+        let expected = std::collections::BTreeMap::from([
+            ("default-src", vec!["'none'"]),
+            ("script-src", vec!["'self'"]),
+            // framer-motion 的 popLayout 往空 <style> 里 insertRule，严格的 style-src 下规则不生效。
+            ("style-src", vec!["'self'", "'unsafe-inline'"]),
+            ("img-src", vec!["'self'"]),
+            ("font-src", vec!["'self'"]),
+            ("connect-src", connect),
+            ("base-uri", vec!["'none'"]),
+            ("form-action", vec!["'none'"]),
+            ("frame-ancestors", vec!["'none'"]),
+        ]);
+        assert_eq!(actual, expected, "内容安全策略与页面实际用到的来源不一致");
     }
 }
