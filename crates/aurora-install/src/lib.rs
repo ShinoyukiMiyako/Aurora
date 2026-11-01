@@ -31,6 +31,7 @@ pub mod natives;
 pub mod plan;
 pub mod vanilla;
 
+mod dir_lock;
 mod net;
 
 pub use complete::{CompletionReport, ensure_complete};

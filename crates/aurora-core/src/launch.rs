@@ -895,13 +895,18 @@ impl Aurora {
             self.runtime(),
             &layout,
             &chain.base_id,
+            self.cancel_token(),
         )
         .await
-        .map_err(|err| {
+        .map_err(|err| -> LaunchFailed {
+            if err.is_cancelled() {
+                return CoreError::from(err).into();
+            }
             LaunchFailure::new(FailureCode::FilesFailed, format!("解压本地库失败：{err}"))
                 .param("count", 1)
                 .param("reason", err.to_string())
                 .caused_by(err)
+                .into()
         })?;
 
         // -- 5 生成启动参数
