@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use aurora_base::retry::RetryPolicy;
 use aurora_download::watchdog::WATCHDOG_MIN_FILE_SIZE;
 use aurora_download::{
-    CancellationToken, ChunkConfig, DownloadConfig, DownloadPool, DownloadTask, Downloader,
-    MirrorSource, SourceHealth, SourcePlan, SourceResolver, WatchdogConfig,
+    CancellationToken, ChunkConfig, CredentialScope, DownloadConfig, DownloadCredential,
+    DownloadPool, DownloadTask, Downloader, MirrorSource, SourceHealth, SourcePlan, SourceResolver,
+    WatchdogConfig,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -123,10 +124,11 @@ enum Pace {
 type PaceFn = fn(Option<u64>, &[Option<u64>]) -> Pace;
 
 /// 手写的下载终点：支持 `Range: bytes=a-b`，每个连接只答一个请求（`Connection: close`），
-/// 按到达顺序记下每个请求的 Range 起点。
+/// 按到达顺序记下每个请求的 Range 起点与带来的下载密钥。
 struct Endpoint {
     addr: SocketAddr,
     seen: Arc<Mutex<Vec<Option<u64>>>>,
+    keys: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl Endpoint {
@@ -136,13 +138,21 @@ impl Endpoint {
             .expect("绑定本地端口");
         let addr = listener.local_addr().expect("本地地址");
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let keys = Arc::new(Mutex::new(Vec::new()));
         let log = seen.clone();
+        let key_log = keys.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(answer(stream, body.clone(), log.clone(), pace));
+                tokio::spawn(answer(
+                    stream,
+                    body.clone(),
+                    log.clone(),
+                    key_log.clone(),
+                    pace,
+                ));
             }
         });
-        Self { addr, seen }
+        Self { addr, seen, keys }
     }
 
     fn url(&self, route: &str) -> String {
@@ -158,10 +168,17 @@ impl Endpoint {
     fn range_starts(&self) -> Vec<u64> {
         self.requests().into_iter().flatten().collect()
     }
+
+    /// 每个请求带来的 `x-api-key` 值，按到达顺序；没带为 `None`。
+    fn api_keys(&self) -> Vec<Option<String>> {
+        self.keys.lock().unwrap().clone()
+    }
 }
 
-/// 读完请求头；返回 Range 区间（不带 Range 为 `None`），连接提前断开返回 `Err`。
-async fn read_range(stream: &mut TcpStream) -> std::io::Result<Option<(u64, u64)>> {
+/// 读完请求头；返回 Range 区间（不带 Range 为 `None`）与 `x-api-key` 的值，连接提前断开返回 `Err`。
+async fn read_range(
+    stream: &mut TcpStream,
+) -> std::io::Result<(Option<(u64, u64)>, Option<String>)> {
     let mut head = Vec::new();
     let mut buf = [0u8; 1024];
     while !head.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -172,24 +189,31 @@ async fn read_range(stream: &mut TcpStream) -> std::io::Result<Option<(u64, u64)
         head.extend_from_slice(&buf[..read]);
     }
     let text = String::from_utf8_lossy(&head).to_ascii_lowercase();
-    Ok(text
+    let range = text
         .lines()
         .find_map(|line| line.strip_prefix("range: bytes="))
         .and_then(|spec| {
             let (start, end) = spec.trim().split_once('-')?;
             Some((start.parse().ok()?, end.parse().ok()?))
-        }))
+        });
+    let api_key = text
+        .lines()
+        .find_map(|line| line.strip_prefix("x-api-key:"))
+        .map(|value| value.trim().to_owned());
+    Ok((range, api_key))
 }
 
 async fn answer(
     mut stream: TcpStream,
     body: Arc<Vec<u8>>,
     log: Arc<Mutex<Vec<Option<u64>>>>,
+    key_log: Arc<Mutex<Vec<Option<String>>>>,
     pace: PaceFn,
 ) {
-    let Ok(range) = read_range(&mut stream).await else {
+    let Ok((range, api_key)) = read_range(&mut stream).await else {
         return;
     };
+    key_log.lock().unwrap().push(api_key);
     let start = range.map(|(start, _)| start);
     let pace = {
         let mut seen = log.lock().unwrap();
@@ -680,5 +704,134 @@ async fn whole_file_stream_switches_endpoint_and_starts_over() {
         "快节点：重取终点的探测与从头重下，都不带 Range"
     );
     assert!(elapsed < Duration::from_secs(10), "耗时 {elapsed:?}");
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 测试用下载密钥。手写终点按小写读回请求头，取全小写免得比较时还要转换。
+const API_KEY: &str = "cf-test-key";
+
+/// 作用域只认这几台本地服务器的下载密钥。
+fn scoped_credential(hosts: &[String]) -> DownloadCredential {
+    DownloadCredential::curseforge(API_KEY)
+        .expect("测试密钥合法")
+        .with_scope(CredentialScope::new(hosts.iter().cloned(), false))
+}
+
+fn credentialed_downloader(chunk: ChunkConfig) -> Downloader {
+    Downloader::new(client(), config(chunk, single_source())).with_manual_redirect_client(
+        aurora_base::http::build_manual_redirect_client().expect("构建不跳转客户端"),
+    )
+}
+
+/// 分发入口每个请求带来的下载密钥，按到达顺序。
+async fn origin_keys(server: &MockServer) -> Vec<Option<String>> {
+    server
+        .received_requests()
+        .await
+        .expect("开启了请求记录")
+        .iter()
+        .map(|r| {
+            r.headers
+                .get("x-api-key")
+                .map(|v| v.to_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+/// 带密钥的分片下载判慢换节点：向原地址重取终点那一跳、新节点上的续传请求，都按作用域带上密钥。
+/// 判慢后的重取终点若绕开逐跳规则改用自动跳转的客户端，原地址与新节点都会收到没带密钥的请求。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn credentialed_chunked_download_keeps_the_key_on_the_switched_node() {
+    let total = 3 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let slow = Endpoint::start(body.clone(), |start, _| match start {
+        None => Pace::HeadOnly,
+        Some(start) if start < 2 * MIB => Pace::Fast,
+        Some(_) => Pace::DripTail(DRIP_ALL),
+    })
+    .await;
+    let fast = Endpoint::start(body.clone(), probe_then_fast).await;
+    let origin = redirector(
+        "/files/big.jar",
+        &slow.url("/node/big.jar?s=first&e=1"),
+        &fast.url("/node/big.jar?s=second&e=2"),
+    )
+    .await;
+    let credential = scoped_credential(&[
+        origin.address().to_string(),
+        slow.addr.to_string(),
+        fast.addr.to_string(),
+    ]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("big.jar");
+    let task = DownloadTask::new(format!("{}/files/big.jar", origin.uri()), &dest)
+        .with_size(total)
+        .with_sha1(&sha1)
+        .with_credential(credential);
+    credentialed_downloader(one_at_a_time(MIB))
+        .download(&task)
+        .await
+        .expect("换节点后应下完");
+
+    let key = Some(API_KEY.to_owned());
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        origin_keys(&origin).await,
+        vec![key.clone(), key.clone()],
+        "首次取终点与判慢后重取，都带密钥"
+    );
+    assert_eq!(fast.requests(), vec![None, Some(2 * MIB)]);
+    assert_eq!(
+        fast.api_keys(),
+        vec![key.clone(), key.clone()],
+        "新节点上的探测与续传都带密钥"
+    );
+    assert_eq!(slow.api_keys(), vec![key; 4]);
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 带密钥的整文件单流判慢换节点：新节点在作用域外时，探测与从头重下都不带密钥，
+/// 作用域内的原地址与慢节点照常带。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn credentialed_whole_file_switch_decides_the_key_per_hop() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let slow = Endpoint::start(body.clone(), |_, _| Pace::DripTail(MIB as usize)).await;
+    let fast = Endpoint::start(body.clone(), |_, _| Pace::Fast).await;
+    let origin = redirector(
+        "/whole.jar",
+        &slow.url("/whole.jar?s=a&e=1"),
+        &fast.url("/whole.jar?s=b&e=2"),
+    )
+    .await;
+    let credential = scoped_credential(&[origin.address().to_string(), slow.addr.to_string()]);
+    let chunk = ChunkConfig {
+        enabled: false,
+        ..one_at_a_time(MIB)
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("whole.jar");
+    let task = DownloadTask::new(format!("{}/whole.jar", origin.uri()), &dest)
+        .with_size(total)
+        .with_sha1(&sha1)
+        .with_credential(credential);
+    credentialed_downloader(chunk)
+        .download(&task)
+        .await
+        .expect("换节点后应下完");
+
+    let key = Some(API_KEY.to_owned());
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(origin_keys(&origin).await, vec![key.clone(), key.clone()]);
+    assert_eq!(slow.api_keys(), vec![key], "慢节点在作用域内");
+    assert_eq!(
+        fast.api_keys(),
+        vec![None, None],
+        "作用域外的新节点：重取终点的探测与从头重下都不带密钥"
+    );
     only_dest_left(dir.path(), &dest);
 }
