@@ -511,6 +511,55 @@ async fn a_source_that_keeps_sending_the_same_slow_node_is_left_for_the_next_sou
     );
 }
 
+/// 分发入口每次跳转都给同一个慢节点签上新的签名与过期时间：节点没换，地址却逐字不同。
+/// 认出是同一个节点就换源，不在它上面再白等一个窗口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_re_signed_address_of_the_same_slow_node_is_not_a_new_endpoint() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let slow = Endpoint::start(body.clone(), probe_then_drip).await;
+    let mirror = Endpoint::start(body.clone(), probe_then_fast).await;
+    let origin = redirector(
+        "/f.jar",
+        &slow.url("/node/f.jar?s=first&e=1"),
+        &slow.url("/node/f.jar?s=second&e=2"),
+    )
+    .await;
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: format!("{}/f.jar", origin.uri()),
+            mirror: mirror.url("/f.jar"),
+        }),
+    );
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), sources));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("应在第二个源上下完");
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        origin_gets(&origin).await,
+        2,
+        "首次取终点 + 判慢后重取一次，认出还是同一个节点就不再问"
+    );
+    assert_eq!(
+        slow.requests(),
+        vec![None, Some(0), None],
+        "同一个慢节点只滴灌过一次"
+    );
+    assert_eq!(mirror.range_starts(), vec![0, MIB], "第二个源上从头下完");
+    only_dest_left(dir.path(), &dest);
+}
+
 /// 只有一个候选、第一次连接慢后面快：判慢后原地址换不出新终点，作为最后一个源关掉看门狗再来，
 /// 照样下完。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

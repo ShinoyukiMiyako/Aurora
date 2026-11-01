@@ -699,8 +699,8 @@ impl Downloader {
     /// 看门狗判慢后向原地址重新取终点。BMCLAPI 这类分发入口每次请求都可能跳到不同节点，再问一次
     /// 往往就能换到快的；节点地址带签名与过期参数，只在这一次尝试里用，不跨文件留存。
     ///
-    /// 换出了新终点就返回它。原地址仍跳回同一个终点（没有跳转的源就是这样）或换终点次数已用尽，
-    /// 返回 [`Error::SlowEndpoint`] 交给换源；重新取终点本身失败，原样返回那个错误。
+    /// 换出了新终点就返回它。原地址仍跳回同一个节点（见 [`same_node`]；没有跳转的源就是这样）
+    /// 或换终点次数已用尽，返回 [`Error::SlowEndpoint`] 交给换源；重新取终点本身失败，原样返回那个错误。
     async fn next_endpoint(
         &self,
         origin: &str,
@@ -751,7 +751,7 @@ impl Downloader {
                 return Err(err);
             }
         };
-        if next == slow {
+        if same_node(&next, slow) {
             tracing::warn!(
                 file = %dest,
                 url = %origin,
@@ -955,6 +955,17 @@ impl<'a> Landing<'a> {
             Some((expected, hasher)) => hasher.verify(expected),
             None => Ok(()),
         }
+    }
+}
+
+/// 两个下载地址是否落在同一个节点上：比协议、主机与端口，不比路径和查询串。
+///
+/// BMCLAPI 每次跳转都给节点地址签上新的签名与过期时间，同一个节点两次跳出来的完整地址也不一样，
+/// 逐字比较认不出「节点没换」，会在同一个慢节点上再白等一个窗口。解析不了的地址只能逐字比。
+fn same_node(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin(),
+        _ => a == b,
     }
 }
 
@@ -1613,6 +1624,36 @@ mod tests {
             transfer_for(&excluded, "https://cdn.modrinth.com/a.jar", Some(1 << 20)),
             Transfer::Chunked { total: 1 << 20 }
         );
+    }
+
+    #[test]
+    fn same_node_compares_scheme_host_and_port_only() {
+        let node = "https://bmclapi1.sakura.sld.tw/maven/a.jar?s=first&e=100";
+        assert!(
+            same_node(
+                node,
+                "https://bmclapi1.sakura.sld.tw/maven/a.jar?s=second&e=200"
+            ),
+            "重签的地址仍是同一个节点"
+        );
+        assert!(
+            same_node(node, "https://bmclapi1.sakura.sld.tw:443/other/b.jar"),
+            "默认端口写不写都一样，路径不同也是同一个节点"
+        );
+        assert!(!same_node(
+            node,
+            "https://bmclapi3.hurtmc.com/maven/a.jar?s=first&e=100"
+        ));
+        assert!(!same_node(
+            node,
+            "https://bmclapi1.sakura.sld.tw:4000/maven/a.jar"
+        ));
+        assert!(!same_node(
+            node,
+            "http://bmclapi1.sakura.sld.tw/maven/a.jar"
+        ));
+        assert!(same_node("not a url", "not a url"), "解析不了时逐字比");
+        assert!(!same_node("not a url", "not a url?s=2"));
     }
 
     #[test]
