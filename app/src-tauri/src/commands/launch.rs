@@ -62,7 +62,7 @@ pub struct LaunchedDto {
     pub offline: bool,
 }
 
-/// 阶段 3 的下载进度。字段与 core-event 的下载进度一致。
+/// 阶段 3 的下载进度。字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DownloadDto {
     pub total: u64,
@@ -584,6 +584,7 @@ mod tests {
             finished,
             bytes: finished * 100,
             total_bytes: Some(total * 100),
+            transferred: finished * 100,
             speed: 50,
         }
     }

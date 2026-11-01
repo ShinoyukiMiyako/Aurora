@@ -59,6 +59,8 @@ pub enum CoreEventKind {
         bytes: u64,
         /// 本批声明大小之和；有文件大小未知时为 `null`。
         total_bytes: Option<u64>,
+        /// 传输字节：网络上实际读到的字节，含重传，跳过的完整文件不算；批内只增不减，本地任务恒为 0。
+        transferred: u64,
         /// 瞬时速度，字节/秒。
         speed: u64,
     },
@@ -74,6 +76,7 @@ impl From<CoreEvent> for CoreEventKind {
                 finished: p.finished,
                 bytes: p.bytes,
                 total_bytes: p.total_bytes,
+                transferred: p.transferred,
                 speed: p.speed,
             },
         }
@@ -162,6 +165,7 @@ mod tests {
                 finished: 1,
                 bytes: 2048,
                 total_bytes: Some(4096),
+                transferred: 1024,
                 speed: 512,
             },
         };
@@ -174,6 +178,7 @@ mod tests {
                 "finished": 1,
                 "bytes": 2048,
                 "total_bytes": 4096,
+                "transferred": 1024,
                 "speed": 512
             })
         );
@@ -206,6 +211,7 @@ mod tests {
                 finished: 2,
                 bytes: 10,
                 total_bytes: None,
+                transferred: 7,
                 speed: 0,
             }))
             .unwrap();
@@ -224,6 +230,7 @@ mod tests {
                 finished: 2,
                 bytes: 10,
                 total_bytes: None,
+                transferred: 7,
                 speed: 0,
             }
         );
@@ -265,6 +272,7 @@ mod tests {
                 finished: 0,
                 bytes: 0,
                 total_bytes: None,
+                transferred: 0,
                 speed: 0,
             },
         };
@@ -278,6 +286,7 @@ mod tests {
                 "finished": 0,
                 "bytes": 0,
                 "total_bytes": null,
+                "transferred": 0,
                 "speed": 0
             })
         );
@@ -311,6 +320,7 @@ mod tests {
             finished,
             bytes,
             total_bytes,
+            transferred: bytes,
             speed: 0,
         })
     }

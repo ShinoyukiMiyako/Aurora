@@ -797,6 +797,7 @@ impl Reporter {
                 finished: progress.files_done,
                 bytes: progress.bytes_done,
                 total_bytes: Some(progress.bytes_total),
+                transferred: 0,
                 speed,
             }),
         );
@@ -1008,6 +1009,7 @@ mod tests {
         let level_len = level_dat("周末生存").len() as u64;
         assert_eq!((last.total, last.finished), (2, 2));
         assert_eq!(last.bytes, level_len + 12);
+        assert_eq!(last.transferred, 0, "备份只碰本机文件，没有网络传输");
         assert_eq!(last.total_bytes, Some(level_len + 12));
     }
 

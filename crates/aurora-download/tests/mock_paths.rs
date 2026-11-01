@@ -905,6 +905,7 @@ async fn corrupted_retry_does_not_double_count_progress_bytes() {
     let snap = *rx.borrow();
     assert_eq!(snap.bytes, size, "坏的那一遍要被退回，进度字节恰为文件大小");
     assert_eq!(snap.total_bytes, Some(size));
+    assert_eq!(snap.transferred, 2 * size, "两遍都走了网线，传输量不退回");
 }
 
 /// 本就完整的文件计入进度：补全类批次里大部分文件都已在盘上，不计入的话进度会停在 0。
@@ -950,6 +951,31 @@ async fn already_complete_files_count_towards_progress_bytes() {
     let snap = *rx.borrow();
     assert_eq!(snap.bytes, 17, "跳过的 12 字节加新下的 5 字节");
     assert_eq!(snap.total_bytes, Some(17));
+    assert_eq!(snap.transferred, 5, "跳过的文件不算传输量");
+}
+
+/// 整批文件都已就绪：进度走满，传输量为 0。任务页据此写「文件已就绪」，而不是报一个没下过的大小。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_of_present_files_transfers_nothing() {
+    let server = MockServer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let present = dir.path().join("present.bin");
+    tokio::fs::write(&present, b"already-here").await.unwrap();
+    let task = DownloadTask::new(format!("{}/present", server.uri()), &present)
+        .with_sha1(sha1_of(b"already-here").await)
+        .with_size(12);
+
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let (tx, rx) = watch::channel(DownloadProgress::default());
+    let report = DownloadPool::new(downloader, 2)
+        .download_all(vec![task], Some(tx))
+        .await
+        .unwrap();
+
+    assert!(report.is_success());
+    let snap = *rx.borrow();
+    assert_eq!((snap.bytes, snap.total_bytes), (12, Some(12)));
+    assert_eq!(snap.transferred, 0);
 }
 
 /// 并发为 1 时请求顺序即派发顺序：大文件先开工，大小未知的最后。

@@ -555,6 +555,7 @@ impl Aurora {
             finished: 0,
             bytes: 0,
             total_bytes: Some(bytes_total),
+            transferred: 0,
             speed: 0,
         });
         let forwarder = events
@@ -579,6 +580,7 @@ impl Aurora {
                     finished: p.files_done,
                     bytes: p.bytes_done,
                     total_bytes: Some(p.bytes_total),
+                    transferred: 0,
                     speed,
                 });
                 // 最后一个文件写完之后紧接着收尾与回读校验。
@@ -2083,6 +2085,7 @@ mod tests {
         assert_eq!((last.total, last.finished), (4, 4));
         assert_eq!(last.bytes, override_bytes);
         assert_eq!(last.total_bytes, Some(override_bytes));
+        assert_eq!(last.transferred, 0, "打包只写本机文件，没有网络传输");
     }
 
     /// 弹窗按预览给的分项和当前勾选算「会跳过几个」，这里钉死它与导出结果同一口径：

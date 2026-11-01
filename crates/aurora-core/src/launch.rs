@@ -879,6 +879,7 @@ impl Aurora {
                 finished: 0,
                 bytes: 0,
                 total_bytes: Some(0),
+                transferred: 0,
                 speed: 0,
             });
         } else {
