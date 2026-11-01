@@ -198,6 +198,44 @@ describe("AppearanceProvider", () => {
     expect(api.appearance.accent).toBe("moss");
   });
 
+  it("较早的请求比更新的那次晚确认：确认值仍是更新的那次，之后的写入失败回到它而不是较早的那次", async () => {
+    stubMatchMedia(false);
+    const first = deferred<AppearanceDto>();
+    const second = deferred<AppearanceDto>();
+    vi.mocked(persist).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    mount();
+    let p1!: Promise<void>;
+    let p2!: Promise<void>;
+    act(() => {
+      p1 = api.setAppearance({ accent: "amethyst" });
+    });
+    act(() => {
+      p2 = api.setAppearance({ accent: "moss" });
+    });
+    await act(async () => {
+      second.resolve({ ...DAY_DTO, accent: "moss" });
+      await p2;
+    });
+    await act(async () => {
+      first.resolve({ ...DAY_DTO, accent: "amethyst" });
+      await p1;
+    });
+    expect(html.getAttribute("data-sk-accent")).toBe("moss");
+
+    const failure = new Error("配置文件被占用");
+    vi.mocked(persist).mockRejectedValueOnce(failure);
+    let caught: unknown;
+    await act(async () => {
+      await api.setAppearance({ mode: "night" }).catch((e: unknown) => {
+        caught = e;
+      });
+    });
+    expect(caught).toBe(failure);
+    expect(html.getAttribute("data-sk-accent")).toBe("moss");
+    expect(html.getAttribute("data-sk-mode")).toBe("day");
+    expect(api.appearance).toEqual({ ...DEFAULT_APPEARANCE, accent: "moss" });
+  });
+
   it("旧请求失败时新请求仍在途，不回滚新请求的乐观值", async () => {
     stubMatchMedia(false);
     const first = deferred<AppearanceDto>();

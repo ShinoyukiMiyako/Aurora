@@ -100,6 +100,8 @@ export function AppearanceProvider({ initial, children }: AppearanceProviderProp
   const [systemReduced, setSystemReduced] = useState(systemPrefersReducedMotion);
   const shownRef = useRef(initial);
   const confirmedRef = useRef(initial);
+  /** confirmedRef 来自哪一次请求；首帧前读到的初始值算第 0 次。 */
+  const confirmedSeq = useRef(0);
   const systemReducedRef = useRef(systemReduced);
   const requestSeq = useRef(0);
 
@@ -128,7 +130,11 @@ export function AppearanceProvider({ initial, children }: AppearanceProviderProp
       show({ ...shownRef.current, ...patch });
       try {
         const confirmed = appearanceFromDto(await persistAppearance(dto));
-        confirmedRef.current = confirmed;
+        // 较早的请求晚回来时，它带回的是更早的后端状态，不能盖掉更新的那次确认：之后写入失败要回到的是更新的那次
+        if (seq >= confirmedSeq.current) {
+          confirmedSeq.current = seq;
+          confirmedRef.current = confirmed;
+        }
         if (seq === requestSeq.current) show(confirmed);
       } catch (error) {
         // 不吞错误：只负责把界面还原到后端确认的值，错误照样交给调用方

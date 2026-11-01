@@ -4,7 +4,7 @@ import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, cancelledError, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { resources } from "./resource";
 import { isActiveTask } from "./tasks";
 import type { LauncherStore } from "./store";
@@ -429,6 +429,126 @@ describe("改名迁移任务", () => {
     java.resolve({ component: "java-runtime-delta", version: { major: 21, minor: 0, security: 5, build: 11, raw: "21.0.5" }, java_executable: "C:/jdk21/bin/java.exe" });
     await settle();
     expect(callsOf(ipc, "set_instance_settings").map((a) => a.id)).toEqual(["生存二"]);
+  });
+});
+
+describe("改名已落盘、之后的读取失败：内存里挂在旧 id 上的引用照样迁到新名字", () => {
+  /**
+   * 生存：固定在侧栏、是当前实例；有一个启动失败的会话、一个失败的光影任务，还有一个装好后要固定给它的 Java。
+   * 后端改名时连带改侧栏固定与当前实例（返回改名用的 rename_instance 改写）。
+   */
+  async function seedReferences(): Promise<{ java: Deferred<unknown>; failedTaskId: string; renameOnBackend: () => void }> {
+    let pins: string[] = [];
+    let selected: string | null = null;
+    ipc.overrides.set("set_sidebar_pins", (args) => (pins = args.pins as string[]));
+    ipc.overrides.set("get_sidebar_pins", () => pins);
+    ipc.overrides.set("update_config", (args) => {
+      if ("selectedVersion" in args) selected = args.selectedVersion as string | null;
+      return null;
+    });
+    ipc.overrides.set("get_config", () => configDto({ selected_version: selected }));
+    await store.actions.togglePin("生存");
+    await store.actions.selectInstance("生存");
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_broken", "找不到启动入口");
+    });
+    await store.actions.launch("生存");
+    ipc.overrides.set("install_resource", () => {
+      throw new IpcError("download_failed", "下载源暂时不可用");
+    });
+    await store.actions.installResource({
+      resourceType: "shader",
+      platform: "modrinth",
+      projectId: "bsl",
+      name: "BSL",
+      targets: [{ instanceId: "生存", fileVersionId: "b1", world: null }],
+    });
+    const java = deferred<unknown>();
+    ipc.overrides.set("install_java", () => java.promise);
+    await store.actions.installJava(21, { pinFor: "生存" });
+    await settle();
+    const failed = store.getState().tasks.find((t) => t.status === "failed");
+    if (failed === undefined) throw new Error("光影任务应已失败");
+    const renameOnBackend = () =>
+      ipc.overrides.set("rename_instance", () => {
+        instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+        pins = pins.map((p) => (p === "生存" ? "生存二" : p));
+        if (selected === "生存") selected = "生存二";
+        return { id: "生存二" };
+      });
+    return { java, failedTaskId: failed.id, renameOnBackend };
+  }
+
+  it.each([
+    ["实例列表", "list_instances"],
+    ["侧栏固定", "get_sidebar_pins"],
+    ["全局设置", "get_config"],
+  ])("%s读不出来：会话、任务、入队上下文、固定、当前实例与 lastRename 都迁过去；改名照成功返回，读取失败单独提示", async (_name, command) => {
+    const { java, failedTaskId, renameOnBackend } = await seedReferences();
+    expect(store.getState()).toMatchObject({ sidebarPins: ["生存"], selectedInstanceId: "生存" });
+    renameOnBackend();
+    ipc.overrides.set(command, () => {
+      throw new IpcError("io_error", "读取失败：拒绝访问。 (os error 5)");
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const frames: string[][] = [];
+    const off = store.subscribe(() => {
+      const s = store.getState();
+      if (s.lastRename !== null) frames.push(s.instances.map((i) => i.id));
+    });
+
+    expect(await store.actions.renameInstance("生存", "生存二")).toBe("生存二");
+    off();
+
+    const state = store.getState();
+    expect(state.lastRename).toMatchObject({ from: "生存", to: "生存二" });
+    expect(state.instances.map((i) => i.id)).toEqual(["生存二", "创造"]);
+    // 外壳按 lastRename 改写历史、按实例列表剪路由：两者必须同一帧到达，不能有一帧新名字还不在列表里
+    expect(frames.length).toBeGreaterThan(0);
+    for (const ids of frames) expect(ids).toContain("生存二");
+    expect(state.sidebarPins).toEqual(["生存二"]);
+    expect(state.selectedInstanceId).toBe("生存二");
+    expect(state.session).toMatchObject({ instanceId: "生存二", phase: "failed" });
+    expect(state.tasks.find((t) => t.id === failedTaskId)).toMatchObject({ instanceId: "生存二", spec: { args: { versionId: "生存二" } } });
+    expect(state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["error", "实例列表没能刷新", "读取失败：拒绝访问。 (os error 5)"]);
+    expect(error).toHaveBeenCalledWith("实例列表没能刷新", expect.objectContaining({ code: "io_error" }));
+
+    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", (args) => args.settings);
+    java.resolve({ component: "java-runtime-delta", version: { major: 21, minor: 0, security: 5, build: 11, raw: "21.0.5" }, java_executable: "C:/jdk21/bin/java.exe" });
+    await settle();
+    expect(callsOf(ipc, "set_instance_settings").map((a) => a.id)).toEqual(["生存二"]);
+  });
+
+  it("改名前已在路上的重扫与固定读取在改名之后、改名的重扫之前回来：列表与固定仍是新名字，不退回旧 id", async () => {
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    await store.actions.togglePin("生存");
+    const staleScan = deferred<InstanceDto[]>();
+    const stalePins = deferred<string[]>();
+    ipc.overrides.set("list_instances", () => staleScan.promise);
+    ipc.overrides.set("get_sidebar_pins", () => stalePins.promise);
+    void store.actions.refreshInstances();
+    void store.actions.reload("pins");
+    await settle();
+
+    const renameScan = deferred<InstanceDto[]>();
+    ipc.overrides.set("rename_instance", () => ({ id: "生存二" }));
+    ipc.overrides.set("list_instances", () => renameScan.promise);
+    ipc.overrides.set("get_sidebar_pins", () => ["生存二"]);
+    const renamed = store.actions.renameInstance("生存", "生存二");
+    await settle();
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["生存二", "创造"]);
+
+    staleScan.resolve([instanceDto("生存"), instanceDto("创造")]);
+    stalePins.resolve(["生存"]);
+    await settle();
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["生存二", "创造"]);
+    expect(store.getState().sidebarPins).toEqual(["生存二"]);
+
+    renameScan.resolve([instanceDto("生存二"), instanceDto("创造"), instanceDto("新世界")]);
+    expect(await renamed).toBe("生存二");
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["生存二", "创造", "新世界"]);
   });
 });
 

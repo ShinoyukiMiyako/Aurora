@@ -2,7 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstanceDto } from "../ipc/instances";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import type { ConfigDto } from "../ipc/config";
+import { accountDto, bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { activeAccount } from "./selectors";
 import type { LauncherStore } from "./store";
 
@@ -132,5 +133,55 @@ describe("账户列表与当前账户分两条命令读：对不上或晚到的�
     slow.resolve(A);
     await first;
     expect(store.getState().currentAccountId).toBe(B.uuid);
+  });
+});
+
+describe("重叠的设置与侧栏固定读取：先发出、后回来的旧结果不覆盖新结果", () => {
+  it("设置：先发出的那次晚回来时，当前实例不退回旧值；先发出的先回来照常采纳", async () => {
+    const slow = deferred<ConfigDto>();
+    ipc.overrides.set("get_config", () => slow.promise);
+    const first = store.actions.reload("settings");
+    await settle();
+    ipc.overrides.set("get_config", () => configDto({ selected_version: "创造" }));
+    await store.actions.reload("settings");
+    expect(store.getState().settings?.selectedVersion).toBe("创造");
+
+    slow.resolve(configDto({ selected_version: "生存" }));
+    await first;
+    expect(store.getState().settings?.selectedVersion).toBe("创造");
+    expect(store.getState().status.settings).toEqual({ kind: "ready" });
+
+    const early = deferred<ConfigDto>();
+    const late = deferred<ConfigDto>();
+    const queue = [early, late];
+    ipc.overrides.set("get_config", () => {
+      const next = queue.shift();
+      if (next === undefined) throw new Error("多读了一次配置");
+      return next.promise;
+    });
+    const a = store.actions.reload("settings");
+    const b = store.actions.reload("settings");
+    await settle();
+    early.resolve(configDto({ selected_version: null }));
+    await a;
+    expect(store.getState().settings?.selectedVersion).toBeNull();
+    late.resolve(configDto({ selected_version: "生存" }));
+    await b;
+    expect(store.getState().settings?.selectedVersion).toBe("生存");
+  });
+
+  it("侧栏固定：先发出的那次晚回来时，固定列表不退回旧值", async () => {
+    const slow = deferred<string[]>();
+    ipc.overrides.set("get_sidebar_pins", () => slow.promise);
+    const first = store.actions.reload("pins");
+    await settle();
+    ipc.overrides.set("get_sidebar_pins", () => ["创造", "生存"]);
+    await store.actions.reload("pins");
+    expect(store.getState().sidebarPins).toEqual(["创造", "生存"]);
+
+    slow.resolve([]);
+    await first;
+    expect(store.getState().sidebarPins).toEqual(["创造", "生存"]);
+    expect(store.getState().instances.filter((i) => i.pinned).map((i) => i.id)).toEqual(["生存", "创造"]);
   });
 });

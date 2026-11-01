@@ -221,3 +221,110 @@ describe("资源缓存：按前缀失效", () => {
     off();
   });
 });
+
+describe("资源缓存：出错的条目没人看了就丢掉，再有人要时重新请求", () => {
+  /** 让出一个宏任务：出错条目的清理排在这之后。 */
+  const macrotask = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+
+  /** 依次给出这些结果；多发一次请求直接报错。 */
+  function scripted(results: (() => Promise<string>)[]) {
+    return vi.fn(() => {
+      const next = results.shift();
+      if (next === undefined) throw new Error("多发了请求");
+      return next();
+    });
+  }
+
+  it("断网时看过的页面：最后一个订阅者走后丢掉出错的条目，恢复联网后再进来重新请求", async () => {
+    const cache = new ResourceCache();
+    const fetcher = scripted([() => Promise.reject(new Error("网络断了")), () => Promise.resolve("恢复后的资讯")]);
+    const off = cache.subscribe("news", fetcher, () => undefined);
+    await tick();
+    expect(cache.snapshot("news")).toMatchObject({ status: "error", data: undefined });
+    off();
+    await macrotask();
+
+    const again = cache.subscribe("news", fetcher, () => undefined);
+    await tick();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(cache.snapshot("news")).toMatchObject({ status: "ready", data: "恢复后的资讯", error: null });
+    again();
+  });
+
+  it("订阅者在请求还没回来时就走了：失败晚到后同样丢掉，下次再要时重新请求", async () => {
+    const cache = new ResourceCache();
+    const offline = deferred<string>();
+    const fetcher = scripted([() => offline.promise, () => Promise.resolve("v2")]);
+    const off = cache.subscribe("mods:生存", fetcher, () => undefined);
+    off();
+    offline.reject(new Error("网络断了"));
+    await tick();
+    await macrotask();
+
+    const again = cache.subscribe("mods:生存", fetcher, () => undefined);
+    await tick();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(cache.snapshot("mods:生存")).toMatchObject({ status: "ready", data: "v2" });
+    again();
+  });
+
+  it("同一轮里退订再订阅（组件交接）不重新请求，条目留着；之后也不会反复请求", async () => {
+    const cache = new ResourceCache();
+    const fetcher = scripted([() => Promise.reject(new Error("网络断了"))]);
+    const off = cache.subscribe("crash:生存", fetcher, () => undefined);
+    await tick();
+    off();
+    const next = cache.subscribe("crash:生存", fetcher, () => undefined);
+    for (let i = 0; i < 3; i++) await macrotask();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const snap = cache.snapshot("crash:生存");
+    expect(snap.status).toBe("error");
+    expect(snap.error?.message).toBe("网络断了");
+    next();
+  });
+
+  it("React 里换一个组件接着看同一个 key（同一次提交里卸载旧的、挂上新的）：不重新请求，仍显示原错误", async () => {
+    const cache = new ResourceCache();
+    const fetcher = scripted([() => Promise.reject(new Error("磁盘读不出来"))]);
+    const seen: ResourceResult<string>[] = [];
+    function Probe() {
+      seen.push(useResource("log:生存", fetcher, cache));
+      return null;
+    }
+    const view = render(<Probe key="overview" />);
+    await tick();
+    view.rerender(<Probe key="logs" />);
+    for (let i = 0; i < 3; i++) await macrotask();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const last = seen[seen.length - 1];
+    expect(last.status).toBe("error");
+    expect(last.error?.message).toBe("磁盘读不出来");
+    view.unmount();
+  });
+
+  it("没出错的条目没人看了照常留着，再订阅直接用缓存", async () => {
+    const cache = new ResourceCache();
+    const fetcher = scripted([() => Promise.resolve("v1")]);
+    const off = cache.subscribe("content:生存", fetcher, () => undefined);
+    await tick();
+    off();
+    await macrotask();
+    const again = cache.subscribe("content:生存", fetcher, () => undefined);
+    await tick();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(cache.snapshot("content:生存")).toMatchObject({ status: "ready", data: "v1" });
+    again();
+  });
+
+  it("命令式 read 失败后没人订阅：同样丢掉，之后订阅的页面重新请求而不是拿到这次的错误", async () => {
+    const cache = new ResourceCache();
+    const fetcher = scripted([() => Promise.reject(new Error("网络断了")), () => Promise.resolve("v2")]);
+    await expect(cache.read("plan:生存", fetcher)).rejects.toThrow("网络断了");
+    await macrotask();
+    const off = cache.subscribe("plan:生存", fetcher, () => undefined);
+    await tick();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(cache.snapshot("plan:生存")).toMatchObject({ status: "ready", data: "v2" });
+    off();
+  });
+});

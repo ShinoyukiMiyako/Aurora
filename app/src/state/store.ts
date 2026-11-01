@@ -698,6 +698,24 @@ function countUnseen(tasks: readonly Task[], unseen: readonly string[]): number 
   return tasks.filter((t) => t.status === "failed" && ids.has(attemptTaskId(t))).length;
 }
 
+/**
+ * 按任务 id 记着的入队上下文与未看过的失败，只为还用得上的任务留着：入队上下文跟任务表里的任务、以及结束后还在等
+ * 落地重扫的任务（与 landing 同进同出）；未看过的失败只记任务表里任务的当前这一次尝试。历史超出上限被剪掉、清除已结束、
+ * 失败的新建改排补全撤下的任务，以及重试后的上一次尝试，它们的记录随之清掉，不随运行时间越积越多。
+ * 没有可清的时原样返回原引用，派生的实例列表按引用记忆。
+ */
+function prunedTaskRefs(raw: RawState): Partial<RawState> {
+  const live = new Set(raw.tasks.map((t) => t.id));
+  for (const id of raw.landing) live.add(id);
+  const attempts = new Set(raw.tasks.map(attemptTaskId));
+  const staleMeta = Object.keys(raw.taskMeta).some((id) => !live.has(id));
+  const staleUnseen = raw.unseenFailures.some((attempt) => !attempts.has(attempt));
+  return {
+    ...(staleMeta ? { taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).filter(([id]) => live.has(id))) } : {}),
+    ...(staleUnseen ? { unseenFailures: raw.unseenFailures.filter((attempt) => attempts.has(attempt)) } : {}),
+  };
+}
+
 /** 活动任务对一个已扫描实例的影响：整个目录在写（安装中），或者只在改动 Mod 与资源。 */
 type TaskEffect = "installing" | "modifying" | null;
 
@@ -903,6 +921,11 @@ export class LauncherStore {
   /** 账户读取的发出序号与已采纳的最晚序号（见 fetchAccounts）。 */
   private accountsIssued = 0;
   private accountsApplied = 0;
+  /** 全局设置与侧栏固定读取的发出序号与已采纳的最晚序号（见 fetchSettings、fetchPins）。 */
+  private settingsIssued = 0;
+  private settingsApplied = 0;
+  private pinsIssued = 0;
+  private pinsApplied = 0;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
   /**
@@ -969,7 +992,9 @@ export class LauncherStore {
   private set(patch: Partial<RawState> | ((raw: RawState) => Partial<RawState>)): void {
     const next = typeof patch === "function" ? patch(this.raw) : patch;
     const before = this.raw;
-    this.raw = { ...this.raw, ...next };
+    const merged = { ...this.raw, ...next };
+    // 任务只会经任务表与 landing 离开，它们变了才核对挂在任务 id 上的记录
+    this.raw = next.tasks !== undefined || next.landing !== undefined ? { ...merged, ...prunedTaskRefs(merged) } : merged;
     if (next.toasts !== undefined && next.toasts !== before.toasts) this.scheduleToastExpiry();
     if (next.session !== undefined && next.session !== before.session) this.scheduleLinger();
     for (const listener of [...this.listeners]) listener();
@@ -1064,8 +1089,16 @@ export class LauncherStore {
     );
   }
 
+  /**
+   * 读全局设置。启动加载、改设置、换游戏目录、删除与改名都会读，先发出的那次可能后回来，读到的是更早的配置，
+   * 照单采纳会把当前实例等设置改回去：与实例重扫一样只采纳比已采纳的那次更晚发出的结果。
+   */
   private async fetchSettings(): Promise<void> {
-    this.set({ settings: settingsFromDto(await configIpc.getConfig()) });
+    const seq = ++this.settingsIssued;
+    const settings = settingsFromDto(await configIpc.getConfig());
+    if (seq <= this.settingsApplied) return;
+    this.settingsApplied = seq;
+    this.set({ settings });
   }
 
   /**
@@ -1091,7 +1124,7 @@ export class LauncherStore {
   /**
    * 重扫实例列表。几处会同时发起重扫（窗口获得焦点、游戏退出、任务落地、删除与改名），先发出的那次可能后回来：
    * 它读的是更早的盘面，照单采纳会让刚删掉的实例回到列表、刚改名的实例变回旧名。所以只采纳比已采纳的那次更晚发出的结果；
-   * 晚到的旧结果丢掉，但 extra（撤占位项、改名迁移）照样套在已采纳的那份更新的列表上。
+   * 晚到的旧结果丢掉，但 extra（撤占位项）照样套在已采纳的那份更新的列表上。
    */
   private async fetchInstances(extra?: (raw: RawState) => Partial<RawState>): Promise<void> {
     const seq = ++this.scanIssued;
@@ -1105,8 +1138,13 @@ export class LauncherStore {
     this.set((raw) => ({ ...scanned, ...(extra === undefined ? {} : extra(raw)) }));
   }
 
+  /** 读侧栏固定。与 fetchSettings 同理，只采纳比已采纳的那次更晚发出的结果。 */
   private async fetchPins(): Promise<void> {
-    this.set({ pins: await instancesIpc.getSidebarPins() });
+    const seq = ++this.pinsIssued;
+    const pins = await instancesIpc.getSidebarPins();
+    if (seq <= this.pinsApplied) return;
+    this.pinsApplied = seq;
+    this.set({ pins });
   }
 
   /**
@@ -1685,6 +1723,38 @@ export class LauncherStore {
     for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
   }
 
+  /**
+   * 改名已落盘：内存里挂在旧 id 上的引用一次迁到新 id，不等之后的重扫与读取（它们失败时任务重试、会话修复动作都还指着
+   * 已经不在的旧名字）。实例列表里那一项就地改名、与 lastRename 在同一次更新里：外壳按 lastRename 改写历史、按实例列表
+   * 剪路由，新 id 晚一帧进列表，实例页就被当成已删除剪掉。后端随改名迁了侧栏固定与当前实例，这里同样就地换掉；
+   * 改名之前发出、还没回来的重扫与读取读的是改名前的盘面，晚到时不再采纳。
+   */
+  private migrateRenamed(from: string, to: string): void {
+    this.scanApplied = this.scanIssued;
+    this.pinsApplied = this.pinsIssued;
+    this.settingsApplied = this.settingsIssued;
+    this.renameSeq += 1;
+    const seq = this.renameSeq;
+    this.set((raw) => ({
+      lastRename: { from, to, seq },
+      scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
+      pins: raw.pins.map((p) => (p === from ? to : p)),
+      settings: raw.settings === null || raw.settings.selectedVersion !== from ? raw.settings : { ...raw.settings, selectedVersion: to },
+      tasks: raw.tasks.map((t) => renamedTask(t, from, to)),
+      taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, from, to)])),
+      // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
+      session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
+      launchPrompt:
+        raw.launchPrompt === null
+          ? null
+          : {
+              ...raw.launchPrompt,
+              instanceId: raw.launchPrompt.instanceId === from ? to : raw.launchPrompt.instanceId,
+              occupantId: raw.launchPrompt.occupantId === from ? to : raw.launchPrompt.occupantId,
+            },
+    }));
+  }
+
   /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
   private pendingCreate(id: string): { taskId: string; meta: Extract<TaskMeta, { type: "create" }> } | null {
     if (this.raw.scanned.some((i) => i.id === id)) return null;
@@ -2187,29 +2257,16 @@ export class LauncherStore {
             return { newId: renamedTo(lag), lagged: lag };
           },
         );
-        await Promise.all([store.fetchPins(), store.fetchSettings()]);
         store.instanceIdTaken(newId);
         // 游玩记录已迁到新名字下（没跟上的由后端在下一次读时补上）：主页日历按旧 id 找不到实例，会把改了名的说成已删除
         invalidateResources("play-stats");
-        store.renameSeq += 1;
-        const seq = store.renameSeq;
-        // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
-        await store.fetchInstances((raw) => ({
-          lastRename: { from: id, to: newId, seq },
-          tasks: raw.tasks.map((t) => renamedTask(t, id, newId)),
-          taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, id, newId)])),
-          session: raw.session !== null && raw.session.instanceId === id ? { ...raw.session, instanceId: newId } : raw.session,
-          launchPrompt:
-            raw.launchPrompt === null
-              ? null
-              : {
-                  ...raw.launchPrompt,
-                  instanceId: raw.launchPrompt.instanceId === id ? newId : raw.launchPrompt.instanceId,
-                  occupantId: raw.launchPrompt.occupantId === id ? newId : raw.launchPrompt.occupantId,
-                },
-        }));
+        store.migrateRenamed(id, newId);
         store.scheduleJournal();
         if (lagged !== null) store.playRecordsLagged(newId, lagged);
+        // 改名已经落盘，之后读不出来不是改名失败：照成功返回，读取的失败按刷新失败另发通知，不说成没改成
+        await Promise.all([store.fetchPins(), store.fetchSettings(), store.fetchInstances()]).catch((error: unknown) =>
+          store.report(ACTION_ERROR.refreshInstances, error),
+        );
         return newId;
       },
       async updateInstanceSettings(id, patch) {

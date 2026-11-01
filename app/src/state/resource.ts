@@ -4,7 +4,7 @@
 // - invalidate(prefix) 让 key 等于 prefix 或以「prefix:」开头的数据失效：有人在看的立即重取（重取期间保留旧数据），
 //   没人看的直接丢弃，下次有人要时再取。key 用冒号分段，「history:1.21」不会误伤「history:1.21.1」。
 // - 失效后旧请求晚到的结果按版本号丢弃，界面不会被旧数据覆盖。
-// - 错误进入 error 状态由页面原位呈现（模块级错误），不吞、不转成空数据。
+// - 错误进入 error 状态由页面原位呈现（模块级错误），不吞、不转成空数据。出错的条目没人看了就丢掉，下次有人要时重新请求。
 
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 
@@ -98,8 +98,21 @@ export class ResourceCache {
         const error = toError(raw);
         this.set(entry, { status: "error", data: entry.snapshot.data, error, refreshing: false });
         for (const observer of [...this.errorObservers]) observer(error);
+        this.sweepIfAbandoned(key, entry);
       },
     );
+  }
+
+  /**
+   * 出错的条目没人看了就丢掉：订阅只在 loading 时发请求，留着它的话断网时看过的页面恢复联网后再进来还是那条错误。
+   * 延后一个宏任务再查：组件交接（React 在同一次提交里先退订旧的、再订阅新的）期间订阅数短暂归零，
+   * 当场丢掉会让新订阅者从头请求，出错的页面每次重渲染都换 key 时还会反复请求。
+   */
+  private sweepIfAbandoned(key: string, entry: Entry): void {
+    if (entry.listeners.size > 0 || entry.snapshot.status !== "error") return;
+    setTimeout(() => {
+      if (this.entries.get(key) === entry && entry.listeners.size === 0 && entry.snapshot.status === "error") this.entries.delete(key);
+    }, 0);
   }
 
   /** 订阅一个 key；首个订阅者到来且没有可用数据时发起请求。返回退订函数。 */
@@ -112,6 +125,7 @@ export class ResourceCache {
     return () => {
       entry.listeners.delete(listener);
       entry.lastUsed = ++this.clock;
+      this.sweepIfAbandoned(key, entry);
       this.evictIdle();
     };
   }
