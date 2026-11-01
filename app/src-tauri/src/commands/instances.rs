@@ -270,6 +270,24 @@ impl InstanceLocks {
         })
     }
 
+    /// `bases` 里第一个此刻容不下基底占用的基底，连同挡路的那件事：补全、重新安装加载器沿继承链依次占基底时，
+    /// 就停在它上面报 `instance_busy`，报的也是这一份。实例列表用它让界面提前禁用入口。
+    pub fn blocking_base(&self, bases: &[String]) -> Option<BaseBusyDto> {
+        let table = lock_table(&self.table);
+        bases.iter().find_map(|base| {
+            let conflict = table
+                .held
+                .get(&lock_key(base))?
+                .iter()
+                .filter(|h| !InstanceActivity::Inherited.compatible_with(h.activity))
+                .min_by_key(|h| h.activity.report_rank())?;
+            Some(BaseBusyDto {
+                id: base.clone(),
+                activity: conflict.activity,
+            })
+        })
+    }
+
     /// 实例此刻在做的事，同 [`InstanceLocks::occupancy`] 的前一半；只有用例单看它。
     #[cfg(test)]
     pub fn activity(&self, id: &str) -> Option<InstanceActivity> {
@@ -612,12 +630,22 @@ pub struct InstanceDto {
     /// 正以它为基底的实例（有几个时为最早占到的那个）；没有被别的实例当作基底时为 null。
     /// 非空时删除、改名、补全它会报 instance_busy。
     pub used_by: Option<String>,
+    /// 继承链上此刻容不下基底占用的基底；非空时补全、重新安装加载器它会报 instance_busy。版本 JSON 用不了
+    /// 的实例读不出链，补全也不占基底，为 null。
+    pub base_busy: Option<BaseBusyDto>,
     /// 累计游玩分钟（向下取整）；没玩过为 0，游玩记录读不出时为 null。
     pub playtime_min: Option<u64>,
     /// 上次游玩结束的 Unix 毫秒；没玩过或游玩记录读不出时为 null。
     pub last_played_at: Option<u64>,
     /// 游玩记录读不出来的原因。
     pub play_error: Option<String>,
+}
+
+/// 挡着基底占用的基底：哪个版本、在做什么。形状与这时 `instance_busy` 的 detail 相同。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BaseBusyDto {
+    pub id: String,
+    pub activity: InstanceActivity,
 }
 
 /// 实例的版本支持哪些直达方式：进入存档（Quick Play，1.20 起）与加入服务器。
@@ -1015,6 +1043,7 @@ fn instance_dto(
         dir_error: summary.dir_error,
         activity,
         used_by: None,
+        base_busy: None,
         playtime_min,
         last_played_at,
         play_error,
@@ -1222,12 +1251,17 @@ pub(crate) async fn list_instances_with(
         .into_iter()
         .map(|summary| {
             let (activity, used_by) = locks.occupancy(&summary.id);
+            let base_busy = match &summary.version {
+                InstanceVersion::Ready(ready) => locks.blocking_base(&ready.bases),
+                InstanceVersion::Broken(_) => None,
+            };
             let play = match &plays {
                 Readable::Read(plays) => Readable::Read(plays.get(&summary.id)),
                 Readable::Unreadable(reason) => Readable::Unreadable(reason.clone()),
             };
             InstanceDto {
                 used_by,
+                base_busy,
                 ..instance_dto(summary, activity, play)
             }
         })
@@ -4225,6 +4259,7 @@ mod tests {
                     singleplayer: true,
                     multiplayer: true,
                 }),
+                bases: Vec::new(),
                 mod_count: Some(80),
                 world_count: Some(3),
                 isolated: Some(true),
@@ -4570,6 +4605,74 @@ mod tests {
     /// 被当作基底：与基底自己的改动、备份以及别的实例对它的占用兼容；与挪走或重写目录的事互斥，与基底自己的
     /// 启动、运行也互斥（游戏映射着 natives，这时补全或导入要重写它们会中途报 IO 错误），两个方向都是。并行时报
     /// 基底自己的事，只剩基底占用时才报 inherited。
+    /// 补全要沿继承链占基底，基底容不下这份占用时任务开工就失败：列表提前报出同一个基底与同一件事，界面据此禁用
+    /// 入口。基底只是在改动或备份时不挡，链上几个基底都忙时报最近的那个，与依次占用时停下的位置一致。
+    #[tokio::test]
+    async fn listed_instances_report_the_base_that_would_refuse_their_repair() {
+        use InstanceActivity::*;
+        let env = Env::new();
+        env.vanilla("1.20.1");
+        env.version(
+            "FAB",
+            r#"{"id":"FAB","inheritsFrom":"1.20.1","type":"release","mainClass":"K"}"#,
+        );
+        env.version(
+            "叠层",
+            r#"{"id":"叠层","inheritsFrom":"fab","type":"release","mainClass":"K"}"#,
+        );
+        let locks = InstanceLocks::default();
+        let listed = |id: &'static str| {
+            let (facade, locks) = (env.facade.clone(), locks.clone());
+            async move {
+                let list = list_instances_with(&facade, &locks).await.unwrap();
+                list.into_iter()
+                    .find(|i| i.id == id)
+                    .unwrap_or_else(|| panic!("列表里没有 {id}"))
+                    .base_busy
+            }
+        };
+        let busy = |id: &str, activity| {
+            Some(BaseBusyDto {
+                id: id.to_owned(),
+                activity,
+            })
+        };
+
+        assert_eq!(listed("FAB").await, None);
+        assert_eq!(listed("叠层").await, None);
+
+        let game = locks.acquire("1.20.1", Running).unwrap();
+        assert_eq!(listed("FAB").await, busy("1.20.1", Running));
+        assert_eq!(listed("叠层").await, busy("1.20.1", Running));
+        assert_eq!(listed("1.20.1").await, None, "基底自己不算被自己挡着");
+        let refused = locks
+            .acquire_with_bases("FAB", Repairing, &["1.20.1".to_owned()])
+            .err()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(listed("FAB").await).unwrap(),
+            refused.detail.unwrap(),
+            "与补全被拒时 detail 里的是同一份"
+        );
+
+        let nearer = locks.acquire("FAB", Repairing).unwrap();
+        // id 是 inheritsFrom 的原样写法，与 instance_busy 的 detail 相同；查占用不分大小写。
+        assert_eq!(listed("叠层").await, busy("fab", Repairing));
+        drop(nearer);
+        drop(game);
+
+        for compatible in [Modifying, BackingUp] {
+            let held = locks.acquire("1.20.1", compatible).unwrap();
+            assert_eq!(listed("FAB").await, None, "{compatible:?}");
+            drop(held);
+        }
+        let user = locks
+            .acquire_with_bases("别的实例", Running, &["1.20.1".to_owned()])
+            .unwrap();
+        assert_eq!(listed("FAB").await, None, "基底可以同时被几个实例占着");
+        drop(user);
+    }
+
     #[test]
     fn inherited_bases_exclude_the_bases_own_game_and_directory_rewrites() {
         use InstanceActivity::*;
