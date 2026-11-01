@@ -2135,7 +2135,7 @@ describe("实例详情：存档备份", () => {
     click(rowMenu("新世界"));
     click(menuItem("导出存档"));
     await flush();
-    expect(pick).toHaveBeenCalledWith({ title: "导出「新世界」", defaultPath: "w2.zip", filter: { name: "存档压缩包", extensions: ["zip"] } });
+    expect(pick).toHaveBeenCalledWith({ title: "导出「新世界」", defaultPath: "w2.zip", filter: { name: "存档压缩包（*.zip）", extensions: ["zip"] } });
     expect(callsOf(ipc, "export_world")).toEqual([]);
     expect(launcher.state.tasks).toEqual([]);
 
