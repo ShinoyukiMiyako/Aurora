@@ -50,7 +50,7 @@ pub struct TemplateFile {
 pub struct TemplateInfo {
     /// 模板目录里存在、而且是普通文件的白名单项，按 [`TEMPLATE_FILES`] 的顺序。
     pub files: Vec<TemplateFile>,
-    /// 从哪个实例保存来的；文件是手放的、没有元数据时为 `None`。
+    /// 保存当时的实例名，只作来源说明，实例之后改名或删除不跟着变；文件是手放的、没有元数据时为 `None`。
     pub source_instance: Option<String>,
     /// 保存的时刻（Unix 毫秒）。
     pub saved_at: Option<u64>,
