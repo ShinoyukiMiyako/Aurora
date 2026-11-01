@@ -17,7 +17,7 @@ export const PAGE_COPY = {
 
 export const HERO_COPY = {
   eyebrowVanilla: "原版实例",
-  eyebrowModded: "自建模组实例",
+  eyebrowModded: "自建 Mod 实例",
   eyebrowModpack: (source: string) => `整合包 · ${source}`,
   modpackLocal: "本地文件",
   played: (minutes: number) => `已游玩 ${formatPlaytime(minutes)}`,

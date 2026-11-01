@@ -331,7 +331,7 @@ describe("实例详情：头图与标签", () => {
     ];
     await open("overview");
     expect(document.querySelector("h1")?.textContent).toBe(ID);
-    expect(text()).toContain("自建模组实例 · 已游玩 2 小时 10 分钟");
+    expect(text()).toContain("自建 Mod 实例 · 已游玩 2 小时 10 分钟");
     expect(byRole("tab", /^Mod/).textContent).toBe("Mod1 更新");
     expect(text()).toContain("1 个有更新");
   });
