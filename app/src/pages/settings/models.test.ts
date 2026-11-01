@@ -50,10 +50,20 @@ describe("Java 分区推导", () => {
     expect(javaNotes("auto", all, instances, true)).toEqual([]);
     expect(javaNotes("C:/x86/java.exe", all, instances, true)).toEqual([{ kind: "pinned" }, { kind: "bits32" }]);
     expect(javaNotes("auto", all.slice(0, 2), instances, false)).toEqual([{ kind: "missing", majors: [8], autoDownload: false }]);
-    // 固定的路径已不在探测结果里：只有「固定」提醒，不臆测位数
-    expect(javaNotes("D:/gone/java.exe", all, instances, true)).toEqual([{ kind: "pinned" }]);
+    // 固定的路径已不在探测结果里：换成带路径的「找不到」提醒，通用的「固定」提醒不再出现，也不臆测位数
+    expect(javaNotes("D:/gone/java.exe", all, instances, true)).toEqual([{ kind: "pinnedMissing", path: "D:/gone/java.exe" }]);
     expect(selectedRuntime("D:/gone/java.exe", all)).toBeNull();
     expect(selectedRuntime("auto", all)).toBeNull();
+  });
+
+  it("固定的默认 Java 找不到时与缺版本提醒并存；一个运行时都没扫到也照样报出路径", () => {
+    const gone = "E:\\portable\\jdk-17\\bin\\java.exe";
+    const all = [runtime("C:/jdk25/java.exe", 25), runtime("C:/jdk21/java.exe", 21)];
+    expect(javaNotes(gone, all, instances, false)).toEqual([
+      { kind: "pinnedMissing", path: gone },
+      { kind: "missing", majors: [8], autoDownload: false },
+    ]);
+    expect(javaNotes(gone, [], [], true)).toEqual([{ kind: "pinnedMissing", path: gone }]);
   });
 
   it("托管运行时只认 managed 来源", () => {

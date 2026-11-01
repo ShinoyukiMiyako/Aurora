@@ -308,12 +308,74 @@ describe("设置页：Java", () => {
     expect(text()).toContain("还缺 Java 25，对应实例会启动失败。可以在下面手动下载，或打开「自动下载 Java」。");
   });
 
+  it("一个运行时都没扫到：列表位置换成空状态，缺版本的提醒照常出现", async () => {
+    ipc.overrides.set("detect_java", () => []);
+    await mount("java");
+    expect(text()).toContain("没有在本机找到 Java");
+    expect(text()).toContain("首次启动时会自动下载");
+    expect(text()).toContain("还缺 Java 25、Java 21、Java 8，首次启动对应实例时会自动下载。");
+    expect(all('[role="radio"]')).toEqual([]);
+  });
+
   it("固定成某个运行时：写入路径并出现固定提醒", async () => {
     await mount("java");
     await click(radio("Java 8"));
     expect(callsOf(ipc, "update_config")).toEqual([{ defaultJava: "C:\\Program Files\\Java\\jre1.8.0_421\\bin\\java.exe" }]);
     expect(radio("Java 8").getAttribute("aria-checked")).toBe("true");
     expect(text()).toContain("固定成单一 Java 后，要求其他主版本的实例");
+  });
+
+  describe("固定的默认 Java 已不在扫描结果里", () => {
+    const JRE8 = "C:\\Program Files\\Java\\jre1.8.0_421\\bin\\java.exe";
+    const JDK21 = "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.5.11-hotspot\\bin\\java.exe";
+    const jdk21 = {
+      path: JDK21,
+      version: { major: 21, minor: 0, security: 5, build: 11, raw: "21.0.5" },
+      is_64bit: true,
+      vendor: "Eclipse Adoptium",
+      source: "registry",
+    };
+    const warnTitle = "默认 Java 已经找不到了，跟随全局的实例会启动失败";
+
+    beforeEach(async () => {
+      // 先在假后端里固定 Java 8，再让扫描只报出 Java 21：等于那个 Java 8 被卸载了
+      await mockInvoke("update_config", { defaultJava: JRE8 });
+    });
+
+    it("列表一项都不选中，给出带路径的专门提醒，「改回自动选择」写回 auto", async () => {
+      ipc.overrides.set("detect_java", () => [jdk21]);
+      await mount("java");
+      expect(all('[role="radio"]').map((r) => r.getAttribute("aria-checked"))).toEqual(["false", "false"]);
+      const alert = all('[role="alert"]').find((el) => el.textContent?.includes(warnTitle));
+      if (alert === undefined) throw new Error("没有出现固定 Java 找不到的提醒");
+      expect(alert.textContent).toContain(JRE8);
+      expect(text()).not.toContain("固定成单一 Java 后");
+      expect([...alert.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["改回自动选择", "重新选择"]);
+
+      await click(button("改回自动选择"));
+      expect(callsOf(ipc, "update_config")).toEqual([{ defaultJava: "auto" }]);
+      expect(radio("自动选择").getAttribute("aria-checked")).toBe("true");
+      expect(text()).not.toContain(warnTitle);
+    });
+
+    it("「重新选择」把焦点移到列表里第一个运行时，不改写设置", async () => {
+      ipc.overrides.set("detect_java", () => [jdk21]);
+      await mount("java");
+      await click(button("重新选择"));
+      expect(document.activeElement).toBe(radio("Java 21"));
+      expect(callsOf(ipc, "update_config")).toEqual([]);
+      expect(text()).toContain(warnTitle);
+    });
+
+    it("一个运行时都没扫到：只给「改回自动选择」，没有可重新选的", async () => {
+      ipc.overrides.set("detect_java", () => []);
+      await mount("java");
+      expect(text()).toContain("没有在本机找到 Java");
+      const alert = all('[role="alert"]').find((el) => el.textContent?.includes(warnTitle));
+      if (alert === undefined) throw new Error("没有出现固定 Java 找不到的提醒");
+      expect(alert.textContent).toContain(JRE8);
+      expect([...alert.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["改回自动选择"]);
+    });
   });
 
   it("重新扫描：再发一次探测，完成后报告找到的个数", async () => {

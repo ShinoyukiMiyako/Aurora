@@ -12,7 +12,7 @@ import type { CreateInstancePreset } from "../../state/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, deferred, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, resetRecorder, settle } from "../../test/launcher";
 import { CREATE_COPY } from "./copy";
 import CreateInstanceFlow from "./index";
 
@@ -355,6 +355,75 @@ describe("新建实例：版本与加载器的联动", () => {
     random.mockReturnValue(0);
     click(button(CREATE_COPY.cover.shuffle));
     expect(checkedRadio()?.getAttribute("aria-label")).toBe("樱花木板");
+  });
+});
+
+describe("新建实例：确认步的 Java 与全局固定的默认 Java", () => {
+  // 假后端扫描出的两个运行时
+  const JRE8 = "C:\\Program Files\\Java\\jre1.8.0_421\\bin\\java.exe";
+  const JDK21 = "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.5.11-hotspot\\bin\\java.exe";
+
+  /** 全局固定 defaultJava 后走到原版的确认步；oldVersions 打开远古版本的显示。 */
+  async function confirmWith(defaultJava: string, mcVersion: string | null, oldVersions = false) {
+    ipc.overrides.set("get_config", () => configDto({ default_java: defaultJava }));
+    await mount();
+    await fillName("固定测试");
+    if (oldVersions) click(button(CREATE_COPY.version.old));
+    if (mcVersion !== null) {
+      click(radio(mcVersion));
+      await flush();
+    }
+    await next();
+    await next();
+    await next();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+  }
+
+  /** 键值表里「Java」那一行的值。 */
+  const javaRow = () => {
+    const key = [...dialog().querySelectorAll("dt")].find((d) => d.textContent === CREATE_COPY.confirm.java);
+    const value = key?.nextElementSibling;
+    if (value === null || value === undefined) throw new Error("确认步没有 Java 一行");
+    return value;
+  };
+  const isWarn = () => javaRow().querySelector('[class*="warnText"]') !== null;
+
+  it("固定的 Java 低于要求：这一行显示 warn，写明会用 Java 8、需要 Java 21，并指向实例设置", async () => {
+    await confirmWith(JRE8, null);
+    expect(javaRow().textContent).toBe("会用固定的 Java 8，这个版本需要 Java 21");
+    expect(isWarn()).toBe(true);
+    expect(dialog().textContent).toContain("设置里固定的 Java 8 低于要求，这个实例启动时会失败。创建后可以在实例设置里给它单独指定 Java 21。");
+    expect(dialog().textContent).not.toContain("Java 21 · 已安装");
+    // 只是提醒，不挡创建
+    expect(button(CREATE_COPY.create).disabled).toBe(false);
+  });
+
+  it("固定的 Java 高于要求：同样 warn，说明旧版 Forge 与部分 Mod 会报错", async () => {
+    await confirmWith(JDK21, "1.5.2", true);
+    expect(javaRow().textContent).toBe("会用固定的 Java 21，这个版本需要 Java 8");
+    expect(isWarn()).toBe(true);
+    expect(dialog().textContent).toContain("设置里固定的 Java 21 比要求的新，旧版 Forge 与部分 Mod 会直接报错。创建后可以在实例设置里给它单独指定 Java 8。");
+  });
+
+  it("要求的主版本本机没有：先下载再到实例设置里指定", async () => {
+    await confirmWith(JRE8, "1.20.1");
+    expect(javaRow().textContent).toBe("会用固定的 Java 8，这个版本需要 Java 17");
+    expect(dialog().textContent).toContain("先在设置里下载 Java 17，创建后到实例设置里给它单独指定。");
+    expect(dialog().textContent).not.toContain("会自动下载");
+  });
+
+  it("固定的路径已不在扫描结果里：不写已安装，说明启动会失败", async () => {
+    await confirmWith("E:\\portable\\jdk-21\\bin\\java.exe", null);
+    expect(javaRow().textContent).toBe("会用固定的默认 Java，但它已经找不到了");
+    expect(isWarn()).toBe(true);
+    expect(dialog().textContent).toContain("设置里固定的默认 Java 已经找不到了，这个实例启动时会失败。创建后可以在实例设置里给它单独指定 Java 21。");
+  });
+
+  it("固定的 Java 与要求一致：照常写已安装与它的发行方，没有提醒", async () => {
+    await confirmWith(JDK21, null);
+    expect(javaRow().textContent).toBe("Java 21 · 已安装（Eclipse Adoptium）");
+    expect(isWarn()).toBe(false);
+    expect(dialog().textContent).not.toContain("实例设置里给它单独指定");
   });
 });
 
