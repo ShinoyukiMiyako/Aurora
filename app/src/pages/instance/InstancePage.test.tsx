@@ -1473,6 +1473,22 @@ describe("实例详情：Mod 管理", () => {
     expect(callsOf(ipc, "set_mod_enabled")).toHaveLength(1);
   });
 
+  it("开关的启停还没回来：移除带原因禁用、点了不开确认框，回来后恢复", async () => {
+    const pending = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => pending.promise);
+    await open("mods");
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    const remove = button("移除 Sodium");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    click(remove);
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    pending.resolve("sodium.jar.disabled");
+    await flush();
+    expect(button("移除 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("移除前确认，并说明它带进来的前置会保留", async () => {
     await open("mods");
     click(button("移除 Sodium"));

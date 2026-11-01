@@ -725,7 +725,8 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
               </Button>
             ))}
           <MoreMenu items={holdMenu(r, holdLock, setHold)} size="sm" label={MODS_COPY.more(r.name)} />
-          <IconButton icon="trash" label={MODS_COPY.remove(r.name)} size="sm" variant="danger" disabledReason={lock} onClick={() => remove(r)} />
+          {/* 启停还没回来时盘上是哪个名字未知：这时开确认框，确认时拿的是改名前的旧名字 */}
+          <IconButton icon="trash" label={MODS_COPY.remove(r.name)} size="sm" variant="danger" disabledReason={toggleReason(r)} onClick={() => remove(r)} />
         </div>
       ),
     },
