@@ -6,6 +6,7 @@
 use std::fmt::Display;
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tauri::ipc::InvokeError;
@@ -37,6 +38,8 @@ pub struct SetupContext {
     located: Mutex<Located>,
     /// 用户选了原生向导。窗口关掉后进程还要等它退出：临时文件要靠守卫句柄钉到那时。
     wizard: Mutex<Option<StandardRun>>,
+    /// F5 和右键菜单的刷新是 WebView2 自带的：页面一重载，进度和关窗拦截都没了，载荷却还在写。
+    installing: AtomicBool,
 }
 
 impl SetupContext {
@@ -47,6 +50,7 @@ impl SetupContext {
             log,
             located: Mutex::default(),
             wizard: Mutex::default(),
+            installing: AtomicBool::new(false),
         }
     }
 
@@ -134,6 +138,11 @@ impl SetupContext {
         self.session.launcher_running()
     }
 
+    /// 窗口此刻能不能换页。
+    pub fn allows_navigation(&self) -> bool {
+        !self.installing.load(Ordering::Acquire)
+    }
+
     pub fn install(&self, plan: &InstallPlan, reporter: &dyn Reporter) -> Result<(), Failure> {
         let registered = self
             .located
@@ -143,7 +152,10 @@ impl SetupContext {
             .clone();
         let target = Target::from_plan(plan, registered.as_deref())?;
         self.log.info(format_args!("开始安装：{target:?}"));
-        self.session.install(&target, reporter)
+        self.installing.store(true, Ordering::Release);
+        let outcome = self.session.install(&target, reporter);
+        self.installing.store(false, Ordering::Release);
+        outcome
     }
 
     pub fn open_launcher(&self, dir: &Path) -> io::Result<Opened> {
@@ -303,6 +315,8 @@ pub fn window_ready(window: WebviewWindow) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
+    #[cfg(debug_assertions)]
+    use std::sync::Mutex;
 
     use super::*;
     use crate::contract::{Existing, ExistingKind};
@@ -526,6 +540,14 @@ mod tests {
         assert_eq!(registered_commands().len(), 8);
     }
 
+    /// 放行判定只有接到窗口上才起作用，配置项写错编译也不报。
+    #[test]
+    fn the_window_asks_the_context_before_navigating() {
+        assert!(
+            include_str!("main.rs").contains(".on_navigation(move |_| page.allows_navigation())")
+        );
+    }
+
     #[test]
     fn the_frontend_listens_on_the_event_the_backend_emits() {
         let needle = format!("PROGRESS_EVENT = \"{PROGRESS_EVENT}\"");
@@ -612,6 +634,30 @@ mod tests {
             }
         }
 
+        /// 进度回调跑在安装的工作线程上，这里读到的就是安装中途的放行结果。
+        struct NavigationSpy<'a> {
+            context: &'a SetupContext,
+            seen: Mutex<Vec<bool>>,
+        }
+
+        impl<'a> NavigationSpy<'a> {
+            fn new(context: &'a SetupContext) -> Self {
+                Self {
+                    context,
+                    seen: Mutex::default(),
+                }
+            }
+        }
+
+        impl Reporter for NavigationSpy<'_> {
+            fn progress(&self, _: Progress) {
+                let allowed = self.context.allows_navigation();
+                self.seen.lock().unwrap().push(allowed);
+            }
+
+            fn note(&self, _: &str) {}
+        }
+
         fn fresh(dir: &str) -> InstallPlan {
             InstallPlan {
                 mode: InstallMode::Fresh,
@@ -626,6 +672,41 @@ mod tests {
                 dir: None,
                 desktop_shortcut: false,
             }
+        }
+
+        #[test]
+        fn the_page_stays_put_while_an_install_runs() {
+            let rig = rig("navigation");
+            assert!(rig.context.allows_navigation(), "开窗时的第一次加载要放行");
+
+            let spy = NavigationSpy::new(&rig.context);
+            rig.context.install(&fresh(r"D:\Petalfall"), &spy).unwrap();
+
+            let seen = spy.seen.into_inner().unwrap();
+            assert!(seen.len() >= 4, "开始、解包、退出、核验都有进度：{seen:?}");
+            assert!(seen.iter().all(|allowed| !allowed), "{seen:?}");
+            assert!(rig.context.allows_navigation(), "装完刷新已经碍不着什么");
+        }
+
+        #[test]
+        fn a_failed_install_lets_the_page_go_again() {
+            let sandbox = tempfile::tempdir().unwrap();
+            let session = fake::session(
+                Fake::new(Outcome::Verify, Duration::from_millis(5)),
+                sandbox.path(),
+            )
+            .unwrap();
+            let Claim::First(instance) = test_claim("commands-navigation-failed") else {
+                panic!("这个名字上不该已有实例");
+            };
+            let log = SetupLog::open(&sandbox.path().join("log")).unwrap();
+            let context = SetupContext::new(session, Arc::new(instance), Arc::new(log));
+
+            let spy = NavigationSpy::new(&context);
+            context.install(&fresh(r"D:\Petalfall"), &spy).unwrap_err();
+
+            assert!(spy.seen.lock().unwrap().iter().all(|allowed| !allowed));
+            assert!(context.allows_navigation());
         }
 
         #[test]
