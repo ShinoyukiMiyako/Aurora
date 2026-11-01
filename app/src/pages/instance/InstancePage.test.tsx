@@ -1369,9 +1369,10 @@ describe("实例详情：Mod 管理", () => {
     const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索名称、作者或文件名"]');
     if (search === null) throw new Error("没有搜索框");
     typeInto(search, "FABRIC");
-    const grid = document.querySelector('[role="grid"]');
-    expect(grid?.textContent).toContain("Fabric API");
-    expect(grid?.textContent).not.toContain("Sodium 的简介");
+    // 筛掉的行还在淡出，已经标了 inert，不算表格的行
+    const shownRows = [...document.querySelectorAll('[role="grid"] [role="row"]:not([inert])')].map((r) => r.textContent).join(" ");
+    expect(shownRows).toContain("Fabric API");
+    expect(shownRows).not.toContain("Sodium 的简介");
     typeInto(search, "nothing-here");
     expect(text()).toContain("列出的 Mod 里没有和「nothing-here」相关的。");
     click(button("清除筛选"));
