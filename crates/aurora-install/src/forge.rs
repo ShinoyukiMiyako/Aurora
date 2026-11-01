@@ -928,7 +928,7 @@ async fn outputs_ready(jar: &str, outputs: &[(PathBuf, String)]) -> Result<bool>
 /// 删掉 sha1 对不上的旧产物；它正被别的进程占着时报 [`Error::ProcessorOutputLocked`]。
 async fn discard_stale_output(jar: &str, path: &Path) -> Result<()> {
     let probe = path.to_path_buf();
-    let held = tokio::task::spawn_blocking(move || held_open(&probe))
+    let held = tokio::task::spawn_blocking(move || aurora_base::fs::held_open(&probe))
         .await
         .map_err(|join| io_err(path, std::io::Error::other(join.to_string())))?
         .map_err(|source| io_err(path, source))?;
@@ -962,7 +962,7 @@ async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
         paths
             .into_iter()
             .filter(|path| path.is_file())
-            .find(|path| match held_open(path) {
+            .find(|path| match aurora_base::fs::held_open(path) {
                 Ok(held) => held,
                 Err(err) => {
                     tracing::warn!(path = %path.display(), %err, "探测处理器用到的文件是否被占用失败");
@@ -981,39 +981,6 @@ async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
             }
         },
     }
-}
-
-/// 文件此刻是否被别的进程以「不放行删除共享」的方式打开着（JVM 读 jar 就是这样打开的），此时它既
-/// 删不掉也换不掉。探测方式是以删除权限、放行一切共享去打开：只有已有句柄没放行删除共享时才失败。
-#[cfg(windows)]
-fn held_open(path: &Path) -> std::io::Result<bool> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    // Win32 常量：DELETE 访问权，FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE。
-    const DELETE: u32 = 0x0001_0000;
-    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
-    // ERROR_SHARING_VIOLATION 与 ERROR_LOCK_VIOLATION。
-    const SHARING_VIOLATION: i32 = 32;
-    const LOCK_VIOLATION: i32 = 33;
-
-    match std::fs::OpenOptions::new()
-        .access_mode(DELETE)
-        .share_mode(FILE_SHARE_ALL)
-        .open(path)
-    {
-        Ok(_) => Ok(false),
-        Err(err) if matches!(err.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)) => {
-            Ok(true)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(err),
-    }
-}
-
-/// 非 Windows 平台上删除与替换不受已打开句柄影响，没有可探测的占用。
-#[cfg(not(windows))]
-fn held_open(_path: &Path) -> std::io::Result<bool> {
-    Ok(false)
 }
 
 // ---- 处理器子进程 ----

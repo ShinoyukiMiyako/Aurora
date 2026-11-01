@@ -166,44 +166,16 @@ pub(crate) async fn lock_mods_dir(mods_dir: &Path) -> OwnedMutexGuard<()> {
     entry.lock_owned().await
 }
 
-/// 文件此刻是否被别的进程以「不许删除 / 改名」的方式打开着。
-///
-/// 游戏运行时 JVM 打开着每个 Mod jar，Windows 上这些文件既不能改名也不能删除；在动第一个文件之前先
-/// 探一次，能把「改到一半撞上占用」变成一次干净的拒绝。探测方式是以删除权限、放行一切共享去打开：
-/// 只有已有句柄没放行删除共享时才会失败，正好就是改名与删除会失败的那个条件。
-#[cfg(windows)]
-pub(crate) fn held_open(path: &Path) -> Result<bool> {
-    use std::os::windows::fs::OpenOptionsExt;
-
-    // Win32 常量：DELETE 访问权，FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE。
-    const DELETE: u32 = 0x0001_0000;
-    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
-    // ERROR_SHARING_VIOLATION 与 ERROR_LOCK_VIOLATION。
-    const SHARING_VIOLATION: i32 = 32;
-    const LOCK_VIOLATION: i32 = 33;
-
-    match std::fs::OpenOptions::new()
-        .access_mode(DELETE)
-        .share_mode(FILE_SHARE_ALL)
-        .open(path)
-    {
-        Ok(_) => Ok(false),
-        Err(err) if matches!(err.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)) => {
-            Ok(true)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(aurora_base::Error::Io {
+/// 文件此刻是否被别的进程以「不许删除 / 改名」的方式打开着。游戏运行时 JVM 打开着每个 Mod jar，
+/// Windows 上这些文件既不能改名也不能删除。
+fn held_open(path: &Path) -> Result<bool> {
+    aurora_base::fs::held_open(path).map_err(|source| {
+        aurora_base::Error::Io {
             path: path.to_owned(),
             source,
         }
-        .into()),
-    }
-}
-
-/// 非 Windows 平台上改名与删除不受已打开句柄影响，没有可探测的占用。
-#[cfg(not(windows))]
-pub(crate) fn held_open(_path: &Path) -> Result<bool> {
-    Ok(false)
+        .into()
+    })
 }
 
 /// 变更 mods 目录之前的占用检查：任一路径正被占用即整体拒绝，一个文件都不动。
@@ -349,29 +321,5 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_millis(200), lock_mods_dir(&a))
             .await
             .expect("释放后应能立刻拿到");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn held_open_detects_a_handle_without_delete_sharing() {
-        use std::os::windows::fs::OpenOptionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let jar = dir.path().join("in-use.jar");
-        std::fs::write(&jar, b"jar").unwrap();
-        assert!(!held_open(&jar).unwrap());
-
-        // JVM 读 jar 的打开方式：放行读写共享、不放行删除共享。
-        let handle = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0x1 | 0x2)
-            .open(&jar)
-            .unwrap();
-        assert!(held_open(&jar).unwrap());
-        // 与真正的改名同一结论：此刻改名确实会失败。
-        assert!(std::fs::rename(&jar, dir.path().join("moved.jar")).is_err());
-        drop(handle);
-        assert!(!held_open(&jar).unwrap());
-        // 不存在的文件谈不上占用。
-        assert!(!held_open(&dir.path().join("ghost.jar")).unwrap());
     }
 }
