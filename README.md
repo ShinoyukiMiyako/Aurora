@@ -51,6 +51,8 @@ pnpm tauri build
 
 `pnpm dev` 不需要编译 Rust。前端发现自己不在 Tauri 窗口里运行时，所有命令都改走 `app/src/ipc/mock` 里的模拟实现，调界面和跑前端测试都用这条路径。
 
+`pnpm tauri dev` 直接加载开发服务器，不注入内容安全策略；涉及策略或能力文件的改动用 `pnpm tauri build --debug --no-bundle` 的构建验证。在真机上验证时，把 `LOCALAPPDATA`、`APPDATA` 与 `WEBVIEW2_USER_DATA_FOLDER` 指到临时目录，免得改动本机的真实配置、账户与实例（见 `docs/architecture.md` 的「内容安全策略与能力」）。
+
 ## 常用命令
 
 在仓库根目录执行（Rust）：
@@ -112,7 +114,7 @@ pnpm tauri build
 ## 测试与守卫
 
 - Rust 侧各 crate 自带单元测试。涉及网络的流程用 wiremock 在本地模拟 Mojang、Modrinth、CurseForge 与微软登录端点，命令层测试从参数校验一直覆盖到磁盘副作用。
-- 前端用 vitest：领域适配、状态容器、页面与外壳组件、IPC 模拟后端都有测试，`App.test.tsx` 从首次启动向导走到主界面做整应用冒烟。
+- 前端用 vitest：领域适配、状态容器、页面与外壳组件、IPC 模拟后端都有测试，`App.test.tsx` 从首次启动向导走到主界面做整应用冒烟。进程数取逻辑处理器的一半；渲染整页、流程弹窗或外壳的测试文件要在文件首部写 `// @module-tag heavy-page`（单例超时 30 秒），细则见 `docs/architecture.md` 的「测试与守卫」。
 - `pnpm lint:tokens` 运行 `app/scripts/check-tokens.mjs`，用纯文本扫描检查以下几类问题：字面色值、页面里写死的样式、Tailwind 任意值、视口断点、动效参数、目录间的依赖方向、原版材质的引用位置、Emoji、产品名字面量、富文本注入。每条规则在 `app/scripts/guard-fixtures/` 下都有正反例。
 - `aurora-tauri` 的一条测试检查 `tauri.conf.json`、`index.html`、`app/src/lib/app-info.ts` 三处的产品名与 Rust 品牌常量是否一致。
 
