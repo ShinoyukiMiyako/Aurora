@@ -62,15 +62,23 @@ pub fn build_client() -> Result<reqwest::Client> {
 
 /// 按给定配置构建客户端。
 pub fn build_client_with(config: &HttpConfig) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder()
+    configured_builder(config)
+        .build()
+        .map_err(Error::HttpClientBuild)
+}
+
+/// 两种客户端共用的配置：带凭据的下载换用不跳转的客户端时，超时、UA 与连接池必须与共享客户端一致，
+/// 以后给 [`HttpConfig`] 加的项也只改这一处。
+fn configured_builder(config: &HttpConfig) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
         .user_agent(config.user_agent.as_str())
         .connect_timeout(config.connect_timeout)
         .read_timeout(config.read_timeout)
         .pool_max_idle_per_host(config.pool_idle_per_host);
-    if let Some(total) = config.total_timeout {
-        builder = builder.timeout(total);
+    match config.total_timeout {
+        Some(total) => builder.timeout(total),
+        None => builder,
     }
-    builder.build().map_err(Error::HttpClientBuild)
 }
 
 /// 用默认配置构建不自动跟随跳转的客户端，见 [`build_manual_redirect_client_with`]。
@@ -84,18 +92,12 @@ pub fn build_manual_redirect_client() -> Result<reqwest::Client> {
 /// WWW-Authenticate 这几个头，自定义的 `x-api-key` 会被原样带到下一跳；跳转策略又只能按客户端设，
 /// 不能按请求设。所以带密钥的下载要换用这个客户端，由下载引擎逐跳决定带不带头。
 ///
-/// 除跳转策略外与 [`build_client_with`] 逐项相同，两边的参数要一起改。
+/// 除跳转策略外与 [`build_client_with`] 逐项相同。
 pub fn build_manual_redirect_client_with(config: &HttpConfig) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder()
-        .user_agent(config.user_agent.as_str())
-        .connect_timeout(config.connect_timeout)
-        .read_timeout(config.read_timeout)
-        .pool_max_idle_per_host(config.pool_idle_per_host)
-        .redirect(reqwest::redirect::Policy::none());
-    if let Some(total) = config.total_timeout {
-        builder = builder.timeout(total);
-    }
-    builder.build().map_err(Error::HttpClientBuild)
+    configured_builder(config)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(Error::HttpClientBuild)
 }
 
 /// 联网请求在网络层失败的种类：连不上（DNS 解析失败、连接被拒、TLS 握手失败都在这里），或者等不到响应。
