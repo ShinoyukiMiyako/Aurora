@@ -1,8 +1,11 @@
+import { useState, type FocusEvent } from "react";
+import { useEscapeListener } from "../../shell/overlay";
 import { Button } from "../../ui/Button";
 import type { Failure } from "../contract";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import type { FailureRecovery } from "../model";
+import styles from "./Failed.module.css";
 
 export interface FailedProps {
   copy: SetupCopy;
@@ -19,17 +22,69 @@ export interface FailedProps {
   onBack(): void;
 }
 
-export function Failed({ copy, failure, recovery, onRecover }: FailedProps) {
-  const reason = copy.failed.reason[failure.code];
+/** 键盘用户 Tab 到错误码就是整段选中，接着 Ctrl+C。 */
+function selectContents(event: FocusEvent<HTMLElement>): void {
+  window.getSelection()?.selectAllChildren(event.currentTarget);
+}
+
+export function Failed({ copy, failure, recovery, standardInstaller, onRecover, onOpenLog, onReport, onStandardInstaller, onBack }: FailedProps) {
+  const text = copy.failed;
+  const reason = text.reason[failure.code];
+  // 重试和标准安装程序各起一个 NSIS，NSIS 之间没有互斥，同写一个目录只会留下半套文件，还会让窗口关不掉。
+  // 所以选定一条路就关上别的路。两条路的结局都是离开这一页或关窗，出错进 fatal，这个状态不用复位
+  const [leaving, setLeaving] = useState<"recover" | "standard" | null>(null);
+  useEscapeListener(leaving === null, onBack);
+
   return (
     <Frame
       title={reason.title}
-      lead={reason.body(failure.detail)}
-      footer={
-        <Button variant="primary" onClick={onRecover}>
-          {recovery === "retry" ? copy.failed.retry : copy.failed.changeLocation}
+      lead={<span role="alert">{reason.body(failure.detail)}</span>}
+      footerStart={
+        <Button variant="ghost" disabled={leaving !== null} focusableWhenDisabled onClick={onBack}>
+          {text.back}
         </Button>
       }
-    />
+      footer={
+        <>
+          <Button onClick={onOpenLog}>{text.openLog}</Button>
+          <Button
+            variant="primary"
+            autoFocus
+            loading={leaving === "recover"}
+            disabled={leaving === "standard"}
+            focusableWhenDisabled
+            onClick={() => {
+              setLeaving("recover");
+              onRecover();
+            }}
+          >
+            {recovery === "retry" ? text.retry : text.changeLocation}
+          </Button>
+        </>
+      }
+    >
+      {/* 拖动区里只有带 tabindex 的元素才不会一按下就拖窗，鼠标才选得到字 */}
+      <code className={styles.code} tabIndex={0} onFocus={selectContents}>{`${failure.code}: ${failure.detail}`}</code>
+      <div className={styles.links}>
+        <Button variant="ghost" size="sm" iconRight="external" onClick={onReport}>
+          {text.report}
+        </Button>
+        {standardInstaller && (
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={leaving === "standard"}
+            disabled={leaving === "recover"}
+            focusableWhenDisabled
+            onClick={() => {
+              setLeaving("standard");
+              onStandardInstaller();
+            }}
+          >
+            {text.standardInstaller}
+          </Button>
+        )}
+      </div>
+    </Frame>
   );
 }
