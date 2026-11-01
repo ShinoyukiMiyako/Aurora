@@ -150,15 +150,28 @@ describe("需要手动下载的文件清单的说明文字", () => {
     const surface = resolveColor("var(--sk-surface)", tokens, [0, 0, 0]);
     const footer = resolveColor(modalFooterBackground(), tokens, surface);
     const dest = contrast(resolveColor(decl(".blockedDest", "color"), tokens, surface), surface);
-    const foot = contrast(resolveColor(decl(".blockedFootNote", "color"), tokens, footer), footer);
+    // 底栏说明的颜色来自共用的 footNote，清单只把字号压到 12
+    const foot = contrast(resolveColor(decl(".footNote", "color"), tokens, footer), footer);
     expect({ dest: dest >= 4.5, foot: foot >= 4.5 }).toEqual({ dest: true, foot: true });
   });
 
   it("两处都是 12 号字的 text-2", () => {
     expect(decl(".blockedDest", "color")).toBe("var(--sk-text-2)");
     expect(decl(".blockedDest", "font-size")).toBe("var(--sk-fs-caption)");
-    expect(decl(".blockedFootNote", "color")).toBe("var(--sk-text-2)");
+    expect(decl(".footNote", "color")).toBe("var(--sk-text-2)");
+    expect(packBlocks.get(".blockedFootNote")?.has("color")).toBe(false);
     expect(decl(".blockedFootNote", "font-size")).toBe("var(--sk-fs-caption)");
     expect(decl(".blockedFootNote", "line-height")).toBe("var(--sk-lh-caption)");
+  });
+});
+
+// 整合包面板、导入弹窗与安装面板共用的底栏左侧说明（「1.21.1 · Fabric · 214 个 Mod」「勾选右侧的实例后安装」）
+// 同样是要读到的信息，落在弹窗页脚的混色底上。
+describe("弹窗底栏左侧说明", () => {
+  it.each(Object.entries(APPEARANCES))("%s：对页脚底色不低于 4.5:1", (_name, selectors) => {
+    const tokens = tokensOf(selectors);
+    const surface = resolveColor("var(--sk-surface)", tokens, [0, 0, 0]);
+    const footer = resolveColor(modalFooterBackground(), tokens, surface);
+    expect(contrast(resolveColor(decl(".footNote", "color"), tokens, footer), footer)).toBeGreaterThanOrEqual(4.5);
   });
 });
