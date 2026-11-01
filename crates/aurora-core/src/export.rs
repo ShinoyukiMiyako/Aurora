@@ -769,10 +769,14 @@ async fn exportable(version: &DiscoveredVersion) -> Result<(String, Option<PackL
             Some(unsupported.kind.as_str().to_owned()),
         ));
     }
+    // 1.20.1 的 NeoForge 沿用 Forge 的坐标与启动参数，探测同时命中两个。探测照实列着（这时 Forge 的 Mod 也能装），
+    // 写进整合包的只有 NeoForge。
+    let neoforge = version.loaders.iter().any(|l| l.kind == LoaderKind::NeoForge);
     let mut writable = version.loaders.iter().filter_map(|l| {
         let kind = match l.kind {
             LoaderKind::Fabric => PackLoaderKind::Fabric,
             LoaderKind::Quilt => PackLoaderKind::Quilt,
+            LoaderKind::Forge if neoforge => return None,
             LoaderKind::Forge => PackLoaderKind::Forge,
             LoaderKind::NeoForge => PackLoaderKind::NeoForge,
             LoaderKind::OptiFine | LoaderKind::LiteLoader => return None,
@@ -1535,6 +1539,31 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
         dir
+    }
+
+    /// 1.20.1 的 NeoForge 沿用 Forge 的坐标与启动参数，探测同时命中两个：装的是 NeoForge，不算双加载器。
+    #[tokio::test]
+    async fn neoforge_on_1_20_1_exports_as_neoforge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = bare_aurora(tmp.path());
+        bare_instance(
+            tmp.path(),
+            "新锻造",
+            r#"{"id":"新锻造","inheritsFrom":"1.20.1","type":"release",
+                "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "arguments":{"game":["--fml.forgeVersion","47.1.106","--fml.forgeGroup","net.neoforged"],"jvm":[]},
+                "libraries":[{"name":"net.neoforged:forge:1.20.1-47.1.106:universal"}]}"#,
+        );
+
+        let preview = aurora.preview_modpack_export("新锻造").await.unwrap();
+
+        assert_eq!(
+            preview.loader,
+            Some(PackLoader {
+                kind: PackLoaderKind::NeoForge,
+                version: "47.1.106".to_owned(),
+            })
+        );
     }
 
     #[tokio::test]
