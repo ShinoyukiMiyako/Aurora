@@ -15,7 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aurora_instance::{MINECRAFT_DIR_NAME, official_minecraft_dir};
+use aurora_instance::{MINECRAFT_DIR_NAME, list_version_dirs, official_minecraft_dir};
+use tokio::time::Instant;
 
 use crate::config::{NamedDirectory, ParkedDirectory};
 use crate::error::{CoreError, GameDirProblem, Result};
@@ -36,6 +37,23 @@ pub struct GameDirectoryEntry {
     pub is_current: bool,
     /// 此刻能否访问。为假时记录依然保留，插回硬盘就恢复。
     pub available: bool,
+    /// `versions/` 下的版本目录数，口径同 [`list_version_dirs`]，没有 `versions/` 算 0。
+    /// 不可达、探测超时或读取失败时为 `None`：这时并不知道里面有多少，不能说成 0。
+    pub version_count: Option<u32>,
+}
+
+/// 一轮探测对一个游戏目录的结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GameDirProbe {
+    available: bool,
+    version_count: Option<u32>,
+}
+
+impl GameDirProbe {
+    const UNREACHABLE: Self = Self {
+        available: false,
+        version_count: None,
+    };
 }
 
 /// 首次启动向导第一步之前的目录记录，由 [`Aurora::first_run_baseline`] 取得。
@@ -102,6 +120,40 @@ pub async fn probe_dir(path: &Path) -> bool {
             tracing::info!(path = %path.display(), "目录探测超时，按不可达处理");
             false
         }
+    }
+}
+
+/// 探测一个游戏目录：先确认可达，再数版本，两步共用一个 [`DIR_PROBE_TIMEOUT`]。
+///
+/// 必须先确认可达：盘拔掉时读 `versions/` 报的同样是 NotFound，直接数会把不可达说成 0 个版本。
+/// 两步各给一份时限的话，一个挂起的目录要拖住列表两倍时间。数不出来不影响 `available`：
+/// 目录确实能访问，只是不知道版本数。
+async fn probe_game_dir(
+    path: &Path,
+    reachable: impl Future<Output = bool>,
+    versions: impl Future<Output = aurora_instance::Result<Option<Vec<String>>>>,
+) -> GameDirProbe {
+    let deadline = Instant::now() + DIR_PROBE_TIMEOUT;
+    if !reachable.await {
+        tracing::info!(path = %path.display(), "目录不可达，版本数按未知处理");
+        return GameDirProbe::UNREACHABLE;
+    }
+    let version_count = match tokio::time::timeout_at(deadline, versions).await {
+        Ok(Ok(Some(names))) => Some(names.len() as u32),
+        // 还没装过东西的目录没有 versions/，这是确切的 0 个，不是不知道。
+        Ok(Ok(None)) => Some(0),
+        Ok(Err(error)) => {
+            tracing::warn!(path = %path.display(), %error, "读取版本目录失败，版本数按未知处理");
+            None
+        }
+        Err(_) => {
+            tracing::info!(path = %path.display(), "读取版本目录超时，版本数按未知处理");
+            None
+        }
+    };
+    GameDirProbe {
+        available: true,
+        version_count,
     }
 }
 
@@ -178,7 +230,7 @@ impl Aurora {
         self.config_mut().first_run_completed = true;
     }
 
-    /// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达。
+    /// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达与版本数。
     pub async fn game_directories(&self) -> Vec<GameDirectoryEntry> {
         let current = self.game_dir().to_path_buf();
         let mut listed = vec![(self.directory_name(&current), current.clone(), true)];
@@ -188,15 +240,20 @@ impl Aurora {
                 listed.push((extra.name.clone(), extra.path.clone(), false));
             }
         }
-        let availability = probe_all(listed.iter().map(|(_, path, _)| path.clone())).await;
+        let paths = listed.iter().map(|(_, path, _)| path.clone());
+        let probes = probe_each(paths, GameDirProbe::UNREACHABLE, |path| async move {
+            probe_game_dir(&path, probe_dir(&path), list_version_dirs(&path)).await
+        })
+        .await;
         listed
             .into_iter()
-            .zip(availability)
-            .map(|((name, path, is_current), available)| GameDirectoryEntry {
+            .zip(probes)
+            .map(|((name, path, is_current), probe)| GameDirectoryEntry {
                 name,
                 path,
                 is_current,
-                available,
+                available: probe.available,
+                version_count: probe.version_count,
             })
             .collect()
     }
@@ -348,16 +405,31 @@ impl Aurora {
 
 /// 并发限时探测一组路径，结果与输入一一对应。
 async fn probe_all(paths: impl Iterator<Item = PathBuf>) -> Vec<bool> {
+    probe_each(paths, false, |path| async move { probe_dir(&path).await }).await
+}
+
+/// 每条路径一个任务并发探测，结果与输入一一对应；任务异常结束的位置留 `failed`。
+///
+/// 挂起的路径只耗尽它自己的时限：整轮最多等一个时限，其余路径的结果也不受牵连。
+async fn probe_each<T, Fut>(
+    paths: impl Iterator<Item = PathBuf>,
+    failed: T,
+    probe: impl Fn(PathBuf) -> Fut,
+) -> Vec<T>
+where
+    T: Copy + Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
     let mut set = tokio::task::JoinSet::new();
-    let mut count = 0;
+    let mut out = Vec::new();
     for (index, path) in paths.enumerate() {
-        count += 1;
-        set.spawn(async move { (index, probe_dir(&path).await) });
+        out.push(failed);
+        let probing = probe(path);
+        set.spawn(async move { (index, probing.await) });
     }
-    let mut out = vec![false; count];
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok((index, available)) => out[index] = available,
+            Ok((index, result)) => out[index] = result,
             Err(join) => tracing::warn!(error = %join, "目录探测任务异常结束，按不可达处理"),
         }
     }
@@ -679,15 +751,205 @@ mod tests {
                     path: current,
                     is_current: true,
                     available: true,
+                    version_count: Some(0),
                 },
                 GameDirectoryEntry {
                     name: "外置盘".to_owned(),
                     path: gone,
                     is_current: false,
                     available: false,
+                    version_count: None,
                 },
             ]
         );
+    }
+
+    /// 版本数与 `list_version_dirs` 同口径：文件和点开头的目录不算；没有 `versions/` 与空的 `versions/`
+    /// 都是确切的 0。访问不到的目录是未知而不是 0，空着的目录和拔掉的盘在界面上要分得开。
+    /// 版本数取到超过异步目录读取的单批条数，确认跨批也数得全。
+    #[tokio::test(start_paused = true)]
+    async fn game_directories_tell_version_counts_from_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = default_game_dir(tmp.path());
+        let versions = current.join("versions");
+        let installed = fastrand::usize(33..=64);
+        for index in 0..installed {
+            std::fs::create_dir_all(versions.join(format!("实例 {index}"))).unwrap();
+        }
+        std::fs::create_dir_all(versions.join(".petalfall")).unwrap();
+        std::fs::write(versions.join("usercache.json"), b"[]").unwrap();
+        let no_versions = tmp.path().join("PCL").join(".minecraft");
+        std::fs::create_dir_all(&no_versions).unwrap();
+        let empty_versions = tmp.path().join("HMCL").join(".minecraft");
+        std::fs::create_dir_all(empty_versions.join("versions")).unwrap();
+        let one_version = tmp.path().join("Games").join(".minecraft");
+        std::fs::create_dir_all(one_version.join("versions").join("1.21.1")).unwrap();
+        let unplugged = tmp.path().join("unplugged").join(".minecraft");
+        let aurora = aurora_at(
+            tmp.path(),
+            &current,
+            vec![
+                named("PCL", no_versions),
+                named("HMCL", empty_versions),
+                named("Games", one_version),
+                named("外置盘", unplugged),
+            ],
+        );
+
+        let counts: Vec<(bool, Option<u32>)> = aurora
+            .game_directories()
+            .await
+            .into_iter()
+            .map(|e| (e.available, e.version_count))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![
+                (true, Some(installed as u32)),
+                (true, Some(0)),
+                (true, Some(0)),
+                (true, Some(1)),
+                (false, None),
+            ]
+        );
+    }
+
+    /// `versions` 被一个同名文件占着：目录能访问，但版本目录读不出来，不能说成 0 个。
+    #[tokio::test(start_paused = true)]
+    async fn versions_occupied_by_a_file_is_unknown_not_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = default_game_dir(tmp.path());
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join("versions"), b"x").unwrap();
+        let aurora = aurora_at(tmp.path(), &current, Vec::new());
+
+        let listed = aurora.game_directories().await;
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].available);
+        assert_eq!(listed[0].version_count, None);
+    }
+
+    /// 被测逻辑丢了时限时让测试挂掉，而不是永远等下去；同时量出花了多久。
+    async fn within_time_limit<F: Future>(probing: F) -> (F::Output, Duration) {
+        let started = Instant::now();
+        let output = tokio::time::timeout(DIR_PROBE_TIMEOUT * 20, probing)
+            .await
+            .expect("探测没有在时限内结束");
+        (output, started.elapsed())
+    }
+
+    const REACHED_BUT_UNCOUNTED: GameDirProbe = GameDirProbe {
+        available: true,
+        version_count: None,
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn unreadable_versions_is_unknown_but_directory_stays_available() {
+        let failing = async {
+            Err(aurora_instance::Error::Io {
+                path: PathBuf::from("N:/.minecraft/versions"),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            })
+        };
+
+        let probe = probe_game_dir(Path::new("N:/.minecraft"), async { true }, failing).await;
+
+        assert_eq!(probe, REACHED_BUT_UNCOUNTED);
+    }
+
+    /// 读 `versions/` 挂住时，时限一到就放弃数版本；目录本身已经确认可达，不能因此变成不可达。
+    #[tokio::test(start_paused = true)]
+    async fn stuck_listing_gives_up_at_the_limit_and_keeps_availability() {
+        let (probe, elapsed) = within_time_limit(probe_game_dir(
+            Path::new("N:/.minecraft"),
+            async { true },
+            std::future::pending(),
+        ))
+        .await;
+
+        assert_eq!(probe, REACHED_BUT_UNCOUNTED);
+        assert!(elapsed >= DIR_PROBE_TIMEOUT, "提前放弃了：{elapsed:?}");
+        assert!(elapsed < DIR_PROBE_TIMEOUT * 2, "等太久：{elapsed:?}");
+    }
+
+    /// 可达判断与数版本共用一个时限：前一步慢了，后一步只有余下的时间，一个目录不会等到两倍。
+    #[tokio::test(start_paused = true)]
+    async fn reachability_and_counting_share_one_limit() {
+        let slow_reachable = async {
+            tokio::time::sleep(DIR_PROBE_TIMEOUT * 3 / 4).await;
+            true
+        };
+
+        let (probe, elapsed) = within_time_limit(probe_game_dir(
+            Path::new("N:/.minecraft"),
+            slow_reachable,
+            std::future::pending(),
+        ))
+        .await;
+
+        assert_eq!(probe, REACHED_BUT_UNCOUNTED);
+        assert!(elapsed >= DIR_PROBE_TIMEOUT, "提前放弃了：{elapsed:?}");
+        assert!(
+            elapsed < DIR_PROBE_TIMEOUT * 5 / 4,
+            "时限被累加了：{elapsed:?}"
+        );
+    }
+
+    /// 不可达的目录一个字节都不读：盘已经挂住了，再派一个阻塞线程去读 `versions/` 只会多卡死一个。
+    #[tokio::test(start_paused = true)]
+    async fn unreachable_directory_is_never_listed() {
+        let probe = probe_game_dir(Path::new("N:/.minecraft"), async { false }, async {
+            panic!("不可达的目录不该去读 versions/")
+        })
+        .await;
+
+        assert_eq!(probe, GameDirProbe::UNREACHABLE);
+    }
+
+    /// 几个挂起的目录并发等，整轮只耗一个时限，不随目录数累加；健康的目录不受牵连，照样拿到版本数。
+    #[tokio::test(start_paused = true)]
+    async fn stuck_directories_share_one_limit_and_spare_healthy_ones() {
+        let healthy = PathBuf::from("D:/Games/.minecraft");
+        let paths = vec![
+            PathBuf::from("N:/a/.minecraft"),
+            healthy.clone(),
+            PathBuf::from("N:/b/.minecraft"),
+            PathBuf::from("N:/c/.minecraft"),
+        ];
+
+        let (probes, elapsed) = within_time_limit(probe_each(
+            paths.into_iter(),
+            GameDirProbe::UNREACHABLE,
+            |path| {
+                let is_healthy = path == healthy;
+                async move {
+                    let listing = async move {
+                        if is_healthy {
+                            Ok(Some(vec!["1.21.1".to_owned(), "生存".to_owned()]))
+                        } else {
+                            std::future::pending().await
+                        }
+                    };
+                    probe_game_dir(&path, async { true }, listing).await
+                }
+            },
+        ))
+        .await;
+
+        let counted = GameDirProbe {
+            available: true,
+            version_count: Some(2),
+        };
+        assert_eq!(
+            probes,
+            vec![
+                REACHED_BUT_UNCOUNTED,
+                counted,
+                REACHED_BUT_UNCOUNTED,
+                REACHED_BUT_UNCOUNTED,
+            ]
+        );
+        assert!(elapsed < DIR_PROBE_TIMEOUT * 2, "时限被累加了：{elapsed:?}");
     }
 
     #[test]
