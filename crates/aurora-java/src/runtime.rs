@@ -266,18 +266,18 @@ impl JavaRuntimeInstaller {
             })?;
 
         let files = self.fetch_component_files(component).await?;
-        let java_rel = locate_java_executable(&files).ok_or(Error::MissingJavaExecutable)?;
+        let java_rel = locate_java_executable(&files)?.ok_or(Error::MissingJavaExecutable)?;
         let version =
             JavaVersion::parse(&component.version.name).ok_or_else(|| Error::JavaVersionParse {
                 output: component.version.name.clone(),
             })?;
-        Ok(build_plan(
+        build_plan(
             component_name,
             version,
             install_dir,
             &files,
             install_dir.join(java_rel),
-        ))
+        )
     }
 
     /// 拉取并校验某组件的文件清单（含对清单自身的 sha1 校验）。
@@ -390,14 +390,15 @@ fn best_entry(entries: &[RuntimeComponent]) -> Option<&RuntimeComponent> {
     })
 }
 
-/// 把组件文件清单摊成计划：相对路径落到 `install_dir` 下，清单的 BTreeMap 顺序即计划顺序。
+/// 把组件文件清单摊成计划：相对路径落到 `install_dir` 下，清单的 BTreeMap 顺序即计划顺序。任何一条
+/// 路径或链接目标会落到 `install_dir` 之外时整份计划作废，一个文件都不下。
 fn build_plan(
     component: &str,
     version: JavaVersion,
     install_dir: &Path,
     files: &ComponentFiles,
     java_executable: PathBuf,
-) -> RuntimePlan {
+) -> Result<RuntimePlan> {
     let mut plan = RuntimePlan {
         component: component.to_owned(),
         version,
@@ -407,7 +408,7 @@ fn build_plan(
         links: Vec::new(),
     };
     for (rel, entry) in &files.files {
-        let path = install_dir.join(rel_to_path(rel));
+        let path = install_dir.join(rel_to_path(rel)?);
         match entry {
             FileEntry::Directory => plan.directories.push(path),
             FileEntry::File {
@@ -420,17 +421,20 @@ fn build_plan(
                 size: downloads.raw.size,
                 executable: *executable,
             }),
-            FileEntry::Link { target } => plan.links.push(RuntimeLink {
-                path,
-                target: target.clone(),
-            }),
+            FileEntry::Link { target } => {
+                check_link_target(rel, target)?;
+                plan.links.push(RuntimeLink {
+                    path,
+                    target: target.clone(),
+                });
+            }
         }
     }
-    plan
+    Ok(plan)
 }
 
-/// 从文件清单里定位 java 可执行文件的相对路径（`bin/java` 或 `bin/java.exe`）。
-fn locate_java_executable(files: &ComponentFiles) -> Option<PathBuf> {
+/// 从文件清单里定位 java 可执行文件的相对路径（`bin/java` 或 `bin/java.exe`）；清单里没有时 `Ok(None)`。
+fn locate_java_executable(files: &ComponentFiles) -> Result<Option<PathBuf>> {
     files
         .files
         .iter()
@@ -439,11 +443,69 @@ fn locate_java_executable(files: &ComponentFiles) -> Option<PathBuf> {
                 && (rel.ends_with("bin/java.exe") || rel.ends_with("bin/java"))
         })
         .map(|(rel, _)| rel_to_path(rel))
+        .transpose()
 }
 
-/// 把清单里以 `/` 分隔的相对路径转成本平台 `PathBuf`。
-fn rel_to_path(rel: &str) -> PathBuf {
-    rel.split('/').collect()
+/// 把清单里以 `/` 分隔的相对路径转成本平台 `PathBuf`；能走出安装目录的报 [`Error::UnsafeRuntimePath`]。
+fn rel_to_path(rel: &str) -> Result<PathBuf> {
+    match unsafe_reason(rel) {
+        Some(reason) => Err(Error::UnsafeRuntimePath {
+            path: rel.to_owned(),
+            reason,
+        }),
+        None => Ok(rel.split('/').collect()),
+    }
+}
+
+/// 相对路径为什么不能拼进安装目录；能拼时 `None`。规则与版本域对库路径、资源逻辑名的判定一致（本 crate
+/// 不依赖版本域，在这里单独实现）：Windows 上反斜杠也是分隔符，冒号引出盘符或备用数据流，段尾的点与空格
+/// 会被悄悄去掉。
+fn unsafe_reason(rel: &str) -> Option<&'static str> {
+    if rel.is_empty() {
+        return Some("为空");
+    }
+    if rel.starts_with('/') {
+        return Some("是绝对路径");
+    }
+    if rel.contains('\\') {
+        return Some("含反斜杠");
+    }
+    if rel.contains(':') {
+        return Some("含冒号（盘符或备用数据流）");
+    }
+    rel.split('/').find_map(|segment| {
+        if segment.is_empty() {
+            Some("含空段")
+        } else if segment == "." || segment == ".." {
+            Some("含 . 或 .. 段")
+        } else if segment.ends_with(['.', ' ']) {
+            Some("有段以点或空格结尾")
+        } else {
+            None
+        }
+    })
+}
+
+/// 符号链接的目标相对链接所在目录解析（mac 运行时里 `../Home/lib/libjli.dylib` 这类），按段推演后不能
+/// 越过安装目录的根，也不能是绝对路径或带盘符、反斜杠。
+fn check_link_target(link: &str, target: &str) -> Result<()> {
+    let escapes = || Error::UnsafeRuntimeLink {
+        path: link.to_owned(),
+        target: target.to_owned(),
+    };
+    if target.is_empty() || target.starts_with('/') || target.contains(['\\', ':']) {
+        return Err(escapes());
+    }
+    // 链接自身所在目录的深度：`a/b/link` 在第 2 层。
+    let mut depth = link.split('/').count() - 1;
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => depth = depth.checked_sub(1).ok_or_else(escapes)?,
+            _ => depth += 1,
+        }
+    }
+    Ok(())
 }
 
 /// 反序列化 JSON，失败时带上是哪份报文的上下文。
@@ -579,7 +641,7 @@ mod tests {
     #[test]
     fn rel_to_path_splits_forward_slashes() {
         assert_eq!(
-            rel_to_path("bin/java.exe"),
+            rel_to_path("bin/java.exe").unwrap(),
             ["bin", "java.exe"].iter().collect::<PathBuf>()
         );
     }
@@ -915,5 +977,164 @@ mod tests {
             .expect("首个 503 后重试应成功");
         assert_eq!(plan.component, "java-runtime-gamma");
         assert_eq!(plan.files[0].sha1, sha1_hex(&gamma_java));
+    }
+
+    // ---- 清单路径越界：清单与文件 sha1 同源，恶意条目能把合法 sha1 的文件写到运行时目录之外 ----
+
+    /// 递归列出目录下的全部文件与目录。
+    fn entries_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path.clone());
+                }
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// 挂一份只含给定文件条目的组件清单，返回 mock 地址。
+    async fn mount_component(server: &MockServer, files: serde_json::Value) {
+        let base = server.uri();
+        let manifest = serde_json::json!({ "files": files }).to_string();
+        let all_json = serde_json::json!({
+            "windows-x64": {"java-runtime-gamma": [{
+                "manifest": {"sha1": sha1_hex(manifest.as_bytes()), "url": format!("{base}/gamma.json")},
+                "version": {"name": "17.0.8"}
+            }]}
+        })
+        .to_string();
+        mount_get(server, "/all.json", all_json).await;
+        mount_get(server, "/gamma.json", manifest).await;
+    }
+
+    fn file_entry(base: &str) -> serde_json::Value {
+        serde_json::json!({"type": "file", "downloads": {"raw": {
+            "sha1": sha1_hex(b"x"), "size": 1, "url": format!("{base}/objects/x")
+        }}})
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_paths_escaping_the_runtime_dir_are_rejected() {
+        for (path, reason) in [
+            ("../../escaped.dll", "含 . 或 .. 段"),
+            ("bin/../../escaped.dll", "含 . 或 .. 段"),
+            ("/abs/escaped.dll", "是绝对路径"),
+            ("C:/Windows/escaped.dll", "含冒号（盘符或备用数据流）"),
+            ("C:escaped.dll", "含冒号（盘符或备用数据流）"),
+            ("bin\\..\\..\\escaped.dll", "含反斜杠"),
+            ("bin/java.exe:stream", "含冒号（盘符或备用数据流）"),
+            ("bin//escaped.dll", "含空段"),
+            ("bin/escaped.dll.", "有段以点或空格结尾"),
+        ] {
+            let server = MockServer::start().await;
+            let base = server.uri();
+            mount_component(
+                &server,
+                serde_json::json!({ "bin/java.exe": file_entry(&base), path: file_entry(&base) }),
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let install_dir = tmp.path().join("runtime").join("17");
+
+            let err = fast_installer(aurora_base::http::build_client().unwrap(), &base)
+                .plan_for_platform(17, "windows-x64", &install_dir)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, Error::UnsafeRuntimePath { path: got, reason: why } if got == path && *why == reason),
+                "{path:?}: {err:?}"
+            );
+            assert_eq!(entries_under(tmp.path()), Vec::<PathBuf>::new(), "{path:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn links_pointing_outside_the_runtime_dir_are_rejected() {
+        for target in [
+            "../../../../escaped",
+            "/etc/passwd",
+            "C:/Windows/System32",
+            "..\\..\\escaped",
+            "",
+        ] {
+            let server = MockServer::start().await;
+            let base = server.uri();
+            mount_component(
+                &server,
+                serde_json::json!({
+                    "bin/java.exe": file_entry(&base),
+                    "jre.bundle/Contents/MacOS/libjli.dylib": {"type": "link", "target": target}
+                }),
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+
+            let err = fast_installer(aurora_base::http::build_client().unwrap(), &base)
+                .plan_for_platform(17, "windows-x64", &tmp.path().join("17"))
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, Error::UnsafeRuntimeLink { path, target: got }
+                    if path == "jre.bundle/Contents/MacOS/libjli.dylib" && got == target),
+                "{target:?}: {err:?}"
+            );
+            assert_eq!(
+                entries_under(tmp.path()),
+                Vec::<PathBuf>::new(),
+                "{target:?}"
+            );
+        }
+    }
+
+    /// mac 运行时真实的链接形态：目标经 `..` 回到包内另一个目录，仍在安装目录里。
+    #[test]
+    fn links_staying_inside_the_runtime_dir_are_kept() {
+        let files: ComponentFiles = serde_json::from_value(serde_json::json!({"files": {
+            "jre.bundle/Contents/Home/bin/java": {"type": "file", "executable": true,
+                "downloads": {"raw": {"sha1": "a", "size": 1, "url": "https://x/java"}}},
+            "jre.bundle/Contents/MacOS/libjli.dylib": {"type": "link", "target": "../Home/lib/libjli.dylib"},
+            "jre.bundle/Contents/Home/lib/jli": {"type": "link", "target": "../../.."}
+        }}))
+        .unwrap();
+        let root = PathBuf::from("/rt");
+        let plan = build_plan(
+            "jre-legacy",
+            JavaVersion::parse("17.0.8").unwrap(),
+            &root,
+            &files,
+            root.join("jre.bundle/Contents/Home/bin/java"),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.links,
+            vec![
+                RuntimeLink {
+                    path: root
+                        .join("jre.bundle")
+                        .join("Contents")
+                        .join("Home")
+                        .join("lib")
+                        .join("jli"),
+                    target: "../../..".into(),
+                },
+                RuntimeLink {
+                    path: root
+                        .join("jre.bundle")
+                        .join("Contents")
+                        .join("MacOS")
+                        .join("libjli.dylib"),
+                    target: "../Home/lib/libjli.dylib".into(),
+                },
+            ]
+        );
+        assert!(check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../..").is_ok());
+        assert!(check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../../..").is_err());
     }
 }

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::relpath::check_relative_path;
 
 /// 资源本地存放布局。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,21 +89,14 @@ where
     D: serde::Deserializer<'de>,
 {
     let objects = BTreeMap::<String, AssetObject>::deserialize(deserializer)?;
-    if let Some(name) = objects.keys().find(|name| !is_safe_object_name(name)) {
-        return Err(serde::de::Error::custom(format!(
-            "资源逻辑名 {name:?} 会落到资源目录之外（为空、是绝对路径，或含 . / .. 段、盘符、反斜杠）"
-        )));
+    for name in objects.keys() {
+        if let Err(problem) = check_relative_path(name) {
+            return Err(serde::de::Error::custom(format!(
+                "资源逻辑名 {name:?} {problem}，会落到资源目录之外"
+            )));
+        }
     }
     Ok(objects)
-}
-
-fn is_safe_object_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('/')
-        && !name.contains(['\\', ':'])
-        && name
-            .split('/')
-            .all(|segment| segment != "." && segment != "..")
 }
 
 fn sha1_hex<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
@@ -199,6 +193,10 @@ mod tests {
             "/abs/evil.txt",
             "sounds/a.ogg:stream",
             "",
+            "minecraft//sounds/a.ogg",
+            "minecraft/sounds/",
+            "minecraft/.../a.ogg",
+            "sounds/a.ogg.",
         ] {
             let parsed = AssetObjectsIndex::from_json_str(&index_with(name, GOOD_HASH));
             assert!(

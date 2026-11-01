@@ -610,13 +610,14 @@ impl Aurora {
         reporter.stage(LaunchStage::CompleteLibraries).await;
         let libraries = aurora_install::plan::library_tasks(merged, self.runtime(), &layout)?;
         plan.files.extend(libraries);
-        if let Some(logging) = aurora_install::plan::logging_task(merged, &layout) {
+        if let Some(logging) = aurora_install::plan::logging_task(merged, &layout)? {
             plan.files.push(logging);
         }
         let mut plan = DownloadPlan {
             files: missing_files(plan.files).await?,
             asset_index_missing: plan.asset_index_missing,
         };
+        aurora_install::complete::reject_missing_bundled(&plan.files)?;
         let authlib = match &account.credentials {
             AccountCredentials::AuthlibInjector(creds) => Some(creds.api_root.clone()),
             _ => None,
@@ -933,7 +934,7 @@ impl Aurora {
             .asset_index
             .as_ref()
             .expect("调用方已确认 assetIndex 存在");
-        let path = layout.asset_index_json(&asset_index.id);
+        let path = layout.asset_index_json(&asset_index.id)?;
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|source| aurora_base::Error::Io {
@@ -942,10 +943,10 @@ impl Aurora {
             })?;
         let index = AssetObjectsIndex::from_json_str(&String::from_utf8_lossy(&bytes))
             .map_err(|err| CoreError::from(aurora_install::Error::from(err)))?;
-        let tasks = aurora_install::plan::asset_object_tasks(&index, layout);
+        let tasks = aurora_install::plan::asset_object_tasks(&index, layout)?;
         let target_dir = match index.layout() {
             AssetLayout::Standard => return Ok((tasks, None)),
-            AssetLayout::Virtual => layout.asset_virtual_dir(&asset_index.id),
+            AssetLayout::Virtual => layout.asset_virtual_dir(&asset_index.id)?,
             AssetLayout::MapToResources => layout.resources_dir(),
         };
         Ok((tasks, Some(LegacyAssets { target_dir, index })))
@@ -976,13 +977,10 @@ impl Aurora {
             .objects
             .iter()
             .map(|(logical, object)| {
-                let dest = logical
-                    .split('/')
-                    .filter(|segment| !segment.is_empty())
-                    .fold(target_dir.clone(), |dir, segment| dir.join(segment));
-                DownloadTask::new(String::new(), dest).with_size(object.size)
+                let dest = aurora_install::layout::materialized_asset_path(&target_dir, logical)?;
+                Ok(DownloadTask::new(String::new(), dest).with_size(object.size))
             })
-            .collect();
+            .collect::<Result<_, aurora_install::Error>>()?;
         let missing = missing_files(expanded).await?.len();
         if missing == 0 {
             return Ok(());
@@ -1929,6 +1927,43 @@ mod tests {
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::VersionBroken);
         assert!(failure.params.contains_key("reason"));
+    }
+
+    /// 加载器安装器自带的库（版本 JSON 里地址留空）被删掉后启动：报只能重装加载器，不把空地址交给下载池
+    /// 去报地址解析失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deleted_bundled_loader_library_stops_launch_with_loader_library_missing() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_version(&mc, 17, true);
+        let json = serde_json::json!({
+            "id": VERSION,
+            "type": "release",
+            "mainClass": "cpw.mods.modlauncher.Launcher",
+            "javaVersion": {"component": "java-runtime-gamma", "majorVersion": 17},
+            "libraries": [{
+                "name": "net.minecraftforge:forge:1.20.1-47.2.0:universal",
+                "downloads": {"artifact": {
+                    "path": "net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-universal.jar",
+                    "url": "", "sha1": "0".repeat(40), "size": 4
+                }}
+            }]
+        });
+        let dir = mc.join("versions").join(VERSION);
+        std::fs::write(dir.join(format!("{VERSION}.json")), json.to_string()).unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, _) = launch(&fx.aurora, java).await;
+
+        let expected = mc
+            .join("libraries")
+            .join("net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-universal.jar");
+        match result {
+            Err(LaunchFailed::Core(CoreError::Install(
+                aurora_install::Error::LoaderLibraryMissing { path },
+            ))) => assert_eq!(path, expected),
+            other => panic!("应报加载器自带的库缺失：{:?}", other.err()),
+        }
     }
 
     #[test]

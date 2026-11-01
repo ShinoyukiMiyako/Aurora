@@ -8,6 +8,9 @@
 //! `target_id` 把「客户端 jar 与 natives 的落点版本」与「被检查的版本 JSON 的 id」解耦：原版安装
 //! 时两者相同；加载器版本（已合并解析）则复用其原版的 jar 与 natives 目录，故传原版 id；按实例名
 //! 安装的实例则落到实例自己的目录。
+//!
+//! 加载器安装器自带的库（版本 JSON 里地址留空）没有地方可以重下：盘上那份齐全就不进下载批次，缺了或坏了
+//! 报 [`Error::LoaderLibraryMissing`]，交给玩家重装加载器。
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +19,7 @@ use aurora_version::{AssetLayout, AssetObjectsIndex, VersionJson};
 
 use crate::context::InstallContext;
 use crate::error::{Error, Result, io_err};
+use crate::layout::{checked_segment, materialized_asset_path};
 use crate::natives;
 use crate::net;
 use crate::plan;
@@ -41,9 +45,13 @@ pub async fn ensure_complete(
     version: &VersionJson,
     target_id: &str,
 ) -> Result<CompletionReport> {
+    // 原版安装时 target_id 就是远端版本 JSON 里的 id，客户端 jar 与 natives 目录都按它落盘。
+    checked_segment(target_id, || "版本 id".to_owned())?;
+
     // 第一批：库 + 日志配置 + 客户端 jar + assetIndex（都并入一池）。
     let library_tasks = plan::library_tasks(version, cx.runtime, cx.layout)?;
     let libraries = library_tasks.len();
+    let library_tasks = settle_bundled_libraries(library_tasks).await?;
     let mut primary = skip_present_unverifiable(library_tasks).await?;
 
     let client_jar =
@@ -58,7 +66,7 @@ pub async fn ensure_complete(
             false
         };
 
-    if let Some(log) = plan::logging_task(version, cx.layout) {
+    if let Some(log) = plan::logging_task(version, cx.layout)? {
         primary.push(log);
     }
     let has_assets = version.asset_index.is_some();
@@ -70,7 +78,7 @@ pub async fn ensure_complete(
     // 第二批：资源对象全量补全（仅当版本带 assetIndex）。
     let assets = if has_assets {
         let index = read_asset_index(cx, version).await?;
-        let object_tasks = plan::asset_object_tasks(&index, cx.layout);
+        let object_tasks = plan::asset_object_tasks(&index, cx.layout)?;
         let count = object_tasks.len();
         cx.run_batch(object_tasks, "补全资源", None).await?;
         materialize_assets(cx, version, &index).await?;
@@ -114,6 +122,60 @@ pub(crate) async fn skip_present_unverifiable(
     Ok(kept)
 }
 
+/// 加载器安装器自带的库：版本 JSON 声明了下载件、地址却留空（Forge 1.13 起的 installer 把它们放在
+/// `maven/` 下，安装时解出或由处理器生成）。下载引擎拿空地址只会报地址解析失败，所以在这里先认：盘上那份
+/// 的大小与 sha1 都对得上（与下载引擎认「已就绪」同一套判据）就从批次里拿掉，缺失或对不上时报
+/// [`Error::LoaderLibraryMissing`]。
+pub(crate) async fn settle_bundled_libraries(
+    tasks: Vec<DownloadTask>,
+) -> Result<Vec<DownloadTask>> {
+    let mut kept = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if !task.url.is_empty() {
+            kept.push(task);
+            continue;
+        }
+        if !bundled_library_ready(&task).await? {
+            return Err(Error::LoaderLibraryMissing { path: task.dest });
+        }
+    }
+    Ok(kept)
+}
+
+/// 即将交给下载引擎的任务里有地址为空的，就是加载器自带、已经缺失的库：报
+/// [`Error::LoaderLibraryMissing`]，而不是让下载引擎报地址解析失败。供只比对存在与大小、不校验 sha1 的
+/// 启动前检查在挑出缺失文件后调用。
+pub fn reject_missing_bundled(missing: &[DownloadTask]) -> Result<()> {
+    match missing.iter().find(|task| task.url.is_empty()) {
+        Some(task) => Err(Error::LoaderLibraryMissing {
+            path: task.dest.clone(),
+        }),
+        None => Ok(()),
+    }
+}
+
+async fn bundled_library_ready(task: &DownloadTask) -> Result<bool> {
+    let len = match tokio::fs::metadata(&task.dest).await {
+        Ok(meta) if meta.is_file() => meta.len(),
+        Ok(_) => return Ok(false),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(io_err(&task.dest, source)),
+    };
+    if task.size.is_some_and(|size| size != len) {
+        return Ok(false);
+    }
+    match task.sha1.as_deref() {
+        Some(sha1) if !sha1.is_empty() => {
+            match aurora_base::fs::verify_sha1(&task.dest, sha1).await {
+                Ok(()) => Ok(true),
+                Err(aurora_base::Error::HashMismatch { .. }) => Ok(false),
+                Err(err) => Err(err.into()),
+            }
+        }
+        _ => Ok(true),
+    }
+}
+
 /// 从磁盘读回并解析已下载的 assetIndex。
 async fn read_asset_index(
     cx: InstallContext<'_>,
@@ -127,7 +189,7 @@ async fn read_asset_index(
         })?
         .id
         .clone();
-    let path = cx.layout.asset_index_json(&index_id);
+    let path = cx.layout.asset_index_json(&index_id)?;
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|source| io_err(&path, source))?;
@@ -154,7 +216,7 @@ async fn materialize_assets(
                 .ok_or_else(|| Error::MissingAssetIndex {
                     version: version.id.clone(),
                 })?;
-            cx.layout.asset_virtual_dir(&index_id)
+            cx.layout.asset_virtual_dir(&index_id)?
         }
         AssetLayout::MapToResources => cx.layout.resources_dir(),
     };
@@ -163,13 +225,13 @@ async fn materialize_assets(
         .objects
         .iter()
         .map(|(logical, object)| {
-            (
+            Ok((
                 cx.layout.asset_object_path(&object.hash),
-                target_dir.join(crate::layout::rel_to_path(logical)),
+                materialized_asset_path(&target_dir, logical)?,
                 object.size,
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     tokio::task::spawn_blocking(move || copy_missing(&jobs))
         .await
         .map_err(|join| {
@@ -258,7 +320,7 @@ mod tests {
         }
         let index = virtual_index(&[("a.txt", a_hash, 4), ("sub/b.txt", b_hash, 6)]);
         let version = version_with(Some("pre-1.6"), None);
-        let target = layout.asset_virtual_dir("pre-1.6");
+        let target = layout.asset_virtual_dir("pre-1.6").unwrap();
 
         std::fs::create_dir_all(target.join("sub")).unwrap();
         std::fs::write(target.join("a.txt"), b"zzzz").unwrap();
@@ -394,5 +456,210 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::MissingAssetIndex { ref version } if version == "1.6.4"));
         assert!(!layout.assets_dir().join("virtual").exists());
+    }
+
+    fn sha1_of(bytes: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        base16ct::lower::encode_string(&Sha1::digest(bytes))
+    }
+
+    /// 递归列出目录下的全部文件。
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    struct Sandbox {
+        // 整个测试只碰这个临时目录：游戏目录在它下面两层，越界写入会落在临时目录里、被 files_under 看到。
+        tmp: tempfile::TempDir,
+        layout: crate::layout::GameLayout,
+        client: reqwest::Client,
+        pool: DownloadPool,
+        runtime: RuntimeContext,
+        policy: RetryPolicy,
+    }
+
+    impl Sandbox {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("sandbox").join("game");
+            std::fs::create_dir_all(&root).unwrap();
+            let client = aurora_base::http::build_client().unwrap();
+            Self {
+                layout: crate::layout::GameLayout::new(root),
+                pool: DownloadPool::new(Downloader::with_defaults(client.clone()), 2),
+                client,
+                tmp,
+                runtime: RuntimeContext::new(OsName::Windows, "x86_64", 64),
+                policy: RetryPolicy::default(),
+            }
+        }
+
+        fn cx(&self) -> InstallContext<'_> {
+            InstallContext::new(
+                &self.client,
+                &self.pool,
+                &self.layout,
+                &self.runtime,
+                &self.policy,
+            )
+        }
+    }
+
+    /// 远端版本 JSON 的库路径或坐标带着 `..`：补全在算落点时就拒掉，一个请求都不发，临时目录里一个文件都
+    /// 不落（修复前这份带合法 sha1 的文件会写到游戏目录之外的 `<临时目录>/escaped.jar`）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn escaping_library_entries_write_nothing_anywhere() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const BODY: &[u8] = b"payload";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY.to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri());
+        let entries = [
+            serde_json::json!({
+                "name": "com.example:evil:1.0",
+                "downloads": {"artifact": {
+                    "path": "../../../escaped.jar",
+                    "sha1": sha1_of(BODY), "size": BODY.len(),
+                    "url": format!("{base}escaped.jar")
+                }}
+            }),
+            serde_json::json!({
+                "name": "evil:x:1/../../../../escaped",
+                "url": base,
+                "sha1": sha1_of(BODY), "size": BODY.len()
+            }),
+        ];
+        for library in entries {
+            let sandbox = Sandbox::new();
+            let version: VersionJson = serde_json::from_value(serde_json::json!({
+                "id": "evil", "libraries": [library.clone()]
+            }))
+            .unwrap();
+
+            let err = ensure_complete(sandbox.cx(), &version, "evil")
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, Error::UnsafePath { entry, .. } if entry.starts_with("库 ")),
+                "{library}: {err:?}"
+            );
+            assert_eq!(files_under(sandbox.tmp.path()), Vec::<PathBuf>::new());
+        }
+    }
+
+    /// 补全的落点版本 id 来自远端版本 JSON（原版安装）：带分隔符或 `..` 的 id 直接拒掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_escaping_target_id_is_rejected_before_anything_is_written() {
+        let sandbox = Sandbox::new();
+        let version: VersionJson = serde_json::from_value(serde_json::json!({
+            "id": "../../escaped",
+            "downloads": {"client": {"sha1": "s", "size": 1, "url": "https://example.com/c.jar"}}
+        }))
+        .unwrap();
+
+        let err = ensure_complete(sandbox.cx(), &version, "../../escaped")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Separator }
+                if entry == "版本 id" && path == "../../escaped"
+        ));
+        assert_eq!(files_under(sandbox.tmp.path()), Vec::<PathBuf>::new());
+    }
+
+    fn forge_with_bundled(sha1: &str, size: usize) -> VersionJson {
+        serde_json::from_value(serde_json::json!({
+            "id": "1.16.5-forge-36.2.39",
+            "libraries": [{
+                "name": "net.minecraftforge:forge:1.16.5-36.2.39",
+                "downloads": {"artifact": {
+                    "path": "net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39.jar",
+                    "url": "", "sha1": sha1, "size": size
+                }}
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// 加载器安装器自带的库被删掉后补全：报只能重装加载器，而不是把空地址交给下载引擎报地址解析失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deleted_bundled_loader_library_reports_loader_library_missing() {
+        const SHIM: &[u8] = b"forge-shim";
+        let sandbox = Sandbox::new();
+        let version = forge_with_bundled(&sha1_of(SHIM), SHIM.len());
+        let jar = sandbox
+            .layout
+            .library_path("net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39.jar");
+
+        let err = ensure_complete(sandbox.cx(), &version, "1.16.5-forge-36.2.39")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::LoaderLibraryMissing { path } if *path == jar),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "加载器自带的库 forge-1.16.5-36.2.39.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器"
+        );
+        assert!(!jar.exists());
+    }
+
+    /// 盘上那份对得上就照常补全；被改坏（大小相同、内容不同）同样报缺失，不留着坏文件当已就绪。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bundled_loader_library_on_disk_is_checked_by_sha1() {
+        const SHIM: &[u8] = b"forge-shim";
+        let sandbox = Sandbox::new();
+        let version = forge_with_bundled(&sha1_of(SHIM), SHIM.len());
+        let jar = sandbox
+            .layout
+            .library_path("net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39.jar");
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        std::fs::write(&jar, SHIM).unwrap();
+
+        let report = ensure_complete(sandbox.cx(), &version, "1.16.5-forge-36.2.39")
+            .await
+            .unwrap();
+        assert_eq!(report.libraries, 1);
+        assert_eq!(std::fs::read(&jar).unwrap(), SHIM);
+
+        std::fs::write(&jar, b"forge-shiM").unwrap();
+        let err = ensure_complete(sandbox.cx(), &version, "1.16.5-forge-36.2.39")
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, Error::LoaderLibraryMissing { path } if *path == jar));
+    }
+
+    #[test]
+    fn missing_tasks_without_an_address_are_reported_as_loader_libraries() {
+        let fetchable = DownloadTask::new("https://libraries.minecraft.net/a.jar", "/mc/a.jar");
+        let bundled = DownloadTask::new("", "/mc/libraries/forge.jar").with_sha1("aa");
+        assert!(reject_missing_bundled(std::slice::from_ref(&fetchable)).is_ok());
+        assert!(matches!(
+            reject_missing_bundled(&[fetchable, bundled]),
+            Err(Error::LoaderLibraryMissing { path }) if path == Path::new("/mc/libraries/forge.jar")
+        ));
     }
 }

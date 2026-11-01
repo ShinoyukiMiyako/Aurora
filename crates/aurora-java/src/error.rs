@@ -58,6 +58,15 @@ pub enum Error {
     /// 调用方经取消令牌放弃了本次运行时下载。
     #[error("Java 运行时下载已取消")]
     Cancelled,
+
+    /// 组件清单里的文件路径会落到运行时安装目录之外（为空、是绝对路径，或含 `..`、盘符、反斜杠、冒号、
+    /// 空段）。清单与其中文件的 sha1 来自同一个源（可以是镜像），下载校验拦不住，所以在算落点时就拒掉。
+    #[error("Java 运行时清单里的路径「{path}」{reason}，会落到运行时目录之外，已拒绝安装")]
+    UnsafeRuntimePath { path: String, reason: &'static str },
+
+    /// 组件清单里的符号链接指到运行时安装目录之外：之后经它写入或加载的文件会落到别处。
+    #[error("Java 运行时清单里的链接「{path}」指向「{target}」，会指到运行时目录之外，已拒绝安装")]
+    UnsafeRuntimeLink { path: String, target: String },
 }
 
 impl Error {
@@ -86,6 +95,8 @@ impl RetryableError for Error {
             | Error::MissingJavaExecutable => false,
             // 取消是调用方的决定，重试违背它。
             Error::Cancelled => false,
+            // 清单内容本身越界，重拉同一份清单结果不变。
+            Error::UnsafeRuntimePath { .. } | Error::UnsafeRuntimeLink { .. } => false,
         }
     }
 }
