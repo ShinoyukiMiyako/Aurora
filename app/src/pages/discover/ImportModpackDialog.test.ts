@@ -79,11 +79,11 @@ describe("需要手动下载的文件清单", () => {
     size: null,
   });
 
-  it("落点目录取最后一个斜杠之前；不在子目录里的落点违反契约", () => {
+  it("落点目录取最后一个斜杠之前；只有文件名的是整合包本体，没有落点目录；以斜杠开头的落点违反契约", () => {
     expect(destinationDir("mods/a.jar")).toBe("mods");
     expect(destinationDir("config/sub/a.json")).toBe("config/sub");
-    expect(() => destinationDir("a.jar")).toThrow("不在任何子目录里");
-    expect(() => destinationDir("/a.jar")).toThrow("不在任何子目录里");
+    expect(destinationDir("生存 2.0.0.zip")).toBeNull();
+    expect(() => destinationDir("/a.jar")).toThrow("不是相对路径");
   });
 
   it("按认领结果给每个文件定状态；结果没覆盖到的文件直接报错", () => {

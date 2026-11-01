@@ -32,10 +32,14 @@ export interface BlockedFilesModalProps {
   onAllFound: () => void;
 }
 
-/** 落点所在的目录：「装到 mods/」。CurseForge 文件总是落进实例下的某个子目录。 */
-export function destinationDir(destination: string): string {
+/**
+ * 落点所在的目录：「装到 mods/」。整合包里的文件总是落进实例下的某个子目录；落点只有文件名的是整合包本体
+ * （作者不允许启动器直接下载整个包），它不装进实例的哪个目录，返回 null。以斜杠开头的落点违反契约。
+ */
+export function destinationDir(destination: string): string | null {
   const slash = destination.lastIndexOf("/");
-  if (slash <= 0) throw new Error(`需要手动下载的文件落点 ${destination} 不在任何子目录里`);
+  if (slash === -1) return null;
+  if (slash === 0) throw new Error(`需要手动下载的文件落点 ${destination} 不是相对路径`);
   return destination.slice(0, slash);
 }
 
@@ -170,11 +174,12 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
           <List aria-label={BLOCKED_COPY.title}>
             {files.map((file) => {
               const status = statuses === null ? undefined : statuses.get(file.file_id);
+              const dir = destinationDir(file.destination);
               return (
                 <ListRow
                   key={file.file_id}
                   title={<span className={styles.blockedName}>{file.file_name}</span>}
-                  meta={<span className={styles.blockedDest}>{BLOCKED_COPY.destination(destinationDir(file.destination))}</span>}
+                  meta={dir === null ? undefined : <span className={styles.blockedDest}>{BLOCKED_COPY.destination(dir)}</span>}
                   trailing={
                     <>
                       <Fade id={status === undefined ? null : status}>
