@@ -6,6 +6,7 @@
 
 import { useState } from "react";
 import { createPortal } from "react-dom";
+import { Icon } from "../../../art/Icon";
 import { defaultModpackCover, type InstanceCover } from "../../../art/iso/covers";
 import { ACTION_ERROR, taskFailureReason } from "../../../copy/flows";
 import { percent } from "../../../domain/format";
@@ -96,6 +97,54 @@ function summaryBlocked(summary: ResourceResult<ModpackSummaryDto>): boolean {
 function packFileBlocked(detail: ProjectDetail, summary: ResourceResult<ModpackSummaryDto>): boolean {
   if (summary.status === "ready") return false;
   return !detail.distribution_allowed || summaryBlocked(summary);
+}
+
+/** 面板上的一条提醒。reason 与 retry 只有读取失败才有。 */
+interface PackNotice {
+  key: string;
+  text: string;
+  reason: string | null;
+  retry: (() => void) | null;
+}
+
+/**
+ * 还没开始安装时的提醒，重的在前：这一步至多一条说明块，第一条用说明块，其余写成行。
+ * 几条色调相同，按对安装的影响排：装不了、要走手动下载、只能装最新版本、事先看不到清单，重名只是提个醒。
+ */
+function packNotices(
+  detail: ProjectDetail,
+  versions: ResourceResult<ModVersionList>,
+  summary: ResourceResult<ModpackSummaryDto>,
+  noGameVersion: boolean,
+  fromPack: readonly { name: string }[],
+): PackNotice[] {
+  const notices: PackNotice[] = [];
+  if (noGameVersion) notices.push({ key: "no-game-version", text: MODPACK_COPY.noGameVersion, reason: null, retry: null });
+  if (packFileBlocked(detail, summary)) notices.push({ key: "pack-blocked", text: MODPACK_COPY.packBlocked, reason: null, retry: null });
+  if (versions.status === "error") notices.push({ key: "versions-failed", text: MODPACK_COPY.versionsFailed, reason: versions.error.message, retry: versions.reload });
+  if (summary.status === "error" && !summaryBlocked(summary)) {
+    notices.push({ key: "summary-failed", text: MODPACK_COPY.summaryFailed, reason: summaryErrorText(summary.error), retry: summary.reload });
+  }
+  if (fromPack.length > 0) notices.push({ key: "duplicate", text: MODPACK_COPY.duplicate(fromPack.length, fromPack[0].name), reason: null, retry: null });
+  return notices;
+}
+
+function NoticeText({ notice }: { notice: PackNotice }) {
+  if (notice.reason === null) return notice.text;
+  return (
+    <>
+      <span className={styles.errorTitle}>{notice.text}</span>
+      <span className={styles.errorText}>{notice.reason}</span>
+    </>
+  );
+}
+
+function NoticeRetry({ retry }: { retry: () => void }) {
+  return (
+    <Button size="sm" variant="ghost" onClick={retry}>
+      {SEARCH_COPY.retry}
+    </Button>
+  );
 }
 
 /** 这个实例最近一次导入任务。 */
@@ -231,6 +280,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
 
   const installDisabled = version === null || facts.mcVersion === null || nameError !== null;
   const failedBlocked = progress !== null && progress.kind === "failed" ? progress.blocked : null;
+  // 开始安装后版本选择已经收起，这些提醒都管不到这次安装了；进度态自己的说明块是这一步唯一的一条
+  const [leadNotice, ...otherNotices] = progress === null ? packNotices(detail, versions, summary, version !== null && facts.mcVersion === null, fromPack) : [];
   const footer = (
     <>
       <span className={styles.footNote}>{packFootNote(facts)}</span>
@@ -306,22 +357,25 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         facts={listedFacts}
         readOnly={progress !== null && progress.kind !== "cancelled"}
       />
-      {progress === null && fromPack.length > 0 && <Callout tone="warn">{MODPACK_COPY.duplicate(fromPack.length, fromPack[0].name)}</Callout>}
-      {versions.status === "error" && (
-        <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={versions.reload}>{SEARCH_COPY.retry}</Button>}>
-          <span className={styles.errorTitle}>{MODPACK_COPY.versionsFailed}</span>
-          <span className={styles.errorText}>{versions.error.message}</span>
+      {leadNotice !== undefined && (
+        <Callout tone="warn" action={leadNotice.retry === null ? undefined : <NoticeRetry retry={leadNotice.retry} />}>
+          <NoticeText notice={leadNotice} />
         </Callout>
       )}
+      {otherNotices.map((notice) => (
+        <div key={notice.key} className={styles.warnNote}>
+          <Icon name="alert" size={16} className={styles.warnNoteIcon} />
+          <div className={styles.warnNoteText}>
+            <NoticeText notice={notice} />
+          </div>
+          {notice.retry !== null && (
+            <div className={styles.warnNoteAction}>
+              <NoticeRetry retry={notice.retry} />
+            </div>
+          )}
+        </div>
+      ))}
       {progress === null && versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
-      {progress === null && packFileBlocked(detail, summary) && <Callout tone="warn">{MODPACK_COPY.packBlocked}</Callout>}
-      {progress === null && summary.status === "error" && !summaryBlocked(summary) && (
-        <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={summary.reload}>{SEARCH_COPY.retry}</Button>}>
-          <span className={styles.errorTitle}>{MODPACK_COPY.summaryFailed}</span>
-          <span className={styles.errorText}>{summaryErrorText(summary.error)}</span>
-        </Callout>
-      )}
-      {progress === null && version !== null && facts.mcVersion === null && <Callout tone="warn">{MODPACK_COPY.noGameVersion}</Callout>}
 
       {progress !== null && (progress.kind === "queued" || progress.kind === "downloading") && (
         <div className={styles.progress}>

@@ -1169,6 +1169,83 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
     expect(card("樱落").textContent).not.toContain("实例来自它");
     expect(dialog().textContent).not.toContain("来自这个整合包");
   });
+
+  describe("一步至多一条说明块", () => {
+    const panel = () => {
+      const found = dialog().querySelector("aside");
+      if (found === null) throw new Error("详情弹窗里没有安装面板");
+      return found;
+    };
+    const callouts = () => [...panel().querySelectorAll('[class*="_callout_"]')].map((el) => el.textContent);
+    const rows = () => [...panel().querySelectorAll('[class*="_warnNote_"]')].map((el) => el.textContent);
+    const fromPack = { platform: "modrinth" as const, project_id: "M1", version_id: "mp-2", name: "樱落", version: "2.0.0" };
+    const hasInstanceFromPack = () => bootOverrides(ipc, { instances: [instanceDto("樱落周目", { modpack: fromPack })], config: configDto({ selected_version: "樱落周目" }) });
+    const DUPLICATE = "你已经有 1 个来自这个整合包的实例（「樱落周目」），再装一次会得到一个独立的新实例。";
+    const BLOCKED = "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。";
+    const VERSIONS_FAILED = "整合包的版本列表没加载出来，只能装最新版本";
+    const SUMMARY_FAILED = "整合包清单没能提前读出来，Mod 数和下载大小要到导入时才知道";
+
+    it("四条同时成立：手动下载说明留作说明块，其余按版本列表、清单、重名的顺序写成行，读取失败的重试都还在", async () => {
+      const { IpcError } = await import("../../ipc/errors");
+      hasInstanceFromPack();
+      let versionsFail = true;
+      ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v, distribution_allowed: false }));
+      ipc.overrides.set("list_mod_versions", () => {
+        if (versionsFail) throw new IpcError("network_failed", "版本接口超时");
+        return { versions: [v], truncated: false };
+      });
+      ipc.overrides.set("summarize_platform_modpack", () => Promise.reject(new IpcError("remote_pack_unreadable", "服务器不支持分段下载", { url: "https://x/p.mrpack", reason: "no_range" })));
+      await openPack();
+
+      expect(callouts()).toEqual([BLOCKED]);
+      expect(rows()).toEqual([`${VERSIONS_FAILED}版本接口超时重试`, `${SUMMARY_FAILED}服务器不支持分段下载重试`, DUPLICATE]);
+
+      versionsFail = false;
+      const [versionsRow] = panel().querySelectorAll<HTMLElement>('[class*="_warnNote_"]');
+      act(() => buttonByText("重试", versionsRow).click());
+      await flush();
+      expect(rows()).toEqual([`${SUMMARY_FAILED}服务器不支持分段下载重试`, DUPLICATE]);
+    });
+
+    it("这个版本没标游戏版本：说明块留给挡住安装的这一条，重名写成行", async () => {
+      hasInstanceFromPack();
+      const unlabeled = modVersion("mp-3", { project_id: "M1", version_number: "3.0.0", loaders: ["fabric"], game_versions: [] });
+      ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: unlabeled }));
+      ipc.overrides.set("list_mod_versions", () => ({ versions: [unlabeled], truncated: false }));
+      ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+      await openPack();
+      expect(callouts()).toEqual(["这个版本没有标注游戏版本，没法建实例"]);
+      expect(rows()).toEqual([DUPLICATE]);
+      expect(buttonByText("安装为新实例", dialog()).disabled).toBe(true);
+    });
+
+    it("只有重名一条：照旧是说明块，不写成行", async () => {
+      hasInstanceFromPack();
+      ipc.overrides.set("summarize_platform_modpack", () => summary());
+      await openPack();
+      expect(callouts()).toEqual([DUPLICATE]);
+      expect(rows()).toEqual([]);
+    });
+
+    it("开始安装后这些提醒都收起：版本选择已经不在了，面板上只留进度态那一条说明块", async () => {
+      const { IpcError } = await import("../../ipc/errors");
+      hasInstanceFromPack();
+      ipc.overrides.set("list_mod_versions", () => {
+        throw new IpcError("network_failed", "版本接口超时");
+      });
+      ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+      ipc.overrides.set("install_modpack", () => {
+        throw new IpcError("network_failed", "连接 cdn.modrinth.com 失败");
+      });
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      await openPack();
+      expect(callouts()).toEqual([expect.stringContaining(VERSIONS_FAILED)]);
+      act(() => buttonByText("安装为新实例", dialog()).click());
+      await flush();
+      expect(callouts()).toEqual(["没装成：网络连接失败"]);
+      expect(rows()).toEqual([]);
+    });
+  });
 });
 
 describe("发现页：本地整合包的三种入口", () => {
