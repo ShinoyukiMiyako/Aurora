@@ -155,6 +155,13 @@ pub enum CoreError {
     /// 读不到本机物理内存信息。
     #[error("读不到本机内存信息")]
     MemoryUnavailable,
+    /// 这个实例写不成 Modrinth 整合包。`loader` 只在加载器不受支持时给出它的名字。
+    #[error("{}", reason.describe(loader.as_deref()))]
+    ModpackExportUnsupported {
+        id: String,
+        reason: crate::export::ExportBlock,
+        loader: Option<String>,
+    },
 }
 
 /// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。

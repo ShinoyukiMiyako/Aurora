@@ -32,6 +32,7 @@ pub mod crashdiag;
 pub mod deps;
 pub mod error;
 pub mod event;
+pub mod export;
 pub mod facade;
 pub mod folders;
 pub mod history;
@@ -73,6 +74,11 @@ pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, GameDirProblem, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
+pub use export::{
+    BundleReason, ExportBlock, ExportBundledMod, ExportExtra, ExportExtraStat, ExportIndexedMod,
+    ExportMatch, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
+    ModpackExportTarget,
+};
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
