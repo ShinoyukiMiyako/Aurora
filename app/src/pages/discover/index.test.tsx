@@ -1115,6 +1115,18 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
     expect(dialog().textContent).not.toContain("HTTP 401");
   });
 
+  it("清单用了不支持的压缩格式：摘要失败处写统一说法，不给后端原文里的方法编号与条目名", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    ipc.overrides.set("summarize_platform_modpack", () => {
+      throw new IpcError("modpack_unsupported_compression", "整合包条目 manifest.json 用了不支持的压缩方法 93", { method: 93, entry: "manifest.json" });
+    });
+    await openPack();
+    expect(dialog().textContent).toContain("整合包清单没能提前读出来");
+    expect(dialog().textContent).toContain("整合包用了不支持的压缩方式，用整合包作者发布的原始文件再试");
+    expect(dialog().textContent).not.toContain("方法 93");
+    expect(dialog().textContent).not.toContain("manifest.json");
+  });
+
   it("已有来自同一整合包的实例：卡片写出个数，面板提醒再装一次是独立的新实例", async () => {
     ipc.overrides.set("summarize_platform_modpack", () => summary());
     const fromPack = { platform: "modrinth" as const, project_id: "M1", version_id: "mp-2", name: "樱落", version: "2.0.0" };

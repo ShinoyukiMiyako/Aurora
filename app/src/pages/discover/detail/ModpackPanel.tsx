@@ -78,10 +78,10 @@ export function packFacts(version: ModVersionInfo | null, summary: ModpackSummar
   };
 }
 
-/** 摘要读不出来的原因：CurseForge 拒绝下载密钥时与任务失败同一说法（说明怎么换密钥），其余用后端原文。 */
+/** 摘要读不出来的原因：下面这几个码后端原文写给排查用，与任务失败同一说法才告诉玩家怎么办；其余用后端原文。 */
 function summaryErrorText(error: Error): string {
   const record = errorRecord(error);
-  return record.code === "curseforge_key_rejected" ? taskFailureReason(record) : record.message;
+  return record.code === "curseforge_key_rejected" || record.code === "modpack_unsupported_compression" ? taskFailureReason(record) : record.message;
 }
 
 /** 摘要因整合包文件本身不允许启动器下载而读不出来：重试还是这个结果，手动下载走安装失败后的清单。 */
