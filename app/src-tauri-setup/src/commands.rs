@@ -667,6 +667,45 @@ mod tests {
         }
 
         #[test]
+        fn a_record_older_than_the_install_leaves_the_working_install_in_charge() {
+            let rig = rig("stale");
+            rig.context
+                .install(&fresh(r"D:\Petalfall"), &Recording::default())
+                .unwrap();
+            let instdir = rig.sandbox.path().join("instdir");
+            JournalStore::new(&rig.context.session.roots().state)
+                .save(&Journal::begin(&instdir, true, "0.0.1"))
+                .unwrap();
+
+            let probe = rig.context.probe().unwrap();
+
+            assert!(!probe.interrupted);
+            assert_eq!(probe.existing.unwrap().kind, ExistingKind::Same);
+            assert_ne!(probe.default_dir, instdir.to_str().unwrap());
+        }
+
+        #[test]
+        fn a_half_upgrade_of_a_removed_install_goes_back_into_its_dir() {
+            let rig = rig("removed");
+            let half = rig.sandbox.path().join("half");
+            std::fs::create_dir(&half).unwrap();
+            std::fs::write(half.join(CONFIG_FILE), b"{}").unwrap();
+            let journal = Journal::begin(&half, false, &rig.context.session.header().version);
+            JournalStore::new(&rig.context.session.roots().state)
+                .save(&journal)
+                .unwrap();
+
+            let probe = rig.context.probe().unwrap();
+            let check = rig.context.check_dir(half.to_str().unwrap(), &OpenEnv);
+
+            assert_eq!(probe.existing, None);
+            assert!(probe.interrupted);
+            assert_eq!(probe.default_dir, half.to_str().unwrap());
+            assert_eq!(check.normalized, half.to_str().unwrap());
+            assert!(check.has_config);
+        }
+
+        #[test]
         fn a_locked_install_before_any_probe_has_no_target() {
             let rig = rig("no-target");
 
