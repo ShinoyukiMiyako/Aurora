@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import { act, Profiler } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { CONFIRM_COPY, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { startSession, type SessionState } from "../state/session";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
+import { emulateFocusFixup } from "../test/focus-fixup";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ISLAND_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
@@ -315,5 +316,103 @@ describe("状态岛按片订阅", () => {
     expect(commits).toBeGreaterThanOrEqual(20);
     expect(rects.mock.contexts.filter((el) => el === island)).toHaveLength(0);
     rects.mockRestore();
+  });
+});
+
+describe("状态岛详情的取消与结束：进行中保持可聚焦", () => {
+  /** 打开着的确认框：关闭后在退场动画期间仍挂着，带 data-exiting 的不算。 */
+  const openDialogs = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter((el) => el.closest("[data-exiting]") === null);
+
+  const buttonIn = (scope: ParentNode, text: string) => {
+    const el = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text);
+    if (el === undefined) throw new Error(`找不到按钮 ${text}`);
+    return el;
+  };
+
+  /** 按浏览器对原生按钮的键盘激活：Enter 的 keydown 没被 preventDefault 就派发 click（jsdom 不做这一步）。 */
+  const pressEnter = (el: HTMLElement) =>
+    act(() => {
+      if (el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))) el.click();
+    });
+
+  async function openIsland() {
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <StatusIsland />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+  }
+
+  async function expand() {
+    const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
+    if (island === null) throw new Error("状态岛没有出现");
+    act(() => island.click());
+    await flush();
+    const [detail] = openDialogs();
+    if (detail === undefined) throw new Error("状态岛详情没有打开");
+    return detail;
+  }
+
+  it("运行中：确认结束后焦点回到「结束游戏」并留在上面，正在结束期间读出不可用、再按不重复弹确认", async () => {
+    onTestFinished(emulateFocusFixup());
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    ipc.overrides.set("stop_game", () => new Promise(() => undefined));
+    await openIsland();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    const detail = await expand();
+    const stop = buttonIn(detail, LAUNCH_COPY.stopGame);
+    act(() => stop.focus());
+    act(() => stop.click());
+    await flush();
+    const confirm = openDialogs().find((d) => d !== detail);
+    if (confirm === undefined) throw new Error("确认框没有打开");
+    act(() => buttonIn(confirm, CONFIRM_COPY.stopGame("生存").confirmLabel).click());
+    await flush();
+
+    expect(callsOf(ipc, "stop_game")).toHaveLength(1);
+    expect(openDialogs()).toEqual([detail]);
+    expect(stop.isConnected).toBe(true);
+    expect(stop.disabled).toBe(false);
+    expect(stop.getAttribute("aria-disabled")).toBe("true");
+    expect(stop.getAttribute("aria-busy")).toBe("true");
+    expect(document.activeElement).toBe(stop);
+
+    pressEnter(stop);
+    await flush();
+    expect(openDialogs()).toEqual([detail]);
+    expect(callsOf(ipc, "stop_game")).toHaveLength(1);
+    expect(document.activeElement).toBe(stop);
+  });
+
+  it("加载中：按下「取消启动」后焦点留在按钮上，正在结束期间再按不重复取消", async () => {
+    onTestFinished(emulateFocusFixup());
+    ipc.overrides.set("cancel_task", () => new Promise(() => undefined));
+    await openIsland();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const detail = await expand();
+    const cancel = buttonIn(detail, LAUNCH_COPY.cancel);
+    act(() => cancel.focus());
+    pressEnter(cancel);
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
+    expect(cancel.disabled).toBe(false);
+    expect(cancel.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(cancel);
+
+    pressEnter(cancel);
+    act(() => cancel.click());
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
+    expect(document.activeElement).toBe(cancel);
   });
 });

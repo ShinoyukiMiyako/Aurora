@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
-// 启动胶囊换面时的焦点：键盘按了面上的按钮，换上的新面接住焦点，不随旧面一起丢到 body。
+// 启动胶囊的焦点：键盘按了面上的按钮，换上的新面接住焦点，不随旧面一起丢到 body；
+// 按钮在进行中变成不可用时保持可聚焦，焦点留在按钮上。
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
-import { LAUNCH_COPY } from "../copy/flows";
+import { CONFIRM_COPY, LAUNCH_COPY } from "../copy/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { emulateFocusFixup } from "../test/focus-fixup";
+import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
 import { LaunchCapsule } from "./LaunchCapsule";
@@ -38,6 +41,12 @@ const buttonByText = (text: string) => {
   if (el === undefined) throw new Error(`找不到按钮 ${text}`);
   return el;
 };
+/** 按浏览器对原生按钮的键盘激活：Enter 的 keydown 没被 preventDefault 就派发 click（jsdom 不做这一步）。 */
+const pressEnter = (el: HTMLElement) =>
+  act(() => {
+    if (el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }))) el.click();
+  });
+
 const cancelButton = () => {
   const el = document.querySelector<HTMLButtonElement>(`button[aria-label="${LAUNCH_COPY.cancel}"]`);
   if (el === null) throw new Error("找不到取消启动按钮");
@@ -81,6 +90,54 @@ describe("启动胶囊换面时的焦点", () => {
     expect(document.activeElement).toBe(cancelButton());
   });
 
+  it("焦点在「取消启动」上按下：正在结束期间焦点留在按钮上，按钮读出不可用且不再响应", async () => {
+    onTestFinished(emulateFocusFixup());
+    ipc.overrides.set("cancel_task", () => new Promise(() => undefined));
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const cancel = cancelButton();
+    act(() => cancel.focus());
+    act(() => cancel.click());
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
+    expect(cancel.isConnected).toBe(true);
+    expect(cancel.disabled).toBe(false);
+    expect(cancel.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(cancel);
+    pressEnter(cancel);
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
+  });
+
+  it("焦点在「取消启动」上、加载面坐定换成运行面：坐定期间焦点留在胶囊里，换面后交给「结束游戏」", async () => {
+    onTestFinished(emulateFocusFixup());
+    const started = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => started.promise);
+    const go = buttonByText(LAUNCH_COPY.launch);
+    act(() => go.focus());
+    act(() => go.click());
+    await flush();
+    const cancel = cancelButton();
+    expect(document.activeElement).toBe(cancel);
+
+    await act(async () => {
+      started.resolve({ pid: 4242 });
+      await settle();
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    // 旧面留住演完坐定：取消启动此时不可用，但焦点不丢
+    expect(cancel.isConnected).toBe(true);
+    expect(cancel.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(cancel);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(document.activeElement).toBe(buttonByText(LAUNCH_COPY.stopGame));
+  });
+
   it("焦点不在胶囊里时换面不抢焦点", async () => {
     const elsewhere = buttonByText("别处");
     act(() => elsewhere.focus());
@@ -90,5 +147,74 @@ describe("启动胶囊换面时的焦点", () => {
     await flush();
     expect(cancelButton().isConnected).toBe(true);
     expect(document.activeElement).toBe(elsewhere);
+  });
+});
+
+describe("运行面「结束游戏」", () => {
+  async function runningCapsule() {
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    // 结束一直不返回：入口停在「正在结束」
+    ipc.overrides.set("stop_game", () => new Promise(() => undefined));
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    // 加载面坐定后才换成运行面
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    return buttonByText(LAUNCH_COPY.stopGame);
+  }
+
+  /** 打开着的确认框：关闭后在退场动画期间仍挂着，带 data-exiting 的不算。 */
+  const openDialogs = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter((el) => el.closest("[data-exiting]") === null);
+
+  const dialogButton = (text: string) => {
+    const [dialog] = openDialogs();
+    if (dialog === undefined) throw new Error("确认框没有打开");
+    const el = [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text);
+    if (el === undefined) throw new Error(`确认框里找不到按钮 ${text}`);
+    return el;
+  };
+
+  it("确认结束后焦点回到按钮并留在按钮上：正在结束期间读出不可用，再按不重复弹确认", async () => {
+    onTestFinished(emulateFocusFixup());
+    const stop = await runningCapsule();
+    act(() => stop.focus());
+    act(() => stop.click());
+    await flush();
+    act(() => dialogButton(CONFIRM_COPY.stopGame("生存").confirmLabel).click());
+    await flush();
+
+    expect(callsOf(ipc, "stop_game")).toHaveLength(1);
+    expect(stop.isConnected).toBe(true);
+    expect(stop.textContent).toBe(LAUNCH_COPY.stopGame);
+    expect(stop.disabled).toBe(false);
+    expect(stop.getAttribute("aria-disabled")).toBe("true");
+    expect(stop.getAttribute("aria-busy")).toBe("true");
+    expect(document.activeElement).toBe(stop);
+    expect(openDialogs()).toHaveLength(0);
+
+    pressEnter(stop);
+    act(() => stop.click());
+    await flush();
+    expect(openDialogs()).toHaveLength(0);
+    expect(callsOf(ipc, "stop_game")).toHaveLength(1);
+    expect(document.activeElement).toBe(stop);
+  });
+
+  it("确认框取消：焦点回到按钮，按钮照常可用", async () => {
+    onTestFinished(emulateFocusFixup());
+    const stop = await runningCapsule();
+    act(() => stop.focus());
+    act(() => stop.click());
+    await flush();
+    act(() => dialogButton(CONFIRM_CANCEL_LABEL).click());
+    await flush();
+    expect(callsOf(ipc, "stop_game")).toHaveLength(0);
+    expect(document.activeElement).toBe(stop);
+    expect(stop.getAttribute("aria-disabled")).toBeNull();
+    expect(stop.getAttribute("aria-busy")).toBeNull();
   });
 });

@@ -18,6 +18,7 @@ import { fade, springs } from "../lib/motion";
 import { cx } from "../lib/util";
 import { useNow } from "../state/launcher";
 import { progressTrack } from "../state/tasks";
+import { softDisabledProps } from "../ui/Button";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { useBreathPhase } from "./breath";
 import { instanceCover } from "./cover";
@@ -332,7 +333,8 @@ function RunningFace({ face, entry }: { face: Extract<LaunchView, { kind: "runni
       <span className={styles.dot} data-tone="ok" />
       <Text title={stopping ? SESSION_COPY.stopping : LAUNCH_COPY.runningTitle(now - runningSince)} sub={entry.instance.name} />
       <span className={styles.actions}>
-        <button type="button" className={styles.pill} data-tone="ok" onClick={entry.stop} disabled={stopping} aria-busy={stopping || undefined}>
+        {/* 正在结束期间不用原生禁用：确认框关闭后焦点刚还到这里，原生禁用会把它丢回 body */}
+        <button type="button" className={styles.pill} data-tone="ok" {...softDisabledProps(stopping, entry.stop)} aria-busy={stopping || undefined}>
           {stopping ? <Spinner size={16} tone="current" decorative /> : <Icon name="stop" size={14} />}
           {LAUNCH_COPY.stopGame}
         </button>
@@ -363,9 +365,10 @@ function InstallingText({ progress, track, sub }: { progress: number; track: str
   return <Text title={<motion.span>{title}</motion.span>} sub={sub} />;
 }
 
+/** disabled 时保持可聚焦（aria-disabled）：按下「取消启动」后、换面之前，焦点要留在胶囊里等新面接住。 */
 function IconAction({ label, icon, onClick, disabled = false }: { label: string; icon: "x"; onClick: () => void; disabled?: boolean }) {
   return (
-    <button type="button" className={styles.iconAction} aria-label={label} onClick={onClick} disabled={disabled}>
+    <button type="button" className={styles.iconAction} aria-label={label} {...softDisabledProps(disabled, onClick)}>
       <Icon name={icon} size={16} />
     </button>
   );
