@@ -1,4 +1,5 @@
 import { Button } from "../../ui/Button";
+import { Callout } from "../../ui/Callout";
 import type { InstallMode } from "../contract";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
@@ -17,21 +18,30 @@ export interface DoneProps {
   onClose(): void;
 }
 
+/**
+ * 不自动打开：由用户点击，引导程序才掌握退出时机。焦点落在下一步最该按的按钮上，Enter 直接生效。
+ * 提权时不给打开：提权启动和普通启动用的是两个数据根。
+ */
 export function Done({ copy, mode, version, keptData, elevated, opening, onOpen, onClose }: DoneProps) {
+  const text = copy.done;
   return (
     <Frame
-      title={copy.done.title[mode](version)}
-      lead={elevated ? copy.done.elevated : keptData ? copy.done.kept : copy.done.firstRun}
+      title={text.title[mode](version)}
+      lead={keptData ? text.kept : text.firstRun}
       footer={
         <>
-          <Button onClick={onClose}>{copy.done.close}</Button>
+          <Button autoFocus={elevated} onClick={onClose}>
+            {text.close}
+          </Button>
           {!elevated && (
-            <Button variant="primary" loading={opening} onClick={onOpen}>
-              {copy.done.open}
+            <Button variant="primary" autoFocus loading={opening} onClick={onOpen}>
+              {text.open}
             </Button>
           )}
         </>
       }
-    />
+    >
+      {elevated && <Callout tone="info">{text.elevated}</Callout>}
+    </Frame>
   );
 }
