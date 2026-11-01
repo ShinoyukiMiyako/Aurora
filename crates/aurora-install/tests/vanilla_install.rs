@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
-    DownloadConfig, DownloadPool, Downloader, MirrorSource, SourcePlan, SourceResolver,
+    CancellationToken, DownloadConfig, DownloadPool, Downloader, MirrorSource, SourcePlan,
+    SourceResolver,
 };
 use aurora_install::{GameLayout, InstallContext, VanillaInstaller};
 use aurora_version::{OsName, RuntimeContext};
@@ -202,9 +203,191 @@ async fn full_vanilla_install_lands_every_artifact() {
         b"native-dll-payload"
     );
 
+    // 版本目录里只有这些：下载用的临时名在版本 JSON 就位后不留下。
+    assert_eq!(
+        dir_entries(&layout.version_dir("1.21")),
+        vec!["1.21-natives", "1.21.jar", "1.21.json"]
+    );
+
     // ---- 幂等性：再次安装应全部命中已存在校验、结果一致 ----
     let again = installer.install("1.21").await.expect("重复安装应成功");
     assert_eq!(again, summary);
+    assert_eq!(
+        dir_entries(&layout.version_dir("1.21")),
+        vec!["1.21-natives", "1.21.jar", "1.21.json"]
+    );
+}
+
+fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// 只试一次的安装环境，取消令牌同时挂在下载池与上下文上（与门面的接法一致）。
+struct Bench {
+    client: reqwest::Client,
+    pool: DownloadPool,
+    dir: tempfile::TempDir,
+    layout: GameLayout,
+    runtime: RuntimeContext,
+    policy: RetryPolicy,
+    cancel: CancellationToken,
+}
+
+impl Bench {
+    fn new() -> Self {
+        let once = RetryPolicy {
+            max_attempts: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            jitter: false,
+        };
+        let client = aurora_base::http::build_client().unwrap();
+        let config = DownloadConfig {
+            retry: once.clone(),
+            sources: SourcePlan::new(vec![MirrorSource::Official]),
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let pool = DownloadPool::new(Downloader::new(client.clone(), config), 2)
+            .with_cancel(cancel.clone());
+        let dir = tempfile::tempdir().unwrap();
+        Self {
+            layout: GameLayout::new(dir.path()),
+            dir,
+            client,
+            pool,
+            runtime: RuntimeContext::new(OsName::Windows, "x86_64", 64),
+            policy: once,
+            cancel,
+        }
+    }
+
+    fn installer(&self, server: &MockServer) -> VanillaInstaller<'_> {
+        let cx = InstallContext::new(
+            &self.client,
+            &self.pool,
+            &self.layout,
+            &self.runtime,
+            &self.policy,
+        )
+        .with_cancel(Some(&self.cancel));
+        VanillaInstaller::new(cx).with_manifest_url(format!("{}/manifest.json", server.uri()))
+    }
+}
+
+/// 版本 1.21：清单、版本 JSON（`version_body` 为 `None` 时给一份声明了客户端 jar 的正常 JSON）与
+/// 客户端 jar 的响应。
+async fn mount_release(
+    server: &MockServer,
+    version_body: Option<String>,
+    client_jar: ResponseTemplate,
+) {
+    let base = server.uri();
+    let manifest = format!(
+        r#"{{"latest":{{"release":"1.21","snapshot":"1.21"}},"versions":[
+            {{"id":"1.21","type":"release","url":"{base}/version.json","time":"t","releaseTime":"t"}}
+        ]}}"#
+    );
+    let version_body = version_body.unwrap_or_else(|| {
+        format!(
+            r#"{{"id":"1.21","type":"release","mainClass":"net.minecraft.client.main.Main",
+                "downloads":{{"client":{{"sha1":"{sha1}","size":6,"url":"{base}/client.jar"}}}}}}"#,
+            sha1 = sha1_hex(b"client"),
+        )
+    });
+    mount_bytes(server, "/manifest.json", manifest.into_bytes()).await;
+    mount_bytes(server, "/version.json", version_body.into_bytes()).await;
+    Mock::given(method("GET"))
+        .and(path("/client.jar"))
+        .respond_with(client_jar)
+        .mount(server)
+        .await;
+}
+
+/// 下不全或读不懂都算没装上：版本目录是这次建的，失败后整个不留，版本列表里既看不到这个版本，也不会
+/// 多出一行「缺少版本 JSON」。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_install_leaves_nothing_of_the_version() {
+    for (version_body, client_jar) in [
+        (None, ResponseTemplate::new(404)),
+        (
+            Some(r#"{"id":"#.to_owned()),
+            ResponseTemplate::new(200).set_body_bytes(b"client".to_vec()),
+        ),
+    ] {
+        let server = MockServer::start().await;
+        mount_release(&server, version_body.clone(), client_jar).await;
+        let bench = Bench::new();
+
+        bench.installer(&server).install("1.21").await.unwrap_err();
+
+        assert!(
+            !bench.layout.version_dir("1.21").exists(),
+            "{version_body:?}：{:?}",
+            dir_entries(&bench.dir.path().join("versions"))
+        );
+    }
+}
+
+/// 取消发生在下客户端 jar 的途中：不留版本 JSON，也不留这次建的版本目录。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_leaves_nothing_of_the_version() {
+    let server = MockServer::start().await;
+    let stalled = ResponseTemplate::new(200)
+        .set_body_bytes(b"client".to_vec())
+        .set_delay(Duration::from_secs(30));
+    mount_release(&server, None, stalled).await;
+    let bench = Bench::new();
+    let installer = bench.installer(&server);
+    let attempt = installer.install("1.21");
+    tokio::pin!(attempt);
+
+    let client_jar_requested = async {
+        loop {
+            let requests = server.received_requests().await.unwrap();
+            if requests.iter().any(|r| r.url.path() == "/client.jar") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        _ = &mut attempt => panic!("客户端 jar 还没回来，安装不该结束"),
+        () = client_jar_requested => {}
+    }
+    bench.cancel.cancel();
+    let err = attempt.await.unwrap_err();
+
+    assert!(err.is_cancelled(), "实际：{err:?}");
+    assert!(!bench.layout.version_dir("1.21").exists());
+}
+
+/// 目录在这次安装之前就有：重装失败不动原来的东西，只收走自己的临时文件。原来的版本 JSON 还在，
+/// 没有 JSON 的目录里也可能有别的启动器留下的存档。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_reinstall_keeps_what_was_already_there() {
+    for (kept, content) in [
+        ("1.21.json", br#"{"id":"1.21"}"#.as_slice()),
+        ("options.txt", b"lang:zh_cn".as_slice()),
+    ] {
+        let server = MockServer::start().await;
+        mount_release(&server, None, ResponseTemplate::new(404)).await;
+        let bench = Bench::new();
+        let dir = bench.layout.version_dir("1.21");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(kept), content).unwrap();
+
+        bench.installer(&server).install("1.21").await.unwrap_err();
+
+        assert_eq!(dir_entries(&dir), vec![kept], "{kept}");
+        assert_eq!(std::fs::read(dir.join(kept)).unwrap(), content, "{kept}");
+    }
 }
 
 /// 版本清单（可能来自镜像）给出的 id 原样拼进 versions/<id>/<id>.json：能走出版本目录的报路径越界，

@@ -392,6 +392,7 @@ dependencies = [
  "aurora-download",
  "aurora-version",
  "base16ct",
+ "fastrand",
  "reqwest",
  "serde",
  "serde_json",

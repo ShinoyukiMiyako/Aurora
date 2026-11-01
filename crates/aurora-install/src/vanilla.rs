@@ -1,11 +1,13 @@
 //! 原版安装编排。
 //!
-//! 把「选定的原版 id」变为「本地就绪」：拉版本清单 → 下版本 JSON（sha1 校验落盘）→ 解析 →
+//! 把「选定的原版 id」变为「本地就绪」：拉版本清单 → 下版本 JSON 到临时名（sha1 校验）→ 解析 →
 //! 下 client.jar + 按 rules 过滤的库 + 日志配置 + assetIndex → 读 assetIndex 展开资源对象全量补全
-//! → 解压 natives → 按 virtual/map_to_resources 布局物化资源。下载任务的构造在 [`crate::plan`]
-//! 里（纯函数、可脱网测试），本模块只负责按序编排与两段式的资源展开。
+//! → 解压 natives → 按 virtual/map_to_resources 布局物化资源 → 版本 JSON 改回正式名。下载任务的
+//! 构造在 [`crate::plan`] 里（纯函数、可脱网测试），本模块只负责按序编排与两段式的资源展开。
+//!
+//! 版本列表只凭 `<id>/<id>.json` 认版本，所以它必须最后才出现：失败或取消时这个版本就是没装上。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aurora_download::SourcePlan;
 use aurora_version::{ManifestVersion, VersionJson, VersionManifest};
@@ -93,13 +95,50 @@ impl<'a> VanillaInstaller<'a> {
         self.install_entry(&entry).await
     }
 
-    /// 按清单条目安装原版：下版本 JSON、落盘、解析后补全全部文件。
+    /// 按清单条目安装原版：版本 JSON 下到临时名、解析后补全全部文件，全部就绪才改回正式名。
+    ///
+    /// 失败或取消时版本不算装上：目录是这次建的就整个删掉（里面的客户端 jar 重下不贵，留着只会在
+    /// 版本列表里多一行修不了的「缺少版本 JSON」），目录原本就在则只收走临时文件。
     pub async fn install_entry(&self, entry: &ManifestVersion) -> Result<VanillaSummary> {
         // 清单可能来自镜像，id 原样拼进 versions/<id>/<id>.json。
         checked_segment(&entry.id, || "版本清单里的版本 id".to_owned())?;
+        let dir = self.cx.layout.version_dir(&entry.id);
+        let created = self.claim_version_dir(&dir).await?;
         let dest = self.cx.layout.version_json(&entry.id);
-        let version = self.download_version_json(entry, &dest).await?;
-        self.install_files(&version).await
+        let staged = staged_json_path(&dir);
+
+        let installed = self.install_staged(entry, &staged, &dest).await;
+        if installed.is_err() {
+            discard_unfinished(&dir, created, &staged, &dest).await;
+        }
+        installed
+    }
+
+    async fn install_staged(
+        &self,
+        entry: &ManifestVersion,
+        staged: &Path,
+        dest: &Path,
+    ) -> Result<VanillaSummary> {
+        let version = self.download_version_json(entry, staged).await?;
+        let summary = self.install_files(&version).await?;
+        tokio::fs::rename(staged, dest)
+            .await
+            .map_err(|source| io_err(dest, source))?;
+        Ok(summary)
+    }
+
+    /// 建出版本目录，返回目录是不是这次建的。
+    async fn claim_version_dir(&self, dir: &Path) -> Result<bool> {
+        let versions = self.cx.layout.versions_dir();
+        tokio::fs::create_dir_all(&versions)
+            .await
+            .map_err(|source| io_err(versions, source))?;
+        match tokio::fs::create_dir(dir).await {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(source) => Err(io_err(dir, source)),
+        }
     }
 
     /// 只把版本 JSON 读进内存、不落盘：安装前查看它要求的 Java 主版本之类信息时用。
@@ -133,7 +172,7 @@ impl<'a> VanillaInstaller<'a> {
         net::parse_json(&bytes, "版本 JSON")
     }
 
-    /// 已有解析后的原版版本 JSON（且其 JSON 文件已落盘），补全全部文件与 natives。
+    /// 已有解析后的原版版本 JSON，补全全部文件与 natives。版本 JSON 的落盘由调用方负责。
     ///
     /// 原版的 client jar 与 natives 都落在版本自身目录，故 target_id 即版本 id；复用
     /// [`complete::ensure_complete`] 的幂等补全逻辑。
@@ -145,6 +184,33 @@ impl<'a> VanillaInstaller<'a> {
             assets: report.assets,
             natives: report.natives,
         })
+    }
+}
+
+/// 版本 JSON 安装途中的临时名。版本列表不认它，进程被杀时留下也不会被当成已安装。带随机后缀：并行
+/// 安装同一版本（两个整合包用同一游戏版本）时，先装完的一方不能把后来者的文件改走。
+fn staged_json_path(dir: &Path) -> PathBuf {
+    dir.join(format!(
+        ".{}-version-{:016x}.json.part",
+        aurora_base::app_slug!(),
+        fastrand::u64(..)
+    ))
+}
+
+/// 收拾没装完的版本。这时已经有一个失败要报，清不掉只记日志。
+///
+/// 版本 JSON 在等待期间出现了，说明并行的另一个安装已经装好，目录是它的。
+async fn discard_unfinished(dir: &Path, created: bool, staged: &Path, dest: &Path) {
+    let still_ours = created && matches!(tokio::fs::try_exists(dest).await, Ok(false));
+    let removed = if still_ours {
+        tokio::fs::remove_dir_all(dir).await
+    } else {
+        tokio::fs::remove_file(staged).await
+    };
+    if let Err(err) = removed
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(dir = %dir.display(), %err, "清理没装完的版本失败");
     }
 }
 
@@ -177,6 +243,41 @@ mod tests {
             };
             Ok(format!("{}{prefix}{path}", self.base))
         }
+    }
+
+    /// 目录是这次建的，但并行的另一个安装抢先把版本 JSON 落了位：失败的一方只收走自己的临时文件，
+    /// 不删掉已经装好的版本。
+    #[tokio::test]
+    async fn a_version_finished_by_a_parallel_install_survives_the_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("1.21.json");
+        let staged = staged_json_path(tmp.path());
+        std::fs::write(&dest, b"{}").unwrap();
+        std::fs::write(&staged, b"{}").unwrap();
+
+        discard_unfinished(tmp.path(), true, &staged, &dest).await;
+
+        assert!(dest.is_file());
+        assert!(!staged.exists());
+
+        std::fs::remove_file(&dest).unwrap();
+        discard_unfinished(tmp.path(), true, &staged, &dest).await;
+        assert!(!tmp.path().exists(), "没人装好时这次建的目录整个不留");
+    }
+
+    /// 两次取到的临时名不同，且都不是版本列表认的 `<id>.json`。
+    #[test]
+    fn staged_names_are_unique_and_never_the_real_json() {
+        let dir = Path::new("versions").join("1.21");
+        let (a, b) = (staged_json_path(&dir), staged_json_path(&dir));
+        assert_ne!(a, b);
+        assert_eq!(
+            a.parent(),
+            Some(dir.as_path()),
+            "要与正式名同卷才能原子改名"
+        );
+        let name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with('.') && !name.ends_with(".json"), "{name}");
     }
 
     /// 官方清单持续 503：在官方上把重试次数用完后换镜像取到清单，不再回头请求官方。

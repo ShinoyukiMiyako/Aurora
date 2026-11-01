@@ -21,6 +21,8 @@ serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["rt", "fs", "io-util", "sync", "process", "macros"] }
 thiserror = "2"
 tracing = "0.1"
+# 版本 JSON 安装途中的临时名要带随机后缀，与 aurora-base 原子写同一选择。
+fastrand = "2"
 
 [dev-dependencies]
 # 集成测试用 wiremock（需真正后台运行时），补 macros/rt-multi-thread。
