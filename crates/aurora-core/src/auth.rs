@@ -1322,6 +1322,12 @@ mod tests {
 
         const HERO: &str = "1111111111111111aaaaaaaaaaaaaaaa";
         const ALT: &str = "2222222222222222bbbbbbbbbbbbbbbb";
+        // 续期闸按账户 uuid 进程内共享，各用例并行跑；凡是会在闸里等网络的用例各用一个角色，
+        // 不和别的用例排同一道闸，满载时也不会被别人的慢请求拖过等待时限。
+        const STILL_VALID: &str = "3333333333333333cccccccccccccccc";
+        const PROFILE_DOWN: &str = "4444444444444444dddddddddddddddd";
+        const ABANDONED_LAUNCH: &str = "5555555555555555eeeeeeeeeeeeeeee";
+        const CANCELLED_REFRESH: &str = "6666666666666666ffffffffffffffff";
 
         fn logged_in(outcome: AuthlibLogin) -> Account {
             match outcome {
@@ -1972,10 +1978,10 @@ mod tests {
             );
             Mock::given(method("GET"))
                 .and(path(format!(
-                    "/sessionserver/session/minecraft/profile/{HERO}"
+                    "/sessionserver/session/minecraft/profile/{STILL_VALID}"
                 )))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                    "id": HERO, "name": "HeroRenamed",
+                    "id": STILL_VALID, "name": "HeroRenamed",
                     "properties": [ { "name": "textures", "value": textures } ]
                 })))
                 .mount(&server)
@@ -1984,7 +1990,7 @@ mod tests {
                 .and(path("/authserver/refresh"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                     "accessToken": "rotated", "clientToken": "cli",
-                    "selectedProfile": { "id": HERO, "name": "HeroRenamed" }
+                    "selectedProfile": { "id": STILL_VALID, "name": "HeroRenamed" }
                 })))
                 .expect(0)
                 .mount(&server)
@@ -2002,7 +2008,7 @@ mod tests {
                 "acc".into(),
                 "cli".into(),
                 GameProfile {
-                    id: HERO.into(),
+                    id: STILL_VALID.into(),
                     name: "Hero".into(),
                 },
                 None,
@@ -2010,7 +2016,7 @@ mod tests {
             account.last_verified_at = Some(1);
             let before = aurora.store_login(account).unwrap();
 
-            let refreshed = aurora.refresh_account(HERO).await.unwrap();
+            let refreshed = aurora.refresh_account(STILL_VALID).await.unwrap();
             assert_eq!(refreshed.name, "HeroRenamed");
             assert_eq!(
                 refreshed.skin,
@@ -2021,7 +2027,10 @@ mod tests {
             );
             assert_eq!(refreshed.credentials, before.credentials, "令牌不该被轮换");
             assert!(refreshed.last_verified_at.unwrap() > 1);
-            let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
+            let stored = aurora_at(tmp.path())
+                .find_account(STILL_VALID)
+                .unwrap()
+                .unwrap();
             assert_eq!(stored, refreshed);
             let refreshes = server
                 .received_requests()
@@ -2044,7 +2053,7 @@ mod tests {
                 .await;
             Mock::given(method("GET"))
                 .and(path(format!(
-                    "/sessionserver/session/minecraft/profile/{HERO}"
+                    "/sessionserver/session/minecraft/profile/{PROFILE_DOWN}"
                 )))
                 .respond_with(ResponseTemplate::new(503))
                 .mount(&server)
@@ -2067,14 +2076,14 @@ mod tests {
                     "acc".into(),
                     "cli".into(),
                     GameProfile {
-                        id: HERO.into(),
+                        id: PROFILE_DOWN.into(),
                         name: "Hero".into(),
                     },
                     Some(skin.clone()),
                 ))
                 .unwrap();
 
-            let refreshed = aurora.refresh_account(HERO).await.unwrap();
+            let refreshed = aurora.refresh_account(PROFILE_DOWN).await.unwrap();
             assert_eq!(refreshed.name, "Hero");
             assert_eq!(refreshed.skin, Some(skin));
             assert_eq!(refreshed.credentials, before.credentials);
@@ -2124,7 +2133,7 @@ mod tests {
 
         /// 等到 mock 服务器收到发往 `endpoint` 的请求。
         async fn until_requested(server: &MockServer, endpoint: &str) {
-            tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::time::timeout(Duration::from_secs(15), async {
                 while !server
                     .received_requests()
                     .await
@@ -2136,7 +2145,7 @@ mod tests {
                 }
             })
             .await
-            .unwrap_or_else(|_| panic!("5 秒内没等到 {endpoint} 的请求"));
+            .unwrap_or_else(|_| panic!("15 秒内没等到 {endpoint} 的请求"));
         }
 
         /// 等到库里的账户满足 `done`，超时即失败。续期在后台跑完落盘，调用方那时早已返回。
@@ -2145,7 +2154,7 @@ mod tests {
             uuid: &str,
             done: impl Fn(&Account) -> bool,
         ) -> Account {
-            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
             loop {
                 let stored = aurora_at(data_dir).find_account(uuid).unwrap().unwrap();
                 if done(&stored) {
@@ -2153,7 +2162,7 @@ mod tests {
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "5 秒内续出的凭据没有写进凭据库：{:?}",
+                    "15 秒内续出的凭据没有写进凭据库：{:?}",
                     stored.credentials
                 );
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2188,7 +2197,7 @@ mod tests {
                     ResponseTemplate::new(200)
                         .set_body_json(json!({
                             "accessToken": "rotated", "clientToken": "cli",
-                            "selectedProfile": { "id": HERO, "name": "Hero" }
+                            "selectedProfile": { "id": ABANDONED_LAUNCH, "name": "Hero" }
                         }))
                         .set_delay(Duration::from_millis(300)),
                 )
@@ -2209,7 +2218,7 @@ mod tests {
                     "stale".into(),
                     "cli".into(),
                     GameProfile {
-                        id: HERO.into(),
+                        id: ABANDONED_LAUNCH.into(),
                         name: "Hero".into(),
                     },
                     None,
@@ -2224,8 +2233,10 @@ mod tests {
             launch.abort();
             assert!(launch.await.unwrap_err().is_cancelled());
 
-            let stored =
-                until_stored(tmp.path(), HERO, |a| stored_authlib_token(a) != "stale").await;
+            let stored = until_stored(tmp.path(), ABANDONED_LAUNCH, |a| {
+                stored_authlib_token(a) != "stale"
+            })
+            .await;
             assert_eq!(stored_authlib_token(&stored), "rotated");
             assert_eq!(stored.status, AccountStatus::Ok);
         }
@@ -2312,7 +2323,7 @@ mod tests {
                     ResponseTemplate::new(200)
                         .set_body_json(json!({
                             "accessToken": "rotated", "clientToken": "cli",
-                            "selectedProfile": { "id": HERO, "name": "Hero" }
+                            "selectedProfile": { "id": CANCELLED_REFRESH, "name": "Hero" }
                         }))
                         .set_delay(Duration::from_millis(300)),
                 )
@@ -2333,7 +2344,7 @@ mod tests {
                     "stale".into(),
                     "cli".into(),
                     GameProfile {
-                        id: HERO.into(),
+                        id: CANCELLED_REFRESH.into(),
                         name: "Hero".into(),
                     },
                     None,
@@ -2345,7 +2356,7 @@ mod tests {
             let err = aurora
                 .clone()
                 .with_cancel(precancelled)
-                .refresh_account(HERO)
+                .refresh_account(CANCELLED_REFRESH)
                 .await
                 .unwrap_err();
             assert!(err.is_cancelled(), "{err:?}");
@@ -2354,7 +2365,7 @@ mod tests {
             let token = crate::CancellationToken::new();
             let refresh = {
                 let snapshot = aurora.clone().with_cancel(token.clone());
-                tokio::spawn(async move { snapshot.refresh_account(HERO).await })
+                tokio::spawn(async move { snapshot.refresh_account(CANCELLED_REFRESH).await })
             };
             until_requested(&server, "/authserver/refresh").await;
             token.cancel();
@@ -2366,8 +2377,10 @@ mod tests {
                 returned.as_ref().is_err_and(CoreError::is_cancelled),
                 "{returned:?}"
             );
-            let stored =
-                until_stored(tmp.path(), HERO, |a| stored_authlib_token(a) != "stale").await;
+            let stored = until_stored(tmp.path(), CANCELLED_REFRESH, |a| {
+                stored_authlib_token(a) != "stale"
+            })
+            .await;
             assert_eq!(stored_authlib_token(&stored), "rotated");
         }
 
