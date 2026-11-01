@@ -1220,6 +1220,22 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
       expect(buttonByText("安装为新实例", dialog()).disabled).toBe(true);
     });
 
+    it("受限清单排在后面写成行：打开清单的入口还在", async () => {
+      const { IpcError } = await import("../../ipc/errors");
+      const unlabeled = modVersion("mp-3", { project_id: "M1", version_number: "3.0.0", loaders: ["fabric"], game_versions: [] });
+      const body = { project_id: 700, file_id: 7001, file_name: "sakura-3.0.0.zip", web_url: "https://www.curseforge.com/minecraft/modpacks/sakura/files/7001", destination: "sakura-3.0.0.zip", sha1: "3f786850e387550fdab836ed7e6dc881de23001b", fingerprint: 0, size: 2048 };
+      ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: unlabeled }));
+      ipc.overrides.set("list_mod_versions", () => ({ versions: [unlabeled], truncated: false }));
+      ipc.overrides.set("summarize_platform_modpack", () => Promise.reject(new IpcError("distribution_blocked", "原文", { files: [body] })));
+      await openPack();
+      expect(callouts()).toEqual(["这个版本没有标注游戏版本，没法建实例"]);
+      expect(rows()).toEqual(["作者不允许启动器直接下载这个整合包，需要到 CurseForge 网页手动下载。查看这些文件"]);
+
+      act(() => buttonByText("查看这些文件", panel()).click());
+      await flush();
+      expect(document.body.textContent).toContain("sakura-3.0.0.zip");
+    });
+
     it("只有重名一条：照旧是说明块，不写成行", async () => {
       hasInstanceFromPack();
       ipc.overrides.set("summarize_platform_modpack", () => summary());
