@@ -95,6 +95,15 @@ struct Rule {
 /// 任何语言下都有。
 const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'|hard_dep(?:_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends (?:minecraft|fabricloader|quilt_loader) @";
 
+/// Mixin 报错里点名的 Mod。一键停用按 mod id 对已装 Mod，所以优先取 id，每种写法一个分支：
+/// - Fabric 自带的 Mixin：`Mixin apply for mod sodium failed sodium.mixins.json:X from mod sodium -> ...`；
+/// - 上游写法：`Mixin apply failed sodium.mixins.json:X from mod sodium`；
+/// - 堆栈尾部：`MixinApplyError: Mixin [sodium.mixins.json:X from mod sodium] from phase ...`。
+///
+/// 日志只写了配置文件名时退回 `*.mixins.json`：还能当线索看，但对不上 Mod，只能交给「日志指向的 Mod」。
+/// 这一支必须排最后，同一起点上靠前的分支优先。
+const MIXIN_NAMED_MOD: &str = r"(?i)mixin (?:apply|prepare) for mod ([a-z0-9_\-]+) failed|mixin (?:apply|prepare) failed \S+ from mod ([a-z0-9_\-]+)|\[\S+ from mod ([a-z0-9_\-]+)\]|mixin apply failed ([^\s:]+)";
+
 /// JVM 参数被拒时 Java 自己打的那一行。一个开关没写 `-` 时 Java 把它当成主类，报的是「找不到主类」，主类名带不带点
 /// 区分得开：版本 JSON 给的主类都带包名，不带点的只能是写错的参数；真缺主类是文件问题，不归这里。Java 按系统语言翻译这
 /// 一句，中文两种写法都认。
@@ -217,8 +226,8 @@ const RULES: &[Rule] = &[
             "error applying mixin",
             "mixinapplyerror",
         ],
-        regex: None,
-        extract: Some(r"(?i)mixin apply failed ([^\s:]+)"),
+        regex: Some(r"(?i)\bmixin (?:apply|prepare) for mod \S+ failed"),
+        extract: Some(MIXIN_NAMED_MOD),
         summary: "Mixin 注入失败（通常是 Mod 冲突或与游戏版本不兼容）",
         advice: "定位日志中报错的 Mod 并更新或移除；常见于 Mod 与当前 Minecraft 版本不匹配。",
     },
@@ -599,7 +608,7 @@ const NON_MOD_TOKENS: &[&str] = &[
 /// 崩溃日志的通用写法：Fabric/Quilt 依赖报错的 `Mod 'Sodium' (sodium) 0.5.3`（括号内才是 id，中文系统上
 /// 是 `模组 'Sodium' (sodium)`）、Fabric Loader 不翻译的原因行 `HARD_DEP sodium 0.8.13 {depends ...}`、
 /// Mod 初始化抛异常时的 `provided by 'sodium'`、mixin 报错尾部的 `from mod sodium`，以及 Forge 依赖报错的
-/// `Requested by: 'sodium'`。mixin 规则自带的提取式捕获的是 `*.mixins.json` 配置文件名而非 mod id，
+/// `Requested by: 'sodium'`。mixin 规则自带的提取式可能退回 `*.mixins.json` 配置文件名，
 /// 故不在复用之列。
 static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     RULES
@@ -929,9 +938,33 @@ mod tests {
         let log =
             "[Sodium] Mixin apply failed sodium.mixins.json:features.MixinChunk from mod sodium";
         let diag = primary(log, CrashCategory::MixinFailure);
-        assert_eq!(diag.detail.as_deref(), Some("sodium.mixins.json"));
+        assert_eq!(diag.detail.as_deref(), Some("sodium"));
 
         assert_absent("Mixin subsystem initialized", CrashCategory::MixinFailure);
+    }
+
+    /// 一键停用按 mod id 对已装 Mod，这几种写法都要拿到 id；只有配置文件名时才退回配置文件名。
+    #[test]
+    fn mixin_failure_detail_is_the_mod_id_whenever_the_log_names_one() {
+        // Fabric Loader 0.20.1 自带的 sponge-mixin 0.17.5 的真实写法：`for mod` 插在 apply 与 failed 之间。
+        let fabric = "[Render thread/ERROR]: Mixin apply for mod sodium failed sodium.mixins.json:features.MixinChunk from mod sodium -> net.minecraft.class_310: org.spongepowered.asm.mixin.injection.throwables.InvalidInjectionException";
+        let diag = primary(fabric, CrashCategory::MixinFailure);
+        assert_eq!(diag.detail.as_deref(), Some("sodium"));
+        assert!(diag.matched.contains("Mixin apply for mod sodium failed"));
+
+        let prepare = "Mixin prepare for mod sodium failed sodium.mixins.json:features.MixinChunk";
+        let diag = primary(prepare, CrashCategory::MixinFailure);
+        assert_eq!(diag.detail.as_deref(), Some("sodium"));
+
+        // 同一次崩溃里堆栈尾部的 Caused by 行。
+        let caused_by = "Caused by: org.spongepowered.asm.mixin.throwables.MixinApplyError: Mixin [sodium.mixins.json:features.MixinChunk from mod sodium] from phase [DEFAULT] in config [sodium.mixins.json] FAILED during APPLY";
+        let diag = primary(caused_by, CrashCategory::MixinFailure);
+        assert_eq!(diag.detail.as_deref(), Some("sodium"));
+
+        let config_only =
+            "Mixin apply failed foo.mixins.json:Bar -> net.minecraft.client.Minecraft";
+        let diag = primary(config_only, CrashCategory::MixinFailure);
+        assert_eq!(diag.detail.as_deref(), Some("foo.mixins.json"));
     }
 
     #[test]
