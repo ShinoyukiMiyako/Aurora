@@ -38,6 +38,7 @@ function props(overrides: Partial<LocationProps> = {}): LocationProps {
     desktopShortcut: true,
     initialCheck: null,
     busy: false,
+    attempt: (action) => void action(),
     checkDir: vi.fn(async () => okCheck()),
     pickFolder: vi.fn(async () => null),
     onDirChange: vi.fn(),
@@ -550,5 +551,32 @@ describe("接真的 App", () => {
     expect(document.querySelector("h1")?.textContent).toBe(text.title);
     expect(fake.callsOf("launcherRunning")).toEqual([]);
     expect(fake.callsOf("install")).toEqual([]);
+  });
+
+  it("防抖校验被拒绝时进致命错误页，错误原文显示出来", async () => {
+    const fake = createFakeBridge();
+    fake.checkDir = () => Promise.reject(new Error("IPC 断了"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    view = render(<App bridge={fake} copy={copy} initial={atLocation()} />);
+
+    await settle();
+
+    expect(document.querySelector("h1")?.textContent).toBe(copy.fatal.title);
+    expect(document.querySelector("pre")?.textContent).toContain("IPC 断了");
+    expect(logged).toHaveBeenCalledTimes(1);
+  });
+
+  it("选文件夹被拒绝时进致命错误页，不是点了没反应", async () => {
+    const fake = createFakeBridge();
+    fake.pickFolder = () => Promise.reject(new Error("dialog.open not allowed"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    view = render(<App bridge={fake} copy={copy} initial={atLocation()} />);
+
+    act(() => button(text.browse).click());
+    await pass(0);
+
+    expect(document.querySelector("h1")?.textContent).toBe(copy.fatal.title);
+    expect(document.querySelector("pre")?.textContent).toContain("dialog.open not allowed");
+    expect(logged).toHaveBeenCalledTimes(1);
   });
 });

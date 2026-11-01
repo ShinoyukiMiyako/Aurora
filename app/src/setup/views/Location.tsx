@@ -19,13 +19,13 @@ export const DIR_CHECK_DEBOUNCE_MS = 300;
  * 当前该显示的校验结果。新结果回来之前继续显示上一次的，提示行不随每个按键闪一下；
  * 这点滞后放不过坏目录，发起安装时 App 会再查一遍。
  */
-function useDirCheck(dir: string, initialCheck: DirCheck | null, checkDir: (path: string) => Promise<DirCheck>): DirCheck | null {
+function useDirCheck(dir: string, initialCheck: DirCheck | null, checkDir: (path: string) => Promise<DirCheck>, attempt: (action: () => Promise<unknown>) => void): DirCheck | null {
   const [settled, setSettled] = useState(initialCheck);
 
   // App 每次渲染都传新闭包，放进依赖的话勾一下复选框都会重新写探针
-  const latestCheckDir = useRef(checkDir);
+  const latest = useRef({ checkDir, attempt });
   useLayoutEffect(() => {
-    latestCheckDir.current = checkDir;
+    latest.current = { checkDir, attempt };
   });
 
   useEffect(() => {
@@ -36,7 +36,8 @@ function useDirCheck(dir: string, initialCheck: DirCheck | null, checkDir: (path
     // 探针快慢不定，先发的请求可能后回来
     let superseded = false;
     const timer = window.setTimeout(() => {
-      void latestCheckDir.current(dir).then((check) => {
+      latest.current.attempt(async () => {
+        const check = await latest.current.checkDir(dir);
         if (!superseded) setSettled(check);
       });
     }, DIR_CHECK_DEBOUNCE_MS);
@@ -77,6 +78,8 @@ export interface LocationProps {
   /** 发起安装时目录没过校验的结果，先显示它；改了目录后由 App 清成 null。 */
   initialCheck: DirCheck | null;
   busy: boolean;
+  /** 跑一个 bridge 动作，拒绝时进 fatal：校验和选文件夹被拒绝都不是用户能处理的，这一页接不住。 */
+  attempt(action: () => Promise<unknown>): void;
   /** 防抖校验用，结果只影响提示和主按钮，不进状态机。 */
   checkDir(path: string): Promise<DirCheck>;
   /** 系统选择文件夹，取消为 null。选回的路径要过 model 的 withAppFolder。 */
@@ -88,9 +91,9 @@ export interface LocationProps {
   onInstall(): void;
 }
 
-export function Location({ copy, dir, requiredBytes, desktopShortcut, initialCheck, busy, checkDir, pickFolder, onDirChange, onUseDefault, onShortcutChange, onBack, onInstall }: LocationProps) {
+export function Location({ copy, dir, requiredBytes, desktopShortcut, initialCheck, busy, attempt, checkDir, pickFolder, onDirChange, onUseDefault, onShortcutChange, onBack, onInstall }: LocationProps) {
   const text = copy.location;
-  const check = useDirCheck(dir, initialCheck, checkDir);
+  const check = useDirCheck(dir, initialCheck, checkDir, attempt);
   const issue = check === null || check.issue === null ? undefined : text.issue[check.issue];
   const hint = check === null ? null : dirHint(text, check, requiredBytes);
 
@@ -103,7 +106,8 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
   };
 
   const browse = () => {
-    void pickFolder().then((picked) => {
+    attempt(async () => {
+      const picked = await pickFolder();
       if (picked !== null) onDirChange(withAppFolder(picked));
     });
   };

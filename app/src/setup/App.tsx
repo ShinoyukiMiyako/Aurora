@@ -220,6 +220,7 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
           desktopShortcut={state.desktopShortcut}
           initialCheck={state.dirCheck}
           busy={busy}
+          attempt={attempt}
           checkDir={(path) => bridge.checkDir(path)}
           pickFolder={() => bridge.pickFolder(copy.location.title, state.dir)}
           onDirChange={(dir) => dispatch({ type: "dir_changed", dir })}
