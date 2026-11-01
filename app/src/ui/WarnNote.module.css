@@ -1,0 +1,31 @@
+/* 文字与说明块的文字对齐：说明块在内边距之外还有 1px 描边 */
+.warnNote {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  padding: 0 calc(var(--sk-space-14) + 1px);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+/* 16px 图标与 20px 行高的首行居中对齐 */
+.icon {
+  flex: none;
+  margin-top: calc((var(--sk-lh-small) - 16px) / 2);
+  color: var(--sk-warn);
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 小按钮比一行文字高：让按钮在首行中线上居中，而不是把整行撑高 */
+.action {
+  flex: none;
+  margin: calc((var(--sk-lh-small) - 30px) / 2) 0;
+}

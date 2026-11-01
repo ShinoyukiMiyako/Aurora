@@ -20,6 +20,7 @@ import { IconButton } from "../../ui/IconButton";
 import { Modal } from "../../ui/Modal";
 import { useRovingGroup } from "../../ui/roving";
 import { TextInput } from "../../ui/TextInput";
+import { WarnNote } from "../../ui/WarnNote";
 import { AUTHLIB_DIALOG_COPY, LOGIN_ERROR } from "../../copy/login";
 import { loginProblem, normalizeServerUrl, probeProblem, type InlineProblem, type LoginProblem } from "./errors";
 import styles from "./login.module.css";
@@ -262,10 +263,7 @@ export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | 
             </div>
             {/* 这一步的说明块留给探测失败；地址不是 https 与它可能同时成立，这句写成行 */}
             {normalized.startsWith("http://") && (
-              <p className={styles.warnNote}>
-                <Icon name="alert" size={16} className={styles.warnNoteIcon} />
-                <span>{AUTHLIB_COPY.httpWarning}</span>
-              </p>
+              <WarnNote>{AUTHLIB_COPY.httpWarning}</WarnNote>
             )}
             {probeError !== null && (
               <Callout tone="danger" announce>

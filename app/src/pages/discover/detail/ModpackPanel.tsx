@@ -7,7 +7,6 @@
 
 import { useState } from "react";
 import { createPortal } from "react-dom";
-import { Icon } from "../../../art/Icon";
 import { defaultModpackCover, type InstanceCover } from "../../../art/iso/covers";
 import { ACTION_ERROR, taskFailureReason } from "../../../copy/flows";
 import { percent } from "../../../domain/format";
@@ -28,6 +27,7 @@ import { Callout } from "../../../ui/Callout";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { Select } from "../../../ui/Select";
+import { WarnNote } from "../../../ui/WarnNote";
 import { BlockedFilesModal } from "../BlockedFilesModal";
 import { DETAIL_COPY, MODPACK_COPY, SEARCH_COPY } from "../copy";
 import { instancesFromPack, type ProjectOrigin } from "../model";
@@ -377,17 +377,9 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         </Callout>
       )}
       {otherNotices.map((notice) => (
-        <div key={notice.key} className={styles.warnNote}>
-          <Icon name="alert" size={16} className={styles.warnNoteIcon} />
-          <div className={styles.warnNoteText}>
-            <NoticeText notice={notice} />
-          </div>
-          {notice.action !== null && (
-            <div className={styles.warnNoteAction}>
-              <NoticeAction action={notice.action} />
-            </div>
-          )}
-        </div>
+        <WarnNote key={notice.key} action={notice.action === null ? undefined : <NoticeAction action={notice.action} />}>
+          <NoticeText notice={notice} />
+        </WarnNote>
       ))}
       {progress === null && versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
 

@@ -16,7 +16,4 @@ describe("确认步的说明行", () => {
     expect(declarations("optionNote")).toMatch(/overflow-wrap:\s*anywhere/);
   });
 
-  it("warn 注记同样放开折行", () => {
-    expect(declarations("warnNote")).toMatch(/overflow-wrap:\s*anywhere/);
-  });
 });

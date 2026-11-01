@@ -636,28 +636,6 @@
   user-select: text;
 }
 
-/* warn 注记：文字与说明块的文字对齐 */
-.warnNote {
-  display: flex;
-  flex: none;
-  align-items: flex-start;
-  gap: var(--sk-space-10);
-  min-width: 0;
-  margin: 0;
-  padding: 0 var(--sk-space-14);
-  color: var(--sk-text-2);
-  font-size: var(--sk-fs-small);
-  line-height: var(--sk-lh-small);
-  overflow-wrap: anywhere;
-}
-
-/* 16px 图标与 20px 行高的首行居中对齐 */
-.warnNoteIcon {
-  flex: none;
-  margin-top: calc((var(--sk-lh-small) - 16px) / 2);
-  color: var(--sk-warn);
-}
-
 .after {
   display: flex;
   flex: none;

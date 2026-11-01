@@ -29,6 +29,7 @@ import { SearchInput } from "../../ui/SearchInput";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
+import { WarnNote } from "../../ui/WarnNote";
 import { CREATE_COPY, LOADER_DESCRIPTION, RELEASE_TYPE_LABEL } from "./copy";
 import styles from "./create.module.css";
 import {
@@ -66,16 +67,6 @@ function StepHead({ title, body, right }: { title: string; body: string; right?:
       </div>
       {right}
     </div>
-  );
-}
-
-/** 一步里至多一条说明块，其余的 warn 注记写成行：不限两行，后端原文不会被截断，这一步的固定高度里也省地方。 */
-function WarnNote({ children }: { children: ReactNode }) {
-  return (
-    <p className={styles.warnNote}>
-      <Icon name="alert" size={16} className={styles.warnNoteIcon} />
-      <span>{children}</span>
-    </p>
   );
 }
 
