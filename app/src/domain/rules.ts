@@ -193,7 +193,7 @@ export type AutoBackupOutcome = "runs" | "off" | "skipped";
 
 /**
  * 这一局游戏退出时会不会自动备份。备份由产品自己在游戏退出时做，「游戏启动后」选了关闭时它那时已经不在了，开关开着也不会发生。
- * 有下载任务时关闭降级为最小化，那一局其实还会备份；这里按不会算：说少了只是多一句提醒，说多了玩家就没了备份。
+ * 有进行中的任务时关闭降级为最小化，那一局其实还会备份；这里按不会算：说少了只是多一句提醒，说多了玩家就没了备份。
  */
 export function autoBackupOutcome(afterLaunch: Settings["afterLaunch"], auto: boolean): AutoBackupOutcome {
   if (!auto) return "off";
@@ -206,7 +206,7 @@ export type IsolationPolicyName = Settings["isolationPolicy"];
 
 /**
  * 跟随全局时按全局策略与实例类型推断是否隔离，与后端判定同一张表：加载器（含 OptiFine、LiteLoader）算模组版本，
- * 版本类型不是 release 算非正式版。后端另有一条「版本目录里已有 mods 或 saves 就强制隔离」，前端看不到目录，不参与推断。
+ * 版本类型不是 release 算非正式版。后端另有一条「版本目录的 mods 或 saves 里有内容就强制隔离」，前端看不到目录，不参与推断。
  */
 export function isolationByPolicy(policy: IsolationPolicyName, inst: Pick<InstanceSummary, "loader" | "extraLoaders" | "releaseType">): boolean {
   const modded = inst.loader !== "vanilla" || inst.extraLoaders.length > 0;

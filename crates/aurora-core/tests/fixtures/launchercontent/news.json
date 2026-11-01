@@ -2,24 +2,24 @@
   "version": 1,
   "entries": [
     {
-      "title": "Halloween on Realms",
+      "title": "Lantern Fair Opens",
       "tag": "News",
       "category": "Minecraft: Java Edition",
       "date": "2026-10-30",
-      "text": "12 new maps to send a shiver down your spine!",
+      "text": "A dozen invented maps for a quiet evening walk.",
       "playPageImage": {
-        "title": "halloweenralms_700x466.jpg",
-        "url": "/v2/images/halloweenralms700x466.jpg"
+        "title": "lanternfair_700x466.jpg",
+        "url": "/v2/images/lanternfair700x466.jpg"
       },
       "newsPageImage": {
-        "title": "halloweenrealms_772x350.jpg",
-        "url": "/v2/images/halloweenrealms772x350.jpg",
+        "title": "lanternfair_772x350.jpg",
+        "url": "/v2/images/lanternfair772x350.jpg",
         "dimensions": {
           "width": 772,
           "height": 350
         }
       },
-      "readMoreLink": "https://www.minecraft.net/article/halloween-on-realms?OCID=Launcher",
+      "readMoreLink": "https://www.minecraft.net/article/lantern-fair-opens?OCID=Launcher",
       "cardBorder": false,
       "articleBody": "",
       "newsType": [
@@ -30,24 +30,24 @@
       "needsTranslation": false
     },
     {
-      "title": "Rob a Mob",
+      "title": "Clockwork Harbor",
       "tag": "news",
       "category": "Minecraft for Windows",
       "date": "2026-10-29",
-      "text": "Plan the perfect heist in Rob a Mob, a new collect-and-steal adventure. Hunt valuable mobs, discover rare mutations, and build your collection. Unlock PvP to raid rival bases and steal their best mobs. Just remember to defend your mobs too!",
+      "text": "Build a tiny harbor, wind up the clockwork cranes, and trade crates with the neighbouring islands. Finish the season ledger to unlock a brass lighthouse for your whole crew. Just remember to oil the gears before the tide turns!",
       "playPageImage": {
-        "title": "RAM_Launcher_700x466.png",
-        "url": "/v2/images/RAMLauncher700x466.png"
+        "title": "CWH_Launcher_700x466.png",
+        "url": "/v2/images/CWHLauncher700x466.png"
       },
       "newsPageImage": {
-        "title": "RAM_Launcher_772x350.png",
-        "url": "/v2/images/RAMLauncher772x350.png",
+        "title": "CWH_Launcher_772x350.png",
+        "url": "/v2/images/CWHLauncher772x350.png",
         "dimensions": {
           "width": 772,
           "height": 350
         }
       },
-      "readMoreLink": "https://www.minecraft.net/article/rob-a-mob?OCID=Launcher",
+      "readMoreLink": "https://www.minecraft.net/article/clockwork-harbor?OCID=Launcher",
       "cardBorder": false,
       "articleBody": "",
       "newsType": [
@@ -58,24 +58,24 @@
       "needsTranslation": true
     },
     {
-      "title": "Enter the Marketplace, if you dare",
+      "title": "Seven Quiet Gardens",
       "tag": "news",
       "category": "Minecraft for Windows",
       "date": "2026-10-20",
-      "text": "Looking for a scary good time? Explore seven frightfully fun Spooky Spotlight packs! Discover creepy creatures, eerie environments, jarring jump scares, and chilling challenges. What are you waiting for? Enter the Marketplace...if you dare! ",
+      "text": "Need a slower evening? Wander seven pocket gardens full of paper kites, mossy stairways, and tiny tea houses. Every path ends somewhere new, so pick a gate and take your time! ",
       "playPageImage": {
-        "title": "MKPL_SpookySpotlight_Launcher_700x466.png",
-        "url": "/v2/images/MKPLSpookySpotlightLauncher700x466.png"
+        "title": "PKG_QuietGardens_Launcher_700x466.png",
+        "url": "/v2/images/PKGQuietGardensLauncher700x466.png"
       },
       "newsPageImage": {
-        "title": "MKPL_SpookySpotlight_Launcher_772x350.png",
-        "url": "/v2/images/MKPLSpookySpotlightLauncher772x350.png",
+        "title": "PKG_QuietGardens_Launcher_772x350.png",
+        "url": "/v2/images/PKGQuietGardensLauncher772x350.png",
         "dimensions": {
           "width": 772,
           "height": 350
         }
       },
-      "readMoreLink": "https://minecraft.net/article/marketplace-spotlight-october-2026?OCID=Launcher",
+      "readMoreLink": "https://minecraft.net/article/seven-quiet-gardens-october-2026?OCID=Launcher",
       "cardBorder": false,
       "articleBody": "",
       "newsType": [
@@ -86,24 +86,24 @@
       "needsTranslation": true
     },
     {
-      "title": "Avatar Legends add-on  ",
+      "title": "Tidewalker add-on  ",
       "tag": "news",
       "category": "Minecraft for Windows",
       "date": "2026-10-16",
-      "text": "Become the Avatar in Minecraft! Discover temples, master the elements, and even unlock the Avatar State. Dress for the occasion with the Blue Spirit mask Character Creator item, available for free in the Marketplace, for a limited time!",
+      "text": "Walk the shallows in this made-up add-on! Chart tide pools, befriend the hermit crabs, and learn the old sea songs. Pick up the driftwood crown in the shop, free for a little while!",
       "playPageImage": {
-        "title": "AvatarLegends_Launcher_700x466.png",
-        "url": "/v2/images/AvatarLegendsLauncher700x466.png"
+        "title": "Tidewalker_Launcher_700x466.png",
+        "url": "/v2/images/TidewalkerLauncher700x466.png"
       },
       "newsPageImage": {
-        "title": "AvatarLegends_Launcher_772x350.png",
-        "url": "/v2/images/AvatarLegendsLauncher772x350.png",
+        "title": "Tidewalker_Launcher_772x350.png",
+        "url": "/v2/images/TidewalkerLauncher772x350.png",
         "dimensions": {
           "width": 772,
           "height": 350
         }
       },
-      "readMoreLink": "https://www.minecraft.net/article/avatar-legends-add-on?OCID=Launcher",
+      "readMoreLink": "https://www.minecraft.net/article/tidewalker-add-on?OCID=Launcher",
       "cardBorder": false,
       "articleBody": "",
       "newsType": [
@@ -114,24 +114,24 @@
       "needsTranslation": true
     },
     {
-      "title": "Minecraft Realms  ",
+      "title": "Shared Harbors  ",
       "tag": "news",
       "category": "Minecraft for Windows",
       "date": "2026-10-08",
-      "text": "Bring your Wilderness Bound expedition into Minecraft Realms! Gather up to 10 explorers from any Bedrock platform for an expedition through the dappled forest. Subscribe today!",
+      "text": "Take your tide charts somewhere shared! Invite up to 10 friends from any device for a slow sail between the islands. Try it this weekend!",
       "playPageImage": {
-        "title": "MCV_FallDrop_Realms_Primary_MinecraftLauncher_700x466.png",
-        "url": "/v2/images/MCVFallDropRealmsPrimaryMinecraftLauncher700x466.png"
+        "title": "SH_Harbors_Primary_Launcher_700x466.png",
+        "url": "/v2/images/SHHarborsPrimaryLauncher700x466.png"
       },
       "newsPageImage": {
-        "title": "MCV_FallDrop_Realms_Primary_MinecraftLauncher_772x350.png",
-        "url": "/v2/images/MCVFallDropRealmsPrimaryMinecraftLauncher772x350.png",
+        "title": "SH_Harbors_Primary_Launcher_772x350.png",
+        "url": "/v2/images/SHHarborsPrimaryLauncher772x350.png",
         "dimensions": {
           "width": 772,
           "height": 350
         }
       },
-      "readMoreLink": "https://www.minecraft.net/article/wilderness-bound-realms?OCID=Launcher",
+      "readMoreLink": "https://www.minecraft.net/article/shared-harbors?OCID=Launcher",
       "cardBorder": false,
       "articleBody": "",
       "newsType": [
@@ -142,24 +142,24 @@
       "needsTranslation": true
     },
     {
-      "title": "Minecraft Dungeons II is live",
+      "title": "Deep Vaults update is out",
       "tag": "News",
       "category": "Minecraft Dungeons II",
       "date": "2026-09-28",
-      "text": "Time to brave the unknown and save the day!",
+      "text": "Grab a torch and mind the third step.",
       "playPageImage": {
-        "title": "dungeons_launch_700x466.jpg",
-        "url": "/v2/images/dungeonslaunch700x466.jpg"
+        "title": "deepvaults_700x466.jpg",
+        "url": "/v2/images/deepvaults700x466.jpg"
       },
       "newsPageImage": {
-        "title": "dungeons_launch_772x350.jpg",
-        "url": "/v2/images/dungeonslaunch772x350.jpg",
+        "title": "deepvaults_772x350.jpg",
+        "url": "/v2/images/deepvaults772x350.jpg",
         "dimensions": {
           "width": 772,
           "height": 350
         }
       },
-      "readMoreLink": "https://www.minecraft.net/article/minecraft-dungeons-ii-is-live?OCID=Launcher",
+      "readMoreLink": "https://www.minecraft.net/article/deep-vaults-update-is-out?OCID=Launcher",
       "cardBorder": true,
       "articleBody": "",
       "newsType": [
@@ -171,24 +171,24 @@
       "needsTranslation": false
     },
     {
-      "title": "New on Java Realms: Grinding & Galaxy",
+      "title": "Fresh Maps: Copper & Comets",
       "tag": "News",
       "category": "Minecraft: Java Edition",
       "date": "2026-09-28",
-      "text": "9 maps to entertain you this autumn.",
+      "text": "Nine invented maps for the rainy weeks ahead.",
       "playPageImage": {
-        "title": "jr-sep-700x466.jpg",
-        "url": "/v2/images/jrsep700x466.jpg"
+        "title": "fm-sep-700x466.jpg",
+        "url": "/v2/images/fmsep700x466.jpg"
       },
       "newsPageImage": {
-        "title": "jr-sep-772x350.jpg",
-        "url": "/v2/images/jrsep772x350.jpg",
+        "title": "fm-sep-772x350.jpg",
+        "url": "/v2/images/fmsep772x350.jpg",
         "dimensions": {
           "width": 772,
           "height": 350
         }
       },
-      "readMoreLink": "https://www.minecraft.net/article/new-on-java-realms--grinding-and-galaxy?OCID=Launcher",
+      "readMoreLink": "https://www.minecraft.net/article/fresh-maps--copper-and-comets?OCID=Launcher",
       "cardBorder": false,
       "articleBody": "",
       "newsType": [
@@ -199,11 +199,11 @@
       "needsTranslation": false
     },
     {
-      "title": "Camp Out Challenge",
+      "title": "Kite Day Challenge",
       "tag": "news",
       "category": "Minecraft for Windows",
       "date": "2026-09-26",
-      "text": "Head into the wild to place 200M cushions and 50M straw beds in our community challenge! Place 50% of both to unlock 2 free Character Creator items and a java skin, or place them all before Friday October 2 at 10 AM PT for MORE rewards for all players!",
+      "text": "Fly 200M paper kites and tie 50M ribbons in this made-up community event! Reach the halfway mark to unlock a free hat, or finish both goals by the end of the week for a bigger prize!",
       "playPageImage": {
         "title": "MCLauncher_700x466.png",
         "url": "/v2/images/MCLauncher700x466.png"
@@ -216,7 +216,7 @@
           "height": 350
         }
       },
-      "readMoreLink": "https://www.minecraft.net/article/camp-out-community-challenge?OCID=Launcher",
+      "readMoreLink": "https://www.minecraft.net/article/kite-day-community-challenge?OCID=Launcher",
       "cardBorder": false,
       "articleBody": "",
       "newsType": [

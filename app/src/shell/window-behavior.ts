@@ -97,7 +97,7 @@ export function useCloseGuard(): void {
 
 export type AfterLaunchMove = "keep" | "minimize" | "exit";
 
-/** 「游戏启动后」设置在进入运行时的动作：关闭启动器时有进行中的下载任务降级为最小化。 */
+/** 「游戏启动后」设置在进入运行时的动作：关闭启动器时有进行中的任务降级为最小化。 */
 export function afterLaunchMove(setting: AfterLaunch, activeTaskCount: number): AfterLaunchMove {
   if (setting === "keep") return "keep";
   if (setting === "minimize") return "minimize";

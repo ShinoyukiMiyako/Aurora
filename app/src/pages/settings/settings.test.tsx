@@ -987,6 +987,13 @@ describe("设置页：游戏", () => {
     await flush();
   });
 
+  it("版本隔离：关闭档的例外写目录里有内容，不写已有目录（隔离时启动一次就会建出空目录，空目录不强制隔离）", async () => {
+    await mockInvoke("update_config", { isolationPolicy: "disabled" });
+    await mount("game");
+    expect(text()).toContain("所有实例共用同一个目录，Mod 与配置可能互相串味（mods 或 saves 里有内容的实例仍会单独存放）");
+    expect(text()).not.toContain("已有 mods 或 saves");
+  });
+
   it("其他文件夹：切换前二次确认，确认后切换并刷新列表；访问不到的不能切；移除只删记录", async () => {
     let dirs = [
       { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true },

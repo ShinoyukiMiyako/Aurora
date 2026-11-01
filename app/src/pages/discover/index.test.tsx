@@ -1313,6 +1313,8 @@ describe("发现页：本地整合包的三种入口", () => {
     });
 
   beforeEach(() => {
+    // pickFile 是文件级 vi.fn，restoreMocks 只还原 spyOn，调用记录不清就会带进下一个用例
+    vi.mocked(pickFile).mockClear();
     ipc.overrides.set("preview_modpack", (args) => preview(String(args.path)));
   });
 
