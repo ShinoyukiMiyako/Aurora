@@ -1,4 +1,4 @@
-// 通知容器：右下角的通知栈，新的在最下面；弹窗或首次启动向导开着时挪到右上角，给它们的底栏让路。
+// 通知容器：右下角的通知栈，新的在最下面；弹窗或首次启动向导开着时挪到左上角，给它们的按钮让路。
 // 挂在浮层根里，弹窗打开时也看得见（动作此时置灰）。
 // 寿命与暂停由状态容器管，这里只负责摆放与交互：
 // 指针悬停或焦点在栈内时全部暂停计时，离开后恢复；动作经外壳统一执行（先关这条再导航或执行）。
@@ -9,11 +9,20 @@ import { useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { toastCountdown, type Toast as ToastState } from "../state/toasts";
-import { Toast } from "../ui/Toast";
+import { Toast, type ToastSide } from "../ui/Toast";
 import { TOASTS_COPY } from "../copy/shell";
 import { useOverlayRoot } from "./overlay";
 import { useShell } from "./shell";
 import styles from "./Toasts.module.css";
+
+/**
+ * 落点写在样式表里，判据是弹窗节点还在不在文档里（含退场中），脚本不再判断一遍，只读样式表给的方向。
+ * 容器还没挂上时没有入场动画（AnimatePresence 的 initial 是 false），方向用不上。
+ */
+function slideSide(region: HTMLElement | null): ToastSide {
+  if (region === null) return 1;
+  return getComputedStyle(region).getPropertyValue("--toast-enter-side").trim() === "-1" ? -1 : 1;
+}
 
 export function Toasts() {
   const toasts = useLauncherSelector((s) => s.toasts);
@@ -56,6 +65,7 @@ export function Toasts() {
   };
 
   if (root === null) return null;
+  const side = slideSide(regionRef.current);
   return createPortal(
     <section
       ref={regionRef}
@@ -85,9 +95,9 @@ export function Toasts() {
         sync();
       }}
     >
-      <AnimatePresence initial={false}>
+      <AnimatePresence initial={false} custom={side}>
         {toasts.map((toast) => (
-          <ToastItem key={toast.id} toast={toast} onClose={() => actions.dismissToast(toast.id)} onUnmount={recheck} />
+          <ToastItem key={toast.id} toast={toast} side={side} onClose={() => actions.dismissToast(toast.id)} onUnmount={recheck} />
         ))}
       </AnimatePresence>
     </section>,
@@ -95,7 +105,7 @@ export function Toasts() {
   );
 }
 
-function ToastItem({ toast, onClose, onUnmount }: { toast: ToastState; onClose: () => void; onUnmount: () => void }) {
+function ToastItem({ toast, side, onClose, onUnmount }: { toast: ToastState; side: ToastSide; onClose: () => void; onUnmount: () => void }) {
   const { runToastAction } = useShell();
   const onUnmountRef = useRef(onUnmount);
   onUnmountRef.current = onUnmount;
@@ -109,6 +119,7 @@ function ToastItem({ toast, onClose, onUnmount }: { toast: ToastState; onClose: 
       tone={toast.tone}
       title={toast.title}
       body={toast.body}
+      side={side}
       action={action === undefined ? undefined : { label: action.label, onClick: () => runToastAction(toast) }}
       onClose={onClose}
       countdown={memo.current.value}

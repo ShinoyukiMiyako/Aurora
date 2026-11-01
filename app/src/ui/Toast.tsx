@@ -4,10 +4,10 @@
 //   有弹窗打开时动作置灰并说明原因（动作多半要导航或开新弹窗，叠在弹窗背后执行会让用户找不到结果）。
 // - 底部倒计时细线按剩余寿命线性缩短，暂停计时期间停住；不自动消失（countdown 为 null）的没有细线；
 //   减少动画时不显示。剩余比例或剩余时长变化时细线从新的位置重新开始。
-// - 入场从右侧滑入并轻微回弹，退场淡出；其余通知让位走布局动画。
+// - 入场从落点靠窗口边的一侧滑入并轻微回弹，退场淡出；哪一侧由容器给，单独摆放时从右侧进。其余通知让位走布局动画。
 // - error 为 alert（打断播报），其余为 status；通知不抢焦点、不入 Esc 栈。
 
-import { motion } from "framer-motion";
+import { motion, type Variants } from "framer-motion";
 import { Icon, type IconName } from "../art/Icon";
 import { fade, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
@@ -23,9 +23,20 @@ export const TOAST_ACTION_BLOCKED_REASON = "先完成或关闭当前弹窗";
 
 const TONE_ICON: Readonly<Record<ToastTone, IconName>> = { info: "info", success: "check-circle", warning: "alert", error: "x-circle" };
 
-/** 入场时从右侧滑入的距离（px）与起始缩放。 */
+/** 入场时滑入的距离（px）与起始缩放。 */
 const ENTER_SHIFT = 40;
 const ENTER_SCALE = 0.96;
+
+/** 滑入滑出的一侧：1 右，-1 左。 */
+export type ToastSide = 1 | -1;
+
+/**
+ * 入场起点与退场终点是同一个位置。x 必须是数字：写成 var() 时布局动画量位置扣不掉这段位移，入场途中关闭会飞出去。
+ * 退场时节点已摘出列表、收不到新属性，一侧由 AnimatePresence 的 custom 给。
+ */
+const SLIDE: Variants = {
+  away: (side: ToastSide) => ({ opacity: 0, x: side * ENTER_SHIFT, scale: ENTER_SCALE, transition: fade.out }),
+};
 
 export interface ToastCountdown {
   /** 剩余寿命占满额的比例（0 到 1），细线从这个长度开始缩短。 */
@@ -43,10 +54,12 @@ export interface ToastProps {
   onClose: () => void;
   /** null：不自动消失（error），没有倒计时细线。 */
   countdown: ToastCountdown | null;
+  /** 跟着容器的落点走，默认 1。 */
+  side?: ToastSide;
   className?: string;
 }
 
-export function Toast({ tone, title, body, action, onClose, countdown, className }: ToastProps) {
+export function Toast({ tone, title, body, action, onClose, countdown, side = 1, className }: ToastProps) {
   const { scrimOpen } = useOverlayState();
   if (countdown !== null && (countdown.fraction < 0 || countdown.fraction > 1 || countdown.remainingMs < 0))
     throw new Error(`倒计时取值越界：fraction ${countdown.fraction}，remainingMs ${countdown.remainingMs}`);
@@ -57,9 +70,11 @@ export function Toast({ tone, title, body, action, onClose, countdown, className
       role={tone === "error" ? "alert" : "status"}
       className={cx(styles.toast, className)}
       data-tone={tone}
-      initial={{ opacity: 0, x: ENTER_SHIFT, scale: ENTER_SCALE }}
+      custom={side}
+      variants={SLIDE}
+      initial="away"
       animate={{ opacity: 1, x: 0, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
-      exit={{ opacity: 0, x: ENTER_SHIFT, scale: ENTER_SCALE, transition: fade.out }}
+      exit="away"
       transition={{ layout: springs.settle }}
     >
       <span className={styles.iconBase}>

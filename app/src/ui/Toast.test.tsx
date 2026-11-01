@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
+import { AnimatePresence } from "framer-motion";
+import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { render, stubResizeObserver, type Rendered } from "../test/dom";
 import { Modal } from "./Modal";
-import { TOAST_ACTION_BLOCKED_REASON, Toast, type ToastProps } from "./Toast";
+import { TOAST_ACTION_BLOCKED_REASON, Toast, type ToastProps, type ToastSide } from "./Toast";
 
 let view: Rendered | undefined;
 
@@ -33,6 +34,44 @@ const click = (el: Element) =>
   act(() => {
     el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
   });
+
+const shiftOf = (toast: HTMLElement) => {
+  const match = /translateX\((-?[\d.]+)px\)/.exec(toast.style.transform);
+  if (match === null) throw new Error(`transform 里没有横向位移：${toast.style.transform}`);
+  return Number(match[1]);
+};
+
+/** 退场时节点收不到新属性：进来时的一侧是属性给的，走的时候的一侧是 AnimatePresence 的 custom 给的。 */
+function Removable({ entering, leaving }: { entering: ToastSide; leaving: ToastSide }) {
+  const [shown, setShown] = useState(true);
+  return (
+    <>
+      <button onClick={() => setShown(false)}>收起</button>
+      <AnimatePresence custom={leaving}>{shown && <Toast {...base} side={entering} />}</AnimatePresence>
+    </>
+  );
+}
+
+describe("Toast 的滑动方向", () => {
+  it("容器没给方向时从右侧滑入", () => {
+    const { container } = mount(<Toast {...base} />);
+    expect(shiftOf(container.querySelector("[data-tone]") as HTMLElement)).toBe(40);
+  });
+
+  it("落点在左时从左侧滑入", () => {
+    const { container } = mount(<Toast {...base} side={-1} />);
+    expect(shiftOf(container.querySelector("[data-tone]") as HTMLElement)).toBe(-40);
+  });
+
+  it("进来之后落点翻到左侧（弹窗开了）：退场走当时的一侧，不是进来时的", async () => {
+    const { container } = mount(<Removable entering={1} leaving={-1} />);
+    const toast = container.querySelector("[data-tone]") as HTMLElement;
+    await vi.waitFor(() => expect(Math.abs(shiftOf(toast))).toBeLessThan(1), { timeout: 3000, interval: 10 });
+
+    click(buttonByText("收起"));
+    await vi.waitFor(() => expect(shiftOf(toast)).toBeLessThan(-4), { timeout: 2000, interval: 4 });
+  });
+});
 
 describe("Toast", () => {
   it.each([
