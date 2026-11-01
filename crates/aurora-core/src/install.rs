@@ -216,6 +216,7 @@ impl Aurora {
             )),
         );
         let summary = ForgeInstaller::new(cx, java_path)
+            .with_sources(self.source_plan(self.config().download_source))
             .install(installer_url)
             .await?;
         emit(
@@ -471,6 +472,94 @@ mod tests {
             .join("0.15.0")
             .join("loader-0.15.0.jar");
         assert_eq!(tokio::fs::read(&lib).await.unwrap(), b"loader-jar");
+    }
+
+    /// 传统布局的 Forge 与实例路径一样按下载源方案取 installer 的 `.sha1`：官方 maven 不通时才有镜像兜底，
+    /// 否则缓存里的 installer 无法复用，下载时也没有校验值。冒充的 installer 不是 zip，流程停在读安装配置。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn legacy_forge_install_fetches_the_installer_sha1_through_the_source_plan() {
+        const SHA1_PATH: &str =
+            "/net/minecraftforge/forge/test-47.2.0/forge-test-47.2.0-installer.jar.sha1";
+        let installer_path = SHA1_PATH.trim_end_matches(".sha1");
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        let manifest_path = "/mc/game/version_manifest_v2.json";
+        let base = "https://meta.invalid";
+        for server in [&official, &mirror] {
+            Mock::given(method("GET"))
+                .and(path(manifest_path))
+                .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                    r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                        "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                        "time":"t","releaseTime":"t"}}]}}"#
+                )))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/test.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main",
+                        "javaVersion":{"component":"java-runtime-gamma","majorVersion":17}}"#,
+                ))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(installer_path))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not a zip".to_vec()))
+                .mount(server)
+                .await;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let payload = root.join("payload");
+        std::fs::write(&payload, b"not a zip").unwrap();
+        let sha1 = aurora_base::fs::sha1_hex(&payload).await.unwrap();
+        Mock::given(method("GET"))
+            .and(path(SHA1_PATH))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&official)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(SHA1_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sha1))
+            .mount(&mirror)
+            .await;
+
+        let java = root.join("fake-java-17.cmd");
+        std::fs::write(
+            &java,
+            "@echo off\r\n>&2 echo openjdk version \"17.0.8\" 2023-07-18\r\nexit /b 0\r\n",
+        )
+        .unwrap();
+        let config = AuroraConfig {
+            default_java: Some(java),
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::for_test(config, root.clone(), root.clone())
+            .with_manifest_url(format!("{base}{manifest_path}"))
+            .with_source_routes(
+                std::sync::Arc::new(crate::sources::tests::Routes {
+                    official: official.uri(),
+                    mirror: mirror.uri(),
+                }),
+                std::time::Duration::from_secs(600),
+                std::time::Duration::from_secs(2),
+            );
+
+        aurora
+            .install("test", Some(LoaderChoice::Forge), Some("47.2.0"), None)
+            .await
+            .unwrap_err();
+
+        let sha1_requests = mirror
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == SHA1_PATH)
+            .count();
+        assert_eq!(sha1_requests, 1, "官方取不到时应换镜像取 .sha1");
     }
 
     /// 原版 JSON 声明 javaVersion.majorVersion，Forge 分支须读回它并据此解析 Java；这里给一个
