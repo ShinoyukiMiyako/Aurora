@@ -20,7 +20,7 @@ use zip::result::ZipError;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
-use crate::modpack::{BlockedProbe, RemoteFacts, count_pack_mods};
+use crate::modpack::{BlockedProbe, RemoteFacts, count_pack_mods, read_pack_blocking};
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
 const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
@@ -89,6 +89,9 @@ struct RemotePack {
 impl Aurora {
     /// 平台上某个整合包版本的清单摘要，不下载整包。服务器不支持范围读取、包不是可读的 zip
     /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法或压缩方式解不开时报 [`CoreError::Modpack`]。
+    ///
+    /// 包本体不允许启动器直接下载时，认领过就读暂存副本（导入读的也是它），没认领过报
+    /// [`CoreError::FileDistributionBlocked`]，清单里只有这个包，用户在安装前就能手动下载。
     pub async fn summarize_platform_modpack(
         &self,
         platform: Platform,
@@ -96,9 +99,16 @@ impl Aurora {
         version_id: &str,
     ) -> Result<ModpackSummary> {
         // 只要下载地址：落点目录不会被用到。
-        let (_, task) = self
+        let located = self
             .platform_file_task(platform, project_id, version_id, Path::new(""), "")
-            .await?;
+            .await;
+        let (_, task) = match located {
+            Ok(found) => found,
+            Err(err) => {
+                let (_, staged) = self.claimed_instead_of(err).await?;
+                return self.summarize_staged_pack(&staged).await;
+            }
+        };
         // CurseForge 的包本体在 forgecdn 上，范围读取与导入时的下载一样要带下载密钥。
         let reader = match &task.credential {
             Some(credential) => RangeClient::Credentialed {
@@ -112,6 +122,39 @@ impl Aurora {
             .remote_facts(&pack.manifest.remote, BlockedProbe::Skip)
             .await?;
         Ok(pack.summarize(remote))
+    }
+
+    /// 认领到暂存位的包本体：包已经在本地，与预览本地文件一样读，不发范围请求。
+    async fn summarize_staged_pack(&self, path: &Path) -> Result<ModpackSummary> {
+        let archive = read_pack_blocking(path.to_path_buf()).await?;
+        let pack_bytes = tokio::fs::metadata(path)
+            .await
+            .map_err(|source| aurora_base::Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .len();
+        let remote = self
+            .remote_facts(&archive.manifest.remote, BlockedProbe::Skip)
+            .await?;
+        let mod_files = count_pack_mods(
+            remote.destinations(),
+            archive.overrides.iter().map(|entry| entry.path.as_str()),
+        );
+        let manifest = archive.manifest;
+        Ok(ModpackSummary {
+            format: manifest.format,
+            remote_files: manifest.remote.len(),
+            name: manifest.name,
+            version: manifest.version,
+            minecraft: manifest.minecraft,
+            loader: manifest.loader,
+            pack_bytes,
+            mod_files,
+            remote_bytes: remote.bytes,
+            override_files: archive.overrides.len(),
+            override_bytes: archive.overrides_bytes,
+        })
     }
 }
 

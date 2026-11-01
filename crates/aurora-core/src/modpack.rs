@@ -1403,7 +1403,7 @@ fn preview_of(
     }
 }
 
-async fn read_pack_blocking(path: PathBuf) -> Result<PackArchive> {
+pub(crate) async fn read_pack_blocking(path: PathBuf) -> Result<PackArchive> {
     Ok(tokio::task::spawn_blocking(move || aurora_modpack::read_pack(&path)).await??)
 }
 
@@ -3780,6 +3780,124 @@ mod tests {
             "暂存副本导入后留着"
         );
         assert!(renamed.is_file(), "下载文件夹里的原文件不动");
+    }
+
+    /// 整合包本体受限：认领之前摘要报受限、清单里只有这个包；认领之后摘要从暂存副本读，数字与导入时读到的
+    /// 同一份包一致，不向 CDN 要包。暂存副本被改过时不算认领，照旧报受限。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claimed_curseforge_pack_file_is_summarized_from_the_claim() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.zip");
+        write_curseforge_pack(
+            &built,
+            &curseforge_vanilla_manifest(serde_json::json!([
+                { "projectID": 1, "fileID": 11, "required": true }
+            ])),
+            &[
+                ("overrides/options.txt", b"fov:70"),
+                ("overrides/mods/extra.jar", b"jar"),
+                ("overrides/mods/README.md", b"read me"),
+            ],
+        );
+        let pack_bytes = std::fs::read(&built).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": cf_file_with(7001, 700, "受限包-1.0.zip", None, &pack_bytes)
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": cf_mod(700, 4471)})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file(11, 1, "jei.jar", None),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(1, 6)]})),
+            )
+            .mount(&server)
+            .await;
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+
+        let err = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件：{err:?}");
+        };
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(7001, "受限包-1.0.zip")]
+        );
+
+        let downloads = tmp.path().join("下载");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("受限包-1.0 (1).zip"), &pack_bytes).unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert_eq!(report.missing, Vec::<u32>::new());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
+            .await
+            .unwrap();
+        assert_eq!(
+            summary,
+            crate::modpack_summary::ModpackSummary {
+                format: PackFormat::CurseForge,
+                name: "受限包".into(),
+                version: None,
+                minecraft: "test".into(),
+                loader: None,
+                pack_bytes: pack_bytes.len() as u64,
+                remote_files: 1,
+                mod_files: 2,
+                remote_bytes: Some(10),
+                override_files: 3,
+                override_bytes: 6 + 3 + 7,
+            }
+        );
+
+        let staged = aurora
+            .blocked_claims_dir()
+            .join("curseforge-7001")
+            .join("受限包-1.0.zip");
+        std::fs::write(&staged, b"tampered").unwrap();
+        let err = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::FileDistributionBlocked { files } if files[0].file_id == 7001),
+            "{err:?}"
+        );
     }
 
     #[test]

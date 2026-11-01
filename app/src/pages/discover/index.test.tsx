@@ -1728,6 +1728,7 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
 
   describe("整合包本体要手动下载时的提前说明", () => {
     const NOTE = "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。";
+    const LISTED = "作者不允许启动器直接下载这个整合包，需要到 CurseForge 网页手动下载。";
     const SUMMARY_FAILED = "整合包清单没能提前读出来";
     const BODY = {
       project_id: 700,
@@ -1752,6 +1753,20 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
       await flush();
     }
 
+    const READY_SUMMARY = {
+      name: "生存",
+      version: "2.0.0",
+      minecraft: "1.20.1",
+      loader: { kind: "fabric", version: "0.16.5" },
+      format: "curseforge",
+      pack_bytes: 2048,
+      remote_files: 2,
+      mod_files: 2,
+      remote_bytes: 4096,
+      override_files: 0,
+      override_bytes: 0,
+    };
+
     const blockedSummary = async () => {
       const { IpcError } = await import("../../ipc/errors");
       throw new IpcError("distribution_blocked", "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：生存 2.0.0.zip", { files: [BODY] });
@@ -1759,7 +1774,8 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
 
     it("摘要报本体受限：只说要手动下载，不当成清单读不出来，也不给重试；安装照常能点，点了走手动下载", async () => {
       await openPack(false, blockedSummary);
-      expect(dialog().textContent).toContain(NOTE);
+      expect(dialog().textContent).toContain(LISTED);
+      expect(dialog().textContent).not.toContain(NOTE);
       expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
       expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "重试")).toBe(false);
 
@@ -1769,35 +1785,69 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
       });
       await clickIn(dialog(), "安装为新实例");
       expect(dialog().textContent).toContain("没装成：有 1 个文件需要到 CurseForge 网页手动下载");
-      expect(dialog().textContent).not.toContain(NOTE);
+      expect(dialog().textContent).not.toContain(LISTED);
       expect(buttonByText("查看这些文件", dialog())).toBeDefined();
     });
 
     it("工程允许下载、这个版本的本体受限：以摘要为准，同样提前说明", async () => {
       await openPack(true, blockedSummary);
-      expect(dialog().textContent).toContain(NOTE);
+      expect(dialog().textContent).toContain(LISTED);
       expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
     });
 
-    it("工程标着不允许、摘要还没到：先按工程标记说明", async () => {
+    it("安装前就能打开清单：认领到本体后摘要重读，说明收起、Mod 数出来，没有发起安装", async () => {
+      let claimed = false;
+      await openPack(false, () => (claimed ? READY_SUMMARY : blockedSummary()));
+      ipc.overrides.set("claim_blocked_files", () => {
+        claimed = true;
+        return { claimed: [{ file_id: 7001, source_path: `${MOCK_DOWNLOADS_DIR}\\生存 2.0.0 (1).zip` }], missing: [] };
+      });
+
+      await clickIn(dialog(), "查看这些文件");
+      expect(blockedRow("生存 2.0.0.zip").textContent).not.toContain("装到");
+      await clickIn(blockedDialog(), "我已下载，重新检查");
+      expect(callsOf(ipc, "summarize_platform_modpack")).toHaveLength(2);
+      await clickIn(blockedDialog(), "继续导入");
+
+      expect(dialog().textContent).not.toContain(LISTED);
+      expect(dialog().textContent).toContain("2 个 Mod");
+      expect(callsOf(ipc, "install_modpack")).toEqual([]);
+    });
+
+    it("认领完不点继续、直接关掉清单：摘要照样已经重读过", async () => {
+      let claimed = false;
+      await openPack(false, () => (claimed ? READY_SUMMARY : blockedSummary()));
+      ipc.overrides.set("claim_blocked_files", () => {
+        claimed = true;
+        return { claimed: [{ file_id: 7001, source_path: `${MOCK_DOWNLOADS_DIR}\\生存 2.0.0 (1).zip` }], missing: [] };
+      });
+
+      await clickIn(dialog(), "查看这些文件");
+      await clickIn(blockedDialog(), "我已下载，重新检查");
+      await clickIn(blockedDialog(), "关闭");
+
+      expect(dialog().textContent).not.toContain(LISTED);
+    });
+
+    it("清单里没找到本体：摘要不重读，说明还在", async () => {
+      await openPack(false, blockedSummary);
+      ipc.overrides.set("claim_blocked_files", () => ({ claimed: [], missing: [7001] }));
+
+      await clickIn(dialog(), "查看这些文件");
+      await clickIn(blockedDialog(), "我已下载，重新检查");
+
+      expect(callsOf(ipc, "summarize_platform_modpack")).toHaveLength(1);
+      expect(dialog().textContent).toContain(LISTED);
+    });
+
+    it("工程标着不允许、摘要还没到：先按工程标记说明，还没有清单可开", async () => {
       await openPack(false, () => new Promise(() => {}));
       expect(dialog().textContent).toContain(NOTE);
+      expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "查看这些文件")).toBe(false);
     });
 
     it("工程标着不允许、这个版本的摘要读到了：本体拿得到，不说明", async () => {
-      await openPack(false, () => ({
-        name: "生存",
-        version: "2.0.0",
-        minecraft: "1.20.1",
-        loader: { kind: "fabric", version: "0.16.5" },
-        format: "curseforge",
-        pack_bytes: 2048,
-        remote_files: 2,
-        mod_files: 2,
-        remote_bytes: 4096,
-        override_files: 0,
-        override_bytes: 0,
-      }));
+      await openPack(false, () => READY_SUMMARY);
       expect(dialog().textContent).not.toContain(NOTE);
       expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
     });

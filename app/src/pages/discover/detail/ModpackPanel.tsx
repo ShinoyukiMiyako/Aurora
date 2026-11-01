@@ -3,6 +3,7 @@
 // 摘要还没到或读不出来时，游戏版本与加载器退回平台版本信息，Mod 数与下载量不显示。
 // 平台整合包不提供可选文件勾选，可选文件照装。导入因有文件需要到 CurseForge 网页手动下载而失败时，
 // 主按钮改为「查看这些文件」打开清单，全部找到后在清单里「重新安装」重排这个任务。
+// 摘要就报整合包文件本身要手动下载时，提前说明上也能打开清单；认领后摘要读得到了，面板回到正常的安装前状态。
 
 import { useState } from "react";
 import { createPortal } from "react-dom";
@@ -17,7 +18,7 @@ import { useRunner } from "../../../shell/useRunner";
 import { errorRecord } from "../../../state/errors";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
-import { useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
+import { blockedFilesOf, useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
 import { findInstance } from "../../../state/selectors";
 import type { BlockedFileDto } from "../../../state/store";
@@ -84,18 +85,18 @@ function summaryErrorText(error: Error): string {
   return record.code === "curseforge_key_rejected" || record.code === "modpack_unsupported_compression" ? taskFailureReason(record) : record.message;
 }
 
-/** 摘要因整合包文件本身不允许启动器下载而读不出来：重试还是这个结果，手动下载走安装失败后的清单。 */
-function summaryBlocked(summary: ResourceResult<ModpackSummaryDto>): boolean {
-  return summary.status === "error" && errorRecord(summary.error).code === "distribution_blocked";
+/** 摘要因整合包文件本身不允许启动器下载而读不出来时的清单（只有这个包）：重试还是这个结果，手动下载走这份清单。 */
+function summaryBlockedFiles(summary: ResourceResult<ModpackSummaryDto>): readonly BlockedFileDto[] | null {
+  return summary.status === "error" ? blockedFilesOf(summary.error) : null;
 }
 
 /**
  * 要不要提前说明整合包文件得手动下载。工程标记只是工程级的默认说法：这个版本的摘要读到了就说明文件拿得到，
- * 摘要报受限时不管标记怎么写都算；摘要没到时先按标记说。这里不禁用安装：点了才有清单，手动下载走的是这条路。
+ * 摘要报受限时不管标记怎么写都算；摘要没到时先按标记说。这里不禁用安装：没先手动下载就点了，失败态同样给清单。
  */
 function packFileBlocked(detail: ProjectDetail, summary: ResourceResult<ModpackSummaryDto>): boolean {
   if (summary.status === "ready") return false;
-  return !detail.distribution_allowed || summaryBlocked(summary);
+  return !detail.distribution_allowed || summaryBlockedFiles(summary) !== null;
 }
 
 /** 这个实例最近一次导入任务。 */
@@ -140,8 +141,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const [cover, setCover] = useState<InstanceCover>(() => defaultModpackCover(detail.project_id));
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  // 打开过的清单留着它的文件与任务：重新安装后面板离开失败态，清单仍要播完退场
-  const [blocked, setBlocked] = useState<{ open: boolean; files: readonly BlockedFileDto[]; taskId: string } | null>(null);
+  // 打开过的清单留着它的文件与任务：重新安装后面板离开失败态，清单仍要播完退场。安装前打开的没有任务
+  const [blocked, setBlocked] = useState<{ open: boolean; files: readonly BlockedFileDto[]; taskId: string | null } | null>(null);
 
   const list = versions.status === "ready" ? versions.data.versions : null;
   // 版本列表拉不到时还能装详情里给出的最新版本
@@ -153,6 +154,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const summary = useModpackSummary(detail.platform, detail.project_id, version === null ? null : version.version_id);
   const releases = manifest.status === "ready" ? manifest.data.versions.map((v) => v.id) : null;
   const facts = packFacts(version, summary.status === "ready" ? summary.data : null, releases);
+  const summaryFiles = summaryBlockedFiles(summary);
   const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, extra: [{ icon: "box", text: MODPACK_COPY.summaryLoading }] } : facts;
   // 提交的是去掉首尾空格的名字，校验也按它：否则前面多个空格就躲过重名检查，末尾多个空格又被当成 Windows 不允许的名字
   const nameError = instanceNameError(name.trim(), existing);
@@ -314,8 +316,21 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         </Callout>
       )}
       {progress === null && versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
-      {progress === null && packFileBlocked(detail, summary) && <Callout tone="warn">{MODPACK_COPY.packBlocked}</Callout>}
-      {progress === null && summary.status === "error" && !summaryBlocked(summary) && (
+      {progress === null && packFileBlocked(detail, summary) && (
+        <Callout
+          tone="warn"
+          action={
+            summaryFiles === null ? undefined : (
+              <Button size="sm" variant="ghost" onClick={() => setBlocked({ open: true, files: summaryFiles, taskId: null })}>
+                {MODPACK_COPY.viewBlocked}
+              </Button>
+            )
+          }
+        >
+          {summaryFiles === null ? MODPACK_COPY.packBlocked : MODPACK_COPY.packBlockedListed}
+        </Callout>
+      )}
+      {progress === null && summary.status === "error" && summaryFiles === null && (
         <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={summary.reload}>{SEARCH_COPY.retry}</Button>}>
           <span className={styles.errorTitle}>{MODPACK_COPY.summaryFailed}</span>
           <span className={styles.errorText}>{summaryErrorText(summary.error)}</span>
@@ -342,11 +357,11 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         <BlockedFilesModal
           open={blocked.open}
           files={blocked.files}
-          origin="failed"
+          origin={blocked.taskId === null ? "import" : "failed"}
           onClose={() => setBlocked({ ...blocked, open: false })}
           onAllFound={() => {
             setBlocked({ ...blocked, open: false });
-            retry(blocked.taskId);
+            if (blocked.taskId !== null) retry(blocked.taskId);
           }}
         />
       )}
