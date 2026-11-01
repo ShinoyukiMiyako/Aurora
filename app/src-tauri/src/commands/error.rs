@@ -1560,7 +1560,7 @@ mod tests {
         .into();
         assert_eq!(
             timeout.message,
-            "这个 Java 10 秒内没有给出版本信息，已放弃: D:/jdk/bin/java.exe"
+            "这个 Java 10 秒内没有给出版本信息，已放弃：D:/jdk/bin/java.exe"
         );
         let detail = timeout.detail.unwrap();
         assert_eq!(detail["reason"], json!("probe_timeout"));
@@ -1574,7 +1574,7 @@ mod tests {
         assert_eq!(incomplete.code, code::JAVA_RUNTIME_INCOMPLETE);
         assert_eq!(
             incomplete.message,
-            "这个 Java 缺少 release、lib/modules，可能没装完整: D:/jdk/bin/java.exe"
+            "这个 Java 缺少 release、lib/modules，可能没装完整：D:/jdk/bin/java.exe"
         );
         assert_eq!(
             incomplete.detail,

@@ -182,7 +182,7 @@ pub enum CoreError {
         source: Option<aurora_java::Error>,
     },
     /// 手动添加的 Java 缺少运行时文件，多半没装完整；`missing` 相对 Java 根目录、以 `/` 分隔。
-    #[error("这个 Java 缺少 {}，可能没装完整: {}", missing.join("、"), path.display())]
+    #[error("这个 Java 缺少 {}，可能没装完整：{}", missing.join("、"), path.display())]
     JavaRuntimeIncomplete { path: PathBuf, missing: Vec<String> },
     /// 读写 Windows 图形设置里某个程序的显卡偏好失败。`path` 是那个程序。
     #[error("写入 {path} 的显卡偏好失败")]
@@ -317,14 +317,14 @@ impl JavaPathProblem {
     fn message(self, path: &std::path::Path) -> String {
         let path = path.display();
         match self {
-            JavaPathProblem::NotAbsolute => format!("Java 路径须是绝对路径: {path}"),
+            JavaPathProblem::NotAbsolute => format!("Java 路径须是绝对路径：{path}"),
             JavaPathProblem::NotJavaExecutable => {
-                format!("只能添加 java.exe 或 javaw.exe: {path}")
+                format!("只能添加 java.exe 或 javaw.exe：{path}")
             }
-            JavaPathProblem::NotFound => format!("找不到这个文件: {path}"),
-            JavaPathProblem::ProbeFailed => format!("识别不出这个 Java: {path}"),
+            JavaPathProblem::NotFound => format!("找不到这个文件：{path}"),
+            JavaPathProblem::ProbeFailed => format!("识别不出这个 Java：{path}"),
             JavaPathProblem::ProbeTimeout => format!(
-                "这个 Java {} 秒内没有给出版本信息，已放弃: {path}",
+                "这个 Java {} 秒内没有给出版本信息，已放弃：{path}",
                 aurora_java::PROBE_TIMEOUT.as_secs()
             ),
         }
@@ -411,27 +411,27 @@ mod tests {
             (
                 JavaPathProblem::NotAbsolute,
                 "not_absolute",
-                format!("Java 路径须是绝对路径: {shown}"),
+                format!("Java 路径须是绝对路径：{shown}"),
             ),
             (
                 JavaPathProblem::NotJavaExecutable,
                 "not_java_executable",
-                format!("只能添加 java.exe 或 javaw.exe: {shown}"),
+                format!("只能添加 java.exe 或 javaw.exe：{shown}"),
             ),
             (
                 JavaPathProblem::NotFound,
                 "not_found",
-                format!("找不到这个文件: {shown}"),
+                format!("找不到这个文件：{shown}"),
             ),
             (
                 JavaPathProblem::ProbeFailed,
                 "probe_failed",
-                format!("识别不出这个 Java: {shown}"),
+                format!("识别不出这个 Java：{shown}"),
             ),
             (
                 JavaPathProblem::ProbeTimeout,
                 "probe_timeout",
-                format!("这个 Java 10 秒内没有给出版本信息，已放弃: {shown}"),
+                format!("这个 Java 10 秒内没有给出版本信息，已放弃：{shown}"),
             ),
         ] {
             assert_eq!(reason.code(), code);
@@ -462,7 +462,7 @@ mod tests {
         };
         assert_eq!(
             incomplete.to_string(),
-            format!("这个 Java 缺少 release、lib/modules，可能没装完整: {shown}")
+            format!("这个 Java 缺少 release、lib/modules，可能没装完整：{shown}")
         );
     }
 

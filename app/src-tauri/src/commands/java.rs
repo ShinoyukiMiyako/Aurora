@@ -287,7 +287,7 @@ mod tests {
         assert_eq!(err.code, code::JAVA_PATH_INVALID);
         assert_eq!(
             err.message,
-            format!("只能添加 java.exe 或 javaw.exe: {}", notes.display())
+            format!("只能添加 java.exe 或 javaw.exe：{}", notes.display())
         );
         let detail = err.detail.unwrap();
         assert_eq!(detail["reason"], json!("not_java_executable"));
