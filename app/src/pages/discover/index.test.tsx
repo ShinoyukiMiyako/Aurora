@@ -262,6 +262,13 @@ describe("发现页：搜索", () => {
     expect(searchInput().value).toBe("sod");
   });
 
+  it("从实例的 Mod 页过来：写回路由之后适配实例还在，搜索按它的版本与加载器", async () => {
+    await mount({ page: "discover", kind: "mod", forInstance: "生存" });
+    expect(nav.route).toEqual({ page: "discover", kind: "mod" });
+    expect(document.body.textContent).toContain("适配：生存");
+    expect(lastSearch()).toMatchObject({ gameVersions: ["1.21.1"], loaders: ["fabric"] });
+  });
+
   it("输入停 300 ms 才搜；生效的关键词写回路由", async () => {
     await mount();
     expect(lastSearch().query).toBeNull();
