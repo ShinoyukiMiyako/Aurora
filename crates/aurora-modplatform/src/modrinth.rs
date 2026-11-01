@@ -446,18 +446,26 @@ pub struct ModrinthHit {
 impl ModrinthHit {
     /// 转成统一命中。`requested` 是本次搜索的类型：工程同时属于多种类型时（常见于同时发布为
     /// Mod 与数据包的工程），取其中被请求的那一种，免得在「数据包」搜索里显示成 Mod。
+    ///
+    /// `project_type` 不可全信：数据包工程写的都是 `mod`，纯数据包也一样，所以 `all_project_types`
+    /// 给了又不含它时不认，否则纯数据包在「全部」里会标成 Mod。
     pub fn to_search_hit(&self, requested: &[ResourceType]) -> SearchHit {
         let primary = ResourceType::from_modrinth_project_type(&self.project_type);
-        let resource_type = if requested.contains(&primary) {
+        let primary_real = self.all_project_types.is_empty()
+            || self
+                .all_project_types
+                .iter()
+                .any(|p| p == primary.modrinth_project_type());
+        let resource_type = if primary_real && requested.contains(&primary) {
             primary
         } else {
-            requested
+            self.all_project_types
                 .iter()
-                .copied()
-                .find(|t| {
-                    self.all_project_types
+                .find_map(|p| {
+                    requested
                         .iter()
-                        .any(|p| p == t.modrinth_project_type())
+                        .copied()
+                        .find(|t| t.modrinth_project_type() == p)
                 })
                 .unwrap_or(primary)
         };
@@ -631,12 +639,14 @@ pub struct ModrinthProject {
 }
 
 impl ModrinthProject {
-    /// 工程的资源类型。Modrinth 把数据包工程记为 `mod`，只能从加载器只有 `datapack` 认出来。
+    /// 工程的资源类型。Modrinth 把数据包工程记为 `mod`，详情又不带 `all_project_types`，只能看加载器：
+    /// 有 `datapack` 而没有 Mod 加载器的工程没有 Mod 文件可装。同时也发布成 Mod 的工程这里认不出，
+    /// 按 Mod 算，它的 Mod 版本是 jar、数据包版本是 zip，详情一级分不开。
     pub fn resource_type(&self) -> ResourceType {
         let primary = ResourceType::from_modrinth_project_type(&self.project_type);
         if primary == ResourceType::Mod
-            && !self.loaders.is_empty()
-            && self.loaders.iter().all(|l| l == "datapack")
+            && self.loaders.iter().any(|l| l == "datapack")
+            && !self.loaders.iter().any(|l| parse_loader_name(l).is_some())
         {
             ResourceType::DataPack
         } else {
@@ -963,6 +973,30 @@ mod tests {
         assert_eq!(mixed.hue, Some(25));
     }
 
+    /// `/v2/search` 的实际响应里数据包工程的 `project_type` 一律是 `mod`，`all_project_types` 才是实情。
+    #[test]
+    fn hit_trusts_all_project_types_over_project_type() {
+        let everything = ResourceType::DISCOVERABLE;
+        let pure = hit_json("mod", &["datapack"]).to_search_hit(&everything);
+        assert_eq!(pure.resource_type, ResourceType::DataPack);
+        assert_eq!(
+            pure.page_url.as_deref(),
+            Some("https://modrinth.com/datapack/terralith")
+        );
+        // 同时发成数据包与资源包的工程标成数据包，与详情的判定一致。
+        let packs = hit_json("mod", &["datapack", "resourcepack"]).to_search_hit(&everything);
+        assert_eq!(packs.resource_type, ResourceType::DataPack);
+        // 确实也是 Mod 的工程仍按主类型。
+        let dual = hit_json("mod", &["datapack", "mod"]).to_search_hit(&everything);
+        assert_eq!(dual.resource_type, ResourceType::Mod);
+        // 响应没带这个字段时没有别的依据。
+        let unlisted = hit_json("resourcepack", &[]).to_search_hit(&everything);
+        assert_eq!(unlisted.resource_type, ResourceType::ResourcePack);
+        // 列出的类型一个都不在本次请求里时，退回工程自报的类型。
+        let elsewhere = hit_json("mod", &["plugin"]).to_search_hit(&[ResourceType::Shader]);
+        assert_eq!(elsewhere.resource_type, ResourceType::Mod);
+    }
+
     #[test]
     fn primary_author_prefers_owner_then_ordering() {
         let member = |name: &str, role: &str, ordering: i64| ModrinthTeamMember {
@@ -1051,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn project_with_only_datapack_loader_is_a_datapack() {
+    fn project_with_datapack_but_no_mod_loader_is_a_datapack() {
         let project = |loaders: &[&str]| -> ModrinthProject {
             serde_json::from_value(serde_json::json!({
                 "id": "p", "title": "t", "description": "d", "project_type": "mod",
@@ -1068,6 +1102,16 @@ mod tests {
             ResourceType::Mod
         );
         assert_eq!(project(&[]).resource_type(), ResourceType::Mod);
+        // 同一个 zip 兼发资源包或插件的工程没有 Mod 文件，当成 Mod 会把 zip 装进 mods 目录。
+        assert_eq!(
+            project(&["datapack", "minecraft"]).resource_type(),
+            ResourceType::DataPack
+        );
+        assert_eq!(
+            project(&["datapack", "paper", "purpur"]).resource_type(),
+            ResourceType::DataPack
+        );
+        assert_eq!(project(&["paper"]).resource_type(), ResourceType::Mod);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
