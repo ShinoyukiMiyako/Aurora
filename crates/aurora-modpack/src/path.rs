@@ -106,15 +106,15 @@ pub enum PathValidationError {
     ParentTraversal,
     #[error("路径含 Windows 盘符前缀")]
     DrivePrefix,
-    #[error("路径进入启动器元数据目录: {component}")]
+    #[error("路径进入启动器元数据目录：{component}")]
     ProtectedTopLevel { component: String },
-    #[error("路径组件以点或空格结尾: {component}")]
+    #[error("路径组件以点或空格结尾：{component}")]
     TrailingDotOrSpace { component: String },
-    #[error("路径组件含 Windows 非法字符: {component}")]
+    #[error("路径组件含 Windows 非法字符：{component}")]
     InvalidCharacter { component: String },
-    #[error("路径组件是 Windows 保留设备名: {component}")]
+    #[error("路径组件是 Windows 保留设备名：{component}")]
     ReservedName { component: String },
-    #[error("路径组件疑似 DOS 短文件名别名: {component}")]
+    #[error("路径组件疑似 DOS 短文件名别名：{component}")]
     DosShortName { component: String },
 }
 

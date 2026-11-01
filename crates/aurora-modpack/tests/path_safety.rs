@@ -158,3 +158,26 @@ fn rejects_windows_aliases_invalid_characters_and_controls() {
         );
     }
 }
+
+/// 这些原文经错误详情显示在界面上，中文句子里用全角冒号。
+#[test]
+fn rejection_messages_use_full_width_colons() {
+    let meta = aurora_instance::AURORA_META_DIR;
+    assert_eq!(
+        validate_relative_path(&format!("{meta}/a"))
+            .unwrap_err()
+            .to_string(),
+        format!("路径进入启动器元数据目录：{meta}")
+    );
+    for (path, message) in [
+        ("mods/a.", "路径组件以点或空格结尾：a."),
+        ("mods/a?.jar", "路径组件含 Windows 非法字符：a?.jar"),
+        ("mods/CON.jar", "路径组件是 Windows 保留设备名：CON.jar"),
+        ("mods/PROGRA~1", "路径组件疑似 DOS 短文件名别名：PROGRA~1"),
+    ] {
+        assert_eq!(
+            validate_relative_path(path).unwrap_err().to_string(),
+            message
+        );
+    }
+}
