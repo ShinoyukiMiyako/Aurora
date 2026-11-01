@@ -114,6 +114,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 - 1.12.2 及更早（`minecraftArguments`）的版本按设置补上 `--width` / `--height`，Windows 上补上新式版本 JSON 自带的 `HeapDumpPath` 驱动识别参数。`options.txt` 的 `resourcePacks` 里一个带 `file/` 前缀的都没有时（1.12.2 及更早的写法），整份按文件名识别。
 - 会话日志读尾部时丢掉最后一段没有换行的半行：游戏运行中日志按块落盘，文件常停在半行。
 - 游戏输出单行最多保留 64 KB（`aurora_launch::process::MAX_LINE_BYTES`），超出部分丢弃，并在这一行末尾注明丢了多少字节；会话日志、崩溃判定缓存与界面三处同源。切在 UTF-8 字符中间时退到字符前。
+- 官方日志配置让 stdout 走 log4j 的 XML 布局，读取端在同一处按行解回 `[线程/级别]: 正文`（`aurora_launch` 的 `log4j_xml.rs`），边读边吐，不等事件结束；stderr 不解。这份配置带着 Log4Shell 的缓解，不能不传。
 - 实例 Java 跟随全局、全局固定了默认 Java 时按固定路径启动，找不到或版本不够同样报 `java_pinned_missing` / `java_too_old`。这两个失败码带参数 `pinned_by`（`instance` / `global`），前端据此给出修复：`global` 时修复按钮把默认 Java 改回自动选择再启动（`auto_default_java`），第二个按钮去实例设置单独指定；`instance` 时把实例改回自动选择。
 - 实例 id 不能以点或空格结尾：Windows 会把 `versions/abc.` 解析成 `versions/abc`，实例锁却按字面区分。
 
@@ -186,7 +187,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 1. 命令开头调用 `TaskRegistry::register`。同一个 id 已在运行时报 `task_conflict`。
 2. 进度通过 `aurora://core-event` 推送，负载里带 `task_id`，前端的下载队列据此把进度归到对应任务。作为组合任务的一项调用时（见下文），命令另收可选参数 `step`（第几项，从 0 计），原样标在这次调用的每条事件上。
 3. `cancel_task(taskId)` 触发令牌，命令必须在 1000 ms（`CANCEL_DEADLINE`）内以 `cancelled` 返回。个别不观察令牌的阶段，由 `TaskHandle::run` 在宽限期满后放弃。失败或被放弃的整合包导入按命令层占住的实例名清理半成品（`discard_modpack_import`），不看未完成标记里记的是哪个任务；删不掉时把标记落成 `failed` 或 `cancelled`（`settle_modpack_import`），不留 `pending`。还没占到实例名就失败的导入不碰任何实例。
-4. 前端任务表通过 `save_task_journal` / `load_task_journal` 整份原子写入 `<数据目录>/tasks.json`。后端不解读任务表本身，只比序号：`save_task_journal` 带从 1 起单调递增的 `seq`，后端在写锁内读盘上那份的序号，不比它大的丢弃（仍返回成功，`seq` 为 0 报 `invalid_argument`），两次几乎同时到达的写入不会让较早的那份盖掉较新的。`load_task_journal` 返回 `{ seq, tasks }`，与写入共用一把锁，前端从读到的序号之后接着编（取它与内存序号的较大者，不倒退）。没有 `seq` 的旧文件按 0 读；盘上文件损坏或版本不符时其中的序号按 0 处理，前端照常写回覆盖。
+4. 前端任务表通过 `save_task_journal` / `load_task_journal` 整份原子写入 `<数据目录>/tasks.json`。后端不解读任务表本身，只比序号：`save_task_journal` 带从 1 起单调递增的 `seq`，后端在写锁内读盘上那份的序号，不比它大的丢弃（仍返回成功，`seq` 为 0 报 `invalid_argument`），两次几乎同时到达的写入不会让较早的那份盖掉较新的。`load_task_journal` 返回 `{ seq, tasks }`，与写入共用一把锁，前端从读到的序号之后接着编（取它与内存序号的较大者，不倒退）。读回时还在进行的导出任务按落点调一次 `discard_export_leftovers`：进程没了收尾代码跑不到，写到一半的临时文件留在玩家选的目录里，这个命令只删导出自己的命名。没有 `seq` 的旧文件按 0 读；盘上文件损坏或版本不符时其中的序号按 0 处理，前端照常写回覆盖。
 
 ### 实例互斥
 
@@ -296,7 +297,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 - 支持与否只看版本 JSON（`aurora-launch` 的 `quickplay.rs`，`quick_play_support`），不按版本号判断：`arguments.game` 里有以 `is_quick_play_singleplayer`、`is_quick_play_multiplayer` 为条件的参数块就置上对应 feature 并填入占位符。Realms 与记录路径两个 feature 永远不置。实例列表的 `quick_play`（`{ singleplayer, multiplayer }`，继承链断了或损坏时为 null）让前端提前禁用入口。
 - 没有这些块、但启动参数是 joptsimple 形式的版本（新式 `arguments.game`，或旧式参数里有 `--username`），多人改为追加 `--server <host> --port <port>`（`legacy_server_args`）。`minecraftArguments` 的版本先拼 `--width` / `--height`，后拼 `--server` / `--port`，都在玩家自定义参数之前。单人报 `quick_play_unsupported`；更早的位置参数式版本两种都不支持。
-- 校验放在校验游戏文件阶段：版本不支持报 `quick_play_unsupported`，存档不在报 `world_not_found`，地址写错报 `invalid_argument`（`detail.address`），不会先下载一堆文件再告诉玩家进不去。
+- 校验放在校验游戏文件阶段：版本不支持报 `quick_play_unsupported`，存档不在报 `world_not_found`，世界文件夹名过不了系统代码页报 `world_name_unencodable`（java.exe 按系统代码页读命令行，这个名字到不了游戏），地址写错报 `invalid_argument`（`detail.address`），不会先下载一堆文件再告诉玩家进不去。
 - 主页固定的服务器可以记住「加入」用的实例（`PinnedServer.instance`）。`set_pinned_server_instance(address, instance)` 按地址的身份找固定项（没写端口等于 25565），只改配置、不占实例，返回整份固定列表；不在列表里报 `server_not_pinned`，实例不存在报 `version_not_installed`。实例改名时绑定跟着改，删除时清空。
 
 `offlineFallback` 与 `quickPlay` 可以同时传。前端以离线方式进单人时沿用失败那一局的单人直达目标，服务器目标丢掉，按普通启动进标题画面：离线方式只保证单人游戏。
@@ -320,9 +321,9 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 ### 崩溃诊断与启动提醒
 
-诊断不只看会话日志，还扫这一局留下的两份文件（`crashdiag.rs`）：工作目录下 pid 对得上、修改时间不早于会话开始的 `hs_err_pid<pid>.log`，以及 `crash-reports/` 下会话开始后最新的一份崩溃报告。Forge 崩溃报告的 Suspected Mods 段并入可疑 Mod，对到 mods 目录里的文件。`last_crash` 的报告带 `exit_code_note`（退出码对照：`0xC0000005`、`0xC0000409` 与 1，表外的码为 null）与 `scanned_files`（参与扫描的文件），线索带来源。规则一条都没命中、退出码是访问冲突或紧急中止时，给出类别 `native_crash` 的线索；退出码 1 太笼统，只给说明不给线索。`last-crash.json` 的格式版本是 2，旧的 1 版照常读。
+诊断不只看会话日志，还扫这一局留下的两份文件（`crashdiag.rs`）：工作目录下 pid 对得上、修改时间不早于会话开始的 `hs_err_pid<pid>.log`，以及 `crash-reports/` 下会话开始后最新的一份崩溃报告。Forge 崩溃报告的 Suspected Mods 段并入可疑 Mod，对到 mods 目录里的文件。`last_crash` 的报告带 `exit_code_note`（退出码对照：`0xC0000005`、`0xC0000409` 与 1，表外的码为 null）与 `scanned_files`（参与扫描的文件），线索带来源。规则一条都没命中时先看 JVM 致命错误头里的异常码（JVM 自己接住原生异常时退出码是 1，异常码只在这里），再看退出码是不是访问冲突或紧急中止，两种都给出类别 `native_crash` 的线索；退出码 1 太笼统，只给说明不给线索。Fabric 的依赖报错按系统语言翻译，规则同时认本地化措辞与不翻译的原因行（`HARD_DEP ...`）；`Incompatible mods found!` 这一句只在别的规则都说不清时才算一条。`last-crash.json` 的格式版本是 2，旧的 1 版照常读。
 
-启动前的几项判断只提醒、不阻断（`aurora_launch::precheck`），写进启动日志，也记进这一局的崩溃报告（`warnings`）：`game_path`（路径含非 ASCII 或 `!`）、`onedrive_folder`、`icloud_folder`（工作目录在同步文件夹里）、`long_player_name`（角色名超过 16 个字符而游戏是 1.20.3 或更新）、`jvm_memory_unit`、`jvm_min_over_max`、`jvm_max_too_low`（自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法不对、最小堆大于最大堆、最大堆低于 512 MB）。
+启动前的几项判断只提醒、不阻断（`aurora_launch::precheck`），写进启动日志，也记进这一局的崩溃报告（`warnings`）：`game_path`（工作目录或 natives 目录含非 ASCII 或 `!`）、`onedrive_folder`、`icloud_folder`（工作目录在同步文件夹里）、`long_player_name`（角色名超过 16 个字符而游戏是 1.20.3 或更新）、`jvm_memory_unit`、`jvm_min_over_max`、`jvm_max_too_low`（自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法不对、最小堆大于最大堆、最大堆低于 512 MB）。
 
 ### 事件
 
