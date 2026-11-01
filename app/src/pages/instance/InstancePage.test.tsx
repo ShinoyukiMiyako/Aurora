@@ -1619,7 +1619,137 @@ describe("实例详情：崩溃诊断", () => {
     expect(text()).not.toContain("mods 目录读不出来");
     expect(button("调到 6 GB").textContent).toBe("调到 6 GB");
   });
+
+  describe("Mod 启停在重扫回来之前", () => {
+    const SUSPECT_SODIUM = [{ mod_id: "sodium", file_name: "sodium.jar" }];
+    /** 一键尝试的按钮：与「日志指向的 Mod」的开关同名，按不是开关的那个找。 */
+    const fixButton = (name: string): HTMLButtonElement => {
+      const found = [...document.querySelectorAll<HTMLButtonElement>('button:not([role="switch"])')].find((b) => b.textContent === name);
+      if (found === undefined) throw new Error(`找不到一键尝试按钮 ${name}`);
+      return found;
+    };
+
+    it("停用请求还没回来时开关带原因禁用：第二下不发命令", async () => {
+      crash = { ...report([{ category: "mixin_failure" }], NOW - 60_000), suspects: SUSPECT_SODIUM };
+      const disk = modDisk();
+      await open("crash");
+      const pending = deferred<string>();
+      ipc.overrides.set("set_mod_enabled", () => pending.promise);
+      click(byRole("switch", "停用 Sodium"));
+      await flush();
+      const toggle = byRole("switch", "启用 Sodium");
+      expect(toggle.getAttribute("aria-disabled")).toBe("true");
+      click(toggle);
+      await flush();
+      expect(callsOf(ipc, "set_mod_enabled")).toEqual([{ versionId: ID, fileName: "sodium.jar", enabled: false }]);
+      disk.files.delete("sodium.jar");
+      disk.files.add("sodium.jar.disabled");
+      await act(async () => {
+        pending.resolve("sodium.jar.disabled");
+        await settle(20);
+      });
+      expect(byRole("switch", "启用 Sodium").getAttribute("aria-disabled")).toBeNull();
+    });
+
+    it("停用后列表还没重扫回来又点回启用：按盘上已改好的文件名调后端，不报冲突", async () => {
+      crash = { ...report([{ category: "mixin_failure" }], NOW - 60_000), suspects: SUSPECT_SODIUM };
+      const disk = modDisk();
+      await open("crash");
+      disk.hold();
+      click(byRole("switch", "停用 Sodium"));
+      await flush();
+      click(byRole("switch", "启用 Sodium"));
+      await flush();
+      expect(callsOf(ipc, "set_mod_enabled")).toEqual([
+        { versionId: ID, fileName: "sodium.jar", enabled: false },
+        { versionId: ID, fileName: "sodium.jar.disabled", enabled: true },
+      ]);
+      expect(toastTitles()).toEqual(["已停用 Sodium", "已启用 Sodium"]);
+      await disk.release();
+      expect([...disk.files].sort()).toEqual(["fabric-api.jar", "sodium.jar"]);
+      expect(byRole("switch", "停用 Sodium").getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("一键尝试停用之后、列表还没重扫回来：开关跟着显示已停用，点回启用用盘上的新名字", async () => {
+      crash = { ...report([{ category: "mixin_failure", detail: "sodium" }], NOW - 60_000), suspects: SUSPECT_SODIUM };
+      const disk = modDisk();
+      await open("crash");
+      disk.hold();
+      click(fixButton("停用 Sodium"));
+      await flush();
+      const toggle = byRole("switch", "启用 Sodium");
+      expect(toggle.getAttribute("aria-checked")).toBe("false");
+      click(toggle);
+      await flush();
+      expect(callsOf(ipc, "set_mod_enabled")).toEqual([
+        { versionId: ID, fileName: "sodium.jar", enabled: false },
+        { versionId: ID, fileName: "sodium.jar.disabled", enabled: true },
+      ]);
+      expect(toastTitles()).not.toContain("Mod 开关没有生效");
+    });
+
+    it("开关停用、重扫回来之后再点一键尝试的「停用」：按盘上的名字调后端，不拿推荐时的旧名报冲突", async () => {
+      crash = { ...report([{ category: "mixin_failure", detail: "sodium" }], NOW - 60_000), suspects: SUSPECT_SODIUM };
+      const disk = modDisk();
+      await open("crash");
+      click(byRole("switch", "停用 Sodium"));
+      await flush();
+      expect(byRole("switch", "启用 Sodium").getAttribute("aria-checked")).toBe("false");
+      click(fixButton("停用 Sodium"));
+      await flush();
+      expect(callsOf(ipc, "set_mod_enabled")).toEqual([
+        { versionId: ID, fileName: "sodium.jar", enabled: false },
+        { versionId: ID, fileName: "sodium.jar.disabled", enabled: false },
+      ]);
+      expect(toastTitles()).not.toContain("Mod 开关没有生效");
+      expect([...disk.files].sort()).toEqual(["fabric-api.jar", "sodium.jar.disabled"]);
+      expect(text()).toContain("已停用 1 个文件");
+    });
+  });
 });
+
+/**
+ * 按盘上的文件名应答启停与重扫，规则与后端一致：已是目标状态原样返回，目标名已存在报 mod_state_conflict。
+ * hold() 之后的重扫停在半路直到 release()，模拟大实例扫 mods 目录要好一阵。
+ */
+function modDisk(): { files: Set<string>; hold(): void; release(): Promise<void> } {
+  const keyOf = (fileName: string) => fileName.replace(/\.disabled$/, "");
+  const byKey = new Map(mods.map((m) => [keyOf(m.file_name), m]));
+  const files = new Set(mods.map((m) => m.file_name));
+  let gate: Deferred<void> | null = null;
+  ipc.overrides.set("list_mods", async () => {
+    if (gate !== null) await gate.promise;
+    return [...files].map((f) => {
+      const base = byKey.get(keyOf(f));
+      if (base === undefined) throw new Error(`盘上多出一个测试没有准备的文件 ${f}`);
+      return { ...base, file_name: f, enabled: !f.endsWith(".disabled") };
+    });
+  });
+  ipc.overrides.set("set_mod_enabled", (args) => {
+    const fileName = String(args.fileName);
+    const target = args.enabled === true ? keyOf(fileName) : `${keyOf(fileName)}.disabled`;
+    if (target === fileName) return fileName;
+    if (files.has(target)) throw new IpcError("mod_state_conflict", `模组启禁状态切换失败: 目标文件已存在 ${target}`);
+    if (!files.has(fileName)) throw new IpcError("mod_platform_failed", `文件 IO 失败: ${fileName}`);
+    files.delete(fileName);
+    files.add(target);
+    return target;
+  });
+  return {
+    files,
+    hold: () => {
+      gate = deferred<void>();
+    },
+    release: async () => {
+      const held = gate;
+      gate = null;
+      await act(async () => {
+        if (held !== null) held.resolve();
+        await settle(20);
+      });
+    },
+  };
+}
 
 function report(diagnoses: { category: CrashReportDto["diagnoses"][number]["category"]; detail?: string }[], at: number): CrashReportDto {
   return {
