@@ -5,6 +5,7 @@
 // 「取消时不在运行」的 id，同 id 再登记会直接是已取消状态，重试必须换新 id。
 
 import { TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
+import type { InstanceSummary } from "../domain/adapt";
 import { MAX_PARALLEL_TASKS, TASK_HISTORY_LIMIT } from "../domain/limits";
 import type { Task, TaskKind, TaskSpec } from "../domain/types";
 
@@ -142,24 +143,37 @@ export const INSTANCE_TASK_COMMANDS: ReadonlySet<string> = new Set(["install_ver
 export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world", "export_world", "restore_world_backup"]);
 
 /**
- * 两个任务挂在同一实例（不分大小写，与后端的锁键一致）上，后端不让它们同时进行：至少一个要写整个目录；或都是存档任务
- * （backing_up 彼此互斥）；或一个是存档任务、一个是导出整合包（后端只拒勾了存档的导出，这里不拆开导出参数，一律排开）。
- * 不隔离的实例共用存档时后端还会跨实例拒绝，那要看实例的隔离，这里不判，撞上了按 instance_busy 失败，可以重试。
+ * 共用一份存档的实例（不隔离）的锁键。隔离结果读不出来的（null）不算：拿不准时不排，撞上了后端照样拒绝，
+ * 按 instance_busy 失败、可以重试。
  */
-function excludes(a: Task, b: Task): boolean {
-  if (a.instanceId === null || b.instanceId === null || a.instanceId.toLowerCase() !== b.instanceId.toLowerCase()) return false;
-  if (INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command)) return true;
-  const worldA = WORLD_TASK_COMMANDS.has(a.spec.command);
-  const worldB = WORLD_TASK_COMMANDS.has(b.spec.command);
-  return (worldA && (worldB || b.spec.command === "export_modpack")) || (worldB && a.spec.command === "export_modpack");
+export function sharedSavesKeys(instances: readonly Pick<InstanceSummary, "id" | "isolated">[]): Set<string> {
+  return new Set(instances.filter((inst) => inst.isolated === false).map((inst) => inst.id.toLowerCase()));
 }
 
 /**
- * 有空位时该开始的任务（按队列顺序），已在运行的不算。与运行中的、或排在它前面的任务在同一实例上互斥的留在队里：
- * 一起开始的话后到的那个必然以 instance_busy 失败（例如断网恢复后「全部重试」同时拉起同一实例的补全与装 Mod）。
- * 排在前面、自己也还在等的也算，同一实例上先到的先做，后来的装 Mod 不绕过等着的补全。
+ * 两个任务后端不让同时进行。挂在同一实例（不分大小写，与后端的锁键一致）上时：至少一个要写整个目录；或都是存档任务
+ * （backing_up 彼此互斥）；或一个是存档任务、一个是导出整合包（后端只拒勾了存档的导出，这里不拆开导出参数，一律排开）。
+ * 挂在共用存档的两个实例上时只有最后一种：实例锁只管各自的实例，后端另外看共用存档的实例有没有在备份、恢复或读存档。
  */
-export function tasksToStart(tasks: readonly Task[]): Task[] {
+function excludes(a: Task, b: Task, sharedSaves: ReadonlySet<string>): boolean {
+  if (a.instanceId === null || b.instanceId === null) return false;
+  const worldA = WORLD_TASK_COMMANDS.has(a.spec.command);
+  const worldB = WORLD_TASK_COMMANDS.has(b.spec.command);
+  const worldAndExport = (worldA && b.spec.command === "export_modpack") || (worldB && a.spec.command === "export_modpack");
+  const keyA = a.instanceId.toLowerCase();
+  const keyB = b.instanceId.toLowerCase();
+  if (keyA !== keyB) return worldAndExport && sharedSaves.has(keyA) && sharedSaves.has(keyB);
+  if (INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command)) return true;
+  return (worldA && worldB) || worldAndExport;
+}
+
+/**
+ * 有空位时该开始的任务（按队列顺序），已在运行的不算。与运行中的、或排在它前面的任务互斥的留在队里：
+ * 一起开始的话后到的那个必然以 instance_busy 失败（例如断网恢复后「全部重试」同时拉起同一实例的补全与装 Mod）。
+ * 排在前面、自己也还在等的也算，先到的先做，后来的装 Mod 不绕过等着的补全。sharedSaves 是共用存档的实例
+ * （见 sharedSavesKeys），调度时现取：实例的隔离随时能改，从任务日志恢复的任务也没有入队时的实例列表。
+ */
+export function tasksToStart(tasks: readonly Task[], sharedSaves: ReadonlySet<string>): Task[] {
   const free = MAX_PARALLEL_TASKS - tasks.filter((t) => t.status === "running").length;
   if (free <= 0) return [];
   const ahead = tasks.filter((t) => t.status === "running");
@@ -167,7 +181,7 @@ export function tasksToStart(tasks: readonly Task[]): Task[] {
   for (const task of tasks) {
     if (start.length === free) break;
     if (task.status !== "queued") continue;
-    const blocked = ahead.some((other) => excludes(task, other));
+    const blocked = ahead.some((other) => excludes(task, other, sharedSaves));
     ahead.push(task);
     if (!blocked) start.push(task);
   }

@@ -17,6 +17,7 @@ import {
   progressTrack,
   queuePosition,
   retryTask,
+  sharedSavesKeys,
   startComposite,
   trimHistory,
   tasksToStart,
@@ -27,6 +28,9 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const T0 = 1_720_000_000_000;
+
+/** 调度：shared 是共用存档的实例，大多数用例与它无关。 */
+const start = (tasks: readonly Task[], shared: readonly string[] = []) => tasksToStart(tasks, new Set(shared));
 
 function task(id: string, overrides: Partial<Task> = {}): Task {
   return {
@@ -68,7 +72,7 @@ describe("下载队列：纯函数", () => {
 
   it("调度按数组顺序取最靠前的 queued，同时最多 3 个在跑", () => {
     const tasks = [task("t1"), task("t2", { status: "running" }), task("t3"), task("t4"), task("t5")];
-    expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["t1", "t3"]);
+    expect(start(tasks).map((t) => t.id)).toEqual(["t1", "t3"]);
     expect(queuePosition(tasks, "t1")).toBe(1);
     expect(queuePosition(tasks, "t4")).toBe(3);
     expect(queuePosition(tasks, "t2")).toBeNull();
@@ -82,29 +86,29 @@ describe("下载队列：纯函数", () => {
 
     it("装 Mod 在跑时，同一实例的补全留在队里，别的实例与不挂实例的任务照常开始", () => {
       const tasks = [mods("m1", "生存", { status: "running" }), repair("r1", "生存"), repair("r2", "创造"), task("j21")];
-      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["r2", "j21"]);
+      expect(start(tasks).map((t) => t.id)).toEqual(["r2", "j21"]);
     });
 
     it("实例 id 不分大小写：补全「Survival」在跑时，「survival」上的装 Mod 等着", () => {
       const tasks = [repair("r1", "Survival", { status: "running" }), mods("m1", "survival")];
-      expect(tasksToStart(tasks)).toEqual([]);
+      expect(start(tasks)).toEqual([]);
     });
 
     it("先到先下：排在前面、还在等的补全挡住同一实例后来的装 Mod，即使装 Mod 彼此可以同时跑", () => {
       const tasks = [mods("m1", "生存", { status: "running" }), repair("r1", "生存"), mods("m2", "生存")];
-      expect(tasksToStart(tasks)).toEqual([]);
+      expect(start(tasks)).toEqual([]);
       const afterFirst = tasks.map((t) => (t.id === "m1" ? { ...t, status: "done" as const, finishedAt: T0 } : t));
-      expect(tasksToStart(afterFirst).map((t) => t.id)).toEqual(["r1"]);
+      expect(start(afterFirst).map((t) => t.id)).toEqual(["r1"]);
     });
 
     it("同一实例上的装 Mod 与装资源彼此兼容，可以同时开始", () => {
       const tasks = [mods("m1", "生存", { status: "running" }), mods("m2", "生存"), mods("m3", "生存")];
-      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["m2", "m3"]);
+      expect(start(tasks).map((t) => t.id)).toEqual(["m2", "m3"]);
     });
 
     it("同一次调度里也互斥：空位够时，排队的补全与它后面同一实例的装 Mod 只开始前一个", () => {
       const tasks = [repair("r1", "生存"), mods("m1", "生存"), task("j21")];
-      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["r1", "j21"]);
+      expect(start(tasks).map((t) => t.id)).toEqual(["r1", "j21"]);
     });
   });
 
@@ -118,25 +122,59 @@ describe("下载队列：纯函数", () => {
 
     it("同一实例上两个存档的备份一个一个来，别的实例的备份照常开始；实例 id 不分大小写", () => {
       const tasks = [world("w1", "Survival", "backup_world"), world("w2", "survival", "backup_world"), world("w3", "创造", "backup_world")];
-      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["w1", "w3"]);
+      expect(start(tasks).map((t) => t.id)).toEqual(["w1", "w3"]);
     });
 
     it("恢复与导出存档同样排着，前一个结束就轮到它", () => {
       const running = world("w1", "生存", "restore_world_backup", { status: "running" });
       const tasks = [running, world("w2", "生存", "export_world")];
-      expect(tasksToStart(tasks)).toEqual([]);
-      expect(tasksToStart([{ ...running, status: "done", finishedAt: T0 }, tasks[1]]).map((t) => t.id)).toEqual(["w2"]);
+      expect(start(tasks)).toEqual([]);
+      expect(start([{ ...running, status: "done", finishedAt: T0 }, tasks[1]]).map((t) => t.id)).toEqual(["w2"]);
     });
 
     it("备份在跑时同一实例的导出整合包等着，反过来排队的恢复也等导出读完", () => {
-      expect(tasksToStart([world("w1", "生存", "backup_world", { status: "running" }), pack("p1", "生存")])).toEqual([]);
-      expect(tasksToStart([pack("p1", "生存", { status: "running" }), world("w1", "生存", "restore_world_backup")])).toEqual([]);
+      expect(start([world("w1", "生存", "backup_world", { status: "running" }), pack("p1", "生存")])).toEqual([]);
+      expect(start([pack("p1", "生存", { status: "running" }), world("w1", "生存", "restore_world_backup")])).toEqual([]);
     });
 
     it("备份只与 Mod 改动兼容：同一实例的装 Mod 与备份一起开始，两个导出整合包也一起开始", () => {
-      expect(tasksToStart([world("w1", "生存", "backup_world"), mods("m1", "生存")]).map((t) => t.id)).toEqual(["w1", "m1"]);
-      expect(tasksToStart([pack("p1", "生存"), pack("p2", "生存")]).map((t) => t.id)).toEqual(["p1", "p2"]);
+      expect(start([world("w1", "生存", "backup_world"), mods("m1", "生存")]).map((t) => t.id)).toEqual(["w1", "m1"]);
+      expect(start([pack("p1", "生存"), pack("p2", "生存")]).map((t) => t.id)).toEqual(["p1", "p2"]);
     });
+
+    describe("不隔离的实例共用一份存档，后端跨实例拒绝的组合同样排开", () => {
+      const shared = ["甲", "乙"];
+
+      it("甲在备份时乙的导出整合包等着，备份结束才开始", () => {
+        const running = world("w1", "甲", "backup_world", { status: "running" });
+        expect(start([running, pack("p1", "乙")], shared)).toEqual([]);
+        expect(start([{ ...running, status: "done", finishedAt: T0 }, pack("p1", "乙")], shared).map((t) => t.id)).toEqual(["p1"]);
+      });
+
+      it("同时排进来：先到的开始，后到的等它；恢复与导出存档也一样，反过来排队的恢复等导出读完", () => {
+        expect(start([world("w1", "甲", "backup_world"), pack("p1", "乙")], shared).map((t) => t.id)).toEqual(["w1"]);
+        expect(start([world("w1", "甲", "export_world", { status: "running" }), pack("p1", "乙")], shared)).toEqual([]);
+        expect(start([pack("p1", "甲", { status: "running" }), world("w1", "乙", "restore_world_backup")], shared)).toEqual([]);
+      });
+
+      it("键不分大小写，与后端的实例锁一致", () => {
+        expect(start([world("w1", "Survival", "backup_world", { status: "running" }), pack("p1", "creative")], ["survival", "creative"])).toEqual([]);
+      });
+
+      it("只要有一边隔离就不相干，照常开始", () => {
+        expect(start([world("w1", "甲", "backup_world", { status: "running" }), pack("p1", "丙")], shared).map((t) => t.id)).toEqual(["p1"]);
+        expect(start([world("w1", "丙", "backup_world", { status: "running" }), pack("p1", "甲")], shared).map((t) => t.id)).toEqual(["p1"]);
+      });
+
+      it("跨实例只排开存档任务与导出整合包：两个备份、新建与补全都照常开始", () => {
+        expect(start([world("w1", "甲", "backup_world", { status: "running" }), world("w2", "乙", "backup_world")], shared).map((t) => t.id)).toEqual(["w2"]);
+        expect(start([world("w1", "甲", "backup_world", { status: "running" }), mods("m1", "乙")], shared).map((t) => t.id)).toEqual(["m1"]);
+      });
+    });
+  });
+
+  it("共用存档的实例：只算明确不隔离的，隔离结果读不出来的不算；键一律小写", () => {
+    expect([...sharedSavesKeys([{ id: "Survival", isolated: false }, { id: "创造", isolated: true }, { id: "坏的", isolated: null }])]).toEqual(["survival"]);
   });
 
   it("重试只对失败的任务，换下一次尝试并排到队尾", () => {
