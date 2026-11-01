@@ -113,6 +113,11 @@ impl VersionJson {
     pub fn uses_legacy_assets(&self) -> bool {
         matches!(self.assets.as_deref(), Some("legacy" | "pre-1.6"))
     }
+
+    /// 该版本的资源是否铺在工作目录的 `resources` 下（pre-1.6 索引的 map_to_resources 布局）。
+    pub fn maps_assets_to_resources(&self) -> bool {
+        self.assets.as_deref() == Some("pre-1.6")
+    }
 }
 
 /// 新式结构化参数：game 与 jvm 两组。

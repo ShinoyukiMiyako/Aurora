@@ -277,7 +277,9 @@ impl<'a> CommandBuilder<'a> {
             .map(|a| a.id.clone())
             .or_else(|| self.version.assets.clone())
             .unwrap_or_default();
-        let game_assets = if self.version.uses_legacy_assets() {
+        let game_assets = if self.version.maps_assets_to_resources() {
+            self.game_dir.join("resources").display().to_string()
+        } else if self.version.uses_legacy_assets() {
             self.paths
                 .assets_dir
                 .join("virtual")
@@ -530,6 +532,55 @@ mod tests {
             .filter(|pair| pair[0] == key)
             .map(|pair| pair[1].as_str())
             .collect()
+    }
+
+    /// `--assetsDir` 指到 `${game_assets}`：launchwrapper 从这里读窗口图标，得和资源实际铺开的位置一致。
+    fn game_assets_of(json: &str, game_dir: &str) -> String {
+        let version = VersionJson::from_json_str(json).unwrap();
+        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
+        let args = CommandBuilder::new(
+            &version,
+            ctx,
+            "java.exe",
+            paths,
+            game_dir,
+            AuthValues::offline("Steve", "uuid"),
+            "1.0.0",
+        )
+        .build()
+        .unwrap()
+        .args;
+        value_after(&args, "--assetsDir")[0].to_owned()
+    }
+
+    /// pre-1.6 的资源铺在工作目录的 resources 下（隔离实例就是实例自己的目录），assets/virtual 下没有它。
+    #[test]
+    fn pre_1_6_assets_dir_is_the_resources_folder_of_the_working_dir() {
+        let json = r#"{"id":"b1.7.3","mainClass":"net.minecraft.launchwrapper.Launch","assets":"pre-1.6",
+            "minecraftArguments":"${auth_player_name} --gameDir ${game_directory} --assetsDir ${game_assets}"}"#;
+        assert_eq!(
+            game_assets_of(json, "/mc/versions/b1.7.3"),
+            PathBuf::from("/mc/versions/b1.7.3")
+                .join("resources")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn legacy_index_assets_dir_stays_under_virtual() {
+        let json = r#"{"id":"1.6.4","mainClass":"net.minecraft.client.main.Main","assets":"legacy",
+            "minecraftArguments":"--username ${auth_player_name} --assetsDir ${game_assets}"}"#;
+        assert_eq!(
+            game_assets_of(json, "/mc"),
+            PathBuf::from("/mc")
+                .join("assets")
+                .join("virtual")
+                .join("legacy")
+                .display()
+                .to_string()
+        );
     }
 
     /// 1.12.2 及更早的 minecraftArguments 不带窗口尺寸参数，游戏本身认 `--width` / `--height`：
