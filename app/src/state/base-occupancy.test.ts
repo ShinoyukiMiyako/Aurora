@@ -126,6 +126,37 @@ describe("子实例开工后基底的占用立刻进列表", () => {
     expect(repairLock()).toBeNull();
   });
 
+  it("导入整合包：平台包下载那条阶段早于占用，占住之后的阶段照样把基底读进列表", async () => {
+    const pack = "空岛生存";
+    const done = deferred<unknown>();
+    ipc.overrides.set("install_modpack", () => done.promise);
+    await store.actions.installModpack({
+      source: { kind: "file", path: "C:/packs/pack.mrpack" },
+      name: pack,
+      cover: "grass",
+      packName: pack,
+      packVersion: "1.0.0",
+      modCount: 0,
+      mcVersion: BASE,
+      loader: "neoforge",
+      loaderVersion: "21.1.265",
+      excludedOptional: [],
+    });
+    await settle();
+    const call = callsOf(ipc, "install_modpack")[0];
+    if (call === undefined) throw new Error("导入没有开始");
+    const taskId = String(call.taskId);
+
+    emit(CORE_EVENT, { kind: "stage", task_id: taskId, message: "下载整合包 pack.mrpack" });
+    await settle();
+    expect(repairLock()).toBeNull();
+
+    onDisk = [instanceDto(BASE, { activity: "inherited", used_by: pack }), instanceDto(CHILD), instanceDto(pack, { activity: "installing" })];
+    emit(CORE_EVENT, { kind: "stage", task_id: taskId, message: "下载 3 个整合包文件" });
+    await settle();
+    expect(repairLock()).toEqual({ kind: "inherited", usedBy: pack });
+  });
+
   it("不占基底的任务（向导新建的实例是自包含的）的阶段事件不重扫", async () => {
     const done = deferred<unknown>();
     ipc.overrides.set("install_version", () => done.promise);
