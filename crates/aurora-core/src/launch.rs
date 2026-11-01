@@ -754,7 +754,7 @@ impl Aurora {
                 required_major,
                 &settings.java,
                 pinned_by,
-                &mc_version,
+                game_version,
                 reporter,
             )
             .await?;
@@ -954,8 +954,7 @@ impl Aurora {
         if self.is_cancelled() {
             return Err(CoreError::from(aurora_download::Error::Cancelled).into());
         }
-        let log = reporter.log.take();
-        let session = spawn_game(&command, reporter.clock, log, game_log)?;
+        let session = spawn_game(&command, reporter.clock, &mut reporter.log, game_log)?;
         let pid = session.id();
         let _ = reporter
             .events
@@ -1633,7 +1632,7 @@ async fn quick_play_target(
 fn spawn_game(
     command: &LaunchCommand,
     clock: SessionClock,
-    log: Option<SessionLog>,
+    log: &mut Option<SessionLog>,
     game_log: Option<LogBatchSink>,
 ) -> Result<GameSession, LaunchFailed> {
     aurora_launch::spawn(command, clock, log, game_log).map_err(|err| {
@@ -2152,8 +2151,20 @@ mod tests {
 
     /// 门面上布置一个过期的微软账户、指向 mock 的登录端点，返回落库后的账户。
     fn with_stale_account(fx: &Fixture, server: &wiremock::MockServer) -> (Aurora, Account) {
+        with_stale_account_as(fx, server, MS_UUID)
+    }
+
+    /// 同 [`with_stale_account`]，账户用指定的 uuid。续期闸按 uuid 在进程内共享：要卡准续期时机的用例单用
+    /// 一个 uuid，否则满载时会排在别的用例的续期后面，请求迟迟发不出去。
+    fn with_stale_account_as(
+        fx: &Fixture,
+        server: &wiremock::MockServer,
+        uuid: &str,
+    ) -> (Aurora, Account) {
         let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(server));
-        let stored = aurora.store_account_for_test(stale_microsoft()).unwrap();
+        let mut account = stale_microsoft();
+        account.uuid = uuid.to_owned();
+        let stored = aurora.store_account_for_test(account).unwrap();
         (aurora, stored)
     }
 
@@ -2604,6 +2615,78 @@ mod tests {
         assert_eq!(warned, vec![("生存 服", 1, true), ("老 存档", 0, false)]);
     }
 
+    /// 新建实例的版本 JSON 把 id 换成实例名、去掉了 inheritsFrom，继承链根就是实例自己。Java 失败的文案要写
+    /// 「Minecraft 1.21.1 需要 Java 21」，拿实例名去填就成了「Minecraft 生存 服 需要 Java 21」。
+    #[tokio::test]
+    async fn java_failures_name_the_game_version_not_the_instance() {
+        let fx = fixture();
+        let renamed = "生存 服";
+        let dir = fx.root.join(".minecraft").join("versions").join(renamed);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{renamed}.json")),
+            format!(
+                r#"{{"id":"{renamed}","clientVersion":"1.21.1","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-delta","majorVersion":21}}}}"#
+            ),
+        )
+        .unwrap();
+        let request = || LaunchRequest {
+            version_id: renamed.to_owned(),
+            ..request()
+        };
+
+        let java = fake_java(&fx.root, 17, 0);
+        let (result, _) = launch_request(&fx.aurora, request(), java).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::JavaTooOld);
+        assert_eq!(
+            failure.params.get("mc_version"),
+            Some(&Value::from("1.21.1"))
+        );
+        assert_eq!(
+            failure.message,
+            "实例指定的 Java 17 无法运行 Minecraft 1.21.1，至少需要 Java 21"
+        );
+    }
+
+    /// 进程起不来时会话日志不能跟着丢：写缓冲里攒着这次启动的全部阶段，而日志页正是玩家排查 spawn_failed 的地方。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_failure_keeps_a_finished_session_log() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_version(&mc, 17, true);
+        // 命令行超过 Windows 的长度上限：Java 探测照常通过，到拉起进程这一步才被系统拒绝。
+        aurora_instance::VersionSettingsStore::for_version_dir(
+            &mc.join(VERSIONS_DIR).join(VERSION),
+        )
+        .save(&VersionSettings {
+            jvm_args: format!("-Dpadding={}", "x".repeat(40_000)),
+            ..VersionSettings::default()
+        })
+        .await
+        .unwrap();
+
+        let (result, events) = launch(&fx.aurora, fake_java(&fx.root, 17, 0)).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::SpawnFailed);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6]);
+
+        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
+        let lines: Vec<(Option<LauncherLevel>, &str)> = log
+            .lines
+            .iter()
+            .map(|l| (l.level, l.text.as_str()))
+            .collect();
+        assert!(
+            lines.contains(&(Some(LauncherLevel::Info), LaunchStage::SpawnProcess.label())),
+            "{lines:?}"
+        );
+        let last = lines.last().expect("日志里应有这次启动的记录");
+        assert_eq!(last.0, Some(LauncherLevel::Error));
+        assert!(last.1.starts_with("启动失败：无法启动 "), "{}", last.1);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verified_launch_clears_the_recorded_failure() {
         let down = wiremock::MockServer::start().await;
@@ -2753,12 +2836,13 @@ mod tests {
     async fn cancelling_while_refreshing_is_a_cancel_and_keeps_the_last_account_failure() {
         // 续期还在等服务端回应（服务故障时还要退避重试）就被玩家取消：这不是凭据被判失效，不能报成需要
         // 重新登录，也不能盖掉上一次的服务故障记录，否则紧接着的以离线方式进单人会被错拒。
+        const CANCEL_UUID: &str = "c0ffee00c0ffee00c0ffee00c0ffee00";
         let server = wiremock::MockServer::start().await;
         mount_token(&server, outage_page()).await;
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
-        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (aurora, stored) = with_stale_account_as(&fx, &server, CANCEL_UUID);
         let (result, _) =
             launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
@@ -2771,13 +2855,21 @@ mod tests {
         .await;
         let token = CancellationToken::new();
         let cancelling = aurora.clone().with_cancel(token.clone());
-        let trigger = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // 等续期请求真的发出才取消：定时取消在满载时会赶在请求之前，测的就不是「等回音时被取消」了。
+        let cancel_once_sent = async {
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("续期请求应已发出");
             token.cancel();
-        });
-        let (result, events) =
-            launch_request(&cancelling, stored_request(stored.clone()), java.clone()).await;
-        trigger.await.unwrap();
+        };
+        let (_, (result, events)) = tokio::join!(
+            cancel_once_sent,
+            launch_request(&cancelling, stored_request(stored.clone()), java.clone())
+        );
         match result {
             Err(err) => assert!(err.is_cancelled(), "{err:?}"),
             Ok(_) => panic!("取消后不应拉起进程"),
@@ -2785,7 +2877,7 @@ mod tests {
         assert_eq!(stage_indices(&events), vec![0]);
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(
-            failures_of(&aurora).get(MS_UUID),
+            failures_of(&aurora).get(CANCEL_UUID),
             Some(&FailureCode::AccountServiceDown)
         );
         let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
@@ -2793,7 +2885,7 @@ mod tests {
             log.ended.map(|e| e.outcome),
             Some(SessionOutcome::Cancelled)
         );
-        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), stored);
+        assert_eq!(aurora.find_account(CANCEL_UUID).unwrap().unwrap(), stored);
 
         // 记录完好：降级照常放行。
         let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;

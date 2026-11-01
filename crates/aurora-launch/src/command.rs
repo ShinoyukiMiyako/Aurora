@@ -591,6 +591,43 @@ mod tests {
         assert_eq!(value_after(&args, "--port"), vec!["25566"]);
     }
 
+    /// 官方版本 JSON 里真实出现过的日志配置名都能通过校验，`-Dlog4j.configurationFile` 指向 log_configs 下的
+    /// 这个文件；拼接路径时段里的空格、中文不受影响。
+    #[test]
+    fn real_log_config_names_reach_the_jvm_argument() {
+        for id in ["client-1.7.xml", "client-1.12.xml", "client-1.21.2.xml"] {
+            let json = serde_json::json!({
+                "id": "1.21", "mainClass": "net.minecraft.client.main.Main",
+                "logging": {"client": {
+                    "argument": "-Dlog4j.configurationFile=${path}",
+                    "file": {"id": id, "sha1": "a", "size": 1, "url": "u"},
+                    "type": "log4j2-xml"
+                }}
+            });
+            let version = VersionJson::from_json_str(&json.to_string()).unwrap();
+            let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+            let root = PathBuf::from("/我的 世界/.minecraft");
+            let paths = GamePaths::standard(root.clone(), "1.21");
+            let args = CommandBuilder::new(
+                &version,
+                ctx,
+                "java.exe",
+                paths,
+                &root,
+                AuthValues::offline("Steve", "uuid"),
+                "1.0.0",
+            )
+            .build()
+            .unwrap()
+            .args;
+            let expected = format!(
+                "-Dlog4j.configurationFile={}",
+                root.join("assets").join("log_configs").join(id).display()
+            );
+            assert!(args.contains(&expected), "{id}：{args:?}");
+        }
+    }
+
     /// 日志配置名原样当作 `assets/log_configs/` 下的文件名：不是单个安全路径段时报路径越界，
     /// 与补全时的下载计划同一判据，不把 `-Dlog4j.configurationFile` 指到目录外的文件。
     #[test]

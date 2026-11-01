@@ -41,6 +41,10 @@ const CRASH_LOG_TAIL_BYTES: u64 = 512 * 1024;
 /// hs_err 与崩溃报告读开头多少字节：原因都写在开头（hs_err 的 Problematic frame、崩溃报告的异常与
 /// 可疑 Mod），尾部是系统信息与 Mod 清单。
 const CRASH_FILE_HEAD_BYTES: u64 = 512 * 1024;
+/// JVM 错误日志里进程全貌一段的标题。从这里起是已捕获的内部异常、加载过的 dll、启动参数与环境变量，不是这次
+/// 崩溃的现场：Mod 自己接住的 UnsatisfiedLinkError 也记在里面，扫进去就成了假线索。错误头与崩溃线程的调用栈
+/// 都在它之前。
+const HS_ERR_PROCESS_SECTION: &str = "---------------  P R O C E S S  ---------------";
 /// 判断「在会话开始之后写下」时放宽的毫秒数：FAT / exFAT 的修改时间只精确到 2 秒。
 const MTIME_SLACK_MS: u64 = 2000;
 /// 游戏把崩溃报告写在工作目录下的这个目录里，文件名形如 `crash-2026-10-29_19.04.12-client.txt`。
@@ -136,12 +140,16 @@ pub(crate) struct ScanInput<'a> {
 }
 
 impl ScanInput<'_> {
-    /// 整份文件文本按行编号，行号从 1 起。
+    /// 整份文件文本按行编号，行号从 1 起。JVM 错误日志只取崩溃现场那部分（见 [`HS_ERR_PROCESS_SECTION`]）。
     pub(crate) fn numbered(source: CrashSource, path: Option<String>, text: &str) -> ScanInput<'_> {
+        let scene = match (source, text.find(HS_ERR_PROCESS_SECTION)) {
+            (CrashSource::HsErr, Some(end)) => &text[..end],
+            _ => text,
+        };
         ScanInput {
             source,
             path,
-            lines: text
+            lines: scene
                 .lines()
                 .enumerate()
                 .map(|(index, line)| (line, index as u64 + 1))
@@ -997,6 +1005,53 @@ mod tests {
         // hs_err 带着 JVM 致命错误头，崩溃迹象成立，会话日志里点名的 sodium 列为嫌疑。
         let ids: Vec<&str> = report.suspects.iter().map(|s| s.mod_id.as_str()).collect();
         assert_eq!(ids, vec!["sodium"]);
+    }
+
+    /// JVM 错误日志的进程全貌一段记着已捕获的内部异常与加载过的 dll，它们不是这次崩溃的现场：被 Mod 接住的
+    /// UnsatisfiedLinkError 不是线索。这段之前的错误头与调用栈照常扫，行号仍按整份文件计。
+    #[test]
+    fn hs_err_process_section_is_not_scanned() {
+        const FULL: &str = "#\n\
+            # A fatal error has been detected by the Java Runtime Environment:\n\
+            #\n\
+            #  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x00007ffe, pid=4242, tid=11\n\
+            \n\
+            ---------------  T H R E A D  ---------------\n\
+            \n\
+            Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)\n\
+            C  [ig9icd64.dll+0x57a41c]\n\
+            \n\
+            ---------------  P R O C E S S  ---------------\n\
+            \n\
+            Internal exceptions (1 events):\n\
+            Event: 1.2 Thread 0x1 Exception <a 'java/lang/UnsatisfiedLinkError'{0x1}: no jinput-dx8_64 in java.library.path> (0x1)\n\
+            \n\
+            Dynamic libraries:\n\
+            0x00007ffe - 0x00007fff \tC:\\Windows\\System32\\ig9icd64.dll\n\
+            \n\
+            VM Arguments:\n\
+            jvm_args: -XX:+HeapDumpOnOutOfMemoryError\n";
+        let inputs = [ScanInput::numbered(
+            CrashSource::HsErr,
+            Some(r"D:\mc\hs_err_pid4242.log".into()),
+            FULL,
+        )];
+        let report = CrashReport::from_sources(&inputs, Some(-1_073_741_819));
+        let categories: Vec<CrashCategory> = report.diagnoses.iter().map(|c| c.category).collect();
+        assert_eq!(categories, vec![CrashCategory::IntelGraphicsDriver]);
+        assert_eq!(report.diagnoses[0].line, 9);
+
+        // 别的来源里出现同样的字样不受影响：这道截断只属于 JVM 错误日志。
+        let inputs = [ScanInput::numbered(CrashSource::CrashReport, None, FULL)];
+        let report = CrashReport::from_sources(&inputs, None);
+        assert!(
+            report
+                .diagnoses
+                .iter()
+                .any(|c| c.category == CrashCategory::NativeLibraryMissing),
+            "{:?}",
+            report.diagnoses
+        );
     }
 
     #[test]
