@@ -88,7 +88,10 @@ export interface Session {
 
 // ---------------------------------------------------------------- 下载任务
 
-/** world_backup：备份与导出存档（都是打包）；world_restore：用备份恢复存档。两者都不算安装，对实例只算改动中。 */
+/**
+ * world_backup：备份与导出存档（都是打包）；world_restore：用备份恢复存档。两者都不算安装；后端在任务期间把实例记为
+ * backing_up，只与 Mod 改动兼容，启动、改名、删除都要等它结束。
+ */
 export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore", "modpack_export"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 

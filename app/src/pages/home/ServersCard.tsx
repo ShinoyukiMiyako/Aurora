@@ -19,11 +19,11 @@ import { cx } from "../../lib/util";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
-import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
+import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import { useKnownServers, usePinnedServers, useServerStatus, type KnownServerDto, type PinnedServerDto } from "../../state/queries/home";
 import type { ResourceResult } from "../../state/resource";
-import { busyInstanceId } from "../../state/selectors";
+import { busyInstanceId, savesBusyIds } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card, type ResponsiveValue } from "../../ui/Card";
@@ -47,12 +47,14 @@ import { useReportOnce } from "./report";
 import {
   SIGNAL_BARS,
   defaultJoinChoice,
+  joinBlock,
   joinCandidates,
   joinPlan,
   pinCandidates,
   pinMenuPlan,
   serverRows,
   type BusySession,
+  type JoinBlock,
   type JoinPlan,
   type ProbeState,
   type ServerRow,
@@ -86,6 +88,8 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const busyId = useLauncherSelector(busyInstanceId);
   const busyPhase = useLauncherSelector((st) => (busyInstanceId(st) === null || st.session === null ? null : st.session.phase === "running" ? "running" : "loading"));
   const busy: BusySession | null = busyId === null || busyPhase === null ? null : { instanceId: busyId, phase: busyPhase };
+  // 存档正在备份、恢复或导出的实例：后端拒绝启动，「加入」与实例选择据此带原因禁用
+  const savesBusy = useLauncherSelector(savesBusyIds, shallowArrayEqual);
   const gate = useLoadingGate(pinned.status === "loading");
   // 挑选弹窗打开过才挂上，之后保持挂载好播完关闭的退场。
   // 每次打开换一个 session，弹窗里「刚点过」的记录随之清空
@@ -186,10 +190,11 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
               >
                 <ServerRowView
                   row={row}
-                  join={joinPlan(row.instance, instances, busy)}
+                  join={joinPlan(row.instance, instances, busy, savesBusy)}
                   candidates={candidates}
                   selectedInstanceId={selectedInstanceId}
                   busy={busy}
+                  savesBusy={savesBusy}
                   onUnpin={() => toggle({ name: row.name, address: row.address, instance: row.instance })}
                 />
               </motion.li>
@@ -319,15 +324,20 @@ interface ServerRowViewProps {
   selectedInstanceId: string | null;
   /** 占着游戏进程的那一局；实例选择里选中它时「加入服务器」带原因禁用。 */
   busy: BusySession | null;
+  /** 存档正在备份、恢复或导出的实例；实例选择里选中它时同样带原因禁用。 */
+  savesBusy: readonly string[];
   onUnpin: () => void;
 }
 
-/** 占着游戏进程的实例不能再拿来加入：同一实例再启动是空操作，加载阶段写「正在启动」。 */
-function busyReason(instanceId: string, phase: BusySession["phase"]): string {
-  return phase === "running" ? HOME_COPY.joinRunning(instanceId) : HOME_COPY.joinLaunching(instanceId);
+/**
+ * 不能拿来加入的原因：占着游戏进程的实例再启动是空操作，加载阶段写「正在启动」；存档在备份或恢复时后端拒绝启动。
+ */
+function blockReason(instanceId: string, block: JoinBlock): string {
+  if (block.kind === "backingUp") return HOME_COPY.joinBackingUp(instanceId);
+  return block.phase === "running" ? HOME_COPY.joinRunning(instanceId) : HOME_COPY.joinLaunching(instanceId);
 }
 
-function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpin }: ServerRowViewProps) {
+function ServerRowView({ row, join, candidates, selectedInstanceId, busy, savesBusy, onUnpin }: ServerRowViewProps) {
   const { copyText } = useShell();
   const actions = useLauncherActions();
   const run = useRunner();
@@ -366,7 +376,12 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpi
     await quickPlay(instanceId);
   };
   const forget = () => void run(() => actions.setPinnedServerInstance(row.address, null), HOME_COPY.saveJoinError);
-  const joinBlocked = join.kind === "busy" ? busyReason(join.instanceId, join.phase) : undefined;
+  const joinBlocked =
+    join.kind === "busy"
+      ? blockReason(join.instanceId, { kind: "busy", phase: join.phase })
+      : join.kind === "backingUp"
+        ? blockReason(join.instanceId, { kind: "backingUp" })
+        : undefined;
 
   useEffect(() => {
     if (!copied) return;
@@ -448,6 +463,7 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpi
           candidates={candidates}
           selectedInstanceId={selectedInstanceId}
           busy={busy}
+          savesBusy={savesBusy}
           rememberDefault={picker.remember}
           onJoin={(instanceId, remember) => void joinWith(instanceId, remember)}
           onClose={closePicker}
@@ -465,19 +481,21 @@ interface JoinPickerProps {
   candidates: readonly InstanceSummary[];
   selectedInstanceId: string | null;
   busy: BusySession | null;
+  savesBusy: readonly string[];
   rememberDefault: boolean;
   onJoin: (instanceId: string, remember: boolean) => void;
   onClose: () => void;
 }
 
 /** 选用哪个实例加入：只列能加入服务器的实例；一个都没有时换成紧凑空状态，不给复选框与主按钮。 */
-function JoinPicker({ id, open, anchor, server, candidates, selectedInstanceId, busy, rememberDefault, onJoin, onClose }: JoinPickerProps) {
+function JoinPicker({ id, open, anchor, server, candidates, selectedInstanceId, busy, savesBusy, rememberDefault, onJoin, onClose }: JoinPickerProps) {
   const [choice, setChoice] = useState<string | null>(() => defaultJoinChoice(candidates, selectedInstanceId));
   const [remember, setRemember] = useState(rememberDefault);
   // 开着的时候实例列表可能变了（被删除、开始安装）：选中的那一项不在候选里就退回默认
   const current = choice !== null && candidates.some((c) => c.id === choice) ? choice : defaultJoinChoice(candidates, selectedInstanceId);
   // 默认选中的当前实例常常就是正在运行的那个：照常列出、可以改选，只是不能拿它加入
-  const blocked = busy !== null && busy.instanceId === current ? busyReason(current, busy.phase) : undefined;
+  const block = current === null ? null : joinBlock(current, busy, savesBusy);
+  const blocked = current === null || block === null ? undefined : blockReason(current, block);
   return (
     <Popover id={id} open={open} anchor={anchor} onClose={onClose} placement="bottom-end" autoFocus aria-label={HOME_COPY.joinPickerLabel(server)} className={s.joinPanel}>
       {current === null ? (

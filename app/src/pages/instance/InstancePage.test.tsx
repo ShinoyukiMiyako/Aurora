@@ -1786,6 +1786,31 @@ describe("实例详情：存档直达", () => {
     expect(folder?.getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("后端在备份或恢复存档：头图的启动胶囊带原因禁用、保持可聚焦，点了不发 launch_game；备份结束后恢复可点", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
+    await open("overview");
+    const capsule = () => {
+      const found = document.querySelector<HTMLButtonElement>(`[role="group"][aria-label="启动「${ID}」"] button`);
+      if (found === null) throw new Error("找不到启动胶囊的按钮");
+      return found;
+    };
+    expect(capsule().textContent).toBe("启动游戏");
+    expect(capsule().getAttribute("aria-disabled")).toBe("true");
+    expect(capsule().disabled).toBe(false);
+    expect(await hoverTip(capsule())).toBe("正在备份或恢复存档，完成后再启动");
+    click(capsule());
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(launcher.state.session).toBeNull();
+
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: null } : i));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(capsule().getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("读不出版本信息：每行都写「这个实例的版本信息不完整」", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, quick_play: null } : i));
     await open("overview");

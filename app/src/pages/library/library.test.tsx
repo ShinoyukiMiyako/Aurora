@@ -561,6 +561,30 @@ describe("实例库：动作", () => {
     expect(await reasonOf(remove)).toBe("游戏正在运行，先结束游戏");
   });
 
+  it("后端在备份或恢复存档（含游戏退出后的自动备份）：底栏「启动」与菜单里的删除都带原因禁用，点了不发 launch_game 与删除预览", async () => {
+    instances = instances.map((i) => (i.id === "原版" ? { ...i, activity: "backing_up" } : i));
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "原版").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    const launch = byText<HTMLButtonElement>("button", "启动", card);
+    expect(launch.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(launch)).toBe("正在备份或恢复存档，完成后再启动");
+    click(launch);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toEqual([]);
+    click(byLabel("「原版」的更多操作"));
+    const remove = menuItem(LIBRARY_COPY.menu.remove);
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(remove)).toBe("正在备份或恢复这个实例的存档，完成后才能删除");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    // 别的实例不受影响
+    const other = byText<HTMLButtonElement>("article button", "樱花生存").closest("article");
+    if (other === null) throw new Error("找不到卡片");
+    expect(byText<HTMLButtonElement>("button", "启动", other).getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("后端正在改动 Mod、资源或设置：删除入口提前禁用并写明原因，不发预览与删除", async () => {
     instances = instances.map((i) => (i.id === "原版" ? { ...i, activity: "modifying" } : i));
     await mount();

@@ -967,6 +967,27 @@ describe("主页：固定服务器的「加入」", () => {
     expect(launcher.state.launchPrompt).toEqual({ instanceId: "生存", occupantId: "创造", occupantPhase: "running", quickPlay: SERVER });
   });
 
+  it("记住的实例在备份或恢复存档：「加入」aria-disabled 并写明原因，点了不启动", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, activity: "backing_up" } : i));
+    await mount();
+    const join = joinButton();
+    expect(join.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      join.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = join.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「加入」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("「创造」正在备份或恢复存档，完成后再加入");
+    click(join);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(picker()).toBeNull();
+  });
+
   it("实例选择里选中的正是运行中的实例：「加入服务器」aria-disabled 并写明原因，点了既不保存也不启动；换一个实例就能加入", async () => {
     await mount();
     await act(async () => {

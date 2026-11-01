@@ -84,7 +84,7 @@ describe("拖动排序的几何", () => {
 });
 
 describe("固定实例菜单的第一项", () => {
-  const entry = (view: LaunchView) => ({ view, launch: vi.fn(), cancel: vi.fn(), stop: vi.fn(), openCrash: vi.fn() });
+  const entry = (view: LaunchView, blocked: string | null = null) => ({ view, blocked, launch: vi.fn(), cancel: vi.fn(), stop: vi.fn(), openCrash: vi.fn() });
 
   it("按启动视图给出启动、取消、结束、诊断或修复", () => {
     expect(pinLaunchItem(entry({ kind: "ready", busyElsewhere: false })).label).toBe(LAUNCH_COPY.launch);
@@ -100,6 +100,23 @@ describe("固定实例菜单的第一项", () => {
     pinLaunchItem(e).onSelect();
     expect(e.stop).toHaveBeenCalledTimes(1);
     expect(e.launch).not.toHaveBeenCalled();
+  });
+
+  it("存档备份或恢复进行中：启动与重新启动是带原因的禁用项，点了不启动；取消、结束、诊断照常", () => {
+    const reason = "正在备份或恢复存档，完成后再启动";
+    const launchable: LaunchView[] = [
+      { kind: "ready", busyElsewhere: false },
+      { kind: "stopped", session, reason: "exited" },
+      { kind: "failed", session, code: "spawn_failed", params: {} },
+    ];
+    for (const view of launchable) {
+      const e = entry(view, reason);
+      const item = pinLaunchItem(e);
+      expect(item).toMatchObject({ disabled: true, disabledReason: reason });
+    }
+    for (const view of [{ kind: "running", session }, { kind: "crashed", session }] as LaunchView[]) {
+      expect(pinLaunchItem(entry(view, reason)).disabled).toBeUndefined();
+    }
   });
 
   it("安装中是禁用项", () => {

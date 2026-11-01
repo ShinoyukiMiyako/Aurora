@@ -215,6 +215,8 @@ export const LAUNCH_COPY = {
   queuedDetail: (position: number) => `排队中 · 第 ${position} 位`,
   installingTitle: (pct: string) => `正在安装 ${pct}`,
   busyElsewhere: "另一个游戏在运行",
+  /** 存档备份或恢复进行中，启动入口的禁用原因。 */
+  savesBusy: "正在备份或恢复存档，完成后再启动",
   group: (name: string) => `启动「${name}」`,
 } as const;
 

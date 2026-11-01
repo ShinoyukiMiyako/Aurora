@@ -58,6 +58,19 @@ export function busyWorlds(state: LauncherState, instanceId: string): string[] {
   return [...worlds].sort();
 }
 
+/**
+ * 实例的存档此刻正被备份、恢复或导出，后端会以 instance_busy 拒绝启动：后端报着 backing_up，或者前端有它的存档任务
+ * 在排队或进行中（列表是任务开始前扫的，排着的任务一开始就会占住实例，这时点启动正好撞上它）。
+ */
+export function savesBusy(state: LauncherState, inst: InstanceSummary): boolean {
+  return inst.activity === "backing_up" || busyWorlds(state, inst.id).length > 0;
+}
+
+/** 存档正被备份、恢复或导出的实例 id，按实例列表的顺序。只随实例列表与任务的增减变，按 shallowArrayEqual 订阅。 */
+export function savesBusyIds(state: LauncherState): string[] {
+  return state.instances.filter((inst) => savesBusy(state, inst)).map((inst) => inst.id);
+}
+
 export function queuePosition(state: LauncherState, taskId: string): number | null {
   return taskQueuePosition(state.tasks, taskId);
 }

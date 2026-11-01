@@ -60,7 +60,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const run = useRunner();
   const deleteInstance = useDeleteInstance();
 
-  const deleteReason = lockReason(instanceLocks(busy, inst.status === "installing", inst.activity === "modifying").delete, "delete");
+  const deleteReason = lockReason(instanceLocks(busy, inst.status === "installing", inst.activity === "modifying", inst.activity === "backing_up").delete, "delete");
   const pinAllowed = inst.pinned || canPin;
   const cover = instanceCover(inst);
   const justCrashed = viewKind === "crashed";

@@ -19,6 +19,7 @@ import { cx } from "../lib/util";
 import { useNow } from "../state/launcher";
 import { progressTrack } from "../state/tasks";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
+import { Tooltip } from "../ui/Tooltip";
 import { useBreathPhase } from "./breath";
 import { instanceCover } from "./cover";
 import styles from "./LaunchCapsule.module.css";
@@ -216,13 +217,29 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
   const cover = instanceCover(entry.instance);
   const id = entry.instance.id;
   switch (face.kind) {
-    case "ready":
-      return (
-        <button type="button" className={styles.go} onClick={entry.launch}>
+    case "ready": {
+      const label = (
+        <>
           <Icon name="play" size={18} />
           {relaunch ? LAUNCH_COPY.relaunch : LAUNCH_COPY.launch}
+        </>
+      );
+      // 存档备份或恢复进行中：保持可聚焦，悬停与聚焦写出原因，点击无效
+      if (entry.blocked !== null) {
+        return (
+          <Tooltip content={entry.blocked}>
+            <button type="button" className={styles.go} data-disabled aria-disabled="true">
+              {label}
+            </button>
+          </Tooltip>
+        );
+      }
+      return (
+        <button type="button" className={styles.go} onClick={entry.launch}>
+          {label}
         </button>
       );
+    }
     case "broken": {
       const action = brokenAction(face);
       return (

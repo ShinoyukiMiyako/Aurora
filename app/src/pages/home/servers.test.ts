@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { KnownServerDto, ServerStatusDto } from "../../state/queries/home";
 import { MENU_MAX_ACTIONS } from "../../ui/Menu";
-import { canJoinWith, defaultJoinChoice, joinCandidates, joinPlan, pinCandidates, pinMenuPlan, serverRows, signalBars, signalQuality } from "./servers";
+import { canJoinWith, defaultJoinChoice, joinBlock, joinCandidates, joinPlan, pinCandidates, pinMenuPlan, serverRows, signalBars, signalQuality } from "./servers";
 import { summary } from "./test-data";
 
 function status(address: string, overrides: Partial<ServerStatusDto> = {}): ServerStatusDto {
@@ -181,19 +181,32 @@ describe("加入服务器用的实例", () => {
   });
 
   it("记住的实例可用就直接加入；正在启动或运行时带原因禁用；别的实例在跑不影响", () => {
-    expect(joinPlan("旧版", instances, null)).toEqual({ kind: "direct", instanceId: "旧版" });
-    expect(joinPlan("旧版", instances, { instanceId: "最近", phase: "running" })).toEqual({ kind: "direct", instanceId: "旧版" });
-    expect(joinPlan("旧版", instances, { instanceId: "旧版", phase: "loading" })).toEqual({ kind: "busy", instanceId: "旧版", phase: "loading" });
-    expect(joinPlan("最近", instances, { instanceId: "最近", phase: "running" })).toEqual({ kind: "busy", instanceId: "最近", phase: "running" });
+    expect(joinPlan("旧版", instances, null, [])).toEqual({ kind: "direct", instanceId: "旧版" });
+    expect(joinPlan("旧版", instances, { instanceId: "最近", phase: "running" }, [])).toEqual({ kind: "direct", instanceId: "旧版" });
+    expect(joinPlan("旧版", instances, { instanceId: "旧版", phase: "loading" }, [])).toEqual({ kind: "busy", instanceId: "旧版", phase: "loading" });
+    expect(joinPlan("最近", instances, { instanceId: "最近", phase: "running" }, [])).toEqual({ kind: "busy", instanceId: "最近", phase: "running" });
+  });
+
+  it("记住的实例在备份或恢复存档：带原因禁用；别的实例在备份不影响", () => {
+    expect(joinPlan("旧版", instances, null, ["旧版"])).toEqual({ kind: "backingUp", instanceId: "旧版" });
+    expect(joinPlan("旧版", instances, { instanceId: "最近", phase: "running" }, ["旧版"])).toEqual({ kind: "backingUp", instanceId: "旧版" });
+    expect(joinPlan("旧版", instances, null, ["最近"])).toEqual({ kind: "direct", instanceId: "旧版" });
+  });
+
+  it("实例选择里选中的那一个能不能拿来加入：正在启动或运行、在备份或恢复存档时各有原因，别的实例占着不算", () => {
+    expect(joinBlock("旧版", null, [])).toBeNull();
+    expect(joinBlock("旧版", { instanceId: "最近", phase: "running" }, ["最近"])).toBeNull();
+    expect(joinBlock("旧版", { instanceId: "旧版", phase: "loading" }, [])).toEqual({ kind: "busy", phase: "loading" });
+    expect(joinBlock("旧版", null, ["旧版"])).toEqual({ kind: "backingUp" });
   });
 
   it("没记住、记住的已不在、损坏、在安装、版本不支持：都按没记住弹实例选择", () => {
     for (const remembered of [null, "已删除", "坏了", "安装中", "太老"]) {
-      expect(joinPlan(remembered, instances, null)).toEqual({ kind: "pick" });
+      expect(joinPlan(remembered, instances, null, [])).toEqual({ kind: "pick" });
     }
     // 记住的 id 按字符串精确比对，与后端改名、删除时同步绑定的口径一致
     const named = [summary("Survival", { quickPlay: both })];
-    expect(joinPlan("survival", named, null)).toEqual({ kind: "pick" });
-    expect(joinPlan("Survival", named, null)).toEqual({ kind: "direct", instanceId: "Survival" });
+    expect(joinPlan("survival", named, null, [])).toEqual({ kind: "pick" });
+    expect(joinPlan("Survival", named, null, [])).toEqual({ kind: "direct", instanceId: "Survival" });
   });
 });

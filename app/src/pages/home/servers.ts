@@ -168,11 +168,23 @@ export interface BusySession {
   phase: "loading" | "running";
 }
 
+/** 某个实例此刻为什么不能拿来加入：它自己正在启动或运行，或者存档正在备份、恢复或导出（后端拒绝启动）。 */
+export type JoinBlock = { kind: "busy"; phase: BusySession["phase"] } | { kind: "backingUp" };
+
+/** 能拿来加入为 null。别的实例占着游戏进程不算：照常启动，由启动拦截弹替换确认。savesBusy 是存档正忙的实例 id。 */
+export function joinBlock(instanceId: string, busy: BusySession | null, savesBusy: readonly string[]): JoinBlock | null {
+  if (busy !== null && busy.instanceId === instanceId) return { kind: "busy", phase: busy.phase };
+  if (savesBusy.includes(instanceId)) return { kind: "backingUp" };
+  return null;
+}
+
 export type JoinPlan =
   /** 记住的实例可用：点「加入」直接以它启动并进服。 */
   | { kind: "direct"; instanceId: string }
   /** 记住的实例正在启动或运行：按钮带原因禁用。 */
   | { kind: "busy"; instanceId: string; phase: BusySession["phase"] }
+  /** 记住的实例正在备份、恢复或导出存档：按钮带原因禁用。 */
+  | { kind: "backingUp"; instanceId: string }
   /** 没记住，或记住的实例已经不在、损坏、在安装、版本不支持：弹实例选择。 */
   | { kind: "pick" };
 
@@ -180,10 +192,11 @@ export type JoinPlan =
  * 行上的「加入」怎么走。记住的实例只有仍在实例列表里、就绪、版本支持加入服务器时才算数（被删除或换了游戏目录后
  * 同名的未必是同一个），否则按没记住处理。别的实例在运行时照常直接启动，由启动拦截弹替换确认。
  */
-export function joinPlan(remembered: string | null, instances: readonly InstanceSummary[], busy: BusySession | null): JoinPlan {
+export function joinPlan(remembered: string | null, instances: readonly InstanceSummary[], busy: BusySession | null, savesBusy: readonly string[]): JoinPlan {
   if (remembered === null) return { kind: "pick" };
   const inst = instances.find((i) => i.id === remembered);
   if (inst === undefined || !canJoinWith(inst)) return { kind: "pick" };
-  if (busy !== null && busy.instanceId === inst.id) return { kind: "busy", instanceId: inst.id, phase: busy.phase };
-  return { kind: "direct", instanceId: inst.id };
+  const block = joinBlock(inst.id, busy, savesBusy);
+  if (block === null) return { kind: "direct", instanceId: inst.id };
+  return block.kind === "busy" ? { kind: "busy", instanceId: inst.id, phase: block.phase } : { kind: "backingUp", instanceId: inst.id };
 }

@@ -8,7 +8,7 @@ import type { TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { resources } from "./resource";
-import { busyWorlds } from "./selectors";
+import { busyWorlds, savesBusyIds } from "./selectors";
 import { worldBackupsKey, type LauncherStore } from "./store";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -85,6 +85,8 @@ describe("备份、导出与恢复入队", () => {
     expect(inst).toMatchObject({ status: "ready", activity: "modifying" });
     expect(busyWorlds(store.getState(), "生存")).toEqual(["w1"]);
     expect(busyWorlds(store.getState(), "创造")).toEqual([]);
+    // 后端还没报 backing_up，排着或在跑的存档任务就已经让启动入口提前禁用
+    expect(savesBusyIds(store.getState())).toEqual(["生存"]);
   });
 
   it("同一个存档的备份已在队列里：不再入队，只提示重复", async () => {
