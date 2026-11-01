@@ -24,9 +24,10 @@ pub fn encoding_args() -> Vec<String> {
     ]
 }
 
-/// 旧版（无 `arguments.jvm`）的固定 JVM 基础参数集，模板形式。
+/// 旧版（版本 jvm 参数里没有 `${classpath}`）的固定 JVM 基础参数集，模板形式。
 ///
-/// 1.12- 的版本 JSON 不带结构化 jvm 参数，启动器需自行补上 natives 路径、启动器品牌标识与 classpath。
+/// 1.12- 的版本 JSON 不带结构化 jvm 参数，继承它们的加载器版本也至多带几条自己的 `-D`，启动器需自行
+/// 补上 natives 路径、启动器品牌标识与 classpath。
 pub fn legacy_jvm_base_args() -> Vec<String> {
     vec![
         "-Djava.library.path=${natives_directory}".to_owned(),
@@ -37,7 +38,7 @@ pub fn legacy_jvm_base_args() -> Vec<String> {
     ]
 }
 
-/// 旧版（无 `arguments.jvm`）在当前平台上要补的 JVM 参数，排在 [`legacy_jvm_base_args`] 之前。
+/// 旧版（判据同 [`legacy_jvm_base_args`]）在当前平台上要补的 JVM 参数，排在 [`legacy_jvm_base_args`] 之前。
 ///
 /// 1.13 起的版本 JSON 在 Windows 上自带 `-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance...`：
 /// Intel 显卡驱动靠命令行里的这串认出 Minecraft，套用为它准备的驱动配置。旧版本 JSON 不写这条，

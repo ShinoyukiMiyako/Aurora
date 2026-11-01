@@ -1,7 +1,7 @@
 //! 启动命令拼装：把版本 JSON、路径、账户、内存、Authlib-Injector 组合成完整的
 //! `java <jvm 参数...> <主类> <游戏参数...>` 与工作目录。
 //!
-//! 这是本 crate 的门面：JVM 段（安全/编码/内存/authlib + 版本 jvm 参数或旧版基座 + 日志参数）与
+//! 这是本 crate 的门面：JVM 段（安全/编码/内存/authlib + 旧版基座与版本 jvm 参数 + 日志参数）与
 //! 游戏段（新式 `arguments.game` 或旧式 `minecraftArguments`）分别拼成模板序列，再统一过一遍 `${}` 占位符
 //! 替换。占位符全表（natives/library/game_directory/assets/auth_*/version_type/classpath…）在这里一次性算好。
 //! 直达存档或服务器（[`QuickPlayTarget`]）按版本 JSON 有没有 Quick Play 条件块，决定是置 feature 填占位符，
@@ -354,7 +354,8 @@ impl<'a> CommandBuilder<'a> {
             ph.insert(*placeholder, value.as_str());
         }
 
-        // JVM 段模板：先注入的安全/编码/内存/authlib，再叠版本 jvm 参数（或旧版基座），最后日志参数。
+        // JVM 段模板：先注入的安全/编码/内存/authlib，再叠旧版基座（版本 jvm 参数没带 classpath 时）与版本
+        // jvm 参数，最后日志参数。
         let mut jvm_templates: Vec<String> = Vec::new();
         jvm_templates.extend(args::security_args());
         jvm_templates.extend(args::encoding_args());
@@ -362,20 +363,23 @@ impl<'a> CommandBuilder<'a> {
         if let Some(authlib) = &self.authlib {
             jvm_templates.extend(authlib.jvm_args());
         }
-        match self
+        let version_jvm = self
             .version
             .arguments
             .as_ref()
-            .filter(|arguments| !arguments.jvm.is_empty())
+            .map(|arguments| args::expand_arguments(&arguments.jvm, &self.ctx))
+            .unwrap_or_default();
+        // 不能按 arguments.jvm 是否为空判断：Legacy Fabric 这类加载器继承 minecraftArguments 的旧版，
+        // arguments.jvm 里只有它自己的 -D，classpath 与 natives 路径仍要靠基座。基座排在前面，
+        // 与新式版本合并后「原版参数在前、加载器参数在后」的顺序一致。
+        if !version_jvm
+            .iter()
+            .any(|template| template.contains("${classpath}"))
         {
-            Some(arguments) => {
-                jvm_templates.extend(args::expand_arguments(&arguments.jvm, &self.ctx))
-            }
-            None => {
-                jvm_templates.extend(args::legacy_jvm_platform_args(&self.ctx));
-                jvm_templates.extend(args::legacy_jvm_base_args());
-            }
+            jvm_templates.extend(args::legacy_jvm_platform_args(&self.ctx));
+            jvm_templates.extend(args::legacy_jvm_base_args());
         }
+        jvm_templates.extend(version_jvm);
         if let Some(client) = self
             .version
             .logging
@@ -589,6 +593,57 @@ mod tests {
         assert_eq!(value_after(&args, "--height"), vec!["1080"]);
         assert_eq!(value_after(&args, "--server"), vec!["play.example.com"]);
         assert_eq!(value_after(&args, "--port"), vec!["25566"]);
+    }
+
+    /// 判据看展开后的模板：条件块没命中时 classpath 并没有进命令行，`${classpath_separator}` 也不是 classpath。
+    #[test]
+    fn legacy_base_is_added_whenever_the_expanded_jvm_args_have_no_classpath() {
+        for jvm in [
+            r#""-Dloader.own=1""#,
+            r#"{"rules":[{"action":"allow","os":{"name":"linux"}}],"value":["-cp","${classpath}"]},"-Dloader.own=1""#,
+            r#""-p","${library_directory}/a.jar${classpath_separator}${library_directory}/b.jar""#,
+        ] {
+            let json = format!(
+                r#"{{"id":"1.12.2","mainClass":"m",
+                "minecraftArguments":"--username ${{auth_player_name}}",
+                "arguments":{{"jvm":[{jvm}]}}}}"#
+            );
+            let args = build_with_resolution(&json, None);
+            let classpaths = value_after(&args, "-cp");
+            assert_eq!(classpaths.len(), 1, "{jvm}：{args:?}");
+            assert!(classpaths[0].ends_with("1.12.2.jar"), "{jvm}：{args:?}");
+            assert!(
+                args.iter().any(|a| a.starts_with("-Djava.library.path=")),
+                "{jvm}：{args:?}"
+            );
+        }
+    }
+
+    /// 模板自带 classpath 就是完整的 jvm 参数，不管是不是写成 `-cp`：再补一份基座只会多出第二条 classpath。
+    #[test]
+    fn jvm_args_that_carry_the_classpath_get_no_legacy_base() {
+        for (jvm, cp_flags) in [
+            (r#""-cp","${classpath}""#, 1),
+            (r#""-Djava.class.path=${classpath}""#, 0),
+            (
+                r#"{"rules":[{"action":"allow","os":{"name":"windows"}}],"value":["-cp","${classpath}"]}"#,
+                1,
+            ),
+        ] {
+            let json = format!(
+                r#"{{"id":"1.12.2","mainClass":"m",
+                "minecraftArguments":"--username ${{auth_player_name}}",
+                "arguments":{{"jvm":[{jvm}]}}}}"#
+            );
+            let args = build_with_resolution(&json, None);
+            assert!(
+                !args.iter().any(|a| a.starts_with("-Djava.library.path=")
+                    || a.starts_with("-Dminecraft.launcher.brand=")
+                    || a.starts_with("-XX:HeapDumpPath=")),
+                "{jvm}：{args:?}"
+            );
+            assert_eq!(value_after(&args, "-cp").len(), cp_flags, "{jvm}：{args:?}");
+        }
     }
 
     /// 官方版本 JSON 里真实出现过的日志配置名都能通过校验，`-Dlog4j.configurationFile` 指向 log_configs 下的
