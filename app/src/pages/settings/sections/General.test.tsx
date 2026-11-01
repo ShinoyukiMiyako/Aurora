@@ -202,6 +202,13 @@ describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
     await flush();
   };
 
+  it("选最小化：说明写进程起来后，不写游戏窗口出现后（拿到进程就最小化，这时窗口还没出来）", async () => {
+    await mountGeneral();
+    await choose("最小化");
+    expect(page()).toContain(`游戏进程起来后${APP_NAME}缩到任务栏，结束后再弹回来`);
+    expect(page()).not.toContain("游戏窗口出现后");
+  });
+
   it("开着自动备份时选关闭：设置下方写明不会备份，换回别的选项这行就没了", async () => {
     await mountGeneral();
     expect(page()).not.toContain(NOTE);
