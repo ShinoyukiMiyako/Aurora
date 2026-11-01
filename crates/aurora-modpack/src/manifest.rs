@@ -383,6 +383,18 @@ fn required_text(document: &'static str, field: &str, value: &str) -> Result<Str
     Ok(trimmed.to_owned())
 }
 
+/// 加载器版本号会原样拼进安装器的下载地址、缓存文件名与版本 id，必须是单个安全的路径段。
+fn loader_version(document: &'static str, field: &str, value: &str) -> Result<String> {
+    let version = required_text(document, field, value)?;
+    aurora_version::check_path_segment(&version).map_err(|problem| {
+        Error::invalid(
+            document,
+            format!("{field} 的加载器版本号「{version}」不能用：{problem}"),
+        )
+    })?;
+    Ok(version)
+}
+
 /// Modrinth 的加载器依赖：至多一个。新出现的依赖 id 按格式约定可能随时增加，不认识的只记日志。
 fn modrinth_loader(dependencies: &BTreeMap<String, String>) -> Result<Option<PackLoader>> {
     let mut found = Vec::new();
@@ -400,7 +412,7 @@ fn modrinth_loader(dependencies: &BTreeMap<String, String>) -> Result<Option<Pac
         };
         found.push(PackLoader {
             kind,
-            version: required_text(MODRINTH_DOCUMENT, &format!("dependencies.{key}"), value)?,
+            version: loader_version(MODRINTH_DOCUMENT, &format!("dependencies.{key}"), value)?,
         });
     }
     match found.len() {
@@ -432,7 +444,7 @@ fn curseforge_loader(id: &str) -> Result<PackLoader> {
     };
     Ok(PackLoader {
         kind,
-        version: required_text(CURSEFORGE_DOCUMENT, "minecraft.modLoaders[].id", version)?,
+        version: loader_version(CURSEFORGE_DOCUMENT, "minecraft.modLoaders[].id", version)?,
     })
 }
 
@@ -600,6 +612,43 @@ mod tests {
         ))
         .unwrap_err();
         assert!(matches!(err, Error::ManifestInvalid { .. }), "{err:?}");
+    }
+
+    /// 加载器版本号会拼进安装器的下载地址、缓存文件名与版本 id：带分隔符、`..` 或盘符的取值在读清单时就
+    /// 拒掉，预览与导入都报清单不合法，不等到安装时才出问题。
+    #[test]
+    fn loader_versions_that_are_not_a_single_path_segment_are_rejected() {
+        for version in [r"47.2.0\..\..\x", "47.2.0/../x", "..", "C:47", "47.2.0."] {
+            let err = PackManifest::parse_modrinth(&index(
+                serde_json::json!([]),
+                serde_json::json!({"minecraft": "1.20.1", "forge": version}),
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::ManifestInvalid { document, reason }
+                        if *document == MODRINTH_DOCUMENT
+                            && reason.contains("dependencies.forge")
+                            && reason.contains(version)
+                ),
+                "{version}：{err:?}"
+            );
+
+            let err = PackManifest::parse_curseforge(&curseforge(
+                serde_json::json!([{"id": format!("forge-{version}"), "primary": true}]),
+                serde_json::json!([]),
+            ))
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    Error::ManifestInvalid { document, reason }
+                        if *document == CURSEFORGE_DOCUMENT && reason.contains(version)
+                ),
+                "{version}：{err:?}"
+            );
+        }
     }
 
     #[test]

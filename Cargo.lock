@@ -460,6 +460,7 @@ name = "aurora-modpack"
 version = "0.1.0"
 dependencies = [
  "aurora-instance",
+ "aurora-version",
  "serde",
  "serde_json",
  "tempfile",

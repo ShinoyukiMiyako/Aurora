@@ -74,7 +74,8 @@ impl InstanceRequest {
         })
     }
 
-    /// 不碰网络就能判断的问题：Forge / NeoForge 没有「推荐版」可查，版本号必须给出。
+    /// 不碰网络就能判断的问题：Forge / NeoForge 没有「推荐版」可查，版本号必须给出；版本号来自远端版本
+    /// 列表，会原样拼进安装器地址、缓存文件名与版本 id，必须是单个安全的路径段。
     pub fn validate(&self) -> Result<()> {
         if let Some(choice @ (LoaderChoice::Forge | LoaderChoice::NeoForge)) = self.loader
             && self.loader_version.is_none()
@@ -84,6 +85,15 @@ impl InstanceRequest {
                 game_version: self.mc_version.clone(),
             }
             .into());
+        }
+        if let (Some(choice), Some(version)) = (self.loader, &self.loader_version) {
+            aurora_version::check_path_segment(version).map_err(|problem| {
+                aurora_install::Error::UnsafePath {
+                    entry: format!("{} 版本号", choice.display_name()),
+                    path: version.clone(),
+                    problem,
+                }
+            })?;
         }
         Ok(())
     }
@@ -821,5 +831,58 @@ mod tests {
             err,
             CoreError::Instance(InstanceError::NotRepairable { .. })
         ));
+    }
+
+    /// 加载器版本号来自远端版本列表，会拼进安装器地址、缓存文件名与版本 id：不是单个安全路径段时在动手之前
+    /// 报路径越界，不建目录、不发请求；正常的版本号（含预发布后缀）照常放行。
+    #[test]
+    fn loader_versions_that_are_not_a_single_path_segment_fail_validation() {
+        for (choice, version, problem) in [
+            (
+                LoaderChoice::Forge,
+                r"47.2.0\..\..\x",
+                aurora_version::UnsafePath::Backslash,
+            ),
+            (
+                LoaderChoice::NeoForge,
+                "21.1.42/../x",
+                aurora_version::UnsafePath::Separator,
+            ),
+            (
+                LoaderChoice::Fabric,
+                "..",
+                aurora_version::UnsafePath::DotSegment,
+            ),
+        ] {
+            let request = InstanceRequest {
+                mc_version: "1.20.1".into(),
+                loader: Some(choice),
+                loader_version: Some(version.into()),
+            };
+            match request.validate() {
+                Err(CoreError::Install(aurora_install::Error::UnsafePath {
+                    entry,
+                    path,
+                    problem: got,
+                })) => {
+                    assert_eq!(entry, format!("{} 版本号", choice.display_name()));
+                    assert_eq!(path, version);
+                    assert_eq!(got, problem);
+                }
+                other => panic!("{version} 应报路径越界，实际：{other:?}"),
+            }
+        }
+        for (choice, version) in [
+            (LoaderChoice::Forge, "47.2.0"),
+            (LoaderChoice::Quilt, "0.26.0-beta.1"),
+        ] {
+            InstanceRequest {
+                mc_version: "1.20.1".into(),
+                loader: Some(choice),
+                loader_version: Some(version.into()),
+            }
+            .validate()
+            .unwrap();
+        }
     }
 }
