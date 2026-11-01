@@ -26,6 +26,7 @@ import {
 import { resetMocks } from "./mock";
 import { clearMockEventListeners, emitMockWorldBackup } from "./mock/events";
 import { endMockGame, failNextMockLaunch, lastMockQuickPlay } from "./mock/handlers/launch";
+import { acquireMockInstance } from "./mock/handlers/instances";
 import { cancelTask } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -307,6 +308,15 @@ describe("以离线方式进单人 mock", () => {
     expect(disk.code).toBe("disk_full");
     const after = await refusal(stored(HANAMI, "t-after", true));
     expect(after.detail).toEqual({ field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" });
+  });
+
+  it("实例正被占用而没能开局的降级不消耗那条记录：后端在占住实例之后才取账户身份，放开后照常放行", async () => {
+    await failWith("account_service_down");
+    const install = acquireMockInstance("1.21", "installing");
+    const busy = await rejection(launchGame(stored(HANAMI, "t-busy", true)));
+    expect(busy.code).toBe("instance_busy");
+    install.release();
+    expect(await launchGame(stored(HANAMI, "t-off", true))).toEqual({ pid: 4242, offline: true });
   });
 
   it("不是账户类的失败不记：java_missing 之后降级报 no_recent_failure", async () => {
