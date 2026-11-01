@@ -532,6 +532,25 @@ describe("更新预览", () => {
     expect(callsOf(ipc, "check_updates")).toHaveLength(1);
   });
 
+  it("已在排队或进行中更新的 Mod 不再列进预览：确认后不会给同一个文件再排一次更新", async () => {
+    await open();
+    click(button("更新 Sodium"));
+    await flush();
+    expect(launcher.state.tasks.map((t) => [t.spec.command, t.spec.args.fileName])).toEqual([["update_mod", "sodium.jar"]]);
+
+    click(button("全部更新 · 3"));
+    await flush();
+    expect(textOf(dialog())).toContain("已勾选 2 / 2");
+    expect(textOf(dialog())).not.toContain("Sodium");
+    click(button("更新 2 个", dialog()));
+    await flush();
+
+    const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
+    expect(composite).toHaveLength(1);
+    const items = composite[0].spec.args.items as { fileName: string }[];
+    expect(items.map((i) => i.fileName)).toEqual(["fabric-api.jar", "handmade.jar"]);
+  });
+
   it("全不选时确认键带原因禁用；批量更新只列选中行里可更新的", async () => {
     await open();
     click(find("checkbox", "选择 Sodium"));

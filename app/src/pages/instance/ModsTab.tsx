@@ -220,7 +220,9 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     setPreview((p) => ({ files, key: p === null ? 0 : p.key + 1 }));
     setPreviewOpen(true);
   };
-  const previewRows = preview === null ? [] : rows.filter((r) => r.update !== null && (preview.files === null || preview.files.has(r.fileName)));
+  // 已在排队或进行中更新的不再列：可更新项要等那次更新跑完才重取，列进来就会给同一个文件再排一次
+  const previewRows =
+    preview === null ? [] : rows.filter((r) => r.update !== null && !isUpdating(r) && (preview.files === null || preview.files.has(r.fileName)));
   const confirmPreview = (picked: readonly UpdateCandidate[]) => {
     setPreviewOpen(false);
     const files = rows.filter((r) => picked.some((c) => c.file_name === enabledFileName(r.fileName))).map((r) => r.fileName);
