@@ -300,6 +300,67 @@ mod tests {
         }
     }
 
+    /// 路径校验不能误伤真实版本：摘自 Forge、NeoForge、Fabric、OptiFine 与旧版原版 JSON 的写法，含构建号里的
+    /// `+`、下划线、`@zip` 扩展名、分类器，以及 Forge 自己产出的通用 jar 这种下载地址为空的条目。
+    #[test]
+    fn real_library_forms_pass_the_path_check() {
+        for (name, expected) in [
+            (
+                "net.fabricmc:sponge-mixin:0.12.5+mixin.0.8.5",
+                "net/fabricmc/sponge-mixin/0.12.5+mixin.0.8.5/sponge-mixin-0.12.5+mixin.0.8.5.jar",
+            ),
+            (
+                "net.fabricmc:intermediary:1.20.1",
+                "net/fabricmc/intermediary/1.20.1/intermediary-1.20.1.jar",
+            ),
+            (
+                "optifine:OptiFine:1.20.1_HD_U_I5",
+                "optifine/OptiFine/1.20.1_HD_U_I5/OptiFine-1.20.1_HD_U_I5.jar",
+            ),
+            (
+                "net.minecraftforge:forge:1.20.1-47.3.0:client",
+                "net/minecraftforge/forge/1.20.1-47.3.0/forge-1.20.1-47.3.0-client.jar",
+            ),
+            (
+                "net.neoforged:neoforge:21.1.77:client",
+                "net/neoforged/neoforge/21.1.77/neoforge-21.1.77-client.jar",
+            ),
+            (
+                "de.oceanlabs.mcp:mcp_config:1.20.1-20230612.114412@zip",
+                "de/oceanlabs/mcp/mcp_config/1.20.1-20230612.114412/mcp_config-1.20.1-20230612.114412.zip",
+            ),
+            (
+                "org.scala-lang.plugins:scala-continuations-library_2.11:1.0.2",
+                "org/scala-lang/plugins/scala-continuations-library_2.11/1.0.2/scala-continuations-library_2.11-1.0.2.jar",
+            ),
+            (
+                "com.mumfrey:liteloader:1.12.2-SNAPSHOT",
+                "com/mumfrey/liteloader/1.12.2-SNAPSHOT/liteloader-1.12.2-SNAPSHOT.jar",
+            ),
+        ] {
+            let shorthand = Library {
+                name: name.into(),
+                ..Default::default()
+            };
+            assert_eq!(library_relative_path(&shorthand).unwrap(), expected);
+
+            let declared = Library {
+                name: name.into(),
+                downloads: Some(aurora_version::LibraryDownloads {
+                    artifact: Some(aurora_version::Artifact {
+                        path: Some(expected.into()),
+                        sha1: "x".into(),
+                        size: 1,
+                        url: String::new(),
+                    }),
+                    classifiers: None,
+                }),
+                ..Default::default()
+            };
+            assert_eq!(library_relative_path(&declared).unwrap(), expected);
+        }
+    }
+
     #[test]
     fn invalid_non_native_coordinate_errors() {
         let version =
