@@ -754,7 +754,7 @@ impl Aurora {
                 required_major,
                 &settings.java,
                 pinned_by,
-                &mc_version,
+                game_version,
                 reporter,
             )
             .await?;
@@ -881,7 +881,10 @@ impl Aurora {
             self.prefer_dedicated_gpu_for(&java.path, reporter).await?;
         }
         let authlib = match authlib {
-            Some(api_root) => Some(self.prepare_authlib(&api_root, reporter).await?),
+            Some(api_root) => Some(
+                self.prepare_authlib(&api_root, &auth.player_name, reporter)
+                    .await?,
+            ),
             None => None,
         };
 
@@ -954,8 +957,7 @@ impl Aurora {
         if self.is_cancelled() {
             return Err(CoreError::from(aurora_download::Error::Cancelled).into());
         }
-        let log = reporter.log.take();
-        let session = spawn_game(&command, reporter.clock, log, game_log)?;
+        let session = spawn_game(&command, reporter.clock, &mut reporter.log, game_log)?;
         let pid = session.id();
         let _ = reporter
             .events
@@ -1490,16 +1492,19 @@ impl Aurora {
     async fn prepare_authlib(
         &self,
         api_root: &str,
+        account_name: &str,
         reporter: &mut Reporter<'_>,
     ) -> Result<AuthlibInjector, LaunchFailed> {
         let agent = self.ensure_authlib_agent(reporter).await?;
-        let metadata = aurora_auth::yggdrasil::prefetch_metadata(
-            &self.http(),
-            api_root,
-            crate::auth::AUTH_SERVER_TIMEOUT,
-        )
-        .await
-        .map_err(|err| authlib_metadata_failure(err, api_root))?;
+        let http = self.http();
+        let metadata = self
+            .until_cancelled(aurora_auth::yggdrasil::prefetch_metadata(
+                &http,
+                api_root,
+                crate::auth::AUTH_SERVER_TIMEOUT,
+            ))
+            .await?
+            .map_err(|err| authlib_metadata_failure(err, api_root, account_name))?;
         Ok(AuthlibInjector::new(agent, metadata.api_root).with_prefetched(metadata.prefetched))
     }
 
@@ -1510,8 +1515,11 @@ impl Aurora {
         reporter: &mut Reporter<'_>,
     ) -> Result<PathBuf, LaunchFailed> {
         let dir = crate::authlib::agent_dir(self.data_dir());
-        let urls = crate::authlib::latest_urls(&self.source_order(self.config().download_source));
-        let release = match crate::authlib::fetch_latest(&self.http(), &urls).await {
+        let urls = self.authlib_latest_urls();
+        let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
+        let http = self.http();
+        let latest = crate::authlib::fetch_latest(&http, &urls);
+        let release = match self.until_cancelled(latest).await? {
             Ok(release) => release,
             Err(err) => {
                 let Some(jar) = crate::authlib::newest_local(&dir).await? else {
@@ -1554,6 +1562,33 @@ impl Aurora {
             .into());
         }
         Ok(jar)
+    }
+}
+
+impl Aurora {
+    fn authlib_latest_urls(&self) -> Vec<String> {
+        #[cfg(test)]
+        if let Some(url) = self.injected_authlib_latest_url() {
+            return vec![url.to_owned()];
+        }
+        crate::authlib::latest_urls(&self.source_order(self.config().download_source))
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// 等一段不挂下载池令牌的联网：线路黑洞时要等连接超时才回来，取消不能跟着等。
+    async fn until_cancelled<T>(
+        &self,
+        work: impl std::future::Future<Output = T>,
+    ) -> Result<T, LaunchFailed> {
+        match self.cancel_token() {
+            Some(token) => token
+                .run_until_cancelled(work)
+                .await
+                .ok_or_else(|| aurora_download::Error::Cancelled.into()),
+            None => Ok(work.await),
+        }
     }
 }
 
@@ -1633,7 +1668,7 @@ async fn quick_play_target(
 fn spawn_game(
     command: &LaunchCommand,
     clock: SessionClock,
-    log: Option<SessionLog>,
+    log: &mut Option<SessionLog>,
     game_log: Option<LogBatchSink>,
 ) -> Result<GameSession, LaunchFailed> {
     aurora_launch::spawn(command, clock, log, game_log).map_err(|err| {
@@ -1650,19 +1685,32 @@ fn spawn_game(
     })
 }
 
-/// 读不到验证服务器元数据时，只有连不上算玩家能对症处理的失败（联网后重试）。服务器回错误页、
-/// 地址不是验证服务器之类的失败重新登录也解决不了，按门面错误原样报出原文，不提示重新登录。
-fn authlib_metadata_failure(err: aurora_auth::AuthError, api_root: &str) -> LaunchFailed {
-    if !matches!(err, aurora_auth::AuthError::Http { .. }) {
-        return err.into();
+/// 读不到验证服务器元数据时，连不上（联网后重试）与服务故障（5xx、429，稍后重试）算玩家能对症处理的
+/// 失败：账户还是好的，可以稍后重试或先以离线方式进单人，形状与续期失败相同。服务器回错误页、地址不是
+/// 验证服务器之类的失败重新登录也解决不了，按门面错误原样报出原文，不提示重新登录。
+fn authlib_metadata_failure(
+    err: aurora_auth::AuthError,
+    api_root: &str,
+    account_name: &str,
+) -> LaunchFailed {
+    let message = format!("读取验证服务器 {api_root} 的信息失败：{err}");
+    match err {
+        aurora_auth::AuthError::Http { .. } => {
+            LaunchFailure::new(FailureCode::AccountRefreshNetwork, message)
+                .param("server", api_root)
+                .caused_by(err)
+                .into()
+        }
+        aurora_auth::AuthError::ServiceUnavailable { status, .. } => {
+            LaunchFailure::new(FailureCode::AccountServiceDown, message)
+                .param("account", account_name)
+                .param("status", u64::from(status))
+                .param("server", api_root)
+                .caused_by(err)
+                .into()
+        }
+        other => other.into(),
     }
-    LaunchFailure::new(
-        FailureCode::AccountRefreshNetwork,
-        format!("读取验证服务器 {api_root} 的信息失败：{err}"),
-    )
-    .param("server", api_root)
-    .caused_by(err)
-    .into()
 }
 
 /// 续期失败里只有三种给失败码：凭据被服务器判定失效（重新登录，账户由续期本身写库标成需要重登）、
@@ -2152,8 +2200,20 @@ mod tests {
 
     /// 门面上布置一个过期的微软账户、指向 mock 的登录端点，返回落库后的账户。
     fn with_stale_account(fx: &Fixture, server: &wiremock::MockServer) -> (Aurora, Account) {
+        with_stale_account_as(fx, server, MS_UUID)
+    }
+
+    /// 同 [`with_stale_account`]，账户用指定的 uuid。续期闸按 uuid 在进程内共享：要卡准续期时机的用例单用
+    /// 一个 uuid，否则满载时会排在别的用例的续期后面，请求迟迟发不出去。
+    fn with_stale_account_as(
+        fx: &Fixture,
+        server: &wiremock::MockServer,
+        uuid: &str,
+    ) -> (Aurora, Account) {
         let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(server));
-        let stored = aurora.store_account_for_test(stale_microsoft()).unwrap();
+        let mut account = stale_microsoft();
+        account.uuid = uuid.to_owned();
+        let stored = aurora.store_account_for_test(account).unwrap();
         (aurora, stored)
     }
 
@@ -2604,6 +2664,78 @@ mod tests {
         assert_eq!(warned, vec![("生存 服", 1, true), ("老 存档", 0, false)]);
     }
 
+    /// 新建实例的版本 JSON 把 id 换成实例名、去掉了 inheritsFrom，继承链根就是实例自己。Java 失败的文案要写
+    /// 「Minecraft 1.21.1 需要 Java 21」，拿实例名去填就成了「Minecraft 生存 服 需要 Java 21」。
+    #[tokio::test]
+    async fn java_failures_name_the_game_version_not_the_instance() {
+        let fx = fixture();
+        let renamed = "生存 服";
+        let dir = fx.root.join(".minecraft").join("versions").join(renamed);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{renamed}.json")),
+            format!(
+                r#"{{"id":"{renamed}","clientVersion":"1.21.1","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-delta","majorVersion":21}}}}"#
+            ),
+        )
+        .unwrap();
+        let request = || LaunchRequest {
+            version_id: renamed.to_owned(),
+            ..request()
+        };
+
+        let java = fake_java(&fx.root, 17, 0);
+        let (result, _) = launch_request(&fx.aurora, request(), java).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::JavaTooOld);
+        assert_eq!(
+            failure.params.get("mc_version"),
+            Some(&Value::from("1.21.1"))
+        );
+        assert_eq!(
+            failure.message,
+            "实例指定的 Java 17 无法运行 Minecraft 1.21.1，至少需要 Java 21"
+        );
+    }
+
+    /// 进程起不来时会话日志不能跟着丢：写缓冲里攒着这次启动的全部阶段，而日志页正是玩家排查 spawn_failed 的地方。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawn_failure_keeps_a_finished_session_log() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_version(&mc, 17, true);
+        // 命令行超过 Windows 的长度上限：Java 探测照常通过，到拉起进程这一步才被系统拒绝。
+        aurora_instance::VersionSettingsStore::for_version_dir(
+            &mc.join(VERSIONS_DIR).join(VERSION),
+        )
+        .save(&VersionSettings {
+            jvm_args: format!("-Dpadding={}", "x".repeat(40_000)),
+            ..VersionSettings::default()
+        })
+        .await
+        .unwrap();
+
+        let (result, events) = launch(&fx.aurora, fake_java(&fx.root, 17, 0)).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::SpawnFailed);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6]);
+
+        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
+        let lines: Vec<(Option<LauncherLevel>, &str)> = log
+            .lines
+            .iter()
+            .map(|l| (l.level, l.text.as_str()))
+            .collect();
+        assert!(
+            lines.contains(&(Some(LauncherLevel::Info), LaunchStage::SpawnProcess.label())),
+            "{lines:?}"
+        );
+        let last = lines.last().expect("日志里应有这次启动的记录");
+        assert_eq!(last.0, Some(LauncherLevel::Error));
+        assert!(last.1.starts_with("启动失败：无法启动 "), "{}", last.1);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn verified_launch_clears_the_recorded_failure() {
         let down = wiremock::MockServer::start().await;
@@ -2753,12 +2885,13 @@ mod tests {
     async fn cancelling_while_refreshing_is_a_cancel_and_keeps_the_last_account_failure() {
         // 续期还在等服务端回应（服务故障时还要退避重试）就被玩家取消：这不是凭据被判失效，不能报成需要
         // 重新登录，也不能盖掉上一次的服务故障记录，否则紧接着的以离线方式进单人会被错拒。
+        const CANCEL_UUID: &str = "c0ffee00c0ffee00c0ffee00c0ffee00";
         let server = wiremock::MockServer::start().await;
         mount_token(&server, outage_page()).await;
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
-        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (aurora, stored) = with_stale_account_as(&fx, &server, CANCEL_UUID);
         let (result, _) =
             launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
@@ -2771,13 +2904,21 @@ mod tests {
         .await;
         let token = CancellationToken::new();
         let cancelling = aurora.clone().with_cancel(token.clone());
-        let trigger = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // 等续期请求真的发出才取消：定时取消在满载时会赶在请求之前，测的就不是「等回音时被取消」了。
+        let cancel_once_sent = async {
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("续期请求应已发出");
             token.cancel();
-        });
-        let (result, events) =
-            launch_request(&cancelling, stored_request(stored.clone()), java.clone()).await;
-        trigger.await.unwrap();
+        };
+        let (_, (result, events)) = tokio::join!(
+            cancel_once_sent,
+            launch_request(&cancelling, stored_request(stored.clone()), java.clone())
+        );
         match result {
             Err(err) => assert!(err.is_cancelled(), "{err:?}"),
             Ok(_) => panic!("取消后不应拉起进程"),
@@ -2785,7 +2926,7 @@ mod tests {
         assert_eq!(stage_indices(&events), vec![0]);
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(
-            failures_of(&aurora).get(MS_UUID),
+            failures_of(&aurora).get(CANCEL_UUID),
             Some(&FailureCode::AccountServiceDown)
         );
         let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
@@ -2793,7 +2934,7 @@ mod tests {
             log.ended.map(|e| e.outcome),
             Some(SessionOutcome::Cancelled)
         );
-        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), stored);
+        assert_eq!(aurora.find_account(CANCEL_UUID).unwrap().unwrap(), stored);
 
         // 记录完好：降级照常放行。
         let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
@@ -3233,7 +3374,7 @@ mod tests {
     #[test]
     fn unreadable_auth_server_metadata_does_not_ask_for_relogin() {
         const SERVER: &str = "https://skin.example/api/yggdrasil";
-        let network = authlib_metadata_failure(http_error(), SERVER);
+        let network = authlib_metadata_failure(http_error(), SERVER, "Steve");
         let LaunchFailed::Failure(failure) = network else {
             panic!("连不上验证服务器应给出失败码：{network:?}");
         };
@@ -3246,6 +3387,7 @@ mod tests {
                 detail: "API 根地址返回 HTTP 502 Bad Gateway".into(),
             },
             SERVER,
+            "Steve",
         );
         assert!(
             matches!(
@@ -3256,6 +3398,98 @@ mod tests {
             ),
             "服务器回错页不该提示重新登录：{not_yggdrasil:?}"
         );
+
+        // 服务故障和续期时一样归到登录服务故障：账户是好的，玩家可以稍后重试或先以离线方式进单人。
+        let outage = authlib_metadata_failure(
+            aurora_auth::AuthError::ServiceUnavailable {
+                step: "读取验证服务器信息",
+                status: 503,
+            },
+            SERVER,
+            "Steve",
+        );
+        let LaunchFailed::Failure(failure) = outage else {
+            panic!("验证服务器服务故障应给出失败码：{outage:?}");
+        };
+        assert_eq!(failure.code, FailureCode::AccountServiceDown);
+        assert_eq!(failure.params["account"], Value::from("Steve"));
+        assert_eq!(failure.params["status"], Value::from(503u64));
+        assert_eq!(failure.params["server"], Value::from(SERVER));
+    }
+
+    /// 查最新构建与预取元数据这两次联网都不挂下载池的令牌，线路黑洞时要等连接超时才回来。对端这里一直
+    /// 不回，取消后还能立刻以取消返回，才说明两处都接上了令牌。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_preparing_authlib_returns_without_waiting_for_the_network() {
+        use wiremock::matchers::{method, path};
+        let stalled =
+            wiremock::ResponseTemplate::new(503).set_delay(std::time::Duration::from_secs(60));
+
+        for stall_latest in [true, false] {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(method("GET"))
+                .and(path("/latest"))
+                .respond_with(if stall_latest {
+                    stalled.clone()
+                } else {
+                    wiremock::ResponseTemplate::new(404)
+                })
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(method("GET"))
+                .and(path("/yggdrasil"))
+                .respond_with(stalled.clone())
+                .mount(&server)
+                .await;
+            let fx = fixture();
+            // 查不到最新构建时沿用这一份，流程才走得到预取元数据。
+            let dir = crate::authlib::agent_dir(&fx.root);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(crate::authlib::agent_jar(&dir, 1), b"agent").unwrap();
+
+            let token = CancellationToken::new();
+            let aurora = fx
+                .aurora
+                .clone()
+                .with_authlib_latest_url(format!("{}/latest", server.uri()))
+                .with_cancel(token.clone());
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut reporter = Reporter {
+                events: &tx,
+                clock: SessionClock::start().unwrap(),
+                log: None,
+            };
+            let api_root = format!("{}/yggdrasil", server.uri());
+            let cancel_once_stuck = async {
+                let stuck_on = if stall_latest {
+                    "/latest"
+                } else {
+                    "/yggdrasil"
+                };
+                while !server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.url.path() == stuck_on)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                token.cancel();
+            };
+            let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                tokio::join!(
+                    cancel_once_stuck,
+                    aurora.prepare_authlib(&api_root, "Steve", &mut reporter)
+                )
+            })
+            .await
+            .unwrap_or_else(|_| panic!("取消没有打断等待（stall_latest={stall_latest}）"));
+            match result {
+                Err(err) => assert!(err.is_cancelled(), "{err:?}"),
+                Ok(_) => panic!("取消后不该拿到 agent"),
+            }
+        }
     }
 
     #[test]

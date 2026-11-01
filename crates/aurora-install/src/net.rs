@@ -13,6 +13,7 @@
 //! 请求返回已取消。元数据只进内存、不落盘，半途丢下请求没有要清理的东西；不看令牌的话，一次卡住的
 //! 抓取要等满客户端超时加整轮退避才返回，远超取消时限。
 
+use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
 use aurora_base::retry::{RetryPolicy, retry_async};
 use aurora_download::{CancellationToken, SourcePlan};
 
@@ -54,11 +55,19 @@ async fn fetch_with_retry(
                 url: url.to_owned(),
                 source,
             })?;
-        let bytes = resp.bytes().await.map_err(|source| Error::Http {
-            url: url.to_owned(),
-            source,
-        })?;
-        Ok::<Vec<u8>, Error>(bytes.to_vec())
+        read_body_capped(resp, METADATA_MAX_BYTES)
+            .await
+            .map_err(|err| match err {
+                BodyReadError::TooLarge { size, limit } => Error::ResponseTooLarge {
+                    url: url.to_owned(),
+                    size,
+                    limit,
+                },
+                BodyReadError::Transport(source) => Error::Http {
+                    url: url.to_owned(),
+                    source,
+                },
+            })
     })
     .await
 }
@@ -71,25 +80,7 @@ pub(crate) fn candidates(sources: Option<&SourcePlan>, url: &str) -> Result<Vec<
     }
 }
 
-/// 依次尝试各候选地址，返回第一个成功的响应体。取消不换源：它是调用方的决定，不是这个源的故障。
-///
-/// 全部失败时：只有一个候选就原样返回它的错误（没有换源可言，多包一层只会让上层的错误映射认不出它）；
-/// 两个及以上返回 [`Error::AllSourcesFailed`]，按尝试顺序带上每个候选的失败原因。
-pub(crate) async fn get_bytes_from(
-    client: &reqwest::Client,
-    sources: Option<&SourcePlan>,
-    url: &str,
-    policy: &RetryPolicy,
-    cancel: Option<&CancellationToken>,
-    context: &str,
-) -> Result<Vec<u8>> {
-    first_success(client, sources, url, policy, cancel, context, Ok).await
-}
-
 /// GET 并用 serde_json 反序列化（失败时带上报文上下文），按下载源方案在候选地址间兜底。
-///
-/// 每个候选取到字节就当场解析，解析失败也换下一个：镜像偶尔回一页错误提示或截断的报文，状态码却是
-/// 200，只看传输成败会把这份读不懂的内容当成功交出去，另一个源明明有好的也用不上。
 pub(crate) async fn get_json_from<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
@@ -98,14 +89,20 @@ pub(crate) async fn get_json_from<T: serde::de::DeserializeOwned>(
     cancel: Option<&CancellationToken>,
     context: &str,
 ) -> Result<T> {
-    first_success(client, sources, url, policy, cancel, context, |bytes| {
+    get_decoded_from(client, sources, url, policy, cancel, context, |bytes| {
         parse_json(&bytes, context)
     })
     .await
 }
 
-/// 逐个候选取字节并交给 `decode`，返回第一个取到且解码成功的结果；取消与失败的规则见 [`get_bytes_from`]。
-async fn first_success<T>(
+/// 依次尝试各候选地址，取到字节就当场交给 `decode`，返回第一个解码成功的结果。
+///
+/// 解码失败也换下一个：镜像偶尔回一页错误提示或截断的报文，状态码却是 200，只看传输成败会把这份读不懂
+/// 的内容当成功交出去，另一个源明明有好的也用不上。取消不换源：它是调用方的决定，不是这个源的故障。
+///
+/// 全部失败时：只有一个候选就原样返回它的错误（没有换源可言，多包一层只会让上层的错误映射认不出它）；
+/// 两个及以上返回 [`Error::AllSourcesFailed`]，按尝试顺序带上每个候选的失败原因。
+pub(crate) async fn get_decoded_from<T>(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
     url: &str,
@@ -164,7 +161,7 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8], context: 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use aurora_base::mirror::MirrorSource;
     use aurora_base::retry::RetryableError;
@@ -222,7 +219,7 @@ mod tests {
         }
     }
 
-    fn plan_between(server: &MockServer, official: &str, mirror: &str) -> SourcePlan {
+    pub(crate) fn plan_between(server: &MockServer, official: &str, mirror: &str) -> SourcePlan {
         SourcePlan::with_resolver(
             vec![MirrorSource::Official, MirrorSource::BmclApi],
             Arc::new(Fixed {
@@ -242,6 +239,17 @@ mod tests {
     }
 
     const UPSTREAM: &str = "https://x.invalid/a";
+
+    async fn get_bytes_from(
+        client: &reqwest::Client,
+        sources: Option<&SourcePlan>,
+        url: &str,
+        policy: &RetryPolicy,
+        cancel: Option<&CancellationToken>,
+        context: &str,
+    ) -> Result<Vec<u8>> {
+        get_decoded_from(client, sources, url, policy, cancel, context, Ok).await
+    }
 
     /// 第一个候选 503 时换第二个取到；只有一个候选时失败原样返回它自己的 Http 错误，不包聚合层。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -626,6 +634,46 @@ mod tests {
 
         assert_eq!(body, full);
         assert_eq!(accepted.load(Ordering::SeqCst), 2, "应同源重试恰好一次");
+    }
+
+    /// 响应头声明的长度超过上限：不读正文，也不重试，同一个源再来一次还是这么大。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_oversized_response_is_refused_without_a_retry() {
+        let declared = aurora_base::http::METADATA_MAX_BYTES as usize + 1;
+        let (url, accepted) = raw_server(vec![
+            RawReply {
+                declared,
+                body: Vec::new(),
+                hold: Duration::ZERO,
+            },
+            RawReply {
+                declared: 2,
+                body: b"{}".to_vec(),
+                hold: Duration::ZERO,
+            },
+        ]);
+        let client = aurora_base::http::build_client().unwrap();
+        let twice = RetryPolicy {
+            max_attempts: 2,
+            ..fast_policy()
+        };
+
+        let err = get_bytes(&client, &url, &twice, None).await.unwrap_err();
+
+        match &err {
+            Error::ResponseTooLarge {
+                url: failed,
+                size,
+                limit,
+            } => {
+                assert_eq!(failed, &url);
+                assert_eq!(*size, declared as u64);
+                assert_eq!(*limit, aurora_base::http::METADATA_MAX_BYTES);
+            }
+            other => panic!("应为 ResponseTooLarge，实际 {other:?}"),
+        }
+        assert!(!err.is_retryable());
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "不该重试");
     }
 
     /// 只有一次机会时照实报出读体失败，并判为值得重试的瞬时故障。

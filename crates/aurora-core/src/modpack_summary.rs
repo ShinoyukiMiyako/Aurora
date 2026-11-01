@@ -10,13 +10,13 @@
 //! CurseForge 清单只有工程与文件 id，Mod 数与下载量要再问批量文件、批量工程两个接口，与导入同一套落点规则。
 
 use std::collections::HashMap;
-use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aurora_download::DownloadCredential;
 use aurora_modpack::{PackFormat, PackLoader, PackManifest};
 use aurora_modplatform::Platform;
+use zip::result::ZipError;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
@@ -39,8 +39,6 @@ const MANIFEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const RANGE_MAX_BYTES: u64 = 2 * MANIFEST_MAX_BYTES;
 /// 单个范围请求的时限。
 const RANGE_TIMEOUT: Duration = Duration::from_secs(20);
-const STORED: u16 = 0;
-const DEFLATED: u16 = 8;
 
 /// 一个平台整合包版本的清单摘要。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,7 +70,9 @@ type ManifestParser = fn(&[u8]) -> aurora_modpack::Result<PackManifest>;
 #[derive(Debug)]
 struct CentralEntry {
     name: String,
+    flags: u16,
     method: u16,
+    crc32: u32,
     compressed: u64,
     uncompressed: u64,
     local_offset: u64,
@@ -88,7 +88,7 @@ struct RemotePack {
 
 impl Aurora {
     /// 平台上某个整合包版本的清单摘要，不下载整包。服务器不支持范围读取、包不是可读的 zip
-    /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法时报整合包解析错误。
+    /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法或压缩方式解不开时报 [`CoreError::Modpack`]。
     pub async fn summarize_platform_modpack(
         &self,
         platform: Platform,
@@ -335,7 +335,9 @@ fn parse_central_directory(
         if directory.len() < at + CENTRAL_HEADER_LEN || le32(directory, at) != CENTRAL_SIGNATURE {
             return Err(format!("目录第 {} 项的头部不对", index + 1));
         }
+        let flags = le16(directory, at + 8);
         let method = le16(directory, at + 10);
+        let crc32 = le32(directory, at + 16);
         let compressed = le32(directory, at + 20);
         let uncompressed = le32(directory, at + 24);
         let name_len = usize::from(le16(directory, at + 28));
@@ -353,7 +355,9 @@ fn parse_central_directory(
             // 与本地读包同一套解码；两步都解不了的才退成替换字符，摘要只拿名字数文件，不落盘。
             name: aurora_modpack::decode_entry_name(name)
                 .unwrap_or_else(|| String::from_utf8_lossy(name).into_owned()),
+            flags,
             method,
+            crc32,
             compressed: u64::from(compressed),
             uncompressed: u64::from(uncompressed),
             local_offset: u64::from(local_offset),
@@ -401,24 +405,25 @@ async fn read_entry(http: &RangeClient, url: &str, entry: &CentralEntry) -> Resu
         .await?
         .0
     };
-    match entry.method {
-        STORED => Ok(data),
-        DEFLATED => {
-            let mut out = Vec::new();
-            flate2::read::DeflateDecoder::new(data.as_slice())
-                .take(MANIFEST_MAX_BYTES + 1)
-                .read_to_end(&mut out)
-                .map_err(|err| remote(url, format!("解压 {} 失败：{err}", entry.name)))?;
-            if out.len() as u64 > MANIFEST_MAX_BYTES {
-                return Err(remote(url, format!("{} 解压后超出上限", entry.name)));
+    aurora_modpack::decompress_entry(
+        entry.method,
+        entry.flags,
+        entry.crc32,
+        &data,
+        entry.uncompressed,
+        MANIFEST_MAX_BYTES,
+    )
+    .map_err(|err| match err {
+        ZipError::CompressionMethodNotSupported(method) => {
+            aurora_modpack::Error::UnsupportedCompression {
+                path: PathBuf::from(url),
+                entry: entry.name.clone(),
+                method,
             }
-            Ok(out)
+            .into()
         }
-        other => Err(remote(
-            url,
-            format!("{} 用了不支持的压缩方式 {other}", entry.name),
-        )),
-    }
+        other => remote(url, format!("解压 {} 失败：{other}", entry.name)),
+    })
 }
 
 #[cfg(test)]
@@ -470,6 +475,10 @@ mod tests {
 
     /// 打一个 .mrpack：清单 + 两个覆盖文件，再塞一大块不会被读到的填充，模拟几十 MB 的包。
     fn mrpack(manifest: &serde_json::Value) -> Vec<u8> {
+        mrpack_with(manifest, zip::CompressionMethod::Deflated)
+    }
+
+    fn mrpack_with(manifest: &serde_json::Value, method: zip::CompressionMethod) -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
         let deflated = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
@@ -486,9 +495,25 @@ mod tests {
             .unwrap();
         writer.start_file("overrides/options.txt", stored).unwrap();
         writer.write_all(b"lang:zh_cn").unwrap();
-        writer.start_file("modrinth.index.json", deflated).unwrap();
+        writer
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default().compression_method(method),
+            )
+            .unwrap();
         writer.write_all(manifest.to_string().as_bytes()).unwrap();
         writer.finish().unwrap().into_inner()
+    }
+
+    /// 改中央目录里 `name` 那一项头部 `offset` 处的字节。
+    fn patch_central(pack: &mut [u8], name: &str, offset: usize, bytes: &[u8]) {
+        let start = (0..pack.len() - CENTRAL_HEADER_LEN)
+            .find(|&at| {
+                le32(pack, at) == CENTRAL_SIGNATURE
+                    && pack[at + CENTRAL_HEADER_LEN..].starts_with(name.as_bytes())
+            })
+            .expect("中央目录里应有这一项");
+        pack[start + offset..start + offset + bytes.len()].copy_from_slice(bytes);
     }
 
     fn manifest() -> serde_json::Value {
@@ -561,6 +586,65 @@ mod tests {
 
     /// 同一个 .mrpack，放在平台上读摘要与放在本地读预览，Mod 数一样：落进 mods/ 的远程文件加上两层覆盖里
     /// 直接在 mods/ 下的 .jar，同一落点只算一次。
+    /// 本地读包认的压缩方式这里都认：同一个包不能在发现页报读不出来、导入时却能装。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifests_in_every_method_the_local_reader_supports_are_summarized() {
+        for method in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+            zip::CompressionMethod::Bzip2,
+            zip::CompressionMethod::Xz,
+            zip::CompressionMethod::Ppmd,
+        ] {
+            let (server, _, _) = serve(mrpack_with(&manifest(), method), true).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+            let summary = aurora
+                .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+                .await
+                .unwrap_or_else(|err| panic!("{method:?}：{err:?}"));
+            assert_eq!(summary.name, "Fabulously Optimized", "{method:?}");
+            assert_eq!(summary.remote_files, 3, "{method:?}");
+            assert_eq!(summary.mod_files, 2, "{method:?}");
+        }
+    }
+
+    /// 清单用了导入也解不了的压缩方式时，与导入报同一个错，界面给同一句提示；清单数据坏了算读不出来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsupported_or_corrupt_manifests_are_reported_like_the_local_reader() {
+        let mut zstd = mrpack(&manifest());
+        patch_central(&mut zstd, "modrinth.index.json", 10, &93u16.to_le_bytes());
+        let (server, _, _) = serve(zstd, true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CoreError::Modpack(aurora_modpack::Error::UnsupportedCompression { entry, method: 93, .. })
+                    if entry == "modrinth.index.json"
+            ),
+            "{err:?}"
+        );
+
+        let mut corrupt = mrpack(&manifest());
+        patch_central(&mut corrupt, "modrinth.index.json", 16, &[0, 0, 0, 0]);
+        let (server, _, _) = serve(corrupt, true).await;
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::RemotePack { reason, .. } if reason.contains("modrinth.index.json")),
+            "{err:?}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn platform_summary_and_local_preview_count_mods_the_same_way() {
         let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

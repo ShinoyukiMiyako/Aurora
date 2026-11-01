@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, State};
 
-use crate::commands::instances::{InstanceActivity, InstanceLocks};
+use crate::commands::instances::{ensure_saves_free_for_writing, InstanceActivity, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -383,8 +383,18 @@ pub(crate) async fn install_resource_with(
     }
     let platform = parse_platform(args.platform)?;
     let _guard = locks.acquire(args.version_id, InstanceActivity::Modifying)?;
+    let snapshot = facade.snapshot().await;
+    // 数据包写进存档目录，与备份、恢复、导出存档相交。先记下再查，与那几件事先占后查对称，两边同时发起时
+    // 至少有一方会被挡住。被拒时记录随返回撤销。
+    let _writing = if resource_type == ResourceType::DataPack {
+        let writing = locks.write_saves(args.version_id);
+        ensure_saves_free_for_writing(&snapshot, locks, args.version_id).await?;
+        Some(writing)
+    } else {
+        None
+    };
     let task = tasks.register(task_id)?;
-    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let aurora = snapshot.with_cancel(task.token().clone());
     let target = ResourceTarget {
         version_id: args.version_id,
         resource_type,
@@ -793,6 +803,104 @@ mod tests {
             .collect();
         entries.sort();
         assert!(entries.is_empty(), "实例里不该多出东西：{entries:?}");
+    }
+
+    /// 数据包写进存档目录：备份在做时报 instance_busy，不登记任务；资源包不碰存档，照常装。开始之后全程记着
+    /// 「存档正被写」，备份、恢复据此等它，任务结束记录撤销。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn data_pack_install_keeps_clear_of_world_tasks() {
+        use std::time::{Duration, Instant};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for (version, file, delay) in [("dp1", "Slow.zip", 30), ("rp1", "Quick.zip", 0)] {
+            Mock::given(method("GET"))
+                .and(path(format!("/version/{version}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": version, "project_id": "pack", "name": "x", "version_number": "1.0",
+                    "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                    "files": [{"hashes": {}, "url": format!("{}/{file}", server.uri()),
+                               "filename": file, "primary": true, "size": 4}]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/{file}")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(b"pack".to_vec())
+                        .set_delay(Duration::from_secs(delay)),
+                )
+                .mount(&server)
+                .await;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let version_dir = dir.path().join(".minecraft").join("versions").join("生存");
+        std::fs::create_dir_all(version_dir.join("saves").join("新的世界")).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = std::sync::Arc::new(facade_in(dir.path(), &server.uri()));
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let data_pack = || InstallResourceArgs {
+            version_id: "生存",
+            resource_type: "data_pack",
+            world: Some("新的世界"),
+            platform: "modrinth",
+            project_id: "pack",
+            file_version_id: "dp1",
+        };
+
+        let backing_up = locks.acquire("生存", InstanceActivity::BackingUp).unwrap();
+        let err = install_resource_with(&facade, &registry, &locks, "dp#0", data_pack(), &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], "backing_up");
+        assert!(!registry.is_running("dp#0"));
+        assert!(locks.writing_saves().is_empty(), "被拒时记录随之撤销");
+        let resource_pack = InstallResourceArgs {
+            resource_type: "resource_pack",
+            world: None,
+            file_version_id: "rp1",
+            ..data_pack()
+        };
+        install_resource_with(&facade, &registry, &locks, "rp#1", resource_pack, &sink)
+            .await
+            .unwrap();
+        drop(backing_up);
+
+        let install = tokio::spawn({
+            let (f, r, l) = (facade.clone(), registry.clone(), locks.clone());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let args = InstallResourceArgs {
+                    version_id: "生存",
+                    resource_type: "data_pack",
+                    world: Some("新的世界"),
+                    platform: "modrinth",
+                    project_id: "pack",
+                    file_version_id: "dp1",
+                };
+                install_resource_with(&f, &r, &l, "dp#1", args, &sink).await
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !registry.is_running("dp#1") {
+            assert!(Instant::now() < deadline, "数据包安装没有开始");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(locks.writing_saves(), vec!["生存".to_owned()]);
+
+        assert!(registry.cancel("dp#1"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert!(locks.writing_saves().is_empty());
     }
 
     /// 资源下载进行中，实例一直以「改动 Mod 与资源」占着：改名与删除报 instance_busy、目录原地不动；

@@ -261,6 +261,8 @@ export interface ExportExtraStatDto {
   bytes: number;
   /** 存档以外、实例里有的项默认勾选。 */
   default_selected: boolean;
+  /** 这一项里名字不能安全写进整合包的文件（正斜杠相对路径）；勾上才算这次导出会跳过的。 */
+  skipped: string[];
 }
 
 /** 导出前的盘面：每次读取都按此刻的文件重算。 */
@@ -274,8 +276,8 @@ export interface ModpackExportPreviewDto {
   bundled: ExportBundledModDto[];
   disabled: ExportBundledModDto[];
   extras: ExportExtraStatDto[];
-  /** 名字不能安全写进整合包、不会打包的文件（正斜杠相对路径）。 */
-  skipped: string[];
+  /** mods 目录里名字不能安全写进整合包的文件（正斜杠相对路径）；不看勾选，导出时总会跳过。 */
+  mod_skipped: string[];
 }
 
 /** 嵌套对象的键是 snake_case；后端拒绝不认识的键。 */

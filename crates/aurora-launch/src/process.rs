@@ -346,11 +346,12 @@ fn kill_child(child: &mut Child) -> Result<()> {
     }
 }
 
-/// 启动游戏进程。`log` 为本次会话日志（打不开时传 `None`，游戏照常启动），`forward` 接收批量转发的行。
+/// 启动游戏进程。`log` 为本次会话日志（打不开时为 `None`，游戏照常启动），进程起来后才取走：起不来时它还在
+/// 调用方手里，由调用方写下失败与结局，写缓冲里这次启动的记录不会跟着丢。`forward` 接收批量转发的行。
 pub fn spawn(
     command: &LaunchCommand,
     clock: SessionClock,
-    log: Option<SessionLog>,
+    log: &mut Option<SessionLog>,
     forward: Option<LogBatchSink>,
 ) -> Result<GameSession> {
     let mut cmd = Command::new(&command.program);
@@ -383,7 +384,7 @@ pub fn spawn(
     if let Some(stderr) = child.stderr.take() {
         readers.push(spawn_reader(stderr, LogStream::Stderr, clock, line_tx));
     }
-    let pump = tokio::spawn(pump(line_rx, log, forward));
+    let pump = tokio::spawn(pump(line_rx, log.take(), forward));
     let (kill_tx, kill_rx) = mpsc::unbounded_channel();
 
     Ok(GameSession {
@@ -1253,7 +1254,7 @@ mod tests {
         let session = spawn(
             &cmd("echo PETAL_HELLO & exit 3"),
             clock,
-            Some(log),
+            &mut Some(log),
             Some(fwd_tx),
         )
         .unwrap();
@@ -1295,7 +1296,7 @@ mod tests {
         let session = spawn(
             &command("ping", &["-n", "30", "127.0.0.1"]),
             clock,
-            None,
+            &mut None,
             None,
         )
         .unwrap();
@@ -1330,7 +1331,7 @@ mod tests {
         let session = spawn(
             &cmd("echo BEFORE_EXIT & start /b ping -n 10 127.0.0.1 & exit 0"),
             clock,
-            Some(log),
+            &mut Some(log),
             None,
         )
         .unwrap();
@@ -1371,7 +1372,13 @@ mod tests {
         std::fs::write(&script, b"\xd6\xd0\xce\xc4\r\nAFTER_BAD_BYTES\r\n").unwrap();
         let clock = SessionClock::start().unwrap();
         let path = script.display().to_string();
-        let session = spawn(&command("cmd", &["/C", "type", &path]), clock, None, None).unwrap();
+        let session = spawn(
+            &command("cmd", &["/C", "type", &path]),
+            clock,
+            &mut None,
+            None,
+        )
+        .unwrap();
         let end = session.wait().await;
         assert_eq!(end.report.recent_lines.len(), 2);
         assert!(end.report.recent_lines[0].contains('\u{FFFD}'));

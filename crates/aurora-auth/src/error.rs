@@ -176,9 +176,6 @@ impl AuthError {
     }
 }
 
-/// OAuth 端点表示「服务器暂时太忙」的错误名。
-const OAUTH_TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
-
 /// crate 级 `Result` 别名。
 pub type Result<T> = std::result::Result<T, AuthError>;
 
@@ -187,13 +184,15 @@ impl RetryableError for AuthError {
         match self {
             // 下层错误的可重试性交给 aurora-base 判定（瞬时 IO、哈希不符等）。
             AuthError::Base(inner) => inner.is_retryable(),
-            // 连接建立/读取超时属瞬时网络故障，值得重试；解析类 reqwest 错误不重试。
+            // 连接建立、读取超时与读到一半断开都是瞬时网络故障，值得重试。读响应体失败 reqwest 报 decode
+            // 类；响应解析不走这里，读不懂的 JSON 是 Parse。
             AuthError::Http { source, .. } => {
-                source.is_timeout() || source.is_connect() || source.is_request()
+                source.is_timeout()
+                    || source.is_connect()
+                    || source.is_request()
+                    || source.is_body()
+                    || source.is_decode()
             }
-            // 微软令牌端点忙时回 temporarily_unavailable，官方给的处理办法就是稍等后重试；
-            // 其余 OAuth 错误是确定性的拒绝。
-            AuthError::OAuth { error, .. } => error == OAUTH_TEMPORARILY_UNAVAILABLE,
             // 服务端故障多为短时过载或发布中的抖动，按退避重试有望恢复。
             AuthError::ServiceUnavailable { .. } => true,
             // 其余均为确定性的业务/协议/凭据错误，重试是同样结果。
@@ -201,6 +200,8 @@ impl RetryableError for AuthError {
             | AuthError::Response { .. }
             | AuthError::DeviceCodeExpired
             | AuthError::AuthorizationDeclined
+            // 令牌端点说自己忙时报的是 ServiceUnavailable，走到这个变体的都是确定性的拒绝。
+            | AuthError::OAuth { .. }
             | AuthError::XstsBanned
             | AuthError::XstsNoXboxAccount
             | AuthError::XstsRegionUnavailable
@@ -230,6 +231,40 @@ impl RetryableError for AuthError {
 mod tests {
     use super::*;
 
+    /// 响应体读到一半连接断开时 reqwest 报 decode 类错误，登录链的 JSON 解析另走 [`AuthError::Parse`]，
+    /// 所以这里的 decode 只会是传输故障，再试一次有望成功。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_body_cut_off_midway_is_retryable() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{")
+                .unwrap();
+        });
+        let client = aurora_base::http::build_client().unwrap();
+        let response = client.get(&url).send().await.unwrap();
+
+        let source = response.text().await.unwrap_err();
+
+        assert!(source.is_decode(), "{source:?}");
+        assert!(
+            AuthError::Http {
+                context: "测试",
+                source,
+            }
+            .is_retryable()
+        );
+    }
+
     #[test]
     fn relogin_required_is_terminal_not_retryable() {
         // “需重登”是确定性失效，绝不能被当作瞬时网络故障重试。
@@ -245,12 +280,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_busy_oauth_endpoint_is_worth_retrying() {
+    fn oauth_rejections_are_not_retried() {
         let oauth = |error: &str| AuthError::OAuth {
             error: error.into(),
             description: String::new(),
         };
-        assert!(oauth("temporarily_unavailable").is_retryable());
         for error in [
             "invalid_request",
             "invalid_client",

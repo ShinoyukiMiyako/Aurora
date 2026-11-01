@@ -2,8 +2,8 @@
 //!
 //! 文件操作在 [`aurora_instance::world_backup`]，这里负责按实例解析存档的作用域与路径、进程内互斥、
 //! 进度事件与取消。快照之间共享两类锁，写法与下载引擎按目标路径加锁相同：按存档的备份目录加的锁在
-//! 整个备份、恢复、导出、删除期间持有；备份根锁在清单读改写与清理期间持有。不隔离的实例共用同一份
-//! 存档，两个实例同时操作它时就靠这两把锁排队。等锁期间响应取消。
+//! 整个备份、恢复、导出、删除期间持有；备份根锁在清单读改写、清理与改名搬运期间持有，同时要两把时
+//! 先存档锁后根锁。不隔离的实例共用同一份存档，两个实例同时操作它时就靠这两把锁排队。等锁期间响应取消。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -111,7 +111,8 @@ impl Aurora {
     }
 
     /// 备份一个存档。存档文件夹不在报 [`CoreError::WorldNotFound`]，正被游戏打开报
-    /// `Instance(WorldInUse)`。写进清单之后，自动备份开着时按保留策略清理旧备份，清理不掉的发一条告警，下次再试。
+    /// `Instance(WorldInUse)`。写进清单之后，自动备份开着时按保留策略清理旧备份，清理不掉（包括别的存档的清单
+    /// 读不懂）只发一条告警，下次再试：这份备份已经成了，不能因为清理报失败。
     pub async fn backup_world(
         &self,
         id: &str,
@@ -125,9 +126,8 @@ impl Aurora {
         ensure_not_in_use(&paths.world_dir).await?;
 
         let root = self.backup_layout().root().to_path_buf();
-        // 打包前先确认清单都读得懂：打完包才发现记不进清单，备份就成了没人认领的文件。
+        // 打包前先确认自己的清单读得懂：打完包才发现记不进清单，备份就成了没人认领的文件。
         read_backup_index(&paths.backup_dir).await?;
-        scan_backup_indices(&root).await?;
         let dir = paths.backup_dir.clone();
         blocking(move || remove_partial_backups(&dir)).await?;
 
@@ -163,8 +163,22 @@ impl Aurora {
         // 保留策略只管自动备份：自动备份关着时设置页把两项保留设置一起禁用、写明不会清理，
         // 手动备份不能借机删掉玩家以前的自动备份。
         let pruned = if self.config().world_backup.auto {
-            self.prune(&root, Some((&paths.backup_dir, &entry.file)), events)
-                .await?
+            match self
+                .prune(&root, Some((&paths.backup_dir, &entry.file)), events)
+                .await
+            {
+                Ok(pruned) => pruned,
+                Err(err) => {
+                    tracing::error!(error = %err, "按保留策略清理旧的存档备份失败");
+                    emit(
+                        events,
+                        CoreEvent::warning(format!(
+                            "这次没能清理旧的自动备份，下次备份时再试：{err}"
+                        )),
+                    );
+                    0
+                }
+            }
         } else {
             0
         };
@@ -250,6 +264,10 @@ impl Aurora {
 
     /// 删除一份备份：zip 交给 `disposer`（生产是回收站，可以找回），再从清单里摘掉。清单里有、盘上已经
     /// 没有的只摘清单。不在清单里报 [`CoreError::WorldBackupNotFound`]。
+    ///
+    /// 删除不占实例，能和实例改名同时发生，而改名只持备份根锁。根锁要盖住从查清单到写回的全程：放在写回前才拿
+    /// 的话，改名可以从中间插进来，写回时旧路径上的清单读出来是空的，又把搬走的目录在旧名下建了回去，新名下的
+    /// 清单还留着已经删掉的那份。排在改名之后的删除查不到这份备份，按不在报错，不写任何东西。
     pub async fn delete_world_backup(
         &self,
         id: &str,
@@ -260,11 +278,10 @@ impl Aurora {
         let paths = self.world_paths(id, world).await?;
         check_backup_file(file)?;
         let _world = acquire(&WORLD_LOCKS, &paths.backup_dir, self.cancel_token()).await?;
-        if read_backup_index(&paths.backup_dir)
-            .await?
-            .find(file)
-            .is_none()
-        {
+        let root = self.backup_layout().root().to_path_buf();
+        let _root = acquire(&ROOT_LOCKS, &root, self.cancel_token()).await?;
+        let mut index = read_backup_index(&paths.backup_dir).await?;
+        if index.find(file).is_none() {
             return Err(backup_not_found(id, world, file));
         }
         let zip = paths.backup_dir.join(file);
@@ -272,9 +289,6 @@ impl Aurora {
             tracing::info!(id, world, file, "删除存档备份：移入回收站");
             blocking(move || disposer.dispose(&zip)).await?;
         }
-        let root = self.backup_layout().root().to_path_buf();
-        let _root = acquire(&ROOT_LOCKS, &root, None).await?;
-        let mut index = read_backup_index(&paths.backup_dir).await?;
         index.entries.retain(|entry| entry.file != file);
         write_backup_index(&paths.backup_dir, &index).await?;
         Ok(())
@@ -1426,6 +1440,144 @@ mod tests {
         assert_eq!(disposer.seen().len(), 1);
     }
 
+    /// 处置完 zip 后停住，等测试放行：正好卡在删除动完盘、写回清单之前。
+    #[derive(Clone)]
+    struct PausingDisposer {
+        inner: RecordingDisposer,
+        disposed: Arc<tokio::sync::Notify>,
+        resume: Arc<std::sync::Barrier>,
+    }
+
+    impl PausingDisposer {
+        fn new(trash: PathBuf) -> Self {
+            Self {
+                inner: RecordingDisposer::new(trash),
+                disposed: Arc::default(),
+                resume: Arc::new(std::sync::Barrier::new(2)),
+            }
+        }
+
+        /// 放行停在处置之后的那个线程。只在 `disposed` 响过之后调，对方已经到了屏障跟前，不会久等。
+        fn resume(&self) {
+            self.resume.wait();
+        }
+    }
+
+    impl Disposer for PausingDisposer {
+        fn dispose(&self, path: &Path) -> aurora_instance::Result<()> {
+            self.inner.dispose(path)?;
+            self.disposed.notify_one();
+            self.resume.wait();
+            Ok(())
+        }
+    }
+
+    /// 改名赶在删除写回清单之前到来：改名不占存档锁，只有备份根锁能让它等。等不住时旧名下会长出一份空清单，
+    /// 新名下的清单还留着已经进回收站的那份。
+    #[tokio::test]
+    async fn rename_waits_for_a_delete_in_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let saves = isolated(&aurora, "旧名");
+        world(&saves, "w", "w");
+        let keep = aurora
+            .backup_world("旧名", "w", BackupKind::Manual, None)
+            .await
+            .unwrap()
+            .backup;
+        let gone = aurora
+            .backup_world("旧名", "w", BackupKind::Auto, None)
+            .await
+            .unwrap()
+            .backup;
+
+        let disposer = PausingDisposer::new(tmp.path().join("trash"));
+        let deleting = tokio::spawn({
+            let (aurora, file, disposer) = (aurora.clone(), gone.file.clone(), disposer.clone());
+            async move {
+                aurora
+                    .delete_world_backup("旧名", "w", &file, disposer)
+                    .await
+            }
+        });
+        disposer.disposed.notified().await;
+
+        let renaming = tokio::spawn({
+            let aurora = aurora.clone();
+            async move { aurora.rename_world_backups("旧名", "新名").await }
+        });
+        // 留够改名跑完的时间：它要是不用等，这段时间里已经把目录搬走了。
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        disposer.resume();
+        deleting.await.unwrap().unwrap();
+        renaming.await.unwrap().unwrap();
+
+        assert!(
+            !aurora.instance_backups_dir("旧名").unwrap().exists(),
+            "旧名下不应重建备份目录"
+        );
+        let dir = aurora.instance_backups_dir("新名").unwrap().join("w");
+        assert_eq!(zips_in(&dir), vec![keep.file.clone()]);
+        let index = read_backup_index(&dir).await.unwrap();
+        let listed: Vec<&str> = index.entries.iter().map(|e| e.file.as_str()).collect();
+        assert_eq!(listed, vec![keep.file.as_str()]);
+    }
+
+    /// 改名进行中来的删除：拿到备份根锁之前什么都不碰；排到时备份已经搬走，按备份不在报错，旧名下不写东西，
+    /// 搬走的备份在新名下原样留着。
+    #[tokio::test]
+    async fn delete_during_a_rename_leaves_the_moved_backups_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let saves = isolated(&aurora, "旧名");
+        world(&saves, "w", "w");
+        let backup = aurora
+            .backup_world("旧名", "w", BackupKind::Manual, None)
+            .await
+            .unwrap()
+            .backup;
+        let from = aurora.instance_backups_dir("旧名").unwrap();
+        let to = aurora.instance_backups_dir("新名").unwrap();
+
+        // 改名全程持有备份根锁，这里先占住，等删除排上队再搬目录。
+        let renaming = acquire(&ROOT_LOCKS, &aurora.world_backups_root(), None)
+            .await
+            .unwrap();
+        let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+        let deleting = tokio::spawn({
+            let (aurora, file, disposer) = (aurora.clone(), backup.file.clone(), disposer.clone());
+            async move {
+                aurora
+                    .delete_world_backup("旧名", "w", &file, disposer)
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            disposer.seen(),
+            Vec::<PathBuf>::new(),
+            "拿到根锁之前不应动 zip"
+        );
+
+        merge_scope_dir(&from, &to).await.unwrap();
+        drop(renaming);
+        let err = deleting.await.unwrap().unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::WorldBackupNotFound { file, .. } if *file == backup.file),
+            "{err:?}"
+        );
+        assert_eq!(disposer.seen(), Vec::<PathBuf>::new());
+        assert!(!from.exists(), "旧名下不应重建备份目录");
+        let dir = to.join("w");
+        assert_eq!(zips_in(&dir), vec![backup.file.clone()]);
+        assert_eq!(
+            read_backup_index(&dir).await.unwrap().entries.len(),
+            1,
+            "新名下的清单不受影响"
+        );
+    }
+
     #[tokio::test]
     async fn export_validates_the_destination_and_overwrites_it() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1593,6 +1745,79 @@ mod tests {
         let mut left = vec![manual.backup.file, next.backup.file];
         left.sort();
         assert_eq!(zips_in(&dir), left);
+    }
+
+    /// 别的存档的清单读不懂只影响清理：这一份备份照常写成、记进自己的清单，自动备份开着时发一条告警。
+    #[tokio::test]
+    async fn unreadable_index_of_another_world_only_costs_the_prune() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        let saves = isolated(&aurora, "a");
+        world(&saves, "w", "w");
+        let elsewhere = isolated(&aurora, "b");
+        world(&elsewhere, "x", "x");
+        aurora
+            .backup_world("b", "x", BackupKind::Manual, None)
+            .await
+            .unwrap();
+        write(
+            &backups_root(&aurora)
+                .join("instances")
+                .join("b")
+                .join("x")
+                .join(aurora_instance::BACKUP_INDEX_FILE),
+            b"{ broken",
+        );
+        let dir = backups_root(&aurora).join("instances").join("a").join("w");
+
+        for (auto, kind, warned) in [
+            (false, BackupKind::Manual, false),
+            (true, BackupKind::Manual, true),
+            (true, BackupKind::Auto, true),
+        ] {
+            aurora.set_world_backup(WorldBackupSettings {
+                auto,
+                ..WorldBackupSettings::default()
+            });
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let outcome = aurora
+                .backup_world("a", "w", kind, Some(&tx))
+                .await
+                .unwrap_or_else(|err| panic!("auto={auto}, {kind:?}: {err:?}"));
+            drop(tx);
+
+            assert_eq!(outcome.pruned, 0);
+            assert!(dir.join(&outcome.backup.file).exists());
+            let index = read_backup_index(&dir).await.unwrap();
+            assert!(index.find(&outcome.backup.file).is_some());
+            let mut warnings = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if let CoreEvent::Warning(text) = event {
+                    warnings.push(text);
+                }
+            }
+            assert_eq!(
+                !warnings.is_empty(),
+                warned,
+                "auto={auto}, {kind:?}: {warnings:?}"
+            );
+        }
+
+        // 自己这个存档的清单读不懂时仍然不打包：打完包记不进去，备份就成了没人认领的文件。
+        write(&dir.join(aurora_instance::BACKUP_INDEX_FILE), b"{ broken");
+        let before = zips_in(&dir);
+        let err = aurora
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::Instance(InstanceError::BackupIndexInvalid { .. })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(zips_in(&dir), before);
     }
 
     #[tokio::test]

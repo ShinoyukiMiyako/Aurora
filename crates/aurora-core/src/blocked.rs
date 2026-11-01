@@ -11,7 +11,6 @@ use aurora_modplatform::{
     CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform, curseforge_fingerprint,
 };
 use serde::Serialize;
-use sha1::{Digest, Sha1};
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
@@ -86,7 +85,7 @@ pub(crate) async fn single_blocked(
     }
 }
 
-/// 拿一份字节和受限文件的哈希比。
+/// 拿一个文件和受限文件的哈希比。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Check {
     Match,
@@ -95,38 +94,32 @@ enum Check {
     Unverifiable,
 }
 
-fn check_bytes(file: &BlockedFile, bytes: &[u8]) -> Check {
-    if let Some(expected) = &file.sha1 {
-        let actual: String = Sha1::digest(bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        return if actual.eq_ignore_ascii_case(expected) {
-            Check::Match
-        } else {
-            Check::Mismatch
-        };
-    }
-    if file.fingerprint != 0 {
-        return if u64::from(curseforge_fingerprint(bytes)) == file.fingerprint {
-            Check::Match
-        } else {
-            Check::Mismatch
-        };
-    }
-    Check::Unverifiable
-}
-
-/// 读整个文件做校验，放在阻塞线程里：Mod 动辄几十 MB，哈希不该占着异步线程。
+/// 有 sha1 时分块读着算：整合包本体可能几百 MB，校验只该占一个读缓冲。只有 fingerprint 时才读入整个文件，
+/// 指纹要先剔除空白字节，再带剔除后的长度做 MurmurHash2；放在阻塞线程里，哈希不该占着异步线程。
 async fn verify_path(path: &Path, file: &BlockedFile) -> Result<Check> {
+    if let Some(expected) = &file.sha1 {
+        let actual = aurora_base::fs::sha1_hex(path).await?;
+        return Ok(if actual.eq_ignore_ascii_case(expected) {
+            Check::Match
+        } else {
+            Check::Mismatch
+        });
+    }
+    if file.fingerprint == 0 {
+        return Ok(Check::Unverifiable);
+    }
     let owned = path.to_path_buf();
-    let file = file.clone();
+    let expected = file.fingerprint;
     tokio::task::spawn_blocking(move || {
         let bytes = std::fs::read(&owned).map_err(|source| aurora_base::Error::Io {
             path: owned.clone(),
             source,
         })?;
-        Ok(check_bytes(&file, &bytes))
+        Ok(if u64::from(curseforge_fingerprint(&bytes)) == expected {
+            Check::Match
+        } else {
+            Check::Mismatch
+        })
     })
     .await?
 }
@@ -349,6 +342,7 @@ async fn list_top_level_files(folder: &Path) -> std::io::Result<Vec<Candidate>> 
 mod tests {
     use super::*;
     use crate::config::AuroraConfig;
+    use sha1::{Digest, Sha1};
 
     fn sha1_hex(bytes: &[u8]) -> String {
         Sha1::digest(bytes)
@@ -528,6 +522,122 @@ mod tests {
         assert_eq!(aurora.claimed_copy(&file).await.unwrap(), None);
         std::fs::write(&slot, b"good").unwrap();
         assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot));
+    }
+
+    /// aurora-base 的流式哈希按 64 KiB 分块读：这些大小让最后一块分别是不满、正好满、多出一字节，0 字节则是
+    /// 第一次读就到文件尾。
+    const READ_BOUNDARY_SIZES: [usize; 10] = [
+        0, 1, 65_535, 65_536, 65_537, 131_071, 131_072, 131_073, 196_608, 200_000,
+    ];
+
+    /// 期望值是对内存里的整份字节算的，被校验的文件从磁盘读，两边必须一致；平台给大写哈希照样认。改掉最后
+    /// 一个字节必须算不符：最后那段不满的块也得喂进去。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sha1_check_agrees_with_the_whole_file_digest_at_read_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        for (id, len) in READ_BOUNDARY_SIZES.into_iter().enumerate() {
+            let mut bytes = vec![0u8; len];
+            rng.fill(&mut bytes);
+            let path = tmp.path().join(format!("{len}.jar"));
+            std::fs::write(&path, &bytes).unwrap();
+            let mut file = blocked(id as u32, "x.jar", &bytes);
+
+            assert_eq!(
+                verify_path(&path, &file).await.unwrap(),
+                Check::Match,
+                "len={len} seed={seed}"
+            );
+
+            file.sha1 = file.sha1.map(|hex| hex.to_uppercase());
+            assert_eq!(
+                verify_path(&path, &file).await.unwrap(),
+                Check::Match,
+                "大写哈希 len={len} seed={seed}"
+            );
+
+            match bytes.last_mut() {
+                Some(last) => *last ^= 0xff,
+                None => bytes.push(0),
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                verify_path(&path, &file).await.unwrap(),
+                Check::Mismatch,
+                "len={len} seed={seed}"
+            );
+        }
+    }
+
+    /// 0 字节文件的 sha1 是公开的固定值，不依赖测试里的算法。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_file_matches_the_known_empty_sha1() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("empty.jar");
+        std::fs::write(&path, b"").unwrap();
+        let mut file = blocked(1, "empty.jar", b"");
+        file.sha1 = Some("da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned());
+        assert_eq!(verify_path(&path, &file).await.unwrap(), Check::Match);
+    }
+
+    /// 两个哈希都给时以 sha1 为准；只有 fingerprint 时走指纹，空白字节不算内容，别的字节变了才算不符；都没给
+    /// 无从确认。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn check_prefers_sha1_then_fingerprint_then_gives_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("x.jar");
+        let bytes = b"jar contents\n";
+        std::fs::write(&path, bytes).unwrap();
+        let fingerprint = u64::from(curseforge_fingerprint(bytes));
+
+        let mut file = blocked(1, "x.jar", bytes);
+        file.fingerprint = fingerprint + 1;
+        assert_eq!(verify_path(&path, &file).await.unwrap(), Check::Match);
+
+        file.sha1 = Some(sha1_hex(b"another file"));
+        file.fingerprint = fingerprint;
+        assert_eq!(verify_path(&path, &file).await.unwrap(), Check::Mismatch);
+
+        file.sha1 = None;
+        assert_eq!(verify_path(&path, &file).await.unwrap(), Check::Match);
+
+        std::fs::write(&path, b"jar \t contents\r\n").unwrap();
+        assert_eq!(verify_path(&path, &file).await.unwrap(), Check::Match);
+
+        std::fs::write(&path, b"jar contents!\n").unwrap();
+        assert_eq!(verify_path(&path, &file).await.unwrap(), Check::Mismatch);
+
+        std::fs::write(&path, b"").unwrap();
+        file.fingerprint = u64::from(curseforge_fingerprint(b""));
+        assert_eq!(verify_path(&path, &file).await.unwrap(), Check::Match);
+
+        file.fingerprint = 0;
+        assert_eq!(
+            verify_path(&path, &file).await.unwrap(),
+            Check::Unverifiable
+        );
+    }
+
+    /// 文件读不了要报错并带上路径，不能当成哈希不符，让用户以为只是没找到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_file_is_an_io_error_with_its_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("gone.jar");
+        let mut file = blocked(1, "gone.jar", b"x");
+        let err = verify_path(&gone, &file).await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Base(aurora_base::Error::Io { path, .. }) if path == &gone),
+            "{err:?}"
+        );
+
+        file.sha1 = None;
+        file.fingerprint = 1;
+        let err = verify_path(&gone, &file).await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Base(aurora_base::Error::Io { path, .. }) if path == &gone),
+            "{err:?}"
+        );
     }
 
     /// 缓存目录配置了就放在它下面。

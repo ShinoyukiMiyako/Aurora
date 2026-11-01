@@ -67,13 +67,15 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 ### 账户续期
 
-启动前与账户页手动刷新共用一套续期：微软账户的 Minecraft 令牌过期才用 refresh token 重走令牌链，外置账户先校验令牌、无效再刷新。同一账户的续期按账户排队（`core/auth.rs` 的续期闸），进队后以账户库里此刻的凭据为准，两边不会拿同一份旧令牌各刷一次、后到的一方被服务器拒掉。服务器判定凭据失效时，只有库里仍是被拒的那一份才把账户落成 `expired`：等回音期间用户重新登录过，新凭据不受影响。
+启动前与账户页手动刷新共用一套续期：微软账户的 Minecraft 令牌过期才用 refresh token 重走令牌链，外置账户先校验令牌、无效再刷新。同一账户的续期按账户排队（`core/auth.rs` 的续期闸，键是数据目录加账户 uuid，不同凭据库的同名账户互不等待），进队后以账户库里此刻的凭据为准，两边不会拿同一份旧令牌各刷一次、后到的一方被服务器拒掉。服务器判定凭据失效时，只有库里仍是被拒的那一份才把账户落成 `expired`：等回音期间用户重新登录过，新凭据不受影响。
 
 手动刷新外置账户时先校验令牌：仍有效就只从会话服务器更新角色名与皮肤、记一次验证时刻，不轮换令牌（刷新会让正在运行的游戏手里的旧令牌当场作废）；失效才刷新。校验本身遇到服务故障（`ServiceUnavailable`）时照实报错，不接着刷新，令牌与账户库都不动。档案取不到（连不上、服务器出错）时角色名与皮肤保持原样，角色在服务器上已不存在（204）时才清掉皮肤，刷新令牌那条路同样如此。
 
 续期联网的部分跑在独立任务里（`Aurora::renew_detached`）：排闸、读库、联网、落盘一口气做完，续期闸也由任务持有。调用方被取消（快照上的取消令牌触发，或 future 被丢弃）时立刻以 `cancelled` 返回，续期照样跑完落盘：外置刷新与微软令牌链一发出请求，服务器那边的旧凭据就可能作废，新凭据只在回音里。所以续期用的微软令牌链不挂取消令牌（设备码登录仍挂）；已经取消了才来的续期不开始。服务故障的退避重试同样在这个任务里跑完，调用方取消时不等它，排在后面的续期等它结束才读库。
 
-微软令牌端点回 `interaction_required` / `consent_required` 等需要用户在浏览器里操作的错误判为需要重新登录，回 `temporarily_unavailable` 按退避重试。启动前续期的失败只有三种给启动失败码：凭据失效（`ReloginRequired`）给 `account_relogin`，连不上（`Http`）给 `account_refresh_network`，登录服务故障（`ServiceUnavailable`：微软或外置验证服务器回 5xx、429，退避重试过仍不行）给 `account_service_down`；后两种不碰账户库，账户还是好的，可以稍后重试或先以离线方式进单人。封禁、未购买、应用未获批准、响应解析不了、凭据库读写失败、取消都不是重新登录能解决的，按账户错误码与原文原样报出。读外置验证服务器元数据失败时同理，只有连不上给 `account_refresh_network`。
+新凭据一到手先落盘，再做后面的联网：微软 refresh token 换出来就写库，令牌链后面（XBL、XSTS）失败也不丢；外置刷新成功后先写令牌，再查会话服务器的角色档案。这两处写回都以库里还是换出它的那一份为条件，等回音期间用户重新登录过的话新登录优先。
+
+微软令牌端点回 `interaction_required` / `consent_required` 等需要用户在浏览器里操作的错误判为需要重新登录，回 `temporarily_unavailable` 按退避重试，退避用完报 `ServiceUnavailable`。外置账号密码认证回 429 时，带 Yggdrasil 错误体的原样报出且不重试（登录弹窗要原位显示服务器的说明），没有错误体的才算服务故障；刷新、校验的 429 一律算服务故障。启动前续期的失败只有三种给启动失败码：凭据失效（`ReloginRequired`）给 `account_relogin`，连不上（`Http`）给 `account_refresh_network`，登录服务故障（`ServiceUnavailable`：微软或外置验证服务器回 5xx、429，退避重试过仍不行）给 `account_service_down`；后两种不碰账户库，账户还是好的，可以稍后重试或先以离线方式进单人。封禁、未购买、应用未获批准、响应解析不了、凭据库读写失败、取消都不是重新登录能解决的，按账户错误码与原文原样报出。读外置验证服务器元数据失败时同理：连不上给 `account_refresh_network`，根地址回 5xx、429 报 `ServiceUnavailable`，给 `account_service_down`，都记进账户失败、可以以离线方式进单人；回别的非 2xx 或内容不对是 `NotYggdrasilServer`，按账户错误码原样报出。查 authlib-injector 最新构建与预取元数据不走下载池，各自包上取消令牌，点取消不用等连接超时。
 
 ### 安装、补全与启动的约定
 
@@ -151,8 +153,8 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `repairing` | 补全实例 | 互斥 |
 | `renaming` / `deleting` | 改名（新旧两个名字都占）、删除 | 互斥 |
 | `launching` -> `running` | 启动命令（Quick Play 直达同样走 `launch_game`），从启动一直持有到游戏退出 | 只与 `modifying`、`inherited` 兼容 |
-| `backing_up` | 备份、导出、恢复存档；开着自动备份时，游戏退出后由启动命令把 `running` 转成它，备份做完才放开 | 只与 `modifying`、`inherited` 兼容 |
-| `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录，导出整合包 | 与自身、`launching`、`running`、`backing_up`、`inherited` 兼容 |
+| `backing_up` | 备份、导出、恢复存档（都不占基底，基底的删除、改名由依赖检查挡着）；开着自动备份时，游戏退出后由启动命令把 `running` 转成它，备份做完才放开 | 只与 `modifying`、`inherited` 兼容 |
+| `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录，导出整合包，删除存档备份 | 与自身、`launching`、`running`、`backing_up`、`inherited` 兼容 |
 | `inherited` | 继承链上的基底版本：别的实例启动到退出（开着自动备份时到备份做完）、补全、导入整合包期间（导入时占将要继承的原版），以那个实例的名义占住 | 与 `launching`、`running`、`backing_up`、`modifying` 及别的 `inherited` 兼容 |
 
 这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断与模拟后端三处保持一致。
@@ -161,7 +163,13 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 基底占用经 `InstanceLocks::acquire_with_bases` 先占实例自己、再依次占 `Aurora::inheritance_chain` 给出的基底（只沿链读各环的版本 JSON；断在哪一环就停在那里，原因交给启动与补全照原有失败码报出），与实例同名或彼此只差大小写的只占一次，任何一处冲突时已占到的一并放开。基底被占时对它的删除、改名、补全报 `instance_busy`，正文为「实例 <id> 正在被实例 <使用者> 使用，请稍后再试」，`detail` 为 `{ id, activity: "inherited", used_by }`；其余活动的 `detail` 不带 `used_by`。实例列表与删除预览的 `used_by` 给出正以它为基底的实例（几个时取最早占到的那个，与报错的是同一个），前端据此提前禁用改名、补全、删除并写明是谁在用。新建实例是合并后的自包含版本 JSON（不继承原版），不占基底。
 
-备份、导出与恢复存档只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交，所以兼容；游戏开着时存档随时在写，所以与启动、运行互斥。导出整合包对外是 `modifying`，但可能把存档一起打包，与备份、恢复另有两条互斥：实例报着 `backing_up` 时导出报 `instance_busy`；勾了存档时导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出），只读存档的备份与导出存档不受影响。两边都先写自己的记录再查对方，同时发起时至少挡下一方。不隔离的实例共用游戏目录的 saves，实例锁只管自己这个实例，所以这些检查还要看共用同一份存档的别的实例：别的实例正开着游戏时备份、导出或恢复这份存档，别的实例占着 `backing_up` 时启动或导出整合包，别的实例正把存档读进整合包时恢复，都报 `instance_busy`，`detail.id` 指向挡路的那个实例。
+备份、导出与恢复存档只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交，所以兼容；游戏开着时存档随时在写，所以与启动、运行互斥。恢复开始换存档之后不再响应取消，换完才返回，结果按实际报；解压阶段仍在时限内响应取消。
+
+导出整合包对外是 `modifying`，没勾存档时不碰 saves，与运行、备份都兼容。勾了存档时要等存档安定下来：实例在启动、运行或报着 `backing_up` 时导出报 `instance_busy`（备份与恢复都是 `backing_up`，分不清只读与替换，一律等）；导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复与启动在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出），只读存档的备份与导出存档不受影响。
+
+装数据包同样对外是 `modifying`，但写进 `saves/<存档>/datapacks`，和备份、恢复、读存档的导出都相交。它记下「存档正被写」（`InstanceLocks::write_saves`）：实例报着 `backing_up` 或存档正被读进整合包时报 `instance_busy`，备份、恢复、导出存档与带存档的导出整合包在写完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在装数据包）。游戏退出后的自动备份不看这份记录，撞上时那个存档记为备份失败，下一次再备。这些记录两边都先写自己的再查对方，同时发起时至少挡下一方。
+
+不隔离的实例共用游戏目录的 saves，实例锁只管自己这个实例，所以这些检查还要看共用同一份存档的别的实例：别的实例正开着游戏时备份、导出或恢复这份存档，或者带存档导出整合包；别的实例占着 `backing_up` 时启动、带存档导出整合包或装数据包；别的实例正把存档读进整合包时恢复或启动；别的实例正在装数据包时备份、导出或恢复，都报 `instance_busy`，`detail.id` 指向挡路的那个实例。
 
 `install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。CurseForge 上禁止第三方分发的文件，装 Mod、装资源与导入整合包都报 `distribution_blocked`（带文件名），空白的 `downloadUrl` 按缺失处理、先走 download-url 兜底。
 
@@ -341,7 +349,7 @@ versions/<实例名>/
 卷宗与历史始终跟着实例目录走，不随隔离设置变化。否则关掉隔离之后，几个实例会共用同一份记录。
 
 - **未完成标记**：新建实例、补全和整合包导入都使用同一种格式（`kind` 为 `install`、`repair` 或 `modpack`，另有 `outcome`、`started_at`、`error`）。列表据此显示「安装没有完成」之类的原因。补全据此决定怎么处理：`install` 按记下的内容重装，`repair` 补齐文件，`modpack` 报不可补全并提示重新导入。
-- **Mod 备份与回滚**：更新 Mod 时，旧文件改名为 `<文件名>.old` 保留在 mods 目录。同名备份已存在时取 `<文件名>.2.old`、`.3.old`，依次类推。实际的备份名记在历史事件的 `backup_file` 里。一个 Mod 连续更新形成一条链，只能从最近的一次往回滚。
+- **Mod 备份与回滚**：更新 Mod 时，旧文件改名为 `<文件名>.old` 保留在 mods 目录。同名备份已存在时取 `<文件名>.2.old`、`.3.old`，依次类推。实际的备份名记在历史事件的 `backup_file` 里。一个 Mod 连续更新形成一条链，只能从最近的一次往回滚。启用状态跟着 Mod 走：回滚时新文件是停用的，旧文件也恢复成 `<文件名>.disabled`。
 
 ## 测试与守卫
 

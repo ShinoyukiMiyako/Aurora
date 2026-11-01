@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { IpcError } from "../../ipc/errors";
 import type { InstanceDto } from "../../ipc/instances";
-import type { ModpackExportPreviewDto } from "../../ipc/modpack";
+import type { ExportExtra, ExportExtraStatDto, ModpackExportPreviewDto } from "../../ipc/modpack";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickSaveFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -15,7 +15,7 @@ import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../..
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
-import { bundledTotals, defaultExportFileName } from "./ExportModpackModal";
+import { bundledTotals, defaultExportFileName, skippedCount } from "./ExportModpackModal";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -48,17 +48,25 @@ function previewDto(over: Partial<ModpackExportPreviewDto> = {}): ModpackExportP
     bundled: [{ file_name: "handmade-1.0.jar", path: "mods/handmade-1.0.jar", size: 4096, reason: "unlisted" }],
     disabled: [{ file_name: "iris.jar.disabled", path: "mods/iris.jar.disabled", size: 2 * MB, reason: "disabled" }],
     extras: [
-      { extra: "config", files: 37, bytes: 412 * 1024, default_selected: true },
-      { extra: "defaultconfigs", files: 0, bytes: 0, default_selected: false },
-      { extra: "kubejs", files: 0, bytes: 0, default_selected: false },
-      { extra: "resourcepacks", files: 2, bytes: 18 * MB, default_selected: true },
-      { extra: "shaderpacks", files: 1, bytes: 3 * MB, default_selected: true },
-      { extra: "options", files: 1, bytes: 6 * 1024, default_selected: true },
-      { extra: "saves", files: 2, bytes: 80 * MB, default_selected: false },
+      { extra: "config", files: 37, bytes: 412 * 1024, default_selected: true, skipped: [] },
+      { extra: "defaultconfigs", files: 0, bytes: 0, default_selected: false, skipped: [] },
+      { extra: "kubejs", files: 0, bytes: 0, default_selected: false, skipped: [] },
+      { extra: "resourcepacks", files: 2, bytes: 18 * MB, default_selected: true, skipped: [] },
+      { extra: "shaderpacks", files: 1, bytes: 3 * MB, default_selected: true, skipped: [] },
+      { extra: "options", files: 1, bytes: 6 * 1024, default_selected: true, skipped: [] },
+      { extra: "saves", files: 2, bytes: 80 * MB, default_selected: false, skipped: [] },
     ],
-    skipped: [],
+    mod_skipped: [],
     ...over,
   };
+}
+
+/** 默认盘面的额外项，把指定项的跳过文件换成给定的。 */
+function extrasSkipping(skipped: Partial<Record<ExportExtra, string[]>>): ExportExtraStatDto[] {
+  return previewDto().extras.map((stat) => {
+    const files = skipped[stat.extra];
+    return files === undefined ? stat : { ...stat, skipped: files };
+  });
 }
 
 function Probe() {
@@ -237,6 +245,15 @@ describe("导出整合包弹窗：纯函数", () => {
     expect(bundledTotals(dto, { extras: new Set(), includeDisabled: false })).toEqual({ files: 1, bytes: 4096 });
     expect(bundledTotals(dto, { extras: new Set(["config", "saves"]), includeDisabled: true })).toEqual({ files: 37 + 2 + 1 + 1, bytes: 412 * 1024 + 80 * MB + 4096 + 2 * MB });
   });
+
+  it("会跳过的文件数：mods 目录里的总算，额外项的只算勾上的", () => {
+    const dto = previewDto({ mod_skipped: ["mods/a:b.jar"], extras: extrasSkipping({ config: ["config/a:b.json", "config/c?.toml"], saves: ["saves/w/c?.dat"] }) });
+    expect(skippedCount(dto, new Set())).toBe(1);
+    expect(skippedCount(dto, new Set(["resourcepacks"]))).toBe(1);
+    expect(skippedCount(dto, new Set(["config"]))).toBe(3);
+    expect(skippedCount(dto, new Set(["config", "saves"]))).toBe(4);
+    expect(skippedCount(previewDto(), new Set(["config", "saves"]))).toBe(0);
+  });
 });
 
 describe("导出整合包弹窗", () => {
@@ -376,7 +393,7 @@ describe("导出整合包弹窗", () => {
   });
 
   it("不在 Modrinth 上的 Mod 可以展开查看文件名；没有停用的 Mod 时不显示那一块，有跳过的文件时说明", async () => {
-    preview = () => previewDto({ disabled: [], skipped: ["config/a:b.json", "saves/w/c?.dat"] });
+    preview = () => previewDto({ disabled: [], mod_skipped: ["mods/c?.jar"], extras: extrasSkipping({ config: ["config/a:b.json"] }) });
     await openPage();
     await openExport();
     expect(dialog().textContent).not.toContain("带上停用的");
@@ -386,5 +403,30 @@ describe("导出整合包弹窗", () => {
     expect(dialog().querySelector('[aria-label="直接打包进去的 Mod"]')?.textContent).toBe("handmade-1.0.jar");
     click(button("收起", dialog()));
     expect(dialog().querySelector('[aria-label="直接打包进去的 Mod"]')).toBeNull();
+  });
+
+  it("跳过文件的说明跟着勾选变：没勾的额外项不算，mods 目录里的总算", async () => {
+    preview = () => previewDto({ mod_skipped: ["mods/c?.jar"], extras: extrasSkipping({ config: ["config/a:b.json", "config/d?.toml"], saves: ["saves/w/c?.dat"] }) });
+    await openPage();
+    await openExport();
+    // 默认勾了 config、没勾存档
+    expect(dialog().textContent).toContain("3 个文件的名字在 Windows 上不安全，不会打包");
+    click(checkbox("存档（saves）"));
+    expect(dialog().textContent).toContain("4 个文件的名字在 Windows 上不安全，不会打包");
+    click(checkbox("配置文件（config）"));
+    expect(dialog().textContent).toContain("2 个文件的名字在 Windows 上不安全，不会打包");
+    click(checkbox("存档（saves）"));
+    expect(dialog().textContent).toContain("1 个文件的名字在 Windows 上不安全，不会打包");
+  });
+
+  it("跳过的文件全在没勾的额外项里：不显示说明，勾上才出现，再取消又消失", async () => {
+    preview = () => previewDto({ extras: extrasSkipping({ saves: ["saves/w/c?.dat"] }) });
+    await openPage();
+    await openExport();
+    expect(dialog().textContent).not.toContain("在 Windows 上不安全");
+    click(checkbox("存档（saves）"));
+    expect(dialog().textContent).toContain("1 个文件的名字在 Windows 上不安全，不会打包");
+    click(checkbox("存档（saves）"));
+    expect(dialog().textContent).not.toContain("在 Windows 上不安全");
   });
 });

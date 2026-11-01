@@ -412,7 +412,7 @@ mod tests {
             args: args.iter().map(|a| (*a).to_owned()).collect(),
             working_dir: root.clone(),
         };
-        let session = aurora_launch::spawn(&command, clock, Some(log), None).unwrap();
+        let session = aurora_launch::spawn(&command, clock, &mut Some(log), None).unwrap();
         let info = RunInfo {
             version_id: "1.21".to_owned(),
             version_dir: version_dir.clone(),

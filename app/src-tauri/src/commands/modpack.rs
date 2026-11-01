@@ -7,10 +7,10 @@ use std::sync::Mutex;
 
 use aurora_core::{
     is_safe_file_name, Aurora, BlockedFile, BundleReason, ClaimReport, EventSink, ExportBundledMod,
-    ExportExtra, ExportMatch, ImportSelection, InstanceModpack, MarkerError, MarkerSettlement,
-    ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview, ModpackExportTarget,
-    ModpackInstallOutcome, ModpackPreview, ModpackSource, ModpackSummary, PackFileAvailability,
-    PackFileOrigin, PackFormat, PackLoader, PackModEntry,
+    ExportExtra, ExportMatch, GameSlot, ImportSelection, InstanceModpack, MarkerError,
+    MarkerSettlement, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
+    ModpackExportTarget, ModpackInstallOutcome, ModpackPreview, ModpackSource, ModpackSummary,
+    PackFileAvailability, PackFileOrigin, PackFormat, PackLoader, PackModEntry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,8 +19,9 @@ use tauri::{AppHandle, Manager, State};
 use crate::commands::discover::parse_platform;
 use crate::commands::error::code;
 use crate::commands::instances::{
-    busy, ensure_shared_worlds_settled, ChainGuard, ExportedFiles, InstanceActivity, InstanceLocks,
+    ensure_saves_settled_for_reading, ChainGuard, ExportedFiles, InstanceActivity, InstanceLocks,
 };
+use crate::commands::launch::RunningGame;
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -176,7 +177,8 @@ pub struct ModpackSummaryDto {
 }
 
 /// 平台整合包某个版本的清单摘要（Mod 数、要下载的字节）。只按范围读包末尾的目录与清单条目，
-/// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`。
+/// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`，
+/// 清单用了解不开的压缩方式时报 `modpack_unsupported_compression`。
 /// CurseForge 另问批量文件与批量工程两个接口，没配 API key 时报 CurseForge 源被禁用的同一个错误。
 #[tauri::command]
 pub async fn summarize_platform_modpack(
@@ -549,7 +551,7 @@ pub struct ModpackExportPreviewDto {
     pub bundled: Vec<ExportBundledModDto>,
     pub disabled: Vec<ExportBundledModDto>,
     pub extras: Vec<ExportExtraStatDto>,
-    pub skipped: Vec<String>,
+    pub mod_skipped: Vec<String>,
 }
 
 /// 只写进索引的 Mod。
@@ -580,6 +582,7 @@ pub struct ExportExtraStatDto {
     pub files: u64,
     pub bytes: u64,
     pub default_selected: bool,
+    pub skipped: Vec<String>,
 }
 
 /// 导出结果 DTO。
@@ -634,7 +637,8 @@ pub(crate) async fn preview_modpack_export_with(
 /// 失败或取消时不留临时文件，已有的同名目标文件不动。
 ///
 /// 导出期间实例以「改动中」占住：游戏照常运行、Mod 照常可改（读的是此刻的文件），改名、补全、
-/// 删除报 `instance_busy`。
+/// 删除报 `instance_busy`。勾了存档时存档要先安定下来：游戏启动中、运行中，备份或恢复进行中，共用
+/// 这份存档的别的实例开着游戏时都报 `instance_busy`，导出期间也不能启动这个实例。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn export_modpack(
@@ -645,6 +649,7 @@ pub async fn export_modpack(
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
     locks: State<'_, InstanceLocks>,
+    running: State<'_, RunningGame>,
     exports: State<'_, ExportedFiles>,
 ) -> Result<ModpackExportOutcomeDto, CommandError> {
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
@@ -652,6 +657,7 @@ pub async fn export_modpack(
         &facade,
         &tasks,
         &locks,
+        running.slot(),
         &task_id,
         &id,
         options,
@@ -666,10 +672,12 @@ pub async fn export_modpack(
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn export_modpack_with(
     facade: &Facade,
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
+    game: &GameSlot,
     task_id: &str,
     id: &str,
     options: ModpackExportOptionsArg,
@@ -679,20 +687,15 @@ pub(crate) async fn export_modpack_with(
     let id = export_id(id)?;
     let (destination, options) = parse_export_options(options).await?;
     let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
-    // 勾了存档时记下「存档正被整份读走」，恢复存档要等它读完；先记下再查备份与恢复，与恢复那边先占后查对称，
+    let includes_saves = options.extras.contains(&ExportExtra::Saves);
+    // 勾了存档时记下「存档正被整份读走」，恢复存档与启动游戏要等它读完；先记下再查，与那两边先占后查对称，
     // 两边同时发起时至少有一方会被挡住。被拒时记录随返回撤销。
-    let _reading = options
-        .extras
-        .contains(&ExportExtra::Saves)
-        .then(|| locks.read_saves(id));
-    // 改 Mod 与存档备份互相兼容，导出却可能连存档一起打包：备份或恢复正在打包、替换存档时不能导出，
-    // 否则包里是半截的存档。先占住再查，被拒时守卫随返回放开。
-    if locks.occupancy(id).0 == Some(InstanceActivity::BackingUp) {
-        return Err(busy(id, InstanceActivity::BackingUp));
-    }
-    // 不隔离的实例共用游戏目录的 saves：另一个不隔离的实例在备份或恢复时，这份存档同样是半截的。
+    let _reading = includes_saves.then(|| locks.read_saves(id));
     let snapshot = facade.snapshot().await;
-    ensure_shared_worlds_settled(&snapshot, locks, id).await?;
+    // 没勾存档的导出不碰 saves，与运行和备份都兼容。勾了就要等存档安定下来，否则包里是半截的。
+    if includes_saves {
+        ensure_saves_settled_for_reading(&snapshot, locks, game, id).await?;
+    }
     let task = tasks.register(task_id)?;
     let aurora = snapshot.with_cancel(task.token().clone());
     // 落点放在任务的 future 之外：取消宽限期满时 run 会丢弃 future，临时文件仍要在这里清掉。
@@ -880,9 +883,10 @@ fn export_preview_dto(preview: ModpackExportPreview) -> ModpackExportPreviewDto 
                 files: s.files,
                 bytes: s.bytes,
                 default_selected: s.default_selected,
+                skipped: s.skipped,
             })
             .collect(),
-        skipped: preview.skipped,
+        mod_skipped: preview.mod_skipped,
     }
 }
 
@@ -2033,9 +2037,18 @@ mod tests {
             ("  ", export_args(&good), "id", "empty"),
         ];
         for (id, args, field, rule) in cases {
-            let err = export_modpack_with(&facade, &registry, &locks, "ex-bad", id, args, &sink)
-                .await
-                .unwrap_err();
+            let err = export_modpack_with(
+                &facade,
+                &registry,
+                &locks,
+                &GameSlot::default(),
+                "ex-bad",
+                id,
+                args,
+                &sink,
+            )
+            .await
+            .unwrap_err();
             assert_eq!(err.code, code::INVALID_ARGUMENT, "{field}/{rule}");
             let detail = err.detail.unwrap();
             assert_eq!(detail["field"], field, "{field}/{rule}");
@@ -2049,6 +2062,7 @@ mod tests {
             &facade,
             &registry,
             &locks,
+            &GameSlot::default(),
             "ex-bad",
             EXPORT_ID,
             with(&|a| a.extras = vec!["config".into(), "Saves".into()]),
@@ -2072,7 +2086,9 @@ mod tests {
             .await;
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path(), &server.uri());
-        export_instance(dir.path());
+        let instance = export_instance(dir.path());
+        std::fs::write(instance.join("mods").join("con.jar"), b"reserved").unwrap();
+        std::fs::write(instance.join("config").join("nul.json"), b"reserved").unwrap();
         let registry = TaskRegistry::default();
         let locks = InstanceLocks::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
@@ -2093,13 +2109,20 @@ mod tests {
         assert_eq!(wire["extras"][0]["extra"], "config");
         assert_eq!(wire["extras"][0]["files"], 1);
         assert_eq!(wire["extras"][0]["default_selected"], true);
+        assert_eq!(
+            wire["extras"][0]["skipped"],
+            serde_json::json!(["config/nul.json"])
+        );
         assert_eq!(wire["extras"][6]["extra"], "saves");
+        assert_eq!(wire["extras"][6]["skipped"], serde_json::json!([]));
+        assert_eq!(wire["mod_skipped"], serde_json::json!(["mods/con.jar"]));
 
         let destination = dir.path().join("樱花林 1.0.0.mrpack");
         let outcome = export_modpack_with(
             &facade,
             &registry,
             &locks,
+            &GameSlot::default(),
             "ex-ok",
             EXPORT_ID,
             export_args(&destination),
@@ -2147,7 +2170,17 @@ mod tests {
             let args = export_args(&destination);
             async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-                export_modpack_with(&f, &r, &l, "ex-slow", EXPORT_ID, args, &sink).await
+                export_modpack_with(
+                    &f,
+                    &r,
+                    &l,
+                    &GameSlot::default(),
+                    "ex-slow",
+                    EXPORT_ID,
+                    args,
+                    &sink,
+                )
+                .await
             }
         });
 
@@ -2195,7 +2228,17 @@ mod tests {
             let args = export_args(&dir.path().join("占用.mrpack"));
             async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-                export_modpack_with(&f, &r, &l, "ex-hold", EXPORT_ID, args, &sink).await
+                export_modpack_with(
+                    &f,
+                    &r,
+                    &l,
+                    &GameSlot::default(),
+                    "ex-hold",
+                    EXPORT_ID,
+                    args,
+                    &sink,
+                )
+                .await
             }
         });
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -2241,6 +2284,11 @@ mod tests {
         let locks = InstanceLocks::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let destination = dir.path().join("备份中.mrpack");
+        let with_saves = || {
+            let mut args = export_args(&destination);
+            args.extras = vec!["saves".into()];
+            args
+        };
 
         let backing_up = locks
             .acquire(EXPORT_ID, InstanceActivity::BackingUp)
@@ -2249,9 +2297,10 @@ mod tests {
             &facade,
             &registry,
             &locks,
+            &GameSlot::default(),
             "ex-backup",
             EXPORT_ID,
-            export_args(&destination),
+            with_saves(),
             &sink,
         )
         .await
@@ -2262,14 +2311,14 @@ mod tests {
         assert!(!destination.exists());
         assert!(server.received_requests().await.unwrap().is_empty());
         assert_eq!(locks.activity(EXPORT_ID), Some(InstanceActivity::BackingUp));
-        drop(backing_up);
-        assert_eq!(locks.activity(EXPORT_ID), None);
 
+        // 没勾存档的导出不碰 saves，备份在做也照常：和先导出再备份一样可以并行。
         export_modpack_with(
             &facade,
             &registry,
             &locks,
-            "ex-after",
+            &GameSlot::default(),
+            "ex-no-saves",
             EXPORT_ID,
             export_args(&destination),
             &sink,
@@ -2277,6 +2326,149 @@ mod tests {
         .await
         .unwrap();
         assert!(destination.is_file());
+        std::fs::remove_file(&destination).unwrap();
+
+        drop(backing_up);
+        assert_eq!(locks.activity(EXPORT_ID), None);
+
+        export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            &GameSlot::default(),
+            "ex-after",
+            EXPORT_ID,
+            with_saves(),
+            &sink,
+        )
+        .await
+        .unwrap();
+        assert!(destination.is_file());
+    }
+
+    /// 勾了存档时，游戏开着存档随时在写，包里会是半截：启动中、运行中报 instance_busy；没勾存档的导出不碰
+    /// saves，与运行和备份都兼容。不隔离的实例还要看别的实例：占着游戏的实例也不隔离时共用这份存档。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_with_saves_waits_for_the_game() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/version_files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), &server.uri());
+        export_instance(dir.path());
+        let game = dir.path().join(".minecraft");
+        for id in ["共用甲", "共用乙"] {
+            let version = game.join("versions").join(id);
+            std::fs::create_dir_all(&version).unwrap();
+            std::fs::write(
+                version.join(format!("{id}.json")),
+                format!(
+                    r#"{{"id":"{id}","clientVersion":"1.21.1","type":"release","mainClass":"M"}}"#
+                ),
+            )
+            .unwrap();
+        }
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let destination = dir.path().join("运行中.mrpack");
+        let args = |saves: bool| {
+            let mut args = export_args(&destination);
+            if saves {
+                args.extras = vec!["saves".into()];
+            }
+            args
+        };
+
+        for activity in [InstanceActivity::Launching, InstanceActivity::Running] {
+            let held = locks.acquire(EXPORT_ID, activity).unwrap();
+            let err = export_modpack_with(
+                &facade,
+                &registry,
+                &locks,
+                &GameSlot::default(),
+                "ex-running",
+                EXPORT_ID,
+                args(true),
+                &sink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert_eq!(
+                err.detail,
+                Some(json!({ "id": EXPORT_ID, "activity": activity })),
+            );
+            assert!(!registry.is_running("ex-running"));
+            assert!(!destination.exists());
+            assert_eq!(locks.activity(EXPORT_ID), Some(activity));
+            assert!(locks.reading_saves().is_empty(), "被拒时记录随之撤销");
+            drop(held);
+        }
+
+        let running = locks.acquire(EXPORT_ID, InstanceActivity::Running).unwrap();
+        export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            &GameSlot::default(),
+            "ex-no-saves",
+            EXPORT_ID,
+            args(false),
+            &sink,
+        )
+        .await
+        .unwrap();
+        assert!(destination.is_file());
+        std::fs::remove_file(&destination).unwrap();
+        drop(running);
+
+        let slot = GameSlot::default();
+        let reservation = slot.reserve("共用甲").unwrap();
+        let err = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            &slot,
+            "ex-shared-game",
+            "共用乙",
+            args(true),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": "共用甲", "activity": "launching" }))
+        );
+        assert!(!destination.exists());
+        drop(reservation);
+
+        let writing = locks.write_saves(EXPORT_ID);
+        let err = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            &GameSlot::default(),
+            "ex-writing",
+            EXPORT_ID,
+            args(true),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": EXPORT_ID, "activity": "modifying" }))
+        );
+        assert!(err.message.contains("装数据包"), "{}", err.message);
+        assert!(!destination.exists());
+        drop(writing);
     }
 
     /// 不隔离的实例共用游戏目录的 saves：另一个不隔离的实例正在备份或恢复存档时，导出同样报 instance_busy，
@@ -2317,6 +2509,7 @@ mod tests {
             &facade,
             &registry,
             &locks,
+            &GameSlot::default(),
             "ex-shared",
             "共用乙",
             args(),
@@ -2341,6 +2534,7 @@ mod tests {
             &facade,
             &registry,
             &locks,
+            &GameSlot::default(),
             "ex-shared",
             "共用乙",
             args(),

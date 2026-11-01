@@ -23,6 +23,11 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// 清单响应体超过读取上限。`size` 是响应头声明的长度，或读到超限那一刻已收到的字节数，都是实际大小的
+    /// 下界。
+    #[error("{url} 的响应体至少有 {size} 字节，超过 {limit} 字节的上限")]
+    ResponseTooLarge { url: String, size: u64, limit: u64 },
+
     /// JSON 反序列化失败，`context` 标明是哪一份报文（all.json / 组件清单）。
     #[error("解析 JSON 失败：{context}")]
     Json {
@@ -114,6 +119,8 @@ impl RetryableError for Error {
             | Error::MissingJavaExecutable => false,
             // 取消是调用方的决定，重试违背它。
             Error::Cancelled => false,
+            // 同一个地址再来一次还是这么大；换源由候选循环负责。
+            Error::ResponseTooLarge { .. } => false,
             // 清单内容本身越界，重拉同一份清单结果不变。
             Error::UnsafeRuntimePath { .. } | Error::UnsafeRuntimeLink { .. } => false,
             // 每个源内部已按策略重试过，整体再来一轮只会把同样的失败重演一遍。
@@ -122,9 +129,13 @@ impl RetryableError for Error {
     }
 }
 
-/// 判断一个 reqwest 错误是否值得重试。
+/// 判断一个 reqwest 错误是否值得重试（与 aurora-install 同策略）。
+///
+/// 读响应体时连接被重置或提前关闭也算瞬时故障：reqwest 把读体失败包成 decode 类，只认 body 类会把读到
+/// 一半断开的请求当成永久失败、直接换源，两个源各断一次整次 Java 下载就失败了。
 fn is_retryable_http(err: &reqwest::Error) -> bool {
-    if err.is_timeout() || err.is_connect() || err.is_request() {
+    if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
+    {
         return true;
     }
     // error_for_status 抛出的状态码错误：仅对服务端错误与限流重试，4xx（除 429）不重试。

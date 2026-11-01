@@ -13,8 +13,10 @@
 //! 误伤好源——镜像对个别冷门产物返回 404 时，它对其余路径往往是正常的。
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
+
+use crate::watchdog::LinkMeter;
 
 /// 连续失败多少次判定该主机不可用。
 const DEFAULT_TRIP_THRESHOLD: u32 = 3;
@@ -35,6 +37,9 @@ pub struct SourceHealth {
     hosts: Mutex<HashMap<String, HostState>>,
     threshold: u32,
     cooldown: Duration,
+    /// 整条下载链路的吞吐计量。放在这里是因为两者共享范围相同：带宽是整个进程共用的，
+    /// 门面层一个进程只有一张健康表，每批新装配的池都共用它，同时跑的几个池也就算在同一条链路上。
+    link: Arc<LinkMeter>,
 }
 
 impl Default for SourceHealth {
@@ -55,7 +60,13 @@ impl SourceHealth {
             hosts: Mutex::new(HashMap::new()),
             threshold: threshold.max(1),
             cooldown,
+            link: Arc::default(),
         }
+    }
+
+    /// 共用这张健康表的所有传输所在的那条下载链路。
+    pub(crate) fn link(&self) -> &Arc<LinkMeter> {
+        &self.link
     }
 
     /// 把候选按健康度稳定重排：熔断中的主机沉底，其余保持调用方给定的优先级。

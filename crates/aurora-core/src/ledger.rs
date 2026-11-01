@@ -66,7 +66,7 @@ pub struct LedgerEntry {
     /// 这个 Mod 装进实例的时刻（unix 秒）。更新与回滚换的是版本不是 Mod，都沿用原值；哈希反查补身份时
     /// 真实时刻已不可考，取文件修改时刻。
     pub installed_at: i64,
-    /// 作为谁的依赖被带进来的（project_id）；用户主动装的为 `None`。
+    /// 作为谁的依赖被带进来的（project_id）；用户主动装的为 `None`。更新与回滚都沿用原值。
     pub installed_as_dependency_of: Option<String>,
     /// 更新检查设置；没设置为 `None`，落盘时不写这个键，早期卷宗读出也是 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]

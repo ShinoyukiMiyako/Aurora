@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use crate::commands::accounts::find_account;
 use crate::commands::error::code::BUSY;
 use crate::commands::instances::{
-    ensure_shared_worlds_settled, ChainGuard, InstanceActivity, InstanceLocks,
+    ensure_saves_free_for_launch, ChainGuard, InstanceActivity, InstanceLocks,
 };
 use crate::commands::CommandError;
 use crate::events::{self, GAME_LOG_EVENT};
@@ -475,7 +475,7 @@ pub async fn launch_game(
     // 实例与它基底的占用从这里一直持有到游戏退出。
     let (reservation, instance) = reserve_launch(&running, &locks, &aurora, &version_id).await?;
     // 共用存档的实例：先占住自己再查别人，查完之后再有别的实例想备份共用存档，会被占用槽那一侧的检查挡住。
-    ensure_shared_worlds_settled(&aurora, &locks, &version_id).await?;
+    ensure_saves_free_for_launch(&aurora, &locks, &version_id).await?;
     let task = tasks.register(&task_id)?;
     let aurora = aurora.with_cancel(task.token().clone());
 

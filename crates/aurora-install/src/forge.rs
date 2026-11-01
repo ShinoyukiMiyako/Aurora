@@ -400,29 +400,16 @@ impl<'a> ForgeInstaller<'a> {
     }
 
     async fn installer_sha1(&self, installer_url: &str) -> Result<String> {
-        let bytes = net::get_bytes_from(
+        net::get_decoded_from(
             self.cx.client,
             self.sources.as_ref(),
             &format!("{installer_url}.sha1"),
             self.cx.policy,
             self.cx.cancel,
             "installer 的 sha1",
+            parse_sha1_file,
         )
-        .await?;
-        let text = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
-            reason: format!("installer 的 .sha1 不是文本: {err}"),
-        })?;
-        let sha1 = text
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        if sha1.len() != 40 || !sha1.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Error::UnsupportedInstallProfile {
-                reason: format!("installer 的 .sha1 内容不是 sha1：{text}"),
-            });
-        }
-        Ok(sha1)
+        .await
     }
 
     /// 安装成功后删掉 installer 与空了的缓存目录。删不掉不影响安装结果，只记日志。
@@ -513,17 +500,44 @@ impl<'a> ForgeInstaller<'a> {
             aurora_base::app_slug!(),
             "-forge-tmp"
         ));
-        let extracted = extract_data_files(installer, &profile.data, &self.side, &tmp_dir).await?;
-
-        // 组装占位符表：解析后的 data + 安装器注入的特殊变量。
         let minecraft_jar = match target {
             Target::Standalone => self.cx.layout.version_jar(&minecraft),
             Target::Instance(id) => self.cx.layout.version_jar(id),
         };
-        let values =
-            self.build_values(&profile, &minecraft, &minecraft_jar, installer, extracted)?;
+        let ran = self
+            .run_processors(installer, &profile, &minecraft, &minecraft_jar, &tmp_dir)
+            .await;
 
-        // 逐个处理器执行；产物都已就绪的跳过，不计入执行数。
+        // 成败都清：解出的补丁包有几 MB，重试时会重新解出。清不掉不影响安装结果，仅记日志。
+        if let Err(err) = tokio::fs::remove_dir_all(&tmp_dir).await {
+            tracing::debug!(dir = %tmp_dir.display(), %err, "清理 Forge 安装临时目录失败");
+        }
+
+        Ok((
+            embedded,
+            ForgeSummary {
+                id: version_id,
+                libraries,
+                processors: ran?,
+            },
+        ))
+    }
+
+    /// 把 data 表里的文件解到 `tmp_dir`，组好占位符表，逐个处理器执行；返回实际执行的处理器数，产物都已
+    /// 就绪而跳过的不计。
+    async fn run_processors(
+        &self,
+        installer: &Path,
+        profile: &InstallProfile,
+        minecraft: &str,
+        minecraft_jar: &Path,
+        tmp_dir: &Path,
+    ) -> Result<usize> {
+        let extracted = extract_data_files(installer, &profile.data, &self.side, tmp_dir).await?;
+
+        // 组装占位符表：解析后的 data + 安装器注入的特殊变量。
+        let values = self.build_values(profile, minecraft, minecraft_jar, installer, extracted)?;
+
         let mut ran = 0usize;
         for processor in &profile.processors {
             if !side_applies(processor.sides.as_ref(), &self.side) {
@@ -536,20 +550,7 @@ impl<'a> ForgeInstaller<'a> {
                 ran += 1;
             }
         }
-
-        // 清理临时目录（失败不影响安装结果，仅记日志）。
-        if let Err(err) = tokio::fs::remove_dir_all(&tmp_dir).await {
-            tracing::debug!(dir = %tmp_dir.display(), %err, "清理 Forge 安装临时目录失败");
-        }
-
-        Ok((
-            embedded,
-            ForgeSummary {
-                id: version_id,
-                libraries,
-                processors: ran,
-            },
-        ))
+        Ok(ran)
     }
 
     /// 组装处理器占位符表。
@@ -778,6 +779,24 @@ async fn extract_zip_entry_to_async(archive: &Path, entry: &str, dest: &Path) ->
     Ok(())
 }
 
+/// 解析 Maven 旁的 `.sha1` 文件：取第一段，必须是 40 位十六进制。
+fn parse_sha1_file(bytes: Vec<u8>) -> Result<String> {
+    let text = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
+        reason: format!("installer 的 .sha1 不是文本: {err}"),
+    })?;
+    let sha1 = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if sha1.len() != 40 || !sha1.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Error::UnsupportedInstallProfile {
+            reason: format!("installer 的 .sha1 内容不是 sha1：{text}"),
+        });
+    }
+    Ok(sha1)
+}
+
 /// 库条目声明了下载件、地址却留空：这类库由 installer 自带。
 fn is_bundled(lib: &aurora_version::Library) -> bool {
     lib.downloads
@@ -790,6 +809,10 @@ fn is_bundled(lib: &aurora_version::Library) -> bool {
 ///
 /// 盘上已有且 sha1 对得上的不再重写：同一 Forge 版本的另一个实例可能正在运行，Windows 上覆盖
 /// 一个被占用的 jar 会失败。
+///
+/// 地址留空的库不一定在 installer 里：1.20.4 起 version.json 把处理器才生成的 `:client` jar 也列了
+/// 进来。这里只解 installer 里有的，其余留给处理器（官方 installer 也是这样处理），处理器没生成出来
+/// 时由补全报 [`Error::LoaderLibraryMissing`]。
 async fn extract_bundled_libraries(
     installer: &Path,
     libraries: &[aurora_version::Library],
@@ -814,7 +837,11 @@ async fn extract_bundled_libraries(
         if file_matches_sha1(&dest, &artifact.sha1).await? {
             continue;
         }
-        let bytes = read_zip_entry_async(installer, &format!("maven/{rel}")).await?;
+        let bytes = match read_zip_entry_async(installer, &format!("maven/{rel}")).await {
+            Ok(bytes) => bytes,
+            Err(Error::InstallerEntryMissing { .. }) => continue,
+            Err(err) => return Err(err),
+        };
         if !artifact.sha1.is_empty() {
             let mut hasher = aurora_base::fs::Sha1Hasher::new();
             hasher.update(&bytes);
@@ -1567,6 +1594,50 @@ mod tests {
             .unwrap();
     }
 
+    /// 第一个源的 `.sha1` 是错误页：换下一个源取到校验值，缓存里的 installer 照样复用，不重下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_garbled_sha1_page_moves_on_to_the_next_source() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let installer = legacy_installer_bytes();
+        Mock::given(method("GET"))
+            .and(path("/forge-installer.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(installer.clone()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/garbled"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>维护中</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/clean"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sha1_hex(&installer)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let f = fixture();
+        let cache = f
+            .root
+            .join(concat!(".", aurora_base::app_slug!(), "-cache"));
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("forge-installer.jar"), &installer).unwrap();
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        ForgeInstaller::new(cx, "java")
+            .with_sources(crate::net::tests::plan_between(
+                &server, "/garbled", "/clean",
+            ))
+            .install_for_instance(&format!("{}/forge-installer.jar", server.uri()), "x")
+            .await
+            .unwrap();
+    }
+
     /// 另一个 Forge 安装正在进行时，新的安装原地等着、不碰共享的 installer 缓存与库；前一个结束后
     /// 它照常装完。等待中取消立刻以已取消返回。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1707,6 +1778,59 @@ mod tests {
         assert_eq!(
             std::fs::read(f.layout.library_path(shim_path)).unwrap(),
             shim
+        );
+    }
+
+    /// 1.20.4 起 version.json 把补丁后的 `:client` jar 也列成地址留空的库，installer 的 `maven/` 下
+    /// 却没有它：它要等处理器生成。解库这一步不能因此报条目缺失，那样这些版本一次都装不上；
+    /// 处理器没生成出来时由随后的补全报加载器自带库缺失。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_library_left_for_the_processors_is_not_required_in_the_installer() {
+        let patched: &[u8] = b"patched-client";
+        let patched_path =
+            "net/minecraftforge/forge/1.21.1-52.0.30/forge-1.21.1-52.0.30-client.jar";
+        let library = serde_json::json!({
+            "name": "net.minecraftforge:forge:1.21.1-52.0.30:client",
+            "downloads": {"artifact": {
+                "path": patched_path, "url": "",
+                "sha1": sha1_hex(patched), "size": patched.len()
+            }}
+        });
+        let profile = serde_json::json!({
+            "spec": 1,
+            "version": "1.21.1-forge-52.0.30",
+            "minecraft": "1.21.1",
+            "json": "/version.json",
+            "data": {},
+            "processors": [],
+            "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "1.21.1-forge-52.0.30",
+            "inheritsFrom": "1.21.1",
+            "mainClass": "net.minecraftforge.bootstrap.ForgeBootstrap",
+            "libraries": [library]
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let summary = ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.id, "1.21.1-forge-52.0.30");
+        assert_eq!(summary.libraries, 0, "这个库没有地址，不进下载批次");
+        assert!(
+            !f.layout.library_path(patched_path).exists(),
+            "它只能由处理器生成，解库这一步什么都不写"
         );
     }
 
@@ -2278,6 +2402,46 @@ mod tests {
         );
         assert_eq!(std::fs::read(library(&f, OUT_A)).unwrap(), a);
         assert!(!library(&f, OUT_B).exists(), "对不上的旧产物应在重跑前删掉");
+    }
+
+    /// 从 installer 解出的补丁包有几 MB，只给处理器读：处理器失败时也要清掉，不留在版本目录里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_scratch_dir_is_removed_when_a_processor_fails() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let profile = serde_json::json!({
+            "version": "1.20.1-forge-47.2.0",
+            "minecraft": "1.20.1",
+            "json": "/version.json",
+            "data": {"BINPATCH": {"client": "/data/client.lzma", "server": "/data/server.lzma"}},
+            "processors": [{"jar": PROCESSOR_JAR, "classpath": [], "args": ["{BINPATCH}"]}],
+            "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "1.20.1-forge-47.2.0", "inheritsFrom": "1.20.1", "libraries": []
+        });
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+                ("data/client.lzma", b"patches"),
+            ],
+        );
+        let java = fake_java(&f.root, "out", "err", 3);
+
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::ProcessorFailed { .. }),
+            "实际：{err:?}"
+        );
+        let scratch = f.layout.version_dir("1.20.1-forge-47.2.0").join(concat!(
+            ".",
+            aurora_base::app_slug!(),
+            "-forge-tmp"
+        ));
+        assert!(!scratch.exists(), "临时目录应被清掉：{}", scratch.display());
     }
 
     /// 没有声明产物的处理器没有可比的东西，每次都执行（官方 installer 同样如此）。

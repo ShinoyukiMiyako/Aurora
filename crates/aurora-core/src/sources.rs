@@ -57,8 +57,10 @@ impl Aurora {
     }
 
     /// 该策略此刻的下载源方案（顺序同 [`source_order`](Self::source_order)，地址经门面的解析器改写）。
+    /// 元数据抓取不经下载引擎，方案上挂健康表，文件下载刚熔断的源在这里同样排到后面。
     pub(crate) fn source_plan(&self, policy: DownloadSourcePolicy) -> SourcePlan {
         SourcePlan::with_resolver(self.source_order(policy), self.source_resolver.clone())
+            .with_health(self.source_health().clone())
     }
 
     /// 该策略此刻排第一的源，给只认一个首选源、自己负责兜底的下层（如 Java 运行时安装器）。
@@ -346,6 +348,36 @@ pub(crate) mod tests {
         };
         assert_eq!(count(mirror.received_requests().await.unwrap()), 0);
         assert!(count(official.received_requests().await.unwrap()) >= 1);
+    }
+
+    /// 文件下载熔断了镜像后，元数据候选与 Java 清单候选也把它排到后面：线路黑洞时这里每个请求都要先耗掉
+    /// 几轮连接超时才换源。
+    #[test]
+    fn metadata_candidates_sink_a_tripped_source_too() {
+        const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+        const MIRROR: &str = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
+        let dir = PathBuf::from("/data");
+        let config = AuroraConfig {
+            download_source: DownloadSourcePolicy::MirrorFirst,
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::for_test(config, dir.clone(), dir.join(".minecraft"));
+        let java_candidates = || {
+            aurora
+                .java_installer(aurora_java::MOJANG_JAVA_RUNTIME_ALL)
+                .candidates(aurora_java::MOJANG_JAVA_RUNTIME_ALL)
+                .unwrap()
+        };
+        let plan = aurora.source_plan(DownloadSourcePolicy::MirrorFirst);
+        assert_eq!(plan.candidates(MANIFEST).unwrap()[0], MIRROR);
+        assert_ne!(java_candidates()[0], aurora_java::MOJANG_JAVA_RUNTIME_ALL);
+
+        for _ in 0..3 {
+            aurora.source_health().record_failure(MIRROR, true);
+        }
+
+        assert_eq!(plan.candidates(MANIFEST).unwrap()[0], MANIFEST);
+        assert_eq!(java_candidates()[0], aurora_java::MOJANG_JAVA_RUNTIME_ALL);
     }
 
     /// 快照与常驻门面共用同一张健康表：一个任务记下的熔断，别的任务装配的下载池也看得到。

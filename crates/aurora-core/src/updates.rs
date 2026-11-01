@@ -25,6 +25,7 @@ use aurora_modplatform::{
 use serde::Serialize;
 
 use crate::compat::{instance_mc_version, instance_mod_loaders};
+use crate::deps::project_gone;
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::ledger::{LedgerEntry, UpdateHold};
@@ -283,14 +284,28 @@ impl Aurora {
                 let mc_version = mc_version.clone();
                 let loaders = loaders.clone();
                 async move {
-                    let versions = aurora
+                    let listed = aurora
                         .list_mod_versions(
                             entry.platform,
                             &entry.project_id,
                             &[mc_version],
                             &loaders,
                         )
-                        .await?;
+                        .await;
+                    let versions = match listed {
+                        Ok(versions) => versions,
+                        // 工程下架后这一项没有更新可报，与 Modrinth 批量查询里查无此哈希是同一结果；
+                        // 让它报错的话，一个下架的 Mod 会连累整个实例查不了更新。
+                        Err(err) if project_gone(&err) => {
+                            tracing::info!(
+                                platform = entry.platform.display_name(),
+                                project_id = %entry.project_id,
+                                "工程在平台上已不存在，跳过这个 Mod 的更新检查"
+                            );
+                            return Ok(None);
+                        }
+                        Err(err) => return Err(err),
+                    };
                     Ok(
                         pick_update(&versions, &entry.version_id, entry.update_hold.as_ref()).map(
                             |latest| UpdateCandidate {
@@ -535,8 +550,8 @@ fn curseforge_ready(
 /// 从版本列表（已按发布时间倒序）里挑出该推给玩家的更新；没有返回 `None`。
 ///
 /// 候选必须同时满足：不是当前版本、通道被当前版本的通道放行、发布时间严格晚于当前版本、锁定了版本时
-/// 不晚于锁定版本。当前版本不在列表里（平台下架，或当初就装错了版本）时拿不到它的发布时间与通道，无从
-/// 证明「更新」，不猜；锁定的版本不在列表里同理，没有上限就不报，不当作没锁。
+/// 不晚于锁定版本。当前版本不在列表里（平台下架，或当初就装错了版本）或没有发布时间时无从证明「更新」，
+/// 不猜；锁定的版本不在列表里同理，没有上限就不报，不当作没锁。
 pub(crate) fn pick_update<'a>(
     versions: &'a [ModVersionInfo],
     current_version_id: &str,
@@ -555,7 +570,8 @@ pub(crate) fn pick_update<'a>(
     };
     let current = versions
         .iter()
-        .find(|v| v.version_id == current_version_id)?;
+        .find(|v| v.version_id == current_version_id)
+        .filter(|v| !v.date_published.is_empty())?;
     versions.iter().find(|candidate| {
         candidate.version_id != current.version_id
             && current.release_channel.admits(candidate.release_channel)
@@ -1288,6 +1304,69 @@ mod tests {
         assert_eq!(found[0].title.as_deref(), Some("JEI"));
     }
 
+    /// 走版本列表的工程在平台上没了（CurseForge 来源、锁定了版本的 Modrinth 来源）：这一项没有更新可报，
+    /// 别的 Mod 查到的更新照常给出。一个下架的 Mod 不能让整个实例查不了更新。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delisted_project_only_drops_its_own_update() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/gone/version"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let aurora = mixed_platform_instance(tmp.path(), &server)
+            .await
+            .with_curseforge_key("test-key");
+        put_mod(tmp.path(), "1.20.1-fabric", "gone.jar", b"gone-payload").await;
+        let store = aurora.ledger_store("1.20.1-fabric");
+        let mut ledger = store.load().await.unwrap();
+        ledger.upsert(LedgerEntry {
+            update_hold: Some(UpdateHold::Pinned {
+                version_id: "v2".to_owned(),
+            }),
+            ..ledger_entry("gone.jar", "gone", "v1", Some("aa"))
+        });
+        store.save(&ledger).await.unwrap();
+
+        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+
+        let names: Vec<&str> = found.iter().map(|c| c.file_name.as_str()).collect();
+        assert_eq!(names, vec!["sodium-0.5.3.jar"]);
+        assert_eq!(found[0].latest.version_id, "new2");
+    }
+
+    /// 版本列表别的失败不是「工程没了」：照常冒泡，不能把查不到说成没有更新。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn listing_failure_other_than_404_still_fails_the_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let aurora = mixed_platform_instance(tmp.path(), &server)
+            .await
+            .with_curseforge_key("test-key");
+
+        let err = aurora.check_updates("1.20.1-fabric").await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 403, .. })
+            ),
+            "实得 {err:?}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn check_updates_on_uninstalled_version_errors() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1348,6 +1427,9 @@ mod tests {
         let undated = cf_version("200", "");
         assert_eq!(picked(&[undated, current], "100", None), None);
         assert_eq!(picked(&[], "100", None), None);
+        // 当前版本缺发布时间（CurseForge 的 fileDate 可缺）：什么都比空串大，放过去就可能是一次降级。
+        let current_undated = cf_version("100", "");
+        assert_eq!(picked(&[newest, current_undated], "100", None), None);
     }
 
     #[test]

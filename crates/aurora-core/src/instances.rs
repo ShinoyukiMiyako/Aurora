@@ -17,8 +17,8 @@ use aurora_instance::{
     AURORA_META_DIR, BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker,
     InstanceContent, MarkerStore, PinsViolation, VersionProbe, VersionScan, VersionSettings,
     VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_worlds,
-    dir_footprint, discover_versions, is_safe_instance_id, list_version_dirs, list_worlds,
-    probe_version, read_instance_content, resolve_isolation,
+    dir_footprint, discover_versions, is_backup_file_name, is_safe_instance_id, list_version_dirs,
+    list_worlds, probe_version, read_instance_content, resolve_isolation,
 };
 use aurora_launch::{QuickPlaySupport, quick_play_support};
 use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
@@ -249,8 +249,21 @@ impl Aurora {
             file_count,
             dependents: dependents_in(&scan, id),
             backups_dir: self.instance_backups_dir(id)?,
-            backup_count: self.instance_backup_count(id).await?,
+            backup_count: self.kept_backup_count(id).await?,
         })
+    }
+
+    /// 删除确认里要说的备份份数。备份不随实例删除，清单读不懂只影响这个数字：改数盘上的备份文件，
+    /// 否则确认框打不开，实例就删不掉了。
+    async fn kept_backup_count(&self, id: &str) -> Result<u32> {
+        match self.instance_backup_count(id).await {
+            Err(CoreError::Instance(InstanceError::BackupIndexInvalid { path, reason })) => {
+                tracing::warn!(id, path = %path.display(), reason, "备份清单读不懂，删除预览改数盘上的备份文件");
+                let dir = self.instance_backups_dir(id)?;
+                tokio::task::spawn_blocking(move || count_backup_files(&dir)).await?
+            }
+            counted => counted,
+        }
     }
 
     /// 把实例目录交给 `disposer`（生产是系统回收站）。返回目录原先是否存在：不存在时什么都不做，
@@ -520,6 +533,26 @@ async fn summarize(
     })
 }
 
+/// 实例备份目录下各存档里的备份文件数，按文件名认，不读清单。
+fn count_backup_files(instance_dir: &Path) -> Result<u32> {
+    let mut count = 0;
+    for world in std::fs::read_dir(instance_dir).map_err(|source| io_error(instance_dir, source))? {
+        let world = world
+            .map_err(|source| io_error(instance_dir, source))?
+            .path();
+        if !world.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(&world).map_err(|source| io_error(&world, source))? {
+            let file = file.map_err(|source| io_error(&world, source))?;
+            if file.file_name().to_str().is_some_and(is_backup_file_name) {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
 fn unix_millis(time: SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -645,11 +678,19 @@ impl Aurora {
     }
 }
 
-/// 经 `inheritsFrom` 直接依赖 `id` 的实例。
+/// 经 `inheritsFrom` 直接依赖 `id` 的实例。不分大小写，与实例锁、[`Aurora::inheritance_chain`] 判环和 Windows 的
+/// 目录名同一口径：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样靠这个目录运行。
 fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
+    let key = id.to_lowercase();
     scan.versions
         .iter()
-        .filter(|v| v.id != id && v.json.inherits_from.as_deref() == Some(id))
+        .filter(|v| {
+            v.id.to_lowercase() != key
+                && v.json
+                    .inherits_from
+                    .as_deref()
+                    .is_some_and(|parent| parent.to_lowercase() == key)
+        })
         .map(|v| v.id.clone())
         .collect()
 }
@@ -1433,6 +1474,66 @@ pub(crate) mod tests {
         );
         assert!(dir.join("a.json").is_file(), "失败后目录与 JSON 应还原");
         assert!(!aurora.game_dir().join("versions").join("c").exists());
+    }
+
+    /// 继承链、实例锁与 Windows 的目录名都不分大小写：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样
+    /// 靠这个目录运行，删除与改名不能放行。
+    #[tokio::test]
+    async fn dependents_are_found_regardless_of_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        let base = write_version(&game, "Vanilla-1.21", &vanilla_json("Vanilla-1.21"));
+        write_version(&game, "fab", &fabric_json("fab", "vanilla-1.21"));
+
+        let preview = aurora.deletion_preview("Vanilla-1.21").await.unwrap();
+        assert_eq!(preview.dependents, vec!["fab".to_owned()]);
+        for err in [
+            aurora
+                .delete_instance_files("Vanilla-1.21", RecordingDisposer::default())
+                .await
+                .unwrap_err(),
+            aurora
+                .rename_instance_files("Vanilla-1.21", "底座")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Instance(InstanceError::HasDependents { dependents, .. })
+                        if dependents == &["fab".to_owned()]
+                ),
+                "实际：{err:?}"
+            );
+        }
+        assert!(base.is_dir());
+    }
+
+    /// 备份清单坏了是备份自己的问题：删除预览照常给出，份数改数盘上的备份文件。否则确认框打不开，实例就删不掉了。
+    #[tokio::test]
+    async fn a_corrupt_backup_index_does_not_block_the_deletion_preview() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        write_version(aurora.game_dir(), "生存", &vanilla_json("生存"));
+        let world = aurora
+            .instance_backups_dir("生存")
+            .unwrap()
+            .join("新的世界");
+        std::fs::create_dir_all(&world).unwrap();
+        std::fs::write(world.join("index.json"), "{ broken").unwrap();
+        for name in [
+            "1761900000000-manual.zip",
+            "1761900000001-auto.zip",
+            "1761900000002-manual.zip.part",
+            "说明.txt",
+        ] {
+            std::fs::write(world.join(name), b"x").unwrap();
+        }
+
+        let preview = aurora.deletion_preview("生存").await.unwrap();
+        assert_eq!(preview.backup_count, 2);
+        assert_eq!(preview.backups_dir, world.parent().unwrap());
     }
 
     fn pinned(address: &str, instance: Option<&str>) -> crate::config::PinnedServer {

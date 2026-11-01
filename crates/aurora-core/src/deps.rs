@@ -15,6 +15,8 @@
 //! 三、实例里已经装着的前置（任何版本）不动，计划项标成已满足。作者没钉版本就是「有就行」，
 //! 启动器擅自把玩家现有的前置换成最新版，换来的可能是一个别的 Mod 不认的版本；要升级走更新检查。
 //! 装着的那一版在平台上已经下架也一样算已满足，计划只按卷宗列出它（[`PlannedItem::delisted`]）。
+//! 玩家给这个前置设了更新检查（忽略或锁定）时，作者钉了版本也不换，计划如实说明：更新不走确认计划，
+//! 换了玩家都不知道，他的设置就成了摆设。
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -27,7 +29,7 @@ use crate::compat::{
 };
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
-use crate::ledger::{Ledger, LedgerEntry};
+use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
 use crate::modfs::present;
 use crate::modversions::sort_by_published_desc;
 
@@ -84,6 +86,13 @@ enum SkipNote {
     NoCompatibleVersion {
         project_id: String,
     },
+    ProjectGone {
+        project_id: String,
+    },
+    HeldBack {
+        project_id: String,
+        file_name: String,
+    },
     Optional {
         project_id: Option<String>,
     },
@@ -105,7 +114,9 @@ impl SkipNote {
         match self {
             SkipNote::MissingProjectId { .. } => None,
             SkipNote::PinnedGone { project_id, .. }
-            | SkipNote::NoCompatibleVersion { project_id } => Some(project_id),
+            | SkipNote::NoCompatibleVersion { project_id }
+            | SkipNote::ProjectGone { project_id }
+            | SkipNote::HeldBack { project_id, .. } => Some(project_id),
             SkipNote::Optional { project_id }
             | SkipNote::Incompatible { project_id, .. }
             | SkipNote::Embedded { project_id, .. }
@@ -118,21 +129,32 @@ impl SkipNote {
     fn render(&self, name: impl Fn(Option<&str>) -> String) -> String {
         match self {
             SkipNote::MissingProjectId { file_name } => {
-                format!("{file_name} 的一条必需依赖没有给出工程标识，无法自动解析")
+                format!("{file_name} 的一条必需前置没有给出工程标识，无法自动解析")
             }
             SkipNote::PinnedGone {
                 project_id,
                 version_id,
             } => format!(
-                "依赖 {} 指定的版本 {version_id} 在平台上已不存在，未加入计划",
+                "前置 {} 指定的版本 {version_id} 在平台上已不存在，未加入计划",
                 name(Some(project_id))
             ),
             SkipNote::NoCompatibleVersion { project_id } => format!(
-                "依赖 {} 没有适配该实例的版本，未加入计划",
+                "前置 {} 没有适配该实例的版本，未加入计划",
+                name(Some(project_id))
+            ),
+            SkipNote::ProjectGone { project_id } => format!(
+                "前置 {} 在平台上已不存在，未加入计划",
+                name(Some(project_id))
+            ),
+            SkipNote::HeldBack {
+                project_id,
+                file_name,
+            } => format!(
+                "前置 {} 按你的更新设置保留现有版本，未换成 {file_name} 指定的版本",
                 name(Some(project_id))
             ),
             SkipNote::Optional { project_id } => format!(
-                "可选依赖 {} 未自动安装，需要时请手动添加",
+                "可选前置 {} 未自动安装，需要时请手动添加",
                 name(project_id.as_deref())
             ),
             SkipNote::Incompatible {
@@ -146,7 +168,7 @@ impl SkipNote {
                 file_name,
                 project_id,
             } => format!(
-                "内嵌依赖 {} 已打包在 {file_name} 内，无需单独安装",
+                "内嵌前置 {} 已打包在 {file_name} 内，无需单独安装",
                 name(project_id.as_deref())
             ),
             SkipNote::Tool { project_id } => {
@@ -227,7 +249,7 @@ impl Aurora {
     /// 的环（两个 Mod 互相集成时很常见），不去重会直接死循环。同一工程被多个父项要求时也只进计划一次。
     ///
     /// 网络故障与平台报错照常冒泡：那是「查不到」而非「没有」，把它压成一条 skipped 说明会让玩家以为
-    /// 依赖真的不存在。
+    /// 依赖真的不存在。平台明确回了「没有这个工程」才算没有（见 [`project_gone`]）。
     pub async fn plan_install(
         &self,
         version_id: &str,
@@ -277,11 +299,22 @@ impl Aurora {
                         if !visited.insert(dep_project.clone()) {
                             continue;
                         }
+                        let mut author_pin = dep.version_id.as_deref();
+                        if let Some(wanted) = author_pin
+                            && held_back(&ledger, &dirs.mods_dir, platform, &dep_project, wanted)
+                                .await?
+                        {
+                            notes.push(SkipNote::HeldBack {
+                                project_id: dep_project.clone(),
+                                file_name: version.file_name.clone(),
+                            });
+                            author_pin = None;
+                        }
                         match self
                             .resolve_required(
                                 platform,
                                 &dep_project,
-                                dep.version_id.as_deref(),
+                                author_pin,
                                 &facts,
                                 &ledger,
                                 &dirs.mods_dir,
@@ -347,7 +380,7 @@ impl Aurora {
             Some(id) => infos
                 .get(id)
                 .map_or_else(|| id.to_owned(), |info| info.title.clone()),
-            None => "未标明工程的依赖项".to_owned(),
+            None => "未标明工程的前置".to_owned(),
         };
         let skipped = notes.iter().map(|note| note.render(name)).collect();
         Ok(InstallPlan { items, skipped })
@@ -412,9 +445,18 @@ impl Aurora {
         // 文件更多的前置不带条件查会被截断，截掉的部分可能正好有唯一适配本实例的文件，结果是「明明有版本
         // 却报没有适配版本」；带上条件，平台先筛过再分页。缓存里有完整的不过滤列表时由它本地代答。
         let game_versions: Vec<String> = facts.mc_version.clone().into_iter().collect();
-        let candidates = self
+        let listed = self
             .list_mod_versions(platform, dep_project, &game_versions, &facts.mod_loaders)
-            .await?;
+            .await;
+        let candidates = match listed {
+            Ok(candidates) => candidates,
+            Err(err) if project_gone(&err) => {
+                return Ok(Resolved::Skipped(SkipNote::ProjectGone {
+                    project_id: dep_project.to_owned(),
+                }));
+            }
+            Err(err) => return Err(err),
+        };
         Ok(match pick_latest_compatible(candidates, facts) {
             Some(chosen) => Resolved::Chosen(Box::new(chosen), false),
             None => Resolved::Skipped(SkipNote::NoCompatibleVersion {
@@ -424,19 +466,39 @@ impl Aurora {
     }
 }
 
+/// 这个错误说的是不是工程在平台上已经没有了。
+///
+/// 版本列表端点对没有的工程回 404，id 不成形的 CurseForge 工程在触网前就判为未找到。断网、限流、5xx
+/// 是「查不到」而不是「没有」，不算在内。
+pub(crate) fn project_gone(err: &CoreError) -> bool {
+    matches!(
+        err,
+        CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 404, .. })
+            | CoreError::ModVersionNotFound { .. }
+    )
+}
+
 /// 从候选里挑该实例可用的最新版本。
 ///
 /// 显式再排一次而不是依赖上游返回顺序：择优的全部意义就是「最新」，这条前提不该跨模块靠约定维持。
 /// 判定不为 Mismatch 即可用——[`Compatibility::Unknown`]（平台没给元数据）按放行处理，与落位层的
-/// 软提示口径一致。
+/// 软提示口径一致。通道从最稳定的挑起，与更新检查、开局 Mod 同一条底线：玩家没选过测试版，不能因为
+/// 它是某个 Mod 的前置就带进来。
 fn pick_latest_compatible(
     mut candidates: Vec<ModVersionInfo>,
     facts: &InstanceFacts,
 ) -> Option<ModVersionInfo> {
     sort_by_published_desc(&mut candidates);
-    candidates
-        .into_iter()
-        .find(|version| !matches!(judge(version, facts), Compatibility::Mismatch { .. }))
+    candidates.retain(|version| !matches!(judge(version, facts), Compatibility::Mismatch { .. }));
+    let best = ReleaseChannel::Alpha
+        .admitted()
+        .iter()
+        .find_map(|channel| {
+            candidates
+                .iter()
+                .position(|version| version.release_channel == *channel)
+        })?;
+    Some(candidates.swap_remove(best))
 }
 
 /// 按实例事实判定某版本是否可用。MC 版本识别不出时交 `None` 给 [`classify`]：只判加载器，落在
@@ -482,6 +544,27 @@ async fn installed_version<'a>(
         }
     }
     Ok(None)
+}
+
+/// 实例里装着这个工程，玩家设了更新检查，而作者要的 `wanted` 不在他允许的范围内。
+///
+/// 锁定的上限要比发布时间才知道谁先谁后，这里为此多问一次平台不值：只放行锁定的那一版。
+async fn held_back(
+    ledger: &Ledger,
+    mods_dir: &Path,
+    platform: Platform,
+    project_id: &str,
+    wanted: &str,
+) -> Result<bool> {
+    let Some(entry) = installed_version(ledger, mods_dir, platform, project_id, None).await? else {
+        return Ok(false);
+    };
+    Ok(entry.version_id != wanted
+        && match &entry.update_hold {
+            None => false,
+            Some(UpdateHold::Ignored) => true,
+            Some(UpdateHold::Pinned { version_id }) => version_id != wanted,
+        })
 }
 
 #[cfg(test)]
@@ -618,7 +701,7 @@ mod tests {
                     delisted: false,
                 },
             ],
-            skipped: vec!["可选依赖 Mod Menu 未自动安装，需要时请手动添加".to_owned()],
+            skipped: vec!["可选前置 Mod Menu 未自动安装，需要时请手动添加".to_owned()],
         };
 
         let json = serde_json::to_value(&plan).unwrap();
@@ -635,7 +718,7 @@ mod tests {
         assert_eq!(json["items"][1]["title"], serde_json::Value::Null);
         assert_eq!(
             json["skipped"][0],
-            "可选依赖 Mod Menu 未自动安装，需要时请手动添加"
+            "可选前置 Mod Menu 未自动安装，需要时请手动添加"
         );
     }
 
@@ -657,14 +740,14 @@ mod tests {
             HashMap::from([("modmenu".to_owned(), "Mod Menu".to_owned())]);
         let name = |id: Option<&str>| match id {
             Some(id) => titles.get(id).cloned().unwrap_or_else(|| id.to_owned()),
-            None => "未标明工程的依赖项".to_owned(),
+            None => "未标明工程的前置".to_owned(),
         };
         assert_eq!(
             SkipNote::Optional {
                 project_id: Some("modmenu".to_owned())
             }
             .render(name),
-            "可选依赖 Mod Menu 未自动安装，需要时请手动添加"
+            "可选前置 Mod Menu 未自动安装，需要时请手动添加"
         );
         assert_eq!(
             SkipNote::Tool {
@@ -679,7 +762,7 @@ mod tests {
                 project_id: None
             }
             .render(name),
-            "内嵌依赖 未标明工程的依赖项 已打包在 a.jar 内，无需单独安装"
+            "内嵌前置 未标明工程的前置 已打包在 a.jar 内，无需单独安装"
         );
     }
 
@@ -892,9 +975,9 @@ mod tests {
         assert_eq!(
             plan.skipped,
             vec![
-                "可选依赖 Mod Menu 未自动安装，需要时请手动添加".to_owned(),
+                "可选前置 Mod Menu 未自动安装，需要时请手动添加".to_owned(),
                 "sodium-v1.jar 声明与 optifabric 不兼容，未做任何处理".to_owned(),
-                "内嵌依赖 cloth-config 已打包在 sodium-v1.jar 内，无需单独安装".to_owned(),
+                "内嵌前置 cloth-config 已打包在 sodium-v1.jar 内，无需单独安装".to_owned(),
             ]
         );
     }
@@ -953,7 +1036,7 @@ mod tests {
         assert_eq!(plan.items[0].version.version_id, "v1");
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
+            vec!["前置 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
         );
     }
 
@@ -1047,7 +1130,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 指定的版本 gone 在平台上已不存在，未加入计划".to_owned()]
+            vec!["前置 fabric-api 指定的版本 gone 在平台上已不存在，未加入计划".to_owned()]
         );
     }
 
@@ -1081,7 +1164,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["sodium-v1.jar 的一条必需依赖没有给出工程标识，无法自动解析".to_owned()]
+            vec!["sodium-v1.jar 的一条必需前置没有给出工程标识，无法自动解析".to_owned()]
         );
     }
 
@@ -1220,6 +1303,194 @@ mod tests {
         assert_eq!(plan.items.len(), 2);
         assert_eq!(plan.items[1].version.version_id, "old");
         assert!(plan.items[1].already_satisfied);
+    }
+
+    /// 必需前置的工程在平台上没了、实例里也没装：记一条说明，主 Mod 照常进计划。这与「没有适配版本」
+    /// 同属决策二，让整份计划失败等于连主 Mod 的更新也做不了。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn required_dependency_whose_project_is_gone_is_skipped() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"gone-lib","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/project/gone-lib/version"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].version.version_id, "v1");
+        assert_eq!(
+            plan.skipped,
+            vec!["前置 gone-lib 在平台上已不存在，未加入计划".to_owned()]
+        );
+    }
+
+    /// 前置版本列表的别的失败是「查不到」：照常冒泡，不说成工程没了。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dependency_listing_failure_other_than_404_bubbles() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"flaky-lib","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/project/flaky-lib/version"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let err = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 403, .. })
+            ),
+            "实得 {err:?}"
+        );
+    }
+
+    /// 作者钉了 `fabric-api` 的版本 pinned，而实例里装着 current 且设了 `hold`：落一份这样的实例，
+    /// 返回算出的计划。
+    async fn plan_with_held_dependency(hold: UpdateHold) -> InstallPlan {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","version_id":"pinned","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        mount_versions(
+            &server,
+            "fabric-api",
+            &[
+                modrinth_version(
+                    "pinned",
+                    "fabric-api",
+                    "2026-06-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["fabric"],
+                    "",
+                ),
+                modrinth_version(
+                    "current",
+                    "fabric-api",
+                    "2026-01-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["fabric"],
+                    "",
+                ),
+            ],
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut kept = entry("fabric-api-current.jar", "fabric-api", "current");
+        kept.update_hold = Some(hold);
+        let mut ledger = Ledger::default();
+        ledger.upsert(kept);
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("fabric-api-current.jar"), b"jar")
+            .await
+            .unwrap();
+
+        aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap()
+    }
+
+    /// 玩家忽略了这个前置的更新：作者钉的版本不替他换，保留现有版本并说明。更新不走确认计划，换了
+    /// 他都不知道。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ignored_dependency_keeps_its_version_against_an_author_pin() {
+        let plan = plan_with_held_dependency(UpdateHold::Ignored).await;
+
+        assert_eq!(plan.items.len(), 2);
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "current");
+        assert!(dep.already_satisfied);
+        assert!(!dep.delisted);
+        assert_eq!(
+            plan.skipped,
+            vec![
+                "前置 fabric-api 按你的更新设置保留现有版本，未换成 sodium-v1.jar 指定的版本"
+                    .to_owned()
+            ]
+        );
+    }
+
+    /// 玩家锁定的上限不是作者钉的那一版：同样不替他换。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn locked_dependency_keeps_its_version_unless_the_pin_matches() {
+        let plan = plan_with_held_dependency(UpdateHold::Pinned {
+            version_id: "current".to_owned(),
+        })
+        .await;
+        assert_eq!(plan.items[1].version.version_id, "current");
+        assert!(plan.items[1].already_satisfied);
+        assert_eq!(plan.skipped.len(), 1);
+
+        // 锁定的正是作者要的版本：这次替换在玩家允许的范围内，照常进计划。
+        let plan = plan_with_held_dependency(UpdateHold::Pinned {
+            version_id: "pinned".to_owned(),
+        })
+        .await;
+        assert_eq!(plan.items[1].version.version_id, "pinned");
+        assert!(!plan.items[1].already_satisfied);
+        assert!(plan.skipped.is_empty());
     }
 
     /// 前置已装着的那一版在平台上已下架（单版本端点 404）：照常算已满足，计划只按卷宗列出它，不去
@@ -1451,7 +1722,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 指定的版本 pinned 在平台上已不存在，未加入计划".to_owned()]
+            vec!["前置 fabric-api 指定的版本 pinned 在平台上已不存在，未加入计划".to_owned()]
         );
     }
 
@@ -1686,7 +1957,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
+            vec!["前置 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
         );
     }
 
@@ -1866,5 +2137,52 @@ mod tests {
 
         assert!(pick_latest_compatible(vec![incompatible], &facts).is_none());
         assert!(pick_latest_compatible(Vec::new(), &facts).is_none());
+    }
+
+    /// 新装的前置与更新检查同一条底线：有正式版就不把测试版带进来，没有才退到测试版、内测版。
+    #[test]
+    fn pick_latest_compatible_prefers_the_most_stable_channel() {
+        let facts = InstanceFacts {
+            mc_version: Some("1.20.1".to_owned()),
+            loaders: vec!["fabric".to_owned()],
+            mod_loaders: vec![ModLoader::Fabric],
+        };
+        let build = |id: &str, channel: ReleaseChannel, date: &str| {
+            let mut item = version("fabric-api", id);
+            item.loaders = vec![ModLoader::Fabric];
+            item.release_channel = channel;
+            item.date_published = date.to_owned();
+            item
+        };
+        let alpha = build("alpha", ReleaseChannel::Alpha, "2026-09-01T00:00:00Z");
+        let beta = build("beta", ReleaseChannel::Beta, "2026-06-01T00:00:00Z");
+        let old_release = build("r1", ReleaseChannel::Release, "2025-01-01T00:00:00Z");
+        let new_release = build("r2", ReleaseChannel::Release, "2026-01-01T00:00:00Z");
+
+        let id = |list: Vec<ModVersionInfo>| {
+            pick_latest_compatible(list, &facts).map(|picked| picked.version_id)
+        };
+        assert_eq!(
+            id(vec![
+                alpha.clone(),
+                old_release,
+                beta.clone(),
+                new_release.clone()
+            ])
+            .as_deref(),
+            Some("r2")
+        );
+        assert_eq!(
+            id(vec![alpha.clone(), beta]).as_deref(),
+            Some("beta"),
+            "没有正式版时取测试版，不取更新的内测版"
+        );
+        assert_eq!(id(vec![alpha]).as_deref(), Some("alpha"));
+
+        // 正式版不适配这个实例时不算数，退到适配的测试版。
+        let mut wrong_loader = new_release;
+        wrong_loader.loaders = vec![ModLoader::Forge];
+        let beta = build("beta", ReleaseChannel::Beta, "2026-06-01T00:00:00Z");
+        assert_eq!(id(vec![wrong_loader, beta]).as_deref(), Some("beta"));
     }
 }

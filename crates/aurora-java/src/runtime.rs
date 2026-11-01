@@ -13,11 +13,12 @@
 //! 再取一次。清单是装运行时的第一步，单源抓取会让官方源一抽风整个 Java 安装就失败，而运行时
 //! 文件本身早已有换源兜底。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
 use aurora_base::mirror::{self, MirrorSource};
 use aurora_base::retry::{RetryPolicy, retry_async};
 use serde::Deserialize;
@@ -200,6 +201,9 @@ pub struct InstalledRuntime {
 pub type SourceRewriter =
     Arc<dyn Fn(&str, MirrorSource) -> aurora_base::Result<String> + Send + Sync>;
 
+/// 候选地址展开后的再排序，见 [`JavaRuntimeInstaller::with_candidate_order`]。
+pub type CandidateOrder = Arc<dyn Fn(Vec<String>) -> Vec<String> + Send + Sync>;
+
 /// Mojang Java 运行时安装器。
 ///
 /// 持有注入的 HTTP 客户端、清单地址、源顺序、地址改写与重试策略。清单地址与改写都可注入，
@@ -210,6 +214,7 @@ pub struct JavaRuntimeInstaller {
     manifest_url: String,
     sources: Vec<MirrorSource>,
     rewriter: SourceRewriter,
+    candidate_order: Option<CandidateOrder>,
     policy: RetryPolicy,
     cancel: Option<CancellationToken>,
 }
@@ -222,6 +227,7 @@ impl JavaRuntimeInstaller {
             manifest_url: MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             sources: vec![MirrorSource::Official, MirrorSource::BmclApi],
             rewriter: Arc::new(mirror::rewrite),
+            candidate_order: None,
             policy: RetryPolicy::default(),
             cancel: None,
         }
@@ -252,6 +258,12 @@ impl JavaRuntimeInstaller {
     /// 覆盖地址改写（测试把官方源与镜像钉到不同的本地 mock）。
     pub fn with_rewriter(mut self, rewriter: SourceRewriter) -> Self {
         self.rewriter = rewriter;
+        self
+    }
+
+    /// 候选地址展开后再排一次序。aurora-java 不依赖下载引擎，门面经它把源健康表接进来，冷却中的主机排到后面。
+    pub fn with_candidate_order(mut self, order: CandidateOrder) -> Self {
+        self.candidate_order = Some(order);
         self
     }
 
@@ -323,7 +335,7 @@ impl JavaRuntimeInstaller {
     }
 
     /// 按源顺序把官方地址展开成候选请求地址，去重保序：改写结果相同的源（地址不在镜像表里）只试一次。
-    fn candidates(&self, url: &str) -> Result<Vec<String>> {
+    pub fn candidates(&self, url: &str) -> Result<Vec<String>> {
         let mut out: Vec<String> = Vec::with_capacity(self.sources.len());
         for &source in &self.sources {
             let resolved = (self.rewriter)(url, source)?;
@@ -331,7 +343,10 @@ impl JavaRuntimeInstaller {
                 out.push(resolved);
             }
         }
-        Ok(out)
+        Ok(match &self.candidate_order {
+            Some(order) => order(out),
+            None => out,
+        })
     }
 
     /// 逐个候选执行 `fetch`，返回第一个成功的结果。
@@ -391,11 +406,7 @@ impl JavaRuntimeInstaller {
                 url: url.to_owned(),
                 source,
             })?;
-            let bytes = resp.bytes().await.map_err(|source| Error::Http {
-                url: url.to_owned(),
-                source,
-            })?;
-            Ok::<Vec<u8>, Error>(bytes.to_vec())
+            read_metadata_body(resp, url).await
         });
         self.until_cancelled(fetch).await
     }
@@ -412,19 +423,29 @@ impl JavaRuntimeInstaller {
                 url: url.to_owned(),
                 source,
             })?;
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|source| Error::Http {
-                    url: url.to_owned(),
-                    source,
-                })?
-                .to_vec();
+            let bytes = read_metadata_body(resp, url).await?;
             verify_bytes_sha1(&bytes, expected_sha1)?;
             Ok::<Vec<u8>, Error>(bytes)
         });
         self.until_cancelled(fetch).await
     }
+}
+
+/// 读完清单的响应体，超过元数据上限报 [`Error::ResponseTooLarge`]。
+async fn read_metadata_body(resp: reqwest::Response, url: &str) -> Result<Vec<u8>> {
+    read_body_capped(resp, METADATA_MAX_BYTES)
+        .await
+        .map_err(|err| match err {
+            BodyReadError::TooLarge { size, limit } => Error::ResponseTooLarge {
+                url: url.to_owned(),
+                size,
+                limit,
+            },
+            BodyReadError::Transport(source) => Error::Http {
+                url: url.to_owned(),
+                source,
+            },
+        })
 }
 
 /// 当前平台的运行时清单键。以 `windows-x64` 为主目标，其余平台尽力而为映射。
@@ -486,8 +507,15 @@ fn build_plan(
         directories: Vec::new(),
         links: Vec::new(),
     };
+    let links: BTreeSet<&str> = files
+        .files
+        .iter()
+        .filter(|(_, entry)| matches!(entry, FileEntry::Link { .. }))
+        .map(|(rel, _)| rel.as_str())
+        .collect();
     for (rel, entry) in &files.files {
         let path = install_dir.join(rel_to_path(rel)?);
+        check_not_under_link(rel, &links)?;
         match entry {
             FileEntry::Directory => plan.directories.push(path),
             FileEntry::File {
@@ -501,7 +529,7 @@ fn build_plan(
                 executable: *executable,
             }),
             FileEntry::Link { target } => {
-                check_link_target(rel, target)?;
+                check_link_target(rel, target, &links)?;
                 plan.links.push(RuntimeLink {
                     path,
                     target: target.clone(),
@@ -565,9 +593,28 @@ fn unsafe_reason(rel: &str) -> Option<&'static str> {
     })
 }
 
+/// 清单条目不能放在另一条链接底下：`up -> ..` 之后的 `up/x.dll`，路径逐段看都在目录里，写入时却跟着
+/// 链接走到了别处。真实清单（全部 mac、linux 组件）没有这种写法。
+fn check_not_under_link(rel: &str, links: &BTreeSet<&str>) -> Result<()> {
+    let under_link = rel
+        .match_indices('/')
+        .any(|(end, _)| links.contains(&rel[..end]));
+    if under_link {
+        return Err(Error::UnsafeRuntimePath {
+            path: rel.to_owned(),
+            reason: "穿过了清单里的符号链接",
+        });
+    }
+    Ok(())
+}
+
 /// 符号链接的目标相对链接所在目录解析（mac 运行时里 `../Home/lib/libjli.dylib` 这类），按段推演后不能
 /// 越过安装目录的根，也不能是绝对路径或带盘符、反斜杠。
-fn check_link_target(link: &str, target: &str) -> Result<()> {
+///
+/// 按段推演的前提是途中没有别的链接：走进一条链接后，再往下的落点取决于它指向哪里，所以目标中途穿过
+/// `links` 里的条目也算越界。目标最后一段正好是另一条链接没有问题，每条链接各自验过，串起来也出不了
+/// 目录。真实清单里的链接都不穿过别的链接。
+fn check_link_target(link: &str, target: &str, links: &BTreeSet<&str>) -> Result<()> {
     let escapes = || Error::UnsafeRuntimeLink {
         path: link.to_owned(),
         target: target.to_owned(),
@@ -575,13 +622,21 @@ fn check_link_target(link: &str, target: &str) -> Result<()> {
     if target.is_empty() || target.starts_with('/') || target.contains(['\\', ':']) {
         return Err(escapes());
     }
-    // 链接自身所在目录的深度：`a/b/link` 在第 2 层。
-    let mut depth = link.split('/').count() - 1;
-    for segment in target.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => depth = depth.checked_sub(1).ok_or_else(escapes)?,
-            _ => depth += 1,
+    // 从链接自身所在目录出发：`a/b/link` 从 `a/b` 开始走。
+    let mut at: Vec<&str> = link.split('/').collect();
+    at.pop();
+    let mut segments = target
+        .split('/')
+        .filter(|segment| !matches!(*segment, "" | "."))
+        .peekable();
+    while let Some(segment) = segments.next() {
+        if segment == ".." {
+            at.pop().ok_or_else(escapes)?;
+            continue;
+        }
+        at.push(segment);
+        if segments.peek().is_some() && links.contains(at.join("/").as_str()) {
+            return Err(escapes());
         }
     }
     Ok(())
@@ -715,6 +770,7 @@ fn symlink_impl(target: &str, link: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use sha1::{Digest, Sha1};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use wiremock::matchers::{method, path as match_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -1253,8 +1309,157 @@ mod tests {
                 },
             ]
         );
-        assert!(check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../..").is_ok());
-        assert!(check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../../..").is_err());
+        let no_links = BTreeSet::new();
+        assert!(
+            check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../..", &no_links).is_ok()
+        );
+        assert!(
+            check_link_target(
+                "jre.bundle/Contents/Home/lib/jli",
+                "../../../../..",
+                &no_links
+            )
+            .is_err()
+        );
+    }
+
+    fn plan_of(files: serde_json::Value) -> Result<RuntimePlan> {
+        let files: ComponentFiles =
+            serde_json::from_value(serde_json::json!({ "files": files })).unwrap();
+        let root = PathBuf::from("/rt");
+        build_plan(
+            "java-runtime-gamma",
+            JavaVersion::parse("17.0.8").unwrap(),
+            &root,
+            &files,
+            root.join("bin/java"),
+        )
+    }
+
+    /// 按段推演只在途中没有别的链接时才算数：先放一条合法的链接指到根上，再经它往外走，或者把文件放到
+    /// 链接底下，逐段看都在目录里，实际会落到运行时目录之外。
+    #[test]
+    fn going_through_another_link_is_rejected() {
+        let err = plan_of(serde_json::json!({
+            "a/b/up": {"type": "link", "target": "../.."},
+            "t": {"type": "link", "target": "a/b/up/.."}
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::UnsafeRuntimeLink { path, target }
+                if path == "t" && target == "a/b/up/.."),
+            "实际：{err:?}"
+        );
+
+        for (entry, kind) in [
+            (
+                "up/evil.dll",
+                serde_json::json!({"type": "file", "downloads": {"raw": {
+                    "sha1": "a", "size": 1, "url": "https://x/evil"
+                }}}),
+            ),
+            ("up/lib", serde_json::json!({"type": "directory"})),
+            (
+                "up/link",
+                serde_json::json!({"type": "link", "target": "x"}),
+            ),
+        ] {
+            let err = plan_of(serde_json::json!({
+                "up": {"type": "link", "target": "bin"},
+                entry: kind
+            }))
+            .unwrap_err();
+            assert!(
+                matches!(&err, Error::UnsafeRuntimePath { path, reason }
+                    if path == entry && *reason == "穿过了清单里的符号链接"),
+                "{entry}: {err:?}"
+            );
+        }
+    }
+
+    /// 链接的目标本身是另一条链接没有问题：每条链接各自验过，串起来也出不了目录。
+    #[test]
+    fn a_link_ending_on_another_link_is_kept() {
+        let plan = plan_of(serde_json::json!({
+            "legal/java.desktop/LICENSE": {"type": "link", "target": "../java.base/LICENSE"},
+            "legal/java.base/LICENSE": {"type": "link", "target": "../shared/LICENSE"}
+        }))
+        .unwrap();
+        assert_eq!(plan.links.len(), 2);
+    }
+
+    // ---- 读响应体途中的故障：wiremock 造不出响应体只到一半，手写应答 ----
+
+    /// 按连接顺序写出 `replies` 里的（声明长度，实际正文）后关闭连接。返回地址与已接受的连接数。
+    fn raw_server(replies: Vec<(u64, Vec<u8>)>) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/all.json", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        std::thread::spawn(move || {
+            for (declared, body) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let status = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(status.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (url, accepted)
+    }
+
+    /// 清单读到一半连接断开：同一个源再试一次就拿到完整内容，不必换源。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_manifest_cut_off_midway_is_retried_from_the_same_source() {
+        let full = br#"{"windows-x64":{}}"#.to_vec();
+        let (url, accepted) = raw_server(vec![
+            (full.len() as u64, full[..5].to_vec()),
+            (full.len() as u64, full.clone()),
+        ]);
+        let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+
+        assert_eq!(installer.get_bytes(&url).await.unwrap(), full);
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "应同源重试恰好一次");
+    }
+
+    /// 声明的长度超过上限：不读正文也不重试。带校验的那条读取路径同样限长。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_oversized_manifest_is_refused_without_a_retry() {
+        let declared = aurora_base::http::METADATA_MAX_BYTES + 1;
+        for verified in [false, true] {
+            let (url, accepted) = raw_server(vec![(declared, Vec::new()), (2, b"{}".to_vec())]);
+            let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+
+            let result = if verified {
+                installer.get_verified_bytes(&url, &sha1_hex(b"{}")).await
+            } else {
+                installer.get_bytes(&url).await
+            };
+
+            match result {
+                Err(Error::ResponseTooLarge {
+                    url: failed,
+                    size,
+                    limit,
+                }) => {
+                    assert_eq!(failed, url);
+                    assert_eq!(size, declared);
+                    assert_eq!(limit, aurora_base::http::METADATA_MAX_BYTES);
+                }
+                other => panic!("应为 ResponseTooLarge，实际 {other:?}"),
+            }
+            assert_eq!(accepted.load(Ordering::SeqCst), 1, "不该重试");
+        }
     }
 
     // ---- 逐源回退：两台 mock 分别扮演官方源与镜像 ----
@@ -1313,6 +1518,21 @@ mod tests {
             .iter()
             .filter(|r| r.url.path() == p)
             .count()
+    }
+
+    #[test]
+    fn candidate_order_hook_reorders_the_expanded_candidates() {
+        let client = aurora_base::http::build_client().unwrap();
+        let installer =
+            JavaRuntimeInstaller::new(client).with_candidate_order(Arc::new(|mut candidates| {
+                candidates.reverse();
+                candidates
+            }));
+
+        let candidates = installer.candidates(MOJANG_JAVA_RUNTIME_ALL).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[1], MOJANG_JAVA_RUNTIME_ALL, "官方源被排到了后面");
     }
 
     #[test]
