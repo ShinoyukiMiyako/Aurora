@@ -255,6 +255,8 @@ export const WORLD_BLOCKER_LABEL = {
   renaming: "改名",
   deleting: "删除",
   backing_up: "备份或恢复存档",
+  /** 只挡恢复：导出整合包勾了存档时要读整份存档。 */
+  exporting: "导出整合包",
 } as const;
 
 export const WORLD_BACKUP_COPY = {

@@ -34,7 +34,7 @@ import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_DATA_DIR, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { acquireMockInstance, addMockInstance, ensureMockSharedWorldsSettled, handlers as instanceHandlers, mockInstanceHeldFor, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstance, addMockInstance, ensureMockSharedWorldsSettled, handlers as instanceHandlers, markMockSavesRead, mockInstanceHeldFor, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
 import { isMockTaskCancelled } from "./tasks";
 
@@ -624,16 +624,22 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
   const options = validateExport(id, parseExportOptions(args.options));
   // 与后端一样先占实例再登记任务：参数不合法不占任何东西，任务无论怎样结束都在最后放开
   const hold = acquireMockInstance(id, "modifying");
+  // 勾了存档时与后端一样先记下「存档正被整份读走」再查备份与恢复：恢复要等它读完
+  const unmark = options.extras.includes("saves") ? markMockSavesRead(id) : () => undefined;
+  const release = () => {
+    unmark();
+    hold.release();
+  };
   // 与后端一样先占住再查：改 Mod 与存档备份兼容，导出却可能连存档一起打包
   if (mockInstanceHeldFor(id, "backing_up")) {
-    hold.release();
+    release();
     throw new IpcError("instance_busy", `实例 ${id} 正在备份或恢复存档，请稍后再试`, { id, activity: "backing_up" });
   }
   // 共用存档的实例还要看别的不隔离实例：它们备份或恢复的是同一份 saves，导出会打进半截的存档
   try {
     ensureMockSharedWorldsSettled(id);
   } catch (error) {
-    hold.release();
+    release();
     throw error;
   }
   return runMockTask(taskId, async () => {
@@ -675,7 +681,7 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
       disabled_mods: carried.length,
       skipped: plan.skipped,
     };
-  }).finally(() => hold.release());
+  }).finally(release);
 }
 
 export const handlers: MockHandlers = {

@@ -666,6 +666,12 @@ pub(crate) async fn export_modpack_with(
     let id = export_id(id)?;
     let (destination, options) = parse_export_options(options).await?;
     let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+    // 勾了存档时记下「存档正被整份读走」，恢复存档要等它读完；先记下再查备份与恢复，与恢复那边先占后查对称，
+    // 两边同时发起时至少有一方会被挡住。被拒时记录随返回撤销。
+    let _reading = options
+        .extras
+        .contains(&ExportExtra::Saves)
+        .then(|| locks.read_saves(id));
     // 改 Mod 与存档备份互相兼容，导出却可能连存档一起打包：备份或恢复正在打包、替换存档时不能导出，
     // 否则包里是半截的存档。先占住再查，被拒时守卫随返回放开。
     if locks.activity(id) == Some(InstanceActivity::BackingUp) {

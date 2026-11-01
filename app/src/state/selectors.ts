@@ -71,6 +71,21 @@ export function savesBusyIds(state: LauncherState): string[] {
   return state.instances.filter((inst) => savesBusy(state, inst)).map((inst) => inst.id);
 }
 
+/**
+ * 这个实例有勾了存档的导出整合包任务在排队或进行中：导出会把整份存档读进包里，后端在它读完前拒绝恢复存档
+ * （恢复要替换存档）；只读存档的备份与导出存档不受影响。只随任务的增减变。
+ */
+export function savesExported(state: LauncherState, instanceId: string): boolean {
+  return state.tasks.some((task) => {
+    if (!isActiveTask(task) || task.instanceId !== instanceId || task.spec.command !== "export_modpack") return false;
+    const options = task.spec.args.options;
+    if (typeof options !== "object" || options === null || !("extras" in options) || !Array.isArray(options.extras)) {
+      throw new Error(`任务 ${task.title} 的参数 options.extras 应为数组`);
+    }
+    return options.extras.includes("saves");
+  });
+}
+
 export function queuePosition(state: LauncherState, taskId: string): number | null {
   return taskQueuePosition(state.tasks, taskId);
 }

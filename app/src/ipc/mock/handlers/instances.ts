@@ -1110,14 +1110,45 @@ export function ensureMockSharedWorldsSettled(id: string): void {
   if (shared !== undefined) throw busyError(shared.dto.id, "backing_up");
 }
 
+/** 存档正被导出整合包整份读走的实例（原样 id，同一实例可有多份），与后端互斥表里那份记录同一口径。 */
+const savesReaders: string[] = [];
+
+/** 记下实例的存档正被整份读走（导出整合包勾了存档），返回撤销函数；与后端一样先记下、再查备份与恢复。 */
+export function markMockSavesRead(id: string): () => void {
+  savesReaders.push(id);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    savesReaders.splice(savesReaders.indexOf(id), 1);
+  };
+}
+
+function savesBeingExported(id: string): IpcError {
+  return new IpcError("instance_busy", `实例 ${id} 正在导出带存档的整合包，请稍后再试`, { id, activity: "modifying" });
+}
+
+/** 与后端同序：恢复要替换存档，本实例或共用这份存档的另一个不隔离实例正在导出带存档的整合包时报 instance_busy。 */
+function ensureSavesNotRead(id: string): void {
+  // 没有导出在读存档时不看自己的存档作用域：每次恢复都会经过这里
+  if (savesReaders.length === 0) return;
+  const key = id.toLowerCase();
+  const own = savesReaders.find((reader) => reader.toLowerCase() === key);
+  if (own !== undefined) throw savesBeingExported(own);
+  if (isolatedOf(requireInstance(id))) return;
+  const shared = savesReaders.find((reader) => !isolatedOf(requireInstance(reader)));
+  if (shared !== undefined) throw savesBeingExported(shared);
+}
+
 /**
  * 备份、恢复、导出共用的长任务外壳：先占住实例（启动、运行中报 instance_busy），共用存档再查别的实例的游戏，
- * 最后登记任务，结束（含失败）放开。打包与解压按文件数推进度，期间被取消即以 cancelled 拒绝。
+ * 恢复再查有没有导出在读存档，最后登记任务，结束（含失败）放开。打包与解压按文件数推进度，期间被取消即以 cancelled 拒绝。
  */
-async function worldTask<T>(taskId: string, id: string, work: () => Promise<T>): Promise<T> {
+async function worldTask<T>(taskId: string, id: string, replacesSaves: boolean, work: () => Promise<T>): Promise<T> {
   const release = acquire(id, "backing_up");
   try {
     ensureSharedWorldFree(id);
+    if (replacesSaves) ensureSavesNotRead(id);
     beginMockTask(taskId);
   } catch (error) {
     release();
@@ -1145,7 +1176,7 @@ async function backupWorld(args: MockArgs): Promise<BackupResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
   const world = worldArg(args);
-  return worldTask(taskId, id, async () => {
+  return worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);
     stage(taskId, `正在打包「${world}」`);
@@ -1163,7 +1194,7 @@ async function restoreWorldBackup(args: MockArgs): Promise<RestoreResultDto> {
   const id = str(args, "id");
   const world = worldArg(args);
   const file = str(args, "file");
-  return worldTask(taskId, id, async () => {
+  return worldTask(taskId, id, true, async () => {
     const instance = requireInstance(id);
     const entry = worldBackups(id, world).find((b) => b.file === file);
     if (entry === undefined) throw backupNotFound(id, world, file);
@@ -1194,7 +1225,7 @@ async function exportWorld(args: MockArgs): Promise<ExportResultDto> {
   const dest = str(args, "dest");
   if (!/^([A-Za-z]:[\\/]|\\\\)/.test(dest)) throw invalid("dest", "not_absolute", `导出位置须是绝对路径：${dest}`);
   if (!dest.toLowerCase().endsWith(".zip")) throw invalid("dest", "not_zip", `导出的文件须以 .zip 结尾：${dest}`);
-  return worldTask(taskId, id, async () => {
+  return worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);
     stage(taskId, `正在打包「${world}」`);
@@ -1445,6 +1476,7 @@ export function reset(): void {
   template = null;
   backups = seedBackups();
   holds.clear();
+  savesReaders.length = 0;
 }
 
 interface InstancesSnapshot {

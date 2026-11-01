@@ -36,6 +36,7 @@ import { clearMockEventListeners } from "./mock/events";
 import { acquireMockInstance, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
 import { endMockGame, reset as resetLaunchMock } from "./mock/handlers/launch";
 import { launchGame } from "./launch";
+import { exportModpack } from "./modpack";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -638,6 +639,35 @@ describe("mock：存档备份", () => {
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect((await done).backup.kind).toBe("manual");
     game.release();
+  });
+
+  it("勾了存档的导出整合包进行中：恢复报 instance_busy（指向导出的实例，活动为 modifying），不登记任务；备份照常；共用存档的另一个实例同样被挡", async () => {
+    vi.useFakeTimers();
+    const [first] = (await listWorldBackups(ID, WORLD)).backups;
+    const exporting = exportModpack("ex", ID, { destination: "D:/out/樱花.mrpack", name: "樱花", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false });
+    const refused = await rejection(restoreWorldBackup("rs", ID, WORLD, first.file));
+    expect(refused.code).toBe("instance_busy");
+    expect(refused.message).toBe(`实例 ${ID} 正在导出带存档的整合包，请稍后再试`);
+    expect(detail(refused)).toEqual({ id: ID, activity: "modifying" });
+    expect(await cancelTask("rs")).toBe(false);
+    // 备份只读存档，照常进行
+    const backup = backupWorld("bk", ID, WORLD);
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    expect((await backup).backup.kind).toBe("manual");
+    await vi.advanceTimersByTimeAsync(1000);
+    await exporting;
+
+    // 共用存档：另一个不隔离的实例在导出带存档的整合包时，恢复同样被挡
+    const OTHER = "1.21.1";
+    const settings = await getInstanceSettings(ID);
+    await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
+    const sharedExport = exportModpack("ex-2", OTHER, { destination: "D:/out/原版.mrpack", name: "原版", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false });
+    expect(detail(await rejection(restoreWorldBackup("rs-2", ID, WORLD, first.file)))).toEqual({ id: OTHER, activity: "modifying" });
+    await vi.advanceTimersByTimeAsync(1000);
+    await sharedExport;
+    const restored = restoreWorldBackup("rs-3", ID, WORLD, first.file);
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    expect((await restored).world).toBe(WORLD);
   });
 
   it("共用存档跨实例互斥的反方向：不隔离的实例在备份时，另一个不隔离的实例启动报 instance_busy（backing_up），不登记任务；隔离的实例照常启动", async () => {

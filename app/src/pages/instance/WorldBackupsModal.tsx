@@ -10,7 +10,7 @@ import { useRunner } from "../../shell/useRunner";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import type { WorldDto } from "../../state/queries/instance";
 import { useResource, type ResourceResult } from "../../state/resource";
-import { activeTasks, busyWorlds } from "../../state/selectors";
+import { activeTasks, busyWorlds, savesExported } from "../../state/selectors";
 import { worldBackupsKey, type WorldBackupDto, type WorldBackupListDto } from "../../state/store";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -54,6 +54,8 @@ export interface WorldLockInput {
   repairTask: boolean;
   /** 本实例有排队或进行中的备份、导出或恢复任务。 */
   worldTask: boolean;
+  /** 本实例有勾了存档的导出整合包任务在排队或进行中：只挡恢复，备份与导出存档只读、照常。 */
+  savesExport: boolean;
 }
 
 /**
@@ -75,7 +77,9 @@ export function worldLockReasons(input: WorldLockInput): { backup: string | unde
           : input.activity === "backing_up" || input.worldTask
             ? WORLD_BLOCKER_LABEL.backing_up
             : null;
-  if (blocker === null) return { backup: undefined, restore: undefined };
+  if (blocker === null) {
+    return { backup: undefined, restore: input.savesExport ? COPY.blocked(input.name, WORLD_BLOCKER_LABEL.exporting) : undefined };
+  }
   const reason = COPY.blocked(input.name, blocker);
   return { backup: reason, restore: reason };
 }
@@ -101,6 +105,7 @@ export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
   const id = inst.id;
   const worlds = useLauncherSelector((s) => busyWorlds(s, id), shallowArrayEqual);
   const repairTask = useLauncherSelector((s) => activeTasks(s).some((t) => t.instanceId === id && t.spec.command === "repair_instance"));
+  const savesExport = useLauncherSelector((s) => savesExported(s, id));
   const reasons = worldLockReasons({
     name: inst.name,
     status: inst.status,
@@ -108,6 +113,7 @@ export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
     sessionActive: ops.busy,
     repairTask,
     worldTask: worlds.length > 0,
+    savesExport,
   });
 
   const backup = (world: WorldRef) => {

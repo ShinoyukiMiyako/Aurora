@@ -2077,6 +2077,31 @@ describe("实例详情：存档备份", () => {
     expect(callsOf(ipc, "delete_world_backup")).toEqual([]);
   });
 
+  it("导出带存档的整合包进行中：恢复带原因禁用、点了不发命令；只读存档的备份照常；不带存档的导出不挡恢复", async () => {
+    const exporting = deferred<unknown>();
+    ipc.overrides.set("export_modpack", () => exporting.promise);
+    const options = (extras: string[]) => ({ destination: "D:/out/樱花.mrpack", name: "樱花", version: "1.0.0", summary: null, extras, include_disabled: false }) as never;
+    await openBackups();
+    await act(async () => {
+      await launcher.actions.exportModpack(ID, options(["config"]));
+    });
+    await flush();
+    const restore = () => button("恢复 2026年10月31日 10:00 的备份", backupsDialog());
+    expect(restore().getAttribute("aria-disabled")).toBeNull();
+
+    await act(async () => {
+      await launcher.actions.exportModpack(ID, options(["config", "saves"]));
+    });
+    await flush();
+    expect(restore().getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(restore())).toBe("「樱花生存」正在导出整合包，完成后再试");
+    click(restore());
+    await flush();
+    expect(dialogs()).toHaveLength(1);
+    expect(callsOf(ipc, "restore_world_backup")).toEqual([]);
+    expect(button("备份存档", backupsDialog()).getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("游戏运行中：恢复与备份存档禁用并写原因，删除照常（不占实例）", async () => {
     await open("overview");
     await startGame();
