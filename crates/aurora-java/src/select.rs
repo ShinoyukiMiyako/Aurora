@@ -7,6 +7,8 @@
 //! 缺运行时文件的候选（[`JavaInstallation::is_complete`] 为假）一律不参与：它能答出版本，
 //! 但拿它启动游戏会在加载核心类库时失败，宁可落到下一个候选或自动下载。
 
+use std::cmp::Reverse;
+
 use crate::detect::JavaInstallation;
 
 /// 从候选中挑出匹配 `required_major` 的最佳完整 Java；无匹配返回 `None`（上层据此决定是否自动下载）。
@@ -17,8 +19,8 @@ pub fn select_for_major(
     candidates
         .iter()
         .filter(|java| is_eligible(java, required_major))
-        // min_by 在相等时留下靠前的那个，max_by 留下靠后的。
-        .min_by(|a, b| rank_key(b).cmp(&rank_key(a)))
+        // min_by_key 在相等时留下靠前的那个，max_by_key 留下靠后的。
+        .min_by_key(|java| Reverse(rank_key(java)))
 }
 
 /// 返回全部匹配 `required_major` 的完整候选，按「最佳在前」排序，供 UI 列出可选项。
@@ -31,7 +33,7 @@ pub fn rank_for_major(
         .filter(|java| is_eligible(java, required_major))
         .collect();
     // 降序：先按是否 64 位，再按版本号，最佳排在前面。
-    matched.sort_by(|a, b| rank_key(b).cmp(&rank_key(a)));
+    matched.sort_by_key(|java| Reverse(rank_key(java)));
     matched
 }
 
