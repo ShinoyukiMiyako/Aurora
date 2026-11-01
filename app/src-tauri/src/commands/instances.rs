@@ -3059,7 +3059,11 @@ mod tests {
             move || {
                 let bases = ["1.20.1".to_owned()];
                 while !stop.load(Ordering::Relaxed) {
-                    drop(locks.acquire_with_bases("Fabric", Launching, &bases).unwrap());
+                    drop(
+                        locks
+                            .acquire_with_bases("Fabric", Launching, &bases)
+                            .unwrap(),
+                    );
                 }
             }
         });
