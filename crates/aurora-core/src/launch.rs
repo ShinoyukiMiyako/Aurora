@@ -754,7 +754,7 @@ impl Aurora {
                 required_major,
                 &settings.java,
                 pinned_by,
-                &mc_version,
+                game_version,
                 reporter,
             )
             .await?;
@@ -2614,6 +2614,40 @@ mod tests {
             ));
         }
         assert_eq!(warned, vec![("生存 服", 1, true), ("老 存档", 0, false)]);
+    }
+
+    /// 新建实例的版本 JSON 把 id 换成实例名、去掉了 inheritsFrom，继承链根就是实例自己。Java 失败的文案要写
+    /// 「Minecraft 1.21.1 需要 Java 21」，拿实例名去填就成了「Minecraft 生存 服 需要 Java 21」。
+    #[tokio::test]
+    async fn java_failures_name_the_game_version_not_the_instance() {
+        let fx = fixture();
+        let renamed = "生存 服";
+        let dir = fx.root.join(".minecraft").join("versions").join(renamed);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{renamed}.json")),
+            format!(
+                r#"{{"id":"{renamed}","clientVersion":"1.21.1","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-delta","majorVersion":21}}}}"#
+            ),
+        )
+        .unwrap();
+        let request = || LaunchRequest {
+            version_id: renamed.to_owned(),
+            ..request()
+        };
+
+        let java = fake_java(&fx.root, 17, 0);
+        let (result, _) = launch_request(&fx.aurora, request(), java).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::JavaTooOld);
+        assert_eq!(
+            failure.params.get("mc_version"),
+            Some(&Value::from("1.21.1"))
+        );
+        assert_eq!(
+            failure.message,
+            "实例指定的 Java 17 无法运行 Minecraft 1.21.1，至少需要 Java 21"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
