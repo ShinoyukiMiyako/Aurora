@@ -9,7 +9,7 @@ license.workspace = true
 # http2/gzip/json/stream 是下游 download/modplatform crate 的共用刚需，集中在共享工厂里开一次。
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "gzip", "json", "stream"] }
 # 库内只用 spawn_blocking(rt) + 异步文件 IO(fs/io-util) + 退避 sleep(time)；运行时风格由上层选择，不强制 rt-multi-thread。
-tokio = { version = "1", default-features = false, features = ["rt", "fs", "io-util", "time"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "fs", "io-util", "time"] }
 thiserror = "2"
 sha1 = "0.11"
 # authlib-injector 的发布清单只给 SHA-256，下载后据此校验。

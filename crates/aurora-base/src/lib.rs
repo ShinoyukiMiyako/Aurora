@@ -8,6 +8,7 @@
 //! - [`http`]：reqwest + rustls 客户端工厂，统一 User-Agent 与超时策略。
 //! - [`mirror`]：官方下载域名到 BMCLAPI 镜像域名的 URL 改写。
 //! - [`fs`]：流式 sha1 校验、临时文件 + rename 的原子写入、数据目录定位。
+//! - [`path_lock`]：按路径串行的进程内锁表。
 //! - [`retry`]：指数退避重试包装。
 //!
 //! 错误统一归口到 [`Error`]，下游 crate 直接 `#[from]` 冒泡即可。
@@ -17,6 +18,8 @@ pub mod error;
 pub mod fs;
 pub mod http;
 pub mod mirror;
+pub mod path_lock;
 pub mod retry;
 
 pub use error::{Error, Result, error_with_causes};
+pub use path_lock::PathLocks;

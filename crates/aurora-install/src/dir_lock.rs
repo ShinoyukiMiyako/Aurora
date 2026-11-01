@@ -5,41 +5,25 @@
 //! 后到的一方会把先到的一方写好的 dll 截断重写，或者在 Windows 上撞出共享冲突让补全半路失败。排到后到的
 //! 一方时目录已经写完，它经戳记或大小比对直接跳过。
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, LazyLock, Mutex, Weak};
 
+use aurora_base::PathLocks;
 use aurora_download::CancellationToken;
 use tokio::sync::OwnedMutexGuard;
 
 use crate::error::Result;
 
-/// 正在写或排队的目录。值存弱引用：没人持有的条目在下一次加锁时清掉，表里只留进行中的目录。
-static DIRS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
-    LazyLock::new(Mutex::default);
+/// 正在写或排队的目录。
+static DIRS: PathLocks = PathLocks::new();
 
-/// 占住目录 `dir`，同一目录上的写入一个接一个来。键不分大小写：`inheritsFrom` 写的大小写可以与目录名不同，
-/// Windows 上它们是同一个目录。等待期间响应取消，令牌已触发时不再去拿锁。
+/// 占住目录 `dir`，同一目录上的写入一个接一个来。等待期间响应取消，令牌已触发时不再去拿锁。
 ///
 /// 持有者把返回的守卫带进阻塞线程：写到一半不能因为外层 future 被丢弃就放开。
 pub(crate) async fn lock_dir(
     dir: &Path,
     cancel: Option<&CancellationToken>,
 ) -> Result<OwnedMutexGuard<()>> {
-    let key = dir.to_string_lossy().to_lowercase();
-    let slot = {
-        // 临界区里只有 HashMap 的增删查，真中毒说明程序已处于未知状态，直接崩。
-        let mut table = DIRS.lock().expect("目录写锁表的锁已中毒");
-        table.retain(|_, held| held.strong_count() > 0);
-        match table.get(&key).and_then(Weak::upgrade) {
-            Some(slot) => slot,
-            None => {
-                let slot = Arc::new(tokio::sync::Mutex::new(()));
-                table.insert(key, Arc::downgrade(&slot));
-                slot
-            }
-        }
-    };
+    let slot = DIRS.slot(dir);
     match cancel {
         Some(token) if token.is_cancelled() => Err(aurora_download::Error::Cancelled.into()),
         Some(token) => token

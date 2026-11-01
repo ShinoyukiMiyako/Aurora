@@ -28,12 +28,12 @@
 //! 每一跳各自按凭据作用域决定带不带头（见 [`follow_redirects`]）；带了凭据的那一跳回 401 时，
 //! 不重试、不换源、不回退整文件，直接以 [`Error::CredentialRejected`] 结束。
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
+use std::sync::Arc;
 
+use aurora_base::PathLocks;
 use aurora_base::fs::Sha1Hasher;
 use aurora_base::retry::{RetryPolicy, retry_async, retry_async_until};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
@@ -1152,10 +1152,8 @@ async fn until_cancelled<F: Future>(
     }
 }
 
-/// 正在下载或排队的目标路径。值存弱引用：没人持有的条目在下一次加锁时清掉，表里只留进行中的目标，
-/// 几千个资源对象下完也不会堆积。
-static DESTINATIONS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
-    LazyLock::new(Mutex::default);
+/// 正在下载或排队的目标路径。表里只留进行中的目标，几千个资源对象下完也不会堆积。
+static DESTINATIONS: PathLocks = PathLocks::new();
 
 /// 占住一个目标路径，同一路径上的下载在进程内一个接一个来。
 ///
@@ -1166,20 +1164,7 @@ async fn lock_dest(
     dest: &Path,
     cancel: Option<&CancellationToken>,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
-    let slot = {
-        // 临界区里只有 HashMap 的增删查，真中毒说明程序已处于未知状态，直接崩。
-        let mut table = DESTINATIONS.lock().expect("下载目标表的锁已中毒");
-        table.retain(|_, held| held.strong_count() > 0);
-        match table.get(dest).and_then(Weak::upgrade) {
-            Some(slot) => slot,
-            None => {
-                let slot = Arc::new(tokio::sync::Mutex::new(()));
-                table.insert(dest.to_path_buf(), Arc::downgrade(&slot));
-                slot
-            }
-        }
-    };
-    until_cancelled(cancel, slot.lock_owned()).await
+    until_cancelled(cancel, DESTINATIONS.slot(dest).lock_owned()).await
 }
 
 /// 删除一个可能不存在的中间文件。不存在是常态（该分片还没开始）；其余失败记日志，
@@ -1551,9 +1536,6 @@ mod tests {
         };
         drop(held);
         next.await.unwrap().unwrap();
-        // 没人再占着时条目随下一次加锁清掉。
-        drop(lock_dest(&other, None).await.unwrap());
-        assert!(!DESTINATIONS.lock().unwrap().contains_key(&dest));
     }
 
     /// 已取消的令牌在文件开始前就挡住：不发请求、不建任何文件。

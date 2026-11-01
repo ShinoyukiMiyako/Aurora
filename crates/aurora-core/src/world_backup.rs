@@ -5,11 +5,11 @@
 //! 整个备份、恢复、导出、删除期间持有；备份根锁在清单读改写、清理与改名搬运期间持有，同时要两把时
 //! 先存档锁后根锁。不隔离的实例共用同一份存档，两个实例同时操作它时就靠这两把锁排队。等锁期间响应取消。
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use aurora_base::PathLocks;
 use aurora_download::CancellationToken;
 use aurora_instance::{
     BackupEntry, BackupKind, BackupLayout, Disposer, PackProgress, PackedWorld, RESTORE_SUFFIX,
@@ -706,34 +706,18 @@ async fn blocking<T: Send + 'static>(
 
 // ---- 进程内互斥 ----
 
-type LockTable = LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>;
-
-/// 按存档备份目录加的锁。值存弱引用，没人持有的条目在下一次加锁时清掉。
-static WORLD_LOCKS: LockTable = LazyLock::new(Mutex::default);
+/// 按存档备份目录加的锁。
+static WORLD_LOCKS: PathLocks = PathLocks::new();
 /// 按备份根加的锁：清单读改写与清理。
-static ROOT_LOCKS: LockTable = LazyLock::new(Mutex::default);
+static ROOT_LOCKS: PathLocks = PathLocks::new();
 
-/// 占住 `path` 对应的锁。键不分大小写：Windows 上只差大小写的路径是同一个目录。等锁期间响应取消，
-/// 令牌已触发时不再去拿锁。
+/// 占住 `path` 对应的锁。等锁期间响应取消，令牌已触发时不再去拿锁。
 async fn acquire(
-    table: &LockTable,
+    table: &PathLocks,
     path: &Path,
     cancel: Option<&CancellationToken>,
 ) -> Result<OwnedMutexGuard<()>> {
-    let key = path.to_string_lossy().to_lowercase();
-    let slot = {
-        // 临界区里只有 HashMap 的增删查，真中毒说明程序已处于未知状态，直接崩。
-        let mut held = table.lock().expect("存档备份的锁表已中毒");
-        held.retain(|_, slot| slot.strong_count() > 0);
-        match held.get(&key).and_then(Weak::upgrade) {
-            Some(slot) => slot,
-            None => {
-                let slot = Arc::new(tokio::sync::Mutex::new(()));
-                held.insert(key, Arc::downgrade(&slot));
-                slot
-            }
-        }
-    };
+    let slot = table.slot(path);
     match cancel {
         Some(token) if token.is_cancelled() => Err(InstanceError::Cancelled.into()),
         Some(token) => token
@@ -824,6 +808,7 @@ mod tests {
     use super::*;
     use crate::instances::tests::{aurora_at, vanilla_json, write_version};
     use std::io::Write;
+    use std::sync::{Arc, Mutex};
 
     /// 一份最小的 level.dat：根复合标签里的 `Data.LevelName`，gzip 压缩。
     fn level_dat(name: &str) -> Vec<u8> {
