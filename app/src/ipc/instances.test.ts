@@ -619,8 +619,8 @@ describe("mock：存档备份", () => {
     // 1.21.1 是原版正式版，跟随全局时不隔离；樱花生存是 Fabric 实例，关掉隔离后与它共用存档
     const OTHER = "1.21.1";
     const settings = await getInstanceSettings(ID);
-    await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
     const [first] = (await listWorldBackups(ID, WORLD)).backups;
+    await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
     for (const activity of ["launching", "running"] as const) {
       const game = acquireMockInstance(OTHER, activity);
       for (const attempt of [backupWorld("s1", ID, WORLD), restoreWorldBackup("s2", ID, WORLD, first.file), exportWorld("s3", ID, WORLD, "D:\\out\\a.zip")]) {
@@ -661,11 +661,15 @@ describe("mock：存档备份", () => {
     const OTHER = "1.21.1";
     const settings = await getInstanceSettings(ID);
     await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
+    // 关了隔离就换到共用的那一层备份：先备一份共用的再恢复它
+    const sharedBackup = backupWorld("bk-shared", ID, WORLD);
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    const { file } = (await sharedBackup).backup;
     const sharedExport = exportModpack("ex-2", OTHER, { destination: "D:/out/原版.mrpack", name: "原版", version: "1.0.0", summary: null, extras: ["saves"], include_disabled: false });
-    expect(detail(await rejection(restoreWorldBackup("rs-2", ID, WORLD, first.file)))).toEqual({ id: OTHER, activity: "modifying" });
+    expect(detail(await rejection(restoreWorldBackup("rs-2", ID, WORLD, file)))).toEqual({ id: OTHER, activity: "modifying" });
     await vi.advanceTimersByTimeAsync(1000);
     await sharedExport;
-    const restored = restoreWorldBackup("rs-3", ID, WORLD, first.file);
+    const restored = restoreWorldBackup("rs-3", ID, WORLD, file);
     await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
     expect((await restored).world).toBe(WORLD);
   });

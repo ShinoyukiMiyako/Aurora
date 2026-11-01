@@ -5,11 +5,13 @@ import { installMod, installResource } from "../discover";
 import { IpcError } from "../errors";
 import { rollback } from "../history";
 import {
+  backupWorld,
   deleteInstance,
   getInstanceSettings,
   getSidebarPins,
   installVersion,
   listInstances,
+  listWorldBackups,
   openFolder,
   previewInstanceDeletion,
   renameInstance,
@@ -17,13 +19,13 @@ import {
   setInstanceSettings,
   setSidebarPins,
 } from "../instances";
-import { launchGame, playStats } from "../launch";
+import { launchGame, onGameExit, onWorldBackup, playStats, type WorldBackupEvent } from "../launch";
 import { checkUpdates, removeMod, setModEnabled, updateMod } from "../mods";
 import { cancelTask } from "../tasks";
 import { resetMocks } from ".";
 import { clearMockEventListeners } from "./events";
-import { acquireMockInstance, acquireMockInstanceWithBases, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
-import { endMockGame, failNextMockPlayRecords } from "./handlers/launch";
+import { acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, addMockWorld, failNextMockBackupsMove, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
+import { endMockGame, failNextMockPlayRecords, pauseNextMockAutoBackup } from "./handlers/launch";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./handlers/tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -307,6 +309,114 @@ describe("mock 的游玩记录与后端一样按游戏目录区分", () => {
     expect((await getConfig()).game_dir).toBe(OTHER_DIR);
     expect(await minutesOf("1.21")).toBe(4);
     expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 4 });
+  });
+});
+
+describe("mock 的游戏退出后自动备份与后端同序", () => {
+  /** 樱花生存是隔离实例，种子里带着 New World 这个存档。 */
+  const ISOLATED = "樱花生存";
+  const WORLD = "New World";
+
+  async function backupEvents(): Promise<WorldBackupEvent[]> {
+    const events: WorldBackupEvent[] = [];
+    await onWorldBackup((event) => events.push(event));
+    return events;
+  }
+
+  it("退出事件先到，实例原地转成备份、基底留到备份做完，之后才放开并推备份事件", async () => {
+    const order: string[] = [];
+    await onGameExit(() => order.push("exit"));
+    const events = await backupEvents();
+    await launchGame({ ...offline(ISOLATED, "t-auto"), quickPlay: { kind: "singleplayer", world_dir_name: WORLD } });
+    const before = (await listWorldBackups(ISOLATED, WORLD)).backups.length;
+    const finish = pauseNextMockAutoBackup();
+
+    endMockGame(0, MINUTE);
+    expect(order).toEqual(["exit"]);
+    expect(await activityOf(ISOLATED)).toBe("backing_up");
+    expect(await busy(renameInstance(ISOLATED, "改个名"))).toEqual([`实例 ${ISOLATED} 正在备份或恢复存档，请稍后再试`, { id: ISOLATED, activity: "backing_up" }]);
+    expect((await rejection(launchGame(offline(ISOLATED, "t-again")))).detail).toEqual({ id: ISOLATED, activity: "backing_up" });
+    expect(events).toEqual([]);
+
+    finish();
+    expect(await activityOf(ISOLATED)).toBeNull();
+    expect(events).toEqual([{ instance_id: ISOLATED, backed_up: [WORLD], failed: [] }]);
+    expect((await listWorldBackups(ISOLATED, WORLD)).backups).toHaveLength(before + 1);
+    expect((await listWorldBackups(ISOLATED, WORLD)).backups[0].kind).toBe("auto");
+  });
+
+  it("加载器实例：备份期间基底仍报 inherited，备份做完才放开", async () => {
+    addMockInstance("导入的包", "1.21", { kind: "fabric", version: "0.16.10" }, null);
+    await launchGame(offline("导入的包", "t-chain"));
+    const finish = pauseNextMockAutoBackup();
+    endMockGame(0, MINUTE);
+    expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ activity: "inherited", used_by: "导入的包" });
+    expect(await activityOf("导入的包")).toBe("backing_up");
+    finish();
+    expect((await listInstances()).find((i) => i.id === "1.21")).toMatchObject({ activity: null, used_by: null });
+  });
+
+  it("这一局没有进存档：没有要备份的，备份事件照样推，列表是空的", async () => {
+    const events = await backupEvents();
+    await launchGame(offline(ISOLATED, "t-none"));
+    endMockGame(0, MINUTE);
+    expect(events).toEqual([{ instance_id: ISOLATED, backed_up: [], failed: [] }]);
+    expect(await activityOf(ISOLATED)).toBeNull();
+  });
+
+  it("关着自动备份：退出就放开，没有备份事件", async () => {
+    const events = await backupEvents();
+    await updateConfig({ worldBackup: { auto: false, keep_per_world: 5, max_total_gb: 20 } });
+    await launchGame({ ...offline(ISOLATED, "t-off"), quickPlay: { kind: "singleplayer", world_dir_name: WORLD } });
+    const before = (await listWorldBackups(ISOLATED, WORLD)).backups.length;
+    endMockGame(0, MINUTE);
+    expect(await activityOf(ISOLATED)).toBeNull();
+    expect(events).toEqual([]);
+    expect((await listWorldBackups(ISOLATED, WORLD)).backups).toHaveLength(before);
+  });
+});
+
+describe("mock 的存档备份按作用域存放，与后端的备份目录一致", () => {
+  const SHARED_A = "1.21";
+  const SHARED_B = "1.21.1";
+
+  it("不隔离的实例共用一份：在一个实例上备份，另一个实例也看得到，改名不搬它们，删除预览也不算它们", async () => {
+    const world = "共用存档";
+    addMockWorld(SHARED_A, world);
+    addMockWorld(SHARED_B, world);
+    vi.useFakeTimers();
+    const done = backupWorld("t-shared", SHARED_A, world);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    await done;
+    const seen = await listWorldBackups(SHARED_B, world);
+    expect(seen).toMatchObject({ scope: "shared" });
+    expect(seen.backups).toHaveLength(1);
+    expect((await previewInstanceDeletion(SHARED_A)).backup_count).toBe(0);
+    await renameInstance(SHARED_A, "改个名");
+    expect((await listWorldBackups(SHARED_B, world)).backups).toHaveLength(1);
+  });
+
+  it("隔离实例改名把备份挪到新名字下；挪不动时报 world_backups_not_moved，备份留在旧名下，改名照样落盘", async () => {
+    const ISOLATED = "樱花生存";
+    failNextMockBackupsMove();
+    const error = await rejection(renameInstance(ISOLATED, "樱花二号"));
+    expect(error.code).toBe("world_backups_not_moved");
+    expect(error.message).toBe("实例已改名为「樱花二号」，但存档备份没能跟着挪：拒绝访问。 (os error 5)");
+    expect(error.detail).toEqual({
+      id: ISOLATED,
+      renamed_to: "樱花二号",
+      path: `D:/Games/.minecraft/.petalfall/backups/instances/${ISOLATED}`,
+      causes: ["拒绝访问。 (os error 5)"],
+    });
+    expect((await listInstances()).some((i) => i.id === "樱花二号")).toBe(true);
+    expect((await listWorldBackups("樱花二号", "New World")).backups).toEqual([]);
+  });
+
+  it("新名字下留着同一存档的备份：改名是并进去，不把它们冲掉", async () => {
+    const ISOLATED = "樱花生存";
+    await renameInstance(ISOLATED, "临时");
+    await renameInstance("临时", ISOLATED);
+    expect((await listWorldBackups(ISOLATED, "New World")).backups).toHaveLength(3);
   });
 });
 
