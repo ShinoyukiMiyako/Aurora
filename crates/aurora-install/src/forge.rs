@@ -1025,6 +1025,10 @@ async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
 /// 处理器输出只留最后这么多行：binarypatcher、重命名工具一跑能打出上万行，失败时有用的是末尾的异常。
 const OUTPUT_TAIL_LINES: usize = 200;
 
+/// 单行输出留下的上限。末尾缓冲只限行数：处理器把一大段内容打在一行里、甚至一直不换行时，这一行会
+/// 涨到把内存吃光。16 KiB 放得下带整条 classpath 的命令行和最长的异常信息，200 行也才 3.2 MB。
+const OUTPUT_LINE_MAX_BYTES: usize = 16 * 1024;
+
 /// 子进程退出后等读取任务读完剩余输出的时限。处理器若把管道句柄传给了还活着的孙进程，管道不会
 /// 关闭、读取任务会一直等下去；限时后放弃剩下的输出，不让安装卡在这里。
 const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1101,21 +1105,65 @@ async fn collect_lines(
     use tokio::io::AsyncBufReadExt;
 
     let mut reader = tokio::io::BufReader::new(stream);
-    let mut line = Vec::new();
+    let mut line = PendingLine::default();
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) => break,
-            Ok(_) => push_line(
-                &tail,
-                decode_output(&line)
-                    .trim_end_matches(['\r', '\n'])
-                    .to_owned(),
-            ),
+        let chunk = match reader.fill_buf().await {
+            Ok(chunk) => chunk,
             Err(err) => {
+                line.flush_partial(&tail);
                 push_line(&tail, format!("（读取处理器输出中断：{err}）"));
-                break;
+                return;
             }
+        };
+        if chunk.is_empty() {
+            line.flush_partial(&tail);
+            return;
+        }
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let body = &chunk[..newline.unwrap_or(chunk.len())];
+        line.append(body);
+        let consumed = body.len() + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            line.flush(&tail);
+        }
+    }
+}
+
+/// 正在收的一行：只留开头 [`OUTPUT_LINE_MAX_BYTES`]，超出的只计数。
+#[derive(Default)]
+struct PendingLine {
+    kept: Vec<u8>,
+    cut: usize,
+}
+
+impl PendingLine {
+    fn append(&mut self, bytes: &[u8]) {
+        let room = OUTPUT_LINE_MAX_BYTES - self.kept.len();
+        let taken = bytes.len().min(room);
+        self.kept.extend_from_slice(&bytes[..taken]);
+        self.cut += bytes.len() - taken;
+    }
+
+    /// 这一行收完了，交给末尾缓冲。
+    fn flush(&mut self, tail: &std::sync::Mutex<OutputTail>) {
+        let decoded = decode_output(&self.kept);
+        let text = decoded.trim_end_matches('\r');
+        push_line(
+            tail,
+            match self.cut {
+                0 => text.to_owned(),
+                cut => format!("{text}（这一行太长，略去后面 {cut} 字节）"),
+            },
+        );
+        self.kept.clear();
+        self.cut = 0;
+    }
+
+    /// 输出到头了：没有换行符结尾的最后半行也要交上去，什么都没收到时不多出一个空行。
+    fn flush_partial(&mut self, tail: &std::sync::Mutex<OutputTail>) {
+        if !self.kept.is_empty() {
+            self.flush(tail);
         }
     }
 }
@@ -2853,6 +2901,114 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("java.lang.IllegalStateException: bad patch")),
             "{chain:?}"
+        );
+    }
+
+    const OUTPUT_LINE_CAP: usize = 16 * 1024;
+
+    fn cut_line(kept: &str, cut: usize) -> String {
+        format!("{kept}（这一行太长，略去后面 {cut} 字节）")
+    }
+
+    /// 单行超过上限时只留开头并标明略去多少；下一行不受影响。正好到上限的不算超。
+    #[tokio::test]
+    async fn a_line_over_the_cap_is_cut_and_marked() {
+        let kept = "x".repeat(OUTPUT_LINE_CAP);
+        for (over, expected) in [
+            (0, kept.clone()),
+            (1, cut_line(&kept, 1)),
+            (5000, cut_line(&kept, 5000)),
+            (3 * OUTPUT_LINE_CAP, cut_line(&kept, 3 * OUTPUT_LINE_CAP)),
+        ] {
+            let mut stream = vec![b'x'; OUTPUT_LINE_CAP + over];
+            stream.extend_from_slice(b"\nnext line\n");
+            let tail = collected();
+
+            collect_lines(stream.as_slice(), tail.clone()).await;
+
+            assert_eq!(lines_of(&tail), vec![expected, "next line".to_owned()]);
+        }
+    }
+
+    /// 一直不换行的输出（比如把二进制打到了 stdout）读到结束：缓冲不跟着涨，只留上限内的开头。
+    #[tokio::test]
+    async fn output_that_never_ends_a_line_stays_within_the_cap() {
+        let stream = vec![b'y'; 64 * OUTPUT_LINE_CAP];
+        let tail = collected();
+
+        collect_lines(stream.as_slice(), tail.clone()).await;
+
+        assert_eq!(
+            lines_of(&tail),
+            vec![cut_line(&"y".repeat(OUTPUT_LINE_CAP), 63 * OUTPUT_LINE_CAP)]
+        );
+    }
+
+    /// 换行符落在哪一段读取里都一样：随机长度的行连成一串读出来，逐行与预期一致。
+    #[tokio::test]
+    async fn lines_of_random_lengths_read_back_one_by_one() {
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let mut stream = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..OUTPUT_TAIL_LINES {
+            let len = rng.usize(0..2 * OUTPUT_LINE_CAP);
+            let ending: &[u8] = if rng.bool() { b"\n" } else { b"\r\n" };
+            stream.extend(std::iter::repeat_n(b'z', len));
+            stream.extend_from_slice(ending);
+            // 换行符之前的字节都算这一行的长度，CR 也在内。
+            let body = len + ending.len() - 1;
+            expected.push(if body <= OUTPUT_LINE_CAP {
+                "z".repeat(len)
+            } else {
+                cut_line(&"z".repeat(OUTPUT_LINE_CAP), body - OUTPUT_LINE_CAP)
+            });
+        }
+        let tail = collected();
+
+        collect_lines(stream.as_slice(), tail.clone()).await;
+
+        assert_eq!(lines_of(&tail), expected, "seed {seed}");
+    }
+
+    /// 普通输出照旧：去掉行尾的 CRLF，空行留着，最后一行没有换行符也不丢。
+    #[tokio::test]
+    async fn ordinary_lines_come_through_unchanged() {
+        let tail = collected();
+
+        collect_lines(b"first\r\n\nlast".as_slice(), tail.clone()).await;
+
+        assert_eq!(lines_of(&tail), vec!["first", "", "last"]);
+    }
+
+    /// 读到一半管道出错：已经读到的半行不丢，后面跟上中断的原因。
+    #[tokio::test]
+    async fn a_read_error_keeps_the_partial_line() {
+        struct BreaksAfter(Option<&'static [u8]>);
+
+        impl tokio::io::AsyncRead for BreaksAfter {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(match self.0.take() {
+                    Some(bytes) => {
+                        buf.put_slice(bytes);
+                        Ok(())
+                    }
+                    None => Err(std::io::Error::other("管道断了")),
+                })
+            }
+        }
+
+        let tail = collected();
+
+        collect_lines(BreaksAfter(Some(b"partial")), tail.clone()).await;
+
+        assert_eq!(
+            lines_of(&tail),
+            vec!["partial", "（读取处理器输出中断：管道断了）"]
         );
     }
 
