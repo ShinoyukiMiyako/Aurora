@@ -435,8 +435,9 @@ pub(crate) async fn select_authlib_profile_with(
     Ok(account_dto(&account))
 }
 
-/// 刷新账户信息（名字、皮肤、令牌）。凭据被判定失效时账户转为 `expired` 并报 `ReloginRequired`。
-/// 离线账户没有可刷新的凭据，报 `invalid_argument`。
+/// 刷新账户信息。微软账户续期令牌并更新名字与皮肤；外置账户先验证令牌，仍有效时只从会话服务器
+/// 更新名字与皮肤、不轮换令牌，失效时才刷新令牌。凭据被判定失效时账户转为 `expired` 并报
+/// `ReloginRequired`。离线账户没有可刷新的凭据，报 `invalid_argument`。
 #[tauri::command]
 pub async fn refresh_account(
     uuid: String,
