@@ -4,6 +4,7 @@
 
 import type { TaskKind, TaskStatus } from "../domain/types";
 import { invoke, listen, type UnlistenFn } from "./bridge";
+import type { BlockedFileDto } from "./modpack";
 
 export const CORE_EVENT = "aurora://core-event";
 
@@ -34,6 +35,8 @@ export type CoreEvent =
 export interface TaskErrorDto {
   code: string;
   message: string;
+  /** 以 distribution_blocked 失败时需要手动下载的文件清单；其余失败与较早写入的日志没有这一项。 */
+  blocked_files?: readonly BlockedFileDto[];
 }
 
 /** 重新执行该任务所需的命令与参数（不含 taskId）。 */
