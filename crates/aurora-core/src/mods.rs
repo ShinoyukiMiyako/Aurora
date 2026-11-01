@@ -34,7 +34,7 @@ use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
 use crate::history::HistoryEvent;
-use crate::ledger::{Ledger, LedgerEntry};
+use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
 use crate::modfs::{
     MODS_DIR, ensure_not_held, is_plain_file_name, ledger_key, lock_mods_dir, now_unix,
     numbered_backup_name, present, refuse, try_exists,
@@ -98,6 +98,19 @@ pub struct ModSource {
     pub title: Option<String>,
     /// 作为谁的前置被带进来的（project_id）；玩家主动装的为 `None`。
     pub dependency_of: Option<String>,
+    /// 这个 Mod 装进实例的时刻（unix 秒），取卷宗原值。
+    pub installed_at: i64,
+    /// 更新检查设置；没设置为 `None`（序列化为 `null`）。
+    pub update_hold: Option<UpdateHold>,
+}
+
+/// 批量启停里一个文件的结果。
+#[derive(Debug)]
+pub struct ModToggleOutcome {
+    /// 入参里的文件名，原样带回。
+    pub file_name: String,
+    /// 切换后的磁盘路径，或这一个文件失败的原因。
+    pub result: Result<PathBuf>,
 }
 
 /// 实例 Mod 列表的一项：磁盘扫描结果 + 卷宗 join 出的来源与图标。
@@ -255,15 +268,68 @@ impl Aurora {
         enabled: bool,
     ) -> Result<PathBuf> {
         let dirs = self.resolved_dirs(version_id).await?;
-        let path = mod_file_path(&dirs.mods_dir, file_name)?;
         let _guard = lock_mods_dir(&dirs.mods_dir).await;
-        ensure_not_held(vec![path.clone()]).await?;
-        let switched = if enabled {
-            enable_mod(&path).await?
-        } else {
-            disable_mod(&path).await?
-        };
-        Ok(switched)
+        toggle_locked(&dirs.mods_dir, file_name, enabled).await
+    }
+
+    /// 批量启用或禁用一组文件，逐个给出结果，顺序与入参一致。
+    ///
+    /// 单个文件失败（名字不合法、文件不在、被游戏占用、目标名已存在）只记在它那一项，不中断其余：
+    /// 玩家勾了十个，一个被占用不该让另外九个也不动。外层错误只来自实例本身解析不了。mods 目录的写锁
+    /// 整批只拿一次，批次中途不会插进别的改动。与单个启停一样不写历史。
+    pub async fn set_mods_enabled(
+        &self,
+        version_id: &str,
+        file_names: &[String],
+        enabled: bool,
+    ) -> Result<Vec<ModToggleOutcome>> {
+        let dirs = self.resolved_dirs(version_id).await?;
+        let _guard = lock_mods_dir(&dirs.mods_dir).await;
+        let mut outcomes = Vec::with_capacity(file_names.len());
+        for file_name in file_names {
+            outcomes.push(ModToggleOutcome {
+                file_name: file_name.clone(),
+                result: toggle_locked(&dirs.mods_dir, file_name, enabled).await,
+            });
+        }
+        Ok(outcomes)
+    }
+
+    /// 设置某个 Mod 的更新检查：`Some` 为忽略或锁定版本，`None` 为恢复检查。
+    ///
+    /// `file_name` 是列表里的磁盘文件名，禁用态也认。只改卷宗、不碰 jar，所以游戏运行中也能做；值没变
+    /// 时不落盘。文件不在 mods 目录里、或卷宗里没有它的平台来源（本地文件不参与更新检查）时拒绝。
+    pub async fn set_mod_update_hold(
+        &self,
+        version_id: &str,
+        file_name: &str,
+        hold: Option<UpdateHold>,
+    ) -> Result<()> {
+        let dirs = self.resolved_dirs(version_id).await?;
+        let path = mod_file_path(&dirs.mods_dir, file_name)?;
+        let key = ledger_key(file_name);
+        let _guard = lock_mods_dir(&dirs.mods_dir).await;
+        if !present(&dirs.mods_dir, key).await? {
+            return Err(refuse(
+                &path,
+                std::io::ErrorKind::NotFound,
+                format!("mods 目录里没有 {file_name}，可能已被移除"),
+            ));
+        }
+        let store = self.ledger_store(version_id);
+        let mut ledger = store.load().await?;
+        let entry = ledger.find_mut(key).ok_or_else(|| {
+            refuse(
+                &path,
+                std::io::ErrorKind::NotFound,
+                format!("{file_name} 没有平台来源记录，不能设置更新检查"),
+            )
+        })?;
+        if entry.update_hold == hold {
+            return Ok(());
+        }
+        entry.update_hold = hold;
+        store.save(&ledger).await
     }
 
     /// 从实例里移除一个 Mod 文件，摘掉它的卷宗条目，并在历史里记一条移除事件。
@@ -647,11 +713,19 @@ impl Aurora {
         for placement in placements {
             // 改名式更新：旧文件名那条记录必须先摘掉，否则卷宗里会同时挂着新旧两个文件名，而磁盘上
             // 旧的那个已经变成 .old 备份了。
-            if let Some(replaced) = &placement.replaced
-                && replaced.old_file != placement.file_name
-            {
-                ledger.remove(&replaced.old_file);
-            }
+            let previous = match &placement.replaced {
+                Some(replaced) if replaced.old_file != placement.file_name => {
+                    ledger.remove(&replaced.old_file)
+                }
+                Some(_) => ledger.find(&placement.file_name).cloned(),
+                None => None,
+            };
+            // 更新换的是版本不是 Mod：装进实例的时刻与玩家的更新设置都跟着这个 Mod 走。顶替来路不明的
+            // 文件时没有旧记录可继承，按新装算。
+            let (installed_at, update_hold) = match previous {
+                Some(old) => (old.installed_at, old.update_hold),
+                None => (at, None),
+            };
             ledger.upsert(LedgerEntry {
                 file_name: placement.file_name.clone(),
                 platform: placement.version.platform,
@@ -661,8 +735,9 @@ impl Aurora {
                 title: placement.title.clone(),
                 icon_url: placement.icon_url.clone(),
                 sha1: placement.sha1.clone(),
-                installed_at: at,
+                installed_at,
                 installed_as_dependency_of: placement.required_by.clone(),
+                update_hold,
             });
         }
         self.ledger_store(version_id).save(&ledger).await?;
@@ -738,16 +813,31 @@ fn join_ledger(installed: InstalledMod, ledger: &Ledger) -> InstanceMod {
             version_number: e.version_number.clone(),
             title: e.title.clone(),
             dependency_of: e.installed_as_dependency_of.clone(),
+            installed_at: e.installed_at,
+            update_hold: e.update_hold.clone(),
         }),
         installed,
     }
+}
+
+/// 切换一个文件的启停。调用方持有 mods 目录写锁；单个与批量启停共用这一段，两条路径的校验与占用
+/// 检查才不会走岔。
+async fn toggle_locked(mods_dir: &Path, file_name: &str, enabled: bool) -> Result<PathBuf> {
+    let path = mod_file_path(mods_dir, file_name)?;
+    ensure_not_held(vec![path.clone()]).await?;
+    let switched = if enabled {
+        enable_mod(&path).await?
+    } else {
+        disable_mod(&path).await?
+    };
+    Ok(switched)
 }
 
 /// 前端传来的 mods 目录文件名 -> 完整路径，挡住任何不是「mods 目录里一个模组 jar」的名字。
 ///
 /// 移除与启停只该作用于模组文件本身：放任任意文件名进来，`.old` 备份、配置文件乃至带 `..` 的路径都会
 /// 被当成 Mod 删掉或改名。
-fn mod_file_path(mods_dir: &Path, file_name: &str) -> Result<PathBuf> {
+pub(crate) fn mod_file_path(mods_dir: &Path, file_name: &str) -> Result<PathBuf> {
     if !is_plain_file_name(file_name) || !ledger_key(file_name).ends_with(".jar") {
         return Err(refuse(
             &mods_dir.join(file_name),
@@ -1567,6 +1657,19 @@ mod tests {
             .await
             .unwrap();
 
+        // 装进实例的时刻定在过去，好与「现在」区分；更新设置经禁用态文件名设上。
+        let store = aurora.ledger_store("1.21");
+        let mut ledger = store.load().await.unwrap();
+        ledger.find_mut("sodium-v1.jar").unwrap().installed_at = 1_600_000_000;
+        store.save(&ledger).await.unwrap();
+        let pin = UpdateHold::Pinned {
+            version_id: "v2".to_owned(),
+        };
+        aurora
+            .set_mod_update_hold("1.21", "sodium-v1.jar.disabled", Some(pin.clone()))
+            .await
+            .unwrap();
+
         let outcome = aurora
             .update_mod("1.21", "sodium-v1.jar.disabled", "v2", None)
             .await
@@ -1594,6 +1697,9 @@ mod tests {
         let entry = ledger.find("sodium-v2.jar").unwrap();
         assert_eq!(entry.version_id, "v2");
         assert_eq!(entry.sha1.as_deref(), Some(sha1_hex(&new_jar).as_str()));
+        // 换的是版本不是 Mod：装进实例的时刻与更新设置原样带到新条目上。
+        assert_eq!(entry.installed_at, 1_600_000_000);
+        assert_eq!(entry.update_hold, Some(pin.clone()));
 
         let history = aurora.history("1.21").await.unwrap();
         assert_eq!(history.events.len(), 2);
@@ -1625,18 +1731,12 @@ mod tests {
         let update_id = history.events[1].id().to_owned();
         aurora.rollback("1.21", &update_id).await.unwrap();
         assert_eq!(dir_names(&mods_dir).await, vec!["sodium-v1.jar"]);
-        assert_eq!(
-            aurora
-                .ledger_store("1.21")
-                .load()
-                .await
-                .unwrap()
-                .find("sodium-v1.jar")
-                .unwrap()
-                .version_number
-                .as_deref(),
-            Some("v1.0")
-        );
+        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let restored = ledger.find("sodium-v1.jar").unwrap();
+        assert_eq!(restored.version_number.as_deref(), Some("v1.0"));
+        // 回滚同样不改装进实例的时刻，更新设置也还在。
+        assert_eq!(restored.installed_at, 1_600_000_000);
+        assert_eq!(restored.update_hold, Some(pin));
     }
 
     /// 挂一个文件名固定为 sodium.jar 的版本：各版本的下载地址按版本分开，文件名却相同（原地更新）。
@@ -1674,6 +1774,12 @@ mod tests {
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
+        let store = aurora.ledger_store("1.21");
+        let mut ledger = store.load().await.unwrap();
+        let entry = ledger.find_mut("sodium.jar").unwrap();
+        entry.installed_at = 1_500_000_000;
+        entry.update_hold = Some(UpdateHold::Ignored);
+        store.save(&ledger).await.unwrap();
         aurora
             .update_mod("1.21", "sodium.jar", "v2", None)
             .await
@@ -1682,6 +1788,17 @@ mod tests {
             .update_mod("1.21", "sodium.jar", "v3", None)
             .await
             .unwrap();
+        // 同名原地更新同样沿用旧条目的装进时刻与更新设置。
+        let entry = store
+            .load()
+            .await
+            .unwrap()
+            .find("sodium.jar")
+            .cloned()
+            .unwrap();
+        assert_eq!(entry.version_id, "v3");
+        assert_eq!(entry.installed_at, 1_500_000_000);
+        assert_eq!(entry.update_hold, Some(UpdateHold::Ignored));
 
         let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
         assert_eq!(
@@ -1931,6 +2048,7 @@ mod tests {
             sha1: None,
             installed_at: 0,
             installed_as_dependency_of: None,
+            update_hold: None,
         });
         aurora.ledger_store("1.21").save(&ledger).await.unwrap();
 
@@ -1976,6 +2094,248 @@ mod tests {
         assert!(aurora.history("1.21").await.unwrap().events.is_empty());
     }
 
+    /// 批量启停：逐个给出结果、顺序同入参；单个失败不影响其余；已是目标状态的原样返回路径；不写历史。
+    #[tokio::test]
+    async fn set_mods_enabled_reports_each_file_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        for name in ["a.jar", "b.jar.disabled", "c.jar"] {
+            tokio::fs::write(mods_dir.join(name), name.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let names: Vec<String> = [
+            "a.jar",
+            "config.toml",
+            "b.jar.disabled",
+            "ghost.jar",
+            "c.jar",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let outcomes = aurora
+            .set_mods_enabled("1.21", &names, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|o| o.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "a.jar",
+                "config.toml",
+                "b.jar.disabled",
+                "ghost.jar",
+                "c.jar"
+            ]
+        );
+        assert_eq!(
+            outcomes[0].result.as_ref().unwrap(),
+            &mods_dir.join("a.jar.disabled")
+        );
+        let (_, reason) = refusal(outcomes[1].result.as_ref().unwrap_err());
+        assert!(reason.contains("不是 mods 目录里的模组文件名"), "{reason}");
+        // 已是禁用态：原样返回原路径。
+        assert_eq!(
+            outcomes[2].result.as_ref().unwrap(),
+            &mods_dir.join("b.jar.disabled")
+        );
+        assert!(outcomes[3].result.is_err());
+        assert_eq!(
+            outcomes[4].result.as_ref().unwrap(),
+            &mods_dir.join("c.jar.disabled")
+        );
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["a.jar.disabled", "b.jar.disabled", "c.jar.disabled"]
+        );
+        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+
+        // 反向批量启用。
+        let back: Vec<String> = ["a.jar.disabled", "c.jar.disabled"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let outcomes = aurora.set_mods_enabled("1.21", &back, true).await.unwrap();
+        assert!(outcomes.iter().all(|o| o.result.is_ok()));
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["a.jar", "b.jar.disabled", "c.jar"]
+        );
+
+        let err = aurora
+            .set_mods_enabled("ghost", &back, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::VersionNotInstalled { .. }));
+    }
+
+    /// 更新检查设置：禁用态文件名也能设；文件不在、无来源记录各自拒绝；值没变不改写卷宗文件。
+    #[tokio::test]
+    async fn set_mod_update_hold_writes_ledger_and_skips_unchanged_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("sodium.jar.disabled"), b"jar")
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("manual.jar"), b"jar")
+            .await
+            .unwrap();
+        let store = aurora.ledger_store("1.21");
+        let mut ledger = Ledger::default();
+        for (file_name, project_id) in [("sodium.jar", "AANobbMI"), ("gone.jar", "P7dR8mSH")] {
+            ledger.upsert(LedgerEntry {
+                file_name: file_name.to_owned(),
+                platform: Platform::Modrinth,
+                project_id: project_id.to_owned(),
+                version_id: "v1".to_owned(),
+                version_number: None,
+                title: None,
+                icon_url: None,
+                sha1: None,
+                installed_at: 1_700_000_000,
+                installed_as_dependency_of: None,
+                update_hold: None,
+            });
+        }
+        store.save(&ledger).await.unwrap();
+
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar.disabled", Some(UpdateHold::Ignored))
+            .await
+            .unwrap();
+        let after = store.load().await.unwrap();
+        assert_eq!(
+            after.find("sodium.jar").unwrap().update_hold,
+            Some(UpdateHold::Ignored)
+        );
+        assert_eq!(after.find("gone.jar").unwrap().update_hold, None);
+
+        // 值相同不落盘：先把文件换成紧凑写法，真的改写过就会变回带缩进的格式。
+        let compact = serde_json::to_vec(&after).unwrap();
+        tokio::fs::write(store.path(), &compact).await.unwrap();
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(store.path()).await.unwrap(), compact);
+
+        // 改成锁定、再恢复检查。
+        let pin = UpdateHold::Pinned {
+            version_id: "v9".to_owned(),
+        };
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar", Some(pin.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load()
+                .await
+                .unwrap()
+                .find("sodium.jar")
+                .unwrap()
+                .update_hold,
+            Some(pin)
+        );
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load()
+                .await
+                .unwrap()
+                .find("sodium.jar")
+                .unwrap()
+                .update_hold,
+            None
+        );
+
+        let before = tokio::fs::read(store.path()).await.unwrap();
+        // 卷宗里有、盘上没有：按已被移除拒绝。
+        let err = aurora
+            .set_mod_update_hold("1.21", "gone.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap_err();
+        let (path, reason) = refusal(&err);
+        assert_eq!(path, mods_dir.join("gone.jar"));
+        assert!(reason.contains("mods 目录里没有 gone.jar"), "{reason}");
+        // 盘上有、卷宗没有：本地文件不参与更新检查。
+        let err = aurora
+            .set_mod_update_hold("1.21", "manual.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap_err();
+        assert!(
+            refusal(&err)
+                .1
+                .contains("manual.jar 没有平台来源记录，不能设置更新检查"),
+            "{err:?}"
+        );
+        let err = aurora
+            .set_mod_update_hold("1.21", "a.jar.old", None)
+            .await
+            .unwrap_err();
+        assert!(refusal(&err).1.contains("不是 mods 目录里的模组文件名"));
+        assert_eq!(tokio::fs::read(store.path()).await.unwrap(), before);
+    }
+
+    /// 列表里的来源带上装进实例的时刻与更新设置，没设置时序列化为 null。
+    #[tokio::test]
+    async fn listed_source_carries_installed_at_and_update_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("a.jar"), b"a")
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("b.jar"), b"b")
+            .await
+            .unwrap();
+        let mut ledger = Ledger::default();
+        for (file_name, at, hold) in [
+            ("a.jar", 1_700_000_001, None),
+            ("b.jar", -3, Some(UpdateHold::Ignored)),
+        ] {
+            ledger.upsert(LedgerEntry {
+                file_name: file_name.to_owned(),
+                platform: Platform::Modrinth,
+                project_id: format!("p-{file_name}"),
+                version_id: "v1".to_owned(),
+                version_number: None,
+                title: None,
+                icon_url: None,
+                sha1: None,
+                installed_at: at,
+                installed_as_dependency_of: None,
+                update_hold: hold,
+            });
+        }
+        aurora.ledger_store("1.21").save(&ledger).await.unwrap();
+
+        let mut listed = aurora.list_mods("1.21").await.unwrap();
+        listed.sort_by(|x, y| x.installed.file_name.cmp(&y.installed.file_name));
+        let a = serde_json::to_value(listed[0].source.as_ref().unwrap()).unwrap();
+        assert_eq!(a["installed_at"], 1_700_000_001);
+        assert_eq!(a["update_hold"], serde_json::Value::Null);
+        let b = serde_json::to_value(listed[1].source.as_ref().unwrap()).unwrap();
+        assert_eq!(b["installed_at"], -3);
+        assert_eq!(b["update_hold"], serde_json::json!({ "kind": "ignored" }));
+    }
+
     /// 同一实例上的并发变更不丢记录：每次移除都留下自己的历史事件，卷宗条目全部摘净。
     ///
     /// 卷宗与历史都是「读全量 - 改 - 整体写」，没有写锁时并发的几次会各自读到同一份旧数据再各自写回，
@@ -2003,6 +2363,7 @@ mod tests {
                 sha1: None,
                 installed_at: 0,
                 installed_as_dependency_of: None,
+                update_hold: None,
             });
         }
         aurora.ledger_store("1.21").save(&ledger).await.unwrap();
