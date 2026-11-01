@@ -340,7 +340,7 @@ const RULES: &[Rule] = &[
         category: CrashCategory::LoopbackUnavailable,
         // Windows 上 NIO 的 Selector 靠 TEMP 下的 AF_UNIX 套接字建回环管道。TEMP 缺失、不可写或路径过长时绑定失败，
         // JDK 退回 TCP，不会走到这句报错；走到这里是绑定成功、连接失败（`Invalid argument: connect`）：带文件系统写虚拟化的
-        // 打包应用把写进 AppData 的套接字文件重定向了，它的子进程都一样。所以建议指向启动方式，不指向 TEMP 本身。
+        // 打包应用把写进 AppData 的套接字文件重定向了，它的子进程都一样。所以建议指向启动方式，不让玩家去查 TEMP 存不存在。
         patterns: &["unable to establish loopback connection"],
         regex: None,
         extract: None,
