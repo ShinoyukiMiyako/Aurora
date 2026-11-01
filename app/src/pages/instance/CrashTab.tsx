@@ -705,10 +705,10 @@ function FixRow({
         <ol className={styles.steps}>
           <li>{CRASH_PAGE_COPY.driverStep1}</li>
           <li>{CRASH_PAGE_COPY.driverStep2}</li>
-          {fix.javawPath !== null && (
+          {fix.javaPath !== null && (
             <li className={styles.stepCopy}>
-              <code className={styles.path}>{fix.javawPath}</code>
-              <CopyButton text={fix.javawPath} label={CRASH_PAGE_COPY.copyJavaw} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
+              <code className={styles.path}>{fix.javaPath}</code>
+              <CopyButton text={fix.javaPath} label={CRASH_PAGE_COPY.copyJava} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
             </li>
           )}
         </ol>

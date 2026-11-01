@@ -130,7 +130,7 @@ describe("崩溃诊断文案", () => {
 describe("显卡驱动的处理办法", () => {
   it("游戏由 java.exe 拉起，步骤与复制按钮都写 java.exe，不写 javaw.exe", () => {
     expect(CRASH_PAGE_COPY.driverStep2).toContain("把 java.exe 设为「高性能」");
-    expect(CRASH_PAGE_COPY.copyJavaw).toBe("复制 java.exe 路径");
+    expect(CRASH_PAGE_COPY.copyJava).toBe("复制 java.exe 路径");
   });
 });
 

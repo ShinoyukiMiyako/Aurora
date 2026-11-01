@@ -735,7 +735,7 @@ export type CrashFix =
   | { kind: "keep_latest"; disable: { fileName: string; name: string }[] }
   | { kind: "repair"; category: "native_library_missing" | "corrupted_jar"; changeGameDir: boolean }
   /** category 是这份报告里第一条显卡或本地崩溃类线索的类别，三类共用这一条。 */
-  | { kind: "driver_steps"; category: "graphics_driver" | "intel_graphics_driver" | "native_crash"; javawPath: string | null }
+  | { kind: "driver_steps"; category: "graphics_driver" | "intel_graphics_driver" | "native_crash"; javaPath: string | null }
   | { kind: "compare_log" };
 
 export interface CrashFixContext {
@@ -858,7 +858,7 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
       case "intel_graphics_driver":
       case "native_crash":
         // 三类的处理办法相同，键都是 driver_steps：只留第一条出现的类别
-        push({ kind: "driver_steps", category: clue.category, javawPath: report.java === null ? null : javawOf(report.java.path) });
+        push({ kind: "driver_steps", category: clue.category, javaPath: report.java === null ? null : report.java.path });
         break;
       case "corrupted_jar": {
         const mod = corruptedModFile(clue.matched, ctx.mods);
@@ -892,9 +892,4 @@ export function crashFixKey(fix: CrashFix): string {
     default:
       return fix.kind;
   }
-}
-
-/** 显卡设置里要选的是 javaw.exe；报告里记的可能是 java.exe。 */
-export function javawOf(javaPath: string): string {
-  return javaPath.replace(/java(\.exe)?$/i, (_m, exe: string | undefined) => (exe === undefined ? "javaw" : "javaw.exe"));
 }

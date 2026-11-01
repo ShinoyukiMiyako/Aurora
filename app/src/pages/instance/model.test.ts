@@ -33,7 +33,6 @@ import {
   isPendingModUpdate,
   javaChoice,
   javaFit,
-  javawOf,
   matchSuspect,
   modCounts,
   modRows,
@@ -513,10 +512,6 @@ describe("路径", () => {
     expect(instanceFolderPath("C:\\Users\\a\\.minecraft", "生存")).toBe("C:\\Users\\a\\.minecraft\\versions\\生存");
     expect(instanceFolderPath("D:/Games/.minecraft/", "RLCraft")).toBe("D:/Games/.minecraft/versions/RLCraft");
   });
-  it("javaw.exe", () => {
-    expect(javawOf("C:\\jdk\\bin\\java.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
-    expect(javawOf("C:\\jdk\\bin\\javaw.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
-  });
 });
 
 describe("更新任务换掉的 Mod", () => {
@@ -853,13 +848,13 @@ describe("一键尝试", () => {
     });
   });
 
-  it("本地库缺失带游戏路径提醒时多一个更换游戏目录；显卡驱动给 javaw 路径；文件损坏落在 mods 下改为停用该文件", () => {
+  it("本地库缺失带游戏路径提醒时多一个更换游戏目录；显卡驱动给这次用的 java.exe 路径；文件损坏落在 mods 下改为停用该文件", () => {
     expect(crashFixes(report([clue("native_library_missing")], { warnings: ["game_path"] }), ctx())[0]).toEqual({
       kind: "repair",
       category: "native_library_missing",
       changeGameDir: true,
     });
-    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javawPath: "C:/jdk/bin/javaw.exe" });
+    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javaPath: "C:/jdk/bin/java.exe" });
     const mods = [mod("badmod-1.jar")];
     expect(crashFixes(report([clue("corrupted_jar", { matched: "zip END header not found D:\\mc\\mods\\badmod-1.jar" })]), ctx({ mods }))[0]).toEqual({
       kind: "disable_mod",
@@ -949,19 +944,19 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
     expect(fixes).toEqual([{ kind: "disable_mod", category: "game_version_mismatch", fileName: "sodium-1.jar", name: "sodium-1" }, { kind: "compare_log" }]);
   });
 
-  it("Intel 显卡驱动与本地崩溃：给处理办法三步与 javaw 路径；报告里没有 Java 时不给路径", () => {
+  it("Intel 显卡驱动与本地崩溃：给处理办法三步与 java.exe 路径；报告里没有 Java 时不给路径", () => {
     expect(crashFixes(report([clue("intel_graphics_driver", { detail: "ig9icd64.dll" })]), ctx())[0]).toEqual({
       kind: "driver_steps",
       category: "intel_graphics_driver",
-      javawPath: "C:/jdk/bin/javaw.exe",
+      javaPath: "C:/jdk/bin/java.exe",
     });
     const nativeClue = clue("native_crash", { detail: "0xC0000005", matched: "", line: 0, source: "exit_code" });
-    expect(crashFixes(report([nativeClue], { java: null }), ctx())).toEqual([{ kind: "driver_steps", category: "native_crash", javawPath: null }, { kind: "compare_log" }]);
+    expect(crashFixes(report([nativeClue], { java: null }), ctx())).toEqual([{ kind: "driver_steps", category: "native_crash", javaPath: null }, { kind: "compare_log" }]);
   });
 
   it("显卡、Intel 显卡与本地崩溃同在一份报告里只出一条处理办法，取第一条出现的类别", () => {
     const fixes = crashFixes(report([clue("intel_graphics_driver"), clue("graphics_driver"), clue("native_crash", { source: "exit_code" })]), ctx());
-    expect(fixes).toEqual([{ kind: "driver_steps", category: "intel_graphics_driver", javawPath: "C:/jdk/bin/javaw.exe" }, { kind: "compare_log" }]);
+    expect(fixes).toEqual([{ kind: "driver_steps", category: "intel_graphics_driver", javaPath: "C:/jdk/bin/java.exe" }, { kind: "compare_log" }]);
     const reversed = crashFixes(report([clue("graphics_driver"), clue("intel_graphics_driver")]), ctx());
     expect(reversed.map((f) => (f.kind === "driver_steps" ? f.category : f.kind))).toEqual(["graphics_driver", "compare_log"]);
   });
