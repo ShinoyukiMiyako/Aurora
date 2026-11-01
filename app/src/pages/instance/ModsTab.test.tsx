@@ -298,6 +298,34 @@ describe("批量操作", () => {
     expect(find("checkbox", "选择 Iris").getAttribute("aria-checked")).toBe("false");
   });
 
+  it("批量条在焦点还在条内时换回工具条：焦点落到同一位置的搜索框，不掉回页面开头", async () => {
+    await open();
+    const search = () => document.querySelector<HTMLInputElement>('input[placeholder="搜索名称、作者或文件名"]');
+
+    click(find("checkbox", "选择 Iris"));
+    const clear = button("取消选择");
+    act(() => clear.focus());
+    click(clear);
+    expect(search()).not.toBeNull();
+    expect(document.activeElement).toBe(search());
+
+    // 批量动作跑完清空选择时同样如此
+    click(find("checkbox", "选择 Sodium"));
+    const disable = button("停用");
+    act(() => disable.focus());
+    click(disable);
+    await flush();
+    expect(callsOf(ipc, "set_mods_enabled")).toHaveLength(1);
+    expect(document.activeElement).toBe(search());
+
+    // 焦点已经不在条里（玩家点回了表格）时不抢焦点
+    click(find("checkbox", "选择 Sodium"));
+    const row = find("checkbox", "选择 Handmade");
+    act(() => row.focus());
+    click(button("取消选择"));
+    expect(document.activeElement).toBe(row);
+  });
+
   it("选择随列表重扫剪枝：文件被挪走后不再列出的行从选择里剔除，放回来也不会自动选上", async () => {
     await open();
     click(find("checkbox", "选择 Sodium"));
@@ -419,6 +447,55 @@ describe("忽略更新", () => {
   });
 });
 
+describe("行标注的位置", () => {
+  const rowEl = (name: string): HTMLElement => {
+    const row = [...grid().querySelectorAll<HTMLElement>('[role="row"][data-row-index]')].find((r) => {
+      const title = r.querySelector('[class*="modName"]');
+      return title !== null && title.textContent === name;
+    });
+    if (row === undefined) throw new Error(`没有 ${name} 这一行`);
+    return row;
+  };
+  /** Mod 列第二行的标注，按显示顺序。 */
+  const modTags = (name: string): string[] => {
+    const sub = rowEl(name).querySelector('[class*="modSub"]');
+    if (sub === null) throw new Error(`${name} 这一行没有第二行`);
+    return [...sub.querySelectorAll("span[data-tone]")].map(textOf);
+  };
+  const versionTags = (name: string): string[] => {
+    const cell = rowEl(name).querySelector('[class*="versionCell"]');
+    if (cell === null) throw new Error(`${name} 这一行没有版本列`);
+    return [...cell.querySelectorAll("span[data-tone]")].map(textOf);
+  };
+  const pinSodium = () => {
+    mods = mods.map((m) => (m.file_name === "sodium.jar" && m.source !== null ? { ...m, source: { ...m.source, update_hold: { kind: "pinned", version_id: "AANobbMI-1.1" } } } : m));
+  };
+
+  it("宽档：不检查更新与已锁定版本占版本列第二行、顶替「可更新到」；Mod 列只留新增与前置", async () => {
+    pinSodium();
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "1.0", "0.93.0")];
+    await open();
+    expect(versionTags("Iris")).toEqual(["不检查更新"]);
+    expect(modTags("Iris")).toEqual([]);
+    expect(versionTags("Sodium")).toEqual(["已锁定版本"]);
+    expect(modTags("Sodium")).toEqual(["新增"]);
+    expect(versionTags("Fabric API")).toEqual(["可更新到 0.93.0"]);
+    expect(modTags("Fabric API")).toEqual(["前置 · 由 Sodium 带入"]);
+  });
+
+  it("紧凑档：按来源、可更新到 / 不检查更新 / 已锁定版本、新增、前置排，最多 3 个", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    pinSodium();
+    mods = mods.map((m) => (m.file_name === "fabric-api.jar" && m.source !== null ? { ...m, source: { ...m.source, installed_at: Math.floor((NOW - DAY) / 1000) } } : m));
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1"), candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "1.0", "0.93.0")];
+    await open();
+    expect(modTags("Fabric API")).toEqual(["Modrinth", "可更新到 0.93.0", "新增"]);
+    expect(modTags("Sodium")).toEqual(["Modrinth", "已锁定版本", "新增"]);
+    expect(modTags("Iris")).toEqual(["Modrinth", "不检查更新"]);
+    expect(modTags("Handmade")).toEqual(["本地文件", "新增"]);
+  });
+});
+
 describe("更新预览", () => {
   beforeEach(() => {
     updates = [
@@ -453,6 +530,25 @@ describe("更新预览", () => {
       ["sodium.jar", "AANobbMI-1.1"],
     ]);
     expect(callsOf(ipc, "check_updates")).toHaveLength(1);
+  });
+
+  it("已在排队或进行中更新的 Mod 不再列进预览：确认后不会给同一个文件再排一次更新", async () => {
+    await open();
+    click(button("更新 Sodium"));
+    await flush();
+    expect(launcher.state.tasks.map((t) => [t.spec.command, t.spec.args.fileName])).toEqual([["update_mod", "sodium.jar"]]);
+
+    click(button("全部更新 · 3"));
+    await flush();
+    expect(textOf(dialog())).toContain("已勾选 2 / 2");
+    expect(textOf(dialog())).not.toContain("Sodium");
+    click(button("更新 2 个", dialog()));
+    await flush();
+
+    const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
+    expect(composite).toHaveLength(1);
+    const items = composite[0].spec.args.items as { fileName: string }[];
+    expect(items.map((i) => i.fileName)).toEqual(["fabric-api.jar", "handmade.jar"]);
   });
 
   it("全不选时确认键带原因禁用；批量更新只列选中行里可更新的", async () => {
