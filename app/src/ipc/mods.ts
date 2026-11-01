@@ -108,6 +108,8 @@ export interface ModUpdateOutcomeDto {
   file_name: string;
   path: string;
   platform: PlatformId;
+  /** 新版本要的必需前置里没有照办的（被保留、已下架、没有适配版本），每条一句给玩家看的说明。更新不走确认计划，只有这里说得上。 */
+  skipped: string[];
 }
 
 export type Compatibility =

@@ -208,6 +208,8 @@ describe("更新检查与更新", () => {
 
     const outcome = await updateMod("task-u1", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060");
     expect(outcome).toMatchObject({ file_name: "AANobbMI-0.6.0.jar", platform: "modrinth" });
+    // 这一版带着可选前置 Mod Menu：可选的不算没照办，不进结果
+    expect(outcome.skipped).toEqual([]);
     expect(stages[0]).toBe("准备把 AANobbMI-0.5.3.jar 更新到版本 sodium-060");
 
     const names = (await listMods(MOCK_MOD_INSTANCE)).map((m) => m.file_name);
@@ -237,6 +239,14 @@ describe("更新检查与更新", () => {
     expect(checks.find((c) => c.event_id === update.id)).toEqual({ event_id: update.id, can_rollback: false, reason: "该更新已经回滚过" });
     const twice = await failure(rollback(MOCK_MOD_INSTANCE, update.id));
     expect(twice.detail).toEqual({ causes: [`事件 ${update.id} 已经回滚过，不能重复回滚`] });
+  });
+
+  it("新版本要的必需前置找不到适配版本：说明随结果带回，确认计划的出参不多这个键", async () => {
+    await installMod("task-forge", "1.20.1-Forge", "modrinth", "AANobbMI", "sodium-053");
+    const outcome = await updateMod("task-forge-up", "1.20.1-Forge", "AANobbMI-0.5.3.jar", "sodium-060");
+    expect(outcome.file_name).toBe("AANobbMI-0.6.0.jar");
+    expect(outcome.skipped).toEqual(["前置 Fabric API 没有适配该实例的版本，未加入计划"]);
+    expect(Object.keys(await planInstall("1.20.1-Forge", "modrinth", "AANobbMI", "sodium-060")).sort()).toEqual(["items", "skipped"]);
   });
 
   it("停用的 Mod 更新后仍停用：落盘与返回都带 .disabled，卷宗与历史按启用态文件名记账", async () => {

@@ -723,6 +723,8 @@ export const TASK_TEXT = {
   updateDetail: (from: string, to: string, instance: string) => `${from} → ${to} · 「${instance}」`,
   updateAllTitle: (count: number) => `更新 ${count} 个 Mod`,
   updateAllDetail: (instance: string) => `「${instance}」`,
+  /** 更新任务的详情后面跟上没有照办的前置：通知会消失，这里留一份全文。 */
+  updateDetailWithDeps: (detail: string, deps: string) => `${detail} · ${deps}`,
   /** 新实例就绪后接着装的开局 Mod（一个组合任务）。 */
   starterTitle: (count: number) => `装上 ${count} 个开局 Mod`,
   starterDetail: (instance: string) => `「${instance}」`,
@@ -801,6 +803,8 @@ export const TASK_TOAST = {
   }),
   modUpdated: (mod: string, instance: string) => ({ title: `已更新 ${mod}`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
   modsUpdated: (count: number, instance: string) => ({ title: `已更新 ${count} 个 Mod`, body: `「${instance}」· 旧版本已保留，可以回滚` }),
+  /** 更新不走确认计划：新版本要的必需前置没有照办时，完成通知之后补一条，正文写后端原文。 */
+  updateDepsSkipped: (instance: string, notes: readonly string[]) => ({ title: `「${instance}」有 ${notes.length} 个前置要留意`, body: notes.join("；") }),
   /** 「全部更新」重试时，上一次已经全部换好（或玩家另行更新、移除了），这一次没有要换的。 */
   modsAlreadyLatest: (instance: string) => ({ title: ALL_MODS_LATEST, body: `「${instance}」` }),
   resourcePack: (name: string) => ({ title: `已安装资源包 ${name}`, body: "进入游戏后在「选项 → 资源包」里启用" }),

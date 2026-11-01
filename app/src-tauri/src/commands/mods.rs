@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use aurora_core::modversions::ModVersionList;
 use aurora_core::{
     is_mod_file_busy, Aurora, BaseError, BodyFormat, CoreError, EventSink, InstallPlan,
-    InstalledSource, InstanceMatch, InstanceMod, ModLoader, ModVersionInfo, Platform, StarterGroup,
-    StarterMissingReason, StarterMods, UpdateCandidate, UpdateHold,
+    InstalledSource, InstanceMatch, InstanceMod, ModInstallOutcome, ModLoader, ModVersionInfo,
+    Platform, StarterGroup, StarterMissingReason, StarterMods, UpdateCandidate, UpdateHold,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -34,6 +34,19 @@ pub struct ModUpdateOutcomeDto {
     pub file_name: String,
     pub path: String,
     pub platform: Platform,
+    /// 新版本要的必需前置里没有照办的，每条一句给玩家看的说明；更新不走确认计划，只有这里说得上。
+    pub skipped: Vec<String>,
+}
+
+impl From<ModInstallOutcome> for ModUpdateOutcomeDto {
+    fn from(outcome: ModInstallOutcome) -> Self {
+        Self {
+            file_name: outcome.file_name,
+            path: outcome.path.display().to_string(),
+            platform: outcome.platform,
+            skipped: outcome.skipped,
+        }
+    }
 }
 
 /// 列出指定实例已装 Mod（含禁用态、jar 元数据，以及卷宗 join 出的来源与图标）。
@@ -347,11 +360,7 @@ pub(crate) async fn update_mod_with(
                 .map_err(mods_error)
         })
         .await?;
-    Ok(ModUpdateOutcomeDto {
-        file_name: outcome.file_name,
-        path: outcome.path.display().to_string(),
-        platform: outcome.platform,
-    })
+    Ok(outcome.into())
 }
 
 /// 某工程的版本列表。
@@ -740,6 +749,26 @@ mod tests {
         }
         // 门面锁在命令返回后已释放。
         assert!(facade.is_unlocked());
+    }
+
+    /// 没有说明时 `skipped` 也要在：前端直接读它的长度。
+    #[test]
+    fn update_outcome_dto_carries_the_skipped_notes() {
+        let outcome = |skipped: Vec<String>| ModInstallOutcome {
+            file_name: "sodium-v2.jar".to_owned(),
+            path: "mods/sodium-v2.jar".into(),
+            platform: Platform::Modrinth,
+            skipped,
+        };
+        let note = "前置 Lib 没有适配该实例的版本，未加入计划".to_owned();
+
+        let json =
+            serde_json::to_value(ModUpdateOutcomeDto::from(outcome(vec![note.clone()]))).unwrap();
+        assert_eq!(json["file_name"], "sodium-v2.jar");
+        assert_eq!(json["skipped"], json!([note]));
+
+        let json = serde_json::to_value(ModUpdateOutcomeDto::from(outcome(Vec::new()))).unwrap();
+        assert_eq!(json["skipped"], json!([]));
     }
 
     /// 空参数在碰门面之前就以 invalid_argument 拒绝；更新命令不登记任务。

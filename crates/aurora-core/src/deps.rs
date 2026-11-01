@@ -61,6 +61,11 @@ pub struct InstallPlan {
     pub items: Vec<PlannedItem>,
     /// 被跳过的依赖说明（每条一句中文），供 UI 如实告知而不是假装没有。
     pub skipped: Vec<String>,
+    /// `skipped` 里说必需前置的那几条：被保留、已下架、没有适配版本或无从解析。更新不走确认计划，这几条
+    /// 要随结果带回去告诉玩家。可选、内嵌、工具类与不兼容声明不算：它们每次更新都在，混进来就成了噪声。
+    /// 只在后端流转，确认计划的界面读完整的 `skipped`。
+    #[serde(skip)]
+    pub unmet: Vec<String>,
 }
 
 /// 判定依赖版本所需的实例事实。
@@ -110,6 +115,18 @@ enum SkipNote {
 }
 
 impl SkipNote {
+    /// 这条说的是必需前置没有照办，而不是一条本来就不要求装的声明。
+    fn is_required(&self) -> bool {
+        matches!(
+            self,
+            SkipNote::MissingProjectId { .. }
+                | SkipNote::PinnedGone { .. }
+                | SkipNote::NoCompatibleVersion { .. }
+                | SkipNote::ProjectGone { .. }
+                | SkipNote::HeldBack { .. }
+        )
+    }
+
     fn project_id(&self) -> Option<&str> {
         match self {
             SkipNote::MissingProjectId { .. } => None,
@@ -383,7 +400,16 @@ impl Aurora {
             None => "未标明工程的前置".to_owned(),
         };
         let skipped = notes.iter().map(|note| note.render(name)).collect();
-        Ok(InstallPlan { items, skipped })
+        let unmet = notes
+            .iter()
+            .filter(|note| note.is_required())
+            .map(|note| note.render(name))
+            .collect();
+        Ok(InstallPlan {
+            items,
+            skipped,
+            unmet,
+        })
     }
 
     /// 解析一条必需依赖。
@@ -702,9 +728,12 @@ mod tests {
                 },
             ],
             skipped: vec!["可选前置 Mod Menu 未自动安装，需要时请手动添加".to_owned()],
+            unmet: vec!["前置 Lib 没有适配该实例的版本，未加入计划".to_owned()],
         };
 
         let json = serde_json::to_value(&plan).unwrap();
+        // 确认计划的界面读完整的 skipped，这份子集不下发。
+        assert!(json.get("unmet").is_none());
         assert_eq!(json["items"][0]["required_by"], serde_json::Value::Null);
         assert_eq!(json["items"][0]["already_satisfied"], false);
         assert_eq!(json["items"][0]["title"], "Sodium");
@@ -728,6 +757,7 @@ mod tests {
         let json = serde_json::to_value(InstallPlan {
             items: Vec::new(),
             skipped: Vec::new(),
+            unmet: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["items"], serde_json::json!([]));
@@ -980,6 +1010,7 @@ mod tests {
                 "内嵌前置 cloth-config 已打包在 sodium-v1.jar 内，无需单独安装".to_owned(),
             ]
         );
+        assert_eq!(plan.unmet, Vec::<String>::new());
     }
 
     /// 依赖没有适配本实例的版本：进 skipped 说明，主 Mod 仍留在计划里。
@@ -1038,6 +1069,7 @@ mod tests {
             plan.skipped,
             vec!["前置 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
         );
+        assert_eq!(plan.unmet, plan.skipped);
     }
 
     /// 依赖钉死了精确版本：原样采用（走单版本端点），不因为有更新的版本就改口。
