@@ -1,6 +1,7 @@
 // 需要手动下载的文件清单：作者不允许启动器直接下载的 CurseForge 文件，逐个给出它在网页上的文件页；用户下载好后
 // 选文件所在的文件夹，后端按 sha1 或指纹认领进暂存位（不看文件名，被浏览器改过名的也认得出）。
-// 从导入确认步打开时，全部找到后「继续导入」回确认步重新读取；从安装失败态打开时「重新安装」重排这个任务。
+// 从导入确认步或发现页面板的安装前说明打开时，全部找到后「继续导入」回到原处；
+// 从安装失败态打开时「重新安装」重排这个任务。
 // 检查进行中可以关掉清单：后台检查不打断，结果丢弃。
 
 import { AnimatePresence, motion, useIsPresent } from "framer-motion";
@@ -29,7 +30,7 @@ export interface BlockedFilesModalProps {
   files: readonly BlockedFileDto[];
   origin: BlockedOrigin;
   onClose: () => void;
-  /** 全部找到后点主按钮：import 回确认步重新读取，failed 重新安装。清单由调用方关掉。 */
+  /** 全部找到后点主按钮：import 回到打开清单的地方，failed 重新安装。清单由调用方关掉。 */
   onAllFound: () => void;
 }
 

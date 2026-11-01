@@ -20,12 +20,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aurora_download::{CredentialScope, DownloadCredential, DownloadTask};
 use aurora_instance::{
     AURORA_META_DIR, IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore,
-    VERSIONS_DIR, VersionSettings, VersionSettingsStore,
+    NameViolation, VERSIONS_DIR, VersionSettings, VersionSettingsStore, check_name_format,
 };
 use aurora_modpack::{
     CurseForgeFileRef, ModrinthFile, PackArchive, PackFormat, PackLoader, PackLoaderKind,
@@ -34,7 +34,7 @@ use aurora_modpack::{
 use aurora_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
 use serde::{Deserialize, Serialize};
 
-use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed};
+use crate::blocked::{BlockedFile, CLAIMS_DIR, ClaimedCopy, PACK_CACHE_DIR, place_claimed};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
@@ -44,9 +44,6 @@ use crate::resources::{
     curseforge_download_url, is_safe_file_name, join_landing, task_for_file_url,
 };
 
-/// 实例名的最大字符数：界面上要完整显示，路径也不宜过长。
-pub const INSTANCE_NAME_MAX_CHARS: usize = 32;
-
 /// 实例目录里的整合包信息文件名（在启动器元数据目录下）。
 const MODPACK_INFO_FILE: &str = "modpack.json";
 /// 整合包信息的格式版本；字段不兼容地变化时递增。
@@ -54,6 +51,8 @@ const MODPACK_INFO_SCHEMA: u32 = 1;
 /// CurseForge 批量接口一次带多少个 id。接口文档没写上限，大整合包有四五百个文件，
 /// 分批是为了让单个请求体与响应都保持在常规大小。
 const CURSEFORGE_BATCH: usize = 200;
+/// 平台整合包的下载缓存放多久还没删就算残留。
+const STALE_PACK_CACHE_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 // CurseForge 的资源大类 id（与发现页分类表同一来源：官方分类接口的真实响应）。
 const CF_CLASS_RESOURCE_PACKS: u32 = 12;
@@ -212,66 +211,10 @@ pub struct InstanceModpack {
     pub installed_at: u64,
 }
 
-/// 实例名不可用的原因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstanceNameRule {
-    /// 去掉首尾空白后为空。
-    Empty,
-    /// 超过 [`INSTANCE_NAME_MAX_CHARS`] 个字符。
-    TooLong,
-    /// 含 Windows 文件名不允许的字符、控制字符，或以点开头/结尾。
-    IllegalChar,
-    /// Windows 保留设备名（CON、NUL、COM1……）。
-    Reserved,
-    /// 与已有版本目录或本次要装的游戏版本同名（不区分大小写）。
-    Duplicate,
-}
-
-impl InstanceNameRule {
-    /// 给用户看的原因。
-    pub fn describe(self) -> &'static str {
-        match self {
-            InstanceNameRule::Empty => "名字不能为空",
-            InstanceNameRule::TooLong => "名字最多 32 个字符",
-            InstanceNameRule::IllegalChar => {
-                "不能含 \\ / : * ? \" < > | 与控制字符，也不能以点开头或结尾"
-            }
-            InstanceNameRule::Reserved => "这是 Windows 的保留名",
-            InstanceNameRule::Duplicate => "已有同名的版本或实例",
-        }
-    }
-}
-
-/// 校验实例名的写法（不查重），返回去掉首尾空白后的名字。
-pub fn validate_instance_name(raw: &str) -> std::result::Result<String, InstanceNameRule> {
+/// 校验实例名的写法（不查重），返回去掉首尾空白后的名字。规则与新建、改名是同一套。
+pub fn validate_instance_name(raw: &str) -> std::result::Result<String, NameViolation> {
     let name = raw.trim();
-    if name.is_empty() {
-        return Err(InstanceNameRule::Empty);
-    }
-    if name.chars().count() > INSTANCE_NAME_MAX_CHARS {
-        return Err(InstanceNameRule::TooLong);
-    }
-    if name.chars().any(|c| {
-        matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
-    }) {
-        return Err(InstanceNameRule::IllegalChar);
-    }
-    // 结尾的点会被 Windows 悄悄去掉；开头的点是隐藏目录，也和启动器元数据目录同一种写法。
-    if name.starts_with('.') || name.ends_with('.') {
-        return Err(InstanceNameRule::IllegalChar);
-    }
-    let stem = name.split('.').next().unwrap_or(name).trim_end();
-    let upper = stem.to_ascii_uppercase();
-    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ["COM", "LPT"].iter().any(|prefix| {
-            upper
-                .strip_prefix(prefix)
-                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
-        });
-    if reserved {
-        return Err(InstanceNameRule::Reserved);
-    }
+    check_name_format(name)?;
     Ok(name.to_owned())
 }
 
@@ -308,7 +251,7 @@ pub struct PreparedModpack {
     remote: Vec<RemoteDownload>,
     /// 认领到暂存位的受限文件：导入时复制进实例，不下载。
     claimed: Vec<ClaimedCopy>,
-    /// 平台整合包下载到的缓存目录；本地文件为 `None`。
+    /// 平台整合包下载到的缓存目录，只属于这一次导入；本地文件为 `None`。
     cache_dir: Option<PathBuf>,
 }
 
@@ -338,13 +281,57 @@ impl PreparedModpack {
     }
 }
 
-/// 下载来的包只是导入的中间产物；删不掉不影响任何实例，留日志即可。
+/// 下载来的包只是导入的中间产物；删不掉不影响任何实例，留日志即可。下载在建目录之前就失败时目录不存在。
 async fn remove_pack_cache(dir: Option<&Path>) {
     let Some(dir) = dir else {
         return;
     };
-    if let Err(err) = tokio::fs::remove_dir_all(dir).await {
+    if let Err(err) = tokio::fs::remove_dir_all(dir).await
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
         tracing::warn!(dir = %dir.display(), error = %err, "整合包下载缓存未能删除");
+    }
+}
+
+/// 清掉下载缓存根下的残留，认领暂存位不动。
+///
+/// 导入结束后缓存就删了；进程被杀、或取消宽限期满丢弃了导入，目录会留下来，而它只属于那一次导入，不会再有
+/// 人接手。比 [`STALE_PACK_CACHE_AGE`] 老的才算残留：再慢的导入也用不了这么久，不会删到别的导入手里的包。
+/// 与删缓存同理，清不掉不影响导入，留日志即可。
+async fn sweep_stale_pack_caches(root: &Path, now: SystemTime) {
+    let mut entries = match tokio::fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            tracing::warn!(dir = %root.display(), error = %err, "读不了整合包下载缓存目录，这次不清残留");
+            return;
+        }
+    };
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return,
+            Err(err) => {
+                tracing::warn!(dir = %root.display(), error = %err, "读不了整合包下载缓存目录，这次不清残留");
+                return;
+            }
+        };
+        if entry.file_name() == CLAIMS_DIR {
+            continue;
+        }
+        let dir = entry.path();
+        let stale = match entry.metadata().await.and_then(|meta| meta.modified()) {
+            Ok(modified) => now
+                .duration_since(modified)
+                .is_ok_and(|age| age > STALE_PACK_CACHE_AGE),
+            Err(err) => {
+                tracing::warn!(dir = %dir.display(), error = %err, "读不了残留缓存的修改时间，留着");
+                false
+            }
+        };
+        if stale {
+            remove_pack_cache(Some(&dir)).await;
+        }
     }
 }
 
@@ -533,7 +520,7 @@ impl Aurora {
         let requested = name.unwrap_or(&manifest.name);
         let name = validate_instance_name(requested).map_err(|rule| name_error(requested, rule))?;
         if name.eq_ignore_ascii_case(&manifest.minecraft) {
-            return Err(name_error(&name, InstanceNameRule::Duplicate));
+            return Err(name_error(&name, NameViolation::Duplicate));
         }
         self.ensure_modpack_name_free(&name).await?;
         let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
@@ -629,7 +616,7 @@ impl Aurora {
         // 原版或加载器的自然版本 id 与实例同名时，安装已经把它写进了实例目录，两者没法共存，按重名
         // 处理。失败清理会连它一起删掉：同名目录在建实例前不存在，一定是这次装出来的。
         if natural.eq_ignore_ascii_case(name) || installed.vanilla.id.eq_ignore_ascii_case(name) {
-            return Err(name_error(name, InstanceNameRule::Duplicate));
+            return Err(name_error(name, NameViolation::Duplicate));
         }
         self.materialize_version_json(
             name,
@@ -816,13 +803,16 @@ impl Aurora {
                 })?
         {
             if entry.file_name().to_string_lossy().to_lowercase() == wanted {
-                return Err(name_error(name, InstanceNameRule::Duplicate));
+                return Err(name_error(name, NameViolation::Duplicate));
             }
         }
         Ok(())
     }
 
     /// 平台整合包下载到缓存目录，返回包路径与它所在的临时目录。
+    ///
+    /// 目录每次导入一个、名字带随机后缀：同一个版本同时导入两次时，先结束的一路删目录不能动另一路手里的包。
+    /// 代价是下载失败后分片没有下一次来续传，当场连目录删掉。
     ///
     /// CurseForge 包本体也可能不允许启动器直接下载：这时报的受限清单里只有这个包，用户从网页下载、认领进
     /// 暂存位后，重新安装直接读暂存副本，不再向 CDN 要，也没有要删的临时目录（暂存副本留给下次用）。
@@ -840,14 +830,13 @@ impl Aurora {
                 project_id: format!("{project_id}/{version_id}"),
             });
         }
-        let cache_root = self.cache_root();
+        let root = self.cache_root().join(PACK_CACHE_DIR);
         let platform_slug = match platform {
             Platform::Modrinth => "modrinth",
             Platform::CurseForge => "curseforge",
         };
-        let dir = cache_root
-            .join("modpacks")
-            .join(format!("{platform_slug}-{version_id}"));
+        let suffix = fastrand::u32(..);
+        let dir = root.join(format!("{platform_slug}-{version_id}-{suffix:08x}"));
         let (file_name, task) = match self
             .platform_file_task(platform, project_id, version_id, &dir, "")
             .await
@@ -862,14 +851,20 @@ impl Aurora {
                 return Ok((staged, None));
             }
         };
+        sweep_stale_pack_caches(&root, SystemTime::now()).await;
         emit(events, CoreEvent::stage(format!("下载整合包 {file_name}")));
         let dest = task.dest.clone();
-        let report = self
+        let failure = match self
             .download_pool_reporting(events)
             .download_all(vec![task], None)
-            .await?;
-        if let Some(failure) = report.failures.into_iter().next() {
-            return Err(failure.error.into());
+            .await
+        {
+            Ok(report) => report.failures.into_iter().next().map(|f| f.error),
+            Err(err) => Some(err),
+        };
+        if let Some(err) = failure {
+            remove_pack_cache(Some(&dir)).await;
+            return Err(err.into());
         }
         Ok((dest, Some(dir)))
     }
@@ -1349,11 +1344,11 @@ fn preview_of(
     }
 }
 
-async fn read_pack_blocking(path: PathBuf) -> Result<PackArchive> {
+pub(crate) async fn read_pack_blocking(path: PathBuf) -> Result<PackArchive> {
     Ok(tokio::task::spawn_blocking(move || aurora_modpack::read_pack(&path)).await??)
 }
 
-fn name_error(name: &str, rule: InstanceNameRule) -> CoreError {
+fn name_error(name: &str, rule: NameViolation) -> CoreError {
     CoreError::InstanceNameInvalid {
         name: name.to_owned(),
         rule,
@@ -1390,7 +1385,7 @@ async fn create_instance_dir(version_dir: &Path, name: &str) -> Result<()> {
     match tokio::fs::create_dir(version_dir).await {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(name_error(name, InstanceNameRule::Duplicate))
+            Err(name_error(name, NameViolation::Duplicate))
         }
         Err(source) => Err(aurora_base::Error::Io {
             path: version_dir.to_path_buf(),
@@ -1547,7 +1542,7 @@ mod tests {
                 "{raw:?}"
             );
         };
-        let bad = |raw: &str, rule: InstanceNameRule| {
+        let bad = |raw: &str, rule: NameViolation| {
             assert_eq!(validate_instance_name(raw), Err(rule), "{raw:?}");
         };
         ok("  我的整合包 1.0  ", "我的整合包 1.0");
@@ -1556,19 +1551,33 @@ mod tests {
         ok("COM10", "COM10");
         ok("Console", "Console");
         ok("a.b", "a.b");
-        bad("", InstanceNameRule::Empty);
-        bad(" \t ", InstanceNameRule::Empty);
-        bad(&"樱".repeat(33), InstanceNameRule::TooLong);
-        for c in ['\\', '/', ':', '*', '?', '"', '<', '>', '|', '\u{7}'] {
-            bad(&format!("a{c}b"), InstanceNameRule::IllegalChar);
+        bad("", NameViolation::Empty);
+        bad(" \t ", NameViolation::Empty);
+        bad(&"樱".repeat(33), NameViolation::TooLong);
+        for c in ['\\', '/', ':', '*', '?', '"', '<', '>', '|'] {
+            bad(&format!("a{c}b"), NameViolation::IllegalChar);
         }
-        bad(".hidden", InstanceNameRule::IllegalChar);
-        bad("pack.", InstanceNameRule::IllegalChar);
+        bad("a\u{7}b", NameViolation::ReservedByWindows);
+        bad(".hidden", NameViolation::LeadingDot);
+        bad("pack.", NameViolation::ReservedByWindows);
         for reserved in [
             "CON", "prn", "Aux", "nul", "COM1", "com9", "LPT1", "lpt9", "con.txt", "NUL .x",
         ] {
-            bad(reserved, InstanceNameRule::Reserved);
+            bad(reserved, NameViolation::ReservedByWindows);
         }
+    }
+
+    /// 名字长度按 UTF-16 码元算，与新建、改名和界面输入框同一计法：补充平面字符占两个码元。
+    #[test]
+    fn instance_name_length_counts_utf16_units() {
+        assert_eq!(
+            validate_instance_name(&"\u{1F338}".repeat(16)).as_deref(),
+            Ok("\u{1F338}".repeat(16).as_str())
+        );
+        assert_eq!(
+            validate_instance_name(&"\u{1F338}".repeat(17)),
+            Err(NameViolation::TooLong)
+        );
     }
 
     #[test]
@@ -1577,7 +1586,7 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(seed);
         let alphabet: Vec<char> = "abcXYZ019 -_+()[]樱花林落樱整合包".chars().collect();
         for _ in 0..500 {
-            let len = rng.usize(1..=INSTANCE_NAME_MAX_CHARS);
+            let len = rng.usize(1..=aurora_instance::MAX_NAME_UNITS);
             let raw: String = (0..len)
                 .map(|_| alphabet[rng.usize(..alphabet.len())])
                 .collect();
@@ -1994,13 +2003,11 @@ mod tests {
             std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
             b"fov:90"
         );
-        let cache = tmp
-            .path()
-            .join("data")
-            .join("cache")
-            .join("modpacks")
-            .join("modrinth-pv1");
-        assert!(!cache.exists(), "下载缓存应在导入后删除");
+        assert_eq!(
+            pack_cache_entries(tmp.path()),
+            Vec::<String>::new(),
+            "下载缓存应在导入后删除"
+        );
     }
 
     /// 准备一步不动游戏目录：名字已定、平台包已下到缓存，但实例目录还没建；放弃时缓存删掉。
@@ -2038,25 +2045,28 @@ mod tests {
             project_id: "proj".into(),
             version_id: "pv2".into(),
         };
-        let cache = tmp
-            .path()
-            .join("data")
-            .join("cache")
-            .join("modpacks")
-            .join("modrinth-pv2");
 
         let prepared = aurora
             .prepare_modpack(&source, None, &ImportSelection::default(), None)
             .await
             .unwrap();
         assert_eq!(prepared.name(), "测试包");
+        let cache = prepared.cache_dir.clone().expect("平台包有下载缓存");
+        assert!(
+            cache.starts_with(tmp.path().join("data").join("cache").join("modpacks")),
+            "{cache:?}"
+        );
         assert!(cache.join("pack.mrpack").is_file(), "平台包应已下到缓存");
         assert!(
             !aurora.game_dir().join("versions").join("测试包").exists(),
             "准备一步不建实例目录"
         );
         prepared.discard().await;
-        assert!(!cache.exists(), "放弃导入时删掉下载缓存");
+        assert_eq!(
+            pack_cache_entries(tmp.path()),
+            Vec::<String>::new(),
+            "放弃导入时删掉下载缓存"
+        );
 
         let err = aurora
             .prepare_modpack(&source, Some("a/b"), &ImportSelection::default(), None)
@@ -2065,11 +2075,209 @@ mod tests {
         assert!(matches!(
             err,
             CoreError::InstanceNameInvalid {
-                rule: InstanceNameRule::IllegalChar,
+                rule: NameViolation::IllegalChar,
                 ..
             }
         ));
-        assert!(!cache.exists(), "准备失败也不留下载缓存");
+        assert_eq!(
+            pack_cache_entries(tmp.path()),
+            Vec::<String>::new(),
+            "准备失败也不留下载缓存"
+        );
+    }
+
+    /// 挂上一个平台版本：`sha1` 是版本信息里声明的包哈希，`bytes` 是下载时真正回的内容。
+    async fn mount_platform_pack(
+        server: &MockServer,
+        version_id: &str,
+        sha1: &str,
+        bytes: Vec<u8>,
+    ) {
+        let file = format!("/files/{version_id}.mrpack");
+        Mock::given(method("GET"))
+            .and(path(format!("/version/{version_id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": version_id, "project_id": "proj", "name": "1.0.0", "version_number": "1.0.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {"sha1": sha1},
+                           "url": format!("{}{file}", server.uri()),
+                           "filename": "pack.mrpack", "primary": true, "size": bytes.len()}]
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(file))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+            .mount(server)
+            .await;
+    }
+
+    fn platform_source(version_id: &str) -> ModpackSource {
+        ModpackSource::Platform {
+            platform: Platform::Modrinth,
+            project_id: "proj".into(),
+            version_id: version_id.into(),
+        }
+    }
+
+    /// `<缓存根>/modpacks` 下现有的条目名，排好序；目录还没建出来算没有。
+    fn pack_cache_entries(root: &Path) -> Vec<String> {
+        let dir = root.join("data").join("cache").join("modpacks");
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// 同一个平台版本同时导入两次：先结束的一路删自己的缓存，另一路手里的包还在，照常导入完。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_imports_of_one_platform_version_keep_their_own_cache() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.mrpack");
+        write_pack(
+            &built,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"fov:90")],
+        );
+        let bytes = std::fs::read(&built).unwrap();
+        mount_platform_pack(&server, "pv3", &sha1_hex(&bytes), bytes).await;
+        let aurora = aurora(tmp.path(), &server);
+        let source = platform_source("pv3");
+        let none = ImportSelection::default();
+
+        let (first, second) = tokio::join!(
+            aurora.prepare_modpack(&source, Some("第一份"), &none, None),
+            aurora.prepare_modpack(&source, Some("第二份"), &none, None),
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+        first.discard().await;
+        let outcome = aurora
+            .import_modpack(second, "task-second", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            b"fov:90"
+        );
+        assert_eq!(
+            pack_cache_entries(tmp.path()),
+            Vec::<String>::new(),
+            "两路都结束后不留缓存"
+        );
+    }
+
+    /// 缓存目录只属于这一次导入，下载失败时没有下一次来接手，当场删掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_pack_download_leaves_no_cache_behind() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        // 回来的内容与声明的哈希对不上：下载走到了落盘这一步才失败，目录已经建出来了。
+        mount_platform_pack(&server, "pv4", &"0".repeat(40), b"not the pack".to_vec()).await;
+        let aurora = aurora(tmp.path(), &server);
+
+        let err = aurora
+            .prepare_modpack(
+                &platform_source("pv4"),
+                None,
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, CoreError::Download(_)), "{err:?}");
+        assert_eq!(pack_cache_entries(tmp.path()), Vec::<String>::new());
+    }
+
+    /// 被杀掉的进程留下的目录只有这一步能清掉；新近的目录可能正被别的导入用着，认领暂存位导入后也要留着。
+    #[tokio::test]
+    async fn sweeping_removes_only_stale_pack_caches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("data").join("cache").join("modpacks");
+        for dir in [
+            "claims/curseforge-1",
+            "modrinth-v1-0000beef",
+            "curseforge-7-1234abcd",
+        ] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("pack.zip"), b"x").unwrap();
+        }
+
+        sweep_stale_pack_caches(&root, SystemTime::now()).await;
+        assert_eq!(
+            pack_cache_entries(tmp.path()),
+            vec!["claims", "curseforge-7-1234abcd", "modrinth-v1-0000beef"],
+            "没过期的都留着"
+        );
+
+        let later = SystemTime::now() + STALE_PACK_CACHE_AGE + Duration::from_secs(60);
+        sweep_stale_pack_caches(&root, later).await;
+        assert_eq!(pack_cache_entries(tmp.path()), vec!["claims"]);
+        assert!(root.join("claims/curseforge-1/pack.zip").is_file());
+    }
+
+    /// 下载平台整合包时顺手清残留：上一次被杀掉的进程留下的目录在这里消失，新近的目录不动。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn downloading_a_platform_pack_sweeps_caches_left_by_a_killed_run() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.mrpack");
+        write_pack(
+            &built,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[],
+        );
+        let bytes = std::fs::read(&built).unwrap();
+        mount_platform_pack(&server, "pv5", &sha1_hex(&bytes), bytes).await;
+        let root = tmp.path().join("data").join("cache").join("modpacks");
+        let stale = root.join("modrinth-old-0000dead");
+        let fresh = root.join("modrinth-new-0000beef");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        // Windows 上打开目录要带这个标志。
+        std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&stale)
+            .unwrap()
+            .set_modified(SystemTime::now() - STALE_PACK_CACHE_AGE - Duration::from_secs(60))
+            .unwrap();
+        let aurora = aurora(tmp.path(), &server);
+
+        let prepared = aurora
+            .prepare_modpack(
+                &platform_source("pv5"),
+                None,
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!stale.exists(), "残留应被清掉");
+        assert!(fresh.is_dir(), "新近的目录可能正被别的导入用着");
+        prepared.discard().await;
+    }
+
+    /// 还没有缓存目录时什么也不用清。
+    #[tokio::test]
+    async fn sweeping_a_missing_cache_root_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        sweep_stale_pack_caches(&tmp.path().join("modpacks"), SystemTime::now()).await;
+        assert!(!tmp.path().join("modpacks").exists());
     }
 
     /// 装游戏失败时整个实例目录删掉；同名（不区分大小写）与和游戏版本同名都在动手前拒绝，已有目录不动。
@@ -2116,7 +2324,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, CoreError::InstanceNameInvalid { name, rule: InstanceNameRule::Duplicate } if name == "taken"),
+            matches!(&err, CoreError::InstanceNameInvalid { name, rule: NameViolation::Duplicate } if name == "taken"),
             "{err:?}"
         );
         assert_eq!(
@@ -2137,7 +2345,7 @@ mod tests {
         assert!(matches!(
             err,
             CoreError::InstanceNameInvalid {
-                rule: InstanceNameRule::Duplicate,
+                rule: NameViolation::Duplicate,
                 ..
             }
         ));
@@ -2159,7 +2367,7 @@ mod tests {
         assert!(matches!(
             err,
             CoreError::InstanceNameInvalid {
-                rule: InstanceNameRule::IllegalChar,
+                rule: NameViolation::IllegalChar,
                 ..
             }
         ));
@@ -3573,6 +3781,124 @@ mod tests {
             "暂存副本导入后留着"
         );
         assert!(renamed.is_file(), "下载文件夹里的原文件不动");
+    }
+
+    /// 整合包本体受限：认领之前摘要报受限、清单里只有这个包；认领之后摘要从暂存副本读，数字与导入时读到的
+    /// 同一份包一致，不向 CDN 要包。暂存副本被改过时不算认领，照旧报受限。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claimed_curseforge_pack_file_is_summarized_from_the_claim() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.zip");
+        write_curseforge_pack(
+            &built,
+            &curseforge_vanilla_manifest(serde_json::json!([
+                { "projectID": 1, "fileID": 11, "required": true }
+            ])),
+            &[
+                ("overrides/options.txt", b"fov:70"),
+                ("overrides/mods/extra.jar", b"jar"),
+                ("overrides/mods/README.md", b"read me"),
+            ],
+        );
+        let pack_bytes = std::fs::read(&built).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": cf_file_with(7001, 700, "受限包-1.0.zip", None, &pack_bytes)
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": cf_mod(700, 4471)})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file(11, 1, "jei.jar", None),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(1, 6)]})),
+            )
+            .mount(&server)
+            .await;
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+
+        let err = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件：{err:?}");
+        };
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.file_id, f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(7001, "受限包-1.0.zip")]
+        );
+
+        let downloads = tmp.path().join("下载");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("受限包-1.0 (1).zip"), &pack_bytes).unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert_eq!(report.missing, Vec::<u32>::new());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
+            .await
+            .unwrap();
+        assert_eq!(
+            summary,
+            crate::modpack_summary::ModpackSummary {
+                format: PackFormat::CurseForge,
+                name: "受限包".into(),
+                version: None,
+                minecraft: "test".into(),
+                loader: None,
+                pack_bytes: pack_bytes.len() as u64,
+                remote_files: 1,
+                mod_files: 2,
+                remote_bytes: Some(10),
+                override_files: 3,
+                override_bytes: 6 + 3 + 7,
+            }
+        );
+
+        let staged = aurora
+            .blocked_claims_dir()
+            .join("curseforge-7001")
+            .join("受限包-1.0.zip");
+        std::fs::write(&staged, b"tampered").unwrap();
+        let err = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::FileDistributionBlocked { files } if files[0].file_id == 7001),
+            "{err:?}"
+        );
     }
 
     #[test]

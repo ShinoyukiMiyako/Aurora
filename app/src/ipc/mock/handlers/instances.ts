@@ -68,7 +68,7 @@ const GIB = 1024 * MB;
 /** 后端的备份根（<游戏目录>/.petalfall/backups）；ipc/ 引用不到元数据目录名常量，mock 按后端的布局写一份。 */
 const MOCK_BACKUPS_ROOT = "D:/Games/.minecraft/.petalfall/backups";
 
-const NAME_MESSAGES: Record<NameRule, string> = {
+export const NAME_MESSAGES: Record<NameRule, string> = {
   empty: "先给实例起个名字",
   too_long: "名称最多 32 个字",
   illegal_char: '名称里不能有 \\ / : * ? " < > | 这些字符',

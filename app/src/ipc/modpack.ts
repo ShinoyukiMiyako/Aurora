@@ -140,12 +140,6 @@ export const CURSEFORGE_KEY_REJECTED = "curseforge_key_rejected";
 /** 整合包用了不支持的压缩方式（detail.path、entry、method）。 */
 export const MODPACK_UNSUPPORTED_COMPRESSION = "modpack_unsupported_compression";
 
-/** 错误码 instance_name_invalid 的 detail.rule。 */
-export type InstanceNameRule = "empty" | "too_long" | "illegal_char" | "reserved" | "duplicate";
-
-/** 实例名最多字符数，与后端一致。 */
-export const INSTANCE_NAME_MAX_CHARS = 32;
-
 /**
  * 读本地整合包的清单与条目表（不解压）。CurseForge 清单有远程文件时后端另问两个批量接口来数 Mod、算下载量，
  * 没配 API key 时报 CurseForge 源被禁用的同一个错误。
@@ -156,6 +150,7 @@ export const previewModpack = (path: string): Promise<ModpackPreviewDto> => invo
  * 平台整合包某个版本的 Mod 数与要下载的字节，供安装前确认。只按范围读包末尾的目录与清单条目，
  * 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 remote_pack_unreadable（detail.url、detail.reason）。
  * CurseForge 另问批量文件与批量工程两个接口，没配 API key 时报 CurseForge 源被禁用的同一个错误。
+ * 整合包文件本身不允许启动器直接下载时，认领过就读暂存副本，没认领过报 distribution_blocked，detail.files 里只有这个包。
  */
 export const summarizePlatformModpack = (platform: Platform, projectId: string, versionId: string): Promise<ModpackSummaryDto> =>
   invoke<ModpackSummaryDto>("summarize_platform_modpack", { platform, projectId, versionId });
@@ -276,8 +271,10 @@ export interface ModpackExportPreviewDto {
   bundled: ExportBundledModDto[];
   disabled: ExportBundledModDto[];
   extras: ExportExtraStatDto[];
-  /** mods 目录里名字不能安全写进整合包的文件（正斜杠相对路径）；不看勾选，导出时总会跳过。 */
+  /** mods 目录里启用的 jar 中名字不能安全写进整合包的文件（正斜杠相对路径）；不看勾选，导出时总会跳过。 */
   mod_skipped: string[];
+  /** 停用的 jar 中名字不能安全写进整合包的文件；带上停用的 Mod 时才算这次导出会跳过的。 */
+  disabled_skipped: string[];
 }
 
 /** 嵌套对象的键是 snake_case；后端拒绝不认识的键。 */

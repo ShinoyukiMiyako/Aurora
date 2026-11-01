@@ -86,6 +86,7 @@ import type { CoreEvent } from "../ipc/tasks";
 import { describeError, errorRecord } from "./errors";
 import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type LoginState } from "./login";
 import { network as appNetwork, type NetworkMonitor } from "./online";
+import { MODPACK_SUMMARY_RESOURCE } from "./queries/discover";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
 import {
@@ -2796,7 +2797,11 @@ export class LauncherStore {
       },
       async claimBlockedFiles(folder, files) {
         return claimBlockedFiles(folder, files).then(
-          (report): ClaimOutcome => ({ kind: "report", report }),
+          (report): ClaimOutcome => {
+            // 认领到的可能是整合包本体：之前因为它读不出来的摘要现在读得到了
+            if (report.claimed.length > 0) invalidateResources(MODPACK_SUMMARY_RESOURCE);
+            return { kind: "report", report };
+          },
           (error: unknown): ClaimOutcome => {
             if (isIpcError(error) && error.code === IO_ERROR_CODE) return { kind: "folder_error", message: error.message };
             throw error;

@@ -183,8 +183,10 @@ pub struct ModpackExportPreview {
     pub bundled: Vec<ExportBundledMod>,
     pub disabled: Vec<ExportBundledMod>,
     pub extras: Vec<ExportExtraStat>,
-    /// mods 目录里名字不能安全写进整合包的文件（实例相对的正斜杠路径）。不看勾选，导出时总会跳过。
+    /// mods 目录里启用的 jar 中名字不能安全写进整合包的文件（实例相对的正斜杠路径）。不看勾选，导出时总会跳过。
     pub mod_skipped: Vec<String>,
+    /// 停用的 jar 中名字不能安全写进整合包的文件，带上停用的 Mod 时才算这次导出会跳过的。
+    pub disabled_skipped: Vec<String>,
 }
 
 /// 一次导出的结果。
@@ -319,8 +321,10 @@ struct ExportPlan {
     disabled: Vec<(ExportBundledMod, PlannedFile)>,
     /// 这次规划要的额外项；没要的不在里面，也没有遍历过。
     extras: BTreeMap<ExportExtra, CollectedExtra>,
-    /// mods 目录里名字写不进整合包的文件。
+    /// mods 目录里启用的 jar 中名字写不进整合包的文件。
     mod_skipped: Vec<String>,
+    /// 停用的 jar 中名字写不进整合包的文件。
+    disabled_skipped: Vec<String>,
 }
 
 impl ExportPlan {
@@ -349,6 +353,7 @@ impl ExportPlan {
             disabled: self.disabled.iter().map(|(m, _)| m.clone()).collect(),
             extras,
             mod_skipped: self.mod_skipped.clone(),
+            disabled_skipped: self.disabled_skipped.clone(),
         }
     }
 }
@@ -398,6 +403,7 @@ impl Aurora {
         overrides.extend(plan.bundled.iter().map(|(_, f)| f.clone()));
         let disabled_mods = if options.include_disabled {
             overrides.extend(plan.disabled.iter().map(|(_, f)| f.clone()));
+            skipped.extend(plan.disabled_skipped.iter().cloned());
             plan.disabled.len()
         } else {
             0
@@ -642,6 +648,7 @@ impl Aurora {
             disabled,
             extras,
             mod_skipped: listing.skipped,
+            disabled_skipped: listing.disabled_skipped,
         })
     }
 
@@ -786,7 +793,10 @@ async fn exportable(version: &DiscoveredVersion) -> Result<(String, Option<PackL
 struct ModListing {
     enabled: Vec<LocalJar>,
     disabled: Vec<LocalJar>,
+    /// 启用的 jar 里名字写不进整合包的。
     skipped: Vec<String>,
+    /// 停用的 jar 里名字写不进整合包的：没带上停用的 Mod 时它们本来就不进包，不算跳过。
+    disabled_skipped: Vec<String>,
 }
 
 /// 只看 mods 目录直接子项里的普通文件：`*.jar` 启用、`*.jar.disabled` 停用，其余（备份、子目录、
@@ -830,7 +840,12 @@ async fn list_mods(mods_dir: &Path) -> Result<ModListing> {
         let relative = format!("{MODS_DIR}/{lossy}");
         let (Some(file_name), Ok(safe)) = (raw.to_str(), SafeRelativePath::new(relative.clone()))
         else {
-            listing.skipped.push(relative);
+            let skipped = if enabled {
+                &mut listing.skipped
+            } else {
+                &mut listing.disabled_skipped
+            };
+            skipped.push(relative);
             continue;
         };
         let size = entry
@@ -859,6 +874,7 @@ async fn list_mods(mods_dir: &Path) -> Result<ModListing> {
         .disabled
         .sort_by(|a, b| a.file.path.cmp(&b.file.path));
     listing.skipped.sort();
+    listing.disabled_skipped.sort();
     Ok(listing)
 }
 
@@ -1992,6 +2008,49 @@ mod tests {
             counted.sort();
             assert_eq!(counted, outcome.skipped, "勾选 {selected:?}");
         }
+    }
+
+    /// 名字不安全的停用 jar 只在带上停用的 Mod 时才算跳过：没带它们本来就不进包，算进去就把数报多了。
+    /// 启用的 jar 不看这个勾选。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsafe_disabled_jars_count_as_skipped_only_when_disabled_mods_are_included() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        fixture.write("mods/con.jar", b"reserved");
+        fixture.write("mods/aux.jar.disabled", b"reserved");
+        fixture.write("mods/prn.jar.disabled", b"reserved");
+
+        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        assert_eq!(preview.mod_skipped, vec!["mods/con.jar"]);
+        assert_eq!(
+            preview.disabled_skipped,
+            vec!["mods/aux.jar.disabled", "mods/prn.jar.disabled"]
+        );
+
+        let without = ModpackExportTarget::new(fixture.root.join("不带停用.mrpack"));
+        let outcome = fixture
+            .aurora
+            .export_modpack(ID, &options(Vec::new(), false), &without, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.skipped, vec!["mods/con.jar"]);
+        assert_eq!(outcome.disabled_mods, 0);
+
+        let with = ModpackExportTarget::new(fixture.root.join("带上停用.mrpack"));
+        let outcome = fixture
+            .aurora
+            .export_modpack(ID, &options(Vec::new(), true), &with, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome.skipped,
+            vec![
+                "mods/aux.jar.disabled",
+                "mods/con.jar",
+                "mods/prn.jar.disabled"
+            ]
+        );
+        assert_eq!(outcome.disabled_mods, 1, "名字安全的那一个照常带上");
     }
 
     /// 存档可能很大：导出只遍历勾选的额外项，勾重了也只走一遍，预览才遍历全部。

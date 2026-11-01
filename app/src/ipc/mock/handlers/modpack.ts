@@ -8,7 +8,7 @@
 
 import type { PlatformId } from "../../discover";
 import { IpcError } from "../../errors";
-import type { InstanceDto } from "../../instances";
+import { checkInstanceName, type InstanceDto, type NameRule } from "../../instances";
 import type {
   BlockedFileDto,
   ClaimReportDto,
@@ -16,7 +16,6 @@ import type {
   ExportExtra,
   ExportExtraStatDto,
   ExportIndexedModDto,
-  InstanceNameRule,
   ModpackExportOptions,
   ModpackExportOutcomeDto,
   ModpackExportPreviewDto,
@@ -29,12 +28,12 @@ import type {
   PackLoaderKind,
   PackModDto,
 } from "../../modpack";
-import { DISTRIBUTION_BLOCKED, EXPORT_EXTRAS, INSTANCE_NAME_MAX_CHARS, parseBlockedFiles } from "../../modpack";
+import { DISTRIBUTION_BLOCKED, EXPORT_EXTRAS, parseBlockedFiles } from "../../modpack";
 import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_DATA_DIR, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, ensureMockSavesSettledForReading, handlers as instanceHandlers, markMockSavesRead, recordMockExport, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { NAME_MESSAGES, acquireMockInstance, acquireMockInstanceWithBases, addMockInstance, ensureMockSavesSettledForReading, handlers as instanceHandlers, markMockSavesRead, recordMockExport, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
 import { isMockTaskCancelled } from "./tasks";
 
@@ -99,27 +98,15 @@ export function reset(): void {
   claimed.clear();
 }
 
-const RULE_TEXT: Record<InstanceNameRule, string> = {
-  empty: "名字不能为空",
-  too_long: `名字最多 ${INSTANCE_NAME_MAX_CHARS} 个字符`,
-  illegal_char: '不能含 \\ / : * ? " < > | 与控制字符，也不能以点开头或结尾',
-  reserved: "这是 Windows 的保留名",
-  duplicate: "已有同名的版本或实例",
-};
-
-/** 与后端 validate_instance_name 一致；返回去掉首尾空白后的名字或不合格的原因。 */
-function checkName(raw: string): { name: string } | { rule: InstanceNameRule } {
+/** 与后端 validate_instance_name 一致：去掉首尾空白后按实例名规则校验（不查重）；返回这个名字或不合格的原因。 */
+function checkName(raw: string): { name: string } | { rule: NameRule } {
   const name = raw.trim();
-  if (name === "") return { rule: "empty" };
-  if ([...name].length > INSTANCE_NAME_MAX_CHARS) return { rule: "too_long" };
-  if (/[\\/:*?"<>|\p{Cc}]/u.test(name) || name.startsWith(".") || name.endsWith(".")) return { rule: "illegal_char" };
-  const stem = name.split(".")[0].trimEnd().toUpperCase();
-  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/.test(stem)) return { rule: "reserved" };
-  return { name };
+  const rule = checkInstanceName(name, []);
+  return rule === null ? { name } : { rule };
 }
 
-function nameError(name: string, rule: InstanceNameRule): IpcError {
-  return new IpcError("instance_name_invalid", `实例名 ${name} 不可用：${RULE_TEXT[rule]}`, { name, rule });
+function nameError(name: string, rule: NameRule): IpcError {
+  return new IpcError("instance_name_invalid", `实例名 ${name} 不可用：${NAME_MESSAGES[rule]}`, { name, rule });
 }
 
 function formatOf(path: string): PackFormat {
@@ -542,6 +529,7 @@ function planExport(id: string): ModpackExportPreviewDto {
     disabled,
     extras,
     mod_skipped: [],
+    disabled_skipped: [],
   };
 }
 
@@ -678,7 +666,7 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
       override_files: files,
       bundled_mods: plan.bundled.map((m) => m.file_name),
       disabled_mods: carried.length,
-      skipped: [...plan.mod_skipped, ...extras.flatMap((e) => e.skipped)].sort(),
+      skipped: [...plan.mod_skipped, ...(options.include_disabled ? plan.disabled_skipped : []), ...extras.flatMap((e) => e.skipped)].sort(),
     };
   })
     .then((outcome) => {

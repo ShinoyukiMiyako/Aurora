@@ -8,13 +8,18 @@ use std::path::{Path, PathBuf};
 
 use aurora_modplatform::curseforge::file_page_url;
 use aurora_modplatform::{
-    CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform, curseforge_fingerprint,
+    CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform, hash_mod_file,
 };
 use serde::Serialize;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::resources::is_safe_file_name;
+
+/// 缓存根下放整合包相关内容的目录：下载来的包与认领暂存位都在它下面。
+pub(crate) const PACK_CACHE_DIR: &str = "modpacks";
+/// 整合包缓存目录下的认领暂存位。
+pub(crate) const CLAIMS_DIR: &str = "claims";
 
 /// 一个受限文件：要到 CurseForge 网页手动下载，认领时按这里的哈希校验。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -94,8 +99,8 @@ enum Check {
     Unverifiable,
 }
 
-/// 有 sha1 时分块读着算：整合包本体可能几百 MB，校验只该占一个读缓冲。只有 fingerprint 时才读入整个文件，
-/// 指纹要先剔除空白字节，再带剔除后的长度做 MurmurHash2；放在阻塞线程里，哈希不该占着异步线程。
+/// 都是分块读着算：整合包本体可能几百 MB，校验只该占一个读缓冲。指纹的初值要剔除空白后的总长度，
+/// 所以只有 fingerprint 时要读两趟。
 async fn verify_path(path: &Path, file: &BlockedFile) -> Result<Check> {
     if let Some(expected) = &file.sha1 {
         let actual = aurora_base::fs::sha1_hex(path).await?;
@@ -108,20 +113,18 @@ async fn verify_path(path: &Path, file: &BlockedFile) -> Result<Check> {
     if file.fingerprint == 0 {
         return Ok(Check::Unverifiable);
     }
-    let owned = path.to_path_buf();
-    let expected = file.fingerprint;
-    tokio::task::spawn_blocking(move || {
-        let bytes = std::fs::read(&owned).map_err(|source| aurora_base::Error::Io {
-            path: owned.clone(),
-            source,
-        })?;
-        Ok(if u64::from(curseforge_fingerprint(&bytes)) == expected {
+    let hashes = hash_mod_file(path).await.map_err(|err| match err {
+        // 与 sha1 那一支报同一种错：读不了文件要作为 io 错误回到界面，不算平台错误。
+        aurora_modplatform::Error::Base(base) => CoreError::Base(base),
+        other => CoreError::ModPlatform(other),
+    })?;
+    Ok(
+        if u64::from(hashes.curseforge_fingerprint) == file.fingerprint {
             Check::Match
         } else {
             Check::Mismatch
-        })
-    })
-    .await?
+        },
+    )
 }
 
 fn io_error(path: &Path, source: std::io::Error) -> CoreError {
@@ -161,7 +164,7 @@ impl Aurora {
 
     /// 手动下载的受限文件认领后放在这里。
     pub fn blocked_claims_dir(&self) -> PathBuf {
-        self.cache_root().join("modpacks").join("claims")
+        self.cache_root().join(PACK_CACHE_DIR).join(CLAIMS_DIR)
     }
 
     fn claim_slot(&self, file: &BlockedFile) -> PathBuf {
@@ -342,6 +345,7 @@ async fn list_top_level_files(folder: &Path) -> std::io::Result<Vec<Candidate>> 
 mod tests {
     use super::*;
     use crate::config::AuroraConfig;
+    use aurora_modplatform::curseforge_fingerprint;
     use sha1::{Digest, Sha1};
 
     fn sha1_hex(bytes: &[u8]) -> String {
@@ -524,8 +528,8 @@ mod tests {
         assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot));
     }
 
-    /// aurora-base 的流式哈希按 64 KiB 分块读：这些大小让最后一块分别是不满、正好满、多出一字节，0 字节则是
-    /// 第一次读就到文件尾。
+    /// 流式哈希按 64 KiB 分块读：这些大小让最后一块分别是不满、正好满、多出一字节，0 字节则是第一次读就到
+    /// 文件尾。
     const READ_BOUNDARY_SIZES: [usize; 10] = [
         0, 1, 65_535, 65_536, 65_537, 131_071, 131_072, 131_073, 196_608, 200_000,
     ];
@@ -560,6 +564,41 @@ mod tests {
             match bytes.last_mut() {
                 Some(last) => *last ^= 0xff,
                 None => bytes.push(0),
+            }
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                verify_path(&path, &file).await.unwrap(),
+                Check::Mismatch,
+                "len={len} seed={seed}"
+            );
+        }
+    }
+
+    /// 只有 fingerprint 时同样跨分块边界：两趟流式算出的指纹与对内存里整份字节算的一致，改掉最后一个非空白
+    /// 字节必须算不符。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fingerprint_check_agrees_with_the_whole_file_digest_at_read_boundaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        for (id, len) in READ_BOUNDARY_SIZES.into_iter().enumerate() {
+            let mut bytes = vec![0u8; len];
+            rng.fill(&mut bytes);
+            let path = tmp.path().join(format!("fp-{len}.jar"));
+            std::fs::write(&path, &bytes).unwrap();
+            let mut file = blocked(id as u32, "x.jar", &bytes);
+            file.sha1 = None;
+            file.fingerprint = u64::from(curseforge_fingerprint(&bytes));
+
+            assert_eq!(
+                verify_path(&path, &file).await.unwrap(),
+                Check::Match,
+                "len={len} seed={seed}"
+            );
+
+            match bytes.iter_mut().rfind(|b| !matches!(**b, 9 | 10 | 13 | 32)) {
+                Some(last) => *last = if *last == b'a' { b'b' } else { b'a' },
+                None => bytes.push(b'x'),
             }
             std::fs::write(&path, &bytes).unwrap();
             assert_eq!(

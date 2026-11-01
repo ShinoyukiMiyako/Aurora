@@ -180,6 +180,8 @@ pub struct ModpackSummaryDto {
 /// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`，
 /// 清单用了解不开的压缩方式时报 `modpack_unsupported_compression`。
 /// CurseForge 另问批量文件与批量工程两个接口，没配 API key 时报 CurseForge 源被禁用的同一个错误。
+/// 整合包文件本身不允许启动器直接下载时，认领过就读暂存副本，没认领过报 `distribution_blocked`，
+/// detail.files 里只有这个包。
 #[tauri::command]
 pub async fn summarize_platform_modpack(
     platform: String,
@@ -552,6 +554,7 @@ pub struct ModpackExportPreviewDto {
     pub disabled: Vec<ExportBundledModDto>,
     pub extras: Vec<ExportExtraStatDto>,
     pub mod_skipped: Vec<String>,
+    pub disabled_skipped: Vec<String>,
 }
 
 /// 只写进索引的 Mod。
@@ -887,6 +890,7 @@ fn export_preview_dto(preview: ModpackExportPreview) -> ModpackExportPreviewDto 
             })
             .collect(),
         mod_skipped: preview.mod_skipped,
+        disabled_skipped: preview.disabled_skipped,
     }
 }
 
@@ -2084,6 +2088,7 @@ mod tests {
         let facade = facade_in(dir.path(), &server.uri());
         let instance = export_instance(dir.path());
         std::fs::write(instance.join("mods").join("con.jar"), b"reserved").unwrap();
+        std::fs::write(instance.join("mods").join("aux.jar.disabled"), b"reserved").unwrap();
         std::fs::write(instance.join("config").join("nul.json"), b"reserved").unwrap();
         let registry = TaskRegistry::default();
         let locks = InstanceLocks::default();
@@ -2112,6 +2117,10 @@ mod tests {
         assert_eq!(wire["extras"][6]["extra"], "saves");
         assert_eq!(wire["extras"][6]["skipped"], serde_json::json!([]));
         assert_eq!(wire["mod_skipped"], serde_json::json!(["mods/con.jar"]));
+        assert_eq!(
+            wire["disabled_skipped"],
+            serde_json::json!(["mods/aux.jar.disabled"])
+        );
 
         let destination = dir.path().join("樱花林 1.0.0.mrpack");
         let outcome = export_modpack_with(

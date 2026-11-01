@@ -57,6 +57,7 @@ function previewDto(over: Partial<ModpackExportPreviewDto> = {}): ModpackExportP
       { extra: "saves", files: 2, bytes: 80 * MB, default_selected: false, skipped: [] },
     ],
     mod_skipped: [],
+    disabled_skipped: [],
     ...over,
   };
 }
@@ -255,13 +256,19 @@ describe("导出整合包弹窗：纯函数", () => {
     expect(effectiveExtras(noSaves, "游戏开着")).toBe(noSaves);
   });
 
-  it("会跳过的文件数：mods 目录里的总算，额外项的只算勾上的", () => {
-    const dto = previewDto({ mod_skipped: ["mods/a:b.jar"], extras: extrasSkipping({ config: ["config/a:b.json", "config/c?.toml"], saves: ["saves/w/c?.dat"] }) });
-    expect(skippedCount(dto, new Set())).toBe(1);
-    expect(skippedCount(dto, new Set(["resourcepacks"]))).toBe(1);
-    expect(skippedCount(dto, new Set(["config"]))).toBe(3);
-    expect(skippedCount(dto, new Set(["config", "saves"]))).toBe(4);
-    expect(skippedCount(previewDto(), new Set(["config", "saves"]))).toBe(0);
+  it("会跳过的文件数：启用的 jar 总算，停用的 jar 带上才算，额外项的只算勾上的", () => {
+    const dto = previewDto({
+      mod_skipped: ["mods/a:b.jar"],
+      disabled_skipped: ["mods/c?.jar.disabled", "mods/d?.jar.disabled"],
+      extras: extrasSkipping({ config: ["config/a:b.json", "config/c?.toml"], saves: ["saves/w/c?.dat"] }),
+    });
+    expect(skippedCount(dto, new Set(), false)).toBe(1);
+    expect(skippedCount(dto, new Set(), true)).toBe(3);
+    expect(skippedCount(dto, new Set(["resourcepacks"]), false)).toBe(1);
+    expect(skippedCount(dto, new Set(["config"]), false)).toBe(3);
+    expect(skippedCount(dto, new Set(["config", "saves"]), false)).toBe(4);
+    expect(skippedCount(dto, new Set(["config", "saves"]), true)).toBe(6);
+    expect(skippedCount(previewDto(), new Set(["config", "saves"]), true)).toBe(0);
   });
 });
 
@@ -412,6 +419,23 @@ describe("导出整合包弹窗", () => {
     expect(dialog().querySelector('[aria-label="直接打包进去的 Mod"]')?.textContent).toBe("handmade-1.0.jar");
     click(button("收起", dialog()));
     expect(dialog().querySelector('[aria-label="直接打包进去的 Mod"]')).toBeNull();
+  });
+
+  it("跳过文件的说明跟着「带上停用的 Mod」变：名字不安全的停用 jar 没带上时不算", async () => {
+    preview = () => previewDto({ mod_skipped: ["mods/c?.jar"], disabled_skipped: ["mods/d?.jar.disabled"] });
+    await openPage();
+    await openExport();
+    expect(dialog().textContent).toContain("1 个文件的名字在 Windows 上不安全，不会打包");
+    click(checkbox("带上停用的 1 个 Mod"));
+    expect(dialog().textContent).toContain("2 个文件的名字在 Windows 上不安全，不会打包");
+  });
+
+  it("停用的 jar 全都名字不安全：没有勾选框，这些文件不算跳过", async () => {
+    preview = () => previewDto({ disabled: [], disabled_skipped: ["mods/d?.jar.disabled"] });
+    await openPage();
+    await openExport();
+    expect(dialog().textContent).not.toContain("带上停用的");
+    expect(dialog().textContent).not.toContain("不会打包");
   });
 
   it("跳过文件的说明跟着勾选变：没勾的额外项不算，mods 目录里的总算", async () => {
