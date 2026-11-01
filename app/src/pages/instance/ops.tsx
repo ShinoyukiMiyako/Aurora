@@ -41,9 +41,9 @@ export interface InstanceOps {
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
 export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "delete"): string | undefined {
   if (lock === null) return undefined;
-  if (lock === "modifying") {
-    if (kind === "mods") throw new Error("改动 Mod 与改动 Mod 互相兼容，不会因此锁住 Mod 操作");
-    return LOCK_REASON.modifying[kind];
+  if (lock === "modifying" || lock === "backing_up") {
+    if (kind === "mods") throw new Error(`${lock} 与改动 Mod 互相兼容，不会因此锁住 Mod 操作`);
+    return lock === "modifying" ? LOCK_REASON.modifying[kind] : LOCK_REASON.backingUp[kind];
   }
   if (kind === "rename") return lock === "running" ? LOCK_REASON.renameRunning : LOCK_REASON.renameInstalling;
   if (kind === "mods") return lock === "running" ? LOCK_REASON.runningMods : LOCK_REASON.installing;
@@ -60,7 +60,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
   // 改名校验要全部实例名；只订阅名字，别的实例的进度与状态变化不让页面重渲染
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const installing = inst.status === "installing";
-  const locks = instanceLocks(busy, installing, inst.activity === "modifying");
+  const locks = instanceLocks(busy, installing, inst.activity === "modifying", inst.activity === "backing_up");
   const work = workLock(installing, inst.activity);
   const name = inst.name;
 

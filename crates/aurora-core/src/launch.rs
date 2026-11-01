@@ -9,6 +9,9 @@
 //!
 //! 文件校验只看存在与大小、不算哈希：每次启动给几千个资源文件算 sha1 要几十秒。缺了或大小不对的
 //! 才交给下载池，下载池对它们做完整校验。
+//!
+//! 直达存档或服务器（[`QuickPlay`]）在校验游戏文件阶段预检：版本不支持、存档不在、地址写错都在这里
+//! 失败，不会先下载一堆文件再告诉玩家进不去。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,9 +27,10 @@ use aurora_java::{DetectSource, JavaInstallation, select_for_major};
 use aurora_launch::logfile::{SessionOutcome, logs_dir};
 use aurora_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
-    LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, SessionClock, SessionLog,
-    SyncProvider, game_path_warning, jvm_memory_issue, long_player_name, recommended_max_mb,
-    required_java_major, sync_folder, sync_roots_from_env,
+    LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, QuickPlayMode,
+    QuickPlayTarget, SessionClock, SessionLog, SyncProvider, game_path_warning, jvm_memory_issue,
+    long_player_name, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
+    sync_roots_from_env,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
 use serde::Serialize;
@@ -145,6 +149,24 @@ pub enum LaunchAccount {
     Stored(Box<Account>),
 }
 
+/// 启动后直接去哪儿。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickPlay {
+    /// 进入存档：`saves/` 下的世界文件夹名（不是存档里写的显示名）。
+    Singleplayer { world_dir_name: String },
+    /// 加入服务器：玩家写的地址原文。
+    Multiplayer { address: String },
+}
+
+impl QuickPlay {
+    pub fn mode(&self) -> QuickPlayMode {
+        match self {
+            QuickPlay::Singleplayer { .. } => QuickPlayMode::Singleplayer,
+            QuickPlay::Multiplayer { .. } => QuickPlayMode::Multiplayer,
+        }
+    }
+}
+
 /// 一次启动的输入。
 pub struct LaunchRequest {
     pub version_id: String,
@@ -153,6 +175,8 @@ pub struct LaunchRequest {
     pub launcher_version: String,
     /// 游戏输出的批量转发端；`None` 时只写会话日志。
     pub game_log: Option<LogBatchSink>,
+    /// 启动后直接进入存档或加入服务器；`None` 为停在标题画面。
+    pub quick_play: Option<QuickPlay>,
 }
 
 /// 各账户最近一次账户类启动失败，键为账户 uuid。只在内存里：降级放行要的是「刚才亲眼看到验证失败」，
@@ -649,6 +673,7 @@ impl Aurora {
             account,
             launcher_version,
             game_log,
+            quick_play,
         } = request;
         let merged = &chain.merged;
         // 继承链根就是原版：加载器版本的 inheritsFrom 可能指向另一个加载器版本，不能直接当游戏版本号。
@@ -735,6 +760,24 @@ impl Aurora {
             .param("reason", "missing_main_class")
             .into());
         }
+        let quick_play = match quick_play {
+            Some(quick_play) => {
+                let target =
+                    quick_play_target(&version_id, merged, &working_dir, quick_play).await?;
+                reporter
+                    .info(match &target {
+                        QuickPlayTarget::Singleplayer { world_dir_name } => {
+                            format!("直接进入存档「{world_dir_name}」")
+                        }
+                        QuickPlayTarget::Multiplayer { address, .. } => {
+                            format!("直接加入服务器 {address}")
+                        }
+                    })
+                    .await;
+                Some(target)
+            }
+            None => None,
+        };
         let layout = self.layout();
         let mut plan = DownloadPlan::default();
         let mut legacy = self
@@ -847,6 +890,7 @@ impl Aurora {
             memory,
             &settings,
             authlib,
+            quick_play,
         )?;
         reporter
             .info(format!(
@@ -1489,6 +1533,61 @@ fn agent_unavailable(err: crate::authlib::LatestLookupError) -> LaunchFailure {
     }
 }
 
+/// 直达目标的预检，顺序即报错的先后：版本不支持（不新增失败码，照常作为启动链路错误冒泡）、存档不在
+/// 或文件夹名不安全（复用 [`CoreError::WorldNotFound`]）、地址写法不对（[`CoreError::InvalidServerAddress`]）。
+/// 不联网解析地址，也不查 SRV：没写端口的地址原样交给游戏自己解析。
+async fn quick_play_target(
+    version_id: &str,
+    merged: &VersionJson,
+    working_dir: &Path,
+    quick_play: QuickPlay,
+) -> Result<QuickPlayTarget, LaunchFailed> {
+    let mode = quick_play.mode();
+    if !quick_play_support(merged).supports(mode) {
+        return Err(aurora_launch::LaunchError::QuickPlayUnsupported {
+            version: version_id.to_owned(),
+            mode,
+        }
+        .into());
+    }
+    match quick_play {
+        QuickPlay::Singleplayer { world_dir_name } => {
+            let not_found = || CoreError::WorldNotFound {
+                version_id: version_id.to_owned(),
+                world: world_dir_name.clone(),
+            };
+            // 文件夹名会原样拼进路径并交给游戏：带分隔符或 `..` 的名字不可能是 saves 下的一个存档。
+            if !crate::resources::is_safe_file_name(&world_dir_name) {
+                return Err(not_found().into());
+            }
+            let world_dir = working_dir.join("saves").join(&world_dir_name);
+            let is_dir = match tokio::fs::metadata(&world_dir).await {
+                Ok(meta) => meta.is_dir(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(source) => {
+                    return Err(aurora_base::Error::Io {
+                        path: world_dir,
+                        source,
+                    }
+                    .into());
+                }
+            };
+            if !is_dir {
+                return Err(not_found().into());
+            }
+            Ok(QuickPlayTarget::Singleplayer { world_dir_name })
+        }
+        QuickPlay::Multiplayer { address } => {
+            let parsed = crate::servers::parse_server_address(&address)?;
+            Ok(QuickPlayTarget::Multiplayer {
+                address: address.trim().to_owned(),
+                host: parsed.host,
+                port: parsed.port,
+            })
+        }
+    }
+}
+
 /// 起进程；起不来就是 spawn_failed，原样带上系统给的原因。
 fn spawn_game(
     command: &LaunchCommand,
@@ -1690,7 +1789,8 @@ fn drive_label(path: &Path) -> String {
     }
 }
 
-/// 用合并后的版本 JSON、路径、鉴权值与实例设置拼出启动命令。
+/// 用合并后的版本 JSON、路径、鉴权值与实例设置拼出启动命令。版本不支持直达时的错误照常冒泡，不归为
+/// version_broken：版本本身没坏，换个启动方式就能进。
 #[allow(clippy::too_many_arguments)]
 fn assemble_command(
     merged: &VersionJson,
@@ -1704,6 +1804,7 @@ fn assemble_command(
     memory: MemoryConfig,
     settings: &InstanceLaunchSettings,
     authlib: Option<AuthlibInjector>,
+    quick_play: Option<QuickPlayTarget>,
 ) -> Result<LaunchCommand, LaunchFailed> {
     let mut builder = CommandBuilder::new(
         merged,
@@ -1723,6 +1824,9 @@ fn assemble_command(
     }
     if let Some(authlib) = authlib {
         builder = builder.with_authlib(authlib);
+    }
+    if let Some(target) = quick_play {
+        builder = builder.with_quick_play(target);
     }
     builder.build().map_err(|err| match err {
         aurora_launch::LaunchError::MissingMainClass { .. }
@@ -1824,6 +1928,7 @@ mod tests {
             },
             launcher_version: "9.9.9".to_owned(),
             game_log: None,
+            quick_play: None,
         }
     }
 
@@ -1910,6 +2015,45 @@ mod tests {
     fn stored_request(account: Account) -> LaunchRequest {
         LaunchRequest {
             account: LaunchAccount::Stored(Box::new(account)),
+            ..request()
+        }
+    }
+
+    /// 游戏参数里与直达有关的四个块，摘自官方 1.20.1 版本 JSON。
+    const QUICK_PLAY_GAME_ARGS: &str = r#"["--username","${auth_player_name}","--version","${version_name}",
+        {"rules":[{"action":"allow","features":{"has_quick_plays_support":true}}],"value":["--quickPlayPath","${quickPlayPath}"]},
+        {"rules":[{"action":"allow","features":{"is_quick_play_singleplayer":true}}],"value":["--quickPlaySingleplayer","${quickPlaySingleplayer}"]},
+        {"rules":[{"action":"allow","features":{"is_quick_play_multiplayer":true}}],"value":["--quickPlayMultiplayer","${quickPlayMultiplayer}"]},
+        {"rules":[{"action":"allow","features":{"is_quick_play_realms":true}}],"value":["--quickPlayRealms","${quickPlayRealms}"]}]"#;
+
+    /// 旧式启动参数：有 `--username`，没有 Quick Play 块。
+    const LEGACY_ARGS: &str =
+        r#""minecraftArguments":"--username ${auth_player_name} --version ${version_name}""#;
+
+    fn quick_play_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},"arguments":{{"game":{QUICK_PLAY_GAME_ARGS}}}}}"#
+        )
+    }
+
+    fn legacy_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},{LEGACY_ARGS}}}"#
+        )
+    }
+
+    /// 装一个客户端 jar 已在本地、版本 JSON 由调用方给出的实例。
+    fn install_json(mc: &Path, id: &str, json: &str) {
+        let dir = mc.join("versions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+        std::fs::write(dir.join(format!("{id}.jar")), b"jar").unwrap();
+    }
+
+    fn quick_request(version_id: &str, quick_play: QuickPlay) -> LaunchRequest {
+        LaunchRequest {
+            version_id: version_id.to_owned(),
+            quick_play: Some(quick_play),
             ..request()
         }
     }
@@ -2474,6 +2618,281 @@ mod tests {
             .expect("账户应仍在库中");
         assert_eq!(after.status, aurora_auth::AccountStatus::Expired);
         assert_eq!(after.credentials, stored.credentials);
+    }
+
+    fn singleplayer(world: &str) -> QuickPlay {
+        QuickPlay::Singleplayer {
+            world_dir_name: world.to_owned(),
+        }
+    }
+
+    fn launcher_lines(events: &[LaunchEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LaunchEvent::Log { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 旧版要直达存档：在校验游戏文件阶段就失败，存档在不在都不看，也不会走到补全与下载。
+    #[tokio::test]
+    async fn legacy_singleplayer_fails_while_verifying_files_before_any_download() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, "1.12.2", &legacy_json("1.12.2"));
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request("1.12.2", singleplayer("New World")),
+            java,
+        )
+        .await;
+        match result {
+            Err(LaunchFailed::Core(CoreError::Launch(
+                aurora_launch::LaunchError::QuickPlayUnsupported { version, mode },
+            ))) => {
+                assert_eq!(version, "1.12.2");
+                assert_eq!(mode, QuickPlayMode::Singleplayer);
+            }
+            other => panic!("应报不支持直达存档，实际：{:?}", other.err()),
+        }
+        assert_eq!(stage_indices(&events), vec![0, 1]);
+        assert!(
+            !events.iter().any(|e| matches!(e, LaunchEvent::Download(_))),
+            "不该推出下载进度：{events:?}"
+        );
+        let log = fx.aurora.last_launch_log("1.12.2").await.unwrap().unwrap();
+        assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
+    }
+
+    #[tokio::test]
+    async fn missing_or_unsafe_world_is_world_not_found_with_the_given_name() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, VERSION, &quick_play_json(VERSION));
+        // 同名的是文件不是文件夹：也不是存档。
+        std::fs::create_dir_all(mc.join("saves")).unwrap();
+        std::fs::write(mc.join("saves").join("只是文件"), b"x").unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        for world in ["New World", "../New World", "只是文件", ""] {
+            let (result, events) = launch_request(
+                &fx.aurora,
+                quick_request(VERSION, singleplayer(world)),
+                java.clone(),
+            )
+            .await;
+            match result {
+                Err(LaunchFailed::Core(CoreError::WorldNotFound {
+                    version_id,
+                    world: got,
+                })) => {
+                    assert_eq!(version_id, VERSION);
+                    assert_eq!(got, world);
+                }
+                other => panic!("{world:?} 应报存档不存在，实际：{:?}", other.err()),
+            }
+            assert_eq!(stage_indices(&events), vec![0, 1], "{world:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_server_address_fails_while_verifying_files() {
+        let fx = fixture();
+        install_json(
+            &fx.root.join(".minecraft"),
+            VERSION,
+            &quick_play_json(VERSION),
+        );
+        let java = fake_java(&fx.root, 17, 0);
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request(
+                VERSION,
+                QuickPlay::Multiplayer {
+                    address: "mc.example.com:0".to_owned(),
+                },
+            ),
+            java,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(LaunchFailed::Core(CoreError::InvalidServerAddress { address, .. })) if address == "mc.example.com:0"),
+            "{:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(stage_indices(&events), vec![0, 1]);
+    }
+
+    /// 存档在的时候照常走完八个阶段，启动日志写明直达了哪个存档。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quick_play_into_an_existing_world_reaches_running() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, VERSION, &quick_play_json(VERSION));
+        std::fs::create_dir_all(mc.join("saves").join("New World")).unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request(VERSION, singleplayer("New World")),
+            java.clone(),
+        )
+        .await;
+        let run = match result {
+            Ok(run) => run,
+            Err(err) => panic!("启动应成功：{err:?}"),
+        };
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert!(
+            launcher_lines(&events).contains(&"直接进入存档「New World」".to_owned()),
+            "{:?}",
+            launcher_lines(&events)
+        );
+        run.finish().await.unwrap();
+
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request(
+                VERSION,
+                QuickPlay::Multiplayer {
+                    address: " mc.example.com:25570 ".to_owned(),
+                },
+            ),
+            java,
+        )
+        .await;
+        let run = match result {
+            Ok(run) => run,
+            Err(err) => panic!("启动应成功：{err:?}"),
+        };
+        assert!(
+            launcher_lines(&events).contains(&"直接加入服务器 mc.example.com:25570".to_owned()),
+            "{:?}",
+            launcher_lines(&events)
+        );
+        run.finish().await.unwrap();
+    }
+
+    fn assembled(
+        merged: &VersionJson,
+        quick_play: Option<QuickPlayTarget>,
+    ) -> Result<LaunchCommand, LaunchFailed> {
+        let root = PathBuf::from(r"D:\mc\.minecraft");
+        assemble_command(
+            merged,
+            &RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64),
+            Path::new(r"C:\jdk\bin\java.exe"),
+            GamePaths::standard(&root, &merged.id),
+            &root,
+            AuthValues::offline("Steve", "0123456789abcdef0123456789abcdef"),
+            &merged.id,
+            "9.9.9",
+            MemoryConfig::fixed(2048),
+            &InstanceLaunchSettings::default(),
+            None,
+            quick_play,
+        )
+    }
+
+    fn tail(args: &[String], n: usize) -> Vec<&str> {
+        args[args.len() - n..].iter().map(String::as_str).collect()
+    }
+
+    /// 预检得出的目标原样进命令行：新版走 Quick Play、地址不补端口；旧版换算成 --server/--port，
+    /// 没写端口时显式写 25565，IPv6 不带方括号。
+    #[tokio::test]
+    async fn checked_targets_reach_the_command_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let modern = VersionJson::from_json_str(&quick_play_json(VERSION)).unwrap();
+        let legacy = VersionJson::from_json_str(&legacy_json("1.12.2")).unwrap();
+        let multiplayer = |address: &str| QuickPlay::Multiplayer {
+            address: address.to_owned(),
+        };
+
+        let bare = quick_play_target(
+            VERSION,
+            &modern,
+            tmp.path(),
+            multiplayer(" play.example.com "),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            bare,
+            QuickPlayTarget::Multiplayer {
+                address: "play.example.com".to_owned(),
+                host: "play.example.com".to_owned(),
+                port: 25565,
+            }
+        );
+        let args = assembled(&modern, Some(bare)).unwrap().args;
+        assert_eq!(
+            tail(&args, 2),
+            vec!["--quickPlayMultiplayer", "play.example.com"]
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--server" || a == "--quickPlayPath")
+        );
+
+        let default_port =
+            quick_play_target("1.12.2", &legacy, tmp.path(), multiplayer("mc.example.com"))
+                .await
+                .unwrap();
+        let args = assembled(&legacy, Some(default_port)).unwrap().args;
+        assert_eq!(
+            tail(&args, 4),
+            vec!["--server", "mc.example.com", "--port", "25565"]
+        );
+
+        let ipv6 = quick_play_target(
+            "1.12.2",
+            &legacy,
+            tmp.path(),
+            multiplayer("[2001:db8::1]:25570"),
+        )
+        .await
+        .unwrap();
+        let args = assembled(&legacy, Some(ipv6)).unwrap().args;
+        assert_eq!(
+            tail(&args, 4),
+            vec!["--server", "2001:db8::1", "--port", "25570"]
+        );
+
+        // 不带直达时命令行里没有任何直达参数。
+        let plain = assembled(&modern, None).unwrap().args;
+        assert!(
+            !plain
+                .iter()
+                .any(|a| a.starts_with("--quickPlay") || a.contains("${quickPlay"))
+        );
+    }
+
+    /// 拼命令时才发现不支持（调用方没预检）也照原样报不支持，不并进 version_broken。
+    #[test]
+    fn unsupported_target_at_assembly_is_not_version_broken() {
+        let legacy = VersionJson::from_json_str(&legacy_json("1.12.2")).unwrap();
+        let result = assembled(
+            &legacy,
+            Some(QuickPlayTarget::Singleplayer {
+                world_dir_name: "New World".to_owned(),
+            }),
+        );
+        assert!(
+            matches!(
+                &result,
+                Err(LaunchFailed::Core(CoreError::Launch(
+                    aurora_launch::LaunchError::QuickPlayUnsupported { version, mode: QuickPlayMode::Singleplayer }
+                ))) if version == "1.12.2"
+            ),
+            "{:?}",
+            result.as_ref().err()
+        );
     }
 
     #[test]

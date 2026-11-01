@@ -12,6 +12,7 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     release_type: "release",
     is_release: true,
     java_major: 21,
+    quick_play: { singleplayer: true, multiplayer: true },
     mod_count: 0,
     world_count: 0,
     isolated: false,
@@ -121,6 +122,13 @@ describe("实例 DTO 适配：状态", () => {
     expect(inst).toMatchObject({ worldCount: 3, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
     const unread = instanceFromDto(instanceDto("坏", { world_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
     expect(unread).toMatchObject({ worldCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
+  });
+
+  it("直达能力逐位带过：旧版只能加入服务器、读不出版本信息为 null", () => {
+    expect(instanceFromDto(instanceDto("新版"), idle).quickPlay).toEqual({ singleplayer: true, multiplayer: true });
+    expect(instanceFromDto(instanceDto("1.12.2", { quick_play: { singleplayer: false, multiplayer: true } }), idle).quickPlay).toEqual({ singleplayer: false, multiplayer: true });
+    expect(instanceFromDto(instanceDto("1.5.2", { quick_play: { singleplayer: false, multiplayer: false } }), idle).quickPlay).toEqual({ singleplayer: false, multiplayer: false });
+    expect(instanceFromDto(instanceDto("断链", { quick_play: null, java_major: null }), idle).quickPlay).toBeNull();
   });
 });
 

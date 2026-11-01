@@ -88,7 +88,8 @@ export interface Session {
 
 // ---------------------------------------------------------------- 下载任务
 
-export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair"] as const;
+/** world_backup：备份与导出存档（都是打包）；world_restore：用备份恢复存档。两者都不算安装，对实例只算改动中。 */
+export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
 export const TASK_STATUSES = ["queued", "running", "done", "failed", "cancelled"] as const;

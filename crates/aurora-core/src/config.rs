@@ -85,6 +85,29 @@ impl Default for MemorySettings {
     }
 }
 
+/// 存档备份设置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldBackupSettings {
+    /// 游戏退出后是否自动备份这次玩过的存档。默认开：备份的价值在零操作兜底，等玩家想起来手动备份
+    /// 往往已经晚了。
+    pub auto: bool,
+    /// 每个存档保留的自动备份份数；手动备份不受它限制。
+    pub keep_per_world: u32,
+    /// 全部备份的总量上限（GB，按 1024^3 字节计），超过后先删最旧的自动备份。
+    pub max_total_gb: u32,
+}
+
+impl Default for WorldBackupSettings {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            keep_per_world: 5,
+            max_total_gb: 20,
+        }
+    }
+}
+
 /// 游戏启动后启动器窗口的去留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +140,9 @@ pub struct PinnedServer {
     pub name: String,
     /// `host` 或 `host:port`（IPv6 写成 `[addr]:port`）。
     pub address: String,
+    /// 「加入」时默认用的实例 id；没记住为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 /// 一条带名字的目录。名字是给人看的（「PCL2」「官方启动器」），路径才是身份。
@@ -184,6 +210,8 @@ pub struct AuroraConfig {
     /// 新实例是否沿用默认设置（数据目录里的模板）。关掉时新建与整合包导入一律不套模板；
     /// 旧配置没有这一项时按开着处理：没有模板时套用本来就什么也不做。
     pub new_instance_template: bool,
+    /// 存档备份。旧配置没有这一项时取默认值。
+    pub world_backup: WorldBackupSettings,
 }
 
 impl Default for AuroraConfig {
@@ -213,6 +241,7 @@ impl Default for AuroraConfig {
             extra_java_paths: Vec::new(),
             prefer_dedicated_gpu: false,
             new_instance_template: true,
+            world_backup: WorldBackupSettings::default(),
         }
     }
 }
@@ -587,6 +616,73 @@ mod tests {
         assert_eq!(store.load().await.unwrap(), config);
     }
 
+    /// 旧配置没有 world_backup 时按默认值载入：自动备份开、每个存档 5 份、总量 20 GB。
+    #[tokio::test]
+    async fn world_backup_defaults_for_old_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 16, "language": "en-US"}"#,
+        )
+        .await
+        .unwrap();
+        let loaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(
+            loaded.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 5,
+                max_total_gb: 20,
+            }
+        );
+        assert_eq!(loaded.download_concurrency, 16);
+        assert_eq!(loaded.language, UiLanguage::EnUs);
+    }
+
+    /// world_backup 只写了一部分时，缺的那几项取默认值；写过之后原样落盘、原样读回。
+    #[tokio::test]
+    async fn partial_world_backup_fills_defaults_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(&path, br#"{"world_backup": {"keep_per_world": 1}}"#)
+            .await
+            .unwrap();
+        let store = ConfigStore::at(&path);
+        let mut loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 1,
+                max_total_gb: 20,
+            }
+        );
+
+        tokio::fs::write(&path, br#"{"world_backup": {"auto": false}}"#)
+            .await
+            .unwrap();
+        let off = store.load().await.unwrap().world_backup;
+        assert_eq!(
+            (off.auto, off.keep_per_world, off.max_total_gb),
+            (false, 5, 20)
+        );
+
+        loaded.world_backup = WorldBackupSettings {
+            auto: false,
+            keep_per_world: 50,
+            max_total_gb: 1000,
+        };
+        store.save(&loaded).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["world_backup"],
+            serde_json::json!({ "auto": false, "keep_per_world": 50, "max_total_gb": 1000 })
+        );
+        assert_eq!(store.load().await.unwrap(), loaded);
+    }
+
     /// 不认识的语言（新版本才有的译文）不让整份配置失败：语言退回简体中文，其余照常。
     /// 命令行与桌面应用走同一条解析，`load` 也一样宽容。
     #[tokio::test]
@@ -633,10 +729,18 @@ mod tests {
             after_launch: AfterLaunch::Close,
             check_updates: false,
             default_java: Some(PathBuf::from("C:/Java/jdk-21/bin/java.exe")),
-            pinned_servers: vec![PinnedServer {
-                name: "Hypixel".to_owned(),
-                address: "mc.hypixel.net".to_owned(),
-            }],
+            pinned_servers: vec![
+                PinnedServer {
+                    name: "Hypixel".to_owned(),
+                    address: "mc.hypixel.net".to_owned(),
+                    instance: None,
+                },
+                PinnedServer {
+                    name: "家".to_owned(),
+                    address: "10.0.0.2:25570".to_owned(),
+                    instance: Some("生存 1.21.1".to_owned()),
+                },
+            ],
             extra_game_directories: vec![NamedDirectory {
                 name: "PCL2".to_owned(),
                 path: PathBuf::from("D:/PCL2/.minecraft"),
@@ -649,6 +753,56 @@ mod tests {
         ConfigStore::at(&path).save(&config).await.unwrap();
         let reloaded = ConfigStore::at(&path).load().await.unwrap();
         assert_eq!(reloaded, config);
+    }
+
+    /// 旧配置里固定的服务器只有 name 与 address：照常读出、没有记住实例；原样写回时也不多出 instance 键，
+    /// 降级回旧版本读到的仍是它认识的形状。
+    #[tokio::test]
+    async fn pinned_servers_without_instance_load_and_resave_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{"pinned_servers": [{"name": "Hypixel", "address": "mc.hypixel.net"}, {"name": "家", "address": "10.0.0.2:25570"}]}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.pinned_servers,
+            vec![
+                PinnedServer {
+                    name: "Hypixel".to_owned(),
+                    address: "mc.hypixel.net".to_owned(),
+                    instance: None,
+                },
+                PinnedServer {
+                    name: "家".to_owned(),
+                    address: "10.0.0.2:25570".to_owned(),
+                    instance: None,
+                },
+            ]
+        );
+
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["pinned_servers"],
+            serde_json::json!([
+                {"name": "Hypixel", "address": "mc.hypixel.net"},
+                {"name": "家", "address": "10.0.0.2:25570"}
+            ])
+        );
+
+        // 记住了实例的那条写出 instance，读回来一致。
+        let mut bound = loaded;
+        bound.pinned_servers[1].instance = Some("生存".to_owned());
+        store.save(&bound).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["pinned_servers"][1]["instance"], "生存");
+        assert!(raw["pinned_servers"][0].get("instance").is_none());
+        assert_eq!(store.load().await.unwrap(), bound);
     }
 
     /// 三档的兜底顺序：只有尽量官方把官方放前面，自动测不出来时与尽量镜像同为镜像在前。

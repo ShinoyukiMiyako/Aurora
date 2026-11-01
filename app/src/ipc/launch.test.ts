@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "./bridge";
 import { lastCrash, lastLaunchLog } from "./diagnostics";
@@ -11,16 +12,20 @@ import {
   onGameExit,
   onGameLog,
   onLaunchPhase,
+  onWorldBackup,
   playStats,
+  QUICK_PLAY_UNSUPPORTED_CODE,
   stopGame,
+  WORLD_BACKUP_EVENT,
   type GameExitEvent,
   type GameLogEvent,
   type LaunchArgs,
   type LaunchPhaseEvent,
+  type WorldBackupEvent,
 } from "./launch";
 import { resetMocks } from "./mock";
-import { clearMockEventListeners } from "./mock/events";
-import { endMockGame, failNextMockLaunch } from "./mock/handlers/launch";
+import { clearMockEventListeners, emitMockWorldBackup } from "./mock/events";
+import { endMockGame, failNextMockLaunch, lastMockQuickPlay } from "./mock/handlers/launch";
 import { cancelTask } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -45,7 +50,7 @@ function today(): string {
 }
 
 function offline(versionId: string, taskId: string): LaunchArgs {
-  return { taskId, versionId, accountUuid: null, offlineName: "Steve", offlineFallback: false };
+  return { taskId, versionId, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null };
 }
 
 async function recordEvents() {
@@ -190,11 +195,11 @@ describe("启动 mock", () => {
   });
 
   it("账户必须二选一；参数类型不对是 Tauri 自己的参数错误", async () => {
-    const neither = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: null, offlineName: null, offlineFallback: false } as never));
+    const neither = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: null, offlineName: null, offlineFallback: false, quickPlay: null } as never));
     expect(neither.code).toBe("invalid_argument");
-    const both = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: "u", offlineName: "Steve", offlineFallback: false } as never));
+    const both = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: "u", offlineName: "Steve", offlineFallback: false, quickPlay: null } as never));
     expect(both.code).toBe("invalid_argument");
-    const wrongType = await rejection(launchGame({ taskId: "t", versionId: 7, accountUuid: null, offlineName: "Steve", offlineFallback: false } as never));
+    const wrongType = await rejection(launchGame({ taskId: "t", versionId: 7, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null } as never));
     expect(wrongType.code).toBe("unknown");
     // 被拒的启动不占槽。
     expect(await launchGame(offline("1.21", "t-ok"))).toEqual({ pid: 4242, offline: false });
@@ -207,7 +212,7 @@ describe("以离线方式进单人 mock", () => {
   const YOZAKURA = "b7c2d3e4f5a64b7c8d9e0f1a2b3c4d5e";
   const WARN_LINE = "以离线方式进单人：Hanami_Walker 这一局不经账户验证，只能玩单人游戏";
 
-  const stored = (uuid: string, taskId: string, offlineFallback: boolean): LaunchArgs => ({ taskId, versionId: "1.21", accountUuid: uuid, offlineName: null, offlineFallback });
+  const stored = (uuid: string, taskId: string, offlineFallback: boolean): LaunchArgs => ({ taskId, versionId: "1.21", accountUuid: uuid, offlineName: null, offlineFallback, quickPlay: null });
 
   /** 用这个账户普通启动一次，在阶段 0 以账户类失败码失败。 */
   async function failWith(code: string, uuid = HANAMI): Promise<void> {
@@ -251,7 +256,7 @@ describe("以离线方式进单人 mock", () => {
   });
 
   it("离线角色名与账户库里的离线账户：offline_account", async () => {
-    const byName = await refusal({ taskId: "t-1", versionId: "1.21", accountUuid: null, offlineName: "Steve", offlineFallback: true });
+    const byName = await refusal({ taskId: "t-1", versionId: "1.21", accountUuid: null, offlineName: "Steve", offlineFallback: true, quickPlay: null });
     expect(byName.detail).toEqual({ field: "offlineFallback", reason: "offline_account", account: "Steve" });
     expect(byName.message).toBe("Steve 不能以离线方式进单人：离线账户本来就不经验证");
 
@@ -325,6 +330,50 @@ describe("以离线方式进单人 mock", () => {
     expect(wrongType.code).toBe("unknown");
     expect(wrongType.message).toBe("invalid args `offlineFallback` for command `launch_game`");
   });
+
+  it("直达：单人按世界文件夹名、多人按地址原文通过检查后照常走完八个阶段，mock 记下这次的 quickPlay", async () => {
+    const { phases } = await recordEvents();
+    const world = { kind: "singleplayer", world_dir_name: "New World" } as const;
+    expect(await launchGame({ ...offline("樱花生存", "t-sp"), quickPlay: world })).toEqual({ pid: 4242, offline: false });
+    expect(lastMockQuickPlay()).toEqual(world);
+    expect(phases.map((p) => p.stage_index).at(-1)).toBe(7);
+    await stopGame();
+    // 1.20 之前的版本只是不能直达存档，加入服务器照常
+    const server = { kind: "multiplayer", address: " play.example:25570 " } as const;
+    expect(await launchGame({ ...offline("RLCraft", "t-mp"), quickPlay: server })).toEqual({ pid: 4242, offline: false });
+    expect(lastMockQuickPlay()).toEqual(server);
+    await stopGame();
+    await launchGame(offline("1.21", "t-plain"));
+    expect(lastMockQuickPlay()).toBeNull();
+  });
+
+  it("直达的三项检查都在占游戏槽之前：版本不支持、世界不在、地址不合法各报各的码，之后照常能启动", async () => {
+    const unsupported = await rejection(launchGame({ ...offline("RLCraft", "t-1"), quickPlay: { kind: "singleplayer", world_dir_name: "x" } }));
+    expect(unsupported.code).toBe(QUICK_PLAY_UNSUPPORTED_CODE);
+    expect(unsupported.detail).toEqual({ version_id: "RLCraft", mode: "singleplayer" });
+    expect(unsupported.message).toBe("版本 RLCraft 不支持直接进入存档（1.20 之前的版本没有 Quick Play）");
+    // 世界名与文件夹名不同：只认文件夹名
+    const byLevelName = await rejection(launchGame({ ...offline("樱花生存", "t-2"), quickPlay: { kind: "singleplayer", world_dir_name: "樱花谷" } }));
+    expect(byLevelName.code).toBe("world_not_found");
+    expect(byLevelName.detail).toEqual({ version_id: "樱花生存", world: "樱花谷" });
+    const badAddress = await rejection(launchGame({ ...offline("1.21", "t-3"), quickPlay: { kind: "multiplayer", address: "host:0" } }));
+    expect(badAddress.code).toBe("invalid_argument");
+    expect(badAddress.detail).toMatchObject({ address: "host:0" });
+    const broken = await rejection(launchGame({ ...offline("没装完", "t-4"), quickPlay: { kind: "multiplayer", address: "play.example" } }));
+    expect(broken.detail).toEqual({ version_id: "没装完", mode: "multiplayer" });
+    expect(lastMockQuickPlay()).toBeNull();
+    expect(await launchGame(offline("1.21", "t-ok"))).toEqual({ pid: 4242, offline: false });
+  });
+
+  it("quickPlay 形状不对是 Tauri 自己的参数错误；缺键等于普通启动", async () => {
+    for (const quickPlay of ["New World", { kind: "realms", id: "1" }, { kind: "singleplayer" }, { kind: "multiplayer", address: "a", extra: 1 }]) {
+      const error = await rejection(invoke("launch_game", { taskId: "t", versionId: "1.21", accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay }));
+      expect(error.code).toBe("unknown");
+      expect(error.message).toContain("quickPlay");
+    }
+    expect(await invoke("launch_game", { taskId: "t-ok", versionId: "1.21", accountUuid: null, offlineName: "Steve", offlineFallback: false })).toEqual({ pid: 4242, offline: false });
+    expect(lastMockQuickPlay()).toBeNull();
+  });
 });
 
 describe("游玩统计 mock", () => {
@@ -380,20 +429,51 @@ describe("降级启动的拒绝细节", () => {
   });
 });
 
+describe("自动备份事件", () => {
+  const payload: WorldBackupEvent = {
+    instance_id: "樱花生存",
+    backed_up: ["New World"],
+    failed: [{ world: "坏档", error: { code: "world_in_use", message: "这个存档正被游戏打开，退出游戏后再试", detail: { path: "D:/saves/坏档" } } }],
+  };
+
+  it("mock 推的自动备份结果原样送到 onWorldBackup，退订后不再收到", async () => {
+    const got: WorldBackupEvent[] = [];
+    const off = await onWorldBackup((e) => got.push(e));
+    emitMockWorldBackup(payload);
+    expect(got).toEqual([payload]);
+    off();
+    emitMockWorldBackup({ ...payload, backed_up: [] });
+    expect(got).toHaveLength(1);
+  });
+});
+
 describe("Tauri 窗口里", () => {
   beforeEach(() => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
-  it("launchGame 只传实例、账户、降级标记与取消句柄；playStats 传 range 对象", async () => {
-    vi.mocked(tauriInvoke).mockResolvedValueOnce({ pid: 7, offline: false }).mockResolvedValueOnce(null).mockResolvedValueOnce({});
-    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这五项。
+  it("onWorldBackup 订阅 aurora://world-backup，只把负载交给处理函数", async () => {
+    vi.mocked(tauriListen).mockImplementationOnce(async (_event, handler) => {
+      handler({ event: WORLD_BACKUP_EVENT, id: 1, payload: { instance_id: "a", backed_up: ["w"], failed: [] } });
+      return () => undefined;
+    });
+    const got: WorldBackupEvent[] = [];
+    await onWorldBackup((e) => got.push(e));
+    expect(vi.mocked(tauriListen).mock.calls[0][0]).toBe("aurora://world-backup");
+    expect(got).toEqual([{ instance_id: "a", backed_up: ["w"], failed: [] }]);
+  });
+
+  it("launchGame 只传实例、账户、降级标记、直达目标与取消句柄；playStats 传 range 对象", async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ pid: 7, offline: false }).mockResolvedValueOnce({ pid: 8, offline: false }).mockResolvedValueOnce(null).mockResolvedValueOnce({});
+    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这六项。
     const extra = { ...offline("1.21", "t-run"), maxMemoryMb: 4096 } as unknown as LaunchArgs;
     expect(await launchGame(extra)).toEqual({ pid: 7, offline: false });
+    expect(await launchGame({ ...offline("1.21", "t-qp"), quickPlay: { kind: "multiplayer", address: "play.example" } })).toEqual({ pid: 8, offline: false });
     await stopGame();
     await playStats({ from: "2026-10-01", to: "2026-10-31" });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
-      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineFallback: false, offlineName: "Steve" }],
+      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineFallback: false, offlineName: "Steve", quickPlay: null }],
+      ["launch_game", { taskId: "t-qp", versionId: "1.21", accountUuid: null, offlineFallback: false, offlineName: "Steve", quickPlay: { kind: "multiplayer", address: "play.example" } }],
       ["stop_game", undefined],
       ["play_stats", { range: { from: "2026-10-01", to: "2026-10-31" } }],
     ]);

@@ -74,6 +74,7 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     release_type: "release",
     is_release: true,
     java_major: 21,
+    quick_play: { singleplayer: true, multiplayer: true },
     mod_count: 0,
     world_count: 0,
     isolated: false,
@@ -116,6 +117,7 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     language: "zh-CN",
     extra_java_paths: [],
     prefer_dedicated_gpu: false,
+    world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
     ...overrides,
   };
 }

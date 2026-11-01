@@ -65,13 +65,22 @@ import { installMod, type InstallableResourceType, type ResourceInstallOutcomeDt
 import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/errors";
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
 import * as instancesIpc from "../ipc/instances";
-import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
+import type {
+  BackupResultDto,
+  DeletionPreviewDto,
+  ExportResultDto,
+  FolderTarget,
+  InstallResultDto,
+  InstanceDto,
+  RestoreResultDto,
+  WorldBackupListDto,
+} from "../ipc/instances";
 import * as javaIpc from "../ipc/java";
 import type { InstalledRuntimeDto, JavaInstallationDto, RemoveJavaPathDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
 import { blockedFilesOf, claimBlockedFiles, downloadsFolder, parseBlockedFiles, type BlockedFileDto, type ClaimReportDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
-import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServers, type PinnedServerDto } from "../ipc/system";
+import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServerInstance, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
 import type { CoreEvent } from "../ipc/tasks";
 import { describeError, errorRecord } from "./errors";
@@ -79,6 +88,7 @@ import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type 
 import { network as appNetwork, type NetworkMonitor } from "./online";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
+import { WORLD_TASK_COMMANDS } from "./selectors";
 import {
   appendSessionLogs,
   applyPhase,
@@ -144,6 +154,9 @@ export type ClaimOutcome = { kind: "report"; report: ClaimReportDto } | { kind: 
 
 // ---------------------------------------------------------------- 状态形状
 
+/** 页面与启动层不直接引用 ipc/，直达目标的形状经这里拿。 */
+export type { QuickPlayArg } from "../ipc/launch";
+
 export type Slice = "settings" | "accounts" | "instances" | "pins" | "tasks" | "firstRun";
 export type SliceStatus = { kind: "loading" } | { kind: "ready" } | { kind: "error"; error: Error };
 
@@ -152,6 +165,8 @@ export interface LaunchPrompt {
   instanceId: string;
   occupantId: string;
   occupantPhase: "loading" | "running";
+  /** 确认替换后这次启动要直达的世界或服务器；普通启动为 null。 */
+  quickPlay: launchIpc.QuickPlayArg | null;
 }
 
 /** 新实例就绪后接着装的一个开局 Mod（Modrinth 上的工程与挑好的版本）。 */
@@ -245,7 +260,18 @@ type TaskMeta =
   | { type: "starter"; instanceId: string; count: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
-  | { type: "updates"; instanceId: string };
+  | { type: "updates"; instanceId: string }
+  /** 备份、导出、恢复存档。world 是存档文件夹名，name 是任务标题与通知里写的存档名。 */
+  | { type: "world"; instanceId: string; world: string; name: string; op: "backup" | "restore" | "export" };
+
+export type { WorldBackupDto, WorldBackupListDto } from "../ipc/instances";
+
+/** 存档备份列表的查询 key：world-backups:<实例 id>:<存档文件夹名>。共用存档的几个实例看到同一份，失效时按前缀整个失效。 */
+export const WORLD_BACKUPS_RESOURCE = "world-backups";
+
+export function worldBackupsKey(instanceId: string, world: string): string {
+  return `${WORLD_BACKUPS_RESOURCE}:${instanceId}:${world}`;
+}
 
 interface RawState {
   status: Record<Slice, SliceStatus>;
@@ -355,6 +381,11 @@ export interface LauncherActions {
   refreshInstances(): Promise<void>;
   // 启动会话
   launch(id: string): Promise<void>;
+  /**
+   * 启动并直达一个世界或一台服务器，与 launch 走同一条拦截（同实例已在加载或运行时不重复、别的实例占着时弹替换确认、
+   * 没有账户时先登录再继续）。损坏与安装中的实例不提供直达，入口应当禁用，调到这里直接抛错。
+   */
+  quickPlay(id: string, target: launchIpc.QuickPlayArg): Promise<void>;
   stop(): Promise<void>;
   dismissSession(): void;
   resolveLaunchPrompt(accept: boolean): Promise<void>;
@@ -369,6 +400,18 @@ export interface LauncherActions {
   rollback(instanceId: string, eventId: string): Promise<void>;
   /** launchAfter：装好后通知带「启动」这个实例；pinFor：装好后把这个实例的 Java 固定为新装的运行时。 */
   installJava(major: number, opts?: { launchAfter?: string; pinFor?: string }): Promise<void>;
+  // 存档备份（world 是存档文件夹名，name 是界面上显示的存档名）
+  /** 入队一个手动备份任务；同一件事已在队列里时只提示重复。 */
+  backupWorld(instanceId: string, world: string, name: string): Promise<void>;
+  /** 入队一个恢复任务：用 file 这份备份替换现在的存档。调用前由界面确认。 */
+  restoreWorldBackup(instanceId: string, world: string, name: string, file: string): Promise<void>;
+  /** 入队一个导出任务：把存档打包到 dest（系统保存对话框选定的 .zip）。 */
+  exportWorld(instanceId: string, world: string, name: string, dest: string): Promise<void>;
+  /** 把一份备份移入回收站（不经任务队列，不确认）。 */
+  deleteWorldBackup(instanceId: string, world: string, file: string): Promise<void>;
+  listWorldBackups(instanceId: string, world: string): Promise<WorldBackupListDto>;
+  /** 在系统文件管理器里定位到这个文件或文件夹；打开失败原样抛出。 */
+  revealPath(path: string): Promise<void>;
   // 下载任务
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
@@ -396,6 +439,8 @@ export interface LauncherActions {
   /** commitFirstRun 加 finishFirstRun：提交后立即卸载向导。 */
   completeFirstRun(gameDir: string, extraDirectories: configIpc.NamedDirectoryDto[]): Promise<void>;
   togglePinServer(server: PinnedServerDto): Promise<void>;
+  /** 记住（instance 为 id）或忘掉（null）某台固定服务器「加入」时用的实例；与固定的读改写排在同一条链上。 */
+  setPinnedServerInstance(address: string, instance: string | null): Promise<void>;
   reload(slice: Slice): Promise<void>;
 }
 
@@ -412,6 +457,7 @@ const TASK_COMMANDS = new Set([
   "install_resource",
   "update_mod",
   "update_mods",
+  ...WORLD_TASK_COMMANDS,
 ]);
 
 /**
@@ -428,6 +474,12 @@ const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
 
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
+
+/**
+ * opener 插件在文件管理器里定位文件或文件夹的命令（opener:default 含 allow-reveal-item-in-dir）。备份目录、导出的文件
+ * 不属于 open_folder 能按实例解析的那几种目标，路径由后端在列表与结果里给出。
+ */
+const REVEAL_COMMAND = "plugin:opener|reveal_item_in_dir";
 
 /** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
@@ -545,6 +597,14 @@ function metaFromSpec(task: Task): TaskMeta | null {
     }
     case "update_mods":
       return { type: "updates", instanceId: strArg(args, "versionId", command) };
+    // 任务日志只记了文件夹名，恢复出来的任务按文件夹名称呼存档
+    case "backup_world":
+    case "export_world":
+    case "restore_world_backup": {
+      const world = strArg(args, "world", command);
+      const op = command === "backup_world" ? "backup" : command === "export_world" ? "export" : "restore";
+      return { type: "world", instanceId: strArg(args, "id", command), world, name: world, op };
+    }
     default:
       return null;
   }
@@ -674,6 +734,9 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
   install_resource: "versionId",
   update_mod: "versionId",
   update_mods: "versionId",
+  backup_world: "id",
+  export_world: "id",
+  restore_world_backup: "id",
 };
 
 /**
@@ -698,6 +761,7 @@ const GAME_DIR_SCOPED_RESOURCES = [
   "memory-advice",
   "play-stats",
   "servers:known",
+  WORLD_BACKUPS_RESOURCE,
 ] as const;
 
 /**
@@ -706,7 +770,7 @@ const GAME_DIR_SCOPED_RESOURCES = [
  * 所以 id 一落到新实例上就丢掉它们。不在改名当时丢原 id 的：改名发起的页面那一刻还订阅着原 id，失效会让它按已经不在的
  * 实例重取、在缓存里留下一条报错。
  */
-const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice"] as const;
+const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice", WORLD_BACKUPS_RESOURCE] as const;
 
 /**
  * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
@@ -717,7 +781,23 @@ function playRecordsLag(err: unknown): IpcError {
   throw err;
 }
 
-/** play_records_failed 的 detail.renamed_to：改名已落盘后的新 id。缺了就是契约被破坏。 */
+/**
+ * 改名只差游玩记录或存档备份没跟上时命令以这两个码之一拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再分别提示。
+ * 两样都没跟上时后端报的是游玩记录那一个。其余错误照常冒泡。
+ */
+function renameLag(err: unknown): IpcError {
+  if (isIpcError(err) && (err.code === instancesIpc.PLAY_RECORDS_FAILED_ERROR_CODE || err.code === instancesIpc.WORLD_BACKUPS_NOT_MOVED_ERROR_CODE)) return err;
+  throw err;
+}
+
+/** world_backups_not_moved 的 detail.path：留在旧名下的备份目录。缺了就是契约被破坏。 */
+function strandedBackups(err: IpcError): string {
+  const detail = err.detail;
+  if (typeof detail === "object" && detail !== null && "path" in detail && typeof detail.path === "string") return detail.path;
+  throw new Error(`改名报 ${err.code} 却没给出 detail.path：${err.message}`);
+}
+
+/** 改名报 play_records_failed 或 world_backups_not_moved 时的 detail.renamed_to：改名已落盘后的新 id。缺了就是契约被破坏。 */
 function renamedTo(err: IpcError): string {
   const detail = err.detail;
   if (typeof detail === "object" && detail !== null && "renamed_to" in detail && typeof detail.renamed_to === "string") return detail.renamed_to;
@@ -740,6 +820,7 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "resource":
     case "update":
     case "updates":
+    case "world":
       return meta.instanceId === from ? { ...meta, instanceId: to } : meta;
     case "java":
       return meta.launchAfter === from || meta.pinFor === from ? { ...meta, launchAfter: swap(meta.launchAfter), pinFor: swap(meta.pinFor) } : meta;
@@ -793,6 +874,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     extraLoaders: [],
     releaseType: null,
     javaMajor: null,
+    quickPlay: null,
     description: null,
     cover: meta.cover,
     pinned,
@@ -1039,6 +1121,7 @@ export class LauncherStore {
       launchIpc.onLaunchPhase((e) => this.onLaunchPhase(e)),
       launchIpc.onGameLog((e) => this.onGameLog(e)),
       launchIpc.onGameExit((e) => this.onGameExit(e)),
+      launchIpc.onWorldBackup((e) => this.onWorldBackup(e)),
     ];
     for (const sub of subscriptions) {
       sub.then(
@@ -1238,6 +1321,14 @@ export class LauncherStore {
     invalidateResources("installed-sources");
   }
 
+  /** 改名已照成功落地，只差存档备份没挪过来：原因留在控制台，提示备份还在哪里，给出打开那个文件夹。 */
+  private backupsLagged(name: string, err: IpcError): void {
+    const path = strandedBackups(err);
+    console.warn(err.message, err.detail);
+    const copy = TOAST_COPY.backupsNotMoved(name, path);
+    this.pushToast("warning", copy.title, copy.body, { label: TOAST_COPY.openFolderAction, run: () => this.actions.revealPath(path), errorTitle: ACTION_ERROR.openFolder });
+  }
+
   /** 改名、删除已照成功落地，只差游玩记录：原因留在控制台，提示玩家记录之后会补上。 */
   private playRecordsLagged(name: string, err: IpcError): void {
     console.warn(err.message, err.detail);
@@ -1332,6 +1423,23 @@ export class LauncherStore {
     invalidateResources("play-stats");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
+  }
+
+  /**
+   * 游戏退出后的自动备份做完了：备份列表与实例的活动（后端在备份期间记着 backing_up）都要重读。
+   * 有存档没备份成时发一条 error 通知，正文是第一个失败存档的原文，「复制错误原文」带上全部失败与结构化详情。
+   */
+  private onWorldBackup(event: launchIpc.WorldBackupEvent): void {
+    invalidateResources(WORLD_BACKUPS_RESOURCE);
+    this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    const first = event.failed[0];
+    if (first === undefined) return;
+    for (const failure of event.failed) console.error(`「${event.instance_id}」的存档 ${failure.world} 自动备份没有完成`, failure.error);
+    const raw = event.failed
+      .map((f) => `${f.world}：${f.error.message}${f.error.detail === undefined ? "" : `\n${JSON.stringify(f.error.detail)}`}`)
+      .join("\n");
+    const copy = TOAST_COPY.autoBackupFailed(event.instance_id, first.error.message);
+    this.pushToast("error", copy.title, copy.body, { label: TOAST_COPY.copyErrorAction, run: () => navigator.clipboard.writeText(raw), errorTitle: TOAST_COPY.copyFailed });
   }
 
   /** 读崩溃报告的主线索，写进会话并发崩溃通知。读不出时会话标为 unavailable，错误照常抛出。 */
@@ -1594,9 +1702,16 @@ export class LauncherStore {
         unseenFailures: [...raw.unseenFailures, attemptTaskId(before)],
         ...landing(raw),
       }));
-      this.failureToast(before, taskFailureReason(record));
+      if (WORLD_TASK_COMMANDS.has(before.spec.command)) this.worldFailureToast(before, taskFailureReason(record));
+      else this.failureToast(before, taskFailureReason(record));
     }
     this.tasksChanged();
+    // 恢复没做完时原来的存档可能已经进了回收站；备份失败也可能清掉了半截的临时文件。列表、存档与实例的活动都按盘上重读
+    if (WORLD_TASK_COMMANDS.has(before.spec.command) && before.instanceId !== null) {
+      invalidateResources(WORLD_BACKUPS_RESOURCE);
+      invalidateResources(`content:${before.instanceId}`);
+      this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    }
     // 新建与导入取消后后端删除实例，修复失败或取消后实例带着未完成标记，都要重扫。占位项与重扫结果在同一次
     // 更新里交接：盘上留了目录就由扫描项接替，没留就移除
     if (INSTANCE_TASKS.has(before.spec.command)) {
@@ -1610,6 +1725,12 @@ export class LauncherStore {
       this.modsChanged(before.instanceId);
       this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     }
+  }
+
+  /** 备份、导出、恢复存档失败：各自一条，不并进下载失败的合并通知（它们不是下载）。 */
+  private worldFailureToast(task: Task, reason: string): void {
+    const copy = TASK_TOAST.worldFailed(task.title, reason);
+    this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install });
   }
 
   /** 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。 */
@@ -1796,6 +1917,28 @@ export class LauncherStore {
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
         return;
       }
+      case "world": {
+        // 共用存档的几个实例看到同一份备份表，整个前缀一起失效；恢复换掉了存档，存档列表跟着重读
+        invalidateResources(WORLD_BACKUPS_RESOURCE);
+        invalidateResources(`content:${meta.instanceId}`);
+        await this.fetchInstances();
+        if (meta.op === "backup") {
+          const outcome = result as BackupResultDto;
+          const copy = TASK_TOAST.worldBackedUp(meta.name, outcome.backup.size_bytes, outcome.pruned);
+          this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.viewBackupsAction, to: { page: "instance", id: meta.instanceId, tab: "overview" } });
+          return;
+        }
+        if (meta.op === "export") {
+          const outcome = result as ExportResultDto;
+          const copy = TASK_TOAST.worldExported(meta.name, outcome.path);
+          this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.openContainingAction, run: () => this.actions.revealPath(outcome.path), errorTitle: ACTION_ERROR.openFolder });
+          return;
+        }
+        const outcome = result as RestoreResultDto;
+        const copy = TASK_TOAST.worldRestored(meta.name, outcome.previous_in_recycle_bin);
+        this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined);
+        return;
+      }
     }
   }
 
@@ -1847,7 +1990,7 @@ export class LauncherStore {
     if (this.raw.login !== null && this.raw.login.kind === kind) this.set({ login: null });
     if (intent.kind === "launch") {
       this.pushToast("success", toast.title, TOAST_COPY.continuingLaunch(intent.instanceId));
-      await this.actions.launch(intent.instanceId);
+      await this.requestLaunch(intent.instanceId, intent.quickPlay);
       return;
     }
     this.pushToast("success", toast.title, toast.body);
@@ -1855,15 +1998,43 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 启动内部
 
+  /**
+   * 普通启动与直达共用的拦截链：同一实例已在加载或运行时直接返回；别的实例占着游戏进程时弹替换确认；
+   * 安装中抛错；损坏的普通启动转成「修复并启动」，直达抛错；没有账户先登录，登录后带着同一个 quickPlay 继续。
+   */
+  private async requestLaunch(id: string, quickPlay: launchIpc.QuickPlayArg | null): Promise<void> {
+    const inst = this.instance(id);
+    const s = this.raw.session;
+    if (s !== null && isSessionActive(s)) {
+      // 同一实例在多个入口上点启动，只有第一次生效
+      if (s.instanceId === id) return;
+      this.set({ launchPrompt: { instanceId: id, occupantId: s.instanceId, occupantPhase: s.phase === "running" ? "running" : "loading", quickPlay } });
+      return;
+    }
+    if (inst.status === "installing") throw new Error(`「${id}」还在安装，入口不应提供启动`);
+    if (inst.status === "broken") {
+      // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达
+      if (quickPlay !== null) throw new Error(`「${id}」需要先修复，入口不应提供直达`);
+      await this.actions.repairInstance(id, { launchAfter: true });
+      return;
+    }
+    const account = this.currentAccount();
+    if (account === null) {
+      this.set({ login: { kind: "no_account", intent: { kind: "launch", instanceId: id, quickPlay } } });
+      return;
+    }
+    await this.startLaunch(id, account, quickPlay, false);
+  }
+
   /** offlineFallback：失败卡上的「以离线方式进单人」，这一局不刷新登录；能否放行由后端凭它记下的上一次失败判定。 */
-  private async startLaunch(instanceId: string, account: Account, offlineFallback: boolean): Promise<void> {
+  private async startLaunch(instanceId: string, account: Account, quickPlay: launchIpc.QuickPlayArg | null, offlineFallback: boolean): Promise<void> {
     const taskId = freshId("launch");
-    this.set({ session: startSession(instanceId, taskId, account, Date.now()), launchPrompt: null });
+    this.set({ session: startSession(instanceId, taskId, account, Date.now(), quickPlay), launchPrompt: null });
     if (this.raw.settings !== null && this.raw.settings.selectedVersion !== instanceId) {
       this.background(ACTION_ERROR.selectInstance, this.actions.selectInstance(instanceId));
     }
     // 启动的结局（失败码、取消）是会话状态的一部分，不是异常：在这里转成会话；其余错误清掉乐观会话后原样抛出
-    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null, offlineFallback }).then(
+    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null, offlineFallback, quickPlay }).then(
       (launched) => {
         const s = this.raw.session;
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });
@@ -1915,8 +2086,11 @@ export class LauncherStore {
   private fixTarget(s: SessionState, kind: FailureFixKind): FailureFixTarget {
     const instanceId = s.instanceId;
     switch (kind) {
-      case "retry":
-        return { run: () => this.actions.launch(instanceId), errorTitle: ACTION_ERROR.launch(instanceId) };
+      case "retry": {
+        // 重试是同一次启动再来一遍，直达目标一起带上；其余修复动作之后按普通启动继续
+        const quickPlay = s.quickPlay;
+        return { run: () => this.requestLaunch(instanceId, quickPlay), errorTitle: ACTION_ERROR.launch(instanceId) };
+      }
       case "repair":
         return { run: () => this.actions.repairInstance(instanceId), errorTitle: ACTION_ERROR.repair };
       case "download_java": {
@@ -1934,7 +2108,7 @@ export class LauncherStore {
         };
       case "relogin": {
         const accountUuid = s.accountUuid;
-        return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId }), errorTitle: ACTION_ERROR.relogin };
+        return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId, quickPlay: null }), errorTitle: ACTION_ERROR.relogin };
       }
       case "launch_offline_once": {
         const accountUuid = s.accountUuid;
@@ -1946,7 +2120,7 @@ export class LauncherStore {
             if (inst.status === "broken") throw new Error(`「${instanceId}」文件不完整，入口不应提供以离线方式进单人`);
             const account = this.raw.accounts.find((a) => a.uuid === accountUuid);
             if (account === undefined) throw new Error(`账户 ${accountUuid} 不存在`);
-            await this.startLaunch(instanceId, account, true);
+            await this.startLaunch(instanceId, account, null, true);
           },
           errorTitle: ACTION_ERROR.launch(instanceId),
         };
@@ -2232,8 +2406,9 @@ export class LauncherStore {
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
         for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
-        // 后端随删除清掉了它的游玩记录，日历与洞察不能还算着它
+        // 后端随删除清掉了它的游玩记录，日历与洞察不能还算着它；记住它的固定服务器也一并忘掉了
         invalidateResources("play-stats");
+        invalidateResources("servers");
         const copy = TOAST_COPY.instanceDeleted(id, worldCount);
         store.pushToast("info", copy.title, copy.body);
         if (lagged !== null) store.playRecordsLagged(id, lagged);
@@ -2244,14 +2419,16 @@ export class LauncherStore {
         const { newId, lagged } = await instancesIpc.renameInstance(id, name).then(
           (outcome): { newId: string; lagged: IpcError | null } => ({ newId: outcome.id, lagged: null }),
           (err: unknown) => {
-            const lag = playRecordsLag(err);
+            const lag = renameLag(err);
             return { newId: renamedTo(lag), lagged: lag };
           },
         );
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
         store.instanceIdTaken(newId);
-        // 游玩记录已迁到新名字下（没跟上的由后端在下一次读时补上）：主页日历按旧 id 找不到实例，会把改了名的说成已删除
+        // 游玩记录已迁到新名字下（没跟上的由后端在下一次读时补上）：主页日历按旧 id 找不到实例，会把改了名的说成已删除。
+        // 记住它的固定服务器也跟到了新名字下
         invalidateResources("play-stats");
+        invalidateResources("servers");
         store.renameSeq += 1;
         const seq = store.renameSeq;
         // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
@@ -2270,7 +2447,8 @@ export class LauncherStore {
                 },
         }));
         store.scheduleJournal();
-        if (lagged !== null) store.playRecordsLagged(newId, lagged);
+        if (lagged !== null && lagged.code === instancesIpc.WORLD_BACKUPS_NOT_MOVED_ERROR_CODE) store.backupsLagged(newId, lagged);
+        else if (lagged !== null) store.playRecordsLagged(newId, lagged);
         return newId;
       },
       async updateInstanceSettings(id, patch) {
@@ -2298,6 +2476,9 @@ export class LauncherStore {
       async openFolder(target, id = null, world = null) {
         await instancesIpc.openFolder(target, id, world);
       },
+      async revealPath(path) {
+        await invoke<void>(REVEAL_COMMAND, { paths: [path] });
+      },
       async openExternal(url) {
         const parsed = new URL(url);
         if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error(`只能打开 http(s) 网址：${url}`);
@@ -2322,25 +2503,10 @@ export class LauncherStore {
 
       // ---- 启动会话
       async launch(id) {
-        const inst = store.instance(id);
-        const s = store.raw.session;
-        if (s !== null && isSessionActive(s)) {
-          // 同一实例在多个入口上点启动，只有第一次生效
-          if (s.instanceId === id) return;
-          store.set({ launchPrompt: { instanceId: id, occupantId: s.instanceId, occupantPhase: s.phase === "running" ? "running" : "loading" } });
-          return;
-        }
-        if (inst.status === "installing") throw new Error(`「${id}」还在安装，入口不应提供启动`);
-        if (inst.status === "broken") {
-          await actions.repairInstance(id, { launchAfter: true });
-          return;
-        }
-        const account = store.currentAccount();
-        if (account === null) {
-          store.set({ login: { kind: "no_account", intent: { kind: "launch", instanceId: id } } });
-          return;
-        }
-        await store.startLaunch(id, account, false);
+        await store.requestLaunch(id, null);
+      },
+      async quickPlay(id, target) {
+        await store.requestLaunch(id, target);
       },
       async stop() {
         const s = store.raw.session;
@@ -2369,7 +2535,7 @@ export class LauncherStore {
         await actions.stop();
         // 替换时不等已结束会话的 1500 ms 停留，直接开始新的
         store.set({ session: null });
-        await actions.launch(prompt.instanceId);
+        await store.requestLaunch(prompt.instanceId, prompt.quickPlay);
       },
       failureFix(kind) {
         const s = store.raw.session;
@@ -2537,6 +2703,31 @@ export class LauncherStore {
         );
       },
 
+      // ---- 存档备份
+      async backupWorld(instanceId, world, name) {
+        if (store.sessionActiveFor(instanceId)) throw new Error(`「${instanceId}」的游戏正在运行，退出后再备份`);
+        const task = store.enqueueWorld(instanceId, world, name, "backup", { command: "backup_world", args: { id: instanceId, world } });
+        if (task === null) return;
+        const copy = TASK_TOAST.backupStarted(name);
+        store.pushToast("info", copy.title, copy.body);
+      },
+      async restoreWorldBackup(instanceId, world, name, file) {
+        if (store.sessionActiveFor(instanceId)) throw new Error(`「${instanceId}」的游戏正在运行，退出后再恢复`);
+        store.enqueueWorld(instanceId, world, name, "restore", { command: "restore_world_backup", args: { id: instanceId, world, file } });
+      },
+      async exportWorld(instanceId, world, name, dest) {
+        if (store.sessionActiveFor(instanceId)) throw new Error(`「${instanceId}」的游戏正在运行，退出后再导出`);
+        store.enqueueWorld(instanceId, world, name, "export", { command: "export_world", args: { id: instanceId, world, dest } });
+      },
+      async deleteWorldBackup(instanceId, world, file) {
+        await instancesIpc.deleteWorldBackup(instanceId, world, file);
+        invalidateResources(WORLD_BACKUPS_RESOURCE);
+        store.pushToast("info", TOAST_COPY.backupDeleted.title, TOAST_COPY.backupDeleted.body);
+      },
+      async listWorldBackups(instanceId, world) {
+        return instancesIpc.listWorldBackups(instanceId, world);
+      },
+
       // ---- 下载任务
       async cancelTask(id) {
         const task = store.findTask(id);
@@ -2638,24 +2829,37 @@ export class LauncherStore {
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
       async togglePinServer(server) {
-        const run = store.serverPinChain.then(async () => {
+        await store.queueServerPins(async () => {
           const current = await listPinnedServers();
           const pinned = current.some((s) => s.address === server.address);
-          await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, server]);
-          invalidateResources("servers");
+          // 新固定的服务器还没选过加入用的实例
+          await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, { name: server.name, address: server.address, instance: null }]);
         });
-        // 链只负责排队：这一次的失败经下面的 await 照常抛给调用方，不挡后面排着的切换
-        store.serverPinChain = run.then(
-          () => undefined,
-          () => undefined,
-        );
-        await run;
+      },
+      async setPinnedServerInstance(address, instance) {
+        await store.queueServerPins(() => setPinnedServerInstance(address, instance));
       },
       async reload(slice) {
         await store.loadSlice(slice);
       },
     };
     return actions;
+  }
+
+  /**
+   * 固定服务器的读改写排成一条链串行执行，写成功后让服务器查询失效。链只负责排队：这一次的失败经返回的 Promise
+   * 照常抛给调用方，不挡后面排着的写入。
+   */
+  private async queueServerPins(write: () => Promise<unknown>): Promise<void> {
+    const run = this.serverPinChain.then(async () => {
+      await write();
+      invalidateResources("servers");
+    });
+    this.serverPinChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
   }
 
   private async afterAuthlib(account: Account): Promise<void> {
@@ -2705,6 +2909,16 @@ export class LauncherStore {
     this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
     this.tasksChanged();
     return true;
+  }
+
+  /** 排一个备份、导出或恢复任务；导出与备份同是打包，都记作 world_backup。同一件事已在队列里时提示重复并返回 null。 */
+  private enqueueWorld(instanceId: string, world: string, name: string, op: "backup" | "restore" | "export", spec: Task["spec"]): Task | null {
+    const title = op === "backup" ? TASK_TEXT.backupTitle(name) : op === "export" ? TASK_TEXT.exportTitle(name) : TASK_TEXT.restoreTitle(name);
+    return this.enqueue(
+      { kind: op === "restore" ? "world_restore" : "world_backup", title, detail: TASK_TEXT.backupDetail(instanceId), instanceId, spec },
+      { type: "world", instanceId, world, name, op },
+      title,
+    );
   }
 
   private enqueueUpdate(instanceId: string, candidate: modsIpc.UpdateCandidate): void {

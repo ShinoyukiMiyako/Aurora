@@ -49,7 +49,7 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        // 更改游戏目录、导入本地整合包要拿磁盘绝对路径，只能走系统对话框。
+        // 更改游戏目录、导入本地整合包、选导出存档的位置要拿磁盘绝对路径，只能走系统对话框。
         .plugin(tauri_plugin_dialog::init())
         // -- art --
         .register_asynchronous_uri_scheme_protocol(textures::SCHEME, textures::handle);
@@ -145,6 +145,11 @@ pub fn run() {
             commands::instances::template_info,
             commands::instances::save_instance_as_template,
             commands::instances::clear_template,
+            commands::instances::backup_world,
+            commands::instances::list_world_backups,
+            commands::instances::restore_world_backup,
+            commands::instances::delete_world_backup,
+            commands::instances::export_world,
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
@@ -187,6 +192,7 @@ pub fn run() {
             commands::system::probe_network,
             commands::servers::list_pinned_servers,
             commands::servers::set_pinned_servers,
+            commands::servers::set_pinned_server_instance,
             commands::servers::list_known_servers,
             commands::servers::ping_servers,
             commands::news::list_news,

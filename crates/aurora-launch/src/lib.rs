@@ -14,6 +14,7 @@
 //! - [`logfile`]：每次启动的会话日志（写入、滚动保留、读尾部）。
 //! - [`crash`]：崩溃基础检测规则表与结构化诊断。
 //! - [`precheck`]：启动前的轻量判断（所需 Java 主版本、路径与同步盘提醒、角色名长度、JVM 内存参数）。
+//! - [`quickplay`]：直达存档与服务器（Quick Play 与旧版 `--server` / `--port`）的支持判定。
 //! - [`workspace`]：游戏工作目录（版本隔离）解析。
 //!
 //! 错误统一归口到 [`LaunchError`]，下游可 `#[from] aurora_launch::LaunchError` 冒泡。
@@ -29,6 +30,7 @@ pub mod memory;
 pub mod placeholder;
 pub mod precheck;
 pub mod process;
+pub mod quickplay;
 pub mod workspace;
 
 pub use account::{AuthValues, AuthlibInjector, OFFLINE_ACCESS_TOKEN};
@@ -57,5 +59,9 @@ pub use precheck::{
 pub use process::{
     ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogStream, SessionEnd,
     detect_crash, spawn,
+};
+pub use quickplay::{
+    FEATURE_MULTIPLAYER, FEATURE_SINGLEPLAYER, QuickPlayMode, QuickPlaySupport, QuickPlayTarget,
+    legacy_server_args, quick_play_support,
 };
 pub use workspace::resolve_game_directory;

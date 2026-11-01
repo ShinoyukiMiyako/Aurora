@@ -21,7 +21,7 @@ function phase(session: SessionState, stageIndex: number, download: SessionState
 const dl = (bytes: number, totalBytes: number | null, done = 0, total: number | null = 10) => ({ done, total, bytes, totalBytes, speedBps: 4_200_000 });
 
 describe("会话进度：八阶段区间", () => {
-  const s0 = startSession("生存", "launch-1", ACCOUNT, T0);
+  const s0 = startSession("生存", "launch-1", ACCOUNT, T0, null);
 
   it("各阶段起点：0 / 0.1 / 0.2 / 0.3 / 0.75 / 0.83 / 0.91", () => {
     expect(s0).toMatchObject({ phase: "preparing", progress: 0, stageIndex: 0, accountName: "Steve" });
@@ -71,7 +71,7 @@ describe("准备阶段的提醒数", () => {
   const line = (level: LogLine["level"], source: LogLine["source"], text: string): LogLine => ({ at: T0, level, source, text });
 
   it("加载期间启动器的 warn 行记到当前阶段；游戏输出、info 与 error 行不算；运行之后不再计", () => {
-    let s = startSession("生存", "launch-1", ACCOUNT, T0);
+    let s = startSession("生存", "launch-1", ACCOUNT, T0, null);
     expect(s.stageWarnings).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
     s = appendSessionLogs(s, "生存", [line("warn", "launcher", "游戏路径含有非 ASCII 字符"), line("info", "launcher", "检查 Java"), line("warn", "game", "x")]);
     s = phase(s, 2);
@@ -84,13 +84,13 @@ describe("准备阶段的提醒数", () => {
   });
 
   it("别的实例的日志不记", () => {
-    const s = startSession("生存", "launch-1", ACCOUNT, T0);
+    const s = startSession("生存", "launch-1", ACCOUNT, T0, null);
     expect(appendSessionLogs(s, "创造", [line("warn", "launcher", "x")])).toBe(s);
   });
 });
 
 describe("会话退出", () => {
-  const running = sessionLaunched(startSession("生存", "launch-1", ACCOUNT, T0), "launch-1", T0 + 1000);
+  const running = sessionLaunched(startSession("生存", "launch-1", ACCOUNT, T0, null), "launch-1", T0 + 1000);
 
   it("玩家结束的永远不判崩溃，即使退出码非 0", () => {
     const s = sessionExited(running, { versionId: "生存", crashed: true, killed: true }, T0 + 5000);
@@ -131,7 +131,7 @@ describe("会话：状态容器里的启动与结束", () => {
 
   it("点启动后进入 preparing，阶段事件推进进度，launch_game 返回后进入运行", async () => {
     const { store, launched, pending, taskId } = await launching();
-    expect(callsOf(ipc, "launch_game")).toEqual([{ taskId, versionId: "生存", accountUuid: "00000000-0000-0000-0000-00000000a001", offlineFallback: false, offlineName: null }]);
+    expect(callsOf(ipc, "launch_game")).toEqual([{ taskId, versionId: "生存", accountUuid: "00000000-0000-0000-0000-00000000a001", offlineFallback: false, offlineName: null, quickPlay: null }]);
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "preparing", progress: 0 });
 
     emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 3, download: { total: 480, finished: 120, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);

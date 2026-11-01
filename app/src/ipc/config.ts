@@ -39,6 +39,15 @@ export interface MemorySettings {
   auto: boolean;
 }
 
+/** 存档备份：退出游戏后自动备份玩过的存档，自动备份按两条规则清理，手动备份一直保留。 */
+export interface WorldBackupSettings {
+  auto: boolean;
+  /** 每个存档保留的自动备份份数，1 到 50。 */
+  keep_per_world: number;
+  /** 全部备份的总量上限（GB），1 到 1000；超过时先删最旧的自动备份。 */
+  max_total_gb: number;
+}
+
 export interface ConfigDto {
   /** 当前游戏目录（.minecraft）绝对路径。 */
   game_dir: string;
@@ -68,6 +77,7 @@ export interface ConfigDto {
   extra_java_paths: string[];
   /** 启动前把这次用的 java 设为 Windows 图形设置里的高性能显卡。 */
   prefer_dedicated_gpu: boolean;
+  world_backup: WorldBackupSettings;
 }
 
 /**
@@ -94,6 +104,8 @@ export interface ConfigPatch {
   notifiedUpdateVersion?: string;
   language?: UiLanguage;
   preferDedicatedGpu?: boolean;
+  /** 三个字段都必须给出；越界报 invalid_argument，detail.field 为 world_backup.keep_per_world 或 world_backup.max_total_gb。 */
+  worldBackup?: WorldBackupSettings;
 }
 
 export const getConfig = (): Promise<ConfigDto> => invoke<ConfigDto>("get_config");

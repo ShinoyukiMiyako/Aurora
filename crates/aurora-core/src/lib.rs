@@ -64,6 +64,7 @@ pub mod template;
 pub mod updates;
 pub mod versions;
 mod workdir;
+pub mod world_backup;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
@@ -73,7 +74,7 @@ pub use compat::{
 };
 pub use config::{
     AfterLaunch, AuroraConfig, ConfigFieldReset, ConfigRecovery, ConfigStore, DownloadSourcePolicy,
-    MemorySettings, NamedDirectory, PinnedServer,
+    MemorySettings, NamedDirectory, PinnedServer, WorldBackupSettings,
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog, ScannedFile};
 pub use deps::{InstallPlan, PlannedItem};
@@ -86,7 +87,7 @@ pub use install::{InstallOutcome, LoaderChoice};
 pub use java::RemovedJavaPath;
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
-    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
+    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning, QuickPlay,
     resolve_memory,
 };
 pub use launcher_update::{UpdateSource, order_update_sources};
@@ -114,6 +115,9 @@ pub use starter::{
 };
 pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
 pub use updates::UpdateCandidate;
+pub use world_backup::{
+    AutoBackupOutcome, BackupOutcome, ExportOutcome, RestoreOutcome, WorldBackup, WorldBackupList,
+};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -130,14 +134,15 @@ pub use aurora_auth::{
 };
 pub use aurora_install::{LoaderSummary, VanillaSummary};
 pub use aurora_instance::{
-    BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,
+    BackupKind, BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,
+    WorldScope,
 };
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use aurora_launch::{
     CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, ExitReport, KillSwitch,
     LauncherLevel, LogBatchSink, LogEntry, LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier,
-    SessionEnded, SessionOutcome, SystemMemory, analyze, detect_crash, game_line_level,
-    probe_system_memory,
+    QuickPlayMode, QuickPlaySupport, QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory,
+    analyze, detect_crash, game_line_level, probe_system_memory,
 };
 pub use aurora_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,

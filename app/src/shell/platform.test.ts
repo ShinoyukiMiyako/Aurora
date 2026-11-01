@@ -2,16 +2,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { callsOf, resetRecorder } from "../test/launcher";
-import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile } from "./platform";
+import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile, pickSaveFile } from "./platform";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
-const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 beforeEach(() => {
   resetRecorder(ipc);
   dialog.open.mockReset();
+  dialog.save.mockReset();
 });
 
 afterEach(() => {
@@ -80,5 +81,24 @@ describe("选择文件", () => {
   it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消，也不去调对话框", async () => {
     await expect(pickFile({ title: "选择整合包文件", filter })).rejects.toThrow("浏览器预览里没有系统的选择文件对话框");
     expect(dialog.open).not.toHaveBeenCalled();
+  });
+});
+
+describe("保存文件", () => {
+  const options = { title: "导出「新的世界」", defaultPath: "新的世界.zip", filter: { name: "存档压缩包", extensions: ["zip"] } };
+
+  it("窗口里：带上标题、默认文件名与类型过滤；选定给出完整路径，取消为 null", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.save.mockResolvedValueOnce("E:\\备份\\新的世界.zip").mockResolvedValueOnce(null);
+    await expect(pickSaveFile(options)).resolves.toBe("E:\\备份\\新的世界.zip");
+    await expect(pickSaveFile(options)).resolves.toBeNull();
+    expect(dialog.save).toHaveBeenCalledTimes(2);
+    expect(dialog.save).toHaveBeenNthCalledWith(1, { title: "导出「新的世界」", defaultPath: "新的世界.zip", filters: [{ name: "存档压缩包", extensions: ["zip"] }] });
+    expect(dialog.open).not.toHaveBeenCalled();
+  });
+
+  it("浏览器预览里没有保存对话框：明确拒绝，不当作用户取消", async () => {
+    await expect(pickSaveFile(options)).rejects.toThrow("浏览器预览里没有系统的保存文件对话框，导出要在桌面应用里进行");
+    expect(dialog.save).not.toHaveBeenCalled();
   });
 });

@@ -35,8 +35,11 @@ export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "wo
 
 // ---------------------------------------------------------------- 锁定
 
-/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置。 */
-export type InstanceLock = "running" | "installing" | "modifying";
+/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置，或正在备份、恢复、导出存档。 */
+export type InstanceLock = "running" | "installing" | "modifying" | "backing_up";
+
+/** 后端占着实例、又不挡 Mod 操作的两种活动。 */
+type HeldActivity = "modifying" | "backing_up";
 
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
@@ -45,19 +48,21 @@ export interface InstanceLocks {
   rename: InstanceLock | null;
   /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。 */
   repair: InstanceLock | null;
-  delete: "running" | "modifying" | null;
+  delete: "running" | HeldActivity | null;
 }
 
 /**
  * busy：本实例的会话在准备、下载、启动或运行中（JVM 占着 Mod 文件，Windows 下改名、替换、删除都会失败）。
  * installing：安装或补全任务正在写这个实例的目录。
- * modifying：后端正占着实例改动 Mod、资源或设置。它与游戏运行、与它自己兼容，所以不锁 Mod 操作；
- * 但与改名、删除、补全互斥，不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
+ * modifying：后端正占着实例改动 Mod、资源或设置。backingUp：后端正在备份、恢复或导出存档（游戏退出后的
+ * 自动备份也算）。两者都与 Mod 改动兼容，所以不锁 Mod 操作；但与改名、删除、补全互斥，不提前禁用的话
+ * 只能等后端以 instance_busy 拒绝后再报错。后端只报告一种活动，两者不会同时为真。
  */
-export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean): InstanceLocks {
+export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean, backingUp = false): InstanceLocks {
+  const held: HeldActivity | null = backingUp ? "backing_up" : modifying ? "modifying" : null;
   const fileLock = busy ? "running" : installing ? "installing" : null;
-  const dirLock = fileLock !== null ? fileLock : modifying ? "modifying" : null;
-  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : null };
+  const dirLock = fileLock !== null ? fileLock : held;
+  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : held };
 }
 
 /** 打开工作子目录与写实例设置被什么挡住。 */
@@ -116,6 +121,28 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
   if (crashActive) return "crashed";
   if (view === "broken") return "broken";
   if (view === "installing") return "installing";
+  return null;
+}
+
+// ---------------------------------------------------------------- 存档直达
+
+export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | "launching" | "running";
+
+/**
+ * 存档行「进入」此刻为什么不能点；能点为 null。自上而下取第一条：实例自身的状态先于版本能力，版本能力先于进行中的
+ * 备份与这一局的会话。另一个实例占着游戏进程时照常能点，由启动拦截弹替换确认。
+ *
+ * 备份或恢复期间后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的存档任务：后端还没
+ * 报 backing_up 时就点进入，会正好撞上马上要占实例的那个任务。
+ */
+export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPlay" | "activity">, view: LaunchViewKind, worldTask: boolean): EnterWorldBlock | null {
+  if (inst.status === "installing") return "installing";
+  if (inst.status === "broken") return "broken";
+  if (inst.quickPlay === null) return "unknownVersion";
+  if (!inst.quickPlay.singleplayer) return "legacy";
+  if (inst.activity === "backing_up" || worldTask) return "backingUp";
+  if (view === "loading") return "launching";
+  if (view === "running") return "running";
   return null;
 }
 

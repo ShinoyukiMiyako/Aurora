@@ -11,6 +11,7 @@ import {
   GAME_LOG_EVENT,
   LAUNCH_PHASE_EVENT,
   OFFLINE_FALLBACK_FIELD,
+  QUICK_PLAY_UNSUPPORTED_CODE,
   type BusyDetail,
   type GameExitEvent,
   type InstanceMinutesDto,
@@ -23,12 +24,15 @@ import {
   type OfflineFallbackRefusedDetail,
   type PlayDayDto,
   type PlayStatsDto,
+  type QuickPlayArg,
+  type QuickPlayUnsupportedDetail,
 } from "../../launch";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { mockAccountFacts } from "./accounts";
-import { handlers as configHandlers, samePath } from "./config";
-import { acquireMockInstance, type MockInstanceHold } from "./instances";
+import { handlers as configHandlers, requireStruct, samePath, tauriArgError } from "./config";
+import { acquireMockInstance, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { serverKey } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 const MOCK_PID = 4242;
@@ -158,6 +162,7 @@ let pendingFailure: PendingFailure | null = null;
  * 刷新页面（相当于重开启动器）后为空；普通启动成功时清掉，降级启动取出即消耗。
  */
 let accountFailures = new Map<string, string>();
+let lastQuickPlay: QuickPlayArg | null = null;
 let logs = new Map<string, LaunchLogDto>();
 let crashes = new Map<string, CrashReportDto>();
 /** 下一份崩溃报告带的启动提醒；用一次就清空。 */
@@ -290,6 +295,44 @@ function optionalStringArg(command: string, args: MockArgs, key: string): string
   return value;
 }
 
+/** Rust 侧的 Option<QuickPlayArg>（按 kind 区分的内部标签枚举）：缺键与 null 都是普通启动。 */
+function quickPlayArg(args: MockArgs): QuickPlayArg | null {
+  const raw = args.quickPlay;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) throw tauriArgError("launch_game", "quickPlay", "expected an internally tagged enum");
+  const kind = (raw as Record<string, unknown>).kind;
+  if (kind === "singleplayer") {
+    const record = requireStruct(raw, ["kind", "world_dir_name"], "launch_game", "quickPlay");
+    if (typeof record.world_dir_name !== "string") throw tauriArgError("launch_game", "quickPlay", "missing field `world_dir_name`");
+    return { kind, world_dir_name: record.world_dir_name };
+  }
+  if (kind === "multiplayer") {
+    const record = requireStruct(raw, ["kind", "address"], "launch_game", "quickPlay");
+    if (typeof record.address !== "string") throw tauriArgError("launch_game", "quickPlay", "missing field `address`");
+    return { kind, address: record.address };
+  }
+  throw tauriArgError("launch_game", "quickPlay", `unknown variant \`${String(kind)}\`, expected \`singleplayer\` or \`multiplayer\``);
+}
+
+/** 与后端「校验游戏文件」阶段的检查同序：版本支持这种直达方式，世界文件夹还在，服务器地址合法。 */
+function checkQuickPlay(versionId: string, quickPlay: QuickPlayArg): void {
+  const support = mockInstanceQuickPlay(versionId);
+  const supported = support !== null && (quickPlay.kind === "singleplayer" ? support.singleplayer : support.multiplayer);
+  if (!supported) {
+    const detail: QuickPlayUnsupportedDetail = { version_id: versionId, mode: quickPlay.kind };
+    const what = quickPlay.kind === "singleplayer" ? "进入存档（1.20 之前的版本没有 Quick Play）" : "加入服务器";
+    throw new IpcError(QUICK_PLAY_UNSUPPORTED_CODE, `版本 ${versionId} 不支持直接${what}`, detail);
+  }
+  if (quickPlay.kind === "singleplayer") {
+    const worlds = mockInstanceWorlds(versionId);
+    if (worlds === null || !worlds.includes(quickPlay.world_dir_name)) {
+      throw new IpcError("world_not_found", `实例 ${versionId} 里没有存档 ${quickPlay.world_dir_name}`, { version_id: versionId, world: quickPlay.world_dir_name });
+    }
+    return;
+  }
+  serverKey(quickPlay.address);
+}
+
 function busy(current: Occupant): IpcError {
   const verb = current.phase === "running" ? "正在运行" : "正在启动";
   const detail: BusyDetail = { version_id: current.versionId, phase: current.phase };
@@ -324,7 +367,10 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   const uuid = optionalStringArg("launch_game", args, "accountUuid");
   const name = optionalStringArg("launch_game", args, "offlineName");
   const offlineFallback = boolArg("launch_game", args, "offlineFallback");
+  const quickPlay = quickPlayArg(args);
   if ((uuid === null) === (name === null)) throw new IpcError("invalid_argument", "启动需提供 account_uuid 与 offline_name 二者之一");
+  if (quickPlay !== null) checkQuickPlay(versionId, quickPlay);
+  lastQuickPlay = quickPlay;
   if (occupant) throw busy(occupant);
   // 后端在开局取账户身份时才拒绝，那时已占了槽与实例，但一失败就全部放开；这里在占用之前拒绝，对外可见的状态相同。
   const offlineAs = offlineFallback ? admitOfflineFallback(uuid, name) : null;
@@ -465,6 +511,11 @@ export function failNextMockLaunch(code: string, params: Record<string, string |
   pendingFailure = { code, message, params };
 }
 
+/** 最近一次通过了参数与直达检查的 launch_game 带的 quickPlay；普通启动为 null。 */
+export function lastMockQuickPlay(): QuickPlayArg | null {
+  return lastQuickPlay;
+}
+
 /** 诊断 mock 读取用。 */
 /** 当前游戏目录里某实例的累计游玩（分钟向下取整）与上次游玩；没玩过为 null。实例 mock 的列表据此给出游玩时长。 */
 export function mockPlaySummary(versionId: string): { playtime_min: number; last_played_at: number } | null {
@@ -594,6 +645,7 @@ export function reset(): void {
   occupant = null;
   pendingFailure = null;
   accountFailures = new Map();
+  lastQuickPlay = null;
   pendingRecordsFailure = null;
   pendingWarnings = [];
   logs = new Map();

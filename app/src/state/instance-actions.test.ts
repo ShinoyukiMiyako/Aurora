@@ -86,11 +86,11 @@ describe("改名迁移启动会话", () => {
     ipc.overrides.set("launch_game", () => ({ pid: 1 }));
     await store.actions.launch("创造");
     await store.actions.launch("生存");
-    expect(store.getState().launchPrompt).toEqual({ instanceId: "生存", occupantId: "创造", occupantPhase: "running" });
+    expect(store.getState().launchPrompt).toEqual({ instanceId: "生存", occupantId: "创造", occupantPhase: "running", quickPlay: null });
 
     renameOnDisk("生存", "生存二");
     await store.actions.renameInstance("生存", "生存二");
-    expect(store.getState().launchPrompt).toEqual({ instanceId: "生存二", occupantId: "创造", occupantPhase: "running" });
+    expect(store.getState().launchPrompt).toEqual({ instanceId: "生存二", occupantId: "创造", occupantPhase: "running", quickPlay: null });
     expect(store.getState().session).toMatchObject({ instanceId: "创造", phase: "running" });
     await settle();
   });

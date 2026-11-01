@@ -94,6 +94,13 @@ pub enum CoreError {
     /// 数据包要装进的存档在该实例里不存在。
     #[error("实例 {version_id} 里没有存档 {world}")]
     WorldNotFound { version_id: String, world: String },
+    /// 要恢复或删除的备份不在这个存档的备份清单里，或清单里有、盘上已经没有了。
+    #[error("实例 {version_id} 的存档 {world} 没有备份 {file}")]
+    WorldBackupNotFound {
+        version_id: String,
+        world: String,
+        file: String,
+    },
     /// 平台给出的文件名不能安全地落盘（含路径分隔符、`..` 等）。
     #[error("{platform} 给出的文件名不安全：{file_name}")]
     UnsafeFileName {
@@ -154,6 +161,9 @@ pub enum CoreError {
         address: String,
         reason: &'static str,
     },
+    /// 要改的服务器不在固定列表里。
+    #[error("服务器「{address}」没有固定")]
+    ServerNotPinned { address: String },
     /// 游戏目录不能用作当前目录。
     #[error("游戏目录 {path} 不能用：{problem}")]
     InvalidGameDirectory {
@@ -324,6 +334,7 @@ impl CoreError {
             CoreError::Java(err) => err.is_cancelled(),
             CoreError::Auth(err) => err.is_cancelled(),
             CoreError::Modpack(aurora_modpack::Error::Cancelled) => true,
+            CoreError::Instance(aurora_instance::Error::Cancelled) => true,
             _ => false,
         }
     }
@@ -349,6 +360,13 @@ mod tests {
         assert!(CoreError::Auth(aurora_auth::AuthError::Cancelled).is_cancelled());
         assert!(!CoreError::Auth(aurora_auth::AuthError::ReloginRequired).is_cancelled());
         assert!(CoreError::Modpack(aurora_modpack::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Instance(aurora_instance::Error::Cancelled).is_cancelled());
+        assert!(
+            !CoreError::Instance(aurora_instance::Error::WorldInUse {
+                path: PathBuf::from("saves/w"),
+            })
+            .is_cancelled()
+        );
 
         assert!(
             !CoreError::OfflineFallbackRefused {

@@ -125,7 +125,7 @@ describe("还没有账户", () => {
     expect(title()).toBe(NO_ACCOUNT_COPY.title);
     act(() => button(NO_ACCOUNT_COPY.addOffline).click());
     await flush();
-    expect(launcher.state.login).toEqual({ kind: "offline", intent: { kind: "launch", instanceId: "生存" } });
+    expect(launcher.state.login).toEqual({ kind: "offline", intent: { kind: "launch", instanceId: "生存", quickPlay: null } });
     expect(title()).toBe(OFFLINE_DIALOG_COPY.title);
   });
 });
