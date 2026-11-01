@@ -815,8 +815,9 @@ button.bar:hover .barTrack {
   color: var(--sk-danger);
 }
 
-/* 最窄一档里「加入」保留文字按钮，延迟文字先让位，只留信号格 */
-:root[data-sk-tier="compact"] .ping {
+/* 这张卡在 compact（span 5）与 wide（span 3）两档最窄：「加入」保留文字按钮，延迟文字先让位，只留信号格 */
+:root[data-sk-tier="compact"] .ping,
+:root[data-sk-tier="wide"] .ping {
   display: none;
 }
 

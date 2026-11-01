@@ -2139,6 +2139,10 @@ export class LauncherStore {
           return;
         }
         this.set({ session: null });
+        // 直达的存档已被移走：入口手里的存档列表过时了，重读一遍，免得那一行留着让人再点
+        if (quickPlay !== null && quickPlay.kind === "singleplayer" && isIpcError(error) && error.code === launchIpc.WORLD_NOT_FOUND_CODE) {
+          invalidateResources(`content:${instanceId}`);
+        }
         throw error;
       },
     );
@@ -2164,7 +2168,8 @@ export class LauncherStore {
     const instanceId = s.instanceId;
     switch (kind) {
       case "retry": {
-        // 重试是同一次启动再来一遍，直达目标一起带上；其余修复动作之后按普通启动继续
+        // 重试、改为自动选择 Java 后立即重启、重新登录后继续，都是同一次启动再来一遍，直达目标一起带上；
+        // 下载 Java 后的自动启动挂在下载任务上，按普通启动继续
         const quickPlay = s.quickPlay;
         return { run: () => this.requestLaunch(instanceId, quickPlay), errorTitle: ACTION_ERROR.launch(instanceId) };
       }
@@ -2175,17 +2180,20 @@ export class LauncherStore {
         if (typeof major !== "number") throw new Error("java_missing 缺少 major");
         return { run: () => this.actions.installJava(major, { launchAfter: instanceId }), errorTitle: ACTION_ERROR.installJava };
       }
-      case "auto_java":
+      case "auto_java": {
+        const quickPlay = s.quickPlay;
         return {
           run: async () => {
             await this.actions.updateInstanceSettings(instanceId, { java: JAVA_AUTO });
-            await this.actions.launch(instanceId);
+            await this.requestLaunch(instanceId, quickPlay);
           },
           errorTitle: ACTION_ERROR.launch(instanceId),
         };
+      }
       case "relogin": {
         const accountUuid = s.accountUuid;
-        return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId, quickPlay: null }), errorTitle: ACTION_ERROR.relogin };
+        const quickPlay = s.quickPlay;
+        return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId, quickPlay }), errorTitle: ACTION_ERROR.relogin };
       }
       case "launch_offline_once": {
         const accountUuid = s.accountUuid;
