@@ -14,6 +14,7 @@ use crate::AURORA_META_DIR;
 use crate::error::{Error, Result};
 
 const MARKER_FILE: &str = "incomplete.json";
+const INSTALL_RECORD_FILE: &str = "install-record.json";
 
 /// 新建实例时要装的东西，修复一个没装完的实例时照此重新安装。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,9 +145,70 @@ impl MarkerStore {
     }
 }
 
+/// 实例装好时留下的记录：装的是什么。
+///
+/// 未完成标记在安装成功后就删了，之后版本 JSON 被手工删掉或写坏，修复时只有这份记录说得出该重装什么。
+#[derive(Debug, Clone)]
+pub struct InstallRecordStore {
+    path: PathBuf,
+}
+
+impl InstallRecordStore {
+    /// `version_dir/.petalfall/install-record.json`。
+    pub fn for_version_dir(version_dir: &Path) -> Self {
+        Self {
+            path: version_dir.join(AURORA_META_DIR).join(INSTALL_RECORD_FILE),
+        }
+    }
+
+    /// 读取记录；这份记录出现之前装的实例没有，返回 `None`。
+    pub async fn load(&self) -> Result<Option<InstallSpec>> {
+        match tokio::fs::read(&self.path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|source| Error::Json {
+                    context: "安装记录",
+                    path: self.path.clone(),
+                    source,
+                }),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(Error::Io {
+                path: self.path.clone(),
+                source,
+            }),
+        }
+    }
+
+    /// 原子写入记录。
+    pub async fn save(&self, spec: &InstallSpec) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(spec).map_err(|source| Error::Json {
+            context: "安装记录",
+            path: self.path.clone(),
+            source,
+        })?;
+        aurora_base::fs::atomic_write(&self.path, &bytes).await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn install_record_round_trips_and_is_absent_on_older_instances() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = InstallRecordStore::for_version_dir(tmp.path());
+        assert_eq!(store.load().await.unwrap(), None);
+        let spec = InstallSpec {
+            mc_version: "1.20.1".into(),
+            loader: Some("fabric".into()),
+            loader_version: Some("0.20.1".into()),
+            use_template: false,
+        };
+        store.save(&spec).await.unwrap();
+        assert_eq!(store.load().await.unwrap(), Some(spec));
+    }
 
     fn install_marker() -> IncompleteMarker {
         IncompleteMarker::pending(

@@ -10,7 +10,7 @@
 //! 界面据此显示「安装没有完成」），取消则经 [`Aurora::abandon_instance`] 把整个目录丢掉。
 //!
 //! 补全先经 [`Aurora::begin_repair`] 看标记定方案：标记里记着当初的安装内容（安装没完成）就照着重装，
-//! 否则按现有版本 JSON 补齐缺失的文件。
+//! 否则按现有版本 JSON 补齐缺失的文件；版本 JSON 被删或写坏时照装好时留下的安装记录重装。
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,8 +20,9 @@ use aurora_install::{
     forge_installer_url, merge_for_instance, neoforge_installer_url, write_instance_json,
 };
 use aurora_instance::{
-    AURORA_META_DIR, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec, MarkerError,
-    MarkerStore, NameViolation, VersionProbe, discover_versions, probe_version,
+    AURORA_META_DIR, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallRecordStore,
+    InstallSpec, MarkerError, MarkerStore, NameViolation, VersionProbe, discover_versions,
+    probe_version,
 };
 use aurora_version::{VersionJson, resolve};
 
@@ -305,6 +306,16 @@ impl Aurora {
         };
 
         write_instance_json(&layout, &merged).await?;
+        // 记实际装上的版本：Fabric / Quilt 没指定版本时装的是当时的推荐版，日后修复时推荐版可能已经变了。
+        // 默认设置不记：重装时实例里已经有玩家自己的设置。
+        InstallRecordStore::for_version_dir(&dir)
+            .save(&InstallSpec {
+                mc_version: request.mc_version.clone(),
+                loader: request.loader.map(|choice| choice.key().to_owned()),
+                loader_version: loader.as_ref().map(|l| l.version.clone()),
+                use_template: false,
+            })
+            .await?;
         emit(events, CoreEvent::stage("补全库、资源与 natives"));
         let report = ensure_complete(cx, &merged, id).await?;
         tokio::fs::remove_file(&staged)
@@ -381,7 +392,7 @@ impl Aurora {
 
     /// 定补全方案并写下新的未完成标记，返回方案与标记。
     ///
-    /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，不可用就无从下手，报不可补全。
+    /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，不可用时照安装记录重装，连记录也没有才报不可补全。
     pub async fn begin_repair(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
         let dir = self.existing_instance_dir(id).await?;
         let store = MarkerStore::for_version_dir(&dir);
@@ -410,14 +421,24 @@ impl Aurora {
                 match probe_version(self.game_dir(), id).await? {
                     VersionProbe::Found(_) => RepairPlan::Complete,
                     VersionProbe::Broken(broken) => {
-                        return Err(InstanceError::NotRepairable {
-                            id: id.to_owned(),
-                            reason: format!(
-                                "{}，也没有记下当初装的是什么",
-                                broken_reason_text(&broken.reason)
-                            ),
-                        }
-                        .into());
+                        let record = match InstallRecordStore::for_version_dir(&dir).load().await {
+                            Ok(record) => record,
+                            Err(err) => {
+                                tracing::warn!(id, error = %err, "安装记录损坏，当作没有记录");
+                                None
+                            }
+                        };
+                        let Some(spec) = record else {
+                            return Err(InstanceError::NotRepairable {
+                                id: id.to_owned(),
+                                reason: format!(
+                                    "{}，也没有记下当初装的是什么",
+                                    broken_reason_text(&broken.reason)
+                                ),
+                            }
+                            .into());
+                        };
+                        RepairPlan::Reinstall(InstanceRequest::from_spec(id, &spec)?)
                     }
                 }
             }
@@ -989,6 +1010,88 @@ mod tests {
     }
 
     /// 整合包导入中断的实例即使版本 JSON 已经写好也不能按「补全」处理：报不可补全，标记原样留着。
+    /// 装好之后版本 JSON 被手工删掉或写坏：这时已经没有未完成标记，只有安装记录说得出当初装的是什么。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lost_version_json_is_reinstalled_from_the_install_record() {
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+        let id = "周末生存";
+        let req = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
+        let marker = aurora.create_instance_dir(id, &req).await.unwrap();
+        aurora.install_instance(id, &req, None).await.unwrap();
+        aurora
+            .settle_instance_marker(id, marker, MarkerSettlement::Succeeded)
+            .await
+            .unwrap();
+        let dir = aurora.game_dir().join("versions").join(id);
+        let json = dir.join(format!("{id}.json"));
+        let installed = std::fs::read_to_string(&json).unwrap();
+        // 玩家的 Mod 不能因为修复而丢。
+        std::fs::create_dir_all(dir.join("mods")).unwrap();
+        std::fs::write(dir.join("mods").join("sodium.jar"), b"jar").unwrap();
+
+        for damage in [
+            Box::new(|p: &std::path::Path| std::fs::remove_file(p).unwrap())
+                as Box<dyn Fn(&std::path::Path)>,
+            Box::new(|p: &std::path::Path| std::fs::write(p, "{ not json").unwrap()),
+        ] {
+            damage(&json);
+            let (plan, marker) = aurora.begin_repair(id).await.unwrap();
+            assert_eq!(plan, RepairPlan::Reinstall(req.clone()));
+            assert!(matches!(marker.kind, IncompleteKind::Install { .. }));
+            let outcome = aurora.repair_instance(id, &plan, None).await.unwrap();
+            assert!(outcome.reinstalled);
+            aurora
+                .settle_instance_marker(id, marker, MarkerSettlement::Succeeded)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::read_to_string(&json).unwrap(), installed);
+        }
+        assert!(dir.join("mods").join("sodium.jar").exists());
+        assert!(!marker_path(&dir).exists());
+    }
+
+    /// 没指定版本时记下的是这次实际装上的，不是「推荐版」：日后修复不该换掉玩家的加载器版本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_record_keeps_the_version_that_was_actually_installed() {
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/1.21.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"loader":{"separator":".","build":10,"maven":"m","version":"0.16.10","stable":true}}]"#,
+            ))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+        let req = InstanceRequest {
+            use_template: true,
+            ..request("1.21.1", Some(LoaderChoice::Fabric), None)
+        };
+        aurora.create_instance_dir("推荐版", &req).await.unwrap();
+        aurora.install_instance("推荐版", &req, None).await.unwrap();
+        let dir = aurora.game_dir().join("versions").join("推荐版");
+        assert_eq!(
+            InstallRecordStore::for_version_dir(&dir)
+                .load()
+                .await
+                .unwrap(),
+            Some(InstallSpec {
+                mc_version: "1.21.1".into(),
+                loader: Some("fabric".into()),
+                loader_version: Some("0.16.10".into()),
+                use_template: false,
+            })
+        );
+    }
+
     #[tokio::test]
     async fn interrupted_modpack_import_is_not_repairable_and_keeps_its_marker() {
         let tmp = tempfile::tempdir().unwrap();
