@@ -9,7 +9,6 @@
 //! 事件就可能立刻启动下一个实例。
 
 use std::future::Future;
-use std::time::Instant;
 
 use aurora_core::{
     game_line_level, Aurora, DownloadProgress, Finished, GameExit, GameRun, GameSlot,
@@ -234,42 +233,23 @@ fn launch_error(err: LaunchFailed) -> CommandError {
     CommandError::new(code, failure.message.clone()).with_detail(Value::Object(detail))
 }
 
-/// 等游戏退出并译成退出事件。等待本身失败时退出码无从得知，按「拿不到退出码」报崩溃——前端总要有
-/// 一个结局才能离开运行态。
-async fn settle(
-    version_id: String,
-    since: Instant,
-    finish: impl Future<Output = aurora_core::Result<Finished>>,
-) -> GameExitDto {
-    match finish.await {
-        Ok(Finished { exit, problems }) => {
-            for problem in &problems {
-                tracing::error!(version = %exit.version_id, error = %problem, "游戏收尾记账失败");
-            }
-            exit.into()
-        }
-        Err(err) => {
-            tracing::error!(version = %version_id, error = %err, "等待游戏进程退出失败");
-            GameExitDto {
-                version_id,
-                exit_code: None,
-                crashed: true,
-                killed: false,
-                duration_ms: u64::try_from(since.elapsed().as_millis())
-                    .expect("毫秒数在 u64 范围内"),
-            }
-        }
+/// 等游戏退出并译成退出事件。等待进程本身失败时门面照样给出这一局的结局（退出码无从得知按崩溃判定，
+/// 玩家点过结束的算结束），那次失败与记账失败一起只记进启动器日志：前端总要有一个结局才能离开运行态。
+async fn settle(finish: impl Future<Output = Finished>) -> GameExitDto {
+    let Finished { exit, problems } = finish.await;
+    for problem in &problems {
+        tracing::error!(version = %exit.version_id, error = %problem, "游戏收尾出现问题");
     }
+    exit.into()
 }
 
 /// 监控一局游戏：收尾后先放开占用槽，再推退出事件。
 async fn watch(
-    version_id: String,
-    finish: impl Future<Output = aurora_core::Result<Finished>>,
+    finish: impl Future<Output = Finished>,
     release: impl FnOnce(),
     emit: impl FnOnce(GameExitDto),
 ) {
-    let exit = settle(version_id, Instant::now(), finish).await;
+    let exit = settle(finish).await;
     release();
     emit(exit);
 }
@@ -277,10 +257,8 @@ async fn watch(
 /// 实例与它基底的占用随进程寿命：游戏退出、收尾记账写完后与占用槽一起放开，删除、改名、补全它们
 /// 在运行期间被拒绝。
 fn spawn_watch(app: AppHandle, ticket: SlotTicket, instance: ChainGuard, run: GameRun) {
-    let version_id = run.version_id().to_owned();
     tauri::async_runtime::spawn(async move {
         watch(
-            version_id,
             run.finish(),
             || {
                 drop(instance);
@@ -802,39 +780,29 @@ mod tests {
 
     #[tokio::test]
     async fn crash_and_kill_exits_map_to_the_event_payload() {
-        let crashed = settle("1.21".into(), Instant::now(), async {
-            Ok(Finished {
+        let crashed = settle(async {
+            Finished {
                 exit: exit("1.21", Some(3), true, false),
                 problems: Vec::new(),
-            })
+            }
         })
         .await;
         assert_eq!(
             serde_json::to_value(&crashed).unwrap(),
             json!({ "version_id": "1.21", "exit_code": 3, "crashed": true, "killed": false, "duration_ms": 61_000 })
         );
-        let killed = settle("1.21".into(), Instant::now(), async {
-            Ok(Finished {
-                exit: exit("1.21", Some(1), false, true),
+        // 收尾出了问题（例如等待进程失败）也照门面给的结局推出去，玩家点过结束的仍是 killed。
+        let killed = settle(async {
+            Finished {
+                exit: exit("1.21", None, false, true),
                 problems: vec![aurora_core::CoreError::PlatformUnsupported],
-            })
+            }
         })
         .await;
-        assert!(killed.killed && !killed.crashed);
-    }
-
-    #[tokio::test]
-    async fn failed_wait_still_ends_the_session_as_a_crash() {
-        let since = Instant::now() - std::time::Duration::from_millis(1_500);
-        let exit = settle("1.21".into(), since, async {
-            Err(aurora_core::CoreError::PlatformUnsupported)
-        })
-        .await;
-        assert_eq!(exit.version_id, "1.21");
-        assert_eq!(exit.exit_code, None);
-        assert!(exit.crashed);
-        assert!(!exit.killed);
-        assert!(exit.duration_ms >= 1_500);
+        assert_eq!(
+            serde_json::to_value(&killed).unwrap(),
+            json!({ "version_id": "1.21", "exit_code": null, "crashed": false, "killed": true, "duration_ms": 61_000 })
+        );
     }
 
     #[tokio::test]
@@ -842,12 +810,11 @@ mod tests {
         // 前端收到退出事件就可能立即启动下一个实例：放开占用槽必须先于推送。
         let order = std::cell::RefCell::new(Vec::new());
         watch(
-            "1.21".into(),
             async {
-                Ok(Finished {
+                Finished {
                     exit: exit("1.21", Some(0), false, false),
                     problems: Vec::new(),
-                })
+                }
             },
             || order.borrow_mut().push("release".to_owned()),
             |exit| {

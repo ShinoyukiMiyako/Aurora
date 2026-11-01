@@ -428,7 +428,7 @@ async fn launch(
     };
 
     println!("游戏已启动（pid {:?}），等待退出……", run.pid());
-    let finished = run.finish().await?;
+    let finished = run.finish().await;
     let _ = log_printer.await;
     for problem in &finished.problems {
         eprintln!("[收尾] {problem}");

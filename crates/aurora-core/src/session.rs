@@ -2,14 +2,16 @@
 //! 游戏」的占用槽 [`GameSlot`]。
 //!
 //! 收尾时的记账（游玩时长、崩溃报告）任何一项失败都不能吞掉「游戏已退出」这个事实：退出结果照常
-//! 交出，记账失败作为 [`Finished::problems`] 一并交给上层如实上报。
+//! 交出，记账失败作为 [`Finished::problems`] 一并交给上层如实上报。等待游戏进程本身失败也一样：这一局
+//! 照样记时长、照崩溃判定存这一局的报告，否则界面拿去展示的是上一局的崩溃。
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use aurora_launch::logfile::SessionOutcome;
 use aurora_launch::{
-    GameSession, KillSwitch, LauncherLevel, LogSource, SessionClock, SessionLog, detect_crash,
+    GameSession, KillSwitch, LauncherLevel, LogSource, SessionClock, SessionEnd, SessionLog,
+    detect_crash,
 };
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +63,7 @@ pub struct GameExit {
     pub duration_ms: u64,
 }
 
-/// 收尾产物：退出结果，以及收尾记账中遇到的问题。
+/// 收尾产物：退出结果，以及收尾中遇到的问题（等待进程或后台任务的失败排第一，其后是记账失败）。
 pub struct Finished {
     pub exit: GameExit,
     pub problems: Vec<CoreError>,
@@ -89,31 +91,45 @@ impl GameRun {
         self.session.kill_switch()
     }
 
-    /// 等游戏退出并收尾。只有等待进程本身失败才返回错误，此时退出码无从得知。
-    pub async fn finish(self) -> Result<Finished> {
+    /// 等游戏退出并收尾。等待进程本身失败或后台任务异常结束时同样收尾：退出码无从得知时按拿不到
+    /// 退出码判定崩溃，玩家点过结束的仍算结束，那次失败排在 [`Finished::problems`] 的第一项。
+    pub async fn finish(self) -> Finished {
         let GameRun { info, session } = self;
-        let end = session.wait().await?;
-        let exited_at = info.clock.now();
-        let report = end.report;
-        let killed = report.terminated_by_launcher;
-        let crashed = detect_crash(&report);
-        let outcome = if killed {
-            SessionOutcome::Killed
-        } else if crashed {
-            SessionOutcome::Crashed
-        } else {
-            SessionOutcome::Exited
-        };
-        let exit = GameExit {
-            version_id: info.version_id.clone(),
-            exit_code: report.code,
-            crashed,
-            killed,
-            duration_ms: exited_at.saturating_sub(info.running_since),
-        };
+        let end = session.wait().await;
+        settle(info, end).await
+    }
+}
 
-        let mut problems = Vec::new();
-        let log_path = match end.log {
+/// 按会话的结束产物收尾：写日志结局、记游玩时长、存崩溃报告。与真实子进程分开，等待失败的路径也能
+/// 确定地测到。
+async fn settle(info: RunInfo, end: SessionEnd) -> Finished {
+    let exited_at = info.clock.now();
+    let report = end.report;
+    let killed = report.terminated_by_launcher;
+    let crashed = detect_crash(&report);
+    let outcome = if killed {
+        SessionOutcome::Killed
+    } else if crashed {
+        SessionOutcome::Crashed
+    } else {
+        SessionOutcome::Exited
+    };
+    let exit = GameExit {
+        version_id: info.version_id.clone(),
+        exit_code: report.code,
+        crashed,
+        killed,
+        duration_ms: exited_at.saturating_sub(info.running_since),
+    };
+
+    let mut problems = Vec::new();
+    let log_path = match end.failure {
+        // 收尾不正常时 aurora-launch 已在日志里写下原因与结局并关闭，这里只接着用它的路径。
+        Some(failure) => {
+            problems.push(CoreError::from(failure.error));
+            failure.log_path
+        }
+        None => match end.log {
             Some(log) => match close_log(log, exited_at, &exit, outcome).await {
                 Ok(path) => Some(path),
                 Err(err) => {
@@ -122,66 +138,66 @@ impl GameRun {
                 }
             },
             None => None,
-        };
+        },
+    };
 
-        if let Err(err) = crate::playtime::record_play(
-            &info.data_dir,
-            &info.game_dir,
-            &info.version_id,
-            info.running_since,
-            exited_at,
-        )
-        .await
-        {
+    if let Err(err) = crate::playtime::record_play(
+        &info.data_dir,
+        &info.game_dir,
+        &info.version_id,
+        info.running_since,
+        exited_at,
+    )
+    .await
+    {
+        problems.push(err);
+    }
+
+    if crashed {
+        // 日志文件在就读文件尾部：崩溃报告本体常有几百行，退出时缓存的 500 行未必装得下。
+        // 日志没能建立时退回到缓存的最近几行，那仍是这一局的现场。
+        let tail = match &log_path {
+            Some(path) => match read_tail_for_diagnosis(path).await {
+                Ok(tail) => Some(tail),
+                Err(err) => {
+                    problems.push(err);
+                    None
+                }
+            },
+            None => None,
+        };
+        // 行号按整份日志计，日志页与诊断页对得上；没有日志文件时只能按缓存里的顺序编号。
+        let numbered: Vec<(&str, u64)> = match &tail {
+            Some(tail) => tail
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.source == LogSource::Game)
+                .map(|(index, e)| (e.text.as_str(), tail.first_line + index as u64))
+                .collect(),
+            None => report
+                .recent_lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (line.as_str(), index as u64 + 1))
+                .collect(),
+        };
+        let mut crash = CrashReport::from_lines(&numbered);
+        if let Err(err) = crash.join_suspects(&info.working_dir).await {
             problems.push(err);
         }
-
-        if crashed {
-            // 日志文件在就读文件尾部：崩溃报告本体常有几百行，退出时缓存的 500 行未必装得下。
-            // 日志没能建立时退回到缓存的最近几行，那仍是这一局的现场。
-            let tail = match &log_path {
-                Some(path) => match read_tail_for_diagnosis(path).await {
-                    Ok(tail) => Some(tail),
-                    Err(err) => {
-                        problems.push(err);
-                        None
-                    }
-                },
-                None => None,
-            };
-            // 行号按整份日志计，日志页与诊断页对得上；没有日志文件时只能按缓存里的顺序编号。
-            let numbered: Vec<(&str, u64)> = match &tail {
-                Some(tail) => tail
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| e.source == LogSource::Game)
-                    .map(|(index, e)| (e.text.as_str(), tail.first_line + index as u64))
-                    .collect(),
-                None => report
-                    .recent_lines
-                    .iter()
-                    .enumerate()
-                    .map(|(index, line)| (line.as_str(), index as u64 + 1))
-                    .collect(),
-            };
-            let mut crash = CrashReport::from_lines(&numbered);
-            if let Err(err) = crash.join_suspects(&info.working_dir).await {
-                problems.push(err);
-            }
-            crash.at = Some(exited_at);
-            crash.exit_code = report.code;
-            crash.session_started_at = log_path.as_ref().map(|_| info.clock.started_at());
-            crash.java = Some(info.java.clone());
-            crash.max_memory_mb = Some(info.max_memory_mb);
-            crash.warnings = info.warnings.clone();
-            if let Err(err) = save_crash_report(&info.version_dir, &crash).await {
-                problems.push(err);
-            }
+        crash.at = Some(exited_at);
+        crash.exit_code = report.code;
+        crash.session_started_at = log_path.as_ref().map(|_| info.clock.started_at());
+        crash.java = Some(info.java.clone());
+        crash.max_memory_mb = Some(info.max_memory_mb);
+        crash.warnings = info.warnings.clone();
+        if let Err(err) = save_crash_report(&info.version_dir, &crash).await {
+            problems.push(err);
         }
-
-        Ok(Finished { exit, problems })
     }
+
+    Finished { exit, problems }
 }
 
 /// 同一时间只运行一个游戏的占用槽。从开始启动起就占着：两次启动同时走加载阶段，会争同一批文件下载、
@@ -399,7 +415,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn nonzero_exit_is_a_crash_with_its_code() {
         let started = start("cmd", &["/C", "exit 3"]).await;
-        let finished = started.run.finish().await.unwrap();
+        let finished = started.run.finish().await;
         assert!(finished.problems.is_empty(), "{:?}", finished.problems);
         assert_eq!(finished.exit.exit_code, Some(3));
         assert!(finished.exit.crashed);
@@ -415,7 +431,7 @@ mod tests {
         let kill = started.run.kill_switch();
         let waiting = tokio::spawn(started.run.finish());
         assert!(kill.kill().await.unwrap(), "进程还在跑，应结束成功");
-        let finished = waiting.await.unwrap().unwrap();
+        let finished = waiting.await.unwrap();
         assert!(finished.problems.is_empty(), "{:?}", finished.problems);
         assert!(finished.exit.killed);
         assert!(!finished.exit.crashed);
@@ -429,7 +445,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn clean_exit_is_neither_crash_nor_kill() {
         let started = start("cmd", &["/C", "exit 0"]).await;
-        let finished = started.run.finish().await.unwrap();
+        let finished = started.run.finish().await;
         assert_eq!(finished.exit.exit_code, Some(0));
         assert!(!finished.exit.crashed);
         assert!(!finished.exit.killed);
@@ -462,7 +478,7 @@ mod tests {
 
         let waiting = tokio::spawn(started.run.finish());
         assert!(slot.kill_switch().unwrap().kill().await.unwrap());
-        assert!(waiting.await.unwrap().unwrap().exit.killed);
+        assert!(waiting.await.unwrap().exit.killed);
         slot.release(ticket);
         assert!(slot.reserve("b").is_ok());
     }
@@ -491,8 +507,144 @@ mod tests {
             "{ broken",
         )
         .unwrap();
-        let finished = started.run.finish().await.unwrap();
+        let finished = started.run.finish().await;
         assert_eq!(finished.exit.exit_code, Some(0));
         assert_eq!(finished.problems.len(), 1);
+    }
+
+    /// 等待失败后的现场：aurora-launch 已把读到的游戏输出与原因、结局写进会话日志并关闭。
+    struct WaitFailed {
+        _tmp: tempfile::TempDir,
+        root: PathBuf,
+        version_dir: PathBuf,
+        info: RunInfo,
+        end: SessionEnd,
+    }
+
+    async fn wait_failed(terminated_by_launcher: bool) -> WaitFailed {
+        use aurora_launch::{ExitReport, LaunchError, SessionFailure};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let version_dir = root.join("versions").join("1.21");
+        let clock = SessionClock::start().unwrap();
+        let running_since = clock.now();
+        let mut log = SessionLog::create(&logs_dir(&version_dir), "1.21", clock.started_at())
+            .await
+            .unwrap();
+        let oom = "java.lang.OutOfMemoryError: Java heap space";
+        log.write(clock.now(), LogSource::Game, None, oom)
+            .await
+            .unwrap();
+        log.write(
+            clock.now(),
+            LogSource::Launcher,
+            Some(LauncherLevel::Error),
+            "等待游戏进程结束失败：句柄已失效（退出码 未知）",
+        )
+        .await
+        .unwrap();
+        let outcome = if terminated_by_launcher {
+            SessionOutcome::Killed
+        } else {
+            SessionOutcome::Crashed
+        };
+        let log_path = log.finish(clock.now(), outcome).await.unwrap();
+        let info = RunInfo {
+            version_id: "1.21".to_owned(),
+            version_dir: version_dir.clone(),
+            working_dir: root.clone(),
+            data_dir: root.clone(),
+            game_dir: root.clone(),
+            clock,
+            running_since,
+            java: JavaUsed {
+                major: 21,
+                path: "java".to_owned(),
+                is_64bit: true,
+            },
+            max_memory_mb: 4096,
+            warnings: Vec::new(),
+            pid: None,
+        };
+        let end = SessionEnd {
+            report: ExitReport {
+                code: None,
+                success: false,
+                recent_lines: vec![oom.to_owned()],
+                terminated_by_launcher,
+            },
+            log: None,
+            failure: Some(SessionFailure {
+                error: LaunchError::Wait(std::io::Error::other("句柄已失效")),
+                log_path: Some(log_path),
+            }),
+        };
+        WaitFailed {
+            _tmp: tmp,
+            root,
+            version_dir,
+            info,
+            end,
+        }
+    }
+
+    async fn saved_crash(root: &Path) -> Option<CrashReport> {
+        crate::facade::Aurora::for_test(
+            crate::config::AuroraConfig::default(),
+            root.to_path_buf(),
+            root.to_path_buf(),
+        )
+        .last_crash("1.21")
+        .await
+        .unwrap()
+    }
+
+    /// 等待进程本身失败：这一局照样记游玩时长、存下这一局的崩溃报告（从已落盘的会话日志诊断），
+    /// 那次失败作为问题交出。否则界面按崩溃去读的是上一局的报告。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_failure_still_records_play_and_saves_this_crash() {
+        let failed = wait_failed(false).await;
+        let finished = settle(failed.info, failed.end).await;
+
+        assert_eq!(finished.exit.exit_code, None);
+        assert!(finished.exit.crashed);
+        assert!(!finished.exit.killed);
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        assert!(
+            matches!(
+                &finished.problems[0],
+                CoreError::Launch(aurora_launch::LaunchError::Wait(_))
+            ),
+            "{:?}",
+            finished.problems[0]
+        );
+        let crash = saved_crash(&failed.root).await.expect("应存下这一局的崩溃");
+        assert_eq!(crash.exit_code, None);
+        assert_eq!(
+            crash
+                .diagnoses
+                .iter()
+                .map(|clue| clue.category)
+                .collect::<Vec<_>>(),
+            [aurora_launch::CrashCategory::OutOfMemory]
+        );
+        assert!(crash.log_path.is_some(), "应能找回这一局的会话日志");
+        assert!(played_ms(&failed.root).await.is_some());
+        // 结局由 aurora-launch 写过一次，这里不再追加。
+        assert_eq!(outcome(&failed.version_dir).await, SessionOutcome::Crashed);
+    }
+
+    /// 玩家点过结束之后等待失败：算玩家结束，不是崩溃，不存崩溃报告，时长照记。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_failure_after_a_kill_is_a_kill_not_a_crash() {
+        let failed = wait_failed(true).await;
+        let finished = settle(failed.info, failed.end).await;
+
+        assert!(finished.exit.killed);
+        assert!(!finished.exit.crashed);
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        assert!(!crash_saved(&failed.version_dir));
+        assert!(played_ms(&failed.root).await.is_some());
     }
 }

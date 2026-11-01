@@ -51,6 +51,6 @@ pub use placeholder::Placeholders;
 pub use precheck::{DEFAULT_JAVA_MAJOR, game_path_warning, required_java_major};
 pub use process::{
     ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogStream, SessionEnd,
-    detect_crash, spawn,
+    SessionFailure, detect_crash, spawn,
 };
 pub use workspace::resolve_game_directory;

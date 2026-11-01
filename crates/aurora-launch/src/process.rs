@@ -8,7 +8,7 @@
 //! 所以读取端只往无界通道里塞，慢的是写盘还是界面都只会让内存里多攒几行，不会反压到游戏。
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -71,10 +71,25 @@ pub struct ExitReport {
     pub terminated_by_launcher: bool,
 }
 
-/// 会话结束的全部产物：退出报告，以及尚未关闭的会话日志（调用方还要追加收尾行再关闭）。
+/// 会话结束的全部产物：退出报告，尚未关闭的会话日志（调用方还要追加收尾行再关闭），以及收尾不正常
+/// 时的那次失败。
+///
+/// 收尾不正常也照样交出退出报告而不是只报错：游戏这一局确实结束了，上层还要据此记游玩时长、存
+/// 这一局的崩溃报告、按玩家有没有点过结束给出结局，只拿到一个错误的话这些都无从做起。
 pub struct SessionEnd {
     pub report: ExitReport,
+    /// 收尾正常时保持打开交还调用方；收尾不正常时日志已在这里写完结局关闭，为 `None`。
     pub log: Option<SessionLog>,
+    pub failure: Option<SessionFailure>,
+}
+
+/// 收尾不正常：等待游戏进程本身失败，或读取、汇流的后台任务异常结束。
+#[derive(Debug)]
+pub struct SessionFailure {
+    /// 排在第一的那次失败；同时另有的失败只写进启动器日志。
+    pub error: LaunchError,
+    /// 已写下原因与结局并落盘的会话日志；没开日志、日志随汇流任务一起丢了、或收尾写入失败时为 `None`。
+    pub log_path: Option<PathBuf>,
 }
 
 /// 结束请求：附一条回执，让请求方拿到结束动作的真实成败。
@@ -121,7 +136,8 @@ impl GameSession {
     }
 
     /// 等待进程退出，期间随时响应 [`KillSwitch`] 的结束请求；回收读取与汇流任务，产出退出报告。
-    pub async fn wait(mut self) -> Result<SessionEnd> {
+    /// 等待或后台任务失败时同样产出，失败放在 [`SessionEnd::failure`]。
+    pub async fn wait(mut self) -> SessionEnd {
         let mut terminated_by_launcher = false;
         let status = loop {
             tokio::select! {
@@ -159,16 +175,16 @@ struct Exited {
 /// 进程等完之后收尾：读完（或限时结束）两条输出流、收回汇流任务、产出退出报告。等待的结果由调用方
 /// 传入，与真实子进程无关，收尾的每条路径都能确定地测到。
 ///
-/// 等待本身失败、或后台任务异常结束时同样走完收尾，会话日志写下原因与结局并落盘之后才报错：提前返回
-/// 的话读取与汇流任务被扔在后台，日志缓冲里最后那几行与结局行都不会落盘。一切正常时日志保持打开交还
-/// 调用方，由它追加退出行再关闭。
+/// 等待本身失败、或后台任务异常结束时同样走完收尾，会话日志写下原因与结局并落盘之后才交出失败：提前
+/// 返回的话读取与汇流任务被扔在后台，日志缓冲里最后那几行与结局行都不会落盘。一切正常时日志保持打开
+/// 交还调用方，由它追加退出行再关闭。
 async fn conclude(
     exited: Exited,
     clock: SessionClock,
     readers: Vec<JoinHandle<()>>,
     pump: JoinHandle<PumpOutcome>,
     drain_deadline: Duration,
-) -> Result<SessionEnd> {
+) -> SessionEnd {
     let drain = drain_readers(readers, drain_deadline).await;
     // 读取任务此时都已结束、发送端全部放掉，汇流任务一定会收尾。
     let (recent, mut log, pump_failure) = match pump.await {
@@ -220,25 +236,38 @@ async fn conclude(
         .chain(drain.err())
         .chain(pump_failure);
     let Some(failure) = failures.next() else {
-        return Ok(SessionEnd { report, log });
+        return SessionEnd {
+            report,
+            log,
+            failure: None,
+        };
     };
     for other in failures {
         tracing::error!(error = %error_chain(&other), "游戏会话收尾时另有失败");
     }
-    if let Some(log) = log {
-        settle_log_after_failure(log, clock.now(), &failure, &report).await;
+    let log_path = match log {
+        Some(log) => settle_log_after_failure(log, clock.now(), &failure, &report).await,
+        None => None,
+    };
+    SessionEnd {
+        report,
+        log: None,
+        failure: Some(SessionFailure {
+            error: failure,
+            log_path,
+        }),
     }
-    Err(failure)
 }
 
 /// 收尾不正常时调用方拿不到会话日志，没人会再替它写结局：在这里写下原因与结局并落盘。结局与正常
-/// 收尾时的判法一致：玩家结束的算结束，拿不到退出码按崩溃判定的规则算异常结束。
+/// 收尾时的判法一致：玩家结束的算结束，拿不到退出码按崩溃判定的规则算异常结束。返回落盘的路径，
+/// 写不成时为 `None`。
 async fn settle_log_after_failure(
     mut log: SessionLog,
     at: u64,
     failure: &LaunchError,
     report: &ExitReport,
-) {
+) -> Option<PathBuf> {
     let code = report
         .code
         .map_or_else(|| "未知".to_owned(), |code| code.to_string());
@@ -256,8 +285,12 @@ async fn settle_log_after_failure(
         log.finish(at, outcome).await
     }
     .await;
-    if let Err(err) = settled {
-        tracing::warn!(error = %err, "会话日志收尾失败，这份日志缺少结局");
+    match settled {
+        Ok(path) => Some(path),
+        Err(err) => {
+            tracing::warn!(error = %err, "会话日志收尾失败，这份日志缺少结局");
+            None
+        }
     }
 }
 
@@ -1023,8 +1056,8 @@ mod tests {
             out.pump,
             Duration::from_secs(5),
         )
-        .await
-        .unwrap();
+        .await;
+        assert!(end.failure.is_none(), "{:?}", end.failure);
         assert_eq!(end.report.code, Some(0));
         assert!(end.report.success);
         assert_eq!(end.report.recent_lines, ["LINE_ONE", "LINE_TWO"]);
@@ -1035,7 +1068,7 @@ mod tests {
         assert_eq!(read_back(&out.dir).await.1, None);
     }
 
-    /// 等待进程本身失败：照样读完输出、写下原因与结局并落盘，再把等待的错误报上去。
+    /// 等待进程本身失败：照样读完输出、写下原因与结局并落盘，退出报告与那次失败一并交出。
     #[tokio::test]
     async fn wait_failure_still_settles_the_session_log() {
         let out = output(b"LINE_ONE\nLINE_TWO\n").await;
@@ -1043,20 +1076,30 @@ mod tests {
             status: Err(std::io::Error::other("句柄已失效")),
             terminated_by_launcher: false,
         };
-        let err = conclude(
+        let end = conclude(
             exited,
             out.clock,
             out.readers,
             out.pump,
             Duration::from_secs(5),
         )
-        .await
-        .err()
-        .expect("等待失败应报错");
-        let LaunchError::Wait(source) = &err else {
-            panic!("应报等待失败：{err:?}");
+        .await;
+        let failure = end.failure.expect("等待失败应交出失败");
+        let LaunchError::Wait(source) = &failure.error else {
+            panic!("应报等待失败：{:?}", failure.error);
         };
         assert_eq!(source.to_string(), "句柄已失效");
+        assert_eq!(
+            failure.log_path.as_deref(),
+            Some(out.dir.join(crate::logfile::LATEST_LOG).as_path()),
+            "应交出已落盘的会话日志"
+        );
+        assert!(end.log.is_none(), "日志已在收尾时关闭");
+        // 退出码无从得知，读到的输出照样在报告里，供上层做崩溃判定。
+        assert_eq!(end.report.code, None);
+        assert!(!end.report.success);
+        assert!(!end.report.terminated_by_launcher);
+        assert_eq!(end.report.recent_lines, ["LINE_ONE", "LINE_TWO"]);
         let (lines, ended) = read_back(&out.dir).await;
         assert_eq!(
             lines,
@@ -1078,17 +1121,18 @@ mod tests {
             status: Err(std::io::Error::other("句柄已失效")),
             terminated_by_launcher: true,
         };
-        let err = conclude(
+        let end = conclude(
             exited,
             out.clock,
             out.readers,
             out.pump,
             Duration::from_secs(5),
         )
-        .await
-        .err()
-        .expect("等待失败应报错");
-        assert!(matches!(err, LaunchError::Wait(_)), "{err:?}");
+        .await;
+        let failure = end.failure.expect("等待失败应交出失败");
+        assert!(matches!(failure.error, LaunchError::Wait(_)), "{failure:?}");
+        // 玩家点过结束这一事实随报告交出，上层据此记为结束而不是崩溃。
+        assert!(end.report.terminated_by_launcher);
         let (lines, ended) = read_back(&out.dir).await;
         assert_eq!(
             lines,
@@ -1110,14 +1154,13 @@ mod tests {
             status: Ok(clean_exit()),
             terminated_by_launcher: false,
         };
-        let err = conclude(exited, out.clock, readers, out.pump, Duration::from_secs(5))
-            .await
-            .err()
-            .expect("读取任务异常结束应报错");
+        let end = conclude(exited, out.clock, readers, out.pump, Duration::from_secs(5)).await;
+        let failure = end.failure.expect("读取任务异常结束应交出失败");
         assert!(
-            matches!(&err, LaunchError::Join(join) if join.is_panic()),
-            "{err:?}"
+            matches!(&failure.error, LaunchError::Join(join) if join.is_panic()),
+            "{failure:?}"
         );
+        assert_eq!(end.report.code, Some(0));
         let (lines, ended) = read_back(&out.dir).await;
         assert_eq!(lines.len(), 2, "{lines:?}");
         assert_eq!(lines[0], game("LINE"));
@@ -1214,7 +1257,8 @@ mod tests {
             Some(fwd_tx),
         )
         .unwrap();
-        let end = session.wait().await.unwrap();
+        let end = session.wait().await;
+        assert!(end.failure.is_none(), "{:?}", end.failure);
 
         assert_eq!(end.report.code, Some(3));
         assert!(!end.report.success);
@@ -1265,7 +1309,6 @@ mod tests {
         let end = tokio::time::timeout(Duration::from_secs(10), waiter)
             .await
             .expect("结束后应很快退出")
-            .unwrap()
             .unwrap();
         assert!(end.report.terminated_by_launcher);
         assert!(!detect_crash(&end.report));
@@ -1294,8 +1337,7 @@ mod tests {
         let started = std::time::Instant::now();
         let end = tokio::time::timeout(Duration::from_secs(15), session.wait())
             .await
-            .expect("游戏进程退出后应在收尾时限内产出报告")
-            .unwrap();
+            .expect("游戏进程退出后应在收尾时限内产出报告");
         let waited = started.elapsed();
 
         assert!(
@@ -1330,7 +1372,7 @@ mod tests {
         let clock = SessionClock::start().unwrap();
         let path = script.display().to_string();
         let session = spawn(&command("cmd", &["/C", "type", &path]), clock, None, None).unwrap();
-        let end = session.wait().await.unwrap();
+        let end = session.wait().await;
         assert_eq!(end.report.recent_lines.len(), 2);
         assert!(end.report.recent_lines[0].contains('\u{FFFD}'));
         assert_eq!(end.report.recent_lines[1], "AFTER_BAD_BYTES");

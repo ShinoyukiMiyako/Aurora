@@ -1812,7 +1812,7 @@ mod tests {
         assert!(stage(3) < download_at && download_at < stage(4));
         assert!(run.pid().is_some());
 
-        let finished = run.finish().await.unwrap();
+        let finished = run.finish().await;
         assert!(finished.problems.is_empty(), "{:?}", finished.problems);
         let exit = finished.exit;
         assert_eq!(exit.version_id, VERSION);
