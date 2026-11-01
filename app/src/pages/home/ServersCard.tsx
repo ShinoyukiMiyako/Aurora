@@ -130,12 +130,15 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 
   const pin = async (server: PinnedServerDto) => (await run(() => actions.togglePinServer(server), ACTION_ERROR.servers)).ok;
   const toggle = (server: PinnedServerDto) => void pin(server);
-  // 行退场动画结束后「更多」跟着移除，焦点会掉回 body；焦点还在这一行时趁它还在交给卡片头的加号
+  // 行退场后「更多」跟着移除，焦点会掉回 body。这时行可能还在退场，也可能已经没了：
+  // 焦点还在这一行或已经掉回 body 就交给卡片头的加号，玩家带去别处的不动
   const unpin = (server: PinnedServerDto) =>
     void pin(server).then((ok) => {
       if (!ok) return;
-      const row = document.activeElement?.closest(`[${SERVER_ROW_ATTR}]`);
-      if (row === null || row === undefined || row.getAttribute(SERVER_ROW_ATTR) !== server.address) return;
+      const active = document.activeElement;
+      const row = active === null ? null : active.closest(`[${SERVER_ROW_ATTR}]`);
+      const lost = active === null || active === document.body;
+      if (!lost && (row === null || row.getAttribute(SERVER_ROW_ATTR) !== server.address)) return;
       const plus = document.querySelector<HTMLElement>(`[${PIN_BUTTON_ATTR}]`);
       if (plus === null) throw new Error("服务器卡片头上找不到加号");
       plus.focus();
