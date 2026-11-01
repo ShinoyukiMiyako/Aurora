@@ -5,7 +5,7 @@
 //! - 增量 sha1（[`Sha1Hasher`]）：数据边到边算，供下载引擎在写盘的同时校验，省掉写完再读一遍。
 //! - 原子写入：同目录临时文件写完 fsync 后 rename 覆盖目标，杜绝写一半留下损坏文件。
 //! - 目录定位：数据目录便携优先——可执行文件所在目录可写就用它，否则挂在
-//!   `%LOCALAPPDATA%\Petalfall` 下；目录里已有 `config.json` 时写不进去也不换地方
+//!   `%LOCALAPPDATA%\Petalfall` 下；目录里已有读得进来的 `config.json` 时写不进去也不换地方
 //!   （[`resolve_data_dir`]）。
 
 use std::io::Read;
@@ -269,7 +269,7 @@ pub fn resolve_data_dir() -> Result<DataDirResolution> {
     let started = Instant::now();
     let root = choose_data_root(
         exe_dir_candidate(),
-        config_exists,
+        has_readable_config,
         probe_writable,
         std::thread::sleep,
     );
@@ -303,7 +303,8 @@ enum DataRoot {
 ///
 /// 探针失败不等于数据不在这里：杀软锁文件、受控文件夹、磁盘写满、外接盘只读都只说明这一次写不进去。
 /// 这时换到系统目录，用户看到的是一个全新的启动器和首次向导，以为账户和实例都丢了，下次探针通过又翻回来。
-/// 所以目录里有 config.json 就不换地方。确认不了它在不在时不算有，走原来的回落，两个原因一起留下。
+/// 所以目录里有读得进来的 config.json 就不换地方。读不进来的不算有，走原来的回落，两个原因一起留下：
+/// 坏配置要先改名留存才能按默认配置继续，这个目录改不了名，留下来启动就终止了，没有窗口，日志也写不进去。
 fn choose_data_root(
     exe_dir: std::result::Result<PathBuf, String>,
     has_config: impl FnOnce(&Path) -> std::io::Result<bool>,
@@ -323,7 +324,7 @@ fn choose_data_root(
         Ok(false) => return DataRoot::System { reason },
         Err(err) => {
             return DataRoot::System {
-                reason: format!("{reason}；{CONFIG_FILE} 在不在也确认不了：{err}"),
+                reason: format!("{reason}；{CONFIG_FILE} 读不进来：{err}"),
             };
         }
     }
@@ -356,9 +357,15 @@ fn exe_dir_candidate() -> std::result::Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// `dir` 里有没有全局配置。
-fn config_exists(dir: &Path) -> std::io::Result<bool> {
-    dir.join(CONFIG_FILE).try_exists()
+/// `dir` 里有没有读得进来的全局配置：文件不在是 `false`，读不出来或不是合法 JSON 报错。
+fn has_readable_config(dir: &Path) -> std::io::Result<bool> {
+    let bytes = match std::fs::read(dir.join(CONFIG_FILE)) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)?;
+    Ok(true)
 }
 
 /// 在 `dir` 里写一个探针文件再删掉；写不进去交回系统错误。
@@ -701,7 +708,7 @@ mod tests {
         assert!(waited.is_empty(), "{waited:?}");
     }
 
-    /// config.json 在不在都确认不了：不当作有，回落，探针的原因和确认失败的原因都留下。
+    /// config.json 读不进来：不当作有，回落，探针的原因和读不进来的原因都留下。
     #[test]
     fn unconfirmable_config_falls_back_with_both_reasons() {
         let attempts = std::cell::Cell::new(0);
@@ -716,9 +723,8 @@ mod tests {
         assert_eq!(
             root,
             DataRoot::System {
-                reason:
-                    r"E:\Petalfall 不可写：第 1 次写不进去；config.json 在不在也确认不了：拒绝访问"
-                        .to_owned()
+                reason: r"E:\Petalfall 不可写：第 1 次写不进去；config.json 读不进来：拒绝访问"
+                    .to_owned()
             }
         );
         assert_eq!(attempts.get(), 1);
@@ -753,6 +759,56 @@ mod tests {
         );
     }
 
+    /// 坏配置留不下来：按默认配置继续要先把它改名留存，这个目录改不了名，留下来启动就终止了，没有窗口，
+    /// 日志也写不进去。空文件是写到一半掉电的样子，截断的 JSON 与乱码同理。
+    #[test]
+    fn real_probe_failure_with_a_broken_config_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(WRITE_PROBE)).unwrap();
+
+        for broken in [&b""[..], b"{ \"language\": ", b"\xFF\xFE\x00"] {
+            std::fs::write(dir.path().join(CONFIG_FILE), broken).unwrap();
+            let root = choose_data_root(
+                Ok(dir.path().to_path_buf()),
+                has_readable_config,
+                probe_writable,
+                |delay| panic!("不该等待：{delay:?}"),
+            );
+            match root {
+                DataRoot::System { reason } => {
+                    assert!(reason.contains("不可写"), "实际：{reason}");
+                    assert!(reason.contains("config.json 读不进来"), "实际：{reason}");
+                }
+                other => panic!("{broken:?} 不该留在写不进去的目录：{other:?}"),
+            }
+        }
+    }
+
+    /// 读得进来才算有。类型对不上的合法 JSON 这里分不出来，它要核心的配置结构才认得。
+    #[test]
+    fn config_counts_only_when_it_can_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(CONFIG_FILE);
+
+        assert!(
+            !has_readable_config(dir.path()).unwrap(),
+            "没有文件就是没有"
+        );
+
+        std::fs::write(&config, br#"{"first_run_completed": true}"#).unwrap();
+        assert!(has_readable_config(dir.path()).unwrap());
+
+        std::fs::write(&config, b"not json").unwrap();
+        assert_eq!(
+            has_readable_config(dir.path()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        std::fs::remove_file(&config).unwrap();
+        std::fs::create_dir(&config).unwrap();
+        assert!(has_readable_config(dir.path()).is_err(), "同名目录不是配置");
+    }
+
     /// 走真实文件系统：探针路径被同名目录占着，写入真的失败，结论只取决于盘上有没有 config.json。
     #[test]
     fn real_probe_failure_is_decided_by_the_config_file_on_disk() {
@@ -761,7 +817,7 @@ mod tests {
         let choose = || {
             choose_data_root(
                 Ok(dir.path().to_path_buf()),
-                config_exists,
+                has_readable_config,
                 probe_writable,
                 |_| {},
             )
