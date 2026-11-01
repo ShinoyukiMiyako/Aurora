@@ -2,7 +2,7 @@
 //! 以及新建页要的版本清单、加载器版本与所需 Java。
 //!
 //! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，装、删、启停、
-//! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
+//! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档与删除存档备份）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
 //! 并在 detail 里带上正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏、与存档备份之间可以并行
 //! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动、补全与导入整合包期间，实例继承链上的
 //! 基底版本（客户端 jar 与 natives 所在的原版）以 inherited 一并占住，删除、改名、补全基底报
@@ -1972,8 +1972,9 @@ async fn ensure_dir(dir: &Path) -> Result<(), CommandError> {
 //
 // 备份放在游戏目录下的启动器元数据区，按实例与存档文件夹名分目录；不隔离、共用游戏目录 saves 的存档
 // 归在共用的一份下，几个实例看到的是同一批备份。备份、恢复、导出是长任务，占住实例做「备份」：
-// 与启动、运行、改名、删除、新建、补全互斥，与 Mod 改动、被别的实例当作基底并行。列表与删除备份不碰存档
-// 本身，不占实例。
+// 与启动、运行、改名、删除、新建、补全互斥，与 Mod 改动、被别的实例当作基底并行。它们只碰存档与备份区，
+// 用不到基底的客户端 jar 与 natives，所以不占基底：基底这期间可以补全，删除与改名有依赖检查挡着。
+// 列表不占实例；删除备份只碰备份区，以「改动」占住实例，挡开改名时挪走备份目录。
 
 /// 一份存档备份。
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2364,20 +2365,23 @@ pub(crate) async fn restore_world_backup_with(
     })
 }
 
-/// 把一份备份移入回收站并从备份列表里去掉。可以从回收站找回，所以不需要确认。不占实例：只碰备份区，
-/// 与同一存档的备份、恢复由门面按存档排队。备份不在报 `world_backup_not_found`。
+/// 把一份备份移入回收站并从备份列表里去掉。可以从回收站找回，所以不需要确认。只碰备份区，以「改动」占住实例：
+/// 游戏运行中、备份进行中照常能删（与同一存档的备份、恢复由门面按存档排队），改名、删除实例、新建、补全进行中
+/// 报 `instance_busy`。备份不在报 `world_backup_not_found`。
 #[tauri::command]
 pub async fn delete_world_backup(
     id: String,
     world: String,
     file: String,
     facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
 ) -> Result<(), CommandError> {
-    delete_world_backup_with(&facade, &id, &world, &file, RecycleBin).await
+    delete_world_backup_with(&facade, &locks, &id, &world, &file, RecycleBin).await
 }
 
 pub(crate) async fn delete_world_backup_with(
     facade: &Facade,
+    locks: &InstanceLocks,
     id: &str,
     world: &str,
     file: &str,
@@ -2385,6 +2389,9 @@ pub(crate) async fn delete_world_backup_with(
 ) -> Result<(), CommandError> {
     check_world(world)?;
     check_backup_file(file)?;
+    // 备份目录按实例名放，改名时整个挪走，挪的时候不看存档锁：不占住实例的话，这边删到一半，清单会按旧路径
+    // 重新写出来，挪过去的清单里却还记着删掉的那份。
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
     let aurora = facade.snapshot().await;
     aurora
         .delete_world_backup(id, world, file, disposer)
@@ -4814,9 +4821,16 @@ mod tests {
                 list_world_backups_with(&env.facade, "生存", world)
                     .await
                     .unwrap_err(),
-                delete_world_backup_with(&env.facade, "生存", world, "1-auto.zip", Remove)
-                    .await
-                    .unwrap_err(),
+                delete_world_backup_with(
+                    &env.facade,
+                    &w.locks,
+                    "生存",
+                    world,
+                    "1-auto.zip",
+                    Remove,
+                )
+                .await
+                .unwrap_err(),
             ] {
                 assert_eq!(err.code, common::INVALID_ARGUMENT, "{world:?}");
                 assert_eq!(err.detail.unwrap()["field"], "world", "{world:?}");
@@ -5350,7 +5364,7 @@ mod tests {
             .unwrap();
     }
 
-    /// 删除备份：zip 交给 disposer，从列表里摘掉；再删一次报 world_backup_not_found。游戏运行中也能删（不占实例）。
+    /// 删除备份：zip 交给 disposer，从列表里摘掉；再删一次报 world_backup_not_found。游戏运行中也能删。
     #[tokio::test]
     async fn deleting_a_backup_disposes_the_zip_and_drops_it_from_the_list() {
         let env = Env::new();
@@ -5369,6 +5383,7 @@ mod tests {
         let disposer = Recorder::default();
         delete_world_backup_with(
             &env.facade,
+            &w.locks,
             "生存",
             "新的世界",
             &first.backup.file,
@@ -5387,6 +5402,7 @@ mod tests {
 
         let err = delete_world_backup_with(
             &env.facade,
+            &w.locks,
             "生存",
             "新的世界",
             &first.backup.file,
@@ -5396,6 +5412,50 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, common::WORLD_BACKUP_NOT_FOUND);
         assert_eq!(err.detail.unwrap()["file"], json!(first.backup.file));
+    }
+
+    /// 备份按实例名分目录放，改名时整个挪走：改名进行中删备份报 instance_busy，zip 不动；备份进行中不受影响。
+    #[tokio::test]
+    async fn deleting_a_backup_waits_for_a_rename_of_the_instance() {
+        let env = Env::new();
+        env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(&env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        let file = made.backup.file;
+        let disposer = Recorder::default();
+        let delete = || {
+            delete_world_backup_with(
+                &env.facade,
+                &w.locks,
+                "生存",
+                "新的世界",
+                &file,
+                disposer.clone(),
+            )
+        };
+
+        let renaming = w.locks.acquire("生存", InstanceActivity::Renaming).unwrap();
+        let err = delete().await.unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], "renaming");
+        assert!(disposer.disposed().is_empty());
+        drop(renaming);
+
+        let backing_up = w
+            .locks
+            .acquire("生存", InstanceActivity::BackingUp)
+            .unwrap();
+        delete().await.unwrap();
+        assert_eq!(disposer.disposed().len(), 1);
+        assert_eq!(
+            w.locks.activity("生存"),
+            Some(InstanceActivity::BackingUp),
+            "删完放开自己那一份"
+        );
+        drop(backing_up);
     }
 
     /// 共用存档：另一个不隔离的实例在把存档打进整合包时，恢复同样报 instance_busy，detail 指向那个实例、活动为
