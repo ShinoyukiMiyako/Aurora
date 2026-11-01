@@ -215,19 +215,20 @@ const RULES: &[Rule] = &[
         patterns: &[
             "missing or unsupported mandatory dependencies",
             "actual version: '[missing]'",
-            "which is missing",
             "requires version",
             "incompatible mod set",
         ],
-        // 依赖方是游戏、加载器或 Java 的原因行已被上面的规则占走，留下的是 Mod 之间的依赖。
+        // 依赖方是游戏、加载器或 Java 的原因行已被上面的规则占走，留下的是 Mod 之间的依赖。`which is missing` 只认 `requires`：
+        // 主语换成 `recommends` 是解析成功后的加载警告，游戏照常启动。
         regex: Some(concat!(
             r"(?i)hard_dep(?:_no_candidate|_incompatible_preselected)? \S+ \S+ \{depends |",
+            r"\brequires .+ which is missing|",
             r"需要 模组 '[^']+' \([a-z0-9_\-]+\) 的"
         )),
         // 写法要带上「没装」那半句：`of mod 'X' (x)` 与 `需要 模组 'X' (x) 的` 在版本不对、加载不了时一模一样。
         extract: Some(concat!(
-            r"(?i)of ([a-z0-9_\-]+),? which is missing|",
-            r"of mod '.+' \(([a-z0-9_\-]+)\),? which is missing|",
+            r"(?i)requires .+ of ([a-z0-9_\-]+),? which is missing|",
+            r"requires .+ of mod '.+' \(([a-z0-9_\-]+)\),? which is missing|",
             r"需要 模组 '.+' \(([a-z0-9_\-]+)\) 的 .*但没有安装|",
             r"hard_dep_no_candidate \S+ \S+ \{depends ([a-z0-9_\-]+) @|",
             r"mod id: '([a-z0-9_\-]+)', requested by: '[^']+', expected range: '[^']*', actual version: '\[missing\]'"
@@ -1478,6 +1479,72 @@ More details:\n\
             )
             .is_empty()
         );
+    }
+
+    /// recommends 是解析成功之后才打的警告，没装也照常启动：单独出现不算线索，别的原因崩溃时也不能多出一条缺少前置。
+    #[test]
+    fn missing_recommended_dependency_is_not_a_clue() {
+        let warning = "[main/WARN]: Warnings were found!\n \
+            - Mod 'Mod Menu' (modmenu) 7.2.2 recommends any 1.20.x version of fabric-api, which is missing!\n\
+            \t - You should install any 1.20.x version of fabric-api for the optimal experience.";
+        assert!(analyze(warning, None).is_empty(), "{warning}");
+        assert!(
+            analyze(
+                "\t - 模组 'Mod Menu' (modmenu) 7.2.2 建议安装 fabric-api 的 任意 1.20.x 版本，但没有安装它！",
+                None
+            )
+            .is_empty()
+        );
+
+        let crashed = format!("{warning}\njava.lang.OutOfMemoryError: Java heap space");
+        let categories: Vec<CrashCategory> = analyze(&crashed, Some(1))
+            .iter()
+            .map(|d| d.category)
+            .collect();
+        assert_eq!(categories, vec![CrashCategory::OutOfMemory]);
+        assert!(
+            !extract_mod_ids(&crashed).contains(&"fabric-api".to_owned()),
+            "没装的推荐项不是日志指向的 Mod"
+        );
+    }
+
+    /// 真缺前置的报错紧跟在警告后面时，缺的是要求的那个，不是推荐的那个。
+    #[test]
+    fn missing_detail_skips_the_recommended_dependency() {
+        let lines = [
+            "[main/ERROR]: Incompatible mod set!",
+            "\t - Mod 'A' (a) 1.0 recommends any version of cloth-config, which is missing!",
+            "\t - Mod 'B' (b) 1.0 requires version 0.90.0 or later of fabric-api, which is missing!",
+        ];
+        let diags = analyze_lines(&lines);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+        assert_eq!(diags[0].line, 0);
+        assert_eq!(diags[0].detail.as_deref(), Some("fabric-api"));
+    }
+
+    /// 版本要求的说法有好多种，不是都写 requires version。
+    #[test]
+    fn required_dependency_is_missing_however_the_version_is_worded() {
+        for (line, dependency) in [
+            (
+                "\t - Mod 'Zoomify' (zoomify) 2.15.2 requires any version of fabric-language-kotlin, which is missing!",
+                "fabric-language-kotlin",
+            ),
+            (
+                "\t - Mod 'Mod Menu' (modmenu) 7.2.2 requires any 1.20.x version of fabric-api, which is missing!",
+                "fabric-api",
+            ),
+            (
+                "\t - Mod 'A' (a) 1.0 requires any version between 1.0 (inclusive) and 2.0 (exclusive) of cloth-config, which is missing!",
+                "cloth-config",
+            ),
+        ] {
+            let diags = analyze(line, Some(1));
+            assert_eq!(diags.len(), 1, "{diags:?}");
+            assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+            assert_eq!(diags[0].detail.as_deref(), Some(dependency));
+        }
     }
 
     /// Forge 的报错：整体一行之下逐条列出，实际版本写着 [MISSING] 才是没装。
