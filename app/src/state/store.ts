@@ -2397,6 +2397,13 @@ export class LauncherStore {
         return {
           // 用失败的那一局的账户，不看此刻的当前账户：降级判据是这个账户上一次的失败
           run: async () => {
+            // 失败通知会一直留着，点下去时可能已经有一局在跑：启动会先把会话换成新的，那一局就从界面上丢了。
+            // 替换确认接不上这条路（它按普通启动继续），所以另一个实例占着时让玩家自己先结束
+            const active = this.raw.session;
+            if (active !== null && isSessionActive(active)) {
+              if (active.instanceId === instanceId) return;
+              throw new Error(`「${active.instanceId}」的游戏正在运行，先结束游戏`);
+            }
             const inst = this.instance(instanceId);
             if (inst.status === "installing") throw new Error(`「${instanceId}」还在安装，入口不应提供启动`);
             if (inst.status === "broken") throw new Error(`「${instanceId}」文件不完整，入口不应提供以离线方式进单人`);
