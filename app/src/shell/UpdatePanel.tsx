@@ -2,7 +2,7 @@
 // 外壳级浮层：外壳布局挂 UpdatePanelMount，任何页面与通知动作经 openUpdatePanel 打开它。
 
 import { useEffect, useMemo, type ReactNode } from "react";
-import { SakuraMark } from "../art/Logo";
+import { PetalMark } from "../art/PetalMark";
 import { Spinner } from "../art/Spinner";
 import { downloadFailureCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
@@ -183,7 +183,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
       open={open}
       onClose={onClose}
       size="md"
-      icon={<SakuraMark size={28} />}
+      icon={<PetalMark size={32} />}
       title={UPDATE_COPY.panelTitle(update.version)}
       subtitle={UPDATE_COPY.panelSubtitle(update.current_version, update.date === null ? null : formatDate(update.date))}
       dismissible={!installing}

@@ -2,7 +2,7 @@
 // 更新面板由外壳挂载。版本、发布通道与构建日期取构建时注入的构建信息：它和安装包、更新器比较用的是同一个版本号。
 
 import { useState } from "react";
-import { SakuraMark } from "../../../art/Logo";
+import { PetalMark } from "../../../art/PetalMark";
 import { Spinner } from "../../../art/Spinner";
 import { RELEASE_CHANNEL_LABEL } from "../../../copy/flows";
 import { formatDate } from "../../../domain/format";
@@ -38,7 +38,7 @@ function BrandCard({ build }: { build: BuildInfo }) {
     <section className={s.brand}>
       <span className={s.brandGlow} aria-hidden="true" />
       <span className={s.brandMark}>
-        <SakuraMark size={46} />
+        <PetalMark size={48} />
       </span>
       <span className={s.brandText}>
         <span className={s.brandName}>

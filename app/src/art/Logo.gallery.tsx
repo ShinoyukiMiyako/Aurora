@@ -1,13 +1,27 @@
 import type { GalleryEntry } from "../dev/gallery-types";
 import { GalleryRow } from "../dev/GalleryKit";
 import { Logo, SakuraMark } from "./Logo";
+import { PetalMark } from "./PetalMark";
 
 export const gallery: GalleryEntry = {
-  title: "SakuraMark / Logo",
+  title: "PetalMark / SakuraMark / Logo",
   group: "原语",
   order: 3,
   render: () => (
     <>
+      <GalleryRow label="花瓣徽记 16 母版">
+        <PetalMark size={16} />
+        <PetalMark size={20} />
+      </GalleryRow>
+      <GalleryRow label="花瓣徽记 12 母版">
+        <PetalMark size={24} />
+        <PetalMark size={28} />
+      </GalleryRow>
+      <GalleryRow label="花瓣徽记整数倍">
+        <PetalMark size={32} />
+        <PetalMark size={48} />
+        <PetalMark size={64} />
+      </GalleryRow>
       <GalleryRow label="像素母版 16">
         <SakuraMark size={16} />
       </GalleryRow>

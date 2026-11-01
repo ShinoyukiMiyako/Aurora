@@ -214,6 +214,7 @@ describe("启动器更新：外壳 API", () => {
     });
     const dialog = document.querySelector('[data-sk-modal-layer]:not([data-exiting]) [role="dialog"]');
     if (dialog === null) throw new Error("更新面板没有打开");
+    expect(dialog.querySelector("canvas")?.style.width).toBe("32px");
     expect([...dialog.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["发现页支持按实例筛选", "详见 发布页"]);
     expect(dialog.querySelector("li strong")?.textContent).toBe("按实例");
     expect([...dialog.querySelectorAll("a")].map((a) => [a.getAttribute("href"), a.getAttribute("target")])).toEqual([["https://example.org/r/0.2.0", "_blank"]]);
