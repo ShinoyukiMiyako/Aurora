@@ -148,8 +148,13 @@ impl RetryableError for Error {
 }
 
 /// 判断一个 reqwest 错误是否值得重试（与 aurora-java 同策略）。
+///
+/// 读响应体时连接被重置或提前关闭也算瞬时故障：reqwest 把读体失败包成 decode 类（`Response::bytes`
+/// 里统一经 `error::decode`），只认 body 类会把读到一半断开的请求当成永久失败、不再同源重试。
+/// 本 crate 不开 reqwest 的解压与 json 特性，decode 类不会来自报文本身的格式问题。
 fn is_retryable_http(err: &reqwest::Error) -> bool {
-    if err.is_timeout() || err.is_connect() || err.is_request() {
+    if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
+    {
         return true;
     }
     match err.status() {

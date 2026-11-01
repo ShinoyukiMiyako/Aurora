@@ -131,6 +131,7 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8], context: 
 mod tests {
     use super::*;
     use aurora_base::mirror::MirrorSource;
+    use aurora_base::retry::RetryableError;
     use aurora_download::SourceResolver;
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -437,5 +438,64 @@ mod tests {
         );
         let (result, waited) = cancel_midway(fetch, &token, Duration::from_millis(300)).await;
         assert_cancelled_promptly(result, waited);
+    }
+
+    /// 读响应体途中连接被对端断开：同一个源再试一次就拿到完整报文。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_body_cut_off_midway_is_retried_from_the_same_source() {
+        let full = br#"{"versions":[{"id":"1.20.1"}]}"#.to_vec();
+        let (url, accepted) = raw_server(vec![
+            RawReply {
+                declared: full.len(),
+                body: full[..7].to_vec(),
+                hold: Duration::ZERO,
+            },
+            RawReply {
+                declared: full.len(),
+                body: full.clone(),
+                hold: Duration::ZERO,
+            },
+        ]);
+        let client = aurora_base::http::build_client().unwrap();
+        let twice = RetryPolicy {
+            max_attempts: 2,
+            ..fast_policy()
+        };
+
+        let body = get_bytes(&client, &url, &twice, None).await.unwrap();
+
+        assert_eq!(body, full);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "应同源重试恰好一次");
+    }
+
+    /// 只有一次机会时照实报出读体失败，并判为值得重试的瞬时故障。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_body_cut_off_midway_is_a_retryable_http_error() {
+        let (url, _) = raw_server(vec![RawReply {
+            declared: 64,
+            body: b"{\"id\":".to_vec(),
+            hold: Duration::ZERO,
+        }]);
+        let client = aurora_base::http::build_client().unwrap();
+
+        let err = get_bytes(&client, &url, &fast_policy(), None)
+            .await
+            .unwrap_err();
+
+        match &err {
+            Error::Http {
+                url: failed,
+                source,
+            } => {
+                assert_eq!(failed, &url);
+                assert!(
+                    source.is_decode(),
+                    "reqwest 把读体失败归为 decode 类：{source:?}"
+                );
+            }
+            other => panic!("应为 Http，实际 {other:?}"),
+        }
+        assert!(err.is_retryable());
+        assert!(!err.is_cancelled());
     }
 }
