@@ -5,6 +5,7 @@
 import { useState } from "react";
 import { INTERFACE_COPY, LANGUAGE_OPTIONS } from "../../../copy/settings";
 import type { Settings } from "../../../domain/adapt";
+import { autoBackupOutcome } from "../../../domain/rules";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import type { LauncherState } from "../../../state/store";
@@ -16,7 +17,7 @@ import { SegmentedControl } from "../../../ui/SegmentedControl";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
 import { TextInput } from "../../../ui/TextInput";
-import { AFTER_LAUNCH_OPTIONS, GENERAL_COPY, saveFailed } from "../copy";
+import { AFTER_LAUNCH_OPTIONS, AUTO_BACKUP_SKIPPED_NOTE, GENERAL_COPY, saveFailed } from "../copy";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
 
@@ -30,6 +31,7 @@ function loaded(state: LauncherState): Settings {
 }
 
 const selectAfterLaunch = (state: LauncherState): AfterLaunch => loaded(state).afterLaunch;
+const selectAutoBackup = (state: LauncherState): boolean => loaded(state).worldBackup.auto;
 const selectLanguage = (state: LauncherState): Language => loaded(state).language;
 const selectHasClientId = (state: LauncherState): boolean => loaded(state).hasClientId;
 
@@ -41,6 +43,7 @@ function afterLaunchOption(value: AfterLaunch) {
 
 function AfterLaunchRow() {
   const afterLaunch = useLauncherSelector(selectAfterLaunch);
+  const autoBackup = useLauncherSelector(selectAutoBackup);
   const actions = useLauncherActions();
   const write = useSettingWrite(afterLaunch, GENERAL_COPY.afterLaunch, (next: AfterLaunch) => actions.updateSettings({ afterLaunch: next }));
   const current = afterLaunchOption(write.value);
@@ -48,9 +51,12 @@ function AfterLaunchRow() {
     <SettingRow
       title={GENERAL_COPY.afterLaunch}
       description={
-        <span className={s.desc} data-tone={write.value === "close" ? "warn" : undefined}>
-          {current.desc}
-        </span>
+        <>
+          <span className={s.desc} data-tone={write.value === "close" ? "warn" : undefined}>
+            {current.desc}
+          </span>
+          {autoBackupOutcome(write.value, autoBackup) === "skipped" && <span className={s.descNote}>{AUTO_BACKUP_SKIPPED_NOTE}</span>}
+        </>
       }
     >
       <SegmentedControl<AfterLaunch>

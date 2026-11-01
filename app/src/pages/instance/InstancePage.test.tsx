@@ -2713,6 +2713,18 @@ describe("实例详情：存档备份", () => {
     expect(toastTitles()).toContain("已开始备份「新世界」");
   });
 
+  it.each([
+    ["「游戏启动后」选了关闭", { after_launch: "close" as const }],
+    ["自动备份关着", { world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } }],
+  ])("%s：游戏运行中的禁用原因不说退出时会自动备份", async (_name, overrides) => {
+    bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false }, ...overrides }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await open("overview");
+    await startGame();
+    click(rowMenu("新世界"));
+    expect(await hoverReason(menuItem("备份存档"))).toBe("游戏退出后再备份");
+  });
+
   it("游戏运行中：备份与导出禁用并写明原因，查看备份照常；点了不发命令", async () => {
     await open("overview");
     await startGame();
@@ -2757,7 +2769,7 @@ describe("实例详情：存档备份", () => {
     // 存档名没变过的那几份不写「当时名为」
     expect(texts[0]).not.toContain("当时名为");
     expect(callsOf(ipc, "list_world_backups")).toEqual([{ id: ID, world: "w2" }]);
-    expect(dlg.textContent).toContain("退出游戏后会自动备份玩过的存档，每个存档保留 5 份自动备份。");
+    expect(dlg.textContent).toContain("游戏退出后会自动备份玩过的存档，每个存档保留 5 份自动备份。");
   });
 
   it("恢复先确认：确认前不调用 restore_world_backup，确认后调用一次，参数为实例、存档与那一份备份", async () => {
@@ -2937,8 +2949,31 @@ describe("实例详情：存档备份", () => {
     await openBackups();
     const dlg = backupsDialog();
     expect(dlg.textContent).toContain("还没有备份 · 所有共用存档的实例看到的是同一份");
-    expect(dlg.textContent).toContain("退出游戏时会自动备份玩过的存档，也可以现在备份一份。");
+    expect(dlg.textContent).toContain("游戏退出时会自动备份玩过的存档，也可以现在备份一份。");
     expect(rows()).toHaveLength(0);
+  });
+
+  it("「游戏启动后」选了关闭：开着自动备份也不会发生，注记说清楚并带到设置的常规分区，空状态不再许诺自动备份", async () => {
+    list = { ...list, backups: [], total_bytes: 0 };
+    bootOverrides(ipc, { instances, config: configDto({ after_launch: "close", memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await openBackups();
+    const dlg = backupsDialog();
+    expect(dlg.textContent).toContain(`「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份，可以在设置 · 常规里改。`);
+    expect(dlg.textContent).toContain("可以现在备份一份。");
+    expect(dlg.textContent).not.toContain("会自动备份玩过的存档");
+    click(button("去设置", dlg));
+    await flush();
+    expect(nav.route).toEqual({ page: "settings", section: "general" });
+  });
+
+  it("自动备份关着：空状态不说会自动备份", async () => {
+    list = { ...list, backups: [], total_bytes: 0 };
+    bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false }, world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await openBackups();
+    expect(backupsDialog().textContent).toContain("可以现在备份一份。");
+    expect(backupsDialog().textContent).not.toContain("会自动备份玩过的存档");
   });
 
   it("读不到列表：原位报错写原因，「重试」重新请求", async () => {

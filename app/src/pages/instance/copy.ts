@@ -258,6 +258,8 @@ export const WORLD_BACKUP_COPY = {
 
   /** 启动中或游戏中：游戏开着会边写边打包，退出时又会自动备份一份。 */
   runningBackup: "游戏退出后再备份，退出时会自动备份一份",
+  /** 这一局退出时不会自动备份：不能再说「会自动备份一份」。 */
+  runningBackupNoAuto: "游戏退出后再备份",
   runningRestore: "游戏退出后再恢复",
   blocked: (instance: string, activity: string) => `「${instance}」正在${activity}，完成后再试`,
   worldBusy: "这个存档正在备份或恢复",
@@ -278,8 +280,9 @@ export const WORLD_BACKUP_COPY = {
   restoreLabel: (moment: string) => `恢复 ${moment} 的备份`,
   remove: "删除",
   removeLabel: (moment: string) => `删除 ${moment} 的备份`,
-  autoOnNote: (keep: number) => `退出游戏后会自动备份玩过的存档，每个存档保留 ${keep} 份自动备份。`,
+  autoOnNote: (keep: number) => `游戏退出后会自动备份玩过的存档，每个存档保留 ${keep} 份自动备份。`,
   autoOffNote: "自动备份已关闭，可以在设置 · 游戏里打开。",
+  autoSkippedNote: `「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份，可以在设置 · 常规里改。`,
   goSettings: "去设置",
   openFolder: "打开备份文件夹",
   /** 一份备份都还没写过时备份目录还不存在，文件管理器打不开它。 */
@@ -287,7 +290,9 @@ export const WORLD_BACKUP_COPY = {
   loadError: "读不到备份列表",
   retry: "重试",
   emptyTitle: "还没有备份",
-  emptyBody: "退出游戏时会自动备份玩过的存档，也可以现在备份一份。",
+  emptyBody: "游戏退出时会自动备份玩过的存档，也可以现在备份一份。",
+  /** 不会自动备份（开关关着，或落樱那时已经关了）：只剩手动这一条路。 */
+  emptyBodyManual: "可以现在备份一份。",
 } as const;
 
 // ---------------------------------------------------------------- Mod 管理

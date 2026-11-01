@@ -55,6 +55,9 @@ export const AFTER_LAUNCH_OPTIONS = [
   { value: "close", label: `关闭${APP_NAME}`, desc: `游戏启动后${APP_NAME}退出，游戏日志与崩溃诊断将不可用` },
 ] as const;
 
+/** 自动备份由产品在游戏退出时做，这时它已经关了：开关开着也不会发生。写在「游戏启动后」与「自动备份」两行下面。 */
+export const AUTO_BACKUP_SKIPPED_NOTE = `「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份存档`;
+
 // ---------------------------------------------------------------- 下载
 
 export const DOWNLOAD_COPY = {
@@ -228,7 +231,7 @@ export const GAME_DIR_COPY = {
 
 export const WORLD_BACKUP_COPY = {
   title: "存档备份",
-  subtitle: "退出游戏后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走",
+  subtitle: "游戏退出后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走",
   auto: "自动备份",
   autoDesc: "游戏退出后，把这次玩过的存档各备份一份",
   keep: "每个存档保留",

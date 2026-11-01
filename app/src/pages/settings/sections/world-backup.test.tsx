@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../../art/illustrations/test-canvas";
 import type { ConfigDto, WorldBackupSettings } from "../../../ipc/config";
 import { IpcError } from "../../../ipc/errors";
+import { APP_NAME } from "../../../lib/app-info";
 import { OverlayRoot } from "../../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearance";
@@ -120,12 +121,26 @@ afterEach(() => {
 describe("设置 · 游戏：存档备份", () => {
   it("默认：自动备份开，每个存档保留 5 份，总量上限 20 GB；下拉列出常用几档", async () => {
     await mountGame();
-    expect(card().textContent).toContain("退出游戏后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走");
+    expect(card().textContent).toContain("游戏退出后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走");
     expect(autoSwitch().getAttribute("aria-checked")).toBe("true");
     expect(select("每个存档保留").textContent).toBe("5 份");
     expect(select("总量上限").textContent).toBe("20 GB");
     await click(select("每个存档保留"));
     expect(openOptions().map((o) => o.textContent)).toEqual(["3 份", "5 份", "10 份", "20 份"]);
+  });
+
+  it("「游戏启动后」选了关闭：自动备份开着也写明不会备份，关掉开关这行就没了", async () => {
+    const NOTE = `「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份存档`;
+    config = configDto({ after_launch: "close" });
+    await mountGame();
+    expect(card().textContent).toContain(NOTE);
+    await click(autoSwitch());
+    expect(card().textContent).not.toContain(NOTE);
+  });
+
+  it("「游戏启动后」没选关闭：不提这件事", async () => {
+    await mountGame();
+    expect(card().textContent).not.toContain("不会自动备份");
   });
 
   it("关掉自动备份：一次写全三项，两个下拉随即禁用并说明原因", async () => {
