@@ -358,6 +358,11 @@ function DetailHero({ detail, platforms, back, onClose }: { detail: ProjectDetai
   const kind = resourceKindOf(detail.resource_type);
   const hue = entryHue(detail.hue, detail.project_id, hueOf);
   const gallery = kind === "modpack" && detail.gallery.length > 0 ? detail.gallery[0] : null;
+  // 先去掉没有中文名的再取前几个：平台新加的分类不占名额
+  const categories = detail.categories
+    .map(categoryDisplay)
+    .filter((name) => name !== null)
+    .slice(0, CATEGORY_TAGS);
   return (
     <div className={styles.hero}>
       <Cover hue={hue} seed={detail.project_id} height={HERO_HEIGHT} remoteUrl={gallery} shade="left">
@@ -376,9 +381,9 @@ function DetailHero({ detail, platforms, back, onClose }: { detail: ProjectDetai
                   {PLATFORM_LABEL[p]}
                 </Tag>
               ))}
-              {detail.categories.slice(0, CATEGORY_TAGS).map((c) => (
-                <Tag key={c} size="sm" tone="outline">
-                  {categoryDisplay(c)}
+              {categories.map((name) => (
+                <Tag key={name} size="sm" tone="outline">
+                  {name}
                 </Tag>
               ))}
             </div>

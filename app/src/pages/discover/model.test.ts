@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { CATEGORY_NAME } from "./copy";
 import { entry, result, summary } from "./fixtures";
 import {
   allPlatformsFailed,
   appendHits,
+  categoryDisplay,
   clearFilters,
   conditionParts,
   curseForgeSkipNote,
@@ -10,6 +13,7 @@ import {
   fitCandidates,
   hasConditions,
   hitKey,
+  HOT_CATEGORIES,
   installedCount,
   instancesFromPack,
   PAGE_SIZE,
@@ -45,6 +49,42 @@ function prng(seed: number): () => number {
     return s / 0x100000000;
   };
 }
+
+describe("分类显示名", () => {
+  // Modrinth /v2/tag/category 的响应原样；服务器目录的分类不在发现页的搜索范围里，详情也打不开那类工程
+  const tags = JSON.parse(readFileSync(new URL("../../../../crates/aurora-modplatform/tests/fixtures/modrinth-tag-category.json", import.meta.url), "utf8")) as { name: string; project_type: string }[];
+  const reachable = tags.filter((t) => t.project_type !== "minecraft_java_server");
+
+  it("Mod、整合包、资源包、光影的全部分类都有中文名，表里也没有接口之外的键", () => {
+    expect(reachable.map((t) => t.project_type).filter((p, i, all) => all.indexOf(p) === i).sort()).toEqual(["mod", "modpack", "resourcepack", "shader"]);
+    expect(reachable.filter((t) => categoryDisplay(t.name) === null).map((t) => `${t.project_type}/${t.name}`)).toEqual([]);
+    expect(Object.keys(CATEGORY_NAME).sort()).toEqual([...new Set(reachable.map((t) => t.name))].sort());
+  });
+
+  it("显示名不漏英文原文：要么含中文，要么是分辨率这种本身不用翻译的写法", () => {
+    expect(Object.entries(CATEGORY_NAME).filter(([, name]) => !/[㐀-鿿]/.test(name) && !/^\d+x$/.test(name))).toEqual([]);
+  });
+
+  it("资源详情里见过的分类写成中文，同一个键在各类型下只有一个名字", () => {
+    expect(["equipment", "game-mechanics", "entities", "tweaks", "colored-lighting", "bloom", "low"].map(categoryDisplay)).toEqual(["装备", "游戏机制", "实体", "微调", "彩色光照", "泛光", "低负载"]);
+    expect(["potato", "screenshot", "8x-", "512x+", "16x"].map(categoryDisplay)).toEqual(["低配友好", "截图向", "8x 及以下", "512x 及以上", "16x"]);
+  });
+
+  it("不认识的分类没有显示名：平台新加的键、加载器标签、CurseForge 的英文分类名、对象原型上的名字", () => {
+    expect(["brand-new-tag", "datapack", "Technology", "Armor, Tools, and Weapons", "", "constructor", "__proto__"].map(categoryDisplay)).toEqual([null, null, null, null, null, null, null]);
+  });
+
+  it("热门分类与详情标签用同一份中文名，每种类型固定 7 枚", () => {
+    for (const list of Object.values(HOT_CATEGORIES)) {
+      expect(list).toHaveLength(7);
+      for (const c of list) expect(c.label).toBe(categoryDisplay(c.key));
+    }
+    expect(HOT_CATEGORIES.mod.map((c) => c.label)).toEqual(["优化", "科技", "魔法", "冒险", "装饰", "实用", "世界生成"]);
+    expect(HOT_CATEGORIES.modpack.map((c) => c.label)).toEqual(["冒险", "科技", "魔法", "轻量", "任务", "多人", "优化"]);
+    expect(HOT_CATEGORIES.resourcepack.map((c) => c.label)).toEqual(["原版风", "简约", "写实", "主题", "界面", "字体", "音效"]);
+    expect(HOT_CATEGORIES.shader.map((c) => c.label)).toEqual(["原版风", "写实", "半写实", "卡通", "幻想", "低配友好", "截图向"]);
+  });
+});
 
 describe("搜索参数", () => {
   it("首页参数：关键词去空白，空白关键词为 null，每页 24 条，游标为 null", () => {

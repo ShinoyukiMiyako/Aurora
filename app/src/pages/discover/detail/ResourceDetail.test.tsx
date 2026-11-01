@@ -102,6 +102,13 @@ const heroTitle = () => {
   return h.textContent;
 };
 
+/** 头图标签行紧贴在标题上方：类型、平台、分类。 */
+const heroTags = () => {
+  const row = dialog().querySelector("h2")?.previousElementSibling;
+  if (row === null || row === undefined) throw new Error("头图没有标签行");
+  return [...row.children].map((tag) => tag.textContent);
+};
+
 beforeEach(() => {
   vi.useFakeTimers();
   resetRecorder(ipc);
@@ -132,6 +139,24 @@ afterEach(() => {
   view = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("资源详情：头图标签行", () => {
+  it("分类写中文名；认不出的分类不显示也不占名额，最多 3 个", async () => {
+    ipc.overrides.set("project_detail", () => ({
+      ...detail("modrinth", "AANobbMI", "Sodium"),
+      categories: ["brand-new-tag", "equipment", "Technology", "game-mechanics", "colored-lighting", "bloom"],
+    }));
+    await mount();
+    expect(heroTags()).toEqual(["Mod", "Modrinth", "CurseForge", "装备", "游戏机制", "彩色光照"]);
+  });
+
+  it("分类全都认不出时只留类型与平台标，英文原文不出现", async () => {
+    ipc.overrides.set("project_detail", () => ({ ...detail("modrinth", "AANobbMI", "Sodium"), categories: ["Performance", "Utility & QoL"] }));
+    await mount();
+    expect(heroTags()).toEqual(["Mod", "Modrinth", "CurseForge"]);
+    expect(dialog().textContent).not.toContain("Performance");
+  });
 });
 
 describe("资源详情：合并卡切换来源", () => {
