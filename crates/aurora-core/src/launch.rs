@@ -1601,7 +1601,8 @@ fn agent_unavailable(err: crate::authlib::LatestLookupError) -> LaunchFailure {
 }
 
 /// 直达目标的预检，顺序即报错的先后：版本不支持（不新增失败码，照常作为启动链路错误冒泡）、存档不在
-/// 或文件夹名不安全（复用 [`CoreError::WorldNotFound`]）、地址写法不对（[`CoreError::InvalidServerAddress`]）。
+/// 或文件夹名不安全（复用 [`CoreError::WorldNotFound`]）、文件夹名过不了系统代码页
+/// （[`CoreError::WorldNameUnencodable`]）、地址写法不对（[`CoreError::InvalidServerAddress`]）。
 /// 不联网解析地址，也不查 SRV：没写端口的地址原样交给游戏自己解析。
 async fn quick_play_target(
     version_id: &str,
@@ -1641,6 +1642,14 @@ async fn quick_play_target(
             };
             if !is_dir {
                 return Err(not_found().into());
+            }
+            if let Some(ch) = aurora_launch::quick_play_lost_char(&world_dir_name) {
+                return Err(CoreError::WorldNameUnencodable {
+                    version_id: version_id.to_owned(),
+                    world: world_dir_name,
+                    ch,
+                }
+                .into());
             }
             Ok(QuickPlayTarget::Singleplayer { world_dir_name })
         }
@@ -3163,6 +3172,43 @@ mod tests {
             }
             assert_eq!(stage_indices(&events), vec![0, 1], "{world:?}");
         }
+    }
+
+    /// 名字过不了系统代码页时停在校验阶段：起进程只会停在游戏里那句世界标识符无效，玩家不知道为什么。
+    /// 系统代码页是 UTF-8 的机器上什么字符都到得了，这条无从验证。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn world_name_outside_the_system_code_page_is_refused_before_the_game_starts() {
+        const WORLD: &str = "𠮷野の里";
+        let Some(lost) = aurora_launch::quick_play_lost_char(WORLD) else {
+            return;
+        };
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, VERSION, &quick_play_json(VERSION));
+        std::fs::create_dir_all(mc.join("saves").join(WORLD)).unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request(VERSION, singleplayer(WORLD)),
+            java,
+        )
+        .await;
+
+        match result {
+            Err(LaunchFailed::Core(CoreError::WorldNameUnencodable {
+                version_id,
+                world,
+                ch,
+            })) => {
+                assert_eq!(version_id, VERSION);
+                assert_eq!(world, WORLD);
+                assert_eq!(ch, lost);
+            }
+            other => panic!("应报存档名带不过去，实际：{:?}", other.err()),
+        }
+        assert_eq!(stage_indices(&events), vec![0, 1]);
     }
 
     #[tokio::test]

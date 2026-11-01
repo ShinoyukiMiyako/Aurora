@@ -39,21 +39,26 @@ pub fn game_path_warning(game_dir: &Path) -> Option<String> {
 ///
 /// Windows 上的 java.exe 按系统代码页读命令行（Java 8 到 26 实测都是）：表示不了的字符变成问号，
 /// classpath 指向不存在的文件，游戏只会报找不到主类。其他系统的命令行是字节串，没有这回事。
-#[cfg(windows)]
 pub fn path_char_outside_code_page(path: &Path) -> Option<char> {
-    // SAFETY: 无参数，只读进程的系统代码页。
-    let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
-    char_outside_code_page(&path.to_string_lossy(), code_page)
+    char_lost_on_command_line(&path.to_string_lossy())
 }
 
-/// 路径里第一个系统代码页表示不了的字符。非 Windows 系统不受影响。
+/// 命令行参数里第一个到不了 Java 的字符。
+#[cfg(windows)]
+pub(crate) fn char_lost_on_command_line(text: &str) -> Option<char> {
+    // SAFETY: 无参数，只读进程的系统代码页。
+    let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
+    char_outside_code_page(text, code_page)
+}
+
+/// 命令行参数里第一个到不了 Java 的字符。非 Windows 系统不受影响。
 #[cfg(not(windows))]
-pub fn path_char_outside_code_page(_path: &Path) -> Option<char> {
+pub(crate) fn char_lost_on_command_line(_text: &str) -> Option<char> {
     None
 }
 
 #[cfg(windows)]
-fn char_outside_code_page(text: &str, code_page: u32) -> Option<char> {
+pub(crate) fn char_outside_code_page(text: &str, code_page: u32) -> Option<char> {
     use windows_sys::Win32::Globalization::{CP_UTF8, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte};
 
     // UTF-8 什么都表示得了，而且系统不接受它带这里的标志与输出参数。

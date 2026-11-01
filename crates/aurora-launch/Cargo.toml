@@ -23,7 +23,7 @@ tracing = "0.1"
 # 内存建议要读物理内存总量与可用量；只开 system 特性，进程、磁盘、网络那些采集都用不到。
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
-# java.exe 按系统代码页读命令行，启动前要判断路径过不过得去。
+# java.exe 按系统代码页读命令行，启动前要判断路径与世界文件夹名过不过得去。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 

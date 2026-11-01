@@ -94,6 +94,15 @@ pub enum CoreError {
     /// 数据包要装进的存档在该实例里不存在。
     #[error("实例 {version_id} 里没有存档 {world}")]
     WorldNotFound { version_id: String, world: String },
+    /// 直达的世界文件夹名里有系统代码页表示不了的字符，Java 的命令行参数带不过去。
+    #[error(
+        "存档文件夹名里的「{ch}」系统代码页表示不了，没法直接进入。请启动游戏后在单人列表里进入，或把文件夹改名"
+    )]
+    WorldNameUnencodable {
+        version_id: String,
+        world: String,
+        ch: char,
+    },
     /// 要恢复或删除的备份不在这个存档的备份清单里，或清单里有、盘上已经没有了。
     #[error("实例 {version_id} 的存档 {world} 没有备份 {file}")]
     WorldBackupNotFound {

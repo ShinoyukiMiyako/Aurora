@@ -66,6 +66,6 @@ pub use process::{
 };
 pub use quickplay::{
     FEATURE_MULTIPLAYER, FEATURE_SINGLEPLAYER, QuickPlayMode, QuickPlaySupport, QuickPlayTarget,
-    legacy_server_args, quick_play_support,
+    legacy_server_args, quick_play_lost_char, quick_play_support,
 };
 pub use workspace::resolve_game_directory;
