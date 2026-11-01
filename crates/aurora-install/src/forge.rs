@@ -383,6 +383,9 @@ impl<'a> ForgeInstaller<'a> {
     /// 校验通过的旧文件直接复用，不再重下几十 MB。
     async fn download_installer(&self, installer_url: &str) -> Result<PathBuf> {
         let file_name = installer_url.rsplit('/').next().unwrap_or("installer.jar");
+        // 地址里的加载器版本号来自远端版本列表或整合包清单，原样成了文件名：带反斜杠或 `..` 时
+        // 在 Windows 上会落到缓存目录之外。
+        checked_segment(file_name, || "加载器安装器".to_owned())?;
         let dest = self.installer_cache_dir().join(file_name);
         let mut task = aurora_download::DownloadTask::new(installer_url, dest.clone());
         match self.installer_sha1(installer_url).await {
@@ -2436,6 +2439,49 @@ mod tests {
             cancelled_at.elapsed() < Duration::from_secs(1),
             "实际等了 {:?}",
             cancelled_at.elapsed()
+        );
+    }
+
+    /// installer 的缓存文件名取自地址的最后一段，地址里的加载器版本号来自远端版本列表或整合包清单。
+    /// 带反斜杠的版本号在 Windows 上会把落点带出缓存目录：报路径越界，不发请求、不写文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_installer_file_name_escaping_the_cache_dir_is_rejected() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(legacy_installer_bytes()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let f = fixture();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let file_name = r"forge-1.20.1-47.2.0\..\..\escaped-installer.jar";
+        let url = format!("{}/{file_name}", server.uri());
+
+        let err = ForgeInstaller::new(cx, "java")
+            .install_for_instance(&url, "x")
+            .await
+            .unwrap_err();
+
+        match err {
+            Error::UnsafePath {
+                entry,
+                path,
+                problem,
+            } => {
+                assert_eq!(entry, "加载器安装器");
+                assert_eq!(path, file_name);
+                assert_eq!(problem, aurora_version::UnsafePath::Backslash);
+            }
+            other => panic!("应报路径越界，实际：{other:?}"),
+        }
+        assert!(!f.root.join("escaped-installer.jar").exists());
+        assert!(
+            !f.root
+                .join(concat!(".", aurora_base::app_slug!(), "-cache"))
+                .exists()
         );
     }
 }
