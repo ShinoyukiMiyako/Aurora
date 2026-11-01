@@ -15,7 +15,7 @@ import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useInstanceMods, type InstalledMod, type UpdateCandidate, type UpdateHold } from "../../state/queries/instance";
-import { invalidate, type ResourceResult } from "../../state/resource";
+import type { ResourceResult } from "../../state/resource";
 import { modFilesBeingUpdated, progressTrack } from "../../state/tasks";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -146,14 +146,6 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   useEffect(() => {
     barMounted.current = true;
   }, []);
-
-  // 玩家手动往 mods 文件夹里放了 jar：窗口重新获得焦点时重扫
-  useEffect(() => {
-    if (queryId === null) return;
-    const rescan = () => invalidate(`mods:${queryId}`);
-    window.addEventListener("focus", rescan);
-    return () => window.removeEventListener("focus", rescan);
-  }, [queryId]);
 
   // 列表换了一份（启停后的重扫）就以磁盘为准，丢掉乐观的开关值
   const modsData = mods.status === "ready" ? mods.data : null;

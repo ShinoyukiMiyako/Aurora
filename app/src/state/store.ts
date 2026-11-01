@@ -1415,6 +1415,8 @@ export class LauncherStore {
   }
 
   private readonly onWindowFocus = (): void => {
+    // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫
+    invalidateResources("mods");
     if (this.raw.status.instances.kind !== "ready") return;
     if (Date.now() - this.lastScanAt < INSTANCE_RESCAN_MIN_MS) return;
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());

@@ -20,6 +20,22 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("窗口回到前台", () => {
+  it("外部增删 Mod：不在 Mod 页也要重读，概览的数字才跟得上", async () => {
+    const store = await startedStore();
+    let mods = ["a.jar"];
+    const read = () => Promise.resolve(mods);
+    expect(await resources.read("mods:生存", read)).toEqual(["a.jar"]);
+
+    mods = ["a.jar", "b.jar"];
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+
+    expect(await resources.read("mods:生存", read)).toEqual(["a.jar", "b.jar"]);
+    store.stop();
+  });
+});
+
 describe("游戏退出后的缓存失效", () => {
   it("启动途中后端自己下载了 Java：退出后 Java 列表重新请求", async () => {
     const store = await startedStore();
