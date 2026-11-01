@@ -46,6 +46,8 @@ const renders = vi.hoisted(() => ({
   WorldBackupsModal: 0,
   ExportModpackModal: 0,
   UpdatePreviewModal: 0,
+  /** Mod 表格：整页只有 Mod 标签用它。 */
+  Table: 0,
 }));
 /** 控制台最近一次拿到的行数：确认日志确实画到了控制台上。 */
 const consoleLines = vi.hoisted(() => ({ last: -1 }));
@@ -131,6 +133,11 @@ vi.mock("../../ui/Tooltip", async (orig) => {
       return mod.Tooltip(props);
     },
   };
+});
+
+vi.mock("../../ui/Table", async (orig) => {
+  const mod = await orig<typeof import("../../ui/Table")>();
+  return { ...mod, Table: counted("Table", mod.Table as (props: Parameters<typeof mod.Table>[0]) => ReactNode) };
 });
 
 const ID = "樱花生存";
@@ -543,6 +550,58 @@ describe("实例详情的弹窗：本实例运行中、另一个实例在补全"
     stream(taskId);
     expect(commits).toBe(0);
     expect(renders).toEqual(before);
+  });
+});
+
+describe("Mod 标签：本实例的更新任务在跑", () => {
+  const source = { platform: "modrinth" as const, project_id: "AANobbMI", version_id: "v1", version_number: "1.0.0", title: null, dependency_of: null, installed_at: Math.floor(NOW / 1000) - 86_400 * 30, update_hold: null };
+  const latest: UpdateCandidate["latest"] = {
+    version_id: "AANobbMI-v2",
+    project_id: "AANobbMI",
+    platform: "modrinth",
+    name: "1.1.0",
+    version_number: "1.1.0",
+    release_channel: "release",
+    game_versions: ["1.21.1"],
+    loaders: ["fabric"],
+    file_name: "sodium-1.1.0.jar",
+    file_size: 2048,
+    sha1: null,
+    download_url: null,
+    date_published: "",
+    dependencies: [],
+  };
+
+  it("20 次下载进度：表格不重渲染，摘要行的进度条照走，这一行的更新键照旧挡着", async () => {
+    ipc.overrides.set("list_mods", () => [{ ...mod("sodium.jar", "Sodium"), source }, mod("lithium.jar", "Lithium")]);
+    ipc.overrides.set("check_updates", (): UpdateCandidate[] => [{ file_name: "sodium.jar", title: "Sodium", current_version_id: "v1", current_version_number: "1.0.0", latest }]);
+    ipc.overrides.set("update_mod", () => new Promise(() => undefined));
+    await open("mods");
+    const rowUpdate = () => {
+      const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === "更新 Sodium");
+      if (found === undefined) throw new Error("没有「更新 Sodium」按钮");
+      return found;
+    };
+    act(() => rowUpdate().click());
+    await flush();
+    const task = launcher.state.tasks.find((t) => t.spec.command === "update_mod");
+    if (task === undefined || task.status !== "running") throw new Error("更新任务应在进行中");
+    expect(rowUpdate().getAttribute("aria-disabled")).toBe("true");
+    expect(renders.Table).toBeGreaterThan(0);
+
+    const before = renders.Table;
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: i, bytes: i * 1000, total_bytes: 40_000, speed: 1_000_000 });
+      });
+    }
+    const progress = launcher.state.tasks.find((t) => t.id === task.id)?.progress;
+    if (progress === undefined) throw new Error("更新任务不见了");
+    expect(percent(progress)).toBe("50%");
+    expect(renders.Table).toBe(before);
+    const bar = document.querySelector('[role="progressbar"]');
+    expect(bar?.getAttribute("aria-valuenow")).toBe("50");
+    expect(rowUpdate().getAttribute("aria-disabled")).toBe("true");
   });
 });
 

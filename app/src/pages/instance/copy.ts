@@ -7,6 +7,9 @@ import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../..
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 
+/** 崩溃摘要句的开头：规则命中只是线索；线索全部只来自退出码时不说日志。 */
+const cluePointer = (exitCodeOnly: boolean) => (exitCodeOnly ? "退出码指向" : "日志指向");
+
 export const PAGE_COPY = {
   tabsLabel: "实例详情",
   liveBadge: "实时",
@@ -154,7 +157,7 @@ export const OVERVIEW_COPY = {
   viewTasks: "查看下载任务",
   failedTitle: (title: string) => `上次启动失败：${title}`,
   crashTitle: (relative: string) => `上次启动崩溃了 · ${relative}`,
-  crashBody: (label: string) => `${joinMixed("日志指向", label)}，诊断里有可以一键尝试的办法。`,
+  crashBody: (label: string, exitCodeOnly: boolean) => `${joinMixed(cluePointer(exitCodeOnly), label)}，诊断里有可以一键尝试的办法。`,
   crashBodyNoClue: "没有匹配到已知原因，可以对照完整日志排查。",
   crashBodyPending: "正在读取崩溃报告。",
   viewCrash: "查看诊断",
@@ -387,6 +390,7 @@ export const MODS_COPY = {
   batchAllEnabled: "选中的 Mod 都已启用",
   batchAllDisabled: "选中的 Mod 都已停用",
   batchNoUpdates: "选中的 Mod 都没有可用的更新",
+  batchAllUpdating: "选中的 Mod 都已在更新",
   batchRemoveTitle: (count: number) => `移除 ${count} 个 Mod？`,
   batchRemoveBody: (count: number, size: number) => `会删除选中的 ${count} 个文件（共 ${formatBytes(size)}），这一步不能回滚。以后可以从发现页重新安装。`,
   batchRemoveDependents: (names: readonly string[]) => `${names.join("、")} 把其中的 Mod 作为前置，移除后可能无法加载。`,
@@ -589,7 +593,7 @@ export const CRASH_PAGE_COPY = {
   copyPath: "复制报告路径",
   fullLog: "完整日志",
   clueCount: (n: number) => `找到 ${n} 条线索`,
-  clueTail: (labels: readonly string[]) => `，${joinMixed("日志指向", joinCrashLabels(labels))}`,
+  clueTail: (labels: readonly string[], exitCodeOnly: boolean) => `，${joinMixed(cluePointer(exitCodeOnly), joinCrashLabels(labels))}`,
   stale: (relative: string) => `这是${relative}的崩溃，之后已经正常启动过。`,
   runningAgain: "游戏正在运行；如果再次崩溃，这里会换成新的诊断。",
   /** 会话日志是默认来源，不写来源名；其余来源写在行号前。 */

@@ -29,7 +29,7 @@ import { Tag } from "../../ui/Tag";
 import { Tooltip } from "../../ui/Tooltip";
 import { LOCK_REASON } from "../instance/copy";
 import { useDeleteInstance } from "../instance/delete";
-import { instanceLocks, isCrashActive } from "../instance/model";
+import { isCrashActive, locksOf } from "../instance/model";
 import { lockReason } from "../instance/ops";
 import { CardStatus } from "./CardStatus";
 import { LIBRARY_COPY } from "./copy";
@@ -60,7 +60,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const run = useRunner();
   const deleteInstance = useDeleteInstance();
 
-  const deleteReason = lockReason(instanceLocks(busy, inst.status === "installing", inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up").delete, "delete");
+  const deleteReason = lockReason(locksOf(inst, busy).delete, "delete");
   const pinAllowed = inst.pinned || canPin;
   const cover = instanceCover(inst);
   const justCrashed = viewKind === "crashed";

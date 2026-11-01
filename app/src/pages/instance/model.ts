@@ -78,6 +78,11 @@ export function instanceLocks(busy: boolean, installing: boolean, modifying: boo
   return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : occupied };
 }
 
+/** 按实例摘要算的锁。busy 是本实例的会话在准备、下载、启动或运行中。实例页与实例库的卡片同一份判定。 */
+export function locksOf(inst: Pick<InstanceSummary, "status" | "activity" | "usedBy">, busy: boolean): InstanceLocks {
+  return instanceLocks(busy, inst.status === "installing", inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up");
+}
+
 /** 打开工作子目录与写实例设置被什么挡住。 */
 export type WorkLock = "installing" | "renaming" | "deleting";
 
@@ -541,13 +546,15 @@ export interface BatchAvailability {
   remove: string | undefined;
 }
 
-export function batchAvailability(selected: readonly ModRow[], lock: string | undefined): BatchAvailability {
+export function batchAvailability(selected: readonly ModRow[], lock: string | undefined, isUpdating: (row: ModRow) => boolean): BatchAvailability {
   if (selected.length === 0) throw new Error("没有选中的 Mod 时不显示批量操作条");
   if (lock !== undefined) return { enable: lock, disable: lock, update: lock, remove: lock };
+  // 已在更新的不进更新预览：选中的可更新项全在更新时打开也是一张空表
+  const updatable = selected.filter((r) => r.update !== null);
   return {
     enable: selected.every((r) => r.enabled) ? MODS_COPY.batchAllEnabled : undefined,
     disable: selected.every((r) => !r.enabled) ? MODS_COPY.batchAllDisabled : undefined,
-    update: selected.every((r) => r.update === null) ? MODS_COPY.batchNoUpdates : undefined,
+    update: updatable.length === 0 ? MODS_COPY.batchNoUpdates : updatable.every(isUpdating) ? MODS_COPY.batchAllUpdating : undefined,
     remove: undefined,
   };
 }
@@ -689,6 +696,16 @@ export function historyItems(events: readonly HistoryEvent[], checks: readonly R
 }
 
 export const HISTORY_PAGE = 30;
+
+// ---------------------------------------------------------------- 崩溃：线索的来源
+
+/**
+ * 这份报告的线索是不是全部只来自退出码：日志一条规则都没命中，只有退出码兜底。这时摘要要写「退出码指向」，
+ * 写「日志指向」就和线索卡里「日志里没有匹配到已知原因」自相矛盾。没有线索时无从说起，为 false。
+ */
+export function cluesFromExitCodeOnly(report: Pick<CrashReportDto, "diagnoses">): boolean {
+  return report.diagnoses.length > 0 && report.diagnoses.every((clue) => clue.source === "exit_code");
+}
 
 // ---------------------------------------------------------------- 崩溃：日志指向的 Mod
 

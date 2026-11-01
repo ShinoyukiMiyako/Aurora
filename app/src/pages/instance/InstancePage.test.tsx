@@ -991,6 +991,21 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(text()).toContain("安装没有完成");
     expect(text()).toContain("网络连接失败。可以重试，或到下载任务里查看。");
 
+    // 断网时重试必然又失败一次：与下载任务页同一个口径，带原因禁用，点了不重排
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    onTestFinished(() => onLine.mockRestore());
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    expect(button("重试").getAttribute("aria-disabled")).toBe("true");
+    click(button("重试"));
+    await flush();
+    expect(attempts).toBe(1);
+    onLine.mockReturnValue(true);
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+
     click(button("重试"));
     await flush();
     expect(attempts).toBe(2);
@@ -1473,6 +1488,22 @@ describe("实例详情：Mod 管理", () => {
     expect(callsOf(ipc, "set_mod_enabled")).toHaveLength(1);
   });
 
+  it("开关的启停还没回来：移除带原因禁用、点了不开确认框，回来后恢复", async () => {
+    const pending = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => pending.promise);
+    await open("mods");
+    click(byRole("switch", "停用 Sodium"));
+    await flush();
+    const remove = button("移除 Sodium");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    click(remove);
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    pending.resolve("sodium.jar.disabled");
+    await flush();
+    expect(button("移除 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("移除前确认，并说明它带进来的前置会保留", async () => {
     await open("mods");
     click(button("移除 Sodium"));
@@ -1858,6 +1889,29 @@ describe("实例详情：设置", () => {
       expect(() => button("清除", row())).toThrow();
     });
 
+    it.each([
+      ["保存为默认", "save_instance_as_template"],
+      ["清除", "clear_template"],
+    ])("点「%s」后请求在途：按钮保持可聚焦，焦点留在它上面，两个按钮都按不了", async (label, command) => {
+      onTestFinished(emulateFocusFixup());
+      template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
+      const pending = deferred<TemplateInfoDto>();
+      ipc.overrides.set(command, () => pending.promise);
+      await open("settings");
+      const pressed = button(label, row());
+      const other = button(label === "清除" ? "保存为默认" : "清除", row());
+      act(() => pressed.focus());
+      click(pressed);
+      await flush();
+      expect(pressed.disabled).toBe(false);
+      expect(pressed.getAttribute("aria-busy")).toBe("true");
+      expect(document.activeElement).toBe(pressed);
+      expect(other.getAttribute("aria-disabled")).toBe("true");
+      click(pressed);
+      await flush();
+      expect(callsOf(ipc, command)).toHaveLength(1);
+    });
+
     it("已有别的实例存的默认设置写出来源与时刻，手放的写来源不明；没进过游戏时保存失败用后端原文报错，原来的不动", async () => {
       template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
       ipc.overrides.set("save_instance_as_template", (args) => {
@@ -1931,6 +1985,23 @@ describe("实例详情：设置", () => {
     resetRecorderKeepOverrides();
     await open("settings");
     expect(text()).toContain("连同 2 个存档一起移入回收站。");
+  });
+
+  it("点「补全」后任务排上：按钮换成「进行中」，还是同一个节点、保持可聚焦，焦点留在它上面，再按不重复排", async () => {
+    onTestFinished(emulateFocusFixup());
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("settings");
+    const repair = button("补全");
+    act(() => repair.focus());
+    click(repair);
+    await flush();
+    expect(button("进行中")).toBe(repair);
+    expect(repair.disabled).toBe(false);
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(repair);
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
   });
 
   it("实例上还挂着任务：确认框说明会先取消任务", async () => {
@@ -2747,6 +2818,67 @@ describe("实例详情：存档备份", () => {
     expect(dialogs()).toHaveLength(1);
     expect(callsOf(ipc, "restore_world_backup")).toEqual([]);
     expect(button("备份存档", backupsDialog()).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("弹窗里点「备份存档」后任务在进行：按钮转圈、还是同一个节点，焦点留在它上面，再按不重复入队", async () => {
+    onTestFinished(emulateFocusFixup());
+    await openBackups();
+    const start = button("备份存档", backupsDialog());
+    act(() => start.focus());
+    click(start);
+    await flush();
+    expect(button("备份存档", backupsDialog())).toBe(start);
+    expect(start.getAttribute("aria-busy")).toBe("true");
+    expect(start.disabled).toBe(false);
+    expect(document.activeElement).toBe(start);
+    click(start);
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toHaveLength(1);
+  });
+
+  it("别的存档有任务在进行：弹窗里的「备份存档」不转圈，写明实例正在备份或恢复存档", async () => {
+    await openBackups();
+    await act(async () => {
+      await launcher.actions.backupWorld(ID, "w1", "旧世界");
+      await settle(20);
+    });
+    const start = button("备份存档", backupsDialog());
+    expect(start.getAttribute("aria-busy")).toBeNull();
+    expect(await hoverReason(start)).toBe("「樱花生存」正在备份或恢复存档，完成后再试");
+  });
+
+  it("删除请求还没回来：这一行的删除转圈，再按不重复发；失败后恢复可点，错误照常报出", async () => {
+    const pending = deferred<null>();
+    ipc.overrides.set("delete_world_backup", () => pending.promise);
+    await openBackups();
+    const remove = button("删除 2026年10月31日 10:00 的备份", backupsDialog());
+    click(remove);
+    await flush();
+    expect(remove.getAttribute("aria-busy")).toBe("true");
+    expect(button("删除 2026年10月30日 10:00 的备份", backupsDialog()).getAttribute("aria-busy")).toBeNull();
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "delete_world_backup")).toHaveLength(1);
+    await act(async () => {
+      pending.reject(new IpcError("world_backup_not_found", "备份已经不在了"));
+      await settle(20);
+    });
+    expect(remove.getAttribute("aria-busy")).toBeNull();
+    expect(toastTitles()).toContain("没能删除这份备份");
+  });
+
+  it("备份列表还没读到：「打开备份文件夹」是可聚焦的禁用，读到后恢复可用", async () => {
+    const pending = deferred<WorldBackupListDto>();
+    ipc.overrides.set("list_world_backups", () => pending.promise);
+    await openBackups();
+    const openDir = button("打开备份文件夹", backupsDialog());
+    expect(openDir.disabled).toBe(false);
+    expect(openDir.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      pending.resolve(list);
+      await settle(20);
+    });
+    expect(button("打开备份文件夹", backupsDialog()).getAttribute("aria-disabled")).toBeNull();
   });
 
   it("游戏运行中：恢复与备份存档禁用并写原因，删除照常（不占实例）", async () => {

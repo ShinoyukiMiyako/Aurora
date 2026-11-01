@@ -172,13 +172,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     }
   }, [actions, checking, run, updates]);
 
-  // 只订阅本实例排队与进行中的更新任务（含「全部更新」）：它们的进度条要跟着走，别的任务的进度不让整张表重渲染
-  const updateTasks = useLauncherSelector(
-    (s) => s.tasks.filter((t) => isPendingModUpdate(t, id)),
-    shallowArrayEqual,
-  );
-  // 组合任务跑完之前入队的几项都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败
-  const updatingFiles = modFilesBeingUpdated(updateTasks, id);
+  // 组合任务跑完之前入队的几项都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败。
+  // 只订阅文件名单：更新任务的进度约 100 ms 一次，名单不变，整张表不跟着重渲染；摘要行的进度条自己订阅
+  const updatingNames = useLauncherSelector((s) => [...modFilesBeingUpdated(s.tasks, id)].sort(), shallowArrayEqual);
+  const updatingFiles = new Set(updatingNames);
   const rows = modsData === null ? [] : modRows(modsData, updates.status === "ready" ? updates.data : null).map((r) => {
     const override = overrides.get(r.fileName);
     return override === undefined ? r : { ...r, enabled: override };
@@ -255,10 +252,15 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     setPreviewOpen(false);
     const files = rows.filter((r) => picked.some((c) => c.file_name === enabledFileName(r.fileName))).map((r) => r.fileName);
     const batch = preview !== null && preview.files !== null;
-    setPending(new Set(files));
+    // 只增减这一批：单个更新可能还在查可更新项，它的转圈归它自己结束
+    setPending((p) => new Set([...p, ...files]));
     if (batch) setBatchBusy("update");
     void run(() => actions.updateAllMods(id, picked), ACTION_ERROR.updateMods).then(() => {
-      setPending(new Set());
+      setPending((p) => {
+        const next = new Set(p);
+        for (const f of files) next.delete(f);
+        return next;
+      });
       if (!batch) return;
       setBatchBusy(null);
       setSelected(new Set());
@@ -371,7 +373,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const columns = modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold });
   // 选中的行有启停还没回来时盘上是哪个名字未知，批量动作和开关一样带原因等它
   const batchLock = lock === undefined && selectedRows.some((r) => toggling.has(r.fileName)) ? MODS_COPY.togglePending : lock;
-  const batch = selectedRows.length > 0 ? batchAvailability(selectedRows, batchLock) : null;
+  const batch = selectedRows.length > 0 ? batchAvailability(selectedRows, batchLock, isUpdating) : null;
   // 进行中的那个按钮转圈，其余批量按钮在它结束前一并禁用
   const batchBlocked = (action: BatchAction) => batchBusy !== null && batchBusy !== action;
   // 减少动画时只去掉位移与形变，200 ms 的淡入照常保留
@@ -399,7 +401,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
               icon="download"
               disabled={batchBlocked("update")}
               focusableWhenDisabled
-              disabledReason={batch.update}
+              // 确认之后勾选项随即都算在更新：别让转圈的按钮中途换成带原因禁用
+              disabledReason={batchBusy === "update" ? undefined : batch.update}
               loading={batchBusy === "update"}
               onClick={() => openPreview(new Set(selectedRows.map((r) => r.fileName)))}
             >
@@ -432,7 +435,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           <div className={styles.toolRight}>
             <FolderButton ops={ops} target="mods" label={MODS_COPY.openFolder} variant="secondary" />
             {counts.outdated > 0 ? (
-              <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updateTasks.length > 0} onClick={() => openPreview(null)}>
+              <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updatingNames.length > 0} onClick={() => openPreview(null)}>
                 {MODS_COPY.updateAll(counts.outdated)}
               </Button>
             ) : (
@@ -457,12 +460,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
             {partial && inst.modpack !== null ? MODS_COPY.partialNote(inst.modpack.name, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}
           </span>
         )}
-        {updateTasks.length > 0 && (
-          <span className={styles.modTask}>
-            <ProgressBar value={updateTasks[0].status === "running" ? updateTasks[0].progress : 0} size="sm" track={progressTrack(updateTasks[0])} label={updateTasks[0].title} />
-            <span className={styles.ellipsis}>{updateTasks[0].title}</span>
-          </span>
-        )}
+        <UpdateProgress instanceId={id} />
       </Inset>
 
       {ops.locks.mods !== null && <Banner tone="info" title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : MODS_COPY.bannerInstalling} />}
@@ -545,6 +543,18 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
       )}
     </div>
+  );
+}
+
+/** 摘要行的更新进度，取排在最前的那个更新任务。进度约 100 ms 一次，只让这一小块跟着重渲染。 */
+function UpdateProgress({ instanceId }: { instanceId: string }) {
+  const task = useLauncherSelector((s) => s.tasks.find((t) => isPendingModUpdate(t, instanceId)));
+  if (task === undefined) return null;
+  return (
+    <span className={styles.modTask}>
+      <ProgressBar value={task.status === "running" ? task.progress : 0} size="sm" track={progressTrack(task)} label={task.title} />
+      <span className={styles.ellipsis}>{task.title}</span>
+    </span>
   );
 }
 
@@ -724,7 +734,8 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
               </Button>
             ))}
           <MoreMenu items={holdMenu(r, holdLock, setHold)} size="sm" label={MODS_COPY.more(r.name)} />
-          <IconButton icon="trash" label={MODS_COPY.remove(r.name)} size="sm" variant="danger" disabledReason={lock} onClick={() => remove(r)} />
+          {/* 启停还没回来时盘上是哪个名字未知：这时开确认框，确认时拿的是改名前的旧名字 */}
+          <IconButton icon="trash" label={MODS_COPY.remove(r.name)} size="sm" variant="danger" disabledReason={toggleReason(r)} onClick={() => remove(r)} />
         </div>
       ),
     },

@@ -1,5 +1,6 @@
 // 崩溃诊断：顶部是这次崩溃的摘要（参与扫描的文件、这次启动时的提醒）；左列逐条线索（类别、解释、命中的日志行与前两行，
-// 只有退出码时改写退出码），右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」。
+// 只有退出码时改写退出码），右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」；
+// 线索全部只来自退出码时摘要写「退出码指向」。
 // 本页不放第二个启动胶囊：重新启动用头图的胶囊。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -45,7 +46,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { CRASH_PAGE_COPY, MODS_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
-import { crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
+import { cluesFromExitCodeOnly, crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -182,7 +183,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
           </span>
           <h2 className={styles.crashTitle}>
             {unique.length > 0 ? CRASH_PAGE_COPY.clueCount(report.diagnoses.length) : CRASH_COPY.noClueTitle}
-            <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique) : `，${CRASH_COPY.noClueExplain}`}</span>
+            <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique, cluesFromExitCodeOnly(report)) : `，${CRASH_COPY.noClueExplain}`}</span>
           </h2>
           {report.log_path !== null && (
             <span className={styles.crashPath}>
