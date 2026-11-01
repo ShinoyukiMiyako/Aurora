@@ -40,6 +40,7 @@ export interface InstanceOps {
   /** 此刻不能把存档带进整合包的原因；能带为 undefined。 */
   exportSavesReason: string | undefined;
   repair(): void;
+  reinstallLoader(): void;
   remove(): void;
 }
 
@@ -107,6 +108,12 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     });
   };
 
+  const reinstallLoader = () => {
+    void run(() => actions.repairInstance(id, { reinstallLoader: true }), ACTION_ERROR.reinstallLoader).then((outcome) => {
+      if (outcome.ok) actions.toast("info", OVERVIEW_COPY.reinstallLoaderStarted(name), OVERVIEW_COPY.repairStartedBody);
+    });
+  };
+
   const remove = () => {
     void deleteInstance(inst);
   };
@@ -125,6 +132,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     exportReason: exportReason(inst, work),
     exportSavesReason: exportSavesReason(inst, busy),
     repair,
+    reinstallLoader,
     remove,
   };
 }

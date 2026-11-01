@@ -195,6 +195,15 @@ describe("启动 mock", () => {
     expect(() => failNextMockLaunch("teapot", {})).toThrow("未知的启动失败码 teapot");
   });
 
+  it("加载器自带的库缺失在补全库文件阶段拒绝，与后端查出它的阶段一致，detail 带完整路径", async () => {
+    const { phases } = await recordEvents();
+    failNextMockLaunch("loader_library_missing", { path: "D:/mc/libraries/forge.jar" });
+    const error = await rejection(launchGame(offline("1.21", "t-1")));
+    expect(error.code).toBe("loader_library_missing");
+    expect(error.detail).toEqual({ path: "D:/mc/libraries/forge.jar" });
+    expect(phases.map((p) => p.stage_index)).toEqual([0, 1, 2]);
+  });
+
   it("账户必须二选一；参数类型不对是 Tauri 自己的参数错误", async () => {
     const neither = await rejection(launchGame({ taskId: "t", versionId: "1.21", accountUuid: null, offlineName: null, offlineFallback: false, quickPlay: null } as never));
     expect(neither.code).toBe("invalid_argument");

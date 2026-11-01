@@ -1369,6 +1369,46 @@ describe("实例详情：整合包没导入完", () => {
 });
 
 describe("实例详情：概览", () => {
+  const LOST = "加载器自带的库 fabric-loader-0.16.10.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器";
+
+  it("启动败在加载器自带的库上：失败横幅给出重新安装加载器，点了排重装任务", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("loader_library_missing", LOST, { path: "D:/mc/libraries/fabric-loader-0.16.10.jar" });
+    });
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(text()).toContain("上次启动失败：加载器文件缺失");
+    expect(text()).toContain("只能由加载器安装器生成");
+    click(button("重新安装加载器"));
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toMatchObject([{ id: ID, reinstallLoader: true }]);
+  });
+
+  it("补全败在加载器自带的库上：修复横幅的按钮直接写重新安装加载器，不再是刚失败过的「修复实例」", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, incomplete: { kind: "repair", outcome: "failed", started_at: NOW, spec: null, error: { code: "loader_library_missing", message: LOST } } } : i));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("overview");
+    expect(text()).toContain("实例文件不完整，暂时无法启动");
+    expect(() => button("修复实例")).toThrow("找不到按钮");
+    click(button("重新安装加载器"));
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toMatchObject([{ id: ID, reinstallLoader: true }]);
+  });
+
+  it("别的原因损坏：修复横幅仍是「修复实例」，命令不带 reinstallLoader", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, incomplete: { kind: "repair", outcome: "failed", started_at: NOW, spec: null, error: { code: "network_failed", message: "连接超时" } } } : i));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("overview");
+    expect(() => button("重新安装加载器")).toThrow("找不到按钮");
+    click(button("修复实例"));
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.reinstallLoader)).toEqual([undefined]);
+  });
+
   it("存档按最近游玩排序，极限模式标红；资源包与光影按加载顺序列出", async () => {
     await open("overview");
     const rows = [...document.querySelectorAll("li")].map(textOf);
@@ -1858,6 +1898,77 @@ describe("实例详情：设置", () => {
     expect(skeletons()).toBe(0);
     expect(document.querySelector('textarea[aria-label="JVM 参数"]')).not.toBeNull();
     expect(text()).toContain("全局固定值");
+  });
+
+  describe("重新安装加载器", () => {
+    const patchInstance = (patch: Partial<InstanceDto>) => {
+      instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));
+    };
+
+    it("点了排一个带 reinstallLoader 的补全任务，并通知进度在哪；任务进行中两行都写「进行中」，再点不重复排", async () => {
+      ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+      await open("settings");
+      expect(text()).toContain("游戏版本、加载器版本、Mod、配置与存档都保持不变。");
+      const reinstall = button("重新安装");
+      click(reinstall);
+      await flush();
+      expect(callsOf(ipc, "repair_instance")).toMatchObject([{ id: ID, reinstallLoader: true }]);
+      expect(launcher.state.toasts.find((t) => t.title === `开始重新安装「${ID}」的加载器`)).toMatchObject({ tone: "info", body: "进度见下载任务" });
+      expect(launcher.state.tasks.filter((t) => t.spec.command === "repair_instance")).toMatchObject([{ kind: "repair", title: `重新安装「${ID}」的加载器` }]);
+      expect([...document.querySelectorAll("button")].filter((b) => b.textContent === "进行中")).toHaveLength(2);
+      expect(reinstall.getAttribute("aria-disabled")).toBe("true");
+      click(reinstall);
+      await flush();
+      expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
+    });
+
+    it.each<[string, Partial<InstanceDto>]>([
+      ["原版实例没有加载器可装", { loaders: [] }],
+      ["只有 OptiFine", { loaders: [{ kind: "optifine", version: "1.21.1_HD_U_J1" }] }],
+      ["Fabric 上叠着 LiteLoader，重装会把它丢掉", { loaders: [{ kind: "fabric", version: "0.16.10" }, { kind: "liteloader", version: "1.12.2" }] }],
+    ])("%s：没有这一行，补全照常", async (_name, patch) => {
+      patchInstance(patch);
+      await open("settings");
+      expect(text()).not.toContain("重新安装加载器");
+      expect(button("补全").disabled).toBe(false);
+    });
+
+    it("整合包没导入完：这里只给重新导入，重装加载器补不回缺的 Mod", async () => {
+      patchInstance({ incomplete: { kind: "modpack", outcome: "failed", started_at: NOW, spec: null, error: null } });
+      await open("settings");
+      expect(text()).toContain("重新导入");
+      expect(text()).not.toContain("重新安装加载器");
+    });
+
+    it("游戏运行中：说明换成要先结束游戏，点了什么也不排", async () => {
+      ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+      await open("settings");
+      await act(async () => {
+        await launcher.actions.launch(ID);
+        await settle(20);
+      });
+      expect(text()).toContain("游戏正在运行，结束后才能重新安装。");
+      expect(text()).not.toContain("游戏版本、加载器版本、Mod、配置与存档都保持不变。");
+      const reinstall = button("重新安装");
+      expect(reinstall.getAttribute("aria-disabled")).toBe("true");
+      click(reinstall);
+      await flush();
+      expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    });
+
+    it.each([
+      ["正在改动 Mod", { activity: "modifying" as const }],
+      ["正在备份存档", { activity: "backing_up" as const }],
+      ["被别的实例当作基底", { activity: "inherited" as const, used_by: "整合包" }],
+    ])("%s：与补全同一把锁，按钮带原因禁用", async (_name, patch) => {
+      patchInstance(patch);
+      await open("settings");
+      const reinstall = button("重新安装");
+      expect(reinstall.getAttribute("aria-disabled")).toBe("true");
+      click(reinstall);
+      await flush();
+      expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    });
   });
 
   describe("设为新实例的默认设置", () => {

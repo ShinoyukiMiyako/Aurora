@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "./bridge";
 import { IpcError, isCancelled } from "./errors";
 import { updateConfig } from "./config";
 import {
@@ -33,7 +34,7 @@ import {
 } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { acquireMockInstance, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
+import { acquireMockInstance, addMockInstance, loseMockLoaderLibrary, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
 import { endMockGame, reset as resetLaunchMock } from "./mock/handlers/launch";
 import { launchGame } from "./launch";
 import { exportModpack } from "./modpack";
@@ -378,6 +379,98 @@ describe("mock：新建与补全", () => {
     expect(await repaired).toEqual({ reinstalled: true, libraries: 12, assets: 0, natives: 0 });
     const fixed = (await listInstances()).find((i) => i.id === "没装完");
     expect(fixed).toMatchObject({ status: "ready", incomplete: null, mc_version: "1.20.1", loaders: [{ kind: "neoforge", version: "47.1.106" }] });
+  });
+
+  describe("重新安装加载器", () => {
+    const FABRIC = "樱花生存";
+    const find = async (id: string) => {
+      const found = (await listInstances()).find((i) => i.id === id);
+      if (found === undefined) throw new Error(`mock 里没有实例 ${id}`);
+      return found;
+    };
+
+    it("版本号与存档都不变，标记清掉，结果记作重装；期间占着实例，报的是 repairing", async () => {
+      vi.useFakeTimers();
+      const before = await find(FABRIC);
+      const worlds = (await listInstanceContent(FABRIC)).worlds;
+      expect(worlds.length).toBeGreaterThan(0);
+
+      const done = repairInstance("t-loader", FABRIC, { reinstallLoader: true });
+      await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+      expect(await find(FABRIC)).toMatchObject({ activity: "repairing", incomplete: { kind: "install", outcome: "pending", spec: { mc_version: "1.21.1", loader: "fabric", loader_version: "0.16.10" } } });
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+
+      expect(await done).toEqual({ reinstalled: true, libraries: 12, assets: 0, natives: 0 });
+      const after = await find(FABRIC);
+      expect(after).toMatchObject({ status: "ready", incomplete: null, activity: null, mc_version: before.mc_version, loaders: before.loaders, mod_count: before.mod_count, world_count: before.world_count });
+      expect((await listInstanceContent(FABRIC)).worlds).toEqual(worlds);
+    });
+
+    it("不带参数的普通补全仍按版本 JSON 补，结果不算重装", async () => {
+      vi.useFakeTimers();
+      const done = repairInstance("t-plain", FABRIC);
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+      expect(await done).toMatchObject({ reinstalled: false });
+    });
+
+    it("上次补全败在加载器自带的库上：普通补全直接换成重装", async () => {
+      vi.useFakeTimers();
+      loseMockLoaderLibrary(FABRIC, "fabric-loader-0.16.10.jar");
+      expect(await find(FABRIC)).toMatchObject({ incomplete: { kind: "repair", outcome: "failed", error: { code: "loader_library_missing" } } });
+      const done = repairInstance("t-stuck", FABRIC);
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+      expect(await done).toMatchObject({ reinstalled: true });
+      expect((await find(FABRIC)).incomplete).toBeNull();
+
+      // 装不回的（这里是原版）照旧补全，不把补全也报成不可补全
+      loseMockLoaderLibrary("1.21.1", "x.jar");
+      const plain = repairInstance("t-plain", "1.21.1");
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+      expect(await plain).toMatchObject({ reinstalled: false });
+    });
+
+    it("中途取消：标记记成安装并带着读出的版本号，之后普通补全接着重装", async () => {
+      vi.useFakeTimers();
+      const cancelled = repairInstance("t-cancel", FABRIC, { reinstallLoader: true }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+      await cancelTask("t-cancel");
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+      expect(isCancelled(await cancelled)).toBe(true);
+      expect(await find(FABRIC)).toMatchObject({ activity: null, incomplete: { kind: "install", outcome: "cancelled", spec: { loader: "fabric", loader_version: "0.16.10" } } });
+
+      const resumed = repairInstance("t-resume", FABRIC);
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+      expect(await resumed).toMatchObject({ reinstalled: true });
+      expect(await find(FABRIC)).toMatchObject({ incomplete: null, loaders: [{ kind: "fabric", version: "0.16.10" }] });
+    });
+
+    it("原版没有可装的加载器：与后端同码同文，实例不留标记、不留占用", async () => {
+      const error = await rejection(repairInstance("t-vanilla", "1.21.1", { reinstallLoader: true }));
+      expect(error).toMatchObject({
+        code: "instance_failed",
+        message: "实例 1.21.1 无法补全：没有装加载器，不需要重新安装",
+        detail: { id: "1.21.1", reason: "没有装加载器，不需要重新安装" },
+      });
+      expect(await find("1.21.1")).toMatchObject({ incomplete: null, activity: null });
+    });
+
+    it("参数不是布尔时与后端一样报参数错误", async () => {
+      const error = await rejection(invoke("repair_instance", { taskId: "t-bad", id: FABRIC, reinstallLoader: "yes" }));
+      expect(error).toMatchObject({ code: "invalid_argument", detail: { field: "reinstallLoader", reason: "type" } });
+    });
+
+    it("运行中与别的实例占着基底时都报 instance_busy", async () => {
+      await launchGame({ taskId: "t-run", versionId: FABRIC, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null });
+      expect((await rejection(repairInstance("t-busy", FABRIC, { reinstallLoader: true }))).detail).toEqual({ id: FABRIC, activity: "running" });
+      endMockGame(0, MOCK_STEP_MS);
+
+      addMockInstance("叠在原版上", "1.21", { kind: "fabric", version: "0.16.10" }, null);
+      const hold = acquireMockInstance("1.21", "deleting");
+      const error = await rejection(repairInstance("t-base", "叠在原版上", { reinstallLoader: true }));
+      hold.release();
+      expect(error).toMatchObject({ code: "instance_busy", detail: { id: "1.21", activity: "deleting" } });
+      expect((await find("叠在原版上")).incomplete).toBeNull();
+    });
   });
 
   it("补全被取消时标记记为 cancelled", async () => {

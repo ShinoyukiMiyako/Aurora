@@ -3,11 +3,11 @@
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
-import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, REINSTALL_LOADER_LABEL, TOAST_COPY } from "../../copy/flows";
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
-import { isolationByPolicy, needsReimport, runtimeComplete } from "../../domain/rules";
+import { canReinstallLoader, isolationByPolicy, needsReimport, runtimeComplete } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -616,11 +616,28 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             </Button>
           </SettingRow>
         ) : (
-          <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
-            <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} focusableWhenDisabled disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
-              {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
-            </Button>
-          </SettingRow>
+          <>
+            <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
+              <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} focusableWhenDisabled disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
+                {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
+              </Button>
+            </SettingRow>
+            {/* 与补全同一个任务、同一把锁：哪个按钮点的都一样，进行中时两行都写「进行中」 */}
+            {canReinstallLoader(inst) && (
+              <SettingRow title={REINSTALL_LOADER_LABEL} description={ops.locks.repair === "running" ? SETTINGS_COPY.reinstallLoaderRunning : SETTINGS_COPY.reinstallLoaderNote}>
+                <Button
+                  size="sm"
+                  icon="wrench"
+                  disabled={ops.locks.repair === "installing"}
+                  focusableWhenDisabled
+                  disabledReason={ops.locks.repair === "installing" ? undefined : lockReason(ops.locks.repair, "reinstallLoader")}
+                  onClick={ops.reinstallLoader}
+                >
+                  {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.reinstallLoader}
+                </Button>
+              </SettingRow>
+            )}
+          </>
         )}
       </div>
       <div className={styles.dangerZone} data-stack={tier === "compact" || undefined}>

@@ -61,6 +61,7 @@ const FAILURE_STAGE: Record<string, number> = {
   account_refresh_network: 0,
   account_service_down: 0,
   version_broken: 1,
+  loader_library_missing: 2,
   files_offline: 3,
   files_failed: 3,
   disk_full: 3,

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAppearance, setAppearance } from "./appearance";
 import { inTauri, invoke, listen } from "./bridge";
 import { installMod } from "./discover";
-import { installVersion } from "./instances";
+import { installVersion, repairInstance } from "./instances";
 import { installJava } from "./java";
 import { launchGame } from "./launch";
 import { updateMod } from "./mods";
@@ -193,16 +193,20 @@ describe("Tauri 窗口里走真命令", () => {
 
   // 键名逐个对应 Rust 命令形参的 camelCase 形式；漏传 taskId 时 Tauri 会以参数错误拒绝整条命令。
   it("长命令带 taskId，参数键与 Rust 形参一致", async () => {
-    for (let i = 0; i < 4; i++) vi.mocked(tauriInvoke).mockResolvedValueOnce(null);
+    for (let i = 0; i < 6; i++) vi.mocked(tauriInvoke).mockResolvedValueOnce(null);
     await installJava("t-java", 21);
     await installVersion("t-ver", "1.21.1", "fabric", "0.16.9", "周末生存");
     await installMod("t-mod", "1.21.1-fabric", "modrinth", "AANobbMI", "mv1");
     await launchGame({ taskId: "t-run", versionId: "1.21.1", accountUuid: "u-1", offlineName: null, offlineFallback: true, quickPlay: null });
+    await repairInstance("t-fix", "周末生存");
+    await repairInstance("t-loader", "周末生存", { reinstallLoader: true });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["install_java", { taskId: "t-java", requiredMajor: 21 }],
       ["install_version", { taskId: "t-ver", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9", targetName: "周末生存" }],
       ["install_mod", { taskId: "t-mod", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1" }],
       ["launch_game", { taskId: "t-run", versionId: "1.21.1", accountUuid: "u-1", offlineFallback: true, offlineName: null, quickPlay: null }],
+      ["repair_instance", { taskId: "t-fix", id: "周末生存" }],
+      ["repair_instance", { taskId: "t-loader", id: "周末生存", reinstallLoader: true }],
     ]);
   });
 

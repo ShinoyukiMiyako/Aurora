@@ -236,7 +236,7 @@ export const AVATAR_LINE = {
 // ---------------------------------------------------------------- 启动失败
 
 /** 失败修复动作的种类；按钮行为由启动层按种类执行。 */
-export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "auto_default_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs" | "launch_offline_once";
+export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "auto_default_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "reinstall_loader" | "open_logs" | "launch_offline_once";
 
 export interface FailureFix {
   kind: FailureFixKind;
@@ -289,6 +289,10 @@ const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" }
 // 只想让这个实例换 Java 的，去实例设置里单独指定。
 const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默认 Java 改回自动选择" };
 const PICK_JAVA: FailureFix = { kind: "pick_java", label: "选择 Java" };
+/** 启动失败通知、实例管理卡与修复横幅上同一个说法。 */
+export const REINSTALL_LOADER_LABEL = "重新安装加载器";
+/** 加载器自带的库缺失：启动失败卡的正文与任务失败原因同一句。 */
+const LOADER_LIBRARY_MISSING_REASON = `加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要${REINSTALL_LOADER_LABEL}`;
 /** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
 const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
 
@@ -370,6 +374,8 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
         fix: { kind: "repair", label: "修复实例" },
         secondary: null,
       };
+    case "loader_library_missing":
+      return { title: "加载器文件缺失", body: sentence(LOADER_LIBRARY_MISSING_REASON), fix: { kind: "reinstall_loader", label: REINSTALL_LOADER_LABEL }, secondary: null };
     case "spawn_failed":
       return {
         title: "游戏进程没能启动",
@@ -713,6 +719,7 @@ export const TASK_TEXT = {
   modpackTitle: (name: string) => `导入整合包 ${name}`,
   modpackDetail: (version: string, modCount: number | null) => (modCount === null ? version : `${version} · ${modCount} 个 Mod`),
   repairTitle: (name: string) => `补全「${name}」的游戏文件`,
+  reinstallLoaderTitle: (name: string) => `重新安装「${name}」的加载器`,
   repairDetail: (mcVersion: string, loader: LoaderKind, loaderVersion: string | null) => versionWithLoader(mcVersion, loader, loaderVersion, " · "),
   /** 损坏到连游戏版本都读不出来的实例。 */
   repairDetailUnknown: "游戏版本读不出来",
@@ -755,7 +762,7 @@ export function taskFailureReason(error: TaskError): string {
     case "install_unsafe_path":
       return "版本文件里有指向游戏目录之外的路径，已拒绝写入";
     case "loader_library_missing":
-      return "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器";
+      return LOADER_LIBRARY_MISSING_REASON;
     case "curseforge_key_rejected":
       return "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试";
     case "distribution_blocked":
@@ -795,6 +802,7 @@ export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以开始游戏了" }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
   repaired: (name: string) => ({ title: `「${name}」已修复` }),
+  loaderReinstalled: (name: string) => ({ title: `「${name}」的加载器已重新安装` }),
   modInstalled: (mod: string, dependencies: number, instance: string) => ({
     title: dependencies > 0 ? `已安装 ${mod} 及 ${dependencies} 个前置` : `已安装 ${mod}`,
     body: `装入「${instance}」`,
@@ -925,6 +933,7 @@ export const ACTION_ERROR = {
   exportModpack: "没能开始导出整合包",
   revealExport: "没能打开导出文件所在的文件夹",
   repair: "没能开始补全游戏文件",
+  reinstallLoader: `没能开始${REINSTALL_LOADER_LABEL}`,
   deleteInstance: (name: string) => `没能删除「${name}」`,
   renameInstance: "没能重命名实例",
   instanceSettings: "实例设置没有保存",
@@ -1247,6 +1256,7 @@ export const INSTANCE_IN_USE_COPY = {
   reason: (user: string) => `实例「${user}」正在使用它`,
   rename: (user: string) => `实例「${user}」正在使用它，结束后才能重命名`,
   repair: (user: string) => `实例「${user}」正在使用它，结束后才能补全`,
+  reinstallLoader: (user: string) => `实例「${user}」正在使用它，结束后才能${REINSTALL_LOADER_LABEL}`,
   delete: (user: string) => `实例「${user}」正在使用它，结束后才能删除`,
 } as const;
 
@@ -1261,18 +1271,20 @@ const INSTANCE_LOCK_REASON = {
   modifying: {
     rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
     repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
+    reinstallLoader: `正在改动这个实例的 Mod、资源或设置，完成后才能${REINSTALL_LOADER_LABEL}`,
     delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
   },
   /** 备份、恢复或导出存档进行中，游戏退出后的自动备份也算。 */
   backingUp: {
     rename: "正在备份或恢复这个实例的存档，完成后才能重命名",
     repair: "正在备份或恢复这个实例的存档，完成后才能补全",
+    reinstallLoader: `正在备份或恢复这个实例的存档，完成后才能${REINSTALL_LOADER_LABEL}`,
     delete: "正在备份或恢复这个实例的存档，完成后才能删除",
   },
 } as const;
 
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
-export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "delete"): string | undefined {
+export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete"): string | undefined {
   if (lock === null) return undefined;
   if (typeof lock === "object") {
     if (kind === "mods") throw new Error("被别的实例当作基底时照样能改动 Mod，不会因此锁住 Mod 操作");
@@ -1284,7 +1296,7 @@ export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | 
   }
   if (kind === "rename") return lock === "running" ? INSTANCE_LOCK_REASON.renameRunning : INSTANCE_LOCK_REASON.renameInstalling;
   if (kind === "mods") return lock === "running" ? INSTANCE_LOCK_REASON.runningMods : INSTANCE_LOCK_REASON.installing;
-  if (kind === "repair" && lock === "installing") return INSTANCE_LOCK_REASON.repairInProgress;
+  if ((kind === "repair" || kind === "reinstallLoader") && lock === "installing") return INSTANCE_LOCK_REASON.repairInProgress;
   return INSTANCE_LOCK_REASON.running;
 }
 

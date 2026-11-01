@@ -170,6 +170,21 @@ export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete
   return inst.status === "broken" && inst.incomplete !== null && inst.incomplete.kind === "modpack";
 }
 
+// ---------------------------------------------------------------- 重新安装加载器
+
+/**
+ * 这个实例的加载器能原样装回。OptiFine、LiteLoader 是外部安装器写进来的，装不了，叠在别的加载器上时重装也会把它们丢掉；
+ * 占位项的目录还没落盘。与后端的判定是同一件事，读不出版本号这类只有盘上才看得出的情况由后端报不可补全。
+ */
+export function canReinstallLoader(inst: Pick<InstanceSummary, "loader" | "extraLoaders" | "placeholder">): boolean {
+  return !inst.placeholder && inst.loader !== "vanilla" && inst.extraLoaders.length === 0;
+}
+
+/** 上次的安装或补全败在加载器自带的库上：补全补不回来，修复入口要明说是重新安装加载器。 */
+export function lostLoaderLibrary(inst: Pick<InstanceSummary, "incomplete">): boolean {
+  return inst.incomplete !== null && inst.incomplete.error !== null && inst.incomplete.error.code === "loader_library_missing";
+}
+
 // ---------------------------------------------------------------- 版本隔离
 
 export type IsolationPolicyName = Settings["isolationPolicy"];
