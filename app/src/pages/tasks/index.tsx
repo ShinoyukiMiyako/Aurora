@@ -40,6 +40,7 @@ import {
   filterOf,
   filterRoute,
   overviewOf,
+  retryNeedsNetwork,
   rowMeta,
   sameTaskLayout,
   subtitleOf,
@@ -281,7 +282,7 @@ function TaskListRow({ task: placed, queuePosition, now, handlers }: { task: Tas
       task={task}
       meta={meta}
       hasInstance={task.instanceId !== null && handlers.hasInstance(task.instanceId)}
-      retryBlocked={handlers.retryBlocked}
+      retryBlocked={retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
       onCancel={() => handlers.onCancel(task)}
       onRetry={() => handlers.onRetry(task)}
       onViewBlocked={() => handlers.onViewBlocked(task)}

@@ -46,6 +46,13 @@ const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
   modpack_export: false,
 };
 
+/** 备份与恢复存档只碰本机文件，断网时重试照样能成；导出要向平台反查 Mod，其余都要下载。 */
+const OFFLINE_RETRY_KINDS: ReadonlySet<TaskKind> = new Set(["world_backup", "world_restore"]);
+
+export function retryNeedsNetwork(task: Task): boolean {
+  return !OFFLINE_RETRY_KINDS.has(task.kind);
+}
+
 export const TASK_FILTERS = ["all", "active", "done", "failed"] as const satisfies readonly TaskFilter[];
 
 // ---------------------------------------------------------------- 路由

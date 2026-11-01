@@ -350,6 +350,30 @@ describe("下载任务页：断网", () => {
     expect(callsOf(ipc, "install_java")).toEqual([{ requiredMajor: 17, taskId: "failed-java#2" }]);
   });
 
+  it("断网：备份与恢复存档只碰本机文件，失败后的重试不置灰，点了照常重排", async () => {
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    const args = { id: "生存", world: "旧世界" };
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-backup", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args },
+        }),
+      ],
+    });
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    await mount();
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBeNull();
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([{ ...args, taskId: "failed-backup#2" }]);
+  });
+
   it("断网：要手动下载的文件都找到后「重新安装」只提示联网后再重试，不把任务重新排进队列", async () => {
     resetModpackMock();
     const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);

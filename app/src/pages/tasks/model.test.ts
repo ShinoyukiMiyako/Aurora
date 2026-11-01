@@ -19,6 +19,7 @@ import {
   overviewRemaining,
   pushSample,
   rowMeta,
+  retryNeedsNetwork,
   sameTaskLayout,
   subtitleOf,
   takeSample,
@@ -375,5 +376,12 @@ describe("页头副标题", () => {
 
   it("只有本地任务在跑、后面还排着：照常写下载与排队的数量", () => {
     expect(subtitleOf(bucketTasks([running("modpack_export"), queued("mod")]))).toBe("0 个下载中，1 个排队 · 最多 3 个并行");
+  });
+});
+
+describe("重试要不要联网", () => {
+  it("备份与恢复存档只碰本机文件；导出要向平台反查 Mod，其余都要下载", () => {
+    const local: readonly TaskKind[] = ["world_backup", "world_restore"];
+    for (const kind of TASK_KINDS) expect(retryNeedsNetwork(task(kind, { kind })), kind).toBe(!local.includes(kind));
   });
 });
