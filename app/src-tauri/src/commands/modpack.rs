@@ -180,6 +180,8 @@ pub struct ModpackSummaryDto {
 /// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`，
 /// 清单用了解不开的压缩方式时报 `modpack_unsupported_compression`。
 /// CurseForge 另问批量文件与批量工程两个接口，没配 API key 时报 CurseForge 源被禁用的同一个错误。
+/// 整合包文件本身不允许启动器直接下载时，认领过就读暂存副本，没认领过报 `distribution_blocked`，
+/// detail.files 里只有这个包。
 #[tauri::command]
 pub async fn summarize_platform_modpack(
     platform: String,

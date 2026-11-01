@@ -329,8 +329,8 @@ async fn sweep_stale_pack_caches(root: &Path, now: SystemTime) {
                 false
             }
         };
-        if stale && let Err(err) = tokio::fs::remove_dir_all(&dir).await {
-            tracing::warn!(dir = %dir.display(), error = %err, "整合包下载缓存的残留未能删除");
+        if stale {
+            remove_pack_cache(Some(&dir)).await;
         }
     }
 }

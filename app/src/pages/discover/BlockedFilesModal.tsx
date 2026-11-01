@@ -30,7 +30,7 @@ export interface BlockedFilesModalProps {
   files: readonly BlockedFileDto[];
   origin: BlockedOrigin;
   onClose: () => void;
-  /** 全部找到后点主按钮：import 回确认步重新读取，failed 重新安装。清单由调用方关掉。 */
+  /** 全部找到后点主按钮：import 回到打开清单的地方，failed 重新安装。清单由调用方关掉。 */
   onAllFound: () => void;
 }
 
