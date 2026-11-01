@@ -610,7 +610,7 @@ impl Aurora {
         reporter.stage(LaunchStage::CompleteLibraries).await;
         let libraries = aurora_install::plan::library_tasks(merged, self.runtime(), &layout)?;
         plan.files.extend(libraries);
-        if let Some(logging) = aurora_install::plan::logging_task(merged, &layout) {
+        if let Some(logging) = aurora_install::plan::logging_task(merged, &layout)? {
             plan.files.push(logging);
         }
         let mut plan = DownloadPlan {
@@ -933,7 +933,7 @@ impl Aurora {
             .asset_index
             .as_ref()
             .expect("调用方已确认 assetIndex 存在");
-        let path = layout.asset_index_json(&asset_index.id);
+        let path = layout.asset_index_json(&asset_index.id)?;
         let bytes = tokio::fs::read(&path)
             .await
             .map_err(|source| aurora_base::Error::Io {
@@ -942,10 +942,10 @@ impl Aurora {
             })?;
         let index = AssetObjectsIndex::from_json_str(&String::from_utf8_lossy(&bytes))
             .map_err(|err| CoreError::from(aurora_install::Error::from(err)))?;
-        let tasks = aurora_install::plan::asset_object_tasks(&index, layout);
+        let tasks = aurora_install::plan::asset_object_tasks(&index, layout)?;
         let target_dir = match index.layout() {
             AssetLayout::Standard => return Ok((tasks, None)),
-            AssetLayout::Virtual => layout.asset_virtual_dir(&asset_index.id),
+            AssetLayout::Virtual => layout.asset_virtual_dir(&asset_index.id)?,
             AssetLayout::MapToResources => layout.resources_dir(),
         };
         Ok((tasks, Some(LegacyAssets { target_dir, index })))
@@ -976,13 +976,10 @@ impl Aurora {
             .objects
             .iter()
             .map(|(logical, object)| {
-                let dest = logical
-                    .split('/')
-                    .filter(|segment| !segment.is_empty())
-                    .fold(target_dir.clone(), |dir, segment| dir.join(segment));
-                DownloadTask::new(String::new(), dest).with_size(object.size)
+                let dest = aurora_install::layout::materialized_asset_path(&target_dir, logical)?;
+                Ok(DownloadTask::new(String::new(), dest).with_size(object.size))
             })
-            .collect();
+            .collect::<Result<_, aurora_install::Error>>()?;
         let missing = missing_files(expanded).await?.len();
         if missing == 0 {
             return Ok(());

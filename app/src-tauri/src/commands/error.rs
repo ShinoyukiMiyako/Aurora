@@ -135,6 +135,9 @@ pub mod code {
     /// 改名或删除已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改。前端照成功处理再
     /// 提示；没改成的记录由门面记着，之后读写游玩记录时补上。detail：`{ id, renamed_to? }` 与原因链。
     pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
+    /// 版本 JSON 或资源索引给出的路径会落到游戏目录之外，已拒绝写入。detail：`{ entry, path }`，原因链里是
+    /// 哪一种越界（`..` 段、绝对路径、盘符……）。
+    pub const INSTALL_UNSAFE_PATH: &str = "install_unsafe_path";
 }
 
 /// 序列化给前端的命令错误。
@@ -328,6 +331,7 @@ fn install_code(err: &InstallError) -> &'static str {
     match err {
         InstallError::LoaderVersionNotFound { .. } => code::LOADER_VERSION_NOT_FOUND,
         InstallError::Download(_) => code::DOWNLOAD_FAILED,
+        InstallError::UnsafePath { .. } => code::INSTALL_UNSAFE_PATH,
         _ => code::INSTALL_FAILED,
     }
 }
@@ -518,6 +522,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
+        }
+        CoreError::Install(InstallError::UnsafePath { entry, path, .. }) => {
+            detail.insert("entry".to_owned(), json!(entry));
+            detail.insert("path".to_owned(), json!(path));
         }
         _ => {}
     }
@@ -919,6 +927,60 @@ mod tests {
         let detail = rejected.detail.unwrap();
         assert!(detail.get("network").is_none(), "{detail}");
         assert_eq!(detail["causes"], json!([format!("HTTP 状态码 404: {url}")]));
+    }
+
+    /// 补全时版本 JSON 的库路径越界：前端拿到 install_unsafe_path，detail 指认条目、原始路径与越界原因，
+    /// 临时目录里一个文件都不落。整条链路只碰临时目录（游戏目录与数据目录都指向它）。
+    #[tokio::test]
+    async fn unsafe_library_paths_reach_the_frontend_as_install_unsafe_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let game = dir.path().join("game");
+        let version_dir = game.join("versions").join("evil");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let version = json!({
+            "id": "evil",
+            "mainClass": "net.minecraft.client.main.Main",
+            "libraries": [{
+                "name": "com.example:evil:1.0",
+                "downloads": {"artifact": {
+                    "path": "../../escaped.jar", "sha1": "0".repeat(40), "size": 1,
+                    "url": "https://example.com/escaped.jar"
+                }}
+            }]
+        });
+        std::fs::write(version_dir.join("evil.json"), version.to_string()).unwrap();
+        let config = aurora_core::AuroraConfig {
+            game_directory: Some(game),
+            ..aurora_core::AuroraConfig::default()
+        };
+        let aurora = aurora_core::Aurora::open(
+            config,
+            dir.path().join("data"),
+            dir.path().join("data").join("config.json"),
+        )
+        .unwrap();
+
+        let (plan, _) = aurora.begin_repair("evil").await.unwrap();
+        let err: CommandError = aurora
+            .repair_instance("evil", &plan, None)
+            .await
+            .unwrap_err()
+            .into();
+
+        assert_eq!(err.code, code::INSTALL_UNSAFE_PATH);
+        assert_eq!(
+            err.message,
+            "库 com.example:evil:1.0：路径「../../escaped.jar」会落到游戏目录之外，已拒绝写入"
+        );
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "entry": "库 com.example:evil:1.0",
+                "path": "../../escaped.jar",
+                "causes": ["含 . 或 .. 段"]
+            }))
+        );
+        assert!(!dir.path().join("escaped.jar").exists());
     }
 
     #[test]

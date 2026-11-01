@@ -16,6 +16,7 @@ use aurora_version::{AssetLayout, AssetObjectsIndex, VersionJson};
 
 use crate::context::InstallContext;
 use crate::error::{Error, Result, io_err};
+use crate::layout::{checked_segment, materialized_asset_path};
 use crate::natives;
 use crate::net;
 use crate::plan;
@@ -41,6 +42,9 @@ pub async fn ensure_complete(
     version: &VersionJson,
     target_id: &str,
 ) -> Result<CompletionReport> {
+    // 原版安装时 target_id 就是远端版本 JSON 里的 id，客户端 jar 与 natives 目录都按它落盘。
+    checked_segment(target_id, || "版本 id".to_owned())?;
+
     // 第一批：库 + 日志配置 + 客户端 jar + assetIndex（都并入一池）。
     let library_tasks = plan::library_tasks(version, cx.runtime, cx.layout)?;
     let libraries = library_tasks.len();
@@ -58,7 +62,7 @@ pub async fn ensure_complete(
             false
         };
 
-    if let Some(log) = plan::logging_task(version, cx.layout) {
+    if let Some(log) = plan::logging_task(version, cx.layout)? {
         primary.push(log);
     }
     let has_assets = version.asset_index.is_some();
@@ -70,7 +74,7 @@ pub async fn ensure_complete(
     // 第二批：资源对象全量补全（仅当版本带 assetIndex）。
     let assets = if has_assets {
         let index = read_asset_index(cx, version).await?;
-        let object_tasks = plan::asset_object_tasks(&index, cx.layout);
+        let object_tasks = plan::asset_object_tasks(&index, cx.layout)?;
         let count = object_tasks.len();
         cx.run_batch(object_tasks, "补全资源", None).await?;
         materialize_assets(cx, version, &index).await?;
@@ -127,7 +131,7 @@ async fn read_asset_index(
         })?
         .id
         .clone();
-    let path = cx.layout.asset_index_json(&index_id);
+    let path = cx.layout.asset_index_json(&index_id)?;
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|source| io_err(&path, source))?;
@@ -154,7 +158,7 @@ async fn materialize_assets(
                 .ok_or_else(|| Error::MissingAssetIndex {
                     version: version.id.clone(),
                 })?;
-            cx.layout.asset_virtual_dir(&index_id)
+            cx.layout.asset_virtual_dir(&index_id)?
         }
         AssetLayout::MapToResources => cx.layout.resources_dir(),
     };
@@ -163,13 +167,13 @@ async fn materialize_assets(
         .objects
         .iter()
         .map(|(logical, object)| {
-            (
+            Ok((
                 cx.layout.asset_object_path(&object.hash),
-                target_dir.join(crate::layout::rel_to_path(logical)),
+                materialized_asset_path(&target_dir, logical)?,
                 object.size,
-            )
+            ))
         })
-        .collect();
+        .collect::<Result<_>>()?;
     tokio::task::spawn_blocking(move || copy_missing(&jobs))
         .await
         .map_err(|join| {
@@ -258,7 +262,7 @@ mod tests {
         }
         let index = virtual_index(&[("a.txt", a_hash, 4), ("sub/b.txt", b_hash, 6)]);
         let version = version_with(Some("pre-1.6"), None);
-        let target = layout.asset_virtual_dir("pre-1.6");
+        let target = layout.asset_virtual_dir("pre-1.6").unwrap();
 
         std::fs::create_dir_all(target.join("sub")).unwrap();
         std::fs::write(target.join("a.txt"), b"zzzz").unwrap();
@@ -394,5 +398,135 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::MissingAssetIndex { ref version } if version == "1.6.4"));
         assert!(!layout.assets_dir().join("virtual").exists());
+    }
+
+    fn sha1_of(bytes: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        base16ct::lower::encode_string(&Sha1::digest(bytes))
+    }
+
+    /// 递归列出目录下的全部文件。
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    struct Sandbox {
+        // 整个测试只碰这个临时目录：游戏目录在它下面两层，越界写入会落在临时目录里、被 files_under 看到。
+        tmp: tempfile::TempDir,
+        layout: crate::layout::GameLayout,
+        client: reqwest::Client,
+        pool: DownloadPool,
+        runtime: RuntimeContext,
+        policy: RetryPolicy,
+    }
+
+    impl Sandbox {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("sandbox").join("game");
+            std::fs::create_dir_all(&root).unwrap();
+            let client = aurora_base::http::build_client().unwrap();
+            Self {
+                layout: crate::layout::GameLayout::new(root),
+                pool: DownloadPool::new(Downloader::with_defaults(client.clone()), 2),
+                client,
+                tmp,
+                runtime: RuntimeContext::new(OsName::Windows, "x86_64", 64),
+                policy: RetryPolicy::default(),
+            }
+        }
+
+        fn cx(&self) -> InstallContext<'_> {
+            InstallContext::new(
+                &self.client,
+                &self.pool,
+                &self.layout,
+                &self.runtime,
+                &self.policy,
+            )
+        }
+    }
+
+    /// 远端版本 JSON 的库路径或坐标带着 `..`：补全在算落点时就拒掉，一个请求都不发，临时目录里一个文件都
+    /// 不落（修复前这份带合法 sha1 的文件会写到游戏目录之外的 `<临时目录>/escaped.jar`）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn escaping_library_entries_write_nothing_anywhere() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const BODY: &[u8] = b"payload";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY.to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri());
+        let entries = [
+            serde_json::json!({
+                "name": "com.example:evil:1.0",
+                "downloads": {"artifact": {
+                    "path": "../../../escaped.jar",
+                    "sha1": sha1_of(BODY), "size": BODY.len(),
+                    "url": format!("{base}escaped.jar")
+                }}
+            }),
+            serde_json::json!({
+                "name": "evil:x:1/../../../../escaped",
+                "url": base,
+                "sha1": sha1_of(BODY), "size": BODY.len()
+            }),
+        ];
+        for library in entries {
+            let sandbox = Sandbox::new();
+            let version: VersionJson = serde_json::from_value(serde_json::json!({
+                "id": "evil", "libraries": [library.clone()]
+            }))
+            .unwrap();
+
+            let err = ensure_complete(sandbox.cx(), &version, "evil")
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, Error::UnsafePath { entry, .. } if entry.starts_with("库 ")),
+                "{library}: {err:?}"
+            );
+            assert_eq!(files_under(sandbox.tmp.path()), Vec::<PathBuf>::new());
+        }
+    }
+
+    /// 补全的落点版本 id 来自远端版本 JSON（原版安装）：带分隔符或 `..` 的 id 直接拒掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_escaping_target_id_is_rejected_before_anything_is_written() {
+        let sandbox = Sandbox::new();
+        let version: VersionJson = serde_json::from_value(serde_json::json!({
+            "id": "../../escaped",
+            "downloads": {"client": {"sha1": "s", "size": 1, "url": "https://example.com/c.jar"}}
+        }))
+        .unwrap();
+
+        let err = ensure_complete(sandbox.cx(), &version, "../../escaped")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            &err,
+            Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Separator }
+                if entry == "版本 id" && path == "../../escaped"
+        ));
+        assert_eq!(files_under(sandbox.tmp.path()), Vec::<PathBuf>::new());
     }
 }

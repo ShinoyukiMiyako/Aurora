@@ -114,6 +114,18 @@ pub enum Error {
     /// java 处理器以非零码退出，安装无法继续。
     #[error("处理器 {jar} 执行失败（退出码 {status:?}）")]
     ProcessorFailed { jar: String, status: Option<i32> },
+
+    /// 版本 JSON、资源索引给出的相对路径（库路径、maven 坐标的某一段、资源 hash、索引 id、日志配置名、
+    /// 版本 id）会落到游戏目录之外。这些值来自远端，sha1 也由同一份文件给出，下载校验拦不住，所以在算落点时
+    /// 就拒掉。`entry` 指认是哪个条目，`problem` 说明是哪一种问题。
+    #[error("{entry}：路径「{path}」会落到游戏目录之外，已拒绝写入")]
+    UnsafePath {
+        entry: String,
+        path: String,
+        #[source]
+        problem: aurora_version::UnsafePath,
+    },
+
 }
 
 /// crate 级 `Result` 别名。
@@ -143,6 +155,8 @@ impl RetryableError for Error {
             | Error::ProcessorMainClassMissing { .. }
             | Error::JavaLaunch { .. }
             | Error::ProcessorFailed { .. } => false,
+            // 路径越界是文件内容本身的问题，重下同一份文件结果不变。
+            Error::UnsafePath { .. } => false,
         }
     }
 }

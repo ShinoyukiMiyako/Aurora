@@ -534,6 +534,8 @@ export function taskFailureReason(error: { code: string; message: string }): str
       return "网络连接失败";
     case "hash_mismatch":
       return "下载到的文件和官方记录不一致";
+    case "install_unsafe_path":
+      return "版本文件里有指向游戏目录之外的路径，已拒绝写入";
     default:
       return error.message;
   }
