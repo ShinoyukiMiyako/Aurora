@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { KnownServerDto, ServerStatusDto } from "../../state/queries/home";
 import { MENU_MAX_ACTIONS } from "../../ui/Menu";
-import { canJoinWith, defaultJoinChoice, joinBlock, joinCandidates, joinPlan, pinCandidates, pinMenuPlan, serverRows, signalBars, signalQuality } from "./servers";
+import { canJoinWith, defaultJoinChoice, joinBlock, joinCandidates, joinPlan, pinCandidates, pinMenuPlan, rememberedGone, serverRows, signalBars, signalQuality } from "./servers";
 import { summary } from "./test-data";
 
 function status(address: string, overrides: Partial<ServerStatusDto> = {}): ServerStatusDto {
@@ -208,5 +208,14 @@ describe("加入服务器用的实例", () => {
     const named = [summary("Survival", { quickPlay: both })];
     expect(joinPlan("survival", named, null, [])).toEqual({ kind: "pick" });
     expect(joinPlan("Survival", named, null, [])).toEqual({ kind: "direct", instanceId: "Survival" });
+  });
+
+  it("记住的实例算不算已经不在：只看列表里有没有，损坏、在安装、版本不支持都还在；列表没读出来时不下结论", () => {
+    expect(rememberedGone("已删除", instances, true)).toBe(true);
+    for (const stillListed of ["坏了", "安装中", "太老", "旧版"]) expect(rememberedGone(stillListed, instances, true)).toBe(false);
+    expect(rememberedGone(null, instances, true)).toBe(false);
+    expect(rememberedGone("已删除", [], false)).toBe(false);
+    // 与 joinPlan 同一个比对口径
+    expect(rememberedGone("survival", [summary("Survival", { quickPlay: both })], true)).toBe(true);
   });
 });
