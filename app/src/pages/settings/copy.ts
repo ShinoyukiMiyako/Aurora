@@ -148,7 +148,7 @@ export const GPU_COPY = {
   toggle: "让游戏用独立显卡",
   descSwitchable: (name: string) => `启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」，游戏会用 ${name}`,
   descSingle: "这台电脑只找到一块显卡，开着也不会换显卡",
-  descLoading: "正在读取显卡信息",
+  descLoading: "正在读取显卡信息…",
   descGeneric: "启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」",
   dualNote: (powerSaving: string, highPerformance: string) =>
     `这台电脑有两块显卡：${powerSaving} 和 ${highPerformance}。笔记本常默认用省电的那块跑游戏，帧数会低不少。`,

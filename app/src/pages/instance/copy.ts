@@ -31,7 +31,7 @@ export const HERO_COPY = {
   installing: (pct: string) => `安装中 ${pct}`,
   installingQueued: "等待安装",
   /** 后端报告实例在备份、恢复或导出存档（游戏退出后的自动备份也算）。 */
-  backingUp: "正在备份存档",
+  backingUp: "正在备份存档…",
   lastCrash: "上次崩溃",
   pin: "固定到侧栏",
   unpin: "从侧栏取消固定",
@@ -156,7 +156,7 @@ export const OVERVIEW_COPY = {
   crashTitle: (relative: string) => `上次启动崩溃了 · ${relative}`,
   crashBody: (label: string) => `${cluePointer([label])}，诊断里有可以一键尝试的办法。`,
   crashBodyNoClue: "没有匹配到已知原因，可以对照完整日志排查。",
-  crashBodyPending: "正在读取崩溃报告。",
+  crashBodyPending: "正在读取崩溃报告…",
   viewCrash: "查看诊断",
 
   statPlaytime: "累计游玩",

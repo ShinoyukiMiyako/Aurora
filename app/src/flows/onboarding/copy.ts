@@ -37,7 +37,7 @@ export const FOOTER_COPY = {
   next: "下一步",
   startNow: "直接开始",
   finish: "开始使用",
-  preparing: "正在准备",
+  preparing: "正在准备…",
   skippedTag: "已跳过",
   stepsLabel: "向导步骤",
   finishFailed: "首次设置没有保存",

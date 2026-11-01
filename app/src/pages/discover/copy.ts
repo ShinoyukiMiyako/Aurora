@@ -177,7 +177,7 @@ export const INSTALL_COPY = {
   footNone: "勾选右侧的实例后安装",
   footSelected: (instances: number, files: number, bytes: number | null) =>
     bytes === null ? `已选 ${instances} 个实例 · 共 ${files} 个文件待下载` : `已选 ${instances} 个实例 · 共 ${files} 个文件待下载 · 约 ${formatBytes(bytes)}`,
-  footCounting: (instances: number) => `已选 ${instances} 个实例 · 正在计算要下载的文件`,
+  footCounting: (instances: number) => `已选 ${instances} 个实例 · 正在计算要下载的文件…`,
   cancel: "取消",
   update: "更新",
   install: "安装",

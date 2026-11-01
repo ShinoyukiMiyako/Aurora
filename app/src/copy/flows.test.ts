@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { FAILURE_CODES, type FailureCode } from "../domain/types";
 import { APP_NAME } from "../lib/app-info";
-import { SEARCH_COPY } from "../pages/discover/copy";
+import { CREATE_COPY } from "../flows/create-instance/copy";
+import { FOOTER_COPY } from "../flows/onboarding/copy";
+import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
+import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
+import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
 import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
@@ -89,6 +93,22 @@ describe("禁用词扫描本身", () => {
     expect(bannedIn(["请稍候，操作成功！", null, "已登录 Steve"])).toEqual(["请稍候：请稍候，操作成功！", "操作成功：请稍候，操作成功！", "！：请稍候，操作成功！"]);
     expect(bannedIn(["账号登陆失败"])).toEqual(["账号：账号登陆失败", "登陆：账号登陆失败"]);
     expect(bannedIn(["一键修复 MOD 导致的问题", "Mod 已装好"])).toEqual(["导致：一键修复 MOD 导致的问题", "一键修复：一键修复 MOD 导致的问题", "MOD：一键修复 MOD 导致的问题"]);
+  });
+});
+
+describe("进行中的状态", () => {
+  it.each([
+    ["概览崩溃横幅读报告时", OVERVIEW_COPY.crashBodyPending],
+    ["头图的备份标签", HERO_COPY.backingUp],
+    ["读取显卡信息时", GPU_COPY.descLoading],
+    ["新建实例的按钮", CREATE_COPY.creating],
+    ["确认步查询开局 Mod", CREATE_COPY.confirm.starter.loading],
+    ["确认步读取默认设置", CREATE_COPY.confirm.starter.templateBlocked.loading],
+    ["首次启动向导的按钮", FOOTER_COPY.preparing],
+    ["安装面板页脚", INSTALL_COPY.footCounting(2)],
+  ])("%s以「正在」开头、以省略号结尾", (_where, text) => {
+    expect(text).toMatch(/正在[^…]+…$/);
+    expect(text).not.toContain("...");
   });
 });
 
