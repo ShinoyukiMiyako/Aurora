@@ -84,6 +84,9 @@ enum SkipNote {
     NoCompatibleVersion {
         project_id: String,
     },
+    ProjectGone {
+        project_id: String,
+    },
     Optional {
         project_id: Option<String>,
     },
@@ -105,7 +108,8 @@ impl SkipNote {
         match self {
             SkipNote::MissingProjectId { .. } => None,
             SkipNote::PinnedGone { project_id, .. }
-            | SkipNote::NoCompatibleVersion { project_id } => Some(project_id),
+            | SkipNote::NoCompatibleVersion { project_id }
+            | SkipNote::ProjectGone { project_id } => Some(project_id),
             SkipNote::Optional { project_id }
             | SkipNote::Incompatible { project_id, .. }
             | SkipNote::Embedded { project_id, .. }
@@ -129,6 +133,10 @@ impl SkipNote {
             ),
             SkipNote::NoCompatibleVersion { project_id } => format!(
                 "依赖 {} 没有适配该实例的版本，未加入计划",
+                name(Some(project_id))
+            ),
+            SkipNote::ProjectGone { project_id } => format!(
+                "依赖 {} 在平台上已不存在，未加入计划",
                 name(Some(project_id))
             ),
             SkipNote::Optional { project_id } => format!(
@@ -227,7 +235,7 @@ impl Aurora {
     /// 的环（两个 Mod 互相集成时很常见），不去重会直接死循环。同一工程被多个父项要求时也只进计划一次。
     ///
     /// 网络故障与平台报错照常冒泡：那是「查不到」而非「没有」，把它压成一条 skipped 说明会让玩家以为
-    /// 依赖真的不存在。
+    /// 依赖真的不存在。平台明确回了「没有这个工程」才算没有（见 [`project_gone`]）。
     pub async fn plan_install(
         &self,
         version_id: &str,
@@ -412,9 +420,18 @@ impl Aurora {
         // 文件更多的前置不带条件查会被截断，截掉的部分可能正好有唯一适配本实例的文件，结果是「明明有版本
         // 却报没有适配版本」；带上条件，平台先筛过再分页。缓存里有完整的不过滤列表时由它本地代答。
         let game_versions: Vec<String> = facts.mc_version.clone().into_iter().collect();
-        let candidates = self
+        let listed = self
             .list_mod_versions(platform, dep_project, &game_versions, &facts.mod_loaders)
-            .await?;
+            .await;
+        let candidates = match listed {
+            Ok(candidates) => candidates,
+            Err(err) if project_gone(&err) => {
+                return Ok(Resolved::Skipped(SkipNote::ProjectGone {
+                    project_id: dep_project.to_owned(),
+                }));
+            }
+            Err(err) => return Err(err),
+        };
         Ok(match pick_latest_compatible(candidates, facts) {
             Some(chosen) => Resolved::Chosen(Box::new(chosen), false),
             None => Resolved::Skipped(SkipNote::NoCompatibleVersion {
@@ -1232,6 +1249,88 @@ mod tests {
         assert_eq!(plan.items.len(), 2);
         assert_eq!(plan.items[1].version.version_id, "old");
         assert!(plan.items[1].already_satisfied);
+    }
+
+    /// 必需前置的工程在平台上没了、实例里也没装：记一条说明，主 Mod 照常进计划。这与「没有适配版本」
+    /// 同属决策二，让整份计划失败等于连主 Mod 的更新也做不了。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn required_dependency_whose_project_is_gone_is_skipped() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"gone-lib","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/project/gone-lib/version"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].version.version_id, "v1");
+        assert_eq!(
+            plan.skipped,
+            vec!["依赖 gone-lib 在平台上已不存在，未加入计划".to_owned()]
+        );
+    }
+
+    /// 前置版本列表的别的失败是「查不到」：照常冒泡，不说成工程没了。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dependency_listing_failure_other_than_404_bubbles() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"flaky-lib","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/project/flaky-lib/version"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let err = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 403, .. })
+            ),
+            "实得 {err:?}"
+        );
     }
 
     /// 前置已装着的那一版在平台上已下架（单版本端点 404）：照常算已满足，计划只按卷宗列出它，不去
