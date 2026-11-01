@@ -80,13 +80,27 @@ describe("备份、导出与恢复入队", () => {
     expect(task.spec).toEqual({ command: "backup_world", args: { id: "生存", world: "w1" } });
     expect(callsOf(ipc, "backup_world")).toEqual([{ id: "生存", world: "w1", taskId: `${task.id}#1` }]);
     expect(toasts()).toContainEqual(["info", "已开始备份「旧世界」", "进度见下载任务"]);
-    // 备份期间实例只算改动中，不画成安装中
+    // 后端还没报之前就按备份算，不画成安装中：导出整合包与改名的禁用原因都认这个活动
     const inst = store.getState().instances.find((i) => i.id === "生存");
-    expect(inst).toMatchObject({ status: "ready", activity: "modifying" });
+    expect(inst).toMatchObject({ status: "ready", activity: "backing_up" });
     expect(busyWorlds(store.getState(), "生存")).toEqual(["w1"]);
     expect(busyWorlds(store.getState(), "创造")).toEqual([]);
     // 后端还没报 backing_up，排着或在跑的存档任务就已经让启动入口提前禁用
     expect(savesBusyIds(store.getState())).toEqual(["生存"]);
+  });
+
+  it("列表已报基底占用或 Mod 改动：存档任务排在前面报备份；后端报的运行不被盖掉", async () => {
+    instances = [instanceDto("生存", { activity: "inherited", used_by: "基于生存" }), instanceDto("创造", { activity: "modifying" }), instanceDto("冒险", { activity: "running" })];
+    await store.actions.refreshInstances();
+    for (const id of ["生存", "创造", "冒险"]) await store.actions.backupWorld(id, "w1", "旧世界");
+    const summary = (id: string) => {
+      const inst = store.getState().instances.find((i) => i.id === id);
+      if (inst === undefined) throw new Error(`没有实例 ${id}`);
+      return [inst.activity, inst.usedBy];
+    };
+    expect(summary("生存")).toEqual(["backing_up", "基于生存"]);
+    expect(summary("创造")).toEqual(["backing_up", null]);
+    expect(summary("冒险")).toEqual(["running", null]);
   });
 
   it("同一实例上两个存档排在一起：一个做完才开始下一个，不撞后端的 instance_busy", async () => {

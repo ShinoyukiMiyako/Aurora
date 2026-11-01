@@ -909,8 +909,8 @@ function prunedTaskRefs(raw: RawState): Partial<RawState> {
   };
 }
 
-/** 活动任务对一个已扫描实例的影响：整个目录在写（安装中），或者只在改动 Mod 与资源。 */
-type TaskEffect = "installing" | "modifying" | null;
+/** 活动任务对一个已扫描实例的影响：整个目录在写（安装中）、在备份或恢复存档，或者只在改动 Mod 与资源。 */
+type TaskEffect = "installing" | "backing_up" | "modifying" | null;
 
 type CreationMeta = Extract<TaskMeta, { type: "create" | "modpack" }>;
 
@@ -923,10 +923,11 @@ function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEff
     const facts = creation !== null && base.mcVersion === null ? { mcVersion: creation.mcVersion, loader: creation.loader, loaderVersion: creation.loaderVersion } : {};
     return { ...base, ...facts, pinned, status: "installing", brokenReason: null };
   }
+  if (effect === null) return { ...base, pinned };
   // 列表是任务开始前扫的，后端那时还没记下占用；后端报的活动（例如运行中）比前端推断的更准，留着它。
-  // 只剩被当作基底时例外：与后端的排序一致，实例自己的改动排在它前面。
-  if (effect === "modifying") return { ...base, pinned, activity: base.activity === null || base.activity === "inherited" ? "modifying" : base.activity };
-  return { ...base, pinned };
+  // 排得比任务低的例外，与后端的排序一致：实例自己的事排在被当作基底前面，备份排在 Mod 改动前面。
+  const lower = base.activity === null || base.activity === "inherited" || (effect === "backing_up" && base.activity === "modifying");
+  return { ...base, pinned, activity: lower ? effect : base.activity };
 }
 
 /** 实例列表与侧栏固定列表：只随扫描结果、固定列表、入队上下文与活动任务的集合变，下载进度与会话日志不影响它们。 */
@@ -975,7 +976,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
  * 每次都会换掉原始状态；如果每次都重建实例对象，按 state.instances 做依赖或做选择的组件就跟着每秒重渲染十次。
  *
  * - 实例列表：扫描结果、固定列表、入队上下文都是同一份引用，活动任务的集合（id 与所挂实例）也没变时，整份复用上一次的。
- * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、活动任务带来的状态（安装中或改动中）都没变，就复用上一次的那个对象。
+ * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、活动任务带来的状态（安装中、备份中或改动中）都没变，就复用上一次的那个对象。
  */
 class StateDeriver {
   private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; landing: RawState["landing"]; activeKey: string } | null = null;
@@ -1036,18 +1037,19 @@ class StateDeriver {
 
   private compute(raw: RawState, active: readonly Task[]): InstancesView {
     const installing = new Set<string>();
+    const backingUp = new Set<string>();
     const modifying = new Set<string>();
     const creating = new Map<string, CreationMeta>();
     for (const t of active) {
       if (t.instanceId === null) continue;
-      (INSTANCE_TASK_COMMANDS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
+      (INSTANCE_TASK_COMMANDS.has(t.spec.command) ? installing : WORLD_TASK_COMMANDS.has(t.spec.command) ? backingUp : modifying).add(t.instanceId.toLowerCase());
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
     const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; creation: CreationMeta | null; value: InstanceSummary }>();
     const instances: InstanceSummary[] = raw.scanned.map((base) => {
       const key = base.id.toLowerCase();
-      const effect: TaskEffect = installing.has(key) ? "installing" : modifying.has(key) ? "modifying" : null;
+      const effect: TaskEffect = installing.has(key) ? "installing" : backingUp.has(key) ? "backing_up" : modifying.has(key) ? "modifying" : null;
       const pinned = raw.pins.includes(base.id);
       const found = creating.get(key);
       const creation = found === undefined ? null : found;
