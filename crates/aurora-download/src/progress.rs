@@ -167,19 +167,29 @@ impl ProgressReporter {
 pub(crate) struct FileProgress {
     reporter: Option<ProgressReporter>,
     credited: Arc<AtomicU64>,
+    /// 该文件在网络上读到的原始字节：只增不减，不随 reset 退回，有没有观察者都计。
+    /// 吞吐看门狗读它算速度；有效字节会随换终点、重试退回，拿它算速度会算出负数。
+    wire: Arc<AtomicU64>,
 }
 
 impl FileProgress {
-    /// 挂到批次累加器上；`None` 时一切记账都是空操作。
+    /// 挂到批次累加器上；`None` 时有效字节记账都是空操作，原始字节照计。
     pub(crate) fn new(reporter: Option<&ProgressReporter>) -> Self {
         Self {
             reporter: reporter.cloned(),
             credited: Arc::new(AtomicU64::new(0)),
+            wire: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// 该文件迄今在网络上读到的原始字节。
+    pub(crate) fn wire_bytes(&self) -> u64 {
+        self.wire.load(Ordering::Relaxed)
     }
 
     /// 网络上为该文件读到 `n` 字节。
     pub(crate) fn transferred(&self, n: u64) {
+        self.wire.fetch_add(n, Ordering::Relaxed);
         if let Some(reporter) = &self.reporter {
             reporter.transferred(n);
             self.credited.fetch_add(n, Ordering::Relaxed);
@@ -329,6 +339,26 @@ mod tests {
             0,
             "克隆出的分片记账同属一个文件，一并退回"
         );
+    }
+
+    #[test]
+    fn wire_bytes_only_grow_and_ignore_reset_reuse_and_reporter() {
+        let (reporter, _rx) = reporter(1, Some(5000));
+        let file = FileProgress::new(Some(&reporter));
+        let chunk = file.clone();
+        file.transferred(1000);
+        chunk.transferred(500);
+        file.reset();
+        file.reused(2000);
+        file.settle(0);
+        assert_eq!(file.wire_bytes(), 1500, "退回与复用都不动原始字节");
+        assert_eq!(chunk.wire_bytes(), 1500, "克隆共享同一份计数");
+
+        let bare = FileProgress::new(None);
+        bare.transferred(7);
+        bare.transferred(0);
+        bare.reset();
+        assert_eq!(bare.wire_bytes(), 7, "没有观察者也照计");
     }
 
     #[test]

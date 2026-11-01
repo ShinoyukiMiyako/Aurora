@@ -9,7 +9,7 @@ use std::time::Duration;
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
     ChunkConfig, DownloadConfig, DownloadTask, Downloader, MirrorSource, SourceHealth, SourcePlan,
-    SourceResolver,
+    SourceResolver, WatchdogConfig,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -61,6 +61,7 @@ fn split_config(primary: &MockServer, mirror: &MockServer) -> DownloadConfig {
                 mirror: mirror.uri(),
             }),
         ),
+        watchdog: WatchdogConfig::default(),
     }
 }
 
@@ -201,6 +202,7 @@ async fn intermittent_failures_do_not_accumulate_into_a_trip() {
                 mirror: server.uri(),
             }),
         ),
+        watchdog: WatchdogConfig::default(),
     };
     let health = Arc::new(SourceHealth::with_policy(2, Duration::from_secs(60)));
     let downloader = Downloader::with_health(client(), config, health.clone());
