@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { GalleryEntry } from "../dev/gallery-types";
 import { GalleryRow } from "../dev/GalleryKit";
+import { APP_NAME } from "../lib/app-info";
 import { Field } from "./Field";
 import { RadioGroup, type RadioOption } from "./RadioGroup";
 
@@ -8,7 +9,7 @@ type After = "keep" | "minimize" | "close";
 const AFTER_LAUNCH: RadioOption<After>[] = [
   { value: "keep", label: "保持打开" },
   { value: "minimize", label: "最小化" },
-  { value: "close", label: "关闭启动器" },
+  { value: "close", label: `关闭${APP_NAME}` },
 ];
 
 function Live({ orientation }: { orientation: "vertical" | "horizontal" }) {
