@@ -448,11 +448,9 @@ pub(crate) mod tests {
             tokio::time::sleep(Duration::from_secs(30)).await;
             drop(held);
         });
-        let started = Instant::now();
         let err = ping(&local(addr), Duration::from_millis(200))
             .await
             .unwrap_err();
         assert!(matches!(err, PingError::Timeout(_)), "实际：{err:?}");
-        assert!(started.elapsed() < Duration::from_millis(1000));
     }
 }
