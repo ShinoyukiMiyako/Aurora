@@ -129,32 +129,32 @@ impl SkipNote {
     fn render(&self, name: impl Fn(Option<&str>) -> String) -> String {
         match self {
             SkipNote::MissingProjectId { file_name } => {
-                format!("{file_name} 的一条必需依赖没有给出工程标识，无法自动解析")
+                format!("{file_name} 的一条必需前置没有给出工程标识，无法自动解析")
             }
             SkipNote::PinnedGone {
                 project_id,
                 version_id,
             } => format!(
-                "依赖 {} 指定的版本 {version_id} 在平台上已不存在，未加入计划",
+                "前置 {} 指定的版本 {version_id} 在平台上已不存在，未加入计划",
                 name(Some(project_id))
             ),
             SkipNote::NoCompatibleVersion { project_id } => format!(
-                "依赖 {} 没有适配该实例的版本，未加入计划",
+                "前置 {} 没有适配该实例的版本，未加入计划",
                 name(Some(project_id))
             ),
             SkipNote::ProjectGone { project_id } => format!(
-                "依赖 {} 在平台上已不存在，未加入计划",
+                "前置 {} 在平台上已不存在，未加入计划",
                 name(Some(project_id))
             ),
             SkipNote::HeldBack {
                 project_id,
                 file_name,
             } => format!(
-                "依赖 {} 按你的更新设置保留现有版本，未换成 {file_name} 指定的版本",
+                "前置 {} 按你的更新设置保留现有版本，未换成 {file_name} 指定的版本",
                 name(Some(project_id))
             ),
             SkipNote::Optional { project_id } => format!(
-                "可选依赖 {} 未自动安装，需要时请手动添加",
+                "可选前置 {} 未自动安装，需要时请手动添加",
                 name(project_id.as_deref())
             ),
             SkipNote::Incompatible {
@@ -168,7 +168,7 @@ impl SkipNote {
                 file_name,
                 project_id,
             } => format!(
-                "内嵌依赖 {} 已打包在 {file_name} 内，无需单独安装",
+                "内嵌前置 {} 已打包在 {file_name} 内，无需单独安装",
                 name(project_id.as_deref())
             ),
             SkipNote::Tool { project_id } => {
@@ -380,7 +380,7 @@ impl Aurora {
             Some(id) => infos
                 .get(id)
                 .map_or_else(|| id.to_owned(), |info| info.title.clone()),
-            None => "未标明工程的依赖项".to_owned(),
+            None => "未标明工程的前置".to_owned(),
         };
         let skipped = notes.iter().map(|note| note.render(name)).collect();
         Ok(InstallPlan { items, skipped })
@@ -701,7 +701,7 @@ mod tests {
                     delisted: false,
                 },
             ],
-            skipped: vec!["可选依赖 Mod Menu 未自动安装，需要时请手动添加".to_owned()],
+            skipped: vec!["可选前置 Mod Menu 未自动安装，需要时请手动添加".to_owned()],
         };
 
         let json = serde_json::to_value(&plan).unwrap();
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(json["items"][1]["title"], serde_json::Value::Null);
         assert_eq!(
             json["skipped"][0],
-            "可选依赖 Mod Menu 未自动安装，需要时请手动添加"
+            "可选前置 Mod Menu 未自动安装，需要时请手动添加"
         );
     }
 
@@ -740,14 +740,14 @@ mod tests {
             HashMap::from([("modmenu".to_owned(), "Mod Menu".to_owned())]);
         let name = |id: Option<&str>| match id {
             Some(id) => titles.get(id).cloned().unwrap_or_else(|| id.to_owned()),
-            None => "未标明工程的依赖项".to_owned(),
+            None => "未标明工程的前置".to_owned(),
         };
         assert_eq!(
             SkipNote::Optional {
                 project_id: Some("modmenu".to_owned())
             }
             .render(name),
-            "可选依赖 Mod Menu 未自动安装，需要时请手动添加"
+            "可选前置 Mod Menu 未自动安装，需要时请手动添加"
         );
         assert_eq!(
             SkipNote::Tool {
@@ -762,7 +762,7 @@ mod tests {
                 project_id: None
             }
             .render(name),
-            "内嵌依赖 未标明工程的依赖项 已打包在 a.jar 内，无需单独安装"
+            "内嵌前置 未标明工程的前置 已打包在 a.jar 内，无需单独安装"
         );
     }
 
@@ -975,9 +975,9 @@ mod tests {
         assert_eq!(
             plan.skipped,
             vec![
-                "可选依赖 Mod Menu 未自动安装，需要时请手动添加".to_owned(),
+                "可选前置 Mod Menu 未自动安装，需要时请手动添加".to_owned(),
                 "sodium-v1.jar 声明与 optifabric 不兼容，未做任何处理".to_owned(),
-                "内嵌依赖 cloth-config 已打包在 sodium-v1.jar 内，无需单独安装".to_owned(),
+                "内嵌前置 cloth-config 已打包在 sodium-v1.jar 内，无需单独安装".to_owned(),
             ]
         );
     }
@@ -1036,7 +1036,7 @@ mod tests {
         assert_eq!(plan.items[0].version.version_id, "v1");
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
+            vec!["前置 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
         );
     }
 
@@ -1130,7 +1130,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 指定的版本 gone 在平台上已不存在，未加入计划".to_owned()]
+            vec!["前置 fabric-api 指定的版本 gone 在平台上已不存在，未加入计划".to_owned()]
         );
     }
 
@@ -1164,7 +1164,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["sodium-v1.jar 的一条必需依赖没有给出工程标识，无法自动解析".to_owned()]
+            vec!["sodium-v1.jar 的一条必需前置没有给出工程标识，无法自动解析".to_owned()]
         );
     }
 
@@ -1343,7 +1343,7 @@ mod tests {
         assert_eq!(plan.items[0].version.version_id, "v1");
         assert_eq!(
             plan.skipped,
-            vec!["依赖 gone-lib 在平台上已不存在，未加入计划".to_owned()]
+            vec!["前置 gone-lib 在平台上已不存在，未加入计划".to_owned()]
         );
     }
 
@@ -1465,7 +1465,7 @@ mod tests {
         assert!(!dep.delisted);
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 按你的更新设置保留现有版本，未换成 sodium-v1.jar 指定的版本".to_owned()]
+            vec!["前置 fabric-api 按你的更新设置保留现有版本，未换成 sodium-v1.jar 指定的版本".to_owned()]
         );
     }
 
@@ -1719,7 +1719,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 指定的版本 pinned 在平台上已不存在，未加入计划".to_owned()]
+            vec!["前置 fabric-api 指定的版本 pinned 在平台上已不存在，未加入计划".to_owned()]
         );
     }
 
@@ -1954,7 +1954,7 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(
             plan.skipped,
-            vec!["依赖 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
+            vec!["前置 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
         );
     }
 
