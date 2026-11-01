@@ -1023,7 +1023,7 @@ mod tests {
 
     use super::*;
     use crate::config::AuroraConfig;
-    use crate::ledger::{Ledger, LedgerEntry};
+    use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
     use crate::modpack::{InstanceModpack, ModpackSource};
     use aurora_download::CancellationToken;
     use aurora_instance::{IsolationOverride, VersionSettings, VersionSettingsStore};
@@ -1421,6 +1421,70 @@ mod tests {
         let hashes = body["hashes"].as_array().unwrap();
         assert_eq!(hashes.len(), 4);
         assert!(hashes.contains(&serde_json::json!(sha1_of(b"replaced by hand"))));
+    }
+
+    /// 忽略更新与锁定版本只管检查更新：整合包照样按卷宗记的版本写进索引，接收方装到的是同一个文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_holds_do_not_change_how_mods_are_indexed() {
+        let fixture = fixture().await;
+        fixture
+            .aurora
+            .set_mod_update_hold(ID, "a.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap();
+        fixture
+            .aurora
+            .set_mod_update_hold(
+                ID,
+                "b.jar",
+                Some(UpdateHold::Pinned {
+                    version_id: "vb".into(),
+                }),
+            )
+            .await
+            .unwrap();
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+
+        let indexed: Vec<_> = preview
+            .indexed
+            .iter()
+            .map(|m| (m.file_name.as_str(), m.version_id.as_str(), m.matched_by))
+            .collect();
+        assert_eq!(
+            indexed,
+            vec![
+                ("a.jar", "va", ExportMatch::Ledger),
+                ("b.jar", "vb", ExportMatch::Ledger),
+                ("c.jar", "vc", ExportMatch::Hash),
+            ]
+        );
+        assert_eq!(
+            names(&preview.bundled, |m| &m.file_name),
+            vec!["d.jar", "e.jar"]
+        );
+        let by_ids = requests_to(&fixture.server, "/versions").await;
+        assert_eq!(by_ids.len(), 1);
+        let ids = by_ids[0].url.query().unwrap().to_owned();
+        assert!(ids.contains("va") && ids.contains("vb"), "{ids}");
+        let ledger = fixture.aurora.ledger_store(ID).load().await.unwrap();
+        let held: Vec<_> = ledger
+            .entries
+            .iter()
+            .filter_map(|e| e.update_hold.as_ref().map(|h| (e.file_name.as_str(), h)))
+            .collect();
+        assert_eq!(
+            held,
+            vec![
+                ("a.jar", &UpdateHold::Ignored),
+                (
+                    "b.jar",
+                    &UpdateHold::Pinned {
+                        version_id: "vb".into()
+                    }
+                ),
+            ]
+        );
     }
 
     fn bare_aurora(root: &Path) -> Aurora {

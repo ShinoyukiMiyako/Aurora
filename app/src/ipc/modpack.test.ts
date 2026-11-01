@@ -20,6 +20,7 @@ import {
   type ModpackExportOptions,
   type ModpackSource,
 } from "./modpack";
+import { setModUpdateHold, setModsEnabled } from "./mods";
 import { CORE_EVENT, cancelTask, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -288,6 +289,20 @@ describe("导出整合包 mock", () => {
     expect(() => acquireMockInstance(FABRIC, "launching").release()).not.toThrow();
     await running;
     expect(() => acquireMockInstance(FABRIC, "renaming").release()).not.toThrow();
+  });
+
+  it("导出进行中批量启停与忽略更新照常可用；改过的盘面在下一次预览里体现，忽略更新的 Mod 仍走索引", async () => {
+    const running = exportModpack("t-mods", FABRIC, base);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await setModsEnabled(FABRIC, ["AANobbMI-0.5.3.jar"], false)).toEqual([
+      { status: "ok", file_name: "AANobbMI-0.5.3.jar", path: "C:/Games/.minecraft/versions/1.20.1-Fabric/mods/AANobbMI-0.5.3.jar.disabled" },
+    ]);
+    await setModUpdateHold(FABRIC, "P7dR8mSH-0.92.2.jar", { kind: "ignored" });
+    expect((await running).path).toBe(DEST);
+
+    const preview = await previewModpackExport(FABRIC);
+    expect(preview.indexed.map((m) => [m.file_name, m.matched_by])).toEqual([["P7dR8mSH-0.92.2.jar", "ledger"]]);
+    expect(preview.disabled.map((m) => m.file_name)).toEqual(["AANobbMI-0.5.3.jar.disabled", "gvQqBUqZ-0.11.2.jar.disabled"]);
   });
 
   it("取消后以 cancelled 结束并放开实例", async () => {
