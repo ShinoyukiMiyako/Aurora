@@ -429,6 +429,13 @@ export function clearFinished(tasks: readonly Task[]): Task[] {
   return tasks.filter(isActiveTask);
 }
 
+/** 写到玩家选的目录里的导出任务的落点；别的任务、或记录里读不出落点时为 null。 */
+export function exportDestination(spec: TaskSpec): string | null {
+  const { command, args } = spec;
+  const dest = command === "export_world" ? args.dest : command === "export_modpack" && typeof args.options === "object" && args.options !== null ? (args.options as Record<string, unknown>).destination : null;
+  return typeof dest === "string" ? dest : null;
+}
+
 /** 上次关闭时还没完成的任务：记为失败，原因「落樱关闭时中断」，可以重试。 */
 export function restoreJournal(tasks: readonly Task[], now: number): Task[] {
   const error = { code: TASK_INTERRUPTED_CODE, message: taskFailureReason({ code: TASK_INTERRUPTED_CODE, message: "" }) };

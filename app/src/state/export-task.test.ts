@@ -164,6 +164,39 @@ describe("导出整合包任务", () => {
     expect([lastToast().title, lastToast().body, lastToast().action?.label]).toEqual(["已导出「周末包」", "1 个 Mod 打包进了文件，分享前确认作者允许转载", "打开所在文件夹"]);
   });
 
+  it("上次关闭时写到一半的导出：启动时按落点收掉临时文件，已经结束的和别的任务不动", async () => {
+    store.stop();
+    const record = (id: string, status: TaskRecordDto["status"], spec: TaskRecordDto["spec"]): TaskRecordDto => ({
+      id,
+      kind: "modpack_export",
+      title: id,
+      detail: "",
+      instance_id: "生存",
+      status,
+      progress: 0.5,
+      bytes: 0,
+      total_bytes: null,
+      speed_bps: 0,
+      attempt: 1,
+      error: null,
+      created_at: T0 - 60_000,
+      finished_at: null,
+      spec,
+    });
+    resetRecorder(ipc);
+    bootOverrides(ipc, {
+      journal: [
+        record("pack", "running", { command: "export_modpack", args: { id: "生存", options: { ...OPTIONS, destination: "D:/out/包.mrpack" } } }),
+        record("world", "running", { command: "export_world", args: { id: "生存", world: "w", dest: "D:/out/存档.zip" } }),
+        record("finished", "done", { command: "export_world", args: { id: "生存", world: "w", dest: "D:/out/完成.zip" } }),
+        record("backup", "running", { command: "backup_world", args: { id: "生存", world: "w" } }),
+      ],
+    });
+    store = await startedStore();
+    await settle();
+    expect(callsOf(ipc, "discard_export_leftovers").map((a) => a.dest)).toEqual(["D:/out/包.mrpack", "D:/out/存档.zip"]);
+  });
+
   it("任务表里的导出任务缺 options.name 时重试直接报错，不调命令、不发没有名字的通知", async () => {
     store.stop();
     const broken: TaskRecordDto = {

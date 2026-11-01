@@ -119,6 +119,7 @@ pub fn run() {
             commands::tasks::cancel_task,
             commands::tasks::save_task_journal,
             commands::tasks::load_task_journal,
+            commands::tasks::discard_export_leftovers,
             // -- config --
             commands::config::get_config,
             commands::config::update_config,

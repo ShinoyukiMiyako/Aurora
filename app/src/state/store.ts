@@ -113,6 +113,7 @@ import {
   completeCompositeStep,
   compositeProgress,
   dropSuperseded,
+  exportDestination,
   findDuplicate,
   INSTANCE_TASK_COMMANDS,
   isActiveTask,
@@ -1403,15 +1404,22 @@ export class LauncherStore {
     const loaded = journal.tasks.map((record) => journalTask(taskFromRecord(record)));
     this.journalState = "read";
     let changed = false;
+    let interrupted: Task[] = [];
     this.set((raw) => {
       const inMemory = new Set(raw.tasks.map((t) => t.id));
       const previous = loaded.filter((t) => !inMemory.has(t.id));
       const restored = restoreJournal(previous, now);
+      interrupted = previous.filter(isActiveTask);
       // 内存里的任务是日志读不出期间入队的，还没写进去过
       changed = raw.tasks.length > 0 || restored.some((t, i) => t !== previous[i]);
       return { tasks: trimHistory([...restored, ...raw.tasks]) };
     });
     if (changed) this.scheduleJournal();
+    // 进程没了收尾代码跑不到，写到一半的文件还留在玩家选的目录里，不重试就一直占着
+    for (const task of interrupted) {
+      const dest = exportDestination(task.spec);
+      if (dest !== null) this.background(ACTION_ERROR.discardExportLeftovers, tasksIpc.discardExportLeftovers(dest));
+    }
   }
 
   private readonly onWindowFocus = (): void => {

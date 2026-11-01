@@ -949,6 +949,7 @@ export function accountKindLabel(kind: AccountKind, authServer: string | null): 
 
 /** 外层统一错误处理（useRunner）用的标题：说清「什么没成功」。 */
 export const ACTION_ERROR = {
+  discardExportLeftovers: "没能清理上次没写完的导出文件",
   launch: (name: string) => `「${name}」启动失败`,
   stop: "无法结束游戏进程",
   selectAccount: "没能切换账户",

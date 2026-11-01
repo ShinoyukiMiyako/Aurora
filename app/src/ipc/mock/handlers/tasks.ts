@@ -100,6 +100,7 @@ export const handlers: MockHandlers = {
     journal = { seq, tasks };
   },
   load_task_journal: () => journal,
+  discard_export_leftovers: () => null,
 };
 
 export function reset(): void {

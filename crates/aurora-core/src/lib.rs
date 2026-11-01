@@ -84,7 +84,7 @@ pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use export::{
     BundleReason, ExportBlock, ExportBundledMod, ExportExtra, ExportExtraStat, ExportIndexedMod,
     ExportMatch, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
-    ModpackExportTarget,
+    ModpackExportTarget, discard_export_leftovers,
 };
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
