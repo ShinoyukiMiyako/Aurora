@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 // 启动胶囊换面时的焦点：键盘按了面上的按钮，换上的新面接住焦点，不随旧面一起丢到 body。
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

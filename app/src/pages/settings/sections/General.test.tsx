@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 // 设置页常规分区：界面语言的选择与写入，以及分区按片订阅（游戏运行时每批日志都换一次状态，设置行不该跟着重渲染）。
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

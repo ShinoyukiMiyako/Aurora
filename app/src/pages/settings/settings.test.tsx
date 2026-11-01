@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";

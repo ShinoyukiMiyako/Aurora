@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 // 通知容器的暂停计时：指针或焦点在栈内时全部暂停，两者都离开才恢复。
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";

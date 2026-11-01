@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
