@@ -683,7 +683,16 @@ impl Aurora {
         if self.is_cancelled() {
             return Err(AuthError::Cancelled.into());
         }
-        let task = tokio::spawn(renewal(self.clone()));
+        let renewal = renewal(self.clone());
+        let target = uuid.to_owned();
+        let task = tokio::spawn(async move {
+            let outcome = renewal.await;
+            // 调用方这时可能已经走了，错误没有别的去处。
+            if let Err(err) = &outcome {
+                tracing::warn!(uuid = %target, error = %err, "续期失败");
+            }
+            outcome
+        });
         let joined = match self.cancel_token() {
             Some(token) => match token.run_until_cancelled(task).await {
                 Some(joined) => joined,
