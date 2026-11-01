@@ -39,7 +39,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | L2 | `aurora-instance` | 实例发现、命名规则、实例设置、未完成标记、版本隔离判定、存档与资源包读取、移入回收站；只读写本地文件 | base, version |
 | L2 | `aurora-install` | 原版、Fabric、Quilt、Forge、NeoForge 安装（含 Forge 处理器子进程），库、资源与 natives 补全 | base, version, download |
 | L2 | `aurora-modplatform` | Modrinth v2 与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存 | base, download |
-| L2 | `aurora-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录 | instance |
+| L2 | `aurora-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录 | instance, version |
 | L3 | `aurora-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector）、游戏进程管理、会话日志、崩溃判定 | base, auth, version, instance |
 | L4 | `aurora-core` | 门面 `Aurora`：配置、实例、安装、整合包、Mod 与历史、发现、Java、账户、启动、崩溃诊断、游玩统计、新闻、服务器状态、外观、自更新检查 | 以上全部 |
 | 外层 | `aurora-cli` | 调试命令行，用于端到端冒烟 | core, base |
@@ -262,7 +262,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | 目录 | 内容 | 允许引入 |
 | --- | --- | --- |
 | `pages/` | 七个页面：home、library、instance、discover、accounts、tasks、settings | pages、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib |
-| `flows/` | 跨页面的流程：登录、新建实例、首次启动向导 | 同 pages |
+| `flows/` | 跨页面的流程：登录、新建实例、首次启动向导 | flows、ui、art、launch、shell（仅 `useShell`、`useNav`、`useRunner`）、state、domain、copy、lib。不能引入 pages：两边共用的规则放进 `domain/` |
 | `shell/` | 外壳：标题栏、侧栏、命令面板、通知、下载速览、错误边界、浮层机制、窗口行为 | shell、ui、art、launch、state、ipc、mc、domain、copy、lib、dev、styles |
 | `launch/` | 启动胶囊与启动视图 | launch、state、ui、art、domain、copy、lib |
 | `state/` | 状态容器、查询缓存、任务表、通知、路由 | state、ipc、domain、copy、lib |
