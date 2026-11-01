@@ -6,7 +6,7 @@
 // 每行的「加入」以记住的实例直接启动并进服；没记住（或记住的已不可用）时弹实例选择，可以顺手记住这次的选择。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
 import { ACTION_ERROR, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
@@ -343,6 +343,10 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpi
     setPicker((p) => ({ session: p === null ? 1 : p.session + 1, open: true, anchor, remember }));
   };
   const closePicker = () => setPicker((p) => (p === null ? p : { ...p, open: false }));
+  const pickerId = useId();
+  const pickerOpen = picker !== null && picker.open;
+  // 没记住时点「加入」就弹实例选择；从「更多」菜单打开时面板也锚在它上面，打开期间同样标展开
+  const anchorsPicker = join.kind === "pick" || pickerOpen;
 
   const quickPlay = (instanceId: string) =>
     run(() => actions.quickPlay(instanceId, { kind: "multiplayer", address: row.address }), ACTION_ERROR.launch(instanceId));
@@ -419,7 +423,15 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpi
         )}
       </span>
       <span ref={joinRef} className={s.serverJoin}>
-        <Button variant="secondary" size="sm" disabledReason={joinBlocked} onClick={onJoin}>
+        <Button
+          variant="secondary"
+          size="sm"
+          disabledReason={joinBlocked}
+          aria-haspopup={anchorsPicker ? "dialog" : undefined}
+          aria-expanded={anchorsPicker ? pickerOpen : undefined}
+          aria-controls={pickerOpen ? pickerId : undefined}
+          onClick={onJoin}
+        >
           {HOME_COPY.join}
         </Button>
       </span>
@@ -427,6 +439,7 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpi
       {picker !== null && (
         <JoinPicker
           key={picker.session}
+          id={pickerId}
           open={picker.open}
           anchor={picker.anchor}
           server={row.name}
@@ -443,6 +456,7 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpi
 }
 
 interface JoinPickerProps {
+  id: string;
   open: boolean;
   anchor: Element;
   server: string;
@@ -455,7 +469,7 @@ interface JoinPickerProps {
 }
 
 /** 选用哪个实例加入：只列能加入服务器的实例；一个都没有时换成紧凑空状态，不给复选框与主按钮。 */
-function JoinPicker({ open, anchor, server, candidates, selectedInstanceId, busy, rememberDefault, onJoin, onClose }: JoinPickerProps) {
+function JoinPicker({ id, open, anchor, server, candidates, selectedInstanceId, busy, rememberDefault, onJoin, onClose }: JoinPickerProps) {
   const [choice, setChoice] = useState<string | null>(() => defaultJoinChoice(candidates, selectedInstanceId));
   const [remember, setRemember] = useState(rememberDefault);
   // 开着的时候实例列表可能变了（被删除、开始安装）：选中的那一项不在候选里就退回默认
@@ -463,7 +477,7 @@ function JoinPicker({ open, anchor, server, candidates, selectedInstanceId, busy
   // 默认选中的当前实例常常就是正在运行的那个：照常列出、可以改选，只是不能拿它加入
   const blocked = busy !== null && busy.instanceId === current ? busyReason(current, busy.phase) : undefined;
   return (
-    <Popover open={open} anchor={anchor} onClose={onClose} placement="bottom-end" autoFocus aria-label={HOME_COPY.joinPickerLabel(server)} className={s.joinPanel}>
+    <Popover id={id} open={open} anchor={anchor} onClose={onClose} placement="bottom-end" autoFocus aria-label={HOME_COPY.joinPickerLabel(server)} className={s.joinPanel}>
       {current === null ? (
         <EmptyState icon="server" compact title={HOME_COPY.joinEmptyTitle} body={HOME_COPY.joinEmptyBody} />
       ) : (

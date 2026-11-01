@@ -833,6 +833,29 @@ describe("主页：固定服务器的「加入」", () => {
     expect(callsOf(ipc, "launch_game")).toHaveLength(0);
   });
 
+  it("没记住时「加入」是实例选择的锚点：读屏能知道它弹出对话框、此刻是否展开、展开的是哪一个", async () => {
+    await mount();
+    const button = joinButton();
+    expect(button.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(button.hasAttribute("aria-controls")).toBe(false);
+    click(button);
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    expect(panel.id).not.toBe("");
+    expect(button.getAttribute("aria-controls")).toBe(panel.id);
+  });
+
+  it("记住的实例可用时「加入」直接启动，不标弹出对话框", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
+    await mount();
+    const button = joinButton();
+    expect(button.hasAttribute("aria-haspopup")).toBe(false);
+    expect(button.hasAttribute("aria-expanded")).toBe(false);
+  });
+
   it("选定并勾选「记住这个选择」：先保存选择（一次，参数为地址与实例）再启动，之后菜单里出现「更换加入用的实例」", async () => {
     await mount();
     click(joinButton());
