@@ -1918,6 +1918,167 @@ mod tests {
         assert!(!config.unrecognized.contains_key("language"));
     }
 
+    /// 更新的版本写下的文件落到这个版本手里：这几个字段、段里不认识的键、不认识的枚举取值同时存在时，
+    /// 整段替换设置、改掉一个退回项、后台写入、再次载入都互不影响，再写一遍文件也分毫不差。
+    #[tokio::test]
+    async fn new_fields_unknown_keys_and_enum_originals_coexist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{
+                "download_concurrency": 24,
+                "language": "fr-FR",
+                "after_launch": "hide_to_tray",
+                "appearance": {"mode": "dusk", "accent": "moss", "glow": true},
+                "memory": {"max_mb": 8192, "gc": "zgc"},
+                "world_backup": {"keep_per_world": 9, "compress": "zstd"},
+                "pinned_servers": [{"name": "山谷", "address": "mc.example.com", "region": "cn"}],
+                "sync": {"enabled": true}
+            }"#,
+        )
+        .await
+        .unwrap();
+
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![
+                ("appearance.mode", "dusk".to_owned()),
+                ("after_launch", "hide_to_tray".to_owned()),
+                ("language", "fr-FR".to_owned()),
+            ]
+        );
+        assert!(config.extra_java_paths.is_empty());
+        assert!(!config.prefer_dedicated_gpu);
+        assert!(config.new_instance_template);
+        assert_eq!(
+            config.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 9,
+                max_total_gb: 20,
+            }
+        );
+        let wire = serde_json::to_value(config.world_backup).unwrap();
+        assert!(wire.get("compress").is_none(), "不认识的键不进 IPC 出参");
+
+        let mut aurora =
+            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        aurora.set_world_backup(WorldBackupSettings {
+            auto: false,
+            keep_per_world: 3,
+            max_total_gb: 5,
+        });
+        aurora.set_memory(MemorySettings {
+            max_mb: 2048,
+            min_mb: Some(1024),
+            auto: false,
+        });
+        aurora.set_prefer_dedicated_gpu(true);
+        aurora.add_extra_java_path(PathBuf::from(r"D:\Java 21\中文\bin\java.exe"));
+        aurora.config_mut().new_instance_template = false;
+        aurora.set_language(UiLanguage::EnUs);
+        aurora.save_config().await.unwrap();
+        aurora.set_notified_update_version(Some("0.3.0".to_owned()));
+        aurora.save_config().await.unwrap();
+
+        let written = tokio::fs::read(&path).await.unwrap();
+        let raw: Value = serde_json::from_slice(&written).unwrap();
+        assert_eq!(raw["download_concurrency"], 24);
+        assert_eq!(raw["language"], "en-US", "改过的那项按新值写");
+        assert_eq!(raw["after_launch"], "hide_to_tray");
+        assert_eq!(
+            raw["appearance"],
+            serde_json::json!({
+                "mode": "dusk",
+                "accent": "moss",
+                "petals": true,
+                "panorama": false,
+                "reduce_motion": false,
+                "glow": true
+            })
+        );
+        assert_eq!(
+            raw["memory"],
+            serde_json::json!({"max_mb": 2048, "min_mb": 1024, "auto": false, "gc": "zgc"})
+        );
+        assert_eq!(
+            raw["world_backup"],
+            serde_json::json!({
+                "auto": false,
+                "keep_per_world": 3,
+                "max_total_gb": 5,
+                "compress": "zstd"
+            })
+        );
+        assert_eq!(
+            raw["pinned_servers"],
+            serde_json::json!([{"name": "山谷", "address": "mc.example.com"}]),
+            "服务器条目里不认识的键按既定口径不保留"
+        );
+        assert_eq!(raw["sync"], serde_json::json!({"enabled": true}));
+        assert_eq!(
+            raw["extra_java_paths"],
+            serde_json::json!([r"D:\Java 21\中文\bin\java.exe"])
+        );
+        assert_eq!(raw["prefer_dedicated_gpu"], true);
+        assert_eq!(raw["new_instance_template"], false);
+        assert_eq!(raw["notified_update_version"], "0.3.0");
+
+        let (reloaded, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![
+                ("appearance.mode", "dusk".to_owned()),
+                ("after_launch", "hide_to_tray".to_owned()),
+            ]
+        );
+        assert_eq!(&reloaded, aurora.config());
+
+        let mut again =
+            Aurora::for_test(reloaded, dir.path().to_path_buf(), dir.path().to_path_buf());
+        again.save_config().await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), written);
+    }
+
+    /// 这几个字段出现之前写的文件没有要带回去的东西：第一次落盘时新字段按默认值写出，读回来不差。
+    #[tokio::test]
+    async fn config_from_before_the_new_fields_gains_them_on_first_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{
+                "download_concurrency": 24,
+                "default_java": "C:\\jdk-17\\bin\\java.exe",
+                "appearance": {"mode": "night"},
+                "memory": {"max_mb": 8192}
+            }"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (loaded, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(loaded.carried_over, CarriedOver::default());
+        assert!(loaded.unrecognized.is_empty());
+
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["extra_java_paths"], serde_json::json!([]));
+        assert_eq!(raw["prefer_dedicated_gpu"], false);
+        assert_eq!(raw["new_instance_template"], true);
+        assert_eq!(
+            raw["world_backup"],
+            serde_json::json!({"auto": true, "keep_per_world": 5, "max_total_gb": 20})
+        );
+        assert_eq!(raw["appearance"]["mode"], "night");
+        assert_eq!(raw["memory"]["max_mb"], 8192);
+        assert_eq!(raw["default_java"], r"C:\jdk-17\bin\java.exe");
+        assert_eq!(store.load().await.unwrap(), loaded);
+    }
+
     /// 结构损坏不因为同时有不认识的取值而被放过：退回之后类型仍对不上，整份留存、按默认启动，
     /// 错误指向真正对不上的那一项，而不是被退回的取值。
     #[tokio::test]
