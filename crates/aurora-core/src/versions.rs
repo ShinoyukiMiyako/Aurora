@@ -43,8 +43,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use aurora_base::retry::RetryPolicy;
-
     use crate::config::{AuroraConfig, DownloadSourcePolicy};
     use crate::error::CoreError;
     use crate::facade::Aurora;
@@ -114,7 +112,7 @@ mod tests {
             .with_manifest_url(format!("https://meta.invalid{MANIFEST_PATH}"))
     }
 
-    /// 官方清单持续 503：在官方上把默认重试用完后换镜像，返回镜像上的版本列表。
+    /// 官方清单持续 503：还有镜像可换，试一次就换过去，返回镜像上的版本列表。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn list_manifest_falls_back_to_mirror_when_official_is_down() {
         let official = MockServer::start().await;
@@ -122,7 +120,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(MANIFEST_PATH))
             .respond_with(ResponseTemplate::new(503))
-            .expect(u64::from(RetryPolicy::default().max_attempts))
+            .expect(1)
             .mount(&official)
             .await;
         Mock::given(method("GET"))

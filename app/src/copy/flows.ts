@@ -394,12 +394,20 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     case "version_broken":
       return {
         title: "版本文件不完整",
-        body: "找不到启动入口（mainClass），版本 JSON 可能没有正确合并。",
+        // reason 只有这一个固定值，其余是解析器的原话：文件写坏时说缺 mainClass 就说错了
+        body: params.reason === "missing_main_class" ? "找不到启动入口（mainClass），版本 JSON 可能没有正确合并。" : "版本 JSON 读不出来，可能写坏了或被改动过。",
         fix: { kind: "repair", label: "修复实例" },
         secondary: null,
       };
     case "loader_library_missing":
       return { title: "加载器文件缺失", body: sentence(LOADER_LIBRARY_MISSING_REASON), fix: { kind: "reinstall_loader", label: REINSTALL_LOADER_LABEL }, secondary: null };
+    case "path_unsupported":
+      return {
+        title: "路径里有 Java 读不了的字符",
+        body: `「${strParam(params, "char", code)}」不在这台电脑的系统编码里，Java 读不了 ${strParam(params, "path", code)}。给实例改个名字或换一个游戏目录，避开这个字符。`,
+        fix: { kind: "open_logs", label: "完整日志" },
+        secondary: null,
+      };
     case "spawn_failed":
       return {
         title: "游戏进程没能启动",
@@ -416,6 +424,7 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
 export const CRASH_CATEGORIES = [
   "java_version_mismatch",
   "out_of_memory",
+  "jvm_args_invalid",
   "missing_language_provider",
   "game_version_mismatch",
   "missing_dependency",
@@ -426,6 +435,7 @@ export const CRASH_CATEGORIES = [
   "intel_graphics_driver",
   "graphics_driver",
   "corrupted_jar",
+  "loopback_unavailable",
   "native_crash",
 ] as const;
 export type CrashCategoryName = (typeof CRASH_CATEGORIES)[number];
@@ -486,6 +496,10 @@ export const EXIT_CODE_COPY: Readonly<Record<ExitCodeKind, { phrase: string; exp
     explain: "退出码 1 只说明进程报错退出，具体原因要看日志。",
   },
 };
+
+/** detail 是十六进制异常码的写法（来自 JVM 错误头或退出码）。 */
+const NATIVE_EXCEPTION_CODE = /^0x[0-9A-F]{8}$/;
+const NATIVE_EXCEPTION_KIND: Readonly<Record<string, ExitCodeKind | undefined>> = { "0xC0000005": "access_violation", "0xC0000409": "stack_buffer_overrun" };
 
 export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCopy>> = {
   java_version_mismatch: {
@@ -557,10 +571,29 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     title: "游戏或 Mod 文件损坏",
     explain: () => "有 jar 文件不完整或被改动过。",
   },
+  loopback_unavailable: {
+    label: "本机连接失败",
+    title: "Java 建不起本机连接",
+    explain: () => "用到网络的 Mod 起不来，这通常和临时目录有关。确认环境变量 TEMP 指向的文件夹存在、可写，路径不要太长；安全软件拦截时也会这样。",
+  },
+  jvm_args_invalid: {
+    label: "JVM 参数有误",
+    title: "Java 不接受这些 JVM 参数",
+    explain: (c) =>
+      c.detail === null
+        ? "日志指向自定义的 JVM 参数，Java 没能起来。可以到实例设置里改掉或删掉写错的参数再试。"
+        : `日志指向 JVM 参数 ${c.detail}，Java 不认它，没能起来。可以到实例设置里改掉或删掉再试。`,
+  },
   native_crash: {
     label: "进程异常退出",
     title: "游戏进程异常退出",
     explain: (c) => {
+      // JVM 自己接住原生异常时以退出码 1 结束，真正的异常码只在错误头里，这时不能拿 1 来解释
+      if (c.detail !== null && NATIVE_EXCEPTION_CODE.test(c.detail) && (c.exitNote === null || c.exitNote.hex !== c.detail)) {
+        const kind = NATIVE_EXCEPTION_KIND[c.detail];
+        const phrase = kind === undefined ? "" : `（${EXIT_CODE_COPY[kind].phrase}）`;
+        return `JVM 记下了异常 ${c.detail}${phrase}，它死在原生代码里，日志里没有更具体的线索。常见于显卡驱动、Java 本体或带本地库的 Mod，可以先更新显卡驱动，再换一个 Java 版本试试。`;
+      }
       const code = need(c.exitCode, "退出码", "native_crash");
       const note = need(c.exitNote, "退出码说明", "native_crash");
       if (note.code !== code) throw new Error(`退出码说明 ${note.code} 与退出码 ${code} 对不上`);
@@ -841,6 +874,8 @@ export const TASK_TOAST = {
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
   repaired: (name: string) => ({ title: `「${name}」已修复` }),
   loaderReinstalled: (name: string) => ({ title: `「${name}」的加载器已重新安装` }),
+  /** 重试「关闭时中断」的新建时，发现它在中断之前已经装完了。 */
+  installFinishedBeforeInterrupt: (name: string) => ({ title: `「${name}」已经装好了` }),
   modInstalled: (mod: string, dependencies: number, instance: string) => ({
     title: dependencies > 0 ? `已安装 ${mod} 及 ${dependencies} 个前置` : `已安装 ${mod}`,
     body: `装入「${instance}」`,
@@ -863,6 +898,8 @@ export const TASK_TOAST = {
   /** 从任务日志恢复后重试成功、已没有入队时上下文的任务。 */
   finished: (title: string) => ({ title: `已完成：${title}` }),
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
+  /** 补全不止下载：还要解压、校验、跑安装器，标题不说下载。 */
+  repairFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
   exportStarted: (name: string) => ({ title: `已开始导出「${name}」`, body: "进度见下载任务" }),
   /** bundled：打包进文件的 Mod 数；没有时不写正文。 */
   exported: (name: string, bundled: number) =>
@@ -960,6 +997,7 @@ export function accountKindLabel(kind: AccountKind, authServer: string | null): 
 
 /** 外层统一错误处理（useRunner）用的标题：说清「什么没成功」。 */
 export const ACTION_ERROR = {
+  discardExportLeftovers: "没能清理上次没写完的导出文件",
   launch: (name: string) => `「${name}」启动失败`,
   stop: "无法结束游戏进程",
   selectAccount: "没能切换账户",
@@ -1048,6 +1086,11 @@ export const CONFIRM_COPY = {
     title: `结束「${occupant}」并启动「${next}」？`,
     body: `${APP_NAME}同一时间只运行一个游戏。没保存的进度可能丢失，建议先在游戏菜单里保存并退出。`,
     confirmLabel: "结束并启动",
+  }),
+  occupantGone: (next: string, occupant: string) => ({
+    title: `启动「${next}」？`,
+    body: `「${occupant}」已经退出了。`,
+    confirmLabel: "启动",
   }),
   cancelCreate: (taskTitle: string, instance: string) => ({
     title: `取消${quoted(taskTitle)}？`,

@@ -20,7 +20,7 @@ use aurora_version::{AssetLayout, AssetObjectsIndex, VersionJson};
 use crate::context::InstallContext;
 use crate::dir_lock::lock_dir;
 use crate::error::{Error, Result, io_err};
-use crate::layout::{checked_segment, materialized_asset_path};
+use crate::layout::{GameLayout, checked_segment, materialized_asset_path};
 use crate::natives;
 use crate::net;
 use crate::plan;
@@ -223,14 +223,22 @@ async fn materialize_assets(
         }
         AssetLayout::MapToResources => cx.layout.resources_dir(),
     };
+    materialize_objects(cx.layout, index, &target_dir).await
+}
 
+/// 把索引里的对象按逻辑名铺到 `target_dir`。对象必须已在 `assets/objects` 里，缺了报错。
+pub async fn materialize_objects(
+    layout: &GameLayout,
+    index: &AssetObjectsIndex,
+    target_dir: &Path,
+) -> Result<()> {
     let jobs: Vec<(PathBuf, PathBuf, u64)> = index
         .objects
         .iter()
         .map(|(logical, object)| {
             Ok((
-                cx.layout.asset_object_path(&object.hash),
-                materialized_asset_path(&target_dir, logical)?,
+                layout.asset_object_path(&object.hash),
+                materialized_asset_path(target_dir, logical)?,
                 object.size,
             ))
         })

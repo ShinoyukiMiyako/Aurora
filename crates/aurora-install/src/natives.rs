@@ -2,6 +2,7 @@
 //!
 //! 版本 JSON 里被判定为 native 的库（旧式带 `natives` 映射的 classifier 件，或 1.19+ 独立的
 //! `natives-<os>` 条目）下载下来是 jar，启动前须把其中的动态库解压到版本隔离的 natives 目录。
+//! 26.2 起新式条目改由游戏自己从 classpath 解压，这里跳过，判据见 [`VersionJson::extracts_native`]。
 //! 解压尊重库自带的 `extract.exclude` 前缀规则（Mojang 通常排除 `META-INF/`）。zip 读取是同步、
 //! CPU/IO 混合操作，故整段解压丢进 `spawn_blocking`，不阻塞异步 worker。
 //!
@@ -71,7 +72,7 @@ pub async fn extract_all_natives(
     let dest = layout.natives_dir(target_id);
     let mut jobs: Vec<NativeJob> = Vec::new();
     for lib in select_libraries(version, ctx) {
-        if !lib.is_native() {
+        if !version.extracts_native(lib) {
             continue;
         }
         let Some(rel) = native_jar_relpath(lib, ctx)? else {
@@ -331,6 +332,62 @@ mod tests {
             std::fs::read(layout.natives_dir("1.21").join("lwjgl.dll")).unwrap(),
             b"fake-dll-bytes"
         );
+    }
+
+    /// 1.16.5 这类版本 JSON 的写法：主件一条，同坐标再来一条带 natives 映射的。解压要落到后一条的分类件上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extract_all_natives_finds_native_entry_after_main_jar_of_same_coordinate() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        let jar_path = layout.library_path("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar");
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        build_test_jar(&jar_path);
+        let version = VersionJson::from_json_str(
+            r#"{"id":"1.16.5","libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}}},
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{
+                    "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"},
+                    "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"n","size":2,"url":"n"}}},
+                 "natives":{"windows":"natives-windows"},
+                 "extract":{"exclude":["META-INF/"]}}
+            ]}"#,
+        )
+        .unwrap();
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+
+        let count = extract_all_natives(&version, &ctx, &layout, "1.16.5")
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read(layout.natives_dir("1.16.5").join("lwjgl.dll")).unwrap(),
+            b"fake-dll-bytes"
+        );
+    }
+
+    /// 26.2 起游戏自己从 classpath 解压本地库，这里解出来的文件没人读，白占几百 MB。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn natives_are_not_extracted_when_library_path_moves_to_a_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        put_native_jar(&layout);
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let mut version = new_style_version("x");
+        version.arguments = Some(aurora_version::Arguments {
+            game: Vec::new(),
+            jvm: vec![aurora_version::Argument::Plain(
+                "-Djava.library.path=${natives_directory}/java".to_owned(),
+            )],
+        });
+
+        let count = extract_all_natives(&version, &ctx, &layout, "26.3")
+            .await
+            .unwrap();
+
+        assert_eq!(count, 0);
+        assert!(!layout.natives_dir("26.3").join("lwjgl.dll").exists());
     }
 
     /// natives jar 的路径（直给的或由坐标算出的）能走出库目录时报路径越界，不去读库目录外的文件；

@@ -568,7 +568,8 @@ pub struct VersionRequirementsDto {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct InstanceDto {
     pub id: String,
-    /// ready：版本 JSON 可用；broken：缺失或损坏，见 broken_reason。
+    /// ready：版本 JSON 可用；broken：缺失或损坏，见 broken_reason。只说版本 JSON，安装写到一半时也是 ready：
+    /// 判断能不能用要同时看 incomplete 为空。
     pub status: &'static str,
     pub broken_reason: Option<String>,
     /// 原版版本号；识别不出或 broken 时为 null。
@@ -2034,6 +2035,14 @@ pub(crate) async fn folder_path(
             .existing_instance_dir(require_id()?)
             .await
             .map_err(instance_error)?),
+        "session_logs" => {
+            let id = require_id()?;
+            // 缺了要建出来：和工作子目录一样先占住实例，不然可能建进正在改名或删除的目录，留下一个空壳
+            let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+            let dir = aurora.session_logs_dir(id).await.map_err(instance_error)?;
+            ensure_dir(&dir).await?;
+            Ok(dir)
+        }
         "world" => {
             let world = world
                 .ok_or_else(|| invalid_field("world", "missing", "打开存档需要存档文件夹名"))?;
@@ -4382,6 +4391,12 @@ mod tests {
                 .unwrap(),
             dir
         );
+        // 崩溃页列的日志路径在这里，不在游戏自己的 logs 下；还没启动过时也先建出来，资源管理器打得开。
+        let session_logs = folder_path(facade, &locks, "session_logs", Some("1.21.1"), None)
+            .await
+            .unwrap();
+        assert_eq!(session_logs, dir.join(".petalfall").join("logs"));
+        assert!(session_logs.is_dir());
         // 原版正式版默认不隔离：mods 在游戏目录下，打开前建出来。
         let mods = folder_path(facade, &locks, "mods", Some("1.21.1"), None)
             .await
@@ -4448,6 +4463,10 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY);
+            let err = folder_path(&env.facade, &locks, "session_logs", Some("1.21.1"), None)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
             drop(held);
         }
         let description = || async {
@@ -4462,6 +4481,10 @@ mod tests {
         assert_eq!(description().await, None, "被拒绝的写入不改动设置");
         assert!(!env.game_dir().join("mods").exists());
         assert!(!dir.join("mods").exists());
+        assert!(
+            !dir.join(".petalfall").join("logs").exists(),
+            "被拒绝时不在改名或删除中的实例里建目录"
+        );
 
         let _game = locks.acquire("1.21.1", InstanceActivity::Running).unwrap();
         set_instance_settings_with(&env.facade, &locks, "1.21.1", settings)

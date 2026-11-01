@@ -13,7 +13,7 @@ import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../lau
 import { bindArtStatus } from "../mc/binding";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
-import { routeInstanceId, type Route } from "../state/route";
+import { routeInstanceId, sameRoute, type Route } from "../state/route";
 import { activeDownloads, activeTasks, pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
 import type { Toast } from "../state/toasts";
@@ -268,6 +268,15 @@ function ShellCore({ children }: { children: ReactNode }) {
     if (crashedHere) actions.dismissSession();
   }, [actions, crashedHere]);
 
+  // 人已经在错误通知指向的页面上：要说的页面都说了，错误通知又不自动消失，留着只会挡住页面上的控件
+  const toasts = useLauncherSelector((s) => s.toasts);
+  useEffect(() => {
+    for (const toast of toasts) {
+      const action = toast.action;
+      if (toast.tone === "error" && action !== undefined && "to" in action && sameRoute(action.to, route)) actions.dismissToast(toast.id);
+    }
+  }, [actions, route, toasts]);
+
   // ---------------------------------------------------------------- 确认框
 
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
@@ -301,7 +310,11 @@ function ShellCore({ children }: { children: ReactNode }) {
     if (launchPrompt === null || promptRef.current === launchPrompt) return;
     promptRef.current = launchPrompt;
     const copy = launchPromptCopy(launchPrompt);
-    void confirm(copy).then((ok) => run(() => actions.resolveLaunchPrompt(ok), ACTION_ERROR.launch(launchPrompt.instanceId)));
+    void confirm(copy).then((ok) => {
+      // 确认框改过口时旧的这次按取消结算，它的回答不算数，别把新的那次也收走
+      if (promptRef.current !== launchPrompt) return;
+      return run(() => actions.resolveLaunchPrompt(ok), ACTION_ERROR.launch(launchPrompt.instanceId));
+    });
   }, [actions, confirm, launchPrompt, run]);
 
   // ---------------------------------------------------------------- 命令面板、新建实例
@@ -476,15 +489,43 @@ function ShellCore({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // WebView2 最小化时 visibilityState 仍是 visible，只能问窗口：最小化与还原都会让窗口尺寸变化，变一次读一次
+  const [minimized, setMinimized] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    const read = () =>
+      void run(async () => {
+        const now = await port.isMinimized();
+        if (!disposed) setMinimized(now);
+      }, SHELL_ACTION_ERROR.windowState);
+    port.onResized(read).then(
+      (release) => {
+        if (disposed) {
+          release();
+          return;
+        }
+        unlisten = release;
+        read();
+      },
+      (error: unknown) => void run(() => Promise.reject(error), SHELL_ACTION_ERROR.windowState),
+    );
+    return () => {
+      disposed = true;
+      if (unlisten !== null) unlisten();
+    };
+  }, [port, run]);
+  const shown = visible && !minimized;
+
   // 窗口不可见期间全部通知暂停计时
   useEffect(() => {
-    if (visible) return;
+    if (shown) return;
     actions.pauseToasts("hidden");
     return () => actions.resumeToasts("hidden");
-  }, [actions, visible]);
+  }, [actions, shown]);
 
   // 运行呼吸窗口：进入运行、或运行中窗口重新获得焦点时开始；失焦或不可见立即结束
-  const active = visible && focused;
+  const active = shown && focused;
   useEffect(() => {
     if (runningSince === null || !active) {
       endBreathWindow();
@@ -494,7 +535,7 @@ function ShellCore({ children }: { children: ReactNode }) {
     return () => endBreathWindow();
   }, [runningSince, active]);
 
-  const petalsPaused = !visible || !focused || scrimOpen;
+  const petalsPaused = !shown || !focused || scrimOpen;
 
   // ---------------------------------------------------------------- 材质状态
 

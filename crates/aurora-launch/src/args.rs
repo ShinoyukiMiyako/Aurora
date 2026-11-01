@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use aurora_version::{Argument, OsName, RuntimeContext, evaluate_rules};
+use aurora_version::{Argument, OsName, RuntimeContext, VersionJson, evaluate_rules};
 
 /// 强制安全参数：缓解 Log4Shell（CVE-2021-44228）。必须默认注入，与用户设置无关。
 pub fn security_args() -> Vec<String> {
@@ -51,6 +51,25 @@ pub fn legacy_jvm_platform_args(ctx: &RuntimeContext) -> Vec<String> {
         ],
         OsName::Osx | OsName::Linux => Vec::new(),
     }
+}
+
+/// 离线令牌下把 authlib 的接口地址指到解析不了的域名，只有 authlib 2.1 需要。
+///
+/// 1.16.4、1.16.5 带的 authlib 2.1 启动时拿令牌问权限接口，占位令牌被拒后它把多人游戏整个关掉：标题画面的
+/// 按钮是灰的，局域网和第三方服务器都进不去；接口连不上时才按离线处理。之后的版本连上被拒也按离线走，
+/// 不用这样绕，留着真实地址才拿得到校验别人皮肤签名的公钥。
+pub fn offline_api_args(version: &VersionJson) -> Vec<String> {
+    let refuses_offline_token = version
+        .libraries
+        .iter()
+        .any(|lib| lib.name.starts_with("com.mojang:authlib:2.1."));
+    if !refuses_offline_token {
+        return Vec::new();
+    }
+    ["auth", "account", "session", "services"]
+        .iter()
+        .map(|api| format!("-Dminecraft.api.{api}.host=https://invalid.invalid"))
+        .collect()
 }
 
 /// 展开新式 `arguments`（game 或 jvm）数组：纯字符串直接收，条件块按 rules 命中才收其 value。

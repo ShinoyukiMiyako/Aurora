@@ -11,6 +11,7 @@ import {
   instancePath,
   latestRelease,
   loaderOptions,
+  loaderVersionNote,
   manifestProblem,
   newInstanceIsolated,
   optionChecked,
@@ -117,6 +118,24 @@ describe("加载器版本", () => {
     ).toBe("0.16.10");
     expect(recommendedLoaderVersion([{ version: "0.27.2-beta.1", stable: false }])).toBe("0.27.2-beta.1");
     expect(recommendedLoaderVersion([])).toBeNull();
+  });
+
+  it("推荐版才说是最新发布：排在它前面的测试版、它后面的老版本各说各的", () => {
+    const list = [
+      { version: "0.31.0-beta.5", stable: false },
+      { version: "0.30.2", stable: true },
+      { version: "0.30.1", stable: true },
+    ];
+    const recommended = recommendedLoaderVersion(list);
+    expect(list.map((v) => loaderVersionNote(v, recommended))).toEqual(["betaNote", "newest", "older"]);
+  });
+
+  it("全是测试版时推荐的那个也算最新发布", () => {
+    const list = [
+      { version: "0.27.2-beta.2", stable: false },
+      { version: "0.27.2-beta.1", stable: false },
+    ];
+    expect(list.map((v) => loaderVersionNote(v, recommendedLoaderVersion(list)))).toEqual(["newest", "betaNote"]);
   });
 
   it("明确选过的版本只对当时的加载器与游戏版本有效，换了任一个回到推荐版", () => {

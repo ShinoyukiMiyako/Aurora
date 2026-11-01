@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::context::InstallContext;
 use crate::error::{Error, Result};
+use crate::forge_versions::compare_versions;
 use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
@@ -55,7 +56,8 @@ impl LoaderFlavor {
 pub struct LoaderVersion {
     /// loader 版本号，如 `0.15.11`。
     pub version: String,
-    /// 是否为稳定版。Fabric meta 直接给出；Quilt meta 不给，按版本号里有没有预发布标记推断。
+    /// 是否为稳定版，一律按版本号里有没有预发布标记推断：Quilt meta 不给这个字段，Fabric meta 给的
+    /// 其实是「是不是当前推荐的那一个」，除了最新版全是 false。
     #[serde(default)]
     pub stable: bool,
 }
@@ -86,12 +88,18 @@ pub struct LoaderSummary {
     pub libraries: usize,
 }
 
-/// 版本号里带这些片段的视为预发布版（beta / alpha / rc / pre）。
-pub fn is_prerelease(version: &str) -> bool {
+/// 版本号里预发布标记（beta / alpha / rc / pre）开始的位置；没有标记时为 `None`。
+pub(crate) fn prerelease_at(version: &str) -> Option<usize> {
     let lower = version.to_ascii_lowercase();
     ["beta", "alpha", "rc", "pre"]
         .iter()
-        .any(|tag| lower.contains(tag))
+        .filter_map(|tag| lower.find(tag))
+        .min()
+}
+
+/// 版本号里带预发布标记的视为预发布版。
+pub fn is_prerelease(version: &str) -> bool {
+    prerelease_at(version).is_some()
 }
 
 /// Fabric/Quilt 安装器。
@@ -156,7 +164,8 @@ impl<'a> LoaderInstaller<'a> {
         .await
     }
 
-    /// 列出某游戏版本的全部可用 loader（meta 返回顺序：最新在前）。
+    /// 列出某游戏版本的全部可用 loader，新的在前。Quilt meta 这个端点不按版本排序，这里自己排：
+    /// 下游的「最新」「推荐」都靠这个顺序。
     pub async fn list_loaders(&self, game_version: &str) -> Result<Vec<LoaderVersion>> {
         let entries: Vec<LoaderListEntry> = net::get_json_from(
             self.cx.client,
@@ -167,20 +176,18 @@ impl<'a> LoaderInstaller<'a> {
             "loader 列表",
         )
         .await?;
-        let flavor = self.flavor;
-        Ok(entries
+        let mut loaders: Vec<LoaderVersion> = entries
             .into_iter()
-            .map(|e| match flavor {
-                LoaderFlavor::Fabric => e.loader,
-                LoaderFlavor::Quilt => LoaderVersion {
-                    stable: !is_prerelease(&e.loader.version),
-                    version: e.loader.version,
-                },
+            .map(|e| LoaderVersion {
+                stable: !is_prerelease(&e.loader.version),
+                version: e.loader.version,
             })
-            .collect())
+            .collect();
+        loaders.sort_by(|a, b| compare_versions(&b.version, &a.version));
+        Ok(loaders)
     }
 
-    /// 选出推荐 loader：优先最新稳定版，无稳定版则取列表首个（meta 已按新→旧排序）。
+    /// 选出推荐 loader：优先最新稳定版，无稳定版则取列表首个。
     pub async fn latest_loader(&self, game_version: &str) -> Result<LoaderVersion> {
         let loaders = self.list_loaders(game_version).await?;
         loaders
@@ -344,6 +351,101 @@ mod tests {
         assert_eq!(version.id, "fabric-loader-0.15.11-1.21");
         assert_eq!(loader, "0.15.11");
         assert_eq!(raw, profile.as_bytes(), "落盘要的是原始字节");
+    }
+
+    /// Fabric meta 的 stable 只标当前推荐的那一个，其余 254 个正式版全是 false（2026 年实测）：
+    /// 照搬的话向导会把它们全标成测试版。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fabric_stability_ignores_the_meta_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/1.20.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"loader":{"version":"0.20.1","stable":true}},
+                    {"loader":{"version":"0.20.0","stable":false}},
+                    {"loader":{"version":"0.19.5","stable":false}},
+                    {"loader":{"version":"0.19.0-beta.1","stable":false}}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let loaders = LoaderInstaller::fabric(cx)
+            .with_base_url(server.uri())
+            .list_loaders("1.20.1")
+            .await
+            .unwrap();
+        let flags: Vec<(&str, bool)> = loaders
+            .iter()
+            .map(|l| (l.version.as_str(), l.stable))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("0.20.1", true),
+                ("0.20.0", true),
+                ("0.19.5", true),
+                ("0.19.0-beta.1", false),
+            ]
+        );
+    }
+
+    /// Quilt meta 的 `loader/<游戏版本>` 不按版本排序，1.20.1 排在最前的是 0.20.0-beta.9，第一个正式版
+    /// 是 0.24.0：按返回顺序取「最新稳定版」会选到一个连 QFAPI 都载不起来的老版本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_loaders_are_ordered_newest_first_whatever_meta_returns() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/versions/loader/1.20.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"loader":{"version":"0.20.0-beta.9"}},
+                    {"loader":{"version":"0.20.0-beta.7"}},
+                    {"loader":{"version":"0.24.0"}},
+                    {"loader":{"version":"0.30.2-beta.1"}},
+                    {"loader":{"version":"0.9.1"}},
+                    {"loader":{"version":"0.31.0-beta.5"}},
+                    {"loader":{"version":"0.30.2"}}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let installer = LoaderInstaller::quilt(cx).with_base_url(server.uri());
+        let order: Vec<String> = installer
+            .list_loaders("1.20.1")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.version)
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "0.31.0-beta.5",
+                "0.30.2",
+                "0.30.2-beta.1",
+                "0.24.0",
+                "0.20.0-beta.9",
+                "0.20.0-beta.7",
+                "0.9.1",
+            ]
+        );
+        assert_eq!(
+            installer.latest_loader("1.20.1").await.unwrap().version,
+            "0.30.2"
+        );
     }
 
     /// Quilt meta 不给 stable 字段：按版本号推断，推荐版跳过 beta。

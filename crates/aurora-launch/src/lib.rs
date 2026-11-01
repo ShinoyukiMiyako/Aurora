@@ -12,6 +12,7 @@
 //! - [`command`]：门面构造器 [`command::CommandBuilder`] -> [`command::LaunchCommand`]。
 //! - [`process`]：进程 spawn、输出捕获与批量转发、结束游戏、退出报告、崩溃触发判定。
 //! - [`logfile`]：每次启动的会话日志（写入、滚动保留、读尾部）。
+//! - `log4j_xml`：把游戏 stdout 上的 log4j XML 事件还原成普通日志行。
 //! - [`crash`]：崩溃基础检测规则表与结构化诊断。
 //! - [`precheck`]：启动前的轻量判断（所需 Java 主版本、路径与同步盘提醒、角色名长度、JVM 内存参数）。
 //! - [`quickplay`]：直达存档与服务器（Quick Play 与旧版 `--server` / `--port`）的支持判定。
@@ -25,6 +26,7 @@ pub mod classpath;
 pub mod command;
 pub mod crash;
 pub mod error;
+mod log4j_xml;
 pub mod logfile;
 pub mod memory;
 pub mod placeholder;
@@ -39,7 +41,8 @@ pub use classpath::{classpath_entries, classpath_separator, classpath_string};
 pub use command::{CommandBuilder, GamePaths, LaunchCommand};
 pub use crash::{
     CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, analyze, analyze_lines,
-    exit_code_clue, explain_exit_code, extract_mod_ids, has_crash_marker, suspected_mods,
+    exit_code_clue, explain_exit_code, extract_mod_ids, has_crash_marker, jvm_exception_clue,
+    suspected_mods,
 };
 pub use error::{LaunchError, Result};
 pub use logfile::{
@@ -53,8 +56,9 @@ pub use memory::{
 pub use placeholder::Placeholders;
 pub use precheck::{
     DEFAULT_JAVA_MAJOR, JvmMemoryIssue, MIN_MAX_HEAP_MB, ONEDRIVE_ENV_VARS, PLAYER_NAME_MAX_UNITS,
-    SyncProvider, SyncRoot, game_path_warning, jvm_memory_issue, long_player_name,
-    required_java_major, sync_folder, sync_roots_from_env,
+    SyncProvider, SyncRoot, effective_max_heap_mb, game_path_warning, jvm_memory_issue,
+    long_player_name, path_char_outside_code_page, required_java_major, sync_folder,
+    sync_roots_from_env,
 };
 pub use process::{
     ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogStream, SessionEnd,
@@ -62,6 +66,6 @@ pub use process::{
 };
 pub use quickplay::{
     FEATURE_MULTIPLAYER, FEATURE_SINGLEPLAYER, QuickPlayMode, QuickPlaySupport, QuickPlayTarget,
-    legacy_server_args, quick_play_support,
+    legacy_server_args, quick_play_lost_char, quick_play_support,
 };
 pub use workspace::resolve_game_directory;

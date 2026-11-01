@@ -35,6 +35,58 @@ pub fn game_path_warning(game_dir: &Path) -> Option<String> {
     ))
 }
 
+/// 路径里第一个系统代码页表示不了的字符。
+///
+/// Windows 上的 java.exe 按系统代码页读命令行（Java 8 到 26 实测都是）：表示不了的字符变成问号，
+/// classpath 指向不存在的文件，游戏只会报找不到主类。其他系统的命令行是字节串，没有这回事。
+pub fn path_char_outside_code_page(path: &Path) -> Option<char> {
+    char_lost_on_command_line(&path.to_string_lossy())
+}
+
+/// 命令行参数里第一个到不了 Java 的字符。
+#[cfg(windows)]
+pub(crate) fn char_lost_on_command_line(text: &str) -> Option<char> {
+    // SAFETY: 无参数，只读进程的系统代码页。
+    let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
+    char_outside_code_page(text, code_page)
+}
+
+/// 命令行参数里第一个到不了 Java 的字符。非 Windows 系统不受影响。
+#[cfg(not(windows))]
+pub(crate) fn char_lost_on_command_line(_text: &str) -> Option<char> {
+    None
+}
+
+#[cfg(windows)]
+pub(crate) fn char_outside_code_page(text: &str, code_page: u32) -> Option<char> {
+    use windows_sys::Win32::Globalization::{CP_UTF8, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte};
+
+    // UTF-8 什么都表示得了，而且系统不接受它带这里的标志与输出参数。
+    if code_page == CP_UTF8 {
+        return None;
+    }
+    text.chars().filter(|ch| !ch.is_ascii()).find(|ch| {
+        let mut wide = [0u16; 2];
+        let wide = ch.encode_utf16(&mut wide);
+        let mut encoded = [0u8; 8];
+        let mut lossy = 0;
+        // SAFETY: 两个缓冲区都是栈上数组，长度都小到不会截断 i32，输出参数指向本地变量。
+        let written = unsafe {
+            WideCharToMultiByte(
+                code_page,
+                WC_NO_BEST_FIT_CHARS,
+                wide.as_ptr(),
+                wide.len() as i32,
+                encoded.as_mut_ptr(),
+                encoded.len() as i32,
+                std::ptr::null(),
+                &raw mut lossy,
+            )
+        };
+        written == 0 || lossy != 0
+    })
+}
+
 /// 同步盘。它们在同步时会占用、替换或按需下载正在读写的文件，存档与 Mod 可能读不全。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncProvider {
@@ -226,9 +278,48 @@ pub fn jvm_memory_issue(custom_args: &[String], launcher: MemoryConfig) -> Optio
     })
 }
 
+/// 这一局真正生效的最大堆（MB，向上取整）：自定义参数排在启动器的内存参数之后，同一参数 JVM 取最后一次，所以是
+/// 自定义参数里最后一个 `-Xmx`，没写才用启动器的。写法不对的那些 Java 根本起不来，不算。
+pub fn effective_max_heap_mb(custom_args: &[String], launcher: MemoryConfig) -> u32 {
+    custom_args
+        .iter()
+        .filter_map(|arg| heap_arg_bytes(arg))
+        .rfind(|(kind, _)| *kind == 'x')
+        .map_or(launcher.max_mb, |(_, bytes)| {
+            u32::try_from(bytes.div_ceil(MIB)).unwrap_or(u32::MAX)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_max_heap_follows_the_last_valid_xmx() {
+        let launcher = MemoryConfig {
+            max_mb: 4096,
+            min_mb: None,
+        };
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        assert_eq!(effective_max_heap_mb(&[], launcher), 4096);
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx64M"]), launcher), 64);
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx2g"]), launcher), 2048);
+        assert_eq!(
+            effective_max_heap_mb(&args(&["-Xmx1g", "-Xmx512m"]), launcher),
+            512
+        );
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx1536k"]), launcher), 2);
+        // 最小堆与其他开关不影响最大堆；写错的 -Xmx 让 Java 起不来，这里不把它算成生效值。
+        assert_eq!(
+            effective_max_heap_mb(&args(&["-Xms1g", "-XX:+UseG1GC"]), launcher),
+            4096
+        );
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx4GB"]), launcher), 4096);
+        assert_eq!(
+            effective_max_heap_mb(&args(&["-Xmx99999999999999g"]), launcher),
+            4096
+        );
+    }
 
     #[test]
     fn game_path_warns_on_non_ascii_and_bang() {
@@ -237,6 +328,39 @@ mod tests {
         let bang = game_path_warning(Path::new(r"D:\games!\mc")).unwrap();
         assert!(bang.contains("「!」"), "{bang}");
         assert_eq!(game_path_warning(Path::new(r"D:\games\mc")), None);
+    }
+
+    /// 判定只看给定的代码页，测试不随这台电脑的系统语言变。
+    #[cfg(windows)]
+    #[test]
+    fn code_page_check_finds_the_first_character_it_cannot_encode() {
+        const GBK: u32 = 936;
+        const WESTERN: u32 = 1252;
+        assert_eq!(char_outside_code_page(r"D:\我的世界\生存 1.12", GBK), None);
+        assert_eq!(
+            char_outside_code_page(r"D:\我的世界\한글 테스트", GBK),
+            Some('한')
+        );
+        assert_eq!(char_outside_code_page(r"D:\games", WESTERN), None);
+        assert_eq!(char_outside_code_page(r"D:\我的世界", WESTERN), Some('我'));
+        // 代理对也是一个字符。
+        assert_eq!(
+            char_outside_code_page("D:\\\u{20BB7}", GBK),
+            Some('\u{20BB7}')
+        );
+    }
+
+    /// 只能近似映射的字符同样算表示不了：ā 近似成 a 之后路径指向的已经不是那个文件。
+    #[cfg(windows)]
+    #[test]
+    fn best_fit_mapping_counts_as_not_encodable() {
+        assert_eq!(char_outside_code_page("\u{101}", 1252), Some('\u{101}'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn utf8_code_page_encodes_everything() {
+        assert_eq!(char_outside_code_page("D:\\한글\\\u{20BB7}", 65001), None);
     }
 
     #[test]

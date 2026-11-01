@@ -93,5 +93,8 @@ export const saveTaskJournal = (seq: number, tasks: TaskRecordDto[]): Promise<vo
 /** 读取上次写入的任务日志；从未写过时为 { seq: 0, tasks: [] }，文件损坏或版本不符时以 task_journal_invalid 拒绝。 */
 export const loadTaskJournal = (): Promise<TaskJournalDto> => invoke<TaskJournalDto>("load_task_journal");
 
+/** 删掉 `dest` 旁边上次没写完的导出临时文件。只收导出的命名，别的文件不碰；没有残留也算成功。 */
+export const discardExportLeftovers = (dest: string): Promise<void> => invoke<void>("discard_export_leftovers", { dest });
+
 export const onCoreEvent = (handler: (event: CoreEvent) => void): Promise<UnlistenFn> =>
   listen<CoreEvent>(CORE_EVENT, handler);

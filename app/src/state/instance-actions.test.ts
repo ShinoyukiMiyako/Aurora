@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { TASK_TEXT } from "../copy/flows";
+import { TASK_TEXT, TASK_TOAST } from "../copy/flows";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { TaskRecordDto } from "../ipc/tasks";
@@ -217,7 +217,7 @@ describe("加载器自带的库缺失", () => {
     const task = store.getState().tasks.find((t) => t.spec.command === "repair_instance");
     if (task === undefined) throw new Error("应留下失败的重装任务");
     expect(task.status).toBe("failed");
-    expect(store.getState().toasts.find((t) => t.title === "下载失败：重新安装「生存」的加载器")).toMatchObject({ body: "Forge 没有适用于 1.20.1 的可用 loader 版本", action: { label: "重试" } });
+    expect(store.getState().toasts.find((t) => t.title === "重新安装「生存」的加载器没有完成")).toMatchObject({ body: "Forge 没有适用于 1.20.1 的可用 loader 版本", action: { label: "重试" } });
 
     ipc.overrides.set("repair_instance", () => repaired);
     store.actions.retryTask(task.id);
@@ -245,51 +245,79 @@ describe("加载器自带的库缺失", () => {
   });
 });
 
-describe("修复成功后收起失败会话", () => {
-  const failLaunch = async (id: string, code: string, detail?: unknown): Promise<void> => {
+describe("修复完成后的启动失败卡", () => {
+  beforeEach(() => {
+    ipc.overrides.set("repair_instance", () => Promise.resolve({ reinstalled: false, libraries: 0, assets: 0, natives: 0 }));
+  });
+
+  const repairedToast = (id: string) => ["success", `「${id}」已修复`];
+  const toasts = () => store.getState().toasts.map((t) => [t.tone, t.title]);
+
+  const failLaunchWith = async (code: string, detail?: Record<string, unknown>) => {
     ipc.overrides.set("launch_game", () => {
       throw new IpcError(code, "启动失败", detail);
     });
-    await store.actions.launch(id);
-    expect(store.getState().session).toMatchObject({ instanceId: id, phase: "failed" });
-    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+    await store.actions.launch("生存");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code } });
   };
-  const repair = async (id: string, opts?: { reinstallLoader?: boolean }): Promise<void> => {
+  const repair = async (id: string, opts?: { launchAfter?: boolean; reinstallLoader?: boolean }) => {
     await store.actions.repairInstance(id, opts);
     await settle();
   };
 
-  it("失败说的就是文件坏了：修好后横幅收起", async () => {
-    await failLaunch("生存", "version_broken");
-    await repair("生存");
+  it("版本文件不完整的失败卡随修复完成撤下：入口回到启动，通知说已修复", async () => {
+    await failLaunchWith("version_broken");
+    const fix = store.actions.failureFix("repair");
+    if (!("run" in fix)) throw new Error("修复实例应是命令类修复动作");
+    await fix.run();
+    await settle();
+    expect(toasts()).toContainEqual(repairedToast("生存"));
     expect(store.getState().session).toBeNull();
   });
 
   it("失败说的是加载器文件缺失：重装加载器后横幅收起", async () => {
-    await failLaunch("生存", "loader_library_missing", { path: "D:/mc/libraries/fabric-loader-0.16.10.jar" });
+    await failLaunchWith("loader_library_missing", { path: "D:/mc/libraries/fabric-loader-0.16.10.jar" });
     await repair("生存", { reinstallLoader: true });
     expect(store.getState().session).toBeNull();
   });
 
+  it("修复解决不了的失败卡留着：Java 不存在不会因为补全了文件就好", async () => {
+    await failLaunchWith("java_missing", { major: 21, mc_version: "1.21.1" });
+    await repair("生存");
+    expect(toasts()).toContainEqual(repairedToast("生存"));
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "java_missing" } });
+  });
+
   it("修复管不到的失败留着：网络问题修完文件还在", async () => {
-    await failLaunch("生存", "files_offline", { count: 3 });
+    await failLaunchWith("files_offline", { count: 3 });
     await repair("生存");
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "files_offline" } });
   });
 
-  it("修的是别的实例：这个实例的失败留着", async () => {
-    await failLaunch("生存", "version_broken");
+  it("修的是别的实例时不动这张失败卡", async () => {
+    await failLaunchWith("version_broken");
     await repair("创造");
+    expect(toasts()).toContainEqual(repairedToast("创造"));
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
   });
 
   it("修复本身失败：横幅留着，问题还在", async () => {
-    await failLaunch("生存", "version_broken");
+    await failLaunchWith("version_broken");
     ipc.overrides.set("repair_instance", () => {
       throw new IpcError("download_failed", "下载失败");
     });
     await repair("生存");
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
+  });
+
+  it("修好后接着启动却停在登录弹窗上：会话没被换掉，失败卡同样撤下", async () => {
+    await failLaunchWith("version_broken");
+    ipc.overrides.set("list_accounts", () => []);
+    ipc.overrides.set("current_account", () => null);
+    await store.actions.reload("accounts");
+    await repair("生存", { launchAfter: true });
+    expect(store.getState().login).toMatchObject({ kind: "no_account", intent: { kind: "launch", instanceId: "生存" } });
+    expect(store.getState().session).toBeNull();
   });
 });
 
@@ -1249,6 +1277,16 @@ describe("装到一半被重扫扫到半成品目录", () => {
   });
 });
 
+describe("补全失败的通知", () => {
+  it("标题说的是补全，不是下载", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ipc.overrides.set("repair_instance", () => Promise.reject(new IpcError("files_failed", "两个文件没下完")));
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(store.getState().toasts.map((t) => [t.title, t.body])).toEqual([["补全「生存」的游戏文件没有完成", "两个文件没下完"]]);
+  });
+});
+
 describe("重试失败的新建", () => {
   const spec = { name: "新世界", mcVersion: "1.21.1", loader: "fabric" as const, loaderVersion: "0.16.10", cover: "grass" };
   /** 后端失败时保留的目录：带着安装标记，结局是失败。 */
@@ -1317,6 +1355,54 @@ describe("重试失败的新建", () => {
     await settle();
     expect(callsOf(ipc, "install_version")).toHaveLength(2);
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
+  });
+
+  it("从实例库修好之后：失败的新建那一行撤下，不留一个点了只会撞名的重试", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+    expect(commands()).toEqual([["install_version", "failed"]]);
+
+    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+    instances = instances.map((i) => (i.id === "新世界" ? instanceDto("新世界", { mc_version: "1.21.1" }) : i));
+    await store.actions.repairInstance("新世界");
+    await settle();
+
+    expect(commands()).toEqual([["repair_instance", "done"]]);
+  });
+
+  it("补全再次失败：失败的新建那一行留着，实例还没好", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+
+    ipc.overrides.set("repair_instance", () => Promise.reject(new IpcError("network_failed", "连接超时")));
+    await store.actions.repairInstance("新世界");
+    await settle();
+
+    expect(commands()).toEqual([
+      ["install_version", "failed"],
+      ["repair_instance", "failed"],
+    ]);
+  });
+
+  it("补全成功只撤同一实例的行：别的实例失败的新建还在", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+    await store.actions.createInstance({ ...spec, name: "另一个世界" });
+    await settle();
+    expect(commands()).toEqual([
+      ["install_version", "failed"],
+      ["install_version", "failed"],
+    ]);
+
+    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+    instances = instances.map((i) => (i.id === "新世界" ? instanceDto("新世界", { mc_version: "1.21.1" }) : i));
+    await store.actions.repairInstance("新世界");
+    await settle();
+
+    expect(store.getState().tasks.filter((t) => t.status === "failed").map((t) => t.instanceId)).toEqual(["另一个世界"]);
   });
 
   it("同名目录不是安装留下的（例如已有实例改名撞上）：不改排补全", async () => {
@@ -1468,6 +1554,30 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
     expect(entry("新世界")).toMatchObject({ placeholder: false, status: "ready" });
     expect(store.getState().instances.filter((i) => i.id === "新世界")).toHaveLength(1);
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["新世界"] }]);
+  });
+
+  it("中断前其实已经装完：重试撤下这一行并提示，不重跑 install_version 撞名", async () => {
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.21.1" })];
+    await restartWith(interrupted("t-old", "game", "新世界", "install_version", { id: "1.21.1", loader: null, loaderVersion: null, targetName: "新世界" }));
+
+    store.actions.retryTask("t-old");
+    await settle();
+
+    expect(callsOf(ipc, "install_version")).toEqual([]);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(store.getState().tasks).toEqual([]);
+    expect(store.getState().toasts.map((t) => t.title)).toContain(TASK_TOAST.installFinishedBeforeInterrupt("新世界").title);
+  });
+
+  it("「全部重试」遇到中断前已经装完的新建：撤下这一行，不计入重试个数", async () => {
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.21.1" })];
+    await restartWith(interrupted("t-old", "game", "新世界", "install_version", { id: "1.21.1", loader: null, loaderVersion: null, targetName: "新世界" }));
+
+    expect(store.actions.retryFailedTasks()).toBe(0);
+    await settle();
+
+    expect(callsOf(ipc, "install_version")).toEqual([]);
+    expect(store.getState().tasks).toEqual([]);
   });
 
   it("导入整合包：全部重试期间同样有占位项，失败后重扫落定才撤下", async () => {

@@ -525,6 +525,23 @@
   min-width: 0;
 }
 
+/* 真实版本号又长又没有断点（1.14.2+kotlin.2.4.21），单元格是 overflow: hidden，不让它换行就被静默切掉尾巴 */
+.versionCell .modVersion {
+  flex: none;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.versionCell .updateTag {
+  height: auto;
+  min-height: var(--tag-height);
+  max-width: 100%;
+  padding-block: var(--sk-space-2);
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .modInstalled {
   color: var(--sk-text-2);
   font-family: var(--sk-mono);

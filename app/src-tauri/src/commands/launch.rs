@@ -442,6 +442,7 @@ enum AccountArg {
 /// 启动一个已安装版本。账户给 `account_uuid`（账户库里的账户）或 `offline_name`（临时离线账户）二者之一。
 /// 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析。`quick_play` 给出时启动后直接进入存档或
 /// 加入服务器：版本不支持报 quick_play_unsupported（detail.version_id、mode），存档不在报 world_not_found，
+/// 世界文件夹名过不了系统代码页报 world_name_unencodable（detail.version_id、world、char），
 /// 地址写法不对报 invalid_argument（detail.address），都在校验游戏文件阶段报出。
 ///
 /// `offline_fallback` 为真时以离线方式进单人：不刷新登录，用账户上次登录时的档案名进游戏。能否放行由

@@ -20,6 +20,8 @@ pub enum CrashCategory {
     JavaVersionMismatch,
     /// 内存不足（堆溢出 / 无法分配堆）。
     OutOfMemory,
+    /// Java 不接受自定义的 JVM 参数，虚拟机没能起来。
+    JvmArgsInvalid,
     /// Forge / NeoForge 的语言提供器缺失（Mod 依赖的语言支持库没装，或 Mod 是给另一个 Forge 做的）。
     MissingLanguageProvider,
     /// Mod 要求别的游戏版本或加载器版本。
@@ -40,7 +42,9 @@ pub enum CrashCategory {
     GraphicsDriver,
     /// 游戏或库文件损坏（jar 不完整 / 被修改）。
     CorruptedJar,
-    /// 进程以 Windows 异常码退出而日志里没有已知原因；只由退出码兜底产出，不进规则表。
+    /// Java 建不起本机回环连接，用到网络选择器的 Mod 起不来，多半是临时目录的问题。
+    LoopbackUnavailable,
+    /// 进程死在原生代码里而日志里没有已知原因；只由 JVM 错误头或退出码兜底产出，不进规则表。
     NativeCrash,
 }
 
@@ -75,13 +79,26 @@ struct Rule {
     advice: &'static str,
 }
 
-/// Mod 要求别的游戏或加载器版本，两种日志写法各一个分支，各自捕获提出要求的那个 Mod 的 id：
+/// Mod 要求别的游戏或加载器版本，每种日志写法一个分支，点得出是哪个 Mod 时捕获它的 id：
 /// - Fabric Loader：`Mod 'Sodium' (sodium) 0.5.3 requires version 1.20.1 of 'Minecraft' (minecraft), but only
 ///   the wrong version is present: 1.20.4!`（内置 Mod 没有 `Mod ` 前缀，依赖方渲染成 `'Minecraft' (minecraft)`）；
+/// - Fabric Loader 在中文系统上：`模组 'Sodium' (sodium) 0.5.3 需要 'Minecraft' (minecraft) 的 1.20.1 版本，但已经
+///   安装了的版本 1.20.4 不对！`；
+/// - Quilt Loader：`36 mods requires version [0.25.0, ∞) of quilt_loader, which is missing!`，主语可能是「N 个
+///   Mod」，点不出是谁；
 /// - Forge / NeoForge：`\tMod ID: 'minecraft', Requested by: 'sodium', Expected range: '[1.20.4]', Actual version: '1.20.1'`。
 ///
 /// 依赖 Java 的同类报错不归这里（那是换 Java 的事），其余 Mod 之间的版本不符仍归「缺少前置」。
-const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'";
+///
+/// Fabric Loader 给玩家看的说明按系统语言翻译，同一次失败它还会写一行不翻译的原因
+/// `HARD_DEP_INCOMPATIBLE_PRESELECTED sodium 0.8.13 {depends minecraft @ [1.21]}`，最后一个分支认这种写法，
+/// 任何语言下都有。
+const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'|hard_dep(?:_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends (?:minecraft|fabricloader|quilt_loader) @";
+
+/// JVM 参数被拒时 Java 自己打的那一行。一个开关没写 `-` 时 Java 把它当成主类，报的是「找不到主类」，主类名带不带点
+/// 区分得开：版本 JSON 给的主类都带包名，不带点的只能是写错的参数；真缺主类是文件问题，不归这里。Java 按系统语言翻译这
+/// 一句，中文两种写法都认。
+const JVM_ARG_REJECTED: &str = r"(?i)^(?:unrecognized option: \S+|error: could not find or load main class [^\s.]+\s*$|错误: 找不到或无法加载主类 [^\s.]+\s*$|錯誤: 找不到或無法載入主要類別 [^\s.]+\s*$)";
 
 /// Intel OpenGL 驱动（ig4icd64、ig75icd64、ig9icd64、igxelpicd64 等）出现在原生调用栈帧行里。
 const INTEL_ICD_FRAME: &str = r"(?i)^\s*#?\s*C\s+\[(ig[0-9a-z]{0,8}icd(?:32|64)\.dll)\+";
@@ -94,8 +111,10 @@ const RULES: &[Rule] = &[
             "has been compiled by a more recent version of the java runtime",
             "class file version",
         ],
-        regex: None,
-        extract: Some(r"(?i)(class file version \d+)"),
+        // Mod 声明要求更高的 Java 时 Fabric Loader 的报错：依赖方渲染成 `'OpenJDK ...' (java)`，不翻译的原因行是
+        // `{depends java @ [>=21]}`，紧跟着的 `Fix:` 行写着要换成的 `add:java 21`。
+        regex: Some(r"(?i)\{depends java @|\(java\), but only the wrong version"),
+        extract: Some(r"(?i)(class file version \d+)|add:(java \d+)"),
         summary: "Java 版本与游戏或 Mod 不匹配",
         advice: concat!(
             "改用目标版本要求的 Java：较新的 Minecraft 需要 Java 17 或 21，1.16 及更早需要 Java 8。可在设置中切换，或让",
@@ -115,6 +134,24 @@ const RULES: &[Rule] = &[
         extract: None,
         summary: "内存不足",
         advice: "调高最大内存（-Xmx），减少同时加载的 Mod 与高清材质；32 位 Java 无法分配大内存，请改用 64 位 Java。",
+    },
+    Rule {
+        category: CrashCategory::JvmArgsInvalid,
+        patterns: &[
+            "unrecognized vm option",
+            "improperly specified vm option",
+            "invalid maximum heap size",
+            "invalid initial heap size",
+            "initial heap size set to a larger value than the maximum heap size",
+            "conflicting collector combinations in option list",
+            "must be enabled via -xx:+unlock",
+        ],
+        regex: Some(JVM_ARG_REJECTED),
+        extract: Some(
+            r"(?i)vm option '([^']+)'|heap size: (\S+)|unrecognized option: (\S+)|main class ([^\s.]+)\s*$|主类 ([^\s.]+)\s*$|主要類別 ([^\s.]+)\s*$",
+        ),
+        summary: "Java 不接受自定义的 JVM 参数",
+        advice: "到实例设置里改掉或删掉写错的 JVM 参数再试。",
     },
     Rule {
         category: CrashCategory::MissingLanguageProvider,
@@ -142,8 +179,18 @@ const RULES: &[Rule] = &[
             "requires version",
             "incompatible mod set",
         ],
-        regex: None,
-        extract: Some(r"(?i)of ([a-z0-9_\-]+),? which is missing"),
+        // 依赖方是游戏、加载器或 Java 的原因行已被上面的规则占走，留下的是 Mod 之间的依赖。
+        regex: Some(concat!(
+            r"(?i)hard_dep(?:_no_candidate|_incompatible_preselected)? \S+ \S+ \{depends |",
+            r"需要 模组 '[^']+' \([a-z0-9_\-]+\) 的"
+        )),
+        // 缺的是 Mod 时两种语言都带显示名：`of mod 'Fabric API' (fabric-api)`、`需要 模组 'Fabric API' (fabric-api) 的`。
+        extract: Some(concat!(
+            r"(?i)of ([a-z0-9_\-]+),? which is missing|",
+            r"of mod '[^']+' \(([a-z0-9_\-]+)\)|",
+            r"需要 模组 '[^']+' \(([a-z0-9_\-]+)\) 的|",
+            r"hard_dep_no_candidate \S+ \S+ \{depends ([a-z0-9_\-]+) @"
+        )),
         summary: "缺少前置 Mod 或依赖版本不满足",
         advice: "根据日志补齐缺失的前置 Mod（如 Fabric API），或把相关 Mod 调整到彼此兼容的版本。",
     },
@@ -246,6 +293,14 @@ const RULES: &[Rule] = &[
             "重新校验并补全文件，或删除损坏的 jar 后重新下载。"
         ),
     },
+    Rule {
+        category: CrashCategory::LoopbackUnavailable,
+        patterns: &["unable to establish loopback connection"],
+        regex: None,
+        extract: None,
+        summary: "Java 建不起本机回环连接",
+        advice: "确认环境变量 TEMP 指向的文件夹存在、可写，路径不要太长；安全软件拦截时也会这样，可以把 Java 加入白名单再试。",
+    },
 ];
 
 /// 编译好的规则：子串命中、正则命中与附加信息提取各一条正则。
@@ -293,6 +348,20 @@ static COMPILED: LazyLock<Vec<CompiledRule>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Fabric Loader 整体报不兼容的两行，同样不翻译。说不清是哪一类不兼容（比如两个 Mod 互相声明冲突）时
+/// 它们是唯一的线索；说得清时它们是同一件事的另一种说法，不能再算一条。
+static FABRIC_INCOMPATIBLE: LazyLock<Regex> = LazyLock::new(|| {
+    literal_alternation(&[
+        "incompatible mods found!",
+        "some of your mods are incompatible",
+    ])
+});
+
+/// JVM 致命错误头里的异常行：`#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x00007ffb, pid=1, tid=2`。
+static JVM_EXCEPTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^#\s+EXCEPTION_[A-Z_]+ \(0x([0-9a-f]{8})\)").expect("内置正则必须可编译")
+});
+
 /// 崩溃标记：崩溃报告头、JVM 致命错误头、主线程未捕获异常。
 static CRASH_MARKER: LazyLock<Regex> = LazyLock::new(|| {
     literal_alternation(&[
@@ -308,46 +377,64 @@ pub fn analyze(log: &str, exit_code: Option<i32>) -> Vec<CrashDiagnosis> {
     let lines: Vec<&str> = log.lines().collect();
     let mut out = analyze_lines(&lines);
     if out.is_empty() {
-        out.extend(exit_code_clue(exit_code));
+        out.extend(jvm_exception_clue(&lines).or_else(|| exit_code_clue(exit_code)));
     }
     out
 }
 
 /// 扫描按行切好的日志，返回全部命中的诊断（按规则优先级顺序），`line` 是命中行的下标。
 ///
-/// 每条规则取第一条命中、且没被更高优先级规则占用的行：Fabric 的版本不符报错一行里同时有
-/// 「requires version」与「(minecraft)」，归了「版本不符」就不该再算一条「缺少前置」。附加信息从命中行起
-/// 往后找第一处能提取的地方（同一条报错的细节常常在下一行，例如 Fabric 的依赖报错先说
+/// 每条规则取第一条命中、且没被更高优先级规则占用的行，并占下它命中的所有行：Fabric 的一次版本不符报错
+/// 有好几行都写着「requires version」与「(minecraft)」，归了「版本不符」就不该再算一条「缺少前置」。
+/// 附加信息从命中行起往后找第一处能提取的地方（同一条报错的细节常常在下一行，例如 Fabric 的依赖报错先说
 /// 「Incompatible mod set」再逐条列出缺的是谁）。
 pub fn analyze_lines(lines: &[&str]) -> Vec<CrashDiagnosis> {
     let mut out = Vec::new();
     let mut occupied = vec![false; lines.len()];
     for compiled in COMPILED.iter() {
-        let Some(index) = lines
-            .iter()
-            .enumerate()
-            .position(|(index, line)| !occupied[index] && compiled.hits(line))
-        else {
+        let hits: Vec<usize> = (0..lines.len())
+            .filter(|&index| !occupied[index] && compiled.hits(lines[index]))
+            .collect();
+        let Some(&first) = hits.first() else {
             continue;
         };
-        occupied[index] = true;
-        let detail = compiled.extract.as_ref().and_then(|re| {
-            lines[index..].iter().find_map(|line| {
-                re.captures(line)
-                    .and_then(|caps| caps.iter().skip(1).flatten().next())
-                    .map(|m| m.as_str().trim().to_owned())
-            })
-        });
-        out.push(CrashDiagnosis {
-            category: compiled.rule.category,
-            summary: compiled.rule.summary.to_owned(),
-            advice: compiled.rule.advice.to_owned(),
-            detail,
-            matched: truncate(lines[index].trim(), 240),
-            line: index,
-        });
+        for index in hits {
+            occupied[index] = true;
+        }
+        out.push(diagnose(compiled, lines, first));
+    }
+    if out.is_empty()
+        && let Some(index) = lines.iter().position(|l| FABRIC_INCOMPATIBLE.is_match(l))
+    {
+        let missing = COMPILED
+            .iter()
+            .find(|c| c.rule.category == CrashCategory::MissingDependency)
+            .expect("规则表里有缺少前置这一条");
+        out.push(diagnose(missing, lines, index));
     }
     out
+}
+
+fn diagnose(compiled: &CompiledRule, lines: &[&str], index: usize) -> CrashDiagnosis {
+    let detail = compiled.extract.as_ref().and_then(|re| {
+        lines[index..]
+            .iter()
+            .find_map(|line| first_capture(re, line))
+    });
+    CrashDiagnosis {
+        category: compiled.rule.category,
+        summary: compiled.rule.summary.to_owned(),
+        advice: compiled.rule.advice.to_owned(),
+        detail: detail.map(|text| text.trim().to_owned()),
+        matched: truncate(lines[index].trim(), 240),
+        line: index,
+    }
+}
+
+/// 第一个参与匹配的捕获组：提取式按分支写多种日志格式，每个分支有自己的组。
+fn first_capture<'a>(re: &Regex, text: &'a str) -> Option<&'a str> {
+    re.captures(text)
+        .and_then(|caps| caps.iter().skip(1).flatten().next().map(|m| m.as_str()))
 }
 
 /// 日志里是否出现明确的崩溃标记（崩溃报告头、JVM 致命错误、主线程未捕获异常）。
@@ -414,6 +501,25 @@ pub fn explain_exit_code(code: i32) -> Option<ExitCodeNote> {
         })
 }
 
+/// JVM 致命错误头给出的兜底线索。JVM 自己接住原生异常时写完 hs_err 就以退出码 1 结束，退出码看不出它死在原生代码里，
+/// 异常码只留在错误头里。`detail` 是按退出码同一写法的十六进制。
+pub fn jvm_exception_clue(lines: &[&str]) -> Option<CrashDiagnosis> {
+    lines.iter().enumerate().find_map(|(index, line)| {
+        let hex = first_capture(&JVM_EXCEPTION, line)?.to_ascii_uppercase();
+        let detail = format!("0x{hex}");
+        Some(CrashDiagnosis {
+            category: CrashCategory::NativeCrash,
+            summary: format!("JVM 死在原生代码里（{detail}）"),
+            advice: NATIVE_CRASH_ADVICE.to_owned(),
+            detail: Some(detail),
+            matched: truncate(line.trim(), 240),
+            line: index,
+        })
+    })
+}
+
+const NATIVE_CRASH_ADVICE: &str = "日志里没有匹配到已知原因。常见于显卡驱动、Java 本体或带本地库的 Mod，可以先更新显卡驱动，再换一个 Java 版本试试。";
+
 /// 只凭退出码给出的兜底线索：访问冲突与紧急中止说明进程死在了原生代码里，值得一条线索；退出码 1
 /// 太笼统（Java 抛出未捕获异常也是 1），只给说明不给线索。`detail` 是十六进制退出码，`matched` 为空、
 /// `line` 为 0，因为它不来自任何一行日志。
@@ -423,7 +529,7 @@ pub fn exit_code_clue(code: Option<i32>) -> Option<CrashDiagnosis> {
         ExitCodeKind::AccessViolation | ExitCodeKind::StackBufferOverrun => Some(CrashDiagnosis {
             category: CrashCategory::NativeCrash,
             summary: format!("游戏进程异常退出（退出码 {}，{}）", note.hex, note.summary),
-            advice: "日志里没有匹配到已知原因。常见于显卡驱动、Java 本体或带本地库的 Mod，可以先更新显卡驱动，再换一个 Java 版本试试。".to_owned(),
+            advice: NATIVE_CRASH_ADVICE.to_owned(),
             detail: Some(note.hex),
             matched: String::new(),
             line: 0,
@@ -489,10 +595,12 @@ const NON_MOD_TOKENS: &[&str] = &[
     "javafml",
 ];
 
-/// 点名 Mod 的正则：复用「缺少前置」「重复 Mod」两条规则的提取式（它们捕获的正是 mod id），另补三种
-/// 崩溃日志的通用写法：Fabric/Quilt 依赖报错的 `Mod 'Sodium' (sodium) 0.5.3`（括号内才是 id）、
-/// mixin 报错尾部的 `from mod sodium`，以及 Forge 依赖报错的 `Requested by: 'sodium'`。mixin 规则自带的
-/// 提取式捕获的是 `*.mixins.json` 配置文件名而非 mod id，故不在复用之列。
+/// 点名 Mod 的正则：复用「缺少前置」「重复 Mod」两条规则的提取式（它们捕获的正是 mod id），另补几种
+/// 崩溃日志的通用写法：Fabric/Quilt 依赖报错的 `Mod 'Sodium' (sodium) 0.5.3`（括号内才是 id，中文系统上
+/// 是 `模组 'Sodium' (sodium)`）、Fabric Loader 不翻译的原因行 `HARD_DEP sodium 0.8.13 {depends ...}`、
+/// Mod 初始化抛异常时的 `provided by 'sodium'`、mixin 报错尾部的 `from mod sodium`，以及 Forge 依赖报错的
+/// `Requested by: 'sodium'`。mixin 规则自带的提取式捕获的是 `*.mixins.json` 配置文件名而非 mod id，
+/// 故不在复用之列。
 static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     RULES
         .iter()
@@ -505,8 +613,11 @@ static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .filter_map(|rule| rule.extract)
         .chain([
             r"(?i)\bmod '[^']+' \(([a-z0-9_\-]+)\)",
+            r"(?i)模组 '[^']+' \(([a-z0-9_\-]+)\)",
+            r"(?i)\bhard_dep(?:_no_candidate|_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends ",
             r"(?i)\bfrom mod ([a-z0-9_\-]+)",
             r"(?i)requested by: '([a-z0-9_\-]+)'",
+            r"(?i)\bprovided by '([a-z0-9_\-]+)'",
         ])
         .map(|pattern| Regex::new(pattern).expect("内置 mod id 提取正则必须可编译"))
         .collect()
@@ -517,7 +628,13 @@ pub fn extract_mod_ids(log: &str) -> Vec<String> {
     let mut hits: Vec<(usize, String)> = Vec::new();
     for re in MOD_ID_PATTERNS.iter() {
         for caps in re.captures_iter(log) {
-            let group = caps.get(1).expect("提取正则的第 1 组是必选捕获组");
+            // 提取式按分支写多种日志格式，每个分支各有自己的捕获组。
+            let group = caps
+                .iter()
+                .skip(1)
+                .flatten()
+                .next()
+                .expect("提取式的每个分支都有捕获组");
             let id = group.as_str().trim().to_ascii_lowercase();
             if id.is_empty() || NON_MOD_TOKENS.contains(&id.as_str()) {
                 continue;
@@ -623,6 +740,190 @@ mod tests {
         );
     }
 
+    /// 真实 Fabric Loader 0.20.1 在中文系统上的输出（已还原成普通行）：说明文字全是中文，
+    /// 英文的「which is missing」一个字都没有，不翻译的只有 Reason 那几行。
+    const FABRIC_ZH_MISSING: &str = "[main/WARN]: Mod resolution failed
+[main/INFO]: Immediate reason: [HARD_DEP_NO_CANDIDATE architectury 9.2.14 {depends fabric-api @ [>=0.66.0]}, ROOT_FORCELOAD_SINGLE architectury 9.2.14]
+[main/INFO]: Reason: [HARD_DEP architectury 9.2.14 {depends fabric-api @ [>=0.66.0]}]
+[main/INFO]: Fix: add [add:fabric-api 0.66.0 ([[0.66.0,∞)])], remove [], replace []
+[main/ERROR]: Incompatible mods found!
+[main/ERROR]: net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!
+确定了一种可能的解决方法，这样做可能会解决你的问题：
+\t - 安装 fabric-api，0.66.0 及以上版本。
+更多信息：
+\t - 模组 'Architectury' (architectury) 9.2.14 需要 fabric-api 的 0.66.0 及以上版本，但没有安装它！
+\tat net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)";
+
+    const FABRIC_ZH_GAME_VERSION: &str = "[main/WARN]: Mod resolution failed
+[main/INFO]: Immediate reason: [HARD_DEP_INCOMPATIBLE_PRESELECTED sodium 0.8.13+mc1.21.1 {depends minecraft @ [1.21 || 1.21.1]}, ROOT_FORCELOAD_SINGLE sodium 0.8.13+mc1.21.1]
+[main/INFO]: Reason: [HARD_DEP sodium 0.8.13+mc1.21.1 {depends minecraft @ [1.21 || 1.21.1]}]
+[main/INFO]: Fix: add [], remove [], replace [[minecraft 1.20.1] -> add:minecraft 1.21.1 ([[1.21,1.21], [1.21.1,1.21.1]])]
+[main/ERROR]: Incompatible mods found!
+[main/ERROR]: net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!
+确定了一种可能的解决方法，这样做可能会解决你的问题：
+\t - 将 'Minecraft' (minecraft) 1.20.1 替换为 1.21 版本 或 1.21.1 版本。
+更多信息：
+\t - 模组 'Sodium' (sodium) 0.8.13+mc1.21.1 需要 'Minecraft' (minecraft) 的 1.21 版本 或 1.21.1 版本，但已经安装了的版本 1.20.1 不对！";
+
+    const FABRIC_ZH_JAVA: &str = "[main/WARN]: Mod resolution failed
+[main/INFO]: Immediate reason: [HARD_DEP_INCOMPATIBLE_PRESELECTED pfjava 1.0.0 {depends java @ [>=21]}, ROOT_FORCELOAD_SINGLE pfjava 1.0.0]
+[main/INFO]: Reason: [HARD_DEP pfjava 1.0.0 {depends java @ [>=21]}]
+[main/INFO]: Fix: add [], remove [], replace [[java 17] -> add:java 21 ([[21,∞)])]
+[main/ERROR]: Incompatible mods found!
+\t - 模组 'PF Java21 Test' (pfjava) 1.0.0 需要 'Java HotSpot(TM) 64-Bit Server VM' (java) 的 21 及以上版本，但已经安装了的版本 17 不对！";
+
+    /// 同一次 Java 报错在英文系统上的说明行：不能因为写着 requires version 再多算一条缺少前置。
+    const FABRIC_EN_JAVA: &str = "[main/INFO]: Immediate reason: [HARD_DEP_INCOMPATIBLE_PRESELECTED pfjava 1.0.0 {depends java @ [>=21]}, ROOT_FORCELOAD_SINGLE pfjava 1.0.0]
+[main/INFO]: Fix: add [], remove [], replace [[java 17] -> add:java 21 ([[21,∞)])]
+\t - Mod 'PF Java21 Test' (pfjava) 1.0.0 requires version 21 or later of 'Java HotSpot(TM) 64-Bit Server VM' (java), but only the wrong version is present: 17!";
+
+    #[test]
+    fn fabric_resolution_failures_are_recognised_in_any_language() {
+        let missing = analyze(FABRIC_ZH_MISSING, Some(1));
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert_eq!(missing[0].category, CrashCategory::MissingDependency);
+        assert_eq!(missing[0].detail.as_deref(), Some("fabric-api"));
+
+        let game = analyze(FABRIC_ZH_GAME_VERSION, Some(1));
+        assert_eq!(game.len(), 1, "{game:?}");
+        assert_eq!(game[0].category, CrashCategory::GameVersionMismatch);
+        assert_eq!(game[0].detail.as_deref(), Some("sodium"));
+
+        for log in [FABRIC_ZH_JAVA, FABRIC_EN_JAVA] {
+            let java = analyze(log, Some(1));
+            assert_eq!(java.len(), 1, "{java:?}");
+            assert_eq!(java[0].category, CrashCategory::JavaVersionMismatch);
+            assert_eq!(java[0].detail.as_deref(), Some("java 21"));
+        }
+    }
+
+    #[test]
+    fn fabric_resolution_failures_point_at_the_mods() {
+        assert_eq!(
+            extract_mod_ids(FABRIC_ZH_MISSING),
+            vec!["architectury", "fabric-api"]
+        );
+        assert_eq!(extract_mod_ids(FABRIC_ZH_GAME_VERSION), vec!["sodium"]);
+        assert_eq!(extract_mod_ids(FABRIC_ZH_JAVA), vec!["pfjava"]);
+    }
+
+    /// Mod 之间版本不符：有前置但版本不对，依赖方不是游戏、加载器或 Java，还算缺少前置，只是说不出缺的是谁。
+    #[test]
+    fn fabric_mod_to_mod_mismatch_stays_a_dependency_problem() {
+        let log = "[main/INFO]: Immediate reason: [HARD_DEP_INCOMPATIBLE_PRESELECTED rei 12.1 {depends cloth-config @ [>=11]}, ROOT_FORCELOAD_SINGLE rei 12.1]";
+        let diag = primary(log, CrashCategory::MissingDependency);
+        assert_eq!(diag.detail, None);
+    }
+
+    /// 两个 Mod 互相声明冲突：说不清哪一类时，整体报错这两行是唯一的线索。
+    #[test]
+    fn fabric_incompatible_alone_is_a_dependency_clue_only_when_nothing_better_exists() {
+        let log = "[main/INFO]: Immediate reason: [NEG_HARD_DEP a 1.0 {breaks b @ [<2]}]
+[main/ERROR]: Incompatible mods found!";
+        let diags = analyze(log, Some(1));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+        assert_eq!(diags[0].detail, None);
+        assert_eq!(diags[0].line, 1);
+    }
+
+    /// Mod 初始化抛异常时 Fabric 只写 provided by，这是日志里唯一指向具体 Mod 的地方。
+    #[test]
+    fn entrypoint_failure_names_the_mod() {
+        assert_eq!(
+            extract_mod_ids(
+                "java.lang.RuntimeException: Could not execute entrypoint stage 'client' due to errors, provided by 'pfcrash' at 'pfcrash.Boom'!"
+            ),
+            vec!["pfcrash"]
+        );
+    }
+
+    #[test]
+    fn jvm_rejecting_the_args_is_recognised() {
+        for (log, detail) in [
+            (
+                "Unrecognized VM option 'NotARealFlag'\nError: Could not create the Java Virtual Machine.",
+                Some("NotARealFlag"),
+            ),
+            (
+                "Improperly specified VM option 'MaxGCPauseMillis'\nError: Could not create the Java Virtual Machine.",
+                Some("MaxGCPauseMillis"),
+            ),
+            ("Invalid maximum heap size: -Xmx4GB", Some("-Xmx4GB")),
+            ("Invalid initial heap size: -Xms2x", Some("-Xms2x")),
+            ("Unrecognized option: --add-opns", Some("--add-opns")),
+            (
+                "Error: VM option 'UseZGC' is experimental and must be enabled via -XX:+UnlockExperimentalVMOptions.",
+                Some("UseZGC"),
+            ),
+            (
+                "Conflicting collector combinations in option list; please refer to the release notes for the combinations allowed",
+                None,
+            ),
+            (
+                "Error occurred during initialization of VM\nInitial heap size set to a larger value than the maximum heap size",
+                None,
+            ),
+            (
+                "错误: 找不到或无法加载主类 XX:+UseG1GC",
+                Some("XX:+UseG1GC"),
+            ),
+            ("錯誤: 找不到或無法載入主要類別 Xmx4G", Some("Xmx4G")),
+            (
+                "Error: Could not find or load main class Xmx4G",
+                Some("Xmx4G"),
+            ),
+        ] {
+            let diag = primary(log, CrashCategory::JvmArgsInvalid);
+            assert_eq!(diag.detail.as_deref(), detail, "{log}");
+        }
+    }
+
+    /// 真缺主类是文件问题：版本 JSON 给的主类带包名，不能说成参数写错。
+    #[test]
+    fn missing_real_main_class_is_not_a_bad_jvm_arg() {
+        for log in [
+            "错误: 找不到或无法加载主类 net.fabricmc.loader.impl.launch.knot.KnotClient",
+            "Error: Could not find or load main class net.minecraft.client.main.Main",
+            "[main/INFO]: --unrecognized option: x",
+        ] {
+            assert_absent(log, CrashCategory::JvmArgsInvalid);
+        }
+    }
+
+    /// Windows 上 NIO 的 Selector 靠临时目录里的 AF_UNIX 套接字建回环管道，用到 Netty 或 java.net.http 的 Mod
+    /// 在这里失败时只留下这一句。
+    #[test]
+    fn loopback_failure_points_at_the_temp_directory() {
+        let log = "Caused by: io.netty.channel.ChannelException: failed to open a new selector
+                   Caused by: java.io.IOException: Unable to establish loopback connection
+                   	at java.base/sun.nio.ch.PipeImpl.<init>(PipeImpl.java:175)";
+        let diags = analyze(log, Some(1));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::LoopbackUnavailable);
+        assert_eq!(diags[0].line, 1);
+        assert!(diags[0].advice.contains("TEMP"), "{}", diags[0].advice);
+    }
+
+    /// 真实 JVM 崩溃：写完 hs_err 后进程以退出码 1 结束，退出码兜底打不中。
+    #[test]
+    fn jvm_fatal_header_gives_a_native_crash_clue() {
+        let log = "#\n# A fatal error has been detected by the Java Runtime Environment:\n#\n#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x00007ffb617ce847, pid=83492, tid=72668\n#";
+        let diags = analyze(log, Some(1));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].category, CrashCategory::NativeCrash);
+        assert_eq!(diags[0].detail.as_deref(), Some("0xC0000005"));
+        assert_eq!(diags[0].line, 3);
+    }
+
+    #[test]
+    fn jvm_fatal_header_stays_behind_the_rules() {
+        let log = "# C  [ig9icd64.dll+0x57a41c]\n#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x1, pid=1, tid=2";
+        let diags = analyze(log, Some(1));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].category, CrashCategory::IntelGraphicsDriver);
+    }
+
     #[test]
     fn mixin_failure_positive_and_negative() {
         let log =
@@ -719,7 +1020,7 @@ mod tests {
                 compiled.rule.category
             );
         }
-        assert_eq!(MOD_ID_PATTERNS.len(), 5);
+        assert_eq!(MOD_ID_PATTERNS.len(), 8);
         assert!(SUSPECTED_HEAD.is_match("Suspected Mods: NONE"));
         assert!(!has_crash_marker("Stopping!"));
     }
@@ -777,6 +1078,72 @@ mod tests {
             .into_iter()
             .find(|d| d.category == category)
             .unwrap_or_else(|| panic!("应命中 {category:?}：{log}"))
+    }
+
+    /// Fabric Loader 0.20.1 在中文系统上的真实报错：外层两句是英文，细节按系统语言本地化。
+    const FABRIC_INCOMPATIBLE_ZH: &str = "[main/ERROR]: Incompatible mods found!\n\
+net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!\n\
+确定了一种可能的解决方法，这样做可能会解决你的问题：\n\
+\t - 将 模组 'Fabric API' (fabric-api) 0.83.0+1.20 替换为 0.92.0+1.20.1 及以上版本。\n\
+更多信息：\n\
+\t - 模组 'Fabric API' (fabric-api) 0.83.0+1.20 需要 'Minecraft' (minecraft) 的 从 1.20-（含）到 1.20.1-（不含）的任意版本，但已经安装了的版本 1.20.1 不对！\n\
+\t - 模组 'YetAnotherConfigLib' (yet_another_config_lib_v3) 3.6.6+1.20.1-fabric 需要 模组 'Fabric API' (fabric-api) 的 0.92.0+1.20.1 及以上版本，但已经安装了的版本 0.83.0+1.20 不对！\n";
+
+    /// 同一次失败在英文系统上的措辞，由 Fabric Loader 自带的英文语言文件拼出。
+    const FABRIC_INCOMPATIBLE_EN: &str = "[main/ERROR]: Incompatible mods found!\n\
+net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!\n\
+A potential solution has been determined, this may resolve your problem:\n\
+\t - Replace mod 'Fabric API' (fabric-api) 0.83.0+1.20 with version 0.92.0+1.20.1 or later.\n\
+More details:\n\
+\t - Mod 'Fabric API' (fabric-api) 0.83.0+1.20 requires any version between 1.20- (inclusive) and 1.20.1- (exclusive) of 'Minecraft' (minecraft), but only the wrong version is present: 1.20.1!\n\
+\t - Mod 'YetAnotherConfigLib' (yet_another_config_lib_v3) 3.6.6+1.20.1-fabric requires version 0.92.0+1.20.1 or later of mod 'Fabric API' (fabric-api), but only the wrong version is present: 0.83.0+1.20!\n";
+
+    #[test]
+    fn fabric_incompatible_mods_are_recognised_in_both_languages() {
+        for log in [FABRIC_INCOMPATIBLE_ZH, FABRIC_INCOMPATIBLE_EN] {
+            let mismatch = find(log, CrashCategory::GameVersionMismatch);
+            assert_eq!(mismatch.detail.as_deref(), Some("fabric-api"), "{log}");
+            let missing = find(log, CrashCategory::MissingDependency);
+            assert_eq!(missing.line, 6, "{log}");
+            assert_eq!(missing.detail.as_deref(), Some("fabric-api"), "{log}");
+            assert_eq!(
+                extract_mod_ids(log),
+                vec![
+                    "fabric-api".to_owned(),
+                    "yet_another_config_lib_v3".to_owned()
+                ],
+                "{log}"
+            );
+        }
+    }
+
+    /// 中文报错里缺前置的写法，语言文件 `resolution.depends.missing`。
+    #[test]
+    fn missing_dependency_in_chinese_names_the_mod() {
+        let log = "[main/ERROR]: Incompatible mods found!\n\
+                   \t - 模组 'Zoomify' (zoomify) 2.15.2 需要 模组 'Fabric Language Kotlin' (fabric-language-kotlin) 的 任意版本，但没有安装它！";
+        let diag = primary(log, CrashCategory::MissingDependency);
+        assert_eq!(diag.detail.as_deref(), Some("fabric-language-kotlin"));
+    }
+
+    /// Quilt Loader 把加载器版本不够也写成 missing：`quilt_loader` 不是能到发现页搜的 Mod。
+    #[test]
+    fn quilt_loader_too_old_is_a_version_mismatch_not_a_missing_mod() {
+        let log = "36 mods requires version [0.25.0, ∞) of quilt_loader, which is missing!";
+        let diag = primary(log, CrashCategory::GameVersionMismatch);
+        assert_eq!(diag.detail, None);
+        assert_absent(log, CrashCategory::MissingDependency);
+    }
+
+    #[test]
+    fn healthy_fabric_lines_stay_quiet() {
+        for healthy in [
+            "[main/INFO]: Loading 84 mods:",
+            "[main/WARN]: Mod resolution failed",
+            "\t- fabric-api 0.92.12+1.20.1",
+        ] {
+            assert!(analyze(healthy, None).is_empty(), "{healthy}");
+        }
     }
 
     #[test]

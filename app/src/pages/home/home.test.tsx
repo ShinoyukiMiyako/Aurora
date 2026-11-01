@@ -229,15 +229,24 @@ describe("主页：问候与继续游玩", () => {
     expect(text()).toContain("存档「海岛据点」");
   });
 
-  it("大卡落到损坏实例且存档数不出来：不读存档目录，也不弹存档列表读不出来", async () => {
-    instances = instances.map((i) => (i.id === "生存" ? { ...i, status: "broken", broken_reason: "缺少版本 JSON", world_count: null } : i));
+  it("大卡落到缺版本 JSON 的实例且存档数不出来：工作目录解析不出来，不读存档目录，也不弹错误", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, status: "broken", broken_reason: "缺少版本 JSON", mc_version: null, world_count: null, mod_count: null } : i));
     ipc.overrides.set("list_instance_content", () => {
-      throw new Error("instance_not_found");
+      throw new IpcError("instance_failed", "实例 生存 的版本 JSON 不可用：缺少版本 JSON");
     });
     await mount();
     expect(document.querySelector("h2")?.textContent).toBe("生存");
     expect(callsOf(ipc, "list_instance_content")).toEqual([]);
-    expect(launcher.state.toasts.map((t) => t.title)).not.toContain("存档列表读不出来");
+    expect(launcher.state.toasts).toEqual([]);
+  });
+
+  it("未完成但版本 JSON 还在的实例数得出存档：照常读，信息行写存档名", async () => {
+    instances = instances.map((i) =>
+      i.id === "生存" ? { ...i, incomplete: { kind: "repair", outcome: "pending", started_at: NOW - MINUTE, spec: null, error: null }, world_count: 2 } : i,
+    );
+    await mount();
+    expect(callsOf(ipc, "list_instance_content")).toEqual([{ id: "生存" }]);
+    expect(text()).toContain("存档「海岛据点」");
   });
 
   it("整合包实例：大卡挂出整合包名与版本，让出 Mod 数", async () => {

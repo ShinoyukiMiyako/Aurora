@@ -3,7 +3,7 @@
 //! 本文件只做装配：日志、插件、managed state、主窗口兜底、命令注册与退出收尾（[`exit`]）。命令实现按领域分在
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
 //! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
-//! 自动重载 [`renderer`]——各自成模块。
+//! 自动重载 [`renderer`]、同一数据目录只跑一个启动器 [`single_instance`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -16,6 +16,8 @@ mod facade;
 mod gpu;
 mod logging;
 mod renderer;
+#[cfg(windows)]
+mod single_instance;
 mod tasks;
 mod textures;
 mod window;
@@ -29,6 +31,14 @@ use crate::tasks::{TaskJournal, TaskRegistry};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 排在日志之前：每次启动都开一份新日志、清掉最旧的，连点几下图标就把正在用的那份挤掉了。
+    #[cfg(windows)]
+    let claimed = match single_instance::claim() {
+        Ok(single_instance::Claim::Forwarded) => return,
+        Ok(single_instance::Claim::First(instance)) => Ok(instance),
+        Err(err) => Err(err),
+    };
+
     // 先装 subscriber 再做任何事：配置载入、数据目录探测这些最容易出问题的动作都在下面，
     // 晚一步初始化，恰恰是最想看的那几行日志就丢了。
     let log_path = logging::init();
@@ -40,6 +50,14 @@ pub fn run() {
         aurora_base::brand::APP_NAME_EN
     );
     log_data_dir();
+
+    // 占位失败不拦启动：拦下来就是双击后什么都没有，而这只是少了一层防重复打开，错误记进日志。
+    #[cfg(windows)]
+    let instance = claimed
+        .inspect_err(|err| {
+            tracing::error!(error = %err, "同一数据目录的占位失败，这次启动不防重复打开");
+        })
+        .ok();
 
     let context = tauri::generate_context!();
     let updater_support = commands::updater::detect_support(
@@ -87,6 +105,10 @@ pub fn run() {
             app.manage(server_monitor);
             app.manage(UpdaterState::new(updater_support));
             window::setup_main_window(app)?;
+            #[cfg(windows)]
+            if let Some(instance) = instance {
+                window::front_on_second_launch(app, instance)?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -97,6 +119,7 @@ pub fn run() {
             commands::tasks::cancel_task,
             commands::tasks::save_task_journal,
             commands::tasks::load_task_journal,
+            commands::tasks::discard_export_leftovers,
             // -- config --
             commands::config::get_config,
             commands::config::update_config,

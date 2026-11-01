@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import { TASK_KINDS, type Task, type TaskKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 import { newTask } from "../../state/tasks";
 import { CHART_MIN_CEILING_BPS, ETA_WINDOW_SAMPLES, THROUGHPUT_SAMPLES } from "./constants";
+import { TASKS_COPY } from "./copy";
 import {
   bucketTasks,
   cancelAllConfirm,
@@ -240,13 +242,13 @@ describe("吞吐采样与总览", () => {
       task("d1", { status: "done", bytes: 5000, totalBytes: 5000, finishedAt: T0 }),
     ]);
     const o = overviewOf(b);
-    expect(o).toEqual({ label: "running", speed: 100, downloaded: 1300, total: 2000, fraction: 0.65 });
+    expect(o).toEqual({ label: "running", speed: 100, downloaded: 1300, total: 2000, fraction: 0.65, localOnly: false });
     expect(overviewRemaining(o, 0)).toBe("剩余 700 B · 约 10 秒");
     expect(overviewRemaining(o, 10)).toBe("剩余 700 B · 约 2 分钟");
     expect(overviewRemaining({ ...o, speed: 0 }, 0)).toBe("剩余 700 B · 等待数据");
     // 只有总量未知的排队任务、或没有任何活动任务：没有可显示的进度，而不是 0%
-    expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: null });
-    expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })]))).toEqual({ label: "idle", speed: 0, downloaded: 0, total: 0, fraction: null });
+    expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: null, localOnly: false });
+    expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })]))).toEqual({ label: "idle", speed: 0, downloaded: 0, total: 0, fraction: null, localOnly: false });
     // 边界：总量已知但一个字节都还没下，是真实的 0
     expect(overviewOf(bucketTasks([task("r0", { status: "running", bytes: 0, totalBytes: 1 })])).fraction).toBe(0);
   });
@@ -268,6 +270,20 @@ describe("吞吐采样与总览", () => {
     const points = high.line.split(" ");
     expect(points[THROUGHPUT_SAMPLES - 2]).toBe(`L${((46 / 47) * 100).toFixed(2)},5.00`);
     expect(points[THROUGHPUT_SAMPLES - 1]).toBe("L100.00,17.50");
+  });
+});
+
+describe("本地任务的措辞", () => {
+  it("活动任务全是导出、备份时总览不说已下载；混着下载任务或空闲时照旧", () => {
+    const backup = task("b", { kind: "world_backup", status: "running" });
+    const exportPack = task("e", { kind: "modpack_export" });
+    expect(overviewOf(bucketTasks([backup, exportPack])).localOnly).toBe(true);
+    expect(overviewOf(bucketTasks([backup, task("m", { kind: "mod" })])).localOnly).toBe(false);
+    expect(overviewOf(bucketTasks([])).localOnly).toBe(false);
+  });
+
+  it("并行通道的说明对下载和本地任务都成立", () => {
+    expect(TASKS_COPY.lanes.subtitle).toBe(`同一时间最多 ${MAX_PARALLEL_TASKS} 个任务在跑`);
   });
 });
 

@@ -440,8 +440,23 @@ export function trimHistory(tasks: readonly Task[]): Task[] {
   return tasks.filter((t) => isActiveTask(t) || keep.has(t.id));
 }
 
+/**
+ * 补全成功后，这个实例失败的新建与补全都没有要重试的了：实例已经好了，留着的话任务页一直报失败，新建那行点重试还会撞名。
+ */
+export function dropSuperseded(tasks: readonly Task[], instanceId: string): Task[] {
+  const key = instanceId.toLowerCase();
+  return tasks.filter((t) => !(t.status === "failed" && t.instanceId !== null && t.instanceId.toLowerCase() === key && (t.spec.command === "install_version" || t.spec.command === "repair_instance")));
+}
+
 export function clearFinished(tasks: readonly Task[]): Task[] {
   return tasks.filter(isActiveTask);
+}
+
+/** 写到玩家选的目录里的导出任务的落点；别的任务、或记录里读不出落点时为 null。 */
+export function exportDestination(spec: TaskSpec): string | null {
+  const { command, args } = spec;
+  const dest = command === "export_world" ? args.dest : command === "export_modpack" && typeof args.options === "object" && args.options !== null ? (args.options as Record<string, unknown>).destination : null;
+  return typeof dest === "string" ? dest : null;
 }
 
 /** 上次关闭时还没完成的任务：记为失败，原因「落樱关闭时中断」，可以重试。 */

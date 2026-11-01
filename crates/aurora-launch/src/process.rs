@@ -21,10 +21,13 @@ use tokio::task::JoinHandle;
 
 use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
+use crate::log4j_xml::Log4jXmlDecoder;
 use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog, SessionOutcome};
 
 /// 崩溃判定缓存的最近游戏输出行数。
 pub const RECENT_LINE_CAPACITY: usize = 500;
+/// 1.5.2 这一代的窗口关闭回调打这一行，然后 `System.exit(1)`：退出码 1 在这里是玩家关窗，不是出错。
+const OLD_WINDOW_CLOSE_LINE: &str = "Someone is closing me!";
 /// 批量转发的时间窗：带 Mod 的游戏启动期每秒上千行，逐行推给界面就是一场事件风暴。
 pub const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// 时间窗内攒满这么多行就提前发出，免得单批过大。
@@ -350,9 +353,12 @@ pub fn spawn(
     let mut cmd = Command::new(&command.program);
     cmd.args(&command.args);
     cmd.current_dir(&command.working_dir);
-    if let Some(bin_dir) = command.program.parent() {
-        cmd.env("PATH", prepend_path(bin_dir));
-    }
+    // natives 目录进 PATH：LWJGL 2 用 String.getBytes() 把 OpenAL 的绝对路径交给 LoadLibraryA，
+    // -Dfile.encoding=UTF-8 下路径含中文就对不上系统代码页，它最后才按裸文件名走系统搜索路径。
+    // 这条路也没有的话，游戏不报错，直接进无声模式。
+    let mut search_dirs: Vec<&Path> = command.program.parent().into_iter().collect();
+    search_dirs.push(&command.natives_dir);
+    cmd.env("PATH", prepend_path(&search_dirs));
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     // 不继承 stdin：游戏不读控制台输入，避免子进程挂在管道上。
@@ -401,7 +407,8 @@ fn configure_no_window(cmd: &mut Command) {
 #[cfg(not(windows))]
 fn configure_no_window(_cmd: &mut Command) {}
 
-/// 崩溃判定：启动器主动结束的一律不算；日志里有明确的崩溃标记算；否则看退出码，非 0 或拿不到退出码都算。
+/// 崩溃判定：启动器主动结束的一律不算；日志里有明确的崩溃标记算；旧版玩家关窗不算；否则看退出码，
+/// 非 0 或拿不到退出码都算。
 ///
 /// 主动结束先行短路：Windows 上强制结束留下非 0 退出码、Unix 上被信号结束则没有退出码，两种表现
 /// 都会命中后面的规则，而玩家点「结束游戏」不该收到一次崩溃指认。
@@ -416,12 +423,21 @@ pub fn detect_crash(report: &ExitReport) -> bool {
     {
         return true;
     }
+    let closed_by_player = report.code == Some(1)
+        && report
+            .recent_lines
+            .iter()
+            .any(|line| line.trim() == OLD_WINDOW_CLOSE_LINE);
+    if closed_by_player {
+        return false;
+    }
     report.code != Some(0)
 }
 
 /// 逐行读一条输出流。按字节读、有损解码：JVM 的本地层（如致命错误头）按系统代码页输出，
 /// 一个非 UTF-8 字节就会让按字符串读的读取端报错退出，从此没人读这条管道，游戏随之卡死。
-/// 单行超过 [`MAX_LINE_BYTES`] 的部分边读边丢，读取照常往下走。
+/// 单行超过 [`MAX_LINE_BYTES`] 的部分边读边丢，读取照常往下走。stdout 上的 log4j XML 事件在这里还原成普通行，
+/// 之后的会话日志、崩溃判定与界面拿到的都是还原后的文本。
 fn spawn_reader<R>(
     reader: R,
     stream: LogStream,
@@ -434,7 +450,7 @@ where
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
         let mut lines = LineSplitter::new();
-        let mut emit = |text: String| {
+        let mut send = |text: String| {
             let line = LogLine {
                 at: clock.now(),
                 stream,
@@ -445,6 +461,12 @@ where
             if tx.send(line).is_err() {
                 tracing::warn!(?stream, "游戏输出汇流任务已退出，丢弃后续输出");
             }
+        };
+        // 日志配置只把 XML 打到 stdout；stderr 上是 JVM 与未捕获异常的原文。
+        let mut xml = (stream == LogStream::Stdout).then(Log4jXmlDecoder::new);
+        let mut emit = |text: String| match xml.as_mut() {
+            Some(decoder) => decoder.decode(text, &mut send),
+            None => send(text),
         };
         loop {
             let chunk = match reader.fill_buf().await {
@@ -641,11 +663,17 @@ fn flush_batch(forward: &mut Option<LogBatchSink>, batch: &mut Vec<LogLine>) {
     }
 }
 
-/// 把 `bin_dir` 拼到现有 PATH 头部。
-fn prepend_path(bin_dir: &Path) -> std::ffi::OsString {
-    let mut combined = bin_dir.as_os_str().to_owned();
+/// 把 `dirs` 按顺序拼到现有 PATH 头部。
+fn prepend_path(dirs: &[&Path]) -> std::ffi::OsString {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let mut combined = std::ffi::OsString::new();
+    for (index, dir) in dirs.iter().enumerate() {
+        if index > 0 {
+            combined.push(sep);
+        }
+        combined.push(dir.as_os_str());
+    }
     if let Some(existing) = std::env::var_os("PATH") {
-        let sep = if cfg!(windows) { ";" } else { ":" };
         combined.push(sep);
         combined.push(existing);
     }
@@ -682,6 +710,34 @@ mod tests {
         )));
     }
 
+    /// 1.5.2 这一代玩家点窗口的叉，游戏打一行再以退出码 1 结束，日志里没有别的异常。
+    #[test]
+    fn closing_the_window_of_an_old_version_is_not_a_crash() {
+        let closed = [
+            "Someone is closing me!",
+            "AL lib: (EE) alc_cleanup: 1 device not closed",
+        ];
+        assert!(!detect_crash(&report(Some(1), &closed, false)));
+    }
+
+    #[test]
+    fn window_close_line_does_not_excuse_real_crashes() {
+        // 崩溃画面也是这个窗口，玩家看完关掉时同样打这一行。
+        let crashed = ["---- Minecraft Crash Report ----", "Someone is closing me!"];
+        assert!(detect_crash(&report(Some(1), &crashed, false)));
+        // 关窗只会以 1 结束，别的退出码说明进程是自己倒下的。
+        assert!(detect_crash(&report(
+            Some(-1_073_741_819),
+            &["Someone is closing me!"],
+            false
+        )));
+        assert!(detect_crash(&report(
+            None,
+            &["Someone is closing me!"],
+            false
+        )));
+    }
+
     #[test]
     fn launcher_termination_is_never_a_crash() {
         // Windows 上强制结束留下非 0 退出码，Unix 上被信号结束没有退出码。
@@ -706,9 +762,14 @@ mod tests {
     }
 
     #[test]
-    fn prepend_path_puts_bin_first() {
-        let combined = prepend_path(Path::new("C:/java/bin"));
-        assert!(combined.to_string_lossy().starts_with("C:/java/bin"));
+    fn prepend_path_keeps_the_given_order_in_front() {
+        let combined = prepend_path(&[Path::new("C:/java/bin"), Path::new("C:/mc/natives")]);
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        assert!(
+            combined
+                .to_string_lossy()
+                .starts_with(&format!("C:/java/bin{sep}C:/mc/natives"))
+        );
     }
 
     #[tokio::test]
@@ -751,6 +812,45 @@ mod tests {
         );
         let all: Vec<u64> = batches.iter().flatten().map(|l| l.at).collect();
         assert_eq!(all, (0..total as u64).collect::<Vec<_>>());
+    }
+
+    async fn read_lines(input: &'static [u8], stream: LogStream) -> Vec<String> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_reader(input, stream, SessionClock::start().unwrap(), tx)
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        while let Some(line) = rx.recv().await {
+            out.push(line.text);
+        }
+        out
+    }
+
+    /// 真实客户端走官方日志配置时 stdout 是 XML：还原成普通行后级别才认得出来。
+    #[tokio::test]
+    async fn stdout_xml_events_reach_the_pipeline_as_plain_lines() {
+        let input = concat!(
+            "  <log4j:Event logger=\"a\" timestamp=\"1\" level=\"ERROR\" thread=\"main\">
+",
+            "    <log4j:Message><![CDATA[Incompatible mods found!]]></log4j:Message>
+",
+            "  </log4j:Event>
+",
+        )
+        .as_bytes();
+        let lines = read_lines(input, LogStream::Stdout).await;
+        assert_eq!(lines, vec!["[main/ERROR]: Incompatible mods found!"]);
+        assert_eq!(crate::game_line_level(&lines[0]), LauncherLevel::Error);
+    }
+
+    #[tokio::test]
+    async fn stderr_is_not_treated_as_xml() {
+        let input = b"<log4j:Event logger=\"a\" level=\"INFO\" thread=\"main\">
+";
+        assert_eq!(
+            read_lines(input, LogStream::Stderr).await,
+            vec![r#"<log4j:Event logger="a" level="INFO" thread="main">"#]
+        );
     }
 
     /// Mod 打印几 MB 不带换行的转储：这一行只留前 64 KB 并注明丢掉的字节数，后面的行照常读到。
@@ -1062,6 +1162,43 @@ mod tests {
         assert_eq!(read_back(&out.dir).await.1, None);
     }
 
+    /// 版本 JSON 的日志配置让 stdout 走 XML：会话日志与崩溃判定缓存里都要是还原后的普通行。
+    #[tokio::test]
+    async fn xml_log_events_are_recorded_as_plain_lines() {
+        let out = output(
+            b"  <log4j:Event logger=\"FabricLoader\" timestamp=\"1\" level=\"ERROR\" thread=\"main\">\n    <log4j:Message><![CDATA[Incompatible mods found!]]></log4j:Message>\n  </log4j:Event>\nPLAIN\n",
+        )
+        .await;
+        let exited = Exited {
+            status: Ok(clean_exit()),
+            terminated_by_launcher: false,
+        };
+        let end = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            end.report.recent_lines,
+            ["[main/ERROR]: Incompatible mods found!", "PLAIN"]
+        );
+        end.log
+            .expect("日志应保持打开交还调用方")
+            .finish(out.clock.now(), SessionOutcome::Exited)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_back(&out.dir).await.0,
+            [
+                game("[main/ERROR]: Incompatible mods found!"),
+                game("PLAIN")
+            ]
+        );
+    }
+
     /// 等待进程本身失败：照样读完输出、写下原因与结局并落盘，退出报告与那次失败一并交出。
     #[tokio::test]
     async fn wait_failure_still_settles_the_session_log() {
@@ -1226,6 +1363,7 @@ mod tests {
             program: std::path::PathBuf::from(program),
             args: args.iter().map(|a| (*a).to_owned()).collect(),
             working_dir: std::env::temp_dir(),
+            natives_dir: std::env::temp_dir().join("natives-on-path"),
         }
     }
 
@@ -1279,6 +1417,29 @@ mod tests {
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("[game] PETAL_HELLO"), "{content}");
+    }
+
+    /// LWJGL 2 按裸文件名找 OpenAL 时靠的是系统的 DLL 搜索路径，游戏进程的 PATH 里得有 natives 目录。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn spawn_puts_natives_dir_on_the_game_path() {
+        let clock = SessionClock::start().unwrap();
+        let session = spawn(&cmd("echo PATH_IS=%PATH%"), clock, &mut None, None).unwrap();
+        let end = session.wait().await;
+        assert!(end.failure.is_none(), "{:?}", end.failure);
+
+        let line = end
+            .report
+            .recent_lines
+            .iter()
+            .find_map(|l| l.strip_prefix("PATH_IS="))
+            .expect("应打印 PATH")
+            .to_owned();
+        let natives = std::env::temp_dir().join("natives-on-path");
+        assert!(
+            line.split(';').any(|dir| dir == natives.to_string_lossy()),
+            "PATH 里应有 natives 目录：{line}"
+        );
     }
 
     #[cfg(windows)]

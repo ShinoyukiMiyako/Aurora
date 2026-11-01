@@ -12,6 +12,8 @@
 use aurora_version::{Argument, RuleAction, VersionJson};
 use serde::Serialize;
 
+use crate::precheck::char_lost_on_command_line;
+
 /// 单人直达的 feature 名。
 pub const FEATURE_SINGLEPLAYER: &str = "is_quick_play_singleplayer";
 /// 多人直达的 feature 名。
@@ -94,6 +96,15 @@ pub fn quick_play_support(version: &VersionJson) -> QuickPlaySupport {
     }
 }
 
+/// 世界文件夹名里第一个到不了游戏的字符，全都到得了时为 `None`。
+///
+/// java.exe 在 Windows 上按 ANSI 读命令行，`--quickPlaySingleplayer` 的值要过一道系统代码页，页里没有的
+/// 字符变成 `?`。游戏拿着改坏的名字找不到存档，只在窗口里报一句世界标识符无效。这里绕不过去：参数文件
+/// 同样按系统编码解码，`sun.jnu.encoding` 也改不了，所以提前告诉玩家。
+pub fn quick_play_lost_char(world_dir_name: &str) -> Option<char> {
+    char_lost_on_command_line(world_dir_name)
+}
+
 /// 启动参数是不是 joptsimple 形式，能直接追加 `--server` / `--port`：`arguments.game` 非空，或
 /// `minecraftArguments` 按空白切开后含 `--username`。1.6 之前的位置参数式写法追加未知选项会让游戏退出。
 pub fn legacy_server_args(version: &VersionJson) -> bool {
@@ -128,6 +139,52 @@ pub(crate) fn has_feature_block(version: &VersionJson, feature: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 代码页按编号给，结论不随跑测试的机器变。
+    #[cfg(windows)]
+    #[test]
+    fn code_page_decides_which_world_names_reach_the_game() {
+        use crate::precheck::char_outside_code_page;
+
+        for ch in ['a', '桜', 'の', '実'] {
+            assert_eq!(
+                char_outside_code_page(&ch.to_string(), 936),
+                None,
+                "GBK 里有 {ch}"
+            );
+        }
+        for ch in ['㐂', '𠮷', '한'] {
+            assert_eq!(
+                char_outside_code_page(&ch.to_string(), 936),
+                Some(ch),
+                "GBK 里没有 {ch}"
+            );
+        }
+        // 真机上的表现：这些字符经 ANSI 命令行变成 ?，不是近似字
+        assert_eq!(
+            char_outside_code_page("桜", 1252),
+            Some('桜'),
+            "西文代码页没有汉字"
+        );
+        assert_eq!(
+            char_outside_code_page("ａ", 1252),
+            Some('ａ'),
+            "全角字母不能按最接近的半角算"
+        );
+        for ch in ['㐂', '𠮷', '한'] {
+            assert_eq!(
+                char_outside_code_page(&ch.to_string(), 65001),
+                None,
+                "UTF-8 代码页什么都表示得了"
+            );
+        }
+    }
+
+    #[test]
+    fn ascii_world_names_always_reach_the_game() {
+        assert_eq!(quick_play_lost_char("New World-1_(2)"), None);
+        assert_eq!(quick_play_lost_char(""), None);
+    }
 
     #[test]
     fn mode_names_match_the_wire_names() {

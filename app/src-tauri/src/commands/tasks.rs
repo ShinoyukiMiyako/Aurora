@@ -1,5 +1,7 @@
 //! 长任务的取消与任务日志的读写。登记表与日志的实现在 [`crate::tasks`]。
 
+use std::path::Path;
+
 use serde_json::{Map, Value};
 use tauri::State;
 
@@ -31,6 +33,20 @@ pub async fn save_task_journal(
 ) -> Result<(), CommandError> {
     let data_dir = facade.read().await.data_dir().to_path_buf();
     journal.save(&data_dir, seq, tasks).await?;
+    Ok(())
+}
+
+/// 删掉 `dest` 旁边上次没写完的导出临时文件。只收导出的命名（`<dest>.part`、`<文件名>.<8 位十六进制>.part.mrpack`），
+/// 别的文件不碰；目录已经不在、没有残留都算成功。`dest` 不是绝对路径时报 `invalid_argument`。
+#[tauri::command]
+pub async fn discard_export_leftovers(dest: String) -> Result<(), CommandError> {
+    let path = Path::new(&dest);
+    if !path.is_absolute() {
+        return Err(CommandError::invalid_argument(format!(
+            "导出位置须是绝对路径：{dest}"
+        )));
+    }
+    aurora_core::discard_export_leftovers(path).await;
     Ok(())
 }
 

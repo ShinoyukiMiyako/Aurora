@@ -6,7 +6,7 @@ import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { applyPhase, sessionLaunched, startSession } from "../../state/session";
 import { newTask } from "../../state/tasks";
-import { LOGS_COPY, MODS_COPY } from "./copy";
+import { LOGS_COPY, MODS_COPY, OVERVIEW_COPY } from "./copy";
 import {
   adjustModSort,
   autoJavaPick,
@@ -47,6 +47,7 @@ import {
   removalRelations,
   sortRows,
   sortWorlds,
+  playtimeNote,
   toggleFlags,
   weeklyHours,
   workLock,
@@ -138,6 +139,7 @@ const ctx = (over: Partial<CrashFixContext> = {}): CrashFixContext => ({
   followsGlobal: true,
   physicalMb: 32768,
   mods: [],
+  jvmArgs: "",
   runtimes: [],
   requiredJava: 21,
   ...over,
@@ -371,6 +373,14 @@ describe("游玩与内存", () => {
     const week = 7 * 24 * 3600 * 1000;
     expect(weeklyHours(120, 0, week * 4)).toBe("0.5");
     expect(weeklyHours(90, 0, 1000)).toBe("1.5");
+  });
+
+  it("累计游玩格的说明：没玩过说没开始，玩过不足一分钟不说没开始，缺创建时间时不算周均", () => {
+    const week = 7 * 24 * 3600 * 1000;
+    expect(playtimeNote({ playtimeMin: 0, lastPlayedAt: null, createdAt: 0 }, week)).toBe(OVERVIEW_COPY.notStarted);
+    expect(playtimeNote({ playtimeMin: 0, lastPlayedAt: week - 1000, createdAt: 0 }, week)).toBe(OVERVIEW_COPY.underAMinute);
+    expect(playtimeNote({ playtimeMin: 120, lastPlayedAt: 1000, createdAt: 0 }, week * 4)).toBe(OVERVIEW_COPY.perWeek("0.5"));
+    expect(playtimeNote({ playtimeMin: 120, lastPlayedAt: 1000, createdAt: null }, week)).toBeNull();
   });
 
   it("实例设置优先，否则自动分配取推荐值、固定取全局值", () => {
@@ -912,6 +922,26 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
     const mods = [mod("sodium-1.jar")];
     const fixes = crashFixes(report([clue("game_version_mismatch", { detail: "sodium" }), clue("mixin_failure", { detail: "sodium" })]), ctx({ mods }));
     expect(fixes).toEqual([{ kind: "disable_mod", category: "game_version_mismatch", fileName: "sodium-1.jar", name: "sodium-1" }, { kind: "compare_log" }]);
+  });
+
+  it("最大内存写在 -Xmx 里：调内存设置不生效，一键尝试带去改参数", () => {
+    const oom = clue("out_of_memory", { matched: "java.lang.OutOfMemoryError: Java heap space" });
+    expect(crashFixes(report([oom], { max_memory_mb: 64 }), ctx({ jvmArgs: "-Xmx64M -XX:+UseG1GC" }))[0]).toEqual({ kind: "memory_in_jvm_args" });
+    const reserve = clue("out_of_memory", { matched: "Could not reserve enough space for object heap" });
+    expect(crashFixes(report([reserve]), ctx({ jvmArgs: "-Xmx32G" }))[0]).toEqual({ kind: "memory_in_jvm_args" });
+    // 32 位 Java 分配不到是换 Java 的事，写在哪里都一样；-Xms 不决定上限，内存设置照样管用
+    expect(crashFixes(report([reserve], { java: { major: 8, path: "C:/j8/bin/java.exe", is_64bit: false } }), ctx({ jvmArgs: "-Xmx4G" }))[0]).toEqual({ kind: "use_64bit_java" });
+    expect(crashFixes(report([oom]), ctx({ jvmArgs: "-Xms1G" }))[0]).toMatchObject({ kind: "raise_memory" });
+  });
+
+  it("JVM 参数被拒：一键尝试带去实例设置，不替玩家改参数", () => {
+    expect(crashFixes(report([clue("jvm_args_invalid", { detail: "NotARealFlag" })]), ctx())).toEqual([{ kind: "jvm_args" }, { kind: "compare_log" }]);
+  });
+
+  it("加载器写明要 Java 21：本机有就切过去，没有就下载", () => {
+    const java21 = crashFixes(report([clue("java_version_mismatch", { detail: "java 21" })]), ctx({ requiredJava: 17, runtimes: [java("D:/jdk21/bin/java.exe", 21, 1)] }));
+    expect(java21[0]).toEqual({ kind: "switch_java", major: 21, path: "D:/jdk21/bin/java.exe" });
+    expect(crashFixes(report([clue("java_version_mismatch", { detail: "java 21" })]), ctx({ requiredJava: 17, runtimes: [] }))[0]).toEqual({ kind: "download_java", major: 21 });
   });
 
   it("Intel 显卡驱动与本地崩溃：给处理办法三步与 java.exe 路径；报告里没有 Java 时不给路径", () => {

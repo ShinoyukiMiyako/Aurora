@@ -75,7 +75,7 @@ pub use compat::{
 };
 pub use config::{
     AfterLaunch, AuroraConfig, ConfigFieldReset, ConfigRecovery, ConfigStore, DownloadSourcePolicy,
-    MemorySettings, NamedDirectory, PinnedServer, WorldBackupSettings,
+    MemorySettings, NamedDirectory, ParkedDirectory, PinnedServer, WorldBackupSettings,
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog, ScannedFile};
 pub use deps::{InstallPlan, PlannedItem};
@@ -84,7 +84,7 @@ pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use export::{
     BundleReason, ExportBlock, ExportBundledMod, ExportExtra, ExportExtraStat, ExportIndexedMod,
     ExportMatch, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
-    ModpackExportTarget,
+    ModpackExportTarget, discard_export_leftovers,
 };
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};

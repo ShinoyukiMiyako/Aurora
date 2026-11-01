@@ -24,7 +24,7 @@ import {
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { clock, formatDate, formatMemory, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
-import { javaMajorFromClassVersion } from "../../domain/rules";
+import { javaMajorFromDetail } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -191,7 +191,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
               <Icon name="file" size={14} />
               <code className={styles.path}>{report.log_path}</code>
               <CopyButton text={report.log_path} label={CRASH_PAGE_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
-              <FolderButton ops={ops} target="logs" label={SETTINGS_COPY.open} size="sm" />
+              <FolderButton ops={ops} target="session_logs" label={SETTINGS_COPY.open} size="sm" />
             </span>
           )}
           <span className={styles.soft}>{`${formatDate(report.at)} ${clock(report.at)}`}</span>
@@ -287,7 +287,7 @@ function LaunchWarnings({ warnings, onTab }: { warnings: CrashReportDto["warning
 function ClueCard({ index, clue, report, required }: { index: number; clue: CrashClueDto; report: CrashReportDto; required: number | null }) {
   const label = crashCategoryLabel(clue.category);
   const copy = CRASH_CATEGORY[clue.category as CrashCategoryName];
-  const fromDetail = javaMajorFromClassVersion(clue.detail);
+  const fromDetail = javaMajorFromDetail(clue.detail);
   const explain = copy.explain({
     detail: clue.detail,
     currentJava: report.java === null ? null : report.java.major,
@@ -352,7 +352,9 @@ const FIX_ICON: Readonly<Record<CrashFix["kind"], "memory" | "java" | "mod" | "c
   raise_memory: "memory",
   memory_at_cap: "memory",
   lower_memory: "memory",
+  memory_in_jvm_args: "memory",
   use_64bit_java: "java",
+  jvm_args: "terminal",
   switch_java: "java",
   download_java: "java",
   enable_mod: "mod",
@@ -371,8 +373,11 @@ function fixTitle(fix: CrashFix): string {
     case "raise_memory":
     case "memory_at_cap":
     case "lower_memory":
+    case "memory_in_jvm_args":
     case "use_64bit_java":
       return CRASH_CATEGORY.out_of_memory.label;
+    case "jvm_args":
+      return CRASH_CATEGORY.jvm_args_invalid.label;
     case "switch_java":
     case "download_java":
       return CRASH_CATEGORY.java_version_mismatch.label;
@@ -426,18 +431,19 @@ function FixesCard({
   const ready = settings.status === "ready" && memory.status === "ready" && runtimes.status === "ready" && required.status === "ready" && modsReady;
   // 推一次就定住：点了「停用」之后 Mod 列表会变，再推会让刚完成的那一行消失
   useEffect(() => {
-    if (!ready || frozen !== null || memory.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready") return;
+    if (!ready || frozen !== null || settings.status !== "ready" || memory.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready") return;
     setFrozen(
       crashFixes(report, {
         memoryMb: memory.value.effectiveMb,
         followsGlobal: memory.value.followsGlobal,
         physicalMb: memory.value.advice.total_mb,
+        jvmArgs: settings.data.jvmArgs,
         mods,
         runtimes: runtimes.data,
         requiredJava: required.value,
       }),
     );
-  }, [frozen, memory, mods, ready, report, required, runtimes]);
+  }, [frozen, memory, mods, ready, report, required, runtimes, settings]);
 
   // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上。
   // 实例设置读不出来时内存也跟着报同一个错，所以设置排在内存前面，标题才对得上真正没读出来的那一样
@@ -600,9 +606,17 @@ function FixRow({
         settingsLock,
       );
       break;
+    case "memory_in_jvm_args":
+      note = CRASH_PAGE_COPY.memoryInJvmArgsNote;
+      action = button(CRASH_COPY.openInstanceSettings, () => onTab("settings"));
+      break;
     case "use_64bit_java":
       note = CRASH_PAGE_COPY.java64Note;
       action = button(CRASH_COPY.use64BitJava, () => changeSetting({ java: JAVA_AUTO }, CRASH_PAGE_COPY.javaItem, SETTINGS_COPY.javaAuto, CRASH_PAGE_COPY.java64Done), settingsLock);
+      break;
+    case "jvm_args":
+      note = CRASH_PAGE_COPY.jvmArgsNote;
+      action = button(CRASH_COPY.openInstanceSettings, () => onTab("settings"));
       break;
     case "switch_java":
       note = CRASH_PAGE_COPY.javaNote(fix.major);

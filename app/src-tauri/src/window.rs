@@ -1,5 +1,5 @@
 //! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]）与渲染进程故障后的自动重载
-//! （见 [`crate::renderer`]），以及生产构建关闭 WebView2 浏览器加速键。
+//! （见 [`crate::renderer`]）、生产构建关闭 WebView2 浏览器加速键，以及再次启动时把窗口叫到前台。
 //!
 //! 窗口以 `visible: false` 创建：前端在首帧渲染前读外观、写好明暗与强调色，画完第一帧才自己
 //! `show()`，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。
@@ -34,6 +34,24 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     tauri::async_runtime::spawn(async move {
         show_if_still_hidden(SHOW_FALLBACK, || window.is_visible(), || window.show()).await;
     });
+    Ok(())
+}
+
+/// 再次启动时把主窗口叫到前台：最小化的先还原。窗口还没显示时 `set_focus` 不做事，前端显示时它本来就在前台。
+#[cfg(windows)]
+pub fn front_on_second_launch(
+    app: &App,
+    instance: crate::single_instance::Instance,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let window = app
+        .get_webview_window(MAIN_WINDOW)
+        .ok_or_else(|| format!("找不到主窗口 {MAIN_WINDOW}，tauri.conf.json 与代码不一致"))?;
+    instance.listen(move || {
+        tracing::info!("又启动了一次，把已有窗口叫到前台");
+        if let Err(err) = window.unminimize().and_then(|()| window.set_focus()) {
+            tracing::error!(error = %err, "把主窗口叫到前台失败");
+        }
+    })?;
     Ok(())
 }
 

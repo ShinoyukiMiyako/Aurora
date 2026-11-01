@@ -3,7 +3,8 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { INSTANCE_NAME_ERROR } from "../../copy/flows";
+import { INSTANCE_NAME_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
+import { SLOW_HINT_MS } from "../../domain/limits";
 // 版本清单、加载器版本、Java 这几条查询落到假后端。静态引入让假后端在首个查询之前就加载完：
 // 几条查询同时触发桥里的动态引入时，后到的会拿到还没执行完的模块。
 import { IpcError } from "../../ipc/errors";
@@ -188,6 +189,17 @@ describe("新建实例：名称", () => {
 });
 
 describe("新建实例：完整走一遍", () => {
+  it("版本列表迟迟不来：骨架下面说一句比平时慢，不是干等着", async () => {
+    ipc.overrides.set("list_manifest", () => new Promise(() => undefined));
+    await mount();
+    await fillName("慢");
+    expect(dialog().textContent).not.toContain(SLOW_LOADING_HINT);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SLOW_HINT_MS);
+    });
+    expect(dialog().textContent).toContain(SLOW_LOADING_HINT);
+  });
+
   it("选版本、加载器、加载器版本、封面后创建：排入安装任务、通知、设为当前并打开详情", async () => {
     await mount();
     await fillName("周末生存");

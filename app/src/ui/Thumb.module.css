@@ -48,7 +48,8 @@
   color: hsl(var(--hue) var(--sk-hue-glyph-s) var(--sk-hue-glyph-l));
 }
 
-/* ---- 加载中：同形骨架，光带横扫；减少动画时静止 ---- */
+/* ---- 加载中：同形骨架，光带横扫；减少动画时静止。还在视口外没开始加载时只有底色 ---- */
+.thumb[data-view="pending"],
 .thumb[data-view="loading"] {
   background: var(--sk-bg-2);
 }

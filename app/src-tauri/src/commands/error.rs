@@ -90,6 +90,8 @@ pub mod code {
     pub const INTERNAL: &str = "internal";
     /// 数据包要装进的存档不存在（detail.version_id、world）。
     pub const WORLD_NOT_FOUND: &str = "world_not_found";
+    /// 直达的世界文件夹名过不了系统代码页，Java 收不到（detail.version_id、world、char）。
+    pub const WORLD_NAME_UNENCODABLE: &str = "world_name_unencodable";
     /// 平台给出的文件名不能安全落盘（detail.platform、file_name）。
     pub const UNSAFE_FILE_NAME: &str = "unsafe_file_name";
     /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载。detail.files 为对象数组，每项
@@ -321,6 +323,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidProjectId { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidResourceTarget(_) => code::INVALID_ARGUMENT,
         CoreError::WorldNotFound { .. } => code::WORLD_NOT_FOUND,
+        CoreError::WorldNameUnencodable { .. } => code::WORLD_NAME_UNENCODABLE,
         CoreError::WorldBackupNotFound { .. } => code::WORLD_BACKUP_NOT_FOUND,
         CoreError::UnsafeFileName { .. } => code::UNSAFE_FILE_NAME,
         CoreError::FileDistributionBlocked { .. } => code::DISTRIBUTION_BLOCKED,
@@ -579,6 +582,15 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::WorldNotFound { version_id, world } => {
             detail.insert("version_id".to_owned(), json!(version_id));
             detail.insert("world".to_owned(), json!(world));
+        }
+        CoreError::WorldNameUnencodable {
+            version_id,
+            world,
+            ch,
+        } => {
+            detail.insert("version_id".to_owned(), json!(version_id));
+            detail.insert("world".to_owned(), json!(world));
+            detail.insert("char".to_owned(), json!(ch.to_string()));
         }
         CoreError::WorldBackupNotFound {
             version_id,
@@ -899,6 +911,23 @@ mod tests {
         let detail = world.detail.unwrap();
         assert_eq!(detail["version_id"], json!("生存"));
         assert_eq!(detail["world"], json!("新的世界"));
+
+        let unencodable: CommandError = CoreError::WorldNameUnencodable {
+            version_id: "生存".into(),
+            world: "㐂の森".into(),
+            ch: '㐂',
+        }
+        .into();
+        assert_eq!(unencodable.code, code::WORLD_NAME_UNENCODABLE);
+        assert!(
+            unencodable.message.contains("「㐂」"),
+            "{}",
+            unencodable.message
+        );
+        let detail = unencodable.detail.unwrap();
+        assert_eq!(detail["version_id"], json!("生存"));
+        assert_eq!(detail["world"], json!("㐂の森"));
+        assert_eq!(detail["char"], json!("㐂"));
 
         let blocked: CommandError = CoreError::FileDistributionBlocked {
             files: vec![

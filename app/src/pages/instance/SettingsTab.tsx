@@ -441,11 +441,13 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
   // 跟随全局时说此刻实际隔离与否：列表里后端给的生效值算上了「版本目录里已有 mods 或 saves 就强制隔离」，
   // 前端看不到目录、推断不出这一条；后端没给出（实例设置读不出）时才按全局策略推断
   const followIsolated = policy === null ? null : inst.isolated === null ? isolationByPolicy(policy, inst) : inst.isolated;
+  // 关闭也压不过这条强制隔离：写共用的话，说明和游戏实际读写的目录对不上
+  const offNote = inst.isolated === true ? SETTINGS_COPY.isolationOffForcedNote : SETTINGS_COPY.isolationOffNote;
   const isolationNote =
     s.isolation === "enabled"
       ? SETTINGS_COPY.isolationOnNote
       : s.isolation === "disabled"
-        ? SETTINGS_COPY.isolationOffNote
+        ? offNote
         : policy === null || followIsolated === null
           ? undefined
           : SETTINGS_COPY.isolationFollowNote(ISOLATION_POLICY_LABEL[policy], followIsolated);

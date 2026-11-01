@@ -55,6 +55,8 @@ export interface QuickPlayUnsupportedDetail {
 
 /** 直达的世界文件夹不在实例的 saves 下（或名字不能当文件夹名），detail：{ version_id, world }。 */
 export const WORLD_NOT_FOUND_CODE = "world_not_found";
+/** 启动时发现版本 JSON 不在了（在启动器之外被删掉）。 */
+export const VERSION_NOT_INSTALLED_CODE = "version_not_installed";
 
 /** 启动成功：游戏进程已经起来。 */
 export interface LaunchedDto {
@@ -198,7 +200,8 @@ export interface PlayStatsDto {
 /**
  * 启动一个实例。失败时 IpcError 的 code 为启动失败码（java_missing 等，插值参数平铺在 detail 里，
  * 原因链在 detail.causes）、BUSY_ERROR_CODE、cancelled，或门面的通用错误码。带 quickPlay 时还可能是
- * QUICK_PLAY_UNSUPPORTED_CODE、world_not_found（世界文件夹不在了），或 invalid_argument（地址不合法，detail.address）。
+ * QUICK_PLAY_UNSUPPORTED_CODE、world_not_found（世界文件夹不在了）、world_name_unencodable（世界文件夹名过不了系统代码页，
+ * message 直接给玩家看）或 invalid_argument（地址不合法，detail.address）。
  * 降级启动被拒绝时 code 为 invalid_argument，detail 为 OfflineFallbackRefusedDetail（用 offlineFallbackRefusal 取出）。
  */
 export const launchGame = (args: LaunchArgs): Promise<LaunchedDto> =>

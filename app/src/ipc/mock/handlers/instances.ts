@@ -52,6 +52,7 @@ const FOLDER_TARGETS: readonly FolderTarget[] = [
   "resourcepacks",
   "shaderpacks",
   "logs",
+  "session_logs",
   "screenshots",
   "world",
 ];

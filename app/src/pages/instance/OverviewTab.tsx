@@ -57,8 +57,8 @@ import {
   overviewBanner,
   peekLayout,
   peekPerRow,
+  playtimeNote,
   sortWorlds,
-  weeklyHours,
   worldName,
   WORLDS_PREVIEW,
   type ModRow,
@@ -219,11 +219,10 @@ export function InstallingBanner({ instanceId }: { instanceId: string }) {
 
 // ---------------------------------------------------------------- 四格数据
 
-function PlaytimeTile({ minutes, createdAt, now }: { minutes: number; createdAt: number | null; now: number }) {
+function PlaytimeTile({ minutes, lastPlayedAt, createdAt, now }: { minutes: number; lastPlayedAt: number | null; createdAt: number | null; now: number }) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
-  // 创建时间读不出来时算不了平均，但玩过就是玩过，不能写成还没开始玩
-  const note = minutes === 0 ? OVERVIEW_COPY.notStarted : createdAt === null ? null : OVERVIEW_COPY.perWeek(weeklyHours(minutes, createdAt, now));
+  const note = playtimeNote({ playtimeMin: minutes, lastPlayedAt, createdAt }, now);
   return (
     <StatTile
       icon="clock"
@@ -272,7 +271,7 @@ function StatsCard({
         {inst.playtimeMin === null ? (
           <StatTile icon="clock" label={OVERVIEW_COPY.statPlaytime} kind="text" value={OVERVIEW_COPY.playUnknown} />
         ) : (
-          <PlaytimeTile minutes={inst.playtimeMin} createdAt={inst.createdAt} now={now} />
+          <PlaytimeTile minutes={inst.playtimeMin} lastPlayedAt={inst.lastPlayedAt} createdAt={inst.createdAt} now={now} />
         )}
         {inst.playError !== null ? (
           <StatTile icon="calendar" label={OVERVIEW_COPY.statLastPlayed} kind="text" value={OVERVIEW_COPY.playUnknown} />

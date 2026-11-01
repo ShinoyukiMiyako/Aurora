@@ -253,6 +253,60 @@ impl ModpackExportTarget {
     }
 }
 
+/// 删掉 `destination` 旁边上次没写完的导出临时文件，返回删掉的个数。
+///
+/// 写包时进程没了，收尾代码跑不到，只能下次启动按任务日志里的落点来收：存档导出是 `<落点>.part`，整合包
+/// 导出是 `<文件名>.<8 位十六进制>.part.mrpack`。别的文件一概不碰；目录已经不在等于没有残留，删不掉只记日志。
+pub async fn discard_export_leftovers(destination: &Path) -> usize {
+    let (Some(parent), Some(name), Some(stem)) = (
+        destination.parent(),
+        destination.file_name(),
+        destination.file_stem(),
+    ) else {
+        return 0;
+    };
+    let (name, stem) = (name.to_string_lossy(), stem.to_string_lossy());
+    let mut entries = match tokio::fs::read_dir(parent).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(err) => {
+            tracing::warn!(path = %parent.display(), error = %err, "读不了导出目录，没写完的临时文件留着");
+            return 0;
+        }
+    };
+    let mut removed = 0;
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(err) => {
+                tracing::warn!(path = %parent.display(), error = %err, "遍历导出目录中断");
+                break;
+            }
+        };
+        if !is_export_leftover(&entry.file_name().to_string_lossy(), &name, &stem) {
+            continue;
+        }
+        match tokio::fs::remove_file(entry.path()).await {
+            Ok(()) => removed += 1,
+            Err(err) => {
+                tracing::warn!(path = %entry.path().display(), error = %err, "导出的临时文件未能删除");
+            }
+        }
+    }
+    removed
+}
+
+fn is_export_leftover(file: &str, destination_name: &str, destination_stem: &str) -> bool {
+    if file.strip_suffix(".part") == Some(destination_name) {
+        return true;
+    }
+    file.strip_prefix(destination_stem)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".part.mrpack"))
+        .is_some_and(|random| random.len() == 8 && random.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// 实例写不成整合包的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1771,6 +1825,53 @@ mod tests {
         target.discard().await;
         assert!(!target.part_path().exists());
         assert_eq!(std::fs::read(target.destination()).unwrap(), b"keep");
+    }
+
+    /// 写包时进程没了，临时文件留在用户选的目录里。只收这两种命名，别的文件一概不碰。
+    #[tokio::test]
+    async fn leftovers_of_an_interrupted_export_are_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        for name in [
+            "存档.zip",
+            "存档.zip.part",
+            "樱花 1.0.0.mrpack",
+            "樱花 1.0.0.0a1b2c3d.part.mrpack",
+            "樱花 1.0.0.notahex!.part.mrpack",
+            "樱花 2.0.0.0a1b2c3d.part.mrpack",
+            "别的.zip.part",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        assert_eq!(discard_export_leftovers(&dir.join("存档.zip")).await, 1);
+        assert_eq!(
+            discard_export_leftovers(&dir.join("樱花 1.0.0.mrpack")).await,
+            1
+        );
+
+        let mut left: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "别的.zip.part",
+                "存档.zip",
+                "樱花 1.0.0.mrpack",
+                "樱花 1.0.0.notahex!.part.mrpack",
+                "樱花 2.0.0.0a1b2c3d.part.mrpack",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vanished_directory_has_no_leftovers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("不在了").join("存档.zip");
+        assert_eq!(discard_export_leftovers(&dest).await, 0);
     }
 
     #[cfg(windows)]

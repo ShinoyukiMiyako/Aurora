@@ -102,6 +102,12 @@ export function recommendedLoaderVersion(list: readonly LoaderVersionDto[]): str
   return list.length > 0 ? list[0].version : null;
 }
 
+/** 版本行的说明。列表第一行可能是比推荐版还新的测试版，「最新发布」要跟着推荐版走，不能看行号。 */
+export function loaderVersionNote(version: LoaderVersionDto, recommended: string | null): "newest" | "older" | "betaNote" {
+  if (version.version === recommended) return "newest";
+  return version.stable ? "older" : "betaNote";
+}
+
 /** 用户在加载器版本步明确选过的版本；只对选它时的加载器与游戏版本有效，换了任一个就回到推荐版。 */
 export interface LoaderVersionPick {
   loader: LoaderChoice;

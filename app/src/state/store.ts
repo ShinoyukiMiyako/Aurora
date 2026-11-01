@@ -15,6 +15,7 @@ import {
   DEVICE_CODE_TIMEOUT_CODE,
   isCrashCategory,
   NEXT_LAUNCH_SUFFIX,
+  TASK_INTERRUPTED_CODE,
   TASK_TEXT,
   TASK_TOAST,
   TOAST_COPY,
@@ -114,6 +115,8 @@ import {
   clearFinished,
   completeCompositeStep,
   compositeProgress,
+  dropSuperseded,
+  exportDestination,
   findDuplicate,
   INSTANCE_TASK_COMMANDS,
   isActiveTask,
@@ -175,7 +178,8 @@ export type SliceStatus = { kind: "loading" } | { kind: "ready" } | { kind: "err
 export interface LaunchPrompt {
   instanceId: string;
   occupantId: string;
-  occupantPhase: "loading" | "running";
+  /** gone：弹窗开着时占用的那局自己结束了，没有东西要替换，只剩这次启动本身。 */
+  occupantPhase: "loading" | "running" | "gone";
   /** 确认替换后这次启动要直达的世界或服务器；普通启动为 null。 */
   quickPlay: launchIpc.QuickPlayArg | null;
 }
@@ -478,6 +482,9 @@ export interface LauncherActions {
 
 // ---------------------------------------------------------------- 常量与工具
 
+/** 跑 Forge 系安装器时缺 Java 由后端自己下载，这些任务不管成败都可能多出一个运行时。 */
+const MAY_DOWNLOAD_JAVA = new Set(["install_version", "install_modpack", "repair_instance"]);
+
 /** 任务日志里允许重放的命令：防止损坏的日志让前端调用任意命令。install_mods 与 update_mods 是前端的组合任务。 */
 const TASK_COMMANDS = new Set([
   "install_version",
@@ -501,6 +508,8 @@ const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb
 
 /** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
 const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
+/** 运行期间占着继承链上基底版本的任务命令。 */
+const BASE_HOLDING_COMMANDS: ReadonlySet<string> = new Set(["repair_instance", "install_modpack"]);
 
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
@@ -1147,6 +1156,8 @@ export class LauncherStore {
   private journalTimer: ReturnType<typeof setTimeout> | null = null;
   private loginGen = 0;
   private lastScanAt = 0;
+  /** 已经为之重扫过的那次启动（见 onLaunchPhase）。 */
+  private launchScanned: string | null = null;
   /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
   private scanIssued = 0;
   private scanApplied = 0;
@@ -1417,20 +1428,31 @@ export class LauncherStore {
     const loaded = journal.tasks.map((record) => journalTask(taskFromRecord(record)));
     this.journalState = "read";
     let changed = false;
+    let interrupted: Task[] = [];
     this.set((raw) => {
       const inMemory = new Set(raw.tasks.map((t) => t.id));
       const previous = loaded.filter((t) => !inMemory.has(t.id));
       const restored = restoreJournal(previous, now);
+      interrupted = previous.filter(isActiveTask);
       // 内存里的任务是日志读不出期间入队的，还没写进去过
       changed = raw.tasks.length > 0 || restored.some((t, i) => t !== previous[i]);
       return { tasks: trimHistory([...restored, ...raw.tasks]) };
     });
     if (changed) this.scheduleJournal();
+    // 进程没了收尾代码跑不到，写到一半的文件还留在玩家选的目录里，不重试就一直占着
+    for (const task of interrupted) {
+      const dest = exportDestination(task.spec);
+      if (dest !== null) this.background(ACTION_ERROR.discardExportLeftovers, tasksIpc.discardExportLeftovers(dest));
+    }
   }
 
   private readonly onWindowFocus = (): void => {
+    // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫
+    invalidateResources("mods");
     if (this.raw.status.instances.kind !== "ready") return;
     if (Date.now() - this.lastScanAt < INSTANCE_RESCAN_MIN_MS) return;
+    // 本机 Java 也可能被挪走：探测要起进程，跟着实例重扫一起节流
+    invalidateResources("java");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
   };
 
@@ -1555,7 +1577,20 @@ export class LauncherStore {
     if (event.kind === "warning") {
       const task = taskByAttempt(this.raw.tasks, event.task_id);
       console.warn(`任务 ${task === undefined ? event.task_id : task.title} 的提醒：${event.message}`);
+      return;
     }
+    this.rescanHoldingBases(event.task_id);
+  }
+
+  /**
+   * 任务占着基底的话，基底的改名、补全、删除要按「被使用」禁用，而占用只有后端知道，列表是开工前扫的。补全与导入
+   * 的进度阶段都推在占住基底之后（导入下载整合包那几条在占住之前，所以每个阶段都重扫，不止第一个），结束时
+   * rescanHeld 再读一遍放开。阶段一个任务只有几条，下载进度不走这里。
+   */
+  private rescanHoldingBases(attemptId: string): void {
+    const task = taskByAttempt(this.raw.tasks, attemptId);
+    if (task === undefined || !BASE_HOLDING_COMMANDS.has(task.spec.command)) return;
+    this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
   }
 
   private onDeviceCode(code: accountsIpc.DeviceCode): void {
@@ -1587,6 +1622,12 @@ export class LauncherStore {
       Date.now(),
     );
     if (next !== s) this.set({ session: next });
+    // 第一条阶段事件推出来时后端已占住实例与基底，一局游戏可能开几个小时，不重扫的话基底这段时间一直按空闲显示。
+    // 下载进度也走这个事件，所以一次启动只扫一回；结束时退出事件与备份事件各自重扫，启动被拒时 startLaunch 重扫。
+    if (event.task_id !== this.launchScanned) {
+      this.launchScanned = event.task_id;
+      this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    }
   }
 
   private onGameLog(event: launchIpc.GameLogEvent): void {
@@ -1604,12 +1645,18 @@ export class LauncherStore {
       const next = sessionExited(s, { versionId: id, crashed: event.crashed, killed: event.killed }, Date.now());
       this.set({ session: next });
       crashedSession = next.phase === "crashed";
+      this.markOccupantGone(id);
     }
     // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好。这一局可能新建了存档，游玩统计也多了一段：
     // 没人订阅的缓存条目随之丢弃，之后重新挂载的页面会重取，不靠页面自己观察签名变化
     invalidateResources(`log:${id}`);
     invalidateResources(`content:${id}`);
+    // 玩家常常在资源管理器里往 mods 目录放了文件就直接启动：诊断页要拿日志点名的 Mod 对列表，旧列表里没有它，
+    // 开关与「停用」就都出不来
+    invalidateResources(`mods:${id}`);
     invalidateResources("play-stats");
+    // 启动时缺 Java，后端也会自己下载运行时
+    invalidateResources("java");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
     if (crashedSession || (event.crashed && !event.killed)) this.background(ACTION_ERROR.loadCrash, this.announceCrash(id));
   }
@@ -1629,6 +1676,12 @@ export class LauncherStore {
       .join("\n");
     const copy = TOAST_COPY.autoBackupFailed(event.instance_id, first.error.message);
     this.pushToast("error", copy.title, copy.body, { label: TOAST_COPY.copyErrorAction, run: () => navigator.clipboard.writeText(raw), errorTitle: TOAST_COPY.copyFailed });
+  }
+
+  /** 替换确认开着时占用的那局自己结束了：「会先结束它」不再成立，确认框随之改口。 */
+  private markOccupantGone(instanceId: string): void {
+    const prompt = this.raw.launchPrompt;
+    if (prompt !== null && prompt.occupantId === instanceId) this.set({ launchPrompt: { ...prompt, occupantPhase: "gone" } });
   }
 
   /** 读崩溃报告的主线索，写进会话并发崩溃通知。读不出时会话标为 unavailable，错误照常抛出。 */
@@ -1754,17 +1807,22 @@ export class LauncherStore {
       const attemptId = attemptTaskId(task);
       this.execute(task).then(
         (result) => {
-          this.cancelRequested.delete(attemptId);
-          this.composites.delete(attemptId);
+          this.attemptSettled(task, attemptId);
           this.onTaskDone(task.id, attempt, result);
         },
         (error: unknown) => {
-          this.cancelRequested.delete(attemptId);
-          this.composites.delete(attemptId);
+          this.attemptSettled(task, attemptId);
           this.onTaskFailed(task.id, attempt, error);
         },
       );
     }
+  }
+
+  /** 一次尝试落定，成败都走这里。 */
+  private attemptSettled(task: Task, attemptId: string): void {
+    this.cancelRequested.delete(attemptId);
+    this.composites.delete(attemptId);
+    if (MAY_DOWNLOAD_JAVA.has(task.spec.command)) invalidateResources("java");
   }
 
   /** 请后端取消运行中的这一次尝试，并记下请求：组合任务据此不再开始下一项。返回后端此刻是否在运行它。 */
@@ -1902,7 +1960,11 @@ export class LauncherStore {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
     const keep = this.keepsPlaceholder(before);
-    this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())), ...(keep ? { landing: [...raw.landing, id] } : {}) }));
+    const repaired = before.spec.command === "repair_instance" ? before.instanceId : null;
+    this.set((raw) => {
+      const done = trimHistory(markDone(raw.tasks, id, attempt, Date.now()));
+      return { tasks: repaired === null ? done : dropSuperseded(done, repaired), ...(keep ? { landing: [...raw.landing, id] } : {}) };
+    });
     this.tasksChanged();
     this.rescanHeld(before.instanceId);
     if (this.discardLanding.has(id)) return;
@@ -2007,7 +2069,7 @@ export class LauncherStore {
       this.failureBatch = { toastId, startedAt: batch.startedAt, reasons };
       return;
     }
-    const single = TASK_TOAST.failed(task.title, reason);
+    const single = task.kind === "repair" ? TASK_TOAST.repairFailed(task.title, reason) : TASK_TOAST.failed(task.title, reason);
     // 文件没到手时重试必然再失败一次，通知上不给重试，转去失败筛选看清单
     const action: ToastAction =
       error.blocked_files === undefined
@@ -2173,12 +2235,13 @@ export class LauncherStore {
         const mark = this.renames.length;
         await this.fetchInstances();
         const id = this.renamedSince(strArg(task.spec.args, "id", command), mark);
+        // 排在接着启动之前：启动可能停在登录弹窗上不换会话，失败卡留着的话入口只剩再修一次，和修好了对不上
+        this.dismissRepairedFailure(id);
         if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
           await this.actions.launch(id);
           return;
         }
-        this.dismissRepairedFailure(id);
         const copy = task.spec.args.reinstallLoader === true ? TASK_TOAST.loaderReinstalled(id) : TASK_TOAST.repaired(id);
         this.pushToast("success", copy.title, undefined, this.launchAction(id));
         return;
@@ -2383,6 +2446,8 @@ export class LauncherStore {
       (launched) => {
         const s = this.raw.session;
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });
+        // 启动途中自动下载的托管运行时不经过 Java 任务，本机 Java 列表要在这里失效
+        invalidateResources("java");
         if (launched.offline) {
           const copy = TOAST_COPY.offlineLaunched(instanceId);
           this.pushToast("info", copy.title, copy.body);
@@ -2390,8 +2455,10 @@ export class LauncherStore {
       },
       (error: unknown) => {
         this.net.reportFailure(error);
+        this.rescanHeld(instanceId);
         const s = this.raw.session;
         if (s === null || s.taskId !== taskId) throw error;
+        this.markOccupantGone(instanceId);
         if (isCancelled(error)) {
           this.set({ session: sessionCancelled(s, taskId, Date.now()) });
           return;
@@ -2410,6 +2477,10 @@ export class LauncherStore {
         // 直达的存档已被移走：入口手里的存档列表过时了，重读一遍，免得那一行留着让人再点
         if (quickPlay !== null && quickPlay.kind === "singleplayer" && isIpcError(error) && error.code === launchIpc.WORLD_NOT_FOUND_CODE) {
           invalidateResources(`content:${instanceId}`);
+        }
+        // 版本文件是在启动器之外没的：列表还当它完好，重扫之后入口才换成「修复并启动」，不然玩家只能对着通知一遍遍点启动
+        if (isIpcError(error) && error.code === launchIpc.VERSION_NOT_INSTALLED_CODE) {
+          this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
         }
         throw error;
       },
@@ -3230,6 +3301,12 @@ export class LauncherStore {
           store.retryAsRepair(task, leftover);
           return;
         }
+        const installed = store.installedBeforeInterrupt(task);
+        if (installed !== null) {
+          store.retireTask(task);
+          store.pushToast("info", TASK_TOAST.installFinishedBeforeInterrupt(installed).title);
+          return;
+        }
         const duplicate = findDuplicate(store.raw.tasks, task.spec);
         if (duplicate !== undefined) {
           store.pushToast("info", TASK_TOAST.duplicate(task.title).title);
@@ -3246,6 +3323,10 @@ export class LauncherStore {
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
               if (findDuplicate(store.raw.tasks, { command: "repair_instance", args: { id: leftover } }) === undefined && store.retryAsRepair(task, leftover)) retried += 1;
+              continue;
+            }
+            if (store.installedBeforeInterrupt(task) !== null) {
+              store.retireTask(task);
               continue;
             }
             // 逐个排：前一个重试后，同一件事的后一个就算重复
@@ -3391,6 +3472,22 @@ export class LauncherStore {
   }
 
   /**
+   * 「关闭时中断」的新建其实已经装完时的实例 id；否则 null。结局写进任务日志有防抖，装完到写下之间进程没了就是这样：
+   * 盘上的实例已经没有安装标记，重跑 install_version 只会撞名，那一行也永远留在失败里。
+   */
+  private installedBeforeInterrupt(task: Task): string | null {
+    if (task.spec.command !== "install_version" || task.error === null || task.error.code !== TASK_INTERRUPTED_CODE) return null;
+    const name = strArg(task.spec.args, "targetName", task.spec.command).toLowerCase();
+    const installed = this.raw.scanned.find((i) => i.id.toLowerCase() === name && i.incomplete === null);
+    return installed === undefined ? null : installed.id;
+  }
+
+  private retireTask(task: Task): void {
+    this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
+    this.scheduleJournal();
+  }
+
+  /**
    * 失败新建的重试改排补全：补全任务接替这一行，失败的那一行撤下，不再留着一个点了也没用的重试。新建时勾的开局 Mod
    * 跟着交给补全任务，否则重试成功后玩家勾的 Mod 一个都没装上，也没有任何提示。
    */
@@ -3432,6 +3529,7 @@ export class LauncherStore {
 
 /** 确认对话框里「替换运行中的游戏」两种文案，供外壳弹确认时用。 */
 export function launchPromptCopy(prompt: LaunchPrompt): { title: string; body: string; confirmLabel: string; tone: "primary" | "danger" } {
+  if (prompt.occupantPhase === "gone") return { ...CONFIRM_COPY.occupantGone(prompt.instanceId, prompt.occupantId), tone: "primary" };
   if (prompt.occupantPhase === "loading") return { ...CONFIRM_COPY.replaceLoading(prompt.instanceId, prompt.occupantId), tone: "primary" };
   return { ...CONFIRM_COPY.replaceRunning(prompt.instanceId, prompt.occupantId), tone: "danger" };
 }

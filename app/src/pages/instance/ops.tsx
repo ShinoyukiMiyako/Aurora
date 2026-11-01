@@ -17,7 +17,7 @@ import { workLock, type WorkLock } from "./model";
 export type FolderTarget = Parameters<LauncherActions["openFolder"]>[0];
 
 /** 打开前后端要先占住实例（缺了要建出来）的工作子目录；实例文件夹本身与单个存档只是定位，不占。 */
-const WORK_FOLDERS: ReadonlySet<FolderTarget> = new Set<FolderTarget>(["mods", "saves", "resourcepacks", "shaderpacks", "logs", "screenshots"]);
+const WORK_FOLDERS: ReadonlySet<FolderTarget> = new Set<FolderTarget>(["mods", "saves", "resourcepacks", "shaderpacks", "logs", "session_logs", "screenshots"]);
 
 export interface InstanceOps {
   locks: InstanceLocks;

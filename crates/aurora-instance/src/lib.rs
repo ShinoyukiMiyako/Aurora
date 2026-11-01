@@ -58,7 +58,8 @@ pub use settings::{
 };
 
 pub use marker::{
-    IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec, MarkerError, MarkerStore,
+    IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallRecordStore, InstallSpec,
+    MarkerError, MarkerStore,
 };
 
 pub use isolation::{

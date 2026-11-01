@@ -3,14 +3,17 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOAST_COPY } from "../copy/flows";
+import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
 import { pickSaveFile } from "./platform";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
+import { browserWindowPort, WindowPortProvider, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -186,6 +189,50 @@ describe("外壳：确认框与启动替换", () => {
     expect(launcher.state.session).toMatchObject({ instanceId: "创造", phase: "running" });
     expect(launcher.state.launchPrompt).toBeNull();
   });
+
+  it("替换确认开着时旧游戏自己退出：弹窗改口，确认后直接启动，不再发结束请求", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    expect(dialogTitle()).toBe("结束「生存」并启动「创造」？");
+
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
+    await flush();
+    expect(dialogTitle()).toBe("启动「创造」？");
+    expect(launcher.state.launchPrompt).toMatchObject({ instanceId: "创造", occupantPhase: "gone" });
+
+    act(() => button("启动").click());
+    await flush();
+    expect(callsOf(ipc, "stop_game")).toEqual([]);
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "创造"]);
+    expect(launcher.state.session).toMatchObject({ instanceId: "创造", phase: "running" });
+    expect(launcher.state.launchPrompt).toBeNull();
+  });
+
+  it("改口后取消：不启动，弹窗关掉", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
+    await flush();
+
+    act(() => button(CONFIRM_CANCEL_LABEL).click());
+    await flush();
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存"]);
+    expect(launcher.state.launchPrompt).toBeNull();
+  });
 });
 
 describe("外壳：全局快捷键", () => {
@@ -308,6 +355,104 @@ describe("外壳：通知动作", () => {
     act(() => shell.runToastAction(toast));
 
     expect(nav.route).toEqual({ page: "instance", id: "生存二", tab: "crash" });
+  });
+
+  it("人已经到了通知指向的页面：这条收起，指向别处的留着", async () => {
+    await mount();
+    act(() => {
+      launcher.actions.toast("error", "「生存」崩溃了", undefined, { action: { label: "查看诊断", to: { page: "instance", id: "生存", tab: "crash" } } });
+      launcher.actions.toast("error", "「创造」崩溃了", undefined, { action: { label: "查看诊断", to: { page: "instance", id: "创造", tab: "crash" } } });
+      launcher.actions.toast("error", "没有动作");
+    });
+    act(() => nav.go({ page: "instance", id: "生存", tab: "crash" }));
+    await flush();
+    expect(launcher.state.toasts.map((t) => t.title)).toEqual(["「创造」崩溃了", "没有动作"]);
+  });
+
+  it("页面已经开着时新来的通知也不再指回这里", async () => {
+    await mount();
+    act(() => nav.go({ page: "instance", id: "生存", tab: "crash" }));
+    await flush();
+    act(() => {
+      launcher.actions.toast("error", "「生存」崩溃了", undefined, { action: { label: "查看诊断", to: { page: "instance", id: "生存", tab: "crash" } } });
+    });
+    await flush();
+    expect(launcher.state.toasts).toEqual([]);
+  });
+});
+
+describe("外壳：最小化期间的通知", () => {
+  // WebView2 最小化时 visibilityState 仍是 visible，所以这里只动窗口状态，不动 document
+  let minimized: boolean;
+  let resized: () => void;
+  const port = (): WindowPort => ({
+    ...browserWindowPort(),
+    isMinimized: async () => minimized,
+    onResized: async (handler) => {
+      resized = handler;
+      return () => {};
+    },
+  });
+  const mountWithPort = async () => {
+    view = render(
+      <WindowPortProvider port={port()}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+  };
+  const windowChanged = async (next: boolean) => {
+    minimized = next;
+    resized();
+    await flush();
+  };
+  const titles = () => launcher.state.toasts.map((t) => t.title);
+
+  beforeEach(() => {
+    minimized = false;
+    // 用例要把时钟拨过自动检查更新的延时：不支持更新时不排期，不会多出一条「可以更新了」
+    ipc.overrides.set("updater_info", () => ({ current_version: "0.1.0", supported: false, unsupported_reason: null, available: null, downloaded_version: null, install_on_exit: false }));
+  });
+
+  it("最小化期间到点的通知不消失，还原后按剩余时长继续走完", async () => {
+    await mountWithPort();
+    await act(async () => launcher.actions.toast("info", "已停用 Sodium"));
+    await windowChanged(true);
+
+    await act(async () => void vi.advanceTimersByTime(60_000));
+    expect(titles()).toEqual(["已停用 Sodium"]);
+
+    await windowChanged(false);
+    await act(async () => void vi.advanceTimersByTime(60_000));
+    expect(titles()).toEqual([]);
+  });
+
+  it("窗口没有最小化时通知照常到点消失", async () => {
+    await mountWithPort();
+    await act(async () => launcher.actions.toast("info", "已停用 Sodium"));
+    await windowChanged(false);
+    await act(async () => void vi.advanceTimersByTime(60_000));
+    expect(titles()).toEqual([]);
+  });
+
+  it("读不出窗口状态经外层统一错误处理报告", async () => {
+    view = render(
+      <WindowPortProvider port={{ ...port(), isMinimized: () => Promise.reject(new Error("窗口已销毁")) }}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    expect(launcher.state.toasts.map((t) => [t.title, t.body])).toEqual([[SHELL_ACTION_ERROR.windowState, "窗口已销毁"]]);
   });
 });
 

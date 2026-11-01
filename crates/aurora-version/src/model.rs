@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::rules::{Rule, RuntimeContext, evaluate_rules};
 
+/// 13w25a 的发布日期。ISO-8601 按字符串比较，只比到日就够：前一个版本 13w24b 早了三天。
+const WINDOW_SIZE_ARGS_SINCE: &str = "2013-06-17";
+
 /// 一个版本 JSON 的完整域模型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionJson {
@@ -113,6 +116,40 @@ impl VersionJson {
     pub fn uses_legacy_assets(&self) -> bool {
         matches!(self.assets.as_deref(), Some("legacy" | "pre-1.6"))
     }
+
+    /// 该版本的资源是否铺在工作目录的 `resources` 下（pre-1.6 索引的 map_to_resources 布局）。
+    pub fn maps_assets_to_resources(&self) -> bool {
+        self.assets.as_deref() == Some("pre-1.6")
+    }
+
+    /// 客户端是否认 `--width` / `--height`。13w25a 才加上这两个选项，更早的快照遇到未知选项直接退出。
+    /// 没有发布时间的自定义版本 JSON 按认处理：它们基本都是新版本改的。
+    pub fn accepts_window_size_args(&self) -> bool {
+        self.release_time
+            .as_deref()
+            .is_none_or(|released| released >= WINDOW_SIZE_ARGS_SINCE)
+    }
+
+    /// 这个库的 jar 是否由启动器解压成本地库，解压了就不进 classpath；两边都走这一个判据，
+    /// 一个 natives 库不会两头落空。
+    ///
+    /// 26.2 起版本 JSON 把 `java.library.path` 指到 natives 子目录，由游戏从 classpath 上的 natives jar
+    /// 自行解压到各自的子目录：解到 natives 目录里的文件读不到，新式 natives 条目得留在 classpath。
+    /// 旧式 `natives` 映射的 classifier 件不是 classpath 用的 jar，始终解压。
+    pub fn extracts_native(&self, lib: &Library) -> bool {
+        lib.is_native() && (lib.natives.is_some() || !self.library_path_in_natives_subdir())
+    }
+
+    fn library_path_in_natives_subdir(&self) -> bool {
+        const SUBDIR_LIBRARY_PATH: &str = "-Djava.library.path=${natives_directory}/";
+        let moved = |value: &String| value.starts_with(SUBDIR_LIBRARY_PATH);
+        self.arguments.as_ref().is_some_and(|args| {
+            args.jvm.iter().any(|arg| match arg {
+                Argument::Plain(value) => moved(value),
+                Argument::Conditional { value, .. } => value.as_slice().iter().any(moved),
+            })
+        })
+    }
 }
 
 /// 新式结构化参数：game 与 jvm 两组。
@@ -205,13 +242,21 @@ impl Library {
 
     /// 用于同名库去重的键：`group:artifact`（+ classifier 以区分主件与各 natives）。
     /// 坐标无法解析时退回整个 name，保证不同名库不会被误并。
+    ///
+    /// 带 natives 映射的条目单独成键：1.13 到 1.18 的版本 JSON 把同一坐标写成两条，一条主件进 classpath，
+    /// 一条带 natives 映射只为解压，并掉任何一条都少东西。去重只在同类之间：主件压主件，natives 条目压 natives 条目。
     pub fn dedup_key(&self) -> String {
-        match self.coordinate() {
+        let key = match self.coordinate() {
             Some(c) => match c.classifier {
                 Some(cl) => format!("{}:{}:{}", c.group, c.artifact, cl),
                 None => format!("{}:{}", c.group, c.artifact),
             },
             None => self.name.clone(),
+        };
+        if self.natives.is_some() {
+            format!("{key}#natives")
+        } else {
+            key
         }
     }
 
@@ -360,7 +405,7 @@ pub struct LoggingFile {
     pub url: String,
 }
 
-/// 过滤出当前环境生效、且按 `group:artifact[:classifier]` 去重后的库列表。
+/// 过滤出当前环境生效、且按 [`Library::dedup_key`] 去重后的库列表。
 ///
 /// 去重保留 "先出现者"。合并继承链时子版本（加载器）库排在前面，因此这里天然让加载器指定的
 /// 库版本压过原版同名库——这正是启动器该有的行为（加载器常有意锁定某个较低版本，不能用
@@ -425,6 +470,43 @@ mod tests {
             v.minecraft_arguments.as_deref(),
             Some("--username ${auth_player_name} --version ${version_name}")
         );
+    }
+
+    fn native_lib(json: &str) -> Library {
+        serde_json::from_str(json).expect("应解析")
+    }
+
+    #[test]
+    fn natives_go_to_classpath_only_when_library_path_points_into_a_subdir() {
+        let new_style = native_lib(r#"{"name":"org.lwjgl:lwjgl:3.4.3:natives-windows"}"#);
+        let old_style = native_lib(
+            r#"{"name":"org.lwjgl.lwjgl:lwjgl-platform:2.9.4","natives":{"windows":"natives-windows"}}"#,
+        );
+        let plain = native_lib(r#"{"name":"org.lwjgl:lwjgl:3.4.3"}"#);
+        let version = |jvm: &str| {
+            VersionJson::from_json_str(&format!(r#"{{"id":"x","arguments":{{"jvm":[{jvm}]}}}}"#))
+                .expect("应解析")
+        };
+
+        let cases = [
+            (r#""-Djava.library.path=${natives_directory}/java""#, false),
+            (
+                r#"{"rules":[{"action":"allow"}],"value":["-Xss1M","-Djava.library.path=${natives_directory}/java"]}"#,
+                false,
+            ),
+            (r#""-Djava.library.path=${natives_directory}""#, true),
+            (r#""-Djna.tmpdir=${natives_directory}/jna""#, true),
+        ];
+        for (jvm, extracted) in cases {
+            let v = version(jvm);
+            assert_eq!(v.extracts_native(&new_style), extracted, "{jvm}");
+            assert!(v.extracts_native(&old_style), "{jvm}");
+            assert!(!v.extracts_native(&plain), "{jvm}");
+        }
+
+        // 1.12- 的版本 JSON 没有结构化参数，启动器自己补的库路径就是解压目录
+        let legacy = VersionJson::from_json_str(r#"{"id":"1.12.2"}"#).expect("应解析");
+        assert!(legacy.extracts_native(&new_style));
     }
 
     #[test]
@@ -504,6 +586,47 @@ mod tests {
                 "org.lwjgl:lwjgl:3.3.3:natives-windows"
             ]
         );
+    }
+
+    /// 1.13 到 1.18 的版本 JSON 把 LWJGL 这类库写成同坐标的两条：先是进 classpath 的主件，
+    /// 再是带 natives 映射、只为解压的一条。按坐标并掉后一条，本地库就没人下载和解压，游戏起不来。
+    #[test]
+    fn select_libraries_keeps_native_entry_sharing_coordinate_with_main_jar() {
+        let json = r#"{
+            "id":"1.16.5",
+            "libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}}},
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{
+                    "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"},
+                    "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"b","size":2,"url":"n"}}},
+                 "natives":{"windows":"natives-windows"}}
+            ]
+        }"#;
+        let v = VersionJson::from_json_str(json).expect("应解析");
+        let win64 = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let selected = select_libraries(&v, &win64);
+        assert_eq!(selected.len(), 2, "主件与 natives 条目都要留下");
+        assert!(!selected[0].is_native());
+        assert!(selected[1].is_native());
+    }
+
+    /// 带 natives 映射的条目之间照常按坐标去重：加载器压过原版的规则对它们同样成立。
+    #[test]
+    fn select_libraries_dedups_native_entries_among_themselves() {
+        let json = r#"{
+            "id":"merged",
+            "libraries":[
+                {"name":"org.lwjgl:lwjgl:3.3.0","natives":{"windows":"natives-windows"}},
+                {"name":"org.lwjgl:lwjgl:3.2.2","natives":{"windows":"natives-windows"}}
+            ]
+        }"#;
+        let v = VersionJson::from_json_str(json).expect("应解析");
+        let win64 = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let selected = select_libraries(&v, &win64);
+        let names: Vec<&str> = selected.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["org.lwjgl:lwjgl:3.3.0"]);
     }
 
     #[test]

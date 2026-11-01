@@ -65,7 +65,7 @@ export interface QuickPlaySupportDto {
 
 export interface InstanceDto {
   id: string;
-  /** ready：版本 JSON 可用；broken：缺失或损坏，原因见 broken_reason。 */
+  /** ready：版本 JSON 可用；broken：缺失或损坏，原因见 broken_reason。只说版本 JSON，安装写到一半时也是 ready：判断能不能用要同时看 incomplete 为空。 */
   status: "ready" | "broken";
   broken_reason: string | null;
   /** 原版版本号；识别不出或 broken 时为 null。 */
@@ -318,7 +318,7 @@ export interface ManifestDto {
 
 /**
  * open_folder 能打开的文件夹。game_dir、data_dir（启动器数据目录）、launcher_logs（启动器自己的日志目录）
- * 不需要 id；world 还需要存档文件夹名。
+ * 不需要 id；world 还需要存档文件夹名。logs 是游戏自己写的日志，session_logs 是启动器记下的每局会话日志。
  */
 export type FolderTarget =
   | "game_dir"
@@ -330,6 +330,7 @@ export type FolderTarget =
   | "resourcepacks"
   | "shaderpacks"
   | "logs"
+  | "session_logs"
   | "screenshots"
   | "world";
 

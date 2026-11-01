@@ -13,7 +13,7 @@ import { LauncherProvider } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { resetRecorder, settle } from "../../test/launcher";
+import { callsOf, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -129,6 +129,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("崩溃诊断：日志路径", () => {
+  it("路径旁的「打开」去日志文件所在的目录，不是游戏自己的 logs：那里找不到这个文件", async () => {
+    await crashWith(1);
+    await open("crash");
+    // 无线索的建议里还有一个同名按钮，跳到日志页；摘要卡在前
+    click(buttons("打开")[0]);
+    await flush();
+    expect(callsOf(ipc, "open_folder")).toEqual([{ target: "session_logs", id: ID, world: null }]);
+  });
+});
+
 describe("崩溃诊断：退出码兜底", () => {
   it("访问冲突且日志没有命中：一条进程异常退出线索，页头括注退出码说明，线索卡写退出码而不画日志框", async () => {
     await crashWith(-1073741819);
@@ -188,6 +199,38 @@ describe("概览的崩溃横幅", () => {
     await crashWith(1);
     await open("overview");
     expect(text()).toContain("日志指向内存不足，诊断里有可以一键尝试的办法。");
+  });
+});
+
+describe("崩溃诊断：JVM 参数被拒", () => {
+  it("点名被拒的参数，一键尝试把人带到实例设置", async () => {
+    await crashWith(1);
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = {
+        ...base,
+        diagnoses: [
+          {
+            category: "jvm_args_invalid",
+            summary: "",
+            advice: "",
+            detail: "NotARealFlag",
+            matched: "Unrecognized VM option 'NotARealFlag'",
+            line: 9,
+            context: [],
+            source: "session_log",
+          },
+        ],
+      };
+      return report;
+    });
+    await open("crash");
+    expect(text()).toContain("找到 1 条线索，日志指向 JVM 参数有误");
+    expect(text()).toContain("日志指向 JVM 参数 NotARealFlag，Java 不认它");
+    click(button("打开实例设置"));
+    await flush();
+    expect(nav.route).toMatchObject({ page: "instance", id: ID, tab: "settings" });
   });
 });
 

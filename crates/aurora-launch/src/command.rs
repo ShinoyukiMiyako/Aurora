@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use aurora_version::{RuntimeContext, VersionJson, check_path_segment};
 use serde::Serialize;
 
-use crate::account::{AuthValues, AuthlibInjector};
+use crate::account::{AuthValues, AuthlibInjector, OFFLINE_ACCESS_TOKEN};
 use crate::args;
 use crate::classpath;
 use crate::error::{LaunchError, Result};
@@ -65,6 +65,8 @@ pub struct LaunchCommand {
     pub args: Vec<String>,
     /// 工作目录（隔离判定后的游戏目录）。
     pub working_dir: PathBuf,
+    /// natives 解压目录，游戏进程的 PATH 里要有它，见 [`crate::process::spawn`]。
+    pub natives_dir: PathBuf,
 }
 
 impl LaunchCommand {
@@ -275,7 +277,9 @@ impl<'a> CommandBuilder<'a> {
             .map(|a| a.id.clone())
             .or_else(|| self.version.assets.clone())
             .unwrap_or_default();
-        let game_assets = if self.version.uses_legacy_assets() {
+        let game_assets = if self.version.maps_assets_to_resources() {
+            self.game_dir.join("resources").display().to_string()
+        } else if self.version.uses_legacy_assets() {
             self.paths
                 .assets_dir
                 .join("virtual")
@@ -363,6 +367,9 @@ impl<'a> CommandBuilder<'a> {
         if let Some(authlib) = &self.authlib {
             jvm_templates.extend(authlib.jvm_args());
         }
+        if self.auth.access_token == OFFLINE_ACCESS_TOKEN {
+            jvm_templates.extend(args::offline_api_args(self.version));
+        }
         let version_jvm = self
             .version
             .arguments
@@ -432,9 +439,10 @@ impl<'a> CommandBuilder<'a> {
             (None, None) => Vec::new(),
         };
         let mut game_args: Vec<String> = game_templates.iter().map(|t| ph.substitute(t)).collect();
-        // 旧式 minecraftArguments 不带窗口尺寸，新式参数靠 has_custom_resolution 条件块带上；
-        // 游戏 1.6 起都认 --width / --height，模板里没有时补一份。
+        // 旧式 minecraftArguments 不带窗口尺寸，新式参数靠 has_custom_resolution 条件块带上，
+        // 模板里没有时补一份。
         if let Some((width, height)) = self.resolution
+            && self.version.accepts_window_size_args()
             && !game_args
                 .iter()
                 .any(|arg| arg == "--width" || arg == "--height")
@@ -472,6 +480,7 @@ impl<'a> CommandBuilder<'a> {
             program: self.java,
             args: argv,
             working_dir: self.game_dir,
+            natives_dir: self.paths.natives_dir,
         })
     }
 }
@@ -509,6 +518,7 @@ mod tests {
                 "".to_owned(),
             ],
             working_dir: PathBuf::from("D:/mc"),
+            natives_dir: PathBuf::from("D:/mc/natives"),
         };
         let line = command.command_line();
         assert!(line.starts_with("\"C:/Program Files/Java/bin/java.exe\""));
@@ -543,6 +553,115 @@ mod tests {
             .collect()
     }
 
+    /// `--assetsDir` 指到 `${game_assets}`：launchwrapper 从这里读窗口图标，得和资源实际铺开的位置一致。
+    fn game_assets_of(json: &str, game_dir: &str) -> String {
+        let version = VersionJson::from_json_str(json).unwrap();
+        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
+        let args = CommandBuilder::new(
+            &version,
+            ctx,
+            "java.exe",
+            paths,
+            game_dir,
+            AuthValues::offline("Steve", "uuid"),
+            "1.0.0",
+        )
+        .build()
+        .unwrap()
+        .args;
+        value_after(&args, "--assetsDir")[0].to_owned()
+    }
+
+    /// pre-1.6 的资源铺在工作目录的 resources 下（隔离实例就是实例自己的目录），assets/virtual 下没有它。
+    #[test]
+    fn pre_1_6_assets_dir_is_the_resources_folder_of_the_working_dir() {
+        let json = r#"{"id":"b1.7.3","mainClass":"net.minecraft.launchwrapper.Launch","assets":"pre-1.6",
+            "minecraftArguments":"${auth_player_name} --gameDir ${game_directory} --assetsDir ${game_assets}"}"#;
+        assert_eq!(
+            game_assets_of(json, "/mc/versions/b1.7.3"),
+            PathBuf::from("/mc/versions/b1.7.3")
+                .join("resources")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn legacy_index_assets_dir_stays_under_virtual() {
+        let json = r#"{"id":"1.6.4","mainClass":"net.minecraft.client.main.Main","assets":"legacy",
+            "minecraftArguments":"--username ${auth_player_name} --assetsDir ${game_assets}"}"#;
+        assert_eq!(
+            game_assets_of(json, "/mc"),
+            PathBuf::from("/mc")
+                .join("assets")
+                .join("virtual")
+                .join("legacy")
+                .display()
+                .to_string()
+        );
+    }
+
+    fn jvm_args_for(authlib: &str, auth: AuthValues) -> Vec<String> {
+        let json = format!(
+            r#"{{"id":"1.16.5","mainClass":"net.minecraft.client.main.Main",
+                "libraries":[{{"name":"com.mojang:authlib:{authlib}"}}],
+                "arguments":{{"game":["--username","${{auth_player_name}}"],"jvm":["-cp","${{classpath}}"]}}}}"#
+        );
+        let version = VersionJson::from_json_str(&json).unwrap();
+        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
+        CommandBuilder::new(&version, ctx, "java.exe", paths, "/mc", auth, "1.0.0")
+            .build()
+            .unwrap()
+            .args
+    }
+
+    fn redirects_api(args: &[String]) -> bool {
+        [
+            "-Dminecraft.api.auth.host=https://invalid.invalid",
+            "-Dminecraft.api.account.host=https://invalid.invalid",
+            "-Dminecraft.api.session.host=https://invalid.invalid",
+            "-Dminecraft.api.services.host=https://invalid.invalid",
+        ]
+        .iter()
+        .all(|arg| args.iter().any(|a| a == arg))
+    }
+
+    /// 1.16.4、1.16.5 带的 authlib 2.1 拿离线占位令牌问权限接口被拒后，多人游戏整个不可用；接口连不上时它才
+    /// 按离线处理。指到解析不了的地址，离线账户才进得了局域网和第三方服务器。
+    #[test]
+    fn offline_account_on_authlib_2_1_redirects_the_api_hosts() {
+        let args = jvm_args_for("2.1.28", AuthValues::offline("Steve", "uuid"));
+        assert!(redirects_api(&args), "{args:?}");
+    }
+
+    #[test]
+    fn other_authlib_versions_keep_the_real_api_hosts() {
+        for authlib in ["1.5.25", "2.3.31", "6.0.54"] {
+            let args = jvm_args_for(authlib, AuthValues::offline("Steve", "uuid"));
+            assert!(
+                !args.iter().any(|a| a.starts_with("-Dminecraft.api.")),
+                "{authlib}: {args:?}"
+            );
+        }
+    }
+
+    /// 带真实令牌的账户要连官方接口：正版校验、皮肤与 Realms 都靠它。
+    #[test]
+    fn real_token_keeps_the_real_api_hosts_on_authlib_2_1() {
+        let auth = AuthValues {
+            access_token: "real-token".to_owned(),
+            user_type: "msa".to_owned(),
+            ..AuthValues::offline("Steve", "uuid")
+        };
+        let args = jvm_args_for("2.1.28", auth);
+        assert!(
+            !args.iter().any(|a| a.starts_with("-Dminecraft.api.")),
+            "{args:?}"
+        );
+    }
+
     /// 1.12.2 及更早的 minecraftArguments 不带窗口尺寸参数，游戏本身认 `--width` / `--height`：
     /// 设了分辨率就要补上，否则实例设置里的窗口大小对这些版本不生效。
     #[test]
@@ -557,6 +676,41 @@ mod tests {
         // 没设分辨率：不凭空加尺寸参数，交给游戏自己的默认窗口。
         let args = build_with_resolution(legacy, None);
         assert!(!args.iter().any(|a| a == "--width" || a == "--height"));
+    }
+
+    /// 13w25a 之前的 Main 不认窗口尺寸选项，遇到未知选项直接退出，默认分辨率也会让这些快照起不来。
+    /// 13w24b 的模板和 1.6 已经一样，只能按发布时间分。
+    #[test]
+    fn versions_before_13w25a_never_get_the_resolution_appended() {
+        for (id, released) in [
+            ("13w16a", "2013-04-21T12:49:30+00:00"),
+            ("13w24b", "2013-06-14T12:19:13+00:00"),
+        ] {
+            let json = serde_json::json!({
+                "id": id, "mainClass": "net.minecraft.client.main.Main",
+                "releaseTime": released,
+                "minecraftArguments": "--username ${auth_player_name}",
+            })
+            .to_string();
+            let args = build_with_resolution(&json, Some((1280, 720)));
+            assert!(
+                !args.iter().any(|a| a == "--width" || a == "--height"),
+                "{id}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolution_is_appended_from_13w25a_on() {
+        let json = serde_json::json!({
+            "id": "13w25a", "mainClass": "net.minecraft.client.main.Main",
+            "releaseTime": "2013-06-17T14:08:06+00:00",
+            "minecraftArguments": "--username ${auth_player_name}",
+        })
+        .to_string();
+        let args = build_with_resolution(&json, Some((1280, 720)));
+        assert_eq!(value_after(&args, "--width"), vec!["1280"]);
+        assert_eq!(value_after(&args, "--height"), vec!["720"]);
     }
 
     /// 新式参数自带 has_custom_resolution 条件块：只出现一份，不重复追加。

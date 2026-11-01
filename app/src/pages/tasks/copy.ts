@@ -22,13 +22,14 @@ export const TASKS_COPY = {
     remaining: (bytes: string, eta: string) => `剩余 ${bytes} · ${eta}`,
     idleSub: "新任务开始后这里会画出吞吐曲线",
     downloaded: "已下载",
+    processed: "已处理",
     batchTotal: "本批合计",
     chartIdle: `最近 ${THROUGHPUT_SAMPLES} 秒没有下载流量`,
   },
 
   lanes: {
     title: "并行通道",
-    subtitle: `同一时间最多 ${MAX_PARALLEL_TASKS} 个任务在下`,
+    subtitle: `同一时间最多 ${MAX_PARALLEL_TASKS} 个任务在跑`,
     idle: "空闲",
     queued: (count: number) => `还有 ${count} 个在排队，空出通道后按加入顺序开始`,
     none: "没有排队的任务",

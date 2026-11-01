@@ -38,7 +38,7 @@ export function ThroughputCard({ overview, history }: ThroughputCardProps) {
         <div className={styles.flowStats}>
           <span className={styles.miniStat}>
             <span className={styles.miniValue}>{formatBytes(overview.downloaded)}</span>
-            <span className={styles.miniLabel}>{TASKS_COPY.flow.downloaded}</span>
+            <span className={styles.miniLabel}>{overview.localOnly ? TASKS_COPY.flow.processed : TASKS_COPY.flow.downloaded}</span>
           </span>
           <span className={styles.miniStat}>
             <span className={styles.miniValue}>{formatBytes(overview.total)}</span>

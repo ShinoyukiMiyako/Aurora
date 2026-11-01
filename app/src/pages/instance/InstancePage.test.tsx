@@ -413,6 +413,19 @@ describe("实例详情：头图与标签", () => {
     expect(lines).toEqual(["游玩记录读不出来：解析 游玩记录 失败", "实例目录读不出来：文件 IO 失败: mods：拒绝访问"]);
   });
 
+  it("玩过但累计不足一分钟：累计格不写还没开始玩，从没启动过才写", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: 0, last_played_at: NOW - 1000 } : i));
+    await open("overview");
+    expect(text()).toContain("1 秒前");
+    expect(text()).toContain("玩过，不到 1 分钟");
+    expect(text()).not.toContain("还没开始玩");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: 0, last_played_at: null } : i));
+    resetRecorderKeepOverrides();
+    await open("overview");
+    expect(text()).toContain("还没开始玩");
+  });
+
   it("切标签用 replace：路由换成新标签，面板随之切换", async () => {
     await open("overview");
     click(byRole("tab", "设置"));
@@ -1344,7 +1357,7 @@ describe("实例详情：工作目录与实例设置的占用", () => {
       { target: "saves", id: ID, world: null },
       { target: "mods", id: ID, world: null },
       { target: "logs", id: ID, world: null },
-      { target: "logs", id: ID, world: null },
+      { target: "session_logs", id: ID, world: null },
     ]);
     click(byRole("tab", "设置"));
     await flush();
@@ -1367,6 +1380,21 @@ describe("实例详情：版本隔离说明", () => {
     instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: false } : i));
     await open("settings", "创造");
     expect(text()).toContain("这个实例与其他未隔离的实例共用存档与配置。");
+  });
+
+  it("设成关闭、但实例文件夹里已有存档或 Mod：后端仍然隔离，说明写实情，不写共用", async () => {
+    settings = { ...settings, isolation: "disabled" };
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: true } : i));
+    await open("settings", "创造");
+    expect(text()).toContain("这个实例的文件夹里已有存档或 Mod，仍然单独存放。");
+    expect(text()).not.toContain("与其他未隔离的实例共用 .minecraft 下的存档与配置。");
+  });
+
+  it("设成关闭且后端确实不隔离：写共用", async () => {
+    settings = { ...settings, isolation: "disabled" };
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: false } : i));
+    await open("settings", "创造");
+    expect(text()).toContain("与其他未隔离的实例共用 .minecraft 下的存档与配置。");
   });
 });
 
@@ -2252,6 +2280,23 @@ describe("实例详情：设置", () => {
 });
 
 describe("实例详情：日志与历史", () => {
+  it("启动器在那一局中途退出、什么都没记下：说清原因，不是一个空列表", async () => {
+    ipc.overrides.set("last_launch_log", (): LaunchLogDto => ({ path: "latest.log", started_at: NOW - DAY, lines: [], omitted: 0, ended: null }));
+    await open("logs");
+    expect(text()).toContain("这一局没有记下输出");
+    expect(text()).not.toContain("当前筛选下没有日志行");
+  });
+
+  it("记下过内容的一局没有结局也照常显示", async () => {
+    ipc.overrides.set(
+      "last_launch_log",
+      (): LaunchLogDto => ({ path: "latest.log", started_at: NOW - DAY, lines: [{ at: NOW - DAY, level: "info", source: "launcher", text: "检查游戏文件" }], omitted: 0, ended: null }),
+    );
+    await open("logs");
+    expect(text()).toContain("全部1警告及以上0");
+    expect(text()).not.toContain("这一局没有记下输出");
+  });
+
   it("时间线最新在前；可回滚的更新一键回滚，安装事件写明原因", async () => {
     history = [
       { kind: "install", id: "100-000", at: Math.floor(NOW / 1000) - 3600, files: ["sodium-0.5.jar"] },
@@ -2797,6 +2842,20 @@ describe("实例详情：存档直达", () => {
     await flush();
     expect(launcher.state.launchPrompt).toEqual({ instanceId: ID, occupantId: "创造", occupantPhase: "running", quickPlay: { kind: "singleplayer", world_dir_name: "w1" } });
     expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["创造"]);
+  });
+
+  it("启动时发现版本文件没了：重扫实例列表，入口才换得成修复并启动", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_not_installed", `本地未安装版本 ${ID}`, { id: ID });
+    });
+    await open("overview");
+    const before = callsOf(ipc, "list_instances").length;
+    await act(async () => {
+      await expect(launcher.actions.launch(ID)).rejects.toThrow(`本地未安装版本 ${ID}`);
+    });
+    await flush();
+    expect(launcher.state.session).toBeNull();
+    expect(callsOf(ipc, "list_instances").length).toBeGreaterThan(before);
   });
 
   it("直达失败（存档已被移走）：外层报「无法启动」类错误，正文是后端原文，会话回到启动前", async () => {

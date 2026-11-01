@@ -17,8 +17,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 运行时：异步落盘(fs/io-util)、并发池 spawn(rt)、进度 watch(sync)、Forge processors 子进程(process)，
-# 处理器退出与取消令牌二选一等待(macros 的 select!)。
-tokio = { version = "1", default-features = false, features = ["rt", "fs", "io-util", "sync", "process", "macros"] }
+# 处理器退出与取消令牌二选一等待(macros 的 select!)、换源前等响应头的时限(time)。
+tokio ={ version = "1", default-features = false, features = ["rt", "fs", "io-util", "sync", "process", "macros", "time"] }
 thiserror = "2"
 tracing = "0.1"
 # 版本 JSON 安装途中的临时名要带随机后缀，与 aurora-base 原子写同一选择。
