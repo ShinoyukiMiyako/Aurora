@@ -6,15 +6,16 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { CONFIRM_COPY, LAUNCH_COPY } from "../copy/flows";
+import { STOPPED_LINGER_MS } from "../domain/limits";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { emulateFocusFixup } from "../test/focus-fixup";
-import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, callsOf, cancelledError, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
-import { LaunchCapsule } from "./LaunchCapsule";
+import { FACE_HOLD_MS, LaunchCapsule } from "./LaunchCapsule";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -137,6 +138,42 @@ describe("启动胶囊换面时的焦点", () => {
       await vi.advanceTimersByTimeAsync(2000);
     });
     expect(document.activeElement).toBe(buttonByText(LAUNCH_COPY.stopGame));
+  });
+
+  it("焦点在「取消启动」上、取消成功换成没有按钮的已结束面：焦点交给胶囊本身，不随旧面丢到 body", async () => {
+    const launched = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => launched.promise);
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const cancel = cancelButton();
+    act(() => cancel.focus());
+    act(() => cancel.click());
+    await act(async () => {
+      launched.reject(cancelledError());
+      await settle();
+    });
+    expect(launcher.state.session?.phase).toBe("stopped");
+    // 拆散的动画留住旧面一小会儿，之后换成已结束面；已结束面停留的计时还没到
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FACE_HOLD_MS.disassemble + 20);
+    });
+    const stopped = document.querySelector<HTMLElement>('[data-face="stopped:cancelled"]');
+    if (stopped === null) throw new Error("没有换成已结束面");
+    expect(stopped.querySelector("button")).toBeNull();
+    // 旧面此刻还在演退场，演完即被移除：焦点留在它的按钮上就会随之落回 body，所以换面这一刻就交给胶囊
+    const capsule = document.querySelector<HTMLElement>(`[role="group"][aria-label="${LAUNCH_COPY.group("生存")}"]`);
+    if (capsule === null) throw new Error("找不到启动胶囊");
+    expect(document.activeElement).toBe(capsule);
+    expect(capsule.tabIndex).toBe(-1);
+
+    // 已结束面停留到期、回到可启动的面：焦点仍在胶囊里，交给「启动游戏」
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(STOPPED_LINGER_MS);
+    });
+    expect(launcher.state.session).toBeNull();
+    expect(document.activeElement).toBe(buttonByText(LAUNCH_COPY.launch));
   });
 
   it("焦点不在胶囊里时换面不抢焦点", async () => {

@@ -155,12 +155,12 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   const key = faceKey(face);
   // 键盘按了面上的按钮（「启动」「结束游戏」）随即换面：焦点还停在退场的旧面上，旧面移除时浏览器把它落回 body
   // 且不派发任何事件，键盘用户只能从文档开头重新找起。换面时焦点在胶囊里，就交给新面第一个可用的按钮；
-  // 新面没有按钮（安装中、已结束）时留在原处
+  // 新面没有按钮（安装中、已结束）时交给胶囊本身（不进 Tab 序列），之后换上带按钮的面再交给按钮
   useLayoutEffect(() => {
     const capsule = capsuleRef.current;
     if (capsule === null || !capsule.contains(document.activeElement)) return;
     const next = capsule.querySelector<HTMLElement>(`[data-face="${key}"] button:not(:disabled)`);
-    if (next !== null) next.focus();
+    (next ?? capsule).focus();
   }, [key]);
   const tone = toneOf(face);
   const expanded = face.kind !== "ready" && face.kind !== "broken";
@@ -177,6 +177,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
       transition={{ layout: springs.morph }}
       role="group"
       aria-label={LAUNCH_COPY.group(entry.instance.name)}
+      tabIndex={-1}
       className={cx(styles.capsule, className)}
       data-size={size}
       data-block={block || undefined}
