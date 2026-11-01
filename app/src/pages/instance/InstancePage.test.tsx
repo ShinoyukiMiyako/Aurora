@@ -2051,6 +2051,23 @@ describe("实例详情：设置", () => {
 });
 
 describe("实例详情：日志与历史", () => {
+  it("启动器在那一局中途退出、什么都没记下：说清原因，不是一个空列表", async () => {
+    ipc.overrides.set("last_launch_log", (): LaunchLogDto => ({ path: "latest.log", started_at: NOW - DAY, lines: [], omitted: 0, ended: null }));
+    await open("logs");
+    expect(text()).toContain("这一局没有记下输出");
+    expect(text()).not.toContain("当前筛选下没有日志行");
+  });
+
+  it("记下过内容的一局没有结局也照常显示", async () => {
+    ipc.overrides.set(
+      "last_launch_log",
+      (): LaunchLogDto => ({ path: "latest.log", started_at: NOW - DAY, lines: [{ at: NOW - DAY, level: "info", source: "launcher", text: "检查游戏文件" }], omitted: 0, ended: null }),
+    );
+    await open("logs");
+    expect(text()).toContain("全部1警告及以上0");
+    expect(text()).not.toContain("这一局没有记下输出");
+  });
+
   it("时间线最新在前；可回滚的更新一键回滚，安装事件写明原因", async () => {
     history = [
       { kind: "install", id: "100-000", at: Math.floor(NOW / 1000) - 3600, files: ["sodium-0.5.jar"] },

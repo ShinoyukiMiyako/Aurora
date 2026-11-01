@@ -91,6 +91,13 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
         <ModuleError title={LOGS_COPY.error} error={lastLog.error} onRetry={lastLog.reload} />
       </Card>
     );
+  } else if (lastData !== null && lastData.ended === null && lastData.lines.length === 0) {
+    return (
+      <Card className={styles.console}>
+        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} subtitle={LOGS_COPY.lastLaunch(formatRelative(lastData.started_at, now), false)} />
+        <EmptyState compact scene="book-pen" title={LOGS_COPY.noOutputTitle} body={LOGS_COPY.noOutputBody} />
+      </Card>
+    );
   } else if (lastData !== null) {
     dropped = lastData.omitted;
     const ended = lastData.ended;

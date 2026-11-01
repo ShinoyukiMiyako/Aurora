@@ -540,6 +540,8 @@ export const LOGS_COPY = {
   noLinesForFilter: "当前筛选下没有日志行",
   emptyTitle: "还没有日志",
   emptyBody: "启动一次游戏，这里会实时滚动输出，并在结束后保留完整的一份。",
+  noOutputTitle: "这一局没有记下输出",
+  noOutputBody: "启动器在这局游戏中途退出了，之后的输出没有经过这里。游戏自己的日志在 logs 文件夹里。",
   error: "读不到上次的日志",
   retry: "重试",
 
