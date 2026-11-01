@@ -7,7 +7,8 @@
 //!    地址——有作者禁止第三方分发、用户也还没手动下载认领的文件就在这一步整体报错，不先装几百 MB 游戏再
 //!    告诉用户装不完。这一步不动游戏目录（[`Aurora::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
 //! 2. 原子地建目录（同名即报错），写下带任务 id 的未完成标记（[`Aurora::import_modpack`] 从这里开始）。
-//! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。
+//! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。这次新落下的目录
+//!    记进依赖版本记录，不进实例库；目录原本就在的是玩家的，不记。
 //! 4. 在实例目录写一份以实例名为 id 的版本 JSON：有加载器时是加载器 JSON 的副本，原版时只
 //!    `inheritsFrom` 原版。启动按 `inheritsFrom` 找客户端 jar，实例目录里不需要 jar。
 //! 5. 实例强制隔离：整合包的 Mod 与配置只该出现在这个实例里。
@@ -29,7 +30,7 @@ use aurora_instance::{
 };
 use aurora_modpack::{
     CurseForgeFileRef, ModrinthFile, PackArchive, PackFormat, PackLoader, PackLoaderKind,
-    RemoteFiles,
+    PackManifest, RemoteFiles,
 };
 use aurora_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
 use serde::{Deserialize, Serialize};
@@ -272,21 +273,24 @@ impl PreparedModpack {
     /// 加载器版本。实例 JSON 是加载器 JSON 的副本，它的 `inheritsFrom` 就是这个原版，写出来之前要读加载器目录。
     /// 调用方据此在导入期间占住它们，不必等实例 JSON 写出来再扫。
     pub fn natural_versions(&self) -> Vec<String> {
-        let manifest = &self.archive.manifest;
-        let mut versions = vec![manifest.minecraft.clone()];
-        if let Some(loader) = &manifest.loader {
-            versions.push(loader_choice(loader.kind).natural_version_id(
-                &manifest.minecraft,
-                strip_minecraft_prefix(&loader.version, &manifest.minecraft),
-            ));
-        }
-        versions
+        natural_versions(&self.archive.manifest)
     }
 
     /// 不导入了：删掉平台整合包的下载缓存，本地文件不动。
     pub async fn discard(self) {
         remove_pack_cache(self.cache_dir.as_deref()).await;
     }
+}
+
+fn natural_versions(manifest: &PackManifest) -> Vec<String> {
+    let mut versions = vec![manifest.minecraft.clone()];
+    if let Some(loader) = &manifest.loader {
+        versions.push(loader_choice(loader.kind).natural_version_id(
+            &manifest.minecraft,
+            strip_minecraft_prefix(&loader.version, &manifest.minecraft),
+        ));
+    }
+    versions
 }
 
 /// 下载来的包只是导入的中间产物；删不掉不影响任何实例，留日志即可。下载在建目录之前就失败时目录不存在。
@@ -609,6 +613,20 @@ impl Aurora {
         let loader = manifest.loader.as_ref();
         let loader_version =
             loader.map(|l| strip_minecraft_prefix(&l.version, &manifest.minecraft));
+        // 在安装之前看目录在不在：装完就分不出哪些是这次落下的。先记后装，下载途中的目录不露出来，装到一半被杀、
+        // 导入被放弃时也没有人再来补记。目录不分大小写。
+        let present: HashSet<String> = self
+            .instance_names()
+            .await?
+            .iter()
+            .map(|id| id.to_lowercase())
+            .collect();
+        let is_new = |id: &String| !present.contains(&id.to_lowercase());
+        let landing: Vec<String> = natural_versions(manifest)
+            .into_iter()
+            .filter(is_new)
+            .collect();
+        self.record_base_versions(&landing).await?;
         let installed = self
             .install(
                 &manifest.minecraft,
@@ -616,7 +634,19 @@ impl Aurora {
                 loader_version,
                 events,
             )
-            .await?;
+            .await;
+        // 成败都核对一遍：装失败时后面的目录没落下；早期 Forge 的 legacy 安装器不一定按算出的 id 落目录。
+        if let Err(err) = self.forget_unlanded_base_versions(&landing).await {
+            tracing::warn!(error = %err, "未能收回没落下的依赖版本记录");
+        }
+        let installed = installed?;
+        // 以安装结果为准：算出的 id 可能不对，并行的导入失败时也可能收回了同一个 id。
+        let landed: Vec<String> = std::iter::once(&installed.vanilla.id)
+            .chain(installed.loader.as_ref().map(|loader| &loader.id))
+            .filter(|id| is_new(id))
+            .cloned()
+            .collect();
+        self.record_base_versions(&landed).await?;
         let natural = installed
             .loader
             .as_ref()
@@ -2003,20 +2033,197 @@ mod tests {
         }
     }
 
-    /// 玩家导入一个整合包，实例列表就只多这一个实例。加载器装在自己的版本目录里：目录留着，不当实例列出；
-    /// 原版基底照常列出，导入出的实例继承的就是它。
+    const NATURAL_FABRIC: &str = "fabric-loader-0.15.0-test";
+
+    fn fabric_profile(library_base: &str) -> String {
+        format!(
+            r#"{{"id":"{NATURAL_FABRIC}","inheritsFrom":"test","type":"release",
+                "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.0","url":"{library_base}/"}}]}}"#
+        )
+    }
+
+    /// 让 mock 提供 Fabric 0.15.0：profile 与它的 loader jar。
+    async fn mount_fabric(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/test/0.15.0/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(fabric_profile(&server.uri())))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/net/fabricmc/fabric-loader/0.15.0/fabric-loader-0.15.0.jar",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"loader".to_vec()))
+            .mount(server)
+            .await;
+    }
+
+    fn fabric_pack(root: &Path) -> PathBuf {
+        let pack = root.join("fabric.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"})),
+            &[],
+        );
+        pack
+    }
+
+    async fn import_as(
+        aurora: &Aurora,
+        pack: PathBuf,
+        name: &str,
+    ) -> Result<ModpackInstallOutcome> {
+        aurora
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some(name),
+                &ImportSelection::default(),
+                "task-natural",
+                None,
+            )
+            .await
+    }
+
+    async fn listed_ids(aurora: &Aurora) -> Vec<String> {
+        let list = aurora.list_instances().await.unwrap();
+        list.into_iter().map(|instance| instance.id).collect()
+    }
+
+    fn write_game_version(aurora: &Aurora, id: &str, json: &str) {
+        let dir = aurora.game_dir().join("versions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+    }
+
+    /// 玩家导入一个整合包，实例列表就只多这一个实例。原版与加载器版本都落在自己的版本目录里：目录留着，不当实例
+    /// 列出，最后一个用它们的整合包删掉后也不回来；重名检查照常按目录算。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn imported_pack_adds_one_instance_and_no_loader_version_to_the_list() {
+    async fn imported_pack_adds_one_instance_and_no_base_version_to_the_list() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        mount_fabric(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = fabric_pack(tmp.path());
+        let aurora = aurora(tmp.path(), &server);
+
+        let outcome = import_as(&aurora, pack, "周末整合包").await.unwrap();
+
+        assert_eq!(listed_ids(&aurora).await, ["周末整合包"]);
+        for base in ["test", NATURAL_FABRIC] {
+            let json = aurora
+                .game_dir()
+                .join("versions")
+                .join(base)
+                .join(format!("{base}.json"));
+            assert!(json.is_file(), "{base} 的目录不删");
+        }
+
+        std::fs::remove_dir_all(&outcome.version_dir).unwrap();
+
+        assert!(listed_ids(&aurora).await.is_empty());
+        let err = aurora.check_new_instance_name("test").await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::Instance(crate::InstanceError::InvalidName {
+                    violation: NameViolation::Duplicate,
+                    ..
+                })
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// 别的启动器的游戏目录里已有同款原版与加载器版本：导入用上它们，它们仍是玩家的，导入后、整合包删掉后都列着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn versions_already_on_disk_stay_listed_after_a_pack_uses_them() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        mount_fabric(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = fabric_pack(tmp.path());
+        let aurora = aurora(tmp.path(), &server);
+        write_game_version(
+            &aurora,
+            "test",
+            r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
+        );
+        write_game_version(
+            &aurora,
+            NATURAL_FABRIC,
+            &fabric_profile("https://example.invalid"),
+        );
+
+        let outcome = import_as(&aurora, pack, "周末整合包").await.unwrap();
+
+        assert_eq!(
+            listed_ids(&aurora).await,
+            [NATURAL_FABRIC, "test", "周末整合包"]
+        );
+        std::fs::remove_dir_all(&outcome.version_dir).unwrap();
+        assert_eq!(listed_ids(&aurora).await, [NATURAL_FABRIC, "test"]);
+    }
+
+    /// 一个整合包落下基底后，下一个用同样基底的整合包看到的是「目录原本就在」：记录不因此变，基底照样不列出。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn second_pack_on_the_same_bases_keeps_them_hidden() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        mount_fabric(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = fabric_pack(tmp.path());
+        let aurora = aurora(tmp.path(), &server);
+
+        import_as(&aurora, pack.clone(), "第一个").await.unwrap();
+        import_as(&aurora, pack, "第二个").await.unwrap();
+
+        assert_eq!(listed_ids(&aurora).await, ["第一个", "第二个"]);
+    }
+
+    /// 加载器没装成：原版已经落下、目录留着，不能露出来；加载器版本没有落下，不留在记录里，日后别的启动器装出
+    /// 这个版本时它是玩家的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_loader_install_hides_what_landed_and_forgets_what_did_not() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = fabric_pack(tmp.path());
+        let aurora = aurora(tmp.path(), &server);
+
+        import_as(&aurora, pack, "周末整合包").await.unwrap_err();
+
+        assert!(listed_ids(&aurora).await.is_empty());
+        assert!(
+            aurora
+                .game_dir()
+                .join("versions")
+                .join("test")
+                .join("test.json")
+                .is_file()
+        );
+
+        write_game_version(
+            &aurora,
+            NATURAL_FABRIC,
+            &fabric_profile("https://example.invalid"),
+        );
+        assert_eq!(listed_ids(&aurora).await, [NATURAL_FABRIC]);
+    }
+
+    /// 安装器落的目录名和按写法算出的不同（早期 Forge 的 legacy 安装器会这样）：实际落下的记下，算出的那个没落下，
+    /// 不留在记录里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn loader_directory_named_differently_is_recorded_as_it_landed() {
+        const LANDED: &str = "test-Forge0.15.0";
         let server = MockServer::start().await;
         mount_vanilla(&server).await;
         Mock::given(method("GET"))
             .and(path("/v2/versions/loader/test/0.15.0/profile/json"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
-                r#"{{"id":"fabric-loader-0.15.0-test","inheritsFrom":"test","type":"release",
-                    "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
-                    "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.0","url":"{}/"}}]}}"#,
-                server.uri()
-            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(fabric_profile(&server.uri()).replace(NATURAL_FABRIC, LANDED)),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -2027,37 +2234,47 @@ mod tests {
             .mount(&server)
             .await;
         let tmp = tempfile::tempdir().unwrap();
-        let pack = tmp.path().join("fabric.mrpack");
-        write_pack(
-            &pack,
-            &index(serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"})),
-            &[],
-        );
+        let pack = fabric_pack(tmp.path());
         let aurora = aurora(tmp.path(), &server);
 
-        aurora
-            .install_modpack(
-                &ModpackSource::File { path: pack },
-                Some("周末整合包"),
-                &ImportSelection::default(),
-                "task-natural",
-                None,
-            )
-            .await
-            .unwrap();
+        import_as(&aurora, pack, "周末整合包").await.unwrap();
 
-        let list = aurora.list_instances().await.unwrap();
-        let ids: Vec<&str> = list.iter().map(|instance| instance.id.as_str()).collect();
-        assert_eq!(ids, ["test", "周末整合包"]);
-        assert!(
-            aurora
-                .game_dir()
-                .join("versions")
-                .join("fabric-loader-0.15.0-test")
-                .join("fabric-loader-0.15.0-test.json")
-                .is_file(),
-            "加载器版本的目录不删"
+        assert_eq!(listed_ids(&aurora).await, ["周末整合包"]);
+        write_game_version(
+            &aurora,
+            NATURAL_FABRIC,
+            &fabric_profile("https://example.invalid"),
         );
+        assert_eq!(listed_ids(&aurora).await, [NATURAL_FABRIC, "周末整合包"]);
+    }
+
+    /// 原版就没装成：什么都没落下，记录里什么都不留，日后别的启动器装出这个版本时它照常列出。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_vanilla_install_leaves_nothing_in_the_record() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = fabric_pack(tmp.path());
+        let aurora = aurora(tmp.path(), &server);
+
+        import_as(&aurora, pack, "周末整合包").await.unwrap_err();
+
+        assert!(listed_ids(&aurora).await.is_empty());
+        write_game_version(
+            &aurora,
+            "test",
+            r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
+        );
+        assert_eq!(listed_ids(&aurora).await, ["test"]);
     }
 
     /// 平台整合包：先下载到缓存，导入后缓存删掉，整合包信息记下平台、工程与版本。
