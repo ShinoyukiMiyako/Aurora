@@ -122,7 +122,8 @@ pub struct CrashReport {
     #[serde(default)]
     pub exit_code_note: Option<ExitCodeNote>,
     /// 参与扫描的文件，按扫描顺序。会话日志一项与 `log_path` 同理读报告时现找、补在最前，
-    /// 存进文件的只有崩溃报告与 hs_err。
+    /// 存进文件的只有崩溃报告与 hs_err；位于实例目录之内的存成相对实例目录的路径，读报告时拼回当前的
+    /// 实例目录：版本隔离的实例改名时整个目录会搬走，存绝对路径就会指向已不存在的位置。
     #[serde(default)]
     pub scanned_files: Vec<ScannedFile>,
 }
@@ -464,6 +465,11 @@ pub(crate) async fn save_crash_report(version_dir: &Path, report: &CrashReport) 
     stored
         .scanned_files
         .retain(|file| file.kind != CrashSource::SessionLog);
+    for file in &mut stored.scanned_files {
+        if let Ok(relative) = Path::new(&file.path).strip_prefix(version_dir) {
+            file.path = relative.display().to_string();
+        }
+    }
     let bytes = serde_json::to_vec_pretty(&CrashReportFile {
         format: CRASH_REPORT_FORMAT,
         report: stored,
@@ -500,6 +506,11 @@ impl Aurora {
         let Some(mut report) = load_crash_file::<CrashReport>(&version_dir).await? else {
             return Ok(None);
         };
+        for file in &mut report.scanned_files {
+            if Path::new(&file.path).is_relative() {
+                file.path = version_dir.join(&file.path).display().to_string();
+            }
+        }
         if let Some(started_at) = report.session_started_at {
             report.log_path = session_log_path(&logs_dir(&version_dir), started_at)
                 .await?
@@ -1239,6 +1250,77 @@ mod tests {
         let loaded = aurora.last_crash("1.20.1").await.unwrap().unwrap();
         let kinds: Vec<CrashSource> = loaded.scanned_files.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, vec![CrashSource::CrashReport, CrashSource::HsErr]);
+    }
+
+    /// 版本隔离的实例在自己的目录里运行，崩溃报告与 hs_err 都写在实例目录下；实例改名后目录整体搬走，
+    /// 记下的路径必须跟着到新目录，否则「复制路径」给出的是一个已经不存在的文件。
+    #[tokio::test]
+    async fn scanned_files_inside_the_instance_follow_a_rename() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let old_dir = put_version(tmp.path(), "整合包 旧");
+        let inside_report = old_dir
+            .join(CRASH_REPORTS_DIR)
+            .join("crash-2026-10-31_12.00.00-client.txt");
+        let inside_hs_err = old_dir.join("hs_err_pid4242.log");
+        let outside = tmp.path().join("共享 目录").join("hs_err_pid7.log");
+        let inputs = [
+            ScanInput::numbered(
+                CrashSource::CrashReport,
+                Some(inside_report.display().to_string()),
+                "---- Minecraft Crash Report ----",
+            ),
+            ScanInput::numbered(
+                CrashSource::HsErr,
+                Some(inside_hs_err.display().to_string()),
+                HS_ERR,
+            ),
+            ScanInput::numbered(
+                CrashSource::HsErr,
+                Some(outside.display().to_string()),
+                HS_ERR,
+            ),
+        ];
+        let mut report = CrashReport::from_sources(&inputs, Some(-1_073_741_819));
+        report.at = Some(2_000);
+        save_crash_report(&old_dir, &report).await.unwrap();
+
+        // 改名前读出的仍是完整路径。
+        let before = aurora.last_crash("整合包 旧").await.unwrap().unwrap();
+        assert_eq!(before.scanned_files, report.scanned_files);
+
+        aurora
+            .rename_instance_files("整合包 旧", "整合包 新")
+            .await
+            .unwrap();
+        let new_dir = tmp
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("整合包 新");
+        let loaded = aurora.last_crash("整合包 新").await.unwrap().unwrap();
+        assert_eq!(
+            loaded.scanned_files,
+            vec![
+                ScannedFile {
+                    kind: CrashSource::CrashReport,
+                    path: new_dir
+                        .join(CRASH_REPORTS_DIR)
+                        .join("crash-2026-10-31_12.00.00-client.txt")
+                        .display()
+                        .to_string(),
+                },
+                ScannedFile {
+                    kind: CrashSource::HsErr,
+                    path: new_dir.join("hs_err_pid4242.log").display().to_string(),
+                },
+                // 实例目录之外的文件不随改名移动，原样保留。
+                ScannedFile {
+                    kind: CrashSource::HsErr,
+                    path: outside.display().to_string(),
+                },
+            ]
+        );
     }
 
     #[tokio::test]
