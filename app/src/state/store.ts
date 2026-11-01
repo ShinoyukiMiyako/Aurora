@@ -698,6 +698,24 @@ function countUnseen(tasks: readonly Task[], unseen: readonly string[]): number 
   return tasks.filter((t) => t.status === "failed" && ids.has(attemptTaskId(t))).length;
 }
 
+/**
+ * 按任务 id 记着的入队上下文与未看过的失败，只为还用得上的任务留着：入队上下文跟任务表里的任务、以及结束后还在等
+ * 落地重扫的任务（与 landing 同进同出）；未看过的失败只记任务表里任务的当前这一次尝试。历史超出上限被剪掉、清除已结束、
+ * 失败的新建改排补全撤下的任务，以及重试后的上一次尝试，它们的记录随之清掉，不随运行时间越积越多。
+ * 没有可清的时原样返回原引用，派生的实例列表按引用记忆。
+ */
+function prunedTaskRefs(raw: RawState): Partial<RawState> {
+  const live = new Set(raw.tasks.map((t) => t.id));
+  for (const id of raw.landing) live.add(id);
+  const attempts = new Set(raw.tasks.map(attemptTaskId));
+  const staleMeta = Object.keys(raw.taskMeta).some((id) => !live.has(id));
+  const staleUnseen = raw.unseenFailures.some((attempt) => !attempts.has(attempt));
+  return {
+    ...(staleMeta ? { taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).filter(([id]) => live.has(id))) } : {}),
+    ...(staleUnseen ? { unseenFailures: raw.unseenFailures.filter((attempt) => attempts.has(attempt)) } : {}),
+  };
+}
+
 /** 活动任务对一个已扫描实例的影响：整个目录在写（安装中），或者只在改动 Mod 与资源。 */
 type TaskEffect = "installing" | "modifying" | null;
 
@@ -972,7 +990,9 @@ export class LauncherStore {
   private set(patch: Partial<RawState> | ((raw: RawState) => Partial<RawState>)): void {
     const next = typeof patch === "function" ? patch(this.raw) : patch;
     const before = this.raw;
-    this.raw = { ...this.raw, ...next };
+    const merged = { ...this.raw, ...next };
+    // 任务只会经任务表与 landing 离开，它们变了才核对挂在任务 id 上的记录
+    this.raw = next.tasks !== undefined || next.landing !== undefined ? { ...merged, ...prunedTaskRefs(merged) } : merged;
     if (next.toasts !== undefined && next.toasts !== before.toasts) this.scheduleToastExpiry();
     if (next.session !== undefined && next.session !== before.session) this.scheduleLinger();
     for (const listener of [...this.listeners]) listener();
