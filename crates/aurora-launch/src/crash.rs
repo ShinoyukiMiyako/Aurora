@@ -75,13 +75,17 @@ struct Rule {
     advice: &'static str,
 }
 
-/// Mod 要求别的游戏或加载器版本，两种日志写法各一个分支，各自捕获提出要求的那个 Mod 的 id：
+/// Mod 要求别的游戏或加载器版本，每种日志写法一个分支，点得出是哪个 Mod 时捕获它的 id：
 /// - Fabric Loader：`Mod 'Sodium' (sodium) 0.5.3 requires version 1.20.1 of 'Minecraft' (minecraft), but only
 ///   the wrong version is present: 1.20.4!`（内置 Mod 没有 `Mod ` 前缀，依赖方渲染成 `'Minecraft' (minecraft)`）；
+/// - Fabric Loader 在中文系统上：`模组 'Sodium' (sodium) 0.5.3 需要 'Minecraft' (minecraft) 的 1.20.1 版本，但已经
+///   安装了的版本 1.20.4 不对！`；
+/// - Quilt Loader：`36 mods requires version [0.25.0, ∞) of quilt_loader, which is missing!`，主语可能是「N 个
+///   Mod」，点不出是谁；
 /// - Forge / NeoForge：`\tMod ID: 'minecraft', Requested by: 'sodium', Expected range: '[1.20.4]', Actual version: '1.20.1'`。
 ///
 /// 依赖 Java 的同类报错不归这里（那是换 Java 的事），其余 Mod 之间的版本不符仍归「缺少前置」。
-const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'";
+const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'";
 
 /// Intel OpenGL 驱动（ig4icd64、ig75icd64、ig9icd64、igxelpicd64 等）出现在原生调用栈帧行里。
 const INTEL_ICD_FRAME: &str = r"(?i)^\s*#?\s*C\s+\[(ig[0-9a-z]{0,8}icd(?:32|64)\.dll)\+";
@@ -141,9 +145,15 @@ const RULES: &[Rule] = &[
             "which is missing",
             "requires version",
             "incompatible mod set",
+            // Fabric Loader 现在的措辞。细节行按系统语言本地化，中文系统上只有这两句是英文。
+            "incompatible mods found",
+            "some of your mods are incompatible",
         ],
         regex: None,
-        extract: Some(r"(?i)of ([a-z0-9_\-]+),? which is missing"),
+        // 缺的是 Mod 时两种语言都带显示名：`of mod 'Fabric API' (fabric-api)`、`需要 模组 'Fabric API' (fabric-api) 的`。
+        extract: Some(
+            r"(?i)of ([a-z0-9_\-]+),? which is missing|of mod '[^']+' \(([a-z0-9_\-]+)\)|需要 模组 '[^']+' \(([a-z0-9_\-]+)\) 的",
+        ),
         summary: "缺少前置 Mod 或依赖版本不满足",
         advice: "根据日志补齐缺失的前置 Mod（如 Fabric API），或把相关 Mod 调整到彼此兼容的版本。",
     },
@@ -489,10 +499,11 @@ const NON_MOD_TOKENS: &[&str] = &[
     "javafml",
 ];
 
-/// 点名 Mod 的正则：复用「缺少前置」「重复 Mod」两条规则的提取式（它们捕获的正是 mod id），另补三种
-/// 崩溃日志的通用写法：Fabric/Quilt 依赖报错的 `Mod 'Sodium' (sodium) 0.5.3`（括号内才是 id）、
-/// mixin 报错尾部的 `from mod sodium`，以及 Forge 依赖报错的 `Requested by: 'sodium'`。mixin 规则自带的
-/// 提取式捕获的是 `*.mixins.json` 配置文件名而非 mod id，故不在复用之列。
+/// 点名 Mod 的正则：复用「缺少前置」「重复 Mod」两条规则的提取式（它们捕获的正是 mod id），另补几种
+/// 崩溃日志的通用写法：Fabric/Quilt 依赖报错的 `Mod 'Sodium' (sodium) 0.5.3`（括号内才是 id，中文系统上
+/// 是 `模组 'Sodium' (sodium)`）、mixin 报错尾部的 `from mod sodium`、Forge 依赖报错的
+/// `Requested by: 'sodium'`，以及 Fabric 入口崩溃的 `provided by 'sodium'`。mixin 规则自带的提取式捕获的是
+/// `*.mixins.json` 配置文件名而非 mod id，故不在复用之列。
 static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     RULES
         .iter()
@@ -505,8 +516,10 @@ static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .filter_map(|rule| rule.extract)
         .chain([
             r"(?i)\bmod '[^']+' \(([a-z0-9_\-]+)\)",
+            r"(?i)模组 '[^']+' \(([a-z0-9_\-]+)\)",
             r"(?i)\bfrom mod ([a-z0-9_\-]+)",
             r"(?i)requested by: '([a-z0-9_\-]+)'",
+            r"(?i)\bprovided by '([a-z0-9_\-]+)'",
         ])
         .map(|pattern| Regex::new(pattern).expect("内置 mod id 提取正则必须可编译"))
         .collect()
@@ -517,7 +530,13 @@ pub fn extract_mod_ids(log: &str) -> Vec<String> {
     let mut hits: Vec<(usize, String)> = Vec::new();
     for re in MOD_ID_PATTERNS.iter() {
         for caps in re.captures_iter(log) {
-            let group = caps.get(1).expect("提取正则的第 1 组是必选捕获组");
+            // 提取式按分支写多种日志格式，每个分支各有自己的捕获组。
+            let group = caps
+                .iter()
+                .skip(1)
+                .flatten()
+                .next()
+                .expect("提取式的每个分支都有捕获组");
             let id = group.as_str().trim().to_ascii_lowercase();
             if id.is_empty() || NON_MOD_TOKENS.contains(&id.as_str()) {
                 continue;
@@ -719,7 +738,7 @@ mod tests {
                 compiled.rule.category
             );
         }
-        assert_eq!(MOD_ID_PATTERNS.len(), 5);
+        assert_eq!(MOD_ID_PATTERNS.len(), 7);
         assert!(SUSPECTED_HEAD.is_match("Suspected Mods: NONE"));
         assert!(!has_crash_marker("Stopping!"));
     }
@@ -777,6 +796,79 @@ mod tests {
             .into_iter()
             .find(|d| d.category == category)
             .unwrap_or_else(|| panic!("应命中 {category:?}：{log}"))
+    }
+
+    /// Fabric Loader 0.20.1 在中文系统上的真实报错：外层两句是英文，细节按系统语言本地化。
+    const FABRIC_INCOMPATIBLE_ZH: &str = "[main/ERROR]: Incompatible mods found!\n\
+net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!\n\
+确定了一种可能的解决方法，这样做可能会解决你的问题：\n\
+\t - 将 模组 'Fabric API' (fabric-api) 0.83.0+1.20 替换为 0.92.0+1.20.1 及以上版本。\n\
+更多信息：\n\
+\t - 模组 'Fabric API' (fabric-api) 0.83.0+1.20 需要 'Minecraft' (minecraft) 的 从 1.20-（含）到 1.20.1-（不含）的任意版本，但已经安装了的版本 1.20.1 不对！\n\
+\t - 模组 'YetAnotherConfigLib' (yet_another_config_lib_v3) 3.6.6+1.20.1-fabric 需要 模组 'Fabric API' (fabric-api) 的 0.92.0+1.20.1 及以上版本，但已经安装了的版本 0.83.0+1.20 不对！\n";
+
+    /// 同一次失败在英文系统上的措辞，由 Fabric Loader 自带的英文语言文件拼出。
+    const FABRIC_INCOMPATIBLE_EN: &str = "[main/ERROR]: Incompatible mods found!\n\
+net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!\n\
+A potential solution has been determined, this may resolve your problem:\n\
+\t - Replace mod 'Fabric API' (fabric-api) 0.83.0+1.20 with version 0.92.0+1.20.1 or later.\n\
+More details:\n\
+\t - Mod 'Fabric API' (fabric-api) 0.83.0+1.20 requires any version between 1.20- (inclusive) and 1.20.1- (exclusive) of 'Minecraft' (minecraft), but only the wrong version is present: 1.20.1!\n\
+\t - Mod 'YetAnotherConfigLib' (yet_another_config_lib_v3) 3.6.6+1.20.1-fabric requires version 0.92.0+1.20.1 or later of mod 'Fabric API' (fabric-api), but only the wrong version is present: 0.83.0+1.20!\n";
+
+    #[test]
+    fn fabric_incompatible_mods_are_recognised_in_both_languages() {
+        for log in [FABRIC_INCOMPATIBLE_ZH, FABRIC_INCOMPATIBLE_EN] {
+            let mismatch = find(log, CrashCategory::GameVersionMismatch);
+            assert_eq!(mismatch.detail.as_deref(), Some("fabric-api"), "{log}");
+            let missing = find(log, CrashCategory::MissingDependency);
+            assert_eq!(missing.line, 0, "{log}");
+            assert_eq!(missing.detail.as_deref(), Some("fabric-api"), "{log}");
+            assert_eq!(
+                extract_mod_ids(log),
+                vec![
+                    "fabric-api".to_owned(),
+                    "yet_another_config_lib_v3".to_owned()
+                ],
+                "{log}"
+            );
+        }
+    }
+
+    /// 中文报错里缺前置的写法，语言文件 `resolution.depends.missing`。
+    #[test]
+    fn missing_dependency_in_chinese_names_the_mod() {
+        let log = "[main/ERROR]: Incompatible mods found!\n\
+                   \t - 模组 'Zoomify' (zoomify) 2.15.2 需要 模组 'Fabric Language Kotlin' (fabric-language-kotlin) 的 任意版本，但没有安装它！";
+        let diag = primary(log, CrashCategory::MissingDependency);
+        assert_eq!(diag.detail.as_deref(), Some("fabric-language-kotlin"));
+    }
+
+    /// Quilt Loader 把加载器版本不够也写成 missing：`quilt_loader` 不是能到发现页搜的 Mod。
+    #[test]
+    fn quilt_loader_too_old_is_a_version_mismatch_not_a_missing_mod() {
+        let log = "36 mods requires version [0.25.0, ∞) of quilt_loader, which is missing!";
+        let diag = primary(log, CrashCategory::GameVersionMismatch);
+        assert_eq!(diag.detail, None);
+        assert_absent(log, CrashCategory::MissingDependency);
+    }
+
+    /// Fabric 崩溃报告点名出事的入口时，那就是最直接的线索。
+    #[test]
+    fn entrypoint_failure_names_the_mod_that_provided_it() {
+        let log = "java.lang.RuntimeException: Could not execute entrypoint stage 'client' due to errors, provided by 'modmenu' at 'com.terraformersmc.modmenu.ModMenu'!";
+        assert_eq!(extract_mod_ids(log), vec!["modmenu".to_owned()]);
+    }
+
+    #[test]
+    fn healthy_fabric_lines_stay_quiet() {
+        for healthy in [
+            "[main/INFO]: Loading 84 mods:",
+            "[main/WARN]: Mod resolution failed",
+            "\t- fabric-api 0.92.12+1.20.1",
+        ] {
+            assert!(analyze(healthy, None).is_empty(), "{healthy}");
+        }
     }
 
     #[test]
