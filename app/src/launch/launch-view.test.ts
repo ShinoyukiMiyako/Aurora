@@ -179,7 +179,7 @@ describe("会话第二行文案", () => {
     expect(failedWith("java_too_old", { ...old, pinned_by: "global" })).toEqual({
       title: "Java 8 无法运行 1.18.2",
       body: "Minecraft 1.18.2 至少需要 Java 17，设置里把默认 Java 固定成了 Java 8。",
-      fix: { kind: "auto_default_java", label: "默认 Java 改回自动选择" },
+      fix: { kind: "auto_default_java", label: "默认 Java 改回自动" },
       secondary: { kind: "pick_java", label: "选择 Java" },
     });
     expect(failedWith("java_too_old", { ...old, pinned_by: "instance" })).toEqual({
@@ -191,7 +191,7 @@ describe("会话第二行文案", () => {
     expect(failedWith("java_pinned_missing", { path: "D:/jdk8/bin/java.exe", pinned_by: "global" })).toEqual({
       title: "默认 Java 不存在",
       body: "设置里固定的默认 Java 已经找不到了：D:/jdk8/bin/java.exe。",
-      fix: { kind: "auto_default_java", label: "默认 Java 改回自动选择" },
+      fix: { kind: "auto_default_java", label: "默认 Java 改回自动" },
       secondary: { kind: "pick_java", label: "选择 Java" },
     });
     expect(failedWith("java_pinned_missing", { path: "D:/jdk8/bin/java.exe", pinned_by: "instance" })).toMatchObject({ title: "指定的 Java 不存在", fix: { kind: "auto_java" } });

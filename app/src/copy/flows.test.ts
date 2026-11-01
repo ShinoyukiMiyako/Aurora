@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, failureCopy, failureToastLabel, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -235,6 +235,44 @@ describe("启动失败：账户验证暂时不可用", () => {
     );
     const toast = TOAST_COPY.offlineLaunched("生存");
     expect(bannedIn([...texts, toast.title, toast.body])).toEqual([]);
+  });
+});
+
+/** 按钮字数：英文单词、版本号各按 1 个字计。 */
+function buttonLength(label: string): number {
+  return [...label.matchAll(/[A-Za-z0-9.]+|[^\sA-Za-z0-9.]/g)].length;
+}
+
+describe("启动失败的修复动作", () => {
+  const copies = [
+    ...FAILURE_CODES.map((code) => failureCopy(code, PARAMS[code], { ...ctx("Steve"), javaPinned: true })),
+    failureCopy("java_pinned_missing", { ...PARAMS.java_pinned_missing, pinned_by: "global" }, ctx("Steve")),
+    failureCopy("java_too_old", { ...PARAMS.java_too_old, pinned_by: "global" }, ctx("Steve")),
+  ];
+
+  it("字数的算法：英文单词与版本号各算 1 个字", () => {
+    expect(buttonLength("切换到 Java 21")).toBe(5);
+    expect(buttonLength("默认 Java 改回自动选择")).toBe(9);
+  });
+
+  it("按钮文案都在 2 到 8 个字之间", () => {
+    const labels = copies.flatMap((c) => (c.secondary === null ? [c.fix.label] : [c.fix.label, c.secondary.label]));
+    expect(labels.filter((label) => buttonLength(label) < 2 || buttonLength(label) > 8)).toEqual([]);
+  });
+
+  it("通知的操作都在 2 到 4 个字之间", () => {
+    const labels = copies.map((c) => failureToastLabel(c.fix));
+    expect(labels.filter((label) => buttonLength(label) < 2 || buttonLength(label) > 4)).toEqual([]);
+  });
+
+  it("改默认 Java 与改实例的 Java 在按钮和通知里都分得开，放得下的动作通知沿用按钮文案", () => {
+    const global = failureCopy("java_too_old", { ...PARAMS.java_too_old, pinned_by: "global" }, ctx("Steve")).fix;
+    const instance = failureCopy("java_too_old", PARAMS.java_too_old, ctx("Steve")).fix;
+    expect(global.label).toBe("默认 Java 改回自动");
+    expect(failureToastLabel(global)).toBe("改回自动");
+    expect(instance.label).toBe("改为自动选择");
+    expect(failureToastLabel(instance)).toBe("改为自动");
+    expect(failureToastLabel({ kind: "download_java", label: "下载 Java 21" })).toBe("下载 Java 21");
   });
 });
 

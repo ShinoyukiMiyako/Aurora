@@ -222,7 +222,7 @@ describe("直达走与启动相同的拦截链", () => {
 });
 
 describe("全局默认 Java 的修复动作", () => {
-  it("默认 Java 版本不够「默认 Java 改回自动选择」：改完设置立即重新启动，带着同一个 quickPlay", async () => {
+  it("默认 Java 版本不够「默认 Java 改回自动」：改完设置立即重新启动，带着同一个 quickPlay", async () => {
     const launcher = await boot();
     let fails = true;
     ipc.overrides.set("launch_game", () => {

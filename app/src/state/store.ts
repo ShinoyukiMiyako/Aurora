@@ -18,6 +18,7 @@ import {
   TASK_TOAST,
   TOAST_COPY,
   failureCopy,
+  failureToastLabel,
   crashCategoryLabel,
   taskFailureReason,
   SESSION_COPY,
@@ -2349,7 +2350,7 @@ export class LauncherStore {
     this.set({ session: failed });
     // 通知的操作是修复动作的第一个按钮。javaPinned 只影响第二个按钮，这里不读实例设置
     const copy = failureCopy(code, params, { accountName: s.accountName, accountKind: s.accountKind, javaPinned: false });
-    const action: ToastAction = { label: copy.fix.label, ...this.fixTarget(failed, copy.fix.kind) };
+    const action: ToastAction = { label: failureToastLabel(copy.fix), ...this.fixTarget(failed, copy.fix.kind) };
     this.pushToast("error", TOAST_COPY.launchFailed(s.instanceId), copy.title, action);
   }
 

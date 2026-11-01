@@ -287,7 +287,7 @@ const RETRY: FailureFix = { kind: "retry", label: "重试" };
 const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" };
 // 实例本来就跟随全局、是全局设置固定了默认 Java：把实例改回自动选择什么也不会变，要改的是默认 Java；
 // 只想让这个实例换 Java 的，去实例设置里单独指定。
-const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默认 Java 改回自动选择" };
+const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默认 Java 改回自动" };
 const PICK_JAVA: FailureFix = { kind: "pick_java", label: "选择 Java" };
 /** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
 const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
@@ -297,6 +297,18 @@ function pinnedGlobally(params: FailureParams, code: FailureCode): boolean {
   const by = strParam(params, "pinned_by", code);
   if (by !== "instance" && by !== "global") throw new Error(`启动失败码 ${code} 的参数 pinned_by 不认识：${by}`);
   return by === "global";
+}
+
+/** 失败通知的操作只放得下 2 到 4 个字：按钮文案更长的修复动作在这里写短，其余沿用按钮文案。 */
+export function failureToastLabel(fix: FailureFix): string {
+  switch (fix.kind) {
+    case "auto_java":
+      return "改为自动";
+    case "auto_default_java":
+      return "改回自动";
+    default:
+      return fix.label;
+  }
 }
 
 export function failureCopy(code: FailureCode, params: FailureParams, ctx: FailureContext): FailureCopy {
