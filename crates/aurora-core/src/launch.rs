@@ -781,7 +781,10 @@ impl Aurora {
             })?;
         let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         ensure_paths_reach_java([&paths.client_jar, &paths.natives_dir, &working_dir])?;
-        if let Some(text) = game_path_warning(&working_dir) {
+        // 不隔离的实例工作目录里没有实例名，natives 目录才有。
+        if let Some(text) =
+            game_path_warning(&working_dir).or_else(|| game_path_warning(&paths.natives_dir))
+        {
             warnings.push(LaunchWarning::GamePath);
             reporter.warn(text).await;
         }
@@ -2367,6 +2370,30 @@ mod tests {
         };
         run.finish().await;
         assert_eq!(std::fs::read(&copied).unwrap(), b"ogg!");
+    }
+
+    /// 不隔离的实例工作目录是 .minecraft，路径里没有实例名；natives 目录却在实例名底下，本地库从那里加载。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn natives_under_a_non_ascii_instance_name_are_warned_about() {
+        let id = "caf\u{e9}";
+        let fx = fixture();
+        install_json(&fx.root.join(".minecraft"), id, &quick_play_json(id));
+        let java = fake_java(&fx.root, 17, 0);
+        let request = LaunchRequest {
+            version_id: id.to_owned(),
+            ..super::tests::request()
+        };
+
+        let (_, events) = launch_request(&fx.aurora, request, java).await;
+
+        let warned = events.iter().any(|event| {
+            matches!(
+                event,
+                LaunchEvent::Log { level: LauncherLevel::Warn, text, .. }
+                    if text.starts_with("游戏路径含字符「\u{e9}」")
+            )
+        });
+        assert!(warned);
     }
 
     /// java.exe 按系统代码页读命令行，表示不了的字符变成问号，游戏只会报找不到主类。不起进程，
