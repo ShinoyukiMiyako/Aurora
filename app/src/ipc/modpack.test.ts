@@ -505,28 +505,31 @@ describe("导出整合包 mock", () => {
     expect(() => acquireMockInstance(FABRIC, "renaming").release()).not.toThrow();
   });
 
-  it("存档备份或恢复进行中报 instance_busy，活动为 backing_up；不登记任务、不留占用", async () => {
+  it("存档备份或恢复进行中：带存档的报 instance_busy，活动为 backing_up，不登记任务、不留占用；没勾存档的照常", async () => {
+    const withSaves: ModpackExportOptions = { ...base, extras: ["config", "saves"] };
     const backingUp = acquireMockInstance(FABRIC, "backing_up");
-    expect(await errorOf(exportModpack("t-backup", FABRIC, base))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "backing_up" } });
+    expect(await errorOf(exportModpack("t-backup", FABRIC, withSaves))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "backing_up" } });
     expect(await cancelTask("t-backup")).toBe(false);
+    expect(await exportModpack("t-plain", FABRIC, base)).toMatchObject({ path: base.destination });
     backingUp.release();
     // 被拒的那一次没有留下「改动中」：补全这类与改动中互斥的事照常能占
     expect(() => acquireMockInstance(FABRIC, "repairing").release()).not.toThrow();
-    expect(await exportModpack("t-after", FABRIC, base)).toMatchObject({ path: base.destination });
+    expect(await exportModpack("t-after", FABRIC, withSaves)).toMatchObject({ path: base.destination });
   });
 
-  it("共用存档：另一个不隔离的实例在备份或恢复时报 instance_busy，指向那个实例，不登记任务、不留占用；自己隔离时不挡", async () => {
+  it("共用存档：另一个不隔离的实例在备份或恢复时带存档的报 instance_busy，指向那个实例，不登记任务、不留占用；自己隔离时不挡", async () => {
     // 1.21.1 是原版正式版，跟随全局时不隔离；关掉 Fabric 实例的隔离后两者共用 .minecraft/saves
     const OTHER = "1.21.1";
+    const withSaves: ModpackExportOptions = { ...base, extras: ["config", "saves"] };
     const settings = await getInstanceSettings(FABRIC);
     await setInstanceSettings(FABRIC, { ...settings, isolation: "disabled" });
     const backingUp = acquireMockInstance(OTHER, "backing_up");
-    expect(await errorOf(exportModpack("t-shared", FABRIC, base))).toMatchObject({ code: "instance_busy", detail: { id: OTHER, activity: "backing_up" } });
+    expect(await errorOf(exportModpack("t-shared", FABRIC, withSaves))).toMatchObject({ code: "instance_busy", detail: { id: OTHER, activity: "backing_up" } });
     expect(await cancelTask("t-shared")).toBe(false);
     expect(() => acquireMockInstance(FABRIC, "repairing").release()).not.toThrow();
 
     await setInstanceSettings(FABRIC, { ...settings, isolation: "enabled" });
-    expect(await exportModpack("t-isolated", FABRIC, base)).toMatchObject({ path: base.destination });
+    expect(await exportModpack("t-isolated", FABRIC, withSaves)).toMatchObject({ path: base.destination });
     backingUp.release();
   });
 
