@@ -2,7 +2,7 @@
   "version": 1,
   "entries": [
     {
-      "title": "Minecraft 26.4 Snapshot 6",
+      "title": "Trial Build 26.4 No. 6",
       "version": "26.4-snapshot-6",
       "type": "snapshot",
       "image": {
@@ -12,11 +12,11 @@
       "contentPath": "javaPatchNotes/26-4-snapshot-6.json",
       "id": "26-4-snapshot-6",
       "date": "2026-10-27T13:40:29.000Z",
-      "shortText": "Kai is ice fishing, sitting on a light blue cushion in front of an igloo made of snow bricks.",
+      "shortText": "A fox naps on a striped rug beside a small tent made of spruce planks.",
       "needsTranslation": false
     },
     {
-      "title": "Minecraft 26.4 Snapshot 5",
+      "title": "Trial Build 26.4 No. 5",
       "version": "26.4-snapshot-5",
       "type": "snapshot",
       "image": {
@@ -26,11 +26,11 @@
       "contentPath": "javaPatchNotes/26-4-snapshot-5.json",
       "id": "26-4-snapshot-5",
       "date": "2026-10-20T12:15:06.000Z",
-      "shortText": "Zuri is throwing Ice Balls at a Frostibe from a Packed Ice Brick house",
+      "shortText": "Two villagers trade pumpkins over a fence at the edge of a quiet farm",
       "needsTranslation": false
     },
     {
-      "title": "Minecraft 26.4 Snapshot 4",
+      "title": "Trial Build 26.4 No. 4",
       "version": "26.4-snapshot-4",
       "type": "snapshot",
       "image": {
@@ -40,11 +40,11 @@
       "contentPath": "javaPatchNotes/26-4-snapshot-4.json",
       "id": "26-4-snapshot-4",
       "date": "2026-10-13T12:05:46.000Z",
-      "shortText": "With 26.4 Snapshot 4, we're breaking out a cool new block, introducing Brittle Ice! And Jukeboxes can now keep the music going with playlists by putting your music discs in a chest above them, making dance parties much easier. Just be careful not to dance ",
+      "shortText": "This build tries out a new lamp block, the Paper Lantern! Composters can also hand their output to a hopper placed below them, which makes large gardens much tidier to run. Please tell us how it feels on your own farms, and do not forget to water the ",
       "needsTranslation": false
     },
     {
-      "title": "Minecraft 26.4 Snapshot 3",
+      "title": "Trial Build 26.4 No. 3",
       "version": "26.4-snapshot-3",
       "type": "snapshot",
       "image": {
@@ -54,11 +54,11 @@
       "contentPath": "javaPatchNotes/8df071b98ac92911ae6caae35feb68506bca66894d16f41797164b9a9c6d1824.json",
       "id": "8df071b98ac92911ae6caae35feb68506bca66894d16f41797164b9a9c6d1824",
       "date": "2026-10-06T12:54:26.000Z",
-      "shortText": "Brr! Does it feel colder all of a sudden? Minecraft LIVE revealed the first look at our next game drop – and it's frosty. Explore ice caves filled with glittering icicles and ice crystals, plus meet a not-so-chill new hostile mob! This frozen zombie varian",
+      "shortText": "Hello again! This build is all about tidying up – and there is plenty to tidy. Storage rooms get a new shelf variant, signs remember their colour after being moved, and a sleepy new passive mob wanders the meadows! This small woolly friend likes to fo",
       "needsTranslation": false
     },
     {
-      "title": "Minecraft 26.4 Snapshot 2",
+      "title": "Trial Build 26.4 No. 2",
       "version": "26.4-snapshot-2",
       "type": "snapshot",
       "image": {
@@ -68,11 +68,11 @@
       "contentPath": "javaPatchNotes/26-4-snapshot-2.json",
       "id": "26-4-snapshot-2",
       "date": "2026-09-29T11:32:57.000Z",
-      "shortText": "Hi there! It is time for the second snapshot for 26.4, featuring improved render distance fog, a new celestial occluder, and a fresh redesign of the F3 screen.Happy mining!ChangesWhen \"Improved Transparency\" is on, sky background and clouds that are behind",
+      "shortText": "Good morning! Here is the second build of this cycle, with softer distance haze, a new sun glare option, and a cleaner layout for the debug overlay.Have fun!ChangesWhen \"Softer Shadows\" is on, tree canopies and hills that sit behind low cloud are now dra",
       "needsTranslation": false
     },
     {
-      "title": "Minecraft 26.4 Snapshot 1",
+      "title": "Trial Build 26.4 No. 1",
       "version": "26.4-snapshot-1",
       "type": "snapshot",
       "image": {
@@ -82,25 +82,25 @@
       "contentPath": "javaPatchNotes/26-4-snapshot-1.json",
       "id": "26-4-snapshot-1",
       "date": "2026-09-22T13:38:53.000Z",
-      "shortText": "Welcome to the first snapshot of 26.4! We're kicking things off with a range of technical updates and improvements, including Vulkan becoming the default graphics API.ChangesWorld GenerationUpgrading worlds from before Caves and Cliffs will now also genera",
+      "shortText": "Welcome to the first build of this cycle! We are starting with a batch of engine cleanups and tooling work, including a faster chunk loader switched on by default.ChangesWorld LoadingOpening worlds saved by much older versions will now also rebuild their sp",
       "needsTranslation": false
     },
     {
-      "title": "Minecraft: Java Edition 26.3",
+      "title": "Stable Build 26.3",
       "version": "26.3",
       "type": "release",
       "image": {
-        "title": "dappled camp 540x540.jpg",
-        "url": "/v2/images/dappledcamp540x540.jpg"
+        "title": "harbor days 540x540.jpg",
+        "url": "/v2/images/harbordays540x540.jpg"
       },
       "contentPath": "javaPatchNotes/26-3.json",
       "id": "26-3",
       "date": "2026-09-15T11:23:02.000Z",
-      "shortText": "Wilderness Bound is out now in Minecraft Java Edition! Pack your supplies and set off on an expedition into the dappled forest where the trails end and adventure begins. Seek out abandoned camps, build outposts among the poplar trees, sleep under the stars",
+      "shortText": "Harbor Days is out now! Pack a lunch and head for the new coastline, where little fishing villages line the bay and the tide uncovers something different every morning. Repair an old pier, raise a lighthouse, and fall asleep to the sound of the waves whil",
       "needsTranslation": false
     },
     {
-      "title": "Minecraft 26.3 Release Candidate 3",
+      "title": "Trial Build 26.3 Candidate 3",
       "version": "26.3-rc-3",
       "type": "snapshot",
       "image": {
@@ -110,7 +110,7 @@
       "contentPath": "javaPatchNotes/26-3-release-candidate-3.json",
       "id": "26-3-release-candidate-3",
       "date": "2026-09-14T12:58:38.000Z",
-      "shortText": "They say that third time's the charm! Release Candidate 3 for 26.3 is here with yet another handful of fixes as we put the final touches on the Wilderness Bound game drop.Happy mining!Fixed bugs in 26.3 Release Candidate 3MC-311456 - VSync can be disabled ",
+      "shortText": "Third try is the lucky one, right? Candidate 3 for this cycle is here with one more small batch of fixes while we finish polishing the Harbor Days update.Have fun!Fixed bugs in Candidate 3FX-10042 - Frame limiter ignores the slider value after a restart ",
       "needsTranslation": false
     }
   ]

@@ -874,7 +874,7 @@ mod tests {
         }
     }
 
-    /// 真实响应夹具：只收 Java 资讯，更新日志按 type 标正式版 / 快照，合并后按时刻倒序。
+    /// 夹具结构照真实响应、文案自拟：只收 Java 资讯，更新日志按 type 标正式版 / 快照，合并后按时刻倒序。
     #[test]
     fn fixtures_parse_into_java_items() {
         let mut items = parse_news(NEWS_FIXTURE.as_bytes(), BASE, "news").unwrap();
@@ -884,16 +884,16 @@ mod tests {
                 .iter()
                 .all(|i| i.tag == NewsTag::Event && i.game_version.is_none())
         );
-        let halloween = items[0].clone();
-        assert_eq!(halloween.title, "Halloween on Realms");
+        let newest = items[0].clone();
+        assert_eq!(newest.title, "Lantern Fair Opens");
         assert_eq!(
-            halloween.summary,
-            "12 new maps to send a shiver down your spine!"
+            newest.summary,
+            "A dozen invented maps for a quiet evening walk."
         );
-        assert_eq!(halloween.date, OCT_30);
+        assert_eq!(newest.date, OCT_30);
         assert_eq!(
-            halloween.thumbnail_url.as_deref(),
-            Some("https://launchercontent.mojang.com/v2/images/halloweenralms700x466.jpg")
+            newest.thumbnail_url.as_deref(),
+            Some("https://launchercontent.mojang.com/v2/images/lanternfair700x466.jpg")
         );
 
         let notes = parse_patch_notes(NOTES_FIXTURE.as_bytes(), BASE, "notes").unwrap();
@@ -903,11 +903,11 @@ mod tests {
         assert_eq!(release[0].game_version.as_deref(), Some("26.3"));
         assert_eq!(notes[0].tag, NewsTag::Snapshot);
         assert_eq!(notes[0].game_version.as_deref(), Some("26.4-snapshot-6"));
-        assert_eq!(notes[0].title, "Minecraft 26.4 Snapshot 6");
+        assert_eq!(notes[0].title, "Trial Build 26.4 No. 6");
 
         items.extend(notes);
         items.sort_by_key(|item| std::cmp::Reverse(item.date));
-        assert_eq!(items[0].id, halloween.id);
+        assert_eq!(items[0].id, newest.id);
         assert!(items.windows(2).all(|w| w[0].date >= w[1].date));
     }
 
