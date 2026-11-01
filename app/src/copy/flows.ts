@@ -966,6 +966,11 @@ export const BOOT_SLICE_ERROR = {
 
 // ---------------------------------------------------------------- 确认对话框
 
+/** 放进「」里的文字：任务标题自己带直角引号（补全「生存」的游戏文件）时，内层换成『』。 */
+function quoted(text: string): string {
+  return `「${text.replaceAll("「", "『").replaceAll("」", "』")}」`;
+}
+
 export const CONFIRM_COPY = {
   cancel: "取消",
   keepDownloading: "继续下载",
@@ -985,12 +990,12 @@ export const CONFIRM_COPY = {
     confirmLabel: "结束并启动",
   }),
   cancelCreate: (taskTitle: string, instance: string) => ({
-    title: `取消「${taskTitle}」？`,
+    title: `取消${quoted(taskTitle)}？`,
     body: `「${instance}」还没装好，取消后这个实例会被删除。`,
     confirmLabel: "取消任务",
   }),
   cancelRepair: (taskTitle: string, instance: string) => ({
-    title: `取消「${taskTitle}」？`,
+    title: `取消${quoted(taskTitle)}？`,
     body: `「${instance}」会停在文件不完整的状态，之后可以再点「修复实例」。`,
     confirmLabel: "取消任务",
   }),

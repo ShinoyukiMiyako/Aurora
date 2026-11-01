@@ -3,7 +3,7 @@ import { FAILURE_CODES, type FailureCode } from "../domain/types";
 import { APP_NAME } from "../lib/app-info";
 import { SEARCH_COPY } from "../pages/discover/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, failureCopy, microsoftLoginFailure, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -113,6 +113,16 @@ describe("插值贴着中文时的混排", () => {
     expect(TASKS_COPY.row.progressLabel("安装 Sodium")).toBe("安装 Sodium 的下载进度");
     expect(TASKS_COPY.row.progressLabel("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件的下载进度");
     expect(TASKS_COPY.lanes.progressLabel("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件的下载进度");
+  });
+});
+
+describe("取消实例级任务的确认", () => {
+  it("标题里的任务标题带直角引号时换成『』，外层仍是「」", () => {
+    const copy = CONFIRM_COPY.cancelRepair(TASK_TEXT.repairTitle("生存"), "生存");
+    expect(copy.title).toBe("取消「补全『生存』的游戏文件」？");
+    expect(copy.body).toBe("「生存」会停在文件不完整的状态，之后可以再点「修复实例」。");
+    expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.createTitle("1.21.1", "vanilla", null), "周末生存").title).toBe("取消「安装 1.21.1」？");
+    expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.modpackTitle("RLCraft"), "RLCraft").title).toBe("取消「导入整合包 RLCraft」？");
   });
 });
 
