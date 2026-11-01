@@ -176,6 +176,23 @@ impl<U: ReleaseVersion> UpdateSlot<U> {
         self.available = found;
     }
 
+    /// 收下一次检查的结果，返回这次要告诉前端的版本。
+    ///
+    /// 插件的 `ReleaseNotFound` 只说明所有端点都回了非 2xx：清单 404 时是这个更新源上还没有发布，
+    /// 不算检查失败。它也不是关于最新版本的结论（插件不报状态码，503 同样走到这里），
+    /// 所以槽位不动，记着的版本和下好的包照旧；什么都没记着时前端看到的就是没有新版本。
+    fn settle_check(
+        &mut self,
+        checked: tauri_plugin_updater::Result<Option<U>>,
+    ) -> tauri_plugin_updater::Result<Option<&U>> {
+        match checked {
+            Ok(found) => self.record_check(found),
+            Err(tauri_plugin_updater::Error::ReleaseNotFound) => {}
+            Err(err) => return Err(err),
+        }
+        Ok(self.available.as_ref())
+    }
+
     /// 收下下载好的包。下载期间又检查过一次、结果换了版本或已无更新时不收：与 [`record_check`](Self::record_check)
     /// 守的是同一件事，界面按最新的检查结果显示版本，退出时装上的却是旧包。
     fn store_download(&mut self, update: U, bytes: Vec<u8>) -> Result<(), CommandError> {
@@ -290,7 +307,8 @@ pub async fn updater_info(
 }
 
 /// 检查更新。端点按「文件下载源」策略排序，前一个连不上或非 2xx 时插件自动试下一个。
-/// 已是最新返回 `null`。不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
+/// 已是最新返回 `null`；所有端点都没给出清单不算失败，见 [`UpdateSlot::settle_check`]。
+/// 不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
 #[tauri::command]
 pub async fn check_update(
     app: AppHandle,
@@ -317,13 +335,23 @@ pub async fn check_update(
         .endpoints(urls)
         .and_then(|builder| builder.timeout(CHECK_TIMEOUT).build())
         .map_err(check_failed)?;
-    let found = checker.check().await.map_err(check_failed)?;
-    match &found {
-        Some(update) => tracing::info!(version = %update.version, ?endpoints, "发现可用更新"),
-        None => tracing::info!(?endpoints, "已是最新版本"),
+    let checked = checker.check().await;
+    match &checked {
+        Ok(Some(update)) => {
+            tracing::info!(version = %update.version, ?endpoints, "发现可用更新")
+        }
+        Ok(None) => tracing::info!(?endpoints, "已是最新版本"),
+        // 界面上不算失败，日志要留痕：服务器故障也长这样，只有这里看得出来。
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
+            tracing::warn!(?endpoints, "更新源都没有给出清单，按没有新版本处理")
+        }
+        Err(_) => {}
     }
-    let dto = found.as_ref().map(update_dto);
-    updater.slot().record_check(found);
+    let dto = updater
+        .slot()
+        .settle_check(checked)
+        .map_err(check_failed)?
+        .map(update_dto);
     Ok(dto)
 }
 
@@ -794,7 +822,7 @@ mod tests {
             code::UPDATE_CHECK_FAILED,
             "检查更新失败",
             Some(&endpoints),
-            tauri_plugin_updater::Error::ReleaseNotFound,
+            tauri_plugin_updater::Error::TargetNotFound("windows-x86_64".into()),
         );
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         assert_eq!(err.detail.unwrap()["endpoints"], json!([PRIMARY_ENDPOINT]));
@@ -832,8 +860,82 @@ mod tests {
             code::UPDATE_CHECK_FAILED,
             "检查更新失败",
             Some(&endpoints),
-            tauri_plugin_updater::Error::ReleaseNotFound,
+            tauri_plugin_updater::Error::TargetNotFound("windows-x86_64".into()),
         );
         assert!(err.detail.unwrap().get("network").is_none());
+    }
+
+    /// 没拿到清单就说不清最新版本是哪个：本次会话记着的版本、下好的包和退出时安装都不动，
+    /// 否则一次 503 就会把校验过的包丢掉。
+    #[test]
+    fn missing_manifest_keeps_what_the_session_knows() {
+        use tauri_plugin_updater::Error::ReleaseNotFound;
+
+        let mut slot = UpdateSlot::<Fake>::default();
+        assert!(slot.settle_check(Err(ReleaseNotFound)).unwrap().is_none());
+
+        slot.record_check(Some(Fake("0.2.0")));
+        slot.store_download(Fake("0.2.0"), vec![9]).unwrap();
+        slot.set_install_on_exit(true).unwrap();
+        let known = slot.settle_check(Err(ReleaseNotFound)).unwrap();
+        assert_eq!(known.map(|update| update.0), Some("0.2.0"));
+        assert_eq!(slot.downloaded_version().as_deref(), Some("0.2.0"));
+        assert!(slot.install_on_exit);
+
+        // 拿到了清单才是结论：已无更新时照旧丢包。
+        assert!(slot.settle_check(Ok(None)).unwrap().is_none());
+        assert_eq!(slot.downloaded_version(), None);
+        assert!(!slot.install_on_exit);
+    }
+
+    #[test]
+    fn other_check_failures_stay_failures_and_change_nothing() {
+        let mut slot = UpdateSlot::<Fake>::default();
+        slot.record_check(Some(Fake("0.2.0")));
+
+        let err = slot
+            .settle_check(Err(tauri_plugin_updater::Error::TargetNotFound(
+                "windows-x86_64".into(),
+            )))
+            .err()
+            .unwrap();
+        assert!(matches!(
+            err,
+            tauri_plugin_updater::Error::TargetNotFound(_)
+        ));
+        assert_eq!(
+            slot.available.as_ref().map(|update| update.0),
+            Some("0.2.0")
+        );
+    }
+
+    /// 更新域名 TLS 不通时的样子：TCP 连得上，握手时被对端掐断。要算 connect，前端才认得出这是连不上。
+    #[tokio::test]
+    async fn tls_handshake_cut_off_is_a_connect_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "https://127.0.0.1:{}/latest.json",
+            listener.local_addr().unwrap().port()
+        );
+        std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            drop(socket);
+        });
+        let cut_off = aurora_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_err();
+
+        let err = updater_error(
+            code::UPDATE_CHECK_FAILED,
+            "检查更新失败",
+            Some(&[url]),
+            tauri_plugin_updater::Error::Reqwest(cut_off),
+        );
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        assert!(err.message.starts_with("检查更新失败："), "{}", err.message);
+        assert_eq!(err.detail.unwrap()["network"], json!("connect"));
     }
 }

@@ -208,7 +208,10 @@ export interface UpdaterInfoDto {
 /** 不支持时也能调，据 supported 决定是否显示更新入口。 */
 export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>("updater_info");
 
-/** 检查更新，已是最新返回 null。不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed。 */
+/**
+ * 检查更新，没有新版本返回 null。更新源没给出清单（所有端点回非 2xx）不算失败：本次会话已知的版本仍在就返回它，否则同样是 null。
+ * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed，网络层失败带 detail.network。
+ */
 export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | null>("check_update");
 
 /**
