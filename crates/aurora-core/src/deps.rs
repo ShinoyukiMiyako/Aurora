@@ -14,11 +14,12 @@
 //!
 //! 三、实例里已经装着的前置（任何版本）不动，计划项标成已满足。作者没钉版本就是「有就行」，
 //! 启动器擅自把玩家现有的前置换成最新版，换来的可能是一个别的 Mod 不认的版本；要升级走更新检查。
+//! 装着的那一版在平台上已经下架也一样算已满足，计划只按卷宗列出它（[`PlannedItem::delisted`]）。
 
 use std::collections::HashSet;
 use std::path::Path;
 
-use aurora_modplatform::{DependencyKind, ModLoader, ModVersionInfo, Platform};
+use aurora_modplatform::{DependencyKind, ModLoader, ModVersionInfo, Platform, ReleaseChannel};
 use serde::Serialize;
 
 use crate::compat::{
@@ -43,6 +44,10 @@ pub struct PlannedItem {
     pub required_by: Option<String>,
     /// 该实例里已装着这一项，本次跳过下载。主项指同工程同版本；前置指同工程的任意版本。
     pub already_satisfied: bool,
+    /// 实例里装着的这一版在平台上已经找不到（下架或删除），只出现在已满足的前置上；为假时不序列化，
+    /// 其余计划项的形状不变。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub delisted: bool,
 }
 
 /// 一次安装的完整计划。
@@ -155,8 +160,64 @@ impl SkipNote {
 enum Resolved {
     /// 选中的版本与它是否已装在实例里。
     Chosen(Box<ModVersionInfo>, bool),
+    /// 实例里装着、平台上已找不到的那一版，只剩卷宗里的记录。
+    Delisted(Box<LedgerEntry>),
     /// 没有可用版本，附跳过说明。
     Skipped(SkipNote),
+}
+
+impl PlannedItem {
+    /// 平台上取到的版本进计划；标题与图标等整份计划算完后批量补。
+    fn from_platform(
+        version: ModVersionInfo,
+        required_by: Option<String>,
+        already_satisfied: bool,
+    ) -> Self {
+        Self {
+            version,
+            title: None,
+            icon_url: None,
+            required_by,
+            already_satisfied,
+            delisted: false,
+        }
+    }
+
+    /// 已装、但平台上已找不到的前置：只按卷宗列出，不替玩家换版本，也不展开它的前置。
+    ///
+    /// 版本视图只填卷宗记着的事实（版本 id、工程、平台、文件名、sha1、版本号），发布通道、适配版本、
+    /// 加载器、大小、直链、发布时间与依赖都只有平台知道：空着给出，发布通道按正式版给出。这一形态
+    /// 恒为已满足，既不参与择优也不下载，这些字段没有读者。卷宗没记版本号时用版本 id 顶上，展示名
+    /// 用文件名：玩家在 mods 目录里认得的就是它。标题与图标先取卷宗那份，平台上工程还在时再被
+    /// 平台的覆盖。
+    fn from_ledger(entry: LedgerEntry, required_by: String) -> Self {
+        let version = ModVersionInfo {
+            version_number: entry
+                .version_number
+                .unwrap_or_else(|| entry.version_id.clone()),
+            version_id: entry.version_id,
+            project_id: entry.project_id,
+            platform: entry.platform,
+            name: entry.file_name.clone(),
+            release_channel: ReleaseChannel::Release,
+            game_versions: Vec::new(),
+            loaders: Vec::new(),
+            file_name: entry.file_name,
+            file_size: None,
+            sha1: entry.sha1,
+            download_url: None,
+            date_published: String::new(),
+            dependencies: Vec::new(),
+        };
+        Self {
+            version,
+            title: entry.title,
+            icon_url: entry.icon_url,
+            required_by: Some(required_by),
+            already_satisfied: true,
+            delisted: true,
+        }
+    }
 }
 
 impl Aurora {
@@ -195,11 +256,12 @@ impl Aurora {
         // 去重键取平台返回的规范 project_id，而不是入参——入参可能是 slug，与依赖声明里的 id 对不上。
         let mut visited: HashSet<String> = HashSet::from([root.project_id.clone()]);
         let root_satisfied = installed_exact(&ledger, &dirs.mods_dir, &root).await?;
-        let mut stack: Vec<(ModVersionInfo, Option<String>, bool)> =
-            vec![(root, None, root_satisfied)];
+        let mut stack: Vec<PlannedItem> =
+            vec![PlannedItem::from_platform(root, None, root_satisfied)];
 
-        while let Some((version, required_by, satisfied)) = stack.pop() {
-            let mut children: Vec<(ModVersionInfo, Option<String>, bool)> = Vec::new();
+        while let Some(item) = stack.pop() {
+            let version = &item.version;
+            let mut children: Vec<PlannedItem> = Vec::new();
 
             for dep in &version.dependencies {
                 let dep_project = dep.project_id.clone();
@@ -227,12 +289,14 @@ impl Aurora {
                             .await?
                         {
                             Resolved::Chosen(chosen, installed) => {
-                                children.push((
+                                children.push(PlannedItem::from_platform(
                                     *chosen,
                                     Some(version.project_id.clone()),
                                     installed,
                                 ));
                             }
+                            Resolved::Delisted(entry) => children
+                                .push(PlannedItem::from_ledger(*entry, version.project_id.clone())),
                             Resolved::Skipped(note) => notes.push(note),
                         }
                     }
@@ -257,13 +321,7 @@ impl Aurora {
             for child in children.into_iter().rev() {
                 stack.push(child);
             }
-            items.push(PlannedItem {
-                version,
-                title: None,
-                icon_url: None,
-                required_by,
-                already_satisfied: satisfied,
-            });
+            items.push(item);
         }
 
         // 整份计划的标题一次取齐：计划项与跳过说明里提到的工程合成一个批次。
@@ -299,6 +357,10 @@ impl Aurora {
     ///
     /// 依赖声明里带了精确版本号时原样采用、不再择优：那是 Mod 作者钉死的搭配，启动器凭「更新」二字
     /// 推翻它，换来的通常是一个作者从未测过的组合。没钉版本时，实例里已有同工程的文件就沿用它。
+    ///
+    /// 实例里装着的那一版在平台上已经找不到（下架或删除）时照样算已满足：文件就在 mods 目录里，能不能
+    /// 用由玩家现有的整套 Mod 说了算；拿平台上另一版顶替是替他换版本，让整份计划失败则连主 Mod 也装
+    /// 不上。只有「找不到这个版本」这样处理，网络与别的平台错误照常冒泡。
     async fn resolve_required(
         &self,
         platform: Platform,
@@ -316,21 +378,34 @@ impl Aurora {
                 }
                 // 「作者钉的版本没了」与「这个实例用不上任何版本」是两回事，玩家该拿到哪一种，取决于他
                 // 接下来是去找替代 Mod 还是去换实例。
-                Err(CoreError::ModVersionNotFound { .. }) => {
-                    Ok(Resolved::Skipped(SkipNote::PinnedGone {
-                        project_id: dep_project.to_owned(),
-                        version_id: pinned.to_owned(),
-                    }))
-                }
+                Err(CoreError::ModVersionNotFound { .. }) => Ok(
+                    match installed_version(ledger, mods_dir, platform, dep_project, Some(pinned))
+                        .await?
+                    {
+                        Some(entry) => Resolved::Delisted(Box::new(entry.clone())),
+                        None => Resolved::Skipped(SkipNote::PinnedGone {
+                            project_id: dep_project.to_owned(),
+                            version_id: pinned.to_owned(),
+                        }),
+                    },
+                ),
                 Err(other) => Err(other),
             };
         }
 
-        if let Some(entry) = installed_any(ledger, mods_dir, platform, dep_project).await? {
-            let version = self
+        if let Some(entry) =
+            installed_version(ledger, mods_dir, platform, dep_project, None).await?
+        {
+            return match self
                 .get_mod_version(platform, dep_project, &entry.version_id)
-                .await?;
-            return Ok(Resolved::Chosen(Box::new(version), true));
+                .await
+            {
+                Ok(version) => Ok(Resolved::Chosen(Box::new(version), true)),
+                Err(CoreError::ModVersionNotFound { .. }) => {
+                    Ok(Resolved::Delisted(Box::new(entry.clone())))
+                }
+                Err(other) => Err(other),
+            };
         }
 
         // 把实例事实作为过滤条件带下去。这不是为了省流量：CurseForge 的文件列表最多翻 10 页（500 个文件），
@@ -388,16 +463,19 @@ async fn installed_exact(
     Ok(false)
 }
 
-/// 该工程的任意版本是否已装在此实例；装着就返回那条卷宗记录。磁盘是权威：卷宗有而文件不在不算。
-async fn installed_any<'a>(
+/// 该工程的某一版（`version_id` 为 `None` 时任意版本）是否已装在此实例；装着就返回那条卷宗记录。
+/// 磁盘是权威：卷宗有而文件不在不算。
+async fn installed_version<'a>(
     ledger: &'a Ledger,
     mods_dir: &Path,
     platform: Platform,
     project_id: &str,
+    version_id: Option<&str>,
 ) -> Result<Option<&'a LedgerEntry>> {
     for entry in &ledger.entries {
         if entry.platform == platform
             && entry.project_id == project_id
+            && version_id.is_none_or(|wanted| entry.version_id == wanted)
             && present(mods_dir, &entry.file_name).await?
         {
             return Ok(Some(entry));
@@ -528,6 +606,7 @@ mod tests {
                     icon_url: Some("https://cdn.example.invalid/s.png".to_owned()),
                     required_by: None,
                     already_satisfied: false,
+                    delisted: false,
                 },
                 PlannedItem {
                     version: version("P7dR8mSH", "QwErTyUi"),
@@ -535,6 +614,7 @@ mod tests {
                     icon_url: None,
                     required_by: Some("AANobbMI".to_owned()),
                     already_satisfied: true,
+                    delisted: false,
                 },
             ],
             skipped: vec!["可选依赖 Mod Menu 未自动安装，需要时请手动添加".to_owned()],
@@ -1139,6 +1219,378 @@ mod tests {
         assert_eq!(plan.items.len(), 2);
         assert_eq!(plan.items[1].version.version_id, "old");
         assert!(plan.items[1].already_satisfied);
+    }
+
+    /// 前置已装着的那一版在平台上已下架（单版本端点 404）：照常算已满足，计划只按卷宗列出它，不去
+    /// 平台上另挑一个版本，也不让整份计划失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installed_dependency_delisted_from_platform_stays_satisfied() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/version/delisted"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // 平台上另有可用版本：不能拿它顶替玩家装着的那份。
+        Mock::given(method("GET"))
+            .and(path("/project/fabric-api/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "[{}]",
+                modrinth_version(
+                    "replacement",
+                    "fabric-api",
+                    "2026-06-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["fabric"],
+                    "",
+                )
+            )))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut kept = entry("fabric-api-0.92.0.jar", "fabric-api", "delisted");
+        kept.version_number = Some("0.92.0+1.20.1".to_owned());
+        kept.title = Some("Fabric API".to_owned());
+        kept.icon_url = Some("https://cdn.example.invalid/fabric.png".to_owned());
+        kept.sha1 = Some("0123456789abcdef0123456789abcdef01234567".to_owned());
+        let mut ledger = Ledger::default();
+        ledger.upsert(kept);
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        // 禁用态也算装着。
+        tokio::fs::write(mods_dir.join("fabric-api-0.92.0.jar.disabled"), b"jar")
+            .await
+            .unwrap();
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 2);
+        assert!(!plan.items[0].delisted);
+        let dep = &plan.items[1];
+        assert!(dep.already_satisfied);
+        assert!(dep.delisted);
+        assert_eq!(dep.required_by.as_deref(), Some("sodium"));
+        assert_eq!(dep.version.platform, Platform::Modrinth);
+        assert_eq!(dep.version.project_id, "fabric-api");
+        assert_eq!(dep.version.version_id, "delisted");
+        assert_eq!(dep.version.version_number, "0.92.0+1.20.1");
+        assert_eq!(dep.version.file_name, "fabric-api-0.92.0.jar");
+        assert_eq!(
+            dep.version.sha1.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
+        assert!(dep.version.dependencies.is_empty());
+        assert_eq!(dep.version.download_url, None);
+        // 平台上连工程摘要都取不到时，名字与图标取卷宗记下的那份。
+        assert_eq!(dep.title.as_deref(), Some("Fabric API"));
+        assert_eq!(
+            dep.icon_url.as_deref(),
+            Some("https://cdn.example.invalid/fabric.png")
+        );
+        assert!(plan.skipped.is_empty());
+
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["items"][1]["delisted"], true);
+        // 只在这一形态上出现，其余计划项的形状不变。
+        assert!(json["items"][0].get("delisted").is_none());
+    }
+
+    /// 卷宗没记版本号的已下架前置：版本号退到版本 id；平台上工程还在时名字以平台为准。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delisted_dependency_without_version_number_uses_version_id_and_platform_title() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"id":"fabric-api","title":"Fabric API","description":"d","project_type":"mod",
+                     "downloads":1,"icon_url":"https://cdn.example.invalid/now.png"}]"#,
+            ))
+            .mount(&server)
+            .await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/version/gone1"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut kept = entry("fabric-api.jar", "fabric-api", "gone1");
+        kept.title = Some("旧标题".to_owned());
+        let mut ledger = Ledger::default();
+        ledger.upsert(kept);
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("fabric-api.jar"), b"jar")
+            .await
+            .unwrap();
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap();
+        let dep = &plan.items[1];
+        assert!(dep.delisted && dep.already_satisfied);
+        assert_eq!(dep.version.version_number, "gone1");
+        assert_eq!(dep.title.as_deref(), Some("Fabric API"));
+        assert_eq!(
+            dep.icon_url.as_deref(),
+            Some("https://cdn.example.invalid/now.png")
+        );
+    }
+
+    /// 作者钉的版本已下架，而实例里装的恰好就是这一版：同样算已满足，不报「指定的版本已不存在」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pinned_dependency_delisted_but_installed_stays_satisfied() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","version_id":"pinned","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/version/pinned"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut ledger = Ledger::default();
+        ledger.upsert(entry("fabric-api-pinned.jar", "fabric-api", "pinned"));
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("fabric-api-pinned.jar"), b"jar")
+            .await
+            .unwrap();
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap();
+        assert_eq!(plan.items.len(), 2);
+        assert!(plan.items[1].delisted && plan.items[1].already_satisfied);
+        assert_eq!(plan.items[1].version.version_id, "pinned");
+        assert!(plan.skipped.is_empty());
+
+        // 装着的是同工程的另一版时，钉的那一版仍是「已不存在」，照旧如实说明。
+        let mut ledger = Ledger::default();
+        ledger.upsert(entry("fabric-api-other.jar", "fabric-api", "other"));
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("fabric-api-other.jar"), b"jar")
+            .await
+            .unwrap();
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap();
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(
+            plan.skipped,
+            vec!["依赖 fabric-api 指定的版本 pinned 在平台上已不存在，未加入计划".to_owned()]
+        );
+    }
+
+    /// 已装前置的版本查询不是 404 而是别的平台错误：那是「查不到」，照常冒泡，不当成已下架。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installed_dependency_lookup_failure_other_than_not_found_still_errors() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/version/kept"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut ledger = Ledger::default();
+        ledger.upsert(entry("fabric-api.jar", "fabric-api", "kept"));
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("fabric-api.jar"), b"jar")
+            .await
+            .unwrap();
+
+        let err = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 403, .. })
+            ),
+            "实得 {err:?}"
+        );
+    }
+
+    /// 端到端：前置已下架时装 Mod 照常完成，只下载主项，装着的前置原样不动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_mod_proceeds_when_installed_dependency_is_delisted() {
+        use sha1::Digest;
+
+        let server = MockServer::start().await;
+        let payload = b"sodium-jar-bytes".to_vec();
+        let sha1: String = sha1::Sha1::digest(&payload)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let root = format!(
+            r#"{{"id":"v1","project_id":"sodium","name":"Sodium v1","version_number":"v1",
+                "version_type":"release","date_published":"2026-01-01T00:00:00Z",
+                "game_versions":["1.20.1"],"loaders":["fabric"],
+                "dependencies":[{{"project_id":"fabric-api","dependency_type":"required"}}],
+                "files":[{{"hashes":{{"sha1":"{sha1}"}},"url":"{}/files/sodium-v1.jar",
+                    "filename":"sodium-v1.jar","primary":true,"size":{}}}]}}"#,
+            server.uri(),
+            payload.len()
+        );
+        Mock::given(method("GET"))
+            .and(path("/version/v1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(root))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/version/delisted"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/files/sodium-v1.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(payload.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut ledger = Ledger::default();
+        ledger.upsert(entry("fabric-api-old.jar", "fabric-api", "delisted"));
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("fabric-api-old.jar"), b"kept-dependency")
+            .await
+            .unwrap();
+
+        let outcome = aurora
+            .install_mod("1.20.1-fabric", Platform::Modrinth, "sodium", "v1", None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.file_name, "sodium-v1.jar");
+        assert_eq!(
+            tokio::fs::read(mods_dir.join("sodium-v1.jar"))
+                .await
+                .unwrap(),
+            payload
+        );
+        assert_eq!(
+            tokio::fs::read(mods_dir.join("fabric-api-old.jar"))
+                .await
+                .unwrap(),
+            b"kept-dependency"
+        );
+        let ledger = aurora.ledger_store("1.20.1-fabric").load().await.unwrap();
+        assert_eq!(
+            ledger.find("sodium-v1.jar").map(|e| e.version_id.as_str()),
+            Some("v1")
+        );
+        let kept = ledger
+            .find("fabric-api-old.jar")
+            .expect("前置的卷宗记录原样保留");
+        assert_eq!(kept.version_id, "delisted");
     }
 
     /// 卷宗里同工程但版本号不同：主项不算已满足（要装的是另一个版本，即一次更新）。

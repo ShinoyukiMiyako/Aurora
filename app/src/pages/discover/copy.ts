@@ -166,6 +166,7 @@ export const INSTALL_COPY = {
   previewGroup: (name: string) => `「${name}」`,
   requiredBy: (name: string) => `${name} 的前置`,
   satisfied: "已满足，跳过",
+  satisfiedDelisted: "已安装，平台上已找不到这个版本",
   planLoading: "正在计算要一起安装的文件…",
   planFailed: "没能算出要一起安装的文件",
   skipped: "以下前置没有一起装：",

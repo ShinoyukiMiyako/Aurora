@@ -665,6 +665,37 @@ describe("发现页：资源详情与安装", () => {
     expect(openDialogs()).toHaveLength(0);
   });
 
+  it("Mod 的前置预览：已装前置在平台上已下架时照常列出并标明，不计进待下载的文件", async () => {
+    const mod = entry("M1", { title: "钠" });
+    const main = modVersion("main2", { project_id: "M1", file_size: 4096 });
+    pages = () => result([mod]);
+    ipc.overrides.set("project_detail", () => detailOf(mod, { latest_version: main }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [main], truncated: false }));
+    ipc.overrides.set("match_instances", () => [match("生存", { best_version: main })]);
+    ipc.overrides.set("plan_install", () => ({
+      items: [
+        { version: main, title: "钠", icon_url: null, required_by: null, already_satisfied: false },
+        {
+          version: modVersion("gone1", { project_id: "D1", name: "dep-gone.jar", version_number: "0.9.1", file_name: "dep-gone.jar", file_size: null, game_versions: [], loaders: [] }),
+          title: "织布机",
+          icon_url: null,
+          required_by: "M1",
+          already_satisfied: true,
+          delisted: true,
+        },
+        { version: modVersion("kept1", { project_id: "D2", version_number: "1.2.0" }), title: "线团", icon_url: null, required_by: "M1", already_satisfied: true },
+      ],
+      skipped: [],
+    }));
+    await mount();
+    act(() => card("钠").click());
+    await flush();
+    const rows = [...dialog().querySelectorAll<HTMLElement>("[data-satisfied]")].map((row) => row.textContent);
+    expect(rows).toEqual(["织布机钠 的前置已安装，平台上已找不到这个版本", "线团钠 的前置已满足，跳过"]);
+    expect(dialog().textContent).not.toContain("0.9.1");
+    expect(dialog().textContent).toContain("已选 1 个实例 · 共 1 个文件待下载");
+  });
+
   it("版本列表截断时，安装面板的版本下拉与版本标签都说明列表不全", async () => {
     const note = "CurseForge 上的文件太多，这里只列出了其中一部分，没找到的版本请到 CurseForge 网页查看";
     const notes = () => {

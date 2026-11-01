@@ -566,24 +566,7 @@ impl TextureService {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(ThumbError::Io { path, source }),
         }
-        let bytes = remote::fetch(&self.inner.http, url, remote::THUMB_TIMEOUT)
-            .await
-            .map_err(|err| match err {
-                remote::FetchError::Http(source) => ThumbError::Http {
-                    url: url.to_owned(),
-                    source,
-                },
-                remote::FetchError::Status(status) => ThumbError::Status {
-                    url: url.to_owned(),
-                    status,
-                },
-            })?;
-        if bytes.len() > remote::THUMB_MAX_BYTES {
-            return Err(ThumbError::TooLarge {
-                url: url.to_owned(),
-                size: bytes.len(),
-            });
-        }
+        let bytes = remote::fetch_thumb(&self.inner.http, url).await?;
         if remote::image_mime(&bytes).is_none() {
             return Err(ThumbError::NotImage {
                 url: url.to_owned(),

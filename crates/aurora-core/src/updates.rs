@@ -16,8 +16,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use aurora_modplatform::{
-    CurseForgeFile, CurseForgeFingerprintMatch, InstalledMod, ModHashes, ModVersionInfo,
-    ModrinthVersion, Platform, hash_mod_file,
+    CurseForgeClient, CurseForgeFile, CurseForgeFingerprintMatch, InstalledMod, ModHashes,
+    ModVersionInfo, ModrinthVersion, Platform, hash_mod_file,
 };
 use serde::Serialize;
 
@@ -60,6 +60,18 @@ impl Aurora {
     /// 文件名字典序，保证 UI 列表稳定。新旧一律按发布时间比，绝不比版本号字符串：两个平台的版本号
     /// 各家一套格式，字典序比出来的「更新」随时可能是一次降级。
     pub async fn check_updates(&self, version_id: &str) -> Result<Vec<UpdateCandidate>> {
+        self.check_updates_with(version_id, || self.curseforge_client())
+            .await
+    }
+
+    /// [`Aurora::check_updates`] 的本体。`curseforge` 构造 CurseForge 客户端，只用来判断 CurseForge
+    /// 那部分能不能查；文件列表照旧经版本列表缓存取。生产传 [`Aurora::curseforge_client`]：有没有 key
+    /// 取决于构建与进程环境，测试要稳定地造出「没有 key」只能从这里注入。
+    async fn check_updates_with(
+        &self,
+        version_id: &str,
+        curseforge: impl FnOnce() -> Result<CurseForgeClient>,
+    ) -> Result<Vec<UpdateCandidate>> {
         let instance = self.resolve_instance(version_id).await?;
         // 只装了 OptiFine 的实例同样没有 Mod 加载器：OptiFine 不认 mods 目录里的 Mod。
         let loaders = instance_mod_loaders(&instance);
@@ -196,7 +208,8 @@ impl Aurora {
             }
         }
 
-        if !curseforge_targets.is_empty() {
+        if !curseforge_targets.is_empty() && curseforge_ready(curseforge, curseforge_targets.len())?
+        {
             let aurora = self.clone();
             let found = bounded_map(
                 curseforge_targets,
@@ -368,6 +381,28 @@ impl Aurora {
         Ok(index_by_fingerprint(
             client.fingerprint_matches(fingerprints).await?,
         ))
+    }
+}
+
+/// CurseForge 来源的更新查不查得了。
+///
+/// 未配置 API key 时这部分整体跳过并记 info：缺一把可选的钥匙不该让 Modrinth 那部分已经查到的更新
+/// 一并丢掉，与 [`Aurora::curseforge_fingerprint_lookup`] 停用指纹反查是同一约定。构造客户端的其它
+/// 失败照常冒泡。
+fn curseforge_ready(
+    curseforge: impl FnOnce() -> Result<CurseForgeClient>,
+    pending: usize,
+) -> Result<bool> {
+    match curseforge() {
+        Ok(_) => Ok(true),
+        Err(CoreError::ModPlatform(aurora_modplatform::Error::CurseForgeKeyMissing)) => {
+            tracing::info!(
+                pending,
+                "未配置 CurseForge API key，跳过 CurseForge 来源 Mod 的更新检查"
+            );
+            Ok(false)
+        }
+        Err(other) => Err(other),
     }
 }
 
@@ -879,6 +914,154 @@ mod tests {
         // 没有任何已知身份，最新版本查询一次都不该发。
         let requests = server.received_requests().await.unwrap();
         assert_eq!(count_requests(&requests, "/version_files/update"), 0);
+    }
+
+    /// 一个实例里同时有 Modrinth 与 CurseForge 来源的 Mod：后者的卷宗条目是 JEI（238222，文件 100）。
+    async fn mixed_platform_instance(mc: &Path, server: &MockServer) -> Aurora {
+        put_version(mc, "1.20.1-fabric", FABRIC_JSON).await;
+        let (_, sha1) = put_mod(mc, "1.20.1-fabric", "sodium-0.5.3.jar", b"sodium-payload").await;
+        put_mod(mc, "1.20.1-fabric", "jei-100.jar", b"jei-payload").await;
+        mount_post(
+            server,
+            "/version_files",
+            format!(
+                r#"{{"{sha1}":{}}}"#,
+                modrinth_version(
+                    "old1",
+                    "AANobbMI",
+                    "0.5.3",
+                    "2025-01-01T00:00:00Z",
+                    "sodium-0.5.3.jar",
+                    &sha1
+                )
+            ),
+        )
+        .await;
+        mount_post(
+            server,
+            "/version_files/update",
+            format!(
+                r#"{{"{sha1}":{}}}"#,
+                modrinth_version(
+                    "new2",
+                    "AANobbMI",
+                    "0.6.0",
+                    "2026-06-01T00:00:00Z",
+                    "sodium-0.6.0.jar",
+                    "bb"
+                )
+            ),
+        )
+        .await;
+        let aurora = aurora_at(mc, &server.uri());
+        let mut jei = ledger_entry("jei-100.jar", "238222", "100", None);
+        jei.platform = Platform::CurseForge;
+        jei.title = Some("JEI".to_owned());
+        save_ledger(
+            &aurora,
+            "1.20.1-fabric",
+            vec![
+                ledger_entry("sodium-0.5.3.jar", "AANobbMI", "old1", Some(&sha1)),
+                jei,
+            ],
+        )
+        .await;
+        aurora
+    }
+
+    fn key_missing() -> Result<aurora_modplatform::CurseForgeClient> {
+        Err(CoreError::ModPlatform(
+            aurora_modplatform::Error::CurseForgeKeyMissing,
+        ))
+    }
+
+    /// 当前构建没有 CurseForge API key：CurseForge 那部分跳过，Modrinth 查到的更新照常给出，
+    /// 一个 CurseForge 请求都不发。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn check_updates_without_curseforge_key_keeps_modrinth_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        let aurora = mixed_platform_instance(tmp.path(), &server).await;
+
+        let found = aurora
+            .check_updates_with("1.20.1-fabric", key_missing)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_name, "sodium-0.5.3.jar");
+        assert_eq!(found[0].current_version_id, "old1");
+        assert_eq!(found[0].latest.version_id, "new2");
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests.iter().all(|r| !r.url.path().starts_with("/v1/")),
+            "没有 key 时不该发出任何 CurseForge 请求：{:?}",
+            requests.iter().map(|r| r.url.path()).collect::<Vec<_>>()
+        );
+    }
+
+    /// 构造 CurseForge 客户端的别的失败不是「没配 key」，照常冒泡，不把它当成可以跳过的情形。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn check_updates_surfaces_other_curseforge_client_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        let aurora = mixed_platform_instance(tmp.path(), &server).await;
+
+        let err = aurora
+            .check_updates_with("1.20.1-fabric", || {
+                Err(CoreError::ModPlatform(aurora_modplatform::Error::Status {
+                    url: "https://api.curseforge.com".to_owned(),
+                    status: 500,
+                }))
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 500, .. })
+            ),
+            "实得 {err:?}"
+        );
+    }
+
+    /// 配了 key：CurseForge 来源的 Mod 按文件列表比出更新，与 Modrinth 的结果合在一起按文件名排好。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn check_updates_with_curseforge_key_reports_both_platforms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {
+                        "id": 200, "modId": 238222, "displayName": "JEI 200",
+                        "fileName": "jei-200.jar", "releaseType": 1,
+                        "fileDate": "2026-06-01T00:00:00Z", "gameVersions": ["1.20.1", "Fabric"],
+                        "downloadUrl": "https://cf.example.invalid/jei-200.jar"
+                    },
+                    {
+                        "id": 100, "modId": 238222, "displayName": "JEI 100",
+                        "fileName": "jei-100.jar", "releaseType": 1,
+                        "fileDate": "2026-01-01T00:00:00Z", "gameVersions": ["1.20.1", "Fabric"]
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+        let aurora = mixed_platform_instance(tmp.path(), &server)
+            .await
+            .with_curseforge_key("test-key");
+
+        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let names: Vec<(&str, &str)> = found
+            .iter()
+            .map(|c| (c.file_name.as_str(), c.latest.version_id.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("jei-100.jar", "200"), ("sodium-0.5.3.jar", "new2")]
+        );
+        assert_eq!(found[0].title.as_deref(), Some("JEI"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

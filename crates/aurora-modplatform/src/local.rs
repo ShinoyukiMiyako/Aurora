@@ -5,7 +5,7 @@
 //! `.disabled` 后缀表达（[`DISABLED_SUFFIX`] 是这条约定的唯一出处，上层一律引用它）。jar 即 zip，
 //! 读取走 spawn_blocking 避免阻塞异步 worker。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -128,7 +128,8 @@ pub async fn scan_mods_dir(dir: impl AsRef<Path>) -> Result<Vec<InstalledMod>> {
 ///
 /// 缓存以「文件名 + 大小 + 修改时间」为判据，三者一致就直接复用上次的解析结果，不再开 zip。
 /// mods 目录的变更频率极低（装/删 Mod 才变），所以稳态下这一轮的 zip 解析次数是 0。
-/// `cache_path` 为 `None` 时退化成全量解析。
+/// `cache_path` 为 `None` 时退化成全量解析。解析失败的结果里，描述文件损坏这类确定性的照样缓存，
+/// 打不开文件这类读盘故障不缓存（见 [`is_transient_read_failure`]），下一轮重新解析。
 pub async fn scan_mods_dir_cached(
     dir: impl AsRef<Path>,
     cache_path: Option<&Path>,
@@ -167,6 +168,8 @@ pub async fn scan_mods_dir_cached(
     }
 
     let miss_count = pending.len();
+    // 本轮读盘失败的文件：照常按无元数据列出，但不进缓存，下一轮重新解析。
+    let mut transient: HashSet<String> = HashSet::new();
     let limit = scan_concurrency();
     let mut queue = pending.into_iter();
     let mut set: tokio::task::JoinSet<(usize, ModCandidate, Result<Option<ModMetadata>>)> =
@@ -182,11 +185,16 @@ pub async fn scan_mods_dir_cached(
         let metadata = match outcome {
             Ok(metadata) => metadata,
             Err(error) => {
+                let retry_next_scan = is_transient_read_failure(&error);
                 tracing::warn!(
                     path = %candidate.path.display(),
                     error = %error,
+                    retry_next_scan,
                     "解析模组元数据失败，按无元数据列出"
                 );
+                if retry_next_scan {
+                    transient.insert(candidate.file_name.clone());
+                }
                 None
             }
         };
@@ -206,7 +214,11 @@ pub async fn scan_mods_dir_cached(
     if let Some(path) = cache_path {
         // 按本轮实际结果重建缓存，顺带把已删除 jar 的旧条目清掉。内容没变就不写盘，避免每次进页面
         // 都白白 fsync 一次。
-        let next = ModMetadataCache::build(&entries);
+        let next = ModMetadataCache::build(
+            entries
+                .iter()
+                .filter(|(candidate, _)| !transient.contains(&candidate.file_name)),
+        );
         if next != cache {
             save_metadata_cache(path, &next).await;
         }
@@ -223,6 +235,28 @@ pub async fn scan_mods_dir_cached(
         .into_iter()
         .map(|(candidate, metadata)| candidate.into_installed(metadata))
         .collect())
+}
+
+/// 这次解析失败是不是换个时机就可能好的读盘故障。
+///
+/// 打不开文件（被杀毒软件或别的启动器独占、权限一时不对、扫描途中被移走）属于这一类：把它当成「没有
+/// 元数据」缓存下来，这个 jar 在文件被改动之前会一直显示为无元数据。zip 读出的 io 错误里，数据本身
+/// 坏掉的三种（校验和不对、压缩流损坏、文件被截断）对同一份字节每次都一样，与描述文件内容损坏一样
+/// 是确定性的结果，可以缓存。
+fn is_transient_read_failure(error: &Error) -> bool {
+    match error {
+        Error::Base(aurora_base::Error::Io { .. }) => true,
+        Error::Zip {
+            source: zip::result::ZipError::Io(source),
+            ..
+        } => !matches!(
+            source.kind(),
+            std::io::ErrorKind::InvalidData
+                | std::io::ErrorKind::InvalidInput
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    }
 }
 
 /// 把一个待解析项投进阻塞线程池。任务把候选项一并带回，省得再按下标回查。
@@ -324,11 +358,13 @@ impl ModMetadataCache {
     }
 
     /// 按本轮扫描结果重建。只收本轮真实存在的文件，已删除 jar 的旧条目因此自动消失。
-    fn build(entries: &[(ModCandidate, Option<ModMetadata>)]) -> Self {
+    fn build<'a>(
+        entries: impl IntoIterator<Item = &'a (ModCandidate, Option<ModMetadata>)>,
+    ) -> Self {
         Self {
             schema: CACHE_SCHEMA,
             entries: entries
-                .iter()
+                .into_iter()
                 .map(|(candidate, metadata)| {
                     (
                         candidate.file_name.clone(),
@@ -1814,6 +1850,135 @@ authors="Snownee, TrainGuys"
             .await
             .unwrap();
         assert_eq!(mods[0].metadata.as_ref().unwrap().mod_id, "fresh");
+    }
+
+    /// 文件一时打不开（被别的程序独占）：本轮按无元数据列出，但不写进缓存，下一轮重新解析。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn transient_open_failure_is_not_cached_and_retried_next_scan() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        rewrite_jar_with_mtime(&dir.path().join("ok.jar"), "ok", epoch_plus(1_000));
+        let locked = dir.path().join("locked.jar");
+        rewrite_jar_with_mtime(&locked, "locked", epoch_plus(1_000));
+
+        // 不放行任何共享：扫描时的打开以共享冲突失败，正是杀毒或别的启动器占着文件时的样子。
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+        let first = scan_mods_dir_cached(dir.path(), Some(&cache))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].file_name, "locked.jar");
+        assert!(first[0].metadata.is_none(), "打不开的这一轮按无元数据列出");
+        assert_eq!(first[1].metadata.as_ref().unwrap().mod_id, "ok");
+        let persisted: ModMetadataCache =
+            serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        assert!(persisted.entries.contains_key("ok.jar"));
+        assert!(
+            !persisted.entries.contains_key("locked.jar"),
+            "瞬时的读盘失败不能当成「没有元数据」缓存下来"
+        );
+
+        drop(held);
+        let second = scan_mods_dir_cached(dir.path(), Some(&cache))
+            .await
+            .unwrap();
+        assert_eq!(
+            second[0].metadata.as_ref().unwrap().mod_id,
+            "locked",
+            "文件能打开之后的下一轮必须重新解析"
+        );
+        let persisted: ModMetadataCache =
+            serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        assert_eq!(
+            persisted.entries["locked.jar"]
+                .metadata
+                .as_ref()
+                .map(|m| m.mod_id.as_str()),
+            Some("locked")
+        );
+    }
+
+    /// 描述文件本身坏了（同一份字节每次都解析失败）：照旧缓存成「无元数据」，不每轮都重开 zip。
+    #[tokio::test]
+    async fn deterministic_descriptor_corruption_is_still_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let broken = dir.path().join("broken.jar");
+        build_jar(&broken, &[("fabric.mod.json", b"{ this is not json ")]);
+        std::fs::File::options()
+            .write(true)
+            .open(&broken)
+            .unwrap()
+            .set_modified(epoch_plus(1_000))
+            .unwrap();
+
+        let mods = scan_mods_dir_cached(dir.path(), Some(&cache))
+            .await
+            .unwrap();
+        assert!(mods[0].metadata.is_none());
+        let persisted: ModMetadataCache =
+            serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        let entry = persisted
+            .entries
+            .get("broken.jar")
+            .expect("描述文件损坏是确定性的结果，应当缓存");
+        assert_eq!(entry.metadata, None);
+        assert_eq!(entry.stamp.size, std::fs::metadata(&broken).unwrap().len());
+        assert_eq!(entry.stamp.mtime_ms, 1_000_000);
+    }
+
+    #[test]
+    fn only_os_level_read_failures_count_as_transient() {
+        let io = |kind: std::io::ErrorKind| std::io::Error::new(kind, "x");
+        let open = |kind| {
+            Error::Base(aurora_base::Error::Io {
+                path: PathBuf::from("a.jar"),
+                source: io(kind),
+            })
+        };
+        let zip_io = |kind| Error::Zip {
+            path: PathBuf::from("a.jar"),
+            source: zip::result::ZipError::Io(io(kind)),
+        };
+        // 打不开、读到一半被拒：换个时机可能就好。
+        assert!(is_transient_read_failure(&open(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(is_transient_read_failure(&open(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(is_transient_read_failure(&zip_io(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(is_transient_read_failure(&zip_io(
+            std::io::ErrorKind::Other
+        )));
+        // 校验和不对、压缩流损坏、文件被截断：同一份字节每次都一样。
+        assert!(!is_transient_read_failure(&zip_io(
+            std::io::ErrorKind::InvalidData
+        )));
+        assert!(!is_transient_read_failure(&zip_io(
+            std::io::ErrorKind::InvalidInput
+        )));
+        assert!(!is_transient_read_failure(&zip_io(
+            std::io::ErrorKind::UnexpectedEof
+        )));
+        assert!(!is_transient_read_failure(&Error::Zip {
+            path: PathBuf::from("a.jar"),
+            source: zip::result::ZipError::UnsupportedArchive("x"),
+        }));
+        let json = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert!(!is_transient_read_failure(&Error::Json {
+            context: "a.jar".to_owned(),
+            source: json,
+        }));
     }
 
     #[tokio::test]

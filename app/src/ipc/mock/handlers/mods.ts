@@ -329,12 +329,12 @@ function project(platform: PlatformId, projectId: string): { project: MockProjec
 }
 
 function projectVersions(platform: PlatformId, projectId: string): ModVersionInfo[] {
-  return sourceVersions(project(platform, projectId).source);
+  return sourceVersions(project(platform, projectId).source).filter((v) => !isDelisted(platform, projectId, v.version_id));
 }
 
 function findVersion(platform: PlatformId, projectId: string, versionId: string): ModVersionInfo {
   const found = findMockSource(platform, projectId)?.source.versions.find((v) => v.info.version_id === versionId);
-  if (found === undefined) {
+  if (found === undefined || isDelisted(platform, projectId, versionId)) {
     throw new IpcError("mod_version_not_found", `平台 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 上工程 ${projectId} 未找到版本 ${versionId}`);
   }
   return found.info;
@@ -365,10 +365,10 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
     const found = findMockSource(root.platform, id);
     return found === undefined ? id : found.project.title;
   };
-  const stack: [ModVersionInfo, string | null, boolean][] = [[root, null, installedExact(instance, root)]];
-  for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
-    const [v, requiredBy, satisfied] = next;
-    const children: [ModVersionInfo, string | null, boolean][] = [];
+  const stack: PlannedItem[] = [plannedFromPlatform(root, null, installedExact(instance, root))];
+  for (let item = stack.pop(); item !== undefined; item = stack.pop()) {
+    const v = item.version;
+    const children: PlannedItem[] = [];
     for (const dep of v.dependencies) {
       if (dep.kind === "optional") skipped.push(`可选依赖 ${name(dep.project_id)} 未自动安装，需要时请手动添加`);
       else if (dep.kind === "incompatible") skipped.push(`${v.file_name} 声明与 ${name(dep.project_id)} 不兼容，未做任何处理`);
@@ -379,20 +379,58 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
         visited.add(dep.project_id);
         const kept = installedAny(instance, v.platform, dep.project_id);
         if (kept) {
-          children.push([findVersion(v.platform, dep.project_id, kept.version_id), v.project_id, true]);
+          // 装着的那一版在平台上没了也算已满足，只按卷宗列出，与后端一致
+          children.push(
+            isDelisted(kept.platform, kept.project_id, kept.version_id)
+              ? plannedFromLedger(kept, v.project_id)
+              : plannedFromPlatform(findVersion(v.platform, dep.project_id, kept.version_id), v.project_id, true),
+          );
           continue;
         }
         const candidates = projectVersions(v.platform, dep.project_id);
         const chosen = newestFirst(candidates).find((c) => classify(c, instance.mc_version, instance.loaders).kind !== "mismatch");
-        if (chosen) children.push([chosen, v.project_id, false]);
+        if (chosen) children.push(plannedFromPlatform(chosen, v.project_id, false));
         else skipped.push(`依赖 ${name(dep.project_id)} 没有适配该实例的版本，未加入计划`);
       }
     }
     stack.push(...children.reverse());
-    // 目录不带图（假后端不托管图片），计划项与卷宗里的图标都为空
-    items.push({ version: v, title: project(v.platform, v.project_id).project.title, icon_url: null, required_by: requiredBy, already_satisfied: satisfied });
+    items.push(item);
   }
   return { items, skipped };
+}
+
+// 目录不带图（假后端不托管图片），平台给的计划项图标为空
+function plannedFromPlatform(v: ModVersionInfo, requiredBy: string | null, satisfied: boolean): PlannedItem {
+  return { version: v, title: project(v.platform, v.project_id).project.title, icon_url: null, required_by: requiredBy, already_satisfied: satisfied };
+}
+
+/** 已装、平台上已下架的前置：版本信息只有卷宗记着的那些，平台才有的字段空着；工程还在时名字取平台的。 */
+function plannedFromLedger(row: LedgerRow, requiredBy: string): PlannedItem {
+  const listed = findMockSource(row.platform, row.project_id);
+  return {
+    version: {
+      version_id: row.version_id,
+      project_id: row.project_id,
+      platform: row.platform,
+      name: row.file_name,
+      version_number: row.version_number === null ? row.version_id : row.version_number,
+      release_channel: "release",
+      game_versions: [],
+      loaders: [],
+      file_name: row.file_name,
+      file_size: null,
+      // 假后端的卷宗不记 sha1
+      sha1: null,
+      download_url: null,
+      date_published: "",
+      dependencies: [],
+    },
+    title: listed === undefined ? row.title : listed.project.title,
+    icon_url: listed === undefined ? row.icon_url : null,
+    required_by: requiredBy,
+    already_satisfied: true,
+    delisted: true,
+  };
 }
 
 function busyCheck(versionId: string, fileName: string): void {
@@ -419,6 +457,21 @@ const truncatedListings = new Set<string>();
 export function setMockVersionListTruncated(platform: PlatformId, projectId: string, truncated: boolean): void {
   if (truncated) truncatedListings.add(`${platform}:${projectId}`);
   else truncatedListings.delete(`${platform}:${projectId}`);
+}
+
+const delistedVersions = new Set<string>();
+
+function isDelisted(platform: PlatformId, projectId: string, versionId: string): boolean {
+  return delistedVersions.has(`${platform}:${projectId}:${versionId}`);
+}
+
+/**
+ * 测试与演示用：让某个版本从平台上下架。单版本查询报 mod_version_not_found，版本列表里也不再有它；
+ * 已装在实例里的那份文件与卷宗不动。种子目录是固定的，只能这样造出「已装的版本在平台上没了」。
+ */
+export function setMockVersionDelisted(platform: PlatformId, projectId: string, versionId: string, delisted: boolean): void {
+  if (delisted) delistedVersions.add(`${platform}:${projectId}:${versionId}`);
+  else delistedVersions.delete(`${platform}:${projectId}:${versionId}`);
 }
 
 export function assertNotBusy(versionId: string, fileNames: string[]): void {
@@ -780,6 +833,7 @@ export function reset(): void {
   instances = seedInstances();
   busyFiles.clear();
   truncatedListings.clear();
+  delistedVersions.clear();
 }
 
 // 工程目录是固定的种子，不存；被占用的文件只在一次命令里有意义，也不存。
