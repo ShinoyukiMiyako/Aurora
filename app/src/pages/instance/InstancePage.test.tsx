@@ -2749,6 +2749,67 @@ describe("实例详情：存档备份", () => {
     expect(button("备份存档", backupsDialog()).getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("弹窗里点「备份存档」后任务在进行：按钮转圈、还是同一个节点，焦点留在它上面，再按不重复入队", async () => {
+    onTestFinished(emulateFocusFixup());
+    await openBackups();
+    const start = button("备份存档", backupsDialog());
+    act(() => start.focus());
+    click(start);
+    await flush();
+    expect(button("备份存档", backupsDialog())).toBe(start);
+    expect(start.getAttribute("aria-busy")).toBe("true");
+    expect(start.disabled).toBe(false);
+    expect(document.activeElement).toBe(start);
+    click(start);
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toHaveLength(1);
+  });
+
+  it("别的存档有任务在进行：弹窗里的「备份存档」不转圈，写明实例正在备份或恢复存档", async () => {
+    await openBackups();
+    await act(async () => {
+      await launcher.actions.backupWorld(ID, "w1", "旧世界");
+      await settle(20);
+    });
+    const start = button("备份存档", backupsDialog());
+    expect(start.getAttribute("aria-busy")).toBeNull();
+    expect(await hoverReason(start)).toBe("「樱花生存」正在备份或恢复存档，完成后再试");
+  });
+
+  it("删除请求还没回来：这一行的删除转圈，再按不重复发；失败后恢复可点，错误照常报出", async () => {
+    const pending = deferred<null>();
+    ipc.overrides.set("delete_world_backup", () => pending.promise);
+    await openBackups();
+    const remove = button("删除 2026年10月31日 10:00 的备份", backupsDialog());
+    click(remove);
+    await flush();
+    expect(remove.getAttribute("aria-busy")).toBe("true");
+    expect(button("删除 2026年10月30日 10:00 的备份", backupsDialog()).getAttribute("aria-busy")).toBeNull();
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "delete_world_backup")).toHaveLength(1);
+    await act(async () => {
+      pending.reject(new IpcError("world_backup_not_found", "备份已经不在了"));
+      await settle(20);
+    });
+    expect(remove.getAttribute("aria-busy")).toBeNull();
+    expect(toastTitles()).toContain("没能删除这份备份");
+  });
+
+  it("备份列表还没读到：「打开备份文件夹」是可聚焦的禁用，读到后恢复可用", async () => {
+    const pending = deferred<WorldBackupListDto>();
+    ipc.overrides.set("list_world_backups", () => pending.promise);
+    await openBackups();
+    const openDir = button("打开备份文件夹", backupsDialog());
+    expect(openDir.disabled).toBe(false);
+    expect(openDir.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      pending.resolve(list);
+      await settle(20);
+    });
+    expect(button("打开备份文件夹", backupsDialog()).getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("游戏运行中：恢复与备份存档禁用并写原因，删除照常（不占实例）", async () => {
     await open("overview");
     await startGame();

@@ -2,6 +2,7 @@
 // 列表走按需查询缓存（key 见 worldBackupsKey），任务完成、删除一份、自动备份做完后由状态层按前缀失效；
 // 锁定只订阅「哪些存档有任务」与「是不是在补全」这类只随任务增减变化的值，不随下载进度重渲染。
 
+import { useState } from "react";
 import { ACTION_ERROR, CONFIRM_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { clock, formatBytes, formatDate, formatRelative } from "../../domain/format";
@@ -162,7 +163,6 @@ export function WorldBackupsModal({ inst, world, open, onClose, worldOps }: Worl
   const run = useRunner();
   const list = useWorldBackups(inst.id, world.dir);
   const busy = worldOps.busyWorlds.includes(world.dir);
-  const backupReason = busy ? COPY.worldBusy : worldOps.backupReason;
   const ready = list.status === "ready" ? list.data : null;
 
   const subtitle =
@@ -177,6 +177,7 @@ export function WorldBackupsModal({ inst, world, open, onClose, worldOps }: Worl
         icon="folder"
         disabledReason={ready === null ? undefined : ready.backups.length === 0 ? COPY.noFolderYet : undefined}
         disabled={ready === null}
+        focusableWhenDisabled
         onClick={() => {
           if (ready === null) return;
           void run(() => actions.revealPath(ready.dir), ACTION_ERROR.openFolder);
@@ -184,7 +185,8 @@ export function WorldBackupsModal({ inst, world, open, onClose, worldOps }: Worl
       >
         {COPY.openFolder}
       </Button>
-      <Button variant="primary" icon="archive" disabledReason={backupReason} onClick={() => worldOps.backup(world)}>
+      {/* 这个存档的任务在进行时转圈，不换成带原因的禁用：原因气泡要多包一层，刚按下的按钮会重挂、丢掉焦点 */}
+      <Button variant="primary" icon="archive" loading={busy} disabledReason={busy ? undefined : worldOps.backupReason} onClick={() => worldOps.backup(world)}>
         {COPY.backup}
       </Button>
     </>
@@ -279,6 +281,8 @@ function BackupRows({
   const actions = useLauncherActions();
   const run = useRunner();
   const { confirm } = useShell();
+  // 删除不确认、也不走任务：请求回来之前再按一次，第二个请求撞上已经移走的文件，报 world_backup_not_found
+  const [removing, setRemoving] = useState<ReadonlySet<string>>(new Set());
   const rowRestoreReason = busy ? COPY.worldBusy : restoreReason;
   const rowDeleteReason = busy ? COPY.worldBusy : undefined;
 
@@ -289,7 +293,14 @@ function BackupRows({
   };
 
   const remove = (backup: WorldBackupDto) => {
-    void run(() => actions.deleteWorldBackup(inst.id, world.dir, backup.file), ACTION_ERROR.deleteWorldBackup);
+    setRemoving((s) => new Set(s).add(backup.file));
+    void run(() => actions.deleteWorldBackup(inst.id, world.dir, backup.file), ACTION_ERROR.deleteWorldBackup).then(() =>
+      setRemoving((s) => {
+        const next = new Set(s);
+        next.delete(backup.file);
+        return next;
+      }),
+    );
   };
 
   // 后端给出的就是新的在前；界面的顺序不依赖传输顺序，这里按备份时刻再排一次
@@ -318,7 +329,7 @@ function BackupRows({
                 <Button size="sm" aria-label={COPY.restoreLabel(moment)} disabledReason={rowRestoreReason} onClick={() => void restore(b)}>
                   {COPY.restore}
                 </Button>
-                <Button size="sm" variant="ghost" aria-label={COPY.removeLabel(moment)} disabledReason={rowDeleteReason} onClick={() => remove(b)}>
+                <Button size="sm" variant="ghost" aria-label={COPY.removeLabel(moment)} disabledReason={rowDeleteReason} loading={removing.has(b.file)} onClick={() => remove(b)}>
                   {COPY.remove}
                 </Button>
               </span>
