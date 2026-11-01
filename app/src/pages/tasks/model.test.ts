@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Task } from "../../domain/types";
+import { TASK_KINDS, type Task, type TaskKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 import { newTask } from "../../state/tasks";
 import { CHART_MIN_CEILING_BPS, ETA_WINDOW_SAMPLES, THROUGHPUT_SAMPLES } from "./constants";
@@ -20,6 +20,7 @@ import {
   pushSample,
   rowMeta,
   sameTaskLayout,
+  subtitleOf,
   takeSample,
   taskGroups,
   totalEtaSpeed,
@@ -339,5 +340,40 @@ describe("任务表的结构比较", () => {
   it("不认识的字段一律算结构", () => {
     const extra = { ...running, note: "新字段" } as Task;
     expect(sameTaskLayout([running], [extra])).toBe(false);
+  });
+});
+
+describe("页头副标题", () => {
+  const running = (kind: TaskKind) => task(kind, { kind, status: "running" });
+  const queued = (kind: TaskKind) => task(`queued-${kind}`, { kind, status: "queued" });
+
+  it("没有活动任务：写队列空闲", () => {
+    expect(subtitleOf(bucketTasks([task("d", { status: "done", finishedAt: T0 })]))).toBe("队列空闲 · 新建实例、装 Mod、导入整合包都会排到这里");
+  });
+
+  it("「下载中」只算下载类：导出整合包、备份与恢复存档夹在下载之间时不计入", () => {
+    expect(subtitleOf(bucketTasks([running("game"), running("mod"), running("modpack_export")]))).toBe("2 个下载中，0 个排队 · 最多 3 个并行");
+    expect(subtitleOf(bucketTasks([running("mod"), running("world_backup"), queued("mod")]))).toBe("1 个下载中，1 个排队 · 最多 3 个并行");
+    expect(subtitleOf(bucketTasks([running("repair"), running("world_restore")]))).toBe("1 个下载中，0 个排队 · 最多 3 个并行");
+  });
+
+  it("除本地任务外的每一类运行时都算下载，修复补的是游戏文件", () => {
+    const local: readonly TaskKind[] = ["world_backup", "world_restore", "modpack_export"];
+    for (const kind of TASK_KINDS.filter((k) => !local.includes(k))) {
+      expect(subtitleOf(bucketTasks([running(kind)])), kind).toBe("1 个下载中，0 个排队 · 最多 3 个并行");
+    }
+  });
+
+  it("排队的不分类别，都还没开始：排着的导出照样算进排队", () => {
+    expect(subtitleOf(bucketTasks([running("mod"), queued("modpack_export"), queued("world_backup")]))).toBe("1 个下载中，2 个排队 · 最多 3 个并行");
+  });
+
+  it("只有本地任务在跑、没有排队：不写「0 个下载中」，按进行中说", () => {
+    expect(subtitleOf(bucketTasks([running("modpack_export")]))).toBe("1 个任务进行中 · 最多 3 个并行");
+    expect(subtitleOf(bucketTasks([running("world_backup"), running("world_restore")]))).toBe("2 个任务进行中 · 最多 3 个并行");
+  });
+
+  it("只有本地任务在跑、后面还排着：照常写下载与排队的数量", () => {
+    expect(subtitleOf(bucketTasks([running("modpack_export"), queued("mod")]))).toBe("0 个下载中，1 个排队 · 最多 3 个并行");
   });
 });

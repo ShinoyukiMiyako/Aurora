@@ -42,6 +42,7 @@ import {
   overviewOf,
   rowMeta,
   sameTaskLayout,
+  subtitleOf,
   TASK_FILTERS,
   taskGroups,
   type TaskBuckets,
@@ -103,7 +104,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
       key="header"
       titleId={titleId}
       title={PAGE_LABEL.tasks}
-      subtitle={active.length > 0 ? TASKS_COPY.subtitleActive(buckets.running.length, buckets.queued.length) : TASKS_COPY.subtitleIdle}
+      subtitle={subtitleOf(buckets)}
       actions={
         <>
           {active.length >= 2 && (

@@ -5,7 +5,8 @@ import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import { THROUGHPUT_SAMPLES } from "./constants";
 
 export const TASKS_COPY = {
-  subtitleActive: (running: number, queued: number) => `${running} 个下载中，${queued} 个排队 · 最多 ${MAX_PARALLEL_TASKS} 个并行`,
+  subtitleActive: (downloading: number, queued: number) => `${downloading} 个下载中，${queued} 个排队 · 最多 ${MAX_PARALLEL_TASKS} 个并行`,
+  subtitleLocal: (running: number) => `${running} 个任务进行中 · 最多 ${MAX_PARALLEL_TASKS} 个并行`,
   subtitleIdle: "队列空闲 · 新建实例、装 Mod、导入整合包都会排到这里",
   cancelAll: "全部取消",
   clearFinished: (count: number) => (count > 0 ? `清除已结束（${count}）` : "清除已结束"),

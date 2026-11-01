@@ -27,6 +27,25 @@ export const KIND_ICON: Readonly<Record<TaskKind, IconName>> = {
   modpack_export: "modpack",
 };
 
+/**
+ * 这一类任务运行时是不是在下载。导出整合包是本地打包，备份与恢复存档是本地读写，只是同走一条队列；
+ * 修复补的是游戏文件，算下载。逐类写全：以后加类别时由类型逼着定它算不算。
+ */
+const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
+  game: true,
+  loader: true,
+  mod: true,
+  modpack: true,
+  java: true,
+  resourcepack: true,
+  shader: true,
+  datapack: true,
+  repair: true,
+  world_backup: false,
+  world_restore: false,
+  modpack_export: false,
+};
+
 export const TASK_FILTERS = ["all", "active", "done", "failed"] as const satisfies readonly TaskFilter[];
 
 // ---------------------------------------------------------------- 路由
@@ -73,6 +92,17 @@ export function bucketTasks(tasks: readonly Task[]): TaskBuckets {
 export function filterCounts(b: TaskBuckets): Readonly<Record<TaskFilter, number>> {
   const active = b.running.length + b.queued.length;
   return { all: active + b.finished.length, active, done: b.done.length, failed: b.ended.length };
+}
+
+/**
+ * 页头副标题。「下载中」只数下载类；排队的都还没开始，不分类别。
+ * 只有本地任务在跑、也没有排队的时候，「0 个下载中，0 个排队」读起来像队列是空的，改说进行中的个数。
+ */
+export function subtitleOf(b: TaskBuckets): string {
+  if (b.running.length + b.queued.length === 0) return TASKS_COPY.subtitleIdle;
+  const downloading = b.running.filter((t) => DOWNLOADS_WHEN_RUNNING[t.kind]).length;
+  if (downloading === 0 && b.queued.length === 0) return TASKS_COPY.subtitleLocal(b.running.length);
+  return TASKS_COPY.subtitleActive(downloading, b.queued.length);
 }
 
 export interface TaskGroup {
