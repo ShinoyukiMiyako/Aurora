@@ -881,7 +881,10 @@ impl Aurora {
             self.prefer_dedicated_gpu_for(&java.path, reporter).await?;
         }
         let authlib = match authlib {
-            Some(api_root) => Some(self.prepare_authlib(&api_root, reporter).await?),
+            Some(api_root) => Some(
+                self.prepare_authlib(&api_root, &auth.player_name, reporter)
+                    .await?,
+            ),
             None => None,
         };
 
@@ -1489,6 +1492,7 @@ impl Aurora {
     async fn prepare_authlib(
         &self,
         api_root: &str,
+        account_name: &str,
         reporter: &mut Reporter<'_>,
     ) -> Result<AuthlibInjector, LaunchFailed> {
         let agent = self.ensure_authlib_agent(reporter).await?;
@@ -1498,7 +1502,7 @@ impl Aurora {
             crate::auth::AUTH_SERVER_TIMEOUT,
         )
         .await
-        .map_err(|err| authlib_metadata_failure(err, api_root))?;
+        .map_err(|err| authlib_metadata_failure(err, api_root, account_name))?;
         Ok(AuthlibInjector::new(agent, metadata.api_root).with_prefetched(metadata.prefetched))
     }
 
@@ -1649,19 +1653,32 @@ fn spawn_game(
     })
 }
 
-/// 读不到验证服务器元数据时，只有连不上算玩家能对症处理的失败（联网后重试）。服务器回错误页、
-/// 地址不是验证服务器之类的失败重新登录也解决不了，按门面错误原样报出原文，不提示重新登录。
-fn authlib_metadata_failure(err: aurora_auth::AuthError, api_root: &str) -> LaunchFailed {
-    if !matches!(err, aurora_auth::AuthError::Http { .. }) {
-        return err.into();
+/// 读不到验证服务器元数据时，连不上（联网后重试）与服务故障（5xx、429，稍后重试）算玩家能对症处理的
+/// 失败：账户还是好的，可以稍后重试或先以离线方式进单人，形状与续期失败相同。服务器回错误页、地址不是
+/// 验证服务器之类的失败重新登录也解决不了，按门面错误原样报出原文，不提示重新登录。
+fn authlib_metadata_failure(
+    err: aurora_auth::AuthError,
+    api_root: &str,
+    account_name: &str,
+) -> LaunchFailed {
+    let message = format!("读取验证服务器 {api_root} 的信息失败：{err}");
+    match err {
+        aurora_auth::AuthError::Http { .. } => {
+            LaunchFailure::new(FailureCode::AccountRefreshNetwork, message)
+                .param("server", api_root)
+                .caused_by(err)
+                .into()
+        }
+        aurora_auth::AuthError::ServiceUnavailable { status, .. } => {
+            LaunchFailure::new(FailureCode::AccountServiceDown, message)
+                .param("account", account_name)
+                .param("status", u64::from(status))
+                .param("server", api_root)
+                .caused_by(err)
+                .into()
+        }
+        other => other.into(),
     }
-    LaunchFailure::new(
-        FailureCode::AccountRefreshNetwork,
-        format!("读取验证服务器 {api_root} 的信息失败：{err}"),
-    )
-    .param("server", api_root)
-    .caused_by(err)
-    .into()
 }
 
 /// 续期失败里只有三种给失败码：凭据被服务器判定失效（重新登录，账户由续期本身写库标成需要重登）、
@@ -3325,7 +3342,7 @@ mod tests {
     #[test]
     fn unreadable_auth_server_metadata_does_not_ask_for_relogin() {
         const SERVER: &str = "https://skin.example/api/yggdrasil";
-        let network = authlib_metadata_failure(http_error(), SERVER);
+        let network = authlib_metadata_failure(http_error(), SERVER, "Steve");
         let LaunchFailed::Failure(failure) = network else {
             panic!("连不上验证服务器应给出失败码：{network:?}");
         };
@@ -3338,6 +3355,7 @@ mod tests {
                 detail: "API 根地址返回 HTTP 502 Bad Gateway".into(),
             },
             SERVER,
+            "Steve",
         );
         assert!(
             matches!(
@@ -3348,6 +3366,23 @@ mod tests {
             ),
             "服务器回错页不该提示重新登录：{not_yggdrasil:?}"
         );
+
+        // 服务故障和续期时一样归到登录服务故障：账户是好的，玩家可以稍后重试或先以离线方式进单人。
+        let outage = authlib_metadata_failure(
+            aurora_auth::AuthError::ServiceUnavailable {
+                step: "读取验证服务器信息",
+                status: 503,
+            },
+            SERVER,
+            "Steve",
+        );
+        let LaunchFailed::Failure(failure) = outage else {
+            panic!("验证服务器服务故障应给出失败码：{outage:?}");
+        };
+        assert_eq!(failure.code, FailureCode::AccountServiceDown);
+        assert_eq!(failure.params["account"], Value::from("Steve"));
+        assert_eq!(failure.params["status"], Value::from(503u64));
+        assert_eq!(failure.params["server"], Value::from(SERVER));
     }
 
     #[test]
