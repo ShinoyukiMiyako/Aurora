@@ -906,6 +906,8 @@ export const TASK_TOAST = {
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
   /** 补全不止下载：还要解压、校验、跑安装器，标题不说下载。 */
   repairFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
+  /** 导入同样不止下载，还可能没开工就被占用拒绝。名字用实例名，与开始、完成通知一致；任务标题写的是整合包自己的名字。 */
+  importFailed: (instance: string, reason: string) => ({ title: `导入「${instance}」没有完成`, body: reason }),
   exportStarted: (name: string) => ({ title: `已开始导出「${name}」`, body: "进度见下载任务" }),
   /** bundled：打包进文件的 Mod 数；没有时不写正文。 */
   exported: (name: string, bundled: number) =>

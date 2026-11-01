@@ -2055,7 +2055,7 @@ export class LauncherStore {
 
   /**
    * 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。
-   * 导出整合包不是下载：它的失败单独一条「导出失败」，不并进也不开启下载失败的合并。
+   * 导出与导入整合包不是下载：它们的失败各自单独一条，不并进也不开启下载失败的合并。
    */
   private failureToast(task: Task, error: TaskError): void {
     const reason = taskFailureReason(error);
@@ -2063,6 +2063,11 @@ export class LauncherStore {
     if (task.kind === "modpack_export") {
       const copy = TASK_TOAST.exportFailed(task.title, reason);
       this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.exportModpack });
+      return;
+    }
+    if (task.kind === "modpack") {
+      const copy = TASK_TOAST.importFailed(strArg(task.spec.args, "name", task.spec.command), reason);
+      this.pushToast("error", copy.title, copy.body, this.failedTaskAction(task, error));
       return;
     }
     const batch = this.failureBatch;
@@ -2075,13 +2080,15 @@ export class LauncherStore {
       return;
     }
     const single = task.kind === "repair" ? TASK_TOAST.repairFailed(task.title, reason) : TASK_TOAST.failed(task.title, reason);
-    // 文件没到手时重试必然再失败一次，通知上不给重试，转去失败筛选看清单
-    const action: ToastAction =
-      error.blocked_files === undefined
-        ? { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install }
-        : { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } };
-    const toastId = this.pushToast("error", single.title, single.body, action);
+    const toastId = this.pushToast("error", single.title, single.body, this.failedTaskAction(task, error));
     this.failureBatch = { toastId, startedAt: now, reasons: [reason] };
+  }
+
+  /** 文件没到手时重试必然再失败一次，通知上不给重试，转去失败筛选看清单。 */
+  private failedTaskAction(task: Task, error: TaskError): ToastAction {
+    return error.blocked_files === undefined
+      ? { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install }
+      : { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } };
   }
 
   private withRunningSuffix(instanceId: string, body: string): string {
