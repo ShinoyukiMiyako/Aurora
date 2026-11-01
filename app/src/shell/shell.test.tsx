@@ -7,6 +7,7 @@ import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
@@ -169,6 +170,50 @@ describe("外壳：确认框与启动替换", () => {
     expect(callsOf(ipc, "stop_game")).toHaveLength(1);
     expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "创造"]);
     expect(launcher.state.session).toMatchObject({ instanceId: "创造", phase: "running" });
+    expect(launcher.state.launchPrompt).toBeNull();
+  });
+
+  it("替换确认开着时旧游戏自己退出：弹窗改口，确认后直接启动，不再发结束请求", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    expect(dialogTitle()).toBe("结束「生存」并启动「创造」？");
+
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
+    await flush();
+    expect(dialogTitle()).toBe("启动「创造」？");
+    expect(launcher.state.launchPrompt).toMatchObject({ instanceId: "创造", occupantPhase: "gone" });
+
+    act(() => button("启动").click());
+    await flush();
+    expect(callsOf(ipc, "stop_game")).toEqual([]);
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "创造"]);
+    expect(launcher.state.session).toMatchObject({ instanceId: "创造", phase: "running" });
+    expect(launcher.state.launchPrompt).toBeNull();
+  });
+
+  it("改口后取消：不启动，弹窗关掉", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
+    await flush();
+
+    act(() => button(CONFIRM_CANCEL_LABEL).click());
+    await flush();
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存"]);
     expect(launcher.state.launchPrompt).toBeNull();
   });
 });

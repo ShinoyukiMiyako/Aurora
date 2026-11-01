@@ -169,7 +169,8 @@ export type SliceStatus = { kind: "loading" } | { kind: "ready" } | { kind: "err
 export interface LaunchPrompt {
   instanceId: string;
   occupantId: string;
-  occupantPhase: "loading" | "running";
+  /** gone：弹窗开着时占用的那局自己结束了，没有东西要替换，只剩这次启动本身。 */
+  occupantPhase: "loading" | "running" | "gone";
   /** 确认替换后这次启动要直达的世界或服务器；普通启动为 null。 */
   quickPlay: launchIpc.QuickPlayArg | null;
 }
@@ -1608,6 +1609,7 @@ export class LauncherStore {
       const next = sessionExited(s, { versionId: id, crashed: event.crashed, killed: event.killed }, Date.now());
       this.set({ session: next });
       crashedSession = next.phase === "crashed";
+      this.markOccupantGone(id);
     }
     // 游玩时长、上次游玩与崩溃报告在推送前已由后端写好。这一局可能新建了存档，游玩统计也多了一段：
     // 没人订阅的缓存条目随之丢弃，之后重新挂载的页面会重取，不靠页面自己观察签名变化
@@ -1638,6 +1640,12 @@ export class LauncherStore {
       .join("\n");
     const copy = TOAST_COPY.autoBackupFailed(event.instance_id, first.error.message);
     this.pushToast("error", copy.title, copy.body, { label: TOAST_COPY.copyErrorAction, run: () => navigator.clipboard.writeText(raw), errorTitle: TOAST_COPY.copyFailed });
+  }
+
+  /** 替换确认开着时占用的那局自己结束了：「会先结束它」不再成立，确认框随之改口。 */
+  private markOccupantGone(instanceId: string): void {
+    const prompt = this.raw.launchPrompt;
+    if (prompt !== null && prompt.occupantId === instanceId) this.set({ launchPrompt: { ...prompt, occupantPhase: "gone" } });
   }
 
   /** 读崩溃报告的主线索，写进会话并发崩溃通知。读不出时会话标为 unavailable，错误照常抛出。 */
@@ -2362,6 +2370,7 @@ export class LauncherStore {
         this.rescanHeld(instanceId);
         const s = this.raw.session;
         if (s === null || s.taskId !== taskId) throw error;
+        this.markOccupantGone(instanceId);
         if (isCancelled(error)) {
           this.set({ session: sessionCancelled(s, taskId, Date.now()) });
           return;
@@ -3401,6 +3410,7 @@ export class LauncherStore {
 
 /** 确认对话框里「替换运行中的游戏」两种文案，供外壳弹确认时用。 */
 export function launchPromptCopy(prompt: LaunchPrompt): { title: string; body: string; confirmLabel: string; tone: "primary" | "danger" } {
+  if (prompt.occupantPhase === "gone") return { ...CONFIRM_COPY.occupantGone(prompt.instanceId, prompt.occupantId), tone: "primary" };
   if (prompt.occupantPhase === "loading") return { ...CONFIRM_COPY.replaceLoading(prompt.instanceId, prompt.occupantId), tone: "primary" };
   return { ...CONFIRM_COPY.replaceRunning(prompt.instanceId, prompt.occupantId), tone: "danger" };
 }

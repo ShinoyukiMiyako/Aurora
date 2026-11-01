@@ -309,7 +309,11 @@ function ShellCore({ children }: { children: ReactNode }) {
     if (launchPrompt === null || promptRef.current === launchPrompt) return;
     promptRef.current = launchPrompt;
     const copy = launchPromptCopy(launchPrompt);
-    void confirm(copy).then((ok) => run(() => actions.resolveLaunchPrompt(ok), ACTION_ERROR.launch(launchPrompt.instanceId)));
+    void confirm(copy).then((ok) => {
+      // 确认框改过口时旧的这次按取消结算，它的回答不算数，别把新的那次也收走
+      if (promptRef.current !== launchPrompt) return;
+      return run(() => actions.resolveLaunchPrompt(ok), ACTION_ERROR.launch(launchPrompt.instanceId));
+    });
   }, [actions, confirm, launchPrompt, run]);
 
   // ---------------------------------------------------------------- 命令面板、新建实例

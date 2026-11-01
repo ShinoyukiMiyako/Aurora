@@ -1034,6 +1034,11 @@ export const CONFIRM_COPY = {
     body: `${APP_NAME}同一时间只运行一个游戏。没保存的进度可能丢失，建议先在游戏菜单里保存并退出。`,
     confirmLabel: "结束并启动",
   }),
+  occupantGone: (next: string, occupant: string) => ({
+    title: `启动「${next}」？`,
+    body: `「${occupant}」已经退出了。`,
+    confirmLabel: "启动",
+  }),
   cancelCreate: (taskTitle: string, instance: string) => ({
     title: `取消${quoted(taskTitle)}？`,
     body: `「${instance}」还没装好，取消后这个实例会被删除。`,
