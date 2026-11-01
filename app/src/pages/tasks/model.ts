@@ -7,7 +7,7 @@ import { formatBytes, formatPlaytime, formatRelative, formatSpeed, percent } fro
 import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import type { Task, TaskKind } from "../../domain/types";
 import type { RouteOf, TaskFilter } from "../../state/route";
-import { attemptTaskId } from "../../state/tasks";
+import { attemptTaskId, DOWNLOADS_WHEN_RUNNING } from "../../state/tasks";
 import { CHART_MIN_CEILING_BPS, CHART_VIEW, ETA_WINDOW_SAMPLES, THROUGHPUT_SAMPLES } from "./constants";
 import { TASKS_COPY } from "./copy";
 
@@ -25,25 +25,6 @@ export const KIND_ICON: Readonly<Record<TaskKind, IconName>> = {
   world_backup: "world",
   world_restore: "world",
   modpack_export: "modpack",
-};
-
-/**
- * 这一类任务运行时是不是在下载。导出整合包是本地打包，备份与恢复存档是本地读写，只是同走一条队列；
- * 修复补的是游戏文件，算下载。逐类写全：以后加类别时由类型逼着定它算不算。
- */
-const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
-  game: true,
-  loader: true,
-  mod: true,
-  modpack: true,
-  java: true,
-  resourcepack: true,
-  shader: true,
-  datapack: true,
-  repair: true,
-  world_backup: false,
-  world_restore: false,
-  modpack_export: false,
 };
 
 /** 备份与恢复存档只碰本机文件，断网时重试照样能成；导出要向平台反查 Mod，其余都要下载。 */

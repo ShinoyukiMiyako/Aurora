@@ -1027,7 +1027,7 @@ export const CONFIRM_COPY = {
     confirmLabel: "恢复备份",
   }),
   closeWithSession: `游戏会继续运行，但之后的日志和崩溃诊断不会被记录。`,
-  closeWithTasks: (count: number) => `还有 ${count} 个下载没完成，关闭后会中断，下次打开可以重试。`,
+  closeWithTasks: (count: number, downloads: number) => `还有 ${count} 个${downloads === count ? "下载" : "任务"}没完成，关闭后会中断，下次打开可以重试。`,
   closeWithBackups: (count: number) => `有 ${count} 个实例正在自动备份存档，关闭后这次备份不会完成。`,
   closeTitle: `关闭${APP_NAME}？`,
   closeConfirm: `关闭${APP_NAME}`,

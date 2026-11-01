@@ -119,11 +119,11 @@ afterEach(() => {
 
 describe("关闭确认的文案", () => {
   it("没有会话也没有任务时不确认", () => {
-    expect(closeConfirmOptions({ session: false, tasks: 0, backups: 0 })).toBeNull();
+    expect(closeConfirmOptions({ session: false, tasks: 0, downloads: 0, backups: 0 })).toBeNull();
   });
 
   it("只有会话：正文说游戏会继续运行，取消键是「取消」", () => {
-    const options = closeConfirmOptions({ session: true, tasks: 0, backups: 0 });
+    const options = closeConfirmOptions({ session: true, tasks: 0, downloads: 0, backups: 0 });
     expect(options).toEqual({
       title: CONFIRM_COPY.closeTitle,
       body: CONFIRM_COPY.closeWithSession,
@@ -134,21 +134,33 @@ describe("关闭确认的文案", () => {
   });
 
   it("只有任务：正文写任务数，取消键是「继续下载」", () => {
-    const options = closeConfirmOptions({ session: false, tasks: 2, backups: 0 });
-    expect(options?.body).toBe(CONFIRM_COPY.closeWithTasks(2));
+    const options = closeConfirmOptions({ session: false, tasks: 2, downloads: 2, backups: 0 });
+    expect(options?.body).toBe("还有 2 个下载没完成，关闭后会中断，下次打开可以重试。");
+    expect(options?.cancelLabel).toBe(CONFIRM_COPY.keepDownloading);
+  });
+
+  it("只有本地任务：不说成下载，取消键是「取消」", () => {
+    const options = closeConfirmOptions({ session: false, tasks: 2, downloads: 0, backups: 0 });
+    expect(options?.body).toBe("还有 2 个任务没完成，关闭后会中断，下次打开可以重试。");
+    expect(options?.cancelLabel).toBe(CONFIRM_COPY.cancel);
+  });
+
+  it("下载与本地任务都有：正文写任务，取消键仍是「继续下载」", () => {
+    const options = closeConfirmOptions({ session: false, tasks: 3, downloads: 1, backups: 0 });
+    expect(options?.body).toBe("还有 3 个任务没完成，关闭后会中断，下次打开可以重试。");
     expect(options?.cancelLabel).toBe(CONFIRM_COPY.keepDownloading);
   });
 
   it("两者都有：合并成一个对话框，正文先会话后任务", () => {
-    const options = closeConfirmOptions({ session: true, tasks: 1, backups: 0 });
-    expect(options?.body).toBe(`${CONFIRM_COPY.closeWithSession}${CONFIRM_COPY.closeWithTasks(1)}`);
+    const options = closeConfirmOptions({ session: true, tasks: 1, downloads: 1, backups: 0 });
+    expect(options?.body).toBe(`${CONFIRM_COPY.closeWithSession}${CONFIRM_COPY.closeWithTasks(1, 1)}`);
     expect(options?.cancelLabel).toBe(CONFIRM_COPY.cancel);
   });
 });
 
 describe("关闭确认：自动备份", () => {
   it("只有自动备份在跑：正文说备份会中断，取消键是「取消」", () => {
-    expect(closeConfirmOptions({ session: false, tasks: 0, backups: 2 })).toEqual({
+    expect(closeConfirmOptions({ session: false, tasks: 0, downloads: 0, backups: 2 })).toEqual({
       title: CONFIRM_COPY.closeTitle,
       body: "有 2 个实例正在自动备份存档，关闭后这次备份不会完成。",
       confirmLabel: CONFIRM_COPY.closeConfirm,
@@ -158,8 +170,8 @@ describe("关闭确认：自动备份", () => {
   });
 
   it("与任务同时有：正文按任务、备份的顺序拼接，取消键仍是「继续下载」", () => {
-    const options = closeConfirmOptions({ session: false, tasks: 1, backups: 1 });
-    expect(options?.body).toBe(`${CONFIRM_COPY.closeWithTasks(1)}${CONFIRM_COPY.closeWithBackups(1)}`);
+    const options = closeConfirmOptions({ session: false, tasks: 1, downloads: 1, backups: 1 });
+    expect(options?.body).toBe(`${CONFIRM_COPY.closeWithTasks(1, 1)}${CONFIRM_COPY.closeWithBackups(1)}`);
     expect(options?.cancelLabel).toBe(CONFIRM_COPY.keepDownloading);
   });
 });
@@ -283,7 +295,7 @@ describe("关闭请求", () => {
       await settle();
     });
     const body = document.querySelector('[role="dialog"]')?.textContent;
-    expect(body).toContain(CONFIRM_COPY.closeWithTasks(1));
+    expect(body).toContain("还有 1 个任务没完成");
     expect(body).not.toContain("自动备份");
   });
 

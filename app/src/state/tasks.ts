@@ -116,6 +116,25 @@ export function newTask(draft: TaskDraft, now: number): Task {
   };
 }
 
+/**
+ * 这一类任务运行时是不是在下载。导出整合包是本地打包，备份与恢复存档是本地读写，只是同走一条队列；
+ * 修复补的是游戏文件，算下载。逐类写全：以后加类别时由类型逼着定它算不算。
+ */
+export const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
+  game: true,
+  loader: true,
+  mod: true,
+  modpack: true,
+  java: true,
+  resourcepack: true,
+  shader: true,
+  datapack: true,
+  repair: true,
+  world_backup: false,
+  world_restore: false,
+  modpack_export: false,
+};
+
 /** 写整个实例目录的命令（新建、导入、补全）：期间实例算「安装中」，后端的实例锁里它与这个实例上的任何别的事都互斥。 */
 export const INSTANCE_TASK_COMMANDS: ReadonlySet<string> = new Set(["install_version", "install_modpack", "repair_instance"]);
 

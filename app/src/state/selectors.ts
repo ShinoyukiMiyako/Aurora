@@ -5,7 +5,7 @@ import { SIDEBAR_PIN_LIMIT, USED_AUTH_SERVERS_LIMIT } from "../domain/limits";
 import type { Task } from "../domain/types";
 import { isSessionActive } from "./session";
 import type { LauncherState } from "./store";
-import { isActiveTask, queuePosition as taskQueuePosition, WORLD_TASK_COMMANDS } from "./tasks";
+import { DOWNLOADS_WHEN_RUNNING, isActiveTask, queuePosition as taskQueuePosition, WORLD_TASK_COMMANDS } from "./tasks";
 
 export function activeAccount(state: LauncherState): Account | null {
   if (state.currentAccountId === null) return null;
@@ -123,9 +123,10 @@ export function usedAuthServers(state: LauncherState, except: readonly string[])
 /**
  * 有活动会话、排队或进行中的任务、或自动备份在跑时，关闭窗口要先确认。
  * 自动备份是后端在游戏退出后直接跑的，不在任务表里，只能看实例报的 backing_up；手动备份也报它，已经算在任务里，不重复数。
+ * downloads 是 tasks 里下载类的个数，本地打包与备份不能说成下载。
  */
-export function closeNeedsConfirm(state: LauncherState): { session: boolean; tasks: number; backups: number } {
+export function closeNeedsConfirm(state: LauncherState): { session: boolean; tasks: number; downloads: number; backups: number } {
   const tasks = activeTasks(state);
   const backups = state.instances.filter((inst) => inst.activity === "backing_up" && !tasks.some((t) => t.instanceId === inst.id)).length;
-  return { session: busyInstanceId(state) !== null, tasks: tasks.length, backups };
+  return { session: busyInstanceId(state) !== null, tasks: tasks.length, downloads: tasks.filter((t) => DOWNLOADS_WHEN_RUNNING[t.kind]).length, backups };
 }
