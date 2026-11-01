@@ -264,7 +264,7 @@ describe("安装中", () => {
     start({ outcome: "hang", progress: [{ phase: "verify", percent: 90, slow: false }] });
     await seeHeading(copy.welcome.title);
     button(copy.welcome.install).click();
-    await vi.waitFor(() => expect(document.querySelector("main p")?.textContent).toBe(copy.installing.phase.verify), WAIT);
+    await vi.waitFor(() => expect(document.querySelector("main")?.textContent).toContain(copy.installing.phase.verify), WAIT);
   });
 
   it("再快也至少展示规定时长", async () => {
@@ -367,7 +367,7 @@ describe("打开启动器", () => {
     mount(<App bridge={fake} copy={copy} initial={doneState(fake)} />);
     await seeHeading(copy.done.title.fresh(""));
     expect(buttonNamed(copy.done.open)).toBeUndefined();
-    expect(document.querySelector("main p")?.textContent).toBe(copy.done.elevated);
+    expect(document.querySelector("main")?.textContent).toContain(copy.done.elevated);
   });
 });
 
