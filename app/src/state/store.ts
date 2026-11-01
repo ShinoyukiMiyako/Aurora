@@ -2333,6 +2333,10 @@ export class LauncherStore {
         if (quickPlay !== null && quickPlay.kind === "singleplayer" && isIpcError(error) && error.code === launchIpc.WORLD_NOT_FOUND_CODE) {
           invalidateResources(`content:${instanceId}`);
         }
+        // 版本文件是在启动器之外没的：列表还当它完好，重扫之后入口才换成「修复并启动」，不然玩家只能对着通知一遍遍点启动
+        if (isIpcError(error) && error.code === launchIpc.VERSION_NOT_INSTALLED_CODE) {
+          this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+        }
         throw error;
       },
     );

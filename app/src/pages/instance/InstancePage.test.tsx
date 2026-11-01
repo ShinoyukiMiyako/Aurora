@@ -2570,6 +2570,20 @@ describe("实例详情：存档直达", () => {
     expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["创造"]);
   });
 
+  it("启动时发现版本文件没了：重扫实例列表，入口才换得成修复并启动", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_not_installed", `本地未安装版本 ${ID}`, { id: ID });
+    });
+    await open("overview");
+    const before = callsOf(ipc, "list_instances").length;
+    await act(async () => {
+      await expect(launcher.actions.launch(ID)).rejects.toThrow(`本地未安装版本 ${ID}`);
+    });
+    await flush();
+    expect(launcher.state.session).toBeNull();
+    expect(callsOf(ipc, "list_instances").length).toBeGreaterThan(before);
+  });
+
   it("直达失败（存档已被移走）：外层报「无法启动」类错误，正文是后端原文，会话回到启动前", async () => {
     ipc.overrides.set("launch_game", () => {
       throw new IpcError("world_not_found", `实例 ${ID} 里没有存档 w2`, { version_id: ID, world: "w2" });
