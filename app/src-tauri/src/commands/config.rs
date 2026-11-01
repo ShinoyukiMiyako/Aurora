@@ -1213,7 +1213,8 @@ mod tests {
         assert_eq!(facade.snapshot().await.game_directories().await.len(), 1);
     }
 
-    #[tokio::test]
+    /// 时钟暂停：目录探测的阻塞任务做完之前时限不走，满载时任务排队不会被当成目录不可达。
+    #[tokio::test(start_paused = true)]
     async fn set_game_directory_switches_and_rejects_bad_targets() {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path());

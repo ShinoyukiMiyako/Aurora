@@ -317,7 +317,7 @@ async fn read_stored(path: &Path) -> Result<Stored, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use tokio::time::Instant;
 
     #[test]
     fn handle_unregisters_on_drop_and_duplicates_conflict() {
@@ -394,7 +394,8 @@ mod tests {
     }
 
     /// 主体完全不看令牌（模拟 Java 探测这类阶段）：宽限期满后强行放弃，仍在时限内返回。
-    #[tokio::test]
+    /// 时钟暂停，下面的时长都是定时器之间的先后，不是实际耗时，机器再忙也不差分毫。
+    #[tokio::test(start_paused = true)]
     async fn run_abandons_work_that_ignores_the_token() {
         let registry = TaskRegistry::default();
         let task = registry.register("stubborn").unwrap();

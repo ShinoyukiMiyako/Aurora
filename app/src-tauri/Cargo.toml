@@ -68,6 +68,8 @@ windows = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# 暂停时钟：带时限的用例按定时器先后判定，不受机器负载影响。
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 # 命令层集成测试用本地 mock 端点（设备码登录、版本清单）。
 wiremock = "0.6"
