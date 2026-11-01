@@ -313,7 +313,9 @@ export const previewModpackExport = (id: string): Promise<ModpackExportPreviewDt
 
 /**
  * 长任务：把实例导出为 .mrpack。后端按此刻的盘面重新规划，不信任前端带回的清单；占实例的「改动中」，
- * 与游戏运行、装 Mod 兼容。先写到同目录的临时文件、回读校验通过后才换到 destination，失败或取消不留文件。
+ * 与游戏运行、存档备份、装 Mod 兼容。extras 含 saves 时要等存档安定：实例在启动、运行、备份或恢复，存档正被
+ * 装数据包，或共用存档的实例有这些事时报 instance_busy。先写到同目录的临时文件、回读校验通过后才换到
+ * destination，失败或取消不留文件。
  */
 export const exportModpack = (taskId: string, id: string, options: ModpackExportOptions): Promise<ModpackExportOutcomeDto> =>
   invoke<ModpackExportOutcomeDto>("export_modpack", { taskId, id, options });

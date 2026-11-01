@@ -71,7 +71,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 - 测速共享：`aurora-download` 的 `speed.rs`，`SourceSpeedCache` 对各源的版本清单地址发 `Range: bytes=0-0` 的探针，按首字节时间排序。单源探针超时 3 秒，结论保留 10 分钟，只在进程内，不落盘（玩家会换网络）。缓存经 `Arc` 挂在门面上（`source_speed`），随快照共享，同一时刻只测一轮：一次装机里各处共用一份结论，有效期内不再发探针。只有下载 Mojang 产物的长任务入口才测（`Aurora::prepare_sources`：装版本、新建与补全实例、装 Java、启动前补文件）；元数据与界面列表只读缓存，新建实例页这类首屏不等探针。没有未过期的结论时取兜底顺序，`Auto` 的兜底是镜像在前：两个源都探不通多半是网络整体不佳，这时镜像的成功率更高。两个源都测不出时不写缓存。测速途中取消立即返回，丢下的那一轮不写缓存。
 - 主机熔断：`SourceHealth` 按主机与端口记连续失败，连续 3 次熔断 60 秒。熔断期间这个主机的候选排到末尾而不是剔除（全都熔断时仍要有东西可试），到期放行一次试探，任何一次成功清零。引擎对每个文件都按它重排候选，与测速顺序自然叠加。只有主机故障才记账：传输层失败、5xx、408、429 算，其余 4xx 只说明这个源没有这个文件，取消与下载密钥被拒也不算。健康表挂在门面上，跨池、跨任务共享。
-- 元数据回退：版本清单、版本 JSON、Fabric / Quilt meta、Forge / NeoForge 的 Maven 元数据经 `aurora-install` 的 `get_bytes_from`、`get_json_from` 按源计划逐个候选尝试（`first_success`）。连接失败、5xx 与解析失败都换下一个：镜像偶尔回 200 加一页错误提示。取消不换源，也不进错误汇总。全部失败时，两个及以上候选报 `AllSourcesFailed`（按尝试顺序带上每个候选的失败原因），只有一个候选时原样报它的错误。Java 运行时清单同样按源回退，`aurora-java` 有自己的 `AllSourcesFailed`。
+- 元数据回退：版本清单、版本 JSON、Fabric / Quilt meta、Forge / NeoForge 的 Maven 元数据经 `aurora-install` 的 `get_json_from`、`get_decoded_from` 按源计划逐个候选尝试。连接失败、5xx 与解析失败都换下一个：镜像偶尔回 200 加一页错误提示。取消不换源，也不进错误汇总。全部失败时，两个及以上候选报 `AllSourcesFailed`（按尝试顺序带上每个候选的失败原因），只有一个候选时原样报它的错误。Java 运行时清单同样按源回退，`aurora-java` 有自己的 `AllSourcesFailed`。
 - 吞吐看门狗（`aurora-download` 的 `watchdog.rs`）：HTTP 客户端只有连接超时与读间隔超时，一个每秒只吐几 KB 的终点触发不了它们。看门狗盯声明大小超过 1 MiB 的文件（`WATCHDOG_MIN_FILE_SIZE`；大小未知的不盯），只管网络传输段，合并、校验、落位不计时。每秒采样一次（`WATCHDOG_TICK`），观察满 15 秒的窗口（`SLOW_WINDOW`）才可能判慢。判慢要同时满足两条：
   1. 本传输的窗口平均速度严格低于 32 KiB/s（`SLOW_BYTES_PER_SEC`）。这只是必要条件：默认 64 并发时，总速率约 2 MiB/s 就会把每条摊到它以下。
   2. 这笔账算得到谁头上（`Tally::blame`）。窗口里只有这一个传输的连接时算终点；总速率严格低于 128 KiB/s（`LINK_FLOOR_BYTES_PER_SEC`，约 1 Mbit/s）时算链路（`SlowCause::Link`），这种线路上份额抖得厉害，先于份额判定；总速率正常而本传输不到公平份额的一半时算终点（`SlowCause::Endpoint`）；其余情况是带宽被大家分走了，不判慢。
@@ -210,7 +210,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 备份、导出与恢复存档只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交，所以兼容；游戏开着时存档随时在写，所以与启动、运行互斥。恢复开始换存档之后不再响应取消，换完才返回，结果按实际报；解压阶段仍在时限内响应取消。
 
-导出整合包对外是 `modifying`，没勾存档时不碰 saves，与运行、备份都兼容。勾了存档时要等存档安定下来：实例在启动、运行或报着 `backing_up` 时导出报 `instance_busy`（备份与恢复都是 `backing_up`，分不清只读与替换，一律等）；导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复与启动在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出），只读存档的备份与导出存档不受影响。
+导出整合包对外是 `modifying`，没勾存档时不碰 saves，与运行、备份都兼容。勾了存档时要等存档安定下来：实例在启动、运行或报着 `backing_up` 时导出报 `instance_busy`（备份与恢复都是 `backing_up`，分不清只读与替换，一律等）；导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复与启动在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出），只读存档的备份与导出存档不受影响。前端在启动、运行与备份时只禁用导出弹窗里的存档这一项并写明原因（`exportSavesReason`），其余内容照常导出；共用存档时别的实例挡住要看隔离，仍由后端报。
 
 装数据包同样对外是 `modifying`，但写进 `saves/<存档>/datapacks`，和备份、恢复、读存档的导出都相交。它记下「存档正被写」（`InstanceLocks::write_saves`）：实例报着 `backing_up` 或存档正被读进整合包时报 `instance_busy`，备份、恢复、导出存档与带存档的导出整合包在写完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在装数据包）。游戏退出后的自动备份不看这份记录，撞上时那个存档记为备份失败，下一次再备。这些记录两边都先写自己的再查对方，同时发起时至少挡下一方。
 
@@ -379,7 +379,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 `ipc/bridge.ts` 是全项目唯一引入 `@tauri-apps/api/core` 和 `@tauri-apps/api/event` 的文件。它在每次调用时判断运行环境：在 Tauri 窗口里走真实命令；在纯浏览器（`pnpm dev`）和 vitest 里，动态加载 `ipc/mock`。模拟后端尽量复刻真实后端的参数校验、错误码和状态变化，方便调界面和测试前端，但不能替代 Rust 侧的测试。真机运行时不会加载这个分块。
 
-插件命令（如 `plugin:opener|open_url`）同样经 `bridge.ts` 调用，模拟后端有同名的处理。`bridge.test.ts` 检查模拟后端的命令与 `generate_handler!` 注册的命令一一对应，插件命令则必须在 `capabilities/default.json` 里有对应的权限。opener 插件只授予 `opener:allow-open-url` 与 `opener:allow-default-urls`（http、https、mailto、tel），不用 `opener:default`：它连带授予不受路径范围约束的 `reveal_item_in_dir`。打开文件夹走后端的 `open_folder`；在文件管理器里定位并选中走后端的 `reveal_in_folder`，只放行启动器自己产出的路径（当前游戏目录的存档备份区，这次运行里导出的存档与整合包），别的路径报 `invalid_argument`。dialog 插件只授予 `dialog:allow-open` 与 `dialog:allow-save`（`shell/platform.ts` 的选择文件与保存文件对话框）。保存对话框只有 `pickSaveFile` 一份实现，页面经两条路拿到它：外壳的 `useShell().saveFile`（导出整合包），`App.tsx` 注入的 `PickSaveFileProvider`（`pages/instance/save-file.ts`，导出存档）。
+插件命令（如 `plugin:opener|open_url`）同样经 `bridge.ts` 调用，模拟后端有同名的处理。`bridge.test.ts` 检查模拟后端的命令与 `generate_handler!` 注册的命令一一对应，插件命令则必须在 `capabilities/default.json` 里有对应的权限。opener 插件只授予 `opener:allow-open-url` 与 `opener:allow-default-urls`（http、https、mailto、tel），不用 `opener:default`：它连带授予不受路径范围约束的 `reveal_item_in_dir`。打开文件夹走后端的 `open_folder`；在文件管理器里定位并选中走后端的 `reveal_in_folder`，只放行启动器自己产出的路径（当前游戏目录的存档备份区，这次运行里导出的存档与整合包），别的路径报 `invalid_argument`。dialog 插件只授予 `dialog:allow-open` 与 `dialog:allow-save`（`shell/platform.ts` 的选择文件与保存文件对话框）。保存对话框只有 `pickSaveFile` 一份实现，页面一律经外壳的 `useShell().saveFile` 拿到它（导出整合包、导出存档）。
 
 开发构建在纯浏览器里运行时，`main.tsx` 在第一条命令之前调用 `enableMockPersistence(localStorage, APP_SLUG)`：首次启动是否完成、配置、外观、账户、实例、Mod 与 Java 探测结果的状态存进键 `<slug>.mock.<领域>`，刷新页面后接着上次的状态。存下的数据读不出或快照版本不符时启动直接报错，在控制台执行 `__sk.resetMockData()` 恢复种子数据并刷新。vitest 不启用持久化。
 
