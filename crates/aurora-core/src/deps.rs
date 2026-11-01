@@ -15,6 +15,8 @@
 //! 三、实例里已经装着的前置（任何版本）不动，计划项标成已满足。作者没钉版本就是「有就行」，
 //! 启动器擅自把玩家现有的前置换成最新版，换来的可能是一个别的 Mod 不认的版本；要升级走更新检查。
 //! 装着的那一版在平台上已经下架也一样算已满足，计划只按卷宗列出它（[`PlannedItem::delisted`]）。
+//! 玩家给这个前置设了更新检查（忽略或锁定）时，作者钉了版本也不换，计划如实说明：更新不走确认计划，
+//! 换了玩家都不知道，他的设置就成了摆设。
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -27,7 +29,7 @@ use crate::compat::{
 };
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
-use crate::ledger::{Ledger, LedgerEntry};
+use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
 use crate::modfs::present;
 use crate::modversions::sort_by_published_desc;
 
@@ -87,6 +89,10 @@ enum SkipNote {
     ProjectGone {
         project_id: String,
     },
+    HeldBack {
+        project_id: String,
+        file_name: String,
+    },
     Optional {
         project_id: Option<String>,
     },
@@ -109,7 +115,8 @@ impl SkipNote {
             SkipNote::MissingProjectId { .. } => None,
             SkipNote::PinnedGone { project_id, .. }
             | SkipNote::NoCompatibleVersion { project_id }
-            | SkipNote::ProjectGone { project_id } => Some(project_id),
+            | SkipNote::ProjectGone { project_id }
+            | SkipNote::HeldBack { project_id, .. } => Some(project_id),
             SkipNote::Optional { project_id }
             | SkipNote::Incompatible { project_id, .. }
             | SkipNote::Embedded { project_id, .. }
@@ -137,6 +144,13 @@ impl SkipNote {
             ),
             SkipNote::ProjectGone { project_id } => format!(
                 "依赖 {} 在平台上已不存在，未加入计划",
+                name(Some(project_id))
+            ),
+            SkipNote::HeldBack {
+                project_id,
+                file_name,
+            } => format!(
+                "依赖 {} 按你的更新设置保留现有版本，未换成 {file_name} 指定的版本",
                 name(Some(project_id))
             ),
             SkipNote::Optional { project_id } => format!(
@@ -285,11 +299,22 @@ impl Aurora {
                         if !visited.insert(dep_project.clone()) {
                             continue;
                         }
+                        let mut author_pin = dep.version_id.as_deref();
+                        if let Some(wanted) = author_pin
+                            && held_back(&ledger, &dirs.mods_dir, platform, &dep_project, wanted)
+                                .await?
+                        {
+                            notes.push(SkipNote::HeldBack {
+                                project_id: dep_project.clone(),
+                                file_name: version.file_name.clone(),
+                            });
+                            author_pin = None;
+                        }
                         match self
                             .resolve_required(
                                 platform,
                                 &dep_project,
-                                dep.version_id.as_deref(),
+                                author_pin,
                                 &facts,
                                 &ledger,
                                 &dirs.mods_dir,
@@ -511,6 +536,27 @@ async fn installed_version<'a>(
         }
     }
     Ok(None)
+}
+
+/// 实例里装着这个工程，玩家设了更新检查，而作者要的 `wanted` 不在他允许的范围内。
+///
+/// 锁定的上限要比发布时间才知道谁先谁后，这里为此多问一次平台不值：只放行锁定的那一版。
+async fn held_back(
+    ledger: &Ledger,
+    mods_dir: &Path,
+    platform: Platform,
+    project_id: &str,
+    wanted: &str,
+) -> Result<bool> {
+    let Some(entry) = installed_version(ledger, mods_dir, platform, project_id, None).await? else {
+        return Ok(false);
+    };
+    Ok(entry.version_id != wanted
+        && match &entry.update_hold {
+            None => false,
+            Some(UpdateHold::Ignored) => true,
+            Some(UpdateHold::Pinned { version_id }) => version_id != wanted,
+        })
 }
 
 #[cfg(test)]
@@ -1331,6 +1377,109 @@ mod tests {
             ),
             "实得 {err:?}"
         );
+    }
+
+    /// 作者钉了 `fabric-api` 的版本 pinned，而实例里装着 current 且设了 `hold`：落一份这样的实例，
+    /// 返回算出的计划。
+    async fn plan_with_held_dependency(hold: UpdateHold) -> InstallPlan {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "sodium",
+            &[modrinth_version(
+                "v1",
+                "sodium",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","version_id":"pinned","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        mount_versions(
+            &server,
+            "fabric-api",
+            &[
+                modrinth_version(
+                    "pinned",
+                    "fabric-api",
+                    "2026-06-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["fabric"],
+                    "",
+                ),
+                modrinth_version(
+                    "current",
+                    "fabric-api",
+                    "2026-01-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["fabric"],
+                    "",
+                ),
+            ],
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut kept = entry("fabric-api-current.jar", "fabric-api", "current");
+        kept.update_hold = Some(hold);
+        let mut ledger = Ledger::default();
+        ledger.upsert(kept);
+        aurora
+            .ledger_store("1.20.1-fabric")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("fabric-api-current.jar"), b"jar")
+            .await
+            .unwrap();
+
+        aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
+            .await
+            .unwrap()
+    }
+
+    /// 玩家忽略了这个前置的更新：作者钉的版本不替他换，保留现有版本并说明。更新不走确认计划，换了
+    /// 他都不知道。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ignored_dependency_keeps_its_version_against_an_author_pin() {
+        let plan = plan_with_held_dependency(UpdateHold::Ignored).await;
+
+        assert_eq!(plan.items.len(), 2);
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "current");
+        assert!(dep.already_satisfied);
+        assert!(!dep.delisted);
+        assert_eq!(
+            plan.skipped,
+            vec!["依赖 fabric-api 按你的更新设置保留现有版本，未换成 sodium-v1.jar 指定的版本".to_owned()]
+        );
+    }
+
+    /// 玩家锁定的上限不是作者钉的那一版：同样不替他换。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn locked_dependency_keeps_its_version_unless_the_pin_matches() {
+        let plan = plan_with_held_dependency(UpdateHold::Pinned {
+            version_id: "current".to_owned(),
+        })
+        .await;
+        assert_eq!(plan.items[1].version.version_id, "current");
+        assert!(plan.items[1].already_satisfied);
+        assert_eq!(plan.skipped.len(), 1);
+
+        // 锁定的正是作者要的版本：这次替换在玩家允许的范围内，照常进计划。
+        let plan = plan_with_held_dependency(UpdateHold::Pinned {
+            version_id: "pinned".to_owned(),
+        })
+        .await;
+        assert_eq!(plan.items[1].version.version_id, "pinned");
+        assert!(!plan.items[1].already_satisfied);
+        assert!(plan.skipped.is_empty());
     }
 
     /// 前置已装着的那一版在平台上已下架（单版本端点 404）：照常算已满足，计划只按卷宗列出它，不去
