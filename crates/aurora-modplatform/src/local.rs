@@ -337,14 +337,15 @@ fn unix_millis(time: std::time::SystemTime) -> i64 {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct ModMetadataCache {
     /// 缓存格式版本。元数据结构加了字段时提升它：旧缓存里的条目没有新字段，若照常命中，新字段会
-    /// 一直是空值直到文件被改动——版本对不上就整份作废、全量重解析一轮。
+    /// 一直是空值直到文件被改动——版本对不上就整份作废、全量重解析一轮。解析规则放宽时同样要提升：
+    /// 解析失败也会按「无元数据」缓存，旧结果不作废，新规则对没改动过的 jar 永远不生效。
     #[serde(default)]
     schema: u32,
     entries: BTreeMap<String, CacheEntry>,
 }
 
 /// 当前缓存格式版本，见 [`ModMetadataCache::schema`]。
-const CACHE_SCHEMA: u32 = 1;
+const CACHE_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct CacheEntry {
@@ -641,6 +642,42 @@ fn normalize_icon_entry(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+/// 把 JSON 描述文件整理成 serde_json 能读的严格 JSON，放行范围与 Fabric / Quilt 加载器对齐。
+///
+/// 两个加载器都用 Gson 派生的 JsonReader 读描述文件，它的字符串词法比 JSON 规范宽：字符串里的裸控制
+/// 字符原样收下，`\'` 与「反斜杠 + 换行」算合法转义，文件开头的一个 BOM 跳过。真实 Mod 确实依赖这份
+/// 宽容：Gradle 展开模板时会把源码里的 `\n` 变成真换行，判成损坏的话，游戏能加载的 Mod 在列表里就成了
+/// 无元数据。
+///
+/// 只改写这几处，其余字节原样交给 serde_json，注释、尾逗号、单引号串这些加载器同样拒绝的写法继续报错。
+/// 按字节走不会切开字符：UTF-8 多字节序列里不会出现 ASCII 字节。
+fn loader_tolerant_json(bytes: &[u8]) -> Vec<u8> {
+    let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let mut out = Vec::with_capacity(body.len());
+    let mut in_string = false;
+    let mut rest = body.iter().copied();
+    while let Some(byte) = rest.next() {
+        match byte {
+            b'"' => {
+                in_string = !in_string;
+                out.push(byte);
+            }
+            // 反斜杠连带下一个字节一起处理：`\"` 不结束字符串，`\\` 后面的换行才是裸换行。
+            b'\\' if in_string => match rest.next() {
+                Some(b'\'') => out.push(b'\''),
+                Some(b'\n') => out.extend_from_slice(br"\n"),
+                Some(escaped) => out.extend_from_slice(&[b'\\', escaped]),
+                None => out.push(byte),
+            },
+            0x00..=0x1F if in_string => {
+                out.extend_from_slice(format!("\\u{byte:04x}").as_bytes());
+            }
+            _ => out.push(byte),
+        }
+    }
+    out
+}
+
 /// `fabric.mod.json` 里作者可为字符串或 `{ "name": ... }` 对象。
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -669,7 +706,8 @@ struct FabricModJson {
 }
 
 fn parse_fabric_metadata(bytes: &[u8], path: &Path) -> Result<Option<ModMetadata>> {
-    let raw: FabricModJson = serde_json::from_slice(bytes).map_err(|source| Error::Json {
+    let tolerant = loader_tolerant_json(bytes);
+    let raw: FabricModJson = serde_json::from_slice(&tolerant).map_err(|source| Error::Json {
         context: format!("fabric.mod.json in {}", path.display()),
         source,
     })?;
@@ -783,7 +821,8 @@ fn quilt_dependency_tail(declared: &str) -> &str {
 }
 
 fn parse_quilt_metadata(bytes: &[u8], path: &Path) -> Result<Option<ModMetadata>> {
-    let raw: QuiltModJson = serde_json::from_slice(bytes).map_err(|source| Error::Json {
+    let tolerant = loader_tolerant_json(bytes);
+    let raw: QuiltModJson = serde_json::from_slice(&tolerant).map_err(|source| Error::Json {
         context: format!("quilt.mod.json in {}", path.display()),
         source,
     })?;
@@ -1618,6 +1657,226 @@ authors="Snownee, TrainGuys"
         assert!(matches!(err, Error::Json { .. }));
     }
 
+    /// 三段 description 取自真实 Mod：源码或 gradle.properties 里写的是合法的 `\n`，构建时展开成了
+    /// 真换行，jar 里的 fabric.mod.json 因此带裸换行，Fabric Loader 照常加载。
+    #[tokio::test]
+    async fn scan_reads_real_descriptors_with_raw_newlines() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "BetterGrassify.jar",
+                "bettergrass",
+                "Gamers can finally touch grass!?\nOptiFine's Fancy and Fast better grass for \
+                 Fabric!",
+            ),
+            (
+                "entity_model_features.jar",
+                "entity_model_features",
+                "This is an expansion of the ETF mod, it adds support for OptiFine format Custom \
+                 Entity Model (CEM) resource packs.\nWhile still allowing you to disable this to \
+                 use a different model mod :)",
+            ),
+            (
+                "entity_texture_features.jar",
+                "entity_texture_features",
+                "Adds support for resource-pack driven features for entity textures including \
+                 some OptiFine features\nSupports OptiFine:\n - Random & Custom textures\n - \
+                 Emissive textures\nWith more features such as:\n - Blinking textures\n - Player \
+                 Skin support",
+            ),
+        ];
+        for (file_name, id, description) in cases {
+            // description 不做 JSON 转义：字符串里的换行写进文件就是裸字节，与 jar 里的形态一致。
+            let descriptor = format!(
+                r#"{{
+  "schemaVersion": 1,
+  "id": "{id}",
+  "version": "1.0.0",
+  "description": "{description}",
+  "authors": [{{"name": "Traben", "contact": {{"homepage": "https://example.invalid"}}}}],
+  "depends": {{"minecraft": ">=1.21"}}
+}}"#
+            );
+            build_jar(
+                &dir.path().join(file_name),
+                &[("fabric.mod.json", descriptor.as_bytes())],
+            );
+        }
+
+        let mods = scan_mods_dir(dir.path()).await.unwrap();
+
+        assert_eq!(mods.len(), cases.len());
+        for ((file_name, id, description), listed) in cases.iter().zip(&mods) {
+            assert_eq!(listed.file_name, *file_name);
+            let meta = listed
+                .metadata
+                .as_ref()
+                .expect("Loader 能加载就不该无元数据");
+            assert_eq!(meta.mod_id, *id);
+            assert_eq!(meta.description.as_deref(), Some(*description));
+            // description 之后的字段也读到了，说明裸换行没有打乱后面的解析。
+            assert_eq!(meta.authors, vec!["Traben"]);
+            assert_eq!(meta.minecraft_version.as_deref(), Some(">=1.21"));
+        }
+    }
+
+    #[tokio::test]
+    async fn quilt_description_with_raw_newline_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("multiline.jar");
+        let descriptor = r#"{
+            "quilt_loader": {
+                "id": "multiline",
+                "version": "1.0.0",
+                "metadata": {
+                    "name": "Multiline",
+                    "description": "第一行
+第二行"
+                },
+                "depends": [{"id": "minecraft", "versions": ">=1.21"}]
+            }
+        }"#
+        .as_bytes();
+        build_jar(&jar, &[("quilt.mod.json", descriptor)]);
+
+        let meta = parse_mod_metadata(&jar).await.unwrap().expect("应有元数据");
+        assert_eq!(meta.mod_id, "multiline");
+        assert_eq!(meta.description.as_deref(), Some("第一行\n第二行"));
+        assert_eq!(meta.minecraft_version.as_deref(), Some(">=1.21"));
+    }
+
+    /// 解析一份描述文件，`literal` 是 description 两个引号之间的原始内容，返回解析出的值。
+    fn description_of_literal(literal: &str) -> Option<String> {
+        let descriptor = format!(r#"{{"id":"probe","description":"{literal}","name":"after"}}"#);
+        let meta = parse_fabric_metadata(descriptor.as_bytes(), Path::new("probe.jar"))
+            .unwrap_or_else(|error| panic!("{literal:?} 应当能解析: {error}"))
+            .expect("应有元数据");
+        // 字符串之后的字段还读得到，才说明字符串的边界没有判错。
+        assert_eq!(meta.name.as_deref(), Some("after"));
+        meta.description
+    }
+
+    #[test]
+    fn string_lexing_matches_loader_tolerance() {
+        let cases = [
+            ("回车换行", "a\r\nb", "a\r\nb"),
+            ("制表符", "a\tb", "a\tb"),
+            ("多字节字符紧贴裸换行", "落樱\n花瓣", "落樱\n花瓣"),
+            ("单引号转义", r"It\'s", "It's"),
+            ("反斜杠接换行", "a\\\nb", "a\nb"),
+            ("转义的反斜杠后是裸换行", "a\\\\\nb", "a\\\nb"),
+            (
+                "转义的引号后是裸换行",
+                "say \\\"hi\\\"\ndone",
+                "say \"hi\"\ndone",
+            ),
+            ("合法转义原样解读", "a\\nb\\tc\\u00e9\\/", "a\nb\tcé/"),
+        ];
+        for (label, literal, expected) in cases {
+            assert_eq!(
+                description_of_literal(literal).as_deref(),
+                Some(expected),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_control_character_survives_as_its_own_value() {
+        for code in 0x00..=0x1F_u8 {
+            let control = char::from(code);
+            let expected = format!("a{control}b");
+            assert_eq!(
+                description_of_literal(&expected).as_deref(),
+                Some(expected.as_str()),
+                "控制字符 U+{code:04X}"
+            );
+        }
+    }
+
+    /// 随机拼出带各种裸字节与转义的字符串，解析结果必须逐字等于拼接时记下的值。种子固定，失败可复现。
+    #[test]
+    fn randomized_string_literals_round_trip() {
+        let fragments = [
+            ("\n", "\n"),
+            ("\r\n", "\r\n"),
+            ("\t", "\t"),
+            ("\u{1}", "\u{1}"),
+            ("\\\\", "\\"),
+            ("\\\"", "\""),
+            ("\\'", "'"),
+            ("\\\n", "\n"),
+            ("\\n", "\n"),
+            ("\\u0041", "A"),
+            ("落", "落"),
+            ("a", "a"),
+            ("{", "{"),
+            ("//", "//"),
+        ];
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % u64::try_from(bound).unwrap()).unwrap()
+        };
+        for _ in 0..500 {
+            let mut literal = String::new();
+            let mut expected = String::new();
+            for _ in 0..next(40) {
+                let (raw, value) = fragments[next(fragments.len())];
+                literal.push_str(raw);
+                expected.push_str(value);
+            }
+            assert_eq!(
+                description_of_literal(&literal).as_deref(),
+                Some(expected.as_str()),
+                "{literal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_bom_is_skipped_once_like_the_loader() {
+        let meta = parse_fabric_metadata(b"\xEF\xBB\xBF{\"id\":\"bom\"}", Path::new("bom.jar"))
+            .unwrap()
+            .expect("应有元数据");
+        assert_eq!(meta.mod_id, "bom");
+    }
+
+    /// 容忍只放到 Loader 也放行的那几处：这些写法 Loader 同样拒绝，字段也照旧严格，一律是 JSON 错误。
+    #[test]
+    fn everything_else_stays_strict() {
+        let cases: [(&str, &[u8]); 16] = [
+            ("尾逗号", br#"{"id":"x",}"#),
+            ("块注释", b"{\"id\":\"x\" /* c */}"),
+            ("行注释", b"{\"id\":\"x\" // c\n}"),
+            ("单引号串", br"{'id':'x'}"),
+            ("无引号键", br#"{id:"x"}"#),
+            ("字符串外的控制字符", b"{\"id\":\"x\"\x01}"),
+            ("未闭合的字符串", b"{\"id\":\"x"),
+            ("反斜杠收尾", b"{\"id\":\"x\\"),
+            ("未知转义", br#"{"id":"\q"}"#),
+            ("反斜杠接制表符", b"{\"id\":\"a\\\tb\"}"),
+            ("反斜杠接回车", b"{\"id\":\"a\\\rb\"}"),
+            ("残缺的 unicode 转义", br#"{"id":"\u12"}"#),
+            ("两个 BOM", b"\xEF\xBB\xBF\xEF\xBB\xBF{\"id\":\"x\"}"),
+            ("缺 id", b"{\"description\":\"a\nb\"}"),
+            ("id 类型不对", br#"{"id":1}"#),
+            (
+                "description 类型不对",
+                b"{\"id\":\"x\",\"description\":[\"a\nb\"]}",
+            ),
+        ];
+        for (label, descriptor) in cases {
+            let outcome = parse_fabric_metadata(descriptor, Path::new("strict.jar"));
+            assert!(
+                matches!(outcome, Err(Error::Json { .. })),
+                "{label}: {outcome:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn scan_detects_enabled_and_disabled_and_skips_non_jar() {
         let dir = tempfile::tempdir().unwrap();
@@ -1854,6 +2113,54 @@ authors="Snownee, TrainGuys"
             .await
             .unwrap();
         assert_eq!(mods[0].metadata.as_ref().unwrap().mod_id, "fresh");
+    }
+
+    /// 严格解析时代把带裸换行的 jar 判成无元数据缓存了下来。jar 没变，判据就一直命中，
+    /// 放宽解析后已有用户的这些 Mod 只能靠缓存版本作废才读得出来。
+    #[tokio::test]
+    async fn parse_failure_cached_before_tolerance_is_reparsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache.json");
+        let jar = dir.path().join("emf.jar");
+        build_jar(
+            &jar,
+            &[(
+                "fabric.mod.json",
+                b"{\"id\":\"entity_model_features\",\"description\":\"a\nb\"}",
+            )],
+        );
+        std::fs::File::options()
+            .write(true)
+            .open(&jar)
+            .unwrap()
+            .set_modified(epoch_plus(1_000))
+            .unwrap();
+        // schema 写死成放宽之前的 1，不引用常量：这个用例保护的就是这次版本提升。
+        let legacy = serde_json::json!({
+            "schema": 1,
+            "entries": {
+                "emf.jar": {
+                    "stamp": {"size": std::fs::metadata(&jar).unwrap().len(), "mtime_ms": 1_000_000},
+                    "metadata": null
+                }
+            }
+        });
+        std::fs::write(&cache, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let mods = scan_mods_dir_cached(dir.path(), Some(&cache))
+            .await
+            .unwrap();
+
+        let meta = mods[0]
+            .metadata
+            .as_ref()
+            .expect("旧缓存里的失败结果不能再命中");
+        assert_eq!(meta.mod_id, "entity_model_features");
+        assert_eq!(meta.description.as_deref(), Some("a\nb"));
+        let persisted: ModMetadataCache =
+            serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        assert_eq!(persisted.schema, CACHE_SCHEMA);
+        assert!(persisted.entries["emf.jar"].metadata.is_some());
     }
 
     /// 文件一时打不开（被别的程序独占）：本轮按无元数据列出，但不写进缓存，下一轮重新解析。
