@@ -2178,6 +2178,7 @@ export class LauncherStore {
           await this.actions.launch(id);
           return;
         }
+        this.dismissRepairedFailure(id);
         const copy = task.spec.args.reinstallLoader === true ? TASK_TOAST.loaderReinstalled(id) : TASK_TOAST.repaired(id);
         this.pushToast("success", copy.title, undefined, this.launchAction(id));
         return;
@@ -2413,6 +2414,14 @@ export class LauncherStore {
         throw error;
       },
     );
+  }
+
+  /** 修好了失败横幅说的问题，横幅再留着就是过时的话。账户、网络这些修复管不到的失败下次启动还会撞上，留着。 */
+  private dismissRepairedFailure(id: string): void {
+    const s = this.raw.session;
+    if (s === null || s.phase !== "failed" || s.instanceId !== id || s.failure === null) return;
+    const { fix } = failureCopy(s.failure.code, s.failure.params, { accountName: s.accountName, accountKind: s.accountKind, javaPinned: false });
+    if (fix.kind === "repair" || fix.kind === "reinstall_loader") this.set({ session: null });
   }
 
   private failLaunch(s: SessionState, code: FailureCode, detail: unknown): void {

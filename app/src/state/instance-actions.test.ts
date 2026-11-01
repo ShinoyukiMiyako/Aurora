@@ -245,6 +245,54 @@ describe("加载器自带的库缺失", () => {
   });
 });
 
+describe("修复成功后收起失败会话", () => {
+  const failLaunch = async (id: string, code: string, detail?: unknown): Promise<void> => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError(code, "启动失败", detail);
+    });
+    await store.actions.launch(id);
+    expect(store.getState().session).toMatchObject({ instanceId: id, phase: "failed" });
+    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+  };
+  const repair = async (id: string, opts?: { reinstallLoader?: boolean }): Promise<void> => {
+    await store.actions.repairInstance(id, opts);
+    await settle();
+  };
+
+  it("失败说的就是文件坏了：修好后横幅收起", async () => {
+    await failLaunch("生存", "version_broken");
+    await repair("生存");
+    expect(store.getState().session).toBeNull();
+  });
+
+  it("失败说的是加载器文件缺失：重装加载器后横幅收起", async () => {
+    await failLaunch("生存", "loader_library_missing", { path: "D:/mc/libraries/fabric-loader-0.16.10.jar" });
+    await repair("生存", { reinstallLoader: true });
+    expect(store.getState().session).toBeNull();
+  });
+
+  it("修复管不到的失败留着：网络问题修完文件还在", async () => {
+    await failLaunch("生存", "files_offline", { count: 3 });
+    await repair("生存");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "files_offline" } });
+  });
+
+  it("修的是别的实例：这个实例的失败留着", async () => {
+    await failLaunch("生存", "version_broken");
+    await repair("创造");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
+  });
+
+  it("修复本身失败：横幅留着，问题还在", async () => {
+    await failLaunch("生存", "version_broken");
+    ipc.overrides.set("repair_instance", () => {
+      throw new IpcError("download_failed", "下载失败");
+    });
+    await repair("生存");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
+  });
+});
+
 describe("改名迁移启动会话", () => {
   it("启动失败的会话随改名换成新 id：重试按新名字启动，查看日志也落到新名字", async () => {
     ipc.overrides.set("launch_game", () => {

@@ -149,6 +149,22 @@ describe("发通知之前的等待里落盘的改名：按新名字发", () => {
     expect(await launchedBy("「生存二」已修复")).toBe("生存二");
   });
 
+  it("补全落地读实例列表期间改名：失败会话跟到新名字后照样收起", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_broken", "启动失败");
+    });
+    await store.actions.launch("生存");
+    const gate = holdNextScan();
+    await store.actions.repairInstance("生存");
+    await settle();
+    await rename("生存", "生存二");
+
+    gate.resolve();
+    await settle();
+
+    expect(store.getState().session).toBeNull();
+  });
+
   it("Java 装好后写设置期间改名：通知与启动动作落到新名字", async () => {
     const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     const written = deferred<void>();
