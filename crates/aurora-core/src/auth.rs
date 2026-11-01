@@ -11,9 +11,14 @@
 //! `spawn_blocking`；本模块的异步方法自己这样做。登录、刷新这类要联网的流程先跑完网络、再开库写入：
 //! 库实例打开时读入整库、写回时整库覆盖，跨十几分钟的设备码轮询持有它，期间别处的改动就会被盖掉。
 //! 所有读写再经进程内一把锁串行，两次读改写不会交错丢更新。同一账户的续期另按账户排队
-//! （`refresh_gate`），排在后面的一方以库里刚续出的凭据为准。
+//! （`refresh_gate`），排在后面的一方以库里刚续出的凭据为准。续期会轮换凭据，跑在独立任务里，
+//! 调用方被取消也照样跑完落盘（`renew_detached`）。
+//!
+//! 凭据库读不出来（换了机器或 Windows 用户、文件被改坏）时原文件改名留存、按空库继续，经过供启动提示取用
+//! （[`Aurora::credential_recoveries`]）。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -46,6 +51,10 @@ pub const OFFLINE_ACCOUNTS_FILE: &str = "offline_accounts.json";
 
 /// 凭据库文件名（DPAPI 加密），挂在数据目录下。
 pub const CREDENTIALS_FILE: &str = "credentials.bin";
+
+/// 读不出来的凭据库改名用的后缀前缀，后面接本地时间 `YYYYMMDD-HHMMSS`；与坏配置文件的留存同一种写法，
+/// 用户在数据目录里一眼认得出是同一类现场。
+const BROKEN_SUFFIX: &str = ".broken-";
 
 /// 探测外置登录服务器（解析 API 地址 + 取元数据）的总时限。
 pub const AUTH_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,6 +90,89 @@ async fn refresh_gate(uuid: &str) -> OwnedMutexGuard<()> {
             .clone()
     };
     gate.lock_owned().await
+}
+
+/// 凭据库读不出来时做的处置：原文件改名留存，按空凭据库继续。供启动提示告诉用户。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRecovery {
+    /// 原文件改名后的路径，内容原样未动：回到原来那台机器、原来那个 Windows 用户下，把它改回
+    /// `credentials.bin` 就能找回账户。
+    pub preserved: PathBuf,
+    /// 读不出来的原因，含原因链。
+    pub error: String,
+}
+
+/// 本进程里改名留存过的凭据库，按凭据库路径记。哪条命令先碰上坏文件都只处置这一次（改名之后就是
+/// 空库），启动提示事后来这里取经过，不必赶在别的命令之前读。
+#[cfg(windows)]
+static CREDENTIAL_RECOVERIES: LazyLock<Mutex<HashMap<PathBuf, Vec<CredentialRecovery>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 表里只有已经发生过的事实，中毒不携带需要放弃的状态。
+#[cfg(windows)]
+fn credential_recoveries_at(path: &Path) -> Vec<CredentialRecovery> {
+    CREDENTIAL_RECOVERIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(path)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn record_credential_recovery(path: &Path, recovery: CredentialRecovery) {
+    CREDENTIAL_RECOVERIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(path.to_owned())
+        .or_default()
+        .push(recovery);
+}
+
+/// 把读不出来的凭据库改名到同目录下一个还没被占用的留存名（`credentials.bin.broken-<本地时间>`，
+/// 同一秒里重名时追加 `-2`、`-3`），返回新路径。在账户库锁内调用。
+///
+/// 改名失败照实报错：这时按空库继续的话，下一次登录就会把用户的文件盖掉。
+#[cfg(windows)]
+fn preserve_unreadable_credentials(path: &Path) -> Result<PathBuf> {
+    use chrono::{Datelike, Local, Timelike};
+    let now = Local::now();
+    let base = format!(
+        "{}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
+        path.display(),
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
+    let io_error = |path: &Path| {
+        let path = path.to_owned();
+        move |source| aurora_base::Error::Io { path, source }
+    };
+    let mut candidate = PathBuf::from(&base);
+    let mut attempt = 1u32;
+    // Windows 上的 rename 会顶掉已存在的目标，先确认留存名没被占用，不能覆盖上一份留存。
+    while candidate.try_exists().map_err(io_error(&candidate))? {
+        attempt += 1;
+        candidate = PathBuf::from(format!("{base}-{attempt}"));
+    }
+    std::fs::rename(path, &candidate).map_err(io_error(path))?;
+    Ok(candidate)
+}
+
+/// 错误连同它的原因链，用「：」接起来。凭据库读不出来的原因常在第二层（JSON 的行列）。
+#[cfg(windows)]
+fn error_with_causes(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut cause = err.source();
+    while let Some(inner) = cause {
+        text.push('：');
+        text.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    text
 }
 
 /// 外置登录服务器的探测结果。
@@ -202,10 +294,15 @@ impl Aurora {
             .unwrap_or_else(|| DEFAULT_MSA_CLIENT_ID.to_owned())
     }
 
-    /// 装配微软登录客户端；门面快照挂了取消令牌时客户端也挂上。
+    /// 装配不挂取消令牌的微软客户端。续期用它：令牌链一开跑就要走完，见 [`Aurora::renew_detached`]。
+    fn msa_client(&self) -> MicrosoftAuth {
+        MicrosoftAuth::new(self.http(), self.msa_client_id())
+            .with_endpoints(self.msa_endpoints().clone())
+    }
+
+    /// 装配登录用的微软客户端；门面快照挂了取消令牌时客户端也挂上。
     fn microsoft_auth(&self) -> MicrosoftAuth {
-        let auth = MicrosoftAuth::new(self.http(), self.msa_client_id())
-            .with_endpoints(self.msa_endpoints().clone());
+        let auth = self.msa_client();
         match self.cancel_token() {
             Some(token) => auth.with_cancel(token.clone()),
             None => auth,
@@ -260,6 +357,18 @@ impl Aurora {
         let mut accounts = self.credential_accounts()?;
         accounts.extend(self.open_offline_accounts()?.accounts());
         Ok(accounts)
+    }
+
+    /// 本进程里这个数据目录下凭据库读不出来、被改名留存的经过；没有过为空。
+    ///
+    /// 先打开一次凭据库：坏文件要是还没被哪条命令碰到，就在这一刻处置。启动提示调用它，不必赶在
+    /// 账户列表之前。
+    pub async fn credential_recoveries(&self) -> Result<Vec<CredentialRecovery>> {
+        self.blocking(|aurora| {
+            let _guard = lock_account_db();
+            aurora.credential_recoveries_unlocked()
+        })
+        .await
     }
 
     /// 按 uuid 跨两库查账户（含令牌，供启动路径取用）。
@@ -485,11 +594,27 @@ impl Aurora {
             .await
     }
 
-    /// 刷新账户信息：微软重走令牌链、外置刷新令牌，顺带更新名字与皮肤，返回更新后的记录。
+    /// 刷新账户信息，返回更新后的记录。
+    ///
+    /// - 微软：重走令牌链，名字与皮肤以这次取到的为准。
+    /// - 外置：先校验令牌。仍有效就只从会话服务器更新角色名与皮肤，令牌不动：刷新会让旧令牌当场作废，
+    ///   正在运行的游戏手里拿着的就是它，作废了游戏里进多人服务器会被判会话无效。校验判失效才刷新令牌。
+    /// - 离线：没有可刷新的凭据，原样返回。
     ///
     /// 服务器判定凭据失效（微软刷新令牌被判需重登、外置令牌被拒）时把账户落成「需要重新登录」并报
-    /// [`AuthError::ReloginRequired`]；网络故障原样冒泡、状态不变。离线账户没有可刷新的凭据，原样返回。
+    /// [`AuthError::ReloginRequired`]；网络故障原样冒泡、状态不变。
+    ///
+    /// 刷新跑在独立任务里：调用方被取消时以 [`AuthError::Cancelled`] 返回，刷新照样跑完落盘
+    /// （见 [`Aurora::renew_detached`]）。
     pub async fn refresh_account(&self, uuid: &str) -> Result<Account> {
+        let target = uuid.to_owned();
+        self.renew_detached(uuid, |aurora| async move {
+            aurora.refresh_account_now(&target).await
+        })
+        .await
+    }
+
+    async fn refresh_account_now(&self, uuid: &str) -> Result<Account> {
         let _gate = refresh_gate(uuid).await;
         let account = self.stored_account(uuid).await?;
         match &account.credentials {
@@ -497,6 +622,13 @@ impl Aurora {
                 self.refresh_microsoft(&account, &creds.refresh_token).await
             }
             AccountCredentials::AuthlibInjector(creds) => {
+                let client = self.yggdrasil(&creds.api_root);
+                if client
+                    .validate(&creds.access_token, Some(&creds.client_token))
+                    .await?
+                {
+                    return self.sync_authlib_profile(&client, &account).await;
+                }
                 self.refresh_authlib(&account, creds).await
             }
             AccountCredentials::Offline => Ok(account),
@@ -512,7 +644,8 @@ impl Aurora {
     /// 续期被判定为凭据失效时账户落成「需要重新登录」并报 [`AuthError::ReloginRequired`]。
     ///
     /// 要联网时先排进这个账户的续期闸，再以库里此刻的记录为准：排队期间别处可能刚续过，
-    /// 传进来的那份凭据已经作废。
+    /// 传进来的那份凭据已经作废。联网的部分跑在独立任务里：启动被取消时以 [`AuthError::Cancelled`]
+    /// 返回，续期照样跑完落盘（见 [`Aurora::renew_detached`]）。
     pub async fn ensure_account_fresh(&self, account: &Account) -> Result<Account> {
         match &account.credentials {
             AccountCredentials::Microsoft(creds)
@@ -523,8 +656,48 @@ impl Aurora {
             AccountCredentials::Offline => return Ok(account.clone()),
             AccountCredentials::Microsoft(_) | AccountCredentials::AuthlibInjector(_) => {}
         }
-        let _gate = refresh_gate(&account.uuid).await;
-        let account = self.stored_account(&account.uuid).await?;
+        let target = account.uuid.clone();
+        self.renew_detached(&account.uuid, |aurora| async move {
+            aurora.ensure_account_fresh_now(&target).await
+        })
+        .await
+    }
+
+    /// 在独立任务里跑一次续期（排闸、读库、联网、落盘一口气做完），调用方只等它的结果。
+    ///
+    /// 外置刷新与微软令牌链都会轮换凭据：请求一发出，服务器那边的旧凭据就可能作废，新凭据只在回音里。
+    /// 续期要是跑在调用方的 future 里，启动被取消、命令层在宽限期满后丢掉 future 时，回音跟着被丢，
+    /// 账户就只能重新登录。所以调用方被取消（快照上的取消令牌触发，或 future 被丢弃）时只是不再等，
+    /// 续期照样跑完落盘；续期闸由任务自己持有，排在后面的续期等它落完盘才读库。令牌链因此不挂取消令牌。
+    /// 已经取消了才来的续期不开始。
+    async fn renew_detached<F>(
+        &self,
+        uuid: &str,
+        renewal: impl FnOnce(Aurora) -> F,
+    ) -> Result<Account>
+    where
+        F: std::future::Future<Output = Result<Account>> + Send + 'static,
+    {
+        if self.is_cancelled() {
+            return Err(AuthError::Cancelled.into());
+        }
+        let task = tokio::spawn(renewal(self.clone()));
+        let joined = match self.cancel_token() {
+            Some(token) => match token.run_until_cancelled(task).await {
+                Some(joined) => joined,
+                None => {
+                    tracing::info!(uuid, "续期的调用方已取消，续期在后台跑完并落盘");
+                    return Err(AuthError::Cancelled.into());
+                }
+            },
+            None => task.await,
+        };
+        joined?
+    }
+
+    async fn ensure_account_fresh_now(&self, uuid: &str) -> Result<Account> {
+        let _gate = refresh_gate(uuid).await;
+        let account = self.stored_account(uuid).await?;
         match &account.credentials {
             AccountCredentials::Microsoft(creds) => {
                 if creds.minecraft_token_valid_at(unix_millis() / 1000) {
@@ -563,7 +736,7 @@ impl Aurora {
     }
 
     async fn refresh_microsoft(&self, account: &Account, refresh_token: &str) -> Result<Account> {
-        match self.microsoft_auth().refresh_session(refresh_token).await {
+        match self.msa_client().refresh_session(refresh_token).await {
             Ok(session) => {
                 let fresh = account_from_session(&session);
                 let uuid = account.uuid.clone();
@@ -612,6 +785,42 @@ impl Aurora {
                     stored.name = name;
                 }
                 stored.skin = skin;
+                stored.status = AccountStatus::Ok;
+                stored.last_verified_at = Some(unix_millis());
+            })
+        })
+        .await
+    }
+
+    /// 令牌已校验有效：从会话服务器取角色名与皮肤写回，记一次验证时刻，令牌原样不动。
+    ///
+    /// 档案取不到（连不上、服务器出错）只记 warn，角色名与皮肤保持原样，不拿空值盖掉；角色在服务器上
+    /// 已不存在（204）时没有皮肤可显示，皮肤清空、名字留着。
+    async fn sync_authlib_profile(
+        &self,
+        client: &YggdrasilClient,
+        account: &Account,
+    ) -> Result<Account> {
+        let profile = match client.session_profile(&account.uuid).await {
+            Ok(profile) => Some(profile),
+            Err(err) => {
+                tracing::warn!(uuid = %account.uuid, error = %err, "取外置角色档案失败，角色名与皮肤保持原样");
+                None
+            }
+        };
+        let uuid = account.uuid.clone();
+        self.blocking(move |aurora| {
+            aurora.update_credential_account(&uuid, |stored| {
+                match profile {
+                    Some(Some(profile)) => {
+                        if let Some(name) = profile.name {
+                            stored.name = name;
+                        }
+                        stored.skin = profile.skin;
+                    }
+                    Some(None) => stored.skin = None,
+                    None => {}
+                }
                 stored.status = AccountStatus::Ok;
                 stored.last_verified_at = Some(unix_millis());
             })
@@ -724,9 +933,35 @@ impl Aurora {
         Ok(())
     }
 
+    /// 打开凭据库。文件读到了却还原不出来（换了机器或 Windows 用户、文件被改坏）时不报错：原文件改名留存，
+    /// 按空库继续，经过记进本进程的留存表。离线账户在另一个库里，不受影响；微软与外置登录账户要重新登录。
+    /// 读文件本身失败、改名失败仍然报错。
     fn open_credentials(&self) -> Result<AccountManager<aurora_auth::DpapiCredentialStore>> {
-        let store = aurora_auth::DpapiCredentialStore::at(self.data_dir().join(CREDENTIALS_FILE));
-        Ok(AccountManager::load(store)?)
+        let path = self.data_dir().join(CREDENTIALS_FILE);
+        let err = match AccountManager::load(aurora_auth::DpapiCredentialStore::at(&path)) {
+            Ok(manager) => return Ok(manager),
+            Err(err) if err.is_unreadable_credentials() => err,
+            Err(err) => return Err(err.into()),
+        };
+        let preserved = preserve_unreadable_credentials(&path)?;
+        let error = error_with_causes(&err);
+        tracing::error!(
+            path = %path.display(),
+            preserved = %preserved.display(),
+            error = %error,
+            "凭据库读不出来，已改名留存，按空凭据库继续；微软与外置登录账户需要重新登录"
+        );
+        record_credential_recovery(&path, CredentialRecovery { preserved, error });
+        Ok(AccountManager::load(
+            aurora_auth::DpapiCredentialStore::at(&path),
+        )?)
+    }
+
+    fn credential_recoveries_unlocked(&self) -> Result<Vec<CredentialRecovery>> {
+        self.open_credentials()?;
+        Ok(credential_recoveries_at(
+            &self.data_dir().join(CREDENTIALS_FILE),
+        ))
     }
 
     fn credential_accounts(&self) -> Result<Vec<Account>> {
@@ -758,6 +993,10 @@ impl Aurora {
 impl Aurora {
     fn ensure_credential_store() -> Result<()> {
         Err(crate::error::CoreError::PlatformUnsupported)
+    }
+
+    fn credential_recoveries_unlocked(&self) -> Result<Vec<CredentialRecovery>> {
+        Ok(Vec::new())
     }
 
     fn credential_accounts(&self) -> Result<Vec<Account>> {
@@ -1083,6 +1322,12 @@ mod tests {
 
         const HERO: &str = "1111111111111111aaaaaaaaaaaaaaaa";
         const ALT: &str = "2222222222222222bbbbbbbbbbbbbbbb";
+        // 续期闸按账户 uuid 进程内共享，各用例并行跑；凡是会在闸里等网络的用例各用一个角色，
+        // 不和别的用例排同一道闸，满载时也不会被别人的慢请求拖过等待时限。
+        const STILL_VALID: &str = "3333333333333333cccccccccccccccc";
+        const PROFILE_DOWN: &str = "4444444444444444dddddddddddddddd";
+        const ABANDONED_LAUNCH: &str = "5555555555555555eeeeeeeeeeeeeeee";
+        const CANCELLED_REFRESH: &str = "6666666666666666ffffffffffffffff";
 
         fn logged_in(outcome: AuthlibLogin) -> Account {
             match outcome {
@@ -1596,7 +1841,7 @@ mod tests {
                 .respond_with(forbidden())
                 .mount(&server)
                 .await;
-            // 手动刷新排在后面时，拿到的是刚续出的新令牌，照常再轮换一次。
+            // 手动刷新排在后面时，拿到的是刚续出的新令牌：校验有效，不再轮换。
             Mock::given(method("POST"))
                 .and(path("/authserver/refresh"))
                 .and(body_partial_json(json!({ "accessToken": "fresh" })))
@@ -1604,6 +1849,7 @@ mod tests {
                     "accessToken": "fresher", "clientToken": "cli",
                     "selectedProfile": { "id": HERO, "name": "Hero" }
                 })))
+                .expect(0)
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
@@ -1662,6 +1908,13 @@ mod tests {
             let server = MockServer::start().await;
             mount_yggdrasil(&server, json!({})).await;
             Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
                 .and(path("/authserver/refresh"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                     "accessToken": "fresh", "clientToken": "cli",
@@ -1700,6 +1953,141 @@ mod tests {
                 }
                 other => panic!("期望外置凭据，得到 {other:?}"),
             }
+        }
+
+        /// 手动刷新外置账户，令牌仍有效：只从会话服务器更新角色名与皮肤，令牌原样不动，一个刷新请求都不发。
+        /// 刷新会让旧令牌当场作废，正在运行的游戏手里拿着的就是它。把手动刷新改回直接刷新，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn manual_authlib_refresh_with_valid_token_keeps_the_token() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .and(body_partial_json(
+                    json!({ "accessToken": "acc", "clientToken": "cli" }),
+                ))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let textures = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                json!({ "textures": { "SKIN": {
+                    "url": "https://skins.example/renamed.png", "metadata": { "model": "slim" }
+                } } })
+                .to_string(),
+            );
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/sessionserver/session/minecraft/profile/{STILL_VALID}"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": STILL_VALID, "name": "HeroRenamed",
+                    "properties": [ { "name": "textures", "value": textures } ]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "accessToken": "rotated", "clientToken": "cli",
+                    "selectedProfile": { "id": STILL_VALID, "name": "HeroRenamed" }
+                })))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let mut account = authlib_account(
+                &info,
+                "hero@example.com",
+                "acc".into(),
+                "cli".into(),
+                GameProfile {
+                    id: STILL_VALID.into(),
+                    name: "Hero".into(),
+                },
+                None,
+            );
+            account.last_verified_at = Some(1);
+            let before = aurora.store_login(account).unwrap();
+
+            let refreshed = aurora.refresh_account(STILL_VALID).await.unwrap();
+            assert_eq!(refreshed.name, "HeroRenamed");
+            assert_eq!(
+                refreshed.skin,
+                Some(SkinRef {
+                    url: "https://skins.example/renamed.png".into(),
+                    model: SkinModel::Slim,
+                })
+            );
+            assert_eq!(refreshed.credentials, before.credentials, "令牌不该被轮换");
+            assert!(refreshed.last_verified_at.unwrap() > 1);
+            let stored = aurora_at(tmp.path())
+                .find_account(STILL_VALID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored, refreshed);
+            let refreshes = server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.url.path() == "/authserver/refresh")
+                .count();
+            assert_eq!(refreshes, 0, "令牌有效时不该发刷新请求");
+        }
+
+        /// 令牌有效、会话服务器却查不到档案（连不上）：照样算一次验证，角色名与皮肤保持原样，不拿空值盖掉。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn manual_authlib_refresh_keeps_name_and_skin_when_profile_is_unavailable() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/sessionserver/session/minecraft/profile/{PROFILE_DOWN}"
+                )))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let skin = SkinRef {
+                url: "https://skins.example/hero.png".into(),
+                model: SkinModel::Wide,
+            };
+            let before = aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "acc".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: PROFILE_DOWN.into(),
+                        name: "Hero".into(),
+                    },
+                    Some(skin.clone()),
+                ))
+                .unwrap();
+
+            let refreshed = aurora.refresh_account(PROFILE_DOWN).await.unwrap();
+            assert_eq!(refreshed.name, "Hero");
+            assert_eq!(refreshed.skin, Some(skin));
+            assert_eq!(refreshed.credentials, before.credentials);
+            assert!(refreshed.last_verified_at >= before.last_verified_at);
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1743,6 +2131,259 @@ mod tests {
             );
         }
 
+        /// 等到 mock 服务器收到发往 `endpoint` 的请求。
+        async fn until_requested(server: &MockServer, endpoint: &str) {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while !server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.url.path() == endpoint)
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("15 秒内没等到 {endpoint} 的请求"));
+        }
+
+        /// 等到库里的账户满足 `done`，超时即失败。续期在后台跑完落盘，调用方那时早已返回。
+        async fn until_stored(
+            data_dir: &std::path::Path,
+            uuid: &str,
+            done: impl Fn(&Account) -> bool,
+        ) -> Account {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                let stored = aurora_at(data_dir).find_account(uuid).unwrap().unwrap();
+                if done(&stored) {
+                    return stored;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "15 秒内续出的凭据没有写进凭据库：{:?}",
+                    stored.credentials
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        fn stored_authlib_token(account: &Account) -> &str {
+            match &account.credentials {
+                AccountCredentials::AuthlibInjector(c) => &c.access_token,
+                other => panic!("期望外置凭据，得到 {other:?}"),
+            }
+        }
+
+        /// 外置令牌的刷新请求已经发出、回音还没到时启动被放弃：命令层在取消宽限期满后直接丢掉启动的
+        /// future。服务器这边旧令牌已经作废，新令牌要是跟着被丢掉，账户就只能重新登录。续期放进独立任务
+        /// 之后，丢掉的只是等待，新令牌照样写进凭据库。把续期挪回调用方的 future 里，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn abandoned_launch_still_persists_the_rotated_authlib_token() {
+            let server = MockServer::start().await;
+            mount_yggdrasil(&server, json!({})).await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .and(body_partial_json(json!({ "accessToken": "stale" })))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({
+                            "accessToken": "rotated", "clientToken": "cli",
+                            "selectedProfile": { "id": ABANDONED_LAUNCH, "name": "Hero" }
+                        }))
+                        .set_delay(Duration::from_millis(300)),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let account = aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "stale".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: ABANDONED_LAUNCH.into(),
+                        name: "Hero".into(),
+                    },
+                    None,
+                ))
+                .unwrap();
+
+            let launch = {
+                let aurora = aurora.clone();
+                tokio::spawn(async move { aurora.ensure_account_fresh(&account).await })
+            };
+            until_requested(&server, "/authserver/refresh").await;
+            launch.abort();
+            assert!(launch.await.unwrap_err().is_cancelled());
+
+            let stored = until_stored(tmp.path(), ABANDONED_LAUNCH, |a| {
+                stored_authlib_token(a) != "stale"
+            })
+            .await;
+            assert_eq!(stored_authlib_token(&stored), "rotated");
+            assert_eq!(stored.status, AccountStatus::Ok);
+        }
+
+        /// 启动在微软令牌链续期途中被取消（令牌端点已经轮换了 refresh token，XBL 还没回音）：调用方立刻以
+        /// 取消返回，续期在后台走完令牌链，轮换后的 refresh token 照样写进凭据库。原先取消令牌一路挂到
+        /// 令牌链上，链在半途停下，轮换出的 refresh token 跟着丢了。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn cancelled_launch_still_persists_the_rotated_microsoft_refresh_token() {
+            let server = MockServer::start().await;
+            mount_full_login(&server, 200).await;
+            // 让 XBL 慢一拍：取消落在令牌端点轮换之后、整条链跑完之前。
+            Mock::given(method("POST"))
+                .and(path("/xbl"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({
+                            "Token": "xbl", "DisplayClaims": { "xui": [ { "uhs": "theuhs" } ] }
+                        }))
+                        .set_delay(Duration::from_millis(400)),
+                )
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let token = crate::CancellationToken::new();
+            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let stale = aurora
+                .store_login(Account::new(
+                    MS_UUID,
+                    "PetalPlayer",
+                    AccountCredentials::Microsoft(MicrosoftCredentials {
+                        refresh_token: "old-refresh".into(),
+                        minecraft_token: Some("OLD-MC".into()),
+                        minecraft_expires_at: Some(1),
+                    }),
+                ))
+                .unwrap();
+
+            let launch = {
+                let snapshot = aurora.clone().with_cancel(token.clone());
+                tokio::spawn(async move { snapshot.ensure_account_fresh(&stale).await })
+            };
+            until_requested(&server, "/xbl").await;
+            token.cancel();
+            let returned = tokio::time::timeout(Duration::from_millis(200), launch)
+                .await
+                .expect("取消后调用方应立刻返回，不等续期跑完")
+                .unwrap();
+            assert!(
+                returned.as_ref().is_err_and(CoreError::is_cancelled),
+                "{returned:?}"
+            );
+
+            let stored = until_stored(tmp.path(), MS_UUID, |a| {
+                matches!(&a.credentials, AccountCredentials::Microsoft(c) if c.refresh_token != "old-refresh")
+            })
+            .await;
+            match &stored.credentials {
+                AccountCredentials::Microsoft(c) => {
+                    assert_eq!(c.refresh_token, "rotated-refresh");
+                    assert_eq!(c.minecraft_token.as_deref(), Some("MC-TOKEN"));
+                }
+                other => panic!("期望 Microsoft 凭据，得到 {other:?}"),
+            }
+        }
+
+        /// 手动刷新被取消也一样：外置令牌刷新发出后调用方立刻以取消返回，新令牌照样落盘。
+        /// 已经取消了才来的续期压根不发请求。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn cancelled_manual_refresh_still_persists_and_precancelled_one_sends_nothing() {
+            let server = MockServer::start().await;
+            mount_yggdrasil(&server, json!({})).await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({
+                            "accessToken": "rotated", "clientToken": "cli",
+                            "selectedProfile": { "id": CANCELLED_REFRESH, "name": "Hero" }
+                        }))
+                        .set_delay(Duration::from_millis(300)),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "stale".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: CANCELLED_REFRESH.into(),
+                        name: "Hero".into(),
+                    },
+                    None,
+                ))
+                .unwrap();
+
+            let precancelled = crate::CancellationToken::new();
+            precancelled.cancel();
+            let err = aurora
+                .clone()
+                .with_cancel(precancelled)
+                .refresh_account(CANCELLED_REFRESH)
+                .await
+                .unwrap_err();
+            assert!(err.is_cancelled(), "{err:?}");
+            assert!(server.received_requests().await.unwrap().is_empty());
+
+            let token = crate::CancellationToken::new();
+            let refresh = {
+                let snapshot = aurora.clone().with_cancel(token.clone());
+                tokio::spawn(async move { snapshot.refresh_account(CANCELLED_REFRESH).await })
+            };
+            until_requested(&server, "/authserver/refresh").await;
+            token.cancel();
+            let returned = tokio::time::timeout(Duration::from_millis(200), refresh)
+                .await
+                .expect("取消后调用方应立刻返回")
+                .unwrap();
+            assert!(
+                returned.as_ref().is_err_and(CoreError::is_cancelled),
+                "{returned:?}"
+            );
+            let stored = until_stored(tmp.path(), CANCELLED_REFRESH, |a| {
+                stored_authlib_token(a) != "stale"
+            })
+            .await;
+            assert_eq!(stored_authlib_token(&stored), "rotated");
+        }
+
         /// 删掉最后一个凭据账户后，当前账户必须回落到还留着的离线号；凭据库里还有别的账户时，
         /// 选中权留在凭据库。把 remove_account 里那段回落删掉，本用例即挂。
         #[test]
@@ -1779,6 +2420,247 @@ mod tests {
                 .expect("删掉最后一个凭据账户后，剩下的离线账户必须接手当前账户");
             assert_eq!(current.uuid, offline.uuid);
             assert_eq!(current.account_type, AccountType::Offline);
+        }
+
+        /// 数据目录里留存下来的坏凭据库，按文件名排序。
+        fn preserved_credentials(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let prefix = format!("{CREDENTIALS_FILE}{BROKEN_SUFFIX}");
+            let mut found: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(&prefix))
+                })
+                .collect();
+            found.sort();
+            found
+        }
+
+        /// 三种读不出来的凭据库：空文件、随机字节（换了机器或 Windows 用户后的密文在这台机器上就是这样）、
+        /// 能解密但解出来不是账户库。
+        fn unreadable_credential_files(dir: &std::path::Path) -> Vec<(&'static str, Vec<u8>)> {
+            use aurora_auth::CredentialStore as _;
+            let mut noise = vec![0u8; fastrand::usize(1..=512)];
+            fastrand::fill(&mut noise);
+            let foreign = dir.join("foreign.bin");
+            aurora_auth::DpapiCredentialStore::at(&foreign)
+                .save(br#"{"accounts": "not-a-list"}"#)
+                .unwrap();
+            let not_a_database = std::fs::read(&foreign).unwrap();
+            std::fs::remove_file(&foreign).unwrap();
+            vec![
+                ("空文件", Vec::new()),
+                ("随机字节", noise),
+                ("不是账户库", not_a_database),
+            ]
+        }
+
+        /// credentials.bin 解不开或解出来不是账户库时，整个账户系统不能跟着不可用：原文件逐字节原样改名留存，
+        /// 按空凭据库继续，离线账户照常列出、仍是当前账户，之后登录照常写进新的凭据库，留存的文件不受影响。
+        /// 把 open_credentials 里的留存处置去掉，列账户就报错，本用例即挂。
+        #[test]
+        fn unreadable_credential_store_is_preserved_and_accounts_keep_working() {
+            let scratch = tempfile::tempdir().unwrap();
+            for (case, garbage) in unreadable_credential_files(scratch.path()) {
+                let tmp = tempfile::tempdir().unwrap();
+                let aurora = aurora_at(tmp.path());
+                let steve = aurora.add_offline_account("Steve", None).unwrap();
+                let credentials = tmp.path().join(CREDENTIALS_FILE);
+                std::fs::write(&credentials, &garbage).unwrap();
+
+                let listed: Vec<_> = aurora
+                    .accounts()
+                    .unwrap_or_else(|err| panic!("{case}：凭据库读不出来时离线账户也列不出：{err}"))
+                    .into_iter()
+                    .map(|a| a.uuid)
+                    .collect();
+                assert_eq!(listed, std::slice::from_ref(&steve.uuid), "{case}");
+                assert_eq!(
+                    aurora.current_account().unwrap().unwrap().uuid,
+                    steve.uuid,
+                    "{case}"
+                );
+                assert!(!credentials.exists(), "{case}：坏文件应已改名挪开");
+                let preserved = preserved_credentials(tmp.path());
+                assert_eq!(preserved.len(), 1, "{case}：只留存一份：{preserved:?}");
+                assert_eq!(std::fs::read(&preserved[0]).unwrap(), garbage, "{case}");
+
+                aurora
+                    .store_login(Account::new(
+                        MS_UUID,
+                        "PetalPlayer",
+                        AccountCredentials::Microsoft(MicrosoftCredentials {
+                            refresh_token: "after-recovery".into(),
+                            minecraft_token: None,
+                            minecraft_expires_at: None,
+                        }),
+                    ))
+                    .unwrap();
+                let restarted = aurora_at(tmp.path());
+                let stored = restarted.find_account(MS_UUID).unwrap().expect(case);
+                match &stored.credentials {
+                    AccountCredentials::Microsoft(c) => {
+                        assert_eq!(c.refresh_token, "after-recovery", "{case}")
+                    }
+                    other => panic!("{case}：期望 Microsoft 凭据，得到 {other:?}"),
+                }
+                assert_eq!(restarted.accounts().unwrap().len(), 2, "{case}");
+                assert_eq!(preserved_credentials(tmp.path()), preserved, "{case}");
+                assert_eq!(std::fs::read(&preserved[0]).unwrap(), garbage, "{case}");
+            }
+        }
+
+        /// 启动提示要的经过：留存路径与原因。不论是这次查询先碰上坏文件，还是账户列表先碰上，经过都在，
+        /// 且只处置一次；之后再查还是同一份。去掉留存表的登记，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn credential_recoveries_report_the_preserved_file_once() {
+            let scratch = tempfile::tempdir().unwrap();
+            for (case, garbage) in unreadable_credential_files(scratch.path()) {
+                for listed_first in [false, true] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let aurora = aurora_at(tmp.path());
+                    assert!(aurora.credential_recoveries().await.unwrap().is_empty());
+                    std::fs::write(tmp.path().join(CREDENTIALS_FILE), &garbage).unwrap();
+                    if listed_first {
+                        assert!(aurora.accounts().unwrap().is_empty(), "{case}");
+                    }
+
+                    let recoveries = aurora.credential_recoveries().await.unwrap();
+                    let preserved = preserved_credentials(tmp.path());
+                    assert_eq!(preserved.len(), 1, "{case}");
+                    assert_eq!(recoveries.len(), 1, "{case}：{recoveries:?}");
+                    assert_eq!(recoveries[0].preserved, preserved[0], "{case}");
+                    let name = preserved[0].file_name().unwrap().to_str().unwrap();
+                    let stamp = name
+                        .strip_prefix(&format!("{CREDENTIALS_FILE}{BROKEN_SUFFIX}"))
+                        .unwrap();
+                    assert!(
+                        stamp.len() == 15
+                            && stamp.as_bytes()[8] == b'-'
+                            && stamp.chars().filter(char::is_ascii_digit).count() == 14,
+                        "{case}：留存名应带 YYYYMMDD-HHMMSS 的本地时间：{name}"
+                    );
+                    let expected_reason = if case == "不是账户库" {
+                        "凭据反序列化失败"
+                    } else {
+                        "Windows DPAPI 解密失败"
+                    };
+                    assert!(
+                        recoveries[0].error.starts_with(expected_reason),
+                        "{case}：{}",
+                        recoveries[0].error
+                    );
+                    if case == "不是账户库" {
+                        assert!(
+                            recoveries[0].error.contains("line 1"),
+                            "原因链里应带 JSON 的行列：{}",
+                            recoveries[0].error
+                        );
+                    }
+
+                    assert_eq!(aurora.credential_recoveries().await.unwrap(), recoveries);
+                    assert_eq!(preserved_credentials(tmp.path()), preserved);
+                }
+            }
+        }
+
+        /// 留存名已被占用（同一秒里又坏了一次）：另取 `-2`，先前那份不被顶掉。Windows 上的 rename 会
+        /// 直接覆盖已存在的目标，去掉占用检查本用例即挂。
+        #[test]
+        fn preserving_never_overwrites_an_earlier_copy() {
+            use chrono::{Datelike, Local, Timelike};
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let credentials = tmp.path().join(CREDENTIALS_FILE);
+            // 从现在起往后几秒的留存名都先占上，不论用例跑到哪一秒，头一个候选都已被占用。
+            let start = Local::now();
+            let occupied: Vec<_> = (0..3)
+                .map(|offset| {
+                    let at = start + chrono::Duration::seconds(offset);
+                    let name = format!(
+                        "{CREDENTIALS_FILE}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
+                        at.year(),
+                        at.month(),
+                        at.day(),
+                        at.hour(),
+                        at.minute(),
+                        at.second()
+                    );
+                    let path = tmp.path().join(name);
+                    std::fs::write(&path, format!("earlier {offset}")).unwrap();
+                    path
+                })
+                .collect();
+            std::fs::write(&credentials, b"broken again").unwrap();
+
+            aurora.accounts().unwrap();
+            let all = preserved_credentials(tmp.path());
+            assert_eq!(all.len(), occupied.len() + 1, "{all:?}");
+            for (offset, path) in occupied.iter().enumerate() {
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    format!("earlier {offset}")
+                );
+            }
+            let fresh = all.iter().find(|p| !occupied.contains(p)).unwrap();
+            assert!(
+                fresh.to_str().unwrap().ends_with("-2"),
+                "头一个候选被占用时应追加 -2：{}",
+                fresh.display()
+            );
+            assert_eq!(std::fs::read(fresh).unwrap(), b"broken again");
+        }
+
+        /// 读文件本身失败（这里是同名目录占着凭据库的位置）不是坏文件：照实报错，什么都不挪。
+        #[test]
+        fn credential_store_that_cannot_be_read_is_reported_not_moved() {
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let credentials = tmp.path().join(CREDENTIALS_FILE);
+            std::fs::create_dir(&credentials).unwrap();
+            let err = aurora.accounts().unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Auth(AuthError::Base(aurora_base::Error::Io { .. }))
+                ),
+                "{err:?}"
+            );
+            assert!(credentials.is_dir());
+            assert!(preserved_credentials(tmp.path()).is_empty());
+        }
+
+        /// 当前账户原是凭据库里的账户：留存后没有当前账户，不擅自换成离线号。换了的话，下次点启动就用离线号
+        /// 进了游戏，多人服务器进不去还不知道为什么；没有当前账户时启动会先让用户选。
+        #[test]
+        fn recovery_does_not_hand_the_selection_to_an_offline_account() {
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let offline = aurora.add_offline_account("Alex", None).unwrap();
+            aurora
+                .store_login(Account::new(
+                    MS_UUID,
+                    "PetalPlayer",
+                    AccountCredentials::Microsoft(MicrosoftCredentials {
+                        refresh_token: "r".into(),
+                        minecraft_token: None,
+                        minecraft_expires_at: None,
+                    }),
+                ))
+                .unwrap();
+            assert_eq!(aurora.current_account().unwrap().unwrap().uuid, MS_UUID);
+            std::fs::write(tmp.path().join(CREDENTIALS_FILE), b"moved from another PC").unwrap();
+
+            assert!(aurora.current_account().unwrap().is_none());
+            let listed: Vec<_> = aurora
+                .accounts()
+                .unwrap()
+                .into_iter()
+                .map(|a| a.uuid)
+                .collect();
+            assert_eq!(listed, [offline.uuid]);
         }
 
         /// 并发读改写不丢更新：多个线程同时往库里加不同账户，最后一个都不能少。

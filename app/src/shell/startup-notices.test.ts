@@ -35,6 +35,33 @@ describe("启动提示的呈现", () => {
     expect(callsOf(ipc, "open_folder")).toEqual([{ target: "data_dir", id: null, world: null }]);
   });
 
+  it("凭据库读不出来：标题说出了什么事，正文说原文件的去向与要重新登录的账户，动作打开数据目录", async () => {
+    ipc.overrides.set("open_folder", () => null);
+    const notice = describeStartupNotice({
+      kind: "credentials_reset",
+      preserved_path: "D:\\Games\\data\\credentials.bin.broken-20261031-061200",
+      error: "Windows DPAPI 解密失败: 该项不适于在指定状态下使用。 (0x8009000B)",
+    });
+    expect([notice.title, notice.body, notice.action?.label]).toEqual([
+      "账户登录信息读不出来",
+      "原文件已改名留在数据目录里，微软与外置登录账户要重新登录",
+      "打开目录",
+    ]);
+    const action = notice.action;
+    if (action === undefined || !("run" in action)) throw new Error("凭据库重置的提示应当带一个执行命令的动作");
+    expect(action.errorTitle).toBe(SHELL_ACTION_ERROR.openDataDir);
+    await action.run();
+    expect(callsOf(ipc, "open_folder")).toEqual([{ target: "data_dir", id: null, world: null }]);
+  });
+
+  it("配置与凭据库都出了事：按后端顺序各成一条", async () => {
+    ipc.overrides.set("startup_notices", () => [
+      configReset,
+      { kind: "credentials_reset", preserved_path: "D:\\data\\credentials.bin.broken-20261031-061200", error: "凭据反序列化失败（凭据文件可能已损坏）：expected value at line 1 column 1" },
+    ]);
+    expect((await loadStartupNotices()).map((n) => n.title)).toEqual([STARTUP_NOTICE_COPY.configReset.title, STARTUP_NOTICE_COPY.credentialsReset.title]);
+  });
+
   it("个别设置退回默认：标题报项数，正文按后端顺序列出设置名与原值，不带动作也不调命令", () => {
     const one = describeStartupNotice({ kind: "config_fields_reset", fields: [{ field: "language", value: "fr-FR" }] });
     expect(one).toEqual({ title: "1 项设置已暂用默认值", body: "当前版本不认识原值：界面语言 fr-FR" });

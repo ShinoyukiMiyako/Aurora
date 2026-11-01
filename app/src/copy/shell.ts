@@ -182,6 +182,11 @@ export const STARTUP_NOTICE_COPY = {
       language: "界面语言",
     } satisfies Readonly<Record<ConfigEnumField, string>>,
   },
+  credentialsReset: {
+    title: "账户登录信息读不出来",
+    body: "原文件已改名留在数据目录里，微软与外置登录账户要重新登录",
+    action: "打开目录",
+  },
 } as const;
 
 /** 首次启动却缺少向导模块：构建产物不完整，外壳不能继续（错误原文进整屏错误页）。 */

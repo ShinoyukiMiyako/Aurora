@@ -91,6 +91,21 @@ describe("启动提示", () => {
     ]);
   });
 
+  it("凭据库被重置的提示带着留存路径按设置的顺序原样返回；设置之后改动传入的对象不影响模拟后端", async () => {
+    const config = { kind: "config_reset" as const, preserved_path: "D:/Launcher/config.json.broken-20261031-143025", error: "expected value at line 1 column 1" };
+    const credentials = {
+      kind: "credentials_reset" as const,
+      preserved_path: "D:/Launcher/credentials.bin.broken-20261031-143025",
+      error: "Windows DPAPI 解密失败: 参数错误。 (0x80070057)",
+    };
+    setMockStartupNotices([config, credentials]);
+    credentials.preserved_path = "changed";
+    expect(await startupNotices()).toEqual([
+      config,
+      { kind: "credentials_reset", preserved_path: "D:/Launcher/credentials.bin.broken-20261031-143025", error: "Windows DPAPI 解密失败: 参数错误。 (0x80070057)" },
+    ]);
+  });
+
   it("Tauri 里不带参数调用 startup_notices", async () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
     vi.mocked(tauriInvoke).mockResolvedValueOnce([]);
