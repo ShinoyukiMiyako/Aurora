@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { mockInvoke } from "../../ipc/mock";
+import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
 import type { InstanceSources } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
@@ -9,11 +11,13 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "../../shell/window";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "../../state/queries/discover";
+import type { BlockedFileDto, PackModDto } from "../../state/store";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
+import { PickFolderProvider, type PickFolder } from "./platform";
 import { clearSnapshot } from "./session";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -31,6 +35,8 @@ let observers: { callback: IntersectionObserverCallback; options: IntersectionOb
 let online: boolean;
 let dropHandlers: ((event: WindowDropEvent) => void)[];
 let port: WindowPort;
+/** 系统选择文件夹对话框的替身：默认选中系统下载文件夹。 */
+let pickFolder: Mock<PickFolder>;
 
 function Probe() {
   nav = useNav();
@@ -54,9 +60,11 @@ async function mount(route: Parameters<NavApi["go"]>[0] = { page: "discover" }) 
     <WindowPortProvider port={port}>
       <LauncherProvider>
         <ShellProvider>
-          <Probe />
-          <PageArea />
-          <OverlayRoot />
+          <PickFolderProvider value={pickFolder}>
+            <Probe />
+            <PageArea />
+            <OverlayRoot />
+          </PickFolderProvider>
         </ShellProvider>
       </LauncherProvider>
     </WindowPortProvider>,
@@ -150,6 +158,19 @@ function detailOf(e: SearchEntry, overrides: Partial<ProjectDetail> = {}): Proje
   };
 }
 
+/** 预览里的 n 个照常下载的 Mod，条数与 mod_files 对上。 */
+function packMods(n: number): PackModDto[] {
+  return Array.from({ length: n }, (_, i) => ({
+    path: `mods/mod-${String(i + 1).padStart(3, "0")}.jar`,
+    file_name: `mod-${String(i + 1).padStart(3, "0")}.jar`,
+    origin: "remote",
+    optional: false,
+    project_id: null,
+    file_id: null,
+    availability: "download",
+  }));
+}
+
 /** installed_sources 的一行：实例里装着这些 Modrinth 工程。 */
 function sourcesOf(versionId: string, projectIds: readonly string[]): InstanceSources {
   return { status: "ready", version_id: versionId, sources: projectIds.map((id) => ({ platform: "modrinth", project_id: id })) };
@@ -189,6 +210,7 @@ beforeEach(() => {
   online = true;
   vi.spyOn(navigator, "onLine", "get").mockImplementation(() => online);
   dropHandlers = [];
+  pickFolder = vi.fn<PickFolder>(async () => MOCK_DOWNLOADS_DIR);
   port = {
     ...browserWindowPort(),
     onDrop: async (handler) => {
@@ -780,7 +802,8 @@ describe("发现页：整合包", () => {
     await flush();
     const installs = callsOf(ipc, "install_modpack");
     expect(installs).toHaveLength(1);
-    expect(installs[0]).toMatchObject({ source: { kind: "platform", platform: "modrinth", project_id: "M1", version_id: "mp-1" }, name: "生存 2" });
+    // 平台整合包不提供可选文件勾选：可选文件照装
+    expect(installs[0]).toMatchObject({ source: { kind: "platform", platform: "modrinth", project_id: "M1", version_id: "mp-1" }, name: "生存 2", excludedOptional: [] });
     // 平台版本没声明包含的工程：不知道 Mod 数，任务详情只写版本，不写「0 个 Mod」
     expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 生存", "2.0.0"]]);
     expect(openDialogs()).toHaveLength(1);
@@ -805,6 +828,9 @@ describe("发现页：整合包", () => {
         remote_bytes: 3 * 1024 * 1024,
         override_files: 8,
         override_bytes: 4096,
+        mods: packMods(96),
+        optional_extras: [],
+        blocked_files: [],
       };
     });
     ipc.overrides.set("install_modpack", () => new Promise(() => {}));
@@ -835,7 +861,7 @@ describe("发现页：整合包", () => {
     await flush();
     const installs = callsOf(ipc, "install_modpack");
     expect(installs).toHaveLength(1);
-    expect(installs[0]).toMatchObject({ source: { kind: "file", path: "D:\Downloads\pack.mrpack" }, name: "创造 2" });
+    expect(installs[0]).toMatchObject({ source: { kind: "file", path: "D:\Downloads\pack.mrpack" }, name: "创造 2", excludedOptional: [] });
     expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号 · 96 个 Mod"]]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已开始导入「创造 2」");
     expect(openDialogs()).toHaveLength(0);
@@ -962,6 +988,9 @@ describe("发现页：本地整合包的三种入口", () => {
     remote_bytes: 2048,
     override_files: 3,
     override_bytes: 512,
+    mods: packMods(10),
+    optional_extras: [],
+    blocked_files: [],
   });
   const fire = (event: WindowDropEvent) =>
     act(async () => {
@@ -1133,5 +1162,237 @@ describe("发现页：本地整合包的三种入口", () => {
     expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "D:\\a.png" }]);
     expect(dialog().textContent).toContain("只认 .mrpack 和 CurseForge 导出的 .zip");
     expect(dropZone()).toBeDefined();
+  });
+});
+
+describe("发现页：需要手动下载的文件与可选文件", () => {
+  const BLOCKED_PACK = "D:\\Downloads\\blocked-pack.zip";
+  const MRPACK = "D:\\Downloads\\生存.mrpack";
+  const FILES: BlockedFileDto[] = [
+    {
+      project_id: 900001,
+      file_id: 5000001,
+      file_name: "blocked-a.jar",
+      web_url: "https://www.curseforge.com/minecraft/mc-mods/blocked-a/files/5000001",
+      destination: "mods/blocked-a.jar",
+      sha1: "3f786850e387550fdab836ed7e6dc881de23001b",
+      fingerprint: 0,
+      size: 1024,
+    },
+    {
+      project_id: 900002,
+      file_id: 5000002,
+      file_name: "blocked-b.jar",
+      web_url: "https://www.curseforge.com/minecraft/mc-mods/blocked-b/files/5000002",
+      destination: "mods/blocked-b.jar",
+      sha1: "89e6c98d92887913cadf06b2adb97f26cde4849b",
+      fingerprint: 0,
+      size: 1024,
+    },
+  ];
+
+  beforeEach(() => {
+    // 下载文件夹里的文件与认领过的文件是假后端的内存状态，用例之间不能串
+    resetModpackMock();
+  });
+
+  const clickIn = (root: ParentNode, text: string) =>
+    act(async () => {
+      buttonByText(text, root).click();
+      await settle();
+    });
+  /** 看得见的文字：状态标签换一个时旧的还在淡出（标着 data-exiting），不算。 */
+  const shownText = (el: Element) => {
+    const copy = el.cloneNode(true) as Element;
+    for (const gone of copy.querySelectorAll("[data-exiting]")) gone.remove();
+    return copy.textContent;
+  };
+  const blockedDialog = () => {
+    const el = openDialogs().find((d) => d.querySelector("h2")?.textContent === "需要手动下载的文件");
+    if (el === undefined) throw new Error("需要手动下载的文件清单没有打开");
+    return el;
+  };
+  const blockedRow = (file: string) => {
+    const row = [...blockedDialog().querySelectorAll("li")].find((li) => li.textContent?.startsWith(file));
+    if (row === undefined) throw new Error(`清单里没有 ${file}`);
+    return row;
+  };
+  const modRows = () => [...dialog().querySelectorAll('ul[aria-label="包内 Mod"] > li')];
+  const rowsTagged = (tag: string) => modRows().filter((li) => li.textContent?.endsWith(tag)).map((li) => li.textContent?.slice(0, -tag.length));
+  const submitButton = () => buttonByText("导入为新实例", dialog());
+  const checkbox = (label: string) => {
+    const el = dialog().querySelector<HTMLButtonElement>(`[role="checkbox"][aria-label="${label}"]`);
+    if (el === null) throw new Error(`没有勾选框 ${label}`);
+    return el;
+  };
+
+  it("本地 .mrpack：Mod 行数等于 mod_files，可选文件默认勾上；取消勾选一个可选 Mod 后导入，只跳过它", async () => {
+    await mount({ page: "discover", importFile: MRPACK });
+    expect(modRows()).toHaveLength(41);
+    expect(dialog().textContent).toContain("包内 Mod · 41");
+    expect(rowsTagged("包内自带")).toEqual(["config-helper.jar", "pack-tweaks.jar"]);
+    expect(rowsTagged("可选")).toEqual(["optional-helper.jar"]);
+    expect(dialog().textContent).toContain("其他可选文件");
+    expect(checkbox("装上 optional-helper.jar").getAttribute("aria-checked")).toBe("true");
+    expect(checkbox("装上 optional-pack.zip").getAttribute("aria-checked")).toBe("true");
+
+    act(() => checkbox("装上 optional-helper.jar").click());
+    expect(checkbox("装上 optional-helper.jar").getAttribute("aria-checked")).toBe("false");
+    // 勾选只决定下不下载，清单里的 Mod 数与下载量照整包写
+    expect(dialog().textContent).toContain("包内 Mod · 41");
+    expect(dialog().textContent).toContain("1.21.1 · Fabric · 41 个 Mod");
+
+    ipc.overrides.set("install_modpack", () => new Promise(() => {}));
+    await clickIn(dialog(), "导入为新实例");
+    const installs = callsOf(ipc, "install_modpack");
+    expect(installs).toHaveLength(1);
+    expect(installs[0].excludedOptional).toEqual(["mods/optional-helper.jar"]);
+    expect(launcher.state.tasks[0].spec.args.excludedOptional).toEqual(["mods/optional-helper.jar"]);
+  });
+
+  it("受限文件挡住导入；清单里检查下载文件夹：只下了 a 时 a 已找到、b 还没找到，都找到后继续导入，确认步原地重新读取", async () => {
+    seedMockDownloads(["blocked-a.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    expect(modRows()).toHaveLength(41);
+    expect(rowsTagged("需手动下载")).toEqual(["blocked-a.jar", "blocked-b.jar"]);
+    expect(dialog().textContent).toContain("有 2 个文件需要到 CurseForge 网页手动下载，下载好之前不能导入。");
+    expect(submitButton().getAttribute("aria-disabled")).toBe("true");
+    await clickIn(dialog(), "导入为新实例");
+    expect(callsOf(ipc, "install_modpack")).toEqual([]);
+
+    // 改过的名字在重新读取后还在
+    const nameInput = dialog().querySelector<HTMLInputElement>('input:not([aria-label="整合包文件的完整路径"])');
+    if (nameInput === null) throw new Error("没有名称输入框");
+    typeInto(nameInput, "周末联机");
+
+    await clickIn(dialog(), "查看这些文件");
+    expect(blockedDialog().textContent).toContain("这 2 个文件的作者不允许启动器直接下载。到 CurseForge 网页下载后，回到这里重新检查。");
+    expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
+    expect(blockedDialog().textContent).toContain("下载好后选文件所在的文件夹");
+
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(pickFolder.mock.calls).toEqual([[MOCK_DOWNLOADS_DIR, "选择下载好的文件所在的文件夹"]]);
+    expect(callsOf(ipc, "claim_blocked_files").map((c) => [c.folder, (c.files as BlockedFileDto[]).map((f) => f.file_id)])).toEqual([[MOCK_DOWNLOADS_DIR, [5000001, 5000002]]]);
+    expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/已找到");
+    expect(blockedRow("blocked-b.jar").textContent).toBe("blocked-b.jar装到 mods/还没找到打开网页");
+    expect(blockedDialog().textContent).toContain("找到 1 个，还差 1 个。文件要和网页上的完全一致，改过名也能认出来。");
+    expect(buttonByText("我已下载，重新检查", blockedDialog())).toBeDefined();
+
+    seedMockDownloads(["blocked-b.jar"]);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(shownText(blockedRow("blocked-b.jar"))).toBe("blocked-b.jar装到 mods/已找到");
+    expect(shownText(blockedDialog())).toContain("2 个文件都已找到。");
+    expect(shownText(blockedDialog())).not.toContain("还差");
+
+    // 第二次读取挂起：确认步原地显示重新读取，主按钮不能点
+    const gate = deferred<void>();
+    ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => mockInvoke("preview_modpack", args)));
+    await clickIn(blockedDialog(), "继续导入");
+    expect(openDialogs()).toHaveLength(1);
+    expect(dialog().textContent).toContain("正在重新读取 blocked-pack.zip…");
+    expect(submitButton().disabled).toBe(true);
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: BLOCKED_PACK }, { path: BLOCKED_PACK }]);
+    expect(dialog().textContent).not.toContain("正在重新读取");
+    expect(rowsTagged("已找到")).toEqual(["blocked-a.jar", "blocked-b.jar"]);
+    expect(dialog().textContent).not.toContain("下载好之前不能导入");
+    expect(nameInput.isConnected && nameInput.value).toBe("周末联机");
+    expect(submitButton().getAttribute("aria-disabled")).toBeNull();
+
+    ipc.overrides.set("install_modpack", () => new Promise(() => {}));
+    await clickIn(dialog(), "导入为新实例");
+    expect(callsOf(ipc, "install_modpack")).toMatchObject([{ source: { kind: "file", path: BLOCKED_PACK }, name: "周末联机", excludedOptional: [] }]);
+  });
+
+  it("选文件夹时取消什么都不变；选的文件夹读不了时原位写出后端原文，列表状态不变；别的失败交给外层通知", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    pickFolder.mockResolvedValueOnce(null);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(callsOf(ipc, "claim_blocked_files")).toEqual([]);
+    expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
+
+    ipc.overrides.set("claim_blocked_files", () => {
+      throw new IpcError("io", "选的文件夹不存在：D:\\nope", { path: "D:\\nope" });
+    });
+    pickFolder.mockResolvedValueOnce("D:\\nope");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(blockedDialog().textContent).toContain("选的文件夹不存在：D:\\nope");
+    expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+
+    ipc.overrides.set("claim_blocked_files", () => {
+      throw new IpcError("invalid_argument", "file_id 5000001 出现了不止一次");
+    });
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(launcher.state.toasts.find((t) => t.title === "没能检查下载好的文件")?.body).toBe("file_id 5000001 出现了不止一次");
+  });
+
+  it("检查中：主按钮写「正在检查…」，行内「打开网页」不能点；关掉清单不打断检查，晚到的结果丢弃，再打开从头开始", async () => {
+    const gate = deferred<unknown>();
+    ipc.overrides.set("claim_blocked_files", () => gate.promise);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(buttonByText("正在检查…", blockedDialog()).getAttribute("aria-busy")).toBe("true");
+    const openButtons = [...blockedDialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === "打开网页");
+    expect(openButtons.map((b) => b.disabled)).toEqual([true, true]);
+
+    await clickIn(blockedDialog(), "关闭");
+    await act(async () => {
+      gate.resolve({ claimed: [{ file_id: 5000001, source_path: "x" }], missing: [5000002] });
+      await settle();
+    });
+    await clickIn(dialog(), "查看这些文件");
+    expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
+    expect(blockedRow("blocked-b.jar").textContent).toBe("blocked-b.jar装到 mods/打开网页");
+    expect(buttonByText("我已下载，重新检查", blockedDialog()).getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("平台整合包以 distribution_blocked 失败：面板写出个数，「查看这些文件」打开清单，「打开网页」用系统浏览器打开文件页；都找到后重新安装", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const opened = vi.fn();
+    vi.stubGlobal("open", opened);
+    const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    let attempts = 0;
+    ipc.overrides.set("install_modpack", () => {
+      attempts += 1;
+      if (attempts === 1) throw new IpcError("distribution_blocked", "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：blocked-a.jar、blocked-b.jar", { files: FILES });
+      return new Promise(() => {});
+    });
+    await mount();
+    act(() => card("生存").click());
+    await flush();
+    await clickIn(dialog(), "安装为新实例");
+    expect(dialog().textContent).toContain("没装成：有 2 个文件需要到 CurseForge 网页手动下载");
+    expect(launcher.state.tasks[0].error).toEqual({ code: "distribution_blocked", message: expect.any(String), blocked_files: FILES });
+    expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "重试")).toBe(false);
+
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedRow("blocked-b.jar"), "打开网页");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url: FILES[1].web_url }]);
+    expect(opened).toHaveBeenCalledWith(FILES[1].web_url, "_blank", "noopener,noreferrer");
+
+    seedMockDownloads(["Blocked-A.jar", "blocked-b.JAR"]);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(blockedDialog().textContent).toContain("2 个文件都已找到。");
+    await clickIn(blockedDialog(), "重新安装");
+    const installs = callsOf(ipc, "install_modpack");
+    expect(installs).toHaveLength(2);
+    const { taskId: firstId, ...firstArgs } = installs[0];
+    const { taskId: secondId, ...secondArgs } = installs[1];
+    expect(secondArgs).toEqual(firstArgs);
+    expect([firstId, secondId]).toEqual([`${launcher.state.tasks[0].id}#1`, `${launcher.state.tasks[0].id}#2`]);
+    expect(launcher.state.tasks[0]).toMatchObject({ status: "running", attempt: 2, error: null });
+    expect(openDialogs()).toHaveLength(1);
   });
 });

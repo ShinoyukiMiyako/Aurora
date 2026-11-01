@@ -1,6 +1,8 @@
 // 整合包的右栏：整合包总是装成新实例。可改名、选包版本、换封面；点安装后面板原位切到进度，弹窗不关。
 // 所选版本的清单摘要（只读远端包末尾的目录与清单，不下载整包）给出游戏版本、加载器、Mod 数与下载量；
 // 摘要还没到或读不出来时，游戏版本与加载器退回平台版本信息，Mod 数与下载量不显示。
+// 平台整合包不提供可选文件勾选，可选文件照装。导入因有文件需要到 CurseForge 网页手动下载而失败时，
+// 主按钮改为「查看这些文件」打开清单，全部找到后在清单里「重新安装」重排这个任务。
 
 import { useState } from "react";
 import { createPortal } from "react-dom";
@@ -17,11 +19,13 @@ import { useManifest } from "../../../state/queries/catalog";
 import { useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
 import { findInstance } from "../../../state/selectors";
+import type { BlockedFileDto } from "../../../state/store";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { Select } from "../../../ui/Select";
+import { BlockedFilesModal } from "../BlockedFilesModal";
 import { DETAIL_COPY, MODPACK_COPY, SEARCH_COPY } from "../copy";
 import { instancesFromPack, type ProjectOrigin } from "../model";
 import { uniqueName } from "../names";
@@ -83,7 +87,13 @@ function importTask(tasks: readonly Task[], instanceId: string): Task | null {
   return latest;
 }
 
-type Progress = { kind: "queued" } | { kind: "downloading"; progress: number } | { kind: "ready" } | { kind: "cancelled" } | { kind: "failed"; reason: string; taskId: string };
+type Progress =
+  | { kind: "queued" }
+  | { kind: "downloading"; progress: number }
+  | { kind: "ready" }
+  | { kind: "cancelled" }
+  /** blocked：以需要手动下载的文件失败时的清单，其余失败为 null。 */
+  | { kind: "failed"; reason: string; taskId: string; blocked: readonly BlockedFileDto[] | null };
 
 export interface ModpackPanelProps {
   detail: ProjectDetail;
@@ -109,6 +119,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const [cover, setCover] = useState<InstanceCover>(() => defaultModpackCover(detail.project_id));
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // 打开过的清单留着它的文件与任务：重新安装后面板离开失败态，清单仍要播完退场
+  const [blocked, setBlocked] = useState<{ open: boolean; files: readonly BlockedFileDto[]; taskId: string } | null>(null);
 
   const list = versions.status === "ready" ? versions.data.versions : null;
   // 版本列表拉不到时还能装详情里给出的最新版本
@@ -142,7 +154,12 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         return { kind: "cancelled" };
       case "failed":
         if (task.error === null) throw new Error(`导入任务 ${task.id} 失败却没有错误记录`);
-        return { kind: "failed", reason: taskFailureReason(task.error), taskId: task.id };
+        return {
+          kind: "failed",
+          reason: taskFailureReason(task.error),
+          taskId: task.id,
+          blocked: task.error.blocked_files === undefined ? null : task.error.blocked_files,
+        };
     }
   })();
 
@@ -167,6 +184,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
           mcVersion: mc,
           loader: facts.loader,
           loaderVersion,
+          excludedOptional: [],
         }),
       ACTION_ERROR.importModpack,
     );
@@ -181,6 +199,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   };
 
   const installDisabled = version === null || facts.mcVersion === null || nameError !== null;
+  const failedBlocked = progress !== null && progress.kind === "failed" ? progress.blocked : null;
   const footer = (
     <>
       <span className={styles.footNote}>{packFootNote(facts)}</span>
@@ -198,9 +217,15 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
           <Button variant="ghost" onClick={onClose}>
             {MODPACK_COPY.close}
           </Button>
-          <Button variant="primary" icon="refresh" onClick={() => actions.retryTask(progress.taskId)}>
-            {MODPACK_COPY.retry}
-          </Button>
+          {failedBlocked === null ? (
+            <Button variant="primary" icon="refresh" onClick={() => actions.retryTask(progress.taskId)}>
+              {MODPACK_COPY.retry}
+            </Button>
+          ) : (
+            <Button variant="primary" icon="download" onClick={() => setBlocked({ open: true, files: failedBlocked, taskId: progress.taskId })}>
+              {MODPACK_COPY.viewBlocked}
+            </Button>
+          )}
         </>
       ) : (
         <>
@@ -281,6 +306,18 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
       )}
       {progress !== null && progress.kind === "cancelled" && <Callout tone="info">{MODPACK_COPY.cancelled}</Callout>}
       {progress !== null && progress.kind === "failed" && <Callout tone="danger">{MODPACK_COPY.failed(progress.reason)}</Callout>}
+      {blocked !== null && (
+        <BlockedFilesModal
+          open={blocked.open}
+          files={blocked.files}
+          origin="failed"
+          onClose={() => setBlocked({ ...blocked, open: false })}
+          onAllFound={() => {
+            setBlocked({ ...blocked, open: false });
+            actions.retryTask(blocked.taskId);
+          }}
+        />
+      )}
 
       {footerHost !== null && createPortal(footer, footerHost)}
     </Inset>

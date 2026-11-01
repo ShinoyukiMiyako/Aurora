@@ -4,7 +4,7 @@
 // 页面与流程模块按目录约定在这里收集，外壳不直接引用 pages/ 与 flows/：
 // - pages/<PageId>/index.tsx 七个必须齐全，缺一个或多一个在启动前（prepareApp）就报错；
 // - 登录流程随外壳一起加载；首次启动向导与新建实例按需加载，目录不存在时外壳照常运行。
-// 设置页与向导要用的宿主能力（选择文件夹、游戏目录登记、打开数据目录与日志目录）由它们各自声明接口与 Provider，
+// 设置页、向导与发现页要用的宿主能力（选择文件夹、游戏目录登记、打开数据目录与日志目录）由它们各自声明接口与 Provider，
 // 真实实现在 shell/platform，这里注入：App 是唯一同时看得见两边的地方。
 // 开发构建里地址带 #__gallery 时显示组件陈列；生产构建里 import.meta.env.DEV 为常量 false，陈列整段被摇树移除。
 
@@ -13,6 +13,7 @@ import type { Appearance } from "./domain/types";
 import LoginFlow from "./flows/login";
 import { PickDirectoryProvider } from "./flows/onboarding/platform";
 import { logDiagnostic } from "./ipc/diagnostics";
+import { PickFolderProvider } from "./pages/discover/platform";
 import { SETTINGS_COMMANDS, SettingsCommandsProvider, type SettingsCommands } from "./pages/settings/commands";
 import { AppShell, type ShellFlows } from "./shell/AppShell";
 import { SHELL_CRASH_COPY } from "./copy/shell";
@@ -55,7 +56,9 @@ const SETTINGS_HOST: SettingsCommands = { ...SETTINGS_COMMANDS, ...gameDirectory
 function HostProviders({ children }: { children: ReactNode }) {
   return (
     <SettingsCommandsProvider value={SETTINGS_HOST}>
-      <PickDirectoryProvider value={pickDirectory}>{children}</PickDirectoryProvider>
+      <PickDirectoryProvider value={pickDirectory}>
+        <PickFolderProvider value={pickDirectory}>{children}</PickFolderProvider>
+      </PickDirectoryProvider>
     </SettingsCommandsProvider>
   );
 }

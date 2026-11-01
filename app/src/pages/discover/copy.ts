@@ -222,6 +222,7 @@ export const MODPACK_COPY = {
   reinstall: "重新安装",
   retry: "重试",
   install: "安装为新实例",
+  viewBlocked: "查看这些文件",
 } as const;
 
 export const IMPORT_COPY = {
@@ -249,4 +250,39 @@ export const IMPORT_COPY = {
   errorManifestInvalid: (message: string) => `整合包清单读不出来：${message}`,
   errorCorrupt: "文件不完整或已损坏，重新下载一份再试",
   errorNetwork: "CurseForge 整合包要联网向平台查文件信息，联网后再读一次",
+  errorCompression: (entry: string) => `这个整合包用了不支持的压缩方式（${entry}），用整合包作者发布的原始文件再试`,
+  modsTitle: (n: number) => `包内 Mod · ${n}`,
+  modsLabel: "包内 Mod",
+  extrasTitle: "其他可选文件",
+  tagBundled: "包内自带",
+  tagBlocked: "需手动下载",
+  tagFound: "已找到",
+  tagOptional: "可选",
+  optionalLabel: (file: string) => `装上 ${file}`,
+  blockedNotice: (n: number) => `有 ${n} 个文件需要到 CurseForge 网页手动下载，下载好之前不能导入。`,
+  viewBlocked: "查看这些文件",
+  submitBlocked: (n: number) => `还有 ${n} 个文件需要手动下载`,
+  rereading: (file: string) => `正在重新读取 ${file}…`,
+} as const;
+
+export const BLOCKED_COPY = {
+  title: "需要手动下载的文件",
+  intro: (n: number) => `这 ${n} 个文件的作者不允许启动器直接下载。到 CurseForge 网页下载后，回到这里重新检查。`,
+  destination: (dir: string) => `装到 ${dir}/`,
+  found: "已找到",
+  missing: "还没找到",
+  openWeb: "打开网页",
+  openWebLabel: (file: string) => `打开网页：${file}`,
+  footNote: "下载好后选文件所在的文件夹",
+  close: "关闭",
+  check: "我已下载，重新检查",
+  checking: "正在检查…",
+  partial: (found: number, missing: number) => `找到 ${found} 个，还差 ${missing} 个。文件要和网页上的完全一致，改过名也能认出来。`,
+  allFound: (n: number) => `${n} 个文件都已找到。`,
+  continueImport: "继续导入",
+  reinstall: "重新安装",
+  pickTitle: "选择下载好的文件所在的文件夹",
+  /** 打开网页、取下载文件夹、选文件夹失败时的通知标题。 */
+  openFailed: "没能打开网页",
+  checkFailed: "没能检查下载好的文件",
 } as const;

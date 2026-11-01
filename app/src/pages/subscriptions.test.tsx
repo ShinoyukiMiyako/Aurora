@@ -6,6 +6,7 @@ import { act, Profiler, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { GAME_LOG_EVENT } from "../ipc/launch";
+import { resetMocks } from "../ipc/mock";
 import { CORE_EVENT } from "../ipc/tasks";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
@@ -17,6 +18,7 @@ import { RemoteImageProvider } from "../ui/remote-image";
 import type { ProjectDetail } from "../state/queries/discover";
 import { entry, match, modVersion, result } from "./discover/fixtures";
 import DiscoverPage from "./discover/index";
+import { PickFolderProvider } from "./discover/platform";
 import { clearSnapshot } from "./discover/session";
 import HomePage from "./home/index";
 import LibraryPage from "./library/index";
@@ -147,12 +149,14 @@ async function mount(page: ReactNode) {
     <LauncherProvider>
       <ShellProvider>
         <RemoteImageProvider resolve={async (url) => url}>
-          <Probe />
-          <div style={{ overflowY: "auto" }}>
-            <Profiler id="page" onRender={() => void (commits += 1)}>
-              {page}
-            </Profiler>
-          </div>
+          <PickFolderProvider value={async () => null}>
+            <Probe />
+            <div style={{ overflowY: "auto" }}>
+              <Profiler id="page" onRender={() => void (commits += 1)}>
+                {page}
+              </Profiler>
+            </div>
+          </PickFolderProvider>
         </RemoteImageProvider>
         <OverlayRoot />
       </ShellProvider>
@@ -308,6 +312,41 @@ describe("发现页", () => {
     expect(dialog.querySelectorAll('[role="checkbox"]').length).toBeGreaterThan(0);
     commits = 0;
     downloads(task.id);
+    logs();
+    expect(launcher.state.session?.logs).toHaveLength(20);
+    expect(commits).toBe(0);
+  });
+
+  it("导入本地整合包到确认步、再打开需要手动下载的文件清单：20 次下载进度加 20 批游戏日志，页面子树一次都不提交", async () => {
+    resetMocks();
+    await mount(<DiscoverPage route={{ page: "discover" }} />);
+    const task = await busy();
+    const click = (text: string) =>
+      act(() => {
+        const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text);
+        if (button === undefined) throw new Error(`找不到按钮 ${text}`);
+        button.click();
+      });
+    click("导入整合包文件");
+    await flush();
+    const path = document.querySelector<HTMLInputElement>('input[aria-label="整合包文件的完整路径"]');
+    if (path === null) throw new Error("没有路径输入框");
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+    if (descriptor === undefined || descriptor.set === undefined) throw new Error("jsdom 的 input 没有 value 设置器");
+    const set = descriptor.set;
+    act(() => {
+      set.call(path, "D:\\Downloads\\blocked-pack.zip");
+      path.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    click("读取");
+    await flush();
+    expect(document.querySelectorAll('ul[aria-label="包内 Mod"] > li')).toHaveLength(41);
+    click("查看这些文件");
+    await flush();
+    expect([...document.querySelectorAll('[role="dialog"] h2')].map((h) => h.textContent)).toEqual(["导入整合包文件", "需要手动下载的文件"]);
+    commits = 0;
+    downloads(task.id);
+    expect(launcher.state.tasks[0].bytes).toBe(20_000);
     logs();
     expect(launcher.state.session?.logs).toHaveLength(20);
     expect(commits).toBe(0);

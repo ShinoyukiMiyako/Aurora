@@ -222,7 +222,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
         expect(summary.minecraft).toBe(latest.game_versions[0]);
         n++;
         const name = `导入 ${n}`;
-        await installModpack(`t-mp-${n}`, { kind: "platform", platform: s.platform, project_id: s.project_id, version_id: latest.version_id }, name);
+        await installModpack(`t-mp-${n}`, { kind: "platform", platform: s.platform, project_id: s.project_id, version_id: latest.version_id }, name, []);
         const instance = (await listInstances()).find((i) => i.id === name);
         expect(instance?.modpack).toEqual({ platform: s.platform, project_id: s.project_id, version_id: latest.version_id, name: hit.title, version: latest.version_number });
         expect(instance?.mc_version).toBe(summary.minecraft);

@@ -2,7 +2,7 @@
 // 插值一律经 domain/format 格式化；带插值的条目写成函数，参数缺失属于调用方的契约错误，直接抛出。
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
-import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskKind, TaskStatus } from "../domain/types";
+import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
 import type { NameRule } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 
@@ -526,7 +526,7 @@ export const TASK_TEXT = {
 export const TASK_INTERRUPTED_CODE = "interrupted";
 
 /** 任务失败原因（行内与 Toast 正文）。能归类的给统一说法，其余用后端原文。 */
-export function taskFailureReason(error: { code: string; message: string }): string {
+export function taskFailureReason(error: TaskError): string {
   switch (error.code) {
     case TASK_INTERRUPTED_CODE:
       return `${APP_NAME}关闭时中断`;
@@ -534,6 +534,13 @@ export function taskFailureReason(error: { code: string; message: string }): str
       return "网络连接失败";
     case "hash_mismatch":
       return "下载到的文件和官方记录不一致";
+    case "curseforge_key_rejected":
+      return "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试";
+    case "distribution_blocked":
+      // 较早的任务日志只存了错误码与原文（原文里列着文件名），没有清单时照原文给出
+      return error.blocked_files === undefined ? error.message : `有 ${error.blocked_files.length} 个文件需要到 CurseForge 网页手动下载`;
+    case "modpack_unsupported_compression":
+      return "整合包用了不支持的压缩方式，用整合包作者发布的原始文件再试";
     default:
       return error.message;
   }
