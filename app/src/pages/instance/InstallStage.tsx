@@ -8,12 +8,14 @@ import { INSTALL_STAGE_COPY } from "../../copy/install-stage";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions } from "../../state/launcher";
+import { useOnline } from "../../state/online";
 import type { InstanceTab } from "../../state/route";
 import type { BlockedFileDto } from "../../state/store";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { EmptyState } from "../../ui/EmptyState";
 import { BlockedFilesModal } from "../discover/BlockedFilesModal";
+import { TASKS_COPY } from "../tasks/copy";
 import styles from "./instance.module.css";
 import type { InstallStage } from "./model";
 import { InstallingBanner } from "./OverviewTab";
@@ -43,6 +45,7 @@ function StagePanel({ stage }: { stage: InstallStageTabProps["stage"] }) {
   const { go } = useNav();
   const actions = useLauncherActions();
   const run = useRunner();
+  const online = useOnline();
   // 清单关掉、重排之后任务就不是失败态了，它得留在这一层才放得完退场动画
   const [blocked, setBlocked] = useState<{ open: boolean; files: readonly BlockedFileDto[]; taskId: string } | null>(null);
   const blockedModal = blocked !== null && (
@@ -78,7 +81,8 @@ function StagePanel({ stage }: { stage: InstallStageTabProps["stage"] }) {
             action={
               <>
                 {files === undefined ? (
-                  <Button icon="refresh" onClick={() => void run(() => actions.retryTask(taskId), ACTION_ERROR.install)}>
+                  // 与下载任务页同一个口径：断网时重试必然又失败一次
+                  <Button icon="refresh" disabledReason={online ? undefined : TASKS_COPY.offline.retryReason} onClick={() => void run(() => actions.retryTask(taskId), ACTION_ERROR.install)}>
                     {INSTALL_STAGE_COPY.retry}
                   </Button>
                 ) : (

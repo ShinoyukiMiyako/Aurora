@@ -991,6 +991,21 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(text()).toContain("安装没有完成");
     expect(text()).toContain("网络连接失败。可以重试，或到下载任务里查看。");
 
+    // 断网时重试必然又失败一次：与下载任务页同一个口径，带原因禁用，点了不重排
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    onTestFinished(() => onLine.mockRestore());
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    expect(button("重试").getAttribute("aria-disabled")).toBe("true");
+    click(button("重试"));
+    await flush();
+    expect(attempts).toBe(1);
+    onLine.mockReturnValue(true);
+    act(() => {
+      window.dispatchEvent(new Event("online"));
+    });
+
     click(button("重试"));
     await flush();
     expect(attempts).toBe(2);
