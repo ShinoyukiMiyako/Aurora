@@ -239,7 +239,7 @@ type TaskMeta =
        * 所以安装期间只在派生状态里固定，装好后再写进侧栏固定列表。
        */
       autoPin: boolean;
-      /** 就绪后接着装的开局 Mod；重启后恢复的新建任务推不出来，为空。 */
+      /** 就绪后接着装的开局 Mod；重启后恢复的新建任务从参数里的 starterMods 读回。 */
       starter: StarterPick[];
     }
   | {
@@ -251,7 +251,7 @@ type TaskMeta =
       loader: LoaderKind;
       loaderVersion: string | null;
     }
-  /** starter：失败的新建改排补全时接过来的开局 Mod，补全好了照样接着装；别的补全为空。 */
+  /** starter：失败的新建改排补全时接过来的开局 Mod，补全好了照样接着装，重启后从参数读回；别的补全为空。 */
   | { type: "repair"; launchAfter: boolean; starter: StarterPick[] }
   /** pinFor：下载完把这个实例的 Java 固定为新装的运行时（崩溃诊断「下载 Java N」）。 */
   | { type: "java"; major: number; launchAfter: string | null; pinFor: string | null }
@@ -600,12 +600,12 @@ function metaFromSpec(task: Task): TaskMeta | null {
         cover: null,
         // 重启后恢复的新建任务不知道当时侧栏的余量：按「有空位就固定」处理
         autoPin: true,
-        starter: [],
+        starter: starterPicksArg(args, command),
       };
     case "install_modpack":
       return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
     case "repair_instance":
-      return { type: "repair", launchAfter: false, starter: [] };
+      return { type: "repair", launchAfter: false, starter: starterPicksArg(args, command) };
     case "install_java": {
       const major = args.requiredMajor;
       if (typeof major !== "number") throw new Error("任务 install_java 缺少 requiredMajor");
@@ -668,6 +668,25 @@ function modItems(args: Record<string, unknown>): ModItem[] {
       title: strArg(r, "title", "install_mods"),
       fileSize: fileSizeArg(r, "install_mods"),
     };
+  });
+}
+
+/**
+ * 新建与补全任务参数里的 starterMods：勾选的开局 Mod 跟着参数写进任务表，重启后恢复的任务据此仍会在就绪后接着装。
+ * 调后端命令时去掉这个键；没勾开局 Mod 时不写这个键，较早写下的记录也没有，都按空列表处理。
+ */
+function starterArgs(starter: readonly StarterPick[]): { starterMods?: StarterPick[] } {
+  return starter.length === 0 ? {} : { starterMods: starter.map((pick) => ({ projectId: pick.projectId, modVersionId: pick.modVersionId, title: pick.title, fileSize: pick.fileSize })) };
+}
+
+function starterPicksArg(args: Record<string, unknown>, command: string): StarterPick[] {
+  if (!("starterMods" in args)) return [];
+  const raw = args.starterMods;
+  if (!Array.isArray(raw)) throw new Error(`任务 ${command} 的 starterMods 应为数组：${String(raw)}`);
+  return raw.map((item: unknown, i) => {
+    if (typeof item !== "object" || item === null) throw new Error(`任务 ${command} 的 starterMods 第 ${i} 项不是对象`);
+    const r = item as Record<string, unknown>;
+    return { projectId: strArg(r, "projectId", command), modVersionId: strArg(r, "modVersionId", command), title: strArg(r, "title", command), fileSize: fileSizeArg(r, command) };
   });
 }
 
@@ -1666,7 +1685,10 @@ export class LauncherStore {
       const outcome: UpdatesOutcome = { updated };
       return outcome;
     }
-    return invoke<unknown>(command, { ...args, taskId });
+    // starterMods 只供前端在重启后恢复「就绪后接着装」，后端的新建与补全命令没有这个参数，不往下传
+    const wire: Record<string, unknown> = { ...args, taskId };
+    delete wire.starterMods;
+    return invoke<unknown>(command, wire);
   }
 
   /**
@@ -2402,7 +2424,7 @@ export class LauncherStore {
             title: TASK_TEXT.createTitle(spec.mcVersion, spec.loader, spec.loaderVersion),
             detail: TASK_TEXT.createDetail(spec.name),
             instanceId: spec.name,
-            spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name, useTemplate } },
+            spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name, useTemplate, ...starterArgs(starter) } },
           },
           { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover, autoPin, starter },
           spec.name,
@@ -3010,7 +3032,7 @@ export class LauncherStore {
           ? TASK_TEXT.repairDetail(mcVersion, inst.loader, inst.loaderVersion)
           : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
     return this.enqueue(
-      { kind: "repair", title: TASK_TEXT.repairTitle(id), detail, instanceId: id, spec: { command: "repair_instance", args: { id } } },
+      { kind: "repair", title: TASK_TEXT.repairTitle(id), detail, instanceId: id, spec: { command: "repair_instance", args: { id, ...starterArgs(starter) } } },
       { type: "repair", launchAfter, starter },
       id,
     );
