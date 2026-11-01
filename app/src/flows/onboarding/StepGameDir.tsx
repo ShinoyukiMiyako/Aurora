@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { SEARCH_DEBOUNCE_MS } from "../../domain/limits";
+import { samePath } from "../../domain/paths";
 import { useRunner } from "../../shell/useRunner";
 import { useDiscoveredGameDirectories, useGameDirectoryInspection } from "../../state/queries/catalog";
 import { Button } from "../../ui/Button";
@@ -12,7 +13,7 @@ import { Field } from "../../ui/Field";
 import { Skeleton } from "../../ui/Skeleton";
 import { TextInput } from "../../ui/TextInput";
 import { DIR_COPY } from "./copy";
-import { extraCandidates, sameDirectory } from "./model";
+import { extraCandidates } from "./model";
 import s from "./onboarding.module.css";
 import { usePickDirectory } from "./platform";
 
@@ -121,7 +122,7 @@ export function StepGameDir({ path, defaultPath, error, deselected, onPathChange
           </Button>
         </div>
       </Field>
-      {!sameDirectory(path, defaultPath) && (
+      {!samePath(path, defaultPath) && (
         <span>
           <Button size="sm" variant="ghost" icon="rollback" onClick={() => onPathChange(defaultPath)}>
             {DIR_COPY.useDefault}

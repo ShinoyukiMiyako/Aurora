@@ -3,9 +3,9 @@
 
 import type { InstanceSummary } from "../../domain/adapt";
 import { JAVA_AUTO } from "../../domain/adapt";
+import { samePath } from "../../domain/paths";
 import { runtimeComplete } from "../../domain/rules";
 import type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto } from "../../state/queries/catalog";
-import { samePath } from "./game-model";
 
 export type JavaNote =
   | { kind: "pinned" }

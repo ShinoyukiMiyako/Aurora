@@ -3,7 +3,7 @@ import { instanceFromDto } from "../../domain/adapt";
 import { runtimeComplete } from "../../domain/rules";
 import type { GpuAdapterDto, JavaInstallationDto } from "../../state/queries/catalog";
 import { instanceDto } from "../../test/launcher";
-import { dirName, hasBang, normalizePath, overAvailable, samePath, unrecorded } from "./game-model";
+import { dirName, hasBang, overAvailable, unrecorded } from "./game-model";
 import {
   gpuSummary,
   hasManaged,
@@ -165,12 +165,6 @@ describe("游戏目录推导", () => {
   it("「!」会被拒绝", () => {
     expect(hasBang("D:/Games/Hi!/.minecraft")).toBe(true);
     expect(hasBang("D:/Games/.minecraft")).toBe(false);
-  });
-
-  it("路径比较：统一分隔符与末尾斜杠，Windows 盘符路径不分大小写，其余区分", () => {
-    expect(normalizePath("D:\\Games\\.minecraft\\")).toBe("d:/games/.minecraft");
-    expect(samePath("D:\\Games\\.minecraft", "d:/games/.minecraft/")).toBe(true);
-    expect(samePath("/home/a/.minecraft", "/home/A/.minecraft")).toBe(false);
   });
 
   it("显示名取最后一段，.minecraft 取上一级；空路径抛错", () => {

@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
+import { samePath } from "../../../domain/paths";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
@@ -37,7 +38,7 @@ import {
   RECOMMENDED_ISOLATION,
   WORLD_BACKUP_COPY,
 } from "../copy";
-import { dirName, hasBang, overAvailable, samePath, unrecorded } from "../game-model";
+import { dirName, hasBang, overAvailable, unrecorded } from "../game-model";
 import { InstanceStack } from "../InstanceStack";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite, type SettingWrite } from "../write";
