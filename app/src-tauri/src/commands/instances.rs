@@ -151,6 +151,30 @@ impl InstanceLocks {
         bases: &[String],
     ) -> Result<ChainGuard, CommandError> {
         let own = self.acquire(id, activity)?;
+        self.hold_bases(own, id, activity, bases)
+    }
+
+    /// 同 [`InstanceLocks::acquire_with_bases`]，基底要读盘才知道（`chain` 读实例的继承链）：占住实例自己之后
+    /// 才去读。实例正被安装、补全、改名或删除时它的版本 JSON 可能正被替换或挪走，先读的话报出来的会是读文件
+    /// 的错误而不是 `instance_busy`；占住之后链也不会再被别的命令改掉。读链失败时实例自己的占用随错误放开。
+    pub async fn acquire_with_chain(
+        &self,
+        id: &str,
+        activity: InstanceActivity,
+        chain: impl std::future::Future<Output = Result<Vec<String>, CommandError>>,
+    ) -> Result<ChainGuard, CommandError> {
+        let own = self.acquire(id, activity)?;
+        let bases = chain.await?;
+        self.hold_bases(own, id, activity, &bases)
+    }
+
+    fn hold_bases(
+        &self,
+        own: InstanceGuard,
+        id: &str,
+        activity: InstanceActivity,
+        bases: &[String],
+    ) -> Result<ChainGuard, CommandError> {
         let mut keys = HashSet::from([lock_key(id)]);
         let mut held = Vec::with_capacity(bases.len());
         for base in bases {
@@ -172,11 +196,14 @@ impl InstanceLocks {
     ) -> Result<InstanceGuard, CommandError> {
         let key = lock_key(id);
         let mut table = lock_table(&self.table);
-        if let Some(conflict) = table
-            .held
-            .get(&key)
-            .and_then(|holds| holds.iter().find(|h| !activity.compatible_with(h.activity)))
-        {
+        // 冲突有几处时报列表里也报的那一件（实例自己的事、modifying、inherited 依次），不随哪份占用先到而变，
+        // 否则基底自己在运行时，被拒的删除会说成「正在被别的实例使用」，与界面上的状态对不上。
+        if let Some(conflict) = table.held.get(&key).and_then(|holds| {
+            holds
+                .iter()
+                .filter(|h| !activity.compatible_with(h.activity))
+                .min_by_key(|h| h.activity.report_rank())
+        }) {
             return Err(busy(id, conflict));
         }
         let token = table.next;
@@ -194,26 +221,25 @@ impl InstanceLocks {
         })
     }
 
-    /// 实例此刻在做的事；有几件并行时报最值得界面知道的那一件。
+    /// 实例此刻在做的事，同 [`InstanceLocks::occupancy`] 的前一半；只有用例单看它。
+    #[cfg(test)]
     pub fn activity(&self, id: &str) -> Option<InstanceActivity> {
-        lock_table(&self.table)
-            .held
-            .get(&lock_key(id))
-            .and_then(|holds| {
-                holds
-                    .iter()
-                    .map(|h| h.activity)
-                    .min_by_key(|activity| activity.report_rank())
-            })
+        self.occupancy(id).0
     }
 
-    /// 正以 `id` 为基底的实例；有几个时报最早占到的那个（与 instance_busy 报的是同一个），没有被当作
-    /// 基底时为 `None`。
-    pub fn used_by(&self, id: &str) -> Option<String> {
-        lock_table(&self.table)
-            .held
-            .get(&lock_key(id))
-            .and_then(|holds| holds.iter().find_map(|h| h.used_by.clone()))
+    /// 实例此刻在做的事（有几件并行时报最值得界面知道的那一件）与正以它为基底的实例（有几个时报最早占到的
+    /// 那个，与 instance_busy 报的是同一个；没被当作基底时为 `None`），在同一次查表里取出。实例列表与删除预览
+    /// 用它：分两次查的话，两次之间别的命令占上或放开基底，就会报出「inherited 却没有 used_by」这类对不上的一对。
+    pub fn occupancy(&self, id: &str) -> (Option<InstanceActivity>, Option<String>) {
+        let table = lock_table(&self.table);
+        let Some(holds) = table.held.get(&lock_key(id)) else {
+            return (None, None);
+        };
+        let activity = holds
+            .iter()
+            .map(|h| h.activity)
+            .min_by_key(|activity| activity.report_rank());
+        (activity, holds.iter().find_map(|h| h.used_by.clone()))
     }
 }
 
@@ -832,9 +858,10 @@ fn content_dto(content: InstanceContent) -> InstanceContentDto {
 
 /// 删除预览带上实例此刻的占用：它在做的事与正以它为基底的实例，删除确认据此提前说明为什么删不了。
 fn preview_dto(preview: DeletionPreview, locks: &InstanceLocks) -> DeletionPreviewDto {
+    let (activity, used_by) = locks.occupancy(&preview.id);
     DeletionPreviewDto {
-        activity: locks.activity(&preview.id),
-        used_by: locks.used_by(&preview.id),
+        activity,
+        used_by,
         id: preview.id,
         worlds: preview.worlds.into_iter().map(world_dto).collect(),
         size_bytes: preview.size_bytes,
@@ -935,8 +962,7 @@ pub(crate) async fn list_instances_with(
     Ok(list
         .into_iter()
         .map(|summary| {
-            let activity = locks.activity(&summary.id);
-            let used_by = locks.used_by(&summary.id);
+            let (activity, used_by) = locks.occupancy(&summary.id);
             let play = plays.get(&summary.id);
             InstanceDto {
                 used_by,
@@ -1183,8 +1209,11 @@ pub(crate) async fn repair_instance_with(
     let aurora = facade.snapshot().await;
     // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名或补全。
     // 依赖检查只在删除、改名动手那一刻扫一次，挡不住补全中途的这些操作。
-    let bases = aurora.inheritance_chain(id).await.map_err(instance_error)?;
-    let _guard = locks.acquire_with_bases(id, InstanceActivity::Repairing, &bases)?;
+    let _guard = locks
+        .acquire_with_chain(id, InstanceActivity::Repairing, async {
+            aurora.inheritance_chain(id).await.map_err(instance_error)
+        })
+        .await?;
     let task = tasks.register(task_id)?;
     let aurora = aurora.with_cancel(task.token().clone());
     let (plan, marker) = aurora.begin_repair(id).await.map_err(instance_error)?;
@@ -1934,6 +1963,36 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY);
+    }
+
+    /// 实例自己正被占着时补全先报 instance_busy，不先去读它的版本 JSON：安装途中 JSON 正被替换、一时读不出来时，
+    /// 补全该说「正在安装」，而不是一个读文件的错误；被拒的补全不占任务 id。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repairing_a_busy_instance_is_refused_before_its_chain_is_read() {
+        let env = Env::new();
+        std::fs::create_dir_all(
+            env.game_dir()
+                .join("versions")
+                .join("装到 一半")
+                .join("装到 一半.json"),
+        )
+        .unwrap();
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let installing = locks
+            .acquire("装到 一半", InstanceActivity::Installing)
+            .unwrap();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let err = repair_instance_with(&env.facade, &registry, &locks, "r", "装到 一半", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY, "{err:?}");
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "装到 一半", "activity": "installing" })
+        );
+        assert!(!registry.is_running("r"));
+        drop(installing);
     }
 
     /// 传统布局的加载器实例补全时把客户端 jar 与 natives 写进继承链根的目录：补全期间删除、改名基底都以
@@ -3036,6 +3095,80 @@ mod tests {
     #[should_panic(expected = "基底占用要记下使用者")]
     fn inherited_is_only_taken_together_with_its_user() {
         let _ = InstanceLocks::default().acquire("1.20.1", InstanceActivity::Inherited);
+    }
+
+    /// 列表与删除预览里的 activity 和 used_by 必须是同一刻的：别的命令同时占上、放开基底时，不能报出
+    /// 「inherited 却没有 used_by」或「有 used_by 却没有 activity」这样的一对，前端把它当作契约破了直接抛错，
+    /// 整个实例列表就刷新失败。
+    #[test]
+    fn occupancy_reads_activity_and_user_at_the_same_moment() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use InstanceActivity::*;
+        let locks = InstanceLocks::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let churn = std::thread::spawn({
+            let (locks, stop) = (locks.clone(), stop.clone());
+            move || {
+                let bases = ["1.20.1".to_owned()];
+                while !stop.load(Ordering::Relaxed) {
+                    drop(
+                        locks
+                            .acquire_with_bases("Fabric", Launching, &bases)
+                            .unwrap(),
+                    );
+                }
+            }
+        });
+        let (mut idle, mut used) = (0u32, 0u32);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && (idle < 1_000 || used < 1_000) {
+            match locks.occupancy("1.20.1") {
+                (None, None) => idle += 1,
+                (Some(Inherited), Some(user)) if user == "Fabric" => used += 1,
+                torn => {
+                    stop.store(true, Ordering::Relaxed);
+                    panic!("activity 与 used_by 不是同一刻的：{torn:?}");
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        assert!(idle > 0 && used > 0, "两种状态都该看到过：{idle} / {used}");
+    }
+
+    /// 基底自己也在运行或改动时，被拒的删除、改名、补全报它自己的事，与列表里的 activity 一致，
+    /// 不随哪一份占用先到而变：实例自己的事优先，其次 modifying，最后 inherited。
+    #[test]
+    fn busy_reports_the_same_activity_the_list_shows() {
+        use InstanceActivity::*;
+        let locks = InstanceLocks::default();
+        let bases = ["1.20.1".to_owned()];
+        let fabric = locks.acquire_with_bases("Fabric", Running, &bases).unwrap();
+        let modifying = locks.acquire("1.20.1", Modifying).unwrap();
+        let game = locks.acquire("1.20.1", Running).unwrap();
+        for activity in [Deleting, Renaming, Repairing, Installing] {
+            let err = locks.acquire("1.20.1", activity).err().unwrap();
+            assert_eq!(locks.activity("1.20.1"), Some(Running));
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "1.20.1", "activity": "running" }),
+                "{activity:?}"
+            );
+            assert_eq!(err.message, "实例 1.20.1 正在运行，请稍后再试");
+        }
+        drop(game);
+        let err = locks.acquire("1.20.1", Deleting).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "modifying" })
+        );
+        drop(modifying);
+        let err = locks.acquire("1.20.1", Deleting).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric" })
+        );
+        drop(fabric);
     }
 
     #[test]

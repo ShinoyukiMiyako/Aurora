@@ -24,3 +24,25 @@ describe("复制错误信息的文本", () => {
     expect(errorDetail("boom")).toBe("boom");
   });
 });
+
+describe("实例被当作基底时被拒的通知正文", () => {
+  it("instance_busy 的 activity 为 inherited：正文写正在用它的实例，与禁用提示同一组文案", () => {
+    const user = "Fabric 生存 1.20.1";
+    const error = new IpcError("instance_busy", `实例 1.20.1 正在被实例 ${user} 使用，请稍后再试`, {
+      id: "1.20.1",
+      activity: "inherited",
+      used_by: user,
+    });
+    expect(describeError(error)).toBe(`实例「${user}」正在使用它`);
+  });
+
+  it("其余占用照写后端原文", () => {
+    const error = new IpcError("instance_busy", "实例 1.20.1 正在运行，请稍后再试", { id: "1.20.1", activity: "running" });
+    expect(describeError(error)).toBe("实例 1.20.1 正在运行，请稍后再试");
+  });
+
+  it("inherited 却没说是谁在用：前后端契约破了，直接抛错", () => {
+    const error = new IpcError("instance_busy", "实例 1.20.1 正在被实例 X 使用，请稍后再试", { id: "1.20.1", activity: "inherited" });
+    expect(() => describeError(error)).toThrow("没说是哪个实例在用");
+  });
+});
