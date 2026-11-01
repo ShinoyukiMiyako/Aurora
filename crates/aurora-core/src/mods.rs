@@ -1895,7 +1895,7 @@ mod tests {
         assert!(checks[1].can_rollback);
         let update_id = history.events[1].id().to_owned();
         aurora.rollback("1.21", &update_id).await.unwrap();
-        assert_eq!(dir_names(&mods_dir).await, vec!["sodium-v1.jar"]);
+        assert_eq!(dir_names(&mods_dir).await, vec!["sodium-v1.jar.disabled"]);
         let ledger = aurora.ledger_store("1.21").load().await.unwrap();
         let restored = ledger.find("sodium-v1.jar").unwrap();
         assert_eq!(restored.version_number.as_deref(), Some("v1.0"));

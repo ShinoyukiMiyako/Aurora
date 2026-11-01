@@ -406,7 +406,8 @@ impl Aurora {
             .collect())
     }
 
-    /// 回滚一次更新：把 `<old_file>.old` 改回原名、删掉更新装上的新文件，再追加一条回滚事件。
+    /// 回滚一次更新：把 `<old_file>.old` 改回原名、删掉更新装上的新文件，再追加一条回滚事件。启用状态跟着
+    /// Mod 走，新文件此刻是停用的，旧文件也恢复成停用的。
     ///
     /// 全部前置检查（事件存在、是更新事件、没回滚过、没被之后的更新盖过、备份还在、目标名没被占、
     /// 文件没被游戏占用）通过后才动第一次盘。半个回滚比不回滚更糟——玩家会拿到一个既不是旧版也不是新版的 mods 目录，
@@ -469,14 +470,21 @@ impl Aurora {
                 format!("回滚事件 {event_id} 需要备份文件 {backup_file}，它已不在 mods 目录里"),
             ));
         }
-        let restored = mods_dir.join(old_file);
+        let disabled = !try_exists(&mods_dir.join(file_name)).await?
+            && try_exists(&mods_dir.join(format!("{file_name}{DISABLED_SUFFIX}"))).await?;
+        let restored_name = if disabled {
+            format!("{old_file}{DISABLED_SUFFIX}")
+        } else {
+            old_file.clone()
+        };
+        let restored = mods_dir.join(&restored_name);
         // 原地更新（新旧同名）时目标就是待删的新文件，删完自然腾空，不算被占用；只有改名更新才需要
         // 提防「目标名上另有其人」——直接 rename 会把它悄无声息地覆盖掉。
         if old_file != file_name && try_exists(&restored).await? {
             return Err(refuse(
                 &restored,
                 std::io::ErrorKind::AlreadyExists,
-                format!("回滚目标 {old_file} 已存在于 mods 目录，拒绝覆盖它"),
+                format!("回滚目标 {restored_name} 已存在于 mods 目录，拒绝覆盖它"),
             ));
         }
         ensure_not_held(vec![
@@ -923,6 +931,96 @@ mod tests {
             }
             other => panic!("期望回滚拒绝错误，得到 {other:?}"),
         }
+    }
+
+    /// 启用状态跟着 Mod 走：新文件此刻是停用的，回滚照样把它删掉，回来的旧文件也是停用的，sha1 照常按复原的
+    /// 文件重算。
+    #[tokio::test]
+    async fn rollback_of_a_disabled_mod_keeps_it_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        for (event, at, new_file, old_file) in [
+            ("200-001", 200, "sodium-0.6.0.jar", "sodium-0.5.3.jar"),
+            // 原地更新：回滚目标与待删的新文件同名。
+            ("300-001", 300, "sodium.jar", "sodium.jar"),
+        ] {
+            tokio::fs::write(mods_dir.join(format!("{new_file}.disabled")), NEW_BYTES)
+                .await
+                .unwrap();
+            tokio::fs::write(mods_dir.join(format!("{old_file}.old")), OLD_BYTES)
+                .await
+                .unwrap();
+            let ledger_store = aurora.ledger_store(VERSION_ID);
+            let mut ledger = Ledger::default();
+            ledger.upsert(ledger_entry(new_file, "NEW-VER", &sha1_hex(NEW_BYTES)));
+            ledger_store.save(&ledger).await.unwrap();
+            aurora
+                .history_store(VERSION_ID)
+                .append(update_event(
+                    event, at, new_file, old_file, "OLD-VER", "NEW-VER",
+                ))
+                .await
+                .unwrap();
+
+            aurora.rollback(VERSION_ID, event).await.unwrap();
+
+            assert_eq!(
+                dir_names(&mods_dir).await,
+                vec![format!("{old_file}.disabled")]
+            );
+            assert_eq!(
+                tokio::fs::read(mods_dir.join(format!("{old_file}.disabled")))
+                    .await
+                    .unwrap(),
+                OLD_BYTES
+            );
+            let ledger = ledger_store.load().await.unwrap();
+            let entry = ledger.find(old_file).expect("旧文件应有卷宗条目");
+            assert_eq!(entry.sha1.as_deref(), Some(sha1_hex(OLD_BYTES).as_str()));
+            tokio::fs::remove_file(mods_dir.join(format!("{old_file}.disabled")))
+                .await
+                .unwrap();
+        }
+    }
+
+    /// 改名更新回滚时，停用态的目标名被别的文件占着同样拒绝，不悄悄盖掉。
+    #[tokio::test]
+    async fn rollback_of_a_disabled_mod_refuses_to_overwrite_the_disabled_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        tokio::fs::write(mods_dir.join("sodium-0.6.0.jar.disabled"), NEW_BYTES)
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("sodium-0.5.3.jar.old"), OLD_BYTES)
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("sodium-0.5.3.jar.disabled"), b"someone else")
+            .await
+            .unwrap();
+        aurora
+            .history_store(VERSION_ID)
+            .append(update_event(
+                "200-001",
+                200,
+                "sodium-0.6.0.jar",
+                "sodium-0.5.3.jar",
+                "OLD-VER",
+                "NEW-VER",
+            ))
+            .await
+            .unwrap();
+
+        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+
+        let (path, reason) = refusal(&err);
+        assert_eq!(path, mods_dir.join("sodium-0.5.3.jar.disabled"));
+        assert!(reason.contains("已存在"), "{reason}");
+        assert_eq!(
+            tokio::fs::read(mods_dir.join("sodium-0.5.3.jar.disabled"))
+                .await
+                .unwrap(),
+            b"someone else"
+        );
     }
 
     /// 正常回滚：旧文件按原名复原、新文件与备份消失、卷宗身份改回旧版本、历史多出一条回滚事件。
@@ -1427,36 +1525,6 @@ mod tests {
                 "sodium-0.6.0.jar"
             ]
         );
-    }
-
-    /// 玩家更新后把新文件禁用了：回滚照样把 `.disabled` 那份删掉，不留下一个只是没启用的新版。
-    #[tokio::test]
-    async fn rollback_removes_the_new_file_even_when_player_disabled_it() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
-
-        tokio::fs::write(mods_dir.join("sodium-0.6.0.jar.disabled"), NEW_BYTES)
-            .await
-            .unwrap();
-        tokio::fs::write(mods_dir.join("sodium-0.5.3.jar.old"), OLD_BYTES)
-            .await
-            .unwrap();
-
-        aurora
-            .history_store(VERSION_ID)
-            .append(update_event(
-                "200-001",
-                200,
-                "sodium-0.6.0.jar",
-                "sodium-0.5.3.jar",
-                "OLD-VER",
-                "NEW-VER",
-            ))
-            .await
-            .unwrap();
-
-        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
-        assert_eq!(dir_names(&mods_dir).await, vec!["sodium-0.5.3.jar"]);
     }
 
     /// 新文件正被别的进程以「不许删除」的方式打开（游戏在跑）：回滚在动盘之前整体拒绝。
