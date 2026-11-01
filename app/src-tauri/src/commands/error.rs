@@ -151,6 +151,9 @@ pub mod code {
     pub const OPEN_FAILED: &str = "open_failed";
     /// 要改动的 Mod 文件正被占用（游戏运行中）。detail：`{ path }`，为被占用的文件。
     pub const MOD_FILE_BUSY: &str = "mod_file_busy";
+    /// 本地 jar 不能加进实例（重名、同一个 Mod 已装、不是 jar 等），message 可以直接给玩家看。detail：`{ path }`，
+    /// 为被拒的文件。
+    pub const LOCAL_MOD_REFUSED: &str = "local_mod_refused";
     /// 这个实例写不成 Modrinth 整合包。detail：`{ id, reason, loader? }`，reason 为 version_unknown /
     /// loader_unsupported / loader_version_unknown / multiple_loaders / incomplete，loader 只在加载器
     /// 不受支持时给出。
@@ -315,6 +318,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::ConfigParse { .. } => code::CONFIG_INVALID,
         CoreError::ConfigSerialize(_) => code::CONFIG_SERIALIZE,
         CoreError::VersionNotInstalled { .. } => code::VERSION_NOT_INSTALLED,
+        CoreError::LocalModRefused { .. } => code::LOCAL_MOD_REFUSED,
         CoreError::ModVersionNotFound { .. } => code::MOD_VERSION_NOT_FOUND,
         CoreError::NoJava { .. } => code::JAVA_MISSING,
         CoreError::PrecheckFailed(_) => code::PRECHECK_FAILED,
@@ -690,7 +694,8 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::Base(BaseError::Io { path, .. })
-        | CoreError::GpuPreferenceWrite { path, .. } => {
+        | CoreError::GpuPreferenceWrite { path, .. }
+        | CoreError::LocalModRefused { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::Fetch { url, .. }

@@ -950,6 +950,9 @@ export const TOAST_COPY = {
   modsEnabled: (count: number) => `已启用 ${count} 个 Mod`,
   modsDisabled: (count: number) => ({ title: `已停用 ${count} 个 Mod`, body: "文件名后加了 .disabled，随时可以再启用" }),
   modsToggleFailed: (count: number, enabled: boolean) => (enabled ? `${count} 个 Mod 没能启用` : `${count} 个 Mod 没能停用`),
+  modAdded: (fileName: string) => `已添加 ${fileName}`,
+  modsAdded: (count: number) => `已添加 ${count} 个 Mod`,
+  modsAddFailed: (added: number, failed: number) => (added === 0 ? `${failed} 个 Mod 没能添加` : `已添加 ${added} 个 Mod，${failed} 个没能添加`),
   modsRemoved: (count: number) => `已移除 ${count} 个 Mod`,
   modsRemoveFailed: (count: number) => `${count} 个 Mod 没能移除`,
   /** 批量动作里失败的几项原因不止一种时的正文；只有一种时直接写后端原文。 */
@@ -1020,6 +1023,7 @@ export const ACTION_ERROR = {
   pin: "侧栏固定没有保存",
   selectInstance: "没能设为当前实例",
   toggleMod: "Mod 开关没有生效",
+  addMod: "没能添加 Mod",
   removeMod: "没能移除 Mod",
   updateMods: "没能检查 Mod 更新",
   updateHold: "更新检查设置没有保存",

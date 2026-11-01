@@ -1,4 +1,4 @@
-// 放置提示：把整合包文件或外置登录服务器链接拖过窗口时，整窗盖一层强调色虚线框与一句说明松开会做什么。
+// 放置提示：把整合包文件、外置登录服务器链接或要添加的 .jar 拖过窗口时，整窗盖一层强调色虚线框与一句说明松开会做什么。
 // 不接指针事件（拖放由原生层处理，这一层只是提示）。
 // 读屏只播报已经挂着的 live region 里后来的变化，带着文字一起插入的 status 往往不播报：
 // 所以播报用一个常驻、视觉隐藏的 status 节点，只换里面的字；看得见的那层随拖放进出，对读屏隐藏。
@@ -13,6 +13,7 @@ import type { FileDropHint } from "./file-drop";
 const HINT: Readonly<Record<Exclude<FileDropHint, null>, { text: string; icon: IconName }>> = {
   modpack: { text: DROP_COPY.modpackHint, icon: "upload" },
   auth_server: { text: DROP_COPY.authServerHint, icon: "server" },
+  mods: { text: DROP_COPY.modsHint, icon: "box" },
 };
 
 export function DropHint({ hint }: { hint: FileDropHint }) {

@@ -21,7 +21,7 @@ import {
 } from "../instances";
 import { launchGame, onGameExit, onWorldBackup, playStats, type WorldBackupEvent } from "../launch";
 import { exportModpack, type ModpackExportOptions } from "../modpack";
-import { checkUpdates, removeMod, setModEnabled, updateMod } from "../mods";
+import { addLocalMods, checkUpdates, removeMod, setModEnabled, updateMod } from "../mods";
 import { cancelTask } from "../tasks";
 import { resetMocks } from ".";
 import { clearMockEventListeners } from "./events";
@@ -174,6 +174,7 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
       expect((await busy(openFolder("screenshots", FABRIC)))[1]).toEqual(expected);
       expect((await busy(setModEnabled(FABRIC, "AANobbMI-0.5.3.jar", false)))[1]).toEqual(expected);
       expect((await busy(removeMod(FABRIC, "handmade-1.0.jar")))[1]).toEqual(expected);
+      expect((await busy(addLocalMods(FABRIC, ["D:\\dl\\extra.jar"])))[1]).toEqual(expected);
       expect((await busy(updateMod("t-up", FABRIC, "handmade-1.0.jar", "v1")))[1]).toEqual(expected);
       expect((await busy(installMod("t-mod", FABRIC, "modrinth", "AANobbMI", "mr-sodium-0.5.11")))[1]).toEqual(expected);
       expect((await busy(rollback(FABRIC, "e1")))[1]).toEqual(expected);

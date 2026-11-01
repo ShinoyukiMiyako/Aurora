@@ -105,7 +105,7 @@ pub use modpack::{
     validate_instance_name,
 };
 pub use modpack_summary::ModpackSummary;
-pub use mods::{InstanceMod, ModInstallOutcome, ModSource, ModToggleOutcome};
+pub use mods::{InstanceMod, LocalModOutcome, ModInstallOutcome, ModSource, ModToggleOutcome};
 pub use modversions::ProjectInfo;
 pub use news::{LauncherChannel, NewsFeed, NewsItem, NewsTag};
 pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};

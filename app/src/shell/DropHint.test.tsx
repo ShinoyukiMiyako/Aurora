@@ -34,6 +34,11 @@ describe("放置提示的读屏播报", () => {
     expect(region.textContent).toBe(DROP_COPY.authServerHint);
     expect(region.dataset.hint).toBe("auth_server");
 
+    view.rerender(ui("mods"));
+    expect(liveRegions()).toEqual([region]);
+    expect(region.textContent).toBe(DROP_COPY.modsHint);
+    expect(region.dataset.hint).toBe("mods");
+
     view.rerender(ui(null));
     expect(liveRegions()).toEqual([region]);
     expect(region.isConnected).toBe(true);

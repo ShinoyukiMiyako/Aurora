@@ -189,6 +189,7 @@ pub fn run() {
             commands::mods::list_mods,
             commands::mods::set_mod_enabled,
             commands::mods::set_mods_enabled,
+            commands::mods::add_local_mods,
             commands::mods::remove_mod,
             commands::mods::set_mod_update_hold,
             commands::mods::check_updates,

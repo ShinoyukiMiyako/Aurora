@@ -538,6 +538,68 @@ describe("更新预览里勾选的几项", () => {
   });
 });
 
+describe("添加本地 Mod", () => {
+  const toastsNow = () => store.getState().toasts.map((t) => [t.tone, t.title, t.body]);
+  const ok = (source: string, fileName: string) => ({ status: "ok", source, file_name: fileName });
+  const refused = (source: string, message: string) => ({ status: "error", source, error: { code: "local_mod_refused", message } });
+
+  it("一个加成：success 通知写落盘的文件名，Mod 列表、历史、可更新项与落位矩阵失效，实例摘要重取", async () => {
+    ipc.overrides.set("add_local_mods", () => [ok("D:\\dl\\Sodium.JAR", "Sodium.jar")]);
+    const mods = await cached("mods:生存");
+    const history = await cached("history:生存");
+    const updates = await cached("mod-updates:生存");
+    const matrix = await cached("match:modrinth:sodium:mod:auto");
+    const other = await cached("mods:创造");
+    const listedBefore = callsOf(ipc, "list_instances").length;
+
+    await store.actions.addLocalMods("生存", ["D:\\dl\\Sodium.JAR"]);
+
+    expect(callsOf(ipc, "add_local_mods")).toEqual([{ versionId: "生存", paths: ["D:\\dl\\Sodium.JAR"] }]);
+    expect(toastsNow()).toEqual([["success", "已添加 Sodium.jar", undefined]]);
+    expect(await readAgain("mods:生存", mods)).toBe(2);
+    expect(await readAgain("history:生存", history)).toBe(2);
+    expect(await readAgain("mod-updates:生存", updates)).toBe(2);
+    expect(await readAgain("match:modrinth:sodium:mod:auto", matrix)).toBe(2);
+    expect(await readAgain("mods:创造", other)).toBe(1);
+    expect(callsOf(ipc, "list_instances").length).toBe(listedBefore + 1);
+  });
+
+  it("多个全部加成：通知写个数", async () => {
+    ipc.overrides.set("add_local_mods", () => [ok("a", "a.jar"), ok("b", "b.jar"), ok("c", "c.jar")]);
+    await store.actions.addLocalMods("生存", ["a", "b", "c"]);
+    expect(toastsNow()).toEqual([["success", "已添加 3 个 Mod", undefined]]);
+  });
+
+  it("部分被拒：warning 通知写加成与没加成的个数和原因；两种原因时写原因各不相同；全被拒时只写没加成的个数", async () => {
+    ipc.overrides.set("add_local_mods", () => [ok("a", "a.jar"), refused("b", "mods 目录里已有 b.jar，先移除它再添加")]);
+    await store.actions.addLocalMods("生存", ["a", "b"]);
+    expect(toastsNow()).toEqual([["warning", "已添加 1 个 Mod，1 个没能添加", "mods 目录里已有 b.jar，先移除它再添加"]]);
+
+    ipc.overrides.set("add_local_mods", () => [ok("a", "a.jar"), refused("b", "b.jar 是空文件"), refused("c", "c.jar 不是 .jar 文件")]);
+    await store.actions.addLocalMods("生存", ["a", "b", "c"]);
+    expect(toastsNow().at(-1)).toEqual(["warning", "已添加 1 个 Mod，2 个没能添加", "原因各不相同"]);
+
+    ipc.overrides.set("add_local_mods", () => [refused("a", "a.jar 是空文件"), refused("b", "a.jar 是空文件")]);
+    await store.actions.addLocalMods("生存", ["a", "b"]);
+    expect(toastsNow().at(-1)).toEqual(["warning", "2 个 Mod 没能添加", "a.jar 是空文件"]);
+  });
+
+  it("整次失败照常抛出、不发通知；文件可能已经落盘（历史没写成），列表照样失效", async () => {
+    ipc.overrides.set("add_local_mods", () => {
+      throw new IpcError("io", "文件 IO 失败: history.json");
+    });
+    const mods = await cached("mods:生存");
+    await expect(store.actions.addLocalMods("生存", ["a"])).rejects.toMatchObject({ code: "io" });
+    expect(toastsNow()).toEqual([]);
+    expect(await readAgain("mods:生存", mods)).toBe(2);
+  });
+
+  it("空数组是界面的错：直接报错，不发命令", async () => {
+    await expect(store.actions.addLocalMods("生存", [])).rejects.toThrow("至少要有一个文件");
+    expect(callsOf(ipc, "add_local_mods")).toEqual([]);
+  });
+});
+
 describe("批量启停与移除", () => {
   const infoAndWarnings = () => store.getState().toasts.map((t) => [t.tone, t.title, t.body]);
 

@@ -17,8 +17,11 @@
 //!
 //! 所有改动 mods 目录的操作都在该目录的写锁下进行，并在动第一个文件前探测占用（游戏运行时 jar 被
 //! JVM 打开着，Windows 上既不能改名也不能删）。
+//!
+//! 玩家拖进来的本地 jar 走 [`Aurora::add_local_mods`]：同样先进暂存再移进 `mods/`、同样在写锁下、同样记
+//! 历史，但没有平台版本可记，所以不写卷宗，也不顶替已有文件。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use aurora_download::DownloadTask;
@@ -115,6 +118,15 @@ pub struct ModToggleOutcome {
     pub file_name: String,
     /// 切换后的磁盘路径，或这一个文件失败的原因。
     pub result: Result<PathBuf>,
+}
+
+/// 添加本地 jar 时一个文件的结果。
+#[derive(Debug)]
+pub struct LocalModOutcome {
+    /// 入参里的路径，原样带回。
+    pub source: PathBuf,
+    /// 落进 mods 目录的文件名，或这一个文件没加成的原因。
+    pub result: Result<String>,
 }
 
 /// 实例 Mod 列表的一项：磁盘扫描结果 + 卷宗 join 出的来源与图标。
@@ -247,6 +259,55 @@ impl Aurora {
             events,
         )
         .await
+    }
+
+    /// 把玩家拖进来的本地 jar 复制进实例的 mods 目录，逐个给出结果，顺序与入参一致。
+    ///
+    /// 本地文件没有平台版本可记，所以不写卷宗：列表里它就是「本地文件」，之后检查更新按哈希反查能补上身份。
+    /// 历史照记一条安装事件。
+    ///
+    /// 已有同名文件或同一个 `mod_id` 时拒绝这一个，不走更新路径顶替：平台更新知道换的是哪两个版本，回滚才有
+    /// 依据，本地文件是什么版本无从查考，玩家要换就先移除旧的。不判加载器对不对得上：描述文件只说明这个 jar
+    /// 最先被哪种读法认出来，Quilt 读 Fabric 的 jar、老版 NeoForge 读 `mods.toml`、一个 jar 打多个加载器的描述
+    /// 文件都是常态，判不准就不替玩家拒绝，与手动放进 mods 文件夹同一口径。
+    ///
+    /// 单个文件被拒不中断其余：一批里一个重名不该让另外几个也进不来。外层错误只来自实例解析不了、mods 目录
+    /// 读不出，或文件已落盘而历史没写成。
+    pub async fn add_local_mods(
+        &self,
+        version_id: &str,
+        sources: &[PathBuf],
+    ) -> Result<Vec<LocalModOutcome>> {
+        let dirs = self.resolved_dirs(version_id).await?;
+        let _guard = lock_mods_dir(&dirs.mods_dir).await;
+        let mut taken = installed_mod_ids(&dirs).await?;
+        let staging_dir = new_staging_dir(&dirs.working_dir);
+
+        let mut outcomes = Vec::with_capacity(sources.len());
+        let mut added = Vec::new();
+        for source in sources {
+            let result = add_local_jar(&dirs.mods_dir, &staging_dir, &mut taken, source).await;
+            if let Ok(file_name) = &result {
+                added.push(file_name.clone());
+            }
+            outcomes.push(LocalModOutcome {
+                source: source.clone(),
+                result,
+            });
+        }
+        discard_staging(&staging_dir, None).await;
+
+        if !added.is_empty() {
+            let at = now_unix();
+            self.history_store(version_id)
+                .append_with(at, |id| HistoryEvent::Install {
+                    id,
+                    at,
+                    files: added,
+                })
+                .await?;
+        }
+        Ok(outcomes)
     }
 
     /// 列出指定实例的已装 Mod（含禁用态），并从卷宗 join 出平台来源与图标。
@@ -459,11 +520,7 @@ impl Aurora {
         let main_planned_file = main.version.file_name.clone();
 
         let dirs = self.resolved_dirs(version_id).await?;
-        let staging_dir = dirs
-            .working_dir
-            .join(AURORA_META_DIR)
-            .join(STAGING_DIR)
-            .join(format!("{}-{:08x}", now_unix(), fastrand::u32(..)));
+        let staging_dir = new_staging_dir(&dirs.working_dir);
 
         let total = items.len();
         let pending: Vec<PlannedItem> = items
@@ -1073,18 +1130,148 @@ async fn find_previous_by_mod_id(
     Ok(None)
 }
 
-/// 读一个暂存 jar 的 `mod_id`；没有可识别的描述文件返回 `None`。
+/// 读一个 jar 的 `mod_id`；没有可识别的描述文件返回 `None`。
 ///
 /// 解析失败同样返回 `None`（记告警）：这道判据是额外收益，读不出元数据的 jar（损坏包、非标准打包）
-/// 不该让整次安装失败——它已经通过了平台声明的完整性校验。
+/// 不该让整次安装失败——它已经通过了平台声明的完整性校验，本地文件则是玩家明确要放进来的。
 async fn mod_id_of(path: &Path) -> Option<String> {
     match parse_mod_metadata(path).await {
         Ok(meta) => meta.map(|meta| meta.mod_id),
         Err(err) => {
-            tracing::warn!(path = %path.display(), error = %err, "读取暂存 jar 的 mod_id 失败，跳过按 mod_id 查重");
+            tracing::warn!(path = %path.display(), error = %err, "读取 jar 的 mod_id 失败，跳过按 mod_id 查重");
             None
         }
     }
+}
+
+/// 实例里已装 Mod 的 `mod_id` 到磁盘文件名（停用态也算：启用它时一样会和新文件撞）。
+async fn installed_mod_ids(dirs: &InstanceDirs) -> Result<HashMap<String, String>> {
+    Ok(scan_installed(dirs)
+        .await?
+        .into_iter()
+        .filter_map(|item| Some((item.metadata?.mod_id, item.file_name)))
+        .collect())
+}
+
+/// 本次改动独占的暂存子目录，见 [`STAGING_DIR`]。
+fn new_staging_dir(working_dir: &Path) -> PathBuf {
+    working_dir
+        .join(AURORA_META_DIR)
+        .join(STAGING_DIR)
+        .join(format!("{}-{:08x}", now_unix(), fastrand::u32(..)))
+}
+
+fn local_refusal(source: &Path, reason: String) -> CoreError {
+    CoreError::LocalModRefused {
+        path: source.to_owned(),
+        reason,
+    }
+}
+
+/// 本地文件落进 mods 目录时用的文件名：扩展名统一成小写 `.jar`，列表与启停只认这个写法，原样落盘就成了
+/// mods 目录里一个看不见、摘不掉的文件。
+fn local_jar_name(source: &Path) -> Result<String> {
+    let name = source.file_name().map_or_else(
+        || source.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let lowered = name.to_ascii_lowercase();
+    let Some(stem) = lowered.strip_suffix(".jar") else {
+        return Err(local_refusal(source, format!("{name} 不是 .jar 文件")));
+    };
+    let file_name = format!("{}.jar", &name[..stem.len()]);
+    if !is_plain_file_name(&file_name) {
+        return Err(local_refusal(
+            source,
+            format!("{name} 这个文件名放不进 mods 目录"),
+        ));
+    }
+    Ok(file_name)
+}
+
+/// 把一个本地 jar 过完检查后移进 mods 目录，返回落盘的文件名。调用方持有 mods 目录写锁，`taken` 随之更新，
+/// 同一批后面的文件才撞得上前面刚落盘的。
+async fn add_local_jar(
+    mods_dir: &Path,
+    staging_dir: &Path,
+    taken: &mut HashMap<String, String>,
+    source: &Path,
+) -> Result<String> {
+    let file_name = local_jar_name(source)?;
+    let meta = tokio::fs::metadata(source)
+        .await
+        .map_err(|err| aurora_base::Error::Io {
+            path: source.to_owned(),
+            source: err,
+        })?;
+    if !meta.is_file() {
+        return Err(local_refusal(source, format!("{file_name} 不是文件")));
+    }
+    if meta.len() == 0 {
+        return Err(local_refusal(source, format!("{file_name} 是空文件")));
+    }
+    if present(mods_dir, &file_name).await? {
+        return Err(local_refusal(
+            source,
+            format!("mods 目录里已有 {file_name}，先移除它再添加"),
+        ));
+    }
+    let mod_id = mod_id_of(source).await;
+    if let Some(existing) = mod_id.as_ref().and_then(|id| taken.get(id)) {
+        return Err(local_refusal(
+            source,
+            format!("实例里已有同一个 Mod（{existing}），先移除它再添加"),
+        ));
+    }
+
+    let staged = staging_dir.join(&file_name);
+    copy_as_new_file(source, &staged).await?;
+    tokio::fs::create_dir_all(mods_dir)
+        .await
+        .map_err(|err| aurora_base::Error::Io {
+            path: mods_dir.to_owned(),
+            source: err,
+        })?;
+    let dest = mods_dir.join(&file_name);
+    tokio::fs::rename(&staged, &dest)
+        .await
+        .map_err(|err| aurora_base::Error::Io {
+            path: dest,
+            source: err,
+        })?;
+    if let Some(id) = mod_id {
+        taken.insert(id, file_name.clone());
+    }
+    Ok(file_name)
+}
+
+/// 逐字节写成一个新文件，不用 `fs::copy`：系统复制在 Windows 上把修改时刻一起带过来，而本地 Mod 的安装时间
+/// 取的就是这个时刻，「新增」标注与按安装时间排序都会算错。
+async fn copy_as_new_file(source: &Path, dest: &Path) -> Result<()> {
+    if let Some(dir) = dest.parent() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|err| aurora_base::Error::Io {
+                path: dir.to_owned(),
+                source: err,
+            })?;
+    }
+    let mut reader = tokio::fs::File::open(source)
+        .await
+        .map_err(|err| aurora_base::Error::Io {
+            path: source.to_owned(),
+            source: err,
+        })?;
+    let dest_error = |err| aurora_base::Error::Io {
+        path: dest.to_owned(),
+        source: err,
+    };
+    let mut writer = tokio::fs::File::create(dest).await.map_err(dest_error)?;
+    tokio::io::copy(&mut reader, &mut writer)
+        .await
+        .map_err(dest_error)?;
+    writer.sync_all().await.map_err(dest_error)?;
+    Ok(())
 }
 
 /// 把一个暂存文件移进 mods 目录，必要时先给旧文件留一份 `.old` 备份。
@@ -2806,6 +2993,293 @@ mod tests {
         )
         .unwrap();
         zip.finish().unwrap();
+    }
+
+    /// 一个隔离实例加一个放拖入文件的下载目录，模拟玩家从外面拖 jar 进来。
+    async fn local_add_fixture(mc: &Path) -> (Aurora, PathBuf, PathBuf) {
+        put_version(mc, "1.21").await;
+        let aurora = isolated_aurora(mc, "http://127.0.0.1:9".to_owned());
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let downloads = mc.join("downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        (aurora, mods_dir, downloads)
+    }
+
+    fn added_name(outcome: &LocalModOutcome) -> &str {
+        match &outcome.result {
+            Ok(name) => name,
+            Err(err) => panic!("{} 应当加成，实得 {err:?}", outcome.source.display()),
+        }
+    }
+
+    fn refused_reason(outcome: &LocalModOutcome) -> String {
+        match &outcome.result {
+            Err(CoreError::LocalModRefused { path, reason }) => {
+                assert_eq!(path, &outcome.source, "拒绝原因要指向玩家拖进来的那个文件");
+                reason.clone()
+            }
+            other => panic!("{} 应当被拒，实得 {other:?}", outcome.source.display()),
+        }
+    }
+
+    /// 单个与多个 jar 都复制进 mods（原文件留在原处），按「本地文件」列出，历史只记一条安装事件，暂存不留痕。
+    #[tokio::test]
+    async fn local_jars_are_copied_into_mods_as_local_files_with_one_install_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (sodium, lithium) = (downloads.join("sodium.jar"), downloads.join("lithium.jar"));
+        build_mod_jar(&sodium, "sodium");
+        build_mod_jar(&lithium, "lithium");
+
+        let outcomes = aurora
+            .add_local_mods("1.21", &[sodium.clone(), lithium.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(outcomes[0].source, sodium);
+        assert_eq!(added_name(&outcomes[0]), "sodium.jar");
+        assert_eq!(outcomes[1].source, lithium);
+        assert_eq!(added_name(&outcomes[1]), "lithium.jar");
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["lithium.jar", "sodium.jar"]
+        );
+        assert_eq!(
+            std::fs::read(mods_dir.join("sodium.jar")).unwrap(),
+            std::fs::read(&sodium).unwrap()
+        );
+
+        let listed = aurora.list_mods("1.21").await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().all(|m| m.source.is_none()), "{listed:?}");
+
+        let history = aurora.history("1.21").await.unwrap();
+        assert_eq!(history.events.len(), 1);
+        match &history.events[0] {
+            HistoryEvent::Install { files, .. } => {
+                assert_eq!(
+                    files,
+                    &vec!["sodium.jar".to_owned(), "lithium.jar".to_owned()]
+                );
+            }
+            other => panic!("实得 {other:?}"),
+        }
+
+        let staging = mods_dir
+            .parent()
+            .unwrap()
+            .join(AURORA_META_DIR)
+            .join(STAGING_DIR);
+        assert!(dir_names(&staging).await.is_empty());
+    }
+
+    /// 一批里被拒的只影响它自己：同名（启用或停用）、空文件、不是 jar、已经不在了都逐项报，其余照常落盘，已有文件一个字节都不动。
+    #[tokio::test]
+    async fn one_refused_jar_does_not_stop_the_rest_of_the_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        std::fs::write(mods_dir.join("taken.jar"), b"installed bytes").unwrap();
+        std::fs::write(mods_dir.join("off.jar.disabled"), b"disabled bytes").unwrap();
+
+        let taken = downloads.join("taken.jar");
+        let off = downloads.join("off.jar");
+        let blank = downloads.join("blank.jar");
+        let notes = downloads.join("notes.txt");
+        let ghost = downloads.join("ghost.jar");
+        let folder = downloads.join("folder.jar");
+        let fresh = downloads.join("fresh.jar");
+        build_mod_jar(&taken, "taken");
+        build_mod_jar(&off, "off");
+        std::fs::write(&blank, b"").unwrap();
+        std::fs::write(&notes, b"not a mod").unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        build_mod_jar(&fresh, "fresh");
+
+        let outcomes = aurora
+            .add_local_mods(
+                "1.21",
+                &[taken, off, blank, notes, ghost, folder, fresh.clone()],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            refused_reason(&outcomes[0]),
+            "mods 目录里已有 taken.jar，先移除它再添加"
+        );
+        assert_eq!(
+            refused_reason(&outcomes[1]),
+            "mods 目录里已有 off.jar，先移除它再添加"
+        );
+        assert_eq!(refused_reason(&outcomes[2]), "blank.jar 是空文件");
+        assert_eq!(refused_reason(&outcomes[3]), "notes.txt 不是 .jar 文件");
+        assert!(
+            matches!(
+                &outcomes[4].result,
+                Err(CoreError::Base(aurora_base::Error::Io { source, .. }))
+                    if source.kind() == std::io::ErrorKind::NotFound
+            ),
+            "{:?}",
+            outcomes[4]
+        );
+        assert_eq!(refused_reason(&outcomes[5]), "folder.jar 不是文件");
+        assert_eq!(added_name(&outcomes[6]), "fresh.jar");
+
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["fresh.jar", "off.jar.disabled", "taken.jar"]
+        );
+        assert_eq!(
+            std::fs::read(mods_dir.join("taken.jar")).unwrap(),
+            b"installed bytes"
+        );
+        assert_eq!(
+            std::fs::read(mods_dir.join("off.jar.disabled")).unwrap(),
+            b"disabled bytes"
+        );
+        let history = aurora.history("1.21").await.unwrap();
+        assert_eq!(history.events.len(), 1);
+        assert!(
+            matches!(&history.events[0], HistoryEvent::Install { files, .. } if files == &vec!["fresh.jar".to_owned()]),
+            "{:?}",
+            history.events
+        );
+    }
+
+    /// 一个都没加成时不写历史：历史是「发生过什么」的证据，没发生的事不该留记录。
+    #[tokio::test]
+    async fn nothing_added_writes_no_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let notes = downloads.join("notes.txt");
+        std::fs::write(&notes, b"not a mod").unwrap();
+
+        let outcomes = aurora.add_local_mods("1.21", &[notes]).await.unwrap();
+
+        assert_eq!(refused_reason(&outcomes[0]), "notes.txt 不是 .jar 文件");
+        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+        if mods_dir.exists() {
+            assert!(dir_names(&mods_dir).await.is_empty());
+        }
+    }
+
+    /// 同一个 mod_id 的两个 jar 共存时游戏启动即崩：已装的（停用态也算）与同一批里先落盘的都要挡住，原因写明撞了哪个文件。
+    #[tokio::test]
+    async fn local_jar_with_an_installed_mod_id_is_refused_naming_that_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        build_mod_jar(&mods_dir.join("sodium-manual.jar"), "sodium");
+        build_mod_jar(&mods_dir.join("iris-old.jar.disabled"), "iris");
+
+        let newer_sodium = downloads.join("sodium-0.6.jar");
+        let newer_iris = downloads.join("iris-1.8.jar");
+        let first = downloads.join("twin-a.jar");
+        let second = downloads.join("twin-b.jar");
+        build_mod_jar(&newer_sodium, "sodium");
+        build_mod_jar(&newer_iris, "iris");
+        build_mod_jar(&first, "twin");
+        build_mod_jar(&second, "twin");
+
+        let outcomes = aurora
+            .add_local_mods("1.21", &[newer_sodium, newer_iris, first, second])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            refused_reason(&outcomes[0]),
+            "实例里已有同一个 Mod（sodium-manual.jar），先移除它再添加"
+        );
+        assert_eq!(
+            refused_reason(&outcomes[1]),
+            "实例里已有同一个 Mod（iris-old.jar.disabled），先移除它再添加"
+        );
+        assert_eq!(added_name(&outcomes[2]), "twin-a.jar");
+        assert_eq!(
+            refused_reason(&outcomes[3]),
+            "实例里已有同一个 Mod（twin-a.jar），先移除它再添加"
+        );
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["iris-old.jar.disabled", "sodium-manual.jar", "twin-a.jar"]
+        );
+    }
+
+    /// 没有描述文件的 jar（OptiFine 这类）读不出身份，但它是玩家明确要放进来的：照收，和手动放进 mods 文件夹一样。
+    #[tokio::test]
+    async fn local_jar_without_a_descriptor_is_accepted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let optifine = downloads.join("OptiFine_1.21.jar");
+        std::fs::write(&optifine, b"PK-not-really-a-descriptor").unwrap();
+
+        let outcomes = aurora.add_local_mods("1.21", &[optifine]).await.unwrap();
+
+        assert_eq!(added_name(&outcomes[0]), "OptiFine_1.21.jar");
+        assert_eq!(dir_names(&mods_dir).await, vec!["OptiFine_1.21.jar"]);
+    }
+
+    /// 扩展名大写的 jar 落盘时改成小写：列表与启停都只认 .jar，原样落盘就成了 mods 目录里看不见的文件。
+    #[tokio::test]
+    async fn local_jar_extension_is_lowercased_so_the_list_can_see_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let shouting = downloads.join("Sodium.JAR");
+        build_mod_jar(&shouting, "sodium");
+
+        let outcomes = aurora.add_local_mods("1.21", &[shouting]).await.unwrap();
+
+        assert_eq!(added_name(&outcomes[0]), "Sodium.jar");
+        assert_eq!(dir_names(&mods_dir).await, vec!["Sodium.jar"]);
+        let listed = aurora.list_mods("1.21").await.unwrap();
+        assert_eq!(listed[0].installed.file_name, "Sodium.jar");
+    }
+
+    /// 本地文件的安装时间取文件修改时刻，所以落盘的副本要是此刻的：沿用下载时的旧时刻，「新增」标注和按安装时间排序都不对。
+    #[tokio::test]
+    async fn added_local_jar_is_stamped_with_the_time_it_was_added() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let old = downloads.join("old.jar");
+        build_mod_jar(&old, "old");
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        aurora.add_local_mods("1.21", &[old]).await.unwrap();
+
+        let stamped = std::fs::metadata(mods_dir.join("old.jar"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let age = std::time::SystemTime::now()
+            .duration_since(stamped)
+            .unwrap_or_default();
+        assert!(age < std::time::Duration::from_secs(60), "{age:?}");
+    }
+
+    /// 实例本身不存在时整次失败，不是逐项失败：一个文件都没有机会动。
+    #[tokio::test]
+    async fn adding_to_a_missing_instance_fails_as_a_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (aurora, _, downloads) = local_add_fixture(tmp.path()).await;
+        let jar = downloads.join("a.jar");
+        build_mod_jar(&jar, "a");
+
+        let err = aurora
+            .add_local_mods("没有这个实例", &[jar])
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CoreError::VersionNotInstalled { .. }),
+            "{err:?}"
+        );
     }
 
     /// 同一个 Mod 换平台再装一次：按 jar 里的 mod_id 认出旧拷贝，走更新路径而不是两份共存。

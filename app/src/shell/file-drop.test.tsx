@@ -56,6 +56,8 @@ const hintText = () => document.querySelector('[role="status"][data-hint]')?.tex
 
 const PACK = "D:\\Downloads\\All the Mods 10.mrpack";
 const CF_PACK = "C:\\Users\\a\\Desktop\\RLCraft.ZIP";
+const JAR = "D:\\Downloads\\sodium.jar";
+const JAR_B = "D:\\Downloads\\Lithium.JAR";
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -122,11 +124,29 @@ describe("窗口级拖放：外壳自己处理", () => {
 
   it("拖进的不是整合包：不显示提示；松开后不导航，弹一条只认哪两种文件的提醒", async () => {
     await mount();
-    fire({ type: "enter", content: { kind: "files", paths: ["D:\\mods\\sodium.jar"] } });
+    fire({ type: "enter", content: { kind: "files", paths: ["D:\\shots\\sakura.png"] } });
     expect(shell.fileDropHint).toBeNull();
-    fire({ type: "drop", content: { kind: "files", paths: ["D:\\mods\\sodium.jar"] } });
+    fire({ type: "drop", content: { kind: "files", paths: ["D:\\shots\\sakura.png"] } });
     expect(nav.route).toEqual({ page: "home" });
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["warning", DROP_COPY.notModpack.title, DROP_COPY.notModpack.body]]);
+  });
+
+  it("没有页面收 .jar 时拖进 .jar：不显示提示；松开后不导航，说明要到实例的 Mod 页，不再说它不是整合包", async () => {
+    await mount();
+    fire({ type: "enter", content: { kind: "files", paths: [JAR] } });
+    expect(shell.fileDropHint).toBeNull();
+    fire({ type: "drop", content: { kind: "files", paths: [JAR, JAR_B] } });
+    expect(nav.route).toEqual({ page: "home" });
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["warning", DROP_COPY.jarElsewhere.title, DROP_COPY.jarElsewhere.body]]);
+  });
+
+  it("没有页面收 .jar 时 .jar 和整合包一起拖进来：照常导入整合包", async () => {
+    await mount();
+    fire({ type: "enter", content: { kind: "files", paths: [JAR, PACK] } });
+    expect(shell.fileDropHint).toBe("modpack");
+    fire({ type: "drop", content: { kind: "files", paths: [JAR, PACK] } });
+    expect(nav.route).toEqual({ page: "discover", importFile: PACK });
+    expect(launcher.state.toasts).toEqual([]);
   });
 
   it("有浮层打开时外壳不处理：不提示、不导航、不提醒", async () => {
@@ -244,6 +264,128 @@ describe("窗口级拖放：登记了接收方", () => {
     fire({ type: "leave" });
     fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
     expect(onDrop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("窗口级拖放：页面收 .jar", () => {
+  const jarTarget = (reason?: string) => ({ lockReason: vi.fn(() => reason), onDrop: vi.fn() });
+  const toastsNow = () => launcher.state.toasts.map((t) => [t.tone, t.title, t.body]);
+
+  it("拖进 .jar 提示松开以添加；松开只把 .jar 按原顺序交给页面，不导航也不提醒", async () => {
+    await mount();
+    const target = jarTarget();
+    act(() => void shell.registerJarDrop(target));
+    fire({ type: "enter", content: { kind: "files", paths: ["D:\\notes.txt", JAR] } });
+    expect(shell.fileDropHint).toBe("mods");
+    expect(hintText()).toBe(DROP_COPY.modsHint);
+    fire({ type: "drop", content: { kind: "files", paths: [JAR, "D:\\notes.txt", JAR_B] } });
+    expect(shell.fileDropHint).toBeNull();
+    expect(target.onDrop.mock.calls).toEqual([[[JAR, JAR_B]]]);
+    expect(nav.route).toEqual({ page: "home" });
+    expect(toastsNow()).toEqual([]);
+  });
+
+  it("页面此刻收不了：不提示「松开以添加」，松开不交给页面，写明这条原因", async () => {
+    await mount();
+    const target = jarTarget("游戏正在运行，Mod 文件被占用");
+    act(() => void shell.registerJarDrop(target));
+    fire({ type: "enter", content: { kind: "files", paths: [JAR] } });
+    expect(shell.fileDropHint).toBeNull();
+    fire({ type: "drop", content: { kind: "files", paths: [JAR] } });
+    expect(target.onDrop).not.toHaveBeenCalled();
+    expect(toastsNow()).toEqual([["warning", DROP_COPY.modsLocked, "游戏正在运行，Mod 文件被占用"]]);
+  });
+
+  it("页面只收 .jar：整合包照常导入，别的文件照常提醒，服务器链接照常打开弹窗", async () => {
+    await mount();
+    const target = jarTarget();
+    act(() => void shell.registerJarDrop(target));
+
+    fire({ type: "enter", content: { kind: "files", paths: [PACK] } });
+    expect(shell.fileDropHint).toBe("modpack");
+    fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    expect(nav.route).toEqual({ page: "discover", importFile: PACK });
+
+    fire({ type: "drop", content: { kind: "files", paths: ["D:\\notes.txt"] } });
+    expect(toastsNow()).toEqual([["warning", DROP_COPY.notModpack.title, DROP_COPY.notModpack.body]]);
+
+    await act(async () => {
+      for (const handler of [...dropHandlers]) handler({ type: "drop", content: { kind: "auth_server", url: "https://littleskin.cn/api/yggdrasil" } });
+      await settle();
+    });
+    expect(launcher.state.login).toMatchObject({ kind: "authlib", dropped: "https://littleskin.cn/api/yggdrasil" });
+    expect(target.onDrop).not.toHaveBeenCalled();
+  });
+
+  it(".jar 和整合包一起拖到收 .jar 的页面：.jar 优先，只交 .jar，不导入", async () => {
+    await mount();
+    const target = jarTarget();
+    act(() => void shell.registerJarDrop(target));
+    fire({ type: "enter", content: { kind: "files", paths: [PACK, JAR] } });
+    expect(shell.fileDropHint).toBe("mods");
+    fire({ type: "drop", content: { kind: "files", paths: [PACK, JAR] } });
+    expect(target.onDrop.mock.calls).toEqual([[[JAR]]]);
+    expect(nav.route).toEqual({ page: "home" });
+  });
+
+  it("有浮层打开或在首次启动向导里：不提示，松开也不交给页面", async () => {
+    await mount();
+    const target = jarTarget();
+    act(() => void shell.registerJarDrop(target));
+    act(() => shell.openPalette());
+    fire({ type: "enter", content: { kind: "files", paths: [JAR] } });
+    expect(shell.fileDropHint).toBeNull();
+    fire({ type: "drop", content: { kind: "files", paths: [JAR] } });
+    expect(target.onDrop).not.toHaveBeenCalled();
+    expect(toastsNow()).toEqual([]);
+    view?.unmount();
+
+    bootOverrides(ipc, { firstRun: true });
+    await mount();
+    const wizard = jarTarget();
+    act(() => void shell.registerJarDrop(wizard));
+    fire({ type: "enter", content: { kind: "files", paths: [JAR] } });
+    fire({ type: "drop", content: { kind: "files", paths: [JAR] } });
+    expect(shell.fileDropHint).toBeNull();
+    expect(wizard.onDrop).not.toHaveBeenCalled();
+  });
+
+  it("导入弹窗这类独占的接收方排在页面前面：文件交给它，页面收不到", async () => {
+    await mount();
+    const target = jarTarget();
+    const exclusive = { onDrop: vi.fn() };
+    act(() => {
+      shell.registerJarDrop(target);
+      shell.registerFileDrop(exclusive);
+    });
+    fire({ type: "drop", content: { kind: "files", paths: [JAR] } });
+    expect(exclusive.onDrop.mock.calls).toEqual([[[JAR]]]);
+    expect(target.onDrop).not.toHaveBeenCalled();
+  });
+
+  it("最后登记的页面收；注销后交回前一个，全部注销后回到外壳的说明", async () => {
+    await mount();
+    const outer = jarTarget();
+    const inner = jarTarget();
+    let offOuter = () => {};
+    let offInner = () => {};
+    act(() => {
+      offOuter = shell.registerJarDrop(outer);
+      offInner = shell.registerJarDrop(inner);
+    });
+    fire({ type: "drop", content: { kind: "files", paths: [JAR] } });
+    expect(inner.onDrop).toHaveBeenCalledTimes(1);
+    expect(outer.onDrop).not.toHaveBeenCalled();
+
+    act(() => offInner());
+    fire({ type: "drop", content: { kind: "files", paths: [JAR] } });
+    expect(outer.onDrop).toHaveBeenCalledTimes(1);
+
+    act(() => offOuter());
+    fire({ type: "drop", content: { kind: "files", paths: [JAR] } });
+    expect(inner.onDrop).toHaveBeenCalledTimes(1);
+    expect(outer.onDrop).toHaveBeenCalledTimes(1);
+    expect(toastsNow()).toEqual([["warning", DROP_COPY.jarElsewhere.title, DROP_COPY.jarElsewhere.body]]);
   });
 });
 

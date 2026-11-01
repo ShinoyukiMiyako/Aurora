@@ -23,7 +23,7 @@ import { DROP_COPY, FILE_PICK_COPY, FILE_SAVE_COPY, SHELL_ACTION_ERROR } from ".
 import { UPDATE_COPY } from "../copy/updater";
 import { isTypingTarget } from "../lib/util";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { FILE_KINDS, useFileDrop, type FileDropHint, type FileDropTarget, type FileKind } from "./file-drop";
+import { FILE_KINDS, useFileDrop, type FileDropHint, type FileDropTarget, type FileKind, type JarDropTarget } from "./file-drop";
 import { assertPageCombo, matchesCombo, useGlobalShortcuts, type KeyCombo, type Shortcut } from "./keys";
 import {
   canBack,
@@ -110,6 +110,8 @@ export interface ShellApi {
    * 没有接收方时，拖进 .mrpack / .zip 由外壳导航到发现页并带上 importFile；拖进外置登录服务器链接打开外置登录弹窗。
    */
   registerFileDrop(target: FileDropTarget): () => void;
+  /** 登记收 .jar 的页面：只拿走 .jar，别的拖放仍归外壳；返回注销函数。 */
+  registerJarDrop(target: JarDropTarget): () => void;
   /** 拖动经过窗口时外壳要显示的放置提示（外壳布局据此绘制）。 */
   fileDropHint: FileDropHint;
   /** 系统选择文件对话框，按文件种类给出标题与扩展名过滤；用户取消为 null。浏览器预览里没有这个对话框，如实拒绝。 */
@@ -449,6 +451,8 @@ function ShellCore({ children }: { children: ReactNode }) {
     blocked: () => shortcutState.firstRun === true || overlay.isOpen() || shortcutState.paletteOpen,
     go,
     rejectNonModpack: () => void actions.toast("warning", DROP_COPY.notModpack.title, DROP_COPY.notModpack.body),
+    rejectJars: () => void actions.toast("warning", DROP_COPY.jarElsewhere.title, DROP_COPY.jarElsewhere.body),
+    rejectLockedJars: (reason) => void actions.toast("warning", DROP_COPY.modsLocked, reason),
     openAuthServer: (url) => void run(() => actions.openAuthlibServer(url), ACTION_ERROR.authlib),
     reportError: (error) => void run(() => Promise.reject(error), SHELL_ACTION_ERROR.fileDrop),
   });
@@ -602,6 +606,7 @@ function ShellCore({ children }: { children: ReactNode }) {
       registerFind,
       registerShortcut,
       registerFileDrop: fileDrop.registerFileDrop,
+      registerJarDrop: fileDrop.registerJarDrop,
       fileDropHint: fileDrop.hint,
       pickFile,
       saveFile,
@@ -621,6 +626,7 @@ function ShellCore({ children }: { children: ReactNode }) {
       createInstance,
       fileDrop.hint,
       fileDrop.registerFileDrop,
+      fileDrop.registerJarDrop,
       installUpdate,
       openCreateInstance,
       openPalette,

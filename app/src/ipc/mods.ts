@@ -187,6 +187,18 @@ export type ModToggleResult =
 export const setModsEnabled = (versionId: string, fileNames: readonly string[], enabled: boolean): Promise<ModToggleResult[]> =>
   invoke<ModToggleResult[]>("set_mods_enabled", { versionId, fileNames, enabled });
 
+/** 添加本地 jar 时一个文件的结果：成功给落盘的文件名，失败给这一项的命令错误，其余文件不受影响。 */
+export type LocalModResult =
+  | { status: "ok"; source: string; file_name: string }
+  | { status: "error"; source: string; error: { code: string; message: string; detail?: unknown } };
+
+/**
+ * 把本地 jar 复制进实例的 mods 目录，结果与入参逐项对应、顺序一致。重名、同一个 Mod 已装、不是 jar 只拒那一项
+ * （local_mod_refused，message 可以直接给玩家看）；整次调用只在实例解析与互斥失败时拒绝。
+ */
+export const addLocalMods = (versionId: string, paths: readonly string[]): Promise<LocalModResult[]> =>
+  invoke<LocalModResult[]>("add_local_mods", { versionId, paths });
+
 /** 改写卷宗里这个 Mod 的更新检查设置；hold 为 null 表示恢复检查更新。只改记录不碰文件，游戏运行中也可用。 */
 export const setModUpdateHold = (versionId: string, fileName: string, hold: UpdateHold | null): Promise<void> =>
   invoke<void>("set_mod_update_hold", { versionId, fileName, hold });

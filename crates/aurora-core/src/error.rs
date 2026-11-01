@@ -61,6 +61,10 @@ pub enum CoreError {
     /// 请求启动/操作的版本本地未安装。
     #[error("本地未安装版本 {id}")]
     VersionNotInstalled { id: String },
+    /// 本地 jar 不能加进实例；`reason` 是给玩家看的一句话，不走 IO 错误：那一类的顶层文案只有路径，
+    /// 玩家看不出是重名还是别的。
+    #[error("{reason}")]
+    LocalModRefused { path: PathBuf, reason: String },
     /// 请求安装的模组版本/文件在平台上不存在。
     #[error("平台 {platform} 上工程 {project_id} 未找到版本 {version_id}")]
     ModVersionNotFound {
