@@ -1,8 +1,9 @@
 //! 第一次启动前补全 options.txt：游戏语言跟随系统显示语言，默认跳过无障碍引导。
 //!
 //! 游戏自己不看系统语言，没有 options.txt 就是英文；现代版本第一次进游戏还要先走一遍无障碍引导。启动前在这里
-//! 补上缺的行，新建、导入、补全出来的实例都走这一步。已有的行是玩家、整合包或默认设置定下的，一律不动；玩家
-//! 在游戏里改过之后文件里自然有这些行，这里也就不再介入。
+//! 补上缺的行，新建、导入、补全出来的实例都走这一步。已有的行是玩家、整合包或默认设置定下的，意思一律不动；玩家
+//! 在游戏里改过之后文件里自然有这些行，这里也就不再介入。唯一的例外是 `lang:` 的大小写要跟着这一局的版本走，
+//! 见 [`respell_language`]。
 //!
 //! 语言码查这个版本的资源索引而不按版本号判断：同一种语言 1.11 起写 `zh_cn`，更早写 `zh_CN`，索引里的
 //! 写法就是这个版本认的写法；哪个版本有哪些语言（`zh_hk` 只有新版才有）也一并由索引说了算。
@@ -79,14 +80,19 @@ enum GameLanguage {
     Unavailable,
 }
 
-/// 系统语言标签在这个版本的资源索引里对应的语言。
-fn resolve_game_language(system: &str, index: &AssetObjectsIndex) -> GameLanguage {
-    let available: HashMap<String, &str> = index
+/// 这个版本的索引里有的语言：全小写的语言码到索引里的原样写法。
+fn index_languages(index: &AssetObjectsIndex) -> HashMap<String, &str> {
+    index
         .objects
         .keys()
         .filter_map(|logical| language_code(logical))
         .map(|code| (code.to_ascii_lowercase(), code))
-        .collect();
+        .collect()
+}
+
+/// 系统语言标签在这个版本的资源索引里对应的语言。
+fn resolve_game_language(system: &str, index: &AssetObjectsIndex) -> GameLanguage {
+    let available = index_languages(index);
     for candidate in candidates(system) {
         if candidate == GAME_DEFAULT {
             return GameLanguage::GameDefault;
@@ -155,6 +161,36 @@ fn has_line(options: &[u8], key: &[u8]) -> bool {
 /// 文件不存在，或存在但没有这个键。
 fn lacks(existing: Option<&[u8]>, key: &[u8]) -> bool {
     !existing.is_some_and(|options| has_line(options, key))
+}
+
+/// 文件里有默认语言以外的 `lang:` 行。
+fn names_another_language(options: &[u8]) -> bool {
+    options
+        .split(|byte| matches!(byte, b'\n' | b'\r'))
+        .filter_map(|line| line.strip_prefix(LANG_KEY))
+        .any(|value| !value.eq_ignore_ascii_case(GAME_DEFAULT.as_bytes()))
+}
+
+/// `lang:` 行换成这个版本的大小写后的完整内容，什么都不用改时返回 `None`。
+///
+/// 默认隔离策略下原版实例共用一份 options.txt，而语言码的大小写 1.11 变过：新版留下的 `zh_cn` 老版不认，老版
+/// 写法的 `zh_CN` 碰上文件里新版的 `version:` 也不走游戏自己的小写迁移，两头都退回英文。只差大小写还是同一门
+/// 语言，换写法不算改玩家的选择；这个版本没有的语言原样留着。
+fn respell_language(options: &[u8], languages: &HashMap<String, &str>) -> Option<Vec<u8>> {
+    let mut written = options.to_vec();
+    for line in written.split_mut(|byte| matches!(byte, b'\n' | b'\r')) {
+        if !line.starts_with(LANG_KEY) {
+            continue;
+        }
+        let value = &mut line[LANG_KEY.len()..];
+        let known = std::str::from_utf8(value)
+            .ok()
+            .and_then(|code| languages.get(&code.to_ascii_lowercase()));
+        if let Some(code) = known {
+            value.copy_from_slice(code.as_bytes());
+        }
+    }
+    (written != options).then_some(written)
 }
 
 /// 加上这些行后的完整内容：原内容逐字节保留，换行风格跟随原文件。
@@ -268,7 +304,17 @@ async fn fill(
     } else {
         None
     };
-    let Some(content) = fill_options(existing, language.as_deref(), inputs.skip_onboarding) else {
+    let respelled = match existing {
+        Some(options) => respell_existing_language(options, inputs, layout, report).await,
+        None => None,
+    };
+    let was_respelled = respelled.is_some();
+    let filled = fill_options(
+        respelled.as_deref().or(existing),
+        language.as_deref(),
+        inputs.skip_onboarding,
+    );
+    let Some(content) = filled.or(respelled) else {
         return Ok(());
     };
     aurora_base::fs::atomic_write(&path, &content).await?;
@@ -277,10 +323,37 @@ async fn fill(
             .notes
             .push(format!("游戏语言设为 {code}，跟随系统语言 {system}"));
     }
+    if was_respelled {
+        report
+            .notes
+            .push("游戏语言的写法换成这个版本的大小写".to_owned());
+    }
     if inputs.skip_onboarding && lacks(existing, ONBOARDING_KEY) {
         report.notes.push("已跳过游戏的首次无障碍引导".to_owned());
     }
     Ok(())
+}
+
+/// 现有语言按这个版本的写法改过后的内容（见 [`respell_language`]）。索引读不出来只算这一项没做成，记进
+/// `report`，引导那一行照写。
+async fn respell_existing_language(
+    options: &[u8],
+    inputs: &OptionsInputs<'_>,
+    layout: &GameLayout,
+    report: &mut OptionsReport,
+) -> Option<Vec<u8>> {
+    // 默认语言不在索引里，也没有写法之分。英文玩家每局都走到这里，不为它读一次索引。
+    if !names_another_language(options) {
+        return None;
+    }
+    let id = inputs.asset_index_id?;
+    match read_asset_index(layout, id).await {
+        Ok(index) => respell_language(options, &index_languages(&index)),
+        Err(err) => {
+            report.failures.push(err);
+            None
+        }
+    }
 }
 
 /// 这个版本的 `lang:` 该写什么。写不了时为 `None`，原因记进 `report`：索引读不出来只算语言这一项没做成，
@@ -731,6 +804,92 @@ mod tests {
     }
 
     #[test]
+    fn existing_language_takes_the_spelling_of_the_version_being_launched() {
+        type Case<'a> = (&'a [u8], &'a [&'a str], Option<&'a [u8]>);
+        let cases: &[Case] = &[
+            // 新版写下的小写，老版不认，会退回英文。
+            (
+                b"lang:zh_cn\nonboardAccessibility:false\n",
+                V1_8_9,
+                Some(b"lang:zh_CN\nonboardAccessibility:false\n"),
+            ),
+            (b"lang:zh_cn\n", V1_7_10, Some(b"lang:zh_CN\n")),
+            (b"lang:zh_cn\n", V1_6_4, Some(b"lang:zh_CN\n")),
+            (
+                b"lang:zh_tw\r\nfov:0.5\r\n",
+                V1_7_10,
+                Some(b"lang:zh_TW\r\nfov:0.5\r\n"),
+            ),
+            (b"lang:de_de\n", V1_7_10, Some(b"lang:de_DE\n")),
+            // 反过来：带着 version: 行的大写，新版不走自己的小写迁移，同样退回英文。
+            (
+                b"version:2586\nlang:zh_CN\n",
+                V1_20_1,
+                Some(b"version:2586\nlang:zh_cn\n"),
+            ),
+            (
+                b"lang:zh_CN\nfov:0.5",
+                V1_12_2,
+                Some(b"lang:zh_cn\nfov:0.5"),
+            ),
+            // 其余内容逐字节留着，换行也不动。
+            (
+                b"\xff\xfe:1\r\nlang:zh_cn\r\nfov:0.5",
+                V1_8_9,
+                Some(b"\xff\xfe:1\r\nlang:zh_CN\r\nfov:0.5"),
+            ),
+            // 写法已经是这个版本的：不用写。
+            (b"lang:zh_CN\n", V1_8_9, None),
+            (b"lang:zh_cn\n", V1_20_1, None),
+            // 不是同一门语言，或这个版本没有这门语言：不替玩家换语言。
+            (b"lang:ja_jp\n", V1_8_9, None),
+            (b"lang:zh_hk\n", V1_7_10, None),
+            (b"lang:en_us\n", V1_7_10, None),
+            (b"lang:\n", V1_8_9, None),
+            (b"lang:\xd6\xd0\n", V1_8_9, None),
+            // 索引里没有语言（1.5.2）：无从判断写法。
+            (b"lang:zh_cn\n", V1_5_2, None),
+            // realms 的语言文件不算。
+            (b"lang:zh_cn\n", &["realms/lang/zh_CN.lang"], None),
+            // 名字里带 lang 的别的键。
+            (b"xlang:zh_cn\nkey_key.lang:zh_cn\n", V1_8_9, None),
+            (b"fov:0.5\n", V1_8_9, None),
+            (b"", V1_8_9, None),
+        ];
+        for (options, keys, expected) in cases {
+            assert_eq!(
+                respell_language(options, &index_languages(&index(keys))).as_deref(),
+                *expected,
+                "原内容 {:?}，索引 {keys:?}",
+                String::from_utf8_lossy(options),
+            );
+        }
+    }
+
+    /// 随机内容：改写法只动 `lang:` 行的值，文件长度不变，其它位置一个字节不差。
+    #[test]
+    fn respelling_only_touches_the_language_value() {
+        let languages = index(V1_8_9);
+        let languages = index_languages(&languages);
+        for _ in 0..200 {
+            let noise = || -> Vec<u8> {
+                std::iter::repeat_with(|| fastrand::u8(..))
+                    .filter(|byte| !matches!(byte, b'\n' | b'\r'))
+                    .take(fastrand::usize(0..512))
+                    .collect()
+            };
+            let (before, after) = (noise(), noise());
+            let lang = b"\nlang:zh_cn\n";
+            let options = [&before[..], lang, &after[..]].concat();
+
+            let written = respell_language(&options, &languages).unwrap();
+
+            let expected = [&before[..], b"\nlang:zh_CN\n", &after[..]].concat();
+            assert_eq!(written, expected);
+        }
+    }
+
+    #[test]
     fn added_lines_follow_the_newline_style_of_the_file() {
         let cases: &[(&[u8], &[u8])] = &[
             (b"", b"lang:zh_cn\n"),
@@ -843,6 +1002,7 @@ mod tests {
     }
 
     const SKIPPED: &str = "已跳过游戏的首次无障碍引导";
+    const RESPELLED: &str = "游戏语言的写法换成这个版本的大小写";
 
     #[tokio::test]
     async fn missing_options_file_is_created_with_both_lines() {
@@ -868,8 +1028,116 @@ mod tests {
         assert_eq!(scene.options().unwrap(), expected);
     }
 
+    /// 共用 options.txt 的版本之间换着玩：语言不变，写法换成这一局的版本认的。
     #[tokio::test]
-    async fn existing_lines_are_never_touched_and_the_index_is_not_even_read() {
+    async fn existing_language_is_respelled_for_the_version_being_launched() {
+        let scene = scene(V1_8_9);
+        scene.write(OPTIONS_FILE, b"lang:zh_cn\nonboardAccessibility:false\n");
+
+        let notes = scene.fill(Some("en-US")).await;
+
+        assert_eq!(
+            scene.options().unwrap(),
+            b"lang:zh_CN\nonboardAccessibility:false\n"
+        );
+        assert_eq!(notes, [RESPELLED]);
+    }
+
+    /// 改写法和补引导是同一次写入。
+    #[tokio::test]
+    async fn respelling_and_the_missing_onboarding_line_land_together() {
+        let scene = scene(V1_7_10);
+        scene.write(OPTIONS_FILE, b"lang:zh_tw\r\nfov:0.5\r\n");
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert_eq!(
+            scene.options().unwrap(),
+            b"lang:zh_TW\r\nfov:0.5\r\nonboardAccessibility:false\r\n"
+        );
+        assert_eq!(notes, [RESPELLED, SKIPPED]);
+    }
+
+    /// 开关关掉也要改写法：它管的是引导，这里也不额外声明数据版本。
+    #[tokio::test]
+    async fn switch_off_still_respells_the_existing_language() {
+        let scene = scene(V1_8_9);
+        scene.write(OPTIONS_FILE, b"lang:zh_cn\n");
+
+        let report = scene
+            .fill_with(Some("zh-CN"), Some("lang-test"), false)
+            .await;
+
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.notes, [RESPELLED]);
+        assert_eq!(scene.options().unwrap(), b"lang:zh_CN\n");
+    }
+
+    /// 写法只看文件和索引，读不出系统语言也一样改。
+    #[tokio::test]
+    async fn respelling_does_not_need_the_system_language() {
+        let scene = scene(V1_8_9);
+        scene.write(OPTIONS_FILE, b"lang:zh_cn\nonboardAccessibility:false\n");
+
+        let notes = scene.fill(None).await;
+
+        assert_eq!(
+            scene.options().unwrap(),
+            b"lang:zh_CN\nonboardAccessibility:false\n"
+        );
+        assert_eq!(notes, [RESPELLED]);
+    }
+
+    /// 写法对的文件一个字节都不写，换着玩的老玩家不会每局都重写一次。
+    #[tokio::test]
+    async fn language_already_spelled_for_this_version_leaves_the_file_alone() {
+        let scene = scene(V1_8_9);
+        let original = b"lang:zh_CN\r\nonboardAccessibility:false\r\nfov:0.5";
+        scene.write(OPTIONS_FILE, original);
+
+        let notes = scene.fill(Some("zh-CN")).await;
+
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(scene.options().unwrap(), original);
+    }
+
+    /// 版本没有资源索引时无从判断写法，语言行原样留着，也不算失败。
+    #[tokio::test]
+    async fn existing_language_stays_without_an_asset_index() {
+        let scene = scene(V1_8_9);
+        let original = b"lang:zh_cn\nonboardAccessibility:false\n";
+        scene.write(OPTIONS_FILE, original);
+
+        let report = scene.fill_with(Some("zh-CN"), None, true).await;
+
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(scene.options().unwrap(), original);
+    }
+
+    /// 索引读不出来只算写法这一项没做成：报给调用方，语言行原样，引导那一行不受牵连。
+    #[tokio::test]
+    async fn damaged_asset_index_keeps_the_existing_language_and_still_adds_onboarding() {
+        let scene = scene(V1_8_9);
+        let path = scene.layout.asset_index_json("lang-test").unwrap();
+        std::fs::write(path, b"{not json").unwrap();
+        scene.write(OPTIONS_FILE, b"lang:zh_cn\n");
+
+        let report = scene
+            .fill_with(Some("zh-CN"), Some("lang-test"), true)
+            .await;
+
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert_eq!(report.notes, [SKIPPED]);
+        assert_eq!(
+            scene.options().unwrap(),
+            b"lang:zh_cn\nonboardAccessibility:false\n"
+        );
+    }
+
+    /// 默认语言不用查写法，英文玩家每局启动都走这里，不该为它读索引。
+    #[tokio::test]
+    async fn default_language_is_left_alone_without_reading_the_index() {
         let scene = scene(V1_21_1);
         let original = b"lang:en_us\nonboardAccessibility:true\nfov:0.5\n";
         scene.write(OPTIONS_FILE, original);

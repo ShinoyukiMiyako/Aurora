@@ -4828,6 +4828,51 @@ mod tests {
         );
     }
 
+    /// 默认策略下原版实例共用 options.txt：新版留下的 `zh_cn` 轮到老版时，游戏读到的是老版认的 `zh_CN`。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn older_version_reads_the_language_in_its_own_spelling() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_CN.lang");
+        std::fs::write(
+            mc.join("options.txt"),
+            b"lang:zh_cn\r\nonboardAccessibility:false\r\n",
+        )
+        .unwrap();
+        let java = options_reading_java(&fx.root);
+
+        let (game, events) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(game, ["lang:zh_CN", "onboardAccessibility:false"]);
+        assert_eq!(
+            std::fs::read(mc.join("options.txt")).unwrap(),
+            b"lang:zh_CN\r\nonboardAccessibility:false\r\n"
+        );
+        let info = log_texts(&events, LauncherLevel::Info);
+        assert!(info.contains(&"游戏语言的写法换成这个版本的大小写".to_owned()));
+    }
+
+    /// 反方向：老版的 `zh_CN` 留在带 `version:` 的文件里，新版不走自己的迁移，也要换回小写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn newer_version_reads_the_language_in_its_own_spelling() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        std::fs::write(
+            mc.join("options.txt"),
+            b"version:2586\nlang:zh_CN\nonboardAccessibility:false\n",
+        )
+        .unwrap();
+        let java = options_reading_java(&fx.root);
+
+        let (game, _) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(
+            game,
+            ["version:2586", "lang:zh_cn", "onboardAccessibility:false"]
+        );
+    }
+
     /// 两行都有时文件一个字节都不变。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_leaves_a_complete_options_file_alone() {
