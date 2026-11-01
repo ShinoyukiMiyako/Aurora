@@ -26,7 +26,6 @@ import styles from "./instance.module.css";
 import { worldName } from "./model";
 import type { InstanceOps } from "./ops";
 import { ModuleError, SlowHint, useModuleView } from "./parts";
-import { usePickSaveFile } from "./save-file";
 
 const COPY = WORLD_BACKUP_COPY;
 
@@ -102,7 +101,7 @@ export interface WorldOps {
 export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
   const actions = useLauncherActions();
   const run = useRunner();
-  const pickSaveFile = usePickSaveFile();
+  const { saveFile } = useShell();
   const id = inst.id;
   const worlds = useLauncherSelector((s) => busyWorlds(s, id), shallowArrayEqual);
   const repairTask = useLauncherSelector((s) => activeTasks(s).some((t) => t.instanceId === id && t.spec.command === "repair_instance"));
@@ -124,7 +123,7 @@ export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
   const exportTo = (world: WorldRef) => {
     void run(async () => {
       // 文件夹名一定是合法的文件名，显示用的存档名可能带 : / 这类字符
-      const dest = await pickSaveFile({ title: COPY.exportDialogTitle(world.name), defaultPath: `${world.dir}.zip`, filter: { name: COPY.exportFilter, extensions: ["zip"] } });
+      const dest = await saveFile({ title: COPY.exportDialogTitle(world.name), filter: { name: COPY.exportFilter, extensions: ["zip"] } }, `${world.dir}.zip`);
       if (dest === null) return;
       await actions.exportWorld(id, world.dir, world.name, dest);
     }, ACTION_ERROR.exportWorld);

@@ -11,6 +11,7 @@ import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSetting
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
+import { pickSaveFile } from "../../shell/platform";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
 import { PickFolderProvider } from "../discover/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -26,12 +27,14 @@ import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 import { InstallStageTab } from "./InstallStage";
 import { creationRef, creationRefEqual, installStage } from "./model";
-import { PickSaveFileProvider, type PickSaveFile } from "./save-file";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
-/** 系统保存文件对话框的替身：各用例按需改写返回值。 */
-const saveDialog = vi.hoisted(() => ({ pick: null as unknown as PickSaveFile }));
+// 系统保存文件对话框的替身：各用例按需改写返回值
+vi.mock("../../shell/platform", async (orig) => {
+  const actual = await orig<typeof import("../../shell/platform")>();
+  return { ...actual, pickSaveFile: vi.fn(actual.pickSaveFile) };
+});
 
 const ID = "樱花生存";
 const DAY = 24 * 3600 * 1000;
@@ -67,12 +70,10 @@ function Providers({ children }: { children: ReactNode }) {
     <LauncherProvider>
       <ShellProvider>
         <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          <PickSaveFileProvider value={(options) => saveDialog.pick(options)}>
-            <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
-              {children}
-              <OverlayRoot />
-            </PickFolderProvider>
-          </PickSaveFileProvider>
+          <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
+            {children}
+            <OverlayRoot />
+          </PickFolderProvider>
         </RemoteImageProvider>
       </ShellProvider>
     </LauncherProvider>
@@ -205,7 +206,8 @@ function contentDto(): InstanceContentDto {
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   resetRecorder(ipc);
-  saveDialog.pick = vi.fn(() => Promise.reject(new Error("这个用例不该弹保存对话框")));
+  vi.mocked(pickSaveFile).mockReset();
+  vi.mocked(pickSaveFile).mockRejectedValue(new Error("这个用例不该弹保存对话框"));
   stubMatchMedia(false);
   stubResizeObserver();
   stubCanvas();
@@ -2958,8 +2960,8 @@ describe("实例详情：存档备份", () => {
   });
 
   it("导出：弹系统保存对话框（默认文件名是存档文件夹名），选定后入队导出；取消对话框什么都不做", async () => {
-    const pick = vi.fn<PickSaveFile>(() => Promise.resolve(null));
-    saveDialog.pick = pick;
+    const pick = vi.mocked(pickSaveFile);
+    pick.mockResolvedValue(null);
     await open("overview");
     click(rowMenu("新世界"));
     click(menuItem("导出存档"));
@@ -2974,6 +2976,15 @@ describe("实例详情：存档备份", () => {
     await flush();
     expect(callsOf(ipc, "export_world")).toEqual([{ id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
     expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "导出「新世界」" });
+  });
+
+  it("导出：对话框给回的路径没带扩展名时补上 .zip，后端只收 .zip", async () => {
+    vi.mocked(pickSaveFile).mockResolvedValue("E:\\导出\\新世界");
+    await open("overview");
+    click(rowMenu("新世界"));
+    click(menuItem("导出存档"));
+    await flush();
+    expect(callsOf(ipc, "export_world")).toMatchObject([{ id: ID, world: "w2", dest: "E:\\导出\\新世界.zip" }]);
   });
 
   it("删除实例的确认：有备份时说备份留在哪、不随实例删除；没有备份时指向存档菜单", async () => {
