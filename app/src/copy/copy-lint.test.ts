@@ -1,5 +1,7 @@
-// 全站文案的横向检查：所有文案表（copy/ 与各页、各流程的 copy.ts）里的中文字符串字面量，逐条过禁用词、标点与中西文混排。
+// 全站文案的横向检查：全部非测试源码里的中文字符串字面量与 JSX 文本，逐条过禁用词、标点与中西文混排。
+// 陈列页只在开发构建出现，假后端的句子模仿的是后端，都不扫。
 // 只看字面量的正文：注释、代码、模板字符串的插值都不算；插值位换成一个既非中文也非字母数字的占位符，免得误判混排。
+// 给开发者看的 new Error、console 文案不是界面文字，也不算。
 // 另把任务失败原因认的错误码与后端码表对齐：码改了名，统一说法就会悄悄失效，界面退回后端原文而没人发现。
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -14,7 +16,10 @@ interface Literal {
   text: string;
 }
 
-/** 取出源码里全部字符串字面量的正文（单引号、双引号与模板字符串，含插值里嵌套的字面量），跳过注释。 */
+/** 字面量是这些调用的第一个参数：给开发者看的，到不了界面。 */
+const DEVELOPER_TEXT = /(?:new Error|console\.\w+)\(\s*$/;
+
+/** 取出源码里全部字符串字面量的正文（单引号、双引号与模板字符串，含插值里嵌套的字面量）和紧跟在 > 后的中文 JSX 文本，跳过注释与正则。 */
 function stringLiterals(source: string): Literal[] {
   const found: Literal[] = [];
   let pos = 0;
@@ -61,6 +66,36 @@ function stringLiterals(source: string): Literal[] {
     }
   }
 
+  /** 这个 / 在表达式开头：前面是运算符、括号或 return。JSX 的 /> 与 </ 不算。 */
+  function startsRegex(): boolean {
+    if (source[pos + 1] === ">") return false;
+    const before = source.slice(0, pos).trimEnd();
+    return before !== "" && !before.endsWith("<") && (/[(,=:[!&|?{]$/.test(before) || /\breturn$/.test(before));
+  }
+
+  function skipRegex(): void {
+    let inClass = false;
+    pos += 1;
+    for (;;) {
+      if (pos >= source.length) throw new Error(`第 ${lineAt(pos)} 行的正则没有闭合`);
+      const ch = source[pos];
+      if (ch === "\\") pos += 1;
+      else if (ch === "[") inClass = true;
+      else if (ch === "]") inClass = false;
+      else if (ch === "/" && !inClass) {
+        pos += 1;
+        return;
+      }
+      pos += 1;
+    }
+  }
+
+  function jsxTextEnd(from: number): number {
+    const rest = source.slice(from).search(/[<{]/);
+    if (rest < 0) throw new Error(`第 ${lineAt(from)} 行的 JSX 文本没有闭合`);
+    return from + rest;
+  }
+
   /** 读代码；untilClose 时读到与开头配对的右花括号为止（模板插值），否则读到文件尾。 */
   function code(untilClose: boolean): void {
     let depth = 0;
@@ -78,10 +113,22 @@ function stringLiterals(source: string): Literal[] {
         pos = end + 2;
         continue;
       }
+      if (ch === "/" && startsRegex()) {
+        skipRegex();
+        continue;
+      }
+      if (ch === ">" && JSX_TEXT_START.test(source.slice(pos + 1))) {
+        const start = pos + 1;
+        pos = jsxTextEnd(start);
+        found.push({ line: lineAt(start), text: source.slice(start, pos).trim() });
+        continue;
+      }
       if (ch === '"' || ch === "'" || ch === "`") {
         const start = pos;
+        const forDevelopers = DEVELOPER_TEXT.test(source.slice(0, start));
         pos += 1;
-        found.push({ line: lineAt(start), text: ch === "`" ? template() : quoted(ch) });
+        const text = ch === "`" ? template() : quoted(ch);
+        if (!forDevelopers) found.push({ line: lineAt(start), text });
         continue;
       }
       if (ch === "{") depth += 1;
@@ -100,6 +147,9 @@ function stringLiterals(source: string): Literal[] {
   code(false);
   return found;
 }
+
+/** > 之后紧跟中文：这是 JSX 文本。代码里 > 右边不会是中文。 */
+const JSX_TEXT_START = /^\s*[㐀-鿿]/;
 
 const CJK = /[㐀-鿿]/;
 
@@ -251,7 +301,7 @@ function lint(file: string, source: string): string[] {
   return out;
 }
 
-const COPY_SOURCES = import.meta.glob<string>(["./*.ts", "../pages/*/copy.ts", "../flows/*/copy.ts", "!./*.test.ts"], {
+const COPY_SOURCES = import.meta.glob<string>(["../**/*.{ts,tsx}", "!../**/*.test.{ts,tsx}", "!../**/*.gallery.tsx", "!../ipc/mock/**", "!../test/**"], {
   query: "?raw",
   import: "default",
   eager: true,
@@ -266,6 +316,8 @@ const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "../pages/discover/copy.ts", text: "CurseForge 上的文件太多，这里只列出了其中一部分，没找到的版本请到 CurseForge 网页查看", why: "要用户到 CurseForge 网页上看" },
   { file: "./updater.ts", text: `${HOLE} / ${HOLE}`, why: "两边是带单位的字节量，贴在一起的 MB/612 读着像速率" },
   { file: "../pages/tasks/copy.ts", text: `${HOLE} / ${HOLE}`, why: "两边是带单位的字节量，贴在一起的 MB/612 读着像速率" },
+  { file: "../ui/ConfirmDialog.tsx", text: "确定", why: "列的就是确认键不许用的泛称" },
+  { file: "../pages/settings/commands.ts", text: "打开启动器日志目录", why: "设置页没接上真实命令时抛给开发者的动作名" },
 ];
 
 function isExempt(entry: string): boolean {
@@ -292,6 +344,32 @@ describe("文案字面量的提取", () => {
 
   it("引号里的转义不算结束", () => {
     expect(stringLiterals('const a = "带 \\" 引号";')).toEqual([{ line: 1, text: '带 \\" 引号' }]);
+  });
+
+  it("正则里的引号不开字符串，除号和 JSX 的斜杠不开正则", () => {
+    const source = [
+      "const a = text.replace(/[\"'`]/g, \"\");",
+      "const b = /[/\"]/.test(x) ? \"甲\" : \"乙\";",
+      "const c = w / 2 + h / 2;",
+      "const d = <Foo a={x} />;",
+      "const e = (<p></p>);",
+      "const f = \"丙\";",
+    ].join("\n");
+    expect(stringLiterals(source).map((l) => l.text)).toEqual(["", "甲", "乙", "丙"]);
+  });
+
+  it("取出紧跟在 > 后的中文 JSX 文本，到下一个标签或插值为止；箭头与比较不算", () => {
+    const source = ["const a = <p>已就绪 ，下次启动生效</p>;", "const b = <p className=\"x\">", "  还有 {n} 个</p>;", "const c = (n: number) => n > 1;"].join("\n");
+    expect(stringLiterals(source)).toEqual([
+      { line: 1, text: "已就绪 ，下次启动生效" },
+      { line: 2, text: "x" },
+      { line: 2, text: "还有" },
+    ]);
+  });
+
+  it("new Error 与 console 的第一个参数给开发者看，不算文案；别的调用照算", () => {
+    const source = ["throw new Error(`状态 ${s} 不对`);", 'console.warn("读不到配置", error);', 'toast("已保存");'].join("\n");
+    expect(stringLiterals(source).map((l) => l.text)).toEqual(["已保存"]);
   });
 });
 
@@ -341,7 +419,10 @@ describe("全站文案表", () => {
   it("收齐了公共文案与各页、各流程的文案表", () => {
     for (const file of ["./flows.ts", "./shell.ts", "./settings.ts", "../pages/instance/copy.ts", "../pages/home/copy.ts", "../pages/discover/copy.ts", "../pages/settings/copy.ts", "../flows/create-instance/copy.ts"])
       expect(files).toContain(file);
-    expect(files.filter((f) => f.endsWith(".test.ts"))).toEqual([]);
+    expect(files.filter((f) => /\.test\.tsx?$|\.gallery\.tsx$|\/ipc\/mock\//.test(f))).toEqual([]);
+    expect(files).toContain("../shell/shell.tsx");
+    expect(files).toContain("../state/store.ts");
+    expect(files).toContain("../ui/Menu.tsx");
   });
 
   it("没有禁用词与标点、混排问题（例外单独列出）", () => {
