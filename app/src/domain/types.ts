@@ -124,3 +124,19 @@ export interface Task {
   finishedAt: number | null;
   spec: TaskSpec;
 }
+
+// ---------------------------------------------------------------- 实例忙碌
+
+/**
+ * 后端实例锁表里一个实例可能被占着做的事（instance_busy 的 detail.activity，实例列表的 activity 同一套取值）。
+ * inherited：别的实例正以它为基底（那个实例启动到退出、补全、导入整合包期间），它的删除、改名、补全被拒。
+ */
+export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited"] as const;
+export type BusyActivity = (typeof BUSY_ACTIVITIES)[number];
+
+/** instance_busy 拒绝的原因：被占着的实例与它在做的事；inherited 时 usedBy 是正以它为基底的实例，其余为 null。 */
+export interface InstanceBusy {
+  id: string;
+  activity: BusyActivity;
+  usedBy: string | null;
+}
