@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL } from "../../copy/flows";
+import { ACTION_ERROR, CRASH_COPY, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
 import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
@@ -142,7 +142,7 @@ function CrashBanner({ report, onTab }: { report: CrashReportDto; onTab(tab: Ins
       title={OVERVIEW_COPY.crashTitle(formatRelative(report.at, now))}
       actions={<Button onClick={() => onTab("crash")}>{OVERVIEW_COPY.viewCrash}</Button>}
     >
-      {first === undefined ? OVERVIEW_COPY.crashBodyNoClue : OVERVIEW_COPY.crashBody(crashCategoryLabel(first.category))}
+      {first === undefined ? OVERVIEW_COPY.crashBodyNoClue : first.category === "manual_debug_crash" ? CRASH_COPY.manualNote : OVERVIEW_COPY.crashBody(crashCategoryLabel(first.category))}
     </Banner>
   );
 }

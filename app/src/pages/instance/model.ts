@@ -879,6 +879,9 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false, renameInstance: false });
         break;
       }
+      case "manual_debug_crash":
+        // 玩家自己按出来的崩溃没有要修的东西
+        break;
       case "loopback_unavailable":
         // 卡在玩家系统的临时目录或安全软件上，实例设置与任务都够不着，线索卡的解释就是全部办法
         break;

@@ -21,7 +21,7 @@ import {
   TOAST_COPY,
   failureCopy,
   failureToastLabel,
-  crashCategoryLabel,
+  crashClueLine,
   taskFailureReason,
   SESSION_COPY,
   type CrashCategoryName,
@@ -1713,7 +1713,7 @@ export class LauncherStore {
       category = first;
     }
     setClue(report === null ? { status: "unavailable" } : { status: "known", category });
-    const body = category === null ? SESSION_COPY.noClue : SESSION_COPY.crashClue(crashCategoryLabel(category));
+    const body = category === null ? SESSION_COPY.noClue : crashClueLine(category);
     this.pushToast("error", TOAST_COPY.crashed(current()), body, toCrashPage());
   }
 

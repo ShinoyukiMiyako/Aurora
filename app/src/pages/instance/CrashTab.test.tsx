@@ -204,6 +204,48 @@ describe("概览的崩溃横幅", () => {
   });
 });
 
+describe("崩溃诊断：手动触发的崩溃", () => {
+  beforeEach(async () => {
+    await crashWith(1);
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = {
+        ...base,
+        suspects: [],
+        diagnoses: [
+          {
+            category: "manual_debug_crash",
+            summary: "",
+            advice: "",
+            detail: null,
+            matched: "Description: Manually triggered debug crash",
+            line: 5,
+            context: [],
+            source: "crash_report",
+          },
+        ],
+      };
+      return report;
+    });
+  });
+
+  it("页头写彩蛋，不画线索卡和一键尝试", async () => {
+    await open("crash");
+    expect(text()).toContain("你认真的吗...? 这是按住 F3+C 十秒手动触发的崩溃，游戏本身没有问题。");
+    expect(text()).not.toContain("找到 1 条线索");
+    expect(text()).not.toContain("日志指向");
+    expect(text()).not.toContain("一键尝试");
+    expect(text()).not.toContain("线索 1");
+  });
+
+  it("概览横幅不提一键尝试", async () => {
+    await open("overview");
+    expect(text()).toContain("这是按住 F3+C 十秒手动触发的崩溃，游戏本身没有问题。");
+    expect(text()).not.toContain("诊断里有可以一键尝试的办法");
+  });
+});
+
 describe("崩溃诊断：JVM 参数被拒", () => {
   it("点名被拒的参数，一键尝试把人带到实例设置", async () => {
     await crashWith(1);
