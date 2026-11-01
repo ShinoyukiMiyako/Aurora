@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "dev:setup": "vite --mode setup",
+    "build:setup": "tsc && vite build --mode setup",
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",

@@ -83,9 +83,41 @@ jobs:
           test -f "$installer"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
 
+      # 壳不内嵌 NSIS，拼接放在最后：Runner 跑不了 Windows 程序，pack-setup 的自检是这条路上唯一的验证。
+      # 将来要签名的话，外层签名必须插在 pack-setup 之后。
+      - name: 构建首装引导程序
+        id: bootstrap
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER: ${{ steps.bundle.outputs.installer }}
+        run: |
+          # 壳的版本号指向启动器的配置，构建脚本却只盯自己这份，不碰一下 exe 的版本资源会停在上一次。
+          touch src-tauri-setup/tauri.conf.json
+          TAURI_APP_PATH=src-tauri-setup pnpm tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
+          cargo test --release --locked -p aurora-setup-payload
+          release_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
+          bootstrap_dir="$release_dir/bundle/installer"
+          bootstrap="$bootstrap_dir/Petalfall-Installer-${VERSION}-x64.exe"
+          mkdir -p "$bootstrap_dir"
+          cargo run --release --locked -p aurora-setup-payload --bin pack-setup -- \
+            "$release_dir/petalfall-setup.exe" "$INSTALLER" "$release_dir/Petalfall.exe" "$VERSION" "$bootstrap"
+          test -f "$bootstrap"
+          echo "bootstrap=$bootstrap" >> "$GITHUB_OUTPUT"
+          du -sh "$CARGO_TARGET_DIR"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           path: ${{ steps.bundle.outputs.installer }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      # archive: false 时一步只能传一个文件，两个包各占一步。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.bootstrap.outputs.bootstrap }}
           archive: false
           if-no-files-found: error
           overwrite: true
@@ -99,12 +131,15 @@ jobs:
           TAG: dev-build
           VERSION: ${{ steps.version.outputs.version }}
           INSTALLER: ${{ steps.bundle.outputs.installer }}
+          BOOTSTRAP: ${{ steps.bootstrap.outputs.bootstrap }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --cleanup-tag --yes
           fi
-          gh release create "$TAG" "$INSTALLER" \
+          gh release create "$TAG" \
+            "$BOOTSTRAP#首次安装用这个" \
+            "$INSTALLER#原生 NSIS 包，首装包被拦截时可用" \
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Dev 构建 $VERSION" \
-            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。交叉编译，未签名，不含自动更新。"
+            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。首次安装用 Petalfall-Installer，被安全软件拦下时换原生 NSIS 包。交叉编译，未签名，不含自动更新。"

@@ -1,0 +1,48 @@
+/* 撑满主列内容区：法律声明贴在底栏上方，和安装按钮读在一起 */
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+  min-height: 100%;
+}
+
+.location {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+}
+
+.label {
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-small);
+}
+
+.pathRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  padding: var(--sk-space-4) var(--sk-space-4) var(--sk-space-4) var(--sk-space-12);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+}
+
+.path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sk-text);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legal {
+  margin: auto 0 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}

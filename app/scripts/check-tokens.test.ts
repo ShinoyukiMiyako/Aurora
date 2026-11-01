@@ -70,7 +70,7 @@ describe("令牌守卫", () => {
     expect(found(join(FIXTURES, rule, "good"))).toEqual([]);
   });
 
-  it("T9 查 src、scripts 与 src-tauri/src 里的 Emoji", () => {
+  it("T9 查 src、scripts、src-tauri/src 与 src-tauri-setup/src 里的 Emoji", () => {
     const root = tempRoot();
     // 用码位现造，仓库里不落任何 Emoji 字符
     const glyph = String.fromCodePoint(0x1f338);
@@ -78,7 +78,8 @@ describe("令牌守卫", () => {
     writeIn(root, "scripts/tool.mjs", `console.log("ok");\nconsole.log("${glyph}");\n`);
     writeIn(root, "src-tauri/src/main.rs", `fn main() {}\n// ${glyph}\n`);
     writeIn(root, "src-tauri/src/notes.txt", `${glyph}\n`);
-    expect(found(root)).toEqual(["scripts/tool.mjs:2:T9", "src-tauri/src/main.rs:2:T9", "src/ui/label.ts:1:T9"]);
+    writeIn(root, "src-tauri-setup/src/lib.rs", `// ${glyph}\n`);
+    expect(found(root)).toEqual(["scripts/tool.mjs:2:T9", "src-tauri-setup/src/lib.rs:1:T9", "src-tauri/src/main.rs:2:T9", "src/ui/label.ts:1:T9"]);
   });
 
   it("豁免只覆盖注释所在行与下一行", () => {

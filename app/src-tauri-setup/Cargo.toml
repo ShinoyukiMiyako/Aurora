@@ -1,0 +1,54 @@
+[package]
+name = "aurora-setup"
+version = "0.1.0"
+description = "Petalfall 的安装引导程序：解开尾部附加的 NSIS 包并静默安装，界面走 WebView2"
+authors = ["Petalfall"]
+edition = "2024"
+license.workspace = true
+
+[lib]
+# `_lib` 后缀避免 lib 与 bin 同名（Windows 上的已知冲突，见 rust-lang/cargo#8519）。
+name = "aurora_setup_lib"
+
+[[bin]]
+name = "petalfall-setup"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# 次版本与 package.json 里的 @tauri-apps/plugin-dialog 配对，tauri 构建会比对两边的主次版本，这里与启动器保持同一写法。
+tauri-plugin-dialog = "~2.7"
+# 失败页的问题反馈和协议页的源代码链接要交给系统浏览器。
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 载荷头的读写定位只有这一份实现，引导程序和打包工具共用。
+aurora-setup-payload = { path = "../../crates/aurora-setup-payload" }
+# 解开载荷后核对哈希，安装后核对 Petalfall.exe。
+sha2 = "0.11"
+# 已安装版本与载荷版本比较：dev 包的预发布段要按 semver 规则比。
+semver = "1"
+# 解开载荷的随机临时目录。
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+# 与启动器同版本：Tauri 没有暴露浏览器加速键的开关，只能直接调 WebView2 的设置接口。
+webview2-com = "0.38.2"
+windows-core = "0.61"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
