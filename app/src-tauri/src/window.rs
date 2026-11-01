@@ -176,6 +176,8 @@ mod tests {
     /// 不需要 process 插件的权限；恢复最小化的窗口走不激活窗口的后端命令，WebView 不需要会激活窗口的
     /// unminimize；打开文件夹走后端命令，WebView 不需要 opener 的 reveal_item_in_dir——它不受任何路径范围
     /// 约束，`opener:default` 会连它一起授予，页面里一段注入的脚本就能让资源管理器定位到任意路径。
+    /// 核心权限也逐条列出、不用 `core:default`：整套默认集还放行路径解析、事件发送、菜单、托盘等命令，
+    /// 前端一条都不用，页面里注入的脚本却能借它们探路径、伪造事件。
     #[test]
     fn capability_grants_every_window_api_the_shell_uses() {
         let cap: serde_json::Value =
@@ -188,7 +190,12 @@ mod tests {
             .map(|p| p.as_str().unwrap())
             .collect();
         for needed in [
-            "core:default",
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "core:window:allow-is-maximized",
+            "core:window:allow-is-minimized",
+            "core:window:allow-is-focused",
+            "core:window:allow-internal-toggle-maximize",
             "core:window:allow-minimize",
             "core:window:allow-toggle-maximize",
             "core:window:allow-close",
@@ -216,5 +223,50 @@ mod tests {
             !granted.contains(&"core:window:allow-unminimize"),
             "WebView 不该拿到会激活窗口的 unminimize"
         );
+        let defaults: Vec<&&str> = granted.iter().filter(|p| p.ends_with(":default")).collect();
+        assert!(
+            defaults.is_empty(),
+            "WebView 不该拿到整套默认权限集：{defaults:?}"
+        );
+    }
+
+    /// 内嵌前端的内容安全策略：脚本只认打包进来的文件，页面只能连 IPC 与材质协议。策略被删掉或误放开
+    /// 时，注入进页面的一段文字就能执行脚本、把数据发到任意主机。
+    #[test]
+    fn content_security_policy_stays_strict() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let csp = conf["app"]["security"]["csp"]
+            .as_object()
+            .expect("app.security.csp 应是按指令写的对象");
+        let directive = |name: &str| -> Vec<&str> {
+            csp.get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("内容安全策略缺少 {name}"))
+                .split_whitespace()
+                .collect()
+        };
+        assert_eq!(directive("default-src"), ["'none'"]);
+        let script = directive("script-src");
+        for loose in ["'unsafe-inline'", "'unsafe-eval'", "*", "data:", "blob:"] {
+            assert!(!script.contains(&loose), "script-src 不该放开 {loose}");
+        }
+        let connect = directive("connect-src");
+        let texture_host = format!("http://{}.localhost", crate::textures::SCHEME);
+        let texture_scheme = format!("{}:", crate::textures::SCHEME);
+        for needed in [
+            "ipc:",
+            "http://ipc.localhost",
+            texture_host.as_str(),
+            texture_scheme.as_str(),
+        ] {
+            assert!(connect.contains(&needed), "connect-src 缺少 {needed}");
+        }
+        for loose in ["*", "http:", "https:"] {
+            assert!(!connect.contains(&loose), "connect-src 不该放开 {loose}");
+        }
+        for name in ["base-uri", "form-action", "frame-ancestors"] {
+            assert_eq!(directive(name), ["'none'"], "{name} 应为 'none'");
+        }
     }
 }
