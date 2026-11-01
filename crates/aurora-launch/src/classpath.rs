@@ -289,7 +289,8 @@ mod tests {
         )
         .unwrap();
         let client_jar = Path::new("/c.jar");
-        let entries = classpath_entries(&version, &win64(), Path::new("/libs"), client_jar).unwrap();
+        let entries =
+            classpath_entries(&version, &win64(), Path::new("/libs"), client_jar).unwrap();
         assert_eq!(entries, vec![client_jar.to_path_buf()]);
     }
 

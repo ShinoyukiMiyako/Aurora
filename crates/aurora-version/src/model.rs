@@ -468,10 +468,8 @@ mod tests {
         );
         let plain = native_lib(r#"{"name":"org.lwjgl:lwjgl:3.4.3"}"#);
         let version = |jvm: &str| {
-            VersionJson::from_json_str(&format!(
-                r#"{{"id":"x","arguments":{{"jvm":[{jvm}]}}}}"#
-            ))
-            .expect("应解析")
+            VersionJson::from_json_str(&format!(r#"{{"id":"x","arguments":{{"jvm":[{jvm}]}}}}"#))
+                .expect("应解析")
         };
 
         let cases = [
