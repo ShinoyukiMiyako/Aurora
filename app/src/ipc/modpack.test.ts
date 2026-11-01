@@ -2,13 +2,13 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke, listen } from "./bridge";
 import { IpcError } from "./errors";
-import { deleteInstance, getInstanceSettings, listInstances, setInstanceSettings } from "./instances";
+import { deleteInstance, getInstanceSettings, listInstances, revealInFolder, setInstanceSettings } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { acquireMockInstance } from "./mock/handlers/instances";
 import { reset as resetLaunchMock } from "./mock/handlers/launch";
 import { MOCK_DOWNLOADS_DIR, seedMockDownloads } from "./mock/handlers/modpack";
-import { mockRevealedPaths } from "./mock/handlers/opener";
+import { mockRevealedPaths } from "./mock/handlers/instances";
 import {
   EXPORT_EXTRAS,
   INSTANCE_NAME_MAX_CHARS,
@@ -19,7 +19,6 @@ import {
   installModpack,
   previewModpack,
   previewModpackExport,
-  revealExportedPack,
   summarizePlatformModpack,
   type BlockedFileDto,
   type ModpackExportOptions,
@@ -60,7 +59,7 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
     ]);
   });
 
-  it("导出：顶层键 camelCase，options 内部为 snake_case；在资源管理器里选中文件时参数键为 paths", async () => {
+  it("导出：顶层键 camelCase，options 内部为 snake_case；在资源管理器里选中文件走后端命令，参数键为 path", async () => {
     vi.mocked(tauriInvoke).mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     const options: ModpackExportOptions = {
       destination: "D:\\分享\\樱花 1.0.0.mrpack",
@@ -72,11 +71,11 @@ describe("Tauri 里参数键与 Rust 形参一致", () => {
     };
     await previewModpackExport("樱花生存");
     await exportModpack("t-ex", "樱花生存", options);
-    await revealExportedPack("D:\\分享\\樱花 1.0.0.mrpack");
+    await revealInFolder("D:\\分享\\樱花 1.0.0.mrpack");
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["preview_modpack_export", { id: "樱花生存" }],
       ["export_modpack", { taskId: "t-ex", id: "樱花生存", options }],
-      ["plugin:opener|reveal_item_in_dir", { paths: ["D:\\分享\\樱花 1.0.0.mrpack"] }],
+      ["reveal_in_folder", { path: "D:\\分享\\樱花 1.0.0.mrpack" }],
     ]);
   });
 
@@ -543,14 +542,18 @@ describe("导出整合包 mock", () => {
     expect([without.override_files, without.disabled_mods, without.bytes]).toEqual([1, 0, 4096 + 512 * 3]);
   });
 
-  it("在资源管理器里选中：记下路径；参数不是字符串数组时照插件的参数错误拒绝", async () => {
-    await revealExportedPack(DEST);
-    expect(mockRevealedPaths).toEqual([DEST]);
-    const bad = await errorOf(invoke("plugin:opener|reveal_item_in_dir", { paths: DEST }));
-    expect(bad).toMatchObject({ code: "unknown" });
-    expect((bad as IpcError).message).toContain("invalid args `paths` for command `reveal_item_in_dir`");
-    expect(mockRevealedPaths).toEqual([DEST]);
+  it("在资源管理器里选中：与后端一样只放行这次导出写成的文件与备份区里的路径，别的路径、相对路径报 invalid_argument", async () => {
+    const notOurs = await errorOf(revealInFolder(DEST));
+    expect(notOurs).toMatchObject({ code: "invalid_argument", detail: { field: "path", reason: "not_launcher_output" } });
+    expect(mockRevealedPaths).toEqual([]);
+    await exportModpack("t-reveal", FABRIC, base);
+    await revealInFolder(DEST);
+    await revealInFolder("D:/Games/.minecraft/.petalfall/backups/instances/樱花生存");
+    expect(mockRevealedPaths).toEqual([DEST, "D:/Games/.minecraft/.petalfall/backups/instances/樱花生存"]);
+    expect(await errorOf(revealInFolder("D:/Games/.minecraft/.petalfall/backups/../config.json"))).toMatchObject({ detail: { reason: "not_launcher_output" } });
+    expect(await errorOf(revealInFolder("分享/测试包.mrpack"))).toMatchObject({ code: "invalid_argument", detail: { field: "path", reason: "relative" } });
     resetMocks();
     expect(mockRevealedPaths).toEqual([]);
+    expect(await errorOf(revealInFolder(DEST))).toMatchObject({ detail: { reason: "not_launcher_output" } });
   });
 });

@@ -19,7 +19,8 @@ use tauri::{AppHandle, Manager, State};
 use crate::commands::discover::parse_platform;
 use crate::commands::error::code;
 use crate::commands::instances::{
-    busy, ensure_shared_worlds_settled, InstanceActivity, InstanceGuard, InstanceLocks,
+    busy, ensure_shared_worlds_settled, ExportedFiles, InstanceActivity, InstanceGuard,
+    InstanceLocks,
 };
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
@@ -637,6 +638,7 @@ pub async fn export_modpack(
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
     locks: State<'_, InstanceLocks>,
+    exports: State<'_, ExportedFiles>,
 ) -> Result<ModpackExportOutcomeDto, CommandError> {
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = export_modpack_with(
@@ -650,6 +652,10 @@ pub async fn export_modpack(
     )
     .await;
     events.finish().await;
+    // 完成通知上的「打开所在文件夹」要定位它
+    if let Ok(done) = &outcome {
+        exports.record(Path::new(&done.path));
+    }
     outcome
 }
 
@@ -2212,9 +2218,11 @@ mod tests {
         assert!(destination.is_file());
     }
 
-    /// 前端要调的保存对话框与「在文件夹里选中」两条插件权限写在能力文件里。
+    /// 前端要调的保存对话框授予在能力文件里。「在文件夹里选中」改走后端的 reveal_in_folder：opener 的
+    /// reveal_item_in_dir 不受路径范围约束，页面里注入的脚本就能让资源管理器定位到任意路径，WebView 不拿它，
+    /// 也不拿连它一起授予的 opener:default。
     #[test]
-    fn capability_grants_the_save_dialog_and_reveal_in_folder() {
+    fn capability_grants_the_save_dialog_but_not_reveal_in_folder() {
         let cap: serde_json::Value =
             serde_json::from_str(include_str!("../../capabilities/default.json")).unwrap();
         let granted: Vec<&str> = cap["permissions"]
@@ -2223,8 +2231,15 @@ mod tests {
             .iter()
             .map(|p| p.as_str().unwrap())
             .collect();
-        for needed in ["dialog:allow-save", "opener:allow-reveal-item-in-dir"] {
-            assert!(granted.contains(&needed), "能力文件缺少 {needed}");
+        assert!(
+            granted.contains(&"dialog:allow-save"),
+            "能力文件缺少 dialog:allow-save"
+        );
+        for unneeded in ["opener:default", "opener:allow-reveal-item-in-dir"] {
+            assert!(
+                !granted.contains(&unneeded),
+                "WebView 不该拿到 {unneeded}：它会放行不受路径范围约束的 reveal_item_in_dir"
+            );
         }
     }
 }

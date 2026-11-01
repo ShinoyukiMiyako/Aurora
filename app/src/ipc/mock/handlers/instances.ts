@@ -1225,13 +1225,48 @@ async function exportWorld(args: MockArgs): Promise<ExportResultDto> {
   const dest = str(args, "dest");
   if (!/^([A-Za-z]:[\\/]|\\\\)/.test(dest)) throw invalid("dest", "not_absolute", `导出位置须是绝对路径：${dest}`);
   if (!dest.toLowerCase().endsWith(".zip")) throw invalid("dest", "not_zip", `导出的文件须以 .zip 结尾：${dest}`);
-  return worldTask(taskId, id, false, async () => {
+  const result = await worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);
     stage(taskId, `正在打包「${world}」`);
     await fakePack(taskId, packedSize(found));
     return { path: dest, size_bytes: packedSize(found) };
   });
+  recordMockExport(result.path);
+  return result;
+}
+
+/**
+ * 在资源管理器里选中过的路径，按调用先后。浏览器里没有资源管理器，测试据此断言「打开所在文件夹」选中的是哪个文件。
+ * 导出的是同一个数组，reset 只清空不换引用，测试模块里早先拿到的引用一直有效。
+ */
+export const mockRevealedPaths: string[] = [];
+
+/** 这次运行里导出存档、导出整合包写成的文件；与后端一样，「打开所在文件夹」只放行这些与备份区里的路径。 */
+const exportedFiles = new Set<string>();
+
+export function recordMockExport(path: string): void {
+  exportedFiles.add(path);
+}
+
+/** 浏览器里没有真实路径：拆开分隔符、折叠 . 与 ..，再看是否落在备份根之下，与后端按真实路径比的结论一致。 */
+function insideMockBackups(path: string): boolean {
+  const parts: string[] = [];
+  for (const part of path.split(/[\\/]+/)) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part.toLowerCase());
+  }
+  return MOCK_BACKUPS_ROOT.toLowerCase()
+    .split("/")
+    .every((part, index) => parts[index] === part);
+}
+
+function revealInFolder(args: MockArgs): void {
+  const path = str(args, "path");
+  if (!/^([A-Za-z]:[\\/]|\\\\)/.test(path)) throw invalid("path", "relative", `要定位的路径必须是绝对路径：${path}`);
+  if (!exportedFiles.has(path) && !insideMockBackups(path)) throw invalid("path", "not_launcher_output", `只能定位启动器自己产出的文件：${path}`);
+  mockRevealedPaths.push(path);
 }
 
 export const handlers: MockHandlers = {
@@ -1441,6 +1476,7 @@ export const handlers: MockHandlers = {
 
   export_world: exportWorld,
 
+  reveal_in_folder: (args) => revealInFolder(args),
   open_folder: (args) => {
     const target = str(args, "target");
     const id = optStr(args, "id");
@@ -1477,6 +1513,8 @@ export function reset(): void {
   backups = seedBackups();
   holds.clear();
   savesReaders.length = 0;
+  mockRevealedPaths.length = 0;
+  exportedFiles.clear();
 }
 
 interface InstancesSnapshot {

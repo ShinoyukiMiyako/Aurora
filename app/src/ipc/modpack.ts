@@ -316,5 +316,3 @@ export const previewModpackExport = (id: string): Promise<ModpackExportPreviewDt
 export const exportModpack = (taskId: string, id: string, options: ModpackExportOptions): Promise<ModpackExportOutcomeDto> =>
   invoke<ModpackExportOutcomeDto>("export_modpack", { taskId, id, options });
 
-/** 在系统文件管理器里选中导出的文件（opener 插件）。 */
-export const revealExportedPack = (path: string): Promise<void> => invoke<void>("plugin:opener|reveal_item_in_dir", { paths: [path] });

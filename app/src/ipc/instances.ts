@@ -487,3 +487,9 @@ export const exportWorld = (taskId: string, id: string, world: string, dest: str
 /** 用系统文件管理器打开文件夹；路径由后端按实例 id 解析。 */
 export const openFolder = (target: FolderTarget, id: string | null, world: string | null = null): Promise<void> =>
   invoke<void>("open_folder", { target, id, world });
+
+/**
+ * 在系统文件管理器里选中一个启动器自己产出的文件或文件夹：存档备份区里的路径（备份列表的目录、改名后没挪过来的
+ * 旧备份目录），或这次运行里导出存档、导出整合包写成的文件。别的路径后端报 invalid_argument。
+ */
+export const revealInFolder = (path: string): Promise<void> => invoke<void>("reveal_in_folder", { path });

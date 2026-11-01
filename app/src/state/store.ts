@@ -78,7 +78,7 @@ import type {
 import * as javaIpc from "../ipc/java";
 import type { InstalledRuntimeDto, JavaInstallationDto, RemoveJavaPathDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
-import { blockedFilesOf, claimBlockedFiles, downloadsFolder, parseBlockedFiles, revealExportedPack, type BlockedFileDto, type ClaimReportDto, type ModpackExportOptions, type ModpackExportOutcomeDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
+import { blockedFilesOf, claimBlockedFiles, downloadsFolder, parseBlockedFiles, type BlockedFileDto, type ClaimReportDto, type ModpackExportOptions, type ModpackExportOutcomeDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
 import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServerInstance, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
@@ -430,7 +430,7 @@ export interface LauncherActions {
   /** 把一份备份移入回收站（不经任务队列，不确认）。 */
   deleteWorldBackup(instanceId: string, world: string, file: string): Promise<void>;
   listWorldBackups(instanceId: string, world: string): Promise<WorldBackupListDto>;
-  /** 在系统文件管理器里定位到这个文件或文件夹；打开失败原样抛出。 */
+  /** 在系统文件管理器里选中启动器自己产出的文件或文件夹（存档备份区里的、这次运行里导出的）；别的路径与打开失败原样抛出。 */
   revealPath(path: string): Promise<void>;
   // 下载任务
   cancelTask(id: string): Promise<void>;
@@ -496,11 +496,6 @@ const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
 
-/**
- * opener 插件在文件管理器里定位文件或文件夹的命令（opener:default 含 allow-reveal-item-in-dir）。备份目录、导出的文件
- * 不属于 open_folder 能按实例解析的那几种目标，路径由后端在列表与结果里给出。
- */
-const REVEAL_COMMAND = "plugin:opener|reveal_item_in_dir";
 
 /** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
@@ -2011,7 +2006,7 @@ export class LauncherStore {
         const copy = TASK_TOAST.exported(meta.name, outcome.bundled_mods.length);
         this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, {
           label: TASK_TOAST.revealAction,
-          run: () => revealExportedPack(outcome.path),
+          run: () => this.actions.revealPath(outcome.path),
           errorTitle: ACTION_ERROR.revealExport,
         });
         return;
@@ -2582,7 +2577,7 @@ export class LauncherStore {
         await instancesIpc.openFolder(target, id, world);
       },
       async revealPath(path) {
-        await invoke<void>(REVEAL_COMMAND, { paths: [path] });
+        await instancesIpc.revealInFolder(path);
       },
       async openExternal(url) {
         const parsed = new URL(url);

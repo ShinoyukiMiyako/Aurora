@@ -370,6 +370,12 @@ impl Aurora {
         self.config_mut().world_backup = settings;
     }
 
+    /// 当前游戏目录的备份根 `<游戏目录>/.petalfall/backups`（不检查是否存在）。外壳据此判断一个路径是不是
+    /// 启动器自己的备份区里的。
+    pub fn world_backups_root(&self) -> PathBuf {
+        self.backup_layout().root().to_path_buf()
+    }
+
     fn backup_layout(&self) -> BackupLayout {
         BackupLayout::new(self.game_dir())
     }

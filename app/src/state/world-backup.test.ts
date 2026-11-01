@@ -138,7 +138,7 @@ describe("备份、导出与恢复入队", () => {
   it("导出：同样记作 world_backup，标题写「导出」；完成后通知写路径，「打开所在文件夹」在文件管理器里定位到它", async () => {
     const exported = deferred<ExportResultDto>();
     ipc.overrides.set("export_world", () => exported.promise);
-    ipc.overrides.set("plugin:opener|reveal_item_in_dir", () => null);
+    ipc.overrides.set("reveal_in_folder", () => null);
     await store.actions.exportWorld("生存", "w1", "旧世界", "D:\\导出\\w1.zip");
     await settle();
     const [task] = store.getState().tasks;
@@ -151,7 +151,7 @@ describe("备份、导出与恢复入队", () => {
     expect(toasts()).toContainEqual(["success", "已导出「旧世界」", "D:\\导出\\w1.zip"]);
     expect(toast("已导出「旧世界」").action?.label).toBe("打开所在文件夹");
     await runAction("已导出「旧世界」");
-    expect(callsOf(ipc, "plugin:opener|reveal_item_in_dir")).toEqual([{ paths: ["D:\\导出\\w1.zip"] }]);
+    expect(callsOf(ipc, "reveal_in_folder")).toEqual([{ path: "D:\\导出\\w1.zip" }]);
   });
 
   it("恢复：记作 world_restore；完成后说原存档进了回收站，原来没有这个存档时不说", async () => {
@@ -277,7 +277,7 @@ describe("改名时备份没跟上", () => {
 
   it("照改名成功处理，warning 通知写备份还在哪，「打开文件夹」定位到那里", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    ipc.overrides.set("plugin:opener|reveal_item_in_dir", () => null);
+    ipc.overrides.set("reveal_in_folder", () => null);
     ipc.overrides.set("rename_instance", () => {
       instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
       throw notMoved({ id: "生存", renamed_to: "生存二", path: "D:/Games/.minecraft/.petalfall/backups/instances/生存" });
@@ -288,7 +288,7 @@ describe("改名时备份没跟上", () => {
     expect(toasts()).toContainEqual(["warning", "「生存二」的存档备份没能跟着改名", "备份还在 D:/Games/.minecraft/.petalfall/backups/instances/生存"]);
     expect(toasts().map(([, title]) => title)).not.toContain("「生存二」的游玩记录没能跟着改");
     await runAction("「生存二」的存档备份没能跟着改名");
-    expect(callsOf(ipc, "plugin:opener|reveal_item_in_dir")).toEqual([{ paths: ["D:/Games/.minecraft/.petalfall/backups/instances/生存"] }]);
+    expect(callsOf(ipc, "reveal_in_folder")).toEqual([{ path: "D:/Games/.minecraft/.petalfall/backups/instances/生存" }]);
   });
 
   it("缺 detail.path 是契约被破坏：直接报错，不提示", async () => {

@@ -52,7 +52,7 @@ describe("浏览器与测试环境走 mock", () => {
       permissions: string[];
     };
     const plugins = mockCommands().filter((cmd) => cmd.startsWith("plugin:"));
-    expect(plugins).toEqual(["plugin:opener|open_url", "plugin:opener|reveal_item_in_dir"]);
+    expect(plugins).toEqual(["plugin:opener|open_url"]);
     for (const cmd of plugins) {
       const [plugin, name] = cmd.slice("plugin:".length).split("|");
       expect(capability.permissions).toContain(`${plugin}:allow-${name.replaceAll("_", "-")}`);
@@ -67,14 +67,6 @@ describe("浏览器与测试环境走 mock", () => {
     const denied = await invoke("plugin:opener|open_url", { url: "file:///C:/Windows/System32/calc.exe" }).catch((e: unknown) => e);
     expect(denied).toMatchObject({ code: "unknown", message: "Not allowed to open url file:///C:/Windows/System32/calc.exe" });
     expect(open).toHaveBeenCalledTimes(1);
-  });
-
-  it("opener 的 mock 定位文件：paths 是路径列表才放行，别的形状照插件的参数错误拒绝", async () => {
-    await expect(invoke("plugin:opener|reveal_item_in_dir", { paths: ["D:/Games/.minecraft/.petalfall/backups"] })).resolves.toBeUndefined();
-    const single = await invoke("plugin:opener|reveal_item_in_dir", { paths: "D:/a.zip" }).catch((e: unknown) => e);
-    expect(single).toMatchObject({ code: "unknown", message: 'invalid args `paths` for command `reveal_item_in_dir`: expected a sequence of strings, found "D:/a.zip"' });
-    const missing = await invoke("plugin:opener|reveal_item_in_dir", {}).catch((e: unknown) => e);
-    expect(missing).toMatchObject({ code: "unknown" });
   });
 
   it("未实现的命令直接抛错，不返回空值", async () => {

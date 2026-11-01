@@ -13,26 +13,6 @@ function openUrl(args: MockArgs): void {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-/**
- * 在资源管理器里选中过的路径，按调用先后。浏览器里没有资源管理器，测试据此断言「打开所在文件夹」选中的是哪个文件。
- * 导出的是同一个数组，reset 只清空不换引用，测试模块里早先拿到的引用一直有效。
- */
-export const mockRevealedPaths: string[] = [];
-
-function revealItemInDir(args: MockArgs): void {
-  const paths = args.paths;
-  // 形参是 Vec<PathBuf>：不是字符串数组时是 Tauri 自己的反序列化错误，到前端是纯字符串
-  if (!Array.isArray(paths) || paths.some((p) => typeof p !== "string")) {
-    throw `invalid args \`paths\` for command \`reveal_item_in_dir\`: expected a sequence of strings, found ${JSON.stringify(paths)}`;
-  }
-  mockRevealedPaths.push(...(paths as string[]));
-}
-
 export const handlers: MockHandlers = {
   "plugin:opener|open_url": (args) => openUrl(args),
-  "plugin:opener|reveal_item_in_dir": (args) => revealItemInDir(args),
 };
-
-export function reset(): void {
-  mockRevealedPaths.length = 0;
-}

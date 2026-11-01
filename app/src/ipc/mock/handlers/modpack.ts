@@ -34,7 +34,7 @@ import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_DATA_DIR, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { acquireMockInstance, addMockInstance, ensureMockSharedWorldsSettled, handlers as instanceHandlers, markMockSavesRead, mockInstanceHeldFor, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstance, addMockInstance, ensureMockSharedWorldsSettled, handlers as instanceHandlers, markMockSavesRead, mockInstanceHeldFor, recordMockExport, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
 import { isMockTaskCancelled } from "./tasks";
 
@@ -681,7 +681,12 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
       disabled_mods: carried.length,
       skipped: plan.skipped,
     };
-  }).finally(release);
+  })
+    .then((outcome) => {
+      recordMockExport(outcome.path);
+      return outcome;
+    })
+    .finally(release);
 }
 
 export const handlers: MockHandlers = {

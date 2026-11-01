@@ -72,6 +72,7 @@ pub fn run() {
             app.manage(TaskJournal::default());
             // -- instances --
             app.manage(commands::instances::InstanceLocks::default());
+            app.manage(commands::instances::ExportedFiles::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
             // -- accounts --
@@ -142,6 +143,7 @@ pub fn run() {
             commands::instances::required_java,
             commands::instances::version_requirements,
             commands::instances::open_folder,
+            commands::instances::reveal_in_folder,
             commands::instances::template_info,
             commands::instances::save_instance_as_template,
             commands::instances::clear_template,

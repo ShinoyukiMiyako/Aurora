@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
-import { mockRevealedPaths } from "../ipc/mock/handlers/opener";
 import type { ModpackExportOptions, ModpackExportOutcomeDto } from "../ipc/modpack";
 import { CORE_EVENT, type TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -87,6 +86,7 @@ describe("导出整合包任务", () => {
 
   it("完成：Toast 标题「已导出「名称」」，没有打包进文件的 Mod 时没有正文；「打开所在文件夹」在资源管理器里选中导出的文件", async () => {
     ipc.overrides.set("export_modpack", () => outcome([]));
+    ipc.overrides.set("reveal_in_folder", () => null);
     const id = await store.actions.exportModpack("生存", OPTIONS);
     await settle();
     expect(store.getState().tasks.find((t) => t.id === id)?.status).toBe("done");
@@ -94,8 +94,7 @@ describe("导出整合包任务", () => {
     expect([toast.tone, toast.title, toast.body]).toEqual(["success", "已导出「周末包」", undefined]);
     expect(toast.action?.label).toBe("打开所在文件夹");
     await runAction(toast);
-    expect(callsOf(ipc, "plugin:opener|reveal_item_in_dir")).toEqual([{ paths: [DEST] }]);
-    expect(mockRevealedPaths.at(-1)).toBe(DEST);
+    expect(callsOf(ipc, "reveal_in_folder")).toEqual([{ path: DEST }]);
     // 实例没有被当成装好或改过：导出不重扫实例列表
     expect(callsOf(ipc, "list_instances")).toHaveLength(1);
   });

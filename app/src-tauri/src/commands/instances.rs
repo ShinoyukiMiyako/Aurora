@@ -6,7 +6,7 @@
 //! 并在 detail 里带上正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏、与存档备份之间可以并行
 //! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -1648,6 +1648,97 @@ pub async fn open_folder(
     })
 }
 
+/// 这次运行里导出存档、导出整合包写成的文件（managed state）。「打开所在文件夹」只放行这些与存档备份区里的路径。
+/// 只在进程内有意义：重启后导出完成的通知已经不在，没有入口再要求定位它们。
+#[derive(Default)]
+pub struct ExportedFiles(Mutex<HashSet<PathBuf>>);
+
+impl ExportedFiles {
+    pub fn record(&self, path: &Path) {
+        self.0
+            .lock()
+            .expect("导出记录的锁已中毒")
+            .insert(path.to_path_buf());
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        self.0.lock().expect("导出记录的锁已中毒").contains(path)
+    }
+}
+
+/// 在系统文件管理器里定位并选中一个启动器自己产出的文件或文件夹：当前游戏目录存档备份区里的路径（备份列表给的
+/// 目录、改名后没挪过来的旧备份目录），或这次运行里导出存档、导出整合包写成的文件。别的路径报 `invalid_argument`
+/// （detail.reason 为 `relative` 或 `not_launcher_output`），系统打不开报 `open_failed`。
+///
+/// opener 插件的 reveal_item_in_dir 不受路径范围约束，授予前端的话，页面里注入的脚本就能让资源管理器定位到任意
+/// 路径；所以前端不拿那条权限，改由这里按白名单放行。
+#[tauri::command]
+pub async fn reveal_in_folder(
+    app: AppHandle,
+    path: String,
+    facade: State<'_, Facade>,
+    exports: State<'_, ExportedFiles>,
+) -> Result<(), CommandError> {
+    let backups_root = facade.snapshot().await.world_backups_root();
+    let target = reveal_target(&path, &backups_root, &exports)?;
+    tracing::info!(path = %target.display(), "在文件管理器里定位");
+    app.opener().reveal_item_in_dir(&target).map_err(|err| {
+        tracing::warn!(path = %target.display(), error = %err, "在文件管理器里定位失败");
+        CommandError::new(code::OPEN_FAILED, format!("打开所在文件夹失败：{err}"))
+            .with_detail(json!({ "path": path }))
+    })
+}
+
+/// 定位目标是否是启动器自己产出的路径。导出写成的文件按记下的原样比；备份区里的按真实路径比，挡住 `..` 与
+/// 链接绕出备份区。路径或备份区不在时它不可能在备份区里。
+fn reveal_target(
+    path: &str,
+    backups_root: &Path,
+    exports: &ExportedFiles,
+) -> Result<PathBuf, CommandError> {
+    let target = PathBuf::from(path);
+    if !target.is_absolute() {
+        return Err(invalid_field(
+            "path",
+            "relative",
+            format!("要定位的路径必须是绝对路径：{path}"),
+        ));
+    }
+    if exports.contains(&target) {
+        return Ok(target);
+    }
+    let not_ours = || {
+        invalid_field(
+            "path",
+            "not_launcher_output",
+            format!("只能定位启动器自己产出的文件：{path}"),
+        )
+    };
+    let (Some(real), Some(root)) = (
+        existing_real_path(&target)?,
+        existing_real_path(backups_root)?,
+    ) else {
+        return Err(not_ours());
+    };
+    if real.starts_with(&root) {
+        Ok(target)
+    } else {
+        Err(not_ours())
+    }
+}
+
+/// 真实路径；路径不在为 None，别的读取错误照实上报。
+fn existing_real_path(path: &Path) -> Result<Option<PathBuf>, CommandError> {
+    match std::fs::canonicalize(path) {
+        Ok(real) => Ok(Some(real)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(CommandError::from(aurora_core::BaseError::Io {
+            path: path.to_path_buf(),
+            source,
+        })),
+    }
+}
+
 /// 工作目录下可直接打开的子目录。
 const WORKING_SUBDIRS: [&str; 6] = [
     "mods",
@@ -2178,6 +2269,7 @@ pub async fn export_world(
     tasks: State<'_, TaskRegistry>,
     locks: State<'_, InstanceLocks>,
     running: State<'_, RunningGame>,
+    exports: State<'_, ExportedFiles>,
 ) -> Result<ExportResultDto, CommandError> {
     let env = WorldTaskEnv {
         facade: &facade,
@@ -2188,6 +2280,10 @@ pub async fn export_world(
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = export_world_with(&env, &task_id, &id, &world, &dest, events.sink()).await;
     events.finish().await;
+    // 完成通知上的「打开所在文件夹」要定位它
+    if let Ok(done) = &outcome {
+        exports.record(Path::new(&done.path));
+    }
     outcome
 }
 
@@ -4714,6 +4810,54 @@ mod tests {
         assert!(w.locks.reading_saves().is_empty());
         let after = restore("乙", "共用", "rs-after").await.unwrap_err();
         assert_eq!(after.code, code::WORLD_BACKUP_NOT_FOUND);
+    }
+
+    /// 「打开所在文件夹」只放行启动器自己产出的路径：存档备份区里的（按真实路径比，`..` 绕不出去），与这次运行里
+    /// 导出写成的文件；别的路径报 invalid_argument（not_launcher_output），相对路径报 relative。
+    #[test]
+    fn reveal_accepts_only_launcher_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .join(".minecraft")
+            .join(".petalfall")
+            .join("backups");
+        let backups = root.join("instances").join("生存").join("新的世界");
+        std::fs::create_dir_all(&backups).unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, b"{}").unwrap();
+        let exported = dir.path().join("分享").join("存档.zip");
+        let exports = ExportedFiles::default();
+
+        assert_eq!(
+            reveal_target(backups.to_str().unwrap(), &root, &exports).unwrap(),
+            backups
+        );
+        let escaped = root.join("..").join("..").join("..").join("config.json");
+        for (path, reason) in [
+            (escaped.display().to_string(), "not_launcher_output"),
+            (config.display().to_string(), "not_launcher_output"),
+            (exported.display().to_string(), "not_launcher_output"),
+            ("分享/存档.zip".to_owned(), "relative"),
+        ] {
+            let err = reveal_target(&path, &root, &exports).unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{path}");
+            assert_eq!(
+                err.detail,
+                Some(json!({ "field": "path", "reason": reason })),
+                "{path}"
+            );
+        }
+
+        exports.record(&exported);
+        assert_eq!(
+            reveal_target(exported.to_str().unwrap(), &root, &exports).unwrap(),
+            exported
+        );
+        // 还没有任何备份时备份区不在，什么都不在它里面
+        let missing_root = dir.path().join("另一个游戏目录").join("backups");
+        let err = reveal_target(backups.to_str().unwrap(), &missing_root, &exports).unwrap_err();
+        assert_eq!(err.detail.unwrap()["reason"], "not_launcher_output");
     }
 
     /// 共用存档：另一个也不隔离的实例开着游戏时，备份报 instance_busy，detail.id 是那个实例；隔离实例自己的存档

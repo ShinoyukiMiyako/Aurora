@@ -2127,11 +2127,11 @@ describe("实例详情：存档备份", () => {
   });
 
   it("打开备份文件夹：在文件管理器里定位到列表给的目录；还没有备份时禁用", async () => {
-    ipc.overrides.set("plugin:opener|reveal_item_in_dir", () => null);
+    ipc.overrides.set("reveal_in_folder", () => null);
     await openBackups();
     click(button("打开备份文件夹", backupsDialog()));
     await flush();
-    expect(callsOf(ipc, "plugin:opener|reveal_item_in_dir")).toEqual([{ paths: [list.dir] }]);
+    expect(callsOf(ipc, "reveal_in_folder")).toEqual([{ path: list.dir }]);
     view?.unmount();
     list = { ...list, backups: [], total_bytes: 0 };
     resetRecorderKeepOverrides();
@@ -2140,7 +2140,7 @@ describe("实例详情：存档备份", () => {
     expect(await hoverReason(openDir)).toBe("还没有备份，备份目录还没建出来");
     click(openDir);
     await flush();
-    expect(callsOf(ipc, "plugin:opener|reveal_item_in_dir")).toEqual([]);
+    expect(callsOf(ipc, "reveal_in_folder")).toEqual([]);
   });
 
   it("没有备份：副标题与空状态都说还没有备份；共用存档的副标题注明所有共用的实例看到同一份", async () => {
