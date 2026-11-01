@@ -172,13 +172,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     }
   }, [actions, checking, run, updates]);
 
-  // 只订阅本实例排队与进行中的更新任务（含「全部更新」）：它们的进度条要跟着走，别的任务的进度不让整张表重渲染
-  const updateTasks = useLauncherSelector(
-    (s) => s.tasks.filter((t) => isPendingModUpdate(t, id)),
-    shallowArrayEqual,
-  );
-  // 组合任务跑完之前入队的几项都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败
-  const updatingFiles = modFilesBeingUpdated(updateTasks, id);
+  // 组合任务跑完之前入队的几项都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败。
+  // 只订阅文件名单：更新任务的进度约 100 ms 一次，名单不变，整张表不跟着重渲染；摘要行的进度条自己订阅
+  const updatingNames = useLauncherSelector((s) => [...modFilesBeingUpdated(s.tasks, id)].sort(), shallowArrayEqual);
+  const updatingFiles = new Set(updatingNames);
   const rows = modsData === null ? [] : modRows(modsData, updates.status === "ready" ? updates.data : null).map((r) => {
     const override = overrides.get(r.fileName);
     return override === undefined ? r : { ...r, enabled: override };
@@ -438,7 +435,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           <div className={styles.toolRight}>
             <FolderButton ops={ops} target="mods" label={MODS_COPY.openFolder} variant="secondary" />
             {counts.outdated > 0 ? (
-              <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updateTasks.length > 0} onClick={() => openPreview(null)}>
+              <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updatingNames.length > 0} onClick={() => openPreview(null)}>
                 {MODS_COPY.updateAll(counts.outdated)}
               </Button>
             ) : (
@@ -463,12 +460,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
             {partial && inst.modpack !== null ? MODS_COPY.partialNote(inst.modpack.name, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}
           </span>
         )}
-        {updateTasks.length > 0 && (
-          <span className={styles.modTask}>
-            <ProgressBar value={updateTasks[0].status === "running" ? updateTasks[0].progress : 0} size="sm" track={progressTrack(updateTasks[0])} label={updateTasks[0].title} />
-            <span className={styles.ellipsis}>{updateTasks[0].title}</span>
-          </span>
-        )}
+        <UpdateProgress instanceId={id} />
       </Inset>
 
       {ops.locks.mods !== null && <Banner tone="info" title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : MODS_COPY.bannerInstalling} />}
@@ -551,6 +543,18 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
       )}
     </div>
+  );
+}
+
+/** 摘要行的更新进度，取排在最前的那个更新任务。进度约 100 ms 一次，只让这一小块跟着重渲染。 */
+function UpdateProgress({ instanceId }: { instanceId: string }) {
+  const task = useLauncherSelector((s) => s.tasks.find((t) => isPendingModUpdate(t, instanceId)));
+  if (task === undefined) return null;
+  return (
+    <span className={styles.modTask}>
+      <ProgressBar value={task.status === "running" ? task.progress : 0} size="sm" track={progressTrack(task)} label={task.title} />
+      <span className={styles.ellipsis}>{task.title}</span>
+    </span>
   );
 }
 
