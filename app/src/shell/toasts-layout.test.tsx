@@ -33,15 +33,24 @@ const SHEET = readFileSync(join(HERE, "Toasts.module.css"), "utf8")
   .replace(/:global\((.+)\) \.region/g, "$1 .region")
   .replaceAll(".region", `.${styles.region}`);
 
-const BOTTOM_RIGHT = { top: "auto", bottom: "var(--sk-space-16)", right: "var(--sk-space-16)" };
-/** 标题栏 56 高、再留 8：窗口三键也不能挡。 */
-const TOP_RIGHT = { top: "calc(56px + var(--sk-space-8))", bottom: "auto", right: "var(--sk-space-16)" };
+const BOTTOM_RIGHT = { top: "auto", bottom: "var(--sk-space-16)", left: "auto", right: "var(--sk-space-16)" };
+/** 标题栏 56 高、再留 64：资源详情的「返回」在 900 高的窗口里下沿到 113。 */
+const TOP_LEFT = { top: "calc(56px + var(--sk-space-64))", bottom: "auto", left: "var(--sk-space-16)", right: "auto" };
 
 const placement = () => {
   const region = document.querySelector<HTMLElement>(`section[aria-label="${TOASTS_COPY.region}"]`);
   if (region === null) throw new Error("通知容器没有挂上");
-  const { top, bottom, right } = getComputedStyle(region);
-  return { top, bottom, right };
+  const { top, bottom, left, right } = getComputedStyle(region);
+  return { top, bottom, left, right };
+};
+
+/** 刚挂上的通知此刻的横向位移：入场动画还没走，就是入场起点。 */
+const enterShift = (title: string) => {
+  const toast = [...document.querySelectorAll<HTMLElement>("[data-tone]")].find((el) => el.textContent?.includes(title));
+  if (toast === undefined) throw new Error(`没有「${title}」这条通知`);
+  const match = /translateX\((-?[\d.]+)px\)/.exec(toast.style.transform);
+  if (match === null) throw new Error(`「${title}」此刻没有横向位移：${toast.style.transform}`);
+  return Number(match[1]);
 };
 
 let view: Rendered | undefined;
@@ -119,7 +128,7 @@ describe("通知栈的落点", () => {
     expect(placement()).toEqual(BOTTOM_RIGHT);
   });
 
-  it("弹窗开着时在标题栏下方的右上角，让出底栏；弹窗退场完回到右下角", async () => {
+  it("弹窗开着时在标题栏下方的左上角，让出底栏和头部的关闭按钮；弹窗退场完回到右下角", async () => {
     bootOverrides(ipc, { instances: [instanceDto("生存")] });
     await mount();
     act(() => launcher.actions.toast("error", "常驻的失败"));
@@ -127,20 +136,20 @@ describe("通知栈的落点", () => {
     act(() => shell.openCreateInstance());
     await flush();
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
-    expect(placement()).toEqual(TOP_RIGHT);
+    expect(placement()).toEqual(TOP_LEFT);
 
     act(() => shell.closeCreateInstance());
     await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 3000, interval: 20 });
     expect(placement()).toEqual(BOTTOM_RIGHT);
   });
 
-  it("首次启动向导开着时同样在右上角：「开始使用」在向导底栏右侧；向导收尾后回到右下角", async () => {
+  it("首次启动向导开着时同样在左上角：「开始使用」在向导底栏右侧；向导收尾后回到右下角", async () => {
     bootOverrides(ipc, { instances: [], firstRun: true });
     ipc.overrides.set("complete_first_run", () => null);
     await mount();
     act(() => launcher.actions.toast("success", "已添加离线账户"));
     expect(document.querySelector("[data-flow='onboarding']")).not.toBeNull();
-    expect(placement()).toEqual(TOP_RIGHT);
+    expect(placement()).toEqual(TOP_LEFT);
 
     await act(async () => {
       await launcher.actions.completeFirstRun("D:\\Games\\.minecraft", []);
@@ -148,5 +157,63 @@ describe("通知栈的落点", () => {
     await flush();
     expect(document.querySelector("[data-flow='onboarding']")).toBeNull();
     expect(placement()).toEqual(BOTTOM_RIGHT);
+  });
+
+  it("入场方向跟随落点：平时从右侧进，弹窗开着时从左侧进，弹窗退场完再回到右侧", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => void launcher.actions.toast("error", "平时来的"));
+    expect(enterShift("平时来的")).toBe(40);
+
+    act(() => shell.openCreateInstance());
+    await flush();
+    act(() => void launcher.actions.toast("error", "弹窗开着时来的"));
+    expect(enterShift("弹窗开着时来的")).toBe(-40);
+
+    act(() => shell.closeCreateInstance());
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 3000, interval: 20 });
+    act(() => void launcher.actions.toast("error", "弹窗走了才来的"));
+    expect(enterShift("弹窗走了才来的")).toBe(40);
+  });
+
+  it("平时进来的通知，弹窗开着时关掉：退场走左侧，栈此刻在左上角", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    let id = "";
+    act(() => {
+      id = launcher.actions.toast("error", "平时来的");
+    });
+    expect(enterShift("平时来的")).toBe(40);
+
+    act(() => shell.openCreateInstance());
+    await flush();
+    await vi.waitFor(() => expect(Math.abs(enterShift("平时来的"))).toBeLessThan(1), { timeout: 3000, interval: 10 });
+    act(() => launcher.actions.dismissToast(id));
+    await vi.waitFor(() => expect(enterShift("平时来的")).toBeLessThan(-4), { timeout: 2000, interval: 4 });
+  });
+
+  it("弹窗开着时进来的通知，弹窗退场完才关：退场走右侧，栈此刻已回右下角", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => shell.openCreateInstance());
+    await flush();
+    let id = "";
+    act(() => {
+      id = launcher.actions.toast("error", "弹窗开着时来的");
+    });
+    expect(enterShift("弹窗开着时来的")).toBe(-40);
+
+    act(() => shell.closeCreateInstance());
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 3000, interval: 20 });
+    await vi.waitFor(() => expect(Math.abs(enterShift("弹窗开着时来的"))).toBeLessThan(1), { timeout: 3000, interval: 10 });
+    act(() => launcher.actions.dismissToast(id));
+    await vi.waitFor(() => expect(enterShift("弹窗开着时来的")).toBeGreaterThan(4), { timeout: 2000, interval: 4 });
+  });
+
+  it("首次启动向导开着时同样从左侧进", async () => {
+    bootOverrides(ipc, { instances: [], firstRun: true });
+    await mount();
+    act(() => void launcher.actions.toast("success", "已添加离线账户"));
+    expect(enterShift("已添加离线账户")).toBe(-40);
   });
 });

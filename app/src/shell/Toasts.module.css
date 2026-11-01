@@ -13,10 +13,16 @@
   max-width: calc(100% - var(--sk-space-32));
 }
 
-/* 弹窗和首次启动向导的主按钮都在底栏右侧，通知留在右下角会盖住它。挪到标题栏下方：窗口按钮也不能挡 */
+/*
+ * 弹窗和向导开着时四个角都有按钮：右下是底栏主按钮，右上是头部关闭，左下是新建实例步骤条的末项。
+ * 贴左放在标题栏下方，再让过资源详情左上的「返回」，它在 900 高的窗口里下沿到 113。方向随落点翻到左侧
+ */
 :global(:root:has([data-sk-modal-layer], [data-sk-onboarding])) .region {
-  top: calc(56px + var(--sk-space-8));
+  --toast-enter-side: -1;
+  top: calc(56px + var(--sk-space-64));
+  right: auto;
   bottom: auto;
+  left: var(--sk-space-16);
 }
 
 :global(:root[data-sk-tier="compact"]) .region {
