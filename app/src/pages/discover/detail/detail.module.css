@@ -289,7 +289,7 @@
   gap: var(--sk-space-10);
 }
 
-.versions > button:last-child {
+.versions > [data-tooltip-host]:last-child > button {
   align-self: center;
 }
 
