@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act, type ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { ICON_PATHS } from "../../art/icon-paths";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
@@ -203,6 +203,12 @@ function contentDto(): InstanceContentDto {
     ],
   };
 }
+
+// 没改写的命令落到假后端，它第一次用到时才动态引入，这是真实的异步，假定时器推不动：
+// 不先引入好，用例过不过就取决于前面有没有别的用例跑过
+beforeAll(async () => {
+  await import("../../ipc/mock");
+});
 
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
