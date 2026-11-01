@@ -349,7 +349,7 @@ fn verify(pack: &ExportPack, dest: &Path, written: &BTreeMap<String, u64>) -> Re
         path: dest.to_path_buf(),
         reason,
     };
-    let archive = read_pack(dest).map_err(|err| fail(describe_chain(&err)))?;
+    let archive = read_pack(dest).map_err(|err| fail(aurora_base::error_with_causes(&err)))?;
     let manifest = &archive.manifest;
     if manifest.format != PackFormat::Modrinth {
         return Err(fail("读回来不是 Modrinth 格式".to_owned()));
@@ -410,17 +410,6 @@ fn verify(pack: &ExportPack, dest: &Path, written: &BTreeMap<String, u64>) -> Re
         )));
     }
     Ok(())
-}
-
-fn describe_chain(err: &dyn std::error::Error) -> String {
-    let mut text = err.to_string();
-    let mut current = err.source();
-    while let Some(cause) = current {
-        text.push('：');
-        text.push_str(&cause.to_string());
-        current = cause.source();
-    }
-    text
 }
 
 #[derive(Serialize)]

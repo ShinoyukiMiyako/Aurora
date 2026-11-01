@@ -543,7 +543,7 @@ impl ProbeCache {
                 modified_ms,
                 failed_at_ms,
                 kind: ProbeFailureKind::of(err),
-                message: error_chain(err),
+                message: aurora_base::error_with_causes(err),
             },
         );
     }
@@ -624,18 +624,6 @@ fn fingerprint(path: &Path) -> Result<Fingerprint> {
 fn unix_millis(time: SystemTime) -> Option<u64> {
     let elapsed = time.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(elapsed.as_millis()).ok()
-}
-
-/// 错误连同来源链拼成一行：`JavaExec` 自身的文案只有路径，真正的原因在 io 错误里。
-fn error_chain(err: &Error) -> String {
-    let mut message = err.to_string();
-    let mut source = std::error::Error::source(err);
-    while let Some(cause) = source {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        source = cause.source();
-    }
-    message
 }
 
 // ---- 内部：候选 -> 安装项 ----
@@ -1597,7 +1585,7 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].kind, ProbeFailureKind::Exec);
         assert!(
-            failures[0].message.ends_with(": 拒绝访问"),
+            failures[0].message.ends_with("：拒绝访问"),
             "{}",
             failures[0].message
         );

@@ -162,19 +162,6 @@ fn preserve_unreadable_credentials_at(
     Ok(candidate)
 }
 
-/// 错误连同它的原因链，用「：」接起来。凭据库读不出来的原因常在第二层（JSON 的行列）。
-#[cfg(windows)]
-fn error_with_causes(err: &dyn std::error::Error) -> String {
-    let mut text = err.to_string();
-    let mut cause = err.source();
-    while let Some(inner) = cause {
-        text.push('：');
-        text.push_str(&inner.to_string());
-        cause = inner.source();
-    }
-    text
-}
-
 /// 外置登录服务器的探测结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthServerInfo {
@@ -1003,7 +990,7 @@ impl Aurora {
             Err(err) => return Err(err.into()),
         };
         let preserved = preserve_unreadable_credentials(&path)?;
-        let error = error_with_causes(&err);
+        let error = aurora_base::error_with_causes(&err);
         tracing::error!(
             path = %path.display(),
             preserved = %preserved.display(),

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
+use aurora_base::error_with_causes;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
@@ -243,7 +244,7 @@ async fn conclude(
         };
     };
     for other in failures {
-        tracing::error!(error = %error_chain(&other), "游戏会话收尾时另有失败");
+        tracing::error!(error = %error_with_causes(&other), "游戏会话收尾时另有失败");
     }
     let log_path = match log {
         Some(log) => settle_log_after_failure(log, clock.now(), &failure, &report).await,
@@ -271,7 +272,7 @@ async fn settle_log_after_failure(
     let code = report
         .code
         .map_or_else(|| "未知".to_owned(), |code| code.to_string());
-    let text = format!("{}（退出码 {code}）", error_chain(failure));
+    let text = format!("{}（退出码 {code}）", error_with_causes(failure));
     let outcome = if report.terminated_by_launcher {
         SessionOutcome::Killed
     } else if detect_crash(report) {
@@ -292,14 +293,6 @@ async fn settle_log_after_failure(
             None
         }
     }
-}
-
-/// 错误连同原因链拼成一行，写进会话日志给人看。
-fn error_chain(err: &LaunchError) -> String {
-    std::iter::successors(Some(err as &dyn std::error::Error), |e| e.source())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("：")
 }
 
 /// 等读取任务读完各自的流，最多等 `deadline`；超时或有一个异常结束时，其余没读完的都结束掉，不留在
