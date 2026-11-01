@@ -1658,6 +1658,30 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "恢复联网后再安装"]);
   });
 
+  it("作者不允许启动器下载的 Mod：说明块里的「打开网页」用系统浏览器打开工程页，打不开时报出来；安装按钮禁用", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    vi.stubGlobal("open", vi.fn());
+    const mod = entry("M1", { title: "受限 Mod", resource_type: "mod", loaders: ["fabric"] });
+    const url = "https://www.curseforge.com/minecraft/mc-mods/locked";
+    pages = () => result([mod]);
+    ipc.overrides.set("project_detail", () => detailOf(mod, { distribution_allowed: false, page_url: url }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [], truncated: false }));
+    await mount();
+    act(() => card("受限 Mod").click());
+    await flush();
+    expect(dialog().textContent).toContain("作者不允许在启动器里下载这个资源，只能去 CurseForge 网页下载。");
+    expect(buttonByText("安装", dialog()).disabled).toBe(true);
+
+    await clickIn(dialog(), "打开网页");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url }]);
+
+    ipc.overrides.set("plugin:opener|open_url", () => {
+      throw new IpcError("internal", "没有默认浏览器");
+    });
+    await clickIn(dialog(), "打开网页");
+    expect(launcher.state.toasts.find((t) => t.title === "没能打开网页")?.body).toBe("没有默认浏览器");
+  });
+
   describe("整合包本体要手动下载时的提前说明", () => {
     const NOTE = "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。";
     const SUMMARY_FAILED = "整合包清单没能提前读出来";
