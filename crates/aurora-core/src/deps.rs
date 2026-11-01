@@ -424,6 +424,18 @@ impl Aurora {
     }
 }
 
+/// 这个错误说的是不是工程在平台上已经没有了。
+///
+/// 版本列表端点对没有的工程回 404，id 不成形的 CurseForge 工程在触网前就判为未找到。断网、限流、5xx
+/// 是「查不到」而不是「没有」，不算在内。
+pub(crate) fn project_gone(err: &CoreError) -> bool {
+    matches!(
+        err,
+        CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 404, .. })
+            | CoreError::ModVersionNotFound { .. }
+    )
+}
+
 /// 从候选里挑该实例可用的最新版本。
 ///
 /// 显式再排一次而不是依赖上游返回顺序：择优的全部意义就是「最新」，这条前提不该跨模块靠约定维持。
