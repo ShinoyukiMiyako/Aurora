@@ -1106,11 +1106,9 @@ async fn collect_lines(
         line.clear();
         match reader.read_until(b'\n', &mut line).await {
             Ok(0) => break,
-            // 只用于展示与排查：java 按系统代码页输出，非 UTF-8 的字节换成替换符，不让一行读不出
-            // 就丢掉整段输出。
             Ok(_) => push_line(
                 &tail,
-                String::from_utf8_lossy(&line)
+                decode_output(&line)
                     .trim_end_matches(['\r', '\n'])
                     .to_owned(),
             ),
@@ -1120,6 +1118,68 @@ async fn collect_lines(
             }
         }
     }
+}
+
+/// 解码处理器的一行输出，只用于展示与排查。
+///
+/// JVM 往管道写时用 `native.encoding`，也就是系统 ANSI 代码页（简体中文系统上是 GBK），与
+/// `file.encoding` 无关。不先试 UTF-8：GBK 的「目录」恰好是合法 UTF-8。
+#[cfg(windows)]
+fn decode_output(bytes: &[u8]) -> String {
+    decode_code_page(bytes, windows_sys::Win32::Globalization::CP_ACP)
+}
+
+#[cfg(not(windows))]
+fn decode_output(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// 按代码页解码；非法字节由系统换成替换字符，不让一行读不出就丢掉整段输出。系统不认这个代码页时
+/// 退回按 UTF-8 有损解码并记日志：处理器的失败才是要报的错，不能被解码的问题顶替。
+#[cfg(windows)]
+fn decode_code_page(bytes: &[u8], code_page: u32) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let fall_back = || {
+        let err = std::io::Error::last_os_error();
+        tracing::warn!(code_page, %err, "按代码页解码处理器输出失败，改按 UTF-8 解码");
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let input_len = i32::try_from(bytes.len()).expect("处理器输出的单行长度有上限");
+    // SAFETY: 输入指针与长度出自同一切片；输出缓冲传空指针与 0，只询问需要的 UTF-16 长度。
+    let needed = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if needed <= 0 {
+        return fall_back();
+    }
+    let mut wide = vec![0u16; needed as usize];
+    // SAFETY: 输入同上；输出缓冲是刚按 needed 分配的 wide，长度如实告知。
+    let written = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            wide.as_mut_ptr(),
+            needed,
+        )
+    };
+    if written <= 0 {
+        return fall_back();
+    }
+    wide.truncate(written as usize);
+    String::from_utf16_lossy(&wide)
 }
 
 fn push_line(tail: &std::sync::Mutex<OutputTail>, line: String) {
@@ -2818,6 +2878,59 @@ mod tests {
         };
         assert_eq!(shown.to_string(), "处理器输出（略去前 3 行）：\na\nb");
         assert_eq!(ProcessorOutput::default().to_string(), "处理器没有任何输出");
+    }
+
+    fn collected() -> std::sync::Arc<std::sync::Mutex<OutputTail>> {
+        std::sync::Arc::new(std::sync::Mutex::new(OutputTail::default()))
+    }
+
+    fn lines_of(tail: &std::sync::Mutex<OutputTail>) -> Vec<String> {
+        let tail = tail.lock().unwrap();
+        tail.lines.iter().cloned().collect()
+    }
+
+    /// 「游戏目录」的 GBK 字节。按 UTF-8 解码时前半截全成替换符，后半截的「目录」恰好是合法 UTF-8，
+    /// 会变成「Ŀ¼」，所以不能先试 UTF-8 再退回代码页。
+    #[cfg(windows)]
+    const GBK_GAME_DIR: &[u8] = b"\xD3\xCE\xCF\xB7\xC4\xBF\xC2\xBC";
+
+    /// 经管道读到的字节按系统代码页解码：JVM 往管道写时用的就是它（`native.encoding`）。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn processor_output_is_read_in_the_system_code_page() {
+        use windows_sys::Win32::Globalization::GetACP;
+
+        let stream = [b"C:\\", GBK_GAME_DIR, b"\\.minecraft\r\n"].concat();
+        let tail = collected();
+
+        collect_lines(stream.as_slice(), tail.clone()).await;
+
+        // SAFETY: GetACP 没有参数，只读进程的代码页设置。
+        let expected = match unsafe { GetACP() } {
+            936 => r"C:\游戏目录\.minecraft".to_owned(),
+            other => decode_code_page(&stream[..stream.len() - 2], other),
+        };
+        assert_eq!(lines_of(&tail), vec![expected]);
+    }
+
+    /// 代码页由参数决定，不依赖这台机器的系统设置：GBK 与系统启用 UTF-8 时的 65001 都解得对，空串不算
+    /// 失败（空输入调系统函数会报参数错误），行尾残缺的多字节序列不让整行读不出来。
+    #[cfg(windows)]
+    #[test]
+    fn decode_code_page_reads_the_bytes_of_that_code_page() {
+        assert_eq!(decode_code_page(GBK_GAME_DIR, 936), "游戏目录");
+        assert_eq!(decode_code_page("游戏目录".as_bytes(), 65001), "游戏目录");
+        assert_eq!(decode_code_page(b"", 936), "");
+        assert_eq!(decode_code_page(b"plain ascii", 936), "plain ascii");
+        let cut = decode_code_page(&GBK_GAME_DIR[..3], 936);
+        assert!(cut.starts_with('游'), "{cut:?}");
+    }
+
+    /// 系统不认的代码页：输出只用于排查，退回按 UTF-8 有损解码，不让这一行消失。
+    #[cfg(windows)]
+    #[test]
+    fn an_unknown_code_page_falls_back_to_lossy_utf8() {
+        assert_eq!(decode_code_page(b"Exception: boom", 1), "Exception: boom");
     }
 
     /// JVM 读 jar 的打开方式：放行读写共享、不放行删除共享。另一个实例的游戏就这样占着库里的 jar。
