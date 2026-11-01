@@ -928,6 +928,11 @@ export class LauncherStore {
   private settingsApplied = 0;
   private pinsIssued = 0;
   private pinsApplied = 0;
+  /**
+   * 最近一次写入的当前实例，以及写入发出时设置读取已发出到第几次（见 selectInstance、fetchSettings）。
+   * 写入没有返回整份配置，晚到的旧读取不能整份丢掉（里面可能有改设置之后读到的别的字段），只把当前实例按写入改正。
+   */
+  private selectionWrite: { id: string; readsIssued: number } | null = null;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
   /**
@@ -1097,9 +1102,12 @@ export class LauncherStore {
    */
   private async fetchSettings(): Promise<void> {
     const seq = ++this.settingsIssued;
-    const settings = settingsFromDto(await configIpc.getConfig());
+    const read = settingsFromDto(await configIpc.getConfig());
     if (seq <= this.settingsApplied) return;
     this.settingsApplied = seq;
+    // 当前实例写入发出之前发出的读取可能读在写入之前
+    const written = this.selectionWrite;
+    const settings = written !== null && seq <= written.readsIssued ? { ...read, selectedVersion: written.id } : read;
     this.set({ settings });
   }
 
@@ -2152,7 +2160,9 @@ export class LauncherStore {
       async selectInstance(id) {
         // 已经是当前实例时不再写配置（新建实例入队时已设过，新建流程收尾可能再设一次）
         if (store.raw.settings !== null && store.raw.settings.selectedVersion === id) return;
+        const readsIssued = store.settingsIssued;
         await configIpc.updateConfig({ selectedVersion: id });
+        store.selectionWrite = { id, readsIssued };
         store.set((raw) => ({ settings: raw.settings === null ? null : { ...raw.settings, selectedVersion: id } }));
       },
       togglePin(id) {

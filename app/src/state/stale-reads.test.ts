@@ -224,3 +224,26 @@ describe("写入之前已在路上的固定读取晚到时，不把刚写下的�
     expect(store.getState().sidebarPins).toEqual(["生存", "创造"]);
   });
 });
+
+describe("选中实例之前已在路上的设置读取晚到时，当前实例以写入为准", () => {
+  it("当前实例：选中之前发出的设置读取晚到，当前实例仍是刚选中的那个，其余字段照常采纳", async () => {
+    const slow = deferred<ConfigDto>();
+    ipc.overrides.set("get_config", () => slow.promise);
+    const reading = store.actions.reload("settings");
+    await settle();
+    await store.actions.selectInstance("创造");
+    expect(store.getState().settings?.selectedVersion).toBe("创造");
+
+    slow.resolve(configDto({ selected_version: "生存", download_concurrency: 8 }));
+    await reading;
+    expect(store.getState().settings?.selectedVersion).toBe("创造");
+    expect(store.getState().settings?.downloadConcurrency).toBe(8);
+  });
+
+  it("当前实例：选中之后才发出的读取照常采纳（例如后端随删除清掉了选择）", async () => {
+    await store.actions.selectInstance("创造");
+    ipc.overrides.set("get_config", () => configDto({ selected_version: null }));
+    await store.actions.reload("settings");
+    expect(store.getState().settings?.selectedVersion).toBeNull();
+  });
+});
