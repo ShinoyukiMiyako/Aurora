@@ -12,6 +12,7 @@ import {
   LAUNCH_PHASE_EVENT,
   OFFLINE_FALLBACK_FIELD,
   QUICK_PLAY_UNSUPPORTED_CODE,
+  WORLD_BACKUP_EVENT,
   type BusyDetail,
   type GameExitEvent,
   type InstanceMinutesDto,
@@ -26,12 +27,13 @@ import {
   type PlayStatsDto,
   type QuickPlayArg,
   type QuickPlayUnsupportedDetail,
+  type WorldBackupEvent,
 } from "../../launch";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { mockAccountFacts } from "./accounts";
-import { handlers as configHandlers, requireStruct, samePath, tauriArgError } from "./config";
-import { acquireMockInstanceWithBases, ensureMockSharedWorldsSettled, mockInheritanceChain, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { handlers as configHandlers, mockWorldBackupSettings, requireStruct, samePath, tauriArgError } from "./config";
+import { acquireMockInstanceWithBases, autoBackupMockWorlds, ensureMockSharedWorldsSettled, mockInheritanceChain, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { serverKey } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -137,6 +139,8 @@ interface Occupant {
   hold: MockInstanceHold;
   /** 启动时的游戏目录：这一局记在它下面，游戏运行期间换了游戏目录也记回这里。 */
   gameDir: string;
+  /** 这一局进过的存档，退出后的自动备份只备份它们。mock 没有 level.dat 的修改时间，知道的只有直达的那一个。 */
+  played: string[];
 }
 
 interface PendingFailure {
@@ -395,7 +399,8 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   const startedAt = Date.now();
   // 与后端一样取启动这一刻的游戏目录（启动用的是那一刻的门面快照）。
   const gameDir = mockConfig().game_dir;
-  occupant = { versionId, phase: "loading", startedAt, runningSince: startedAt, hold, gameDir };
+  const played = quickPlay !== null && quickPlay.kind === "singleplayer" ? [quickPlay.world_dir_name] : [];
+  occupant = { versionId, phase: "loading", startedAt, runningSince: startedAt, hold, gameDir, played };
   logs.set(versionId, { path: `D:/mc/versions/${versionId}/logs/latest.log`, started_at: startedAt, lines: [], omitted: 0, ended: null });
   const failure = pendingFailure;
   pendingFailure = null;
@@ -434,7 +439,7 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   // 验证通过的一局说明账户已恢复，上一次的失败作废；降级的一局没经验证，记录在判定时已经消耗
   if (uuid !== null && offlineAs === null) accountFailures.delete(uuid);
   hold.setActivity("running");
-  occupant = { versionId, phase: "running", startedAt, runningSince: Date.now(), hold, gameDir };
+  occupant = { versionId, phase: "running", startedAt, runningSince: Date.now(), hold, gameDir, played };
   emitPhase(taskId, STAGES.length - 1);
   pushLines(versionId, [line("game", "info", "[12:00:00] [main/INFO]: Loading Minecraft")]);
   return { pid: MOCK_PID, offline: offlineAs !== null };
@@ -478,11 +483,41 @@ function finishGame(exitCode: number | null, killed: boolean, durationMs: number
       scanned_files: [{ kind: "session_log", path: log.path }],
     });
   }
-  // 收尾记账写完后放开占用，再推退出事件：前端收到退出时已经可以改名、删除
-  occupant.hold.release();
+  const { hold, played } = occupant;
+  const auto = mockWorldBackupSettings().auto;
+  // 收尾记账写完后再推退出事件，与后端同序：关着自动备份时占用同游戏槽一起放开，前端收到退出时已经可以改名、删除；
+  // 开着时实例原地转成备份，基底跟着留到备份做完，这期间实例不能改名、删除或再次启动
+  if (auto) hold.setActivity("backing_up");
+  else hold.release();
   occupant = null;
   const payload: GameExitEvent = { version_id: versionId, exit_code: exitCode, crashed, killed, duration_ms: durationMs };
   emitMockEvent(GAME_EXIT_EVENT, payload);
+  if (!auto) return;
+  const finish = () => {
+    const backedUp = autoBackupMockWorlds(versionId, played);
+    hold.release();
+    const backup: WorldBackupEvent = { instance_id: versionId, backed_up: backedUp, failed: [] };
+    emitMockEvent(WORLD_BACKUP_EVENT, backup);
+  };
+  const pause = pausedAutoBackup;
+  pausedAutoBackup = null;
+  if (pause === null) finish();
+  else pause(finish);
+}
+
+/** 接过下一次自动备份的收尾；null 为退出后当场做完。 */
+let pausedAutoBackup: ((finish: () => void) => void) | null = null;
+
+/** 下一次游戏退出后的自动备份停在半路，调返回的函数才做完：看备份期间的占用时用，平时退出后当场做完。 */
+export function pauseNextMockAutoBackup(): () => void {
+  let finish: (() => void) | null = null;
+  pausedAutoBackup = (rest) => {
+    finish = rest;
+  };
+  return () => {
+    if (finish === null) throw new Error("mock：自动备份还没开始");
+    finish();
+  };
 }
 
 /** 模拟游戏自己退出（退出码非 0 即崩溃）。durationMs 缺省为从进程起来到现在。 */
@@ -653,6 +688,7 @@ export const handlers: MockHandlers = {
 
 export function reset(): void {
   occupant = null;
+  pausedAutoBackup = null;
   pendingFailure = null;
   accountFailures = new Map();
   lastQuickPlay = null;

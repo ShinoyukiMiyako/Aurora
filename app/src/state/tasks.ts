@@ -119,10 +119,20 @@ export function newTask(draft: TaskDraft, now: number): Task {
 /** 写整个实例目录的命令（新建、导入、补全）：期间实例算「安装中」，后端的实例锁里它与这个实例上的任何别的事都互斥。 */
 export const INSTANCE_TASK_COMMANDS: ReadonlySet<string> = new Set(["install_version", "install_modpack", "repair_instance"]);
 
-/** 两个任务挂在同一实例（不分大小写，与后端的锁键一致）上，且至少一个要写整个目录：后端不让它们同时进行。 */
+/** 备份、导出与恢复存档的任务命令；它们都带着 id（实例）与 world（存档文件夹名）两个参数。 */
+export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world", "export_world", "restore_world_backup"]);
+
+/**
+ * 两个任务挂在同一实例（不分大小写，与后端的锁键一致）上，后端不让它们同时进行：至少一个要写整个目录；或都是存档任务
+ * （backing_up 彼此互斥）；或一个是存档任务、一个是导出整合包（备份、恢复进行中不能导出，勾了存档的导出进行中不能恢复）。
+ * 不隔离的实例共用存档时后端还会跨实例拒绝，那要看实例的隔离，这里不判，撞上了按 instance_busy 失败，可以重试。
+ */
 function excludes(a: Task, b: Task): boolean {
   if (a.instanceId === null || b.instanceId === null || a.instanceId.toLowerCase() !== b.instanceId.toLowerCase()) return false;
-  return INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command);
+  if (INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command)) return true;
+  const worldA = WORLD_TASK_COMMANDS.has(a.spec.command);
+  const worldB = WORLD_TASK_COMMANDS.has(b.spec.command);
+  return (worldA && (worldB || b.spec.command === "export_modpack")) || (worldB && a.spec.command === "export_modpack");
 }
 
 /**

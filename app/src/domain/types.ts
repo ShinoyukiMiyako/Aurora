@@ -90,7 +90,7 @@ export interface Session {
 
 /**
  * world_backup：备份与导出存档（都是打包）；world_restore：用备份恢复存档。两者都不算安装；后端在任务期间把实例记为
- * backing_up，只与 Mod 改动兼容，启动、改名、删除都要等它结束。
+ * backing_up，只与 Mod 改动、被当作基底兼容，启动、改名、删除都要等它结束。
  */
 export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore", "modpack_export"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
@@ -144,8 +144,9 @@ export interface Task {
 /**
  * 后端实例锁表里一个实例可能被占着做的事（instance_busy 的 detail.activity，实例列表的 activity 同一套取值）。
  * inherited：别的实例正以它为基底（那个实例启动到退出、补全、导入整合包期间），它的删除、改名、补全被拒。
+ * backing_up：备份、恢复或导出存档（含游戏退出后的自动备份），只与 Mod 改动、被当作基底兼容。
  */
-export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited"] as const;
+export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"] as const;
 export type BusyActivity = (typeof BUSY_ACTIVITIES)[number];
 
 /** instance_busy 拒绝的原因：被占着的实例与它在做的事；inherited 时 usedBy 是正以它为基底的实例，其余为 null。 */

@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { IpcRecorder } from "../test/fake-bridge";
 import type { ConfigDto } from "../ipc/config";
-import { accountDto, bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import { accountDto, bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import { activeAccount } from "./selectors";
 import type { LauncherStore } from "./store";
 
@@ -247,3 +248,54 @@ describe("选中实例之前已在路上的设置读取晚到时，当前实例�
     expect(store.getState().settings?.selectedVersion).toBeNull();
   });
 });
+
+describe("任务进行中重扫读到的占用不留到任务结束之后", () => {
+  const OPTIONS = { destination: "D:\分享\包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false };
+  const activity = () => store.getState().instances.find((i) => i.id === "生存")?.activity;
+
+  /** 导出跑着的时候窗口回到前台重扫：列表记下后端此刻报的 modifying。 */
+  async function exportingWithHeldList(): Promise<Deferred<unknown>> {
+    const running = deferred<unknown>();
+    ipc.overrides.set("export_modpack", () => running.promise);
+    await store.actions.exportModpack("生存", OPTIONS);
+    await settle();
+    onDisk = [instanceDto("生存", { activity: "modifying" }), instanceDto("创造")];
+    await store.actions.refreshInstances();
+    expect(activity()).toBe("modifying");
+    onDisk = [instanceDto("生存"), instanceDto("创造")];
+    return running;
+  }
+
+  it("导出成功：落地不用重扫，结束时也要重读一次，改名与删除不再被挡", async () => {
+    const running = await exportingWithHeldList();
+    running.resolve({ path: OPTIONS.destination, name: "包", version: "1.0.0", bytes: 1, indexed_files: 0, override_files: 0, bundled_mods: [], disabled_mods: 0, skipped: [] });
+    await settle();
+    expect(activity()).toBeNull();
+  });
+
+  it("导出失败：同样按盘上重读", async () => {
+    const running = await exportingWithHeldList();
+    running.reject(new IpcError("modpack_export_check_failed", "回读校验没通过"));
+    await settle();
+    expect(activity()).toBeNull();
+  });
+
+  it("导出被取消：同样按盘上重读", async () => {
+    const running = await exportingWithHeldList();
+    running.reject(cancelledError());
+    await settle();
+    expect(activity()).toBeNull();
+  });
+
+  it("列表没记着占用的实例不多扫一次", async () => {
+    const running = deferred<unknown>();
+    ipc.overrides.set("export_modpack", () => running.promise);
+    await store.actions.exportModpack("生存", OPTIONS);
+    await settle();
+    const scans = callsOf(ipc, "list_instances").length;
+    running.reject(new IpcError("modpack_export_check_failed", "回读校验没通过"));
+    await settle();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(scans);
+  });
+});
+

@@ -473,6 +473,81 @@ describe("改名迁移任务", () => {
     await settle();
     expect(callsOf(ipc, "set_instance_settings").map((a) => a.id)).toEqual(["生存二"]);
   });
+
+  it.each([
+    ["备份存档", "world_backup", "backup_world", { id: "生存", world: "w1" }, "id"],
+    ["导出存档", "world_backup", "export_world", { id: "生存", world: "w1", dest: "D:\导出\w1.zip" }, "id"],
+    ["恢复存档", "world_restore", "restore_world_backup", { id: "生存", world: "w1", file: "1720-manual.zip" }, "id"],
+    ["导出整合包", "modpack_export", "export_modpack", { id: "生存", options: { destination: "D:\包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false } }, "id"],
+    ["更新一个 Mod", "mod", "update_mod", { versionId: "生存", fileName: "a.jar", modVersionId: "v2" }, "versionId"],
+    ["开局 Mod", "mod", "install_mods", { versionId: "生存", platform: "modrinth", projectId: "p", starter: true, items: [{ platform: "modrinth", projectId: "p", modVersionId: "v", title: "P", fileSize: null }] }, "versionId"],
+    ["批量更新", "mod", "update_mods", { versionId: "生存", items: [{ fileName: "a.jar", platform: "modrinth", projectId: "p", modVersionId: "v", title: "P", fileSize: null }] }, "versionId"],
+  ] as const)("重启后恢复的%s：改名后任务与命令参数都指向新名字", async (_name, kind, command, args, key) => {
+    store.stop();
+    resetRecorder(ipc);
+    const record: TaskRecordDto = {
+      id: "task-old",
+      kind,
+      title: "上次的任务",
+      detail: "",
+      instance_id: "生存",
+      status: "failed",
+      progress: 0,
+      bytes: 0,
+      total_bytes: null,
+      speed_bps: 0,
+      attempt: 1,
+      error: { code: "interrupted", message: "关闭时中断" },
+      created_at: 1_719_000_000_000,
+      finished_at: 1_719_000_000_500,
+      spec: { command, args },
+    };
+    bootOverrides(ipc, { journal: [record] });
+    ipc.overrides.set("list_instances", () => instances);
+    renameOnDisk("生存", "生存二");
+    store = await startedStore();
+    await store.actions.renameInstance("生存", "生存二");
+    const [task] = store.getState().tasks;
+    expect(task.instanceId).toBe("生存二");
+    expect(task.spec.args).toEqual({ ...args, [key]: "生存二" });
+  });
+
+  it("失败的新建留下的半成品改了名：重试按新名字补全，不在旧名字下再装一份", async () => {
+    stubInstanceSettings();
+    ipc.overrides.set("install_version", () => {
+      throw new IpcError("network_failed", "连接超时");
+    });
+    const incomplete: InstanceDto["incomplete"] = { kind: "install", outcome: "failed", started_at: 1_720_000_000_000, spec: { mc_version: "1.21.1", loader: null, loader_version: null }, error: { code: "network_failed", message: "连接超时" } };
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "c1" });
+    instances = [...instances, instanceDto("新世界", { status: "broken", broken_reason: "缺少版本 JSON", mc_version: null, incomplete })];
+    await settle();
+    const [failed] = store.getState().tasks;
+    expect(failed.status).toBe("failed");
+
+    renameOnDisk("新世界", "老世界");
+    await store.actions.renameInstance("新世界", "老世界");
+    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+    store.actions.retryTask(failed.id);
+    await settle();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["老世界"]);
+    expect(callsOf(ipc, "install_version")).toHaveLength(1);
+  });
+
+  it("等登录的启动跟到新名字：改名在弹窗打开时落盘，登录后启动新名字", async () => {
+    ipc.overrides.set("list_accounts", () => []);
+    ipc.overrides.set("current_account", () => null);
+    await store.actions.reload("accounts");
+    const renaming = deferred<{ id: string }>();
+    ipc.overrides.set("rename_instance", () => renaming.promise);
+    const done = store.actions.renameInstance("生存", "生存二");
+    await store.actions.launch("生存");
+    expect(store.getState().login).toMatchObject({ kind: "no_account", intent: { kind: "launch", instanceId: "生存" } });
+
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+    renaming.resolve({ id: "生存二" });
+    await done;
+    expect(store.getState().login).toMatchObject({ kind: "no_account", intent: { kind: "launch", instanceId: "生存二", quickPlay: null } });
+  });
 });
 
 describe("改名已落盘、之后的读取失败：内存里挂在旧 id 上的引用照样迁到新名字", () => {

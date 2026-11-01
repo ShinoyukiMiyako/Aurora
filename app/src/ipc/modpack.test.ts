@@ -211,7 +211,9 @@ describe("整合包 mock", () => {
 
     expect((await running).version_id).toBe("周末联机");
     expect((await listInstances()).find((i) => i.id === "1.21.1")).toMatchObject({ activity: null, used_by: null });
-    expect(await renameInstance("1.21.1", "1.21.1 原版")).toEqual({ id: "1.21.1 原版" });
+    // 占用放开了，实例 JSON 也写好了：之后挡住它的是依赖检查
+    const after = await rejected(renameInstance("1.21.1", "1.21.1 原版"));
+    expect(after).toMatchObject({ code: "instance_has_dependents", detail: { id: "1.21.1", dependents: ["周末联机"] } });
   });
 
   it("原版被当作基底时照样能备份它的存档，先备份再导入也放行：列表报备份，used_by 不丢", async () => {

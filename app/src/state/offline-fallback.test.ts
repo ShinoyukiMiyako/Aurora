@@ -177,6 +177,36 @@ describe("以离线方式进单人：状态容器", () => {
     expect(store.getState().session).toMatchObject({ instanceId: "樱花生存", phase: "running", quickPlay: null, failure: null });
   });
 
+  it("失败通知还留着时另一局已经开起来：不发起启动，也不把那一局的会话冲掉", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player");
+    failNextMockLaunch("account_service_down", { account: "Mock_Player", status: 503 });
+    await store.actions.launch("生存");
+    const stale = runnable(store.actions.failureFix("launch_offline_once"));
+    ipc.overrides.set("list_instances", () => [instanceDto("生存"), instanceDto("1.21")]);
+    await store.actions.refreshInstances();
+    await store.actions.launch("1.21");
+    expect(store.getState().session).toMatchObject({ instanceId: "1.21", phase: "running" });
+
+    await expect(stale.run()).rejects.toThrow("「1.21」的游戏正在运行，先结束游戏");
+    expect(store.getState().session).toMatchObject({ instanceId: "1.21", phase: "running" });
+    expect(launchArgs()).toHaveLength(2);
+  });
+
+  it("失败通知还留着时同一实例已经重新开起来：只有第一次生效，什么都不做", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player");
+    failNextMockLaunch("account_service_down", { account: "Mock_Player", status: 503 });
+    await store.actions.launch("生存");
+    const stale = runnable(store.actions.failureFix("launch_offline_once"));
+    await runnable(store.actions.failureFix("retry")).run();
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "running" });
+
+    await stale.run();
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "running" });
+    expect(launchArgs()).toHaveLength(2);
+  });
+
   it("实例在失败之后变成损坏：不发起启动，直接报错", async () => {
     await loginMockPlayer();
     const store = await storeWith(MOCK_PLAYER, "Mock_Player");

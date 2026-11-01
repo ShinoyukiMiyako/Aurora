@@ -208,7 +208,7 @@ describe("直达走与启动相同的拦截链", () => {
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     ipc.overrides.set("launch_game", () => {
-      throw new IpcError("java_pinned_missing", "指定的 Java 不存在", { path: "C:/jdk/bin/java.exe" });
+      throw new IpcError("java_pinned_missing", "指定的 Java 不存在", { path: "C:/jdk/bin/java.exe", pinned_by: "instance" });
     });
     await s.actions.quickPlay("生存", WORLD);
     expect(s.getState().session).toMatchObject({ phase: "failed", quickPlay: WORLD, failure: { code: "java_pinned_missing" } });

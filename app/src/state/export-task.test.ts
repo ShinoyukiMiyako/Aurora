@@ -164,7 +164,7 @@ describe("导出整合包任务", () => {
     expect([lastToast().title, lastToast().body, lastToast().action?.label]).toEqual(["已导出「周末包」", "1 个 Mod 打包进了文件，分享前确认作者允许转载", "打开所在文件夹"]);
   });
 
-  it("任务表里的导出任务缺 options.name 时直接报错，不发没有名字的通知", async () => {
+  it("任务表里的导出任务缺 options.name 时重试直接报错，不调命令、不发没有名字的通知", async () => {
     store.stop();
     const broken: TaskRecordDto = {
       id: "task-bad",
@@ -186,12 +186,40 @@ describe("导出整合包任务", () => {
     resetRecorder(ipc);
     bootOverrides(ipc, { journal: [broken] });
     ipc.overrides.set("export_modpack", () => outcome([]));
-    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     store = await startedStore();
-    store.actions.retryTask("task-bad");
+    expect(() => store.actions.retryTask("task-bad")).toThrow("任务 export_modpack 的参数 name 应为字符串");
     await settle();
+    expect(callsOf(ipc, "export_modpack")).toEqual([]);
+    expect(store.getState().tasks.map((t) => [t.id, t.status])).toEqual([["task-bad", "failed"]]);
     expect(store.getState().toasts.map((t) => t.title)).not.toContain("已导出「周末包」");
-    expect(errors.mock.calls.some((c) => String(c[1]).includes("任务 export_modpack 的参数 name 应为字符串"))).toBe(true);
-    errors.mockRestore();
+  });
+
+  it("全部重试撞上一条坏记录时照样报错，排回队列的那几条不留在排队里", async () => {
+    store.stop();
+    const record = (id: string, name: unknown): TaskRecordDto => ({
+      id,
+      kind: "modpack_export",
+      title: "导出整合包",
+      detail: "",
+      instance_id: "生存",
+      status: "failed",
+      progress: 0,
+      bytes: 0,
+      total_bytes: null,
+      speed_bps: 0,
+      attempt: 1,
+      error: { code: "interrupted", message: "关闭时中断" },
+      created_at: T0 - 60_000,
+      finished_at: T0 - 1000,
+      spec: { command: "export_modpack", args: { id: "生存", options: { ...OPTIONS, name } } },
+    });
+    resetRecorder(ipc);
+    bootOverrides(ipc, { journal: [record("task-good", "周末包"), record("task-bad", 7)] });
+    ipc.overrides.set("export_modpack", () => outcome([]));
+    store = await startedStore();
+    expect(() => store.actions.retryFailedTasks()).toThrow("任务 export_modpack 的参数 name 应为字符串");
+    await settle();
+    expect(callsOf(ipc, "export_modpack")).toEqual([{ taskId: "task-good#2", id: "生存", options: OPTIONS }]);
+    expect(store.getState().tasks.find((t) => t.id === "task-good")?.status).toBe("done");
   });
 });
