@@ -236,7 +236,7 @@ export const AVATAR_LINE = {
 // ---------------------------------------------------------------- 启动失败
 
 /** 失败修复动作的种类；按钮行为由启动层按种类执行。 */
-export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "auto_default_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs" | "launch_offline_once";
+export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "auto_default_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs" | "launch_offline_once" | "open_client_id_settings";
 
 export interface FailureFix {
   kind: FailureFixKind;
@@ -291,6 +291,12 @@ const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默�
 const PICK_JAVA: FailureFix = { kind: "pick_java", label: "选择 Java" };
 /** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
 const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
+/** 启动时续期与登录弹窗碰到的是同一个拒绝，标题、正文与去设置的按钮共用。 */
+const APP_NOT_APPROVED = {
+  title: "登录应用未获批准",
+  body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+  fixLabel: "打开设置",
+} as const;
 
 /** 固定的 Java 是实例设置里指定的，还是设置里固定的默认 Java（参数 pinned_by）。 */
 function pinnedGlobally(params: FailureParams, code: FailureCode): boolean {
@@ -347,6 +353,9 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
         secondary: OFFLINE_ONCE,
       };
     }
+    // 不给「重试」：同一个 client_id 重试只会得到同样的结果。不给以离线方式进单人：验证不是暂时不可用，后端也不放行
+    case "account_app_not_approved":
+      return { title: APP_NOT_APPROVED.title, body: APP_NOT_APPROVED.body, fix: { kind: "open_client_id_settings", label: APP_NOT_APPROVED.fixLabel }, secondary: null };
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
     case "files_failed":
@@ -1126,12 +1135,7 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
       return plain("微软登录服务暂时不可用", "微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。", LOGIN_RETRY);
     // 不给「重试」：同一个 client_id 重试只会得到同样的结果
     case "AppNotApproved":
-      return plain(
-        "登录应用未获批准",
-        `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
-        { kind: "open_client_id_settings", label: "打开设置" },
-        { kind: "copy_error", label: "复制错误信息" },
-      );
+      return plain(APP_NOT_APPROVED.title, APP_NOT_APPROVED.body, { kind: "open_client_id_settings", label: APP_NOT_APPROVED.fixLabel }, { kind: "copy_error", label: "复制错误信息" });
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });
   }

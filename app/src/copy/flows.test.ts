@@ -75,6 +75,7 @@ const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
   account_relogin: { account: "Steve" },
   account_refresh_network: { account: "Steve" },
   account_service_down: { account: "Steve", status: 503 },
+  account_app_not_approved: { account: "Steve" },
   files_offline: { count: 3 },
   files_failed: { count: 2, reason: "连接超时" },
   disk_full: { drive: "D:", needed_bytes: 1024 },
@@ -230,6 +231,27 @@ describe("启动失败：账户验证暂时不可用", () => {
     );
     const toast = TOAST_COPY.offlineLaunched("生存");
     expect(bannedIn([...texts, toast.title, toast.body])).toEqual([]);
+  });
+});
+
+describe("启动失败：登录应用未获批准", () => {
+  it("说明是应用的审批问题，修复动作打开设置，不给重试也不给以离线方式进单人", () => {
+    const copy = failureCopy("account_app_not_approved", PARAMS.account_app_not_approved, ctx("Steve"));
+    expect(copy).toEqual({
+      title: "登录应用未获批准",
+      body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+      fix: { kind: "open_client_id_settings", label: "打开设置" },
+      secondary: null,
+    });
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+    expect(bannedIn([copy.title, copy.body, copy.fix.label])).toEqual([]);
+  });
+
+  it("与登录弹窗上的同一条错误说的是同一句话", () => {
+    const launch = failureCopy("account_app_not_approved", {}, ctx("Steve"));
+    const login = microsoftLoginFailure("AppNotApproved", "x", undefined);
+    expect([launch.title, launch.body]).toEqual([login.title, login.body]);
+    expect(launch.fix.label).toBe(login.primary?.label);
   });
 });
 

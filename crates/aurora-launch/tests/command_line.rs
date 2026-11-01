@@ -1,13 +1,14 @@
 //! 表驱动的完整命令行断言：用贴近真实结构的 1.12.2（旧式 minecraftArguments）与 1.21（新式 arguments）
 //! 版本 JSON，走公开的 [`CommandBuilder`]，断言拼出的整条 `java <jvm...> <主类> <游戏...>` 逐 token 正确。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use aurora_launch::{
     AuthValues, CommandBuilder, GamePaths, MemoryConfig, classpath_entries, classpath_separator,
     classpath_string,
 };
-use aurora_version::{OsName, RuntimeContext, VersionJson};
+use aurora_version::{OsName, RuntimeContext, VersionJson, resolve};
 
 /// 调用方传入的应用版本号；断言它原样进入 `${launcher_version}`。
 const LAUNCHER_VERSION: &str = "2.3.4";
@@ -173,6 +174,98 @@ fn legacy_1_12_2_full_command_line() {
     assert!(!classpath.contains("lwjgl-platform"));
     assert!(!classpath.contains("only"));
     assert!(classpath.ends_with(&paths.client_jar.display().to_string()));
+}
+
+/// Legacy Fabric 式的加载器版本：继承 1.12.2 及更早的原版，`arguments.game` 为空，
+/// `arguments.jvm` 里只有它自己的一条 `-D`。
+const LEGACY_FABRIC: &str = r#"{
+    "id": "fabric-loader-0.16.14-1.12.2",
+    "inheritsFrom": "1.12.2",
+    "type": "release",
+    "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+    "arguments": {
+        "game": [],
+        "jvm": ["-DFabricMcEmu= net.minecraft.client.main.Main "]
+    },
+    "libraries": [
+        {"name":"net.fabricmc:fabric-loader:0.16.14","downloads":{"artifact":{"path":"net/fabricmc/fabric-loader/0.16.14/fabric-loader-0.16.14.jar","sha1":"c1","size":1,"url":"u"}}}
+    ]
+}"#;
+
+/// 合并后 `minecraftArguments` 与非空的 `arguments.jvm` 并存：`-cp` 与 natives 路径版本 JSON 都没写，
+/// 只走 `arguments.jvm` 的话 JVM 连主类都找不到。基座排在加载器自己的参数之前，与新式版本合并后的顺序一致。
+#[test]
+fn legacy_loader_with_its_own_jvm_args_keeps_the_legacy_base() {
+    let parent = VersionJson::from_json_str(VANILLA_1_12_2).unwrap();
+    let child = VersionJson::from_json_str(LEGACY_FABRIC).unwrap();
+    let provider = HashMap::from([(parent.id.clone(), parent)]);
+    let version = resolve(&child, &provider).unwrap();
+    assert!(version.minecraft_arguments.is_some());
+    assert_eq!(version.arguments.as_ref().unwrap().jvm.len(), 1);
+
+    let ctx = win10();
+    let minecraft_dir = PathBuf::from("D:/mc/.minecraft");
+    let paths = GamePaths::standard(&minecraft_dir, "1.12.2");
+    let java = PathBuf::from("C:/jdk8/bin/java.exe");
+    let command = CommandBuilder::new(
+        &version,
+        ctx.clone(),
+        &java,
+        paths.clone(),
+        &minecraft_dir,
+        AuthValues::offline("Steve", UUID),
+        LAUNCHER_VERSION,
+    )
+    .with_memory(MemoryConfig::fixed(2048))
+    .build()
+    .unwrap();
+
+    let natives = paths.natives_dir.display().to_string();
+    let classpath = classpath_string(
+        &classpath_entries(&version, &ctx, &paths.libraries_dir, &paths.client_jar).unwrap(),
+        classpath_separator(OsName::Windows),
+    );
+    assert!(
+        classpath.contains("fabric-loader-0.16.14.jar"),
+        "{classpath}"
+    );
+    let log_config = paths
+        .assets_dir
+        .join("log_configs")
+        .join("client-1.12.xml")
+        .display()
+        .to_string();
+
+    let jvm_end = command
+        .args
+        .iter()
+        .position(|arg| arg == "net.fabricmc.loader.impl.launch.knot.KnotClient")
+        .unwrap();
+    assert_eq!(
+        command.args[..jvm_end],
+        [
+            s("-Dlog4j2.formatMsgNoLookups=true"),
+            s("-Dfile.encoding=UTF-8"),
+            s("-Dstdout.encoding=UTF-8"),
+            s("-Dstderr.encoding=UTF-8"),
+            s("-Xmx2048m"),
+            s(
+                "-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump",
+            ),
+            format!("-Djava.library.path={natives}"),
+            s("-Dminecraft.launcher.brand=Petalfall"),
+            format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}"),
+            s("-cp"),
+            classpath,
+            s("-DFabricMcEmu= net.minecraft.client.main.Main "),
+            format!("-Dlog4j.configurationFile={log_config}"),
+        ]
+    );
+    // 游戏段仍是继承来的 minecraftArguments。
+    assert_eq!(
+        command.args[jvm_end + 1..jvm_end + 3],
+        [s("--username"), s("Steve")]
+    );
 }
 
 #[test]

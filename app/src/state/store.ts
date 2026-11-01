@@ -2425,6 +2425,9 @@ export class LauncherStore {
         return { to: { page: "instance", id: instanceId, tab: "logs" } };
       case "pick_java":
         return { to: { page: "instance", id: instanceId, tab: "settings" } };
+      case "open_client_id_settings":
+        // client_id 在常规分区的高级卡片里
+        return { to: { page: "settings", section: "general" } };
     }
   }
 

@@ -170,6 +170,14 @@ const MIB: u64 = 1024 * 1024;
 static HEAP_SIZE_ARG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^-Xm([sx])(\d+)([kKmMgGtT]?)$").expect("内置正则必须可编译"));
 
+/// 是不是在设堆大小。前缀后面紧跟字母的是另一个选项（OpenJ9 的 `-Xmso<size>`），不是写错单位的堆参数；
+/// 其余写法（`-Xmx`、`-Xmx=4g`）都还算，留给 [`heap_arg_bytes`] 判对错。
+fn is_heap_arg(arg: &str) -> bool {
+    arg.strip_prefix("-Xmx")
+        .or_else(|| arg.strip_prefix("-Xms"))
+        .is_some_and(|value| !value.starts_with(|c: char| c.is_ascii_alphabetic()))
+}
+
 /// 一个 `-Xmx` / `-Xms` 参数的字节数；写法不合法或数值溢出为 `None`（HotSpot 对溢出同样拒绝）。
 fn heap_arg_bytes(arg: &str) -> Option<(char, u64)> {
     let caps = HEAP_SIZE_ARG.captures(arg)?;
@@ -193,7 +201,7 @@ pub fn jvm_memory_issue(custom_args: &[String], launcher: MemoryConfig) -> Optio
     let mut max_bytes = u64::from(launcher.max_mb) * MIB;
     let mut min_bytes = launcher.min_mb.map(|min| u64::from(min) * MIB);
     for arg in custom_args {
-        if !(arg.starts_with("-Xmx") || arg.starts_with("-Xms")) {
+        if !is_heap_arg(arg) {
             continue;
         }
         let Some((kind, bytes)) = heap_arg_bytes(arg) else {
@@ -416,6 +424,34 @@ mod tests {
             Some(JvmMemoryIssue::MinOverMax {
                 min_mb: 2048,
                 max_mb: 1024
+            })
+        );
+    }
+
+    /// `-Xmso` 是 OpenJ9 的操作系统线程栈大小，只是前缀碰巧与 `-Xms` 相同：既不是写错单位的堆参数，
+    /// 也不能把它的值算进最小堆。
+    #[test]
+    fn options_that_only_share_the_heap_prefix_are_left_alone() {
+        let launcher = MemoryConfig::fixed(2048);
+        assert_eq!(jvm_memory_issue(&args("-Xmso256k"), launcher), None);
+        // 算进最小堆的话 8g 大于最大堆，这里要报的只有后面那个真的写错的 -Xms。
+        assert_eq!(jvm_memory_issue(&args("-Xmso8g"), launcher), None);
+        assert_eq!(
+            jvm_memory_issue(&args("-Xmso256k -Xms4GB"), launcher),
+            Some(JvmMemoryIssue::BadUnit {
+                arg: "-Xms4GB".into()
+            })
+        );
+        // 排在真堆参数之后也不改变生效值。
+        assert_eq!(
+            jvm_memory_issue(&args("-Xmx256m -Xmso8g"), launcher),
+            Some(JvmMemoryIssue::MaxTooLow { max_mb: 256 })
+        );
+        // 紧跟的不是字母，就还是写错了的堆参数。
+        assert_eq!(
+            jvm_memory_issue(&args("-Xmx=4g"), launcher),
+            Some(JvmMemoryIssue::BadUnit {
+                arg: "-Xmx=4g".into()
             })
         );
     }

@@ -60,6 +60,7 @@ const FAILURE_STAGE: Record<string, number> = {
   account_relogin: 0,
   account_refresh_network: 0,
   account_service_down: 0,
+  account_app_not_approved: 0,
   version_broken: 1,
   files_offline: 3,
   files_failed: 3,
