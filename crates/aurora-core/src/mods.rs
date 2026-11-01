@@ -29,7 +29,7 @@ use aurora_modplatform::{
 };
 use serde::Serialize;
 
-use crate::blocked::{BlockedFile, single_blocked};
+use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
 use crate::deps::PlannedItem;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
@@ -137,6 +137,8 @@ struct StagedItem {
     file_name: String,
     /// 下载任务，`dest` 指向暂存区。
     task: DownloadTask,
+    /// 手动下载认领到的副本：有它时不下载，从这里复制进暂存区，任务只用来核对大小与哈希。
+    claimed: Option<PathBuf>,
     /// 校验通过后的 SHA-1：平台声明了就是它，没声明就是对暂存文件的实测值。
     sha1: Option<String>,
 }
@@ -471,8 +473,17 @@ impl Aurora {
         );
 
         let mut staged: Vec<StagedItem> = Vec::with_capacity(pending.len());
+        let mut blocked: Vec<BlockedFile> = Vec::new();
         for item in pending {
-            staged.push(self.stage_item(item, &staging_dir).await?);
+            match self.stage_item(item, &staging_dir).await {
+                Ok(item) => staged.push(item),
+                // 一次报全：不让玩家手动下完一个、重试，才发现还有下一个。
+                Err(CoreError::FileDistributionBlocked { files }) => blocked.extend(files),
+                Err(err) => return Err(err),
+            }
+        }
+        if !blocked.is_empty() {
+            return Err(CoreError::FileDistributionBlocked { files: blocked });
         }
         ensure_unique_targets(&staged, &dirs.mods_dir)?;
 
@@ -543,12 +554,17 @@ impl Aurora {
             ));
         }
         let dest = staging_dir.join(&file_name);
-        let task = match version.to_download_task(&dest) {
-            Some(task) => task,
-            None => {
-                let url = self.fallback_download_url(&version).await?;
-                version.task_for_url(url, &dest)
-            }
+        let (task, claimed) = match version.to_download_task(&dest) {
+            Some(task) => (task, None),
+            None => match self.fallback_download_url(&version).await {
+                Ok(url) => (version.task_for_url(url, &dest), None),
+                Err(err) => {
+                    let (_, copy) = self.claimed_instead_of(err).await?;
+                    // 这条任务不下载，地址只会出现在校验失败的报错里，写副本路径才对得上来源。
+                    let source = copy.display().to_string();
+                    (version.task_for_url(source, &dest), Some(copy))
+                }
+            },
         };
         let task = match version.platform {
             Platform::CurseForge => {
@@ -565,6 +581,7 @@ impl Aurora {
             required_by,
             file_name,
             task,
+            claimed,
         })
     }
 
@@ -611,14 +628,31 @@ impl Aurora {
         if staged.is_empty() {
             return Ok(());
         }
-        let tasks: Vec<DownloadTask> = staged.iter().map(|s| s.task.clone()).collect();
-        let report = self
-            .download_pool_reporting(events)
-            .download_all(tasks, None)
-            .await?;
-        // 有失败即冒泡其最终错误（重试换源后仍失败），绝不当作成功。
-        if let Some(failure) = report.failures.into_iter().next() {
-            return Err(failure.error.into());
+        let claimed: Vec<ClaimedCopy> = staged
+            .iter()
+            .filter_map(|item| {
+                item.claimed.clone().map(|copy| ClaimedCopy {
+                    staged: copy,
+                    dest: item.task.dest.clone(),
+                })
+            })
+            .collect();
+        place_claimed(&claimed).await?;
+
+        let tasks: Vec<DownloadTask> = staged
+            .iter()
+            .filter(|item| item.claimed.is_none())
+            .map(|item| item.task.clone())
+            .collect();
+        if !tasks.is_empty() {
+            let report = self
+                .download_pool_reporting(events)
+                .download_all(tasks, None)
+                .await?;
+            // 有失败即冒泡其最终错误（重试换源后仍失败），绝不当作成功。
+            if let Some(failure) = report.failures.into_iter().next() {
+                return Err(failure.error.into());
+            }
         }
 
         let total = staged.len();
@@ -2681,6 +2715,196 @@ mod tests {
             }]
         );
         server.verify().await;
+    }
+
+    /// 挂好一个作者不允许第三方分发的 CurseForge 工程：download-url 拒绝，工程摘要给网页链接用。
+    async fn mount_blocked_project(server: &MockServer, mod_id: u32, file_id: u32) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{mod_id}/files/{file_id}/download-url"
+            )))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{mod_id}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": mod_id, "name": "Locked", "slug": format!("locked-{mod_id}"), "summary": "", "classId": 6
+                }})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    fn blocked_version(mod_id: u32, file_id: u32, bytes: &[u8]) -> ModVersionInfo {
+        let mut version = version_info(
+            "curseforge",
+            &mod_id.to_string(),
+            &file_id.to_string(),
+            None,
+        );
+        version.sha1 = Some(sha1_hex(bytes));
+        version.file_size = Some(bytes.len() as u64);
+        version
+    }
+
+    fn blocked_file(mod_id: u32, file_id: u32, bytes: &[u8]) -> BlockedFile {
+        let file_name = format!("{mod_id}-{file_id}.jar");
+        BlockedFile {
+            project_id: mod_id,
+            file_id,
+            web_url: format!(
+                "https://www.curseforge.com/minecraft/mc-mods/locked-{mod_id}/files/{file_id}"
+            ),
+            destination: format!("mods/{file_name}"),
+            file_name,
+            sha1: Some(sha1_hex(bytes)),
+            fingerprint: 0,
+            size: Some(bytes.len() as u64),
+        }
+    }
+
+    /// 把受限文件放进「下载文件夹」再认领，走和界面一样的入口进暂存位。
+    async fn claim(aurora: &Aurora, tmp: &Path, file: &BlockedFile, bytes: &[u8]) {
+        let downloads = tmp.join("Downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        tokio::fs::write(downloads.join(&file.file_name), bytes)
+            .await
+            .unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, std::slice::from_ref(file))
+            .await
+            .unwrap();
+        assert!(report.missing.is_empty(), "{report:?}");
+    }
+
+    /// 受限 Mod 手动下载并认领之后再装一次：不再报受限，也不下载，暂存位的副本过一遍校验后落进 mods/，
+    /// 暂存位留着副本，卷宗照常记下来源。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_mod_installs_from_the_claimed_copy() {
+        let server = MockServer::start().await;
+        mount_blocked_project(&server, 9, 90).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let uri = server.uri();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let bytes: &[u8] = b"claimed-jar";
+        claim(&aurora, mc, &blocked_file(9, 90, bytes), bytes).await;
+
+        let outcome = aurora
+            .install_planned(
+                "1.21",
+                vec![planned(blocked_version(9, 90, bytes))],
+                (Platform::CurseForge, "9", "90"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.file_name, "9-90.jar");
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert_eq!(dir_names(&mods_dir).await, vec!["9-90.jar"]);
+        assert_eq!(tokio::fs::read(&outcome.path).await.unwrap(), bytes);
+        let listed = aurora.list_mods("1.21").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].source.as_ref().map(|s| s.project_id.as_str()),
+            Some("9")
+        );
+        assert!(
+            aurora
+                .blocked_claims_dir()
+                .join("curseforge-90/9-90.jar")
+                .is_file()
+        );
+    }
+
+    /// 暂存位的副本被改坏了（校验不过）不算认领：照旧报受限，mods/ 里什么都不落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tampered_claimed_copy_is_not_installed() {
+        let server = MockServer::start().await;
+        mount_blocked_project(&server, 9, 90).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let uri = server.uri();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let bytes: &[u8] = b"claimed-jar";
+        claim(&aurora, mc, &blocked_file(9, 90, bytes), bytes).await;
+        tokio::fs::write(
+            aurora.blocked_claims_dir().join("curseforge-90/9-90.jar"),
+            b"tampered",
+        )
+        .await
+        .unwrap();
+
+        let err = aurora
+            .install_planned(
+                "1.21",
+                vec![planned(blocked_version(9, 90, bytes))],
+                (Platform::CurseForge, "9", "90"),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CoreError::FileDistributionBlocked { .. }),
+            "{err:?}"
+        );
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!mods_dir.join("9-90.jar").exists());
+    }
+
+    /// 计划里有好几个受限文件时一次报全，已认领的不在其中；有没认领的就一个文件都不落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_unclaimed_file_of_a_plan_is_reported_at_once() {
+        let server = MockServer::start().await;
+        for (mod_id, file_id) in [(9, 90), (10, 100), (11, 110)] {
+            mount_blocked_project(&server, mod_id, file_id).await;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let uri = server.uri();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let bytes: &[u8] = b"claimed-jar";
+        claim(&aurora, mc, &blocked_file(10, 100, bytes), bytes).await;
+
+        let err = aurora
+            .install_planned(
+                "1.21",
+                vec![
+                    planned(blocked_version(9, 90, b"first")),
+                    planned(blocked_version(10, 100, bytes)),
+                    planned(blocked_version(11, 110, b"third")),
+                ],
+                (Platform::CurseForge, "9", "90"),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            files,
+            &[
+                blocked_file(9, 90, b"first"),
+                blocked_file(11, 110, b"third")
+            ]
+        );
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!mods_dir.join("10-100.jar").exists());
     }
 
     /// 门面级：CDN 对带了密钥的请求回 401，install_mod 失败；错误链上认得出是 CurseForge 拒绝了密钥，

@@ -33,7 +33,7 @@ use aurora_modpack::{
 use aurora_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
 use serde::{Deserialize, Serialize};
 
-use crate::blocked::BlockedFile;
+use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
@@ -309,13 +309,6 @@ pub struct PreparedModpack {
     claimed: Vec<ClaimedCopy>,
     /// 平台整合包下载到的缓存目录；本地文件为 `None`。
     cache_dir: Option<PathBuf>,
-}
-
-/// 一个从暂存位复制进实例的受限文件。暂存副本导入后留着，同一个文件再导入时还能用。
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ClaimedCopy {
-    staged: PathBuf,
-    dest: PathBuf,
 }
 
 /// 清单里的远程文件准备成的样子：要下载的，与认领到暂存位、直接复制的。
@@ -848,19 +841,14 @@ impl Aurora {
             .await
         {
             Ok(found) => found,
-            Err(CoreError::FileDistributionBlocked { files }) => {
-                if let [pack] = files.as_slice()
-                    && let Some(staged) = self.claimed_copy(pack).await?
-                {
-                    emit(
-                        events,
-                        CoreEvent::stage(format!("使用手动下载的整合包 {}", pack.file_name)),
-                    );
-                    return Ok((staged, None));
-                }
-                return Err(CoreError::FileDistributionBlocked { files });
+            Err(err) => {
+                let (pack, staged) = self.claimed_instead_of(err).await?;
+                emit(
+                    events,
+                    CoreEvent::stage(format!("使用手动下载的整合包 {}", pack.file_name)),
+                );
+                return Ok((staged, None));
             }
-            Err(err) => return Err(err),
         };
         emit(events, CoreEvent::stage(format!("下载整合包 {file_name}")));
         let dest = task.dest.clone();
@@ -1189,27 +1177,6 @@ pub(crate) async fn curseforge_remote_facts(
             .map(|(sum, length)| sum + length);
     }
     Ok(RemoteFacts { entries, bytes })
-}
-
-/// 认领到的受限文件从暂存位复制进实例。暂存副本留着：同一个文件再导入时还能用。
-async fn place_claimed(claimed: &[ClaimedCopy]) -> Result<()> {
-    for copy in claimed {
-        if let Some(parent) = copy.dest.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|source| aurora_base::Error::Io {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-        }
-        tokio::fs::copy(&copy.staged, &copy.dest)
-            .await
-            .map_err(|source| aurora_base::Error::Io {
-                path: copy.dest.clone(),
-                source,
-            })?;
-    }
-    Ok(())
 }
 
 fn file_name_of(path: &str) -> String {

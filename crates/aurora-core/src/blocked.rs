@@ -64,6 +64,13 @@ pub struct ClaimedFile {
     pub source: PathBuf,
 }
 
+/// 一个从暂存位复制到落点的受限文件。暂存副本留着：同一个文件再装时还能用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaimedCopy {
+    pub(crate) staged: PathBuf,
+    pub(crate) dest: PathBuf,
+}
+
 /// 单个 Mod 或资源受限：多问一次工程拿到网页链接，拼成只有这一项的受限错误。问工程失败就报那次失败，
 /// 不拿一个没有网页链接的半成品糊弄过去。
 pub(crate) async fn single_blocked(
@@ -189,6 +196,25 @@ impl Aurora {
         }
     }
 
+    /// 单个文件受限时看它认领过没有：认领过就交回文件与暂存副本，单装的 Mod、资源与整合包本体重试时不用再报
+    /// 受限；没认领过、或者这根本不是受限错误，原样报。
+    pub(crate) async fn claimed_instead_of(
+        &self,
+        err: CoreError,
+    ) -> Result<(BlockedFile, PathBuf)> {
+        match err {
+            CoreError::FileDistributionBlocked { mut files } => {
+                if files.len() == 1
+                    && let Some(staged) = self.claimed_copy(&files[0]).await?
+                {
+                    return Ok((files.remove(0), staged));
+                }
+                Err(CoreError::FileDistributionBlocked { files })
+            }
+            other => Err(other),
+        }
+    }
+
     /// 从用户选的文件夹里认领手动下载好的受限文件，复制进暂存位。
     ///
     /// 只看文件夹顶层的普通文件：文件名（不分大小写）相同，或平台给了大小且大小正好相同的才算候选，
@@ -261,35 +287,46 @@ impl Aurora {
         Ok(ClaimReport { claimed, missing })
     }
 
-    /// 先复制成同目录下的 `.part`，再改名成正式文件名：复制到一半失败或进程退出时，暂存位里不会留下
-    /// 一个看起来完整的半截文件。
     async fn store_claim(&self, source: &Path, file: &BlockedFile) -> Result<()> {
-        let slot = self.claim_slot(file);
-        let dir = slot
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.blocked_claims_dir());
-        tokio::fs::create_dir_all(&dir)
-            .await
-            .map_err(|source| io_error(&dir, source))?;
-        let part = dir.join(format!("{}.part", file.file_name));
-        let copied = async {
-            tokio::fs::copy(source, &part)
-                .await
-                .map_err(|err| io_error(&part, err))?;
-            tokio::fs::rename(&part, &slot)
-                .await
-                .map_err(|err| io_error(&slot, err))
-        }
-        .await;
-        if copied.is_err()
-            && let Err(cleanup) = tokio::fs::remove_file(&part).await
-            && cleanup.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(part = %part.display(), error = %cleanup, "认领失败后临时文件未能删除");
-        }
-        copied
+        copy_whole(source, &self.claim_slot(file)).await
     }
+}
+
+/// 认领到的受限文件从暂存位复制到落点。
+pub(crate) async fn place_claimed(claimed: &[ClaimedCopy]) -> Result<()> {
+    for copy in claimed {
+        copy_whole(&copy.staged, &copy.dest).await?;
+    }
+    Ok(())
+}
+
+/// 先复制成同目录下的 `.part`，再改名成正式文件名：复制到一半失败或进程退出时，落点不会留下一个看起来完整的
+/// 半截文件。父目录不在时建上。
+async fn copy_whole(source: &Path, dest: &Path) -> Result<()> {
+    if let Some(dir) = dest.parent() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|err| io_error(dir, err))?;
+    }
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let copied = async {
+        tokio::fs::copy(source, &part)
+            .await
+            .map_err(|err| io_error(&part, err))?;
+        tokio::fs::rename(&part, dest)
+            .await
+            .map_err(|err| io_error(dest, err))
+    }
+    .await;
+    if copied.is_err()
+        && let Err(cleanup) = tokio::fs::remove_file(&part).await
+        && cleanup.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(part = %part.display(), error = %cleanup, "受限文件复制失败后临时文件未能删除");
+    }
+    copied
 }
 
 async fn list_top_level_files(folder: &Path) -> std::io::Result<Vec<Candidate>> {

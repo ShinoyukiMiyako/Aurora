@@ -10,6 +10,8 @@ import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSetting
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
+import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
+import { PickFolderProvider } from "../discover/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
@@ -64,8 +66,10 @@ function Providers({ children }: { children: ReactNode }) {
       <ShellProvider>
         <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
           <PickSaveFileProvider value={(options) => saveDialog.pick(options)}>
-            {children}
-            <OverlayRoot />
+            <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
+              {children}
+              <OverlayRoot />
+            </PickFolderProvider>
           </PickSaveFileProvider>
         </RemoteImageProvider>
       </ShellProvider>
@@ -826,6 +830,53 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(attempts).toBe(2);
     expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
     expect(text()).toContain(RUNNING);
+    expect(text()).not.toContain("安装没有完成");
+  });
+
+  it("没装成是因为有文件要手动下载：说明块不提重试，「查看这些文件」打开清单，都找到后重新安装", async () => {
+    resetModpackMock();
+    const FILE = {
+      project_id: 9,
+      file_id: 90,
+      file_name: "locked.jar",
+      web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90",
+      destination: "mods/locked.jar",
+      sha1: "a".repeat(40),
+      fingerprint: 0,
+      size: 3,
+    };
+    let attempts = 0;
+    ipc.overrides.set("install_version", () => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new IpcError("distribution_blocked", "原文", { files: [FILE] })) : new Promise(() => undefined);
+    });
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="crash" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await create(NAME);
+    expect(text()).toContain("有 1 个文件需要到 CurseForge 网页手动下载。");
+    expect(text()).not.toContain("可以重试");
+    expect([...document.querySelectorAll("button")].some((b) => b.textContent === "重试")).toBe(false);
+
+    click(button("查看这些文件"));
+    await flush();
+    seedMockDownloads(["locked.jar"]);
+    click(button("我已下载，重新检查"));
+    await flush();
+    click(button("重新安装"));
+    await flush();
+    expect(attempts).toBe(2);
+    expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
     expect(text()).not.toContain("安装没有完成");
   });
 });

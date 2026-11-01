@@ -4,7 +4,7 @@
 import { isForgeBuiltinProvider } from "../../copy/flows";
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
-import type { Task, TaskStatus } from "../../domain/types";
+import type { Task, TaskError, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
@@ -162,7 +162,7 @@ export interface CreationRef {
   status: TaskStatus;
   title: string;
   modpack: boolean;
-  error: { code: string; message: string } | null;
+  error: TaskError | null;
 }
 
 /** 挂在这个实例名下的新建或导入任务：进行中的优先（重试还是同一个任务）；都已结束时取最近建的那个。 */
@@ -198,7 +198,7 @@ export type InstallStage =
   | { kind: "none" }
   | { kind: "queued" | "running"; title: string }
   | { kind: "landing" }
-  | { kind: "failed"; taskId: string; modpack: boolean; error: { code: string; message: string } };
+  | { kind: "failed"; taskId: string; modpack: boolean; error: TaskError };
 
 export function installStage(inst: Pick<InstanceSummary, "id" | "placeholder" | "activity">, creation: CreationRef | null): InstallStage {
   if (creation !== null && (creation.status === "queued" || creation.status === "running")) return { kind: creation.status, title: creation.title };

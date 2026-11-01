@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use aurora_download::DownloadTask;
 use aurora_modplatform::{CurseForgeClient, ModrinthClient, Platform, ResourceType};
 
-use crate::blocked::{BlockedFile, single_blocked};
+use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
@@ -68,18 +68,37 @@ impl Aurora {
                 target.version_id
             )),
         );
-        let (file_name, task) = self
+        let (file_name, dest) = match self
             .platform_file_task(platform, project_id, file_version_id, &dir, &landing)
-            .await?;
-        let dest = task.dest.clone();
-        emit(events, CoreEvent::stage(format!("开始下载 {file_name}")));
-        let report = self
-            .download_pool_reporting(events)
-            .download_all(vec![task], None)
-            .await?;
-        if let Some(failure) = report.failures.into_iter().next() {
-            return Err(failure.error.into());
-        }
+            .await
+        {
+            Ok((file_name, task)) => {
+                let dest = task.dest.clone();
+                emit(events, CoreEvent::stage(format!("开始下载 {file_name}")));
+                let report = self
+                    .download_pool_reporting(events)
+                    .download_all(vec![task], None)
+                    .await?;
+                if let Some(failure) = report.failures.into_iter().next() {
+                    return Err(failure.error.into());
+                }
+                (file_name, dest)
+            }
+            Err(err) => {
+                let (file, staged) = self.claimed_instead_of(err).await?;
+                let dest = dir.join(&file.file_name);
+                emit(
+                    events,
+                    CoreEvent::stage(format!("使用手动下载的 {}", file.file_name)),
+                );
+                place_claimed(&[ClaimedCopy {
+                    staged,
+                    dest: dest.clone(),
+                }])
+                .await?;
+                (file.file_name, dest)
+            }
+        };
         emit(
             events,
             CoreEvent::stage(format!("{file_name} 已安装到 {}", dest.display())),
@@ -638,6 +657,98 @@ mod tests {
         );
         assert!(!mc.join("versions/1.21.1/resourcepacks/pack.zip").exists());
         server.verify().await;
+    }
+
+    /// 受限资源包手动下载并认领之后再装一次：不再报受限，暂存位的副本复制进 resourcepacks/，覆盖同名旧文件，
+    /// 暂存位留着副本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_resource_installs_from_the_claimed_copy() {
+        let bytes: &[u8] = b"claimed-pack";
+        let sha1: String = Sha1::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123/files/456"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 456, "modId": 123, "displayName": "Pack", "fileName": "pack.zip",
+                    "hashes": [{"value": sha1, "algo": 1}],
+                    "downloadUrl": null, "fileLength": bytes.len(), "fileFingerprint": 778
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123/files/456/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 123, "name": "Pack", "slug": "pack", "summary": "", "classId": 12,
+                    "links": {"websiteUrl": "https://www.curseforge.com/minecraft/texture-packs/pack/"}
+                }})),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let aurora = aurora(mc, IsolationPolicy::All, &server.uri()).with_curseforge_key("k");
+        let target = ResourceTarget {
+            version_id: "1.21.1",
+            resource_type: ResourceType::ResourcePack,
+            world: None,
+        };
+
+        let err = aurora
+            .install_resource(target, Platform::CurseForge, "123", "456", None)
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("没认领时应报受限：{err:?}");
+        };
+        let downloads = mc.join("Downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        tokio::fs::write(downloads.join("pack (1).zip"), bytes)
+            .await
+            .unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert!(report.missing.is_empty(), "{report:?}");
+        let landing = mc.join("versions/1.21.1/resourcepacks");
+        tokio::fs::create_dir_all(&landing).await.unwrap();
+        tokio::fs::write(landing.join("pack.zip"), b"old")
+            .await
+            .unwrap();
+
+        let outcome = aurora
+            .install_resource(target, Platform::CurseForge, "123", "456", None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.file_name, "pack.zip");
+        assert_eq!(outcome.path, landing.join("pack.zip"));
+        assert_eq!(outcome.platform, Platform::CurseForge);
+        assert_eq!(tokio::fs::read(&outcome.path).await.unwrap(), bytes);
+        let mut names: Vec<String> = Vec::new();
+        let mut entries = tokio::fs::read_dir(&landing).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(names, vec!["pack.zip"]);
+        assert!(
+            aurora
+                .blocked_claims_dir()
+                .join("curseforge-456/pack.zip")
+                .is_file()
+        );
     }
 
     /// CurseForge 的任务（含 download-url 兜底出来的）都挂 CurseForge 凭据，Modrinth 的任务不挂。数据包的

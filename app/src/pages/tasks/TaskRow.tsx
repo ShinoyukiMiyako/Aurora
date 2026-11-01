@@ -51,10 +51,12 @@ export interface TaskRowProps {
   retryBlocked: string | undefined;
   onCancel(): void;
   onRetry(): void;
+  /** 打开需要手动下载的文件清单；只有以这个原因失败的任务才有入口。 */
+  onViewBlocked(): void;
   onViewInstance(): void;
 }
 
-export function TaskRow({ task, meta, hasInstance, retryBlocked, onCancel, onRetry, onViewInstance }: TaskRowProps) {
+export function TaskRow({ task, meta, hasInstance, retryBlocked, onCancel, onRetry, onViewBlocked, onViewInstance }: TaskRowProps) {
   const active = isActiveTask(task);
   const viewInstance = hasInstance && (
     <Button variant="ghost" size="sm" iconRight="arrow-right" onClick={onViewInstance}>
@@ -107,11 +109,17 @@ export function TaskRow({ task, meta, hasInstance, retryBlocked, onCancel, onRet
         <span className={styles.side}>
           {task.status === "running" && <span className={styles.pct}>{percent(task.progress)}</span>}
           {active && <IconButton icon="x" label={TASKS_COPY.row.cancel} size="sm" onClick={onCancel} />}
-          {task.status === "failed" && (
-            <Button variant="secondary" size="sm" disabledReason={retryBlocked} onClick={onRetry}>
-              {TASKS_COPY.row.retry}
-            </Button>
-          )}
+          {/* 文件没到手时重试必然还是这个结果：清单找齐后由它重排任务 */}
+          {task.status === "failed" &&
+            (task.error?.blocked_files === undefined ? (
+              <Button variant="secondary" size="sm" disabledReason={retryBlocked} onClick={onRetry}>
+                {TASKS_COPY.row.retry}
+              </Button>
+            ) : (
+              <Button variant="secondary" size="sm" onClick={onViewBlocked}>
+                {TASKS_COPY.row.viewBlocked}
+              </Button>
+            ))}
           {!active && viewInstance}
         </span>
       }
