@@ -12,7 +12,7 @@
 use std::cmp::Ordering;
 
 use aurora_base::retry::RetryPolicy;
-use aurora_download::SourcePlan;
+use aurora_download::{CancellationToken, SourcePlan};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -167,14 +167,15 @@ pub fn builds_for(builds: &[LoaderBuild], mc_version: &str) -> Vec<LoaderBuild> 
     matching
 }
 
-/// 抓取并解析一份 `maven-metadata.xml`。
+/// 抓取并解析一份 `maven-metadata.xml`；`cancel` 触发即以已取消返回。
 pub async fn fetch_maven_versions(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
     url: &str,
     policy: &RetryPolicy,
+    cancel: Option<&CancellationToken>,
 ) -> Result<Vec<String>> {
-    let bytes = net::get_bytes_from(client, sources, url, policy).await?;
+    let bytes = net::get_bytes_from(client, sources, url, policy, cancel).await?;
     let xml = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {
         reason: format!("{url} 不是 UTF-8 文本：{err}"),
     })?;

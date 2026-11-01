@@ -199,7 +199,14 @@ impl Aurora {
         let pool = self.download_pool_reporting(events);
         let policy = self.retry_policy();
         let http = self.http();
-        let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
+        let cx = make_context(
+            &http,
+            &pool,
+            &layout,
+            self.runtime(),
+            &policy,
+            self.cancel_token(),
+        );
         let mc = request.mc_version.as_str();
 
         emit(events, CoreEvent::stage(format!("查找原版 {mc}")));
@@ -255,13 +262,12 @@ impl Aurora {
                         choice.display_name()
                     )),
                 );
-                let mut forge = ForgeInstaller::new(cx, java)
-                    .with_sources(self.config().download_source.source_plan());
-                // 处理器不看下载池的令牌，单独挂上：取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
-                if let Some(token) = self.cancel_token() {
-                    forge = forge.with_cancel(token.clone());
-                }
-                let (embedded, summary) = forge.install_for_instance(&url, id).await?;
+                // 处理器不看下载池的令牌，取消看的是上下文上挂的那个（make_context 已挂上）：
+                // 取消时正在跑的处理器要被结束，不能等宽限期满被丢下。
+                let (embedded, summary) = ForgeInstaller::new(cx, java)
+                    .with_sources(self.config().download_source.source_plan())
+                    .install_for_instance(&url, id)
+                    .await?;
                 emit(
                     events,
                     CoreEvent::stage(format!(
@@ -433,7 +439,14 @@ impl Aurora {
                 let pool = self.download_pool_reporting(events);
                 let policy = self.retry_policy();
                 let http = self.http();
-                let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
+                let cx = make_context(
+                    &http,
+                    &pool,
+                    &layout,
+                    self.runtime(),
+                    &policy,
+                    self.cancel_token(),
+                );
                 emit(events, CoreEvent::stage(format!("补全实例 {id} 的文件")));
                 let report = ensure_complete(cx, &merged, &root).await?;
                 emit(

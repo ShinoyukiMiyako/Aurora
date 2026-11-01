@@ -14,7 +14,14 @@ impl Aurora {
         let pool = self.download_pool();
         let policy = self.retry_policy();
         let http = self.http();
-        let cx = make_context(&http, &pool, &layout, self.runtime(), &policy);
+        let cx = make_context(
+            &http,
+            &pool,
+            &layout,
+            self.runtime(),
+            &policy,
+            self.cancel_token(),
+        );
         let manifest = VanillaInstaller::new(cx)
             .with_manifest_url(self.manifest_url())
             .fetch_manifest()

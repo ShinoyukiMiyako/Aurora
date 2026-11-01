@@ -992,7 +992,14 @@ impl Aurora {
         let pool = self.download_pool();
         let policy = self.retry_policy();
         aurora_install::ensure_complete(
-            make_context(&http, &pool, layout, self.runtime(), &policy),
+            make_context(
+                &http,
+                &pool,
+                layout,
+                self.runtime(),
+                &policy,
+                self.cancel_token(),
+            ),
             merged,
             base_id,
         )

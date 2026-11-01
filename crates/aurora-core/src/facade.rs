@@ -409,15 +409,17 @@ impl Aurora {
 /// 装配一个安装上下文所需的一束借用（生命周期绑定到传入的各组件）。
 ///
 /// 安装/补全类操作先建 `layout`/`pool`/`policy` 局部变量，再借此函数打成 [`InstallContext`]，避免每处
-/// 重复五参数样板。
+/// 重复五参数样板。`cancel` 传门面快照上的令牌（[`Aurora::cancel_token`]）：元数据抓取与 Forge
+/// 处理器不经过下载池，只从上下文里看取消；必填是为了让每个造上下文的地方都想到它。
 pub(crate) fn make_context<'a>(
     http: &'a reqwest::Client,
     pool: &'a DownloadPool,
     layout: &'a GameLayout,
     runtime: &'a RuntimeContext,
     policy: &'a RetryPolicy,
+    cancel: Option<&'a CancellationToken>,
 ) -> InstallContext<'a> {
-    InstallContext::new(http, pool, layout, runtime, policy)
+    InstallContext::new(http, pool, layout, runtime, policy).with_cancel(cancel)
 }
 
 #[cfg(test)]
