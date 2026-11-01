@@ -314,6 +314,44 @@ describe("需要手动下载的文件清单随失败记录进任务日志", () =
     expect(store.getState().tasks[0]).toMatchObject({ status: "running", attempt: 2, error: null });
   });
 
+  it("有手动下载清单的失败：通知不给重试，转去失败筛选看清单；全部重试跳过它，别的失败照常排回", async () => {
+    journal = () => ({
+      seq: 0,
+      tasks: [
+        packRecord("blocked", { code: "distribution_blocked", message: MESSAGE, blocked_files: BLOCKED } as TaskRecordDto["error"]),
+        packRecord("old-blocked", { code: "distribution_blocked", message: MESSAGE }),
+        { ...packRecord("key", { code: "curseforge_key_rejected", message: "拒绝" }), instance_id: "另一包", spec: { command: "install_modpack", args: { source: { kind: "file", path: "D:\\packs\\b.zip" }, name: "另一包", excludedOptional: [] } } },
+      ],
+    });
+    await store.actions.reload("tasks");
+    ipc.overrides.set("install_modpack", () => new Promise(() => undefined));
+    expect(store.actions.retryFailedTasks()).toBe(2);
+    await settle();
+    const byId = new Map(store.getState().tasks.map((t) => [t.id, t.status]));
+    expect(byId.get("blocked")).toBe("failed");
+    expect(byId.get("key")).toBe("running");
+    expect(byId.get("old-blocked")).not.toBe("failed");
+
+    ipc.overrides.set("install_modpack", () => {
+      throw new IpcError("distribution_blocked", MESSAGE, { files: BLOCKED });
+    });
+    await store.actions.installModpack({
+      source: { kind: "file", path: "D:\\packs\\樱落.mrpack" },
+      name: "新的樱落",
+      cover: "grass",
+      packName: "樱落",
+      packVersion: "1.0.0",
+      modCount: 41,
+      mcVersion: "1.21.1",
+      loader: "fabric",
+      loaderVersion: "0.16.9",
+      excludedOptional: [],
+    });
+    await settle();
+    const toast = store.getState().toasts.find((t) => t.body === "有 2 个文件需要到 CurseForge 网页手动下载");
+    expect(toast?.action).toEqual({ label: "查看", to: { page: "tasks", filter: "failed" } });
+  });
+
   it("别的失败不带清单", async () => {
     journal = () => ({ seq: 0, tasks: [] });
     await store.actions.reload("tasks");

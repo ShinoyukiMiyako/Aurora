@@ -354,6 +354,11 @@ export function markCancelled(tasks: readonly Task[], id: string, now: number): 
   return update(tasks, id, (t) => (isActiveTask(t) ? { ...t, status: "cancelled", speedBps: 0, finishedAt: now } : t));
 }
 
+/** 失败里带着手动下载清单的任务：文件没到手，原样重跑只会再失败一次，不进通知的重试与「全部重试」，要走清单。 */
+export function awaitsManualFiles(task: Task): boolean {
+  return task.error !== null && task.error.blocked_files !== undefined;
+}
+
 /** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试。 */
 export function retryTask(tasks: readonly Task[], id: string): Task[] {
   const task = tasks.find((t) => t.id === id);

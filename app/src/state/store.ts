@@ -107,6 +107,7 @@ import {
   applyCompositeDownload,
   applyTaskDownload,
   attemptTaskId,
+  awaitsManualFiles,
   clearFinished,
   completeCompositeStep,
   compositeProgress,
@@ -1420,7 +1421,7 @@ export class LauncherStore {
 
   /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
-    const failed = this.raw.tasks.filter((t) => t.status === "failed").length;
+    const failed = this.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t)).length;
     const copy = TOAST_COPY.networkRestored(failed);
     const action: ToastAction | undefined =
       failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
@@ -1893,7 +1894,7 @@ export class LauncherStore {
         ...landing(raw),
       }));
       if (WORLD_TASK_COMMANDS.has(before.spec.command)) this.worldFailureToast(before, taskFailureReason(record));
-      else this.failureToast(before, taskFailureReason(record));
+      else this.failureToast(before, record);
     }
     this.tasksChanged();
     this.rescanHeld(before.instanceId);
@@ -1928,7 +1929,8 @@ export class LauncherStore {
    * 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。
    * 导出整合包不是下载：它的失败单独一条「导出失败」，不并进也不开启下载失败的合并。
    */
-  private failureToast(task: Task, reason: string): void {
+  private failureToast(task: Task, error: TaskError): void {
+    const reason = taskFailureReason(error);
     const now = Date.now();
     if (task.kind === "modpack_export") {
       const copy = TASK_TOAST.exportFailed(task.title, reason);
@@ -1945,11 +1947,12 @@ export class LauncherStore {
       return;
     }
     const single = TASK_TOAST.failed(task.title, reason);
-    const toastId = this.pushToast("error", single.title, single.body, {
-      label: TASK_TOAST.retryAction,
-      run: () => this.actions.retryTask(task.id),
-      errorTitle: ACTION_ERROR.install,
-    });
+    // 文件没到手时重试必然再失败一次，通知上不给重试，转去失败筛选看清单
+    const action: ToastAction =
+      error.blocked_files === undefined
+        ? { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install }
+        : { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } };
+    const toastId = this.pushToast("error", single.title, single.body, action);
     this.failureBatch = { toastId, startedAt: now, reasons: [reason] };
   }
 
@@ -3139,7 +3142,7 @@ export class LauncherStore {
       retryFailedTasks() {
         let retried = 0;
         try {
-          for (const task of store.raw.tasks.filter((t) => t.status === "failed")) {
+          for (const task of store.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t))) {
             const leftover = store.leftoverOfFailedCreate(task);
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
