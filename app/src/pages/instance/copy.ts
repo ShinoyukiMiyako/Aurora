@@ -151,6 +151,7 @@ export const OVERVIEW_COPY = {
   minutesUnit: "分钟",
   perWeek: (hours: string) => `平均每周 ${hours} 小时`,
   notStarted: "还没开始玩",
+  underAMinute: "玩过，不到 1 分钟",
   never: "从未",
   rememberOnLaunch: "启动一次就会记下来",
   modsUnit: "个",

@@ -57,8 +57,8 @@ import {
   overviewBanner,
   peekLayout,
   peekPerRow,
+  playtimeNote,
   sortWorlds,
-  weeklyHours,
   worldName,
   WORLDS_PREVIEW,
   type ModRow,
@@ -218,6 +218,7 @@ function StatsCard({
   const modTotal = mods.status === "ready" ? modTotals(inst, mods.data.length).total : inst.modCount;
   const hours = Math.floor(inst.playtimeMin / 60);
   const minutes = inst.playtimeMin % 60;
+  const playtime = playtimeNote(inst, now);
   const modded = inst.loader !== "vanilla";
   const worlds = useModuleView(content);
   const worldsBytes = content.status === "ready" ? content.data.worlds.reduce((sum, w) => sum + w.size_bytes, 0) : 0;
@@ -238,10 +239,7 @@ function StatsCard({
           label={OVERVIEW_COPY.statPlaytime}
           value={String(hours > 0 ? hours : minutes)}
           unit={hours > 0 ? OVERVIEW_COPY.hoursUnit(minutes) : OVERVIEW_COPY.minutesUnit}
-          delta={{
-            direction: "flat",
-            text: inst.playtimeMin === 0 || inst.createdAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.perWeek(weeklyHours(inst.playtimeMin, inst.createdAt, now)),
-          }}
+          delta={playtime === null ? undefined : { direction: "flat", text: playtime }}
         />
         <StatTile
           icon="calendar"
