@@ -675,6 +675,7 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
         finished: Math.round((files * quarter) / 4),
         bytes: Math.round((bytes * quarter) / 4),
         total_bytes: bytes,
+        transferred: 0,
         speed: quarter === 0 ? 0 : 8 * MB,
       });
       if (quarter < 4) await exportTick();

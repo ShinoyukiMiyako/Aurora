@@ -527,6 +527,7 @@ impl DownloadMeter {
             finished,
             bytes: self.bytes,
             total_bytes: self.total_bytes,
+            transferred: self.bytes,
             speed,
         }
     }
@@ -786,6 +787,7 @@ mod tests {
                 finished: 0,
                 bytes: 2000,
                 total_bytes: Some(10_000),
+                transferred: 2000,
                 speed: 10_000,
             }
         );
@@ -801,6 +803,7 @@ mod tests {
                 finished: 1,
                 bytes: 2500,
                 total_bytes: Some(10_000),
+                transferred: 2500,
                 speed: 5000,
             }
         );

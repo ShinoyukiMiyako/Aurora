@@ -8,10 +8,12 @@
 //! - 有效字节（快照里的 `bytes`）：一批里已经就绪的字节。成功或本就完整而跳过的文件按其实际
 //!   大小计入，续传复用的分片计入；失败的尝试、被丢弃的分片一律退回。因此它不会因重传而虚高，
 //!   一批全部成功时恰等于 `total_bytes`，用来画进度条与「已下载 / 总量」文案。
-//! - 传输字节（只在内部）：网络上实际读到的字节，重试会重复累加，只用来算速度。
+//! - 传输字节（快照里的 `transferred`）：网络上实际读到的字节，重试会重复累加。用来算速度，
+//!   也是任务结束后报给玩家的实际传输量；画进度不能用它。
 //!
-//! 两者之差就是重传浪费，批次结束时记一条日志。曾经只有传输字节一套计数，界面拿它当完成度，
-//! 于是出现过「100% · 1.06 GB / 1.04 GB」——分子比分母还大。
+//! 重传时传输字节比有效字节多，差额批次结束时记一条日志；跳过完整文件时有效字节比传输字节多，
+//! 补全类批次能差出几百 MB，所以「下了多少」只能看传输字节。曾经只有传输字节一套计数，界面拿它
+//! 当完成度，于是出现过「100% · 1.06 GB / 1.04 GB」——分子比分母还大。
 //!
 //! `total_bytes` 是这一批任务声明大小之和，只在每个任务都声明了大小时才有值。
 //! 速度由独立采样任务按固定间隔对传输字节增量做 EWMA 平滑得到。
@@ -36,6 +38,9 @@ pub struct DownloadProgress {
     pub bytes: u64,
     /// 本批任务声明大小之和；有任一任务大小未知时为 `None`（总量无从得知，不能拿部分和冒充）。
     pub total_bytes: Option<u64>,
+    /// 传输字节：网络上实际读到的字节，含重传，跳过的文件与复用的分片不算；批内只增不减。
+    /// 打包、备份这些本地任务借这个结构报进度，没有网络传输，恒为 0。
+    pub transferred: u64,
     /// 瞬时速度，字节/秒（按实际传输字节做 EWMA 平滑）。
     pub speed: u64,
 }
@@ -63,6 +68,7 @@ impl ReporterInner {
             finished: self.finished.load(Ordering::Relaxed),
             bytes: self.effective.load(Ordering::Relaxed),
             total_bytes: self.total_bytes,
+            transferred: self.transferred.load(Ordering::Relaxed),
             speed: self.speed.load(Ordering::Relaxed),
         }
     }
@@ -321,6 +327,7 @@ mod tests {
         assert_eq!(snap.finished, 1);
         assert_eq!(snap.bytes, 150);
         assert_eq!(snap.total_bytes, Some(4096));
+        assert_eq!(snap.transferred, 150);
         assert_eq!(reporter.transferred_bytes(), 150);
     }
 
@@ -341,17 +348,28 @@ mod tests {
             "有效字节恰为文件大小，坏的那遍被退回"
         );
         assert_eq!(reporter.transferred_bytes(), 2000, "吞吐计数保留两遍传输");
+        assert_eq!(
+            rx.borrow().transferred,
+            2000,
+            "快照如实报两遍：那笔流量真的走过网线"
+        );
     }
 
     #[test]
     fn reused_parts_count_as_ready_bytes() {
-        let (reporter, _rx) = reporter(1, Some(900));
+        let (reporter, rx) = reporter(1, Some(900));
         let file = FileProgress::new(Some(&reporter));
         file.reused(600);
         file.transferred(300);
         file.settle(900);
+        reporter.finish_file();
         assert_eq!(reporter.effective_bytes(), 900);
         assert_eq!(reporter.transferred_bytes(), 300, "复用的分片没走网络");
+        assert_eq!(
+            (rx.borrow().bytes, rx.borrow().transferred),
+            (900, 300),
+            "快照里两套计数各报各的"
+        );
     }
 
     #[test]

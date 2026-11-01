@@ -106,7 +106,7 @@ export function offlineFallbackRefusal(error: unknown): OfflineFallbackRefusedDe
 /** 加载阶段的分段；stage_index 0-2 为 preparing，3 为 downloading，4-6 为 launching，7 为 running。 */
 export type LaunchPhaseName = "preparing" | "downloading" | "launching" | "running";
 
-/** 阶段 3 的下载进度快照，字段与 core-event 的下载进度一致。 */
+/** 阶段 3 的下载进度快照，字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。 */
 export interface LaunchDownloadDto {
   total: number;
   finished: number;

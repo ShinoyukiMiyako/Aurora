@@ -154,28 +154,53 @@ describe("行内元信息", () => {
     expect(() => rowMeta(task("q"), ctx())).toThrow("没有队列位次");
   });
 
-  it("已完成：总量是这一次尝试跨批次累计的字节，用时从开始运行算起、不含排队等待；右侧相对时间", () => {
-    // 加入队列 90 秒后才开始跑，跑了 20 秒；最后一批只有 2 MB，累计下了 50 MB
-    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 90_000, finishedAt: T0 + 110_000, bytes: 2 * MB, totalBytes: 2 * MB, doneBytes: 52_400_000 });
+  it("已完成：写这一次尝试跨批次的实际传输量，用时从开始运行算起、不含排队等待；右侧相对时间", () => {
+    // 加入队列 90 秒后才开始跑，跑了 20 秒；最后一批只有 2 MB，累计传了 50 MB
+    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 90_000, finishedAt: T0 + 110_000, bytes: 2 * MB, totalBytes: 2 * MB, doneBytes: 52_400_000, transferredBytes: 52_400_000 });
     expect(rowMeta(done, ctx({ now: T0 + 5 * 60_000 + 110_000 }))).toEqual({ left: "50.0 MB · 用时 20 秒", right: "5 分钟前", danger: false });
     expect(rowMeta({ ...done, finishedAt: T0 + 90_000 + 125_000 }, ctx({ now: T0 + 215_000 })).left).toBe("50.0 MB · 用时 2 分钟");
     // 边界：刚开始就结束也写满 1 秒
     expect(rowMeta({ ...done, finishedAt: T0 + 90_000 }, ctx()).left).toBe("50.0 MB · 用时 1 秒");
   });
 
-  it("已完成：一个字节都没下（文件都已就绪）不写总量；较早的任务记录没有开始时刻，不写用时", () => {
-    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 1_000, finishedAt: T0 + 4_000, doneBytes: 0 });
-    expect(rowMeta(done, ctx()).left).toBe("用时 3 秒");
-    expect(rowMeta({ ...done, startedAt: null, doneBytes: 4096 }, ctx()).left).toBe("4.0 KB");
-    expect(rowMeta({ ...done, startedAt: null, doneBytes: 0 }, ctx()).left).toBe("已完成");
+  it("已完成：补全时跳过的完整文件不算下载量，有效字节再多也只写实际传输的", () => {
+    const repaired = task("d", { kind: "repair", status: "done", startedAt: T0, finishedAt: T0 + 2_000, bytes: 701 * MB, totalBytes: 701 * MB, doneBytes: 701 * MB, transferredBytes: 5.5 * MB });
+    expect(rowMeta(repaired, ctx()).left).toBe("5.5 MB · 用时 2 秒");
+    // 边界：只传了 1 字节也如实写，不算已就绪
+    expect(rowMeta({ ...repaired, transferredBytes: 1 }, ctx()).left).toBe("1 B · 用时 2 秒");
+  });
+
+  it("已完成：一个字节都没传写文件已就绪；较早的任务记录没有开始时刻，不写用时", () => {
+    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 1_000, finishedAt: T0 + 4_000, doneBytes: 701 * MB, transferredBytes: 0 });
+    expect(rowMeta(done, ctx()).left).toBe("文件已就绪 · 用时 3 秒");
+    expect(rowMeta({ ...done, startedAt: null, transferredBytes: 4096 }, ctx()).left).toBe("4.0 KB");
+    expect(rowMeta({ ...done, startedAt: null, transferredBytes: 0 }, ctx()).left).toBe("文件已就绪");
     // 重试过的任务照样写第几次尝试，用时只算最后这一次
-    expect(rowMeta({ ...done, attempt: 3 }, ctx()).left).toBe("用时 3 秒 · 第 3 次尝试");
+    expect(rowMeta({ ...done, attempt: 3 }, ctx()).left).toBe("文件已就绪 · 用时 3 秒 · 第 3 次尝试");
+  });
+
+  it("已完成：较早的下载记录没有传输量，累计字节含跳过的文件，不拿它冒充下载量，也不说已就绪", () => {
+    const old = task("d", { kind: "repair", status: "done", startedAt: T0, finishedAt: T0 + 2_000, doneBytes: 701 * MB, transferredBytes: null });
+    expect(rowMeta(old, ctx()).left).toBe("用时 2 秒");
+    expect(rowMeta({ ...old, startedAt: null }, ctx()).left).toBe("已完成");
+  });
+
+  it("已完成：导出、备份、恢复是本地任务，没有网络传输，写处理的字节，不说已就绪", () => {
+    const kinds: readonly TaskKind[] = ["modpack_export", "world_backup", "world_restore"];
+    for (const kind of kinds) {
+      const done = task("l", { kind, status: "done", startedAt: T0, finishedAt: T0 + 3_000, doneBytes: 3 * MB, transferredBytes: 0 });
+      expect(rowMeta(done, ctx()).left, kind).toBe("3.0 MB · 用时 3 秒");
+      expect(rowMeta({ ...done, doneBytes: 0 }, ctx()).left, kind).toBe("用时 3 秒");
+      expect(rowMeta({ ...done, doneBytes: 0, startedAt: null }, ctx()).left, kind).toBe("已完成");
+      // 较早的本地任务记录没有传输量，处理的字节照写
+      expect(rowMeta({ ...done, transferredBytes: null }, ctx()).left, kind).toBe("3.0 MB · 用时 3 秒");
+    }
   });
 
   it("已完成：运行期间系统时钟往回调过（结束时刻早于开始时刻）算不出用时，不写用时，也不让整行抛错", () => {
-    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 5_000, finishedAt: T0 + 2_000, doneBytes: 3 * MB });
+    const done = task("d", { status: "done", createdAt: T0, startedAt: T0 + 5_000, finishedAt: T0 + 2_000, doneBytes: 3 * MB, transferredBytes: 3 * MB });
     expect(rowMeta(done, ctx()).left).toBe("3.0 MB");
-    expect(rowMeta({ ...done, doneBytes: 0 }, ctx()).left).toBe("已完成");
+    expect(rowMeta({ ...done, transferredBytes: null }, ctx()).left).toBe("已完成");
     // 边界：只早 1 毫秒同样不写
     expect(rowMeta({ ...done, finishedAt: T0 + 4_999 }, ctx()).left).toBe("3.0 MB");
   });
@@ -255,7 +280,6 @@ describe("吞吐采样与总览", () => {
 
   it("曲线：不足 48 个采样左侧补 0；纵轴上限至少 4 MB/s，超过时按样本最大值", () => {
     const empty = chartGeometry([]);
-    expect(empty.idle).toBe(true);
     expect(empty.line.split(" ")).toHaveLength(THROUGHPUT_SAMPLES);
     expect(empty.line.startsWith("M0.00,30.00")).toBe(true);
 
@@ -270,6 +294,29 @@ describe("吞吐采样与总览", () => {
     const points = high.line.split(" ");
     expect(points[THROUGHPUT_SAMPLES - 2]).toBe(`L${((46 / 47) * 100).toFixed(2)},5.00`);
     expect(points[THROUGHPUT_SAMPLES - 1]).toBe("L100.00,17.50");
+  });
+});
+
+describe("曲线空闲的判定", () => {
+  const zeros = (count: number) => Array<number>(count).fill(0);
+
+  it("采样不足一个窗口时不判空闲：采样从进页才开始，更早有没有流量不知道", () => {
+    expect(chartGeometry([]).idle).toBe(false);
+    expect(chartGeometry(zeros(1)).idle).toBe(false);
+    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES - 1)).idle).toBe(false);
+  });
+
+  it("采满一个窗口且全为 0 才判空闲；超出窗口的采样不算", () => {
+    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES)).idle).toBe(true);
+    expect(chartGeometry([MB, ...zeros(THROUGHPUT_SAMPLES)]).idle).toBe(true);
+  });
+
+  it("窗口里任何一秒有流量都不算空闲", () => {
+    const at = Math.floor(Math.random() * THROUGHPUT_SAMPLES);
+    const window = zeros(THROUGHPUT_SAMPLES);
+    window[at] = 1;
+    expect(chartGeometry(window).idle, `第 ${at} 秒有 1 B/s`).toBe(false);
+    expect(chartGeometry([...zeros(THROUGHPUT_SAMPLES - 1), 1]).idle).toBe(false);
   });
 });
 
@@ -347,11 +394,11 @@ describe("取消前的确认", () => {
 });
 
 describe("任务表的结构比较", () => {
-  const running = task("a", { status: "running", progress: 0.1, bytes: 1 * MB, totalBytes: 10 * MB, doneBytes: 1 * MB, speedBps: MB, startedAt: T0 });
+  const running = task("a", { status: "running", progress: 0.1, bytes: 1 * MB, totalBytes: 10 * MB, doneBytes: 1 * MB, transferredBytes: 1 * MB, batchTransferred: 1 * MB, speedBps: MB, startedAt: T0 });
   const queued = task("b");
 
-  it("只换了下载进度的五个字段：结构相同", () => {
-    const next = { ...running, progress: 0.9, bytes: 9 * MB, totalBytes: 12 * MB, doneBytes: 9 * MB, speedBps: 0 };
+  it("只换了下载进度的七个字段：结构相同", () => {
+    const next = { ...running, progress: 0.9, bytes: 9 * MB, totalBytes: 12 * MB, doneBytes: 9 * MB, transferredBytes: 2 * MB, batchTransferred: 2 * MB, speedBps: 0 };
     expect(sameTaskLayout([running, queued], [next, queued])).toBe(true);
   });
 

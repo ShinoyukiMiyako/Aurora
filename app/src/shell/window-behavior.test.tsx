@@ -200,6 +200,8 @@ function task(id: string, status: Task["status"], kind: Task["kind"] = "game"): 
     bytes: 0,
     totalBytes: null,
     doneBytes: 0,
+    transferredBytes: 0,
+    batchTransferred: 0,
     speedBps: 0,
     startedAt: null,
     attempt: 1,

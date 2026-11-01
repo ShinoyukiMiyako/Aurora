@@ -831,6 +831,7 @@ mod tests {
         assert_eq!(last.finished, 2);
         assert_eq!(last.total_bytes, Some(10));
         assert_eq!(last.bytes, 10);
+        assert_eq!(last.transferred, 10);
     }
 
     /// 门面发出的请求带应用版本的 User-Agent，不自动跳转的客户端也一样；快照（克隆）共用同样的客户端，
