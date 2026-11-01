@@ -83,7 +83,7 @@ export function packFacts(version: ModVersionInfo | null, summary: ModpackSummar
 /** 摘要读不出来的原因：下面这几个码后端原文写给排查用，与任务失败同一说法才告诉玩家怎么办；其余用后端原文。 */
 function summaryErrorText(error: Error): string {
   const record = errorRecord(error);
-  return record.code === "curseforge_key_rejected" || record.code === "modpack_unsupported_compression" ? taskFailureReason(record) : record.message;
+  return record.code === "curseforge_key_missing" || record.code === "curseforge_key_rejected" || record.code === "modpack_unsupported_compression" ? taskFailureReason(record) : record.message;
 }
 
 /** 摘要因整合包文件本身不允许启动器下载而读不出来时的清单（只有这个包）：重试还是这个结果，手动下载走这份清单。 */

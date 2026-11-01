@@ -907,7 +907,7 @@ describe("发现页：整合包", () => {
     await flush();
     act(() => buttonByText("安装为新实例", dialog()).click());
     await flush();
-    expect(dialog().textContent).toContain("没装成：这个包里有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY");
+    expect(dialog().textContent).toContain("没装成：有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY");
     expect(dialog().textContent).not.toContain("该源已禁用");
     expect(buttonByText("重试", dialog())).toBeDefined();
   });

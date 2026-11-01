@@ -24,7 +24,7 @@ describe("taskFailureReason", () => {
 
   it("包里有文件只能从 CurseForge 下载又没配密钥：说明要设置哪个环境变量，不露「该源已禁用」这样的排查原文", () => {
     expect(taskFailureReason({ code: "curseforge_key_missing", message: "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用" })).toBe(
-      "这个包里有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY",
+      "有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY",
     );
   });
 

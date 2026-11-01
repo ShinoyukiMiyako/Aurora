@@ -9,7 +9,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Icon } from "../../art/Icon";
 import { defaultModpackCover, type InstanceCover } from "../../art/iso/covers";
-import { ACTION_ERROR } from "../../copy/flows";
+import { ACTION_ERROR, taskFailureReason } from "../../copy/flows";
 import { instanceNameError } from "../../domain/rules";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -55,6 +55,10 @@ export function previewErrorText(error: unknown): string {
       return IMPORT_COPY.errorCorrupt;
     case "modpack_unsupported_compression":
       return IMPORT_COPY.errorCompression(compressionEntry(error));
+    // 后端原文写给排查用，与任务失败同一说法才告诉玩家怎么办
+    case "curseforge_key_missing":
+    case "curseforge_key_rejected":
+      return taskFailureReason(record);
     // 只有 CurseForge 包的预览会联网（清单不带落点与大小，要问平台）
     case "network_failed":
       return IMPORT_COPY.errorNetwork;
