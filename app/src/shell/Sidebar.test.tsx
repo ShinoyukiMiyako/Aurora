@@ -85,7 +85,7 @@ describe("拖动排序的几何", () => {
 });
 
 describe("固定实例菜单的第一项", () => {
-  const entry = (view: LaunchView, blocked: string | null = null) => ({ view, blocked, launch: vi.fn(), cancel: vi.fn(), stop: vi.fn(), openCrash: vi.fn() });
+  const entry = (view: LaunchView, blocked: string | null = null, repairBlocked: string | null = null) => ({ view, blocked, repairBlocked, launch: vi.fn(), cancel: vi.fn(), stop: vi.fn(), openCrash: vi.fn() });
 
   it("按启动视图给出启动、取消、结束、诊断或修复", () => {
     expect(pinLaunchItem(entry({ kind: "ready", busyElsewhere: false })).label).toBe(LAUNCH_COPY.launch);
@@ -94,6 +94,12 @@ describe("固定实例菜单的第一项", () => {
     expect(pinLaunchItem(entry({ kind: "crashed", session })).label).toBe(LAUNCH_COPY.viewCrash);
     expect(pinLaunchItem(entry({ kind: "broken", reason: "x", reimport: false })).label).toBe(LAUNCH_COPY.repairAndLaunch);
     expect(pinLaunchItem(entry({ kind: "broken", reason: "x", reimport: true }))).toMatchObject({ label: "重新导入整合包", icon: "modpack" });
+  });
+
+  it("损坏实例被占着：修复是带原因的禁用项；重新导入不受影响", () => {
+    const blocked = pinLaunchItem(entry({ kind: "broken", reason: "x", reimport: false }, null, "实例「Fabric」正在使用它，结束后才能补全"));
+    expect(blocked).toMatchObject({ label: LAUNCH_COPY.repairAndLaunch, disabled: true, disabledReason: "实例「Fabric」正在使用它，结束后才能补全" });
+    expect(pinLaunchItem(entry({ kind: "broken", reason: "x", reimport: true }))).not.toHaveProperty("disabled");
   });
 
   it("结束游戏走入口自己的确认，不直接调用", () => {

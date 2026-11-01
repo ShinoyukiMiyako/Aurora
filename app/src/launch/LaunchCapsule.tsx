@@ -246,11 +246,15 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
     }
     case "broken": {
       const action = brokenAction(face);
+      // 与就绪面同一写法：包裹层常驻，被占着时带原因禁用，放开时按钮不重挂
+      const blocked = entry.repairBlocked !== null;
       return (
-        <button type="button" className={styles.go} data-tone="warn" onClick={entry.launch}>
-          <Icon name={action.icon} size={18} />
-          {action.label}
-        </button>
+        <Tooltip content={entry.repairBlocked} disabled={!blocked}>
+          <button type="button" className={styles.go} data-tone="warn" data-disabled={blocked || undefined} {...softDisabledProps(blocked, entry.launch)}>
+            <Icon name={action.icon} size={18} />
+            {action.label}
+          </button>
+        </Tooltip>
       );
     }
     case "loading": {
