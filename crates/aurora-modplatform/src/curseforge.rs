@@ -552,6 +552,7 @@ impl From<&CurseForgeMod> for SearchHit {
             title: item.name.clone(),
             description: item.summary.clone(),
             author: item.authors.first().map(|a| a.name.clone()),
+            owner: None,
             downloads: item.download_count,
             // CurseForge 无「关注数」概念。
             follows: None,

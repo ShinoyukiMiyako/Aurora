@@ -2,7 +2,8 @@
 //!
 //! 覆盖搜索（facets 过滤：类型/加载器/游戏版本）、工程详情、版本列表、依赖解析、以及按文件哈希查
 //! 版本 / 查更新。所有远端地址经 `base_url` 注入，单测走本地 mock。响应体裸模型（`Modrinth*`）保持
-//! 与 API 字段一致，向统一模型的翻译放在 [`From`] 实现里。
+//! 与 API 字段一致，向统一模型的翻译放在 [`From`] 实现里。组织只有 v3 路由，见
+//! [`ModrinthClient::organizations`]。
 
 use std::path::PathBuf;
 
@@ -99,6 +100,28 @@ impl ModrinthClient {
         )?;
         let url = format!("{}/teams", self.base_url);
         send_json(&self.retry, "modrinth.teams", || {
+            self.http.get(url.as_str()).query(&[("ids", ids.as_str())])
+        })
+        .await
+    }
+
+    /// 批量取组织（一次请求）：工程对象只带组织 id，组织名要到这里取。
+    ///
+    /// 不存在的 id 不会出现在结果里；空批次不发请求。v2 没有组织路由，这里换到同一根地址的 v3。
+    pub async fn organizations(&self, ids: &[String]) -> Result<Vec<ModrinthOrganization>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = json_array(
+            &ids.iter().map(String::as_str).collect::<Vec<_>>(),
+            "modrinth organization ids",
+        )?;
+        let root = self
+            .base_url
+            .strip_suffix("/v2")
+            .unwrap_or(self.base_url.as_str());
+        let url = format!("{root}/v3/organizations");
+        send_json(&self.retry, "modrinth.organizations", || {
             self.http.get(url.as_str()).query(&[("ids", ids.as_str())])
         })
         .await
@@ -399,8 +422,11 @@ pub struct ModrinthHit {
     /// 图标 URL。
     #[serde(default)]
     pub icon_url: Option<String>,
-    /// 作者名。
+    /// 工程所有者的用户名。组织工程这里是组织的所有者。
     pub author: String,
+    /// 组织名；个人工程为 `None`。这里是展示名，工程详情的同名字段是组织 id。
+    #[serde(default)]
+    pub organization: Option<String>,
     /// 更新时间（ISO-8601）。
     pub date_modified: String,
     /// 工程同时属于的全部类型。数据包工程的 `project_type` 写的是 `mod`，只有这里带 `datapack`。
@@ -443,13 +469,16 @@ impl ModrinthHit {
             )
         });
         let (loaders, categories) = split_modrinth_tags(&self.categories);
+        let owner = Some(self.author.clone()).filter(|a| !a.trim().is_empty());
+        let organization = self.organization.clone().filter(|o| !o.trim().is_empty());
         SearchHit {
             platform: Platform::Modrinth,
             project_id: self.project_id.clone(),
             slug: self.slug.clone(),
             title: self.title.clone(),
             description: self.description.clone(),
-            author: Some(self.author.clone()).filter(|a| !a.trim().is_empty()),
+            author: organization.or_else(|| owner.clone()),
+            owner,
             downloads: self.downloads,
             follows: Some(self.follows),
             icon_url: self.icon_url.clone(),
@@ -516,6 +545,15 @@ pub fn primary_author(members: &[ModrinthTeamMember]) -> Option<String> {
         .map(|m| m.user.username.clone())
 }
 
+/// 组织（`GET /v3/organizations` 的一部分字段）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModrinthOrganization {
+    /// 组织 id。
+    pub id: String,
+    /// 展示名。搜索命中的 `organization` 给的就是它，不是 slug。
+    pub name: String,
+}
+
 /// 图库图。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModrinthGalleryImage {
@@ -572,6 +610,9 @@ pub struct ModrinthProject {
     /// 团队 id。
     #[serde(default)]
     pub team: Option<String>,
+    /// 组织 id；个人工程为 `None`。
+    #[serde(default)]
+    pub organization: Option<String>,
     /// 图库。
     #[serde(default)]
     pub gallery: Vec<ModrinthGalleryImage>,
@@ -943,6 +984,72 @@ mod tests {
         assert_eq!(primary_author(&[]), None);
     }
 
+    /// 结构取自 `/v2/search` 的实际响应：组织工程的 `author` 是组织的所有者，组织名另在 `organization`。
+    #[test]
+    fn organization_hit_displays_organization() {
+        let hit: ModrinthHit = serde_json::from_value(serde_json::json!({
+            "project_id": "AANobbMI", "project_type": "mod", "all_project_types": ["mod"],
+            "slug": "sodium", "author": "jellysquid3", "author_id": "TEZXhE2U",
+            "organization": "CaffeineMC", "organization_id": "LjcZDkRW", "title": "Sodium",
+            "description": "d", "downloads": 258125185, "follows": 42362,
+            "date_modified": "2026-10-15T17:51:36.063140+00:00"
+        }))
+        .unwrap();
+        let unified = hit.to_search_hit(&[ResourceType::Mod]);
+        assert_eq!(unified.author.as_deref(), Some("CaffeineMC"));
+        assert_eq!(unified.owner.as_deref(), Some("jellysquid3"));
+    }
+
+    /// 个人工程的 `organization` 是 null，作者就是所有者。
+    #[test]
+    fn personal_hit_displays_owner() {
+        let hit: ModrinthHit = serde_json::from_value(serde_json::json!({
+            "project_id": "PtjYWJkn", "project_type": "mod", "all_project_types": ["mod"],
+            "slug": "sodium-extra", "author": "FlashyReese", "author_id": "QXAY01zS",
+            "organization": null, "organization_id": null, "title": "Sodium Extra",
+            "description": "d", "downloads": 1, "follows": 1,
+            "date_modified": "2026-10-15T17:51:36.063140+00:00"
+        }))
+        .unwrap();
+        let unified = hit.to_search_hit(&[ResourceType::Mod]);
+        assert_eq!(unified.author.as_deref(), Some("FlashyReese"));
+        assert_eq!(unified.owner.as_deref(), Some("FlashyReese"));
+
+        // 组织名是空白时不能盖掉所有者，否则卡片上作者一栏是空的。
+        let blank_org = ModrinthHit {
+            organization: Some("  ".to_owned()),
+            ..hit
+        };
+        let unified = blank_org.to_search_hit(&[ResourceType::Mod]);
+        assert_eq!(unified.author.as_deref(), Some("FlashyReese"));
+    }
+
+    /// 组织只有 v3 路由：根地址是 `/v2` 时换成同级的 `/v3`，一批 id 一次请求，查不到的 id 不在结果里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn organizations_batch_lands_on_v3_next_to_v2_root() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/organizations"))
+            .and(query_param("ids", r#"["LjcZDkRW","missing1"]"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "LjcZDkRW", "slug": "caffeinemc", "name": "CaffeineMC", "team_id": "UeUe8L5g"}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let http = aurora_base::http::build_client().unwrap();
+        let client = ModrinthClient::new(http).with_base_url(format!("{}/v2", server.uri()));
+        let got = client
+            .organizations(&["LjcZDkRW".to_owned(), "missing1".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "LjcZDkRW");
+        assert_eq!(got[0].name, "CaffeineMC");
+    }
+
     #[test]
     fn project_with_only_datapack_loader_is_a_datapack() {
         let project = |loaders: &[&str]| -> ModrinthProject {
@@ -1263,6 +1370,7 @@ mod tests {
         );
         assert!(c.versions_by_hashes(&[]).await.unwrap().is_empty());
         assert!(c.projects(&[]).await.unwrap().is_empty());
+        assert!(c.organizations(&[]).await.unwrap().is_empty());
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
