@@ -11,6 +11,9 @@ use sha1::{Digest, Sha1};
 
 /// 皮肤下载的时限。
 pub const SKIN_TIMEOUT: Duration = Duration::from_millis(5000);
+/// 单个皮肤文件的大小上限。只收 64x64 或 64x32 的 PNG，正常不过几 KB；地址来自外置登录服务器的档案，
+/// 指向超大文件时不能整个读进内存。
+pub const SKIN_MAX_BYTES: usize = 1024 * 1024;
 /// 缩略图下载的时限。画廊大图可达数 MB，给得比皮肤宽。
 pub const THUMB_TIMEOUT: Duration = Duration::from_secs(15);
 /// 单张缩略图的大小上限，挡住把超大文件当图片塞进缓存。
@@ -102,23 +105,23 @@ pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// GET 一个地址并读完响应体。
+/// GET 一个地址，正文最多 `max_bytes` 字节（皮肤用 [`SKIN_MAX_BYTES`]）。
 pub async fn fetch(
     http: &reqwest::Client,
     url: &str,
     timeout: Duration,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, FetchError> {
-    let resp = http
-        .get(url)
-        .timeout(timeout)
-        .send()
+    get_capped(http, url, timeout, max_bytes)
         .await
-        .map_err(FetchError::Http)?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(FetchError::Status(status.as_u16()));
-    }
-    Ok(resp.bytes().await.map_err(FetchError::Http)?.to_vec())
+        .map_err(|err| match err {
+            CappedError::Http(source) => FetchError::Http(source),
+            CappedError::Status(status) => FetchError::Status(status),
+            CappedError::TooLarge(size) => FetchError::TooLarge {
+                size,
+                limit: max_bytes,
+            },
+        })
 }
 
 /// 下载一张缩略图，最多 [`THUMB_MAX_BYTES`] 字节。
@@ -126,49 +129,69 @@ pub async fn fetch_thumb(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, T
     fetch_capped(http, url, THUMB_TIMEOUT, THUMB_MAX_BYTES).await
 }
 
-/// GET 一个地址，正文最多 `max_bytes` 字节。
-///
-/// 先整包读进内存再比大小，指向超大文件的地址就会先被整个下进内存。所以响应声明的正文长度超限时不读
-/// 正文直接拒；没有声明（分块传输、按压缩编码解码后长度未知）或声明不实的，按块累计，一超限就中止，
-/// 丢掉响应即断开连接。
 async fn fetch_capped(
     http: &reqwest::Client,
     url: &str,
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<Vec<u8>, ThumbError> {
-    let http_error = |source| ThumbError::Http {
-        url: url.to_owned(),
-        source,
-    };
-    let too_large = |size: u64| ThumbError::TooLarge {
-        url: url.to_owned(),
-        size,
-        limit: max_bytes,
-    };
+    get_capped(http, url, timeout, max_bytes)
+        .await
+        .map_err(|err| match err {
+            CappedError::Http(source) => ThumbError::Http {
+                url: url.to_owned(),
+                source,
+            },
+            CappedError::Status(status) => ThumbError::Status {
+                url: url.to_owned(),
+                status,
+            },
+            CappedError::TooLarge(size) => ThumbError::TooLarge {
+                url: url.to_owned(),
+                size,
+                limit: max_bytes,
+            },
+        })
+}
+
+/// [`get_capped`] 的失败；`TooLarge` 带的是响应声明的长度，或读到超限那一刻已收到的字节数。
+enum CappedError {
+    Http(reqwest::Error),
+    Status(u16),
+    TooLarge(u64),
+}
+
+/// GET 一个地址，正文最多 `max_bytes` 字节。
+///
+/// 先整包读进内存再比大小，指向超大文件的地址就会先被整个下进内存。所以响应声明的正文长度超限时不读
+/// 正文直接拒；没有声明（分块传输、按压缩编码解码后长度未知）或声明不实的，按块累计，一超限就中止，
+/// 丢掉响应即断开连接。
+async fn get_capped(
+    http: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CappedError> {
     let mut resp = http
         .get(url)
         .timeout(timeout)
         .send()
         .await
-        .map_err(http_error)?;
+        .map_err(CappedError::Http)?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(ThumbError::Status {
-            url: url.to_owned(),
-            status: status.as_u16(),
-        });
+        return Err(CappedError::Status(status.as_u16()));
     }
     if let Some(declared) = resp.content_length()
         && declared > max_bytes as u64
     {
-        return Err(too_large(declared));
+        return Err(CappedError::TooLarge(declared));
     }
     let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(http_error)? {
+    while let Some(chunk) = resp.chunk().await.map_err(CappedError::Http)? {
         let received = body.len() + chunk.len();
         if received > max_bytes {
-            return Err(too_large(received as u64));
+            return Err(CappedError::TooLarge(received as u64));
         }
         body.extend_from_slice(&chunk);
     }
@@ -181,6 +204,9 @@ pub enum FetchError {
     Http(#[source] reqwest::Error),
     #[error("返回 HTTP {0}")]
     Status(u16),
+    /// `size` 是响应头声明的长度，或读到超限那一刻已收到的字节数，都是实际大小的下界。
+    #[error("至少有 {size} 字节，超过 {limit} 字节的上限")]
+    TooLarge { size: u64, limit: usize },
 }
 
 /// 把缓存文件的修改时间刷成现在：缩略图按它判断「最近使用」。

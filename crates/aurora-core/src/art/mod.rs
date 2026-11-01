@@ -513,7 +513,14 @@ impl TextureService {
     }
 
     async fn download_skin(&self, url: &str, path: &Path) -> Option<image::RgbaImage> {
-        let bytes = match remote::fetch(&self.inner.http, url, remote::SKIN_TIMEOUT).await {
+        let bytes = match remote::fetch(
+            &self.inner.http,
+            url,
+            remote::SKIN_TIMEOUT,
+            remote::SKIN_MAX_BYTES,
+        )
+        .await
+        {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::warn!(url, error = %err, cause = ?std::error::Error::source(&err), "下载皮肤失败，界面回落");

@@ -570,6 +570,37 @@ async fn unusable_skins_fall_back_to_none() {
     }
 }
 
+/// 皮肤地址来自外置登录服务器的档案，指向超大文件时不能整个读进内存：正文超过上限就中止，界面回落，
+/// 不落缓存。用合规的 64x64 PNG 后面补满 2 MB：PNG 解码会忽略 IEND 之后的字节，只读完再判就会照单全收。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_skin_downloads_are_refused() {
+    let fx = fixture();
+    let server = MockServer::start().await;
+    let mut padded = png(64, 64, |_, _| PINK);
+    padded.resize(padded.len() + 2 * 1024 * 1024, 0);
+    Mock::given(method("GET"))
+        .and(url_path("/huge.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(padded))
+        .mount(&server)
+        .await;
+    let url = format!("{}/huge.png", server.uri());
+
+    let info = fx
+        .service
+        .skin_info(&SkinRef {
+            url: url.clone(),
+            model: SkinModel::Wide,
+        })
+        .await;
+
+    assert_eq!(info, None, "超过上限的皮肤应回落");
+    assert!(
+        !fx.cache
+            .join(format!("skins/{}.png", remote::sha1_hex(url.as_bytes())))
+            .exists()
+    );
+}
+
 #[tokio::test]
 async fn thumbs_are_limited_to_known_hosts_and_served_from_cache() {
     let fx = fixture();
