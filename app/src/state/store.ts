@@ -1419,6 +1419,8 @@ export class LauncherStore {
     invalidateResources("mods");
     if (this.raw.status.instances.kind !== "ready") return;
     if (Date.now() - this.lastScanAt < INSTANCE_RESCAN_MIN_MS) return;
+    // 本机 Java 也可能被挪走：探测要起进程，跟着实例重扫一起节流
+    invalidateResources("java");
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
   };
 

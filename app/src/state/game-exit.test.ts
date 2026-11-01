@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { INSTANCE_RESCAN_MIN_MS } from "../domain/limits";
 import { GAME_EXIT_EVENT, type GameExitEvent } from "../ipc/launch";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
@@ -32,6 +33,24 @@ describe("窗口回到前台", () => {
     await settle();
 
     expect(await resources.read("mods:生存", read)).toEqual(["a.jar", "b.jar"]);
+    store.stop();
+  });
+
+  it("固定的 Java 被挪走：隔够时间回到前台时重读，概览不再写着那个 Java", async () => {
+    const store = await startedStore();
+    let majors = [17];
+    const java = () => Promise.resolve(majors);
+    expect(await resources.read("java", java)).toEqual([17]);
+
+    majors = [];
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(await resources.read("java", java), "探测要起进程，刚扫过不重来").toEqual([17]);
+
+    vi.setSystemTime(Date.now() + INSTANCE_RESCAN_MIN_MS);
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+    expect(await resources.read("java", java)).toEqual([]);
     store.stop();
   });
 });
