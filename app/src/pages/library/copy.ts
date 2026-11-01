@@ -65,9 +65,6 @@ export const LIBRARY_COPY = {
   emptyTitle: "实例库还是空的",
   emptyBody: "新建一个实例，选好版本、加载器和封面；或者去发现页把整合包导入成实例。",
   emptyAction: "去发现导入整合包",
-  switchEmptyTitle: "这个目录还没有实例",
-  switchEmptyBody: (name: string, versions: number) => `「${name}」里有 ${versions} 个版本，切过去就能玩，文件不会被移动。`,
-  switchEmptyAction: (name: string) => joinMixed("切到", name),
 
   noMatchTitle: "没有符合条件的实例",
   noMatchQuery: (query: string, loader: LoaderKind | null) =>

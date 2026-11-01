@@ -287,6 +287,68 @@ describe("主页：问候与继续游玩", () => {
   });
 });
 
+describe("主页：当前目录没有实例", () => {
+  const dir = (name: string, version_count: number | null, extra: { is_current?: boolean; available?: boolean } = {}) => ({
+    name,
+    path: `D:\\${name}\\.minecraft`,
+    is_current: extra.is_current === true,
+    available: extra.available !== false,
+    version_count,
+  });
+  const current = dir("默认目录", 0, { is_current: true });
+
+  beforeEach(() => {
+    bootOverrides(ipc, { instances: [] });
+    instances = [];
+  });
+
+  it("别的目录里有版本：点名它，主按钮切过去，新建实例退为次按钮", async () => {
+    ipc.overrides.set("list_game_directories", () => [current, dir("HMCL", 3), dir("PCL2", 12)]);
+    await mount();
+    expect(text()).toContain("这个目录还没有实例");
+    expect(text()).toContain("「PCL2」里有 12 个版本，切过去就能玩，文件不会被移动。");
+    expect(text()).not.toContain("还没有可以继续的实例");
+    expect(buttonByText("切到 PCL2").getAttribute("data-variant")).toBe("primary");
+    expect(buttonByText("新建实例").getAttribute("data-variant")).toBe("secondary");
+  });
+
+  it("主按钮走切换流程：确认之后才切到那个目录", async () => {
+    ipc.overrides.set("list_game_directories", () => [current, dir("PCL2", 12)]);
+    await mount();
+    click(buttonByText("切到 PCL2"));
+    await flush();
+    expect(text()).toContain("切换到「PCL2」？");
+    expect(callsOf(ipc, "set_game_directory")).toEqual([]);
+    click(buttonByText("切换"));
+    await flush();
+    expect(callsOf(ipc, "set_game_directory")).toEqual([{ path: "D:\\PCL2\\.minecraft" }]);
+  });
+
+  it("别的目录空着、访问不到或读不到版本数：维持原来的说法", async () => {
+    ipc.overrides.set("list_game_directories", () => [current, dir("空的", 0), dir("移动硬盘", 30, { available: false }), dir("读不到", null)]);
+    await mount();
+    expect(text()).toContain("还没有可以继续的实例");
+    expect(text()).not.toContain("切到");
+    expect(buttonByText("新建实例").getAttribute("data-variant")).toBe("primary");
+  });
+
+  it("目录列表读不出：不挡新建实例", async () => {
+    ipc.overrides.set("list_game_directories", () => {
+      throw new IpcError("io", "读不出");
+    });
+    await mount();
+    expect(text()).toContain("还没有可以继续的实例");
+    expect(buttonByText("新建实例").getAttribute("data-variant")).toBe("primary");
+  });
+
+  it("有实例时不读目录列表：探测目录要摸盘", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    instances = [instanceDto("生存")];
+    await mount();
+    expect(callsOf(ipc, "list_game_directories")).toEqual([]);
+  });
+});
+
 describe("主页：最近游玩", () => {
   it("排除大卡上的实例与没玩过的，按上次游玩倒序；点卡片进详情", async () => {
     await mount();

@@ -2,10 +2,10 @@
 // 「换一个」切换当前实例时整块内容交叉淡入；被删除的实例在淡出期间直接不画（它的启动入口已不存在）。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
-import { ACTION_ERROR, BOOT_SLICE_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
+import { ACTION_ERROR, BOOT_SLICE_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative } from "../../domain/format";
 import { instanceCover } from "../../launch/cover";
@@ -17,8 +17,9 @@ import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
+import { useGameDirectories } from "../../state/queries/catalog";
 import { useInstanceContent } from "../../state/queries/instance";
-import { findInstance } from "../../state/selectors";
+import { findInstance, gameDirectoryBusy } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { Card, type ResponsiveValue } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -28,6 +29,8 @@ import type { MenuEntry } from "../../ui/Menu";
 import { MenuButton } from "../../ui/MenuButton";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
+import { switchSuggestion } from "../shared/switch-suggestion";
+import { useSwitchDirectory } from "../shared/useSwitchDirectory";
 import { HOME_COPY } from "./copy";
 import { heroTags, latestWorld, switchOptions, worldName, type HeroTag } from "./instances";
 import { SKELETON_SIZE } from "./layout";
@@ -43,7 +46,6 @@ export interface ContinueCardProps {
 export function ContinueCard({ span, target }: ContinueCardProps) {
   const status = useLauncherSelector((s) => s.status.instances);
   const actions = useLauncherActions();
-  const { openCreateInstance } = useShell();
   const run = useRunner();
   const gate = useLoadingGate(status.kind === "loading");
 
@@ -70,25 +72,55 @@ export function ContinueCard({ span, target }: ContinueCardProps) {
       </Card>
     );
   }
-  if (target === null) {
-    return (
-      <Card span={span} className={cx(s.rowOne, s.heroCentered)}>
-        <EmptyState
-          scene="sapling"
-          title={HOME_COPY.continueEmptyTitle}
-          body={HOME_COPY.continueEmptyBody}
-          action={
-            <Button variant="primary" icon="plus" onClick={() => openCreateInstance()}>
-              {HOME_COPY.createInstance}
-            </Button>
-          }
-        />
-      </Card>
-    );
-  }
+  if (target === null) return <NoInstances span={span} />;
   return (
     <Card span={span} padding="none" clip className={s.rowOne}>
       <HeroFrame instanceId={target.id} />
+    </Card>
+  );
+}
+
+/** 只有这里读目录列表：探测目录要摸盘，有实例时主页用不到它。 */
+function NoInstances({ span }: { span: ResponsiveValue }) {
+  const { openCreateInstance } = useShell();
+  const busy = useLauncherSelector(gameDirectoryBusy);
+  const dirs = useGameDirectories();
+  const switchTo = useSwitchDirectory();
+  // 说法取决于目录列表：等它回来再定，不先闪一下「还没有可以继续的实例」
+  const gate = useLoadingGate(dirs.status === "loading");
+
+  // 目录列表是缓存的，盘上的版本却可能被别的启动器改过：回到主页时后台重读一次
+  const refreshDirs = dirs.refresh;
+  useEffect(() => refreshDirs(), [refreshDirs]);
+
+  if (dirs.status === "loading" || gate.view === "skeleton") {
+    return (
+      <Card span={span} padding="none" className={s.rowOne}>
+        <HeroSkeleton pending={gate.view === "pending"} slow={gate.slow} />
+      </Card>
+    );
+  }
+  // 目录列表读不出时这里只是少一个切换入口，错误由设置页的游戏目录卡片原位呈现
+  const suggestion = dirs.data === undefined ? null : switchSuggestion(dirs.data);
+  return (
+    <Card span={span} className={cx(s.rowOne, s.heroCentered)}>
+      <EmptyState
+        scene="sapling"
+        title={suggestion === null ? HOME_COPY.continueEmptyTitle : GAME_DIR_SWITCH_COPY.emptyTitle}
+        body={suggestion === null ? HOME_COPY.continueEmptyBody : GAME_DIR_SWITCH_COPY.emptyBody(suggestion.dir.name, suggestion.versions)}
+        action={
+          <div className={s.emptyActions}>
+            {suggestion !== null && (
+              <Button variant="primary" icon="folder-open" disabledReason={gameDirSwitchReason(busy, suggestion.dir.available)} onClick={() => void switchTo(suggestion.dir.path, suggestion.dir.name)}>
+                {GAME_DIR_SWITCH_COPY.emptyAction(suggestion.dir.name)}
+              </Button>
+            )}
+            <Button variant={suggestion === null ? "primary" : "secondary"} icon="plus" onClick={() => openCreateInstance()}>
+              {HOME_COPY.createInstance}
+            </Button>
+          </div>
+        }
+      />
     </Card>
   );
 }

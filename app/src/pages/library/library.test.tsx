@@ -3,7 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { CONFIRM_COPY, DELETE_INSTANCE_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
+import { CONFIRM_COPY, DELETE_INSTANCE_COPY, GAME_DIR_SWITCH_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
 import type { GameDirectoryDto } from "../../ipc/config";
 import type { InstanceDto, WorldDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
@@ -386,7 +386,7 @@ describe("实例库：游戏目录", () => {
     dirsAre([home, hmcl, unplugged, pcl]);
     await mount();
     const text = document.body.textContent;
-    expect(text).toContain(LIBRARY_COPY.switchEmptyTitle);
+    expect(text).toContain(GAME_DIR_SWITCH_COPY.emptyTitle);
     expect(text).toContain("「PCL2」里有 12 个版本，切过去就能玩，文件不会被移动。");
     expect(text).not.toContain(LIBRARY_COPY.emptyTitle);
     expect(text).not.toContain(LIBRARY_COPY.emptyBody);
@@ -441,7 +441,7 @@ describe("实例库：游戏目录", () => {
     click(dialogButton("切换"));
     await flush();
     expect(toastTitles()).toContain("error:没能切换游戏目录");
-    expect(document.body.textContent).toContain(LIBRARY_COPY.switchEmptyTitle);
+    expect(document.body.textContent).toContain(GAME_DIR_SWITCH_COPY.emptyTitle);
     vi.restoreAllMocks();
   });
 
@@ -492,7 +492,7 @@ describe("实例库：游戏目录", () => {
     await mount();
     expect(document.body.textContent).toContain(LIBRARY_COPY.emptyTitle);
     expect(document.body.textContent).toContain(LIBRARY_COPY.emptyBody);
-    expect(document.body.textContent).not.toContain(LIBRARY_COPY.switchEmptyTitle);
+    expect(document.body.textContent).not.toContain(GAME_DIR_SWITCH_COPY.emptyTitle);
     expect([...document.querySelectorAll("button")].filter((b) => b.textContent?.startsWith("切到"))).toEqual([]);
     expect(byText("button", LIBRARY_COPY.emptyAction)).toBeDefined();
   });
@@ -508,7 +508,7 @@ describe("实例库：游戏目录", () => {
       list.resolve([home, pcl]);
       await settle();
     });
-    expect(document.body.textContent).toContain(LIBRARY_COPY.switchEmptyTitle);
+    expect(document.body.textContent).toContain(GAME_DIR_SWITCH_COPY.emptyTitle);
   });
 
   it("目录列表读不出来：页面照常，退回普通空状态，没有目录选择", async () => {
@@ -536,7 +536,7 @@ describe("实例库：游戏目录", () => {
     view?.unmount();
     dirsAre([home, pcl]);
     await mount();
-    expect(document.body.textContent).toContain(LIBRARY_COPY.switchEmptyTitle);
+    expect(document.body.textContent).toContain(GAME_DIR_SWITCH_COPY.emptyTitle);
   });
 
   it("只登记了一个目录：工具条上没有目录选择", async () => {

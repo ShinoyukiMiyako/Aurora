@@ -105,25 +105,6 @@ export function brokenInstances(list: readonly InstanceSummary[]): InstanceSumma
   return list.filter((inst) => inst.status === "broken" && !needsReimport(inst));
 }
 
-export interface SwitchSuggestion {
-  dir: GameDirectoryDto;
-  versions: number;
-}
-
-/**
- * 当前目录没有实例时值得切过去的目录：其它可达目录里版本最多的，一样多时取记录在前的。
- * 读不到版本数的不算：说不上里面有东西，就不该让人专门切过去。
- */
-export function switchSuggestion(dirs: readonly GameDirectoryDto[]): SwitchSuggestion | null {
-  let best: SwitchSuggestion | null = null;
-  for (const dir of dirs) {
-    const versions = dir.version_count;
-    if (dir.is_current || !dir.available || versions === null || versions === 0) continue;
-    if (best === null || versions > best.versions) best = { dir, versions };
-  }
-  return best;
-}
-
 /**
  * 目录选择的选项：标签只写目录名（触发器上显示的就是它），版本数放第二行；切不过去的禁用，第二行换成原因。
  * 当前目录的数取实例列表（instanceCount，读到之前为 null）：目录列表只在切换和回到本页时重读，新建、删除实例后还是旧数。
