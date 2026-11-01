@@ -446,11 +446,14 @@ fn download_bytes(json: &VersionJson, ctx: &RuntimeContext) -> Option<u64> {
     let mut total = json.downloads.as_ref()?.client.as_ref()?.size;
     let index = json.asset_index.as_ref()?;
     total += index.size + index.total_size?;
+    // 主件与 natives 分写两条的库，两条声明的是同一个主件。
+    let mut counted = HashSet::new();
     for library in select_libraries(json, ctx) {
         let downloads = library.downloads.as_ref()?;
         total += downloads
             .artifact
             .as_ref()
+            .filter(|artifact| counted.insert(artifact.url.as_str()))
             .map_or(0, |artifact| artifact.size);
         total += library.native_artifact(ctx).map_or(0, |native| native.size);
     }
@@ -787,6 +790,17 @@ mod tests {
                               "natives-here": { "path": "d", "sha1": "4", "size": 400, "url": "http://x/d" },
                               "natives-there": { "path": "e", "sha1": "5", "size": 90_000, "url": "http://x/e" }
                           }
+                      } },
+                    // 1.13 到 1.18 的孪生条目：主件那条排在前面，natives 件要算上，主件只算一次。
+                    { "name": "a:twin:1",
+                      "downloads": { "artifact": { "path": "f", "sha1": "6", "size": 5, "url": "http://x/f" } } },
+                    { "name": "a:twin:1",
+                      "natives": { os: "natives-here" },
+                      "downloads": {
+                          "artifact": { "path": "f", "sha1": "6", "size": 5, "url": "http://x/f" },
+                          "classifiers": {
+                              "natives-here": { "path": "g", "sha1": "7", "size": 6000, "url": "http://x/g" }
+                          }
                       } }
                 ]
             })
@@ -808,7 +822,7 @@ mod tests {
         assert_eq!(full.java_major, 21);
         assert_eq!(
             full.download_bytes,
-            Some(1000 + 300 + 50_000 + 7 + 20 + 3 + 400)
+            Some(1000 + 300 + 50_000 + 7 + 20 + 3 + 400 + 5 + 6000)
         );
         assert_eq!(aurora.required_java("req-full").await.unwrap(), 21);
 

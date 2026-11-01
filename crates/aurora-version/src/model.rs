@@ -205,13 +205,21 @@ impl Library {
 
     /// 用于同名库去重的键：`group:artifact`（+ classifier 以区分主件与各 natives）。
     /// 坐标无法解析时退回整个 name，保证不同名库不会被误并。
+    ///
+    /// 带 natives 映射的条目自成一类：1.13 到 1.18 的原版 JSON 把同一个库写成两条同名条目，前一条只有
+    /// 主件，后一条带 natives 分类件，并成一条就只剩主件，natives 既不下载也不解压。
     pub fn dedup_key(&self) -> String {
-        match self.coordinate() {
+        let key = match self.coordinate() {
             Some(c) => match c.classifier {
                 Some(cl) => format!("{}:{}:{}", c.group, c.artifact, cl),
                 None => format!("{}:{}", c.group, c.artifact),
             },
             None => self.name.clone(),
+        };
+        if self.natives.is_some() {
+            format!("{key}:natives")
+        } else {
+            key
         }
     }
 
@@ -360,7 +368,7 @@ pub struct LoggingFile {
     pub url: String,
 }
 
-/// 过滤出当前环境生效、且按 `group:artifact[:classifier]` 去重后的库列表。
+/// 过滤出当前环境生效、且按 [`Library::dedup_key`] 去重后的库列表。
 ///
 /// 去重保留 "先出现者"。合并继承链时子版本（加载器）库排在前面，因此这里天然让加载器指定的
 /// 库版本压过原版同名库——这正是启动器该有的行为（加载器常有意锁定某个较低版本，不能用

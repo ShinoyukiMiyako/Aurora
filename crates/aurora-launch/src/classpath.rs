@@ -242,6 +242,36 @@ mod tests {
         assert!(joined.ends_with("1.21.jar"));
     }
 
+    /// 1.13 到 1.18 的孪生条目两条都被选中：classpath 里主件只出现一次，natives 件不进去。
+    #[test]
+    fn natives_twin_leaves_one_main_jar_on_the_classpath() {
+        let version = VersionJson::from_json_str(
+            r#"{
+                "id": "1.18.2",
+                "libraries": [
+                    {"name":"org.lwjgl:lwjgl:3.2.2",
+                     "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"m","size":1,"url":"u"}}},
+                    {"name":"org.lwjgl:lwjgl:3.2.2",
+                     "natives":{"windows":"natives-windows"},
+                     "downloads":{
+                        "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"m","size":1,"url":"u"},
+                        "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"w","size":1,"url":"u"}}}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let libraries_dir = Path::new("D:/mc/.minecraft/libraries");
+        let client_jar = Path::new("D:/mc/.minecraft/versions/1.18.2/1.18.2.jar");
+        let entries = classpath_entries(&version, &win64(), libraries_dir, client_jar).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                libraries_dir.join("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"),
+                client_jar.to_path_buf(),
+            ]
+        );
+    }
+
     /// 库路径与由坐标算出的路径按补全时下载计划的同一判据校验：空段、`..`、反斜杠一律报路径越界，
     /// 不把 `org//x.jar` 悄悄拼成 `org/x.jar`。
     #[test]

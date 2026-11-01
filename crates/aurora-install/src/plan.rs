@@ -8,6 +8,8 @@
 //! 落点里的每个相对段（库路径、坐标各段、资源 hash、索引 id、日志配置名、版本 id）都来自版本 JSON 或
 //! 资源索引，按 [`crate::layout`] 的规则校验，能走出游戏目录的报 [`Error::UnsafePath`]。
 
+use std::collections::HashSet;
+
 use aurora_download::DownloadTask;
 use aurora_version::{AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries};
 
@@ -42,6 +44,9 @@ pub fn library_tasks(
     for lib in selected {
         push_library_tasks(lib, ctx, layout, &mut tasks)?;
     }
+    // 主件与 natives 分写两条的库，两条声明的是同一个主件。
+    let mut seen = HashSet::new();
+    tasks.retain(|task| seen.insert(task.dest.clone()));
     Ok(tasks)
 }
 
@@ -212,6 +217,38 @@ mod tests {
 
     fn win64() -> RuntimeContext {
         RuntimeContext::new(OsName::Windows, "x86_64", 64)
+    }
+
+    /// 1.13 到 1.18 的孪生条目：主件只排一次，当前平台的 natives 件要排上，别的平台不排。
+    #[test]
+    fn natives_twin_queues_the_classifier_jar_and_one_main_jar() {
+        let v = VersionJson::from_json_str(
+            r#"{"id":"1.18.2","libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"m","size":3,"url":"https://libraries.minecraft.net/m.jar"}}},
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "natives":{"linux":"natives-linux","windows":"natives-windows"},
+                 "downloads":{
+                    "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"m","size":3,"url":"https://libraries.minecraft.net/m.jar"},
+                    "classifiers":{
+                        "natives-linux":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-linux.jar","sha1":"l","size":1,"url":"https://libraries.minecraft.net/l.jar"},
+                        "natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"w","size":2,"url":"https://libraries.minecraft.net/w.jar"}}}}
+            ]}"#,
+        )
+        .unwrap();
+        let mut dests: Vec<PathBuf> = library_tasks(&v, &win64(), &layout())
+            .unwrap()
+            .into_iter()
+            .map(|task| task.dest)
+            .collect();
+        dests.sort();
+        assert_eq!(
+            dests,
+            vec![
+                layout().library_path("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar"),
+                layout().library_path("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"),
+            ]
+        );
     }
 
     #[test]
