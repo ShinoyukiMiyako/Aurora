@@ -14,6 +14,7 @@ import type { LoaderKind, Task } from "../../../domain/types";
 import { LaunchCapsule } from "../../../launch/LaunchCapsule";
 import { useNav } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
+import { errorRecord } from "../../../state/errors";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
 import { useModpackSummary, type ModpackSummaryDto, type ModVersionInfo, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
@@ -75,6 +76,12 @@ export function packFacts(version: ModVersionInfo | null, summary: ModpackSummar
     modCount: null,
     downloadBytes: null,
   };
+}
+
+/** 摘要读不出来的原因：CurseForge 拒绝下载密钥时与任务失败同一说法（说明怎么换密钥），其余用后端原文。 */
+function summaryErrorText(error: Error): string {
+  const record = errorRecord(error);
+  return record.code === "curseforge_key_rejected" ? taskFailureReason(record) : record.message;
 }
 
 /** 这个实例最近一次导入任务。 */
@@ -286,7 +293,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
       {progress === null && summary.status === "error" && (
         <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={summary.reload}>{SEARCH_COPY.retry}</Button>}>
           <span className={styles.errorTitle}>{MODPACK_COPY.summaryFailed}</span>
-          <span className={styles.errorText}>{summary.error.message}</span>
+          <span className={styles.errorText}>{summaryErrorText(summary.error)}</span>
         </Callout>
       )}
       {progress === null && version !== null && facts.mcVersion === null && <Callout tone="warn">{MODPACK_COPY.noGameVersion}</Callout>}

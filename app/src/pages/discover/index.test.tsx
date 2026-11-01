@@ -951,6 +951,21 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
     expect(dialog().textContent).not.toContain("整合包清单没能提前读出来");
   });
 
+  it("CurseForge 拒绝了下载密钥：摘要失败处写出怎么换密钥，不只给后端原文", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    ipc.overrides.set("summarize_platform_modpack", () => {
+      throw new IpcError("curseforge_key_rejected", "CurseForge 拒绝了下载密钥（HTTP 401）：https://edge.forgecdn.net/files/1/2/p.zip", {
+        realm: "curseforge",
+        url: "https://edge.forgecdn.net/files/1/2/p.zip",
+        status: 401,
+      });
+    });
+    await openPack();
+    expect(dialog().textContent).toContain("整合包清单没能提前读出来");
+    expect(dialog().textContent).toContain("CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试");
+    expect(dialog().textContent).not.toContain("HTTP 401");
+  });
+
   it("已有来自同一整合包的实例：卡片写出个数，面板提醒再装一次是独立的新实例", async () => {
     ipc.overrides.set("summarize_platform_modpack", () => summary());
     const fromPack = { platform: "modrinth" as const, project_id: "M1", version_id: "mp-2", name: "樱落", version: "2.0.0" };
