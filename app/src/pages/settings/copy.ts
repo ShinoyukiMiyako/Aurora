@@ -36,6 +36,8 @@ export const GENERAL_COPY = {
   launchTitle: "启动",
   launchSubtitle: `按下「启动游戏」之后${APP_NAME}做什么`,
   afterLaunch: "游戏启动后",
+  skipAccessibilityOnboarding: "跳过首次无障碍引导",
+  skipAccessibilityOnboardingDesc: "实例第一次启动时不显示 Minecraft 的讲述人与无障碍提示；只影响还没启动过游戏的目录，未隔离的实例共用一个目录，需要讲述人时关掉",
   advancedTitle: "高级",
   clientId: "微软登录 client_id",
   clientIdDesc: "自定义 Azure 应用的 client_id，用于微软正版登录；出于安全不回显已保存的值",

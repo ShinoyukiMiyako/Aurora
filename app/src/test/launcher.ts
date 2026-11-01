@@ -120,6 +120,7 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     language: "zh-CN",
     extra_java_paths: [],
     prefer_dedicated_gpu: false,
+    skip_accessibility_onboarding: true,
     world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
     ...overrides,
   };

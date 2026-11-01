@@ -116,6 +116,30 @@ describe("mock 持久化", () => {
     expect(matrix.find((m) => m.version_id === "1.21.1-Fabric")?.state).toBe("installed");
   });
 
+  it("跳过首次无障碍引导：关掉后刷新仍是关；早先的快照没有这个键时按默认开读入", async () => {
+    type StoredConfig = { data: { config: Record<string, unknown> } };
+    const KEY = "slug.mock.config";
+    const storage = new MemoryStorage();
+    const first = await reload();
+    first.enableMockPersistence(storage, PREFIX);
+    await first.mockInvoke("update_config", { skipAccessibilityOnboarding: false, downloadConcurrency: 16 });
+
+    const second = await reload();
+    second.enableMockPersistence(storage, PREFIX);
+    const expected = { skip_accessibility_onboarding: false, download_concurrency: 16 };
+    expect(await second.mockInvoke("get_config")).toMatchObject(expected);
+
+    const raw = storage.getItem(KEY);
+    if (raw === null) throw new Error(`存储里没有 ${KEY}`);
+    const saved = JSON.parse(raw) as StoredConfig;
+    delete saved.data.config.skip_accessibility_onboarding;
+    storage.setItem(KEY, JSON.stringify(saved));
+
+    const third = await reload();
+    third.enableMockPersistence(storage, PREFIX);
+    expect(await third.mockInvoke("get_config")).toMatchObject({ ...expected, skip_accessibility_onboarding: true });
+  });
+
   it("resetMockData 回到种子并清掉存下的状态，刷新后仍是种子", async () => {
     const storage = new MemoryStorage();
     const first = await reload();

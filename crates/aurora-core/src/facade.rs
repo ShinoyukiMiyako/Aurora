@@ -70,6 +70,8 @@ pub struct Aurora {
     source_health: Arc<SourceHealth>,
     /// Windows 图形设置里按程序显卡偏好的读写；测试注入替身，不碰真实注册表。
     gpu_preferences: Arc<dyn GpuPreferenceStore>,
+    /// 读系统显示语言；测试注入替身，断言才不随本机语言漂移。
+    system_language: fn() -> Option<String>,
     /// 各账户最近一次账户类启动失败，以离线方式进单人时据此放行。与工程版本缓存一样放在门面上：快照
     /// 克隆共享同一个句柄，重开门面即清空。
     pub(crate) account_failures: crate::launch::AccountFailures,
@@ -141,6 +143,7 @@ impl Aurora {
             source_resolver: Arc::new(MirrorResolver),
             source_health: Arc::new(SourceHealth::new()),
             gpu_preferences: Arc::new(RegistryGpuPreferences),
+            system_language: sys_locale::get_locale,
             account_failures: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
@@ -328,6 +331,13 @@ impl Aurora {
         self.config.prefer_dedicated_gpu = enabled;
     }
 
+    /// 设置启动前是否跳过游戏的首次无障碍引导。
+    ///
+    /// 只决定缺这一项的 options.txt 补不补；已经写进文件的值不跟着改，分不出它是启动器写的还是玩家留下的。
+    pub fn set_skip_accessibility_onboarding(&mut self, enabled: bool) {
+        self.config.skip_accessibility_onboarding = enabled;
+    }
+
     /// 记下用户跳过的启动器版本。
     pub fn set_skipped_update_version(&mut self, version: Option<String>) {
         self.config.skipped_update_version = version;
@@ -485,6 +495,11 @@ impl Aurora {
     pub(crate) fn gpu_preferences(&self) -> Arc<dyn GpuPreferenceStore> {
         self.gpu_preferences.clone()
     }
+
+    /// 系统显示语言的 BCP 47 标签（如 `zh-CN`）；读不出来时为 `None`。
+    pub(crate) fn system_language(&self) -> Option<String> {
+        (self.system_language)()
+    }
 }
 
 /// 装配一个安装上下文所需的一束借用（生命周期绑定到传入的各组件）。
@@ -538,6 +553,7 @@ impl Aurora {
             source_resolver: Arc::new(MirrorResolver),
             source_health: Arc::new(SourceHealth::new()),
             gpu_preferences: Arc::new(crate::gpu::testing::UnsetGpuPreferences),
+            system_language: || None,
             account_failures: Default::default(),
             curseforge_key: None,
             curseforge_cdn_scope: None,
@@ -567,6 +583,12 @@ impl Aurora {
     /// 换上显卡偏好写入器的替身。
     pub(crate) fn with_gpu_preference_store(mut self, store: Arc<dyn GpuPreferenceStore>) -> Self {
         self.gpu_preferences = store;
+        self
+    }
+
+    /// 换上系统语言的替身。
+    pub(crate) fn with_system_language(mut self, read: fn() -> Option<String>) -> Self {
+        self.system_language = read;
         self
     }
 
@@ -707,6 +729,12 @@ mod tests {
         assert!(aurora.config().prefer_dedicated_gpu);
         aurora.set_prefer_dedicated_gpu(false);
         assert!(!aurora.config().prefer_dedicated_gpu);
+
+        assert!(aurora.config().skip_accessibility_onboarding);
+        aurora.set_skip_accessibility_onboarding(false);
+        assert!(!aurora.config().skip_accessibility_onboarding);
+        aurora.set_skip_accessibility_onboarding(true);
+        assert!(aurora.config().skip_accessibility_onboarding);
     }
 
     /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。

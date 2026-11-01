@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aurora_auth::{Account, AccountCredentials, AccountStatus};
+use aurora_base::error_with_causes;
 use aurora_download::{BatchReport, DownloadTask};
 use aurora_install::GameLayout;
 use aurora_instance::{
@@ -994,6 +995,9 @@ impl Aurora {
         if self.is_cancelled() {
             return Err(CoreError::from(aurora_download::Error::Cancelled).into());
         }
+        // 放在取消检查之后：取消或中途失败的启动不碰玩家的设置，这时资源索引也一定在本地了。
+        self.fill_missing_options(merged, &layout, &working_dir, reporter)
+            .await;
         let session = spawn_game(&command, reporter.clock, &mut reporter.log, game_log)?;
         let pid = session.id();
         let _ = reporter
@@ -1063,6 +1067,38 @@ impl Aurora {
             }
         }
         Ok(())
+    }
+
+    /// 补全工作目录里的 options.txt（见 [`crate::game_lang`]）。
+    ///
+    /// 写不进去不挡启动：这只是省玩家改一次语言、走一遍引导的便利项，不值得为它让这一局起不来。
+    async fn fill_missing_options(
+        &self,
+        merged: &VersionJson,
+        layout: &GameLayout,
+        working_dir: &Path,
+        reporter: &mut Reporter<'_>,
+    ) {
+        let system = self.system_language();
+        let inputs = crate::game_lang::OptionsInputs {
+            system: system.as_deref(),
+            asset_index_id: merged.asset_index.as_ref().map(|index| index.id.as_str()),
+            skip_onboarding: self.config().skip_accessibility_onboarding,
+        };
+        let report = crate::game_lang::fill_missing_options(&inputs, layout, working_dir).await;
+        for note in report.notes {
+            tracing::info!(dir = %working_dir.display(), "{note}");
+            reporter.info(note).await;
+        }
+        for failure in &report.failures {
+            let reason = error_with_causes(failure);
+            tracing::warn!(dir = %working_dir.display(), error = %reason, "补全 options.txt 失败，按现有设置启动");
+            reporter
+                .warn(format!(
+                    "没能补全 options.txt（{reason}），这次按现有设置启动"
+                ))
+                .await;
+        }
     }
 
     /// 记下或清掉这个账户最近一次账户类失败，供以离线方式进单人时判定。只有可处理的账户失败才记；
@@ -1342,15 +1378,7 @@ impl Aurora {
             .asset_index
             .as_ref()
             .expect("调用方已确认 assetIndex 存在");
-        let path = layout.asset_index_json(&asset_index.id)?;
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|source| aurora_base::Error::Io {
-                path: path.clone(),
-                source,
-            })?;
-        let index = AssetObjectsIndex::from_json_str(&String::from_utf8_lossy(&bytes))
-            .map_err(|err| CoreError::from(aurora_install::Error::from(err)))?;
+        let index = read_asset_index(layout, &asset_index.id).await?;
         let tasks = aurora_install::plan::asset_object_tasks(&index, layout)?;
         let target_dir = match index.layout() {
             AssetLayout::Standard => return Ok((tasks, None)),
@@ -1822,6 +1850,22 @@ async fn probe_java(
 ) -> Result<Result<JavaInstallation, String>, LaunchFailed> {
     let probed = tokio::task::spawn_blocking(move || aurora_java::probe(&path, source)).await?;
     Ok(probed.map_err(|err| err.to_string()))
+}
+
+/// 读本地的资源索引。
+pub(crate) async fn read_asset_index(
+    layout: &GameLayout,
+    id: &str,
+) -> Result<AssetObjectsIndex, CoreError> {
+    let path = layout.asset_index_json(id)?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|source| aurora_base::Error::Io {
+            path: path.clone(),
+            source,
+        })?;
+    AssetObjectsIndex::from_json_str(&String::from_utf8_lossy(&bytes))
+        .map_err(|err| aurora_install::Error::from(err).into())
 }
 
 async fn path_exists(path: &Path) -> Result<bool, LaunchFailed> {
@@ -4555,6 +4599,388 @@ mod tests {
                 .await;
         }
         (format!("{base}/all.json"), files)
+    }
+
+    /// 冒充 java 的批处理：报 Java 17；当作游戏时把当前目录下的 options.txt 打成游戏输出，证明游戏起来时
+    /// 文件已经在它的工作目录里了。
+    fn options_reading_java(dir: &Path) -> PathBuf {
+        let path = dir.join("options-reading-java.cmd");
+        let script = "@echo off\r\n\
+             if \"%~1\"==\"-version\" goto version\r\n\
+             type options.txt\r\n\
+             exit /b 0\r\n\
+             :version\r\n\
+             >&2 echo openjdk version \"17.0.8\" 2023-07-18\r\n\
+             >&2 echo OpenJDK 64-Bit Server VM (build 17.0.8+7, mixed mode)\r\n\
+             exit /b 0\r\n";
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+
+    const LANG_OBJECT: &[u8] = b"{}";
+    const LANG_INDEX_ID: &str = "lang-test";
+
+    fn sha1_hex(bytes: &[u8]) -> String {
+        use sha1::{Digest, Sha1};
+        Sha1::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
+    /// 只有一个语言文件的资源索引，与语言文件对象的哈希。
+    fn language_index(key: &str) -> (String, String) {
+        let hash = sha1_hex(LANG_OBJECT);
+        let index = format!(
+            r#"{{"objects":{{"{key}":{{"hash":"{hash}","size":{}}}}}}}"#,
+            LANG_OBJECT.len()
+        );
+        (index, hash)
+    }
+
+    fn put_language_object(mc: &Path, hash: &str) {
+        let bucket = mc.join("assets").join("objects").join(&hash[..2]);
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join(hash), LANG_OBJECT).unwrap();
+    }
+
+    fn language_version_json(id: &str, kind: &str, index: &str, url: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"{kind}","mainClass":"net.minecraft.client.main.Main",
+                "javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},
+                "assetIndex":{{"id":"{LANG_INDEX_ID}","sha1":"{}","size":{},"url":"{url}"}}}}"#,
+            sha1_hex(index.as_bytes()),
+            index.len()
+        )
+    }
+
+    /// 索引与语言文件都在本地的版本，走不到下载。默认策略下 `release` 共用游戏目录，`snapshot` 隔离。
+    fn install_with_language(mc: &Path, id: &str, kind: &str, key: &str) {
+        let (index, hash) = language_index(key);
+        let indexes = mc.join("assets").join("indexes");
+        std::fs::create_dir_all(&indexes).unwrap();
+        std::fs::write(indexes.join(format!("{LANG_INDEX_ID}.json")), &index).unwrap();
+        put_language_object(mc, &hash);
+        let json = language_version_json(id, kind, &index, "http://invalid.test/lang-test.json");
+        install_json(mc, id, &json);
+    }
+
+    fn chinese_system(fx: &Fixture) -> Aurora {
+        fx.aurora
+            .clone()
+            .with_system_language(|| Some("zh-CN".to_owned()))
+    }
+
+    /// 启动到游戏退出，返回游戏的输出与启动过程的事件。
+    async fn play_to_exit(
+        aurora: &Aurora,
+        id: &str,
+        java: PathBuf,
+    ) -> (Vec<String>, Vec<LaunchEvent>) {
+        let request = LaunchRequest {
+            version_id: id.to_owned(),
+            ..request()
+        };
+        let (result, events) = launch_request(aurora, request, java).await;
+        let Ok(run) = result else {
+            panic!("应启动成功");
+        };
+        assert_eq!(run.finish().await.exit.exit_code, Some(0));
+        let log = aurora.last_launch_log(id).await.unwrap().unwrap();
+        let game = log
+            .lines
+            .iter()
+            .filter(|line| line.source == LogSource::Game)
+            .map(|line| line.text.clone())
+            .collect();
+        (game, events)
+    }
+
+    /// 共用 .minecraft 的实例：写到共用目录，游戏起来时已经读得到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_launch_of_a_shared_instance_follows_the_system_language() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let java = options_reading_java(&fx.root);
+
+        let (game, events) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(
+            std::fs::read(mc.join("options.txt")).unwrap(),
+            b"lang:zh_cn\nonboardAccessibility:false\n"
+        );
+        assert_eq!(game, ["lang:zh_cn", "onboardAccessibility:false"]);
+        let instance_options = mc.join("versions").join(VERSION).join("options.txt");
+        assert!(!instance_options.exists());
+        let info = log_texts(&events, LauncherLevel::Info);
+        assert!(info.contains(&"游戏语言设为 zh_cn，跟随系统语言 zh-CN".to_owned()));
+        assert!(info.contains(&"已跳过游戏的首次无障碍引导".to_owned()));
+    }
+
+    /// 隔离的实例：写到实例自己的目录，语言码的大小写跟着这个版本的索引，共用目录不受影响。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn first_launch_of_an_isolated_instance_follows_the_system_language() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, "14w21b", "snapshot", "minecraft/lang/zh_CN.lang");
+        let java = options_reading_java(&fx.root);
+
+        let (game, _) = play_to_exit(&chinese_system(&fx), "14w21b", java).await;
+
+        assert_eq!(
+            std::fs::read(mc.join("versions").join("14w21b").join("options.txt")).unwrap(),
+            b"lang:zh_CN\nonboardAccessibility:false\n"
+        );
+        assert_eq!(game, ["lang:zh_CN", "onboardAccessibility:false"]);
+        assert!(!mc.join("options.txt").exists());
+    }
+
+    /// 关掉开关的共用实例：语言照写，不写引导，还要让游戏别把引导标成走过。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switch_off_on_a_shared_instance_leaves_onboarding_to_the_game() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let java = options_reading_java(&fx.root);
+        let mut aurora = chinese_system(&fx);
+        aurora.set_skip_accessibility_onboarding(false);
+
+        let (game, _) = play_to_exit(&aurora, VERSION, java).await;
+
+        assert_eq!(
+            std::fs::read(mc.join("options.txt")).unwrap(),
+            b"version:3319\nlang:zh_cn\n"
+        );
+        assert_eq!(game, ["version:3319", "lang:zh_cn"]);
+    }
+
+    /// 关掉开关的隔离实例：同样落在实例自己的目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switch_off_on_an_isolated_instance_leaves_onboarding_to_the_game() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, "14w21b", "snapshot", "minecraft/lang/zh_CN.lang");
+        let java = fake_java(&fx.root, 17, 0);
+        let mut aurora = chinese_system(&fx);
+        aurora.set_skip_accessibility_onboarding(false);
+
+        play_to_exit(&aurora, "14w21b", java).await;
+
+        assert_eq!(
+            std::fs::read(mc.join("versions").join("14w21b").join("options.txt")).unwrap(),
+            b"version:3319\nlang:zh_CN\n"
+        );
+        assert!(!mc.join("options.txt").exists());
+    }
+
+    /// 英文系统又关了开关：没什么要写，不创建文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switch_off_on_an_english_system_creates_no_options_file() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let java = fake_java(&fx.root, 17, 0);
+        let mut aurora = fx
+            .aurora
+            .clone()
+            .with_system_language(|| Some("en-US".to_owned()));
+        aurora.set_skip_accessibility_onboarding(false);
+
+        play_to_exit(&aurora, VERSION, java).await;
+
+        assert!(!mc.join("options.txt").exists());
+    }
+
+    /// 英文系统开着开关：不写语言，只补引导那一行。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn english_system_only_gets_the_onboarding_line() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let java = fake_java(&fx.root, 17, 0);
+        let aurora = fx
+            .aurora
+            .clone()
+            .with_system_language(|| Some("en-US".to_owned()));
+
+        play_to_exit(&aurora, VERSION, java).await;
+
+        assert_eq!(
+            std::fs::read(mc.join("options.txt")).unwrap(),
+            b"onboardAccessibility:false\n"
+        );
+    }
+
+    /// 玩家选过的语言不动，缺的引导行跟着原文件的换行补上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_leaves_a_chosen_language_alone() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        std::fs::write(mc.join("options.txt"), b"lang:en_us\r\nfov:0.5\r\n").unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(
+            std::fs::read(mc.join("options.txt")).unwrap(),
+            b"lang:en_us\r\nfov:0.5\r\nonboardAccessibility:false\r\n"
+        );
+    }
+
+    /// 默认策略下原版实例共用 options.txt：新版留下的 `zh_cn` 轮到老版时，游戏读到的是老版认的 `zh_CN`。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn older_version_reads_the_language_in_its_own_spelling() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_CN.lang");
+        std::fs::write(
+            mc.join("options.txt"),
+            b"lang:zh_cn\r\nonboardAccessibility:false\r\n",
+        )
+        .unwrap();
+        let java = options_reading_java(&fx.root);
+
+        let (game, events) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(game, ["lang:zh_CN", "onboardAccessibility:false"]);
+        assert_eq!(
+            std::fs::read(mc.join("options.txt")).unwrap(),
+            b"lang:zh_CN\r\nonboardAccessibility:false\r\n"
+        );
+        let info = log_texts(&events, LauncherLevel::Info);
+        assert!(info.contains(&"游戏语言的写法换成这个版本的大小写".to_owned()));
+    }
+
+    /// 反方向：老版的 `zh_CN` 留在带 `version:` 的文件里，新版不走自己的迁移，也要换回小写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn newer_version_reads_the_language_in_its_own_spelling() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        std::fs::write(
+            mc.join("options.txt"),
+            b"version:2586\nlang:zh_CN\nonboardAccessibility:false\n",
+        )
+        .unwrap();
+        let java = options_reading_java(&fx.root);
+
+        let (game, _) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(
+            game,
+            ["version:2586", "lang:zh_cn", "onboardAccessibility:false"]
+        );
+    }
+
+    /// 两行都有时文件一个字节都不变。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_leaves_a_complete_options_file_alone() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let original = b"lang:en_us\r\nonboardAccessibility:true\r\nfov:0.5";
+        std::fs::write(mc.join("options.txt"), original).unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(std::fs::read(mc.join("options.txt")).unwrap(), original);
+    }
+
+    /// 补全路径：索引是这一局才下载的，语言码同样查得到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn asset_index_downloaded_by_this_launch_decides_the_language() {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        let (index, hash) = language_index("minecraft/lang/zh_cn.json");
+        wiremock::Mock::given(method("GET"))
+            .and(path("/lang-test.json"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(index.clone()))
+            .mount(&server)
+            .await;
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        put_language_object(&mc, &hash);
+        let url = format!("{}/lang-test.json", server.uri());
+        let json = language_version_json(VERSION, "release", &index, &url);
+        install_json(&mc, VERSION, &json);
+        let java = options_reading_java(&fx.root);
+
+        let (game, _) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        assert_eq!(game, ["lang:zh_cn", "onboardAccessibility:false"]);
+    }
+
+    /// 写不进去只留一条带系统原因的提醒，游戏照常启动，文件保持原样。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn options_write_failure_warns_and_still_launches() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let options = mc.join("options.txt");
+        std::fs::write(&options, b"fov:0.5\n").unwrap();
+        // 只放行读（FILE_SHARE_READ）：读得到 options.txt，换不掉它。
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&options)
+            .unwrap();
+        let java = complete_fake_java(&fx.root, 17, 0);
+
+        let (_, events) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+        drop(held);
+
+        let warnings = log_texts(&events, LauncherLevel::Warn);
+        let [warning] = warnings.as_slice() else {
+            panic!("应只有一条提醒：{warnings:?}");
+        };
+        assert!(warning.starts_with("没能补全 options.txt（"), "{warning}");
+        assert!(
+            warning.contains(&options.display().to_string()),
+            "{warning}"
+        );
+        // 系统错误在原因链第二层，只显示顶层的话看不到它。
+        assert!(warning.contains("(os error "), "{warning}");
+        assert_eq!(std::fs::read(&options).unwrap(), b"fov:0.5\n");
+    }
+
+    /// 读不出 options.txt 同样只算这个便利项失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_options_file_warns_and_still_launches() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        std::fs::create_dir_all(mc.join("options.txt")).unwrap();
+        let java = complete_fake_java(&fx.root, 17, 0);
+
+        let (_, events) = play_to_exit(&chinese_system(&fx), VERSION, java).await;
+
+        let warnings = log_texts(&events, LauncherLevel::Warn);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("没能补全 options.txt（"),
+            "{warnings:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_launch_leaves_the_options_file_alone() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
+        let token = CancellationToken::new();
+        token.cancel();
+        let aurora = chinese_system(&fx).with_cancel(token);
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, _) = launch(&aurora, java).await;
+
+        assert!(result.err().is_some_and(|err| err.is_cancelled()));
+        assert!(!mc.join("options.txt").exists());
     }
 
     /// 启动时缺 Java 自动下载走下载池：阶段 3 推出带总数与总字节的进度，文件落进托管目录。冒充的
