@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { memoryCapMb, memoryLowerTarget, memoryTarget, javaMajorFromClassVersion, isHeapReserveFailure } from "../domain/rules";
 import type { ExitCodeNoteDto } from "../ipc/diagnostics";
+import { CRASH_PAGE_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import {
   CRASH_CATEGORIES,
   CRASH_CATEGORY,
@@ -108,6 +109,21 @@ describe("崩溃诊断文案", () => {
     expect(CRASH_COPY.headline(["out_of_memory"])).toBe("找到 1 条线索，日志指向内存不足");
     expect(CRASH_COPY.headline(["optifine_incompatible", "native_crash"])).toBe("找到 2 条线索，日志指向 OptiFine 不兼容与进程异常退出");
     expect(SESSION_COPY.crashClue(crashCategoryLabel("java_version_mismatch"))).toBe("日志指向 Java 版本不匹配");
+  });
+
+  it("只有退出码兜底这一条线索时写「退出码指向」，四处通用句式一致", () => {
+    const label = crashCategoryLabel("native_crash");
+    expect(CRASH_COPY.headline(["native_crash"])).toBe("找到 1 条线索，退出码指向进程异常退出");
+    expect(SESSION_COPY.crashClue(label)).toBe("退出码指向进程异常退出");
+    expect(OVERVIEW_COPY.crashBody(label)).toBe("退出码指向进程异常退出，诊断里有可以一键尝试的办法。");
+    expect(CRASH_PAGE_COPY.clueTail([label])).toBe("，退出码指向进程异常退出");
+  });
+
+  it("线索里有命中日志的类别时仍写「日志指向」，混排空格照旧", () => {
+    const labels = [crashCategoryLabel("mixin_failure"), crashCategoryLabel("native_crash")];
+    expect(CRASH_PAGE_COPY.clueTail(labels)).toBe("，日志指向 Mixin 注入失败与进程异常退出");
+    expect(OVERVIEW_COPY.crashBody(crashCategoryLabel("mixin_failure"))).toBe("日志指向 Mixin 注入失败，诊断里有可以一键尝试的办法。");
+    expect(() => CRASH_PAGE_COPY.clueTail([])).toThrow("类别列表为空");
   });
 });
 

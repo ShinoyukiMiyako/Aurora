@@ -190,7 +190,7 @@ export const SESSION_COPY = {
   running: (elapsedMs: number) => `已运行 ${formatElapsed(elapsedMs)}`,
   cancelledDetail: "已下载的文件会保留",
   played: (minutes: number) => (minutes < 1 ? "本次游玩不到 1 分钟" : `本次游玩 ${Math.floor(minutes)} 分钟`),
-  crashClue: (label: string) => joinMixed("日志指向", label),
+  crashClue: (label: string) => cluePointer([label]),
   noClue: "没有匹配到已知原因",
   /** 阶段清单里跳过下载时该行右侧的说明。 */
   noDownload: "无需下载",
@@ -555,13 +555,20 @@ export function joinCrashLabels(labels: readonly string[]): string {
   return joinMixed(`${labels[0]}、${labels[1]}`, "等", `${labels.length} 类问题`);
 }
 
+/**
+ * 崩溃通用句式的主干：「日志指向 A 与 B」。native_crash 是退出码兜底，不来自任何一行日志，
+ * 线索只有它时写「退出码指向」，否则紧接着的解释「日志里没有匹配到已知原因」就和这句对不上。
+ */
+export function cluePointer(labels: readonly string[]): string {
+  const onlyExitCode = labels.every((label) => label === CRASH_CATEGORY.native_crash.label);
+  return joinMixed(onlyExitCode ? "退出码指向" : "日志指向", joinCrashLabels(labels));
+}
+
 export const CRASH_COPY = {
   noClueTitle: "没有匹配到已知原因",
   noClueExplain: "可以对照完整日志排查，崩溃前的警告往往能找到更早的源头。",
   headline: (categories: readonly string[]) =>
-    categories.length === 0
-      ? "没有匹配到已知原因"
-      : joinMixed(`找到 ${categories.length} 条线索，日志指向`, joinCrashLabels(categories.map(crashCategoryLabel))),
+    categories.length === 0 ? "没有匹配到已知原因" : `找到 ${categories.length} 条线索，${cluePointer(categories.map(crashCategoryLabel))}`,
   exitLine: (relative: string, exitCode: number | null, note: ExitCodeNoteDto | null) => {
     if (exitCode === null) return `${relative}崩溃 · 退出码未知`;
     if (note === null) return `${relative}崩溃 · 退出码 ${exitCode}`;

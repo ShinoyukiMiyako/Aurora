@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { CRASH_SOURCE_LABEL, joinCrashLabels, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
+import { cluePointer, CRASH_SOURCE_LABEL, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -154,7 +154,7 @@ export const OVERVIEW_COPY = {
   viewTasks: "查看下载任务",
   failedTitle: (title: string) => `上次启动失败：${title}`,
   crashTitle: (relative: string) => `上次启动崩溃了 · ${relative}`,
-  crashBody: (label: string) => `${joinMixed("日志指向", label)}，诊断里有可以一键尝试的办法。`,
+  crashBody: (label: string) => `${cluePointer([label])}，诊断里有可以一键尝试的办法。`,
   crashBodyNoClue: "没有匹配到已知原因，可以对照完整日志排查。",
   crashBodyPending: "正在读取崩溃报告。",
   viewCrash: "查看诊断",
@@ -589,7 +589,7 @@ export const CRASH_PAGE_COPY = {
   copyPath: "复制报告路径",
   fullLog: "完整日志",
   clueCount: (n: number) => `找到 ${n} 条线索`,
-  clueTail: (labels: readonly string[]) => `，${joinMixed("日志指向", joinCrashLabels(labels))}`,
+  clueTail: (labels: readonly string[]) => `，${cluePointer(labels)}`,
   stale: (relative: string) => `这是${relative}的崩溃，之后已经正常启动过。`,
   runningAgain: "游戏正在运行；如果再次崩溃，这里会换成新的诊断。",
   /** 会话日志是默认来源，不写来源名；其余来源写在行号前。 */
