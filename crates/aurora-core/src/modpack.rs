@@ -268,11 +268,19 @@ impl PreparedModpack {
         &self.name
     }
 
-    /// 导入出的实例将继承的原版 id（客户端 jar 与 natives 所在的版本目录）：有加载器时实例 JSON 是
-    /// 加载器 JSON 的副本，它的 `inheritsFrom` 就是这个原版；导入也正是把原版装在这个自然版本目录里。
-    /// 调用方据此在导入期间占住它，不必等实例 JSON 写出来再扫。
-    pub fn base_version(&self) -> &str {
-        &self.archive.manifest.minecraft
+    /// 导入要写的自然版本目录：先是导入出的实例将继承的原版（客户端 jar 与 natives 所在），有加载器时再加
+    /// 加载器版本。实例 JSON 是加载器 JSON 的副本，它的 `inheritsFrom` 就是这个原版，写出来之前要读加载器目录。
+    /// 调用方据此在导入期间占住它们，不必等实例 JSON 写出来再扫。
+    pub fn natural_versions(&self) -> Vec<String> {
+        let manifest = &self.archive.manifest;
+        let mut versions = vec![manifest.minecraft.clone()];
+        if let Some(loader) = &manifest.loader {
+            versions.push(loader_choice(loader.kind).natural_version_id(
+                &manifest.minecraft,
+                strip_minecraft_prefix(&loader.version, &manifest.minecraft),
+            ));
+        }
+        versions
     }
 
     /// 不导入了：删掉平台整合包的下载缓存，本地文件不动。
@@ -1913,14 +1921,23 @@ mod tests {
             )
             .await
             .unwrap();
-        // 导入前预告的基底就是写出的实例 JSON 继承的那个原版，调用方据此在导入期间占住它。
-        let base = prepared.base_version().to_owned();
-        assert_eq!(base, "test");
+        // 导入前预告的目录就是导入实际写的：实例 JSON 继承前者、抄自后者，调用方据此在导入期间占住它们。
+        let natural = prepared.natural_versions();
+        assert_eq!(natural, ["test", "fabric-loader-0.15.0-test"]);
+        let base = natural[0].clone();
         let outcome = aurora
             .import_modpack(prepared, "task-f", None)
             .await
             .unwrap();
         assert_eq!(outcome.version_id, "测试包");
+        assert!(
+            aurora
+                .game_dir()
+                .join(VERSIONS_DIR)
+                .join(&natural[1])
+                .join(format!("{}.json", natural[1]))
+                .is_file()
+        );
         let dir = outcome.version_dir;
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("测试包.json")).unwrap()).unwrap();
@@ -1948,6 +1965,42 @@ mod tests {
         let scan = discover_versions(aurora.game_dir()).await.unwrap();
         let found = scan.versions.iter().find(|v| v.id == "测试包").unwrap();
         assert!(found.has_mod_loader(), "加载器应能从实例 JSON 识别出来");
+    }
+
+    /// 没有加载器的包只写原版；加载器版本与安装时用的是同一个写法，清单里带 MC 前缀的先去掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn natural_versions_follow_the_pack_manifest() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora(tmp.path(), &server);
+        let pack = tmp.path().join("pack.mrpack");
+        for (dependencies, natural) in [
+            (serde_json::json!({"minecraft": "1.21"}), vec!["1.21"]),
+            (
+                serde_json::json!({"minecraft": "1.21", "quilt-loader": "0.26.0"}),
+                vec!["1.21", "quilt-loader-0.26.0-1.21"],
+            ),
+            (
+                serde_json::json!({"minecraft": "1.20.1", "forge": "1.20.1-47.2.0"}),
+                vec!["1.20.1", "1.20.1-forge-47.2.0"],
+            ),
+            (
+                serde_json::json!({"minecraft": "1.21.1", "neoforge": "21.1.42"}),
+                vec!["1.21.1", "neoforge-21.1.42"],
+            ),
+        ] {
+            write_pack(&pack, &index(dependencies), &[]);
+            let prepared = aurora
+                .prepare_modpack(
+                    &ModpackSource::File { path: pack.clone() },
+                    None,
+                    &ImportSelection::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(prepared.natural_versions(), natural);
+        }
     }
 
     /// 平台整合包：先下载到缓存，导入后缓存删掉，整合包信息记下平台、工程与版本。
