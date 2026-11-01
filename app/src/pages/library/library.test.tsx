@@ -561,6 +561,14 @@ describe("实例库：游戏目录", () => {
     expect(dialogTitle()).toBeUndefined();
   });
 
+  it("当前目录的盘拔掉了：实例列表读到空，目录选择写版本数读不到，不写 0 个版本", async () => {
+    instances = [];
+    dirsAre([{ ...unplugged, is_current: true }, pcl]);
+    await mount();
+    openPicker();
+    expect(options()[0].textContent).toBe("移动硬盘版本数读不到");
+  });
+
   it("目录选择选中别的目录：用登记的名字问确认，切换前显示的还是原目录，确认后切过去", async () => {
     dirsAre([home, directory("我的 HMCL", HMCL, 3)]);
     await mount();

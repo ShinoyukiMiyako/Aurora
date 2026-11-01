@@ -127,13 +127,14 @@ export function switchSuggestion(dirs: readonly GameDirectoryDto[]): SwitchSugge
 /**
  * 目录选择的选项：标签只写目录名（触发器上显示的就是它），版本数放第二行；切不过去的禁用，第二行换成原因。
  * 当前目录的数取实例列表（instanceCount，读到之前为 null）：目录列表只在切换和回到本页时重读，新建、删除实例后还是旧数。
+ * 版本数读不到时不取：盘拔掉时实例列表读到的是空，那不是 0 个版本。
  */
 export function directoryOptions(dirs: readonly GameDirectoryDto[], busy: boolean, instanceCount: number | null): SelectOption<string>[] {
   return dirs.map((dir) => {
     const option = { value: dir.path, label: dir.name };
     const blocked = dir.is_current ? undefined : gameDirSwitchReason(busy, dir.available);
     if (blocked !== undefined) return { ...option, hint: blocked, disabled: true };
-    const versions = dir.is_current && instanceCount !== null ? instanceCount : dir.version_count;
+    const versions = dir.is_current && dir.version_count !== null && instanceCount !== null ? instanceCount : dir.version_count;
     return { ...option, hint: versions === null ? LIBRARY_COPY.dirVersionsUnknown : LIBRARY_COPY.dirVersions(versions) };
   });
 }

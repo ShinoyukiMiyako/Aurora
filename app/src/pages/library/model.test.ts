@@ -214,6 +214,11 @@ describe("directoryOptions", () => {
     const [option] = directoryOptions([dir("默认目录", null, { is_current: true, available: false })], false, null);
     expect([option.hint, option.disabled]).toEqual(["版本数读不到", undefined]);
   });
+
+  it("当前目录的版本数读不到时不跟实例列表走：盘拔掉时实例列表读到的是空，不等于 0 个版本", () => {
+    const [option] = directoryOptions([dir("移动硬盘", null, { is_current: true, available: false }), dir("PCL2", 12)], false, 0);
+    expect(option.hint).toBe("版本数读不到");
+  });
 });
 
 describe("文案", () => {
