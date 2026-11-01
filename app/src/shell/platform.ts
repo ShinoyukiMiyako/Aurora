@@ -36,11 +36,17 @@ export async function pickFile(options: { title: string; filter: FileFilter }): 
   return open({ title: options.title, multiple: false, directory: false, filters: [{ name: options.filter.name, extensions: [...options.filter.extensions] }] });
 }
 
+/** 保存对话框的标题与保存类型：外壳的文件种类之外，页面可以自带（存档名进标题的场合）。 */
+export interface SaveFileDialog {
+  title: string;
+  filter: FileFilter;
+}
+
 /**
  * 系统保存文件对话框：defaultPath 可以只是文件名（落在系统默认的文件夹里），filter 限定保存类型。
  * 选定返回完整路径，用户取消为 null；覆盖已有文件的确认由系统对话框自己问过。
  */
-export async function pickSaveFile(options: { title: string; defaultPath: string; filter: FileFilter }): Promise<string | null> {
+export async function pickSaveFile(options: SaveFileDialog & { defaultPath: string }): Promise<string | null> {
   if (!inTauri()) throw new NoNativeDialogError("保存文件", "导出要在桌面应用里进行");
   return save({ title: options.title, defaultPath: options.defaultPath, filters: [{ name: options.filter.name, extensions: [...options.filter.extensions] }] });
 }
