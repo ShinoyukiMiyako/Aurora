@@ -645,11 +645,19 @@ impl Aurora {
     }
 }
 
-/// 经 `inheritsFrom` 直接依赖 `id` 的实例。
+/// 经 `inheritsFrom` 直接依赖 `id` 的实例。不分大小写，与实例锁、[`Aurora::inheritance_chain`] 判环和 Windows 的
+/// 目录名同一口径：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样靠这个目录运行。
 fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
+    let key = id.to_lowercase();
     scan.versions
         .iter()
-        .filter(|v| v.id != id && v.json.inherits_from.as_deref() == Some(id))
+        .filter(|v| {
+            v.id.to_lowercase() != key
+                && v.json
+                    .inherits_from
+                    .as_deref()
+                    .is_some_and(|parent| parent.to_lowercase() == key)
+        })
         .map(|v| v.id.clone())
         .collect()
 }
@@ -1433,6 +1441,40 @@ pub(crate) mod tests {
         );
         assert!(dir.join("a.json").is_file(), "失败后目录与 JSON 应还原");
         assert!(!aurora.game_dir().join("versions").join("c").exists());
+    }
+
+    /// 继承链、实例锁与 Windows 的目录名都不分大小写：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样
+    /// 靠这个目录运行，删除与改名不能放行。
+    #[tokio::test]
+    async fn dependents_are_found_regardless_of_case() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        let base = write_version(&game, "Vanilla-1.21", &vanilla_json("Vanilla-1.21"));
+        write_version(&game, "fab", &fabric_json("fab", "vanilla-1.21"));
+
+        let preview = aurora.deletion_preview("Vanilla-1.21").await.unwrap();
+        assert_eq!(preview.dependents, vec!["fab".to_owned()]);
+        for err in [
+            aurora
+                .delete_instance_files("Vanilla-1.21", RecordingDisposer::default())
+                .await
+                .unwrap_err(),
+            aurora
+                .rename_instance_files("Vanilla-1.21", "底座")
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Instance(InstanceError::HasDependents { dependents, .. })
+                        if dependents == &["fab".to_owned()]
+                ),
+                "实际：{err:?}"
+            );
+        }
+        assert!(base.is_dir());
     }
 
     fn pinned(address: &str, instance: Option<&str>) -> crate::config::PinnedServer {
