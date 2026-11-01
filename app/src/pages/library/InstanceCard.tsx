@@ -167,7 +167,9 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
               </Tag>
             )}
             <span className={styles.grow} />
-            {pinAllowed ? pinButton : <Tooltip content={TOAST_COPY.pinLimit}>{pinButton}</Tooltip>}
+            <Tooltip content={TOAST_COPY.pinLimit} disabled={pinAllowed}>
+              {pinButton}
+            </Tooltip>
           </div>
           {inst.mcVersion !== null && <span className={styles.coverVersion}>{inst.mcVersion}</span>}
         </div>

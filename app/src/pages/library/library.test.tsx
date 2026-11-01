@@ -416,6 +416,22 @@ describe("实例库：动作", () => {
     expect(toastTitles()).toContain("success:已从侧栏取消固定「樱花生存」");
   });
 
+  it("侧栏从满到不满：聚焦着的图钉不重挂，焦点留在它上面", async () => {
+    instances = ["a", "b", "c", "d", "e", "f"].map((id) => instanceDto(id));
+    bootOverrides(ipc, { instances, pins: ["a", "b", "c", "d", "e"] });
+    ipc.overrides.set("list_instances", () => instances);
+    await mount();
+    const pin = byLabel("把「f」固定到侧栏");
+    act(() => pin.focus());
+    await act(async () => {
+      await launcher.actions.togglePin("a");
+    });
+    await flush();
+    expect(byLabel("把「f」固定到侧栏")).toBe(pin);
+    expect(document.activeElement).toBe(pin);
+    expect(pin.getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("侧栏已满 5 个：图钉不写固定列表，只给上限提示；菜单项禁用并说明原因", async () => {
     instances = ["a", "b", "c", "d", "e", "f"].map((id) => instanceDto(id));
     bootOverrides(ipc, { instances, pins: ["a", "b", "c", "d", "e"] });

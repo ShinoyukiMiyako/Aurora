@@ -396,6 +396,24 @@ describe("批量操作", () => {
     expect(callsOf(ipc, "set_mods_enabled")).toEqual([{ versionId: ID, fileNames: ["iris.jar"], enabled: false }]);
   });
 
+  it("行内开关聚焦着点下去：等后端期间软禁用，开关不重挂，焦点留在它上面；回来后恢复可点", async () => {
+    await open();
+    const pending = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => pending.promise);
+    const toggle = find("switch", "停用 Sodium") as HTMLButtonElement;
+    act(() => toggle.focus());
+    click(toggle);
+    expect(toggle.isConnected).toBe(true);
+    expect(toggle.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(toggle);
+
+    pending.resolve("sodium.jar.disabled");
+    await flush();
+    expect(toggle.isConnected).toBe(true);
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("禁用原因：选中的都已启用时「启用」带原因禁用，选中的都没有更新时「更新」同样禁用", async () => {
     await open();
     click(find("checkbox", "选择 Sodium"));

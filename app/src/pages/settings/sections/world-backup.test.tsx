@@ -146,6 +146,21 @@ describe("设置 · 游戏：存档备份", () => {
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("自动备份关闭时不会清理");
   });
 
+  it("开关自动备份来回切：下拉不重挂；可用时宿主不进 Tab 顺序，禁用时才能聚焦读原因", async () => {
+    await mountGame();
+    const keep = select("每个存档保留");
+    const host = keep.parentElement;
+    if (host === null) throw new Error("下拉没有宿主");
+    expect(host.hasAttribute("tabindex")).toBe(false);
+    await click(autoSwitch());
+    expect(select("每个存档保留")).toBe(keep);
+    expect(host.getAttribute("tabindex")).toBe("0");
+    await click(autoSwitch());
+    expect(select("每个存档保留")).toBe(keep);
+    expect(keep.disabled).toBe(false);
+    expect(host.hasAttribute("tabindex")).toBe(false);
+  });
+
   it("改保留份数与总量上限：各自即时写入，补丁带着另外两项此刻的值", async () => {
     await mountGame();
     await pick("每个存档保留", "10 份");

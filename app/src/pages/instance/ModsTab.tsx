@@ -705,15 +705,13 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
       width: 64,
       sortable: true,
       keepOpaque: true,
-      // 锁住时开关自己用提示气泡写禁用原因；可用时悬停说明点了是停用还是启用
+      // 锁住时开关自己用提示气泡写禁用原因；可用时悬停说明点了是停用还是启用。外层常驻：原因来去时开关不重挂，焦点不掉回 body
       cell: (r) => {
         const reason = toggleReason(r);
-        return reason === undefined ? (
-          <Tooltip content={MODS_COPY.toggleTip(r.enabled)}>
-            <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} />
+        return (
+          <Tooltip content={MODS_COPY.toggleTip(r.enabled)} disabled={reason !== undefined}>
+            <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={reason} />
           </Tooltip>
-        ) : (
-          <Toggle checked={r.enabled} onChange={() => toggle(r)} ariaLabel={MODS_COPY.toggleLabel(r.name, r.enabled)} disabledReason={reason} />
         );
       },
     },
