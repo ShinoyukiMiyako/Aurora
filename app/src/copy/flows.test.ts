@@ -63,8 +63,8 @@ function bannedIn(texts: readonly (string | null)[]): string[] {
 /** 每个失败码文案需要的插值参数；漏配一个码类型检查就不过。 */
 const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
   java_missing: { major: 21, mc_version: "1.21.1" },
-  java_pinned_missing: { path: "C:/jdk/bin/java.exe" },
-  java_too_old: { current: 17, major: 21, mc_version: "1.21.1" },
+  java_pinned_missing: { path: "C:/jdk/bin/java.exe", pinned_by: "instance" },
+  java_too_old: { current: 17, major: 21, mc_version: "1.21.1", pinned_by: "instance" },
   account_relogin: { account: "Steve" },
   account_refresh_network: { account: "Steve" },
   account_service_down: { account: "Steve", status: 503 },

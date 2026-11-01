@@ -332,6 +332,8 @@ describe("任务失败原因与后端码表对齐", () => {
       world_backup_not_found: "这份备份已经不在了",
       world_backup_corrupt: "备份文件已损坏，无法恢复",
       world_in_use: "这个存档正被游戏打开",
+      install_unsafe_path: "版本文件里有指向游戏目录之外的路径，已拒绝写入",
+      loader_library_missing: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器",
     });
   });
 
