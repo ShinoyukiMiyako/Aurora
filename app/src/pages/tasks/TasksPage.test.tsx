@@ -349,6 +349,71 @@ describe("下载任务页：断网", () => {
     await flush();
     expect(callsOf(ipc, "install_java")).toEqual([{ requiredMajor: 17, taskId: "failed-java#2" }]);
   });
+
+  it("断网：备份与恢复存档只碰本机文件，失败后的重试不置灰，点了照常重排", async () => {
+    vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
+    const args = { id: "生存", world: "旧世界" };
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-backup", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args },
+        }),
+      ],
+    });
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    await mount();
+    const retry = buttonIn(row("备份「旧世界」"), "重试");
+    expect(retry.getAttribute("aria-disabled")).toBeNull();
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([{ ...args, taskId: "failed-backup#2" }]);
+  });
+
+  it("断网：要手动下载的文件都找到后「重新安装」只提示联网后再重试，不把任务重新排进队列", async () => {
+    resetModpackMock();
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);
+    const args = { id: "生存", platform: "curseforge", projectId: "9", versionId: "90" };
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-mod", "failed", {
+          kind: "mod",
+          title: "安装 Locked",
+          instance_id: "生存",
+          error: {
+            code: "distribution_blocked",
+            message: "原文",
+            blocked_files: [
+              { project_id: 9, file_id: 90, file_name: "locked.jar", web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90", destination: "mods/locked.jar", sha1: "a".repeat(40), fingerprint: 0, size: 3 },
+            ],
+          },
+          spec: { command: "install_mod", args },
+        }),
+      ],
+    });
+    ipc.overrides.set("install_mod", () => new Promise(() => undefined));
+    await mount();
+    act(() => buttonIn(row("安装 Locked"), "查看这些文件").click());
+    await flush();
+    seedMockDownloads(["locked.jar"]);
+    act(() => buttonIn(dialog(), "我已下载，重新检查").click());
+    await flush();
+    expect(dialog().textContent).toContain("1 个文件都已找到。");
+
+    onLine.mockReturnValue(false);
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    act(() => buttonIn(dialog(), "重新安装").click());
+    await flush();
+    expect(callsOf(ipc, "install_mod")).toEqual([]);
+    expect(launcher.state.tasks.map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "联网后才能重试"]);
+  });
 });
 
 describe("下载任务页：筛选", () => {
@@ -393,6 +458,28 @@ describe("下载任务页：进行中", () => {
     await flush();
     return launcher.state.tasks.map((t) => t.id);
   }
+
+  it("备份存档在跑：行与通道的进度条读屏只说进度，不说成下载", async () => {
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-backup", "failed", {
+          kind: "world_backup",
+          title: "备份「旧世界」",
+          detail: "「生存」",
+          instance_id: "生存",
+          error: { code: "io", message: "磁盘已满" },
+          spec: { command: "backup_world", args: { id: "生存", world: "旧世界" } },
+        }),
+      ],
+    });
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    await mount();
+    act(() => buttonIn(row("备份「旧世界」"), "重试").click());
+    await flush();
+    const labels = [...page().querySelectorAll('[role="progressbar"]')].map((bar) => bar.getAttribute("aria-label"));
+    expect(labels.filter((label) => label === "备份「旧世界」的进度")).toHaveLength(2);
+    expect(labels.filter((label) => label !== null && label.includes("下载进度"))).toEqual([]);
+  });
 
   it("三条通道各放一个运行中的任务，第四个排队；副标题与排队说明给出数量", async () => {
     const ids = await fourJavaTasks();

@@ -11,7 +11,6 @@ import {
   INITIAL_WIZARD,
   jumpTo,
   pickedExtras,
-  sameDirectory,
   stepStatus,
 } from "./model";
 
@@ -68,6 +67,5 @@ describe("第一步：游戏目录", () => {
     expect(candidates.map((c) => c.name)).toEqual(["官方启动器", "HMCL"]);
     expect(pickedExtras(candidates, new Set())).toEqual(candidates);
     expect(pickedExtras(candidates, new Set(["E:/HMCL/.minecraft"]))).toEqual([found[0]]);
-    expect(sameDirectory("/a/b/", "/a/b")).toBe(true);
   });
 });

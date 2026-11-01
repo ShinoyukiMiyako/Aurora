@@ -5,8 +5,9 @@
 // 超时（10 s）由动作本身以错误结束，经统一错误处理弹「无法结束游戏进程」，入口回到原状态。
 
 import { useCallback, useEffect, useState } from "react";
-import { ACTION_ERROR, CONFIRM_COPY, LAUNCH_COPY, type FailureCopy, type FailureFixKind } from "../copy/flows";
+import { ACTION_ERROR, CONFIRM_COPY, LAUNCH_COPY, lockReason, type FailureCopy, type FailureFixKind } from "../copy/flows";
 import { javaPinned, type InstanceSummary } from "../domain/adapt";
+import { locksOf } from "../domain/instance-locks";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useInstanceSettings } from "../state/queries/instance";
 import { reimportRoute } from "../state/route";
@@ -27,6 +28,11 @@ export interface LaunchEntry {
    * 取消、结束、查看诊断不受影响；能启动为 null。
    */
   blocked: string | null;
+  /**
+   * 损坏实例此刻不能修复的原因：后端占着它或别的实例正以它为基底，补全排上也会被 instance_busy 拒绝。入口据此带原因禁用
+   * 「修复并启动」；重新导入建的是新实例，不受影响。能修复或不是损坏视图为 null。
+   */
+  repairBlocked: string | null;
   /** 启动（就绪、已结束、失败、崩溃后再启动）；损坏时由状态容器转成「修复并启动」，整合包没导入完的去重新导入。 */
   launch(): void;
   /**
@@ -121,5 +127,8 @@ export function useLaunch(instanceId: string): LaunchEntry {
   );
 
   const blocked = busySaves ? LAUNCH_COPY.savesBusy : null;
-  return { instance: inst, view, stopping, failure, blocked, launch, quickPlay, cancel, stop, dismiss, openCrash, openLogs, fix };
+  // 损坏视图下这个实例没有活动会话，会话这一项恒为 false
+  const repairReason = isBroken && !reimport ? lockReason(locksOf(inst, false).repair, "repair") : undefined;
+  const repairBlocked = repairReason === undefined ? null : repairReason;
+  return { instance: inst, view, stopping, failure, blocked, repairBlocked, launch, quickPlay, cancel, stop, dismiss, openCrash, openLogs, fix };
 }

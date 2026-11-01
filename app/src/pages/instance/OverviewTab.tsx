@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, crashCategoryLabel, MODPACK_REIMPORT_COPY, modpackLabel } from "../../copy/flows";
+import { ACTION_ERROR, crashCategoryLabel, lockReason, MODPACK_REIMPORT_COPY, modpackLabel } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
 import { needsReimport } from "../../domain/rules";
@@ -63,7 +63,7 @@ import {
   WORLDS_PREVIEW,
   type ModRow,
 } from "./model";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 import { useWorldOps, WorldBackupsModal, worldRef, type WorldRef } from "./WorldBackupsModal";
 import { UpdatePreviewModal } from "./UpdatePreviewModal";

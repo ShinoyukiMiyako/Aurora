@@ -98,7 +98,7 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
   const [statuses, setStatuses] = useState<ReadonlyMap<number, FileStatus> | null>(null);
   const [checking, setChecking] = useState(false);
   const [folderError, setFolderError] = useState<string | null>(null);
-  // 正在进行的那次检查；关掉清单或再开一次检查时换掉，晚到的结果对不上就丢弃
+  // 正在进行的那次检查，从点下按钮算起（系统对话框弹出之前连点不弹第二个）；关掉清单时清空，晚到的结果对不上就丢弃
   const live = useRef<object | null>(null);
 
   // 每次打开都从「还没检查过」开始：清单可能已经换了（导入确认步重新读过、失败的任务重试过）
@@ -118,25 +118,33 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
   const found = statuses === null ? 0 : files.filter((f) => statuses.get(f.file_id) === "found").length;
   const allFound = statuses !== null && found === files.length;
 
-  const check = () =>
-    void run(async () => {
+  const check = () => {
+    if (live.current !== null) return;
+    const token = {};
+    live.current = token;
+    const attempt = async () => {
       const folder = await pickFolder(await actions.downloadsFolder(), BLOCKED_COPY.pickTitle);
-      if (folder === null) return;
-      const token = {};
-      live.current = token;
+      if (folder === null || live.current !== token) return;
       setChecking(true);
-      const outcome = await actions.claimBlockedFiles(folder, files).finally(() => {
-        if (live.current === token) setChecking(false);
-      });
+      const outcome = await actions.claimBlockedFiles(folder, files);
       if (live.current !== token) return;
-      live.current = null;
       if (outcome.kind === "folder_error") {
         setFolderError(outcome.message);
         return;
       }
       setFolderError(null);
       setStatuses(claimStatuses(files, outcome.report));
-    }, BLOCKED_COPY.checkFailed);
+    };
+    void run(
+      () =>
+        attempt().finally(() => {
+          if (live.current !== token) return;
+          live.current = null;
+          setChecking(false);
+        }),
+      BLOCKED_COPY.checkFailed,
+    );
+  };
 
   const close = () => {
     live.current = null;

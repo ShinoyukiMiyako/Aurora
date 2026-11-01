@@ -6,7 +6,7 @@ import { AnimatePresence } from "framer-motion";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
-import { MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
+import { lockReason, MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { needsReimport } from "../../domain/rules";
@@ -29,7 +29,7 @@ import { TextInput } from "../../ui/TextInput";
 import { HERO_COPY, SOURCE_LABEL } from "./copy";
 import { ExportModpackModal } from "./ExportModpackModal";
 import styles from "./instance.module.css";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 
 /** 头图高度：wide 档多给 20，方块 compact 档缩到 64。 */
 const HERO_HEIGHT = { compact: 164, regular: 164, wide: 184 } as const;

@@ -188,6 +188,72 @@ describe("启动胶囊换面时的焦点", () => {
   });
 });
 
+describe("就绪面的带原因禁用", () => {
+  const refreshWith = async (activity: "backing_up" | null) => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { activity })]);
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+  };
+
+  it("存档备份开始又结束：聚焦着的「启动」不换节点，焦点留着；备份期间读出不可用，点击不启动", async () => {
+    const go = buttonByText(LAUNCH_COPY.launch);
+    act(() => go.focus());
+
+    await refreshWith("backing_up");
+    expect(buttonByText(LAUNCH_COPY.launch)).toBe(go);
+    expect(document.activeElement).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBe("true");
+    pressEnter(go);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+
+    await refreshWith(null);
+    expect(buttonByText(LAUNCH_COPY.launch)).toBe(go);
+    expect(document.activeElement).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBeNull();
+    pressEnter(go);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+  });
+});
+
+describe("损坏面的带原因禁用", () => {
+  const refreshWith = async (over: { activity?: "backing_up" | "modifying" | "inherited" | null; used_by?: string | null; modpack_incomplete?: boolean }) => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { status: "broken", broken_reason: "版本 JSON 不可用", activity: null, ...over })]);
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+  };
+  const repair = () => buttonByText(LAUNCH_COPY.repairAndLaunch);
+
+  it.each([
+    ["正在备份", { activity: "backing_up" as const }],
+    ["正在改动", { activity: "modifying" as const }],
+    ["被别的实例当作基底", { activity: "inherited" as const, used_by: "Fabric 1.20.1" }],
+  ])("%s：「修复并启动」保持可聚焦、读出不可用，点击不排补全；放开后不换节点，点了才排", async (_name, over) => {
+    await refreshWith({});
+    const go = repair();
+    act(() => go.focus());
+    await refreshWith(over);
+    expect(repair()).toBe(go);
+    expect(document.activeElement).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBe("true");
+    pressEnter(go);
+    await flush();
+    expect(launcher.state.tasks).toEqual([]);
+
+    await refreshWith({});
+    expect(repair()).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBeNull();
+    pressEnter(go);
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.spec.command)).toEqual(["repair_instance"]);
+  });
+});
+
 describe("运行面「结束游戏」", () => {
   async function runningCapsule() {
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));

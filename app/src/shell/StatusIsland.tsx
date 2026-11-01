@@ -342,7 +342,7 @@ interface IslandControls {
 
 function islandFailure(session: SessionState) {
   if (session.failure === null) throw new Error("failed 会话缺少失败码");
-  return failureCopy(session.failure.code, session.failure.params, { accountName: session.accountName, javaPinned: false });
+  return failureCopy(session.failure.code, session.failure.params, { accountName: session.accountName, accountKind: session.accountKind, javaPinned: false });
 }
 
 function DetailActions({ session, controls, onClose }: { session: SessionState; controls: IslandControls; onClose: () => void }) {

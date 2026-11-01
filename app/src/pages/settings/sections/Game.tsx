@@ -4,6 +4,7 @@ import { useState, type ReactNode } from "react";
 import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
+import { samePath } from "../../../domain/paths";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
@@ -37,7 +38,7 @@ import {
   RECOMMENDED_ISOLATION,
   WORLD_BACKUP_COPY,
 } from "../copy";
-import { dirName, hasBang, overAvailable, samePath, unrecorded } from "../game-model";
+import { dirName, hasBang, overAvailable, unrecorded } from "../game-model";
 import { InstanceStack } from "../InstanceStack";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite, type SettingWrite } from "../write";
@@ -382,12 +383,11 @@ function countOptions(presets: readonly number[], current: number, label: (n: nu
   return values.map((n) => ({ value: String(n), label: label(n) }));
 }
 
-/** 禁用的下拉没有 disabledReason：外面包一层可聚焦的宿主，悬停与聚焦时说明原因。 */
+/** 禁用的下拉没有 disabledReason：外面包一层可聚焦的宿主，悬停与聚焦时说明原因。宿主常驻，开关切换时下拉不重挂。 */
 function ReasonHost({ reason, children }: { reason: string | undefined; children: ReactNode }) {
-  if (reason === undefined) return children;
   return (
-    <Tooltip content={reason}>
-      <span className={s.tagHost} tabIndex={0}>
+    <Tooltip content={reason} disabled={reason === undefined}>
+      <span className={s.tagHost} tabIndex={reason === undefined ? undefined : 0}>
         {children}
       </span>
     </Tooltip>

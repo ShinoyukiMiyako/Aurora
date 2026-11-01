@@ -2,6 +2,7 @@
 // 状态由流程组件持有，这里只做推算，便于逐条测试。
 
 import { JAVA_AUTO, releaseTypeFromDto, type ReleaseType } from "../../domain/adapt";
+import { samePath } from "../../domain/paths";
 import type { LoaderKind } from "../../domain/types";
 import { bestLocalRuntime, isolationByPolicy, type IsolationPolicyName } from "../../domain/rules";
 import type { JavaInstallationDto, LoaderChoice, LoaderVersionDto, ManifestDto } from "../../state/queries/catalog";
@@ -135,7 +136,7 @@ export type ConfirmJava =
 export function confirmJava(required: number, runtimes: readonly JavaInstallationDto[], defaultJava: string): ConfirmJava {
   const local = bestLocalRuntime(runtimes, required);
   if (defaultJava === JAVA_AUTO) return local === null ? { kind: "download", major: required } : { kind: "installed", major: required, vendor: local.vendor };
-  const pinned = runtimes.find((r) => r.path === defaultJava);
+  const pinned = runtimes.find((r) => samePath(r.path, defaultJava));
   const requiredInstalled = local !== null;
   if (pinned === undefined) return { kind: "pinnedMissing", required, requiredInstalled };
   if (pinned.version.major !== required) return { kind: "pinnedMismatch", pinned: pinned.version.major, required, requiredInstalled };

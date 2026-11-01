@@ -28,12 +28,10 @@ import {
   installStage,
   instanceFolderPath,
   isNewMod,
-  instanceLocks,
   isCrashActive,
   isPendingModUpdate,
   javaChoice,
   javaFit,
-  javawOf,
   matchSuspect,
   modCounts,
   modRows,
@@ -160,44 +158,6 @@ describe("上次崩溃判定", () => {
   });
 });
 
-describe("锁定矩阵", () => {
-  it("运行中锁住 Mod、重命名、补全与删除", () => {
-    expect(instanceLocks(true, false, false, null, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
-  });
-  it("安装中锁住文件操作但可以删除", () => {
-    expect(instanceLocks(false, true, false, null, false)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
-  });
-  it("就绪时全部可用", () => {
-    expect(instanceLocks(false, false, false, null, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
-  });
-  it("后端在改动 Mod、资源或设置：锁住改名、补全与删除，Mod 操作照常", () => {
-    expect(instanceLocks(false, false, true, null, false)).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
-  });
-  it("后端在备份、恢复或导出存档：同样锁住改名、补全与删除，Mod 操作照常；游戏运行仍然优先", () => {
-    expect(instanceLocks(false, false, false, null, true)).toEqual({ mods: null, rename: "backing_up", repair: "backing_up", delete: "backing_up" });
-    expect(instanceLocks(true, false, false, null, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
-    expect(instanceLocks(false, true, false, null, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "backing_up" });
-  });
-  it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
-    expect(instanceLocks(true, false, true, null, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
-    expect(instanceLocks(false, true, true, null, false)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
-  });
-  it("被别的实例当作基底：锁住改名、补全与删除并带上是谁在用，Mod 操作照常", () => {
-    const inherited = { kind: "inherited", usedBy: "Fabric 1.20.1" };
-    expect(instanceLocks(false, false, false, "Fabric 1.20.1", false)).toEqual({ mods: null, rename: inherited, repair: inherited, delete: inherited });
-  });
-  it("被当作基底的同时实例自己有事在做时报实例自己的事", () => {
-    expect(instanceLocks(true, false, false, "FAB", false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
-    expect(instanceLocks(false, true, false, "FAB", false)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: { kind: "inherited", usedBy: "FAB" } });
-    expect(instanceLocks(false, false, true, "FAB", false)).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
-  });
-  it("备份中又被当作基底：同样报实例自己的备份，不报基底", () => {
-    expect(instanceLocks(false, false, false, "FAB", true)).toEqual({ mods: null, rename: "backing_up", repair: "backing_up", delete: "backing_up" });
-    expect(instanceLocks(false, true, false, "FAB", true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "backing_up" });
-    expect(instanceLocks(true, false, false, "FAB", true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
-  });
-});
-
 describe("工作目录与实例设置的锁", () => {
   it("安装中（含补全）锁住；后端在改名或删除时按活动锁住", () => {
     expect(workLock(true, null)).toBe("installing");
@@ -212,7 +172,7 @@ describe("工作目录与实例设置的锁", () => {
 
 describe("整页订阅的启动视图", () => {
   const T0 = 1_700_000_000_000;
-  const account = { uuid: "u", name: "Steve" };
+  const account = { uuid: "u", name: "Steve", kind: "microsoft" as const };
   const repair = (status: Task["status"], progress: number, speedBps: number, id = "repair-1"): Task => ({
     ...newTask({ id, kind: "game", title: "补全 生存", detail: "", instanceId: "生存", spec: { command: "repair", args: { versionId: "生存" } } }, T0),
     status,
@@ -443,6 +403,13 @@ describe("Java 选择", () => {
     expect(autoJavaPick(runtimes, 17, "C:/gone", "auto")).toEqual({ kind: "global", path: "C:/gone", runtime: null });
   });
 
+  it("路径按路径规则比较：只差大小写或分隔符的是同一个 Java，不当成缺失", () => {
+    const list = [java("D:/Java/jdk-21/bin/java.exe", 21, 0)];
+    expect(autoJavaPick(list, 17, "d:\\java\\JDK-21\\bin\\java.exe", "auto")).toEqual({ kind: "global", path: "d:\\java\\JDK-21\\bin\\java.exe", runtime: list[0] });
+    expect(javaChoice("D:\\Java/jdk-21\\bin/java.exe", list, 17, "auto", "auto")).toEqual({ auto: false, path: "D:\\Java/jdk-21\\bin/java.exe", runtime: list[0] });
+    expect(javaChoice("D:/Java/jdk-17/bin/java.exe", list, 17, "auto", "auto")).toEqual({ auto: false, path: "D:/Java/jdk-17/bin/java.exe", runtime: null });
+  });
+
   it("固定路径对不上本机列表时 runtime 为 null；JVM 预设判断回落到要求版本", () => {
     const missing = javaChoice("C:/gone/java.exe", runtimes, 17, "auto", "auto");
     expect(missing).toEqual({ auto: false, path: "C:/gone/java.exe", runtime: null });
@@ -512,10 +479,6 @@ describe("路径", () => {
   it("沿用游戏目录的分隔符", () => {
     expect(instanceFolderPath("C:\\Users\\a\\.minecraft", "生存")).toBe("C:\\Users\\a\\.minecraft\\versions\\生存");
     expect(instanceFolderPath("D:/Games/.minecraft/", "RLCraft")).toBe("D:/Games/.minecraft/versions/RLCraft");
-  });
-  it("javaw.exe", () => {
-    expect(javawOf("C:\\jdk\\bin\\java.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
-    expect(javawOf("C:\\jdk\\bin\\javaw.exe")).toBe("C:\\jdk\\bin\\javaw.exe");
   });
 });
 
@@ -663,17 +626,30 @@ describe("Mod 安装时间、新增标注与更新检查设置", () => {
       [candidate("on1.jar", "2.0")],
     );
     const pick = (...names: string[]) => rows.filter((r) => names.includes(r.name));
-    expect(batchAvailability(pick("On1", "On2"), undefined)).toEqual({ enable: MODS_COPY.batchAllEnabled, disable: undefined, update: undefined, remove: undefined });
-    expect(batchAvailability(pick("Off1", "Off2"), undefined)).toEqual({
+    const nothingUpdating = () => false;
+    expect(batchAvailability(pick("On1", "On2"), undefined, nothingUpdating)).toEqual({ enable: MODS_COPY.batchAllEnabled, disable: undefined, update: undefined, remove: undefined });
+    expect(batchAvailability(pick("Off1", "Off2"), undefined, nothingUpdating)).toEqual({
       enable: undefined,
       disable: MODS_COPY.batchAllDisabled,
       update: MODS_COPY.batchNoUpdates,
       remove: undefined,
     });
-    expect(batchAvailability(pick("On2", "Off1"), undefined)).toEqual({ enable: undefined, disable: undefined, update: MODS_COPY.batchNoUpdates, remove: undefined });
+    expect(batchAvailability(pick("On2", "Off1"), undefined, nothingUpdating)).toEqual({ enable: undefined, disable: undefined, update: MODS_COPY.batchNoUpdates, remove: undefined });
     const lock = "游戏正在运行";
-    expect(batchAvailability(pick("On1", "Off1"), lock)).toEqual({ enable: lock, disable: lock, update: lock, remove: lock });
-    expect(() => batchAvailability([], undefined)).toThrow("没有选中的 Mod");
+    expect(batchAvailability(pick("On1", "Off1"), lock, nothingUpdating)).toEqual({ enable: lock, disable: lock, update: lock, remove: lock });
+    expect(() => batchAvailability([], undefined, nothingUpdating)).toThrow("没有选中的 Mod");
+  });
+
+  it("批量更新只看选中项里可更新的那些：它们都已在更新时带原因禁用，没有可更新的仍说没有可用的更新，还有一个没在更新就可用", () => {
+    const rows = modRows([named("a.jar", "A"), named("b.jar", "B"), named("c.jar", "C")], [candidate("a.jar", "2.0"), candidate("b.jar", "2.0")]);
+    const pick = (...names: string[]) => rows.filter((r) => names.includes(r.name));
+    const updating = (r: { name: string }) => r.name === "A";
+    expect(batchAvailability(pick("A"), undefined, updating).update).toBe(MODS_COPY.batchAllUpdating);
+    expect(batchAvailability(pick("A", "C"), undefined, updating).update).toBe(MODS_COPY.batchAllUpdating);
+    expect(batchAvailability(pick("A", "B"), undefined, updating).update).toBeUndefined();
+    expect(batchAvailability(pick("C"), undefined, updating).update).toBe(MODS_COPY.batchNoUpdates);
+    // 锁住时沿用锁定原因：结束游戏之前说不上「在更新」
+    expect(batchAvailability(pick("A"), "游戏正在运行", updating).update).toBe("游戏正在运行");
   });
 
   it("批量移除的两层关系只说没被一起选中的", () => {
@@ -840,13 +816,13 @@ describe("一键尝试", () => {
     });
   });
 
-  it("本地库缺失带游戏路径提醒时多一个更换游戏目录；显卡驱动给 javaw 路径；文件损坏落在 mods 下改为停用该文件", () => {
+  it("本地库缺失带游戏路径提醒时多一个更换游戏目录；显卡驱动给这次用的 java.exe 路径；文件损坏落在 mods 下改为停用该文件", () => {
     expect(crashFixes(report([clue("native_library_missing")], { warnings: ["game_path"] }), ctx())[0]).toEqual({
       kind: "repair",
       category: "native_library_missing",
       changeGameDir: true,
     });
-    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javawPath: "C:/jdk/bin/javaw.exe" });
+    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javaPath: "C:/jdk/bin/java.exe" });
     const mods = [mod("badmod-1.jar")];
     expect(crashFixes(report([clue("corrupted_jar", { matched: "zip END header not found D:\\mc\\mods\\badmod-1.jar" })]), ctx({ mods }))[0]).toEqual({
       kind: "disable_mod",
@@ -936,19 +912,19 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
     expect(fixes).toEqual([{ kind: "disable_mod", category: "game_version_mismatch", fileName: "sodium-1.jar", name: "sodium-1" }, { kind: "compare_log" }]);
   });
 
-  it("Intel 显卡驱动与本地崩溃：给处理办法三步与 javaw 路径；报告里没有 Java 时不给路径", () => {
+  it("Intel 显卡驱动与本地崩溃：给处理办法三步与 java.exe 路径；报告里没有 Java 时不给路径", () => {
     expect(crashFixes(report([clue("intel_graphics_driver", { detail: "ig9icd64.dll" })]), ctx())[0]).toEqual({
       kind: "driver_steps",
       category: "intel_graphics_driver",
-      javawPath: "C:/jdk/bin/javaw.exe",
+      javaPath: "C:/jdk/bin/java.exe",
     });
     const nativeClue = clue("native_crash", { detail: "0xC0000005", matched: "", line: 0, source: "exit_code" });
-    expect(crashFixes(report([nativeClue], { java: null }), ctx())).toEqual([{ kind: "driver_steps", category: "native_crash", javawPath: null }, { kind: "compare_log" }]);
+    expect(crashFixes(report([nativeClue], { java: null }), ctx())).toEqual([{ kind: "driver_steps", category: "native_crash", javaPath: null }, { kind: "compare_log" }]);
   });
 
   it("显卡、Intel 显卡与本地崩溃同在一份报告里只出一条处理办法，取第一条出现的类别", () => {
     const fixes = crashFixes(report([clue("intel_graphics_driver"), clue("graphics_driver"), clue("native_crash", { source: "exit_code" })]), ctx());
-    expect(fixes).toEqual([{ kind: "driver_steps", category: "intel_graphics_driver", javawPath: "C:/jdk/bin/javaw.exe" }, { kind: "compare_log" }]);
+    expect(fixes).toEqual([{ kind: "driver_steps", category: "intel_graphics_driver", javaPath: "C:/jdk/bin/java.exe" }, { kind: "compare_log" }]);
     const reversed = crashFixes(report([clue("graphics_driver"), clue("intel_graphics_driver")]), ctx());
     expect(reversed.map((f) => (f.kind === "driver_steps" ? f.category : f.kind))).toEqual(["graphics_driver", "compare_log"]);
   });

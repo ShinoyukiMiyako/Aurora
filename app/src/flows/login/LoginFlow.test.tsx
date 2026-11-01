@@ -360,6 +360,40 @@ describe("外置登录弹窗", () => {
     await flush();
   }
 
+  it("服务器故障：探测与登录都原位说明，不落到外层错误，不说地址或密码不对；登录这一步能原样重试", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "skin.example.com");
+    ipc.overrides.set("probe_auth_server", () => {
+      throw new IpcError("ServiceUnavailable", "登录服务暂时不可用（读取验证服务器信息：HTTP 503）", { step: "读取验证服务器信息", status: 503 });
+    });
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    expect(dialog()?.textContent).toContain(AUTHLIB_COPY.serverDown.title);
+    expect(dialog()?.textContent).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+
+    ipc.overrides.delete("probe_auth_server");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const [username, password] = inputs();
+    typeInto(username, "multi@example.com");
+    typeInto(password, "secret");
+    ipc.overrides.set("authlib_login", () => {
+      throw new IpcError("ServiceUnavailable", "登录服务暂时不可用（账号密码认证：HTTP 502）", { step: "账号密码认证", status: 502 });
+    });
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    expect(dialog()?.textContent).toContain(AUTHLIB_COPY.loginServiceDown.title);
+    expect(inputs()[1].value).toBe("secret");
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+
+    ipc.overrides.delete("authlib_login");
+    act(() => button(AUTHLIB_COPY.retry).click());
+    await flush();
+    expect(dialog()?.textContent).not.toContain(AUTHLIB_COPY.loginServiceDown.title);
+    expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+  });
+
   it("不是认证服务器时原位说明；换个地址进入登录这一步", async () => {
     await openAuthlib();
     typeInto(inputs()[0], "not-ygg.example.com");
@@ -374,6 +408,17 @@ describe("外置登录弹窗", () => {
     await flush();
     expect(dialog()?.textContent).toContain("https://skin.example.com/");
     expect(document.activeElement).toBe(inputs()[0]);
+  });
+
+  it("http 地址又探测失败：说明块留给失败原因，明文提醒写成行，两句都在", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "http://not-ygg.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const callouts = [...(dialog()?.querySelectorAll('[class*="_callout_"]') ?? [])];
+    expect(callouts).toHaveLength(1);
+    expect(callouts[0].textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
+    expect(dialog()?.querySelector('[class*="_warnNote_"]')?.textContent).toBe(AUTHLIB_COPY.httpWarning);
   });
 
   it("从皮肤站拖进服务器链接：弹窗打开即填好地址并执行一次「下一步」，停在登录这一步", async () => {

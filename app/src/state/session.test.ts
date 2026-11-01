@@ -11,7 +11,7 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const T0 = 1_720_000_000_000;
-const ACCOUNT = { uuid: "u-1", name: "Steve" };
+const ACCOUNT = { uuid: "u-1", name: "Steve", kind: "microsoft" as const };
 
 function phase(session: SessionState, stageIndex: number, download: SessionState["download"] = null, at = T0): SessionState {
   const name = stageIndex < 3 ? "preparing" : stageIndex === 3 ? "downloading" : stageIndex < 7 ? "launching" : "running";

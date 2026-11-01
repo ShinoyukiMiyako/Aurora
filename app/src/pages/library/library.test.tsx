@@ -416,6 +416,22 @@ describe("实例库：动作", () => {
     expect(toastTitles()).toContain("success:已从侧栏取消固定「樱花生存」");
   });
 
+  it("侧栏从满到不满：聚焦着的图钉不重挂，焦点留在它上面", async () => {
+    instances = ["a", "b", "c", "d", "e", "f"].map((id) => instanceDto(id));
+    bootOverrides(ipc, { instances, pins: ["a", "b", "c", "d", "e"] });
+    ipc.overrides.set("list_instances", () => instances);
+    await mount();
+    const pin = byLabel("把「f」固定到侧栏");
+    act(() => pin.focus());
+    await act(async () => {
+      await launcher.actions.togglePin("a");
+    });
+    await flush();
+    expect(byLabel("把「f」固定到侧栏")).toBe(pin);
+    expect(document.activeElement).toBe(pin);
+    expect(pin.getAttribute("aria-disabled")).toBeNull();
+  });
+
   it("侧栏已满 5 个：图钉不写固定列表，只给上限提示；菜单项禁用并说明原因", async () => {
     instances = ["a", "b", "c", "d", "e", "f"].map((id) => instanceDto(id));
     bootOverrides(ipc, { instances, pins: ["a", "b", "c", "d", "e"] });
@@ -610,6 +626,49 @@ describe("实例库：动作", () => {
     const other = byText<HTMLButtonElement>("article button", "樱花生存").closest("article");
     if (other === null) throw new Error("找不到卡片");
     expect(byText<HTMLButtonElement>("button", "启动", other).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("损坏的实例被别的实例当作基底：底栏「修复并启动」与修复横幅都带原因禁用，点了不排补全", async () => {
+    instances = instances.map((i) => (i.id === "坏掉的" ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "坏掉的").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    const repair = byText<HTMLButtonElement>("button", "修复并启动", card);
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(repair)).toBe("实例「Fabric 整合」正在使用它，结束后才能补全");
+    click(repair);
+    await flush();
+    const banner = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairOne);
+    expect(banner.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(banner)).toBe("实例「Fabric 整合」正在使用它，结束后才能补全");
+    click(banner);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("修复横幅的「全部修复」：被占着的实例这轮不排，其余照排", async () => {
+    instances = [...instances, instanceDto("也坏了", { status: "broken", broken_reason: "缺少客户端 jar", activity: "backing_up" })];
+    await mount();
+    const repairAll = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairAll);
+    expect(repairAll.getAttribute("aria-disabled")).toBeNull();
+    click(repairAll);
+    await flush();
+    expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+  });
+
+  it("整合包没导入完的实例在备份或恢复存档：底栏「删除」带原因禁用，不发删除预览", async () => {
+    const incomplete = { kind: "modpack" as const, outcome: "failed" as const, started_at: NOW - HOUR, spec: null, error: { code: "network_failed", message: "连接被重置" } };
+    instances = [...instances, instanceDto("本地包", { status: "broken", broken_reason: null, incomplete, modpack: null, activity: "backing_up" })];
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "本地包").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    const remove = byText<HTMLButtonElement>("button", "删除", card);
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(remove)).toBe("正在备份或恢复这个实例的存档，完成后才能删除");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
   });
 
   it("后端正在改动 Mod、资源或设置：删除入口提前禁用并写明原因，不发预览与删除", async () => {

@@ -203,7 +203,7 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
         },
       },
     };
-    ipc.overrides.set("load_task_journal", () => [record]);
+    ipc.overrides.set("load_task_journal", () => ({ seq: 0, tasks: [record] }));
     unsubscribe();
     store = await startedStore();
     unsubscribe = watchToasts(store);
@@ -222,7 +222,7 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
   /** 把一条任务记录当成上次退出前写下的任务表，重启 store 读回来。 */
   async function restartWith(record: TaskRecordDto): Promise<void> {
     store.stop();
-    ipc.overrides.set("load_task_journal", () => [record]);
+    ipc.overrides.set("load_task_journal", () => ({ seq: 0, tasks: [record] }));
     unsubscribe();
     store = await startedStore();
     unsubscribe = watchToasts(store);

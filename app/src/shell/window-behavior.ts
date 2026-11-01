@@ -37,16 +37,20 @@ export function sameSessionStep(a: SessionStep | null, b: SessionStep | null): b
 
 // ---------------------------------------------------------------- 关闭确认
 
-/** 关闭前要不要确认、确认框写什么。会话与任务同时成立时合并成一个对话框，正文按「会话、任务」顺序拼接。 */
-export function closeConfirmOptions(need: { session: boolean; tasks: number }): ConfirmOptions | null {
-  if (!need.session && need.tasks === 0) return null;
-  const body = [need.session ? CONFIRM_COPY.closeWithSession : "", need.tasks > 0 ? CONFIRM_COPY.closeWithTasks(need.tasks) : ""].join("");
+/** 关闭前要不要确认、确认框写什么。几件事同时成立时合并成一个对话框，正文按「会话、任务、自动备份」顺序拼接。 */
+export function closeConfirmOptions(need: { session: boolean; tasks: number; backups: number }): ConfirmOptions | null {
+  if (!need.session && need.tasks === 0 && need.backups === 0) return null;
+  const body = [
+    need.session ? CONFIRM_COPY.closeWithSession : "",
+    need.tasks > 0 ? CONFIRM_COPY.closeWithTasks(need.tasks) : "",
+    need.backups > 0 ? CONFIRM_COPY.closeWithBackups(need.backups) : "",
+  ].join("");
   return {
     title: CONFIRM_COPY.closeTitle,
     body,
     confirmLabel: CONFIRM_COPY.closeConfirm,
-    // 只有任务时取消键说「继续下载」；有会话时取消的是「关掉启动器」本身，用「取消」
-    cancelLabel: need.session ? CONFIRM_COPY.cancel : CONFIRM_COPY.keepDownloading,
+    // 只有任务时取消键说「继续下载」；有会话或只有备份时取消的是「关掉启动器」本身，用「取消」
+    cancelLabel: need.session || need.tasks === 0 ? CONFIRM_COPY.cancel : CONFIRM_COPY.keepDownloading,
     tone: "danger",
   };
 }
@@ -56,7 +60,7 @@ export function closeConfirmOptions(need: { session: boolean; tasks: number }): 
  * 确认后把下载任务记录立即写一次再销毁窗口。确认退出不结束游戏进程。
  */
 export function useCloseGuard(): void {
-  const need = useLauncherSelector(closeNeedsConfirm, (a, b) => a.session === b.session && a.tasks === b.tasks);
+  const need = useLauncherSelector(closeNeedsConfirm, (a, b) => a.session === b.session && a.tasks === b.tasks && a.backups === b.backups);
   const actions = useLauncherActions();
   const { confirm } = useShell();
   const run = useRunner();

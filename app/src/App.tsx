@@ -12,7 +12,6 @@ import { lazy, Suspense, type ComponentType, type ReactNode } from "react";
 import type { Appearance } from "./domain/types";
 import LoginFlow from "./flows/login";
 import { PickDirectoryProvider } from "./flows/onboarding/platform";
-import { PickSaveFileProvider } from "./pages/instance/save-file";
 import { logDiagnostic } from "./ipc/diagnostics";
 import { PickFolderProvider } from "./pages/discover/platform";
 import { SETTINGS_COMMANDS, SettingsCommandsProvider, type SettingsCommands } from "./pages/settings/commands";
@@ -22,7 +21,7 @@ import { ErrorBoundary } from "./shell/ErrorBoundary";
 import { describeError, ErrorScreen } from "./shell/ErrorScreen";
 import { buildPageTable } from "./shell/nav";
 import { createPageRegistry, type PageRegistry } from "./shell/pages";
-import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickSaveFile } from "./shell/platform";
+import { gameDirectoryCommands, launcherFolderCommands, pickDirectory } from "./shell/platform";
 import { ShellProvider } from "./shell/shell";
 import { loadStartupNotices } from "./shell/startup-notices";
 import { RevealWindow } from "./shell/window";
@@ -58,9 +57,7 @@ function HostProviders({ children }: { children: ReactNode }) {
   return (
     <SettingsCommandsProvider value={SETTINGS_HOST}>
       <PickDirectoryProvider value={pickDirectory}>
-        <PickFolderProvider value={pickDirectory}>
-          <PickSaveFileProvider value={pickSaveFile}>{children}</PickSaveFileProvider>
-        </PickFolderProvider>
+        <PickFolderProvider value={pickDirectory}>{children}</PickFolderProvider>
       </PickDirectoryProvider>
     </SettingsCommandsProvider>
   );

@@ -5,7 +5,7 @@ import { SIDEBAR_PIN_LIMIT, USED_AUTH_SERVERS_LIMIT } from "../domain/limits";
 import type { Task } from "../domain/types";
 import { isSessionActive } from "./session";
 import type { LauncherState } from "./store";
-import { isActiveTask, queuePosition as taskQueuePosition } from "./tasks";
+import { isActiveTask, queuePosition as taskQueuePosition, WORLD_TASK_COMMANDS } from "./tasks";
 
 export function activeAccount(state: LauncherState): Account | null {
   if (state.currentAccountId === null) return null;
@@ -39,9 +39,6 @@ export function instanceTask(state: LauncherState, instanceId: string): Task | n
   const task = state.tasks.find((t) => t.instanceId === instanceId && isActiveTask(t));
   return task === undefined ? null : task;
 }
-
-/** 备份、导出与恢复存档的任务命令；它们都带着 id（实例）与 world（存档文件夹名）两个参数。 */
-export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world", "export_world", "restore_world_backup"]);
 
 /**
  * 这个实例上有备份、导出或恢复任务在排队或进行中的存档（文件夹名，去重后按码位排序）。只随任务的增减变，
@@ -123,7 +120,12 @@ export function usedAuthServers(state: LauncherState, except: readonly string[])
   return servers.slice(0, USED_AUTH_SERVERS_LIMIT);
 }
 
-/** 有活动会话或排队、进行中的任务时，关闭窗口要先确认。 */
-export function closeNeedsConfirm(state: LauncherState): { session: boolean; tasks: number } {
-  return { session: busyInstanceId(state) !== null, tasks: activeTasks(state).length };
+/**
+ * 有活动会话、排队或进行中的任务、或自动备份在跑时，关闭窗口要先确认。
+ * 自动备份是后端在游戏退出后直接跑的，不在任务表里，只能看实例报的 backing_up；手动备份也报它，已经算在任务里，不重复数。
+ */
+export function closeNeedsConfirm(state: LauncherState): { session: boolean; tasks: number; backups: number } {
+  const tasks = activeTasks(state);
+  const backups = state.instances.filter((inst) => inst.activity === "backing_up" && !tasks.some((t) => t.instanceId === inst.id)).length;
+  return { session: busyInstanceId(state) !== null, tasks: tasks.length, backups };
 }

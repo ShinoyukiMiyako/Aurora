@@ -2,6 +2,7 @@
 // 插值一律经 domain/format 格式化；带插值的条目写成函数，参数缺失属于调用方的契约错误，直接抛出。
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
+import type { InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { NameRule, TemplateSkipReason } from "../ipc/instances";
@@ -190,7 +191,7 @@ export const SESSION_COPY = {
   running: (elapsedMs: number) => `已运行 ${formatElapsed(elapsedMs)}`,
   cancelledDetail: "已下载的文件会保留",
   played: (minutes: number) => (minutes < 1 ? "本次游玩不到 1 分钟" : `本次游玩 ${Math.floor(minutes)} 分钟`),
-  crashClue: (label: string) => joinMixed("日志指向", label),
+  crashClue: (label: string) => cluePointer([label]),
   noClue: "没有匹配到已知原因",
   /** 阶段清单里跳过下载时该行右侧的说明。 */
   noDownload: "无需下载",
@@ -253,6 +254,8 @@ export interface FailureCopy {
 export interface FailureContext {
   /** 本次启动所用账户的名字。 */
   accountName: string;
+  /** 本次启动所用账户的类型：外置登录账户的故障不是微软的故障。 */
+  accountKind: AccountKind;
   /** 实例设置里固定了 Java 路径（不是 auto）。 */
   javaPinned: boolean;
 }
@@ -326,21 +329,24 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     }
     case "account_relogin":
       return { title: "需要重新登录", body: `${ctx.accountName} 的登录已失效。`, fix: { kind: "relogin", label: "重新登录" }, secondary: null };
+    // 微软与外置登录账户续期时连不上都走这里，文案不写账户类型
     case "account_refresh_network":
       return {
-        title: "无法验证微软账户",
+        title: "无法验证账户",
         body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
         fix: RETRY,
         secondary: OFFLINE_ONCE,
       };
     // 不读插值参数：status 只供排查，缺了也不该让失败卡抛错
-    case "account_service_down":
+    case "account_service_down": {
+      const microsoft = ctx.accountKind === "microsoft";
       return {
-        title: "微软登录服务暂时不可用",
-        body: `微软的登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+        title: microsoft ? "微软登录服务暂时不可用" : "登录服务暂时不可用",
+        body: `${microsoft ? "微软的" : ""}登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
         fix: RETRY,
         secondary: OFFLINE_ONCE,
       };
+    }
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
     case "files_failed":
@@ -554,13 +560,20 @@ export function joinCrashLabels(labels: readonly string[]): string {
   return joinMixed(`${labels[0]}、${labels[1]}`, "等", `${labels.length} 类问题`);
 }
 
+/**
+ * 崩溃通用句式的主干：「日志指向 A 与 B」。native_crash 是退出码兜底，不来自任何一行日志，
+ * 线索只有它时写「退出码指向」，否则紧接着的解释「日志里没有匹配到已知原因」就和这句对不上。
+ */
+export function cluePointer(labels: readonly string[]): string {
+  const onlyExitCode = labels.every((label) => label === CRASH_CATEGORY.native_crash.label);
+  return joinMixed(onlyExitCode ? "退出码指向" : "日志指向", joinCrashLabels(labels));
+}
+
 export const CRASH_COPY = {
   noClueTitle: "没有匹配到已知原因",
   noClueExplain: "可以对照完整日志排查，崩溃前的警告往往能找到更早的源头。",
   headline: (categories: readonly string[]) =>
-    categories.length === 0
-      ? "没有匹配到已知原因"
-      : joinMixed(`找到 ${categories.length} 条线索，日志指向`, joinCrashLabels(categories.map(crashCategoryLabel))),
+    categories.length === 0 ? "没有匹配到已知原因" : `找到 ${categories.length} 条线索，${cluePointer(categories.map(crashCategoryLabel))}`,
   exitLine: (relative: string, exitCode: number | null, note: ExitCodeNoteDto | null) => {
     if (exitCode === null) return `${relative}崩溃 · 退出码未知`;
     if (note === null) return `${relative}崩溃 · 退出码 ${exitCode}`;
@@ -659,13 +672,17 @@ export const TASK_STATUS_LABEL: Readonly<Record<TaskStatus, string>> = {
   cancelled: "已取消",
 };
 
-/** 导出整合包在运行时是在本地打包，不是在下载。 */
-const EXPORT_RUNNING_LABEL = "打包中";
+/** 这几类运行时在本地读写，不是在下载。 */
+const LOCAL_RUNNING_LABEL: Readonly<Partial<Record<TaskKind, string>>> = {
+  modpack_export: "打包中",
+  world_backup: "打包中",
+  world_restore: "恢复中",
+};
 
 /** 一个任务此刻的状态标签：显示任务状态的地方都用它，不直接取 TASK_STATUS_LABEL。 */
 export function taskStatusLabel(task: { kind: TaskKind; status: TaskStatus }): string {
-  if (task.status === "running" && task.kind === "modpack_export") return EXPORT_RUNNING_LABEL;
-  return TASK_STATUS_LABEL[task.status];
+  const local = task.status === "running" ? LOCAL_RUNNING_LABEL[task.kind] : undefined;
+  return local === undefined ? TASK_STATUS_LABEL[task.status] : local;
 }
 
 /** 任务类别标签。修复任务补的是游戏文件，归在「游戏」名下；备份、导出与恢复都归在「存档」名下。 */
@@ -862,7 +879,7 @@ export const TOAST_COPY = {
   accountDeleted: (name: string) => `已删除账户 ${name}`,
   accountSwitched: (name: string) => `已切换到 ${name}`,
   instanceSelected: (name: string) => ({ title: `「${name}」已设为当前实例`, body: "主页的「继续游玩」会显示它" }),
-  settingChanged: (name: string, item: string, value: string) => ({ title: `「${name}」的${item}已改为 ${value}`, body: "下次启动生效" }),
+  settingChanged: (name: string, item: string, value: string) => ({ title: joinMixed(`「${name}」的`, item, `已改为 ${value}`), body: "下次启动生效" }),
   networkRestored: (failed: number) => (failed === 0 ? { title: "网络已恢复" } : { title: "网络已恢复", body: `有 ${failed} 个下载失败` }),
   retryAllAction: "全部重试",
   copyFailed: "复制失败",
@@ -943,7 +960,7 @@ export const ACTION_ERROR = {
   readInstanceSettings: "实例设置读不出来",
   subscribe: "后端事件订阅失败",
   /** 任务本身已完成，完成后的落地（写封面、固定、刷新列表）出错。 */
-  landTask: (title: string) => `${title}已完成，后续设置没有写入`,
+  landTask: (title: string) => joinMixed(title, "已完成，后续设置没有写入"),
 } as const;
 
 /** 启动时首查各切片失败的通知标题。 */
@@ -958,9 +975,16 @@ export const BOOT_SLICE_ERROR = {
 
 // ---------------------------------------------------------------- 确认对话框
 
+/** 放进「」里的文字：任务标题自己带直角引号（补全「生存」的游戏文件）时，内层换成『』。 */
+function quoted(text: string): string {
+  return `「${text.replaceAll("「", "『").replaceAll("」", "』")}」`;
+}
+
 export const CONFIRM_COPY = {
   cancel: "取消",
   keepDownloading: "继续下载",
+  /** 被取消的都不是下载时的取消键：写「继续下载」就说错了在做的事。 */
+  keepTasks: "不取消",
   stopGame: (name: string) => ({
     title: "结束游戏？",
     body: `会直接结束「${name}」的游戏进程，没保存的进度可能丢失。正常退出请在游戏菜单里保存并退出。`,
@@ -977,22 +1001,22 @@ export const CONFIRM_COPY = {
     confirmLabel: "结束并启动",
   }),
   cancelCreate: (taskTitle: string, instance: string) => ({
-    title: `取消「${taskTitle}」？`,
+    title: `取消${quoted(taskTitle)}？`,
     body: `「${instance}」还没装好，取消后这个实例会被删除。`,
     confirmLabel: "取消任务",
   }),
   cancelRepair: (taskTitle: string, instance: string) => ({
-    title: `取消「${taskTitle}」？`,
+    title: `取消${quoted(taskTitle)}？`,
     body: `「${instance}」会停在文件不完整的状态，之后可以再点「修复实例」。`,
     confirmLabel: "取消任务",
   }),
-  cancelAll: (count: number, creating: number, repairing: number) => {
+  cancelAll: (count: number, creating: number, repairing: number, downloads: number) => {
     const parts: string[] = [];
     if (creating > 0) parts.push(`正在新建的 ${creating} 个实例会被删除`);
     if (repairing > 0) parts.push(`正在修复的 ${repairing} 个实例会保持文件不完整`);
     return {
       title: `取消全部 ${count} 个任务？`,
-      body: parts.length > 0 ? `${parts.join("，")}。` : "已下载的部分会被丢弃。",
+      body: parts.length > 0 ? `${parts.join("，")}。` : downloads > 0 ? "已下载的部分会被丢弃。" : "还没完成的部分会被丢弃。",
       confirmLabel: "全部取消",
     };
   },
@@ -1004,6 +1028,7 @@ export const CONFIRM_COPY = {
   }),
   closeWithSession: `游戏会继续运行，但之后的日志和崩溃诊断不会被记录。`,
   closeWithTasks: (count: number) => `还有 ${count} 个下载没完成，关闭后会中断，下次打开可以重试。`,
+  closeWithBackups: (count: number) => `有 ${count} 个实例正在自动备份存档，关闭后这次备份不会完成。`,
   closeTitle: `关闭${APP_NAME}？`,
   closeConfirm: `关闭${APP_NAME}`,
 } as const;
@@ -1123,6 +1148,8 @@ export const AUTHLIB_COPY = {
   next: "下一步",
   unreachable: { title: "连不上这个地址", body: "检查地址是否正确，或稍后重试。" },
   notYggdrasil: { title: "这个地址不是外置登录服务器", body: "需要支持 authlib-injector 的认证服务器地址，皮肤站的说明页里一般会给出。" },
+  serverDown: { title: "这个服务器暂时不可用", body: "服务器那边出了故障，地址没有问题。稍后重试。" },
+  loginServiceDown: { title: "登录服务暂时不可用", body: "服务器那边出了故障，不是账户或密码的问题。稍后重试。" },
   username: "邮箱或用户名",
   password: "密码",
   passwordNote: `密码只用于这一次登录，${APP_NAME}不会保存`,
@@ -1222,6 +1249,44 @@ export const INSTANCE_IN_USE_COPY = {
   repair: (user: string) => `实例「${user}」正在使用它，结束后才能补全`,
   delete: (user: string) => `实例「${user}」正在使用它，结束后才能删除`,
 } as const;
+
+/** 操作被实例锁挡住时的悬停提示与菜单项 hint。 */
+const INSTANCE_LOCK_REASON = {
+  running: "游戏正在运行，先结束游戏",
+  runningMods: "游戏正在运行，Mod 文件被占用",
+  installing: "实例正在补全文件",
+  renameRunning: "游戏正在运行，结束后才能重命名",
+  renameInstalling: "安装任务正在写这个实例的文件夹",
+  repairInProgress: "进行中",
+  modifying: {
+    rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
+    repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
+    delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
+  },
+  /** 备份、恢复或导出存档进行中，游戏退出后的自动备份也算。 */
+  backingUp: {
+    rename: "正在备份或恢复这个实例的存档，完成后才能重命名",
+    repair: "正在备份或恢复这个实例的存档，完成后才能补全",
+    delete: "正在备份或恢复这个实例的存档，完成后才能删除",
+  },
+} as const;
+
+/** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
+export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "delete"): string | undefined {
+  if (lock === null) return undefined;
+  if (typeof lock === "object") {
+    if (kind === "mods") throw new Error("被别的实例当作基底时照样能改动 Mod，不会因此锁住 Mod 操作");
+    return INSTANCE_IN_USE_COPY[kind](lock.usedBy);
+  }
+  if (lock === "modifying" || lock === "backing_up") {
+    if (kind === "mods") throw new Error(`${lock} 与改动 Mod 互相兼容，不会因此锁住 Mod 操作`);
+    return lock === "modifying" ? INSTANCE_LOCK_REASON.modifying[kind] : INSTANCE_LOCK_REASON.backingUp[kind];
+  }
+  if (kind === "rename") return lock === "running" ? INSTANCE_LOCK_REASON.renameRunning : INSTANCE_LOCK_REASON.renameInstalling;
+  if (kind === "mods") return lock === "running" ? INSTANCE_LOCK_REASON.runningMods : INSTANCE_LOCK_REASON.installing;
+  if (kind === "repair" && lock === "installing") return INSTANCE_LOCK_REASON.repairInProgress;
+  return INSTANCE_LOCK_REASON.running;
+}
 
 /** 整合包名全是 Windows 不允许的字符、整理完什么都不剩时，新实例的默认名。 */
 export const MODPACK_FALLBACK_NAME = "整合包";

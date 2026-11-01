@@ -297,6 +297,32 @@
   gap: var(--sk-space-4);
 }
 
+/* 说明块之外的提醒：文字与说明块的文字对齐，换行不限行数 */
+.noteRows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  padding: 0 var(--sk-space-14);
+}
+
+.noteRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* 16px 图标与 20px 行高的首行居中对齐 */
+.noteIcon {
+  flex: none;
+  margin-top: calc((var(--sk-lh-small) - 16px) / 2);
+  color: var(--sk-warn);
+}
+
 .warnLine {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);

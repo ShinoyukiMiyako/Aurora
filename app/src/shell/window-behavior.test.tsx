@@ -119,11 +119,11 @@ afterEach(() => {
 
 describe("关闭确认的文案", () => {
   it("没有会话也没有任务时不确认", () => {
-    expect(closeConfirmOptions({ session: false, tasks: 0 })).toBeNull();
+    expect(closeConfirmOptions({ session: false, tasks: 0, backups: 0 })).toBeNull();
   });
 
   it("只有会话：正文说游戏会继续运行，取消键是「取消」", () => {
-    const options = closeConfirmOptions({ session: true, tasks: 0 });
+    const options = closeConfirmOptions({ session: true, tasks: 0, backups: 0 });
     expect(options).toEqual({
       title: CONFIRM_COPY.closeTitle,
       body: CONFIRM_COPY.closeWithSession,
@@ -134,15 +134,33 @@ describe("关闭确认的文案", () => {
   });
 
   it("只有任务：正文写任务数，取消键是「继续下载」", () => {
-    const options = closeConfirmOptions({ session: false, tasks: 2 });
+    const options = closeConfirmOptions({ session: false, tasks: 2, backups: 0 });
     expect(options?.body).toBe(CONFIRM_COPY.closeWithTasks(2));
     expect(options?.cancelLabel).toBe(CONFIRM_COPY.keepDownloading);
   });
 
   it("两者都有：合并成一个对话框，正文先会话后任务", () => {
-    const options = closeConfirmOptions({ session: true, tasks: 1 });
+    const options = closeConfirmOptions({ session: true, tasks: 1, backups: 0 });
     expect(options?.body).toBe(`${CONFIRM_COPY.closeWithSession}${CONFIRM_COPY.closeWithTasks(1)}`);
     expect(options?.cancelLabel).toBe(CONFIRM_COPY.cancel);
+  });
+});
+
+describe("关闭确认：自动备份", () => {
+  it("只有自动备份在跑：正文说备份会中断，取消键是「取消」", () => {
+    expect(closeConfirmOptions({ session: false, tasks: 0, backups: 2 })).toEqual({
+      title: CONFIRM_COPY.closeTitle,
+      body: "有 2 个实例正在自动备份存档，关闭后这次备份不会完成。",
+      confirmLabel: CONFIRM_COPY.closeConfirm,
+      cancelLabel: CONFIRM_COPY.cancel,
+      tone: "danger",
+    });
+  });
+
+  it("与任务同时有：正文按任务、备份的顺序拼接，取消键仍是「继续下载」", () => {
+    const options = closeConfirmOptions({ session: false, tasks: 1, backups: 1 });
+    expect(options?.body).toBe(`${CONFIRM_COPY.closeWithTasks(1)}${CONFIRM_COPY.closeWithBackups(1)}`);
+    expect(options?.cancelLabel).toBe(CONFIRM_COPY.keepDownloading);
   });
 });
 
@@ -230,6 +248,43 @@ describe("关闭请求", () => {
     await flush();
     expect(win.port.destroy).not.toHaveBeenCalled();
     expect(callsOf(ipc, "save_task_journal")).toHaveLength(0);
+  });
+
+  it("游戏退出后自动备份还在跑：先确认，取消就不关；备份完（实例不再报占用）直接关", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存", { activity: "backing_up" })] });
+    await mount();
+    await act(async () => {
+      void win.requestClose();
+      await settle();
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(CONFIRM_COPY.closeWithBackups(1));
+    act(() => dialogButton(CONFIRM_COPY.cancel).click());
+    await flush();
+    expect(win.port.destroy).not.toHaveBeenCalled();
+
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { activity: null })]);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await act(async () => {
+      await win.requestClose();
+      await settle();
+    });
+    expect(win.port.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("手动备份在任务表里：只算一次任务，不再按自动备份提一遍", async () => {
+    ipc.overrides.set("backup_world", () => deferred<never>().promise);
+    await mount();
+    act(() => void launcher.actions.backupWorld("生存", "w1", "旧世界"));
+    await flush();
+    await act(async () => {
+      void win.requestClose();
+      await settle();
+    });
+    const body = document.querySelector('[role="dialog"]')?.textContent;
+    expect(body).toContain(CONFIRM_COPY.closeWithTasks(1));
+    expect(body).not.toContain("自动备份");
   });
 
   it("确认之后写任务记录再销毁，不结束游戏进程", async () => {

@@ -1,5 +1,6 @@
 // 崩溃诊断：顶部是这次崩溃的摘要（参与扫描的文件、这次启动时的提醒）；左列逐条线索（类别、解释、命中的日志行与前两行，
-// 只有退出码时改写退出码），右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」。
+// 只有退出码时改写退出码），右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」；
+// 线索全部只来自退出码时摘要写「退出码指向」。
 // 本页不放第二个启动胶囊：重新启动用头图的胶囊。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -15,6 +16,7 @@ import {
   crashCategoryLabel,
   EXIT_CODE_COPY,
   launchWarningCopy,
+  lockReason,
   TOAST_COPY,
   type CrashCategoryName,
   type LaunchWarningActionKind,
@@ -46,7 +48,7 @@ import { CRASH_PAGE_COPY, MODS_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
 import { crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface CrashTabProps {
@@ -704,10 +706,10 @@ function FixRow({
         <ol className={styles.steps}>
           <li>{CRASH_PAGE_COPY.driverStep1}</li>
           <li>{CRASH_PAGE_COPY.driverStep2}</li>
-          {fix.javawPath !== null && (
+          {fix.javaPath !== null && (
             <li className={styles.stepCopy}>
-              <code className={styles.path}>{fix.javawPath}</code>
-              <CopyButton text={fix.javawPath} label={CRASH_PAGE_COPY.copyJavaw} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
+              <code className={styles.path}>{fix.javaPath}</code>
+              <CopyButton text={fix.javaPath} label={CRASH_PAGE_COPY.copyJava} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
             </li>
           )}
         </ol>

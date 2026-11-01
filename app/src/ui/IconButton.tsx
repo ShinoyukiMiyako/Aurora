@@ -83,17 +83,11 @@ export function IconButton({
       {badge !== undefined && <span className={styles.badge}>{badge}</span>}
     </button>
   );
-  if (softDisabled && disabledReason !== undefined)
-    return (
-      <Tooltip content={tooltip ? label : disabledReason} sub={tooltip ? disabledReason : undefined} side={tooltipSide} wrap>
-        {button}
-      </Tooltip>
-    );
-  return tooltip ? (
-    <Tooltip content={label} side={tooltipSide}>
+  // 包裹层常驻：tooltip={false} 的按钮原因随状态来去时同样不重挂，聚焦着的按钮不丢焦点
+  const reason = softDisabled ? disabledReason : undefined;
+  return (
+    <Tooltip content={tooltip ? label : reason} sub={tooltip ? reason : undefined} side={tooltipSide} wrap={reason !== undefined} disabled={!tooltip && reason === undefined}>
       {button}
     </Tooltip>
-  ) : (
-    button
   );
 }

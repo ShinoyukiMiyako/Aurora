@@ -13,7 +13,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -104,6 +104,22 @@ function dialog(): HTMLElement {
 
 function click(el: HTMLElement) {
   act(() => el.click());
+}
+
+/** 悬停后关联的提示气泡里写的原因。 */
+async function hoverReason(el: HTMLElement): Promise<string> {
+  act(() => {
+    el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  const tip = [...document.querySelectorAll<HTMLElement>('[role="tooltip"]')].at(-1);
+  act(() => {
+    el.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+  });
+  if (tip === undefined) throw new Error("悬停后没有提示气泡");
+  return textOf(tip);
 }
 
 function typeInto(el: HTMLInputElement, value: string) {
@@ -283,6 +299,23 @@ describe("安装时间与新增标注", () => {
     expect(widest).toBe("2026年12月28日");
     expect(Number(px[1]) - 2 * CELL_PADDING).toBeGreaterThanOrEqual(widthOf(widest));
   });
+
+  it("操作列放得下更新按钮、更多菜单与移除键，按钮不被单元格裁掉", async () => {
+    await open();
+    const headers = [...grid().querySelectorAll<HTMLElement>('[role="columnheader"]')].filter((h) => h.dataset.hideRegular === undefined);
+    const at = headers.findIndex((h) => h.textContent === "操作");
+    expect(at).toBeGreaterThan(0);
+    const template = grid().style.getPropertyValue("--table-cols-regular").match(/minmax\([^)]*\)|\S+/g);
+    if (template === null) throw new Error("表格没有 regular 档的列模板");
+    const px = /^(\d+)px$/.exec(template[at]);
+    if (px === null) throw new Error(`操作列不是固定宽：${template[at]}`);
+
+    const CELL_PADDING = 12;
+    const GAP = 6;
+    const UPDATE_BUTTON = 56;
+    const ICON_BUTTON = 30;
+    expect(Number(px[1]) - 2 * CELL_PADDING).toBeGreaterThanOrEqual(UPDATE_BUTTON + ICON_BUTTON + ICON_BUTTON + 2 * GAP);
+  });
 });
 
 describe("批量操作", () => {
@@ -378,6 +411,24 @@ describe("批量操作", () => {
     click(button("停用"));
     await flush();
     expect(callsOf(ipc, "set_mods_enabled")).toEqual([{ versionId: ID, fileNames: ["iris.jar"], enabled: false }]);
+  });
+
+  it("行内开关聚焦着点下去：等后端期间软禁用，开关不重挂，焦点留在它上面；回来后恢复可点", async () => {
+    await open();
+    const pending = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => pending.promise);
+    const toggle = find("switch", "停用 Sodium") as HTMLButtonElement;
+    act(() => toggle.focus());
+    click(toggle);
+    expect(toggle.isConnected).toBe(true);
+    expect(toggle.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(toggle);
+
+    pending.resolve("sodium.jar.disabled");
+    await flush();
+    expect(toggle.isConnected).toBe(true);
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute("aria-disabled")).toBeNull();
   });
 
   it("禁用原因：选中的都已启用时「启用」带原因禁用，选中的都没有更新时「更新」同样禁用", async () => {
@@ -553,13 +604,22 @@ describe("更新预览", () => {
     expect(callsOf(ipc, "check_updates")).toHaveLength(1);
   });
 
-  it("已在排队或进行中更新的 Mod 不再列进预览：确认后不会给同一个文件再排一次更新", async () => {
+  it("有更新在跑时「全部更新」转圈、不开预览；走批量更新时已在更新的 Mod 不列进预览，确认后不会给同一个文件再排一次", async () => {
     await open();
     click(button("更新 Sodium"));
     await flush();
     expect(launcher.state.tasks.map((t) => [t.spec.command, t.spec.args.fileName])).toEqual([["update_mod", "sodium.jar"]]);
 
-    click(button("全部更新 · 3"));
+    const updateAll = button("全部更新 · 3");
+    expect(updateAll.getAttribute("aria-busy")).toBe("true");
+    click(updateAll);
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Fabric API"));
+    click(find("checkbox", "选择 Handmade"));
+    click(button("更新"));
     await flush();
     expect(textOf(dialog())).toContain("已勾选 2 / 2");
     expect(textOf(dialog())).not.toContain("Sodium");
@@ -570,6 +630,48 @@ describe("更新预览", () => {
     expect(composite).toHaveLength(1);
     const items = composite[0].spec.args.items as { fileName: string }[];
     expect(items.map((i) => i.fileName)).toEqual(["fabric-api.jar", "handmade.jar"]);
+  });
+
+  it("选中的 Mod 都已在更新：批量更新带原因禁用，点了不开预览；另选一个还能更新的就恢复可用", async () => {
+    await open();
+    click(button("更新 Sodium"));
+    await flush();
+    click(find("checkbox", "选择 Sodium"));
+    const update = button("更新");
+    expect(update.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(update)).toBe("选中的 Mod 都已在更新");
+    click(update);
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    click(find("checkbox", "选择 Fabric API"));
+    expect(button("更新").getAttribute("aria-disabled")).toBeNull();
+    click(button("更新"));
+    await flush();
+    expect(textOf(dialog())).toContain("已勾选 1 / 1");
+  });
+
+  it("单个更新还在查可更新项时确认批量更新：那一行继续转圈，批量入队之后也不松开", async () => {
+    await open();
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    click(button("更新 Sodium"));
+    await flush();
+    expect(button("更新 Sodium").getAttribute("aria-busy")).toBe("true");
+
+    click(find("checkbox", "选择 Fabric API"));
+    click(button("更新"));
+    await flush();
+    click(button("更新 1 个", dialog()));
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.spec.args.fileName)).toEqual(["fabric-api.jar"]);
+    expect(button("更新 Sodium").getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => {
+      checking.resolve(updates);
+      await settle(20);
+    });
+    expect(launcher.state.tasks.map((t) => t.spec.args.fileName).sort()).toEqual(["fabric-api.jar", "sodium.jar"]);
   });
 
   it("全不选时确认键带原因禁用；批量更新只列选中行里可更新的", async () => {

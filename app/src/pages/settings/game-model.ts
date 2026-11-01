@@ -1,22 +1,11 @@
 // 游戏分区的推导：游戏目录的显示名与比较、探测结果去重、内存超出空闲的提醒。纯函数。
 
+import { samePath } from "../../domain/paths";
 import type { GameDirectoryDto, NamedDirectoryDto } from "../../state/queries/catalog";
 
 /** Java 的 classpath 用「!」分隔 jar 内路径，目录名里带它会让游戏读不出文件。 */
 export function hasBang(path: string): boolean {
   return path.includes("!");
-}
-
-const WINDOWS_PATH = /^[a-zA-Z]:[\\/]/;
-
-/** 比较用：统一分隔符、去掉末尾分隔符；Windows 盘符路径不区分大小写。 */
-export function normalizePath(path: string): string {
-  const unified = path.trim().replace(/\\/g, "/").replace(/\/+$/, "");
-  return WINDOWS_PATH.test(path.trim()) ? unified.toLowerCase() : unified;
-}
-
-export function samePath(a: string, b: string): boolean {
-  return normalizePath(a) === normalizePath(b);
 }
 
 /**

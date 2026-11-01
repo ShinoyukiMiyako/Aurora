@@ -136,6 +136,7 @@ function currentInstanceEntry(entry: LaunchEntry): PaletteEntry | null {
       if (entry.blocked !== null) return null;
       return { ...base, id: "current:launch", label: LAUNCH_COPY.group(name), hint: PALETTE_COPY.currentHint, icon: "play", navigates: false, run: entry.launch };
     case "broken": {
+      if (entry.repairBlocked !== null) return null;
       const action = brokenAction(entry.view);
       return { ...base, id: "current:repair", label: action.label, icon: action.icon, navigates: entry.view.reimport, run: entry.launch };
     }

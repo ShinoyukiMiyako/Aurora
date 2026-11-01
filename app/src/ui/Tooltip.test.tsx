@@ -265,6 +265,82 @@ describe("立即消失", () => {
   });
 });
 
+describe("常驻的包裹层", () => {
+  it("关着的提示不碰浮层体系：放在 OverlayProvider 之外也能渲染，开着的照样报错", () => {
+    view = render(
+      <Tooltip content="提示" disabled>
+        <button>A</button>
+      </Tooltip>,
+    );
+    expect(button("A").textContent).toBe("A");
+    expect(() =>
+      render(
+        <Tooltip content="提示">
+          <button>B</button>
+        </Tooltip>,
+      ),
+    ).toThrow("浮层组件必须放在 OverlayProvider 之内");
+  });
+
+  it("从关到开：之后照常悬停出现", () => {
+    let setDisabled!: (v: boolean) => void;
+    function Host() {
+      const [disabled, set] = useState(true);
+      setDisabled = set;
+      return (
+        <Tooltip content="提示" disabled={disabled}>
+          <button>A</button>
+        </Tooltip>
+      );
+    }
+    mount(<Host />);
+    act(() => setDisabled(false));
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    expect(bubble()?.textContent).toBe("提示");
+  });
+
+  it("调用方连内容一起撤掉：退场中的气泡还是原来的字，不闪成空气泡", () => {
+    let setReason!: (v: string | undefined) => void;
+    function Host() {
+      const [reason, set] = useState<string | undefined>("游戏运行中不能修改");
+      setReason = set;
+      return (
+        <Tooltip content={reason} disabled={reason === undefined}>
+          <button>A</button>
+        </Tooltip>
+      );
+    }
+    mount(<Host />);
+    focusByKeyboard(button("A"));
+    expect(bubble()?.textContent).toBe("游戏运行中不能修改");
+    act(() => setReason(undefined));
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+    expect(bubble()?.textContent).toBe("游戏运行中不能修改");
+  });
+
+  // <Tooltip><Button /></Tooltip>：里层的包裹 display: contents，没有盒子，锚在它身上气泡会飞到左上角
+  it("子元素自带一层包裹：气泡锚在里面的控件上，禁用判定也看控件", () => {
+    const container = mount(
+      <Tooltip content="外层" side="top">
+        <Tooltip content="里层" disabled>
+          <button disabled>A</button>
+        </Tooltip>
+      </Tooltip>,
+    );
+    const root = container.querySelector("[data-sk-overlay-root]") as HTMLElement;
+    setRect(root, { left: 0, top: 0, width: 1000, height: 700 });
+    setRect(button("A"), { left: 100, top: 300, width: 80, height: 30 });
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    const tip = bubble() as HTMLElement;
+    expect(tip.textContent).toBe("外层");
+    expect(tip.dataset.side).toBe("top");
+    expect(tip.style.left).not.toBe("0px");
+    expect(tip.style.top).toBe("292px");
+  });
+});
+
 describe("键盘与关联", () => {
   it("键盘聚焦立即出现，失焦立即消失", () => {
     mount(

@@ -1,5 +1,7 @@
 // 首次启动向导的步骤推进：前进、跳过、后退、点回已经到过的步。纯函数。
 
+import { samePath } from "../../domain/paths";
+
 export const STEPS = ["gameDir", "java", "account", "appearance"] as const;
 export type StepId = (typeof STEPS)[number];
 
@@ -94,19 +96,6 @@ export function dirProblem(path: string): DirProblem | null {
   return null;
 }
 
-const WINDOWS_PATH = /^[a-zA-Z]:[\\/]/;
-
-/** 比较用：统一分隔符、去掉末尾分隔符；Windows 盘符路径不区分大小写。 */
-function normalizePath(path: string): string {
-  const trimmed = path.trim();
-  const unified = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
-  return WINDOWS_PATH.test(trimmed) ? unified.toLowerCase() : unified;
-}
-
-export function sameDirectory(a: string, b: string): boolean {
-  return normalizePath(a) === normalizePath(b);
-}
-
 export interface NamedDirectory {
   name: string;
   path: string;
@@ -114,7 +103,7 @@ export interface NamedDirectory {
 
 /** 可以一并收下的其他启动器文件夹：去掉与所选游戏目录相同的那个。 */
 export function extraCandidates(discovered: readonly NamedDirectory[], gameDir: string): NamedDirectory[] {
-  return discovered.filter((d) => !sameDirectory(d.path, gameDir));
+  return discovered.filter((d) => !samePath(d.path, gameDir));
 }
 
 /** 默认全部勾选：只记用户取消勾选的路径，探测结果晚到也不用补默认值。 */

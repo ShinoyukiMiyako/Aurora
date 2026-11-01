@@ -88,7 +88,6 @@ import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type 
 import { network as appNetwork, type NetworkMonitor } from "./online";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
-import { WORLD_TASK_COMMANDS } from "./selectors";
 import {
   appendSessionLogs,
   applyPhase,
@@ -108,6 +107,7 @@ import {
   applyCompositeDownload,
   applyTaskDownload,
   attemptTaskId,
+  awaitsManualFiles,
   clearFinished,
   completeCompositeStep,
   compositeProgress,
@@ -127,6 +127,7 @@ import {
   tasksToStart,
   trimHistory,
   type CompositeProgress,
+  WORLD_TASK_COMMANDS,
   type DownloadSnapshot,
   type TaskDraft,
 } from "./tasks";
@@ -768,8 +769,12 @@ function waitUntil(subscribe: (listener: () => void) => () => void, predicate: (
 
 // ---------------------------------------------------------------- 改名
 
-/** 命令参数里指向实例的那一项：失败任务重试时按它重新调用命令。 */
+/**
+ * 命令参数里指向实例的那一项：失败任务重试时按它重新调用命令。install_version 是要建的名字：新建失败留下的半成品改了名，
+ * 重试按这个名字认出半成品改排补全，不跟过去的话会在旧名字下再装一份，半成品一直留着。
+ */
 const INSTANCE_ARG: Readonly<Record<string, string>> = {
+  install_version: "targetName",
   repair_instance: "id",
   install_mod: "versionId",
   install_mods: "versionId",
@@ -782,10 +787,6 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
   export_modpack: "id",
 };
 
-/**
- * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
- * 后端在实例有活动任务时拒绝改名，所以这里换的只是已结束的任务（失败的可以重试）。
- */
 /**
  * 换游戏目录后要重取的按需数据：实例 id 只在一个游戏目录里唯一，同名实例换了目录就是另一个；游玩统计按游戏目录分开记；
  * 多人游戏列表读的是该目录下的 servers.dat。
@@ -855,6 +856,10 @@ function renamedTo(err: IpcError): string {
   throw new Error(`改名报 ${err.code} 却没给出 detail.renamed_to：${err.message}`);
 }
 
+/**
+ * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
+ * 后端拒绝的是正占着实例的任务，这里换的是还没开始的（排队中）与已结束的（失败的可以重试）。
+ */
 function renamedTask(task: Task, from: string, to: string): Task {
   if (task.instanceId !== from) return task;
   const key = INSTANCE_ARG[task.spec.command];
@@ -876,11 +881,18 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "java":
       return meta.launchAfter === from || meta.pinFor === from ? { ...meta, launchAfter: swap(meta.launchAfter), pinFor: swap(meta.pinFor) } : meta;
     case "create":
+      return meta.name === from ? { ...meta, name: to } : meta;
     case "modpack":
     case "repair":
     case "export":
       return meta;
   }
+}
+
+/** 等登录后继续的启动挂在实例上：改名在弹窗开着时落盘的话，登录后要启动的是新名字。 */
+function renamedLogin(login: LoginState | null, from: string, to: string): LoginState | null {
+  if (login === null || login.intent.kind !== "launch" || login.intent.instanceId !== from) return login;
+  return { ...login, intent: { ...login.intent, instanceId: to } };
 }
 
 // ---------------------------------------------------------------- 派生
@@ -909,8 +921,8 @@ function prunedTaskRefs(raw: RawState): Partial<RawState> {
   };
 }
 
-/** 活动任务对一个已扫描实例的影响：整个目录在写（安装中），或者只在改动 Mod 与资源。 */
-type TaskEffect = "installing" | "modifying" | null;
+/** 活动任务对一个已扫描实例的影响：整个目录在写（安装中）、在备份或恢复存档，或者只在改动 Mod 与资源。 */
+type TaskEffect = "installing" | "backing_up" | "modifying" | null;
 
 type CreationMeta = Extract<TaskMeta, { type: "create" | "modpack" }>;
 
@@ -923,10 +935,11 @@ function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEff
     const facts = creation !== null && base.mcVersion === null ? { mcVersion: creation.mcVersion, loader: creation.loader, loaderVersion: creation.loaderVersion } : {};
     return { ...base, ...facts, pinned, status: "installing", brokenReason: null };
   }
+  if (effect === null) return { ...base, pinned };
   // 列表是任务开始前扫的，后端那时还没记下占用；后端报的活动（例如运行中）比前端推断的更准，留着它。
-  // 只剩被当作基底时例外：与后端的排序一致，实例自己的改动排在它前面。
-  if (effect === "modifying") return { ...base, pinned, activity: base.activity === null || base.activity === "inherited" ? "modifying" : base.activity };
-  return { ...base, pinned };
+  // 排得比任务低的例外，与后端的排序一致：实例自己的事排在被当作基底前面，备份排在 Mod 改动前面。
+  const lower = base.activity === null || base.activity === "inherited" || (effect === "backing_up" && base.activity === "modifying");
+  return { ...base, pinned, activity: lower ? effect : base.activity };
 }
 
 /** 实例列表与侧栏固定列表：只随扫描结果、固定列表、入队上下文与活动任务的集合变，下载进度与会话日志不影响它们。 */
@@ -975,7 +988,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
  * 每次都会换掉原始状态；如果每次都重建实例对象，按 state.instances 做依赖或做选择的组件就跟着每秒重渲染十次。
  *
  * - 实例列表：扫描结果、固定列表、入队上下文都是同一份引用，活动任务的集合（id 与所挂实例）也没变时，整份复用上一次的。
- * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、活动任务带来的状态（安装中或改动中）都没变，就复用上一次的那个对象。
+ * - 必须重算时按实例增量：一个实例的扫描结果、固定与否、活动任务带来的状态（安装中、备份中或改动中）都没变，就复用上一次的那个对象。
  */
 class StateDeriver {
   private lastInputs: { scanned: InstanceSummary[]; pins: string[]; taskMeta: RawState["taskMeta"]; landing: RawState["landing"]; activeKey: string } | null = null;
@@ -1036,18 +1049,19 @@ class StateDeriver {
 
   private compute(raw: RawState, active: readonly Task[]): InstancesView {
     const installing = new Set<string>();
+    const backingUp = new Set<string>();
     const modifying = new Set<string>();
     const creating = new Map<string, CreationMeta>();
     for (const t of active) {
       if (t.instanceId === null) continue;
-      (INSTANCE_TASK_COMMANDS.has(t.spec.command) ? installing : modifying).add(t.instanceId.toLowerCase());
+      (INSTANCE_TASK_COMMANDS.has(t.spec.command) ? installing : WORLD_TASK_COMMANDS.has(t.spec.command) ? backingUp : modifying).add(t.instanceId.toLowerCase());
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
     const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; creation: CreationMeta | null; value: InstanceSummary }>();
     const instances: InstanceSummary[] = raw.scanned.map((base) => {
       const key = base.id.toLowerCase();
-      const effect: TaskEffect = installing.has(key) ? "installing" : modifying.has(key) ? "modifying" : null;
+      const effect: TaskEffect = installing.has(key) ? "installing" : backingUp.has(key) ? "backing_up" : modifying.has(key) ? "modifying" : null;
       const pinned = raw.pins.includes(base.id);
       const found = creating.get(key);
       const creation = found === undefined ? null : found;
@@ -1407,7 +1421,7 @@ export class LauncherStore {
 
   /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
-    const failed = this.raw.tasks.filter((t) => t.status === "failed").length;
+    const failed = this.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t)).length;
     const copy = TOAST_COPY.networkRestored(failed);
     const action: ToastAction | undefined =
       failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
@@ -1829,11 +1843,22 @@ export class LauncherStore {
     const keep = this.keepsPlaceholder(before);
     this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())), ...(keep ? { landing: [...raw.landing, id] } : {}) }));
     this.tasksChanged();
+    this.rescanHeld(before.instanceId);
     if (this.discardLanding.has(id)) return;
     this.background(
       ACTION_ERROR.landTask(before.title),
       this.landTask(before, result).finally(() => this.endLanding(id)),
     );
+  }
+
+  /**
+   * 任务进行中的重扫把后端当时的占用记进了列表，派生时留着它。任务结束时后端已放开，有的任务落地时不重扫（更新 Mod、
+   * 导出整合包），不重读的话改名、删除、补全一直按占用禁用到下一次重扫。落地也重扫的按序号采纳后一次，多扫一遍无妨。
+   */
+  private rescanHeld(instanceId: string | null): void {
+    if (instanceId === null) return;
+    const key = instanceId.toLowerCase();
+    if (this.raw.scanned.some((i) => i.id.toLowerCase() === key && i.activity !== null)) this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
   }
 
   /** 新建与导入任务结束时它的占位项要留到落地重扫落定（见 RawState.landing）；用户正在删除它时不留。 */
@@ -1869,9 +1894,10 @@ export class LauncherStore {
         ...landing(raw),
       }));
       if (WORLD_TASK_COMMANDS.has(before.spec.command)) this.worldFailureToast(before, taskFailureReason(record));
-      else this.failureToast(before, taskFailureReason(record));
+      else this.failureToast(before, record);
     }
     this.tasksChanged();
+    this.rescanHeld(before.instanceId);
     // 恢复没做完时原来的存档可能已经进了回收站；备份失败也可能清掉了半截的临时文件。列表、存档与实例的活动都按盘上重读
     if (WORLD_TASK_COMMANDS.has(before.spec.command) && before.instanceId !== null) {
       invalidateResources(WORLD_BACKUPS_RESOURCE);
@@ -1903,7 +1929,8 @@ export class LauncherStore {
    * 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。
    * 导出整合包不是下载：它的失败单独一条「导出失败」，不并进也不开启下载失败的合并。
    */
-  private failureToast(task: Task, reason: string): void {
+  private failureToast(task: Task, error: TaskError): void {
+    const reason = taskFailureReason(error);
     const now = Date.now();
     if (task.kind === "modpack_export") {
       const copy = TASK_TOAST.exportFailed(task.title, reason);
@@ -1920,11 +1947,12 @@ export class LauncherStore {
       return;
     }
     const single = TASK_TOAST.failed(task.title, reason);
-    const toastId = this.pushToast("error", single.title, single.body, {
-      label: TASK_TOAST.retryAction,
-      run: () => this.actions.retryTask(task.id),
-      errorTitle: ACTION_ERROR.install,
-    });
+    // 文件没到手时重试必然再失败一次，通知上不给重试，转去失败筛选看清单
+    const action: ToastAction =
+      error.blocked_files === undefined
+        ? { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install }
+        : { label: TASK_TOAST.viewAction, to: { page: "tasks", filter: "failed" } };
+    const toastId = this.pushToast("error", single.title, single.body, action);
     this.failureBatch = { toastId, startedAt: now, reasons: [reason] };
   }
 
@@ -2009,6 +2037,7 @@ export class LauncherStore {
       taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, from, to)])),
       // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
       session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
+      login: renamedLogin(raw.login, from, to),
       launchPrompt:
         raw.launchPrompt === null
           ? null
@@ -2319,7 +2348,7 @@ export class LauncherStore {
     const failed = sessionFailed(s, s.taskId, { code, params }, Date.now());
     this.set({ session: failed });
     // 通知的操作是修复动作的第一个按钮。javaPinned 只影响第二个按钮，这里不读实例设置
-    const copy = failureCopy(code, params, { accountName: s.accountName, javaPinned: false });
+    const copy = failureCopy(code, params, { accountName: s.accountName, accountKind: s.accountKind, javaPinned: false });
     const action: ToastAction = { label: copy.fix.label, ...this.fixTarget(failed, copy.fix.kind) };
     this.pushToast("error", TOAST_COPY.launchFailed(s.instanceId), copy.title, action);
   }
@@ -2371,6 +2400,13 @@ export class LauncherStore {
         return {
           // 用失败的那一局的账户，不看此刻的当前账户：降级判据是这个账户上一次的失败
           run: async () => {
+            // 失败通知会一直留着，点下去时可能已经有一局在跑：启动会先把会话换成新的，那一局就从界面上丢了。
+            // 替换确认接不上这条路（它按普通启动继续），所以另一个实例占着时让玩家自己先结束
+            const active = this.raw.session;
+            if (active !== null && isSessionActive(active)) {
+              if (active.instanceId === instanceId) return;
+              throw new Error(`「${active.instanceId}」的游戏正在运行，先结束游戏`);
+            }
             const inst = this.instance(instanceId);
             if (inst.status === "installing") throw new Error(`「${instanceId}」还在安装，入口不应提供启动`);
             if (inst.status === "broken") throw new Error(`「${instanceId}」文件不完整，入口不应提供以离线方式进单人`);
@@ -3105,19 +3141,23 @@ export class LauncherStore {
       },
       retryFailedTasks() {
         let retried = 0;
-        for (const task of store.raw.tasks.filter((t) => t.status === "failed")) {
-          const leftover = store.leftoverOfFailedCreate(task);
-          if (leftover !== null) {
-            // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
-            if (findDuplicate(store.raw.tasks, { command: "repair_instance", args: { id: leftover } }) === undefined && store.retryAsRepair(task, leftover)) retried += 1;
-            continue;
+        try {
+          for (const task of store.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t))) {
+            const leftover = store.leftoverOfFailedCreate(task);
+            if (leftover !== null) {
+              // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
+              if (findDuplicate(store.raw.tasks, { command: "repair_instance", args: { id: leftover } }) === undefined && store.retryAsRepair(task, leftover)) retried += 1;
+              continue;
+            }
+            // 逐个排：前一个重试后，同一件事的后一个就算重复
+            if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
+            store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id), ...store.restoredMeta(raw, task) }));
+            retried += 1;
           }
-          // 逐个排：前一个重试后，同一件事的后一个就算重复
-          if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
-          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id), ...store.restoredMeta(raw, task) }));
-          retried += 1;
+        } finally {
+          // 任务日志里的坏记录读参数时会抛错：已经排回队列的照样要调度，否则停在排队，再也没有事件拉起它们
+          if (retried > 0) store.tasksChanged();
         }
-        if (retried > 0) store.tasksChanged();
         return retried;
       },
       clearFinishedTasks() {

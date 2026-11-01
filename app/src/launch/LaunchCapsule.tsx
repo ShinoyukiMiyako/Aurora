@@ -232,35 +232,29 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
   const id = entry.instance.id;
   switch (face.kind) {
     case "ready": {
-      const label = (
-        <>
-          <Icon name="play" size={18} />
-          {relaunch ? LAUNCH_COPY.relaunch : LAUNCH_COPY.launch}
-        </>
-      );
-      // 存档备份或恢复进行中：保持可聚焦，悬停与聚焦写出原因，点击无效
-      if (entry.blocked !== null) {
-        return (
-          <Tooltip content={entry.blocked}>
-            <button type="button" className={styles.go} data-disabled aria-disabled="true">
-              {label}
-            </button>
-          </Tooltip>
-        );
-      }
+      // 存档备份或恢复进行中：保持可聚焦，悬停与聚焦写出原因，点击无效。
+      // 包裹层常驻：备份结束时按钮不重挂，聚焦着的「启动」不丢焦点，换面时焦点也还在胶囊里
+      const blocked = entry.blocked !== null;
       return (
-        <button type="button" className={styles.go} onClick={entry.launch}>
-          {label}
-        </button>
+        <Tooltip content={entry.blocked} disabled={!blocked}>
+          <button type="button" className={styles.go} data-disabled={blocked || undefined} {...softDisabledProps(blocked, entry.launch)}>
+            <Icon name="play" size={18} />
+            {relaunch ? LAUNCH_COPY.relaunch : LAUNCH_COPY.launch}
+          </button>
+        </Tooltip>
       );
     }
     case "broken": {
       const action = brokenAction(face);
+      // 与就绪面同一写法：包裹层常驻，被占着时带原因禁用，放开时按钮不重挂
+      const blocked = entry.repairBlocked !== null;
       return (
-        <button type="button" className={styles.go} data-tone="warn" onClick={entry.launch}>
-          <Icon name={action.icon} size={18} />
-          {action.label}
-        </button>
+        <Tooltip content={entry.repairBlocked} disabled={!blocked}>
+          <button type="button" className={styles.go} data-tone="warn" data-disabled={blocked || undefined} {...softDisabledProps(blocked, entry.launch)}>
+            <Icon name={action.icon} size={18} />
+            {action.label}
+          </button>
+        </Tooltip>
       );
     }
     case "loading": {

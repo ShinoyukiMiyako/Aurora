@@ -76,5 +76,10 @@ export function Checkbox({ checked, onChange, label, ariaLabel, invalid = false,
     </button>
   );
 
-  return softDisabled ? <Tooltip content={disabledReason}>{box}</Tooltip> : box;
+  // 包裹层常驻：原因随状态来去时复选框不重挂，聚焦着的复选框不丢焦点
+  return (
+    <Tooltip content={disabledReason} disabled={!softDisabled}>
+      {box}
+    </Tooltip>
+  );
 }

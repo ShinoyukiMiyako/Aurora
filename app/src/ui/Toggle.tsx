@@ -55,5 +55,10 @@ export function Toggle({ checked, onChange, label, description, ariaLabel, disab
     </button>
   );
 
-  return softDisabled ? <Tooltip content={disabledReason}>{toggle}</Tooltip> : toggle;
+  // 包裹层常驻：原因随状态来去时开关不重挂，聚焦着的开关不丢焦点
+  return (
+    <Tooltip content={disabledReason} disabled={!softDisabled}>
+      {toggle}
+    </Tooltip>
+  );
 }

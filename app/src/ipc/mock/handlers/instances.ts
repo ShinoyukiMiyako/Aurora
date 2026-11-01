@@ -326,8 +326,14 @@ function seedInstances(): MockInstance[] {
 
 // ---------------------------------------------------------------- 存档备份
 
-/** 实例 id -> 存档文件夹名 -> 备份表。不分新旧顺序，列出时再按 created_at 倒序。 */
+/**
+ * 作用域 -> 存档文件夹名 -> 备份表。隔离实例的备份记在实例 id 下，不隔离的都记在 SHARED_BACKUPS 下，与后端的备份目录一样分层。
+ * 不分新旧顺序，列出时再按 created_at 倒序。
+ */
 type BackupBook = Record<string, Record<string, WorldBackupDto[]>>;
+
+/** 不隔离的实例共用的那一层备份；实例 id 不会含星号，不与任何实例相撞。 */
+const SHARED_BACKUPS = "*shared";
 
 function backupEntry(createdAt: number, kind: BackupKind, sizeBytes: number, levelName: string | null): WorldBackupDto {
   return { file: `${createdAt}-${kind}.zip`, kind, created_at: createdAt, size_bytes: sizeBytes, level_name: levelName };
@@ -695,11 +701,19 @@ export function addMockInstance(
     // 整合包导入的实例强制隔离，与后端写入的实例设置一致。
     settings: { ...defaultSettings(), isolation: "enabled" },
     modpack,
-    inheritsFrom: null,
+    // 与后端一样，带加载器的实例 JSON 继承原版：启动、补全它都要连带占住原版，原版也因此不能删、不能改名
+    inheritsFrom: loader === null ? null : mcVersion,
     content: emptyContent(),
     sizeBytes: 0,
     fileCount: 0,
   });
+}
+
+/** 给实例加一个空存档（模拟游戏里新建的）。 */
+export function addMockWorld(id: string, world: string): void {
+  const instance = requireInstance(id);
+  const created: WorldDto = { dir_name: world, level_status: "ok", level_error: null, name: world, mode: "survival", last_played: Date.now(), size_bytes: 10 * MB, modified_at: Date.now() };
+  instance.content.worlds = [...instance.content.worlds, created];
 }
 
 /** 别的领域 mock 要求实例存在时用：id 不安全报 invalid_argument，不存在报 version_not_installed，与后端同形。 */
@@ -885,9 +899,9 @@ function applyTemplate(instance: MockInstance): TemplateOutcomeDto {
 }
 
 const TEMPLATE_SKIP_STAGE: Record<Extract<TemplateOutcomeDto, { status: "skipped" }>["reason"], string> = {
-  disabled: "配置里关闭了新建实例时沿用默认设置",
+  disabled: "新建实例时沿用默认设置已在配置里关闭",
   empty: "还没有默认设置",
-  shared_working_dir: "这个实例与其他未隔离的实例共用游戏目录里的设置",
+  shared_working_dir: "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
 };
 
 function templateStage(outcome: TemplateOutcomeDto): string {
@@ -1082,19 +1096,40 @@ function requireWorld(instance: MockInstance, world: string): WorldDto {
   return found;
 }
 
-function worldBackups(id: string, world: string): WorldBackupDto[] {
-  const book = backups[id];
+/** 这个实例的备份记在哪一层：共用存档的几个实例看到同一份。 */
+function backupScope(id: string): string {
+  return isolatedOf(requireInstance(id)) ? id : SHARED_BACKUPS;
+}
+
+function scopedBackups(scope: string, world: string): WorldBackupDto[] {
+  const book = backups[scope];
   if (book === undefined) return [];
   const list = book[world];
   return list === undefined ? [] : list;
 }
 
-function setWorldBackups(id: string, world: string, list: WorldBackupDto[]): void {
-  const book = backups[id] === undefined ? {} : backups[id];
+function setScopedBackups(scope: string, world: string, list: WorldBackupDto[]): void {
+  const book = backups[scope] === undefined ? {} : backups[scope];
   if (list.length === 0) delete book[world];
   else book[world] = list;
-  if (Object.keys(book).length === 0) delete backups[id];
-  else backups[id] = book;
+  if (Object.keys(book).length === 0) delete backups[scope];
+  else backups[scope] = book;
+}
+
+function worldBackups(id: string, world: string): WorldBackupDto[] {
+  return scopedBackups(backupScope(id), world);
+}
+
+function setWorldBackups(id: string, world: string, list: WorldBackupDto[]): void {
+  setScopedBackups(backupScope(id), world, list);
+}
+
+/** 与后端 merge_scope_dir 一致：把旧名字下的备份并进新名字下，新名字下原有的留着。 */
+function mergeScope(from: string, to: string): void {
+  const book = backups[from];
+  if (book === undefined) return;
+  for (const [world, list] of Object.entries(book)) setScopedBackups(to, world, [...scopedBackups(to, world), ...list]);
+  delete backups[from];
 }
 
 function backupNotFound(id: string, world: string, file: string): IpcError {
@@ -1113,34 +1148,34 @@ function freshBackupTime(id: string, world: string): number {
  * 与后端 plan_prune 一致：先按每个存档保留最近 keep_per_world 份自动备份，再在全部备份超过总量上限时从全局最旧的
  * 自动备份删起；手动备份从不删，刚写成的那一份（keep）不参与第二步。返回删掉的份数。
  */
-function pruneBackups(keep: { id: string; world: string; file: string }): number {
+function pruneBackups(keep: { scope: string; world: string; file: string }): number {
   const policy = mockWorldBackupSettings();
   const limit = policy.max_total_gb * GIB;
   let pruned = 0;
-  for (const [id, book] of Object.entries(backups)) {
+  for (const [scope, book] of Object.entries(backups)) {
     for (const [world, list] of Object.entries(book)) {
       const autos = list.filter((b) => b.kind === "auto").sort((a, b) => b.created_at - a.created_at);
       const doomed = new Set(autos.slice(policy.keep_per_world).map((b) => b.file));
       if (doomed.size === 0) continue;
       pruned += doomed.size;
-      setWorldBackups(
-        id,
+      setScopedBackups(
+        scope,
         world,
         list.filter((b) => !doomed.has(b.file)),
       );
     }
   }
-  const all = Object.entries(backups).flatMap(([id, book]) => Object.entries(book).flatMap(([world, list]) => list.map((entry) => ({ id, world, entry }))));
+  const all = Object.entries(backups).flatMap(([scope, book]) => Object.entries(book).flatMap(([world, list]) => list.map((entry) => ({ scope, world, entry }))));
   let total = all.reduce((sum, b) => sum + b.entry.size_bytes, 0);
   const candidates = all
-    .filter((b) => b.entry.kind === "auto" && !(b.id === keep.id && b.world === keep.world && b.entry.file === keep.file))
+    .filter((b) => b.entry.kind === "auto" && !(b.scope === keep.scope && b.world === keep.world && b.entry.file === keep.file))
     .sort((a, b) => a.entry.created_at - b.entry.created_at);
   for (const c of candidates) {
     if (total <= limit) break;
-    setWorldBackups(
-      c.id,
+    setScopedBackups(
+      c.scope,
       c.world,
-      worldBackups(c.id, c.world).filter((b) => b.file !== c.entry.file),
+      scopedBackups(c.scope, c.world).filter((b) => b.file !== c.entry.file),
     );
     total -= c.entry.size_bytes;
     pruned += 1;
@@ -1246,6 +1281,14 @@ async function worldTask<T>(taskId: string, id: string, replacesSaves: boolean, 
   }
 }
 
+/** 下一次改名时存档备份挪不动的原因；null 为照常。 */
+let pendingBackupsMoveFailure: string | null = null;
+
+/** 下一次改名时备份目录挪不动（模拟被别的程序占着）：改名照常落盘，备份留在旧名下，命令报 world_backups_not_moved。 */
+export function failNextMockBackupsMove(cause = "拒绝访问。 (os error 5)"): void {
+  pendingBackupsMoveFailure = cause;
+}
+
 /** 存档打成 zip 后的大小：mock 按存档体积的九成算。 */
 function packedSize(world: WorldDto): number {
   return Math.round(world.size_bytes * 0.9);
@@ -1268,8 +1311,25 @@ async function backupWorld(args: MockArgs): Promise<BackupResultDto> {
     const entry = backupEntry(freshBackupTime(id, world), "manual", packedSize(found), found.name);
     setWorldBackups(id, world, [...worldBackups(id, world), entry]);
     // 与后端一致：自动备份关着时不清理，手动备份不借机删以前的自动备份
-    const pruned = mockWorldBackupSettings().auto ? pruneBackups({ id, world, file: entry.file }) : 0;
+    const pruned = mockWorldBackupSettings().auto ? pruneBackups({ scope: backupScope(id), world, file: entry.file }) : 0;
     return { backup: entry, pruned };
+  });
+}
+
+/**
+ * 与后端 auto_backup_after_session 一致：这一局进过的存档各写一份自动备份，写完按保留策略清理，返回备份成了的存档。
+ * 存档这时已经不在的不算。启动 mock 在游戏退出后调用，占用由它持有到这里返回。
+ */
+export function autoBackupMockWorlds(id: string, worlds: readonly string[]): string[] {
+  if (worlds.length === 0) return [];
+  const instance = requireInstance(id);
+  return worlds.filter((world) => {
+    const found = instance.content.worlds.find((w) => w.dir_name === world);
+    if (found === undefined) return false;
+    const entry = backupEntry(freshBackupTime(id, world), "auto", packedSize(found), found.name);
+    setWorldBackups(id, world, [...worldBackups(id, world), entry]);
+    pruneBackups({ scope: backupScope(id), world, file: entry.file });
+    return true;
   });
 }
 
@@ -1308,7 +1368,7 @@ async function exportWorld(args: MockArgs): Promise<ExportResultDto> {
   const world = worldArg(args);
   const dest = str(args, "dest");
   if (!/^([A-Za-z]:[\\/]|\\\\)/.test(dest)) throw invalid("dest", "not_absolute", `导出位置须是绝对路径：${dest}`);
-  if (!dest.toLowerCase().endsWith(".zip")) throw invalid("dest", "not_zip", `导出的文件须以 .zip 结尾：${dest}`);
+  if (!dest.toLowerCase().endsWith(".zip")) throw invalid("dest", "not_zip", `导出文件须是 .zip：${dest}`);
   const result = await worldTask(taskId, id, false, async () => {
     const instance = requireInstance(id);
     const found = requireWorld(instance, world);
@@ -1489,17 +1549,24 @@ export const handlers: MockHandlers = {
       instance.dto = { ...instance.dto, id: newName };
       renameMockMods(id, newName);
       renameMockLaunchRecords(id, newName);
-      // 备份按实例 id 分目录，改名时整个目录挪到新名字下
-      if (backups[id] !== undefined) {
-        backups[newName] = backups[id];
-        delete backups[id];
-      }
+      // 隔离实例的备份按实例 id 分目录，改名时并到新名字下；共用的那一层不动
+      const stuck = pendingBackupsMoveFailure;
+      pendingBackupsMoveFailure = null;
+      if (stuck === null) mergeScope(id, newName);
       pins = pins.map((pin) => (pin === id ? newName : pin));
       renameMockPinnedInstance(id, newName);
       followMockSelection(id, newName);
       const lag = takeMockPlayRecordsFailure();
       if (lag !== null) {
         throw new IpcError("play_records_failed", `实例已改名为「${newName}」，但游玩记录没能跟着改：${lag}`, { id, renamed_to: newName, causes: [lag] });
+      }
+      if (stuck !== null) {
+        throw new IpcError("world_backups_not_moved", `实例已改名为「${newName}」，但存档备份没能跟着挪：${stuck}`, {
+          id,
+          renamed_to: newName,
+          path: `${MOCK_BACKUPS_ROOT}/instances/${id}`,
+          causes: [stuck],
+        });
       }
       return { id: newName };
     } finally {
@@ -1549,14 +1616,17 @@ export const handlers: MockHandlers = {
     const id = str(args, "id");
     const world = worldArg(args);
     const file = str(args, "file");
-    requireInstance(id);
-    const list = worldBackups(id, world);
-    if (!list.some((b) => b.file === file)) throw backupNotFound(id, world, file);
-    setWorldBackups(
-      id,
-      world,
-      list.filter((b) => b.file !== file),
-    );
+    // 与后端同序：先校验入参，再占住实例（改名、删除、新建、补全进行中报 instance_busy；与运行中的游戏、备份兼容）
+    return withMockInstance(id, "modifying", () => {
+      requireInstance(id);
+      const list = worldBackups(id, world);
+      if (!list.some((b) => b.file === file)) throw backupNotFound(id, world, file);
+      setWorldBackups(
+        id,
+        world,
+        list.filter((b) => b.file !== file),
+      );
+    });
   },
 
   export_world: exportWorld,
@@ -1597,6 +1667,7 @@ export function reset(): void {
   template = null;
   backups = seedBackups();
   holds.clear();
+  pendingBackupsMoveFailure = null;
   savesReaders.length = 0;
   mockRevealedPaths.length = 0;
   exportedFiles.clear();

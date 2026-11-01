@@ -103,7 +103,7 @@ function RecentCard({ inst }: { inst: InstanceSummary }) {
 
 /** 卡片右下角的小号启动入口：与启动胶囊同一套视图。 */
 function RecentLaunch({ instanceId }: { instanceId: string }) {
-  const { instance, view, failure, blocked, launch, openCrash, fix } = useLaunch(instanceId);
+  const { instance, view, failure, blocked, repairBlocked, launch, openCrash, fix } = useLaunch(instanceId);
   switch (view.kind) {
     case "ready":
       return (
@@ -118,7 +118,7 @@ function RecentLaunch({ instanceId }: { instanceId: string }) {
       );
     case "broken": {
       const action = brokenAction(view);
-      return <IconButton icon={action.icon} variant="secondary" size="sm" label={action.label} onClick={launch} />;
+      return <IconButton icon={action.icon} variant="secondary" size="sm" label={action.label} disabledReason={repairBlocked === null ? undefined : repairBlocked} onClick={launch} />;
     }
     case "failed": {
       if (failure === null) throw new Error("启动失败的入口缺少失败文案");

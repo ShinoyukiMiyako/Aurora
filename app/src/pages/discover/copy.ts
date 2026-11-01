@@ -1,5 +1,6 @@
 // 发现页、资源详情、安装面板与整合包导入的文案。插值一律经 domain/format 格式化，页面组件只引用这里。
 
+import { joinMixed } from "../../copy/flows";
 import { formatBytes, formatCount } from "../../domain/format";
 import { PLATFORM_TIMEOUT_MS } from "../../domain/limits";
 import type { Platform } from "../../domain/types";
@@ -65,8 +66,8 @@ export const SEARCH_COPY = {
   tooMany: "结果太多，换个更具体的关键词试试",
   nextFailed: "下一页没加载出来",
   retry: "重试",
-  emptyWithQuery: (query: string, kind: DiscoverKind) => `没有找到与「${query}」相关的${kindNoun(kind)}`,
-  emptyNoQuery: (kind: DiscoverKind) => `没有符合条件的${kindNoun(kind)}`,
+  emptyWithQuery: (query: string, kind: DiscoverKind) => joinMixed(`没有找到与「${query}」相关的`, kindNoun(kind)),
+  emptyNoQuery: (kind: DiscoverKind) => joinMixed("没有符合条件的", kindNoun(kind)),
   emptyBody: "换个关键词，或者清除筛选再看看。",
   partialFailed: (failed: Platform, other: Platform) => `${PLATFORM_LABEL[failed]} 暂时没有响应，下面只有 ${PLATFORM_LABEL[other]} 的结果。`,
   allFailed: "暂时连不上资源平台",
@@ -176,7 +177,7 @@ export const INSTALL_COPY = {
   footNone: "勾选右侧的实例后安装",
   footSelected: (instances: number, files: number, bytes: number | null) =>
     bytes === null ? `已选 ${instances} 个实例 · 共 ${files} 个文件待下载` : `已选 ${instances} 个实例 · 共 ${files} 个文件待下载 · 约 ${formatBytes(bytes)}`,
-  footCounting: (instances: number) => `已选 ${instances} 个实例 · 正在计算要下载的文件`,
+  footCounting: (instances: number) => `已选 ${instances} 个实例 · 正在计算要下载的文件…`,
   cancel: "取消",
   update: "更新",
   install: "安装",
@@ -201,6 +202,7 @@ export const MODPACK_COPY = {
   remoteFiles: (n: number) => `${n} 个文件需要下载`,
   summaryLoading: "正在读取整合包清单…",
   summaryFailed: "整合包清单没能提前读出来，Mod 数和下载大小要到导入时才知道",
+  packBlocked: "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。",
   duplicate: (n: number, first: string) => `你已经有 ${n} 个来自这个整合包的实例（「${first}」），再装一次会得到一个独立的新实例。`,
   overrides: (n: number, bytes: number) => `包内自带 ${n} 个文件 · ${formatBytes(bytes)}`,
   memory: "内存跟随全局设置",

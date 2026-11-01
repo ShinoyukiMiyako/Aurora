@@ -134,7 +134,8 @@ describe("崩溃诊断：退出码兜底", () => {
     await crashWith(-1073741819);
     await open("crash");
     expect(text()).toContain("1 分钟前崩溃 · 退出码 -1073741819（0xC0000005 访问冲突）");
-    expect(text()).toContain("找到 1 条线索，日志指向进程异常退出");
+    expect(text()).toContain("找到 1 条线索，退出码指向进程异常退出");
+    expect(text()).not.toContain("日志指向进程异常退出");
     expect(text()).toContain("游戏进程异常退出");
     expect(text()).toContain(
       "退出码 0xC0000005（访问冲突），日志里没有匹配到已知原因。常见于显卡驱动、Java 本体或带本地库的 Mod，可以先更新显卡驱动，再换一个 Java 版本试试。",
@@ -172,6 +173,21 @@ describe("崩溃诊断：退出码兜底", () => {
     await open("crash");
     expect(text()).toContain("1 分钟前崩溃 · 退出码 3");
     expect(text()).not.toContain("退出码 3（");
+  });
+});
+
+describe("概览的崩溃横幅", () => {
+  it("线索只来自退出码：写「退出码指向」，不说日志指向", async () => {
+    await crashWith(-1073741819);
+    await open("overview");
+    expect(text()).toContain("退出码指向进程异常退出，诊断里有可以一键尝试的办法。");
+    expect(text()).not.toContain("日志指向进程异常退出");
+  });
+
+  it("线索来自日志：照旧写「日志指向」", async () => {
+    await crashWith(1);
+    await open("overview");
+    expect(text()).toContain("日志指向内存不足，诊断里有可以一键尝试的办法。");
   });
 });
 

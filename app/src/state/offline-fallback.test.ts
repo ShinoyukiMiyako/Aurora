@@ -110,6 +110,14 @@ describe("以离线方式进单人：状态容器", () => {
     expect(infoToasts(store)).toEqual([]);
   });
 
+  it("外置登录账户遇到服务故障：会话记下账户类型，失败通知不写微软", async () => {
+    const store = await storeWith(YOZAKURA, "Yozakura", "authlib_injector");
+    failNextMockLaunch("account_service_down", { account: "Yozakura", status: 503 });
+    await store.actions.launch("生存");
+    expect(store.getState().session).toMatchObject({ phase: "failed", accountKind: "authlib", failure: { code: "account_service_down" } });
+    expect(store.getState().toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body, t.action?.label])).toEqual([["「生存」启动失败", "登录服务暂时不可用", "重试"]]);
+  });
+
   it("账户已被判定需要重新登录而被拒绝降级：会话改为 failed(account_relogin)，失败卡给出「重新登录」", async () => {
     const store = await storeWith(YOZAKURA, "Yozakura", "authlib_injector");
     failNextMockLaunch("account_service_down", { account: "Yozakura", status: 503 });
@@ -175,6 +183,36 @@ describe("以离线方式进单人：状态容器", () => {
       [true, null],
     ]);
     expect(store.getState().session).toMatchObject({ instanceId: "樱花生存", phase: "running", quickPlay: null, failure: null });
+  });
+
+  it("失败通知还留着时另一局已经开起来：不发起启动，也不把那一局的会话冲掉", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player");
+    failNextMockLaunch("account_service_down", { account: "Mock_Player", status: 503 });
+    await store.actions.launch("生存");
+    const stale = runnable(store.actions.failureFix("launch_offline_once"));
+    ipc.overrides.set("list_instances", () => [instanceDto("生存"), instanceDto("1.21")]);
+    await store.actions.refreshInstances();
+    await store.actions.launch("1.21");
+    expect(store.getState().session).toMatchObject({ instanceId: "1.21", phase: "running" });
+
+    await expect(stale.run()).rejects.toThrow("「1.21」的游戏正在运行，先结束游戏");
+    expect(store.getState().session).toMatchObject({ instanceId: "1.21", phase: "running" });
+    expect(launchArgs()).toHaveLength(2);
+  });
+
+  it("失败通知还留着时同一实例已经重新开起来：只有第一次生效，什么都不做", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player");
+    failNextMockLaunch("account_service_down", { account: "Mock_Player", status: 503 });
+    await store.actions.launch("生存");
+    const stale = runnable(store.actions.failureFix("launch_offline_once"));
+    await runnable(store.actions.failureFix("retry")).run();
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "running" });
+
+    await stale.run();
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "running" });
+    expect(launchArgs()).toHaveLength(2);
   });
 
   it("实例在失败之后变成损坏：不发起启动，直接报错", async () => {

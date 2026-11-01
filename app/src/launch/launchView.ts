@@ -101,7 +101,7 @@ export function brokenAction(view: Extract<LaunchView, { kind: "broken" }>): { l
 
 /** 失败会话的文案；javaPinned 只影响 spawn_failed 的第二个按钮（实例设置固定了 Java 时才出现）。 */
 export function launchFailure(view: Extract<LaunchView, { kind: "failed" }>, javaPinned: boolean): FailureCopy {
-  return failureCopy(view.code, view.params, { accountName: view.session.accountName, javaPinned });
+  return failureCopy(view.code, view.params, { accountName: view.session.accountName, accountKind: view.session.accountKind, javaPinned });
 }
 
 /**
@@ -130,7 +130,7 @@ export function sessionDetail(session: SessionState, now: number): string | null
     case "failed": {
       if (session.failure === null) throw new Error("failed 会话缺少失败码");
       // 标题与 javaPinned 无关
-      return failureCopy(session.failure.code, session.failure.params, { accountName: session.accountName, javaPinned: false }).title;
+      return failureCopy(session.failure.code, session.failure.params, { accountName: session.accountName, accountKind: session.accountKind, javaPinned: false }).title;
     }
     case "crashed": {
       const crash = session.crash;

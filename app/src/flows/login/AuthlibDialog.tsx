@@ -260,7 +260,13 @@ export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | 
                 </button>
               ))}
             </div>
-            {normalized.startsWith("http://") && <Callout tone="warn">{AUTHLIB_COPY.httpWarning}</Callout>}
+            {/* 这一步的说明块留给探测失败；地址不是 https 与它可能同时成立，这句写成行 */}
+            {normalized.startsWith("http://") && (
+              <p className={styles.warnNote}>
+                <Icon name="alert" size={16} className={styles.warnNoteIcon} />
+                <span>{AUTHLIB_COPY.httpWarning}</span>
+              </p>
+            )}
             {probeError !== null && (
               <Callout tone="danger" announce>
                 <strong className={styles.problemTitle}>{probeError.title}</strong>
@@ -327,6 +333,20 @@ export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | 
                 }
               >
                 {AUTHLIB_COPY.network}
+              </Callout>
+            )}
+            {loginError !== null && loginError.kind === "service_down" && (
+              <Callout
+                tone="danger"
+                announce
+                action={
+                  <Button variant="secondary" size="sm" icon="refresh" onClick={submitLogin}>
+                    {AUTHLIB_COPY.retry}
+                  </Button>
+                }
+              >
+                <strong className={styles.problemTitle}>{AUTHLIB_COPY.loginServiceDown.title}</strong>
+                <span>{AUTHLIB_COPY.loginServiceDown.body}</span>
               </Callout>
             )}
             {loginError !== null && loginError.kind === "no_profile" && (

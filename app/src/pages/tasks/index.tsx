@@ -40,8 +40,10 @@ import {
   filterOf,
   filterRoute,
   overviewOf,
+  retryNeedsNetwork,
   rowMeta,
   sameTaskLayout,
+  subtitleOf,
   TASK_FILTERS,
   taskGroups,
   type TaskBuckets,
@@ -103,7 +105,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
       key="header"
       titleId={titleId}
       title={PAGE_LABEL.tasks}
-      subtitle={active.length > 0 ? TASKS_COPY.subtitleActive(buckets.running.length, buckets.queued.length) : TASKS_COPY.subtitleIdle}
+      subtitle={subtitleOf(buckets)}
       actions={
         <>
           {active.length >= 2 && (
@@ -217,6 +219,11 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
           onClose={() => setBlocked({ ...blocked, open: false })}
           onAllFound={() => {
             setBlocked({ ...blocked, open: false });
+            // 与行上的重试同一口径：断网时重排必然又失败一次，白白多出一次尝试
+            if (!online) {
+              actions.toast("warning", TASKS_COPY.offline.title, TASKS_COPY.offline.retryReason);
+              return;
+            }
             void run(() => actions.retryTask(blocked.taskId), ACTION_ERROR.install);
           }}
         />
@@ -275,7 +282,7 @@ function TaskListRow({ task: placed, queuePosition, now, handlers }: { task: Tas
       task={task}
       meta={meta}
       hasInstance={task.instanceId !== null && handlers.hasInstance(task.instanceId)}
-      retryBlocked={handlers.retryBlocked}
+      retryBlocked={retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
       onCancel={() => handlers.onCancel(task)}
       onRetry={() => handlers.onRetry(task)}
       onViewBlocked={() => handlers.onViewBlocked(task)}

@@ -3,7 +3,7 @@
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
-import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
@@ -52,7 +52,7 @@ import {
   toggleFlags,
   ZGC_MIN_JAVA,
 } from "./model";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 import { ModuleError, SlowHint } from "./parts";
 
 export interface SettingsTabProps {
@@ -617,7 +617,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
           </SettingRow>
         ) : (
           <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
-            <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
+            <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} focusableWhenDisabled disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
               {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
             </Button>
           </SettingRow>
@@ -680,11 +680,11 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
       }
     >
       {info !== null && info.present && (
-        <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} onClick={clear}>
+        <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} focusableWhenDisabled onClick={clear}>
           {SETTINGS_COPY.templateClear}
         </Button>
       )}
-      <Button size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} disabledReason={locked} onClick={save}>
+      <Button size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} focusableWhenDisabled disabledReason={locked} onClick={save}>
         {SETTINGS_COPY.templateSave}
       </Button>
     </SettingRow>
