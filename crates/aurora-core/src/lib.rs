@@ -36,6 +36,7 @@ pub mod event;
 pub mod export;
 pub mod facade;
 pub mod folders;
+mod game_lang;
 mod gpu;
 pub mod history;
 pub mod install;

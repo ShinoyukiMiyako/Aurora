@@ -38,6 +38,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 原版材质服务：校验客户端 jar 与全景对象的哈希、给远程皮肤与缩略图按地址取缓存键。
 sha1 = "0.11"
+# 取系统显示语言，新实例第一次启动时让游戏语言跟随它。
+sys-locale = "0.3"
 
 # 启动前写 Windows 图形设置里的按程序显卡偏好（当前用户的注册表）；与 aurora-java 同一版本。
 [target.'cfg(windows)'.dependencies]
