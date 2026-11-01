@@ -48,6 +48,21 @@ describe("工程目录：搜得到就打得开、装得上", () => {
     }
   });
 
+  it("Sodium、Lithium 是组织工程：卡片与详情的作者都是组织名 CaffeineMC，不是组织所有者", async () => {
+    const { hits } = await searchResources(ALL);
+    const shown = await Promise.all(
+      ["Sodium", "Lithium"].map(async (title) => {
+        const hit = hits.find((h) => h.title === title);
+        if (hit === undefined) throw new Error(`目录里没有 ${title}`);
+        return [hit.author, (await projectDetail(hit.platform, hit.project_id)).author];
+      }),
+    );
+    expect(shown).toEqual([
+      ["CaffeineMC", "CaffeineMC"],
+      ["CaffeineMC", "CaffeineMC"],
+    ]);
+  });
+
   it("文件形态随类型：Mod 是 .jar 且标了加载器；资源包、光影、数据包是 .zip 且不带加载器；整合包分平台", async () => {
     const { hits } = await searchResources(ALL);
     for (const hit of hits) {

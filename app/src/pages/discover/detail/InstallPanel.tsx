@@ -2,7 +2,7 @@
 // 判定由后端落位矩阵给出，本机才知道的条件（实例状态、存档、Iris / OptiFine）在 verdict.ts 里叠加。
 // 底栏渲染进弹窗页脚（footerHost），面板与底栏共用同一份勾选状态。
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { ACTION_ERROR, LOADER_NAME } from "../../../copy/flows";
 import type { InstanceSummary } from "../../../domain/adapt";
@@ -122,6 +122,7 @@ export interface InstallPanelProps {
 
 export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, online, footerHost, onClose }: InstallPanelProps) {
   const instances = useLauncherSelector((s) => s.instances);
+  const instancesRead = useLauncherSelector((s) => s.status.instances.kind === "ready");
   const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
   const actions = useLauncherActions();
   const run = useRunner();
@@ -143,12 +144,14 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   const readyIds = instances.filter((i) => i.status === "ready").map((i) => i.id);
   const missing = matchRows === null ? [] : readyIds.filter((id) => !matchRows.some((m) => m.version_id === id));
   const missingKey = missing.join("\u0000");
-  const reloadedFor = useRef("");
+  const [reloadedFor, setReloadedFor] = useState("");
   useEffect(() => {
-    if (missingKey === "" || reloadedFor.current === missingKey) return;
-    reloadedFor.current = missingKey;
+    if (missingKey === "" || reloadedFor === missingKey) return;
+    setReloadedFor(missingKey);
     matches.reload();
-  }, [missingKey, matches]);
+  }, [missingKey, reloadedFor, matches]);
+  // 重取过仍缺的实例矩阵不认它，不再等：否则默认勾选永远落不下来
+  const covered = missingKey === "" || (reloadedFor === missingKey && !matches.refreshing);
 
   const irisRows = iris === null ? null : iris.status === "ready" ? iris.rows : null;
   const shaderLoaderOf = (inst: InstanceSummary): ShaderLoaderState => {
@@ -188,9 +191,12 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
     })),
   );
 
-  // 默认勾选只做一次，且要等判定落定：矩阵到了、数据包的存档读完、光影的 Iris 情况查完
+  // 默认勾选只做一次，且要等判定落定：实例列表读到、矩阵到了并覆盖全部就绪实例、数据包的存档读完、光影的 Iris 情况查完。
+  // 看过的资源矩阵留在缓存里，新建实例后再打开时先拿到的是旧矩阵，这时落定新实例就永远勾不上了
   const settled =
+    instancesRead &&
     matchRows !== null &&
+    covered &&
     (type !== "data_pack" || instances.every((i) => i.status !== "ready" || worldsOf(i.id).status !== "loading")) &&
     (type !== "shader" || (iris !== null && iris.status !== "loading"));
   useEffect(() => {

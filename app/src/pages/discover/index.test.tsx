@@ -766,6 +766,18 @@ describe("发现页：资源详情与安装", () => {
     expect(openDialogs()).toHaveLength(1);
   });
 
+  it("同时发布成 Mod 的数据包：结果卡标数据包，点开后头图的类型标与卡一致", async () => {
+    const dual = entry("D0", { title: "地貌重塑", resource_type: "data_pack" });
+    pages = () => result([dual]);
+    ipc.overrides.set("project_detail", () => detailOf(dual, { resource_type: "mod", latest_version: v }));
+    await mount();
+    act(() => card("地貌重塑").click());
+    await flush();
+    const tags = dialog().querySelector("h2")?.previousElementSibling;
+    if (tags === null || tags === undefined) throw new Error("头图没有标签行");
+    expect(tags.firstElementChild?.textContent).toBe("数据包");
+  });
+
   it("数据包：逐个读各实例的存档，同时在读的不超过 2 个；读完后按存档判定", async () => {
     const ids = ["甲", "乙", "丙", "丁"];
     const dp = entry("D1", { title: "地形", resource_type: "data_pack", loaders: [] });

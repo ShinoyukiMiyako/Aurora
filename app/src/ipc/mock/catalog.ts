@@ -129,7 +129,7 @@ function seed(): MockProject[] {
     {
       title: "Sodium",
       description: "现代渲染引擎，大幅提升帧率",
-      author: "jellysquid3",
+      author: "CaffeineMC",
       hue: 145,
       categories: ["optimization"],
       resourceType: "mod",
@@ -171,7 +171,7 @@ function seed(): MockProject[] {
     {
       title: "Lithium",
       description: "不改变玩法的通用性能优化",
-      author: "jellysquid3",
+      author: "CaffeineMC",
       hue: 160,
       categories: ["optimization"],
       resourceType: "mod",

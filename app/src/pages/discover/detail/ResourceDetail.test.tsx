@@ -9,7 +9,7 @@ import { IpcError } from "../../../ipc/errors";
 import { OverlayRoot } from "../../../shell/overlay";
 import { ShellProvider } from "../../../shell/shell";
 import { LauncherProvider } from "../../../state/launcher";
-import type { ProjectDetail } from "../../../state/queries/discover";
+import type { InstanceMatch, ProjectDetail } from "../../../state/queries/discover";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../../test/launcher";
@@ -56,7 +56,7 @@ function detail(platform: ProjectDetail["platform"], projectId: string, title: s
   };
 }
 
-const TARGET: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [source("modrinth", "AANobbMI"), source("curseforge", CF_ID)] };
+const TARGET: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [source("modrinth", "AANobbMI"), source("curseforge", CF_ID)], listedType: "mod" };
 
 let view: Rendered | undefined;
 let curseforge: Deferred<ProjectDetail>;
@@ -66,11 +66,11 @@ const flush = () =>
     await settle();
   });
 
-async function mount() {
+async function mount(detailTarget: DetailTarget = TARGET) {
   view = render(
     <LauncherProvider>
       <ShellProvider>
-        <ResourceDetail target={TARGET} onClose={() => undefined} fitInstance={null} online />
+        <ResourceDetail target={detailTarget} onClose={() => undefined} fitInstance={null} online />
         <OverlayRoot />
       </ShellProvider>
     </LauncherProvider>,
@@ -100,6 +100,13 @@ const heroTitle = () => {
   const h = dialog().querySelector("h2");
   if (h === null) throw new Error("头图没有标题");
   return h.textContent;
+};
+
+/** 头图标签行紧贴在标题上方：类型、平台、分类。 */
+const heroTags = () => {
+  const row = dialog().querySelector("h2")?.previousElementSibling;
+  if (row === null || row === undefined) throw new Error("头图没有标签行");
+  return [...row.children].map((tag) => tag.textContent);
 };
 
 beforeEach(() => {
@@ -132,6 +139,129 @@ afterEach(() => {
   view = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe("资源详情：头图标签行", () => {
+  it("分类写中文名；认不出的分类不显示也不占名额，最多 3 个", async () => {
+    ipc.overrides.set("project_detail", () => ({
+      ...detail("modrinth", "AANobbMI", "Sodium"),
+      categories: ["brand-new-tag", "equipment", "Technology", "game-mechanics", "colored-lighting", "bloom"],
+    }));
+    await mount();
+    expect(heroTags()).toEqual(["Mod", "Modrinth", "CurseForge", "装备", "游戏机制", "彩色光照"]);
+  });
+
+  it("分类全都认不出时只留类型与平台标，英文原文不出现", async () => {
+    ipc.overrides.set("project_detail", () => ({ ...detail("modrinth", "AANobbMI", "Sodium"), categories: ["Performance", "Utility & QoL"] }));
+    await mount();
+    expect(heroTags()).toEqual(["Mod", "Modrinth", "CurseForge"]);
+    expect(dialog().textContent).not.toContain("Performance");
+  });
+
+  it("类型标跟结果卡走：数据包结果点进同时发布成 Mod 的工程标数据包，安装仍按详情给的类型判定", async () => {
+    await mount({ ...TARGET, listedType: "data_pack" });
+    expect(heroTags()[0]).toBe("数据包");
+    expect(callsOf(ipc, "match_instances").map((a) => a.resourceType)).toEqual(["mod"]);
+  });
+
+  it("没有结果卡（路由直开、前置点进来）时按详情给的类型标", async () => {
+    await mount({ ...TARGET, listedType: null });
+    expect(heroTags()[0]).toBe("Mod");
+  });
+
+  it("合并卡切到另一个平台后看的是那边的工程，按它自己的类型标", async () => {
+    await mount({ ...TARGET, listedType: "data_pack" });
+    act(() => radio("CurseForge").click());
+    await act(async () => {
+      curseforge.resolve(detail("curseforge", CF_ID, "Sodium（CurseForge）"));
+      await settle();
+    });
+    expect(heroTitle()).toBe("Sodium（CurseForge）");
+    expect(heroTags()[0]).toBe("Mod");
+  });
+});
+
+describe("资源详情：默认勾选", () => {
+  const fabric = { loaders: [{ kind: "fabric" as const, version: "0.16.5" }] };
+  const SINGLE: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" };
+  const best = modVersion("modrinth-v1", { project_id: "AANobbMI" });
+  const checked = (instance: string) => target(instance).getAttribute("aria-checked");
+
+  /** 实例列表已经读到之后才打开详情：用户点开卡片时都是这样。 */
+  async function openAfterBoot() {
+    const app = (open: DetailTarget | null) => (
+      <LauncherProvider>
+        <ShellProvider>
+          <ResourceDetail target={open} onClose={() => undefined} fitInstance={null} online />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    );
+    view = render(app(null));
+    await flush();
+    view.rerender(app(SINGLE));
+    await flush();
+  }
+
+  /** 看过一次这个资源，缓存里留下只有「生存」的矩阵；之后建好新实例并选中它，再打开同一个资源。 */
+  async function reopenAfterCreating(reloaded: Deferred<InstanceMatch[]>) {
+    bootOverrides(ipc, { instances: [instanceDto("生存", fabric)], config: configDto({ selected_version: "生存" }) });
+    ipc.overrides.set("match_instances", () => [match("生存", { best_version: best })]);
+    await openAfterBoot();
+    view?.unmount();
+
+    bootOverrides(ipc, { instances: [instanceDto("生存", fabric), instanceDto("新世界", fabric)], config: configDto({ selected_version: "新世界" }) });
+    ipc.overrides.set("match_instances", () => reloaded.promise);
+    await openAfterBoot();
+  }
+
+  it("缓存的矩阵早于新实例：等重取回来覆盖到它再落定，新实例第一次打开就被勾上", async () => {
+    const reloaded = deferred<InstanceMatch[]>();
+    await reopenAfterCreating(reloaded);
+    expect(checked("新世界")).toBe("false");
+    expect(dialog().textContent).toContain("勾选右侧的实例后安装");
+
+    await act(async () => {
+      reloaded.resolve([match("生存", { best_version: best }), match("新世界", { best_version: best })]);
+      await settle();
+    });
+    expect([checked("新世界"), checked("生存")]).toEqual(["true", "false"]);
+    expect(dialog().textContent).toContain("已选 1 个实例");
+  });
+
+  it("等重取期间用户自己勾了别的实例：默认勾选不再落定，不盖掉用户的选择", async () => {
+    const reloaded = deferred<InstanceMatch[]>();
+    await reopenAfterCreating(reloaded);
+    act(() => target("生存").click());
+    await act(async () => {
+      reloaded.resolve([match("生存", { best_version: best }), match("新世界", { best_version: best })]);
+      await settle();
+    });
+    expect([checked("新世界"), checked("生存")]).toEqual(["false", "true"]);
+  });
+
+  it("重取后矩阵里仍没有的实例不拦着默认勾选，也不反复重取", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存", fabric), instanceDto("占位", fabric)], config: configDto({ selected_version: "生存" }) });
+    ipc.overrides.set("match_instances", () => [match("生存", { best_version: best })]);
+    await openAfterBoot();
+    expect([checked("生存"), checked("占位")]).toEqual(["true", "false"]);
+    expect(callsOf(ipc, "match_instances")).toHaveLength(2);
+  });
+
+  it("实例列表还没读到时不落定：矩阵先到也要等列表，当前实例照样被勾上", async () => {
+    const list = deferred<ReturnType<typeof instanceDto>[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    ipc.overrides.set("match_instances", () => [match("生存", { best_version: best })]);
+    ipc.overrides.set("get_config", () => configDto({ selected_version: "生存" }));
+    await mount(SINGLE);
+    expect(callsOf(ipc, "match_instances")).toHaveLength(1);
+
+    await act(async () => {
+      list.resolve([instanceDto("生存", fabric)]);
+      await settle();
+    });
+    expect(checked("生存")).toBe("true");
+  });
 });
 
 describe("资源详情：合并卡切换来源", () => {

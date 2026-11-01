@@ -5,6 +5,7 @@ import type { LoaderKind, Platform, ResourceKind } from "../../domain/types";
 import type { LoaderChoice } from "../../state/queries/catalog";
 import type { DiscoverableType, InstanceSources, ResourceType, SearchArgs, SearchEntry, SearchResultDto, SortField } from "../../state/queries/discover";
 import type { DiscoverKind, RouteOf } from "../../state/route";
+import { CATEGORY_NAME, type CategoryKey } from "./copy";
 
 /** 每页 24 条：2 / 3 / 4 列的公倍数，末行不留半排。 */
 export const PAGE_SIZE = 24;
@@ -56,48 +57,18 @@ export interface HotCategory {
   label: string;
 }
 
-const COMMON_CATEGORIES: readonly HotCategory[] = [
-  { key: "optimization", label: "优化" },
-  { key: "technology", label: "科技" },
-  { key: "magic", label: "魔法" },
-  { key: "adventure", label: "冒险" },
-  { key: "decoration", label: "装饰" },
-  { key: "utility", label: "实用" },
-  { key: "worldgen", label: "世界生成" },
-];
+const hot = (...keys: CategoryKey[]): HotCategory[] => keys.map((key) => ({ key, label: CATEGORY_NAME[key] }));
+
+const COMMON_CATEGORIES = hot("optimization", "technology", "magic", "adventure", "decoration", "utility", "worldgen");
 
 /** 每种类型固定 7 枚热门分类；键是 Modrinth 的分类名，CurseForge 的对应由后端换算。 */
 export const HOT_CATEGORIES: Readonly<Record<DiscoverKind, readonly HotCategory[]>> = {
   all: COMMON_CATEGORIES,
   mod: COMMON_CATEGORIES,
   datapack: COMMON_CATEGORIES,
-  modpack: [
-    { key: "adventure", label: "冒险" },
-    { key: "technology", label: "科技" },
-    { key: "magic", label: "魔法" },
-    { key: "lightweight", label: "轻量" },
-    { key: "quests", label: "任务" },
-    { key: "multiplayer", label: "多人" },
-    { key: "optimization", label: "优化" },
-  ],
-  resourcepack: [
-    { key: "vanilla-like", label: "原版风" },
-    { key: "simplistic", label: "简约" },
-    { key: "realistic", label: "写实" },
-    { key: "themed", label: "主题" },
-    { key: "gui", label: "界面" },
-    { key: "fonts", label: "字体" },
-    { key: "audio", label: "音效" },
-  ],
-  shader: [
-    { key: "vanilla-like", label: "原版风" },
-    { key: "realistic", label: "写实" },
-    { key: "semi-realistic", label: "半写实" },
-    { key: "cartoon", label: "卡通" },
-    { key: "fantasy", label: "幻想" },
-    { key: "potato", label: "低配友好" },
-    { key: "screenshot", label: "截图向" },
-  ],
+  modpack: hot("adventure", "technology", "magic", "lightweight", "quests", "multiplayer", "optimization"),
+  resourcepack: hot("vanilla-like", "simplistic", "realistic", "themed", "gui", "fonts", "audio"),
+  shader: hot("vanilla-like", "realistic", "semi-realistic", "cartoon", "fantasy", "potato", "screenshot"),
 };
 
 export function categoryLabel(kind: DiscoverKind, key: string): string {
@@ -106,13 +77,9 @@ export function categoryLabel(kind: DiscoverKind, key: string): string {
   return found.label;
 }
 
-/** 详情标签行的分类名：热门分类里有中文名的用中文，其余平台分类照平台原文写。 */
-export function categoryDisplay(key: string): string {
-  for (const list of Object.values(HOT_CATEGORIES)) {
-    const found = list.find((c) => c.key === key);
-    if (found !== undefined) return found.label;
-  }
-  return key;
+/** 详情标签行的分类名。平台新加的分类与 CurseForge 的英文分类名没有中文名，为 null，界面上不显示：标签行不夹英文原文。 */
+export function categoryDisplay(key: string): string | null {
+  return Object.hasOwn(CATEGORY_NAME, key) ? CATEGORY_NAME[key as CategoryKey] : null;
 }
 
 /** 加载器筛选只对 Mod 与整合包有意义；资源包、光影、数据包不分加载器。 */
