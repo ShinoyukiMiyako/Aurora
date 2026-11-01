@@ -1403,6 +1403,21 @@ mod tests {
         (url, accepted)
     }
 
+    /// 清单读到一半连接断开：同一个源再试一次就拿到完整内容，不必换源。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_manifest_cut_off_midway_is_retried_from_the_same_source() {
+        let full = br#"{"windows-x64":{}}"#.to_vec();
+        let (url, accepted) = raw_server(vec![
+            (full.len() as u64, full[..5].to_vec()),
+            (full.len() as u64, full.clone()),
+        ]);
+        let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+
+        assert_eq!(installer.get_bytes(&url).await.unwrap(), full);
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "应同源重试恰好一次");
+    }
+
     /// 声明的长度超过上限：不读正文也不重试。带校验的那条读取路径同样限长。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_oversized_manifest_is_refused_without_a_retry() {

@@ -129,9 +129,13 @@ impl RetryableError for Error {
     }
 }
 
-/// 判断一个 reqwest 错误是否值得重试。
+/// 判断一个 reqwest 错误是否值得重试（与 aurora-install 同策略）。
+///
+/// 读响应体时连接被重置或提前关闭也算瞬时故障：reqwest 把读体失败包成 decode 类，只认 body 类会把读到
+/// 一半断开的请求当成永久失败、直接换源，两个源各断一次整次 Java 下载就失败了。
 fn is_retryable_http(err: &reqwest::Error) -> bool {
-    if err.is_timeout() || err.is_connect() || err.is_request() {
+    if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
+    {
         return true;
     }
     // error_for_status 抛出的状态码错误：仅对服务端错误与限流重试，4xx（除 429）不重试。
