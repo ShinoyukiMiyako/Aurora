@@ -792,7 +792,7 @@ export const TASK_TOAST = {
   cancelled: (title: string) => ({ title: `已取消：${title}` }),
   /** 备份、导出、恢复存档的任务失败：它们不是下载，不并进「n 个下载失败」。 */
   worldFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
-  backupStarted: (world: string) => ({ title: `已开始备份「${world}」`, body: "进度可以在下载任务里查看" }),
+  backupStarted: (world: string) => ({ title: `已开始备份「${world}」`, body: "进度见下载任务" }),
   worldBackedUp: (world: string, size: number, pruned: number) => ({
     title: `已备份「${world}」`,
     body: pruned > 0 ? `${formatBytes(size)} · 清理了 ${pruned} 份旧的自动备份` : formatBytes(size),
