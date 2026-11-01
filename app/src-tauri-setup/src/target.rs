@@ -11,12 +11,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::contract::{DirCheck, DirIssue};
-use crate::existing::{APP_EXE, unquote};
+use crate::existing::{APP_EXE, CONFIG_FILE, unquote};
 
-/// 非空目录追加的子目录名。
-const APP_FOLDER: &str = "Petalfall";
-/// 启动器的配置文件：它在就说明这里有上次留下的数据。
-const CONFIG_FILE: &str = "config.json";
+/// 非空目录追加的子目录名，也是默认安装目录的末段。
+pub const APP_FOLDER: &str = "Petalfall";
 const GAME_FOLDER: &str = ".minecraft";
 const VERSIONS_FOLDER: &str = "versions";
 /// 沿用启动器便携判定的探针名，留下残骸时看得出是谁的。

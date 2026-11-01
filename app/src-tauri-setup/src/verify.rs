@@ -2,89 +2,17 @@
 
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::ptr;
 
 use aurora_setup_payload::Header;
-use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
-};
-use windows_sys::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
 
 use crate::contract::{Failure, FailureCode};
+use crate::existing::{APP_EXE, DISPLAY_VERSION, INSTALL_LOCATION, Registry, UNINSTALL_KEY};
 use crate::extract::{BACKOFF, hash_reader, hex, retry_transient};
 use crate::journal::Journal;
 
-pub const EXE_NAME: &str = "Petalfall.exe";
 pub const UNINSTALLER_NAME: &str = "uninstall.exe";
-pub const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Petalfall";
-pub const DISPLAY_VERSION: &str = "DisplayVersion";
-pub const INSTALL_LOCATION: &str = "InstallLocation";
-/// 够放一条路径；更长的值由系统报回真实长度后再读一次。
-const REGISTRY_BUFFER_CHARS: usize = 1024;
-
-/// 卸载项的读取口子：测试不能碰真实注册表，用户本机的这个键属于正在使用的安装。
-pub trait UninstallEntry: Send + Sync {
-    /// 值不存在是 `Ok(None)`，读取本身出错才是 `Err`。
-    fn value(&self, name: &str) -> io::Result<Option<String>>;
-}
-
-/// 进程是 64 位，读到的就是模板 `SetRegView 64` 写的同一视图。
-pub struct HkcuUninstall;
-
-impl UninstallEntry for HkcuUninstall {
-    fn value(&self, name: &str) -> io::Result<Option<String>> {
-        read_string(
-            HKEY_CURRENT_USER,
-            UNINSTALL_KEY,
-            name,
-            REGISTRY_BUFFER_CHARS,
-        )
-    }
-}
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain([0]).collect()
-}
-
-fn read_string(
-    root: HKEY,
-    subkey: &str,
-    name: &str,
-    capacity: usize,
-) -> io::Result<Option<String>> {
-    let subkey = wide(subkey);
-    let name = wide(name);
-    let mut buffer = vec![0u16; capacity];
-    loop {
-        let mut size = (buffer.len() * 2) as u32;
-        let status = unsafe {
-            RegGetValueW(
-                root,
-                subkey.as_ptr(),
-                name.as_ptr(),
-                RRF_RT_REG_SZ,
-                ptr::null_mut(),
-                buffer.as_mut_ptr().cast(),
-                &mut size,
-            )
-        };
-        match status {
-            ERROR_SUCCESS => {
-                // size 含结尾的 0
-                buffer.truncate((size as usize / 2).saturating_sub(1));
-                let text = String::from_utf16(&buffer)
-                    .map_err(|err| io::Error::new(ErrorKind::InvalidData, err))?;
-                return Ok(Some(text));
-            }
-            ERROR_MORE_DATA => buffer.resize((size as usize).div_ceil(2), 0),
-            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => return Ok(None),
-            code => return Err(io::Error::from_raw_os_error(code as i32)),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExeFingerprint {
     pub len: u64,
@@ -170,13 +98,13 @@ fn write_registry_value(
 impl fmt::Display for Mismatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Mismatch::ExeMissing => write!(f, "{EXE_NAME} 不存在"),
-            Mismatch::ExeEmpty => write!(f, "{EXE_NAME} 是空文件"),
+            Mismatch::ExeMissing => write!(f, "{APP_EXE} 不存在"),
+            Mismatch::ExeEmpty => write!(f, "{APP_EXE} 是空文件"),
             Mismatch::ExeLength { expected, actual } => {
-                write!(f, "{EXE_NAME} 长度 {actual}，应为 {expected}")
+                write!(f, "{APP_EXE} 长度 {actual}，应为 {expected}")
             }
             Mismatch::ExeHash { expected, actual } => {
-                write!(f, "{EXE_NAME} 的 SHA-256 是 {actual}，应为 {expected}")
+                write!(f, "{APP_EXE} 的 SHA-256 是 {actual}，应为 {expected}")
             }
             Mismatch::UninstallerMissing => write!(f, "{UNINSTALLER_NAME} 不存在"),
             Mismatch::UninstallerEmpty => write!(f, "{UNINSTALLER_NAME} 是空文件"),
@@ -192,7 +120,7 @@ impl fmt::Display for Mismatch {
 }
 
 fn check_exe(expected: &Expected, found: &mut Vec<Mismatch>) {
-    let path = expected.instdir.join(EXE_NAME);
+    let path = expected.instdir.join(APP_EXE);
     let actual_len = match fs::metadata(&path) {
         Ok(metadata) => metadata.len(),
         Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -201,7 +129,7 @@ fn check_exe(expected: &Expected, found: &mut Vec<Mismatch>) {
         }
         Err(err) => {
             found.push(Mismatch::Unreadable {
-                item: EXE_NAME,
+                item: APP_EXE,
                 reason: err.to_string(),
             });
             return;
@@ -229,7 +157,7 @@ fn check_exe(expected: &Expected, found: &mut Vec<Mismatch>) {
             actual: hex(&actual),
         }),
         Err(err) => found.push(Mismatch::Unreadable {
-            item: EXE_NAME,
+            item: APP_EXE,
             reason: err.to_string(),
         }),
     }
@@ -247,8 +175,8 @@ fn check_uninstaller(instdir: &Path, found: &mut Vec<Mismatch>) {
     }
 }
 
-fn check_version(entry: &dyn UninstallEntry, expected: &str, found: &mut Vec<Mismatch>) {
-    match entry.value(DISPLAY_VERSION) {
+fn check_version(registry: &dyn Registry, expected: &str, found: &mut Vec<Mismatch>) {
+    match registry.read_string(UNINSTALL_KEY, Some(DISPLAY_VERSION)) {
         Ok(actual) if actual.as_deref() == Some(expected) => {}
         Ok(actual) => found.push(Mismatch::DisplayVersion {
             expected: expected.to_owned(),
@@ -266,9 +194,9 @@ pub(crate) fn fold_dir(path: &str) -> String {
     path.trim_end_matches(['\\', '/']).to_lowercase()
 }
 
-fn check_location(entry: &dyn UninstallEntry, instdir: &Path, found: &mut Vec<Mismatch>) {
+fn check_location(registry: &dyn Registry, instdir: &Path, found: &mut Vec<Mismatch>) {
     let expected = instdir.to_string_lossy();
-    match entry.value(INSTALL_LOCATION) {
+    match registry.read_string(UNINSTALL_KEY, Some(INSTALL_LOCATION)) {
         // 模板写的是带引号的目录
         Ok(Some(actual)) if fold_dir(actual.trim_matches('"')) == fold_dir(&expected) => {}
         Ok(actual) => found.push(Mismatch::InstallLocation {
@@ -283,12 +211,12 @@ fn check_location(entry: &dyn UninstallEntry, instdir: &Path, found: &mut Vec<Mi
 }
 
 /// 四项都查完再返回，一次报全：用户只发得来一次反馈。空表示通过。
-pub fn verify(expected: &Expected, entry: &dyn UninstallEntry) -> Vec<Mismatch> {
+pub fn verify(expected: &Expected, registry: &dyn Registry) -> Vec<Mismatch> {
     let mut found = Vec::new();
     check_exe(expected, &mut found);
     check_uninstaller(&expected.instdir, &mut found);
-    check_version(entry, &expected.version, &mut found);
-    check_location(entry, &expected.instdir, &mut found);
+    check_version(registry, &expected.version, &mut found);
+    check_location(registry, &expected.instdir, &mut found);
     found
 }
 
@@ -308,8 +236,9 @@ pub(crate) mod test_support {
     use std::collections::HashMap;
     use std::io;
 
-    use super::UninstallEntry;
+    use crate::existing::{Registry, UNINSTALL_KEY};
 
+    /// 只有卸载项这一个键的内存注册表。
     #[derive(Default)]
     pub struct MemoryEntry(pub std::sync::Mutex<HashMap<String, Result<String, i32>>>);
 
@@ -334,8 +263,10 @@ pub(crate) mod test_support {
         }
     }
 
-    impl UninstallEntry for MemoryEntry {
-        fn value(&self, name: &str) -> io::Result<Option<String>> {
+    impl Registry for MemoryEntry {
+        fn read_string(&self, key: &str, value: Option<&str>) -> io::Result<Option<String>> {
+            assert_eq!(key, UNINSTALL_KEY);
+            let name = value.expect("卸载项没有要读默认值的地方");
             match self.0.lock().unwrap().get(name) {
                 Some(Ok(value)) => Ok(Some(value.clone())),
                 Some(Err(code)) => Err(io::Error::from_raw_os_error(*code)),
@@ -347,8 +278,6 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
-
     use super::test_support::MemoryEntry;
     use super::*;
     use crate::overlay::test_support::random_bytes;
@@ -367,7 +296,7 @@ mod tests {
         let instdir = dir.path().join("游戏 目录").join("Petalfall");
         fs::create_dir_all(&instdir).unwrap();
         let exe = random_bytes(2048);
-        fs::write(instdir.join(EXE_NAME), &exe).unwrap();
+        fs::write(instdir.join(APP_EXE), &exe).unwrap();
         fs::write(instdir.join(UNINSTALLER_NAME), b"MZ").unwrap();
         Install {
             _dir: dir,
@@ -404,7 +333,7 @@ mod tests {
     #[test]
     fn a_missing_exe_is_named() {
         let install = install();
-        fs::remove_file(install.instdir.join(EXE_NAME)).unwrap();
+        fs::remove_file(install.instdir.join(APP_EXE)).unwrap();
 
         assert_eq!(
             verify(&install.expected(), &install.entry()),
@@ -415,7 +344,7 @@ mod tests {
     #[test]
     fn a_wrong_exe_length_reports_both_numbers() {
         let install = install();
-        fs::write(install.instdir.join(EXE_NAME), vec![0u8; 2047]).unwrap();
+        fs::write(install.instdir.join(APP_EXE), vec![0u8; 2047]).unwrap();
 
         let found = verify(&install.expected(), &install.entry());
 
@@ -434,7 +363,7 @@ mod tests {
         let install = install();
         let mut tampered = install.exe.clone();
         tampered[1024] ^= 0x01;
-        fs::write(install.instdir.join(EXE_NAME), &tampered).unwrap();
+        fs::write(install.instdir.join(APP_EXE), &tampered).unwrap();
 
         assert_eq!(
             verify(&install.expected(), &install.entry()),
@@ -557,7 +486,7 @@ mod tests {
     #[test]
     fn every_failed_item_is_reported_in_one_pass() {
         let install = install();
-        fs::remove_file(install.instdir.join(EXE_NAME)).unwrap();
+        fs::remove_file(install.instdir.join(APP_EXE)).unwrap();
         fs::remove_file(install.instdir.join(UNINSTALLER_NAME)).unwrap();
         let entry = install.entry();
         entry.set(DISPLAY_VERSION, "0.1.0");
@@ -605,11 +534,11 @@ mod tests {
         let install = install();
         let mut expected = install.expected();
         expected.exe = None;
-        fs::write(install.instdir.join(EXE_NAME), b"some other version").unwrap();
+        fs::write(install.instdir.join(APP_EXE), b"some other version").unwrap();
 
         assert_eq!(verify(&expected, &install.entry()), vec![]);
 
-        fs::write(install.instdir.join(EXE_NAME), b"").unwrap();
+        fs::write(install.instdir.join(APP_EXE), b"").unwrap();
         assert_eq!(
             verify(&expected, &install.entry()),
             vec![Mismatch::ExeEmpty]
@@ -661,63 +590,5 @@ mod tests {
         assert_eq!(expected.instdir, PathBuf::from(r"D:\游戏 目录\Petalfall"));
         assert_eq!(expected.version, "1.0.0");
         assert_eq!(expected.exe.unwrap().len, 9);
-    }
-
-    const WINDOWS_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
-
-    /// 真实读取只读 HKLM 上这个每台 Windows 都有的值，不碰卸载项。
-    #[test]
-    fn read_string_returns_a_registry_value() {
-        let value = read_string(
-            HKEY_LOCAL_MACHINE,
-            WINDOWS_VERSION_KEY,
-            "ProductName",
-            REGISTRY_BUFFER_CHARS,
-        )
-        .unwrap();
-
-        assert!(value.unwrap().starts_with("Windows"));
-    }
-
-    #[test]
-    fn read_string_grows_past_a_small_first_buffer() {
-        let whole = read_string(
-            HKEY_LOCAL_MACHINE,
-            WINDOWS_VERSION_KEY,
-            "ProductName",
-            REGISTRY_BUFFER_CHARS,
-        )
-        .unwrap()
-        .unwrap();
-
-        let grown = read_string(HKEY_LOCAL_MACHINE, WINDOWS_VERSION_KEY, "ProductName", 1)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(grown, whole);
-    }
-
-    #[test]
-    fn read_string_treats_missing_values_and_keys_as_none() {
-        assert_eq!(
-            read_string(
-                HKEY_LOCAL_MACHINE,
-                WINDOWS_VERSION_KEY,
-                "PetalfallNoSuchValue",
-                REGISTRY_BUFFER_CHARS
-            )
-            .unwrap(),
-            None
-        );
-        assert_eq!(
-            read_string(
-                HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\PetalfallNoSuchKey",
-                "x",
-                REGISTRY_BUFFER_CHARS
-            )
-            .unwrap(),
-            None
-        );
     }
 }

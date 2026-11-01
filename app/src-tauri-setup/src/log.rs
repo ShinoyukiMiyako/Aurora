@@ -16,12 +16,17 @@ pub const LOG_FILE: &str = "setup.log";
 
 const SECONDS_PER_DAY: u64 = 86_400;
 
-/// 日志所在目录。路径根由调用方传给 [`SetupLog::open`]，这里只负责从环境取默认值。
-pub fn default_root() -> io::Result<PathBuf> {
+/// 用环境变量而不是 Known Folder：半装记录、日志和默认安装目录都从这里取，隔离运行时改一个变量就全部改道。
+pub fn local_app_data() -> io::Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "环境变量 LOCALAPPDATA 没有设置"))?;
-    Ok(PathBuf::from(local).join(SETUP_DIR))
+    Ok(PathBuf::from(local))
+}
+
+/// 日志和半装记录所在目录。路径根由调用方传给 [`SetupLog::open`]，这里只负责从环境取默认值。
+pub fn default_root() -> io::Result<PathBuf> {
+    Ok(local_app_data()?.join(SETUP_DIR))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

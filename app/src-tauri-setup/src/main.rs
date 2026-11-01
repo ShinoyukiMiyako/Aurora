@@ -2,14 +2,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::error::Error;
-use std::fs::File;
-use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aurora_setup_lib::boot::{self, Claim, DesktopUser, Instance, Notice, Webview, WizardError};
+use aurora_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
+use aurora_setup_lib::commands::{self, SetupContext};
 use aurora_setup_lib::log::{self, SetupLog};
+use aurora_setup_lib::overlay;
+use aurora_setup_lib::runner::Session;
 use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
 
@@ -23,16 +24,24 @@ struct Interface {
 }
 
 impl Interface {
-    fn start(instance: &Arc<Instance>, log: &Arc<SetupLog>) -> Result<Self, Box<dyn Error>> {
+    fn start(context: &Arc<SetupContext>) -> Result<Self, Box<dyn Error>> {
         let webview_data = tempfile::Builder::new()
             .prefix(WEBVIEW_DATA_PREFIX)
             .tempdir()?;
         let app = tauri::Builder::default()
             .plugin(tauri_plugin_dialog::init())
             .plugin(tauri_plugin_opener::init())
-            .manage(Arc::clone(instance))
-            .manage(Arc::clone(log))
-            .invoke_handler(tauri::generate_handler![])
+            .manage(Arc::clone(context))
+            .invoke_handler(tauri::generate_handler![
+                commands::probe,
+                commands::check_dir,
+                commands::launcher_running,
+                commands::install,
+                commands::open_launcher,
+                commands::open_log,
+                commands::run_standard_installer,
+                commands::window_ready,
+            ])
             .build(tauri::generate_context!())?;
         let config = app
             .config()
@@ -53,7 +62,12 @@ impl Interface {
         })
     }
 
-    fn run(self, instance: Arc<Instance>, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>> {
+    fn run(
+        self,
+        context: &SetupContext,
+        instance: Arc<boot::Instance>,
+        log: &Arc<SetupLog>,
+    ) -> Result<ExitCode, Box<dyn Error>> {
         boot::focus_on_request(instance, self.window.clone(), Arc::clone(log))?;
         boot::guard_visibility(self.window, Arc::clone(log))?;
         let code = self.app.run_return(|_, _| {});
@@ -64,6 +78,10 @@ impl Interface {
                 started.elapsed().as_millis()
             )),
             Err(err) => log.warn(format_args!("清理 WebView2 数据目录失败：{err}")),
+        }
+        // 用户改走原生向导时窗口已经关了，这里陪它到退出：句柄还钉着载荷，退出后才清得掉临时目录
+        if let Err(err) = context.wait_for_wizard() {
+            log.warn(format_args!("等原生向导退出失败：{err}"));
         }
         Ok(exit_code(code))
     }
@@ -106,39 +124,39 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
         DesktopUser::Unknown(reason) => log.warn(format_args!("比不出桌面用户：{reason}")),
     }
 
-    let exe = std::env::current_exe()?;
-    if let Err(err) = boot::check_package(&mut File::open(&exe)?, cfg!(debug_assertions)) {
-        log.error(format_args!("安装包不完整：{err}"));
-        boot::alert(&Notice::IncompletePackage);
-        return Ok(ExitCode::FAILURE);
-    }
+    // 开窗前就要知道载荷在、长度够：放到窗口里才报的话，用户只能看到一段错误原文
+    let source = match overlay::load() {
+        Ok(source) => source,
+        Err(err) => {
+            log.error(format_args!("安装包不完整：{err}"));
+            boot::alert(&Notice::IncompletePackage);
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    let session = Session::open(source)?;
+    let context = Arc::new(SetupContext::new(
+        session,
+        Arc::clone(&instance),
+        Arc::clone(log),
+    ));
 
     if let Webview::Unavailable { reason } = &webview {
         log.warn(format_args!("WebView2 不可用，改走原生向导：{reason}"));
-        return fall_back(&exe, log);
+        return fall_back(&context);
     }
-    match Interface::start(&instance, log) {
-        Ok(interface) => interface.run(instance, log),
+    match Interface::start(&context) {
+        Ok(interface) => interface.run(&context, instance, log),
         Err(err) => {
             log.error(format_args!("建窗失败，改走原生向导：{err}"));
-            fall_back(&exe, log)
+            fall_back(&context)
         }
     }
 }
 
-fn fall_back(exe: &Path, log: &SetupLog) -> Result<ExitCode, Box<dyn Error>> {
-    match boot::run_wizard(exe, log) {
-        Ok(status) => {
-            log.info(format_args!("原生向导已退出：{status}"));
-            Ok(status.code().map_or(ExitCode::FAILURE, exit_code))
-        }
-        Err(WizardError::Package(detail)) => {
-            log.error(format_args!("安装包损坏：{detail}"));
-            boot::alert(&Notice::IncompletePackage);
-            Ok(ExitCode::FAILURE)
-        }
-        Err(err @ WizardError::Io(_)) => Err(err.into()),
-    }
+fn fall_back(context: &SetupContext) -> Result<ExitCode, Box<dyn Error>> {
+    context.start_wizard()?;
+    let code = context.wait_for_wizard()?;
+    Ok(code.map_or(ExitCode::FAILURE, exit_code))
 }
 
 fn exit_code(code: i32) -> ExitCode {

@@ -14,28 +14,26 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use aurora_setup_payload::Header;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-};
+use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 use windows_sys::core::{GUID, PWSTR};
 
+use crate::boot::Instance;
 use crate::contract::{Failure, FailureCode, InstallMode, InstallPlan, Phase, Progress};
+use crate::existing::{APP_EXE, CurrentUserRegistry, Registry};
 use crate::extract::{
     BACKOFF, Extracted, Sweep, extract, io_failure, retry_transient, sweep_stale,
 };
 use crate::journal::{self, Journal, JournalStore, Processes, Recovery, SystemProcesses};
+use crate::launcher::{self, Opened};
+use crate::log::{self, SetupLog};
 use crate::overlay::Source;
-use crate::verify::{
-    self, EXE_NAME, Expected, HkcuUninstall, UNINSTALLER_NAME, UninstallEntry, verify,
-};
+use crate::verify::{self, Expected, UNINSTALLER_NAME, verify};
 
-/// 半装记录和日志都放这里，见 [`crate::journal`]。
-pub const STATE_DIR: &str = "Petalfall-Setup";
 pub const SHORTCUT_NAME: &str = "Petalfall.lnk";
 
 const POLL: Duration = Duration::from_millis(100);
@@ -69,7 +67,7 @@ impl Roots {
     pub fn system() -> io::Result<Self> {
         Ok(Self {
             temp: std::env::temp_dir(),
-            state: known_folder(&FOLDERID_LocalAppData)?.join(STATE_DIR),
+            state: log::default_root()?,
             desktop: known_folder(&FOLDERID_Desktop)?,
         })
     }
@@ -132,6 +130,16 @@ pub trait Launcher: Send + Sync {
     fn resolve_instdir(&self, requested: &Path) -> PathBuf {
         requested.to_owned()
     }
+
+    /// 启动器开着没有。
+    fn app_running(&self) -> io::Result<bool> {
+        launcher::is_running()
+    }
+
+    /// 打开装好的启动器。
+    fn open_app(&self, dir: &Path, instance: &Instance) -> io::Result<Opened> {
+        launcher::open(dir, instance)
+    }
 }
 
 pub struct SystemLauncher;
@@ -163,6 +171,17 @@ impl Running for ChildRun {
 pub trait Reporter: Send + Sync {
     fn progress(&self, progress: Progress);
     fn note(&self, line: &str);
+}
+
+/// 没有窗口时的出口：原生向导走这里，进度也只能留在日志里。
+impl Reporter for SetupLog {
+    fn progress(&self, progress: Progress) {
+        self.info(format_args!("进度：{progress:?}"));
+    }
+
+    fn note(&self, line: &str) {
+        self.info(line);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -247,7 +266,7 @@ struct TargetWatch {
 
 impl TargetWatch {
     fn new(instdir: &Path, exe_len: u64) -> Self {
-        let exe = instdir.join(EXE_NAME);
+        let exe = instdir.join(APP_EXE);
         let uninstaller = instdir.join(UNINSTALLER_NAME);
         Self {
             exe_is_old: file_len(&exe) == Some(exe_len),
@@ -272,7 +291,7 @@ impl TargetWatch {
 
 fn dir_state(instdir: &Path) -> (Option<u64>, Option<u64>) {
     (
-        file_len(&instdir.join(EXE_NAME)),
+        file_len(&instdir.join(APP_EXE)),
         file_len(&instdir.join(UNINSTALLER_NAME)),
     )
 }
@@ -337,7 +356,7 @@ pub struct Session {
     source: Source,
     roots: Roots,
     launcher: Box<dyn Launcher>,
-    entry: Arc<dyn UninstallEntry>,
+    registry: Arc<dyn Registry>,
     processes: Box<dyn Processes>,
     poll: Duration,
     quick_exit: Duration,
@@ -348,14 +367,14 @@ impl Session {
         source: Source,
         roots: Roots,
         launcher: Box<dyn Launcher>,
-        entry: Arc<dyn UninstallEntry>,
+        registry: Arc<dyn Registry>,
         processes: Box<dyn Processes>,
     ) -> Self {
         Self {
             source,
             roots,
             launcher,
-            entry,
+            registry,
             processes,
             poll: POLL,
             quick_exit: QUICK_EXIT,
@@ -375,7 +394,7 @@ impl Session {
             source,
             Roots::system()?,
             Box::new(SystemLauncher),
-            Arc::new(HkcuUninstall),
+            Arc::new(CurrentUserRegistry),
             Box::new(SystemProcesses),
         ))
     }
@@ -386,6 +405,19 @@ impl Session {
 
     pub fn roots(&self) -> &Roots {
         &self.roots
+    }
+
+    pub fn registry(&self) -> &dyn Registry {
+        self.registry.as_ref()
+    }
+
+    pub fn launcher_running(&self) -> io::Result<bool> {
+        self.launcher.app_running()
+    }
+
+    /// 打开启动器，等它的窗口出现。会阻塞，放在工作线程上调。
+    pub fn open_launcher(&self, dir: &Path, instance: &Instance) -> io::Result<Opened> {
+        self.launcher.open_app(dir, instance)
     }
 
     fn journal_store(&self) -> JournalStore {
@@ -404,7 +436,12 @@ impl Session {
             &self.journal_store(),
             self.processes.as_ref(),
             self.poll,
-            |journal| verify(&Expected::for_journal(journal, header), self.entry.as_ref()),
+            |journal| {
+                verify(
+                    &Expected::for_journal(journal, header),
+                    self.registry.as_ref(),
+                )
+            },
         )
     }
 
@@ -504,7 +541,7 @@ impl Session {
         }
     }
 
-    /// 跑完一次安装。阻塞到结束，在工作线程上调；窗口线程用 [`spawn_install`]。
+    /// 跑完一次安装。阻塞到结束，要放在工作线程上调：子进程要等好几秒，窗口线程不能陪着。
     pub fn install(&self, target: &Target, reporter: &dyn Reporter) -> Result<(), Failure> {
         let outcome = self.perform(target, reporter);
         if let Err(failure) = &outcome {
@@ -544,7 +581,7 @@ impl Session {
         reporter.progress(meter.exited());
         let mismatches = verify(
             &Expected::from_header(header, &instdir),
-            self.entry.as_ref(),
+            self.registry.as_ref(),
         );
         if !mismatches.is_empty() {
             return Err(verify::failure(&mismatches));
@@ -570,17 +607,6 @@ fn remove_shortcut(shortcut: &Path, reporter: &dyn Reporter) {
         }
         _ => {}
     }
-}
-
-/// 把安装放到工作线程：子进程要等好几秒，窗口线程不能陪着。
-pub fn spawn_install(
-    session: Arc<Session>,
-    target: Target,
-    reporter: Arc<dyn Reporter>,
-) -> io::Result<JoinHandle<Result<(), Failure>>> {
-    thread::Builder::new()
-        .name("setup-install".to_owned())
-        .spawn(move || session.install(&target, reporter.as_ref()))
 }
 
 #[cfg(test)]
@@ -613,10 +639,10 @@ mod tests {
 
     use super::test_support::Recording;
     use super::*;
+    use crate::existing::{DISPLAY_VERSION, INSTALL_LOCATION};
     use crate::overlay::Overlay;
     use crate::overlay::test_support::{packed_image, random_bytes};
     use crate::verify::test_support::MemoryEntry;
-    use crate::verify::{DISPLAY_VERSION, INSTALL_LOCATION};
 
     const VERSION: &str = "0.2.0-dev.7";
     const DUMP_ENV: &str = "PETALFALL_TEST_DUMP_ARGS";
@@ -719,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn system_roots_follow_the_known_folders() {
+    fn system_roots_follow_the_environment_and_the_known_folders() {
         let roots = Roots::system().unwrap();
 
         assert_eq!(
@@ -868,9 +894,9 @@ mod tests {
         let mut watch = TargetWatch::new(dir.path(), 8);
 
         assert_eq!(watch.observe(), no_milestones());
-        fs::write(dir.path().join(EXE_NAME), b"1234").unwrap();
+        fs::write(dir.path().join(APP_EXE), b"1234").unwrap();
         assert_eq!(watch.observe(), no_milestones());
-        fs::write(dir.path().join(EXE_NAME), b"12345678").unwrap();
+        fs::write(dir.path().join(APP_EXE), b"12345678").unwrap();
         fs::write(dir.path().join(UNINSTALLER_NAME), b"x").unwrap();
         assert_eq!(
             watch.observe(),
@@ -884,13 +910,13 @@ mod tests {
     #[test]
     fn an_old_exe_of_the_same_length_does_not_count_until_it_changes() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(EXE_NAME), b"12345678").unwrap();
+        fs::write(dir.path().join(APP_EXE), b"12345678").unwrap();
         let mut watch = TargetWatch::new(dir.path(), 8);
 
         assert!(!watch.observe().exe_written);
-        fs::write(dir.path().join(EXE_NAME), b"").unwrap();
+        fs::write(dir.path().join(APP_EXE), b"").unwrap();
         assert!(!watch.observe().exe_written);
-        fs::write(dir.path().join(EXE_NAME), b"abcdefgh").unwrap();
+        fs::write(dir.path().join(APP_EXE), b"abcdefgh").unwrap();
         assert!(watch.observe().exe_written);
     }
 
@@ -1075,7 +1101,7 @@ mod tests {
                 calls: Arc::clone(&self.calls),
                 journal_path: JournalStore::new(&self.roots.state).path(),
             };
-            let entry: Arc<dyn UninstallEntry> = self.entry.clone();
+            let entry: Arc<dyn Registry> = self.entry.clone();
             let mut session = Session::new(
                 Source::Packed(Overlay::open(&self.image).unwrap()),
                 self.roots.clone(),
@@ -1095,7 +1121,7 @@ mod tests {
             Step::Run {
                 effect: Box::new(move || {
                     fs::create_dir_all(&instdir).unwrap();
-                    fs::write(instdir.join(EXE_NAME), exe.as_slice()).unwrap();
+                    fs::write(instdir.join(APP_EXE), exe.as_slice()).unwrap();
                     fs::write(instdir.join(UNINSTALLER_NAME), b"MZ").unwrap();
                     entry.set(DISPLAY_VERSION, VERSION);
                     entry.set(INSTALL_LOCATION, &format!("\"{}\"", instdir.display()));
@@ -1299,7 +1325,7 @@ mod tests {
                     if let Step::Run { effect, .. } = good {
                         effect();
                     }
-                    fs::write(instdir.join(EXE_NAME), b"old exe that stayed behind").unwrap();
+                    fs::write(instdir.join(APP_EXE), b"old exe that stayed behind").unwrap();
                 })
             },
             exit: 0,
@@ -1361,7 +1387,7 @@ mod tests {
         let half_written = Step::Run {
             effect: Box::new(move || {
                 fs::create_dir_all(&instdir).unwrap();
-                fs::write(instdir.join(EXE_NAME), b"half").unwrap();
+                fs::write(instdir.join(APP_EXE), b"half").unwrap();
             }),
             exit: 2,
         };
@@ -1661,18 +1687,6 @@ mod tests {
         assert_eq!(run.wait_and_clean(&Recording::default()).unwrap(), 5);
         assert!(bench.temp_is_empty());
         assert!(!bench.store().path().exists(), "向导不写半装记录");
-    }
-
-    #[test]
-    fn spawn_install_runs_on_a_named_worker_thread_and_hands_back_the_result() {
-        let bench = Bench::new();
-        let session = Arc::new(bench.session(vec![exits(9)]));
-        let target = bench.target(InstallMode::Fresh, true);
-
-        let handle = spawn_install(session, target, Arc::new(Recording::default())).unwrap();
-
-        assert_eq!(handle.thread().name(), Some("setup-install"));
-        assert_eq!(handle.join().unwrap().unwrap_err().detail, "9");
     }
 
     #[test]

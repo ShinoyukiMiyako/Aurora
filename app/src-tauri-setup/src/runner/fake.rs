@@ -15,11 +15,12 @@ use std::time::Duration;
 use aurora_setup_payload::Header;
 
 use super::{Launcher, Roots, Running, Session};
+use crate::boot::Instance;
+use crate::existing::{APP_EXE, DISPLAY_VERSION, INSTALL_LOCATION, Registry, UNINSTALL_KEY};
 use crate::journal::Processes;
+use crate::launcher::Opened;
 use crate::overlay::Source;
-use crate::verify::{
-    DISPLAY_VERSION, EXE_NAME, INSTALL_LOCATION, UNINSTALLER_NAME, UninstallEntry,
-};
+use crate::verify::UNINSTALLER_NAME;
 
 pub const ENV_VAR: &str = "PETALFALL_SETUP_FAKE";
 pub const SANDBOX_DIR: &str = "Petalfall-Fake-Sandbox";
@@ -114,8 +115,11 @@ impl MemoryRegistry {
     }
 }
 
-impl UninstallEntry for MemoryRegistry {
-    fn value(&self, name: &str) -> io::Result<Option<String>> {
+impl Registry for MemoryRegistry {
+    fn read_string(&self, key: &str, value: Option<&str>) -> io::Result<Option<String>> {
+        let Some(name) = value.filter(|_| key == UNINSTALL_KEY) else {
+            return Ok(None);
+        };
         Ok(self
             .0
             .lock()
@@ -156,7 +160,7 @@ impl FakeLauncher {
             Outcome::Verify => &self.exe[..self.exe.len() - 1],
             _ => &self.exe[..],
         };
-        fs::write(self.instdir.join(EXE_NAME), written)?;
+        fs::write(self.instdir.join(APP_EXE), written)?;
         fs::write(self.instdir.join(UNINSTALLER_NAME), b"fake uninstaller")?;
         self.registry.write(DISPLAY_VERSION, self.version.clone());
         self.registry
@@ -184,6 +188,16 @@ impl Launcher for FakeLauncher {
 
     fn resolve_instdir(&self, _requested: &Path) -> PathBuf {
         self.instdir.clone()
+    }
+
+    /// 开发机上开着真的落樱时，假流程也要走得完。
+    fn app_running(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    /// 沙箱里写的不是真程序，没有什么可打开的。
+    fn open_app(&self, _dir: &Path, _instance: &Instance) -> io::Result<Opened> {
+        Ok(Opened::Exited(None))
     }
 }
 
@@ -304,7 +318,7 @@ mod tests {
         assert!(!requested.exists(), "请求的目录不能被写");
         let instdir = sandbox.path().join("instdir");
         assert_eq!(
-            fs::metadata(instdir.join(EXE_NAME)).unwrap().len(),
+            fs::metadata(instdir.join(APP_EXE)).unwrap().len(),
             EXE_LEN as u64
         );
         assert!(instdir.join(UNINSTALLER_NAME).exists());
@@ -399,6 +413,49 @@ mod tests {
             recovery,
             Recovery::Interrupted { journal, .. } if journal.instdir == sandbox.path().join("instdir")
         ));
+    }
+
+    #[test]
+    fn the_session_reads_its_own_registry_and_never_the_real_one() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let session = session_for(Outcome::Ok, sandbox.path());
+
+        assert_eq!(
+            crate::existing::detect(session.registry(), "0.1.0").unwrap(),
+            None
+        );
+
+        session
+            .install(
+                &target(Path::new(r"D:\Petalfall"), true),
+                &Recording::default(),
+            )
+            .unwrap();
+
+        let existing = crate::existing::detect(session.registry(), "0.1.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            existing.dir,
+            sandbox.path().join("instdir").display().to_string()
+        );
+    }
+
+    #[test]
+    fn nothing_real_is_opened() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let session = session_for(Outcome::Ok, sandbox.path());
+        let crate::boot::Claim::First(instance) = crate::boot::test_claim("fake-open") else {
+            panic!("这个名字上不该已有实例");
+        };
+
+        assert!(!session.launcher_running().unwrap());
+        assert_eq!(
+            session
+                .open_launcher(Path::new(r"D:\没有这个目录"), &instance)
+                .unwrap(),
+            Opened::Exited(None)
+        );
     }
 
     #[test]

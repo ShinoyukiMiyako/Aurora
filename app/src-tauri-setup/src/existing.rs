@@ -19,11 +19,14 @@ pub const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Unin
 pub const INSTALL_LOCATION: &str = "InstallLocation";
 pub const DISPLAY_VERSION: &str = "DisplayVersion";
 
+/// 启动器的配置文件：它在就说明这里有上次留下的数据。
+pub const CONFIG_FILE: &str = "config.json";
+
 /// NSIS 记下的上次安装目录，存在键的默认值里。卸载后它可能还在，所以只能当备选。
 pub const LAST_DIR_KEY: &str = r"Software\petalfall\Petalfall";
 
 /// 读 HKCU 的字符串值。抽出来是为了让测试换成内存表，不碰这台电脑上真实的安装记录。
-pub trait Registry {
+pub trait Registry: Send + Sync {
     /// `value` 为 `None` 时读键的默认值。键或值不存在是 `Ok(None)`，不是错误。
     fn read_string(&self, key: &str, value: Option<&str>) -> io::Result<Option<String>>;
 }
@@ -110,6 +113,14 @@ pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Opti
     }))
 }
 
+/// 卸载后留下的上次安装目录：程序没了数据还在时默认接着用，换到别处的话那份数据就成了孤儿。
+///
+/// 读不到配置文件就当没有：这只是换个默认值，不值得拦住安装。
+pub fn leftover_dir(registry: &dyn Registry) -> io::Result<Option<String>> {
+    let dir = read_value(registry, LAST_DIR_KEY, None)?;
+    Ok(dir.filter(|dir| Path::new(dir).join(CONFIG_FILE).is_file()))
+}
+
 /// 真实的 HKCU。安装包只有 64 位，进程默认就是模板写入时用的 64 位视图。
 #[cfg(windows)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -118,47 +129,43 @@ pub struct CurrentUserRegistry;
 #[cfg(windows)]
 impl Registry for CurrentUserRegistry {
     fn read_string(&self, key: &str, value: Option<&str>) -> io::Result<Option<String>> {
-        use std::iter::once;
-        use std::ptr::{null, null_mut};
+        use windows_sys::Win32::System::Registry::HKEY_CURRENT_USER;
 
-        use windows_sys::Win32::Foundation::{
-            ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, ERROR_UNSUPPORTED_TYPE,
-        };
-        use windows_sys::Win32::System::Registry::{
-            HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW,
-        };
+        read_reg_sz(HKEY_CURRENT_USER, key, value, REGISTRY_BUFFER_UNITS)
+    }
+}
 
-        let key: Vec<u16> = key.encode_utf16().chain(once(0)).collect();
-        let value: Option<Vec<u16>> =
-            value.map(|value| value.encode_utf16().chain(once(0)).collect());
-        let value_ptr = value.as_ref().map_or(null(), |value| value.as_ptr());
+/// 够放一条路径；更长的值由系统报回真实长度后再读一次。
+#[cfg(windows)]
+const REGISTRY_BUFFER_UNITS: usize = 1024;
 
-        let mut bytes = 0u32;
-        // SAFETY: key 和 value 都以 NUL 结尾且活过这次调用；空的数据指针表示只问长度。
+#[cfg(windows)]
+fn read_reg_sz(
+    root: windows_sys::Win32::System::Registry::HKEY,
+    key: &str,
+    value: Option<&str>,
+    capacity: usize,
+) -> io::Result<Option<String>> {
+    use std::iter::once;
+    use std::ptr::{null, null_mut};
+
+    use windows_sys::Win32::Foundation::{
+        ERROR_FILE_NOT_FOUND, ERROR_MORE_DATA, ERROR_PATH_NOT_FOUND, ERROR_SUCCESS,
+        ERROR_UNSUPPORTED_TYPE,
+    };
+    use windows_sys::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
+
+    let key: Vec<u16> = key.encode_utf16().chain(once(0)).collect();
+    let value: Option<Vec<u16>> = value.map(|value| value.encode_utf16().chain(once(0)).collect());
+    let value_ptr = value.as_ref().map_or(null(), |value| value.as_ptr());
+
+    let mut buffer = vec![0u16; capacity];
+    loop {
+        let mut bytes = (buffer.len() * 2) as u32;
+        // SAFETY: key 和 value 都以 NUL 结尾且活过这次调用；bytes 如实给出缓冲区长度，系统不会越界。
         let status = unsafe {
             RegGetValueW(
-                HKEY_CURRENT_USER,
-                key.as_ptr(),
-                value_ptr,
-                RRF_RT_REG_SZ,
-                null_mut(),
-                null_mut(),
-                &raw mut bytes,
-            )
-        };
-        match status {
-            ERROR_SUCCESS => {}
-            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => return Ok(None),
-            // 类型不对等于没写过：修复重装会重写它，报错只会把人卡在致命错误页
-            ERROR_UNSUPPORTED_TYPE => return Ok(None),
-            other => return Err(io::Error::from_raw_os_error(other as i32)),
-        }
-
-        let mut buffer = vec![0u16; (bytes as usize).div_ceil(2)];
-        // SAFETY: 缓冲区长度不小于 bytes 字节，RegGetValueW 不会越界，并把实际字节数写回 bytes。
-        let status = unsafe {
-            RegGetValueW(
-                HKEY_CURRENT_USER,
+                root,
                 key.as_ptr(),
                 value_ptr,
                 RRF_RT_REG_SZ,
@@ -167,10 +174,14 @@ impl Registry for CurrentUserRegistry {
                 &raw mut bytes,
             )
         };
-        if status != ERROR_SUCCESS {
-            return Err(io::Error::from_raw_os_error(status as i32));
+        match status {
+            ERROR_SUCCESS => return Ok(Some(decode_reg_sz(&buffer))),
+            ERROR_MORE_DATA => buffer.resize((bytes as usize).div_ceil(2), 0),
+            ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND => return Ok(None),
+            // 类型不对等于没写过：修复重装会重写它，报错只会把人卡在致命错误页
+            ERROR_UNSUPPORTED_TYPE => return Ok(None),
+            other => return Err(io::Error::from_raw_os_error(other as i32)),
         }
-        Ok(Some(decode_reg_sz(&buffer)))
     }
 }
 
@@ -499,11 +510,83 @@ mod tests {
     }
 
     #[test]
+    fn leftover_data_in_the_last_dir_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(CONFIG_FILE), b"{}").unwrap();
+        let text = dir.path().to_str().unwrap();
+        let registry = FakeRegistry::default().with(LAST_DIR_KEY, None, text);
+
+        assert_eq!(leftover_dir(&registry).unwrap().as_deref(), Some(text));
+    }
+
+    #[test]
+    fn a_last_dir_without_data_is_not_a_leftover() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry =
+            FakeRegistry::default().with(LAST_DIR_KEY, None, dir.path().to_str().unwrap());
+
+        assert_eq!(leftover_dir(&registry).unwrap(), None);
+        assert_eq!(leftover_dir(&FakeRegistry::default()).unwrap(), None);
+    }
+
+    #[test]
     fn reg_sz_stops_at_the_terminator() {
         let mut buffer: Vec<u16> = "E:\\落樱".encode_utf16().collect();
         assert_eq!(decode_reg_sz(&buffer), "E:\\落樱");
         buffer.extend([0, 0x41, 0]);
         assert_eq!(decode_reg_sz(&buffer), "E:\\落樱");
         assert_eq!(decode_reg_sz(&[0]), "");
+    }
+
+    const WINDOWS_VERSION_KEY: &str = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+
+    fn read_windows_value(value: &str, capacity: usize) -> io::Result<Option<String>> {
+        use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+        read_reg_sz(
+            HKEY_LOCAL_MACHINE,
+            WINDOWS_VERSION_KEY,
+            Some(value),
+            capacity,
+        )
+    }
+
+    /// 真实读取只读 HKLM 上这个每台 Windows 都有的值，不碰卸载项。
+    #[test]
+    fn the_real_read_returns_a_registry_value() {
+        let value = read_windows_value("ProductName", REGISTRY_BUFFER_UNITS).unwrap();
+
+        assert!(value.unwrap().starts_with("Windows"));
+    }
+
+    #[test]
+    fn the_real_read_grows_past_a_small_first_buffer() {
+        let whole = read_windows_value("ProductName", REGISTRY_BUFFER_UNITS)
+            .unwrap()
+            .unwrap();
+
+        let grown = read_windows_value("ProductName", 1).unwrap().unwrap();
+
+        assert_eq!(grown, whole);
+    }
+
+    #[test]
+    fn the_real_read_treats_missing_values_and_keys_as_none() {
+        use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+        assert_eq!(
+            read_windows_value("PetalfallNoSuchValue", REGISTRY_BUFFER_UNITS).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_reg_sz(
+                HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\PetalfallNoSuchKey",
+                Some("x"),
+                REGISTRY_BUFFER_UNITS
+            )
+            .unwrap(),
+            None
+        );
     }
 }

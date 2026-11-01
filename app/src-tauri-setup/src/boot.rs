@@ -1,23 +1,21 @@
-//! 开窗之前的几道关和开窗之后的兜底：WebView2 够不够新、是不是唯一的实例、是不是桌面用户本人在运行、
-//! 安装包是否完整；樱花窗口起不来时退回 NSIS 原生向导，窗口建好了前端却没动静时由这里显示出来。
+//! 开窗之前的几道关和开窗之后的兜底：WebView2 够不够新、是不是唯一的实例、是不是桌面用户本人在运行；
+//! 窗口建好了前端却没动静时由这里显示出来。
 //!
-//! 退回原生向导不是错误处理的末路：WebView2 本来就是载荷自己装的，向导不依赖它，能陪用户走完全程。
+//! 过不了 WebView2 这关就退回 NSIS 原生向导，这不是错误处理的末路：WebView2 本来就是载荷自己装的，
+//! 向导不依赖它，能陪用户走完全程。
 
-use std::fmt::{self, Display};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::fmt::Display;
+use std::fs;
+use std::io;
 use std::iter::once;
 use std::mem::size_of;
-use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::path::Path;
 use std::ptr::null_mut;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aurora_setup_payload::{Error as PayloadError, locate, sha256};
 use tauri::{Runtime, WebviewWindow};
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, FALSE, GetLastError, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE,
@@ -28,7 +26,6 @@ use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY,
     TOKEN_USER, TokenElevation, TokenUser,
 };
-use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use windows_sys::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, INFINITE, OpenProcess, OpenProcessToken,
     PROCESS_QUERY_LIMITED_INFORMATION, SetEvent, WaitForSingleObject,
@@ -51,11 +48,6 @@ pub const SHOW_FALLBACK: Duration = Duration::from_secs(3);
 
 /// 用 `Local` 命名空间：别的登录会话是另一个用户，HKCU 和安装目录都是他自己的。
 const INSTANCE_EVENT: &str = r"Local\Petalfall-Setup";
-
-/// 不能叫 `Petalfall.exe`：NSIS 按这个文件名结束进程，向导会把自己杀掉。
-const WIZARD_FILE: &str = "petalfall-payload.exe";
-
-const WIZARD_DIR_PREFIX: &str = "petalfall-setup-";
 
 const WEBVIEW_DATA_CLEANUP: Duration = Duration::from_secs(5);
 const CLEANUP_POLL: Duration = Duration::from_millis(100);
@@ -379,114 +371,6 @@ pub fn alert(notice: &Notice) {
     unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), notice.style()) };
 }
 
-/// 开窗前确认载荷在、长度够。放到窗口里才报的话，用户只能看到一段错误原文。
-///
-/// `allow_bare` 给开发构建：没拼过载荷的壳也能开窗调界面。
-pub fn check_package<R: Read + Seek>(image: &mut R, allow_bare: bool) -> Result<(), PayloadError> {
-    match locate(image) {
-        Ok(_) => Ok(()),
-        Err(PayloadError::NoOverlay) if allow_bare => Ok(()),
-        Err(err) => Err(err),
-    }
-}
-
-#[derive(Debug)]
-pub enum WizardError {
-    /// 这个安装包本身坏了，重试没有用。
-    Package(String),
-    Io(io::Error),
-}
-
-impl Display for WizardError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WizardError::Package(detail) => write!(f, "安装包损坏：{detail}"),
-            WizardError::Io(err) => write!(f, "运行原生向导失败：{err}"),
-        }
-    }
-}
-
-impl std::error::Error for WizardError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            WizardError::Package(_) => None,
-            WizardError::Io(err) => Some(err),
-        }
-    }
-}
-
-impl From<io::Error> for WizardError {
-    fn from(err: io::Error) -> Self {
-        WizardError::Io(err)
-    }
-}
-
-impl From<PayloadError> for WizardError {
-    fn from(err: PayloadError) -> Self {
-        match err {
-            PayloadError::Io(err) => WizardError::Io(err),
-            other => WizardError::Package(other.to_string()),
-        }
-    }
-}
-
-/// 不带 `/S` 运行载荷，由 NSIS 原生向导接管，等它退出。缺 WebView2 时向导自己去下载。
-pub fn run_wizard(exe: &Path, log: &SetupLog) -> Result<ExitStatus, WizardError> {
-    let mut image = File::open(exe)?;
-    release_and_run(&mut image, log, |wizard| Command::new(wizard).status())
-}
-
-fn release_and_run<R: Read + Seek>(
-    image: &mut R,
-    log: &SetupLog,
-    run: impl FnOnce(&Path) -> io::Result<ExitStatus>,
-) -> Result<ExitStatus, WizardError> {
-    let dir = tempfile::Builder::new()
-        .prefix(WIZARD_DIR_PREFIX)
-        .tempdir()?;
-    let released = release_payload(image, dir.path())?;
-    log.info(format_args!("运行原生向导：{}", released.path.display()));
-    let status = run(&released.path)?;
-    drop(released);
-    if let Err(err) = dir.close() {
-        log.warn(format_args!("清理向导临时目录失败：{err}"));
-    }
-    Ok(status)
-}
-
-struct Released {
-    path: PathBuf,
-    /// 核对用的句柄留到运行结束：只共享读，核对过的字节在启动前不会被换掉。
-    _no_writers: File,
-}
-
-/// 写到 `dir` 后从磁盘读回来核对，读内存里的副本发现不了杀软的改写和截断。
-fn release_payload<R: Read + Seek>(image: &mut R, dir: &Path) -> Result<Released, WizardError> {
-    let located = locate(image)?;
-    let mut payload = vec![0; located.header.payload_len as usize];
-    image.seek(SeekFrom::Start(located.payload_offset))?;
-    image.read_exact(&mut payload)?;
-
-    let path = dir.join(WIZARD_FILE);
-    fs::write(&path, &payload)?;
-
-    let mut on_disk = OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(&path)?;
-    let mut written = Vec::with_capacity(payload.len());
-    on_disk.read_to_end(&mut written)?;
-    if sha256(&written) != located.header.payload_sha256 {
-        return Err(WizardError::Package(
-            "释放出来的载荷和头里的哈希对不上".to_owned(),
-        ));
-    }
-    Ok(Released {
-        path,
-        _no_writers: on_disk,
-    })
-}
-
 /// 前端一旦出错就永远不显示窗口，这里留一道兜底，让错误页至少能被看见。
 pub fn guard_visibility<R: Runtime>(
     window: WebviewWindow<R>,
@@ -601,22 +485,17 @@ pub(crate) fn test_claim_within(test: &str, budget: Duration) -> Option<Instance
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::io::Cursor;
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::process::CommandExt;
-    use std::process::{Child, Stdio};
+    use std::process::{Child, Command, Stdio};
     use std::sync::mpsc;
     use std::time::Instant;
 
-    use aurora_setup_payload::Header;
     use tempfile::TempDir;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
     use super::*;
-
-    const PE_AT: usize = 0x80;
-    const OPTIONAL_LEN: usize = 240;
-    const SECTION_POINTER: u32 = 0x400;
-    const SECTION_SIZE: u32 = 0x200;
 
     fn scratch_log() -> (TempDir, SetupLog) {
         let root = TempDir::new().unwrap();
@@ -626,42 +505,6 @@ mod tests {
 
     fn logged(log: &SetupLog) -> String {
         fs::read_to_string(log.path()).unwrap()
-    }
-
-    /// 只有一节的最小 PE，节末端就是文件末端。
-    fn bare_stub() -> Vec<u8> {
-        let end = (SECTION_POINTER + SECTION_SIZE) as usize;
-        let mut pe = vec![0u8; end];
-        pe[..2].copy_from_slice(b"MZ");
-        pe[0x3C..0x40].copy_from_slice(&(PE_AT as u32).to_le_bytes());
-        pe[PE_AT..PE_AT + 4].copy_from_slice(b"PE\0\0");
-        let coff = PE_AT + 4;
-        pe[coff + 2..coff + 4].copy_from_slice(&1u16.to_le_bytes());
-        pe[coff + 16..coff + 18].copy_from_slice(&(OPTIONAL_LEN as u16).to_le_bytes());
-        let section = coff + 20 + OPTIONAL_LEN;
-        pe[section + 16..section + 20].copy_from_slice(&SECTION_SIZE.to_le_bytes());
-        pe[section + 20..section + 24].copy_from_slice(&SECTION_POINTER.to_le_bytes());
-        pe
-    }
-
-    fn package(payload: &[u8]) -> Vec<u8> {
-        let header = Header::new(payload, b"exe", "0.2.0").unwrap();
-        let mut file = bare_stub();
-        file.extend_from_slice(&header.to_bytes().unwrap());
-        file.extend_from_slice(payload);
-        file
-    }
-
-    fn noise(seed: u64, len: usize) -> Vec<u8> {
-        let mut state = seed | 1;
-        (0..len)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect()
     }
 
     fn first(test: &str) -> Instance {
@@ -949,135 +792,6 @@ mod tests {
             Notice::StartFailed("x".into()).style(),
             MB_OK | MB_ICONERROR
         );
-    }
-
-    #[test]
-    fn a_complete_package_passes() {
-        let file = package(&noise(3, 512));
-        check_package(&mut Cursor::new(&file), false).unwrap();
-    }
-
-    #[test]
-    fn a_bare_shell_is_refused_outside_development() {
-        let stub = bare_stub();
-        assert!(matches!(
-            check_package(&mut Cursor::new(&stub), false),
-            Err(PayloadError::NoOverlay)
-        ));
-        check_package(&mut Cursor::new(&stub), true).unwrap();
-    }
-
-    #[test]
-    fn a_cut_off_download_is_refused_even_in_development() {
-        let file = package(&noise(5, 512));
-        let cut = &file[..file.len() - 1];
-        assert!(matches!(
-            check_package(&mut Cursor::new(cut), true),
-            Err(PayloadError::PayloadTruncated { .. })
-        ));
-    }
-
-    #[test]
-    fn released_payload_is_byte_identical_and_not_named_after_the_launcher() {
-        let dir = TempDir::new().unwrap();
-        let payload = noise(7, 4096);
-        let released = release_payload(&mut Cursor::new(package(&payload)), dir.path()).unwrap();
-        assert_eq!(fs::read(&released.path).unwrap(), payload);
-        let name = released.path.file_name().unwrap().to_str().unwrap();
-        assert!(!name.eq_ignore_ascii_case(crate::launcher::LAUNCHER_EXE));
-        assert_eq!(released.path.parent().unwrap(), dir.path());
-    }
-
-    #[test]
-    fn a_payload_that_does_not_match_its_hash_is_not_released_as_good() {
-        let dir = TempDir::new().unwrap();
-        let mut file = package(&noise(9, 256));
-        *file.last_mut().unwrap() ^= 0xFF;
-        let err = release_payload(&mut Cursor::new(file), dir.path())
-            .err()
-            .expect("哈希不符必须失败");
-        assert!(matches!(err, WizardError::Package(_)), "{err}");
-    }
-
-    #[test]
-    fn nothing_can_rewrite_the_payload_while_it_is_waiting_to_run() {
-        let dir = TempDir::new().unwrap();
-        let released = release_payload(&mut Cursor::new(package(b"payload")), dir.path()).unwrap();
-        let denied = OpenOptions::new().write(true).open(&released.path);
-        assert!(denied.is_err(), "核对之后文件不许再被写");
-        drop(released);
-        OpenOptions::new()
-            .write(true)
-            .open(dir.path().join(WIZARD_FILE))
-            .expect("跑完之后要放开，临时目录才删得掉");
-    }
-
-    #[test]
-    fn the_wizard_runs_the_released_file_and_its_folder_goes_away() {
-        let (_root, log) = scratch_log();
-        let payload = noise(11, 2048);
-        let seen = Cell::new(None);
-        let status = release_and_run(&mut Cursor::new(package(&payload)), &log, |wizard| {
-            seen.set(Some(wizard.to_path_buf()));
-            assert_eq!(fs::read(wizard).unwrap(), payload, "运行时文件要已经落盘");
-            Command::new("cmd")
-                .args(["/c", "exit 4"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status()
-        })
-        .unwrap();
-        assert_eq!(status.code(), Some(4), "向导的退出码要原样带回来");
-
-        let wizard = seen.take().unwrap();
-        assert!(!wizard.exists());
-        assert!(!wizard.parent().unwrap().exists());
-        assert!(logged(&log).contains("运行原生向导"));
-    }
-
-    /// 占着不许写的句柄不能挡住 CreateProcess 映射这个文件。用系统的 cmd 充当载荷，不碰任何 NSIS 包。
-    #[test]
-    fn a_real_executable_starts_while_the_write_lock_is_held() {
-        let (_root, log) = scratch_log();
-        let cmd = std::env::var_os("ComSpec").expect("Windows 上总有 ComSpec");
-        let payload = fs::read(cmd).unwrap();
-        let status = release_and_run(&mut Cursor::new(package(&payload)), &log, |wizard| {
-            Command::new(wizard)
-                .args(["/c", "exit 7"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status()
-        })
-        .unwrap();
-        assert_eq!(status.code(), Some(7));
-    }
-
-    #[test]
-    fn a_broken_package_never_reaches_the_wizard() {
-        let (_root, log) = scratch_log();
-        let err = release_and_run(&mut Cursor::new(bare_stub()), &log, |_| {
-            panic!("坏包不能运行")
-        })
-        .expect_err("没有载荷要失败");
-        assert!(matches!(err, WizardError::Package(_)), "{err}");
-    }
-
-    #[test]
-    fn a_wizard_that_cannot_start_is_an_io_failure() {
-        let (_root, log) = scratch_log();
-        let err = release_and_run(&mut Cursor::new(package(b"payload")), &log, |_| {
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        })
-        .expect_err("启动失败要报出来");
-        assert!(matches!(err, WizardError::Io(_)), "{err}");
-    }
-
-    #[test]
-    fn payload_io_errors_stay_io_failures() {
-        let io_error = PayloadError::Io(io::Error::from(io::ErrorKind::PermissionDenied));
-        assert!(matches!(WizardError::from(io_error), WizardError::Io(_)));
-        assert!(matches!(
-            WizardError::from(PayloadError::BadMagic),
-            WizardError::Package(_)
-        ));
     }
 
     #[test]

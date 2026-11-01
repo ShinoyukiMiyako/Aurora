@@ -24,9 +24,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::BOOL;
 
 use crate::boot::{self, Instance};
-
-/// 与 NSIS 判定「程序在运行」用同一个文件名。
-pub const LAUNCHER_EXE: &str = "Petalfall.exe";
+use crate::existing::APP_EXE;
 
 /// 引导程序先关的话，桌面会空一段才等到启动器首帧；等太久又像卡住了，所以有上限。
 pub const WINDOW_WAIT: Duration = Duration::from_secs(5);
@@ -42,9 +40,9 @@ pub enum Opened {
     TimedOut,
 }
 
-/// 当前用户有没有在运行启动器，不看它装在哪个目录：NSIS 就是这么判的，别的目录的便携副本同样会被它结束。
+/// 当前用户有没有在运行启动器，不看它装在哪个目录：NSIS 就是这么判的，文件名也用同一个，别的目录的便携副本同样会被它结束。
 pub fn is_running() -> io::Result<bool> {
-    image_running(LAUNCHER_EXE, &boot::current_user()?)
+    image_running(APP_EXE, &boot::current_user()?)
 }
 
 /// 打开 `dir` 下的启动器，等它的窗口出现或等满 [`WINDOW_WAIT`]。会阻塞，不能放在 UI 线程上跑。
@@ -53,7 +51,7 @@ pub fn open(dir: &Path, instance: &Instance) -> io::Result<Opened> {
 }
 
 fn launcher_command(dir: &Path) -> Command {
-    let mut command = Command::new(dir.join(LAUNCHER_EXE));
+    let mut command = Command::new(dir.join(APP_EXE));
     // 工作目录留在安装包所在的文件夹，这个文件夹就在启动器的整个运行期间删不掉
     command.current_dir(dir);
     command
