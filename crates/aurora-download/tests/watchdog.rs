@@ -118,6 +118,12 @@ enum Pace {
     Fast,
     /// 末尾这么多字节每 200 ms 写 2 KiB，之前的一口气发完。
     DripTail(usize),
+    /// 整个响应体每 200 ms 写这么多字节。
+    Steady(usize),
+    /// 无视 Range 一律回整体 200：不支持 Range 的终点。
+    NoRange,
+    /// 回 503。
+    Unavailable,
 }
 
 /// 按本次请求的 Range 起点（不带 Range 为 `None`）与此前收到的全部请求决定节奏。
@@ -221,6 +227,17 @@ async fn answer(
         seen.push(start);
         pace
     };
+    if matches!(pace, Pace::Unavailable) {
+        let head =
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(head.as_bytes()).await;
+        return;
+    }
+    let range = if matches!(pace, Pace::NoRange) {
+        None
+    } else {
+        range
+    };
     let total = body.len();
     let (head, slice) = match range {
         Some((start, end)) => (
@@ -238,16 +255,17 @@ async fn answer(
     if stream.write_all(head.as_bytes()).await.is_err() {
         return;
     }
-    let tail = match pace {
-        Pace::HeadOnly => return,
-        Pace::Fast => 0,
-        Pace::DripTail(tail) => tail.min(slice.len()),
+    let (tail, beat) = match pace {
+        Pace::HeadOnly | Pace::Unavailable => return,
+        Pace::Fast | Pace::NoRange => (0, DRIP_SLICE),
+        Pace::DripTail(tail) => (tail.min(slice.len()), DRIP_SLICE),
+        Pace::Steady(beat) => (slice.len(), beat),
     };
     let (quick, slow) = slice.split_at(slice.len() - tail);
     if stream.write_all(quick).await.is_err() {
         return;
     }
-    for piece in slow.chunks(DRIP_SLICE) {
+    for piece in slow.chunks(beat) {
         tokio::time::sleep(DRIP_EVERY).await;
         // 客户端放弃了这条连接：写失败即收工。
         if stream.write_all(piece).await.is_err() {
@@ -273,6 +291,25 @@ async fn redirector(route: &str, first: &str, then: &str) -> MockServer {
         .with_priority(2)
         .mount(&server)
         .await;
+    server
+}
+
+/// 扮演分发入口：依次 302 到 `hops` 里的地址，用完后一直跳到最后一个。
+async fn redirect_chain(route: &str, hops: &[String]) -> MockServer {
+    let server = MockServer::start().await;
+    for (index, hop) in hops.iter().enumerate() {
+        let priority = u8::try_from(index + 1).expect("跳转链不长");
+        let mock = Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", hop.as_str()))
+            .with_priority(priority);
+        let mock = if index + 1 < hops.len() {
+            mock.up_to_n_times(1)
+        } else {
+            mock
+        };
+        mock.mount(&server).await;
+    }
     server
 }
 
@@ -994,5 +1031,312 @@ async fn credentialed_whole_file_switch_decides_the_key_per_hop() {
         vec![None, None],
         "作用域外的新节点：重取终点的探测与从头重下都不带密钥"
     );
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 一条连接按滴灌节奏（10 KiB/s）送完这么大的文件要 3 秒，足够看满两个 1 秒窗口。
+const SHARED_FILE: u64 = 30 * 1024;
+
+/// 分摊场景的引擎参数：几十 KiB 的小文件也盯着、走整文件单流，一个文件恰好一条连接。
+fn shared_config(sources: SourcePlan) -> DownloadConfig {
+    DownloadConfig {
+        chunk: ChunkConfig {
+            enabled: false,
+            ..one_at_a_time(MIB)
+        },
+        retry: fast_policy(),
+        sources,
+        watchdog: WatchdogConfig {
+            min_file_size: 1024,
+            ..test_watchdog()
+        },
+    }
+}
+
+fn trip_on_first_fault() -> Arc<SourceHealth> {
+    Arc::new(SourceHealth::with_policy(1, Duration::from_secs(60)))
+}
+
+/// `files` 个文件同时从同一台主机下，每条连接都只有 10 KiB/s（低于单条下限 64 KiB/s），总速率正常。
+/// 这是带宽被大家分走的样子：不该判慢，主机也不该记账。判过慢的话，向原地址重取终点会多出请求。
+async fn shared_bandwidth_case(files: usize) {
+    let body = payload(SHARED_FILE);
+    let sha1 = sha1_of(&body).await;
+    let node = Endpoint::start(body.clone(), |_, _| Pace::DripTail(DRIP_ALL)).await;
+    let url = node.url("/shared.jar");
+    let health = trip_on_first_fault();
+    let downloader =
+        Downloader::with_health(client(), shared_config(single_source()), health.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = (0..files)
+        .map(|index| {
+            DownloadTask::new(&url, dir.path().join(format!("f{index}.jar")))
+                .with_size(SHARED_FILE)
+                .with_sha1(&sha1)
+        })
+        .collect();
+
+    let report = DownloadPool::new(downloader, files)
+        .download_all(tasks, None)
+        .await
+        .expect("这批不该整批失败");
+
+    assert_eq!(report.succeeded, files, "失败明细：{:?}", report.failures);
+    assert_eq!(
+        node.requests(),
+        vec![None; files],
+        "每个文件只请求一次：没有判慢，也没有向原地址重取终点"
+    );
+    assert!(!health.is_tripped(&url), "分带宽的主机不该记故障");
+}
+
+/// 全部传输同样慢、总速率正常（32 条合 320 KiB/s，高于默认下限 128 KiB/s）：不判慢。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_transfer_equally_slow_at_a_healthy_total_is_not_slow() {
+    shared_bandwidth_case(32).await;
+}
+
+/// 默认的 64 并发把带宽摊薄到每条都低于下限：一个也不触发。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sixty_four_transfers_sharing_the_bandwidth_never_fire() {
+    shared_bandwidth_case(64).await;
+}
+
+/// 慢文件走 `slow`（第二个源是 `mirror`），其余文件都走 `steady`。
+struct SlowAmongSteady {
+    slow: String,
+    mirror: String,
+    steady: String,
+}
+
+impl SourceResolver for SlowAmongSteady {
+    fn resolve(&self, url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+        Ok(match (url.ends_with("/slow.jar"), source) {
+            (true, MirrorSource::Official) => self.slow.clone(),
+            (true, MirrorSource::BmclApi) => self.mirror.clone(),
+            (false, _) => self.steady.clone(),
+        })
+    }
+}
+
+/// 一条 10 KiB/s，另外三条各 320 KiB/s：慢的那条连公平份额的一半都不到，判慢，账记在它的主机头上；
+/// 同一批里快的主机不受牵连。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_slow_transfer_among_fast_ones_is_slow_and_blamed_on_its_host() {
+    let slow_body = payload(MIB);
+    let steady_body = payload(MIB);
+    let sha1 = sha1_of(&slow_body).await;
+    let slow = Endpoint::start(slow_body.clone(), |_, _| Pace::DripTail(DRIP_ALL)).await;
+    let mirror = Endpoint::start(slow_body.clone(), |_, _| Pace::Fast).await;
+    let steady = Endpoint::start(steady_body, |_, _| Pace::Steady(64 * 1024)).await;
+    let slow_url = slow.url("/slow.jar");
+    let steady_url = steady.url("/steady.jar");
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(SlowAmongSteady {
+            slow: slow_url.clone(),
+            mirror: mirror.url("/slow.jar"),
+            steady: steady_url.clone(),
+        }),
+    );
+    let health = trip_on_first_fault();
+    let downloader = Downloader::with_health(client(), shared_config(sources), health.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let mut tasks = vec![
+        DownloadTask::new(
+            "https://official.example/slow.jar",
+            dir.path().join("slow.jar"),
+        )
+        .with_size(MIB)
+        .with_sha1(&sha1),
+    ];
+    tasks.extend((0..3).map(|index| {
+        DownloadTask::new(
+            format!("https://official.example/steady{index}.jar"),
+            dir.path().join(format!("steady{index}.jar")),
+        )
+        .with_size(MIB)
+        .with_sha1(&sha1)
+    }));
+
+    let report = DownloadPool::new(downloader, 4)
+        .download_all(tasks, None)
+        .await
+        .expect("这批不该整批失败");
+
+    assert_eq!(report.succeeded, 4, "失败明细：{:?}", report.failures);
+    assert_eq!(
+        slow.requests(),
+        vec![None, None],
+        "慢终点：一次下载、判慢后向原地址重取一次"
+    );
+    assert_eq!(mirror.requests(), vec![None], "慢文件换源下完");
+    assert_eq!(steady.requests(), vec![None; 3], "快的三条不受影响");
+    assert!(health.is_tripped(&slow_url), "慢的主机记了账");
+    assert!(!health.is_tripped(&steady_url), "快的主机不受牵连");
+}
+
+/// 四条连接都只有 10 KiB/s，总速率也低于下限：链路确实带不动，判慢换源，
+/// 但这说明不了主机的好坏，不记故障。第二个源也快不起来（四条合 160 KiB/s，不到一个窗口下完）：
+/// 真带不动的链路上没有飞快的源，飞快的源反倒证明链路没事、慢的就是原来那台主机。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_too_slow_for_everyone_is_not_blamed_on_the_host() {
+    let body = payload(SHARED_FILE);
+    let sha1 = sha1_of(&body).await;
+    let node = Endpoint::start(body.clone(), |_, _| Pace::DripTail(DRIP_ALL)).await;
+    let mirror = Endpoint::start(body.clone(), |_, _| Pace::Steady(8 * 1024)).await;
+    let official_url = node.url("/f.jar");
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: official_url.clone(),
+            mirror: mirror.url("/f.jar"),
+        }),
+    );
+    let health = trip_on_first_fault();
+    let downloader = Downloader::with_health(client(), shared_config(sources), health.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let tasks = (0..4)
+        .map(|index| {
+            DownloadTask::new(
+                "https://official.example/f.jar",
+                dir.path().join(format!("f{index}.jar")),
+            )
+            .with_size(SHARED_FILE)
+            .with_sha1(&sha1)
+        })
+        .collect();
+
+    let report = DownloadPool::new(downloader, 4)
+        .download_all(tasks, None)
+        .await
+        .expect("这批不该整批失败");
+
+    assert_eq!(report.succeeded, 4, "失败明细：{:?}", report.failures);
+    assert_eq!(mirror.requests(), vec![None; 4], "四个文件都判慢换了源");
+    assert!(
+        !health.is_tripped(&official_url),
+        "主机不该因为链路慢记故障"
+    );
+}
+
+/// 分片续传换到不支持 Range 的终点后回退整文件，还是同一个源：之前用掉的换终点次数接着算，
+/// 不随回退清零。上限 2 次：慢节点换到无 Range 节点算一次，回退后的慢节点再换一次，然后换源。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn falling_back_from_a_node_without_range_keeps_the_switch_count() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let first = Endpoint::start(body.clone(), probe_then_drip).await;
+    let no_range = Endpoint::start(body.clone(), |_, _| Pace::NoRange).await;
+    let drip: PaceFn = |_, _| Pace::DripTail(DRIP_ALL);
+    let second = Endpoint::start(body.clone(), drip).await;
+    let third = Endpoint::start(body.clone(), drip).await;
+    let fourth = Endpoint::start(body.clone(), drip).await;
+    let mirror = Endpoint::start(body.clone(), probe_then_fast).await;
+    let origin = redirect_chain(
+        "/f.jar",
+        &[
+            first.url("/f.jar"),
+            no_range.url("/f.jar"),
+            second.url("/f.jar"),
+            third.url("/f.jar"),
+            fourth.url("/f.jar"),
+        ],
+    )
+    .await;
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: format!("{}/f.jar", origin.uri()),
+            mirror: mirror.url("/f.jar"),
+        }),
+    );
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), sources));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("应在第二个源上下完");
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        origin_gets(&origin).await,
+        4,
+        "首次取终点、第一次换终点、回退整文件、第二次换终点，之后不再问"
+    );
+    assert!(
+        fourth.requests().is_empty(),
+        "额度用完就不该再换到下一个节点"
+    );
+    assert_eq!(mirror.range_starts(), vec![0, MIB], "第二个源上从头下完");
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 换到的新终点对 Range 回 503，同一个源上重试：重试也不清零换终点次数。
+/// 每次尝试都先落到一个慢节点、再换到回 503 的节点，第三次尝试时额度已用完，判慢即换源。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retrying_on_the_same_source_keeps_the_switch_count() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let first = Endpoint::start(body.clone(), probe_then_drip).await;
+    let second = Endpoint::start(body.clone(), probe_then_drip).await;
+    let third = Endpoint::start(body.clone(), probe_then_drip).await;
+    let unavailable = Endpoint::start(body.clone(), |start, _| match start {
+        None => Pace::HeadOnly,
+        Some(_) => Pace::Unavailable,
+    })
+    .await;
+    let mirror = Endpoint::start(body.clone(), probe_then_fast).await;
+    let refusing = unavailable.url("/f.jar");
+    let origin = redirect_chain(
+        "/f.jar",
+        &[
+            first.url("/f.jar"),
+            refusing.clone(),
+            second.url("/f.jar"),
+            refusing.clone(),
+            third.url("/f.jar"),
+            refusing,
+        ],
+    )
+    .await;
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: format!("{}/f.jar", origin.uri()),
+            mirror: mirror.url("/f.jar"),
+        }),
+    );
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), sources));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("应在第二个源上下完");
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        origin_gets(&origin).await,
+        5,
+        "两次尝试各取终点并换一次，第三次取到终点后判慢不再换"
+    );
+    assert_eq!(
+        unavailable.range_starts(),
+        vec![0, MIB, 0, MIB],
+        "只换过去两次，每次两片都被拒"
+    );
+    assert_eq!(mirror.range_starts(), vec![0, MIB], "第二个源上从头下完");
     only_dest_left(dir.path(), &dest);
 }
