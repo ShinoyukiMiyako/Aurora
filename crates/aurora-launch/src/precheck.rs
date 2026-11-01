@@ -224,8 +224,7 @@ pub fn effective_max_heap_mb(custom_args: &[String], launcher: MemoryConfig) -> 
     custom_args
         .iter()
         .filter_map(|arg| heap_arg_bytes(arg))
-        .filter(|(kind, _)| *kind == 'x')
-        .last()
+        .rfind(|(kind, _)| *kind == 'x')
         .map_or(launcher.max_mb, |(_, bytes)| {
             u32::try_from(bytes.div_ceil(MIB)).unwrap_or(u32::MAX)
         })
