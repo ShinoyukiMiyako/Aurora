@@ -94,6 +94,57 @@ pub fn quick_play_support(version: &VersionJson) -> QuickPlaySupport {
     }
 }
 
+/// 世界文件夹名里第一个到不了游戏的字符，全都到得了时为 `None`。
+///
+/// java.exe 在 Windows 上按 ANSI 读命令行，`--quickPlaySingleplayer` 的值要过一道系统代码页，页里没有的
+/// 字符变成 `?`。游戏拿着改坏的名字找不到存档，只在窗口里报一句世界标识符无效。这里绕不过去：参数文件
+/// 同样按系统编码解码，`sun.jnu.encoding` 也改不了，所以提前告诉玩家。
+pub fn quick_play_lost_char(world_dir_name: &str) -> Option<char> {
+    world_dir_name
+        .chars()
+        .find(|&ch| !survives_command_line(ch))
+}
+
+#[cfg(windows)]
+fn survives_command_line(ch: char) -> bool {
+    // SAFETY: GetACP 没有参数，也不碰调用方的内存。
+    encodable_in(unsafe { windows_sys::Win32::Globalization::GetACP() }, ch)
+}
+
+#[cfg(not(windows))]
+fn survives_command_line(_: char) -> bool {
+    true
+}
+
+#[cfg(windows)]
+fn encodable_in(code_page: u32, ch: char) -> bool {
+    use windows_sys::Win32::Globalization::{CP_UTF8, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte};
+
+    // UTF-8 什么都表示得了，而且不接受下面这两个参数，传了直接报错。
+    if code_page == CP_UTF8 {
+        return true;
+    }
+    let mut wide = [0u16; 2];
+    let wide = ch.encode_utf16(&mut wide);
+    let mut narrow = [0u8; 8];
+    let mut defaulted = 0;
+    // 不准就近替换：全角字母换成半角也是别的名字，和变成问号一样找不到存档。
+    // SAFETY: 两个缓冲区都在栈上，长度如实传入；默认字符用系统的，给空指针；defaulted 是可写的局部变量。
+    let written = unsafe {
+        WideCharToMultiByte(
+            code_page,
+            WC_NO_BEST_FIT_CHARS,
+            wide.as_ptr(),
+            wide.len() as i32,
+            narrow.as_mut_ptr(),
+            narrow.len() as i32,
+            std::ptr::null(),
+            &raw mut defaulted,
+        )
+    };
+    written > 0 && defaulted == 0
+}
+
 /// 启动参数是不是 joptsimple 形式，能直接追加 `--server` / `--port`：`arguments.game` 非空，或
 /// `minecraftArguments` 按空白切开后含 `--username`。1.6 之前的位置参数式写法追加未知选项会让游戏退出。
 pub fn legacy_server_args(version: &VersionJson) -> bool {
@@ -128,6 +179,30 @@ pub(crate) fn has_feature_block(version: &VersionJson, feature: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 代码页按编号给，结论不随跑测试的机器变。
+    #[cfg(windows)]
+    #[test]
+    fn code_page_decides_which_world_names_reach_the_game() {
+        for ch in ['a', '桜', 'の', '実'] {
+            assert!(encodable_in(936, ch), "GBK 里有 {ch}");
+        }
+        for ch in ['㐂', '𠮷', '한'] {
+            assert!(!encodable_in(936, ch), "GBK 里没有 {ch}");
+        }
+        // 真机上的表现：这些字符经 ANSI 命令行变成 ?，不是近似字
+        assert!(!encodable_in(1252, '桜'), "西文代码页没有汉字");
+        assert!(!encodable_in(1252, 'ａ'), "全角字母不能按最接近的半角算");
+        for ch in ['㐂', '𠮷', '한'] {
+            assert!(encodable_in(65001, ch), "UTF-8 代码页什么都表示得了");
+        }
+    }
+
+    #[test]
+    fn ascii_world_names_always_reach_the_game() {
+        assert_eq!(quick_play_lost_char("New World-1_(2)"), None);
+        assert_eq!(quick_play_lost_char(""), None);
+    }
 
     #[test]
     fn mode_names_match_the_wire_names() {
