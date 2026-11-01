@@ -16,7 +16,7 @@ import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "..
 import type { BlockedFileDto, PackModDto } from "../../state/store";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
 import { PickFolderProvider, type PickFolder } from "./platform";
@@ -1516,6 +1516,54 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.toasts.find((t) => t.title === "没能检查下载好的文件")?.body).toBe("file_id 5000001 出现了不止一次");
   });
 
+  it("系统对话框弹出之前连点「我已下载，重新检查」只弹一个；用户取消后可以再检查一次", async () => {
+    const picked = deferred<string | null>();
+    pickFolder.mockImplementationOnce(() => picked.promise);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(pickFolder).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      picked.resolve(null);
+      await settle();
+    });
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(pickFolder).toHaveBeenCalledTimes(2);
+    expect(callsOf(ipc, "claim_blocked_files")).toHaveLength(1);
+  });
+
+  it("取下载文件夹失败后还能再检查一次：通知交给外层，这次检查不留下占位", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    ipc.overrides.set("downloads_folder", () => {
+      throw new IpcError("io", "找不到系统的下载文件夹");
+    });
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(launcher.state.toasts.find((t) => t.title === "没能检查下载好的文件")?.body).toBe("找不到系统的下载文件夹");
+    expect(pickFolder).not.toHaveBeenCalled();
+
+    ipc.overrides.set("downloads_folder", () => MOCK_DOWNLOADS_DIR);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(pickFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it("等系统对话框期间关掉了清单：选好文件夹也不再认领", async () => {
+    const picked = deferred<string | null>();
+    pickFolder.mockImplementationOnce(() => picked.promise);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    await clickIn(blockedDialog(), "关闭");
+    await act(async () => {
+      picked.resolve(MOCK_DOWNLOADS_DIR);
+      await settle();
+    });
+    expect(callsOf(ipc, "claim_blocked_files")).toEqual([]);
+  });
+
   it("检查中：主按钮写「正在检查…」，行内「打开网页」不能点；关掉清单不打断检查，晚到的结果丢弃，再打开从头开始", async () => {
     const gate = deferred<unknown>();
     ipc.overrides.set("claim_blocked_files", () => gate.promise);
@@ -1580,6 +1628,38 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(openDialogs()).toHaveLength(1);
   });
 
+  it("清单开着时任务已被别处重试并取消：「重新安装」重排不了，失败报出来，不悄悄没反应", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    let attempts = 0;
+    ipc.overrides.set("install_modpack", () => {
+      attempts += 1;
+      if (attempts === 1) throw new IpcError("distribution_blocked", "原文", { files: FILES });
+      throw cancelledError();
+    });
+    await mount();
+    act(() => card("生存").click());
+    await flush();
+    await clickIn(dialog(), "安装为新实例");
+    await clickIn(dialog(), "查看这些文件");
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+
+    const { id } = launcher.state.tasks[0];
+    await act(async () => {
+      launcher.actions.retryTask(id);
+      await settle();
+    });
+    expect(launcher.state.tasks[0].status).toBe("cancelled");
+    await clickIn(blockedDialog(), "重新安装");
+    expect(launcher.state.toasts.find((t) => t.title === "没能加入下载队列")?.body).toBe(`任务 ${id} 是 cancelled，只有失败的任务能重试`);
+  });
+
   it("清单里的文件都找到后断网：重新安装与面板的重试同一口径，只提示恢复联网后再装，不把任务重新排进队列", async () => {
     const { IpcError } = await import("../../ipc/errors");
     const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
@@ -1608,6 +1688,115 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.tasks.map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
     expect(callsOf(ipc, "install_modpack")).toHaveLength(1);
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "恢复联网后再安装"]);
+  });
+
+  it("作者不允许启动器下载的 Mod：说明块里的「打开网页」用系统浏览器打开工程页，打不开时报出来；安装按钮禁用", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    vi.stubGlobal("open", vi.fn());
+    const mod = entry("M1", { title: "受限 Mod", resource_type: "mod", loaders: ["fabric"] });
+    const url = "https://www.curseforge.com/minecraft/mc-mods/locked";
+    pages = () => result([mod]);
+    ipc.overrides.set("project_detail", () => detailOf(mod, { distribution_allowed: false, page_url: url }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [], truncated: false }));
+    await mount();
+    act(() => card("受限 Mod").click());
+    await flush();
+    expect(dialog().textContent).toContain("作者不允许在启动器里下载这个资源，只能去 CurseForge 网页下载。");
+    expect(buttonByText("安装", dialog()).disabled).toBe(true);
+
+    await clickIn(dialog(), "打开网页");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url }]);
+
+    ipc.overrides.set("plugin:opener|open_url", () => {
+      throw new IpcError("internal", "没有默认浏览器");
+    });
+    await clickIn(dialog(), "打开网页");
+    expect(launcher.state.toasts.find((t) => t.title === "没能打开网页")?.body).toBe("没有默认浏览器");
+  });
+
+  describe("整合包本体要手动下载时的提前说明", () => {
+    const NOTE = "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。";
+    const SUMMARY_FAILED = "整合包清单没能提前读出来";
+    const BODY = {
+      project_id: 700,
+      file_id: 7001,
+      file_name: "生存 2.0.0.zip",
+      web_url: "https://www.curseforge.com/minecraft/modpacks/survival/files/7001",
+      destination: "生存 2.0.0.zip",
+      sha1: "3f786850e387550fdab836ed7e6dc881de23001b",
+      fingerprint: 0,
+      size: 2048,
+    };
+
+    async function openPack(allowed: boolean, summary: () => unknown) {
+      const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
+      const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+      pages = () => result([pack]);
+      ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v, distribution_allowed: allowed }));
+      ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+      ipc.overrides.set("summarize_platform_modpack", summary);
+      await mount();
+      act(() => card("生存").click());
+      await flush();
+    }
+
+    const blockedSummary = async () => {
+      const { IpcError } = await import("../../ipc/errors");
+      throw new IpcError("distribution_blocked", "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：生存 2.0.0.zip", { files: [BODY] });
+    };
+
+    it("摘要报本体受限：只说要手动下载，不当成清单读不出来，也不给重试；安装照常能点，点了走手动下载", async () => {
+      await openPack(false, blockedSummary);
+      expect(dialog().textContent).toContain(NOTE);
+      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+      expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "重试")).toBe(false);
+
+      const { IpcError } = await import("../../ipc/errors");
+      ipc.overrides.set("install_modpack", () => {
+        throw new IpcError("distribution_blocked", "原文", { files: [BODY] });
+      });
+      await clickIn(dialog(), "安装为新实例");
+      expect(dialog().textContent).toContain("没装成：有 1 个文件需要到 CurseForge 网页手动下载");
+      expect(dialog().textContent).not.toContain(NOTE);
+      expect(buttonByText("查看这些文件", dialog())).toBeDefined();
+    });
+
+    it("工程允许下载、这个版本的本体受限：以摘要为准，同样提前说明", async () => {
+      await openPack(true, blockedSummary);
+      expect(dialog().textContent).toContain(NOTE);
+      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+    });
+
+    it("工程标着不允许、摘要还没到：先按工程标记说明", async () => {
+      await openPack(false, () => new Promise(() => {}));
+      expect(dialog().textContent).toContain(NOTE);
+    });
+
+    it("工程标着不允许、这个版本的摘要读到了：本体拿得到，不说明", async () => {
+      await openPack(false, () => ({
+        name: "生存",
+        version: "2.0.0",
+        minecraft: "1.20.1",
+        loader: { kind: "fabric", version: "0.16.5" },
+        format: "curseforge",
+        pack_bytes: 2048,
+        remote_files: 2,
+        mod_files: 2,
+        remote_bytes: 4096,
+        override_files: 0,
+        override_bytes: 0,
+      }));
+      expect(dialog().textContent).not.toContain(NOTE);
+      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+    });
+
+    it("工程允许、摘要因别的原因失败：照旧写清单读不出来并给重试，不说要手动下载", async () => {
+      const { IpcError } = await import("../../ipc/errors");
+      await openPack(true, () => Promise.reject(new IpcError("network_failed", "连接超时")));
+      expect(dialog().textContent).not.toContain(NOTE);
+      expect(dialog().textContent).toContain(SUMMARY_FAILED);
+      expect(buttonByText("重试", dialog())).toBeDefined();
+    });
   });
 
   it("CurseForge 整合包本体就需要手动下载：清单照常列出这个包，不写落点目录；找到后重新安装", async () => {

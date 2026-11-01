@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { IpcError } from "../../ipc/errors";
 import type { ModpackPreviewDto, PackModDto } from "../../ipc/modpack";
 import { claimStatuses, destinationDir } from "./BlockedFilesModal";
-import { droppedFile, excludedPaths, previewErrorText } from "./ImportModpackDialog";
+import { droppedFile, excludedPaths, previewErrorText, typedPath } from "./ImportModpackDialog";
 
 describe("droppedFile", () => {
   it("一次拖进几个文件时读第一个整合包，扩展名不分大小写", () => {
@@ -17,6 +17,25 @@ describe("droppedFile", () => {
 
   it("拖进来的不是文件（没有路径）时什么都不读", () => {
     expect(droppedFile([])).toBeNull();
+  });
+});
+
+describe("typedPath", () => {
+  it("资源管理器「复制文件地址」带的一对双引号去掉，路径里的中文与空格原样留着", () => {
+    expect(typedPath('"D:\\My Packs\\周末 整合包.mrpack"')).toBe("D:\\My Packs\\周末 整合包.mrpack");
+    expect(typedPath('  "D:\\a b.zip"  ')).toBe("D:\\a b.zip");
+  });
+
+  it("没有成对引号时只去掉首尾空白：单边引号是用户打的字，不猜", () => {
+    expect(typedPath("  D:\\packs\\a.zip ")).toBe("D:\\packs\\a.zip");
+    expect(typedPath('"D:\\packs\\a.zip')).toBe('"D:\\packs\\a.zip');
+    expect(typedPath('"')).toBe('"');
+  });
+
+  it("引号里什么都没有时读不出路径", () => {
+    expect(typedPath('""')).toBe("");
+    expect(typedPath('" "')).toBe("");
+    expect(typedPath("   ")).toBe("");
   });
 });
 

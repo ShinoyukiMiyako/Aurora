@@ -335,14 +335,6 @@
   color: var(--sk-text-3);
 }
 
-.calloutLink {
-  font-size: var(--sk-fs-small);
-  line-height: var(--sk-lh-small);
-  font-weight: var(--sk-w-medium);
-  color: var(--sk-accent);
-  white-space: nowrap;
-}
-
 .errorTitle {
   display: block;
   font-weight: var(--sk-w-medium);

@@ -30,7 +30,7 @@ import { List, ListRow } from "../../../ui/ListRow";
 import { SearchInput } from "../../../ui/SearchInput";
 import { Select, type SelectOption } from "../../../ui/Select";
 import { Tag } from "../../../ui/Tag";
-import { DETAIL_COPY, INSTALL_COPY, SEARCH_COPY } from "../copy";
+import { BLOCKED_COPY, DETAIL_COPY, INSTALL_COPY, SEARCH_COPY } from "../copy";
 import { PROBE_CONCURRENCY, probeWindow, useCollected, WorldsProbe, worldsProgress } from "../probes";
 import {
   defaultPick,
@@ -259,6 +259,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
     ...(versions.status === "ready" ? versionOptions(versions.data.versions) : []),
   ];
 
+  const pageUrl = detail.page_url;
   const footer = (
     <>
       <span className={styles.footNote}>
@@ -288,10 +289,10 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
         <Callout
           tone="warn"
           action={
-            detail.page_url === null ? undefined : (
-              <a className={styles.calloutLink} href={detail.page_url} target="_blank" rel="noreferrer noopener">
+            pageUrl === null ? undefined : (
+              <Button size="sm" variant="ghost" onClick={() => void run(() => actions.openExternal(pageUrl), BLOCKED_COPY.openFailed)}>
                 {INSTALL_COPY.openWeb}
-              </a>
+              </Button>
             )
           }
         >

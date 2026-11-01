@@ -5,7 +5,8 @@ import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import { THROUGHPUT_SAMPLES } from "./constants";
 
 export const TASKS_COPY = {
-  subtitleActive: (running: number, queued: number) => `${running} 个下载中，${queued} 个排队 · 最多 ${MAX_PARALLEL_TASKS} 个并行`,
+  subtitleActive: (downloading: number, queued: number) => `${downloading} 个下载中，${queued} 个排队 · 最多 ${MAX_PARALLEL_TASKS} 个并行`,
+  subtitleLocal: (running: number) => `${running} 个任务进行中 · 最多 ${MAX_PARALLEL_TASKS} 个并行`,
   subtitleIdle: "队列空闲 · 新建实例、装 Mod、导入整合包都会排到这里",
   cancelAll: "全部取消",
   clearFinished: (count: number) => (count > 0 ? `清除已结束（${count}）` : "清除已结束"),
@@ -30,7 +31,7 @@ export const TASKS_COPY = {
     idle: "空闲",
     queued: (count: number) => `还有 ${count} 个在排队，空出通道后按加入顺序开始`,
     none: "没有排队的任务",
-    progressLabel: (title: string) => `${title} 的下载进度`,
+    progressLabel: (title: string) => `${title} 的进度`,
   },
 
   filter: {
@@ -53,7 +54,7 @@ export const TASKS_COPY = {
     viewBlocked: "查看这些文件",
     viewInstance: "查看实例",
     failedTag: "失败",
-    progressLabel: (title: string) => `${title} 的下载进度`,
+    progressLabel: (title: string) => `${title} 的进度`,
     sizePending: "大小待定",
     waitingData: "等待数据",
     transfer: (done: string, total: string) => `${done} / ${total}`,

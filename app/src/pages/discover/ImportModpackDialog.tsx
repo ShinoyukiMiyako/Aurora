@@ -68,6 +68,12 @@ function fileName(path: string): string {
   return parts[parts.length - 1];
 }
 
+/** 路径框里的文字：资源管理器「复制文件地址」带着一对双引号，照原样读只会报扩展名不对。 */
+export function typedPath(input: string): string {
+  const text = input.trim();
+  return text.length >= 2 && text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1).trim() : text;
+}
+
 const PACK_EXTENSION = /\.(mrpack|zip)$/i;
 
 /**
@@ -159,7 +165,7 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
     startRead(file);
   };
   const read = () => {
-    const next = input.trim();
+    const next = typedPath(input);
     if (next !== "") openFile(next);
   };
   const close = () => {
