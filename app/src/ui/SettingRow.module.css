@@ -53,6 +53,7 @@
   max-width: none;
 }
 
-:global([data-sk-tier="compact"]) .row[data-stack] .control > * {
+:global([data-sk-tier="compact"]) .row[data-stack] .control > *,
+:global([data-sk-tier="compact"]) .row[data-stack] .control > [data-tooltip-host] > * {
   flex: 1;
 }
