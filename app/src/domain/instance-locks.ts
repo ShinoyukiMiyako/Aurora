@@ -45,7 +45,11 @@ export function instanceLocks(busy: boolean, installing: boolean, modifying: boo
   return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : occupied, launch: inherited };
 }
 
-/** 按实例摘要算的锁。busy 是本实例的会话在准备、下载、启动或运行中。实例页与实例库的卡片同一份判定。 */
+/**
+ * 按实例摘要算的锁。busy 是本实例的会话在准备、下载、启动或运行中。实例页与实例库的卡片同一份判定。
+ * 后端报着启动或运行而前端没有会话（例如界面重载后）时同样算在跑。
+ */
 export function locksOf(inst: Pick<InstanceSummary, "status" | "activity" | "usedBy">, busy: boolean): InstanceLocks {
-  return instanceLocks(busy, inst.status === "installing", inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up");
+  const running = busy || inst.activity === "launching" || inst.activity === "running";
+  return instanceLocks(running, inst.status === "installing", inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up");
 }

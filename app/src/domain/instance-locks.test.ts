@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { instanceLocks } from "./instance-locks";
+import { instanceLocks, locksOf } from "./instance-locks";
+
+describe("按实例摘要算锁", () => {
+  const ready = { status: "ready", usedBy: null } as const;
+
+  it.each(["running", "launching"] as const)("后端报 %s、前端没有会话（界面重载后）：与本机会话同样锁住文件操作", (activity) => {
+    const locks = locksOf({ ...ready, activity }, false);
+    expect(locks).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running", launch: null });
+  });
+
+  it("别的活动不算游戏在跑", () => {
+    expect(locksOf({ ...ready, activity: "modifying" }, false).mods).toBeNull();
+    expect(locksOf({ ...ready, activity: null }, false)).toEqual({ mods: null, rename: null, repair: null, delete: null, launch: null });
+  });
+});
 
 describe("锁定矩阵", () => {
   it("运行中锁住 Mod、重命名、补全与删除", () => {
