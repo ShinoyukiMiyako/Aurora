@@ -45,13 +45,32 @@ pub(crate) fn numbered_backup_name(file_name: &str, n: u32) -> String {
 /// 文件名是否是一个不带任何路径成分的纯文件名。
 ///
 /// 文件名来自前端或第三方平台，随后要拼进 mods 目录、暂存目录与备份名；带分隔符或 `..` 的名字会让
-/// 这几处一起写到目录外面去，所以入口处一次挡掉。
+/// 这几处一起写到目录外面去，所以入口处一次挡掉。Windows 上还有写不到普通文件里的名字：冒号写进备用
+/// 数据流，结尾的点和空格被系统去掉，设备名根本不落盘，落盘名都和记账名对不上。
 pub(crate) fn is_plain_file_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
         && Path::new(name).file_name().and_then(|n| n.to_str()) == Some(name)
-        && !name.contains(['/', '\\'])
+        && !name.contains(['/', '\\', ':'])
+        && !name.ends_with(['.', ' '])
+        && !is_device_name(name)
+}
+
+/// Windows 的设备名，不分大小写，第一个点之前（去掉结尾空白后）是设备名就算，后面带什么扩展名都一样。
+fn is_device_name(name: &str) -> bool {
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem).trim_end();
+    let bytes = stem.as_bytes();
+    let numbered = |prefix: &[u8]| {
+        bytes.len() == 4
+            && bytes[..3].eq_ignore_ascii_case(prefix)
+            && matches!(bytes[3], b'1'..=b'9')
+    };
+    ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+        || numbered(b"COM")
+        || numbered(b"LPT")
 }
 
 /// 构造一条带中文原因的 IO 类错误。
@@ -234,6 +253,16 @@ mod tests {
     fn plain_file_name_rejects_any_path_component() {
         assert!(is_plain_file_name("sodium-0.5.jar"));
         assert!(is_plain_file_name("a b.jar.disabled"));
+        // 只是长得像设备名的不算。
+        for fine in [
+            "console.jar",
+            "com.jar",
+            "com10.jar",
+            "lpt0.jar",
+            "auxiliary-1.0.jar",
+        ] {
+            assert!(is_plain_file_name(fine), "{fine:?} 是合法的文件名");
+        }
         for bad in [
             "",
             ".",
@@ -243,6 +272,18 @@ mod tests {
             "mods\\x.jar",
             "/x.jar",
             "C:\\x.jar",
+            // 冒号会写进备用数据流，结尾的点和空格落盘时被系统去掉，都和记下的名字对不上。
+            "xy:z.jar",
+            "x.jar.",
+            "x.jar ",
+            // 设备名不分大小写，带什么扩展名都是设备。
+            "CON",
+            "con.jar",
+            "NuL.tar.gz",
+            "aux .jar",
+            "COM1.jar",
+            "lpt9.jar.disabled",
+            "PRN.jar",
         ] {
             assert!(!is_plain_file_name(bad), "{bad:?} 不该被当成纯文件名");
         }
