@@ -35,7 +35,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | L1 | `aurora-version` | 版本清单与版本 JSON 的模型、规则求值、`inheritsFrom` 继承合并、加载器识别；纯解析，不联网也不读写磁盘 | 无 |
 | L1 | `aurora-auth` | 微软登录（设备码、XBL、XSTS、Minecraft 令牌）、离线账户、Yggdrasil 外置登录、DPAPI 凭据存储 | base |
 | L1 | `aurora-java` | 本机 Java 探测（托管目录、手动添加、注册表 HKLM 与 HKCU、JAVA_HOME、常见目录、PATH）与识别缓存、单次 `java -version` 限时 10 秒、运行时完整性检查、按主版本挑选（跳过不完整的）、Mojang 托管运行时的清单与安装计划 | base |
-| L1 | `aurora-download` | 单文件下载引擎（Range 分块、分片续传、按源重试）、批量并发池、换源调度、取消令牌 | base |
+| L1 | `aurora-download` | 单文件下载引擎（Range 分块、分片续传、按源重试）、批量并发池、换源调度、测速、主机熔断、吞吐看门狗、带作用域的下载凭据、取消令牌 | base |
 | L2 | `aurora-instance` | 实例发现、命名规则、实例设置、未完成标记、版本隔离判定、存档与资源包读取、移入回收站；只读写本地文件 | base, version |
 | L2 | `aurora-install` | 原版、Fabric、Quilt、Forge、NeoForge 安装（含 Forge 处理器子进程），库、资源与 natives 补全 | base, version, download |
 | L2 | `aurora-modplatform` | Modrinth v2 与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存 | base, download |
@@ -63,7 +63,24 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 `update` 的闭包里不碰磁盘：切换游戏目录先在快照上限时探测当前目录在不在（`Aurora::probe_current_game_dir`，2 秒，跑在阻塞线程池），写锁里只看探测结果。当前目录在断开的网络盘上时，读配置的命令不会排在写锁后面等几十秒。
 
-门面构造时 HTTP 客户端的 User-Agent 用的是 `aurora-base` 的 crate 版本；外壳在 setup 里用 `Aurora::with_app_version` 按应用版本重建客户端，之后的请求与快照都带 `Petalfall/<应用版本>`。
+门面构造时 HTTP 客户端的 User-Agent 用的是 `aurora-base` 的 crate 版本；外壳在 setup 里用 `Aurora::with_app_version` 按应用版本重建客户端（连同带凭据的下载用的 `http_manual`），之后的请求与快照都带 `Petalfall/<应用版本>`。
+
+### 下载源与下载引擎
+
+下载源分三档（`DownloadSourcePolicy`）：`OfficialFirst`、`MirrorFirst` 是静态顺序，`Auto`（默认）按实测快慢排序。文件下载源（`download_source`）与版本列表源（`version_list_source`）各选一档，实际顺序都由门面的源计划给出（`aurora-core` 的 `sources.rs`：`source_order`、`source_plan`）。
+
+- 测速共享：`SourceSpeedCache` 对各源的版本清单地址发 `Range: bytes=0-0` 的探针，按首字节时间排序。单源探针超时 3 秒，结论保留 10 分钟，只在进程内，不落盘（玩家会换网络）。缓存经 `Arc` 挂在门面上（`source_speed`），随快照共享，同一时刻只测一轮：一次装机里各处共用一份结论，有效期内不再发探针。只有下载 Mojang 产物的长任务入口才测（`Aurora::prepare_sources`：装版本、新建与补全实例、装 Java、启动前补文件）；元数据与界面列表只读缓存，新建实例页这类首屏不等探针。没有未过期的结论时取兜底顺序，`Auto` 的兜底是镜像在前：两个源都探不通多半是网络整体不佳，这时镜像的成功率更高。两个源都测不出时不写缓存。测速途中取消立即返回，丢下的那一轮不写缓存。
+- 主机熔断：`SourceHealth` 按主机与端口记连续失败，连续 3 次熔断 60 秒。熔断期间这个主机的候选排到末尾而不是剔除（全都熔断时仍要有东西可试），到期放行一次试探，任何一次成功清零。引擎对每个文件都按它重排候选，与测速顺序自然叠加。只有主机故障才记账：传输层失败、5xx、408、429 算，其余 4xx 只说明这个源没有这个文件，取消与下载密钥被拒也不算。健康表挂在门面上，跨池、跨任务共享。
+- 元数据回退：版本清单、版本 JSON、Fabric / Quilt meta、Forge / NeoForge 的 Maven 元数据经 `aurora-install` 的 `get_bytes_from`、`get_json_from` 按源计划逐个候选尝试（`first_success`）。连接失败、5xx 与解析失败都换下一个：镜像偶尔回 200 加一页错误提示。取消不换源，也不进错误汇总。全部失败时，两个及以上候选报 `AllSourcesFailed`（按尝试顺序带上每个候选的失败原因），只有一个候选时原样报它的错误。Java 运行时清单同样按源回退，`aurora-java` 有自己的 `AllSourcesFailed`。
+- 吞吐看门狗（`aurora-download` 的 `watchdog.rs`）：HTTP 客户端只有连接超时与读间隔超时，一个每秒只吐几 KB 的终点触发不了它们。看门狗盯声明大小超过 1 MiB 的文件（`WATCHDOG_MIN_FILE_SIZE`；大小未知的不盯），只管网络传输段，合并、校验、落位不计时。每秒采样一次（`WATCHDOG_TICK`），观察满 15 秒的窗口（`SLOW_WINDOW`）才可能判慢。判慢要同时满足两条：
+  1. 本传输的窗口平均速度严格低于 32 KiB/s（`SLOW_BYTES_PER_SEC`）。这只是必要条件：默认 64 并发时，总速率约 2 MiB/s 就会把每条摊到它以下。
+  2. 这笔账算得到谁头上（`Tally::blame`）。窗口里只有这一个传输的连接时算终点；总速率严格低于 128 KiB/s（`LINK_FLOOR_BYTES_PER_SEC`，约 1 Mbit/s）时算链路（`SlowCause::Link`），这种线路上份额抖得厉害，先于份额判定；总速率正常而本传输不到公平份额的一半时算终点（`SlowCause::Endpoint`）；其余情况是带宽被大家分走了，不判慢。
+
+  份额按连接数分，本传输开几条连接就算几份：TCP 公平的单位是连接，按文件数算时，开八条连接的大文件旁边的单连接文件永远拿不到一半。连接数在窗口内累加：别的文件在窗口后半段下完时当前连接数已经掉下去，用它算份额会虚高。计量（`LinkMeter`）放在 `SourceHealth` 上：门面每批新装配一个下载池但共用一张健康表，同时跑的几个池算同一条链路。
+
+  判慢后放弃当前终点，向原地址重新取一个终点（BMCLAPI 这类分发入口每次都可能跳到不同节点），已完整的分片保留，只续传没下完的。每个源每次尝试最多换 2 次（`MAX_ENDPOINT_SWITCHES`），计数按源持有，重试与分片回退都不清零。额度用完、或原地址跳回同一个节点时报 `SlowEndpoint` 交给换源；重新取终点本身失败时原样报那个错误。已是最后一个源时关掉看门狗在当前终点上续传；后面的源都失败时（镜像还没同步到的新文件回 404 就是这样）回到先前判慢的源，关掉看门狗下完，慢也装上。`SlowCause::Link` 的判慢同样换源，但不记主机的账（`Error::is_host_fault`），正常的主机不会被熔断沉底。
+- 带作用域的下载凭据：CurseForge CDN 的下载要带与 API 相同的 `x-api-key`。任务经 `DownloadTask::with_credential` 挂上 `DownloadCredential`，凭据自带作用域（`CredentialScope`）：`curseforge_cdn()` 只认 https 下的 `forgecdn.net` 及其全部子域。资源与平台整合包本体、Mod、整合包里的文件三条下载路径都挂这份凭据（`Aurora::curseforge_credential`）。
+- 逐跳跳转：reqwest 跨主机跳转时只摘掉 Authorization、Cookie 等标准敏感头，自定义的 `x-api-key` 会被原样带到下一跳。所以带凭据的任务换用不自动跟随跳转的客户端（`aurora_base::http::build_manual_redirect_client`，门面的 `http_manual`），由引擎逐跳跟随 301、302、303、307、308，最多 10 跳（`follow_redirects`）。每一跳、每个候选源各自判定带不带头，跳到作用域外的主机、改写到镜像时都不带。带了凭据的那一跳回 401 时报 `CredentialRejected`：不重试、不换源、不回退整文件、不记健康账，命令层报 `curseforge_key_rejected`。没带凭据的那一跳回 401 按普通状态码处理。整合包摘要的范围读取走同一套规则（`credentialed_get`）。
 
 ### 账户续期
 
