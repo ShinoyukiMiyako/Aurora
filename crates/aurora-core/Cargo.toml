@@ -32,8 +32,6 @@ fastrand = "2"
 # 读整合包（.mrpack / CurseForge .zip）与 jar 内的 Mod 图标。只留纯 Rust 的 deflate 后端，
 # 规避 Windows 无 C 编译器时的构建失败；与 aurora-modplatform 同一选择。
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
-# 远端整合包只取清单那一个条目的压缩数据自己解压，与 zip 的 deflate-flate2 后端是同一份实现。
-flate2 = "1"
 # 皮肤帽层判定要读 PNG 像素；只开 png 解码，其余格式用不到。
 image = { version = "0.25", default-features = false, features = ["png"] }
 # 游玩记录按本地日期切分每日时长，需要系统时区（clock）；其余特性用不到。
@@ -46,6 +44,7 @@ sha1 = "0.11"
 winreg = "0.56"
 
 [dev-dependencies]
+flate2 = "1"
 # 网络逻辑用 wiremock 本地 mock 验证（需真正后台运行时，multi_thread flavor）。
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 wiremock = "0.6"
