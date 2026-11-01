@@ -1,6 +1,10 @@
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { isImeComposing } from "../../lib/util";
 import { Button } from "../../ui/Button";
+import { Callout } from "../../ui/Callout";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
+import styles from "./Welcome.module.css";
 
 export interface WelcomeProps {
   copy: SetupCopy;
@@ -14,16 +18,56 @@ export interface WelcomeProps {
   onInstall(): void;
 }
 
-export function Welcome({ copy, busy, onInstall }: WelcomeProps) {
+/**
+ * 空白处按 Enter 等于点安装。焦点在按钮或链接上时 Enter 归它们自己，否则点「更改」会连安装一起发起。
+ * 按住不放的重复事件不算：从下一页按 Enter 回到这里时，手还没松开就会误发起安装。
+ */
+function useEnterToInstall(active: boolean, onInstall: () => void): void {
+  const latest = useRef(onInstall);
+  useLayoutEffect(() => {
+    latest.current = onInstall;
+  });
+
+  useEffect(() => {
+    if (!active) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.repeat || event.ctrlKey || event.altKey || event.shiftKey || event.metaKey || isImeComposing(event)) return;
+      if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+      latest.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [active]);
+}
+
+export function Welcome({ copy, dir, interrupted, busy, onChangeDir, onInstall }: WelcomeProps) {
+  const text = copy.welcome;
+  useEnterToInstall(!busy, onInstall);
   return (
     <Frame
-      title={copy.welcome.title}
-      lead={copy.welcome.lead}
+      title={text.title}
+      lead={text.languageNote === null ? text.lead : `${text.lead} ${text.languageNote}`}
       footer={
         <Button variant="primary" loading={busy} onClick={onInstall}>
-          {copy.welcome.install}
+          {text.install}
         </Button>
       }
-    />
+    >
+      <div className={styles.content}>
+        {interrupted && <Callout tone="info">{text.interrupted}</Callout>}
+        <div className={styles.location}>
+          <span className={styles.label}>{text.locationLabel}</span>
+          <div className={styles.pathRow}>
+            <span className={styles.path} title={dir}>
+              {dir}
+            </span>
+            <Button variant="ghost" size="sm" disabled={busy} focusableWhenDisabled onClick={onChangeDir}>
+              {text.change}
+            </Button>
+          </div>
+        </div>
+        <p className={styles.legal}>{text.legalNote}</p>
+      </div>
+    </Frame>
   );
 }
