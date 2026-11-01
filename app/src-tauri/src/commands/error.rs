@@ -107,7 +107,8 @@ pub mod code {
     pub const MODPACK_UNSUPPORTED_COMPRESSION: &str = "modpack_unsupported_compression";
     /// 整合包里有越出实例目录、写进启动器元数据目录或符号链接的条目（detail.path）。
     pub const MODPACK_UNSAFE_PATH: &str = "modpack_unsafe_path";
-    /// 新实例名不可用（detail.name、rule：empty / too_long / illegal_char / reserved / duplicate）。
+    /// 新实例名不可用（detail.name、rule：empty / too_long / illegal_char / reserved / leading_dot /
+    /// duplicate）。
     pub const INSTANCE_NAME_INVALID: &str = "instance_name_invalid";
     /// 启动器写在实例里的 JSON 文件读不懂（detail.path）。
     pub const JSON_FILE_INVALID: &str = "json_file_invalid";
@@ -629,7 +630,7 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         }
         CoreError::InstanceNameInvalid { name, rule } => {
             detail.insert("name".to_owned(), json!(name));
-            detail.insert("rule".to_owned(), json!(rule));
+            detail.insert("rule".to_owned(), json!(rule.code()));
         }
         CoreError::JsonFileInvalid { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
@@ -974,7 +975,7 @@ mod tests {
     fn modpack_errors_map_to_codes_with_parameters() {
         let name: CommandError = CoreError::InstanceNameInvalid {
             name: "CON".into(),
-            rule: aurora_core::InstanceNameRule::Reserved,
+            rule: aurora_core::NameViolation::ReservedByWindows,
         }
         .into();
         assert_eq!(name.code, code::INSTANCE_NAME_INVALID);

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke, listen } from "./bridge";
 import { IpcError } from "./errors";
 import { instanceBusyFromError } from "../domain/instance-busy";
-import { deleteInstance, getInstanceSettings, listInstances, previewInstanceDeletion, renameInstance, repairInstance, revealInFolder, setInstanceSettings } from "./instances";
+import { INSTANCE_NAME_MAX_UNITS, deleteInstance, getInstanceSettings, listInstances, previewInstanceDeletion, renameInstance, repairInstance, revealInFolder, setInstanceSettings } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { acquireMockInstance } from "./mock/handlers/instances";
@@ -12,7 +12,6 @@ import { MOCK_DOWNLOADS_DIR, seedMockDownloads } from "./mock/handlers/modpack";
 import { mockRevealedPaths } from "./mock/handlers/instances";
 import {
   EXPORT_EXTRAS,
-  INSTANCE_NAME_MAX_CHARS,
   blockedFilesOf,
   claimBlockedFiles,
   downloadsFolder,
@@ -162,11 +161,13 @@ describe("整合包 mock", () => {
     const cases: [string, string][] = [
       ["", "empty"],
       ["   ", "empty"],
-      ["樱".repeat(INSTANCE_NAME_MAX_CHARS + 1), "too_long"],
+      ["樱".repeat(INSTANCE_NAME_MAX_UNITS + 1), "too_long"],
+      ["\u{1F338}".repeat(17), "too_long"],
       ["a/b", "illegal_char"],
       ["a:b", "illegal_char"],
-      [".hidden", "illegal_char"],
-      ["pack.", "illegal_char"],
+      [".hidden", "leading_dot"],
+      ["pack.", "reserved"],
+      ["a\u{7}b", "reserved"],
       ["CON", "reserved"],
       ["com1.txt", "reserved"],
       ["樱花生存", "duplicate"],
@@ -178,7 +179,8 @@ describe("整合包 mock", () => {
       expect(error, name).toBeInstanceOf(IpcError);
       expect(error, name).toMatchObject({ code: "instance_name_invalid", detail: { rule } });
     }
-    expect((await installModpack("t-ok", local, "樱".repeat(INSTANCE_NAME_MAX_CHARS), [])).version_id).toHaveLength(INSTANCE_NAME_MAX_CHARS);
+    expect((await installModpack("t-ok", local, "樱".repeat(INSTANCE_NAME_MAX_UNITS), [])).version_id).toHaveLength(INSTANCE_NAME_MAX_UNITS);
+    expect((await installModpack("t-units", local, "\u{1F338}".repeat(16), [])).version_id).toHaveLength(INSTANCE_NAME_MAX_UNITS);
     expect((await installModpack("t-com0", local, "COM0", [])).version_id).toBe("COM0");
   });
 

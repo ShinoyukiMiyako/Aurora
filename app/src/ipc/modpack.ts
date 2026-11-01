@@ -140,12 +140,6 @@ export const CURSEFORGE_KEY_REJECTED = "curseforge_key_rejected";
 /** 整合包用了不支持的压缩方式（detail.path、entry、method）。 */
 export const MODPACK_UNSUPPORTED_COMPRESSION = "modpack_unsupported_compression";
 
-/** 错误码 instance_name_invalid 的 detail.rule。 */
-export type InstanceNameRule = "empty" | "too_long" | "illegal_char" | "reserved" | "duplicate";
-
-/** 实例名最多字符数，与后端一致。 */
-export const INSTANCE_NAME_MAX_CHARS = 32;
-
 /**
  * 读本地整合包的清单与条目表（不解压）。CurseForge 清单有远程文件时后端另问两个批量接口来数 Mod、算下载量，
  * 没配 API key 时报 CurseForge 源被禁用的同一个错误。

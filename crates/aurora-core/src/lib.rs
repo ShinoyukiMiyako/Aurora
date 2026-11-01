@@ -100,9 +100,9 @@ pub use launcher_update::{UpdateSource, order_update_sources};
 pub use ledger::{Ledger, LedgerEntry, LedgerStore, UpdateHold};
 pub use modfs::is_mod_file_busy;
 pub use modpack::{
-    INSTANCE_NAME_MAX_CHARS, ImportSelection, InstanceModpack, InstanceNameRule,
-    ModpackInstallOutcome, ModpackPreview, ModpackSource, PackFileAvailability, PackFileOrigin,
-    PackModEntry, PreparedModpack, read_instance_modpack, validate_instance_name,
+    ImportSelection, InstanceModpack, ModpackInstallOutcome, ModpackPreview, ModpackSource,
+    PackFileAvailability, PackFileOrigin, PackModEntry, PreparedModpack, read_instance_modpack,
+    validate_instance_name,
 };
 pub use modpack_summary::ModpackSummary;
 pub use mods::{InstanceMod, ModInstallOutcome, ModSource, ModToggleOutcome};

@@ -119,10 +119,10 @@ pub enum CoreError {
     #[error("{reason}")]
     ClaimFolderInvalid { path: PathBuf, reason: String },
     /// 新实例的名字不可用。
-    #[error("实例名 {name} 不可用：{}", rule.describe())]
+    #[error("实例名 {name} 不可用：{}", rule.message())]
     InstanceNameInvalid {
         name: String,
-        rule: crate::modpack::InstanceNameRule,
+        rule: aurora_instance::NameViolation,
     },
     /// 启动器写在实例里的 JSON 文件（整合包信息、未完成标记、版本 JSON）读不懂。
     #[error("读不懂 {path}")]

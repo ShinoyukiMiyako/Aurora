@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use aurora_download::{CredentialScope, DownloadCredential, DownloadTask};
 use aurora_instance::{
     AURORA_META_DIR, IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore,
-    VERSIONS_DIR, VersionSettings, VersionSettingsStore,
+    NameViolation, VERSIONS_DIR, VersionSettings, VersionSettingsStore, check_name_format,
 };
 use aurora_modpack::{
     CurseForgeFileRef, ModrinthFile, PackArchive, PackFormat, PackLoader, PackLoaderKind,
@@ -43,9 +43,6 @@ use crate::instance_install::{MarkerSettlement, now_millis, template_stage};
 use crate::resources::{
     curseforge_download_url, is_safe_file_name, join_landing, task_for_file_url,
 };
-
-/// 实例名的最大字符数：界面上要完整显示，路径也不宜过长。
-pub const INSTANCE_NAME_MAX_CHARS: usize = 32;
 
 /// 实例目录里的整合包信息文件名（在启动器元数据目录下）。
 const MODPACK_INFO_FILE: &str = "modpack.json";
@@ -214,66 +211,10 @@ pub struct InstanceModpack {
     pub installed_at: u64,
 }
 
-/// 实例名不可用的原因。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstanceNameRule {
-    /// 去掉首尾空白后为空。
-    Empty,
-    /// 超过 [`INSTANCE_NAME_MAX_CHARS`] 个字符。
-    TooLong,
-    /// 含 Windows 文件名不允许的字符、控制字符，或以点开头/结尾。
-    IllegalChar,
-    /// Windows 保留设备名（CON、NUL、COM1……）。
-    Reserved,
-    /// 与已有版本目录或本次要装的游戏版本同名（不区分大小写）。
-    Duplicate,
-}
-
-impl InstanceNameRule {
-    /// 给用户看的原因。
-    pub fn describe(self) -> &'static str {
-        match self {
-            InstanceNameRule::Empty => "名字不能为空",
-            InstanceNameRule::TooLong => "名字最多 32 个字符",
-            InstanceNameRule::IllegalChar => {
-                "不能含 \\ / : * ? \" < > | 与控制字符，也不能以点开头或结尾"
-            }
-            InstanceNameRule::Reserved => "这是 Windows 的保留名",
-            InstanceNameRule::Duplicate => "已有同名的版本或实例",
-        }
-    }
-}
-
-/// 校验实例名的写法（不查重），返回去掉首尾空白后的名字。
-pub fn validate_instance_name(raw: &str) -> std::result::Result<String, InstanceNameRule> {
+/// 校验实例名的写法（不查重），返回去掉首尾空白后的名字。规则与新建、改名是同一套。
+pub fn validate_instance_name(raw: &str) -> std::result::Result<String, NameViolation> {
     let name = raw.trim();
-    if name.is_empty() {
-        return Err(InstanceNameRule::Empty);
-    }
-    if name.chars().count() > INSTANCE_NAME_MAX_CHARS {
-        return Err(InstanceNameRule::TooLong);
-    }
-    if name.chars().any(|c| {
-        matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
-    }) {
-        return Err(InstanceNameRule::IllegalChar);
-    }
-    // 结尾的点会被 Windows 悄悄去掉；开头的点是隐藏目录，也和启动器元数据目录同一种写法。
-    if name.starts_with('.') || name.ends_with('.') {
-        return Err(InstanceNameRule::IllegalChar);
-    }
-    let stem = name.split('.').next().unwrap_or(name).trim_end();
-    let upper = stem.to_ascii_uppercase();
-    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ["COM", "LPT"].iter().any(|prefix| {
-            upper
-                .strip_prefix(prefix)
-                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
-        });
-    if reserved {
-        return Err(InstanceNameRule::Reserved);
-    }
+    check_name_format(name)?;
     Ok(name.to_owned())
 }
 
@@ -579,7 +520,7 @@ impl Aurora {
         let requested = name.unwrap_or(&manifest.name);
         let name = validate_instance_name(requested).map_err(|rule| name_error(requested, rule))?;
         if name.eq_ignore_ascii_case(&manifest.minecraft) {
-            return Err(name_error(&name, InstanceNameRule::Duplicate));
+            return Err(name_error(&name, NameViolation::Duplicate));
         }
         self.ensure_modpack_name_free(&name).await?;
         let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
@@ -675,7 +616,7 @@ impl Aurora {
         // 原版或加载器的自然版本 id 与实例同名时，安装已经把它写进了实例目录，两者没法共存，按重名
         // 处理。失败清理会连它一起删掉：同名目录在建实例前不存在，一定是这次装出来的。
         if natural.eq_ignore_ascii_case(name) || installed.vanilla.id.eq_ignore_ascii_case(name) {
-            return Err(name_error(name, InstanceNameRule::Duplicate));
+            return Err(name_error(name, NameViolation::Duplicate));
         }
         self.materialize_version_json(
             name,
@@ -862,7 +803,7 @@ impl Aurora {
                 })?
         {
             if entry.file_name().to_string_lossy().to_lowercase() == wanted {
-                return Err(name_error(name, InstanceNameRule::Duplicate));
+                return Err(name_error(name, NameViolation::Duplicate));
             }
         }
         Ok(())
@@ -1407,7 +1348,7 @@ pub(crate) async fn read_pack_blocking(path: PathBuf) -> Result<PackArchive> {
     Ok(tokio::task::spawn_blocking(move || aurora_modpack::read_pack(&path)).await??)
 }
 
-fn name_error(name: &str, rule: InstanceNameRule) -> CoreError {
+fn name_error(name: &str, rule: NameViolation) -> CoreError {
     CoreError::InstanceNameInvalid {
         name: name.to_owned(),
         rule,
@@ -1444,7 +1385,7 @@ async fn create_instance_dir(version_dir: &Path, name: &str) -> Result<()> {
     match tokio::fs::create_dir(version_dir).await {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(name_error(name, InstanceNameRule::Duplicate))
+            Err(name_error(name, NameViolation::Duplicate))
         }
         Err(source) => Err(aurora_base::Error::Io {
             path: version_dir.to_path_buf(),
@@ -1601,7 +1542,7 @@ mod tests {
                 "{raw:?}"
             );
         };
-        let bad = |raw: &str, rule: InstanceNameRule| {
+        let bad = |raw: &str, rule: NameViolation| {
             assert_eq!(validate_instance_name(raw), Err(rule), "{raw:?}");
         };
         ok("  我的整合包 1.0  ", "我的整合包 1.0");
@@ -1610,19 +1551,33 @@ mod tests {
         ok("COM10", "COM10");
         ok("Console", "Console");
         ok("a.b", "a.b");
-        bad("", InstanceNameRule::Empty);
-        bad(" \t ", InstanceNameRule::Empty);
-        bad(&"樱".repeat(33), InstanceNameRule::TooLong);
-        for c in ['\\', '/', ':', '*', '?', '"', '<', '>', '|', '\u{7}'] {
-            bad(&format!("a{c}b"), InstanceNameRule::IllegalChar);
+        bad("", NameViolation::Empty);
+        bad(" \t ", NameViolation::Empty);
+        bad(&"樱".repeat(33), NameViolation::TooLong);
+        for c in ['\\', '/', ':', '*', '?', '"', '<', '>', '|'] {
+            bad(&format!("a{c}b"), NameViolation::IllegalChar);
         }
-        bad(".hidden", InstanceNameRule::IllegalChar);
-        bad("pack.", InstanceNameRule::IllegalChar);
+        bad("a\u{7}b", NameViolation::ReservedByWindows);
+        bad(".hidden", NameViolation::LeadingDot);
+        bad("pack.", NameViolation::ReservedByWindows);
         for reserved in [
             "CON", "prn", "Aux", "nul", "COM1", "com9", "LPT1", "lpt9", "con.txt", "NUL .x",
         ] {
-            bad(reserved, InstanceNameRule::Reserved);
+            bad(reserved, NameViolation::ReservedByWindows);
         }
+    }
+
+    /// 名字长度按 UTF-16 码元算，与新建、改名和界面输入框同一计法：补充平面字符占两个码元。
+    #[test]
+    fn instance_name_length_counts_utf16_units() {
+        assert_eq!(
+            validate_instance_name(&"\u{1F338}".repeat(16)).as_deref(),
+            Ok("\u{1F338}".repeat(16).as_str())
+        );
+        assert_eq!(
+            validate_instance_name(&"\u{1F338}".repeat(17)),
+            Err(NameViolation::TooLong)
+        );
     }
 
     #[test]
@@ -1631,7 +1586,7 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(seed);
         let alphabet: Vec<char> = "abcXYZ019 -_+()[]樱花林落樱整合包".chars().collect();
         for _ in 0..500 {
-            let len = rng.usize(1..=INSTANCE_NAME_MAX_CHARS);
+            let len = rng.usize(1..=aurora_instance::MAX_NAME_UNITS);
             let raw: String = (0..len)
                 .map(|_| alphabet[rng.usize(..alphabet.len())])
                 .collect();
@@ -2074,7 +2029,7 @@ mod tests {
         assert!(matches!(
             err,
             CoreError::InstanceNameInvalid {
-                rule: InstanceNameRule::IllegalChar,
+                rule: NameViolation::IllegalChar,
                 ..
             }
         ));
@@ -2323,7 +2278,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, CoreError::InstanceNameInvalid { name, rule: InstanceNameRule::Duplicate } if name == "taken"),
+            matches!(&err, CoreError::InstanceNameInvalid { name, rule: NameViolation::Duplicate } if name == "taken"),
             "{err:?}"
         );
         assert_eq!(
@@ -2344,7 +2299,7 @@ mod tests {
         assert!(matches!(
             err,
             CoreError::InstanceNameInvalid {
-                rule: InstanceNameRule::Duplicate,
+                rule: NameViolation::Duplicate,
                 ..
             }
         ));
@@ -2366,7 +2321,7 @@ mod tests {
         assert!(matches!(
             err,
             CoreError::InstanceNameInvalid {
-                rule: InstanceNameRule::IllegalChar,
+                rule: NameViolation::IllegalChar,
                 ..
             }
         ));
