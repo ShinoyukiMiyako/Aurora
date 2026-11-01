@@ -1150,6 +1150,17 @@ export class LauncherStore {
   }
 
   /**
+   * 写入侧栏固定并采纳后端返回的整份列表。写入发出之前已在路上的读取可能读在写入之前，晚到时会把刚写下的固定改回去，
+   * 所以一并作废；写入发出之后才发出的读取照常按序号采纳。
+   */
+  private async writePins(pins: string[]): Promise<void> {
+    const issuedBefore = this.pinsIssued;
+    const written = await instancesIpc.setSidebarPins(pins);
+    this.pinsApplied = Math.max(this.pinsApplied, issuedBefore);
+    this.set({ pins: written });
+  }
+
+  /**
    * 读任务日志并恢复上次的任务：上次没完成的记为「关闭时中断」。日志读不出来时用户照样能入队，所以重试读取时
    * 内存里已有的任务优先，原样保留，只把日志里内存没有的那些并进来；读到过一次之后内存就是准的，再读不改任务表。
    */
@@ -1684,7 +1695,7 @@ export class LauncherStore {
     if (pin) {
       await this.queueSidebarPins(async () => {
         const pins = this.raw.pins;
-        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) await this.writePins([...pins, id]);
       });
     }
     this.instanceIdTaken(id);
@@ -2160,7 +2171,7 @@ export class LauncherStore {
           }
           const pins = store.raw.pins;
           const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
-          store.set({ pins: await instancesIpc.setSidebarPins(next) });
+          await store.writePins(next);
         });
       },
       setSidebarPins(ids) {
@@ -2171,7 +2182,7 @@ export class LauncherStore {
           store.set({ pins: persisted });
           // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
           try {
-            store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
+            await store.writePins(persisted);
           } catch (error) {
             store.set({ pins: before });
             throw error;

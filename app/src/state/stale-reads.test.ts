@@ -185,3 +185,42 @@ describe("重叠的设置与侧栏固定读取：先发出、后回来的旧结�
     expect(store.getState().instances.filter((i) => i.pinned).map((i) => i.id)).toEqual(["生存", "创造"]);
   });
 });
+
+describe("写入之前已在路上的固定读取晚到时，不把刚写下的固定改回去", () => {
+  it("侧栏固定：固定之前发出的读取晚到，固定列表仍是写入后的那份", async () => {
+    const slow = deferred<string[]>();
+    ipc.overrides.set("get_sidebar_pins", () => slow.promise);
+    const reading = store.actions.reload("pins");
+    await settle();
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    await store.actions.togglePin("创造");
+    expect(store.getState().sidebarPins).toEqual(["创造"]);
+
+    slow.resolve([]);
+    await reading;
+    expect(store.getState().sidebarPins).toEqual(["创造"]);
+    expect(store.getState().instances.filter((i) => i.pinned).map((i) => i.id)).toEqual(["创造"]);
+  });
+
+  it("侧栏固定：拖动排序之前发出的读取晚到，顺序仍是写入后的那份", async () => {
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    await store.actions.setSidebarPins(["生存", "创造"]);
+    const slow = deferred<string[]>();
+    ipc.overrides.set("get_sidebar_pins", () => slow.promise);
+    const reading = store.actions.reload("pins");
+    await settle();
+    await store.actions.setSidebarPins(["创造", "生存"]);
+
+    slow.resolve(["生存", "创造"]);
+    await reading;
+    expect(store.getState().sidebarPins).toEqual(["创造", "生存"]);
+  });
+
+  it("侧栏固定：写入之后才发出的读取照常采纳", async () => {
+    ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+    await store.actions.togglePin("创造");
+    ipc.overrides.set("get_sidebar_pins", () => ["生存", "创造"]);
+    await store.actions.reload("pins");
+    expect(store.getState().sidebarPins).toEqual(["生存", "创造"]);
+  });
+});
