@@ -36,9 +36,9 @@ async function loginMockPlayer(): Promise<void> {
 /** 用例里建的状态容器：断言失败时也要在收尾时停掉，联网状态只能接一个容器，不停会连累后面的用例。 */
 let started: LauncherStore | null = null;
 
-async function storeWith(uuid: string, name: string, accountType: "microsoft" | "authlib_injector" = "microsoft"): Promise<LauncherStore> {
+async function storeWith(uuid: string, name: string, accountType: "microsoft" | "authlib_injector" = "microsoft", instanceId = "生存"): Promise<LauncherStore> {
   const extra = accountType === "authlib_injector" ? { auth_server: "Example Skin", server_url: "https://skin.example/api/yggdrasil/" } : {};
-  bootOverrides(ipc, { accounts: [accountDto({ uuid, name, account_type: accountType, last_verified_at: T0, ...extra })], instances: [instanceDto("生存")] });
+  bootOverrides(ipc, { accounts: [accountDto({ uuid, name, account_type: accountType, last_verified_at: T0, ...extra })], instances: [instanceDto(instanceId)] });
   started = await startedStore();
   return started;
 }
@@ -142,6 +142,39 @@ describe("以离线方式进单人：状态容器", () => {
     expect(outcome).toMatchObject({ code: "invalid_argument", detail: { field: "offlineFallback", reason: "no_recent_failure", account: "Hanami_Walker" } });
     expect(store.getState().session).toBeNull();
     expect(launchArgs().map((a) => a.offlineFallback)).toEqual([false, true]);
+  });
+
+  // 假后端种子里的「樱花生存」支持直达，存档文件夹里有 New World。
+  it("直达存档时服务故障：以离线方式进单人照旧直达同一个存档", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player", "microsoft", "樱花生存");
+    const world = { kind: "singleplayer", world_dir_name: "New World" } as const;
+    failNextMockLaunch("account_service_down", { account: "Mock_Player", status: 503 });
+    await store.actions.quickPlay("樱花生存", world);
+    expect(store.getState().session).toMatchObject({ phase: "failed", quickPlay: world, failure: { code: "account_service_down" } });
+
+    await runnable(store.actions.failureFix("launch_offline_once")).run();
+    expect(callsOf(ipc, "launch_game").map((args) => [args.offlineFallback, args.quickPlay])).toEqual([
+      [false, world],
+      [true, world],
+    ]);
+    expect(store.getState().session).toMatchObject({ instanceId: "樱花生存", phase: "running", quickPlay: world, failure: null });
+  });
+
+  it("直达服务器时服务故障：以离线方式进单人丢掉服务器目标，按普通启动进标题画面", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player", "microsoft", "樱花生存");
+    const server = { kind: "multiplayer", address: "play.example" } as const;
+    failNextMockLaunch("account_refresh_network", { account: "Mock_Player" });
+    await store.actions.quickPlay("樱花生存", server);
+    expect(store.getState().session).toMatchObject({ phase: "failed", quickPlay: server, failure: { code: "account_refresh_network" } });
+
+    await runnable(store.actions.failureFix("launch_offline_once")).run();
+    expect(callsOf(ipc, "launch_game").map((args) => [args.offlineFallback, args.quickPlay])).toEqual([
+      [false, server],
+      [true, null],
+    ]);
+    expect(store.getState().session).toMatchObject({ instanceId: "樱花生存", phase: "running", quickPlay: null, failure: null });
   });
 
   it("实例在失败之后变成损坏：不发起启动，直接报错", async () => {

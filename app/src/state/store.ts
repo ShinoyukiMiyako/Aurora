@@ -2120,7 +2120,9 @@ export class LauncherStore {
             if (inst.status === "broken") throw new Error(`「${instanceId}」文件不完整，入口不应提供以离线方式进单人`);
             const account = this.raw.accounts.find((a) => a.uuid === accountUuid);
             if (account === undefined) throw new Error(`账户 ${accountUuid} 不存在`);
-            await this.startLaunch(instanceId, account, null, true);
+            // 以离线方式进单人只能玩单人：失败的那一局是直达存档时照旧直达那个存档，直达服务器的目标丢掉，进标题画面
+            const quickPlay = s.quickPlay !== null && s.quickPlay.kind === "singleplayer" ? s.quickPlay : null;
+            await this.startLaunch(instanceId, account, quickPlay, true);
           },
           errorTitle: ACTION_ERROR.launch(instanceId),
         };
