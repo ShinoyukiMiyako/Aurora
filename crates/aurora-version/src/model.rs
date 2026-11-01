@@ -205,13 +205,21 @@ impl Library {
 
     /// 用于同名库去重的键：`group:artifact`（+ classifier 以区分主件与各 natives）。
     /// 坐标无法解析时退回整个 name，保证不同名库不会被误并。
+    ///
+    /// 带 `natives` 映射的条目另算一个键：1.13 到 1.18 的原版 JSON 把同一坐标写成两条，主件一条在前，
+    /// natives 一条在后，并成一个就没有东西可解压，游戏起来找不到 lwjgl.dll。
     pub fn dedup_key(&self) -> String {
-        match self.coordinate() {
+        let key = match self.coordinate() {
             Some(c) => match c.classifier {
                 Some(cl) => format!("{}:{}:{}", c.group, c.artifact, cl),
                 None => format!("{}:{}", c.group, c.artifact),
             },
             None => self.name.clone(),
+        };
+        if self.natives.is_some() {
+            format!("{key}#natives")
+        } else {
+            key
         }
     }
 
@@ -479,6 +487,34 @@ mod tests {
             Some("natives-linux")
         );
         assert!(lib.native_artifact(&linux).is_none());
+    }
+
+    /// 1.13 到 1.18 的原版 JSON 把 LWJGL 这类库写成同坐标的两条：一条只有主件进类路径，一条带 natives
+    /// 映射提供本地库。两条都要留下；natives 条目之间仍按「先出现者优先」去重。
+    #[test]
+    fn select_libraries_keeps_the_natives_entry_next_to_its_plain_twin() {
+        let json = r#"{
+            "id":"1.16.5",
+            "libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2"},
+                {"name":"org.lwjgl:lwjgl:3.2.2","natives":{"windows":"natives-windows"}},
+                {"name":"org.lwjgl:lwjgl:3.2.1","natives":{"windows":"natives-windows"}}
+            ]
+        }"#;
+        let v = VersionJson::from_json_str(json).expect("应解析");
+        let win64 = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let selected = select_libraries(&v, &win64);
+        let shape: Vec<(&str, bool)> = selected
+            .iter()
+            .map(|l| (l.name.as_str(), l.natives.is_some()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("org.lwjgl:lwjgl:3.2.2", false),
+                ("org.lwjgl:lwjgl:3.2.2", true)
+            ]
+        );
     }
 
     #[test]

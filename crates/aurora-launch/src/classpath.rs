@@ -201,6 +201,35 @@ mod tests {
         );
     }
 
+    /// 同坐标的主件条目与 natives 条目（1.13 到 1.18 的写法）：主件只进一次类路径。
+    #[test]
+    fn classpath_lists_a_twin_entry_once() {
+        let version = VersionJson::from_json_str(
+            r#"{
+                "id":"1.16.5",
+                "libraries":[
+                    {"name":"org.lwjgl:lwjgl:3.2.2",
+                     "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}}},
+                    {"name":"org.lwjgl:lwjgl:3.2.2",
+                     "natives":{"windows":"natives-windows"},
+                     "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"},
+                        "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"b","size":1,"url":"u"}}}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let libraries_dir = Path::new("D:/mc/libraries");
+        let client_jar = Path::new("D:/mc/versions/x/x.jar");
+        let entries = classpath_entries(&version, &win64(), libraries_dir, client_jar).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                libraries_dir.join("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"),
+                client_jar.to_path_buf()
+            ]
+        );
+    }
+
     #[test]
     fn classpath_skips_natives_keeps_order_and_appends_client_jar() {
         // asm 去重保留 9.6；lwjgl 主件进 classpath；lwjgl natives 条目被排除。

@@ -446,11 +446,14 @@ fn download_bytes(json: &VersionJson, ctx: &RuntimeContext) -> Option<u64> {
     let mut total = json.downloads.as_ref()?.client.as_ref()?.size;
     let index = json.asset_index.as_ref()?;
     total += index.size + index.total_size?;
+    // 同坐标的主件条目与 natives 条目都带着同一个主件，盘上只有一份。
+    let mut counted = HashSet::new();
     for library in select_libraries(json, ctx) {
         let downloads = library.downloads.as_ref()?;
         total += downloads
             .artifact
             .as_ref()
+            .filter(|artifact| counted.insert(artifact.url.as_str()))
             .map_or(0, |artifact| artifact.size);
         total += library.native_artifact(ctx).map_or(0, |native| native.size);
     }
@@ -776,6 +779,14 @@ mod tests {
                     { "name": "a:common:1", "downloads": { "artifact": { "path": "a", "sha1": "1", "size": 20, "url": "http://x/a" } } },
                     // 同坐标第二次出现按去重只算一次。
                     { "name": "a:common:1", "downloads": { "artifact": { "path": "a", "sha1": "1", "size": 20, "url": "http://x/a" } } },
+                    // 同坐标的主件与 natives 两条（1.13 到 1.18 的写法）：主件只算一次，natives 件要算。
+                    { "name": "a:twin:1", "downloads": { "artifact": { "path": "f", "sha1": "6", "size": 5000, "url": "http://x/f" } } },
+                    { "name": "a:twin:1",
+                      "natives": { os: "natives-here" },
+                      "downloads": {
+                          "artifact": { "path": "f", "sha1": "6", "size": 5000, "url": "http://x/f" },
+                          "classifiers": { "natives-here": { "path": "g", "sha1": "7", "size": 60, "url": "http://x/g" } }
+                      } },
                     { "name": "a:elsewhere:1",
                       "rules": [{ "action": "allow", "os": { "name": other_os } }],
                       "downloads": { "artifact": { "path": "b", "sha1": "2", "size": 4000, "url": "http://x/b" } } },
@@ -808,7 +819,7 @@ mod tests {
         assert_eq!(full.java_major, 21);
         assert_eq!(
             full.download_bytes,
-            Some(1000 + 300 + 50_000 + 7 + 20 + 3 + 400)
+            Some(1000 + 300 + 50_000 + 7 + 20 + 5000 + 60 + 3 + 400)
         );
         assert_eq!(aurora.required_java("req-full").await.unwrap(), 21);
 

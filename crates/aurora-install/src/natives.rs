@@ -300,6 +300,39 @@ mod tests {
         .unwrap()
     }
 
+    /// 1.13 到 1.18 的写法：主件一条在前，同坐标的 natives 条目在后。
+    fn twin_entry_version() -> VersionJson {
+        VersionJson::from_json_str(
+            r#"{"id":"1.16.5","libraries":[
+                {"name":"org.lwjgl:lwjgl:3.3.3",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar","sha1":"a","size":1,"url":"u"}}},
+                {"name":"org.lwjgl:lwjgl:3.3.3",
+                 "natives":{"windows":"natives-windows"},
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar","sha1":"a","size":1,"url":"u"},
+                    "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar","sha1":"b","size":1,"url":"u"}}}}
+            ]}"#,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extract_all_natives_reaches_the_natives_entry_behind_its_plain_twin() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        put_native_jar(&layout);
+
+        let count = extract_all_natives(&twin_entry_version(), &ctx, &layout, "forge-1165")
+            .await
+            .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read(layout.natives_dir("forge-1165").join("lwjgl.dll")).unwrap(),
+            b"fake-dll-bytes"
+        );
+    }
+
     fn put_native_jar(layout: &GameLayout) {
         let jar_path = layout.library_path("org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar");
         std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
