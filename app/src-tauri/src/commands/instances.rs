@@ -49,7 +49,7 @@ pub enum InstanceActivity {
     Launching,
     Running,
     /// 装、删、启停、更新、回滚 Mod，往实例里装资源包、光影、数据包，查更新时回写卷宗，写实例设置，
-    /// 或为打开文件夹建出工作目录下的子目录。
+    /// 删除存档备份，或为打开文件夹建出工作目录下的子目录。
     Modifying,
     /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到退出、补全、导入整合包
     /// 期间都要读写这里的客户端 jar 与 natives。只经 [`InstanceLocks::acquire_with_bases`] 占，
@@ -4415,6 +4415,40 @@ mod tests {
     }
 
     // ---- 存档备份的命令 ----
+
+    /// 备份、恢复、导出存档不占基底：占住的只有实例自己，基底这期间照样能补全；基底的删除与改名由依赖检查挡着，
+    /// 不靠实例锁。
+    #[tokio::test]
+    async fn world_tasks_leave_the_base_free() {
+        let env = Env::new();
+        env.vanilla("1.20.1");
+        let instance = env.version(
+            "织布",
+            r#"{"id":"织布","inheritsFrom":"1.20.1","type":"release","mainClass":"K"}"#,
+        );
+        write_world(&instance.join("saves"), "新的世界", b"region-v1");
+        let w = WorldEnv::new();
+
+        let held = begin_world_task(&w.with(&env), "t", "织布", false)
+            .await
+            .unwrap();
+        assert_eq!(w.locks.activity("织布"), Some(InstanceActivity::BackingUp));
+        assert_eq!(w.locks.occupancy("1.20.1"), (None, None));
+        drop(
+            w.locks
+                .acquire("1.20.1", InstanceActivity::Repairing)
+                .unwrap(),
+        );
+        let err = delete_instance_with(&env.facade, &w.locks, "1.20.1", Remove)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_HAS_DEPENDENTS);
+        let err = rename_instance_with(&env.facade, &w.locks, "1.20.1", "底座")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_HAS_DEPENDENTS);
+        drop(held);
+    }
 
     /// 测试里不往用户回收站塞东西：记下交来的路径再删掉，文件与目录都收。
     #[derive(Clone, Default)]
