@@ -55,6 +55,15 @@ pub struct RefreshResponse {
     pub selected_profile: Option<GameProfile>,
 }
 
+/// 会话服务器上的角色档案。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProfile {
+    /// 角色名；服务器没写时为 None。
+    pub name: Option<String>,
+    /// 当前启用的皮肤；没有自定义皮肤时为 None。
+    pub skin: Option<SkinRef>,
+}
+
 /// ALI 元数据预取结果。
 #[derive(Debug, Clone)]
 pub struct AliMetadata {
@@ -210,7 +219,17 @@ impl YggdrasilClient {
     ///
     /// 角色不存在（规范规定回 204）、档案没有 `textures` 属性或属性里没有 `SKIN` 时为 `Ok(None)`。
     pub async fn profile_skin(&self, profile_id: &str) -> Result<Option<SkinRef>> {
-        const CONTEXT: &str = "查询角色皮肤";
+        Ok(self
+            .session_profile(profile_id)
+            .await?
+            .and_then(|profile| profile.skin))
+    }
+
+    /// 查询角色在会话服务器上的档案：角色名与当前皮肤。角色不存在（规范规定回 204）时为 `Ok(None)`。
+    ///
+    /// 只读，不碰令牌：令牌仍有效时更新角色名与皮肤用它，不必为此轮换令牌。
+    pub async fn session_profile(&self, profile_id: &str) -> Result<Option<SessionProfile>> {
+        const CONTEXT: &str = "查询角色档案";
         let url = format!(
             "{}sessionserver/session/minecraft/profile/{profile_id}?unsigned=true",
             self.api_root
@@ -240,10 +259,14 @@ impl YggdrasilClient {
                 });
             }
             let body: SessionProfileBody = parse(&text, CONTEXT)?;
-            match body.properties.iter().find(|p| p.name == "textures") {
-                Some(property) => parse_textures_property(&property.value),
-                None => Ok(None),
-            }
+            let skin = match body.properties.iter().find(|p| p.name == "textures") {
+                Some(property) => parse_textures_property(&property.value)?,
+                None => None,
+            };
+            Ok(Some(SessionProfile {
+                name: body.name,
+                skin,
+            }))
         })
         .await
     }
@@ -512,6 +535,9 @@ impl From<RefreshBody> for RefreshResponse {
 
 #[derive(serde::Deserialize)]
 struct SessionProfileBody {
+    /// 规范要求有；个别服务器不写时如实为 None，只查皮肤的调用不因此失败。
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     properties: Vec<PropertyBody>,
 }
@@ -859,6 +885,87 @@ mod tests {
             parse_textures_property(&not_json),
             Err(AuthError::Parse { .. })
         ));
+    }
+
+    /// 档案查询给出角色名与皮肤；没有 textures 属性时皮肤为空，没写名字时名字为空，角色不存在（204）为 None。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_profile_reads_name_and_skin() {
+        let server = MockServer::start().await;
+        let textures = encode_textures(json!({
+            "textures": { "SKIN": { "url": "https://skins.example/hero.png", "metadata": { "model": "slim" } } }
+        }));
+        let profile_path = |id: &str| format!("/sessionserver/session/minecraft/profile/{id}");
+        Mock::given(method("GET"))
+            .and(path(profile_path("1111111111111111aaaaaaaaaaaaaaaa")))
+            .and(query_param("unsigned", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "1111111111111111aaaaaaaaaaaaaaaa",
+                "name": "HeroRenamed",
+                "properties": [ { "name": "textures", "value": textures } ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(profile_path("3333333333333333cccccccccccccccc")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "3333333333333333cccccccccccccccc", "name": "Plain"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(profile_path("4444444444444444dddddddddddddddd")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "4444444444444444dddddddddddddddd", "properties": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(profile_path("2222222222222222bbbbbbbbbbbbbbbb")))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        assert_eq!(
+            client
+                .session_profile("1111111111111111aaaaaaaaaaaaaaaa")
+                .await
+                .unwrap(),
+            Some(SessionProfile {
+                name: Some("HeroRenamed".into()),
+                skin: Some(SkinRef {
+                    url: "https://skins.example/hero.png".into(),
+                    model: SkinModel::Slim,
+                }),
+            })
+        );
+        assert_eq!(
+            client
+                .session_profile("3333333333333333cccccccccccccccc")
+                .await
+                .unwrap(),
+            Some(SessionProfile {
+                name: Some("Plain".into()),
+                skin: None
+            })
+        );
+        assert_eq!(
+            client
+                .session_profile("4444444444444444dddddddddddddddd")
+                .await
+                .unwrap(),
+            Some(SessionProfile {
+                name: None,
+                skin: None
+            })
+        );
+        assert_eq!(
+            client
+                .session_profile("2222222222222222bbbbbbbbbbbbbbbb")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

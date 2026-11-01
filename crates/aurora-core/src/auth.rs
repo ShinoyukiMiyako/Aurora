@@ -585,10 +585,15 @@ impl Aurora {
             .await
     }
 
-    /// 刷新账户信息：微软重走令牌链、外置刷新令牌，顺带更新名字与皮肤，返回更新后的记录。
+    /// 刷新账户信息，返回更新后的记录。
+    ///
+    /// - 微软：重走令牌链，名字与皮肤以这次取到的为准。
+    /// - 外置：先校验令牌。仍有效就只从会话服务器更新角色名与皮肤，令牌不动：刷新会让旧令牌当场作废，
+    ///   正在运行的游戏手里拿着的就是它，作废了游戏里进多人服务器会被判会话无效。校验判失效才刷新令牌。
+    /// - 离线：没有可刷新的凭据，原样返回。
     ///
     /// 服务器判定凭据失效（微软刷新令牌被判需重登、外置令牌被拒）时把账户落成「需要重新登录」并报
-    /// [`AuthError::ReloginRequired`]；网络故障原样冒泡、状态不变。离线账户没有可刷新的凭据，原样返回。
+    /// [`AuthError::ReloginRequired`]；网络故障原样冒泡、状态不变。
     pub async fn refresh_account(&self, uuid: &str) -> Result<Account> {
         let _gate = refresh_gate(uuid).await;
         let account = self.stored_account(uuid).await?;
@@ -597,6 +602,13 @@ impl Aurora {
                 self.refresh_microsoft(&account, &creds.refresh_token).await
             }
             AccountCredentials::AuthlibInjector(creds) => {
+                let client = self.yggdrasil(&creds.api_root);
+                if client
+                    .validate(&creds.access_token, Some(&creds.client_token))
+                    .await?
+                {
+                    return self.sync_authlib_profile(&client, &account).await;
+                }
                 self.refresh_authlib(&account, creds).await
             }
             AccountCredentials::Offline => Ok(account),
@@ -712,6 +724,42 @@ impl Aurora {
                     stored.name = name;
                 }
                 stored.skin = skin;
+                stored.status = AccountStatus::Ok;
+                stored.last_verified_at = Some(unix_millis());
+            })
+        })
+        .await
+    }
+
+    /// 令牌已校验有效：从会话服务器取角色名与皮肤写回，记一次验证时刻，令牌原样不动。
+    ///
+    /// 档案取不到（连不上、服务器出错）只记 warn，角色名与皮肤保持原样，不拿空值盖掉；角色在服务器上
+    /// 已不存在（204）时没有皮肤可显示，皮肤清空、名字留着。
+    async fn sync_authlib_profile(
+        &self,
+        client: &YggdrasilClient,
+        account: &Account,
+    ) -> Result<Account> {
+        let profile = match client.session_profile(&account.uuid).await {
+            Ok(profile) => Some(profile),
+            Err(err) => {
+                tracing::warn!(uuid = %account.uuid, error = %err, "取外置角色档案失败，角色名与皮肤保持原样");
+                None
+            }
+        };
+        let uuid = account.uuid.clone();
+        self.blocking(move |aurora| {
+            aurora.update_credential_account(&uuid, |stored| {
+                match profile {
+                    Some(Some(profile)) => {
+                        if let Some(name) = profile.name {
+                            stored.name = name;
+                        }
+                        stored.skin = profile.skin;
+                    }
+                    Some(None) => stored.skin = None,
+                    None => {}
+                }
                 stored.status = AccountStatus::Ok;
                 stored.last_verified_at = Some(unix_millis());
             })
@@ -1726,7 +1774,7 @@ mod tests {
                 .respond_with(forbidden())
                 .mount(&server)
                 .await;
-            // 手动刷新排在后面时，拿到的是刚续出的新令牌，照常再轮换一次。
+            // 手动刷新排在后面时，拿到的是刚续出的新令牌：校验有效，不再轮换。
             Mock::given(method("POST"))
                 .and(path("/authserver/refresh"))
                 .and(body_partial_json(json!({ "accessToken": "fresh" })))
@@ -1734,6 +1782,7 @@ mod tests {
                     "accessToken": "fresher", "clientToken": "cli",
                     "selectedProfile": { "id": HERO, "name": "Hero" }
                 })))
+                .expect(0)
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
@@ -1792,6 +1841,13 @@ mod tests {
             let server = MockServer::start().await;
             mount_yggdrasil(&server, json!({})).await;
             Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
                 .and(path("/authserver/refresh"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                     "accessToken": "fresh", "clientToken": "cli",
@@ -1830,6 +1886,138 @@ mod tests {
                 }
                 other => panic!("期望外置凭据，得到 {other:?}"),
             }
+        }
+
+        /// 手动刷新外置账户，令牌仍有效：只从会话服务器更新角色名与皮肤，令牌原样不动，一个刷新请求都不发。
+        /// 刷新会让旧令牌当场作废，正在运行的游戏手里拿着的就是它。把手动刷新改回直接刷新，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn manual_authlib_refresh_with_valid_token_keeps_the_token() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .and(body_partial_json(
+                    json!({ "accessToken": "acc", "clientToken": "cli" }),
+                ))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let textures = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                json!({ "textures": { "SKIN": {
+                    "url": "https://skins.example/renamed.png", "metadata": { "model": "slim" }
+                } } })
+                .to_string(),
+            );
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/sessionserver/session/minecraft/profile/{HERO}"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id": HERO, "name": "HeroRenamed",
+                    "properties": [ { "name": "textures", "value": textures } ]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "accessToken": "rotated", "clientToken": "cli",
+                    "selectedProfile": { "id": HERO, "name": "HeroRenamed" }
+                })))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let mut account = authlib_account(
+                &info,
+                "hero@example.com",
+                "acc".into(),
+                "cli".into(),
+                GameProfile {
+                    id: HERO.into(),
+                    name: "Hero".into(),
+                },
+                None,
+            );
+            account.last_verified_at = Some(1);
+            let before = aurora.store_login(account).unwrap();
+
+            let refreshed = aurora.refresh_account(HERO).await.unwrap();
+            assert_eq!(refreshed.name, "HeroRenamed");
+            assert_eq!(
+                refreshed.skin,
+                Some(SkinRef {
+                    url: "https://skins.example/renamed.png".into(),
+                    model: SkinModel::Slim,
+                })
+            );
+            assert_eq!(refreshed.credentials, before.credentials, "令牌不该被轮换");
+            assert!(refreshed.last_verified_at.unwrap() > 1);
+            let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
+            assert_eq!(stored, refreshed);
+            let refreshes = server
+                .received_requests()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.url.path() == "/authserver/refresh")
+                .count();
+            assert_eq!(refreshes, 0, "令牌有效时不该发刷新请求");
+        }
+
+        /// 令牌有效、会话服务器却查不到档案（连不上）：照样算一次验证，角色名与皮肤保持原样，不拿空值盖掉。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn manual_authlib_refresh_keeps_name_and_skin_when_profile_is_unavailable() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/sessionserver/session/minecraft/profile/{HERO}"
+                )))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let skin = SkinRef {
+                url: "https://skins.example/hero.png".into(),
+                model: SkinModel::Wide,
+            };
+            let before = aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "acc".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: HERO.into(),
+                        name: "Hero".into(),
+                    },
+                    Some(skin.clone()),
+                ))
+                .unwrap();
+
+            let refreshed = aurora.refresh_account(HERO).await.unwrap();
+            assert_eq!(refreshed.name, "Hero");
+            assert_eq!(refreshed.skin, Some(skin));
+            assert_eq!(refreshed.credentials, before.credentials);
+            assert!(refreshed.last_verified_at >= before.last_verified_at);
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
