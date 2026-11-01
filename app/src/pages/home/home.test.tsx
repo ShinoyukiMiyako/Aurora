@@ -229,6 +229,17 @@ describe("主页：问候与继续游玩", () => {
     expect(text()).toContain("存档「海岛据点」");
   });
 
+  it("大卡落到损坏实例且存档数不出来：不读存档目录，也不弹存档列表读不出来", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, status: "broken", broken_reason: "缺少版本 JSON", world_count: null } : i));
+    ipc.overrides.set("list_instance_content", () => {
+      throw new Error("instance_not_found");
+    });
+    await mount();
+    expect(document.querySelector("h2")?.textContent).toBe("生存");
+    expect(callsOf(ipc, "list_instance_content")).toEqual([]);
+    expect(launcher.state.toasts.map((t) => t.title)).not.toContain("存档列表读不出来");
+  });
+
   it("整合包实例：大卡挂出整合包名与版本，让出 Mod 数", async () => {
     instances = instances.map((i) =>
       i.id === "生存" ? { ...i, modpack: { platform: "modrinth", project_id: "1KVo5zza", version_id: "v6", name: "Fabulously Optimized", version: "6.2.0" } } : i,
