@@ -1,7 +1,7 @@
 // 任务行：类型图标（带结局角标）、标题与类别标、详情、进度条（仅活动任务）、元信息行、右侧操作。
 
 import { Icon, type IconName } from "../../art/Icon";
-import { TASK_KIND_LABEL, TASK_STATUS_LABEL } from "../../copy/flows";
+import { TASK_KIND_LABEL, taskStatusLabel } from "../../copy/flows";
 import { percent } from "../../domain/format";
 import type { Task, TaskStatus } from "../../domain/types";
 import { cx } from "../../lib/util";
@@ -30,7 +30,7 @@ function KindTile({ task }: { task: Task }) {
       className={styles.tile}
       data-active={isActiveTask(task) ? "" : undefined}
       role="img"
-      aria-label={`${TASK_KIND_LABEL[task.kind]}，${TASK_STATUS_LABEL[task.status]}`}
+      aria-label={`${TASK_KIND_LABEL[task.kind]}，${taskStatusLabel(task)}`}
     >
       <Icon name={KIND_ICON[task.kind]} size={20} />
       {badge !== undefined && (

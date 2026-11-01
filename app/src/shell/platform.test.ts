@@ -2,16 +2,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { callsOf, resetRecorder } from "../test/launcher";
-import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile } from "./platform";
+import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile, saveFile, withExtension } from "./platform";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
-const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 beforeEach(() => {
   resetRecorder(ipc);
   dialog.open.mockReset();
+  dialog.save.mockReset();
 });
 
 afterEach(() => {
@@ -69,5 +70,39 @@ describe("选择文件", () => {
   it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消，也不去调对话框", async () => {
     await expect(pickFile({ title: "选择整合包文件", filter })).rejects.toThrow("浏览器预览里没有系统的选择文件对话框");
     expect(dialog.open).not.toHaveBeenCalled();
+  });
+});
+
+describe("保存文件", () => {
+  const filter = { name: "Modrinth 整合包（*.mrpack）", extensions: ["mrpack"] };
+
+  it("窗口里：标题、类型过滤与默认文件名原样交给保存对话框；选好给出完整路径，取消为 null", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.save.mockResolvedValueOnce("D:\分享\樱花 1.0.0.mrpack").mockResolvedValueOnce(null);
+    await expect(saveFile({ title: "导出整合包", filter, defaultPath: "樱花 1.0.0.mrpack" })).resolves.toBe("D:\分享\樱花 1.0.0.mrpack");
+    await expect(saveFile({ title: "导出整合包", filter, defaultPath: "樱花 1.0.0.mrpack" })).resolves.toBeNull();
+    expect(dialog.save).toHaveBeenCalledTimes(2);
+    expect(dialog.save).toHaveBeenNthCalledWith(1, {
+      title: "导出整合包",
+      filters: [{ name: "Modrinth 整合包（*.mrpack）", extensions: ["mrpack"] }],
+      defaultPath: "樱花 1.0.0.mrpack",
+    });
+    expect(dialog.open).not.toHaveBeenCalled();
+  });
+
+  it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消，也不去调对话框", async () => {
+    const error = await saveFile({ title: "导出整合包", filter, defaultPath: "a.mrpack" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ name: "NoNativeDialogError", message: "浏览器预览里没有系统的保存文件对话框，请直接在输入框里填写路径" });
+    expect(dialog.save).not.toHaveBeenCalled();
+  });
+
+  it("扩展名不对时补上，已经带着（不分大小写）时原样返回", () => {
+    expect(withExtension("D:\分享\樱花", "mrpack")).toBe("D:\分享\樱花.mrpack");
+    expect(withExtension("D:\分享\樱花.zip", "mrpack")).toBe("D:\分享\樱花.zip.mrpack");
+    expect(withExtension("D:\分享\樱花.MRPACK", "mrpack")).toBe("D:\分享\樱花.MRPACK");
+    expect(withExtension("D:\分享\樱花.mrpack", "mrpack")).toBe("D:\分享\樱花.mrpack");
+    // 只差一个点的名字不算带着扩展名
+    expect(withExtension("D:\分享\樱花mrpack", "mrpack")).toBe("D:\分享\樱花mrpack.mrpack");
   });
 });

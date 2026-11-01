@@ -35,6 +35,7 @@ export const HERO_COPY = {
   unpin: "从侧栏取消固定",
   more: "更多操作",
   openFolder: "打开实例文件夹",
+  exportModpack: "导出整合包",
   repair: "补全游戏文件",
   delete: "删除实例",
 } as const;
@@ -69,6 +70,61 @@ export const LOCK_REASON = {
       deleting: "正在删除这个实例",
     },
   },
+  /** 导出整合包：读的是此刻的文件，游戏运行与 Mod 改动不挡；会挪走或重写整个目录的事挡。 */
+  export: {
+    placeholder: "新建的实例还没装好，装完后才能导出",
+    installing: "安装任务正在写这个实例的文件夹，完成后才能导出",
+    renaming: "正在重命名这个实例，完成后才能导出",
+    deleting: "正在删除这个实例",
+    broken: "实例文件不完整，修复后才能导出",
+  },
+} as const;
+
+// ---------------------------------------------------------------- 导出整合包
+
+export const EXPORT_COPY = {
+  title: "导出整合包",
+  subtitle: (name: string, mcVersion: string | null, loader: string | null) => {
+    const head = mcVersion === null ? `「${name}」` : `「${name}」· ${mcVersion}`;
+    return loader === null ? head : `${head} · ${loader}`;
+  },
+  reading: "正在读取 Mod 与配置…",
+  retry: "重试",
+  cancel: "取消",
+  submit: "导出整合包",
+  needName: "先填写名称",
+  needVersion: "先填写版本号",
+  nameLabel: "名称",
+  versionLabel: "版本号",
+  summaryLabel: "简介",
+  summaryPlaceholder: "一句话介绍这个整合包",
+  bundleTitle: "一起打包",
+  extra: {
+    config: "配置文件（config）",
+    defaultconfigs: "默认配置（defaultconfigs）",
+    kubejs: "KubeJS 脚本（kubejs）",
+    resourcepacks: "资源包（resourcepacks）",
+    shaderpacks: "光影（shaderpacks）",
+    options: "游戏选项（options.txt）",
+    saves: "存档（saves）",
+  },
+  savesHint: "地图类整合包才需要，体积可能很大",
+  missingFolder: "实例里没有这个文件夹",
+  missingOptions: "实例里没有 options.txt",
+  none: "无",
+  fileStat: (files: number, bytes: number) => `${files} 个文件 · ${formatBytes(bytes)}`,
+  disabledMods: (count: number) => `带上停用的 ${count} 个 Mod`,
+  disabledHint: "导入后仍是停用状态",
+  statsLabel: "导出预览",
+  indexedLabel: "走 Modrinth 索引",
+  indexedValue: (count: number) => `${count} 个 Mod`,
+  indexedHint: "导入时从 Modrinth 下载",
+  bundledLabel: "打包进文件",
+  unlisted: (count: number) => `${count} 个 Mod 不在 Modrinth 上，会把文件直接打包进去。分享前确认作者允许转载。`,
+  showList: "查看",
+  hideList: "收起",
+  unlistedListLabel: "直接打包进去的 Mod",
+  skipped: (count: number) => `${count} 个文件的名字在 Windows 上不安全，不会打包`,
 } as const;
 
 // ---------------------------------------------------------------- 概览

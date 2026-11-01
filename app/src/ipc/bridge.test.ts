@@ -52,7 +52,7 @@ describe("浏览器与测试环境走 mock", () => {
       permissions: string[];
     };
     const plugins = mockCommands().filter((cmd) => cmd.startsWith("plugin:"));
-    expect(plugins).toEqual(["plugin:opener|open_url"]);
+    expect(plugins).toEqual(["plugin:opener|open_url", "plugin:opener|reveal_item_in_dir"]);
     for (const cmd of plugins) {
       const [plugin, name] = cmd.slice("plugin:".length).split("|");
       expect(capability.permissions).toContain(`${plugin}:allow-${name.replaceAll("_", "-")}`);

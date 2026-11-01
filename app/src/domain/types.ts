@@ -85,7 +85,7 @@ export interface Session {
 
 // ---------------------------------------------------------------- 下载任务
 
-export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair"] as const;
+export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "modpack_export"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
 export const TASK_STATUSES = ["queued", "running", "done", "failed", "cancelled"] as const;

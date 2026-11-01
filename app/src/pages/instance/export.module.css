@@ -1,0 +1,121 @@
+/* 导出整合包弹窗 */
+
+.reading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sk-space-12);
+  min-height: 180px;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  color: var(--sk-text-2);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+  min-width: 0;
+}
+
+/* 名称与版本号：regular / wide 并排，名称占 2/3；compact 上下排 */
+.basics {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--sk-space-12);
+  min-width: 0;
+}
+
+.basics[data-compact] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.extras {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.extraRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--sk-space-12);
+  row-gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+/* compact 下右侧的数字换到标签下一行，与标签文字对齐 */
+.extraRow[data-compact] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.extraRow[data-compact] .extraStat {
+  /* 复选框方块 18 + 间距 9 */
+  padding-left: calc(var(--sk-space-18) + 9px);
+}
+
+.extraStat {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text-2);
+  white-space: nowrap;
+}
+
+.extraHint {
+  grid-column: 1 / -1;
+  /* 复选框方块 18 + 间距 9 */
+  padding-left: calc(var(--sk-space-18) + 9px);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-3);
+}
+
+.disabledBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.kvLabel {
+  display: flex;
+  flex-direction: column;
+}
+
+.kvHint {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-3);
+}
+
+/* 直接打包进去的 Mod：最多 6 行高，超出在列表内滚动 */
+.unlistedList {
+  max-height: calc(var(--sk-lh-mono) * 6);
+  margin: 0;
+  padding: 0 var(--sk-space-12);
+  overflow-y: auto;
+  list-style: none;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  color: var(--sk-text-2);
+}
+
+.unlistedList > li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
