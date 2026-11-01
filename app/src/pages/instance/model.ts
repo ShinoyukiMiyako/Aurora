@@ -692,6 +692,16 @@ export function historyItems(events: readonly HistoryEvent[], checks: readonly R
 
 export const HISTORY_PAGE = 30;
 
+// ---------------------------------------------------------------- 崩溃：线索的来源
+
+/**
+ * 这份报告的线索是不是全部只来自退出码：日志一条规则都没命中，只有退出码兜底。这时摘要要写「退出码指向」，
+ * 写「日志指向」就和线索卡里「日志里没有匹配到已知原因」自相矛盾。没有线索时无从说起，为 false。
+ */
+export function cluesFromExitCodeOnly(report: Pick<CrashReportDto, "diagnoses">): boolean {
+  return report.diagnoses.length > 0 && report.diagnoses.every((clue) => clue.source === "exit_code");
+}
+
 // ---------------------------------------------------------------- 崩溃：日志指向的 Mod
 
 /** 日志点名的 Mod 对到已装列表：先按文件名（含停用态），再按 mod id。 */
