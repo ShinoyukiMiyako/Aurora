@@ -11,6 +11,7 @@
 //!   （[`AuthError::Http`]，交由 `retry_async` 重试）。
 //! - 任一步收到 5xx 或 429 都报 [`AuthError::ServiceUnavailable`]（可重试），且在解析响应体之前判定：
 //!   故障页多半是 HTML，先解析只会得到误导性的解析错误，把微软的故障说成启动器的问题。
+//!   令牌端点回 `temporarily_unavailable` 时同样报它，不论状态码。
 //! - 挂上取消令牌（[`MicrosoftAuth::with_cancel`]）后，设备码请求、轮询与令牌链任一步都会在令牌
 //!   触发时立刻以 [`AuthError::Cancelled`] 返回；设备码有效期长达十几分钟，用户关掉登录弹窗时
 //!   不能让后台继续轮询到过期。
@@ -36,6 +37,8 @@ const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// 与 `consent_required`（要重新同意）给的处理办法都是把用户送回授权页，refresh token 自己换不出令牌。
 const REFRESH_NEEDS_RELOGIN: [&str; 3] =
     ["invalid_grant", "interaction_required", "consent_required"];
+/// OAuth 端点表示「服务器暂时太忙」的错误名，官方给的处理办法是稍等后重试。
+const OAUTH_TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
 
 /// 微软登录链各端点地址。默认指向生产环境；测试可整体替换为本地 mock 服务。
 #[derive(Debug, Clone)]
@@ -179,10 +182,7 @@ impl MicrosoftAuth {
             }
             if !status.is_success() {
                 let err: OAuthErrorBody = parse(&text, "请求设备码")?;
-                return Err(AuthError::OAuth {
-                    error: err.error,
-                    description: err.error_description,
-                });
+                return Err(err.into_error(status, "请求设备码"));
             }
             parse::<DeviceCodeResponse>(&text, "请求设备码")
         })
@@ -237,10 +237,7 @@ impl MicrosoftAuth {
             "slow_down" => Ok(PollOutcome::SlowDown),
             "authorization_declined" => Err(AuthError::AuthorizationDeclined),
             "expired_token" => Err(AuthError::DeviceCodeExpired),
-            _ => Err(AuthError::OAuth {
-                error: err.error,
-                description: err.error_description,
-            }),
+            _ => Err(err.into_error(status, "轮询设备码令牌")),
         }
     }
 
@@ -273,10 +270,7 @@ impl MicrosoftAuth {
                 // 区别于可重试的网络失败。
                 return Err(AuthError::ReloginRequired);
             }
-            Err(AuthError::OAuth {
-                error: err.error,
-                description: err.error_description,
-            })
+            Err(err.into_error(status, "刷新令牌"))
         })
         .await
     }
@@ -692,6 +686,23 @@ struct OAuthErrorBody {
     error: String,
     #[serde(default)]
     error_description: String,
+}
+
+impl OAuthErrorBody {
+    /// 翻成错误。`temporarily_unavailable` 是令牌端点在说自己太忙，与 5xx 是一回事，只是可能走 4xx，
+    /// 只能认错误名；退避用完仍是它时要报服务故障，落成 OAuth 的话续期给不出对应的失败码。
+    fn into_error(self, status: StatusCode, step: &'static str) -> AuthError {
+        if self.error == OAUTH_TEMPORARILY_UNAVAILABLE {
+            return AuthError::ServiceUnavailable {
+                step,
+                status: status.as_u16(),
+            };
+        }
+        AuthError::OAuth {
+            error: self.error,
+            description: self.error_description,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1348,6 +1359,63 @@ mod tests {
             .unwrap();
         assert_eq!(token.refresh_token, "RT2");
         assert_eq!(hits(&server, "/token").await, 2);
+    }
+
+    /// 退避用完还在忙就是服务故障：启动续期靠这个错误落成 account_service_down，失败卡才给得出
+    /// 「以离线方式进单人」；落成 OAuth 的话账户失败记录里没有它，只剩一句原文。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn token_endpoint_that_stays_busy_is_a_service_outage() {
+        let server = MockServer::start().await;
+        let busy = ResponseTemplate::new(400).set_body_json(json!({
+            "error": "temporarily_unavailable",
+            "error_description": "AADSTS90033"
+        }));
+        for endpoint in ["/token", "/devicecode"] {
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(busy.clone())
+                .mount(&server)
+                .await;
+        }
+        let auth = auth_for(&server).with_retry(three_attempts());
+
+        let refresh = auth.refresh("r").await.unwrap_err();
+        assert!(
+            matches!(
+                refresh,
+                AuthError::ServiceUnavailable {
+                    step: "刷新令牌",
+                    status: 400
+                }
+            ),
+            "得到 {refresh:?}"
+        );
+        assert_eq!(hits(&server, "/token").await, 3);
+
+        let poll = auth.poll_device_code(&device(900, 1)).await.unwrap_err();
+        assert!(
+            matches!(
+                poll,
+                AuthError::ServiceUnavailable {
+                    step: "轮询设备码令牌",
+                    status: 400
+                }
+            ),
+            "得到 {poll:?}"
+        );
+
+        let begin = auth.begin_device_code().await.unwrap_err();
+        assert!(
+            matches!(
+                begin,
+                AuthError::ServiceUnavailable {
+                    step: "请求设备码",
+                    status: 400
+                }
+            ),
+            "得到 {begin:?}"
+        );
+        assert_eq!(hits(&server, "/devicecode").await, 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

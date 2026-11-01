@@ -176,9 +176,6 @@ impl AuthError {
     }
 }
 
-/// OAuth 端点表示「服务器暂时太忙」的错误名。
-const OAUTH_TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
-
 /// crate 级 `Result` 别名。
 pub type Result<T> = std::result::Result<T, AuthError>;
 
@@ -191,9 +188,6 @@ impl RetryableError for AuthError {
             AuthError::Http { source, .. } => {
                 source.is_timeout() || source.is_connect() || source.is_request()
             }
-            // 微软令牌端点忙时回 temporarily_unavailable，官方给的处理办法就是稍等后重试；
-            // 其余 OAuth 错误是确定性的拒绝。
-            AuthError::OAuth { error, .. } => error == OAUTH_TEMPORARILY_UNAVAILABLE,
             // 服务端故障多为短时过载或发布中的抖动，按退避重试有望恢复。
             AuthError::ServiceUnavailable { .. } => true,
             // 其余均为确定性的业务/协议/凭据错误，重试是同样结果。
@@ -201,6 +195,8 @@ impl RetryableError for AuthError {
             | AuthError::Response { .. }
             | AuthError::DeviceCodeExpired
             | AuthError::AuthorizationDeclined
+            // 令牌端点说自己忙时报的是 ServiceUnavailable，走到这个变体的都是确定性的拒绝。
+            | AuthError::OAuth { .. }
             | AuthError::XstsBanned
             | AuthError::XstsNoXboxAccount
             | AuthError::XstsRegionUnavailable
@@ -245,12 +241,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_busy_oauth_endpoint_is_worth_retrying() {
+    fn oauth_rejections_are_not_retried() {
         let oauth = |error: &str| AuthError::OAuth {
             error: error.into(),
             description: String::new(),
         };
-        assert!(oauth("temporarily_unavailable").is_retryable());
         for error in [
             "invalid_request",
             "invalid_client",
