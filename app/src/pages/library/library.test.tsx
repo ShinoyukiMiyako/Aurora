@@ -574,4 +574,17 @@ describe("实例库：动作", () => {
     expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
     expect(callsOf(ipc, "delete_instance")).toEqual([]);
   });
+
+  it("别的实例正以它为基底：删除入口提前禁用，原因写明是哪个实例在用，不发预览与删除", async () => {
+    instances = instances.map((i) => (i.id === "原版" ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
+    await mount();
+    click(byLabel("「原版」的更多操作"));
+    const remove = menuItem(LIBRARY_COPY.menu.remove);
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(remove)).toBe("实例「Fabric 整合」正在使用它，结束后才能删除");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
+  });
 });

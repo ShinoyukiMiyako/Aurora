@@ -443,6 +443,39 @@ describe("实例详情：后端正在改动实例", () => {
     await flush();
     expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
   });
+
+  it("别的实例正以它为基底：头图菜单的重命名、补全与删除带上是谁在用的原因禁用，Mod 开关照常可用", async () => {
+    vi.stubGlobal("innerWidth", 1200);
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
+    await open("overview");
+    click(button("更多操作"));
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    for (const [label, what] of [
+      ["重命名", "重命名"],
+      ["补全游戏文件", "补全"],
+      ["删除实例", "删除"],
+    ]) {
+      const item = items.find((el) => textOf(el) === label);
+      if (item === undefined) throw new Error(`菜单里没有「${label}」`);
+      expect(item.getAttribute("aria-disabled")).toBe("true");
+      act(() => {
+        item.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tipId = item.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error(`「${label}」悬停后没有关联提示气泡`);
+      expect(document.getElementById(tipId)?.textContent).toBe(`实例「Fabric 整合」正在使用它，结束后才能${what}`);
+    }
+    click(items[items.length - 1]);
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    keydown(document.body, "Escape");
+    click(byRole("tab", /^Mod/));
+    await flush();
+    expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
 });
 
 describe("实例详情：新建还没落盘的实例", () => {

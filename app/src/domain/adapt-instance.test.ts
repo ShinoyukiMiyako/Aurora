@@ -26,6 +26,7 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     incomplete: null,
     created_at: 1_700_000_000_000,
     activity: null,
+    used_by: null,
     playtime_min: 0,
     last_played_at: null,
     ...overrides,
@@ -121,6 +122,19 @@ describe("实例 DTO 适配：状态", () => {
     expect(inst).toMatchObject({ worldCount: 3, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
     const unread = instanceFromDto(instanceDto("坏", { world_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
     expect(unread).toMatchObject({ worldCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
+  });
+});
+
+describe("实例 DTO 适配：被当作基底", () => {
+  it("正以它为基底的实例原样带过；它自己在运行时活动报运行，usedBy 仍在", () => {
+    expect(instanceFromDto(instanceDto("1.20.1", { activity: "inherited", used_by: "FAB" }), idle)).toMatchObject({ activity: "inherited", usedBy: "FAB" });
+    expect(instanceFromDto(instanceDto("1.20.1", { activity: "running", used_by: "FAB" }), idle)).toMatchObject({ activity: "running", usedBy: "FAB" });
+    expect(instanceFromDto(instanceDto("1.20.1"), idle).usedBy).toBeNull();
+  });
+
+  it("报 inherited 却没说谁在用、说了谁在用却没有任何占用，都是契约破了，抛错", () => {
+    expect(() => instanceFromDto(instanceDto("1.20.1", { activity: "inherited", used_by: null }), idle)).toThrow("实例 1.20.1 被当作基底占着，却没说是哪个实例在用");
+    expect(() => instanceFromDto(instanceDto("1.20.1", { activity: null, used_by: "FAB" }), idle)).toThrow("实例 1.20.1 正被 FAB 使用，却没有报出占用");
   });
 });
 

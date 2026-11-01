@@ -160,6 +160,8 @@ export interface InstanceSummary {
   lastCrashError: string | null;
   /** 后端此刻在这个实例上做的事。 */
   activity: InstanceActivity | null;
+  /** 正以它为基底的实例（启动到退出、补全或导入整合包期间）；这时它的改名、补全、删除会被后端拒绝。没被当作基底时为 null。 */
+  usedBy: string | null;
   settingsError: string | null;
   incomplete: InstanceIncomplete | null;
   /** 新建或导入任务已入队、实例目录还没扫到时由状态层补上的占位项。 */
@@ -231,6 +233,9 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     .map((l) => ({ kind: l.kind, version: l.version }));
   const incomplete = dto.incomplete === null ? null : incompleteFromDto(dto.incomplete);
   const { status, brokenReason } = instanceStatus(dto, incomplete, ctx);
+  // 活动只报最要紧的那一件，被当作基底时它可能是 running 等；反过来报 inherited 却没说谁在用，或说了谁在用却没有任何占用，都是契约破了。
+  if (dto.activity === "inherited" && dto.used_by === null) throw new Error(`实例 ${dto.id} 被当作基底占着，却没说是哪个实例在用`);
+  if (dto.used_by !== null && dto.activity === null) throw new Error(`实例 ${dto.id} 正被 ${dto.used_by} 使用，却没有报出占用`);
   return {
     id: dto.id,
     name: dto.id,
@@ -257,6 +262,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     lastCrashAt: dto.last_crash_at,
     lastCrashError: dto.last_crash_error,
     activity: dto.activity,
+    usedBy: dto.used_by,
     settingsError: dto.settings_error,
     incomplete,
     placeholder: false,

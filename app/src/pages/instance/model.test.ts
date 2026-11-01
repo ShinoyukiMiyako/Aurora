@@ -152,20 +152,29 @@ describe("上次崩溃判定", () => {
 
 describe("锁定矩阵", () => {
   it("运行中锁住 Mod、重命名、补全与删除", () => {
-    expect(instanceLocks(true, false, false)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(true, false, false, null)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
   });
   it("安装中锁住文件操作但可以删除", () => {
-    expect(instanceLocks(false, true, false)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
+    expect(instanceLocks(false, true, false, null)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: null });
   });
   it("就绪时全部可用", () => {
-    expect(instanceLocks(false, false, false)).toEqual({ mods: null, rename: null, repair: null, delete: null });
+    expect(instanceLocks(false, false, false, null)).toEqual({ mods: null, rename: null, repair: null, delete: null });
   });
   it("后端在改动 Mod、资源或设置：锁住改名、补全与删除，Mod 操作照常", () => {
-    expect(instanceLocks(false, false, true)).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
+    expect(instanceLocks(false, false, true, null)).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
   });
   it("同时成立时游戏运行优先，其次安装中，最后才是改动中", () => {
-    expect(instanceLocks(true, false, true)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
-    expect(instanceLocks(false, true, true)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
+    expect(instanceLocks(true, false, true, null)).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(false, true, true, null)).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: "modifying" });
+  });
+  it("被别的实例当作基底：锁住改名、补全与删除并带上是谁在用，Mod 操作照常", () => {
+    const inherited = { kind: "inherited", usedBy: "Fabric 1.20.1" };
+    expect(instanceLocks(false, false, false, "Fabric 1.20.1")).toEqual({ mods: null, rename: inherited, repair: inherited, delete: inherited });
+  });
+  it("被当作基底的同时实例自己有事在做时报实例自己的事", () => {
+    expect(instanceLocks(true, false, false, "FAB")).toEqual({ mods: "running", rename: "running", repair: "running", delete: "running" });
+    expect(instanceLocks(false, true, false, "FAB")).toEqual({ mods: "installing", rename: "installing", repair: "installing", delete: { kind: "inherited", usedBy: "FAB" } });
+    expect(instanceLocks(false, false, true, "FAB")).toEqual({ mods: null, rename: "modifying", repair: "modifying", delete: "modifying" });
   });
 });
 

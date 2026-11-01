@@ -1,7 +1,7 @@
 // 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、补全与删除。
 // 几处入口的锁定判断与反馈都从这里出，保证完全一致（删除确认与实例库共用 delete.tsx）。动作一律经外层统一错误处理执行。
 
-import { ACTION_ERROR } from "../../copy/flows";
+import { ACTION_ERROR, INSTANCE_IN_USE_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { instanceNameError } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
@@ -41,6 +41,10 @@ export interface InstanceOps {
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
 export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "delete"): string | undefined {
   if (lock === null) return undefined;
+  if (typeof lock === "object") {
+    if (kind === "mods") throw new Error("被别的实例当作基底时照样能改动 Mod，不会因此锁住 Mod 操作");
+    return INSTANCE_IN_USE_COPY[kind](lock.usedBy);
+  }
   if (lock === "modifying") {
     if (kind === "mods") throw new Error("改动 Mod 与改动 Mod 互相兼容，不会因此锁住 Mod 操作");
     return LOCK_REASON.modifying[kind];
@@ -60,7 +64,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
   // 改名校验要全部实例名；只订阅名字，别的实例的进度与状态变化不让页面重渲染
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const installing = inst.status === "installing";
-  const locks = instanceLocks(busy, installing, inst.activity === "modifying");
+  const locks = instanceLocks(busy, installing, inst.activity === "modifying", inst.usedBy);
   const work = workLock(installing, inst.activity);
   const name = inst.name;
 

@@ -88,6 +88,7 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     incomplete: null,
     created_at: 1_700_000_000_000,
     activity: null,
+    used_by: null,
     playtime_min: 0,
     last_played_at: null,
     ...overrides,

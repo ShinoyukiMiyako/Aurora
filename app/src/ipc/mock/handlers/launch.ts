@@ -22,7 +22,7 @@ import {
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { handlers as configHandlers, samePath } from "./config";
-import { acquireMockInstance, type MockInstanceHold } from "./instances";
+import { acquireMockInstanceWithBases, mockInheritanceChain, type MockInstanceHold } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 const MOCK_PID = 4242;
@@ -217,8 +217,9 @@ async function launchGame(args: MockArgs): Promise<{ pid: number }> {
   const name = optionalStringArg("launch_game", args, "offlineName");
   if ((uuid === null) === (name === null)) throw new IpcError("invalid_argument", "启动需提供 account_uuid 与 offline_name 二者之一");
   if (occupant) throw busy(occupant);
-  // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），最后登记任务。
-  const hold = acquireMockInstance(versionId, "launching");
+  // 与后端同序：先占全局唯一的游戏槽，再连同继承链上的基底占住实例（新建、补全、改名、删除进行中报 instance_busy），
+  // 最后登记任务；基底一直占到游戏退出，游戏期间要读它的客户端 jar 与 natives。
+  const hold = acquireMockInstanceWithBases(versionId, "launching", mockInheritanceChain(versionId));
   try {
     beginMockTask(taskId);
   } catch (error) {

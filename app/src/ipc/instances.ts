@@ -16,8 +16,11 @@ export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forg
 /** 已装实例里能探测到的加载器，比可安装的多两种。 */
 export type DetectedLoaderKind = LoaderChoice | "optifine" | "liteloader";
 
-/** 实例此刻在做的事。 */
-export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying";
+/**
+ * 实例此刻在做的事。inherited：别的实例正以它为基底（在那个实例的 inheritsFrom 链上），那个实例启动到退出、
+ * 补全或导入整合包期间，这个实例的删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
+ */
+export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "inherited";
 
 export interface LoaderDto {
   kind: DetectedLoaderKind;
@@ -91,7 +94,10 @@ export interface InstanceDto {
   incomplete: IncompleteDto | null;
   /** 实例目录创建时刻（毫秒时间戳）；文件系统不记录时为 null。 */
   created_at: number | null;
+  /** 有几件事并行时报最值得界面知道的那一件：实例自己的事优先，其次 modifying，最后 inherited。 */
   activity: InstanceActivity | null;
+  /** 正以它为基底的实例；有几个时为最早占到的那个（与 instance_busy 报的同一个），没被当作基底时为 null。 */
+  used_by: string | null;
   /** 累计游玩分钟（向下取整）；没玩过为 0。 */
   playtime_min: number;
   /** 上次游玩结束的毫秒时间戳；没玩过为 null。 */
@@ -164,6 +170,8 @@ export interface DeletionPreviewDto {
   dependents: string[];
   /** 非空时删除会以 instance_busy 拒绝。 */
   activity: InstanceActivity | null;
+  /** 正以它为基底的实例；含义同实例列表的 used_by。 */
+  used_by: string | null;
 }
 
 export interface InstallResultDto {

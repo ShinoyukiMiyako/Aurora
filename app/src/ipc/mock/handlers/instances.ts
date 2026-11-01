@@ -72,6 +72,7 @@ const LOADER_NAMES: Record<LoaderChoice, string> = {
 /** 由设置、内容、整合包记录与启动 mock 现算的字段，不在 dto 里另存一份。 */
 type DerivedField =
   | "activity"
+  | "used_by"
   | "description"
   | "cover"
   | "memory_mb"
@@ -337,7 +338,8 @@ const LOADER_VERSIONS: Partial<Record<`${LoaderChoice}:${string}`, LoaderVersion
 let instances: MockInstance[] = seedInstances();
 let pins: string[] = ["樱花生存", "1.21.1"];
 // 实例上的全部占用，键不分大小写，与后端 InstanceLocks 一致：同一实例可以同时有几件兼容的事。
-const holds = new Map<string, { token: number; activity: InstanceActivity }[]>();
+// usedBy 只在 inherited 时有：正以这个实例为基底的那个实例。
+const holds = new Map<string, { token: number; activity: InstanceActivity; usedBy: string | null }[]>();
 let nextHoldToken = 0;
 
 // ---------------------------------------------------------------- 共用
@@ -388,12 +390,28 @@ function checkName(name: string, current: string | null): void {
   if (rule) throw nameError(name, rule);
 }
 
-/** 有几件事并行时报最值得界面知道的那一件：Mod 与设置的改动排在最后，与后端的 report_rank 一致。 */
+/** 同一实例上几件事并行时的先后：实例自己的事最要紧，Mod 与设置的改动其次，被当作基底最后，与后端的 report_rank 一致。 */
+function reportRank(activity: InstanceActivity): number {
+  if (activity === "modifying") return 1;
+  if (activity === "inherited") return 2;
+  return 0;
+}
+
+/** 有几件事并行时报最值得界面知道的那一件。 */
 function activityOf(id: string): InstanceActivity | null {
   const held = holds.get(id.toLowerCase());
   if (held === undefined) return null;
-  const primary = held.find((h) => h.activity !== "modifying");
-  return primary === undefined ? held[0].activity : primary.activity;
+  let primary = held[0];
+  for (const entry of held) if (reportRank(entry.activity) < reportRank(primary.activity)) primary = entry;
+  return primary.activity;
+}
+
+/** 正以它为基底的实例；有几个时报最早占到的那个，与 instance_busy 报的是同一个。 */
+function usedByOf(id: string): string | null {
+  const held = holds.get(id.toLowerCase());
+  if (held === undefined) return null;
+  const user = held.find((h) => h.usedBy !== null);
+  return user === undefined ? null : user.usedBy;
 }
 
 const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
@@ -404,15 +422,24 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
   launching: "启动",
   running: "运行",
   modifying: "改动 Mod、资源或设置",
+  inherited: "被其他实例使用",
 };
 
 /**
  * 两件事能否同时在一个实例上进行，与后端 InstanceActivity::compatible_with 同一张表：Mod、资源与设置的改动彼此兼容，
- * 也与启动、运行中的游戏兼容；新建、补全、改名、删除会挪走或重写整个目录，与任何事都互斥。
+ * 也与启动、运行中的游戏兼容；被别的实例当作基底时，基底自己照样能启动、改动，几个实例也能同时以它为基底；
+ * 新建、补全、改名、删除会挪走或重写整个目录，与任何事都互斥。
  */
 function compatible(a: InstanceActivity, b: InstanceActivity): boolean {
-  if (a === "modifying") return b === "modifying" || b === "launching" || b === "running";
-  return (a === "launching" || a === "running") && b === "modifying";
+  if (a === "modifying" || a === "inherited") return b === "modifying" || b === "launching" || b === "running" || b === "inherited";
+  return (a === "launching" || a === "running") && (b === "modifying" || b === "inherited");
+}
+
+function busyError(id: string, conflict: { activity: InstanceActivity; usedBy: string | null }): IpcError {
+  if (conflict.usedBy !== null) {
+    return new IpcError("instance_busy", `实例 ${id} 正在被实例 ${conflict.usedBy} 使用，请稍后再试`, { id, activity: conflict.activity, used_by: conflict.usedBy });
+  }
+  return new IpcError("instance_busy", `实例 ${id} 正在${ACTIVITY_LABELS[conflict.activity]}，请稍后再试`, { id, activity: conflict.activity });
 }
 
 /** 实例上的一份占用。release 放开它；setActivity 只用于兼容关系相同的两件事之间改记（启动转为运行）。 */
@@ -423,25 +450,76 @@ export interface MockInstanceHold {
 
 /** 占住实例做 activity；有与它不兼容的事在做时报 instance_busy，形状与后端一致。 */
 export function acquireMockInstance(id: string, activity: InstanceActivity): MockInstanceHold {
+  if (activity === "inherited") throw new Error("mock：基底占用要记下使用者，只经 acquireMockInstanceWithBases 占");
+  return hold(id, activity, null);
+}
+
+/**
+ * 占住实例 id 做 activity，同时以它的名义占住继承链上的基底 bases，与后端 acquire_with_bases 一致：先占实例自己，
+ * 再依次占基底，任一处冲突报 instance_busy（基底被占时 detail.id 是那个基底），已占到的一并放开；与 id 同名或
+ * 彼此只差大小写的基底只占一次。setActivity 只改实例自己那一份。
+ */
+export function acquireMockInstanceWithBases(id: string, activity: InstanceActivity, bases: readonly string[]): MockInstanceHold {
+  const own = acquireMockInstance(id, activity);
+  const keys = new Set([id.toLowerCase()]);
+  const held: MockInstanceHold[] = [];
+  try {
+    for (const base of bases) {
+      const key = base.toLowerCase();
+      if (keys.has(key)) continue;
+      keys.add(key);
+      held.push(hold(base, "inherited", id));
+    }
+  } catch (error) {
+    for (const h of held) h.release();
+    own.release();
+    throw error;
+  }
+  return {
+    release: () => {
+      for (const h of held) h.release();
+      own.release();
+    },
+    setActivity: (next) => own.setActivity(next),
+  };
+}
+
+/**
+ * id 继承链上除它自己以外的实例，由近及远，与后端 inheritance_chain 一致：链上某一环不在时停在那一环（它的 id
+ * 已收进结果），判环不分大小写。
+ */
+export function mockInheritanceChain(id: string): string[] {
+  const seen = new Set([id.toLowerCase()]);
+  const chain: string[] = [];
+  let current = find(id);
+  while (current !== undefined && current.inheritsFrom !== null) {
+    const parent = current.inheritsFrom;
+    if (seen.has(parent.toLowerCase())) break;
+    seen.add(parent.toLowerCase());
+    chain.push(parent);
+    current = instances.find((i) => i.dto.id.toLowerCase() === parent.toLowerCase());
+  }
+  return chain;
+}
+
+function hold(id: string, activity: InstanceActivity, usedBy: string | null): MockInstanceHold {
   const key = id.toLowerCase();
   const held = holds.get(key);
   const conflict = held === undefined ? undefined : held.find((h) => !compatible(activity, h.activity));
-  if (conflict !== undefined) {
-    throw new IpcError("instance_busy", `实例 ${id} 正在${ACTIVITY_LABELS[conflict.activity]}，请稍后再试`, { id, activity: conflict.activity });
-  }
-  const hold = { token: nextHoldToken, activity };
+  if (conflict !== undefined) throw busyError(id, conflict);
+  const entry = { token: nextHoldToken, activity, usedBy };
   nextHoldToken += 1;
-  holds.set(key, held === undefined ? [hold] : [...held, hold]);
+  holds.set(key, held === undefined ? [entry] : [...held, entry]);
   const ownEntry = () => {
     const list = holds.get(key);
-    const found = list === undefined ? undefined : list.find((h) => h.token === hold.token);
+    const found = list === undefined ? undefined : list.find((h) => h.token === entry.token);
     if (list === undefined || found === undefined) throw new Error(`mock：实例 ${id} 的这份占用（${activity}）已经放开`);
     return { list, found };
   };
   return {
     release: () => {
       const { list } = ownEntry();
-      const rest = list.filter((h) => h.token !== hold.token);
+      const rest = list.filter((h) => h.token !== entry.token);
       if (rest.length === 0) holds.delete(key);
       else holds.set(key, rest);
     },
@@ -508,6 +586,7 @@ function toDto(instance: MockInstance): InstanceDto {
     last_crash_at: crash === null ? null : crash.at,
     last_crash_error: null,
     activity: activityOf(instance.dto.id),
+    used_by: usedByOf(instance.dto.id),
     playtime_min: play === null ? 0 : play.playtime_min,
     last_played_at: play === null ? null : play.last_played_at,
   };
@@ -801,7 +880,9 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
   const instance = requireInstance(id);
-  const release = acquire(id, "repairing");
+  // 与后端一样，补全期间连同继承链上的基底一起占住：补全要读写基底里的客户端 jar 与 natives。
+  const repairHold = acquireMockInstanceWithBases(id, "repairing", mockInheritanceChain(id));
+  const release = () => repairHold.release();
   try {
     beginMockTask(taskId);
   } catch (error) {
@@ -917,6 +998,7 @@ export const handlers: MockHandlers = {
       file_count: instance.fileCount,
       dependents: dependentsOf(id),
       activity: activityOf(id),
+      used_by: usedByOf(id),
     };
   },
 

@@ -2,7 +2,8 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listen } from "./bridge";
 import { IpcError } from "./errors";
-import { deleteInstance, getInstanceSettings, listInstances } from "./instances";
+import { instanceBusyFromError } from "../domain/instance-busy";
+import { deleteInstance, getInstanceSettings, listInstances, previewInstanceDeletion, renameInstance, repairInstance } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { reset as resetLaunchMock } from "./mock/handlers/launch";
@@ -141,6 +142,27 @@ describe("整合包 mock", () => {
     expect(malformed).toMatchObject({ code: "unknown" });
     const blank = await installModpack("t-c", { kind: "file", path: " " }, null).catch((e: unknown) => e);
     expect(blank).toMatchObject({ code: "invalid_argument" });
+  });
+
+  it("导入期间连同将要继承的原版一起占住：原版的删除、改名、补全报 instance_busy 并说明是谁在用，导入结束即放开", async () => {
+    const running = installModpack("t-base", { ...platform, version_id: "fo-641" }, "周末联机");
+    await vi.waitFor(async () => {
+      expect((await listInstances()).find((i) => i.id === "1.21.1")).toMatchObject({ activity: "inherited", used_by: "周末联机" });
+    });
+    const rejected = (work: Promise<unknown>) => work.then(() => { throw new Error("应被拒绝"); }, (e: unknown) => e);
+    for (const work of [deleteInstance("1.21.1"), renameInstance("1.21.1", "改个名"), repairInstance("t-repair-base", "1.21.1")]) {
+      const error = await rejected(work);
+      if (!(error instanceof IpcError)) throw error;
+      expect(error.message).toBe("实例 1.21.1 正在被实例 周末联机 使用，请稍后再试");
+      expect(instanceBusyFromError(error)).toEqual({ id: "1.21.1", activity: "inherited", usedBy: "周末联机" });
+    }
+    expect(await previewInstanceDeletion("1.21.1")).toMatchObject({ id: "1.21.1", activity: "inherited", used_by: "周末联机" });
+    // 别的实例的占用不受影响
+    expect((await listInstances()).find((i) => i.id === "樱花生存")).toMatchObject({ activity: null, used_by: null });
+
+    expect((await running).version_id).toBe("周末联机");
+    expect((await listInstances()).find((i) => i.id === "1.21.1")).toMatchObject({ activity: null, used_by: null });
+    expect(await renameInstance("1.21.1", "1.21.1 原版")).toEqual({ id: "1.21.1 原版" });
   });
 
   it("导入途中取消以 cancelled 结束，名字没有被占用", async () => {

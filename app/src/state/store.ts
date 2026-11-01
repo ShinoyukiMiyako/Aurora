@@ -731,7 +731,8 @@ function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEff
     return { ...base, ...facts, pinned, status: "installing", brokenReason: null };
   }
   // 列表是任务开始前扫的，后端那时还没记下占用；后端报的活动（例如运行中）比前端推断的更准，留着它。
-  if (effect === "modifying") return { ...base, pinned, activity: base.activity === null ? "modifying" : base.activity };
+  // 只剩被当作基底时例外：与后端的排序一致，实例自己的改动排在它前面。
+  if (effect === "modifying") return { ...base, pinned, activity: base.activity === null || base.activity === "inherited" ? "modifying" : base.activity };
   return { ...base, pinned };
 }
 
@@ -768,6 +769,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     lastCrashAt: null,
     lastCrashError: null,
     activity: "installing",
+    usedBy: null,
     settingsError: null,
     incomplete: null,
     placeholder: true,

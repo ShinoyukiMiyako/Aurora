@@ -34,8 +34,15 @@ export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "wo
 
 // ---------------------------------------------------------------- 锁定
 
-/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置。 */
-export type InstanceLock = "running" | "installing" | "modifying";
+/** 别的实例正以它为基底：那个实例启动到退出、补全或导入整合包期间要读写这里的客户端 jar 与 natives。 */
+export interface InheritedLock {
+  kind: "inherited";
+  /** 正在用它的实例。 */
+  usedBy: string;
+}
+
+/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置，或别的实例正以它为基底。 */
+export type InstanceLock = "running" | "installing" | "modifying" | InheritedLock;
 
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
@@ -44,7 +51,7 @@ export interface InstanceLocks {
   rename: InstanceLock | null;
   /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。 */
   repair: InstanceLock | null;
-  delete: "running" | "modifying" | null;
+  delete: "running" | "modifying" | InheritedLock | null;
 }
 
 /**
@@ -52,11 +59,14 @@ export interface InstanceLocks {
  * installing：安装或补全任务正在写这个实例的目录。
  * modifying：后端正占着实例改动 Mod、资源或设置。它与游戏运行、与它自己兼容，所以不锁 Mod 操作；
  * 但与改名、删除、补全互斥，不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
+ * usedBy：正以它为基底的实例。基底照样能启动、改动 Mod，所以不锁 Mod 操作；改名、删除、补全会挪走或重写它的
+ * 目录，与之互斥。几种原因同时在时报实例自己的事。
  */
-export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean): InstanceLocks {
+export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean, usedBy: string | null): InstanceLocks {
   const fileLock = busy ? "running" : installing ? "installing" : null;
-  const dirLock = fileLock !== null ? fileLock : modifying ? "modifying" : null;
-  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : null };
+  const inherited: InheritedLock | null = usedBy === null ? null : { kind: "inherited", usedBy };
+  const dirLock = fileLock !== null ? fileLock : modifying ? "modifying" : inherited;
+  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : inherited };
 }
 
 /** 打开工作子目录与写实例设置被什么挡住。 */
