@@ -494,11 +494,13 @@ function batchFileNames(value: unknown): string[] {
   return names;
 }
 
-/** 更新检查设置：null 为恢复检查；形状与后端核心类型的 serde 名一致，认不出的原样写进报错。 */
+/**
+ * 更新检查设置：null 为恢复检查；形状与后端核心类型的 serde 名一致，认不出的原样写进报错。
+ * 后端形参是 Option，Tauri 对缺省的键给 None，所以不带 hold 与显式传 null 一样都是恢复检查。
+ */
 function parseUpdateHold(args: MockArgs): UpdateHold | null {
-  if (!("hold" in args)) throw new Error("set_mod_update_hold 缺少参数 hold（前端必须显式传 null 表示恢复检查）");
   const raw = args.hold;
-  if (raw === null) return null;
+  if (raw === undefined || raw === null) return null;
   const unknown = () => new IpcError("invalid_argument", `未知的更新设置 ${JSON.stringify(raw)}`);
   if (typeof raw !== "object" || raw === undefined || !("kind" in raw)) throw unknown();
   if (raw.kind === "ignored") return { kind: "ignored" };

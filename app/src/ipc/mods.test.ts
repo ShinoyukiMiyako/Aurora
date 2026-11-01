@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "./bridge";
 import { IpcError } from "./errors";
 import { listHistory, rollback, rollbackChecks } from "./history";
 import { resetMocks } from "./mock";
@@ -377,6 +378,13 @@ describe("忽略与锁定更新", () => {
       [SODIUM, "sodium-060"],
       ["P7dR8mSH-0.92.2.jar", "fapi-0927"],
     ]);
+  });
+
+  it("不带 hold 键与后端的 Option 缺省一样，按恢复检查处理", async () => {
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, { kind: "ignored" });
+    await invoke("set_mod_update_hold", { versionId: MOCK_MOD_INSTANCE, fileName: SODIUM });
+    expect(await holdOf(SODIUM)).toBeNull();
+    expect((await updatable()).map(([file]) => file)).toContain(SODIUM);
   });
 
   it("锁定版本是上限：锁在当前版本不报更新，锁在较新的版本报到它为止，锁的版本不在列表里不报", async () => {
