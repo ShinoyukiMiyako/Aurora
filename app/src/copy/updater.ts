@@ -30,8 +30,8 @@ export const UPDATE_COPY = {
   installOnExitCard: (v: string) => `关闭${APP_NAME}时会安装 ${v}`,
   installNow: "现在安装",
   checkFailed: "检查更新失败",
-  /** 网络层失败的主句。TLS 不通也算 connect，这时用户的网络完全可能是好的，所以只说更新服务器，不叫人去检查网络。 */
-  checkFailedNetwork: {
+  /** 网络层失败的说法：检查失败时是主句，下载失败时是原因。TLS 不通也算 connect，这时用户的网络完全可能是好的，所以只说更新服务器，不叫人去检查网络。 */
+  networkFailed: {
     connect: "连不上更新服务器",
     timeout: "更新服务器没有响应",
   },
@@ -43,7 +43,6 @@ export const UPDATE_COPY = {
     missing_pubkey: "这个版本没有配置更新签名公钥，验不了更新包，所以不检查更新",
   },
   installingCard: "正在启动安装程序…",
-  downloadFailedCard: (reason: string) => `下载失败：${reason}`,
   // 更新面板
   panelTitle: (v: string) => `更新到 ${v}`,
   panelSubtitle: (current: string, date: string | null) => (date === null ? `当前 ${current}` : `当前 ${current} · 发布于 ${date}`),
@@ -63,7 +62,8 @@ export const UPDATE_COPY = {
   switchToNow: "改为现在安装",
   close: "关闭",
   installing: "正在启动安装程序…",
-  downloadFailed: (reason: string) => `下载失败：${reason}`,
+  downloadFailed: "下载失败",
+  downloadFailedBecause: (reason: string) => `下载失败：${reason}`,
   signatureInvalid: "更新包签名校验不通过，已丢弃，不会安装",
   /** 打包、备份这类本地任务不能说成下载：与关窗确认同一口径，有下载时取消键才写「继续下载」。 */
   restartConfirm: (tasks: number, downloads: number) => ({
@@ -82,6 +82,22 @@ export const UPDATE_COPY = {
   openPanelFailed: "没能打开更新面板",
   offlineReason: "联网后才能使用",
 } as const;
+
+interface DownloadFailure {
+  reason: string;
+  signature: boolean;
+  network: keyof typeof UPDATE_COPY.networkFailed | null;
+}
+
+/**
+ * 下载失败的写法，更新卡与更新面板共用。summary 是中文说法；raw 是另放、可选中的后端原文，
+ * 它多半是插件的英文，不拼进中文句子。签名不符时包已丢弃，原因是固定说法，没有要另放的。
+ */
+export function downloadFailureCopy({ reason, signature, network }: DownloadFailure): { summary: string; raw: string | null } {
+  if (signature) return { summary: UPDATE_COPY.downloadFailedBecause(UPDATE_COPY.signatureInvalid), raw: null };
+  if (network !== null) return { summary: UPDATE_COPY.downloadFailedBecause(UPDATE_COPY.networkFailed[network]), raw: reason };
+  return { summary: UPDATE_COPY.downloadFailed, raw: reason };
+}
 
 /** 自动检查发现新版本时的通知：每个版本只弹一次，动作打开更新面板。 */
 export const UPDATE_FOUND_TOAST = {

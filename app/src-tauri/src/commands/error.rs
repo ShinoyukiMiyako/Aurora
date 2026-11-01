@@ -128,7 +128,7 @@ pub mod code {
     pub const MEMORY_UNAVAILABLE: &str = "memory_unavailable";
     /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey。
     pub const UPDATER_UNSUPPORTED: &str = "updater_unsupported";
-    /// 检查更新失败（连不上更新源、清单不合法）。
+    /// 检查更新失败（连不上更新源、更新源回了 404 以外的非 2xx、清单不合法）。
     pub const UPDATE_CHECK_FAILED: &str = "update_check_failed";
     /// 还没有检查到可用更新就要求下载，或下载期间再次检查换了版本、已无更新（下好的包随即作废）。
     pub const UPDATE_NOT_AVAILABLE: &str = "update_not_available";

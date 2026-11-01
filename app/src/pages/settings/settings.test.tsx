@@ -1244,7 +1244,7 @@ describe("设置页：关于与启动器更新", () => {
   });
 
   it("检查失败是网络层的：主句写中文说明，英文原文放进可选中的细节", async () => {
-    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    const raw = "error sending request for url (https://petalfall.org/updates/latest.json)";
     ipc.overrides.set("check_update", () => {
       throw new IpcError("update_check_failed", raw, { network: "connect", causes: ["client error (Connect)"] });
     });
@@ -1253,6 +1253,60 @@ describe("设置页：关于与启动器更新", () => {
     expect(text()).toContain("连不上更新服务器");
     expect(all("[data-selectable]").map((el) => el.textContent)).toContain(raw);
     expect(button("重试").textContent).toBe("重试");
+  });
+
+  it("下载失败是网络层的：面板与卡片都写中文原因，英文原文另放且可选中，不拼进句子", async () => {
+    const raw = "error sending request for url (https://petalfall.org/updates/setup-0.2.0.exe)";
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError("update_download_failed", raw, { network: "connect", causes: ["client error (Connect)"] });
+    });
+    await mount("about");
+    await click(button("检查更新"));
+    await click(button("查看更新"));
+    await click(button("下载更新"));
+    await flush();
+
+    const panel = openDialogs()[0];
+    expect(panel?.querySelector('[role="alert"]')?.textContent).toBe("下载失败：连不上更新服务器");
+    expect(panel?.querySelector("[data-selectable]")?.textContent).toBe(raw);
+    expect(text()).not.toContain(`下载失败：${raw}`);
+
+    await click(button("稍后"));
+    expect(text()).toContain("下载失败：连不上更新服务器");
+    // 面板还在退场动画里，节点没卸载；这里只看卡片
+    const inCard = all("[data-selectable]").filter((el) => el.closest("[data-sk-modal-layer]") === null);
+    expect(inCard.map((el) => el.textContent)).toEqual([raw]);
+  });
+
+  it("下载失败不是网络层的：说明块只写下载失败，后端原文另放", async () => {
+    const raw = "`Download request failed with status: 503 Service Unavailable`";
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError("update_download_failed", raw);
+    });
+    await mount("about");
+    await click(button("检查更新"));
+    await click(button("查看更新"));
+    await click(button("下载更新"));
+    await flush();
+
+    const panel = openDialogs()[0];
+    expect(panel?.querySelector('[role="alert"]')?.textContent).toBe("下载失败");
+    expect(panel?.querySelector("[data-selectable]")?.textContent).toBe(raw);
+  });
+
+  it("签名不符：说明块写固定原因，没有另放的原文", async () => {
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError("update_signature_invalid", "signature verification failed");
+    });
+    await mount("about");
+    await click(button("检查更新"));
+    await click(button("查看更新"));
+    await click(button("下载更新"));
+    await flush();
+
+    const panel = openDialogs()[0];
+    expect(panel?.querySelector('[role="alert"]')?.textContent).toBe("下载失败：更新包签名校验不通过，已丢弃，不会安装");
+    expect(panel?.querySelector("[data-selectable]")).toBeNull();
   });
 
   it("更新源上没有清单：后端按没有新版本回 null，卡片写已是最新，不算失败", async () => {

@@ -74,7 +74,7 @@ describe("UpdaterController", () => {
   });
 
   it("网络层失败：记下 detail.network 的种类，原文照旧留在 message", async () => {
-    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    const raw = "error sending request for url (https://petalfall.org/updates/latest.json)";
     const failWith = (network: string) => async () => Promise.reject(new IpcError("update_check_failed", raw, { endpoints: ["https://petalfall.org/updates/latest.json"], network }));
     const connect = controllerWith(fakePort({ check: failWith("connect") }));
     await connect.check();
@@ -82,6 +82,13 @@ describe("UpdaterController", () => {
     const timeout = controllerWith(fakePort({ check: failWith("timeout") }));
     await timeout.check();
     expect(timeout.getState().phase).toEqual({ kind: "check_failed", message: raw, network: "timeout" });
+  });
+
+  it("更新源回了 404 以外的状态：落进 check_failed，状态码写进原文，不算网络层失败", async () => {
+    const error = new IpcError("update_check_failed", "更新服务器返回了异常状态", { endpoints: ["https://petalfall.org/updates/latest.json"], status: 503 });
+    const c = controllerWith(fakePort({ check: async () => Promise.reject(error) }));
+    await c.check();
+    expect(c.getState().phase).toEqual({ kind: "check_failed", message: "更新服务器返回了异常状态（503）", network: null });
   });
 
   it("不能检查的阶段调用 check 直接抛错，不发命令", async () => {
@@ -111,7 +118,28 @@ describe("UpdaterController", () => {
     const c = controllerWith(fakePort({ download: async () => Promise.reject(ipcError("update_signature_invalid", "签名校验失败")) }));
     await c.check();
     await c.download();
-    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: "签名校验失败", signature: true });
+    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: "签名校验失败", signature: true, network: null });
+  });
+
+  it("下载的网络层失败：记下 detail.network 的种类，原文留在 reason", async () => {
+    const raw = "error sending request for url (https://petalfall.org/updates/setup-1.4.0.exe)";
+    const failWith = (network: string) => async () => Promise.reject(new IpcError("update_download_failed", raw, { network }));
+    const connect = controllerWith(fakePort({ download: failWith("connect") }));
+    await connect.check();
+    await connect.download();
+    expect(connect.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect" });
+    const timeout = controllerWith(fakePort({ download: failWith("timeout") }));
+    await timeout.check();
+    await timeout.download();
+    expect(timeout.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout" });
+  });
+
+  it("下载失败不是网络层的：network 为 null，原文照旧", async () => {
+    const raw = "`Download request failed with status: 503 Service Unavailable`";
+    const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", raw)) }));
+    await c.check();
+    await c.download();
+    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null });
   });
 
   it("用户取消下载：回到 available，不算失败、不写错误日志", async () => {

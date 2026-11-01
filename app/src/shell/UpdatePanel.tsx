@@ -4,7 +4,7 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { SakuraMark } from "../art/Logo";
 import { Spinner } from "../art/Spinner";
-import { UPDATE_COPY } from "../copy/updater";
+import { downloadFailureCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
@@ -111,11 +111,19 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
         </>
       );
       break;
-    case "download_failed":
+    case "download_failed": {
+      const { summary, raw } = downloadFailureCopy(phase);
       status = (
-        <Callout tone="danger" announce>
-          {UPDATE_COPY.downloadFailed(phase.signature ? UPDATE_COPY.signatureInvalid : phase.reason)}
-        </Callout>
+        <>
+          <Callout tone="danger" announce>
+            {summary}
+          </Callout>
+          {raw !== null && (
+            <p className={s.failureRaw} data-selectable>
+              {raw}
+            </p>
+          )}
+        </>
       );
       footer = (
         <>
@@ -128,6 +136,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
         </>
       );
       break;
+    }
     case "ready":
       status = gameRunning ? (
         <Callout tone="warn" announce>

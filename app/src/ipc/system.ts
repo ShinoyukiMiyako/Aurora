@@ -209,14 +209,15 @@ export interface UpdaterInfoDto {
 export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>("updater_info");
 
 /**
- * 检查更新，没有新版本返回 null。更新源没给出清单（所有端点回非 2xx）不算失败：本次会话已知的版本仍在就返回它，否则同样是 null。
- * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed，网络层失败带 detail.network。
+ * 检查更新，没有新版本返回 null。更新源上还没有发布（所有端点的清单都回 404）不算失败：本次会话已知的版本仍在就返回它，否则同样是 null。
+ * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：网络层失败带 detail.network，更新源回了 404 以外的非 2xx 带 detail.status。
  */
 export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | null>("check_update");
 
 /**
  * 长任务：下载最近一次检查到的更新并校验签名，进度经 core-event（kind download，total 为 1）推送并带 task_id，
- * 可用 cancelTask(taskId) 取消。没检查到更新报 update_not_available，签名不符报 update_signature_invalid。
+ * 可用 cancelTask(taskId) 取消。没检查到更新报 update_not_available，签名不符报 update_signature_invalid，
+ * 下载失败报 update_download_failed，网络层失败带 detail.network。
  * 下载期间再次检查换了版本或已无更新时同样报 update_not_available（message 写明新旧版本），这次下载的包已作废，
  * 按最新的检查结果重新下载即可。
  */
