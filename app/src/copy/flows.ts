@@ -864,7 +864,7 @@ export const TOAST_COPY = {
   /** 改名已完成，存档备份还留在旧名下。 */
   backupsNotMoved: (name: string, path: string) => ({ title: `「${name}」的存档备份没能跟着改名`, body: `备份还在 ${path}` }),
   backupDeleted: { title: "已删除一份备份", body: "已移入回收站" },
-  copyErrorAction: "复制错误原文",
+  copyErrorAction: "复制错误信息",
   openFolderAction: "打开文件夹",
 } as const;
 
