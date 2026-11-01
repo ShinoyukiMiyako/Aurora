@@ -1,0 +1,5 @@
+.step {
+  width: 248px;
+  padding: var(--sk-space-28) var(--sk-space-32) var(--sk-space-24);
+  font-size: var(--sk-fs-title);
+}
