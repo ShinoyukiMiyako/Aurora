@@ -32,6 +32,7 @@ tokio = { version = "1", default-features = false, features = ["fs", "rt", "macr
 
 [dev-dependencies]
 # wiremock 需真正后台运行时，测试用 multi_thread flavor，故补 macros/rt-multi-thread，并带 fs 便于建临时模组目录。
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "fs"] }
+# 节流闸的争抢用例暂停时钟才跑得确定，补 test-util。
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "fs", "test-util"] }
 wiremock = "0.6"
 tempfile = "3"

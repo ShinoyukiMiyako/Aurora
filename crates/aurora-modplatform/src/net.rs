@@ -5,12 +5,14 @@
 //! 仅可重试错误（5xx/429/408、超时/连接类）才会按 [`RetryPolicy`] 退避后再试；4xx 等确定性失败立即冒泡。
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use aurora_base::retry::{RetryPolicy, retry_async};
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
+// 桶的时间和 sleep 必须走同一只钟，用例暂停时钟时两边才对得上。
+use tokio::time::Instant;
 
 use crate::error::{Error, Result};
 
@@ -19,6 +21,11 @@ const REFILL_PER_SEC: f64 = 5.0;
 /// 桶容量：允许这么多次突发。一次交互常要连打几发（搜索、版本列表、依赖解析），
 /// 逐个硬加间隔会让界面平白变慢，故用令牌桶——突发放行，只有持续高频才被压住。
 const BUCKET_CAPACITY: f64 = 10.0;
+/// 最短等待，取 Tokio 的计时精度。补令牌是浮点累加，差一丝到 1 时算出的等待会舍入成 0，
+/// 而 sleep(0) 不推进时钟，调用方就原地空转。
+const MIN_WAIT: Duration = Duration::from_millis(1);
+
+type Gates = Mutex<HashMap<String, Arc<Mutex<TokenBucket>>>>;
 
 /// 元数据请求的节流闸，键是上游的 origin（scheme + host + port），每个上游一个桶。
 ///
@@ -30,8 +37,7 @@ const BUCKET_CAPACITY: f64 = 10.0;
 /// 分开后每个上游收到的请求上限不变。表项只增不删：一个进程里出现过的上游屈指可数。
 ///
 /// 只管元数据请求：文件下载走 aurora-download 自己的并发池，不受此限。
-static GATES: LazyLock<Mutex<HashMap<String, TokenBucket>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static GATES: LazyLock<Gates> = LazyLock::new(Gates::default);
 
 struct TokenBucket {
     tokens: f64,
@@ -52,29 +58,35 @@ impl TokenBucket {
             self.tokens -= 1.0;
             return None;
         }
-        Some(Duration::from_secs_f64(
-            (1.0 - self.tokens) / REFILL_PER_SEC,
-        ))
+        Some(Duration::from_secs_f64((1.0 - self.tokens) / REFILL_PER_SEC).max(MIN_WAIT))
     }
 }
 
-/// 取 `origin` 这个上游的一个令牌，必要时等待。等待期间不持锁，否则所有调用方会排成一列而不是各自等到点。
-async fn acquire(origin: &str) {
-    loop {
-        let wait = {
-            let mut gates = GATES.lock().await;
-            let now = Instant::now();
-            let bucket = gates
-                .entry(origin.to_owned())
-                .or_insert_with(|| TokenBucket {
-                    tokens: BUCKET_CAPACITY,
-                    last_refill: now,
-                });
-            match bucket.try_take(now) {
-                None => return,
-                Some(wait) => wait,
-            }
-        };
+/// 取 `origin` 这个上游的一个令牌，必要时等待，同一上游的调用方先到先得。
+///
+/// 桶锁一直持到拿到令牌：Tokio 的 Mutex 按到达顺序放人，于是等令牌的只有队头，其余人都排在锁上。
+/// 不能放了锁睡到点再抢：睡着的调用方要和刚做完请求、立刻回来的调用方重新竞争，持续争抢时会被饿死。
+///
+/// 也不预订将来的令牌（透支、按序号算时间片）：任务取消时等待中的调用方是被直接丢弃的，预订的时间片
+/// 收不回来，后来者得替没发出去的请求空等。排在锁上的话，丢弃就等于让出位置。
+///
+/// 只有表的锁是所有上游共用的，它不跨越任何等待，一个上游排队不影响别的上游。
+///
+/// 表作参数是给暂停时钟的用例用私有表：全局表被别的线程占住的一瞬，暂停的时钟会因为无事可做一路快进，
+/// 虚拟时间里等待者像是被饿死了。
+async fn acquire(gates: &Gates, origin: &str) {
+    let gate = {
+        let mut table = gates.lock().await;
+        let gate = table.entry(origin.to_owned()).or_insert_with(|| {
+            Arc::new(Mutex::new(TokenBucket {
+                tokens: BUCKET_CAPACITY,
+                last_refill: Instant::now(),
+            }))
+        });
+        Arc::clone(gate)
+    };
+    let mut bucket = gate.lock().await;
+    while let Some(wait) = bucket.try_take(Instant::now()) {
         tokio::time::sleep(wait).await;
     }
 }
@@ -92,7 +104,7 @@ where
             source,
         })?;
         // 节流放在重试内层：429 触发的重试同样要排队，否则退避完又是一次立刻打出去的请求。
-        acquire(&request.url().origin().ascii_serialization()).await;
+        acquire(&GATES, &request.url().origin().ascii_serialization()).await;
         let response = client
             .execute(request)
             .await
@@ -123,7 +135,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// 按连接顺序写出 `replies` 里的（声明长度，实际正文）后关闭连接，wiremock 造不出响应体只到一半。
@@ -309,6 +320,172 @@ mod tests {
             wait.abs_diff(expected) < Duration::from_millis(1),
             "期望约 {expected:?}，实得 {wait:?}"
         );
+    }
+
+    /// 浮点残差让令牌差一丝到 1 时，等待不能舍入成 0：sleep(0) 不推进时钟，调用方会原地空转。
+    #[test]
+    fn a_rounding_residue_still_waits_a_timer_tick() {
+        let t0 = Instant::now();
+        let mut bucket = TokenBucket {
+            tokens: 1.0 - f64::EPSILON,
+            last_refill: t0,
+        };
+        let wait = bucket.try_take(t0).expect("差一丝也是不够");
+        assert_eq!(wait, Duration::from_millis(1));
+    }
+
+    /// 补一个令牌的时间，也就是排队时一个人占用的时长。
+    fn slot() -> Duration {
+        Duration::from_secs_f64(1.0 / REFILL_PER_SEC)
+    }
+
+    /// 暂停时钟的用例专用的闸表。泄漏一下换 'static，好直接交给 spawn 出去的任务。
+    fn private_gates() -> &'static Gates {
+        Box::leak(Box::default())
+    }
+
+    /// 打光 `origin` 的突发额度，此后每个令牌都要等。
+    async fn drain(gates: &Gates, origin: &str) {
+        let started = Instant::now();
+        for _ in 0..BUCKET_CAPACITY as usize {
+            acquire(gates, origin).await;
+        }
+        assert_eq!(started.elapsed(), Duration::ZERO, "突发额度内不该等待");
+    }
+
+    /// 到达间隔：头两个是「同一时刻」与「整整隔一格」两个边界，其余随机。
+    /// 自己写 xorshift 是因为这点用量不值得给本 crate 添一个 dev 依赖。
+    fn arrival_gaps(seed: u64, count: usize) -> Vec<Duration> {
+        let mut state = seed | 1;
+        let random = std::iter::repeat_with(move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            Duration::from_millis(state % (slot().as_millis() as u64 + 1))
+        });
+        [Duration::ZERO, slot()]
+            .into_iter()
+            .chain(random)
+            .take(count)
+            .collect()
+    }
+
+    /// 持续争抢下先到先得：总有人拿完令牌立刻回来接着要，睡着的等待者照样按到达顺序拿到令牌，
+    /// 不会一轮轮输给刚回来的人。排队不能把限速排没了：相邻两次放行仍然隔足一格。
+    #[tokio::test(start_paused = true)]
+    async fn sleeping_waiters_are_served_in_arrival_order_under_contention() {
+        const GREEDY: usize = 3;
+        const WAITERS: usize = 8;
+        let (gates, origin) = (private_gates(), "http://contended.test");
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        drain(gates, origin).await;
+
+        let grants = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut greedy = tokio::task::JoinSet::new();
+        for _ in 0..GREEDY {
+            let grants = grants.clone();
+            greedy.spawn(async move {
+                loop {
+                    acquire(gates, origin).await;
+                    grants.lock().unwrap().push((None, Instant::now()));
+                }
+            });
+        }
+        tokio::task::yield_now().await;
+
+        let mut waiters = tokio::task::JoinSet::new();
+        for (id, gap) in arrival_gaps(seed, WAITERS).into_iter().enumerate() {
+            tokio::time::sleep(gap).await;
+            let grants = grants.clone();
+            let arrived = Instant::now();
+            waiters.spawn(async move {
+                acquire(gates, origin).await;
+                grants.lock().unwrap().push((Some(id), Instant::now()));
+                (id, arrived.elapsed())
+            });
+            // 让它先进到闸里再放下一个，到达顺序才是这里写的顺序。
+            tokio::task::yield_now().await;
+        }
+
+        // 最后一个到达时，前面至多是所有抢占者与所有更早的等待者；多留一格给浮点舍入。
+        let horizon = slot() * (GREEDY + WAITERS + 1) as u32;
+        let waits = tokio::time::timeout(horizon, waiters.join_all())
+            .await
+            .unwrap_or_else(|_| {
+                let served: Vec<usize> = grants
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|(id, _)| *id)
+                    .collect();
+                panic!("种子 {seed}：{horizon:?} 内没走完，等待者被饿死，只放行了 {served:?}")
+            });
+        drop(greedy);
+
+        for (id, wait) in waits {
+            let bound = slot() * (GREEDY + id + 2) as u32;
+            assert!(
+                wait <= bound,
+                "种子 {seed}：等待者 {id} 等了 {wait:?}，上限 {bound:?}"
+            );
+        }
+        let grants = grants.lock().unwrap();
+        let served: Vec<usize> = grants.iter().filter_map(|(id, _)| *id).collect();
+        assert_eq!(
+            served,
+            (0..WAITERS).collect::<Vec<_>>(),
+            "种子 {seed}：不是先到先得"
+        );
+        for pair in grants.windows(2) {
+            let gap = pair[1].1 - pair[0].1;
+            assert!(
+                gap >= slot() - Duration::from_millis(2),
+                "种子 {seed}：相邻放行只隔了 {gap:?}，超过了补充速率"
+            );
+        }
+    }
+
+    /// 任务取消后，宽限期满时主体连同闸上的等待一起被丢弃。排在后面的人不替这些没发出去的请求等。
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_waiters_leave_no_wait_behind() {
+        const CANCELLED: usize = 20;
+        let (gates, origin) = (private_gates(), "http://cancelled.test");
+        drain(gates, origin).await;
+
+        let mut queued = tokio::task::JoinSet::new();
+        for _ in 0..CANCELLED {
+            queued.spawn(acquire(gates, origin));
+        }
+        tokio::task::yield_now().await;
+        queued.shutdown().await;
+
+        let asked = Instant::now();
+        acquire(gates, origin).await;
+        let wait = asked.elapsed();
+        assert!(
+            wait <= slot(),
+            "取消了 {CANCELLED} 个排队者，后来者还等了 {wait:?}"
+        );
+    }
+
+    /// 排队是每个上游自己的事：一个上游的队头睡着时，另一个上游的请求照常立刻放行。
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_on_one_host_does_not_hold_up_another() {
+        let gates = private_gates();
+        let (busy, idle) = ("http://busy.test", "http://idle.test");
+        drain(gates, busy).await;
+        let queued = tokio::spawn(acquire(gates, busy));
+        tokio::task::yield_now().await;
+
+        let asked = Instant::now();
+        acquire(gates, idle).await;
+
+        assert_eq!(asked.elapsed(), Duration::ZERO);
+        assert!(!queued.is_finished(), "繁忙上游的队头应当还在等令牌");
+        queued.await.unwrap();
     }
 
     /// 时间流逝按速率补令牌：空桶等一秒后应恰好补回 REFILL_PER_SEC 个，即能连放这么多次。
