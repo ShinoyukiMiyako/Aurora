@@ -1249,11 +1249,11 @@ mod tests {
         .await
         .unwrap();
         let config = ConfigStore::at(&path).load().await.unwrap();
-        let mut aurora = Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        let mut aurora =
+            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
         let appearance_keys = ["accent", "mode", "panorama", "petals", "reduce_motion"];
-        let keys = |value: Value| -> Vec<String> {
-            value.as_object().unwrap().keys().cloned().collect()
-        };
+        let keys =
+            |value: Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
         assert_eq!(
             keys(serde_json::to_value(aurora.appearance()).unwrap()),
             appearance_keys
