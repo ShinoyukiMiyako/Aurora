@@ -8,9 +8,10 @@
 // 其余部分照最后一次的数据画完退场。
 
 import { Icon, type IconName } from "../../art/Icon";
-import { ACTION_ERROR, modpackLabel, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, lockReason, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatPlaytimeShort, formatRelative } from "../../domain/format";
+import { locksOf } from "../../domain/instance-locks";
 import { instanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
@@ -29,8 +30,7 @@ import { Tag } from "../../ui/Tag";
 import { Tooltip } from "../../ui/Tooltip";
 import { LOCK_REASON } from "../instance/copy";
 import { useDeleteInstance } from "../instance/delete";
-import { isCrashActive, locksOf } from "../instance/model";
-import { lockReason } from "../instance/ops";
+import { isCrashActive } from "../instance/model";
 import { CardStatus } from "./CardStatus";
 import { LIBRARY_COPY } from "./copy";
 import styles from "./library.module.css";

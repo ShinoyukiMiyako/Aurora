@@ -2,6 +2,7 @@
 // 插值一律经 domain/format 格式化；带插值的条目写成函数，参数缺失属于调用方的契约错误，直接抛出。
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
+import type { InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { NameRule, TemplateSkipReason } from "../ipc/instances";
@@ -1248,6 +1249,44 @@ export const INSTANCE_IN_USE_COPY = {
   repair: (user: string) => `实例「${user}」正在使用它，结束后才能补全`,
   delete: (user: string) => `实例「${user}」正在使用它，结束后才能删除`,
 } as const;
+
+/** 操作被实例锁挡住时的悬停提示与菜单项 hint。 */
+const INSTANCE_LOCK_REASON = {
+  running: "游戏正在运行，先结束游戏",
+  runningMods: "游戏正在运行，Mod 文件被占用",
+  installing: "实例正在补全文件",
+  renameRunning: "游戏正在运行，结束后才能重命名",
+  renameInstalling: "安装任务正在写这个实例的文件夹",
+  repairInProgress: "进行中",
+  modifying: {
+    rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
+    repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
+    delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
+  },
+  /** 备份、恢复或导出存档进行中，游戏退出后的自动备份也算。 */
+  backingUp: {
+    rename: "正在备份或恢复这个实例的存档，完成后才能重命名",
+    repair: "正在备份或恢复这个实例的存档，完成后才能补全",
+    delete: "正在备份或恢复这个实例的存档，完成后才能删除",
+  },
+} as const;
+
+/** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
+export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "delete"): string | undefined {
+  if (lock === null) return undefined;
+  if (typeof lock === "object") {
+    if (kind === "mods") throw new Error("被别的实例当作基底时照样能改动 Mod，不会因此锁住 Mod 操作");
+    return INSTANCE_IN_USE_COPY[kind](lock.usedBy);
+  }
+  if (lock === "modifying" || lock === "backing_up") {
+    if (kind === "mods") throw new Error(`${lock} 与改动 Mod 互相兼容，不会因此锁住 Mod 操作`);
+    return lock === "modifying" ? INSTANCE_LOCK_REASON.modifying[kind] : INSTANCE_LOCK_REASON.backingUp[kind];
+  }
+  if (kind === "rename") return lock === "running" ? INSTANCE_LOCK_REASON.renameRunning : INSTANCE_LOCK_REASON.renameInstalling;
+  if (kind === "mods") return lock === "running" ? INSTANCE_LOCK_REASON.runningMods : INSTANCE_LOCK_REASON.installing;
+  if (kind === "repair" && lock === "installing") return INSTANCE_LOCK_REASON.repairInProgress;
+  return INSTANCE_LOCK_REASON.running;
+}
 
 /** 整合包名全是 Windows 不允许的字符、整理完什么都不剩时，新实例的默认名。 */
 export const MODPACK_FALLBACK_NAME = "整合包";

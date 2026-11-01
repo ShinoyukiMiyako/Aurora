@@ -3,7 +3,7 @@
 
 import { useMemo, useState } from "react";
 import { Icon } from "../../art/Icon";
-import { ACTION_ERROR, phaseLabel } from "../../copy/flows";
+import { ACTION_ERROR, lockReason, phaseLabel } from "../../copy/flows";
 import { logLineFromDto, type InstanceSummary } from "../../domain/adapt";
 import { clock, formatDate, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
@@ -26,7 +26,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { HISTORY_KIND_LABEL, LOGS_COPY } from "./copy";
 import styles from "./instance.module.css";
 import { HISTORY_PAGE, historyItems, type HistoryItem } from "./model";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 import { ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface LogsTabProps {

@@ -2,9 +2,10 @@
 // 每种视图写什么、点了做什么都照搬胶囊的判定，这里只负责排版。
 
 import { Icon } from "../../art/Icon";
-import { LAUNCH_COPY, MODPACK_REIMPORT_COPY, SESSION_COPY, TASK_STATUS_LABEL } from "../../copy/flows";
+import { LAUNCH_COPY, lockReason, MODPACK_REIMPORT_COPY, SESSION_COPY, TASK_STATUS_LABEL } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
+import { locksOf } from "../../domain/instance-locks";
 import { needsReimport } from "../../domain/rules";
 import { sessionPhaseLabel, stageLabel, type LaunchView } from "../../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../../launch/useLaunch";
@@ -16,8 +17,6 @@ import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { useDeleteInstance } from "../instance/delete";
-import { locksOf } from "../instance/model";
-import { lockReason } from "../instance/ops";
 import styles from "./library.module.css";
 
 export function CardStatus({ inst }: { inst: InstanceSummary }) {

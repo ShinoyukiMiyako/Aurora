@@ -16,6 +16,7 @@ import {
   crashCategoryLabel,
   EXIT_CODE_COPY,
   launchWarningCopy,
+  lockReason,
   TOAST_COPY,
   type CrashCategoryName,
   type LaunchWarningActionKind,
@@ -47,7 +48,7 @@ import { CRASH_PAGE_COPY, MODS_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
 import { crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface CrashTabProps {

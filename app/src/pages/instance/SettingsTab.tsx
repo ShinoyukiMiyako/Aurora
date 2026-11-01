@@ -3,7 +3,7 @@
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
 import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
-import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
@@ -52,7 +52,7 @@ import {
   toggleFlags,
   ZGC_MIN_JAVA,
 } from "./model";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 import { ModuleError, SlowHint } from "./parts";
 
 export interface SettingsTabProps {

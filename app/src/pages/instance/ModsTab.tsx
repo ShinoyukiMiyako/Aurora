@@ -6,7 +6,7 @@
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
+import { ACTION_ERROR, lockReason, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatDate } from "../../domain/format";
 import { fade } from "../../lib/motion";
@@ -54,7 +54,7 @@ import {
   type ModFilter,
   type ModRow,
 } from "./model";
-import { lockReason, type InstanceOps } from "./ops";
+import type { InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 import { UpdatePreviewModal } from "./UpdatePreviewModal";
 

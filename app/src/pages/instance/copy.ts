@@ -46,23 +46,6 @@ export const HERO_COPY = {
 
 /** 禁用控件的悬停提示与菜单项 hint。 */
 export const LOCK_REASON = {
-  running: "游戏正在运行，先结束游戏",
-  runningMods: "游戏正在运行，Mod 文件被占用",
-  installing: "实例正在补全文件",
-  renameRunning: "游戏正在运行，结束后才能重命名",
-  renameInstalling: "安装任务正在写这个实例的文件夹",
-  repairInProgress: "进行中",
-  modifying: {
-    rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
-    repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
-    delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
-  },
-  /** 备份、恢复或导出存档进行中，游戏退出后的自动备份也算。 */
-  backingUp: {
-    rename: "正在备份或恢复这个实例的存档，完成后才能重命名",
-    repair: "正在备份或恢复这个实例的存档，完成后才能补全",
-    delete: "正在备份或恢复这个实例的存档，完成后才能删除",
-  },
   /** 新建或导入还没落盘的占位项：盘上可能还没有实例目录，打开哪个文件夹都只会报未安装。 */
   placeholderFolder: "新建的实例还没装好，装完后才能打开文件夹",
   /** 打开工作子目录与改实例设置：安装、补全、改名、删除进行中时。 */
