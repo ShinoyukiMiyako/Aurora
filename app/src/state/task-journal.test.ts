@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TASK_INTERRUPTED_CODE } from "../copy/flows";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
-import type { TaskRecordDto } from "../ipc/tasks";
+import { mockInvoke, resetMocks } from "../ipc/mock";
+import type { TaskJournalDto, TaskRecordDto } from "../ipc/tasks";
 import { TASK_JOURNAL_DEBOUNCE_MS } from "../domain/limits";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
@@ -34,7 +35,7 @@ function record(id: string, status: TaskRecordDto["status"]): TaskRecordDto {
   };
 }
 
-let journal: () => TaskRecordDto[];
+let journal: () => TaskJournalDto;
 let install: Deferred<{ id: string }>;
 let instances: InstanceDto[];
 let store: LauncherStore;
@@ -72,7 +73,7 @@ describe("任务日志读不出来时", () => {
     await vi.advanceTimersByTimeAsync(TASK_JOURNAL_DEBOUNCE_MS * 3);
     expect(callsOf(ipc, "save_task_journal")).toEqual([]);
 
-    journal = () => [record("old-done", "done"), record("old-running", "running")];
+    journal = () => ({ seq: 0, tasks: [record("old-done", "done"), record("old-running", "running")] });
     await store.actions.reload("tasks");
     expect(store.getState().status.tasks.kind).toBe("ready");
     const tasks = store.getState().tasks;
@@ -98,12 +99,12 @@ describe("任务日志读不出来时", () => {
   });
 
   it("读到过一次之后再重载不改任务表", async () => {
-    journal = () => [record("old-done", "done")];
+    journal = () => ({ seq: 0, tasks: [record("old-done", "done")] });
     await store.actions.reload("tasks");
     expect(store.getState().tasks.map((t) => t.id)).toEqual(["old-done"]);
     await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
     await settle();
-    journal = () => [record("old-done", "done"), record("from-elsewhere", "running")];
+    journal = () => ({ seq: 0, tasks: [record("old-done", "done"), record("from-elsewhere", "running")] });
     await store.actions.reload("tasks");
     expect(store.getState().tasks.map((t) => [t.id.startsWith("task-") ? "新建" : t.id, t.status])).toEqual([
       ["old-done", "done"],
@@ -124,5 +125,84 @@ describe("任务日志读不出来时", () => {
     await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
     await vi.advanceTimersByTimeAsync(TASK_JOURNAL_DEBOUNCE_MS);
     expect(callsOf(ipc, "save_task_journal")).toHaveLength(1);
+  });
+});
+
+describe("任务日志的序号", () => {
+  /** 重启状态容器，任务日志直接读写假后端；seq 大于 0 时假后端里预先落好序号为 seq 的一份。 */
+  async function restartOnMockJournal(seq: number): Promise<void> {
+    store.stop();
+    resetRecorder(ipc);
+    resetMocks();
+    bootOverrides(ipc);
+    ipc.overrides.delete("load_task_journal");
+    ipc.overrides.delete("save_task_journal");
+    if (seq > 0) await mockInvoke("save_task_journal", { seq, tasks: [record("old-done", "done")] });
+    store = await startedStore();
+    expect(store.getState().status.tasks.kind).toBe("ready");
+  }
+  const savedSeqs = () => callsOf(ipc, "save_task_journal").map((args) => args.seq);
+
+  it("从盘上那份的序号之后接着编，防抖写入与立即写入都各加一", async () => {
+    // 0 是从未写过或加序号之前写下的日志
+    for (const base of [0, 1 + Math.floor(Math.random() * 1_000_000)]) {
+      await restartOnMockJournal(base);
+      await store.actions.flushTaskJournal();
+      store.actions.clearFinishedTasks();
+      await vi.advanceTimersByTimeAsync(TASK_JOURNAL_DEBOUNCE_MS);
+      await store.actions.flushTaskJournal();
+      expect(savedSeqs(), `盘上序号 ${base}`).toEqual([base + 1, base + 2, base + 3]);
+      expect(await mockInvoke("load_task_journal"), `盘上序号 ${base}`).toEqual({ seq: base + 3, tasks: [] });
+    }
+  });
+
+  it("两次写入并发、先发出的那份晚到：盘上留下序号大、内容新的那份", async () => {
+    await restartOnMockJournal(7);
+    const gates: Deferred<void>[] = [];
+    ipc.overrides.set("save_task_journal", async (args) => {
+      const gate = deferred<void>();
+      gates.push(gate);
+      await gate.promise;
+      return mockInvoke("save_task_journal", args);
+    });
+
+    const older = store.actions.flushTaskJournal();
+    store.actions.clearFinishedTasks();
+    const newer = store.actions.flushTaskJournal();
+    const sent = callsOf(ipc, "save_task_journal").map((args) => [args.seq, (args.tasks as TaskRecordDto[]).map((r) => r.id)]);
+    expect(sent).toEqual([
+      [8, ["old-done"]],
+      [9, []],
+    ]);
+
+    gates[1].resolve();
+    await newer;
+    gates[0].resolve();
+    await older;
+    expect(await mockInvoke("load_task_journal")).toEqual({ seq: 9, tasks: [] });
+  });
+
+  it("日志读不出期间写回过：之后读到的序号更小也不倒退，更大则从它之后接着编", async () => {
+    store.stop();
+    resetRecorder(ipc);
+    bootOverrides(ipc);
+    let onDisk: () => TaskJournalDto = () => {
+      throw new IpcError("task_journal_invalid", "任务日志已损坏");
+    };
+    ipc.overrides.set("load_task_journal", () => onDisk());
+    store = await startedStore();
+    await store.actions.flushTaskJournal();
+    await store.actions.flushTaskJournal();
+    expect(savedSeqs()).toEqual([1, 2]);
+
+    onDisk = () => ({ seq: 1, tasks: [] });
+    await store.actions.reload("tasks");
+    await store.actions.flushTaskJournal();
+    expect(savedSeqs()).toEqual([1, 2, 3]);
+
+    onDisk = () => ({ seq: 10, tasks: [] });
+    await store.actions.reload("tasks");
+    await store.actions.flushTaskJournal();
+    expect(savedSeqs()).toEqual([1, 2, 3, 11]);
   });
 });

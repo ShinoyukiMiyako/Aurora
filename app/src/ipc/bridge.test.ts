@@ -108,25 +108,40 @@ describe("浏览器与测试环境走 mock", () => {
     expect((await getAppearance()).mode).toBe("day");
   });
 
-  it("任务日志：种子一条已完成的 Java 下载，写入后整表替换", async () => {
+  it("任务日志：种子一条已完成的 Java 下载，序号为 0；写入后整表替换并记下序号", async () => {
     const seed = await loadTaskJournal();
-    expect(seed).toHaveLength(1);
-    expect(seed[0]).toMatchObject({ kind: "java", title: "下载 Java 25", status: "done", spec: { command: "install_java", args: { requiredMajor: 25 } } });
-    const record: TaskRecordDto = { ...seed[0], id: "task-2", status: "failed", error: { code: "network", message: "连接超时" }, finished_at: 1 };
-    await saveTaskJournal([record]);
-    expect(await loadTaskJournal()).toEqual([record]);
+    expect(seed.seq).toBe(0);
+    expect(seed.tasks).toHaveLength(1);
+    expect(seed.tasks[0]).toMatchObject({ kind: "java", title: "下载 Java 25", status: "done", spec: { command: "install_java", args: { requiredMajor: 25 } } });
+    const record: TaskRecordDto = { ...seed.tasks[0], id: "task-2", status: "failed", error: { code: "network", message: "连接超时" }, finished_at: 1 };
+    await saveTaskJournal(1, [record]);
+    expect(await loadTaskJournal()).toEqual({ seq: 1, tasks: [record] });
   });
 
-  it("任务日志：缺 id 或 id 重复时整次拒绝，原表不变", async () => {
+  it("任务日志：缺 id、id 重复或序号为 0 时整次拒绝，原表不变", async () => {
     const seed = await loadTaskJournal();
-    const dup = await saveTaskJournal([{ ...seed[0], id: "a" }, { ...seed[0], id: "a" }]).catch((e: unknown) => e);
+    const dup = await saveTaskJournal(1, [{ ...seed.tasks[0], id: "a" }, { ...seed.tasks[0], id: "a" }]).catch((e: unknown) => e);
     expect(dup).toMatchObject({ code: "invalid_argument" });
     expect((dup as IpcError).message).toContain("a");
-    const empty = await saveTaskJournal([{ ...seed[0], id: "" }]).catch((e: unknown) => e);
+    const empty = await saveTaskJournal(1, [{ ...seed.tasks[0], id: "" }]).catch((e: unknown) => e);
     expect(empty).toMatchObject({ code: "invalid_argument", message: "任务日志第 0 项缺少字符串 id" });
+    const zero = await saveTaskJournal(0, []).catch((e: unknown) => e);
+    expect(zero).toMatchObject({ code: "invalid_argument", message: "任务日志的序号从 1 起，收到 0" });
     expect(await loadTaskJournal()).toEqual(seed);
-    await saveTaskJournal([]);
-    expect(await loadTaskJournal()).toEqual([]);
+    await saveTaskJournal(1, []);
+    expect(await loadTaskJournal()).toEqual({ seq: 1, tasks: [] });
+  });
+
+  it("任务日志：晚到的旧序号直接丢弃，盘上留序号大的那份", async () => {
+    const seed = await loadTaskJournal();
+    const table = (id: string): TaskRecordDto[] => [{ ...seed.tasks[0], id }];
+    await saveTaskJournal(3, table("third"));
+    await saveTaskJournal(2, table("second"));
+    // 与已落盘的序号相同也算旧
+    await saveTaskJournal(3, table("third-again"));
+    expect(await loadTaskJournal()).toEqual({ seq: 3, tasks: table("third") });
+    await saveTaskJournal(4, table("fourth"));
+    expect(await loadTaskJournal()).toEqual({ seq: 4, tasks: table("fourth") });
   });
 
   it("取消：返回任务此刻是否在运行，未运行的 id 也记下", async () => {

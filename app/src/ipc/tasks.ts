@@ -72,12 +72,23 @@ export interface TaskRecordDto {
  */
 export const cancelTask = (taskId: string): Promise<boolean> => invoke<boolean>("cancel_task", { taskId });
 
-/** 整表写入任务日志（含已结束的最近若干条）。每条的 id 须非空且互不重复，否则整次拒绝、不落盘。 */
-export const saveTaskJournal = (tasks: TaskRecordDto[]): Promise<void> =>
-  invoke<void>("save_task_journal", { tasks });
+/** 读回的任务日志。 */
+export interface TaskJournalDto {
+  /** 已落盘那份的序号；从未写过或加序号之前写的日志为 0。此后的写入从它之后接着编。 */
+  seq: number;
+  tasks: TaskRecordDto[];
+}
 
-/** 读取上次写入的任务日志；从未写过时为空数组，文件损坏或版本不符时以 task_journal_invalid 拒绝。 */
-export const loadTaskJournal = (): Promise<TaskRecordDto[]> => invoke<TaskRecordDto[]>("load_task_journal");
+/**
+ * 整表写入任务日志（含已结束的最近若干条）。每条的 id 须非空且互不重复，否则整次拒绝、不落盘。
+ * seq 是这份的序号，从 1 起单调递增：几次写入并发时到达后端的先后不定，后端只接受比已落盘那份大的，
+ * 晚到的旧版本直接丢弃，不报错。
+ */
+export const saveTaskJournal = (seq: number, tasks: TaskRecordDto[]): Promise<void> =>
+  invoke<void>("save_task_journal", { seq, tasks });
+
+/** 读取上次写入的任务日志；从未写过时为 { seq: 0, tasks: [] }，文件损坏或版本不符时以 task_journal_invalid 拒绝。 */
+export const loadTaskJournal = (): Promise<TaskJournalDto> => invoke<TaskJournalDto>("load_task_journal");
 
 export const onCoreEvent = (handler: (event: CoreEvent) => void): Promise<UnlistenFn> =>
   listen<CoreEvent>(CORE_EVENT, handler);

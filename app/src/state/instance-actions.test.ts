@@ -929,7 +929,7 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
 
   async function restartWith(record: TaskRecordDto): Promise<void> {
     store.stop();
-    ipc.overrides.set("load_task_journal", () => [record]);
+    ipc.overrides.set("load_task_journal", () => ({ seq: 0, tasks: [record] }));
     store = await startedStore();
     expect(store.getState().tasks.map((t) => t.status)).toEqual(["failed"]);
   }

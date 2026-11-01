@@ -6,7 +6,8 @@
 //! [`CANCEL_DEADLINE`] 内以 `cancelled` 返回：协作取消通常几毫秒就停（Forge 处理器子进程也会被
 //! 结束并等它退出），个别不观察令牌的阶段（Java 探测）由 [`TaskHandle::run`] 在宽限期满后强行放弃。
 //!
-//! 任务日志是前端任务表的持久化：后端不解读任务内容，只保证整份原子写入与版本校验。
+//! 任务日志是前端任务表的持久化：后端不解读任务内容，只保证整份原子写入、版本校验，以及按前端给的
+//! 序号只留下更新的那份。
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -166,23 +167,53 @@ const TASK_JOURNAL_VERSION: u32 = 1;
 #[derive(Serialize, Deserialize)]
 struct JournalFile {
     version: u32,
+    /// 写下这份的前端序号。加序号之前写的日志没有这一项，按 0 读：比任何一次新写入都旧。
+    #[serde(default)]
+    seq: u64,
     tasks: Vec<Map<String, Value>>,
 }
 
-/// 任务日志的读写。写入串行化：前端防抖写入与关窗前的立即写入可能并发到达，
-/// 两次原子写各自的临时文件互不干扰，但谁最后 rename 不确定，串行才能保证后到的那份留下。
+/// 读回的任务日志。
+#[derive(Debug, PartialEq, Serialize)]
+pub struct JournalSnapshot {
+    /// 已落盘那份的序号；从未写过或加序号之前写的日志为 0。前端此后的写入从它之后接着编。
+    pub seq: u64,
+    pub tasks: Vec<Map<String, Value>>,
+}
+
+/// 盘上那份日志的状态。
+enum Stored {
+    Missing,
+    /// 损坏或版本不符，附上说明。
+    Invalid(String),
+    Valid(JournalFile),
+}
+
+/// 任务日志的读写。
+///
+/// 前端防抖写入与关窗前的立即写入可能并发到达，两次 IPC 谁先拿到锁不确定，光靠串行会让先发出的那份
+/// 后写、盖掉更新的那份。所以前端给每份带单调递增的序号，写入在锁内比对已落盘的序号，只接受更新的。
 #[derive(Default)]
 pub struct TaskJournal {
     write: tokio::sync::Mutex<()>,
 }
 
 impl TaskJournal {
-    /// 整份写入任务表。每个任务必须带非空、互不重复的字符串 `id`。
+    /// 整份写入任务表，返回这份是否真的落了盘。
+    ///
+    /// `seq` 从 1 起；不比已落盘那份的序号大时，这份是晚到的旧版本，丢弃并返回 `false`。
+    /// 每个任务必须带非空、互不重复的字符串 `id`。
     pub async fn save(
         &self,
         data_dir: &Path,
+        seq: u64,
         tasks: Vec<Map<String, Value>>,
-    ) -> Result<(), CommandError> {
+    ) -> Result<bool, CommandError> {
+        if seq == 0 {
+            return Err(CommandError::invalid_argument(
+                "任务日志的序号从 1 起，收到 0",
+            ));
+        }
         let mut seen = std::collections::HashSet::new();
         for (index, task) in tasks.iter().enumerate() {
             match task.get("id").and_then(Value::as_str) {
@@ -200,48 +231,87 @@ impl TaskJournal {
                 }
             }
         }
+        let path = data_dir.join(TASK_JOURNAL_FILE);
         let file = JournalFile {
             version: TASK_JOURNAL_VERSION,
+            seq,
             tasks,
         };
         let bytes = serde_json::to_vec_pretty(&file).map_err(|err| {
             CommandError::new(code::INTERNAL, format!("序列化任务日志失败：{err}"))
         })?;
         let _guard = self.write.lock().await;
-        aurora_base::fs::atomic_write(data_dir.join(TASK_JOURNAL_FILE), &bytes)
-            .await
-            .map_err(CommandError::from)
+        let committed = match read_stored(&path).await? {
+            Stored::Missing => 0,
+            // 前端读到 task_journal_invalid 后照常写回，用新表覆盖这份救不回来的文件；
+            // 它里面的序号不可信，不能挡住这次恢复。
+            Stored::Invalid(reason) => {
+                tracing::warn!(seq, %reason, "已落盘的任务日志读不出来，这次写入将覆盖它");
+                0
+            }
+            Stored::Valid(stored) => stored.seq,
+        };
+        if seq <= committed {
+            tracing::debug!(seq, committed, "任务日志晚到的旧版本，已丢弃");
+            return Ok(false);
+        }
+        aurora_base::fs::atomic_write(&path, &bytes).await?;
+        Ok(true)
     }
 
-    /// 读回任务表。文件不存在（从未写过）返回空表；内容损坏或版本不符报 `task_journal_invalid`。
-    pub async fn load(&self, data_dir: &Path) -> Result<Vec<Map<String, Value>>, CommandError> {
+    /// 读回任务表与它的序号。文件不存在（从未写过）返回序号 0 的空表；内容损坏或版本不符报
+    /// `task_journal_invalid`。
+    ///
+    /// 与写入同用一把锁：已经到达、还在排队的写入先落盘，读回的序号才是前端接着编号的正确起点。
+    /// 否则窗口重载时上一个页面最后的那次写入可能晚于读取落盘，新页面的第一份会拿到同一个序号而被丢弃。
+    pub async fn load(&self, data_dir: &Path) -> Result<JournalSnapshot, CommandError> {
         let path = data_dir.join(TASK_JOURNAL_FILE);
-        let bytes = match tokio::fs::read(&path).await {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(source) => {
-                return Err(BaseError::Io {
-                    path: path.clone(),
-                    source,
-                }
-                .into())
-            }
-        };
-        let invalid = |message: String| {
-            CommandError::new(code::TASK_JOURNAL_INVALID, message)
-                .with_detail(json!({ "path": path.display().to_string() }))
-        };
-        let file: JournalFile = serde_json::from_slice(&bytes)
-            .map_err(|err| invalid(format!("任务日志 {} 已损坏：{err}", path.display())))?;
-        if file.version != TASK_JOURNAL_VERSION {
-            return Err(invalid(format!(
-                "任务日志 {} 的版本是 {}，当前只认 {TASK_JOURNAL_VERSION}",
-                path.display(),
-                file.version
-            )));
+        let _guard = self.write.lock().await;
+        match read_stored(&path).await? {
+            Stored::Missing => Ok(JournalSnapshot {
+                seq: 0,
+                tasks: Vec::new(),
+            }),
+            Stored::Invalid(message) => Err(CommandError::new(code::TASK_JOURNAL_INVALID, message)
+                .with_detail(json!({ "path": path.display().to_string() }))),
+            Stored::Valid(file) => Ok(JournalSnapshot {
+                seq: file.seq,
+                tasks: file.tasks,
+            }),
         }
-        Ok(file.tasks)
     }
+}
+
+/// 读盘上那份日志。读不了（不是不存在）时报 IO 错误。
+async fn read_stored(path: &Path) -> Result<Stored, CommandError> {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Stored::Missing),
+        Err(source) => {
+            return Err(BaseError::Io {
+                path: path.to_owned(),
+                source,
+            }
+            .into())
+        }
+    };
+    let file: JournalFile = match serde_json::from_slice(&bytes) {
+        Ok(file) => file,
+        Err(err) => {
+            return Ok(Stored::Invalid(format!(
+                "任务日志 {} 已损坏：{err}",
+                path.display()
+            )))
+        }
+    };
+    if file.version != TASK_JOURNAL_VERSION {
+        return Ok(Stored::Invalid(format!(
+            "任务日志 {} 的版本是 {}，当前只认 {TASK_JOURNAL_VERSION}",
+            path.display(),
+            file.version
+        )));
+    }
+    Ok(Stored::Valid(file))
 }
 
 #[cfg(test)]
@@ -394,21 +464,37 @@ mod tests {
     async fn journal_roundtrips_and_missing_file_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         let journal = TaskJournal::default();
-        assert!(journal.load(dir.path()).await.unwrap().is_empty());
+        assert_eq!(
+            journal.load(dir.path()).await.unwrap(),
+            JournalSnapshot {
+                seq: 0,
+                tasks: Vec::new()
+            }
+        );
 
         let tasks = vec![task("a", "running"), task("b", "done")];
-        journal.save(dir.path(), tasks.clone()).await.unwrap();
-        assert_eq!(journal.load(dir.path()).await.unwrap(), tasks);
+        assert!(journal.save(dir.path(), 1, tasks.clone()).await.unwrap());
+        assert_eq!(
+            journal.load(dir.path()).await.unwrap(),
+            JournalSnapshot { seq: 1, tasks }
+        );
 
-        // 落在数据目录的 tasks.json，带版本号。
+        // 落在数据目录的 tasks.json，带版本号与序号。
         let raw: Value =
             serde_json::from_slice(&std::fs::read(dir.path().join("tasks.json")).unwrap()).unwrap();
         assert_eq!(raw["version"], json!(1));
+        assert_eq!(raw["seq"], json!(1));
         assert_eq!(raw["tasks"][1]["id"], json!("b"));
 
         // 空表也能写回（清空已结束任务后）。
-        journal.save(dir.path(), Vec::new()).await.unwrap();
-        assert!(journal.load(dir.path()).await.unwrap().is_empty());
+        assert!(journal.save(dir.path(), 2, Vec::new()).await.unwrap());
+        assert_eq!(
+            journal.load(dir.path()).await.unwrap(),
+            JournalSnapshot {
+                seq: 2,
+                tasks: Vec::new()
+            }
+        );
     }
 
     #[tokio::test]
@@ -437,13 +523,191 @@ mod tests {
 
         let mut no_id = task("x", "done");
         no_id.remove("id");
-        let err = journal.save(dir.path(), vec![no_id]).await.unwrap_err();
+        let err = journal.save(dir.path(), 1, vec![no_id]).await.unwrap_err();
         assert_eq!(err.code, code::INVALID_ARGUMENT);
 
         let dup = vec![task("x", "done"), task("x", "failed")];
-        let err = journal.save(dir.path(), dup).await.unwrap_err();
+        let err = journal.save(dir.path(), 1, dup).await.unwrap_err();
         assert_eq!(err.code, code::INVALID_ARGUMENT);
         // 校验失败不落盘。
         assert!(!dir.path().join(TASK_JOURNAL_FILE).exists());
+    }
+
+    /// 内容带上序号，读回时能认出留下的是哪一份。
+    fn table(seq: u64) -> Vec<Map<String, Value>> {
+        vec![task(&format!("t{seq}"), "running"), task("history", "done")]
+    }
+
+    #[tokio::test]
+    async fn out_of_order_saves_keep_the_higher_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = TaskJournal::default();
+
+        // 后发出的 2 号先到，先发出的 1 号晚到：晚到的旧表不能盖掉新表。
+        assert!(journal.save(dir.path(), 2, table(2)).await.unwrap());
+        assert!(!journal.save(dir.path(), 1, table(1)).await.unwrap());
+        assert_eq!(
+            journal.load(dir.path()).await.unwrap(),
+            JournalSnapshot {
+                seq: 2,
+                tasks: table(2)
+            }
+        );
+
+        // 与已落盘的序号相同也不是更新的一份。
+        assert!(!journal.save(dir.path(), 2, Vec::new()).await.unwrap());
+        assert_eq!(journal.load(dir.path()).await.unwrap().tasks, table(2));
+
+        // 紧接着的下一号照常写下。
+        assert!(journal.save(dir.path(), 3, table(3)).await.unwrap());
+        assert_eq!(
+            journal.load(dir.path()).await.unwrap(),
+            JournalSnapshot {
+                seq: 3,
+                tasks: table(3)
+            }
+        );
+    }
+
+    /// 一批写入以随机次序同时到达：不管谁先拿到锁，最后盘上都是序号最大的那份，且它一定写下了。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_saves_leave_the_highest_seq() {
+        use std::hash::{BuildHasher, Hasher};
+
+        const COUNT: u64 = 24;
+        let seed = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+            | 1;
+        let mut state = seed;
+        let mut order: Vec<u64> = (1..=COUNT).collect();
+        for i in (1..order.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            order.swap(i, (state % (i as u64 + 1)) as usize);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(TaskJournal::default());
+        let saves: Vec<_> = order
+            .iter()
+            .map(|&seq| {
+                let journal = journal.clone();
+                let path = dir.path().to_owned();
+                tokio::spawn(async move { (seq, journal.save(&path, seq, table(seq)).await) })
+            })
+            .collect();
+        let mut written = Vec::new();
+        for save in saves {
+            let (seq, outcome) = save.await.unwrap();
+            if outcome.unwrap() {
+                written.push(seq);
+            }
+        }
+
+        assert!(
+            written.contains(&COUNT),
+            "种子 {seed}，次序 {order:?}：最大序号没有写下，写下的是 {written:?}"
+        );
+        assert_eq!(
+            journal.load(dir.path()).await.unwrap(),
+            JournalSnapshot {
+                seq: COUNT,
+                tasks: table(COUNT)
+            },
+            "种子 {seed}，次序 {order:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn journal_written_before_seq_existed_is_readable_and_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = TaskJournal::default();
+        std::fs::write(
+            dir.path().join(TASK_JOURNAL_FILE),
+            br#"{"version": 1, "tasks": [{"id": "old", "status": "done", "attempt": 1}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            journal.load(dir.path()).await.unwrap(),
+            JournalSnapshot {
+                seq: 0,
+                tasks: vec![task("old", "done")]
+            }
+        );
+        // 前端从 0 之后接着编，第一份 1 号就比它新。
+        assert!(journal.save(dir.path(), 1, table(1)).await.unwrap());
+        assert_eq!(journal.load(dir.path()).await.unwrap().tasks, table(1));
+    }
+
+    #[tokio::test]
+    async fn zero_seq_is_rejected_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = TaskJournal::default();
+        let err = journal.save(dir.path(), 0, table(0)).await.unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert!(!dir.path().join(TASK_JOURNAL_FILE).exists());
+    }
+
+    /// 读不出来的日志里的序号不可信：前端此时从 1 编起，照样能用新表把它覆盖掉。
+    #[tokio::test]
+    async fn unreadable_journal_does_not_block_the_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = TaskJournal::default();
+        let path = dir.path().join(TASK_JOURNAL_FILE);
+
+        for unreadable in [
+            br#"{"version": 1, "seq": 50, "tasks": "#.as_slice(),
+            br#"{"version": 2, "seq": 50, "tasks": []}"#.as_slice(),
+        ] {
+            std::fs::write(&path, unreadable).unwrap();
+            assert!(journal.save(dir.path(), 1, table(1)).await.unwrap());
+            assert_eq!(
+                journal.load(dir.path()).await.unwrap(),
+                JournalSnapshot {
+                    seq: 1,
+                    tasks: table(1)
+                }
+            );
+        }
+    }
+
+    /// 读取要等已经排上队的写入落盘，读回的序号才不会落后于实际。
+    #[tokio::test]
+    async fn load_waits_for_a_save_holding_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = std::sync::Arc::new(TaskJournal::default());
+        assert!(journal.save(dir.path(), 4, table(4)).await.unwrap());
+
+        let guard = journal.write.lock().await;
+        let load = tokio::spawn({
+            let journal = journal.clone();
+            let path = dir.path().to_owned();
+            async move { journal.load(&path).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!load.is_finished(), "写入持锁期间读取不应返回");
+        // 模拟持锁的那次写入落盘。
+        let landed = JournalFile {
+            version: TASK_JOURNAL_VERSION,
+            seq: 5,
+            tasks: table(5),
+        };
+        std::fs::write(
+            dir.path().join(TASK_JOURNAL_FILE),
+            serde_json::to_vec(&landed).unwrap(),
+        )
+        .unwrap();
+        drop(guard);
+
+        assert_eq!(
+            load.await.unwrap().unwrap(),
+            JournalSnapshot {
+                seq: 5,
+                tasks: table(5)
+            }
+        );
     }
 }
