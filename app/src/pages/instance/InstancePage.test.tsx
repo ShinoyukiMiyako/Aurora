@@ -1224,6 +1224,22 @@ describe("实例详情：Mod 管理", () => {
     expect(toast?.body).toBe("文件改名为 sodium.jar.disabled，随时可以再启用");
   });
 
+  it("同一帧里连点两下开关：只发一次启停，不拿旧名字再发第二次", async () => {
+    const pending = deferred<string>();
+    ipc.overrides.set("set_mod_enabled", () => pending.promise);
+    await open("mods");
+    const toggle = byRole("switch", "停用 Sodium");
+    act(() => {
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      toggle.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toEqual([{ versionId: ID, fileName: "sodium.jar", enabled: false }]);
+    pending.resolve("sodium.jar.disabled");
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toHaveLength(1);
+  });
+
   it("移除前确认，并说明它带进来的前置会保留", async () => {
     await open("mods");
     click(button("移除 Sodium"));

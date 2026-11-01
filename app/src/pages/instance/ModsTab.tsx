@@ -80,6 +80,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(new Map());
   const [toggling, setToggling] = useState<ReadonlySet<string>>(new Set());
+  // 同一帧里连点两下时 toggling 还没重渲染出来：另记一份同步的，第二下在这里挡住
+  const togglingNow = useRef<Set<string>>(new Set());
   // 启停成功后、重扫回来之前，行还是按旧文件名画的，盘上的文件已经改了名：记下新名字，只对记下时的那份列表有效。
   // 否则这期间再点开关或移除，会拿旧名字去调后端：启停对着不存在的旧名是空转（后端照成功返回），移除直接报找不到文件
   const [renamed, setRenamed] = useState<{ base: readonly InstalledMod[] | null; names: ReadonlyMap<string, string> }>({ base: null, names: new Map() });
@@ -142,13 +144,15 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
 
   const toggle = (r: ModRow) => {
     // 上一次启停还没回来时不知道盘上是哪个名字，开关已带原因禁用，这里是第二道防线
-    if (toggling.has(r.fileName)) return;
+    if (toggling.has(r.fileName) || togglingNow.current.has(r.fileName)) return;
+    togglingNow.current.add(r.fileName);
     const next = !r.enabled;
     const fileName = diskName(r);
     const base = modsData;
     setOverrides((m) => new Map(m).set(r.fileName, next));
     setToggling((s) => new Set(s).add(r.fileName));
     void run(() => actions.toggleMod(id, fileName, next), ACTION_ERROR.toggleMod).then((outcome) => {
+      togglingNow.current.delete(r.fileName);
       setToggling((s) => {
         const rest = new Set(s);
         rest.delete(r.fileName);
