@@ -513,17 +513,44 @@ impl<'a> ForgeInstaller<'a> {
             aurora_base::app_slug!(),
             "-forge-tmp"
         ));
-        let extracted = extract_data_files(installer, &profile.data, &self.side, &tmp_dir).await?;
-
-        // 组装占位符表：解析后的 data + 安装器注入的特殊变量。
         let minecraft_jar = match target {
             Target::Standalone => self.cx.layout.version_jar(&minecraft),
             Target::Instance(id) => self.cx.layout.version_jar(id),
         };
-        let values =
-            self.build_values(&profile, &minecraft, &minecraft_jar, installer, extracted)?;
+        let ran = self
+            .run_processors(installer, &profile, &minecraft, &minecraft_jar, &tmp_dir)
+            .await;
 
-        // 逐个处理器执行；产物都已就绪的跳过，不计入执行数。
+        // 成败都清：解出的补丁包有几 MB，重试时会重新解出。清不掉不影响安装结果，仅记日志。
+        if let Err(err) = tokio::fs::remove_dir_all(&tmp_dir).await {
+            tracing::debug!(dir = %tmp_dir.display(), %err, "清理 Forge 安装临时目录失败");
+        }
+
+        Ok((
+            embedded,
+            ForgeSummary {
+                id: version_id,
+                libraries,
+                processors: ran?,
+            },
+        ))
+    }
+
+    /// 把 data 表里的文件解到 `tmp_dir`，组好占位符表，逐个处理器执行；返回实际执行的处理器数，产物都已
+    /// 就绪而跳过的不计。
+    async fn run_processors(
+        &self,
+        installer: &Path,
+        profile: &InstallProfile,
+        minecraft: &str,
+        minecraft_jar: &Path,
+        tmp_dir: &Path,
+    ) -> Result<usize> {
+        let extracted = extract_data_files(installer, &profile.data, &self.side, tmp_dir).await?;
+
+        // 组装占位符表：解析后的 data + 安装器注入的特殊变量。
+        let values = self.build_values(profile, minecraft, minecraft_jar, installer, extracted)?;
+
         let mut ran = 0usize;
         for processor in &profile.processors {
             if !side_applies(processor.sides.as_ref(), &self.side) {
@@ -536,20 +563,7 @@ impl<'a> ForgeInstaller<'a> {
                 ran += 1;
             }
         }
-
-        // 清理临时目录（失败不影响安装结果，仅记日志）。
-        if let Err(err) = tokio::fs::remove_dir_all(&tmp_dir).await {
-            tracing::debug!(dir = %tmp_dir.display(), %err, "清理 Forge 安装临时目录失败");
-        }
-
-        Ok((
-            embedded,
-            ForgeSummary {
-                id: version_id,
-                libraries,
-                processors: ran,
-            },
-        ))
+        Ok(ran)
     }
 
     /// 组装处理器占位符表。
@@ -2338,6 +2352,43 @@ mod tests {
         );
         assert_eq!(std::fs::read(library(&f, OUT_A)).unwrap(), a);
         assert!(!library(&f, OUT_B).exists(), "对不上的旧产物应在重跑前删掉");
+    }
+
+    /// 从 installer 解出的补丁包有几 MB，只给处理器读：处理器失败时也要清掉，不留在版本目录里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_scratch_dir_is_removed_when_a_processor_fails() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let profile = serde_json::json!({
+            "version": "1.20.1-forge-47.2.0",
+            "minecraft": "1.20.1",
+            "json": "/version.json",
+            "data": {"BINPATCH": {"client": "/data/client.lzma", "server": "/data/server.lzma"}},
+            "processors": [{"jar": PROCESSOR_JAR, "classpath": [], "args": ["{BINPATCH}"]}],
+            "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "1.20.1-forge-47.2.0", "inheritsFrom": "1.20.1", "libraries": []
+        });
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+                ("data/client.lzma", b"patches"),
+            ],
+        );
+        let java = fake_java(&f.root, "out", "err", 3);
+
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+
+        assert!(matches!(err, Error::ProcessorFailed { .. }), "实际：{err:?}");
+        let scratch = f.layout.version_dir("1.20.1-forge-47.2.0").join(concat!(
+            ".",
+            aurora_base::app_slug!(),
+            "-forge-tmp"
+        ));
+        assert!(!scratch.exists(), "临时目录应被清掉：{}", scratch.display());
     }
 
     /// 没有声明产物的处理器没有可比的东西，每次都执行（官方 installer 同样如此）。
