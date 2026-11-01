@@ -462,7 +462,7 @@ pub fn suspected_mods(text: &str) -> Vec<String> {
         }
         if let Some(caps) = SUSPECTED_ENTRY.captures(line) {
             let id = caps[1].to_ascii_lowercase();
-            if !out.contains(&id) {
+            if !NON_MOD_TOKENS.contains(&id.as_str()) && !out.contains(&id) {
                 out.push(id);
             }
         }
@@ -994,6 +994,19 @@ mod tests {
         );
         assert!(suspected_mods("Suspected Mods: NONE\n\tSomething (foo), Version: 1").is_empty());
         assert!(suspected_mods("\tCreate (create), Version: 0.5.1.f").is_empty());
+    }
+
+    /// 调用栈落在游戏本体或加载器里时，它们也会列在段中，但 mods 目录里没有这样的文件，点名只会误导玩家。
+    #[test]
+    fn suspected_mods_skip_the_game_and_the_loader() {
+        let text = "Suspected Mods: \n\
+            \tMinecraft (minecraft), Version: 1.20.1\n\
+            \t\tat TRANSFORMER/minecraft@1.20.1/net.minecraft.client.Minecraft.m_91374_(Minecraft.java:718)\n\
+            \n\
+            \tForge (forge), Version: 47.3.0\n\
+            \n\
+            \tCreate (create), Version: 0.5.1.f\n";
+        assert_eq!(suspected_mods(text), vec!["create"]);
     }
 
     #[test]
