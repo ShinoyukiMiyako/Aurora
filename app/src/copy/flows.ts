@@ -666,6 +666,7 @@ export const CRASH_COPY = {
 /** 后端的启动提醒全集（按启动阶段的先后）。诊断页按报告里记下的顺序展示。 */
 export const LAUNCH_WARNING_CODES = [
   "game_path",
+  "instance_name",
   "onedrive_folder",
   "icloud_folder",
   "long_player_name",
@@ -674,8 +675,8 @@ export const LAUNCH_WARNING_CODES = [
   "jvm_max_too_low",
 ] as const satisfies readonly LaunchWarningCode[];
 
-/** 提醒上的动作：更换游戏目录去设置的「游戏」分区，管理账户去账户页，打开实例设置切到实例的「设置」标签。 */
-export type LaunchWarningActionKind = "change_game_dir" | "manage_accounts" | "instance_settings";
+/** 提醒上的动作：更换游戏目录去设置的「游戏」分区，重命名实例在头图就地改名，管理账户去账户页，打开实例设置切到实例的「设置」标签。 */
+export type LaunchWarningActionKind = "change_game_dir" | "rename_instance" | "manage_accounts" | "instance_settings";
 
 export interface LaunchWarningCopy {
   title: string;
@@ -688,10 +689,16 @@ const OPEN_INSTANCE_SETTINGS = { kind: "instance_settings", label: CRASH_COPY.op
 
 /** 启动提醒不中断启动：加载时只写 warn 日志，崩溃后在诊断页的「这次启动时的提醒」里按这张表呈现。 */
 export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCopy>> = {
+  // 后端只在这个版本真受影响时才记这两条，受影响的原因不止一种，这里不点名加载器
   game_path: {
-    title: "游戏路径含中文或特殊字符",
-    body: "部分 Forge 版本与本地库在这样的路径下读不出文件，可以换到纯英文路径再试。",
+    title: "游戏目录含中文或特殊字符",
+    body: "这个版本在这样的路径下可能读不出文件，可以换到纯英文路径再试。",
     action: CHANGE_GAME_DIR,
+  },
+  instance_name: {
+    title: "实例名含中文或特殊字符",
+    body: "实例目录用的就是这个名字，这个版本在这样的路径下可能读不出文件，可以改成纯英文名字再试。",
+    action: { kind: "rename_instance", label: "重命名实例" },
   },
   onedrive_folder: {
     title: "游戏目录在 OneDrive 里",

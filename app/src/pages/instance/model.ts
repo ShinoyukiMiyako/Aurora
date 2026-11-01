@@ -711,7 +711,7 @@ export type CrashFix =
   /** 线索指向的 Mod 是别的 Mod 的前置：停用它会连带一批 Mod 起不来，带去 Mod 页更新或查看。 */
   | { kind: "view_mod"; category: DisableCategory | "dependency_version_mismatch"; fileName: string; name: string }
   | { kind: "keep_latest"; disable: { fileName: string; name: string }[] }
-  | { kind: "repair"; category: "native_library_missing" | "corrupted_jar"; changeGameDir: boolean }
+  | { kind: "repair"; category: "native_library_missing" | "corrupted_jar"; changeGameDir: boolean; renameInstance: boolean }
   /** category 是这份报告里第一条显卡或本地崩溃类线索的类别，三类共用这一条。 */
   | { kind: "driver_steps"; category: "graphics_driver" | "intel_graphics_driver" | "native_crash"; javaPath: string | null }
   | { kind: "compare_log" };
@@ -864,7 +864,7 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         break;
       }
       case "native_library_missing":
-        push({ kind: "repair", category: "native_library_missing", changeGameDir: report.warnings.includes("game_path") });
+        push({ kind: "repair", category: "native_library_missing", changeGameDir: report.warnings.includes("game_path"), renameInstance: report.warnings.includes("instance_name") });
         break;
       case "graphics_driver":
       case "intel_graphics_driver":
@@ -875,7 +875,7 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
       case "corrupted_jar": {
         const mod = corruptedModFile(clue.matched, ctx.mods);
         if (mod !== null && mod.enabled) pushDisable("corrupted_jar", mod);
-        else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false });
+        else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false, renameInstance: false });
         break;
       }
       default:

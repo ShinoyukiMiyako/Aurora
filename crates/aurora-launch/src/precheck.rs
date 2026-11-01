@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use aurora_version::VersionJson;
+use aurora_version::{LoaderInfo, LoaderKind, VersionJson};
 use regex::Regex;
 
 use crate::memory::MemoryConfig;
@@ -23,16 +23,56 @@ pub fn required_java_major(version: &VersionJson) -> u32 {
         .map_or(DEFAULT_JAVA_MAJOR, |java| java.major_version)
 }
 
-/// 游戏路径里第一个可能引发问题的字符（非 ASCII、`!`）。有就返回提醒文案。
+/// Forge 换成模块化启动栈（BootstrapLauncher、SecureJarHandler）的第一个小版本。
+const FORGE_MODULE_STACK_MINOR: u32 = 17;
+
+/// 路径里的非 ASCII 字符在这个版本上有没有风险。系统代码页表示不了的字符不归这里管，启动前已经拦下了。
 ///
-/// 部分 Forge 版本与 natives 加载在非 UTF-8 的系统代码页下读不了这类路径，`!` 则会被 Java 的
-/// jar URL 解析当成分隔符。它们不一定出问题，所以只提醒、不阻断。
-pub fn game_path_warning(game_dir: &Path) -> Option<String> {
-    let lossy = game_dir.to_string_lossy();
-    let ch = lossy.chars().find(|c| !c.is_ascii() || *c == '!')?;
-    Some(format!(
-        "游戏路径含字符「{ch}」，部分 Forge 版本与本地库加载可能出错，建议换到纯英文路径"
-    ))
+/// 代码页表示得了的字符，Java 一路都能传到系统：在 GBK 系统上用启动器这套参数实测，模块化的 Forge 全栈
+/// （含 Jar-in-Jar 的 Mod）与 LWJGL 3 的本地库都不受影响。提醒只留给模块化之前的 Forge：这类路径的问题一直
+/// 指向它们，又没有样本能排除。
+/// 版本号解析不出（含周快照）时不提醒：猜错了反而误导。
+pub fn non_ascii_path_at_risk(loaders: &[LoaderInfo], game_version: &str) -> bool {
+    if !loaders
+        .iter()
+        .any(|loader| loader.kind == LoaderKind::Forge)
+    {
+        return false;
+    }
+    RELEASE_PREFIX
+        .captures(game_version)
+        .and_then(|caps| caps[1].parse::<u32>().ok())
+        .is_some_and(|minor| minor < FORGE_MODULE_STACK_MINOR)
+}
+
+/// 路径上一个值得提醒的字符，按玩家要改的地方分开：游戏目录里的要换目录才消得掉，实例名里的改个名就够了。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathWarning {
+    GameDir(char),
+    InstanceName(char),
+}
+
+/// 第一个可能引发问题的字符。`!` 在路径段末尾时 Java 的 jar URL 解析会把它当成分隔符，读 jar 里的文件直接失败，
+/// 与加载器无关；非 ASCII 只在 `non_ascii_at_risk` 时才算。它们不一定出问题，所以只提醒、不阻断。
+fn risky_path_char(text: &str, non_ascii_at_risk: bool) -> Option<char> {
+    text.chars()
+        .find(|c| *c == '!' || (non_ascii_at_risk && !c.is_ascii()))
+}
+
+/// 这一局路径上值得提醒的字符，游戏目录在前。两处都有就各报一条：只改一处，另一处下一局还会冒出来。
+/// `instance_names` 只传真正落在路径上的实例名，没落在路径上的改了也不起作用。
+pub fn path_warnings<'a>(
+    game_dir: &Path,
+    instance_names: impl IntoIterator<Item = &'a str>,
+    non_ascii_at_risk: bool,
+) -> Vec<PathWarning> {
+    let game_dir =
+        risky_path_char(&game_dir.to_string_lossy(), non_ascii_at_risk).map(PathWarning::GameDir);
+    let instance_name = instance_names
+        .into_iter()
+        .find_map(|name| risky_path_char(name, non_ascii_at_risk))
+        .map(PathWarning::InstanceName);
+    game_dir.into_iter().chain(instance_name).collect()
 }
 
 /// 路径里第一个系统代码页表示不了的字符。
@@ -321,13 +361,96 @@ mod tests {
         );
     }
 
+    fn loader(kind: LoaderKind) -> LoaderInfo {
+        LoaderInfo {
+            kind,
+            version: None,
+        }
+    }
+
     #[test]
-    fn game_path_warns_on_non_ascii_and_bang() {
-        let chinese = game_path_warning(Path::new(r"D:\我的世界")).unwrap();
-        assert!(chinese.contains("「我」"), "{chinese}");
-        let bang = game_path_warning(Path::new(r"D:\games!\mc")).unwrap();
-        assert!(bang.contains("「!」"), "{bang}");
-        assert_eq!(game_path_warning(Path::new(r"D:\games\mc")), None);
+    fn non_ascii_paths_only_put_forge_before_1_17_at_risk() {
+        let forge = [loader(LoaderKind::Forge)];
+        for version in ["1.7.10", "1.12.2", "1.13.2", "1.16.5", "1.16.5-pre1"] {
+            assert!(non_ascii_path_at_risk(&forge, version), "{version}");
+        }
+        // 边界：1.16 的最后一个补丁版之后就是模块化启动栈。
+        for version in ["1.17", "1.17.1", "1.20.1", "1.21.4", "26.1"] {
+            assert!(!non_ascii_path_at_risk(&forge, version), "{version}");
+        }
+        // 版本号解析不出时不下结论。
+        assert!(!non_ascii_path_at_risk(&forge, "23w45a"));
+        assert!(!non_ascii_path_at_risk(&forge, "我的整合包"));
+
+        // 同一个旧版本号，换成别的加载器或原版都不算。
+        assert!(!non_ascii_path_at_risk(&[], "1.12.2"));
+        for kind in [
+            LoaderKind::Fabric,
+            LoaderKind::Quilt,
+            LoaderKind::NeoForge,
+            LoaderKind::OptiFine,
+            LoaderKind::LiteLoader,
+        ] {
+            assert!(
+                !non_ascii_path_at_risk(&[loader(kind)], "1.12.2"),
+                "{kind:?}"
+            );
+        }
+        // Forge 叠 OptiFine 时 Forge 还在。
+        assert!(non_ascii_path_at_risk(
+            &[loader(LoaderKind::Forge), loader(LoaderKind::OptiFine)],
+            "1.12.2"
+        ));
+    }
+
+    #[test]
+    fn path_warnings_separate_the_game_dir_from_the_instance_name() {
+        let clean = Path::new(r"D:\games\mc");
+        let chinese = Path::new(r"D:\我的世界");
+
+        assert_eq!(
+            path_warnings(clean, ["周末生存"], true),
+            vec![PathWarning::InstanceName('周')]
+        );
+        assert_eq!(
+            path_warnings(chinese, ["1.12.2"], true),
+            vec![PathWarning::GameDir('我')]
+        );
+        assert_eq!(
+            path_warnings(chinese, ["周末生存"], true),
+            vec![PathWarning::GameDir('我'), PathWarning::InstanceName('周')]
+        );
+        // 第一个名字干净时看下一个：工作目录用实例名，client jar 与 natives 用继承链根的名字。
+        assert_eq!(
+            path_warnings(clean, ["1.12.2", "周末生存"], true),
+            vec![PathWarning::InstanceName('周')]
+        );
+        assert_eq!(path_warnings(clean, ["1.12.2"], true), vec![]);
+        assert_eq!(path_warnings(clean, [], true), vec![]);
+    }
+
+    #[test]
+    fn non_ascii_is_only_flagged_when_it_is_at_risk() {
+        let chinese = Path::new(r"D:\我的世界");
+        assert_eq!(path_warnings(chinese, ["周末生存"], false), vec![]);
+    }
+
+    /// `!` 绊住的是 Java 本身，不看加载器；排在中文之前时报的是它。
+    #[test]
+    fn a_bang_is_flagged_whether_or_not_non_ascii_is_at_risk() {
+        let bang = Path::new(r"D:\games!\mc");
+        assert_eq!(
+            path_warnings(bang, ["周末生存"], false),
+            vec![PathWarning::GameDir('!')]
+        );
+        assert_eq!(
+            path_warnings(Path::new(r"D:\games"), ["周末!"], false),
+            vec![PathWarning::InstanceName('!')]
+        );
+        assert_eq!(
+            path_warnings(Path::new(r"D:\游戏!"), [], true),
+            vec![PathWarning::GameDir('游')]
+        );
     }
 
     /// 判定只看给定的代码页，测试不随这台电脑的系统语言变。

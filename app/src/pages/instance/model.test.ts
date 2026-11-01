@@ -833,6 +833,20 @@ describe("一键尝试", () => {
       kind: "repair",
       category: "native_library_missing",
       changeGameDir: true,
+      renameInstance: false,
+    });
+    // 只有实例名含中文：换游戏目录没用，给的是重命名
+    expect(crashFixes(report([clue("native_library_missing")], { warnings: ["instance_name"] }), ctx())[0]).toEqual({
+      kind: "repair",
+      category: "native_library_missing",
+      changeGameDir: false,
+      renameInstance: true,
+    });
+    expect(crashFixes(report([clue("native_library_missing")], { warnings: ["game_path", "instance_name"] }), ctx())[0]).toEqual({
+      kind: "repair",
+      category: "native_library_missing",
+      changeGameDir: true,
+      renameInstance: true,
     });
     expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javaPath: "C:/jdk/bin/java.exe" });
     const mods = [mod("badmod-1.jar")];
@@ -846,6 +860,7 @@ describe("一键尝试", () => {
       kind: "repair",
       category: "corrupted_jar",
       changeGameDir: false,
+      renameInstance: false,
     });
   });
 

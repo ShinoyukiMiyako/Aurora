@@ -27,12 +27,15 @@ use aurora_java::{DetectSource, JavaInstallation, select_for_major};
 use aurora_launch::logfile::{SessionOutcome, logs_dir};
 use aurora_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
-    LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, QuickPlayMode,
-    QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
-    game_path_warning, jvm_memory_issue, long_player_name, path_char_outside_code_page,
-    quick_play_support, recommended_max_mb, required_java_major, sync_folder, sync_roots_from_env,
+    LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, PathWarning,
+    QuickPlayMode, QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
+    jvm_memory_issue, long_player_name, non_ascii_path_at_risk, path_char_outside_code_page,
+    path_warnings, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
+    sync_roots_from_env,
 };
-use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
+use aurora_version::{
+    AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, detect_loaders, resolve,
+};
 use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -124,8 +127,10 @@ pub type LaunchEventSink = mpsc::UnboundedSender<LaunchEvent>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchWarning {
-    /// 游戏路径含非 ASCII 或 `!`。
+    /// 游戏目录含这个版本读不了的字符（见 [`non_ascii_path_at_risk`]）或 `!`。
     GamePath,
+    /// 实例名含同样的字符，且这个名字落在了路径上。
+    InstanceName,
     /// 工作目录在 OneDrive 同步的文件夹里。
     OnedriveFolder,
     /// 工作目录在 iCloud 同步的文件夹里。
@@ -435,6 +440,30 @@ pub fn resolve_memory(
     match min_mb {
         Some(min) if min <= max => config.with_min(min),
         _ => config,
+    }
+}
+
+/// 路径上的字符对应的提醒与启动器日志原文。
+fn path_warning(warning: PathWarning) -> (LaunchWarning, String) {
+    let reason = |ch: char| {
+        if ch == '!' {
+            "Java 可能把它当成 jar 路径的分隔符"
+        } else {
+            "这个版本的 Forge 可能读不出这样的路径"
+        }
+    };
+    match warning {
+        PathWarning::GameDir(ch) => (
+            LaunchWarning::GamePath,
+            format!("游戏目录含字符「{ch}」，{}，建议换到纯英文路径", reason(ch)),
+        ),
+        PathWarning::InstanceName(ch) => (
+            LaunchWarning::InstanceName,
+            format!(
+                "实例名含字符「{ch}」，{}，建议把实例改成纯英文名字",
+                reason(ch)
+            ),
+        ),
     }
 }
 
@@ -801,11 +830,16 @@ impl Aurora {
             })?;
         let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         ensure_paths_reach_java([&paths.client_jar, &paths.natives_dir, &working_dir])?;
-        // 不隔离的实例工作目录里没有实例名，natives 目录才有。
-        if let Some(text) =
-            game_path_warning(&working_dir).or_else(|| game_path_warning(&paths.natives_dir))
-        {
-            warnings.push(LaunchWarning::GamePath);
+        // 不隔离时工作目录就是游戏目录，路径上只剩继承链根的名字（client jar 与 natives 在它底下）。
+        let names_on_path = resolved
+            .isolated
+            .then_some(version_id.as_str())
+            .into_iter()
+            .chain([chain.base_id.as_str()]);
+        let non_ascii_at_risk = non_ascii_path_at_risk(&detect_loaders(merged), game_version);
+        for warning in path_warnings(self.game_dir(), names_on_path, non_ascii_at_risk) {
+            let (warning, text) = path_warning(warning);
+            warnings.push(warning);
             reporter.warn(text).await;
         }
         if let Some(provider) = sync_folder(&working_dir, &sync_roots_from_env()) {
@@ -2077,6 +2111,11 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_in(".minecraft")
+    }
+
+    /// 游戏目录叫 `game_dir` 的 [`fixture`]。
+    fn fixture_in(game_dir: &str) -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         // 关掉自动分配：最大堆取全局的固定值，断言才不随本机此刻的空闲内存漂移。
@@ -2087,7 +2126,7 @@ mod tests {
             },
             ..AuroraConfig::default()
         };
-        let aurora = Aurora::for_test(config, root.clone(), root.join(".minecraft"));
+        let aurora = Aurora::for_test(config, root.clone(), root.join(game_dir));
         Fixture {
             _tmp: tmp,
             root,
@@ -2415,28 +2454,211 @@ mod tests {
         assert_eq!(std::fs::read(&copied).unwrap(), b"ogg!");
     }
 
-    /// 不隔离的实例工作目录是 .minecraft，路径里没有实例名；natives 目录却在实例名底下，本地库从那里加载。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn natives_under_a_non_ascii_instance_name_are_warned_about() {
-        let id = "caf\u{e9}";
-        let fx = fixture();
-        install_json(&fx.root.join(".minecraft"), id, &quick_play_json(id));
-        let java = fake_java(&fx.root, 17, 0);
+    /// 靠 FMLTweaker 认出来的 Forge 实例：不带库文件，启动时没有东西要下载。
+    fn forge_json(id: &str, game_version: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","clientVersion":"{game_version}","mainClass":"net.minecraft.launchwrapper.Launch","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},"minecraftArguments":"--username ${{auth_player_name}} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker"}}"#
+        )
+    }
+
+    fn fabric_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","clientVersion":"1.21","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},{LEGACY_ARGS}}}"#
+        )
+    }
+
+    /// 让 `id` 跑一局并崩掉，返回启动日志里的路径提醒原文，和崩溃报告记下的提醒码（前端读到的就是这些字符串）。
+    async fn path_warnings_of(fx: &Fixture, id: &str) -> (Vec<String>, Value) {
+        let java = fake_java(&fx.root, 17, 3);
         let request = LaunchRequest {
             version_id: id.to_owned(),
-            ..super::tests::request()
+            ..request()
         };
+        let (result, events) = launch_request(&fx.aurora, request, java).await;
+        let Ok(run) = result else {
+            panic!("{id} 应启动成功");
+        };
+        let finished = run.finish().await;
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        let crash = fx.aurora.last_crash(id).await.unwrap().expect("崩溃应落盘");
+        let texts = events
+            .iter()
+            .filter_map(|event| match event {
+                LaunchEvent::Log {
+                    level: LauncherLevel::Warn,
+                    text,
+                    ..
+                } if text.contains("含字符") => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        (texts, serde_json::to_value(&crash.warnings).unwrap())
+    }
 
-        let (_, events) = launch_request(&fx.aurora, request, java).await;
+    /// 代码页表示得了的非 ASCII 字符，提醒只留给 1.17 之前的 Forge：原版、Fabric、新版 Forge 上不吓人，
+    /// 不管它落在实例名还是游戏目录里。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_ascii_paths_are_not_flagged_where_they_work() {
+        let id = "caf\u{e9}";
+        for json in [
+            quick_play_json(id),
+            fabric_json(id),
+            forge_json(id, "1.20.1"),
+        ] {
+            let fx = fixture();
+            install_json(&fx.root.join(".minecraft"), id, &json);
+            let (texts, codes) = path_warnings_of(&fx, id).await;
+            assert_eq!(texts, Vec::<String>::new(), "{json}");
+            assert_eq!(codes, serde_json::json!([]), "{json}");
+        }
+        for json in [
+            legacy_json("plain"),
+            fabric_json("plain"),
+            forge_json("plain", "1.17.1"),
+        ] {
+            let fx = fixture_in("caf\u{e9}-mc");
+            install_json(&fx.root.join("caf\u{e9}-mc"), "plain", &json);
+            let (texts, codes) = path_warnings_of(&fx, "plain").await;
+            assert_eq!(texts, Vec::<String>::new(), "{json}");
+            assert_eq!(codes, serde_json::json!([]), "{json}");
+        }
+    }
 
-        let warned = events.iter().any(|event| {
-            matches!(
-                event,
-                LaunchEvent::Log { level: LauncherLevel::Warn, text, .. }
-                    if text.starts_with("游戏路径含字符「\u{e9}」")
-            )
-        });
-        assert!(warned);
+    /// 只有实例名含中文时换游戏目录没用，提醒要指向改名。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn old_forge_under_a_non_ascii_instance_name_points_at_the_name() {
+        let id = "caf\u{e9}";
+        let fx = fixture();
+        install_json(&fx.root.join(".minecraft"), id, &forge_json(id, "1.12.2"));
+
+        let (texts, codes) = path_warnings_of(&fx, id).await;
+
+        assert_eq!(
+            texts,
+            vec![
+                "实例名含字符「\u{e9}」，这个版本的 Forge 可能读不出这样的路径，建议把实例改成纯英文名字"
+                    .to_owned()
+            ]
+        );
+        assert_eq!(codes, serde_json::json!(["instance_name"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn old_forge_under_a_non_ascii_game_dir_points_at_the_game_dir() {
+        let fx = fixture_in("caf\u{e9}-mc");
+        install_json(
+            &fx.root.join("caf\u{e9}-mc"),
+            "plain",
+            &forge_json("plain", "1.16.5"),
+        );
+
+        let (texts, codes) = path_warnings_of(&fx, "plain").await;
+
+        assert_eq!(
+            texts,
+            vec![
+                "游戏目录含字符「\u{e9}」，这个版本的 Forge 可能读不出这样的路径，建议换到纯英文路径"
+                    .to_owned()
+            ]
+        );
+        assert_eq!(codes, serde_json::json!(["game_path"]));
+    }
+
+    /// 两处都有就各提一条：只改一处，另一处下一局还会冒出来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn non_ascii_in_both_places_warns_about_both() {
+        let id = "\u{e9}t\u{e9}";
+        let fx = fixture_in("caf\u{e9}-mc");
+        install_json(&fx.root.join("caf\u{e9}-mc"), id, &forge_json(id, "1.7.10"));
+
+        let (_, codes) = path_warnings_of(&fx, id).await;
+
+        assert_eq!(codes, serde_json::json!(["game_path", "instance_name"]));
+    }
+
+    /// 不隔离时工作目录是游戏目录本身，client jar 与 natives 又在原版目录下：路径里根本没有这个名字，改名什么也不会变。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_instance_name_that_is_on_no_path_is_not_flagged() {
+        let id = "caf\u{e9}";
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, "1.12.2", &legacy_json("1.12.2"));
+        let child = format!(
+            r#"{{"id":"{id}","inheritsFrom":"1.12.2","type":"release","mainClass":"net.minecraft.launchwrapper.Launch","minecraftArguments":"--username ${{auth_player_name}} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker"}}"#
+        );
+        install_json(&mc, id, &child);
+        let meta = mc
+            .join("versions")
+            .join(id)
+            .join(aurora_instance::AURORA_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("settings.json"), r#"{"isolation":"disabled"}"#).unwrap();
+
+        let (texts, codes) = path_warnings_of(&fx, id).await;
+
+        assert_eq!(texts, Vec::<String>::new());
+        assert_eq!(codes, serde_json::json!([]));
+    }
+
+    /// 不隔离的原版实例工作目录里没有实例名，client jar 与 natives 却在实例名底下，名字照样落在路径上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_vanilla_instance_name_is_on_the_path_through_its_client_jar() {
+        let fx = fixture();
+        install_json(&fx.root.join(".minecraft"), "a!", &legacy_json("a!"));
+
+        let (_, codes) = path_warnings_of(&fx, "a!").await;
+
+        assert_eq!(codes, serde_json::json!(["instance_name"]));
+    }
+
+    /// 实例 JSON 只是继承了别的版本时，加载器要从合并后的版本上认。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn old_forge_inherited_from_a_parent_version_still_counts() {
+        let fx = fixture_in("caf\u{e9}-mc");
+        let mc = fx.root.join("caf\u{e9}-mc");
+        install_json(&mc, "1.12.2", &legacy_json("1.12.2"));
+        install_json(
+            &mc,
+            "1.12.2-forge",
+            r#"{"id":"1.12.2-forge","inheritsFrom":"1.12.2","type":"release","mainClass":"net.minecraft.launchwrapper.Launch","minecraftArguments":"--username ${auth_player_name} --tweakClass net.minecraftforge.fml.common.launcher.FMLTweaker"}"#,
+        );
+        install_json(
+            &mc,
+            "plain",
+            r#"{"id":"plain","inheritsFrom":"1.12.2-forge","type":"release"}"#,
+        );
+
+        let (_, codes) = path_warnings_of(&fx, "plain").await;
+
+        assert_eq!(codes, serde_json::json!(["game_path"]));
+    }
+
+    /// `!` 由 Java 自己的 jar URL 解析绊住，与加载器无关：Fabric 与原版上照样提醒，话里不提 Forge。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bang_is_flagged_on_every_loader_without_blaming_forge() {
+        let fx = fixture();
+        install_json(&fx.root.join(".minecraft"), "a!", &fabric_json("a!"));
+        let (texts, codes) = path_warnings_of(&fx, "a!").await;
+        assert_eq!(
+            texts,
+            vec![
+                "实例名含字符「!」，Java 可能把它当成 jar 路径的分隔符，建议把实例改成纯英文名字"
+                    .to_owned()
+            ]
+        );
+        assert_eq!(codes, serde_json::json!(["instance_name"]));
+
+        let fx = fixture_in("game!");
+        install_json(&fx.root.join("game!"), "plain", &legacy_json("plain"));
+        let (texts, codes) = path_warnings_of(&fx, "plain").await;
+        assert_eq!(
+            texts,
+            vec![
+                "游戏目录含字符「!」，Java 可能把它当成 jar 路径的分隔符，建议换到纯英文路径"
+                    .to_owned()
+            ]
+        );
+        assert_eq!(codes, serde_json::json!(["game_path"]));
     }
 
     /// java.exe 按系统代码页读命令行，表示不了的字符变成问号，游戏只会报找不到主类。不起进程，

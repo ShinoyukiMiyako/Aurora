@@ -651,6 +651,7 @@ export const CRASH_PAGE_COPY = {
   repairNote: "重新校验原版文件与依赖库，替换掉损坏的部分，存档不受影响。",
   repairDone: "正在补全，进度在下载任务里",
   changeGameDir: "更换游戏目录",
+  renameInstance: "重命名实例",
   changeGameDirNote: "游戏目录路径里有中文或特殊字符",
   driverSteps: "查看处理办法",
   driverNote: "没有自动修复，按下面三步排查",

@@ -74,11 +74,13 @@ export interface JavaUsedDto {
 }
 
 /**
- * 不阻断启动、但值得在诊断里引用的提醒。game_path：游戏路径含非 ASCII 或 !；onedrive_folder / icloud_folder：游戏目录在同步盘里；
+ * 不阻断启动、但值得在诊断里引用的提醒。game_path：游戏目录含 ! 或这个版本读不了的非 ASCII 字符（只有 1.17 之前的 Forge 才算）；
+ * instance_name：实例名含同样的字符，且这个名字落在路径上；onedrive_folder / icloud_folder：游戏目录在同步盘里；
  * long_player_name：角色名超过 16 个字符且游戏不低于 1.20.3；jvm_*：自定义 JVM 参数里的内存写法不对、最小大于最大、最大低于 512 MB。
  */
 export type LaunchWarningCode =
   | "game_path"
+  | "instance_name"
   | "onedrive_folder"
   | "icloud_folder"
   | "long_player_name"

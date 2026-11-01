@@ -9,7 +9,7 @@ import { resetMocks } from "../../ipc/mock";
 import { endMockGame, mockCrashReport, setMockLaunchWarnings } from "../../ipc/mock/handlers/launch";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
-import { LauncherProvider } from "../../state/launcher";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
@@ -28,9 +28,11 @@ const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 
 let view: Rendered | undefined;
 let nav: NavApi;
+let launcher: LauncherApi;
 
 function Probe() {
   nav = useNav();
+  launcher = useLauncher();
   return null;
 }
 
@@ -309,6 +311,54 @@ describe("崩溃诊断：这次启动时的提醒", () => {
     click(button("更换游戏目录"));
     await flush();
     expect(nav.route).toEqual({ page: "settings", section: "game" });
+  });
+
+  it("只有实例名含中文：按钮是「重命名实例」，点了就地改名，不去设置的游戏分区", async () => {
+    setMockLaunchWarnings(["instance_name"]);
+    await crashWith(-1073741819);
+    await open("crash");
+    expect(textOf(section("这次启动时的提醒"))).toContain("实例名含中文或特殊字符");
+    expect(buttons("更换游戏目录")).toHaveLength(0);
+    click(button("重命名实例"));
+    await flush();
+    expect(nav.route).toEqual({ page: "instance", id: ID, tab: "crash" });
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="实例名称"]');
+    if (input === null) throw new Error("没有进入改名");
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("游戏又跑起来时改不了名：按钮带原因禁用，点了不进改名", async () => {
+    setMockLaunchWarnings(["instance_name"]);
+    await crashWith(-1073741819);
+    await open("crash");
+    ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    const rename = button("重命名实例");
+    expect(rename.dataset.disabled).toBe("true");
+    click(rename);
+    await flush();
+    expect(document.querySelector('input[aria-label="实例名称"]')).toBeNull();
+  });
+
+  it("本地库缺失又有实例名提醒：一键尝试里也给重命名，不给更换游戏目录", async () => {
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("应已有崩溃报告");
+      const report: CrashReportDto = {
+        ...base,
+        warnings: ["instance_name"],
+        diagnoses: [{ category: "native_library_missing", summary: "", advice: "", detail: null, matched: "UnsatisfiedLinkError", line: 3, context: [], source: "session_log" }],
+      };
+      return report;
+    });
+    await crashWith(-1073741819);
+    await open("crash");
+    expect(buttons("重命名实例")).toHaveLength(2);
+    expect(buttons("更换游戏目录")).toHaveLength(0);
   });
 
   it("角色名过长去账户页，JVM 内存写法去实例的设置标签", async () => {

@@ -175,7 +175,7 @@ describe("退出码说明", () => {
 });
 
 describe("启动提醒", () => {
-  it("每种提醒都有标题、正文与动作，动作只分三类去处", () => {
+  it("每种提醒都有标题、正文与动作，动作只分四类去处", () => {
     expect([...LAUNCH_WARNING_CODES].sort()).toEqual(Object.keys(LAUNCH_WARNING).sort());
     expect(LAUNCH_WARNING.onedrive_folder).toEqual({
       title: "游戏目录在 OneDrive 里",
@@ -188,9 +188,23 @@ describe("启动提醒", () => {
     expect(LAUNCH_WARNING.jvm_memory_unit.body).toBe("-Xmx、-Xms 的数字后面只能跟 k、m、g、t，例如 -Xmx4g。");
     const byAction = (kind: string) => LAUNCH_WARNING_CODES.filter((c) => LAUNCH_WARNING[c].action.kind === kind);
     expect(byAction("change_game_dir")).toEqual(["game_path", "onedrive_folder", "icloud_folder"]);
+    expect(byAction("rename_instance")).toEqual(["instance_name"]);
     expect(byAction("manage_accounts")).toEqual(["long_player_name"]);
     expect(byAction("instance_settings")).toEqual(["jvm_memory_unit", "jvm_min_over_max", "jvm_max_too_low"]);
     expect(LAUNCH_WARNING.jvm_max_too_low.action.label).toBe("打开实例设置");
+  });
+
+  it("路径提醒分开说：游戏目录指向换目录，实例名指向重命名，都不点名加载器", () => {
+    expect(LAUNCH_WARNING.game_path).toEqual({
+      title: "游戏目录含中文或特殊字符",
+      body: "这个版本在这样的路径下可能读不出文件，可以换到纯英文路径再试。",
+      action: { kind: "change_game_dir", label: "更换游戏目录" },
+    });
+    expect(LAUNCH_WARNING.instance_name).toEqual({
+      title: "实例名含中文或特殊字符",
+      body: "实例目录用的就是这个名字，这个版本在这样的路径下可能读不出文件，可以改成纯英文名字再试。",
+      action: { kind: "rename_instance", label: "重命名实例" },
+    });
   });
 
   it("未知的提醒直接抛错，不回落成空白", () => {
