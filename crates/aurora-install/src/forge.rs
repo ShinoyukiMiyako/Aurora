@@ -1781,6 +1781,75 @@ mod tests {
         );
     }
 
+    /// 重新安装加载器靠这一步补回文件：盘上被删掉的、被改坏的自带库都要从 installer 里重新解出来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installing_again_restores_deleted_and_corrupted_bundled_libraries() {
+        let universal: &[u8] = b"forge-universal-bytes";
+        let shim: &[u8] = b"forge-shim";
+        let universal_path =
+            "net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39-universal.jar";
+        let shim_path = "net/minecraftforge/forge/1.16.5-36.2.39/forge-1.16.5-36.2.39.jar";
+        let artifact = |name: &str, path: &str, bytes: &[u8]| {
+            serde_json::json!({
+                "name": name,
+                "downloads": {"artifact": {
+                    "path": path, "url": "", "sha1": sha1_hex(bytes), "size": bytes.len()
+                }}
+            })
+        };
+        let profile = serde_json::json!({
+            "spec": 0,
+            "version": "1.16.5-forge-36.2.39",
+            "minecraft": "1.16.5",
+            "json": "/version.json",
+            "data": {},
+            "processors": [],
+            "libraries": [artifact(
+                "net.minecraftforge:forge:1.16.5-36.2.39:universal",
+                universal_path,
+                universal
+            )]
+        });
+        let version = serde_json::json!({
+            "id": "1.16.5-forge-36.2.39",
+            "inheritsFrom": "1.16.5",
+            "mainClass": "cpw.mods.modlauncher.Launcher",
+            "libraries": [artifact("net.minecraftforge:forge:1.16.5-36.2.39", shim_path, shim)]
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+                (&format!("maven/{universal_path}"), universal),
+                (&format!("maven/{shim_path}"), shim),
+            ],
+        );
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap();
+
+        let corrupted: Vec<u8> = universal.iter().map(|b| b ^ 0xff).collect();
+        std::fs::write(f.layout.library_path(universal_path), corrupted).unwrap();
+        std::fs::remove_file(f.layout.library_path(shim_path)).unwrap();
+        ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(f.layout.library_path(universal_path)).unwrap(),
+            universal
+        );
+        assert_eq!(
+            std::fs::read(f.layout.library_path(shim_path)).unwrap(),
+            shim
+        );
+    }
+
     /// 1.20.4 起 version.json 把补丁后的 `:client` jar 也列成地址留空的库，installer 的 `maven/` 下
     /// 却没有它：它要等处理器生成。解库这一步不能因此报条目缺失，那样这些版本一次都装不上；
     /// 处理器没生成出来时由随后的补全报加载器自带库缺失。

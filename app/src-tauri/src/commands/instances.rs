@@ -1413,17 +1413,26 @@ pub(crate) async fn install_version_with(
 
 /// 补全实例：新建没装完的照当初的内容重装，其余按现有版本 JSON 补齐缺失文件。长任务，可取消；
 /// 结局写进未完成标记（成功即清除）。
+///
+/// `reinstall_loader`（前端传 `reinstallLoader`）为 true 时把版本 JSON 里读出的加载器原样重装一遍，版本号、
+/// Mod、配置与存档不变；读不出能原样装回的内容时报 `instance_failed`。占用与补全相同。缺省按 false：
+/// 旧任务表里重放的补全任务没有这个键。
 #[tauri::command]
 pub async fn repair_instance(
     app: AppHandle,
     task_id: String,
     id: String,
+    reinstall_loader: Option<bool>,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
     locks: State<'_, InstanceLocks>,
 ) -> Result<RepairResultDto, CommandError> {
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
-    let outcome = repair_instance_with(&facade, &tasks, &locks, &task_id, &id, events.sink()).await;
+    let outcome = if reinstall_loader.unwrap_or(false) {
+        reinstall_loader_with(&facade, &tasks, &locks, &task_id, &id, events.sink()).await
+    } else {
+        repair_instance_with(&facade, &tasks, &locks, &task_id, &id, events.sink()).await
+    };
     events.finish().await;
     crate::textures::refresh_on_success(&app, &outcome).await;
     outcome
@@ -1437,6 +1446,29 @@ pub(crate) async fn repair_instance_with(
     id: &str,
     events: &EventSink,
 ) -> Result<RepairResultDto, CommandError> {
+    run_repair(facade, tasks, locks, task_id, id, false, events).await
+}
+
+pub(crate) async fn reinstall_loader_with(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    locks: &InstanceLocks,
+    task_id: &str,
+    id: &str,
+    events: &EventSink,
+) -> Result<RepairResultDto, CommandError> {
+    run_repair(facade, tasks, locks, task_id, id, true, events).await
+}
+
+async fn run_repair(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    locks: &InstanceLocks,
+    task_id: &str,
+    id: &str,
+    reinstall_loader: bool,
+    events: &EventSink,
+) -> Result<RepairResultDto, CommandError> {
     let aurora = facade.snapshot().await;
     // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名或补全。
     // 依赖检查只在删除、改名动手那一刻扫一次，挡不住补全中途的这些操作。
@@ -1447,7 +1479,12 @@ pub(crate) async fn repair_instance_with(
         .await?;
     let task = tasks.register(task_id)?;
     let aurora = aurora.with_cancel(task.token().clone());
-    let (plan, marker) = aurora.begin_repair(id).await.map_err(instance_error)?;
+    let begun = if reinstall_loader {
+        aurora.begin_loader_reinstall(id).await
+    } else {
+        aurora.begin_repair(id).await
+    };
+    let (plan, marker) = begun.map_err(instance_error)?;
     let outcome = task
         .run(async {
             aurora
@@ -3144,6 +3181,177 @@ mod tests {
         assert_eq!((incomplete.kind, incomplete.outcome), ("repair", "failed"));
         assert_eq!(incomplete.error.as_ref().unwrap().code, err.code);
         assert_eq!(locks.activity("坏库"), None);
+    }
+
+    /// 实例目录里的 Fabric 实例，加载器的库声明了下载件、地址留空，盘上没有文件：补全只能报它补不回来。
+    const LOST_LOADER_JSON: &str = r#"{"id":"FAB","type":"release","clientVersion":"1.21.1",
+        "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+        "libraries":[{"name":"net.fabricmc:fabric-loader:0.16.10","downloads":{"artifact":{
+        "path":"net/fabricmc/fabric-loader/0.16.10/fabric-loader-0.16.10.jar","url":"",
+        "sha1":"0000000000000000000000000000000000000000","size":4}}}]}"#;
+
+    /// 走到重装第一步就停下的环境：版本清单里没有任何版本，报错前已推过「查找原版」，用它认出走的是重装。
+    async fn env_with_empty_manifest(server: &MockServer) -> Env {
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"latest":{"release":"x","snapshot":"x"},"versions":[]}"#),
+            )
+            .mount(server)
+            .await;
+        let uri = server.uri();
+        Env::with(|a| a.with_manifest_url(format!("{uri}/manifest.json")))
+    }
+
+    fn stage_messages(rx: &mut tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<String> {
+        let mut stages = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let CoreEvent::Stage(message) = event {
+                stages.push(message);
+            }
+        }
+        stages
+    }
+
+    /// 重新安装加载器失败时标记记成安装，内容是版本 JSON 里读出的那一份，版本号原样；实例不再占着。之后不带
+    /// 参数的普通补全（修复实例、修复并启动、任务重试）照着标记接着重装，不退回按版本 JSON 补全。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_loader_reinstall_leaves_what_to_put_back_in_the_marker() {
+        let server = MockServer::start().await;
+        let env = env_with_empty_manifest(&server).await;
+        env.version("FAB", LOST_LOADER_JSON);
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r1", "FAB", &sink)
+            .await
+            .unwrap_err();
+        assert_ne!(err.code, common::CANCELLED);
+        assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let incomplete = list[0].incomplete.as_ref().unwrap();
+        assert_eq!((incomplete.kind, incomplete.outcome), ("install", "failed"));
+        assert_eq!(
+            incomplete.spec,
+            Some(InstallSpecDto {
+                mc_version: "1.21.1".into(),
+                loader: Some("fabric".into()),
+                loader_version: Some("0.16.10".into()),
+            })
+        );
+        assert_eq!(incomplete.error.as_ref().unwrap().code, err.code);
+        assert_eq!(locks.activity("FAB"), None);
+
+        repair_instance_with(&env.facade, &registry, &locks, "r2", "FAB", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
+    }
+
+    /// 普通补全查出加载器自带的库缺失后，再点一次补全不能原样失败：同一个命令这回走重装。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_stuck_on_a_lost_loader_library_moves_on_to_reinstalling_it() {
+        let server = MockServer::start().await;
+        let env = env_with_empty_manifest(&server).await;
+        env.version("FAB", LOST_LOADER_JSON);
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, mut rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let first = repair_instance_with(&env.facade, &registry, &locks, "r1", "FAB", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(first.code, code::LOADER_LIBRARY_MISSING);
+        assert_eq!(
+            stage_messages(&mut rx),
+            vec!["补全实例 FAB 的文件".to_owned()]
+        );
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let incomplete = list[0].incomplete.as_ref().unwrap();
+        assert_eq!((incomplete.kind, incomplete.outcome), ("repair", "failed"));
+        assert_eq!(
+            incomplete.error.as_ref().unwrap().code,
+            code::LOADER_LIBRARY_MISSING
+        );
+
+        let second = repair_instance_with(&env.facade, &registry, &locks, "r2", "FAB", &sink)
+            .await
+            .unwrap_err();
+        assert_ne!(second.code, code::LOADER_LIBRARY_MISSING);
+        assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
+    }
+
+    /// 重新安装加载器与补全同一把锁：游戏运行中、基底被占着时都报 instance_busy，被拒时不占任务 id，也不写标记。
+    #[tokio::test]
+    async fn reinstalling_the_loader_goes_through_the_instance_locks() {
+        let env = Env::new();
+        env.vanilla("1.20.1");
+        let dir = env.version(
+            "FAB",
+            r#"{"id":"FAB","inheritsFrom":"1.20.1","type":"release","mainClass":"K",
+                "libraries":[{"name":"net.fabricmc:fabric-loader:0.15.0"}]}"#,
+        );
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let running = locks.acquire("FAB", InstanceActivity::Running).unwrap();
+        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r1", "FAB", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "FAB", "activity": "running" })
+        );
+        drop(running);
+
+        let deleting = locks.acquire("1.20.1", InstanceActivity::Deleting).unwrap();
+        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r2", "FAB", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "deleting" })
+        );
+        drop(deleting);
+
+        assert!(!registry.is_running("r1"));
+        assert!(!registry.is_running("r2"));
+        assert!(!aurora_core::MarkerStore::for_version_dir(&dir)
+            .path()
+            .exists());
+        assert_eq!(locks.activity("FAB"), None);
+    }
+
+    /// 没有能原样装回的加载器：报 instance_failed，原因写进 detail，实例不留标记、不留占用。
+    #[tokio::test]
+    async fn reinstalling_the_loader_of_a_vanilla_instance_is_refused() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let err = reinstall_loader_with(&env.facade, &registry, &locks, "r", "1.21.1", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::INSTANCE_FAILED);
+        assert_eq!(
+            err.message,
+            "实例 1.21.1 无法补全：没有装加载器，不需要重新安装"
+        );
+        assert_eq!(
+            err.detail.unwrap()["reason"],
+            json!("没有装加载器，不需要重新安装")
+        );
+        assert!(!aurora_core::MarkerStore::for_version_dir(&dir)
+            .path()
+            .exists());
+        assert_eq!(locks.activity("1.21.1"), None);
     }
 
     #[tokio::test]
