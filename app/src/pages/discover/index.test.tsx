@@ -1516,6 +1516,54 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.toasts.find((t) => t.title === "没能检查下载好的文件")?.body).toBe("file_id 5000001 出现了不止一次");
   });
 
+  it("系统对话框弹出之前连点「我已下载，重新检查」只弹一个；用户取消后可以再检查一次", async () => {
+    const picked = deferred<string | null>();
+    pickFolder.mockImplementationOnce(() => picked.promise);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(pickFolder).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      picked.resolve(null);
+      await settle();
+    });
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(pickFolder).toHaveBeenCalledTimes(2);
+    expect(callsOf(ipc, "claim_blocked_files")).toHaveLength(1);
+  });
+
+  it("取下载文件夹失败后还能再检查一次：通知交给外层，这次检查不留下占位", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    ipc.overrides.set("downloads_folder", () => {
+      throw new IpcError("io", "找不到系统的下载文件夹");
+    });
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(launcher.state.toasts.find((t) => t.title === "没能检查下载好的文件")?.body).toBe("找不到系统的下载文件夹");
+    expect(pickFolder).not.toHaveBeenCalled();
+
+    ipc.overrides.set("downloads_folder", () => MOCK_DOWNLOADS_DIR);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(pickFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it("等系统对话框期间关掉了清单：选好文件夹也不再认领", async () => {
+    const picked = deferred<string | null>();
+    pickFolder.mockImplementationOnce(() => picked.promise);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    await clickIn(blockedDialog(), "关闭");
+    await act(async () => {
+      picked.resolve(MOCK_DOWNLOADS_DIR);
+      await settle();
+    });
+    expect(callsOf(ipc, "claim_blocked_files")).toEqual([]);
+  });
+
   it("检查中：主按钮写「正在检查…」，行内「打开网页」不能点；关掉清单不打断检查，晚到的结果丢弃，再打开从头开始", async () => {
     const gate = deferred<unknown>();
     ipc.overrides.set("claim_blocked_files", () => gate.promise);
