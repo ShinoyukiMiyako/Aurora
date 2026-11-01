@@ -600,11 +600,11 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       // 实例里已有 Fabric API（旧版）：沿用，不擅自升级。
       ["fapi-0922", "AANobbMI", true, "Fabric API"],
     ]);
-    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时手动添加"]);
 
     const forge = await planInstall("1.20.1-Forge", "modrinth", "AANobbMI", "sodium-060");
     expect(forge.items).toHaveLength(1);
-    expect(forge.skipped).toEqual(["前置 Fabric API 没有适配该实例的版本，未加入计划", "可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(forge.skipped).toEqual(["前置 Fabric API 没有适配该实例的版本，未加入计划", "可选前置 Mod Menu 未自动安装，需要时手动添加"]);
 
     const same = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "gvQqBUqZ", "lith-060");
     expect(same.items[0].already_satisfied).toBe(true);
@@ -628,7 +628,7 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       download_url: null,
       dependencies: [],
     });
-    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时手动添加"]);
 
     expect((await installMod("t-delisted", MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
     // 只落下主项，下架的 Fabric API 原样留着、卷宗记录不变。

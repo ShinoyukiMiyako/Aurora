@@ -154,7 +154,7 @@ impl SkipNote {
                 name(Some(project_id))
             ),
             SkipNote::Optional { project_id } => format!(
-                "可选前置 {} 未自动安装，需要时请手动添加",
+                "可选前置 {} 未自动安装，需要时手动添加",
                 name(project_id.as_deref())
             ),
             SkipNote::Incompatible {
@@ -701,7 +701,7 @@ mod tests {
                     delisted: false,
                 },
             ],
-            skipped: vec!["可选前置 Mod Menu 未自动安装，需要时请手动添加".to_owned()],
+            skipped: vec!["可选前置 Mod Menu 未自动安装，需要时手动添加".to_owned()],
         };
 
         let json = serde_json::to_value(&plan).unwrap();
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(json["items"][1]["title"], serde_json::Value::Null);
         assert_eq!(
             json["skipped"][0],
-            "可选前置 Mod Menu 未自动安装，需要时请手动添加"
+            "可选前置 Mod Menu 未自动安装，需要时手动添加"
         );
     }
 
@@ -747,7 +747,7 @@ mod tests {
                 project_id: Some("modmenu".to_owned())
             }
             .render(name),
-            "可选前置 Mod Menu 未自动安装，需要时请手动添加"
+            "可选前置 Mod Menu 未自动安装，需要时手动添加"
         );
         assert_eq!(
             SkipNote::Tool {
@@ -975,7 +975,7 @@ mod tests {
         assert_eq!(
             plan.skipped,
             vec![
-                "可选前置 Mod Menu 未自动安装，需要时请手动添加".to_owned(),
+                "可选前置 Mod Menu 未自动安装，需要时手动添加".to_owned(),
                 "sodium-v1.jar 声明与 optifabric 不兼容，未做任何处理".to_owned(),
                 "内嵌前置 cloth-config 已打包在 sodium-v1.jar 内，无需单独安装".to_owned(),
             ]

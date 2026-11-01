@@ -99,7 +99,7 @@ describe("键盘", () => {
   it("回车选中高亮项并关闭，焦点留在触发器", () => {
     const onChange = vi.fn();
     mount(<Host options={JAVA} initial={null} onChange={onChange} />);
-    expect(trigger().textContent).toBe("请选择");
+    expect(trigger().textContent).toBe("选择");
     focusTrigger();
     press("Enter");
     expect(highlighted()).toBe("自动选择");

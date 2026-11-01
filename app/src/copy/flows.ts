@@ -139,7 +139,7 @@ export const INSTANCE_NAME_ERROR: Readonly<Record<NameRule, string>> = {
 export const OFFLINE_NAME_COPY = {
   /** 未输入时的默认提示。 */
   hint: "推荐 3 到 16 位英文字母、数字或下划线，进服务器时显示的就是它",
-  empty: "请输入用户名",
+  empty: "输入用户名",
   tooLong: "最多 16 个字符",
   quote: "不能包含双引号",
   duplicate: "已经有同名账户了",
@@ -1183,7 +1183,7 @@ export function incompleteReason(incomplete: IncompleteInput): string {
     return incomplete.error === null ? "上次安装或补全没有完成，文件不完整" : `上次安装或补全没有完成：${incomplete.error.message}`;
   }
   // 导入半途而废时缺的是整合包里的 Mod 与配置，补全补不回来，只能删掉重新导入。
-  if (incomplete.kind === "modpack") return "整合包没有导入完，请删掉这个实例后重新导入";
+  if (incomplete.kind === "modpack") return "整合包没有导入完，删掉这个实例后重新导入";
   const what = incomplete.kind === "install" ? "安装" : "补全";
   switch (incomplete.outcome) {
     case "pending":

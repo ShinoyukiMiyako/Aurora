@@ -401,7 +401,7 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
     const v = item.version;
     const children: PlannedItem[] = [];
     for (const dep of v.dependencies) {
-      if (dep.kind === "optional") skipped.push(`可选前置 ${name(dep.project_id)} 未自动安装，需要时请手动添加`);
+      if (dep.kind === "optional") skipped.push(`可选前置 ${name(dep.project_id)} 未自动安装，需要时手动添加`);
       else if (dep.kind === "incompatible") skipped.push(`${v.file_name} 声明与 ${name(dep.project_id)} 不兼容，未做任何处理`);
       else if (dep.kind === "embedded") skipped.push(`内嵌前置 ${name(dep.project_id)} 已打包在 ${v.file_name} 内，无需单独安装`);
       else if (dep.kind === "tool") skipped.push(`工具类关联 ${name(dep.project_id)} 未自动安装`);
@@ -467,7 +467,7 @@ function plannedFromLedger(row: LedgerRow, requiredBy: string): PlannedItem {
 function busyCheck(versionId: string, fileName: string): void {
   if (busyFiles.has(`${versionId}/${fileName}`)) {
     const path = `${mockModsDir(versionId)}/${fileName}`;
-    throw new IpcError("mod_file_busy", `${fileName} 正被其它程序占用（游戏可能正在运行），请关闭游戏后再试`, { path });
+    throw new IpcError("mod_file_busy", `${fileName} 正被其它程序占用（游戏可能正在运行），结束游戏后再试`, { path });
   }
 }
 

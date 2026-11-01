@@ -259,7 +259,7 @@ beforeEach(() => {
   ipc.overrides.set("last_launch_log", () => null);
   ipc.overrides.set("list_history", () => history);
   ipc.overrides.set("rollback_checks", () =>
-    history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚，请直接移除对应文件" })),
+    history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚，直接移除对应文件" })),
   );
   ipc.overrides.set("rollback", () => null);
   ipc.overrides.set("template_info", () => template);
@@ -1337,7 +1337,7 @@ describe("实例详情：整合包没导入完", () => {
 
   it("概览横幅与头图菜单不给补全，改为重新导入与删除", async () => {
     await open("overview");
-    expect(text()).toContain("整合包没有导入完，请删掉这个实例后重新导入");
+    expect(text()).toContain("整合包没有导入完，删掉这个实例后重新导入");
     expect(() => button("修复实例")).toThrow();
     click(button("更多操作"));
     const labels = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(textOf);
@@ -2050,7 +2050,7 @@ describe("实例详情：日志与历史", () => {
     const items = [...document.querySelectorAll("ol > li")].map(textOf);
     expect(items[0]).toContain("更新 Sodium");
     expect(items[1]).toContain("安装 sodium-0.5");
-    expect(items[1]).toContain("安装事件不支持回滚，请直接移除对应文件");
+    expect(items[1]).toContain("安装事件不支持回滚，直接移除对应文件");
     expect(text()).toContain("2 条记录 · 1 条可回滚");
     click(button("回滚到 0.5.0"));
     await flush();

@@ -224,7 +224,7 @@ pub(crate) async fn ensure_not_held(paths: Vec<PathBuf>) -> Result<()> {
             Err(refuse(
                 &path,
                 std::io::ErrorKind::ResourceBusy,
-                format!("{name} 正被其它程序占用（游戏可能正在运行），请关闭游戏后再试"),
+                format!("{name} 正被其它程序占用（游戏可能正在运行），结束游戏后再试"),
             ))
         }
         None => Ok(()),

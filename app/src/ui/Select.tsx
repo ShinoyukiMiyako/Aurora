@@ -44,7 +44,7 @@ export interface SelectProps<T extends string> {
 
 /** 超过这个数量的选项在列表顶部给过滤框。 */
 export const SELECT_FILTER_THRESHOLD = 12;
-export const SELECT_PLACEHOLDER = "请选择";
+export const SELECT_PLACEHOLDER = "选择";
 export const SELECT_EMPTY_COPY = "没有匹配项";
 export const SELECT_FILTER_LABEL = "筛选选项";
 export const SELECT_FILTER_PLACEHOLDER = "筛选";

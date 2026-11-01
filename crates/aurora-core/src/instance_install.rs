@@ -401,7 +401,7 @@ impl Aurora {
             Some(IncompleteKind::Modpack { .. }) => {
                 return Err(InstanceError::NotRepairable {
                     id: id.to_owned(),
-                    reason: "整合包没有导入完，缺的 Mod 与配置补不回来，请删掉这个实例后重新导入"
+                    reason: "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入"
                         .to_owned(),
                 }
                 .into());
