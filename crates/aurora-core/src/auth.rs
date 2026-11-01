@@ -127,8 +127,16 @@ fn record_credential_recovery(path: &Path, recovery: CredentialRecovery) {
 /// 改名失败照实报错：这时按空库继续的话，下一次登录就会把用户的文件盖掉。
 #[cfg(windows)]
 fn preserve_unreadable_credentials(path: &Path) -> Result<PathBuf> {
-    use chrono::{Datelike, Local, Timelike};
-    let now = Local::now();
+    preserve_unreadable_credentials_at(path, chrono::Local::now())
+}
+
+/// 取名用的时刻由调用方给：同一秒里重名这件事，取系统时钟时测不稳。
+#[cfg(windows)]
+fn preserve_unreadable_credentials_at(
+    path: &Path,
+    now: chrono::DateTime<chrono::Local>,
+) -> Result<PathBuf> {
+    use chrono::{Datelike, Timelike};
     let base = format!(
         "{}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
         path.display(),
@@ -2533,16 +2541,13 @@ mod tests {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn rotated_refresh_token_does_not_overwrite_a_fresh_relogin() {
             let server = MockServer::start().await;
+            let (reply, mut gate) = hold(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "rotated-refresh",
+                "expires_in": 3600
+            })));
             Mock::given(method("POST"))
                 .and(path("/token"))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .set_body_json(json!({
-                            "access_token": "AT", "refresh_token": "rotated-refresh",
-                            "expires_in": 3600
-                        }))
-                        .set_delay(Duration::from_millis(400)),
-                )
+                .respond_with(reply)
                 .mount(&server)
                 .await;
             Mock::given(method("POST"))
@@ -2565,14 +2570,17 @@ mod tests {
             };
             let stale = aurora.store_login(ms_account("old-refresh")).unwrap();
 
+            // 新登录落盘之后才放令牌端点回话，换出来的令牌一定晚于新凭据。
             let relogin = async {
-                until_requested(&server, "/token").await;
+                gate.arrived().await;
                 let aurora = aurora.clone();
                 let fresh = ms_account("new-refresh");
-                tokio::task::spawn_blocking(move || aurora.store_login(fresh))
+                let stored = tokio::task::spawn_blocking(move || aurora.store_login(fresh))
                     .await
                     .unwrap()
-                    .unwrap()
+                    .unwrap();
+                gate.release();
+                stored
             };
             let (refreshed, _) = tokio::join!(aurora.ensure_account_fresh(&stale), relogin);
             refreshed.unwrap_err();
@@ -2993,62 +3001,36 @@ mod tests {
             }
         }
 
-        /// 留存名已被占用（同一秒里又坏了一次）：另取 `-2`，先前那份不被顶掉。Windows 上的 rename 会
-        /// 直接覆盖已存在的目标，去掉占用检查本用例即挂。
-        ///
-        /// 留存名取自系统时钟，没有注入口，用例只能把接下来几秒的名字先占上。机器满载时读库可能排到这几秒
-        /// 之后，那一轮的头一个候选没被占用，什么也说明不了，换个目录重来。
+        /// 留存名已被占用（同一秒里又坏了一次）：另取 `-2`、`-3`，先前那几份不被顶掉。Windows 上的
+        /// rename 会直接覆盖已存在的目标，去掉占用检查本用例即挂。
         #[test]
         fn preserving_never_overwrites_an_earlier_copy() {
-            use chrono::{Datelike, Local, Timelike};
-            const OCCUPIED_SECONDS: i64 = 5;
-            for _ in 0..50 {
-                let tmp = tempfile::tempdir().unwrap();
-                let aurora = aurora_at(tmp.path());
-                let credentials = tmp.path().join(CREDENTIALS_FILE);
-                let start = Local::now();
-                let occupied: Vec<_> = (0..OCCUPIED_SECONDS)
-                    .map(|offset| {
-                        let at = start + chrono::Duration::seconds(offset);
-                        let name = format!(
-                            "{CREDENTIALS_FILE}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
-                            at.year(),
-                            at.month(),
-                            at.day(),
-                            at.hour(),
-                            at.minute(),
-                            at.second()
-                        );
-                        let path = tmp.path().join(name);
-                        std::fs::write(&path, format!("earlier {offset}")).unwrap();
-                        path
-                    })
-                    .collect();
-                std::fs::write(&credentials, b"broken again").unwrap();
+            use chrono::TimeZone;
+            let tmp = tempfile::tempdir().unwrap();
+            let credentials = tmp.path().join(CREDENTIALS_FILE);
+            let at = chrono::Local
+                .with_ymd_and_hms(2026, 6, 15, 12, 34, 56)
+                .unwrap();
+            let named = |suffix: &str| {
+                tmp.path().join(format!(
+                    "{CREDENTIALS_FILE}{BROKEN_SUFFIX}20260615-123456{suffix}"
+                ))
+            };
 
-                aurora.accounts().unwrap();
-                // 全程不到 OCCUPIED_SECONDS - 1 秒，取名时的那一秒才一定落在占好的名字里。
-                if Local::now() - start >= chrono::Duration::seconds(OCCUPIED_SECONDS - 1) {
-                    continue;
-                }
-                let all = preserved_credentials(tmp.path());
-                assert_eq!(all.len(), occupied.len() + 1, "{all:?}");
-                for (offset, path) in occupied.iter().enumerate() {
-                    assert_eq!(
-                        std::fs::read_to_string(path).unwrap(),
-                        format!("earlier {offset}")
-                    );
-                }
-                let fresh = all.iter().find(|p| !occupied.contains(p)).unwrap();
-                assert!(
-                    fresh.to_str().unwrap().ends_with("-2"),
-                    "头一个候选被占用时应追加 -2：{}",
-                    fresh.display()
-                );
-                assert_eq!(std::fs::read(fresh).unwrap(), b"broken again");
-                return;
+            for (attempt, suffix) in ["", "-2", "-3"].into_iter().enumerate() {
+                std::fs::write(&credentials, format!("broken {attempt}")).unwrap();
+                let preserved = preserve_unreadable_credentials_at(&credentials, at).unwrap();
+                assert_eq!(preserved, named(suffix));
+                assert!(!credentials.exists(), "凭据库应已挪走");
             }
-            panic!("连续 50 轮读库都没赶在占好的几秒之内，判断不了留存名的占用");
+
+            for (attempt, suffix) in ["", "-2", "-3"].into_iter().enumerate() {
+                assert_eq!(
+                    std::fs::read_to_string(named(suffix)).unwrap(),
+                    format!("broken {attempt}"),
+                    "留存 {suffix:?} 被后来的那份顶掉了"
+                );
+            }
         }
 
         /// 读文件本身失败（这里是同名目录占着凭据库的位置）不是坏文件：照实报错，什么都不挪。
