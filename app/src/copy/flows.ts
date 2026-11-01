@@ -905,3 +905,6 @@ export const MODPACK_REIMPORT_COPY = {
 export function modpackLabel(pack: { name: string; version: string | null }): string {
   return pack.version === null ? pack.name : `${pack.name} ${pack.version}`;
 }
+
+/** 整合包名全是 Windows 不允许的字符、整理完什么都不剩时，新实例的默认名。 */
+export const MODPACK_FALLBACK_NAME = "整合包";

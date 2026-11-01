@@ -1,7 +1,7 @@
 // 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、整合包没导入完。纯函数，页面、启动入口与状态层共用同一份。
 
 import { INSTANCE_NAME_ERROR, OFFLINE_NAME_COPY } from "../copy/flows";
-import { checkInstanceName } from "../ipc/instances";
+import { checkInstanceName, ILLEGAL_NAME_CHARS, INSTANCE_NAME_MAX_UNITS } from "../ipc/instances";
 import type { InstanceSummary } from "./adapt";
 
 // ---------------------------------------------------------------- 实例名
@@ -13,6 +13,44 @@ import type { InstanceSummary } from "./adapt";
 export function instanceNameError(name: string, existingIds: readonly string[], currentId: string | null = null): string | null {
   const rule = checkInstanceName(name, existingIds, currentId);
   return rule === null ? null : INSTANCE_NAME_ERROR[rule];
+}
+
+/** 按 UTF-16 码元截到上限（与校验的计法一致），不切开代理对：放不下整个字就整个不要。 */
+function fitUnits(name: string, maxUnits: number): string {
+  let out = "";
+  for (const ch of name) {
+    if (out.length + ch.length > maxUnits) break;
+    out += ch;
+  }
+  return out;
+}
+
+const trimEdges = (name: string): string => name.replace(/^[\s.]+/u, "").replace(/[\s.]+$/u, "");
+
+function cleanName(raw: string): string {
+  const replaced = [...raw].map((ch) => (ILLEGAL_NAME_CHARS.includes(ch) || /\p{Cc}/u.test(ch) ? " " : ch)).join("");
+  let name = trimEdges(fitUnits(trimEdges(replaced.replace(/ {2,}/g, " ")), INSTANCE_NAME_MAX_UNITS));
+  // 设备名（CON、NUL、COM1…）带扩展名时，在后面追加什么都还是保留名；点换成空格后不再带扩展名，追加序号就能避开
+  if (checkInstanceName(name, []) === "reserved") name = trimEdges(name.replace(/\./g, " ").replace(/ {2,}/g, " "));
+  return name;
+}
+
+/**
+ * 把外来的名称（整合包名等）整理成能直接提交的默认实例名。Windows 不允许的字符与控制字符换成空格、连续空格并成一个，
+ * 去掉开头与结尾的点和空白，按长度上限截断；整理完什么都不剩时用 fallback。与现有实例不分大小写重名，或本身是 Windows
+ * 保留的设备名时，依次追加「 2」「 3」…，追加之后仍不超过上限：截短的是名字本身，序号不截。
+ */
+export function defaultInstanceName(raw: string, existingIds: readonly string[], fallback: string): string {
+  const cleaned = cleanName(raw);
+  const base = cleaned === "" ? cleanName(fallback) : cleaned;
+  if (base === "") throw new Error(`默认实例名的后备名「${fallback}」整理后是空的`);
+  // 序号候选不会撞上别的规则，只可能与现有实例重名，所以最多试到现有实例数 + 1 个序号就一定有空位
+  for (let n = 1; n <= existingIds.length + 2; n++) {
+    const suffix = n === 1 ? "" : ` ${n}`;
+    const candidate = `${trimEdges(fitUnits(base, INSTANCE_NAME_MAX_UNITS - suffix.length))}${suffix}`;
+    if (checkInstanceName(candidate, existingIds) === null) return candidate;
+  }
+  throw new Error(`给「${raw}」找不到可用的默认实例名`);
 }
 
 // ---------------------------------------------------------------- 离线用户名
