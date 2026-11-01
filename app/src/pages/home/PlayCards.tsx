@@ -251,7 +251,7 @@ function InsightsBody({ activity, selected, onPickDay }: { activity: PlayActivit
           label={HOME_COPY.streak}
           value={String(streak)}
           unit={HOME_COPY.dayUnit}
-          delta={{ direction: "flat", text: streak >= STREAK_WEEK ? HOME_COPY.streakWeek : HOME_COPY.streakKeep }}
+          delta={streak === 0 ? undefined : { direction: "flat", text: streak >= STREAK_WEEK ? HOME_COPY.streakWeek : HOME_COPY.streakKeep }}
         />
         <StatTile
           label={HOME_COPY.topLoader}

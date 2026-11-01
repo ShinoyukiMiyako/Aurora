@@ -431,7 +431,8 @@ function DownloadCard() {
   }
 
   const managed = java.status === "ready" && hasManaged(java.data, major);
-  const reason = !online ? LOAD_COPY.offlineReason : managed ? JAVA_COPY.managedInstalled(major) : undefined;
+  // 首次扫描回来前下拉显示的是实例要求里最高的，点了入队的就是它，而不是缺的那个
+  const reason = !online ? LOAD_COPY.offlineReason : java.status === "loading" ? JAVA_COPY.scanPending : managed ? JAVA_COPY.managedInstalled(major) : undefined;
   const download = () =>
     void run(async () => {
       await actions.installJava(major);

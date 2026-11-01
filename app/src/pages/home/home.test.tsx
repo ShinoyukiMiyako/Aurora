@@ -335,6 +335,22 @@ describe("主页：游玩日历与洞察", () => {
     expect(statLabel("累计时长")).toBe("累计时长 43 小时，4 个实例");
   });
 
+  it("连续游玩断了：只写 0 天，没有可以「继续保持」的；接上一天又写回来", async () => {
+    let days = [day("2026-10-26", [["生存", 120]])];
+    ipc.overrides.set("play_stats", (args: IpcArgs) => {
+      const range = args.range as { from: string; to: string };
+      return { from: range.from, to: range.to, days, total_minutes: 120, instances: [] };
+    });
+    await mount();
+    expect(statLabel("连续游玩")).toBe("连续游玩 0 天");
+    expect(text()).not.toContain("继续保持");
+
+    days = [...days, day("2026-10-30", [["生存", 30]])];
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 30 * MINUTE }));
+    await flush();
+    expect(statLabel("连续游玩")).toBe("连续游玩 1 天，继续保持");
+  });
+
   it("wide 档：洞察并进第一排，与问候、继续游玩同排，跨 3 列", async () => {
     vi.stubGlobal("innerWidth", 1440);
     await mount();

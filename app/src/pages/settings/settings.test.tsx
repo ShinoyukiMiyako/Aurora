@@ -613,6 +613,35 @@ describe("设置页：Java", () => {
       expect(shown()).toContain("Java 17");
     });
 
+    it("首次扫描还没回来：下载带原因禁用，点了不入队；回来后入队的是缺的那个，而不是最高的", async () => {
+      const scan = deferred<JavaInstallationDto[]>();
+      instancesNeed(21, 17);
+      ipc.overrides.set("detect_java", () => scan.promise);
+      await mount("java");
+      const javaTasks = () => launcher.state.tasks.filter((t) => t.kind === "java" && t.status !== "done").map((t) => t.spec);
+
+      expect(contentButton("下载").getAttribute("aria-disabled")).toBe("true");
+      const host = contentButton("下载").closest("[data-tooltip-host]");
+      if (host === null) throw new Error("「下载」外面没有提示宿主");
+      act(() => {
+        host.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("正在扫描本机的 Java，扫完才知道缺哪个");
+      await click(contentButton("下载"));
+      expect(javaTasks()).toEqual([]);
+
+      await act(async () => {
+        scan.resolve([installation("C:\\Java\\jdk-21\\bin\\java.exe", 21)]);
+        await settle(20);
+      });
+      expect(contentButton("下载").getAttribute("aria-disabled")).toBeNull();
+      await click(contentButton("下载"));
+      expect(javaTasks()).toEqual([{ command: "install_java", args: { requiredMajor: 17 } }]);
+    });
+
     it("首次扫描就失败：说不出缺哪个，按都不缺显示最高的，下载照常可点", async () => {
       instancesNeed(21, 17);
       ipc.overrides.set("detect_java", () => {

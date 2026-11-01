@@ -127,6 +127,7 @@ export const JAVA_COPY = {
   downloadTitle: "下载运行时",
   downloadMajor: "要下载的主版本",
   download: "下载",
+  scanPending: "正在扫描本机的 Java，扫完才知道缺哪个",
   managedInstalled: (major: number) => `已经装了托管的 Java ${major}`,
   majorUsers: (n: number) => `${n} 个实例需要`,
   noMajors: "还没有实例用到需要下载的 Java，新建实例后这里会列出它们要的主版本。",

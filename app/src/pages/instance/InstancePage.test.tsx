@@ -9,6 +9,7 @@ import { IpcError } from "../../ipc/errors";
 import type { HistoryEvent } from "../../ipc/history";
 import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, TemplateInfoDto, WorldBackupDto, WorldBackupListDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
+import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
@@ -424,6 +425,30 @@ describe("实例详情：头图与标签", () => {
     resetRecorderKeepOverrides();
     await open("overview");
     expect(text()).toContain("还没开始玩");
+  });
+
+  it("页面开着时游戏退出：上次游玩跟着真实时间走，不停在 1 秒前等 30 秒一跳的时钟", async () => {
+    const lastPlayed = () => byRole("group", /^上次游玩/).getAttribute("aria-label");
+    const pass = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    await open("overview");
+    expect(lastPlayed()).toContain("2 天前");
+
+    await pass(10_000);
+    const exitedAt = Date.now();
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_played_at: exitedAt } : i));
+    act(() => emit(GAME_EXIT_EVENT, { version_id: ID, exit_code: 0, crashed: false, killed: false, duration_ms: 3 * 60_000 }));
+    await flush();
+    expect(lastPlayed()).toContain("1 秒前");
+
+    await pass(5_000);
+    expect(lastPlayed()).toContain("5 秒前");
+    await pass(14_000);
+    expect(lastPlayed()).toContain("19 秒前");
+    await pass(41_000);
+    expect(lastPlayed()).toContain("1 分钟前");
   });
 
   it("切标签用 replace：路由换成新标签，面板随之切换", async () => {
