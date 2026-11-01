@@ -460,7 +460,7 @@ function modFileName(args: MockArgs, versionId: string): string {
 
 function checkedModFileName(fileName: string, versionId: string): string {
   if (fileName.includes("/") || fileName.includes("\\") || !ledgerKey(fileName).endsWith(".jar")) {
-    throw refuse(`${mockModsDir(versionId)}/${fileName}`, `${fileName} 不是 mods 目录里的模组文件名`);
+    throw refuse(`${mockModsDir(versionId)}/${fileName}`, `${fileName} 不是 mods 目录里的 Mod 文件名`);
   }
   return fileName;
 }
@@ -473,7 +473,7 @@ function toggleModFile(id: string, instance: MockInstance, fileName: string, ena
   // 与后端一致：已是目标状态就原样返回，不动文件。
   if (target === fileName) return `${mockModsDir(id)}/${fileName}`;
   const targetPath = `${mockModsDir(id)}/${target}`;
-  if (hasFile(instance, target)) throw new IpcError("mod_state_conflict", `模组启禁状态切换失败: 目标文件已存在 ${targetPath}`);
+  if (hasFile(instance, target)) throw new IpcError("mod_state_conflict", `Mod 启用状态切换失败：目标文件已存在 ${targetPath}`);
   const file = instance.files.find((f) => f.file_name === fileName);
   if (!file) throw new IpcError("mod_platform_failed", `文件 IO 失败: ${targetPath}`);
   file.file_name = target;

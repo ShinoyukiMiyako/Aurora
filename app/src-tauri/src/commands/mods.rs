@@ -1040,7 +1040,7 @@ mod tests {
             wire[1]["error"]["detail"]["causes"][0]
                 .as_str()
                 .unwrap()
-                .contains("notes.txt 不是 mods 目录里的模组文件名"),
+                .contains("notes.txt 不是 mods 目录里的 Mod 文件名"),
             "{}",
             wire[1]
         );

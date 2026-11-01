@@ -60,7 +60,7 @@ pub enum Error {
     CurseForgeKeyMissing,
 
     /// 切换模组启用/禁用状态时，目标文件名已存在（同名启用与禁用副本冲突）。
-    #[error("模组启禁状态切换失败: 目标文件已存在 {path}")]
+    #[error("Mod 启用状态切换失败：目标文件已存在 {path}")]
     ModStateConflict { path: PathBuf },
 }
 
@@ -148,6 +148,14 @@ mod tests {
         assert_eq!(
             Error::CurseForgeKeyMissing.to_string(),
             "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用"
+        );
+        // 原文直接作批量启停部分失败通知的正文，叫法与标点要和界面一致
+        let conflict = Error::ModStateConflict {
+            path: PathBuf::from("D:/mc/mods/a.jar.disabled"),
+        };
+        assert_eq!(
+            conflict.to_string(),
+            "Mod 启用状态切换失败：目标文件已存在 D:/mc/mods/a.jar.disabled"
         );
     }
 }

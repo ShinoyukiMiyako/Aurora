@@ -864,7 +864,7 @@ pub(crate) fn mod_file_path(mods_dir: &Path, file_name: &str) -> Result<PathBuf>
         return Err(refuse(
             &mods_dir.join(file_name),
             std::io::ErrorKind::InvalidInput,
-            format!("{file_name} 不是 mods 目录里的模组文件名"),
+            format!("{file_name} 不是 mods 目录里的 Mod 文件名"),
         ));
     }
     Ok(mods_dir.join(file_name))
@@ -2102,7 +2102,7 @@ mod tests {
             let err = aurora.remove_mod("1.21", bad).await.unwrap_err();
             let (_, reason) = refusal(&err);
             assert!(
-                reason.contains("不是 mods 目录里的模组文件名"),
+                reason.contains("不是 mods 目录里的 Mod 文件名"),
                 "{bad:?}: {reason}"
             );
             assert!(aurora.set_mod_enabled("1.21", bad, false).await.is_err());
@@ -2163,7 +2163,7 @@ mod tests {
             &mods_dir.join("a.jar.disabled")
         );
         let (_, reason) = refusal(outcomes[1].result.as_ref().unwrap_err());
-        assert!(reason.contains("不是 mods 目录里的模组文件名"), "{reason}");
+        assert!(reason.contains("不是 mods 目录里的 Mod 文件名"), "{reason}");
         // 已是禁用态：原样返回原路径。
         assert_eq!(
             outcomes[2].result.as_ref().unwrap(),
@@ -2309,7 +2309,7 @@ mod tests {
             .set_mod_update_hold("1.21", "a.jar.old", None)
             .await
             .unwrap_err();
-        assert!(refusal(&err).1.contains("不是 mods 目录里的模组文件名"));
+        assert!(refusal(&err).1.contains("不是 mods 目录里的 Mod 文件名"));
         assert_eq!(tokio::fs::read(store.path()).await.unwrap(), before);
     }
 

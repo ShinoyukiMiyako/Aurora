@@ -7,6 +7,7 @@ import { clearMockEventListeners, subscribeMockEvent } from "./mock/events";
 import { acquireMockInstance } from "./mock/handlers/instances";
 import {
   MOCK_MOD_INSTANCE,
+  mockInstance,
   mockModFileCount,
   setMockChangelog,
   setMockModFileBusy,
@@ -171,7 +172,7 @@ describe("移除", () => {
     expect(await failure(removeMod(MOCK_MOD_INSTANCE, " "))).toMatchObject({ code: "invalid_argument", message: "file_name 不能为空" });
     const notMod = await failure(removeMod(MOCK_MOD_INSTANCE, "config.toml"));
     expect(notMod.code).toBe("io");
-    expect(notMod.detail).toEqual({ causes: ["config.toml 不是 mods 目录里的模组文件名"] });
+    expect(notMod.detail).toEqual({ causes: ["config.toml 不是 mods 目录里的 Mod 文件名"] });
     const gone = await failure(removeMod(MOCK_MOD_INSTANCE, "ghost.jar"));
     expect(gone.detail).toEqual({ causes: ["mods 目录里没有 ghost.jar，可能已被移除"] });
     expect(await listHistory(MOCK_MOD_INSTANCE)).toHaveLength(1);
@@ -316,12 +317,26 @@ describe("批量启停", () => {
     ]);
     const invalid = results[2];
     if (invalid.status !== "error") throw new Error("非模组文件名应当报错");
-    expect(invalid.error.detail).toEqual({ causes: ["config.toml 不是 mods 目录里的模组文件名"] });
+    expect(invalid.error.detail).toEqual({ causes: ["config.toml 不是 mods 目录里的 Mod 文件名"] });
     expect(await states()).toEqual([
       [SODIUM, true],
       [FABRIC_API, true],
       ["gvQqBUqZ-0.11.2.jar", true],
       [HANDMADE, true],
+    ]);
+  });
+
+  it("停用的目标名已被同名副本占着：那一项报 mod_state_conflict，正文与后端原文相同，两份文件都不动", async () => {
+    mockInstance(MOCK_MOD_INSTANCE).files.push({ file_name: `${SODIUM}.disabled`, size: 1, modified_ms: 0, metadata: null });
+    const [conflict] = await setModsEnabled(MOCK_MOD_INSTANCE, [SODIUM], false);
+    if (conflict.status !== "error") throw new Error("目标文件已存在时应当报错");
+    expect(conflict.error).toMatchObject({
+      code: "mod_state_conflict",
+      message: `Mod 启用状态切换失败：目标文件已存在 C:/Games/.minecraft/versions/${MOCK_MOD_INSTANCE}/mods/${SODIUM}.disabled`,
+    });
+    expect((await states()).filter(([name]) => String(name).startsWith(SODIUM))).toEqual([
+      [SODIUM, true],
+      [`${SODIUM}.disabled`, false],
     ]);
   });
 
