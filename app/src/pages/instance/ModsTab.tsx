@@ -588,7 +588,8 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, toggle, update, 
     {
       key: "installed",
       header: MODS_COPY.colInstalled,
-      width: 104,
+      // 「2026年12月28日」等宽 12 约 94，加单元格左右各 12；104 会把两位的月、日截掉一截
+      width: 120,
       tiers: ["regular", "wide"],
       sortable: true,
       cell: (r) => <span className={styles.modInstalled}>{formatDate(r.addedAt)}</span>,
