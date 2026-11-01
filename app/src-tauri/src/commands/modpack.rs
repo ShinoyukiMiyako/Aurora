@@ -788,6 +788,7 @@ mod tests {
         let listed = list_instances_with(&facade, &locks).await.unwrap();
         let entry = listed.iter().find(|i| i.id == "1.20.1").unwrap();
         assert_eq!(entry.activity, Some(InstanceActivity::Inherited));
+        assert_eq!(entry.used_by.as_deref(), Some("导入中"));
         let err = delete_instance_with(&facade, &locks, "1.20.1", NeverDispose)
             .await
             .unwrap_err();

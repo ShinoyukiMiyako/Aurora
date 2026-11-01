@@ -206,6 +206,15 @@ impl InstanceLocks {
                     .min_by_key(|activity| activity.report_rank())
             })
     }
+
+    /// 正以 `id` 为基底的实例；有几个时报最早占到的那个（与 instance_busy 报的是同一个），没有被当作
+    /// 基底时为 `None`。
+    pub fn used_by(&self, id: &str) -> Option<String> {
+        lock_table(&self.table)
+            .held
+            .get(&lock_key(id))
+            .and_then(|holds| holds.iter().find_map(|h| h.used_by.clone()))
+    }
 }
 
 /// 一次实例占用；丢弃即释放。
@@ -418,6 +427,9 @@ pub struct InstanceDto {
     pub created_at: Option<u64>,
     /// 实例此刻在做的事；空闲为 null。
     pub activity: Option<InstanceActivity>,
+    /// 正以它为基底的实例（有几个时为最早占到的那个）；没有被别的实例当作基底时为 null。
+    /// 非空时删除、改名、补全它会报 instance_busy。
+    pub used_by: Option<String>,
     /// 累计游玩分钟（向下取整）；没玩过为 0。
     pub playtime_min: u64,
     /// 上次游玩结束的 Unix 毫秒；没玩过为 null。
@@ -536,6 +548,8 @@ pub struct DeletionPreviewDto {
     pub dependents: Vec<String>,
     /// 实例此刻在做的事；非空时删除会报 instance_busy。
     pub activity: Option<InstanceActivity>,
+    /// 正以它为基底的实例；含义同实例列表的 used_by。
+    pub used_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -731,6 +745,7 @@ fn instance_dto(
         incomplete: summary.incomplete.map(incomplete_dto),
         created_at: summary.created_at,
         activity,
+        used_by: None,
         playtime_min: play.map_or(0, |p| p.playtime_min),
         last_played_at: play.map(|p| p.last_played_at),
     };
@@ -815,14 +830,16 @@ fn content_dto(content: InstanceContent) -> InstanceContentDto {
     }
 }
 
-fn preview_dto(preview: DeletionPreview, activity: Option<InstanceActivity>) -> DeletionPreviewDto {
+/// 删除预览带上实例此刻的占用：它在做的事与正以它为基底的实例，删除确认据此提前说明为什么删不了。
+fn preview_dto(preview: DeletionPreview, locks: &InstanceLocks) -> DeletionPreviewDto {
     DeletionPreviewDto {
+        activity: locks.activity(&preview.id),
+        used_by: locks.used_by(&preview.id),
         id: preview.id,
         worlds: preview.worlds.into_iter().map(world_dto).collect(),
         size_bytes: preview.size_bytes,
         file_count: preview.file_count,
         dependents: preview.dependents,
-        activity,
     }
 }
 
@@ -919,8 +936,12 @@ pub(crate) async fn list_instances_with(
         .into_iter()
         .map(|summary| {
             let activity = locks.activity(&summary.id);
+            let used_by = locks.used_by(&summary.id);
             let play = plays.get(&summary.id);
-            instance_dto(summary, activity, play)
+            InstanceDto {
+                used_by,
+                ..instance_dto(summary, activity, play)
+            }
         })
         .collect())
 }
@@ -1225,7 +1246,7 @@ pub async fn preview_instance_deletion(
 ) -> Result<DeletionPreviewDto, CommandError> {
     let aurora = facade.snapshot().await;
     let preview = aurora.deletion_preview(&id).await.map_err(instance_error)?;
-    Ok(preview_dto(preview, locks.activity(&id)))
+    Ok(preview_dto(preview, &locks))
 }
 
 /// 把实例移入回收站，并从侧栏固定、当前选中与游玩记录里去掉它。实例在忙报 `instance_busy`，被依赖报
@@ -1953,6 +1974,25 @@ mod tests {
         let listed = list_instances_with(&env.facade, &locks).await.unwrap();
         let base = listed.iter().find(|i| i.id == "1.20.1").unwrap();
         assert_eq!(base.activity, Some(InstanceActivity::Inherited));
+        assert_eq!(base.used_by.as_deref(), Some("FAB"));
+        let fab = listed.iter().find(|i| i.id == "FAB").unwrap();
+        assert_eq!(
+            (fab.activity, fab.used_by.as_deref()),
+            (Some(InstanceActivity::Repairing), None)
+        );
+        let preview = preview_dto(
+            env.facade
+                .snapshot()
+                .await
+                .deletion_preview("1.20.1")
+                .await
+                .unwrap(),
+            &locks,
+        );
+        assert_eq!(
+            (preview.activity, preview.used_by.as_deref()),
+            (Some(InstanceActivity::Inherited), Some("FAB"))
+        );
         let err = delete_instance_with(&env.facade, &locks, "1.20.1", Remove)
             .await
             .unwrap_err();
@@ -1997,7 +2037,7 @@ mod tests {
                 .deletion_preview("旧档")
                 .await
                 .unwrap(),
-            locks.activity("旧档"),
+            &locks,
         );
         assert!(preview.dependents.is_empty());
         assert_eq!(preview.activity, None);
