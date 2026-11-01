@@ -703,7 +703,13 @@ impl Aurora {
         let mut warnings = Vec::new();
         // 离线名与正版名本来就不超过 16 个字符，超长的只会来自外置登录的皮肤站，但对谁都查一遍不费事。
         // 查的是真正交给游戏的角色名：以离线方式进单人时它同样取自账户上次登录的档案名。
-        if long_player_name(&auth.player_name, &mc_version) {
+        // 改过名的原版实例没有 inheritsFrom，继承链根的 id 是玩家起的名字，游戏版本号只在 clientVersion 里。
+        let game_version = merged
+            .client_version
+            .as_deref()
+            .filter(|version| !version.is_empty())
+            .unwrap_or(&mc_version);
+        if long_player_name(&auth.player_name, game_version) {
             warnings.push(LaunchWarning::LongPlayerName);
             reporter
                 .warn(format!(
@@ -2479,6 +2485,61 @@ mod tests {
             .expect("崩溃应落盘");
         assert_eq!(crash.warnings, vec![LaunchWarning::LongPlayerName]);
         assert_eq!(crash.exit_code, Some(3));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn renamed_vanilla_instance_judges_a_long_player_name_by_its_client_version() {
+        // 改过名的原版实例没有 inheritsFrom，继承链根就是它自己，id 是玩家起的名字；游戏版本号只记在
+        // clientVersion 里。拿实例名去比 1.20.3 永远比不出结果，超长名的提醒就漏了。
+        const LONG_NAME: &str = "PetalPlayerLongName01";
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        let java = complete_fake_java(&fx.root, 17, 3);
+        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(&server));
+        let mut account = stale_microsoft();
+        account.name = LONG_NAME.to_owned();
+        let stored = aurora.store_account_for_test(account).unwrap();
+
+        let mut warned = Vec::new();
+        for (renamed, client_version) in [("生存 服", "1.21.1"), ("老 存档", "1.20.2")] {
+            let dir = fx.root.join(".minecraft").join("versions").join(renamed);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{renamed}.json")),
+                format!(
+                    r#"{{"id":"{renamed}","clientVersion":"{client_version}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}}}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join(format!("{renamed}.jar")), b"jar").unwrap();
+            let request = || LaunchRequest {
+                version_id: renamed.to_owned(),
+                ..stored_request(stored.clone())
+            };
+            let (result, _) = launch_request(&aurora, request(), java.clone()).await;
+            assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+            let (result, events) = launch_fallback(&aurora, request(), java.clone()).await;
+            let run = expect_run(result);
+            let long_name_warns = events
+                .iter()
+                .filter(|event| {
+                    matches!(event, LaunchEvent::Log { level: LauncherLevel::Warn, text, .. } if text.starts_with("角色名 "))
+                })
+                .count();
+            run.finish().await.unwrap();
+            let crash = aurora
+                .last_crash(renamed)
+                .await
+                .unwrap()
+                .expect("崩溃应落盘");
+            warned.push((
+                renamed,
+                long_name_warns,
+                crash.warnings.contains(&LaunchWarning::LongPlayerName),
+            ));
+        }
+        assert_eq!(warned, vec![("生存 服", 1, true), ("老 存档", 0, false)]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
