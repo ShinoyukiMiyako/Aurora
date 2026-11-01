@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -55,19 +56,21 @@ const flush = () =>
     await settle();
   });
 
-async function mount(route: Parameters<NavApi["go"]>[0] = { page: "discover" }) {
+async function mount(route: Parameters<NavApi["go"]>[0] = { page: "discover" }, reducedMotion: "always" | "never" = "never") {
   view = render(
-    <WindowPortProvider port={port}>
-      <LauncherProvider>
-        <ShellProvider>
-          <PickFolderProvider value={pickFolder}>
-            <Probe />
-            <PageArea />
-            <OverlayRoot />
-          </PickFolderProvider>
-        </ShellProvider>
-      </LauncherProvider>
-    </WindowPortProvider>,
+    <MotionConfig reducedMotion={reducedMotion}>
+      <WindowPortProvider port={port}>
+        <LauncherProvider>
+          <ShellProvider>
+            <PickFolderProvider value={pickFolder}>
+              <Probe />
+              <PageArea />
+              <OverlayRoot />
+            </PickFolderProvider>
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>
+    </MotionConfig>,
   );
   await flush();
   act(() => nav.go(route));
@@ -1263,6 +1266,21 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(installs).toHaveLength(1);
     expect(installs[0].excludedOptional).toEqual(["mods/optional-helper.jar"]);
     expect(launcher.state.tasks[0].spec.args.excludedOptional).toEqual(["mods/optional-helper.jar"]);
+  });
+
+  it("减少动效时清单的状态标签与说明块照常淡入淡出：换成「已找到」时旧标签先留在原处淡出", async () => {
+    seedMockDownloads(["blocked-a.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK }, "always");
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(shownText(blockedRow("blocked-b.jar"))).toBe("blocked-b.jar装到 mods/还没找到打开网页");
+
+    seedMockDownloads(["blocked-b.jar"]);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    const row = blockedRow("blocked-b.jar");
+    expect([...row.querySelectorAll("[data-exiting]")].map((el) => el.textContent)).toEqual(["还没找到"]);
+    expect(shownText(row)).toBe("blocked-b.jar装到 mods/已找到");
+    expect([...blockedDialog().querySelectorAll("[data-exiting]")].map((el) => el.textContent)).toContain("找到 1 个，还差 1 个。文件要和网页上的完全一致，改过名也能认出来。");
   });
 
   it("受限文件挡住导入；清单里检查下载文件夹：只下了 a 时 a 已找到、b 还没找到，都找到后继续导入，确认步原地重新读取", async () => {
