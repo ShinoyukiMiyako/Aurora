@@ -27,7 +27,7 @@ sha1 = "0.11"
 base16ct = { version = "1", features = ["alloc"] }
 # 目录扫描(fs)、把 zip 阻塞读放进 spawn_blocking(rt)、聚合搜索并发用 tokio::join!(macros)。
 # 运行时风格由上层选择，不强制 rt-multi-thread。
-# 元数据请求的全局令牌桶节流闸要异步锁(sync)与等待(time)。
+# 元数据请求的令牌桶节流闸要异步锁(sync)与等待(time)。
 tokio = { version = "1", default-features = false, features = ["fs", "rt", "macros", "sync", "time"] }
 
 [dev-dependencies]
