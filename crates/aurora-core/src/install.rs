@@ -473,6 +473,150 @@ mod tests {
         assert_eq!(tokio::fs::read(&lib).await.unwrap(), b"loader-jar");
     }
 
+    /// 版本 test：清单、声明了客户端 jar 的版本 JSON，客户端 jar 的响应由用例定。
+    async fn mount_vanilla_with_client(server: &MockServer, client_jar: ResponseTemplate) {
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main",
+                    "downloads":{{"client":{{"sha1":"0000000000000000000000000000000000000000",
+                    "size":6,"url":"{base}/client.jar"}}}}}}"#
+            )))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/client.jar"))
+            .respond_with(client_jar)
+            .mount(server)
+            .await;
+    }
+
+    /// 客户端 jar 下不下来：原版没装上，版本列表里看不到它，也不多出一行损坏项。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_install_is_not_listed_as_a_version() {
+        let server = MockServer::start().await;
+        mount_vanilla_with_client(&server, ResponseTemplate::new(404)).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()));
+
+        aurora
+            .install("test", None, None, None)
+            .await
+            .expect_err("客户端 jar 下不下来");
+
+        let scan = aurora_instance::discover_versions(&mc).await.unwrap();
+        assert_eq!(scan, aurora_instance::VersionScan::default());
+    }
+
+    /// 取消发生在下客户端 jar 的途中：同样不留版本，门面按已取消返回。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_install_is_not_listed_as_a_version() {
+        let server = MockServer::start().await;
+        let stalled = ResponseTemplate::new(200)
+            .set_body_bytes(b"client".to_vec())
+            .set_delay(std::time::Duration::from_secs(30));
+        mount_vanilla_with_client(&server, stalled).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let token = aurora_download::CancellationToken::new();
+        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_cancel(token.clone());
+        let attempt = aurora.install("test", None, None, None);
+        tokio::pin!(attempt);
+
+        let client_jar_requested = async {
+            loop {
+                let requests = server.received_requests().await.unwrap();
+                if requests.iter().any(|r| r.url.path() == "/client.jar") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            outcome = &mut attempt => panic!("客户端 jar 还没回来，安装不该结束：{outcome:?}"),
+            () = client_jar_requested => {}
+        }
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                crate::error::CoreError::Install(aurora_install::Error::Download(
+                    aurora_download::Error::Cancelled
+                ))
+            ),
+            "实际：{err:?}"
+        );
+        let scan = aurora_instance::discover_versions(&mc).await.unwrap();
+        assert_eq!(scan, aurora_instance::VersionScan::default());
+    }
+
+    /// 原版装好了、加载器库下不下来：原版是真的装好了，留着；加载器版本不出现。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_loader_leaves_only_the_finished_vanilla() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/test.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/test/0.15.0/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"id":"fabric-loader-0.15.0-test","inheritsFrom":"test","mainClass":"Knot",
+                    "libraries":[{{"name":"net.example:loader:0.15.0","url":"{base}/"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/net/example/loader/0.15.0/loader-0.15.0.jar"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+            .with_manifest_url(format!("{base}/manifest.json"))
+            .with_fabric_base(&base);
+
+        aurora
+            .install("test", Some(LoaderChoice::Fabric), Some("0.15.0"), None)
+            .await
+            .expect_err("加载器库下不下来");
+
+        let scan = aurora_instance::discover_versions(&mc).await.unwrap();
+        let ids: Vec<&str> = scan.versions.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["test"]);
+        assert_eq!(scan.broken, Vec::new());
+    }
+
     /// 传统布局的 Forge 与实例路径一样按下载源方案取 installer 的 `.sha1`：官方 maven 不通时才有镜像兜底，
     /// 否则缓存里的 installer 无法复用，下载时也没有校验值。冒充的 installer 不是 zip，流程停在读安装配置。
     #[cfg(windows)]

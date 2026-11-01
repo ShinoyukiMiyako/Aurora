@@ -1700,6 +1700,52 @@ mod tests {
         );
     }
 
+    /// 整合包要的加载器装不上：导入失败，半成品实例被清掉，也不留一个看起来已安装的加载器版本。
+    /// 原版是真的装好了，留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_import_leaves_no_half_installed_loader_version() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/test/0.15.0/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"id":"fabric-loader-0.15.0-test","inheritsFrom":"test","mainClass":"Knot",
+                    "libraries":[{{"name":"net.example:loader:0.15.0","url":"{}/"}}]}}"#,
+                server.uri()
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/net/example/loader/0.15.0/loader-0.15.0.jar"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"})),
+            &[],
+        );
+        let aurora = aurora(tmp.path(), &server);
+
+        aurora
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("坏掉的包"),
+                &ImportSelection::default(),
+                "task-failed",
+                None,
+            )
+            .await
+            .expect_err("加载器库下不下来，导入应失败");
+
+        let scan = discover_versions(aurora.game_dir()).await.unwrap();
+        let ids: Vec<&str> = scan.versions.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, vec!["test"]);
+        assert_eq!(scan.broken, Vec::new());
+    }
+
     /// 包里自带的 options.txt 压过默认设置，包里没有的服务器列表由默认设置补上；配置里关掉时一个都不补。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn imported_instance_gets_missing_files_from_the_template() {
