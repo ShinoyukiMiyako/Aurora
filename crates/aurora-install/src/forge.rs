@@ -864,7 +864,7 @@ async fn extract_data_files(
     tmp_dir: &Path,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let mut out = BTreeMap::new();
-    for (index, sided) in data.values().enumerate() {
+    for (index, (key, sided)) in data.iter().enumerate() {
         let raw = sided_value(sided, side);
         if let DataValue::ExtractedFile(path) = classify_data_value(raw) {
             if out.contains_key(&path) {
@@ -872,6 +872,12 @@ async fn extract_data_files(
             }
             // 用 zip 内条目的文件名 + 序号避免重名碰撞。
             let file_name = path.rsplit('/').next().unwrap_or("data.bin");
+            // 文件名出自远端 installer，Windows 上反斜杠也是分隔符，`..` 能藏在里面走出临时目录。
+            aurora_version::check_path_segment(file_name).map_err(|problem| Error::UnsafePath {
+                entry: format!("Forge 安装器的数据项 {key}"),
+                path: path.clone(),
+                problem,
+            })?;
             let dest = tmp_dir.join(format!("{index}-{file_name}"));
             extract_zip_entry_to_async(installer, path.trim_start_matches('/'), &dest).await?;
             out.insert(path, dest);
@@ -1823,6 +1829,50 @@ mod tests {
             );
             assert!(!f.layout.libraries_dir().exists(), "{bad}：不该解出任何库");
         }
+    }
+
+    /// data 表里 `/jar 内路径` 的文件名原样拼进临时目录：Windows 上反斜杠也是分隔符，`..` 能藏在
+    /// 文件名里走出临时目录。这种取值报路径越界，临时目录外什么都不写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn data_files_escaping_the_scratch_dir_are_rejected() {
+        let data_path = r"/data/..\..\..\..\..\escaped.lzma";
+        let profile = serde_json::json!({
+            "spec": 0, "version": "1.16.5-forge-36.2.39", "minecraft": "1.16.5",
+            "json": "/version.json",
+            "data": {"BINPATCH": {"client": data_path, "server": data_path}},
+            "processors": [], "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "1.16.5-forge-36.2.39", "inheritsFrom": "1.16.5", "libraries": []
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+                (data_path.trim_start_matches('/'), b"escaped-bytes"),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let err = ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Backslash }
+                    if entry == "Forge 安装器的数据项 BINPATCH" && path == data_path
+            ),
+            "实际：{err:?}"
+        );
+        // 校验漏掉时，第一个 `..` 抵掉加了序号前缀的那一段，其余四个把文件从 versions/<id>/ 下的
+        // 临时目录送回游戏目录根下。
+        assert!(!f.root.join("escaped.lzma").exists());
+        assert!(!f.root.join("versions").join("escaped.lzma").exists());
     }
 
     /// installer 里那份 jar 与库条目声明的 sha1 对不上：照实报错，不把坏文件留在库目录里。
