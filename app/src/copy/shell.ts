@@ -1,7 +1,7 @@
 // 外壳自己的文案：标题栏、状态岛、下载快览、账户胶囊、侧栏、命令面板、通知容器与错误兜底。
 // 与流程共用的词（阶段名、按钮动词、任务状态）从 flows.ts 取，不在这里另写一份。
 
-import { LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "./flows";
+import { joinMixed, LAUNCH_COPY, PAGE_LABEL, TASK_STATUS_LABEL, TASK_TOAST } from "./flows";
 import { MAX_PARALLEL_TASKS } from "../domain/limits";
 import { APP_NAME } from "../lib/app-info";
 import type { ConfigEnumField } from "../ipc/config";
@@ -45,7 +45,7 @@ export const PEEK_COPY = {
   cancel: "取消任务",
   queued: TASK_STATUS_LABEL.queued,
   progress: (pct: string, speed: string) => `${pct} · ${speed}`,
-  rowProgress: (title: string) => `${title}的进度`,
+  rowProgress: (title: string) => joinMixed(title, "的进度"),
   totalProgress: "下载总进度",
   failed: (count: number) => `${count} 个任务失败`,
   view: TASK_TOAST.viewAction,

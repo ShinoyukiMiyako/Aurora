@@ -870,7 +870,7 @@ export const TOAST_COPY = {
   accountDeleted: (name: string) => `已删除账户 ${name}`,
   accountSwitched: (name: string) => `已切换到 ${name}`,
   instanceSelected: (name: string) => ({ title: `「${name}」已设为当前实例`, body: "主页的「继续游玩」会显示它" }),
-  settingChanged: (name: string, item: string, value: string) => ({ title: `「${name}」的${item}已改为 ${value}`, body: "下次启动生效" }),
+  settingChanged: (name: string, item: string, value: string) => ({ title: joinMixed(`「${name}」的`, item, `已改为 ${value}`), body: "下次启动生效" }),
   networkRestored: (failed: number) => (failed === 0 ? { title: "网络已恢复" } : { title: "网络已恢复", body: `有 ${failed} 个下载失败` }),
   retryAllAction: "全部重试",
   copyFailed: "复制失败",
@@ -951,7 +951,7 @@ export const ACTION_ERROR = {
   readInstanceSettings: "实例设置读不出来",
   subscribe: "后端事件订阅失败",
   /** 任务本身已完成，完成后的落地（写封面、固定、刷新列表）出错。 */
-  landTask: (title: string) => `${title}已完成，后续设置没有写入`,
+  landTask: (title: string) => joinMixed(title, "已完成，后续设置没有写入"),
 } as const;
 
 /** 启动时首查各切片失败的通知标题。 */
