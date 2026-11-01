@@ -16,7 +16,7 @@ The Chinese text comes first and is the binding version. The English text is for
 > - **可以闭源和商业再许可。** 维护者及其继受者可以用任何许可证再许可你的贡献，包括闭源许可和商业许可，也可以更换本项目的许可证，不需要再问你（第四条）。这是本协议存在的原因。
 > - **无偿。** 你得不到任何报酬，维护者或其他人靠你的贡献获得收入时也不向你分成（第三条）。
 >
-> 此外请留意保护作品完整权的不主张约定（第五条）、专利许可及其诉讼终止（第六条）、单位与年龄声明（第八条、第九条）、责任限制（第十一条）、适用法律（第十五条）和语言（第十六条）。
+> 此外请留意署名方式的约定（第五条第二款）、保护作品完整权的不主张约定（第五条第五款）、专利许可及其诉讼终止（第六条）、单位与年龄声明（第八条、第九条）、责任限制（第十一条）、适用法律（第十五条）和语言（第十六条）。
 >
 > 有不明白的地方，签署前在 Pull Request（PR）里提问，维护者会解释。不同意就不要签署；未签署的贡献不会被合并。
 
@@ -38,7 +38,7 @@ The Chinese text comes first and is the binding version. The English text is for
 ### 第三条 著作权许可
 
 1. 你授予维护者一项**非专有、全球、永久、无偿、不可撤销**的著作权许可。这项许可可以转让给继受者，可以多层再许可。维护者和被许可人行使这些权利时，不需要另行取得你的同意。
-2. 许可的权利逐项列举如下，包括《中华人民共和国著作权法》（以下简称《著作权法》）第十条第一款第五项至第十七项和《计算机软件保护条例》第八条规定的权利：
+2. 许可的权利逐项列举如下，包括《中华人民共和国著作权法》（以下简称《著作权法》）第十条第一款第五项至第十七项和《计算机软件保护条例》第八条第一款第三项至第九项规定的权利：
    1. 复制权
    2. 发行权
    3. 出租权
@@ -60,7 +60,7 @@ The Chinese text comes first and is the binding version. The English text is for
 
 ### 第四条 以任何许可证再许可
 
-1. **维护者可以用任何许可证或其他条款再许可你的贡献，包括 AGPL-3.0-only 以外的开源许可证、闭源许可、专有许可和商业许可；可以收取费用；也可以更换本项目的许可证。这是本协议存在的原因。**
+1. **维护者可以用任何许可证或其他条款再许可你的贡献，包括 AGPL-3.0-only 以外的开源许可证、闭源许可、私有软件许可和商业许可；可以收取费用；也可以更换本项目的许可证。这是本协议存在的原因。**
 2. 被许可人可以按其取得的授权继续再许可。
 3. **本项目目前以 AGPL-3.0-only 发布，但维护者不承诺今后继续以这一许可证或任何开源许可证发布本项目或你的贡献。** 已经按某一许可证发布的版本，接收者依该许可证享有的权利不受影响。
 
@@ -160,7 +160,7 @@ The Chinese text comes first and is the binding version. The English text is for
 > - **Closed-source and commercial relicensing is allowed.** The Maintainer and its successors may relicense your Contribution under any license, including closed-source and commercial licenses, and may change the license of the Project, without asking you again (Section 4). This is the reason this Agreement exists.
 > - **Free of charge.** You receive no payment, and no share of any income that the Maintainer or anyone else earns from your Contribution (Section 3).
 >
-> Please also note the limited agreement not to assert the right of integrity (Section 5), the patent license and its litigation termination (Section 6), the employer and age statements (Sections 8 and 9), the limitation of liability (Section 11), the governing law (Section 15) and the language clause (Section 16).
+> Please also note the agreed form of attribution (Section 5, paragraph 2), the limited agreement not to assert the right of integrity (Section 5, paragraph 5), the patent license and its litigation termination (Section 6), the employer and age statements (Sections 8 and 9), the limitation of liability (Section 11), the governing law (Section 15) and the language clause (Section 16).
 >
 > If anything is unclear, ask in the pull request (PR) before signing and the Maintainer will explain it. If you do not agree, do not sign; unsigned Contributions will not be merged.
 
@@ -180,7 +180,7 @@ This Agreement is a copyright license and not a transfer of copyright. The copyr
 ### Section 3. Copyright license
 
 1. You grant the Maintainer a **non-exclusive, worldwide, perpetual, free-of-charge and irrevocable** copyright license. This license may be transferred to Successors and sublicensed through multiple tiers. The Maintainer and Licensees do not need any further consent from you to exercise these rights.
-2. The licensed rights are listed one by one below. They include the rights in Article 10, paragraph 1, items 5 to 17 of the Copyright Law of the People's Republic of China (the "Copyright Law") and in Article 8 of the Regulations on the Protection of Computer Software:
+2. The licensed rights are listed one by one below. They include the rights in Article 10, paragraph 1, items 5 to 17 of the Copyright Law of the People's Republic of China (the "Copyright Law") and in Article 8, paragraph 1, items 3 to 9 of the Regulations on the Protection of Computer Software:
    1. the right of reproduction
    2. the right of distribution
    3. the right of rental
