@@ -34,7 +34,8 @@ import {
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { acquireMockInstance, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
-import { reset as resetLaunchMock } from "./mock/handlers/launch";
+import { endMockGame, reset as resetLaunchMock } from "./mock/handlers/launch";
+import { launchGame } from "./launch";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -610,6 +611,54 @@ describe("mock：存档备份", () => {
     expect((await listInstances()).find((i) => i.id === ID)?.activity).toBe("modifying");
     modifying.release();
     expect((await listInstances()).find((i) => i.id === ID)?.activity).toBeNull();
+  });
+
+  it("共用存档跨实例互斥：另一个不隔离的实例开着游戏时备份、恢复、导出报 instance_busy（指向那个实例），不占任务 id；任一方隔离就不挡", async () => {
+    vi.useFakeTimers();
+    // 1.21.1 是原版正式版，跟随全局时不隔离；樱花生存是 Fabric 实例，关掉隔离后与它共用存档
+    const OTHER = "1.21.1";
+    const settings = await getInstanceSettings(ID);
+    await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
+    const [first] = (await listWorldBackups(ID, WORLD)).backups;
+    for (const activity of ["launching", "running"] as const) {
+      const game = acquireMockInstance(OTHER, activity);
+      for (const attempt of [backupWorld("s1", ID, WORLD), restoreWorldBackup("s2", ID, WORLD, first.file), exportWorld("s3", ID, WORLD, "D:\\out\\a.zip")]) {
+        const error = await rejection(attempt);
+        expect(error.code).toBe("instance_busy");
+        expect(detail(error)).toEqual({ id: OTHER, activity });
+      }
+      expect((await listInstances()).find((i) => i.id === ID)?.activity).toBeNull();
+      game.release();
+    }
+
+    // 自己隔离：别的实例开着游戏也照常备份，被拒的那几次没占住任务 id
+    const game = acquireMockInstance(OTHER, "running");
+    await setInstanceSettings(ID, { ...settings, isolation: "enabled" });
+    const done = backupWorld("s1", ID, WORLD);
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    expect((await done).backup.kind).toBe("manual");
+    game.release();
+  });
+
+  it("共用存档跨实例互斥的反方向：不隔离的实例在备份时，另一个不隔离的实例启动报 instance_busy（backing_up），不登记任务；隔离的实例照常启动", async () => {
+    vi.useFakeTimers();
+    const OTHER = "1.21.1";
+    const settings = await getInstanceSettings(ID);
+    await setInstanceSettings(ID, { ...settings, isolation: "disabled" });
+    const shared = backupWorld("b-shared", ID, WORLD);
+    await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
+    const refused = await rejection(launchGame({ taskId: "l-1", versionId: OTHER, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null }));
+    expect(refused.code).toBe("instance_busy");
+    expect(detail(refused)).toEqual({ id: ID, activity: "backing_up" });
+    expect((await listInstances()).find((i) => i.id === OTHER)?.activity).toBeNull();
+    // 隔离的实例不碰共用存档
+    await expect(launchGame({ taskId: "l-2", versionId: "1.20.1-Fabric", accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null })).resolves.toEqual({ pid: 4242, offline: false });
+    endMockGame(0, 1000);
+    await vi.advanceTimersByTimeAsync(PACK_SPAN_MS);
+    await shared;
+    // 备份完了就放行，被拒的那次没占住任务 id
+    await expect(launchGame({ taskId: "l-1", versionId: OTHER, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null })).resolves.toEqual({ pid: 4242, offline: false });
+    endMockGame(0, 1000);
   });
 
   it("清理：每个存档的自动备份超过保留份数时删最旧的，手动备份不动", async () => {

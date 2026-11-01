@@ -31,7 +31,7 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { mockAccountFacts } from "./accounts";
 import { handlers as configHandlers, requireStruct, samePath, tauriArgError } from "./config";
-import { acquireMockInstance, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstance, ensureMockSharedWorldsSettled, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { serverKey } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -374,9 +374,11 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   if (occupant) throw busy(occupant);
   // 后端在开局取账户身份时才拒绝，那时已占了槽与实例，但一失败就全部放开；这里在占用之前拒绝，对外可见的状态相同。
   const offlineAs = offlineFallback ? admitOfflineFallback(uuid, name) : null;
-  // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），最后登记任务。
+  // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），共用存档再查别的实例
+  // 有没有在备份，最后登记任务。
   const hold = acquireMockInstance(versionId, "launching");
   try {
+    ensureMockSharedWorldsSettled(versionId);
     beginMockTask(taskId);
   } catch (error) {
     hold.release();
