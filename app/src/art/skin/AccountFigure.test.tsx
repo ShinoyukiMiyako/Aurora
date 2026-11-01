@@ -217,6 +217,42 @@ describe("AccountFigure：可拖动的立绘", () => {
     expect(HTMLCanvasElement.prototype.setPointerCapture).toHaveBeenCalledWith(1);
   });
 
+  describe("父组件重渲染（问候卡随下载进度刷新）", () => {
+    it("拖动不被打断：不回默认姿态，后续移动继续跟手", async () => {
+      await mount();
+      dragBy(60);
+      const restDraws = cachedDrawn().length;
+      view?.rerender(figure());
+      expect(cachedDrawn()).toHaveLength(restDraws);
+      pointer("pointermove", 200);
+      expect(frames.size).toBe(1);
+      runFrame();
+      expect(cachedDrawn()).toHaveLength(restDraws);
+    });
+
+    it("回位不被打断：逐帧缓动到位，不一下跳回去", async () => {
+      await mount();
+      dragBy(60);
+      pointer("pointerup", 160);
+      runFrame();
+      const restDraws = cachedDrawn().length;
+      view?.rerender(figure());
+      expect(cachedDrawn()).toHaveLength(restDraws);
+      expect(frames.size).toBe(1);
+      while (frames.size > 0) runFrame();
+      expect(cachedDrawn()).toHaveLength(restDraws + 1);
+    });
+
+    it("皮肤真的换了才重置：换一张皮肤回到默认姿态", async () => {
+      await mount();
+      dragBy(60);
+      view?.rerender(<AccountFigure uuid="u1" skin={{ ...REMOTE, model: "slim" }} scale={6} interactive />);
+      expect(onDisplay()[onDisplay().length - 1].source).toBe(skinFigureCanvas({ ...loaded(), model: "slim" }, 6, 1));
+      pointer("pointermove", 200);
+      expect(frames.size).toBe(0);
+    });
+  });
+
   it("卸载时取消排着的帧", async () => {
     await mount();
     dragBy(60);
