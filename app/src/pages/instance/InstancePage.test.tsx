@@ -1369,6 +1369,13 @@ describe("实例详情：整合包没导入完", () => {
 });
 
 describe("实例详情：概览", () => {
+  it("一个存档都没有：概览的存档数写「还没有存档」", async () => {
+    ipc.overrides.set("list_instance_content", () => ({ ...contentDto(), worlds: [] }));
+    await open("overview");
+    expect(text()).toContain("还没有存档");
+    expect(text()).not.toContain("世界 ·");
+  });
+
   it("存档按最近游玩排序，极限模式标红；资源包与光影按加载顺序列出", async () => {
     await open("overview");
     const rows = [...document.querySelectorAll("li")].map(textOf);
@@ -1377,7 +1384,7 @@ describe("实例详情：概览", () => {
     expect(worldRows[0]).toContain("最近");
     expect(worldRows[0]).toContain("极限 · 1 分钟前");
     expect(worldRows[1]).toContain("创造 · 10 天前");
-    expect(text()).toContain("2 个世界 · 3.0 MB");
+    expect(text()).toContain("2 个存档 · 3.0 MB");
     expect(text()).toContain("Complementary.zip");
     expect(text()).toContain("资源包 · 加载顺序 1");
   });
@@ -1427,7 +1434,7 @@ describe("实例详情：概览", () => {
       pending.resolve(contentDto());
       await settle(20);
     });
-    expect(text()).toContain("2 个世界 · 3.0 MB");
+    expect(text()).toContain("2 个存档 · 3.0 MB");
     expect(text()).not.toContain("比平时慢一些，仍在加载…");
   });
 

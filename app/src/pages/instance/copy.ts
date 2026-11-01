@@ -160,10 +160,10 @@ export const OVERVIEW_COPY = {
   modsUnknown: "Mod 数读不出来",
   worldsUnit: "个",
   worldsSize: (bytes: number) => `共 ${formatBytes(bytes)}`,
-  worldsNone: "还没有世界",
+  worldsNone: "还没有存档",
 
   worldsTitle: "存档",
-  worldsSubtitle: (n: number, bytes: number) => `${n} 个世界 · ${formatBytes(bytes)}`,
+  worldsSubtitle: (n: number, bytes: number) => `${n} 个存档 · ${formatBytes(bytes)}`,
   worldsEmptySubtitle: "进入游戏创建世界后会出现在这里",
   openSaves: "打开存档文件夹",
   openWorld: (name: string) => `打开「${name}」所在文件夹`,
