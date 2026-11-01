@@ -21,7 +21,7 @@ use tokio::process::{Child, Command};
 
 use crate::complete;
 use crate::context::InstallContext;
-use crate::error::{Error, Result, io_err, zip_err};
+use crate::error::{Error, ProcessorOutput, Result, io_err, zip_err};
 use crate::net;
 use crate::plan;
 use aurora_version::VersionJson;
@@ -523,7 +523,7 @@ impl<'a> ForgeInstaller<'a> {
         let values =
             self.build_values(&profile, &minecraft, &minecraft_jar, installer, extracted)?;
 
-        // 逐个处理器执行。
+        // 逐个处理器执行；产物都已就绪的跳过，不计入执行数。
         let mut ran = 0usize;
         for processor in &profile.processors {
             if !side_applies(processor.sides.as_ref(), &self.side) {
@@ -532,8 +532,9 @@ impl<'a> ForgeInstaller<'a> {
             if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
                 return Err(aurora_download::Error::Cancelled.into());
             }
-            self.run_processor(processor, &values).await?;
-            ran += 1;
+            if self.run_processor(processor, &values).await? {
+                ran += 1;
+            }
         }
 
         // 清理临时目录（失败不影响安装结果，仅记日志）。
@@ -573,12 +574,19 @@ impl<'a> ForgeInstaller<'a> {
         insert_path(&mut values, "LIBRARY_DIR", layout.libraries_dir());
         Ok(values)
     }
-    /// 执行单个处理器：读 Main-Class、组 classpath、替换参数、调 java、校验 outputs。
+    /// 执行单个处理器：产物都已就绪时跳过（返回 `false`），否则读 Main-Class、组 classpath、替换参数、
+    /// 调 java、校验 outputs（返回 `true`）。
     async fn run_processor(
         &self,
         processor: &Processor,
         values: &BTreeMap<String, String>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let outputs = resolve_outputs(processor, values, self.cx.layout)?;
+        if outputs_ready(&processor.jar, &outputs).await? {
+            tracing::info!(jar = %processor.jar, "处理器的产物都已就绪且校验通过，跳过");
+            return Ok(false);
+        }
+
         let jar_path = self
             .cx
             .layout
@@ -610,30 +618,60 @@ impl<'a> ForgeInstaller<'a> {
             .arg(&main_class)
             .args(&args);
         let mut child = command.spawn().map_err(launch_error)?;
-        let Some(status) = wait_or_kill(&mut child, self.cx.cancel)
-            .await
-            .map_err(launch_error)?
-        else {
-            tracing::info!(jar = %processor.jar, "安装被取消，处理器子进程已结束");
-            return Err(aurora_download::Error::Cancelled.into());
+        let capture = OutputCapture::start(&mut child);
+        let status = match wait_or_kill(&mut child, self.cx.cancel).await {
+            Ok(Some(status)) => status,
+            Ok(None) => {
+                // 取消有时限，不等剩下的输出读完。
+                capture.abandon();
+                tracing::info!(jar = %processor.jar, "安装被取消，处理器子进程已结束");
+                return Err(aurora_download::Error::Cancelled.into());
+            }
+            Err(source) => {
+                capture.abandon();
+                return Err(launch_error(source));
+            }
         };
+        let output = capture.finish().await;
         if !status.success() {
+            tracing::warn!(
+                jar = %processor.jar,
+                status = ?status.code(),
+                output = %output,
+                "处理器执行失败"
+            );
+            let touched = outputs
+                .iter()
+                .map(|(path, _)| path.clone())
+                .chain(library_files_in(&args, self.cx.layout))
+                .collect();
+            if let Some(path) = first_held_open(touched).await {
+                return Err(Error::ProcessorOutputLocked {
+                    jar: processor.jar.clone(),
+                    path,
+                    output: Some(output),
+                });
+            }
             return Err(Error::ProcessorFailed {
                 jar: processor.jar.clone(),
                 status: status.code(),
+                output,
             });
         }
+        tracing::debug!(
+            jar = %processor.jar,
+            lines = output.lines.len() + output.dropped,
+            "处理器执行完成"
+        );
 
         // 校验产物 sha1（占位符替换后）。sha1 值为空则跳过。
-        for (out_path, out_sha1) in &processor.outputs {
-            let path = substitute_arg(out_path, values, self.cx.layout)?;
-            let sha1 = substitute_arg(out_sha1, values, self.cx.layout)?;
+        for (path, sha1) in &outputs {
             if sha1.is_empty() {
                 continue;
             }
-            aurora_base::fs::verify_sha1(&path, &sha1).await?;
+            aurora_base::fs::verify_sha1(path, sha1).await?;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// legacy 安装：versionInfo 落盘（传统布局）、解出通用 jar、下 versionInfo 里的库。
@@ -784,7 +822,7 @@ async fn extract_bundled_libraries(
             continue;
         }
         let dest = layout.library_path(&rel);
-        if bundled_library_ready(&dest, &artifact.sha1).await? {
+        if file_matches_sha1(&dest, &artifact.sha1).await? {
             continue;
         }
         let bytes = read_zip_entry_async(installer, &format!("maven/{rel}")).await?;
@@ -798,8 +836,8 @@ async fn extract_bundled_libraries(
     Ok(())
 }
 
-/// 自带库的落点上是否已经是对的文件。没有 sha1 可比时一律重新解出。
-async fn bundled_library_ready(dest: &Path, sha1: &str) -> Result<bool> {
+/// 落点上是否已经是 sha1 对得上的文件。没有 sha1 可比时一律算不上（自带库重新解出、处理器重跑）。
+async fn file_matches_sha1(dest: &Path, sha1: &str) -> Result<bool> {
     if sha1.is_empty() {
         return Ok(false);
     }
@@ -839,15 +877,266 @@ async fn extract_data_files(
     Ok(out)
 }
 
+// ---- 处理器产物：缓存命中、占用探测 ----
+
+/// 展开处理器声明的产物，得到「落点 -> 期望 sha1」。求值规则照官方 installer：键整体是 `[坐标]` 时
+/// 取该坐标的库路径，否则做 `{占位符}` 替换；值做 `{占位符}` 替换。
+fn resolve_outputs(
+    processor: &Processor,
+    values: &BTreeMap<String, String>,
+    layout: &crate::layout::GameLayout,
+) -> Result<Vec<(PathBuf, String)>> {
+    processor
+        .outputs
+        .iter()
+        .map(|(path, sha1)| {
+            Ok((
+                PathBuf::from(substitute_arg(path, values, layout)?),
+                replace_placeholders(sha1, values)?,
+            ))
+        })
+        .collect()
+}
+
+/// 处理器能否跳过：照官方 installer 的缓存规则，声明了产物、且每一项都在盘上并与期望 sha1 吻合。
+///
+/// 有一项缺失或对不上就要重跑。对不上的旧文件先删掉（官方也这样做），删之前确认它没被别的进程
+/// 占着：另一个实例正用同一个加载器版本运行时，游戏的 JVM 打开着这些 jar。没写期望 sha1 的产物无从
+/// 校验，算作未就绪，旧文件留给处理器覆盖。
+async fn outputs_ready(jar: &str, outputs: &[(PathBuf, String)]) -> Result<bool> {
+    if outputs.is_empty() {
+        return Ok(false);
+    }
+    let mut ready = true;
+    for (path, sha1) in outputs {
+        if sha1.is_empty() {
+            ready = false;
+            continue;
+        }
+        if file_matches_sha1(path, sha1).await? {
+            continue;
+        }
+        ready = false;
+        discard_stale_output(jar, path).await?;
+    }
+    Ok(ready)
+}
+
+/// 删掉 sha1 对不上的旧产物；它正被别的进程占着时报 [`Error::ProcessorOutputLocked`]。
+async fn discard_stale_output(jar: &str, path: &Path) -> Result<()> {
+    let probe = path.to_path_buf();
+    let held = tokio::task::spawn_blocking(move || held_open(&probe))
+        .await
+        .map_err(|join| io_err(path, std::io::Error::other(join.to_string())))?
+        .map_err(|source| io_err(path, source))?;
+    if held {
+        return Err(Error::ProcessorOutputLocked {
+            jar: jar.to_owned(),
+            path: path.to_path_buf(),
+            output: None,
+        });
+    }
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_err(path, source)),
+    }
+}
+
+/// 参数里指向库目录下的那些路径：处理器失败后据此找出是不是撞上了被占用的文件。
+fn library_files_in(args: &[String], layout: &crate::layout::GameLayout) -> Vec<PathBuf> {
+    let libraries = layout.libraries_dir();
+    args.iter()
+        .map(PathBuf::from)
+        .filter(|path| path.starts_with(&libraries))
+        .collect()
+}
+
+/// 第一个正被别的进程占着的现有文件。只用于给已经失败的处理器找原因：探测本身出错时记一笔日志、
+/// 当它没被占用，处理器的失败照原样报出，不被探测的错误顶替。
+async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
+    let probed = tokio::task::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter(|path| path.is_file())
+            .find(|path| match held_open(path) {
+                Ok(held) => held,
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), %err, "探测处理器用到的文件是否被占用失败");
+                    false
+                }
+            })
+    })
+    .await;
+    match probed {
+        Ok(found) => found,
+        Err(join) => match join.try_into_panic() {
+            Ok(payload) => std::panic::resume_unwind(payload),
+            Err(join) => {
+                tracing::warn!(error = %join, "探测文件占用的任务被中止");
+                None
+            }
+        },
+    }
+}
+
+/// 文件此刻是否被别的进程以「不放行删除共享」的方式打开着（JVM 读 jar 就是这样打开的），此时它既
+/// 删不掉也换不掉。探测方式是以删除权限、放行一切共享去打开：只有已有句柄没放行删除共享时才失败。
+#[cfg(windows)]
+fn held_open(path: &Path) -> std::io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Win32 常量：DELETE 访问权，FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE。
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+    // ERROR_SHARING_VIOLATION 与 ERROR_LOCK_VIOLATION。
+    const SHARING_VIOLATION: i32 = 32;
+    const LOCK_VIOLATION: i32 = 33;
+
+    match std::fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(FILE_SHARE_ALL)
+        .open(path)
+    {
+        Ok(_) => Ok(false),
+        Err(err) if matches!(err.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)) => {
+            Ok(true)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+/// 非 Windows 平台上删除与替换不受已打开句柄影响，没有可探测的占用。
+#[cfg(not(windows))]
+fn held_open(_path: &Path) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+// ---- 处理器子进程 ----
+
+/// 处理器输出只留最后这么多行：binarypatcher、重命名工具一跑能打出上万行，失败时有用的是末尾的异常。
+const OUTPUT_TAIL_LINES: usize = 200;
+
+/// 子进程退出后等读取任务读完剩余输出的时限。处理器若把管道句柄传给了还活着的孙进程，管道不会
+/// 关闭、读取任务会一直等下去；限时后放弃剩下的输出，不让安装卡在这里。
+const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// 收集处理器的 stdout 与 stderr：各起一个读取任务，按到达顺序合进同一份末尾缓冲。管道必须一直有人
+/// 读，否则输出多的处理器写满管道缓冲后会卡住不动。
+struct OutputCapture {
+    tail: std::sync::Arc<std::sync::Mutex<OutputTail>>,
+    readers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct OutputTail {
+    lines: std::collections::VecDeque<String>,
+    dropped: usize,
+}
+
+impl OutputCapture {
+    fn start(child: &mut Child) -> Self {
+        let tail = std::sync::Arc::new(std::sync::Mutex::new(OutputTail::default()));
+        let mut readers = Vec::with_capacity(2);
+        if let Some(stdout) = child.stdout.take() {
+            readers.push(tokio::spawn(collect_lines(stdout, tail.clone())));
+        }
+        if let Some(stderr) = child.stderr.take() {
+            readers.push(tokio::spawn(collect_lines(stderr, tail.clone())));
+        }
+        Self { tail, readers }
+    }
+
+    /// 不要输出了：结束读取任务。
+    fn abandon(self) {
+        for reader in self.readers {
+            reader.abort();
+        }
+    }
+
+    /// 等读取任务读完（限时见 [`OUTPUT_DRAIN_GRACE`]），交出收集到的输出。
+    async fn finish(self) -> ProcessorOutput {
+        for mut reader in self.readers {
+            match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut reader).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join)) => match join.try_into_panic() {
+                    Ok(payload) => std::panic::resume_unwind(payload),
+                    Err(join) => push_line(
+                        &self.tail,
+                        format!("（读取处理器输出的任务被中止：{join}）"),
+                    ),
+                },
+                Err(_) => {
+                    reader.abort();
+                    push_line(
+                        &self.tail,
+                        "（处理器已退出，管道仍被占着，后面的输出没有读完）".to_owned(),
+                    );
+                }
+            }
+        }
+        let tail = self
+            .tail
+            .lock()
+            .expect("输出缓冲的锁只在追加一行时短暂持有");
+        ProcessorOutput {
+            lines: tail.lines.iter().cloned().collect(),
+            dropped: tail.dropped,
+        }
+    }
+}
+
+async fn collect_lines(
+    stream: impl tokio::io::AsyncRead + Unpin,
+    tail: std::sync::Arc<std::sync::Mutex<OutputTail>>,
+) {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line).await {
+            Ok(0) => break,
+            // 只用于展示与排查：java 按系统代码页输出，非 UTF-8 的字节换成替换符，不让一行读不出
+            // 就丢掉整段输出。
+            Ok(_) => push_line(
+                &tail,
+                String::from_utf8_lossy(&line)
+                    .trim_end_matches(['\r', '\n'])
+                    .to_owned(),
+            ),
+            Err(err) => {
+                push_line(&tail, format!("（读取处理器输出中断：{err}）"));
+                break;
+            }
+        }
+    }
+}
+
+fn push_line(tail: &std::sync::Mutex<OutputTail>, line: String) {
+    let mut tail = tail.lock().expect("输出缓冲的锁只在追加一行时短暂持有");
+    if tail.lines.len() == OUTPUT_TAIL_LINES {
+        tail.lines.pop_front();
+        tail.dropped += 1;
+    }
+    tail.lines.push_back(line);
+}
+
 /// 处理器子进程的命令骨架（参数由调用方补上）。
 ///
 /// 丢弃即结束：取消宽限期满时安装的 future 会被整个丢弃，子进程不跟着结束的话，java 会在实例锁
 /// 已经放开之后继续往共享的 libraries 目录写产物，和紧接着的重试互相踩。不弹控制台：java.exe 是
 /// 控制台程序，从没有控制台的启动器里起它，Windows 会给每个处理器开一个黑框，玩家顺手关掉就等于
-/// 杀掉处理器。
+/// 杀掉处理器。stdout 与 stderr 接成管道，由 [`OutputCapture`] 收集。
 fn processor_command(java_path: &Path) -> Command {
     let mut command = Command::new(java_path);
-    command.kill_on_drop(true);
+    command
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     configure_no_window(&mut command);
     command
 }
@@ -1596,6 +1885,392 @@ mod tests {
         let mut child = exits_with(0).spawn().unwrap();
         let status = wait_or_kill(&mut child, None).await.unwrap().unwrap();
         assert!(status.success());
+    }
+
+    // ---- 处理器：缓存命中、输出收集、占用 ----
+
+    const OUT_A: &str = "test:out:1:a";
+    const OUT_B: &str = "test:out:1:b";
+    const PROCESSOR_JAR: &str = "test:proc:1";
+
+    /// 造一个只有一个处理器的现代 installer：产物 A 用 `{占位符}` 键、产物 B 用 `[坐标]` 键，两种
+    /// 写法都是官方 installer 认的；期望 sha1 走 data 表里的 `'字面量'`。`args` 原样交给处理器。
+    fn processor_installer(
+        f: &Fixture,
+        sha_a: &str,
+        sha_b: &str,
+        args: serde_json::Value,
+        with_outputs: bool,
+    ) -> PathBuf {
+        let sided = |value: String| serde_json::json!({ "client": value, "server": value });
+        let outputs = if with_outputs {
+            serde_json::json!({ "{OUT_A}": "{OUT_A_SHA}", format!("[{OUT_B}]"): "{OUT_B_SHA}" })
+        } else {
+            serde_json::json!({})
+        };
+        let profile = serde_json::json!({
+            "version": "1.20.1-forge-47.2.0",
+            "minecraft": "1.20.1",
+            "json": "/version.json",
+            "data": {
+                "OUT_A": sided(format!("[{OUT_A}]")),
+                "OUT_A_SHA": sided(format!("'{sha_a}'")),
+                "OUT_B_SHA": sided(format!("'{sha_b}'")),
+            },
+            "processors": [{
+                "sides": ["client"],
+                "jar": PROCESSOR_JAR,
+                "classpath": [],
+                "args": args,
+                "outputs": outputs,
+            }],
+            "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "1.20.1-forge-47.2.0", "inheritsFrom": "1.20.1", "libraries": []
+        });
+        write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+            ],
+        )
+    }
+
+    fn library(f: &Fixture, coordinate: &str) -> PathBuf {
+        f.layout.library_path_for_coordinate(coordinate).unwrap()
+    }
+
+    fn put(path: &Path, bytes: &[u8]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// 处理器 jar 本身：只要 MANIFEST.MF 里有 Main-Class，真正执行的是注入的 java。
+    fn put_processor_jar(f: &Fixture) {
+        use std::io::Write;
+        let path = library(f, PROCESSOR_JAR);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("META-INF/MANIFEST.MF", opts).unwrap();
+        writer
+            .write_all(b"Manifest-Version: 1.0\r\nMain-Class: test.Processor\r\n\r\n")
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    /// 代替 java 的脚本：往 stdout、stderr 各打一行，再以 `code` 退出。
+    fn fake_java(dir: &Path, stdout: &str, stderr: &str, code: u8) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let path = dir.join("fake-java.cmd");
+            std::fs::write(
+                &path,
+                // 重定向写在前面：`echo x 1>&2` 会把 x 后面的空格也输出。
+                format!("@echo off\r\necho {stdout}\r\n1>&2 echo {stderr}\r\nexit /b {code}\r\n"),
+            )
+            .unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("fake-java");
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho '{stdout}'\necho '{stderr}' 1>&2\nexit {code}\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+    }
+
+    async fn install_with(f: &Fixture, java: &Path, installer: &Path) -> Result<ForgeSummary> {
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        ForgeInstaller::new(cx, java)
+            .install_from_installer(installer)
+            .await
+    }
+
+    /// 声明的产物都在盘上且 sha1 吻合：处理器整个跳过，不读处理器 jar、不起 java，也不计入执行数。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_processor_whose_outputs_are_all_present_and_valid_is_skipped() {
+        let f = fixture();
+        let (a, b) = (b"slim-jar".as_slice(), b"extra-jar".as_slice());
+        put(&library(&f, OUT_A), a);
+        put(&library(&f, OUT_B), b);
+        let installer = processor_installer(
+            &f,
+            &sha1_hex(a),
+            &sha1_hex(b),
+            serde_json::json!(["--output", "{OUT_A}"]),
+            true,
+        );
+
+        // 处理器 jar 不在、java 也不存在：只要真去执行就会失败。
+        let summary = install_with(&f, &f.root.join("no-such-java.exe"), &installer)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.processors, 0);
+        assert_eq!(std::fs::read(library(&f, OUT_A)).unwrap(), a);
+        assert_eq!(std::fs::read(library(&f, OUT_B)).unwrap(), b);
+    }
+
+    /// 只有部分产物就绪时照常执行处理器：缺一个、或有一个对不上，都不能跳过。对不上的旧文件先删掉，
+    /// 已就绪的那一个不动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_processor_with_only_some_outputs_ready_is_run() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let (a, b) = (b"slim-jar".as_slice(), b"extra-jar".as_slice());
+        let installer = processor_installer(
+            &f,
+            &sha1_hex(a),
+            &sha1_hex(b),
+            serde_json::json!(["--output", "{OUT_A}"]),
+            true,
+        );
+        let java = f.root.join("no-such-java.exe");
+
+        // A 就绪，B 缺失。
+        put(&library(&f, OUT_A), a);
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+        assert!(
+            matches!(err, Error::JavaLaunch { .. }),
+            "应真的去起 java：{err:?}"
+        );
+        assert_eq!(std::fs::read(library(&f, OUT_A)).unwrap(), a);
+
+        // A 就绪，B 是上次留下的坏文件。
+        put(&library(&f, OUT_B), b"stale");
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+        assert!(
+            matches!(err, Error::JavaLaunch { .. }),
+            "应真的去起 java：{err:?}"
+        );
+        assert_eq!(std::fs::read(library(&f, OUT_A)).unwrap(), a);
+        assert!(!library(&f, OUT_B).exists(), "对不上的旧产物应在重跑前删掉");
+    }
+
+    /// 没有声明产物的处理器没有可比的东西，每次都执行（官方 installer 同样如此）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_processor_without_declared_outputs_always_runs() {
+        let f = fixture();
+        put_processor_jar(&f);
+        put(&library(&f, OUT_A), b"slim-jar");
+        let installer = processor_installer(
+            &f,
+            &sha1_hex(b"slim-jar"),
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let err = install_with(&f, &f.root.join("no-such-java.exe"), &installer)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::JavaLaunch { .. }), "实际：{err:?}");
+    }
+
+    /// 处理器失败：退出码与它自己的 stdout、stderr 一起交回，输出挂在原因链上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_processor_reports_its_output_on_the_cause_chain() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let java = fake_java(
+            &f.root,
+            "Splitting: client.jar",
+            "java.lang.IllegalStateException: bad patch",
+            3,
+        );
+
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+
+        let Error::ProcessorFailed {
+            jar,
+            status,
+            output,
+        } = &err
+        else {
+            panic!("应为 ProcessorFailed，实际 {err:?}");
+        };
+        assert_eq!(jar, PROCESSOR_JAR);
+        assert_eq!(*status, Some(3));
+        assert_eq!(output.dropped, 0);
+        let mut lines = output.lines.clone();
+        lines.sort();
+        assert_eq!(
+            lines,
+            vec![
+                "Splitting: client.jar".to_owned(),
+                "java.lang.IllegalStateException: bad patch".to_owned(),
+            ]
+        );
+        let chain: Vec<String> =
+            std::iter::successors(std::error::Error::source(&err), |e| e.source())
+                .map(|e| e.to_string())
+                .collect();
+        assert!(
+            chain
+                .iter()
+                .any(|c| c.contains("java.lang.IllegalStateException: bad patch")),
+            "{chain:?}"
+        );
+    }
+
+    /// 输出只留末尾：超出的行从最早的丢起并计数。
+    #[test]
+    fn processor_output_keeps_only_the_tail() {
+        let tail = std::sync::Mutex::new(OutputTail::default());
+        for n in 0..OUTPUT_TAIL_LINES + 5 {
+            push_line(&tail, format!("line {n}"));
+        }
+        let tail = tail.into_inner().unwrap();
+        assert_eq!(tail.dropped, 5);
+        assert_eq!(tail.lines.len(), OUTPUT_TAIL_LINES);
+        assert_eq!(tail.lines.front().map(String::as_str), Some("line 5"));
+        assert_eq!(
+            tail.lines.back().map(String::as_str),
+            Some(format!("line {}", OUTPUT_TAIL_LINES + 4).as_str())
+        );
+
+        let shown = ProcessorOutput {
+            lines: vec!["a".into(), "b".into()],
+            dropped: 3,
+        };
+        assert_eq!(shown.to_string(), "处理器输出（略去前 3 行）：\na\nb");
+        assert_eq!(ProcessorOutput::default().to_string(), "处理器没有任何输出");
+    }
+
+    /// JVM 读 jar 的打开方式：放行读写共享、不放行删除共享。另一个实例的游戏就这样占着库里的 jar。
+    #[cfg(windows)]
+    fn hold_like_a_running_game(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(path)
+            .unwrap()
+    }
+
+    /// 要重跑的处理器有一个对不上的旧产物，而它正被运行中的游戏占着：动手前就报占用，不报笼统的
+    /// IO 失败，也不去起 java。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stale_output_held_by_a_running_game_is_reported_as_locked() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let (a, b) = (b"slim-jar".as_slice(), b"extra-jar".as_slice());
+        put(&library(&f, OUT_A), b"older-slim-jar");
+        put(&library(&f, OUT_B), b);
+        let installer = processor_installer(
+            &f,
+            &sha1_hex(a),
+            &sha1_hex(b),
+            serde_json::json!(["--output", "{OUT_A}"]),
+            true,
+        );
+        let _game = hold_like_a_running_game(&library(&f, OUT_A));
+
+        let err = install_with(&f, &f.root.join("no-such-java.exe"), &installer)
+            .await
+            .unwrap_err();
+
+        match &err {
+            Error::ProcessorOutputLocked { jar, path, output } => {
+                assert_eq!(jar, PROCESSOR_JAR);
+                assert_eq!(path, &library(&f, OUT_A));
+                assert!(output.is_none(), "还没起处理器，不该有输出");
+            }
+            other => panic!("应为 ProcessorOutputLocked，实际 {other:?}"),
+        }
+        assert!(!aurora_base::retry::RetryableError::is_retryable(&err));
+        assert!(err.to_string().contains("正被别的程序占用"), "{err}");
+        assert_eq!(
+            std::fs::read(library(&f, OUT_A)).unwrap(),
+            b"older-slim-jar"
+        );
+    }
+
+    /// 没声明产物的处理器（如 binarypatcher）写库里一个被占着的 jar 而失败：报占用并带上处理器输出。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_processor_failing_on_a_held_library_file_is_reported_as_locked() {
+        let f = fixture();
+        put_processor_jar(&f);
+        put(&library(&f, OUT_A), b"patched-client");
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let java = fake_java(
+            &f.root,
+            "Patching client",
+            "java.nio.file.FileSystemException: being used by another process",
+            1,
+        );
+        let _game = hold_like_a_running_game(&library(&f, OUT_A));
+
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+
+        match &err {
+            Error::ProcessorOutputLocked { path, output, .. } => {
+                assert_eq!(path, &library(&f, OUT_A));
+                let output = output.as_ref().expect("处理器跑过，应带着它的输出");
+                assert!(
+                    output
+                        .lines
+                        .iter()
+                        .any(|line| line.contains("FileSystemException")),
+                    "{output:?}"
+                );
+            }
+            other => panic!("应为 ProcessorOutputLocked，实际 {other:?}"),
+        }
+    }
+
+    /// 同一个失败的处理器，没有文件被占着时照常报 ProcessorFailed：占用的判定不会张冠李戴。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_processor_failure_without_a_held_file_is_not_reported_as_locked() {
+        let f = fixture();
+        put_processor_jar(&f);
+        put(&library(&f, OUT_A), b"patched-client");
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let java = fake_java(&f.root, "Patching client", "OutOfMemoryError", 1);
+
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                Error::ProcessorFailed {
+                    status: Some(1),
+                    ..
+                }
+            ),
+            "实际：{err:?}"
+        );
     }
 
     /// installer 的 `.sha1` 迟迟不回时取消：1 秒内以已取消返回，不当成「拿不到校验值」接着下 installer。

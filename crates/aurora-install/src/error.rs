@@ -113,7 +113,26 @@ pub enum Error {
 
     /// java 处理器以非零码退出，安装无法继续。
     #[error("处理器 {jar} 执行失败（退出码 {status:?}）")]
-    ProcessorFailed { jar: String, status: Option<i32> },
+    ProcessorFailed {
+        jar: String,
+        status: Option<i32>,
+        /// 处理器自己的输出，java 抛出的异常就在这里面。
+        #[source]
+        output: ProcessorOutput,
+    },
+
+    /// 处理器要写的文件正被别的进程打开着：多半是另一个实例正用同一个 Forge / NeoForge 版本运行，
+    /// 游戏的 JVM 占着库目录里的这份 jar。重试没用，要等那个游戏退出。
+    #[error(
+        "{path} 正被别的程序占用，处理器 {jar} 写不进去；可能有游戏正在用同一个加载器版本运行，关掉它后再试"
+    )]
+    ProcessorOutputLocked {
+        jar: String,
+        path: PathBuf,
+        /// 处理器已经跑过并失败时是它的输出；动手之前就查出占用时为空。
+        #[source]
+        output: Option<ProcessorOutput>,
+    },
 }
 
 /// crate 级 `Result` 别名。
@@ -142,7 +161,8 @@ impl RetryableError for Error {
             | Error::DataKeyMissing { .. }
             | Error::ProcessorMainClassMissing { .. }
             | Error::JavaLaunch { .. }
-            | Error::ProcessorFailed { .. } => false,
+            | Error::ProcessorFailed { .. }
+            | Error::ProcessorOutputLocked { .. } => false,
         }
     }
 }
@@ -172,6 +192,37 @@ impl Error {
         matches!(self, Error::Download(inner) if inner.is_cancelled())
     }
 }
+
+/// 处理器子进程留下的输出：stdout 与 stderr 按到达顺序合在一起，只留末尾若干行。
+///
+/// 作为错误挂在处理器错误的原因链上：命令层把原因链整条放进 `detail`，「复制错误原文」与启动器日志
+/// 都能直接看到 java 抛出的异常，而不只是一个退出码。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessorOutput {
+    /// 留下的行，不含换行符，按到达顺序。
+    pub lines: Vec<String>,
+    /// 更早的、因只留末尾而丢掉的行数。
+    pub dropped: usize,
+}
+
+impl std::fmt::Display for ProcessorOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.lines.is_empty() && self.dropped == 0 {
+            return f.write_str("处理器没有任何输出");
+        }
+        if self.dropped > 0 {
+            write!(f, "处理器输出（略去前 {} 行）：", self.dropped)?;
+        } else {
+            f.write_str("处理器输出：")?;
+        }
+        for line in &self.lines {
+            write!(f, "\n{line}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ProcessorOutput {}
 
 /// 把 std::io 错误包成携带路径的 crate 错误。
 pub(crate) fn io_err(path: impl Into<PathBuf>, source: std::io::Error) -> Error {
