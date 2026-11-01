@@ -14,7 +14,7 @@ use aurora_launch::{
 use serde::{Deserialize, Serialize};
 
 use crate::crashdiag::{
-    CrashReport, CrashSource, ScanInput, find_crash_files, read_head_for_diagnosis,
+    CrashReport, CrashSource, ScanInput, find_crash_report, find_hs_err, read_head_for_diagnosis,
     read_tail_for_diagnosis, save_crash_report,
 };
 use crate::error::{CoreError, Result};
@@ -175,22 +175,32 @@ impl GameRun {
                     .map(|(index, line)| (line.as_str(), index as u64 + 1))
                     .collect(),
             };
-            // 游戏自己写下的崩溃报告与 JVM 错误日志：找不到是常态，读不了的跳过那一份并如实上报。
+            // 游戏自己写下的崩溃报告与 JVM 错误日志：找不到是常态，找不了或读不了的只跳过那一份并如实上报。
+            let started_at = info.clock.started_at();
+            let found = [
+                (
+                    CrashSource::CrashReport,
+                    find_crash_report(&info.working_dir, started_at).await,
+                ),
+                (
+                    CrashSource::HsErr,
+                    find_hs_err(&info.working_dir, info.pid, started_at).await,
+                ),
+            ];
             let mut extra: Vec<(CrashSource, String, String)> = Vec::new();
-            match find_crash_files(&info.working_dir, info.pid, info.clock.started_at()).await {
-                Ok(files) => {
-                    for (source, path) in [
-                        (CrashSource::CrashReport, files.crash_report),
-                        (CrashSource::HsErr, files.hs_err),
-                    ] {
-                        let Some(path) = path else { continue };
-                        match read_head_for_diagnosis(&path).await {
-                            Ok(text) => extra.push((source, path.display().to_string(), text)),
-                            Err(err) => problems.push(err),
-                        }
+            for (source, path) in found {
+                let path = match path {
+                    Ok(Some(path)) => path,
+                    Ok(None) => continue,
+                    Err(err) => {
+                        problems.push(err);
+                        continue;
                     }
+                };
+                match read_head_for_diagnosis(&path).await {
+                    Ok(text) => extra.push((source, path.display().to_string(), text)),
+                    Err(err) => problems.push(err),
                 }
-                Err(err) => problems.push(err),
             }
             let mut inputs = vec![ScanInput {
                 source: CrashSource::SessionLog,
@@ -652,5 +662,33 @@ mod tests {
                 .iter()
                 .all(|clue| clue["category"] != "intel_graphics_driver")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unlistable_crash_reports_do_not_drop_the_hs_err() {
+        // 两份文件各自独立：列不出 crash-reports 只跳过崩溃报告，已找到的 JVM 错误日志照样参与扫描。
+        let started = start("cmd", &["/C", "exit -1073741819"]).await;
+        let pid = started.run.pid().expect("进程已经起来");
+        std::fs::write(started.root.join("crash-reports"), b"not a dir").unwrap();
+        let hs_err = started.root.join(format!("hs_err_pid{pid}.log"));
+        std::fs::write(
+            &hs_err,
+            "# A fatal error has been detected by the Java Runtime Environment:\n#\n# C  [ig9icd64.dll+0x57a41c]\n",
+        )
+        .unwrap();
+        let finished = started.run.finish().await.unwrap();
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        let report = saved_crash(&started.version_dir);
+        // 工作目录在实例目录之外（共享游戏目录），存的是绝对路径。
+        let scanned = report["scanned_files"].as_array().unwrap();
+        assert_eq!(scanned.len(), 1, "{scanned:?}");
+        assert_eq!(scanned[0]["kind"], "hs_err");
+        assert_eq!(scanned[0]["path"], hs_err.display().to_string());
+        let clues = report["diagnoses"].as_array().unwrap();
+        assert_eq!(clues.len(), 1, "{clues:?}");
+        assert_eq!(clues[0]["category"], "intel_graphics_driver");
+        assert_eq!(clues[0]["source"], "hs_err");
+        assert_eq!(clues[0]["line"], 3);
+        assert_eq!(clues[0]["detail"], "ig9icd64.dll");
     }
 }

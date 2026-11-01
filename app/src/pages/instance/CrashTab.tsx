@@ -245,26 +245,24 @@ function LaunchWarnings({ warnings, onTab }: { warnings: CrashReportDto["warning
   return (
     <section className={styles.crashBlock} aria-label={CRASH_PAGE_COPY.warningsTitle}>
       <span className={styles.crashBlockTitle}>{CRASH_PAGE_COPY.warningsTitle}</span>
-      {unique.map((code) => {
-        const copy = launchWarningCopy(code);
-        return (
-          <Callout
-            key={code}
-            tone="warn"
-            action={
+      {/* 一张卡片至多一条局部提示，那一条留给过期与再次运行的说明；提醒可能有多条，逐行列出 */}
+      <ul className={styles.warnList}>
+        {unique.map((code) => {
+          const copy = launchWarningCopy(code);
+          return (
+            <li key={code} className={styles.warnRow}>
+              <Icon name="alert" size={16} className={styles.warnIcon} />
+              <span className={styles.warnText}>
+                <span className={styles.warningTitle}>{copy.title}</span>
+                {copy.body}
+              </span>
               <Button size="sm" onClick={() => act(copy.action.kind)}>
                 {copy.action.label}
               </Button>
-            }
-          >
-            {/* 提醒最多两行，窄档下正文可能被截断：悬停看全文 */}
-            <span title={`${copy.title}：${copy.body}`}>
-              <span className={styles.warningTitle}>{copy.title}</span>
-              {copy.body}
-            </span>
-          </Callout>
-        );
-      })}
+            </li>
+          );
+        })}
+      </ul>
     </section>
   );
 }
