@@ -11,14 +11,18 @@ function numericDetail(detail: unknown, key: string): number | null {
   return typeof value === "number" ? value : null;
 }
 
+/** 被别的实例当作基底而被拒时，与禁用提示用同一组文案说是谁在用；其余占用的后端原文已说清在做什么，为 null。 */
+function inUseReason(error: IpcError): string | null {
+  if (!isInstanceBusy(error)) return null;
+  const { usedBy } = instanceBusyFromError(error);
+  return usedBy === null ? null : INSTANCE_IN_USE_COPY.reason(usedBy);
+}
+
 export function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   if (!isIpcError(error)) return error.message;
-  if (isInstanceBusy(error)) {
-    // 被别的实例当作基底而被拒，与禁用提示用同一组文案说是谁在用；其余占用的后端原文已说清在做什么
-    const { usedBy } = instanceBusyFromError(error);
-    if (usedBy !== null) return INSTANCE_IN_USE_COPY.reason(usedBy);
-  }
+  const inUse = inUseReason(error);
+  if (inUse !== null) return inUse;
   const xerr = numericDetail(error.detail, "xerr");
   if (xerr !== null) return `${error.message}（XErr ${xerr}）`;
   const status = numericDetail(error.detail, "status");
@@ -33,7 +37,10 @@ export function describeErrorRecord(record: { code: string; message: string; det
 
 /** 任务失败记录用的 { code, message }：前端自身的 Error 没有错误码，记为 unknown。 */
 export function errorRecord(error: unknown): { code: string; message: string } {
-  if (isIpcError(error)) return { code: error.code, message: error.message };
+  if (isIpcError(error)) {
+    const inUse = inUseReason(error);
+    return { code: error.code, message: inUse === null ? error.message : inUse };
+  }
   if (error instanceof Error) return { code: UNKNOWN_ERROR_CODE, message: error.message };
   return { code: UNKNOWN_ERROR_CODE, message: String(error) };
 }

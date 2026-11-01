@@ -139,3 +139,16 @@ describe("子实例开工后基底的占用立刻进列表", () => {
     expect(callsOf(ipc, "list_instances")).toHaveLength(before);
   });
 });
+
+describe("排队的任务撞上基底占用", () => {
+  it("补全基底被拒：任务失败原因用「正在使用它」，不是后端原文", async () => {
+    ipc.overrides.set("repair_instance", () =>
+      Promise.reject(new IpcError("instance_busy", `实例 ${BASE} 正在被实例 ${CHILD} 使用，请稍后再试`, { id: BASE, activity: "inherited", used_by: CHILD })),
+    );
+    await store.actions.repairInstance(BASE);
+    await settle();
+    const task = store.getState().tasks.find((t) => t.instanceId === BASE);
+    expect(task).toMatchObject({ status: "failed", error: { code: "instance_busy", message: `实例「${CHILD}」正在使用它` } });
+    expect(store.getState().toasts.at(-1)).toMatchObject({ body: `实例「${CHILD}」正在使用它` });
+  });
+});
