@@ -909,3 +909,17 @@ export const MODPACK_REIMPORT_COPY = {
 export function modpackLabel(pack: { name: string; version: string | null }): string {
   return pack.version === null ? pack.name : `${pack.name} ${pack.version}`;
 }
+
+// ---------------------------------------------------------------- 实例被当作基底
+
+/**
+ * 原版实例正被别的实例当作基底（instance_busy 的 activity 为 inherited）：那个实例启动到退出、补全或导入整合包
+ * 期间，原版的删除、改名、补全都被拒。`user` 是正在用它的实例名。状态短句用于实例库卡片与删除确认；
+ * 其余三条是对应控件禁用时的悬停提示与菜单项 hint。
+ */
+export const INSTANCE_IN_USE_COPY = {
+  reason: (user: string) => `实例「${user}」正在使用它`,
+  rename: (user: string) => `实例「${user}」正在使用它，结束后才能重命名`,
+  repair: (user: string) => `实例「${user}」正在使用它，结束后才能补全`,
+  delete: (user: string) => `实例「${user}」正在使用它，结束后才能删除`,
+} as const;

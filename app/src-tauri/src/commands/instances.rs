@@ -4,9 +4,11 @@
 //! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，以及装、删、启停、
 //! 更新、回滚 Mod 与装资源）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy` 并在 detail 里带上
 //! 正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏之间可以并行（运行中改不了的文件由
-//! 门面的占用探测把关），与其余操作互斥。
+//! 门面的占用探测把关），与其余操作互斥。启动、补全与导入整合包期间，实例继承链上的基底版本（客户端
+//! jar 与 natives 所在的原版）以 inherited 一并占住，删除、改名、补全基底报 `instance_busy` 并带上
+//! 正在用它的实例。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -46,6 +48,10 @@ pub enum InstanceActivity {
     /// 装、删、启停、更新、回滚 Mod，往实例里装资源包、光影、数据包，查更新时回写卷宗，写实例设置，
     /// 或为打开文件夹建出工作目录下的子目录。
     Modifying,
+    /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到退出、补全、导入整合包
+    /// 期间都要读写这里的客户端 jar 与 natives。只经 [`InstanceLocks::acquire_with_bases`] 占，
+    /// 占用里记着是哪个实例在用。
+    Inherited,
 }
 
 impl InstanceActivity {
@@ -58,6 +64,7 @@ impl InstanceActivity {
             InstanceActivity::Launching => "启动",
             InstanceActivity::Running => "运行",
             InstanceActivity::Modifying => "改动 Mod、资源或设置",
+            InstanceActivity::Inherited => "被其他实例使用",
         }
     }
 
@@ -65,29 +72,43 @@ impl InstanceActivity {
     ///
     /// Mod、资源与设置的改动只往实例目录里加删、改写文件，彼此不冲突；游戏运行中仍允许改动，
     /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、新建、补全会挪走或重写整个目录，
-    /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。
+    /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。被别的实例当作基底时，基底自己照样能
+    /// 启动、改动，几个实例也可以同时以它为基底；挪走或重写它的目录则会让那些实例丢掉客户端 jar
+    /// 与 natives。
     fn compatible_with(self, other: Self) -> bool {
-        use InstanceActivity::{Launching, Modifying, Running};
+        use InstanceActivity::{Inherited, Launching, Modifying, Running};
         matches!(
             (self, other),
-            (Modifying, Modifying | Launching | Running) | (Launching | Running, Modifying)
+            (
+                Modifying | Inherited,
+                Modifying | Launching | Running | Inherited
+            ) | (Launching | Running, Modifying | Inherited)
         )
     }
 
-    /// 同一实例上有几件事并行时，对外报哪一件：Mod 改动排在最后，界面关心的是启动与运行。
+    /// 同一实例上有几件事并行时，对外报哪一件：实例自己的事最要紧，界面关心的是启动与运行；
+    /// 它的 Mod 改动其次；被别的实例当作基底排在最后。
     fn report_rank(self) -> u8 {
         match self {
             InstanceActivity::Modifying => 1,
+            InstanceActivity::Inherited => 2,
             _ => 0,
         }
     }
+}
+
+/// 一份占用。`used_by` 只在 [`InstanceActivity::Inherited`] 时有：正以这个实例为基底的那个实例。
+struct Hold {
+    token: u64,
+    activity: InstanceActivity,
+    used_by: Option<String>,
 }
 
 /// 一个实例上的全部占用。`next` 给每次占用发一个号，守卫凭号释放自己那一份。
 #[derive(Default)]
 struct LockTable {
     next: u64,
-    held: HashMap<String, Vec<(u64, InstanceActivity)>>,
+    held: HashMap<String, Vec<Hold>>,
 }
 
 /// 实例级互斥表（managed state）。键不分大小写：Windows 上 `ABC` 与 `abc` 是同一个目录。
@@ -110,24 +131,62 @@ impl InstanceLocks {
         id: &str,
         activity: InstanceActivity,
     ) -> Result<InstanceGuard, CommandError> {
+        assert_ne!(
+            activity,
+            InstanceActivity::Inherited,
+            "基底占用要记下使用者，只经 acquire_with_bases 占"
+        );
+        self.hold(id, activity, None)
+    }
+
+    /// 占住实例 `id` 做 `activity`，同时以它的名义占住继承链上的基底版本 `bases`
+    /// （[`aurora_core::Aurora::inheritance_chain`] 的结果，或导入将要继承的原版）。
+    ///
+    /// 先占实例自己，再依次占基底；任一处冲突都报 `instance_busy`（基底被占时 detail 里的 id 是那个基底），
+    /// 已占到的随返回的错误一起放开。基底里与 `id` 同名（链成环）或彼此重复（不分大小写）的只占一次。
+    pub fn acquire_with_bases(
+        &self,
+        id: &str,
+        activity: InstanceActivity,
+        bases: &[String],
+    ) -> Result<ChainGuard, CommandError> {
+        let own = self.acquire(id, activity)?;
+        let mut keys = HashSet::from([lock_key(id)]);
+        let mut held = Vec::with_capacity(bases.len());
+        for base in bases {
+            if keys.insert(lock_key(base)) {
+                held.push(self.hold(base, InstanceActivity::Inherited, Some(id))?);
+            }
+        }
+        if !held.is_empty() {
+            tracing::debug!(id, ?activity, ?bases, "占用实例连同它的基底版本");
+        }
+        Ok(ChainGuard { own, _bases: held })
+    }
+
+    fn hold(
+        &self,
+        id: &str,
+        activity: InstanceActivity,
+        used_by: Option<&str>,
+    ) -> Result<InstanceGuard, CommandError> {
         let key = lock_key(id);
         let mut table = lock_table(&self.table);
-        if let Some(conflict) = table.held.get(&key).and_then(|holds| {
-            holds
-                .iter()
-                .map(|&(_, current)| current)
-                .find(|current| !activity.compatible_with(*current))
-        }) {
+        if let Some(conflict) = table
+            .held
+            .get(&key)
+            .and_then(|holds| holds.iter().find(|h| !activity.compatible_with(h.activity)))
+        {
             return Err(busy(id, conflict));
         }
         let token = table.next;
         table.next += 1;
-        table
-            .held
-            .entry(key.clone())
-            .or_default()
-            .push((token, activity));
-        tracing::debug!(id, ?activity, "占用实例");
+        table.held.entry(key.clone()).or_default().push(Hold {
+            token,
+            activity,
+            used_by: used_by.map(str::to_owned),
+        });
+        tracing::debug!(id, ?activity, used_by, "占用实例");
         Ok(InstanceGuard {
             table: self.table.clone(),
             key,
@@ -143,9 +202,18 @@ impl InstanceLocks {
             .and_then(|holds| {
                 holds
                     .iter()
-                    .map(|&(_, activity)| activity)
+                    .map(|h| h.activity)
                     .min_by_key(|activity| activity.report_rank())
             })
+    }
+
+    /// 正以 `id` 为基底的实例；有几个时报最早占到的那个（与 instance_busy 报的是同一个），没有被当作
+    /// 基底时为 `None`。
+    pub fn used_by(&self, id: &str) -> Option<String> {
+        lock_table(&self.table)
+            .held
+            .get(&lock_key(id))
+            .and_then(|holds| holds.iter().find_map(|h| h.used_by.clone()))
     }
 }
 
@@ -164,9 +232,9 @@ impl InstanceGuard {
         let hold = table
             .held
             .get_mut(&self.key)
-            .and_then(|holds| holds.iter_mut().find(|(token, _)| *token == self.token))
+            .and_then(|holds| holds.iter_mut().find(|h| h.token == self.token))
             .expect("守卫存活期间它的占用一定还在表里");
-        hold.1 = activity;
+        hold.activity = activity;
     }
 }
 
@@ -174,7 +242,7 @@ impl Drop for InstanceGuard {
     fn drop(&mut self) {
         let mut table = lock_table(&self.table);
         if let Some(holds) = table.held.get_mut(&self.key) {
-            holds.retain(|(token, _)| *token != self.token);
+            holds.retain(|h| h.token != self.token);
             if holds.is_empty() {
                 table.held.remove(&self.key);
             }
@@ -182,16 +250,36 @@ impl Drop for InstanceGuard {
     }
 }
 
+/// 一个实例连同它继承链上基底版本的占用：任务期间一起持有，丢弃即一起释放。
+pub struct ChainGuard {
+    own: InstanceGuard,
+    _bases: Vec<InstanceGuard>,
+}
+
+impl ChainGuard {
+    /// 改记实例自己正在做的事，基底的占用不变；约束同 [`InstanceGuard::set_activity`]。
+    pub fn set_activity(&self, activity: InstanceActivity) {
+        self.own.set_activity(activity);
+    }
+}
+
 fn lock_key(id: &str) -> String {
     id.to_lowercase()
 }
 
-fn busy(id: &str, activity: InstanceActivity) -> CommandError {
-    CommandError::new(
-        code::INSTANCE_BUSY,
-        format!("实例 {id} 正在{}，请稍后再试", activity.label()),
-    )
-    .with_detail(json!({ "id": id, "activity": activity }))
+fn busy(id: &str, conflict: &Hold) -> CommandError {
+    match &conflict.used_by {
+        Some(user) => CommandError::new(
+            code::INSTANCE_BUSY,
+            format!("实例 {id} 正在被实例 {user} 使用，请稍后再试"),
+        )
+        .with_detail(json!({ "id": id, "activity": conflict.activity, "used_by": user })),
+        None => CommandError::new(
+            code::INSTANCE_BUSY,
+            format!("实例 {id} 正在{}，请稍后再试", conflict.activity.label()),
+        )
+        .with_detail(json!({ "id": id, "activity": conflict.activity })),
+    }
 }
 
 // ---------------------------------------------------------------- 错误映射
@@ -339,6 +427,9 @@ pub struct InstanceDto {
     pub created_at: Option<u64>,
     /// 实例此刻在做的事；空闲为 null。
     pub activity: Option<InstanceActivity>,
+    /// 正以它为基底的实例（有几个时为最早占到的那个）；没有被别的实例当作基底时为 null。
+    /// 非空时删除、改名、补全它会报 instance_busy。
+    pub used_by: Option<String>,
     /// 累计游玩分钟（向下取整）；没玩过为 0。
     pub playtime_min: u64,
     /// 上次游玩结束的 Unix 毫秒；没玩过为 null。
@@ -457,6 +548,8 @@ pub struct DeletionPreviewDto {
     pub dependents: Vec<String>,
     /// 实例此刻在做的事；非空时删除会报 instance_busy。
     pub activity: Option<InstanceActivity>,
+    /// 正以它为基底的实例；含义同实例列表的 used_by。
+    pub used_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -652,6 +745,7 @@ fn instance_dto(
         incomplete: summary.incomplete.map(incomplete_dto),
         created_at: summary.created_at,
         activity,
+        used_by: None,
         playtime_min: play.map_or(0, |p| p.playtime_min),
         last_played_at: play.map(|p| p.last_played_at),
     };
@@ -736,14 +830,16 @@ fn content_dto(content: InstanceContent) -> InstanceContentDto {
     }
 }
 
-fn preview_dto(preview: DeletionPreview, activity: Option<InstanceActivity>) -> DeletionPreviewDto {
+/// 删除预览带上实例此刻的占用：它在做的事与正以它为基底的实例，删除确认据此提前说明为什么删不了。
+fn preview_dto(preview: DeletionPreview, locks: &InstanceLocks) -> DeletionPreviewDto {
     DeletionPreviewDto {
+        activity: locks.activity(&preview.id),
+        used_by: locks.used_by(&preview.id),
         id: preview.id,
         worlds: preview.worlds.into_iter().map(world_dto).collect(),
         size_bytes: preview.size_bytes,
         file_count: preview.file_count,
         dependents: preview.dependents,
-        activity,
     }
 }
 
@@ -840,8 +936,12 @@ pub(crate) async fn list_instances_with(
         .into_iter()
         .map(|summary| {
             let activity = locks.activity(&summary.id);
+            let used_by = locks.used_by(&summary.id);
             let play = plays.get(&summary.id);
-            instance_dto(summary, activity, play)
+            InstanceDto {
+                used_by,
+                ..instance_dto(summary, activity, play)
+            }
         })
         .collect())
 }
@@ -1080,9 +1180,13 @@ pub(crate) async fn repair_instance_with(
     id: &str,
     events: &EventSink,
 ) -> Result<RepairResultDto, CommandError> {
-    let _guard = locks.acquire(id, InstanceActivity::Repairing)?;
+    let aurora = facade.snapshot().await;
+    // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名或补全。
+    // 依赖检查只在删除、改名动手那一刻扫一次，挡不住补全中途的这些操作。
+    let bases = aurora.inheritance_chain(id).await.map_err(instance_error)?;
+    let _guard = locks.acquire_with_bases(id, InstanceActivity::Repairing, &bases)?;
     let task = tasks.register(task_id)?;
-    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let aurora = aurora.with_cancel(task.token().clone());
     let (plan, marker) = aurora.begin_repair(id).await.map_err(instance_error)?;
     let outcome = task
         .run(async {
@@ -1142,7 +1246,7 @@ pub async fn preview_instance_deletion(
 ) -> Result<DeletionPreviewDto, CommandError> {
     let aurora = facade.snapshot().await;
     let preview = aurora.deletion_preview(&id).await.map_err(instance_error)?;
-    Ok(preview_dto(preview, locks.activity(&id)))
+    Ok(preview_dto(preview, &locks))
 }
 
 /// 把实例移入回收站，并从侧栏固定、当前选中与游玩记录里去掉它。实例在忙报 `instance_busy`，被依赖报
@@ -1832,6 +1936,85 @@ mod tests {
         assert_eq!(err.code, code::INSTANCE_BUSY);
     }
 
+    /// 传统布局的加载器实例补全时把客户端 jar 与 natives 写进继承链根的目录：补全期间删除、改名基底都以
+    /// instance_busy 拒绝（不是等扫盘发现依赖才拒），detail 指出是哪个实例在用它；列表里基底的
+    /// activity 为 inherited。补全结束（这里是取消）后占用随之释放。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repairing_a_loader_instance_holds_its_base_until_it_ends() {
+        let slow = stalling_server();
+        let env = Env::new();
+        env.vanilla("1.20.1");
+        env.version(
+            "FAB",
+            &format!(
+                r#"{{"id":"FAB","inheritsFrom":"1.20.1","type":"release","mainClass":"K",
+                    "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.0","downloads":{{"artifact":{{
+                    "path":"net/fabricmc/fabric-loader/0.15.0/fabric-loader-0.15.0.jar",
+                    "sha1":"0000000000000000000000000000000000000000","size":1048576,
+                    "url":"{slow}/fabric-loader-0.15.0.jar"}}}}}}]}}"#
+            ),
+        );
+        let registry = Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let repair = tokio::spawn({
+            let (f, r, l) = (env.facade.clone(), registry.clone(), locks.clone());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+                repair_instance_with(&f, &r, &l, "repair-fab", "FAB", &sink).await
+            }
+        });
+        let game_dir = env.game_dir();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while leftovers(&game_dir).is_empty() {
+            assert!(Instant::now() < deadline, "加载器库的下载没有开始");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
+        let listed = list_instances_with(&env.facade, &locks).await.unwrap();
+        let base = listed.iter().find(|i| i.id == "1.20.1").unwrap();
+        assert_eq!(base.activity, Some(InstanceActivity::Inherited));
+        assert_eq!(base.used_by.as_deref(), Some("FAB"));
+        let fab = listed.iter().find(|i| i.id == "FAB").unwrap();
+        assert_eq!(
+            (fab.activity, fab.used_by.as_deref()),
+            (Some(InstanceActivity::Repairing), None)
+        );
+        let preview = preview_dto(
+            env.facade
+                .snapshot()
+                .await
+                .deletion_preview("1.20.1")
+                .await
+                .unwrap(),
+            &locks,
+        );
+        assert_eq!(
+            (preview.activity, preview.used_by.as_deref()),
+            (Some(InstanceActivity::Inherited), Some("FAB"))
+        );
+        let err = delete_instance_with(&env.facade, &locks, "1.20.1", Remove)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "inherited", "used_by": "FAB" })
+        );
+        assert_eq!(err.message, "实例 1.20.1 正在被实例 FAB 使用，请稍后再试");
+        let err = rename_instance_with(&env.facade, &locks, "1.20.1", "原版")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert!(game_dir.join("versions").join("1.20.1").is_dir());
+
+        assert!(registry.cancel("repair-fab"));
+        let err = repair.await.unwrap().unwrap_err();
+        assert_eq!(err.code, common::CANCELLED);
+        assert_eq!(locks.activity("1.20.1"), None, "补全结束后基底放开");
+        assert_eq!(locks.activity("FAB"), None);
+    }
+
     #[tokio::test]
     async fn delete_removes_the_directory_and_prunes_pins_and_selection_on_disk() {
         let env = Env::new();
@@ -1854,7 +2037,7 @@ mod tests {
                 .deletion_preview("旧档")
                 .await
                 .unwrap(),
-            locks.activity("旧档"),
+            &locks,
         );
         assert!(preview.dependents.is_empty());
         assert_eq!(preview.activity, None);
@@ -2758,6 +2941,101 @@ mod tests {
         drop(running);
         drop(modifying);
         assert_eq!(locks.activity("pack"), None);
+    }
+
+    /// 被当作基底：与基底自己的启动、运行、改动以及别的实例对它的占用兼容，与挪走或重写目录的事互斥，
+    /// 两个方向都是。并行时报基底自己的事，只剩基底占用时才报 inherited。
+    #[test]
+    fn inherited_bases_coexist_with_running_and_modifying_but_exclude_directory_rewrites() {
+        use InstanceActivity::*;
+        let exclusive = [Installing, Repairing, Renaming, Deleting];
+        let locks = InstanceLocks::default();
+        let bases = ["1.20.1".to_owned()];
+
+        let fabric = locks.acquire_with_bases("Fabric", Running, &bases).unwrap();
+        let quilt = locks
+            .acquire_with_bases("Quilt", Repairing, &bases)
+            .unwrap();
+        assert_eq!(locks.activity("1.20.1"), Some(Inherited));
+        assert_eq!(
+            locks.activity("Fabric"),
+            Some(Running),
+            "实例自己照记它在做的事"
+        );
+        for activity in exclusive {
+            let err = locks.acquire("1.20.1", activity).err().unwrap();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric" }),
+                "{activity:?}"
+            );
+        }
+        let game = locks.acquire("1.20.1", Launching).unwrap();
+        let modifying = locks.acquire("1.20.1", Modifying).unwrap();
+        assert_eq!(
+            locks.activity("1.20.1"),
+            Some(Launching),
+            "基底自己的事排在前面"
+        );
+        drop(game);
+        assert_eq!(locks.activity("1.20.1"), Some(Modifying));
+        drop(modifying);
+
+        drop(fabric);
+        let err = locks.acquire("1.20.1", Deleting).err().unwrap();
+        assert_eq!(err.detail.unwrap()["used_by"], "Quilt", "还有一个实例在用");
+        drop(quilt);
+        assert_eq!(locks.activity("1.20.1"), None);
+        assert_eq!(locks.activity("Quilt"), None);
+
+        // 反过来：基底正在被挪走或重写时，以它为基底的占用被拒，实例自己已占到的一并放开。
+        for activity in exclusive {
+            let held = locks.acquire("1.20.1", activity).unwrap();
+            let err = locks
+                .acquire_with_bases("Fabric", Launching, &bases)
+                .err()
+                .unwrap();
+            assert_eq!(err.detail.unwrap()["id"], "1.20.1", "{activity:?}");
+            assert_eq!(locks.activity("Fabric"), None, "{activity:?}");
+            drop(held);
+        }
+    }
+
+    /// 基底与实例同名（链成环）或彼此只差大小写时只占一次；实例自己被占着时不去碰基底。
+    #[test]
+    fn bases_are_held_once_and_only_after_the_instance_itself() {
+        use InstanceActivity::*;
+        let locks = InstanceLocks::default();
+        let bases = ["fabric".to_owned(), "Base".to_owned(), "BASE".to_owned()];
+        let chain = locks
+            .acquire_with_bases("Fabric", Launching, &bases)
+            .unwrap();
+        assert_eq!(
+            locks.activity("fabric"),
+            Some(Launching),
+            "同名的基底不另占"
+        );
+        assert_eq!(lock_table(&locks.table).held[&lock_key("Fabric")].len(), 1);
+        assert_eq!(lock_table(&locks.table).held[&lock_key("base")].len(), 1);
+        assert_eq!(locks.activity("base"), Some(Inherited));
+        drop(chain);
+        assert!(lock_table(&locks.table).held.is_empty());
+
+        let renaming = locks.acquire("Fabric", Renaming).unwrap();
+        let err = locks
+            .acquire_with_bases("Fabric", Launching, &bases)
+            .err()
+            .unwrap();
+        assert_eq!(err.detail.unwrap()["activity"], "renaming");
+        assert_eq!(locks.activity("base"), None);
+        drop(renaming);
+    }
+
+    #[test]
+    #[should_panic(expected = "基底占用要记下使用者")]
+    fn inherited_is_only_taken_together_with_its_user() {
+        let _ = InstanceLocks::default().acquire("1.20.1", InstanceActivity::Inherited);
     }
 
     #[test]

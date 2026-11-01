@@ -12,9 +12,9 @@ use std::future::Future;
 use std::time::Instant;
 
 use aurora_core::{
-    game_line_level, DownloadProgress, Finished, GameExit, GameRun, GameSlot, LaunchAccount,
-    LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage, LauncherLevel, LogLine,
-    LogSource, PlayRange, PlayStats, SlotBusy, SlotReservation, SlotTicket,
+    game_line_level, Aurora, DownloadProgress, Finished, GameExit, GameRun, GameSlot,
+    LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
+    LauncherLevel, LogLine, LogSource, PlayRange, PlayStats, SlotBusy, SlotReservation, SlotTicket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::commands::accounts::find_account;
 use crate::commands::error::code::BUSY;
-use crate::commands::instances::{InstanceActivity, InstanceGuard, InstanceLocks};
+use crate::commands::instances::{ChainGuard, InstanceActivity, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::{self, GAME_LOG_EVENT};
 use crate::facade::Facade;
@@ -274,8 +274,9 @@ async fn watch(
     emit(exit);
 }
 
-/// 实例占用随进程寿命：游戏退出、收尾记账写完后与占用槽一起放开，删除、改名、补全在运行期间被拒绝。
-fn spawn_watch(app: AppHandle, ticket: SlotTicket, instance: InstanceGuard, run: GameRun) {
+/// 实例与它基底的占用随进程寿命：游戏退出、收尾记账写完后与占用槽一起放开，删除、改名、补全它们
+/// 在运行期间被拒绝。
+fn spawn_watch(app: AppHandle, ticket: SlotTicket, instance: ChainGuard, run: GameRun) {
     let version_id = run.version_id().to_owned();
     tauri::async_runtime::spawn(async move {
         watch(
@@ -291,15 +292,19 @@ fn spawn_watch(app: AppHandle, ticket: SlotTicket, instance: InstanceGuard, run:
     });
 }
 
-/// 启动前的两道占用：全局只跑一个游戏（[`BUSY`]），目标实例此刻没有在安装、补全、改名或删除
-/// （`instance_busy`）。第二道失败时第一道的预留随返回值一起丢弃，不会把占用槽留在加载中。
-fn reserve_launch<'a>(
+/// 启动前的两道占用：全局只跑一个游戏（[`BUSY`]），目标实例此刻没有在安装、补全、改名或删除，
+/// 它继承链上的基底版本也没有在做这几件事（`instance_busy`）。加载器实例的客户端 jar 与 natives 在
+/// 基底的目录里，基底跟着实例一直占到游戏退出。后一道失败时前一道的预留随返回值一起丢弃，不会把
+/// 占用槽留在加载中。
+async fn reserve_launch<'a>(
     running: &'a RunningGame,
     locks: &InstanceLocks,
+    aurora: &Aurora,
     version_id: &str,
-) -> Result<(SlotReservation<'a>, InstanceGuard), CommandError> {
+) -> Result<(SlotReservation<'a>, ChainGuard), CommandError> {
     let reservation = running.0.reserve(version_id).map_err(busy)?;
-    let instance = locks.acquire(version_id, InstanceActivity::Launching)?;
+    let bases = aurora.inheritance_chain(version_id).await?;
+    let instance = locks.acquire_with_bases(version_id, InstanceActivity::Launching, &bases)?;
     Ok((reservation, instance))
 }
 
@@ -333,10 +338,11 @@ pub async fn launch_game(
             ))
         }
     };
-    // 实例占用从这里一直持有到游戏退出。
-    let (reservation, instance) = reserve_launch(&running, &locks, &version_id)?;
+    let aurora = facade.snapshot().await;
+    // 实例与它基底的占用从这里一直持有到游戏退出。
+    let (reservation, instance) = reserve_launch(&running, &locks, &aurora, &version_id).await?;
     let task = tasks.register(&task_id)?;
-    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let aurora = aurora.with_cancel(task.token().clone());
 
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<LaunchEvent>();
     let phase_app = app.clone();
@@ -587,22 +593,51 @@ mod tests {
         assert!(cancelled.is_cancelled());
     }
 
-    #[test]
-    fn launch_reserves_the_slot_and_the_instance_or_neither() {
+    /// 临时游戏目录上的门面：`versions` 里每项是 (id, inheritsFrom)。
+    fn facade_with(dir: &std::path::Path, versions: &[(&str, Option<&str>)]) -> Facade {
+        for (id, parent) in versions {
+            let version_dir = dir.join(".minecraft").join("versions").join(id);
+            std::fs::create_dir_all(&version_dir).unwrap();
+            let mut body = json!({ "id": id, "type": "release", "mainClass": "M" });
+            if let Some(parent) = parent {
+                body["inheritsFrom"] = json!(parent);
+            }
+            std::fs::write(version_dir.join(format!("{id}.json")), body.to_string()).unwrap();
+        }
+        let config = aurora_core::AuroraConfig {
+            game_directory: Some(dir.join(".minecraft")),
+            ..aurora_core::AuroraConfig::default()
+        };
+        Facade::new(Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap())
+    }
+
+    #[tokio::test]
+    async fn launch_reserves_the_slot_and_the_instance_or_neither() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(dir.path(), &[("生存", None), ("创造", None)]);
+        let aurora = facade.snapshot().await;
         let running = RunningGame::default();
         let locks = InstanceLocks::default();
 
         // 实例正在安装：报 instance_busy，占用槽的预留随之放开，别的实例照常能启动。
         let installing = locks.acquire("生存", InstanceActivity::Installing).unwrap();
-        let err = reserve_launch(&running, &locks, "生存").err().unwrap();
+        let err = reserve_launch(&running, &locks, &aurora, "生存")
+            .await
+            .err()
+            .unwrap();
         assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
         assert_eq!(err.detail.unwrap()["activity"], json!("installing"));
         drop(installing);
 
-        let (reservation, instance) = reserve_launch(&running, &locks, "生存").unwrap();
+        let (reservation, instance) = reserve_launch(&running, &locks, &aurora, "生存")
+            .await
+            .unwrap();
         assert_eq!(locks.activity("生存"), Some(InstanceActivity::Launching));
         // 加载中：另一个实例拿不到占用槽，也不会被占住实例。
-        let err = reserve_launch(&running, &locks, "创造").err().unwrap();
+        let err = reserve_launch(&running, &locks, &aurora, "创造")
+            .await
+            .err()
+            .unwrap();
         assert_eq!(err.code, BUSY);
         assert_eq!(locks.activity("创造"), None);
 
@@ -611,7 +646,146 @@ mod tests {
         drop(reservation);
         drop(instance);
         assert_eq!(locks.activity("生存"), None);
-        assert!(reserve_launch(&running, &locks, "创造").is_ok());
+        assert!(reserve_launch(&running, &locks, &aurora, "创造")
+            .await
+            .is_ok());
+    }
+
+    /// 加载器实例从启动到游戏退出都占着它继承的原版：补全、删除、改名原版都以 instance_busy 拒绝，
+    /// detail 指出是哪个实例在用它。基底被占着做这几件事时，启动反过来被拒，占用槽一并放开。
+    #[tokio::test]
+    async fn a_running_loader_instance_holds_its_base_until_the_game_exits() {
+        use crate::commands::instances::{
+            delete_instance_with, rename_instance_with, repair_instance_with,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(
+            dir.path(),
+            &[("1.20.1", None), ("Fabric 生存", Some("1.20.1"))],
+        );
+        let aurora = facade.snapshot().await;
+        let running = RunningGame::default();
+        let locks = InstanceLocks::default();
+        let tasks = TaskRegistry::default();
+        let (sink, _rx) = mpsc::unbounded_channel::<aurora_core::CoreEvent>();
+
+        let (reservation, instance) = reserve_launch(&running, &locks, &aurora, "Fabric 生存")
+            .await
+            .unwrap();
+        instance.set_activity(InstanceActivity::Running);
+        assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
+        let in_use = json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric 生存" });
+        let err = repair_instance_with(&facade, &tasks, &locks, "r", "1.20.1", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap(), in_use);
+        assert!(!tasks.is_running("r"), "被拒的补全不占任务 id");
+        let err = rename_instance_with(&facade, &locks, "1.20.1", "原版")
+            .await
+            .unwrap_err();
+        assert_eq!(err.detail.unwrap(), in_use);
+        let err = delete_instance_with(&facade, &locks, "1.20.1", NeverDispose)
+            .await
+            .unwrap_err();
+        assert_eq!(err.detail.unwrap(), in_use);
+
+        // 游戏退出：实例与基底一起放开，补全原版照常进行。
+        drop(reservation);
+        drop(instance);
+        assert_eq!(locks.activity("1.20.1"), None);
+        assert_eq!(locks.activity("Fabric 生存"), None);
+        let repaired = repair_instance_with(&facade, &tasks, &locks, "r", "1.20.1", &sink)
+            .await
+            .unwrap();
+        assert!(!repaired.reinstalled);
+
+        // 原版正在补全：启动以它为基底的实例被拒，detail 说的是原版在做什么，占用槽没被留下。
+        let repairing = locks
+            .acquire("1.20.1", InstanceActivity::Repairing)
+            .unwrap();
+        let err = reserve_launch(&running, &locks, &aurora, "Fabric 生存")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "repairing" })
+        );
+        assert_eq!(
+            locks.activity("Fabric 生存"),
+            None,
+            "实例自己的占用随之放开"
+        );
+        drop(repairing);
+        assert!(reserve_launch(&running, &locks, &aurora, "Fabric 生存")
+            .await
+            .is_ok());
+    }
+
+    /// 同一个原版上的两个加载器实例各自占着它，互不冲突；两边都结束后原版才放开。前端与占用槽保证
+    /// 同一时间只跑一个游戏，这里各用一个占用槽，单看实例互斥这一层。
+    #[tokio::test]
+    async fn loader_instances_sharing_a_base_do_not_conflict() {
+        use crate::commands::instances::delete_instance_with;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(
+            dir.path(),
+            &[
+                ("1.20.1", None),
+                ("fabric-loader-0.15.0-1.20.1", Some("1.20.1")),
+                ("Fabric", Some("1.20.1")),
+                // 叠在加载器版本上的传统布局：链上两层都占。
+                ("OptiFabric", Some("fabric-loader-0.15.0-1.20.1")),
+            ],
+        );
+        let aurora = facade.snapshot().await;
+        let locks = InstanceLocks::default();
+        let (first_slot, second_slot) = (RunningGame::default(), RunningGame::default());
+
+        let first = reserve_launch(&first_slot, &locks, &aurora, "Fabric")
+            .await
+            .unwrap();
+        let second = reserve_launch(&second_slot, &locks, &aurora, "OptiFabric")
+            .await
+            .unwrap();
+        assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
+        assert_eq!(
+            locks.activity("fabric-loader-0.15.0-1.20.1"),
+            Some(InstanceActivity::Inherited)
+        );
+        let err = delete_instance_with(&facade, &locks, "1.20.1", NeverDispose)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric" }),
+            "先占到的那个实例被报出来"
+        );
+        let err =
+            delete_instance_with(&facade, &locks, "fabric-loader-0.15.0-1.20.1", NeverDispose)
+                .await
+                .unwrap_err();
+        assert_eq!(err.detail.unwrap()["used_by"], json!("OptiFabric"));
+
+        drop(first);
+        assert_eq!(
+            locks.activity("1.20.1"),
+            Some(InstanceActivity::Inherited),
+            "另一个实例还在用"
+        );
+        drop(second);
+        assert_eq!(locks.activity("1.20.1"), None);
+        assert_eq!(locks.activity("fabric-loader-0.15.0-1.20.1"), None);
+    }
+
+    /// 测试里走不到真正的删除：基底被占着时删除命令必须在动目录之前就拒绝。
+    struct NeverDispose;
+
+    impl aurora_core::Disposer for NeverDispose {
+        fn dispose(&self, dir: &std::path::Path) -> Result<(), aurora_core::InstanceError> {
+            panic!("被占着的基底不该被删除：{}", dir.display());
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ use crate::crashdiag::last_crash_at;
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::modpack::{InstanceModpack, read_instance_modpack};
+use crate::workdir::read_version_json;
 
 /// 侧栏最多固定的实例数。
 pub const MAX_SIDEBAR_PINS: usize = 5;
@@ -548,6 +549,48 @@ pub(crate) fn inheritance_root(scan: &VersionScan, id: &str) -> String {
         }
     }
     current.to_owned()
+}
+
+impl Aurora {
+    /// `id` 继承链上除它自己以外的版本 id，由近及远，最后一个是客户端 jar 与 natives 所在的链根。
+    /// 没有 `inheritsFrom` 时为空。
+    ///
+    /// 只读链上各环的版本 JSON，不扫整个 `versions/`：启动与补全在开局就要它，用来在任务期间占住
+    /// 这些基底版本。某一环的 JSON 不在或解析不了时停在那一环（它的 id 已经收进结果）：链断在哪、为什么
+    /// 由启动与补全自己按失败码报出，这里提前报错只会把具体的失败原因换成笼统的错误。读文件本身出错
+    /// （权限、磁盘）照实报错。`inheritsFrom` 来自盘上的文件，指向不能安全拼进路径的 id 时不再往下读。
+    pub async fn inheritance_chain(&self, id: &str) -> Result<Vec<String>> {
+        if !is_safe_instance_id(id) {
+            return Err(InstanceError::InvalidId { id: id.to_owned() }.into());
+        }
+        let versions_dir = self.layout().versions_dir();
+        // 实例锁与 Windows 的目录名都不分大小写，判环也不分。
+        let mut seen = HashSet::from([id.to_lowercase()]);
+        let mut chain = Vec::new();
+        let mut current = id.to_owned();
+        for _ in 0..MAX_INHERIT_DEPTH {
+            if !is_safe_instance_id(&current) {
+                break;
+            }
+            let json = match read_version_json(&versions_dir, &current).await {
+                Ok(Some(json)) => json,
+                Ok(None) | Err(CoreError::Version(_)) => break,
+                Err(err) => return Err(err),
+            };
+            let Some(parent) = json
+                .inherits_from
+                .filter(|parent| !parent.trim().is_empty())
+            else {
+                break;
+            };
+            if !seen.insert(parent.to_lowercase()) {
+                break;
+            }
+            chain.push(parent.clone());
+            current = parent;
+        }
+        Ok(chain)
+    }
 }
 
 /// 经 `inheritsFrom` 直接依赖 `id` 的实例。
@@ -1083,6 +1126,79 @@ pub(crate) mod tests {
             CoreError::Instance(InstanceError::HasDependents { .. })
         ));
         assert!(parent.exists());
+    }
+
+    #[tokio::test]
+    async fn inheritance_chain_lists_the_bases_up_to_the_root_and_stops_where_the_chain_breaks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.20.1", &vanilla_json("1.20.1"));
+        write_version(
+            &game,
+            "fabric-1.20.1",
+            &fabric_json("fabric-1.20.1", "1.20.1"),
+        );
+        // 加载器版本上再叠一层（OptiFine 装在 Fabric 版本上的传统布局）。
+        write_version(&game, "叠层", &fabric_json("叠层", "fabric-1.20.1"));
+
+        assert_eq!(
+            aurora.inheritance_chain("叠层").await.unwrap(),
+            vec!["fabric-1.20.1".to_owned(), "1.20.1".to_owned()]
+        );
+        assert_eq!(
+            aurora.inheritance_chain("fabric-1.20.1").await.unwrap(),
+            vec!["1.20.1".to_owned()]
+        );
+        assert!(aurora.inheritance_chain("1.20.1").await.unwrap().is_empty());
+        // 自包含的实例与盘上没有的 id：没有基底。
+        assert!(
+            aurora
+                .inheritance_chain("没有这个")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // 空白的 inheritsFrom 按没有处理。
+        write_version(
+            &game,
+            "空白",
+            r#"{"id":"空白","inheritsFrom":"  ","type":"release","mainClass":"M"}"#,
+        );
+        assert!(aurora.inheritance_chain("空白").await.unwrap().is_empty());
+
+        // 父版本不在或 JSON 坏了：它的 id 照样收进来，链停在它那里。
+        write_version(&game, "孤儿", &fabric_json("孤儿", "1.19.4"));
+        assert_eq!(
+            aurora.inheritance_chain("孤儿").await.unwrap(),
+            vec!["1.19.4".to_owned()]
+        );
+        write_version(&game, "坏父", "{ not json");
+        write_version(&game, "坏子", &fabric_json("坏子", "坏父"));
+        assert_eq!(
+            aurora.inheritance_chain("坏子").await.unwrap(),
+            vec!["坏父".to_owned()]
+        );
+
+        // 环（含只差大小写的环）在回到走过的 id 时停下，不把自己算作基底。
+        write_version(&game, "环A", &fabric_json("环A", "环b"));
+        write_version(&game, "环b", &fabric_json("环b", "环a"));
+        assert_eq!(
+            aurora.inheritance_chain("环A").await.unwrap(),
+            vec!["环b".to_owned()]
+        );
+        // 盘上的 inheritsFrom 指向游戏目录之外时收下这个 id 但不去读它。
+        write_version(&game, "越界", &fabric_json("越界", "../../secret"));
+        assert_eq!(
+            aurora.inheritance_chain("越界").await.unwrap(),
+            vec!["../../secret".to_owned()]
+        );
+
+        let err = aurora.inheritance_chain("../x").await.unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Instance(InstanceError::InvalidId { .. })
+        ));
     }
 
     #[tokio::test]
