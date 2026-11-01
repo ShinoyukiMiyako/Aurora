@@ -117,6 +117,49 @@ describe("同一实例的设置读改写按调用顺序串行", () => {
   });
 });
 
+describe("固定 Java 引起的启动失败：修复动作改对固定的那一层", () => {
+  beforeEach(() => {
+    stubInstanceSettings();
+  });
+
+  it("全局固定的默认 Java 版本不够：通知的修复动作把默认 Java 改回自动选择再启动，不去动本来就是自动的实例设置", async () => {
+    let fails = true;
+    ipc.overrides.set("launch_game", () => {
+      if (!fails) return { pid: 7 };
+      fails = false;
+      throw new IpcError("java_too_old", "设置里固定的默认 Java 17 无法运行 Minecraft 1.21.1，至少需要 Java 21", {
+        current: 17,
+        major: 21,
+        mc_version: "1.21.1",
+        pinned_by: "global",
+      });
+    });
+    await store.actions.launch("生存");
+    const toast = store.getState().toasts.find((t) => t.tone === "error");
+    expect(toast).toMatchObject({ title: "「生存」启动失败", body: "Java 17 无法运行 1.21.1", action: { label: "默认 Java 改回自动选择" } });
+    const fix = store.actions.failureFix("auto_default_java");
+    if (!("run" in fix)) throw new Error("改回自动选择应是命令类修复动作");
+    await fix.run();
+    expect(callsOf(ipc, "update_config").filter((a) => "defaultJava" in a)).toEqual([{ defaultJava: "auto" }]);
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存", "生存"]);
+  });
+
+  it("实例自己固定的 Java 找不到：修复动作仍是把实例改回自动选择，不碰默认 Java", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("java_pinned_missing", "实例指定的 Java 不可用：D:/jdk/bin/java.exe（文件不存在）", { path: "D:/jdk/bin/java.exe", pinned_by: "instance" });
+    });
+    await store.actions.launch("生存");
+    const toast = store.getState().toasts.find((t) => t.tone === "error");
+    expect(toast).toMatchObject({ body: "指定的 Java 不存在", action: { label: "改为自动选择" } });
+    const fix = store.actions.failureFix("auto_java");
+    if (!("run" in fix)) throw new Error("改为自动选择应是命令类修复动作");
+    await fix.run().catch(() => undefined);
+    expect(callsOf(ipc, "set_instance_settings").map((a) => (a.settings as { java: string }).java)).toEqual(["auto"]);
+    expect(callsOf(ipc, "update_config").filter((a) => "defaultJava" in a)).toEqual([]);
+  });
+});
+
 describe("改名迁移启动会话", () => {
   it("启动失败的会话随改名换成新 id：重试按新名字启动，查看日志也落到新名字", async () => {
     ipc.overrides.set("launch_game", () => {

@@ -232,7 +232,7 @@ export const AVATAR_LINE = {
 // ---------------------------------------------------------------- 启动失败
 
 /** 失败修复动作的种类；按钮行为由启动层按种类执行。 */
-export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs";
+export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "auto_default_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs";
 
 export interface FailureFix {
   kind: FailureFixKind;
@@ -279,6 +279,17 @@ function sentence(text: string): string {
 
 const RETRY: FailureFix = { kind: "retry", label: "重试" };
 const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" };
+// 实例本来就跟随全局、是全局设置固定了默认 Java：把实例改回自动选择什么也不会变，要改的是默认 Java；
+// 只想让这个实例换 Java 的，去实例设置里单独指定。
+const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默认 Java 改回自动选择" };
+const PICK_JAVA: FailureFix = { kind: "pick_java", label: "选择 Java" };
+
+/** 固定的 Java 是实例设置里指定的，还是设置里固定的默认 Java（参数 pinned_by）。 */
+function pinnedGlobally(params: FailureParams, code: FailureCode): boolean {
+  const by = strParam(params, "pinned_by", code);
+  if (by !== "instance" && by !== "global") throw new Error(`启动失败码 ${code} 的参数 pinned_by 不认识：${by}`);
+  return by === "global";
+}
 
 export function failureCopy(code: FailureCode, params: FailureParams, ctx: FailureContext): FailureCopy {
   switch (code) {
@@ -288,24 +299,25 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
         title: `找不到 Java ${major}`,
         body: `Minecraft ${strParam(params, "mc_version", code)} 需要 Java ${major}，自动下载已关闭。`,
         fix: { kind: "download_java", label: `下载 Java ${major}` },
-        secondary: { kind: "pick_java", label: "选择 Java" },
+        secondary: PICK_JAVA,
       };
     }
-    case "java_pinned_missing":
-      return {
-        title: "指定的 Java 不存在",
-        body: `实例设置里选的 Java 已经找不到了：${strParam(params, "path", code)}。`,
-        fix: AUTO_JAVA,
-        secondary: null,
-      };
+    case "java_pinned_missing": {
+      const path = strParam(params, "path", code);
+      if (pinnedGlobally(params, code)) {
+        return { title: "默认 Java 不存在", body: `设置里固定的默认 Java 已经找不到了：${path}。`, fix: AUTO_DEFAULT_JAVA, secondary: PICK_JAVA };
+      }
+      return { title: "指定的 Java 不存在", body: `实例设置里选的 Java 已经找不到了：${path}。`, fix: AUTO_JAVA, secondary: null };
+    }
     case "java_too_old": {
       const mc = strParam(params, "mc_version", code);
-      return {
-        title: `Java ${numParam(params, "current", code)} 无法运行 ${mc}`,
-        body: `Minecraft ${mc} 至少需要 Java ${numParam(params, "major", code)}。`,
-        fix: AUTO_JAVA,
-        secondary: null,
-      };
+      const current = numParam(params, "current", code);
+      const title = `Java ${current} 无法运行 ${mc}`;
+      const need = `Minecraft ${mc} 至少需要 Java ${numParam(params, "major", code)}`;
+      if (pinnedGlobally(params, code)) {
+        return { title, body: `${need}，设置里把默认 Java 固定成了 Java ${current}。`, fix: AUTO_DEFAULT_JAVA, secondary: PICK_JAVA };
+      }
+      return { title, body: `${need}。`, fix: AUTO_JAVA, secondary: null };
     }
     case "account_relogin":
       return { title: "需要重新登录", body: `${ctx.accountName} 的登录已失效。`, fix: { kind: "relogin", label: "重新登录" }, secondary: null };

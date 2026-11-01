@@ -1960,6 +1960,14 @@ export class LauncherStore {
           },
           errorTitle: ACTION_ERROR.launch(instanceId),
         };
+      case "auto_default_java":
+        return {
+          run: async () => {
+            await this.actions.updateSettings({ defaultJava: JAVA_AUTO });
+            await this.actions.launch(instanceId);
+          },
+          errorTitle: ACTION_ERROR.launch(instanceId),
+        };
       case "relogin": {
         const accountUuid = s.accountUuid;
         return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId }), errorTitle: ACTION_ERROR.relogin };

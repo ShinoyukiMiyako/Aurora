@@ -171,10 +171,10 @@ describe("启动 mock", () => {
 
   it("失败码在它所属的阶段拒绝，插值参数原样在 detail 里，之后能再次启动", async () => {
     const { phases } = await recordEvents();
-    failNextMockLaunch("java_too_old", { current: 17, major: 21, mc_version: "1.21" });
+    failNextMockLaunch("java_too_old", { current: 17, major: 21, mc_version: "1.21", pinned_by: "instance" });
     const error = await rejection(launchGame(offline("1.21", "t-1")));
     expect(error.code).toBe("java_too_old");
-    expect(error.detail).toEqual({ current: 17, major: 21, mc_version: "1.21" });
+    expect(error.detail).toEqual({ current: 17, major: 21, mc_version: "1.21", pinned_by: "instance" });
     expect(phases.map((p) => p.stage_index)).toEqual([0]);
     expect((await lastLaunchLog("1.21"))?.ended?.outcome).toBe("failed");
 

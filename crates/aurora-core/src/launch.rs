@@ -265,6 +265,31 @@ pub struct InstanceLaunchSettings {
     pub fullscreen: bool,
 }
 
+/// 启动用的固定 Java 是在哪一层固定的：实例设置里指定的，还是实例跟随全局、全局设置固定了默认 Java。
+/// 随 `java_pinned_missing`、`java_too_old` 以参数 `pinned_by` 交给界面，修复动作据此改对地方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PinnedBy {
+    Instance,
+    Global,
+}
+
+impl PinnedBy {
+    fn as_str(self) -> &'static str {
+        match self {
+            PinnedBy::Instance => "instance",
+            PinnedBy::Global => "global",
+        }
+    }
+
+    /// 报错与告警里对这个 Java 的称呼。
+    fn label(self) -> &'static str {
+        match self {
+            PinnedBy::Instance => "实例指定的 Java",
+            PinnedBy::Global => "设置里固定的默认 Java",
+        }
+    }
+}
+
 /// 实例选用的 Java。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum JavaChoice {
@@ -558,16 +583,25 @@ impl Aurora {
             settings.java = java;
         }
         // 实例跟随全局、全局又固定了默认 Java 时，按固定路径对待：找不到或版本不够同样要报出来，
-        // 不能悄悄换成自动挑选的另一个 Java。
+        // 不能悄悄换成自动挑选的另一个 Java。失败时要说清固定在哪一层：实例本来就是自动选择时，
+        // 把实例改回自动选择什么也不会改变，界面得指向设置里的默认 Java。
+        let mut pinned_by = PinnedBy::Instance;
         if settings.java == JavaChoice::Auto
             && let Some(path) = &self.config().default_java
         {
             settings.java = JavaChoice::Path(path.clone());
+            pinned_by = PinnedBy::Global;
         }
         let (account, auth) = self.launch_identity(account, reporter).await?;
         let required_major = required_java_major(merged);
         let java_plan = self
-            .plan_java(required_major, &settings.java, &mc_version, reporter)
+            .plan_java(
+                required_major,
+                &settings.java,
+                pinned_by,
+                &mc_version,
+                reporter,
+            )
             .await?;
 
         // -- 1 校验游戏文件：工作目录、主类、客户端 jar 与资源
@@ -796,35 +830,39 @@ impl Aurora {
         &self,
         required_major: u32,
         choice: &JavaChoice,
+        pinned_by: PinnedBy,
         mc_version: &str,
         reporter: &mut Reporter<'_>,
     ) -> Result<JavaPlan, LaunchFailed> {
         if let JavaChoice::Path(path) = choice {
+            let who = pinned_by.label();
             let probed = probe_java(path.clone(), DetectSource::Path).await?;
             let java = probed.map_err(|reason| {
                 LaunchFailure::new(
                     FailureCode::JavaPinnedMissing,
-                    format!("实例指定的 Java 不可用：{}（{reason}）", path.display()),
+                    format!("{who} 不可用：{}（{reason}）", path.display()),
                 )
                 .param("path", path.display().to_string())
+                .param("pinned_by", pinned_by.as_str())
             })?;
             if java.version.major < required_major {
                 return Err(LaunchFailure::new(
                     FailureCode::JavaTooOld,
                     format!(
-                        "实例指定的 Java {} 无法运行 Minecraft {mc_version}，至少需要 Java {required_major}",
+                        "{who} {} 无法运行 Minecraft {mc_version}，至少需要 Java {required_major}",
                         java.version.major
                     ),
                 )
                 .param("current", java.version.major)
                 .param("major", required_major)
                 .param("mc_version", mc_version)
+                .param("pinned_by", pinned_by.as_str())
                 .into());
             }
             if java.version.major > required_major {
                 reporter
                     .warn(format!(
-                        "实例指定的 Java {} 高于要求的 Java {required_major}，旧版 Forge 与部分 Mod 可能报错",
+                        "{who} {} 高于要求的 Java {required_major}，旧版 Forge 与部分 Mod 可能报错",
                         java.version.major
                     ))
                     .await;
@@ -1871,6 +1909,15 @@ mod tests {
             failure.params.get("path"),
             Some(&Value::from(missing.display().to_string()))
         );
+        assert_eq!(
+            failure.params.get("pinned_by"),
+            Some(&Value::from("instance"))
+        );
+        assert!(
+            failure.message.starts_with("实例指定的 Java 不可用："),
+            "{}",
+            failure.message
+        );
 
         let (result, _) = launch(&fx.aurora, fake_java(&fx.root, 17, 0)).await;
         let failure = expect_failure(result);
@@ -1880,6 +1927,10 @@ mod tests {
         assert_eq!(
             failure.params.get("mc_version"),
             Some(&Value::from(VERSION))
+        );
+        assert_eq!(
+            failure.params.get("pinned_by"),
+            Some(&Value::from("instance"))
         );
     }
 
@@ -1900,6 +1951,15 @@ mod tests {
         assert_eq!(failure.code, FailureCode::JavaTooOld);
         assert_eq!(failure.params.get("current"), Some(&Value::from(17)));
         assert_eq!(failure.params.get("major"), Some(&Value::from(21)));
+        // 固定在全局：把实例改回自动选择不会有任何变化，界面要据此改指设置里的默认 Java。
+        assert_eq!(
+            failure.params.get("pinned_by"),
+            Some(&Value::from("global"))
+        );
+        assert_eq!(
+            failure.message,
+            format!("设置里固定的默认 Java 17 无法运行 Minecraft {VERSION}，至少需要 Java 21")
+        );
 
         let missing = fx.root.join("gone").join("java.exe");
         fx.aurora.set_default_java(Some(missing.clone()));
@@ -1912,6 +1972,17 @@ mod tests {
         assert_eq!(
             failure.params.get("path"),
             Some(&Value::from(missing.display().to_string()))
+        );
+        assert_eq!(
+            failure.params.get("pinned_by"),
+            Some(&Value::from("global"))
+        );
+        assert!(
+            failure
+                .message
+                .starts_with("设置里固定的默认 Java 不可用："),
+            "{}",
+            failure.message
         );
     }
 

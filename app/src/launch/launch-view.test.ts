@@ -145,7 +145,7 @@ describe("会话第二行文案", () => {
   });
 
   it("失败写失败标题；崩溃读出线索前没有副行，读出后写线索或未匹配", () => {
-    const failed = sessionFailed(loading("A"), "launch-1", { code: "java_too_old", params: { current: 17, major: 21, mc_version: "1.21.1" } }, T0);
+    const failed = sessionFailed(loading("A"), "launch-1", { code: "java_too_old", params: { current: 17, major: 21, mc_version: "1.21.1", pinned_by: "instance" } }, T0);
     expect(sessionDetail(failed, T0)).toBe("Java 17 无法运行 1.21.1");
     const crashed = sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000);
     expect(sessionDetail(crashed, T0)).toBeNull();
@@ -162,6 +162,35 @@ describe("会话第二行文案", () => {
     const relogin = sessionFailed(loading("A"), "launch-1", { code: "account_relogin", params: { account: "Steve" } }, T0);
     const reloginView = launchView(state({ session: relogin }), inst("A")) as Extract<LaunchView, { kind: "failed" }>;
     expect(launchFailure(reloginView, false).body).toBe("Steve 的登录已失效。");
+  });
+
+  it("固定 Java 的失败按固定在哪一层给出修复：全局固定改默认 Java，实例固定改实例；没说固定在哪一层抛错", () => {
+    const failedWith = (code: "java_too_old" | "java_pinned_missing", params: Record<string, string | number>) => {
+      const failed = sessionFailed(loading("A"), "launch-1", { code, params }, T0);
+      return launchFailure(launchView(state({ session: failed }), inst("A")) as Extract<LaunchView, { kind: "failed" }>, false);
+    };
+    const old = { current: 8, major: 17, mc_version: "1.18.2" };
+    expect(failedWith("java_too_old", { ...old, pinned_by: "global" })).toEqual({
+      title: "Java 8 无法运行 1.18.2",
+      body: "Minecraft 1.18.2 至少需要 Java 17，设置里把默认 Java 固定成了 Java 8。",
+      fix: { kind: "auto_default_java", label: "默认 Java 改回自动选择" },
+      secondary: { kind: "pick_java", label: "选择 Java" },
+    });
+    expect(failedWith("java_too_old", { ...old, pinned_by: "instance" })).toEqual({
+      title: "Java 8 无法运行 1.18.2",
+      body: "Minecraft 1.18.2 至少需要 Java 17。",
+      fix: { kind: "auto_java", label: "改为自动选择" },
+      secondary: null,
+    });
+    expect(failedWith("java_pinned_missing", { path: "D:/jdk8/bin/java.exe", pinned_by: "global" })).toEqual({
+      title: "默认 Java 不存在",
+      body: "设置里固定的默认 Java 已经找不到了：D:/jdk8/bin/java.exe。",
+      fix: { kind: "auto_default_java", label: "默认 Java 改回自动选择" },
+      secondary: { kind: "pick_java", label: "选择 Java" },
+    });
+    expect(failedWith("java_pinned_missing", { path: "D:/jdk8/bin/java.exe", pinned_by: "instance" })).toMatchObject({ title: "指定的 Java 不存在", fix: { kind: "auto_java" } });
+    expect(() => failedWith("java_pinned_missing", { path: "D:/jdk8/bin/java.exe" })).toThrow("启动失败码 java_pinned_missing 缺少插值参数 pinned_by");
+    expect(() => failedWith("java_too_old", { ...old, pinned_by: "both" })).toThrow("启动失败码 java_too_old 的参数 pinned_by 不认识：both");
   });
 });
 
