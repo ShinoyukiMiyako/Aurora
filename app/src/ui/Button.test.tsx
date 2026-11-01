@@ -368,6 +368,48 @@ describe("IconButton", () => {
     expect(button.getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("disabled + focusableWhenDisabled：aria-disabled 代替原生禁用，外观同禁用，点击与 Enter、空格都不触发，提示照常写 label", () => {
+    const onClick = vi.fn();
+    const button = mount(<IconButton icon="x" label="取消启动" disabled focusableWhenDisabled onClick={onClick} />);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.dataset.disabled).toBe("true");
+    act(() => button.focus());
+    activateAllWays(button);
+    expect(onClick).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(button);
+    focusByKeyboard(button);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("取消启动");
+  });
+
+  it("聚焦着变成不可用（focusableWhenDisabled）：焦点留在按钮上；原生禁用会落到 body", async () => {
+    onTestFinished(emulateFocusFixup());
+    const onClick = vi.fn();
+    const ui = (props: { disabled?: boolean; focusableWhenDisabled?: boolean }) => withOverlay(<IconButton icon="x" label="取消启动" onClick={onClick} {...props} />);
+    view = render(ui({}));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    act(() => button.focus());
+    view.rerender(ui({ disabled: true, focusableWhenDisabled: true }));
+    await act(async () => undefined);
+    expect(view.container.querySelector("button")).toBe(button);
+    expect(document.activeElement).toBe(button);
+    press(button, "Enter");
+    expect(onClick).not.toHaveBeenCalled();
+
+    view.rerender(ui({}));
+    act(() => button.focus());
+    view.rerender(ui({ disabled: true }));
+    await act(async () => undefined);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("disabled + focusableWhenDisabled + disabledReason：保持可聚焦并挂原因提示", () => {
+    const button = mount(<IconButton icon="folder" label="打开文件夹" disabled focusableWhenDisabled disabledReason="安装进行中，暂时不能打开" />);
+    expect(button.disabled).toBe(false);
+    focusByKeyboard(button);
+    expect(document.querySelector('[role="tooltip"]')?.lastElementChild?.textContent).toBe("安装进行中，暂时不能打开");
+  });
+
   it("没有 disabledReason 时照常点击，调用方自己给的 aria-disabled 原样保留", () => {
     const onClick = vi.fn();
     const button = mount(<IconButton icon="pin" label="固定" aria-disabled onClick={onClick} />);

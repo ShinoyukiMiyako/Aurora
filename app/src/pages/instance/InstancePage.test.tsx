@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act, type ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
@@ -15,6 +15,7 @@ import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } 
 import { routeKey, type InstanceTab } from "../../state/route";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
+import { emulateFocusFixup } from "../../test/focus-fixup";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { invalidate } from "../../state/resource";
@@ -363,6 +364,34 @@ describe("实例详情：头图与标签", () => {
     await flush();
     expect(callsOf(ipc, "rename_instance")).toEqual([{ id: ID, newName: "樱花生存二周目" }]);
     expect(toastTitles()).toContain("已重命名为「樱花生存二周目」");
+  });
+
+  it("点「保存名称」后改名进行中：按钮保持可聚焦，焦点留在它上面，再按不重复提交", async () => {
+    onTestFinished(emulateFocusFixup());
+    const pending = deferred<{ id: string }>();
+    ipc.overrides.set("rename_instance", () => pending.promise);
+    await open("overview");
+    const scope = document.querySelector("h1")?.closest("section");
+    if (!scope) throw new Error("没有头图");
+    keydown(scope, "F2");
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="实例名称"]');
+    if (input === null) throw new Error("F2 没有进入改名");
+    typeInto(input, "樱花生存二周目");
+    const save = button("保存名称");
+    act(() => save.focus());
+    act(() => {
+      save.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await flush();
+    expect(callsOf(ipc, "rename_instance")).toHaveLength(1);
+    expect(button("保存名称")).toBe(save);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(save);
+    act(() => {
+      save.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await flush();
+    expect(callsOf(ipc, "rename_instance")).toHaveLength(1);
   });
 });
 

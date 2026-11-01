@@ -203,7 +203,7 @@ function RenameField({ inst, ops, onDone }: { inst: InstanceSummary; ops: Instan
         onKeyDown={onKeyDown}
         className={styles.renameInput}
       />
-      <IconButton icon="check" label={HERO_COPY.saveName} size="sm" variant="secondary" disabled={error !== null || saving} onClick={commit} />
+      <IconButton icon="check" label={HERO_COPY.saveName} size="sm" variant="secondary" disabled={error !== null || saving} focusableWhenDisabled={saving} onClick={commit} />
       <IconButton icon="x" label={HERO_COPY.cancelRename} size="sm" onClick={onDone} />
       {error !== null && (
         <span className={styles.renameError} role="alert">

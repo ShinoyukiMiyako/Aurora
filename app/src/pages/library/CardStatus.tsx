@@ -113,7 +113,7 @@ function LoadingStatus({ view, entry }: { view: Extract<LaunchView, { kind: "loa
         </span>
         <ProgressBar value={s.progress} size="sm" track={s.taskId} label={stageLabel(s.stageIndex)} />
       </div>
-      <IconButton icon="x" label={LAUNCH_COPY.cancel} size="sm" disabled={stopping} onClick={entry.cancel} />
+      <IconButton icon="x" label={LAUNCH_COPY.cancel} size="sm" disabled={stopping} focusableWhenDisabled onClick={entry.cancel} />
     </div>
   );
 }

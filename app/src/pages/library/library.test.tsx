@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { CONFIRM_COPY, DELETE_INSTANCE_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
 import type { InstanceDto, WorldDto } from "../../ipc/instances";
@@ -9,6 +9,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { emulateFocusFixup } from "../../test/focus-fixup";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
@@ -542,6 +543,31 @@ describe("实例库：动作", () => {
     click(dialogButton(CONFIRM_COPY.cancel));
     await flush();
     expect(callsOf(ipc, "delete_instance")).toEqual([]);
+  });
+
+  it("加载态按下「取消启动」后进入正在结束：按钮保持可聚焦，焦点留在它上面，再按不重复发取消", async () => {
+    onTestFinished(emulateFocusFixup());
+    const launch = deferred<{ pid: number | null }>();
+    ipc.overrides.set("launch_game", () => launch.promise);
+    const cancel = deferred<boolean>();
+    ipc.overrides.set("cancel_task", () => cancel.promise);
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "原版").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    click(byText("button", "启动", card));
+    await flush();
+    const stop = card.querySelector<HTMLButtonElement>('[aria-label="取消启动"]');
+    if (stop === null) throw new Error("加载态没有「取消启动」");
+    act(() => stop.focus());
+    click(stop);
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
+    expect(card.querySelector('[aria-label="取消启动"]')).toBe(stop);
+    expect(stop.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(stop);
+    click(stop);
+    await flush();
+    expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
   });
 
   it("启动：卡片底栏进入加载态，别的卡注明另一个游戏在运行；运行中的实例不能删除", async () => {
