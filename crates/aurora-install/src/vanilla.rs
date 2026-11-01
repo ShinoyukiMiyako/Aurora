@@ -121,6 +121,14 @@ impl<'a> VanillaInstaller<'a> {
         dest: &Path,
     ) -> Result<VanillaSummary> {
         let version = self.download_version_json(entry, staged).await?;
+        // 版本 JSON 按条目 id 落点，客户端 jar 与 natives 按它自己写的 id 落点：不一致时文件散在两个目录，
+        // 失败清理也只管得到条目那一个。
+        if version.id != entry.id {
+            return Err(Error::VersionIdMismatch {
+                expected: entry.id.clone(),
+                actual: version.id,
+            });
+        }
         let summary = self.install_files(&version).await?;
         tokio::fs::rename(staged, dest)
             .await
@@ -278,6 +286,46 @@ mod tests {
         );
         let name = a.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with('.') && !name.ends_with(".json"), "{name}");
+    }
+
+    /// 远端版本 JSON 里的 id 与清单条目对不上：报错，不把客户端 jar 下到另一个目录，这次建的目录也不留。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_version_json_naming_another_id_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/1.21.1.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"{"id":"1.21.2","type":"release"}"#))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 1);
+        let layout = crate::layout::GameLayout::new(tmp.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = RetryPolicy {
+            max_attempts: 1,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            jitter: false,
+        };
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+        let entry: ManifestVersion = serde_json::from_value(serde_json::json!({
+            "id": "1.21.1", "type": "release", "url": format!("{}/1.21.1.json", server.uri()),
+            "time": "t", "releaseTime": "t"
+        }))
+        .unwrap();
+
+        let err = VanillaInstaller::new(cx).install_entry(&entry).await.unwrap_err();
+
+        assert!(
+            matches!(&err, Error::VersionIdMismatch { expected, actual } if expected == "1.21.1" && actual == "1.21.2"),
+            "实际：{err:?}"
+        );
+        assert!(!layout.version_dir("1.21.1").exists());
+        assert!(!layout.version_dir("1.21.2").exists());
     }
 
     /// 官方清单持续 503：在官方上把重试次数用完后换镜像取到清单，不再回头请求官方。

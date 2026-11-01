@@ -85,6 +85,9 @@ pub enum Error {
     },
 
     /// 版本 JSON 缺少客户端主件下载信息，无法确定 client.jar 来源。
+    #[error("版本清单里的 {expected} 指向的版本 JSON 写的是 {actual}")]
+    VersionIdMismatch { expected: String, actual: String },
+
     #[error("版本 {version} 的 JSON 缺少 downloads.client")]
     MissingClientDownload { version: String },
 
@@ -211,6 +214,7 @@ impl RetryableError for Error {
             | Error::Zip { .. }
             | Error::Io { .. }
             | Error::BatchIncomplete { .. }
+            | Error::VersionIdMismatch { .. }
             | Error::MissingClientDownload { .. }
             | Error::MissingAssetIndex { .. }
             | Error::InvalidLibraryCoordinate { .. }
