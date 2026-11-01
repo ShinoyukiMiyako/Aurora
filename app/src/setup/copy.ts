@@ -3,6 +3,7 @@
 
 import { APP_LICENSE, APP_NAME, APP_NAME_EN } from "../lib/app-info";
 import type { DirIssue, ExistingKind, FailureCode, InstallMode, Phase } from "./contract";
+import type { FailureRecovery } from "./model";
 
 export type Lang = "zh" | "en";
 
@@ -23,8 +24,8 @@ export function formatBytes(bytes: number): string {
 
 export interface FailureText {
   title: string;
-  /** detail 是 Failure.detail：payload_exit 时是退出码。 */
-  body(detail: string): string;
+  /** detail 是 Failure.detail：payload_exit 时是退出码。recovery 是这一页给的退路，话要和按钮对得上。 */
+  body(detail: string, recovery: FailureRecovery): string;
 }
 
 export interface InstalledText {
@@ -133,6 +134,9 @@ const LEGAL_NOTE_ZH = `${APP_NAME}按 ${APP_LICENSE} 开源，不提供任何担
 const LEGAL_NOTE_EN = `${APP_NAME_EN} is open source under ${APP_LICENSE} and comes with no warranty. You may redistribute it under that license.`;
 const DATA_UNTOUCHED_ZH = "设置、账户和游戏文件都不动。";
 const DATA_UNTOUCHED_EN = "Your settings, accounts and game files stay as they are.";
+/** 覆盖安装换位置等于搬数据目录，这时不能叫人换文件夹。 */
+const LOCKED_LOCATION_ZH = "现有的安装位置不能换。";
+const LOCKED_LOCATION_EN = "The existing install can't move.";
 
 const ZH: SetupCopy = {
   frame: {
@@ -211,8 +215,8 @@ const ZH: SetupCopy = {
   },
   failed: {
     reason: {
-      dir_unwritable: { title: "这个位置写不进去", body: () => "换一个你有权限的文件夹再试。" },
-      disk_full: { title: "这块盘空间不够", body: () => "腾出空间或换一块盘再试。" },
+      dir_unwritable: { title: "这个位置写不进去", body: (_, recovery) => (recovery === "retry" ? `${LOCKED_LOCATION_ZH}确认你能写这个文件夹后再试。` : "换一个你有权限的文件夹再试。") },
+      disk_full: { title: "这块盘空间不够", body: (_, recovery) => (recovery === "retry" ? `${LOCKED_LOCATION_ZH}腾出空间后再试。` : "腾出空间或换一块盘再试。") },
       extract_failed: { title: "安装包没能解开", body: () => "杀毒软件可能拦下了它。放行后重试，或者重新下载一份。" },
       payload_exit: { title: "安装没有完成", body: (detail) => `安装程序提前退出了，返回码 ${detail}。` },
       verify_failed: { title: "安装没有完成", body: () => "安装程序报告成功，但事后检查没有通过，下面是没过的项。" },
@@ -346,8 +350,8 @@ const EN: SetupCopy = {
   },
   failed: {
     reason: {
-      dir_unwritable: { title: "Can't write to this location", body: () => "Pick a folder you have access to and try again." },
-      disk_full: { title: "Not enough disk space", body: () => "Free up some space or pick another drive, then try again." },
+      dir_unwritable: { title: "Can't write to this location", body: (_, recovery) => (recovery === "retry" ? `${LOCKED_LOCATION_EN} Make sure you can write to this folder, then try again.` : "Pick a folder you have access to and try again.") },
+      disk_full: { title: "Not enough disk space", body: (_, recovery) => (recovery === "retry" ? `${LOCKED_LOCATION_EN} Free up some space, then try again.` : "Free up some space or pick another drive, then try again.") },
       extract_failed: { title: "Couldn't unpack the installer", body: () => "Antivirus software may have blocked it. Allow it and try again, or download a fresh copy." },
       payload_exit: { title: "The install didn't finish", body: (detail) => `The installer quit early with code ${detail}.` },
       verify_failed: { title: "The install didn't finish", body: () => "The installer reported success, but the check afterwards failed. The failed items are below." },

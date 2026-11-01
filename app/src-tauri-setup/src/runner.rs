@@ -32,6 +32,7 @@ use crate::journal::{self, Journal, JournalStore, Processes, Recovery, SystemPro
 use crate::launcher::{self, Opened};
 use crate::log::{self, SetupLog};
 use crate::overlay::Source;
+use crate::target::{SpaceNeed, SystemEnv, TargetEnv, Volume, write_fault};
 use crate::verify::{self, Expected, UNINSTALLER_NAME, verify};
 
 pub const SHORTCUT_NAME: &str = "Petalfall.lnk";
@@ -139,6 +140,11 @@ pub trait Launcher: Send + Sync {
     /// 打开装好的启动器。
     fn open_app(&self, dir: &Path, instance: &Instance) -> io::Result<Opened> {
         launcher::open(dir, instance)
+    }
+
+    /// 目标目录所在的卷。
+    fn target_volume(&self, dir: &Path) -> io::Result<Volume> {
+        SystemEnv.volume(dir)
     }
 }
 
@@ -541,6 +547,30 @@ impl Session {
         }
     }
 
+    /// 退出码不是 0 时的结论。目标盘上查得出原因就按原因报，退出码留在 detail 里给反馈用；查不出才是 payload_exit。
+    fn exit_failure(&self, code: i32, instdir: &Path, reporter: &dyn Reporter) -> Failure {
+        let header = self.header();
+        let need = SpaceNeed::for_payload(header.payload_len, header.exe_len).target;
+        // NSIS 覆盖时先截断旧 exe，那块空间下一次还能用
+        let reclaimable = file_len(&instdir.join(APP_EXE)).unwrap_or(0);
+        let fault = write_fault(instdir, need, reclaimable, |anchor| {
+            self.launcher
+                .target_volume(anchor)
+                .inspect_err(|err| reporter.note(&format!("查目标盘空间失败：{err}")))
+                .ok()
+        });
+        match fault {
+            Some(fault) => Failure {
+                detail: format!("载荷返回码 {code}，{}", fault.detail),
+                ..fault
+            },
+            None => Failure {
+                code: FailureCode::PayloadExit,
+                detail: code.to_string(),
+            },
+        }
+    }
+
     /// 跑完一次安装。阻塞到结束，要放在工作线程上调：子进程要等好几秒，窗口线程不能陪着。
     pub fn install(&self, target: &Target, reporter: &dyn Reporter) -> Result<(), Failure> {
         let outcome = self.perform(target, reporter);
@@ -572,10 +602,7 @@ impl Session {
         let code = outcome?;
         reporter.note(&format!("载荷退出，返回码 {code}"));
         if code != 0 {
-            return Err(Failure {
-                code: FailureCode::PayloadExit,
-                detail: code.to_string(),
-            });
+            return Err(self.exit_failure(code, &instdir, reporter));
         }
 
         reporter.progress(meter.exited());
@@ -1016,9 +1043,17 @@ mod tests {
         steps: Mutex<VecDeque<Step>>,
         calls: Arc<Mutex<Vec<Call>>>,
         journal_path: PathBuf,
+        free_bytes: u64,
     }
 
     impl Launcher for Scripted {
+        fn target_volume(&self, _dir: &Path) -> io::Result<Volume> {
+            Ok(Volume {
+                id: r"D:\".to_owned(),
+                free_bytes: self.free_bytes,
+            })
+        }
+
         fn launch(
             &self,
             exe: &Path,
@@ -1067,6 +1102,7 @@ mod tests {
         exe: Arc<Vec<u8>>,
         entry: Arc<MemoryEntry>,
         calls: Arc<Mutex<Vec<Call>>>,
+        free_bytes: u64,
     }
 
     impl Bench {
@@ -1091,6 +1127,7 @@ mod tests {
                 exe,
                 entry: Arc::new(MemoryEntry::default()),
                 calls: Arc::default(),
+                free_bytes: u64::MAX,
                 _dir: dir,
             }
         }
@@ -1100,6 +1137,7 @@ mod tests {
                 steps: Mutex::new(steps.into()),
                 calls: Arc::clone(&self.calls),
                 journal_path: JournalStore::new(&self.roots.state).path(),
+                free_bytes: self.free_bytes,
             };
             let entry: Arc<dyn Registry> = self.entry.clone();
             let mut session = Session::new(
@@ -1285,6 +1323,87 @@ mod tests {
             notes.iter().any(|line| line == "安装失败：PayloadExit: 3"),
             "{notes:?}"
         );
+    }
+
+    /// `exe` 2048 字节加上目标盘的余量。
+    const NEED_ON_TARGET: u64 = 2048 + 10 * 1024 * 1024;
+
+    fn failed_slowly(bench: &Bench, mode: InstallMode, step: Step) -> Failure {
+        let mut session = bench.session(vec![step]);
+        session.quick_exit = Duration::ZERO;
+        session
+            .install(&bench.target(mode, true), &Recording::default())
+            .unwrap_err()
+    }
+
+    #[test]
+    fn exit_2_with_the_target_disk_out_of_space_is_disk_full() {
+        let mut bench = Bench::new();
+        bench.free_bytes = 4096;
+
+        let failure = failed_slowly(&bench, InstallMode::Fresh, exits(2));
+
+        assert_eq!(
+            failure,
+            Failure {
+                code: FailureCode::DiskFull,
+                detail: format!(r"载荷返回码 2，D:\ 还剩 4096 字节，需要 {NEED_ON_TARGET} 字节"),
+            }
+        );
+        assert!(bench.store().path().exists(), "半装记录要留着");
+    }
+
+    #[test]
+    fn a_half_written_exe_does_not_hide_a_full_disk() {
+        let mut bench = Bench::new();
+        bench.free_bytes = 0;
+        let instdir = bench.instdir.clone();
+        let half_written = Step::Run {
+            effect: Box::new(move || {
+                fs::create_dir_all(&instdir).unwrap();
+                fs::write(instdir.join(APP_EXE), b"half").unwrap();
+            }),
+            exit: 2,
+        };
+
+        let failure = failed_slowly(&bench, InstallMode::Fresh, half_written);
+
+        assert_eq!(failure.code, FailureCode::DiskFull);
+    }
+
+    #[test]
+    fn the_space_an_overwrite_gets_back_is_not_a_shortage() {
+        let mut bench = Bench::new();
+        bench.free_bytes = 4096;
+        fs::create_dir_all(&bench.instdir).unwrap();
+        fs::write(
+            bench.instdir.join(APP_EXE),
+            vec![0u8; NEED_ON_TARGET as usize - 4096],
+        )
+        .unwrap();
+
+        let failure = failed_slowly(&bench, InstallMode::Upgrade, exits(2));
+
+        assert_eq!(
+            failure,
+            Failure {
+                code: FailureCode::PayloadExit,
+                detail: "2".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn exit_2_with_a_target_that_cannot_be_written_is_dir_unwritable() {
+        let bench = Bench::new();
+        // 目标路径上的一段被文件占着：真实权限的情形在 target.rs 用 ACL 测
+        fs::write(bench.instdir.parent().unwrap(), b"in the way").unwrap();
+
+        let failure = failed_slowly(&bench, InstallMode::Fresh, exits(2));
+
+        assert_eq!(failure.code, FailureCode::DirUnwritable);
+        let prefix = format!("载荷返回码 2，{} 写不进去：", bench.instdir.display());
+        assert!(failure.detail.starts_with(&prefix), "{}", failure.detail);
     }
 
     #[test]

@@ -79,7 +79,15 @@ describe("文案表", () => {
   });
 
   it.each(["zh", "en"] as const)("%s 表的退出码落进说明", (lang) => {
-    expect(COPY[lang].failed.reason.payload_exit.body("2")).toContain("2");
+    expect(COPY[lang].failed.reason.payload_exit.body("2", "retry")).toContain("2");
+  });
+
+  it("英文表的写不进和盘满也按退路说话", () => {
+    const { dir_unwritable, disk_full } = COPY.en.failed.reason;
+    expect(dir_unwritable.body("x", "change_location")).toBe("Pick a folder you have access to and try again.");
+    expect(dir_unwritable.body("x", "retry")).toBe("The existing install can't move. Make sure you can write to this folder, then try again.");
+    expect(disk_full.body("x", "change_location")).toBe("Free up some space or pick another drive, then try again.");
+    expect(disk_full.body("x", "retry")).toBe("The existing install can't move. Free up some space, then try again.");
   });
 
   it("空间提示带上两个数", () => {
