@@ -294,23 +294,34 @@ function autoHint(info: JavaInfo): string {
 }
 
 function JavaState({ info, autoDownload, locked, onUseAuto }: { info: JavaInfo; autoDownload: boolean; locked: string | undefined; onUseAuto(): void }) {
+  const { go } = useNav();
   const runtime = chosenRuntime(info.choice);
+  // 实例跟随全局、全局固定了默认 Java：实例本来就是自动选择，「改用自动」改不了任何东西，出路在设置里的默认 Java
+  const globalPin = info.choice.auto && info.choice.pick.kind === "global";
   const useAuto = info.choice.auto ? undefined : (
     <Button size="sm" disabledReason={locked} onClick={onUseAuto}>
       {SETTINGS_COPY.useAuto}
     </Button>
   );
+  const fix = globalPin ? (
+    <Button size="sm" iconRight="arrow-right" onClick={() => go({ page: "settings", section: "java" })}>
+      {SETTINGS_COPY.openJavaSettings}
+    </Button>
+  ) : (
+    useAuto
+  );
   const state = ((): { tone: FeedbackTone; icon: "check-circle" | "alert" | "x-circle" | "download"; title: string; body: ReactNode; action?: ReactNode } => {
     if (runtime === null) {
-      if (!info.choice.auto || info.choice.pick.kind === "global") return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.pinnedMissing, body: null, action: useAuto };
+      if (globalPin) return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.globalPinnedMissing, body: null, action: fix };
+      if (!info.choice.auto) return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.pinnedMissing, body: null, action: useAuto };
       return autoDownload
         ? { tone: "info", icon: "download", title: SETTINGS_COPY.fitDownload(info.required), body: SETTINGS_COPY.fitDownloadBody }
         : { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.fitNoDownload(info.required), body: SETTINGS_COPY.fitNoDownloadBody };
     }
     const fit = javaFit(runtime.version.major, info.required);
     if (fit === "match") return { tone: "ok", icon: "check-circle", title: SETTINGS_COPY.fitMatch(info.required), body: <code className={styles.path}>{runtime.path}</code> };
-    if (fit === "higher") return { tone: "warn", icon: "alert", title: SETTINGS_COPY.fitHigher(info.required), body: SETTINGS_COPY.fitHigherBody, action: useAuto };
-    return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.fitLower(info.required), body: SETTINGS_COPY.fitLowerBody, action: useAuto };
+    if (fit === "higher") return { tone: "warn", icon: "alert", title: SETTINGS_COPY.fitHigher(info.required), body: SETTINGS_COPY.fitHigherBody, action: fix };
+    return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.fitLower(info.required), body: globalPin ? SETTINGS_COPY.fitLowerGlobalBody : SETTINGS_COPY.fitLowerBody, action: fix };
   })();
   return (
     <Callout tone={state.tone} icon={state.icon} action={state.action}>

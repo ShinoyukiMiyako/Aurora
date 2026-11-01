@@ -507,6 +507,36 @@ describe("实例详情：后端正在改动实例", () => {
   });
 });
 
+describe("实例详情：实例跟随全局、全局固定了默认 Java", () => {
+  const pinGlobal = (path: string) => {
+    bootOverrides(ipc, { instances, config: configDto({ default_java: path, memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+  };
+
+  it("固定的默认 Java 低于要求：说明出在默认 Java 上，不给改不了任何东西的「改用自动」，按钮去设置的 Java 分区", async () => {
+    pinGlobal("C:/Java/jdk-17/bin/java.exe");
+    await open("settings");
+    expect(text()).toContain("低于要求的 Java 21，游戏无法启动");
+    expect(text()).toContain("这个实例跟随设置里固定的默认 Java。把默认 Java 改回自动选择，或在上面给这个实例单独选一个。");
+    expect(text()).not.toContain("换成自动选择，或装一个对应版本的 Java。");
+    expect([...document.querySelectorAll("button")].some((b) => b.textContent === "改用自动")).toBe(false);
+    click(button("去改默认 Java"));
+    await flush();
+    expect(nav.route).toEqual({ page: "settings", section: "java" });
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+  });
+
+  it("固定的默认 Java 已不在本机：标题说是设置里的默认 Java，同样给去设置的按钮", async () => {
+    pinGlobal("C:/Java/gone/bin/java.exe");
+    await open("settings");
+    expect(text()).toContain("设置里固定的默认 Java 已不在本机");
+    expect(text()).not.toContain("之前选的 Java 已不在本机");
+    click(button("去改默认 Java"));
+    await flush();
+    expect(nav.route).toEqual({ page: "settings", section: "java" });
+  });
+});
+
 describe("实例详情：新建还没落盘的实例", () => {
   // 安装命令一直不返回：实例只是状态层里的占位项，磁盘上还没有它的目录，后端打开哪个文件夹都只会报「未安装」
   const pending = "新建的实例还没装好，装完后才能打开文件夹";

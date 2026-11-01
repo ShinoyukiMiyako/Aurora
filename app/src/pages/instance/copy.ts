@@ -278,6 +278,9 @@ export const SETTINGS_COPY = {
   fitNoDownload: (major: number) => `本机没有 Java ${major}，自动下载已关闭`,
   fitNoDownloadBody: "到全局设置里打开自动下载，或装一个对应版本的 Java。",
   pinnedMissing: "之前选的 Java 已不在本机",
+  globalPinnedMissing: "设置里固定的默认 Java 已不在本机",
+  fitLowerGlobalBody: "这个实例跟随设置里固定的默认 Java。把默认 Java 改回自动选择，或在上面给这个实例单独选一个。",
+  openJavaSettings: "去改默认 Java",
   useAuto: "改用自动",
   javaError: "读不到本机的 Java 列表",
 
