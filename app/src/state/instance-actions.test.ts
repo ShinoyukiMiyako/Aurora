@@ -476,9 +476,9 @@ describe("改名迁移任务", () => {
 
   it.each([
     ["备份存档", "world_backup", "backup_world", { id: "生存", world: "w1" }, "id"],
-    ["导出存档", "world_backup", "export_world", { id: "生存", world: "w1", dest: "D:\导出\w1.zip" }, "id"],
+    ["导出存档", "world_backup", "export_world", { id: "生存", world: "w1", dest: "D:\\导出\\w1.zip" }, "id"],
     ["恢复存档", "world_restore", "restore_world_backup", { id: "生存", world: "w1", file: "1720-manual.zip" }, "id"],
-    ["导出整合包", "modpack_export", "export_modpack", { id: "生存", options: { destination: "D:\包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false } }, "id"],
+    ["导出整合包", "modpack_export", "export_modpack", { id: "生存", options: { destination: "D:\\包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false } }, "id"],
     ["更新一个 Mod", "mod", "update_mod", { versionId: "生存", fileName: "a.jar", modVersionId: "v2" }, "versionId"],
     ["开局 Mod", "mod", "install_mods", { versionId: "生存", platform: "modrinth", projectId: "p", starter: true, items: [{ platform: "modrinth", projectId: "p", modVersionId: "v", title: "P", fileSize: null }] }, "versionId"],
     ["批量更新", "mod", "update_mods", { versionId: "生存", items: [{ fileName: "a.jar", platform: "modrinth", projectId: "p", modVersionId: "v", title: "P", fileSize: null }] }, "versionId"],

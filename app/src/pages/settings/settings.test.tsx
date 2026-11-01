@@ -328,7 +328,7 @@ describe("设置页：Java", () => {
 
   it("本机扫出 7 个运行时：列表照常列出全部 8 项（含自动选择），可以选中最后一个", async () => {
     const runtimes = [8, 11, 16, 17, 21, 22, 25].map((major) => ({
-      path: `C:\Java\jdk-${major}\bin\java.exe`,
+      path: `C:\\Java\\jdk-${major}\\bin\\java.exe`,
       version: { major, minor: 0, security: 1, build: 1, raw: `${major}.0.1` },
       is_64bit: true,
       vendor: "Eclipse Adoptium",
@@ -339,7 +339,7 @@ describe("设置页：Java", () => {
     await mount("java");
     expect(all('[role="radio"]')).toHaveLength(8);
     await click(radio("Java 8"));
-    expect(callsOf(ipc, "update_config")).toEqual([{ defaultJava: "C:\Java\jdk-8\bin\java.exe" }]);
+    expect(callsOf(ipc, "update_config")).toEqual([{ defaultJava: "C:\\Java\\jdk-8\\bin\\java.exe" }]);
   });
 
   it("固定成某个运行时：写入路径并出现固定提醒", async () => {

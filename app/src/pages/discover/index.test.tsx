@@ -988,10 +988,10 @@ describe("发现页：整合包", () => {
     await flush();
     const path = dialog().querySelector<HTMLInputElement>('input[aria-label="整合包文件的完整路径"]');
     if (path === null) throw new Error("没有路径输入框");
-    typeInto(path, "D:\Downloads\pack.mrpack");
+    typeInto(path, "D:\\Downloads\\pack.mrpack");
     act(() => buttonByText("读取", dialog()).click());
     await flush();
-    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "D:\Downloads\pack.mrpack" }]);
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: "D:\\Downloads\\pack.mrpack" }]);
     expect(dialog().textContent).toContain("这个压缩包里没有 modrinth.index.json 或 manifest.json，不像是整合包");
 
     broken = false;
@@ -1010,7 +1010,7 @@ describe("发现页：整合包", () => {
     await flush();
     const installs = callsOf(ipc, "install_modpack");
     expect(installs).toHaveLength(1);
-    expect(installs[0]).toMatchObject({ source: { kind: "file", path: "D:\Downloads\pack.mrpack" }, name: "创造 2", excludedOptional: [] });
+    expect(installs[0]).toMatchObject({ source: { kind: "file", path: "D:\\Downloads\\pack.mrpack" }, name: "创造 2", excludedOptional: [] });
     expect(launcher.state.tasks.map((t) => [t.title, t.detail])).toEqual([["导入整合包 创造", "未写版本号 · 96 个 Mod"]]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已开始导入「创造 2」");
     expect(openDialogs()).toHaveLength(0);

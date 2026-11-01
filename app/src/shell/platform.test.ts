@@ -71,8 +71,8 @@ describe("选择文件", () => {
 
   it("窗口里：只选一个文件，带上标题与扩展名过滤；选中给出完整路径，取消为 null", async () => {
     vi.stubGlobal("__TAURI_INTERNALS__", {});
-    dialog.open.mockResolvedValueOnce("D:\Downloads\pack.mrpack").mockResolvedValueOnce(null);
-    await expect(pickFile({ title: "选择整合包文件", filter })).resolves.toBe("D:\Downloads\pack.mrpack");
+    dialog.open.mockResolvedValueOnce("D:\\Downloads\\pack.mrpack").mockResolvedValueOnce(null);
+    await expect(pickFile({ title: "选择整合包文件", filter })).resolves.toBe("D:\\Downloads\\pack.mrpack");
     await expect(pickFile({ title: "选择整合包文件", filter })).resolves.toBeNull();
     expect(dialog.open).toHaveBeenCalledTimes(2);
     expect(dialog.open).toHaveBeenNthCalledWith(1, { title: "选择整合包文件", multiple: false, directory: false, filters: [{ name: "整合包", extensions: ["mrpack", "zip"] }] });
@@ -103,11 +103,11 @@ describe("保存文件", () => {
   });
 
   it("扩展名不对时补上，已经带着（不分大小写）时原样返回", () => {
-    expect(withExtension("D:\分享\樱花", "mrpack")).toBe("D:\分享\樱花.mrpack");
-    expect(withExtension("D:\分享\樱花.zip", "mrpack")).toBe("D:\分享\樱花.zip.mrpack");
-    expect(withExtension("D:\分享\樱花.MRPACK", "mrpack")).toBe("D:\分享\樱花.MRPACK");
-    expect(withExtension("D:\分享\樱花.mrpack", "mrpack")).toBe("D:\分享\樱花.mrpack");
+    expect(withExtension("D:\\分享\\樱花", "mrpack")).toBe("D:\\分享\\樱花.mrpack");
+    expect(withExtension("D:\\分享\\樱花.zip", "mrpack")).toBe("D:\\分享\\樱花.zip.mrpack");
+    expect(withExtension("D:\\分享\\樱花.MRPACK", "mrpack")).toBe("D:\\分享\\樱花.MRPACK");
+    expect(withExtension("D:\\分享\\樱花.mrpack", "mrpack")).toBe("D:\\分享\\樱花.mrpack");
     // 只差一个点的名字不算带着扩展名
-    expect(withExtension("D:\分享\樱花mrpack", "mrpack")).toBe("D:\分享\樱花mrpack.mrpack");
+    expect(withExtension("D:\\分享\\樱花mrpack", "mrpack")).toBe("D:\\分享\\樱花mrpack.mrpack");
   });
 });

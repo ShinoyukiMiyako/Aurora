@@ -42,13 +42,13 @@ describe("导航历史：go / replace / back / forward", () => {
   });
 
   it("发现页带不同的待导入文件算不同的路由；同一个文件再 go 一次什么都不做", () => {
-    const pack = "D:\Downloads\pack.mrpack";
+    const pack = "D:\\Downloads\\pack.mrpack";
     const h = walk({ page: "discover" });
     const withFile = navGo(h, { page: "discover", importFile: pack });
     expect(withFile).not.toBe(h);
     expect(routes(withFile)).toEqual([{ page: "home" }, { page: "discover" }, { page: "discover", importFile: pack }]);
     expect(navGo(withFile, { page: "discover", importFile: pack })).toBe(withFile);
-    expect(navGo(withFile, { page: "discover", importFile: "D:\Downloads\other.zip" })).not.toBe(withFile);
+    expect(navGo(withFile, { page: "discover", importFile: "D:\\Downloads\\other.zip" })).not.toBe(withFile);
   });
 
   it("go 截掉前进分支，新项滚动位置为 0、seq 递增", () => {

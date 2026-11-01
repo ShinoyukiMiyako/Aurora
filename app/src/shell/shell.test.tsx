@@ -280,10 +280,10 @@ describe("外壳：写剪贴板", () => {
     await mount();
     let written: boolean | undefined;
     await act(async () => {
-      written = await shell.copyText("C:\Games\.minecraft\versions\生存");
+      written = await shell.copyText("C:\\Games\\.minecraft\\versions\\生存");
     });
     expect(writeText).toHaveBeenCalledTimes(1);
-    expect(writeText).toHaveBeenCalledWith("C:\Games\.minecraft\versions\生存");
+    expect(writeText).toHaveBeenCalledWith("C:\\Games\\.minecraft\\versions\\生存");
     expect(written).toBe(true);
     expect(launcher.state.toasts).toEqual([]);
   });
@@ -400,18 +400,18 @@ describe("外壳：保存文件", () => {
   });
 
   it("按种类：标题与类型过滤取外壳的表，路径补上这个种类的扩展名", async () => {
-    vi.mocked(pickSaveFile).mockResolvedValueOnce("D:\我的 分享\周末包");
+    vi.mocked(pickSaveFile).mockResolvedValueOnce("D:\\我的 分享\\周末包");
     await mount();
-    await expect(shell.saveFile("mrpack", "周末包 1.2.0.mrpack")).resolves.toBe("D:\我的 分享\周末包.mrpack");
+    await expect(shell.saveFile("mrpack", "周末包 1.2.0.mrpack")).resolves.toBe("D:\\我的 分享\\周末包.mrpack");
     expect(vi.mocked(pickSaveFile).mock.calls).toEqual([[{ title: "导出整合包", filter: { name: "Modrinth 整合包（*.mrpack）", extensions: ["mrpack"] }, defaultPath: "周末包 1.2.0.mrpack" }]]);
   });
 
   it("页面自带标题与类型过滤：原样交给对话框，路径补上它的扩展名；已带扩展名不重复，取消为 null", async () => {
     const dialog = { title: "导出「新的世界」", filter: { name: "存档压缩包（*.zip）", extensions: ["zip"] } };
-    vi.mocked(pickSaveFile).mockResolvedValueOnce("E:\备份\新的世界").mockResolvedValueOnce("E:\备份\新的世界.ZIP").mockResolvedValueOnce(null);
+    vi.mocked(pickSaveFile).mockResolvedValueOnce("E:\\备份\\新的世界").mockResolvedValueOnce("E:\\备份\\新的世界.ZIP").mockResolvedValueOnce(null);
     await mount();
-    await expect(shell.saveFile(dialog, "New World.zip")).resolves.toBe("E:\备份\新的世界.zip");
-    await expect(shell.saveFile(dialog, "New World.zip")).resolves.toBe("E:\备份\新的世界.ZIP");
+    await expect(shell.saveFile(dialog, "New World.zip")).resolves.toBe("E:\\备份\\新的世界.zip");
+    await expect(shell.saveFile(dialog, "New World.zip")).resolves.toBe("E:\\备份\\新的世界.ZIP");
     await expect(shell.saveFile(dialog, "New World.zip")).resolves.toBeNull();
     expect(vi.mocked(pickSaveFile).mock.calls[0]).toEqual([{ ...dialog, defaultPath: "New World.zip" }]);
   });

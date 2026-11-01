@@ -250,7 +250,7 @@ describe("选中实例之前已在路上的设置读取晚到时，当前实例�
 });
 
 describe("任务进行中重扫读到的占用不留到任务结束之后", () => {
-  const OPTIONS = { destination: "D:\分享\包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false };
+  const OPTIONS = { destination: "D:\\分享\\包.mrpack", name: "包", version: "1.0.0", summary: null, extras: [], include_disabled: false };
   const activity = () => store.getState().instances.find((i) => i.id === "生存")?.activity;
 
   /** 导出跑着的时候窗口回到前台重扫：列表记下后端此刻报的 modifying。 */
