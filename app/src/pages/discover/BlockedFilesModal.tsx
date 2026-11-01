@@ -4,7 +4,7 @@
 // 检查进行中可以关掉清单：后台检查不打断，结果丢弃。
 
 import { AnimatePresence, motion, useIsPresent } from "framer-motion";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { fade } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { useRunner } from "../../shell/useRunner";
@@ -115,6 +115,14 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
     if (!open) live.current = null;
   }, [open]);
 
+  // 找到的文件那一行不再有「打开网页」，它聚焦着时焦点随按钮掉回 body：交给主按钮，接着检查或继续
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (statuses === null || document.activeElement !== document.body) return;
+    if (primaryRef.current === null) throw new Error("清单的主按钮尚未挂载");
+    primaryRef.current.focus();
+  }, [statuses]);
+
   const found = statuses === null ? 0 : files.filter((f) => statuses.get(f.file_id) === "found").length;
   const allFound = statuses !== null && found === files.length;
 
@@ -152,11 +160,11 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
   };
 
   const primary = allFound ? (
-    <Button variant="primary" icon={origin === "import" ? "arrow-right" : "refresh"} onClick={onAllFound}>
+    <Button ref={primaryRef} variant="primary" icon={origin === "import" ? "arrow-right" : "refresh"} onClick={onAllFound}>
       {origin === "import" ? BLOCKED_COPY.continueImport : BLOCKED_COPY.reinstall}
     </Button>
   ) : (
-    <Button variant="primary" icon="folder-open" loading={checking} onClick={check}>
+    <Button ref={primaryRef} variant="primary" icon="folder-open" loading={checking} onClick={check}>
       {checking ? BLOCKED_COPY.checking : BLOCKED_COPY.check}
     </Button>
   );
@@ -201,6 +209,7 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
                           variant="ghost"
                           icon="external"
                           disabled={checking}
+                          focusableWhenDisabled
                           aria-label={BLOCKED_COPY.openWebLabel(file.file_name)}
                           onClick={() => void run(() => actions.openExternal(file.web_url), BLOCKED_COPY.openFailed)}
                         >
