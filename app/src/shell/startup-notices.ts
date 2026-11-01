@@ -38,6 +38,13 @@ export function describeStartupNotice(notice: StartupNoticeDto): StartupNotice {
       });
       return { title: copy.title(notice.fields.length), body: copy.body(items) };
     }
+    case "credentials_reset":
+      // 留存的完整路径与原因后端已写进启动器日志；原文件就在数据目录里，通知说清后果，给出打开数据目录的入口
+      return {
+        title: STARTUP_NOTICE_COPY.credentialsReset.title,
+        body: STARTUP_NOTICE_COPY.credentialsReset.body,
+        action: { label: STARTUP_NOTICE_COPY.credentialsReset.action, run: () => openFolder("data_dir", null), errorTitle: SHELL_ACTION_ERROR.openDataDir },
+      };
     default: {
       // 类型上已穷尽，运行期到这里的是新版后端的提示：只报它的 kind
       const unknown: never = notice;

@@ -14,6 +14,7 @@
 //! （`refresh_gate`），排在后面的一方以库里刚续出的凭据为准。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -46,6 +47,10 @@ pub const OFFLINE_ACCOUNTS_FILE: &str = "offline_accounts.json";
 
 /// 凭据库文件名（DPAPI 加密），挂在数据目录下。
 pub const CREDENTIALS_FILE: &str = "credentials.bin";
+
+/// 读不出来的凭据库改名用的后缀前缀，后面接本地时间 `YYYYMMDD-HHMMSS`；与坏配置文件的留存同一种写法，
+/// 用户在数据目录里一眼认得出是同一类现场。
+const BROKEN_SUFFIX: &str = ".broken-";
 
 /// 探测外置登录服务器（解析 API 地址 + 取元数据）的总时限。
 pub const AUTH_SERVER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,6 +86,89 @@ async fn refresh_gate(uuid: &str) -> OwnedMutexGuard<()> {
             .clone()
     };
     gate.lock_owned().await
+}
+
+/// 凭据库读不出来时做的处置：原文件改名留存，按空凭据库继续。供启动提示告诉用户。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRecovery {
+    /// 原文件改名后的路径，内容原样未动：回到原来那台机器、原来那个 Windows 用户下，把它改回
+    /// `credentials.bin` 就能找回账户。
+    pub preserved: PathBuf,
+    /// 读不出来的原因，含原因链。
+    pub error: String,
+}
+
+/// 本进程里改名留存过的凭据库，按凭据库路径记。哪条命令先碰上坏文件都只处置这一次（改名之后就是
+/// 空库），启动提示事后来这里取经过，不必赶在别的命令之前读。
+#[cfg(windows)]
+static CREDENTIAL_RECOVERIES: LazyLock<Mutex<HashMap<PathBuf, Vec<CredentialRecovery>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 表里只有已经发生过的事实，中毒不携带需要放弃的状态。
+#[cfg(windows)]
+fn credential_recoveries_at(path: &Path) -> Vec<CredentialRecovery> {
+    CREDENTIAL_RECOVERIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(path)
+        .cloned()
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn record_credential_recovery(path: &Path, recovery: CredentialRecovery) {
+    CREDENTIAL_RECOVERIES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(path.to_owned())
+        .or_default()
+        .push(recovery);
+}
+
+/// 把读不出来的凭据库改名到同目录下一个还没被占用的留存名（`credentials.bin.broken-<本地时间>`，
+/// 同一秒里重名时追加 `-2`、`-3`），返回新路径。在账户库锁内调用。
+///
+/// 改名失败照实报错：这时按空库继续的话，下一次登录就会把用户的文件盖掉。
+#[cfg(windows)]
+fn preserve_unreadable_credentials(path: &Path) -> Result<PathBuf> {
+    use chrono::{Datelike, Local, Timelike};
+    let now = Local::now();
+    let base = format!(
+        "{}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
+        path.display(),
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
+    let io_error = |path: &Path| {
+        let path = path.to_owned();
+        move |source| aurora_base::Error::Io { path, source }
+    };
+    let mut candidate = PathBuf::from(&base);
+    let mut attempt = 1u32;
+    // Windows 上的 rename 会顶掉已存在的目标，先确认留存名没被占用，不能覆盖上一份留存。
+    while candidate.try_exists().map_err(io_error(&candidate))? {
+        attempt += 1;
+        candidate = PathBuf::from(format!("{base}-{attempt}"));
+    }
+    std::fs::rename(path, &candidate).map_err(io_error(path))?;
+    Ok(candidate)
+}
+
+/// 错误连同它的原因链，用「：」接起来。凭据库读不出来的原因常在第二层（JSON 的行列）。
+#[cfg(windows)]
+fn error_with_causes(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut cause = err.source();
+    while let Some(inner) = cause {
+        text.push('：');
+        text.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    text
 }
 
 /// 外置登录服务器的探测结果。
@@ -260,6 +348,18 @@ impl Aurora {
         let mut accounts = self.credential_accounts()?;
         accounts.extend(self.open_offline_accounts()?.accounts());
         Ok(accounts)
+    }
+
+    /// 本进程里这个数据目录下凭据库读不出来、被改名留存的经过；没有过为空。
+    ///
+    /// 先打开一次凭据库：坏文件要是还没被哪条命令碰到，就在这一刻处置。启动提示调用它，不必赶在
+    /// 账户列表之前。
+    pub async fn credential_recoveries(&self) -> Result<Vec<CredentialRecovery>> {
+        self.blocking(|aurora| {
+            let _guard = lock_account_db();
+            aurora.credential_recoveries_unlocked()
+        })
+        .await
     }
 
     /// 按 uuid 跨两库查账户（含令牌，供启动路径取用）。
@@ -724,9 +824,35 @@ impl Aurora {
         Ok(())
     }
 
+    /// 打开凭据库。文件读到了却还原不出来（换了机器或 Windows 用户、文件被改坏）时不报错：原文件改名留存，
+    /// 按空库继续，经过记进本进程的留存表。离线账户在另一个库里，不受影响；微软与外置登录账户要重新登录。
+    /// 读文件本身失败、改名失败仍然报错。
     fn open_credentials(&self) -> Result<AccountManager<aurora_auth::DpapiCredentialStore>> {
-        let store = aurora_auth::DpapiCredentialStore::at(self.data_dir().join(CREDENTIALS_FILE));
-        Ok(AccountManager::load(store)?)
+        let path = self.data_dir().join(CREDENTIALS_FILE);
+        let err = match AccountManager::load(aurora_auth::DpapiCredentialStore::at(&path)) {
+            Ok(manager) => return Ok(manager),
+            Err(err) if err.is_unreadable_credentials() => err,
+            Err(err) => return Err(err.into()),
+        };
+        let preserved = preserve_unreadable_credentials(&path)?;
+        let error = error_with_causes(&err);
+        tracing::error!(
+            path = %path.display(),
+            preserved = %preserved.display(),
+            error = %error,
+            "凭据库读不出来，已改名留存，按空凭据库继续；微软与外置登录账户需要重新登录"
+        );
+        record_credential_recovery(&path, CredentialRecovery { preserved, error });
+        Ok(AccountManager::load(
+            aurora_auth::DpapiCredentialStore::at(&path),
+        )?)
+    }
+
+    fn credential_recoveries_unlocked(&self) -> Result<Vec<CredentialRecovery>> {
+        self.open_credentials()?;
+        Ok(credential_recoveries_at(
+            &self.data_dir().join(CREDENTIALS_FILE),
+        ))
     }
 
     fn credential_accounts(&self) -> Result<Vec<Account>> {
@@ -758,6 +884,10 @@ impl Aurora {
 impl Aurora {
     fn ensure_credential_store() -> Result<()> {
         Err(crate::error::CoreError::PlatformUnsupported)
+    }
+
+    fn credential_recoveries_unlocked(&self) -> Result<Vec<CredentialRecovery>> {
+        Ok(Vec::new())
     }
 
     fn credential_accounts(&self) -> Result<Vec<Account>> {
@@ -1779,6 +1909,247 @@ mod tests {
                 .expect("删掉最后一个凭据账户后，剩下的离线账户必须接手当前账户");
             assert_eq!(current.uuid, offline.uuid);
             assert_eq!(current.account_type, AccountType::Offline);
+        }
+
+        /// 数据目录里留存下来的坏凭据库，按文件名排序。
+        fn preserved_credentials(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let prefix = format!("{CREDENTIALS_FILE}{BROKEN_SUFFIX}");
+            let mut found: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with(&prefix))
+                })
+                .collect();
+            found.sort();
+            found
+        }
+
+        /// 三种读不出来的凭据库：空文件、随机字节（换了机器或 Windows 用户后的密文在这台机器上就是这样）、
+        /// 能解密但解出来不是账户库。
+        fn unreadable_credential_files(dir: &std::path::Path) -> Vec<(&'static str, Vec<u8>)> {
+            use aurora_auth::CredentialStore as _;
+            let mut noise = vec![0u8; fastrand::usize(1..=512)];
+            fastrand::fill(&mut noise);
+            let foreign = dir.join("foreign.bin");
+            aurora_auth::DpapiCredentialStore::at(&foreign)
+                .save(br#"{"accounts": "not-a-list"}"#)
+                .unwrap();
+            let not_a_database = std::fs::read(&foreign).unwrap();
+            std::fs::remove_file(&foreign).unwrap();
+            vec![
+                ("空文件", Vec::new()),
+                ("随机字节", noise),
+                ("不是账户库", not_a_database),
+            ]
+        }
+
+        /// credentials.bin 解不开或解出来不是账户库时，整个账户系统不能跟着不可用：原文件逐字节原样改名留存，
+        /// 按空凭据库继续，离线账户照常列出、仍是当前账户，之后登录照常写进新的凭据库，留存的文件不受影响。
+        /// 把 open_credentials 里的留存处置去掉，列账户就报错，本用例即挂。
+        #[test]
+        fn unreadable_credential_store_is_preserved_and_accounts_keep_working() {
+            let scratch = tempfile::tempdir().unwrap();
+            for (case, garbage) in unreadable_credential_files(scratch.path()) {
+                let tmp = tempfile::tempdir().unwrap();
+                let aurora = aurora_at(tmp.path());
+                let steve = aurora.add_offline_account("Steve", None).unwrap();
+                let credentials = tmp.path().join(CREDENTIALS_FILE);
+                std::fs::write(&credentials, &garbage).unwrap();
+
+                let listed: Vec<_> = aurora
+                    .accounts()
+                    .unwrap_or_else(|err| panic!("{case}：凭据库读不出来时离线账户也列不出：{err}"))
+                    .into_iter()
+                    .map(|a| a.uuid)
+                    .collect();
+                assert_eq!(listed, [steve.uuid.clone()], "{case}");
+                assert_eq!(
+                    aurora.current_account().unwrap().unwrap().uuid,
+                    steve.uuid,
+                    "{case}"
+                );
+                assert!(!credentials.exists(), "{case}：坏文件应已改名挪开");
+                let preserved = preserved_credentials(tmp.path());
+                assert_eq!(preserved.len(), 1, "{case}：只留存一份：{preserved:?}");
+                assert_eq!(std::fs::read(&preserved[0]).unwrap(), garbage, "{case}");
+
+                aurora
+                    .store_login(Account::new(
+                        MS_UUID,
+                        "PetalPlayer",
+                        AccountCredentials::Microsoft(MicrosoftCredentials {
+                            refresh_token: "after-recovery".into(),
+                            minecraft_token: None,
+                            minecraft_expires_at: None,
+                        }),
+                    ))
+                    .unwrap();
+                let restarted = aurora_at(tmp.path());
+                let stored = restarted.find_account(MS_UUID).unwrap().expect(case);
+                match &stored.credentials {
+                    AccountCredentials::Microsoft(c) => {
+                        assert_eq!(c.refresh_token, "after-recovery", "{case}")
+                    }
+                    other => panic!("{case}：期望 Microsoft 凭据，得到 {other:?}"),
+                }
+                assert_eq!(restarted.accounts().unwrap().len(), 2, "{case}");
+                assert_eq!(preserved_credentials(tmp.path()), preserved, "{case}");
+                assert_eq!(std::fs::read(&preserved[0]).unwrap(), garbage, "{case}");
+            }
+        }
+
+        /// 启动提示要的经过：留存路径与原因。不论是这次查询先碰上坏文件，还是账户列表先碰上，经过都在，
+        /// 且只处置一次；之后再查还是同一份。去掉留存表的登记，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn credential_recoveries_report_the_preserved_file_once() {
+            let scratch = tempfile::tempdir().unwrap();
+            for (case, garbage) in unreadable_credential_files(scratch.path()) {
+                for listed_first in [false, true] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let aurora = aurora_at(tmp.path());
+                    assert!(aurora.credential_recoveries().await.unwrap().is_empty());
+                    std::fs::write(tmp.path().join(CREDENTIALS_FILE), &garbage).unwrap();
+                    if listed_first {
+                        assert!(aurora.accounts().unwrap().is_empty(), "{case}");
+                    }
+
+                    let recoveries = aurora.credential_recoveries().await.unwrap();
+                    let preserved = preserved_credentials(tmp.path());
+                    assert_eq!(preserved.len(), 1, "{case}");
+                    assert_eq!(recoveries.len(), 1, "{case}：{recoveries:?}");
+                    assert_eq!(recoveries[0].preserved, preserved[0], "{case}");
+                    let name = preserved[0].file_name().unwrap().to_str().unwrap();
+                    let stamp = name
+                        .strip_prefix(&format!("{CREDENTIALS_FILE}{BROKEN_SUFFIX}"))
+                        .unwrap();
+                    assert!(
+                        stamp.len() == 15
+                            && stamp.as_bytes()[8] == b'-'
+                            && stamp.chars().filter(char::is_ascii_digit).count() == 14,
+                        "{case}：留存名应带 YYYYMMDD-HHMMSS 的本地时间：{name}"
+                    );
+                    let expected_reason = if case == "不是账户库" {
+                        "凭据反序列化失败"
+                    } else {
+                        "Windows DPAPI 解密失败"
+                    };
+                    assert!(
+                        recoveries[0].error.starts_with(expected_reason),
+                        "{case}：{}",
+                        recoveries[0].error
+                    );
+                    if case == "不是账户库" {
+                        assert!(
+                            recoveries[0].error.contains("line 1"),
+                            "原因链里应带 JSON 的行列：{}",
+                            recoveries[0].error
+                        );
+                    }
+
+                    assert_eq!(aurora.credential_recoveries().await.unwrap(), recoveries);
+                    assert_eq!(preserved_credentials(tmp.path()), preserved);
+                }
+            }
+        }
+
+        /// 留存名已被占用（同一秒里又坏了一次）：另取 `-2`，先前那份不被顶掉。Windows 上的 rename 会
+        /// 直接覆盖已存在的目标，去掉占用检查本用例即挂。
+        #[test]
+        fn preserving_never_overwrites_an_earlier_copy() {
+            use chrono::{Datelike, Local, Timelike};
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let credentials = tmp.path().join(CREDENTIALS_FILE);
+            // 从现在起往后几秒的留存名都先占上，不论用例跑到哪一秒，头一个候选都已被占用。
+            let start = Local::now();
+            let occupied: Vec<_> = (0..3)
+                .map(|offset| {
+                    let at = start + chrono::Duration::seconds(offset);
+                    let name = format!(
+                        "{CREDENTIALS_FILE}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
+                        at.year(),
+                        at.month(),
+                        at.day(),
+                        at.hour(),
+                        at.minute(),
+                        at.second()
+                    );
+                    let path = tmp.path().join(name);
+                    std::fs::write(&path, format!("earlier {offset}")).unwrap();
+                    path
+                })
+                .collect();
+            std::fs::write(&credentials, b"broken again").unwrap();
+
+            aurora.accounts().unwrap();
+            let all = preserved_credentials(tmp.path());
+            assert_eq!(all.len(), occupied.len() + 1, "{all:?}");
+            for (offset, path) in occupied.iter().enumerate() {
+                assert_eq!(
+                    std::fs::read_to_string(path).unwrap(),
+                    format!("earlier {offset}")
+                );
+            }
+            let fresh = all.iter().find(|p| !occupied.contains(p)).unwrap();
+            assert!(
+                fresh.to_str().unwrap().ends_with("-2"),
+                "头一个候选被占用时应追加 -2：{}",
+                fresh.display()
+            );
+            assert_eq!(std::fs::read(fresh).unwrap(), b"broken again");
+        }
+
+        /// 读文件本身失败（这里是同名目录占着凭据库的位置）不是坏文件：照实报错，什么都不挪。
+        #[test]
+        fn credential_store_that_cannot_be_read_is_reported_not_moved() {
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let credentials = tmp.path().join(CREDENTIALS_FILE);
+            std::fs::create_dir(&credentials).unwrap();
+            let err = aurora.accounts().unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::Auth(AuthError::Base(aurora_base::Error::Io { .. }))
+                ),
+                "{err:?}"
+            );
+            assert!(credentials.is_dir());
+            assert!(preserved_credentials(tmp.path()).is_empty());
+        }
+
+        /// 当前账户原是凭据库里的账户：留存后没有当前账户，不擅自换成离线号。换了的话，下次点启动就用离线号
+        /// 进了游戏，多人服务器进不去还不知道为什么；没有当前账户时启动会先让用户选。
+        #[test]
+        fn recovery_does_not_hand_the_selection_to_an_offline_account() {
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let offline = aurora.add_offline_account("Alex", None).unwrap();
+            aurora
+                .store_login(Account::new(
+                    MS_UUID,
+                    "PetalPlayer",
+                    AccountCredentials::Microsoft(MicrosoftCredentials {
+                        refresh_token: "r".into(),
+                        minecraft_token: None,
+                        minecraft_expires_at: None,
+                    }),
+                ))
+                .unwrap();
+            assert_eq!(aurora.current_account().unwrap().unwrap().uuid, MS_UUID);
+            std::fs::write(tmp.path().join(CREDENTIALS_FILE), b"moved from another PC").unwrap();
+
+            assert!(aurora.current_account().unwrap().is_none());
+            let listed: Vec<_> = aurora
+                .accounts()
+                .unwrap()
+                .into_iter()
+                .map(|a| a.uuid)
+                .collect();
+            assert_eq!(listed, [offline.uuid]);
         }
 
         /// 并发读改写不丢更新：多个线程同时往库里加不同账户，最后一个都不能少。

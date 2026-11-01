@@ -52,6 +52,17 @@ export type StartupNoticeDto =
       kind: "config_fields_reset";
       /** 至少一项，顺序固定。 */
       fields: ConfigFieldResetDto[];
+    }
+  | {
+      /**
+       * credentials_reset：credentials.bin 解不开（数据目录搬到了另一台机器或另一个 Windows 用户下）或解出来不是账户库。
+       * 原文件已改名留存，按空凭据库继续，微软与外置登录账户要重新登录；离线账户不受影响。排在配置的提示之后。
+       */
+      kind: "credentials_reset";
+      /** 原文件改名后的绝对路径（在数据目录里），内容原样：回到原来的机器与 Windows 用户下改回 credentials.bin 即可找回。 */
+      preserved_path: string;
+      /** 读不出来的原因，含原因链。 */
+      error: string;
     };
 
 /** 一项退回默认的设置。 */

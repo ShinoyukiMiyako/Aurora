@@ -121,6 +121,14 @@ pub enum StartupNoticeDto {
         /// 按固定顺序（同核心的枚举字段登记表），至少一项。
         fields: Vec<ConfigFieldResetDto>,
     },
+    /// credentials.bin 解不开（数据目录搬到了另一台机器或另一个 Windows 用户下）或解出来不是账户库：
+    /// 原文件已改名留存，按空凭据库继续，微软与外置登录账户要重新登录；离线账户不受影响。
+    CredentialsReset {
+        /// 原文件改名后的绝对路径，内容原样：回到原来的机器与 Windows 用户下改回 credentials.bin 即可找回。
+        preserved_path: String,
+        /// 读不出来的原因，含原因链。
+        error: String,
+    },
 }
 
 /// 一项退回默认的设置。
@@ -133,31 +141,62 @@ pub struct ConfigFieldResetDto {
     pub value: String,
 }
 
-/// 本次启动的提示（managed state）。启动后不再变化，查询多少次都返回同一份。
-pub struct StartupNotices(Vec<StartupNoticeDto>);
+/// 本次启动的提示（managed state）。头一次查询之后不再变化，查询多少次都返回同一份。
+pub struct StartupNotices {
+    /// 配置文件的处置，门面构造时就已知道。
+    config: Vec<StartupNoticeDto>,
+    /// 凭据库的处置要开库才知道，头一次查询时取。哪条命令先碰上坏凭据库都只处置一次、经过记在核心里，
+    /// 所以晚于账户列表查询也拿得到。
+    credentials: tokio::sync::OnceCell<Vec<StartupNoticeDto>>,
+}
 
 impl StartupNotices {
     pub fn from_recovery(recovery: Option<ConfigRecovery>) -> Self {
-        Self(
-            recovery
-                .into_iter()
-                .map(|recovery| match recovery {
-                    ConfigRecovery::Reset { preserved, error } => StartupNoticeDto::ConfigReset {
-                        preserved_path: preserved.display().to_string(),
-                        error,
-                    },
-                    ConfigRecovery::FieldsReset(resets) => StartupNoticeDto::ConfigFieldsReset {
-                        fields: resets
-                            .into_iter()
-                            .map(|reset| ConfigFieldResetDto {
-                                field: reset.field,
-                                value: reset.value,
-                            })
-                            .collect(),
-                    },
-                })
-                .collect(),
-        )
+        let config = recovery
+            .into_iter()
+            .map(|recovery| match recovery {
+                ConfigRecovery::Reset { preserved, error } => StartupNoticeDto::ConfigReset {
+                    preserved_path: preserved.display().to_string(),
+                    error,
+                },
+                ConfigRecovery::FieldsReset(resets) => StartupNoticeDto::ConfigFieldsReset {
+                    fields: resets
+                        .into_iter()
+                        .map(|reset| ConfigFieldResetDto {
+                            field: reset.field,
+                            value: reset.value,
+                        })
+                        .collect(),
+                },
+            })
+            .collect();
+        Self {
+            config,
+            credentials: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// 配置的提示在前，凭据库的在后。开库本身失败（读文件失败）照实报错，下一次查询再试。
+    pub(crate) async fn resolve(
+        &self,
+        facade: &Facade,
+    ) -> Result<Vec<StartupNoticeDto>, CommandError> {
+        let credentials = self
+            .credentials
+            .get_or_try_init(|| async {
+                let recoveries = facade.snapshot().await.credential_recoveries().await?;
+                Ok::<_, CommandError>(
+                    recoveries
+                        .into_iter()
+                        .map(|recovery| StartupNoticeDto::CredentialsReset {
+                            preserved_path: recovery.preserved.display().to_string(),
+                            error: recovery.error,
+                        })
+                        .collect(),
+                )
+            })
+            .await?;
+        Ok(self.config.iter().chain(credentials).cloned().collect())
     }
 }
 
@@ -165,8 +204,9 @@ impl StartupNotices {
 #[tauri::command]
 pub async fn startup_notices(
     notices: State<'_, StartupNotices>,
+    facade: State<'_, Facade>,
 ) -> Result<Vec<StartupNoticeDto>, CommandError> {
-    Ok(notices.0.clone())
+    notices.resolve(&facade).await
 }
 
 // ---- 连通性 ----
@@ -187,13 +227,13 @@ mod tests {
 
     #[test]
     fn config_recovery_becomes_a_config_reset_notice() {
-        assert!(StartupNotices::from_recovery(None).0.is_empty());
+        assert!(StartupNotices::from_recovery(None).config.is_empty());
         let notices = StartupNotices::from_recovery(Some(ConfigRecovery::Reset {
             preserved: std::path::PathBuf::from(r"C:\Data\config.json.broken-20261031-143025"),
             error: "invalid type: string \"eight\", expected usize at line 1 column 57".into(),
         }));
         assert_eq!(
-            serde_json::to_value(&notices.0).unwrap(),
+            serde_json::to_value(&notices.config).unwrap(),
             serde_json::json!([{
                 "kind": "config_reset",
                 "preserved_path": r"C:\Data\config.json.broken-20261031-143025",
@@ -220,7 +260,7 @@ mod tests {
             },
         ])));
         assert_eq!(
-            serde_json::to_value(&notices.0).unwrap(),
+            serde_json::to_value(&notices.config).unwrap(),
             serde_json::json!([{
                 "kind": "config_fields_reset",
                 "fields": [
@@ -243,7 +283,7 @@ mod tests {
         assert!(config.first_run_completed);
         let notices = StartupNotices::from_recovery(recovery);
         assert_eq!(
-            serde_json::to_value(&notices.0).unwrap(),
+            serde_json::to_value(&notices.config).unwrap(),
             serde_json::json!([{
                 "kind": "config_fields_reset",
                 "fields": [{ "field": "language", "value": "fr-FR" }]
@@ -261,6 +301,72 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    /// 凭据库解不开：提示带着留存的完整路径与原因，排在配置的提示之后；查询多少次都是同一份，
+    /// 坏文件只被挪一次、内容原样。账户列表先碰上坏文件也一样报得出来。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_credentials_reach_startup_notice_with_the_preserved_path() {
+        for accounts_listed_first in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let garbage = b"ciphertext from another Windows user".to_vec();
+            std::fs::write(dir.path().join("credentials.bin"), &garbage).unwrap();
+            let facade = facade_in(dir.path());
+            if accounts_listed_first {
+                let snapshot = facade.snapshot().await;
+                let accounts = tokio::task::spawn_blocking(move || snapshot.accounts())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(accounts.is_empty());
+            }
+            let notices = StartupNotices::from_recovery(Some(ConfigRecovery::Reset {
+                preserved: dir.path().join("config.json.broken-20261031-143025"),
+                error: "expected value at line 1 column 1".into(),
+            }));
+
+            let first = notices.resolve(&facade).await.unwrap();
+            let preserved: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| {
+                    p.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("credentials.bin.broken-")
+                })
+                .collect();
+            assert_eq!(preserved.len(), 1, "{preserved:?}");
+            assert_eq!(std::fs::read(&preserved[0]).unwrap(), garbage);
+            assert!(!dir.path().join("credentials.bin").exists());
+
+            let json = serde_json::to_value(&first).unwrap();
+            assert_eq!(json.as_array().unwrap().len(), 2, "{json}");
+            assert_eq!(json[0]["kind"], "config_reset");
+            assert_eq!(json[1]["kind"], "credentials_reset");
+            assert_eq!(
+                json[1]["preserved_path"],
+                preserved[0].display().to_string()
+            );
+            let error = json[1]["error"].as_str().unwrap();
+            assert!(error.starts_with("Windows DPAPI 解密失败"), "{error}");
+
+            assert_eq!(notices.resolve(&facade).await.unwrap(), first);
+        }
+    }
+
+    /// 凭据库好好的：只有配置的提示。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn readable_credentials_add_no_startup_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        assert!(StartupNotices::from_recovery(None)
+            .resolve(&facade)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

@@ -135,10 +135,32 @@ pub enum AuthError {
     },
 }
 
+/// [`AuthError::Dpapi`] 的操作名：加密。
+pub(crate) const DPAPI_ENCRYPT: &str = "加密";
+
+/// [`AuthError::Dpapi`] 的操作名：解密。
+pub(crate) const DPAPI_DECRYPT: &str = "解密";
+
 impl AuthError {
     /// 是否由取消令牌引起。
     pub fn is_cancelled(&self) -> bool {
         matches!(self, AuthError::Cancelled)
+    }
+
+    /// 凭据库文件读到了、却还原不出账户库：解密不了（数据目录搬到了另一台机器或另一个 Windows 用户下、
+    /// 文件被改坏），或解出来的不是账户库。
+    ///
+    /// 读文件本身失败（被占用、没有权限）不算：那时文件未必坏，当成坏文件处置的话，下一次写入会盖掉
+    /// 里面还好好的账户。
+    pub fn is_unreadable_credentials(&self) -> bool {
+        matches!(
+            self,
+            AuthError::CredentialDeserialize(_)
+                | AuthError::Dpapi {
+                    operation: DPAPI_DECRYPT,
+                    ..
+                }
+        )
     }
 }
 
@@ -220,6 +242,36 @@ mod tests {
             "",
         ] {
             assert!(!oauth(error).is_retryable(), "{error} 不该被重试");
+        }
+    }
+
+    /// 只有「读到了却还原不出来」算坏凭据库；读文件失败、加密失败都不算，否则好文件会被当成坏文件挪走。
+    #[test]
+    fn only_decrypt_and_parse_failures_mean_unreadable_credentials() {
+        let dpapi = |operation| AuthError::Dpapi {
+            operation,
+            message: "该项不适于在指定状态下使用。 (0x8009000B)".into(),
+        };
+        let parse = serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
+        assert!(dpapi(DPAPI_DECRYPT).is_unreadable_credentials());
+        assert!(AuthError::CredentialDeserialize(parse).is_unreadable_credentials());
+
+        let io = aurora_base::Error::Io {
+            path: "credentials.bin".into(),
+            source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        };
+        let serialize = serde_json::from_slice::<serde_json::Value>(b"]").unwrap_err();
+        for err in [
+            dpapi(DPAPI_ENCRYPT),
+            AuthError::Base(io),
+            AuthError::CredentialSerialize(serialize),
+            AuthError::AccountNotFound("0000".into()),
+            AuthError::ReloginRequired,
+        ] {
+            assert!(
+                !err.is_unreadable_credentials(),
+                "{err:?} 不该被当成坏凭据库"
+            );
         }
     }
 
