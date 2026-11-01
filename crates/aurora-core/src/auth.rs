@@ -12,7 +12,7 @@
 //! 库实例打开时读入整库、写回时整库覆盖，跨十几分钟的设备码轮询持有它，期间别处的改动就会被盖掉。
 //! 所有读写再经进程内一把锁串行，两次读改写不会交错丢更新。同一账户的续期另按账户排队
 //! （`refresh_gate`），排在后面的一方以库里刚续出的凭据为准。续期会轮换凭据，跑在独立任务里，
-//! 调用方被取消也照样跑完落盘（`renew_detached`）。
+//! 调用方被取消也照样跑完落盘（`renew_detached`）；新凭据一到手就写回，不等后面的步骤。
 //!
 //! 凭据库读不出来（换了机器或 Windows 用户、文件被改坏）时原文件改名留存、按空库继续，经过供启动提示取用
 //! （[`Aurora::credential_recoveries`]）。
@@ -738,22 +738,51 @@ impl Aurora {
     }
 
     async fn refresh_microsoft(&self, account: &Account, refresh_token: &str) -> Result<Account> {
-        match self.msa_client().refresh_session(refresh_token).await {
-            Ok(session) => {
-                let fresh = account_from_session(&session);
-                let uuid = account.uuid.clone();
-                self.blocking(move |aurora| {
-                    aurora.update_credential_account(&uuid, |stored| {
-                        // 整条替换但保留加入时刻；档案 uuid 不会变，名字与皮肤以这次取到的为准。
-                        let added_at = stored.added_at;
-                        *stored = Account { added_at, ..fresh };
-                    })
-                })
-                .await
-            }
-            Err(AuthError::ReloginRequired) => self.expire(account).await,
-            Err(err) => Err(err.into()),
-        }
+        let auth = self.msa_client();
+        let msa = match auth.refresh(refresh_token).await {
+            Ok(msa) => msa,
+            Err(AuthError::ReloginRequired) => return self.expire(account).await,
+            Err(err) => return Err(err.into()),
+        };
+        self.keep_rotated_refresh_token(&account.uuid, refresh_token, &msa.refresh_token)
+            .await?;
+        let session = auth.complete_login(&msa).await?;
+        let fresh = account_from_session(&session);
+        let uuid = account.uuid.clone();
+        self.blocking(move |aurora| {
+            aurora.update_credential_account(&uuid, |stored| {
+                // 整条替换但保留加入时刻；档案 uuid 不会变，名字与皮肤以这次取到的为准。
+                let added_at = stored.added_at;
+                *stored = Account { added_at, ..fresh };
+            })
+        })
+        .await
+    }
+
+    /// 令牌端点换出来的 refresh token 立刻写回，不等令牌链走完：后面几步可能撞上服务故障，那时旧令牌
+    /// 可能已经作废，新令牌要是只留在内存里，下一次续期就只能拿作废的去换，账户被判成要重新登录。
+    ///
+    /// 只在库里还是换出它的那一份时才写：等回音的这段时间里用户可能已经重新登录，库里那份更新。
+    async fn keep_rotated_refresh_token(
+        &self,
+        uuid: &str,
+        used: &str,
+        rotated: &str,
+    ) -> Result<()> {
+        let uuid = uuid.to_owned();
+        let used = used.to_owned();
+        let rotated = rotated.to_owned();
+        self.blocking(move |aurora| {
+            aurora.update_credential_account(&uuid, |stored| {
+                if let AccountCredentials::Microsoft(creds) = &mut stored.credentials
+                    && creds.refresh_token == used
+                {
+                    creds.refresh_token = rotated;
+                }
+            })
+        })
+        .await?;
+        Ok(())
     }
 
     async fn refresh_authlib(
@@ -2285,6 +2314,163 @@ mod tests {
             holder.abort();
         }
 
+        /// 微软账户凭据里的 refresh token。
+        fn stored_refresh_token(account: &Account) -> &str {
+            match &account.credentials {
+                AccountCredentials::Microsoft(c) => &c.refresh_token,
+                other => panic!("期望 Microsoft 凭据，得到 {other:?}"),
+            }
+        }
+
+        /// 发往令牌端点的请求体，按到达顺序。
+        async fn token_requests(server: &MockServer) -> Vec<String> {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| r.url.path() == "/token")
+                .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+                .collect()
+        }
+
+        /// 令牌端点已经换出新的 refresh token，令牌链后面的步骤才撞上服务故障：新令牌不能跟着丢。
+        /// 服务端可能已让旧令牌作废，下一次续期还拿旧的去换，账户就成了要重新登录。
+        /// 把这一步的写回删掉，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rotated_refresh_token_survives_an_outage_further_down_the_chain() {
+            let server = MockServer::start().await;
+            let rotated = ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "rotated-refresh", "expires_in": 3600
+            }));
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(rotated.clone())
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/xbl"))
+                .respond_with(ResponseTemplate::new(503))
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let mut stale = Account::new(
+                MS_UUID,
+                "PetalPlayer",
+                AccountCredentials::Microsoft(MicrosoftCredentials {
+                    refresh_token: "old-refresh".into(),
+                    minecraft_token: Some("OLD-MC".into()),
+                    minecraft_expires_at: Some(1),
+                }),
+            );
+            stale.last_verified_at = Some(7);
+            let stale = aurora.store_login(stale).unwrap();
+
+            let err = aurora.ensure_account_fresh(&stale).await.unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    CoreError::Auth(AuthError::ServiceUnavailable {
+                        step: "XBL 认证",
+                        status: 503
+                    })
+                ),
+                "{err:?}"
+            );
+            let stored = aurora_at(tmp.path())
+                .find_account(MS_UUID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored_refresh_token(&stored), "rotated-refresh");
+            // 这次续期没走完，除了换下来的令牌，账户别的都不算数。
+            match &stored.credentials {
+                AccountCredentials::Microsoft(c) => {
+                    assert_eq!(c.minecraft_token.as_deref(), Some("OLD-MC"));
+                    assert_eq!(c.minecraft_expires_at, Some(1));
+                }
+                other => panic!("期望 Microsoft 凭据，得到 {other:?}"),
+            }
+            assert_eq!(stored.status, AccountStatus::Ok);
+            assert_eq!(stored.last_verified_at, Some(7));
+
+            // 服务恢复后的下一次续期拿的是新令牌；响应这次换成不重试的拒绝，用例不必再等一轮退避。
+            server.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(rotated)
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/xbl"))
+                .respond_with(ResponseTemplate::new(400))
+                .mount(&server)
+                .await;
+            aurora.ensure_account_fresh(&stale).await.unwrap_err();
+            let requests = token_requests(&server).await;
+            assert_eq!(requests.len(), 1, "{requests:?}");
+            assert!(
+                requests[0].contains("refresh_token=rotated-refresh"),
+                "{requests:?}"
+            );
+        }
+
+        /// 等令牌端点回音的时候用户重新登录了同一个账户：库里那份比这次换出来的新，不能被盖回去。
+        /// 把写回前「库里还是换出它的那一份」这一判断去掉，本用例即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rotated_refresh_token_does_not_overwrite_a_fresh_relogin() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({
+                            "access_token": "AT", "refresh_token": "rotated-refresh",
+                            "expires_in": 3600
+                        }))
+                        .set_delay(Duration::from_millis(400)),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/xbl"))
+                .respond_with(ResponseTemplate::new(400))
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let ms_account = |refresh: &str| {
+                Account::new(
+                    MS_UUID,
+                    "PetalPlayer",
+                    AccountCredentials::Microsoft(MicrosoftCredentials {
+                        refresh_token: refresh.into(),
+                        minecraft_token: None,
+                        minecraft_expires_at: None,
+                    }),
+                )
+            };
+            let stale = aurora.store_login(ms_account("old-refresh")).unwrap();
+
+            let relogin = async {
+                until_requested(&server, "/token").await;
+                let aurora = aurora.clone();
+                let fresh = ms_account("new-refresh");
+                tokio::task::spawn_blocking(move || aurora.store_login(fresh))
+                    .await
+                    .unwrap()
+                    .unwrap()
+            };
+            let (refreshed, _) = tokio::join!(aurora.ensure_account_fresh(&stale), relogin);
+            refreshed.unwrap_err();
+
+            let stored = aurora_at(tmp.path())
+                .find_account(MS_UUID)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored_refresh_token(&stored), "new-refresh");
+        }
+
         /// 等到库里的账户满足 `done`，超时即失败。续期在后台跑完落盘，调用方那时早已返回。
         async fn until_stored(
             data_dir: &std::path::Path,
@@ -2428,17 +2614,12 @@ mod tests {
                 "{returned:?}"
             );
 
+            // 新 refresh token 一到手就写回了，这里要等到整条链跑完。
             let stored = until_stored(tmp.path(), MS_UUID, |a| {
-                matches!(&a.credentials, AccountCredentials::Microsoft(c) if c.refresh_token != "old-refresh")
+                matches!(&a.credentials, AccountCredentials::Microsoft(c) if c.minecraft_token.as_deref() == Some("MC-TOKEN"))
             })
             .await;
-            match &stored.credentials {
-                AccountCredentials::Microsoft(c) => {
-                    assert_eq!(c.refresh_token, "rotated-refresh");
-                    assert_eq!(c.minecraft_token.as_deref(), Some("MC-TOKEN"));
-                }
-                other => panic!("期望 Microsoft 凭据，得到 {other:?}"),
-            }
+            assert_eq!(stored_refresh_token(&stored), "rotated-refresh");
         }
 
         /// 手动刷新被取消也一样：外置令牌刷新发出后调用方立刻以取消返回，新令牌照样落盘。

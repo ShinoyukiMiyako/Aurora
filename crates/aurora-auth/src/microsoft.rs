@@ -297,15 +297,6 @@ impl MicrosoftAuth {
         })
     }
 
-    /// 刷新令牌并走完令牌链，得到可直接启动的会话（含轮换后的 refresh token）。
-    pub async fn refresh_session(&self, refresh_token: &str) -> Result<MicrosoftSession> {
-        self.cancellable(async {
-            let msa = self.refresh_inner(refresh_token).await?;
-            self.complete_login_inner(&msa).await
-        })
-        .await
-    }
-
     async fn xbl_authenticate(&self, msa_access_token: &str) -> Result<XblToken> {
         let body = XblRequest {
             properties: XblProperties {
