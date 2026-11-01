@@ -1203,6 +1203,18 @@ describe("主页：固定服务器的「加入」", () => {
 });
 
 describe("主页：账户皮肤", () => {
+  it("取到真皮肤时立绘能拖动转身，仍在「管理账户」按钮里", async () => {
+    ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await flush();
+    const figure = document.querySelector<HTMLElement>('[data-sk-art="skin"]');
+    expect(figure?.dataset.art).toBe("skin");
+    expect(figure?.querySelector('canvas[data-tauri-drag-region="false"]')).not.toBeNull();
+    expect(figure?.closest("button")?.getAttribute("aria-label")).toBe("管理账户");
+  });
+
   it("皮肤查询失败：照常画剪影立绘，不弹通知，原因写进控制台", async () => {
     const failure = new IpcError("io", "账户文件读不出来");
     ipc.overrides.set("skin_info", () => {
