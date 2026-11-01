@@ -1076,7 +1076,9 @@ fn modrinth_cdn_credential(
                 .iter()
                 .all(|file| file.urls.iter().any(|url| !on_cdn(scope, url))) =>
         {
-            tracing::warn!("整合包里有 CurseForge CDN 地址但没配下载密钥，这些地址会失败，改走备用地址");
+            tracing::warn!(
+                "整合包里有 CurseForge CDN 地址但没配下载密钥，这些地址会失败，改走备用地址"
+            );
             Ok(None)
         }
         Err(err) => Err(err),
@@ -2417,7 +2419,11 @@ mod tests {
         );
 
         // key 配错了不等于没配，有备用地址也要让用户看见。
-        let malformed = || Err(CoreError::from(DownloadCredential::curseforge(" ").unwrap_err()));
+        let malformed = || {
+            Err(CoreError::from(
+                DownloadCredential::curseforge(" ").unwrap_err(),
+            ))
+        };
         assert!(matches!(
             modrinth_cdn_credential(&with_fallback, &scope, malformed),
             Err(CoreError::Download(

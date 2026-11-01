@@ -59,7 +59,10 @@ pub(crate) fn is_plain_file_name(name: &str) -> bool {
 
 /// Windows 的设备名，不分大小写，第一个点之前（去掉结尾空白后）是设备名就算，后面带什么扩展名都一样。
 fn is_device_name(name: &str) -> bool {
-    let stem = name.split_once('.').map_or(name, |(stem, _)| stem).trim_end();
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .trim_end();
     let bytes = stem.as_bytes();
     let numbered = |prefix: &[u8]| {
         bytes.len() == 4

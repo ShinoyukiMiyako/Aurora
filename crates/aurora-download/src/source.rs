@@ -190,7 +190,9 @@ mod tests {
             vec![official.to_owned(), mirror.to_owned()]
         );
         assert_eq!(
-            SourcePlan::new(mirror_first()).candidates(official).unwrap(),
+            SourcePlan::new(mirror_first())
+                .candidates(official)
+                .unwrap(),
             vec![mirror.to_owned(), official.to_owned()],
             "没挂健康表的方案不受影响"
         );

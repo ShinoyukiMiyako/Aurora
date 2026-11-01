@@ -159,9 +159,10 @@ mod tests {
         ]);
         let client = aurora_base::http::build_client().unwrap();
 
-        let value: serde_json::Value = send_json(&two_attempts(), "测试", || client.get(url.as_str()))
-            .await
-            .unwrap();
+        let value: serde_json::Value =
+            send_json(&two_attempts(), "测试", || client.get(url.as_str()))
+                .await
+                .unwrap();
 
         assert_eq!(value["hits"], 7);
         assert_eq!(accepted.load(Ordering::SeqCst), 2);

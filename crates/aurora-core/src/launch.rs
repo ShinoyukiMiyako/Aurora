@@ -3461,7 +3461,11 @@ mod tests {
             };
             let api_root = format!("{}/yggdrasil", server.uri());
             let cancel_once_stuck = async {
-                let stuck_on = if stall_latest { "/latest" } else { "/yggdrasil" };
+                let stuck_on = if stall_latest {
+                    "/latest"
+                } else {
+                    "/yggdrasil"
+                };
                 while !server
                     .received_requests()
                     .await
