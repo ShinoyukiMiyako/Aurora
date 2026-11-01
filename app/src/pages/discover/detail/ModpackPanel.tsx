@@ -220,7 +220,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
       actions.toast("warning", SEARCH_COPY.offlineInstall, SEARCH_COPY.offlineInstallBody);
       return;
     }
-    actions.retryTask(taskId);
+    void run(() => actions.retryTask(taskId), ACTION_ERROR.install);
   };
 
   const openInstance = () => {

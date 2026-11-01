@@ -16,7 +16,7 @@ import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "..
 import type { BlockedFileDto, PackModDto } from "../../state/store";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
 import { PickFolderProvider, type PickFolder } from "./platform";
@@ -1626,6 +1626,38 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect([firstId, secondId]).toEqual([`${launcher.state.tasks[0].id}#1`, `${launcher.state.tasks[0].id}#2`]);
     expect(launcher.state.tasks[0]).toMatchObject({ status: "running", attempt: 2, error: null });
     expect(openDialogs()).toHaveLength(1);
+  });
+
+  it("清单开着时任务已被别处重试并取消：「重新安装」重排不了，失败报出来，不悄悄没反应", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    let attempts = 0;
+    ipc.overrides.set("install_modpack", () => {
+      attempts += 1;
+      if (attempts === 1) throw new IpcError("distribution_blocked", "原文", { files: FILES });
+      throw cancelledError();
+    });
+    await mount();
+    act(() => card("生存").click());
+    await flush();
+    await clickIn(dialog(), "安装为新实例");
+    await clickIn(dialog(), "查看这些文件");
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+
+    const { id } = launcher.state.tasks[0];
+    await act(async () => {
+      launcher.actions.retryTask(id);
+      await settle();
+    });
+    expect(launcher.state.tasks[0].status).toBe("cancelled");
+    await clickIn(blockedDialog(), "重新安装");
+    expect(launcher.state.toasts.find((t) => t.title === "没能加入下载队列")?.body).toBe(`任务 ${id} 是 cancelled，只有失败的任务能重试`);
   });
 
   it("清单里的文件都找到后断网：重新安装与面板的重试同一口径，只提示恢复联网后再装，不把任务重新排进队列", async () => {
