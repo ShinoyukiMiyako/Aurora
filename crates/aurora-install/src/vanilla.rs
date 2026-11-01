@@ -179,7 +179,7 @@ mod tests {
         }
     }
 
-    /// 官方清单持续 503：在官方上把重试次数用完后换镜像取到清单，不再回头请求官方。
+    /// 官方清单持续 503：还有镜像可换，试一次就换过去取到清单，不再回头请求官方。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn fetch_manifest_falls_back_to_mirror_when_official_is_down() {
         let server = MockServer::start().await;
@@ -187,7 +187,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path(format!("/official{manifest_path}")))
             .respond_with(ResponseTemplate::new(503))
-            .expect(3)
+            .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
