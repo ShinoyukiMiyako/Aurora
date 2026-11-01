@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, crashCategoryLabel, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL } from "../../copy/flows";
+import { ACTION_ERROR, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
 import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
@@ -335,7 +335,7 @@ function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view:
   const [expanded, setExpanded] = useState(false);
   const worldOps = useWorldOps(inst, ops);
   const block = enterWorldBlock(inst, view.kind, worldOps.busyWorlds.length > 0);
-  const enterReason = block === null ? undefined : OVERVIEW_COPY.enterWorldBlocked[block];
+  const enterReason = block === null ? undefined : typeof block === "object" ? INSTANCE_IN_USE_COPY.launch(block.usedBy) : OVERVIEW_COPY.enterWorldBlocked[block];
   // 弹窗关上后仍记着最近看的那个存档：退场动画期间标题与列表不变成空的
   const [backupsOf, setBackupsOf] = useState<WorldRef | null>(null);
   const [backupsOpen, setBackupsOpen] = useState(false);

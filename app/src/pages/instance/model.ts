@@ -3,6 +3,7 @@
 
 import { isForgeBuiltinProvider } from "../../copy/flows";
 import type { InstanceSummary, Settings } from "../../domain/adapt";
+import type { InheritedLock } from "../../domain/instance-locks";
 import { samePath } from "../../domain/paths";
 import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromDetail, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskError, TaskStatus } from "../../domain/types";
@@ -100,7 +101,7 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
 
 // ---------------------------------------------------------------- 存档直达
 
-export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | "inherited" | "launching" | "running";
+export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | InheritedLock | "launching" | "running";
 
 /**
  * 存档行「进入」此刻为什么不能点；能点为 null。自上而下取第一条：实例自身的状态先于版本能力，版本能力先于进行中的
@@ -115,7 +116,7 @@ export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPla
   if (inst.quickPlay === null) return "unknownVersion";
   if (!inst.quickPlay.singleplayer) return "legacy";
   if (inst.activity === "backing_up" || worldTask) return "backingUp";
-  if (inst.usedBy !== null) return "inherited";
+  if (inst.usedBy !== null) return { kind: "inherited", usedBy: inst.usedBy };
   if (view === "loading") return "launching";
   if (view === "running") return "running";
   return null;

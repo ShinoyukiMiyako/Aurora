@@ -2842,6 +2842,18 @@ describe("实例详情：存档直达", () => {
     expect(capsule().getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("别的实例正以它为基底：每行「进入」写明是哪个实例在用，与启动入口同一句，点了不发 launch_game", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
+    await open("overview");
+    for (const name of ["新世界", "旧世界"]) {
+      expect(playButton(name).getAttribute("aria-disabled")).toBe("true");
+      expect(await hoverTip(playButton(name))).toContain("实例「Fabric 整合」正在使用它，结束后才能启动");
+    }
+    click(playButton("新世界"));
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+  });
+
   it("读不出版本信息：每行都写「这个实例的版本信息不完整」", async () => {
     instances = instances.map((i) => (i.id === ID ? { ...i, quick_play: null } : i));
     await open("overview");
