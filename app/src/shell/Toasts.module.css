@@ -13,8 +13,8 @@
   max-width: calc(100% - var(--sk-space-32));
 }
 
-/* 弹窗的主按钮在底栏右侧，通知留在右下角会盖住它。挪到标题栏下方：窗口按钮也不能挡 */
-:global(:root:has([data-sk-modal-layer])) .region {
+/* 弹窗和首次启动向导的主按钮都在底栏右侧，通知留在右下角会盖住它。挪到标题栏下方：窗口按钮也不能挡 */
+:global(:root:has([data-sk-modal-layer], [data-sk-onboarding])) .region {
   top: calc(56px + var(--sk-space-8));
   bottom: auto;
 }
