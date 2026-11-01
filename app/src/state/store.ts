@@ -2106,6 +2106,9 @@ export class LauncherStore {
       case "repair": {
         const id = strArg(task.spec.args, "id", command);
         await this.fetchInstances();
+        // 版本文件已经补回来了：这张失败卡还留着，入口就只剩再修一次，和「已修复」的通知对不上。别的失败原因修复解决不了，不动
+        const s = this.raw.session;
+        if (s !== null && s.instanceId === id && s.phase === "failed" && s.failure?.code === "version_broken") this.set({ session: null });
         if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
           await this.actions.launch(id);
