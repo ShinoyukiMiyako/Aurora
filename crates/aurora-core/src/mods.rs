@@ -1911,12 +1911,15 @@ mod tests {
         let server = MockServer::start().await;
         let (lib_v1, lib_v2) = (b"lib one".to_vec(), b"lib two two".to_vec());
         let sodium = b"sodium".to_vec();
-        for (version, file, bytes) in [("d1", "lib-d1.jar", &lib_v1), ("d2", "lib-d2.jar", &lib_v2)]
-        {
+        // d1 发布得更晚：作者钉的版本只有比实例里的新才会换上去，下面靠它把 d2 换回 d1。
+        for (version, date, file, bytes) in [
+            ("d1", "2026-02-01T00:00:00Z", "lib-d1.jar", &lib_v1),
+            ("d2", "2026-01-01T00:00:00Z", "lib-d2.jar", &lib_v2),
+        ] {
             let body = modrinth_version(
                 version,
                 "lib",
-                "2026-01-01T00:00:00Z",
+                date,
                 file,
                 &format!("{}/{file}", server.uri()),
                 &format!(r#"{{"sha1":"{}"}}"#, sha1_hex(bytes)),
