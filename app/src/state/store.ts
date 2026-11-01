@@ -786,6 +786,8 @@ function waitUntil(subscribe: (listener: () => void) => () => void, predicate: (
  */
 const INSTANCE_ARG: Readonly<Record<string, string>> = {
   install_version: "targetName",
+  // 失败的导入留下半成品时才改得到名字：任务跟着实例走，半成品占着名字时后端拒绝，玩家删掉它再导入，不在旧名字下悄悄再来一份
+  install_modpack: "name",
   repair_instance: "id",
   install_mod: "versionId",
   install_mods: "versionId",
@@ -894,8 +896,8 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "java":
       return meta.launchAfter === from || meta.pinFor === from ? { ...meta, launchAfter: swap(meta.launchAfter), pinFor: swap(meta.pinFor) } : meta;
     case "create":
-      return meta.name === from ? { ...meta, name: to } : meta;
     case "modpack":
+      return meta.name === from ? { ...meta, name: to } : meta;
     case "repair":
     case "export":
       return meta;

@@ -707,6 +707,37 @@ describe("改名迁移任务", () => {
     expect(store.getState().tasks[0]).toMatchObject({ title: "重新安装「生存二」的加载器", spec: { args: { id: "生存二", reinstallLoader: true } } });
   });
 
+  it("失败的导入留下的半成品改了名：重试跟到新名字，不在旧名字下再导入一份，占位与入队上下文也跟过去", async () => {
+    ipc.overrides.set("install_modpack", () => {
+      throw new IpcError("network_failed", "连接超时");
+    });
+    await store.actions.installModpack({
+      source: { kind: "local", path: "D:/包.mrpack" },
+      name: "整合包",
+      packName: "樱落",
+      packVersion: "1.0.0",
+      modCount: 3,
+      cover: null,
+      excludedOptional: [],
+      mcVersion: "1.21.1",
+      loader: "fabric",
+      loaderVersion: "0.16.5",
+    } as never);
+    const incomplete: InstanceDto["incomplete"] = { kind: "modpack", outcome: "failed", started_at: 1_720_000_000_000, spec: null, error: { code: "network_failed", message: "连接超时" } };
+    instances = [...instances, instanceDto("整合包", { status: "broken", broken_reason: "缺少版本 JSON", mc_version: null, incomplete })];
+    await settle();
+    const [failed] = store.getState().tasks;
+    expect(failed.status).toBe("failed");
+
+    renameOnDisk("整合包", "周末包");
+    await store.actions.renameInstance("整合包", "周末包");
+    expect(store.getState().tasks[0]).toMatchObject({ instanceId: "周末包", spec: { args: { name: "周末包" } } });
+
+    store.actions.retryTask(failed.id);
+    await settle();
+    expect(callsOf(ipc, "install_modpack").map((a) => a.name)).toEqual(["整合包", "周末包"]);
+  });
+
   it("失败的新建留下的半成品改了名：重试按新名字补全，不在旧名字下再装一份", async () => {
     stubInstanceSettings();
     ipc.overrides.set("install_version", () => {
