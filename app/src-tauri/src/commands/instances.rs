@@ -2160,6 +2160,40 @@ pub(crate) async fn ensure_shared_worlds_settled(
     Ok(())
 }
 
+/// 导出整合包要把存档整份读走：本实例在启动、运行、备份或恢复，或共用这份存档的别的实例开着游戏、在备份或
+/// 恢复时，存档随时在变，读到的是半截。调用方已占住自己并记下正在读存档，都是先写自己的、再读对方的。
+pub(crate) async fn ensure_saves_settled_for_reading(
+    aurora: &Aurora,
+    locks: &InstanceLocks,
+    game: &GameSlot,
+    id: &str,
+) -> Result<(), CommandError> {
+    if let (
+        Some(
+            activity @ (InstanceActivity::Launching
+            | InstanceActivity::Running
+            | InstanceActivity::BackingUp),
+        ),
+        _,
+    ) = locks.occupancy(id)
+    {
+        return Err(busy(id, activity));
+    }
+    ensure_shared_world_free(aurora, game, id).await?;
+    ensure_shared_worlds_settled(aurora, locks, id).await
+}
+
+/// 启动前的存档检查：别的不隔离实例在备份或恢复共用存档，或者本实例、共用这份存档的实例正把存档打进整合包时，
+/// 游戏一起来就可能写这份存档。调用方已占住自己，导出那边先记下再查，两边至少有一方看得到对方。
+pub(crate) async fn ensure_saves_free_for_launch(
+    aurora: &Aurora,
+    locks: &InstanceLocks,
+    id: &str,
+) -> Result<(), CommandError> {
+    ensure_shared_worlds_settled(aurora, locks, id).await?;
+    ensure_saves_not_read(aurora, locks, id).await
+}
+
 /// 恢复要替换存档：本实例，或共用这份存档的另一个不隔离实例，正在把存档打进整合包时报 instance_busy，
 /// detail 指向导出的那个实例。导出对外是「改动中」，所以 activity 报 modifying，正文写明是在导出。
 async fn ensure_saves_not_read(
@@ -4654,7 +4688,14 @@ mod tests {
         let export = tokio::spawn(async move {
             let (events, _rx) = sink();
             crate::commands::modpack::export_modpack_with(
-                &facade, &tasks, &locks, "ex", "织布", options, &events,
+                &facade,
+                &tasks,
+                &locks,
+                &GameSlot::default(),
+                "ex",
+                "织布",
+                options,
+                &events,
             )
             .await
         });
@@ -5681,6 +5722,43 @@ mod tests {
             .await
             .unwrap();
         drop((isolated, modifying));
+    }
+
+    /// 本实例或共用这份存档的实例正把存档打进整合包时不能启动：游戏一起来就可能写存档，包里是半截的。
+    #[tokio::test]
+    async fn launching_waits_for_an_export_that_reads_its_saves() {
+        let env = Env::new();
+        env.shared_world("甲", "共用");
+        env.vanilla("乙");
+        env.isolated_world("丙", "自己的");
+        let locks = InstanceLocks::default();
+        let aurora = env.facade.snapshot().await;
+
+        let reading = locks.read_saves("甲");
+        for id in ["甲", "乙"] {
+            let err = ensure_saves_free_for_launch(&aurora, &locks, id)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{id}");
+            assert_eq!(
+                err.detail,
+                Some(json!({ "id": "甲", "activity": "modifying" })),
+                "{id}"
+            );
+            assert!(
+                err.message.contains("导出带存档的整合包"),
+                "{}",
+                err.message
+            );
+        }
+        ensure_saves_free_for_launch(&aurora, &locks, "丙")
+            .await
+            .unwrap();
+        drop(reading);
+
+        ensure_saves_free_for_launch(&aurora, &locks, "甲")
+            .await
+            .unwrap();
     }
 
     /// 按活动找实例时给出原样的 id（键是小写的），放开后不再列出。
