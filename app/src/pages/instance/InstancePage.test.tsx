@@ -364,6 +364,19 @@ describe("实例详情：头图与标签", () => {
     expect(text()).toContain("整合包modpack.json 不是合法的 JSON");
   });
 
+  it("玩过但累计不足一分钟：累计格不写还没开始玩，从没启动过才写", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: 0, last_played_at: NOW - 1000 } : i));
+    await open("overview");
+    expect(text()).toContain("1 秒前");
+    expect(text()).toContain("玩过，不到 1 分钟");
+    expect(text()).not.toContain("还没开始玩");
+    view?.unmount();
+    instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: 0, last_played_at: null } : i));
+    resetRecorderKeepOverrides();
+    await open("overview");
+    expect(text()).toContain("还没开始玩");
+  });
+
   it("切标签用 replace：路由换成新标签，面板随之切换", async () => {
     await open("overview");
     click(byRole("tab", "设置"));

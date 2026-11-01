@@ -497,6 +497,8 @@ const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb
 
 /** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
 const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
+/** 运行期间占着继承链上基底版本的任务命令。 */
+const BASE_HOLDING_COMMANDS: ReadonlySet<string> = new Set(["repair_instance", "install_modpack"]);
 
 /** opener 插件打开网址的命令（能力里已授予 opener:allow-open-url，默认作用域放行 http 与 https）。 */
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
@@ -1130,6 +1132,8 @@ export class LauncherStore {
   private journalTimer: ReturnType<typeof setTimeout> | null = null;
   private loginGen = 0;
   private lastScanAt = 0;
+  /** 已经为之重扫过的那次启动（见 onLaunchPhase）。 */
+  private launchScanned: string | null = null;
   /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
   private scanIssued = 0;
   private scanApplied = 0;
@@ -1536,7 +1540,20 @@ export class LauncherStore {
     if (event.kind === "warning") {
       const task = taskByAttempt(this.raw.tasks, event.task_id);
       console.warn(`任务 ${task === undefined ? event.task_id : task.title} 的提醒：${event.message}`);
+      return;
     }
+    this.rescanHoldingBases(event.task_id);
+  }
+
+  /**
+   * 任务占着基底的话，基底的改名、补全、删除要按「被使用」禁用，而占用只有后端知道，列表是开工前扫的。补全与导入
+   * 的进度阶段都推在占住基底之后（导入下载整合包那几条在占住之前，所以每个阶段都重扫，不止第一个），结束时
+   * rescanHeld 再读一遍放开。阶段一个任务只有几条，下载进度不走这里。
+   */
+  private rescanHoldingBases(attemptId: string): void {
+    const task = taskByAttempt(this.raw.tasks, attemptId);
+    if (task === undefined || !BASE_HOLDING_COMMANDS.has(task.spec.command)) return;
+    this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
   }
 
   private onDeviceCode(code: accountsIpc.DeviceCode): void {
@@ -1568,6 +1585,12 @@ export class LauncherStore {
       Date.now(),
     );
     if (next !== s) this.set({ session: next });
+    // 第一条阶段事件推出来时后端已占住实例与基底，一局游戏可能开几个小时，不重扫的话基底这段时间一直按空闲显示。
+    // 下载进度也走这个事件，所以一次启动只扫一回；结束时退出事件与备份事件各自重扫，启动被拒时 startLaunch 重扫。
+    if (event.task_id !== this.launchScanned) {
+      this.launchScanned = event.task_id;
+      this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+    }
   }
 
   private onGameLog(event: launchIpc.GameLogEvent): void {
@@ -2336,6 +2359,7 @@ export class LauncherStore {
       },
       (error: unknown) => {
         this.net.reportFailure(error);
+        this.rescanHeld(instanceId);
         const s = this.raw.session;
         if (s === null || s.taskId !== taskId) throw error;
         if (isCancelled(error)) {

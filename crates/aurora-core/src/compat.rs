@@ -1224,6 +1224,36 @@ mod tests {
         }
     }
 
+    /// 真实 NeoForge 实例的库里有 net.minecraftforge 组的工具库：Forge 专用的版本仍要判不兼容，同一版本
+    /// 三个加载器各发一个文件时也只能选 NeoForge 那个。NeoForge 跳过 Forge 的 jar，前置就等于没装。
+    #[test]
+    fn neoforge_instance_with_forge_group_libs_never_takes_forge_files() {
+        let instance = discovered(
+            "nf",
+            r#"{"id":"nf","type":"release","mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                "arguments":{"game":["--fml.neoForgeVersion","21.1.265"],"jvm":[]},
+                "libraries":[{"name":"net.neoforged:bus:8.0.5"},
+                             {"name":"net.minecraftforge:srgutils:0.4.15"}]}"#,
+        );
+        let loaders = instance_loaders(&instance);
+        assert_eq!(loaders, names(&["neoforge"]));
+
+        let forge_only = version(&[ModLoader::Forge], &["1.21.1"]);
+        assert!(matches!(
+            classify(&forge_only, Some("1.21.1"), &loaders),
+            Compatibility::Mismatch { .. }
+        ));
+
+        // 发布时间上 Forge 那个更新：真机上 mezz_config 就是这样被选成 Forge 版的。
+        let versions = vec![
+            dated("forge", 2026, &[ModLoader::Forge], &["1.21.1"]),
+            dated("neoforge", 2025, &[ModLoader::NeoForge], &["1.21.1"]),
+        ];
+        let (compat, best) = pick_best(ResourceType::Mod, &versions, Some("1.21.1"), &loaders);
+        assert_eq!(compat, Compatibility::Match);
+        assert_eq!(best.unwrap().version_id, "neoforge");
+    }
+
     #[test]
     fn instance_mc_version_prefers_inherits_from() {
         let v = discovered(

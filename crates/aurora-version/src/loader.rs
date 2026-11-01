@@ -42,14 +42,16 @@ pub struct LoaderInfo {
 pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
     let tokens = arg_tokens(version);
     let mut out = Vec::new();
+    let neoforge_libs = has_group(version, "net.neoforged");
 
     // Forge：forge/fmlloader 库版本含 mc 前缀需剥离；退而用 --fml.forgeVersion，或 FMLTweaker 特征串。
+    // 组名只在没有 NeoForge 库时算数：NeoForge 也依赖这个组的工具库（srgutils、unsafe）。
     let forge_version = find_lib_version(version, "net.minecraftforge", "forge")
         .or_else(|| find_lib_version(version, "net.minecraftforge", "fmlloader"))
         .map(|v| strip_mc_prefix(&v))
         .or_else(|| flag_value(&tokens, "--fml.forgeVersion"));
     let forge_present = forge_version.is_some()
-        || has_group(version, "net.minecraftforge")
+        || (has_group(version, "net.minecraftforge") && !neoforge_libs)
         || tokens
             .iter()
             .any(|t| t.contains("FMLTweaker") || t.contains("fml.common.launcher"));
@@ -64,7 +66,7 @@ pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
     let neoforge_version = find_lib_version(version, "net.neoforged", "neoforge")
         .map(|v| strip_mc_prefix(&v))
         .or_else(|| flag_value(&tokens, "--fml.neoForgeVersion"));
-    let neoforge_present = neoforge_version.is_some() || has_group(version, "net.neoforged");
+    let neoforge_present = neoforge_version.is_some() || neoforge_libs;
     if neoforge_present {
         out.push(LoaderInfo {
             kind: LoaderKind::NeoForge,
@@ -261,6 +263,63 @@ mod tests {
         );
         // 不能把 NeoForge 误判成 Forge。
         assert!(!loaders.iter().any(|l| l.kind == LoaderKind::Forge));
+    }
+
+    /// 真实的 NeoForge 版本 JSON 依赖 net.minecraftforge 组的工具库（1.21.1 有 srgutils，1.20.4 还多一个
+    /// unsafe）。多报一个 Forge 的后果在下游：Forge 专用的 jar 判成兼容、前置选中 Forge 版、导出整合包被
+    /// 「不止一种加载器」拦下。
+    #[test]
+    fn forge_group_utility_libs_do_not_make_neoforge_a_forge_instance() {
+        let cases = [
+            (
+                "21.1.265",
+                "1.21.1",
+                r#"[{"name":"net.neoforged.fancymodloader:loader:4.0.45"},
+                    {"name":"net.neoforged:bus:8.0.5"},
+                    {"name":"net.minecraftforge:srgutils:0.4.15"}]"#,
+            ),
+            (
+                "20.4.253",
+                "1.20.4",
+                r#"[{"name":"net.neoforged.fancymodloader:loader:2.0.17@jar"},
+                    {"name":"net.neoforged:bus:7.2.0@jar"},
+                    {"name":"net.minecraftforge:unsafe:0.2.0@jar"},
+                    {"name":"net.minecraftforge:srgutils:0.4.15@jar"}]"#,
+            ),
+        ];
+        for (neoforge, mc, libraries) in cases {
+            let ver = v(&format!(
+                r#"{{"id":"nf","mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                    "arguments":{{"game":["--fml.neoForgeVersion","{neoforge}","--fml.mcVersion","{mc}",
+                                          "--launchTarget","forgeclient"],"jvm":[]}},
+                    "libraries":{libraries}}}"#
+            ));
+            assert_eq!(
+                detect_loaders(&ver),
+                vec![LoaderInfo {
+                    kind: LoaderKind::NeoForge,
+                    version: Some(neoforge.into())
+                }],
+                "NeoForge {neoforge}"
+            );
+        }
+    }
+
+    /// 只有 net.minecraftforge 组的库、没有 forge 本体坐标的旧版本（1.6 的 minecraftforge 库）仍然是 Forge。
+    #[test]
+    fn forge_group_alone_still_means_forge() {
+        let ver = v(r#"{
+            "id":"1.6.4-Forge9.11.1.1345","inheritsFrom":"1.6.4",
+            "mainClass":"net.minecraft.launchwrapper.Launch",
+            "libraries":[{"name":"net.minecraftforge:minecraftforge:9.11.1.1345"}]
+        }"#);
+        assert_eq!(
+            detect_loaders(&ver),
+            vec![LoaderInfo {
+                kind: LoaderKind::Forge,
+                version: None
+            }]
+        );
     }
 
     #[test]
