@@ -186,13 +186,11 @@ const RELEASE_TYPES: Readonly<Record<string, ReleaseType>> = {
   old_alpha: "old",
 };
 
-export function releaseTypeFromDto(value: string): ReleaseType {
-  if (!Object.hasOwn(RELEASE_TYPES, value)) throw new Error(`未知的版本类型：${value}`);
-  return RELEASE_TYPES[value];
-}
-
-/** 版本 JSON 的 type 由写它的启动器决定，什么值都可能有；认不出就当不知道，一个实例不该让整张列表适配失败。 */
-function installedReleaseType(value: string): ReleaseType | null {
+/**
+ * 版本类型是外部数据：实例的版本 JSON 由写它的启动器决定，官方清单也可能多出新类型。
+ * 认不出为 null，由调用方决定怎么显示，一项认不出不该让整张列表适配失败。
+ */
+export function knownReleaseType(value: string): ReleaseType | null {
   return Object.hasOwn(RELEASE_TYPES, value) ? RELEASE_TYPES[value] : null;
 }
 
@@ -257,7 +255,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     loader: primary === undefined ? "vanilla" : primary.kind,
     loaderVersion: primary === undefined || primary.found === undefined ? null : primary.found.version,
     extraLoaders,
-    releaseType: dto.release_type === null ? null : installedReleaseType(dto.release_type),
+    releaseType: dto.release_type === null ? null : knownReleaseType(dto.release_type),
     javaMajor: dto.java_major,
     quickPlay: dto.quick_play === null ? null : { singleplayer: dto.quick_play.singleplayer, multiplayer: dto.quick_play.multiplayer },
     description: dto.description,

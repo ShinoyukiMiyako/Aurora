@@ -1,7 +1,7 @@
 // 新建实例流程的纯逻辑：步骤表、版本清单的整理与筛选、推荐加载器版本、回落规则、存放位置、确认步的 Java、「填过几项」与开局选项。
 // 状态由流程组件持有，这里只做推算，便于逐条测试。
 
-import { JAVA_AUTO, releaseTypeFromDto, type ReleaseType } from "../../domain/adapt";
+import { JAVA_AUTO, knownReleaseType, type ReleaseType } from "../../domain/adapt";
 import { samePath } from "../../domain/paths";
 import type { LoaderKind } from "../../domain/types";
 import { bestLocalRuntime, isolationByPolicy, type IsolationPolicyName } from "../../domain/rules";
@@ -31,11 +31,19 @@ export interface GameVersion {
   loaders: readonly LoaderChoice[];
 }
 
+/** 官方清单新增的类型不能让新建流程打不开：归到快照，确认时多一句提醒，也不会被当成正式版推荐。 */
+function manifestReleaseType(id: string, value: string): ReleaseType {
+  const known = knownReleaseType(value);
+  if (known !== null) return known;
+  console.warn(`版本 ${id} 的类型 ${value} 没见过，按快照显示`);
+  return "snapshot";
+}
+
 export function gameVersionsFromManifest(manifest: ManifestDto): GameVersion[] {
   return manifest.versions.map((v) => {
     const releasedAt = Date.parse(v.release_time);
     if (Number.isNaN(releasedAt)) throw new Error(`版本 ${v.id} 的发布时间读不出来：${v.release_time}`);
-    return { id: v.id, type: releaseTypeFromDto(v.release_type), releasedAt, loaders: v.loaders };
+    return { id: v.id, type: manifestReleaseType(v.id, v.release_type), releasedAt, loaders: v.loaders };
   });
 }
 

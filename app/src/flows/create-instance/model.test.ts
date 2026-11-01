@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { JavaInstallationDto, ManifestDto } from "../../state/queries/catalog";
 import { coverLabel } from "../../copy/flows";
 import { CREATE_COPY } from "./copy";
@@ -60,11 +60,16 @@ describe("版本清单", () => {
     expect(versions[1].releasedAt).toBe(Date.UTC(2024, 7, 8, 12));
   });
 
-  it("发布时间读不出来、版本类型不认识时抛错", () => {
+  it("发布时间读不出来时抛错", () => {
     expect(() => gameVersionsFromManifest(manifest({ versions: [{ id: "x", release_type: "release", release_time: "昨天", loaders: [] }] }))).toThrow(/发布时间/);
-    expect(() => gameVersionsFromManifest(manifest({ versions: [{ id: "x", release_type: "pending", release_time: "2024-01-01T00:00:00Z", loaders: [] }] }))).toThrow(
-      /版本类型/,
-    );
+  });
+
+  it("清单里出现没见过的版本类型：归到快照并记一笔，新建流程照常打开", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const versions = gameVersionsFromManifest(manifest({ versions: [{ id: "26w01x", release_type: "experiment", release_time: "2026-01-01T00:00:00Z", loaders: [] }] }));
+    expect(versions.map((v) => [v.id, v.type])).toEqual([["26w01x", "snapshot"]]);
+    expect(warn).toHaveBeenCalledWith("版本 26w01x 的类型 experiment 没见过，按快照显示");
+    warn.mockRestore();
   });
 
   it("没有任何版本时给出后端原因；连原因也没有属于契约破坏", () => {

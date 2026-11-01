@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncompleteDto, InstanceDto } from "../ipc/instances";
-import { instanceFromDto, releaseTypeFromDto } from "./adapt";
+import { instanceFromDto, knownReleaseType } from "./adapt";
 
 function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): InstanceDto {
   return {
@@ -78,7 +78,7 @@ describe("实例 DTO 适配：加载器", () => {
   it("已装实例的版本类型来自它自己的 JSON，认不出时当不知道，其余字段照常；版本清单仍按契约抛错", () => {
     const inst = instanceFromDto(instanceDto("别的启动器装的", { release_type: "modified" }), idle);
     expect(inst).toMatchObject({ id: "别的启动器装的", status: "ready", releaseType: null, mcVersion: "1.21.1" });
-    expect(() => releaseTypeFromDto("pending")).toThrow("未知的版本类型：pending");
+    expect(knownReleaseType("pending")).toBeNull();
   });
 });
 
