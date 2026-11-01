@@ -191,7 +191,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
               <Icon name="file" size={14} />
               <code className={styles.path}>{report.log_path}</code>
               <CopyButton text={report.log_path} label={CRASH_PAGE_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
-              <FolderButton ops={ops} target="logs" label={SETTINGS_COPY.open} size="sm" />
+              <FolderButton ops={ops} target="session_logs" label={SETTINGS_COPY.open} size="sm" />
             </span>
           )}
           <span className={styles.soft}>{`${formatDate(report.at)} ${clock(report.at)}`}</span>

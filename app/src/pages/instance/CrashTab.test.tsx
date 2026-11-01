@@ -13,7 +13,7 @@ import { LauncherProvider } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { resetRecorder, settle } from "../../test/launcher";
+import { callsOf, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -127,6 +127,17 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("崩溃诊断：日志路径", () => {
+  it("路径旁的「打开」去日志文件所在的目录，不是游戏自己的 logs：那里找不到这个文件", async () => {
+    await crashWith(1);
+    await open("crash");
+    // 无线索的建议里还有一个同名按钮，跳到日志页；摘要卡在前
+    click(buttons("打开")[0]);
+    await flush();
+    expect(callsOf(ipc, "open_folder")).toEqual([{ target: "session_logs", id: ID, world: null }]);
+  });
 });
 
 describe("崩溃诊断：退出码兜底", () => {
