@@ -184,6 +184,45 @@ pub enum CoreError {
     /// 要保存为默认设置的实例，工作目录里一个设置文件都没有（还没进过游戏）。
     #[error("实例 {id} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存")]
     TemplateSourceEmpty { id: String },
+    /// 玩家选了以离线方式进单人，但这个账户此刻不能这样启动。
+    #[error("{account} 不能以离线方式进单人：{}", reason.describe())]
+    OfflineFallbackRefused {
+        account: String,
+        reason: OfflineFallbackRefusal,
+    },
+}
+
+/// 不能以离线方式进单人的原因。[`OfflineFallbackRefusal::as_str`] 是给前端分支用的稳定码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineFallbackRefusal {
+    /// 离线账户本来就不经验证，没有什么可降级的。
+    OfflineAccount,
+    /// 登录已被判定失效：降级只为服务或网络故障兜底，凭据失效应当重新登录。
+    ReloginRequired,
+    /// 门面没有这个账户最近一次验证失败的记录：启动器重开过，或这次失败已经降级过一次。
+    NoRecentFailure,
+}
+
+impl OfflineFallbackRefusal {
+    /// 稳定的 snake_case 码。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OfflineFallbackRefusal::OfflineAccount => "offline_account",
+            OfflineFallbackRefusal::ReloginRequired => "relogin_required",
+            OfflineFallbackRefusal::NoRecentFailure => "no_recent_failure",
+        }
+    }
+
+    /// 给人看的原因。
+    pub fn describe(self) -> &'static str {
+        match self {
+            OfflineFallbackRefusal::OfflineAccount => "离线账户本来就不经验证",
+            OfflineFallbackRefusal::ReloginRequired => "登录已失效，需要重新登录",
+            OfflineFallbackRefusal::NoRecentFailure => {
+                "没有这个账户最近一次验证失败的记录，先重试一次启动"
+            }
+        }
+    }
 }
 
 fn blocked_names(files: &[crate::blocked::BlockedFile]) -> String {
@@ -311,6 +350,14 @@ mod tests {
         assert!(!CoreError::Auth(aurora_auth::AuthError::ReloginRequired).is_cancelled());
         assert!(CoreError::Modpack(aurora_modpack::Error::Cancelled).is_cancelled());
 
+        assert!(
+            !CoreError::OfflineFallbackRefused {
+                account: "PetalPlayer".into(),
+                reason: OfflineFallbackRefusal::NoRecentFailure,
+            }
+            .is_cancelled()
+        );
+
         // 真正的失败不能被当成取消。
         assert!(!CoreError::NoJava { major: 17 }.is_cancelled());
         assert!(
@@ -391,6 +438,34 @@ mod tests {
         assert_eq!(
             incomplete.to_string(),
             format!("这个 Java 缺少 release、lib/modules，可能没装完整: {shown}")
+        );
+    }
+
+    #[test]
+    fn offline_fallback_refusal_codes_and_message() {
+        let all = [
+            (OfflineFallbackRefusal::OfflineAccount, "offline_account"),
+            (OfflineFallbackRefusal::ReloginRequired, "relogin_required"),
+            (OfflineFallbackRefusal::NoRecentFailure, "no_recent_failure"),
+        ];
+        for (reason, code) in all {
+            assert_eq!(reason.as_str(), code);
+        }
+        let err = CoreError::OfflineFallbackRefused {
+            account: "PetalPlayer".into(),
+            reason: OfflineFallbackRefusal::ReloginRequired,
+        };
+        assert_eq!(
+            err.to_string(),
+            "PetalPlayer 不能以离线方式进单人：登录已失效，需要重新登录"
+        );
+        assert_eq!(
+            CoreError::OfflineFallbackRefused {
+                account: "Steve".into(),
+                reason: OfflineFallbackRefusal::OfflineAccount,
+            }
+            .to_string(),
+            "Steve 不能以离线方式进单人：离线账户本来就不经验证"
         );
     }
 }

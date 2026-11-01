@@ -208,11 +208,19 @@ const crash: CrashReportDto = {
   exit_code: -1,
   session_started_at: NOW - 4_000_000,
   log_path: `D:/Games/.minecraft/versions/${ID}/logs/latest.log`,
-  diagnoses: [{ category: "out_of_memory", summary: "", advice: "", detail: null, matched: "java.lang.OutOfMemoryError: Java heap space", line: 18, context: ["a", "b"] }],
+  diagnoses: [
+    { category: "out_of_memory", summary: "", advice: "", detail: null, matched: "java.lang.OutOfMemoryError: Java heap space", line: 18, context: ["a", "b"], source: "session_log" },
+  ],
   suspects: [{ mod_id: "sodium", file_name: "sodium.jar" }],
   java: { major: 21, path: "C:/Java/jdk-21/bin/java.exe", is_64bit: true },
   max_memory_mb: 4096,
-  warnings: [],
+  // 摘要卡的扫描文件与启动提醒也在页面子树里：一并经受游戏日志的冲刷
+  warnings: ["onedrive_folder"],
+  exit_code_note: null,
+  scanned_files: [
+    { kind: "session_log", path: `D:/Games/.minecraft/versions/${ID}/logs/latest.log` },
+    { kind: "crash_report", path: `D:/Games/.minecraft/versions/${ID}/crash-reports/crash-2026-10-31_11.00.00-client.txt` },
+  ],
 };
 
 const history: HistoryEvent[] = [

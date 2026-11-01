@@ -3,6 +3,7 @@
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
 import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
+import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { NameRule, TemplateSkipReason } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 
@@ -232,7 +233,7 @@ export const AVATAR_LINE = {
 // ---------------------------------------------------------------- 启动失败
 
 /** 失败修复动作的种类；按钮行为由启动层按种类执行。 */
-export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs";
+export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs" | "launch_offline_once";
 
 export interface FailureFix {
   kind: FailureFixKind;
@@ -279,6 +280,8 @@ function sentence(text: string): string {
 
 const RETRY: FailureFix = { kind: "retry", label: "重试" };
 const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" };
+/** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
+const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
 
 export function failureCopy(code: FailureCode, params: FailureParams, ctx: FailureContext): FailureCopy {
   switch (code) {
@@ -312,9 +315,17 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     case "account_refresh_network":
       return {
         title: "无法验证微软账户",
-        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先切换到离线账户。",
+        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
         fix: RETRY,
-        secondary: null,
+        secondary: OFFLINE_ONCE,
+      };
+    // 不读插值参数：status 只供排查，缺了也不该让失败卡抛错
+    case "account_service_down":
+      return {
+        title: "微软登录服务暂时不可用",
+        body: `微软的登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+        fix: RETRY,
+        secondary: OFFLINE_ONCE,
       };
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
@@ -351,15 +362,21 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
 
 // ---------------------------------------------------------------- 崩溃诊断
 
+/** 与后端规则的优先级同序；native_crash 只作兜底，排在最后。 */
 export const CRASH_CATEGORIES = [
   "java_version_mismatch",
   "out_of_memory",
+  "missing_language_provider",
+  "game_version_mismatch",
   "missing_dependency",
+  "optifine_incompatible",
   "mixin_failure",
   "duplicate_mod",
   "native_library_missing",
+  "intel_graphics_driver",
   "graphics_driver",
   "corrupted_jar",
+  "native_crash",
 ] as const;
 export type CrashCategoryName = (typeof CRASH_CATEGORIES)[number];
 
@@ -372,6 +389,10 @@ export interface CrashExplainContext {
   requiredJava: number | null;
   /** 这次的最大内存（MB）。 */
   maxMemoryMb: number | null;
+  /** 这次的退出码。 */
+  exitCode: number | null;
+  /** 退出码在对照表里时的说明。 */
+  exitNote: ExitCodeNoteDto | null;
 }
 
 interface CrashCategoryCopy {
@@ -384,6 +405,37 @@ function need<T>(value: T | null, what: string, category: CrashCategoryName): T 
   if (value === null) throw new Error(`诊断 ${category} 的解释需要 ${what}`);
   return value;
 }
+
+/** Forge 自带的语言支持 id：日志说缺它们时没有可装的 Mod。 */
+const FORGE_BUILTIN_PROVIDERS: readonly string[] = ["javafml", "lowcodefml"];
+
+export function isForgeBuiltinProvider(detail: string): boolean {
+  return FORGE_BUILTIN_PROVIDERS.includes(detail.toLowerCase());
+}
+
+/** 线索与扫描文件的来源名。 */
+export const CRASH_SOURCE_LABEL: Readonly<Record<CrashSource, string>> = {
+  session_log: "会话日志",
+  crash_report: "崩溃报告",
+  hs_err: "JVM 错误日志",
+  exit_code: "退出码",
+};
+
+/** 退出码说明：phrase 用在页头括注与 native_crash 的解释里，explain 是摘要卡退出码行的悬停提示。 */
+export const EXIT_CODE_COPY: Readonly<Record<ExitCodeKind, { phrase: string; explain: string }>> = {
+  access_violation: {
+    phrase: "访问冲突",
+    explain: "游戏进程读写了不允许访问的内存，多出现在显卡驱动、Java 本体或带本地库的 Mod 里。",
+  },
+  stack_buffer_overrun: {
+    phrase: "进程紧急中止",
+    explain: "进程自己触发了紧急中止，Java 遇到致命错误后常以这个码退出，JVM 错误日志里通常有更多线索。",
+  },
+  generic_failure: {
+    phrase: "报错退出",
+    explain: "退出码 1 只说明进程报错退出，具体原因要看日志。",
+  },
+};
 
 export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCopy>> = {
   java_version_mismatch: {
@@ -412,10 +464,38 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     title: "同一个 Mod 装了不止一份",
     explain: (c) => `日志指向 ${need(c.detail, "重复的 Mod 名", "duplicate_mod")} 有多个文件，只需要保留一个版本。`,
   },
+  missing_language_provider: {
+    label: "缺少语言支持",
+    title: "Mod 需要的语言支持库没装",
+    explain: (c) => {
+      if (c.detail === null) return "日志指向有 Mod 缺少语言支持库。";
+      // javafml、lowcodefml 是 Forge 自带的语言支持：缺它说明 Mod 是给另一个版本的 Forge 做的，而不是少装了什么
+      if (isForgeBuiltinProvider(c.detail)) return `日志指向有 Mod 是给另一个版本的 Forge 做的，它要的是 ${c.detail}。`;
+      return `日志指向缺少语言支持库 ${c.detail}，它本身也是一个 Mod。`;
+    },
+  },
+  game_version_mismatch: {
+    label: "版本不符",
+    title: "Mod 要求别的游戏或加载器版本",
+    explain: (c) => (c.detail === null ? "日志里有 Mod 不支持当前的游戏版本或加载器版本。" : `日志指向 ${c.detail} 需要另一个版本的 Minecraft 或加载器。`),
+  },
+  optifine_incompatible: {
+    label: "OptiFine 不兼容",
+    title: "OptiFine 与当前加载器不兼容",
+    explain: () => "日志指向 OptiFine 与这个实例的加载器版本对不上。OptiFine 只支持特定版本的 Forge，在 Fabric 与 Quilt 上还要另装转接 Mod。",
+  },
   native_library_missing: {
     label: "本地库缺失",
     title: "本地库加载失败",
     explain: () => "游戏需要的本地库没有正确解压或加载。游戏目录路径含中文或特殊字符时也常出现这条线索。",
+  },
+  intel_graphics_driver: {
+    label: "Intel 显卡驱动",
+    title: "Intel 集成显卡驱动出错",
+    explain: (c) =>
+      c.detail === null
+        ? "日志指向 Intel 集成显卡的驱动。可以先更新驱动，再试试让游戏改用独立显卡。"
+        : `日志指向 Intel 集成显卡的驱动文件 ${c.detail}。可以先更新驱动，再试试让游戏改用独立显卡。`,
   },
   graphics_driver: {
     label: "显卡驱动",
@@ -426,6 +506,16 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     label: "文件损坏",
     title: "游戏或 Mod 文件损坏",
     explain: () => "有 jar 文件不完整或被改动过。",
+  },
+  native_crash: {
+    label: "进程异常退出",
+    title: "游戏进程异常退出",
+    explain: (c) => {
+      const code = need(c.exitCode, "退出码", "native_crash");
+      const note = need(c.exitNote, "退出码说明", "native_crash");
+      if (note.code !== code) throw new Error(`退出码说明 ${note.code} 与退出码 ${code} 对不上`);
+      return `退出码 ${note.hex}（${EXIT_CODE_COPY[note.kind].phrase}），日志里没有匹配到已知原因。常见于显卡驱动、Java 本体或带本地库的 Mod，可以先更新显卡驱动，再换一个 Java 版本试试。`;
+    },
   },
 };
 
@@ -457,7 +547,12 @@ export const CRASH_COPY = {
     categories.length === 0
       ? "没有匹配到已知原因"
       : joinMixed(`找到 ${categories.length} 条线索，日志指向`, joinCrashLabels(categories.map(crashCategoryLabel))),
-  exitLine: (relative: string, exitCode: number | null) => `${relative}崩溃 · ${exitCode === null ? "退出码未知" : `退出码 ${exitCode}`}`,
+  exitLine: (relative: string, exitCode: number | null, note: ExitCodeNoteDto | null) => {
+    if (exitCode === null) return `${relative}崩溃 · 退出码未知`;
+    if (note === null) return `${relative}崩溃 · 退出码 ${exitCode}`;
+    if (note.code !== exitCode) throw new Error(`退出码说明 ${note.code} 与退出码 ${exitCode} 对不上`);
+    return `${relative}崩溃 · 退出码 ${exitCode}（${note.hex} ${EXIT_CODE_COPY[note.kind].phrase}）`;
+  },
   clueIndex: (n: number) => `线索 ${n}`,
   /** 一键尝试 · 内存。 */
   raiseMemory: (targetMb: number) => `调到 ${formatMemory(targetMb)}`,
@@ -469,6 +564,76 @@ export const CRASH_COPY = {
   use64BitJava: "改用 64 位 Java",
   openInstanceSettings: "打开实例设置",
 } as const;
+
+// ---------------------------------------------------------------- 启动提醒
+
+/** 后端的启动提醒全集（按启动阶段的先后）。诊断页按报告里记下的顺序展示。 */
+export const LAUNCH_WARNING_CODES = [
+  "game_path",
+  "onedrive_folder",
+  "icloud_folder",
+  "long_player_name",
+  "jvm_memory_unit",
+  "jvm_min_over_max",
+  "jvm_max_too_low",
+] as const satisfies readonly LaunchWarningCode[];
+
+/** 提醒上的动作：更换游戏目录去设置的「游戏」分区，管理账户去账户页，打开实例设置切到实例的「设置」标签。 */
+export type LaunchWarningActionKind = "change_game_dir" | "manage_accounts" | "instance_settings";
+
+export interface LaunchWarningCopy {
+  title: string;
+  body: string;
+  action: { kind: LaunchWarningActionKind; label: string };
+}
+
+const CHANGE_GAME_DIR = { kind: "change_game_dir", label: "更换游戏目录" } as const;
+const OPEN_INSTANCE_SETTINGS = { kind: "instance_settings", label: CRASH_COPY.openInstanceSettings } as const;
+
+/** 启动提醒不中断启动：加载时只写 warn 日志，崩溃后在诊断页的「这次启动时的提醒」里按这张表呈现。 */
+export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCopy>> = {
+  game_path: {
+    title: "游戏路径含中文或特殊字符",
+    body: "部分 Forge 版本与本地库在这样的路径下读不出文件，可以换到纯英文路径再试。",
+    action: CHANGE_GAME_DIR,
+  },
+  onedrive_folder: {
+    title: "游戏目录在 OneDrive 里",
+    body: "OneDrive 同步时会占用或替换正在读写的文件，存档与 Mod 可能读不全。可以换一个不在 OneDrive 里的游戏目录。",
+    action: CHANGE_GAME_DIR,
+  },
+  icloud_folder: {
+    title: "游戏目录在 iCloud 里",
+    body: "iCloud 同步时会占用或替换正在读写的文件，存档与 Mod 可能读不全。可以换一个不在 iCloud 里的游戏目录。",
+    action: CHANGE_GAME_DIR,
+  },
+  long_player_name: {
+    title: "角色名超过 16 个字符",
+    body: "Minecraft 1.20.3 及更新的版本进不了存档与服务器。可以到皮肤站换一个不超过 16 个字符的角色名。",
+    action: { kind: "manage_accounts", label: "管理账户" },
+  },
+  jvm_memory_unit: {
+    title: "JVM 参数里的内存写法不对",
+    body: "-Xmx、-Xms 的数字后面只能跟 k、m、g、t，例如 -Xmx4g。",
+    action: OPEN_INSTANCE_SETTINGS,
+  },
+  jvm_min_over_max: {
+    title: "最小内存大于最大内存",
+    body: "JVM 参数里 -Xms 比 -Xmx 大，Java 会拒绝启动。",
+    action: OPEN_INSTANCE_SETTINGS,
+  },
+  jvm_max_too_low: {
+    title: "最大内存低于 512 MB",
+    body: "游戏多半进不了主界面，可以调高 -Xmx，或删掉它改用内存设置。",
+    action: OPEN_INSTANCE_SETTINGS,
+  },
+};
+
+/** 与崩溃类别同理：前后端随同一个安装包发布，出现未知的提醒说明发布有缺陷，直接抛错交给页面错误边界。 */
+export function launchWarningCopy(code: string): LaunchWarningCopy {
+  if (!(LAUNCH_WARNING_CODES as readonly string[]).includes(code)) throw new Error(`未知的启动提醒：${code}`);
+  return LAUNCH_WARNING[code as LaunchWarningCode];
+}
 
 // ---------------------------------------------------------------- 下载任务
 
@@ -633,6 +798,8 @@ export const TOAST_COPY = {
   continuingLaunch: (instance: string) => `正在启动「${instance}」`,
   templateSaved: (instance: string) => ({ title: `已把「${instance}」的设置保存为默认`, body: "新建实例时可以在确认步沿用" }),
   templateCleared: "已清除默认设置",
+  /** 失败卡上选了「以离线方式进单人」，游戏起来之后。 */
+  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了。" }),
   viewCrashAction: "查看诊断",
 } as const;
 
@@ -767,7 +934,7 @@ export const MICROSOFT_LOGIN_COPY = {
 /** 前端判定的失败：发起登录后 15 s 内没收到设备码。 */
 export const DEVICE_CODE_TIMEOUT_CODE = "device_code_timeout";
 
-export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close";
+export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close" | "open_client_id_settings";
 
 export interface LoginFailureAction {
   kind: LoginFailureActionKind;
@@ -833,6 +1000,16 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
         "没有找到 Minecraft Java 版的购买记录或游戏档案。买过的话，先在官方启动器里创建一次档案。",
         LOGIN_RETRY,
         { kind: "use_offline", label: "改用离线账户" },
+      );
+    case "ServiceUnavailable":
+      return plain("微软登录服务暂时不可用", "微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。", LOGIN_RETRY);
+    // 不给「重试」：同一个 client_id 重试只会得到同样的结果
+    case "AppNotApproved":
+      return plain(
+        "登录应用未获批准",
+        `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+        { kind: "open_client_id_settings", label: "打开设置" },
+        { kind: "copy_error", label: "复制错误信息" },
       );
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });

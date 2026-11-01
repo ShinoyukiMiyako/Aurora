@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { joinCrashLabels, joinMixed, LOADER_NAME } from "../../copy/flows";
+import { CRASH_SOURCE_LABEL, joinCrashLabels, joinMixed, LOADER_NAME } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -405,7 +405,13 @@ export const CRASH_PAGE_COPY = {
   clueTail: (labels: readonly string[]) => `，${joinMixed("日志指向", joinCrashLabels(labels))}`,
   stale: (relative: string) => `这是${relative}的崩溃，之后已经正常启动过。`,
   runningAgain: "游戏正在运行；如果再次崩溃，这里会换成新的诊断。",
-  matchedLine: (line: number) => `命中的日志行 · 第 ${line} 行`,
+  /** 会话日志是默认来源，不写来源名；其余来源写在行号前。 */
+  matchedLine: (line: number, source: Exclude<keyof typeof CRASH_SOURCE_LABEL, "exit_code">) =>
+    source === "session_log" ? `命中的日志行 · 第 ${line} 行` : `命中的日志行 · ${CRASH_SOURCE_LABEL[source]} 第 ${line} 行`,
+  exitCodeLine: (code: number, hex: string) => `退出码 ${code}（${hex}）`,
+  scannedTitle: "参与扫描的文件",
+  copyScannedPath: "复制路径",
+  warningsTitle: "这次启动时的提醒",
 
   fixesTitle: "一键尝试",
   fixesSubtitle: "按线索推荐，改动都可以随时改回",
@@ -431,9 +437,12 @@ export const CRASH_PAGE_COPY = {
   enableModNote: "日志指向的前置已经装了，只是停用着",
   searchMod: (detail: string) => `搜索 ${detail}`,
   searchModNote: "在发现页找这个前置，安装目标预选这个实例",
+  searchProviderNote: "在发现页找这个语言支持库，安装目标预选这个实例",
   findOnDiscover: "去发现页查找",
   findOnDiscoverNote: "在发现页找缺失的前置，安装目标预选这个实例",
+  findModVersionNote: "在发现页找适配这个实例的版本，安装目标预选这个实例",
   disableMod: (name: string) => `停用 ${name}`,
+  disableOptifine: "停用 OptiFine",
   disableModNote: "先停用它再启动一次，看看问题是否还在",
   keepLatest: "只保留最新版本",
   keepLatestNote: (n: number) => `停用其余 ${n} 个同 id 的文件（改名为 .disabled，不删除）`,

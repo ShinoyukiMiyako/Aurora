@@ -43,6 +43,7 @@ export const FAILURE_CODES = [
   "java_too_old",
   "account_relogin",
   "account_refresh_network",
+  "account_service_down",
   "files_offline",
   "files_failed",
   "disk_full",

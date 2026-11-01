@@ -11,7 +11,16 @@ export type CrashCategory =
   | "duplicate_mod"
   | "native_library_missing"
   | "graphics_driver"
-  | "corrupted_jar";
+  | "corrupted_jar"
+  | "game_version_mismatch"
+  | "optifine_incompatible"
+  | "intel_graphics_driver"
+  | "missing_language_provider"
+  /** 规则一条都没命中、退出码又是访问冲突或紧急中止时的兜底。 */
+  | "native_crash";
+
+/** 线索从哪里读出来：会话日志、原版崩溃报告（crash-reports/ 下）、JVM 错误日志（hs_err_pid*.log），或只有退出码。 */
+export type CrashSource = "session_log" | "crash_report" | "hs_err" | "exit_code";
 
 /** 一条线索。summary / advice 是后端的中文说明，只供复制与排查；界面文案按 category 生成。 */
 export interface CrashClueDto {
@@ -20,12 +29,30 @@ export interface CrashClueDto {
   advice: string;
   /** 从日志提取的附加信息（缺失的 Mod id、class file version 等）。 */
   detail: string | null;
-  /** 命中的那一行，过长已裁剪。 */
+  /** 命中的那一行，过长已裁剪；来源是 exit_code 时为空串。 */
   matched: string;
-  /** 命中行在日志里的行号，从 1 起。 */
+  /** 命中行在来源文件里的行号，从 1 起；来源是 exit_code 时为 0。 */
   line: number;
-  /** 命中行之前的至多两行，按顺序。 */
+  /** 命中行之前的至多两行，按顺序；来源是 exit_code 时为空。 */
   context: string[];
+  source: CrashSource;
+}
+
+export type ExitCodeKind = "access_violation" | "stack_buffer_overrun" | "generic_failure";
+
+/** 认得的退出码。summary 是后端的中文说明，只供复制与排查；界面文案按 kind 生成。 */
+export interface ExitCodeNoteDto {
+  code: number;
+  /** 按无符号 32 位写的十六进制，如 0xC0000005。 */
+  hex: string;
+  kind: ExitCodeKind;
+  summary: string;
+}
+
+/** 参与这次诊断的文件。 */
+export interface ScannedFileDto {
+  kind: Exclude<CrashSource, "exit_code">;
+  path: string;
 }
 
 /** 日志点名的 Mod；file_name 是 mods 目录里对得上的文件，对不上为 null。 */
@@ -40,8 +67,18 @@ export interface JavaUsedDto {
   is_64bit: boolean;
 }
 
-/** 不阻断启动、但值得在诊断里引用的提醒。game_path：游戏路径含非 ASCII 或 !。 */
-export type LaunchWarningCode = "game_path";
+/**
+ * 不阻断启动、但值得在诊断里引用的提醒。game_path：游戏路径含非 ASCII 或 !；onedrive_folder / icloud_folder：游戏目录在同步盘里；
+ * long_player_name：角色名超过 16 个字符且游戏不低于 1.20.3；jvm_*：自定义 JVM 参数里的内存写法不对、最小大于最大、最大低于 512 MB。
+ */
+export type LaunchWarningCode =
+  | "game_path"
+  | "onedrive_folder"
+  | "icloud_folder"
+  | "long_player_name"
+  | "jvm_memory_unit"
+  | "jvm_min_over_max"
+  | "jvm_max_too_low";
 
 export interface CrashReportDto {
   /** 游戏退出的 Unix 毫秒；对粘贴文本的诊断为 null。 */
@@ -55,6 +92,10 @@ export interface CrashReportDto {
   java: JavaUsedDto | null;
   max_memory_mb: number | null;
   warnings: LaunchWarningCode[];
+  /** 退出码在对照表里时的说明；退出码为空或不认得时为 null。 */
+  exit_code_note: ExitCodeNoteDto | null;
+  /** 按扫描顺序（会话日志、崩溃报告、JVM 错误日志）；对粘贴文本的诊断为空。 */
+  scanned_files: ScannedFileDto[];
 }
 
 export type SessionOutcome = "exited" | "crashed" | "killed" | "failed" | "cancelled";

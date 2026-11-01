@@ -131,7 +131,7 @@ describe("会话：状态容器里的启动与结束", () => {
 
   it("点启动后进入 preparing，阶段事件推进进度，launch_game 返回后进入运行", async () => {
     const { store, launched, pending, taskId } = await launching();
-    expect(callsOf(ipc, "launch_game")).toEqual([{ taskId, versionId: "生存", accountUuid: "00000000-0000-0000-0000-00000000a001", offlineName: null }]);
+    expect(callsOf(ipc, "launch_game")).toEqual([{ taskId, versionId: "生存", accountUuid: "00000000-0000-0000-0000-00000000a001", offlineFallback: false, offlineName: null }]);
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "preparing", progress: 0 });
 
     emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 3, download: { total: 480, finished: 120, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);

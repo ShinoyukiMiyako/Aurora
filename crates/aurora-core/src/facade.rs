@@ -70,6 +70,9 @@ pub struct Aurora {
     source_health: Arc<SourceHealth>,
     /// Windows 图形设置里按程序显卡偏好的读写；测试注入替身，不碰真实注册表。
     gpu_preferences: Arc<dyn GpuPreferenceStore>,
+    /// 各账户最近一次账户类启动失败，以离线方式进单人时据此放行。与工程版本缓存一样放在门面上：快照
+    /// 克隆共享同一个句柄，重开门面即清空。
+    pub(crate) account_failures: crate::launch::AccountFailures,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -131,6 +134,7 @@ impl Aurora {
             source_resolver: Arc::new(MirrorResolver),
             source_health: Arc::new(SourceHealth::new()),
             gpu_preferences: Arc::new(RegistryGpuPreferences),
+            account_failures: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
             #[cfg(test)]
@@ -495,6 +499,7 @@ impl Aurora {
             source_resolver: Arc::new(MirrorResolver),
             source_health: Arc::new(SourceHealth::new()),
             gpu_preferences: Arc::new(crate::gpu::testing::UnsetGpuPreferences),
+            account_failures: Default::default(),
             curseforge_key: None,
             curseforge_cdn_scope: None,
         }
