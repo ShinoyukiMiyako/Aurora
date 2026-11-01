@@ -527,7 +527,7 @@ function planExport(id: string): ModpackExportPreviewDto {
   if (worlds === null) throw new Error(`mock 实例 ${id} 已就绪却读不出存档`);
   const extras: ExportExtraStatDto[] = EXPORT_EXTRAS.map((extra) => {
     const stat = extra === "saves" ? { files: worlds.length, bytes: worlds.length * MOCK_WORLD_BYTES } : MOCK_EXTRAS[extra];
-    return { extra, files: stat.files, bytes: stat.bytes, default_selected: extra !== "saves" && stat.files > 0 };
+    return { extra, files: stat.files, bytes: stat.bytes, default_selected: extra !== "saves" && stat.files > 0, skipped: [] };
   });
 
   const pack = dto.modpack;
@@ -540,7 +540,7 @@ function planExport(id: string): ModpackExportPreviewDto {
     bundled,
     disabled,
     extras,
-    skipped: [],
+    mod_skipped: [],
   };
 }
 
@@ -679,7 +679,7 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
       override_files: files,
       bundled_mods: plan.bundled.map((m) => m.file_name),
       disabled_mods: carried.length,
-      skipped: plan.skipped,
+      skipped: [...plan.mod_skipped, ...extras.flatMap((e) => e.skipped)].sort(),
     };
   })
     .then((outcome) => {

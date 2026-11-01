@@ -542,7 +542,7 @@ pub struct ModpackExportPreviewDto {
     pub bundled: Vec<ExportBundledModDto>,
     pub disabled: Vec<ExportBundledModDto>,
     pub extras: Vec<ExportExtraStatDto>,
-    pub skipped: Vec<String>,
+    pub mod_skipped: Vec<String>,
 }
 
 /// 只写进索引的 Mod。
@@ -573,6 +573,7 @@ pub struct ExportExtraStatDto {
     pub files: u64,
     pub bytes: u64,
     pub default_selected: bool,
+    pub skipped: Vec<String>,
 }
 
 /// 导出结果 DTO。
@@ -873,9 +874,10 @@ fn export_preview_dto(preview: ModpackExportPreview) -> ModpackExportPreviewDto 
                 files: s.files,
                 bytes: s.bytes,
                 default_selected: s.default_selected,
+                skipped: s.skipped,
             })
             .collect(),
-        skipped: preview.skipped,
+        mod_skipped: preview.mod_skipped,
     }
 }
 
@@ -1937,7 +1939,9 @@ mod tests {
             .await;
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path(), &server.uri());
-        export_instance(dir.path());
+        let instance = export_instance(dir.path());
+        std::fs::write(instance.join("mods").join("con.jar"), b"reserved").unwrap();
+        std::fs::write(instance.join("config").join("nul.json"), b"reserved").unwrap();
         let registry = TaskRegistry::default();
         let locks = InstanceLocks::default();
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
@@ -1958,7 +1962,13 @@ mod tests {
         assert_eq!(wire["extras"][0]["extra"], "config");
         assert_eq!(wire["extras"][0]["files"], 1);
         assert_eq!(wire["extras"][0]["default_selected"], true);
+        assert_eq!(
+            wire["extras"][0]["skipped"],
+            serde_json::json!(["config/nul.json"])
+        );
         assert_eq!(wire["extras"][6]["extra"], "saves");
+        assert_eq!(wire["extras"][6]["skipped"], serde_json::json!([]));
+        assert_eq!(wire["mod_skipped"], serde_json::json!(["mods/con.jar"]));
 
         let destination = dir.path().join("樱花林 1.0.0.mrpack");
         let outcome = export_modpack_with(

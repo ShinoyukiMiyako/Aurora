@@ -80,6 +80,11 @@ export function bundledTotals(preview: ModpackExportPreviewDto, draft: Pick<Draf
   };
 }
 
+/** 这次导出会跳过的文件数：mods 目录里的总算，额外项的只算勾上的，与导出结果的 skipped 同一口径。 */
+export function skippedCount(preview: ModpackExportPreviewDto, extras: ReadonlySet<ExportExtra>): number {
+  return preview.extras.filter((e) => extras.has(e.extra)).reduce((n, e) => n + e.skipped.length, preview.mod_skipped.length);
+}
+
 export interface ExportModpackModalProps {
   inst: InstanceSummary;
   /** 实例此刻不能导出的原因（与头图菜单项同一条）；打开期间实例被锁时主按钮据此禁用，已填的内容保留。 */
@@ -184,6 +189,7 @@ function ExportForm({ preview, draft, onDraft }: ExportFormProps) {
   const compact = tier === "compact";
   const [listOpen, setListOpen] = useState(false);
   const totals = bundledTotals(preview, draft);
+  const skipped = skippedCount(preview, draft.extras);
 
   const toggleExtra = (extra: ExportExtra, on: boolean) => {
     const next = new Set(draft.extras);
@@ -280,7 +286,7 @@ function ExportForm({ preview, draft, onDraft }: ExportFormProps) {
           )}
         </div>
       )}
-      {preview.skipped.length > 0 && <Callout tone="info">{EXPORT_COPY.skipped(preview.skipped.length)}</Callout>}
+      {skipped > 0 && <Callout tone="info">{EXPORT_COPY.skipped(skipped)}</Callout>}
     </div>
   );
 }
