@@ -3105,19 +3105,23 @@ export class LauncherStore {
       },
       retryFailedTasks() {
         let retried = 0;
-        for (const task of store.raw.tasks.filter((t) => t.status === "failed")) {
-          const leftover = store.leftoverOfFailedCreate(task);
-          if (leftover !== null) {
-            // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
-            if (findDuplicate(store.raw.tasks, { command: "repair_instance", args: { id: leftover } }) === undefined && store.retryAsRepair(task, leftover)) retried += 1;
-            continue;
+        try {
+          for (const task of store.raw.tasks.filter((t) => t.status === "failed")) {
+            const leftover = store.leftoverOfFailedCreate(task);
+            if (leftover !== null) {
+              // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
+              if (findDuplicate(store.raw.tasks, { command: "repair_instance", args: { id: leftover } }) === undefined && store.retryAsRepair(task, leftover)) retried += 1;
+              continue;
+            }
+            // 逐个排：前一个重试后，同一件事的后一个就算重复
+            if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
+            store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id), ...store.restoredMeta(raw, task) }));
+            retried += 1;
           }
-          // 逐个排：前一个重试后，同一件事的后一个就算重复
-          if (findDuplicate(store.raw.tasks, task.spec) !== undefined) continue;
-          store.set((raw) => ({ tasks: retryTask(raw.tasks, task.id), ...store.restoredMeta(raw, task) }));
-          retried += 1;
+        } finally {
+          // 任务日志里的坏记录读参数时会抛错：已经排回队列的照样要调度，否则停在排队，再也没有事件拉起它们
+          if (retried > 0) store.tasksChanged();
         }
-        if (retried > 0) store.tasksChanged();
         return retried;
       },
       clearFinishedTasks() {
