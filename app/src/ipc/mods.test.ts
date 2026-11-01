@@ -3,7 +3,8 @@ import { IpcError } from "./errors";
 import { listHistory, rollback, rollbackChecks } from "./history";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners, subscribeMockEvent } from "./mock/events";
-import { MOCK_MOD_INSTANCE, mockModFileCount, setMockModFileBusy, setMockVersionListTruncated } from "./mock/handlers/mods";
+import { installMod } from "./discover";
+import { MOCK_MOD_INSTANCE, mockModFileCount, setMockModFileBusy, setMockVersionDelisted, setMockVersionListTruncated } from "./mock/handlers/mods";
 import { beginMockTask, endMockTask } from "./mock/handlers/tasks";
 import {
   checkUpdates,
@@ -339,5 +340,41 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
     const same = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "gvQqBUqZ", "lith-060");
     expect(same.items[0].already_satisfied).toBe(true);
     expect(await failure(planInstall(MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "nope"))).toMatchObject({ code: "mod_version_not_found" });
+  });
+
+  it("已装的前置在平台上下架后仍算已满足：计划照常列出并标明，装 Mod 继续，不换版本", async () => {
+    setMockVersionDelisted("modrinth", "P7dR8mSH", "fapi-0922", true);
+    const plan = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060");
+    expect(plan.items).toHaveLength(2);
+    expect(plan.items[0].delisted).toBeUndefined();
+    expect("delisted" in plan.items[0]).toBe(false);
+    expect(plan.items[1]).toMatchObject({ title: "Fabric API", required_by: "AANobbMI", already_satisfied: true, delisted: true });
+    expect(plan.items[1].version).toMatchObject({
+      platform: "modrinth",
+      project_id: "P7dR8mSH",
+      version_id: "fapi-0922",
+      version_number: "0.92.2",
+      file_name: "P7dR8mSH-0.92.2.jar",
+      file_size: null,
+      download_url: null,
+      dependencies: [],
+    });
+    expect(plan.skipped).toEqual(["可选依赖 Mod Menu 未自动安装，需要时请手动添加"]);
+
+    expect((await installMod("t-delisted", MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
+    // 只落下主项，下架的 Fabric API 原样留着、卷宗记录不变。
+    const mods = await listMods(MOCK_MOD_INSTANCE);
+    expect(mods.map((m) => [m.file_name, m.source?.version_id])).toEqual([
+      ["AANobbMI-0.6.0.jar", "sodium-060"],
+      ["P7dR8mSH-0.92.2.jar", "fapi-0922"],
+      ["gvQqBUqZ-0.11.2.jar.disabled", "lith-060"],
+      ["handmade-1.0.jar", undefined],
+    ]);
+
+    // 平台上还在的时候照旧取平台给的版本信息，不带这个标记。
+    setMockVersionDelisted("modrinth", "P7dR8mSH", "fapi-0922", false);
+    const listed = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060");
+    expect(listed.items[1].delisted).toBeUndefined();
+    expect(listed.items[1].version.file_size).not.toBeNull();
   });
 });

@@ -137,6 +137,11 @@ export interface PlannedItem {
   required_by: string | null;
   /** 已装在实例里，本次跳过下载。 */
   already_satisfied: boolean;
+  /**
+   * 只出现在已满足的前置上：实例里装着的这一版在平台上已经找不到（下架或删除）。version 只由卷宗拼出，
+   * 版本 id、工程、平台、文件名与版本号可信，平台才有的字段为空，它的前置也没有展开。
+   */
+  delisted?: true;
 }
 
 export interface InstallPlan {

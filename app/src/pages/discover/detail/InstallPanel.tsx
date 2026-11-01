@@ -18,6 +18,7 @@ import {
   type InstanceMatch,
   type ModVersionInfo,
   type ModVersionList,
+  type PlannedItem,
   type ProjectDetail,
 } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
@@ -441,6 +442,12 @@ function MaybeNote({ row, coveredByIris }: { row: TargetRow; coveredByIris: bool
   return <Callout tone="warn">{INSTALL_COPY.maybeWarn(row.instance.name, row.verdict.reason)}</Callout>;
 }
 
+/** 计划行右端：待下载的给版本号；已满足的说明跳过，平台上已下架的那一版另行说明，版本号只是卷宗里记的。 */
+function planItemNote(item: PlannedItem): string {
+  if (item.delisted === true) return INSTALL_COPY.satisfiedDelisted;
+  return item.already_satisfied ? INSTALL_COPY.satisfied : item.version.version_number;
+}
+
 function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport }: PlanGroupProps) {
   const version = row.verdict.version;
   if (version === null) throw new Error(`已勾选的实例 ${row.instance.id} 没有要装的版本`);
@@ -485,7 +492,7 @@ function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport }: PlanGr
                 {INSTALL_COPY.requiredBy(titleOf(item.required_by))}
               </Tag>
             )}
-            <span className={styles.previewVersion}>{item.already_satisfied ? INSTALL_COPY.satisfied : item.version.version_number}</span>
+            <span className={styles.previewVersion}>{planItemNote(item)}</span>
           </div>
         ))}
       {data !== null && data.skipped.length > 0 && (
