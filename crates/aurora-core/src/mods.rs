@@ -779,11 +779,15 @@ impl Aurora {
                 Some(_) => ledger.find(&placement.file_name).cloned(),
                 None => None,
             };
-            // 更新换的是版本不是 Mod：装进实例的时刻与玩家的更新设置都跟着这个 Mod 走。顶替来路不明的
-            // 文件时没有旧记录可继承，按新装算。
-            let (installed_at, update_hold) = match previous {
-                Some(old) => (old.installed_at, old.update_hold),
-                None => (at, None),
+            // 更新换的是版本不是 Mod：装进实例的时刻、是谁带进来的与玩家的更新设置都跟着这个 Mod 走。
+            // 顶替来路不明的文件时没有旧记录可继承，按新装算。
+            let (installed_at, dependency_of, update_hold) = match previous {
+                Some(old) => (
+                    old.installed_at,
+                    old.installed_as_dependency_of,
+                    old.update_hold,
+                ),
+                None => (at, placement.required_by.clone(), None),
             };
             ledger.upsert(LedgerEntry {
                 file_name: placement.file_name.clone(),
@@ -795,7 +799,7 @@ impl Aurora {
                 icon_url: placement.icon_url.clone(),
                 sha1: placement.sha1.clone(),
                 installed_at,
-                installed_as_dependency_of: placement.required_by.clone(),
+                installed_as_dependency_of: dependency_of,
                 update_hold,
             });
         }
@@ -1898,6 +1902,75 @@ mod tests {
         // 回滚同样不改装进实例的时刻，更新设置也还在。
         assert_eq!(restored.installed_at, 1_600_000_000);
         assert_eq!(restored.update_hold, Some(pin));
+    }
+
+    /// 「被谁带进来」跟着 Mod 走：单独更新一个前置，它还是那个 Mod 的前置，界面的「由 X 带入」与移除
+    /// 时的提醒都靠这条记录。反过来，玩家自己装的 Mod 被别的 Mod 的前置计划换了版本，也还是玩家装的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn updates_keep_who_brought_the_mod_in() {
+        let server = MockServer::start().await;
+        let (lib_v1, lib_v2) = (b"lib one".to_vec(), b"lib two two".to_vec());
+        let sodium = b"sodium".to_vec();
+        for (version, file, bytes) in [
+            ("d1", "lib-d1.jar", &lib_v1),
+            ("d2", "lib-d2.jar", &lib_v2),
+        ] {
+            let body = modrinth_version(
+                version,
+                "lib",
+                "2026-01-01T00:00:00Z",
+                file,
+                &format!("{}/{file}", server.uri()),
+                &format!(r#"{{"sha1":"{}"}}"#, sha1_hex(bytes)),
+                bytes.len(),
+                "",
+            );
+            mount_version(&server, version, &body).await;
+            mount_jar(&server, file, bytes.clone()).await;
+        }
+        let needs_lib = modrinth_version(
+            "v1",
+            "sodium",
+            "2026-01-01T00:00:00Z",
+            "sodium-v1.jar",
+            &format!("{}/sodium-v1.jar", server.uri()),
+            &format!(r#"{{"sha1":"{}"}}"#, sha1_hex(&sodium)),
+            sodium.len(),
+            r#"{"project_id":"lib","version_id":"d1","dependency_type":"required"}"#,
+        );
+        mount_version(&server, "v1", &needs_lib).await;
+        mount_jar(&server, "sodium-v1.jar", sodium).await;
+        mount_projects(&server, &[("sodium", "Sodium"), ("lib", "Lib")]).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), server.uri());
+        aurora
+            .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
+            .await
+            .unwrap();
+
+        aurora
+            .update_mod("1.21", "lib-d1.jar", "d2", None)
+            .await
+            .unwrap();
+        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let lib = ledger.find("lib-d2.jar").unwrap();
+        assert_eq!(lib.installed_as_dependency_of.as_deref(), Some("sodium"));
+
+        // 玩家把它改记成自己装的之后，别的 Mod 的前置计划把它换回 d1，也不改这个身份。
+        let store = aurora.ledger_store("1.21");
+        let mut ledger = store.load().await.unwrap();
+        ledger.find_mut("lib-d2.jar").unwrap().installed_as_dependency_of = None;
+        store.save(&ledger).await.unwrap();
+        aurora.remove_mod("1.21", "sodium-v1.jar").await.unwrap();
+        aurora
+            .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
+            .await
+            .unwrap();
+        let ledger = store.load().await.unwrap();
+        let lib = ledger.find("lib-d1.jar").unwrap();
+        assert_eq!(lib.installed_as_dependency_of, None);
     }
 
     /// 同名原地更新同样保持停用；启用态的 Mod 更新后还是启用态。
