@@ -37,7 +37,7 @@ impl MirrorSource {
 /// - 版本清单 / Java 清单：piston-meta.mojang.com（meta 家族，根路径）
 /// - assets 对象：resources.download.minecraft.net -> /assets
 /// - libraries：libraries.minecraft.net -> /maven
-/// - Fabric：meta.fabricmc.net -> /fabric-meta
+/// - Fabric：meta.fabricmc.net -> /fabric-meta，加载器与它的库 maven.fabricmc.net -> /maven
 /// - Forge：maven.minecraftforge.net -> /maven
 /// - NeoForge：maven.neoforged.net/releases/ -> /maven/
 ///
@@ -56,6 +56,7 @@ const MIRROR_TABLE: &[(&str, &str, &str)] = &[
     ("resources.download.minecraft.net", "", "/assets"),
     ("libraries.minecraft.net", "", "/maven"),
     ("meta.fabricmc.net", "", "/fabric-meta"),
+    ("maven.fabricmc.net", "", "/maven"),
     ("maven.minecraftforge.net", "", "/maven"),
     ("maven.neoforged.net", "/releases/", "/maven/"),
 ];
@@ -157,6 +158,10 @@ mod tests {
             (
                 "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.0.0/neoforge-21.0.0-installer.jar",
                 "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/21.0.0/neoforge-21.0.0-installer.jar",
+            ),
+            (
+                "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar",
+                "https://bmclapi2.bangbang93.com/maven/net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar",
             ),
         ];
         for (input, expected) in cases {
