@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TASK_TOAST } from "../copy/flows";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { TaskRecordDto } from "../ipc/tasks";
@@ -1088,6 +1089,54 @@ describe("重试失败的新建", () => {
     expect(callsOf(ipc, "repair_instance")).toEqual([]);
   });
 
+  it("从实例库修好之后：失败的新建那一行撤下，不留一个点了只会撞名的重试", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+    expect(commands()).toEqual([["install_version", "failed"]]);
+
+    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+    instances = instances.map((i) => (i.id === "新世界" ? instanceDto("新世界", { mc_version: "1.21.1" }) : i));
+    await store.actions.repairInstance("新世界");
+    await settle();
+
+    expect(commands()).toEqual([["repair_instance", "done"]]);
+  });
+
+  it("补全再次失败：失败的新建那一行留着，实例还没好", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+
+    ipc.overrides.set("repair_instance", () => Promise.reject(new IpcError("network_failed", "连接超时")));
+    await store.actions.repairInstance("新世界");
+    await settle();
+
+    expect(commands()).toEqual([
+      ["install_version", "failed"],
+      ["repair_instance", "failed"],
+    ]);
+  });
+
+  it("补全成功只撤同一实例的行：别的实例失败的新建还在", async () => {
+    instances = [...instances, leftover()];
+    await store.actions.createInstance(spec);
+    await settle();
+    await store.actions.createInstance({ ...spec, name: "另一个世界" });
+    await settle();
+    expect(commands()).toEqual([
+      ["install_version", "failed"],
+      ["install_version", "failed"],
+    ]);
+
+    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+    instances = instances.map((i) => (i.id === "新世界" ? instanceDto("新世界", { mc_version: "1.21.1" }) : i));
+    await store.actions.repairInstance("新世界");
+    await settle();
+
+    expect(store.getState().tasks.filter((t) => t.status === "failed").map((t) => t.instanceId)).toEqual(["另一个世界"]);
+  });
+
   it("同名目录不是安装留下的（例如已有实例改名撞上）：不改排补全", async () => {
     instances = [...instances, instanceDto("新世界")];
     await store.actions.createInstance(spec);
@@ -1237,6 +1286,30 @@ describe("重启后重试上次关闭时中断的新建与导入", () => {
     expect(entry("新世界")).toMatchObject({ placeholder: false, status: "ready" });
     expect(store.getState().instances.filter((i) => i.id === "新世界")).toHaveLength(1);
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["新世界"] }]);
+  });
+
+  it("中断前其实已经装完：重试撤下这一行并提示，不重跑 install_version 撞名", async () => {
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.21.1" })];
+    await restartWith(interrupted("t-old", "game", "新世界", "install_version", { id: "1.21.1", loader: null, loaderVersion: null, targetName: "新世界" }));
+
+    store.actions.retryTask("t-old");
+    await settle();
+
+    expect(callsOf(ipc, "install_version")).toEqual([]);
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(store.getState().tasks).toEqual([]);
+    expect(store.getState().toasts.map((t) => t.title)).toContain(TASK_TOAST.installFinishedBeforeInterrupt("新世界").title);
+  });
+
+  it("「全部重试」遇到中断前已经装完的新建：撤下这一行，不计入重试个数", async () => {
+    instances = [...instances, instanceDto("新世界", { mc_version: "1.21.1" })];
+    await restartWith(interrupted("t-old", "game", "新世界", "install_version", { id: "1.21.1", loader: null, loaderVersion: null, targetName: "新世界" }));
+
+    expect(store.actions.retryFailedTasks()).toBe(0);
+    await settle();
+
+    expect(callsOf(ipc, "install_version")).toEqual([]);
+    expect(store.getState().tasks).toEqual([]);
   });
 
   it("导入整合包：全部重试期间同样有占位项，失败后重扫落定才撤下", async () => {

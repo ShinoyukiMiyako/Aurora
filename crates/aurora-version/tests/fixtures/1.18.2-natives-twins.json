@@ -1,0 +1,163 @@
+{
+  "id": "1.18.2",
+  "type": "release",
+  "mainClass": "net.minecraft.client.main.Main",
+  "libraries": [
+    {
+      "downloads": {
+        "artifact": {
+          "path": "org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1.jar",
+          "sha1": "2bb514e444994c6fece99a21f76e0c90438e377f",
+          "size": 317748,
+          "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1.jar"
+        }
+      },
+      "name": "org.lwjgl:lwjgl:3.2.1",
+      "rules": [
+        {
+          "action": "allow",
+          "os": {
+            "name": "osx"
+          }
+        }
+      ]
+    },
+    {
+      "downloads": {
+        "artifact": {
+          "path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar",
+          "sha1": "8ad6294407e15780b43e84929c40e4c5e997972e",
+          "size": 321900,
+          "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"
+        }
+      },
+      "name": "org.lwjgl:lwjgl:3.2.2",
+      "rules": [
+        {
+          "action": "allow"
+        },
+        {
+          "action": "disallow",
+          "os": {
+            "name": "osx"
+          }
+        }
+      ]
+    },
+    {
+      "downloads": {
+        "artifact": {
+          "path": "org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1.jar",
+          "sha1": "2bb514e444994c6fece99a21f76e0c90438e377f",
+          "size": 317748,
+          "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1.jar"
+        },
+        "classifiers": {
+          "natives-macos": {
+            "path": "org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1-natives-macos.jar",
+            "sha1": "5a4c271d150906858d475603dcb9479453c60555",
+            "size": 39835,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.2.1/lwjgl-3.2.1-natives-macos.jar"
+          }
+        }
+      },
+      "name": "org.lwjgl:lwjgl:3.2.1",
+      "natives": {
+        "osx": "natives-macos"
+      },
+      "rules": [
+        {
+          "action": "allow",
+          "os": {
+            "name": "osx"
+          }
+        }
+      ]
+    },
+    {
+      "downloads": {
+        "artifact": {
+          "path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar",
+          "sha1": "8ad6294407e15780b43e84929c40e4c5e997972e",
+          "size": 321900,
+          "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"
+        },
+        "classifiers": {
+          "natives-linux": {
+            "path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-linux.jar",
+            "sha1": "ae7976827ca2a3741f6b9a843a89bacd637af350",
+            "size": 124776,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-linux.jar"
+          },
+          "natives-windows": {
+            "path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar",
+            "sha1": "05359f3aa50d36352815fc662ea73e1c00d22170",
+            "size": 279593,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar"
+          }
+        }
+      },
+      "name": "org.lwjgl:lwjgl:3.2.2",
+      "natives": {
+        "linux": "natives-linux",
+        "windows": "natives-windows"
+      },
+      "rules": [
+        {
+          "action": "allow"
+        },
+        {
+          "action": "disallow",
+          "os": {
+            "name": "osx"
+          }
+        }
+      ]
+    },
+    {
+      "downloads": {
+        "artifact": {
+          "path": "com/mojang/text2speech/1.12.4/text2speech-1.12.4.jar",
+          "sha1": "1f618f522dbdd93218c270bcfd8f8dd84be31717",
+          "size": 12874,
+          "url": "https://libraries.minecraft.net/com/mojang/text2speech/1.12.4/text2speech-1.12.4.jar"
+        }
+      },
+      "name": "com.mojang:text2speech:1.12.4"
+    },
+    {
+      "downloads": {
+        "artifact": {
+          "path": "com/mojang/text2speech/1.12.4/text2speech-1.12.4.jar",
+          "sha1": "1f618f522dbdd93218c270bcfd8f8dd84be31717",
+          "size": 12874,
+          "url": "https://libraries.minecraft.net/com/mojang/text2speech/1.12.4/text2speech-1.12.4.jar"
+        },
+        "classifiers": {
+          "natives-linux": {
+            "path": "com/mojang/text2speech/1.12.4/text2speech-1.12.4-natives-linux.jar",
+            "sha1": "9571b1360a268311d7fa625614186965914f0215",
+            "size": 7833,
+            "url": "https://libraries.minecraft.net/com/mojang/text2speech/1.12.4/text2speech-1.12.4-natives-linux.jar"
+          },
+          "natives-windows": {
+            "path": "com/mojang/text2speech/1.12.4/text2speech-1.12.4-natives-windows.jar",
+            "sha1": "7e37c535186a058d730ec03491182fae2efb57be",
+            "size": 81379,
+            "url": "https://libraries.minecraft.net/com/mojang/text2speech/1.12.4/text2speech-1.12.4-natives-windows.jar"
+          }
+        }
+      },
+      "extract": {
+        "exclude": [
+          "META-INF/"
+        ]
+      },
+      "name": "com.mojang:text2speech:1.12.4",
+      "natives": {
+        "linux": "natives-linux",
+        "windows": "natives-windows"
+      }
+    }
+  ]
+}

@@ -219,6 +219,38 @@ mod tests {
         RuntimeContext::new(OsName::Windows, "x86_64", 64)
     }
 
+    /// 1.13 到 1.18 的孪生条目：主件只排一次，当前平台的 natives 件要排上，别的平台不排。
+    #[test]
+    fn natives_twin_queues_the_classifier_jar_and_one_main_jar() {
+        let v = VersionJson::from_json_str(
+            r#"{"id":"1.18.2","libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"m","size":3,"url":"https://libraries.minecraft.net/m.jar"}}},
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "natives":{"linux":"natives-linux","windows":"natives-windows"},
+                 "downloads":{
+                    "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"m","size":3,"url":"https://libraries.minecraft.net/m.jar"},
+                    "classifiers":{
+                        "natives-linux":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-linux.jar","sha1":"l","size":1,"url":"https://libraries.minecraft.net/l.jar"},
+                        "natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"w","size":2,"url":"https://libraries.minecraft.net/w.jar"}}}}
+            ]}"#,
+        )
+        .unwrap();
+        let mut dests: Vec<PathBuf> = library_tasks(&v, &win64(), &layout())
+            .unwrap()
+            .into_iter()
+            .map(|task| task.dest)
+            .collect();
+        dests.sort();
+        assert_eq!(
+            dests,
+            vec![
+                layout().library_path("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar"),
+                layout().library_path("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"),
+            ]
+        );
+    }
+
     #[test]
     fn client_jar_task_uses_downloads_client() {
         let v = VersionJson::from_json_str(
@@ -280,38 +312,6 @@ mod tests {
             )
         );
         assert_eq!(tasks[1].sha1.as_deref(), Some("w1"));
-    }
-
-    /// 主件与 natives 条目同坐标时都声明了同一个主件：主件只下一次（同一落点并发写会互相打架），
-    /// natives 分类件也要进下载批次。
-    #[test]
-    fn library_tasks_fetch_shared_main_jar_once_and_the_native_classifier() {
-        let v = VersionJson::from_json_str(
-            r#"{
-                "id":"1.16.5",
-                "libraries":[
-                    {"name":"org.lwjgl:lwjgl:3.2.2",
-                     "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a1","size":10,"url":"https://libraries.minecraft.net/lwjgl.jar"}}},
-                    {"name":"org.lwjgl:lwjgl:3.2.2",
-                     "downloads":{
-                        "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a1","size":10,"url":"https://libraries.minecraft.net/lwjgl.jar"},
-                        "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"n1","size":20,"url":"https://libraries.minecraft.net/lwjgl-natives-windows.jar"}}},
-                     "natives":{"windows":"natives-windows"}}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let tasks = library_tasks(&v, &win64(), &layout()).unwrap();
-        let dests: Vec<_> = tasks.iter().map(|t| t.dest.clone()).collect();
-        assert_eq!(
-            dests,
-            vec![
-                PathBuf::from("/mc/libraries/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"),
-                PathBuf::from(
-                    "/mc/libraries/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar"
-                ),
-            ]
-        );
     }
 
     #[test]

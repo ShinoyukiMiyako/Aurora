@@ -14,6 +14,7 @@ import {
   DEVICE_CODE_TIMEOUT_CODE,
   isCrashCategory,
   NEXT_LAUNCH_SUFFIX,
+  TASK_INTERRUPTED_CODE,
   TASK_TEXT,
   TASK_TOAST,
   TOAST_COPY,
@@ -111,6 +112,7 @@ import {
   clearFinished,
   completeCompositeStep,
   compositeProgress,
+  dropSuperseded,
   findDuplicate,
   INSTANCE_TASK_COMMANDS,
   isActiveTask,
@@ -1854,7 +1856,11 @@ export class LauncherStore {
     const before = this.findTask(id);
     if (before.status !== "running" || before.attempt !== attempt) return;
     const keep = this.keepsPlaceholder(before);
-    this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())), ...(keep ? { landing: [...raw.landing, id] } : {}) }));
+    const repaired = before.spec.command === "repair_instance" ? before.instanceId : null;
+    this.set((raw) => {
+      const done = trimHistory(markDone(raw.tasks, id, attempt, Date.now()));
+      return { tasks: repaired === null ? done : dropSuperseded(done, repaired), ...(keep ? { landing: [...raw.landing, id] } : {}) };
+    });
     this.tasksChanged();
     this.rescanHeld(before.instanceId);
     if (this.discardLanding.has(id)) return;
@@ -3153,6 +3159,12 @@ export class LauncherStore {
           store.retryAsRepair(task, leftover);
           return;
         }
+        const installed = store.installedBeforeInterrupt(task);
+        if (installed !== null) {
+          store.retireTask(task);
+          store.pushToast("info", TASK_TOAST.installFinishedBeforeInterrupt(installed).title);
+          return;
+        }
         const duplicate = findDuplicate(store.raw.tasks, task.spec);
         if (duplicate !== undefined) {
           store.pushToast("info", TASK_TOAST.duplicate(task.title).title);
@@ -3169,6 +3181,10 @@ export class LauncherStore {
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
               if (findDuplicate(store.raw.tasks, { command: "repair_instance", args: { id: leftover } }) === undefined && store.retryAsRepair(task, leftover)) retried += 1;
+              continue;
+            }
+            if (store.installedBeforeInterrupt(task) !== null) {
+              store.retireTask(task);
               continue;
             }
             // 逐个排：前一个重试后，同一件事的后一个就算重复
@@ -3301,6 +3317,22 @@ export class LauncherStore {
     const name = strArg(task.spec.args, "targetName", task.spec.command).toLowerCase();
     const leftover = this.raw.scanned.find((i) => i.id.toLowerCase() === name && i.incomplete !== null && i.incomplete.kind === "install");
     return leftover === undefined ? null : leftover.id;
+  }
+
+  /**
+   * 「关闭时中断」的新建其实已经装完时的实例 id；否则 null。结局写进任务日志有防抖，装完到写下之间进程没了就是这样：
+   * 盘上的实例已经没有安装标记，重跑 install_version 只会撞名，那一行也永远留在失败里。
+   */
+  private installedBeforeInterrupt(task: Task): string | null {
+    if (task.spec.command !== "install_version" || task.error === null || task.error.code !== TASK_INTERRUPTED_CODE) return null;
+    const name = strArg(task.spec.args, "targetName", task.spec.command).toLowerCase();
+    const installed = this.raw.scanned.find((i) => i.id.toLowerCase() === name && i.incomplete === null);
+    return installed === undefined ? null : installed.id;
+  }
+
+  private retireTask(task: Task): void {
+    this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
+    this.scheduleJournal();
   }
 
   /**

@@ -821,6 +821,8 @@ export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以开始游戏了" }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
   repaired: (name: string) => ({ title: `「${name}」已修复` }),
+  /** 重试「关闭时中断」的新建时，发现它在中断之前已经装完了。 */
+  installFinishedBeforeInterrupt: (name: string) => ({ title: `「${name}」已经装好了` }),
   modInstalled: (mod: string, dependencies: number, instance: string) => ({
     title: dependencies > 0 ? `已安装 ${mod} 及 ${dependencies} 个前置` : `已安装 ${mod}`,
     body: `装入「${instance}」`,

@@ -228,6 +228,25 @@ describe("主页：问候与继续游玩", () => {
     expect(text()).toContain("存档「海岛据点」");
   });
 
+  it("当前实例缺版本 JSON：工作目录解析不出来，不去读存档，也不弹错误", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, status: "broken", broken_reason: "缺少版本 JSON", mc_version: null, world_count: null, mod_count: null } : i));
+    ipc.overrides.set("list_instance_content", () => {
+      throw new IpcError("instance_failed", "实例 生存 的版本 JSON 不可用：缺少版本 JSON");
+    });
+    await mount();
+    expect(callsOf(ipc, "list_instance_content")).toEqual([]);
+    expect(launcher.state.toasts).toEqual([]);
+  });
+
+  it("未完成但版本 JSON 还在的实例数得出存档：照常读，信息行写存档名", async () => {
+    instances = instances.map((i) =>
+      i.id === "生存" ? { ...i, incomplete: { kind: "repair", outcome: "pending", started_at: NOW - MINUTE, spec: null, error: null }, world_count: 2 } : i,
+    );
+    await mount();
+    expect(callsOf(ipc, "list_instance_content")).toEqual([{ id: "生存" }]);
+    expect(text()).toContain("存档「海岛据点」");
+  });
+
   it("整合包实例：大卡挂出整合包名与版本，让出 Mod 数", async () => {
     instances = instances.map((i) =>
       i.id === "生存" ? { ...i, modpack: { platform: "modrinth", project_id: "1KVo5zza", version_id: "v6", name: "Fabulously Optimized", version: "6.2.0" } } : i,

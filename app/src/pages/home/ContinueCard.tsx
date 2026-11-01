@@ -196,8 +196,10 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const cover = instanceCover(inst);
 
   // 游戏退出后状态层作废这个实例的存档缓存，这里订阅着就会重取，信息行里的存档名才是刚玩的那个。
-  // 实例列表已数过 saves/：一个存档都没有就不必读目录（信息行本来就省略这一段）；数不出来时照常去读
-  const content = useInstanceContent(inst.placeholder || inst.worldCount === 0 ? null : inst.id);
+  // 实例列表已数过 saves/：一个存档都没有就不必读目录（信息行本来就省略这一段）；数不出来时照常去读。
+  // 版本 JSON 坏了或缺失时例外：工作目录解析不出来，读也只会报错，而大卡上已经写着要修复
+  const unreadable = inst.status === "broken" && inst.worldCount === null;
+  const content = useInstanceContent(inst.placeholder || inst.worldCount === 0 || unreadable ? null : inst.id);
   useReportOnce(content.status === "error" ? content.error : null, HOME_COPY.worldsError);
   const world = content.status === "ready" ? latestWorld(content.data.worlds) : null;
 
