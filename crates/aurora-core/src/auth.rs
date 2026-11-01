@@ -2476,7 +2476,7 @@ mod tests {
                     .into_iter()
                     .map(|a| a.uuid)
                     .collect();
-                assert_eq!(listed, [steve.uuid.clone()], "{case}");
+                assert_eq!(listed, std::slice::from_ref(&steve.uuid), "{case}");
                 assert_eq!(
                     aurora.current_account().unwrap().unwrap().uuid,
                     steve.uuid,

@@ -105,6 +105,9 @@ pub(crate) async fn complete_first_run_with(
 // ---- 启动提示 ----
 
 /// 启动时发生、要让用户知道的事。前端启动后查询一次，按 `kind` 展示。
+// 变体名就是前端分支用的 kind（config_reset、credentials_reset……），同一类「按默认或空库重来」的处置
+// 共用 Reset 后缀，比为了这条规则另起一套对不上的名字更好认。
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StartupNoticeDto {
