@@ -119,10 +119,19 @@ pub const PLAYER_NAME_MAX_UNITS: usize = 16;
 static RELEASE_PREFIX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^1\.(\d+)(?:\.(\d+))?").expect("内置正则必须可编译"));
 
+/// 2026 年起的年份版本号 `<年>.<序号>[.<修订>]`，快照与预发布写作 `26.1-snapshot-1`、`26.1-pre-3`。
+/// 年份从 26 起，挡掉形似的愚人节版本 `2.0`。
+static YEAR_BASED_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:2[6-9]|[3-9]\d)\.\d+").expect("内置正则必须可编译"));
+
 /// 角色名在这个游戏版本上是否过长。版本号解析不出（含周快照）时不提醒：猜错了反而误导。
 pub fn long_player_name(name: &str, mc_version: &str) -> bool {
     if name.encode_utf16().count() <= PLAYER_NAME_MAX_UNITS {
         return false;
+    }
+    // 年份版本号全都晚于 1.20.3。
+    if YEAR_BASED_PREFIX.is_match(mc_version) {
+        return true;
     }
     let Some(caps) = RELEASE_PREFIX.captures(mc_version) else {
         return false;
@@ -314,6 +323,26 @@ mod tests {
         assert_eq!(astral.chars().count(), 8);
         assert!(!long_player_name(&astral, "1.21"));
         assert!(long_player_name(&format!("{astral}a"), "1.21"));
+    }
+
+    #[test]
+    fn long_player_name_counts_year_based_versions_as_newer_than_1_20_3() {
+        // 2026 年起正式版、快照、预发布都改用 `<年>.<序号>` 的版本号，全部晚于 1.20.3。
+        let seventeen = "abcdefghijklmnopq";
+        for version in [
+            "26.1",
+            "26.1.2",
+            "26.3",
+            "26.1-snapshot-1",
+            "26.1-pre-3",
+            "26.1-rc-1",
+        ] {
+            assert!(long_player_name(seventeen, version), "{version}");
+            assert!(!long_player_name("abcdefghijklmnop", version), "{version}");
+        }
+        // 愚人节的 2.0 与年份版本号形似，但它是 1.5 时代的版本。
+        assert!(!long_player_name(seventeen, "2.0"));
+        assert!(!long_player_name(seventeen, "25w14craftmine"));
     }
 
     fn args(line: &str) -> Vec<String> {
