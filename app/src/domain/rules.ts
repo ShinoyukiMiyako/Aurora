@@ -129,13 +129,15 @@ export function isHeapReserveFailure(matchedLine: string): boolean {
 /** class file version 与 Java 主版本相差 44（52 是 Java 8，65 是 Java 21）。 */
 const CLASS_FILE_VERSION_OFFSET = 44;
 const CLASS_FILE_VERSION = /class file version (\d+)/i;
+const JAVA_MAJOR = /^java (\d+)$/i;
 
-/** 从诊断 detail（形如「class file version 65」）推算要求的 Java 主版本；对不上为 null。 */
-export function javaMajorFromClassVersion(detail: string | null): number | null {
+/** 从诊断 detail（「class file version 65」，或加载器写明的「java 21」）推算要求的 Java 主版本；对不上为 null。 */
+export function javaMajorFromDetail(detail: string | null): number | null {
   if (detail === null) return null;
-  const match = CLASS_FILE_VERSION.exec(detail);
-  if (match === null) return null;
-  return Number(match[1]) - CLASS_FILE_VERSION_OFFSET;
+  const classFile = CLASS_FILE_VERSION.exec(detail);
+  if (classFile !== null) return Number(classFile[1]) - CLASS_FILE_VERSION_OFFSET;
+  const named = JAVA_MAJOR.exec(detail);
+  return named === null ? null : Number(named[1]);
 }
 
 // ---------------------------------------------------------------- 本机 Java 的自动挑选

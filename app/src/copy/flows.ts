@@ -386,6 +386,7 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
 export const CRASH_CATEGORIES = [
   "java_version_mismatch",
   "out_of_memory",
+  "jvm_args_invalid",
   "missing_language_provider",
   "game_version_mismatch",
   "missing_dependency",
@@ -457,6 +458,10 @@ export const EXIT_CODE_COPY: Readonly<Record<ExitCodeKind, { phrase: string; exp
   },
 };
 
+/** detail 是十六进制异常码的写法（来自 JVM 错误头或退出码）。 */
+const NATIVE_EXCEPTION_CODE = /^0x[0-9A-F]{8}$/;
+const NATIVE_EXCEPTION_KIND: Readonly<Record<string, ExitCodeKind | undefined>> = { "0xC0000005": "access_violation", "0xC0000409": "stack_buffer_overrun" };
+
 export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCopy>> = {
   java_version_mismatch: {
     label: "Java 版本不匹配",
@@ -527,10 +532,24 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     title: "游戏或 Mod 文件损坏",
     explain: () => "有 jar 文件不完整或被改动过。",
   },
+  jvm_args_invalid: {
+    label: "JVM 参数有误",
+    title: "Java 不接受这些 JVM 参数",
+    explain: (c) =>
+      c.detail === null
+        ? "日志指向自定义的 JVM 参数，Java 没能起来。可以到实例设置里改掉或删掉写错的参数再试。"
+        : `日志指向 JVM 参数 ${c.detail}，Java 不认它，没能起来。可以到实例设置里改掉或删掉再试。`,
+  },
   native_crash: {
     label: "进程异常退出",
     title: "游戏进程异常退出",
     explain: (c) => {
+      // JVM 自己接住原生异常时以退出码 1 结束，真正的异常码只在错误头里，这时不能拿 1 来解释
+      if (c.detail !== null && NATIVE_EXCEPTION_CODE.test(c.detail) && (c.exitNote === null || c.exitNote.hex !== c.detail)) {
+        const kind = NATIVE_EXCEPTION_KIND[c.detail];
+        const phrase = kind === undefined ? "" : `（${EXIT_CODE_COPY[kind].phrase}）`;
+        return `JVM 记下了异常 ${c.detail}${phrase}，它死在原生代码里，日志里没有更具体的线索。常见于显卡驱动、Java 本体或带本地库的 Mod，可以先更新显卡驱动，再换一个 Java 版本试试。`;
+      }
       const code = need(c.exitCode, "退出码", "native_crash");
       const note = need(c.exitNote, "退出码说明", "native_crash");
       if (note.code !== code) throw new Error(`退出码说明 ${note.code} 与退出码 ${code} 对不上`);

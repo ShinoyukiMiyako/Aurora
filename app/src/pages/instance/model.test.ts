@@ -912,6 +912,16 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
     expect(fixes).toEqual([{ kind: "disable_mod", category: "game_version_mismatch", fileName: "sodium-1.jar", name: "sodium-1" }, { kind: "compare_log" }]);
   });
 
+  it("JVM 参数被拒：一键尝试带去实例设置，不替玩家改参数", () => {
+    expect(crashFixes(report([clue("jvm_args_invalid", { detail: "NotARealFlag" })]), ctx())).toEqual([{ kind: "jvm_args" }, { kind: "compare_log" }]);
+  });
+
+  it("加载器写明要 Java 21：本机有就切过去，没有就下载", () => {
+    const java21 = crashFixes(report([clue("java_version_mismatch", { detail: "java 21" })]), ctx({ requiredJava: 17, runtimes: [java("D:/jdk21/bin/java.exe", 21, 1)] }));
+    expect(java21[0]).toEqual({ kind: "switch_java", major: 21, path: "D:/jdk21/bin/java.exe" });
+    expect(crashFixes(report([clue("java_version_mismatch", { detail: "java 21" })]), ctx({ requiredJava: 17, runtimes: [] }))[0]).toEqual({ kind: "download_java", major: 21 });
+  });
+
   it("Intel 显卡驱动与本地崩溃：给处理办法三步与 java.exe 路径；报告里没有 Java 时不给路径", () => {
     expect(crashFixes(report([clue("intel_graphics_driver", { detail: "ig9icd64.dll" })]), ctx())[0]).toEqual({
       kind: "driver_steps",

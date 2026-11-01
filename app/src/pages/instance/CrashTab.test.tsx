@@ -191,6 +191,38 @@ describe("概览的崩溃横幅", () => {
   });
 });
 
+describe("崩溃诊断：JVM 参数被拒", () => {
+  it("点名被拒的参数，一键尝试把人带到实例设置", async () => {
+    await crashWith(1);
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = {
+        ...base,
+        diagnoses: [
+          {
+            category: "jvm_args_invalid",
+            summary: "",
+            advice: "",
+            detail: "NotARealFlag",
+            matched: "Unrecognized VM option 'NotARealFlag'",
+            line: 9,
+            context: [],
+            source: "session_log",
+          },
+        ],
+      };
+      return report;
+    });
+    await open("crash");
+    expect(text()).toContain("找到 1 条线索，日志指向 JVM 参数有误");
+    expect(text()).toContain("日志指向 JVM 参数 NotARealFlag，Java 不认它");
+    click(button("打开实例设置"));
+    await flush();
+    expect(nav.route).toMatchObject({ page: "instance", id: ID, tab: "settings" });
+  });
+});
+
 describe("崩溃诊断：参与扫描的文件", () => {
   it("两份文件各占一行、各有复制按钮，复制的是对应的完整路径；来源不是会话日志的线索写出来源名", async () => {
     await crashWith(-1073741819);

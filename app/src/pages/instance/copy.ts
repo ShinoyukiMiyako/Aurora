@@ -605,6 +605,7 @@ export const CRASH_PAGE_COPY = {
   memoryDone: (mb: number) => `已调到 ${formatMemory(mb)}，下次启动生效`,
   java64Done: "已改为自动选择 Java，下次启动生效",
   java64Note: "这次用的是 32 位 Java，分配不到这么多内存",
+  jvmArgsNote: "自定义 JVM 参数在实例设置里，改掉或删掉写错的那一项",
   enableMod: (name: string) => `启用 ${name}`,
   enableModNote: "日志指向的前置已经装了，只是停用着",
   searchMod: (detail: string) => `搜索 ${detail}`,

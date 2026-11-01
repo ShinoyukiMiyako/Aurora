@@ -4,7 +4,7 @@
 import { isForgeBuiltinProvider } from "../../copy/flows";
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { samePath } from "../../domain/paths";
-import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
+import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromDetail, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskError, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
@@ -679,6 +679,8 @@ export type CrashFix =
   | { kind: "memory_at_cap"; totalMb: number }
   | { kind: "lower_memory"; currentMb: number; targetMb: number }
   | { kind: "use_64bit_java" }
+  /** JVM 参数被 Java 拒绝：只有玩家知道想写什么，带他去实例设置，不替他改。 */
+  | { kind: "jvm_args" }
   | { kind: "switch_java"; major: number; path: string }
   | { kind: "download_java"; major: number }
   | { kind: "enable_mod"; fileName: string; name: string }
@@ -757,8 +759,11 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         );
         break;
       }
+      case "jvm_args_invalid":
+        push({ kind: "jvm_args" });
+        break;
       case "java_version_mismatch": {
-        const fromDetail = javaMajorFromClassVersion(clue.detail);
+        const fromDetail = javaMajorFromDetail(clue.detail);
         const major = fromDetail === null ? ctx.requiredJava : fromDetail;
         if (major === null) break;
         const runtime = bestLocalRuntime(ctx.runtimes, major);

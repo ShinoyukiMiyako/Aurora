@@ -24,7 +24,7 @@ import {
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { clock, formatDate, formatMemory, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
-import { javaMajorFromClassVersion } from "../../domain/rules";
+import { javaMajorFromDetail } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -287,7 +287,7 @@ function LaunchWarnings({ warnings, onTab }: { warnings: CrashReportDto["warning
 function ClueCard({ index, clue, report, required }: { index: number; clue: CrashClueDto; report: CrashReportDto; required: number | null }) {
   const label = crashCategoryLabel(clue.category);
   const copy = CRASH_CATEGORY[clue.category as CrashCategoryName];
-  const fromDetail = javaMajorFromClassVersion(clue.detail);
+  const fromDetail = javaMajorFromDetail(clue.detail);
   const explain = copy.explain({
     detail: clue.detail,
     currentJava: report.java === null ? null : report.java.major,
@@ -353,6 +353,7 @@ const FIX_ICON: Readonly<Record<CrashFix["kind"], "memory" | "java" | "mod" | "c
   memory_at_cap: "memory",
   lower_memory: "memory",
   use_64bit_java: "java",
+  jvm_args: "terminal",
   switch_java: "java",
   download_java: "java",
   enable_mod: "mod",
@@ -373,6 +374,8 @@ function fixTitle(fix: CrashFix): string {
     case "lower_memory":
     case "use_64bit_java":
       return CRASH_CATEGORY.out_of_memory.label;
+    case "jvm_args":
+      return CRASH_CATEGORY.jvm_args_invalid.label;
     case "switch_java":
     case "download_java":
       return CRASH_CATEGORY.java_version_mismatch.label;
@@ -603,6 +606,10 @@ function FixRow({
     case "use_64bit_java":
       note = CRASH_PAGE_COPY.java64Note;
       action = button(CRASH_COPY.use64BitJava, () => changeSetting({ java: JAVA_AUTO }, CRASH_PAGE_COPY.javaItem, SETTINGS_COPY.javaAuto, CRASH_PAGE_COPY.java64Done), settingsLock);
+      break;
+    case "jvm_args":
+      note = CRASH_PAGE_COPY.jvmArgsNote;
+      action = button(CRASH_COPY.openInstanceSettings, () => onTab("settings"));
       break;
     case "switch_java":
       note = CRASH_PAGE_COPY.javaNote(fix.major);

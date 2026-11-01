@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { memoryCapMb, memoryLowerTarget, memoryTarget, javaMajorFromClassVersion, isHeapReserveFailure } from "../domain/rules";
+import { memoryCapMb, memoryLowerTarget, memoryTarget, javaMajorFromDetail, isHeapReserveFailure } from "../domain/rules";
 import type { ExitCodeNoteDto } from "../ipc/diagnostics";
 import { CRASH_PAGE_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import {
@@ -24,12 +24,13 @@ const ACCESS_VIOLATION: ExitCodeNoteDto = { code: -1073741819, hex: "0xC0000005"
 const STACK_OVERRUN: ExitCodeNoteDto = { code: -1073740791, hex: "0xC0000409", kind: "stack_buffer_overrun", summary: "紧急中止" };
 
 describe("崩溃诊断文案", () => {
-  it("13 类诊断按后端规则优先级排好，各有标签与标题", () => {
-    expect(CRASH_CATEGORIES).toHaveLength(13);
-    expect(new Set(CRASH_CATEGORIES).size).toBe(13);
+  it("14 类诊断按后端规则优先级排好，各有标签与标题", () => {
+    expect(CRASH_CATEGORIES).toHaveLength(14);
+    expect(new Set(CRASH_CATEGORIES).size).toBe(14);
     expect(CRASH_CATEGORIES.map((c) => crashCategoryLabel(c))).toEqual([
       "Java 版本不匹配",
       "内存不足",
+      "JVM 参数有误",
       "缺少语言支持",
       "版本不符",
       "缺少前置",
@@ -49,6 +50,21 @@ describe("崩溃诊断文案", () => {
     expect(CRASH_CATEGORY.optifine_incompatible.title).toBe("OptiFine 与当前加载器不兼容");
     expect(CRASH_CATEGORY.intel_graphics_driver.title).toBe("Intel 集成显卡驱动出错");
     expect(CRASH_CATEGORY.native_crash.title).toBe("游戏进程异常退出");
+  });
+
+  it("JVM 自己接住原生异常时按错误头里的异常码解释，不拿退出码 1 说事", () => {
+    const generic: ExitCodeNoteDto = { code: 1, hex: "0x00000001", kind: "generic_failure", summary: "报错退出" };
+    const fromHeader = CRASH_CATEGORY.native_crash.explain({ ...BLANK, detail: "0xC0000005", exitCode: 1, exitNote: generic });
+    expect(fromHeader).toContain("JVM 记下了异常 0xC0000005（访问冲突）");
+    expect(fromHeader).not.toContain("退出码");
+    expect(CRASH_CATEGORY.native_crash.explain({ ...BLANK, detail: "0xC000001D", exitCode: 1, exitNote: generic })).toContain("JVM 记下了异常 0xC000001D，");
+    // 退出码本身就是这个异常码：沿用退出码的写法
+    expect(CRASH_CATEGORY.native_crash.explain({ ...BLANK, detail: "0xC0000005", exitCode: ACCESS_VIOLATION.code, exitNote: ACCESS_VIOLATION })).toMatch(/^退出码 0xC0000005（访问冲突）/);
+  });
+
+  it("JVM 参数被拒：点名那个参数，指向实例设置", () => {
+    expect(CRASH_CATEGORY.jvm_args_invalid.explain({ ...BLANK, detail: "NotARealFlag" })).toBe("日志指向 JVM 参数 NotARealFlag，Java 不认它，没能起来。可以到实例设置里改掉或删掉再试。");
+    expect(CRASH_CATEGORY.jvm_args_invalid.explain(BLANK)).toContain("实例设置");
   });
 
   it("未知类别直接抛错，不回落成「未知原因」", () => {
@@ -207,9 +223,12 @@ describe("一键尝试：内存目标", () => {
   });
 
   it("class file version 推出 Java 主版本", () => {
-    expect(javaMajorFromClassVersion("has been compiled by a more recent version (class file version 65.0)")).toBe(21);
-    expect(javaMajorFromClassVersion("class file version 52")).toBe(8);
-    expect(javaMajorFromClassVersion("no version here")).toBeNull();
-    expect(javaMajorFromClassVersion(null)).toBeNull();
+    expect(javaMajorFromDetail("java 21")).toBe(21);
+    expect(javaMajorFromDetail("Java 8")).toBe(8);
+    expect(javaMajorFromDetail("sodium java 21")).toBeNull();
+    expect(javaMajorFromDetail("has been compiled by a more recent version (class file version 65.0)")).toBe(21);
+    expect(javaMajorFromDetail("class file version 52")).toBe(8);
+    expect(javaMajorFromDetail("no version here")).toBeNull();
+    expect(javaMajorFromDetail(null)).toBeNull();
   });
 });
