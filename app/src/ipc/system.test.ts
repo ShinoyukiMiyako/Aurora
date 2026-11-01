@@ -161,9 +161,9 @@ describe("首次启动", () => {
     expect(await isFirstRun()).toBe(false);
     expect((await getConfig()).game_dir).toBe("D:\\Games\\New\\.minecraft");
     expect(await listGameDirectories()).toEqual([
-      { name: "New", path: "D:\\Games\\New\\.minecraft", is_current: true, available: true },
-      { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: false, available: true },
-      { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true },
+      { name: "New", path: "D:\\Games\\New\\.minecraft", is_current: true, available: true, version_count: 0 },
+      { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: false, available: true, version_count: 0 },
+      { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true, version_count: 12 },
     ]);
   });
 });
