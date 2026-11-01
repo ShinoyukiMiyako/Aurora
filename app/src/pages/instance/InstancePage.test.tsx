@@ -1914,6 +1914,40 @@ describe("实例详情：设置", () => {
       expect(callsOf(ipc, command)).toHaveLength(1);
     });
 
+    it("清除成功：「清除」消失后焦点交给「保存为默认」，不掉回 body；清除失败时焦点留在「清除」上", async () => {
+      template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
+      ipc.overrides.set("clear_template", () => {
+        throw new IpcError("config_write_failed", "默认设置文件删不掉");
+      });
+      await open("settings");
+      const clear = button("清除", row());
+      act(() => clear.focus());
+      click(clear);
+      await flush();
+      expect(button("清除", row())).toBe(clear);
+      expect(document.activeElement).toBe(clear);
+
+      ipc.overrides.set("clear_template", () => {
+        template = NO_TEMPLATE;
+        return template;
+      });
+      click(clear);
+      await flush();
+      expect(() => button("清除", row())).toThrow();
+      expect(document.activeElement).toBe(button("保存为默认", row()));
+    });
+
+    it("焦点在别处时清除成功：不把焦点抢到「保存为默认」上", async () => {
+      template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
+      await open("settings");
+      const elsewhere = button("删除实例");
+      act(() => elsewhere.focus());
+      click(button("清除", row()));
+      await flush();
+      expect(() => button("清除", row())).toThrow();
+      expect(document.activeElement).toBe(elsewhere);
+    });
+
     it("已有别的实例存的默认设置写出来源与时刻，手放的写来源不明；没进过游戏时保存失败用后端原文报错，原来的不动", async () => {
       template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
       ipc.overrides.set("save_instance_as_template", (args) => {

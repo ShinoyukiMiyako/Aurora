@@ -2,7 +2,7 @@
 // 除 JVM 参数外都是改了立即保存：JVM 参数是自由文本，留一个显式的保存，免得半句参数被存下来。
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
-import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flows";
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
@@ -650,6 +650,19 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
   const now = useNow(60_000);
   const [busy, setBusy] = useState<"save" | "clear" | null>(null);
   const info = template.status === "ready" ? template.data : null;
+  const present = info !== null && info.present;
+
+  // 默认设置没了，「清除」连同焦点一起从 DOM 里拿掉，焦点掉回 body，键盘用户得从文档开头重新找起。
+  // 交给同一行的「保存为默认」；焦点已经在别处时不抢
+  const saveRef = useRef<HTMLButtonElement>(null);
+  const hadClear = useRef(present);
+  useLayoutEffect(() => {
+    const removed = hadClear.current && !present;
+    hadClear.current = present;
+    if (!removed || document.activeElement !== document.body) return;
+    if (saveRef.current === null) throw new Error("「保存为默认」尚未挂载");
+    saveRef.current.focus();
+  }, [present]);
 
   const save = () => {
     setBusy("save");
@@ -679,12 +692,12 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
         </span>
       }
     >
-      {info !== null && info.present && (
+      {present && (
         <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} focusableWhenDisabled onClick={clear}>
           {SETTINGS_COPY.templateClear}
         </Button>
       )}
-      <Button size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} focusableWhenDisabled disabledReason={locked} onClick={save}>
+      <Button ref={saveRef} size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} focusableWhenDisabled disabledReason={locked} onClick={save}>
         {SETTINGS_COPY.templateSave}
       </Button>
     </SettingRow>

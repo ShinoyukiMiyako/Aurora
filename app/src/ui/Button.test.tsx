@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, type MouseEvent, type ReactNode } from "react";
+import { act, createRef, type MouseEvent, type ReactNode } from "react";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { focusByKeyboard, render, type Rendered } from "../test/dom";
@@ -275,6 +275,14 @@ describe("Button", () => {
     expect(button.getAttribute("aria-disabled")).toBe("true");
     focusByKeyboard(button);
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("游戏运行中不能修改");
+  });
+
+  it("ref 穿过常驻的提示包裹层拿到按钮本身，调用方能把焦点交给它", () => {
+    const ref = createRef<HTMLButtonElement>();
+    const button = mount(<Button ref={ref}>保存为默认</Button>);
+    expect(ref.current).toBe(button);
+    act(() => ref.current?.focus());
+    expect(document.activeElement).toBe(button);
   });
 
   it("只传 focusableWhenDisabled 不传 disabled：按钮照常可用", () => {
