@@ -96,7 +96,7 @@ pub enum CoreError {
     WorldNotFound { version_id: String, world: String },
     /// 直达的世界文件夹名里有系统代码页表示不了的字符，Java 的命令行参数带不过去。
     #[error(
-        "存档文件夹名「{world}」里的「{ch}」不在系统代码页里，Java 收不到这个名字，没法直接进入。启动游戏后在单人列表里进入，或者把文件夹改名"
+        "存档文件夹名里的「{ch}」系统代码页表示不了，没法直接进入。请启动游戏后在单人列表里进入，或把文件夹改名"
     )]
     WorldNameUnencodable {
         version_id: String,

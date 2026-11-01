@@ -918,7 +918,7 @@ mod tests {
         }
         .into();
         assert_eq!(unencodable.code, code::WORLD_NAME_UNENCODABLE);
-        assert!(unencodable.message.contains("㐂の森"), "{}", unencodable.message);
+        assert!(unencodable.message.contains("「㐂」"), "{}", unencodable.message);
         let detail = unencodable.detail.unwrap();
         assert_eq!(detail["version_id"], json!("生存"));
         assert_eq!(detail["world"], json!("㐂の森"));
