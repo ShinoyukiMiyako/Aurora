@@ -70,7 +70,7 @@ pub use local::{
     set_mod_enabled,
 };
 
-pub use hash::{ModHashes, curseforge_fingerprint, hash_mod_file, murmur2};
+pub use hash::{ModHashes, curseforge_fingerprint, fingerprint_file, hash_mod_file, murmur2};
 
 // 下游可直接从本 crate 取下载任务类型，无需再显式依赖 aurora-download。
 pub use aurora_download::DownloadTask;

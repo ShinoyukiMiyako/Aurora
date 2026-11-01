@@ -137,7 +137,25 @@ pub async fn hash_mod_file(path: impl AsRef<Path>) -> Result<ModHashes> {
         .map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))?
 }
 
+/// 只算 CurseForge 指纹，少算一遍 SHA-1：受限文件的校验只有 fingerprint 时用，整合包本体可能几百 MB。
+pub async fn fingerprint_file(path: impl AsRef<Path>) -> Result<u32> {
+    let path = path.as_ref().to_owned();
+    tokio::task::spawn_blocking(move || fingerprint_stream(&path, |_| {}))
+        .await
+        .map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))?
+}
+
 fn hash_mod_file_blocking(path: &Path) -> Result<ModHashes> {
+    let mut sha1 = Sha1::new();
+    let curseforge_fingerprint = fingerprint_stream(path, |chunk| sha1.update(chunk))?;
+    Ok(ModHashes {
+        sha1: base16ct::lower::encode_string(&sha1.finalize()),
+        curseforge_fingerprint,
+    })
+}
+
+/// 两趟流式算指纹。`first_pass` 看得到第一趟读到的每一块，算别的哈希不用再读一遍。
+fn fingerprint_stream(path: &Path, mut first_pass: impl FnMut(&[u8])) -> Result<u32> {
     let io_err = |source: std::io::Error| {
         Error::Base(aurora_base::Error::Io {
             path: path.to_owned(),
@@ -147,7 +165,6 @@ fn hash_mod_file_blocking(path: &Path) -> Result<ModHashes> {
     let mut file = std::fs::File::open(path).map_err(io_err)?;
     let mut buf = vec![0u8; READ_CHUNK];
 
-    let mut sha1 = Sha1::new();
     let mut normalized_len = 0usize;
     loop {
         let read = file.read(&mut buf).map_err(io_err)?;
@@ -155,7 +172,7 @@ fn hash_mod_file_blocking(path: &Path) -> Result<ModHashes> {
             break;
         }
         let chunk = &buf[..read];
-        sha1.update(chunk);
+        first_pass(chunk);
         normalized_len += chunk
             .iter()
             .filter(|&&b| !is_curseforge_whitespace(b))
@@ -186,10 +203,7 @@ fn hash_mod_file_blocking(path: &Path) -> Result<ModHashes> {
         )));
     }
 
-    Ok(ModHashes {
-        sha1: base16ct::lower::encode_string(&sha1.finalize()),
-        curseforge_fingerprint: state.finish(),
-    })
+    Ok(state.finish())
 }
 
 #[cfg(test)]
@@ -281,6 +295,20 @@ mod tests {
         let mut sha = Sha1::new();
         sha.update(&bytes);
         assert_eq!(hashes.sha1, base16ct::lower::encode_string(&sha.finalize()));
+    }
+
+    #[tokio::test]
+    async fn fingerprint_file_agrees_with_the_in_memory_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sample.jar");
+        tokio::fs::write(&file, TEST1).await.unwrap();
+        assert_eq!(fingerprint_file(&file).await.unwrap(), 3_608_199_863);
+
+        let missing = dir.path().join("ghost.jar");
+        match fingerprint_file(&missing).await.unwrap_err() {
+            Error::Base(aurora_base::Error::Io { path, .. }) => assert_eq!(path, missing),
+            other => panic!("期望 IO 错误，得到 {other:?}"),
+        }
     }
 
     #[tokio::test]

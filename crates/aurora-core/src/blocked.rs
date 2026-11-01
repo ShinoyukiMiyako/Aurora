@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use aurora_modplatform::curseforge::file_page_url;
 use aurora_modplatform::{
-    CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform, hash_mod_file,
+    CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform, fingerprint_file,
 };
 use serde::Serialize;
 
@@ -113,18 +113,16 @@ async fn verify_path(path: &Path, file: &BlockedFile) -> Result<Check> {
     if file.fingerprint == 0 {
         return Ok(Check::Unverifiable);
     }
-    let hashes = hash_mod_file(path).await.map_err(|err| match err {
+    let fingerprint = fingerprint_file(path).await.map_err(|err| match err {
         // 与 sha1 那一支报同一种错：读不了文件要作为 io 错误回到界面，不算平台错误。
         aurora_modplatform::Error::Base(base) => CoreError::Base(base),
         other => CoreError::ModPlatform(other),
     })?;
-    Ok(
-        if u64::from(hashes.curseforge_fingerprint) == file.fingerprint {
-            Check::Match
-        } else {
-            Check::Mismatch
-        },
-    )
+    Ok(if u64::from(fingerprint) == file.fingerprint {
+        Check::Match
+    } else {
+        Check::Mismatch
+    })
 }
 
 fn io_error(path: &Path, source: std::io::Error) -> CoreError {
