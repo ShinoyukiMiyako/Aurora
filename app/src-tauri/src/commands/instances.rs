@@ -221,20 +221,15 @@ impl InstanceLocks {
         })
     }
 
-    /// 实例此刻在做的事；有几件并行时报最值得界面知道的那一件。
+    /// 实例此刻在做的事，同 [`InstanceLocks::occupancy`] 的前一半；只有用例单看它。
+    #[cfg(test)]
     pub fn activity(&self, id: &str) -> Option<InstanceActivity> {
         self.occupancy(id).0
     }
 
-    /// 正以 `id` 为基底的实例；有几个时报最早占到的那个（与 instance_busy 报的是同一个），没有被当作
-    /// 基底时为 `None`。
-    pub fn used_by(&self, id: &str) -> Option<String> {
-        self.occupancy(id).1
-    }
-
-    /// 实例此刻对外报的那件事（同 [`InstanceLocks::activity`]）与正以它为基底的实例（同
-    /// [`InstanceLocks::used_by`]），在同一次查表里取出。实例列表与删除预览用它：分两次查的话，两次之间
-    /// 别的命令占上或放开基底，就会报出「inherited 却没有 used_by」这类对不上的一对。
+    /// 实例此刻在做的事（有几件并行时报最值得界面知道的那一件）与正以它为基底的实例（有几个时报最早占到的
+    /// 那个，与 instance_busy 报的是同一个；没被当作基底时为 `None`），在同一次查表里取出。实例列表与删除预览
+    /// 用它：分两次查的话，两次之间别的命令占上或放开基底，就会报出「inherited 却没有 used_by」这类对不上的一对。
     pub fn occupancy(&self, id: &str) -> (Option<InstanceActivity>, Option<String>) {
         let table = lock_table(&self.table);
         let Some(holds) = table.held.get(&lock_key(id)) else {
