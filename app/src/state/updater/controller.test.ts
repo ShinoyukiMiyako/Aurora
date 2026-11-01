@@ -84,6 +84,13 @@ describe("UpdaterController", () => {
     expect(timeout.getState().phase).toEqual({ kind: "check_failed", message: raw, network: "timeout" });
   });
 
+  it("更新源回了 404 以外的状态：落进 check_failed，状态码写进原文，不算网络层失败", async () => {
+    const error = new IpcError("update_check_failed", "更新服务器返回了异常状态", { endpoints: ["https://petalfall.org/updates/latest.json"], status: 503 });
+    const c = controllerWith(fakePort({ check: async () => Promise.reject(error) }));
+    await c.check();
+    expect(c.getState().phase).toEqual({ kind: "check_failed", message: "更新服务器返回了异常状态（503）", network: null });
+  });
+
   it("不能检查的阶段调用 check 直接抛错，不发命令", async () => {
     const port = fakePort();
     const c = controllerWith(port);
