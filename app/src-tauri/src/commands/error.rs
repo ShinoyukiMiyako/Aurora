@@ -281,7 +281,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::JsonSerialize(_) => code::INTERNAL,
         CoreError::SystemClock(_) => code::SYSTEM_CLOCK,
         CoreError::Fetch { .. } => code::NETWORK_FAILED,
-        CoreError::FeedParse { .. } => code::FEED_INVALID,
+        CoreError::FeedParse { .. } | CoreError::FeedTooLarge { .. } => code::FEED_INVALID,
         CoreError::RemotePack { .. } => code::REMOTE_PACK_UNREADABLE,
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
@@ -511,7 +511,9 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::Base(BaseError::Io { path, .. }) => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
-        CoreError::Fetch { url, .. } | CoreError::FeedParse { url, .. } => {
+        CoreError::Fetch { url, .. }
+        | CoreError::FeedParse { url, .. }
+        | CoreError::FeedTooLarge { url, .. } => {
             detail.insert("url".to_owned(), json!(url));
         }
         CoreError::RemotePack { url, reason } => {
@@ -769,6 +771,18 @@ mod tests {
         .into();
         assert_eq!(feed.code, code::FEED_INVALID);
         assert_eq!(feed.detail.unwrap()["url"], json!("https://x/news.json"));
+
+        let oversized: CommandError = CoreError::FeedTooLarge {
+            url: "https://x/releases".into(),
+            size: 20_000_000,
+            limit: 16_777_216,
+        }
+        .into();
+        assert_eq!(oversized.code, code::FEED_INVALID);
+        assert_eq!(
+            oversized.detail.unwrap()["url"],
+            json!("https://x/releases")
+        );
 
         let pack: CommandError = CoreError::RemotePack {
             url: "https://cdn/pack.mrpack".into(),

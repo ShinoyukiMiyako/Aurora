@@ -1237,7 +1237,8 @@ fn agent_unavailable(err: crate::authlib::LatestLookupError) -> LaunchFailure {
         .param("reason", err.to_string());
     match err {
         crate::authlib::LatestLookupError::Download(inner) => failure.caused_by(inner),
-        crate::authlib::LatestLookupError::Parse { .. } => failure,
+        crate::authlib::LatestLookupError::Parse { .. }
+        | crate::authlib::LatestLookupError::TooLarge { .. } => failure,
     }
 }
 

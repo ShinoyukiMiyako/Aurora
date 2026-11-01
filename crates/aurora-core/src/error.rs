@@ -130,6 +130,10 @@ pub enum CoreError {
         #[source]
         source: reqwest::Error,
     },
+    /// 远端内容源（资讯等）回来的正文超出上限，没有整个读进内存。`size` 是响应头声明的长度，或读到超限那一刻
+    /// 已收到的字节数，都是实际大小的下界。
+    #[error("{url} 回来的内容至少有 {size} 字节，超过 {limit} 字节的上限")]
+    FeedTooLarge { url: String, size: u64, limit: u64 },
     /// 只读远端整合包的目录与清单时读不下去：服务器不支持范围读取、不是可读的 zip、缺清单。
     #[error("读不了远端整合包 {url} 的清单：{reason}")]
     RemotePack { url: String, reason: String },

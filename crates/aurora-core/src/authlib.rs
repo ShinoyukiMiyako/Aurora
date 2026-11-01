@@ -22,6 +22,8 @@ const BMCL_LATEST: &str =
 const AGENT_DIR: &str = "authlib-injector";
 const AGENT_PREFIX: &str = "authlib-injector-";
 const AGENT_SUFFIX: &str = ".jar";
+/// 构建信息正文的上限。实际只有几百字节，上限只防镜像或官方地址回来一个超大文件时整个读进内存。
+const RELEASE_MAX_BYTES: u64 = 1024 * 1024;
 
 /// 一个 authlib-injector 构建。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -69,6 +71,9 @@ pub(crate) enum LatestLookupError {
         #[source]
         source: serde_json::Error,
     },
+    /// `size` 是响应头声明的长度，或读到超限那一刻已收到的字节数，都是实际大小的下界。
+    #[error("authlib-injector 构建信息 {url} 至少有 {size} 字节，超过 {limit} 字节的上限")]
+    TooLarge { url: String, size: u64, limit: u64 },
 }
 
 impl LatestLookupError {
@@ -107,7 +112,7 @@ async fn fetch_from(
         url: url.to_owned(),
         source,
     };
-    let response = http.get(url).send().await.map_err(request_failed)?;
+    let mut response = http.get(url).send().await.map_err(request_failed)?;
     let status = response.status();
     if !status.is_success() {
         return Err(aurora_download::Error::Status {
@@ -116,7 +121,25 @@ async fn fetch_from(
         }
         .into());
     }
-    let bytes = response.bytes().await.map_err(request_failed)?;
+    // 声明的长度超限时不读正文；没声明（分块传输）或声明不实的按块累计，一超限就中止。
+    let too_large = |size| LatestLookupError::TooLarge {
+        url: url.to_owned(),
+        size,
+        limit: RELEASE_MAX_BYTES,
+    };
+    if let Some(declared) = response.content_length()
+        && declared > RELEASE_MAX_BYTES
+    {
+        return Err(too_large(declared));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(request_failed)? {
+        let received = (bytes.len() + chunk.len()) as u64;
+        if received > RELEASE_MAX_BYTES {
+            return Err(too_large(received));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     serde_json::from_slice(&bytes).map_err(|source| LatestLookupError::Parse {
         url: url.to_owned(),
         source,
@@ -248,6 +271,36 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_offline(), "{err:?}");
+    }
+
+    /// 构建信息只有几百字节：镜像回来的正文超出上限时不整个读进内存，报超限而不是读完再解析；
+    /// 补满空白的合法 JSON 也照样拒。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_oversized_release_body_is_refused() {
+        let server = MockServer::start().await;
+        let padded = format!(
+            "{LATEST}{}",
+            " ".repeat(usize::try_from(RELEASE_MAX_BYTES).unwrap())
+        );
+        Mock::given(method("GET"))
+            .and(path("/latest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(padded.clone()))
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+        let url = format!("{}/latest.json", server.uri());
+
+        let err = fetch_latest(&http, &[&url]).await.unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                LatestLookupError::TooLarge { url: got, size, limit }
+                    if *got == url && *size == padded.len() as u64 && *limit == RELEASE_MAX_BYTES
+            ),
+            "{err:?}"
+        );
+        assert!(!err.is_offline());
     }
 
     #[tokio::test]

@@ -28,6 +28,9 @@ use crate::facade::Aurora;
 pub const LAUNCHER_CONTENT_BASE: &str = "https://launchercontent.mojang.com";
 const NEWS_PATH: &str = "/v2/news.json";
 const PATCH_NOTES_PATH: &str = "/v2/javaPatchNotes.json";
+/// 资讯与发布列表正文的上限。官方资讯与更新日志实测在几百 KB，留出几十倍余量；只防地址指到超大文件时
+/// 整个读进内存。
+const FEED_MAX_BYTES: u64 = 16 * 1024 * 1024;
 /// 单次请求的时限。
 pub const FETCH_TIMEOUT: Duration = Duration::from_millis(8000);
 /// 磁盘缓存的有效期。
@@ -122,7 +125,8 @@ pub struct NewsFeed {
 /// 启动器资讯的一次失败。退避期内同一次失败要原样重报多次，错误本身由各次结果共享。
 #[derive(Debug, Clone)]
 pub struct LauncherFailure {
-    /// 只会是请求失败（[`CoreError::Fetch`]）或内容认不出（[`CoreError::FeedParse`]）。
+    /// 只会是请求失败（[`CoreError::Fetch`]）、正文超限（[`CoreError::FeedTooLarge`]）或内容认不出
+    /// （[`CoreError::FeedParse`]）。
     pub error: Arc<CoreError>,
     /// 失败的时刻（Unix 毫秒）。
     pub failed_at: u64,
@@ -488,14 +492,32 @@ async fn read_body(request: reqwest::RequestBuilder, url: &str) -> Result<Vec<u8
         url: url.to_owned(),
         source,
     };
-    let response = request
+    let mut response = request
         .timeout(FETCH_TIMEOUT)
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(fetch_error)?;
-    let bytes = response.bytes().await.map_err(fetch_error)?;
-    Ok(bytes.to_vec())
+    // 声明的长度超限时不读正文；没声明（分块传输）或声明不实的按块累计，一超限就中止。
+    let too_large = |size| CoreError::FeedTooLarge {
+        url: url.to_owned(),
+        size,
+        limit: FEED_MAX_BYTES,
+    };
+    if let Some(declared) = response.content_length()
+        && declared > FEED_MAX_BYTES
+    {
+        return Err(too_large(declared));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(fetch_error)? {
+        let received = (body.len() + chunk.len()) as u64;
+        if received > FEED_MAX_BYTES {
+            return Err(too_large(received));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 #[derive(Deserialize)]
@@ -1468,5 +1490,55 @@ mod tests {
         assert!(stale.offline, "启动器发布给的是过期缓存");
         assert_eq!(stale.items, fresh.items);
         assert_eq!(stale.fetched_at, OCT_30, "官方资讯仍在磁盘缓存有效期内");
+    }
+
+    /// 资讯与发布列表的正文有上限：地址指到超大文件时不整个读进内存。后面补满空白的合法 JSON 照样拒，
+    /// 声明的长度超限时不读正文。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oversized_feed_bodies_are_refused_before_they_are_read_whole() {
+        let server = MockServer::start().await;
+        let padded = format!(
+            "{NEWS_FIXTURE}{}",
+            " ".repeat(usize::try_from(FEED_MAX_BYTES).unwrap())
+        );
+        Mock::given(method("GET"))
+            .and(path(NEWS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_string(padded.clone()))
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+        let url = format!("{}{NEWS_PATH}", server.uri());
+
+        let err = match fetch_json(&http, &url).await {
+            Ok(body) => panic!("应报正文超限，实际读下了 {} 字节", body.len()),
+            Err(err) => err,
+        };
+
+        match err {
+            CoreError::FeedTooLarge {
+                url: got,
+                size,
+                limit,
+            } => {
+                assert_eq!(got, url);
+                assert_eq!(size, padded.len() as u64, "声明了长度时按声明的报");
+                assert_eq!(limit, FEED_MAX_BYTES);
+            }
+            other => panic!("应报正文超限，实际：{other:?}"),
+        }
+        // 正好在上限上的照常读下来。
+        server.reset().await;
+        let exact = format!(
+            "{NEWS_FIXTURE}{}",
+            " ".repeat(usize::try_from(FEED_MAX_BYTES).unwrap() - NEWS_FIXTURE.len())
+        );
+        Mock::given(method("GET"))
+            .and(path(NEWS_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_string(exact))
+            .mount(&server)
+            .await;
+        let body = fetch_json(&http, &url).await.unwrap();
+        assert_eq!(body.len() as u64, FEED_MAX_BYTES);
+        assert_eq!(parse_news(&body, BASE, &url).unwrap().len(), 3);
     }
 }
