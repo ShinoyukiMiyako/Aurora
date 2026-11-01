@@ -407,18 +407,29 @@ impl<'a> CommandBuilder<'a> {
                     version: self.version.id.clone(),
                 })?;
 
-        // 游戏段：优先新式 arguments.game，否则旧式 minecraftArguments。
-        let game_templates: Vec<String> = if let Some(arguments) = self
+        // 游戏段：优先新式 arguments.game，否则旧式 minecraftArguments。加载器继承旧版时新式这段可能只有
+        // 自己的 tweak，基础参数还在旧式那段：没带 --username 就把旧式拼在前面，与合并时祖先在前的顺序一致。
+        let structured = self
             .version
             .arguments
             .as_ref()
             .filter(|arguments| !arguments.game.is_empty())
-        {
-            args::expand_arguments(&arguments.game, &self.ctx)
-        } else if let Some(legacy) = &self.version.minecraft_arguments {
-            args::split_legacy_arguments(legacy)
-        } else {
-            Vec::new()
+            .map(|arguments| args::expand_arguments(&arguments.game, &self.ctx));
+        let legacy = self
+            .version
+            .minecraft_arguments
+            .as_deref()
+            .map(args::split_legacy_arguments);
+        let game_templates: Vec<String> = match (structured, legacy) {
+            (Some(structured), Some(mut legacy))
+                if !structured.iter().any(|arg| arg == "--username") =>
+            {
+                legacy.extend(structured);
+                legacy
+            }
+            (Some(structured), _) => structured,
+            (None, Some(legacy)) => legacy,
+            (None, None) => Vec::new(),
         };
         let mut game_args: Vec<String> = game_templates.iter().map(|t| ph.substitute(t)).collect();
         // 旧式 minecraftArguments 不带窗口尺寸，新式参数靠 has_custom_resolution 条件块带上；
@@ -644,6 +655,30 @@ mod tests {
             );
             assert_eq!(value_after(&args, "-cp").len(), cp_flags, "{jvm}：{args:?}");
         }
+    }
+
+    /// 加载器继承旧版时 `arguments.game` 可能只有自己的 tweak，`--username` 这些基础参数还在旧式那一段：
+    /// 不能丢，旧式在前，与新式参数合并时祖先在前的顺序一致。
+    #[test]
+    fn game_args_without_the_base_keep_the_legacy_ones_in_front() {
+        let json = r#"{"id":"1.12.2","mainClass":"m",
+            "minecraftArguments":"--username ${auth_player_name} --version ${version_name}",
+            "arguments":{"game":["--tweakClass","x.Tweaker"]}}"#;
+        let args = build_with_resolution(json, None);
+        let at = |flag: &str| args.iter().position(|a| a == flag);
+        assert!(at("--username").unwrap() < at("--tweakClass").unwrap(), "{args:?}");
+        assert_eq!(value_after(&args, "--version"), ["1.12.2"]);
+    }
+
+    /// `arguments.game` 自带基础参数就是完整的一段：再拼旧式会重复，joptsimple 读单值选项时报错退出。
+    #[test]
+    fn complete_game_args_leave_the_legacy_ones_out() {
+        let json = r#"{"id":"1.12.2","mainClass":"m",
+            "minecraftArguments":"--username ${auth_player_name} --legacyOnly x",
+            "arguments":{"game":["--username","${auth_player_name}","--version","${version_name}"]}}"#;
+        let args = build_with_resolution(json, None);
+        assert_eq!(value_after(&args, "--username").len(), 1, "{args:?}");
+        assert!(!args.iter().any(|a| a == "--legacyOnly"), "{args:?}");
     }
 
     /// 官方版本 JSON 里真实出现过的日志配置名都能通过校验，`-Dlog4j.configurationFile` 指向 log_configs 下的
