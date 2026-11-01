@@ -486,6 +486,10 @@ impl Aurora {
         let resolved = self
             .resolve_unpinned(platform, dep_project, facts, ledger, mods_dir)
             .await?;
+        // 什么都没选上时，跳过说明已经说清了，再说「已改用适配的版本」就是假话。
+        if matches!(resolved, Resolved::Skipped(_)) {
+            rejected = None;
+        }
         Ok((resolved, rejected))
     }
 
@@ -1708,6 +1712,52 @@ mod tests {
                 "appleskin-v1.jar 指定的前置 fabric-api 版本不适配这个实例，已改用适配的版本"
                     .to_owned()
             ]
+        );
+    }
+
+    /// 钉的版本不适配，平台上也没有别的版本适配：只说没有可用的版本，不能再说「已改用」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_with_nothing_compatible_reports_only_that() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "appleskin",
+            &[modrinth_version(
+                "v1",
+                "appleskin",
+                "2023-06-08T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","version_id":"pinned","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        mount_versions(
+            &server,
+            "fabric-api",
+            &[modrinth_version(
+                "pinned",
+                "fabric-api",
+                "2023-05-30T00:00:00Z",
+                &["1.20"],
+                &["fabric"],
+                "",
+            )],
+        )
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "appleskin", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(
+            plan.skipped,
+            vec!["前置 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
         );
     }
 
