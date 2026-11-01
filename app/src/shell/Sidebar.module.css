@@ -108,11 +108,16 @@
   background: var(--sk-line-2);
 }
 
-/* ---- 固定的实例 ---- */
+/*
+ * ---- 固定的实例 ----
+ * 滚动容器会裁掉超出内容盒的部分，而选中环、进度环、焦点环都画在固定项之外：
+ * 列表上下留出余量，容器再用等量负外边距抵消，胶囊里各行的位置不变。
+ */
 .pinScroll {
   position: relative;
   flex: 0 1 auto;
   min-height: 0;
+  margin: calc(-1 * var(--sk-space-4)) 0;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: none;
@@ -132,7 +137,7 @@
   flex-direction: column;
   gap: var(--sk-space-6);
   margin: 0;
-  padding: 0;
+  padding: var(--sk-space-4) 0;
   list-style: none;
 }
 
