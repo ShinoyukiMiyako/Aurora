@@ -1,5 +1,6 @@
 //! 系统：内存建议、首次启动、启动提示与连通性探测。
 
+use aurora_base::fs::DataDirResolution;
 use aurora_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
 use aurora_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
 use serde::Serialize;
@@ -105,12 +106,15 @@ pub(crate) async fn complete_first_run_with(
 // ---- 启动提示 ----
 
 /// 启动时发生、要让用户知道的事。前端启动后查询一次，按 `kind` 展示。
-// 变体名就是前端分支用的 kind（config_reset、credentials_reset……），同一类「按默认或空库重来」的处置
-// 共用 Reset 后缀，比为了这条规则另起一套对不上的名字更好认。
-#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StartupNoticeDto {
+    /// 可执行文件所在目录这次写不进去，但里面有 config.json：数据就在这里，所以没有换到系统目录，
+    /// 账户和实例都在原处，只是这次的改动可能存不下来。
+    DataDirUnwritable {
+        /// 系统给的原因，不含路径。
+        reason: String,
+    },
     /// config.json 读不出来：坏文件已改名留存，本次按默认配置启动（首次启动向导会重新出现）。
     ConfigReset {
         /// 坏文件改名后的绝对路径，原样保留着用户的内容。
@@ -146,6 +150,8 @@ pub struct ConfigFieldResetDto {
 
 /// 本次启动的提示（managed state）。头一次查询之后不再变化，查询多少次都返回同一份。
 pub struct StartupNotices {
+    /// 数据目录的处置，定位时就已知道。
+    data_dir: Option<StartupNoticeDto>,
     /// 配置文件的处置，门面构造时就已知道。
     config: Vec<StartupNoticeDto>,
     /// 凭据库的处置要开库才知道，头一次查询时取。哪条命令先碰上坏凭据库都只处置一次、经过记在核心里，
@@ -174,12 +180,23 @@ impl StartupNotices {
             })
             .collect();
         Self {
+            data_dir: None,
             config,
             credentials: tokio::sync::OnceCell::new(),
         }
     }
 
-    /// 配置的提示在前，凭据库的在后。开库本身失败（读文件失败）照实报错，下一次查询再试。
+    /// 收下数据目录定位的结果：便携目录写不进去时记一条提示。
+    pub fn with_data_dir(mut self, resolved: &DataDirResolution) -> Self {
+        self.data_dir = resolved
+            .write_failure
+            .clone()
+            .map(|reason| StartupNoticeDto::DataDirUnwritable { reason });
+        self
+    }
+
+    /// 数据目录的提示最先：后面的问题多半与它同因。接着是配置的，最后是凭据库的。
+    /// 开库本身失败（读文件失败）照实报错，下一次查询再试。
     pub(crate) async fn resolve(
         &self,
         facade: &Facade,
@@ -199,7 +216,13 @@ impl StartupNotices {
                 )
             })
             .await?;
-        Ok(self.config.iter().chain(credentials).cloned().collect())
+        Ok(self
+            .data_dir
+            .iter()
+            .chain(&self.config)
+            .chain(credentials)
+            .cloned()
+            .collect())
     }
 }
 
@@ -357,6 +380,60 @@ mod tests {
             assert!(error.starts_with("Windows DPAPI 解密失败"), "{error}");
 
             assert_eq!(notices.resolve(&facade).await.unwrap(), first);
+        }
+    }
+
+    fn resolution(write_failure: Option<&str>) -> DataDirResolution {
+        DataDirResolution {
+            path: std::path::PathBuf::from(r"E:\Petalfall"),
+            portable: true,
+            fallback_reason: None,
+            write_failure: write_failure.map(str::to_owned),
+            elapsed: std::time::Duration::ZERO,
+        }
+    }
+
+    /// 便携目录写不进去：提示带着原因排在最前面，配置的提示照常跟在后面，查询多少次都是同一份。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unwritable_data_dir_becomes_the_first_startup_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let reason = "拒绝访问。 (os error 5)";
+        let notices = StartupNotices::from_recovery(Some(ConfigRecovery::Reset {
+            preserved: std::path::PathBuf::from(r"E:\Petalfall\config.json.broken-20261031-143025"),
+            error: "expected value at line 1 column 1".into(),
+        }))
+        .with_data_dir(&resolution(Some(reason)));
+
+        let first = notices.resolve(&facade).await.unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::json!([
+                { "kind": "data_dir_unwritable", "reason": reason },
+                {
+                    "kind": "config_reset",
+                    "preserved_path": r"E:\Petalfall\config.json.broken-20261031-143025",
+                    "error": "expected value at line 1 column 1"
+                }
+            ])
+        );
+        assert_eq!(notices.resolve(&facade).await.unwrap(), first);
+    }
+
+    /// 回落到系统目录或写得通的便携目录：数据目录没有要说的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn usable_data_dir_adds_no_startup_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let fallen_back = DataDirResolution {
+            portable: false,
+            fallback_reason: Some(r"C:\Program Files\Petalfall 不可写：拒绝访问。".into()),
+            ..resolution(None)
+        };
+        for resolved in [resolution(None), fallen_back] {
+            let notices = StartupNotices::from_recovery(None).with_data_dir(&resolved);
+            assert_eq!(notices.resolve(&facade).await.unwrap(), Vec::new());
         }
     }
 

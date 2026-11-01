@@ -20,6 +20,13 @@ export interface StartupNotice {
 /** 后端提示到呈现的对照；认不出的 kind 说明前后端版本不一致，直接抛错，不当作没有提示。 */
 export function describeStartupNotice(notice: StartupNoticeDto): StartupNotice {
   switch (notice.kind) {
+    case "data_dir_unwritable":
+      // 用户要的是一句「数据没丢」和为什么写不进去，所以原因进正文，不只留在日志里：这时日志多半也写不进去
+      return {
+        title: STARTUP_NOTICE_COPY.dataDirUnwritable.title,
+        body: STARTUP_NOTICE_COPY.dataDirUnwritable.body(notice.reason),
+        action: { label: STARTUP_NOTICE_COPY.dataDirUnwritable.action, run: () => openFolder("data_dir", null), errorTitle: SHELL_ACTION_ERROR.openDataDir },
+      };
     case "config_reset":
       // 坏文件的完整路径与解析错误后端已写进启动器日志；通知里只说结果，给出打开数据目录的入口
       return {

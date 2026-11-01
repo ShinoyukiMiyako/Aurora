@@ -87,7 +87,10 @@ pub fn run() {
             let aurora = aurora.with_app_version(&app.package_info().version.to_string())?;
             let server_monitor = ServerMonitor::new(aurora.data_dir());
             app.manage(Facade::new(aurora));
-            app.manage(commands::system::StartupNotices::from_recovery(recovery));
+            app.manage(
+                commands::system::StartupNotices::from_recovery(recovery)
+                    .with_data_dir(&aurora_base::fs::resolve_data_dir()?),
+            );
             // -- tasks --
             app.manage(TaskRegistry::default());
             app.manage(TaskJournal::default());
@@ -278,6 +281,7 @@ fn log_data_dir() {
             path = ?resolved.path,
             portable = resolved.portable,
             fallback_reason = ?resolved.fallback_reason,
+            write_failure = ?resolved.write_failure,
             elapsed_ms = resolved.elapsed.as_millis() as u64,
             "数据目录"
         ),

@@ -37,6 +37,15 @@ export const completeFirstRun = (gameDir: string, extraDirectories: NamedDirecto
 /** 启动时发生、要让用户知道的事，按 kind 区分。 */
 export type StartupNoticeDto =
   | {
+      /**
+       * data_dir_unwritable：可执行文件所在目录这次写不进去，但里面有 config.json，数据就在这里，所以没有换到系统目录。
+       * 账户和实例都在原处，只是这次的改动可能存不下来。排在所有提示之前。
+       */
+      kind: "data_dir_unwritable";
+      /** 系统给的原因，不含路径。 */
+      reason: string;
+    }
+  | {
       /** config_reset：config.json 读不出来，坏文件已改名留存，本次按默认配置启动（首次启动向导会重新出现）。 */
       kind: "config_reset";
       /** 坏文件改名后的绝对路径，原样保留着用户的内容。 */
