@@ -196,24 +196,28 @@ impl InstanceLocks {
 
     /// 实例此刻在做的事；有几件并行时报最值得界面知道的那一件。
     pub fn activity(&self, id: &str) -> Option<InstanceActivity> {
-        lock_table(&self.table)
-            .held
-            .get(&lock_key(id))
-            .and_then(|holds| {
-                holds
-                    .iter()
-                    .map(|h| h.activity)
-                    .min_by_key(|activity| activity.report_rank())
-            })
+        self.occupancy(id).0
     }
 
     /// 正以 `id` 为基底的实例；有几个时报最早占到的那个（与 instance_busy 报的是同一个），没有被当作
     /// 基底时为 `None`。
     pub fn used_by(&self, id: &str) -> Option<String> {
-        lock_table(&self.table)
-            .held
-            .get(&lock_key(id))
-            .and_then(|holds| holds.iter().find_map(|h| h.used_by.clone()))
+        self.occupancy(id).1
+    }
+
+    /// 实例此刻对外报的那件事（同 [`InstanceLocks::activity`]）与正以它为基底的实例（同
+    /// [`InstanceLocks::used_by`]），在同一次查表里取出。实例列表与删除预览用它：分两次查的话，两次之间
+    /// 别的命令占上或放开基底，就会报出「inherited 却没有 used_by」这类对不上的一对。
+    pub fn occupancy(&self, id: &str) -> (Option<InstanceActivity>, Option<String>) {
+        let table = lock_table(&self.table);
+        let Some(holds) = table.held.get(&lock_key(id)) else {
+            return (None, None);
+        };
+        let activity = holds
+            .iter()
+            .map(|h| h.activity)
+            .min_by_key(|activity| activity.report_rank());
+        (activity, holds.iter().find_map(|h| h.used_by.clone()))
     }
 }
 
@@ -832,9 +836,10 @@ fn content_dto(content: InstanceContent) -> InstanceContentDto {
 
 /// 删除预览带上实例此刻的占用：它在做的事与正以它为基底的实例，删除确认据此提前说明为什么删不了。
 fn preview_dto(preview: DeletionPreview, locks: &InstanceLocks) -> DeletionPreviewDto {
+    let (activity, used_by) = locks.occupancy(&preview.id);
     DeletionPreviewDto {
-        activity: locks.activity(&preview.id),
-        used_by: locks.used_by(&preview.id),
+        activity,
+        used_by,
         id: preview.id,
         worlds: preview.worlds.into_iter().map(world_dto).collect(),
         size_bytes: preview.size_bytes,
@@ -935,8 +940,7 @@ pub(crate) async fn list_instances_with(
     Ok(list
         .into_iter()
         .map(|summary| {
-            let activity = locks.activity(&summary.id);
-            let used_by = locks.used_by(&summary.id);
+            let (activity, used_by) = locks.occupancy(&summary.id);
             let play = plays.get(&summary.id);
             InstanceDto {
                 used_by,
@@ -3036,6 +3040,41 @@ mod tests {
     #[should_panic(expected = "基底占用要记下使用者")]
     fn inherited_is_only_taken_together_with_its_user() {
         let _ = InstanceLocks::default().acquire("1.20.1", InstanceActivity::Inherited);
+    }
+
+    /// 列表与删除预览里的 activity 和 used_by 必须是同一刻的：别的命令同时占上、放开基底时，不能报出
+    /// 「inherited 却没有 used_by」或「有 used_by 却没有 activity」这样的一对，前端把它当作契约破了直接抛错，
+    /// 整个实例列表就刷新失败。
+    #[test]
+    fn occupancy_reads_activity_and_user_at_the_same_moment() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use InstanceActivity::*;
+        let locks = InstanceLocks::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let churn = std::thread::spawn({
+            let (locks, stop) = (locks.clone(), stop.clone());
+            move || {
+                let bases = ["1.20.1".to_owned()];
+                while !stop.load(Ordering::Relaxed) {
+                    drop(locks.acquire_with_bases("Fabric", Launching, &bases).unwrap());
+                }
+            }
+        });
+        let (mut idle, mut used) = (0u32, 0u32);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && (idle < 1_000 || used < 1_000) {
+            match locks.occupancy("1.20.1") {
+                (None, None) => idle += 1,
+                (Some(Inherited), Some(user)) if user == "Fabric" => used += 1,
+                torn => {
+                    stop.store(true, Ordering::Relaxed);
+                    panic!("activity 与 used_by 不是同一刻的：{torn:?}");
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        assert!(idle > 0 && used > 0, "两种状态都该看到过：{idle} / {used}");
     }
 
     #[test]
