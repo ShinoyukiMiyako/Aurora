@@ -38,7 +38,7 @@ export function Failed({ copy, failure, recovery, standardInstaller, onRecover, 
   return (
     <Frame
       title={reason.title}
-      lead={<span role="alert">{reason.body(failure.detail)}</span>}
+      lead={<span role="alert">{reason.body(failure.detail, recovery)}</span>}
       footerStart={
         <Button variant="ghost" disabled={leaving !== null} focusableWhenDisabled onClick={onBack}>
           {text.back}

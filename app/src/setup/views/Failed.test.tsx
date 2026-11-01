@@ -10,11 +10,11 @@ import { ISSUES_URL } from "../../lib/app-info";
 import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import App from "../App";
-import type { Failure, FailureCode } from "../contract";
+import type { Existing, Failure, FailureCode } from "../contract";
 import { COPY, type SetupCopy } from "../copy";
 import { createFakeBridge, FAKE_PROBE, type FakeBridge } from "../fake-bridge";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
-import { replay } from "../model";
+import { replay, type FailureRecovery } from "../model";
 import { Failed, type FailedProps } from "./Failed";
 
 const zh = COPY.zh;
@@ -70,14 +70,16 @@ afterEach(() => {
 });
 
 describe("原因", () => {
-  it.each<[FailureCode, string, string, string]>([
-    ["dir_unwritable", "os error 5", "这个位置写不进去", "换一个你有权限的文件夹再试。"],
-    ["disk_full", "os error 112", "这块盘空间不够", "腾出空间或换一块盘再试。"],
-    ["extract_failed", "os error 225", "安装包没能解开", "杀毒软件可能拦下了它。放行后重试，或者重新下载一份。"],
-    ["payload_exit", "2", "安装没有完成", "安装程序提前退出了，返回码 2。"],
-    ["verify_failed", "uninstall.exe missing", "安装没有完成", "安装程序报告成功，但事后检查没有通过，下面是没过的项。"],
-  ])("%s", (code, detail, title, body) => {
-    view = render(failed({ failure: { code, detail } }));
+  it.each<[FailureCode, FailureRecovery, string, string, string]>([
+    ["dir_unwritable", "change_location", "os error 5", "这个位置写不进去", "换一个你有权限的文件夹再试。"],
+    ["dir_unwritable", "retry", "os error 5", "这个位置写不进去", "现有的安装位置不能换。确认你能写这个文件夹后再试。"],
+    ["disk_full", "change_location", "os error 112", "这块盘空间不够", "腾出空间或换一块盘再试。"],
+    ["disk_full", "retry", "os error 112", "这块盘空间不够", "现有的安装位置不能换。腾出空间后再试。"],
+    ["extract_failed", "retry", "os error 225", "安装包没能解开", "杀毒软件可能拦下了它。放行后重试，或者重新下载一份。"],
+    ["payload_exit", "retry", "2", "安装没有完成", "安装程序提前退出了，返回码 2。"],
+    ["verify_failed", "retry", "uninstall.exe missing", "安装没有完成", "安装程序报告成功，但事后检查没有通过，下面是没过的项。"],
+  ])("%s，退路 %s", (code, recovery, detail, title, body) => {
+    view = render(failed({ failure: { code, detail }, recovery }));
     expect(heading()).toBe(title);
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(body);
     expect(errorCode().textContent).toBe(`${code}: ${detail}`);
@@ -270,6 +272,24 @@ describe("接上流程", () => {
     view?.unmount();
     await failedApp({ code: "extract_failed", detail: "os error 225" });
     expect(buttonNamed(zh.failed.retry)).toBeDefined();
+  });
+
+  it.each<[FailureCode, "upgrade" | "repair", string]>([
+    ["dir_unwritable", "upgrade", zh.failed.reason.dir_unwritable.body("x", "retry")],
+    ["disk_full", "repair", zh.failed.reason.disk_full.body("x", "retry")],
+  ])("%s 发生在 %s 时位置是锁定的：只给重试，也不叫人换位置", (code, mode, body) => {
+    const existing: Existing = { kind: mode === "upgrade" ? "upgrade" : "same", version: "0.1.0", dir: String.raw`E:\app` };
+    const probe = { ...FAKE_PROBE, existing };
+    const fake = createFakeBridge({ probe, outcome: "hang", progress: [] });
+    const initial = replay([
+      { type: "probed", probe },
+      { type: "install_requested", mode, running: false },
+      { type: "install_failed", failure: { code, detail: "x" } },
+    ]);
+    view = render(<App bridge={fake} copy={zh} initial={initial} />);
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(body);
+    expect(buttonNamed(zh.failed.retry)).toBeDefined();
+    expect(buttonNamed(zh.failed.changeLocation)).toBeUndefined();
   });
 
   it("打开日志和问题反馈走到 bridge，反馈去 Issues", async () => {
