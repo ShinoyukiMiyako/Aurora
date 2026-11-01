@@ -251,7 +251,7 @@ describe("设置页：常规", () => {
       expect(section("启动").contains(toggle)).toBe(true);
       expect(toggle.getAttribute("role")).toBe("switch");
       expect(toggle.getAttribute("aria-checked")).toBe("true");
-      expect(section("启动").textContent).toContain("实例第一次启动时不显示 Minecraft 的讲述人与无障碍提示；只影响还没启动过的实例，需要讲述人时关掉");
+      expect(section("启动").textContent).toContain("实例第一次启动时不显示 Minecraft 的讲述人与无障碍提示；只影响还没启动过游戏的目录，未隔离的实例共用一个目录，需要讲述人时关掉");
     });
 
     it("关掉写入 skipAccessibilityOnboarding: false，再打开写回 true，控件、状态层与 mock 读回都跟着变", async () => {
