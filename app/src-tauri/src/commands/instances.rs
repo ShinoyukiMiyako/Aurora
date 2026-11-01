@@ -1296,7 +1296,7 @@ pub async fn list_instance_content(
 
 // ---------------------------------------------------------------- 侧栏固定
 
-/// 侧栏固定的实例（按顺序），已不存在的不返回。
+/// 侧栏固定的实例（按顺序），已不存在或不在实例库里的不返回。
 #[tauri::command]
 pub async fn get_sidebar_pins(facade: State<'_, Facade>) -> Result<Vec<String>, CommandError> {
     let aurora = facade.snapshot().await;

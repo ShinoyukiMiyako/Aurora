@@ -24,6 +24,7 @@ use aurora_instance::{
 };
 use aurora_launch::{QuickPlaySupport, quick_play_support};
 use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
@@ -50,6 +51,12 @@ const MAX_INHERIT_DEPTH: usize = 16;
 
 /// 改名时旧版本 JSON 先挪到这个后缀的文件，新 JSON 写成功、其余文件也改完才删，失败时据此还原。
 const RENAME_STAGED_SUFFIX: &str = concat!(".", aurora_base::app_slug!(), "-rename");
+
+/// 依赖版本记录的文件名，放在游戏目录的元数据目录下：换一个游戏目录就是另一批版本。
+const BASE_RECORD_FILE: &str = "base-versions.json";
+
+/// 依赖版本记录的读改写排队：并行的导入各记各的，不排队时后写的会盖掉先写的。
+static BASE_RECORD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 一个附属文件的读取结果。读不出来时带原因，不让一个坏文件拖垮整张列表，也不假装它是默认值。
 #[derive(Debug, Clone, PartialEq)]
@@ -164,13 +171,13 @@ impl Aurora {
     /// 与创建时间一次给齐。
     ///
     /// Mod 数只数 `mods/` 下的文件，不解析 jar；存档数只数 `saves/` 下的文件夹，不读 level.dat；
-    /// 版本 JSON 解析走进程内缓存，文件没变就不重读。只给别的实例当基底的加载器版本不列出。
+    /// 版本 JSON 解析走进程内缓存，文件没变就不重读。玩家没建过的依赖版本目录不列出。
     pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
         let mut scan = discover_versions(self.game_dir()).await?;
-        // 先算再隐藏：这两项要沿继承链走，隐藏的加载器版本可能正是链上的一环。
+        // 先算再隐藏：这两项要沿继承链走，隐藏的版本可能正是链上的一环。
         let javas = java_majors(&scan);
         let quick_plays = quick_play_supports(&scan);
-        hide_loader_bases(&mut scan).await;
+        hide_base_versions(self.game_dir(), &mut scan).await;
         let mut entries: Vec<Entry> = scan
             .versions
             .into_iter()
@@ -373,14 +380,22 @@ impl Aurora {
         pins_changed || was_selected || servers_changed
     }
 
-    /// 配置里固定的实例中当前仍然存在的那些，保持顺序。
+    /// 配置里固定的实例中当前仍在实例库里的那些，保持顺序。不列出的版本目录也不算：侧栏看不见它，它却占着名额，
+    /// 玩家就再也固定不满。
     pub async fn existing_sidebar_pins(&self) -> Result<Vec<String>> {
-        let names: HashSet<String> = self.instance_names().await?.into_iter().collect();
+        let mut scan = discover_versions(self.game_dir()).await?;
+        hide_base_versions(self.game_dir(), &mut scan).await;
+        let visible: HashSet<&str> = scan
+            .versions
+            .iter()
+            .map(|version| version.id.as_str())
+            .chain(scan.broken.iter().map(|broken| broken.id.as_str()))
+            .collect();
         Ok(self
             .config()
             .sidebar_pins
             .iter()
-            .filter(|pin| names.contains(*pin))
+            .filter(|pin| visible.contains(pin.as_str()))
             .cloned()
             .collect())
     }
@@ -725,47 +740,122 @@ impl Aurora {
     }
 }
 
-/// 从扫描结果里去掉只给别的实例当基底的加载器版本。实例库与安装目标都经这里取实例。
+/// 依赖版本记录：导入整合包时新落下的版本目录 id（原版与加载器版本）。
 ///
-/// 安装器把加载器装在自己的版本目录里（`neoforge-21.1.265`），这一层玩家没建过，列出来就像凭空多了一个实例。
-/// 这里只改这份结果：目录不删，继承链、依赖检查、实例占用与查重都不看它。原版基底不动，玩家能在它上面看到
-/// 正被哪个实例使用。
+/// 目录本身看不出是导入落下的还是别的启动器装的，版本 JSON 一模一样，只有落下的那一刻知道，所以当场记下。
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct BaseRecord {
+    versions: Vec<String>,
+}
+
+fn base_record_path(game_dir: &Path) -> PathBuf {
+    game_dir.join(AURORA_META_DIR).join(BASE_RECORD_FILE)
+}
+
+async fn read_base_record(game_dir: &Path) -> Result<BaseRecord> {
+    let path = base_record_path(game_dir);
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|source| CoreError::JsonFileInvalid { path, source }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BaseRecord::default()),
+        Err(source) => Err(aurora_base::Error::Io { path, source }.into()),
+    }
+}
+
+/// 改写记录。读不懂的旧内容作废重记：记录只管显示，不该让导入失败。
+async fn update_base_record(game_dir: &Path, change: impl FnOnce(&mut Vec<String>)) -> Result<()> {
+    let _turn = BASE_RECORD_LOCK.lock().await;
+    let mut record = match read_base_record(game_dir).await {
+        Err(CoreError::JsonFileInvalid { path, source }) => {
+            tracing::warn!(path = %path.display(), error = %source, "依赖版本记录读不懂，作废重记");
+            BaseRecord::default()
+        }
+        read => read?,
+    };
+    let before = record.versions.clone();
+    change(&mut record.versions);
+    if record.versions == before {
+        return Ok(());
+    }
+    let bytes = serde_json::to_vec_pretty(&record).map_err(CoreError::JsonSerialize)?;
+    aurora_base::fs::atomic_write(base_record_path(game_dir), &bytes).await?;
+    Ok(())
+}
+
+impl Aurora {
+    /// 记下导入落下的依赖版本目录。
+    pub(crate) async fn record_base_versions(&self, ids: &[String]) -> Result<()> {
+        update_base_record(self.game_dir(), |versions| {
+            for id in ids {
+                if !versions.contains(id) {
+                    versions.push(id.clone());
+                }
+            }
+        })
+        .await
+    }
+
+    /// 安装之后收回 `ids` 里目录没落下的：记录只管启动器落下的目录，日后别的启动器装出同名版本时，它是玩家的。
+    pub(crate) async fn forget_unlanded_base_versions(&self, ids: &[String]) -> Result<()> {
+        let mut unlanded = Vec::new();
+        for id in ids {
+            if !try_exists(&self.layout().version_dir(id)).await? {
+                unlanded.push(id);
+            }
+        }
+        update_base_record(self.game_dir(), |versions| {
+            versions.retain(|id| !unlanded.contains(&id));
+        })
+        .await
+    }
+}
+
+/// 从扫描结果里去掉玩家没建过的依赖版本目录，列出来它们就像凭空多了实例。实例库、安装目标与侧栏固定都经这里取实例。
 ///
-/// 没有实例在用的不隐藏：别的启动器的游戏目录里，这样的目录就是玩家在玩的版本。读不出来的也不隐藏：
-/// 宁可多列一个，也不把看不清的目录藏起来。
-pub(crate) async fn hide_loader_bases(scan: &mut VersionScan) {
-    let candidates: Vec<&DiscoveredVersion> = scan
+/// 两种目录算这一类：依赖版本记录里的，没人用了也算；继承着别的版本、又被别的实例继承的加载器版本。这里只改这份
+/// 结果：目录不删，继承链、依赖检查、实例占用与查重都不看它。
+///
+/// 记录里的目录缺版本 JSON 时一样隐藏：导入下载途中它就是这样，进程被杀后也会这样留下。记录读不出来时只有记录这
+/// 一条不生效，目录上有实例痕迹的不隐藏，痕迹读不出来的也不隐藏：宁可多列一个，也不把看不清的目录藏起来。
+pub(crate) async fn hide_base_versions(game_dir: &Path, scan: &mut VersionScan) {
+    let recorded: HashSet<String> = match read_base_record(game_dir).await {
+        Ok(record) => record.versions.into_iter().collect(),
+        Err(err) => {
+            let error = error_with_causes(&err);
+            tracing::warn!(%error, "依赖版本记录读不出来，记录里的版本照常列出");
+            HashSet::new()
+        }
+    };
+    let found = scan
         .versions
         .iter()
-        .filter(|version| is_natural_loader_version(version))
-        .collect();
-    if candidates.is_empty() {
-        return;
-    }
-    let packs = pack_loader_sources(scan).await;
+        .filter(|version| {
+            recorded.contains(&version.id)
+                || (is_natural_loader_version(version)
+                    && !dependents_in(scan, &version.id).is_empty())
+        })
+        .map(|version| (&version.id, &version.dir));
+    let broken = scan
+        .broken
+        .iter()
+        .filter(|broken| recorded.contains(&broken.id))
+        .map(|broken| (&broken.id, &broken.dir));
     let mut hidden = HashSet::new();
-    for version in candidates {
-        let copied_by_pack = version.json.inherits_from.as_deref().is_some_and(|base| {
-            packs
-                .iter()
-                .any(|(minecraft, loaders)| minecraft == base && *loaders == version.loaders)
-        });
-        if !copied_by_pack && dependents_in(scan, &version.id).is_empty() {
-            continue;
-        }
-        match has_instance_traces(&version.dir).await {
+    for (id, dir) in found.chain(broken) {
+        match has_instance_traces(dir).await {
             Ok(false) => {
-                hidden.insert(version.id.clone());
+                hidden.insert(id.clone());
             }
             Ok(true) => {}
             Err(err) => {
                 let error = error_with_causes(&err);
-                tracing::warn!(id = %version.id, %error, "读不出实例痕迹，加载器版本照常列出");
+                tracing::warn!(id, %error, "读不出实例痕迹，版本目录照常列出");
             }
         }
     }
     scan.versions
         .retain(|version| !hidden.contains(&version.id));
+    scan.broken.retain(|broken| !hidden.contains(&broken.id));
 }
 
 /// 版本目录是不是加载器安装器落下的样子：继承着别的版本，目录名里带着加载器的版本号
@@ -785,27 +875,9 @@ fn is_natural_loader_version(version: &DiscoveredVersion) -> bool {
         })
 }
 
-/// 导入出的整合包实例用的是哪个加载器版本：(原版 id, 加载器)。
-///
-/// 导入把加载器 JSON 复制成实例 JSON，`inheritsFrom` 指向原版，盘上没有从实例到加载器版本的引用，只能这样
-/// 对回去。原版 id 取整合包记录：重新安装加载器之后实例 JSON 是合并的，不再继承原版。
-async fn pack_loader_sources(scan: &VersionScan) -> Vec<(String, &[LoaderInfo])> {
-    let mut sources = Vec::new();
-    for version in scan.versions.iter().filter(|v| v.has_mod_loader()) {
-        match read_instance_modpack(&version.dir).await {
-            Ok(Some(pack)) => sources.push((pack.minecraft, version.loaders.as_slice())),
-            Ok(None) => {}
-            Err(err) => {
-                let error = error_with_causes(&err);
-                tracing::warn!(id = %version.id, %error, "整合包信息读不出来，认不出它用的加载器版本");
-            }
-        }
-    }
-    sources
-}
-
 /// 目录上有没有当实例用过的痕迹：启动器只往实例的元数据目录里写东西（设置、卷宗、会话日志、安装记录、未完成
-/// 标记），自带 `mods`、`saves` 时里面是玩家的东西。
+/// 标记），自带 `mods`、`saves` 时里面是玩家的东西。依赖版本记录里的名字也看它：原目录在启动器之外被删掉后，
+/// 玩家可以用这个名字建实例。
 async fn has_instance_traces(dir: &Path) -> Result<bool> {
     Ok(has_existing_mods_or_saves(dir).await? || try_exists(&dir.join(AURORA_META_DIR)).await?)
 }
@@ -1377,39 +1449,23 @@ pub(crate) mod tests {
         .unwrap();
     }
 
+    /// 写下依赖版本记录，内容与导入记下的同一形状。
+    pub(crate) fn write_base_record(game_dir: &Path, ids: &[&str]) {
+        let meta = game_dir.join(AURORA_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(
+            meta.join("base-versions.json"),
+            serde_json::to_vec(&json!({ "versions": ids })).unwrap(),
+        )
+        .unwrap();
+    }
+
     async fn listed_ids(aurora: &Aurora) -> Vec<String> {
         let list = aurora.list_instances().await.unwrap();
         list.into_iter().map(|instance| instance.id).collect()
     }
 
-    /// 导入 NeoForge 整合包后盘上的样子：实例 JSON 是加载器 JSON 的副本，继承原版，没有谁继承加载器版本。
-    /// 玩家只建了一个实例，列表里就只多这一个；原版基底照常列出，加载器版本的目录留着，名字也还占着。
-    #[tokio::test]
-    async fn natural_loader_version_behind_an_imported_pack_stays_out_of_the_list() {
-        let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
-        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
-        let natural = write_version(
-            &game,
-            NATURAL_NEOFORGE,
-            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
-        );
-        let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
-        write_pack_info(&pack, "1.21.1");
-
-        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "周末整合包"]);
-
-        assert!(natural.join(format!("{NATURAL_NEOFORGE}.json")).is_file());
-        let names = aurora.instance_names().await.unwrap();
-        assert!(
-            names.iter().any(|name| name == NATURAL_NEOFORGE),
-            "{names:?}"
-        );
-        let err = aurora
-            .check_new_instance_name(NATURAL_NEOFORGE)
-            .await
-            .unwrap_err();
+    fn assert_duplicate_name(err: &CoreError) {
         assert!(
             matches!(
                 err,
@@ -1422,9 +1478,60 @@ pub(crate) mod tests {
         );
     }
 
-    /// 整合包实例重新安装过加载器后版本 JSON 是合并的，不再继承原版；它仍是从这个加载器版本来的。
+    /// 导入 NeoForge 整合包后盘上的样子：原版与加载器版本是这次新落下的，都在记录里。玩家只建了一个实例，列表里
+    /// 就只有这一个；目录留着、名字占着，继承链与依赖检查照常算它们，实例的 Java 与直达方式穿过隐藏的原版算出来。
     #[tokio::test]
-    async fn natural_loader_version_stays_hidden_after_the_pack_reinstalls_its_loader() {
+    async fn recorded_base_versions_stay_out_of_the_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        let vanilla = write_version(&game, "1.21.1", &quick_play_vanilla_json("1.21.1"));
+        let natural = write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
+        write_pack_info(&pack, "1.21.1");
+        write_base_record(&game, &["1.21.1", NATURAL_NEOFORGE]);
+
+        let list = aurora.list_instances().await.unwrap();
+        let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["周末整合包"]);
+        let InstanceVersion::Ready(ready) = &list[0].version else {
+            panic!("整合包实例应可用：{:?}", list[0].version);
+        };
+        assert_eq!(ready.java_major, Some(21));
+        assert_eq!(
+            ready.quick_play,
+            Some(QuickPlaySupport {
+                singleplayer: true,
+                multiplayer: true,
+            })
+        );
+
+        assert!(vanilla.join("1.21.1.json").is_file());
+        assert!(natural.join(format!("{NATURAL_NEOFORGE}.json")).is_file());
+        assert_eq!(
+            aurora.instance_names().await.unwrap(),
+            ["1.21.1", NATURAL_NEOFORGE, "周末整合包"]
+        );
+        for taken in ["1.21.1", NATURAL_NEOFORGE] {
+            let err = aurora.check_new_instance_name(taken).await.unwrap_err();
+            assert_duplicate_name(&err);
+        }
+        assert_eq!(
+            aurora.inheritance_chain("周末整合包").await.unwrap(),
+            ["1.21.1"]
+        );
+        let preview = aurora.deletion_preview("1.21.1").await.unwrap();
+        assert_eq!(preview.dependents, [NATURAL_NEOFORGE, "周末整合包"]);
+    }
+
+    /// 别的启动器的游戏目录里已有同款原版与加载器版本：导入时目录原本就在，不进记录，它们是玩家的，整合包用上它们
+    /// 也不藏，整合包删掉后还在。
+    #[tokio::test]
+    async fn versions_that_were_already_there_stay_listed_next_to_a_pack_using_them() {
         let tmp = tempfile::tempdir().unwrap();
         let aurora = aurora_at(tmp.path());
         let game = aurora.game_dir().to_path_buf();
@@ -1434,14 +1541,18 @@ pub(crate) mod tests {
             NATURAL_NEOFORGE,
             &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
         );
-        let merged = r#"{"id":"周末整合包","clientVersion":"1.21.1","type":"release",
-            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
-            "arguments":{"game":["--fml.neoForgeVersion","21.1.265"],"jvm":[]},
-            "libraries":[{"name":"net.neoforged:bus:8.0.5"}]}"#;
-        let pack = write_version(&game, "周末整合包", merged);
+        let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
         write_pack_info(&pack, "1.21.1");
+        write_base_record(&game, &[]);
 
-        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "周末整合包"]);
+        assert_eq!(
+            listed_ids(&aurora).await,
+            ["1.21.1", NATURAL_NEOFORGE, "周末整合包"]
+        );
+
+        std::fs::remove_dir_all(&pack).unwrap();
+
+        assert_eq!(listed_ids(&aurora).await, ["1.21.1", NATURAL_NEOFORGE]);
     }
 
     /// 被继承的自然加载器版本不列出，但它仍是继承链上的一环：Java 与直达方式穿过它算到原版，删除与改名
@@ -1564,7 +1675,7 @@ pub(crate) mod tests {
             ),
         );
         write_version(&game, "我的存档版", &fabric_json("我的存档版", "1.21.1"));
-        // 整合包只认出自己用的那个加载器版本：同一原版上的别的加载器、别的原版上的同款加载器都不是。
+        // 整合包本身不藏任何目录，隐藏只看记录与继承。
         let pack = write_version(&game, "同原版的包", &neoforge_json("同原版的包", "1.21.1"));
         write_pack_info(&pack, "1.21.1");
         let pack = write_version(
@@ -1605,9 +1716,9 @@ pub(crate) mod tests {
         );
     }
 
-    /// 不再有实例用它时它回到列表：这时它只是一个完整可用的版本，玩家也才有地方删掉它。
+    /// 最后一个用它们的整合包删掉后，记录里的版本也不回到列表：它们是导入落下的，玩家没建过。
     #[tokio::test]
-    async fn natural_loader_version_returns_once_nothing_uses_it() {
+    async fn recorded_versions_stay_hidden_once_nothing_uses_them() {
         let tmp = tempfile::tempdir().unwrap();
         let aurora = aurora_at(tmp.path());
         let game = aurora.game_dir().to_path_buf();
@@ -1619,16 +1730,97 @@ pub(crate) mod tests {
         );
         let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
         write_pack_info(&pack, "1.21.1");
-        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "周末整合包"]);
+        write_base_record(&game, &["1.21.1", NATURAL_NEOFORGE]);
+        assert_eq!(listed_ids(&aurora).await, ["周末整合包"]);
 
         std::fs::remove_dir_all(&pack).unwrap();
 
-        assert_eq!(listed_ids(&aurora).await, ["1.21.1", NATURAL_NEOFORGE]);
+        assert!(listed_ids(&aurora).await.is_empty());
     }
 
-    /// 整合包记录读不懂时认不出它从哪来：宁可多列一个，也不把看不清的目录藏起来，列表照常返回。
+    /// 导入下载途中原版目录还没有版本 JSON，进程被杀后也会这样留下：记录里的目录不因此露出来，不在记录里的
+    /// 照常列成损坏。
     #[tokio::test]
-    async fn unreadable_pack_record_never_hides_a_loader_version() {
+    async fn recorded_directory_without_a_version_json_stays_hidden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        for dir in ["正在下载的原版", "别的坏目录"] {
+            std::fs::create_dir_all(game.join("versions").join(dir)).unwrap();
+        }
+        write_base_record(&game, &["正在下载的原版"]);
+
+        assert_eq!(listed_ids(&aurora).await, ["别的坏目录"]);
+    }
+
+    /// 记录里的目录在启动器之外被删掉后，玩家可以用这个名字建实例：目录上有实例痕迹，它就是实例，不隐藏。
+    #[tokio::test]
+    async fn instance_under_a_recorded_name_is_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        let built = write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        aurora_instance::InstallRecordStore::for_version_dir(&built)
+            .save(&InstallSpec {
+                mc_version: "1.21.1".into(),
+                loader: None,
+                loader_version: None,
+                use_template: false,
+            })
+            .await
+            .unwrap();
+        write_base_record(&game, &["1.21.1"]);
+
+        assert_eq!(listed_ids(&aurora).await, ["1.21.1"]);
+    }
+
+    /// 并行的导入各记各的，谁都不能盖掉别人记下的 id。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_records_keep_every_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let mut ids: Vec<String> = (0..16).map(|i| format!("base-{i:02}")).collect();
+        let mut set = JoinSet::new();
+        for id in &ids {
+            let (aurora, id) = (aurora.clone(), id.clone());
+            set.spawn(async move { aurora.record_base_versions(&[id]).await });
+        }
+        while let Some(joined) = set.join_next().await {
+            joined.unwrap().unwrap();
+        }
+
+        let mut kept = read_base_record(aurora.game_dir()).await.unwrap().versions;
+        kept.sort();
+        ids.sort();
+        assert_eq!(kept, ids);
+    }
+
+    /// 记录读不懂时导入不该失败：作废重记，这次记下的目录照样隐藏，同一个 id 只记一次。
+    #[tokio::test]
+    async fn unreadable_base_record_is_rewritten_by_the_next_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        let meta = game.join(AURORA_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("base-versions.json"), b"{oops").unwrap();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        write_version(&game, "1.20.1", &vanilla_json("1.20.1"));
+
+        for _ in 0..2 {
+            aurora
+                .record_base_versions(&["1.21.1".to_owned()])
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(listed_ids(&aurora).await, ["1.20.1"]);
+        assert_eq!(read_base_record(&game).await.unwrap().versions, ["1.21.1"]);
+    }
+
+    /// 记录读不懂时认不出哪些是依赖版本：宁可多列一个，也不把看不清的目录藏起来；继承规则不看记录，列表照常返回。
+    #[tokio::test]
+    async fn unreadable_base_record_hides_nothing_of_its_own() {
         let tmp = tempfile::tempdir().unwrap();
         let aurora = aurora_at(tmp.path());
         let game = aurora.game_dir().to_path_buf();
@@ -1638,15 +1830,16 @@ pub(crate) mod tests {
             NATURAL_NEOFORGE,
             &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
         );
-        let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
-        let meta = pack.join(AURORA_META_DIR);
-        std::fs::create_dir_all(&meta).unwrap();
-        std::fs::write(meta.join("modpack.json"), b"{oops").unwrap();
-
-        assert_eq!(
-            listed_ids(&aurora).await,
-            ["1.21.1", NATURAL_NEOFORGE, "周末整合包"]
+        write_version(
+            &game,
+            "光影叠加",
+            &format!(r#"{{"id":"光影叠加","inheritsFrom":"{NATURAL_NEOFORGE}","type":"release"}}"#),
         );
+        let meta = game.join(AURORA_META_DIR);
+        std::fs::create_dir_all(&meta).unwrap();
+        std::fs::write(meta.join("base-versions.json"), b"{oops").unwrap();
+
+        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "光影叠加"]);
     }
 
     #[test]
@@ -2176,6 +2369,42 @@ pub(crate) mod tests {
             aurora.existing_sidebar_pins().await.unwrap(),
             vec!["i2".to_owned(), "i1".to_owned()]
         );
+    }
+
+    /// 固定过的目录后来不列出了：侧栏看不见它，它也不该占名额。损坏的实例照常列在实例库里，固定着就还算。
+    #[tokio::test]
+    async fn hidden_versions_take_no_sidebar_pin_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        write_version(
+            &game,
+            NATURAL_NEOFORGE,
+            &neoforge_json(NATURAL_NEOFORGE, "1.21.1"),
+        );
+        write_version(
+            &game,
+            "光影叠加",
+            &format!(r#"{{"id":"光影叠加","inheritsFrom":"{NATURAL_NEOFORGE}","type":"release"}}"#),
+        );
+        write_base_record(&game, &["1.21.1"]);
+        std::fs::create_dir_all(game.join("versions").join("坏的")).unwrap();
+        let visible: Vec<String> = (1..=3).map(|i| format!("i{i}")).collect();
+        for id in &visible {
+            write_version(&game, id, &vanilla_json("1.21.1"));
+        }
+        let mut pins = vec!["1.21.1".to_owned(), NATURAL_NEOFORGE.to_owned()];
+        pins.extend(visible.iter().cloned());
+        pins.push("坏的".to_owned());
+        pins.push("光影叠加".to_owned());
+        aurora.set_sidebar_pins(pins);
+
+        let existing = aurora.existing_sidebar_pins().await.unwrap();
+
+        assert_eq!(existing, ["i1", "i2", "i3", "坏的", "光影叠加"]);
+        assert_eq!(existing.len(), MAX_SIDEBAR_PINS);
+        aurora.validate_sidebar_pins(&existing).await.unwrap();
     }
 
     #[tokio::test]
