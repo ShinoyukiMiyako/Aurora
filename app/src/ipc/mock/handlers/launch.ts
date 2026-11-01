@@ -369,8 +369,6 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   const offlineFallback = boolArg("launch_game", args, "offlineFallback");
   const quickPlay = quickPlayArg(args);
   if ((uuid === null) === (name === null)) throw new IpcError("invalid_argument", "启动需提供 account_uuid 与 offline_name 二者之一");
-  if (quickPlay !== null) checkQuickPlay(versionId, quickPlay);
-  lastQuickPlay = quickPlay;
   if (occupant) throw busy(occupant);
   // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），共用存档再查别的实例
   // 有没有在备份，最后登记任务。
@@ -382,15 +380,18 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
     hold.release();
     throw error;
   }
-  // 后端在占住槽与实例之后、开局取账户身份时才判定（并消耗那条失败记录），被拒就全部放开：占用失败的降级不能把记录用掉
+  // 后端在占住槽与实例之后、开局取账户身份时才判定（并消耗那条失败记录），被拒就全部放开：占用失败的降级不能把记录用掉。
+  // 直达目标在其后的「校验游戏文件」阶段才查，所以槽被占、实例在忙时报的是 busy 与 instance_busy，而不是直达的错误。
   let offlineAs: string | null;
   try {
     offlineAs = offlineFallback ? admitOfflineFallback(uuid, name) : null;
+    if (quickPlay !== null) checkQuickPlay(versionId, quickPlay);
   } catch (error) {
     endMockTask(taskId);
     hold.release();
     throw error;
   }
+  lastQuickPlay = quickPlay;
   const startedAt = Date.now();
   // 与后端一样取启动这一刻的游戏目录（启动用的是那一刻的门面快照）。
   const gameDir = mockConfig().game_dir;

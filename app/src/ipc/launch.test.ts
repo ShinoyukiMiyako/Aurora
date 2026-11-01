@@ -357,7 +357,7 @@ describe("以离线方式进单人 mock", () => {
     expect(lastMockQuickPlay()).toBeNull();
   });
 
-  it("直达的三项检查都在占游戏槽之前：版本不支持、世界不在、地址不合法各报各的码，之后照常能启动", async () => {
+  it("直达的三项检查：版本不支持、世界不在、地址不合法各报各的码，之后照常能启动", async () => {
     const unsupported = await rejection(launchGame({ ...offline("RLCraft", "t-1"), quickPlay: { kind: "singleplayer", world_dir_name: "x" } }));
     expect(unsupported.code).toBe(QUICK_PLAY_UNSUPPORTED_CODE);
     expect(unsupported.detail).toEqual({ version_id: "RLCraft", mode: "singleplayer" });
@@ -373,6 +373,28 @@ describe("以离线方式进单人 mock", () => {
     expect(broken.detail).toEqual({ version_id: "没装完", mode: "multiplayer" });
     expect(lastMockQuickPlay()).toBeNull();
     expect(await launchGame(offline("1.21", "t-ok"))).toEqual({ pid: 4242, offline: false });
+  });
+
+  it("直达检查与后端同序，在占住游戏槽、实例并登记任务之后：槽被占报 busy、实例在忙报 instance_busy；检查没过时全部放开", async () => {
+    const unsupportedWorld = { kind: "singleplayer", world_dir_name: "x" } as const;
+    await launchGame(offline("1.21", "t-run"));
+    const slotTaken = await rejection(launchGame({ ...offline("RLCraft", "t-1"), quickPlay: unsupportedWorld }));
+    expect(slotTaken.code).toBe(BUSY_ERROR_CODE);
+    await stopGame();
+
+    const installing = acquireMockInstance("RLCraft", "installing");
+    const held = await rejection(launchGame({ ...offline("RLCraft", "t-2"), quickPlay: unsupportedWorld }));
+    expect(held).toMatchObject({ code: "instance_busy", detail: { id: "RLCraft", activity: "installing" } });
+    installing.release();
+    expect(lastMockQuickPlay()).toBeNull();
+
+    const unsupported = await rejection(launchGame({ ...offline("RLCraft", "t-3"), quickPlay: unsupportedWorld }));
+    expect(unsupported.code).toBe(QUICK_PLAY_UNSUPPORTED_CODE);
+    expect(lastMockQuickPlay()).toBeNull();
+    // 任务已结束、实例与游戏槽都已放开
+    expect(await cancelTask("t-3")).toBe(false);
+    expect(() => acquireMockInstance("RLCraft", "renaming").release()).not.toThrow();
+    expect(await launchGame(offline("RLCraft", "t-ok"))).toEqual({ pid: 4242, offline: false });
   });
 
   it("quickPlay 形状不对是 Tauri 自己的参数错误；缺键等于普通启动", async () => {
