@@ -1,0 +1,181 @@
+/*
+ * 一屏放下全部内容，长的两块各自滚动。不让主列滚：第三方清单有几百行，商标声明会被顶到看不见的地方；
+ * 而且主列在拖动区里，按住它的滚动条拖的是窗口。
+ */
+.legal {
+  display: grid;
+  grid-template-rows: minmax(0, 3fr) auto minmax(0, 2fr) auto;
+  gap: var(--sk-space-10);
+  height: 100%;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  min-height: 0;
+}
+
+.heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sk-space-8);
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.headingNote {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-body);
+  color: var(--sk-text-2);
+}
+
+.count {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  font-weight: var(--sk-w-mono);
+  color: var(--sk-text-2);
+}
+
+.licenseText,
+.packages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  user-select: text;
+}
+
+/* 两块通栏，贴着主列的裁切边，外扩的聚焦环左右会被裁掉，所以用全局的描边并收到元素内侧 */
+.licenseText:focus-visible,
+.packages:focus-visible {
+  outline-offset: calc(var(--sk-space-2) * -1);
+}
+
+.licenseText {
+  margin: 0;
+  padding: var(--sk-space-10) var(--sk-space-12);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pending {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.failed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-danger);
+}
+
+.failedTitle {
+  margin: 0;
+}
+
+.failedDetail {
+  margin: 0;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  overflow-wrap: anywhere;
+}
+
+/* 左边留出按钮聚焦环的宽度，同样是怕被主列裁掉 */
+.source {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  padding-left: var(--sk-space-4);
+}
+
+.sourceUrl {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.packages {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: var(--sk-space-2) var(--sk-space-12);
+  list-style: none;
+}
+
+/*
+ * 名称占剩余宽度，至少留 16 个字符；版本与许可证按内容定宽，但分别不超过整行的 25% 与 40%。
+ * 上限不能省：按内容定宽的列先于弹性列分到空间，一长串许可证表达式会把名称列挤成 0 宽。
+ */
+.package {
+  display: grid;
+  flex: none;
+  grid-template-columns: minmax(16ch, 1fr) fit-content(25%) fit-content(40%);
+  align-items: baseline;
+  gap: var(--sk-space-12);
+  padding: var(--sk-space-4) 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.package + .package {
+  border-top: 1px solid var(--sk-line-2);
+}
+
+.packageName {
+  overflow: hidden;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.packageVersion {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* 先在空格处换行；单个记号比整列还宽时才在记号中间断开 */
+.packageLicense {
+  color: var(--sk-text-2);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.trademark {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
