@@ -1,5 +1,6 @@
-// 樱花徽记与字标。徽记是五瓣樱花（每瓣带樱花特有的尖端缺刻），全部代码绘制，不使用任何商标图形。
-// 徽记按显示尺寸分三种形态：≥ 28 完整形（渐变花瓣、花心、花蕊）；20-27 简化形（平涂花瓣、镂空花心）；
+// 字标组合 Logo 与五瓣樱花 SakuraMark。品牌图形是 PetalMark 像素花瓣，Logo 用它；SakuraMark 只留给 Spinner 与 BlossomBranch。
+// SakuraMark 每瓣带樱花特有的尖端缺刻，全部代码绘制，不使用任何商标图形。
+// 它按显示尺寸分三种形态：≥ 28 完整形（渐变花瓣、花心、花蕊）；20-27 简化形（平涂花瓣、镂空花心）；
 // 16 只用逐像素母版——矢量五瓣在 16 px 会糊成一团。17-19 px 与 16 px 以下没有可用形态，直接抛错。
 // mono 是单色形：花瓣与镂空花心随 currentColor 走，加载图形用它，任何尺寸都画矢量（像素图旋转会抖）。
 
@@ -7,6 +8,7 @@ import { useId } from "react";
 import { APP_NAME_EN } from "../lib/app-info";
 import { cx } from "../lib/util";
 import styles from "./Logo.module.css";
+import { PetalMark } from "./PetalMark";
 
 /** 一片花瓣：瓣根半径 1.2，瓣尖半径 13.6，缺刻底在半径 11.6。坐标原点为花心，第一瓣朝正上。 */
 const PETAL = "M0 -1.2 C -4.4 -4.4 -6.4 -9.6 -3.6 -13.6 L 0 -11.6 L 3.6 -13.6 C 6.4 -9.6 4.4 -4.4 0 -1.2 Z";
@@ -122,7 +124,7 @@ export function SakuraMark({ size, mono = false, className }: SakuraMarkProps) {
 export type LogoSize = 20 | 28;
 
 export interface LogoProps {
-  /** 徽记边长：20 为 S 档（简化形），28 为 M 档（完整形）。 */
+  /** 徽记边长：20 为 S 档，28 为 M 档。 */
   size: LogoSize;
   className?: string;
 }
@@ -131,7 +133,7 @@ export interface LogoProps {
 export function Logo({ size, className }: LogoProps) {
   return (
     <span className={cx(styles.logo, className)} style={{ gap: Math.round(size * 0.28) }}>
-      <SakuraMark size={size} />
+      <PetalMark size={size} />
       <span className={styles.wordmark} style={{ fontSize: Math.round(size * 0.68) }}>
         {APP_NAME_EN}
       </span>

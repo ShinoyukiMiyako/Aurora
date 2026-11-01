@@ -1174,6 +1174,7 @@ describe("设置页：关于与启动器更新", () => {
     await mount("about");
     expect(text()).toContain("当前是 0.1.0");
     expect(navItem("关于").textContent).toContain("版本 0.1.0");
+    expect(document.querySelector<HTMLCanvasElement>('[class*="brandMark"] canvas')?.style.width).toBe("48px");
     await click(button("检查更新"));
     expect(callsOf(ipc, "check_update")).toHaveLength(1);
     expect(text()).toContain("有新版本 0.2.0");
