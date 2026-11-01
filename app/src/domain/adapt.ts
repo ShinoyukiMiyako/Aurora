@@ -185,6 +185,11 @@ export function releaseTypeFromDto(value: string): ReleaseType {
   return RELEASE_TYPES[value];
 }
 
+/** 版本 JSON 的 type 由写它的启动器决定，什么值都可能有；认不出就当不知道，一个实例不该让整张列表适配失败。 */
+function installedReleaseType(value: string): ReleaseType | null {
+  return Object.hasOwn(RELEASE_TYPES, value) ? RELEASE_TYPES[value] : null;
+}
+
 export function incompleteFromDto(dto: IncompleteDto): InstanceIncomplete {
   return {
     kind: oneOf(dto.kind, ["install", "repair", "modpack", "unknown"] as const, "未完成标记类型"),
@@ -245,7 +250,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     loader: primary === undefined ? "vanilla" : primary.kind,
     loaderVersion: primary === undefined || primary.found === undefined ? null : primary.found.version,
     extraLoaders,
-    releaseType: dto.release_type === null ? null : releaseTypeFromDto(dto.release_type),
+    releaseType: dto.release_type === null ? null : installedReleaseType(dto.release_type),
     javaMajor: dto.java_major,
     quickPlay: dto.quick_play === null ? null : { singleplayer: dto.quick_play.singleplayer, multiplayer: dto.quick_play.multiplayer },
     description: dto.description,
