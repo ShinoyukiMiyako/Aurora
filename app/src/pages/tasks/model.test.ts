@@ -315,6 +315,19 @@ describe("取消前的确认", () => {
     expect(cancelAllConfirm([task("a", { status: "running" }), task("b")]).body).toBe("已下载的部分会被丢弃。");
     expect(cancelAllConfirm([instanceTask("repair_instance", "running"), task("b")]).body).toBe("正在修复的 1 个实例会保持文件不完整。");
   });
+
+  it("全部取消：队列里只有本地任务时不提下载，取消键写「不取消」；混着下载类仍写「继续下载」", () => {
+    const local = [task("e", { kind: "modpack_export", status: "running" }), task("w", { kind: "world_backup", status: "running" })];
+    expect(cancelAllConfirm(local)).toEqual({
+      title: "取消全部 2 个任务？",
+      body: "还没完成的部分会被丢弃。",
+      confirmLabel: "全部取消",
+      cancelLabel: "不取消",
+      tone: "danger",
+    });
+    expect(cancelAllConfirm([...local, task("m", { kind: "mod" })])).toMatchObject({ body: "已下载的部分会被丢弃。", cancelLabel: "继续下载" });
+    expect(cancelAllConfirm([task("r", { kind: "world_restore" })])).toMatchObject({ body: "还没完成的部分会被丢弃。", cancelLabel: "不取消" });
+  });
 });
 
 describe("任务表的结构比较", () => {

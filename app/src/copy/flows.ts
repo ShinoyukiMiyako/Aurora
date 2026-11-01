@@ -671,13 +671,17 @@ export const TASK_STATUS_LABEL: Readonly<Record<TaskStatus, string>> = {
   cancelled: "已取消",
 };
 
-/** 导出整合包在运行时是在本地打包，不是在下载。 */
-const EXPORT_RUNNING_LABEL = "打包中";
+/** 这几类运行时在本地读写，不是在下载。 */
+const LOCAL_RUNNING_LABEL: Readonly<Partial<Record<TaskKind, string>>> = {
+  modpack_export: "打包中",
+  world_backup: "打包中",
+  world_restore: "恢复中",
+};
 
 /** 一个任务此刻的状态标签：显示任务状态的地方都用它，不直接取 TASK_STATUS_LABEL。 */
 export function taskStatusLabel(task: { kind: TaskKind; status: TaskStatus }): string {
-  if (task.status === "running" && task.kind === "modpack_export") return EXPORT_RUNNING_LABEL;
-  return TASK_STATUS_LABEL[task.status];
+  const local = task.status === "running" ? LOCAL_RUNNING_LABEL[task.kind] : undefined;
+  return local === undefined ? TASK_STATUS_LABEL[task.status] : local;
 }
 
 /** 任务类别标签。修复任务补的是游戏文件，归在「游戏」名下；备份、导出与恢复都归在「存档」名下。 */
@@ -978,6 +982,8 @@ function quoted(text: string): string {
 export const CONFIRM_COPY = {
   cancel: "取消",
   keepDownloading: "继续下载",
+  /** 被取消的都不是下载时的取消键：写「继续下载」就说错了在做的事。 */
+  keepTasks: "不取消",
   stopGame: (name: string) => ({
     title: "结束游戏？",
     body: `会直接结束「${name}」的游戏进程，没保存的进度可能丢失。正常退出请在游戏菜单里保存并退出。`,
@@ -1003,13 +1009,13 @@ export const CONFIRM_COPY = {
     body: `「${instance}」会停在文件不完整的状态，之后可以再点「修复实例」。`,
     confirmLabel: "取消任务",
   }),
-  cancelAll: (count: number, creating: number, repairing: number) => {
+  cancelAll: (count: number, creating: number, repairing: number, downloads: number) => {
     const parts: string[] = [];
     if (creating > 0) parts.push(`正在新建的 ${creating} 个实例会被删除`);
     if (repairing > 0) parts.push(`正在修复的 ${repairing} 个实例会保持文件不完整`);
     return {
       title: `取消全部 ${count} 个任务？`,
-      body: parts.length > 0 ? `${parts.join("，")}。` : "已下载的部分会被丢弃。",
+      body: parts.length > 0 ? `${parts.join("，")}。` : downloads > 0 ? "已下载的部分会被丢弃。" : "还没完成的部分会被丢弃。",
       confirmLabel: "全部取消",
     };
   },
@@ -1021,6 +1027,7 @@ export const CONFIRM_COPY = {
   }),
   closeWithSession: `游戏会继续运行，但之后的日志和崩溃诊断不会被记录。`,
   closeWithTasks: (count: number) => `还有 ${count} 个下载没完成，关闭后会中断，下次打开可以重试。`,
+  closeWithBackups: (count: number) => `有 ${count} 个实例正在自动备份存档，关闭后这次备份不会完成。`,
   closeTitle: `关闭${APP_NAME}？`,
   closeConfirm: `关闭${APP_NAME}`,
 } as const;

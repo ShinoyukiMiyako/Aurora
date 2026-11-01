@@ -416,5 +416,6 @@ export function cancelConfirm(task: Task): CancelConfirm | null {
 export function cancelAllConfirm(active: readonly Task[]): CancelConfirm {
   const creating = active.filter((t) => CREATE_COMMANDS.has(t.spec.command)).length;
   const repairing = active.filter((t) => t.spec.command === REPAIR_COMMAND).length;
-  return { ...CONFIRM_COPY.cancelAll(active.length, creating, repairing), cancelLabel: CONFIRM_COPY.keepDownloading, tone: "danger" };
+  const downloads = active.filter((t) => DOWNLOADS_WHEN_RUNNING[t.kind]).length;
+  return { ...CONFIRM_COPY.cancelAll(active.length, creating, repairing, downloads), cancelLabel: downloads > 0 ? CONFIRM_COPY.keepDownloading : CONFIRM_COPY.keepTasks, tone: "danger" };
 }

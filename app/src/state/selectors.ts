@@ -120,7 +120,12 @@ export function usedAuthServers(state: LauncherState, except: readonly string[])
   return servers.slice(0, USED_AUTH_SERVERS_LIMIT);
 }
 
-/** 有活动会话或排队、进行中的任务时，关闭窗口要先确认。 */
-export function closeNeedsConfirm(state: LauncherState): { session: boolean; tasks: number } {
-  return { session: busyInstanceId(state) !== null, tasks: activeTasks(state).length };
+/**
+ * 有活动会话、排队或进行中的任务、或自动备份在跑时，关闭窗口要先确认。
+ * 自动备份是后端在游戏退出后直接跑的，不在任务表里，只能看实例报的 backing_up；手动备份也报它，已经算在任务里，不重复数。
+ */
+export function closeNeedsConfirm(state: LauncherState): { session: boolean; tasks: number; backups: number } {
+  const tasks = activeTasks(state);
+  const backups = state.instances.filter((inst) => inst.activity === "backing_up" && !tasks.some((t) => t.instanceId === inst.id)).length;
+  return { session: busyInstanceId(state) !== null, tasks: tasks.length, backups };
 }

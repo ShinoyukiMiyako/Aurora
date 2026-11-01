@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -150,6 +150,18 @@ describe("取消实例级任务的确认", () => {
     expect(copy.body).toBe("「生存」会停在文件不完整的状态，之后可以再点「修复实例」。");
     expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.createTitle("1.21.1", "vanilla", null), "周末生存").title).toBe("取消「安装 1.21.1」？");
     expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.modpackTitle("RLCraft"), "RLCraft").title).toBe("取消「导入整合包 RLCraft」？");
+  });
+});
+
+describe("任务状态标签", () => {
+  it("运行中的本地任务按实际在做的事写，不说成下载；其余状态与下载类任务照状态表", () => {
+    expect(taskStatusLabel({ kind: "world_backup", status: "running" })).toBe("打包中");
+    expect(taskStatusLabel({ kind: "modpack_export", status: "running" })).toBe("打包中");
+    expect(taskStatusLabel({ kind: "world_restore", status: "running" })).toBe("恢复中");
+    expect(taskStatusLabel({ kind: "game", status: "running" })).toBe("下载中");
+    expect(taskStatusLabel({ kind: "repair", status: "running" })).toBe("下载中");
+    expect(taskStatusLabel({ kind: "world_backup", status: "queued" })).toBe("排队中");
+    expect(taskStatusLabel({ kind: "world_restore", status: "failed" })).toBe("失败");
   });
 });
 
