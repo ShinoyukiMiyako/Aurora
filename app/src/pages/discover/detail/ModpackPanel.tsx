@@ -84,6 +84,20 @@ function summaryErrorText(error: Error): string {
   return record.code === "curseforge_key_rejected" ? taskFailureReason(record) : record.message;
 }
 
+/** 摘要因整合包文件本身不允许启动器下载而读不出来：重试还是这个结果，手动下载走安装失败后的清单。 */
+function summaryBlocked(summary: ResourceResult<ModpackSummaryDto>): boolean {
+  return summary.status === "error" && errorRecord(summary.error).code === "distribution_blocked";
+}
+
+/**
+ * 要不要提前说明整合包文件得手动下载。工程标记只是工程级的默认说法：这个版本的摘要读到了就说明文件拿得到，
+ * 摘要报受限时不管标记怎么写都算；摘要没到时先按标记说。这里不禁用安装：点了才有清单，手动下载走的是这条路。
+ */
+function packFileBlocked(detail: ProjectDetail, summary: ResourceResult<ModpackSummaryDto>): boolean {
+  if (summary.status === "ready") return false;
+  return !detail.distribution_allowed || summaryBlocked(summary);
+}
+
 /** 这个实例最近一次导入任务。 */
 function importTask(tasks: readonly Task[], instanceId: string): Task | null {
   let latest: Task | null = null;
@@ -300,7 +314,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         </Callout>
       )}
       {progress === null && versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
-      {progress === null && summary.status === "error" && (
+      {progress === null && packFileBlocked(detail, summary) && <Callout tone="warn">{MODPACK_COPY.packBlocked}</Callout>}
+      {progress === null && summary.status === "error" && !summaryBlocked(summary) && (
         <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={summary.reload}>{SEARCH_COPY.retry}</Button>}>
           <span className={styles.errorTitle}>{MODPACK_COPY.summaryFailed}</span>
           <span className={styles.errorText}>{summaryErrorText(summary.error)}</span>

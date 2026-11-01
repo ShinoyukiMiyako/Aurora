@@ -201,6 +201,7 @@ export const MODPACK_COPY = {
   remoteFiles: (n: number) => `${n} 个文件需要下载`,
   summaryLoading: "正在读取整合包清单…",
   summaryFailed: "整合包清单没能提前读出来，Mod 数和下载大小要到导入时才知道",
+  packBlocked: "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。",
   duplicate: (n: number, first: string) => `你已经有 ${n} 个来自这个整合包的实例（「${first}」），再装一次会得到一个独立的新实例。`,
   overrides: (n: number, bytes: number) => `包内自带 ${n} 个文件 · ${formatBytes(bytes)}`,
   memory: "内存跟随全局设置",

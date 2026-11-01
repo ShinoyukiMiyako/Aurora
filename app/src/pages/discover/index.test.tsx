@@ -1658,6 +1658,91 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "恢复联网后再安装"]);
   });
 
+  describe("整合包本体要手动下载时的提前说明", () => {
+    const NOTE = "作者不允许启动器直接下载这个整合包。开始安装后会列出要到 CurseForge 网页手动下载的文件。";
+    const SUMMARY_FAILED = "整合包清单没能提前读出来";
+    const BODY = {
+      project_id: 700,
+      file_id: 7001,
+      file_name: "生存 2.0.0.zip",
+      web_url: "https://www.curseforge.com/minecraft/modpacks/survival/files/7001",
+      destination: "生存 2.0.0.zip",
+      sha1: "3f786850e387550fdab836ed7e6dc881de23001b",
+      fingerprint: 0,
+      size: 2048,
+    };
+
+    async function openPack(allowed: boolean, summary: () => unknown) {
+      const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
+      const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+      pages = () => result([pack]);
+      ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v, distribution_allowed: allowed }));
+      ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+      ipc.overrides.set("summarize_platform_modpack", summary);
+      await mount();
+      act(() => card("生存").click());
+      await flush();
+    }
+
+    const blockedSummary = async () => {
+      const { IpcError } = await import("../../ipc/errors");
+      throw new IpcError("distribution_blocked", "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：生存 2.0.0.zip", { files: [BODY] });
+    };
+
+    it("摘要报本体受限：只说要手动下载，不当成清单读不出来，也不给重试；安装照常能点，点了走手动下载", async () => {
+      await openPack(false, blockedSummary);
+      expect(dialog().textContent).toContain(NOTE);
+      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+      expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "重试")).toBe(false);
+
+      const { IpcError } = await import("../../ipc/errors");
+      ipc.overrides.set("install_modpack", () => {
+        throw new IpcError("distribution_blocked", "原文", { files: [BODY] });
+      });
+      await clickIn(dialog(), "安装为新实例");
+      expect(dialog().textContent).toContain("没装成：有 1 个文件需要到 CurseForge 网页手动下载");
+      expect(dialog().textContent).not.toContain(NOTE);
+      expect(buttonByText("查看这些文件", dialog())).toBeDefined();
+    });
+
+    it("工程允许下载、这个版本的本体受限：以摘要为准，同样提前说明", async () => {
+      await openPack(true, blockedSummary);
+      expect(dialog().textContent).toContain(NOTE);
+      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+    });
+
+    it("工程标着不允许、摘要还没到：先按工程标记说明", async () => {
+      await openPack(false, () => new Promise(() => {}));
+      expect(dialog().textContent).toContain(NOTE);
+    });
+
+    it("工程标着不允许、这个版本的摘要读到了：本体拿得到，不说明", async () => {
+      await openPack(false, () => ({
+        name: "生存",
+        version: "2.0.0",
+        minecraft: "1.20.1",
+        loader: { kind: "fabric", version: "0.16.5" },
+        format: "curseforge",
+        pack_bytes: 2048,
+        remote_files: 2,
+        mod_files: 2,
+        remote_bytes: 4096,
+        override_files: 0,
+        override_bytes: 0,
+      }));
+      expect(dialog().textContent).not.toContain(NOTE);
+      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+    });
+
+    it("工程允许、摘要因别的原因失败：照旧写清单读不出来并给重试，不说要手动下载", async () => {
+      const { IpcError } = await import("../../ipc/errors");
+      await openPack(true, () => Promise.reject(new IpcError("network_failed", "连接超时")));
+      expect(dialog().textContent).not.toContain(NOTE);
+      expect(dialog().textContent).toContain(SUMMARY_FAILED);
+      expect(buttonByText("重试", dialog())).toBeDefined();
+    });
+  });
+
   it("CurseForge 整合包本体就需要手动下载：清单照常列出这个包，不写落点目录；找到后重新安装", async () => {
     const { IpcError } = await import("../../ipc/errors");
     const PACK: BlockedFileDto[] = [
