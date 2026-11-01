@@ -376,6 +376,17 @@ describe("外置登录弹窗", () => {
     expect(document.activeElement).toBe(inputs()[0]);
   });
 
+  it("http 地址又探测失败：说明块留给失败原因，明文提醒写成行，两句都在", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "http://not-ygg.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const callouts = [...(dialog()?.querySelectorAll('[class*="_callout_"]') ?? [])];
+    expect(callouts).toHaveLength(1);
+    expect(callouts[0].textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
+    expect(dialog()?.querySelector('[class*="_warnNote_"]')?.textContent).toBe(AUTHLIB_COPY.httpWarning);
+  });
+
   it("从皮肤站拖进服务器链接：弹窗打开即填好地址并执行一次「下一步」，停在登录这一步", async () => {
     await mount();
     await act(async () => {

@@ -8,7 +8,8 @@ import { INSTANCE_NAME_ERROR } from "../../copy/flows";
 // 几条查询同时触发桥里的动态引入时，后到的会拿到还没执行完的模块。
 import { IpcError } from "../../ipc/errors";
 import type { JavaInstallationDto } from "../../ipc/java";
-import { resetMocks } from "../../ipc/mock";
+import type { ManifestDto } from "../../state/queries/catalog";
+import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import type { CreateInstancePreset } from "../../state/flows";
@@ -316,6 +317,22 @@ describe("新建实例：完整走一遍", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(callsOf(ipc, "update_config")).toEqual([]);
   });
+
+  it("创建失败时确认步滚回顶部：开局选项让这一步常要滚动，原因写在最上面，不能停在视野之外", async () => {
+    await mount();
+    await fillName("周末生存");
+    await next();
+    await next();
+    await next();
+    const pane = heading().closest<HTMLElement>('[class*="_pane_"]');
+    if (pane === null) throw new Error("确认步不在滚动容器里");
+    pane.scrollTop = 240;
+    vi.spyOn(launcher.actions, "createInstance").mockRejectedValue(new Error("磁盘空间不足"));
+    click(button(CREATE_COPY.create));
+    await flush();
+    expect(dialog().textContent).toContain("磁盘空间不足");
+    expect(pane.scrollTop).toBe(0);
+  });
 });
 
 describe("新建实例：版本与加载器的联动", () => {
@@ -353,6 +370,25 @@ describe("新建实例：版本与加载器的联动", () => {
     expect(stepButton("加载器").disabled).toBe(true);
     await next();
     expect(checkedRadio()?.textContent).toContain("原版");
+  });
+
+  it("几个加载器都拉不到：说明块只留一条，每个加载器的原因逐行写全，后端原文不被两行截断", async () => {
+    const offline = "连不上 meta.fabricmc.net：操作超时";
+    ipc.overrides.set("list_manifest", async () => ({
+      ...(await mockInvoke<ManifestDto>("list_manifest")),
+      loader_errors: [
+        { loader: "forge", message: offline },
+        { loader: "neoforge", message: offline },
+      ],
+    }));
+    await mount();
+    await fillName("拉不到");
+    click(radio("1.5.2"));
+    await next();
+    expect(dialog().querySelectorAll('[class*="_callout_"]')).toHaveLength(1);
+    expect(dialog().textContent).toContain("1.5.2 没有 Fabric、Quilt 可用，换个游戏版本就能看到。");
+    const rows = [...dialog().querySelectorAll('[class*="_warnNote_"]')].map((el) => el.textContent);
+    expect(rows).toEqual([`暂时拉不到 Forge 的版本信息：${offline}`, `暂时拉不到 NeoForge 的版本信息：${offline}`]);
   });
 
   it("带预设版本打开：选中预设版本并按它的类型打开快照显示", async () => {
@@ -457,6 +493,30 @@ describe("新建实例：确认步的 Java 与全局固定的默认 Java", () =>
     expect(javaRow().textContent).toBe("会用固定的默认 Java，但它已经找不到了");
     expect(isWarn()).toBe(true);
     expect(dialog().textContent).toContain("设置里固定的默认 Java 已经找不到了，这个实例启动时会失败。创建后可以在实例设置里给它单独指定 Java 21。");
+  });
+
+  it("Java 不符、快照与开局选项并存：只有一条说明块，自上而下是键值表、说明块、快照注记、开局选项、创建后打开", async () => {
+    ipc.overrides.set("get_config", () => configDto({ default_java: JRE8 }));
+    await mount({ mcVersion: "24w14a" });
+    await fillName("快照尝鲜");
+    await next();
+    click(radio("Fabric"));
+    await flush();
+    await next();
+    await next();
+    await next();
+    expect(heading().textContent).toBe(CREATE_COPY.confirm.title);
+    expect(button(CREATE_COPY.create).disabled).toBe(false);
+
+    const callouts = [...dialog().querySelectorAll('[class*="_callout_"]')];
+    expect(callouts.map((el) => el.textContent)).toEqual(["设置里固定的 Java 8 低于要求，这个实例启动时会失败。创建后可以在实例设置里给它单独指定 Java 21。"]);
+    expect([...dialog().querySelectorAll('[class*="_warnNote_"]')].map((el) => el.textContent)).toEqual([CREATE_COPY.confirm.snapshotWarning]);
+
+    const body = dialog().textContent;
+    if (body === null) throw new Error("确认步没有内容");
+    const order = ["存放位置", "设置里固定的 Java 8", CREATE_COPY.confirm.snapshotWarning, CREATE_COPY.confirm.starter.template, "一并装上 Fabric API", CREATE_COPY.confirm.openAfter].map((part) => body.indexOf(part));
+    expect(order).not.toContain(-1);
+    expect(order).toEqual([...order].sort((x, y) => x - y));
   });
 
   it("固定的 Java 与要求一致：照常写已安装与它的发行方，没有提醒", async () => {

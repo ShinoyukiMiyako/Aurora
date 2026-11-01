@@ -5,6 +5,7 @@ import { JAVA_AUTO, releaseTypeFromDto, type ReleaseType } from "../../domain/ad
 import type { LoaderKind } from "../../domain/types";
 import { bestLocalRuntime, isolationByPolicy, type IsolationPolicyName } from "../../domain/rules";
 import type { JavaInstallationDto, LoaderChoice, LoaderVersionDto, ManifestDto } from "../../state/queries/catalog";
+import { sameDirectory } from "../onboarding/model";
 import type { StarterGroup, StarterMissingDto, StarterModDto, StarterModsDto, TemplateInfoDto } from "../../state/queries/starter";
 import type { StarterPick } from "../../state/store";
 
@@ -135,7 +136,7 @@ export type ConfirmJava =
 export function confirmJava(required: number, runtimes: readonly JavaInstallationDto[], defaultJava: string): ConfirmJava {
   const local = bestLocalRuntime(runtimes, required);
   if (defaultJava === JAVA_AUTO) return local === null ? { kind: "download", major: required } : { kind: "installed", major: required, vendor: local.vendor };
-  const pinned = runtimes.find((r) => r.path === defaultJava);
+  const pinned = runtimes.find((r) => sameDirectory(r.path, defaultJava));
   const requiredInstalled = local !== null;
   if (pinned === undefined) return { kind: "pinnedMissing", required, requiredInstalled };
   if (pinned.version.major !== required) return { kind: "pinnedMismatch", pinned: pinned.version.major, required, requiredInstalled };

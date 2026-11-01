@@ -384,6 +384,13 @@ describe("设置页：Java", () => {
       expect(text()).not.toContain(warnTitle);
     });
 
+    it("扫描结果里的路径只差大小写：不报找不到，列表里照常选中它", async () => {
+      ipc.overrides.set("detect_java", () => [{ ...jdk21, path: JRE8.toUpperCase(), version: { major: 8, minor: 0, security: 421, build: 9, raw: "1.8.0_421" } }]);
+      await mount("java");
+      expect(radio("Java 8").getAttribute("aria-checked")).toBe("true");
+      expect(text()).not.toContain(warnTitle);
+    });
+
     it("「重新选择」把焦点移到列表里第一个运行时，不改写设置", async () => {
       ipc.overrides.set("detect_java", () => [jdk21]);
       await mount("java");
@@ -419,6 +426,54 @@ describe("设置页：Java", () => {
       if (alert === undefined) throw new Error("没有出现固定 Java 找不到的提醒");
       expect(alert.textContent).toContain(JRE8);
       expect([...alert.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["改回自动选择"]);
+    });
+  });
+
+  describe("同一张卡里的提醒", () => {
+    // 假后端只接受它自己列出的路径：沿用它的 Java 8，把扫描结果改成 32 位
+    const X86 = "C:\\Program Files\\Java\\jre1.8.0_421\\bin\\java.exe";
+    const x86 = {
+      path: X86,
+      version: { major: 8, minor: 0, security: 421, build: 9, raw: "1.8.0_421" },
+      is_64bit: false,
+      vendor: "Oracle",
+      source: "registry",
+      missing_files: [],
+    };
+    /** 说明块带色调，提醒行没有；两者都要播报。 */
+    const callouts = () => all('[role="alert"][data-tone]');
+    const reminderRows = () => all('[role="alert"]:not([data-tone])').map((el) => el.textContent);
+    const missingPinned = "还缺 Java 25、Java 21。默认 Java 固定后不会自动下载，可以在下面手动下载，再到实例设置里单独指定。";
+    const bits32 = "32 位 Java 最多只能用约 1.5 GB 内存，装 Mod 的实例很容易内存不足。";
+
+    it("固定了 32 位 Java 又缺版本：只有一条说明块写固定的后果，其余逐行列在下面", async () => {
+      ipc.overrides.set("detect_java", () => [x86]);
+      await mockInvoke("update_config", { defaultJava: X86 });
+      await mount("java");
+      expect(callouts().map((el) => el.dataset.tone)).toEqual(["warn"]);
+      expect(callouts()[0].textContent).toContain("固定成单一 Java 后");
+      expect(reminderRows()).toEqual([missingPinned, bits32]);
+      expect(text()).not.toContain("首次启动对应实例时会自动下载");
+    });
+
+    it("固定的 Java 找不到又缺版本：说明块留给找不到，两个按钮还在，缺版本写成提醒行", async () => {
+      ipc.overrides.set("detect_java", () => []);
+      await mockInvoke("update_config", { defaultJava: X86 });
+      await mount("java");
+      expect(callouts()).toHaveLength(1);
+      expect(callouts()[0].textContent).toContain("默认 Java 已经找不到了，跟随全局的实例会启动失败");
+      expect(callouts()[0].textContent).toContain(X86);
+      expect([...callouts()[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["改回自动选择"]);
+      expect(reminderRows()).toEqual(["还缺 Java 25、Java 21、Java 8。默认 Java 固定后不会自动下载，可以在下面手动下载，再到实例设置里单独指定。"]);
+    });
+
+    it("改回自动选择后只剩缺版本一条，回到说明块，也回到按开关写的文案", async () => {
+      ipc.overrides.set("detect_java", () => [x86]);
+      await mockInvoke("update_config", { defaultJava: X86 });
+      await mount("java");
+      await click(radio("自动选择"));
+      expect(callouts().map((el) => el.textContent)).toEqual(["还缺 Java 25、Java 21，首次启动对应实例时会自动下载。"]);
+      expect(reminderRows()).toEqual([]);
     });
   });
 
@@ -478,6 +533,21 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
       instanceDto("怀旧", { java_major: 8, mc_version: "1.12.2" }),
       instanceDto("新快照", { java_major: 25, mc_version: "26.1" }),
     ]);
+  });
+
+  it("选择框开着时再点「添加 Java」不再开第二个；关掉之后按钮恢复", async () => {
+    const picking = deferred<string | null>();
+    vi.mocked(pickFile).mockReturnValueOnce(picking.promise);
+    await mount("java");
+    await click(button("添加 Java"));
+    await click(button("添加 Java"));
+    expect(vi.mocked(pickFile)).toHaveBeenCalledTimes(1);
+    expect(button("添加 Java").getAttribute("aria-busy")).toBe("true");
+
+    picking.resolve(null);
+    await flush();
+    expect(button("添加 Java").getAttribute("aria-busy")).toBeNull();
+    expect(callsOf(ipc, "add_java_path")).toEqual([]);
   });
 
   it("添加 Java：选中的 javaw.exe 交给 add_java_path，列表刷新出按 java.exe 记下的「手动添加」项，并提示加了哪个", async () => {

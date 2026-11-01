@@ -110,6 +110,7 @@ export const JAVA_COPY = {
   pickAgain: "重新选择",
   missingAuto: (list: string) => `还缺 ${list}，首次启动对应实例时会自动下载。`,
   missingManual: (list: string) => `还缺 ${list}，对应实例会启动失败。可以在下面手动下载，或打开「自动下载 Java」。`,
+  missingPinned: (list: string) => `还缺 ${list}。默认 Java 固定后不会自动下载，可以在下面手动下载，再到实例设置里单独指定。`,
   bits32Note: "32 位 Java 最多只能用约 1.5 GB 内存，装 Mod 的实例很容易内存不足。",
   scanDone: (n: number) => `扫描完成，找到 ${n} 个 Java 运行时`,
   scanDiff: (added: number, removed: number) => `新增 ${added} 个，消失 ${removed} 个`,
