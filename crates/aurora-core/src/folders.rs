@@ -464,7 +464,7 @@ mod tests {
     }
 
     /// 切换把原当前目录（在盘上存在时）收进额外目录，目标从额外目录里摘掉。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn switch_keeps_existing_previous_directory_reachable() {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join("Games").join(".minecraft");
@@ -488,7 +488,7 @@ mod tests {
     }
 
     /// 从没建出来过的默认目录不收进额外目录，免得列表里多一条永远不可达的记录。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn switch_drops_never_created_previous_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let default_dir = default_game_dir(tmp.path());
@@ -502,7 +502,7 @@ mod tests {
         assert!(aurora.config().extra_game_directories.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn switching_to_the_same_directory_is_a_no_op() {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join(".minecraft");
@@ -522,7 +522,7 @@ mod tests {
 
     /// 切换时不看盘，只认拿锁之前那次探测：探测时还在、切换前一刻断开的网络盘目录照样收下，探测时就不在的
     /// 不收。切换自己去访问磁盘的话，挂起的网络盘会让它持着门面写锁一直卡着。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn switch_decides_from_the_probe_taken_before_the_lock() {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join("NAS").join(".minecraft");
@@ -551,7 +551,7 @@ mod tests {
     }
 
     /// 探测之后当前目录已被别的命令换掉：探测说的不是它，宁可多留一条记录，也不把它当成不存在丢掉。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stale_probe_keeps_the_directory_it_did_not_look_at() {
         let tmp = tempfile::tempdir().unwrap();
         let never_created = default_game_dir(tmp.path());
@@ -572,7 +572,7 @@ mod tests {
     }
 
     /// 当前目录在最前；不可达的额外目录照样列出，只是 available 为假。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn game_directories_keeps_unavailable_entries_visible() {
         let tmp = tempfile::tempdir().unwrap();
         let current = default_game_dir(tmp.path());
@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(aurora.directory_name(Path::new("E:/Games/mc")), "mc");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn discover_skips_known_directories() {
         let tmp = tempfile::tempdir().unwrap();
         let known: Vec<NamedDirectory> = sibling_launcher_dirs();
@@ -644,7 +644,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn inspect_reports_existing_game_files() {
         let tmp = tempfile::tempdir().unwrap();
         let empty = tmp.path().join("empty");
@@ -676,7 +676,7 @@ mod tests {
     }
 
     /// 首次启动：建目录、切过去、收下勾选的文件夹、标记完成；之后不再是首次启动。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn first_run_roundtrip_through_config_store() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
@@ -721,7 +721,7 @@ mod tests {
 
     /// 回到第一步改了再提交：从基线出发重新套用，结果与只提交最后一次相同。第一次提交建出来的默认目录
     /// 不被当成「原来的当前目录」收进额外目录，取消勾选的文件夹也不留着。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn recommitting_first_run_replaces_the_previous_choice() {
         let tmp = tempfile::tempdir().unwrap();
         let default_dir = default_game_dir(tmp.path());
@@ -788,7 +788,7 @@ mod tests {
 
     /// 向导之前就有的记录与当时就在盘上的当前目录照常保留：配置损坏后按默认配置重进向导时，
     /// 原来的默认目录里可能有实例，换走了也要能切回来。
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn recommitting_first_run_keeps_what_existed_before_the_wizard() {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join("Games").join(".minecraft");
