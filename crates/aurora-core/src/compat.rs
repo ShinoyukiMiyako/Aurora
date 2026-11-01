@@ -14,6 +14,7 @@
 //! 资源包、光影、数据包也走同一张矩阵，但只判 MC 版本一维（[`classify_game_version`]）：它们由游戏本体
 //! （光影由 Iris / OptiFine）读取，与实例装的 Mod 加载器无关。
 
+use std::borrow::Borrow;
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -138,9 +139,66 @@ fn join_loader_names(loaders: &[ModLoader]) -> String {
         .join("/")
 }
 
+/// 装着这些加载器的实例能跑哪些加载器的 Mod。
+///
+/// Quilt 能加载 Fabric Mod，而平台上大量 Fabric Mod 从不标 quilt：只认标签会判成不兼容，再退到还标着
+/// quilt 的旧版上。判定与下推过滤共用这一处，否则落位矩阵放行的版本会被版本列表先筛掉。
+fn runnable_loaders(installed: &[ModLoader]) -> Vec<ModLoader> {
+    let mut runnable = installed.to_vec();
+    if installed.contains(&ModLoader::Quilt) && !installed.contains(&ModLoader::Fabric) {
+        runnable.push(ModLoader::Fabric);
+    }
+    runnable
+}
+
+/// 版本号去掉加载器字样后的各段。
+///
+/// 同一发布分加载器各传一份时，版本号只差这个字样（`1.4.0-fabric` 与 `1.4.0-quilt`、`fabric-1.4.0` 与
+/// `quilt-1.4.0`、`1.4.0` 与 `1.4.0+quilt`），两份都不写字样的版本号完全相同。按分隔符切开比删子串稳：
+/// 字样前的分隔符各家不一，有的工程只有 quilt 那份带字样。
+fn release_parts(version: &ModVersionInfo) -> Vec<String> {
+    version
+        .version_number
+        .to_ascii_lowercase()
+        .split(['-', '+', '_'])
+        .filter(|part| !matches!(*part, "fabric" | "quilt"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `fabric` 是不是 `quilt` 这份构建在同一发布里的 Fabric 构建。
+pub(crate) fn is_fabric_twin(fabric: &ModVersionInfo, quilt: &ModVersionInfo) -> bool {
+    fabric.loaders.contains(&ModLoader::Fabric)
+        && !fabric.loaders.contains(&ModLoader::Quilt)
+        && quilt.loaders.contains(&ModLoader::Quilt)
+        && release_parts(fabric) == release_parts(quilt)
+}
+
+/// Quilt 实例上，把同一发布的 quilt 构建排到它的 fabric 构建前面；别的实例不动。`versions` 按发布时间倒序。
+///
+/// 只在同一发布内换位，不是带 quilt 标的一律优先：不少 Mod 后来不再标 quilt，AppleSkin 的 quilt 标停在
+/// 2023 年的 2.5.0，一律优先就是把 Quilt 玩家钉在那个旧版上。
+pub(crate) fn prefer_quilt_builds<V: Borrow<ModVersionInfo>>(
+    versions: &mut [V],
+    loaders: &[ModLoader],
+) {
+    if !loaders.contains(&ModLoader::Quilt) {
+        return;
+    }
+    for at in 0..versions.len() {
+        let twin = versions[at + 1..]
+            .iter()
+            .position(|later| is_fabric_twin(versions[at].borrow(), later.borrow()));
+        if let Some(offset) = twin {
+            versions[at..=at + 1 + offset].rotate_right(1);
+        }
+    }
+}
+
 /// 纯函数：判定某个版本能否用于给定的实例事实。
 ///
 /// `instance_loaders` 取实例已装的加载器名（大小写不敏感，非 Mod 加载器如 OptiFine 会被忽略）。
+/// Quilt 实例同时接受 Fabric 的版本，放行范围见 [`runnable_loaders`]。
 /// 判定顺序按「越确凿越先判」排：先看加载器（对不上一定装不了），再看 MC 版本，最后才把
 /// 元数据缺失归到 [`Compatibility::Unknown`]。
 /// `instance_mc_version` 传 `None` 表示「认不出这个实例基于哪个 MC 版本」。此时只判加载器，
@@ -165,10 +223,11 @@ pub fn classify(
                 reason: "该实例未安装 Mod 加载器".to_owned(),
             };
         }
+        let runnable = runnable_loaders(&instance_kinds);
         let intersects = version
             .loaders
             .iter()
-            .any(|needed| instance_kinds.contains(needed));
+            .any(|needed| runnable.contains(needed));
         if !intersects {
             return Compatibility::Mismatch {
                 reason: format!(
@@ -265,7 +324,14 @@ fn pick_best(
     let mut newest_unknown: Option<(&ModVersionInfo, String)> = None;
     let mut newest_reason: Option<String> = None;
 
-    for version in versions {
+    let kinds: Vec<ModLoader> = instance_loaders
+        .iter()
+        .filter_map(|name| parse_loader_name(name))
+        .collect();
+    let mut ordered: Vec<&ModVersionInfo> = versions.iter().collect();
+    prefer_quilt_builds(&mut ordered, &kinds);
+
+    for version in ordered {
         match judge(
             resource_type,
             version,
@@ -360,13 +426,14 @@ pub(crate) fn instance_loaders(version: &DiscoveredVersion) -> Vec<String> {
         .collect()
 }
 
-/// 实例已装的 Mod 加载器（认不出的名字，即 OptiFine 这类非 Mod 加载器，已剔除）。
+/// 实例能跑哪些加载器的 Mod，下推给平台过滤版本用（认不出的名字，即 OptiFine 这类非 Mod 加载器，已剔除）。
 pub(crate) fn instance_mod_loaders(version: &DiscoveredVersion) -> Vec<ModLoader> {
-    version
+    let installed: Vec<ModLoader> = version
         .loaders
         .iter()
         .filter_map(|info| parse_loader_name(info.kind.as_str()))
-        .collect()
+        .collect();
+    runnable_loaders(&installed)
 }
 
 /// 按 MC 版本补拉 CurseForge 文件页时同时在途的请求数：实例用到的 MC 版本可能有十来种，
@@ -851,6 +918,36 @@ mod tests {
         );
     }
 
+    /// Quilt 能跑 Fabric Mod：平台上只标 fabric 的版本不能因此判成不兼容。
+    #[test]
+    fn quilt_instance_runs_fabric_only_version() {
+        let v = version(&[ModLoader::Fabric], &["1.20.1"]);
+        assert_eq!(
+            classify(&v, Some("1.20.1"), &names(&["quilt"])),
+            Compatibility::Match
+        );
+    }
+
+    /// 放行只到 Fabric：Forge 的版本照旧不兼容，原因也只说实例真正装的加载器。
+    #[test]
+    fn quilt_instance_still_rejects_forge_only_version() {
+        let v = version(&[ModLoader::Forge], &["1.20.1"]);
+        assert_eq!(
+            classify(&v, Some("1.20.1"), &names(&["quilt"])),
+            mismatch("需要 Forge，该实例装的是 Quilt")
+        );
+    }
+
+    /// 放行是单向的：Fabric 跑不了 Quilt Mod。
+    #[test]
+    fn fabric_instance_still_rejects_quilt_only_version() {
+        let v = version(&[ModLoader::Quilt], &["1.20.1"]);
+        assert_eq!(
+            classify(&v, Some("1.20.1"), &names(&["fabric"])),
+            mismatch("需要 Quilt，该实例装的是 Fabric")
+        );
+    }
+
     #[test]
     fn vanilla_instance_rejects_loader_requiring_version() {
         let v = version(&[ModLoader::Forge], &["1.20.1"]);
@@ -1061,6 +1158,136 @@ mod tests {
         );
         assert_eq!(compat, Compatibility::Match);
         assert_eq!(best.unwrap().version_id, "newest");
+    }
+
+    /// 带版本号的 [`dated`]：两个版本是不是同一发布的不同构建，看的就是版本号。
+    fn release(
+        id: &str,
+        number: &str,
+        year: u16,
+        loaders: &[ModLoader],
+        mc: &[&str],
+    ) -> ModVersionInfo {
+        ModVersionInfo {
+            version_number: number.to_owned(),
+            ..dated(id, year, loaders, mc)
+        }
+    }
+
+    /// 落位矩阵给这个实例挑中的版本。
+    fn best_for(versions: &[ModVersionInfo], mc: &str, loader: &str) -> Option<String> {
+        pick_best(ResourceType::Mod, versions, Some(mc), &names(&[loader]))
+            .1
+            .map(|version| version.version_id)
+    }
+
+    /// 真实数据：AppleSkin 在 1.20.1 上只有最老的 2.5.0 还标着 quilt。带 quilt 标不是优先的理由，否则
+    /// Quilt 实例永远退回这个旧版。
+    #[test]
+    fn quilt_instance_takes_the_newest_fabric_build_over_an_older_quilt_tagged_release() {
+        use ModLoader::{Fabric, Forge, Quilt};
+        let versions = vec![
+            release("2.5.2", "2.5.2+mc1.20.1", 2026, &[Fabric], &["1.20.1"]),
+            release(
+                "2.5.1",
+                "2.5.1+mc1.20",
+                2025,
+                &[Fabric],
+                &["1.20", "1.20.1"],
+            ),
+            release("forge", "2.5.1+mc1.20.1", 2024, &[Forge], &["1.20.1"]),
+            release(
+                "2.5.0",
+                "2.5.0+mc1.20",
+                2023,
+                &[Fabric, Quilt],
+                &["1.20", "1.20.1"],
+            ),
+        ];
+        assert_eq!(
+            best_for(&versions, "1.20.1", "quilt").as_deref(),
+            Some("2.5.2")
+        );
+    }
+
+    /// 同一发布分加载器各传一份时 Quilt 实例拿 quilt 那份，哪怕 fabric 那份传得晚。版本号的写法都取自
+    /// 平台上的真实工程。
+    #[test]
+    fn quilt_instance_takes_the_quilt_build_of_the_same_release() {
+        use ModLoader::{Fabric, Quilt};
+        for (fabric, quilt) in [
+            ("3.11.8", "3.11.8"),
+            ("3.2.0-fabric", "3.2.0-quilt"),
+            ("1.16.1_fabric", "1.16.1_quilt"),
+            ("fabric-2.6.27+26.3", "quilt-2.6.27+26.3"),
+            ("1.20-0.8.6-fabric", "1.20-0.8.6-quilt"),
+            ("6.3.29+1.19.2+fabric", "6.3.29+1.19.2+quilt"),
+            ("1.1.0+1.20.1", "1.1.0+1.20.1-quilt"),
+            ("7.5.3+1.20.1-Fabric", "7.5.3+1.20.1-Quilt"),
+        ] {
+            let versions = vec![
+                release("fabric", fabric, 2026, &[Fabric], &["1.20.1"]),
+                release("patch", "0.9.0", 2025, &[Fabric], &["1.20.1"]),
+                release("quilt", quilt, 2024, &[Quilt], &["1.20.1"]),
+            ];
+            assert_eq!(
+                best_for(&versions, "1.20.1", "quilt").as_deref(),
+                Some("quilt"),
+                "{fabric} 与 {quilt} 是同一发布"
+            );
+        }
+    }
+
+    /// 版本号不同就是两个发布：更新的 fabric 构建不让位给旧发布的 quilt 构建。
+    #[test]
+    fn quilt_preference_stops_at_the_release_boundary() {
+        use ModLoader::{Fabric, Quilt};
+        let versions = vec![
+            release("fabric", "2.0.1+fabric", 2026, &[Fabric], &["1.20.1"]),
+            release("quilt", "2.0.0+quilt", 2025, &[Quilt], &["1.20.1"]),
+        ];
+        assert_eq!(
+            best_for(&versions, "1.20.1", "quilt").as_deref(),
+            Some("fabric")
+        );
+    }
+
+    /// 两者都标的那份同样是 quilt 构建；Fabric 实例不受影响，照旧取最新。
+    #[test]
+    fn quilt_preference_counts_multi_loader_builds_and_leaves_fabric_instances_alone() {
+        use ModLoader::{Fabric, Quilt};
+        let versions = vec![
+            release("fabric", "2.0.0+fabric", 2026, &[Fabric], &["1.20.1"]),
+            release("both", "2.0.0+quilt", 2025, &[Fabric, Quilt], &["1.20.1"]),
+        ];
+        assert_eq!(
+            best_for(&versions, "1.20.1", "quilt").as_deref(),
+            Some("both")
+        );
+        assert_eq!(
+            best_for(&versions, "1.20.1", "fabric").as_deref(),
+            Some("fabric")
+        );
+    }
+
+    /// quilt 构建不支持实例的 MC 版本时顶替不了：fabric 构建仍是这个实例能用的最新版。
+    #[test]
+    fn quilt_build_for_another_game_version_leaves_the_fabric_build_in_place() {
+        use ModLoader::{Fabric, Quilt};
+        let versions = vec![
+            release(
+                "fabric",
+                "2.0.0+fabric",
+                2026,
+                &[Fabric],
+                &["1.20.1", "1.20.2"],
+            ),
+            release("quilt", "2.0.0+quilt", 2025, &[Quilt], &["1.20.1"]),
+        ];
+        assert_eq!(
+            best_for(&versions, "1.20.2", "quilt").as_deref(),
+            Some("fabric")
+        );
     }
 
     /// 工程压根没有这个 MC 版本的文件时，说「需要 NeoForge」等于让玩家去换加载器，换了也没得装。
@@ -1369,6 +1596,21 @@ mod tests {
         assert!(instance_loaders(&vanilla).is_empty());
     }
 
+    /// 下推过滤要带上 Fabric，否则平台先把只标 fabric 的版本筛掉，判定根本见不到它们；实例事实仍只有 quilt。
+    #[test]
+    fn quilt_instance_pushes_fabric_down_alongside_quilt() {
+        let v = discovered(
+            "1.20.1-quilt",
+            r#"{"id":"1.20.1-quilt","inheritsFrom":"1.20.1","type":"release",
+                "libraries":[{"name":"org.quiltmc:quilt-loader:0.26.0"}]}"#,
+        );
+        assert_eq!(
+            instance_mod_loaders(&v),
+            vec![ModLoader::Quilt, ModLoader::Fabric]
+        );
+        assert_eq!(instance_loaders(&v), names(&["quilt"]));
+    }
+
     // ---- 实例匹配矩阵（端到端，平台走本地 mock）----
 
     /// 各加载器的特征库坐标，[`aurora_version::detect_loaders`] 据此识别实例装了什么。
@@ -1455,6 +1697,52 @@ mod tests {
             Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
         aurora.set_isolation_policy(aurora_instance::IsolationPolicy::All);
         aurora.with_modrinth_base(base)
+    }
+
+    /// 真实数据的形状：新版只标 fabric，只有旧版还标着 quilt。
+    const APPLESKIN_VERSIONS: &str = r#"[
+        {"id":"new","project_id":"appleskin","name":"AppleSkin 2.5.2","version_number":"2.5.2+mc1.20.1",
+         "version_type":"release","date_published":"2026-01-24T00:00:00Z",
+         "game_versions":["1.20.1"],"loaders":["fabric"],
+         "files":[{"hashes":{"sha1":"aa"},"url":"https://example.invalid/appleskin-2.5.2.jar",
+                   "filename":"appleskin-2.5.2.jar","primary":true,"size":3}]},
+        {"id":"old","project_id":"appleskin","name":"AppleSkin 2.5.0","version_number":"2.5.0+mc1.20",
+         "version_type":"release","date_published":"2023-06-08T00:00:00Z",
+         "game_versions":["1.20","1.20.1"],"loaders":["fabric","quilt"],
+         "files":[{"hashes":{"sha1":"bb"},"url":"https://example.invalid/appleskin-2.5.0.jar",
+                   "filename":"appleskin-2.5.0.jar","primary":true,"size":3}]}
+    ]"#;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn match_instances_puts_the_fabric_only_version_on_quilt_instances() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/appleskin/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(APPLESKIN_VERSIONS))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        put_instance(&mc, "a-forge", "1.20.1", FORGE_LIB).await;
+        put_instance(&mc, "b-quilt", "1.20.1", QUILT_LIB).await;
+
+        let matches = isolated(&mc, server.uri())
+            .match_instances(Platform::Modrinth, "appleskin", ResourceType::Mod, None)
+            .await
+            .unwrap();
+
+        assert_eq!(matches[0].version_id, "b-quilt");
+        assert_eq!(matches[0].state, MatchState::Compatible);
+        assert_eq!(matches[0].compatibility, Compatibility::Match);
+        assert_eq!(matches[0].loaders, names(&["quilt"]));
+        assert_eq!(matches[0].best_version.as_ref().unwrap().version_id, "new");
+
+        assert_eq!(matches[1].version_id, "a-forge");
+        assert_eq!(matches[1].state, MatchState::Incompatible);
+        assert_eq!(
+            matches[1].compatibility,
+            mismatch("需要 Fabric，该实例装的是 Forge")
+        );
     }
 
     /// 安装目标与实例库同一口径：只给别的实例当基底的加载器版本不出现在矩阵里，原版基底照常出现。
