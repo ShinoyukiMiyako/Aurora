@@ -438,7 +438,7 @@ function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | nu
 function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsEditor }) {
   const policy = useLauncherSelector((state) => (state.settings === null ? null : state.settings.isolationPolicy));
   const s = editor.value;
-  // 跟随全局时说此刻实际隔离与否：列表里后端给的生效值算上了「版本目录里已有 mods 或 saves 就强制隔离」，
+  // 跟随全局时说此刻实际隔离与否：列表里后端给的生效值算上了「版本目录的 mods 或 saves 里有内容就强制隔离」，
   // 前端看不到目录、推断不出这一条；后端没给出（实例设置读不出）时才按全局策略推断
   const followIsolated = policy === null ? null : inst.isolated === null ? isolationByPolicy(policy, inst) : inst.isolated;
   // 关闭也压不过这条强制隔离：写共用的话，说明和游戏实际读写的目录对不上
@@ -450,7 +450,10 @@ function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsE
         ? offNote
         : policy === null || followIsolated === null
           ? undefined
-          : SETTINGS_COPY.isolationFollowNote(ISOLATION_POLICY_LABEL[policy], followIsolated);
+          : // 生效值隔离而策略不隔离，只能是强制隔离：照策略写「独立存放」读起来和「不隔离」自相矛盾，要把原因说出来
+            followIsolated && !isolationByPolicy(policy, inst)
+            ? SETTINGS_COPY.isolationFollowForcedNote(ISOLATION_POLICY_LABEL[policy])
+            : SETTINGS_COPY.isolationFollowNote(ISOLATION_POLICY_LABEL[policy], followIsolated);
 
   return (
     <Card padding="lg">

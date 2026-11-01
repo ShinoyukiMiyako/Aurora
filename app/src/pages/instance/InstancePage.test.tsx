@@ -1369,11 +1369,19 @@ describe("实例详情：工作目录与实例设置的占用", () => {
 });
 
 describe("实例详情：版本隔离说明", () => {
-  it("跟随全局时按后端给的生效值说：原版正式版按策略本不隔离，但后端已强制隔离时写独立存放", async () => {
+  it("跟随全局、策略本不隔离但后端已强制隔离：写清是实例文件夹里的内容留住了它，不写和策略相反的一句空话", async () => {
     instances = instances.map((i) => (i.id === "创造" ? { ...i, isolated: true } : i));
     await open("settings", "创造");
-    expect(text()).toContain("这个实例会独立存放存档与配置。");
+    expect(text()).toContain("这个实例的文件夹里已有存档或 Mod，仍然单独存放。");
+    expect(text()).not.toContain("这个实例会独立存放存档与配置。");
     expect(text()).not.toContain("这个实例与其他未隔离的实例共用存档与配置。");
+  });
+
+  it("跟随全局、策略本来就隔离：写独立存放，不提强制", async () => {
+    instances = instances.map((i) => (i.id === "创造" ? { ...i, release_type: "snapshot", isolated: true } : i));
+    await open("settings", "创造");
+    expect(text()).toContain("这个实例会独立存放存档与配置。");
+    expect(text()).not.toContain("仍然单独存放");
   });
 
   it("后端也说不隔离时写共用", async () => {
