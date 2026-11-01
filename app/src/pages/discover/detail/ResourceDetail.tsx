@@ -12,7 +12,7 @@ import type { Platform } from "../../../domain/types";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
-import { useModVersions, useProjectDetail, type DependencyProject, type HitSource, type ModVersionList, type ProjectDetail } from "../../../state/queries/discover";
+import { useModVersions, useProjectDetail, type DependencyProject, type HitSource, type ModVersionList, type ProjectDetail, type ResourceType } from "../../../state/queries/discover";
 import type { ResourceResult } from "../../../state/resource";
 import { Icon, type IconName } from "../../../art/Icon";
 import { Button } from "../../../ui/Button";
@@ -53,6 +53,8 @@ export interface DetailTarget {
   projectId: string;
   /** 合并卡的各平台来源；只有一个平台或从路由直接打开时为空。 */
   sources: readonly HitSource[];
+  /** 结果卡上标的类型；不是从结果卡点开的（路由直开、前置）为 null。 */
+  listedType: ResourceType | null;
 }
 
 export interface ResourceDetailProps {
@@ -82,11 +84,7 @@ export function ResourceDetail({ target, onClose, fitInstance, online }: Resourc
   );
 }
 
-interface StackEntry {
-  platform: Platform;
-  projectId: string;
-  sources: readonly HitSource[];
-}
+type StackEntry = DetailTarget;
 
 interface DetailStackProps {
   target: DetailTarget;
@@ -104,7 +102,7 @@ function parentLabel(parent: StackEntry, titles: ReadonlyMap<string, string>): s
 
 /** 前置的层层点进：栈顶是正在看的资源，返回回到上一层。 */
 function DetailStack({ target, onClose, fitInstance, online, footerHost }: DetailStackProps) {
-  const [stack, setStack] = useState<StackEntry[]>([{ platform: target.platform, projectId: target.projectId, sources: target.sources }]);
+  const [stack, setStack] = useState<StackEntry[]>([target]);
   const [titles, setTitles] = useState<ReadonlyMap<string, string>>(() => new Map());
   const rememberTitle = useCallback((key: string, title: string) => setTitles((prev) => (prev.get(key) === title ? prev : new Map(prev).set(key, title))), []);
   const top = stack[stack.length - 1];
@@ -116,7 +114,7 @@ function DetailStack({ target, onClose, fitInstance, online, footerHost }: Detai
       entry={top}
       back={back}
       onTitle={rememberTitle}
-      onOpenDependency={(dep) => setStack((s) => [...s, { platform: dep.platform, projectId: dep.project_id, sources: [] }])}
+      onOpenDependency={(dep) => setStack((s) => [...s, { platform: dep.platform, projectId: dep.project_id, sources: [], listedType: null }])}
       onClose={onClose}
       fitInstance={fitInstance}
       online={online}
@@ -280,7 +278,7 @@ function DetailBody({ entry, detail, back, onTitle, onClose, onOpenDependency, f
 
   return (
     <div className={styles.root} aria-busy={switching || undefined}>
-      <DetailHero detail={detail} platforms={platforms} back={back} onClose={onClose} />
+      <DetailHero detail={detail} listedType={detail.platform === entry.platform ? entry.listedType : null} platforms={platforms} back={back} onClose={onClose} />
       <StatsBar detail={detail} />
       <div className={styles.bodyGrid}>
         <div className={styles.mainColumn}>
@@ -354,8 +352,21 @@ function DetailBody({ entry, detail, back, onTitle, onClose, onOpenDependency, f
   );
 }
 
-function DetailHero({ detail, platforms, back, onClose }: { detail: ProjectDetail; platforms: readonly Platform[]; back: DetailSourcesProps["back"]; onClose: () => void }) {
-  const kind = resourceKindOf(detail.resource_type);
+interface DetailHeroProps {
+  detail: ProjectDetail;
+  /** 这份详情对应的结果卡类型；切到另一个平台后看的是那边的工程，为 null。 */
+  listedType: ResourceType | null;
+  platforms: readonly Platform[];
+  back: DetailSourcesProps["back"];
+  onClose: () => void;
+}
+
+/**
+ * 类型标与结果卡一致：同时发布成 Mod 与数据包的工程，Modrinth 的详情说不出它也是数据包，
+ * 从「数据包」点进来却标 Mod 就对不上卡。只改这个标：安装面板仍按详情的类型走，这类工程的版本里 jar 与 zip 混着。
+ */
+function DetailHero({ detail, listedType, platforms, back, onClose }: DetailHeroProps) {
+  const kind = resourceKindOf(listedType === null ? detail.resource_type : listedType);
   const hue = entryHue(detail.hue, detail.project_id, hueOf);
   const gallery = kind === "modpack" && detail.gallery.length > 0 ? detail.gallery[0] : null;
   // 先去掉没有中文名的再取前几个：平台新加的分类不占名额

@@ -66,7 +66,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
 
   const [restored] = useState(readSnapshot);
   const [filters, setFilters] = useState<DiscoverFilters>(() => routeFilters(restored === null ? DEFAULT_FILTERS : restored.filters, route, instances));
-  const [detail, setDetail] = useState<DetailTarget | null>(() => (route.open === undefined ? null : { ...route.open, sources: [] }));
+  const [detail, setDetail] = useState<DetailTarget | null>(() => (route.open === undefined ? null : { ...route.open, sources: [], listedType: null }));
   // 外壳把拖进窗口的整合包经路由带进来：进页即打开导入弹窗读取它
   const [importing, setImporting] = useState<ImportRequest | null>(() => (route.importFile === undefined ? null : { file: route.importFile }));
   const debounced = useDebounced(filters.query, SEARCH_DEBOUNCE_MS);
@@ -80,7 +80,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     const next = routeFilters(filters, route, instances);
     setFilters(next);
     debounced.flush(next.query);
-    if (route.open !== undefined) setDetail({ ...route.open, sources: [] });
+    if (route.open !== undefined) setDetail({ ...route.open, sources: [], listedType: null });
     if (route.importFile !== undefined) setImporting({ file: route.importFile });
   }
 
@@ -149,7 +149,7 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
     if (query === "") debounced.flush("");
   };
   // 引用稳定：结果卡包着 memo，页面因输入、筛选或详情开合重渲染时几百张卡不跟着重渲染
-  const open = useCallback((entry: SearchEntry) => setDetail({ platform: entry.platform, projectId: entry.project_id, sources: entry.sources }), []);
+  const open = useCallback((entry: SearchEntry) => setDetail({ platform: entry.platform, projectId: entry.project_id, sources: entry.sources, listedType: entry.resource_type }), []);
 
   // 「已装入 n 个实例」只对 Mod 有意义：结果里确实有 Mod 时才读，全部实例的已装来源一条命令取齐
   const readyIds = useMemo(() => instances.filter((i) => i.status === "ready" && !i.placeholder).map((i) => i.id), [instances]);

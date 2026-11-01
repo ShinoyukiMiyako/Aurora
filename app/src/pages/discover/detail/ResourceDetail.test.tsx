@@ -56,7 +56,7 @@ function detail(platform: ProjectDetail["platform"], projectId: string, title: s
   };
 }
 
-const TARGET: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [source("modrinth", "AANobbMI"), source("curseforge", CF_ID)] };
+const TARGET: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [source("modrinth", "AANobbMI"), source("curseforge", CF_ID)], listedType: "mod" };
 
 let view: Rendered | undefined;
 let curseforge: Deferred<ProjectDetail>;
@@ -66,11 +66,11 @@ const flush = () =>
     await settle();
   });
 
-async function mount() {
+async function mount(detailTarget: DetailTarget = TARGET) {
   view = render(
     <LauncherProvider>
       <ShellProvider>
-        <ResourceDetail target={TARGET} onClose={() => undefined} fitInstance={null} online />
+        <ResourceDetail target={detailTarget} onClose={() => undefined} fitInstance={null} online />
         <OverlayRoot />
       </ShellProvider>
     </LauncherProvider>,
@@ -156,6 +156,28 @@ describe("资源详情：头图标签行", () => {
     await mount();
     expect(heroTags()).toEqual(["Mod", "Modrinth", "CurseForge"]);
     expect(dialog().textContent).not.toContain("Performance");
+  });
+
+  it("类型标跟结果卡走：数据包结果点进同时发布成 Mod 的工程标数据包，安装仍按详情给的类型判定", async () => {
+    await mount({ ...TARGET, listedType: "data_pack" });
+    expect(heroTags()[0]).toBe("数据包");
+    expect(callsOf(ipc, "match_instances").map((a) => a.resourceType)).toEqual(["mod"]);
+  });
+
+  it("没有结果卡（路由直开、前置点进来）时按详情给的类型标", async () => {
+    await mount({ ...TARGET, listedType: null });
+    expect(heroTags()[0]).toBe("Mod");
+  });
+
+  it("合并卡切到另一个平台后看的是那边的工程，按它自己的类型标", async () => {
+    await mount({ ...TARGET, listedType: "data_pack" });
+    act(() => radio("CurseForge").click());
+    await act(async () => {
+      curseforge.resolve(detail("curseforge", CF_ID, "Sodium（CurseForge）"));
+      await settle();
+    });
+    expect(heroTitle()).toBe("Sodium（CurseForge）");
+    expect(heroTags()[0]).toBe("Mod");
   });
 });
 
