@@ -1,4 +1,4 @@
-// 外壳布局：窗口背景层、左侧 84px 侧栏槽位、主列（标题栏 + 内容区），以及始终挂着的通知、登录流程、
+// 外壳布局：窗口背景层、左侧 84px 侧栏槽位（顶上一行品牌 + 胶囊）、主列（标题栏 + 内容区），以及始终挂着的通知、登录流程、
 // 新建实例流程、启动器更新面板、拖放提示与浮层根（应用根元素的最后一个子元素）。首次启动时整窗换成向导：只留一条带徽记与窗口三键的标题条。
 // 向导收尾时先播完它自己的退场（淡出并轻微放大），主界面再淡入；应用启动时已在的那一屏不播入场，窗口显示时就是成品。
 //
@@ -162,6 +162,7 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll }: { pages: PageRe
     <>
       {/* 槽位的空白是窗口拖动区（只认直接点在槽位上），侧栏胶囊本身不是 */}
       <motion.div className={styles.sidebarSlot} data-tauri-drag-region="" {...MAIN_ENTER}>
+        <SidebarBrand />
         <Sidebar />
       </motion.div>
       <motion.div className={styles.main} {...MAIN_ENTER}>
@@ -187,6 +188,16 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll }: { pages: PageRe
     </>
   );
 });
+
+/** 窗口左上角的品牌行。焦点状态放在这一小块里订阅：窗口失焦时只换字标颜色，不牵动 MainFrame 重渲染。 */
+function SidebarBrand() {
+  const frame = useReportedWindowFrame();
+  return (
+    <div className={styles.brand} data-tauri-drag-region="deep" data-blurred={!frame.focused || undefined}>
+      <Logo size={20} className={styles.stripLogo} />
+    </div>
+  );
+}
 
 /** 一次挂载内固定用同一个组件：挂载时已加载的页面直接渲染，没加载的经 lazy 挂起。路由不变时不重渲染。 */
 const PageView = memo(function PageView({ route, pages }: { route: Route; pages: PageRegistry }) {
