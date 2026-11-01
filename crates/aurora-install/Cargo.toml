@@ -29,8 +29,8 @@ fastrand = "2"
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 
 [dev-dependencies]
-# 集成测试用 wiremock（需真正后台运行时），补 macros/rt-multi-thread。
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# 集成测试用 wiremock（需真正后台运行时），补 macros/rt-multi-thread；收尾时限的用例暂停时钟，补 test-util。
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 wiremock = "0.6"
 tempfile = "3"
 # 端到端 mock 测试里需要为造出的字节现算 sha1 当作预置校验值。

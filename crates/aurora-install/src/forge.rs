@@ -1029,8 +1029,8 @@ const OUTPUT_TAIL_LINES: usize = 200;
 /// 涨到把内存吃光。16 KiB 放得下带整条 classpath 的命令行和最长的异常信息，200 行也才 3.2 MB。
 const OUTPUT_LINE_MAX_BYTES: usize = 16 * 1024;
 
-/// 子进程退出后等读取任务读完剩余输出的时限。处理器若把管道句柄传给了还活着的孙进程，管道不会
-/// 关闭、读取任务会一直等下去；限时后放弃剩下的输出，不让安装卡在这里。
+/// 子进程退出后等读取任务读完剩余输出的时限，stdout 与 stderr 共用。处理器若把管道句柄传给了还活着
+/// 的孙进程，管道不会关闭、读取任务会一直等下去；限时后放弃剩下的输出，不让安装卡在这里。
 const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 收集处理器的 stdout 与 stderr：各起一个读取任务，按到达顺序合进同一份末尾缓冲。管道必须一直有人
@@ -1066,10 +1066,13 @@ impl OutputCapture {
         }
     }
 
-    /// 等读取任务读完（限时见 [`OUTPUT_DRAIN_GRACE`]），交出收集到的输出。
+    /// 等读取任务读完（两路共用一个 [`OUTPUT_DRAIN_GRACE`] 的时限），交出收集到的输出。
     async fn finish(self) -> ProcessorOutput {
+        // 截止时刻只算一次：两路都卡住时一共等一个时限。排在后面的那一路过了截止时刻才轮到时，
+        // timeout_at 仍会先看它读完没有，已经读完的不算超时。
+        let deadline = tokio::time::Instant::now() + OUTPUT_DRAIN_GRACE;
         for mut reader in self.readers {
-            match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut reader).await {
+            match tokio::time::timeout_at(deadline, &mut reader).await {
                 Ok(Ok(())) => {}
                 Ok(Err(join)) => match join.try_into_panic() {
                     Ok(payload) => std::panic::resume_unwind(payload),
@@ -3009,6 +3012,60 @@ mod tests {
         assert_eq!(
             lines_of(&tail),
             vec!["partial", "（读取处理器输出中断：管道断了）"]
+        );
+    }
+
+    /// 两路管道都被还活着的孙进程占着：一共只等一个时限，不是每路各等一个，安装不多卡两秒；读到的
+    /// 输出照常交回，每路各记一笔没读完。
+    #[tokio::test(start_paused = true)]
+    async fn both_pipes_share_one_drain_grace() {
+        let tail = collected();
+        push_line(&tail, "already read".to_owned());
+        let capture = OutputCapture {
+            tail,
+            readers: vec![
+                tokio::spawn(std::future::pending()),
+                tokio::spawn(std::future::pending()),
+            ],
+        };
+        let started = tokio::time::Instant::now();
+
+        let output = capture.finish().await;
+
+        let waited = started.elapsed();
+        assert!(
+            waited >= OUTPUT_DRAIN_GRACE
+                && waited < OUTPUT_DRAIN_GRACE + std::time::Duration::from_secs(1),
+            "实际等了 {waited:?}"
+        );
+        let unfinished = "（处理器已退出，管道仍被占着，后面的输出没有读完）";
+        assert_eq!(output.lines, vec!["already read", unfinished, unfinished]);
+    }
+
+    /// 排在后面的那一路在时限内读完了：时限到点时不算它超时，它读到的不丢。
+    #[tokio::test(start_paused = true)]
+    async fn a_pipe_that_finished_within_the_grace_is_not_given_up_on() {
+        let tail = collected();
+        let late = tail.clone();
+        let capture = OutputCapture {
+            tail,
+            readers: vec![
+                tokio::spawn(std::future::pending()),
+                tokio::spawn(async move {
+                    tokio::time::sleep(OUTPUT_DRAIN_GRACE / 2).await;
+                    push_line(&late, "from the second pipe".to_owned());
+                }),
+            ],
+        };
+
+        let output = capture.finish().await;
+
+        assert_eq!(
+            output.lines,
+            vec![
+                "from the second pipe",
+                "（处理器已退出，管道仍被占着，后面的输出没有读完）"
+            ]
         );
     }
 
