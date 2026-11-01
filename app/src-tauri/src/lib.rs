@@ -43,8 +43,10 @@ pub fn run() {
     // 晚一步初始化，恰恰是最想看的那几行日志就丢了。
     let log_path = logging::init();
     log_panics();
+    // 版本号以 tauri.conf.json 为准：dev 包只改它，Cargo.toml 里的版本和实际发出去的包对不上。
+    let context = tauri::generate_context!();
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = %context.package_info().version,
         log = ?log_path,
         "{} 启动",
         aurora_base::brand::APP_NAME_EN
@@ -59,7 +61,6 @@ pub fn run() {
         })
         .ok();
 
-    let context = tauri::generate_context!();
     let updater_support = commands::updater::detect_support(
         context.config().plugins.0.get("updater"),
         cfg!(debug_assertions),
