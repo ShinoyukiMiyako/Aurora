@@ -16,7 +16,7 @@ use aurora_download::{CancellationToken, SourcePlan};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::fabric::is_prerelease;
+use crate::fabric::{is_prerelease, prerelease_at};
 use crate::net;
 
 /// Forge 的版本列表。
@@ -142,7 +142,8 @@ pub fn neoforge_builds(modern: &[String], legacy: &[String]) -> Vec<LoaderBuild>
     builds
 }
 
-/// 版本号比较：逐段按数字比较，数字相同时不带预发布标记的更新。
+/// 版本号比较：先按预发布标记之前的数字逐段比，相同时不带预发布标记的更新，再比标记后面的序号。
+/// 序号不能混进前面一起比：`0.30.2-beta.1` 是 `0.30.2` 发布之前的版本，不是它的第四段。
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     fn numbers(v: &str) -> Vec<u64> {
         v.split(|c: char| !c.is_ascii_digit())
@@ -150,9 +151,15 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
             .map(|s| s.parse().unwrap_or(u64::MAX))
             .collect()
     }
-    numbers(a)
-        .cmp(&numbers(b))
+    fn split(v: &str) -> (&str, &str) {
+        v.split_at(prerelease_at(v).unwrap_or(v.len()))
+    }
+    let (release_a, tail_a) = split(a);
+    let (release_b, tail_b) = split(b);
+    numbers(release_a)
+        .cmp(&numbers(release_b))
         .then_with(|| is_prerelease(b).cmp(&is_prerelease(a)))
+        .then_with(|| numbers(tail_a).cmp(&numbers(tail_b)))
         .then_with(|| a.cmp(b))
 }
 
@@ -365,5 +372,23 @@ mod tests {
         assert!(builds_for(&builds, "1.19").is_empty());
         assert!(!builds[0].stable());
         assert!(builds[2].stable());
+    }
+
+    /// 预发布序号不是第四段版本号：`0.30.2-beta.1` 是 `0.30.2` 发布之前的版本。
+    #[test]
+    fn prerelease_counters_rank_inside_their_release() {
+        assert_eq!(compare_versions("0.30.2-beta.1", "0.30.2"), Ordering::Less);
+        assert_eq!(
+            compare_versions("0.20.0-beta.9", "0.20.0-beta.10"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_versions("0.31.0-beta.1", "0.30.2"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("1.20.1-47.3.0", "1.20.1-47.2.20"),
+            Ordering::Greater
+        );
     }
 }
