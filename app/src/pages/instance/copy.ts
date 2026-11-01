@@ -457,5 +457,13 @@ export const CRASH_PAGE_COPY = {
   emptyBody: "最近的启动都正常退出了。万一崩溃，这里会列出诊断摘要、命中的日志行、日志指向的 Mod，以及可以一键尝试的修复。",
   viewLogs: "查看启动日志",
   error: "读不到崩溃报告",
+  /** 一键尝试与「日志指向的 Mod」要按这几样推，哪一样读不出来就照实说哪一样。 */
+  readError: {
+    settings: SETTINGS_COPY.settingsError,
+    memory: SETTINGS_COPY.memoryError,
+    javaList: SETTINGS_COPY.javaError,
+    javaRequired: "读不到这个版本要求的 Java",
+    mods: "读不到 Mod 列表",
+  },
   retry: "重试",
 } as const;

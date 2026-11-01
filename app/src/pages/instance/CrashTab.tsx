@@ -324,23 +324,21 @@ function FixesCard({
     );
   }, [frozen, memory, mods, ready, report, required, runtimes]);
 
-  // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上
-  const error =
-    settings.status === "error"
-      ? settings
-      : memory.status === "error"
-        ? memory
-        : runtimes.status === "error"
-          ? runtimes
-          : required.status === "error"
-            ? required
-            : modsError;
+  // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上。
+  // 实例设置读不出来时内存也跟着报同一个错，所以设置排在内存前面，标题才对得上真正没读出来的那一样
+  const failure = firstFailure([
+    [CRASH_PAGE_COPY.readError.settings, settings],
+    [CRASH_PAGE_COPY.readError.memory, memory],
+    [CRASH_PAGE_COPY.readError.javaList, runtimes],
+    [CRASH_PAGE_COPY.readError.javaRequired, required],
+    [CRASH_PAGE_COPY.readError.mods, modsError],
+  ]);
 
   return (
     <Card padding="lg">
       <CardHeader icon="zap" title={CRASH_PAGE_COPY.fixesTitle} subtitle={CRASH_PAGE_COPY.fixesSubtitle} />
-      {error !== null && error.status === "error" ? (
-        <ModuleError title={CRASH_PAGE_COPY.error} error={error.error} onRetry={error.reload} />
+      {failure !== null ? (
+        <ModuleError title={failure.title} error={failure.error} onRetry={failure.reload} />
       ) : frozen === null || settings.status !== "ready" ? (
         <Skeleton shape="text" lines={3} />
       ) : (
@@ -373,6 +371,16 @@ function FixesCard({
       )}
     </Card>
   );
+}
+
+type Readable = { status: "loading" | "ready" } | { status: "error"; error: Error; reload(): void };
+
+/** 按顺序取第一样读不出来的输入，带上说明它的标题；原版实例不读 Mod 列表，那一项传 null。 */
+function firstFailure(inputs: readonly (readonly [string, Readable | null])[]): { title: string; error: Error; reload(): void } | null {
+  for (const [title, input] of inputs) {
+    if (input !== null && input.status === "error") return { title, error: input.error, reload: input.reload };
+  }
+  return null;
 }
 
 function FixRow({
@@ -603,7 +611,7 @@ function SuspectsCard({ ops, report, mods, switches }: { ops: InstanceOps; repor
     <Card padding="lg">
       <CardHeader icon="bug" title={CRASH_PAGE_COPY.suspectsTitle} subtitle={CRASH_PAGE_COPY.suspectsSubtitle} />
       {mods.status === "loading" && <Skeleton shape="text" lines={2} />}
-      {mods.status === "error" && <ModuleError title={CRASH_PAGE_COPY.error} error={mods.error} onRetry={mods.reload} />}
+      {mods.status === "error" && <ModuleError title={CRASH_PAGE_COPY.readError.mods} error={mods.error} onRetry={mods.reload} />}
       {mods.status === "ready" && report.suspects.length === 0 && <p className={styles.soft}>{CRASH_PAGE_COPY.suspectsNone}</p>}
       {mods.status === "ready" && report.suspects.length > 0 && (
         <ul className={styles.rows}>

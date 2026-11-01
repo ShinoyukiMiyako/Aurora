@@ -1620,6 +1620,81 @@ describe("实例详情：崩溃诊断", () => {
     expect(button("调到 6 GB").textContent).toBe("调到 6 GB");
   });
 
+  describe("一键尝试要的某一样读不出来：标题照实说是哪一样", () => {
+    /** 卡片按标题找：一键尝试与日志指向的 Mod 各是一张（卡片根带 data-pad）。 */
+    const cardOf = (title: string): HTMLElement => {
+      const heading = [...document.querySelectorAll("h2, h3")].find((h) => h.textContent === title);
+      const found = heading === undefined ? null : heading.closest<HTMLElement>("[data-pad]");
+      if (found === null) throw new Error(`找不到卡片 ${title}`);
+      return found;
+    };
+    const cases: { what: string; title: string; arrange(): void }[] = [
+      {
+        what: "实例设置",
+        title: "读不到实例设置",
+        arrange: () =>
+          ipc.overrides.set("get_instance_settings", () => {
+            throw new IpcError("io", "instance.json 读不出来");
+          }),
+      },
+      {
+        what: "本机内存",
+        title: "读不到本机内存",
+        arrange: () =>
+          ipc.overrides.set("memory_advice", () => {
+            throw new IpcError("io", "查询物理内存失败");
+          }),
+      },
+      {
+        what: "本机的 Java 列表",
+        title: "读不到本机的 Java 列表",
+        arrange: () =>
+          ipc.overrides.set("detect_java", () => {
+            throw new IpcError("io", "注册表读不出来");
+          }),
+      },
+      {
+        what: "版本要求的 Java",
+        title: "读不到这个版本要求的 Java",
+        arrange: () => {
+          instances = instances.map((i) => (i.id === ID ? { ...i, java_major: null } : i));
+          ipc.overrides.set("required_java", () => {
+            throw new IpcError("network_failed", "版本清单下载失败");
+          });
+        },
+      },
+      {
+        what: "Mod 列表",
+        title: "读不到 Mod 列表",
+        arrange: () =>
+          ipc.overrides.set("list_mods", () => {
+            throw new IpcError("io", "mods 目录读不出来");
+          }),
+      },
+    ];
+
+    for (const c of cases) {
+      it(`${c.what}读不出来时写「${c.title}」，不写读不到崩溃报告`, async () => {
+        c.arrange();
+        crash = report([{ category: "out_of_memory" }], NOW - 60_000);
+        await open("crash");
+        const fixes = cardOf("一键尝试");
+        expect(fixes.textContent).toContain(c.title);
+        expect(fixes.textContent).not.toContain("读不到崩溃报告");
+      });
+    }
+
+    it("Mod 列表读不出来时「日志指向的 Mod」同样写读不到 Mod 列表", async () => {
+      ipc.overrides.set("list_mods", () => {
+        throw new IpcError("io", "mods 目录读不出来");
+      });
+      crash = { ...report([{ category: "mixin_failure" }], NOW - 60_000), suspects: [{ mod_id: "sodium", file_name: "sodium.jar" }] };
+      await open("crash");
+      expect(text()).not.toContain("读不到崩溃报告");
+      expect(text().split("读不到 Mod 列表").length - 1).toBe(2);
+    });
+  });
+
   describe("Mod 启停在重扫回来之前", () => {
     const SUSPECT_SODIUM = [{ mod_id: "sodium", file_name: "sodium.jar" }];
     /** 一键尝试的按钮：与「日志指向的 Mod」的开关同名，按不是开关的那个找。 */
