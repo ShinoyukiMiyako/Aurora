@@ -54,6 +54,21 @@ describe("启动提示的呈现", () => {
     expect(callsOf(ipc, "open_folder")).toEqual([{ target: "data_dir", id: null, world: null }]);
   });
 
+  it("数据目录写不进去：标题说数据还在，正文说没丢并带上原因，动作打开数据目录", async () => {
+    ipc.overrides.set("open_folder", () => null);
+    const notice = describeStartupNotice({ kind: "data_dir_unwritable", reason: "拒绝访问。 (os error 5)" });
+    expect([notice.title, notice.body, notice.action?.label]).toEqual([
+      "数据还在原处，但这次写不进去",
+      "账户和实例都没丢。原因：拒绝访问。 (os error 5)",
+      "打开目录",
+    ]);
+    const action = notice.action;
+    if (action === undefined || !("run" in action)) throw new Error("数据目录写不进去的提示应当带一个执行命令的动作");
+    expect(action.errorTitle).toBe(SHELL_ACTION_ERROR.openDataDir);
+    await action.run();
+    expect(callsOf(ipc, "open_folder")).toEqual([{ target: "data_dir", id: null, world: null }]);
+  });
+
   it("配置与凭据库都出了事：按后端顺序各成一条", async () => {
     ipc.overrides.set("startup_notices", () => [
       configReset,

@@ -18,6 +18,8 @@ base16ct = { version = "1", features = ["alloc"] }
 url = "2"
 fastrand = "2"
 tracing = "0.1"
+# 数据目录定位时要判断 config.json 读不读得进来，与核心读配置用同一个解析器，结论才一致。
+serde_json = "1"
 
 [dev-dependencies]
 # wiremock 需要真正的后台运行时，测试用 multi_thread flavor，故 dev 侧补 macros/rt-multi-thread。

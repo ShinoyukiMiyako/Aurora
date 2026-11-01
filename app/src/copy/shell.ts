@@ -172,6 +172,12 @@ export const SHELL_ACTION_ERROR = {
 
 /** 启动提示：后端在启动时遇到、但不妨碍继续运行的问题。标题说清出了什么事，正文说清结果。 */
 export const STARTUP_NOTICE_COPY = {
+  dataDirUnwritable: {
+    title: "数据还在原处，但这次写不进去",
+    /** 通知正文只显示三行，最窄档一行十六个字。原因是这条提示的要点，前面只留半句，路径交给「打开目录」。 */
+    body: (reason: string) => `账户和实例都没丢。原因：${reason}`,
+    action: "打开目录",
+  },
   configReset: {
     title: "配置文件损坏，已按默认设置启动",
     body: "原文件已改名，留在数据目录里",

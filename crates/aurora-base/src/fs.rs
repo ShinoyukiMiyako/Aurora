@@ -5,7 +5,8 @@
 //! - 增量 sha1（[`Sha1Hasher`]）：数据边到边算，供下载引擎在写盘的同时校验，省掉写完再读一遍。
 //! - 原子写入：同目录临时文件写完 fsync 后 rename 覆盖目标，杜绝写一半留下损坏文件。
 //! - 目录定位：数据目录便携优先——可执行文件所在目录可写就用它，否则挂在
-//!   `%LOCALAPPDATA%\Petalfall` 下（[`resolve_data_dir`]）。
+//!   `%LOCALAPPDATA%\Petalfall` 下；目录里已有读得进来的 `config.json` 时写不进去也不换地方
+//!   （[`resolve_data_dir`]）。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -190,7 +191,7 @@ fn ensure_match(algorithm: &'static str, expected: &str, actual: &str) -> Result
     }
 }
 
-/// 一次数据目录定位的结果，供启动日志记录走了哪条路、花了多久。
+/// 一次数据目录定位的结果，供启动日志记录走了哪条路、花了多久，也供启动提示告诉用户写不进去的原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataDirResolution {
     /// 数据目录。
@@ -199,7 +200,9 @@ pub struct DataDirResolution {
     pub portable: bool,
     /// 没走便携模式的原因；便携模式下为 `None`。
     pub fallback_reason: Option<String>,
-    /// 定位耗时（含可写探针）。
+    /// 便携目录这次写不进去时系统给的原因：数据就在那里，所以没换地方，这件事要让用户知道。其余情况为 `None`。
+    pub write_failure: Option<String>,
+    /// 定位耗时（含可写探针与重试的等待）。
     pub elapsed: Duration,
 }
 
@@ -242,6 +245,17 @@ pub fn held_open(_path: &Path) -> std::io::Result<bool> {
 /// 写入探针的文件名：真写一个再删掉，用来判定 exe 所在目录是否可写。
 const WRITE_PROBE: &str = concat!(".", crate::app_slug!(), "-write-probe");
 
+/// 全局配置的文件名，与 aurora-core 的 `Aurora::load` 读的是同一个文件：它在，数据就在这个目录里。
+const CONFIG_FILE: &str = "config.json";
+
+/// 探针失败后每次重试前等多久。杀软扫新文件、另一个启动器进程撞上同名探针这类一时的占用几百毫秒就放开；
+/// 定位在窗口出来之前，这些等待都是双击后没反应的时间，所以次数和总时长写死。
+const PROBE_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(300),
+];
+
 static RESOLVED: OnceLock<DataDirResolution> = OnceLock::new();
 
 /// 定位数据目录，进程内只探测一次。
@@ -253,31 +267,85 @@ pub fn resolve_data_dir() -> Result<DataDirResolution> {
         return Ok(resolved.clone());
     }
     let started = Instant::now();
-    let resolved = match writable_exe_dir() {
-        Ok(dir) => DataDirResolution {
-            path: dir,
-            portable: true,
-            fallback_reason: None,
-            elapsed: started.elapsed(),
-        },
-        Err(reason) => DataDirResolution {
-            path: system_data_dir()?,
-            portable: false,
-            fallback_reason: Some(reason),
-            elapsed: started.elapsed(),
-        },
+    let root = choose_data_root(
+        exe_dir_candidate(),
+        has_readable_config,
+        probe_writable,
+        std::thread::sleep,
+    );
+    let (path, portable, fallback_reason, write_failure) = match root {
+        DataRoot::ExeDir(dir) => (dir, true, None, None),
+        DataRoot::ExeDirUnwritable { dir, failure } => (dir, true, None, Some(failure)),
+        DataRoot::System { reason } => (system_data_dir()?, false, Some(reason), None),
+    };
+    let resolved = DataDirResolution {
+        path,
+        portable,
+        fallback_reason,
+        write_failure,
+        elapsed: started.elapsed(),
     };
     Ok(RESOLVED.get_or_init(|| resolved).clone())
 }
 
-/// 可执行文件所在目录，且确认真的能写；不能用时给出原因。
+/// 数据根落在哪。
+#[derive(Debug, PartialEq, Eq)]
+enum DataRoot {
+    /// exe 所在目录，可写。
+    ExeDir(PathBuf),
+    /// exe 所在目录，重试后仍写不进去，但数据就在这里。`failure` 是系统给的原因。
+    ExeDirUnwritable { dir: PathBuf, failure: String },
+    /// 系统数据目录，`reason` 是 exe 所在目录用不了的原因。
+    System { reason: String },
+}
+
+/// 判定数据根。外界的事实都从参数进来，不碰可执行文件路径、环境变量与进程内缓存，测试才能逐条走到。
 ///
-/// 判据是实际写一个探针文件再删掉，而不是查权限位：网络驱动器、只读介质、组策略重定向都可能让
-/// 权限位看着没问题却写不进去，那种失败要等到下载游戏文件时才炸。
+/// 探针失败不等于数据不在这里：杀软锁文件、受控文件夹、磁盘写满、外接盘只读都只说明这一次写不进去。
+/// 这时换到系统目录，用户看到的是一个全新的启动器和首次向导，以为账户和实例都丢了，下次探针通过又翻回来。
+/// 所以目录里有读得进来的 config.json 就不换地方。读不进来的不算有，走原来的回落，两个原因一起留下：
+/// 坏配置要先改名留存才能按默认配置继续，这个目录改不了名，留下来启动就终止了，没有窗口，日志也写不进去。
+fn choose_data_root(
+    exe_dir: std::result::Result<PathBuf, String>,
+    has_config: impl FnOnce(&Path) -> std::io::Result<bool>,
+    mut probe: impl FnMut(&Path) -> std::io::Result<()>,
+    mut pause: impl FnMut(Duration),
+) -> DataRoot {
+    let dir = match exe_dir {
+        Ok(dir) => dir,
+        Err(reason) => return DataRoot::System { reason },
+    };
+    let Err(mut failure) = probe(&dir) else {
+        return DataRoot::ExeDir(dir);
+    };
+    let reason = format!("{} 不可写：{failure}", dir.display());
+    match has_config(&dir) {
+        Ok(true) => {}
+        Ok(false) => return DataRoot::System { reason },
+        Err(err) => {
+            return DataRoot::System {
+                reason: format!("{reason}；{CONFIG_FILE} 读不进来：{err}"),
+            };
+        }
+    }
+    for delay in PROBE_RETRY_DELAYS {
+        pause(delay);
+        match probe(&dir) {
+            Ok(()) => return DataRoot::ExeDir(dir),
+            Err(latest) => failure = latest,
+        }
+    }
+    DataRoot::ExeDirUnwritable {
+        dir,
+        failure: failure.to_string(),
+    }
+}
+
+/// 可执行文件所在目录，便携模式的候选；不能作候选时给出原因。
 ///
 /// debug 构建一律不走便携：开发时 exe 在 `target/debug` 下，便携判定会把配置、账户凭据和整个
 /// `.minecraft` 全写进构建产物目录，一次 `cargo clean` 就全没了。
-fn writable_exe_dir() -> std::result::Result<PathBuf, String> {
+fn exe_dir_candidate() -> std::result::Result<PathBuf, String> {
     if cfg!(debug_assertions) {
         return Err("debug 构建不使用便携模式".to_owned());
     }
@@ -286,14 +354,27 @@ fn writable_exe_dir() -> std::result::Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| format!("可执行文件路径没有上级目录：{}", exe.display()))?
         .to_path_buf();
-    probe_writable(&dir)?;
     Ok(dir)
 }
 
-/// 在 `dir` 里写一个探针文件再删掉；写不进去返回原因。
-fn probe_writable(dir: &Path) -> std::result::Result<(), String> {
+/// `dir` 里有没有读得进来的全局配置：文件不在是 `false`，读不出来或不是合法 JSON 报错。
+fn has_readable_config(dir: &Path) -> std::io::Result<bool> {
+    let bytes = match std::fs::read(dir.join(CONFIG_FILE)) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)?;
+    Ok(true)
+}
+
+/// 在 `dir` 里写一个探针文件再删掉；写不进去交回系统错误。
+///
+/// 判据是实际写一个探针文件再删掉，而不是查权限位：网络驱动器、只读介质、组策略重定向都可能让
+/// 权限位看着没问题却写不进去，那种失败要等到下载游戏文件时才炸。
+fn probe_writable(dir: &Path) -> std::io::Result<()> {
     let probe = dir.join(WRITE_PROBE);
-    std::fs::write(&probe, b"").map_err(|err| format!("{} 不可写：{err}", dir.display()))?;
+    std::fs::write(&probe, b"")?;
     // 探针删不掉不影响结论（已经证明可写），留个日志即可。
     if let Err(err) = std::fs::remove_file(&probe) {
         tracing::debug!(path = %probe.display(), error = %err, "清理写入探针失败");
@@ -504,11 +585,12 @@ mod tests {
                 .as_deref()
                 .is_some_and(|reason| reason.contains("debug"))
         );
+        assert_eq!(resolved.write_failure, None);
         assert_eq!(data_dir().unwrap(), resolved.path);
         assert_eq!(resolve_data_dir().unwrap(), resolved, "进程内只定位一次");
     }
 
-    /// 可写判据真写真删：可写目录通过且不留探针；指向文件（写不进子路径）的给出原因。
+    /// 可写判据真写真删：可写目录通过且不留探针；指向文件（写不进子路径）的报错。
     #[test]
     fn write_probe_detects_writability_and_leaves_no_residue() {
         let dir = tempfile::tempdir().unwrap();
@@ -518,8 +600,241 @@ mod tests {
 
         let file = dir.path().join("not-a-dir");
         std::fs::write(&file, b"x").unwrap();
-        let reason = probe_writable(&file).unwrap_err();
+        assert!(probe_writable(&file).is_err());
+    }
+
+    /// 判定用的替身目录：不落盘，走不到真实文件系统。
+    fn exe_dir() -> PathBuf {
+        PathBuf::from(r"E:\Petalfall")
+    }
+
+    /// 第 n 次探针（从 1 数起）的系统错误。
+    fn failure(attempt: usize) -> String {
+        format!("第 {attempt} 次写不进去")
+    }
+
+    /// 一路失败的探针，连同它被调用的次数。
+    fn always_failing(
+        attempts: &std::cell::Cell<usize>,
+    ) -> impl FnMut(&Path) -> std::io::Result<()> + '_ {
+        move |_| {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::other(failure(attempts.get())))
+        }
+    }
+
+    /// 探针一路失败、config.json 在：等满全部重试，数据根不换，留下最后一次的系统错误。
+    /// 这条是用户现在的路径：去掉这个分支，每次探针失败都会翻到系统目录、弹出首次向导。
+    #[test]
+    fn unwritable_dir_with_config_keeps_the_data_root_after_every_retry() {
+        let attempts = std::cell::Cell::new(0);
+        let mut waited = Vec::new();
+
+        let root = choose_data_root(
+            Ok(exe_dir()),
+            |dir| {
+                assert_eq!(dir, exe_dir());
+                Ok(true)
+            },
+            always_failing(&attempts),
+            |delay| waited.push(delay),
+        );
+
+        assert_eq!(
+            root,
+            DataRoot::ExeDirUnwritable {
+                dir: exe_dir(),
+                failure: failure(PROBE_RETRY_DELAYS.len() + 1),
+            }
+        );
+        assert_eq!(attempts.get(), PROBE_RETRY_DELAYS.len() + 1);
+        assert_eq!(waited, PROBE_RETRY_DELAYS);
+    }
+
+    /// 重试的等待有上限：探针失败时窗口还没出来，再等就是双击后没反应。
+    #[test]
+    fn retry_waits_add_up_to_less_than_a_second() {
+        assert_eq!(
+            PROBE_RETRY_DELAYS.iter().sum::<Duration>(),
+            Duration::from_millis(600)
+        );
+    }
+
+    /// 一时的占用：重试途中写通了就是正常的便携模式，不留原因，也不再多等。
+    #[test]
+    fn transient_failure_with_config_recovers_and_stops_retrying() {
+        let attempts = std::cell::Cell::new(0);
+        let mut waited = Vec::new();
+
+        let root = choose_data_root(
+            Ok(exe_dir()),
+            |_| Ok(true),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() < 3 {
+                    Err(std::io::Error::other(failure(attempts.get())))
+                } else {
+                    Ok(())
+                }
+            },
+            |delay| waited.push(delay),
+        );
+
+        assert_eq!(root, DataRoot::ExeDir(exe_dir()));
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(waited, PROBE_RETRY_DELAYS[..2]);
+    }
+
+    /// 没有 config.json：这里没有数据要守，第一次失败就回落，不重试不等待（比如装在 Program Files）。
+    #[test]
+    fn unwritable_dir_without_config_falls_back_at_once() {
+        let attempts = std::cell::Cell::new(0);
+        let mut waited = Vec::new();
+
+        let root = choose_data_root(
+            Ok(exe_dir()),
+            |_| Ok(false),
+            always_failing(&attempts),
+            |delay| waited.push(delay),
+        );
+
+        assert_eq!(
+            root,
+            DataRoot::System {
+                reason: r"E:\Petalfall 不可写：第 1 次写不进去".to_owned()
+            }
+        );
+        assert_eq!(attempts.get(), 1);
+        assert!(waited.is_empty(), "{waited:?}");
+    }
+
+    /// config.json 读不进来：不当作有，回落，探针的原因和读不进来的原因都留下。
+    #[test]
+    fn unconfirmable_config_falls_back_with_both_reasons() {
+        let attempts = std::cell::Cell::new(0);
+
+        let root = choose_data_root(
+            Ok(exe_dir()),
+            |_| Err(std::io::Error::other("拒绝访问")),
+            always_failing(&attempts),
+            |delay| panic!("不该等待：{delay:?}"),
+        );
+
+        assert_eq!(
+            root,
+            DataRoot::System {
+                reason: r"E:\Petalfall 不可写：第 1 次写不进去；config.json 读不进来：拒绝访问"
+                    .to_owned()
+            }
+        );
+        assert_eq!(attempts.get(), 1);
+    }
+
+    /// 写得通就是便携模式，用不着看 config.json：全新解压的便携版里还没有它。
+    #[test]
+    fn writable_dir_is_portable_without_looking_for_config() {
+        let root = choose_data_root(
+            Ok(exe_dir()),
+            |_| panic!("写得通时不该去看 config.json"),
+            |_| Ok(()),
+            |delay| panic!("不该等待：{delay:?}"),
+        );
+        assert_eq!(root, DataRoot::ExeDir(exe_dir()));
+    }
+
+    /// exe 目录当不了候选（debug 构建、取不到路径）：不探测，直接回落，原因原样留下。
+    #[test]
+    fn missing_candidate_falls_back_without_probing() {
+        let root = choose_data_root(
+            Err("debug 构建不使用便携模式".to_owned()),
+            |_| panic!("没有候选时不该看 config.json"),
+            |_| panic!("没有候选时不该探测"),
+            |delay| panic!("不该等待：{delay:?}"),
+        );
+        assert_eq!(
+            root,
+            DataRoot::System {
+                reason: "debug 构建不使用便携模式".to_owned()
+            }
+        );
+    }
+
+    /// 坏配置留不下来：按默认配置继续要先把它改名留存，这个目录改不了名，留下来启动就终止了，没有窗口，
+    /// 日志也写不进去。空文件是写到一半掉电的样子，截断的 JSON 与乱码同理。
+    #[test]
+    fn real_probe_failure_with_a_broken_config_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(WRITE_PROBE)).unwrap();
+
+        for broken in [&b""[..], b"{ \"language\": ", b"\xFF\xFE\x00"] {
+            std::fs::write(dir.path().join(CONFIG_FILE), broken).unwrap();
+            let root = choose_data_root(
+                Ok(dir.path().to_path_buf()),
+                has_readable_config,
+                probe_writable,
+                |delay| panic!("不该等待：{delay:?}"),
+            );
+            match root {
+                DataRoot::System { reason } => {
+                    assert!(reason.contains("不可写"), "实际：{reason}");
+                    assert!(reason.contains("config.json 读不进来"), "实际：{reason}");
+                }
+                other => panic!("{broken:?} 不该留在写不进去的目录：{other:?}"),
+            }
+        }
+    }
+
+    /// 读得进来才算有。类型对不上的合法 JSON 这里分不出来，它要核心的配置结构才认得。
+    #[test]
+    fn config_counts_only_when_it_can_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join(CONFIG_FILE);
+
+        assert!(
+            !has_readable_config(dir.path()).unwrap(),
+            "没有文件就是没有"
+        );
+
+        std::fs::write(&config, br#"{"first_run_completed": true}"#).unwrap();
+        assert!(has_readable_config(dir.path()).unwrap());
+
+        std::fs::write(&config, b"not json").unwrap();
+        assert_eq!(
+            has_readable_config(dir.path()).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        std::fs::remove_file(&config).unwrap();
+        std::fs::create_dir(&config).unwrap();
+        assert!(has_readable_config(dir.path()).is_err(), "同名目录不是配置");
+    }
+
+    /// 走真实文件系统：探针路径被同名目录占着，写入真的失败，结论只取决于盘上有没有 config.json。
+    #[test]
+    fn real_probe_failure_is_decided_by_the_config_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(WRITE_PROBE)).unwrap();
+        let choose = || {
+            choose_data_root(
+                Ok(dir.path().to_path_buf()),
+                has_readable_config,
+                probe_writable,
+                |_| {},
+            )
+        };
+
+        let DataRoot::System { reason } = choose() else {
+            panic!("没有 config.json 时应回落");
+        };
         assert!(reason.contains("不可写"), "实际：{reason}");
+
+        std::fs::write(dir.path().join("config.json"), b"{}").unwrap();
+        let DataRoot::ExeDirUnwritable { dir: kept, failure } = choose() else {
+            panic!("有 config.json 时不应换数据根");
+        };
+        assert_eq!(kept, dir.path());
+        let os_error = std::fs::write(dir.path().join(WRITE_PROBE), b"").unwrap_err();
+        assert_eq!(failure, os_error.to_string());
     }
 
     /// 只读不改环境变量：edition 2024 下 `set_var` 是 unsafe，测试不该动进程级全局状态。
