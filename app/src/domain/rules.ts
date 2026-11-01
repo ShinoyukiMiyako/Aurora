@@ -206,7 +206,7 @@ export type IsolationPolicyName = Settings["isolationPolicy"];
 
 /**
  * 跟随全局时按全局策略与实例类型推断是否隔离，与后端判定同一张表：加载器（含 OptiFine、LiteLoader）算模组版本，
- * 版本类型不是 release 算非正式版。后端另有一条「版本目录里已有 mods 或 saves 就强制隔离」，前端看不到目录，不参与推断。
+ * 版本类型不是 release 算非正式版。后端另有一条「版本目录的 mods 或 saves 里有内容就强制隔离」，前端看不到目录，不参与推断。
  */
 export function isolationByPolicy(policy: IsolationPolicyName, inst: Pick<InstanceSummary, "loader" | "extraLoaders" | "releaseType">): boolean {
   const modded = inst.loader !== "vanilla" || inst.extraLoaders.length > 0;
