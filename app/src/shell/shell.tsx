@@ -92,7 +92,7 @@ export interface ShellApi {
   openUpdatePanel(): void;
   closeUpdatePanel(): void;
   /**
-   * 「重启并安装」：有活动下载任务时先确认会中断它们；安装会关闭启动器，动手前把任务表写盘，重启后能看到被中断的任务并重试。
+   * 「重启并安装」：有活动任务时先确认会中断它们；安装会关闭启动器，动手前把任务表写盘，重启后能看到被中断的任务并重试。
    * 游戏会话进行中不允许安装，由入口自己禁用。失败经统一错误处理提示，永不 reject。
    */
   installUpdate(): Promise<void>;

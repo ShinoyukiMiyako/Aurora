@@ -193,7 +193,7 @@ export type AutoBackupOutcome = "runs" | "off" | "skipped";
 
 /**
  * 这一局游戏退出时会不会自动备份。备份由产品自己在游戏退出时做，「游戏启动后」选了关闭时它那时已经不在了，开关开着也不会发生。
- * 有下载任务时关闭降级为最小化，那一局其实还会备份；这里按不会算：说少了只是多一句提醒，说多了玩家就没了备份。
+ * 有进行中的任务时关闭降级为最小化，那一局其实还会备份；这里按不会算：说少了只是多一句提醒，说多了玩家就没了备份。
  */
 export function autoBackupOutcome(afterLaunch: Settings["afterLaunch"], auto: boolean): AutoBackupOutcome {
   if (!auto) return "off";

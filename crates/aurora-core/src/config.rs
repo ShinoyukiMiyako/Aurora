@@ -117,7 +117,7 @@ impl Default for WorldBackupSettings {
 pub enum AfterLaunch {
     /// 留在原处，方便看日志。
     Keep,
-    /// 游戏窗口出现后缩到任务栏，游戏结束再弹回来（默认）。
+    /// 游戏进程起来后缩到任务栏，游戏结束再弹回来（默认）。
     #[default]
     Minimize,
     /// 退出启动器；有下载任务进行中时由前端降级为最小化。

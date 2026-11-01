@@ -182,7 +182,7 @@ describe("游戏启动后的窗口动作", () => {
     expect(afterLaunchMove("minimize", 0)).toBe("minimize");
   });
 
-  it("关闭启动器：没有下载任务时退出，有任务时降级为最小化", () => {
+  it("关闭启动器：没有进行中的任务时退出，有任务时降级为最小化", () => {
     expect(afterLaunchMove("close", 0)).toBe("exit");
     expect(afterLaunchMove("close", 1)).toBe("minimize");
   });
