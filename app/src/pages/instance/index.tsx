@@ -110,7 +110,7 @@ export default function InstancePage({ route }: PageProps<"instance">) {
             {route.tab === "mods" && <ModsTab inst={inst} queryId={queryId} ops={ops} updates={updates} />}
             {route.tab === "settings" && <SettingsTab inst={inst} queryId={queryId} ops={ops} />}
             {route.tab === "logs" && <LogsTab inst={inst} queryId={queryId} ops={ops} />}
-            {route.tab === "crash" && <CrashTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} onTab={onTab} />}
+            {route.tab === "crash" && <CrashTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} onTab={onTab} onRename={() => setRenaming(true)} />}
           </>
         )}
       </TabPanel>

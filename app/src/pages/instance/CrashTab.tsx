@@ -59,9 +59,11 @@ export interface CrashTabProps {
   crash: ResourceResult<CrashReportDto | null>;
   crashActive: boolean;
   onTab(tab: InstanceTab): void;
+  /** 进入头图的就地改名。 */
+  onRename(): void;
 }
 
-export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab }: CrashTabProps) {
+export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab, onRename }: CrashTabProps) {
   const actions = useLauncherActions();
   // 从「查看诊断」进来时收起崩溃态：报告已经落盘，不会丢
   const crashed = view.kind === "crashed";
@@ -103,7 +105,7 @@ export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab }
       </Card>
     );
   }
-  return <ReportView inst={inst} queryId={queryId} ops={ops} view={view} report={crash.data} crashActive={crashActive} onTab={onTab} />;
+  return <ReportView inst={inst} queryId={queryId} ops={ops} view={view} report={crash.data} crashActive={crashActive} onTab={onTab} onRename={onRename} />;
 }
 
 function ReportView({
@@ -114,6 +116,7 @@ function ReportView({
   report,
   crashActive,
   onTab,
+  onRename,
 }: Omit<CrashTabProps, "crash"> & { report: CrashReportDto }) {
   const modded = inst.loader !== "vanilla";
   const mods = useInstanceMods(modded ? queryId : null);
@@ -123,7 +126,7 @@ function ReportView({
 
   return (
     <div className={styles.stack}>
-      <SummaryCard inst={inst} ops={ops} view={view} report={report} crashActive={crashActive} onTab={onTab} />
+      <SummaryCard inst={inst} ops={ops} view={view} report={report} crashActive={crashActive} onTab={onTab} onRename={onRename} />
       <div className={styles.crashGrid}>
         <div className={styles.stack}>
           {report.diagnoses.map((clue, i) => (
@@ -143,6 +146,7 @@ function ReportView({
             modsError={modded && mods.status === "error" ? mods : null}
             switches={switches}
             onTab={onTab}
+            onRename={onRename}
           />
           {modded && <SuspectsCard ops={ops} report={report} mods={mods} switches={switches} />}
         </div>
@@ -153,7 +157,7 @@ function ReportView({
 
 // ---------------------------------------------------------------- 摘要
 
-function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: InstanceSummary; ops: InstanceOps; view: LaunchView; report: CrashReportDto; crashActive: boolean; onTab(tab: InstanceTab): void }) {
+function SummaryCard({ inst, ops, view, report, crashActive, onTab, onRename }: { inst: InstanceSummary; ops: InstanceOps; view: LaunchView; report: CrashReportDto; crashActive: boolean; onTab(tab: InstanceTab): void; onRename(): void }) {
   const now = useNow(30_000);
   const { tier, copyText } = useShell();
   if (report.at === null) throw new Error(`实例 ${inst.id} 的崩溃报告缺少崩溃时刻`);
@@ -196,7 +200,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
           )}
           <span className={styles.soft}>{`${formatDate(report.at)} ${clock(report.at)}`}</span>
           {report.scanned_files.length > 0 && <ScannedFiles files={report.scanned_files} />}
-          {report.warnings.length > 0 && <LaunchWarnings warnings={report.warnings} onTab={onTab} />}
+          {report.warnings.length > 0 && <LaunchWarnings warnings={report.warnings} ops={ops} onTab={onTab} onRename={onRename} />}
         </div>
         <Button variant="ghost" size="sm" icon="terminal" onClick={() => onTab("logs")}>
           {CRASH_PAGE_COPY.fullLog}
@@ -240,12 +244,16 @@ function ScannedFiles({ files }: { files: readonly ScannedFile[] }) {
   );
 }
 
-function LaunchWarnings({ warnings, onTab }: { warnings: CrashReportDto["warnings"]; onTab(tab: InstanceTab): void }) {
+function LaunchWarnings({ warnings, ops, onTab, onRename }: { warnings: CrashReportDto["warnings"]; ops: InstanceOps; onTab(tab: InstanceTab): void; onRename(): void }) {
   const { go } = useNav();
+  const renameLock = lockReason(ops.locks.rename, "rename");
   const act = (kind: LaunchWarningActionKind) => {
     switch (kind) {
       case "change_game_dir":
         go({ page: "settings", section: "game" });
+        return;
+      case "rename_instance":
+        onRename();
         return;
       case "manage_accounts":
         go({ page: "accounts" });
@@ -271,7 +279,7 @@ function LaunchWarnings({ warnings, onTab }: { warnings: CrashReportDto["warning
                 <span className={styles.warningTitle}>{copy.title}</span>
                 {copy.body}
               </span>
-              <Button size="sm" onClick={() => act(copy.action.kind)}>
+              <Button size="sm" disabledReason={copy.action.kind === "rename_instance" ? renameLock : undefined} onClick={() => act(copy.action.kind)}>
                 {copy.action.label}
               </Button>
             </li>
@@ -409,6 +417,7 @@ function FixesCard({
   modsError,
   switches,
   onTab,
+  onRename,
 }: {
   inst: InstanceSummary;
   queryId: string | null;
@@ -420,6 +429,7 @@ function FixesCard({
   modsError: ResourceResult<InstalledMod[]> | null;
   switches: ModSwitches;
   onTab(tab: InstanceTab): void;
+  onRename(): void;
 }) {
   const settings = useInstanceSettings(queryId);
   const memory = useMemoryInfo(inst, settings, queryId);
@@ -486,6 +496,7 @@ function FixesCard({
                 })
               }
               onTab={onTab}
+              onRename={onRename}
             />
             );
           })}
@@ -515,6 +526,7 @@ function FixRow({
   onDone,
   onUndone,
   onTab,
+  onRename,
 }: {
   fix: CrashFix;
   inst: InstanceSummary;
@@ -525,6 +537,7 @@ function FixRow({
   onDone(done: Done): void;
   onUndone(): void;
   onTab(tab: InstanceTab): void;
+  onRename(): void;
 }) {
   const actions = useLauncherActions();
   const { go } = useNav();
@@ -677,12 +690,20 @@ function FixRow({
     case "repair":
       note = inst.status === "installing" ? CRASH_PAGE_COPY.repairDone : CRASH_PAGE_COPY.repairNote;
       if (inst.status !== "installing") action = button(SETTINGS_COPY.repairTitle, ops.repair, repairLock);
-      if (fix.changeGameDir)
-        extra = (
-          <Button variant="ghost" size="sm" onClick={() => go({ page: "settings", section: "game" })}>
-            {CRASH_PAGE_COPY.changeGameDir}
-          </Button>
-        );
+      extra = (
+        <>
+          {fix.changeGameDir && (
+            <Button variant="ghost" size="sm" onClick={() => go({ page: "settings", section: "game" })}>
+              {CRASH_PAGE_COPY.changeGameDir}
+            </Button>
+          )}
+          {fix.renameInstance && (
+            <Button variant="ghost" size="sm" disabledReason={lockReason(ops.locks.rename, "rename")} onClick={onRename}>
+              {CRASH_PAGE_COPY.renameInstance}
+            </Button>
+          )}
+        </>
+      );
       break;
     case "driver_steps":
       note = CRASH_PAGE_COPY.driverNote;

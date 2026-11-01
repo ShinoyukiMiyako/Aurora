@@ -94,7 +94,7 @@ describe("新增文案不用禁用词", () => {
   it("收齐了全部类别、退出码说明与启动提醒", () => {
     // 16 类各有标签、标题与有 detail 的解释，除重复的 Mod 外再有无 detail 的解释，外加一条自带语言支持的分支
     expect(explanations()).toHaveLength(16 * 3 + 15 + 1);
-    expect(texts).toHaveLength(64 + 3 * 2 + 4 + 7 * 3);
+    expect(texts).toHaveLength(64 + 3 * 2 + 4 + 8 * 3);
   });
 
   it.each(FORBIDDEN)("不含「%s」", (word) => {
