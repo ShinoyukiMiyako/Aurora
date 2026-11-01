@@ -1,4 +1,4 @@
-// 常规：游戏启动后启动器做什么；界面语言；高级里的微软登录 client_id。
+// 常规：游戏启动后启动器做什么、实例第一次启动时跳不跳过无障碍引导；界面语言；高级里的微软登录 client_id。
 //
 // 各行按片订阅自己那一项设置：游戏运行时每批日志、下载时每次进度都会换一次状态，整份订阅会让整个分区跟着重渲染。
 
@@ -17,6 +17,7 @@ import { SegmentedControl } from "../../../ui/SegmentedControl";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
 import { TextInput } from "../../../ui/TextInput";
+import { Toggle } from "../../../ui/Toggle";
 import { AFTER_LAUNCH_OPTIONS, AUTO_BACKUP_SKIPPED_NOTE, GENERAL_COPY, saveFailed } from "../copy";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
@@ -32,6 +33,7 @@ function loaded(state: LauncherState): Settings {
 
 const selectAfterLaunch = (state: LauncherState): AfterLaunch => loaded(state).afterLaunch;
 const selectAutoBackup = (state: LauncherState): boolean => loaded(state).worldBackup.auto;
+const selectSkipAccessibilityOnboarding = (state: LauncherState): boolean => loaded(state).skipAccessibilityOnboarding;
 const selectLanguage = (state: LauncherState): Language => loaded(state).language;
 const selectHasClientId = (state: LauncherState): boolean => loaded(state).hasClientId;
 
@@ -66,6 +68,17 @@ function AfterLaunchRow() {
         onChange={write.set}
         options={AFTER_LAUNCH_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
       />
+    </SettingRow>
+  );
+}
+
+function SkipAccessibilityOnboardingRow() {
+  const skip = useLauncherSelector(selectSkipAccessibilityOnboarding);
+  const actions = useLauncherActions();
+  const write = useSettingWrite(skip, GENERAL_COPY.skipAccessibilityOnboarding, (skipAccessibilityOnboarding: boolean) => actions.updateSettings({ skipAccessibilityOnboarding }));
+  return (
+    <SettingRow title={GENERAL_COPY.skipAccessibilityOnboarding} description={GENERAL_COPY.skipAccessibilityOnboardingDesc}>
+      <Toggle checked={write.value} onChange={write.set} ariaLabel={GENERAL_COPY.skipAccessibilityOnboarding} />
     </SettingRow>
   );
 }
@@ -163,6 +176,7 @@ export function GeneralSection() {
       <Card>
         <CardHeader title={GENERAL_COPY.launchTitle} subtitle={GENERAL_COPY.launchSubtitle} icon="play" />
         <AfterLaunchRow />
+        <SkipAccessibilityOnboardingRow />
       </Card>
       <Card>
         <CardHeader title={INTERFACE_COPY.title} icon="sliders" />
