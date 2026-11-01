@@ -314,7 +314,7 @@ export interface ManifestDto {
 
 /**
  * open_folder 能打开的文件夹。game_dir、data_dir（启动器数据目录）、launcher_logs（启动器自己的日志目录）
- * 不需要 id；world 还需要存档文件夹名。
+ * 不需要 id；world 还需要存档文件夹名。logs 是游戏自己写的日志，session_logs 是启动器记下的每局会话日志。
  */
 export type FolderTarget =
   | "game_dir"
@@ -326,6 +326,7 @@ export type FolderTarget =
   | "resourcepacks"
   | "shaderpacks"
   | "logs"
+  | "session_logs"
   | "screenshots"
   | "world";
 

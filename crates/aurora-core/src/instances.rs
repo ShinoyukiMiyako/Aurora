@@ -140,6 +140,14 @@ impl Aurora {
         }
     }
 
+    /// 实例的会话日志目录，日志页与崩溃报告读的启动日志都在这里。实例不存在报 [`CoreError::VersionNotInstalled`]，
+    /// 日志目录本身可能还没建。
+    pub async fn session_logs_dir(&self, id: &str) -> Result<PathBuf> {
+        Ok(aurora_launch::logfile::logs_dir(
+            &self.existing_instance_dir(id).await?,
+        ))
+    }
+
     /// `versions/` 下全部实例目录名（含版本 JSON 损坏的），按名升序。
     pub async fn instance_names(&self) -> Result<Vec<String>> {
         Ok(list_version_dirs(self.game_dir())

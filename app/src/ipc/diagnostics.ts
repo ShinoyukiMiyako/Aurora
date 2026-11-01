@@ -6,6 +6,8 @@ import type { LogLineDto } from "./launch";
 export type CrashCategory =
   | "java_version_mismatch"
   | "out_of_memory"
+  /** Java 不接受自定义的 JVM 参数。 */
+  | "jvm_args_invalid"
   | "missing_dependency"
   | "mixin_failure"
   | "duplicate_mod"
@@ -16,7 +18,7 @@ export type CrashCategory =
   | "optifine_incompatible"
   | "intel_graphics_driver"
   | "missing_language_provider"
-  /** 规则一条都没命中、退出码又是访问冲突或紧急中止时的兜底。 */
+  /** 规则一条都没命中时的兜底：JVM 错误头写着原生异常，或退出码是访问冲突、紧急中止。 */
   | "native_crash";
 
 /** 线索从哪里读出来：会话日志、原版崩溃报告（crash-reports/ 下）、JVM 错误日志（hs_err_pid*.log），或只有退出码。 */

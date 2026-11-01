@@ -25,6 +25,7 @@ pub mod classpath;
 pub mod command;
 pub mod crash;
 pub mod error;
+pub mod log4j_xml;
 pub mod logfile;
 pub mod memory;
 pub mod placeholder;
@@ -39,7 +40,8 @@ pub use classpath::{classpath_entries, classpath_separator, classpath_string};
 pub use command::{CommandBuilder, GamePaths, LaunchCommand};
 pub use crash::{
     CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, analyze, analyze_lines,
-    exit_code_clue, explain_exit_code, extract_mod_ids, has_crash_marker, suspected_mods,
+    exit_code_clue, explain_exit_code, extract_mod_ids, has_crash_marker, jvm_exception_clue,
+    suspected_mods,
 };
 pub use error::{LaunchError, Result};
 pub use logfile::{
@@ -53,8 +55,8 @@ pub use memory::{
 pub use placeholder::Placeholders;
 pub use precheck::{
     DEFAULT_JAVA_MAJOR, JvmMemoryIssue, MIN_MAX_HEAP_MB, ONEDRIVE_ENV_VARS, PLAYER_NAME_MAX_UNITS,
-    SyncProvider, SyncRoot, game_path_warning, jvm_memory_issue, long_player_name,
-    required_java_major, sync_folder, sync_roots_from_env,
+    SyncProvider, SyncRoot, effective_max_heap_mb, game_path_warning, jvm_memory_issue,
+    long_player_name, required_java_major, sync_folder, sync_roots_from_env,
 };
 pub use process::{
     ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogStream, SessionEnd,

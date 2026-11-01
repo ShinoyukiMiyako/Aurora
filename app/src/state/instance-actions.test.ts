@@ -160,6 +160,49 @@ describe("固定 Java 引起的启动失败：修复动作改对固定的那一�
   });
 });
 
+describe("修复完成后的启动失败卡", () => {
+  beforeEach(() => {
+    ipc.overrides.set("repair_instance", () => Promise.resolve({ reinstalled: false, libraries: 0, assets: 0, natives: 0 }));
+  });
+
+  const repairedToast = (id: string) => ["success", `「${id}」已修复`];
+  const toasts = () => store.getState().toasts.map((t) => [t.tone, t.title]);
+
+  const failLaunchWith = async (code: string, detail?: Record<string, unknown>) => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError(code, "启动失败", detail);
+    });
+    await store.actions.launch("生存");
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code } });
+  };
+
+  it("版本文件不完整的失败卡随修复完成撤下：入口回到启动，通知说已修复", async () => {
+    await failLaunchWith("version_broken");
+    const fix = store.actions.failureFix("repair");
+    if (!("run" in fix)) throw new Error("修复实例应是命令类修复动作");
+    await fix.run();
+    await settle();
+    expect(toasts()).toContainEqual(repairedToast("生存"));
+    expect(store.getState().session).toBeNull();
+  });
+
+  it("修复解决不了的失败卡留着：Java 不存在不会因为补全了文件就好", async () => {
+    await failLaunchWith("java_missing", { major: 21, mc_version: "1.21.1" });
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(toasts()).toContainEqual(repairedToast("生存"));
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed", failure: { code: "java_missing" } });
+  });
+
+  it("修的是别的实例时不动这张失败卡", async () => {
+    await failLaunchWith("version_broken");
+    await store.actions.repairInstance("创造");
+    await settle();
+    expect(toasts()).toContainEqual(repairedToast("创造"));
+    expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "failed" });
+  });
+});
+
 describe("改名迁移启动会话", () => {
   it("启动失败的会话随改名换成新 id：重试按新名字启动，查看日志也落到新名字", async () => {
     ipc.overrides.set("launch_game", () => {

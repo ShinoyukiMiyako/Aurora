@@ -28,9 +28,9 @@ use aurora_launch::logfile::{SessionOutcome, logs_dir};
 use aurora_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
     LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, QuickPlayMode,
-    QuickPlayTarget, SessionClock, SessionLog, SyncProvider, game_path_warning, jvm_memory_issue,
-    long_player_name, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
-    sync_roots_from_env,
+    QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
+    game_path_warning, jvm_memory_issue, long_player_name, quick_play_support, recommended_max_mb,
+    required_java_major, sync_folder, sync_roots_from_env,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
 use serde::Serialize;
@@ -922,6 +922,8 @@ impl Aurora {
             warnings.push(warning);
             reporter.warn(text).await;
         }
+        // 崩溃诊断拿它解释内存耗尽：写的要是内存设置而不是 -Xmx，诊断就会说一个这局根本没用上的数。
+        let max_heap_mb = effective_max_heap_mb(&settings.jvm_args, memory);
         let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         let command = assemble_command(
             merged,
@@ -942,7 +944,7 @@ impl Aurora {
                 "Java {} {}；最大内存 {} MB；工作目录 {}{}",
                 java.version.major,
                 java.path.display(),
-                memory.max_mb,
+                max_heap_mb,
                 working_dir.display(),
                 if resolved.isolated {
                     "（已隔离）"
@@ -977,7 +979,7 @@ impl Aurora {
                     path: java.path.display().to_string(),
                     is_64bit: java.is_64bit,
                 },
-                max_memory_mb: memory.max_mb,
+                max_memory_mb: max_heap_mb,
                 warnings,
                 pid,
                 offline,
@@ -3636,6 +3638,51 @@ mod tests {
                 LaunchWarning::JvmMaxTooLow,
                 "最大内存只有 256 MB，低于 512 MB，游戏多半进不了主界面".to_owned()
             )
+        );
+    }
+
+    /// 自定义 -Xmx 排在内存设置之后，这一局真正的上限是它：诊断要解释内存耗尽，记内存设置就是在说一个没用上的数。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crash_report_records_the_max_heap_that_actually_applied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let config = AuroraConfig {
+            memory: MemorySettings {
+                auto: false,
+                ..MemorySettings::default()
+            },
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::for_test(config, root.clone(), root.join(".minecraft"));
+        install_version(&root.join(".minecraft"), 17, true);
+        aurora_instance::VersionSettingsStore::for_version_dir(
+            &root.join(".minecraft").join(VERSIONS_DIR).join(VERSION),
+        )
+        .save(&VersionSettings {
+            jvm_args: "-Xmx64M".into(),
+            ..VersionSettings::default()
+        })
+        .await
+        .unwrap();
+        let java = complete_fake_java(&root, 17, 3);
+
+        let (result, _) = launch(&aurora, java).await;
+        let run = match result {
+            Ok(run) => run,
+            Err(err) => panic!("过小的 -Xmx 只提醒，不阻断启动：{err:?}"),
+        };
+        assert!(run.finish().await.exit.crashed);
+        let crash = aurora
+            .last_crash(VERSION)
+            .await
+            .unwrap()
+            .expect("崩溃应落盘");
+        assert_eq!(crash.max_memory_mb, Some(64));
+        let log = aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert!(
+            log.lines.iter().any(|l| l.text.contains("最大内存 64 MB")),
+            "{:?}",
+            log.lines
         );
     }
 

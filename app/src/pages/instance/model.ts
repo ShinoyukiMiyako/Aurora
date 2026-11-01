@@ -4,7 +4,7 @@
 import { isForgeBuiltinProvider } from "../../copy/flows";
 import type { InstanceSummary, Settings } from "../../domain/adapt";
 import { samePath } from "../../domain/paths";
-import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
+import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromDetail, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskError, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
@@ -303,6 +303,11 @@ export function toggleFlags(text: string, flags: readonly string[]): string {
 /** 参数里自带堆大小：它们排在默认参数之后，会覆盖内存设置。 */
 export function overridesHeap(text: string): boolean {
   return jvmTokens(text).some((t) => /^-Xm[xs]/.test(t));
+}
+
+/** 参数里写了 -Xmx：内存设置这时改不了这一局的最大内存。 */
+export function setsMaxHeap(text: string): boolean {
+  return jvmTokens(text).some((t) => t.startsWith("-Xmx"));
 }
 
 // ---------------------------------------------------------------- 窗口
@@ -678,7 +683,11 @@ export type CrashFix =
   | { kind: "raise_memory"; currentMb: number; targetMb: number; followsGlobal: boolean }
   | { kind: "memory_at_cap"; totalMb: number }
   | { kind: "lower_memory"; currentMb: number; targetMb: number }
+  /** 最大内存写在自定义 JVM 参数的 -Xmx 里：改内存设置不生效，带玩家去改参数。 */
+  | { kind: "memory_in_jvm_args" }
   | { kind: "use_64bit_java" }
+  /** JVM 参数被 Java 拒绝：只有玩家知道想写什么，带他去实例设置，不替他改。 */
+  | { kind: "jvm_args" }
   | { kind: "switch_java"; major: number; path: string }
   | { kind: "download_java"; major: number }
   | { kind: "enable_mod"; fileName: string; name: string }
@@ -698,6 +707,8 @@ export interface CrashFixContext {
   memoryMb: number;
   followsGlobal: boolean;
   physicalMb: number;
+  /** 实例的自定义 JVM 参数原文。 */
+  jvmArgs: string;
   mods: readonly InstalledMod[];
   runtimes: readonly JavaInstallationDto[];
   /** 游戏版本要求的主版本（detail 推不出时用）；版本读不出时为 null。 */
@@ -744,9 +755,17 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
     seen.add(clue.category);
     switch (clue.category) {
       case "out_of_memory": {
-        if (isHeapReserveFailure(clue.matched)) {
-          if (report.java !== null && !report.java.is_64bit) push({ kind: "use_64bit_java" });
-          else push({ kind: "lower_memory", currentMb: ctx.memoryMb, targetMb: memoryLowerTarget(ctx.memoryMb) });
+        const reserve = isHeapReserveFailure(clue.matched);
+        if (reserve && report.java !== null && !report.java.is_64bit) {
+          push({ kind: "use_64bit_java" });
+          break;
+        }
+        if (setsMaxHeap(ctx.jvmArgs)) {
+          push({ kind: "memory_in_jvm_args" });
+          break;
+        }
+        if (reserve) {
+          push({ kind: "lower_memory", currentMb: ctx.memoryMb, targetMb: memoryLowerTarget(ctx.memoryMb) });
           break;
         }
         const target = memoryTarget(ctx.memoryMb, ctx.physicalMb);
@@ -757,8 +776,11 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         );
         break;
       }
+      case "jvm_args_invalid":
+        push({ kind: "jvm_args" });
+        break;
       case "java_version_mismatch": {
-        const fromDetail = javaMajorFromClassVersion(clue.detail);
+        const fromDetail = javaMajorFromDetail(clue.detail);
         const major = fromDetail === null ? ctx.requiredJava : fromDetail;
         if (major === null) break;
         const runtime = bestLocalRuntime(ctx.runtimes, major);

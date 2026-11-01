@@ -49,6 +49,24 @@ describe("游戏退出后的缓存失效", () => {
     store.stop();
   });
 
+  it("启动前手动放进 mods 目录的文件，退出后的 Mod 列表里要有：诊断页按它对日志点名的 Mod", async () => {
+    const store = await startedStore();
+    let files = ["fabric-api.jar"];
+    const mods = () => Promise.resolve([...files]);
+    const other = vi.fn(() => Promise.resolve([]));
+    expect(await resources.read("mods:生存", mods)).toEqual(["fabric-api.jar"]);
+    await resources.read("mods:创造", other);
+
+    files = ["fabric-api.jar", "sodium.jar"];
+    emit(GAME_EXIT_EVENT, { ...exit("生存"), exit_code: 1, crashed: true });
+    await settle();
+
+    expect(await resources.read("mods:生存", mods)).toEqual(["fabric-api.jar", "sodium.jar"]);
+    await resources.read("mods:创造", other);
+    expect(other).toHaveBeenCalledTimes(1);
+    store.stop();
+  });
+
   it("页面一直订阅着的存档内容在退出时立即重取", async () => {
     const store = await startedStore();
     const fetcher = vi.fn(() => Promise.resolve({ worlds: [] }));

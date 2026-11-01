@@ -218,9 +218,48 @@ pub fn jvm_memory_issue(custom_args: &[String], launcher: MemoryConfig) -> Optio
     })
 }
 
+/// 这一局真正生效的最大堆（MB，向上取整）：自定义参数排在启动器的内存参数之后，同一参数 JVM 取最后一次，所以是
+/// 自定义参数里最后一个 `-Xmx`，没写才用启动器的。写法不对的那些 Java 根本起不来，不算。
+pub fn effective_max_heap_mb(custom_args: &[String], launcher: MemoryConfig) -> u32 {
+    custom_args
+        .iter()
+        .filter_map(|arg| heap_arg_bytes(arg))
+        .rfind(|(kind, _)| *kind == 'x')
+        .map_or(launcher.max_mb, |(_, bytes)| {
+            u32::try_from(bytes.div_ceil(MIB)).unwrap_or(u32::MAX)
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_max_heap_follows_the_last_valid_xmx() {
+        let launcher = MemoryConfig {
+            max_mb: 4096,
+            min_mb: None,
+        };
+        let args = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        assert_eq!(effective_max_heap_mb(&[], launcher), 4096);
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx64M"]), launcher), 64);
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx2g"]), launcher), 2048);
+        assert_eq!(
+            effective_max_heap_mb(&args(&["-Xmx1g", "-Xmx512m"]), launcher),
+            512
+        );
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx1536k"]), launcher), 2);
+        // 最小堆与其他开关不影响最大堆；写错的 -Xmx 让 Java 起不来，这里不把它算成生效值。
+        assert_eq!(
+            effective_max_heap_mb(&args(&["-Xms1g", "-XX:+UseG1GC"]), launcher),
+            4096
+        );
+        assert_eq!(effective_max_heap_mb(&args(&["-Xmx4GB"]), launcher), 4096);
+        assert_eq!(
+            effective_max_heap_mb(&args(&["-Xmx99999999999999g"]), launcher),
+            4096
+        );
+    }
 
     #[test]
     fn game_path_warns_on_non_ascii_and_bang() {

@@ -17,8 +17,8 @@ use std::time::UNIX_EPOCH;
 use aurora_launch::logfile::{LATEST_LOG, logs_dir};
 use aurora_launch::{
     CrashCategory, ExitCodeNote, LogEntry, LogTail, SessionEnded, analyze_lines, exit_code_clue,
-    explain_exit_code, extract_mod_ids, has_crash_marker, read_log_tail, session_log_path,
-    suspected_mods,
+    explain_exit_code, extract_mod_ids, has_crash_marker, jvm_exception_clue, read_log_tail,
+    session_log_path, suspected_mods,
 };
 use aurora_modplatform::{InstalledMod, scan_mods_dir};
 use serde::{Deserialize, Serialize};
@@ -211,6 +211,26 @@ impl CrashReport {
                 })
                 .collect()
         };
+        // JVM 错误头排在退出码前面：它能指到具体的行，而 JVM 自己接住异常时退出码只是 1。
+        if diagnoses.is_empty() {
+            diagnoses.extend(inputs.iter().find_map(|input| {
+                let texts: Vec<&str> = input.lines.iter().map(|(text, _)| *text).collect();
+                let clue = jvm_exception_clue(&texts)?;
+                Some(CrashClue {
+                    category: clue.category,
+                    summary: clue.summary,
+                    advice: clue.advice,
+                    detail: clue.detail,
+                    matched: clue.matched,
+                    line: input.lines[clue.line].1,
+                    context: texts[clue.line.saturating_sub(CONTEXT_BEFORE)..clue.line]
+                        .iter()
+                        .map(|line| (*line).to_owned())
+                        .collect(),
+                    source: input.source,
+                })
+            }));
+        }
         if diagnoses.is_empty()
             && let Some(clue) = exit_code_clue(exit_code)
         {
@@ -594,6 +614,36 @@ mod tests {
         "\t - Mod 'Sodium' (sodium) 0.5.3",
         "[19:30:11] [Render thread/INFO]: Setting user: Steve",
     ];
+
+    /// 真实 JVM 崩溃（Java 17，Windows）：进程以 1 退出，只有错误头说得出死在原生代码里。
+    #[test]
+    fn jvm_fatal_header_in_hs_err_is_a_native_crash_clue_with_its_line() {
+        let hs_err = "#\n# A fatal error has been detected by the Java Runtime Environment:\n#\n#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x00007ffb617ce847, pid=83492, tid=72668\n#\n";
+        let report = CrashReport::from_sources(
+            &[
+                ScanInput {
+                    source: CrashSource::SessionLog,
+                    path: Some("session.log".into()),
+                    lines: numbered(&["[main/INFO]: Loading"], 1),
+                },
+                ScanInput::numbered(CrashSource::HsErr, Some("hs_err.log".into()), hs_err),
+            ],
+            Some(1),
+        );
+        assert_eq!(report.diagnoses.len(), 1);
+        let clue = &report.diagnoses[0];
+        assert_eq!(clue.category, CrashCategory::NativeCrash);
+        assert_eq!(clue.source, CrashSource::HsErr);
+        assert_eq!(clue.detail.as_deref(), Some("0xC0000005"));
+        assert_eq!(clue.line, 4);
+        assert_eq!(
+            clue.context,
+            vec![
+                "# A fatal error has been detected by the Java Runtime Environment:",
+                "#"
+            ]
+        );
+    }
 
     fn numbered(lines: &[&'static str], first: u64) -> Vec<(&'static str, u64)> {
         lines

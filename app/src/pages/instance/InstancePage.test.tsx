@@ -1295,7 +1295,7 @@ describe("实例详情：工作目录与实例设置的占用", () => {
       { target: "saves", id: ID, world: null },
       { target: "mods", id: ID, world: null },
       { target: "logs", id: ID, world: null },
-      { target: "logs", id: ID, world: null },
+      { target: "session_logs", id: ID, world: null },
     ]);
     click(byRole("tab", "设置"));
     await flush();
@@ -2568,6 +2568,20 @@ describe("实例详情：存档直达", () => {
     await flush();
     expect(launcher.state.launchPrompt).toEqual({ instanceId: ID, occupantId: "创造", occupantPhase: "running", quickPlay: { kind: "singleplayer", world_dir_name: "w1" } });
     expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["创造"]);
+  });
+
+  it("启动时发现版本文件没了：重扫实例列表，入口才换得成修复并启动", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("version_not_installed", `本地未安装版本 ${ID}`, { id: ID });
+    });
+    await open("overview");
+    const before = callsOf(ipc, "list_instances").length;
+    await act(async () => {
+      await expect(launcher.actions.launch(ID)).rejects.toThrow(`本地未安装版本 ${ID}`);
+    });
+    await flush();
+    expect(launcher.state.session).toBeNull();
+    expect(callsOf(ipc, "list_instances").length).toBeGreaterThan(before);
   });
 
   it("直达失败（存档已被移走）：外层报「无法启动」类错误，正文是后端原文，会话回到启动前", async () => {
