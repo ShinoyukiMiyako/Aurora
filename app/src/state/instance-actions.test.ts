@@ -1019,6 +1019,16 @@ describe("装到一半被重扫扫到半成品目录", () => {
   });
 });
 
+describe("补全失败的通知", () => {
+  it("标题说的是补全，不是下载", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    ipc.overrides.set("repair_instance", () => Promise.reject(new IpcError("files_failed", "两个文件没下完")));
+    await store.actions.repairInstance("生存");
+    await settle();
+    expect(store.getState().toasts.map((t) => [t.title, t.body])).toEqual([["补全「生存」的游戏文件没有完成", "两个文件没下完"]]);
+  });
+});
+
 describe("重试失败的新建", () => {
   const spec = { name: "新世界", mcVersion: "1.21.1", loader: "fabric" as const, loaderVersion: "0.16.10", cover: "grass" };
   /** 后端失败时保留的目录：带着安装标记，结局是失败。 */

@@ -1998,7 +1998,7 @@ export class LauncherStore {
       this.failureBatch = { toastId, startedAt: batch.startedAt, reasons };
       return;
     }
-    const single = TASK_TOAST.failed(task.title, reason);
+    const single = task.kind === "repair" ? TASK_TOAST.repairFailed(task.title, reason) : TASK_TOAST.failed(task.title, reason);
     // 文件没到手时重试必然再失败一次，通知上不给重试，转去失败筛选看清单
     const action: ToastAction =
       error.blocked_files === undefined
