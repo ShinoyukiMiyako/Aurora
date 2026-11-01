@@ -19,6 +19,9 @@ impl Aurora {
     ///
     /// 两个源都测不出时不写缓存、返回 `Ok`，之后按兜底顺序下载。错误只有样本地址解析失败与探测任务
     /// 异常终止两种，原样冒泡为下载错误。
+    ///
+    /// 门面挂着取消令牌时，测速途中取消立即返回取消：一轮探针最长要等一个探针超时（3 秒），
+    /// 不能让取消等它。丢下的那一轮不写缓存。
     pub(crate) async fn prepare_sources(&self) -> Result<()> {
         let config = self.config();
         if config.download_source != DownloadSourcePolicy::Auto
@@ -26,9 +29,20 @@ impl Aurora {
         {
             return Ok(());
         }
-        self.source_speed
-            .measured_order(&self.http(), &DownloadSourcePolicy::Auto.mirror_order())
-            .await?;
+        let http = self.http();
+        let fallback = DownloadSourcePolicy::Auto.mirror_order();
+        let measure = self.source_speed.measured_order(&http, &fallback);
+        match self.cancel_token() {
+            Some(token) => {
+                token
+                    .run_until_cancelled(measure)
+                    .await
+                    .ok_or(aurora_download::Error::Cancelled)??;
+            }
+            None => {
+                measure.await?;
+            }
+        }
         Ok(())
     }
 
@@ -357,6 +371,37 @@ pub(crate) mod tests {
                 .is_tripped(url),
             "各自新建的门面不串用"
         );
+    }
+
+    /// 测速途中任务被取消：不等探针超时（这里两个探针都要 2 秒才答），立即以取消返回，也不写缓存。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_during_measurement_returns_at_once_without_caching() {
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        mount_probe(&official, partial().set_delay(Duration::from_secs(2))).await;
+        mount_probe(&mirror, partial().set_delay(Duration::from_secs(2))).await;
+        let token = aurora_download::CancellationToken::new();
+        let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL)
+            .with_cancel(token.clone());
+        let canceller = {
+            let token = token.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                token.cancel();
+            })
+        };
+
+        let started = std::time::Instant::now();
+        let err = aurora
+            .prepare_sources()
+            .await
+            .expect_err("取消后不该当作测完返回");
+        let elapsed = started.elapsed();
+        canceller.await.unwrap();
+
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert!(elapsed < Duration::from_millis(1000), "耗时 {elapsed:?}");
+        assert!(!aurora.source_speed.is_fresh(), "取消的一轮不留结论");
     }
 
     /// 只有版本列表源是自动时也要测：版本清单的源顺序同样取自这份结论，文件下载仍按固定档。
