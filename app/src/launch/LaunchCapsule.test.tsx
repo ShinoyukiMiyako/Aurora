@@ -188,6 +188,37 @@ describe("启动胶囊换面时的焦点", () => {
   });
 });
 
+describe("就绪面的带原因禁用", () => {
+  const refreshWith = async (activity: "backing_up" | null) => {
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { activity })]);
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle();
+    });
+  };
+
+  it("存档备份开始又结束：聚焦着的「启动」不换节点，焦点留着；备份期间读出不可用，点击不启动", async () => {
+    const go = buttonByText(LAUNCH_COPY.launch);
+    act(() => go.focus());
+
+    await refreshWith("backing_up");
+    expect(buttonByText(LAUNCH_COPY.launch)).toBe(go);
+    expect(document.activeElement).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBe("true");
+    pressEnter(go);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+
+    await refreshWith(null);
+    expect(buttonByText(LAUNCH_COPY.launch)).toBe(go);
+    expect(document.activeElement).toBe(go);
+    expect(go.getAttribute("aria-disabled")).toBeNull();
+    pressEnter(go);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+  });
+});
+
 describe("运行面「结束游戏」", () => {
   async function runningCapsule() {
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
