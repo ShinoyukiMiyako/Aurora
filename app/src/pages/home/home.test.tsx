@@ -848,6 +848,21 @@ describe("主页：固定服务器的「加入」", () => {
     expect(button.getAttribute("aria-controls")).toBe(panel.id);
   });
 
+  it("实例选择开着时再点「加入」：收起面板，不重新打开，也不启动", async () => {
+    await mount();
+    const button = joinButton();
+    click(button);
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    click(radios(panel)[1]);
+    click(button);
+    await flush();
+    expect(picker()).toBeNull();
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+  });
+
   it("记住的实例可用时「加入」直接启动，不标弹出对话框", async () => {
     pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
     await mount();

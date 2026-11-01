@@ -351,7 +351,9 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpi
   const quickPlay = (instanceId: string) =>
     run(() => actions.quickPlay(instanceId, { kind: "multiplayer", address: row.address }), ACTION_ERROR.launch(instanceId));
   const onJoin = () => {
-    if (join.kind === "direct") void quickPlay(join.instanceId);
+    // 面板锚在它上面，开着时点它是收起，与别处弹出面板的触发器一致
+    if (pickerOpen) closePicker();
+    else if (join.kind === "direct") void quickPlay(join.instanceId);
     else openPicker(false);
   };
   // 先关掉选择再启动；要记住时先存下选择，存不下就报错且不启动，免得下次「加入」又和这次不一样
