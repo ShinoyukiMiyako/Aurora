@@ -30,6 +30,8 @@ const SEED_MICROSOFT = "6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20";
 const SEED_EXPIRED = "b7c2d3e4f5a64b7c8d9e0f1a2b3c4d5e";
 
 beforeEach(() => {
+  // tauriInvoke 是文件级 vi.fn，restoreMocks 只还原 spyOn：不清的话前一个用例发过的命令会留在 mock.calls 里
+  vi.clearAllMocks();
   resetMocks();
   clearMockEventListeners();
 });
