@@ -186,15 +186,18 @@ impl Aurora {
             if entry.update_hold == Some(UpdateHold::Ignored) {
                 continue;
             }
-            if !batch_update_target(entry) {
+            // 批量查更新要拿「当前版本」的发布时间与通道作比较，只有这一轮按哈希问过当前版本的才走批量。
+            // 反查写回身份时重读了卷宗，首轮读时设着更新检查、期间被恢复的 Mod 没被问过（也可能没记
+            // SHA-1），这一轮改走版本列表在本地挑，不拿缺了基准的批量结果去猜。
+            let asked_sha1 = known_modrinth
+                .get(key)
+                .or(entry.sha1.as_ref())
+                .filter(|sha1| lookup.binary_search(sha1).is_ok())
+                .cloned();
+            let (true, Some(sha1)) = (batch_update_target(entry), asked_sha1) else {
                 listed_targets.push((key.clone(), entry.clone()));
                 continue;
-            }
-            let sha1 = known_modrinth
-                .get(key)
-                .cloned()
-                .or_else(|| entry.sha1.clone())
-                .expect("反查补上的 Modrinth 身份一定带实测 SHA-1");
+            };
             let channel = current_channel(by_hash.get(&sha1));
             let slot = match modrinth_groups.iter().position(|(c, _)| *c == channel) {
                 Some(index) => index,
@@ -1324,6 +1327,172 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// 收到请求时先改写卷宗再答：模拟玩家在更新检查的网络往返期间点了「恢复检查更新」。
+    struct RewriteLedgerThenRespond {
+        ledger_path: PathBuf,
+        ledger: Vec<u8>,
+        body: String,
+    }
+
+    impl wiremock::Respond for RewriteLedgerThenRespond {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            std::fs::write(&self.ledger_path, &self.ledger).unwrap();
+            ResponseTemplate::new(200).set_body_string(self.body.clone())
+        }
+    }
+
+    /// 首轮读卷宗时设着更新检查的两个 Mod，在反查写回身份重读卷宗前被恢复了检查：没被问过当前版本，
+    /// 这一轮走版本列表在本地挑。没记 SHA-1 的那个不会因此让整次检查崩掉；批量端点给回的旧构建也不会
+    /// 因为缺了当前版本的发布时间而被当成更新报出。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn holds_lifted_mid_check_fall_back_to_the_version_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.20.1-fabric", FABRIC_JSON).await;
+        let (_, iris_sha1) = put_mod(mc, "1.20.1-fabric", "iris.jar", b"iris").await;
+        let (_, lithium_sha1) = put_mod(mc, "1.20.1-fabric", "lithium.jar", b"lithium").await;
+        put_mod(mc, "1.20.1-fabric", "sodium.jar", b"sodium").await;
+
+        let server = MockServer::start().await;
+        let aurora = aurora_at(mc, &server.uri());
+        let held = |entry: LedgerEntry, hold: UpdateHold| LedgerEntry {
+            update_hold: Some(hold),
+            ..entry
+        };
+        let sodium = ledger_entry("sodium.jar", "AANobbMI", "s1", None);
+        let iris = ledger_entry("iris.jar", "YL57xq9U", "i1", Some(&iris_sha1));
+        save_ledger(
+            &aurora,
+            "1.20.1-fabric",
+            vec![
+                held(
+                    sodium.clone(),
+                    UpdateHold::Pinned {
+                        version_id: "s1".to_owned(),
+                    },
+                ),
+                held(iris.clone(), UpdateHold::Ignored),
+            ],
+        )
+        .await;
+        let mut lifted = Ledger::default();
+        lifted.upsert(sodium);
+        lifted.upsert(iris);
+
+        Mock::given(method("POST"))
+            .and(path("/version_files"))
+            .respond_with(RewriteLedgerThenRespond {
+                ledger_path: aurora.ledger_store("1.20.1-fabric").path().to_path_buf(),
+                ledger: serde_json::to_vec(&lifted).unwrap(),
+                body: format!(
+                    r#"{{"{lithium_sha1}":{}}}"#,
+                    modrinth_version(
+                        "l1",
+                        "gvQqBUqZ",
+                        "0.1",
+                        "2025-01-01T00:00:00Z",
+                        "lithium.jar",
+                        &lithium_sha1
+                    )
+                ),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .mount(&server)
+            .await;
+        // 批量端点给 iris 回一个比当前更旧的构建：走批量就会被当成「更新」。
+        mount_post(
+            &server,
+            "/version_files/update",
+            format!(
+                r#"{{"{iris_sha1}":{}}}"#,
+                modrinth_version(
+                    "i0",
+                    "YL57xq9U",
+                    "1.6",
+                    "2025-01-01T00:00:00Z",
+                    "iris-1.6.jar",
+                    "e0"
+                )
+            ),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/project/AANobbMI/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "[{},{}]",
+                modrinth_version(
+                    "s2",
+                    "AANobbMI",
+                    "0.6",
+                    "2026-06-01T00:00:00Z",
+                    "sodium-0.6.jar",
+                    "c2"
+                ),
+                modrinth_version(
+                    "s1",
+                    "AANobbMI",
+                    "0.5",
+                    "2026-01-01T00:00:00Z",
+                    "sodium.jar",
+                    "c1"
+                )
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/YL57xq9U/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "[{},{}]",
+                modrinth_version(
+                    "i1",
+                    "YL57xq9U",
+                    "1.7",
+                    "2026-06-01T00:00:00Z",
+                    "iris.jar",
+                    &iris_sha1
+                ),
+                modrinth_version(
+                    "i0",
+                    "YL57xq9U",
+                    "1.6",
+                    "2025-01-01T00:00:00Z",
+                    "iris-1.6.jar",
+                    "e0"
+                )
+            )))
+            .mount(&server)
+            .await;
+
+        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|c| (c.file_name.as_str(), c.latest.version_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("sodium.jar", "s2")]
+        );
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(count_requests(&requests, "/project/AANobbMI/version"), 1);
+        assert_eq!(count_requests(&requests, "/project/YL57xq9U/version"), 1);
+        let update: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/version_files/update")
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(update.len(), 1);
+        assert_eq!(update[0]["hashes"], serde_json::json!([lithium_sha1]));
+        // 反查补上的身份照常写回，恢复检查的设置不被覆盖。
+        let ledger = aurora.ledger_store("1.20.1-fabric").load().await.unwrap();
+        assert_eq!(ledger.find("lithium.jar").unwrap().version_id, "l1");
+        assert_eq!(ledger.find("sodium.jar").unwrap().update_hold, None);
+        assert_eq!(ledger.find("iris.jar").unwrap().update_hold, None);
     }
 
     /// 当前一个正式版、一个测试版：按通道分两组各请求一次，每组的 version_types 恰为它放行的通道。
