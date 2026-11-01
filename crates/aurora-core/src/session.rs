@@ -411,6 +411,7 @@ mod tests {
             program: PathBuf::from(program),
             args: args.iter().map(|a| (*a).to_owned()).collect(),
             working_dir: root.clone(),
+            natives_dir: root.join("natives"),
         };
         let session = aurora_launch::spawn(&command, clock, &mut Some(log), None).unwrap();
         let info = RunInfo {

@@ -13,6 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::rules::{Rule, RuntimeContext, evaluate_rules};
 
+/// 13w25a 的发布日期。ISO-8601 按字符串比较，只比到日就够：前一个版本 13w24b 早了三天。
+const WINDOW_SIZE_ARGS_SINCE: &str = "2013-06-17";
+
 /// 一个版本 JSON 的完整域模型。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionJson {
@@ -113,6 +116,19 @@ impl VersionJson {
     pub fn uses_legacy_assets(&self) -> bool {
         matches!(self.assets.as_deref(), Some("legacy" | "pre-1.6"))
     }
+
+    /// 该版本的资源是否铺在工作目录的 `resources` 下（pre-1.6 索引的 map_to_resources 布局）。
+    pub fn maps_assets_to_resources(&self) -> bool {
+        self.assets.as_deref() == Some("pre-1.6")
+    }
+
+    /// 客户端是否认 `--width` / `--height`。13w25a 才加上这两个选项，更早的快照遇到未知选项直接退出。
+    /// 没有发布时间的自定义版本 JSON 按认处理：它们基本都是新版本改的。
+    pub fn accepts_window_size_args(&self) -> bool {
+        self.release_time
+            .as_deref()
+            .is_none_or(|released| released >= WINDOW_SIZE_ARGS_SINCE)
+    }
 }
 
 /// 新式结构化参数：game 与 jvm 两组。
@@ -205,13 +221,21 @@ impl Library {
 
     /// 用于同名库去重的键：`group:artifact`（+ classifier 以区分主件与各 natives）。
     /// 坐标无法解析时退回整个 name，保证不同名库不会被误并。
+    ///
+    /// 带 natives 映射的条目单独成键：1.12 到 1.18 的版本 JSON 把同一坐标写成两条，一条主件进 classpath，
+    /// 一条带 natives 映射只为解压，并掉任何一条都少东西。
     pub fn dedup_key(&self) -> String {
-        match self.coordinate() {
+        let key = match self.coordinate() {
             Some(c) => match c.classifier {
                 Some(cl) => format!("{}:{}:{}", c.group, c.artifact, cl),
                 None => format!("{}:{}", c.group, c.artifact),
             },
             None => self.name.clone(),
+        };
+        if self.natives.is_some() {
+            format!("{key}#natives")
+        } else {
+            key
         }
     }
 
@@ -504,6 +528,47 @@ mod tests {
                 "org.lwjgl:lwjgl:3.3.3:natives-windows"
             ]
         );
+    }
+
+    /// 1.13 到 1.18 的版本 JSON 把 LWJGL 这类库写成同坐标的两条：先是进 classpath 的主件，
+    /// 再是带 natives 映射、只为解压的一条。按坐标并掉后一条，本地库就没人下载和解压，游戏起不来。
+    #[test]
+    fn select_libraries_keeps_native_entry_sharing_coordinate_with_main_jar() {
+        let json = r#"{
+            "id":"1.16.5",
+            "libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}}},
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{
+                    "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"},
+                    "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"b","size":2,"url":"n"}}},
+                 "natives":{"windows":"natives-windows"}}
+            ]
+        }"#;
+        let v = VersionJson::from_json_str(json).expect("应解析");
+        let win64 = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let selected = select_libraries(&v, &win64);
+        assert_eq!(selected.len(), 2, "主件与 natives 条目都要留下");
+        assert!(!selected[0].is_native());
+        assert!(selected[1].is_native());
+    }
+
+    /// 带 natives 映射的条目之间照常按坐标去重：加载器压过原版的规则对它们同样成立。
+    #[test]
+    fn select_libraries_dedups_native_entries_among_themselves() {
+        let json = r#"{
+            "id":"merged",
+            "libraries":[
+                {"name":"org.lwjgl:lwjgl:3.3.0","natives":{"windows":"natives-windows"}},
+                {"name":"org.lwjgl:lwjgl:3.2.2","natives":{"windows":"natives-windows"}}
+            ]
+        }"#;
+        let v = VersionJson::from_json_str(json).expect("应解析");
+        let win64 = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let selected = select_libraries(&v, &win64);
+        let names: Vec<&str> = selected.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, vec!["org.lwjgl:lwjgl:3.3.0"]);
     }
 
     #[test]

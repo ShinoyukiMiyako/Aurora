@@ -29,7 +29,8 @@ use aurora_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
     LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, QuickPlayMode,
     QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
-    game_path_warning, jvm_memory_issue, long_player_name, quick_play_support, recommended_max_mb,
+    game_path_warning, jvm_memory_issue, long_player_name, path_char_outside_code_page,
+    quick_play_support, recommended_max_mb,
     required_java_major, sync_folder, sync_roots_from_env,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
@@ -40,7 +41,7 @@ use tokio::sync::mpsc;
 use crate::config::MemorySettings;
 use crate::error::{CoreError, OfflineFallbackRefusal};
 use crate::event::{CoreEvent, DownloadProgress};
-use crate::facade::{Aurora, make_context};
+use crate::facade::Aurora;
 use crate::session::GameRun;
 use crate::workdir::{discovered, read_version_json};
 
@@ -228,6 +229,8 @@ pub enum FailureCode {
     FilesFailed,
     DiskFull,
     VersionBroken,
+    /// 路径里有系统代码页表示不了的字符，Java 收不到这个路径。
+    PathUnsupported,
     SpawnFailed,
 }
 
@@ -244,6 +247,7 @@ impl FailureCode {
             FailureCode::FilesFailed => "files_failed",
             FailureCode::DiskFull => "disk_full",
             FailureCode::VersionBroken => "version_broken",
+            FailureCode::PathUnsupported => "path_unsupported",
             FailureCode::SpawnFailed => "spawn_failed",
         }
     }
@@ -776,6 +780,8 @@ impl Aurora {
                 path: working_dir.clone(),
                 source,
             })?;
+        let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
+        ensure_paths_reach_java([&paths.client_jar, &paths.natives_dir, &working_dir])?;
         if let Some(text) = game_path_warning(&working_dir) {
             warnings.push(LaunchWarning::GamePath);
             reporter.warn(text).await;
@@ -822,7 +828,7 @@ impl Aurora {
         let layout = self.layout();
         let mut plan = DownloadPlan::default();
         let mut legacy = self
-            .plan_game_files(merged, &chain.base_id, &layout, &mut plan)
+            .plan_game_files(merged, &chain.base_id, &layout, &working_dir, &mut plan)
             .await?;
 
         // -- 2 补全库文件
@@ -861,14 +867,15 @@ impl Aurora {
             self.download_files(std::mem::take(&mut plan.files), reporter)
                 .await?;
             if plan.asset_index_missing {
-                let (objects, found) = self.missing_asset_objects(merged, &layout).await?;
+                let (objects, found) = self
+                    .missing_asset_objects(merged, &layout, &working_dir)
+                    .await?;
                 legacy = found;
                 self.download_files(objects, reporter).await?;
             }
         }
         if let Some(legacy) = legacy {
-            self.ensure_legacy_assets(merged, &chain.base_id, &layout, legacy, reporter)
-                .await?;
+            self.ensure_legacy_assets(&layout, legacy, reporter).await?;
         }
         let java = match java_plan {
             JavaPlan::Ready(java) => java,
@@ -924,7 +931,6 @@ impl Aurora {
         }
         // 崩溃诊断拿它解释内存耗尽：写的要是内存设置而不是 -Xmx，诊断就会说一个这局根本没用上的数。
         let max_heap_mb = effective_max_heap_mb(&settings.jvm_args, memory);
-        let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         let command = assemble_command(
             merged,
             self.runtime(),
@@ -1255,6 +1261,7 @@ impl Aurora {
         merged: &VersionJson,
         base_id: &str,
         layout: &GameLayout,
+        working_dir: &Path,
         plan: &mut DownloadPlan,
     ) -> Result<Option<LegacyAssets>, LaunchFailed> {
         let jar = layout.version_jar(base_id);
@@ -1285,7 +1292,7 @@ impl Aurora {
         let index_task = aurora_install::plan::asset_index_task(merged, layout)?;
         if path_exists(&index_task.dest).await? {
             plan.files.push(index_task);
-            let (objects, legacy) = self.asset_object_tasks(merged, layout).await?;
+            let (objects, legacy) = self.asset_object_tasks(merged, layout, working_dir).await?;
             plan.files.extend(objects);
             Ok(legacy)
         } else {
@@ -1300,6 +1307,7 @@ impl Aurora {
         &self,
         merged: &VersionJson,
         layout: &GameLayout,
+        working_dir: &Path,
     ) -> Result<(Vec<DownloadTask>, Option<LegacyAssets>), LaunchFailed> {
         let asset_index = merged
             .asset_index
@@ -1318,7 +1326,8 @@ impl Aurora {
         let target_dir = match index.layout() {
             AssetLayout::Standard => return Ok((tasks, None)),
             AssetLayout::Virtual => layout.asset_virtual_dir(&asset_index.id)?,
-            AssetLayout::MapToResources => layout.resources_dir(),
+            // 这些版本只认工作目录下的 resources。隔离实例的工作目录是实例自己，共享根目录那份它读不到。
+            AssetLayout::MapToResources => working_dir.join("resources"),
         };
         Ok((tasks, Some(LegacyAssets { target_dir, index })))
     }
@@ -1327,17 +1336,16 @@ impl Aurora {
         &self,
         merged: &VersionJson,
         layout: &GameLayout,
+        working_dir: &Path,
     ) -> Result<(Vec<DownloadTask>, Option<LegacyAssets>), LaunchFailed> {
-        let (objects, legacy) = self.asset_object_tasks(merged, layout).await?;
+        let (objects, legacy) = self.asset_object_tasks(merged, layout, working_dir).await?;
         Ok((missing_files(objects).await?, legacy))
     }
 
-    /// 旧版布局的展开目录不全时交给完整补全：展开（按逻辑名复制对象）只在那里实现。展开目录齐全是常态
-    /// （安装时已展开），这条路只在玩家删过资源目录时走到，届时完整补全按哈希重验全部文件的代价可以接受。
+    /// 旧版布局的展开目录不全时按逻辑名补齐。对象此时都在本地：缺的刚在下载阶段下完。隔离实例第一次启动、
+    /// 玩家删过资源目录时走到这里。
     async fn ensure_legacy_assets(
         &self,
-        merged: &VersionJson,
-        base_id: &str,
         layout: &GameLayout,
         legacy: LegacyAssets,
         reporter: &mut Reporter<'_>,
@@ -1357,35 +1365,17 @@ impl Aurora {
             return Ok(());
         }
         reporter
-            .info(format!("旧版资源目录缺少 {missing} 个文件，补全游戏文件"))
+            .info(format!("旧版资源目录缺少 {missing} 个文件，从资源库补齐"))
             .await;
-        self.prepare_sources().await?;
-        let http = self.http();
-        let pool = self.download_pool();
-        let policy = self.retry_policy();
-        aurora_install::ensure_complete(
-            make_context(
-                &http,
-                &pool,
-                layout,
-                self.runtime(),
-                &policy,
-                self.cancel_token(),
-            ),
-            merged,
-            base_id,
-        )
-        .await
-        .map_err(|err| -> LaunchFailed {
-            if matches!(&err, aurora_install::Error::Download(inner) if inner.is_cancelled()) {
-                return CoreError::from(err).into();
-            }
-            LaunchFailure::new(FailureCode::FilesFailed, format!("补全旧版资源失败：{err}"))
-                .param("count", missing)
-                .param("reason", err.to_string())
-                .caused_by(err)
-                .into()
-        })?;
+        aurora_install::complete::materialize_objects(layout, &index, &target_dir)
+            .await
+            .map_err(|err| -> LaunchFailed {
+                LaunchFailure::new(FailureCode::FilesFailed, format!("补全旧版资源失败：{err}"))
+                    .param("count", missing)
+                    .param("reason", err.to_string())
+                    .caused_by(err)
+                    .into()
+            })?;
         Ok(())
     }
 
@@ -1664,6 +1654,27 @@ async fn quick_play_target(
             })
         }
     }
+}
+
+/// 这些路径都要经 java.exe 的命令行。走不通时在下载之前停下：起进程只会等来一句找不到主类。
+fn ensure_paths_reach_java<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), LaunchFailed> {
+    for path in paths {
+        if let Some(ch) = path_char_outside_code_page(path) {
+            return Err(LaunchFailure::new(
+                FailureCode::PathUnsupported,
+                format!(
+                    "路径里的「{ch}」不在系统代码页里，Java 读不了：{}",
+                    path.display()
+                ),
+            )
+            .param("char", ch.to_string())
+            .param("path", path.display().to_string())
+            .into());
+        }
+    }
+    Ok(())
 }
 
 /// 起进程；起不来就是 spawn_failed，原样带上系统给的原因。
@@ -2246,6 +2257,137 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(format!("{VERSION}.jar")), b"jar").unwrap();
+    }
+
+    /// 带 pre-1.6 资源索引的远古版本：索引与对象已在本地，走不到下载。
+    fn install_pre_1_6_version(mc: &Path, id: &str, object: &[u8]) -> String {
+        let hash = "ab".repeat(20);
+        let index = format!(
+            r#"{{"map_to_resources":true,"objects":{{"sound/step/grass1.ogg":{{"hash":"{hash}","size":{}}}}}}}"#,
+            object.len()
+        );
+        let indexes = mc.join("assets").join("indexes");
+        std::fs::create_dir_all(&indexes).unwrap();
+        std::fs::write(indexes.join("pre-1.6.json"), &index).unwrap();
+        let bucket = mc.join("assets").join("objects").join(&hash[..2]);
+        std::fs::create_dir_all(&bucket).unwrap();
+        std::fs::write(bucket.join(&hash), object).unwrap();
+        install_json(
+            mc,
+            id,
+            &format!(
+                r#"{{"id":"{id}","type":"old_beta","mainClass":"net.minecraft.launchwrapper.Launch",
+                    "javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},
+                    "assets":"pre-1.6",
+                    "assetIndex":{{"id":"pre-1.6","sha1":"{hash}","size":{},"url":"http://invalid.test/pre-1.6.json"}},
+                    "minecraftArguments":"${{auth_player_name}} --gameDir ${{game_directory}} --assetsDir ${{game_assets}}"}}"#,
+                index.len()
+            ),
+        );
+        hash
+    }
+
+    /// 远古版本默认隔离，游戏只读工作目录下的 resources：铺到共享根目录等于没铺，这些版本一个音效都没有。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn isolated_pre_1_6_version_gets_resources_in_its_own_working_dir() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_pre_1_6_version(&mc, "b1.7.3", b"ogg!");
+        let java = echo_java(&fx.root);
+        let request = LaunchRequest {
+            version_id: "b1.7.3".to_owned(),
+            ..request()
+        };
+
+        let (result, _) = launch_request(&fx.aurora, request, java).await;
+        let Ok(run) = result else {
+            panic!("应启动成功");
+        };
+        let finished = run.finish().await;
+        assert_eq!(finished.exit.exit_code, Some(0));
+
+        let working_dir = mc.join("versions").join("b1.7.3");
+        let resources = working_dir.join("resources");
+        assert_eq!(
+            std::fs::read(resources.join("sound").join("step").join("grass1.ogg")).unwrap(),
+            b"ogg!"
+        );
+        let log = fx.aurora.last_launch_log("b1.7.3").await.unwrap().unwrap();
+        let args = log
+            .lines
+            .iter()
+            .find(|l| l.source == LogSource::Game && l.text.starts_with("ARGS "))
+            .map(|l| l.text.clone())
+            .expect("假 java 应回显启动参数");
+        // 批处理回显时参数带不带引号由转义规则定，比的是内容。
+        assert!(
+            args.replace('"', "")
+                .contains(&format!("--assetsDir {}", resources.display())),
+            "{args}"
+        );
+    }
+
+    /// 展开目录里缺的文件在启动时补回来；对象本身就在本地，不下载也不重新校验别的文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn missing_pre_1_6_resources_are_restored_on_the_next_launch() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_pre_1_6_version(&mc, "b1.7.3", b"ogg!");
+        let java = echo_java(&fx.root);
+        let request = || LaunchRequest {
+            version_id: "b1.7.3".to_owned(),
+            ..super::tests::request()
+        };
+
+        let (first, _) = launch_request(&fx.aurora, request(), java.clone()).await;
+        let Ok(run) = first else {
+            panic!("第一次应启动成功");
+        };
+        run.finish().await;
+        let copied = mc
+            .join("versions")
+            .join("b1.7.3")
+            .join("resources")
+            .join("sound")
+            .join("step")
+            .join("grass1.ogg");
+        std::fs::remove_file(&copied).unwrap();
+
+        let (second, _) = launch_request(&fx.aurora, request(), java).await;
+        let Ok(run) = second else {
+            panic!("第二次应启动成功");
+        };
+        run.finish().await;
+        assert_eq!(std::fs::read(&copied).unwrap(), b"ogg!");
+    }
+
+    /// java.exe 按系统代码页读命令行，表示不了的字符变成问号，游戏只会报找不到主类。不起进程，
+    /// 说清楚是哪个字符。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn path_outside_the_system_code_page_stops_the_launch() {
+        // 扩展 B 区的汉字，不在任何 ANSI 代码页里。
+        let id = "\u{20BB7}";
+        // 系统代码页切成 UTF-8 的机器上这条路径是合法的。
+        if aurora_launch::path_char_outside_code_page(Path::new(id)).is_none() {
+            return;
+        }
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_pre_1_6_version(&mc, id, b"ogg!");
+        let java = echo_java(&fx.root);
+        let request = LaunchRequest {
+            version_id: id.to_owned(),
+            ..super::tests::request()
+        };
+
+        let (result, _) = launch_request(&fx.aurora, request, java).await;
+
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::PathUnsupported);
+        assert_eq!(failure.params["char"], Value::from(id));
+        let path = failure.params["path"].as_str().unwrap();
+        assert!(path.ends_with(&format!("{id}.jar")), "{path}");
     }
 
     /// 刷新成功的整条令牌链；`login` 决定 Minecraft 登录那一步怎么回应。
@@ -4107,6 +4249,7 @@ mod tests {
             (FailureCode::FilesFailed, "files_failed"),
             (FailureCode::DiskFull, "disk_full"),
             (FailureCode::VersionBroken, "version_broken"),
+            (FailureCode::PathUnsupported, "path_unsupported"),
             (FailureCode::SpawnFailed, "spawn_failed"),
         ];
         for (code, name) in all {

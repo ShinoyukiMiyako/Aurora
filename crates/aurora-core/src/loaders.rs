@@ -446,11 +446,14 @@ fn download_bytes(json: &VersionJson, ctx: &RuntimeContext) -> Option<u64> {
     let mut total = json.downloads.as_ref()?.client.as_ref()?.size;
     let index = json.asset_index.as_ref()?;
     total += index.size + index.total_size?;
+    // 同坐标的主件条目与 natives 条目声明的是同一个主件，下载只有一次，体积也只算一次。
+    let mut counted = HashSet::new();
     for library in select_libraries(json, ctx) {
         let downloads = library.downloads.as_ref()?;
         total += downloads
             .artifact
             .as_ref()
+            .filter(|artifact| counted.insert(artifact.url.as_str()))
             .map_or(0, |artifact| artifact.size);
         total += library.native_artifact(ctx).map_or(0, |native| native.size);
     }
@@ -779,6 +782,8 @@ mod tests {
                     { "name": "a:elsewhere:1",
                       "rules": [{ "action": "allow", "os": { "name": other_os } }],
                       "downloads": { "artifact": { "path": "b", "sha1": "2", "size": 4000, "url": "http://x/b" } } },
+                    { "name": "a:lwjgl:2",
+                      "downloads": { "artifact": { "path": "c", "sha1": "3", "size": 3, "url": "http://x/c" } } },
                     { "name": "a:lwjgl:2",
                       "natives": { os: "natives-here", other_os: "natives-there" },
                       "downloads": {

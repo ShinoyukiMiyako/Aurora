@@ -155,6 +155,37 @@ mod tests {
         assert_eq!(classpath_separator(OsName::Osx), ':');
     }
 
+    /// 同坐标的主件条目与 natives 条目：主件进 classpath 且只进一次，natives 分类件不进。
+    #[test]
+    fn main_jar_shared_with_native_entry_appears_once() {
+        let version = VersionJson::from_json_str(
+            r#"{"id":"1.16.5","libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}}},
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{
+                    "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"},
+                    "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"n","size":2,"url":"n"}}},
+                 "natives":{"windows":"natives-windows"}}
+            ]}"#,
+        )
+        .unwrap();
+        let entries = classpath_entries(
+            &version,
+            &win64(),
+            Path::new("/mc/libraries"),
+            Path::new("/mc/client.jar"),
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                Path::new("/mc/libraries/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar").to_path_buf(),
+                Path::new("/mc/client.jar").to_path_buf(),
+            ]
+        );
+    }
+
     #[test]
     fn maven_path_matches_install_layout() {
         assert_eq!(

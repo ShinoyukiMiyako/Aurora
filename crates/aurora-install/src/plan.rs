@@ -8,6 +8,8 @@
 //! 落点里的每个相对段（库路径、坐标各段、资源 hash、索引 id、日志配置名、版本 id）都来自版本 JSON 或
 //! 资源索引，按 [`crate::layout`] 的规则校验，能走出游戏目录的报 [`Error::UnsafePath`]。
 
+use std::collections::HashSet;
+
 use aurora_download::DownloadTask;
 use aurora_version::{AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries};
 
@@ -42,6 +44,9 @@ pub fn library_tasks(
     for lib in selected {
         push_library_tasks(lib, ctx, layout, &mut tasks)?;
     }
+    // 同坐标的主件条目与 natives 条目都声明了主件：两个任务写同一个落点，批次里只留一个。
+    let mut seen = HashSet::new();
+    tasks.retain(|task| seen.insert(task.dest.clone()));
     Ok(tasks)
 }
 
@@ -275,6 +280,38 @@ mod tests {
             )
         );
         assert_eq!(tasks[1].sha1.as_deref(), Some("w1"));
+    }
+
+    /// 主件与 natives 条目同坐标时都声明了同一个主件：主件只下一次（同一落点并发写会互相打架），
+    /// natives 分类件也要进下载批次。
+    #[test]
+    fn library_tasks_fetch_shared_main_jar_once_and_the_native_classifier() {
+        let v = VersionJson::from_json_str(
+            r#"{
+                "id":"1.16.5",
+                "libraries":[
+                    {"name":"org.lwjgl:lwjgl:3.2.2",
+                     "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a1","size":10,"url":"https://libraries.minecraft.net/lwjgl.jar"}}},
+                    {"name":"org.lwjgl:lwjgl:3.2.2",
+                     "downloads":{
+                        "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a1","size":10,"url":"https://libraries.minecraft.net/lwjgl.jar"},
+                        "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"n1","size":20,"url":"https://libraries.minecraft.net/lwjgl-natives-windows.jar"}}},
+                     "natives":{"windows":"natives-windows"}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let tasks = library_tasks(&v, &win64(), &layout()).unwrap();
+        let dests: Vec<_> = tasks.iter().map(|t| t.dest.clone()).collect();
+        assert_eq!(
+            dests,
+            vec![
+                PathBuf::from("/mc/libraries/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"),
+                PathBuf::from(
+                    "/mc/libraries/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar"
+                ),
+            ]
+        );
     }
 
     #[test]

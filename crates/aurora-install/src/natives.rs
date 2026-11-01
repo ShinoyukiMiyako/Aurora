@@ -323,6 +323,39 @@ mod tests {
         );
     }
 
+    /// 1.16.5 这类版本 JSON 的写法：主件一条，同坐标再来一条带 natives 映射的。解压要落到后一条的分类件上。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn extract_all_natives_finds_native_entry_after_main_jar_of_same_coordinate() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        let jar_path = layout.library_path("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar");
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        build_test_jar(&jar_path);
+        let version = VersionJson::from_json_str(
+            r#"{"id":"1.16.5","libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}}},
+                {"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{
+                    "artifact":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"},
+                    "classifiers":{"natives-windows":{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"n","size":2,"url":"n"}}},
+                 "natives":{"windows":"natives-windows"},
+                 "extract":{"exclude":["META-INF/"]}}
+            ]}"#,
+        )
+        .unwrap();
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+
+        let count = extract_all_natives(&version, &ctx, &layout, "1.16.5")
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read(layout.natives_dir("1.16.5").join("lwjgl.dll")).unwrap(),
+            b"fake-dll-bytes"
+        );
+    }
+
     /// natives jar 的路径（直给的或由坐标算出的）能走出库目录时报路径越界，不去读库目录外的文件；
     /// 坐标缺段报坐标非法，不再悄悄跳过这个 native。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
