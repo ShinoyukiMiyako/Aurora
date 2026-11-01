@@ -606,6 +606,49 @@ async fn the_last_source_finishes_with_the_watchdog_off() {
     only_dest_left(dir.path(), &dest);
 }
 
+/// 没有 sha1 的文件在唯一的源上判慢：关掉看门狗续传时，已下完的分片照样复用。分片是同一个源写的，
+/// 换源前那条「没有 sha1 就清分片」的纪律不适用。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_last_source_keeps_finished_chunks_of_a_file_without_sha1() {
+    let total = 3 * MIB;
+    let body = payload(total);
+    let node = Endpoint::start(body.clone(), |start, seen| match start {
+        None => Pace::HeadOnly,
+        Some(start) if start == 2 * MIB && !seen.contains(&Some(2 * MIB)) => {
+            Pace::DripTail(DRIP_ALL)
+        }
+        Some(_) => Pace::Fast,
+    })
+    .await;
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), single_source()));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("nosha.jar");
+    let task = DownloadTask::new(node.url("/nosha.jar"), &dest).with_size(total);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("最后一个源上慢也要下完");
+
+    assert_eq!(std::fs::read(&dest).unwrap(), *body);
+    assert_eq!(
+        node.requests(),
+        vec![
+            // 看门狗盯着的一轮：探测、前两片快放、第三片滴灌被判慢、向原地址重取终点仍是自己。
+            None,
+            Some(0),
+            Some(MIB),
+            Some(2 * MIB),
+            None,
+            // 关掉看门狗的一轮：探测、首片照例重下、第二片复用、只续第三片。
+            None,
+            Some(0),
+            Some(2 * MIB),
+        ]
+    );
+    only_dest_left(dir.path(), &dest);
+}
+
 /// 第一个源只是慢、后面的源根本没有这个文件（镜像还没同步到的新版本就是这样）：换源失败后回到慢源，
 /// 关掉看门狗在它上面下完，而不是把一个本来下得完的文件判成装不上。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
