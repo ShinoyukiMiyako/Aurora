@@ -783,11 +783,23 @@ async fn extract_zip_entry_to_async(archive: &Path, entry: &str, dest: &Path) ->
     Ok(())
 }
 
-/// 把旧版通用 jar 解到库目录。同一 Forge 版本的游戏正在运行时 JVM 占着这份 jar，替换它会失败；
-/// 失败之后查一次占用，把笼统的 IO 失败换成能照着做的提示，没被占用就原样报出。
+/// 把旧版通用 jar 解到库目录。
 async fn extract_universal_jar(installer: &Path, entry: &str, dest: &Path) -> Result<()> {
     let bytes = read_zip_entry_async(installer, entry).await?;
-    let Err(source) = aurora_base::fs::atomic_write(dest, &bytes).await else {
+    write_library(dest, &bytes).await
+}
+
+/// 把 installer 里的库文件写到落点。盘上已经是这些字节时不写：同一 Forge 版本的游戏可能正开着，
+/// Windows 上覆盖被占用的 jar 会失败，而这里常常没有 sha1 可比。写不进去时看落点是不是被占着，
+/// 是就指认文件，否则照原样报 IO 失败。
+async fn write_library(dest: &Path, bytes: &[u8]) -> Result<()> {
+    if tokio::fs::read(dest)
+        .await
+        .is_ok_and(|current| current == bytes)
+    {
+        return Ok(());
+    }
+    let Err(source) = aurora_base::fs::atomic_write(dest, bytes).await else {
         return Ok(());
     };
     match first_held_open(vec![dest.to_path_buf()]).await {
@@ -864,7 +876,7 @@ async fn extract_bundled_libraries(
             hasher.update(&bytes);
             hasher.verify(&artifact.sha1)?;
         }
-        aurora_base::fs::atomic_write(&dest, &bytes).await?;
+        write_library(&dest, &bytes).await?;
     }
     Ok(())
 }
@@ -3371,6 +3383,74 @@ mod tests {
         assert!(shown.contains("正被别的程序占用"), "{shown}");
         assert_eq!(std::fs::read(&universal).unwrap(), b"older-universal");
         assert!(!f.layout.version_dir(id).exists());
+    }
+
+    /// 旧版通用 jar 没有 sha1 可比，内容相同时也不写：同一 Forge 版本的游戏开着时这次安装本可以成。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_universal_jar_identical_to_the_held_one_is_left_alone() {
+        let f = fixture();
+        let (installer, _) = legacy_installer_needing(&f, "http://unused.invalid/");
+        let universal = library(&f, LEGACY_UNIVERSAL);
+        put(&universal, b"universal");
+        let _game = hold_like_a_running_game(&universal);
+
+        extract_universal_jar(&installer, "forge-universal.jar", &universal)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&universal).unwrap(), b"universal");
+    }
+
+    const BUNDLED_REL: &str = "net/minecraftforge/forge/1.16.5/forge-1.16.5.jar";
+
+    /// 地址留空、没写 sha1 的自带库，由 installer 里的 `bytes` 提供。
+    fn bundled_library(f: &Fixture, bytes: &[u8]) -> (PathBuf, aurora_version::Library) {
+        let installer = write_installer(&f.root, &[(&format!("maven/{BUNDLED_REL}"), bytes)]);
+        let library = serde_json::from_value(serde_json::json!({
+            "name": "net.minecraftforge:forge:1.16.5",
+            "downloads": {"artifact": {"path": BUNDLED_REL, "url": "", "sha1": "", "size": bytes.len()}}
+        }))
+        .unwrap();
+        (installer, library)
+    }
+
+    /// 现代路径的自带库与旧版通用 jar 同一处理：内容不同又被占着时报占用并指认文件。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bundled_library_held_by_a_running_game_is_reported_as_locked() {
+        let f = fixture();
+        let (installer, lib) = bundled_library(&f, b"new-bytes");
+        let dest = f.layout.library_path(BUNDLED_REL);
+        put(&dest, b"older-bytes");
+        let _game = hold_like_a_running_game(&dest);
+
+        let err = extract_bundled_libraries(&installer, &[lib], &f.layout)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::LibraryFileLocked { path, .. } if *path == dest),
+            "实际：{err:?}"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"older-bytes");
+    }
+
+    /// 自带库没写 sha1 时同样按字节比：内容相同就不碰被占着的文件。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bundled_library_identical_to_the_held_one_is_left_alone() {
+        let f = fixture();
+        let (installer, lib) = bundled_library(&f, b"same-bytes");
+        let dest = f.layout.library_path(BUNDLED_REL);
+        put(&dest, b"same-bytes");
+        let _game = hold_like_a_running_game(&dest);
+
+        extract_bundled_libraries(&installer, &[lib], &f.layout)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"same-bytes");
     }
 
     /// 写不进去的原因不是占用（落点是个目录）：不张冠李戴，照原样报 IO 失败。
