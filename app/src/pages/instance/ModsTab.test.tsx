@@ -298,6 +298,34 @@ describe("批量操作", () => {
     expect(find("checkbox", "选择 Iris").getAttribute("aria-checked")).toBe("false");
   });
 
+  it("批量条在焦点还在条内时换回工具条：焦点落到同一位置的搜索框，不掉回页面开头", async () => {
+    await open();
+    const search = () => document.querySelector<HTMLInputElement>('input[placeholder="搜索名称、作者或文件名"]');
+
+    click(find("checkbox", "选择 Iris"));
+    const clear = button("取消选择");
+    act(() => clear.focus());
+    click(clear);
+    expect(search()).not.toBeNull();
+    expect(document.activeElement).toBe(search());
+
+    // 批量动作跑完清空选择时同样如此
+    click(find("checkbox", "选择 Sodium"));
+    const disable = button("停用");
+    act(() => disable.focus());
+    click(disable);
+    await flush();
+    expect(callsOf(ipc, "set_mods_enabled")).toHaveLength(1);
+    expect(document.activeElement).toBe(search());
+
+    // 焦点已经不在条里（玩家点回了表格）时不抢焦点
+    click(find("checkbox", "选择 Sodium"));
+    const row = find("checkbox", "选择 Handmade");
+    act(() => row.focus());
+    click(button("取消选择"));
+    expect(document.activeElement).toBe(row);
+  });
+
   it("选择随列表重扫剪枝：文件被挪走后不再列出的行从选择里剔除，放回来也不会自动选上", async () => {
     await open();
     click(find("checkbox", "选择 Sodium"));

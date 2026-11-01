@@ -4,7 +4,7 @@
 // 忽略更新只改记录、不碰 jar，只在补全时禁用。
 
 import { motion } from "framer-motion";
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
@@ -124,6 +124,12 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const searchRef = useRef<HTMLInputElement>(null);
   // 工具条与批量操作条互换时新条淡入；页面刚挂上时的那一条不淡入
   const barMounted = useRef(false);
+  // 批量条卸下时焦点还在条里（点了「取消选择」或批量动作跑完）：被移除的按钮会把焦点扔回页面开头，
+  // 键盘用户得从头 Tab 回来。卸下的那一刻记一笔，换上的工具条把焦点接到同一位置的搜索框。
+  const focusLeftWithBar = useRef(false);
+  const batchBarRef = useCallback((node: HTMLDivElement) => () => {
+    focusLeftWithBar.current = node.contains(document.activeElement);
+  }, []);
   const id = inst.id;
   const lock = lockReason(ops.locks.mods, "mods");
   // 更新检查设置只写卷宗：运行中照常可用，只有补全在写整个目录时挡住
@@ -319,11 +325,17 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const batchBlocked = (action: BatchAction) => batchBusy !== null && batchBusy !== action;
   // 减少动画时只去掉位移与形变，200 ms 的淡入照常保留
   const barFade = barMounted.current ? { opacity: 0 } : false;
+  const batchShown = batch !== null;
+  useLayoutEffect(() => {
+    if (batchShown || !focusLeftWithBar.current) return;
+    focusLeftWithBar.current = false;
+    searchRef.current?.focus();
+  }, [batchShown]);
 
   return (
     <div className={styles.stack}>
       {batch !== null ? (
-        <motion.div key="batch" className={styles.toolbar} data-batch="" initial={barFade} animate={{ opacity: 1, transition: fade.in }}>
+        <motion.div key="batch" ref={batchBarRef} className={styles.toolbar} data-batch="" initial={barFade} animate={{ opacity: 1, transition: fade.in }}>
           <span className={styles.batchCount}>{MODS_COPY.batchSelected(selectedRows.length)}</span>
           <div className={styles.batchActions}>
             <Button disabled={batchBlocked("enable")} disabledReason={batch.enable} loading={batchBusy === "enable"} onClick={() => batchToggle(true)}>
