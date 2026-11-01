@@ -202,6 +202,23 @@ export function InstallingBanner({ instanceId }: { instanceId: string }) {
 
 // ---------------------------------------------------------------- 四格数据
 
+function PlaytimeTile({ minutes, createdAt, now }: { minutes: number; createdAt: number | null; now: number }) {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return (
+    <StatTile
+      icon="clock"
+      label={OVERVIEW_COPY.statPlaytime}
+      value={String(hours > 0 ? hours : rest)}
+      unit={hours > 0 ? OVERVIEW_COPY.hoursUnit(rest) : OVERVIEW_COPY.minutesUnit}
+      delta={{
+        direction: "flat",
+        text: minutes === 0 || createdAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.perWeek(weeklyHours(minutes, createdAt, now)),
+      }}
+    />
+  );
+}
+
 function StatsCard({
   inst,
   content,
@@ -216,11 +233,14 @@ function StatsCard({
   const now = useNow(30_000);
   // 列表扫完就与 Mod 速览用同一个总数，不让两处一个写 12 个、一个写「还没有装任何 Mod」
   const modTotal = mods.status === "ready" ? modTotals(inst, mods.data.length).total : inst.modCount;
-  const hours = Math.floor(inst.playtimeMin / 60);
-  const minutes = inst.playtimeMin % 60;
   const modded = inst.loader !== "vanilla";
   const worlds = useModuleView(content);
   const worldsBytes = content.status === "ready" ? content.data.worlds.reduce((sum, w) => sum + w.size_bytes, 0) : 0;
+  // 四格里只写得下「读不到」，原因放在格子下面；一张卡片只留一条提示
+  const notices = [
+    ...(inst.playError === null ? [] : [OVERVIEW_COPY.playError(inst.playError)]),
+    ...(inst.dirError === null ? [] : [OVERVIEW_COPY.dirError(inst.dirError)]),
+  ];
 
   const modDelta = !modded
     ? { direction: "flat" as const, text: OVERVIEW_COPY.modsVanilla }
@@ -233,23 +253,22 @@ function StatsCard({
   return (
     <Card>
       <StatGrid columns={4}>
-        <StatTile
-          icon="clock"
-          label={OVERVIEW_COPY.statPlaytime}
-          value={String(hours > 0 ? hours : minutes)}
-          unit={hours > 0 ? OVERVIEW_COPY.hoursUnit(minutes) : OVERVIEW_COPY.minutesUnit}
-          delta={{
-            direction: "flat",
-            text: inst.playtimeMin === 0 || inst.createdAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.perWeek(weeklyHours(inst.playtimeMin, inst.createdAt, now)),
-          }}
-        />
-        <StatTile
-          icon="calendar"
-          label={OVERVIEW_COPY.statLastPlayed}
-          kind="text"
-          value={inst.lastPlayedAt === null ? OVERVIEW_COPY.never : formatRelative(inst.lastPlayedAt, now)}
-          delta={{ direction: "flat", text: inst.lastPlayedAt === null ? OVERVIEW_COPY.rememberOnLaunch : formatDate(inst.lastPlayedAt) }}
-        />
+        {inst.playtimeMin === null ? (
+          <StatTile icon="clock" label={OVERVIEW_COPY.statPlaytime} kind="text" value={OVERVIEW_COPY.playUnknown} />
+        ) : (
+          <PlaytimeTile minutes={inst.playtimeMin} createdAt={inst.createdAt} now={now} />
+        )}
+        {inst.playError !== null ? (
+          <StatTile icon="calendar" label={OVERVIEW_COPY.statLastPlayed} kind="text" value={OVERVIEW_COPY.playUnknown} />
+        ) : (
+          <StatTile
+            icon="calendar"
+            label={OVERVIEW_COPY.statLastPlayed}
+            kind="text"
+            value={inst.lastPlayedAt === null ? OVERVIEW_COPY.never : formatRelative(inst.lastPlayedAt, now)}
+            delta={{ direction: "flat", text: inst.lastPlayedAt === null ? OVERVIEW_COPY.rememberOnLaunch : formatDate(inst.lastPlayedAt) }}
+          />
+        )}
         {modTotal === null ? (
           <StatTile icon="box" label={OVERVIEW_COPY.statMods} kind="text" value={OVERVIEW_COPY.modsUnknown} />
         ) : (
@@ -269,6 +288,13 @@ function StatsCard({
           <div className={styles.statSkeleton}>{worlds.view === "skeleton" && <Skeleton shape="text" lines={3} />}</div>
         )}
       </StatGrid>
+      {notices.length > 0 && (
+        <Callout tone="warn" className={styles.statsNotice}>
+          {notices.map((notice) => (
+            <div key={notice}>{notice}</div>
+          ))}
+        </Callout>
+      )}
     </Card>
   );
 }

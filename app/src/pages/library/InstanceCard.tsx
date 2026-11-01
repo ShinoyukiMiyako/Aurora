@@ -187,8 +187,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
           </Callout>
         ) : (
           <ul className={styles.stats} aria-label={LIBRARY_COPY.statsLabel}>
-            <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={formatRelative(inst.lastPlayedAt, now)} />
-            <Stat icon="clock" label={LIBRARY_COPY.playtime} value={formatPlaytimeShort(inst.playtimeMin)} />
+            <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={inst.playError === null ? formatRelative(inst.lastPlayedAt, now) : LIBRARY_COPY.playUnknown} />
+            <Stat icon="clock" label={LIBRARY_COPY.playtime} value={inst.playtimeMin === null ? LIBRARY_COPY.playUnknown : formatPlaytimeShort(inst.playtimeMin)} />
             {inst.modCount !== null && inst.modCount > 0 && <Stat icon="mod" label={LIBRARY_COPY.modCount} value={String(inst.modCount)} />}
             {inst.worldCount !== null && <Stat icon="world" label={LIBRARY_COPY.worldCount} value={String(inst.worldCount)} />}
           </ul>

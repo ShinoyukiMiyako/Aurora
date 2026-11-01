@@ -178,9 +178,13 @@ export function barFill(minutes: number, max: number): number {
   return Math.max(BAR_MIN_FILL, Math.min(1, minutes / max));
 }
 
-/** 全部实例的累计时长（整小时）与实例数；新建、导入中的占位项不算。 */
-export function totalPlaytime(instances: readonly InstanceSummary[]): { hours: number; count: number } {
+/** 全部实例的累计时长（整小时）与实例数；新建、导入中的占位项不算。有实例的游玩记录读不出时加不出总数，hours 为 null。 */
+export function totalPlaytime(instances: readonly InstanceSummary[]): { hours: number | null; count: number } {
   const real = instances.filter((i) => !i.placeholder);
-  const minutes = real.reduce((t, i) => t + i.playtimeMin, 0);
+  let minutes = 0;
+  for (const inst of real) {
+    if (inst.playtimeMin === null) return { hours: null, count: real.length };
+    minutes += inst.playtimeMin;
+  }
   return { hours: Math.round(minutes / 60), count: real.length };
 }

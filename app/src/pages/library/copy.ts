@@ -7,7 +7,8 @@ import type { SortKey } from "./model";
 
 export const LIBRARY_COPY = {
   title: PAGE_LABEL.library,
-  subtitle: (count: number, pinned: number, minutes: number) => `共 ${count} 个实例 · ${pinned} 个固定在侧栏 · 累计 ${formatPlaytime(minutes)}`,
+  subtitle: (count: number, pinned: number, minutes: number | null) =>
+    `共 ${count} 个实例 · ${pinned} 个固定在侧栏 · ${minutes === null ? "累计时长读不到" : `累计 ${formatPlaytime(minutes)}`}`,
   subtitleEmpty: "还没有实例",
   importModpack: "导入整合包",
   create: "新建实例",
@@ -30,6 +31,7 @@ export const LIBRARY_COPY = {
   statsLabel: "游玩概况",
   lastPlayed: "上次游玩",
   playtime: "累计时长",
+  playUnknown: "读不到",
   modCount: "Mod 数",
   worldCount: "存档数",
 

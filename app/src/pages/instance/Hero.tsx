@@ -95,7 +95,11 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
             <div className={styles.heroText}>
               <span className={styles.heroEyebrow}>
                 {eyebrow}
-                {inst.playtimeMin > 0 && <span className={styles.soft}>{` · ${HERO_COPY.played(inst.playtimeMin)}`}</span>}
+                {inst.playtimeMin === null ? (
+                  <span className={styles.soft}>{` · ${HERO_COPY.playedUnknown}`}</span>
+                ) : (
+                  inst.playtimeMin > 0 && <span className={styles.soft}>{` · ${HERO_COPY.played(inst.playtimeMin)}`}</span>
+                )}
               </span>
               {renaming && renameReason === undefined ? (
                 <RenameField inst={inst} ops={ops} onDone={() => onRenamingChange(false)} />

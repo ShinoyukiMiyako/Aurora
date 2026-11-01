@@ -177,6 +177,17 @@ describe("实例库：列表与页头", () => {
     expect(broken?.querySelector("ul")).toBeNull();
   });
 
+  it("游玩记录读不出：卡片统计写读不到，不写从未游玩与 0m；页头不写累计 0", async () => {
+    instances = instances.map((i) => ({ ...i, playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" }));
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "樱花生存").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    expect([...card.querySelectorAll("li")].map((li) => li.getAttribute("aria-label"))).toEqual(["上次游玩 读不到", "累计时长 读不到", "Mod 数 34", "存档数 0"]);
+    expect(card.textContent).not.toContain("从未游玩");
+    expect(card.textContent).not.toContain("0m");
+    expect(document.querySelector("header p")?.textContent).toBe("共 4 个实例 · 1 个固定在侧栏 · 累计时长读不到");
+  });
+
   it("整合包实例的介绍行写整合包名与版本，统计行带存档数；读不出存档数时不写", async () => {
     instances = [
       ...instances,

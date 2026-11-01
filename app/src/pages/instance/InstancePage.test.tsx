@@ -364,6 +364,40 @@ describe("实例详情：头图与标签", () => {
     expect(text()).toContain("整合包modpack.json 不是合法的 JSON");
   });
 
+  it("游玩记录读不出：眉题、累计游玩与上次游玩都写读不到，原因写在四格下面，不写 0 分钟与从未", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败: playtime.json" } : i));
+    await open("overview");
+    expect(document.querySelector("h1")?.parentElement?.textContent).toContain("自建模组实例 · 游玩时长读不到");
+    expect(byRole("group", "累计游玩 读不到").textContent).toBe("累计游玩读不到");
+    expect(byRole("group", "上次游玩 读不到").textContent).toBe("上次游玩读不到");
+    expect(text()).toContain("游玩记录读不出来：解析 游玩记录 失败: playtime.json");
+    expect(text()).not.toContain("还没开始玩");
+    expect(text()).not.toContain("启动一次就会记下来");
+    expect(text()).not.toContain("0分钟");
+  });
+
+  it("没玩过的实例仍写 0 分钟与从未，没有读不到的提示", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, playtime_min: 0, last_played_at: null } : i));
+    await open("overview");
+    expect(byRole("group", "累计游玩 0 分钟，还没开始玩").textContent).toContain("0分钟");
+    expect(byRole("group", "上次游玩 从未，启动一次就会记下来").textContent).toContain("从未");
+    expect(text()).not.toContain("读不到");
+    expect(text()).not.toContain("读不出来");
+  });
+
+  it("实例目录读不出：Mod 数写读不出来，原因写在四格下面；与游玩记录同时坏时一条提示里各占一行", async () => {
+    instances = instances.map((i) =>
+      i.id === ID ? { ...i, mod_count: null, world_count: null, isolated: null, dir_error: "文件 IO 失败: mods：拒绝访问", playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" } : i,
+    );
+    ipc.overrides.set("list_mods", () => {
+      throw new IpcError("io", "mods 读不出来");
+    });
+    await open("overview");
+    expect(text()).toContain("Mod 数读不出来");
+    const lines = [...document.querySelectorAll<HTMLElement>("[class*=statsNotice] div div")].map((line) => line.textContent);
+    expect(lines).toEqual(["游玩记录读不出来：解析 游玩记录 失败", "实例目录读不出来：文件 IO 失败: mods：拒绝访问"]);
+  });
+
   it("切标签用 replace：路由换成新标签，面板随之切换", async () => {
     await open("overview");
     click(byRole("tab", "设置"));

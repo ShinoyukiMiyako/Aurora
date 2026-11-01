@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use aurora_base::error_with_causes;
 use aurora_instance::{
     AURORA_META_DIR, BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker,
     InstanceContent, MarkerStore, PinsViolation, VersionProbe, VersionScan, VersionSettings,
@@ -67,8 +68,10 @@ pub struct InstanceSummary {
     pub settings: Readable<VersionSettings>,
     /// 未完成标记；`None` 表示文件齐全（或至少没有中断过的安装与修复）。
     pub incomplete: Option<Readable<IncompleteMarker>>,
-    /// 实例目录的创建时刻（Unix 毫秒）；文件系统不记录创建时间时为 `None`。
+    /// 实例目录的创建时刻（Unix 毫秒）；文件系统不记录创建时间或目录读不出时为 `None`。
     pub created_at: Option<u64>,
+    /// 实例目录或工作目录读不出来的原因；此时 `created_at` 或 Mod 数、存档数、隔离生效值为 `None`。
+    pub dir_error: Option<String>,
     /// 从整合包导入时记下的整合包信息；`Read(None)` 表示不是整合包实例。
     pub modpack: Readable<Option<InstanceModpack>>,
     /// 最近一次崩溃的时刻（Unix 毫秒）；`Read(None)` 表示没崩溃过。
@@ -95,7 +98,7 @@ pub struct ReadyVersion {
     pub java_major: Option<u32>,
     /// 支持哪些直达方式（进入存档、加入服务器）；继承链断了时为 `None`。
     pub quick_play: Option<QuickPlaySupport>,
-    /// 工作目录 `mods/` 下的 Mod 文件数；设置文件读不出、定不了工作目录时为 `None`。
+    /// 工作目录 `mods/` 下的 Mod 文件数；设置文件读不出定不了工作目录、或工作目录读不出时为 `None`。
     pub mod_count: Option<u32>,
     /// 工作目录 `saves/` 下的存档数，口径同 [`count_worlds`]；何时为 `None` 同 `mod_count`。
     pub world_count: Option<u32>,
@@ -184,7 +187,7 @@ impl Aurora {
         let mut slots: Vec<Option<InstanceSummary>> = vec![None; total];
         while let Some(joined) = set.join_next().await {
             let (index, summary) = joined?;
-            slots[index] = Some(summary?);
+            slots[index] = Some(summary);
         }
         Ok(slots
             .into_iter()
@@ -442,11 +445,12 @@ impl Entry {
     }
 }
 
+/// 一个实例的摘要。不返回 `Result`：读不出来的都标在这个实例上，一个实例不该让整张列表失败。
 async fn summarize(
     game_dir: &Path,
     policy: aurora_instance::IsolationPolicy,
     entry: Entry,
-) -> Result<InstanceSummary> {
+) -> InstanceSummary {
     let (id, dir) = match &entry {
         Entry::Found(version, ..) => (version.id.clone(), version.dir.clone()),
         Entry::Broken(broken) => (broken.id.clone(), broken.dir.clone()),
@@ -480,32 +484,35 @@ async fn summarize(
             Readable::Unreadable(err.to_string())
         }
     };
-    let meta = tokio::fs::metadata(&dir)
-        .await
-        .map_err(|source| aurora_base::Error::Io {
-            path: dir.clone(),
-            source,
-        })?;
-    // created() 报错只意味着这个文件系统不记录创建时间。
-    let created_at = meta.created().ok().and_then(unix_millis);
+    let mut dir_error = None;
+    let created_at = match tokio::fs::metadata(&dir).await {
+        // created() 报错只意味着这个文件系统不记录创建时间。
+        Ok(meta) => meta.created().ok().and_then(unix_millis),
+        Err(source) => {
+            let reason = error_with_causes(&aurora_base::Error::Io {
+                path: dir.clone(),
+                source,
+            });
+            tracing::warn!(id, error = %reason, "实例目录读不出来");
+            dir_error = Some(reason);
+            None
+        }
+    };
 
     let version = match entry {
         Entry::Broken(broken) => InstanceVersion::Broken(broken.reason),
         Entry::Found(version, java_major, quick_play) => {
             let workdir = match &settings {
                 Readable::Read(settings) => {
-                    let resolved = resolve_isolation(
-                        game_dir,
-                        &id,
-                        policy,
-                        settings.isolation,
-                        version.has_mod_loader(),
-                        version.is_release(),
-                    )
-                    .await?;
-                    let mods = count_mod_files(&resolved.working_dir.join("mods")).await?;
-                    let worlds = count_worlds(&resolved.working_dir.join("saves")).await?;
-                    Some((mods, worlds, resolved.isolated))
+                    match workdir_facts(game_dir, &id, policy, settings, &version).await {
+                        Ok(facts) => Some(facts),
+                        Err(err) => {
+                            let reason = error_with_causes(&err);
+                            tracing::warn!(id, error = %reason, "工作目录读不出来");
+                            dir_error.get_or_insert(reason);
+                            None
+                        }
+                    }
                 }
                 Readable::Unreadable(_) => None,
             };
@@ -522,16 +529,39 @@ async fn summarize(
             })
         }
     };
-    Ok(InstanceSummary {
+    InstanceSummary {
         id,
         dir,
         version,
         settings,
         incomplete,
         created_at,
+        dir_error,
         modpack,
         last_crash_at,
-    })
+    }
+}
+
+/// 工作目录里列表要的 Mod 数、存档数与隔离生效值。
+async fn workdir_facts(
+    game_dir: &Path,
+    id: &str,
+    policy: aurora_instance::IsolationPolicy,
+    settings: &VersionSettings,
+    version: &DiscoveredVersion,
+) -> Result<(u32, u32, bool)> {
+    let resolved = resolve_isolation(
+        game_dir,
+        id,
+        policy,
+        settings.isolation,
+        version.has_mod_loader(),
+        version.is_release(),
+    )
+    .await?;
+    let mods = count_mod_files(&resolved.working_dir.join("mods")).await?;
+    let worlds = count_worlds(&resolved.working_dir.join("saves")).await?;
+    Ok((mods, worlds, resolved.isolated))
 }
 
 /// 实例备份目录下各存档里的备份文件数，按文件名认，不读清单。
@@ -986,6 +1016,56 @@ pub(crate) mod tests {
         assert_eq!(ready.mod_count, None, "定不了工作目录就不数");
         assert_eq!(ready.world_count, None);
         assert_eq!(ready.isolated, None);
+    }
+
+    /// 工作目录里的 `mods`、`saves` 打不开（这里是同名普通文件）：只有这个实例数不出来，别的实例照常。
+    #[tokio::test]
+    async fn unreadable_working_dir_is_reported_per_instance_instead_of_failing_the_list() {
+        for blocked in ["mods", "saves"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let game = aurora.game_dir().to_path_buf();
+            write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+            let bad = write_version(&game, "模组", &fabric_json("模组", "1.21.1"));
+            std::fs::write(bad.join(blocked), b"not a directory").unwrap();
+
+            let list = aurora.list_instances().await.unwrap();
+
+            let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+            assert_eq!(ids, vec!["1.21.1", "模组"]);
+            let InstanceVersion::Ready(ready) = &list[1].version else {
+                panic!("版本 JSON 本身是好的");
+            };
+            assert_eq!(ready.mod_count, None, "{blocked}");
+            assert_eq!(ready.world_count, None, "{blocked}");
+            assert_eq!(ready.isolated, None, "{blocked}");
+            let reason = list[1].dir_error.as_deref().unwrap();
+            assert!(reason.contains(blocked), "{reason}");
+            let InstanceVersion::Ready(healthy) = &list[0].version else {
+                panic!("原版应可用");
+            };
+            assert_eq!(healthy.mod_count, Some(0), "{blocked}");
+            assert_eq!(list[0].dir_error, None, "{blocked}");
+        }
+    }
+
+    /// 列出目录之后实例目录就没了（别处正删着它）：这一项拿不到创建时刻，整张列表照常出来。
+    #[tokio::test]
+    async fn instance_dir_vanishing_mid_scan_does_not_fail_the_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let gone = aurora.game_dir().join("versions").join("刚删掉");
+        let entry = Entry::Broken(BrokenVersion {
+            id: "刚删掉".into(),
+            dir: gone,
+            reason: BrokenReason::MissingJson,
+        });
+
+        let summary = summarize(aurora.game_dir(), aurora.config().isolation_policy, entry).await;
+
+        assert_eq!(summary.id, "刚删掉");
+        assert_eq!(summary.created_at, None);
+        assert!(summary.dir_error.unwrap().contains("刚删掉"));
     }
 
     /// 版本 JSON 读不出来的实例在列表里是损坏项，带上原因；同目录下别的实例不受影响。

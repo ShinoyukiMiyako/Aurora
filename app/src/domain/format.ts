@@ -82,7 +82,7 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
- * 过去的时刻。null 只表示「从未游玩」：只允许 lastPlayedAt 传 null，其他字段为空时不该调用它。
+ * 过去的时刻。null 只表示「从未游玩」：只允许 lastPlayedAt 传 null，其他字段为空或游玩记录读不出时不该调用它。
  * 24 到 48 小时为「昨天」。
  */
 export function formatRelative(ts: number | null, now: number = Date.now()): string {

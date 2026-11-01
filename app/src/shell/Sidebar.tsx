@@ -65,7 +65,7 @@ export function pinTarget(view: LaunchView, id: string): Route {
 export function pinLine(view: LaunchView, inst: InstanceSummary, now: number): string {
   switch (view.kind) {
     case "ready":
-      return AVATAR_LINE.ready(inst.lastPlayedAt, now);
+      return inst.playError === null ? AVATAR_LINE.ready(inst.lastPlayedAt, now) : AVATAR_LINE.playUnknown;
     case "loading":
       return AVATAR_LINE.loading(view.phase, percent(view.session.progress, true));
     case "running": {

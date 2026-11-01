@@ -528,6 +528,7 @@ export function endMockGame(exitCode: number | null, durationMs?: number): void 
 
 /** 下一次改名或删除时游玩记录没跟上的原因；null 为照常。 */
 let pendingRecordsFailure: string | null = null;
+let playRecordsUnreadable: string | null = null;
 
 /**
  * 下一次改名或删除时游玩记录没跟上（模拟 playtime.json 读写失败）：目录、侧栏固定与当前选中照常改好，命令报
@@ -559,6 +560,16 @@ export function failNextMockLaunch(code: string, params: Record<string, string |
 /** 最近一次通过了参数与直达检查的 launch_game 带的 quickPlay；普通启动为 null。 */
 export function lastMockQuickPlay(): QuickPlayArg | null {
   return lastQuickPlay;
+}
+
+/** 模拟 playtime.json 读不懂：实例列表照常返回、每个实例带上这个原因，游玩统计报错；传 null 恢复。 */
+export function setMockPlayRecordsUnreadable(cause: string | null): void {
+  playRecordsUnreadable = cause;
+}
+
+/** playtime.json 读不懂的原因；读得懂为 null。 */
+export function mockPlayRecordsError(): string | null {
+  return playRecordsUnreadable;
 }
 
 /** 诊断 mock 读取用。 */
@@ -660,6 +671,7 @@ function playStats(args: MockArgs): PlayStatsDto {
       to: range.to,
     });
   }
+  if (playRecordsUnreadable !== null) throw new IpcError("instance_failed", playRecordsUnreadable);
   const totals = new Map<string, number>();
   const days: PlayDayDto[] = [];
   // 统计只看当前游戏目录；没记过的目录与后端一样读作一本空账。
@@ -693,6 +705,7 @@ export function reset(): void {
   accountFailures = new Map();
   lastQuickPlay = null;
   pendingRecordsFailure = null;
+  playRecordsUnreadable = null;
   pendingWarnings = [];
   logs = new Map();
   crashes = new Map();

@@ -34,7 +34,7 @@ import {
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { followMockSelection, mockWorldBackupSettings } from "./config";
-import { forgetMockLaunchRecords, mockCrashReport, mockPlaySummary, renameMockLaunchRecords, takeMockPlayRecordsFailure } from "./launch";
+import { forgetMockLaunchRecords, mockCrashReport, mockPlayRecordsError, mockPlaySummary, renameMockLaunchRecords, takeMockPlayRecordsFailure } from "./launch";
 import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
 import { forgetMockPinnedInstance, renameMockPinnedInstance } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
@@ -95,6 +95,8 @@ type DerivedField =
   | "memory_mb"
   | "playtime_min"
   | "last_played_at"
+  | "play_error"
+  | "dir_error"
   | "mod_count"
   | "world_count"
   | "isolated"
@@ -650,7 +652,8 @@ function isolatedOf(instance: MockInstance): boolean {
 }
 
 function toDto(instance: MockInstance): InstanceDto {
-  const play = mockPlaySummary(instance.dto.id);
+  const playError = mockPlayRecordsError();
+  const play = playError === null ? mockPlaySummary(instance.dto.id) : null;
   const ready = instance.dto.status === "ready";
   const crash = mockCrashReport(instance.dto.id);
   return {
@@ -668,8 +671,10 @@ function toDto(instance: MockInstance): InstanceDto {
     last_crash_error: null,
     activity: activityOf(instance.dto.id),
     used_by: usedByOf(instance.dto.id),
-    playtime_min: play === null ? 0 : play.playtime_min,
+    playtime_min: playError !== null ? null : play === null ? 0 : play.playtime_min,
     last_played_at: play === null ? null : play.last_played_at,
+    play_error: playError,
+    dir_error: null,
   };
 }
 
@@ -1511,10 +1516,10 @@ export const handlers: MockHandlers = {
   // 与后端同序：先认实例，再占住（改名、删除、安装、补全进行中报 instance_busy；与运行中的游戏兼容），之后才读工作目录
   save_instance_as_template: (args) => {
     const id = str(args, "id");
-    const instance = requireInstance(id);
+    requireInstance(id);
     return withMockInstance(id, "modifying", () => {
       // mock 没有真实的工作目录：没进过游戏的实例按「还没写出 options.txt 与服务器列表」处理
-      if (toDto(instance).last_played_at === null) {
+      if (mockPlaySummary(id) === null) {
         throw new IpcError(TEMPLATE_SOURCE_EMPTY_ERROR_CODE, `实例 ${id} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存`, { id, files: TEMPLATE_FILES });
       }
       template = {

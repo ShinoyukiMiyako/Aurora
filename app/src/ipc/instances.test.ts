@@ -34,8 +34,8 @@ import {
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { acquireMockInstance, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
-import { endMockGame, reset as resetLaunchMock } from "./mock/handlers/launch";
-import { launchGame } from "./launch";
+import { endMockGame, reset as resetLaunchMock, setMockPlayRecordsUnreadable } from "./mock/handlers/launch";
+import { launchGame, playStats } from "./launch";
 import { exportModpack } from "./modpack";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
@@ -189,6 +189,20 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
 });
 
 describe("mock：列表、内容与元数据", () => {
+  it("游玩记录读不懂：列表照常、每个实例带原因且时长为 null，统计报错；恢复后时长回来", async () => {
+    setMockPlayRecordsUnreadable("解析 游玩记录 失败");
+    const list = await listInstances();
+    expect(list.length).toBeGreaterThan(0);
+    expect(list.every((i) => i.playtime_min === null && i.last_played_at === null && i.play_error === "解析 游玩记录 失败")).toBe(true);
+    await expect(playStats({ from: "2026-01-01", to: "2026-01-31" })).rejects.toMatchObject({ code: "instance_failed" });
+    setMockPlayRecordsUnreadable(null);
+    const restored = await listInstances();
+    expect(restored.find((i) => i.id === "1.21")).toMatchObject({ playtime_min: 175, play_error: null, dir_error: null });
+    setMockPlayRecordsUnreadable("解析 游玩记录 失败");
+    resetLaunchMock();
+    expect((await listInstances()).find((i) => i.id === "1.21")?.play_error).toBeNull();
+  });
+
   it("列表按小写 id 排序，就绪与损坏的实例字段各自成立", async () => {
     const list = await listInstances();
     // 码位顺序：数字 < 拉丁字母 < 汉字（樱 U+6A31 在 没 U+6CA1 之前），与后端一致，不按语言区域排。

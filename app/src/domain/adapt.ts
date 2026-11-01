@@ -142,9 +142,15 @@ export interface InstanceSummary {
   /** status 为 broken 时的原因；其余为 null。 */
   brokenReason: string | null;
   createdAt: number | null;
+  /** 上次游玩的毫秒时间戳；没玩过或游玩记录读不出时为 null，要说「从未游玩」先看 playError。 */
   lastPlayedAt: number | null;
-  playtimeMin: number;
-  /** mods/ 下的文件数，只数不解析；损坏或设置读不出时为 null。 */
+  /** 累计游玩分钟；没玩过为 0，游玩记录读不出时为 null。 */
+  playtimeMin: number | null;
+  /** 游玩记录读不出来的原因。 */
+  playError: string | null;
+  /** 实例目录或工作目录读不出来的原因；此时 createdAt 或 modCount、worldCount、isolated 为 null。 */
+  dirError: string | null;
+  /** mods/ 下的文件数，只数不解析；损坏、设置或工作目录读不出时为 null。 */
   modCount: number | null;
   /** saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 modCount。 */
   worldCount: number | null;
@@ -243,6 +249,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
   // 活动只报最要紧的那一件，被当作基底时它可能是 running 等；反过来报 inherited 却没说谁在用，或说了谁在用却没有任何占用，都是契约破了。
   if (dto.activity === "inherited" && dto.used_by === null) throw new Error(`实例 ${dto.id} 被当作基底占着，却没说是哪个实例在用`);
   if (dto.used_by !== null && dto.activity === null) throw new Error(`实例 ${dto.id} 正被 ${dto.used_by} 使用，却没有报出占用`);
+  if ((dto.playtime_min === null) !== (dto.play_error !== null)) throw new Error(`实例 ${dto.id} 的游玩时长与它的读取错误对不上`);
   return {
     id: dto.id,
     name: dto.id,
@@ -261,6 +268,8 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     createdAt: dto.created_at,
     lastPlayedAt: dto.last_played_at,
     playtimeMin: dto.playtime_min,
+    playError: dto.play_error,
+    dirError: dto.dir_error,
     modCount: dto.mod_count,
     worldCount: dto.world_count,
     isolated: dto.isolated,

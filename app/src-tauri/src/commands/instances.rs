@@ -569,7 +569,7 @@ pub struct InstanceDto {
     pub java_major: Option<u32>,
     /// 支持哪些直达方式；继承链断了或 broken 时为 null。
     pub quick_play: Option<QuickPlaySupportDto>,
-    /// 工作目录 mods/ 下的 Mod 文件数；broken 或设置读不出时为 null。
+    /// 工作目录 mods/ 下的 Mod 文件数；broken、设置或工作目录读不出时为 null。
     pub mod_count: Option<u32>,
     /// 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。
     pub world_count: Option<u32>,
@@ -590,17 +590,21 @@ pub struct InstanceDto {
     /// 崩溃记录读不出来的原因。
     pub last_crash_error: Option<String>,
     pub incomplete: Option<IncompleteDto>,
-    /// 实例目录的创建时刻（Unix 毫秒）。
+    /// 实例目录的创建时刻（Unix 毫秒）；文件系统不记录或目录读不出时为 null。
     pub created_at: Option<u64>,
+    /// 实例目录或工作目录读不出来的原因；此时 created_at 或 mod_count、world_count、isolated 为 null。
+    pub dir_error: Option<String>,
     /// 实例此刻在做的事；空闲为 null。
     pub activity: Option<InstanceActivity>,
     /// 正以它为基底的实例（有几个时为最早占到的那个）；没有被别的实例当作基底时为 null。
     /// 非空时删除、改名、补全它会报 instance_busy。
     pub used_by: Option<String>,
-    /// 累计游玩分钟（向下取整）；没玩过为 0。
-    pub playtime_min: u64,
-    /// 上次游玩结束的 Unix 毫秒；没玩过为 null。
+    /// 累计游玩分钟（向下取整）；没玩过为 0，游玩记录读不出时为 null。
+    pub playtime_min: Option<u64>,
+    /// 上次游玩结束的 Unix 毫秒；没玩过或游玩记录读不出时为 null。
     pub last_played_at: Option<u64>,
+    /// 游玩记录读不出来的原因。
+    pub play_error: Option<String>,
 }
 
 /// 实例的版本支持哪些直达方式：进入存档（Quick Play，1.20 起）与加入服务器。
@@ -936,7 +940,7 @@ fn incomplete_dto(marker: Readable<IncompleteMarker>) -> IncompleteDto {
 fn instance_dto(
     summary: InstanceSummary,
     activity: Option<InstanceActivity>,
-    play: Option<&PlaySummary>,
+    play: Readable<Option<&PlaySummary>>,
 ) -> InstanceDto {
     let (description, cover, memory_mb, settings_error) = match summary.settings {
         Readable::Read(settings) => (
@@ -964,6 +968,14 @@ fn instance_dto(
         Readable::Read(at) => (at, None),
         Readable::Unreadable(error) => (None, Some(error)),
     };
+    let (playtime_min, last_played_at, play_error) = match play {
+        Readable::Read(play) => (
+            Some(play.map_or(0, |p| p.playtime_min)),
+            play.map(|p| p.last_played_at),
+            None,
+        ),
+        Readable::Unreadable(error) => (None, None, Some(error)),
+    };
     let mut dto = InstanceDto {
         id: summary.id,
         status: "ready",
@@ -987,10 +999,12 @@ fn instance_dto(
         last_crash_error,
         incomplete: summary.incomplete.map(incomplete_dto),
         created_at: summary.created_at,
+        dir_error: summary.dir_error,
         activity,
         used_by: None,
-        playtime_min: play.map_or(0, |p| p.playtime_min),
-        last_played_at: play.map(|p| p.last_played_at),
+        playtime_min,
+        last_played_at,
+        play_error,
     };
     match summary.version {
         InstanceVersion::Ready(ready) => {
@@ -1182,12 +1196,23 @@ pub(crate) async fn list_instances_with(
 ) -> Result<Vec<InstanceDto>, CommandError> {
     let aurora = facade.snapshot().await;
     let list = aurora.list_instances().await.map_err(instance_error)?;
-    let plays = aurora.play_summaries().await?;
+    // 游玩记录只是实例的附属信息：读不懂时每个实例带上原因，列表照常给出，界面写「读不到」而不是 0。
+    let plays = match aurora.play_summaries().await {
+        Ok(plays) => Readable::Read(plays),
+        Err(err) => {
+            let reason = aurora_base::error_with_causes(&err);
+            tracing::warn!(error = %reason, "游玩记录读不出来");
+            Readable::Unreadable(reason)
+        }
+    };
     Ok(list
         .into_iter()
         .map(|summary| {
             let (activity, used_by) = locks.occupancy(&summary.id);
-            let play = plays.get(&summary.id);
+            let play = match &plays {
+                Readable::Read(plays) => Readable::Read(plays.get(&summary.id)),
+                Readable::Unreadable(reason) => Readable::Unreadable(reason.clone()),
+            };
             InstanceDto {
                 used_by,
                 ..instance_dto(summary, activity, play)
@@ -3470,7 +3495,7 @@ mod tests {
             .unwrap();
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
         let renamed = list.iter().find(|i| i.id == "生存服").unwrap();
-        assert_eq!(renamed.playtime_min, 90);
+        assert_eq!(renamed.playtime_min, Some(90));
         assert_eq!(renamed.last_played_at, Some(1_761_832_800_000));
         let stats = env
             .facade
@@ -3493,7 +3518,11 @@ mod tests {
         env.vanilla("生存服");
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
         let fresh = list.iter().find(|i| i.id == "生存服").unwrap();
-        assert_eq!(fresh.playtime_min, 0, "同名新实例不继承被删实例的时长");
+        assert_eq!(
+            fresh.playtime_min,
+            Some(0),
+            "同名新实例不继承被删实例的时长"
+        );
         assert_eq!(fresh.last_played_at, None);
         let summaries = env.facade.snapshot().await.play_summaries().await.unwrap();
         assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["别的"]);
@@ -3539,11 +3568,15 @@ mod tests {
         let day = || aurora_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap();
 
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
-        assert_eq!(played(&list), (90, Some(1_761_832_800_000)));
+        assert_eq!(played(&list), (Some(90), Some(1_761_832_800_000)));
 
         switch_game_dir(&env, &other).await;
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
-        assert_eq!(played(&list), (0, None), "另一个游戏目录里的同名实例不继承");
+        assert_eq!(
+            played(&list),
+            (Some(0), None),
+            "另一个游戏目录里的同名实例不继承"
+        );
         let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
         assert_eq!((stats.days.len(), stats.total_minutes), (0, 0));
 
@@ -3556,10 +3589,63 @@ mod tests {
 
         switch_game_dir(&env, &home).await;
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
-        assert_eq!(played(&list), (90, Some(1_761_832_800_000)));
+        assert_eq!(played(&list), (Some(90), Some(1_761_832_800_000)));
         let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
         assert_eq!(stats.total_minutes, 90);
         assert_eq!(stats.instances[0].version_id, "周末生存");
+    }
+
+    /// 游玩记录读不懂：实例列表照常出来，每个实例带上原因（含 JSON 的行列），时长是 null 而不是 0；
+    /// 文件修好后下一次列表恢复。
+    #[tokio::test]
+    async fn unreadable_play_records_leave_the_list_loading() {
+        let env = Env::new();
+        env.vanilla("a");
+        env.vanilla("b");
+        write_playtime(&env, "{ broken");
+        let locks = InstanceLocks::default();
+
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+
+        let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+        for entry in &list {
+            assert_eq!(entry.playtime_min, None, "{}", entry.id);
+            assert_eq!(entry.last_played_at, None, "{}", entry.id);
+            let reason = entry.play_error.as_deref().unwrap();
+            assert!(reason.contains("playtime.json"), "{reason}");
+            assert!(reason.contains("line 1 column 3"), "{reason}");
+        }
+        let value = serde_json::to_value(&list[0]).unwrap();
+        assert_eq!(value["playtime_min"], json!(null));
+
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{"instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},"days":{}}}"#,
+        );
+        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        assert_eq!(list[0].playtime_min, Some(10));
+        assert_eq!(list[0].last_played_at, Some(1_761_800_000_000));
+        assert_eq!(list[0].play_error, None);
+        assert_eq!(list[1].playtime_min, Some(0));
+        assert_eq!(list[1].last_played_at, None);
+        assert_eq!(list[1].play_error, None);
+    }
+
+    /// 新版启动器写的游玩记录，旧版本读到时同样只是读不到时长，不让列表打不开。
+    #[tokio::test]
+    async fn play_records_from_a_newer_format_leave_the_list_loading() {
+        let env = Env::new();
+        env.vanilla("a");
+        write_playtime(&env, r#"{"format":9,"directories":[]}"#);
+
+        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+            .await
+            .unwrap();
+
+        assert_eq!(list[0].playtime_min, None);
+        let reason = list[0].play_error.as_deref().unwrap();
+        assert!(reason.contains("格式版本是 9"), "{reason}");
     }
 
     /// 游玩记录读不出来：改名、删除照样把文件与配置里的侧栏固定、当前选中改完（磁盘与门面都改），命令以
@@ -3656,15 +3742,15 @@ mod tests {
             .open(&path)
             .unwrap();
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
-        assert_eq!(played(&list, "a"), (10, Some(1_761_800_000_000)));
+        assert_eq!(played(&list, "a"), (Some(10), Some(1_761_800_000_000)));
         let err = rename_instance_with(&env.facade, &locks, "a", "b")
             .await
             .unwrap_err();
         assert_eq!(err.code, code::PLAY_RECORDS_FAILED);
         let list = list_instances_with(&env.facade, &locks).await.unwrap();
         assert_eq!(list.len(), 2);
-        assert_eq!(played(&list, "b"), (10, Some(1_761_800_000_000)));
-        assert_eq!(played(&list, "留下"), (0, None));
+        assert_eq!(played(&list, "b"), (Some(10), Some(1_761_800_000_000)));
+        assert_eq!(played(&list, "留下"), (Some(0), None));
         drop(held);
 
         list_instances_with(&env.facade, &locks).await.unwrap();
@@ -3881,12 +3967,12 @@ mod tests {
         );
         assert_eq!(fab.mc_version.as_deref(), Some("1.21.1"));
         assert_eq!(fab.status, "ready");
-        assert_eq!(fab.playtime_min, 121);
+        assert_eq!(fab.playtime_min, Some(121));
         assert_eq!(fab.last_played_at, Some(1_767_225_600_000));
         let vanilla = list.iter().find(|i| i.id == "1.21.1").unwrap();
         assert_eq!(vanilla.activity, None);
         assert_eq!(vanilla.mod_count, Some(0));
-        assert_eq!(vanilla.playtime_min, 0);
+        assert_eq!(vanilla.playtime_min, Some(0));
         assert_eq!(vanilla.last_played_at, None);
     }
 
@@ -3914,6 +4000,7 @@ mod tests {
             settings,
             incomplete: None,
             created_at: Some(1),
+            dir_error: None,
             modpack,
             last_crash_at,
         };
@@ -3943,7 +4030,7 @@ mod tests {
                 Readable::Read(settings),
             ),
             None,
-            None,
+            Readable::Read(None),
         );
         let value = serde_json::to_value(&dto).unwrap();
         assert_eq!(
@@ -3971,8 +4058,11 @@ mod tests {
                 Readable::Unreadable("设置坏了".into()),
             ),
             None,
-            None,
+            Readable::Unreadable("游玩记录坏了".into()),
         );
+        assert_eq!(broken.playtime_min, None);
+        assert_eq!(broken.last_played_at, None);
+        assert_eq!(broken.play_error.as_deref(), Some("游玩记录坏了"));
         assert_eq!(broken.modpack, None);
         assert_eq!(broken.modpack_error.as_deref(), Some("整合包记录坏了"));
         assert_eq!(broken.last_crash_at, None);
@@ -3995,7 +4085,8 @@ mod tests {
             Readable::Read(VersionSettings::default()),
         );
         missing_json.version = InstanceVersion::Broken(aurora_core::BrokenReason::MissingJson);
-        let value = serde_json::to_value(instance_dto(missing_json, None, None)).unwrap();
+        let value =
+            serde_json::to_value(instance_dto(missing_json, None, Readable::Read(None))).unwrap();
         assert_eq!(value["status"], json!("broken"));
         assert_eq!(value["quick_play"], json!(null));
     }

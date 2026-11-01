@@ -201,6 +201,8 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   useReportOnce(content.status === "error" ? content.error : null, HOME_COPY.worldsError);
   const world = content.status === "ready" ? latestWorld(content.data.worlds) : null;
 
+  const when = inst.playError !== null ? HOME_COPY.lastPlayedUnknown : inst.lastPlayedAt === null ? HOME_COPY.neverPlayed : HOME_COPY.lastPlayed(formatRelative(inst.lastPlayedAt, now));
+
   const switchItems: MenuEntry[] = [
     ...switchOptions(instances, inst.id).map((o): MenuEntry => {
       const hint = o.current ? HOME_COPY.switchCurrent : o.mcVersion;
@@ -224,7 +226,7 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
           <Tag tone="accent" size="sm" icon="play">
             {HOME_COPY.continueTag}
           </Tag>
-          <span className={s.heroWhen}>{inst.lastPlayedAt === null ? HOME_COPY.neverPlayed : HOME_COPY.lastPlayed(formatRelative(inst.lastPlayedAt, now))}</span>
+          <span className={s.heroWhen}>{when}</span>
           <span className={s.grow} />
           <MenuButton
             items={switchItems}
@@ -246,7 +248,7 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
           </div>
           <p className={s.heroLine}>
             <Icon name="clock" size={16} />
-            <span>{HOME_COPY.playtime(inst.playtimeMin)}</span>
+            <span>{inst.playtimeMin === null ? HOME_COPY.playtimeUnknown : HOME_COPY.playtime(inst.playtimeMin)}</span>
             {world !== null && (
               <>
                 <span className={s.dot} aria-hidden="true" />
