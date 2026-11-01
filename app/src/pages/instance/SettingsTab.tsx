@@ -617,7 +617,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
           </SettingRow>
         ) : (
           <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
-            <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
+            <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} focusableWhenDisabled disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
               {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
             </Button>
           </SettingRow>
@@ -680,11 +680,11 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
       }
     >
       {info !== null && info.present && (
-        <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} onClick={clear}>
+        <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} focusableWhenDisabled onClick={clear}>
           {SETTINGS_COPY.templateClear}
         </Button>
       )}
-      <Button size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} disabledReason={locked} onClick={save}>
+      <Button size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} focusableWhenDisabled disabledReason={locked} onClick={save}>
         {SETTINGS_COPY.templateSave}
       </Button>
     </SettingRow>

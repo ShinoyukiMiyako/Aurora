@@ -1874,6 +1874,29 @@ describe("实例详情：设置", () => {
       expect(() => button("清除", row())).toThrow();
     });
 
+    it.each([
+      ["保存为默认", "save_instance_as_template"],
+      ["清除", "clear_template"],
+    ])("点「%s」后请求在途：按钮保持可聚焦，焦点留在它上面，两个按钮都按不了", async (label, command) => {
+      onTestFinished(emulateFocusFixup());
+      template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
+      const pending = deferred<TemplateInfoDto>();
+      ipc.overrides.set(command, () => pending.promise);
+      await open("settings");
+      const pressed = button(label, row());
+      const other = button(label === "清除" ? "保存为默认" : "清除", row());
+      act(() => pressed.focus());
+      click(pressed);
+      await flush();
+      expect(pressed.disabled).toBe(false);
+      expect(pressed.getAttribute("aria-busy")).toBe("true");
+      expect(document.activeElement).toBe(pressed);
+      expect(other.getAttribute("aria-disabled")).toBe("true");
+      click(pressed);
+      await flush();
+      expect(callsOf(ipc, command)).toHaveLength(1);
+    });
+
     it("已有别的实例存的默认设置写出来源与时刻，手放的写来源不明；没进过游戏时保存失败用后端原文报错，原来的不动", async () => {
       template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
       ipc.overrides.set("save_instance_as_template", (args) => {
@@ -1947,6 +1970,23 @@ describe("实例详情：设置", () => {
     resetRecorderKeepOverrides();
     await open("settings");
     expect(text()).toContain("连同 2 个存档一起移入回收站。");
+  });
+
+  it("点「补全」后任务排上：按钮换成「进行中」，还是同一个节点、保持可聚焦，焦点留在它上面，再按不重复排", async () => {
+    onTestFinished(emulateFocusFixup());
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("settings");
+    const repair = button("补全");
+    act(() => repair.focus());
+    click(repair);
+    await flush();
+    expect(button("进行中")).toBe(repair);
+    expect(repair.disabled).toBe(false);
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(repair);
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
   });
 
   it("实例上还挂着任务：确认框说明会先取消任务", async () => {
