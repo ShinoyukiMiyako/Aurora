@@ -362,7 +362,7 @@ fn part_path(dest: &Path) -> PathBuf {
 /// 把存档文件夹打成 zip 写到 `dest`：条目统一加 `<存档文件夹名>/` 前缀，每个子目录都有目录条目（空目录也
 /// 保留），任何层级的 `session.lock` 都跳过。先写 `<dest>.part`，写完再改名成 `dest`（已存在则覆盖）。
 ///
-/// 先遍历一遍算出总量，之后每拷 64 KiB 查一次 `is_cancelled`。取消或失败时删掉 `.part`，返回
+/// 先遍历一遍算出总量，之后每拷 64 KiB 查一次 `is_cancelled`，刷完盘、改名就位之前再查一次。取消或失败时删掉 `.part`，返回
 /// [`Error::Cancelled`] 或原错误。存档里有符号链接或目录联接时拒绝打包。
 pub fn pack_world(
     world_dir: &Path,
@@ -387,6 +387,10 @@ pub fn pack_world(
     }
     let part = part_path(dest);
     let written = write_archive(&root, &tree, &part, is_cancelled, progress).and_then(|()| {
+        // 写目录区与刷盘可能要几秒；这期间来的取消也不能让 zip 就位：调用方可能已经不再等结果。
+        if is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         fs::rename(&part, dest).map_err(|source| Error::Io {
             path: dest.to_path_buf(),
             source,
@@ -1295,6 +1299,27 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, Error::Cancelled), "{err:?}");
         assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+    }
+
+    /// 最后一个文件写完之后还要写目录区、刷盘，大存档在机械盘上要几秒，这时进度已到 100%，玩家最容易点取消。
+    /// 取消落在这段里也要按取消收场：不把 zip 改名就位（命令层宽限期满后不再等结果，就位的 zip 记不进清单，
+    /// 导出则会盖掉原来的文件），原来的目标文件保持原样。
+    #[test]
+    fn cancel_after_the_last_file_keeps_the_destination_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let world = sample_world(&tmp.path().join("saves"), "w", "w", b"r");
+        let dest = tmp.path().join("export.zip");
+        fs::write(&dest, b"old").unwrap();
+        let cancelled = Cell::new(false);
+        let err = pack_world(&world, &dest, &|| cancelled.get(), &mut |p| {
+            if p.files_total > 0 && p.files_done == p.files_total {
+                cancelled.set(true);
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+        assert_eq!(fs::read(&dest).unwrap(), b"old");
         assert!(!part_path(&dest).exists());
     }
 
