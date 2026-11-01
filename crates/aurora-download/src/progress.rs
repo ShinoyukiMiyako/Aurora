@@ -23,6 +23,8 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
+use crate::watchdog::LinkMeter;
+
 /// 面向前端进度条的进度快照。字段语义见模块文档。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DownloadProgress {
@@ -170,16 +172,28 @@ pub(crate) struct FileProgress {
     /// 该文件在网络上读到的原始字节：只增不减，不随 reset 退回，有没有观察者都计。
     /// 吞吐看门狗读它算速度；有效字节会随换终点、重试退回，拿它算速度会算出负数。
     wire: Arc<AtomicU64>,
+    /// 该文件正在读响应体的连接数。
+    streams: Arc<AtomicU64>,
+    /// 整条下载链路的计量，该文件读到的字节与开的连接都计入。
+    link: Arc<LinkMeter>,
 }
 
 impl FileProgress {
-    /// 挂到批次累加器上；`None` 时有效字节记账都是空操作，原始字节照计。
-    pub(crate) fn new(reporter: Option<&ProgressReporter>) -> Self {
+    /// 挂到批次累加器与链路计量上；`reporter` 为 `None` 时有效字节记账都是空操作，原始字节照计。
+    pub(crate) fn on_link(reporter: Option<&ProgressReporter>, link: Arc<LinkMeter>) -> Self {
         Self {
             reporter: reporter.cloned(),
             credited: Arc::new(AtomicU64::new(0)),
             wire: Arc::new(AtomicU64::new(0)),
+            streams: Arc::new(AtomicU64::new(0)),
+            link,
         }
+    }
+
+    /// 独占一条链路的文件，供不关心链路计量的单元测试用。
+    #[cfg(test)]
+    pub(crate) fn new(reporter: Option<&ProgressReporter>) -> Self {
+        Self::on_link(reporter, Arc::default())
     }
 
     /// 该文件迄今在网络上读到的原始字节。
@@ -187,9 +201,36 @@ impl FileProgress {
         self.wire.load(Ordering::Relaxed)
     }
 
+    /// 整条链路迄今读到的原始字节。
+    pub(crate) fn link_bytes(&self) -> u64 {
+        self.link.wire_bytes()
+    }
+
+    /// 该文件此刻正在读响应体的连接数。
+    pub(crate) fn open_streams(&self) -> u64 {
+        self.streams.load(Ordering::Relaxed)
+    }
+
+    /// 整条链路此刻正在读响应体的连接数。
+    pub(crate) fn link_streams(&self) -> u64 {
+        self.link.streams()
+    }
+
+    /// 开始读一条响应体；返回的守卫释放即下线。走守卫是因为读响应体的路径上有好几处提前返回，
+    /// 漏减一次，这条链路此后每个传输的份额都会偏低。
+    pub(crate) fn open_stream(&self) -> OpenStream {
+        self.streams.fetch_add(1, Ordering::Relaxed);
+        self.link.stream_opened();
+        OpenStream {
+            streams: self.streams.clone(),
+            link: self.link.clone(),
+        }
+    }
+
     /// 网络上为该文件读到 `n` 字节。
     pub(crate) fn transferred(&self, n: u64) {
         self.wire.fetch_add(n, Ordering::Relaxed);
+        self.link.transferred(n);
         if let Some(reporter) = &self.reporter {
             reporter.transferred(n);
             self.credited.fetch_add(n, Ordering::Relaxed);
@@ -220,6 +261,19 @@ impl FileProgress {
         } else {
             reporter.rewind(previous - len);
         }
+    }
+}
+
+/// 一条正在读响应体的连接，释放即下线。
+pub(crate) struct OpenStream {
+    streams: Arc<AtomicU64>,
+    link: Arc<LinkMeter>,
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        self.streams.fetch_sub(1, Ordering::Relaxed);
+        self.link.stream_closed();
     }
 }
 
@@ -359,6 +413,34 @@ mod tests {
         bare.transferred(0);
         bare.reset();
         assert_eq!(bare.wire_bytes(), 7, "没有观察者也照计");
+    }
+
+    #[test]
+    fn files_on_one_link_add_up_and_streams_close_on_drop() {
+        let link = Arc::new(LinkMeter::default());
+        let first = FileProgress::on_link(None, link.clone());
+        let second = FileProgress::on_link(None, link.clone());
+        first.transferred(1000);
+        second.transferred(24);
+        // 重置只退回有效字节：链路上真走过的字节不随文件的重试退回。
+        first.reset();
+        assert_eq!(first.link_bytes(), 1024);
+        assert_eq!(first.wire_bytes(), 1000);
+
+        let one = first.open_stream();
+        let two = first.clone().open_stream();
+        let three = second.open_stream();
+        assert_eq!(first.open_streams(), 2, "克隆出的分片算同一个文件的连接");
+        assert_eq!(second.open_streams(), 1);
+        assert_eq!(first.link_streams(), 3);
+
+        drop(one);
+        drop(three);
+        assert_eq!(first.open_streams(), 1);
+        assert_eq!(second.open_streams(), 0);
+        assert_eq!(second.link_streams(), 1);
+        drop(two);
+        assert_eq!(link.streams(), 0);
     }
 
     #[test]

@@ -12,10 +12,10 @@
 //! 5. 分片路径在某个源上彻底失败后自动回退为整文件单请求，宁可失去并行加速也要把文件装上。
 //! 6. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。sha1 在写盘的同时算好，
 //!    不把刚写完的文件再读一遍；落盘是否 fsync 见 [`Landing`]。
-//! 7. 大文件的网络传输段由吞吐看门狗盯着（见 [`crate::watchdog`]）：终点慢到窗口平均低于阈值，
-//!    就向原地址重新取一个终点，已完整的分片保留、只续传没下完的；取不到新终点或这个源的换终点
-//!    额度用完即换源；已是最后一个源时关掉看门狗在当前终点上续传，后面的源都失败时回到先前判慢的
-//!    源关掉看门狗下完，慢也装上。合并、校验、落位不计时。
+//! 7. 大文件的网络传输段由吞吐看门狗盯着（见 [`crate::watchdog`]）：终点慢到窗口平均低于阈值、
+//!    且不是带宽被大家分走，就向原地址重新取一个终点，已完整的分片保留、只续传没下完的；取不到
+//!    新终点或这个源的换终点额度用完即换源；已是最后一个源时关掉看门狗在当前终点上续传，后面的源
+//!    都失败时回到先前判慢的源关掉看门狗下完，慢也装上。合并、校验、落位不计时。
 //!
 //! 同一个目标路径的下载在进程内串行（[`lock_dest`]）：两次安装同时落同一个共享文件时，后到的一方
 //! 等前一方落位后再做第 1 步，通常直接跳过。
@@ -44,11 +44,11 @@ use tokio_util::sync::CancellationToken;
 use crate::chunk::{Chunk, ChunkConfig, ChunkPlan};
 use crate::credential::DownloadCredential;
 use crate::error::{Error, Result};
-use crate::health::{SourceHealth, is_host_fault};
+use crate::health::SourceHealth;
 use crate::progress::{FileProgress, ProgressReporter};
 use crate::source::SourcePlan;
 use crate::task::DownloadTask;
-use crate::watchdog::{Armed, WatchdogConfig};
+use crate::watchdog::{Armed, Slow, WatchdogConfig};
 
 /// 下载引擎的运行参数。
 #[derive(Clone, Default)]
@@ -137,7 +137,7 @@ impl Downloader {
         // 还会被记成源的故障。
         self.route_for(task)?;
         let _dest = lock_dest(&task.dest, cancel).await?;
-        let file = FileProgress::new(progress);
+        let file = FileProgress::on_link(progress, self.health.link().clone());
         if let Some(len) = self.already_complete(task).await? {
             tracing::debug!(dest = %task.dest.display(), "目标文件已存在且校验通过，跳过下载");
             // 本就完整的文件也是这一批里已就绪的字节，不计入的话补全类批次的进度会停在 0。
@@ -212,9 +212,9 @@ impl Downloader {
                     if slow_left.is_none() && matches!(err, Error::SlowEndpoint { .. }) {
                         slow_left = Some(url);
                     }
-                    // 4xx 只说明「这个源没有这个文件」，换源即可，不能记在主机头上。
-                    self.health
-                        .record_failure(url, is_host_fault(err.http_status()));
+                    // 4xx 只说明「这个源没有这个文件」，换源即可，不能记在主机头上；
+                    // 链路带不动同样怪不到主机，见 [`Error::is_host_fault`]。
+                    self.health.record_failure(url, err.is_host_fault());
                     // 换源前的分片纪律：分片只按「字节数吻合」判定已完成，与是哪个源写的无关。
                     // 带 sha1 的任务即使跨源拼出坏文件也会在 finalize 被抓住并连分片一起清掉；
                     // 没有 sha1 的任务只校验总大小，那层兜底不存在，必须在换源前清掉本源残留的
@@ -228,6 +228,7 @@ impl Downloader {
                         file = %task.dest.display(),
                         %url,
                         http_status = ?err.http_status(),
+                        host_fault = err.is_host_fault(),
                         error = %err,
                         "该下载源尝试耗尽，切换下一个源"
                     );
@@ -257,8 +258,7 @@ impl Downloader {
                 }
                 Err(err @ Error::CredentialRejected { .. }) => return Err(err),
                 Err(err) => {
-                    self.health
-                        .record_failure(url, is_host_fault(err.http_status()));
+                    self.health.record_failure(url, err.is_host_fault());
                     tracing::warn!(
                         file = %task.dest.display(),
                         %url,
@@ -470,11 +470,11 @@ impl Downloader {
             if job.user_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let (Some(bytes_per_sec), Some(watched)) = (fired, job.watchdog) else {
+            let (Some(verdict), Some(watched)) = (fired, job.watchdog) else {
                 return Err(err);
             };
             target = self
-                .next_endpoint(url, &endpoint, job, watched, bytes_per_sec)
+                .next_endpoint(url, &endpoint, job, watched, verdict)
                 .await?;
             // 新终点上从头重下：摘要与已计入的字节都作废。
             *landing = Landing::for_task(job.task);
@@ -536,9 +536,9 @@ impl Downloader {
             if job.user_cancelled() {
                 return Err(Error::Cancelled);
             }
-            if let (Some(bytes_per_sec), Some(watched)) = (fired, job.watchdog) {
+            if let (Some(verdict), Some(watched)) = (fired, job.watchdog) {
                 endpoint = self
-                    .next_endpoint(url, &endpoint, job, watched, bytes_per_sec)
+                    .next_endpoint(url, &endpoint, job, watched, verdict)
                     .await?;
                 resume = true;
                 // 在途分片都已停下，此刻退回不会与分片记账赛跑；续传时完整的分片重新计入。
@@ -714,9 +714,13 @@ impl Downloader {
         slow: &str,
         job: Job<'_>,
         watched: Watched<'_>,
-        bytes_per_sec: u64,
+        verdict: Slow,
     ) -> Result<String> {
         let Watched { config, switches } = watched;
+        let Slow {
+            bytes_per_sec,
+            cause,
+        } = verdict;
         let dest = job.task.dest.display();
         let window_secs = config.window.as_secs();
         tracing::warn!(
@@ -724,6 +728,7 @@ impl Downloader {
             endpoint = %slow,
             bytes_per_sec,
             window_secs,
+            ?cause,
             "下载终点吞吐过低，放弃该终点"
         );
         let slow_endpoint = || Error::SlowEndpoint {
@@ -731,6 +736,7 @@ impl Downloader {
             bytes_per_sec,
             threshold: config.min_bytes_per_sec,
             window_secs,
+            cause,
         };
         let used = switches.load(Ordering::Relaxed);
         if used >= config.max_endpoint_switches {
@@ -1319,6 +1325,8 @@ async fn stream_to_file(
     let mut writer = BufWriter::with_capacity(WRITE_BUFFER, file);
     let mut written = 0u64;
     let pumped: Result<()> = async {
+        // 落盘时的 fsync 不占带宽，这条连接只算到响应体读完。
+        let _reading = progress.open_stream();
         loop {
             match until_cancelled(cancel, resp.chunk()).await? {
                 Ok(Some(bytes)) => {

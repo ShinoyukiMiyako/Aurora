@@ -10,6 +10,7 @@
 use aurora_base::retry::RetryableError;
 
 use crate::credential::CredentialRealm;
+use crate::watchdog::SlowCause;
 
 /// aurora-download 对外统一错误。
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +79,7 @@ pub enum Error {
 
     /// 吞吐看门狗判定当前下载终点过慢，且向原地址要不到另一个终点（或换终点次数已用尽）。
     /// 换源编排据此换下一个源；已是最后一个源时关掉看门狗续传，所以它不会成为一批下载的最终错误。
+    /// `cause` 决定这笔慢记不记在主机头上，见 [`Error::is_host_fault`]。
     #[error(
         "下载终点过慢：{url}（最近 {window_secs} 秒平均 {bytes_per_sec} 字节/秒，低于 {threshold} 字节/秒）"
     )]
@@ -86,6 +88,7 @@ pub enum Error {
         bytes_per_sec: u64,
         threshold: u64,
         window_secs: u64,
+        cause: SlowCause,
     },
 
     /// 调用方经取消令牌放弃了本次下载；返回前已清掉该文件的临时文件与分片。
@@ -126,6 +129,18 @@ impl Error {
             Error::ChunkedFallbackFailed { fallback, .. } => fallback.http_status(),
             Error::CredentialRejected { status, .. } => Some(*status),
             _ => None,
+        }
+    }
+
+    /// 这次失败要不要记在主机头上。整条链路都慢时换源是对的，但说明不了这台主机的好坏：记上账，
+    /// 分带宽的正常主机就会被熔断沉底，后面的文件全落到可能更慢的源上。
+    pub fn is_host_fault(&self) -> bool {
+        match self {
+            Error::SlowEndpoint {
+                cause: SlowCause::Link,
+                ..
+            } => false,
+            _ => crate::health::is_host_fault(self.http_status()),
         }
     }
 
@@ -434,17 +449,46 @@ mod tests {
             bytes_per_sec: 2048,
             threshold: 32768,
             window_secs: 15,
+            cause: SlowCause::Endpoint,
         };
         assert!(!err.is_retryable(), "同一源上重试只会回到同一个慢终点");
         assert_eq!(err.http_status(), None);
-        assert!(
-            crate::health::is_host_fault(err.http_status()),
-            "慢记作主机故障"
-        );
+        assert!(err.is_host_fault(), "终点的慢记作主机故障");
         assert!(!err.is_cancelled());
         assert_eq!(
             err.to_string(),
             "下载终点过慢：https://node.example/f.jar?s=sig&e=1（最近 15 秒平均 2048 字节/秒，低于 32768 字节/秒）"
+        );
+    }
+
+    #[test]
+    fn a_slow_link_is_not_a_host_fault() {
+        let slow = Error::SlowEndpoint {
+            url: "https://node.example/f.jar".into(),
+            bytes_per_sec: 2048,
+            threshold: 32768,
+            window_secs: 15,
+            cause: SlowCause::Link,
+        };
+        assert!(!slow.is_retryable(), "链路慢同样交给换源");
+        assert!(!slow.is_host_fault(), "说明不了主机的好坏");
+    }
+
+    #[test]
+    fn host_fault_follows_the_status_for_everything_else() {
+        let status = |status| Error::Status {
+            url: "http://x/a".into(),
+            status,
+        };
+        assert!(!status(404).is_host_fault());
+        assert!(status(503).is_host_fault());
+        assert!(status(429).is_host_fault());
+        assert!(
+            Error::RangeUnsupported {
+                url: "http://x/a".into()
+            }
+            .is_host_fault(),
+            "没有状态码的失败算主机故障"
         );
     }
 
