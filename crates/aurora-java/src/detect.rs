@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,6 +69,30 @@ pub fn java_exe_in_home(home: &Path) -> PathBuf {
     home.join("bin").join(JAVA_EXE)
 }
 
+/// 把路径分隔符规整成平台自己的写法：Windows 上 `D:/Java/jdk-17\bin\java.exe` 变成全反斜杠。
+///
+/// JAVA_HOME 与 PATH 里常有人写正斜杠，拼上 `bin\java.exe` 就成了混合分隔符。进程照样起得来，但这条路径
+/// 还要给人看、要作为 Windows 图形设置的按程序显卡偏好的值名，系统不保证能把混着 `/` 的值名认成同一个
+/// 程序。只动分隔符，不解析 `..`、不碰磁盘。
+pub fn normalize_separators(path: &Path) -> PathBuf {
+    path.components()
+        .map(|component| match component {
+            // 路径段的分隔符由 components 拆掉了，前缀却保留原文，`//nas/share` 得自己拼回去。
+            Component::Prefix(prefix) => match prefix.kind() {
+                Prefix::UNC(server, share) => {
+                    let mut unc = OsString::from(r"\\");
+                    unc.push(server);
+                    unc.push(r"\");
+                    unc.push(share);
+                    unc
+                }
+                _ => prefix.as_os_str().to_owned(),
+            },
+            other => other.as_os_str().to_owned(),
+        })
+        .collect()
+}
+
 /// 一条探测来源，供 UI 展示与排序偏好参考。序列化名与 IPC 出参一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,7 +114,7 @@ pub enum DetectSource {
 /// 一个已探测并成功识别的 Java 安装。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaInstallation {
-    /// java 可执行文件的绝对路径。
+    /// java 可执行文件的绝对路径，分隔符已规整（见 [`normalize_separators`]）。
     pub path: PathBuf,
     /// 归一后的版本号。
     pub version: JavaVersion,
@@ -562,9 +586,11 @@ impl CachedProbe {
         Some((self.size?, self.modified_ms?))
     }
 
+    /// 所有 [`JavaInstallation`] 都从这里出来，路径在这里规整一次：探测候选、固定的路径与盘上的旧缓存
+    /// 都可能带着混合分隔符。
     fn to_installation(&self, path: &Path, source: DetectSource) -> JavaInstallation {
         JavaInstallation {
-            path: path.to_path_buf(),
+            path: normalize_separators(path),
             version: self.version.clone(),
             is_64bit: self.is_64bit,
             vendor: self.vendor.clone(),
@@ -1867,6 +1893,149 @@ mod tests {
             java_home_dir(Some(OsStr::new("\"C:\\Program Files\\Java\\jdk-21\"\t"))),
             Some(PathBuf::from("C:\\Program Files\\Java\\jdk-21"))
         );
+    }
+
+    /// 期望的路径文本。`PathBuf` 的相等按路径段比，混合分隔符也算相等，所以这些用例一律比文本。
+    #[cfg(windows)]
+    fn backslashed(path: &Path) -> String {
+        path.to_str().unwrap().replace('/', "\\")
+    }
+
+    #[cfg(windows)]
+    fn forward_slashed(path: &Path) -> String {
+        path.to_str().unwrap().replace('\\', "/")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn separators_are_normalized_to_backslashes() {
+        for (raw, expected) in [
+            (r"D:/Java/jdk-17", r"D:\Java\jdk-17"),
+            (r"D:/Java/jdk-17/", r"D:\Java\jdk-17"),
+            (
+                r"D:/Java/jdk-17\bin\java.exe",
+                r"D:\Java\jdk-17\bin\java.exe",
+            ),
+            (
+                r"D:\Program Files/中文 目录/jdk\bin/java.exe",
+                r"D:\Program Files\中文 目录\jdk\bin\java.exe",
+            ),
+            (
+                r"D:\Java\jdk-17\bin\java.exe",
+                r"D:\Java\jdk-17\bin\java.exe",
+            ),
+            (r"D:/", r"D:\"),
+            (r"D:jdk/bin", r"D:jdk\bin"),
+            (r"jdk-17/bin", r"jdk-17\bin"),
+            (
+                r"//nas/共享/jdk/bin/java.exe",
+                r"\\nas\共享\jdk\bin\java.exe",
+            ),
+            (r"\\nas\share\jdk/bin", r"\\nas\share\jdk\bin"),
+            // 逐字路径里的 `/` 是文件名的一部分，不是分隔符。
+            (r"\\?\D:\Java\jdk-17", r"\\?\D:\Java\jdk-17"),
+        ] {
+            assert_eq!(
+                normalize_separators(Path::new(raw)).to_str(),
+                Some(expected),
+                "{raw}"
+            );
+        }
+    }
+
+    /// 写成正斜杠（带结尾斜杠、含中文与空格）的 JAVA_HOME：报出的路径是统一的反斜杠。
+    #[cfg(windows)]
+    #[test]
+    fn forward_slash_java_home_is_reported_with_backslashes() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("中文 目录").join("jdk-17");
+        let exe = complete_home(&home);
+        let mut system = system_scope(Arc::new(FakeRegistry::default()));
+        system.java_home = Some(OsString::from(format!("{}/", forward_slashed(&home))));
+        let runner = CountingRunner::new(OPENJDK_17);
+
+        let found = detect_with(
+            &scope_with(system, Vec::new()),
+            &mut ProbeCache::default(),
+            &|p: &Path| runner.run(p),
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, DetectSource::JavaHome);
+        assert_eq!(found[0].path.to_str(), Some(backslashed(&exe).as_str()));
+    }
+
+    /// PATH 里写成正斜杠的目录同样不把混合分隔符带出去。
+    #[cfg(windows)]
+    #[test]
+    fn forward_slash_path_entry_is_reported_with_backslashes() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("jdk-17");
+        let exe = complete_home(&home);
+        let mut system = system_scope(Arc::new(FakeRegistry::default()));
+        system.path = Some(OsString::from(format!("{}/bin", forward_slashed(&home))));
+        let runner = CountingRunner::new(OPENJDK_17);
+
+        let found = detect_with(
+            &scope_with(system, Vec::new()),
+            &mut ProbeCache::default(),
+            &|p: &Path| runner.run(p),
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].source, DetectSource::Path);
+        assert_eq!(found[0].path.to_str(), Some(backslashed(&exe).as_str()));
+    }
+
+    /// 固定的路径是混合分隔符：识别、缓存命中两条路报出的都是规整后的。
+    #[cfg(windows)]
+    #[test]
+    fn explicit_probe_reports_backslashes_on_miss_and_hit() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = complete_home(&root.path().join("jdk-17"));
+        let mixed = format!(
+            "{}/bin\\{JAVA_EXE}",
+            forward_slashed(&root.path().join("jdk-17"))
+        );
+        let runner = CountingRunner::new(OPENJDK_17);
+        let mut cache = ProbeCache::default();
+
+        for _ in 0..2 {
+            let java = probe_cached(
+                Path::new(&mixed),
+                DetectSource::Manual,
+                &mut cache,
+                &|p: &Path| runner.run(p),
+            )
+            .unwrap();
+            assert_eq!(java.path.to_str(), Some(backslashed(&exe).as_str()));
+        }
+        assert_eq!(runner.calls(), 1, "第二次命中缓存");
+    }
+
+    /// 探测缓存落在盘上，修之前写下的条目还是混合分隔符：自动选择从缓存里挑到它时也要是规整后的。
+    #[cfg(windows)]
+    #[test]
+    fn cached_entry_with_mixed_separators_comes_back_normalized() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = complete_home(&root.path().join("jdk-17"));
+        let mixed = format!(
+            "{}/bin\\{JAVA_EXE}",
+            forward_slashed(&root.path().join("jdk-17"))
+        );
+        let runner = CountingRunner::new(OPENJDK_17);
+        let mut cache = ProbeCache::default();
+        probe_cached(&exe, DetectSource::JavaHome, &mut cache, &|p: &Path| {
+            runner.run(p)
+        })
+        .unwrap();
+        let mut file = serde_json::to_value(&cache).unwrap();
+        for entry in file["entries"].as_object_mut().unwrap().values_mut() {
+            entry["path"] = serde_json::Value::String(mixed.clone());
+        }
+        let cache: ProbeCache = serde_json::from_value(file).unwrap();
+
+        let known = cache.installations();
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].path.to_str(), Some(backslashed(&exe).as_str()));
     }
 
     /// 手动添加的路径来源为 manual，并压过同一路径的注册表来源。
