@@ -535,6 +535,21 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
     ]);
   });
 
+  it("选择框开着时再点「添加 Java」不再开第二个；关掉之后按钮恢复", async () => {
+    const picking = deferred<string | null>();
+    vi.mocked(pickFile).mockReturnValueOnce(picking.promise);
+    await mount("java");
+    await click(button("添加 Java"));
+    await click(button("添加 Java"));
+    expect(vi.mocked(pickFile)).toHaveBeenCalledTimes(1);
+    expect(button("添加 Java").getAttribute("aria-busy")).toBe("true");
+
+    picking.resolve(null);
+    await flush();
+    expect(button("添加 Java").getAttribute("aria-busy")).toBeNull();
+    expect(callsOf(ipc, "add_java_path")).toEqual([]);
+  });
+
   it("添加 Java：选中的 javaw.exe 交给 add_java_path，列表刷新出按 java.exe 记下的「手动添加」项，并提示加了哪个", async () => {
     await mount("java");
     const configReads = callsOf(ipc, "get_config").length;

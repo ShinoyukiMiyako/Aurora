@@ -325,11 +325,15 @@ function useAddJava() {
   const run = useRunner();
   const { pickFile } = useShell();
   const [adding, setAdding] = useState(false);
+  // 系统选择框不挡窗口：从打开起就算在添加，否则再点一下会开第二个
   const add = async () => {
-    const picked = await run(() => pickFile("java"), JAVA_COPY.pickFailed);
-    if (!picked.ok || picked.value === null) return;
-    const path = picked.value;
     setAdding(true);
+    const picked = await run(() => pickFile("java"), JAVA_COPY.pickFailed);
+    if (!picked.ok || picked.value === null) {
+      setAdding(false);
+      return;
+    }
+    const path = picked.value;
     const result = await run(() => actions.addJavaPath(path), JAVA_COPY.addFailed);
     setAdding(false);
     if (result.ok) {
