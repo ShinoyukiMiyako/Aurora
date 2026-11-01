@@ -239,7 +239,7 @@ describe("游戏目录推导", () => {
       { name: "PCL", path: "E:\\PCL\\.minecraft" },
       { name: "官方", path: "C:/Users/me/AppData/Roaming/.minecraft" },
     ];
-    const known = [{ name: "PCL", path: "e:/pcl/.minecraft", is_current: false, available: true }];
+    const known = [{ name: "PCL", path: "e:/pcl/.minecraft", is_current: false, available: true, version_count: 3 }];
     expect(unrecorded(discovered, known, "d:\\games\\.minecraft")).toEqual([discovered[2]]);
   });
 
