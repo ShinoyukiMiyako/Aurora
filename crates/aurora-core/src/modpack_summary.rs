@@ -2,7 +2,10 @@
 //!
 //! 整合包动辄几百 MB，而发现页要在用户点「安装」之前就说清有多少个 Mod、还要下多少字节。zip 的目录
 //! 在文件末尾，清单（`modrinth.index.json` / `manifest.json`）是其中一个条目：取尾部找到中央目录，
-//! 从目录里查出清单条目的偏移与压缩长度，再只取这一段解压。一共三四个小请求，与包的大小无关。
+//! 从目录里查出清单条目的偏移与压缩长度，再只取这一段解压。一共四五个小请求，与包的大小无关。
+//!
+//! 尾部不用 `bytes=-n` 取：Modrinth 的 CDN（Fastly）对这种写法一律回 501 Unsupported client range，
+//! 先用一个字节的范围问出总长，再按明确的起止取。
 //!
 //! 服务器不支持 Range（回 200 整包）时直接报错，不退回整包下载：那与导入时的下载重复，也违背
 //! 「不下载整包」的前提。ZIP64（中央目录或条目超过 4 GiB）同样报错：整合包远到不了这个体量。
@@ -126,10 +129,18 @@ enum RangeClient {
 
 /// 取尾部找到中央目录，再只取清单那一个条目解析。
 async fn read_remote_pack(http: &RangeClient, url: &str, platform: Platform) -> Result<RemotePack> {
-    let (tail, total) = fetch_range(http, url, format!("bytes=-{TAIL_BYTES}"), TAIL_BYTES).await?;
-    let tail_start = total
-        .checked_sub(tail.len() as u64)
-        .ok_or_else(|| remote(url, "尾部范围比整个文件还长"))?;
+    let (_, total) = fetch_range(http, url, "bytes=0-0".to_owned(), 1).await?;
+    let last = total
+        .checked_sub(1)
+        .ok_or_else(|| remote(url, "文件是空的"))?;
+    let tail_start = total.saturating_sub(TAIL_BYTES);
+    let (tail, _) = fetch_range(
+        http,
+        url,
+        format!("bytes={tail_start}-{last}"),
+        total - tail_start,
+    )
+    .await?;
     let entries = central_directory(http, url, &tail, tail_start).await?;
 
     let (manifest_name, parse): (&str, ManifestParser) = match platform {
@@ -197,7 +208,7 @@ fn remote(url: &str, reason: impl Into<String>) -> CoreError {
     }
 }
 
-/// 取一段范围（`bytes=a-b` 或尾部 `bytes=-n`），`len` 是这段范围的字节数；返回内容与 Content-Range
+/// 取一段范围（`bytes=a-b`），`len` 是这段范围的字节数；返回内容与 Content-Range
 /// 里的文件总长。回的不是 206 说明服务器没按范围给，连同响应体一起丢掉，不把整包读下来。
 ///
 /// 回了 206 的正文也不一定守范围（服务器实现不规范或被人做了手脚），先整段读进内存再比就已经晚了：
@@ -456,7 +467,8 @@ mod tests {
                 return ResponseTemplate::new(200).set_body_bytes(self.body.as_slice());
             };
             let (start, end) = match spec.split_once('-').unwrap() {
-                ("", suffix) => (total.saturating_sub(suffix.parse().unwrap()), total - 1),
+                // Modrinth 的 CDN（Fastly）一律拒绝尾部范围，回 501 Unsupported client range
+                ("", _) => return ResponseTemplate::new(501),
                 (start, end) => (
                     start.parse().unwrap(),
                     end.parse::<usize>().unwrap().min(total - 1),
@@ -558,6 +570,74 @@ mod tests {
             .mount(&server)
             .await;
         (server, served, total)
+    }
+
+    /// 真实的 Modrinth CDN 拒绝尾部范围：全程只发带明确起止的范围，第一个问总长，第二个取尾部 64 KiB 多一点。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn summary_never_sends_a_suffix_range() {
+        let (server, _, total) = serve(mrpack(&manifest()), true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.pack_bytes, total as u64);
+        let ranges: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/pack.mrpack")
+            .map(|request| {
+                request
+                    .headers
+                    .get("range")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(ranges[0], "bytes=0-0");
+        assert_eq!(
+            ranges[1],
+            format!("bytes={}-{}", total as u64 - TAIL_BYTES, total - 1)
+        );
+        assert!(
+            ranges.iter().all(|range| !range.starts_with("bytes=-")),
+            "{ranges:?}"
+        );
+    }
+
+    /// 比尾部窗口还小的包（发现页上不少整合包只有几 KB）：范围从文件开头算起，不能减成负数。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pack_smaller_than_the_tail_window_is_read_whole() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(manifest().to_string().as_bytes()).unwrap();
+        let pack = writer.finish().unwrap().into_inner();
+        let total = pack.len();
+        assert!((total as u64) < TAIL_BYTES);
+        let (server, _, _) = serve(pack, true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!(summary.mod_files, 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -967,8 +1047,8 @@ mod tests {
             .collect();
         assert_eq!(
             pack_reads.len(),
-            3,
-            "包尾、清单条目的本地头、清单数据各一次"
+            4,
+            "总长、包尾、清单条目的本地头、清单数据各一次"
         );
         assert!(
             pack_reads.iter().all(|request| request
@@ -1044,7 +1124,7 @@ mod tests {
             panic!("应报 RemotePack，实为 {err:?}");
         };
         assert!(
-            reason.contains(&format!("bytes=-{TAIL_BYTES}")) && reason.contains("比请求的范围长"),
+            reason.contains("bytes=0-0") && reason.contains("比请求的范围长"),
             "{reason}"
         );
     }
@@ -1091,8 +1171,8 @@ mod tests {
         );
         assert_eq!(
             served.load(Ordering::SeqCst),
-            TAIL_BYTES as usize,
-            "只取了尾部，没有去取 {total} 字节的包里那段伪造的目录"
+            1 + TAIL_BYTES as usize,
+            "只问了总长、取了尾部，没有去取 {total} 字节的包里那段伪造的目录"
         );
     }
 
