@@ -904,7 +904,7 @@ export const TOAST_COPY = {
   templateSaved: (instance: string) => ({ title: `已把「${instance}」的设置保存为默认`, body: "新建实例时可以在确认步沿用" }),
   templateCleared: "已清除默认设置",
   /** 失败卡上选了「以离线方式进单人」，游戏起来之后。 */
-  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了。" }),
+  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了" }),
   viewCrashAction: "查看诊断",
   /** 游戏退出后的自动备份有存档没备份成：正文是第一个失败存档的后端原文。 */
   autoBackupFailed: (instance: string, message: string) => ({ title: `「${instance}」的自动备份没有完成`, body: message }),

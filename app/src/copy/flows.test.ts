@@ -222,7 +222,7 @@ describe("启动失败：账户验证暂时不可用", () => {
   });
 
   it("以离线方式启动的通知：标题带实例名，正文说明只能玩单人", () => {
-    expect(TOAST_COPY.offlineLaunched("周末生存")).toEqual({ title: "「周末生存」以离线方式启动", body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了。" });
+    expect(TOAST_COPY.offlineLaunched("周末生存")).toEqual({ title: "「周末生存」以离线方式启动", body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了" });
     expect(TOAST_COPY.offlineLaunched("周末生存").body.length).toBeLessThanOrEqual(40);
   });
 
