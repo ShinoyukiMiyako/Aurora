@@ -98,10 +98,16 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 - 版本继承合并时 `logging` 按 `client` 逐键继承，子版本空的 `"logging": {}` 不盖掉原版的日志配置。
 - 资源索引读入时校验：对象的 hash 必须是 40 位十六进制，逻辑名不能为空、不能是绝对路径、不能含 `.` / `..` 段、空段、盘符或反斜杠，段尾也不能是点或空格（Windows 落盘时会去掉它们），不合格时整份索引按解析失败报错。hash 与逻辑名都会拼进落点，索引又可能来自第三方镜像。规则在 `aurora-version` 的 `relpath`（`check_relative_path` / `check_path_segment`）里，`aurora-java` 为守住分层另写一份同样的规则。
 - 远端给的相对路径在算落点时一律逐段校验，sha1 与路径出自同一份远端文件、下载校验拦不住越界：库的 `downloads.*.path` 与由 maven 坐标算出的路径（group 每一节、artifact、version、classifier、扩展名）、旧式 natives 的 classifier、资源 hash、索引 id、日志配置名、客户端 jar 的版本 id，Forge installer 自带库的解出落点与 natives 解压时定位的 jar，以及原样拼进 `versions/<id>/` 的版本 id（版本清单条目、Fabric / Quilt meta 的 profile、Forge install_profile 的版本与游戏版本、旧版 versionInfo）。越界报 `install_unsafe_path`（`detail` 带 `entry`、`path` 与原因链），什么都不写、也不发请求；坐标缺段报坐标非法，natives 不再因此悄悄跳过。Java 运行时清单里的文件键与符号链接目标同样校验，越界仍归 `java_failed`。启动在拼 classpath 之前已经过同一份下载计划，越界的库在那里就被拒掉。
+- 启动层拼 classpath 与日志配置参数时（`aurora-launch` 的 `classpath.rs`、`command.rs`）按下载计划的同一判据再校验一次：库路径走 `check_relative_path`，maven 坐标逐段走 `check_path_segment`，日志配置名按单段校验，越界报 `LaunchError::UnsafePath`，门面归入 `version_broken`。原先的路径拆分会悄悄丢掉空段，同一份版本 JSON 补全时被拒、拼 classpath 时却被改写放行。
+- 加载器版本号来自远端版本列表或导入的整合包，原样拼进安装器地址、缓存文件名与实例记录，进入安装流程前按单个路径段校验（URL 解析会规整掉反斜杠与 `..`，请求落到 maven 的别的路径上）。读整合包清单时（Modrinth 的 `dependencies`、CurseForge 的 `minecraft.modLoaders[].id`）不合格报 `modpack_manifest_invalid`，预览就能看到；新建与补全的 `InstanceRequest::validate` 报 `install_unsafe_path`，`entry` 写明是哪种加载器的版本号，不建目录、不发请求。
 - 加载器安装器自带的库（版本 JSON 里声明了下载件、地址留空）只在安装加载器时从 installer 里解出或由处理器生成：补全时先在本地按大小与 sha1 认（与下载引擎的已就绪判据一致），完好则不进批次，缺失或损坏报 `loader_library_missing`（`detail.path` 为完整路径，正文只写文件名），提示重新安装加载器；启动前补全只按存在与大小认，同样报这个码，不把空地址交给下载池。
 - Forge / NeoForge 处理器的缓存照官方 installer：声明了 `outputs` 的处理器，每一项产物都在盘上且 sha1 吻合才跳过（不读处理器 jar、不起 java，也不计入 `ForgeSummary.processors`）；有一项缺失或对不上就重跑，对不上的旧产物先删掉。期望 sha1 为空的产物算未就绪但不删，交给处理器覆盖。处理器的 stdout / stderr 按到达顺序只留最后 200 行，失败时以 warn 整段写进启动器日志并挂在错误的原因链上；子进程退出后最多再等 2 秒读完管道，取消时不等。要写的文件正被别的进程占着（多半是同一加载器版本的游戏正在运行）时报 `ProcessorOutputLocked`，命令层仍归 `install_failed`，正文说明关掉那个游戏后再试。
 - 网络读响应体途中断开（reqwest 把读体失败一律归为 decode 类）按瞬时故障在同一个源上重试，元数据抓取与文件下载都如此。工作区开着 gzip 解压，坏掉的压缩流也落在这一类，重试有次数上限。
-- 远程图片的大小上限：缩略图 20 MB，皮肤 1 MB。响应声明的长度超限时不读正文直接拒，没有声明的按块累计、一超限就中止；皮肤超限时界面回落，不落缓存。
+- 远端正文的读取上限：响应声明的长度超限时不读正文直接拒，没有声明或声明不实的按块累计、一超限就中止，不整包读进内存。
+  - 缩略图 20 MB（`THUMB_MAX_BYTES`），皮肤 1 MB（`SKIN_MAX_BYTES`，超限时界面回落，不落缓存）。
+  - 资讯与 GitHub 发布列表 16 MB（`FEED_MAX_BYTES`）：超限报 `CoreError::FeedTooLarge`，命令层与内容认不出同归 `feed_invalid`，`detail.url` 带地址。
+  - authlib-injector 构建信息 1 MB（`RELEASE_MAX_BYTES`）：超限报 `LatestLookupError::TooLarge`，启动时与非离线的取不到同样处理。
+  - 平台整合包摘要的范围读取（`modpack_summary.rs`）：正文上限是这次请求的范围长度。中央目录与条目的长度出自包本身，可以写成任意值，所以单次范围另设 64 MB 的上限（`RANGE_MAX_BYTES`），超出时不发请求。`RangeClient` 的两种客户端（共享客户端、带下载凭据的逐跳客户端）共用这条规则。
 - 实例设置的 JVM 参数按空白切分，双引号括起来的部分不切开、引号不传给 JVM（`aurora_launch::split_args`）。
 - 1.12.2 及更早（`minecraftArguments`）的版本按设置补上 `--width` / `--height`，Windows 上补上新式版本 JSON 自带的 `HeapDumpPath` 驱动识别参数。`options.txt` 的 `resourcePacks` 里一个带 `file/` 前缀的都没有时（1.12.2 及更早的写法），整份按文件名识别。
 - 会话日志读尾部时丢掉最后一段没有换行的半行：游戏运行中日志按块落盘，文件常停在半行。
