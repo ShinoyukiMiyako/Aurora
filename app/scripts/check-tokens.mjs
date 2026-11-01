@@ -150,8 +150,8 @@ const DEPENDENCY_ALLOW = {
   shell: ["shell", "ui", "art", "launch", "state", "ipc", "mc", "domain", "copy", "lib", "dev", "styles"],
   state: ["state", "ipc", "domain", "copy", "lib"],
   ipc: ["ipc", "domain/types"],
-  // 引导程序不带启动器：状态层、IPC、页面都不许进来，shell 只放行不含应用状态的浮层机制
-  setup: ["setup", "ui", "art", "lib", "styles", "shell/overlay"],
+  // 引导程序不带启动器：状态层、IPC、页面都不许进来，shell 只放行不含应用状态的浮层机制与渲染错误边界
+  setup: ["setup", "ui", "art", "lib", "styles", "shell/overlay", "shell/ErrorBoundary"],
 };
 const ART_TEXTURE_DIRS = ["art/iso", "art/skin", "art/panorama"];
 
