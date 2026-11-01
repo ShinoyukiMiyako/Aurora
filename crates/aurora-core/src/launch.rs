@@ -2152,8 +2152,20 @@ mod tests {
 
     /// 门面上布置一个过期的微软账户、指向 mock 的登录端点，返回落库后的账户。
     fn with_stale_account(fx: &Fixture, server: &wiremock::MockServer) -> (Aurora, Account) {
+        with_stale_account_as(fx, server, MS_UUID)
+    }
+
+    /// 同 [`with_stale_account`]，账户用指定的 uuid。续期闸按 uuid 在进程内共享：要卡准续期时机的用例单用
+    /// 一个 uuid，否则满载时会排在别的用例的续期后面，请求迟迟发不出去。
+    fn with_stale_account_as(
+        fx: &Fixture,
+        server: &wiremock::MockServer,
+        uuid: &str,
+    ) -> (Aurora, Account) {
         let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(server));
-        let stored = aurora.store_account_for_test(stale_microsoft()).unwrap();
+        let mut account = stale_microsoft();
+        account.uuid = uuid.to_owned();
+        let stored = aurora.store_account_for_test(account).unwrap();
         (aurora, stored)
     }
 
@@ -2753,12 +2765,13 @@ mod tests {
     async fn cancelling_while_refreshing_is_a_cancel_and_keeps_the_last_account_failure() {
         // 续期还在等服务端回应（服务故障时还要退避重试）就被玩家取消：这不是凭据被判失效，不能报成需要
         // 重新登录，也不能盖掉上一次的服务故障记录，否则紧接着的以离线方式进单人会被错拒。
+        const CANCEL_UUID: &str = "c0ffee00c0ffee00c0ffee00c0ffee00";
         let server = wiremock::MockServer::start().await;
         mount_token(&server, outage_page()).await;
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
-        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (aurora, stored) = with_stale_account_as(&fx, &server, CANCEL_UUID);
         let (result, _) =
             launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
@@ -2771,13 +2784,21 @@ mod tests {
         .await;
         let token = CancellationToken::new();
         let cancelling = aurora.clone().with_cancel(token.clone());
-        let trigger = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // 等续期请求真的发出才取消：定时取消在满载时会赶在请求之前，测的就不是「等回音时被取消」了。
+        let cancel_once_sent = async {
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("续期请求应已发出");
             token.cancel();
-        });
-        let (result, events) =
-            launch_request(&cancelling, stored_request(stored.clone()), java.clone()).await;
-        trigger.await.unwrap();
+        };
+        let (_, (result, events)) = tokio::join!(
+            cancel_once_sent,
+            launch_request(&cancelling, stored_request(stored.clone()), java.clone())
+        );
         match result {
             Err(err) => assert!(err.is_cancelled(), "{err:?}"),
             Ok(_) => panic!("取消后不应拉起进程"),
@@ -2785,7 +2806,7 @@ mod tests {
         assert_eq!(stage_indices(&events), vec![0]);
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(
-            failures_of(&aurora).get(MS_UUID),
+            failures_of(&aurora).get(CANCEL_UUID),
             Some(&FailureCode::AccountServiceDown)
         );
         let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
@@ -2793,7 +2814,7 @@ mod tests {
             log.ended.map(|e| e.outcome),
             Some(SessionOutcome::Cancelled)
         );
-        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), stored);
+        assert_eq!(aurora.find_account(CANCEL_UUID).unwrap().unwrap(), stored);
 
         // 记录完好：降级照常放行。
         let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
