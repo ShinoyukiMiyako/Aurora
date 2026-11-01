@@ -135,6 +135,7 @@ impl Aurora {
     pub async fn template_info(&self) -> Result<TemplateInfo> {
         let dir = self.template_dir();
         let _guard = lock_template_dir(&dir).await;
+        recover_interrupted_swap(&self.data_dir().join(TEMPLATES_DIR), &dir).await?;
         self.read_template_info(&dir).await
     }
 
@@ -147,6 +148,8 @@ impl Aurora {
         let dir = self.template_dir();
         let _guard = lock_template_dir(&dir).await;
         let root = self.data_dir().join(TEMPLATES_DIR);
+        // 先于清残留：中断现场里的旧模板也带着残留的前缀，不挪回来就会被当成残留删掉
+        recover_interrupted_swap(&root, &dir).await?;
         clear_leftovers(&root).await?;
 
         let mut present = Vec::new();
@@ -181,6 +184,8 @@ impl Aurora {
     pub async fn clear_template(&self) -> Result<TemplateInfo> {
         let dir = self.template_dir();
         let _guard = lock_template_dir(&dir).await;
+        // 中断现场里的旧模板先挪回原位再随 default 一起删掉，不然它下次读的时候又会被挪回来
+        recover_interrupted_swap(&self.data_dir().join(TEMPLATES_DIR), &dir).await?;
         match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => tracing::info!(dir = %dir.display(), "已清除默认设置"),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -196,6 +201,7 @@ impl Aurora {
         }
         let dir = self.template_dir();
         let _guard = lock_template_dir(&dir).await;
+        recover_interrupted_swap(&self.data_dir().join(TEMPLATES_DIR), &dir).await?;
         let files = template_files(&dir).await?;
         if files.is_empty() {
             return Ok(TemplateOutcome::Skipped(TemplateSkip::Empty));
@@ -326,6 +332,53 @@ async fn clear_leftovers(root: &Path) -> Result<()> {
             tracing::warn!(path = %path.display(), error = %err, "清不掉上次保存默认设置留下的目录");
         }
     }
+}
+
+/// 上一次保存在两次改名之间中断（进程被结束、断电）时，`default` 不在，同一时刻的旧目录与暂存目录都还在。
+/// 那次保存没有完成，回到保存之前：把旧目录挪回原位。只认同一时刻成对的两个目录——单独一个旧目录是换上
+/// 新模板后没删掉的，模板随后可能已被清除，挪回来就是把清掉的默认设置又变出来。
+async fn recover_interrupted_swap(root: &Path, dir: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(dir).await {
+        Ok(_) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(aurora_base::Error::Io {
+                path: dir.to_owned(),
+                source,
+            }
+            .into());
+        }
+    }
+    let io = |source| aurora_base::Error::Io {
+        path: root.to_owned(),
+        source,
+    };
+    let mut entries = match tokio::fs::read_dir(root).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io(source).into()),
+    };
+    let mut names = Vec::new();
+    while let Some(entry) = entries.next_entry().await.map_err(io)? {
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    let newest = names
+        .iter()
+        .filter_map(|name| name.strip_prefix(OLD_PREFIX)?.parse::<u64>().ok())
+        .filter(|stamp| names.contains(&format!("{STAGING_PREFIX}{stamp}")))
+        .max();
+    let Some(stamp) = newest else {
+        return Ok(());
+    };
+    let old = root.join(format!("{OLD_PREFIX}{stamp}"));
+    tokio::fs::rename(&old, dir)
+        .await
+        .map_err(|source| aurora_base::Error::Io {
+            path: old.clone(),
+            source,
+        })?;
+    tracing::warn!(old = %old.display(), "上次保存默认设置中途中断，已把保存之前的默认设置挪回原位");
+    Ok(())
 }
 
 /// 建暂存目录，写进白名单文件与元数据。
@@ -736,6 +789,91 @@ mod tests {
             names(&aurora.template_dir()),
             vec!["options.txt".to_owned()]
         );
+    }
+
+    /// 上一次保存在两次改名之间中断（进程被结束、断电）：旧模板已挪开，新的还没换上。之后读、套、清除都先把
+    /// 旧模板挪回原位，不当成没有默认设置，保存开头清残留时也不把它删掉。
+    #[tokio::test]
+    async fn interrupted_swap_puts_the_old_template_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = isolated(tmp.path());
+        let root = tmp.path().join(TEMPLATES_DIR);
+        let interrupted = |stamp: u64| {
+            let old = root.join(format!("{OLD_PREFIX}{stamp}"));
+            std::fs::create_dir_all(&old).unwrap();
+            std::fs::write(old.join("options.txt"), b"fov:90").unwrap();
+            std::fs::write(
+                old.join(TEMPLATE_META_FILE),
+                r#"{"source_instance":"樱花生存","saved_at":3}"#.as_bytes(),
+            )
+            .unwrap();
+            let staging = root.join(format!("{STAGING_PREFIX}{stamp}"));
+            std::fs::create_dir_all(&staging).unwrap();
+            std::fs::write(staging.join("options.txt"), b"fov:110").unwrap();
+        };
+
+        interrupted(5);
+        let info = aurora.template_info().await.unwrap();
+        assert_eq!(
+            info.files,
+            vec![TemplateFile {
+                name: "options.txt",
+                size: 6
+            }]
+        );
+        assert_eq!(info.source_instance.as_deref(), Some("樱花生存"));
+        assert_eq!(info.saved_at, Some(3));
+        assert_eq!(
+            std::fs::read(aurora.template_dir().join("options.txt")).unwrap(),
+            b"fov:90"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+        interrupted(6);
+        let dir = write_version(aurora.game_dir(), "周末生存", &vanilla_json("1.21.1"));
+        assert_eq!(
+            aurora.apply_template("周末生存").await.unwrap(),
+            TemplateOutcome::Applied {
+                copied: vec!["options.txt"],
+                kept: vec![],
+            }
+        );
+        assert_eq!(std::fs::read(dir.join("options.txt")).unwrap(), b"fov:90");
+
+        // 清除之后旧模板不再冒出来：挪回原位的那份随 default 一起删掉，只剩没配对的暂存目录
+        std::fs::remove_dir_all(&root).unwrap();
+        interrupted(7);
+        assert!(!aurora.clear_template().await.unwrap().present());
+        assert!(!aurora.template_info().await.unwrap().present());
+    }
+
+    /// 换上新模板后没删掉的旧目录单独留着、没有同一时刻的暂存目录：它不是中断的现场，模板随后可能已被清除，
+    /// 不能把它挪回来。
+    #[tokio::test]
+    async fn lone_old_dir_is_not_brought_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = isolated(tmp.path());
+        let old = tmp
+            .path()
+            .join(TEMPLATES_DIR)
+            .join(format!("{OLD_PREFIX}5"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("options.txt"), b"fov:90").unwrap();
+        std::fs::create_dir_all(
+            tmp.path()
+                .join(TEMPLATES_DIR)
+                .join(format!("{STAGING_PREFIX}4")),
+        )
+        .unwrap();
+        let dir = write_version(aurora.game_dir(), "周末生存", &vanilla_json("1.21.1"));
+
+        assert!(!aurora.template_info().await.unwrap().present());
+        assert_eq!(
+            aurora.apply_template("周末生存").await.unwrap(),
+            TemplateOutcome::Skipped(TemplateSkip::Empty)
+        );
+        assert!(!aurora.template_dir().exists());
+        assert!(!dir.join("options.txt").exists());
     }
 
     #[tokio::test]

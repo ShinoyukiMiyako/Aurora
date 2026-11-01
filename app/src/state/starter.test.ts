@@ -219,6 +219,86 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
     expect(toasts()).toContain("success:已给「1.21.1-Fabric」装上 2 个 Mod");
   });
 
+  /** 把一条任务记录当成上次退出前写下的任务表，重启 store 读回来。 */
+  async function restartWith(record: TaskRecordDto): Promise<void> {
+    store.stop();
+    ipc.overrides.set("load_task_journal", () => [record]);
+    unsubscribe();
+    store = await startedStore();
+    unsubscribe = watchToasts(store);
+  }
+
+  const interrupted = (command: string, title: string, instanceId: string, args: Record<string, unknown>): TaskRecordDto => ({
+    id: `task-${command}`,
+    kind: command === "repair_instance" ? "repair" : "game",
+    title,
+    detail: `「${instanceId}」`,
+    instance_id: instanceId,
+    status: "running",
+    progress: 0.4,
+    bytes: 0,
+    total_bytes: null,
+    speed_bps: 0,
+    attempt: 1,
+    error: null,
+    created_at: T0 - 60_000,
+    finished_at: null,
+    spec: { command, args },
+  });
+
+  it("新建装到一半退出了启动器：任务表里记着勾的开局 Mod，重启后重试新建，就绪后照样接着装", async () => {
+    const picks = (await fabricPicks()).slice(0, 3);
+    // 这次安装停在半路，不会就绪：要看的只是退出前写进任务表的参数
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass", useTemplate: false, starterMods: picks });
+    const args = tasksOf("install_version")[0].spec.args;
+    expect(args.starterMods).toEqual(picks);
+    // 任务表里记着，调后端时不带：后端的新建命令没有这个参数
+    expect("starterMods" in callsOf(ipc, "install_version")[0]).toBe(false);
+    ipc.overrides.delete("install_version");
+    const other = "重启之后";
+
+    await restartWith(interrupted("install_version", "新建 1.21.1 Fabric", other, { ...args, targetName: other }));
+    resetRecorder(ipc);
+    const [restored] = store.getState().tasks;
+    expect(restored.status).toBe("failed");
+    store.actions.retryTask(restored.id);
+    await runTasks();
+
+    expect(tasksOf("install_version").map((t) => t.status)).toEqual(["done"]);
+    expect(tasksOf("install_mods").map((t) => [t.title, t.status])).toEqual([["装上 3 个开局 Mod", "done"]]);
+    expect(installed(callsOf(ipc, "install_mod"))).toEqual([
+      [other, "P7dR8mSH", "fapi-0115", 0],
+      [other, "AANobbMI", "sodium-121", 1],
+      [other, "gvQqBUqZ", "lith-0143", 2],
+    ]);
+    expect(toasts()).toContain(`success:已给「${other}」装上 3 个 Mod`);
+  });
+
+  it("改排的补全装到一半退出了启动器：重启后重试补全，补全好了照样接着装当初勾的开局 Mod", async () => {
+    const picks = (await fabricPicks()).slice(3);
+    await restartWith(interrupted("repair_instance", "补全「1.21.1-Fabric」", "1.21.1-Fabric", { id: "1.21.1-Fabric", starterMods: picks }));
+    const [restored] = store.getState().tasks;
+    expect(restored.status).toBe("failed");
+    store.actions.retryTask(restored.id);
+    await runTasks();
+
+    expect(tasksOf("repair_instance").map((t) => t.status)).toEqual(["done"]);
+    expect(tasksOf("install_mods").map((t) => [t.title, t.status])).toEqual([["装上 2 个开局 Mod", "done"]]);
+    expect(installed(callsOf(ipc, "install_mod"))).toEqual([
+      ["1.21.1-Fabric", "uXXizFIs", "fc-702-fabric", 0],
+      ["1.21.1-Fabric", "nmDcB62a", "mfix-5194-fabric", 1],
+    ]);
+  });
+
+  it("没勾开局 Mod 的新建与补全不在参数里多写 starterMods", async () => {
+    await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass", starterMods: [] });
+    expect("starterMods" in tasksOf("install_version")[0].spec.args).toBe(false);
+    await runTasks();
+    await store.actions.repairInstance(NAME);
+    expect(tasksOf("repair_instance")[0].spec.args).toEqual({ id: NAME });
+  });
+
   it("保存为默认与清除：成功后默认设置的查询失效重取，并各自通知；没进过游戏的实例保存失败原样抛出", async () => {
     await store.actions.saveInstanceAsTemplate("1.21");
     expect(toasts()).toContain("success:已把「1.21」的设置保存为默认:新建实例时可以在确认步沿用");
