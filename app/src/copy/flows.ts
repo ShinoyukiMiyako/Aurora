@@ -784,6 +784,8 @@ export function taskFailureReason(error: TaskError): string {
       return LOADER_LIBRARY_MISSING_REASON;
     case "curseforge_key_rejected":
       return "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试";
+    case "curseforge_key_missing":
+      return "这个包里有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY";
     case "distribution_blocked":
       // 较早的任务日志只存了错误码与原文（原文里列着文件名），没有清单时照原文给出
       return error.blocked_files === undefined ? error.message : `有 ${error.blocked_files.length} 个文件需要到 CurseForge 网页手动下载`;
@@ -1173,8 +1175,8 @@ export const AUTHLIB_COPY = {
   next: "下一步",
   unreachable: { title: "连不上这个地址", body: "检查地址是否正确，或稍后重试。" },
   notYggdrasil: { title: "这个地址不是外置登录服务器", body: "需要支持 authlib-injector 的认证服务器地址，皮肤站的说明页里一般会给出。" },
-  serverDown: { title: "这个服务器暂时不可用", body: "服务器那边出了故障，地址没有问题。稍后重试。" },
-  loginServiceDown: { title: "登录服务暂时不可用", body: "服务器那边出了故障，不是账户或密码的问题。稍后重试。" },
+  serverDown: { title: "这个服务器暂时不可用", body: "服务器出了故障，地址没有写错。稍后重试。" },
+  loginServiceDown: { title: "登录服务暂时不可用", body: "服务器出了故障，不是账户或密码的问题。稍后重试。" },
   username: "邮箱或用户名",
   password: "密码",
   passwordNote: `密码只用于这一次登录，${APP_NAME}不会保存`,

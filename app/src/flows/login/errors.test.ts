@@ -11,10 +11,12 @@ describe("探测服务器的原位提示", () => {
     expect(probeProblem(new IpcError("invalid_argument", "这不是一个有效的网址：ftp://x"))).toEqual({ title: AUTHLIB_DIALOG_COPY.invalidUrl, body: "这不是一个有效的网址：ftp://x" });
   });
 
-  it("服务器根地址回 5xx：写服务器暂时不可用，不说地址不对", () => {
-    const problem = probeProblem(new IpcError("ServiceUnavailable", "登录服务暂时不可用（读取验证服务器信息：HTTP 503）", { step: "读取验证服务器信息", status: 503 }));
-    expect(problem).toEqual({ title: "这个服务器暂时不可用", body: "服务器那边出了故障，地址没有问题。稍后重试。" });
-    expect(problem).not.toEqual(AUTHLIB_COPY.notYggdrasil);
+  it("服务器根地址回 5xx 或 429：写服务器暂时不可用，不说地址不对", () => {
+    for (const status of [503, 429]) {
+      const problem = probeProblem(new IpcError("ServiceUnavailable", `登录服务暂时不可用（读取验证服务器信息：HTTP ${status}）`, { step: "读取验证服务器信息", status }));
+      expect(problem).toEqual({ title: "这个服务器暂时不可用", body: "服务器出了故障，地址没有写错。稍后重试。" });
+      expect(problem).not.toEqual(AUTHLIB_COPY.notYggdrasil);
+    }
   });
 
   it("其余错误不在原位处理，交给外层", () => {

@@ -1,6 +1,9 @@
 // 启动器更新的文案：外壳的更新面板与发现新版本的通知、设置页关于分区的更新卡共用。产品名一律经 APP_NAME 拼入。
 
 import { APP_NAME } from "../lib/app-info";
+import { CONFIRM_COPY } from "./flows";
+
+const RESTART_INSTALL = "重启并安装";
 
 export const UPDATE_COPY = {
   cardTitle: "启动器更新",
@@ -23,7 +26,7 @@ export const UPDATE_COPY = {
   viewProgress: "查看进度",
   ready: (v: string) => `${v} 已下好，等待安装`,
   readySub: `安装时${APP_NAME}会短暂关闭`,
-  restartInstall: "重启并安装",
+  restartInstall: RESTART_INSTALL,
   installOnExitCard: (v: string) => `关闭${APP_NAME}时会安装 ${v}`,
   installNow: "现在安装",
   checkFailed: "检查更新失败",
@@ -57,9 +60,13 @@ export const UPDATE_COPY = {
   installing: "正在启动安装程序…",
   downloadFailed: (reason: string) => `下载失败：${reason}`,
   signatureInvalid: "更新包签名校验不通过，已丢弃，不会安装",
-  tasksConfirmTitle: "还有下载没完成",
-  tasksConfirmBody: (n: number) => `还有 ${n} 个下载任务，重启会中断它们，之后需要重新开始。`,
-  tasksConfirm: "仍然重启",
+  /** 打包、备份这类本地任务不能说成下载：与关窗确认同一口径，有下载时取消键才写「继续下载」。 */
+  restartConfirm: (tasks: number, downloads: number) => ({
+    title: "重启并安装更新？",
+    body: `还有 ${tasks} 个${downloads === tasks ? "下载" : ""}任务，重启会中断它们，之后需要重新开始。`,
+    confirmLabel: RESTART_INSTALL,
+    cancelLabel: downloads > 0 ? CONFIRM_COPY.keepDownloading : CONFIRM_COPY.cancel,
+  }),
   // 失败通知标题
   installFailed: "没能安装更新",
   installOnExitFailed: "没能设为退出时安装",

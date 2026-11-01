@@ -14,7 +14,7 @@ import { bindArtStatus } from "../mc/binding";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { routeInstanceId, type Route } from "../state/route";
-import { activeTasks, pinnedInstances } from "../state/selectors";
+import { activeDownloads, activeTasks, pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
 import type { Toast } from "../state/toasts";
 import { phaseUpdate } from "../state/updater/machine";
@@ -178,6 +178,7 @@ function ShellCore({ children }: { children: ReactNode }) {
   const firstRun = useLauncherSelector((s) => s.firstRun);
   const pins = useLauncherSelector(pinnedInstances, shallowArrayEqual);
   const pendingTasks = useLauncherSelector((s) => activeTasks(s).length);
+  const pendingDownloads = useLauncherSelector(activeDownloads);
   const actions = useLauncherActions();
   const run = useRunner();
   const overlay = useOverlayControls();
@@ -319,8 +320,8 @@ function ShellCore({ children }: { children: ReactNode }) {
   const updaterRef = useRef(updater);
   updaterRef.current = updater;
   // installUpdate 是引用稳定的回调：活动任务数经 ref 读，不进它的依赖
-  const pendingTasksRef = useRef(pendingTasks);
-  pendingTasksRef.current = pendingTasks;
+  const pendingWorkRef = useRef({ tasks: pendingTasks, downloads: pendingDownloads });
+  pendingWorkRef.current = { tasks: pendingTasks, downloads: pendingDownloads };
   const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
   const openUpdatePanel = useCallback(() => {
     const api = updaterRef.current;
@@ -331,14 +332,9 @@ function ShellCore({ children }: { children: ReactNode }) {
   }, []);
   const closeUpdatePanel = useCallback(() => setUpdatePanelOpen(false), []);
   const installUpdate = useCallback(async () => {
-    const pending = pendingTasksRef.current;
-    if (pending > 0) {
-      const ok = await confirm({
-        title: UPDATE_COPY.tasksConfirmTitle,
-        body: UPDATE_COPY.tasksConfirmBody(pending),
-        confirmLabel: UPDATE_COPY.tasksConfirm,
-        tone: "primary",
-      });
+    const { tasks, downloads } = pendingWorkRef.current;
+    if (tasks > 0) {
+      const ok = await confirm({ ...UPDATE_COPY.restartConfirm(tasks, downloads), tone: "danger" });
       if (!ok) return;
     }
     await run(async () => {

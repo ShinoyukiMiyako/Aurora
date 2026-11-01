@@ -73,6 +73,23 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("外壳：重启并安装更新", () => {
+  it("只有备份这类本地任务：确认框不说成下载，取消键是「取消」，取消后不安装", async () => {
+    ipc.overrides.set("backup_world", () => new Promise(() => {}));
+    await mount();
+    act(() => void launcher.actions.backupWorld("生存", "w1", "旧世界"));
+    await flush();
+    act(() => void shell.installUpdate());
+    await flush();
+    expect(dialogTitle()).toBe("重启并安装更新？");
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("还有 1 个任务，重启会中断它们，之后需要重新开始。");
+    expect(button("重启并安装").dataset.variant).toBe("danger");
+    act(() => button("取消").click());
+    await flush();
+    expect(callsOf(ipc, "install_update")).toHaveLength(0);
+  });
+});
+
 describe("外壳：导航", () => {
   it("go / back / forward 驱动路由与前后可用态", async () => {
     await mount();
