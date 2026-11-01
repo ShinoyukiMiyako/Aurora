@@ -27,6 +27,7 @@ use tokio::io::AsyncReadExt;
 use crate::error::Result;
 use crate::facade::Aurora;
 use crate::launch::LaunchWarning;
+use crate::modfs::ledger_key;
 use crate::session::JavaUsed;
 
 /// 每个实例最近一次崩溃报告的文件名，位于 `versions/<id>/<元数据目录>/`。
@@ -100,6 +101,7 @@ pub struct CrashClue {
 /// 日志点名的一个 Mod。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrashSuspect {
+    /// 日志点名的 mod id；损坏线索认出的 jar 读不出元数据时是去掉后缀的文件名。
     pub mod_id: String,
     /// mods 目录里对得上的文件名；对不上为 `None`。
     pub file_name: Option<String>,
@@ -268,9 +270,15 @@ impl CrashReport {
         }
     }
 
-    /// 把点名的 Mod 对到 `<工作目录>/mods` 里的文件。mods 目录不存在（从没装过 Mod）不是错误。
+    /// 把点名的 Mod 对到 `<工作目录>/mods` 里的文件，并入损坏线索命中行里的 jar。mods 目录不存在
+    /// （从没装过 Mod）不是错误。
     pub(crate) async fn join_suspects(&mut self, working_dir: &Path) -> Result<()> {
-        if self.suspects.is_empty() {
+        // 损坏的 jar 读不出 mod id，日志点不了它的名，所以点名为空时也要去 mods 目录认
+        let corrupted = self
+            .diagnoses
+            .iter()
+            .find(|clue| clue.category == CrashCategory::CorruptedJar);
+        if self.suspects.is_empty() && corrupted.is_none() {
             return Ok(());
         }
         let mods_dir = working_dir.join("mods");
@@ -288,7 +296,46 @@ impl CrashReport {
         for suspect in &mut self.suspects {
             suspect.file_name = file_for_mod_id(&mods, &suspect.mod_id);
         }
+        if let Some(found) = corrupted.and_then(|clue| corrupted_mod_file(&clue.matched, &mods))
+            && !self
+                .suspects
+                .iter()
+                .any(|s| s.file_name.as_deref() == Some(found.file_name.as_str()))
+        {
+            // 命中行直接写着这个文件，比从日志措辞里捞出的 id 更确凿，也是一键尝试点名的那个
+            self.suspects.insert(0, corrupted_suspect(found));
+        }
         Ok(())
+    }
+}
+
+/// 损坏线索的命中行对到已装文件：路径落在 mods 目录下，且文件名紧跟在路径分隔符之后。只认整段文件名：
+/// 子串匹配会把 `pfbad-1.0.0.jar` 认成 `bad-1.0.0.jar`，玩家就照着无辜的 Mod 下手了。
+fn corrupted_mod_file<'a>(matched: &str, mods: &'a [InstalledMod]) -> Option<&'a InstalledMod> {
+    let line = matched.replace('\\', "/").to_ascii_lowercase();
+    if !line.contains("/mods/") {
+        return None;
+    }
+    mods.iter().find(|m| {
+        let name = ledger_key(&m.file_name).to_ascii_lowercase();
+        line.contains(&format!("/{name}"))
+    })
+}
+
+/// 损坏的 jar 通常没有元数据，这时拿去掉后缀的文件名当名字：界面按 `file_name` 对文件，
+/// 只有文件后来不在了才显示它。
+fn corrupted_suspect(found: &InstalledMod) -> CrashSuspect {
+    let enabled_name = ledger_key(&found.file_name);
+    let mod_id = match &found.metadata {
+        Some(meta) => meta.mod_id.clone(),
+        None => enabled_name
+            .strip_suffix(".jar")
+            .unwrap_or(enabled_name)
+            .to_owned(),
+    };
+    CrashSuspect {
+        mod_id,
+        file_name: Some(found.file_name.clone()),
     }
 }
 
@@ -772,6 +819,147 @@ mod tests {
         let mut report = session_only(FABRIC_MISSING_DEPENDENCY, 1);
         report.join_suspects(tmp.path()).await.unwrap();
         assert!(report.suspects.iter().all(|s| s.file_name.is_none()));
+    }
+
+    /// 加载器读不开 jar 时的报错：路径与原因在同一行，jar 读不出 mod id，日志也就点不了名。
+    const CORRUPTED_PFBAD: &str =
+        r"java.util.zip.ZipException: zip END header not found: D:\mc\mods\pfbad-1.0.0.jar";
+
+    /// 不是合法 zip 的 jar：扫描照样列出它，只是没有元数据。
+    fn put_broken_jar(mods_dir: &Path, file_name: &str) {
+        std::fs::create_dir_all(mods_dir).unwrap();
+        std::fs::write(mods_dir.join(file_name), b"not a zip").unwrap();
+    }
+
+    fn suspect(mod_id: &str, file_name: &str) -> CrashSuspect {
+        CrashSuspect {
+            mod_id: mod_id.into(),
+            file_name: Some(file_name.into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupted_jar_in_mods_joins_suspects_by_file_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        put_broken_jar(&mods, "pfbad-1.0.0.jar");
+        put_fabric_mod(&mods, "sodium-0.5.3.jar", "sodium");
+        let mut report = session_only(&[CORRUPTED_PFBAD], 1);
+        assert_eq!(report.diagnoses[0].category, CrashCategory::CorruptedJar);
+        assert!(report.suspects.is_empty(), "日志本身点不出这个 Mod");
+
+        report.join_suspects(tmp.path()).await.unwrap();
+
+        assert_eq!(
+            report.suspects,
+            vec![suspect("pfbad-1.0.0", "pfbad-1.0.0.jar")]
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupted_jar_leads_the_suspects_and_is_not_listed_twice() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        put_broken_jar(&mods, "pfbad-1.0.0.jar");
+        put_fabric_mod(&mods, "zz-renderer-5.jar", "sodium");
+        let lines = [FABRIC_MISSING_DEPENDENCY, &[CORRUPTED_PFBAD]].concat();
+        let mut report = session_only(&lines, 1);
+        report.join_suspects(tmp.path()).await.unwrap();
+        assert_eq!(
+            report.suspects,
+            vec![
+                suspect("pfbad-1.0.0", "pfbad-1.0.0.jar"),
+                suspect("sodium", "zz-renderer-5.jar"),
+                CrashSuspect {
+                    mod_id: "fabric-api".into(),
+                    file_name: None,
+                },
+            ]
+        );
+
+        // 日志已经点了名、也对上了这个文件：不再多出一行
+        let tmp = tempfile::tempdir().unwrap();
+        put_broken_jar(&tmp.path().join("mods"), "sodium-0.5.3.jar");
+        let named = r"error in opening zip file D:\mc\mods\sodium-0.5.3.jar";
+        let lines = [FABRIC_MISSING_DEPENDENCY, &[named]].concat();
+        let mut report = session_only(&lines, 1);
+        report.join_suspects(tmp.path()).await.unwrap();
+        assert_eq!(
+            report.suspects,
+            vec![
+                suspect("sodium", "sodium-0.5.3.jar"),
+                CrashSuspect {
+                    mod_id: "fabric-api".into(),
+                    file_name: None,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupted_jar_needs_a_mods_path_and_a_file_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_broken_jar(&tmp.path().join("mods"), "pfbad-1.0.0.jar");
+        for line in [
+            // 不在 mods 目录下：同名只是巧合，该走修复而不是停用 Mod
+            r"Error: Invalid or corrupt jarfile D:\mc\libraries\pfbad-1.0.0.jar",
+            // 这一行没写路径
+            "java.util.zip.ZipException: zip END header not found",
+            // 写了路径，盘上没有这个文件：不猜
+            r"zip file is empty D:\mc\mods\ghost-2.0.jar",
+        ] {
+            let mut report = session_only(&[line], 1);
+            report.join_suspects(tmp.path()).await.unwrap();
+            assert_eq!(report.suspects, vec![], "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupted_jar_match_takes_the_whole_file_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mods = tmp.path().join("mods");
+        // 列表按文件名排序，bad 在 pfbad 前：子串匹配会先撞上它
+        put_broken_jar(&mods, "bad-1.0.0.jar");
+        put_broken_jar(&mods, "pfbad-1.0.0.jar");
+        let mut report = session_only(&[CORRUPTED_PFBAD], 1);
+        report.join_suspects(tmp.path()).await.unwrap();
+        assert_eq!(
+            report.suspects,
+            vec![suspect("pfbad-1.0.0", "pfbad-1.0.0.jar")]
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupted_jar_match_tolerates_separators_case_and_the_disabled_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        // 崩溃之后玩家把它停用了，再粘贴日志来诊断
+        put_broken_jar(&tmp.path().join("mods"), "PFBad-1.0.0.jar.disabled");
+        let mut report = session_only(
+            &["error in opening zip file file:/D:/mc/Mods/pfbad-1.0.0.jar"],
+            1,
+        );
+        report.join_suspects(tmp.path()).await.unwrap();
+        assert_eq!(
+            report.suspects,
+            vec![suspect("PFBad-1.0.0", "PFBad-1.0.0.jar.disabled")]
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupted_jar_with_readable_metadata_reports_its_mod_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_mod(&tmp.path().join("mods"), "pfbad-1.0.0.jar", "pfbad");
+        let mut report = session_only(&[CORRUPTED_PFBAD], 1);
+        report.join_suspects(tmp.path()).await.unwrap();
+        assert_eq!(report.suspects, vec![suspect("pfbad", "pfbad-1.0.0.jar")]);
+    }
+
+    #[tokio::test]
+    async fn corrupted_jar_without_a_mods_dir_is_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut report = session_only(&[CORRUPTED_PFBAD], 1);
+        report.join_suspects(tmp.path()).await.unwrap();
+        assert_eq!(report.suspects, vec![]);
     }
 
     #[tokio::test]
