@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use crate::credential::DownloadCredential;
+
 /// 单个文件的下载任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadTask {
@@ -17,6 +19,8 @@ pub struct DownloadTask {
     pub sha1: Option<String>,
     /// 期望的文件大小（字节）。提供则用于分块决策与最终截断检查。
     pub size: Option<u64>,
+    /// 下载凭据。提供则这个任务的请求都由引擎逐跳跟随跳转，只有凭据作用域内的那一跳才带上它。
+    pub credential: Option<DownloadCredential>,
 }
 
 impl DownloadTask {
@@ -27,6 +31,7 @@ impl DownloadTask {
             dest: dest.into(),
             sha1: None,
             size: None,
+            credential: None,
         }
     }
 
@@ -39,6 +44,12 @@ impl DownloadTask {
     /// 附加期望大小（字节）。
     pub fn with_size(mut self, size: u64) -> Self {
         self.size = Some(size);
+        self
+    }
+
+    /// 附加下载凭据。
+    pub fn with_credential(mut self, credential: DownloadCredential) -> Self {
+        self.credential = Some(credential);
         self
     }
 }
@@ -63,5 +74,17 @@ mod tests {
         let task = DownloadTask::new("https://host/b", "b");
         assert!(task.sha1.is_none());
         assert!(task.size.is_none());
+        assert!(task.credential.is_none());
+    }
+
+    #[test]
+    fn with_credential_attaches_it_without_touching_the_contract() {
+        let credential = DownloadCredential::curseforge("k").unwrap();
+        let task = DownloadTask::new("https://edge.forgecdn.net/c.jar", "c.jar")
+            .with_size(7)
+            .with_credential(credential.clone());
+        assert_eq!(task.credential, Some(credential));
+        assert_eq!(task.size, Some(7));
+        assert!(task.sha1.is_none());
     }
 }
