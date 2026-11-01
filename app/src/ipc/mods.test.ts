@@ -477,7 +477,7 @@ describe("更新日志", () => {
     });
     expect(await failure(modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, "nope"))).toMatchObject({
       code: "mod_version_not_found",
-      detail: { platform: "modrinth", project_id: "AANobbMI", version_id: "nope" },
+      detail: { platform: "Modrinth", project_id: "AANobbMI", version_id: "nope" },
     });
     expect(await failure(modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, ""))).toMatchObject({ code: "invalid_argument", message: "mod_version_id 不能为空" });
     expect(await failure(modUpdateChangelog("ghost", SODIUM, "sodium-060"))).toMatchObject({ code: "version_not_installed" });

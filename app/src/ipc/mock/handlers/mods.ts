@@ -819,8 +819,9 @@ export const handlers: MockHandlers = {
     const found = findMockSource(row.platform, row.project_id)?.source.versions.find((v) => v.info.version_id === modVersionId);
     if (found === undefined) {
       const platformName = row.platform === "modrinth" ? "Modrinth" : "CurseForge";
+      // 与后端一致：detail.platform 是平台的显示名，不是 serde 名
       throw new IpcError("mod_version_not_found", `平台 ${platformName} 上工程 ${row.project_id} 未找到版本 ${modVersionId}`, {
-        platform: row.platform,
+        platform: platformName,
         project_id: row.project_id,
         version_id: modVersionId,
       });
