@@ -303,7 +303,7 @@ describe("更新检查与更新", () => {
 
   it("来源不明的文件不能更新；被占用时报 mod_file_busy", async () => {
     const unknown = await failure(updateMod("task-u5", MOCK_MOD_INSTANCE, "handmade-1.0.jar", "x"));
-    expect(unknown.detail).toEqual({ causes: ["handmade-1.0.jar 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）"] });
+    expect(unknown.detail).toEqual({ causes: ["handmade-1.0.jar 没有平台来源记录，无法自动更新（先检查更新识别它）"] });
     setMockModFileBusy(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", true);
     expect(await failure(updateMod("task-u6", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060"))).toMatchObject({ code: "mod_file_busy" });
   });
@@ -610,11 +610,11 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       // 实例里已有 Fabric API（旧版）：沿用，不擅自升级。
       ["fapi-0922", "AANobbMI", true, "Fabric API"],
     ]);
-    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时手动添加"]);
 
     const forge = await planInstall("1.20.1-Forge", "modrinth", "AANobbMI", "sodium-060");
     expect(forge.items).toHaveLength(1);
-    expect(forge.skipped).toEqual(["前置 Fabric API 没有适配该实例的版本，未加入计划", "可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(forge.skipped).toEqual(["前置 Fabric API 没有适配该实例的版本，未加入计划", "可选前置 Mod Menu 未自动安装，需要时手动添加"]);
 
     const same = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "gvQqBUqZ", "lith-060");
     expect(same.items[0].already_satisfied).toBe(true);
@@ -638,7 +638,7 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       download_url: null,
       dependencies: [],
     });
-    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时手动添加"]);
 
     expect((await installMod("t-delisted", MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
     // 只落下主项，下架的 Fabric API 原样留着、卷宗记录不变。

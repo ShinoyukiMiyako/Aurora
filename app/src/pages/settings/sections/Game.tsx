@@ -5,6 +5,7 @@ import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/ada
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { samePath } from "../../../domain/paths";
+import { autoBackupOutcome } from "../../../domain/rules";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
@@ -27,6 +28,7 @@ import { Toggle } from "../../../ui/Toggle";
 import { Tooltip } from "../../../ui/Tooltip";
 import { useSettingsCommands } from "../commands";
 import {
+  AUTO_BACKUP_SKIPPED_NOTE,
   GAME_DIR_COPY,
   ISOLATION_COPY,
   ISOLATION_OPTIONS,
@@ -410,7 +412,15 @@ function WorldBackupCard() {
   return (
     <Card>
       <CardHeader title={c.title} subtitle={c.subtitle} icon="archive" />
-      <SettingRow title={c.auto} description={c.autoDesc}>
+      <SettingRow
+        title={c.auto}
+        description={
+          <>
+            {c.autoDesc}
+            {autoBackupOutcome(settings.afterLaunch, auto.value) === "skipped" && <span className={s.descNote}>{AUTO_BACKUP_SKIPPED_NOTE}</span>}
+          </>
+        }
+      >
         <Toggle checked={auto.value} onChange={auto.set} ariaLabel={c.auto} />
       </SettingRow>
       <SettingRow title={c.keep} description={c.keepDesc}>

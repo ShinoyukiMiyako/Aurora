@@ -7,6 +7,7 @@ import type { InstanceDto } from "../../ipc/instances";
 import { IpcError } from "../../ipc/errors";
 import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import { CORE_EVENT } from "../../ipc/tasks";
+import { APP_NAME } from "../../lib/app-info";
 import type { KnownServerDto, NewsItemDto, PinnedServerDto, PlayDayDto, ServerStatusDto } from "../../state/queries/home";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
@@ -446,7 +447,7 @@ describe("主页：资讯", () => {
     expect(text()).not.toContain("离线中");
     const note = document.querySelector<HTMLElement>('[role="note"]');
     if (note === null) throw new Error("没有启动器资讯的提示");
-    expect(note.textContent).toBe("启动器资讯暂时没拉下来：GitHub 限流（403）重试");
+    expect(note.textContent).toBe(`${APP_NAME}资讯暂时没拉下来：GitHub 限流（403）重试`);
     const before = callsOf(ipc, "list_news").length;
     launcherError = null;
     click(buttonByText("重试", note));
@@ -468,7 +469,7 @@ describe("主页：资讯", () => {
     }));
     vi.spyOn(navigator, "onLine", "get").mockReturnValue(false);
     await mount();
-    expect(document.querySelector('[role="note"]')?.textContent).toContain("启动器资讯暂时没拉下来");
+    expect(document.querySelector('[role="note"]')?.textContent).toContain(`${APP_NAME}资讯暂时没拉下来`);
     expect(callsOf(ipc, "list_news")).toHaveLength(1);
 
     reachable = true;
@@ -524,7 +525,7 @@ describe("主页：固定的服务器", () => {
   it("行写在线人数与延迟；加号从多人列表里固定，更多菜单取消固定", async () => {
     await mount();
     expect(text()).toContain("1 个 · 在线人数与延迟");
-    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("127/500 在线");
     expect(text()).toContain("38 ms");
     await openMenu(buttonByLabel("固定服务器"));
     expect(menuItems().map((el) => el.textContent)).toEqual(["本地localhost"]);
@@ -730,7 +731,7 @@ describe("主页：固定的服务器", () => {
     expect(text()).not.toContain("38 ms");
     expect(signals()).toEqual(["paused", "paused"]);
     expect(document.querySelectorAll("[data-on]")).toHaveLength(0);
-    expect(text()).toContain("127 / 500 在线");
+    expect(text()).toContain("127/500 在线");
     expect(text()).toContain("上次 2 小时前在线 1.2 万");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3 * 60_000);

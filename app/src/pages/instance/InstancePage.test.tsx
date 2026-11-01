@@ -10,6 +10,7 @@ import type { HistoryEvent } from "../../ipc/history";
 import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, TemplateInfoDto, WorldBackupDto, WorldBackupListDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
+import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickSaveFile } from "../../shell/platform";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
@@ -259,7 +260,7 @@ beforeEach(() => {
   ipc.overrides.set("last_launch_log", () => null);
   ipc.overrides.set("list_history", () => history);
   ipc.overrides.set("rollback_checks", () =>
-    history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚，请直接移除对应文件" })),
+    history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚，直接移除对应文件" })),
   );
   ipc.overrides.set("rollback", () => null);
   ipc.overrides.set("template_info", () => template);
@@ -330,7 +331,7 @@ describe("实例详情：头图与标签", () => {
     ];
     await open("overview");
     expect(document.querySelector("h1")?.textContent).toBe(ID);
-    expect(text()).toContain("自建模组实例 · 已游玩 2 小时 10 分钟");
+    expect(text()).toContain("自建 Mod 实例 · 已游玩 2 小时 10 分钟");
     expect(byRole("tab", /^Mod/).textContent).toBe("Mod1 更新");
     expect(text()).toContain("1 个有更新");
   });
@@ -1371,7 +1372,7 @@ describe("实例详情：整合包没导入完", () => {
 
   it("概览横幅与头图菜单不给补全，改为重新导入与删除", async () => {
     await open("overview");
-    expect(text()).toContain("整合包没有导入完，请删掉这个实例后重新导入");
+    expect(text()).toContain("整合包没有导入完，删掉这个实例后重新导入");
     expect(() => button("修复实例")).toThrow();
     click(button("更多操作"));
     const labels = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(textOf);
@@ -1443,6 +1444,13 @@ describe("实例详情：概览", () => {
     expect(callsOf(ipc, "repair_instance").map((a) => a.reinstallLoader)).toEqual([undefined]);
   });
 
+  it("一个存档都没有：概览的存档数写「还没有存档」", async () => {
+    ipc.overrides.set("list_instance_content", () => ({ ...contentDto(), worlds: [] }));
+    await open("overview");
+    expect(text()).toContain("还没有存档");
+    expect(text()).not.toContain("世界 ·");
+  });
+
   it("存档按最近游玩排序，极限模式标红；资源包与光影按加载顺序列出", async () => {
     await open("overview");
     const rows = [...document.querySelectorAll("li")].map(textOf);
@@ -1451,7 +1459,7 @@ describe("实例详情：概览", () => {
     expect(worldRows[0]).toContain("最近");
     expect(worldRows[0]).toContain("极限 · 1 分钟前");
     expect(worldRows[1]).toContain("创造 · 10 天前");
-    expect(text()).toContain("2 个世界 · 3.0 MB");
+    expect(text()).toContain("2 个存档 · 3.0 MB");
     expect(text()).toContain("Complementary.zip");
     expect(text()).toContain("资源包 · 加载顺序 1");
   });
@@ -1501,7 +1509,7 @@ describe("实例详情：概览", () => {
       pending.resolve(contentDto());
       await settle(20);
     });
-    expect(text()).toContain("2 个世界 · 3.0 MB");
+    expect(text()).toContain("2 个存档 · 3.0 MB");
     expect(text()).not.toContain("比平时慢一些，仍在加载…");
   });
 
@@ -1645,7 +1653,7 @@ describe("实例详情：Mod 管理", () => {
     click(button("全部更新 · 2"));
     await flush();
     // 先到更新预览：默认全选，确认前不入队
-    expect(dialog().textContent).toContain("已勾选 2 / 2");
+    expect(dialog().textContent).toContain("已勾选 2/2");
     expect(launcher.state.tasks).toEqual([]);
     click(button("更新 2 个", dialog()));
     await flush();
@@ -2222,7 +2230,7 @@ describe("实例详情：日志与历史", () => {
     const items = [...document.querySelectorAll("ol > li")].map(textOf);
     expect(items[0]).toContain("更新 Sodium");
     expect(items[1]).toContain("安装 sodium-0.5");
-    expect(items[1]).toContain("安装事件不支持回滚，请直接移除对应文件");
+    expect(items[1]).toContain("安装事件不支持回滚，直接移除对应文件");
     expect(text()).toContain("2 条记录 · 1 条可回滚");
     click(button("回滚到 0.5.0"));
     await flush();
@@ -2260,7 +2268,7 @@ describe("实例详情：日志与历史", () => {
     expect(row()).toBe(first);
     expect(byRole("radio", /^错误/).textContent).toBe("错误1");
     // 唯一的错误行来自游戏：只看启动器的错误时一行不剩，说明写在日志区里
-    click(byRole("radio", "启动器"));
+    click(byRole("radio", APP_NAME));
     expect(byRole("radio", /^错误/).textContent).toBe("错误0");
     click(byRole("radio", /^错误/));
     expect(document.querySelector('[role="log"]')?.textContent).toContain("当前筛选下没有日志行");
@@ -2884,6 +2892,18 @@ describe("实例详情：存档备份", () => {
     expect(toastTitles()).toContain("已开始备份「新世界」");
   });
 
+  it.each([
+    ["「游戏启动后」选了关闭", { after_launch: "close" as const }],
+    ["自动备份关着", { world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } }],
+  ])("%s：游戏运行中的禁用原因不说退出时会自动备份", async (_name, overrides) => {
+    bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false }, ...overrides }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await open("overview");
+    await startGame();
+    click(rowMenu("新世界"));
+    expect(await hoverReason(menuItem("备份存档"))).toBe("游戏退出后再备份");
+  });
+
   it("游戏运行中：备份与导出禁用并写明原因，查看备份照常；点了不发命令", async () => {
     await open("overview");
     await startGame();
@@ -2928,7 +2948,7 @@ describe("实例详情：存档备份", () => {
     // 存档名没变过的那几份不写「当时名为」
     expect(texts[0]).not.toContain("当时名为");
     expect(callsOf(ipc, "list_world_backups")).toEqual([{ id: ID, world: "w2" }]);
-    expect(dlg.textContent).toContain("退出游戏后会自动备份玩过的存档，每个存档保留 5 份自动备份。");
+    expect(dlg.textContent).toContain("游戏退出后会自动备份玩过的存档，每个存档保留 5 份自动备份。");
   });
 
   it("恢复先确认：确认前不调用 restore_world_backup，确认后调用一次，参数为实例、存档与那一份备份", async () => {
@@ -3108,8 +3128,31 @@ describe("实例详情：存档备份", () => {
     await openBackups();
     const dlg = backupsDialog();
     expect(dlg.textContent).toContain("还没有备份 · 所有共用存档的实例看到的是同一份");
-    expect(dlg.textContent).toContain("退出游戏时会自动备份玩过的存档，也可以现在备份一份。");
+    expect(dlg.textContent).toContain("游戏退出时会自动备份玩过的存档，也可以现在备份一份。");
     expect(rows()).toHaveLength(0);
+  });
+
+  it("「游戏启动后」选了关闭：开着自动备份也不会发生，注记说清楚并带到设置的常规分区，空状态不再许诺自动备份", async () => {
+    list = { ...list, backups: [], total_bytes: 0 };
+    bootOverrides(ipc, { instances, config: configDto({ after_launch: "close", memory: { max_mb: 4096, min_mb: null, auto: false } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await openBackups();
+    const dlg = backupsDialog();
+    expect(dlg.textContent).toContain(`「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份，可以在设置 · 常规里改。`);
+    expect(dlg.textContent).toContain("可以现在备份一份。");
+    expect(dlg.textContent).not.toContain("会自动备份玩过的存档");
+    click(button("去设置", dlg));
+    await flush();
+    expect(nav.route).toEqual({ page: "settings", section: "general" });
+  });
+
+  it("自动备份关着：空状态不说会自动备份", async () => {
+    list = { ...list, backups: [], total_bytes: 0 };
+    bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false }, world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await openBackups();
+    expect(backupsDialog().textContent).toContain("可以现在备份一份。");
+    expect(backupsDialog().textContent).not.toContain("会自动备份玩过的存档");
   });
 
   it("读不到列表：原位报错写原因，「重试」重新请求", async () => {

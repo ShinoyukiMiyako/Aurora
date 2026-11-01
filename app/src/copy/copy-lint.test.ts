@@ -103,6 +103,9 @@ function stringLiterals(source: string): Literal[] {
 
 const CJK = /[㐀-鿿]/;
 
+/** 「启动器」泛指别家或这一类软件的说法：官方与其他启动器，以及平台上作者对启动器下载的限制。 */
+const LAUNCHER_GENERIC = /官方启动器|其他启动器|不允许在?启动器/g;
+
 /** 不要用的说法（语气词、客套、空泛的结果与按钮、占位说法、错别字），以及术语表里各术语的禁用叫法。 */
 const BANNED = [
   "您",
@@ -160,6 +163,47 @@ const BANNED = [
   "卸载",
   "拷贝",
   "撤回",
+  "没有世界",
+  "开始游戏",
+  "关闭游戏",
+  "停止游戏",
+  "退出游戏",
+  "强制结束",
+  "修复游戏",
+  "修复文件",
+  "校验文件",
+  "设备码",
+  "模组包",
+  "行为包",
+  "受限文件",
+  "纯净版",
+  "官方版",
+  "内测版",
+  "存档点",
+  "隔离模式",
+  "版本独立",
+  "独立文件夹",
+  "根目录",
+  "安装目录",
+  "默认实例",
+  "选中实例",
+  "收藏",
+  "置顶",
+  "钉住",
+  "正版账户",
+  "本地账户",
+  "离线模式账户",
+  "皮肤站账户",
+  "第三方登录",
+  "统一通行证",
+  "镜像站",
+  "JRE",
+  "JDK",
+  "运行环境",
+  "Java 参数",
+  "控制台",
+  "操作记录",
+  "资源中心",
 ] as const;
 
 /** 一条字面量里的标点与混排问题，每条写成「规则：片段」。 */
@@ -169,6 +213,7 @@ function punctuationIssues(text: string): string[] {
   if (/[“”‘’]/.test(text)) issues.push("引号用直角引号");
   if (text.includes('"')) issues.push("中文里不用英文双引号");
   if (text.includes("—")) issues.push("不用破折号");
+  if (new RegExp(`[0-9${HOLE}] / [0-9${HOLE}]`).test(text)) issues.push("比值两侧不空格");
   const half = /[㐀-鿿][,:;?!()]|[,:;?!(][㐀-鿿]/.exec(text);
   if (half !== null) issues.push(`中文旁用全角标点：${half[0]}`);
   // 日期是例外：「2026年10月30日」不加空格
@@ -195,6 +240,12 @@ function lint(file: string, source: string): string[] {
     for (const word of BANNED) if (text.includes(word)) out.push(`${file}:${line}：禁用词「${word}」：${text}`);
     // 术语表里「撤销」只指刚做的一键调整的复原，也就是诊断页那一个按钮
     if (text.includes("撤销") && text !== "撤销") out.push(`${file}:${line}：「撤销」只用于一键调整的复原：${text}`);
+    // 「启动器」只泛指别家或这一类软件，自称一律走产品名
+    if (text.replace(LAUNCHER_GENERIC, "").includes("启动器")) out.push(`${file}:${line}：产品自称用产品名：${text}`);
+    // 「世界」是游戏里的说法（创建新世界、进入世界），数的是存储时用「个存档」
+    if (new RegExp(`[0-9${HOLE}] 个世界`).test(text)) out.push(`${file}:${line}：数存档用「个存档」：${text}`);
+    // 「请」只留给要用户到产品之外去做的事，其余直接说动作
+    if (/请(?!求)/.test(text)) out.push(`${file}:${line}：「请」只用于产品之外的动作：${text}`);
     for (const issue of punctuationIssues(text)) out.push(`${file}:${line}：${issue}：${text}`);
   }
   return out;
@@ -206,21 +257,19 @@ const COPY_SOURCES = import.meta.glob<string>(["./*.ts", "../pages/*/copy.ts", "
   eager: true,
 });
 
-/** 还没改掉的旧叫法。每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。 */
-const LEGACY: readonly { file: string; text: string; why: string }[] = [
-  { file: "../pages/instance/copy.ts", text: "自建模组实例", why: "实例类型的旧称，头图用例还钉着这个字面量" },
-];
-
-/** 本来就该这么写的例外；text 是源码里的原样（转义保留）。同样要求还能在原文件里找到。 */
+/** 本来就该这么写的例外；text 是源码里的原样（转义保留）。每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。 */
 const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "./shell.ts", text: "还原", why: "标题栏窗口按钮沿用 Windows 自己的叫法，与存档的「恢复」不是一回事" },
   { file: "./flows.ts", text: '名称里不能有 \\\\ / : * ? " < > | 这些字符', why: "列出的就是 Windows 文件名里不能用的字符本身" },
+  { file: "./flows.ts", text: "请家庭组管理员在 Microsoft 家庭中把这个账户加入家庭组，再回来重试。", why: "要家庭组管理员在微软那边操作" },
+  { file: "./flows.ts", text: `会直接结束「${HOLE}」的游戏进程，没保存的进度可能丢失。正常退出请在游戏菜单里保存并退出。`, why: "要用户在游戏里操作" },
+  { file: "../pages/discover/copy.ts", text: "CurseForge 上的文件太多，这里只列出了其中一部分，没找到的版本请到 CurseForge 网页查看", why: "要用户到 CurseForge 网页上看" },
+  { file: "./updater.ts", text: `${HOLE} / ${HOLE}`, why: "两边是带单位的字节量，贴在一起的 MB/612 读着像速率" },
+  { file: "../pages/tasks/copy.ts", text: `${HOLE} / ${HOLE}`, why: "两边是带单位的字节量，贴在一起的 MB/612 读着像速率" },
 ];
 
-const EXEMPT = [...LEGACY, ...EXCEPTIONS];
-
 function isExempt(entry: string): boolean {
-  return EXEMPT.some((l) => entry.startsWith(`${l.file}:`) && entry.endsWith(`：${l.text}`));
+  return EXCEPTIONS.some((l) => entry.startsWith(`${l.file}:`) && entry.endsWith(`：${l.text}`));
 }
 
 describe("文案字面量的提取", () => {
@@ -257,9 +306,20 @@ describe("文案检查本身", () => {
       'const bad4 = "关掉后不会撤销这项设置";',
       'const date = "2026年10月30日";',
       "const sep = (a: string) => `更新 0.5.8 → 0.6.0 · 「${a}」 · 已就绪`;",
+      'const bad5 = "打开启动器时检查一次";',
+      'const other = "其他启动器的文件夹";',
+      'const blocked = "作者不允许启动器直接下载";',
+      'const bad6 = "请删掉这个实例";',
+      'const net = "请求超时";',
+      "const bad7 = (a: number, b: number) => `已勾选 ${a} / ${b}`;",
+      'const options = "微软 / 离线";',
+      'const ratio = "已勾选 2/3";',
+      'const bad8 = "2 个世界";',
+      'const game = "创建一个世界";',
     ].join("\n");
     expect(lint("x.ts", source)).toEqual([
       "x.ts:2：禁用词「请稍候」：请稍候...",
+      "x.ts:2：「请」只用于产品之外的动作：请稍候...",
       "x.ts:2：省略号用「…」：请稍候...",
       "x.ts:3：禁用词「！」：安装Sodium完成！",
       "x.ts:3：中西文之间加空格：装S：安装Sodium完成！",
@@ -267,6 +327,10 @@ describe("文案检查本身", () => {
       "x.ts:4：引号用直角引号：“生存”已就绪 ，下次启动生效",
       "x.ts:4：全角标点旁不加空格： ，：“生存”已就绪 ，下次启动生效",
       "x.ts:6：「撤销」只用于一键调整的复原：关掉后不会撤销这项设置",
+      "x.ts:9：产品自称用产品名：打开启动器时检查一次",
+      "x.ts:12：「请」只用于产品之外的动作：请删掉这个实例",
+      `x.ts:14：比值两侧不空格：已勾选 ${HOLE} / ${HOLE}`,
+      "x.ts:17：数存档用「个存档」：2 个世界",
     ]);
   });
 });
@@ -280,12 +344,12 @@ describe("全站文案表", () => {
     expect(files.filter((f) => f.endsWith(".test.ts"))).toEqual([]);
   });
 
-  it("没有禁用词与标点、混排问题（旧叫法与例外单独列出）", () => {
+  it("没有禁用词与标点、混排问题（例外单独列出）", () => {
     const issues = files.flatMap((file) => lint(file, COPY_SOURCES[file]));
     expect(issues.filter((entry) => !isExempt(entry))).toEqual([]);
   });
 
-  it.each(EXEMPT.map((l) => [l.file, l.text] as const))("豁免的 %s「%s」还在原处", (file, text) => {
+  it.each(EXCEPTIONS.map((l) => [l.file, l.text] as const))("豁免的 %s「%s」还在原处", (file, text) => {
     expect(stringLiterals(COPY_SOURCES[file]).map((l) => l.text)).toContain(text);
   });
 });

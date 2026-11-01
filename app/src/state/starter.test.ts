@@ -97,7 +97,7 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
     expect((await listMods(NAME)).map((m) => m.source?.project_id)).toEqual(["AANobbMI", "P7dR8mSH", "gvQqBUqZ", "nmDcB62a", "uXXizFIs"]);
     expect(instance(NAME)?.modCount).toBe(5);
     // 套上了默认设置就不补「没有沿用」的提示；就绪与装好各一条
-    expect(toasts()).toContain(`success:「${NAME}」已就绪:可以开始游戏了`);
+    expect(toasts()).toContain(`success:「${NAME}」已就绪:可以启动游戏了`);
     expect(toasts()).toContain(`success:已给「${NAME}」装上 5 个 Mod`);
     expect(toasts().some((t) => t.includes("没有沿用默认设置"))).toBe(false);
   });
@@ -161,7 +161,7 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
     await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass", useTemplate: true, starterMods: [] });
     await runTasks();
     const list = toasts();
-    const ready = list.indexOf(`success:「${NAME}」已就绪:可以开始游戏了`);
+    const ready = list.indexOf(`success:「${NAME}」已就绪:可以启动游戏了`);
     expect(ready).toBeGreaterThanOrEqual(0);
     expect(list[ready + 1]).toBe(`info:「${NAME}」没有沿用默认设置:安装时没有找到默认设置，可能已被清除`);
 

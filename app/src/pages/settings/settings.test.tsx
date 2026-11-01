@@ -223,11 +223,11 @@ describe("设置页：常规", () => {
   it("改「游戏启动后」立即写入后端，说明随选项变化（关闭启动器时为警示）", async () => {
     await mount("general");
     expect(radio("最小化").getAttribute("aria-checked")).toBe("true");
-    await click(radio("关闭启动器"));
+    await click(radio(`关闭${APP_NAME}`));
     expect(callsOf(ipc, "update_config")).toEqual([{ afterLaunch: "close" }]);
-    expect(radio("关闭启动器").getAttribute("aria-checked")).toBe("true");
+    expect(radio(`关闭${APP_NAME}`).getAttribute("aria-checked")).toBe("true");
     const desc = all("span[data-tone='warn']").map((e) => e.textContent);
-    expect(desc).toContain("游戏启动后启动器退出，游戏日志与崩溃诊断将不可用");
+    expect(desc).toContain(`游戏启动后${APP_NAME}退出，游戏日志与崩溃诊断将不可用`);
   });
 
   it("写入失败：控件回到原值，error 通知标题点名设置项、正文给原因", async () => {

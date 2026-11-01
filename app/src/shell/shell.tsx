@@ -6,7 +6,7 @@
 // 内容区滚动容器交给 bindPageScroll，并把 OverlayRoot 放在应用根元素的最后一个子位置。
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ACTION_ERROR, TOAST_COPY } from "../copy/flows";
+import { ACTION_ERROR, CONFIRM_COPY, TOAST_COPY } from "../copy/flows";
 import { artStatus, onArtChanged } from "../ipc/art";
 import { endBreathWindow, startBreathWindow } from "../launch/breath";
 import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";

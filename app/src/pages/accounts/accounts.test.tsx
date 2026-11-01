@@ -164,7 +164,7 @@ describe("账户页：当前账户与列表", () => {
     const kind = spot.querySelector("p[data-tone]") as HTMLElement;
     expect([kind.textContent, kind.dataset.tone]).toEqual(["微软账户 · 正版已验证", "ok"]);
     expect(spot.querySelector("code")?.textContent).toBe("6a1f0c0e-4b5d-4c3e-9f2a-7b8c9d0e1f20");
-    expect([...spot.querySelectorAll("dd")].map((d) => d.textContent)).toEqual(["微软设备码登录", "1 小时前", "2026年10月28日"]);
+    expect([...spot.querySelectorAll("dd")].map((d) => d.textContent)).toEqual(["微软账户登录", "1 小时前", "2026年10月28日"]);
     expect(spot.textContent).toContain("添加于 3 天前");
     expect(cardNames()).toEqual(["Hanami", "Steve"]);
     expect(cardOf("Hanami").textContent).toContain("使用中");

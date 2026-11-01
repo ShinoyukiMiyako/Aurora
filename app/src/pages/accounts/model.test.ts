@@ -103,7 +103,7 @@ describe("kindLine", () => {
 
 describe("verifyMethod", () => {
   it("三种账户各自的验证方式", () => {
-    expect(verifyMethod(msA)).toBe("微软设备码登录");
+    expect(verifyMethod(msA)).toBe("微软账户登录");
     expect(verifyMethod(ygg)).toBe("LittleSkin 的 Yggdrasil 验证");
     expect(verifyMethod(offA)).toBe("不经过验证，只用于单人与离线服务器");
   });

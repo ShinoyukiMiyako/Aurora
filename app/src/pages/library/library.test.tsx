@@ -397,7 +397,7 @@ describe("实例库：动作", () => {
     expect(document.body.textContent).toContain("1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。");
     const card = byText<HTMLButtonElement>("article button", "RLCraft").closest("article");
     if (card === null) throw new Error("找不到卡片");
-    expect(card.textContent).toContain("整合包没有导入完，请删掉这个实例后重新导入");
+    expect(card.textContent).toContain("整合包没有导入完，删掉这个实例后重新导入");
     expect([...card.querySelectorAll("button")].map((b) => b.textContent)).not.toContain("修复并启动");
     click(byText("button", LIBRARY_COPY.repairOne));
     await flush();

@@ -139,7 +139,7 @@ export const INSTANCE_NAME_ERROR: Readonly<Record<NameRule, string>> = {
 export const OFFLINE_NAME_COPY = {
   /** 未输入时的默认提示。 */
   hint: "推荐 3 到 16 位英文字母、数字或下划线，进服务器时显示的就是它",
-  empty: "请输入用户名",
+  empty: "输入用户名",
   tooLong: "最多 16 个字符",
   quote: "不能包含双引号",
   duplicate: "已经有同名账户了",
@@ -288,7 +288,7 @@ const RETRY: FailureFix = { kind: "retry", label: "重试" };
 const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" };
 // 实例本来就跟随全局、是全局设置固定了默认 Java：把实例改回自动选择什么也不会变，要改的是默认 Java；
 // 只想让这个实例换 Java 的，去实例设置里单独指定。
-const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默认 Java 改回自动选择" };
+const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默认 Java 改回自动" };
 const PICK_JAVA: FailureFix = { kind: "pick_java", label: "选择 Java" };
 /** 启动失败通知、实例管理卡与修复横幅上同一个说法。 */
 export const REINSTALL_LOADER_LABEL = "重新安装加载器";
@@ -308,6 +308,18 @@ function pinnedGlobally(params: FailureParams, code: FailureCode): boolean {
   const by = strParam(params, "pinned_by", code);
   if (by !== "instance" && by !== "global") throw new Error(`启动失败码 ${code} 的参数 pinned_by 不认识：${by}`);
   return by === "global";
+}
+
+/** 失败通知的操作只放得下 2 到 4 个字：按钮文案更长的修复动作在这里写短，其余沿用按钮文案。 */
+export function failureToastLabel(fix: FailureFix): string {
+  switch (fix.kind) {
+    case "auto_java":
+      return "改为自动";
+    case "auto_default_java":
+      return "改回自动";
+    default:
+      return fix.label;
+  }
 }
 
 export function failureCopy(code: FailureCode, params: FailureParams, ctx: FailureContext): FailureCopy {
@@ -821,7 +833,7 @@ const TEMPLATE_SKIP_REASON: Readonly<Record<TemplateSkipReason, string>> = {
 };
 
 export const TASK_TOAST = {
-  ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以开始游戏了" }),
+  ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以启动游戏了" }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
   repaired: (name: string) => ({ title: `「${name}」已修复` }),
   loaderReinstalled: (name: string) => ({ title: `「${name}」的加载器已重新安装` }),
@@ -924,7 +936,7 @@ export const TOAST_COPY = {
   templateSaved: (instance: string) => ({ title: `已把「${instance}」的设置保存为默认`, body: "新建实例时可以在确认步沿用" }),
   templateCleared: "已清除默认设置",
   /** 失败卡上选了「以离线方式进单人」，游戏起来之后。 */
-  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了。" }),
+  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了" }),
   viewCrashAction: "查看诊断",
   /** 游戏退出后的自动备份有存档没备份成：正文是第一个失败存档的后端原文。 */
   autoBackupFailed: (instance: string, message: string) => ({ title: `「${instance}」的自动备份没有完成`, body: message }),
@@ -1211,7 +1223,7 @@ export function incompleteReason(incomplete: IncompleteInput): string {
     return incomplete.error === null ? "上次安装或补全没有完成，文件不完整" : `上次安装或补全没有完成：${incomplete.error.message}`;
   }
   // 导入半途而废时缺的是整合包里的 Mod 与配置，补全补不回来，只能删掉重新导入。
-  if (incomplete.kind === "modpack") return "整合包没有导入完，请删掉这个实例后重新导入";
+  if (incomplete.kind === "modpack") return "整合包没有导入完，删掉这个实例后重新导入";
   const what = incomplete.kind === "install" ? "安装" : "补全";
   switch (incomplete.outcome) {
     case "pending":

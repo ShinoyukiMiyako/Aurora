@@ -137,7 +137,7 @@ describe("固定 Java 引起的启动失败：修复动作改对固定的那一�
     });
     await store.actions.launch("生存");
     const toast = store.getState().toasts.find((t) => t.tone === "error");
-    expect(toast).toMatchObject({ title: "「生存」启动失败", body: "Java 17 无法运行 1.21.1", action: { label: "默认 Java 改回自动选择" } });
+    expect(toast).toMatchObject({ title: "「生存」启动失败", body: "Java 17 无法运行 1.21.1", action: { label: "改回自动" } });
     const fix = store.actions.failureFix("auto_default_java");
     if (!("run" in fix)) throw new Error("改回自动选择应是命令类修复动作");
     await fix.run();
@@ -152,7 +152,7 @@ describe("固定 Java 引起的启动失败：修复动作改对固定的那一�
     });
     await store.actions.launch("生存");
     const toast = store.getState().toasts.find((t) => t.tone === "error");
-    expect(toast).toMatchObject({ body: "指定的 Java 不存在", action: { label: "改为自动选择" } });
+    expect(toast).toMatchObject({ body: "指定的 Java 不存在", action: { label: "改为自动" } });
     const fix = store.actions.failureFix("auto_java");
     if (!("run" in fix)) throw new Error("改为自动选择应是命令类修复动作");
     await fix.run().catch(() => undefined);

@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { cluePointer, CRASH_SOURCE_LABEL, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
+import { cluePointer, CRASH_SOURCE_LABEL, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -17,7 +17,7 @@ export const PAGE_COPY = {
 
 export const HERO_COPY = {
   eyebrowVanilla: "原版实例",
-  eyebrowModded: "自建模组实例",
+  eyebrowModded: "自建 Mod 实例",
   eyebrowModpack: (source: string) => `整合包 · ${source}`,
   modpackLocal: "本地文件",
   played: (minutes: number) => `已游玩 ${formatPlaytime(minutes)}`,
@@ -171,10 +171,10 @@ export const OVERVIEW_COPY = {
   modsUnknown: "Mod 数读不出来",
   worldsUnit: "个",
   worldsSize: (bytes: number) => `共 ${formatBytes(bytes)}`,
-  worldsNone: "还没有世界",
+  worldsNone: "还没有存档",
 
   worldsTitle: "存档",
-  worldsSubtitle: (n: number, bytes: number) => `${n} 个世界 · ${formatBytes(bytes)}`,
+  worldsSubtitle: (n: number, bytes: number) => `${n} 个存档 · ${formatBytes(bytes)}`,
   worldsEmptySubtitle: "进入游戏创建世界后会出现在这里",
   openSaves: "打开存档文件夹",
   openWorld: (name: string) => `打开「${name}」所在文件夹`,
@@ -245,7 +245,7 @@ export const OVERVIEW_COPY = {
   vanillaTextures: "使用原版材质",
   packOrder: (order: number) => `资源包 · 加载顺序 ${order}`,
   packInactive: "资源包 · 未启用",
-  packsFoot: (loader: LoaderKind, mc: string) => `${joinMixed(LOADER_NAME[loader], mc)} 的资源可以在发现页按版本筛选。`,
+  packsFoot: (loader: LoaderKind, mc: string) => `${LOADER_NAME[loader]} ${mc} 的资源可以在发现页按版本筛选。`,
   packsError: "读不到资源包与光影",
 } as const;
 
@@ -270,6 +270,8 @@ export const WORLD_BACKUP_COPY = {
 
   /** 启动中或游戏中：游戏开着会边写边打包，退出时又会自动备份一份。 */
   runningBackup: "游戏退出后再备份，退出时会自动备份一份",
+  /** 这一局退出时不会自动备份：不能再说「会自动备份一份」。 */
+  runningBackupNoAuto: "游戏退出后再备份",
   runningRestore: "游戏退出后再恢复",
   blocked: (instance: string, activity: string) => `「${instance}」正在${activity}，完成后再试`,
   worldBusy: "这个存档正在备份或恢复",
@@ -290,8 +292,9 @@ export const WORLD_BACKUP_COPY = {
   restoreLabel: (moment: string) => `恢复 ${moment} 的备份`,
   remove: "删除",
   removeLabel: (moment: string) => `删除 ${moment} 的备份`,
-  autoOnNote: (keep: number) => `退出游戏后会自动备份玩过的存档，每个存档保留 ${keep} 份自动备份。`,
+  autoOnNote: (keep: number) => `游戏退出后会自动备份玩过的存档，每个存档保留 ${keep} 份自动备份。`,
   autoOffNote: "自动备份已关闭，可以在设置 · 游戏里打开。",
+  autoSkippedNote: `「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份，可以在设置 · 常规里改。`,
   goSettings: "去设置",
   openFolder: "打开备份文件夹",
   /** 一份备份都还没写过时备份目录还不存在，文件管理器打不开它。 */
@@ -299,7 +302,9 @@ export const WORLD_BACKUP_COPY = {
   loadError: "读不到备份列表",
   retry: "重试",
   emptyTitle: "还没有备份",
-  emptyBody: "退出游戏时会自动备份玩过的存档，也可以现在备份一份。",
+  emptyBody: "游戏退出时会自动备份玩过的存档，也可以现在备份一份。",
+  /** 不会自动备份（开关关着，或落樱那时已经关了）：只剩手动这一条路。 */
+  emptyBodyManual: "可以现在备份一份。",
 } as const;
 
 // ---------------------------------------------------------------- Mod 管理
@@ -399,7 +404,7 @@ export const UPDATE_PREVIEW_COPY = {
   title: "更新 Mod",
   subtitle: "勾选要更新的 Mod。旧版本会保留，之后可以在历史里回滚。",
   selectAll: "全选",
-  picked: (picked: number, total: number) => `已勾选 ${picked} / ${total}`,
+  picked: (picked: number, total: number) => `已勾选 ${picked}/${total}`,
   pick: (name: string) => `选择 ${name}`,
   versions: (from: string, to: string) => `${from} → ${to}`,
   changelog: "更新日志",

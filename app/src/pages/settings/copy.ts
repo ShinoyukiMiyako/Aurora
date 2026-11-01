@@ -34,7 +34,7 @@ export const LOAD_COPY = {
 
 export const GENERAL_COPY = {
   launchTitle: "启动",
-  launchSubtitle: "按下「启动游戏」之后启动器做什么",
+  launchSubtitle: `按下「启动游戏」之后${APP_NAME}做什么`,
   afterLaunch: "游戏启动后",
   advancedTitle: "高级",
   clientId: "微软登录 client_id",
@@ -50,10 +50,13 @@ export const GENERAL_COPY = {
 } as const;
 
 export const AFTER_LAUNCH_OPTIONS = [
-  { value: "keep", label: "保持打开", desc: "游戏运行时启动器留在原处，方便看日志" },
-  { value: "minimize", label: "最小化", desc: "游戏窗口出现后启动器缩到任务栏，结束后再弹回来" },
-  { value: "close", label: "关闭启动器", desc: "游戏启动后启动器退出，游戏日志与崩溃诊断将不可用" },
+  { value: "keep", label: "保持打开", desc: `游戏运行时${APP_NAME}留在原处，方便看日志` },
+  { value: "minimize", label: "最小化", desc: `游戏窗口出现后${APP_NAME}缩到任务栏，结束后再弹回来` },
+  { value: "close", label: `关闭${APP_NAME}`, desc: `游戏启动后${APP_NAME}退出，游戏日志与崩溃诊断将不可用` },
 ] as const;
+
+/** 自动备份由产品在游戏退出时做，这时它已经关了：开关开着也不会发生。写在「游戏启动后」与「自动备份」两行下面。 */
+export const AUTO_BACKUP_SKIPPED_NOTE = `「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份存档`;
 
 // ---------------------------------------------------------------- 下载
 
@@ -228,7 +231,7 @@ export const GAME_DIR_COPY = {
 
 export const WORLD_BACKUP_COPY = {
   title: "存档备份",
-  subtitle: "退出游戏后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走",
+  subtitle: "游戏退出后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走",
   auto: "自动备份",
   autoDesc: "游戏退出后，把这次玩过的存档各备份一份",
   keep: "每个存档保留",

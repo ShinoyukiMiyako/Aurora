@@ -43,11 +43,11 @@ function checks(instance: MockInstance): RollbackCheck[] {
     switch (event.kind) {
       case "update":
         if (reverted.has(event.id)) return { event_id: event.id, can_rollback: false, reason: "该更新已经回滚过" };
-        if (superseded.has(event.id)) return { event_id: event.id, can_rollback: false, reason: `${event.file_name} 之后又更新过，请先回滚之后的那次更新` };
+        if (superseded.has(event.id)) return { event_id: event.id, can_rollback: false, reason: `${event.file_name} 之后又更新过，先回滚之后的那次更新` };
         if (hasFile(instance, backupName(event))) return { event_id: event.id, can_rollback: true, reason: null };
         return { event_id: event.id, can_rollback: false, reason: `备份文件 ${backupName(event)} 已不在 mods 目录里` };
       case "install":
-        return { event_id: event.id, can_rollback: false, reason: "安装事件不支持回滚，请直接移除对应文件" };
+        return { event_id: event.id, can_rollback: false, reason: "安装事件不支持回滚，直接移除对应文件" };
       case "remove":
         return { event_id: event.id, can_rollback: false, reason: "移除事件不支持回滚，文件已从磁盘删除" };
       case "rollback":
@@ -64,7 +64,7 @@ function rollback(versionId: string, instance: MockInstance, eventId: string): v
   const reverted = revertedIds(instance.history);
   if (reverted.has(eventId)) throw refuse(historyPath, `事件 ${eventId} 已经回滚过，不能重复回滚`);
   if (supersededIds(instance.history, reverted).has(eventId)) {
-    throw refuse(historyPath, `事件 ${eventId} 装上的 ${event.file_name} 之后又更新过，请先回滚之后的那次更新`);
+    throw refuse(historyPath, `事件 ${eventId} 装上的 ${event.file_name} 之后又更新过，先回滚之后的那次更新`);
   }
   const dir = mockModsDir(versionId);
   const backup = backupName(event);

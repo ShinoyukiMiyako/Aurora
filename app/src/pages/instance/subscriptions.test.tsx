@@ -676,7 +676,7 @@ describe("Mod 标签的批量条与更新预览：另一个实例在运行、第
     await flush();
     const dialog = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].find((d) => d.querySelector("h2")?.textContent === "更新 Mod");
     if (dialog === undefined) throw new Error("更新预览没有打开");
-    expect(dialog.textContent).toContain("已勾选 2 / 2");
+    expect(dialog.textContent).toContain("已勾选 2/2");
     act(() => byName<HTMLButtonElement>("button", "Sodium 的更新日志", dialog).click());
     await flush();
     expect(dialog.textContent).toContain("修复了区块边缘的闪烁");
@@ -697,6 +697,6 @@ describe("Mod 标签的批量条与更新预览：另一个实例在运行、第
     expect(renders).toEqual(before);
     // 选择与预览都还在：没有被哪次重挂载清掉
     expect(document.querySelector("[data-batch]")?.textContent).toContain("已选 2 个");
-    expect(dialog.textContent).toContain("已勾选 2 / 2");
+    expect(dialog.textContent).toContain("已勾选 2/2");
   });
 });

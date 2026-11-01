@@ -1086,7 +1086,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
   }
   try {
     if (instance.dto.incomplete?.kind === "modpack") {
-      const reason = "整合包没有导入完，缺的 Mod 与配置补不回来，请删掉这个实例后重新导入";
+      const reason = "整合包没有导入完，缺的 Mod 与配置补不回来，删掉这个实例后重新导入";
       throw new IpcError("instance_failed", `实例 ${id} 无法补全：${reason}`, { id, reason });
     }
     const marked = instance.dto.incomplete?.kind === "install" ? instance.dto.incomplete.spec : null;

@@ -185,7 +185,7 @@ describe("概览的启动失败横幅：以离线方式进单人", () => {
     ]);
     expect(launcher.state.session).toMatchObject({ instanceId: ID, phase: "running", accountUuid: HANAMI, failure: null });
     expect(launcher.state.toasts.filter((t) => t.tone === "info").map((t) => [t.title, t.body])).toEqual([
-      [`「${ID}」以离线方式启动`, "这一局只能玩单人游戏，多人服务器与 Realms 用不了。"],
+      [`「${ID}」以离线方式启动`, "这一局只能玩单人游戏，多人服务器与 Realms 用不了"],
     ]);
     expect(document.body.textContent).not.toContain("上次启动失败：");
   });

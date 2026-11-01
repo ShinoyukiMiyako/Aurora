@@ -79,7 +79,7 @@ describe("微软设备码登录", () => {
     expect(device(store).status).toBe("requesting");
     await vi.advanceTimersByTimeAsync(1);
     await settle();
-    expect(device(store)).toEqual({ status: "failed", code: DEVICE_CODE_TIMEOUT_CODE, message: "15 秒内没有收到设备码", detail: null });
+    expect(device(store)).toEqual({ status: "failed", code: DEVICE_CODE_TIMEOUT_CODE, message: "15 秒内没有收到代码", detail: null });
     expect(callsOf(ipc, "cancel_microsoft_login")).toHaveLength(1);
     await pending;
     emit(DEVICE_CODE_EVENT, CODE);

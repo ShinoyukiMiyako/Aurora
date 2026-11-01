@@ -6,13 +6,14 @@ import { useState } from "react";
 import { ACTION_ERROR, CONFIRM_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { clock, formatBytes, formatDate, formatRelative } from "../../domain/format";
+import { autoBackupOutcome, type AutoBackupOutcome } from "../../domain/rules";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import type { WorldDto } from "../../state/queries/instance";
 import { useResource, type ResourceResult } from "../../state/resource";
 import { activeTasks, busyWorlds, savesExported } from "../../state/selectors";
-import { worldBackupsKey, type WorldBackupDto, type WorldBackupListDto } from "../../state/store";
+import { worldBackupsKey, type LauncherState, type WorldBackupDto, type WorldBackupListDto } from "../../state/store";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { EmptyState } from "../../ui/EmptyState";
@@ -56,6 +57,8 @@ export interface WorldLockInput {
   worldTask: boolean;
   /** 本实例有勾了存档的导出整合包任务在排队或进行中：只挡恢复，备份与导出存档只读、照常。 */
   savesExport: boolean;
+  /** 这一局退出时会自动备份。 */
+  autoBackup: boolean;
 }
 
 /**
@@ -64,7 +67,9 @@ export interface WorldLockInput {
  * 正好撞上第一个占着的实例。
  */
 export function worldLockReasons(input: WorldLockInput): { backup: string | undefined; restore: string | undefined } {
-  if (input.sessionActive || input.activity === "launching" || input.activity === "running") return { backup: COPY.runningBackup, restore: COPY.runningRestore };
+  if (input.sessionActive || input.activity === "launching" || input.activity === "running") {
+    return { backup: input.autoBackup ? COPY.runningBackup : COPY.runningBackupNoAuto, restore: COPY.runningRestore };
+  }
   const blocker =
     input.status === "installing"
       ? input.activity === "repairing" || input.repairTask
@@ -98,6 +103,11 @@ export interface WorldOps {
   menu(world: WorldRef, onViewBackups: () => void): MenuEntry[];
 }
 
+/** 设置还没读到时为 null：还不知道会不会自动备份，哪句都不许诺。 */
+function selectAutoBackup(s: LauncherState): AutoBackupOutcome | null {
+  return s.settings === null ? null : autoBackupOutcome(s.settings.afterLaunch, s.settings.worldBackup.auto);
+}
+
 export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
   const actions = useLauncherActions();
   const run = useRunner();
@@ -106,6 +116,7 @@ export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
   const worlds = useLauncherSelector((s) => busyWorlds(s, id), shallowArrayEqual);
   const repairTask = useLauncherSelector((s) => activeTasks(s).some((t) => t.instanceId === id && t.spec.command === "repair_instance"));
   const savesExport = useLauncherSelector((s) => savesExported(s, id));
+  const autoBackup = useLauncherSelector(selectAutoBackup) === "runs";
   const reasons = worldLockReasons({
     name: inst.name,
     status: inst.status,
@@ -114,6 +125,7 @@ export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
     repairTask,
     worldTask: worlds.length > 0,
     savesExport,
+    autoBackup,
   });
 
   const backup = (world: WorldRef) => {
@@ -215,6 +227,7 @@ function BackupsBody({
 }) {
   const view = useModuleView(list);
   const policy = useLauncherSelector((s) => (s.settings === null ? null : s.settings.worldBackup));
+  const autoBackup = useLauncherSelector(selectAutoBackup);
   const { go } = useNav();
   return (
     <div className={styles.stack}>
@@ -232,13 +245,13 @@ function BackupsBody({
       )}
       {view.view === "error" && list.status === "error" && <ModuleError title={COPY.loadError} error={list.error} onRetry={list.reload} />}
       {view.view === "ready" && list.status === "ready" && list.data.backups.length === 0 && (
-        <EmptyState compact scene="clock" title={COPY.emptyTitle} body={COPY.emptyBody} />
+        <EmptyState compact scene="clock" title={COPY.emptyTitle} body={autoBackup === "runs" ? COPY.emptyBody : COPY.emptyBodyManual} />
       )}
       {view.view === "ready" && list.status === "ready" && list.data.backups.length > 0 && (
         <BackupRows inst={inst} world={world} backups={list.data.backups} busy={busy} restoreReason={worldOps.restoreReason} />
       )}
       {policy !== null &&
-        (policy.auto ? (
+        (autoBackup === "runs" ? (
           <Callout tone="info">{COPY.autoOnNote(policy.keepPerWorld)}</Callout>
         ) : (
           <Callout
@@ -249,14 +262,14 @@ function BackupsBody({
                 size="sm"
                 onClick={() => {
                   onClose();
-                  go({ page: "settings", section: "game" });
+                  go({ page: "settings", section: autoBackup === "skipped" ? "general" : "game" });
                 }}
               >
                 {COPY.goSettings}
               </Button>
             }
           >
-            {COPY.autoOffNote}
+            {autoBackup === "skipped" ? COPY.autoSkippedNote : COPY.autoOffNote}
           </Callout>
         ))}
     </div>

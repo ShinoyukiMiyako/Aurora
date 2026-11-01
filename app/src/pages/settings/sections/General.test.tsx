@@ -7,6 +7,7 @@ import { stubCanvas } from "../../../art/illustrations/test-canvas";
 import type { ConfigDto } from "../../../ipc/config";
 import { IpcError } from "../../../ipc/errors";
 import { GAME_LOG_EVENT } from "../../../ipc/launch";
+import { APP_NAME } from "../../../lib/app-info";
 import { OverlayRoot } from "../../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearance";
@@ -125,6 +126,7 @@ beforeEach(() => {
   ipc.overrides.set("get_config", () => config);
   ipc.overrides.set("update_config", (args: IpcArgs) => {
     if (args.language !== undefined) config = { ...config, language: args.language as ConfigDto["language"] };
+    if (args.afterLaunch !== undefined) config = { ...config, after_launch: args.afterLaunch as ConfigDto["after_launch"] };
     return null;
   });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
@@ -184,6 +186,41 @@ describe("设置页常规分区：界面语言", () => {
       title: "没能保存「语言」",
       body: "磁盘已满",
     });
+  });
+});
+
+describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
+  const NOTE = `「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份存档`;
+  const page = () => document.body.textContent;
+  const radio = (label: string) => {
+    const found = [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((el) => el.textContent === label);
+    if (found === undefined) throw new Error(`找不到选项「${label}」`);
+    return found;
+  };
+  const choose = async (label: string) => {
+    act(() => radio(label).click());
+    await flush();
+  };
+
+  it("开着自动备份时选关闭：设置下方写明不会备份，换回别的选项这行就没了", async () => {
+    await mountGeneral();
+    expect(page()).not.toContain(NOTE);
+    await choose(`关闭${APP_NAME}`);
+    expect(page()).toContain(NOTE);
+    await choose("最小化");
+    expect(page()).not.toContain(NOTE);
+  });
+
+  it("配置里本来就是关闭：打开设置页就有这行", async () => {
+    config = configDto({ after_launch: "close" });
+    await mountGeneral();
+    expect(page()).toContain(NOTE);
+  });
+
+  it("自动备份关着时选关闭：没有要提醒的", async () => {
+    config = configDto({ after_launch: "close", world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } });
+    await mountGeneral();
+    expect(page()).not.toContain(NOTE);
   });
 });
 

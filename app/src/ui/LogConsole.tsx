@@ -39,7 +39,7 @@ export type LogLevelFilter = "all" | "warn" | "error";
 export type LogSourceFilter = "all" | "launcher" | "game";
 
 export const LOG_LEVEL_FILTER_LABEL = { all: "全部", warn: "警告及以上", error: "错误" } as const satisfies Readonly<Record<LogLevelFilter, string>>;
-export const LOG_SOURCE_FILTER_LABEL = { all: "全部来源", launcher: "启动器", game: "游戏" } as const satisfies Readonly<Record<LogSourceFilter, string>>;
+export const LOG_SOURCE_FILTER_LABEL = { all: "全部来源", launcher: APP_NAME, game: "游戏" } as const satisfies Readonly<Record<LogSourceFilter, string>>;
 
 const LEVEL_TEXT = { info: "INFO", warn: "WARN", error: "ERROR" } as const satisfies Readonly<Record<LogLevel, string>>;
 const SOURCE_TEXT = { launcher: APP_NAME, game: "Game" } as const satisfies Readonly<Record<LogSource, string>>;

@@ -18,6 +18,7 @@ import {
   TASK_TOAST,
   TOAST_COPY,
   failureCopy,
+  failureToastLabel,
   crashCategoryLabel,
   taskFailureReason,
   SESSION_COPY,
@@ -2386,7 +2387,7 @@ export class LauncherStore {
     this.set({ session: failed });
     // 通知的操作是修复动作的第一个按钮。javaPinned 只影响第二个按钮，这里不读实例设置
     const copy = failureCopy(code, params, { accountName: s.accountName, accountKind: s.accountKind, javaPinned: false });
-    const action = instanceAction(failed.instanceId, (instanceId) => ({ label: copy.fix.label, ...this.fixTarget({ ...failed, instanceId }, copy.fix.kind) }));
+    const action = instanceAction(failed.instanceId, (instanceId) => ({ label: failureToastLabel(copy.fix), ...this.fixTarget({ ...failed, instanceId }, copy.fix.kind) }));
     this.pushToast("error", TOAST_COPY.launchFailed(s.instanceId), copy.title, action);
   }
 
@@ -2549,7 +2550,7 @@ export class LauncherStore {
           store.set({
             login: {
               ...login,
-              device: { status: "failed", code: DEVICE_CODE_TIMEOUT_CODE, message: `${DEVICE_CODE_FETCH_TIMEOUT_MS / 1000} 秒内没有收到设备码`, detail: null },
+              device: { status: "failed", code: DEVICE_CODE_TIMEOUT_CODE, message: `${DEVICE_CODE_FETCH_TIMEOUT_MS / 1000} 秒内没有收到代码`, detail: null },
             },
           });
           store.background(ACTION_ERROR.cancelLogin, accountsIpc.cancelMicrosoftLogin());

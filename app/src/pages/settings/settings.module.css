@@ -173,6 +173,12 @@
   color: var(--sk-warn);
 }
 
+/* 设置行的说明是行内元素，要另起一行得自己成块；不放到行外，行外的元素会断掉行间的分隔线 */
+.descNote {
+  display: block;
+  color: var(--sk-warn);
+}
+
 .mutedText {
   margin: 0;
   font-size: var(--sk-fs-caption);

@@ -1,6 +1,7 @@
 // 主页文案。页面里不写散落的字符串；跨页面共用的（启动入口、动作失败标题、加载器名）仍从 copy/flows 取。
 
 import { formatCount, formatPlaytime } from "../../domain/format";
+import { APP_NAME } from "../../lib/app-info";
 import type { NewsTag } from "../../state/queries/home";
 
 /** 周一为 0，与日历列序一致。 */
@@ -98,7 +99,7 @@ export const HOME_COPY = {
   offline: "离线中",
   withOffline: (subtitle: string) => `${subtitle} · 离线中`,
   newsError: "资讯暂时没拉下来",
-  launcherNewsError: "启动器资讯暂时没拉下来",
+  launcherNewsError: `${APP_NAME}资讯暂时没拉下来`,
   newsNeedsNetwork: "需要联网获取",
   newsEmpty: "暂时没有新资讯",
   newsOpen: (name: string) => `打开「${name}」`,
@@ -124,7 +125,7 @@ export const HOME_COPY = {
   serversEmptyBody: "点右上角的加号，从服务器列表里挑几个。",
   pinnedError: "固定的服务器读不出来",
   pingError: (reason: string) => `延迟测不出来：${reason}`,
-  online: (online: number, max: number) => `${formatCount(online)} / ${formatCount(max)} 在线`,
+  online: (online: number, max: number) => `${formatCount(online)}/${formatCount(max)} 在线`,
   lastOnline: (relative: string, online: number) => `上次 ${relative}在线 ${formatCount(online)}`,
   latency: (ms: number) => `${ms} ms`,
   unreachable: "连不上",
@@ -163,5 +164,5 @@ export const NEWS_TAG_LABEL: Readonly<Record<NewsTag, string>> = {
   release: "正式版",
   snapshot: "快照",
   event: "活动",
-  launcher: "启动器",
+  launcher: APP_NAME,
 };

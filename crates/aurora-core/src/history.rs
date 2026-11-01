@@ -377,7 +377,7 @@ impl Aurora {
                         } else if superseded.contains(id.as_str()) {
                             (
                                 false,
-                                Some(format!("{file_name} 之后又更新过，请先回滚之后的那次更新")),
+                                Some(format!("{file_name} 之后又更新过，先回滚之后的那次更新")),
                             )
                         } else if backups.contains(&backup) {
                             (true, None)
@@ -387,7 +387,7 @@ impl Aurora {
                     }
                     HistoryEvent::Install { .. } => (
                         false,
-                        Some("安装事件不支持回滚，请直接移除对应文件".to_owned()),
+                        Some("安装事件不支持回滚，直接移除对应文件".to_owned()),
                     ),
                     HistoryEvent::Remove { .. } => (
                         false,
@@ -457,7 +457,7 @@ impl Aurora {
             return Err(refuse(
                 store.path(),
                 std::io::ErrorKind::InvalidInput,
-                format!("事件 {event_id} 装上的 {file_name} 之后又更新过，请先回滚之后的那次更新"),
+                format!("事件 {event_id} 装上的 {file_name} 之后又更新过，先回滚之后的那次更新"),
             ));
         }
 
@@ -1335,7 +1335,7 @@ mod tests {
         assert!(!checks[1].can_rollback);
         assert_eq!(
             checks[1].reason.as_deref(),
-            Some("lib-1.1.jar 之后又更新过，请先回滚之后的那次更新")
+            Some("lib-1.1.jar 之后又更新过，先回滚之后的那次更新")
         );
         assert!(checks[2].can_rollback);
 
@@ -1344,7 +1344,7 @@ mod tests {
         let (path, reason) = refusal(&err);
         assert_eq!(path, store.path());
         assert!(
-            reason.contains("请先回滚之后的那次更新"),
+            reason.contains("先回滚之后的那次更新"),
             "原因实得 {reason}"
         );
         assert_eq!(dir_names(&mods_dir).await, disk_before);
@@ -1652,7 +1652,7 @@ mod tests {
 
         assert_eq!(
             checks[0].reason.as_deref(),
-            Some("安装事件不支持回滚，请直接移除对应文件")
+            Some("安装事件不支持回滚，直接移除对应文件")
         );
         assert!(checks[1].can_rollback);
         assert_eq!(checks[1].reason, None);

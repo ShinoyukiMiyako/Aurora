@@ -229,7 +229,7 @@ impl Aurora {
             refuse(
                 &path,
                 std::io::ErrorKind::NotFound,
-                format!("{file_name} 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）"),
+                format!("{file_name} 没有平台来源记录，无法自动更新（先检查更新识别它）"),
             )
         })?;
         let (platform, project_id) = (entry.platform, entry.project_id.clone());
@@ -2252,7 +2252,7 @@ mod tests {
             .to_owned();
         let err = aurora.rollback("1.21", &first_update).await.unwrap_err();
         assert!(
-            refusal(&err).1.contains("请先回滚之后的那次更新"),
+            refusal(&err).1.contains("先回滚之后的那次更新"),
             "{err:?}"
         );
         assert_eq!(dir_names(&mods_dir).await, before);
