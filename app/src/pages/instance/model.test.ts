@@ -43,7 +43,6 @@ import {
   removalRelations,
   sortWorlds,
   toggleFlags,
-  updateTaskFiles,
   weeklyHours,
   workLock,
   type CrashFixContext,
@@ -448,22 +447,6 @@ describe("路径", () => {
 });
 
 describe("更新任务换掉的 Mod", () => {
-  it("单个更新是它那一个文件，「全部更新」是入队时的全部几项", () => {
-    expect(updateTaskFiles({ command: "update_mod", args: { versionId: "v", fileName: "sodium.jar", modVersionId: "m" } })).toEqual(["sodium.jar"]);
-    const items = [
-      { fileName: "sodium.jar", platform: "modrinth", projectId: "a", modVersionId: "1", title: "Sodium", fileSize: 1 },
-      { fileName: "fabric-api.jar", platform: "modrinth", projectId: "b", modVersionId: "2", title: "Fabric API", fileSize: null },
-    ];
-    expect(updateTaskFiles({ command: "update_mods", args: { versionId: "v", items } })).toEqual(["sodium.jar", "fabric-api.jar"]);
-  });
-
-  it("参数不成形或不是更新任务时直接报错，不当作没有文件", () => {
-    expect(() => updateTaskFiles({ command: "update_mods", args: { versionId: "v" } })).toThrow("缺少 items");
-    expect(() => updateTaskFiles({ command: "update_mods", args: { items: [{ platform: "modrinth" }] } })).toThrow("缺少 fileName");
-    expect(() => updateTaskFiles({ command: "update_mod", args: { fileName: 3 } })).toThrow("不是字符串");
-    expect(() => updateTaskFiles({ command: "install_mod", args: {} })).toThrow("不是 Mod 更新任务");
-  });
-
   it("挡住「全部更新」的只有本实例排队或进行中的更新任务", () => {
     const task = (command: string, instanceId: string, status: Task["status"]): Task => ({
       ...newTask({ id: `${command}-${status}`, kind: "mod", title: "", detail: "", instanceId, spec: { command, args: {} } }, 0),

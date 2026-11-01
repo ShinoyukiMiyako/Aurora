@@ -4,8 +4,10 @@
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { hueOf } from "../../../art/illustrations/seed";
+import { Spinner } from "../../../art/Spinner";
 import { LOADER_NAME } from "../../../copy/flows";
 import { formatBytes, formatCount, formatDate, formatRelative } from "../../../domain/format";
+import { useLoadingGate } from "../../../lib/loading-gate";
 import type { Platform } from "../../../domain/types";
 import { useLauncherSelector, useNow } from "../../../state/launcher";
 import { useManifest } from "../../../state/queries/catalog";
@@ -133,7 +135,11 @@ interface DetailSourcesProps {
   footerHost: HTMLElement | null;
 }
 
-/** 合并卡默认看 Modrinth，可以切到 CurseForge；切换后统计、介绍、版本、安装面板全部换成那个平台的数据。 */
+/**
+ * 合并卡默认看 Modrinth，可以切到 CurseForge；切换后统计、介绍、版本、安装面板全部换成那个平台的数据。
+ * 新平台的详情到达前接着显示上一份并标出正在切换，到达后原地换上：整块换成骨架会卸掉焦点所在的分段控件，
+ * 安装面板的勾选也跟着丢。新平台没取到时上一份照样留着，原位报错，还能切回去。
+ */
 function DetailSources(props: DetailSourcesProps) {
   const { entry } = props;
   const platforms = entry.sources.map((s) => s.platform);
@@ -142,11 +148,26 @@ function DetailSources(props: DetailSourcesProps) {
   const source = entry.sources.find((s) => s.platform === platform);
   const projectId = source === undefined ? entry.projectId : source.project_id;
   const detail = useProjectDetail(platform, projectId);
-  const sourceSwitch = merged ? { value: platform, onChange: setPlatform } : null;
+  const [shown, setShown] = useState<ProjectDetail | null>(null);
+  if (detail.status === "ready" && detail.data !== shown) setShown(detail.data);
+  // 只有切换来源时才接着显示上一份；同一个平台的详情没取到照旧整块报错
+  const previous = merged && shown !== null && shown.platform !== platform ? shown : null;
 
-  if (detail.status === "loading") return <DetailSkeleton {...props} />;
-  if (detail.status === "error") return <DetailError {...props} error={detail.error} retry={detail.reload} />;
-  return <DetailBody key={`${platform}:${projectId}`} {...props} detail={detail.data} sourceSwitch={sourceSwitch} platforms={merged ? ["modrinth", "curseforge"] : [platform]} />;
+  if (detail.status !== "ready" && previous === null) {
+    if (detail.status === "loading") return <DetailSkeleton {...props} />;
+    return <DetailError {...props} error={detail.error} retry={detail.reload} />;
+  }
+  const current = detail.status === "ready" ? detail.data : previous;
+  if (current === null) throw new Error("切换来源期间没有可接着显示的详情");
+  const sourceSwitch = merged
+    ? {
+        value: platform,
+        onChange: setPlatform,
+        switching: detail.status === "loading",
+        failed: detail.status === "error" ? { error: detail.error, retry: detail.reload } : null,
+      }
+    : null;
+  return <DetailBody {...props} detail={current} sourceSwitch={sourceSwitch} platforms={merged ? ["modrinth", "curseforge"] : [platform]} />;
 }
 
 function HeroControls({ back, onClose }: { back: DetailSourcesProps["back"]; onClose: () => void }) {
@@ -223,9 +244,18 @@ function DetailError({ back, onClose, footerHost, error, retry }: DetailSourcesP
 
 type DetailTab = "intro" | "versions";
 
+interface SourceSwitch {
+  value: Platform;
+  onChange: (p: Platform) => void;
+  /** 选中的平台的详情还在路上，显示的是上一个平台的。 */
+  switching: boolean;
+  /** 选中的平台的详情没取到，显示的是上一个平台的。 */
+  failed: { error: Error; retry: () => void } | null;
+}
+
 interface DetailBodyProps extends DetailSourcesProps {
   detail: ProjectDetail;
-  sourceSwitch: { value: Platform; onChange: (p: Platform) => void } | null;
+  sourceSwitch: SourceSwitch | null;
   platforms: readonly Platform[];
 }
 
@@ -235,13 +265,20 @@ function DetailBody({ entry, detail, back, onTitle, onClose, onOpenDependency, f
   const titleKey = `${entry.platform}:${entry.projectId}`;
   useEffect(() => onTitle(titleKey, detail.title), [onTitle, titleKey, detail.title]);
   const [tab, setTab] = useState<DetailTab>("intro");
-  const [pinned, setPinned] = useState<string | null>(null);
+  // 切换来源时本组件不重新挂载（标签、安装面板的勾选都留着），但选定的版本只属于它所在的平台：换了平台回到「自动」
+  const detailKey = `${detail.platform}:${detail.project_id}`;
+  const [pin, setPin] = useState<{ key: string; versionId: string | null }>({ key: detailKey, versionId: null });
+  const pinned = pin.key === detailKey ? pin.versionId : null;
+  const onPin = useCallback((versionId: string | null) => setPin({ key: detailKey, versionId }), [detailKey]);
   const versions = useModVersions(detail.platform, detail.project_id, [], []);
   const kind = resourceKindOf(detail.resource_type);
   const isPack = kind === "modpack";
+  const switching = sourceSwitch !== null && sourceSwitch.switching;
+  // 指示照全站的加载门延迟出现，切换很快时不闪；新详情一到就收起，不等最短停留：要等的内容已经换上了
+  const switchGate = useLoadingGate(switching);
 
   return (
-    <div className={styles.root}>
+    <div className={styles.root} aria-busy={switching || undefined}>
       <DetailHero detail={detail} platforms={platforms} back={back} onClose={onClose} />
       <StatsBar detail={detail} />
       <div className={styles.bodyGrid}>
@@ -270,14 +307,28 @@ function DetailBody({ entry, detail, back, onTitle, onClose, onOpenDependency, f
                     { value: "curseforge", label: PLATFORM_LABEL.curseforge },
                   ]}
                 />
+                {switching && switchGate.view === "skeleton" && <Spinner size={16} />}
               </div>
             )}
           </div>
+          {sourceSwitch !== null && sourceSwitch.failed !== null && (
+            <Callout
+              tone="danger"
+              action={
+                <Button size="sm" variant="ghost" onClick={sourceSwitch.failed.retry}>
+                  {SEARCH_COPY.retry}
+                </Button>
+              }
+            >
+              <span className={styles.errorTitle}>{DETAIL_COPY.loadFailed}</span>
+              <span className={styles.errorText}>{sourceSwitch.failed.error.message}</span>
+            </Callout>
+          )}
           <TabPanel tabsId={tabsId} value={tab}>
             {tab === "intro" ? (
               <IntroTab detail={detail} onOpenDependency={onOpenDependency} />
             ) : (
-              <VersionsTab detail={detail} versions={versions} pinned={pinned} onPin={setPinned} />
+              <VersionsTab detail={detail} versions={versions} pinned={pinned} onPin={onPin} />
             )}
           </TabPanel>
         </div>
@@ -288,13 +339,13 @@ function DetailBody({ entry, detail, back, onTitle, onClose, onOpenDependency, f
               origins={projectOrigins({ platform: detail.platform, project_id: detail.project_id, sources: entry.sources })}
               versions={versions}
               pinned={pinned}
-              onPin={setPinned}
+              onPin={onPin}
               online={online}
               footerHost={footerHost}
               onClose={onClose}
             />
           ) : (
-            <InstallPanel detail={detail} versions={versions} pinned={pinned} onPin={setPinned} fitInstance={fitInstance} online={online} footerHost={footerHost} onClose={onClose} />
+            <InstallPanel detail={detail} versions={versions} pinned={pinned} onPin={onPin} fitInstance={fitInstance} online={online} footerHost={footerHost} onClose={onClose} />
           )}
         </div>
       </div>

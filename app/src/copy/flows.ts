@@ -923,3 +923,6 @@ export const INSTANCE_IN_USE_COPY = {
   repair: (user: string) => `实例「${user}」正在使用它，结束后才能补全`,
   delete: (user: string) => `实例「${user}」正在使用它，结束后才能删除`,
 } as const;
+
+/** 整合包名全是 Windows 不允许的字符、整理完什么都不剩时，新实例的默认名。 */
+export const MODPACK_FALLBACK_NAME = "整合包";

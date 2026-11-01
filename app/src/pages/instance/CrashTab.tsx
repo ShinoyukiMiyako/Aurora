@@ -2,7 +2,7 @@
 // 右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」。
 // 本页不放第二个启动胶囊：重新启动用头图的胶囊。
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { EmptyArt } from "../../art/illustrations/EmptyArt";
 import { KindTile } from "../../art/illustrations/FeatureTile";
@@ -30,10 +30,10 @@ import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
-import { CRASH_PAGE_COPY, SETTINGS_COPY } from "./copy";
+import { CRASH_PAGE_COPY, MODS_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
-import { crashFixes, crashFixKey, matchSuspect, modName, type CrashFix } from "./model";
+import { crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -105,6 +105,7 @@ function ReportView({
   const mods = useInstanceMods(modded ? queryId : null);
   const required = useRequiredMajor(inst);
   const modList = mods.status === "ready" ? mods.data : [];
+  const switches = useModSwitches(inst.id, mods.status === "ready" ? mods.data : null);
 
   return (
     <div className={styles.stack}>
@@ -126,9 +127,10 @@ function ReportView({
             mods={modList}
             modsReady={!modded || mods.status === "ready"}
             modsError={modded && mods.status === "error" ? mods : null}
+            switches={switches}
             onTab={onTab}
           />
-          {modded && <SuspectsCard inst={inst} ops={ops} report={report} mods={mods} />}
+          {modded && <SuspectsCard ops={ops} report={report} mods={mods} switches={switches} />}
         </div>
       </div>
     </div>
@@ -284,6 +286,7 @@ function FixesCard({
   mods,
   modsReady,
   modsError,
+  switches,
   onTab,
 }: {
   inst: InstanceSummary;
@@ -294,6 +297,7 @@ function FixesCard({
   modsReady: boolean;
   /** Mod 列表读不出来（原版实例不读，为 null）：一键尝试要按已装 Mod 推，读不出就推不了。 */
   modsError: ResourceResult<InstalledMod[]> | null;
+  switches: ModSwitches;
   onTab(tab: InstanceTab): void;
 }) {
   const settings = useInstanceSettings(queryId);
@@ -320,23 +324,21 @@ function FixesCard({
     );
   }, [frozen, memory, mods, ready, report, required, runtimes]);
 
-  // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上
-  const error =
-    settings.status === "error"
-      ? settings
-      : memory.status === "error"
-        ? memory
-        : runtimes.status === "error"
-          ? runtimes
-          : required.status === "error"
-            ? required
-            : modsError;
+  // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上。
+  // 实例设置读不出来时内存也跟着报同一个错，所以设置排在内存前面，标题才对得上真正没读出来的那一样
+  const failure = firstFailure([
+    [CRASH_PAGE_COPY.readError.settings, settings],
+    [CRASH_PAGE_COPY.readError.memory, memory],
+    [CRASH_PAGE_COPY.readError.javaList, runtimes],
+    [CRASH_PAGE_COPY.readError.javaRequired, required],
+    [CRASH_PAGE_COPY.readError.mods, modsError],
+  ]);
 
   return (
     <Card padding="lg">
       <CardHeader icon="zap" title={CRASH_PAGE_COPY.fixesTitle} subtitle={CRASH_PAGE_COPY.fixesSubtitle} />
-      {error !== null && error.status === "error" ? (
-        <ModuleError title={CRASH_PAGE_COPY.error} error={error.error} onRetry={error.reload} />
+      {failure !== null ? (
+        <ModuleError title={failure.title} error={failure.error} onRetry={failure.reload} />
       ) : frozen === null || settings.status !== "ready" ? (
         <Skeleton shape="text" lines={3} />
       ) : (
@@ -351,6 +353,7 @@ function FixesCard({
               inst={inst}
               ops={ops}
               settings={settings.data}
+              switches={switches}
               done={state === undefined ? null : state}
               onDone={(d) => setDone((m) => new Map(m).set(key, d))}
               onUndone={() =>
@@ -370,11 +373,22 @@ function FixesCard({
   );
 }
 
+type Readable = { status: "loading" | "ready" } | { status: "error"; error: Error; reload(): void };
+
+/** 按顺序取第一样读不出来的输入，带上说明它的标题；原版实例不读 Mod 列表，那一项传 null。 */
+function firstFailure(inputs: readonly (readonly [string, Readable | null])[]): { title: string; error: Error; reload(): void } | null {
+  for (const [title, input] of inputs) {
+    if (input !== null && input.status === "error") return { title, error: input.error, reload: input.reload };
+  }
+  return null;
+}
+
 function FixRow({
   fix,
   inst,
   ops,
   settings,
+  switches,
   done,
   onDone,
   onUndone,
@@ -384,6 +398,7 @@ function FixRow({
   inst: InstanceSummary;
   ops: InstanceOps;
   settings: InstanceSettings;
+  switches: ModSwitches;
   done: Done | null;
   onDone(done: Done): void;
   onUndone(): void;
@@ -423,17 +438,18 @@ function FixRow({
   /** 停用 / 启用 Mod 的一键尝试：不走「已改为」的通知，统一写「已停用」。 */
   const toggleMods = (files: readonly { fileName: string; name: string }[], enabled: boolean, note: string) => {
     setBusy(true);
-    void run(async () => {
-      for (const f of files) await actions.toggleMod(inst.id, f.fileName, enabled);
-    }, ACTION_ERROR.toggleMod).then((outcome) => {
+    void switches.set(files.map((f) => f.fileName), enabled).then((ok) => {
       setBusy(false);
-      if (!outcome.ok) return;
+      if (!ok) return;
       const names = files.map((f) => f.name).join("、");
       if (enabled) actions.toast("info", CRASH_PAGE_COPY.enabledToast(names));
       else actions.toast("info", CRASH_PAGE_COPY.disabledToast(names), CRASH_PAGE_COPY.suspectDisabledBody);
       onDone({ note, undo: null });
     });
   };
+  // 同一个文件在「日志指向的 Mod」上的启停还没回来时，盘上是哪个名字未知
+  const modReason = (files: readonly { fileName: string }[]): string | undefined =>
+    modLock !== undefined ? modLock : switches.pending(files.map((f) => f.fileName)) ? MODS_COPY.togglePending : undefined;
 
   const button = (label: string, onClick: () => void, reason?: string) => (
     <Button size="sm" loading={busy} disabledReason={reason} onClick={onClick}>
@@ -494,7 +510,7 @@ function FixRow({
       break;
     case "enable_mod":
       note = CRASH_PAGE_COPY.enableModNote;
-      action = button(CRASH_PAGE_COPY.enableMod(fix.name), () => toggleMods([fix], true, CRASH_PAGE_COPY.enabledDone(fix.name)), modLock);
+      action = button(CRASH_PAGE_COPY.enableMod(fix.name), () => toggleMods([fix], true, CRASH_PAGE_COPY.enabledDone(fix.name)), modReason([fix]));
       break;
     case "search_dependency":
       note = CRASH_PAGE_COPY.searchModNote;
@@ -506,11 +522,11 @@ function FixRow({
       break;
     case "disable_mod":
       note = CRASH_PAGE_COPY.disableModNote;
-      action = button(CRASH_PAGE_COPY.disableMod(fix.name), () => toggleMods([fix], false, CRASH_PAGE_COPY.disabledDone(1)), modLock);
+      action = button(CRASH_PAGE_COPY.disableMod(fix.name), () => toggleMods([fix], false, CRASH_PAGE_COPY.disabledDone(1)), modReason([fix]));
       break;
     case "keep_latest":
       note = CRASH_PAGE_COPY.keepLatestNote(fix.disable.length);
-      action = button(CRASH_PAGE_COPY.keepLatest, () => toggleMods(fix.disable, false, CRASH_PAGE_COPY.disabledDone(fix.disable.length)), modLock);
+      action = button(CRASH_PAGE_COPY.keepLatest, () => toggleMods(fix.disable, false, CRASH_PAGE_COPY.disabledDone(fix.disable.length)), modReason(fix.disable));
       break;
     case "repair":
       note = inst.status === "installing" ? CRASH_PAGE_COPY.repairDone : CRASH_PAGE_COPY.repairNote;
@@ -577,16 +593,15 @@ function FixRow({
 
 // ---------------------------------------------------------------- 日志指向的 Mod
 
-function SuspectsCard({ inst, ops, report, mods }: { inst: InstanceSummary; ops: InstanceOps; report: CrashReportDto; mods: ResourceResult<InstalledMod[]> }) {
+function SuspectsCard({ ops, report, mods, switches }: { ops: InstanceOps; report: CrashReportDto; mods: ResourceResult<InstalledMod[]>; switches: ModSwitches }) {
   const actions = useLauncherActions();
-  const run = useRunner();
   const lock = lockReason(ops.locks.mods, "mods");
 
   const toggle = (mod: InstalledMod) => {
     const name = modName(mod);
-    const next = !mod.enabled;
-    void run(() => actions.toggleMod(inst.id, mod.file_name, next), ACTION_ERROR.toggleMod).then((outcome) => {
-      if (!outcome.ok) return;
+    const next = !switches.of(mod).enabled;
+    void switches.set([mod.file_name], next).then((ok) => {
+      if (!ok) return;
       if (next) actions.toast("info", CRASH_PAGE_COPY.enabledToast(name));
       else actions.toast("info", CRASH_PAGE_COPY.disabledToast(name), CRASH_PAGE_COPY.suspectDisabledBody);
     });
@@ -596,29 +611,39 @@ function SuspectsCard({ inst, ops, report, mods }: { inst: InstanceSummary; ops:
     <Card padding="lg">
       <CardHeader icon="bug" title={CRASH_PAGE_COPY.suspectsTitle} subtitle={CRASH_PAGE_COPY.suspectsSubtitle} />
       {mods.status === "loading" && <Skeleton shape="text" lines={2} />}
-      {mods.status === "error" && <ModuleError title={CRASH_PAGE_COPY.error} error={mods.error} onRetry={mods.reload} />}
+      {mods.status === "error" && <ModuleError title={CRASH_PAGE_COPY.readError.mods} error={mods.error} onRetry={mods.reload} />}
       {mods.status === "ready" && report.suspects.length === 0 && <p className={styles.soft}>{CRASH_PAGE_COPY.suspectsNone}</p>}
       {mods.status === "ready" && report.suspects.length > 0 && (
         <ul className={styles.rows}>
           {report.suspects.map((s) => {
             const mod = matchSuspect(s, mods.data);
             const name = mod === null ? s.mod_id : modName(mod);
+            const state = mod === null ? null : switches.of(mod);
             return (
               <li key={`${s.mod_id}:${s.file_name === null ? "" : s.file_name}`} className={styles.row}>
-                {mod === null ? <KindTile kind="unknown" /> : <Thumb url={mod.icon_url} kind="mod" hue={hueOf(mod.metadata === null ? mod.file_name : mod.metadata.mod_id)} size={40} inactive={!mod.enabled} />}
+                {mod === null || state === null ? (
+                  <KindTile kind="unknown" />
+                ) : (
+                  <Thumb url={mod.icon_url} kind="mod" hue={hueOf(mod.metadata === null ? mod.file_name : mod.metadata.mod_id)} size={40} inactive={!state.enabled} />
+                )}
                 <div className={styles.rowMain}>
                   <span className={styles.rowTitle}>
                     <span className={styles.ellipsis}>{name}</span>
-                    {mod !== null && !mod.enabled && <Tag size="sm">{CRASH_PAGE_COPY.disabledTag}</Tag>}
+                    {state !== null && !state.enabled && <Tag size="sm">{CRASH_PAGE_COPY.disabledTag}</Tag>}
                   </span>
                   <code className={styles.modFile}>{s.file_name === null ? CRASH_PAGE_COPY.noFileName : s.file_name}</code>
                 </div>
-                {mod === null ? (
+                {mod === null || state === null ? (
                   <Tag size="sm" tone="outline">
                     {CRASH_PAGE_COPY.notInList}
                   </Tag>
                 ) : (
-                  <Toggle checked={mod.enabled} onChange={() => toggle(mod)} ariaLabel={CRASH_PAGE_COPY.toggleLabel(name, mod.enabled)} disabledReason={lock} />
+                  <Toggle
+                    checked={state.enabled}
+                    onChange={() => toggle(mod)}
+                    ariaLabel={CRASH_PAGE_COPY.toggleLabel(name, state.enabled)}
+                    disabledReason={lock !== undefined ? lock : state.pending ? MODS_COPY.togglePending : undefined}
+                  />
                 )}
               </li>
             );
@@ -627,4 +652,82 @@ function SuspectsCard({ inst, ops, report, mods }: { inst: InstanceSummary; ops:
       )}
     </Card>
   );
+}
+
+// ---------------------------------------------------------------- Mod 启停
+
+interface ModSwitches {
+  /** 列表里这一项此刻的启停态：成功之后、重扫回来之前按改好的算；请求还没回来时 pending。 */
+  of(mod: InstalledMod): { enabled: boolean; pending: boolean };
+  /** 这几个文件里有没有启停还没回来的。 */
+  pending(fileNames: readonly string[]): boolean;
+  /** 依次启停，按盘上的名字调后端；某一项失败就停下，已成功的照样记下。返回是否全部成功。 */
+  set(fileNames: readonly string[], enabled: boolean): Promise<boolean>;
+}
+
+/**
+ * 启停以改名实现。成功之后、mods 目录重扫回来之前，列表还是按旧文件名与旧启停态画的：这期间再点，会拿旧名字和旧状态调后端，
+ * 目标文件已经存在，后端报 mod_state_conflict。所以记下盘上的新名字，只对记下时的那份列表有效，重扫落定即作废；
+ * 请求还没回来时盘上是哪个名字未知，那个文件不能再点。一键尝试与「日志指向的 Mod」两张卡会改到同一个文件，共用这一份记录。
+ */
+function useModSwitches(instanceId: string, mods: readonly InstalledMod[] | null): ModSwitches {
+  const actions = useLauncherActions();
+  const run = useRunner();
+  // 渲染用的是 state；同一帧里连点两下时 state 还没更新，挡第二下靠这份同步的集合
+  const inFlight = useRef(new Set<string>());
+  const [pending, setPending] = useState<ReadonlyMap<string, boolean>>(new Map());
+  const [landed, setLanded] = useState<{ base: readonly InstalledMod[] | null; files: ReadonlyMap<string, { fileName: string; enabled: boolean }> }>({ base: null, files: new Map() });
+
+  // 一键尝试推一次就定住，记的是推荐时的文件名；之后在开关上启停过、列表重扫回来，盘上已经换了名字，按启用态文件名对回列表里的那一项
+  const listedName = (fileName: string): string => {
+    if (mods === null || mods.some((m) => m.file_name === fileName)) return fileName;
+    const key = enabledFileName(fileName);
+    const same = mods.find((m) => enabledFileName(m.file_name) === key);
+    return same === undefined ? fileName : same.file_name;
+  };
+  const landedOf = (listed: string) => (landed.base === mods ? landed.files.get(listed) : undefined);
+
+  const clearPending = (names: readonly string[]) => {
+    for (const n of names) inFlight.current.delete(n);
+    setPending((m) => {
+      const next = new Map(m);
+      for (const n of names) next.delete(n);
+      return next;
+    });
+  };
+
+  return {
+    of(mod) {
+      const inFlightTo = pending.get(mod.file_name);
+      if (inFlightTo !== undefined) return { enabled: inFlightTo, pending: true };
+      const done = landedOf(mod.file_name);
+      return { enabled: done === undefined ? mod.enabled : done.enabled, pending: false };
+    },
+    pending: (fileNames) => fileNames.some((f) => pending.has(listedName(f))),
+    async set(fileNames, enabled) {
+      const base = mods;
+      const targets = fileNames.map((f) => {
+        const listed = listedName(f);
+        const done = landedOf(listed);
+        return { listed, onDisk: done === undefined ? listed : done.fileName };
+      });
+      if (targets.some((t) => inFlight.current.has(t.listed))) return false;
+      for (const t of targets) inFlight.current.add(t.listed);
+      setPending((m) => {
+        const next = new Map(m);
+        for (const t of targets) next.set(t.listed, enabled);
+        return next;
+      });
+      const outcome = await run(async () => {
+        for (const t of targets) {
+          await actions.toggleMod(instanceId, t.onDisk, enabled);
+          const fileName = enabled ? enabledFileName(t.onDisk) : disabledFileName(t.onDisk);
+          setLanded((prev) => ({ base, files: new Map(prev.base === base ? prev.files : []).set(t.listed, { fileName, enabled }) }));
+          clearPending([t.listed]);
+        }
+      }, ACTION_ERROR.toggleMod);
+      clearPending(targets.map((t) => t.listed));
+      return outcome.ok;
+    },
+  };
 }

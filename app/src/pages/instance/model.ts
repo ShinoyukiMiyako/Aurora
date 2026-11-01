@@ -397,25 +397,6 @@ export function isPendingModUpdate(task: Task, instanceId: string): boolean {
   return task.instanceId === instanceId && MOD_UPDATE_COMMANDS.has(task.spec.command) && isActiveTask(task);
 }
 
-/**
- * 一个更新任务要换掉的 Mod（启用态文件名）：单个更新是它那一个，组合任务是入队时的全部几项。
- * 组合任务跑完之前这几行都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败。
- */
-export function updateTaskFiles(spec: { command: string; args: Record<string, unknown> }): string[] {
-  const fileNameOf = (value: unknown): string => {
-    if (typeof value !== "string") throw new Error(`${spec.command} 任务的 fileName 不是字符串：${String(value)}`);
-    return value;
-  };
-  if (spec.command === "update_mod") return [fileNameOf(spec.args.fileName)];
-  if (spec.command !== "update_mods") throw new Error(`不是 Mod 更新任务：${spec.command}`);
-  const items = spec.args.items;
-  if (!Array.isArray(items)) throw new Error("update_mods 任务缺少 items");
-  return items.map((item: unknown) => {
-    if (typeof item !== "object" || item === null || !("fileName" in item)) throw new Error("update_mods 任务的一项缺少 fileName");
-    return fileNameOf(item.fileName);
-  });
-}
-
 function fileStem(fileName: string): string {
   return enabledFileName(fileName).replace(/\.jar$/i, "");
 }
