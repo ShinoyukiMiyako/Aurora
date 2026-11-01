@@ -228,6 +228,8 @@ pub enum FailureCode {
     FilesFailed,
     DiskFull,
     VersionBroken,
+    /// 加载器安装器自带的库缺失或已损坏：没有地址可下，只能重新安装加载器。
+    LoaderLibraryMissing,
     SpawnFailed,
 }
 
@@ -244,6 +246,7 @@ impl FailureCode {
             FailureCode::FilesFailed => "files_failed",
             FailureCode::DiskFull => "disk_full",
             FailureCode::VersionBroken => "version_broken",
+            FailureCode::LoaderLibraryMissing => "loader_library_missing",
             FailureCode::SpawnFailed => "spawn_failed",
         }
     }
@@ -471,6 +474,19 @@ async fn read_chain_member(
                 .into(),
             other => other.into(),
         })
+}
+
+/// 启动前查出加载器自带的库缺失：玩家能针对性处理（重新安装加载器），收敛成失败码；完整路径放进参数，
+/// 与任务失败时的错误详情同一个键。
+fn loader_library_missing(err: aurora_install::Error) -> LaunchFailed {
+    let aurora_install::Error::LoaderLibraryMissing { path } = &err else {
+        return LaunchFailed::Core(err.into());
+    };
+    let path = path.display().to_string();
+    LaunchFailure::new(FailureCode::LoaderLibraryMissing, err.to_string())
+        .param("path", path)
+        .caused_by(err)
+        .into()
 }
 
 fn version_broken(reason: impl Into<String>) -> LaunchFailure {
@@ -836,7 +852,8 @@ impl Aurora {
             files: missing_files(plan.files).await?,
             asset_index_missing: plan.asset_index_missing,
         };
-        aurora_install::complete::reject_missing_bundled(&plan.files)?;
+        aurora_install::complete::reject_missing_bundled(&plan.files)
+            .map_err(loader_library_missing)?;
 
         // -- 3 下载缺失文件（游戏文件、托管 Java、authlib-injector）
         reporter.stage(LaunchStage::DownloadMissing).await;
@@ -4036,12 +4053,16 @@ mod tests {
         let expected = mc
             .join("libraries")
             .join("net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-universal.jar");
-        match result {
-            Err(LaunchFailed::Core(CoreError::Install(
-                aurora_install::Error::LoaderLibraryMissing { path },
-            ))) => assert_eq!(path, expected),
-            other => panic!("应报加载器自带的库缺失：{:?}", other.err()),
-        }
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::LoaderLibraryMissing);
+        assert_eq!(
+            failure.params["path"].as_str().map(Path::new),
+            Some(expected.as_path())
+        );
+        assert_eq!(
+            failure.message,
+            "加载器自带的库 forge-1.20.1-47.2.0-universal.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器"
+        );
     }
 
     #[test]
@@ -4060,6 +4081,7 @@ mod tests {
             (FailureCode::FilesFailed, "files_failed"),
             (FailureCode::DiskFull, "disk_full"),
             (FailureCode::VersionBroken, "version_broken"),
+            (FailureCode::LoaderLibraryMissing, "loader_library_missing"),
             (FailureCode::SpawnFailed, "spawn_failed"),
         ];
         for (code, name) in all {

@@ -1520,6 +1520,11 @@ mod tests {
         let missing: CommandError =
             InstallError::LoaderLibraryMissing { path: path.clone() }.into();
         assert_eq!(missing.code, code::LOADER_LIBRARY_MISSING);
+        // 门面定补全方案时按启动失败码的名字认未完成标记里的这个码，两边是同一个字符串。
+        assert_eq!(
+            missing.code,
+            aurora_core::FailureCode::LoaderLibraryMissing.as_str()
+        );
         assert_eq!(
             missing.message,
             "加载器自带的库 forge-1.16.5-36.2.39.jar 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器"
