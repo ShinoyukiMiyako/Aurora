@@ -32,6 +32,11 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// 元数据响应体超过读取上限。`size` 是响应头声明的长度，或读到超限那一刻已收到的字节数，都是实际大小的
+    /// 下界。
+    #[error("{url} 的响应体至少有 {size} 字节，超过 {limit} 字节的上限")]
+    ResponseTooLarge { url: String, size: u64, limit: u64 },
+
     /// 元数据在每个下载源上都没取到（连不上、非 2xx、内容读不懂）。`attempts` 按尝试顺序记下每个候选
     /// 地址与它失败的完整原因，界面据此能把每个源各自为什么失败都摆出来；`last` 是最后一个候选的原错误，
     /// 原因链从它接着往下，上层沿链判断是不是断网时不会因为多包了一层而认不出。
@@ -185,6 +190,8 @@ impl RetryableError for Error {
             Error::Version(_) => false,
             // 网络类：超时、建连、请求发送失败可重试；5xx / 429 当作瞬时故障。
             Error::Http { source, .. } => is_retryable_http(source),
+            // 同一个地址再来一次还是这么大；换源由候选循环负责。
+            Error::ResponseTooLarge { .. } => false,
             // 结构 / 解包 / 子进程 / 本地 IO 类：重试无意义或不安全，交由上层处置。
             // 每个源都已各自重试过，整体再来一遍只是把同样的失败重演一次。
             Error::AllSourcesFailed { .. } => false,

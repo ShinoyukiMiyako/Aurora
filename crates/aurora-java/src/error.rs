@@ -23,6 +23,11 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// 清单响应体超过读取上限。`size` 是响应头声明的长度，或读到超限那一刻已收到的字节数，都是实际大小的
+    /// 下界。
+    #[error("{url} 的响应体至少有 {size} 字节，超过 {limit} 字节的上限")]
+    ResponseTooLarge { url: String, size: u64, limit: u64 },
+
     /// JSON 反序列化失败，`context` 标明是哪一份报文（all.json / 组件清单）。
     #[error("解析 JSON 失败：{context}")]
     Json {
@@ -114,6 +119,8 @@ impl RetryableError for Error {
             | Error::MissingJavaExecutable => false,
             // 取消是调用方的决定，重试违背它。
             Error::Cancelled => false,
+            // 同一个地址再来一次还是这么大；换源由候选循环负责。
+            Error::ResponseTooLarge { .. } => false,
             // 清单内容本身越界，重拉同一份清单结果不变。
             Error::UnsafeRuntimePath { .. } | Error::UnsafeRuntimeLink { .. } => false,
             // 每个源内部已按策略重试过，整体再来一轮只会把同样的失败重演一遍。

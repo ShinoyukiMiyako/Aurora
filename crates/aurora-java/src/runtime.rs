@@ -18,6 +18,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
 use aurora_base::mirror::{self, MirrorSource};
 use aurora_base::retry::{RetryPolicy, retry_async};
 use serde::Deserialize;
@@ -391,11 +392,7 @@ impl JavaRuntimeInstaller {
                 url: url.to_owned(),
                 source,
             })?;
-            let bytes = resp.bytes().await.map_err(|source| Error::Http {
-                url: url.to_owned(),
-                source,
-            })?;
-            Ok::<Vec<u8>, Error>(bytes.to_vec())
+            read_metadata_body(resp, url).await
         });
         self.until_cancelled(fetch).await
     }
@@ -412,19 +409,29 @@ impl JavaRuntimeInstaller {
                 url: url.to_owned(),
                 source,
             })?;
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|source| Error::Http {
-                    url: url.to_owned(),
-                    source,
-                })?
-                .to_vec();
+            let bytes = read_metadata_body(resp, url).await?;
             verify_bytes_sha1(&bytes, expected_sha1)?;
             Ok::<Vec<u8>, Error>(bytes)
         });
         self.until_cancelled(fetch).await
     }
+}
+
+/// 读完清单的响应体，超过元数据上限报 [`Error::ResponseTooLarge`]。
+async fn read_metadata_body(resp: reqwest::Response, url: &str) -> Result<Vec<u8>> {
+    read_body_capped(resp, METADATA_MAX_BYTES)
+        .await
+        .map_err(|err| match err {
+            BodyReadError::TooLarge { size, limit } => Error::ResponseTooLarge {
+                url: url.to_owned(),
+                size,
+                limit,
+            },
+            BodyReadError::Transport(source) => Error::Http {
+                url: url.to_owned(),
+                source,
+            },
+        })
 }
 
 /// 当前平台的运行时清单键。以 `windows-x64` 为主目标，其余平台尽力而为映射。
@@ -749,6 +756,7 @@ fn symlink_impl(target: &str, link: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use sha1::{Digest, Sha1};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use wiremock::matchers::{method, path as match_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -1364,6 +1372,65 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(plan.links.len(), 2);
+    }
+
+    // ---- 读响应体途中的故障：wiremock 造不出响应体只到一半，手写应答 ----
+
+    /// 按连接顺序写出 `replies` 里的（声明长度，实际正文）后关闭连接。返回地址与已接受的连接数。
+    fn raw_server(replies: Vec<(u64, Vec<u8>)>) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/all.json", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        std::thread::spawn(move || {
+            for (declared, body) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let status = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(status.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (url, accepted)
+    }
+
+    /// 声明的长度超过上限：不读正文也不重试。带校验的那条读取路径同样限长。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_oversized_manifest_is_refused_without_a_retry() {
+        let declared = aurora_base::http::METADATA_MAX_BYTES + 1;
+        for verified in [false, true] {
+            let (url, accepted) = raw_server(vec![(declared, Vec::new()), (2, b"{}".to_vec())]);
+            let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+
+            let result = if verified {
+                installer.get_verified_bytes(&url, &sha1_hex(b"{}")).await
+            } else {
+                installer.get_bytes(&url).await
+            };
+
+            match result {
+                Err(Error::ResponseTooLarge {
+                    url: failed,
+                    size,
+                    limit,
+                }) => {
+                    assert_eq!(failed, url);
+                    assert_eq!(size, declared);
+                    assert_eq!(limit, aurora_base::http::METADATA_MAX_BYTES);
+                }
+                other => panic!("应为 ResponseTooLarge，实际 {other:?}"),
+            }
+            assert_eq!(accepted.load(Ordering::SeqCst), 1, "不该重试");
+        }
     }
 
     // ---- 逐源回退：两台 mock 分别扮演官方源与镜像 ----

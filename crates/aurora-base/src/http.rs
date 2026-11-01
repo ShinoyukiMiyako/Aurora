@@ -15,6 +15,43 @@ use crate::error::{Error, Result};
 /// 与限流，报出一个永远不变的版本号会让对方无从区分新旧客户端。
 pub const USER_AGENT: &str = concat!(crate::app_name_en!(), "/", env!("CARGO_PKG_VERSION"));
 
+/// 元数据响应体（版本清单、资源索引、Java 运行时清单）的读取上限。实际最大的也只有几 MB，上限只防镜像或被
+/// 劫持的线路回来一个超大响应或压缩炸弹时整个读进内存。
+pub const METADATA_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// [`read_body_capped`] 的失败。
+#[derive(Debug, thiserror::Error)]
+pub enum BodyReadError {
+    /// `size` 是响应头声明的长度，或读到超限那一刻已收到的字节数，都是实际大小的下界。
+    #[error("响应体至少有 {size} 字节，超过 {limit} 字节的上限")]
+    TooLarge { size: u64, limit: u64 },
+    /// 读响应体途中的传输错误。reqwest 把这类错误归为 decode 类。
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+}
+
+/// 读完响应体，超过 `limit` 字节就中止。声明的长度超限时不读正文；没声明（分块传输）、声明不实或解压后
+/// 变大的按块累计，一超限就中止。
+pub async fn read_body_capped(
+    mut response: reqwest::Response,
+    limit: u64,
+) -> std::result::Result<Vec<u8>, BodyReadError> {
+    if let Some(size) = response.content_length()
+        && size > limit
+    {
+        return Err(BodyReadError::TooLarge { size, limit });
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let size = (bytes.len() + chunk.len()) as u64;
+        if size > limit {
+            return Err(BodyReadError::TooLarge { size, limit });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 /// HTTP 客户端构建参数。
 ///
 /// 默认不设「整体超时」——大文件下载会持续几分钟，硬性总超时会把正常下载掐断；
@@ -142,6 +179,70 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 手写一次应答后关闭连接。`headers` 不声明长度时响应体读到连接关闭为止，wiremock 造不出这种响应。
+    fn raw_reply(headers: &str, body: &[u8]) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let reply = [
+            format!("HTTP/1.1 200 OK\r\nConnection: close\r\n{headers}\r\n").into_bytes(),
+            body.to_vec(),
+        ]
+        .concat();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            stream.write_all(&reply).unwrap();
+        });
+        url
+    }
+
+    async fn capped(url: &str, limit: u64) -> std::result::Result<Vec<u8>, BodyReadError> {
+        let response = build_client().unwrap().get(url).send().await.unwrap();
+        read_body_capped(response, limit).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capped_read_accepts_a_body_of_exactly_the_limit() {
+        let url = raw_reply("Content-Length: 8\r\n", b"12345678");
+        assert_eq!(capped(&url, 8).await.unwrap(), b"12345678");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capped_read_refuses_a_declared_length_over_the_limit_without_the_body() {
+        // 只声明不发正文：真去读就会报传输错误，而不是这里的超限。
+        let url = raw_reply("Content-Length: 9\r\n", b"");
+        match capped(&url, 8).await {
+            Err(BodyReadError::TooLarge { size: 9, limit: 8 }) => {}
+            other => panic!("应按声明的长度拒绝：{other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capped_read_stops_an_undeclared_body_once_it_passes_the_limit() {
+        let url = raw_reply("", &[b'x'; 64]);
+        match capped(&url, 8).await {
+            Err(BodyReadError::TooLarge { size, limit: 8 }) => {
+                assert!((9..=64).contains(&size), "{size}");
+            }
+            other => panic!("应在累计超限时中止：{other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capped_read_reports_a_body_cut_off_midway_as_transport() {
+        let url = raw_reply("Content-Length: 64\r\n", b"short");
+        match capped(&url, 1024).await {
+            Err(BodyReadError::Transport(source)) => assert!(source.is_decode(), "{source:?}"),
+            other => panic!("应为传输错误：{other:?}"),
+        }
+    }
 
     /// 模拟上层错误把 reqwest 错误挂在 source 上的样子。
     #[derive(Debug, thiserror::Error)]

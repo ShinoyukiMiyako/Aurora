@@ -13,6 +13,7 @@
 //! 请求返回已取消。元数据只进内存、不落盘，半途丢下请求没有要清理的东西；不看令牌的话，一次卡住的
 //! 抓取要等满客户端超时加整轮退避才返回，远超取消时限。
 
+use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
 use aurora_base::retry::{RetryPolicy, retry_async};
 use aurora_download::{CancellationToken, SourcePlan};
 
@@ -54,11 +55,19 @@ async fn fetch_with_retry(
                 url: url.to_owned(),
                 source,
             })?;
-        let bytes = resp.bytes().await.map_err(|source| Error::Http {
-            url: url.to_owned(),
-            source,
-        })?;
-        Ok::<Vec<u8>, Error>(bytes.to_vec())
+        read_body_capped(resp, METADATA_MAX_BYTES)
+            .await
+            .map_err(|err| match err {
+                BodyReadError::TooLarge { size, limit } => Error::ResponseTooLarge {
+                    url: url.to_owned(),
+                    size,
+                    limit,
+                },
+                BodyReadError::Transport(source) => Error::Http {
+                    url: url.to_owned(),
+                    source,
+                },
+            })
     })
     .await
 }
@@ -625,6 +634,46 @@ pub(crate) mod tests {
 
         assert_eq!(body, full);
         assert_eq!(accepted.load(Ordering::SeqCst), 2, "应同源重试恰好一次");
+    }
+
+    /// 响应头声明的长度超过上限：不读正文，也不重试，同一个源再来一次还是这么大。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_oversized_response_is_refused_without_a_retry() {
+        let declared = aurora_base::http::METADATA_MAX_BYTES as usize + 1;
+        let (url, accepted) = raw_server(vec![
+            RawReply {
+                declared,
+                body: Vec::new(),
+                hold: Duration::ZERO,
+            },
+            RawReply {
+                declared: 2,
+                body: b"{}".to_vec(),
+                hold: Duration::ZERO,
+            },
+        ]);
+        let client = aurora_base::http::build_client().unwrap();
+        let twice = RetryPolicy {
+            max_attempts: 2,
+            ..fast_policy()
+        };
+
+        let err = get_bytes(&client, &url, &twice, None).await.unwrap_err();
+
+        match &err {
+            Error::ResponseTooLarge {
+                url: failed,
+                size,
+                limit,
+            } => {
+                assert_eq!(failed, &url);
+                assert_eq!(*size, declared as u64);
+                assert_eq!(*limit, aurora_base::http::METADATA_MAX_BYTES);
+            }
+            other => panic!("应为 ResponseTooLarge，实际 {other:?}"),
+        }
+        assert!(!err.is_retryable());
+        assert_eq!(accepted.load(Ordering::SeqCst), 1, "不该重试");
     }
 
     /// 只有一次机会时照实报出读体失败，并判为值得重试的瞬时故障。
