@@ -30,7 +30,7 @@ import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
 import { CREATE_COPY, LOADER_DESCRIPTION, RELEASE_TYPE_LABEL } from "./copy";
 import styles from "./create.module.css";
-import { instancePath, loaderOptions, type GameVersion, type VersionFilter } from "./model";
+import { confirmJava, instancePath, loaderOptions, type ConfirmJava, type GameVersion, type VersionFilter } from "./model";
 
 /** 名称输入框的长度上限，与名称校验的上限一致（按 UTF-16 码元计）。 */
 export const NAME_MAX = 32;
@@ -493,6 +493,7 @@ export interface ConfirmStepProps {
 export function ConfirmStep({ name, version, loader, loaderVersion, cover, settings, requirements, willPin, openAfter, onOpenAfter, error }: ConfirmStepProps) {
   const c = CREATE_COPY.confirm;
   const loaderValue = loader === "vanilla" ? c.vanilla : loaderVersion === null ? LOADER_NAME[loader] : `${LOADER_NAME[loader]} ${loaderVersion}`;
+  const java = useConfirmJava(requirements, settings);
   return (
     <>
       {error !== null && (
@@ -508,7 +509,7 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
             { label: c.version, value: c.versionValue(version.id, version.type) },
             { label: c.loader, value: loaderValue },
             { label: c.cover, value: coverLabel(cover.block) },
-            { label: c.java, value: settings === null ? <Skeleton shape="text" width={180} /> : <JavaValue requirements={requirements} autoDownload={settings.autoDownloadJava} /> },
+            { label: c.java, value: settings === null ? <Skeleton shape="text" width={180} /> : <JavaValue state={java} autoDownload={settings.autoDownloadJava} /> },
             // 体积只统计游戏本体（客户端、库、资源）；有库没标大小时后端给 null，宁可不写也不写一个偏小的数
             ...(requirements.status === "loading"
               ? [{ label: c.download, value: <Skeleton shape="text" width={120} /> }]
@@ -522,6 +523,7 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
           ]}
         />
       </Inset>
+      {java.status === "ready" && <PinnedJavaNote java={java.java} />}
       {version.type === "snapshot" && (
         <Callout tone="warn" icon="alert">
           {c.snapshotWarning}
@@ -545,14 +547,43 @@ function DownloadValue({ bytes, withLoader }: { bytes: number; withLoader: boole
   );
 }
 
-function JavaValue({ requirements, autoDownload }: { requirements: ResourceResult<VersionRequirementsDto>; autoDownload: boolean }) {
+type ConfirmJavaState = { status: "loading" } | { status: "error"; reason: string } | { status: "ready"; java: ConfirmJava };
+
+/** Java 一行与它下面的说明共用一份结论：要求的主版本、本机运行时与全局默认 Java 都到齐了才下判断。 */
+function useConfirmJava(requirements: ResourceResult<VersionRequirementsDto>, settings: Settings | null): ConfirmJavaState {
   const runtimes = useJavaRuntimes();
+  if (requirements.status === "error") return { status: "error", reason: describeError(requirements.error) };
+  if (runtimes.status === "error") return { status: "error", reason: describeError(runtimes.error) };
+  if (requirements.status === "loading" || runtimes.status === "loading" || settings === null) return { status: "loading" };
+  return { status: "ready", java: confirmJava(requirements.data.java_major, runtimes.data, settings.defaultJava) };
+}
+
+function JavaValue({ state, autoDownload }: { state: ConfirmJavaState; autoDownload: boolean }) {
   const c = CREATE_COPY.confirm;
-  if (requirements.status === "error") return <>{c.javaUnknown(describeError(requirements.error))}</>;
-  if (runtimes.status === "error") return <>{c.javaUnknown(describeError(runtimes.error))}</>;
-  if (requirements.status === "loading" || runtimes.status === "loading") return <Skeleton shape="text" width={180} />;
-  const major = requirements.data.java_major;
-  const installed = runtimes.data.find((j) => j.version.major === major);
-  if (installed !== undefined) return <>{c.javaInstalled(major, installed.vendor)}</>;
-  return <>{autoDownload ? c.javaAuto(major) : c.javaManual(major)}</>;
+  if (state.status === "error") return <>{c.javaUnknown(state.reason)}</>;
+  if (state.status === "loading") return <Skeleton shape="text" width={180} />;
+  const java = state.java;
+  switch (java.kind) {
+    case "installed":
+      return <>{c.javaInstalled(java.major, java.vendor)}</>;
+    case "download":
+      return <>{autoDownload ? c.javaAuto(java.major) : c.javaManual(java.major)}</>;
+    case "pinnedMismatch":
+      return <span className={styles.warnText}>{c.javaPinnedMismatch(java.pinned, java.required)}</span>;
+    case "pinnedMissing":
+      return <span className={styles.warnText}>{c.javaPinnedMissing}</span>;
+  }
+}
+
+/** 全局固定的默认 Java 用不了或与这个版本不符：一句后果，一句出路。新建流程里没有实例级的 Java 选项，出路指向创建后的实例设置。 */
+function PinnedJavaNote({ java }: { java: ConfirmJava }) {
+  const c = CREATE_COPY.confirm;
+  if (java.kind !== "pinnedMismatch" && java.kind !== "pinnedMissing") return null;
+  const effect = java.kind === "pinnedMissing" ? c.pinnedGone : java.pinned < java.required ? c.pinnedLower(java.pinned) : c.pinnedHigher(java.pinned);
+  return (
+    <Callout tone="warn" icon="alert">
+      {effect}
+      {java.requiredInstalled ? c.pinnedFix(java.required) : c.pinnedFixDownload(java.required)}
+    </Callout>
+  );
 }

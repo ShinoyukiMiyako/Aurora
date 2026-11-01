@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ManifestDto } from "../../state/queries/catalog";
+import type { JavaInstallationDto, ManifestDto } from "../../state/queries/catalog";
 import { coverLabel } from "../../copy/flows";
 import { CREATE_COPY } from "./copy";
 import {
+  confirmJava,
   effectiveLoaderVersion,
   filledCount,
   filterVersions,
@@ -134,6 +135,36 @@ describe("确认与关闭", () => {
     expect(filledCount({ ...base, name: "周末生存" })).toBe(1);
     expect(filledCount({ ...base, name: "周末生存", coverChanged: true })).toBe(2);
     expect(filledCount({ name: "a", versionChanged: true, loader: "fabric", loaderVersionChanged: true, coverChanged: true })).toBe(5);
+  });
+});
+
+function runtime(path: string, major: number, vendor: string): JavaInstallationDto {
+  return { path, version: { major, minor: 0, security: 1, build: 0, raw: `${major}.0.1` }, is_64bit: true, vendor, source: "registry" };
+}
+
+describe("确认步的 Java", () => {
+  const jdk21 = runtime("C:/jdk-21/bin/java.exe", 21, "Eclipse Adoptium");
+  const jre8 = runtime("C:/jre-8/bin/java.exe", 8, "Oracle Corporation");
+  const all = [jdk21, jre8];
+
+  it("自动选择：本机有要求的主版本算已安装，没有就要下载", () => {
+    expect(confirmJava(21, all, "auto")).toEqual({ kind: "installed", major: 21, vendor: "Eclipse Adoptium" });
+    expect(confirmJava(17, all, "auto")).toEqual({ kind: "download", major: 17 });
+    expect(confirmJava(17, [], "auto")).toEqual({ kind: "download", major: 17 });
+  });
+
+  it("全局固定了默认 Java：只看固定的那一个，本机另有匹配的也不算数", () => {
+    expect(confirmJava(21, all, jre8.path)).toEqual({ kind: "pinnedMismatch", pinned: 8, required: 21, requiredInstalled: true });
+    expect(confirmJava(8, all, jdk21.path)).toEqual({ kind: "pinnedMismatch", pinned: 21, required: 8, requiredInstalled: true });
+    expect(confirmJava(17, all, jdk21.path)).toEqual({ kind: "pinnedMismatch", pinned: 21, required: 17, requiredInstalled: false });
+    // 主版本相等算已安装，发行方写固定的那个，不是本机第一个同主版本的
+    const zulu21 = runtime("D:/zulu-21/bin/java.exe", 21, "Azul Systems");
+    expect(confirmJava(21, [jdk21, zulu21], zulu21.path)).toEqual({ kind: "installed", major: 21, vendor: "Azul Systems" });
+  });
+
+  it("固定的路径不在扫描结果里：启动会失败，不当作已安装", () => {
+    expect(confirmJava(21, all, "E:/gone/bin/java.exe")).toEqual({ kind: "pinnedMissing", required: 21, requiredInstalled: true });
+    expect(confirmJava(21, [], "E:/gone/bin/java.exe")).toEqual({ kind: "pinnedMissing", required: 21, requiredInstalled: false });
   });
 });
 

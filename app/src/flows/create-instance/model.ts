@@ -1,9 +1,9 @@
-// 新建实例流程的纯逻辑：步骤表、版本清单的整理与筛选、推荐加载器版本、回落规则、存放位置与「填过几项」。
+// 新建实例流程的纯逻辑：步骤表、版本清单的整理与筛选、推荐加载器版本、回落规则、存放位置、确认步的 Java 与「填过几项」。
 // 状态由流程组件持有，这里只做推算，便于逐条测试。
 
-import { releaseTypeFromDto, type ReleaseType } from "../../domain/adapt";
+import { JAVA_AUTO, releaseTypeFromDto, type ReleaseType } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
-import type { LoaderChoice, LoaderVersionDto, ManifestDto } from "../../state/queries/catalog";
+import type { JavaInstallationDto, LoaderChoice, LoaderVersionDto, ManifestDto } from "../../state/queries/catalog";
 
 // ---------------------------------------------------------------- 步骤
 
@@ -115,6 +115,27 @@ export function instancePath(gameDir: string, name: string): string {
   const sep = gameDir.includes("\\") ? "\\" : "/";
   const base = gameDir.endsWith(sep) ? gameDir.slice(0, -1) : gameDir;
   return `${base}${sep}versions${sep}${name}`;
+}
+
+/**
+ * 确认步 Java 一行的结论。新实例的 Java 是「自动选择」，跟随全局设置：全局固定了默认 Java 时启动一律按那个路径，
+ * 找不到或主版本低于要求都会失败，不会悄悄换成本机另一个匹配的；高于要求照常启动，但旧版 Forge 与部分 Mod 可能报错。
+ * requiredInstalled 指本机有没有要求的主版本，决定提示里是「直接指定」还是「先下载再指定」。
+ */
+export type ConfirmJava =
+  | { kind: "installed"; major: number; vendor: string }
+  | { kind: "download"; major: number }
+  | { kind: "pinnedMismatch"; pinned: number; required: number; requiredInstalled: boolean }
+  | { kind: "pinnedMissing"; required: number; requiredInstalled: boolean };
+
+export function confirmJava(required: number, runtimes: readonly JavaInstallationDto[], defaultJava: string): ConfirmJava {
+  const local = runtimes.find((r) => r.version.major === required);
+  if (defaultJava === JAVA_AUTO) return local === undefined ? { kind: "download", major: required } : { kind: "installed", major: required, vendor: local.vendor };
+  const pinned = runtimes.find((r) => r.path === defaultJava);
+  const requiredInstalled = local !== undefined;
+  if (pinned === undefined) return { kind: "pinnedMissing", required, requiredInstalled };
+  if (pinned.version.major !== required) return { kind: "pinnedMismatch", pinned: pinned.version.major, required, requiredInstalled };
+  return { kind: "installed", major: required, vendor: pinned.vendor };
 }
 
 export interface DraftFacts {
