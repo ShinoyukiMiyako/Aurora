@@ -45,6 +45,9 @@ export const gallery: GalleryEntry = {
           </Button>
         ))}
         <Button disabledReason="游戏运行中不能修改">带原因的禁用</Button>
+        <Button disabled focusableWhenDisabled>
+          可聚焦的禁用
+        </Button>
       </GalleryRow>
       <GalleryRow label="加载 · 有图标">
         {VARIANTS.map(({ variant, label }) => (

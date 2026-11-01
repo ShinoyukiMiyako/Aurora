@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { act, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, type MouseEvent, type ReactNode } from "react";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { focusByKeyboard, render, type Rendered } from "../test/dom";
-import { Button, CONTROL_ICON_SIZE } from "./Button";
+import { emulateFocusFixup } from "../test/focus-fixup";
+import { Button, CONTROL_ICON_SIZE, softDisabledProps } from "./Button";
 import { IconButton } from "./IconButton";
 
 let view: Rendered | undefined;
@@ -30,6 +31,28 @@ const click = (el: Element) =>
   act(() => {
     el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
   });
+
+/**
+ * 按浏览器对原生按钮的键盘激活补上 click：Enter 在 keydown、空格在 keyup 之后派发，按键被 preventDefault 则不派发。
+ * jsdom 不做这一步，不补的话「Enter / 空格不触发」的断言恒真。
+ */
+const press = (el: HTMLElement, key: "Enter" | " ") =>
+  act(() => {
+    const down = el.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    if (key === "Enter") {
+      if (down) el.click();
+      return;
+    }
+    const up = el.dispatchEvent(new KeyboardEvent("keyup", { key, bubbles: true, cancelable: true }));
+    if (down && up) el.click();
+  });
+
+/** 指针点击、Enter、空格各激活一次。 */
+const activateAllWays = (el: HTMLElement) => {
+  click(el);
+  press(el, "Enter");
+  press(el, " ");
+};
 
 describe("Button", () => {
   it("默认次按钮、md、type=button，点击触发 onClick", () => {
@@ -154,6 +177,135 @@ describe("Button", () => {
     expect(button.disabled).toBe(true);
     expect(button.dataset.disabled).toBeUndefined();
     expect(button.getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("可用时指针点击、Enter、空格各触发一次 onClick", () => {
+    const onClick = vi.fn();
+    const button = mount(<Button onClick={onClick}>保存</Button>);
+    activateAllWays(button);
+    expect(onClick).toHaveBeenCalledTimes(3);
+  });
+
+  it("disabled + focusableWhenDisabled：aria-disabled 代替原生禁用，外观同禁用，点击与 Enter、空格都不触发，焦点留在按钮上", () => {
+    const onClick = vi.fn();
+    const button = mount(
+      <Button variant="primary" disabled focusableWhenDisabled onClick={onClick}>
+        结束游戏
+      </Button>,
+    );
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    expect(button.dataset.disabled).toBe("true");
+    expect(button.getAttribute("aria-busy")).toBeNull();
+    act(() => button.focus());
+    activateAllWays(button);
+    expect(onClick).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(button);
+    // 没有原因时不包提示
+    focusByKeyboard(button);
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+  });
+
+  it("focusableWhenDisabled 的提交按钮不提交表单", () => {
+    const onSubmit = vi.fn((e: SubmitEvent) => e.preventDefault());
+    view = render(
+      withOverlay(
+        <form onSubmit={(e) => onSubmit(e.nativeEvent as SubmitEvent)}>
+          <Button type="submit" disabled focusableWhenDisabled>
+            登录
+          </Button>
+        </form>,
+      ),
+    );
+    activateAllWays(view.container.querySelector("button") as HTMLButtonElement);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("加载中：Enter、空格同样不触发，焦点留在按钮上", () => {
+    const onClick = vi.fn();
+    const button = mount(
+      <Button icon="stop" loading onClick={onClick}>
+        结束游戏
+      </Button>,
+    );
+    act(() => button.focus());
+    activateAllWays(button);
+    expect(onClick).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(button);
+    // 加载中不降不透明度：不进禁用外观
+    expect(button.dataset.disabled).toBeUndefined();
+  });
+
+  it.each([
+    ["focusableWhenDisabled", { disabled: true, focusableWhenDisabled: true }],
+    ["loading", { loading: true }],
+  ] as const)("聚焦着变成不可用（%s）：焦点留在按钮上；原生禁用会落到 body", async (_name, inert) => {
+    onTestFinished(emulateFocusFixup());
+    const onClick = vi.fn();
+    const ui = (props: { disabled?: boolean; focusableWhenDisabled?: boolean; loading?: boolean }) =>
+      withOverlay(
+        <Button icon="stop" onClick={onClick} {...props}>
+          结束游戏
+        </Button>,
+      );
+    view = render(ui({}));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    act(() => button.focus());
+    view.rerender(ui(inert));
+    await act(async () => undefined);
+    expect(document.activeElement).toBe(button);
+    press(button, "Enter");
+    expect(onClick).not.toHaveBeenCalled();
+
+    // 对照：同一个按钮改成原生禁用，替身按浏览器的样子把焦点落回 body
+    view.rerender(ui({}));
+    act(() => button.focus());
+    view.rerender(ui({ disabled: true }));
+    await act(async () => undefined);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("disabled + focusableWhenDisabled + disabledReason：保持可聚焦并挂原因提示", () => {
+    const button = mount(
+      <Button disabled focusableWhenDisabled disabledReason="游戏运行中不能修改">
+        修改
+      </Button>,
+    );
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
+    focusByKeyboard(button);
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("游戏运行中不能修改");
+  });
+
+  it("只传 focusableWhenDisabled 不传 disabled：按钮照常可用", () => {
+    const onClick = vi.fn();
+    const button = mount(
+      <Button focusableWhenDisabled onClick={onClick}>
+        保存
+      </Button>,
+    );
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    expect(button.dataset.disabled).toBeUndefined();
+    click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("softDisabledProps", () => {
+  it("不可用时挡掉点击并 preventDefault，可用时原样转交", () => {
+    const onClick = vi.fn();
+    const blocked = softDisabledProps<HTMLButtonElement>(true, onClick);
+    expect(blocked["aria-disabled"]).toBe(true);
+    const event = { preventDefault: vi.fn() } as unknown as MouseEvent<HTMLButtonElement>;
+    blocked.onClick(event);
+    expect(onClick).not.toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+
+    const open = softDisabledProps<HTMLButtonElement>(false, onClick);
+    expect(open["aria-disabled"]).toBeUndefined();
+    open.onClick(event);
+    expect(onClick).toHaveBeenCalledWith(event);
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
   });
 });
 
