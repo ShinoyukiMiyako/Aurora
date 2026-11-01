@@ -1911,10 +1911,8 @@ mod tests {
         let server = MockServer::start().await;
         let (lib_v1, lib_v2) = (b"lib one".to_vec(), b"lib two two".to_vec());
         let sodium = b"sodium".to_vec();
-        for (version, file, bytes) in [
-            ("d1", "lib-d1.jar", &lib_v1),
-            ("d2", "lib-d2.jar", &lib_v2),
-        ] {
+        for (version, file, bytes) in [("d1", "lib-d1.jar", &lib_v1), ("d2", "lib-d2.jar", &lib_v2)]
+        {
             let body = modrinth_version(
                 version,
                 "lib",
@@ -1961,7 +1959,10 @@ mod tests {
         // 玩家把它改记成自己装的之后，别的 Mod 的前置计划把它换回 d1，也不改这个身份。
         let store = aurora.ledger_store("1.21");
         let mut ledger = store.load().await.unwrap();
-        ledger.find_mut("lib-d2.jar").unwrap().installed_as_dependency_of = None;
+        ledger
+            .find_mut("lib-d2.jar")
+            .unwrap()
+            .installed_as_dependency_of = None;
         store.save(&ledger).await.unwrap();
         aurora.remove_mod("1.21", "sodium-v1.jar").await.unwrap();
         aurora

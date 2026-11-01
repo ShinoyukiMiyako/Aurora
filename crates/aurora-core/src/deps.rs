@@ -1465,7 +1465,10 @@ mod tests {
         assert!(!dep.delisted);
         assert_eq!(
             plan.skipped,
-            vec!["前置 fabric-api 按你的更新设置保留现有版本，未换成 sodium-v1.jar 指定的版本".to_owned()]
+            vec![
+                "前置 fabric-api 按你的更新设置保留现有版本，未换成 sodium-v1.jar 指定的版本"
+                    .to_owned()
+            ]
         );
     }
 
