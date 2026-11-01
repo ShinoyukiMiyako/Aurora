@@ -155,6 +155,16 @@ pub struct NamedDirectory {
     pub path: PathBuf,
 }
 
+/// 切走的游戏目录留下的实例引用，切回去时放回。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedDirectory {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub sidebar_pins: Vec<String>,
+    #[serde(default)]
+    pub selected_version: Option<String>,
+}
+
 /// 全局配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -174,7 +184,8 @@ pub struct AuroraConfig {
     pub msa_client_id: Option<String>,
     /// 自定义游戏目录（`.minecraft`）；缺省时用数据目录下的 `.minecraft`。
     pub game_directory: Option<PathBuf>,
-    /// 当前选中的启动版本 id（版本页设定，主页据此启动）；缺省或指向已卸载版本时主页回落到扫描首项。
+    /// 当前游戏目录里选中的启动版本 id（版本页设定，主页据此启动）；缺省或指向已卸载版本时主页回落到
+    /// 扫描首项。
     pub selected_version: Option<String>,
     /// 自定义缓存目录（对应功能矩阵「自定义缓存文件夹路径」）；缺省用系统默认。
     pub cache_directory: Option<PathBuf>,
@@ -182,7 +193,7 @@ pub struct AuroraConfig {
     pub auto_download_java: bool,
     /// 外观偏好（明暗、强调色、花瓣、全景、减少动画）。
     pub appearance: Appearance,
-    /// 侧栏固定的实例 id，按显示顺序；最多 5 个，实例删除或改名时同步。
+    /// 当前游戏目录里侧栏固定的实例 id，按显示顺序；最多 5 个，实例删除或改名时同步。
     pub sidebar_pins: Vec<String>,
     /// 游戏启动后启动器窗口的去留。
     pub after_launch: AfterLaunch,
@@ -197,6 +208,8 @@ pub struct AuroraConfig {
     /// 首次启动扫到别的启动器的 `.minecraft` 时不改当前目录，而是记在这里，让玩家随时切过去——
     /// 他在别处攒的存档不该因为换了个启动器就得搬家。
     pub extra_game_directories: Vec<NamedDirectory>,
+    /// 非当前游戏目录的固定与当前选中。它们是实例名，只在所在目录里有意义。
+    pub parked_directories: Vec<ParkedDirectory>,
     /// 首次启动向导的第一步是否已提交。之后中途关掉窗口，下次打开也不再进向导。
     pub first_run_completed: bool,
     /// 用户选择跳过的启动器版本；自动检查不再为它提示，出现更高版本时自然失效。
@@ -246,6 +259,7 @@ impl Default for AuroraConfig {
             default_java: None,
             pinned_servers: Vec::new(),
             extra_game_directories: Vec::new(),
+            parked_directories: Vec::new(),
             first_run_completed: false,
             skipped_update_version: None,
             notified_update_version: None,
@@ -935,6 +949,11 @@ mod tests {
             extra_game_directories: vec![NamedDirectory {
                 name: "PCL2".to_owned(),
                 path: PathBuf::from("D:/PCL2/.minecraft"),
+            }],
+            parked_directories: vec![ParkedDirectory {
+                path: PathBuf::from("D:/别处/.minecraft"),
+                sidebar_pins: vec!["生存".to_owned()],
+                selected_version: Some("生存".to_owned()),
             }],
             first_run_completed: true,
             skipped_update_version: Some("0.2.0".to_owned()),

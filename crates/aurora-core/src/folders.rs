@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use aurora_instance::{MINECRAFT_DIR_NAME, official_minecraft_dir};
 
-use crate::config::NamedDirectory;
+use crate::config::{NamedDirectory, ParkedDirectory};
 use crate::error::{CoreError, GameDirProblem, Result};
 use crate::facade::Aurora;
 
@@ -287,11 +287,36 @@ impl Aurora {
             if !extras.iter().any(|d| same_path(&d.path, &previous)) {
                 extras.push(NamedDirectory {
                     name,
-                    path: previous,
+                    path: previous.clone(),
                 });
             }
         }
+        self.swap_directory_refs(previous, &next);
         self.set_game_directory(next);
+    }
+
+    /// 收起 `previous` 的固定与当前选中，放回 `next` 上次留下的。留在原位的话，在新目录里固定一个实例
+    /// （新建实例也会自动固定）就把原目录的固定整份冲掉了：写固定时只认当前目录里的实例。
+    fn swap_directory_refs(&mut self, previous: PathBuf, next: &Path) {
+        let config = self.config_mut();
+        let sidebar_pins = std::mem::take(&mut config.sidebar_pins);
+        let selected_version = config.selected_version.take();
+        if !sidebar_pins.is_empty() || selected_version.is_some() {
+            config.parked_directories.push(ParkedDirectory {
+                path: previous,
+                sidebar_pins,
+                selected_version,
+            });
+        }
+        if let Some(index) = config
+            .parked_directories
+            .iter()
+            .position(|d| same_path(&d.path, next))
+        {
+            let parked = config.parked_directories.remove(index);
+            config.sidebar_pins = parked.sidebar_pins;
+            config.selected_version = parked.selected_version;
+        }
     }
 
     /// 目录的显示名：记录里有名字用记录的；数据目录下的默认目录用产品名；
@@ -485,6 +510,64 @@ mod tests {
         );
         let extras = &aurora.config().extra_game_directories;
         assert_eq!(extras, &vec![named("Games", current)]);
+    }
+
+    /// 固定与当前选中是实例名，只属于它们所在的目录：切走时收起来，切回来原样放回，在别的目录里改固定、
+    /// 选别的实例都不影响这份。
+    #[tokio::test(start_paused = true)]
+    async fn each_directory_keeps_its_own_pins_and_selection_across_switches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("first").join(".minecraft");
+        let second = tmp.path().join("second").join(".minecraft");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let mut aurora = aurora_at(tmp.path(), &first, Vec::new());
+        let pins = vec!["生存".to_owned(), "建筑".to_owned()];
+        aurora.set_sidebar_pins(pins.clone());
+        aurora.set_selected_version(Some("建筑".to_owned()));
+
+        let probe = aurora.probe_current_game_dir().await;
+        aurora.switch_game_directory(&second, &probe);
+        assert!(aurora.config().sidebar_pins.is_empty());
+        assert_eq!(aurora.config().selected_version, None);
+
+        aurora.set_sidebar_pins(vec!["第二目录".to_owned()]);
+        aurora.set_selected_version(Some("第二目录".to_owned()));
+        let probe = aurora.probe_current_game_dir().await;
+        aurora.switch_game_directory(&first, &probe);
+        assert_eq!(aurora.config().sidebar_pins, pins);
+        assert_eq!(aurora.config().selected_version.as_deref(), Some("建筑"));
+
+        let probe = aurora.probe_current_game_dir().await;
+        aurora.switch_game_directory(&second, &probe);
+        assert_eq!(aurora.config().sidebar_pins, vec!["第二目录".to_owned()]);
+        assert_eq!(
+            aurora.config().selected_version.as_deref(),
+            Some("第二目录")
+        );
+        assert_eq!(
+            aurora.config().parked_directories.len(),
+            1,
+            "切回来的目录不留第二份记录"
+        );
+    }
+
+    /// 切到当前目录本身什么都不动，固定与当前选中还在原位。
+    #[tokio::test(start_paused = true)]
+    async fn switching_to_the_same_directory_keeps_pins_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join(".minecraft");
+        std::fs::create_dir_all(&current).unwrap();
+        let mut aurora = aurora_at(tmp.path(), &current, Vec::new());
+        aurora.set_sidebar_pins(vec!["生存".to_owned()]);
+        aurora.set_selected_version(Some("生存".to_owned()));
+
+        let probe = aurora.probe_current_game_dir().await;
+        aurora.switch_game_directory(&current, &probe);
+
+        assert_eq!(aurora.config().sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(aurora.config().selected_version.as_deref(), Some("生存"));
+        assert!(aurora.config().parked_directories.is_empty());
     }
 
     /// 从没建出来过的默认目录不收进额外目录，免得列表里多一条永远不可达的记录。
