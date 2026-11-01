@@ -2003,6 +2003,63 @@ mod tests {
         }
     }
 
+    /// 玩家导入一个整合包，实例列表就只多这一个实例。加载器装在自己的版本目录里：目录留着，不当实例列出；
+    /// 原版基底照常列出，导入出的实例继承的就是它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn imported_pack_adds_one_instance_and_no_loader_version_to_the_list() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/test/0.15.0/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"id":"fabric-loader-0.15.0-test","inheritsFrom":"test","type":"release",
+                    "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
+                    "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.0","url":"{}/"}}]}}"#,
+                server.uri()
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/net/fabricmc/fabric-loader/0.15.0/fabric-loader-0.15.0.jar",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"loader".to_vec()))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("fabric.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"})),
+            &[],
+        );
+        let aurora = aurora(tmp.path(), &server);
+
+        aurora
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("周末整合包"),
+                &ImportSelection::default(),
+                "task-natural",
+                None,
+            )
+            .await
+            .unwrap();
+
+        let list = aurora.list_instances().await.unwrap();
+        let ids: Vec<&str> = list.iter().map(|instance| instance.id.as_str()).collect();
+        assert_eq!(ids, ["test", "周末整合包"]);
+        assert!(
+            aurora
+                .game_dir()
+                .join("versions")
+                .join("fabric-loader-0.15.0-test")
+                .join("fabric-loader-0.15.0-test.json")
+                .is_file(),
+            "加载器版本的目录不删"
+        );
+    }
+
     /// 平台整合包：先下载到缓存，导入后缓存删掉，整合包信息记下平台、工程与版本。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn platform_pack_is_downloaded_imported_and_its_cache_removed() {
