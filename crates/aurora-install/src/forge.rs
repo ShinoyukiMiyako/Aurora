@@ -715,7 +715,7 @@ impl<'a> ForgeInstaller<'a> {
                     reason: "legacy install 缺 filePath".to_owned(),
                 })?;
         let dest = self.cx.layout.checked_coordinate_path(&coord)?;
-        extract_zip_entry_to_async(installer, file_path.trim_start_matches('/'), &dest).await?;
+        extract_universal_jar(installer, file_path.trim_start_matches('/'), &dest).await?;
 
         // versionInfo 里的 Forge 库条目只有坐标和仓库地址，仓库里那个坐标并没有文件（只有
         // `-universal.jar`）；它就是刚解出的通用 jar，在盘上即算就绪。
@@ -782,6 +782,19 @@ async fn extract_zip_entry_to_async(archive: &Path, entry: &str, dest: &Path) ->
     let bytes = read_zip_entry_async(archive, entry).await?;
     aurora_base::fs::atomic_write(dest, &bytes).await?;
     Ok(())
+}
+
+/// 把旧版通用 jar 解到库目录。同一 Forge 版本的游戏正在运行时 JVM 占着这份 jar，替换它会失败；
+/// 失败之后查一次占用，把笼统的 IO 失败换成能照着做的提示，没被占用就原样报出。
+async fn extract_universal_jar(installer: &Path, entry: &str, dest: &Path) -> Result<()> {
+    let bytes = read_zip_entry_async(installer, entry).await?;
+    let Err(source) = aurora_base::fs::atomic_write(dest, &bytes).await else {
+        return Ok(());
+    };
+    match first_held_open(vec![dest.to_path_buf()]).await {
+        Some(path) => Err(Error::LibraryFileLocked { path, source }),
+        None => Err(source.into()),
+    }
 }
 
 /// 解析 Maven 旁的 `.sha1` 文件：取第一段，必须是 40 位十六进制。
@@ -979,8 +992,8 @@ fn library_files_in(args: &[String], layout: &crate::layout::GameLayout) -> Vec<
         .collect()
 }
 
-/// 第一个正被别的进程占着的现有文件。只用于给已经失败的处理器找原因：探测本身出错时记一笔日志、
-/// 当它没被占用，处理器的失败照原样报出，不被探测的错误顶替。
+/// 第一个正被别的进程占着的现有文件。只用于给已经发生的失败找原因：探测本身出错时记一笔日志、
+/// 当它没被占用，原来的失败照原样报出，不被探测的错误顶替。
 async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
     let probed = tokio::task::spawn_blocking(move || {
         paths
@@ -2923,6 +2936,59 @@ mod tests {
                     ..
                 }
             ),
+            "实际：{err:?}"
+        );
+    }
+
+    const LEGACY_UNIVERSAL: &str = "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10";
+
+    /// 旧版安装要把通用 jar 解到库目录，而同一 Forge 版本的游戏正占着它：报占用并指认文件，不报笼统的
+    /// IO 失败，原来的系统错误留在原因链上；旧 jar 不动，版本也不算装上。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_universal_jar_held_by_a_running_game_is_reported_as_locked() {
+        let f = fixture();
+        let (installer, id) = legacy_installer_needing(&f, "http://unused.invalid/");
+        let universal = library(&f, LEGACY_UNIVERSAL);
+        put(&universal, b"older-universal");
+        let _game = hold_like_a_running_game(&universal);
+
+        let err = install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap_err();
+
+        match &err {
+            Error::LibraryFileLocked { path, source } => {
+                assert_eq!(path, &universal);
+                assert!(
+                    matches!(source, aurora_base::Error::Io { path, .. } if *path == universal),
+                    "{source:?}"
+                );
+            }
+            other => panic!("应为 LibraryFileLocked，实际 {other:?}"),
+        }
+        assert!(!aurora_base::retry::RetryableError::is_retryable(&err));
+        let shown = err.to_string();
+        assert!(shown.contains(&universal.display().to_string()), "{shown}");
+        assert!(shown.contains("正被别的程序占用"), "{shown}");
+        assert_eq!(std::fs::read(&universal).unwrap(), b"older-universal");
+        assert!(!f.layout.version_dir(id).exists());
+    }
+
+    /// 写不进去的原因不是占用（落点是个目录）：不张冠李戴，照原样报 IO 失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_universal_jar_failing_for_another_reason_keeps_its_own_error() {
+        let f = fixture();
+        let (installer, _) = legacy_installer_needing(&f, "http://unused.invalid/");
+        let universal = library(&f, LEGACY_UNIVERSAL);
+        std::fs::create_dir_all(&universal).unwrap();
+
+        let err = install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::Base(aurora_base::Error::Io { path, .. }) if *path == universal),
             "实际：{err:?}"
         );
     }
