@@ -85,3 +85,26 @@ export function useNow(intervalMs: number): number {
   }, [intervalMs]);
   return now;
 }
+
+/** 相对时间写秒数的范围，再往后写分钟。 */
+const SECONDS_SPAN_MS = 60_000;
+
+/**
+ * 给「ts 距今多久」用的当前时间，ts 可能是页面开着时才写入的时刻（游戏退出时的上次游玩）。
+ * useNow 的时钟这时还停在 ts 之前，差值为负，相对时间托成「1 秒前」一直挂到下一跳。
+ * ts 一变就重取；只重取一次不够，下一跳之前字还是不动，所以写秒数的这一分钟按秒走，过了回到 intervalMs。
+ */
+export function useNowSince(ts: number | null, intervalMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = () => {
+      const at = Date.now();
+      setNow(at);
+      timer = setTimeout(tick, ts !== null && at - ts < SECONDS_SPAN_MS ? 1000 : intervalMs);
+    };
+    tick();
+    return () => clearTimeout(timer);
+  }, [ts, intervalMs]);
+  return now;
+}

@@ -14,7 +14,7 @@ import { useLaunch } from "../../launch/useLaunch";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
+import { useLauncherActions, useLauncherSelector, useNow, useNowSince } from "../../state/launcher";
 import {
   useInstanceContent,
   useInstanceMods,
@@ -245,7 +245,7 @@ function StatsCard({
   mods: ResourceResult<InstalledMod[]>;
   outdated: number | null;
 }) {
-  const now = useNow(30_000);
+  const now = useNowSince(inst.lastPlayedAt, 30_000);
   // 列表扫完就与 Mod 速览用同一个总数，不让两处一个写 12 个、一个写「还没有装任何 Mod」
   const modTotal = mods.status === "ready" ? modTotals(inst, mods.data.length).total : inst.modCount;
   const modded = inst.loader !== "vanilla";
