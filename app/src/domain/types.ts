@@ -44,6 +44,7 @@ export const FAILURE_CODES = [
   "account_relogin",
   "account_refresh_network",
   "account_service_down",
+  "account_app_not_approved",
   "files_offline",
   "files_failed",
   "disk_full",
