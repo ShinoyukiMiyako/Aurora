@@ -337,6 +337,46 @@ fn extraction_stops_when_cancelled_and_detects_a_swapped_pack() {
     ));
 }
 
+/// 取消宽限期满时任务的 future 被丢弃，解压线程却还在跑；一个大文件解到底才停的话，它会一直往调用方
+/// 正在清理的目录里写。
+#[test]
+fn extraction_stops_inside_a_single_large_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let body = sample_bytes(4 * 1024 * 1024, 7);
+    let path = pack(
+        tmp.path(),
+        "big.mrpack",
+        &[
+            Entry::File("modrinth.index.json", MRPACK_INDEX),
+            Entry::File("overrides/saves/世界 一/region.bin", &body),
+        ],
+    );
+    let archive = read_pack(&path).unwrap();
+    let dest = tmp.path().join("实例 目录");
+    fs::create_dir(&dest).unwrap();
+
+    let calls = std::cell::Cell::new(0);
+    let cancel_once_started = || {
+        calls.set(calls.get() + 1);
+        calls.get() > 1
+    };
+    assert!(matches!(
+        extract_overrides(&path, &archive.overrides, &dest, &cancel_once_started),
+        Err(Error::Cancelled)
+    ));
+    let written = fs::metadata(dest.join("saves").join("世界 一").join("region.bin"))
+        .unwrap()
+        .len();
+    assert!(written < body.len() as u64, "写出了 {written} 字节");
+
+    // 不取消时大文件逐字节解全。
+    extract_overrides(&path, &archive.overrides, &dest, &never).unwrap();
+    assert_eq!(
+        fs::read(dest.join("saves").join("世界 一").join("region.bin")).unwrap(),
+        body
+    );
+}
+
 #[test]
 fn extracts_a_thousand_entries_promptly() {
     let tmp = tempfile::tempdir().unwrap();

@@ -353,16 +353,20 @@ impl Aurora {
     /// 数得出 Mod、算得出下载量（导入同样要问），没配 API key 或断网时与导入报同样的错。
     ///
     /// CurseForge 包里没给下载地址的文件逐个问 download-url 端点，作者不允许直接下载的列进
-    /// `blocked_files`，暂存位里已有校验通过副本的记为已认领。受限文件不让预览失败：用户要在这一步就
-    /// 看到要手动下载哪些。
+    /// `blocked_files`，暂存位里已有校验通过副本的记为已认领，落点被覆盖层盖住的不用下载、也不列。受限文件
+    /// 不让预览失败：用户要在这一步就看到要手动下载哪些。
     pub async fn preview_modpack_file(&self, path: &Path) -> Result<ModpackPreview> {
         let archive = read_pack_blocking(path.to_path_buf()).await?;
         let remote = self
             .remote_facts(&archive.manifest.remote, BlockedProbe::Probe)
             .await?;
+        let covered = override_landings(&archive);
         let mut claimed = HashSet::new();
         let mut blocked = Vec::new();
         for item in remote.entries.iter().filter_map(|e| e.blocked.as_ref()) {
+            if covered.contains(&item.destination.to_lowercase()) {
+                continue;
+            }
             if self.claimed_copy(item).await?.is_some() {
                 claimed.insert(item.file_id);
             } else {
@@ -544,7 +548,7 @@ impl Aurora {
             )),
         );
         let remote = self
-            .remote_downloads(&manifest.remote, &version_dir)
+            .remote_downloads(&manifest.remote, &override_landings(&archive), &version_dir)
             .await?;
         tracing::debug!(%name, ?source, remote = remote.downloads.len(), claimed = remote.claimed.len(), skipped, "整合包导入已准备好");
         Ok((name, archive, remote))
@@ -870,15 +874,18 @@ impl Aurora {
         Ok((dest, Some(dir)))
     }
 
-    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件认领到了就从暂存位复制。
+    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件认领到了就从暂存位复制，
+    /// 落点在 `covered`（见 [`override_landings`]）里的不用管。
     async fn remote_downloads(
         &self,
         remote: &RemoteFiles,
+        covered: &HashSet<String>,
         version_dir: &Path,
     ) -> Result<RemotePlan> {
         match remote {
             RemoteFiles::Modrinth(files) => {
-                let credential = pack_cdn_credential(files, || {
+                let scope = self.curseforge_cdn_scope();
+                let credential = modrinth_cdn_credential(files, &scope, || {
                     self.curseforge_credential(&self.curseforge_client()?)
                 })?;
                 let mut downloads = Vec::with_capacity(files.len());
@@ -890,16 +897,16 @@ impl Aurora {
                         }
                         .into());
                     };
-                    let task =
+                    let mut task =
                         DownloadTask::new(first.clone(), file.path.resolve_under(version_dir))
                             .with_sha1(file.sha1.clone())
                             .with_size(file.size);
-                    let task = match &credential {
-                        Some(credential) if file.urls.iter().any(|url| on_curseforge_cdn(url)) => {
-                            task.with_credential(credential.clone())
-                        }
-                        _ => task,
-                    };
+                    // 凭据自带作用域，换到备用地址后引擎照样逐跳判定，所以只要有一个地址在 CDN 上就挂。
+                    if let Some(credential) = &credential
+                        && file.urls.iter().any(|url| on_cdn(&scope, url))
+                    {
+                        task = task.with_credential(credential.clone());
+                    }
                     downloads.push(RemoteDownload {
                         task,
                         fallbacks: rest.to_vec(),
@@ -913,18 +920,20 @@ impl Aurora {
             RemoteFiles::CurseForge(refs) if refs.is_empty() => Ok(RemotePlan::default()),
             RemoteFiles::CurseForge(refs) => {
                 let client = self.curseforge_client()?;
-                self.curseforge_downloads(&client, refs, version_dir).await
+                self.curseforge_downloads(&client, refs, covered, version_dir)
+                    .await
             }
         }
     }
 
     /// CurseForge 清单里的文件 id 换成下载任务：落点按 [`CurseForgeIndex::locate`]，没给下载地址的再问
-    /// download-url 端点，任务都挂上 CDN 下载凭据。作者禁止第三方分发的文件，暂存位里有校验通过的副本就
-    /// 改为复制；还有没认领到的就汇总成一个错误，只列这些。
+    /// download-url 端点，任务都挂上 CDN 下载凭据。作者禁止第三方分发的文件，落点被覆盖层盖住的跳过，暂存位
+    /// 里有校验通过的副本就改为复制；还有没认领到的就汇总成一个错误，只列这些。
     async fn curseforge_downloads(
         &self,
         client: &CurseForgeClient,
         refs: &[CurseForgeFileRef],
+        covered: &HashSet<String>,
         version_dir: &Path,
     ) -> Result<RemotePlan> {
         let index = CurseForgeIndex::fetch(client, refs).await?;
@@ -943,6 +952,9 @@ impl Aurora {
                         Some(url) => task_for_file_url(url, &dest, file),
                         None => {
                             let item = index.blocked(reference, file, sub)?;
+                            if covered.contains(&item.destination.to_lowercase()) {
+                                continue;
+                            }
                             match self.claimed_copy(&item).await? {
                                 Some(staged) => plan.claimed.push(ClaimedCopy { staged, dest }),
                                 None => blocked.push(item),
@@ -994,6 +1006,14 @@ impl Aurora {
         }
     }
 
+    fn curseforge_cdn_scope(&self) -> CredentialScope {
+        #[cfg(test)]
+        if let Some(scope) = self.injected_curseforge_cdn_scope() {
+            return scope.clone();
+        }
+        CredentialScope::curseforge_cdn()
+    }
+
     /// 批量下载远程文件；失败的文件有备用地址就换地址再下一轮。
     async fn download_remote(
         &self,
@@ -1029,33 +1049,34 @@ impl Aurora {
     }
 }
 
-/// 这个地址是不是 CurseForge 的 CDN（CDN 不带密钥一律回 401）。
-fn on_curseforge_cdn(url: &str) -> bool {
-    reqwest::Url::parse(url).is_ok_and(|url| CredentialScope::curseforge_cdn().allows(&url))
+fn on_cdn(scope: &CredentialScope, url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|url| scope.allows(&url))
 }
 
-/// Modrinth 格式的包里 forgecdn 地址要用的下载凭据；没有这种地址时不取 key，与 CurseForge 无关的包
-/// 不该因为没配 key 而失败。
+/// Modrinth 清单文件要用的 CDN 凭据。别的启动器导出的 .mrpack 会把 CurseForge 上的 Mod 写成 forgecdn 地址，
+/// 这类地址与平台下载一样不带 key 就回 401；清单里没有这类地址时不去要 key，没配 key 也照常导入。
 ///
-/// 没配 key 时只有「某个文件除了 forgecdn 没有别的地址」才报错：这种文件下不到，导入注定失败，早报
-/// 比下到一半撞 401 明白。每个文件都还有别的地址时照常下，forgecdn 失败了换地址。
-fn pack_cdn_credential(
+/// 没配 key 时，每个文件都还有别的地址可换就只记日志（CDN 那个地址回 401 后换下一个）；有文件只能从 CDN
+/// 下载就在这里报错，不先装几百 MB 游戏再告诉用户装不完。key 配了但不合法是用户要改的错，不在此列。
+fn modrinth_cdn_credential(
     files: &[ModrinthFile],
-    credential: impl FnOnce() -> Result<DownloadCredential>,
+    scope: &CredentialScope,
+    resolve: impl FnOnce() -> Result<DownloadCredential>,
 ) -> Result<Option<DownloadCredential>> {
-    if !files
+    let has_cdn_url = files
         .iter()
-        .any(|file| file.urls.iter().any(|url| on_curseforge_cdn(url)))
-    {
+        .any(|file| file.urls.iter().any(|url| on_cdn(scope, url)));
+    if !has_cdn_url {
         return Ok(None);
     }
-    match credential() {
+    match resolve() {
         Ok(credential) => Ok(Some(credential)),
         Err(CoreError::ModPlatform(aurora_modplatform::Error::CurseForgeKeyMissing))
-            if !files
+            if files
                 .iter()
-                .any(|file| file.urls.iter().all(|url| on_curseforge_cdn(url))) =>
+                .all(|file| file.urls.iter().any(|url| !on_cdn(scope, url))) =>
         {
+            tracing::warn!("整合包里有 CurseForge CDN 地址但没配下载密钥，这些地址会失败，改走备用地址");
             Ok(None)
         }
         Err(err) => Err(err),
@@ -1226,6 +1247,16 @@ pub(crate) async fn curseforge_remote_facts(
             .map(|(sum, length)| sum + length);
     }
     Ok(RemoteFacts { entries, bytes })
+}
+
+/// 覆盖文件的落点，已转小写，与 Windows 上落盘的结果一致。覆盖文件在下载之后解出，落点相同的远程文件
+/// 反正会被盖掉，受限的那些不必让用户手动下载。
+fn override_landings(archive: &PackArchive) -> HashSet<String> {
+    archive
+        .overrides
+        .iter()
+        .map(|entry| entry.path.as_str().to_lowercase())
+        .collect()
 }
 
 fn file_name_of(path: &str) -> String {
@@ -1445,16 +1476,6 @@ mod tests {
             .await;
     }
 
-    fn modrinth_file(name: &str, urls: &[&str]) -> ModrinthFile {
-        ModrinthFile {
-            path: format!("mods/{name}").try_into().unwrap(),
-            urls: urls.iter().map(|url| (*url).to_owned()).collect(),
-            sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned(),
-            size: 10,
-            optional: false,
-        }
-    }
-
     /// 别的启动器导出的 .mrpack 会把 CurseForge 上的 Mod 写成 forgecdn 地址，读包时放行。这些任务要带上
     /// 与 CurseForge 包同一份下载凭据，否则 CDN 回 401、整个导入失败；只有 Modrinth 地址的任务不带。
     #[tokio::test]
@@ -1465,14 +1486,18 @@ mod tests {
         let server = MockServer::start().await;
         let tmp = tempfile::tempdir().unwrap();
         let aurora = aurora(tmp.path(), &server).with_curseforge_key("pack-key");
+        let file = |name: &str, urls: &[&str]| {
+            let urls: Vec<String> = urls.iter().map(|url| (*url).to_owned()).collect();
+            modrinth_file(&format!("mods/{name}"), &urls, b"x")
+        };
         let remote = RemoteFiles::Modrinth(vec![
-            modrinth_file("jei.jar", &[EDGE]),
-            modrinth_file("sodium.jar", &[CDN]),
-            modrinth_file("rei.jar", &[CDN, MEDIA]),
+            file("jei.jar", &[EDGE]),
+            file("sodium.jar", &[CDN]),
+            file("rei.jar", &[CDN, MEDIA]),
         ]);
 
         let plan = aurora
-            .remote_downloads(&remote, Path::new("D:/mc/versions/包"))
+            .remote_downloads(&remote, &HashSet::new(), Path::new("D:/mc/versions/包"))
             .await
             .unwrap();
 
@@ -1490,37 +1515,6 @@ mod tests {
         assert!(credential.applies_to(&reqwest::Url::parse(MEDIA).unwrap()));
         assert!(!credential.applies_to(&reqwest::Url::parse(CDN).unwrap()));
         assert_eq!(plan.downloads[2].fallbacks, vec![MEDIA.to_owned()]);
-    }
-
-    /// 没配 key 时：某个文件只有 forgecdn 地址，导入注定失败，直接报 key 缺失而不是下到一半的 401；
-    /// 每个文件都还有别的地址就照常下，这种包不要 key 也装得上。
-    #[test]
-    fn modrinth_pack_needs_the_key_only_when_a_file_has_no_other_address() {
-        const EDGE: &str = "https://edge.forgecdn.net/files/3040/523/jei.jar";
-        const CDN: &str = "https://cdn.modrinth.com/data/x/sodium.jar";
-        let missing = || -> Result<DownloadCredential> {
-            Err(aurora_modplatform::Error::CurseForgeKeyMissing.into())
-        };
-
-        let cdn_only = [modrinth_file("jei.jar", &[EDGE])];
-        assert!(matches!(
-            pack_cdn_credential(&cdn_only, missing),
-            Err(CoreError::ModPlatform(
-                aurora_modplatform::Error::CurseForgeKeyMissing
-            ))
-        ));
-
-        let alternative = [modrinth_file("jei.jar", &[EDGE, CDN])];
-        assert!(
-            pack_cdn_credential(&alternative, missing)
-                .unwrap()
-                .is_none()
-        );
-
-        let untouched = [modrinth_file("sodium.jar", &[CDN])];
-        let no_call =
-            || -> Result<DownloadCredential> { panic!("纯 Modrinth 包不该去取 key") };
-        assert!(pack_cdn_credential(&untouched, no_call).unwrap().is_none());
     }
 
     fn aurora(root: &Path, server: &MockServer) -> Aurora {
@@ -2268,6 +2262,170 @@ mod tests {
         assert!(!dest.exists());
     }
 
+    fn modrinth_file(dest: &str, urls: &[String], bytes: &[u8]) -> ModrinthFile {
+        ModrinthFile {
+            path: aurora_modpack::SafeRelativePath::new(dest).unwrap(),
+            urls: urls.to_vec(),
+            sha1: sha1_hex(bytes),
+            size: bytes.len() as u64,
+            optional: false,
+        }
+    }
+
+    /// 别的启动器导出的 .mrpack 会把 CurseForge 上的 Mod 写成 forgecdn 地址，读包也认这类主机：下载时与
+    /// 平台下载一样要带密钥，否则 CDN 一律回 401。发往 CDN 的每个请求都带，发往别处的不带；CDN 拒绝密钥时
+    /// 报 CredentialRejected（界面据此说明怎么换密钥），不混同于普通的 401。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mrpack_files_on_the_curseforge_cdn_carry_the_download_key() {
+        let cdn = MockServer::start().await;
+        let other = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cdn.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"cdn-jar".to_vec()))
+            .mount(&cdn)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/locked.jar"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&cdn)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/mr.jar"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"mr-jar".to_vec()))
+            .mount(&other)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora(tmp.path(), &other)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+                [format!("127.0.0.1:{}", cdn.address().port())],
+                false,
+            ));
+        let inst = tmp.path().join("落樱 实例");
+        let files = RemoteFiles::Modrinth(vec![
+            modrinth_file(
+                "mods/cdn.jar",
+                &[format!("{}/cdn.jar", cdn.uri())],
+                b"cdn-jar",
+            ),
+            modrinth_file(
+                "mods/mr.jar",
+                &[format!("{}/mr.jar", other.uri())],
+                b"mr-jar",
+            ),
+        ]);
+
+        let plan = aurora
+            .remote_downloads(&files, &HashSet::new(), &inst)
+            .await
+            .unwrap();
+        aurora.download_remote(plan.downloads, None).await.unwrap();
+
+        assert_eq!(
+            std::fs::read(inst.join("mods").join("cdn.jar")).unwrap(),
+            b"cdn-jar"
+        );
+        assert_eq!(
+            std::fs::read(inst.join("mods").join("mr.jar")).unwrap(),
+            b"mr-jar"
+        );
+        let cdn_requests = cdn.received_requests().await.unwrap();
+        assert!(!cdn_requests.is_empty());
+        for request in &cdn_requests {
+            assert_eq!(
+                request
+                    .headers
+                    .get("x-api-key")
+                    .map(|v| v.to_str().unwrap()),
+                Some("k"),
+                "{}",
+                request.url
+            );
+        }
+        for request in other.received_requests().await.unwrap() {
+            assert!(
+                request.headers.get("x-api-key").is_none(),
+                "{}",
+                request.url
+            );
+        }
+
+        let locked = RemoteFiles::Modrinth(vec![modrinth_file(
+            "mods/locked.jar",
+            &[format!("{}/locked.jar", cdn.uri())],
+            b"x",
+        )]);
+        let plan = aurora
+            .remote_downloads(&locked, &HashSet::new(), &inst)
+            .await
+            .unwrap();
+        let err = aurora
+            .download_remote(plan.downloads, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CoreError::Download(aurora_download::Error::CredentialRejected { status: 401, .. })
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// 没有 CDN 地址时不要 key；有 CDN 地址时要 key，要不到时看文件还有没有别的路可走。
+    #[test]
+    fn mrpack_cdn_credential_is_required_only_when_a_file_has_no_other_url() {
+        const CDN: &str = "https://edge.forgecdn.net/files/1/2/a.jar";
+        const MODRINTH: &str = "https://cdn.modrinth.com/data/a/versions/b/a.jar";
+        let scope = CredentialScope::curseforge_cdn();
+        let file = |urls: &[&str]| {
+            let urls: Vec<String> = urls.iter().map(|url| (*url).to_owned()).collect();
+            modrinth_file("mods/a.jar", &urls, b"x")
+        };
+        let missing = || {
+            Err(CoreError::ModPlatform(
+                aurora_modplatform::Error::CurseForgeKeyMissing,
+            ))
+        };
+        let key = || Ok(DownloadCredential::curseforge("k").unwrap());
+
+        let no_cdn = [file(&[MODRINTH])];
+        assert!(
+            modrinth_cdn_credential(&no_cdn, &scope, || panic!("不该要 key"))
+                .unwrap()
+                .is_none()
+        );
+
+        let cdn_only = [file(&[MODRINTH]), file(&[CDN])];
+        assert!(
+            modrinth_cdn_credential(&cdn_only, &scope, key)
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            modrinth_cdn_credential(&cdn_only, &scope, missing),
+            Err(CoreError::ModPlatform(
+                aurora_modplatform::Error::CurseForgeKeyMissing
+            ))
+        ));
+
+        let with_fallback = [file(&[CDN, MODRINTH]), file(&[MODRINTH])];
+        assert!(
+            modrinth_cdn_credential(&with_fallback, &scope, missing)
+                .unwrap()
+                .is_none()
+        );
+
+        // key 配错了不等于没配，有备用地址也要让用户看见。
+        let malformed = || Err(CoreError::from(DownloadCredential::curseforge(" ").unwrap_err()));
+        assert!(matches!(
+            modrinth_cdn_credential(&with_fallback, &scope, malformed),
+            Err(CoreError::Download(
+                aurora_download::Error::InvalidCredential { .. }
+            ))
+        ));
+    }
+
     fn cf_file(id: u32, mod_id: u32, name: &str, url: Option<String>) -> serde_json::Value {
         serde_json::json!({
             "id": id, "modId": mod_id, "displayName": name, "fileName": name,
@@ -2336,7 +2494,12 @@ mod tests {
         let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
 
         let plan = aurora
-            .curseforge_downloads(&client, &refs(&[(1, 11), (2, 22), (3, 33), (4, 44)]), dir)
+            .curseforge_downloads(
+                &client,
+                &refs(&[(1, 11), (2, 22), (3, 33), (4, 44)]),
+                &HashSet::new(),
+                dir,
+            )
             .await
             .unwrap();
         assert!(plan.claimed.is_empty());
@@ -2366,7 +2529,12 @@ mod tests {
         );
 
         let err = aurora
-            .curseforge_downloads(&client, &refs(&[(1, 11), (5, 55), (6, 66)]), dir)
+            .curseforge_downloads(
+                &client,
+                &refs(&[(1, 11), (5, 55), (6, 66)]),
+                &HashSet::new(),
+                dir,
+            )
             .await
             .unwrap_err();
         let CoreError::FileDistributionBlocked { files } = &err else {
@@ -2407,7 +2575,7 @@ mod tests {
         assert_eq!((files[0].fingerprint, files[0].size), (0, Some(10)));
 
         let err = aurora
-            .curseforge_downloads(&client, &refs(&[(9, 99)]), dir)
+            .curseforge_downloads(&client, &refs(&[(9, 99)]), &HashSet::new(), dir)
             .await
             .unwrap_err();
         assert!(
@@ -3024,6 +3192,107 @@ mod tests {
         assert!(
             matches!(&err, CoreError::Modpack(aurora_modpack::Error::NotOptional { path }) if path == "mods/core.jar"),
             "{err:?}"
+        );
+    }
+
+    /// 受限文件的落点被覆盖层盖住时不用手动下载：覆盖文件在下载之后解出，手动下载的那份反正会被盖掉。
+    /// 预览不列它、准备不报受限，导入后落点是包里自带的内容；落点比较不分大小写。别的受限文件照常报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_files_covered_by_an_override_need_no_manual_download() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file(55, 5, "Covered.jar", None),
+                    cf_file(66, 6, "still-blocked.jar", None),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(5, 6), cf_mod(6, 6)]})),
+            )
+            .mount(&server)
+            .await;
+        for (project, file) in [(5u32, 55u32), (6, 66)] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/v1/mods/{project}/files/{file}/download-url"
+                )))
+                .respond_with(ResponseTemplate::new(403))
+                .mount(&server)
+                .await;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let covered = serde_json::json!({ "projectID": 5, "fileID": 55, "required": true });
+        let blocked = serde_json::json!({ "projectID": 6, "fileID": 66, "required": true });
+        let bundled: &[(&str, &[u8])] = &[("overrides/mods/covered.jar", b"bundled jar")];
+        let none = ImportSelection::default();
+
+        // 只有被盖住的那个：预览不列、导入不拦。
+        let pack = tmp.path().join("自带.zip");
+        write_curseforge_pack(
+            &pack,
+            &curseforge_vanilla_manifest(serde_json::json!([covered])),
+            bundled,
+        );
+        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(preview.blocked_files, Vec::new());
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.file_name.as_str(), m.availability))
+                .collect::<Vec<_>>(),
+            vec![("covered.jar", PackFileAvailability::Bundled)]
+        );
+        let outcome = aurora
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("自带"),
+                &none,
+                "task-covered",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("mods").join("covered.jar")).unwrap(),
+            b"bundled jar"
+        );
+
+        // 另一个没被盖住的文件照常报，清单里只有它。
+        let pack = tmp.path().join("混合.zip");
+        write_curseforge_pack(
+            &pack,
+            &curseforge_vanilla_manifest(serde_json::json!([covered, blocked])),
+            bundled,
+        );
+        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(
+            preview
+                .blocked_files
+                .iter()
+                .map(|f| f.file_id)
+                .collect::<Vec<_>>(),
+            vec![66]
+        );
+        let err = aurora
+            .prepare_modpack(&ModpackSource::File { path: pack }, None, &none, None)
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件");
+        };
+        assert_eq!(
+            files.iter().map(|f| f.file_id).collect::<Vec<_>>(),
+            vec![66]
         );
     }
 

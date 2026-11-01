@@ -176,7 +176,8 @@ pub struct ModpackSummaryDto {
 }
 
 /// 平台整合包某个版本的清单摘要（Mod 数、要下载的字节）。只按范围读包末尾的目录与清单条目，
-/// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`。
+/// 不下载整包；服务器不支持范围读取、包不是可读的 zip 或缺清单时报 `remote_pack_unreadable`，
+/// 清单用了解不开的压缩方式时报 `modpack_unsupported_compression`。
 /// CurseForge 另问批量文件与批量工程两个接口，没配 API key 时报 CurseForge 源被禁用的同一个错误。
 #[tauri::command]
 pub async fn summarize_platform_modpack(
