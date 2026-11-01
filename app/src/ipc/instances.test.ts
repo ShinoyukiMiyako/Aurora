@@ -641,6 +641,17 @@ describe("mock：存档备份", () => {
     expect(left.map((b) => b.kind)).toEqual(Array.from({ length: 7 }, () => "manual"));
   });
 
+  it("自动备份关着时手动备份不清理：份数与总量都超了，以前的自动备份也一份不少", async () => {
+    vi.useFakeTimers();
+    await updateConfig({ worldBackup: { auto: false, keep_per_world: 1, max_total_gb: 1 } });
+    const before = (await listWorldBackups(ID, WORLD)).backups.map((b) => b.file);
+    // 种子 500 MB 加四份手动 648 MB 超过 1 GB，种子里的两份自动备份也超过每个存档 1 份
+    for (const taskId of ["t-1", "t-2", "t-3", "t-4"]) expect((await backupDone(taskId)).pruned).toBe(0);
+    const list = await listWorldBackups(ID, WORLD);
+    expect(list.backups).toHaveLength(7);
+    expect(list.backups.filter((b) => b.kind === "auto").map((b) => b.file)).toEqual(before.filter((_, i) => i !== 1));
+  });
+
   it("恢复：备份表里没有这一份报 world_backup_not_found；成功后存档换成备份时的样子，原存档进回收站", async () => {
     vi.useFakeTimers();
     const error = await rejection(restoreWorldBackup("t-gone", ID, WORLD, "1-auto.zip"));

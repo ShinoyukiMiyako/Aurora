@@ -1901,7 +1901,7 @@ async fn begin_world_task<'a>(
 }
 
 /// 手动备份一个存档（工作目录下 `saves/<world>`）。长任务：进度经 core-event 推送并带 `task_id`，可取消，
-/// 取消后不留半截文件。备份完按保留策略清理旧的自动备份，手动备份不清理。
+/// 取消后不留半截文件。自动备份开着时，备份完按保留策略清理旧的自动备份，手动备份不清理。
 ///
 /// 游戏启动中或运行中报 `instance_busy`（detail.activity 为 launching / running）；共用存档在别的不隔离实例
 /// 开着游戏时同样报 `instance_busy`，detail.id 为那个实例。存档不在报 `world_not_found`，被游戏打开着报

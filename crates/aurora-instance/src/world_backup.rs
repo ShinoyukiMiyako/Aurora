@@ -362,7 +362,7 @@ fn part_path(dest: &Path) -> PathBuf {
 /// 把存档文件夹打成 zip 写到 `dest`：条目统一加 `<存档文件夹名>/` 前缀，每个子目录都有目录条目（空目录也
 /// 保留），任何层级的 `session.lock` 都跳过。先写 `<dest>.part`，写完再改名成 `dest`（已存在则覆盖）。
 ///
-/// 先遍历一遍算出总量，之后每拷 64 KiB 查一次 `is_cancelled`。取消或失败时删掉 `.part`，返回
+/// 先遍历一遍算出总量，之后每拷 64 KiB 查一次 `is_cancelled`，刷完盘、改名就位之前再查一次。取消或失败时删掉 `.part`，返回
 /// [`Error::Cancelled`] 或原错误。存档里有符号链接或目录联接时拒绝打包。
 pub fn pack_world(
     world_dir: &Path,
@@ -387,6 +387,10 @@ pub fn pack_world(
     }
     let part = part_path(dest);
     let written = write_archive(&root, &tree, &part, is_cancelled, progress).and_then(|()| {
+        // 写目录区与刷盘可能要几秒；这期间来的取消也不能让 zip 就位：调用方可能已经不再等结果。
+        if is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         fs::rename(&part, dest).map_err(|source| Error::Io {
             path: dest.to_path_buf(),
             source,
@@ -1044,8 +1048,9 @@ fn remove_dir_logged(path: &Path) {
 ///
 /// 第一步，每个存档的自动备份按 `created_at` 倒序保留前 `keep_per_world` 份，其余进清单。第二步，剩下的
 /// 全部备份（自动与手动一起算）总量超过 `max_total_bytes` 时，按全局 `created_at` 从旧到新继续删自动备份，
-/// 直到不超或没有自动备份可删。手动备份永远不进清单。`keep` 是刚写成的那一份，不参与第二步：否则单个存档
-/// 比上限还大时，新备份刚写完就会被删。清单里文件名不安全的条目不是本工程写的，不碰。
+/// 直到不超或没有自动备份可删。手动备份永远不进清单。`keep` 是刚写成的那一份，两步都不删它：第一步它占保留
+/// 份数里的一份（保留 0 份时也留下它），第二步不参与，否则单个存档比上限还大时，新备份刚写完就会被删。
+/// 清单里文件名不安全的条目不是本工程写的，不碰。
 pub fn plan_prune(
     indices: &[(PathBuf, BackupIndex)],
     policy: RetentionPolicy,
@@ -1053,20 +1058,25 @@ pub fn plan_prune(
 ) -> Vec<(PathBuf, String)> {
     let mut doomed: Vec<(&Path, &BackupEntry)> = Vec::new();
     for (dir, index) in indices {
+        let is_fresh = |entry: &BackupEntry| keep == Some((dir.as_path(), entry.file.as_str()));
         let mut autos: Vec<&BackupEntry> = index
             .entries
             .iter()
             .filter(|entry| entry.kind == BackupKind::Auto && is_backup_file_name(&entry.file))
             .collect();
+        // 刚写成的那一份排在最前、至少留下它：按时刻排序在时钟回拨或保留 0 份时会把它排出去。
         autos.sort_by(|a, b| {
-            b.created_at
-                .cmp(&a.created_at)
+            is_fresh(b)
+                .cmp(&is_fresh(a))
+                .then_with(|| b.created_at.cmp(&a.created_at))
                 .then_with(|| b.file.cmp(&a.file))
         });
+        let fresh_here = autos.first().is_some_and(|entry| is_fresh(entry));
+        let kept = (policy.keep_per_world as usize).max(usize::from(fresh_here));
         doomed.extend(
             autos
                 .into_iter()
-                .skip(policy.keep_per_world as usize)
+                .skip(kept)
                 .map(|entry| (dir.as_path(), entry)),
         );
     }
@@ -1289,6 +1299,27 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, Error::Cancelled), "{err:?}");
         assert!(!dest.exists());
+        assert!(!part_path(&dest).exists());
+    }
+
+    /// 最后一个文件写完之后还要写目录区、刷盘，大存档在机械盘上要几秒，这时进度已到 100%，玩家最容易点取消。
+    /// 取消落在这段里也要按取消收场：不把 zip 改名就位（命令层宽限期满后不再等结果，就位的 zip 记不进清单，
+    /// 导出则会盖掉原来的文件），原来的目标文件保持原样。
+    #[test]
+    fn cancel_after_the_last_file_keeps_the_destination_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let world = sample_world(&tmp.path().join("saves"), "w", "w", b"r");
+        let dest = tmp.path().join("export.zip");
+        fs::write(&dest, b"old").unwrap();
+        let cancelled = Cell::new(false);
+        let err = pack_world(&world, &dest, &|| cancelled.get(), &mut |p| {
+            if p.files_total > 0 && p.files_done == p.files_total {
+                cancelled.set(true);
+            }
+        })
+        .unwrap_err();
+        assert!(matches!(err, Error::Cancelled), "{err:?}");
+        assert_eq!(fs::read(&dest).unwrap(), b"old");
         assert!(!part_path(&dest).exists());
     }
 
@@ -1740,6 +1771,35 @@ mod tests {
         assert_eq!(
             plan_prune(&indices, policy(0), Some((&b, "5-auto.zip"))).len(),
             3
+        );
+    }
+
+    /// 刚写成的那一份在第一步也不能被删：配置手改成每个存档 0 份，或系统时钟往回拨过、新备份的时刻比旧的还早时，
+    /// 按时刻排序会把它排到保留份数之外，备份刚报成功文件就没了。它占保留份数里的一份，其余按时刻倒序补足。
+    #[test]
+    fn the_fresh_backup_survives_the_per_world_cut() {
+        let dir = PathBuf::from("w");
+        let policy = |keep| RetentionPolicy {
+            keep_per_world: keep,
+            max_total_bytes: UNLIMITED,
+        };
+        let indices = [(dir.clone(), index(autos(1..=3, 10)))];
+        assert_eq!(
+            plan_prune(&indices, policy(0), Some((&dir, "3-auto.zip"))),
+            vec![
+                (dir.clone(), "2-auto.zip".to_owned()),
+                (dir.clone(), "1-auto.zip".to_owned()),
+            ]
+        );
+        // 时钟回拨：刚写的是时刻最早的 1，保留 2 份时留下它与最新的 3。
+        assert_eq!(
+            plan_prune(&indices, policy(2), Some((&dir, "1-auto.zip"))),
+            vec![(dir.clone(), "2-auto.zip".to_owned())]
+        );
+        // 不在这个存档里的 keep 不影响这里的取舍。
+        assert_eq!(
+            plan_prune(&indices, policy(2), Some((Path::new("别处"), "1-auto.zip"))),
+            vec![(dir, "1-auto.zip".to_owned())]
         );
     }
 

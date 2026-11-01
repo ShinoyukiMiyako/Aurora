@@ -111,7 +111,7 @@ impl Aurora {
     }
 
     /// 备份一个存档。存档文件夹不在报 [`CoreError::WorldNotFound`]，正被游戏打开报
-    /// `Instance(WorldInUse)`。写进清单之后按保留策略清理旧备份，清理不掉的发一条告警，下次再试。
+    /// `Instance(WorldInUse)`。写进清单之后，自动备份开着时按保留策略清理旧备份，清理不掉的发一条告警，下次再试。
     pub async fn backup_world(
         &self,
         id: &str,
@@ -160,9 +160,14 @@ impl Aurora {
             }
             return Err(err.into());
         }
-        let pruned = self
-            .prune(&root, Some((&paths.backup_dir, &entry.file)), events)
-            .await?;
+        // 保留策略只管自动备份：自动备份关着时设置页把两项保留设置一起禁用、写明不会清理，
+        // 手动备份不能借机删掉玩家以前的自动备份。
+        let pruned = if self.config().world_backup.auto {
+            self.prune(&root, Some((&paths.backup_dir, &entry.file)), events)
+                .await?
+        } else {
+            0
+        };
         Ok(BackupOutcome {
             backup: entry.into(),
             pruned,
@@ -1531,6 +1536,57 @@ mod tests {
             .unwrap();
         assert!(outcome.backed_up.is_empty() && outcome.failed.is_empty());
         assert!(!backups_root(&aurora).exists());
+    }
+
+    /// 设置页在自动备份关闭时禁用两项保留设置并写明「不会清理」：这时手动备份也不能顺手删掉以前的自动备份，
+    /// 不管份数还是总量超没超。
+    #[tokio::test]
+    async fn manual_backup_with_auto_off_keeps_every_earlier_auto_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        let saves = isolated(&aurora, "a");
+        world(&saves, "w", "w");
+        let mut autos = Vec::new();
+        for _ in 0..3 {
+            let outcome = aurora
+                .backup_world("a", "w", BackupKind::Auto, None)
+                .await
+                .unwrap();
+            autos.push(outcome.backup.file);
+        }
+
+        aurora.set_world_backup(WorldBackupSettings {
+            auto: false,
+            keep_per_world: 1,
+            max_total_gb: 1,
+        });
+        let manual = aurora
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap();
+        assert_eq!(manual.pruned, 0);
+
+        let dir = backups_root(&aurora).join("instances").join("a").join("w");
+        let mut expected = autos.clone();
+        expected.push(manual.backup.file.clone());
+        expected.sort();
+        assert_eq!(zips_in(&dir), expected);
+        assert_eq!(read_backup_index(&dir).await.unwrap().entries.len(), 4);
+
+        // 重新打开后，下一份自动备份照常清理：每个存档只留 1 份自动备份，以前的 3 份都清掉，手动备份不动。
+        aurora.set_world_backup(WorldBackupSettings {
+            auto: true,
+            keep_per_world: 1,
+            max_total_gb: 20,
+        });
+        let next = aurora
+            .backup_world("a", "w", BackupKind::Auto, None)
+            .await
+            .unwrap();
+        assert_eq!(next.pruned, 3);
+        let mut left = vec![manual.backup.file, next.backup.file];
+        left.sort();
+        assert_eq!(zips_in(&dir), left);
     }
 
     #[tokio::test]

@@ -1109,7 +1109,8 @@ async function backupWorld(args: MockArgs): Promise<BackupResultDto> {
     await fakePack(taskId, packedSize(found));
     const entry = backupEntry(freshBackupTime(id, world), "manual", packedSize(found), found.name);
     setWorldBackups(id, world, [...worldBackups(id, world), entry]);
-    const pruned = pruneBackups({ id, world, file: entry.file });
+    // 与后端一致：自动备份关着时不清理，手动备份不借机删以前的自动备份
+    const pruned = mockWorldBackupSettings().auto ? pruneBackups({ id, world, file: entry.file }) : 0;
     return { backup: entry, pruned };
   });
 }
