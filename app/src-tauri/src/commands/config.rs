@@ -515,6 +515,8 @@ pub struct GameDirectoryDto {
     pub is_current: bool,
     /// 此刻能否访问；为假时记录仍保留。
     pub available: bool,
+    /// `versions/` 下的版本目录数，没有 `versions/` 算 0。不可达、探测超时或读取失败时为 null，不等于 0。
+    pub version_count: Option<u32>,
 }
 
 /// 一条带名字的目录（探测结果与首次启动勾选项）。
@@ -539,6 +541,7 @@ fn game_directory_dto(entry: GameDirectoryEntry) -> GameDirectoryDto {
         path: entry.path.display().to_string(),
         is_current: entry.is_current,
         available: entry.available,
+        version_count: entry.version_count,
     }
 }
 
@@ -567,7 +570,7 @@ pub(crate) fn parse_named_directory(
     })
 }
 
-/// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达。
+/// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达与版本数。
 #[tauri::command]
 pub async fn list_game_directories(
     facade: State<'_, Facade>,
@@ -1334,6 +1337,43 @@ mod tests {
         assert_eq!(
             read_config(&facade).await.game_dir,
             target.display().to_string()
+        );
+    }
+
+    /// 版本数过 IPC 时 0 和 null 要分得开：null 是「不知道」，字段也得在，前端按 `number | null` 读。
+    #[tokio::test(start_paused = true)]
+    async fn game_directory_dto_tells_unknown_version_count_from_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let current = dir.path().join(".minecraft").join("versions");
+        std::fs::create_dir_all(current.join("1.21.1")).unwrap();
+        std::fs::create_dir_all(current.join("生存")).unwrap();
+        let empty = dir.path().join("PCL").join(".minecraft");
+        std::fs::create_dir_all(&empty).unwrap();
+        let unplugged = dir.path().join("unplugged").join(".minecraft");
+        add_game_directory_with(&facade, "PCL", &empty.display().to_string())
+            .await
+            .unwrap();
+        add_game_directory_with(&facade, "外置盘", &unplugged.display().to_string())
+            .await
+            .unwrap();
+
+        let listed: Vec<serde_json::Value> = facade
+            .snapshot()
+            .await
+            .game_directories()
+            .await
+            .into_iter()
+            .map(|entry| serde_json::to_value(game_directory_dto(entry)).unwrap())
+            .collect();
+
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0]["version_count"], 2);
+        assert_eq!(listed[1]["version_count"], 0);
+        assert_eq!(listed[2]["available"], false);
+        assert_eq!(
+            listed[2].get("version_count"),
+            Some(&serde_json::Value::Null)
         );
     }
 
