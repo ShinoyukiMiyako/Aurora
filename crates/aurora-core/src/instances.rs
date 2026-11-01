@@ -1208,6 +1208,24 @@ pub(crate) mod tests {
         assert!(text.contains("被占.json"), "{text}");
     }
 
+    /// 版本 JSON 写坏了：概览横幅与实例卡片上「版本 JSON」只说一次，后面跟着坏在哪里。
+    #[tokio::test]
+    async fn corrupt_version_json_reason_names_the_subject_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        write_version(aurora.game_dir(), "写坏了", "{ this is not json }");
+
+        let list = aurora.list_instances().await.unwrap();
+
+        let InstanceVersion::Broken(reason) = &list[0].version else {
+            panic!("应为损坏：{:?}", list[0].version);
+        };
+        assert_eq!(
+            broken_reason_text(reason),
+            "版本 JSON 损坏：key must be a string at line 1 column 3"
+        );
+    }
+
     /// 整合包来源与最近崩溃时刻随列表给出；这两份附属文件坏了只标在这个实例上，列表照常返回。
     #[tokio::test]
     async fn list_instances_carries_modpack_origin_and_last_crash() {

@@ -338,15 +338,17 @@ fn parse_version_file(json_path: &Path) -> Result<ParseOutcome> {
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => text,
         Err(err) => {
-            return Ok(ParseOutcome::Invalid(format!(
-                "版本 JSON 不是合法 UTF-8: {err}"
-            )));
+            return Ok(ParseOutcome::Invalid(format!("不是合法 UTF-8: {err}")));
         }
     };
     Ok(match VersionJson::from_json_str(text) {
         Ok(json) => {
             let loaders = detect_loaders(&json);
             ParseOutcome::Parsed(Arc::new((json, loaders)))
+        }
+        // 这一层的文字只是「版本 JSON解析失败」，上层已经写了「版本 JSON 损坏」；坏在哪一行在 source 里。
+        Err(aurora_version::Error::Json { source, .. }) => {
+            ParseOutcome::Invalid(source.to_string())
         }
         Err(err) => ParseOutcome::Invalid(err.to_string()),
     })
@@ -459,6 +461,32 @@ mod tests {
             BrokenReason::Parse(reason) => assert!(reason.contains("UTF-8"), "{reason}"),
             other => panic!("应为解析失败，实际 {other:?}"),
         }
+    }
+
+    /// 上层把原因拼成「版本 JSON 损坏：<说明>」，说明里不再写主语，要写的是只有这里知道的行列号。
+    #[tokio::test]
+    async fn parse_reason_gives_the_position_without_repeating_the_subject() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "broken", "{ this is not json }").await;
+        let bad = mc.join("versions").join("bad-utf8");
+        tokio::fs::create_dir_all(&bad).await.unwrap();
+        tokio::fs::write(bad.join("bad-utf8.json"), b"{\"id\":\"\xff\"}")
+            .await
+            .unwrap();
+
+        let scan = discover_versions(mc).await.unwrap();
+
+        let reasons: Vec<&str> = scan
+            .broken
+            .iter()
+            .map(|b| match &b.reason {
+                BrokenReason::Parse(reason) => reason.as_str(),
+                other => panic!("应为解析失败，实际 {other:?}"),
+            })
+            .collect();
+        assert!(reasons[0].starts_with("不是合法 UTF-8"), "{}", reasons[0]);
+        assert_eq!(reasons[1], "key must be a string at line 1 column 3");
     }
 
     #[tokio::test]
