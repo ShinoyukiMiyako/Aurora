@@ -79,6 +79,7 @@ const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
   files_failed: { count: 2, reason: "连接超时" },
   disk_full: { drive: "D:", needed_bytes: 1024 },
   version_broken: {},
+  path_unsupported: { char: "한", path: "D:/Games/versions/한글/한글.jar" },
   spawn_failed: { message: "CreateProcess error=2" },
 };
 
@@ -230,6 +231,18 @@ describe("启动失败：账户验证暂时不可用", () => {
     );
     const toast = TOAST_COPY.offlineLaunched("生存");
     expect(bannedIn([...texts, toast.title, toast.body])).toEqual([]);
+  });
+});
+
+describe("启动失败：路径里有 Java 读不了的字符", () => {
+  it("点名字符与路径，告诉玩家怎么避开；标题不超过 16 字", () => {
+    const copy = failureCopy("path_unsupported", { char: "한", path: "D:/Games/versions/한글/한글.jar" }, ctx("Steve"));
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+    expect(copy.body).toContain("「한」");
+    expect(copy.body).toContain("D:/Games/versions/한글/한글.jar");
+    expect(copy.body).toContain("改个名字");
+    expect(copy.fix.kind).toBe("open_logs");
+    expect(bannedIn([copy.title, copy.body])).toEqual([]);
   });
 });
 

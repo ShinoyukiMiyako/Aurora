@@ -35,6 +35,53 @@ pub fn game_path_warning(game_dir: &Path) -> Option<String> {
     ))
 }
 
+/// 路径里第一个系统代码页表示不了的字符。
+///
+/// Windows 上的 java.exe 按系统代码页读命令行（Java 8 到 26 实测都是）：表示不了的字符变成问号，
+/// classpath 指向不存在的文件，游戏只会报找不到主类。其他系统的命令行是字节串，没有这回事。
+#[cfg(windows)]
+pub fn path_char_outside_code_page(path: &Path) -> Option<char> {
+    // SAFETY: 无参数，只读进程的系统代码页。
+    let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
+    char_outside_code_page(&path.to_string_lossy(), code_page)
+}
+
+/// 路径里第一个系统代码页表示不了的字符。非 Windows 系统不受影响。
+#[cfg(not(windows))]
+pub fn path_char_outside_code_page(_path: &Path) -> Option<char> {
+    None
+}
+
+#[cfg(windows)]
+fn char_outside_code_page(text: &str, code_page: u32) -> Option<char> {
+    use windows_sys::Win32::Globalization::{CP_UTF8, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte};
+
+    // UTF-8 什么都表示得了，而且系统不接受它带这里的标志与输出参数。
+    if code_page == CP_UTF8 {
+        return None;
+    }
+    text.chars().filter(|ch| !ch.is_ascii()).find(|ch| {
+        let mut wide = [0u16; 2];
+        let wide = ch.encode_utf16(&mut wide);
+        let mut encoded = [0u8; 8];
+        let mut lossy = 0;
+        // SAFETY: 两个缓冲区都是栈上数组，长度都小到不会截断 i32，输出参数指向本地变量。
+        let written = unsafe {
+            WideCharToMultiByte(
+                code_page,
+                WC_NO_BEST_FIT_CHARS,
+                wide.as_ptr(),
+                wide.len() as i32,
+                encoded.as_mut_ptr(),
+                encoded.len() as i32,
+                std::ptr::null(),
+                &raw mut lossy,
+            )
+        };
+        written == 0 || lossy != 0
+    })
+}
+
 /// 同步盘。它们在同步时会占用、替换或按需下载正在读写的文件，存档与 Mod 可能读不全。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncProvider {
@@ -229,6 +276,39 @@ mod tests {
         let bang = game_path_warning(Path::new(r"D:\games!\mc")).unwrap();
         assert!(bang.contains("「!」"), "{bang}");
         assert_eq!(game_path_warning(Path::new(r"D:\games\mc")), None);
+    }
+
+    /// 判定只看给定的代码页，测试不随这台电脑的系统语言变。
+    #[cfg(windows)]
+    #[test]
+    fn code_page_check_finds_the_first_character_it_cannot_encode() {
+        const GBK: u32 = 936;
+        const WESTERN: u32 = 1252;
+        assert_eq!(char_outside_code_page(r"D:\我的世界\生存 1.12", GBK), None);
+        assert_eq!(
+            char_outside_code_page(r"D:\我的世界\한글 테스트", GBK),
+            Some('한')
+        );
+        assert_eq!(char_outside_code_page(r"D:\games", WESTERN), None);
+        assert_eq!(char_outside_code_page(r"D:\我的世界", WESTERN), Some('我'));
+        // 代理对也是一个字符。
+        assert_eq!(
+            char_outside_code_page("D:\\\u{20BB7}", GBK),
+            Some('\u{20BB7}')
+        );
+    }
+
+    /// 只能近似映射的字符同样算表示不了：ā 近似成 a 之后路径指向的已经不是那个文件。
+    #[cfg(windows)]
+    #[test]
+    fn best_fit_mapping_counts_as_not_encodable() {
+        assert_eq!(char_outside_code_page("\u{101}", 1252), Some('\u{101}'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn utf8_code_page_encodes_everything() {
+        assert_eq!(char_outside_code_page("D:\\한글\\\u{20BB7}", 65001), None);
     }
 
     #[test]

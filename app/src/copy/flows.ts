@@ -370,6 +370,13 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
         fix: { kind: "repair", label: "修复实例" },
         secondary: null,
       };
+    case "path_unsupported":
+      return {
+        title: "路径里有 Java 读不了的字符",
+        body: `「${strParam(params, "char", code)}」不在这台电脑的系统编码里，Java 读不了 ${strParam(params, "path", code)}。给实例改个名字或换一个游戏目录，避开这个字符。`,
+        fix: { kind: "open_logs", label: "完整日志" },
+        secondary: null,
+      };
     case "spawn_failed":
       return {
         title: "游戏进程没能启动",

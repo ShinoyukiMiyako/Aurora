@@ -29,8 +29,8 @@ use aurora_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
     LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, QuickPlayMode,
     QuickPlayTarget, SessionClock, SessionLog, SyncProvider, game_path_warning, jvm_memory_issue,
-    long_player_name, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
-    sync_roots_from_env,
+    long_player_name, path_char_outside_code_page, quick_play_support, recommended_max_mb,
+    required_java_major, sync_folder, sync_roots_from_env,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
 use serde::Serialize;
@@ -228,6 +228,8 @@ pub enum FailureCode {
     FilesFailed,
     DiskFull,
     VersionBroken,
+    /// 路径里有系统代码页表示不了的字符，Java 收不到这个路径。
+    PathUnsupported,
     SpawnFailed,
 }
 
@@ -244,6 +246,7 @@ impl FailureCode {
             FailureCode::FilesFailed => "files_failed",
             FailureCode::DiskFull => "disk_full",
             FailureCode::VersionBroken => "version_broken",
+            FailureCode::PathUnsupported => "path_unsupported",
             FailureCode::SpawnFailed => "spawn_failed",
         }
     }
@@ -776,6 +779,8 @@ impl Aurora {
                 path: working_dir.clone(),
                 source,
             })?;
+        let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
+        ensure_paths_reach_java([&paths.client_jar, &paths.natives_dir, &working_dir])?;
         if let Some(text) = game_path_warning(&working_dir) {
             warnings.push(LaunchWarning::GamePath);
             reporter.warn(text).await;
@@ -923,7 +928,6 @@ impl Aurora {
             warnings.push(warning);
             reporter.warn(text).await;
         }
-        let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         let command = assemble_command(
             merged,
             self.runtime(),
@@ -1649,6 +1653,27 @@ async fn quick_play_target(
     }
 }
 
+/// 这些路径都要经 java.exe 的命令行。走不通时在下载之前停下：起进程只会等来一句找不到主类。
+fn ensure_paths_reach_java<'a>(
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), LaunchFailed> {
+    for path in paths {
+        if let Some(ch) = path_char_outside_code_page(path) {
+            return Err(LaunchFailure::new(
+                FailureCode::PathUnsupported,
+                format!(
+                    "路径里的「{ch}」不在系统代码页里，Java 读不了：{}",
+                    path.display()
+                ),
+            )
+            .param("char", ch.to_string())
+            .param("path", path.display().to_string())
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// 起进程；起不来就是 spawn_failed，原样带上系统给的原因。
 fn spawn_game(
     command: &LaunchCommand,
@@ -2331,6 +2356,35 @@ mod tests {
         };
         run.finish().await;
         assert_eq!(std::fs::read(&copied).unwrap(), b"ogg!");
+    }
+
+    /// java.exe 按系统代码页读命令行，表示不了的字符变成问号，游戏只会报找不到主类。不起进程，
+    /// 说清楚是哪个字符。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn path_outside_the_system_code_page_stops_the_launch() {
+        // 扩展 B 区的汉字，不在任何 ANSI 代码页里。
+        let id = "\u{20BB7}";
+        // 系统代码页切成 UTF-8 的机器上这条路径是合法的。
+        if aurora_launch::path_char_outside_code_page(Path::new(id)).is_none() {
+            return;
+        }
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_pre_1_6_version(&mc, id, b"ogg!");
+        let java = echo_java(&fx.root);
+        let request = LaunchRequest {
+            version_id: id.to_owned(),
+            ..super::tests::request()
+        };
+
+        let (result, _) = launch_request(&fx.aurora, request, java).await;
+
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::PathUnsupported);
+        assert_eq!(failure.params["char"], Value::from(id));
+        let path = failure.params["path"].as_str().unwrap();
+        assert!(path.ends_with(&format!("{id}.jar")), "{path}");
     }
 
     /// 刷新成功的整条令牌链；`login` 决定 Minecraft 登录那一步怎么回应。
@@ -4147,6 +4201,7 @@ mod tests {
             (FailureCode::FilesFailed, "files_failed"),
             (FailureCode::DiskFull, "disk_full"),
             (FailureCode::VersionBroken, "version_broken"),
+            (FailureCode::PathUnsupported, "path_unsupported"),
             (FailureCode::SpawnFailed, "spawn_failed"),
         ];
         for (code, name) in all {
