@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use aurora_base::mirror::MirrorSource;
 use aurora_instance::IsolationPolicy;
+use aurora_java::detect::normalize_separators;
 use chrono::{Datelike, Local, Timelike};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -480,6 +481,17 @@ fn take_unknown_enum_values(root: &mut Value) -> Vec<ConfigFieldReset> {
     resets
 }
 
+/// 配置里的 Java 路径换成规整后的分隔符。探测报出的路径都是规整过的，界面比对、移除时匹配都按文本：
+/// 文件里留着旧的混合写法的话，明明还在的 Java 会被说成已失效，移除时也对不上。
+fn settle_java_paths(config: &mut AuroraConfig) {
+    if let Some(path) = &mut config.default_java {
+        *path = normalize_separators(path);
+    }
+    for path in &mut config.extra_java_paths {
+        *path = normalize_separators(path);
+    }
+}
+
 /// 坏配置文件改名用的后缀前缀，后面接本地时间 `YYYYMMDD-HHMMSS`。
 const BROKEN_SUFFIX: &str = ".broken-";
 
@@ -544,6 +556,7 @@ impl ConfigStore {
             .note_fallbacks(&config, &resets)
             .map_err(CoreError::ConfigSerialize)?;
         config.carried_over = carried_over;
+        settle_java_paths(&mut config);
         for reset in &resets {
             tracing::warn!(
                 path = %self.path.display(),
@@ -2077,6 +2090,47 @@ mod tests {
         assert_eq!(raw["memory"]["max_mb"], 8192);
         assert_eq!(raw["default_java"], r"C:\jdk-17\bin\java.exe");
         assert_eq!(store.load().await.unwrap(), loaded);
+    }
+
+    /// 探测报出的路径分隔符是规整过的，界面按文本比对固定的 Java：配置里留着旧写法的话，
+    /// 明明还在的 Java 会被说成已失效。落盘时跟着写成新写法。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn java_paths_load_with_normalized_separators() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{
+                "default_java": "D:/Java/jdk 17\\bin\\java.exe",
+                "extra_java_paths": ["E:/中文 目录/zulu8/bin/java.exe", "F:\\jdk\\bin\\java.exe"]
+            }"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.default_java.as_deref().and_then(Path::to_str),
+            Some(r"D:\Java\jdk 17\bin\java.exe")
+        );
+        let extras: Vec<_> = loaded
+            .extra_java_paths
+            .iter()
+            .filter_map(|path| path.to_str())
+            .collect();
+        assert_eq!(
+            extras,
+            vec![r"E:\中文 目录\zulu8\bin\java.exe", r"F:\jdk\bin\java.exe"]
+        );
+
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["default_java"], r"D:\Java\jdk 17\bin\java.exe");
+        assert_eq!(
+            raw["extra_java_paths"][0],
+            r"E:\中文 目录\zulu8\bin\java.exe"
+        );
     }
 
     /// 结构损坏不因为同时有不认识的取值而被放过：退回之后类型仍对不上，整份留存、按默认启动，
