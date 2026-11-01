@@ -61,19 +61,21 @@ const fn performance(project_id: &'static str, name: &'static str) -> StarterEnt
 // - ModernFix = nmDcB62a，loaders [fabric, forge, neoforge]
 // 某个加载器只收工程级 loaders 里写了它的项：ModernFix 没有 quilt，Sodium 与 Lithium 没有 forge。
 // Forge 上第三方移植的 Sodium、Lithium 不收：维护者不同、版本节奏不同，出了问题玩家找不到正主。
+pub(crate) const FABRIC_API_PROJECT: &str = "P7dR8mSH";
+pub(crate) const QFAPI_PROJECT: &str = "qvIfYCYJ";
 const SODIUM: StarterEntry = performance("AANobbMI", "Sodium");
 const LITHIUM: StarterEntry = performance("gvQqBUqZ", "Lithium");
 const FERRITE_CORE: StarterEntry = performance("uXXizFIs", "FerriteCore");
 const MODERN_FIX: StarterEntry = performance("nmDcB62a", "ModernFix");
 
 const FABRIC: &[StarterEntry] = &[
-    api("P7dR8mSH", "Fabric API"),
+    api(FABRIC_API_PROJECT, "Fabric API"),
     SODIUM,
     LITHIUM,
     FERRITE_CORE,
     MODERN_FIX,
 ];
-const QUILT: &[StarterEntry] = &[api("qvIfYCYJ", "QFAPI"), SODIUM, LITHIUM, FERRITE_CORE];
+const QUILT: &[StarterEntry] = &[api(QFAPI_PROJECT, "QFAPI"), SODIUM, LITHIUM, FERRITE_CORE];
 const NEOFORGE: &[StarterEntry] = &[SODIUM, LITHIUM, FERRITE_CORE, MODERN_FIX];
 const FORGE: &[StarterEntry] = &[FERRITE_CORE, MODERN_FIX];
 
