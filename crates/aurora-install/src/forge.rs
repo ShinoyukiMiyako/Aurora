@@ -471,7 +471,6 @@ impl<'a> ForgeInstaller<'a> {
         checked_segment(&version_id, || "Forge install_profile 的版本 id".to_owned())?;
         checked_segment(&minecraft, || "Forge install_profile 的游戏版本".to_owned())?;
 
-        // 解出内联 version.json。
         let version_bytes =
             read_zip_entry_async(installer, json_entry.trim_start_matches('/')).await?;
         let embedded: VersionJson = net::parse_json(&version_bytes, "Forge version.json")?;
@@ -3143,7 +3142,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_unknown_code_page_falls_back_to_lossy_utf8() {
-        assert_eq!(decode_code_page(b"Exception: boom", 1), "Exception: boom");
+        const NO_SUCH_CODE_PAGE: u32 = 12345;
+        assert_eq!(
+            decode_code_page("补丁失败".as_bytes(), NO_SUCH_CODE_PAGE),
+            "补丁失败"
+        );
     }
 
     /// JVM 读 jar 的打开方式：放行读写共享、不放行删除共享。另一个实例的游戏就这样占着库里的 jar。
