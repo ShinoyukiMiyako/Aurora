@@ -928,6 +928,11 @@ export class LauncherStore {
   private settingsApplied = 0;
   private pinsIssued = 0;
   private pinsApplied = 0;
+  /**
+   * 最近一次写入的当前实例，以及写入发出时设置读取已发出到第几次（见 selectInstance、fetchSettings）。
+   * 写入没有返回整份配置，晚到的旧读取不能整份丢掉（里面可能有改设置之后读到的别的字段），只把当前实例按写入改正。
+   */
+  private selectionWrite: { id: string; readsIssued: number } | null = null;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
   /**
@@ -1097,9 +1102,12 @@ export class LauncherStore {
    */
   private async fetchSettings(): Promise<void> {
     const seq = ++this.settingsIssued;
-    const settings = settingsFromDto(await configIpc.getConfig());
+    const read = settingsFromDto(await configIpc.getConfig());
     if (seq <= this.settingsApplied) return;
     this.settingsApplied = seq;
+    // 当前实例写入发出之前发出的读取可能读在写入之前
+    const written = this.selectionWrite;
+    const settings = written !== null && seq <= written.readsIssued ? { ...read, selectedVersion: written.id } : read;
     this.set({ settings });
   }
 
@@ -1147,6 +1155,17 @@ export class LauncherStore {
     if (seq <= this.pinsApplied) return;
     this.pinsApplied = seq;
     this.set({ pins });
+  }
+
+  /**
+   * 写入侧栏固定并采纳后端返回的整份列表。写入发出之前已在路上的读取可能读在写入之前，晚到时会把刚写下的固定改回去，
+   * 所以一并作废；写入发出之后才发出的读取照常按序号采纳。
+   */
+  private async writePins(pins: string[]): Promise<void> {
+    const issuedBefore = this.pinsIssued;
+    const written = await instancesIpc.setSidebarPins(pins);
+    this.pinsApplied = Math.max(this.pinsApplied, issuedBefore);
+    this.set({ pins: written });
   }
 
   /**
@@ -1684,7 +1703,7 @@ export class LauncherStore {
     if (pin) {
       await this.queueSidebarPins(async () => {
         const pins = this.raw.pins;
-        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) this.set({ pins: await instancesIpc.setSidebarPins([...pins, id]) });
+        if (pins.length < SIDEBAR_PIN_LIMIT && !pins.includes(id)) await this.writePins([...pins, id]);
       });
     }
     this.instanceIdTaken(id);
@@ -2141,7 +2160,9 @@ export class LauncherStore {
       async selectInstance(id) {
         // 已经是当前实例时不再写配置（新建实例入队时已设过，新建流程收尾可能再设一次）
         if (store.raw.settings !== null && store.raw.settings.selectedVersion === id) return;
+        const readsIssued = store.settingsIssued;
         await configIpc.updateConfig({ selectedVersion: id });
+        store.selectionWrite = { id, readsIssued };
         store.set((raw) => ({ settings: raw.settings === null ? null : { ...raw.settings, selectedVersion: id } }));
       },
       togglePin(id) {
@@ -2160,7 +2181,7 @@ export class LauncherStore {
           }
           const pins = store.raw.pins;
           const next = pins.includes(id) ? pins.filter((p) => p !== id) : [...pins, id];
-          store.set({ pins: await instancesIpc.setSidebarPins(next) });
+          await store.writePins(next);
         });
       },
       setSidebarPins(ids) {
@@ -2171,7 +2192,7 @@ export class LauncherStore {
           store.set({ pins: persisted });
           // 拖动排序先乐观改顺序；写入失败恢复原顺序后把错误原样交给外层
           try {
-            store.set({ pins: await instancesIpc.setSidebarPins(persisted) });
+            await store.writePins(persisted);
           } catch (error) {
             store.set({ pins: before });
             throw error;

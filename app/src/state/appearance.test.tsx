@@ -236,6 +236,57 @@ describe("AppearanceProvider", () => {
     expect(api.appearance).toEqual({ ...DEFAULT_APPEARANCE, accent: "moss" });
   });
 
+  it("新请求先失败、旧请求随后确认：界面落到旧请求确认的后端状态，不停在更早的值上", async () => {
+    stubMatchMedia(false);
+    const first = deferred<AppearanceDto>();
+    const second = deferred<AppearanceDto>();
+    vi.mocked(persist).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    mount();
+    let p1!: Promise<void>;
+    let p2!: Promise<void>;
+    act(() => {
+      p1 = api.setAppearance({ accent: "amethyst" });
+      p2 = api.setAppearance({ mode: "night" });
+    });
+    const failure = new Error("写入失败");
+    await act(async () => {
+      second.reject(failure);
+      await expect(p2).rejects.toBe(failure);
+    });
+    expect(html.getAttribute("data-sk-mode")).toBe("day");
+    await act(async () => {
+      first.resolve({ ...DAY_DTO, accent: "amethyst" });
+      await p1;
+    });
+    expect(html.getAttribute("data-sk-accent")).toBe("amethyst");
+    expect(html.getAttribute("data-sk-mode")).toBe("day");
+    expect(api.appearance).toEqual({ ...DEFAULT_APPEARANCE, accent: "amethyst" });
+  });
+
+  it("旧请求确认时更新的请求还在途：不提前换成旧请求的确认值，等更新的那次", async () => {
+    stubMatchMedia(false);
+    const first = deferred<AppearanceDto>();
+    const second = deferred<AppearanceDto>();
+    vi.mocked(persist).mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    mount();
+    let p1!: Promise<void>;
+    let p2!: Promise<void>;
+    act(() => {
+      p1 = api.setAppearance({ accent: "amethyst" });
+      p2 = api.setAppearance({ accent: "moss" });
+    });
+    await act(async () => {
+      first.resolve({ ...DAY_DTO, accent: "amethyst" });
+      await p1;
+    });
+    expect(html.getAttribute("data-sk-accent")).toBe("moss");
+    await act(async () => {
+      second.resolve({ ...DAY_DTO, accent: "moss" });
+      await p2;
+    });
+    expect(api.appearance).toEqual({ ...DEFAULT_APPEARANCE, accent: "moss" });
+  });
+
   it("旧请求失败时新请求仍在途，不回滚新请求的乐观值", async () => {
     stubMatchMedia(false);
     const first = deferred<AppearanceDto>();

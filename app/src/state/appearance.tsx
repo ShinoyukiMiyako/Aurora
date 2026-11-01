@@ -104,6 +104,8 @@ export function AppearanceProvider({ initial, children }: AppearanceProviderProp
   const confirmedSeq = useRef(0);
   const systemReducedRef = useRef(systemReduced);
   const requestSeq = useRef(0);
+  /** 还没有结果的请求序号。 */
+  const pendingSeqs = useRef(new Set<number>());
 
   const show = useCallback((next: Appearance) => {
     applyAppearance(next, systemReducedRef.current);
@@ -127,16 +129,21 @@ export function AppearanceProvider({ initial, children }: AppearanceProviderProp
     async (patch: Partial<Appearance>) => {
       const dto = appearancePatchToDto(patch);
       const seq = ++requestSeq.current;
+      pendingSeqs.current.add(seq);
       show({ ...shownRef.current, ...patch });
       try {
         const confirmed = appearanceFromDto(await persistAppearance(dto));
+        pendingSeqs.current.delete(seq);
         // 较早的请求晚回来时，它带回的是更早的后端状态，不能盖掉更新的那次确认：之后写入失败要回到的是更新的那次
         if (seq >= confirmedSeq.current) {
           confirmedSeq.current = seq;
           confirmedRef.current = confirmed;
+          // 更新的请求都已失败（界面已回滚到当时的确认值）时，这次确认就是后端的最新状态，界面要跟上；
+          // 还有更新的请求在途时由它决定，不提前换掉它的乐观值
+          if (![...pendingSeqs.current].some((s) => s > seq)) show(confirmed);
         }
-        if (seq === requestSeq.current) show(confirmed);
       } catch (error) {
+        pendingSeqs.current.delete(seq);
         // 不吞错误：只负责把界面还原到后端确认的值，错误照样交给调用方
         if (seq === requestSeq.current) show(confirmedRef.current);
         throw error;
