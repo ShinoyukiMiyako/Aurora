@@ -12,6 +12,7 @@ import {
   onLaunchPhase,
   onWorldBackup,
   playStats,
+  QUICK_PLAY_UNSUPPORTED_CODE,
   stopGame,
   WORLD_BACKUP_EVENT,
   type GameExitEvent,
@@ -22,7 +23,7 @@ import {
 } from "./launch";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners, emitMockWorldBackup } from "./mock/events";
-import { endMockGame, failNextMockLaunch } from "./mock/handlers/launch";
+import { endMockGame, failNextMockLaunch, lastMockQuickPlay } from "./mock/handlers/launch";
 import { cancelTask } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -47,7 +48,7 @@ function today(): string {
 }
 
 function offline(versionId: string, taskId: string): LaunchArgs {
-  return { taskId, versionId, accountUuid: null, offlineName: "Steve" };
+  return { taskId, versionId, accountUuid: null, offlineName: "Steve", quickPlay: null };
 }
 
 async function recordEvents() {
@@ -201,6 +202,50 @@ describe("启动 mock", () => {
     // 被拒的启动不占槽。
     expect(await launchGame(offline("1.21", "t-ok"))).toEqual({ pid: 4242 });
   });
+
+  it("直达：单人按世界文件夹名、多人按地址原文通过检查后照常走完八个阶段，mock 记下这次的 quickPlay", async () => {
+    const { phases } = await recordEvents();
+    const world = { kind: "singleplayer", world_dir_name: "New World" } as const;
+    expect(await launchGame({ ...offline("樱花生存", "t-sp"), quickPlay: world })).toEqual({ pid: 4242 });
+    expect(lastMockQuickPlay()).toEqual(world);
+    expect(phases.map((p) => p.stage_index).at(-1)).toBe(7);
+    await stopGame();
+    // 1.20 之前的版本只是不能直达存档，加入服务器照常
+    const server = { kind: "multiplayer", address: " play.example:25570 " } as const;
+    expect(await launchGame({ ...offline("RLCraft", "t-mp"), quickPlay: server })).toEqual({ pid: 4242 });
+    expect(lastMockQuickPlay()).toEqual(server);
+    await stopGame();
+    await launchGame(offline("1.21", "t-plain"));
+    expect(lastMockQuickPlay()).toBeNull();
+  });
+
+  it("直达的三项检查都在占游戏槽之前：版本不支持、世界不在、地址不合法各报各的码，之后照常能启动", async () => {
+    const unsupported = await rejection(launchGame({ ...offline("RLCraft", "t-1"), quickPlay: { kind: "singleplayer", world_dir_name: "x" } }));
+    expect(unsupported.code).toBe(QUICK_PLAY_UNSUPPORTED_CODE);
+    expect(unsupported.detail).toEqual({ version_id: "RLCraft", mode: "singleplayer" });
+    expect(unsupported.message).toBe("版本 RLCraft 不支持直接进入存档（1.20 之前的版本没有 Quick Play）");
+    // 世界名与文件夹名不同：只认文件夹名
+    const byLevelName = await rejection(launchGame({ ...offline("樱花生存", "t-2"), quickPlay: { kind: "singleplayer", world_dir_name: "樱花谷" } }));
+    expect(byLevelName.code).toBe("world_not_found");
+    expect(byLevelName.detail).toEqual({ version_id: "樱花生存", world: "樱花谷" });
+    const badAddress = await rejection(launchGame({ ...offline("1.21", "t-3"), quickPlay: { kind: "multiplayer", address: "host:0" } }));
+    expect(badAddress.code).toBe("invalid_argument");
+    expect(badAddress.detail).toMatchObject({ address: "host:0" });
+    const broken = await rejection(launchGame({ ...offline("没装完", "t-4"), quickPlay: { kind: "multiplayer", address: "play.example" } }));
+    expect(broken.detail).toEqual({ version_id: "没装完", mode: "multiplayer" });
+    expect(lastMockQuickPlay()).toBeNull();
+    expect(await launchGame(offline("1.21", "t-ok"))).toEqual({ pid: 4242 });
+  });
+
+  it("quickPlay 形状不对是 Tauri 自己的参数错误；缺键等于普通启动", async () => {
+    for (const quickPlay of ["New World", { kind: "realms", id: "1" }, { kind: "singleplayer" }, { kind: "multiplayer", address: "a", extra: 1 }]) {
+      const error = await rejection(invoke("launch_game", { taskId: "t", versionId: "1.21", accountUuid: null, offlineName: "Steve", quickPlay }));
+      expect(error.code).toBe("unknown");
+      expect(error.message).toContain("quickPlay");
+    }
+    expect(await invoke("launch_game", { taskId: "t-ok", versionId: "1.21", accountUuid: null, offlineName: "Steve" })).toEqual({ pid: 4242 });
+    expect(lastMockQuickPlay()).toBeNull();
+  });
 });
 
 describe("游玩统计 mock", () => {
@@ -268,15 +313,17 @@ describe("Tauri 窗口里", () => {
     expect(got).toEqual([{ instance_id: "a", backed_up: ["w"], failed: [] }]);
   });
 
-  it("launchGame 只传实例、账户与取消句柄；playStats 传 range 对象", async () => {
-    vi.mocked(tauriInvoke).mockResolvedValueOnce({ pid: 7 }).mockResolvedValueOnce(null).mockResolvedValueOnce({});
-    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这四项。
+  it("launchGame 只传实例、账户、直达目标与取消句柄；playStats 传 range 对象", async () => {
+    vi.mocked(tauriInvoke).mockResolvedValueOnce({ pid: 7 }).mockResolvedValueOnce({ pid: 8 }).mockResolvedValueOnce(null).mockResolvedValueOnce({});
+    // 调用方多塞的键（旧接口的内存参数）不会被转发：命令只收这五项。
     const extra = { ...offline("1.21", "t-run"), maxMemoryMb: 4096 } as unknown as LaunchArgs;
     expect(await launchGame(extra)).toEqual({ pid: 7 });
+    expect(await launchGame({ ...offline("1.21", "t-qp"), quickPlay: { kind: "multiplayer", address: "play.example" } })).toEqual({ pid: 8 });
     await stopGame();
     await playStats({ from: "2026-10-01", to: "2026-10-31" });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
-      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineName: "Steve" }],
+      ["launch_game", { taskId: "t-run", versionId: "1.21", accountUuid: null, offlineName: "Steve", quickPlay: null }],
+      ["launch_game", { taskId: "t-qp", versionId: "1.21", accountUuid: null, offlineName: "Steve", quickPlay: { kind: "multiplayer", address: "play.example" } }],
       ["stop_game", undefined],
       ["play_stats", { range: { from: "2026-10-01", to: "2026-10-31" } }],
     ]);

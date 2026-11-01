@@ -158,6 +158,9 @@ pub struct PinnedServer {
     pub name: String,
     /// `host` 或 `host:port`（IPv6 写成 `[addr]:port`）。
     pub address: String,
+    /// 「加入」时默认用的实例 id；没记住为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 /// 一条带名字的目录。名字是给人看的（「PCL2」「官方启动器」），路径才是身份。
@@ -656,10 +659,18 @@ mod tests {
             after_launch: AfterLaunch::Close,
             check_updates: false,
             default_java: Some(PathBuf::from("C:/Java/jdk-21/bin/java.exe")),
-            pinned_servers: vec![PinnedServer {
-                name: "Hypixel".to_owned(),
-                address: "mc.hypixel.net".to_owned(),
-            }],
+            pinned_servers: vec![
+                PinnedServer {
+                    name: "Hypixel".to_owned(),
+                    address: "mc.hypixel.net".to_owned(),
+                    instance: None,
+                },
+                PinnedServer {
+                    name: "家".to_owned(),
+                    address: "10.0.0.2:25570".to_owned(),
+                    instance: Some("生存 1.21.1".to_owned()),
+                },
+            ],
             extra_game_directories: vec![NamedDirectory {
                 name: "PCL2".to_owned(),
                 path: PathBuf::from("D:/PCL2/.minecraft"),
@@ -672,6 +683,56 @@ mod tests {
         ConfigStore::at(&path).save(&config).await.unwrap();
         let reloaded = ConfigStore::at(&path).load().await.unwrap();
         assert_eq!(reloaded, config);
+    }
+
+    /// 旧配置里固定的服务器只有 name 与 address：照常读出、没有记住实例；原样写回时也不多出 instance 键，
+    /// 降级回旧版本读到的仍是它认识的形状。
+    #[tokio::test]
+    async fn pinned_servers_without_instance_load_and_resave_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{"pinned_servers": [{"name": "Hypixel", "address": "mc.hypixel.net"}, {"name": "家", "address": "10.0.0.2:25570"}]}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.pinned_servers,
+            vec![
+                PinnedServer {
+                    name: "Hypixel".to_owned(),
+                    address: "mc.hypixel.net".to_owned(),
+                    instance: None,
+                },
+                PinnedServer {
+                    name: "家".to_owned(),
+                    address: "10.0.0.2:25570".to_owned(),
+                    instance: None,
+                },
+            ]
+        );
+
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["pinned_servers"],
+            serde_json::json!([
+                {"name": "Hypixel", "address": "mc.hypixel.net"},
+                {"name": "家", "address": "10.0.0.2:25570"}
+            ])
+        );
+
+        // 记住了实例的那条写出 instance，读回来一致。
+        let mut bound = loaded;
+        bound.pinned_servers[1].instance = Some("生存".to_owned());
+        store.save(&bound).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["pinned_servers"][1]["instance"], "生存");
+        assert!(raw["pinned_servers"][0].get("instance").is_none());
+        assert_eq!(store.load().await.unwrap(), bound);
     }
 
     #[test]

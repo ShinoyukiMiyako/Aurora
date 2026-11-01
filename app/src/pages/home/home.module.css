@@ -688,7 +688,7 @@ button.bar:hover .barTrack {
 
 .serverRow {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: var(--sk-space-10);
   padding: var(--sk-space-8) var(--sk-space-10);
@@ -813,4 +813,58 @@ button.bar:hover .barTrack {
 
 .ping[data-state="unreachable"] {
   color: var(--sk-danger);
+}
+
+/* 最窄一档里「加入」保留文字按钮，延迟文字先让位，只留信号格 */
+:root[data-sk-tier="compact"] .ping {
+  display: none;
+}
+
+.serverJoin {
+  display: inline-flex;
+}
+
+/* 实例选择：锚在「加入」上的 Popover */
+.joinPanel {
+  width: 280px;
+}
+
+.joinBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+  padding: var(--sk-space-14) var(--sk-space-16);
+}
+
+.joinTitle {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+/* 候选多时在面板内部滚动，复选框与主按钮始终看得见 */
+.joinList {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.joinOption {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sk-space-6);
+  min-width: 0;
+}
+
+.joinVersion {
+  flex: none;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  white-space: nowrap;
+}
+
+.joinFoot {
+  display: flex;
+  justify-content: flex-end;
 }

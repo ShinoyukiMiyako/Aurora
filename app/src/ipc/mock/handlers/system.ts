@@ -1,15 +1,16 @@
 import { IpcError } from "../../errors";
-import type {
-  KnownServerDto,
-  MemoryAdviceDto,
-  MemoryTier,
-  NewsFeedDto,
-  NewsItemDto,
-  PinnedServerDto,
-  ServerStatusDto,
-  StartupNoticeDto,
-  UpdateDto,
-  UpdaterInfoDto,
+import {
+  SERVER_NOT_PINNED_CODE,
+  type KnownServerDto,
+  type MemoryAdviceDto,
+  type MemoryTier,
+  type NewsFeedDto,
+  type NewsItemDto,
+  type PinnedServerDto,
+  type ServerStatusDto,
+  type StartupNoticeDto,
+  type UpdateDto,
+  type UpdaterInfoDto,
 } from "../../system";
 import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { emitMockEvent } from "../events";
@@ -27,6 +28,7 @@ import {
   tauriArgError,
   validateGameDir,
 } from "./config";
+import { requireMockInstanceId } from "./instances";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 // ---- 模拟下载 ----
@@ -111,8 +113,8 @@ function completeFirstRun(args: MockArgs): void {
 
 const DEFAULT_PORT = 25565;
 
-/** 与后端 parse_server_address 一致，返回去重用的键 host小写:port。 */
-function serverKey(raw: string): string {
+/** 与后端 parse_server_address 一致，返回去重用的键 host小写:port；不合法报 invalid_argument（detail.address）。 */
+export function serverKey(raw: string): string {
   const address = raw.trim();
   const invalid = (reason: string) => new IpcError("invalid_argument", `服务器地址「${raw}」不合法：${reason}`, { address: raw, reason });
   if (address === "") throw invalid("地址为空");
@@ -141,9 +143,10 @@ function serverKey(raw: string): string {
   return `${host.toLowerCase()}:${portNumber}`;
 }
 
+// 晨星记住了用实例 mock 种子里的「樱花生存」加入，小镇没记住：浏览器里两条路径都点得到。
 const SEED_PINNED: PinnedServerDto[] = [
-  { name: "晨星生存服", address: "play.morningstar.example" },
-  { name: "小镇建筑服", address: "build.town.example:25570" },
+  { name: "晨星生存服", address: "play.morningstar.example", instance: "樱花生存" },
+  { name: "小镇建筑服", address: "build.town.example:25570", instance: null },
 ];
 
 // 游戏多人列表（servers.dat）里的服务器。
@@ -201,25 +204,65 @@ let pinned: PinnedServerDto[] = SEED_PINNED.map((s) => ({ ...s }));
 function setPinnedServers(args: MockArgs): PinnedServerDto[] {
   const raw = args.servers;
   if (!Array.isArray(raw)) throw tauriArgError("set_pinned_servers", "servers", "expected a sequence");
-  const parsed = raw.map((item) => {
-    const record = requireStruct(item, ["name", "address"], "set_pinned_servers", "servers");
+  const parsed = raw.map((item): PinnedServerDto => {
+    const record = requireStruct(item, ["name", "address", "instance"], "set_pinned_servers", "servers");
     if (typeof record.name !== "string" || typeof record.address !== "string") {
       throw tauriArgError("set_pinned_servers", "servers", "name 与 address 须为字符串");
     }
-    return { name: record.name, address: record.address };
+    // 与后端的 #[serde(default)] Option<String> 一致：缺键与 null 都是没记住
+    const instance = record.instance === undefined ? null : record.instance;
+    if (instance !== null && typeof instance !== "string") throw tauriArgError("set_pinned_servers", "servers", "instance 须为字符串或 null");
+    if (instance !== null) requireSafeInstanceId(instance);
+    return { name: record.name, address: record.address, instance };
   });
   const seen = new Set<string>();
   const cleaned: PinnedServerDto[] = [];
   for (const server of parsed) {
     const key = serverKey(server.address);
+    // 同地址去重时保留第一次出现那条，连同它记住的实例
     if (seen.has(key)) continue;
     seen.add(key);
     const address = server.address.trim();
     const name = server.name.trim();
-    cleaned.push({ name: name === "" ? address : name, address });
+    cleaned.push({ name: name === "" ? address : name, address, instance: server.instance });
   }
   pinned = cleaned;
   return pinned;
+}
+
+/** 与后端 is_safe_instance_id 同一口径：只校验能否安全拼进路径，不校验实例是否存在。 */
+function requireSafeInstanceId(id: string): void {
+  if (id === "" || id.startsWith(".") || /[\\/:\0]/.test(id)) {
+    throw new IpcError("invalid_argument", `实例 id 不合法：${JSON.stringify(id)}`, { field: "id", reason: "unsafe_id", id });
+  }
+}
+
+/** 与后端同序：先查实例（不存在报 version_not_installed），再按去重键找固定项（找不到报 server_not_pinned）。 */
+function setPinnedServerInstance(args: MockArgs): PinnedServerDto[] {
+  const address = requireString(args, "address", "set_pinned_server_instance");
+  const raw = args.instance;
+  const instance = raw === undefined || raw === null ? null : raw;
+  if (instance !== null && typeof instance !== "string") throw tauriArgError("set_pinned_server_instance", "instance", "expected a string or null");
+  if (instance !== null) requireMockInstanceId(instance);
+  const key = serverKey(address);
+  const index = pinned.findIndex((p) => serverKey(p.address) === key);
+  if (index < 0) throw new IpcError(SERVER_NOT_PINNED_CODE, `服务器「${address}」没有固定`, { address });
+  pinned = pinned.map((p, i) => (i === index ? { ...p, instance } : p));
+  return pinned;
+}
+
+/** 实例改名后，记住它的固定服务器跟到新名字；按字符串精确相等，与侧栏固定同一口径。返回是否有改动。 */
+export function renameMockPinnedInstance(from: string, to: string): boolean {
+  const changed = pinned.some((p) => p.instance === from);
+  if (changed) pinned = pinned.map((p) => (p.instance === from ? { ...p, instance: to } : p));
+  return changed;
+}
+
+/** 实例删除后，记住它的固定服务器改回没记住。返回是否有改动。 */
+export function forgetMockPinnedInstance(id: string): boolean {
+  const changed = pinned.some((p) => p.instance === id);
+  if (changed) pinned = pinned.map((p) => (p.instance === id ? { ...p, instance: null } : p));
+  return changed;
 }
 
 function listKnownServers(): KnownServerDto[] {
@@ -374,6 +417,7 @@ export const handlers: MockHandlers = {
   probe_network: () => networkReachable,
   list_pinned_servers: () => pinned,
   set_pinned_servers: (args) => setPinnedServers(args),
+  set_pinned_server_instance: (args) => setPinnedServerInstance(args),
   list_known_servers: () => listKnownServers(),
   ping_servers: (args) => pingServers(args),
   list_news: (args) => listNews(args),
@@ -392,8 +436,9 @@ export function reset(): void {
 }
 
 // 固定的服务器在后端是配置的一部分；启动提示与更新状态每次启动重新得出，不存。
+// 版本 2：固定项多了记住的实例。
 export const persist: MockPersist = {
-  version: 1,
+  version: 2,
   snapshot: () => pinned,
   restore: (data) => {
     pinned = data as PinnedServerDto[];

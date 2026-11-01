@@ -2,9 +2,13 @@
 // 由这里的状态驱动，从任何入口（账户页、标题栏、启动拦截、令牌失效）都能弹出。
 
 import type { Account } from "../domain/adapt";
+import type { QuickPlayArg } from "../ipc/launch";
 
-/** 登录完成后要做的事：手动登录只关弹窗；由启动拦截触发的登录成功后自动继续这次启动。 */
-export type LoginIntent = { kind: "manual" } | { kind: "launch"; instanceId: string };
+/**
+ * 登录完成后要做的事：手动登录只关弹窗；由启动拦截触发的登录成功后自动继续这次启动，
+ * 直达世界或服务器的那次启动带着同一个 quickPlay 继续，普通启动为 null。
+ */
+export type LoginIntent = { kind: "manual" } | { kind: "launch"; instanceId: string; quickPlay: QuickPlayArg | null };
 
 export const MANUAL_LOGIN: LoginIntent = { kind: "manual" };
 

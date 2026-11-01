@@ -15,7 +15,8 @@ use std::time::{Instant, SystemTime};
 use aurora_core::{
     game_line_level, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun, GameSlot,
     LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
-    LauncherLevel, LogLine, LogSource, PlayRange, PlayStats, SlotBusy, SlotReservation, SlotTicket,
+    LauncherLevel, LogLine, LogSource, PlayRange, PlayStats, QuickPlay, SlotBusy, SlotReservation,
+    SlotTicket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -195,6 +196,30 @@ fn world_backup_event(
         instance_id: instance_id.to_owned(),
         backed_up,
         failed,
+    }
+}
+
+/// `launch_game` 的直达参数：启动后直接进入存档或加入服务器。前端键名 `quickPlay`，普通启动传 null。
+///
+/// 内部标签枚举叠 deny_unknown_fields 是有效的：serde_derive 1.0.228 先把 `kind` 从内容里取走，
+/// 再按容器属性反序列化结构体变体，多出的字段照样报错。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuickPlayArg {
+    /// `world_dir_name` 是 saves 下的世界文件夹名。
+    Singleplayer { world_dir_name: String },
+    /// `address` 是玩家写的地址原文。
+    Multiplayer { address: String },
+}
+
+impl From<QuickPlayArg> for QuickPlay {
+    fn from(arg: QuickPlayArg) -> Self {
+        match arg {
+            QuickPlayArg::Singleplayer { world_dir_name } => {
+                QuickPlay::Singleplayer { world_dir_name }
+            }
+            QuickPlayArg::Multiplayer { address } => QuickPlay::Multiplayer { address },
+        }
     }
 }
 
@@ -423,7 +448,9 @@ enum AccountArg {
 }
 
 /// 启动一个已安装版本。账户给 `account_uuid`（账户库里的账户）或 `offline_name`（临时离线账户）二者之一。
-/// 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析。
+/// 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析。`quick_play` 给出时启动后直接进入存档或
+/// 加入服务器：版本不支持报 quick_play_unsupported（detail.version_id、mode），存档不在报 world_not_found，
+/// 地址写法不对报 invalid_argument（detail.address），都在校验游戏文件阶段报出。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_game(
@@ -432,6 +459,7 @@ pub async fn launch_game(
     version_id: String,
     account_uuid: Option<String>,
     offline_name: Option<String>,
+    quick_play: Option<QuickPlayArg>,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
     running: State<'_, RunningGame>,
@@ -490,6 +518,7 @@ pub async fn launch_game(
                 account,
                 launcher_version: app.package_info().version.to_string(),
                 game_log: Some(log_tx),
+                quick_play: quick_play.map(QuickPlay::from),
             };
             aurora
                 .launch(request, &events_tx)
@@ -703,6 +732,49 @@ mod tests {
             aurora_core::DownloadError::Cancelled,
         )));
         assert!(cancelled.is_cancelled());
+    }
+
+    #[test]
+    fn quick_play_arg_parses_both_kinds_and_rejects_anything_else() {
+        let world: QuickPlayArg = serde_json::from_value(
+            json!({ "kind": "singleplayer", "world_dir_name": "New World" }),
+        )
+        .unwrap();
+        assert_eq!(
+            QuickPlay::from(world),
+            QuickPlay::Singleplayer {
+                world_dir_name: "New World".into()
+            }
+        );
+        let server: QuickPlayArg = serde_json::from_value(
+            json!({ "kind": "multiplayer", "address": "mc.example.com:25570" }),
+        )
+        .unwrap();
+        assert_eq!(
+            QuickPlay::from(server),
+            QuickPlay::Multiplayer {
+                address: "mc.example.com:25570".into()
+            }
+        );
+        // 前端普通启动传 null。
+        assert_eq!(
+            serde_json::from_value::<Option<QuickPlayArg>>(Value::Null).unwrap(),
+            None
+        );
+
+        for bad in [
+            json!({ "kind": "realms", "realm_id": "1" }),
+            json!({ "kind": "Singleplayer", "world_dir_name": "w" }),
+            json!({ "world_dir_name": "w" }),
+            json!({ "kind": "singleplayer" }),
+            json!({ "kind": "multiplayer", "address": "a", "port": 25565 }),
+            json!({ "kind": "singleplayer", "worldDirName": "w" }),
+        ] {
+            assert!(
+                serde_json::from_value::<QuickPlayArg>(bad.clone()).is_err(),
+                "{bad} 不该被接受"
+            );
+        }
     }
 
     #[test]

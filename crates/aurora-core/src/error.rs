@@ -153,6 +153,9 @@ pub enum CoreError {
         address: String,
         reason: &'static str,
     },
+    /// 要改的服务器不在固定列表里。
+    #[error("服务器「{address}」没有固定")]
+    ServerNotPinned { address: String },
     /// 游戏目录不能用作当前目录。
     #[error("游戏目录 {path} 不能用：{problem}")]
     InvalidGameDirectory {

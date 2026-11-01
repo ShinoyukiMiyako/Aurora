@@ -80,7 +80,7 @@ pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
-    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
+    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning, QuickPlay,
     resolve_memory,
 };
 pub use launcher_update::{UpdateSource, order_update_sources};
@@ -126,8 +126,9 @@ pub use aurora_instance::{
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use aurora_launch::{
     CrashCategory, CrashDiagnosis, ExitReport, KillSwitch, LauncherLevel, LogBatchSink, LogEntry,
-    LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, SessionEnded, SessionOutcome,
-    SystemMemory, analyze, detect_crash, game_line_level, probe_system_memory,
+    LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, QuickPlayMode, QuickPlaySupport,
+    QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory, analyze, detect_crash,
+    game_line_level, probe_system_memory,
 };
 pub use aurora_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,

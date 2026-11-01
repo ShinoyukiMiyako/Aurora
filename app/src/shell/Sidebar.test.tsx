@@ -22,7 +22,7 @@ vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).f
 
 const T0 = 1_700_000_000_000;
 const inst = { id: "生存", name: "生存", lastPlayedAt: null } as InstanceSummary;
-const session = startSession("生存", "launch-1", { uuid: "u", name: "Steve" }, T0);
+const session = startSession("生存", "launch-1", { uuid: "u", name: "Steve" }, T0, null);
 
 describe("侧栏选中项", () => {
   it("主导航页各自对应；账户页没有选中项", () => {

@@ -60,7 +60,7 @@ async function busy(promise: Promise<unknown>): Promise<[string, unknown]> {
   return [error.message, error.detail];
 }
 
-const offline = (versionId: string, taskId: string) => ({ taskId, versionId, accountUuid: null, offlineName: "Steve" });
+const offline = (versionId: string, taskId: string) => ({ taskId, versionId, accountUuid: null, offlineName: "Steve", quickPlay: null });
 
 async function activityOf(id: string): Promise<string | null> {
   const found = (await listInstances()).find((i) => i.id === id);

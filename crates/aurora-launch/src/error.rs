@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use crate::quickplay::QuickPlayMode;
+
 /// 启动链路错误。
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
@@ -67,6 +69,14 @@ pub enum LaunchError {
     /// 系统时钟早于 1970 年：时间戳无从谈起。
     #[error("系统时钟早于 1970 年，请校正系统时间")]
     ClockBeforeEpoch,
+
+    /// 要求直达存档或服务器，但这个版本的启动参数里没有对应的入口。
+    #[error("版本 {version} 不支持直接{}", .mode.unsupported_action())]
+    QuickPlayUnsupported {
+        /// 版本 id。
+        version: String,
+        mode: QuickPlayMode,
+    },
 
     /// 隔离解析（探盘 mods/saves）冒泡上来的实例层错误。
     #[error(transparent)]

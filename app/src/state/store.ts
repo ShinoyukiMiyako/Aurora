@@ -79,7 +79,7 @@ import type { InstalledRuntimeDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
 import type { ModpackInstallOutcomeDto, ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
-import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServers, type PinnedServerDto } from "../ipc/system";
+import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServerInstance, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
 import type { CoreEvent } from "../ipc/tasks";
 import { describeError, errorRecord } from "./errors";
@@ -144,6 +144,9 @@ import {
 
 // ---------------------------------------------------------------- 状态形状
 
+/** 页面与启动层不直接引用 ipc/，直达目标的形状经这里拿。 */
+export type { QuickPlayArg } from "../ipc/launch";
+
 export type Slice = "settings" | "accounts" | "instances" | "pins" | "tasks" | "firstRun";
 export type SliceStatus = { kind: "loading" } | { kind: "ready" } | { kind: "error"; error: Error };
 
@@ -152,6 +155,8 @@ export interface LaunchPrompt {
   instanceId: string;
   occupantId: string;
   occupantPhase: "loading" | "running";
+  /** 确认替换后这次启动要直达的世界或服务器；普通启动为 null。 */
+  quickPlay: launchIpc.QuickPlayArg | null;
 }
 
 /** 新建实例的入参。cover 为封面预设 id。 */
@@ -338,6 +343,11 @@ export interface LauncherActions {
   refreshInstances(): Promise<void>;
   // 启动会话
   launch(id: string): Promise<void>;
+  /**
+   * 启动并直达一个世界或一台服务器，与 launch 走同一条拦截（同实例已在加载或运行时不重复、别的实例占着时弹替换确认、
+   * 没有账户时先登录再继续）。损坏与安装中的实例不提供直达，入口应当禁用，调到这里直接抛错。
+   */
+  quickPlay(id: string, target: launchIpc.QuickPlayArg): Promise<void>;
   stop(): Promise<void>;
   dismissSession(): void;
   resolveLaunchPrompt(accept: boolean): Promise<void>;
@@ -387,6 +397,8 @@ export interface LauncherActions {
   /** commitFirstRun 加 finishFirstRun：提交后立即卸载向导。 */
   completeFirstRun(gameDir: string, extraDirectories: configIpc.NamedDirectoryDto[]): Promise<void>;
   togglePinServer(server: PinnedServerDto): Promise<void>;
+  /** 记住（instance 为 id）或忘掉（null）某台固定服务器「加入」时用的实例；与固定的读改写排在同一条链上。 */
+  setPinnedServerInstance(address: string, instance: string | null): Promise<void>;
   reload(slice: Slice): Promise<void>;
 }
 
@@ -800,6 +812,7 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     extraLoaders: [],
     releaseType: null,
     javaMajor: null,
+    quickPlay: null,
     description: null,
     cover: meta.cover,
     pinned,
@@ -1869,7 +1882,7 @@ export class LauncherStore {
     if (this.raw.login !== null && this.raw.login.kind === kind) this.set({ login: null });
     if (intent.kind === "launch") {
       this.pushToast("success", toast.title, TOAST_COPY.continuingLaunch(intent.instanceId));
-      await this.actions.launch(intent.instanceId);
+      await this.requestLaunch(intent.instanceId, intent.quickPlay);
       return;
     }
     this.pushToast("success", toast.title, toast.body);
@@ -1877,14 +1890,42 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 启动内部
 
-  private async startLaunch(instanceId: string, account: Account): Promise<void> {
+  /**
+   * 普通启动与直达共用的拦截链：同一实例已在加载或运行时直接返回；别的实例占着游戏进程时弹替换确认；
+   * 安装中抛错；损坏的普通启动转成「修复并启动」，直达抛错；没有账户先登录，登录后带着同一个 quickPlay 继续。
+   */
+  private async requestLaunch(id: string, quickPlay: launchIpc.QuickPlayArg | null): Promise<void> {
+    const inst = this.instance(id);
+    const s = this.raw.session;
+    if (s !== null && isSessionActive(s)) {
+      // 同一实例在多个入口上点启动，只有第一次生效
+      if (s.instanceId === id) return;
+      this.set({ launchPrompt: { instanceId: id, occupantId: s.instanceId, occupantPhase: s.phase === "running" ? "running" : "loading", quickPlay } });
+      return;
+    }
+    if (inst.status === "installing") throw new Error(`「${id}」还在安装，入口不应提供启动`);
+    if (inst.status === "broken") {
+      // 修复完成后的自动启动是普通启动，带不上直达目标：入口按损坏禁用直达
+      if (quickPlay !== null) throw new Error(`「${id}」需要先修复，入口不应提供直达`);
+      await this.actions.repairInstance(id, { launchAfter: true });
+      return;
+    }
+    const account = this.currentAccount();
+    if (account === null) {
+      this.set({ login: { kind: "no_account", intent: { kind: "launch", instanceId: id, quickPlay } } });
+      return;
+    }
+    await this.startLaunch(id, account, quickPlay);
+  }
+
+  private async startLaunch(instanceId: string, account: Account, quickPlay: launchIpc.QuickPlayArg | null): Promise<void> {
     const taskId = freshId("launch");
-    this.set({ session: startSession(instanceId, taskId, account, Date.now()), launchPrompt: null });
+    this.set({ session: startSession(instanceId, taskId, account, Date.now(), quickPlay), launchPrompt: null });
     if (this.raw.settings !== null && this.raw.settings.selectedVersion !== instanceId) {
       this.background(ACTION_ERROR.selectInstance, this.actions.selectInstance(instanceId));
     }
     // 启动的结局（失败码、取消）是会话状态的一部分，不是异常：在这里转成会话；其余错误清掉乐观会话后原样抛出
-    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null }).then(
+    await launchIpc.launchGame({ taskId, versionId: instanceId, accountUuid: account.uuid, offlineName: null, quickPlay }).then(
       () => {
         const s = this.raw.session;
         if (s !== null) this.set({ session: sessionLaunched(s, taskId, Date.now()) });
@@ -1926,8 +1967,11 @@ export class LauncherStore {
   private fixTarget(s: SessionState, kind: FailureFixKind): FailureFixTarget {
     const instanceId = s.instanceId;
     switch (kind) {
-      case "retry":
-        return { run: () => this.actions.launch(instanceId), errorTitle: ACTION_ERROR.launch(instanceId) };
+      case "retry": {
+        // 重试是同一次启动再来一遍，直达目标一起带上；其余修复动作之后按普通启动继续
+        const quickPlay = s.quickPlay;
+        return { run: () => this.requestLaunch(instanceId, quickPlay), errorTitle: ACTION_ERROR.launch(instanceId) };
+      }
       case "repair":
         return { run: () => this.actions.repairInstance(instanceId), errorTitle: ACTION_ERROR.repair };
       case "download_java": {
@@ -1945,7 +1989,7 @@ export class LauncherStore {
         };
       case "relogin": {
         const accountUuid = s.accountUuid;
-        return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId }), errorTitle: ACTION_ERROR.relogin };
+        return { run: () => this.actions.relogin(accountUuid, { kind: "launch", instanceId, quickPlay: null }), errorTitle: ACTION_ERROR.relogin };
       }
       case "open_game_dir":
         return { run: () => this.actions.openFolder("game_dir"), errorTitle: ACTION_ERROR.openFolder };
@@ -2226,8 +2270,9 @@ export class LauncherStore {
         if (s !== null && s.instanceId === id) store.set({ session: null });
         await Promise.all([store.fetchInstances(), store.fetchPins(), store.fetchSettings()]);
         for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
-        // 后端随删除清掉了它的游玩记录，日历与洞察不能还算着它
+        // 后端随删除清掉了它的游玩记录，日历与洞察不能还算着它；记住它的固定服务器也一并忘掉了
         invalidateResources("play-stats");
+        invalidateResources("servers");
         const copy = TOAST_COPY.instanceDeleted(id, worldCount);
         store.pushToast("info", copy.title, copy.body);
         if (lagged !== null) store.playRecordsLagged(id, lagged);
@@ -2244,8 +2289,10 @@ export class LauncherStore {
         );
         await Promise.all([store.fetchPins(), store.fetchSettings()]);
         store.instanceIdTaken(newId);
-        // 游玩记录已迁到新名字下（没跟上的由后端在下一次读时补上）：主页日历按旧 id 找不到实例，会把改了名的说成已删除
+        // 游玩记录已迁到新名字下（没跟上的由后端在下一次读时补上）：主页日历按旧 id 找不到实例，会把改了名的说成已删除。
+        // 记住它的固定服务器也跟到了新名字下
         invalidateResources("play-stats");
+        invalidateResources("servers");
         store.renameSeq += 1;
         const seq = store.renameSeq;
         // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
@@ -2297,25 +2344,10 @@ export class LauncherStore {
 
       // ---- 启动会话
       async launch(id) {
-        const inst = store.instance(id);
-        const s = store.raw.session;
-        if (s !== null && isSessionActive(s)) {
-          // 同一实例在多个入口上点启动，只有第一次生效
-          if (s.instanceId === id) return;
-          store.set({ launchPrompt: { instanceId: id, occupantId: s.instanceId, occupantPhase: s.phase === "running" ? "running" : "loading" } });
-          return;
-        }
-        if (inst.status === "installing") throw new Error(`「${id}」还在安装，入口不应提供启动`);
-        if (inst.status === "broken") {
-          await actions.repairInstance(id, { launchAfter: true });
-          return;
-        }
-        const account = store.currentAccount();
-        if (account === null) {
-          store.set({ login: { kind: "no_account", intent: { kind: "launch", instanceId: id } } });
-          return;
-        }
-        await store.startLaunch(id, account);
+        await store.requestLaunch(id, null);
+      },
+      async quickPlay(id, target) {
+        await store.requestLaunch(id, target);
       },
       async stop() {
         const s = store.raw.session;
@@ -2344,7 +2376,7 @@ export class LauncherStore {
         await actions.stop();
         // 替换时不等已结束会话的 1500 ms 停留，直接开始新的
         store.set({ session: null });
-        await actions.launch(prompt.instanceId);
+        await store.requestLaunch(prompt.instanceId, prompt.quickPlay);
       },
       failureFix(kind) {
         const s = store.raw.session;
@@ -2626,24 +2658,37 @@ export class LauncherStore {
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },
       async togglePinServer(server) {
-        const run = store.serverPinChain.then(async () => {
+        await store.queueServerPins(async () => {
           const current = await listPinnedServers();
           const pinned = current.some((s) => s.address === server.address);
-          await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, server]);
-          invalidateResources("servers");
+          // 新固定的服务器还没选过加入用的实例
+          await setPinnedServers(pinned ? current.filter((s) => s.address !== server.address) : [...current, { name: server.name, address: server.address, instance: null }]);
         });
-        // 链只负责排队：这一次的失败经下面的 await 照常抛给调用方，不挡后面排着的切换
-        store.serverPinChain = run.then(
-          () => undefined,
-          () => undefined,
-        );
-        await run;
+      },
+      async setPinnedServerInstance(address, instance) {
+        await store.queueServerPins(() => setPinnedServerInstance(address, instance));
       },
       async reload(slice) {
         await store.loadSlice(slice);
       },
     };
     return actions;
+  }
+
+  /**
+   * 固定服务器的读改写排成一条链串行执行，写成功后让服务器查询失效。链只负责排队：这一次的失败经返回的 Promise
+   * 照常抛给调用方，不挡后面排着的写入。
+   */
+  private async queueServerPins(write: () => Promise<unknown>): Promise<void> {
+    const run = this.serverPinChain.then(async () => {
+      await write();
+      invalidateResources("servers");
+    });
+    this.serverPinChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    await run;
   }
 
   private async afterAuthlib(account: Account): Promise<void> {

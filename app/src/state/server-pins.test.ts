@@ -9,9 +9,9 @@ import type { LauncherStore } from "./store";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-const hypixel: PinnedServerDto = { name: "Hypixel", address: "mc.hypixel.net" };
-const wynn: PinnedServerDto = { name: "Wynncraft", address: "play.wynncraft.com" };
-const local: PinnedServerDto = { name: "自家服", address: "192.168.1.8:25565" };
+const hypixel: PinnedServerDto = { name: "Hypixel", address: "mc.hypixel.net", instance: null };
+const wynn: PinnedServerDto = { name: "Wynncraft", address: "play.wynncraft.com", instance: null };
+const local: PinnedServerDto = { name: "自家服", address: "192.168.1.8:25565", instance: "生存" };
 
 let stored: PinnedServerDto[];
 let failNextWrite: boolean;

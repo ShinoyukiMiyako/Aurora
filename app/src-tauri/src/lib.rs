@@ -182,6 +182,7 @@ pub fn run() {
             commands::system::probe_network,
             commands::servers::list_pinned_servers,
             commands::servers::set_pinned_servers,
+            commands::servers::set_pinned_server_instance,
             commands::servers::list_known_servers,
             commands::servers::ping_servers,
             commands::news::list_news,

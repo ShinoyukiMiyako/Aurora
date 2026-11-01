@@ -74,6 +74,7 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     release_type: "release",
     is_release: true,
     java_major: 21,
+    quick_play: { singleplayer: true, multiplayer: true },
     mod_count: 0,
     world_count: 0,
     isolated: false,

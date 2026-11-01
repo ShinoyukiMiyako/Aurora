@@ -4,7 +4,7 @@
 import { SESSION_LOG_LIMIT } from "../domain/limits";
 import { FAILURE_CODES, type FailureCode, type LogLine, type Session, type SessionDownload, type SessionPhase } from "../domain/types";
 import type { CrashCategoryName } from "../copy/flows";
-import type { LaunchPhaseName } from "../ipc/launch";
+import type { LaunchPhaseName, QuickPlayArg } from "../ipc/launch";
 
 /** 崩溃会话的主线索：读报告前为 pending，读不出报告为 unavailable。 */
 export type SessionCrash = { status: "pending" } | { status: "known"; category: CrashCategoryName | null } | { status: "unavailable" };
@@ -16,6 +16,8 @@ export interface SessionState extends Session {
   accountUuid: string;
   /** 本次所用账户的名字：失败文案要写它，账户随后被删除时也不丢。 */
   accountName: string;
+  /** 这次启动直达的世界或服务器；普通启动为 null。失败后「重试」带着它再来一次。 */
+  quickPlay: QuickPlayArg | null;
   crash: SessionCrash | null;
   /**
    * 加载期间各阶段收到的提醒条数，下标对应八阶段表。准备阶段的检查项不通过但不阻断时，后端写一条启动器 warn 日志，
@@ -60,12 +62,13 @@ export function stageProgress(stageIndex: number, download: SessionDownload | nu
   return start;
 }
 
-export function startSession(instanceId: string, taskId: string, account: { uuid: string; name: string }, now: number): SessionState {
+export function startSession(instanceId: string, taskId: string, account: { uuid: string; name: string }, now: number, quickPlay: QuickPlayArg | null): SessionState {
   return {
     instanceId,
     taskId,
     accountUuid: account.uuid,
     accountName: account.name,
+    quickPlay,
     phase: "preparing",
     progress: 0,
     stageIndex: 0,

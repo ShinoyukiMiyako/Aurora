@@ -133,17 +133,17 @@ describe("微软设备码登录", () => {
     const store = await startedStore();
 
     await store.actions.launch("生存");
-    expect(store.getState().login).toEqual({ kind: "no_account", intent: { kind: "launch", instanceId: "生存" } });
+    expect(store.getState().login).toEqual({ kind: "no_account", intent: { kind: "launch", instanceId: "生存", quickPlay: null } });
     expect(callsOf(ipc, "launch_game")).toEqual([]);
 
-    const pending = store.actions.openLogin("microsoft", { kind: "launch", instanceId: "生存" });
+    const pending = store.actions.openLogin("microsoft", { kind: "launch", instanceId: "生存", quickPlay: null });
     await settle();
     accounts = [MS_ACCOUNT];
     login.resolve(MS_ACCOUNT);
     await settle();
     expect(store.getState().login).toBeNull();
     expect(store.getState().toasts.at(-1)).toMatchObject({ tone: "success", title: "已登录 Mock_Player", body: "正在启动「生存」" });
-    expect(callsOf(ipc, "launch_game")).toEqual([expect.objectContaining({ versionId: "生存", accountUuid: "ms-1" })]);
+    expect(callsOf(ipc, "launch_game")).toEqual([expect.objectContaining({ versionId: "生存", accountUuid: "ms-1", quickPlay: null })]);
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "preparing", accountName: "Mock_Player" });
     void pending;
     store.stop();

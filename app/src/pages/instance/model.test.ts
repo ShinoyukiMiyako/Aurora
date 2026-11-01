@@ -12,6 +12,7 @@ import {
   creationRef,
   creationRefEqual,
   deletableWorldCount,
+  enterWorldBlock,
   disabledFileName,
   effectiveJavaMajor,
   effectiveMemoryMb,
@@ -197,7 +198,7 @@ describe("整页订阅的启动视图", () => {
   });
   const installing = (task: Task | null, queuePosition: number | null): LaunchView => ({ kind: "installing", task, queuePosition });
   const downloading = (done: number) => {
-    const session = applyPhase(startSession("生存", "launch-1", account, T0), { taskId: "launch-1", phase: "downloading", stageIndex: 3, download: { done, total: 100, bytes: 0, totalBytes: null, speedBps: 2048 } }, T0 + done);
+    const session = applyPhase(startSession("生存", "launch-1", account, T0, null), { taskId: "launch-1", phase: "downloading", stageIndex: 3, download: { done, total: 100, bytes: 0, totalBytes: null, speedBps: 2048 } }, T0 + done);
     if (session.phase !== "downloading") throw new Error("应在下载阶段");
     return { kind: "loading", session, phase: session.phase } as const satisfies LaunchView;
   };
@@ -227,6 +228,39 @@ describe("整页订阅的启动视图", () => {
     expect(pageViewEqual({ kind: "stopped", session: ended, reason: "exited" }, { kind: "stopped", session: ended, reason: "cancelled" })).toBe(false);
     expect(pageViewEqual({ kind: "broken", reason: "缺少版本文件", reimport: false }, { kind: "broken", reason: "缺少库文件", reimport: false })).toBe(false);
     expect(pageViewEqual({ kind: "broken", reason: "缺少版本文件", reimport: false }, { kind: "broken", reason: "缺少版本文件", reimport: true })).toBe(false);
+  });
+});
+
+describe("存档行「进入」的禁用原因", () => {
+  const both = { singleplayer: true, multiplayer: true };
+  const legacy = { singleplayer: false, multiplayer: true };
+
+  it("可用：就绪、版本支持、这一局没在跑；别的实例占着游戏进程不算", () => {
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "ready", false)).toBeNull();
+    // 已结束、失败、崩溃的会话不挡再次进入
+    for (const view of ["stopped", "failed", "crashed"] as const) expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, view, false)).toBeNull();
+  });
+
+  it("自上而下取第一条：安装中 > 损坏 > 版本信息不完整 > 版本不支持 > 备份中 > 正在启动 > 正在运行", () => {
+    expect(enterWorldBlock({ status: "installing", quickPlay: null, activity: null }, "loading", false)).toBe("installing");
+    expect(enterWorldBlock({ status: "broken", quickPlay: null, activity: null }, "running", false)).toBe("broken");
+    expect(enterWorldBlock({ status: "ready", quickPlay: null, activity: null }, "running", false)).toBe("unknownVersion");
+    expect(enterWorldBlock({ status: "ready", quickPlay: legacy, activity: "backing_up" }, "ready", true)).toBe("legacy");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "backing_up" }, "running", false)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "loading", true)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "loading", false)).toBe("launching");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "running", false)).toBe("running");
+  });
+
+  it("只看单人位：能加入服务器、不能进存档的版本照样禁用", () => {
+    expect(enterWorldBlock({ status: "ready", quickPlay: { singleplayer: false, multiplayer: false }, activity: null }, "ready", false)).toBe("legacy");
+    expect(enterWorldBlock({ status: "ready", quickPlay: { singleplayer: true, multiplayer: false }, activity: null }, "ready", false)).toBeNull();
+  });
+
+  it("备份中：后端报 backing_up，或前端已有排着、进行中的存档任务；改 Mod 不挡", () => {
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "backing_up" }, "ready", false)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null }, "ready", true)).toBe("backingUp");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "modifying" }, "ready", false)).toBeNull();
   });
 });
 

@@ -17,12 +17,15 @@ import {
   memoryAdvice,
   pingServers,
   probeNetwork,
+  SERVER_NOT_PINNED_CODE,
   setInstallOnExit,
+  setPinnedServerInstance,
   setPinnedServers,
   startupNotices,
   updaterInfo,
 } from "./system";
 import { setMockNetworkReachable, setMockStartupNotices } from "./mock/handlers/system";
+import { deleteInstance, listInstances, renameInstance } from "./instances";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -153,22 +156,68 @@ describe("首次启动", () => {
 describe("服务器", () => {
   it("固定列表整体替换：同地址去重、空名字用地址", async () => {
     const saved = await setPinnedServers([
-      { name: "", address: " play.example.cn:25566 " },
-      { name: "重复", address: "PLAY.example.cn:25566" },
-      { name: "默认端口", address: "mc.example.cn" },
-      { name: "同一台", address: "mc.example.cn:25565" },
+      { name: "", address: " play.example.cn:25566 ", instance: "1.21.1" },
+      { name: "重复", address: "PLAY.example.cn:25566", instance: "RLCraft" },
+      { name: "默认端口", address: "mc.example.cn", instance: null },
+      { name: "同一台", address: "mc.example.cn:25565", instance: "1.21" },
     ]);
+    // 去重保留第一次出现那条，连同它记住的实例
     expect(saved).toEqual([
-      { name: "play.example.cn:25566", address: "play.example.cn:25566" },
-      { name: "默认端口", address: "mc.example.cn" },
+      { name: "play.example.cn:25566", address: "play.example.cn:25566", instance: "1.21.1" },
+      { name: "默认端口", address: "mc.example.cn", instance: null },
     ]);
     expect(await listPinnedServers()).toEqual(saved);
+  });
+
+  it("固定项可以不带 instance（旧调用方），读回为 null；instance 不是字符串或 null 按 Tauri 参数错误拒绝", async () => {
+    const saved = await invoke<unknown>("set_pinned_servers", { servers: [{ name: "旧", address: "old.example" }] });
+    expect(saved).toEqual([{ name: "旧", address: "old.example", instance: null }]);
+    const typed = await rejection(invoke("set_pinned_servers", { servers: [{ name: "坏", address: "bad.example", instance: 7 }] }));
+    expect(typed.code).toBe("unknown");
+    const extra = await rejection(invoke("set_pinned_servers", { servers: [{ name: "多", address: "x.example", instance: null, port: 1 }] }));
+    expect(extra.message).toContain("unknown field `port`");
+    expect(await listPinnedServers()).toEqual(saved);
+  });
+
+  it("记住与忘掉加入用的实例：地址按去重键匹配，返回整份列表并落进固定列表", async () => {
+    const remembered = await setPinnedServerInstance("BUILD.town.example:25570", "1.21.1");
+    expect(remembered).toEqual([
+      { name: "晨星生存服", address: "play.morningstar.example", instance: "樱花生存" },
+      { name: "小镇建筑服", address: "build.town.example:25570", instance: "1.21.1" },
+    ]);
+    // 不写端口等于 25565
+    const forgot = await setPinnedServerInstance("play.morningstar.example:25565", null);
+    expect(forgot.map((s) => s.instance)).toEqual([null, "1.21.1"]);
+    expect(await listPinnedServers()).toEqual(forgot);
+  });
+
+  it("记住实例：不在固定列表里报 server_not_pinned，实例不存在报 version_not_installed，地址不合法报 invalid_argument，列表都不变", async () => {
+    const before = await listPinnedServers();
+    const missing = await rejection(setPinnedServerInstance("nowhere.example", "1.21.1"));
+    expect(missing.code).toBe(SERVER_NOT_PINNED_CODE);
+    expect(missing.detail).toEqual({ address: "nowhere.example" });
+    const ghost = await rejection(setPinnedServerInstance("play.morningstar.example", "已删除的实例"));
+    expect(ghost.code).toBe("version_not_installed");
+    expect(ghost.detail).toEqual({ id: "已删除的实例" });
+    // 实例先查：服务器也不在时报的是实例
+    expect((await rejection(setPinnedServerInstance("nowhere.example", "已删除的实例"))).code).toBe("version_not_installed");
+    expect((await rejection(setPinnedServerInstance("bad:0", null))).detail).toMatchObject({ address: "bad:0" });
+    expect(await listPinnedServers()).toEqual(before);
+  });
+
+  it("实例改名后记住的绑定跟着改，删除后清空；没记住它的服务器不动", async () => {
+    await setPinnedServerInstance("build.town.example:25570", "1.21.1");
+    await renameInstance("樱花生存", "樱花生存二");
+    expect((await listPinnedServers()).map((s) => s.instance)).toEqual(["樱花生存二", "1.21.1"]);
+    await deleteInstance("樱花生存二");
+    expect((await listPinnedServers()).map((s) => s.instance)).toEqual([null, "1.21.1"]);
+    expect((await listInstances()).some((i) => i.id === "樱花生存二")).toBe(false);
   });
 
   it("有一个地址不合法整体拒绝，原列表不变", async () => {
     const before = await listPinnedServers();
     for (const address of ["x:0", "x:65536", "x:abc", "", "[::1", "a b"]) {
-      const error = await rejection(setPinnedServers([{ name: "好", address: "ok.example" }, { name: "坏", address }]));
+      const error = await rejection(setPinnedServers([{ name: "好", address: "ok.example", instance: null }, { name: "坏", address, instance: null }]));
       expect(error.code).toBe("invalid_argument");
       expect(error.detail).toMatchObject({ address });
     }
@@ -286,7 +335,8 @@ describe("Tauri 窗口里的参数键", () => {
     await addGameDirectory("HMCL", "D:\\HMCL\\.minecraft");
     await memoryAdvice("1.21.4");
     await completeFirstRun("D:\\Games\\.minecraft", [{ name: "HMCL", path: "D:\\HMCL\\.minecraft" }]);
-    await setPinnedServers([{ name: "a", address: "a.example" }]);
+    await setPinnedServers([{ name: "a", address: "a.example", instance: null }]);
+    await setPinnedServerInstance("a.example", "生存");
     await pingServers(["a.example"]);
     await downloadUpdate("u-9");
     await setInstallOnExit(false);
@@ -295,7 +345,8 @@ describe("Tauri 窗口里的参数键", () => {
       ["add_game_directory", { name: "HMCL", path: "D:\\HMCL\\.minecraft" }],
       ["memory_advice", { versionId: "1.21.4" }],
       ["complete_first_run", { gameDir: "D:\\Games\\.minecraft", extraDirectories: [{ name: "HMCL", path: "D:\\HMCL\\.minecraft" }] }],
-      ["set_pinned_servers", { servers: [{ name: "a", address: "a.example" }] }],
+      ["set_pinned_servers", { servers: [{ name: "a", address: "a.example", instance: null }] }],
+      ["set_pinned_server_instance", { address: "a.example", instance: "生存" }],
       ["ping_servers", { addresses: ["a.example"] }],
       ["download_update", { taskId: "u-9" }],
       ["set_install_on_exit", { enabled: false }],

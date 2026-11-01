@@ -131,6 +131,8 @@ export interface InstanceSummary {
   extraLoaders: { kind: ExtraLoaderKind; version: string | null }[];
   releaseType: ReleaseType | null;
   javaMajor: number | null;
+  /** 版本能否直接进入存档、直接加入服务器；读不出版本信息（损坏、继承链断了）或还在安装的占位项为 null。 */
+  quickPlay: { singleplayer: boolean; multiplayer: boolean } | null;
   /** 实例设置里的描述；没写或设置读不出时为 null。 */
   description: string | null;
   /** 封面预设 id；null 表示没设过，按默认封面规则画。 */
@@ -240,6 +242,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     extraLoaders,
     releaseType: dto.release_type === null ? null : releaseTypeFromDto(dto.release_type),
     javaMajor: dto.java_major,
+    quickPlay: dto.quick_play === null ? null : { singleplayer: dto.quick_play.singleplayer, multiplayer: dto.quick_play.multiplayer },
     description: dto.description,
     cover: dto.cover,
     pinned: ctx.pins.includes(dto.id),
