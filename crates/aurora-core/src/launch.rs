@@ -1869,12 +1869,18 @@ mod tests {
         }
     }
 
-    /// 拉 Java 运行时清单失败：HTTP 层错误（不论直接还是包在下层）判离线，内容读不懂判文件失败。
+    /// 拉 Java 运行时清单失败：HTTP 层错误（不论直接还是压在逐源回退的聚合错误下面）判离线，
+    /// 内容读不懂判文件失败。
     #[tokio::test]
     async fn java_manifest_failures_are_classified_by_http_cause() {
-        #[derive(Debug, thiserror::Error)]
-        #[error("Java 运行时清单在全部下载源上都失败")]
-        struct Wrapped(#[source] aurora_java::Error);
+        let all_sources_failed = |last: aurora_java::Error| aurora_java::Error::AllSourcesFailed {
+            context: "Java 运行时总清单",
+            attempts: vec![
+                "https://piston-meta.mojang.com/all.json：HTTP 请求失败".to_owned(),
+                format!("https://bmclapi2.bangbang93.com/all.json：{last}"),
+            ],
+            last: Box::new(last),
+        };
 
         let http = aurora_base::http::build_client().unwrap();
         let unreachable = || async {
@@ -1900,13 +1906,22 @@ mod tests {
             code_of(java_download_failure(17, garbled)),
             FailureCode::FilesFailed
         );
-        // 聚合层把 HTTP 错误压在下面时仍要认得出来。
-        assert!(has_http_cause(&Wrapped(unreachable().await)));
+        // 两个源都没取到：最后一个源连不上仍判离线，最后一个源回的是读不懂的内容判文件失败。
+        assert_eq!(
+            code_of(java_download_failure(
+                17,
+                all_sources_failed(unreachable().await)
+            )),
+            FailureCode::FilesOffline
+        );
         let garbled = aurora_java::Error::Json {
             context: "all.json".into(),
             source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
         };
-        assert!(!has_http_cause(&Wrapped(garbled)));
+        assert_eq!(
+            code_of(java_download_failure(17, all_sources_failed(garbled))),
+            FailureCode::FilesFailed
+        );
     }
 
     #[tokio::test]

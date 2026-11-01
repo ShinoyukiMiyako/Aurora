@@ -310,6 +310,93 @@ mod tests {
         assert!(stages.iter().any(|s| s.contains("原版 test 安装完成")));
     }
 
+    /// 自动档装版本：入口先测一轮速，版本清单与版本 JSON 都从实测更快的源取（这里是官方，与测不出时的
+    /// 镜像优先相反，证明顺序来自实测）；有效期内再装一次不再探测。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_install_measures_once_and_fetches_metadata_from_the_faster_source() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        use wiremock::matchers::header;
+
+        // 清单与版本 JSON 的官方地址用解析不了的域名，只经源计划落到两台 mock：接线断了也连不到真实网络。
+        let manifest_path = "/mc/game/version_manifest_v2.json";
+        let version_path = "/v1/packages/0123/test.json";
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        for (server, probe_delay) in [(&official, 0), (&mirror, 300)] {
+            Mock::given(method("GET"))
+                .and(path(manifest_path))
+                .and(header("range", "bytes=0-0"))
+                .respond_with(
+                    ResponseTemplate::new(206)
+                        .insert_header("content-range", "bytes 0-0/100")
+                        .set_delay(Duration::from_millis(probe_delay)),
+                )
+                .with_priority(1)
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(manifest_path))
+                .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                    r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"https://meta.invalid{version_path}",
+                    "time":"t","releaseTime":"t"}}]}}"#
+                )))
+                .mount(server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(version_path))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
+                ))
+                .mount(server)
+                .await;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+            .with_manifest_url(format!("https://meta.invalid{manifest_path}"))
+            .with_source_routes(
+                Arc::new(crate::sources::tests::Routes {
+                    official: official.uri(),
+                    mirror: mirror.uri(),
+                }),
+                Duration::from_secs(600),
+                Duration::from_secs(2),
+            );
+
+        aurora.install("test", None, None, None).await.unwrap();
+        aurora.install("test", None, None, None).await.unwrap();
+
+        // (探针, 清单, 版本 JSON) 各收到几次。
+        let tally = |requests: Vec<wiremock::Request>| {
+            let probes = requests
+                .iter()
+                .filter(|r| r.headers.contains_key("range"))
+                .count();
+            let plain = |p: &str| {
+                requests
+                    .iter()
+                    .filter(|r| r.url.path() == p && !r.headers.contains_key("range"))
+                    .count()
+            };
+            (probes, plain(manifest_path), plain(version_path))
+        };
+        assert_eq!(
+            tally(official.received_requests().await.unwrap()),
+            (1, 2, 2)
+        );
+        assert_eq!(tally(mirror.received_requests().await.unwrap()), (1, 0, 0));
+        let json_path = mc.join("versions").join("test").join("test.json");
+        assert!(
+            tokio::fs::read_to_string(&json_path)
+                .await
+                .unwrap()
+                .contains("net.minecraft.client.main.Main")
+        );
+    }
+
     /// 原版 + Fabric 加载器：门面先装空壳原版，再叠加 Fabric（profile JSON 落盘 + 下加载器库）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn install_with_fabric_loader_wires_both_stages() {
