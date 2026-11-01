@@ -71,7 +71,7 @@ describe("后端信息同步进状态机", () => {
   });
 
   it("同一版本下载失败后再同步，失败原因保留，重试入口不丢", () => {
-    const failed: UpdaterPhase = { kind: "download_failed", update: UPDATE, reason: "连接被重置", signature: false };
+    const failed: UpdaterPhase = { kind: "download_failed", update: UPDATE, reason: "连接被重置", signature: false, network: "connect" };
     expect(run(at(failed), { type: "info", info: info({ available: UPDATE }) }).phase).toEqual(failed);
     expect(run(at(failed), { type: "info", info: info({ available: { ...UPDATE, version: "0.3.0" } }) }).phase).toEqual({
       kind: "available",
@@ -127,17 +127,22 @@ describe("下载", () => {
 
   it("完成进入 ready；失败带原因与是否签名问题；取消回到 available", () => {
     expect(run(start, { type: "download_done", taskId: "t1", update: UPDATE }).phase).toEqual({ kind: "ready", update: UPDATE });
-    expect(run(start, { type: "download_failed", taskId: "t1", reason: "签名不符", signature: true }).phase).toEqual({
+    expect(run(start, { type: "download_failed", taskId: "t1", reason: "签名不符", signature: true, network: null }).phase).toEqual({
       kind: "download_failed",
       update: UPDATE,
       reason: "签名不符",
       signature: true,
+      network: null,
+    });
+    expect(run(start, { type: "download_failed", taskId: "t1", reason: "error sending request", signature: false, network: "timeout" }).phase).toMatchObject({
+      reason: "error sending request",
+      network: "timeout",
     });
     expect(run(start, { type: "download_cancelled", taskId: "t1" }).phase).toEqual({ kind: "available", update: UPDATE });
   });
 
   it("下载失败后可以重试；没有可下的版本时不开始", () => {
-    const failed = run(start, { type: "download_failed", taskId: "t1", reason: "断网", signature: false });
+    const failed = run(start, { type: "download_failed", taskId: "t1", reason: "断网", signature: false, network: "connect" });
     expect(run(failed, { type: "download_start", taskId: "t2" }).phase).toMatchObject({ kind: "downloading", taskId: "t2", bytes: 0 });
     const idle = at({ kind: "idle" });
     expect(run(idle, { type: "download_start", taskId: "t3" })).toBe(idle);

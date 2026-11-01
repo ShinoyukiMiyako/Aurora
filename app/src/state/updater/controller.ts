@@ -102,7 +102,7 @@ export class UpdaterController {
         return;
       }
       console.error("下载启动器更新失败", error);
-      this.dispatch({ type: "download_failed", taskId, reason: describeError(error), signature: code === SIGNATURE_INVALID_CODE });
+      this.dispatch({ type: "download_failed", taskId, reason: describeError(error), signature: code === SIGNATURE_INVALID_CODE, network: networkFailureOf(error) });
     }
   }
 

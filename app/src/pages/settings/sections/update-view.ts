@@ -1,7 +1,7 @@
 // 关于页更新卡在各阶段的呈现：主句、次句、唯一的按钮。纯函数，便于逐状态核对。
 
 import { formatBytes, formatDate, formatRelative, percent } from "../../../domain/format";
-import { UPDATE_COPY } from "../../../copy/updater";
+import { downloadFailureCopy, UPDATE_COPY } from "../../../copy/updater";
 import { downloadFraction, type UpdaterState } from "../../../state/updater/machine";
 
 export type CardAction = "check" | "open_panel" | "install";
@@ -24,6 +24,8 @@ export interface CardView {
   sub: string | null;
   /** 次句是错误原文：可选中复制。 */
   subIsError: boolean;
+  /** 次句是中文说法时另放一行的错误原文，同样可选中复制。 */
+  raw: string | null;
   button: CardButton;
 }
 
@@ -45,12 +47,13 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
   const offline = ctx.online ? undefined : UPDATE_COPY.offlineReason;
   const check = (label: string = UPDATE_COPY.check) => button(label, "secondary", "check", { disabledReason: offline });
   const installReason = ctx.gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
-  const view = (title: string, sub: string | null, btn: CardButton, extra: Partial<Pick<CardView, "accent" | "subIsError">> = {}): CardView => ({
+  const view = (title: string, sub: string | null, btn: CardButton, extra: Partial<Pick<CardView, "accent" | "subIsError" | "raw">> = {}): CardView => ({
     title,
     sub,
     button: btn,
     accent: false,
     subIsError: false,
+    raw: null,
     ...extra,
   });
 
@@ -69,7 +72,7 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
     case "up_to_date":
       return view(UPDATE_COPY.upToDate, UPDATE_COPY.checkedAgo(formatRelative(phase.checkedAt, ctx.now)), check());
     case "check_failed":
-      return view(phase.network === null ? UPDATE_COPY.checkFailed : UPDATE_COPY.checkFailedNetwork[phase.network], phase.message, check(UPDATE_COPY.retry), { subIsError: true });
+      return view(phase.network === null ? UPDATE_COPY.checkFailed : UPDATE_COPY.networkFailed[phase.network], phase.message, check(UPDATE_COPY.retry), { subIsError: true });
     case "available": {
       const parts: string[] = [];
       if (phase.update.date !== null) parts.push(UPDATE_COPY.publishedAt(formatDate(phase.update.date)));
@@ -77,13 +80,10 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
       const sub = parts.length === 0 ? null : parts.join(" · ");
       return view(UPDATE_COPY.available(phase.update.version), sub, button(UPDATE_COPY.view, "primary", "open_panel"), { accent: true });
     }
-    case "download_failed":
-      return view(
-        UPDATE_COPY.available(phase.update.version),
-        UPDATE_COPY.downloadFailedCard(phase.signature ? UPDATE_COPY.signatureInvalid : phase.reason),
-        button(UPDATE_COPY.view, "primary", "open_panel"),
-        { accent: true, subIsError: true },
-      );
+    case "download_failed": {
+      const { summary, raw } = downloadFailureCopy(phase);
+      return view(UPDATE_COPY.available(phase.update.version), summary, button(UPDATE_COPY.view, "primary", "open_panel"), { accent: true, raw });
+    }
     case "downloading": {
       const fraction = downloadFraction(phase.bytes, phase.totalBytes);
       const title = fraction === null ? UPDATE_COPY.downloading(phase.update.version) : UPDATE_COPY.downloadingPct(phase.update.version, percent(fraction));

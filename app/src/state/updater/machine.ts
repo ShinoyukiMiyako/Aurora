@@ -24,7 +24,8 @@ export type UpdaterPhase =
   | { kind: "check_failed"; message: string; network: NetworkFailure | null }
   | { kind: "available"; update: UpdateInfo }
   | { kind: "downloading"; update: UpdateInfo; taskId: string; bytes: number; totalBytes: number | null }
-  | { kind: "download_failed"; update: UpdateInfo; reason: string; signature: boolean }
+  /** reason 是后端原文；network 同 check_failed。 */
+  | { kind: "download_failed"; update: UpdateInfo; reason: string; signature: boolean; network: NetworkFailure | null }
   /** 已下载并通过签名校验，等用户决定何时安装。 */
   | { kind: "ready"; update: UpdateInfo }
   | { kind: "install_on_exit"; update: UpdateInfo }
@@ -48,7 +49,7 @@ export type UpdaterEvent =
   | { type: "download_start"; taskId: string }
   | { type: "download_progress"; taskId: string; bytes: number; totalBytes: number | null }
   | { type: "download_done"; taskId: string; update: UpdateInfo }
-  | { type: "download_failed"; taskId: string; reason: string; signature: boolean }
+  | { type: "download_failed"; taskId: string; reason: string; signature: boolean; network: NetworkFailure | null }
   | { type: "download_cancelled"; taskId: string }
   | { type: "install_on_exit"; enabled: boolean }
   | { type: "install_start" }
@@ -129,7 +130,7 @@ export function updaterReducer(state: UpdaterState, event: UpdaterEvent): Update
       return to({ kind: "ready", update: event.update });
     case "download_failed":
       if (!sameTask(phase, event.taskId)) return state;
-      return to({ kind: "download_failed", update: phase.update, reason: event.reason, signature: event.signature });
+      return to({ kind: "download_failed", update: phase.update, reason: event.reason, signature: event.signature, network: event.network });
     case "download_cancelled":
       if (!sameTask(phase, event.taskId)) return state;
       return to({ kind: "available", update: phase.update });

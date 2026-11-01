@@ -52,8 +52,8 @@ describe("更新卡各阶段", () => {
     expect([onExit.button.label, onExit.button.variant, onExit.button.action]).toEqual(["现在安装", "secondary", "install"]);
     const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
     expect([failed.title, failed.sub, failed.subIsError, failed.button.label]).toEqual(["检查更新失败", "清单里没有这个平台", true, "重试"]);
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true }), CTX);
-    expect(signature.sub).toBe("下载失败：更新包签名校验不通过，已丢弃，不会安装");
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: null }), CTX);
+    expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
     const unsupported = updateCardView(state({ kind: "unsupported", reason: "debug_build" }), CTX);
     expect([unsupported.title, unsupported.sub, unsupported.button.disabled]).toEqual(["当前环境不支持自动更新", "开发环境或调试模式下不检查更新", true]);
   });
@@ -70,6 +70,30 @@ describe("更新卡各阶段", () => {
     const { title } = updateCardView(state({ kind: "check_failed", message: "error sending request", network: "connect" }), CTX);
     expect(title).not.toMatch(/[A-Za-z]/);
     expect(title).not.toContain("网络");
+  });
+
+  it("下载失败是网络层的：次句按种类写中文原因，英文原文另放一行，主句与按钮不变", () => {
+    const raw = "error sending request for url (https://petalfall.org/updates/setup-0.3.0.exe)";
+    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect" }), CTX);
+    expect([connect.title, connect.accent, connect.sub, connect.subIsError, connect.raw, connect.button.action]).toEqual(["有新版本 0.3.0", true, "下载失败：连不上更新服务器", false, raw, "open_panel"]);
+    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout" }), CTX);
+    expect([timeout.sub, timeout.raw]).toEqual(["下载失败：更新服务器没有响应", raw]);
+  });
+
+  it("下载失败不是网络层的：次句只说下载失败，不把后端原文拼进中文句子", () => {
+    const raw = "`Download request failed with status: 503 Service Unavailable`";
+    const other = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null }), CTX);
+    expect([other.sub, other.raw]).toEqual(["下载失败", raw]);
+  });
+
+  it("签名不符优先于网络种类：原因固定，不另放原文", () => {
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: "connect" }), CTX);
+    expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
+  });
+
+  it("只有下载失败才有另放的原文：检查失败的原文就是次句", () => {
+    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
+    expect([failed.sub, failed.raw]).toEqual(["清单里没有这个平台", null]);
   });
 
   it("不支持更新的原因分开说：发布构建没配签名公钥时不说成是开发环境", () => {

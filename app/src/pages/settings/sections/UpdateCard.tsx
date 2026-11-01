@@ -36,6 +36,11 @@ function StatusLine({ view, onAction }: { view: CardView; onAction: () => void }
             {view.sub}
           </span>
         )}
+        {view.raw !== null && (
+          <span className={s.errorText} data-selectable>
+            {view.raw}
+          </span>
+        )}
       </span>
       <Button
         variant={button.variant}
