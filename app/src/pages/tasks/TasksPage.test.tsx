@@ -513,6 +513,23 @@ describe("下载任务页：进行中", () => {
     expect(page().textContent).not.toContain("最近 48 秒没有下载流量");
   });
 
+  it("任务进行中进页：采样从进页才开始，没采满 48 秒不说没有下载流量，一直没有流量才在采满时说", async () => {
+    await fourJavaTasks();
+    // 离开时采样丢弃，再进来时任务还在跑、这一刻速度为 0（比如正在校验文件）
+    act(() => nav.go({ page: "discover" }));
+    await flush();
+    await advance(60_000);
+    act(() => nav.go({ page: "tasks" }));
+    await flush();
+    expect(page().textContent).toContain("当前总速度");
+    expect(page().textContent).not.toContain("最近 48 秒没有下载流量");
+    // 进页时立刻采一个，之后每秒一个：第 47 秒才凑满 48 个
+    await advance(46_000);
+    expect(page().textContent).not.toContain("最近 48 秒没有下载流量");
+    await advance(1000);
+    expect(page().textContent).toContain("最近 48 秒没有下载流量");
+  });
+
   it("完成行：总量是几批下载的累计，用时从开始运行算起，排队等待不算", async () => {
     const ids = await fourJavaTasks();
     // 第四个任务排队 30 秒后才轮到

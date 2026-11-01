@@ -346,11 +346,14 @@ export function overviewRemaining(o: Overview, speedForEta: number): string {
 export interface ChartGeometry {
   line: string;
   area: string;
-  /** 全部采样为 0：曲线贴底，改为显示「最近 N 秒没有下载流量」。 */
+  /** 采满一个窗口且全部为 0：曲线贴底，改为显示「最近 N 秒没有下载流量」。 */
   idle: boolean;
 }
 
-/** 最近 THROUGHPUT_SAMPLES 秒的总速度曲线；采样不足时左侧补 0。纵轴上限 = max(最低上限, 样本最大值)。 */
+/**
+ * 最近 THROUGHPUT_SAMPLES 秒的总速度曲线；采样不足时左侧补 0。纵轴上限 = max(最低上限, 样本最大值)。
+ * 补的 0 只是画图用的：采样从进页才开始，更早有没有流量不知道，窗口没采满就不能说这段时间没有流量。
+ */
 export function chartGeometry(totals: readonly number[]): ChartGeometry {
   const recent = totals.slice(-THROUGHPUT_SAMPLES);
   const padded = [...Array<number>(THROUGHPUT_SAMPLES - recent.length).fill(0), ...recent];
@@ -358,7 +361,7 @@ export function chartGeometry(totals: readonly number[]): ChartGeometry {
   const { width, height, peak } = CHART_VIEW;
   const points = padded.map((v, i) => `${((i / (THROUGHPUT_SAMPLES - 1)) * width).toFixed(2)},${(height - (v / ceiling) * peak).toFixed(2)}`);
   const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${p}`).join(" ");
-  return { line, area: `${line} L${width},${height} L0,${height} Z`, idle: padded.every((v) => v === 0) };
+  return { line, area: `${line} L${width},${height} L0,${height} Z`, idle: recent.length === THROUGHPUT_SAMPLES && recent.every((v) => v === 0) };
 }
 
 // ---------------------------------------------------------------- 取消前的确认

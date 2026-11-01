@@ -255,7 +255,6 @@ describe("吞吐采样与总览", () => {
 
   it("曲线：不足 48 个采样左侧补 0；纵轴上限至少 4 MB/s，超过时按样本最大值", () => {
     const empty = chartGeometry([]);
-    expect(empty.idle).toBe(true);
     expect(empty.line.split(" ")).toHaveLength(THROUGHPUT_SAMPLES);
     expect(empty.line.startsWith("M0.00,30.00")).toBe(true);
 
@@ -270,6 +269,29 @@ describe("吞吐采样与总览", () => {
     const points = high.line.split(" ");
     expect(points[THROUGHPUT_SAMPLES - 2]).toBe(`L${((46 / 47) * 100).toFixed(2)},5.00`);
     expect(points[THROUGHPUT_SAMPLES - 1]).toBe("L100.00,17.50");
+  });
+});
+
+describe("曲线空闲的判定", () => {
+  const zeros = (count: number) => Array<number>(count).fill(0);
+
+  it("采样不足一个窗口时不判空闲：采样从进页才开始，更早有没有流量不知道", () => {
+    expect(chartGeometry([]).idle).toBe(false);
+    expect(chartGeometry(zeros(1)).idle).toBe(false);
+    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES - 1)).idle).toBe(false);
+  });
+
+  it("采满一个窗口且全为 0 才判空闲；超出窗口的采样不算", () => {
+    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES)).idle).toBe(true);
+    expect(chartGeometry([MB, ...zeros(THROUGHPUT_SAMPLES)]).idle).toBe(true);
+  });
+
+  it("窗口里任何一秒有流量都不算空闲", () => {
+    const at = Math.floor(Math.random() * THROUGHPUT_SAMPLES);
+    const window = zeros(THROUGHPUT_SAMPLES);
+    window[at] = 1;
+    expect(chartGeometry(window).idle, `第 ${at} 秒有 1 B/s`).toBe(false);
+    expect(chartGeometry([...zeros(THROUGHPUT_SAMPLES - 1), 1]).idle).toBe(false);
   });
 });
 
