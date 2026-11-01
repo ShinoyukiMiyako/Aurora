@@ -5,15 +5,26 @@
 // 恢复时剩余不足 TOAST_MIN_REMAIN_MS 的补到这个值，免得刚移开指针就消失。
 
 import { TOAST_ACTION_MIN_TTL_MS, TOAST_DEDUPE_MS, TOAST_MAX, TOAST_MIN_REMAIN_MS, TOAST_TTL_MS } from "../domain/limits";
-import type { Route } from "./route";
+import { renamedRoute, routeInstanceId, type Route } from "./route";
 
 export type ToastTone = "info" | "success" | "warning" | "error";
 
 /**
  * 至多一个动作：导航用 to，执行命令（重试、下载 Java、启动等）用 run。点击后先关闭这条再执行。
  * 命令经外层统一错误处理执行，失败通知的标题取 errorTitle（动作文案只有两三个字，当不了失败标题）。
+ * instance：动作闭包里写死的实例（见 instanceAction）。路由是数据，改名时直接改写；闭包改写不了，要靠它重建。
  */
-export type ToastAction = { label: string } & ({ to: Route } | { run: () => void | Promise<void>; errorTitle: string });
+export type ToastAction = { label: string; instance?: ToastActionInstance } & ({ to: Route } | { run: () => void | Promise<void>; errorTitle: string });
+
+interface ToastActionInstance {
+  id: string;
+  build: (id: string) => ToastAction;
+}
+
+/** 闭包里带着实例 id 的动作：build 按给定的 id 造动作，实例改名时用新 id 重造一份。 */
+export function instanceAction(id: string, build: (id: string) => ToastAction): ToastAction {
+  return { ...build(id), instance: { id, build } };
+}
 
 export interface Toast {
   id: string;
@@ -115,6 +126,33 @@ export function resumeToasts(state: ToastsState, reason: ToastPauseReason, now: 
     t.pausedRemainingMs === null ? t : { ...t, deadline: now + Math.max(t.pausedRemainingMs, TOAST_MIN_REMAIN_MS), pausedRemainingMs: null },
   );
   return { ...state, items, pausedBy };
+}
+
+function actionTarget(action: ToastAction): string | null {
+  if (action.instance !== undefined) return action.instance.id;
+  return "to" in action ? routeInstanceId(action.to) : null;
+}
+
+function mapTargeting(state: ToastsState, id: string, change: (toast: Toast, action: ToastAction) => Toast): ToastsState {
+  const targets = (toast: Toast) => toast.action !== undefined && actionTarget(toast.action) === id;
+  if (!state.items.some(targets)) return state;
+  return { ...state, items: state.items.map((t) => (t.action !== undefined && targets(t) ? change(t, t.action) : t)) };
+}
+
+/**
+ * 实例改名：动作指向旧 id 的通知换到新 id。只动此刻留着的通知，之后有实例用上旧名字时，新发的通知按新实例走，
+ * 留着的已经离开了这个名字，不必分辨一个名字说的是改名前还是改名后的实例。
+ */
+export function retargetToasts(state: ToastsState, from: string, to: string): ToastsState {
+  return mapTargeting(state, from, (toast, action) => {
+    if (action.instance !== undefined) return { ...toast, action: instanceAction(to, action.instance.build) };
+    return "to" in action ? { ...toast, action: { ...action, to: renamedRoute(action.to, from, to) } } : toast;
+  });
+}
+
+/** 实例删除：通知留着，动作摘掉。之后有实例用上这个名字时，点它不能落到新实例上。 */
+export function detachToasts(state: ToastsState, id: string): ToastsState {
+  return mapTargeting(state, id, (toast) => ({ ...toast, action: undefined }));
 }
 
 /** 移除到期的通知。 */
