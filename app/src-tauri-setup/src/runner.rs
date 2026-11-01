@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use aurora_setup_payload::Header;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
-use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath};
 use windows_sys::core::{GUID, PWSTR};
 
 use crate::boot::Instance;
@@ -76,8 +76,16 @@ impl Roots {
 
 fn known_folder(id: &GUID) -> io::Result<PathBuf> {
     let mut raw: PWSTR = std::ptr::null_mut();
-    let status =
-        unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT as u32, std::ptr::null_mut(), &mut raw) };
+    // 不验证文件夹在不在：桌面被重定向到断开的位置时，验证失败会让整个安装包起不来，向导回退也走不到，
+    // 而它只用来删一个快捷方式
+    let status = unsafe {
+        SHGetKnownFolderPath(
+            id,
+            KF_FLAG_DONT_VERIFY as u32,
+            std::ptr::null_mut(),
+            &mut raw,
+        )
+    };
     let path = (status >= 0).then(|| {
         let len = (0..).take_while(|&at| unsafe { *raw.add(at) } != 0).count();
         PathBuf::from(OsString::from_wide(unsafe {
@@ -664,6 +672,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    use windows_sys::Win32::UI::Shell::FOLDERID_OriginalImages;
+
     use super::test_support::Recording;
     use super::*;
     use crate::existing::{DISPLAY_VERSION, INSTALL_LOCATION};
@@ -781,6 +791,14 @@ mod tests {
         );
         assert_eq!(roots.temp, std::env::temp_dir());
         assert!(roots.desktop.is_absolute());
+    }
+
+    /// 桌面重定向到已断开的位置时文件夹不在，拿真桌面测不了，这里换一个几乎没有机器真有的已知文件夹。
+    #[test]
+    fn a_known_folder_that_is_not_on_disk_still_resolves() {
+        let path = known_folder(&FOLDERID_OriginalImages).unwrap();
+
+        assert!(path.ends_with("Original Images"), "{}", path.display());
     }
 
     #[test]
@@ -1730,6 +1748,24 @@ mod tests {
                 &Recording::default(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn a_desktop_that_is_not_on_disk_does_not_fail_the_install() {
+        let bench = Bench::new();
+        fs::remove_dir(&bench.roots.desktop).unwrap();
+        let session = bench.session(vec![bench.good_install()]);
+        let reporter = Recording::default();
+
+        session
+            .install(&bench.target(InstallMode::Fresh, false), &reporter)
+            .unwrap();
+
+        let notes = reporter.notes.lock().unwrap();
+        assert!(
+            !notes.iter().any(|line| line.contains("快捷方式")),
+            "{notes:?}"
+        );
     }
 
     #[test]
