@@ -24,6 +24,8 @@ use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog, Session
 
 /// 崩溃判定缓存的最近游戏输出行数。
 pub const RECENT_LINE_CAPACITY: usize = 500;
+/// 1.5.2 这一代的窗口关闭回调打这一行，然后 `System.exit(1)`：退出码 1 在这里是玩家关窗，不是出错。
+const OLD_WINDOW_CLOSE_LINE: &str = "Someone is closing me!";
 /// 批量转发的时间窗：带 Mod 的游戏启动期每秒上千行，逐行推给界面就是一场事件风暴。
 pub const LOG_BATCH_INTERVAL: Duration = Duration::from_millis(100);
 /// 时间窗内攒满这么多行就提前发出，免得单批过大。
@@ -411,7 +413,8 @@ fn configure_no_window(cmd: &mut Command) {
 #[cfg(not(windows))]
 fn configure_no_window(_cmd: &mut Command) {}
 
-/// 崩溃判定：启动器主动结束的一律不算；日志里有明确的崩溃标记算；否则看退出码，非 0 或拿不到退出码都算。
+/// 崩溃判定：启动器主动结束的一律不算；日志里有明确的崩溃标记算；旧版玩家关窗不算；否则看退出码，
+/// 非 0 或拿不到退出码都算。
 ///
 /// 主动结束先行短路：Windows 上强制结束留下非 0 退出码、Unix 上被信号结束则没有退出码，两种表现
 /// 都会命中后面的规则，而玩家点「结束游戏」不该收到一次崩溃指认。
@@ -425,6 +428,14 @@ pub fn detect_crash(report: &ExitReport) -> bool {
         .any(|line| crate::crash::has_crash_marker(line))
     {
         return true;
+    }
+    let closed_by_player = report.code == Some(1)
+        && report
+            .recent_lines
+            .iter()
+            .any(|line| line.trim() == OLD_WINDOW_CLOSE_LINE);
+    if closed_by_player {
+        return false;
     }
     report.code != Some(0)
 }
@@ -694,6 +705,34 @@ mod tests {
         assert!(detect_crash(&report(
             Some(0),
             &["---- Minecraft Crash Report ----"],
+            false
+        )));
+    }
+
+    /// 1.5.2 这一代玩家点窗口的叉，游戏打一行再以退出码 1 结束，日志里没有别的异常。
+    #[test]
+    fn closing_the_window_of_an_old_version_is_not_a_crash() {
+        let closed = [
+            "Someone is closing me!",
+            "AL lib: (EE) alc_cleanup: 1 device not closed",
+        ];
+        assert!(!detect_crash(&report(Some(1), &closed, false)));
+    }
+
+    #[test]
+    fn window_close_line_does_not_excuse_real_crashes() {
+        // 崩溃画面也是这个窗口，玩家看完关掉时同样打这一行。
+        let crashed = ["---- Minecraft Crash Report ----", "Someone is closing me!"];
+        assert!(detect_crash(&report(Some(1), &crashed, false)));
+        // 关窗只会以 1 结束，别的退出码说明进程是自己倒下的。
+        assert!(detect_crash(&report(
+            Some(-1_073_741_819),
+            &["Someone is closing me!"],
+            false
+        )));
+        assert!(detect_crash(&report(
+            None,
+            &["Someone is closing me!"],
             false
         )));
     }
