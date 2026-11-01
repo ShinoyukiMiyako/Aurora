@@ -2300,9 +2300,10 @@ pub(crate) async fn list_world_backups_with(
 }
 
 /// 用一份备份替换现在的存档：先解压到临时目录并确认 level.dat 读得出，再把现在的存档移入回收站、换上新的。
-/// 长任务，可取消；取消或失败时现在的存档原样不动。占用规则与 `backup_world` 相同。备份不在报
-/// `world_backup_not_found`，备份损坏或有越界条目报 `world_backup_corrupt`；原存档已进回收站、新的没放到位时报
-/// `world_restore_incomplete`，detail.staged 为恢复出的副本。
+/// 长任务，解压期间可取消，取消或失败时现在的存档原样不动；开始换存档之后不再响应取消，换完才返回，结果按
+/// 实际报。占用规则与 `backup_world` 相同。备份不在报 `world_backup_not_found`，备份损坏或有越界条目报
+/// `world_backup_corrupt`；原存档已进回收站、新的没放到位时报 `world_restore_incomplete`，detail.staged 为恢复
+/// 出的副本。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn restore_world_backup(
@@ -2349,15 +2350,14 @@ pub(crate) async fn restore_world_backup_with(
     check_instance_id(id)?;
     check_world(world)?;
     check_backup_file(file)?;
-    let (_guard, task, aurora) = begin_world_task(env, task_id, id, true).await?;
-    let outcome = task
-        .run(async {
-            aurora
-                .restore_world_backup(id, world, file, disposer, Some(events))
-                .await
-                .map_err(instance_error)
-        })
-        .await?;
+    let (_guard, _task, aurora) = begin_world_task(env, task_id, id, true).await?;
+    // 不走 TaskHandle::run：解压阶段自己看令牌，取消时很快停下；换存档一旦开始就停不下来了，宽限期满丢弃
+    // future 只是不再等它，后台线程照样换完，用户却收到「已取消」，实例也放开了，半途就能启动游戏。
+    // 新副本没能就位时也得照实报出它在哪，不能被 run 盖成取消。
+    let outcome = aurora
+        .restore_world_backup(id, world, file, disposer, Some(events))
+        .await
+        .map_err(instance_error)?;
     Ok(RestoreResultDto {
         world: outcome.world,
         previous_in_recycle_bin: outcome.previous_in_recycle_bin,
@@ -5103,6 +5103,144 @@ mod tests {
         assert!(disposer.disposed().is_empty(), "取消时不碰现在的存档");
         assert_eq!(locks.activity("生存"), None);
         assert!(!registry.is_running("rs-big"));
+    }
+
+    /// 处置存档时停住等测试放行：回收站收下一个大存档要好几秒，取消就落在这段时间里。放行后删掉存档；
+    /// `squat` 为真时再在原处建出一个非空目录，让恢复出的副本改名就位失败。
+    #[derive(Clone, Default)]
+    struct HeldDisposer {
+        entered: Arc<std::sync::atomic::AtomicBool>,
+        release: Arc<std::sync::atomic::AtomicBool>,
+        squat: bool,
+    }
+
+    impl Disposer for HeldDisposer {
+        fn dispose(&self, path: &Path) -> Result<(), InstanceError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.entered.store(true, SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !self.release.load(SeqCst) {
+                assert!(Instant::now() < deadline, "测试一直没有放行");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let io = |source| InstanceError::Io {
+                path: path.to_path_buf(),
+                source,
+            };
+            std::fs::remove_dir_all(path).map_err(io)?;
+            if self.squat {
+                std::fs::create_dir_all(path.join("抢占")).map_err(io)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// 备份一个存档再改掉它，发起恢复，等恢复走到处置现在的存档时取消，过了取消时限才放行。
+    /// 返回放行前任务是否已结束、那时实例的占用、任务的结果与现在的存档。
+    async fn cancel_restore_mid_swap(
+        env: &Env,
+        disposer: HeldDisposer,
+    ) -> (
+        bool,
+        Option<InstanceActivity>,
+        Result<RestoreResultDto, CommandError>,
+        PathBuf,
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let world = env.isolated_world("生存", "新的世界");
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(env), "bk", "生存", "新的世界", &events)
+            .await
+            .unwrap();
+        std::fs::write(world.join("region").join("r.0.0.mca"), b"region-v2").unwrap();
+
+        let facade = env.facade.clone();
+        let registry = Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let game = Arc::new(GameSlot::default());
+        let (r, l, g, d) = (
+            registry.clone(),
+            locks.clone(),
+            game.clone(),
+            disposer.clone(),
+        );
+        let file = made.backup.file;
+        let restore = tokio::spawn(async move {
+            let ctx = WorldTaskEnv {
+                facade: &facade,
+                tasks: &r,
+                locks: &l,
+                game: &g,
+            };
+            let (events, _rx) = sink();
+            restore_world_backup_with(&ctx, "rs-swap", "生存", "新的世界", &file, d, &events).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !disposer.entered.load(SeqCst) {
+            assert!(Instant::now() < deadline, "恢复没有走到处置存档");
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        assert!(registry.cancel("rs-swap"));
+        tokio::time::sleep(CANCEL_DEADLINE + Duration::from_millis(200)).await;
+        let finished_early = restore.is_finished();
+        let activity = locks.activity("生存");
+        disposer.release.store(true, SeqCst);
+        let outcome = restore.await.unwrap();
+        assert_eq!(locks.activity("生存"), None);
+        assert!(!registry.is_running("rs-swap"));
+        (finished_early, activity, outcome, world)
+    }
+
+    /// 取消落在处置现在的存档之后：换存档已经停不下来，不能告诉用户取消了、放开实例让人在半途启动游戏。
+    /// 一直等到换完，实例全程占着，结果按成功报（取消晚了一步）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_restore_mid_swap_waits_for_the_swap_to_finish() {
+        let env = Env::new();
+        let (finished_early, activity, outcome, world) =
+            cancel_restore_mid_swap(&env, HeldDisposer::default()).await;
+
+        assert!(!finished_early, "存档还没换完，任务不该先结束");
+        assert_eq!(activity, Some(InstanceActivity::BackingUp));
+        assert_eq!(
+            outcome.unwrap(),
+            RestoreResultDto {
+                world: "新的世界".into(),
+                previous_in_recycle_bin: true,
+            }
+        );
+        assert_eq!(
+            std::fs::read(world.join("region").join("r.0.0.mca")).unwrap(),
+            b"region-v1"
+        );
+    }
+
+    /// 取消之后才在就位那一步失败：这不是取消造成的，原存档已进回收站，恢复出的副本是用户唯一的新副本，
+    /// 要照实报 world_restore_incomplete 并带上它的位置，不能被盖成 cancelled。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_restore_left_unplaced_after_cancel_still_reports_where_the_copy_is() {
+        let env = Env::new();
+        let disposer = HeldDisposer {
+            squat: true,
+            ..HeldDisposer::default()
+        };
+        let (_, _, outcome, world) = cancel_restore_mid_swap(&env, disposer).await;
+
+        let err = outcome.unwrap_err();
+        assert_eq!(err.code, common::WORLD_RESTORE_INCOMPLETE);
+        let staged = world
+            .parent()
+            .unwrap()
+            .join(format!("新的世界.{}-restore", aurora_base::brand::APP_SLUG));
+        assert_eq!(
+            err.detail.unwrap()["staged"],
+            json!(staged.display().to_string())
+        );
+        assert_eq!(
+            std::fs::read(staged.join("region").join("r.0.0.mca")).unwrap(),
+            b"region-v1"
+        );
     }
 
     /// 恢复：现在的存档交给 disposer（生产环境是回收站），换上备份时的样子；备份不在报 world_backup_not_found。
