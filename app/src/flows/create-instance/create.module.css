@@ -740,3 +740,10 @@
 :global([data-sk-reduced]) .radio::after {
   transition: none;
 }
+
+.slowHint {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}

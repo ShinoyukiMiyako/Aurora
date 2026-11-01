@@ -6,9 +6,10 @@ import { Icon } from "../../art/Icon";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { LoaderTile } from "../../art/illustrations/FeatureTile";
-import { coverLabel, LOADER_NAME } from "../../copy/flows";
+import { coverLabel, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { Settings } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { describeError } from "../../state/errors";
 import { useJavaRuntimes, type LoaderVersionDto, type VersionRequirementsDto } from "../../state/queries/catalog";
 import type { StarterModsDto, TemplateInfoDto } from "../../state/queries/starter";
@@ -168,6 +169,7 @@ export interface VersionStepProps {
 export function VersionStep(props: VersionStepProps) {
   const { status, problem, onRetry, items, latestId, staleSince, value, onChange, filter, onFilter, selectedJava, now } = props;
   const count = staleSince === null ? CREATE_COPY.version.count(items.length) : `${CREATE_COPY.version.count(items.length)} · ${CREATE_COPY.version.stale(staleSince, now)}`;
+  const { slow } = useLoadingGate(status === "loading");
   return (
     <>
       <StepHead title={CREATE_COPY.version.title} body={CREATE_COPY.version.body} />
@@ -187,7 +189,10 @@ export function VersionStep(props: VersionStepProps) {
       {problem !== null ? (
         <LoadError title={CREATE_COPY.version.loadError} error={problem} onRetry={onRetry} />
       ) : status !== "ready" ? (
-        <SkeletonRows label={CREATE_COPY.version.loadingLabel} />
+        <>
+          <SkeletonRows label={CREATE_COPY.version.loadingLabel} />
+          {slow && <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p>}
+        </>
       ) : items.length === 0 ? (
         <EmptyState scene="search" compact titleAs="h4" title={CREATE_COPY.version.noMatch(filter.query.trim())} />
       ) : (
