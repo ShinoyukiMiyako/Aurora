@@ -30,7 +30,7 @@ use aurora_modplatform::{
 use serde::Serialize;
 
 use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
-use crate::deps::PlannedItem;
+use crate::deps::{InstallPlan, PlannedItem};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
@@ -72,6 +72,8 @@ pub struct ModInstallOutcome {
     pub path: PathBuf,
     /// 来源平台。
     pub platform: Platform,
+    /// 这个版本要的必需前置里没有照办的，每条一句中文，见 [`InstallPlan::unmet`]。
+    pub skipped: Vec<String>,
 }
 
 /// 一个实例与 Mod 相关的全部目录，同源于一次隔离判定。
@@ -200,7 +202,7 @@ impl Aurora {
             .await?;
         self.install_planned(
             version_id,
-            plan.items,
+            plan,
             (platform, project_id, mod_version_id),
             events,
         )
@@ -211,8 +213,8 @@ impl Aurora {
     /// [`Aurora::check_updates`] 给出的最新版）。
     ///
     /// 走与安装同一条管线：旧文件改名为 `.old` 留作回滚凭据，历史记一条更新事件，新版本声明的必需前置
-    /// 一并补齐。`file_name` 是列表里的磁盘文件名（禁用态带 `.disabled` 也认）。卷宗里没有这个文件的
-    /// 来源时拒绝：不知道它是哪个工程，就无从「更新」。
+    /// 一并补齐，补不齐的记进结果的 `skipped`。`file_name` 是列表里的磁盘文件名（禁用态带 `.disabled`
+    /// 也认）。卷宗里没有这个文件的来源时拒绝：不知道它是哪个工程，就无从「更新」。
     pub async fn update_mod(
         &self,
         version_id: &str,
@@ -240,7 +242,7 @@ impl Aurora {
             .await?;
         self.install_planned(
             version_id,
-            plan.items,
+            plan,
             (platform, &project_id, mod_version_id),
             events,
         )
@@ -439,10 +441,11 @@ impl Aurora {
     async fn install_planned(
         &self,
         version_id: &str,
-        items: Vec<PlannedItem>,
+        plan: InstallPlan,
         root: (Platform, &str, &str),
         events: Option<&EventSink>,
     ) -> Result<ModInstallOutcome> {
+        let InstallPlan { items, unmet, .. } = plan;
         // plan_install 在结构上保证计划至少含主项。这里给错误而不是 panic：万一那条保证被后续改动
         // 打破，玩家该看到一句能读懂的失败，而不是整个命令被 panic 掀掉。
         let Some(main) = items.first() else {
@@ -529,6 +532,7 @@ impl Aurora {
             file_name: main_file,
             path: dest,
             platform: main_platform,
+            skipped: unmet,
         })
     }
 
@@ -1904,6 +1908,90 @@ mod tests {
         assert_eq!(restored.update_hold, Some(pin));
     }
 
+    /// 更新不走确认计划：必需前置没有照办的说明随结果带回去。可选、内嵌这类声明不算，它们每次更新都在，
+    /// 混进来玩家就学会了无视这条通知。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn update_mod_reports_required_dependencies_it_could_not_honor() {
+        let server = MockServer::start().await;
+        let (old_jar, new_jar, lib) = (
+            b"sodium old".to_vec(),
+            b"sodium new build".to_vec(),
+            b"lib".to_vec(),
+        );
+        mount_sodium(&server, "v1", "sodium-v1.jar", &old_jar).await;
+        let lib_body = modrinth_version(
+            "d1",
+            "lib",
+            "2026-01-01T00:00:00Z",
+            "lib-d1.jar",
+            &format!("{}/lib-d1.jar", server.uri()),
+            &format!(r#"{{"sha1":"{}"}}"#, sha1_hex(&lib)),
+            lib.len(),
+            "",
+        );
+        mount_version(&server, "d1", &lib_body).await;
+        mount_jar(&server, "lib-d1.jar", lib).await;
+        let v2 = modrinth_version(
+            "v2",
+            "sodium",
+            "2026-02-01T00:00:00Z",
+            "sodium-v2.jar",
+            &format!("{}/sodium-v2.jar", server.uri()),
+            &format!(r#"{{"sha1":"{}"}}"#, sha1_hex(&new_jar)),
+            new_jar.len(),
+            concat!(
+                r#"{"project_id":"lib","version_id":"d2","dependency_type":"required"},"#,
+                r#"{"project_id":"gone","dependency_type":"required"},"#,
+                r#"{"project_id":"nofit","dependency_type":"required"},"#,
+                r#"{"project_id":"menu","dependency_type":"optional"},"#,
+                r#"{"project_id":"bundled","dependency_type":"embedded"}"#
+            ),
+        );
+        mount_version(&server, "v2", &v2).await;
+        mount_jar(&server, "sodium-v2.jar", new_jar).await;
+        mount_versions(&server, "nofit", "[]".to_owned()).await;
+        mount_projects(
+            &server,
+            &[
+                ("sodium", "Sodium"),
+                ("lib", "Lib"),
+                ("nofit", "No Fit"),
+                ("menu", "Mod Menu"),
+            ],
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), server.uri());
+        aurora
+            .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
+            .await
+            .unwrap();
+        aurora
+            .install_mod("1.21", Platform::Modrinth, "lib", "d1", None)
+            .await
+            .unwrap();
+        aurora
+            .set_mod_update_hold("1.21", "lib-d1.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap();
+
+        let outcome = aurora
+            .update_mod("1.21", "sodium-v1.jar", "v2", None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.file_name, "sodium-v2.jar");
+        assert_eq!(
+            outcome.skipped,
+            vec![
+                "前置 Lib 按你的更新设置保留现有版本，未换成 sodium-v2.jar 指定的版本".to_owned(),
+                "前置 gone 在平台上已不存在，未加入计划".to_owned(),
+                "前置 No Fit 没有适配该实例的版本，未加入计划".to_owned(),
+            ]
+        );
+    }
+
     /// 「被谁带进来」跟着 Mod 走：单独更新一个前置，它还是那个 Mod 的前置，界面的「由 X 带入」与移除
     /// 时的提醒都靠这条记录。反过来，玩家自己装的 Mod 被别的 Mod 的前置计划换了版本，也还是玩家装的。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2822,6 +2910,14 @@ mod tests {
         }
     }
 
+    fn plan_of(items: Vec<PlannedItem>) -> InstallPlan {
+        InstallPlan {
+            items,
+            skipped: Vec::new(),
+            unmet: Vec::new(),
+        }
+    }
+
     /// CurseForge 的暂存任务（直链与 download-url 兜底出来的）都挂 CurseForge 凭据，Modrinth 的不挂。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn curseforge_staged_tasks_carry_the_credential_and_modrinth_tasks_do_not() {
@@ -3019,7 +3115,7 @@ mod tests {
         let outcome = aurora
             .install_planned(
                 "1.21",
-                vec![planned(blocked_version(9, 90, bytes))],
+                plan_of(vec![planned(blocked_version(9, 90, bytes))]),
                 (Platform::CurseForge, "9", "90"),
                 None,
             )
@@ -3068,7 +3164,7 @@ mod tests {
         let err = aurora
             .install_planned(
                 "1.21",
-                vec![planned(blocked_version(9, 90, bytes))],
+                plan_of(vec![planned(blocked_version(9, 90, bytes))]),
                 (Platform::CurseForge, "9", "90"),
                 None,
             )
@@ -3103,11 +3199,11 @@ mod tests {
         let err = aurora
             .install_planned(
                 "1.21",
-                vec![
+                plan_of(vec![
                     planned(blocked_version(9, 90, b"first")),
                     planned(blocked_version(10, 100, bytes)),
                     planned(blocked_version(11, 110, b"third")),
-                ],
+                ]),
                 (Platform::CurseForge, "9", "90"),
                 None,
             )

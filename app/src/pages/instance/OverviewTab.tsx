@@ -567,6 +567,7 @@ function ModsPeekCard({
           open={preview.open}
           queryId={queryId}
           rows={outdated}
+          lock={ops.updateReason}
           onClose={() => setPreview((p) => (p === null ? p : { ...p, open: false }))}
           onConfirm={(picked) => {
             setPreview((p) => (p === null ? p : { ...p, open: false }));

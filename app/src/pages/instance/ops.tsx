@@ -1,7 +1,7 @@
 // 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、导出整合包、补全与删除。
 // 几处入口的锁定判断与反馈都从这里出，保证完全一致（删除确认与实例库共用 delete.tsx）。动作一律经外层统一错误处理执行。
 
-import { ACTION_ERROR } from "../../copy/flows";
+import { ACTION_ERROR, lockReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf, type InstanceLocks } from "../../domain/instance-locks";
 import { instanceNameError } from "../../domain/rules";
@@ -39,6 +39,10 @@ export interface InstanceOps {
   exportReason: string | undefined;
   /** 此刻不能把存档带进整合包的原因；能带为 undefined。 */
   exportSavesReason: string | undefined;
+  /** 更新检查设置此刻改不了的原因：只写卷宗不碰 jar，游戏运行不挡；但要占住实例，安装、补全、改名、删除挡着。能改为 undefined。 */
+  updateHoldReason: string | undefined;
+  /** 此刻不能确认更新 Mod 的原因：既要换 jar（游戏运行、补全挡着），也要占住实例（改名、删除挡着）。能更新为 undefined。 */
+  updateReason: string | undefined;
   repair(): void;
   remove(): void;
 }
@@ -100,6 +104,8 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     return work === null || !WORK_FOLDERS.has(target) ? undefined : LOCK_REASON.work.folder[work];
   };
   const settingsReason = work === null ? undefined : LOCK_REASON.work.settings[work];
+  const updateHoldReason = work === null ? undefined : LOCK_REASON.work.mods[work];
+  const modsLock = lockReason(locks.mods, "mods");
 
   const repair = () => {
     void run(() => actions.repairInstance(id), ACTION_ERROR.repair).then((outcome) => {
@@ -124,6 +130,8 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     settingsReason,
     exportReason: exportReason(inst, work),
     exportSavesReason: exportSavesReason(inst, busy),
+    updateHoldReason,
+    updateReason: modsLock !== undefined ? modsLock : updateHoldReason,
     repair,
     remove,
   };

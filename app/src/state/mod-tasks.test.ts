@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../ipc/errors";
-import type { InstallPlan, ModVersionInfo, UpdateCandidate } from "../ipc/mods";
+import type { InstallPlan, ModUpdateOutcomeDto, ModVersionInfo, UpdateCandidate } from "../ipc/mods";
 import { CORE_EVENT } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, emit, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
@@ -29,6 +29,11 @@ function version(projectId: string, versionId: string, overrides: Partial<ModVer
     dependencies: [],
     ...overrides,
   };
+}
+
+/** update_mod 的成功结果。 */
+function updated(args: Record<string, unknown>, skipped: string[] = []): ModUpdateOutcomeDto {
+  return { file_name: String(args.fileName), path: "", platform: "modrinth", skipped };
 }
 
 function plan(...items: { projectId: string; versionId: string; satisfied?: boolean }[]): InstallPlan {
@@ -196,7 +201,7 @@ describe("一次装进几个实例", () => {
 describe("全部更新", () => {
   it("多个可更新合成一个任务：标题写个数，逐个调 update_mod 并共用 taskId，完成只弹一条通知", async () => {
     ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
-    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => updated(args));
     await store.actions.updateAllMods("生存");
     await settle();
 
@@ -218,7 +223,7 @@ describe("全部更新", () => {
 
   it("只有一个可更新时退回单个 Mod 的任务与文案", async () => {
     ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2")]);
-    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => updated(args));
     await store.actions.updateAllMods("生存");
     await settle();
     expect(store.getState().tasks.map((t) => [t.title, t.spec.command])).toEqual([["更新 sodium", "update_mod"]]);
@@ -231,7 +236,7 @@ describe("全部更新", () => {
     ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
     ipc.overrides.set("update_mod", (args) => {
       if (args.fileName === "lithium-l1.jar") throw new IpcError("download_failed", "下载源暂时不可用");
-      return { file_name: String(args.fileName), path: "", platform: "modrinth" };
+      return updated(args);
     });
     await store.actions.updateAllMods("生存");
     await settle();
@@ -242,7 +247,7 @@ describe("全部更新", () => {
     // sodium 已是 s2；lithium 被玩家手动换成了另一个文件名；iris 还没动
     const lithiumRenamed = { ...candidate("lithium", "l1", "l2"), file_name: "lithium-fabric-l1.jar" };
     ipc.overrides.set("check_updates", () => [lithiumRenamed, candidate("iris", "i1", "i2")]);
-    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => updated(args));
     store.actions.retryTask(task.id);
     await settle();
     expect(store.getState().tasks[0].status).toBe("done");
@@ -257,13 +262,13 @@ describe("全部更新", () => {
     ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
     ipc.overrides.set("update_mod", (args) => {
       if (args.fileName === "iris-i1.jar") throw new IpcError("history_write_failed", "变更历史写入失败");
-      return { file_name: String(args.fileName), path: "", platform: "modrinth" };
+      return updated(args);
     });
     await store.actions.updateAllMods("生存");
     await settle();
     const [task] = store.getState().tasks;
     expect(task.status).toBe("failed");
-    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => updated(args));
     return task.id;
   }
 
@@ -272,7 +277,7 @@ describe("全部更新", () => {
   it("单个 Mod 的更新还在跑时，全部更新跳过它，只把其余的合成一个任务", async () => {
     const sodium = deferred<unknown>();
     ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
-    ipc.overrides.set("update_mod", (args) => (args.fileName === "sodium-s1.jar" ? sodium.promise : { file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => (args.fileName === "sodium-s1.jar" ? sodium.promise : updated(args)));
     await store.actions.updateMod("生存", "sodium-s1.jar");
     await settle();
     expect(store.getState().tasks.map((t) => [t.spec.command, t.status])).toEqual([["update_mod", "running"]]);
@@ -282,7 +287,7 @@ describe("全部更新", () => {
     const [, all] = store.getState().tasks;
     expect(all).toMatchObject({ title: "更新 2 个 Mod", spec: { command: "update_mods" }, status: "done" });
     expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["sodium-s1.jar", "lithium-l1.jar", "iris-i1.jar"]);
-    sodium.resolve({ file_name: "sodium-s1.jar", path: "", platform: "modrinth" });
+    sodium.resolve(updated({ fileName: "sodium-s1.jar" }));
     await settle();
   });
 
@@ -307,7 +312,7 @@ describe("全部更新", () => {
     await settle();
     expect(store.getState().tasks).toHaveLength(2);
     expect(store.getState().toasts.filter((t) => t.tone === "info").map((t) => t.title)).toEqual(["更新 3 个 Mod 已在下载队列里"]);
-    pending.resolve({ file_name: "sodium-s1.jar", path: "", platform: "modrinth" });
+    pending.resolve(updated({ fileName: "sodium-s1.jar" }));
     await settle();
   });
 
@@ -369,7 +374,7 @@ describe("全部更新", () => {
       ],
     });
     ipc.overrides.set("check_updates", () => [candidate("iris", "i1", "i2")]);
-    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => updated(args));
     store = await startedStore();
     store.actions.retryTask("task-old");
     await settle();
@@ -378,11 +383,114 @@ describe("全部更新", () => {
   });
 });
 
+describe("更新时没有照办的前置", () => {
+  const HELD = "前置 Fabric API 按你的更新设置保留现有版本，未换成 sodium-s2.jar 指定的版本";
+  const GONE = "前置 Cloth Config 在平台上已不存在，未加入计划";
+  const NO_FIT = "前置 Indium 没有适配该实例的版本，未加入计划";
+  const toastList = () => store.getState().toasts.map((t) => [t.tone, t.title, t.body]);
+  const SUCCESS_BODY = "「生存」· 旧版本已保留，可以回滚";
+
+  it("单个更新：完成通知之后补一条 warning 写后端原文并能去下载任务页，任务详情留一份全文", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2")]);
+    ipc.overrides.set("update_mod", (args) => updated(args, [HELD, GONE]));
+    await store.actions.updateMod("生存", "sodium-s1.jar");
+    await settle();
+    expect(toastList()).toEqual([
+      ["success", "已更新 sodium", SUCCESS_BODY],
+      ["warning", "「生存」有 2 个前置要留意", `${HELD}；${GONE}`],
+    ]);
+    expect(store.getState().toasts[1].action).toMatchObject({ label: "查看", to: { page: "tasks" } });
+    expect(store.getState().tasks[0]).toMatchObject({ status: "done", detail: `s1 → s2 · 「生存」 · ${HELD}；${GONE}` });
+  });
+
+  it("全部更新：几项撞上同一个前置时说明只留一条，合成一条通知", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => updated(args, args.fileName === "lithium-l1.jar" ? [] : args.fileName === "iris-i1.jar" ? [GONE, NO_FIT] : [GONE]));
+    await store.actions.updateAllMods("生存");
+    await settle();
+    expect(toastList()).toEqual([
+      ["success", "已更新 3 个 Mod", SUCCESS_BODY],
+      ["warning", "「生存」有 2 个前置要留意", `${GONE}；${NO_FIT}`],
+    ]);
+    expect(store.getState().tasks[0].detail).toBe(`「生存」 · ${GONE}；${NO_FIT}`);
+  });
+
+  it("都照办了：只有完成通知，任务详情不变", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2")]);
+    ipc.overrides.set("update_mod", (args) => updated(args));
+    await store.actions.updateMod("生存", "sodium-s1.jar");
+    await settle();
+    expect(toastList()).toEqual([["success", "已更新 sodium", SUCCESS_BODY]]);
+    expect(store.getState().tasks[0].detail).toBe("s1 → s2 · 「生存」");
+  });
+
+  it("全部更新停在中途：已经换好的那几项的说明不丢，失败通知照常", async () => {
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
+    ipc.overrides.set("update_mod", (args) => {
+      if (args.fileName === "lithium-l1.jar") throw new IpcError("download_failed", "下载源暂时不可用");
+      return updated(args, [GONE]);
+    });
+    await store.actions.updateAllMods("生存");
+    await settle();
+    expect(store.getState().tasks[0].status).toBe("failed");
+    expect(toastList()).toContainEqual(["warning", "「生存」有 1 个前置要留意", GONE]);
+    expect(toastList().filter(([tone]) => tone === "error")).toHaveLength(1);
+    expect(store.getState().tasks[0].detail).toBe(`「生存」 · ${GONE}`);
+  });
+
+  it("全部更新中途取消：已经换好的那几项的说明同样不丢", async () => {
+    const lithium = deferred<unknown>();
+    ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2")]);
+    ipc.overrides.set("update_mod", (args) => (args.fileName === "sodium-s1.jar" ? updated(args, [NO_FIT]) : lithium.promise));
+    ipc.overrides.set("cancel_task", () => true);
+    await store.actions.updateAllMods("生存");
+    await settle();
+    expect(callsOf(ipc, "update_mod")).toHaveLength(2);
+    await store.actions.cancelTask(store.getState().tasks[0].id);
+    lithium.reject(new IpcError("cancelled", "已取消"));
+    await settle();
+    expect(store.getState().tasks[0].status).toBe("cancelled");
+    expect(toastList()).toContainEqual(["warning", "「生存」有 1 个前置要留意", NO_FIT]);
+  });
+
+  it("重启后恢复的单个更新重试成功：没有入队上下文也补这条说明", async () => {
+    store.stop();
+    resetRecorder(ipc);
+    bootOverrides(ipc, {
+      journal: [
+        {
+          id: "task-one",
+          kind: "mod",
+          title: "更新 sodium",
+          detail: "s1 → s2 · 「生存」",
+          instance_id: "生存",
+          status: "running",
+          progress: 0.5,
+          bytes: 0,
+          total_bytes: null,
+          speed_bps: 0,
+          attempt: 1,
+          error: null,
+          created_at: 1_719_000_000_000,
+          finished_at: null,
+          spec: { command: "update_mod", args: { versionId: "生存", fileName: "sodium-s1.jar", modVersionId: "s2" } },
+        },
+      ],
+    });
+    ipc.overrides.set("update_mod", (args) => updated(args, [HELD]));
+    store = await startedStore();
+    store.actions.retryTask("task-one");
+    await settle();
+    expect(toastList()).toContainEqual(["warning", "「生存」有 1 个前置要留意", HELD]);
+    expect(store.getState().tasks[0].detail).toBe(`s1 → s2 · 「生存」 · ${HELD}`);
+  });
+});
+
 describe("更新预览里勾选的几项", () => {
   const picked = [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")];
 
   beforeEach(() => {
-    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => updated(args));
   });
 
   it("三项里勾了两项：入队的 update_mods 只含这两项，不再现查可更新项，逐项更新的也只有它们", async () => {
@@ -564,13 +672,13 @@ describe("组合任务的取消", () => {
   it("全部更新：一项在宽限期内换好后不再更新其余的", async () => {
     ipc.overrides.set("check_updates", () => [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")]);
     const first = deferred<unknown>();
-    ipc.overrides.set("update_mod", (args) => (callsOf(ipc, "update_mod").length === 1 ? first.promise : { file_name: String(args.fileName), path: "", platform: "modrinth" }));
+    ipc.overrides.set("update_mod", (args) => (callsOf(ipc, "update_mod").length === 1 ? first.promise : updated(args)));
     ipc.overrides.set("cancel_task", () => true);
     await store.actions.updateAllMods("生存");
     await settle();
     const [task] = store.getState().tasks;
     await store.actions.cancelTask(task.id);
-    first.resolve({ file_name: "sodium-s2.jar", path: "", platform: "modrinth" });
+    first.resolve(updated({ fileName: "sodium-s2.jar" }));
     await settle();
     expect(callsOf(ipc, "update_mod").map((a) => a.fileName)).toEqual(["sodium-s1.jar"]);
     expect(store.getState().tasks.map((t) => t.status)).toEqual(["cancelled"]);
@@ -642,7 +750,7 @@ describe("组合任务的进度按整体累计", () => {
       snap();
     };
     const finish = async (i: number) => {
-      calls[i].resolve({ file_name: `${i}.jar`, path: "", platform: "modrinth" });
+      calls[i].resolve(updated({ fileName: `${i}.jar` }));
       await settle();
       snap();
     };
@@ -786,7 +894,7 @@ describe("组合任务的进度按整体累计", () => {
         snap();
       },
       async finish(i: number) {
-        calls[i].resolve({ file_name: `${i}.jar`, path: "", platform: "modrinth" });
+        calls[i].resolve(updated({ fileName: `${i}.jar` }));
         await settle();
         snap();
       },

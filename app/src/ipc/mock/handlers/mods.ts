@@ -387,9 +387,19 @@ function installedAny(instance: MockInstance, platform: PlatformId, projectId: s
   return instance.ledger.find((r) => r.platform === platform && r.project_id === projectId && present(instance, r.file_name));
 }
 
-function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
+/** unmet 与后端同一口径：skipped 里说必需前置的那几条，只随更新结果带回，确认计划的出参没有这个键。 */
+interface MockPlan extends InstallPlan {
+  unmet: string[];
+}
+
+function plan(instance: MockInstance, root: ModVersionInfo): MockPlan {
   const items: PlannedItem[] = [];
   const skipped: string[] = [];
+  const unmet: string[] = [];
+  const skipRequired = (note: string) => {
+    skipped.push(note);
+    unmet.push(note);
+  };
   const visited = new Set([root.project_id]);
   const name = (id: string | null) => {
     if (id === null) return "未标明工程的前置";
@@ -405,7 +415,7 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
       else if (dep.kind === "incompatible") skipped.push(`${v.file_name} 声明与 ${name(dep.project_id)} 不兼容，未做任何处理`);
       else if (dep.kind === "embedded") skipped.push(`内嵌前置 ${name(dep.project_id)} 已打包在 ${v.file_name} 内，无需单独安装`);
       else if (dep.kind === "tool") skipped.push(`工具类关联 ${name(dep.project_id)} 未自动安装`);
-      else if (dep.project_id === null) skipped.push(`${v.file_name} 的一条必需前置没有给出工程标识，无法自动解析`);
+      else if (dep.project_id === null) skipRequired(`${v.file_name} 的一条必需前置没有给出工程标识，无法自动解析`);
       else if (!visited.has(dep.project_id)) {
         visited.add(dep.project_id);
         const kept = installedAny(instance, v.platform, dep.project_id);
@@ -421,13 +431,13 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
         const candidates = projectVersions(v.platform, dep.project_id);
         const chosen = newestFirst(candidates).find((c) => classify(c, instance.mc_version, instance.loaders).kind !== "mismatch");
         if (chosen) children.push(plannedFromPlatform(chosen, v.project_id, false));
-        else skipped.push(`前置 ${name(dep.project_id)} 没有适配该实例的版本，未加入计划`);
+        else skipRequired(`前置 ${name(dep.project_id)} 没有适配该实例的版本，未加入计划`);
       }
     }
     stack.push(...children.reverse());
     items.push(item);
   }
-  return { items, skipped };
+  return { items, skipped, unmet };
 }
 
 // 目录不带图（假后端不托管图片），平台给的计划项图标为空
@@ -998,7 +1008,7 @@ export const handlers: MockHandlers = {
       const main = result.items[0].version;
       stage(taskId, step, `模组 ${main.file_name} 已安装`);
       const onDisk = diskName(instance, main.file_name);
-      return { file_name: onDisk, path: `${mockModsDir(id)}/${onDisk}`, platform: main.platform };
+      return { file_name: onDisk, path: `${mockModsDir(id)}/${onDisk}`, platform: main.platform, skipped: result.unmet };
     } finally {
       endMockTask(taskId);
       hold.release();
@@ -1075,7 +1085,8 @@ export const handlers: MockHandlers = {
     const projectId = requireNonEmpty(args.projectId, "projectId");
     const modVersionId = requireNonEmpty(args.modVersionId, "modVersionId");
     const instance = mockInstance(args.versionId);
-    return plan(instance, findVersion(platform, projectId, modVersionId));
+    const { items, skipped } = plan(instance, findVersion(platform, projectId, modVersionId));
+    return { items, skipped };
   },
 };
 

@@ -1,7 +1,7 @@
 // Mod 管理：吸顶工具条（搜索、状态筛选、打开文件夹、全部更新、添加）+ 总数说明 + 表格。
 // 选中至少一行时工具条原位换成批量操作条；全部更新与批量更新都先打开更新预览，勾选后才入队。
 // 游戏运行中（含加载中）与安装中禁用全部 Mod 文件操作：JVM 占着文件，Windows 下改名、替换、删除都会失败。
-// 忽略更新只改记录、不碰 jar，只在补全时禁用。
+// 忽略更新只改记录、不碰 jar，游戏运行不挡；但写卷宗要占住实例，安装、补全、改名、删除进行中禁用。
 
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
@@ -139,8 +139,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const lock = lockReason(ops.locks.mods, "mods");
   // 检查更新会把反查到的身份回写卷宗，后端照改动 Mod 占住实例：与安装、补全、改名、删除互斥，游戏运行不挡
   const checkReason = ops.work === null ? undefined : LOCK_REASON.work.checkUpdates[ops.work];
-  // 更新检查设置只写卷宗：运行中照常可用，只有补全在写整个目录时挡住
-  const holdLock = ops.locks.mods === "installing" ? lock : undefined;
+  const holdLock = ops.updateHoldReason;
 
   useEffect(() => registerFind(() => searchRef.current?.focus()), [registerFind]);
   useEffect(() => {
@@ -540,7 +539,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
       )}
 
       {preview !== null && (
-        <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
+        <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} lock={ops.updateReason} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
       )}
     </div>
   );
@@ -561,7 +560,7 @@ function UpdateProgress({ instanceId }: { instanceId: string }) {
 interface ColumnDeps {
   compact: boolean;
   lock: string | undefined;
-  /** 更新检查设置的锁：只有补全时才有。 */
+  /** 更新检查设置的锁：安装、补全、改名、删除进行中才有。 */
   holdLock: string | undefined;
   now: number;
   isUpdating(r: ModRow): boolean;

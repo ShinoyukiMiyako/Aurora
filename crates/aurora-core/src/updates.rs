@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use aurora_modplatform::{
     BodyFormat, CurseForgeClient, CurseForgeFile, CurseForgeFingerprintMatch, InstalledMod,
-    ModHashes, ModVersionInfo, ModrinthVersion, Platform, ReleaseChannel, hash_mod_file,
+    ModHashes, ModLoader, ModVersionInfo, ModrinthVersion, Platform, ReleaseChannel, hash_mod_file,
 };
 use serde::Serialize;
 
@@ -32,7 +32,7 @@ use crate::ledger::{LedgerEntry, UpdateHold};
 use crate::modfs::{
     NETWORK_CONCURRENCY, bounded_map, ledger_key, local_concurrency, lock_mods_dir, refuse,
 };
-use crate::mods::{mod_file_path, scan_installed};
+use crate::mods::{InstanceDirs, mod_file_path, scan_installed};
 
 /// 一个可更新项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -121,12 +121,28 @@ impl Aurora {
         if installed.is_empty() {
             return Ok(Vec::new());
         }
+        self.check_scanned(
+            version_id, &dirs, &installed, loaders, mc_version, curseforge,
+        )
+        .await
+    }
+
+    /// 拿一次扫描结果查更新。扫描与这里之间隔着时间，`installed` 里的文件此刻不一定还在。
+    async fn check_scanned(
+        &self,
+        version_id: &str,
+        dirs: &InstanceDirs,
+        installed: &[InstalledMod],
+        loaders: Vec<ModLoader>,
+        mc_version: String,
+        curseforge: impl FnOnce() -> Result<CurseForgeClient>,
+    ) -> Result<Vec<UpdateCandidate>> {
         let mut ledger = self.ledger_store(version_id).load().await?;
 
         // 磁盘是权威：待查集合来自重扫结果，并按启用态文件名去重——同名的启用副本与禁用副本指向同一条
         // 卷宗身份，不该产出两条重复的更新项。
         let mut files: BTreeMap<String, &InstalledMod> = BTreeMap::new();
-        for item in &installed {
+        for item in installed {
             files
                 .entry(ledger_key(&item.file_name).to_owned())
                 .or_insert(item);
@@ -142,13 +158,22 @@ impl Aurora {
             })
             .map(|(key, item)| (key.clone(), item.path.clone()))
             .collect();
-        let hashed: HashMap<String, ModHashes> =
-            bounded_map(to_hash, local_concurrency(), |(key, path)| async move {
-                Ok((key, hash_mod_file(&path).await?))
-            })
-            .await?
-            .into_iter()
-            .collect();
+        let hashing = bounded_map(to_hash, local_concurrency(), |(key, path)| async move {
+            Ok((key, hash_unless_gone(&path).await?))
+        })
+        .await?;
+        let mut hashed: HashMap<String, ModHashes> = HashMap::with_capacity(hashing.len());
+        for (key, hashes) in hashing {
+            match hashes {
+                Some(hashes) => {
+                    hashed.insert(key, hashes);
+                }
+                // 从待查集合里摘掉：下面按集合取哈希时不用再分「没算」与「算不出」。
+                None => {
+                    files.remove(&key);
+                }
+            }
+        }
 
         let mut known_modrinth: HashMap<String, String> = HashMap::new();
         let mut unknown: Vec<String> = Vec::new();
@@ -522,6 +547,24 @@ impl Aurora {
         Ok(index_by_fingerprint(
             client.fingerprint_matches(fingerprints).await?,
         ))
+    }
+}
+
+/// 算一个文件的双通道哈希；文件已经不在了返回 `None`。
+///
+/// 待查集合来自更早的那次扫描：玩家可能在资源管理器里删了文件，启停与移除也能和检查更新同时进行。没了
+/// 的文件没有更新可报，让它报错会连累整个实例查不了更新。占用、权限这类读取失败不算：文件还在，漏查了
+/// 玩家不会知道，照常冒泡。
+async fn hash_unless_gone(path: &std::path::Path) -> Result<Option<ModHashes>> {
+    match hash_mod_file(path).await {
+        Ok(hashes) => Ok(Some(hashes)),
+        Err(aurora_modplatform::Error::Base(aurora_base::Error::Io { source, .. }))
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            tracing::info!(path = %path.display(), "文件在检查更新途中不见了，跳过");
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -1093,6 +1136,112 @@ mod tests {
         // 没有任何已知身份，最新版本查询一次都不该发。
         let requests = server.received_requests().await.unwrap();
         assert_eq!(count_requests(&requests, "/version_files/update"), 0);
+    }
+
+    /// 扫描之后、算哈希之前文件没了（玩家在资源管理器里删了，或并发的移除抢了先）：那个文件不报更新，
+    /// 其余 Mod 照常。两类都要补算：卷宗里没有身份的，与卷宗没记 SHA-1 的 Modrinth 条目。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn files_gone_after_the_scan_are_skipped_not_fatal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.20.1-fabric", FABRIC_JSON).await;
+        let (_, sha1) = put_mod(mc, "1.20.1-fabric", "sodium-0.5.3.jar", b"sodium-payload").await;
+        let (unknown, _) = put_mod(mc, "1.20.1-fabric", "dropped-in.jar", b"dropped").await;
+        let (known, _) = put_mod(mc, "1.20.1-fabric", "lithium.jar", b"lithium").await;
+
+        let server = MockServer::start().await;
+        mount_post(
+            &server,
+            "/version_files",
+            format!(
+                r#"{{"{sha1}":{}}}"#,
+                modrinth_version(
+                    "old1",
+                    "AANobbMI",
+                    "0.5.3",
+                    "2025-01-01T00:00:00Z",
+                    "sodium-0.5.3.jar",
+                    &sha1
+                )
+            ),
+        )
+        .await;
+        mount_post(
+            &server,
+            "/version_files/update",
+            format!(
+                r#"{{"{sha1}":{}}}"#,
+                modrinth_version(
+                    "new2",
+                    "AANobbMI",
+                    "0.6.0",
+                    "2026-06-01T00:00:00Z",
+                    "sodium-0.6.0.jar",
+                    "bb"
+                )
+            ),
+        )
+        .await;
+
+        let aurora = aurora_at(mc, &server.uri());
+        save_ledger(
+            &aurora,
+            "1.20.1-fabric",
+            vec![
+                ledger_entry("sodium-0.5.3.jar", "AANobbMI", "old1", None),
+                ledger_entry("lithium.jar", "gvQqBUqZ", "l1", None),
+            ],
+        )
+        .await;
+
+        let dirs = aurora.resolved_dirs("1.20.1-fabric").await.unwrap();
+        let scanned = scan_installed(&dirs).await.unwrap();
+        assert_eq!(scanned.len(), 3);
+        tokio::fs::remove_file(&unknown).await.unwrap();
+        tokio::fs::remove_file(&known).await.unwrap();
+
+        let found = aurora
+            .check_scanned(
+                "1.20.1-fabric",
+                &dirs,
+                &scanned,
+                vec![ModLoader::Fabric],
+                "1.20.1".to_owned(),
+                key_missing,
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].file_name, "sodium-0.5.3.jar");
+        assert_eq!(found[0].latest.version_id, "new2");
+        // 只问还在的那个文件，没了的文件不进任何查询。
+        let requests = server.received_requests().await.unwrap();
+        let asked = requests
+            .iter()
+            .find(|r| r.url.path() == "/version_files")
+            .unwrap();
+        let asked: serde_json::Value = serde_json::from_slice(&asked.body).unwrap();
+        assert_eq!(asked["hashes"], serde_json::json!([sha1]));
+    }
+
+    /// 读不出的文件不等于没了：占用、权限这类失败照常冒泡，否则这个 Mod 的更新会被悄悄漏报。
+    #[tokio::test]
+    async fn hash_failures_other_than_not_found_still_surface() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = hash_unless_gone(tmp.path()).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::ModPlatform(aurora_modplatform::Error::Base(_))
+            ),
+            "目录不是文件，读取失败要原样报出来，得到 {err:?}"
+        );
+        assert!(
+            hash_unless_gone(&tmp.path().join("gone.jar"))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// 一个实例里同时有 Modrinth 与 CurseForge 来源的 Mod：后者的卷宗条目是 JEI（238222，文件 100）。

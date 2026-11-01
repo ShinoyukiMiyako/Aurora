@@ -719,9 +719,10 @@ function updateItems(args: Record<string, unknown>): UpdateItem[] {
   });
 }
 
-/** 「全部更新」这一次尝试实际换掉的 Mod（重试时只含这一次换的）。 */
+/** 「全部更新」这一次尝试实际换掉的 Mod（重试时只含这一次换的）与它们没有照办的前置。 */
 interface UpdatesOutcome {
   updated: UpdateItem[];
+  skipped: string[];
 }
 
 /**
@@ -1785,17 +1786,25 @@ export class LauncherStore {
       const versionId = strArg(args, "versionId", command);
       const items = task.attempt > 1 ? await this.pendingUpdates(versionId, updateItems(args)) : updateItems(args);
       const updated: UpdateItem[] = [];
-      await this.runSteps(
-        taskId,
-        items.map((item) => ({
-          size: item.fileSize,
-          run: async (step) => {
-            await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId, step);
-            updated.push(item);
-          },
-        })),
-      );
-      const outcome: UpdatesOutcome = { updated };
+      const skipped: string[] = [];
+      try {
+        await this.runSteps(
+          taskId,
+          items.map((item) => ({
+            size: item.fileSize,
+            run: async (step) => {
+              const outcome = await modsIpc.updateMod(taskId, versionId, item.fileName, item.modVersionId, step);
+              updated.push(item);
+              skipped.push(...outcome.skipped);
+            },
+          })),
+        );
+      } catch (error) {
+        // 停在中途时前面几项已经换好：失败与取消的通知只说这次停了，它们没有照办的前置要在这里说
+        this.reportSkippedDeps(task.id, versionId, skipped);
+        throw error;
+      }
+      const outcome: UpdatesOutcome = { updated, skipped };
       return outcome;
     }
     // starterMods 只供前端在重启后恢复「就绪后接着装」，后端的新建与补全命令没有这个参数，不往下传
@@ -1815,6 +1824,19 @@ export class LauncherStore {
       if (current === undefined || current.current_version_id === item.modVersionId) return [];
       return [{ ...item, fileName: current.file_name }];
     });
+  }
+
+  /**
+   * 更新不走确认计划，新版本要的必需前置没有照办时玩家没有别处可知：补一条通知，并把全文记进任务详情。
+   * 通知正文最多三行、还会消失，全文要到下载任务页去看。几项撞上同一个前置时只说一次。
+   */
+  private reportSkippedDeps(taskId: string, instanceId: string, skipped: readonly string[]): void {
+    const notes = [...new Set(skipped)];
+    if (notes.length === 0) return;
+    const copy = TASK_TOAST.updateDepsSkipped(instanceId, notes);
+    this.set((raw) => ({ tasks: raw.tasks.map((t) => (t.id === taskId ? { ...t, detail: TASK_TEXT.updateDetailWithDeps(t.detail, copy.body) } : t)) }));
+    this.scheduleJournal();
+    this.pushToast("warning", copy.title, copy.body, { label: TASK_TOAST.viewAction, to: { page: "tasks" } });
   }
 
   private findTask(id: string): Task {
@@ -2072,6 +2094,7 @@ export class LauncherStore {
         await this.fetchInstances();
       }
       this.pushToast("success", TASK_TOAST.finished(task.title).title);
+      if (command === "update_mod") this.reportSkippedDeps(task.id, strArg(task.spec.args, "versionId", command), (result as modsIpc.ModUpdateOutcomeDto).skipped);
       return;
     }
     switch (meta.type) {
@@ -2158,11 +2181,12 @@ export class LauncherStore {
         this.modsChanged(meta.instanceId);
         const copy = TASK_TOAST.modUpdated(meta.name, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        this.reportSkippedDeps(task.id, meta.instanceId, (result as modsIpc.ModUpdateOutcomeDto).skipped);
         return;
       }
       case "updates": {
         // 重试时上一次尝试已经换掉的不再计入：通知只说这一次实际换了什么
-        const { updated } = result as UpdatesOutcome;
+        const { updated, skipped } = result as UpdatesOutcome;
         this.modsChanged(meta.instanceId);
         if (updated.length === 0) {
           const latest = TASK_TOAST.modsAlreadyLatest(meta.instanceId);
@@ -2172,6 +2196,7 @@ export class LauncherStore {
         const only = updated.length === 1 ? updated[0].title : null;
         const copy = only === null ? TASK_TOAST.modsUpdated(updated.length, meta.instanceId) : TASK_TOAST.modUpdated(only, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        this.reportSkippedDeps(task.id, meta.instanceId, skipped);
         return;
       }
       case "world": {
