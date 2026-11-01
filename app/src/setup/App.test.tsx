@@ -159,6 +159,23 @@ describe("启动", () => {
   });
 });
 
+describe("右键菜单", () => {
+  const rightClick = (target: Element) => {
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    target.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+
+  it("空白处拦下带刷新和打印的默认菜单，路径框留着复制粘贴", async () => {
+    start();
+    await seeHeading(copy.welcome.title);
+    expect(rightClick(document.querySelector("h1")!)).toBe(true);
+    const field = document.body.appendChild(document.createElement("input"));
+    expect(rightClick(field)).toBe(false);
+    field.remove();
+  });
+});
+
 describe("发起安装", () => {
   it("首装的计划带校验规整后的目录，装完到完成页", async () => {
     const fake = start({ checkDir: (path) => ({ normalized: `${path}-规整`, issue: null, hasConfig: false, notEmpty: false, freeBytes: 1 }) });

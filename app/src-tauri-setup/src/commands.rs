@@ -548,6 +548,14 @@ mod tests {
         );
     }
 
+    /// 浏览器加速键的开关要在运行时接到窗口上，漏了只有 release 窗口里才看得出来。
+    #[test]
+    fn the_window_turns_browser_keys_off() {
+        assert!(
+            include_str!("main.rs").contains("boot::disable_browser_accelerator_keys(&self.window")
+        );
+    }
+
     #[test]
     fn the_frontend_listens_on_the_event_the_backend_emits() {
         let needle = format!("PROGRESS_EVENT = \"{PROGRESS_EVENT}\"");

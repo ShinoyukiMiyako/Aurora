@@ -371,6 +371,36 @@ pub fn alert(notice: &Notice) {
     unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), notice.style()) };
 }
 
+/// 关闭 WebView2 的浏览器加速键：F5 / Ctrl+R 刷新、Ctrl+P 打印、Ctrl+F 查找、F12 开发者工具一次全部屏蔽。
+/// 开发构建保留，出问题时还要刷新和调试。
+pub fn disable_browser_accelerator_keys(
+    window: &WebviewWindow,
+    log: Arc<SetupLog>,
+) -> tauri::Result<()> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+    use windows_core::Interface;
+
+    fn apply(webview: &tauri::webview::PlatformWebview) -> windows_core::Result<()> {
+        // SAFETY: with_webview 的回调在 WebView 所属的 UI 线程上执行，controller 与由它取得的
+        // CoreWebView2、Settings 在回调期间都有效；这里只调用设置对象的 getter / setter。
+        unsafe {
+            let core = webview.controller().CoreWebView2()?;
+            let settings: ICoreWebView2Settings3 = core.Settings()?.cast()?;
+            settings.SetAreBrowserAcceleratorKeysEnabled(false)
+        }
+    }
+
+    if cfg!(debug_assertions) {
+        return Ok(());
+    }
+    window.with_webview(move |webview| {
+        // 回调在 UI 线程上异步执行，错误传不回建窗处，只能记下来；后果是这些快捷键仍生效，安装中的刷新另有导航拦截。
+        if let Err(err) = apply(&webview) {
+            log.warn(format_args!("关闭 WebView2 浏览器加速键失败：{err}"));
+        }
+    })
+}
+
 /// 前端一旦出错就永远不显示窗口，这里留一道兜底，让错误页至少能被看见。
 pub fn guard_visibility<R: Runtime>(
     window: WebviewWindow<R>,

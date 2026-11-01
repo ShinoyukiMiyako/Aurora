@@ -7,6 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { ISSUES_URL } from "../lib/app-info";
 import { rootTransition } from "../lib/motion";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
+import { allowsNativeContextMenu } from "../shell/keys";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import type { SetupBridge } from "./bridge";
 import { isFailure, type InstallMode } from "./contract";
@@ -348,6 +349,14 @@ function SetupRoot({ bridge, copy, initial = initialState }: AppProps) {
  * 从 fatal 重新挂载一遍：错误原文、窗口显示、关窗监听都走正常路径。
  */
 export default function App({ bridge, copy, initial = initialState }: AppProps) {
+  // WebView2 默认菜单带刷新和打印；路径框、错误原文的复制粘贴还要用，规则与启动器一致
+  useEffect(() => {
+    const onContextMenu = (event: MouseEvent) => {
+      if (!allowsNativeContextMenu(event.target)) event.preventDefault();
+    };
+    window.addEventListener("contextmenu", onContextMenu);
+    return () => window.removeEventListener("contextmenu", onContextMenu);
+  }, []);
   return (
     <ErrorBoundary
       onError={(error) => console.error("引导程序渲染出错", error)}

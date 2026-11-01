@@ -35,6 +35,9 @@ semver = "1"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
+# 与启动器同版本：Tauri 没有暴露浏览器加速键的开关，只能直接调 WebView2 的设置接口。
+webview2-com = "0.38.2"
+windows-core = "0.61"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",

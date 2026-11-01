@@ -70,6 +70,7 @@ impl Interface {
         instance: Arc<boot::Instance>,
         log: &Arc<SetupLog>,
     ) -> Result<ExitCode, Box<dyn Error>> {
+        boot::disable_browser_accelerator_keys(&self.window, Arc::clone(log))?;
         boot::focus_on_request(instance, self.window.clone(), Arc::clone(log))?;
         boot::guard_visibility(self.window, Arc::clone(log))?;
         let code = self.app.run_return(|_, _| {});
