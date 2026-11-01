@@ -40,6 +40,9 @@ pub const MIRROR_ENABLED: bool = false;
 /// 单个端点取清单的时限。清单是一次性的小请求，比下载源探测放宽，慢网下也要能拿到。
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// 清单不存在时更新源回的状态码：这个源上还没有发布。
+const MANIFEST_MISSING_STATUS: u16 = 404;
+
 /// 下载进度推送的最小间隔，与下载池的采样间隔一致，前端进度条观感相同。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -139,6 +142,14 @@ struct Downloaded<U> {
     bytes: Vec<u8>,
 }
 
+/// 一次检查给槽位的结论。
+enum CheckConclusion<U> {
+    /// 取到了清单：`Some` 是比当前新的版本，`None` 是已是最新。
+    Manifest(Option<U>),
+    /// 所有端点都确认清单 404：这个更新源上还没有发布。
+    NotPublished,
+}
+
 /// 一次会话内的更新进度：检查到的、下载好的、是否退出时安装。只在内存里，重启即清空。
 struct UpdateSlot<U> {
     available: Option<U>,
@@ -176,21 +187,15 @@ impl<U: ReleaseVersion> UpdateSlot<U> {
         self.available = found;
     }
 
-    /// 收下一次检查的结果，返回这次要告诉前端的版本。
+    /// 收下一次检查的结论，返回这次要告诉前端的版本。
     ///
-    /// 插件的 `ReleaseNotFound` 只说明所有端点都回了非 2xx：清单 404 时是这个更新源上还没有发布，
-    /// 不算检查失败。它也不是关于最新版本的结论（插件不报状态码，503 同样走到这里），
+    /// 清单 404 时这个更新源上还没有发布，不算检查失败；但没拿到清单也说不清最新版本是哪个，
     /// 所以槽位不动，记着的版本和下好的包照旧；什么都没记着时前端看到的就是没有新版本。
-    fn settle_check(
-        &mut self,
-        checked: tauri_plugin_updater::Result<Option<U>>,
-    ) -> tauri_plugin_updater::Result<Option<&U>> {
-        match checked {
-            Ok(found) => self.record_check(found),
-            Err(tauri_plugin_updater::Error::ReleaseNotFound) => {}
-            Err(err) => return Err(err),
+    fn settle_check(&mut self, conclusion: CheckConclusion<U>) -> Option<&U> {
+        if let CheckConclusion::Manifest(found) = conclusion {
+            self.record_check(found);
         }
-        Ok(self.available.as_ref())
+        self.available.as_ref()
     }
 
     /// 收下下载好的包。下载期间又检查过一次、结果换了版本或已无更新时不收：与 [`record_check`](Self::record_check)
@@ -307,7 +312,7 @@ pub async fn updater_info(
 }
 
 /// 检查更新。端点按「文件下载源」策略排序，前一个连不上或非 2xx 时插件自动试下一个。
-/// 已是最新返回 `null`；所有端点都没给出清单不算失败，见 [`UpdateSlot::settle_check`]。
+/// 已是最新返回 `null`；所有端点的清单都确认 404 不算失败，见 [`conclude_check`] 与 [`UpdateSlot::settle_check`]。
 /// 不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
 #[tauri::command]
 pub async fn check_update(
@@ -322,37 +327,85 @@ pub async fn check_update(
         .update_endpoints(PRIMARY_ENDPOINT, MIRROR_ENABLED.then_some(MIRROR_ENDPOINT))
         .await;
     let urls = endpoint_urls(&endpoints);
-    let check_failed = |err| {
-        updater_error(
-            code::UPDATE_CHECK_FAILED,
-            "检查更新失败",
-            Some(&endpoints),
-            err,
-        )
-    };
     let checker = app
         .updater_builder()
         .endpoints(urls)
         .and_then(|builder| builder.timeout(CHECK_TIMEOUT).build())
-        .map_err(check_failed)?;
+        .map_err(|err| check_failed(&endpoints, err))?;
     let checked = checker.check().await;
     match &checked {
         Ok(Some(update)) => {
             tracing::info!(version = %update.version, ?endpoints, "发现可用更新")
         }
         Ok(None) => tracing::info!(?endpoints, "已是最新版本"),
-        // 界面上不算失败，日志要留痕：服务器故障也长这样，只有这里看得出来。
-        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
-            tracing::warn!(?endpoints, "更新源都没有给出清单，按没有新版本处理")
-        }
         Err(_) => {}
     }
-    let dto = updater
-        .slot()
-        .settle_check(checked)
-        .map_err(check_failed)?
-        .map(update_dto);
+    let version = app.package_info().version.to_string();
+    let conclusion = conclude_check(checked, &version, &endpoints).await?;
+    let dto = updater.slot().settle_check(conclusion).map(update_dto);
     Ok(dto)
+}
+
+/// 把插件的检查结果变成给槽位的结论。
+///
+/// `ReleaseNotFound` 只说明所有端点都回了非 2xx，插件不报状态码，503、403 这类服务器故障也长这样。
+/// 所以自己再问一次，确认是 404 才算没有发布，否则服务器出故障时界面会显示已是最新。
+async fn conclude_check<U>(
+    checked: tauri_plugin_updater::Result<Option<U>>,
+    app_version: &str,
+    endpoints: &[String],
+) -> Result<CheckConclusion<U>, CommandError> {
+    match checked {
+        Ok(found) => Ok(CheckConclusion::Manifest(found)),
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
+            confirm_manifest_missing(app_version, endpoints).await?;
+            Ok(CheckConclusion::NotPublished)
+        }
+        Err(err) => Err(check_failed(endpoints, err)),
+    }
+}
+
+/// 逐个端点再 GET 一次清单。只要有一个端点答不出 404，就说不清那个源上有没有新版本，只能算检查失败。
+async fn confirm_manifest_missing(
+    app_version: &str,
+    endpoints: &[String],
+) -> Result<(), CommandError> {
+    let http = aurora_base::http::build_client_with(
+        &aurora_base::http::HttpConfig::for_app_version(app_version),
+    )?;
+    for endpoint in endpoints {
+        let response = http
+            .get(endpoint)
+            .header("accept", "application/json")
+            .timeout(CHECK_TIMEOUT)
+            .send()
+            .await
+            .map_err(|err| check_failed(endpoints, tauri_plugin_updater::Error::Reqwest(err)))?;
+        let status = response.status().as_u16();
+        if status != MANIFEST_MISSING_STATUS {
+            tracing::warn!(
+                endpoint,
+                status,
+                "更新源没有给出清单，也不是 404，算检查失败"
+            );
+            return Err(
+                CommandError::new(code::UPDATE_CHECK_FAILED, "更新服务器返回了异常状态")
+                    .with_detail(json!({ "endpoints": endpoints, "status": status })),
+            );
+        }
+    }
+    // 界面上不算失败，日志要留痕。
+    tracing::warn!(?endpoints, "更新源上没有清单（404），按没有新版本处理");
+    Ok(())
+}
+
+fn check_failed(endpoints: &[String], err: tauri_plugin_updater::Error) -> CommandError {
+    updater_error(
+        code::UPDATE_CHECK_FAILED,
+        "检查更新失败",
+        Some(endpoints),
+        err,
+    )
 }
 
 /// 下载最近一次检查到的更新并校验签名。长任务：进度经 core-event 推送（`kind: "download"`，
@@ -869,47 +922,154 @@ mod tests {
     }
 
     /// 没拿到清单就说不清最新版本是哪个：本次会话记着的版本、下好的包和退出时安装都不动，
-    /// 否则一次 503 就会把校验过的包丢掉。
+    /// 否则一次 404 就会把校验过的包丢掉。
     #[test]
     fn missing_manifest_keeps_what_the_session_knows() {
-        use tauri_plugin_updater::Error::ReleaseNotFound;
-
         let mut slot = UpdateSlot::<Fake>::default();
-        assert!(slot.settle_check(Err(ReleaseNotFound)).unwrap().is_none());
+        assert!(slot.settle_check(CheckConclusion::NotPublished).is_none());
 
         slot.record_check(Some(Fake("0.2.0")));
         slot.store_download(Fake("0.2.0"), vec![9]).unwrap();
         slot.set_install_on_exit(true).unwrap();
-        let known = slot.settle_check(Err(ReleaseNotFound)).unwrap();
+        let known = slot.settle_check(CheckConclusion::NotPublished);
         assert_eq!(known.map(|update| update.0), Some("0.2.0"));
         assert_eq!(slot.downloaded_version().as_deref(), Some("0.2.0"));
         assert!(slot.install_on_exit);
 
         // 拿到了清单才是结论：已无更新时照旧丢包。
-        assert!(slot.settle_check(Ok(None)).unwrap().is_none());
+        assert!(slot.settle_check(CheckConclusion::Manifest(None)).is_none());
         assert_eq!(slot.downloaded_version(), None);
         assert!(!slot.install_on_exit);
     }
 
-    #[test]
-    fn other_check_failures_stay_failures_and_change_nothing() {
-        let mut slot = UpdateSlot::<Fake>::default();
-        slot.record_check(Some(Fake("0.2.0")));
+    const MANIFEST: &str = "/updates/latest.json";
 
-        let err = slot
-            .settle_check(Err(tauri_plugin_updater::Error::TargetNotFound(
-                "windows-x86_64".into(),
-            )))
-            .err()
+    /// 本地更新源：清单固定回一个状态码。匹配上 Accept 才回，探测和插件问的就是同一件事。
+    async fn source_answering(status: u16) -> (wiremock::MockServer, String) {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(MANIFEST))
+            .and(header("accept", "application/json"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&server)
+            .await;
+        let url = format!("{}{MANIFEST}", server.uri());
+        (server, url)
+    }
+
+    /// 插件报 `ReleaseNotFound` 之后的结论。
+    async fn after_release_not_found(
+        endpoints: &[String],
+    ) -> Result<CheckConclusion<Fake>, CommandError> {
+        conclude_check(
+            Err(tauri_plugin_updater::Error::ReleaseNotFound),
+            "0.1.0",
+            endpoints,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn manifest_404_counts_as_not_published() {
+        let (_source, url) = source_answering(404).await;
+        let conclusion = after_release_not_found(&[url]).await.unwrap();
+        assert!(matches!(conclusion, CheckConclusion::NotPublished));
+    }
+
+    /// 服务器故障不能显示成已是最新：404 以外的状态一律是检查失败，状态码进 detail 让界面写出来。
+    /// 200 是两次请求之间服务恢复了，这次同样没拿到清单，重试就好。
+    #[tokio::test]
+    async fn other_statuses_behind_release_not_found_stay_check_failures() {
+        for status in [200, 400, 401, 403, 405, 429, 500, 502, 503] {
+            let (_source, url) = source_answering(status).await;
+            let endpoints = vec![url];
+            let err = after_release_not_found(&endpoints).await.err().unwrap();
+            assert_eq!(err.code, code::UPDATE_CHECK_FAILED, "{status}");
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["status"], json!(status));
+            assert_eq!(detail["endpoints"], json!(endpoints));
+            assert!(detail.get("network").is_none(), "{status}");
+        }
+    }
+
+    /// 再问一次时连不上：和插件自己连不上一样是检查失败，照样标出网络层失败的种类。
+    #[tokio::test]
+    async fn probe_that_cannot_connect_stays_a_check_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}{MANIFEST}",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+
+        let endpoints = vec![url];
+        let err = after_release_not_found(&endpoints).await.err().unwrap();
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["network"], json!("connect"));
+        assert_eq!(detail["endpoints"], json!(endpoints));
+    }
+
+    /// 主源与镜像都开着时：每个端点都确认 404 才算没有发布，任一端点故障就说不清它上面有没有新版本。
+    #[tokio::test]
+    async fn every_endpoint_has_to_confirm_404() {
+        let (missing, missing_url) = source_answering(404).await;
+        let (other_missing, other_missing_url) = source_answering(404).await;
+        let conclusion = after_release_not_found(&[missing_url.clone(), other_missing_url])
+            .await
+            .unwrap();
+        assert!(matches!(conclusion, CheckConclusion::NotPublished));
+        assert_eq!(missing.received_requests().await.unwrap().len(), 1);
+        assert_eq!(other_missing.received_requests().await.unwrap().len(), 1);
+
+        let (_broken, broken_url) = source_answering(503).await;
+        for endpoints in [
+            [missing_url.clone(), broken_url.clone()],
+            [broken_url.clone(), missing_url.clone()],
+        ] {
+            let err = after_release_not_found(&endpoints).await.err().unwrap();
+            assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+            assert_eq!(err.detail.unwrap()["status"], json!(503));
+        }
+    }
+
+    #[tokio::test]
+    async fn check_results_with_a_manifest_need_no_probe() {
+        let (source, url) = source_answering(503).await;
+        let endpoints = vec![url];
+
+        let found = conclude_check(Ok(Some(Fake("0.2.0"))), "0.1.0", &endpoints)
+            .await
             .unwrap();
         assert!(matches!(
-            err,
-            tauri_plugin_updater::Error::TargetNotFound(_)
+            found,
+            CheckConclusion::Manifest(Some(Fake("0.2.0")))
         ));
-        assert_eq!(
-            slot.available.as_ref().map(|update| update.0),
-            Some("0.2.0")
-        );
+        let latest = conclude_check::<Fake>(Ok(None), "0.1.0", &endpoints)
+            .await
+            .unwrap();
+        assert!(matches!(latest, CheckConclusion::Manifest(None)));
+        assert!(source.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn other_check_failures_stay_failures_without_a_probe() {
+        let (source, url) = source_answering(404).await;
+        let err = conclude_check::<Fake>(
+            Err(tauri_plugin_updater::Error::TargetNotFound(
+                "windows-x86_64".into(),
+            )),
+            "0.1.0",
+            &[url],
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        assert!(source.received_requests().await.unwrap().is_empty());
     }
 
     /// 更新域名 TLS 不通时的样子：TCP 连得上，握手时被对端掐断。要算 connect，前端才认得出这是连不上。
