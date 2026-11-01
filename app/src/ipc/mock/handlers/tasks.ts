@@ -1,5 +1,5 @@
 import { IpcError } from "../../errors";
-import type { TaskRecordDto } from "../../tasks";
+import type { TaskJournalDto, TaskRecordDto } from "../../tasks";
 import type { MockHandlers } from "../types";
 
 const HOUR = 3_600_000;
@@ -31,7 +31,8 @@ function seedJournal(): TaskRecordDto[] {
 /** 记住多少个「取消先于登记到达」的 id，与后端的 EARLY_CANCEL_MEMORY 一致。 */
 const EARLY_CANCEL_MEMORY = 64;
 
-let journal: TaskRecordDto[] = seedJournal();
+// 种子当作加序号之前写下的日志，序号为 0
+let journal: TaskJournalDto = { seq: 0, tasks: seedJournal() };
 /** 运行中的长任务：这一次登记有没有收到取消。 */
 const running = new Map<string, { cancelled: boolean }>();
 /**
@@ -89,14 +90,20 @@ export const handlers: MockHandlers = {
     return false;
   },
   save_task_journal: (args) => {
+    const seq = args.seq;
+    if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) throw new Error("save_task_journal 缺少非负整数 seq");
     if (!Array.isArray(args.tasks)) throw new Error("save_task_journal 缺少 tasks 数组");
-    journal = validateJournal(args.tasks);
+    if (seq === 0) throw new IpcError("invalid_argument", "任务日志的序号从 1 起，收到 0");
+    const tasks = validateJournal(args.tasks);
+    // 与后端一样：不比已落盘那份新的是晚到的旧版本，丢弃不报错
+    if (seq <= journal.seq) return;
+    journal = { seq, tasks };
   },
   load_task_journal: () => journal,
 };
 
 export function reset(): void {
-  journal = seedJournal();
+  journal = { seq: 0, tasks: seedJournal() };
   running.clear();
   cancelledEarly = [];
 }

@@ -366,10 +366,13 @@ describe("下载队列：状态容器", () => {
   it("全部重试：同一实例上的补全与装 Mod 一起重新排队时，只先开始补全，装 Mod 等补全结束再开始", async () => {
     const failed = (id: string, command: string, args: Record<string, unknown>, kind: Task["kind"]): TaskRecordDto =>
       record(id, "failed", { kind, instance_id: "生存", error: { code: "network_failed", message: "连不上" }, spec: { command, args } });
-    ipc.overrides.set("load_task_journal", () => [
-      failed("r1", "repair_instance", { id: "生存" }, "repair"),
-      failed("m1", "install_mods", { versionId: "生存", platform: "modrinth", projectId: "sodium", items: [{ platform: "modrinth", projectId: "sodium", modVersionId: "v1", title: "Sodium", fileSize: 10 }] }, "mod"),
-    ]);
+    ipc.overrides.set("load_task_journal", () => ({
+      seq: 0,
+      tasks: [
+        failed("r1", "repair_instance", { id: "生存" }, "repair"),
+        failed("m1", "install_mods", { versionId: "生存", platform: "modrinth", projectId: "sodium", items: [{ platform: "modrinth", projectId: "sodium", modVersionId: "v1", title: "Sodium", fileSize: 10 }] }, "mod"),
+      ],
+    }));
     const store = await startedStore();
     try {
       const repairDone = deferred<unknown>();

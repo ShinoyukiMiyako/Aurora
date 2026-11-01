@@ -125,6 +125,8 @@ export interface BootData {
   instances?: InstanceDto[];
   pins?: string[];
   journal?: TaskRecordDto[];
+  /** 任务日志已落盘的序号，缺省为 0。 */
+  journalSeq?: number;
   firstRun?: boolean;
   config?: ConfigDto;
 }
@@ -138,7 +140,10 @@ export function bootOverrides(ipc: IpcRecorder, data: BootData = {}): void {
   ipc.overrides.set("current_account", () => current);
   ipc.overrides.set("list_instances", () => (data.instances === undefined ? [instanceDto("生存"), instanceDto("创造")] : data.instances));
   ipc.overrides.set("get_sidebar_pins", () => (data.pins === undefined ? [] : data.pins));
-  ipc.overrides.set("load_task_journal", () => (data.journal === undefined ? [] : data.journal));
+  ipc.overrides.set("load_task_journal", () => ({
+    seq: data.journalSeq === undefined ? 0 : data.journalSeq,
+    tasks: data.journal === undefined ? [] : data.journal,
+  }));
   ipc.overrides.set("is_first_run", () => (data.firstRun === undefined ? false : data.firstRun));
   ipc.overrides.set("save_task_journal", () => null);
   ipc.overrides.set("update_config", () => null);

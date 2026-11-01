@@ -910,6 +910,8 @@ export class LauncherStore {
    * invalid 是文件损坏或版本不符，内容本来就救不回来，照常写回，免得任务表从此再也存不下来。
    */
   private journalState: "unread" | "read" | "invalid" = "unread";
+  /** 最近一次写任务日志用的序号；读到日志后从盘上那份的序号之后接着编（见 saveJournal）。 */
+  private journalSeq = 0;
   /** 首次启动向导的第一步已经提交（后端已记下向导完成）。 */
   private firstRunCommitted = false;
   /**
@@ -1112,13 +1114,15 @@ export class LauncherStore {
    * 内存里已有的任务优先，原样保留，只把日志里内存没有的那些并进来；读到过一次之后内存就是准的，再读不改任务表。
    */
   private async fetchJournal(): Promise<void> {
-    const records = await tasksIpc.loadTaskJournal().catch((error: unknown) => {
+    const journal = await tasksIpc.loadTaskJournal().catch((error: unknown) => {
       if (isIpcError(error) && error.code === TASK_JOURNAL_INVALID_CODE) this.journalState = "invalid";
       throw error;
     });
+    // 只往前不往回：日志读不出期间照常写回过的话，内存里的序号可能已经超过这次读到的
+    this.journalSeq = Math.max(this.journalSeq, journal.seq);
     if (this.journalState === "read") return;
     const now = Date.now();
-    const loaded = records.map(taskFromRecord);
+    const loaded = journal.tasks.map(taskFromRecord);
     this.journalState = "read";
     let changed = false;
     this.set((raw) => {
@@ -1418,7 +1422,9 @@ export class LauncherStore {
 
   private async saveJournal(): Promise<void> {
     if (this.journalState === "unread") return;
-    await tasksIpc.saveTaskJournal(this.raw.tasks.map(taskToRecord));
+    // 序号与表在同一步取：序号大的那份一定是更新的表，防抖写入与关窗前的立即写入并发时后端据此丢掉晚到的旧表
+    const seq = ++this.journalSeq;
+    await tasksIpc.saveTaskJournal(seq, this.raw.tasks.map(taskToRecord));
   }
 
   private pump(): void {

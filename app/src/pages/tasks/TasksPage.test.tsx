@@ -2,7 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
-import { CORE_EVENT, type TaskRecordDto } from "../../ipc/tasks";
+import { CORE_EVENT, type TaskJournalDto, type TaskRecordDto } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
@@ -250,7 +250,7 @@ describe("下载任务页：历史", () => {
     expect(rows()).toHaveLength(0);
     expect(page().textContent).toContain("下载队列是空的");
     await advance(1000);
-    expect(callsOf(ipc, "save_task_journal").at(-1)).toEqual({ tasks: [] });
+    expect(callsOf(ipc, "save_task_journal").at(-1)).toEqual({ seq: 1, tasks: [] });
   });
 
   it("重试：同一任务换下一次尝试的 taskId 重新开始，行内写第几次尝试", async () => {
@@ -466,7 +466,7 @@ describe("下载任务页：任务记录读取", () => {
     let fail = true;
     ipc.overrides.set("load_task_journal", () => {
       if (fail) throw new IpcError("task_journal_invalid", "任务日志第 0 项缺少字符串 id");
-      return [];
+      return { seq: 0, tasks: [] };
     });
     await mount();
     expect(page().textContent).toContain("下载任务记录读不出来");
@@ -482,7 +482,7 @@ describe("下载任务页：任务记录读取", () => {
   });
 
   it("300 ms 内读完不出骨架；超过才出，出了至少停留 300 ms", async () => {
-    const journal = deferred<TaskRecordDto[]>();
+    const journal = deferred<TaskJournalDto>();
     ipc.overrides.set("load_task_journal", () => journal.promise);
     await mount();
     const busy = () => page().querySelector('[aria-busy="true"]') !== null;
@@ -491,7 +491,7 @@ describe("下载任务页：任务记录读取", () => {
     await advance(1);
     expect(busy()).toBe(true);
     await advance(100);
-    journal.resolve([]);
+    journal.resolve({ seq: 0, tasks: [] });
     await flush();
     // 数据已到，但骨架才出现 100 ms
     expect(busy()).toBe(true);
@@ -502,7 +502,7 @@ describe("下载任务页：任务记录读取", () => {
   });
 
   it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读完随骨架一起收起", async () => {
-    const journal = deferred<TaskRecordDto[]>();
+    const journal = deferred<TaskJournalDto>();
     ipc.overrides.set("load_task_journal", () => journal.promise);
     await mount();
     await advance(300);
@@ -511,7 +511,7 @@ describe("下载任务页：任务记录读取", () => {
     expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
     await advance(1);
     expect(page().textContent).toContain("比平时慢一些，仍在加载…");
-    journal.resolve([]);
+    journal.resolve({ seq: 0, tasks: [] });
     await flush();
     expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
     expect(page().textContent).toContain("下载队列是空的");
