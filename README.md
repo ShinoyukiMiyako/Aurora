@@ -132,6 +132,6 @@ pnpm tauri build
 
 ## 许可
 
-本项目以 GNU Affero General Public License v3.0 发布，全文见 [LICENSE](LICENSE)。
+本项目以 GNU Affero General Public License v3.0 发布，全文见 [LICENSE](LICENSE)。向本项目提交贡献前要先签署[贡献者许可协议（CLA）](CLA.md)，流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 Minecraft 是 Mojang Studios 的商标。本项目与 Mojang、Microsoft 无关，也未获得它们的认可。
