@@ -505,8 +505,13 @@ export function mockInheritanceChain(id: string): string[] {
 function hold(id: string, activity: InstanceActivity, usedBy: string | null): MockInstanceHold {
   const key = id.toLowerCase();
   const held = holds.get(key);
-  const conflict = held === undefined ? undefined : held.find((h) => !compatible(activity, h.activity));
-  if (conflict !== undefined) throw busyError(id, conflict);
+  // 冲突有几处时报列表里也报的那一件，与后端同一优先级；同级时报最早占到的
+  const conflicts = held === undefined ? [] : held.filter((h) => !compatible(activity, h.activity));
+  if (conflicts.length > 0) {
+    let conflict = conflicts[0];
+    for (const h of conflicts) if (reportRank(h.activity) < reportRank(conflict.activity)) conflict = h;
+    throw busyError(id, conflict);
+  }
   const entry = { token: nextHoldToken, activity, usedBy };
   nextHoldToken += 1;
   holds.set(key, held === undefined ? [entry] : [...held, entry]);

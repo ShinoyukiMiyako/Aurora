@@ -22,7 +22,7 @@ import { checkUpdates, removeMod, setModEnabled, updateMod } from "../mods";
 import { cancelTask } from "../tasks";
 import { resetMocks } from ".";
 import { clearMockEventListeners } from "./events";
-import { acquireMockInstance, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
+import { acquireMockInstance, acquireMockInstanceWithBases, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
 import { endMockGame, failNextMockPlayRecords } from "./handlers/launch";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./handlers/tasks";
 
@@ -93,6 +93,17 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
     endMockGame(0, MINUTE);
     expect(await activityOf(FABRIC)).toBeNull();
     await expect(renameInstance(FABRIC, "改个名")).resolves.toEqual({ id: "改个名" });
+  });
+
+  it("基底自己也在运行：被拒的删除报它自己的事，与列表一致，不随哪份占用先到而变", async () => {
+    const chain = acquireMockInstanceWithBases(FABRIC, "running", ["1.21"]);
+    const game = acquireMockInstance("1.21", "running");
+    expect(await activityOf("1.21")).toBe("running");
+    expect(await busy(deleteInstance("1.21"))).toEqual(["实例 1.21 正在运行，请稍后再试", { id: "1.21", activity: "running" }]);
+    game.release();
+    expect(await busy(deleteInstance("1.21"))).toEqual([`实例 1.21 正在被实例 ${FABRIC} 使用，请稍后再试`, { id: "1.21", activity: "inherited", used_by: FABRIC }]);
+    chain.release();
+    expect(await activityOf("1.21")).toBeNull();
   });
 
   it("启动失败或被取消：占用随之放开", async () => {
