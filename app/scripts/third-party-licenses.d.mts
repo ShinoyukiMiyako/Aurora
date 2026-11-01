@@ -19,6 +19,8 @@ export function collectCargoPackages(metadata: unknown, rootPackage: string): Th
 
 export function hostTarget(): string;
 
+export function distributionTarget(env: Record<string, string | undefined>): string;
+
 export function readCargoMetadata(manifestPath: string, target: string): unknown;
 
-export function thirdPartyManifest(options: { appDir: string; cargoManifest: string; rootPackage: string }): ThirdPartyManifest;
+export function thirdPartyManifest(options: { appDir: string; cargoManifest: string; rootPackage: string; env: Record<string, string | undefined> }): ThirdPartyManifest;

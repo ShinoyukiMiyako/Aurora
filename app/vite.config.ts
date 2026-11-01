@@ -16,7 +16,7 @@ const APP_DIR = dirname(fileURLToPath(import.meta.url));
  * 不做成模块：引入它的代码在测试里没有这个插件，按模块解析会让所有间接引入的测试一起失败；前端用 fetch 按需读取。
  */
 function thirdPartyLicenses(): Plugin {
-  const manifest = () => JSON.stringify(thirdPartyManifest({ appDir: APP_DIR, cargoManifest: join(APP_DIR, "..", "Cargo.toml"), rootPackage: "aurora-tauri" }));
+  const manifest = () => JSON.stringify(thirdPartyManifest({ appDir: APP_DIR, cargoManifest: join(APP_DIR, "..", "Cargo.toml"), rootPackage: "aurora-tauri", env: process.env }));
   return {
     name: "petalfall:third-party-licenses",
     configureServer(server) {

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { collectCargoPackages, collectNpmPackages, npmLicense } from "./third-party-licenses.mjs";
+import { collectCargoPackages, collectNpmPackages, distributionTarget, hostTarget, npmLicense } from "./third-party-licenses.mjs";
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -71,6 +71,18 @@ describe("前端依赖闭包", () => {
     expect(packages).toContainEqual({ ecosystem: "npm", name: "react", version: react.version, license: "MIT" });
     expect(packages.some((p) => p.name === "@fontsource-variable/outfit" && p.license === "OFL-1.1")).toBe(true);
     expect(packages.some((p) => p.name === "vitest" || p.name === "vite" || p.name === "typescript")).toBe(false);
+  });
+});
+
+describe("清单按哪个平台过滤 Rust 依赖", () => {
+  it("交叉编译时取 Tauri 传来的目标，不取构建机自己的平台", () => {
+    const target = hostTarget() === "x86_64-pc-windows-msvc" ? "x86_64-unknown-linux-gnu" : "x86_64-pc-windows-msvc";
+    expect(distributionTarget({ TAURI_ENV_TARGET_TRIPLE: target })).toBe(target);
+  });
+
+  it("不经 Tauri 直接构建时取本机平台，空值也算没传", () => {
+    expect(distributionTarget({})).toBe(hostTarget());
+    expect(distributionTarget({ TAURI_ENV_TARGET_TRIPLE: "" })).toBe(hostTarget());
   });
 });
 
