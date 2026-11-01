@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { INSTANCE_IN_USE_COPY } from "../copy/flows";
 import { IpcError } from "../ipc/errors";
+import { describeError } from "../state/errors";
 import { instanceBusyFromError, isInstanceBusy } from "./instance-busy";
 import { BUSY_ACTIVITIES } from "./types";
 
@@ -21,14 +22,20 @@ describe("instance_busy 的原因", () => {
     for (const activity of BUSY_ACTIVITIES.filter((a) => a !== "inherited")) {
       expect(instanceBusyFromError(busy({ id: "生存", activity }))).toEqual({ id: "生存", activity, usedBy: null });
     }
-    expect(BUSY_ACTIVITIES).toEqual(["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited"]);
+    expect(BUSY_ACTIVITIES).toEqual(["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"]);
+  });
+
+  it("备份存档挡住的操作读得出来：与后端 busy 同形，不带 used_by，通知照后端原文", () => {
+    const reason = instanceBusyFromError(new IpcError("instance_busy", "实例 生存 正在备份或恢复存档，请稍后再试", { id: "生存", activity: "backing_up" }));
+    expect(reason).toEqual({ id: "生存", activity: "backing_up", usedBy: null });
+    expect(describeError(new IpcError("instance_busy", "实例 生存 正在备份或恢复存档，请稍后再试", { id: "生存", activity: "backing_up" }))).toBe("实例 生存 正在备份或恢复存档，请稍后再试");
   });
 
   it("契约被破坏时抛错，不回落成笼统的忙", () => {
     expect(() => instanceBusyFromError(busy({ id: "1.20.1", activity: "inherited" }))).toThrow("没说是哪个实例在用");
     expect(() => instanceBusyFromError(busy({ id: "1.20.1", activity: "inherited", used_by: 3 }))).toThrow("没说是哪个实例在用");
     expect(() => instanceBusyFromError(busy({ id: "生存", activity: "running", used_by: "别的" }))).toThrow("不该带 used_by");
-    expect(() => instanceBusyFromError(busy({ id: "生存", activity: "backing_up" }))).toThrow("未知的实例占用：backing_up");
+    expect(() => instanceBusyFromError(busy({ id: "生存", activity: "exporting" }))).toThrow("未知的实例占用：exporting");
     expect(() => instanceBusyFromError(busy({ activity: "running" }))).toThrow("detail.id");
     expect(() => instanceBusyFromError(busy(undefined))).toThrow("没带 detail");
     expect(() => instanceBusyFromError(new IpcError("mod_file_busy", "x", { id: "生存", activity: "running" }))).toThrow("不是 instance_busy");
