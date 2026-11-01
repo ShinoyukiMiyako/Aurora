@@ -120,6 +120,30 @@ describe("下载队列：纯函数", () => {
     const mods = (id: string, instanceId: string) =>
       task(id, { kind: "mod", instanceId, spec: { command: "install_mods", args: { versionId: instanceId, platform: "modrinth", projectId: id, items: [] } } });
 
+    const resource = (id: string, instanceId: string, resourceType: string, overrides: Partial<Task> = {}) =>
+      task(id, { kind: "datapack", instanceId, spec: { command: "install_resource", args: { versionId: instanceId, resourceType, world: "w1", platform: "modrinth", projectId: id, fileVersionId: "v1" } }, ...overrides });
+
+    it("装数据包写的是存档：等同一实例上的备份、恢复做完，备份也等它", () => {
+      expect(start([world("w1", "生存", "backup_world", { status: "running" }), resource("d1", "生存", "data_pack")])).toEqual([]);
+      expect(start([resource("d1", "生存", "data_pack"), world("w1", "生存", "restore_world_backup")]).map((t) => t.id)).toEqual(["d1"]);
+    });
+
+    it("装数据包在共用存档的两个实例之间也排开，隔离的实例照常开始", () => {
+      const tasks = [world("w1", "生存", "backup_world", { status: "running" }), resource("d1", "创造", "data_pack")];
+      expect(start(tasks, ["生存", "创造"])).toEqual([]);
+      expect(start(tasks, ["生存"]).map((t) => t.id)).toEqual(["d1"]);
+    });
+
+    it("装数据包与导出整合包同样排开：导出要读这份存档", () => {
+      expect(start([pack("p1", "生存", { status: "running" }), resource("d1", "生存", "data_pack")])).toEqual([]);
+      expect(start([resource("d1", "生存", "data_pack", { status: "running" }), pack("p1", "创造")], ["生存", "创造"])).toEqual([]);
+    });
+
+    it("资源包与光影不写存档，不等存档任务", () => {
+      const tasks = [world("w1", "生存", "backup_world", { status: "running" }), resource("r1", "生存", "resource_pack"), resource("s1", "生存", "shader")];
+      expect(start(tasks).map((t) => t.id)).toEqual(["r1", "s1"]);
+    });
+
     it("同一实例上两个存档的备份一个一个来，别的实例的备份照常开始；实例 id 不分大小写", () => {
       const tasks = [world("w1", "Survival", "backup_world"), world("w2", "survival", "backup_world"), world("w3", "创造", "backup_world")];
       expect(start(tasks).map((t) => t.id)).toEqual(["w1", "w3"]);

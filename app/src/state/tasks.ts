@@ -151,20 +151,29 @@ export function sharedSavesKeys(instances: readonly Pick<InstanceSummary, "id" |
 }
 
 /**
+ * a 与 b 在抢这份存档：存档任务撞上导出整合包（后端只拒勾了存档的导出，这里不拆开导出参数，一律排开）或装数据包，
+ * 导出整合包撞上装数据包。两个数据包各写各的，不算。
+ */
+function savesConflict(a: Task, b: Task): boolean {
+  const dataPack = b.spec.command === "install_resource" && b.spec.args.resourceType === "data_pack";
+  return (dataPack && (WORLD_TASK_COMMANDS.has(a.spec.command) || a.spec.command === "export_modpack")) || (WORLD_TASK_COMMANDS.has(a.spec.command) && b.spec.command === "export_modpack");
+}
+
+/**
  * 两个任务后端不让同时进行。挂在同一实例（不分大小写，与后端的锁键一致）上时：至少一个要写整个目录；或都是存档任务
- * （backing_up 彼此互斥）；或一个是存档任务、一个是导出整合包（后端只拒勾了存档的导出，这里不拆开导出参数，一律排开）。
- * 挂在共用存档的两个实例上时只有最后一种：实例锁只管各自的实例，后端另外看共用存档的实例有没有在备份、恢复或读存档。
+ * （backing_up 彼此互斥）；或在抢存档（savesConflict）。
+ * 挂在共用存档的两个实例上时只有最后一种：实例锁只管各自的实例，后端另外看共用存档的实例有没有在备份、恢复、读写存档。
  */
 function excludes(a: Task, b: Task, sharedSaves: ReadonlySet<string>): boolean {
   if (a.instanceId === null || b.instanceId === null) return false;
   const worldA = WORLD_TASK_COMMANDS.has(a.spec.command);
   const worldB = WORLD_TASK_COMMANDS.has(b.spec.command);
-  const worldAndExport = (worldA && b.spec.command === "export_modpack") || (worldB && a.spec.command === "export_modpack");
+  const saves = savesConflict(a, b) || savesConflict(b, a);
   const keyA = a.instanceId.toLowerCase();
   const keyB = b.instanceId.toLowerCase();
-  if (keyA !== keyB) return worldAndExport && sharedSaves.has(keyA) && sharedSaves.has(keyB);
+  if (keyA !== keyB) return saves && sharedSaves.has(keyA) && sharedSaves.has(keyB);
   if (INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command)) return true;
-  return (worldA && worldB) || worldAndExport;
+  return (worldA && worldB) || saves;
 }
 
 /**
