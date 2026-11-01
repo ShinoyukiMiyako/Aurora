@@ -368,7 +368,8 @@ describe("外置登录弹窗", () => {
     });
     act(() => button(AUTHLIB_COPY.next).click());
     await flush();
-    expect(dialog()?.textContent).toContain(AUTHLIB_COPY.serverDown.title);
+    expect(dialog()?.textContent).toContain("这个服务器暂时不可用");
+    expect(dialog()?.textContent).toContain("服务器出了故障，地址没有写错。稍后重试。");
     expect(dialog()?.textContent).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
     expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
 
@@ -383,7 +384,8 @@ describe("外置登录弹窗", () => {
     });
     act(() => button(AUTHLIB_COPY.login).click());
     await flush();
-    expect(dialog()?.textContent).toContain(AUTHLIB_COPY.loginServiceDown.title);
+    expect(dialog()?.textContent).toContain("登录服务暂时不可用");
+    expect(dialog()?.textContent).toContain("服务器出了故障，不是账户或密码的问题。稍后重试。");
     expect(inputs()[1].value).toBe("secret");
     expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
 
