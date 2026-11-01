@@ -33,7 +33,7 @@ use crate::gpu::{GpuPreferenceStore, RegistryGpuPreferences};
 
 /// 下载进度事件的最小间隔。采样器每 100 ms 推一次快照，逐文件完成时还会额外推一次；
 /// 上千个小文件的资源批次若逐条转发，事件通道与前端 IPC 都会被灌满，按此间隔只留最新快照。
-const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 门面：组合下层 crate 的统一入口。
 #[derive(Clone)]
@@ -80,6 +80,10 @@ pub struct Aurora {
     /// 测试把 CurseForge 下载凭据的作用域换成本地 mock：生产作用域只认 https 的 forgecdn.net。
     #[cfg(test)]
     curseforge_cdn_scope: Option<aurora_download::CredentialScope>,
+    /// 测试注入的下载地址改写：往返测试要让导入侧把清单里的正式 CDN 地址下到本地 mock，又不能放松导入
+    /// 对清单地址的白名单校验，只能在下载池这一层改写。
+    #[cfg(test)]
+    download_resolver: Option<std::sync::Arc<dyn aurora_download::SourceResolver>>,
 }
 
 impl Aurora {
@@ -139,6 +143,8 @@ impl Aurora {
             curseforge_key: None,
             #[cfg(test)]
             curseforge_cdn_scope: None,
+            #[cfg(test)]
+            download_resolver: None,
         })
     }
 
@@ -350,12 +356,21 @@ impl Aurora {
 
     /// 按当前配置的下载源策略与并发上限装配一个批量下载池；门面挂了取消令牌时池也挂上。
     pub(crate) fn download_pool(&self) -> DownloadPool {
-        let downloader = Downloader::with_health(
-            self.http.clone(),
-            self.download_config(),
-            self.source_health().clone(),
-        )
-        .with_manual_redirect_client(self.http_manual.clone());
+        let config = self.download_config();
+        #[cfg(test)]
+        let config = match &self.download_resolver {
+            Some(resolver) => DownloadConfig {
+                sources: aurora_download::SourcePlan::with_resolver(
+                    config.sources.sources.clone(),
+                    resolver.clone(),
+                ),
+                ..config
+            },
+            None => config,
+        };
+        let downloader =
+            Downloader::with_health(self.http.clone(), config, self.source_health().clone())
+                .with_manual_redirect_client(self.http_manual.clone());
         let pool = DownloadPool::new(downloader, self.config.download_concurrency);
         match &self.cancel {
             Some(token) => pool.with_cancel(token.clone()),
@@ -502,6 +517,7 @@ impl Aurora {
             account_failures: Default::default(),
             curseforge_key: None,
             curseforge_cdn_scope: None,
+            download_resolver: None,
         }
     }
 
@@ -567,6 +583,15 @@ impl Aurora {
         &self,
     ) -> Option<&aurora_download::CredentialScope> {
         self.curseforge_cdn_scope.as_ref()
+    }
+
+    /// 下载池里每个地址先经这个解析器改写。
+    pub(crate) fn with_download_resolver(
+        mut self,
+        resolver: std::sync::Arc<dyn aurora_download::SourceResolver>,
+    ) -> Self {
+        self.download_resolver = Some(resolver);
+        self
     }
 }
 

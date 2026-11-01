@@ -14,7 +14,7 @@ describe("任务类别与标题", () => {
 
   it("标题写存档名，详情写实例名", () => {
     expect(TASK_TEXT.backupTitle("新的世界")).toBe("备份「新的世界」");
-    expect(TASK_TEXT.exportTitle("新的世界")).toBe("导出「新的世界」");
+    expect(TASK_TEXT.exportWorldTitle("新的世界")).toBe("导出「新的世界」");
     expect(TASK_TEXT.restoreTitle("新的世界")).toBe("恢复「新的世界」");
     expect(TASK_TEXT.backupDetail("樱花生存")).toBe("「樱花生存」");
   });

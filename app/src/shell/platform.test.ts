@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { callsOf, resetRecorder } from "../test/launcher";
-import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile, pickSaveFile } from "./platform";
+import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile, pickSaveFile, withExtension } from "./platform";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
@@ -100,5 +100,14 @@ describe("保存文件", () => {
   it("浏览器预览里没有保存对话框：明确拒绝，不当作用户取消", async () => {
     await expect(pickSaveFile(options)).rejects.toThrow("浏览器预览里没有系统的保存文件对话框，导出要在桌面应用里进行");
     expect(dialog.save).not.toHaveBeenCalled();
+  });
+
+  it("扩展名不对时补上，已经带着（不分大小写）时原样返回", () => {
+    expect(withExtension("D:\分享\樱花", "mrpack")).toBe("D:\分享\樱花.mrpack");
+    expect(withExtension("D:\分享\樱花.zip", "mrpack")).toBe("D:\分享\樱花.zip.mrpack");
+    expect(withExtension("D:\分享\樱花.MRPACK", "mrpack")).toBe("D:\分享\樱花.MRPACK");
+    expect(withExtension("D:\分享\樱花.mrpack", "mrpack")).toBe("D:\分享\樱花.mrpack");
+    // 只差一个点的名字不算带着扩展名
+    expect(withExtension("D:\分享\樱花mrpack", "mrpack")).toBe("D:\分享\樱花mrpack.mrpack");
   });
 });

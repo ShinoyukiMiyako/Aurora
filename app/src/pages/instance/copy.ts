@@ -2,7 +2,7 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { CRASH_SOURCE_LABEL, joinCrashLabels, joinMixed, LOADER_NAME } from "../../copy/flows";
+import { CRASH_SOURCE_LABEL, joinCrashLabels, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
@@ -37,6 +37,7 @@ export const HERO_COPY = {
   unpin: "从侧栏取消固定",
   more: "更多操作",
   openFolder: "打开实例文件夹",
+  exportModpack: "导出整合包",
   repair: "补全游戏文件",
   delete: "删除实例",
 } as const;
@@ -77,6 +78,61 @@ export const LOCK_REASON = {
       deleting: "正在删除这个实例",
     },
   },
+  /** 导出整合包：读的是此刻的文件，游戏运行与 Mod 改动不挡；会挪走或重写整个目录的事挡。 */
+  export: {
+    placeholder: "新建的实例还没装好，装完后才能导出",
+    installing: "安装任务正在写这个实例的文件夹，完成后才能导出",
+    renaming: "正在重命名这个实例，完成后才能导出",
+    deleting: "正在删除这个实例",
+    broken: "实例文件不完整，修复后才能导出",
+  },
+} as const;
+
+// ---------------------------------------------------------------- 导出整合包
+
+export const EXPORT_COPY = {
+  title: "导出整合包",
+  subtitle: (name: string, mcVersion: string | null, loader: string | null) => {
+    const head = mcVersion === null ? `「${name}」` : `「${name}」· ${mcVersion}`;
+    return loader === null ? head : `${head} · ${loader}`;
+  },
+  reading: "正在读取 Mod 与配置…",
+  retry: "重试",
+  cancel: "取消",
+  submit: "导出整合包",
+  needName: "先填写名称",
+  needVersion: "先填写版本号",
+  nameLabel: "名称",
+  versionLabel: "版本号",
+  summaryLabel: "简介",
+  summaryPlaceholder: "一句话介绍这个整合包",
+  bundleTitle: "一起打包",
+  extra: {
+    config: "配置文件（config）",
+    defaultconfigs: "默认配置（defaultconfigs）",
+    kubejs: "KubeJS 脚本（kubejs）",
+    resourcepacks: "资源包（resourcepacks）",
+    shaderpacks: "光影（shaderpacks）",
+    options: "游戏选项（options.txt）",
+    saves: "存档（saves）",
+  },
+  savesHint: "地图类整合包才需要，体积可能很大",
+  missingFolder: "实例里没有这个文件夹",
+  missingOptions: "实例里没有 options.txt",
+  none: "无",
+  fileStat: (files: number, bytes: number) => `${files} 个文件 · ${formatBytes(bytes)}`,
+  disabledMods: (count: number) => `带上停用的 ${count} 个 Mod`,
+  disabledHint: "导入后仍是停用状态",
+  statsLabel: "导出预览",
+  indexedLabel: "走 Modrinth 索引",
+  indexedValue: (count: number) => `${count} 个 Mod`,
+  indexedHint: "导入时从 Modrinth 下载",
+  bundledLabel: "打包进文件",
+  unlisted: (count: number) => `${count} 个 Mod 不在 Modrinth 上，会把文件直接打包进去。分享前确认作者允许转载。`,
+  showList: "查看",
+  hideList: "收起",
+  unlistedListLabel: "直接打包进去的 Mod",
+  skipped: (count: number) => `${count} 个文件的名字在 Windows 上不安全，不会打包`,
 } as const;
 
 // ---------------------------------------------------------------- 概览
@@ -297,9 +353,55 @@ export const MODS_COPY = {
   removeDependents: (names: readonly string[]) => `${names.join("、")} 把它作为前置，移除后可能无法加载。`,
   removeBroughtIn: (names: readonly string[]) => `它带进来的前置 ${names.join("、")} 会保留，如果不再需要可以单独移除。`,
   removeConfirm: "移除",
+
+  ignoredFilter: "不检查更新",
+  colInstalled: "安装时间",
+  newTag: "新增",
+  ignoredTag: "不检查更新",
+  pinnedTag: "已锁定版本",
+  more: (name: string) => `${name} 的更多操作`,
+  ignoreUpdates: "忽略这个 Mod 的更新",
+  restoreUpdates: "恢复检查更新",
+  localNoUpdates: "本地文件不参与更新检查",
+  selectAll: "选择列出的全部 Mod",
+  selectRow: (name: string) => `选择 ${name}`,
+
+  batchSelected: (count: number) => `已选 ${count} 个`,
+  batchEnable: "启用",
+  batchDisable: "停用",
+  batchUpdate: "更新",
+  batchRemove: "移除",
+  clearSelection: "取消选择",
+  batchAllEnabled: "选中的 Mod 都已启用",
+  batchAllDisabled: "选中的 Mod 都已停用",
+  batchNoUpdates: "选中的 Mod 都没有可用的更新",
+  batchRemoveTitle: (count: number) => `移除 ${count} 个 Mod？`,
+  batchRemoveBody: (count: number, size: number) => `会删除选中的 ${count} 个文件（共 ${formatBytes(size)}），这一步不能回滚。以后可以从发现页重新安装。`,
+  batchRemoveDependents: (names: readonly string[]) => `${names.join("、")} 把其中的 Mod 作为前置，移除后可能无法加载。`,
+  batchRemoveBroughtIn: (names: readonly string[]) => `它们带进来的前置 ${names.join("、")} 会保留，如果不再需要可以单独移除。`,
 } as const;
 
 export const SOURCE_LABEL = { modrinth: "Modrinth", curseforge: "CurseForge" } as const;
+
+/** Mod 版本的不稳定通道沿用启动器自己发布通道的叫法；正式版不标。 */
+export const MOD_CHANNEL_LABEL = { beta: RELEASE_CHANNEL_LABEL.beta, alpha: RELEASE_CHANNEL_LABEL.preview } as const;
+
+export const UPDATE_PREVIEW_COPY = {
+  title: "更新 Mod",
+  subtitle: "勾选要更新的 Mod。旧版本会保留，之后可以在历史里回滚。",
+  selectAll: "全选",
+  picked: (picked: number, total: number) => `已勾选 ${picked} / ${total}`,
+  pick: (name: string) => `选择 ${name}`,
+  versions: (from: string, to: string) => `${from} → ${to}`,
+  changelog: "更新日志",
+  changelogLabel: (name: string) => `${name} 的更新日志`,
+  changelogFailed: "更新日志没能取到",
+  changelogEmpty: "这个版本没有写更新日志",
+  retry: "重试",
+  cancel: "取消",
+  confirm: (count: number) => `更新 ${count} 个`,
+  nonePicked: "至少勾选一个 Mod",
+} as const;
 
 // ---------------------------------------------------------------- 设置
 

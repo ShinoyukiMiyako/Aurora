@@ -224,9 +224,9 @@ beforeEach(() => {
     fullscreen: false,
   };
   mods = [
-    modDto("sodium.jar", "Sodium", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null } }),
+    modDto("sodium.jar", "Sodium", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null, installed_at: 1_780_000_000, update_hold: null } }),
     modDto("fabric-api.jar", "Fabric API", {
-      source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.100", title: "Fabric API", dependency_of: "AANobbMI" },
+      source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.100", title: "Fabric API", dependency_of: "AANobbMI", installed_at: 1_780_000_000, update_hold: null },
     }),
   ];
   updates = [];
@@ -388,9 +388,9 @@ describe("实例详情：后端正在改动实例", () => {
   const reason = (what: string) => `正在改动这个实例的 Mod、资源或设置，完成后才能${what}`;
 
   it.each([
-    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "补全游戏文件", "删除实例"]],
-    ["regular", 1200, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
-    ["wide", 1440, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
+    ["regular", 1200, ["重命名", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
+    ["wide", 1440, ["重命名", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
   ])("%s 档：头图菜单的重命名、补全与删除提前禁用，每项只写标签、原因放进悬停的提示气泡；F2 不进入改名", async (_tier, width, labels) => {
     vi.stubGlobal("innerWidth", width);
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
@@ -530,6 +530,19 @@ describe("实例详情：新建还没落盘的实例", () => {
     if (tipId === null) throw new Error(`「${textOf(el)}」悬停后没有关联提示气泡`);
     return document.getElementById(tipId)?.textContent;
   }
+
+  it("头图菜单的「导出整合包」带原因禁用，点了不读导出预览、不开弹窗", async () => {
+    await openPlaceholder("overview");
+    click(button("更多操作"));
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "导出整合包");
+    if (item === undefined) throw new Error("菜单里没有「导出整合包」");
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(item)).toBe("新建的实例还没装好，装完后才能导出");
+    click(item);
+    await flush();
+    expect(callsOf(ipc, "preview_modpack_export")).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
 
   it("头图菜单的「打开实例文件夹」带原因禁用，点了不发命令、不报错", async () => {
     await openPlaceholder("overview");
@@ -813,6 +826,75 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
     expect(text()).toContain(RUNNING);
     expect(text()).not.toContain("安装没有完成");
+  });
+});
+
+describe("实例详情：导出整合包入口", () => {
+  function exportItem(): HTMLElement {
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "导出整合包");
+    if (item === undefined) throw new Error("菜单里没有「导出整合包」");
+    return item;
+  }
+
+  async function tipOf(el: HTMLElement): Promise<string | null | undefined> {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「导出整合包」悬停后没有关联提示气泡");
+    return document.getElementById(tipId)?.textContent;
+  }
+
+  it("菜单项排在「打开实例文件夹」之后、分隔线之前", async () => {
+    await open("overview");
+    click(button("更多操作"));
+    const labels = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(textOf);
+    expect(labels.indexOf("导出整合包")).toBe(labels.indexOf("打开实例文件夹") + 1);
+    expect(exportItem().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it.each<[string, Partial<InstanceDto>, string]>([
+    ["补全进行中", { activity: "repairing" }, "安装任务正在写这个实例的文件夹，完成后才能导出"],
+    ["正在重命名", { activity: "renaming" }, "正在重命名这个实例，完成后才能导出"],
+    ["正在删除", { activity: "deleting" }, "正在删除这个实例"],
+    ["文件不完整", { status: "broken", broken_reason: "缺少版本 JSON" }, "实例文件不完整，修复后才能导出"],
+  ])("%s：菜单项带原因禁用，点了不读导出预览", async (_case, patch, reason) => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));
+    await open("overview");
+    click(button("更多操作"));
+    const item = exportItem();
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await tipOf(item)).toBe(reason);
+    click(item);
+    await flush();
+    expect(callsOf(ipc, "preview_modpack_export")).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it.each<[string, Partial<InstanceDto>]>([
+    ["游戏运行中", { activity: "running" }],
+    ["正在装 Mod", { activity: "modifying" }],
+  ])("%s：导出读的是此刻的文件，照常可用", async (_case, patch) => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));
+    await open("overview");
+    click(button("更多操作"));
+    expect(exportItem().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("本实例的补全任务排着队时同样禁用", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle();
+    });
+    click(button("更多操作"));
+    const item = exportItem();
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await tipOf(item)).toBe("安装任务正在写这个实例的文件夹，完成后才能导出");
   });
 });
 
@@ -1179,7 +1261,7 @@ describe("实例详情：Mod 管理", () => {
     expect(callsOf(ipc, "remove_mod")).toEqual([]);
   });
 
-  it("「全部更新」进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
+  it("「全部更新」先打开更新预览，确认后进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
     vi.stubGlobal("innerWidth", 1440);
     const candidate = (fileName: string, title: string, projectId: string, from: string, to: string): UpdateCandidate => ({
       file_name: fileName,
@@ -1208,9 +1290,15 @@ describe("实例详情：Mod 管理", () => {
     await open("mods");
     click(button("全部更新 · 2"));
     await flush();
+    // 先到更新预览：默认全选，确认前不入队
+    expect(dialog().textContent).toContain("已勾选 2 / 2");
+    expect(launcher.state.tasks).toEqual([]);
+    click(button("更新 2 个", dialog()));
+    await flush();
     const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
     expect(composite.map((t) => t.status)).toEqual(["running"]);
-    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["sodium.jar"]);
+    // 预览按名称升序列出，勾选项按这个顺序逐项更新
+    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["fabric-api.jar"]);
     // 组合任务还在跑，两行都算在更新中：按钮转圈，点了不另起一个同文件的单个更新
     const sodium = button("更新 Sodium");
     expect(sodium.getAttribute("aria-busy")).toBe("true");

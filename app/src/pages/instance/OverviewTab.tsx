@@ -65,6 +65,7 @@ import {
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 import { useWorldOps, WorldBackupsModal, worldRef, type WorldRef } from "./WorldBackupsModal";
+import { UpdatePreviewModal } from "./UpdatePreviewModal";
 
 export interface OverviewTabProps {
   inst: InstanceSummary;
@@ -94,7 +95,7 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
       <div className={styles.overviewGrid}>
         <WorldsCard inst={inst} view={view} content={content} ops={ops} />
         <InfoCard inst={inst} queryId={queryId} onTab={onTab} />
-        <ModsPeekCard inst={inst} mods={mods} updates={updates} ops={ops} onTab={onTab} />
+        <ModsPeekCard inst={inst} queryId={queryId} mods={mods} updates={updates} ops={ops} onTab={onTab} />
         <PacksCard inst={inst} content={content} />
       </div>
     </div>
@@ -455,12 +456,14 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
 
 function ModsPeekCard({
   inst,
+  queryId,
   mods,
   updates,
   ops,
   onTab,
 }: {
   inst: InstanceSummary;
+  queryId: string | null;
   mods: ResourceResult<InstalledMod[]>;
   updates: ResourceResult<UpdateCandidate[]>;
   ops: InstanceOps;
@@ -475,6 +478,8 @@ function ModsPeekCard({
   const rows: ModRow[] = mods.status === "ready" ? modRows(mods.data, updates.status === "ready" ? updates.data : null) : [];
   const { total, partial } = modTotals(inst, rows.length);
   const outdated = rows.filter((r) => r.update !== null);
+  // 「全部更新」先打开更新预览，与 Mod 标签同一个弹窗；key 每次打开递增，勾选从默认全选重新开始
+  const [preview, setPreview] = useState<{ key: number; open: boolean } | null>(null);
 
   const subtitle = vanilla || load.view !== "ready" || rows.length === 0 ? undefined : partial ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
 
@@ -533,7 +538,7 @@ function ModsPeekCard({
                   size="sm"
                   icon="download"
                   disabledReason={lockReason(ops.locks.mods, "mods")}
-                  onClick={() => void run(() => actions.updateAllMods(inst.id), ACTION_ERROR.updateMods)}
+                  onClick={() => setPreview((p) => ({ key: p === null ? 0 : p.key + 1, open: true }))}
                 >
                   {OVERVIEW_COPY.updateAll}
                 </Button>
@@ -546,6 +551,19 @@ function ModsPeekCard({
             </Callout>
           )}
         </>
+      )}
+      {preview !== null && (
+        <UpdatePreviewModal
+          key={preview.key}
+          open={preview.open}
+          queryId={queryId}
+          rows={outdated}
+          onClose={() => setPreview((p) => (p === null ? p : { ...p, open: false }))}
+          onConfirm={(picked) => {
+            setPreview((p) => (p === null ? p : { ...p, open: false }));
+            void run(() => actions.updateAllMods(inst.id, picked), ACTION_ERROR.updateMods);
+          }}
+        />
       )}
     </Card>
   );

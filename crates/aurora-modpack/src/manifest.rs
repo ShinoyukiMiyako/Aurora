@@ -18,16 +18,28 @@ use crate::path::SafeRelativePath;
 pub(crate) const MODRINTH_DOCUMENT: &str = "modrinth.index.json";
 pub(crate) const CURSEFORGE_DOCUMENT: &str = "manifest.json";
 
-/// Modrinth 整合包里允许的下载主机。Modrinth 上架的整合包只会出现前四个；后两个是 CurseForge 的
-/// 文件分发主机，其他启动器导出 .mrpack 时会把 CurseForge 上的 Mod 写成它们。清单来自本地文件时
-/// 地址是任意的，不设白名单就等于让一个文件指挥启动器去请求任意主机（含内网地址）。
-const MODRINTH_ALLOWED_HOSTS: &[&str] = &[
+/// Modrinth 格式约定的下载主机：Modrinth 上架的整合包只会出现这四个。清单来自本地文件时地址是任意的，
+/// 不设白名单就等于让一个文件指挥启动器去请求任意主机（含内网地址）。
+pub(crate) const MODRINTH_PLATFORM_HOSTS: &[&str] = &[
     "cdn.modrinth.com",
     "github.com",
     "raw.githubusercontent.com",
     "gitlab.com",
-    "edge.forgecdn.net",
-    "mediafilez.forgecdn.net",
+];
+
+/// CurseForge 的文件分发主机。其他启动器导出 .mrpack 时会把 CurseForge 上的 Mod 写成它们，读包时认，
+/// 导出时不写：这类地址不在格式约定的白名单里，别的启动器与 Modrinth 都可能拒收。
+const CURSEFORGE_CDN_HOSTS: &[&str] = &["edge.forgecdn.net", "mediafilez.forgecdn.net"];
+
+/// 读包时认的下载主机：格式约定的四个，加上 CurseForge 的分发主机。
+const READ_ALLOWED_HOSTS: &[&[&str]] = &[MODRINTH_PLATFORM_HOSTS, CURSEFORGE_CDN_HOSTS];
+
+/// 四种能写进 Modrinth 清单的加载器。
+const PACK_LOADER_KINDS: [PackLoaderKind; 4] = [
+    PackLoaderKind::Fabric,
+    PackLoaderKind::Quilt,
+    PackLoaderKind::Forge,
+    PackLoaderKind::NeoForge,
 ];
 
 /// 整合包格式。
@@ -309,7 +321,7 @@ impl PackManifest {
                 ));
             }
             for url in &file.downloads {
-                check_download_url(url).map_err(|reason| {
+                check_download_url(url, READ_ALLOWED_HOSTS).map_err(|reason| {
                     Error::invalid(
                         MODRINTH_DOCUMENT,
                         format!("{} 的下载地址 {url} {reason}", file.path),
@@ -424,16 +436,15 @@ fn required_text(document: &'static str, field: &str, value: &str) -> Result<Str
 fn modrinth_loader(dependencies: &BTreeMap<String, String>) -> Result<Option<PackLoader>> {
     let mut found = Vec::new();
     for (key, value) in dependencies {
-        let kind = match key.as_str() {
-            "minecraft" => continue,
-            "fabric-loader" => PackLoaderKind::Fabric,
-            "quilt-loader" => PackLoaderKind::Quilt,
-            "forge" => PackLoaderKind::Forge,
-            "neoforge" => PackLoaderKind::NeoForge,
-            other => {
-                tracing::warn!(dependency = other, version = %value, "Modrinth 整合包依赖里有不认识的项，忽略");
-                continue;
-            }
+        if key == "minecraft" {
+            continue;
+        }
+        let Some(kind) = PACK_LOADER_KINDS
+            .into_iter()
+            .find(|kind| loader_dependency_key(*kind) == key)
+        else {
+            tracing::warn!(dependency = %key, version = %value, "Modrinth 整合包依赖里有不认识的项，忽略");
+            continue;
         };
         found.push(PackLoader {
             kind,
@@ -447,6 +458,16 @@ fn modrinth_loader(dependencies: &BTreeMap<String, String>) -> Result<Option<Pac
             MODRINTH_DOCUMENT,
             "dependencies 里同时要求了多个加载器",
         )),
+    }
+}
+
+/// 加载器在 Modrinth 清单 `dependencies` 里的键。读包与写包共用，两边对同一个加载器不会认出两种写法。
+pub(crate) fn loader_dependency_key(kind: PackLoaderKind) -> &'static str {
+    match kind {
+        PackLoaderKind::Fabric => "fabric-loader",
+        PackLoaderKind::Quilt => "quilt-loader",
+        PackLoaderKind::Forge => "forge",
+        PackLoaderKind::NeoForge => "neoforge",
     }
 }
 
@@ -473,8 +494,12 @@ fn curseforge_loader(id: &str) -> Result<PackLoader> {
     })
 }
 
-/// 下载地址只收 https 与白名单主机；返回拒收原因。
-fn check_download_url(raw: &str) -> std::result::Result<(), &'static str> {
+/// 下载地址只收 https、不带用户凭据、主机在 `allowed` 的某一张表里；返回拒收原因。读包与导出共用这一套
+/// 判定，只是认的主机表不同。
+pub(crate) fn check_download_url(
+    raw: &str,
+    allowed: &[&[&str]],
+) -> std::result::Result<(), &'static str> {
     let url = url::Url::parse(raw).map_err(|_| "不是合法地址")?;
     if url.scheme() != "https" {
         return Err("不是 https");
@@ -483,7 +508,7 @@ fn check_download_url(raw: &str) -> std::result::Result<(), &'static str> {
         return Err("带有用户凭据");
     }
     let host = url.host_str().ok_or("没有主机名")?;
-    if !MODRINTH_ALLOWED_HOSTS.contains(&host) {
+    if !allowed.iter().any(|hosts| hosts.contains(&host)) {
         return Err("的主机不在允许范围内");
     }
     Ok(())

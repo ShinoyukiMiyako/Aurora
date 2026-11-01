@@ -118,7 +118,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `repairing` | 补全实例 | 互斥 |
 | `renaming` / `deleting` | 改名（新旧两个名字都占）、删除 | 互斥 |
 | `launching` -> `running` | 启动命令，从启动一直持有到游戏退出 | 只与 `modifying` 兼容 |
-| `modifying` | 装、删、启停、更新、回滚 Mod，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录 | 与自身、`launching`、`running` 兼容 |
+| `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录 | 与自身、`launching`、`running` 兼容 |
 
 游戏运行时仍然可以改动 Mod。被游戏占用的文件由门面在动手前检测，检测到时报 `mod_file_busy`。`list_instances` 返回的 `activity` 就来自这张表，前端刷新之后也能据此知道哪个实例正在安装。
 
@@ -133,6 +133,8 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 `launch_game` 带必填参数 `offlineFallback`，出参为 `{ pid, offline }`。为 true 时以离线方式进单人：不刷新也不校验登录，不下载、不注入 authlib-injector，用账户上次登录时的档案名与 uuid 加离线令牌（`accessToken` 为 `0`，`userType` 为 `legacy`）进游戏，只保证单人游戏，账户库不写；启动器日志记一条警告。能否放行由门面凭自己记下的「这个账户最近一次账户类启动失败」判定，不信前端：记录挂在 `Aurora` 的共享句柄上，只在内存里，快照共用、重开门面即清空，判定时取出即消耗，经验证跑起来的一局清掉它。上次是 `account_service_down` 或 `account_refresh_network` 才放行；离线账户、已失效账户、上次是 `account_relogin` 或没有记录时报 `invalid_argument`，`detail` 为 `{ field: "offlineFallback", reason, account }`，`reason` 取 `offline_account`、`relogin_required`、`no_recent_failure`。降级启动与普通启动走同一条阶段链路，取消与实例互斥不变。
 
 微软登录链各步（设备码、轮询、刷新令牌、XBL、XSTS、Minecraft 登录、档案）遇到 5xx、429 或故障页时，先判状态码再解析响应体，按退避重试过仍不行就报 `ServiceUnavailable`，`detail` 为 `{ step, status }`；它的原因链上没有 HTTP 客户端错误，不带 `detail.network`，不触发连通性探测。启动续期遇到它时失败码为 `account_service_down`，账户库不动；只有服务器明确判定凭据失效（`account_relogin`）才把账户标成需要重登。Minecraft 服务以 403 且响应体含 Invalid app registration 拒绝启动器所用的微软应用时报 `AppNotApproved`，不重试、不带 `detail`。
+
+`set_mods_enabled` 批量启停一组 Mod：整批只占一次 `modifying`、只拿一次 mods 目录写锁，按入参顺序逐项返回 `{ status: "ok", file_name, path }` 或 `{ status: "error", file_name, error }`，单个文件被占用（`mod_file_busy`）、改名冲突（`mod_state_conflict`）或不在盘上只让那一项失败；空数组、空文件名和重复文件名在占锁前以 `invalid_argument` 拒绝。`set_mod_update_hold` 写卷宗里的更新检查设置：`{ kind: "ignored" }` 忽略更新，`{ kind: "pinned", version_id }` 只接受不晚于该版本的更新，`null` 恢复检查，与 `list_mods` 出参的 `update_hold` 同形；它只改记录、不碰 jar，游戏运行中也能用，文件不在或没有平台来源时报 `io`。`check_updates` 出参形状不变：忽略的 Mod 不进任何查询；锁定的走版本列表在本地挑，不报比锁定版本新的候选；候选只取与当前版本同一发布通道或更稳定的（正式版只报正式版，测试版报正式版与测试版，预览版三种都报，当前通道认不出时按正式版）。Modrinth 侧按当前通道分组下推 `version_types`，全是正式版时仍只有两次请求。`mod_update_changelog` 取某个 Mod 某个平台版本的更新日志 `{ version_id, format, body }`（Modrinth 为 `markdown`，CurseForge 为 `html`，作者没写为 `null`），只读、不占实例锁、不缓存；版本不属于这个工程时报 `mod_version_not_found`。`list_mods` 来源里的 `installed_at` 是这个 Mod 装进实例的时刻（UNIX 秒），更新与回滚都沿用原值，哈希反查补身份时取文件修改时刻。
 
 `installed_sources` 一次给出全部实例已装 Mod 的平台来源（卷宗与 mods 目录的文件名 join，禁用态也算），只读、不占实例锁；某个实例读不出时只让那一项带上错误。发现页的「已装入 n 个实例」用它，不再逐个实例调 `list_mods`。
 

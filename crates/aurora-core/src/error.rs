@@ -200,6 +200,13 @@ pub enum CoreError {
         account: String,
         reason: OfflineFallbackRefusal,
     },
+    /// 这个实例写不成 Modrinth 整合包。`loader` 只在加载器不受支持时给出它的名字。
+    #[error("{}", reason.describe(loader.as_deref()))]
+    ModpackExportUnsupported {
+        id: String,
+        reason: crate::export::ExportBlock,
+        loader: Option<String>,
+    },
 }
 
 /// 不能以离线方式进单人的原因。[`OfflineFallbackRefusal::as_str`] 是给前端分支用的稳定码。

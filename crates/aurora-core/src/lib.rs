@@ -33,6 +33,7 @@ pub mod crashdiag;
 pub mod deps;
 pub mod error;
 pub mod event;
+pub mod export;
 pub mod facade;
 pub mod folders;
 mod gpu;
@@ -80,6 +81,11 @@ pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog
 pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, GameDirProblem, JavaPathProblem, OfflineFallbackRefusal, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
+pub use export::{
+    BundleReason, ExportBlock, ExportBundledMod, ExportExtra, ExportExtraStat, ExportIndexedMod,
+    ExportMatch, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
+    ModpackExportTarget,
+};
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
@@ -91,7 +97,7 @@ pub use launch::{
     resolve_memory,
 };
 pub use launcher_update::{UpdateSource, order_update_sources};
-pub use ledger::{Ledger, LedgerEntry, LedgerStore};
+pub use ledger::{Ledger, LedgerEntry, LedgerStore, UpdateHold};
 pub use modfs::is_mod_file_busy;
 pub use modpack::{
     INSTANCE_NAME_MAX_CHARS, ImportSelection, InstanceModpack, InstanceNameRule,
@@ -99,7 +105,7 @@ pub use modpack::{
     PackModEntry, PreparedModpack, read_instance_modpack, validate_instance_name,
 };
 pub use modpack_summary::ModpackSummary;
-pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
+pub use mods::{InstanceMod, ModInstallOutcome, ModSource, ModToggleOutcome};
 pub use modversions::ProjectInfo;
 pub use news::{LauncherChannel, NewsFeed, NewsItem, NewsTag};
 pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
@@ -114,7 +120,7 @@ pub use starter::{
     starter_table,
 };
 pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
-pub use updates::UpdateCandidate;
+pub use updates::{ModChangelog, UpdateCandidate};
 pub use world_backup::{
     AutoBackupOutcome, BackupOutcome, ExportOutcome, RestoreOutcome, WorldBackup, WorldBackupList,
 };

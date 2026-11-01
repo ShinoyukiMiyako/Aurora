@@ -251,6 +251,24 @@ impl CurseForgeClient {
         }
     }
 
+    /// 取单个文件的更新日志正文（平台给的是 HTML）；工程或文件不存在返回 `None`。
+    pub async fn file_changelog(&self, mod_id: u32, file_id: u32) -> Result<Option<String>> {
+        let url = format!(
+            "{}/v1/mods/{}/files/{}/changelog",
+            self.base_url, mod_id, file_id
+        );
+        let result: Result<Envelope<String>> =
+            send_json(&self.retry, "curseforge.file_changelog", || {
+                self.get(url.as_str())
+            })
+            .await;
+        match result {
+            Ok(envelope) => Ok(Some(envelope.data)),
+            Err(Error::Status { status: 404, .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// 按一批 modId 取工程详情，用于给安装计划与卷宗补上工程标题与图标。空批次不发请求。
     pub async fn mods(&self, mod_ids: &[u32]) -> Result<Vec<CurseForgeMod>> {
         if mod_ids.is_empty() {
@@ -1145,6 +1163,49 @@ mod tests {
         assert_eq!(info.loaders, vec![ModLoader::NeoForge]);
 
         assert!(client(&server).mod_file(238222, 9).await.unwrap().is_none());
+    }
+
+    /// 文件更新日志：打 /v1/mods/{modId}/files/{fileId}/changelog 并带 key，拆开 data 原样给出 HTML；
+    /// 404 为 None；各只请求一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_changelog_unwraps_html_and_maps_404_to_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/5001/changelog"))
+            .and(header("x-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": "<p>JEI 15.3</p><ul><li>修复配方查找</li></ul>"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/9/changelog"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = client(&server);
+        assert_eq!(
+            c.file_changelog(238222, 5001).await.unwrap().as_deref(),
+            Some("<p>JEI 15.3</p><ul><li>修复配方查找</li></ul>")
+        );
+        assert!(c.file_changelog(238222, 9).await.unwrap().is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    /// 404 以外的失败照常冒泡，不当作「没有日志」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_changelog_client_error_bubbles() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/1/files/2/changelog"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let err = client(&server).file_changelog(1, 2).await.unwrap_err();
+        assert!(matches!(err, Error::Status { status: 403, .. }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

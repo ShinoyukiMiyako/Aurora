@@ -72,7 +72,7 @@ describe("浏览器与测试环境走 mock", () => {
   it("opener 的 mock 定位文件：paths 是路径列表才放行，别的形状照插件的参数错误拒绝", async () => {
     await expect(invoke("plugin:opener|reveal_item_in_dir", { paths: ["D:/Games/.minecraft/.petalfall/backups"] })).resolves.toBeUndefined();
     const single = await invoke("plugin:opener|reveal_item_in_dir", { paths: "D:/a.zip" }).catch((e: unknown) => e);
-    expect(single).toMatchObject({ code: "unknown", message: "invalid args `paths` for command `plugin:opener|reveal_item_in_dir`: expected a sequence of paths" });
+    expect(single).toMatchObject({ code: "unknown", message: 'invalid args `paths` for command `reveal_item_in_dir`: expected a sequence of strings, found "D:/a.zip"' });
     const missing = await invoke("plugin:opener|reveal_item_in_dir", {}).catch((e: unknown) => e);
     expect(missing).toMatchObject({ code: "unknown" });
   });

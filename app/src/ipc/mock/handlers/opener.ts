@@ -1,5 +1,5 @@
 import type { MockArgs, MockHandlers } from "../types";
-import { requireString, tauriArgError } from "./config";
+import { requireString } from "./config";
 
 // opener 插件的命令。真机上由插件按能力作用域判断放不放行，再交给系统默认程序打开；
 // 浏览器预览里新开一个标签页，放行的协议与默认权限 allow-default-urls 一致。
@@ -13,16 +13,26 @@ function openUrl(args: MockArgs): void {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-const REVEAL = "plugin:opener|reveal_item_in_dir";
+/**
+ * 在资源管理器里选中过的路径，按调用先后。浏览器里没有资源管理器，测试据此断言「打开所在文件夹」选中的是哪个文件。
+ * 导出的是同一个数组，reset 只清空不换引用，测试模块里早先拿到的引用一直有效。
+ */
+export const mockRevealedPaths: string[] = [];
 
-// 插件按 Vec<PathBuf> 反序列化 paths；浏览器预览没有文件管理器可以定位，参数合法就当作已经打开，
-// 与 open_folder 对游戏目录的处理一致。
 function revealItemInDir(args: MockArgs): void {
   const paths = args.paths;
-  if (!Array.isArray(paths) || paths.some((p) => typeof p !== "string")) throw tauriArgError(REVEAL, "paths", "expected a sequence of paths");
+  // 形参是 Vec<PathBuf>：不是字符串数组时是 Tauri 自己的反序列化错误，到前端是纯字符串
+  if (!Array.isArray(paths) || paths.some((p) => typeof p !== "string")) {
+    throw `invalid args \`paths\` for command \`reveal_item_in_dir\`: expected a sequence of strings, found ${JSON.stringify(paths)}`;
+  }
+  mockRevealedPaths.push(...(paths as string[]));
 }
 
 export const handlers: MockHandlers = {
   "plugin:opener|open_url": (args) => openUrl(args),
-  [REVEAL]: (args) => revealItemInDir(args),
+  "plugin:opener|reveal_item_in_dir": (args) => revealItemInDir(args),
 };
+
+export function reset(): void {
+  mockRevealedPaths.length = 0;
+}

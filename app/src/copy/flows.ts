@@ -645,6 +645,15 @@ export const TASK_STATUS_LABEL: Readonly<Record<TaskStatus, string>> = {
   cancelled: "已取消",
 };
 
+/** 导出整合包在运行时是在本地打包，不是在下载。 */
+const EXPORT_RUNNING_LABEL = "打包中";
+
+/** 一个任务此刻的状态标签：显示任务状态的地方都用它，不直接取 TASK_STATUS_LABEL。 */
+export function taskStatusLabel(task: { kind: TaskKind; status: TaskStatus }): string {
+  if (task.status === "running" && task.kind === "modpack_export") return EXPORT_RUNNING_LABEL;
+  return TASK_STATUS_LABEL[task.status];
+}
+
 /** 任务类别标签。修复任务补的是游戏文件，归在「游戏」名下；备份、导出与恢复都归在「存档」名下。 */
 export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   game: "游戏",
@@ -658,6 +667,7 @@ export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   repair: "游戏",
   world_backup: "存档",
   world_restore: "存档",
+  modpack_export: "导出",
 };
 
 function versionWithLoader(mcVersion: string, loader: LoaderKind, loaderVersion: string | null, sep: string): string {
@@ -689,10 +699,12 @@ export const TASK_TEXT = {
   javaDetailPending: "Mojang 运行时 · 手动",
   javaDetail: (version: string) => `Mojang ${version} · 手动`,
   backupTitle: (world: string) => `备份「${world}」`,
-  exportTitle: (world: string) => `导出「${world}」`,
+  exportWorldTitle: (world: string) => `导出「${world}」`,
   restoreTitle: (world: string) => `恢复「${world}」`,
   /** 备份、导出与恢复任务的详情：存档属于哪个实例。 */
   backupDetail: (instance: string) => `「${instance}」`,
+  exportTitle: (name: string) => `导出整合包 ${name}`,
+  exportDetail: (version: string, instance: string) => `${version} · 「${instance}」`,
   queuePosition: (n: number) => `排队中 · 第 ${n} 位`,
   attempt: (k: number) => `第 ${k} 次尝试`,
 } as const;
@@ -725,6 +737,8 @@ export function taskFailureReason(error: TaskError): string {
     // 原存档已进回收站、恢复出的副本留在临时目录：两个位置都在后端原文里，统一说法会把它们丢掉
     case "world_restore_incomplete":
       return error.message;
+    case "modpack_export_check_failed":
+      return "导出的文件没通过校验，已删除";
     default:
       return error.message;
   }
@@ -766,6 +780,11 @@ export const TASK_TOAST = {
   /** 从任务日志恢复后重试成功、已没有入队时上下文的任务。 */
   finished: (title: string) => ({ title: `已完成：${title}` }),
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
+  exportStarted: (name: string) => ({ title: `已开始导出「${name}」`, body: "进度见下载任务" }),
+  /** bundled：打包进文件的 Mod 数；没有时不写正文。 */
+  exported: (name: string, bundled: number) =>
+    bundled > 0 ? { title: `已导出「${name}」`, body: `${bundled} 个 Mod 打包进了文件，分享前确认作者允许转载` } : { title: `已导出「${name}」` },
+  exportFailed: (title: string, reason: string) => ({ title: `导出失败：${title}`, body: reason }),
   failedMany: (count: number, reasons: readonly string[]) => ({
     title: `${count} 个下载失败`,
     body: new Set(reasons).size === 1 ? reasons[0] : "原因各不相同",
@@ -794,6 +813,8 @@ export const TASK_TOAST = {
     body: instances.length === 1 ? `装入「${instances[0]}」` : `装入 ${instances.length} 个实例，进度见下载任务`,
   }),
   launchAction: "启动",
+  /** 在资源管理器里选中刚生成的文件。 */
+  revealAction: "打开所在文件夹",
   retryAction: "重试",
   viewAction: "查看",
 } as const;
@@ -806,6 +827,15 @@ export const TOAST_COPY = {
   stopFailed: "无法结束游戏进程",
   allModsLatest: ALL_MODS_LATEST,
   modRemoved: (name: string) => `已移除 ${name}`,
+  modsEnabled: (count: number) => `已启用 ${count} 个 Mod`,
+  modsDisabled: (count: number) => ({ title: `已停用 ${count} 个 Mod`, body: "文件名后加了 .disabled，随时可以再启用" }),
+  modsToggleFailed: (count: number, enabled: boolean) => (enabled ? `${count} 个 Mod 没能启用` : `${count} 个 Mod 没能停用`),
+  modsRemoved: (count: number) => `已移除 ${count} 个 Mod`,
+  modsRemoveFailed: (count: number) => `${count} 个 Mod 没能移除`,
+  /** 批量动作里失败的几项原因不止一种时的正文；只有一种时直接写后端原文。 */
+  mixedReasons: "原因各不相同",
+  updateIgnored: (name: string) => ({ title: `已忽略 ${name} 的更新`, body: "检查更新时会跳过它，可以在更多菜单里恢复" }),
+  updateRestored: (name: string) => `已恢复检查 ${name} 的更新`,
   rolledBack: (name: string, from: string, to: string) => ({ title: `已回滚 ${name}`, body: `${to} → ${from}` }),
   cannotRollback: "这条记录不能回滚",
   instanceDeleted: (name: string, worlds: number) =>
@@ -857,6 +887,8 @@ export const ACTION_ERROR = {
   authlib: "外置登录没有完成",
   createInstance: "没能开始新建实例",
   importModpack: "没能开始导入整合包",
+  exportModpack: "没能开始导出整合包",
+  revealExport: "没能打开导出文件所在的文件夹",
   repair: "没能开始补全游戏文件",
   deleteInstance: (name: string) => `没能删除「${name}」`,
   renameInstance: "没能重命名实例",
@@ -868,6 +900,7 @@ export const ACTION_ERROR = {
   toggleMod: "Mod 开关没有生效",
   removeMod: "没能移除 Mod",
   updateMods: "没能检查 Mod 更新",
+  updateHold: "更新检查设置没有保存",
   install: "没能加入下载队列",
   probeNetwork: "没能检测网络连接",
   rollback: "没能回滚",

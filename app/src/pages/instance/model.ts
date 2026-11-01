@@ -7,8 +7,10 @@ import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromClassVersion, memo
 import type { Task, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
-import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
+import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { isActiveTask } from "../../state/tasks";
+import type { TableSort } from "../../ui/Table";
+import { MODS_COPY } from "./copy";
 
 // ---------------------------------------------------------------- 上次崩溃
 
@@ -442,9 +444,14 @@ export interface ModRow {
   dependencyOf: string | null;
   /** 带它进来的工程 id（对不上已装 Mod 时也保留，用于移除确认里的说明）。 */
   dependencyOfProject: string | null;
+  /** 已忽略更新的行恒为 null：设置刚改、可更新项还没重取时也不再给「更新」。 */
   update: UpdateCandidate | null;
   size: number;
   modId: string | null;
+  /** 装进实例的时刻（毫秒）：有来源记录取卷宗里的原值，本地文件取文件修改时刻。 */
+  addedAt: number;
+  /** 检查更新时的处理；本地文件没有来源记录，恒为 null。 */
+  hold: UpdateHold | null;
 }
 
 export function modName(mod: InstalledMod): string {
@@ -462,7 +469,9 @@ export function modRows(mods: readonly InstalledMod[], updates: readonly UpdateC
     const source = m.source;
     const depProject = source === null ? null : source.dependency_of;
     const depName = depProject === null ? undefined : nameByProject.get(depProject);
-    const update = updates === null ? undefined : updates.find((u) => u.file_name === enabledFileName(m.file_name));
+    const hold = source === null ? null : source.update_hold;
+    const ignored = hold !== null && hold.kind === "ignored";
+    const update = updates === null || ignored ? undefined : updates.find((u) => u.file_name === enabledFileName(m.file_name));
     const version = meta !== null && meta.version !== null ? meta.version : source !== null ? source.version_number : null;
     return {
       fileName: m.file_name,
@@ -480,6 +489,8 @@ export function modRows(mods: readonly InstalledMod[], updates: readonly UpdateC
       update: update === undefined ? null : update,
       size: m.size,
       modId: meta === null ? null : meta.mod_id,
+      addedAt: source === null ? m.modified_ms : source.installed_at * 1000,
+      hold,
     };
   });
   return rows.sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName));
@@ -496,11 +507,21 @@ export function modTotals(inst: Pick<InstanceSummary, "modCount" | "modpack">, l
   return { total, partial: total > listed };
 }
 
-export type ModFilter = "all" | "enabled" | "disabled" | "outdated";
+export type ModFilter = "all" | "enabled" | "disabled" | "outdated" | "ignored";
+
+function isIgnored(row: ModRow): boolean {
+  return row.hold !== null && row.hold.kind === "ignored";
+}
 
 export function modCounts(rows: readonly ModRow[]): Readonly<Record<ModFilter, number>> {
   const enabled = rows.filter((r) => r.enabled).length;
-  return { all: rows.length, enabled, disabled: rows.length - enabled, outdated: rows.filter((r) => r.update !== null).length };
+  return {
+    all: rows.length,
+    enabled,
+    disabled: rows.length - enabled,
+    outdated: rows.filter((r) => r.update !== null).length,
+    ignored: rows.filter(isIgnored).length,
+  };
 }
 
 /** 名称、作者、文件名、简介里不分大小写的子串匹配，再叠加状态筛选。 */
@@ -510,6 +531,7 @@ export function filterMods(rows: readonly ModRow[], query: string, filter: ModFi
     if (filter === "enabled" && !r.enabled) return false;
     if (filter === "disabled" && r.enabled) return false;
     if (filter === "outdated" && r.update === null) return false;
+    if (filter === "ignored" && !isIgnored(r)) return false;
     if (q === "") return true;
     return [r.name, r.author, r.fileName, r.summary].some((field) => field !== null && field.toLowerCase().includes(q));
   });
@@ -520,6 +542,65 @@ export function removalRelations(row: ModRow, rows: readonly ModRow[]): { brough
   const broughtIn = row.projectId === null ? [] : rows.filter((r) => r.dependencyOfProject === row.projectId && r.fileName !== row.fileName).map((r) => r.name);
   const dependents = row.dependencyOf === null ? [] : [row.dependencyOf];
   return { broughtIn, dependents };
+}
+
+/**
+ * 批量移除的两层关系，只说没被一起选中的：选中项带进来的前置会保留；把选中项当前置的 Mod 可能加载不了。
+ * 一起选中的已经要一并移除，提醒它们没有意义。名字按出现顺序去重。
+ */
+export function batchRemovalRelations(selected: readonly ModRow[], rows: readonly ModRow[]): { broughtIn: string[]; dependents: string[] } {
+  const chosen = new Set(selected.map((r) => r.fileName));
+  const projects = new Set(selected.flatMap((r) => (r.projectId === null ? [] : [r.projectId])));
+  const broughtIn = rows.filter((r) => !chosen.has(r.fileName) && r.dependencyOfProject !== null && projects.has(r.dependencyOfProject)).map((r) => r.name);
+  const dependents = selected.flatMap((s) =>
+    s.dependencyOfProject === null ? [] : rows.filter((r) => r.projectId === s.dependencyOfProject && !chosen.has(r.fileName)).map((r) => r.name),
+  );
+  return { broughtIn: [...new Set(broughtIn)], dependents: [...new Set(dependents)] };
+}
+
+/** 批量操作条四个按钮的禁用原因；undefined 为可用。锁住时四个都沿用单行操作的锁定原因。 */
+export interface BatchAvailability {
+  enable: string | undefined;
+  disable: string | undefined;
+  update: string | undefined;
+  remove: string | undefined;
+}
+
+export function batchAvailability(selected: readonly ModRow[], lock: string | undefined): BatchAvailability {
+  if (selected.length === 0) throw new Error("没有选中的 Mod 时不显示批量操作条");
+  if (lock !== undefined) return { enable: lock, disable: lock, update: lock, remove: lock };
+  return {
+    enable: selected.every((r) => r.enabled) ? MODS_COPY.batchAllEnabled : undefined,
+    disable: selected.every((r) => !r.enabled) ? MODS_COPY.batchAllDisabled : undefined,
+    update: selected.every((r) => r.update === null) ? MODS_COPY.batchNoUpdates : undefined,
+    remove: undefined,
+  };
+}
+
+const NEW_MOD_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 装进实例不满 7 天算新增；恰好满 7 天起不再算。时刻在将来（本机时钟被往回调过）也按刚装上算。 */
+export function isNewMod(row: Pick<ModRow, "addedAt">, now: number): boolean {
+  return now - row.addedAt < NEW_MOD_MS;
+}
+
+/** 表头点到「安装时间」时第一次按新到旧：想看的是最近装了什么；再点由表格照常翻转。 */
+export function adjustModSort(previous: TableSort, next: TableSort): TableSort {
+  if (next.key === "installed" && previous.key !== "installed") return { key: "installed", direction: "desc" };
+  return next;
+}
+
+/** 列表排序：名称、来源、启用状态按文本比，同值按名称；安装时间按时刻比，同一时刻按名称（再按文件名）升序。 */
+export function sortRows(rows: readonly ModRow[], sort: TableSort): ModRow[] {
+  const dir = sort.direction === "asc" ? 1 : -1;
+  const byName = (a: ModRow, b: ModRow) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName);
+  if (sort.key === "installed") return [...rows].sort((a, b) => dir * (a.addedAt - b.addedAt) || byName(a, b));
+  const key = (r: ModRow): string => {
+    if (sort.key === "source") return r.platform === null ? "~" : r.platform;
+    if (sort.key === "enabled") return r.enabled ? "0" : "1";
+    return r.name;
+  };
+  return [...rows].sort((a, b) => dir * key(a).localeCompare(key(b), "zh-CN") || a.name.localeCompare(b.name, "zh-CN"));
 }
 
 // ---------------------------------------------------------------- Mod 速览

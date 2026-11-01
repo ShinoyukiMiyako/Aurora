@@ -24,6 +24,7 @@ export const KIND_ICON: Readonly<Record<TaskKind, IconName>> = {
   repair: "box",
   world_backup: "world",
   world_restore: "world",
+  modpack_export: "modpack",
 };
 
 export const TASK_FILTERS = ["all", "active", "done", "failed"] as const satisfies readonly TaskFilter[];

@@ -1,4 +1,4 @@
-// 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、补全与删除。
+// 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、导出整合包、补全与删除。
 // 几处入口的锁定判断与反馈都从这里出，保证完全一致（删除确认与实例库共用 delete.tsx）。动作一律经外层统一错误处理执行。
 
 import { ACTION_ERROR } from "../../copy/flows";
@@ -34,6 +34,8 @@ export interface InstanceOps {
   folderReason(target: FolderTarget): string | undefined;
   /** 实例设置此刻改不了的原因；能改为 undefined，可以直接交给 disabledReason。 */
   settingsReason: string | undefined;
+  /** 此刻不能导出整合包的原因；能导出为 undefined。菜单项与导出弹窗的主按钮共用它。 */
+  exportReason: string | undefined;
   repair(): void;
   remove(): void;
 }
@@ -49,6 +51,17 @@ export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | 
   if (kind === "mods") return lock === "running" ? LOCK_REASON.runningMods : LOCK_REASON.installing;
   if (kind === "repair" && lock === "installing") return LOCK_REASON.repairInProgress;
   return LOCK_REASON.running;
+}
+
+/**
+ * 导出读的是此刻的文件，与「改动中」同属一类：游戏运行、装 Mod 都不挡；安装、补全、改名、删除会挪走或重写目录，挡住。
+ * 占位项的目录还没落盘，损坏的实例写不出可用的整合包。
+ */
+export function exportReason(inst: InstanceSummary, work: WorkLock | null): string | undefined {
+  if (inst.placeholder) return LOCK_REASON.export.placeholder;
+  if (work !== null) return LOCK_REASON.export[work];
+  if (inst.status === "broken") return LOCK_REASON.export.broken;
+  return undefined;
 }
 
 export function useInstanceOps(inst: InstanceSummary): InstanceOps {
@@ -99,5 +112,19 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     void deleteInstance(inst);
   };
 
-  return { locks, work, busy, installing, nameError, rename, togglePin, openFolder, folderReason, settingsReason, repair, remove };
+  return {
+    locks,
+    work,
+    busy,
+    installing,
+    nameError,
+    rename,
+    togglePin,
+    openFolder,
+    folderReason,
+    settingsReason,
+    exportReason: exportReason(inst, work),
+    repair,
+    remove,
+  };
 }

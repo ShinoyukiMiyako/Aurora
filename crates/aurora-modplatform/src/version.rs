@@ -44,6 +44,45 @@ impl ReleaseChannel {
             _ => None,
         }
     }
+
+    /// Modrinth `version_type` 取值，与 [`Self::from_modrinth`] 互逆。
+    pub fn modrinth_name(self) -> &'static str {
+        match self {
+            ReleaseChannel::Release => "release",
+            ReleaseChannel::Beta => "beta",
+            ReleaseChannel::Alpha => "alpha",
+        }
+    }
+
+    /// 稳定度秩：越小越稳定。
+    fn rank(self) -> u8 {
+        match self {
+            ReleaseChannel::Release => 0,
+            ReleaseChannel::Beta => 1,
+            ReleaseChannel::Alpha => 2,
+        }
+    }
+
+    /// 当前装着 `self` 通道的版本时，可否把 `candidate` 通道的版本作为更新推给玩家：同级或更稳定才行。
+    ///
+    /// 装正式版的玩家没选过测试版，自动把他推上一个不稳定的构建等于替他做了决定；装测试版、预览版的
+    /// 玩家本来就在追新，回到更稳定的通道永远是安全的。
+    pub fn admits(self, candidate: ReleaseChannel) -> bool {
+        candidate.rank() <= self.rank()
+    }
+
+    /// [`Self::admits`] 放行的全部通道，从最稳定到最不稳定。
+    pub fn admitted(self) -> &'static [ReleaseChannel] {
+        match self {
+            ReleaseChannel::Release => &[ReleaseChannel::Release],
+            ReleaseChannel::Beta => &[ReleaseChannel::Release, ReleaseChannel::Beta],
+            ReleaseChannel::Alpha => &[
+                ReleaseChannel::Release,
+                ReleaseChannel::Beta,
+                ReleaseChannel::Alpha,
+            ],
+        }
+    }
 }
 
 /// 由平台给的加载器名解析枚举；识别不出返回 `None`。
@@ -174,6 +213,69 @@ mod tests {
         );
         assert_eq!(ReleaseChannel::from_curseforge(0), None);
         assert_eq!(ReleaseChannel::from_curseforge(9), None);
+    }
+
+    const ALL_CHANNELS: [ReleaseChannel; 3] = [
+        ReleaseChannel::Release,
+        ReleaseChannel::Beta,
+        ReleaseChannel::Alpha,
+    ];
+
+    #[test]
+    fn modrinth_name_round_trips_through_from_modrinth() {
+        assert_eq!(ReleaseChannel::Release.modrinth_name(), "release");
+        assert_eq!(ReleaseChannel::Beta.modrinth_name(), "beta");
+        assert_eq!(ReleaseChannel::Alpha.modrinth_name(), "alpha");
+        for channel in ALL_CHANNELS {
+            assert_eq!(
+                ReleaseChannel::from_modrinth(channel.modrinth_name()),
+                Some(channel)
+            );
+        }
+    }
+
+    #[test]
+    fn admits_only_same_or_more_stable_channels() {
+        use ReleaseChannel::{Alpha, Beta, Release};
+        // 全部 9 种（当前, 候选）组合逐一写明。
+        let table = [
+            (Release, Release, true),
+            (Release, Beta, false),
+            (Release, Alpha, false),
+            (Beta, Release, true),
+            (Beta, Beta, true),
+            (Beta, Alpha, false),
+            (Alpha, Release, true),
+            (Alpha, Beta, true),
+            (Alpha, Alpha, true),
+        ];
+        for (current, candidate, expected) in table {
+            assert_eq!(
+                current.admits(candidate),
+                expected,
+                "当前 {current:?} 候选 {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admitted_lists_exactly_what_admits_accepts() {
+        assert_eq!(
+            ReleaseChannel::Release.admitted(),
+            &[ReleaseChannel::Release]
+        );
+        assert_eq!(
+            ReleaseChannel::Beta.admitted(),
+            &[ReleaseChannel::Release, ReleaseChannel::Beta]
+        );
+        assert_eq!(ReleaseChannel::Alpha.admitted(), &ALL_CHANNELS);
+        for current in ALL_CHANNELS {
+            let expected: Vec<ReleaseChannel> = ALL_CHANNELS
+                .into_iter()
+                .filter(|candidate| current.admits(*candidate))
+                .collect();
+            assert_eq!(current.admitted(), expected.as_slice());
+        }
     }
 
     #[test]

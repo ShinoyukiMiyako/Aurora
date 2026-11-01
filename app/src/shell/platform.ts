@@ -1,4 +1,4 @@
-// 设置页、实例页与首次启动向导要用、页面与流程又不能直接调用的宿主能力：系统选择文件夹、选择文件与保存文件对话框、
+// 设置页、实例页、首次启动向导与导出整合包要用、页面与流程又不能直接调用的宿主能力：系统选择文件夹、选择文件与保存文件对话框、
 // 其他游戏目录的登记与移除、打开启动器数据目录与日志目录。这里给出真实实现，由 App 经各自的 Provider 注入；
 // 形状与页面、流程声明的接口一致，类型由 App 在注入处核对（外壳不引用 pages/ 与 flows/）。
 
@@ -43,6 +43,21 @@ export async function pickFile(options: { title: string; filter: FileFilter }): 
 export async function pickSaveFile(options: { title: string; defaultPath: string; filter: FileFilter }): Promise<string | null> {
   if (!inTauri()) throw new NoNativeDialogError("保存文件", "导出要在桌面应用里进行");
   return save({ title: options.title, defaultPath: options.defaultPath, filters: [{ name: options.filter.name, extensions: [...options.filter.extensions] }] });
+}
+
+/** 保存对话框能产出的文件种类。 */
+export const SAVE_FILE_KINDS = {
+  mrpack: { extensions: ["mrpack"] },
+} as const satisfies Record<string, { extensions: readonly string[] }>;
+
+export type SaveFileKind = keyof typeof SAVE_FILE_KINDS;
+
+/**
+ * 保存对话框给回的路径不带要求的扩展名时补上（不分大小写）：在 Windows 上用户把类型下拉换成别的、或在文件名里打了别的扩展名，
+ * 系统都不会替换它；后端只收 .mrpack。
+ */
+export function withExtension(path: string, extension: string): string {
+  return path.toLowerCase().endsWith(`.${extension.toLowerCase()}`) ? path : `${path}.${extension}`;
 }
 
 export interface GameDirectoryCommands {

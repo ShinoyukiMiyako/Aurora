@@ -161,9 +161,12 @@ pub fn run() {
             // -- mods --
             commands::mods::list_mods,
             commands::mods::set_mod_enabled,
+            commands::mods::set_mods_enabled,
             commands::mods::remove_mod,
+            commands::mods::set_mod_update_hold,
             commands::mods::check_updates,
             commands::mods::update_mod,
+            commands::mods::mod_update_changelog,
             commands::mods::list_mod_versions,
             commands::mods::match_instances,
             commands::mods::installed_sources,
@@ -184,6 +187,8 @@ pub fn run() {
             commands::modpack::install_modpack,
             commands::modpack::claim_blocked_files,
             commands::modpack::downloads_folder,
+            commands::modpack::preview_modpack_export,
+            commands::modpack::export_modpack,
             // -- system --
             commands::system::memory_advice,
             commands::system::is_first_run,

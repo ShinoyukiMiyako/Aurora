@@ -3,12 +3,15 @@ import { bestLocalRuntime, runtimeComplete } from "../../domain/rules";
 import type { Task } from "../../domain/types";
 import type { LaunchView } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
-import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, WorldDto } from "../../state/queries/instance";
+import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { applyPhase, sessionLaunched, startSession } from "../../state/session";
 import { newTask } from "../../state/tasks";
-import { LOGS_COPY } from "./copy";
+import { LOGS_COPY, MODS_COPY } from "./copy";
 import {
+  adjustModSort,
   autoJavaPick,
+  batchAvailability,
+  batchRemovalRelations,
   crashFixes,
   crashFixKey,
   creationRef,
@@ -24,6 +27,7 @@ import {
   historyItems,
   installStage,
   instanceFolderPath,
+  isNewMod,
   instanceLocks,
   isCrashActive,
   isolationByPolicy,
@@ -43,6 +47,7 @@ import {
   presetFlags,
   RESOLUTION_LIMITS,
   removalRelations,
+  sortRows,
   sortWorlds,
   toggleFlags,
   updateTaskFiles,
@@ -519,8 +524,8 @@ describe("更新任务换掉的 Mod", () => {
 });
 
 describe("Mod 列表", () => {
-  const sodium = mod("sodium-0.6.jar", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null } }, { name: "Sodium", authors: ["JellySquid", "IMS"], description: "渲染优化" });
-  const api = mod("fabric-api-0.1.jar.disabled", { source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.1", title: "Fabric API", dependency_of: "AANobbMI" } }, { name: null });
+  const sodium = mod("sodium-0.6.jar", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null, installed_at: 1_780_000_000, update_hold: null } }, { name: "Sodium", authors: ["JellySquid", "IMS"], description: "渲染优化" });
+  const api = mod("fabric-api-0.1.jar.disabled", { source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.1", title: "Fabric API", dependency_of: "AANobbMI", installed_at: 1_780_000_000, update_hold: null } }, { name: null });
   const local = mod("ZZZ-local.jar", {}, null);
 
   it("名称回落：元数据名、平台标题、文件名；按名称排序", () => {
@@ -535,7 +540,7 @@ describe("Mod 列表", () => {
     const apiRow = rows.find((r) => r.fileName === api.file_name);
     expect(apiRow?.dependencyOf).toBe("Sodium");
     expect(apiRow?.update?.latest.version_number).toBe("0.2");
-    expect(modCounts(rows)).toEqual({ all: 2, enabled: 1, disabled: 1, outdated: 1 });
+    expect(modCounts(rows)).toEqual({ all: 2, enabled: 1, disabled: 1, outdated: 1, ignored: 0 });
   });
 
   it("搜索不分大小写，匹配作者与文件名，并叠加状态筛选", () => {
@@ -560,6 +565,122 @@ describe("Mod 列表", () => {
     expect(enabledFileName("a.jar.disabled")).toBe("a.jar");
     expect(disabledFileName("a.jar")).toBe("a.jar.disabled");
     expect(disabledFileName("a.jar.disabled")).toBe("a.jar.disabled");
+  });
+});
+
+describe("Mod 安装时间、新增标注与更新检查设置", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const NOW = 1_790_000_000_000;
+  const source = (projectId: string, installedAt: number, hold: UpdateHold | null = null, dependencyOf: string | null = null) => ({
+    platform: "modrinth" as const,
+    project_id: projectId,
+    version_id: `${projectId}-v1`,
+    version_number: "1.0",
+    title: null,
+    dependency_of: dependencyOf,
+    installed_at: installedAt,
+    update_hold: hold,
+  });
+  const named = (fileName: string, name: string, over: Partial<InstalledMod> = {}) => mod(fileName, over, { name });
+
+  it("装进实例的时刻：有来源取卷宗里的秒数换成毫秒，本地文件取文件修改时刻", () => {
+    const rows = modRows(
+      [named("a.jar", "Alpha", { source: source("pa", 1_789_000_000), modified_ms: 5 }), named("b.jar", "Beta", { modified_ms: 1_789_500_000_123 })],
+      null,
+    );
+    expect(rows.map((r) => [r.name, r.addedAt])).toEqual([
+      ["Alpha", 1_789_000_000_000],
+      ["Beta", 1_789_500_000_123],
+    ]);
+  });
+
+  it("按安装时间排序：首次点按新到旧，同一时刻按名称，本地文件按修改时刻参与；再点翻转为旧到新", () => {
+    const rows = modRows(
+      [
+        named("c.jar", "Charlie", { source: source("pc", 1_789_000_000) }),
+        named("b.jar", "Bravo", { source: source("pb", 1_789_000_000) }),
+        named("local.jar", "Local", { modified_ms: 1_789_000_000_500 }),
+        named("old.jar", "Oldest", { source: source("po", 1_700_000_000) }),
+        named("a.jar", "Alpha", { source: source("pa", 1_789_000_000) }),
+      ],
+      null,
+    );
+    const first = adjustModSort({ key: "mod", direction: "asc" }, { key: "installed", direction: "asc" });
+    expect(first).toEqual({ key: "installed", direction: "desc" });
+    expect(sortRows(rows, first).map((r) => r.name)).toEqual(["Local", "Alpha", "Bravo", "Charlie", "Oldest"]);
+    // 再点同一列由表格翻转方向，adjustModSort 不再干预；同一时刻仍按名称升序
+    const flipped = adjustModSort(first, { key: "installed", direction: "asc" });
+    expect(flipped).toEqual({ key: "installed", direction: "asc" });
+    expect(sortRows(rows, flipped).map((r) => r.name)).toEqual(["Oldest", "Alpha", "Bravo", "Charlie", "Local"]);
+    // 别的列照表格给的方向
+    expect(adjustModSort(first, { key: "mod", direction: "asc" })).toEqual({ key: "mod", direction: "asc" });
+    expect(sortRows(rows, { key: "mod", direction: "desc" }).map((r) => r.name)).toEqual(["Oldest", "Local", "Charlie", "Bravo", "Alpha"]);
+  });
+
+  it("新增：不满 7 天为真，恰好 7 天为假，时刻在将来按刚装上算", () => {
+    expect(isNewMod({ addedAt: NOW - 7 * DAY + 1 }, NOW)).toBe(true);
+    expect(isNewMod({ addedAt: NOW - 7 * DAY }, NOW)).toBe(false);
+    expect(isNewMod({ addedAt: NOW - 30 * DAY }, NOW)).toBe(false);
+    expect(isNewMod({ addedAt: NOW }, NOW)).toBe(true);
+    expect(isNewMod({ addedAt: NOW + DAY }, NOW)).toBe(true);
+  });
+
+  it("忽略更新：筛选与计数只算 ignored，锁定的不算；被忽略的行即使还拿着旧的可更新项也不给更新", () => {
+    const rows = modRows(
+      [
+        named("a.jar", "Alpha", { source: source("pa", 1, { kind: "ignored" }) }),
+        named("b.jar", "Bravo", { source: source("pb", 1, { kind: "pinned", version_id: "pb-v1" }) }),
+        named("c.jar.disabled", "Charlie", { source: source("pc", 1, { kind: "ignored" }) }),
+        named("d.jar", "Delta"),
+      ],
+      [candidate("a.jar", "2.0"), candidate("b.jar", "1.1")],
+    );
+    expect(modCounts(rows)).toEqual({ all: 4, enabled: 3, disabled: 1, outdated: 1, ignored: 2 });
+    expect(filterMods(rows, "", "ignored").map((r) => r.name)).toEqual(["Alpha", "Charlie"]);
+    expect(filterMods(rows, "char", "ignored").map((r) => r.name)).toEqual(["Charlie"]);
+    expect(rows.map((r) => [r.name, r.hold === null ? null : r.hold.kind, r.update === null ? null : r.update.latest.version_number])).toEqual([
+      ["Alpha", "ignored", null],
+      ["Bravo", "pinned", "1.1"],
+      ["Charlie", "ignored", null],
+      ["Delta", null, null],
+    ]);
+  });
+
+  it("批量操作条的禁用原因：全启用、全停用、都没有更新、上锁", () => {
+    const rows = modRows(
+      [named("on1.jar", "On1"), named("on2.jar", "On2"), named("off1.jar.disabled", "Off1"), named("off2.jar.disabled", "Off2")],
+      [candidate("on1.jar", "2.0")],
+    );
+    const pick = (...names: string[]) => rows.filter((r) => names.includes(r.name));
+    expect(batchAvailability(pick("On1", "On2"), undefined)).toEqual({ enable: MODS_COPY.batchAllEnabled, disable: undefined, update: undefined, remove: undefined });
+    expect(batchAvailability(pick("Off1", "Off2"), undefined)).toEqual({
+      enable: undefined,
+      disable: MODS_COPY.batchAllDisabled,
+      update: MODS_COPY.batchNoUpdates,
+      remove: undefined,
+    });
+    expect(batchAvailability(pick("On2", "Off1"), undefined)).toEqual({ enable: undefined, disable: undefined, update: MODS_COPY.batchNoUpdates, remove: undefined });
+    const lock = "游戏正在运行";
+    expect(batchAvailability(pick("On1", "Off1"), lock)).toEqual({ enable: lock, disable: lock, update: lock, remove: lock });
+    expect(() => batchAvailability([], undefined)).toThrow("没有选中的 Mod");
+  });
+
+  it("批量移除的两层关系只说没被一起选中的", () => {
+    const rows = modRows(
+      [
+        named("create.jar", "Create", { source: source("create", 1) }),
+        named("flywheel.jar", "Flywheel", { source: source("flywheel", 1, null, "create") }),
+        named("sodium.jar", "Sodium", { source: source("sodium", 1) }),
+        named("api.jar", "Fabric API", { source: source("api", 1, null, "sodium") }),
+        named("iris.jar", "Iris", { source: source("iris", 1, null, "sodium") }),
+      ],
+      null,
+    );
+    const pick = (...names: string[]) => rows.filter((r) => names.includes(r.name));
+    // 选了 Sodium 与它带来的 Iris：只剩 Fabric API 会保留；Flywheel 是 Create 的前置，Create 没被选中
+    expect(batchRemovalRelations(pick("Sodium", "Iris", "Flywheel"), rows)).toEqual({ broughtIn: ["Fabric API"], dependents: ["Create"] });
+    expect(batchRemovalRelations(pick("Create", "Flywheel"), rows)).toEqual({ broughtIn: [], dependents: [] });
+    expect(batchRemovalRelations(pick("Fabric API", "Iris"), rows)).toEqual({ broughtIn: [], dependents: ["Sodium"] });
   });
 });
 

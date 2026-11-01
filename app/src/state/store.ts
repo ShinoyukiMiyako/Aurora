@@ -78,7 +78,7 @@ import type {
 import * as javaIpc from "../ipc/java";
 import type { InstalledRuntimeDto, JavaInstallationDto, RemoveJavaPathDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
-import { blockedFilesOf, claimBlockedFiles, downloadsFolder, parseBlockedFiles, type BlockedFileDto, type ClaimReportDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
+import { blockedFilesOf, claimBlockedFiles, downloadsFolder, parseBlockedFiles, revealExportedPack, type BlockedFileDto, type ClaimReportDto, type ModpackExportOptions, type ModpackExportOutcomeDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
 import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServerInstance, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
@@ -262,7 +262,9 @@ type TaskMeta =
   | { type: "update"; instanceId: string; name: string }
   | { type: "updates"; instanceId: string }
   /** 备份、导出、恢复存档。world 是存档文件夹名，name 是任务标题与通知里写的存档名。 */
-  | { type: "world"; instanceId: string; world: string; name: string; op: "backup" | "restore" | "export" };
+  | { type: "world"; instanceId: string; world: string; name: string; op: "backup" | "restore" | "export" }
+  /** name：整合包名称（完成通知用），与命令参数 options.name 相同。 */
+  | { type: "export"; name: string };
 
 export type { WorldBackupDto, WorldBackupListDto } from "../ipc/instances";
 
@@ -363,6 +365,11 @@ export interface LauncherActions {
   setSidebarPins(ids: string[]): Promise<void>;
   createInstance(spec: CreateInstanceSpec): Promise<string>;
   installModpack(spec: InstallModpackSpec): Promise<string>;
+  /**
+   * 把实例导出为 .mrpack：入队一个挂在实例上的任务，返回任务 id（同一份导出已在队列里时返回那个任务的 id）。
+   * 期间实例算「改动中」，不挡启动。options.destination 由系统保存对话框给出。
+   */
+  exportModpack(id: string, options: ModpackExportOptions): Promise<string>;
   previewInstanceDeletion(id: string): Promise<DeletionPreviewDto>;
   deleteInstance(id: string, worldCount: number): Promise<void>;
   renameInstance(id: string, name: string): Promise<string>;
@@ -393,9 +400,22 @@ export interface LauncherActions {
   failureFix(kind: FailureFixKind): FailureFixTarget;
   // Mod 与资源
   toggleMod(instanceId: string, fileName: string, enabled: boolean): Promise<void>;
+  /**
+   * 批量启用或停用：逐个文件，一个失败不中断其余的。全部成功给 info 通知，有失败给 warning 通知并写明原因；
+   * 整次被拒（实例忙碌等）照常抛出。
+   */
+  toggleMods(instanceId: string, fileNames: readonly string[], enabled: boolean): Promise<void>;
   updateMod(instanceId: string, fileName: string): Promise<void>;
-  updateAllMods(instanceId: string): Promise<void>;
+  /**
+   * 不给 picked：现查一次可更新项，全部更新（没有可更新的提示都已是最新）。
+   * 给了：只更新这几项（更新预览里勾选的），一项按单个更新入队，多项合成一个任务；空数组直接报错。
+   */
+  updateAllMods(instanceId: string, picked?: readonly modsIpc.UpdateCandidate[]): Promise<void>;
   removeMod(instanceId: string, fileName: string, name: string): Promise<void>;
+  /** 逐项移除；被拒的那几项记为失败、不中断其余的，结束后按结果给一条通知。 */
+  removeMods(instanceId: string, files: readonly { fileName: string; name: string }[]): Promise<void>;
+  /** 忽略（或锁定）这个 Mod 的更新；hold 为 null 恢复检查。只改记录不碰文件，游戏运行中也可用。 */
+  setModUpdateHold(instanceId: string, fileName: string, name: string, hold: modsIpc.UpdateHold | null): Promise<void>;
   installResource(spec: InstallResourceSpec): Promise<void>;
   rollback(instanceId: string, eventId: string): Promise<void>;
   /** launchAfter：装好后通知带「启动」这个实例；pinFor：装好后把这个实例的 Java 固定为新装的运行时。 */
@@ -458,6 +478,7 @@ const TASK_COMMANDS = new Set([
   "update_mod",
   "update_mods",
   ...WORLD_TASK_COMMANDS,
+  "export_modpack",
 ]);
 
 /**
@@ -605,6 +626,11 @@ function metaFromSpec(task: Task): TaskMeta | null {
       const op = command === "backup_world" ? "backup" : command === "export_world" ? "export" : "restore";
       return { type: "world", instanceId: strArg(args, "id", command), world, name: world, op };
     }
+    case "export_modpack": {
+      const options = args.options;
+      if (typeof options !== "object" || options === null) throw new Error("任务 export_modpack 缺少 options");
+      return { type: "export", name: strArg(options as Record<string, unknown>, "name", command) };
+    }
     default:
       return null;
   }
@@ -737,6 +763,7 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
   backup_world: "id",
   export_world: "id",
   restore_world_backup: "id",
+  export_modpack: "id",
 };
 
 /**
@@ -755,6 +782,7 @@ const GAME_DIR_SCOPED_RESOURCES = [
   "crash",
   "log",
   "mod-updates",
+  "mod-changelog",
   "plan",
   "match",
   "installed-sources",
@@ -770,7 +798,14 @@ const GAME_DIR_SCOPED_RESOURCES = [
  * 所以 id 一落到新实例上就丢掉它们。不在改名当时丢原 id 的：改名发起的页面那一刻还订阅着原 id，失效会让它按已经不在的
  * 实例重取、在缓存里留下一条报错。
  */
-const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice", WORLD_BACKUPS_RESOURCE] as const;
+const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "mod-changelog", "plan", "memory-advice", WORLD_BACKUPS_RESOURCE] as const;
+
+/** 批量动作里失败几项的通知正文：后端给的原因只有一种时照写原文，不止一种时不挑一条代表全部。 */
+function batchFailureReason(messages: readonly string[]): string {
+  const distinct = new Set(messages);
+  if (distinct.size === 0) throw new Error("没有失败项却要写失败原因");
+  return distinct.size === 1 ? messages[0] : TOAST_COPY.mixedReasons;
+}
 
 /**
  * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
@@ -827,6 +862,7 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "create":
     case "modpack":
     case "repair":
+    case "export":
       return meta;
   }
 }
@@ -1733,9 +1769,17 @@ export class LauncherStore {
     this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.install });
   }
 
-  /** 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。 */
+  /**
+   * 单个失败一条「下载失败」；10 s 内再有失败合并成一条「n 个下载失败」，操作改为查看失败筛选。
+   * 导出整合包不是下载：它的失败单独一条「导出失败」，不并进也不开启下载失败的合并。
+   */
   private failureToast(task: Task, reason: string): void {
     const now = Date.now();
+    if (task.kind === "modpack_export") {
+      const copy = TASK_TOAST.exportFailed(task.title, reason);
+      this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.exportModpack });
+      return;
+    }
     const batch = this.failureBatch;
     if (batch !== null && now - batch.startedAt <= FAILURE_TOAST_MERGE_MS) {
       this.set({ toasts: dismissToast(this.raw.toasts, batch.toastId) });
@@ -1937,6 +1981,17 @@ export class LauncherStore {
         const outcome = result as RestoreResultDto;
         const copy = TASK_TOAST.worldRestored(meta.name, outcome.previous_in_recycle_bin);
         this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined);
+        return;
+      }
+      case "export": {
+        // 导出不改实例：没有要失效的缓存，也不追加「下次启动生效」
+        const outcome = result as ModpackExportOutcomeDto;
+        const copy = TASK_TOAST.exported(meta.name, outcome.bundled_mods.length);
+        this.pushToast("success", copy.title, "body" in copy ? copy.body : undefined, {
+          label: TASK_TOAST.revealAction,
+          run: () => revealExportedPack(outcome.path),
+          errorTitle: ACTION_ERROR.revealExport,
+        });
         return;
       }
     }
@@ -2380,6 +2435,24 @@ export class LauncherStore {
         );
         return spec.name;
       },
+      async exportModpack(id, options) {
+        const inst = store.instance(id);
+        const spec = { command: "export_modpack", args: { id, options } };
+        const task = store.enqueue(
+          { kind: "modpack_export", title: TASK_TEXT.exportTitle(options.name), detail: TASK_TEXT.exportDetail(options.version, inst.name), instanceId: id, spec },
+          { type: "export", name: options.name },
+          options.name,
+        );
+        if (task === null) {
+          // 同一份导出（同实例、同参数、同位置）已在队列里：入队已经提示过，交回那个任务
+          const existing = findDuplicate(store.raw.tasks, spec);
+          if (existing === undefined) throw new Error(`导出「${options.name}」没有入队，队列里也没有同样的任务`);
+          return existing.id;
+        }
+        const copy = TASK_TOAST.exportStarted(options.name);
+        store.pushToast("info", copy.title, copy.body);
+        return task.id;
+      },
       async previewInstanceDeletion(id) {
         return instancesIpc.previewInstanceDeletion(id);
       },
@@ -2557,12 +2630,33 @@ export class LauncherStore {
         if (candidate === undefined) throw new Error(`${fileName} 没有可用的更新`);
         store.enqueueUpdate(instanceId, candidate);
       },
-      async updateAllMods(instanceId) {
+      async toggleMods(instanceId, fileNames, enabled) {
         store.assertModsEditable(instanceId);
-        const candidates = await modsIpc.checkUpdates(instanceId);
-        if (candidates.length === 0) {
-          store.pushToast("info", TOAST_COPY.allModsLatest);
+        const results = await modsIpc.setModsEnabled(instanceId, fileNames, enabled);
+        invalidateResources(`mods:${instanceId}`);
+        const failed = results.flatMap((r) => (r.status === "error" ? [r.error.message] : []));
+        if (failed.length > 0) {
+          store.pushToast("warning", TOAST_COPY.modsToggleFailed(failed.length, enabled), batchFailureReason(failed));
           return;
+        }
+        if (enabled) store.pushToast("info", TOAST_COPY.modsEnabled(results.length));
+        else {
+          const copy = TOAST_COPY.modsDisabled(results.length);
+          store.pushToast("info", copy.title, copy.body);
+        }
+      },
+      async updateAllMods(instanceId, picked) {
+        store.assertModsEditable(instanceId);
+        let candidates: readonly modsIpc.UpdateCandidate[];
+        if (picked === undefined) {
+          candidates = await modsIpc.checkUpdates(instanceId);
+          if (candidates.length === 0) {
+            store.pushToast("info", TOAST_COPY.allModsLatest);
+            return;
+          }
+        } else {
+          if (picked.length === 0) throw new Error("更新预览至少要勾选一个 Mod");
+          candidates = picked;
         }
         // 只有一个可更新时就是单个 Mod 的更新，标题与通知写 Mod 名；多个合成一个任务、一条通知
         if (candidates.length === 1) {
@@ -2600,6 +2694,39 @@ export class LauncherStore {
         store.modsChanged(instanceId);
         await store.fetchInstances();
         store.pushToast("info", TOAST_COPY.modRemoved(name));
+      },
+      async removeMods(instanceId, files) {
+        if (files.length === 0) throw new Error("批量移除至少要有一个 Mod");
+        store.assertModsEditable(instanceId);
+        const failed: string[] = [];
+        try {
+          for (const file of files) {
+            try {
+              await modsIpc.removeMod(instanceId, file.fileName);
+            } catch (err) {
+              if (!isIpcError(err)) throw err;
+              failed.push(err.message);
+            }
+          }
+        } finally {
+          // 中途出了意外也已经删掉了前面几个：列表、历史与可更新项不能停在动手之前
+          store.modsChanged(instanceId);
+        }
+        await store.fetchInstances();
+        if (failed.length > 0) store.pushToast("warning", TOAST_COPY.modsRemoveFailed(failed.length), batchFailureReason(failed));
+        else store.pushToast("info", TOAST_COPY.modsRemoved(files.length));
+      },
+      async setModUpdateHold(instanceId, fileName, name, hold) {
+        // 只写卷宗、不碰 jar，所以运行中照常可用；补全在写整个目录，界面已禁用入口，这里是第二道防线
+        if (store.instance(instanceId).status === "installing") throw new Error(`「${instanceId}」正在补全文件`);
+        await modsIpc.setModUpdateHold(instanceId, fileName, hold);
+        invalidateResources(`mods:${instanceId}`);
+        invalidateResources(`mod-updates:${instanceId}`);
+        if (hold === null) store.pushToast("info", TOAST_COPY.updateRestored(name));
+        else {
+          const copy = TOAST_COPY.updateIgnored(name);
+          store.pushToast("info", copy.title, copy.body);
+        }
       },
       async installResource(spec) {
         const enqueued: string[] = [];
@@ -2915,7 +3042,7 @@ export class LauncherStore {
 
   /** 排一个备份、导出或恢复任务；导出与备份同是打包，都记作 world_backup。同一件事已在队列里时提示重复并返回 null。 */
   private enqueueWorld(instanceId: string, world: string, name: string, op: "backup" | "restore" | "export", spec: Task["spec"]): Task | null {
-    const title = op === "backup" ? TASK_TEXT.backupTitle(name) : op === "export" ? TASK_TEXT.exportTitle(name) : TASK_TEXT.restoreTitle(name);
+    const title = op === "backup" ? TASK_TEXT.backupTitle(name) : op === "export" ? TASK_TEXT.exportWorldTitle(name) : TASK_TEXT.restoreTitle(name);
     return this.enqueue(
       { kind: op === "restore" ? "world_restore" : "world_backup", title, detail: TASK_TEXT.backupDetail(instanceId), instanceId, spec },
       { type: "world", instanceId, world, name, op },
