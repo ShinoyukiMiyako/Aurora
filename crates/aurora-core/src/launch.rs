@@ -1612,6 +1612,11 @@ fn spawn_game(
 /// 续期失败分三类。只有服务器明确判定凭据失效时账户才会被标成需要重登（由续期本身写库）；服务故障与
 /// 网络故障不碰账户库，账户还是好的，玩家可以稍后重试或先以离线方式进单人。
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
+    // 取消不是续期的结论：原样当取消上报。归进下面的兜底分支会变成「需要重新登录」，还会盖掉门面记下的
+    // 上一次服务或网络故障，让紧接着的以离线方式进单人被错拒。
+    if err.is_cancelled() {
+        return err.into();
+    }
     match &err {
         CoreError::Auth(aurora_auth::AuthError::Http { .. }) => LaunchFailure::new(
             FailureCode::AccountRefreshNetwork,
@@ -2618,6 +2623,59 @@ mod tests {
             .expect("账户应仍在库中");
         assert_eq!(after.status, aurora_auth::AccountStatus::Expired);
         assert_eq!(after.credentials, stored.credentials);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_refreshing_is_a_cancel_and_keeps_the_last_account_failure() {
+        // 续期还在等服务端回应（服务故障时还要退避重试）就被玩家取消：这不是凭据被判失效，不能报成需要
+        // 重新登录，也不能盖掉上一次的服务故障记录，否则紧接着的以离线方式进单人会被错拒。
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        server.reset().await;
+        mount_token(
+            &server,
+            wiremock::ResponseTemplate::new(503).set_delay(std::time::Duration::from_secs(30)),
+        )
+        .await;
+        let token = CancellationToken::new();
+        let cancelling = aurora.clone().with_cancel(token.clone());
+        let trigger = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            token.cancel();
+        });
+        let (result, events) =
+            launch_request(&cancelling, stored_request(stored.clone()), java.clone()).await;
+        trigger.await.unwrap();
+        match result {
+            Err(err) => assert!(err.is_cancelled(), "{err:?}"),
+            Ok(_) => panic!("取消后不应拉起进程"),
+        }
+        assert_eq!(stage_indices(&events), vec![0]);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            failures_of(&aurora).get(MS_UUID),
+            Some(&FailureCode::AccountServiceDown)
+        );
+        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert_eq!(
+            log.ended.map(|e| e.outcome),
+            Some(SessionOutcome::Cancelled)
+        );
+        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), stored);
+
+        // 记录完好：降级照常放行。
+        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        run.finish().await.unwrap();
     }
 
     fn singleplayer(world: &str) -> QuickPlay {
