@@ -197,7 +197,7 @@ export function weeklyHours(playtimeMin: number, createdAt: number, now: number)
 }
 
 /** 累计游玩格的说明。时长按分钟取整，玩过一局也可能是 0：是否玩过看上次游玩。没有创建时间就算不出周均，返回 null。 */
-export function playtimeNote(inst: Pick<InstanceSummary, "playtimeMin" | "lastPlayedAt" | "createdAt">, now: number): string | null {
+export function playtimeNote(inst: Pick<InstanceSummary, "lastPlayedAt" | "createdAt"> & { playtimeMin: number }, now: number): string | null {
   if (inst.playtimeMin === 0) return inst.lastPlayedAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.underAMinute;
   return inst.createdAt === null ? null : OVERVIEW_COPY.perWeek(weeklyHours(inst.playtimeMin, inst.createdAt, now));
 }
