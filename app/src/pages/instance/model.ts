@@ -304,7 +304,8 @@ export function toggleFlags(text: string, flags: readonly string[]): string {
 
 /** 参数里自带堆大小：它们排在默认参数之后，会覆盖内存设置。 */
 export function overridesHeap(text: string): boolean {
-  return jvmTokens(text).some((t) => /^-Xm[xs]/.test(t));
+  // 只看 -Xmx、-Xms 本身：-Xmso 这类是别的选项，不碰堆大小
+  return jvmTokens(text).some((t) => /^-Xm[xs](?![a-zA-Z])/.test(t));
 }
 
 // ---------------------------------------------------------------- 窗口

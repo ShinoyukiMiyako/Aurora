@@ -442,6 +442,7 @@ describe("JVM 预设", () => {
   it("自带 -Xmx / -Xms 时提示会覆盖内存设置", () => {
     expect(overridesHeap("-XX:+UseG1GC -Xmx8G")).toBe(true);
     expect(overridesHeap("-Xms2g")).toBe(true);
+    expect(overridesHeap("-Xmso256k")).toBe(false);
     expect(overridesHeap("-XX:MaxGCPauseMillis=50")).toBe(false);
   });
 });
