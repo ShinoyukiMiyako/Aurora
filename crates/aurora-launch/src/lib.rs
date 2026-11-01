@@ -12,6 +12,7 @@
 //! - [`command`]：门面构造器 [`command::CommandBuilder`] -> [`command::LaunchCommand`]。
 //! - [`process`]：进程 spawn、输出捕获与批量转发、结束游戏、退出报告、崩溃触发判定。
 //! - [`logfile`]：每次启动的会话日志（写入、滚动保留、读尾部）。
+//! - `log4j`：把游戏 stdout 上的 log4j XML 事件还原成普通日志行。
 //! - [`crash`]：崩溃基础检测规则表与结构化诊断。
 //! - [`precheck`]：启动前的轻量判断（所需 Java 主版本、路径与同步盘提醒、角色名长度、JVM 内存参数）。
 //! - [`quickplay`]：直达存档与服务器（Quick Play 与旧版 `--server` / `--port`）的支持判定。
@@ -25,6 +26,7 @@ pub mod classpath;
 pub mod command;
 pub mod crash;
 pub mod error;
+mod log4j;
 pub mod logfile;
 pub mod memory;
 pub mod placeholder;

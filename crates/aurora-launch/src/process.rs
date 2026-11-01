@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
+use crate::log4j::Log4jDecoder;
 use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog, SessionOutcome};
 
 /// 崩溃判定缓存的最近游戏输出行数。
@@ -441,7 +442,14 @@ where
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
         let mut lines = LineSplitter::new();
-        let mut emit = |text: String| {
+        let mut log4j = Log4jDecoder::default();
+        let mut emit = |raw: String| {
+            // 只有 stdout 走 log4j 的控制台布局，stderr 上是 JVM 与本地层直接打的行。
+            let decoded = match stream {
+                LogStream::Stdout => log4j.decode(raw),
+                LogStream::Stderr => Some(raw),
+            };
+            let Some(text) = decoded else { return };
             let line = LogLine {
                 at: clock.now(),
                 stream,
@@ -1067,6 +1075,43 @@ mod tests {
         // 结局由调用方写：此时文件里还没有结局行。
         drop(log);
         assert_eq!(read_back(&out.dir).await.1, None);
+    }
+
+    /// 版本 JSON 的日志配置让 stdout 走 XML：会话日志与崩溃判定缓存里都要是还原后的普通行。
+    #[tokio::test]
+    async fn xml_log_events_are_recorded_as_plain_lines() {
+        let out = output(
+            b"  <log4j:Event logger=\"FabricLoader\" timestamp=\"1\" level=\"ERROR\" thread=\"main\">\n    <log4j:Message><![CDATA[Incompatible mods found!]]></log4j:Message>\n  </log4j:Event>\nPLAIN\n",
+        )
+        .await;
+        let exited = Exited {
+            status: Ok(clean_exit()),
+            terminated_by_launcher: false,
+        };
+        let end = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            end.report.recent_lines,
+            ["[main/ERROR]: Incompatible mods found!", "PLAIN"]
+        );
+        end.log
+            .expect("日志应保持打开交还调用方")
+            .finish(out.clock.now(), SessionOutcome::Exited)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_back(&out.dir).await.0,
+            [
+                game("[main/ERROR]: Incompatible mods found!"),
+                game("PLAIN")
+            ]
+        );
     }
 
     /// 等待进程本身失败：照样读完输出、写下原因与结局并落盘，退出报告与那次失败一并交出。
