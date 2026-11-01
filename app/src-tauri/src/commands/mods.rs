@@ -901,6 +901,59 @@ mod tests {
         assert!(facade.is_unlocked());
     }
 
+    /// 批量里各项失败各报各的码，前端模拟后端照这张表复刻：目标名已被占为 mod_state_conflict，名字不是
+    /// mods 目录里的 jar 为 io（原因在 detail.causes），文件不在时改名失败为 mod_platform_failed。
+    #[tokio::test]
+    async fn batch_item_errors_carry_their_own_codes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
+        put_jars(&mods_dir, &["a.jar", "b.jar", "b.jar.disabled"]).await;
+
+        let results = set_mods_enabled_with(
+            &facade,
+            &InstanceLocks::default(),
+            VERSION_ID,
+            &names(&["b.jar", "notes.txt", "ghost.jar", "a.jar"]),
+            false,
+        )
+        .await
+        .unwrap();
+        let wire = serde_json::to_value(&results).unwrap();
+        let statuses: Vec<(&str, &str)> = wire
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["file_name"].as_str().unwrap(),
+                    item["error"]["code"].as_str().unwrap_or("ok"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                ("b.jar", code::MOD_STATE_CONFLICT),
+                ("notes.txt", code::IO),
+                ("ghost.jar", code::MOD_PLATFORM_FAILED),
+                ("a.jar", "ok"),
+            ]
+        );
+        assert!(
+            wire[1]["error"]["detail"]["causes"][0]
+                .as_str()
+                .unwrap()
+                .contains("notes.txt 不是 mods 目录里的模组文件名"),
+            "{}",
+            wire[1]
+        );
+        assert_eq!(wire[3]["status"], "ok");
+        // 冲突的那项两个文件都原样留着。
+        assert!(mods_dir.join("b.jar").exists());
+        assert!(mods_dir.join("b.jar.disabled").exists());
+        assert!(mods_dir.join("a.jar.disabled").exists());
+    }
+
     /// 批量启停与更新检查设置占的是 modifying：改名进行中报 instance_busy（detail.activity 为 renaming），
     /// 游戏运行中照常成功且实例仍记为运行中。
     #[tokio::test]
