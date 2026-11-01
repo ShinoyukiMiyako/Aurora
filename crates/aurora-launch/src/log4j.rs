@@ -7,7 +7,7 @@
 //!   <log4j:Event logger="FabricLoader" timestamp="1793537169348" level="ERROR" thread="main">
 //!     <log4j:Message><![CDATA[Incompatible mods found!]]></log4j:Message>
 //!     <log4j:Throwable><![CDATA[net.fabricmc.loader.impl.FormattedException: ...
-//! 	at net.fabricmc.loader.impl.launch.knot.Knot.init(Knot.java:142)
+//!     at net.fabricmc.loader.impl.launch.knot.Knot.init(Knot.java:142)
 //! ]]></log4j:Throwable>
 //!   </log4j:Event>
 //! ```
