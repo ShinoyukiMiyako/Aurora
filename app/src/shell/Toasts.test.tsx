@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 // 通知容器的暂停计时：指针或焦点在栈内时全部暂停，两者都离开才恢复；
 // 指针或焦点所在的那条通知被移除、收不到离开事件时也要恢复。
 import { act } from "react";

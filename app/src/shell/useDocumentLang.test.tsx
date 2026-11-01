@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 // <html lang> 写界面文案实际所用的语言：配置读到之前保持页面自带的 zh-CN；选了还没有译文的 English 时文案仍是中文，
 // lang 也保持 zh-CN，读屏不会用英文语音念中文。
 import { act } from "react";

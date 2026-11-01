@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @module-tag heavy-page
 // 启动胶囊的焦点：键盘按了面上的按钮，换上的新面接住焦点，不随旧面一起丢到 body；
 // 按钮在进行中变成不可用时保持可聚焦，焦点留在按钮上。
 import { act } from "react";

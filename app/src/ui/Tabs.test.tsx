@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { act, useId, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pageItem } from "../lib/motion";
-import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { SegmentedControl, type SegmentOption } from "./SegmentedControl";
 import { TabPanel, Tabs, type TabItem } from "./Tabs";
 
@@ -20,8 +20,9 @@ afterEach(() => {
 
 const tabs = () => [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 const selectedTab = () => tabs().find((t) => t.getAttribute("aria-selected") === "true");
-/** 让 framer-motion 的帧循环跑完入场（真实计时器）。 */
-const settle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 700)));
+const section = () => document.querySelector<HTMLElement>('[data-testid="section"]') as HTMLElement;
+/** 等面板里带变体的子元素播完入场。 */
+const entered = () => waitForFrames(() => expect(section().style.opacity).toBe("1"));
 
 type Section = "overview" | "mods" | "settings" | "logs" | "crash";
 const SECTIONS: TabItem<Section>[] = [
@@ -89,20 +90,14 @@ describe("Tabs", () => {
 
   it("切换后面板里带变体的子元素完成入场、可见", async () => {
     view = render(<InstanceTabs onChange={() => undefined} />);
-    await settle();
-    const first = document.querySelector<HTMLElement>('[data-testid="section"]') as HTMLElement;
-    expect(first.style.opacity).toBe("1");
+    await entered();
     act(() => selectedTab()?.focus());
     keydown(document.activeElement as Element, "ArrowRight");
-    await settle();
-    const second = document.querySelector<HTMLElement>('[data-testid="section"]') as HTMLElement;
-    expect(second.textContent).toBe("mods");
-    expect(second.style.opacity).toBe("1");
+    expect(section().textContent).toBe("mods");
+    await entered();
     keydown(document.activeElement as Element, "ArrowRight");
-    await settle();
-    const third = document.querySelector<HTMLElement>('[data-testid="section"]') as HTMLElement;
-    expect(third.textContent).toBe("logs");
-    expect(third.style.opacity).toBe("1");
+    expect(section().textContent).toBe("logs");
+    await entered();
     // 旧面板同一帧移除，不并存
     expect(document.querySelectorAll('[role="tabpanel"]')).toHaveLength(1);
   });

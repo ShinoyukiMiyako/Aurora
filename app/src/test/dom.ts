@@ -103,6 +103,28 @@ export function stubResizeObserver(): ResizeObserverStub {
   };
 }
 
+/** 一帧的时长（60 Hz）。 */
+const FRAME_MS = 16;
+/** waitForFrames 的上限：远长于界面里最长的入场与退场，又短于默认的单例超时，没等到时报出的是哪条断言没过。 */
+const FRAME_WAIT_TIMEOUT_MS = 3_000;
+
+/**
+ * 按真实时间等 framer-motion 把动画播到 assertion 通过为止。framer-motion 在模块加载时取走 jsdom 的
+ * requestAnimationFrame，帧循环跑在真实时间上，假定时器推不动它。睡固定时长不可靠：机器满载时帧会晚到，
+ * 固定时长还要整段占掉用例的超时预算。每一轮在 act 里让出一帧，动画结束引起的重渲染（例如退场后卸载）在 act 收尾时提交。
+ */
+export async function waitForFrames(assertion: () => void): Promise<void> {
+  // 假定时器下 setTimeout 不走真实时间，这里的每一帧都要靠 waitFor 顺手推进假时钟，等的就不是 framer-motion 的帧了
+  if (vi.isFakeTimers()) throw new Error("waitForFrames 要在真实计时器下用：framer-motion 的帧循环不受假定时器驱动");
+  await vi.waitFor(
+    async () => {
+      await act(() => new Promise<void>((resolve) => setTimeout(resolve, FRAME_MS)));
+      assertion();
+    },
+    { timeout: FRAME_WAIT_TIMEOUT_MS, interval: FRAME_MS },
+  );
+}
+
 /** 固定元素的布局矩形（jsdom 不做布局，getBoundingClientRect 恒为 0）。 */
 export function setRect(el: Element, rect: { left: number; top: number; width: number; height: number }): void {
   el.getBoundingClientRect = () =>
