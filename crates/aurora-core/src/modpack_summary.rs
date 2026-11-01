@@ -88,7 +88,7 @@ struct RemotePack {
 
 impl Aurora {
     /// 平台上某个整合包版本的清单摘要，不下载整包。服务器不支持范围读取、包不是可读的 zip
-    /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法时报整合包解析错误。
+    /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法或压缩方式解不开时报 [`CoreError::Modpack`]。
     pub async fn summarize_platform_modpack(
         &self,
         platform: Platform,
