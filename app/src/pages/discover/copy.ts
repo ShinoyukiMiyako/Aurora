@@ -170,7 +170,7 @@ export const INSTALL_COPY = {
   satisfiedDelisted: "已安装，平台上已找不到这个版本",
   planLoading: "正在计算要一起安装的文件…",
   planFailed: "没能算出要一起安装的文件",
-  skipped: "以下前置没有一起装：",
+  skipped: "前置说明：",
   maybeWarn: (name: string, reason: string) => `「${name}」只是可能可行：${reason}`,
   withIris: "一并安装 Iris Shaders",
   irisName: "Iris Shaders",

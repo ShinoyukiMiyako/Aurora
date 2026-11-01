@@ -32,6 +32,7 @@ use crate::facade::Aurora;
 use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
 use crate::modfs::present;
 use crate::modversions::sort_by_published_desc;
+use crate::starter::{FABRIC_API_PROJECT, QFAPI_PROJECT};
 
 /// 计划里的一项。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -357,11 +358,19 @@ impl Aurora {
                             });
                             continue;
                         };
+                        // 换成 QFAPI 时作者钉的是 Fabric API 的版本，对 QFAPI 没有意义，一并丢掉。
+                        let stand_in =
+                            quilt_stand_in(platform, &dep_project, &facts, &ledger, &dirs.mods_dir)
+                                .await?;
+                        let mut author_pin = match stand_in {
+                            Some(_) => None,
+                            None => dep.version_id.as_deref(),
+                        };
+                        let dep_project = stand_in.map_or(dep_project, str::to_owned);
                         // 已展开过（含环）就不再进计划：它要么已在 items 里，要么已被判为不可用。
                         if !visited.insert(dep_project.clone()) {
                             continue;
                         }
-                        let mut author_pin = dep.version_id.as_deref();
                         if let Some(wanted) = author_pin
                             && held_back(&ledger, &dirs.mods_dir, platform, &dep_project, wanted)
                                 .await?
@@ -605,6 +614,30 @@ impl Aurora {
     }
 }
 
+/// Quilt 实例上顶替 Fabric API 这条前置的工程；不用顶替时为 `None`。
+///
+/// Fabric Mod 写的前置是 Fabric API，而 Quilt 上这个位置由 QFAPI 占着：它声明自己提供 fabric-api，
+/// Fabric API 本身在平台上只标 fabric，按原样解析只能得到一句假的「没有适配版本」。实例里已经装着
+/// Fabric API 时不换，再添一份 QFAPI 只会重复加载。工程 id 只记了 Modrinth 的。
+async fn quilt_stand_in(
+    platform: Platform,
+    dep_project: &str,
+    facts: &InstanceFacts,
+    ledger: &Ledger,
+    mods_dir: &Path,
+) -> Result<Option<&'static str>> {
+    if platform != Platform::Modrinth
+        || dep_project != FABRIC_API_PROJECT
+        || !facts.mod_loaders.contains(&ModLoader::Quilt)
+    {
+        return Ok(None);
+    }
+    let has_fabric_api = installed_version(ledger, mods_dir, platform, dep_project, None)
+        .await?
+        .is_some();
+    Ok((!has_fabric_api).then_some(QFAPI_PROJECT))
+}
+
 /// 这个错误说的是不是工程在平台上已经没有了。
 ///
 /// 版本列表端点对没有的工程回 404，id 不成形的 CurseForge 工程在触网前就判为未找到。断网、限流、5xx
@@ -790,6 +823,22 @@ mod tests {
                 r#"{{"id":"{id}","inheritsFrom":"1.20.1","type":"release",
                     "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
                     "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.11"}}]}}"#
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// 落一个 Quilt 实例：与 Fabric 实例同形，库坐标让加载器探测命中 Quilt。
+    async fn put_quilt_instance(mc: &Path, id: &str) {
+        let dir = mc.join("versions").join(id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(
+            dir.join(format!("{id}.json")),
+            format!(
+                r#"{{"id":"{id}","inheritsFrom":"1.20.1","type":"release",
+                    "mainClass":"org.quiltmc.loader.impl.launch.knot.KnotClient",
+                    "libraries":[{{"name":"org.quiltmc:quilt-loader:0.30.2"}}]}}"#
             ),
         )
         .await
@@ -1238,6 +1287,171 @@ mod tests {
         assert_eq!(plan.items.len(), 2);
         assert_eq!(plan.items[1].version.version_id, "pinned");
         assert!(plan.skipped.is_empty());
+    }
+
+    /// 一个标了 Fabric 与 Quilt、把 Fabric API 钉在旧版的 Mod，加上平台上的 Fabric API 与 QFAPI。
+    /// 真实数据：AppleSkin 2.5.0+mc1.20 钉的 Fabric API 只标 fabric，Quilt 实例上永远不适配。
+    async fn mount_quilt_dependency_case(server: &MockServer) {
+        let dep = format!(
+            r#"{{"project_id":"{FABRIC_API_PROJECT}","version_id":"fapi-pinned","dependency_type":"required"}}"#
+        );
+        mount_versions(
+            server,
+            "appleskin",
+            &[modrinth_version(
+                "v1",
+                "appleskin",
+                "2026-01-01T00:00:00Z",
+                &["1.20", "1.20.1"],
+                &["fabric", "quilt"],
+                &dep,
+            )],
+        )
+        .await;
+        mount_versions(
+            server,
+            FABRIC_API_PROJECT,
+            &[modrinth_version(
+                "fapi-pinned",
+                FABRIC_API_PROJECT,
+                "2025-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                "",
+            )],
+        )
+        .await;
+        mount_versions(
+            server,
+            QFAPI_PROJECT,
+            &[
+                modrinth_version(
+                    "qfapi-old",
+                    QFAPI_PROJECT,
+                    "2025-06-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["quilt"],
+                    "",
+                ),
+                modrinth_version(
+                    "qfapi-new",
+                    QFAPI_PROJECT,
+                    "2026-02-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["quilt"],
+                    "",
+                ),
+            ],
+        )
+        .await;
+    }
+
+    /// Quilt 实例里的 QFAPI 就是 Fabric API 那个前置：算已满足，不报「没有适配版本」，版本也不动。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_instance_with_qfapi_counts_as_having_fabric_api() {
+        let server = MockServer::start().await;
+        mount_quilt_dependency_case(&server).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut ledger = Ledger::default();
+        ledger.upsert(entry("qfapi.jar", QFAPI_PROJECT, "qfapi-old"));
+        aurora
+            .ledger_store("1.20.1-quilt")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-quilt").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("qfapi.jar"), b"jar")
+            .await
+            .unwrap();
+
+        let plan = aurora
+            .plan_install("1.20.1-quilt", Platform::Modrinth, "appleskin", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[1].version.project_id, QFAPI_PROJECT);
+        assert_eq!(plan.items[1].version.version_id, "qfapi-old");
+        assert_eq!(plan.items[1].required_by, Some("appleskin".to_owned()));
+        assert!(plan.items[1].already_satisfied);
+        assert_eq!(plan.skipped, Vec::<String>::new());
+        assert_eq!(plan.unmet, Vec::<String>::new());
+    }
+
+    /// 没装 QFAPI 的 Quilt 实例：前置落到适配实例的最新 QFAPI 上，作者钉的 Fabric API 版本与它无关。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_instance_without_qfapi_gets_it_for_a_fabric_api_dependency() {
+        let server = MockServer::start().await;
+        mount_quilt_dependency_case(&server).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let plan = aurora
+            .plan_install("1.20.1-quilt", Platform::Modrinth, "appleskin", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[1].version.project_id, QFAPI_PROJECT);
+        assert_eq!(plan.items[1].version.version_id, "qfapi-new");
+        assert!(!plan.items[1].already_satisfied);
+        assert_eq!(plan.skipped, Vec::<String>::new());
+    }
+
+    /// Quilt 实例里已经装着 Fabric API（从别处搬来的老实例）：沿用它，不再添一份 QFAPI。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_instance_that_already_has_fabric_api_keeps_it() {
+        let server = MockServer::start().await;
+        mount_quilt_dependency_case(&server).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        let mut ledger = Ledger::default();
+        ledger.upsert(entry("fapi.jar", FABRIC_API_PROJECT, "fapi-pinned"));
+        aurora
+            .ledger_store("1.20.1-quilt")
+            .save(&ledger)
+            .await
+            .unwrap();
+        let mods_dir = aurora.resolve_mods_dir("1.20.1-quilt").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("fapi.jar"), b"jar")
+            .await
+            .unwrap();
+
+        let plan = aurora
+            .plan_install("1.20.1-quilt", Platform::Modrinth, "appleskin", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[1].version.project_id, FABRIC_API_PROJECT);
+        assert!(plan.items[1].already_satisfied);
+    }
+
+    /// Fabric 实例照旧：前置就是 Fabric API，不会被换成 QFAPI。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fabric_instance_never_swaps_fabric_api_for_qfapi() {
+        let server = MockServer::start().await;
+        mount_quilt_dependency_case(&server).await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "appleskin", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items[1].version.project_id, FABRIC_API_PROJECT);
     }
 
     /// 钉死的版本在平台上已被删除：说明具体是哪个版本没了，而不是笼统说「找不到」。
