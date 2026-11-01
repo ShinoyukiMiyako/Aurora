@@ -203,9 +203,12 @@ impl Aurora {
     }
 
     /// 把当前配置写回配置文件。
-    pub async fn save_config(&self) -> Result<()> {
+    ///
+    /// 要可变借用：取值不认识、暂用默认值的枚举字段，没改过时写回原值；改成别的取值写进文件之后，
+    /// 原值随之作废，这份记录得跟着门面走，后面改回默认时才按默认写。
+    pub async fn save_config(&mut self) -> Result<()> {
         crate::config::ConfigStore::at(&self.config_path)
-            .save(&self.config)
+            .save_settling(&mut self.config)
             .await
     }
 

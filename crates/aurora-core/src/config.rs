@@ -11,9 +11,9 @@
 //! 不让一份写错的配置把启动器堵死在打不开的状态。
 //!
 //! 枚举字段按字段前向兼容：降级后遇到新版本写入的取值，只把那一项退回默认，其余设置照常读入，
-//! 文件原样不动（见 [`ConfigFieldReset`]）。整份当坏文件处理的只剩不是合法 JSON 与类型对不上。
-//! 不认识的顶层设置原样留在 [`AuroraConfig::unrecognized`] 里，外观、内存段里不认识的键留在
-//! [`AuroraConfig::carried_over`] 里，落盘时都原样写回。
+//! 文件原样不动，之后落盘时没改过的那项写回原值（见 [`ConfigFieldReset`]）。整份当坏文件处理的
+//! 只剩不是合法 JSON 与类型对不上。不认识的顶层设置原样留在 [`AuroraConfig::unrecognized`] 里，
+//! 外观、内存段里不认识的键留在 [`AuroraConfig::carried_over`] 里，落盘时都原样写回。
 
 use std::path::{Path, PathBuf};
 
@@ -237,16 +237,33 @@ impl Default for AuroraConfig {
     }
 }
 
-/// 从 config.json 读进来、内存里的设置表示不了、落盘时要原样带回去的内容：外观段、内存段里这个版本
-/// 不认识的键（多半是更新的版本写的）。
+/// 从 config.json 读进来、内存里的设置表示不了、落盘时要原样带回去的内容（多半是更新的版本写的）：
+/// 外观段、内存段里这个版本不认识的键，以及取值不认识、暂用默认值启动的枚举字段的原值。
 ///
 /// 不放进 [`Appearance`] 与 [`MemorySettings`] 自己身上：这两个值原样进 IPC 出参，内存设置还会被设置页
 /// 整份替换，放在段里要么漏给前端，要么被一次替换冲掉。它也不参与配置的序列化，只由 [`ConfigStore`]
-/// 读入时收下、落盘时写回各自的段。
+/// 读入时收下、落盘时写回。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CarriedOver {
     appearance: serde_json::Map<String, Value>,
     memory: serde_json::Map<String, Value>,
+    enum_originals: Vec<EnumOriginal>,
+}
+
+/// 一个取值不认识、暂用默认值的枚举字段。
+///
+/// 只要内存里还是载入时补上的默认值，就算没人改过，落盘时写回原值：后台写入（如记下已提示的更新版本）
+/// 与改别的设置都会整份落盘，写进默认值的话，降级之后再升回去，新版本写的值就没了。改成别的取值并
+/// 落过盘之后这条记录作废（见 [`ConfigStore::save_settling`]）。重新选一次当前显示的默认值不算改过：
+/// 取值没变，界面上也分不出来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnumOriginal {
+    /// 同 [`ConfigFieldReset::field`]。
+    field: &'static str,
+    /// 文件里写的原值。
+    original: String,
+    /// 载入时补上的默认值序列化后的样子。
+    fallback: Value,
 }
 
 impl CarriedOver {
@@ -255,11 +272,36 @@ impl CarriedOver {
         Ok(Self {
             appearance: unrecognized_keys::<Appearance>(tree.get("appearance"))?,
             memory: unrecognized_keys::<MemorySettings>(tree.get("memory"))?,
+            enum_originals: Vec::new(),
         })
     }
 
-    /// 把收下的键写回要落盘的 JSON 树，与同段认识的键并排。
-    fn restore_into(&self, tree: &mut Value) -> serde_json::Result<()> {
+    /// 记下退回默认的枚举字段的原值，连同载入后实际补上的取值。
+    fn note_fallbacks(
+        &mut self,
+        config: &AuroraConfig,
+        resets: &[ConfigFieldReset],
+    ) -> serde_json::Result<()> {
+        if resets.is_empty() {
+            return Ok(());
+        }
+        let written = serde_json::to_value(config)?;
+        for reset in resets {
+            let fallback = written
+                .pointer(&json_pointer(reset.field))
+                .ok_or_else(|| missing_field(reset.field))?;
+            self.enum_originals.push(EnumOriginal {
+                field: reset.field,
+                original: reset.value.clone(),
+                fallback: fallback.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// 把收下的内容写回要落盘的 JSON 树：不认识的键与同段认识的键并排，没人改过的枚举字段换回原值。
+    /// 交回这次换回了原值的字段。
+    fn restore_into(&self, tree: &mut Value) -> serde_json::Result<Vec<&'static str>> {
         for (section, keys) in [("appearance", &self.appearance), ("memory", &self.memory)] {
             if keys.is_empty() {
                 continue;
@@ -277,8 +319,29 @@ impl CarriedOver {
                 object.entry(key.clone()).or_insert_with(|| value.clone());
             }
         }
-        Ok(())
+        let mut restored = Vec::new();
+        for entry in &self.enum_originals {
+            let slot = tree
+                .pointer_mut(&json_pointer(entry.field))
+                .ok_or_else(|| missing_field(entry.field))?;
+            if *slot == entry.fallback {
+                *slot = Value::String(entry.original.clone());
+                restored.push(entry.field);
+            }
+        }
+        Ok(restored)
     }
+}
+
+/// 点号连接的字段位置换成 JSON Pointer，如 `appearance.mode` 换成 `/appearance/mode`。
+fn json_pointer(field: &str) -> String {
+    format!("/{}", field.replace('.', "/"))
+}
+
+fn missing_field(field: &str) -> serde_json::Error {
+    <serde_json::Error as serde::ser::Error>::custom(format!(
+        "配置序列化后找不到登记的枚举字段 {field}"
+    ))
 }
 
 /// 一段设置里这个版本不认识的键。认不认识交给段自己的反序列化：flatten 进来的结构先领走自己的字段，
@@ -323,8 +386,8 @@ pub enum ConfigRecovery {
 
 /// 一个因取值不认识而退回默认的枚举字段。
 ///
-/// 文件不因此改写：降级后再升回去，新版本写的值还在。用户改了任一设置时整份配置照常落盘，
-/// 这一项才按当时内存里的值写回。
+/// 文件不因此改写。之后整份落盘（改别的设置、后台记下已提示的更新版本）时，这一项只要还是暂用的
+/// 默认值就写回原值，降级后再升回去，新版本写的值还在；用户把它改成别的取值，才按新值写。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigFieldReset {
     /// 字段在 config.json 里的位置，嵌套用点号连接，如 `language`、`appearance.mode`。
@@ -448,7 +511,11 @@ impl ConfigStore {
                 (config, resets)
             }
         };
-        config.carried_over = CarriedOver::collect(&tree).map_err(parse_error)?;
+        let mut carried_over = CarriedOver::collect(&tree).map_err(parse_error)?;
+        carried_over
+            .note_fallbacks(&config, &resets)
+            .map_err(CoreError::ConfigSerialize)?;
+        config.carried_over = carried_over;
         for reset in &resets {
             tracing::warn!(
                 path = %self.path.display(),
@@ -523,16 +590,36 @@ impl ConfigStore {
         Ok(candidate)
     }
 
-    /// 持久化配置（原子写入，带父目录创建）。读入时收下的各段不认识的键一并写回。
+    /// 持久化配置（原子写入，带父目录创建）。读入时收下的各段不认识的键一并写回；取值不认识、内存里
+    /// 仍是暂用默认值的枚举字段写回原值。
+    ///
+    /// 只写不记：同一份配置改成别的取值落过盘、再改回默认时，这里仍会写回原值。门面落盘走
+    /// [`Aurora::save_config`]，会把作废的原值一并去掉。
     pub async fn save(&self, config: &AuroraConfig) -> Result<()> {
-        let mut tree = serde_json::to_value(config).map_err(CoreError::ConfigSerialize)?;
+        self.write(config).await.map(drop)
+    }
+
+    /// 同 [`ConfigStore::save`]，写成功后把已被新值顶掉的原值从内存里去掉：文件里已经是新值了，
+    /// 之后用户再改回默认，也该按默认写，而不是把早先的原值翻出来。
+    pub(crate) async fn save_settling(&self, config: &mut AuroraConfig) -> Result<()> {
+        let restored = self.write(config).await?;
         config
+            .carried_over
+            .enum_originals
+            .retain(|entry| restored.contains(&entry.field));
+        Ok(())
+    }
+
+    /// 落盘，交回这次换回了原值的枚举字段。
+    async fn write(&self, config: &AuroraConfig) -> Result<Vec<&'static str>> {
+        let mut tree = serde_json::to_value(config).map_err(CoreError::ConfigSerialize)?;
+        let restored = config
             .carried_over
             .restore_into(&mut tree)
             .map_err(CoreError::ConfigSerialize)?;
         let bytes = serde_json::to_vec_pretty(&tree).map_err(CoreError::ConfigSerialize)?;
         aurora_base::fs::atomic_write(&self.path, &bytes).await?;
-        Ok(())
+        Ok(restored)
     }
 }
 
@@ -1003,7 +1090,26 @@ mod tests {
             ..AuroraConfig::default()
         };
         want.appearance.petals = false;
-        assert_eq!(config, want);
+        let settings = AuroraConfig {
+            carried_over: CarriedOver::default(),
+            ..config.clone()
+        };
+        assert_eq!(settings, want);
+
+        // 什么都没改就落盘：每一项都写回原值。
+        ConfigStore::at(&path).save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        for field in ENUM_FIELDS {
+            let leaf = field.path.rsplit('.').next().unwrap();
+            let pointer = format!("/{}", field.path.replace('.', "/"));
+            assert_eq!(
+                raw.pointer(&pointer),
+                Some(&Value::String(format!("future-{leaf}"))),
+                "{}",
+                field.path
+            );
+        }
+        assert_eq!(raw["download_concurrency"], 128);
     }
 
     /// 枚举字段登记表要覆盖默认配置里每一个字符串取值（默认配置的字符串叶子只有枚举），反过来表里也没有
@@ -1074,9 +1180,10 @@ mod tests {
         }
     }
 
-    /// 不改写的承诺只到用户改设置为止：之后整份照常落盘，退回的那项按当时内存里的值写回。
+    /// 改了别的设置整份落盘时，退回默认、没人动过的那项写回文件里的原值，而不是内存里暂用的默认值；
+    /// 下次载入仍按默认值启动、仍报出原值。改的那项照常写入。
     #[tokio::test]
-    async fn changed_setting_writes_back_the_fallback() {
+    async fn unchanged_fallback_writes_back_the_original_value() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         tokio::fs::write(&path, br#"{"language": "fr-FR", "check_updates": false}"#)
@@ -1084,13 +1191,146 @@ mod tests {
             .unwrap();
         let store = ConfigStore::at(&path);
         let (mut config, _) = store.load_or_preserve().await.unwrap();
+        assert_eq!(config.language, UiLanguage::ZhCn);
         config.download_concurrency = 32;
         store.save(&config).await.unwrap();
         let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-        assert_eq!(raw["language"], "zh-CN");
+        assert_eq!(raw["language"], "fr-FR");
         assert_eq!(raw["check_updates"], false);
         assert_eq!(raw["download_concurrency"], 32);
-        assert_eq!(store.load_or_preserve().await.unwrap(), (config, None));
+        let (reloaded, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![("language", "fr-FR".to_owned())]
+        );
+        assert_eq!(reloaded, config);
+    }
+
+    /// 门面上的后台写入（自动检查更新记下已提示的版本）同样不把暂用的默认值写进文件：连写两次，
+    /// 文件里的语言与外观段里的强调色仍是原值，同段认识的明暗照常保留。
+    #[tokio::test]
+    async fn background_saves_keep_unknown_enum_values_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"language": "fr-FR", "appearance": {"accent": "aurora", "mode": "night"}}"#,
+        )
+        .await
+        .unwrap();
+        let (config, _) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        let mut aurora =
+            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        for version in ["0.3.0", "0.3.1"] {
+            aurora.set_notified_update_version(Some(version.to_owned()));
+            aurora.save_config().await.unwrap();
+            let raw: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            assert_eq!(raw["notified_update_version"], version);
+            assert_eq!(raw["language"], "fr-FR");
+            assert_eq!(raw["appearance"]["accent"], "aurora");
+            assert_eq!(raw["appearance"]["mode"], "night");
+        }
+        assert_eq!(aurora.config().language, UiLanguage::ZhCn);
+        let (reloaded, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(
+            field_resets(recovery),
+            vec![
+                ("appearance.accent", "aurora".to_owned()),
+                ("language", "fr-FR".to_owned()),
+            ]
+        );
+        assert_eq!(reloaded.notified_update_version.as_deref(), Some("0.3.1"));
+    }
+
+    /// 用户改了退回的那项就按新值写，之后再改回默认也按默认写，原值不再回来；同段别的退回项不受影响。
+    #[tokio::test]
+    async fn user_change_replaces_unknown_enum_value() {
+        use crate::appearance::{AccentColor, AppearanceMode, AppearancePatch};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"language": "fr-FR", "appearance": {"mode": "dusk", "accent": "aurora"}}"#,
+        )
+        .await
+        .unwrap();
+        let (config, _) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        let mut aurora =
+            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        let raw = || async {
+            serde_json::from_slice::<Value>(&tokio::fs::read(&path).await.unwrap()).unwrap()
+        };
+
+        aurora.set_language(UiLanguage::EnUs);
+        aurora.save_config().await.unwrap();
+        assert_eq!(raw().await["language"], "en-US");
+        aurora.set_language(UiLanguage::ZhCn);
+        aurora.save_config().await.unwrap();
+        assert_eq!(raw().await["language"], "zh-CN");
+
+        aurora.set_appearance(AppearancePatch {
+            accent: Some(AccentColor::Moss),
+            ..AppearancePatch::default()
+        });
+        aurora.save_config().await.unwrap();
+        let written = raw().await;
+        assert_eq!(written["appearance"]["accent"], "moss");
+        assert_eq!(written["appearance"]["mode"], "dusk");
+
+        aurora.set_appearance(AppearancePatch {
+            mode: Some(AppearanceMode::Night),
+            ..AppearancePatch::default()
+        });
+        aurora.save_config().await.unwrap();
+        assert_eq!(raw().await["appearance"]["mode"], "night");
+        aurora.set_appearance(AppearancePatch {
+            mode: Some(AppearanceMode::Day),
+            ..AppearancePatch::default()
+        });
+        aurora.save_config().await.unwrap();
+        let written = raw().await;
+        assert_eq!(written["appearance"]["mode"], "day");
+        assert_eq!(written["language"], "zh-CN");
+        assert_eq!(
+            ConfigStore::at(&path).load_or_preserve().await.unwrap().1,
+            None
+        );
+    }
+
+    /// 合法取值照旧：后台写入按内存里的值写，改成默认值也写默认值，载入不报任何处置。
+    #[tokio::test]
+    async fn known_enum_values_are_written_as_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"language": "en-US", "after_launch": "keep", "appearance": {"mode": "night"}}"#,
+        )
+        .await
+        .unwrap();
+        let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        let mut aurora =
+            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        aurora.set_notified_update_version(Some("0.3.0".to_owned()));
+        aurora.save_config().await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["language"], "en-US");
+        assert_eq!(raw["after_launch"], "keep");
+        assert_eq!(raw["appearance"]["mode"], "night");
+
+        aurora.set_language(UiLanguage::ZhCn);
+        aurora.set_after_launch(AfterLaunch::Minimize);
+        aurora.save_config().await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["language"], "zh-CN");
+        assert_eq!(raw["after_launch"], "minimize");
+        assert_eq!(
+            ConfigStore::at(&path).load_or_preserve().await.unwrap(),
+            (aurora.config().clone(), None)
+        );
     }
 
     /// 降级之后读到新版本才有的设置：照常读入、不算任何处置；改一项设置整份落盘时，那几项原样写回，
@@ -1358,6 +1598,7 @@ mod tests {
         assert_eq!(raw["appearance"]["glow"], true);
         assert_eq!(raw["memory"]["gc"], "zgc");
         assert_eq!(raw["memory"]["max_mb"], 4096);
+        assert_eq!(raw["appearance"]["mode"], "dusk");
     }
 
     /// 字段级退回与不认识的设置同时出现：枚举退回默认，不认识的设置照样留着，两者互不影响。
