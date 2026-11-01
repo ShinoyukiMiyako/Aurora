@@ -687,7 +687,7 @@ pub(crate) async fn export_modpack_with(
         .then(|| locks.read_saves(id));
     // 改 Mod 与存档备份互相兼容，导出却可能连存档一起打包：备份或恢复正在打包、替换存档时不能导出，
     // 否则包里是半截的存档。先占住再查，被拒时守卫随返回放开。
-    if locks.activity(id) == Some(InstanceActivity::BackingUp) {
+    if locks.occupancy(id).0 == Some(InstanceActivity::BackingUp) {
         return Err(busy(id, InstanceActivity::BackingUp));
     }
     // 不隔离的实例共用游戏目录的 saves：另一个不隔离的实例在备份或恢复时，这份存档同样是半截的。

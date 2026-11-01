@@ -145,7 +145,7 @@ describe("确认与关闭", () => {
 });
 
 function runtime(path: string, major: number, vendor: string): JavaInstallationDto {
-  return { path, version: { major, minor: 0, security: 1, build: 0, raw: `${major}.0.1` }, is_64bit: true, vendor, source: "registry" };
+  return { path, version: { major, minor: 0, security: 1, build: 0, raw: `${major}.0.1` }, is_64bit: true, vendor, source: "registry", missing_files: [] };
 }
 
 describe("确认步的 Java", () => {
