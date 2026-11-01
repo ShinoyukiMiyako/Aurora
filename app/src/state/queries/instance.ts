@@ -6,13 +6,13 @@ import { lastCrash, lastLaunchLog, type CrashReportDto, type LaunchLogDto } from
 import { listHistory, rollbackChecks, type HistoryEvent, type RollbackCheck } from "../../ipc/history";
 import { getInstanceSettings, listInstanceContent, type InstanceContentDto } from "../../ipc/instances";
 import { previewModpackExport, type ModpackExportPreviewDto } from "../../ipc/modpack";
-import { checkUpdates, listMods, type InstalledMod, type UpdateCandidate } from "../../ipc/mods";
+import { checkUpdates, listMods, modUpdateChangelog, type InstalledMod, type ModChangelog, type UpdateCandidate } from "../../ipc/mods";
 import { invalidate, useResource, type ResourceResult } from "../resource";
 
 export type { CrashClueDto, CrashReportDto, CrashSuspectDto, LaunchLogDto } from "../../ipc/diagnostics";
 export type { HistoryEvent, RollbackCheck } from "../../ipc/history";
 export type { InstanceContentDto, PackDto, ResourcePackDto, ShaderPackDto, WorldDto } from "../../ipc/instances";
-export type { InstalledMod, ModMetadata, ModSource, UpdateCandidate } from "../../ipc/mods";
+export type { InstalledMod, ModChangelog, ModMetadata, ModSource, UpdateCandidate, UpdateHold } from "../../ipc/mods";
 export { EXPORT_EXTRAS } from "../../ipc/modpack";
 export type { ExportBundledModDto, ExportExtra, ExportExtraStatDto, ModpackExportOptions, ModpackExportPreviewDto } from "../../ipc/modpack";
 
@@ -75,6 +75,14 @@ export function useModpackExportPreview(id: string | null): ResourceResult<Modpa
     invalidate(k);
   }
   return useResource(k, () => previewModpackExport(need(id)));
+}
+
+/**
+ * mod-changelog:<id>:<文件名>|<版本 id> —— 某个可更新版本的更新日志。enabled 为 false 时不请求：展开才取，
+ * 打开更新预览不为每一项都去问平台。平台上的日志不随本地改动变，不随 Mod 变动失效。
+ */
+export function useModChangelog(id: string | null, fileName: string, modVersionId: string, enabled: boolean): ResourceResult<ModChangelog> {
+  return useResource(enabled ? key("mod-changelog", id, `${fileName}|${modVersionId}`) : null, () => modUpdateChangelog(need(id), fileName, modVersionId));
 }
 
 function need(id: string | null): string {

@@ -331,9 +331,22 @@ export interface LauncherActions {
   failureFix(kind: FailureFixKind): FailureFixTarget;
   // Mod 与资源
   toggleMod(instanceId: string, fileName: string, enabled: boolean): Promise<void>;
+  /**
+   * 批量启用或停用：逐个文件，一个失败不中断其余的。全部成功给 info 通知，有失败给 warning 通知并写明原因；
+   * 整次被拒（实例忙碌等）照常抛出。
+   */
+  toggleMods(instanceId: string, fileNames: readonly string[], enabled: boolean): Promise<void>;
   updateMod(instanceId: string, fileName: string): Promise<void>;
-  updateAllMods(instanceId: string): Promise<void>;
+  /**
+   * 不给 picked：现查一次可更新项，全部更新（没有可更新的提示都已是最新）。
+   * 给了：只更新这几项（更新预览里勾选的），一项按单个更新入队，多项合成一个任务；空数组直接报错。
+   */
+  updateAllMods(instanceId: string, picked?: readonly modsIpc.UpdateCandidate[]): Promise<void>;
   removeMod(instanceId: string, fileName: string, name: string): Promise<void>;
+  /** 逐项移除；被拒的那几项记为失败、不中断其余的，结束后按结果给一条通知。 */
+  removeMods(instanceId: string, files: readonly { fileName: string; name: string }[]): Promise<void>;
+  /** 忽略（或锁定）这个 Mod 的更新；hold 为 null 恢复检查。只改记录不碰文件，游戏运行中也可用。 */
+  setModUpdateHold(instanceId: string, fileName: string, name: string, hold: modsIpc.UpdateHold | null): Promise<void>;
   installResource(spec: InstallResourceSpec): Promise<void>;
   rollback(instanceId: string, eventId: string): Promise<void>;
   /** launchAfter：装好后通知带「启动」这个实例；pinFor：装好后把这个实例的 Java 固定为新装的运行时。 */
@@ -645,6 +658,7 @@ const GAME_DIR_SCOPED_RESOURCES = [
   "crash",
   "log",
   "mod-updates",
+  "mod-changelog",
   "plan",
   "match",
   "installed-sources",
@@ -659,7 +673,14 @@ const GAME_DIR_SCOPED_RESOURCES = [
  * 所以 id 一落到新实例上就丢掉它们。不在改名当时丢原 id 的：改名发起的页面那一刻还订阅着原 id，失效会让它按已经不在的
  * 实例重取、在缓存里留下一条报错。
  */
-const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "plan", "memory-advice"] as const;
+const INSTANCE_SCOPED_RESOURCES = ["mods", "content", "history", "crash", "log", "settings", "mod-updates", "mod-changelog", "plan", "memory-advice"] as const;
+
+/** 批量动作里失败几项的通知正文：后端给的原因只有一种时照写原文，不止一种时不挑一条代表全部。 */
+function batchFailureReason(messages: readonly string[]): string {
+  const distinct = new Set(messages);
+  if (distinct.size === 0) throw new Error("没有失败项却要写失败原因");
+  return distinct.size === 1 ? messages[0] : TOAST_COPY.mixedReasons;
+}
 
 /**
  * 改名、删除只差游玩记录没跟上时命令以这个码拒绝：目录、侧栏固定与当前选中都已改好，照成功处理再提示；
@@ -2282,12 +2303,33 @@ export class LauncherStore {
         if (candidate === undefined) throw new Error(`${fileName} 没有可用的更新`);
         store.enqueueUpdate(instanceId, candidate);
       },
-      async updateAllMods(instanceId) {
+      async toggleMods(instanceId, fileNames, enabled) {
         store.assertModsEditable(instanceId);
-        const candidates = await modsIpc.checkUpdates(instanceId);
-        if (candidates.length === 0) {
-          store.pushToast("info", TOAST_COPY.allModsLatest);
+        const results = await modsIpc.setModsEnabled(instanceId, fileNames, enabled);
+        invalidateResources(`mods:${instanceId}`);
+        const failed = results.flatMap((r) => (r.status === "error" ? [r.error.message] : []));
+        if (failed.length > 0) {
+          store.pushToast("warning", TOAST_COPY.modsToggleFailed(failed.length, enabled), batchFailureReason(failed));
           return;
+        }
+        if (enabled) store.pushToast("info", TOAST_COPY.modsEnabled(results.length));
+        else {
+          const copy = TOAST_COPY.modsDisabled(results.length);
+          store.pushToast("info", copy.title, copy.body);
+        }
+      },
+      async updateAllMods(instanceId, picked) {
+        store.assertModsEditable(instanceId);
+        let candidates: readonly modsIpc.UpdateCandidate[];
+        if (picked === undefined) {
+          candidates = await modsIpc.checkUpdates(instanceId);
+          if (candidates.length === 0) {
+            store.pushToast("info", TOAST_COPY.allModsLatest);
+            return;
+          }
+        } else {
+          if (picked.length === 0) throw new Error("更新预览至少要勾选一个 Mod");
+          candidates = picked;
         }
         // 只有一个可更新时就是单个 Mod 的更新，标题与通知写 Mod 名；多个合成一个任务、一条通知
         if (candidates.length === 1) {
@@ -2325,6 +2367,39 @@ export class LauncherStore {
         store.modsChanged(instanceId);
         await store.fetchInstances();
         store.pushToast("info", TOAST_COPY.modRemoved(name));
+      },
+      async removeMods(instanceId, files) {
+        if (files.length === 0) throw new Error("批量移除至少要有一个 Mod");
+        store.assertModsEditable(instanceId);
+        const failed: string[] = [];
+        try {
+          for (const file of files) {
+            try {
+              await modsIpc.removeMod(instanceId, file.fileName);
+            } catch (err) {
+              if (!isIpcError(err)) throw err;
+              failed.push(err.message);
+            }
+          }
+        } finally {
+          // 中途出了意外也已经删掉了前面几个：列表、历史与可更新项不能停在动手之前
+          store.modsChanged(instanceId);
+        }
+        await store.fetchInstances();
+        if (failed.length > 0) store.pushToast("warning", TOAST_COPY.modsRemoveFailed(failed.length), batchFailureReason(failed));
+        else store.pushToast("info", TOAST_COPY.modsRemoved(files.length));
+      },
+      async setModUpdateHold(instanceId, fileName, name, hold) {
+        // 只写卷宗、不碰 jar，所以运行中照常可用；补全在写整个目录，界面已禁用入口，这里是第二道防线
+        if (store.instance(instanceId).status === "installing") throw new Error(`「${instanceId}」正在补全文件`);
+        await modsIpc.setModUpdateHold(instanceId, fileName, hold);
+        invalidateResources(`mods:${instanceId}`);
+        invalidateResources(`mod-updates:${instanceId}`);
+        if (hold === null) store.pushToast("info", TOAST_COPY.updateRestored(name));
+        else {
+          const copy = TOAST_COPY.updateIgnored(name);
+          store.pushToast("info", copy.title, copy.body);
+        }
       },
       async installResource(spec) {
         const enqueued: string[] = [];

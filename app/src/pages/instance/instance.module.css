@@ -516,6 +516,134 @@
   min-width: 0;
 }
 
+.modInstalled {
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 批量操作条与工具条是同一个吸顶容器，控件同为 md 高，互换时高度不变 */
+.batchCount {
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.batchActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.batchClear {
+  margin-left: auto;
+}
+
+/* compact 下计数与「取消选择」留在第一行，按钮组换到第二行右对齐 */
+:root[data-sk-tier="compact"] .batchActions {
+  order: 3;
+  flex-basis: 100%;
+  justify-content: flex-end;
+}
+
+/* ---------------------------------------------------------------- 更新预览 */
+
+.previewHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-12);
+  padding-bottom: var(--sk-space-10);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+.previewCount {
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.previewList {
+  display: flex;
+  flex-direction: column;
+}
+
+.previewItem {
+  border-bottom: 1px solid var(--sk-line);
+}
+
+.previewItem:last-child {
+  border-bottom: 0;
+}
+
+.previewRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-10) 0;
+}
+
+.previewMain {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.previewName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--sk-text);
+  font-size: var(--sk-fs-body);
+  font-weight: var(--sk-w-medium);
+}
+
+/* 版本号永不截断：省略的只有名称 */
+.previewVersions {
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  white-space: nowrap;
+}
+
+.previewChevron {
+  display: inline-flex;
+}
+
+/* 展开区最高 240，超出在区内滚动；不对高度做动画，下方各项靠位移让位 */
+.changelog {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 0 var(--sk-space-4) var(--sk-space-12);
+}
+
+.changelogEmpty {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+}
+
+.changelogError {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sk-space-4);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+.changelogErrorTitle {
+  color: var(--sk-text);
+  font-weight: var(--sk-w-medium);
+}
+
 /* ---------------------------------------------------------------- 设置 */
 
 .settingsGrid {

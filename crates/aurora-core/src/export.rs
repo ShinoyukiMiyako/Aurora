@@ -1170,6 +1170,7 @@ mod tests {
                 sha1: None,
                 installed_at: 1_754_000_000,
                 installed_as_dependency_of: None,
+                update_hold: None,
             };
         fixture
             .aurora

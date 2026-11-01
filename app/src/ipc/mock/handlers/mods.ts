@@ -17,10 +17,14 @@ import type {
   ModLoader,
   ModMetadata,
   ModUpdateOutcomeDto,
+  ModChangelog,
+  ModToggleResult,
   ModVersionInfo,
   ModVersionList,
   PlannedItem,
+  ReleaseChannel,
   UpdateCandidate,
+  UpdateHold,
 } from "../../mods";
 import type { InstallableResourceType, ModInstallOutcomeDto, PlatformId } from "../../discover";
 import { CORE_EVENT } from "../../tasks";
@@ -55,6 +59,9 @@ interface LedgerRow {
   title: string | null;
   icon_url: string | null;
   dependency_of: string | null;
+  /** 装进实例的时刻，UNIX 秒；顶替旧版本时沿用旧行的值。 */
+  installed_at: number;
+  update_hold: UpdateHold | null;
 }
 
 export interface MockInstance {
@@ -82,8 +89,12 @@ function metadata(modId: string, name: string, ver: string, minecraft = "~1.20.1
   };
 }
 
-/** 种子实例的卷宗行：都是从 Modrinth 装的，图标地址是当时平台给的那张（目录本身不带图，假后端不托管图片）。 */
-function ledgerRow(fileName: string, projectId: string, versionId: string, versionNumber: string, dependencyOf: string | null): LedgerRow {
+/**
+ * 种子实例的卷宗行：都是从 Modrinth 装的，图标地址是当时平台给的那张（目录本身不带图，假后端不托管图片）。
+ * 装进实例的时刻取那个文件的修改时刻：种子里的文件装上之后都没再动过。
+ */
+function ledgerRow(file: DiskFile, projectId: string, versionId: string, versionNumber: string, dependencyOf: string | null): LedgerRow {
+  const fileName = ledgerKey(file.file_name);
   const found = findMockSource("modrinth", projectId);
   if (found === undefined) throw new Error(`mock 种子引用了目录里没有的工程 ${projectId}`);
   if (!found.source.versions.some((v) => v.info.version_id === versionId)) throw new Error(`mock 种子引用了目录里没有的版本 ${versionId}`);
@@ -96,28 +107,28 @@ function ledgerRow(fileName: string, projectId: string, versionId: string, versi
     title: found.project.title,
     icon_url: `https://cdn.modrinth.com/data/${projectId}/icon.png`,
     dependency_of: dependencyOf,
+    installed_at: Math.floor(file.modified_ms / 1000),
+    update_hold: null,
   };
 }
 
 function seedInstances(): Map<string, MockInstance> {
   const day = 86_400_000;
   const base = Date.UTC(2026, 9, 1);
+  const sodium: DiskFile = { file_name: "AANobbMI-0.5.3.jar", size: 1_048_576, modified_ms: base - 30 * day, metadata: metadata("sodium", "Sodium", "0.5.3") };
+  const fabricApi: DiskFile = { file_name: "P7dR8mSH-0.92.2.jar", size: 2_097_152, modified_ms: base - 30 * day, metadata: metadata("fabric-api", "Fabric API", "0.92.2") };
+  const lithium: DiskFile = { file_name: "gvQqBUqZ-0.11.2.jar.disabled", size: 524_288, modified_ms: base - 10 * day, metadata: metadata("lithium", "Lithium", "0.11.2") };
   return new Map<string, MockInstance>([
     [
       MOCK_MOD_INSTANCE,
       {
         mc_version: "1.20.1",
         loaders: ["fabric"],
-        files: [
-          { file_name: "AANobbMI-0.5.3.jar", size: 1_048_576, modified_ms: base - 30 * day, metadata: metadata("sodium", "Sodium", "0.5.3") },
-          { file_name: "P7dR8mSH-0.92.2.jar", size: 2_097_152, modified_ms: base - 30 * day, metadata: metadata("fabric-api", "Fabric API", "0.92.2") },
-          { file_name: "gvQqBUqZ-0.11.2.jar.disabled", size: 524_288, modified_ms: base - 10 * day, metadata: metadata("lithium", "Lithium", "0.11.2") },
-          { file_name: "handmade-1.0.jar", size: 4_096, modified_ms: base - day, metadata: metadata("handmade", "Handmade", "1.0") },
-        ],
+        files: [sodium, fabricApi, lithium, { file_name: "handmade-1.0.jar", size: 4_096, modified_ms: base - day, metadata: metadata("handmade", "Handmade", "1.0") }],
         ledger: [
-          ledgerRow("AANobbMI-0.5.3.jar", "AANobbMI", "sodium-053", "0.5.3", null),
-          ledgerRow("P7dR8mSH-0.92.2.jar", "P7dR8mSH", "fapi-0922", "0.92.2", "AANobbMI"),
-          ledgerRow("gvQqBUqZ-0.11.2.jar", "gvQqBUqZ", "lith-060", "0.11.2", null),
+          ledgerRow(sodium, "AANobbMI", "sodium-053", "0.5.3", null),
+          ledgerRow(fabricApi, "P7dR8mSH", "fapi-0922", "0.92.2", "AANobbMI"),
+          ledgerRow(lithium, "gvQqBUqZ", "lith-060", "0.11.2", null),
         ],
         history: [{ kind: "install", id: "1790000000-001", at: 1_790_000_000, files: ["AANobbMI-0.5.3.jar", "P7dR8mSH-0.92.2.jar"] }],
       },
@@ -329,7 +340,7 @@ function project(platform: PlatformId, projectId: string): { project: MockProjec
 }
 
 function projectVersions(platform: PlatformId, projectId: string): ModVersionInfo[] {
-  return sourceVersions(project(platform, projectId).source);
+  return sourceVersions(project(platform, projectId).source).map(withChannel);
 }
 
 function findVersion(platform: PlatformId, projectId: string, versionId: string): ModVersionInfo {
@@ -337,7 +348,22 @@ function findVersion(platform: PlatformId, projectId: string, versionId: string)
   if (found === undefined) {
     throw new IpcError("mod_version_not_found", `平台 ${platform === "modrinth" ? "Modrinth" : "CurseForge"} 上工程 ${projectId} 未找到版本 ${versionId}`);
   }
-  return found.info;
+  return withChannel(found.info);
+}
+
+const channelOverrides = new Map<string, ReleaseChannel>();
+
+/**
+ * 测试与演示用：把某个版本改标成别的发布通道。种子目录里的版本全是正式版，按通道过滤更新候选的规则只能这样造出来；
+ * 版本列表、更新检查、安装计划读到的都是改标后的值。
+ */
+export function setMockVersionChannel(platform: PlatformId, versionId: string, channel: ReleaseChannel): void {
+  channelOverrides.set(`${platform}:${versionId}`, channel);
+}
+
+function withChannel(v: ModVersionInfo): ModVersionInfo {
+  const channel = channelOverrides.get(`${v.platform}:${v.version_id}`);
+  return channel === undefined ? v : { ...v, release_channel: channel };
 }
 
 function matchesFilters(v: ModVersionInfo, gameVersions: string[], loaders: ModLoader[]): boolean {
@@ -426,11 +452,82 @@ export function assertNotBusy(versionId: string, fileNames: string[]): void {
 }
 
 function modFileName(args: MockArgs, versionId: string): string {
-  const fileName = requireNonEmpty(args.fileName, "fileName");
+  return checkedModFileName(requireNonEmpty(args.fileName, "fileName"), versionId);
+}
+
+function checkedModFileName(fileName: string, versionId: string): string {
   if (fileName.includes("/") || fileName.includes("\\") || !ledgerKey(fileName).endsWith(".jar")) {
     throw refuse(`${mockModsDir(versionId)}/${fileName}`, `${fileName} 不是 mods 目录里的模组文件名`);
   }
   return fileName;
+}
+
+/** 已经占住实例之后的单个文件启停，单个与批量共用；返回改名后的路径。 */
+function toggleModFile(id: string, instance: MockInstance, fileName: string, enabled: boolean): string {
+  busyCheck(id, fileName);
+  const key = ledgerKey(fileName);
+  const target = enabled ? key : `${key}${DISABLED_SUFFIX}`;
+  // 与后端一致：已是目标状态就原样返回，不动文件。
+  if (target === fileName) return `${mockModsDir(id)}/${fileName}`;
+  const targetPath = `${mockModsDir(id)}/${target}`;
+  if (hasFile(instance, target)) throw new IpcError("mod_state_conflict", `模组启禁状态切换失败: 目标文件已存在 ${targetPath}`);
+  const file = instance.files.find((f) => f.file_name === fileName);
+  if (!file) throw new IpcError("mod_platform_failed", `文件 IO 失败: ${targetPath}`);
+  file.file_name = target;
+  return targetPath;
+}
+
+/** 批量启停的文件名：参数校验与后端同文，先于占住实例。 */
+function batchFileNames(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("set_mods_enabled 缺少数组参数 fileNames");
+  const names = value.map((n) => requireString(n, "fileNames[]"));
+  if (names.length === 0) throw new IpcError("invalid_argument", "file_names 不能为空");
+  if (names.some((n) => n.trim() === "")) throw new IpcError("invalid_argument", "file_names 里有空文件名");
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (seen.has(name)) throw new IpcError("invalid_argument", `file_names 里有重复的 ${name}`);
+    seen.add(name);
+  }
+  return names;
+}
+
+/** 更新检查设置：null 为恢复检查；形状与后端核心类型的 serde 名一致，认不出的原样写进报错。 */
+function parseUpdateHold(args: MockArgs): UpdateHold | null {
+  if (!("hold" in args)) throw new Error("set_mod_update_hold 缺少参数 hold（前端必须显式传 null 表示恢复检查）");
+  const raw = args.hold;
+  if (raw === null) return null;
+  const unknown = () => new IpcError("invalid_argument", `未知的更新设置 ${JSON.stringify(raw)}`);
+  if (typeof raw !== "object" || raw === undefined || !("kind" in raw)) throw unknown();
+  if (raw.kind === "ignored") return { kind: "ignored" };
+  if (raw.kind !== "pinned" || !("version_id" in raw) || typeof raw.version_id !== "string") throw unknown();
+  if (raw.version_id.trim() === "") throw new IpcError("invalid_argument", "hold.version_id 不能为空");
+  return { kind: "pinned", version_id: raw.version_id };
+}
+
+function sameHold(a: UpdateHold | null, b: UpdateHold | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.kind === "ignored" || b.kind === "ignored") return a.kind === b.kind;
+  return a.version_id === b.version_id;
+}
+
+const changelogOverrides = new Map<string, string | null>();
+
+/** 测试与演示用：登记某个平台版本的更新日志原文（null 表示平台没写）；没登记的版本给一段固定的合成内容。 */
+export function setMockChangelog(platform: PlatformId, versionId: string, body: string | null): void {
+  changelogOverrides.set(`${platform}:${versionId}`, body);
+}
+
+/** 与后端一样：平台给空串或纯空白也算没写。 */
+function changelogBody(v: ModVersionInfo): string | null {
+  const key = `${v.platform}:${v.version_id}`;
+  const body = changelogOverrides.has(key) ? changelogOverrides.get(key) : syntheticChangelog(v);
+  if (body === undefined) throw new Error(`mock 更新日志登记表里 ${key} 的值丢了`);
+  return body === null || body.trim() === "" ? null : body;
+}
+
+function syntheticChangelog(v: ModVersionInfo): string {
+  if (v.platform === "modrinth") return `## ${v.version_number}\n\n- 修复与新版加载器的兼容问题\n- 降低区块加载时的内存占用\n`;
+  return `<p>${v.version_number} 更新内容</p><ul><li>修复与新版加载器的兼容问题</li><li>降低区块加载时的内存占用</li></ul>`;
 }
 
 /** mods 目录里算作 Mod 的文件：.jar 与停用的 .jar.disabled，更新留下的 .old 备份不算，口径同后端 count_mod_files。 */
@@ -499,10 +596,45 @@ function listMods(versionId: string, instance: MockInstance): InstalledMod[] {
               version_number: row.version_number,
               title: row.title,
               dependency_of: row.dependency_of,
+              installed_at: row.installed_at,
+              update_hold: row.update_hold,
             }
           : null,
       };
     });
+}
+
+/** 通道的稳定程度：正式版 0、测试版 1、预览版 2。 */
+const CHANNEL_RANK: Readonly<Record<ReleaseChannel, number>> = { release: 0, beta: 1, alpha: 2 };
+
+/** 当前装着 current 通道的版本时能不能推 candidate：同级或更稳定才推，正式版不会被推成测试版。 */
+function admits(current: ReleaseChannel, candidate: ReleaseChannel): boolean {
+  return CHANNEL_RANK[candidate] <= CHANNEL_RANK[current];
+}
+
+/**
+ * 与后端同一条挑选规则。versions 已按发布时间倒序；当前版本不在列表里就无从证明更新。
+ * 锁定的版本以它的发布时间为上限，锁定版本不在列表里不报。
+ */
+function pickUpdate(versions: readonly ModVersionInfo[], currentId: string, hold: UpdateHold | null): ModVersionInfo | null {
+  const current = versions.find((v) => v.version_id === currentId);
+  if (current === undefined) return null;
+  if (hold !== null && hold.kind === "ignored") return null;
+  let ceiling: string | null = null;
+  if (hold !== null && hold.kind === "pinned") {
+    const pinned = versions.find((v) => v.version_id === hold.version_id);
+    if (pinned === undefined) return null;
+    ceiling = pinned.date_published;
+  }
+  const picked = versions.find(
+    (v) =>
+      v.version_id !== currentId &&
+      admits(current.release_channel, v.release_channel) &&
+      v.date_published !== "" &&
+      v.date_published > current.date_published &&
+      (ceiling === null || v.date_published <= ceiling),
+  );
+  return picked === undefined ? null : picked;
 }
 
 function checkUpdates(instance: MockInstance): UpdateCandidate[] {
@@ -513,11 +645,11 @@ function checkUpdates(instance: MockInstance): UpdateCandidate[] {
   const found: UpdateCandidate[] = [];
   for (const key of keys) {
     const row = instance.ledger.find((r) => r.file_name === key);
-    if (!row) continue;
+    // 忽略更新的 Mod 连版本列表都不去取
+    if (!row || (row.update_hold !== null && row.update_hold.kind === "ignored")) continue;
     const versions = newestFirst(projectVersions(row.platform, row.project_id)).filter((v) => matchesFilters(v, [mc], kinds));
-    const latest = versions[0];
-    const current = versions.find((v) => v.version_id === row.version_id);
-    if (!latest || !current || latest.version_id === row.version_id || latest.date_published <= current.date_published) continue;
+    const latest = pickUpdate(versions, row.version_id, row.update_hold);
+    if (latest === null) continue;
     found.push({ file_name: key, title: row.title, current_version_id: row.version_id, current_version_number: row.version_number, latest });
   }
   return found;
@@ -543,6 +675,7 @@ function place(instance: MockInstance, items: PlannedItem[]): void {
     }
     if (v.file_size === null) throw new Error(`mock 目录里的版本 ${v.version_id} 缺少 file_size`);
     instance.files.push({ file_name: target, size: v.file_size, modified_ms: Date.now(), metadata: null });
+    // 换版本还是同一个 Mod：装进实例的时刻与更新检查设置跟着走
     instance.ledger.push({
       file_name: target,
       platform: v.platform,
@@ -552,6 +685,8 @@ function place(instance: MockInstance, items: PlannedItem[]): void {
       title: item.title,
       icon_url: item.icon_url,
       dependency_of: item.required_by,
+      installed_at: previous ? previous.installed_at : at,
+      update_hold: previous ? previous.update_hold : null,
     });
     if (previous) {
       instance.history.push({
@@ -636,20 +771,62 @@ export const handlers: MockHandlers = {
     const fileName = modFileName(args, id);
     if (typeof args.enabled !== "boolean") throw new Error("set_mod_enabled 缺少布尔参数 enabled");
     const enabled = args.enabled;
+    return withMockInstance(id, "modifying", () => toggleModFile(id, mockInstance(id), fileName, enabled));
+  },
+  // 逐个文件启停，一个失败不中断其余的；整次只在参数与实例互斥上拒绝
+  set_mods_enabled: (args): ModToggleResult[] => {
+    const id = requireString(args.versionId, "versionId");
+    const fileNames = batchFileNames(args.fileNames);
+    if (typeof args.enabled !== "boolean") throw new Error("set_mods_enabled 缺少布尔参数 enabled");
+    const enabled = args.enabled;
     return withMockInstance(id, "modifying", () => {
       const instance = mockInstance(id);
-      busyCheck(id, fileName);
-      const key = ledgerKey(fileName);
-      const target = enabled ? key : `${key}${DISABLED_SUFFIX}`;
-      // 与后端一致：已是目标状态就原样返回，不动文件。
-      if (target === fileName) return `${mockModsDir(id)}/${fileName}`;
-      const targetPath = `${mockModsDir(id)}/${target}`;
-      if (hasFile(instance, target)) throw new IpcError("mod_state_conflict", `模组启禁状态切换失败: 目标文件已存在 ${targetPath}`);
-      const file = instance.files.find((f) => f.file_name === fileName);
-      if (!file) throw new IpcError("mod_platform_failed", `文件 IO 失败: ${targetPath}`);
-      file.file_name = target;
-      return targetPath;
+      return fileNames.map((fileName): ModToggleResult => {
+        try {
+          return { status: "ok", file_name: fileName, path: toggleModFile(id, instance, checkedModFileName(fileName, id), enabled) };
+        } catch (error) {
+          if (!(error instanceof IpcError)) throw error;
+          const detail = error.detail === undefined ? {} : { detail: error.detail };
+          return { status: "error", file_name: fileName, error: { code: error.code, message: error.message, ...detail } };
+        }
+      });
     });
+  },
+  // 只改卷宗不碰 jar：与运行中的游戏兼容，同样以 modifying 占住实例
+  set_mod_update_hold: (args) => {
+    const id = requireString(args.versionId, "versionId");
+    const fileName = requireNonEmpty(args.fileName, "fileName");
+    const hold = parseUpdateHold(args);
+    withMockInstance(id, "modifying", () => {
+      const instance = mockInstance(id);
+      const path = `${mockModsDir(id)}/${checkedModFileName(fileName, id)}`;
+      const key = ledgerKey(fileName);
+      if (!present(instance, key)) throw refuse(path, `mods 目录里没有 ${fileName}，可能已被移除`);
+      const row = instance.ledger.find((r) => r.file_name === key);
+      if (!row) throw refuse(path, `${fileName} 没有平台来源记录，不能设置更新检查`);
+      if (!sameHold(row.update_hold, hold)) row.update_hold = hold;
+    });
+  },
+  // 只读：不占实例，与 list_mods 一样
+  mod_update_changelog: (args): ModChangelog => {
+    const id = requireString(args.versionId, "versionId");
+    const fileName = requireNonEmpty(args.fileName, "fileName");
+    const modVersionId = requireNonEmpty(args.modVersionId, "modVersionId");
+    const instance = mockInstance(id);
+    const path = `${mockModsDir(id)}/${checkedModFileName(fileName, id)}`;
+    const row = instance.ledger.find((r) => r.file_name === ledgerKey(fileName));
+    if (!row) throw refuse(path, `${fileName} 没有平台来源记录，取不到更新日志`);
+    const found = findMockSource(row.platform, row.project_id)?.source.versions.find((v) => v.info.version_id === modVersionId);
+    if (found === undefined) {
+      const platformName = row.platform === "modrinth" ? "Modrinth" : "CurseForge";
+      // 与后端一致：detail.platform 是平台的显示名，不是 serde 名
+      throw new IpcError("mod_version_not_found", `平台 ${platformName} 上工程 ${row.project_id} 未找到版本 ${modVersionId}`, {
+        platform: platformName,
+        project_id: row.project_id,
+        version_id: modVersionId,
+      });
+    }
+    return { version_id: modVersionId, format: row.platform === "modrinth" ? "markdown" : "html", body: changelogBody(found.info) };
   },
   remove_mod: (args) => {
     const id = requireString(args.versionId, "versionId");
@@ -780,11 +957,14 @@ export function reset(): void {
   instances = seedInstances();
   busyFiles.clear();
   truncatedListings.clear();
+  channelOverrides.clear();
+  changelogOverrides.clear();
 }
 
-// 工程目录是固定的种子，不存；被占用的文件只在一次命令里有意义，也不存。
+// 工程目录是固定的种子，不存；被占用的文件只在一次命令里有意义，也不存。测试钩子登记的通道与更新日志同样不存。
+// 版本 2：卷宗行加了装进实例的时刻与更新检查设置。
 export const persist: MockPersist = {
-  version: 1,
+  version: 2,
   snapshot: () => [...instances.entries()],
   restore: (data) => {
     instances = new Map(data as [string, MockInstance][]);
