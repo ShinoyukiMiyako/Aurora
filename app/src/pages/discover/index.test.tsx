@@ -667,7 +667,7 @@ describe("发现页：资源详情与安装", () => {
 
   it("Mod 的前置预览：已装前置在平台上已下架时照常列出并标明，不计进待下载的文件", async () => {
     const mod = entry("M1", { title: "钠" });
-    const main = modVersion("m-2", { project_id: "M1", file_size: 4096 });
+    const main = modVersion("main2", { project_id: "M1", file_size: 4096 });
     pages = () => result([mod]);
     ipc.overrides.set("project_detail", () => detailOf(mod, { latest_version: main }));
     ipc.overrides.set("list_mod_versions", () => ({ versions: [main], truncated: false }));
@@ -676,14 +676,14 @@ describe("发现页：资源详情与安装", () => {
       items: [
         { version: main, title: "钠", icon_url: null, required_by: null, already_satisfied: false },
         {
-          version: modVersion("gone-1", { project_id: "D1", name: "dep-gone.jar", version_number: "0.9.1", file_name: "dep-gone.jar", file_size: null, game_versions: [], loaders: [] }),
+          version: modVersion("gone1", { project_id: "D1", name: "dep-gone.jar", version_number: "0.9.1", file_name: "dep-gone.jar", file_size: null, game_versions: [], loaders: [] }),
           title: "织布机",
           icon_url: null,
           required_by: "M1",
           already_satisfied: true,
           delisted: true,
         },
-        { version: modVersion("kept-1", { project_id: "D2", version_number: "1.2.0" }), title: "线团", icon_url: null, required_by: "M1", already_satisfied: true },
+        { version: modVersion("kept1", { project_id: "D2", version_number: "1.2.0" }), title: "线团", icon_url: null, required_by: "M1", already_satisfied: true },
       ],
       skipped: [],
     }));
