@@ -7,7 +7,7 @@ import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flow
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
-import { needsReimport, runtimeComplete } from "../../domain/rules";
+import { isolationByPolicy, needsReimport, runtimeComplete } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -42,7 +42,6 @@ import {
   effectiveJavaMajor,
   hasFlags,
   instanceFolderPath,
-  isolationByPolicy,
   javaFit,
   JVM_PRESET_KEYS,
   overridesHeap,

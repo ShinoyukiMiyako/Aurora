@@ -30,7 +30,6 @@ import {
   isNewMod,
   instanceLocks,
   isCrashActive,
-  isolationByPolicy,
   javaChoice,
   javaFit,
   javawOf,
@@ -55,6 +54,7 @@ import {
   workLock,
   type CrashFixContext,
 } from "./model";
+import { isolationByPolicy } from "../../domain/rules";
 
 function java(path: string, major: number, minor: number, is64 = true, vendor = "Microsoft"): JavaInstallationDto {
   return { path, version: { major, minor, security: 0, build: 0, raw: `${major}.${minor}` }, is_64bit: is64, vendor, source: "registry", missing_files: [] };

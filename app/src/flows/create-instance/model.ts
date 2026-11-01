@@ -3,8 +3,7 @@
 
 import { releaseTypeFromDto, type ReleaseType } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
-// sk-guard-allow T6: 新实例隔离与否要和实例设置页「跟随全局」的推断是同一套规则，不另写一份
-import { isolationByPolicy, type IsolationPolicyName } from "../../pages/instance/model";
+import { isolationByPolicy, type IsolationPolicyName } from "../../domain/rules";
 import type { LoaderChoice, LoaderVersionDto, ManifestDto } from "../../state/queries/catalog";
 import type { StarterGroup, StarterMissingDto, StarterModDto, StarterModsDto, TemplateInfoDto } from "../../state/queries/starter";
 import type { StarterPick } from "../../state/store";

@@ -353,31 +353,6 @@ export function parseDimension(text: string, limit: { min: number; max: number }
   return value >= limit.min && value <= limit.max ? value : null;
 }
 
-// ---------------------------------------------------------------- 版本隔离
-
-export type IsolationPolicyName = Settings["isolationPolicy"];
-
-/**
- * 跟随全局时按全局策略与实例类型推断是否隔离，与后端判定同一张表：加载器（含 OptiFine、LiteLoader）算模组版本，
- * 版本类型不是 release 算非正式版。后端另有一条「版本目录里已有 mods 或 saves 就强制隔离」，前端看不到目录，不参与推断。
- */
-export function isolationByPolicy(policy: IsolationPolicyName, inst: Pick<InstanceSummary, "loader" | "extraLoaders" | "releaseType">): boolean {
-  const modded = inst.loader !== "vanilla" || inst.extraLoaders.length > 0;
-  const nonRelease = inst.releaseType !== "release";
-  switch (policy) {
-    case "disabled":
-      return false;
-    case "mod_loaders_only":
-      return modded;
-    case "non_release_only":
-      return nonRelease;
-    case "mod_loaders_and_non_release":
-      return modded || nonRelease;
-    case "all":
-      return true;
-  }
-}
-
 // ---------------------------------------------------------------- 路径
 
 /** 实例文件夹：<游戏目录>/versions/<实例 id>，分隔符沿用游戏目录自己的写法。 */

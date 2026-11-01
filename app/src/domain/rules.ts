@@ -1,10 +1,10 @@
-// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、本机 Java 的自动挑选、整合包没导入完。
+// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、本机 Java 的自动挑选、整合包没导入完、跟随全局时的版本隔离。
 // 纯函数，页面、流程、启动入口与状态层共用同一份。
 
 import { INSTANCE_NAME_ERROR, OFFLINE_NAME_COPY } from "../copy/flows";
 import { checkInstanceName } from "../ipc/instances";
 import type { JavaInstallationDto } from "../ipc/java";
-import type { InstanceSummary } from "./adapt";
+import type { InstanceSummary, Settings } from "./adapt";
 
 // ---------------------------------------------------------------- 实例名
 
@@ -130,4 +130,29 @@ export function bestLocalRuntime(runtimes: readonly JavaInstallationDto[], major
  */
 export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete">): boolean {
   return inst.status === "broken" && inst.incomplete !== null && inst.incomplete.kind === "modpack";
+}
+
+// ---------------------------------------------------------------- 版本隔离
+
+export type IsolationPolicyName = Settings["isolationPolicy"];
+
+/**
+ * 跟随全局时按全局策略与实例类型推断是否隔离，与后端判定同一张表：加载器（含 OptiFine、LiteLoader）算模组版本，
+ * 版本类型不是 release 算非正式版。后端另有一条「版本目录里已有 mods 或 saves 就强制隔离」，前端看不到目录，不参与推断。
+ */
+export function isolationByPolicy(policy: IsolationPolicyName, inst: Pick<InstanceSummary, "loader" | "extraLoaders" | "releaseType">): boolean {
+  const modded = inst.loader !== "vanilla" || inst.extraLoaders.length > 0;
+  const nonRelease = inst.releaseType !== "release";
+  switch (policy) {
+    case "disabled":
+      return false;
+    case "mod_loaders_only":
+      return modded;
+    case "non_release_only":
+      return nonRelease;
+    case "mod_loaders_and_non_release":
+      return modded || nonRelease;
+    case "all":
+      return true;
+  }
 }
