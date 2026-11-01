@@ -4,6 +4,9 @@
 // 指针离开触发元素后再停留 linger，期间移入气泡则保持显示（可悬停驻留，不让气泡挡住路又抓不住）。
 // 预热：任一气泡消失后 warmWindow 内，移到另一个带提示的元素上不再等待。
 // 不入 Esc 栈：Esc 先由栈顶浮层处理，同时通知这里收起。
+//
+// 包裹层可以常驻：disabled 时什么都不显示、也不碰浮层体系，控件要不要提示随状态变化时不用增减这一层，
+// 增减的话 React 会重挂控件，聚焦着的控件把焦点丢回 body。Button、IconButton、Toggle、Checkbox 都这样用。
 
 import { AnimatePresence, motion } from "framer-motion";
 import { cloneElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
@@ -31,7 +34,7 @@ export interface TooltipProps {
    * 给焦点不落在触发元素自身上的场合用：菜单以 aria-activedescendant 高亮的项从不获得焦点，聚焦触发不了提示。
    */
   open?: boolean;
-  /** 单个可聚焦元素；气泡锚定在它身上，并通过 aria-describedby 关联。 */
+  /** 单个可聚焦元素；气泡锚定在它身上，并通过 aria-describedby 关联。它自己可以再带一层提示包裹。 */
   children: ReactElement<{ "aria-describedby"?: string }>;
 }
 
@@ -40,14 +43,26 @@ let lastHiddenAt = Number.NEGATIVE_INFINITY;
 
 const DEFAULT_OFFSET: Record<TooltipSide, number> = { top: 8, bottom: 8, left: 12, right: 12 };
 
+/** 包裹层里真正的控件：子元素自带一层包裹（<Tooltip><Button /></Tooltip>）时往里走，包裹层 display: contents，没有盒子可锚定。 */
+function triggerOf(host: Element): Element | null {
+  const first = host.firstElementChild;
+  return first !== null && first.hasAttribute("data-tooltip-host") ? triggerOf(first) : first;
+}
+
 export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.delay, offset, wrap = false, disabled = false, open: forced, children }: TooltipProps) {
-  const root = useOverlayRoot();
   const id = useId();
   const hostRef = useRef<HTMLSpanElement>(null);
   const showTimer = useRef<number | undefined>(undefined);
   const hideTimer = useRef<number | undefined>(undefined);
   const [anchor, setAnchor] = useState<Element | null>(null);
   const openRef = useRef(false);
+
+  // 错误屏的按钮在 OverlayProvider 之外，从没启用过的提示不能碰浮层体系。启用过就留着：退场动画要在气泡层里演完
+  const [armed, setArmed] = useState(!disabled);
+  if (!disabled && !armed) setArmed(true);
+  // 调用方常把内容和 disabled 一起撤掉（按钮的禁用原因没了）：退场中的气泡留着最后的字，不闪成空气泡
+  const shown = useRef({ content, sub });
+  if (!disabled) shown.current = { content, sub };
 
   const clearTimers = () => {
     window.clearTimeout(showTimer.current);
@@ -74,8 +89,8 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
     if (disabled) return;
     window.clearTimeout(hideTimer.current);
     if (openRef.current) return;
-    const target = hostRef.current?.firstElementChild;
-    if (!target) throw new Error("Tooltip 必须包住一个元素");
+    const target = hostRef.current === null ? null : triggerOf(hostRef.current);
+    if (target === null) throw new Error("Tooltip 必须包住一个元素");
     const warm = Date.now() - lastHiddenAt < TOOLTIP_TIMING.warmWindow;
     window.clearTimeout(showTimer.current);
     if (immediate || warm) open(target);
@@ -115,8 +130,6 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
     if (anchor !== null && !openedDisabled.current && anchor.matches(":disabled")) hideNow();
   });
 
-  useEscapeListener(anchor !== null, hideNow);
-
   useEffect(() => {
     if (!anchor) return;
     window.addEventListener("scroll", hideNow, true);
@@ -130,6 +143,7 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
       <span
         ref={hostRef}
         className={styles.host}
+        data-tooltip-host=""
         onPointerEnter={() => show(false)}
         onPointerLeave={scheduleHide}
         onPointerDown={hideNow}
@@ -140,29 +154,29 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
       >
         {cloneElement(children, { "aria-describedby": describedBy === "" ? undefined : describedBy })}
       </span>
-      {root &&
-        createPortal(
-          <AnimatePresence>
-            {anchor && (
-              <Bubble
-                key="bubble"
-                id={id}
-                root={root}
-                anchor={anchor}
-                side={side}
-                offset={offset ?? DEFAULT_OFFSET[side]}
-                wrap={wrap}
-                content={content}
-                sub={sub}
-                onEnter={() => window.clearTimeout(hideTimer.current)}
-                onLeave={scheduleHide}
-              />
-            )}
-          </AnimatePresence>,
-          root,
-        )}
+      {armed && (
+        <BubbleLayer
+          anchor={anchor}
+          onEscape={hideNow}
+          id={id}
+          side={side}
+          offset={offset ?? DEFAULT_OFFSET[side]}
+          wrap={wrap}
+          content={shown.current.content}
+          sub={shown.current.sub}
+          onEnter={() => window.clearTimeout(hideTimer.current)}
+          onLeave={scheduleHide}
+        />
+      )}
     </>
   );
+}
+
+function BubbleLayer({ anchor, onEscape, ...bubble }: Omit<BubbleProps, "root" | "anchor"> & { anchor: Element | null; onEscape(): void }) {
+  const root = useOverlayRoot();
+  useEscapeListener(anchor !== null, onEscape);
+  if (root === null) return null;
+  return createPortal(<AnimatePresence>{anchor && <Bubble key="bubble" root={root} anchor={anchor} {...bubble} />}</AnimatePresence>, root);
 }
 
 interface BubbleProps {

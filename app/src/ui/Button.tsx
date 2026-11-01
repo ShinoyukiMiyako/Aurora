@@ -122,5 +122,11 @@ export function Button({
     </button>
   );
 
-  return softDisabled && disabledReason !== undefined ? <Tooltip content={disabledReason}>{button}</Tooltip> : button;
+  // 包裹层常驻：原因随状态来去时按钮不重挂，聚焦着的按钮不丢焦点
+  const reason = softDisabled ? disabledReason : undefined;
+  return (
+    <Tooltip content={reason} disabled={reason === undefined}>
+      {button}
+    </Tooltip>
+  );
 }

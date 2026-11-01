@@ -41,7 +41,7 @@ import {
   type NavHistory,
 } from "./nav";
 import { OverlayProvider, useOverlayControls, useOverlayState } from "./overlay";
-import { pickFile as pickNativeFile, pickSaveFile as saveNativeFile, SAVE_FILE_KINDS, withExtension, type SaveFileKind } from "./platform";
+import { pickFile as pickNativeFile, pickSaveFile as saveNativeFile, SAVE_FILE_KINDS, withExtension, type SaveFileDialog, type SaveFileKind } from "./platform";
 import { useTier, type Tier } from "./tier";
 import { useUpdaterAutoCheck } from "./update-check";
 import { useRunner } from "./useRunner";
@@ -115,10 +115,10 @@ export interface ShellApi {
   /** 系统选择文件对话框，按文件种类给出标题与扩展名过滤；用户取消为 null。浏览器预览里没有这个对话框，如实拒绝。 */
   pickFile(kind: FileKind): Promise<string | null>;
   /**
-   * 系统保存文件对话框，按文件种类给出标题与类型过滤，文件名框预填 defaultName；用户取消为 null。
-   * 给回的路径一定带这个种类的扩展名。浏览器预览里没有这个对话框，如实拒绝。
+   * 系统保存文件对话框：标题与类型过滤按文件种类取，或由页面直接给出（标题里要写存档名这类）；文件名框预填 defaultName，用户取消为 null。
+   * 给回的路径一定带要求的扩展名（类型过滤的第一个）。浏览器预览里没有这个对话框，如实拒绝。页面要保存文件都经这里。
    */
-  saveFile(kind: SaveFileKind, defaultName: string): Promise<string | null>;
+  saveFile(target: SaveFileKind | SaveFileDialog, defaultName: string): Promise<string | null>;
   /** 通知的动作：先关闭这条通知，再导航或经统一错误处理执行命令。 */
   runToastAction(toast: Toast): void;
   /**
@@ -449,11 +449,11 @@ function ShellCore({ children }: { children: ReactNode }) {
     return pickNativeFile({ title: copy.title, filter: { name: copy.filter, extensions: FILE_KINDS[kind].extensions } });
   }, []);
 
-  const saveFile = useCallback(async (kind: SaveFileKind, defaultName: string) => {
-    const copy = FILE_SAVE_COPY[kind];
-    const extension = SAVE_FILE_KINDS[kind].extensions[0];
-    const path = await saveNativeFile({ title: copy.title, filter: { name: copy.filter, extensions: SAVE_FILE_KINDS[kind].extensions }, defaultPath: defaultName });
-    return path === null ? null : withExtension(path, extension);
+  const saveFile = useCallback(async (target: SaveFileKind | SaveFileDialog, defaultName: string) => {
+    const dialog: SaveFileDialog =
+      typeof target === "string" ? { title: FILE_SAVE_COPY[target].title, filter: { name: FILE_SAVE_COPY[target].filter, extensions: SAVE_FILE_KINDS[target].extensions } } : target;
+    const path = await saveNativeFile({ ...dialog, defaultPath: defaultName });
+    return path === null ? null : withExtension(path, dialog.filter.extensions[0]);
   }, []);
 
   // ---------------------------------------------------------------- 尺寸分档、可见性与焦点

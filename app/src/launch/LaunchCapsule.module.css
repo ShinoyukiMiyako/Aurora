@@ -131,8 +131,8 @@
   padding: 0 7px 0 var(--sk-space-10);
 }
 
-/* 就绪与修复面是整枚按钮，铺满胶囊 */
-.face:has(> .go) {
+/* 就绪与修复面是整枚按钮，铺满胶囊（就绪面的按钮外面有一层 display: contents 的提示包裹） */
+.face:has(.go) {
   padding: 0;
 }
 
