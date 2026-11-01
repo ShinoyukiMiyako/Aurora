@@ -9,7 +9,7 @@
 //!    的再一起按哈希反查（`/version_files`）。查到、且平台给的 sha512、大小与下载地址都能写进清单的，
 //!    只写索引，导入的人从 Modrinth 下载；其余的原样打包进文件。
 //! 3. 额外项（配置、资源包、光影、存档……）只从白名单目录收集，跳过启动器元数据目录、`.old` 备份、
-//!    符号链接与目录联接；日志、崩溃报告、natives、版本 jar 与 JSON 不在白名单里，结构上就进不了包。
+//!    存档的 `session.lock`、符号链接与目录联接；日志、崩溃报告、natives、版本 jar 与 JSON 不在白名单里，结构上就进不了包。
 //!
 //! 写包在阻塞线程里进行，先写到目标旁边的临时文件，回读校验通过后才换到目标位置。
 
@@ -42,6 +42,8 @@ const VERSIONS_BATCH: usize = 100;
 const HASHES_BATCH: usize = 500;
 /// 游戏选项文件，额外项里唯一的单个文件。
 const OPTIONS_FILE: &str = "options.txt";
+/// 存档的占用锁文件。
+const SESSION_LOCK: &str = "session.lock";
 
 /// 可以一起打包的额外内容。顺序即界面顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -982,8 +984,10 @@ fn walk(
             walk(&path, &child, excluded, out)?;
             continue;
         }
+        // session.lock 是游戏打开存档时的锁文件：游戏开着时对它持有排他锁，读它会失败；导入的人也用不上。
         if !file_type.is_file()
             || name.to_lowercase().ends_with(BACKUP_SUFFIX)
+            || name.eq_ignore_ascii_case(SESSION_LOCK)
             || excluded.contains(&path_key(&path))
         {
             continue;
@@ -1965,6 +1969,55 @@ mod tests {
         assert_eq!(
             read_entry(&destination, "overrides/mods/x.jar.disabled"),
             fixture.jars["x.jar.disabled"]
+        );
+        assert!(leftovers(&fixture.root).is_empty());
+    }
+
+    /// 游戏开着存档时对 session.lock 持有排他锁，别的句柄读它会失败；它对导入的人也没有意义。
+    /// 带存档导出时任何层级的 session.lock 都不读、不进包，预览的计数同样不算它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saves_leave_out_session_locks_even_while_the_game_holds_one() {
+        let fixture = fixture().await;
+        mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
+        fixture.write("saves/World/session.lock", "\u{2603}".as_bytes());
+        fixture.write("saves/World/DIM-1/SESSION.LOCK", b"x");
+        fixture.write("saves/World/region/r.0.0.mca", b"region");
+        let holder = std::fs::OpenOptions::new()
+            .write(true)
+            .open(fixture.dir.join("saves/World/session.lock"))
+            .unwrap();
+        holder.lock().unwrap();
+
+        let preview = fixture.aurora.preview_modpack_export(ID).await;
+        let target = ModpackExportTarget::new(fixture.root.join("开着存档.mrpack"));
+        let outcome = fixture
+            .aurora
+            .export_modpack(ID, &options(vec![ExportExtra::Saves], false), &target, None)
+            .await;
+        holder.unlock().unwrap();
+        let outcome = outcome.unwrap();
+
+        let saves = preview
+            .unwrap()
+            .extras
+            .into_iter()
+            .find(|s| s.extra == ExportExtra::Saves)
+            .unwrap();
+        assert_eq!(
+            (saves.files, saves.bytes),
+            (2, (b"level".len() + b"region".len()) as u64)
+        );
+        assert_eq!(outcome.override_files, 4, "d、e 两个 jar 加两个存档文件");
+        let saves_entries: Vec<String> = entry_names(target.destination())
+            .into_iter()
+            .filter(|n| n.starts_with("overrides/saves/"))
+            .collect();
+        assert_eq!(
+            saves_entries,
+            vec![
+                "overrides/saves/World/level.dat",
+                "overrides/saves/World/region/r.0.0.mca",
+            ]
         );
         assert!(leftovers(&fixture.root).is_empty());
     }
