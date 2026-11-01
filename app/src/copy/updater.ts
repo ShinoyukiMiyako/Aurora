@@ -57,9 +57,8 @@ export const UPDATE_COPY = {
   installing: "正在启动安装程序…",
   downloadFailed: (reason: string) => `下载失败：${reason}`,
   signatureInvalid: "更新包签名校验不通过，已丢弃，不会安装",
-  tasksConfirmTitle: "还有下载没完成",
+  tasksConfirmTitle: "重启并安装更新？",
   tasksConfirmBody: (n: number) => `还有 ${n} 个下载任务，重启会中断它们，之后需要重新开始。`,
-  tasksConfirm: "仍然重启",
   // 失败通知标题
   installFailed: "没能安装更新",
   installOnExitFailed: "没能设为退出时安装",

@@ -1044,7 +1044,8 @@ describe("设置页：关于与启动器更新", () => {
     });
     await click(all<HTMLButtonElement>(OPEN_DIALOG + ' button').find((b) => b.textContent === "改为现在安装") as HTMLButtonElement);
     const titles = all(OPEN_DIALOG + ' h2').map((h) => h.textContent);
-    expect(titles).toContain("还有下载没完成");
+    expect(titles).toContain("重启并安装更新？");
+    expect(all(OPEN_DIALOG + " button").map((b) => b.textContent)).toEqual(expect.arrayContaining(["继续下载", "重启并安装"]));
     expect(callsOf(ipc, "install_update")).toHaveLength(0);
   });
 
