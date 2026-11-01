@@ -1,6 +1,6 @@
 // 浮层（弹窗、浮层面板）的焦点归还记录点：打开时记下当时的焦点元素，关闭后把焦点还给它。
 //
-// 它已不在文档中（打开它的按钮被关闭这一步换掉了）时落到它所在的区域：从最近的、还在文档里的祖先找起，取第一个
+// 它已不在文档中（打开它的按钮被关闭这一步换掉了）或已被禁用时落到它所在的区域：从最近的、还在文档里的祖先找起，取第一个
 // 可 Tab 的控件；找到弹窗或内容区滚动容器这一层就停，落到容器本身。叠着的弹窗里不能退回内容区滚动容器：它在底层
 // 弹窗的圈定之外，焦点会被圈定拉到底层弹窗的第一个控件，也就是头部的「关闭」，再按一下回车就把整个流程关了。
 //
@@ -73,7 +73,9 @@ export function FocusReturnPoint({ active, shouldReturn, handle }: FocusReturnPo
     if (skipped.current) return;
     const check = shouldReturnRef.current;
     if (check !== undefined && !check()) return;
-    const destination = target instanceof HTMLElement && target.isConnected && target !== document.body ? target : regionDestination(region.current);
+    // 还在文档里但已被原生禁用的目标接不住焦点，焦点会留在正在退场的浮层里，浮层移除后掉回 body
+    const usable = target instanceof HTMLElement && target.isConnected && target !== document.body && !target.matches(":disabled");
+    const destination = usable ? target : regionDestination(region.current);
     destination?.focus();
   };
   const restoreRef = useRef(restore);

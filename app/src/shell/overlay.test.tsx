@@ -283,6 +283,34 @@ describe("焦点圈定与归还", () => {
     expect(document.activeElement).toBe(byText("打开"));
   });
 
+  it("原焦点元素此刻被禁用时同样落到兜底容器，焦点不留在正在退场的浮层里", () => {
+    function Host() {
+      const [open, setOpen] = useState(false);
+      const [locked, setLocked] = useState(false);
+      return (
+        <div tabIndex={-1} {...{ [FOCUS_FALLBACK_ATTR]: "" }} data-testid="fallback">
+          <button
+            disabled={locked}
+            onClick={() => {
+              setOpen(true);
+              setLocked(true);
+            }}
+          >
+            打开
+          </button>
+          <FocusReturnPoint active={open} />
+          {open && <Dialog onClose={() => setOpen(false)} />}
+        </div>
+      );
+    }
+    mount(<Host />);
+    act(() => byText("打开").focus());
+    act(() => byText("打开").click());
+    act(() => byText("丙").focus());
+    act(() => byText("丙").click());
+    expect(document.activeElement).toBe(document.querySelector('[data-testid="fallback"]'));
+  });
+
   it("原焦点元素已不在文档中时落到兜底容器", () => {
     function Host() {
       const [open, setOpen] = useState(false);
