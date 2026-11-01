@@ -218,6 +218,11 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
           onClose={() => setBlocked({ ...blocked, open: false })}
           onAllFound={() => {
             setBlocked({ ...blocked, open: false });
+            // 与行上的重试同一口径：断网时重排必然又失败一次，白白多出一次尝试
+            if (!online) {
+              actions.toast("warning", TASKS_COPY.offline.title, TASKS_COPY.offline.retryReason);
+              return;
+            }
             void run(() => actions.retryTask(blocked.taskId), ACTION_ERROR.install);
           }}
         />

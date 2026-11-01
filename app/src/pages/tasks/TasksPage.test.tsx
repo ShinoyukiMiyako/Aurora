@@ -349,6 +349,47 @@ describe("下载任务页：断网", () => {
     await flush();
     expect(callsOf(ipc, "install_java")).toEqual([{ requiredMajor: 17, taskId: "failed-java#2" }]);
   });
+
+  it("断网：要手动下载的文件都找到后「重新安装」只提示联网后再重试，不把任务重新排进队列", async () => {
+    resetModpackMock();
+    const onLine = vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);
+    const args = { id: "生存", platform: "curseforge", projectId: "9", versionId: "90" };
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-mod", "failed", {
+          kind: "mod",
+          title: "安装 Locked",
+          instance_id: "生存",
+          error: {
+            code: "distribution_blocked",
+            message: "原文",
+            blocked_files: [
+              { project_id: 9, file_id: 90, file_name: "locked.jar", web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90", destination: "mods/locked.jar", sha1: "a".repeat(40), fingerprint: 0, size: 3 },
+            ],
+          },
+          spec: { command: "install_mod", args },
+        }),
+      ],
+    });
+    ipc.overrides.set("install_mod", () => new Promise(() => undefined));
+    await mount();
+    act(() => buttonIn(row("安装 Locked"), "查看这些文件").click());
+    await flush();
+    seedMockDownloads(["locked.jar"]);
+    act(() => buttonIn(dialog(), "我已下载，重新检查").click());
+    await flush();
+    expect(dialog().textContent).toContain("1 个文件都已找到。");
+
+    onLine.mockReturnValue(false);
+    act(() => {
+      window.dispatchEvent(new Event("offline"));
+    });
+    act(() => buttonIn(dialog(), "重新安装").click());
+    await flush();
+    expect(callsOf(ipc, "install_mod")).toEqual([]);
+    expect(launcher.state.tasks.map((t) => [t.status, t.attempt])).toEqual([["failed", 1]]);
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "联网后才能重试"]);
+  });
 });
 
 describe("下载任务页：筛选", () => {
