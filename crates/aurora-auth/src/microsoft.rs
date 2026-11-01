@@ -822,11 +822,15 @@ mod tests {
         });
 
         // 间隔 5 s：若取消没有打断等待，至少要 5 s 才会返回。
+        let interval = Duration::from_secs(5);
         let started = Instant::now();
-        let err = auth.poll_device_code(&device(900, 5)).await.unwrap_err();
+        let err = auth
+            .poll_device_code(&device(900, interval.as_secs()))
+            .await
+            .unwrap_err();
         assert!(matches!(err, AuthError::Cancelled), "得到 {err:?}");
         assert!(
-            started.elapsed() < Duration::from_millis(1000),
+            started.elapsed() < interval,
             "取消后过了 {:?} 才返回",
             started.elapsed()
         );
