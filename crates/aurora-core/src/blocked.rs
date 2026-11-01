@@ -16,6 +16,11 @@ use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::resources::is_safe_file_name;
 
+/// 缓存根下放整合包相关内容的目录：下载来的包与认领暂存位都在它下面。
+pub(crate) const PACK_CACHE_DIR: &str = "modpacks";
+/// 整合包缓存目录下的认领暂存位。
+pub(crate) const CLAIMS_DIR: &str = "claims";
+
 /// 一个受限文件：要到 CurseForge 网页手动下载，认领时按这里的哈希校验。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlockedFile {
@@ -161,7 +166,7 @@ impl Aurora {
 
     /// 手动下载的受限文件认领后放在这里。
     pub fn blocked_claims_dir(&self) -> PathBuf {
-        self.cache_root().join("modpacks").join("claims")
+        self.cache_root().join(PACK_CACHE_DIR).join(CLAIMS_DIR)
     }
 
     fn claim_slot(&self, file: &BlockedFile) -> PathBuf {
