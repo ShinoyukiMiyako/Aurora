@@ -557,6 +557,75 @@ async fn the_last_source_finishes_with_the_watchdog_off() {
     only_dest_left(dir.path(), &dest);
 }
 
+/// 第一个源只是慢、后面的源根本没有这个文件（镜像还没同步到的新版本就是这样）：换源失败后回到慢源，
+/// 关掉看门狗在它上面下完，而不是把一个本来下得完的文件判成装不上。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_source_is_finished_with_the_watchdog_off_when_every_later_source_fails() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let node = Endpoint::start(body.clone(), |start, seen| match start {
+        None => Pace::HeadOnly,
+        Some(_) if seen.iter().all(Option::is_none) => Pace::DripTail(DRIP_ALL),
+        Some(_) => Pace::Fast,
+    })
+    .await;
+    let mirror = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/f.jar"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&mirror)
+        .await;
+    let official_url = node.url("/f.jar");
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: official_url.clone(),
+            mirror: format!("{}/f.jar", mirror.uri()),
+        }),
+    );
+    let health = Arc::new(SourceHealth::with_policy(1, Duration::from_secs(60)));
+    let downloader = Downloader::with_health(
+        client(),
+        config(one_at_a_time(MIB), sources),
+        health.clone(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    let started = Instant::now();
+    downloader
+        .download(&task)
+        .await
+        .expect("后面的源都失败时，慢源上关掉看门狗也要下完");
+    let elapsed = started.elapsed();
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        node.requests(),
+        vec![
+            // 看门狗盯着的一轮：探测、首片滴灌被判慢、向原地址重取终点仍是自己。
+            None,
+            Some(0),
+            None,
+            // 镜像 404 之后回到这里、关掉看门狗的一轮：探测、首片重下、第二片。
+            None,
+            Some(0),
+            Some(MIB),
+        ]
+    );
+    assert!(origin_gets(&mirror).await >= 1, "镜像确实试过");
+    assert!(
+        !health.is_tripped(&official_url),
+        "慢源最后下成了，之前记的故障一笔勾销"
+    );
+    assert!(elapsed < Duration::from_secs(10), "耗时 {elapsed:?}");
+    only_dest_left(dir.path(), &dest);
+}
+
 /// 轮询直到 `cond` 成立；5 s 内不成立说明现场没造出来，测试本身有问题。
 async fn wait_until(what: &str, cond: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(5);
