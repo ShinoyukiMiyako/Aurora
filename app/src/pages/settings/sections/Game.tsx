@@ -405,7 +405,7 @@ function WorldBackupCard() {
   const pruneReason = auto.value ? undefined : c.pruneOff;
   return (
     <Card>
-      <CardHeader title={c.title} subtitle={c.subtitle} icon="drive" />
+      <CardHeader title={c.title} subtitle={c.subtitle} icon="archive" />
       <SettingRow title={c.auto} description={c.autoDesc}>
         <Toggle checked={auto.value} onChange={auto.set} ariaLabel={c.auto} />
       </SettingRow>

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ICON_PATHS } from "../../art/icon-paths";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
@@ -1977,6 +1978,7 @@ describe("实例详情：存档备份", () => {
     await open("overview");
     click(rowMenu("新世界"));
     expect(menuItems().map(textOf)).toEqual(["备份存档", "查看备份", "导出存档"]);
+    expect(menuItem("备份存档").querySelector("svg path")?.getAttribute("d")).toBe(ICON_PATHS.archive.s);
     expect(menuItems().map((el) => el.getAttribute("aria-disabled"))).toEqual([null, null, null]);
     click(menuItem("备份存档"));
     await flush();

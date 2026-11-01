@@ -132,7 +132,7 @@ export function useWorldOps(inst: InstanceSummary, ops: InstanceOps): WorldOps {
   const menu = (world: WorldRef, onViewBackups: () => void): MenuEntry[] => {
     const locked = reasons.backup !== undefined;
     return [
-      { label: COPY.backup, icon: "drive", disabled: locked, disabledReason: reasons.backup, onSelect: () => backup(world) },
+      { label: COPY.backup, icon: "archive", disabled: locked, disabledReason: reasons.backup, onSelect: () => backup(world) },
       { label: COPY.viewBackups, icon: "history", onSelect: onViewBackups },
       { label: COPY.export, icon: "upload", disabled: locked, disabledReason: reasons.backup, onSelect: () => exportTo(world) },
     ];
@@ -184,7 +184,7 @@ export function WorldBackupsModal({ inst, world, open, onClose, worldOps }: Worl
       >
         {COPY.openFolder}
       </Button>
-      <Button variant="primary" icon="drive" disabledReason={backupReason} onClick={() => worldOps.backup(world)}>
+      <Button variant="primary" icon="archive" disabledReason={backupReason} onClick={() => worldOps.backup(world)}>
         {COPY.backup}
       </Button>
     </>

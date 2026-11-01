@@ -25,7 +25,7 @@ const REGISTERED = [
   // 账户
   "shield", "user", "server", "users", "key", "lock", "logout",
   // 文件与系统
-  "box", "folder", "folder-open", "file", "file-text", "terminal", "java", "memory", "cpu", "drive", "globe", "monitor", "keyboard",
+  "box", "archive", "folder", "folder-open", "file", "file-text", "terminal", "java", "memory", "cpu", "drive", "globe", "monitor", "keyboard",
   // 外观
   "sun", "moon", "palette", "image",
 ];
@@ -44,8 +44,8 @@ function svgOf(name: IconName, size?: IconSize): SVGSVGElement {
 const usableSizes = (def: IconDef) => ICON_SIZES.filter((s) => (def.only === undefined || s === def.only) && (def.min === undefined || s >= def.min));
 
 describe("图标清单", () => {
-  it("路径表与清单逐项一致（99 个，顺序相同）", () => {
-    expect(REGISTERED).toHaveLength(99);
+  it("路径表与清单逐项一致（100 个，顺序相同）", () => {
+    expect(REGISTERED).toHaveLength(100);
     expect(ICON_NAMES).toEqual(REGISTERED);
   });
 
