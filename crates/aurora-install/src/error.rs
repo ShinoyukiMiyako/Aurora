@@ -150,6 +150,18 @@ pub enum Error {
         output: Option<ProcessorOutput>,
     },
 
+    /// 要写进库目录的文件正被别的进程打开着（旧版 Forge 的通用 jar 由安装器直接解出，不经处理器）。
+    /// 与 [`Error::ProcessorOutputLocked`] 同样重试没用，要等那个游戏退出。
+    #[error(
+        "{path} 正被别的程序占用，写不进去；可能有游戏正在用同一个加载器版本运行，关掉它后再试"
+    )]
+    LibraryFileLocked {
+        path: PathBuf,
+        /// 写入失败时的原始错误。
+        #[source]
+        source: aurora_base::Error,
+    },
+
     /// 版本 JSON、资源索引给出的相对路径（库路径、maven 坐标的某一段、资源 hash、索引 id、日志配置名、
     /// 版本 id）会落到游戏目录之外。这些值来自远端，sha1 也由同一份文件给出，下载校验拦不住，所以在算落点时
     /// 就拒掉。`entry` 指认是哪个条目，`problem` 说明是哪一种问题。
@@ -209,7 +221,8 @@ impl RetryableError for Error {
             | Error::ProcessorMainClassMissing { .. }
             | Error::JavaLaunch { .. }
             | Error::ProcessorFailed { .. }
-            | Error::ProcessorOutputLocked { .. } => false,
+            | Error::ProcessorOutputLocked { .. }
+            | Error::LibraryFileLocked { .. } => false,
             // 路径越界与加载器自带库缺失都是文件内容本身的问题，重下同一份文件结果不变。
             Error::UnsafePath { .. } | Error::LoaderLibraryMissing { .. } => false,
         }

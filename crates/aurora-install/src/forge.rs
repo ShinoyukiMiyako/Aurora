@@ -2,10 +2,13 @@
 //!
 //! 现代 Forge（1.13+）与 NeoForge 走同构逻辑：installer jar 内含 `install_profile.json`（声明
 //! 一批处理器 JVM 调用与一张 data 占位符表）加一份 `version.json`（最终版本描述）。安装 =
-//! 解出 version.json 落盘 → 下载 install_profile 与 version 声明的库 → 把 data 表按目标 side
+//! 解出 version.json → 下载 install_profile 与 version 声明的库 → 把 data 表按目标 side
 //! 塌缩并解析 `[maven坐标]`/`/jar内路径`/`'字面量'` 三种取值 → 逐个处理器把 `{占位符}` 替换成
-//! 实际值后调 java 运行 → 校验各处理器 outputs 的 sha1。旧版 Forge（install_profile 带 `install`
-//! 字段而无 processors）则直接把 `versionInfo` 落盘、从 zip 解出通用 jar，不跑处理器。
+//! 实际值后调 java 运行 → 校验各处理器 outputs 的 sha1 → version.json 落盘。旧版 Forge
+//! （install_profile 带 `install` 字段而无 processors）则从 zip 解出通用 jar、下完库后把
+//! `versionInfo` 落盘，不跑处理器。
+//!
+//! 版本 JSON 都是最后一步：版本列表只凭它认版本，失败或取消时这个版本就是没装上。
 //!
 //! 占位符替换、data 塌缩、classpath 组装、Main-Class 解析都抽成纯函数，表驱动单测覆盖；真正的
 //! java 子进程执行与库下载是集成层，本模块负责把它们按 install_profile 的语义正确编排。
@@ -285,7 +288,8 @@ pub fn neoforge_installer_url(neoforge_version: &str) -> String {
 /// 安装产物落在哪里。
 #[derive(Debug, Clone, Copy)]
 enum Target<'t> {
-    /// 传统布局：版本 JSON 写到 `versions/<forge 版本 id>/`，处理器读原版目录里的客户端 jar。
+    /// 传统布局：全部就绪后版本 JSON 写到 `versions/<forge 版本 id>/`，处理器读原版目录里的客户端 jar，
+    /// 临时文件放在 installer 缓存目录下。
     Standalone,
     /// 按实例安装：版本 JSON 不落盘（交给调用方与原版合并后写进实例目录），处理器读实例目录里的
     /// 客户端 jar，临时文件也放在实例目录下。
@@ -441,7 +445,7 @@ impl<'a> ForgeInstaller<'a> {
         }
     }
 
-    /// 现代安装：解出 version.json、下库、跑处理器。
+    /// 现代安装：解出 version.json、下库、跑处理器，全部成功后版本 JSON 才落盘（传统布局）。
     async fn install_modern(
         &self,
         installer: &Path,
@@ -467,14 +471,9 @@ impl<'a> ForgeInstaller<'a> {
         checked_segment(&version_id, || "Forge install_profile 的版本 id".to_owned())?;
         checked_segment(&minecraft, || "Forge install_profile 的游戏版本".to_owned())?;
 
-        // 解出内联 version.json；传统布局原样落盘，按实例安装交给调用方。
         let version_bytes =
             read_zip_entry_async(installer, json_entry.trim_start_matches('/')).await?;
         let embedded: VersionJson = net::parse_json(&version_bytes, "Forge version.json")?;
-        if let Target::Standalone = target {
-            let json_path = self.cx.layout.version_json(&version_id);
-            aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
-        }
 
         // 下载 install_profile 与 version.json 声明的库。下载地址留空的是 installer 自带的
         // （放在 `maven/` 下），从 installer 解出，不进下载批次：空地址交给下载引擎只会整批失败。
@@ -490,16 +489,13 @@ impl<'a> ForgeInstaller<'a> {
         .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
-        // 解出 data 表里 `/jar 内路径` 型取值到独立临时目录。
-        let scratch_owner = match target {
-            Target::Standalone => version_id.as_str(),
-            Target::Instance(id) => id,
+        // 解出 data 表里 `/jar 内路径` 型取值到独立临时目录。传统布局不放进版本目录：它在版本 JSON
+        // 就位之前不该出现，安装的 future 被整个丢弃时临时目录也来不及清，会在版本列表里留下一行。
+        let scratch_parent = match target {
+            Target::Standalone => self.installer_cache_dir(),
+            Target::Instance(id) => self.cx.layout.version_dir(id),
         };
-        let tmp_dir = self.cx.layout.version_dir(scratch_owner).join(concat!(
-            ".",
-            aurora_base::app_slug!(),
-            "-forge-tmp"
-        ));
+        let tmp_dir = scratch_parent.join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
         let minecraft_jar = match target {
             Target::Standalone => self.cx.layout.version_jar(&minecraft),
             Target::Instance(id) => self.cx.layout.version_jar(id),
@@ -512,13 +508,20 @@ impl<'a> ForgeInstaller<'a> {
         if let Err(err) = tokio::fs::remove_dir_all(&tmp_dir).await {
             tracing::debug!(dir = %tmp_dir.display(), %err, "清理 Forge 安装临时目录失败");
         }
+        let processors = ran?;
+
+        // 传统布局原样落盘，按实例安装交给调用方。
+        if let Target::Standalone = target {
+            let json_path = self.cx.layout.version_json(&version_id);
+            aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
+        }
 
         Ok((
             embedded,
             ForgeSummary {
                 id: version_id,
                 libraries,
-                processors: ran?,
+                processors,
             },
         ))
     }
@@ -669,7 +672,7 @@ impl<'a> ForgeInstaller<'a> {
         Ok(true)
     }
 
-    /// legacy 安装：versionInfo 落盘（传统布局）、解出通用 jar、下 versionInfo 里的库。
+    /// legacy 安装：解出通用 jar、下 versionInfo 里的库，全部成功后 versionInfo 才落盘（传统布局）。
     async fn install_legacy(
         &self,
         installer: &Path,
@@ -694,9 +697,6 @@ impl<'a> ForgeInstaller<'a> {
             })?;
         let id = embedded.id.clone();
         checked_segment(&id, || "Forge versionInfo 的版本 id".to_owned())?;
-        if let Target::Standalone = target {
-            aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
-        }
 
         // 从 installer zip 解出通用 jar 到其 maven 落点。
         let install = profile.install.as_ref().expect("已判定 install 存在");
@@ -714,7 +714,7 @@ impl<'a> ForgeInstaller<'a> {
                     reason: "legacy install 缺 filePath".to_owned(),
                 })?;
         let dest = self.cx.layout.checked_coordinate_path(&coord)?;
-        extract_zip_entry_to_async(installer, file_path.trim_start_matches('/'), &dest).await?;
+        extract_universal_jar(installer, file_path.trim_start_matches('/'), &dest).await?;
 
         // versionInfo 里的 Forge 库条目只有坐标和仓库地址，仓库里那个坐标并没有文件（只有
         // `-universal.jar`）；它就是刚解出的通用 jar，在盘上即算就绪。
@@ -725,6 +725,10 @@ impl<'a> ForgeInstaller<'a> {
         )?)
         .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
+
+        if let Target::Standalone = target {
+            aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
+        }
 
         Ok((
             embedded,
@@ -777,6 +781,19 @@ async fn extract_zip_entry_to_async(archive: &Path, entry: &str, dest: &Path) ->
     let bytes = read_zip_entry_async(archive, entry).await?;
     aurora_base::fs::atomic_write(dest, &bytes).await?;
     Ok(())
+}
+
+/// 把旧版通用 jar 解到库目录。同一 Forge 版本的游戏正在运行时 JVM 占着这份 jar，替换它会失败；
+/// 失败之后查一次占用，把笼统的 IO 失败换成能照着做的提示，没被占用就原样报出。
+async fn extract_universal_jar(installer: &Path, entry: &str, dest: &Path) -> Result<()> {
+    let bytes = read_zip_entry_async(installer, entry).await?;
+    let Err(source) = aurora_base::fs::atomic_write(dest, &bytes).await else {
+        return Ok(());
+    };
+    match first_held_open(vec![dest.to_path_buf()]).await {
+        Some(path) => Err(Error::LibraryFileLocked { path, source }),
+        None => Err(source.into()),
+    }
 }
 
 /// 解析 Maven 旁的 `.sha1` 文件：取第一段，必须是 40 位十六进制。
@@ -974,8 +991,8 @@ fn library_files_in(args: &[String], layout: &crate::layout::GameLayout) -> Vec<
         .collect()
 }
 
-/// 第一个正被别的进程占着的现有文件。只用于给已经失败的处理器找原因：探测本身出错时记一笔日志、
-/// 当它没被占用，处理器的失败照原样报出，不被探测的错误顶替。
+/// 第一个正被别的进程占着的现有文件。只用于给已经发生的失败找原因：探测本身出错时记一笔日志、
+/// 当它没被占用，原来的失败照原样报出，不被探测的错误顶替。
 async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
     let probed = tokio::task::spawn_blocking(move || {
         paths
@@ -1007,8 +1024,12 @@ async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
 /// 处理器输出只留最后这么多行：binarypatcher、重命名工具一跑能打出上万行，失败时有用的是末尾的异常。
 const OUTPUT_TAIL_LINES: usize = 200;
 
-/// 子进程退出后等读取任务读完剩余输出的时限。处理器若把管道句柄传给了还活着的孙进程，管道不会
-/// 关闭、读取任务会一直等下去；限时后放弃剩下的输出，不让安装卡在这里。
+/// 单行输出留下的上限。末尾缓冲只限行数：处理器把一大段内容打在一行里、甚至一直不换行时，这一行会
+/// 涨到把内存吃光。16 KiB 放得下带整条 classpath 的命令行和最长的异常信息，200 行也才 3.2 MB。
+const OUTPUT_LINE_MAX_BYTES: usize = 16 * 1024;
+
+/// 子进程退出后等读取任务读完剩余输出的时限，stdout 与 stderr 共用。处理器若把管道句柄传给了还活着
+/// 的孙进程，管道不会关闭、读取任务会一直等下去；限时后放弃剩下的输出，不让安装卡在这里。
 const OUTPUT_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 收集处理器的 stdout 与 stderr：各起一个读取任务，按到达顺序合进同一份末尾缓冲。管道必须一直有人
@@ -1044,10 +1065,13 @@ impl OutputCapture {
         }
     }
 
-    /// 等读取任务读完（限时见 [`OUTPUT_DRAIN_GRACE`]），交出收集到的输出。
+    /// 等读取任务读完（两路共用一个 [`OUTPUT_DRAIN_GRACE`] 的时限），交出收集到的输出。
     async fn finish(self) -> ProcessorOutput {
+        // 截止时刻只算一次：两路都卡住时一共等一个时限。排在后面的那一路过了截止时刻才轮到时，
+        // timeout_at 仍会先看它读完没有，已经读完的不算超时。
+        let deadline = tokio::time::Instant::now() + OUTPUT_DRAIN_GRACE;
         for mut reader in self.readers {
-            match tokio::time::timeout(OUTPUT_DRAIN_GRACE, &mut reader).await {
+            match tokio::time::timeout_at(deadline, &mut reader).await {
                 Ok(Ok(())) => {}
                 Ok(Err(join)) => match join.try_into_panic() {
                     Ok(payload) => std::panic::resume_unwind(payload),
@@ -1083,25 +1107,129 @@ async fn collect_lines(
     use tokio::io::AsyncBufReadExt;
 
     let mut reader = tokio::io::BufReader::new(stream);
-    let mut line = Vec::new();
+    let mut line = PendingLine::default();
     loop {
-        line.clear();
-        match reader.read_until(b'\n', &mut line).await {
-            Ok(0) => break,
-            // 只用于展示与排查：java 按系统代码页输出，非 UTF-8 的字节换成替换符，不让一行读不出
-            // 就丢掉整段输出。
-            Ok(_) => push_line(
-                &tail,
-                String::from_utf8_lossy(&line)
-                    .trim_end_matches(['\r', '\n'])
-                    .to_owned(),
-            ),
+        let chunk = match reader.fill_buf().await {
+            Ok(chunk) => chunk,
             Err(err) => {
+                line.flush_partial(&tail);
                 push_line(&tail, format!("（读取处理器输出中断：{err}）"));
-                break;
+                return;
             }
+        };
+        if chunk.is_empty() {
+            line.flush_partial(&tail);
+            return;
+        }
+        let newline = chunk.iter().position(|byte| *byte == b'\n');
+        let body = &chunk[..newline.unwrap_or(chunk.len())];
+        line.append(body);
+        let consumed = body.len() + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            line.flush(&tail);
         }
     }
+}
+
+/// 正在收的一行：只留开头 [`OUTPUT_LINE_MAX_BYTES`]，超出的只计数。
+#[derive(Default)]
+struct PendingLine {
+    kept: Vec<u8>,
+    cut: usize,
+}
+
+impl PendingLine {
+    fn append(&mut self, bytes: &[u8]) {
+        let room = OUTPUT_LINE_MAX_BYTES - self.kept.len();
+        let taken = bytes.len().min(room);
+        self.kept.extend_from_slice(&bytes[..taken]);
+        self.cut += bytes.len() - taken;
+    }
+
+    /// 这一行收完了，交给末尾缓冲。
+    fn flush(&mut self, tail: &std::sync::Mutex<OutputTail>) {
+        let decoded = decode_output(&self.kept);
+        let text = decoded.trim_end_matches('\r');
+        push_line(
+            tail,
+            match self.cut {
+                0 => text.to_owned(),
+                cut => format!("{text}（这一行太长，略去后面 {cut} 字节）"),
+            },
+        );
+        self.kept.clear();
+        self.cut = 0;
+    }
+
+    /// 输出到头了：没有换行符结尾的最后半行也要交上去，什么都没收到时不多出一个空行。
+    fn flush_partial(&mut self, tail: &std::sync::Mutex<OutputTail>) {
+        if !self.kept.is_empty() {
+            self.flush(tail);
+        }
+    }
+}
+
+/// 解码处理器的一行输出，只用于展示与排查。
+///
+/// JVM 往管道写时用 `native.encoding`，也就是系统 ANSI 代码页（简体中文系统上是 GBK），与
+/// `file.encoding` 无关。不先试 UTF-8：GBK 的「目录」恰好是合法 UTF-8。
+#[cfg(windows)]
+fn decode_output(bytes: &[u8]) -> String {
+    decode_code_page(bytes, windows_sys::Win32::Globalization::CP_ACP)
+}
+
+#[cfg(not(windows))]
+fn decode_output(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// 按代码页解码；非法字节由系统换成替换字符，不让一行读不出就丢掉整段输出。系统不认这个代码页时
+/// 退回按 UTF-8 有损解码并记日志：处理器的失败才是要报的错，不能被解码的问题顶替。
+#[cfg(windows)]
+fn decode_code_page(bytes: &[u8], code_page: u32) -> String {
+    use windows_sys::Win32::Globalization::MultiByteToWideChar;
+
+    if bytes.is_empty() {
+        return String::new();
+    }
+    let fall_back = || {
+        let err = std::io::Error::last_os_error();
+        tracing::warn!(code_page, %err, "按代码页解码处理器输出失败，改按 UTF-8 解码");
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let input_len = i32::try_from(bytes.len()).expect("处理器输出的单行长度有上限");
+    // SAFETY: 输入指针与长度出自同一切片；输出缓冲传空指针与 0，只询问需要的 UTF-16 长度。
+    let needed = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if needed <= 0 {
+        return fall_back();
+    }
+    let mut wide = vec![0u16; needed as usize];
+    // SAFETY: 输入同上；输出缓冲是刚按 needed 分配的 wide，长度如实告知。
+    let written = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            0,
+            bytes.as_ptr(),
+            input_len,
+            wide.as_mut_ptr(),
+            needed,
+        )
+    };
+    if written <= 0 {
+        return fall_back();
+    }
+    wide.truncate(written as usize);
+    String::from_utf16_lossy(&wide)
 }
 
 fn push_line(tail: &std::sync::Mutex<OutputTail>, line: String) {
@@ -2336,6 +2464,36 @@ mod tests {
         }
     }
 
+    /// 代替 java 的脚本：写下 `started` 后一直跑，代替正在干活、不观察取消令牌的处理器。
+    ///
+    /// 不能靠子命令拖时间：结束的只是脚本本身，还活着的子命令占着管道，Windows 上读管道在阻塞线程
+    /// 里，测试运行时收尾时要等它退出。
+    fn hanging_java(dir: &Path, started: &Path) -> PathBuf {
+        let started = started.display();
+        #[cfg(windows)]
+        {
+            let path = dir.join("hanging-java.cmd");
+            std::fs::write(
+                &path,
+                format!("@echo off\r\necho up> \"{started}\"\r\n:spin\r\ngoto spin\r\n"),
+            )
+            .unwrap();
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = dir.join("hanging-java");
+            std::fs::write(
+                &path,
+                format!("#!/bin/sh\necho up > '{started}'\nexec sleep 30\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+    }
+
     async fn install_with(f: &Fixture, java: &Path, installer: &Path) -> Result<ForgeSummary> {
         let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
         ForgeInstaller::new(cx, java)
@@ -2436,12 +2594,244 @@ mod tests {
             matches!(err, Error::ProcessorFailed { .. }),
             "实际：{err:?}"
         );
-        let scratch = f.layout.version_dir("1.20.1-forge-47.2.0").join(concat!(
-            ".",
-            aurora_base::app_slug!(),
-            "-forge-tmp"
-        ));
+        let scratch = f
+            .root
+            .join(concat!(".", aurora_base::app_slug!(), "-cache"))
+            .join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
         assert!(!scratch.exists(), "临时目录应被清掉：{}", scratch.display());
+    }
+
+    /// 处理器失败时这个 Forge 版本就是没装上：不留版本 JSON，版本目录也不出现。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_processor_leaves_no_version_behind() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let java = fake_java(&f.root, "out", "err", 3);
+
+        let err = install_with(&f, &java, &installer).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::ProcessorFailed { .. }),
+            "实际：{err:?}"
+        );
+        assert!(!f.layout.version_dir("1.20.1-forge-47.2.0").exists());
+    }
+
+    /// 取消时正在跑的处理器被结束，同样不留版本 JSON 与版本目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_a_running_processor_leaves_no_version_behind() {
+        let f = fixture();
+        put_processor_jar(&f);
+        let installer = processor_installer(
+            &f,
+            "",
+            "",
+            serde_json::json!(["--output", "{OUT_A}"]),
+            false,
+        );
+        let started = f.root.join("processor-started");
+        let java = hanging_java(&f.root, &started);
+        let token = CancellationToken::new();
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_cancel(Some(&token));
+        let forge = ForgeInstaller::new(cx, &java);
+        let attempt = forge.install_from_installer(&installer);
+        tokio::pin!(attempt);
+
+        let processor_started = async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            outcome = &mut attempt => panic!("处理器还在跑，安装不该结束：{outcome:?}"),
+            () = processor_started => {}
+        }
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+
+        assert!(err.is_cancelled(), "实际：{err:?}");
+        assert!(!f.layout.version_dir("1.20.1-forge-47.2.0").exists());
+    }
+
+    const DEPENDENCY: &str = "org.example:dep:1";
+    const DEPENDENCY_PATH: &str = "/org/example/dep/1/dep-1.jar";
+
+    /// 现代 installer：version.json 声明了一个要从 `repository` 下载的库。返回 installer 与版本 id。
+    fn modern_installer_needing(f: &Fixture, repository: &str) -> (PathBuf, &'static str) {
+        let id = "1.16.5-forge-36.2.39";
+        let profile = serde_json::json!({
+            "spec": 0, "version": id, "minecraft": "1.16.5", "json": "/version.json",
+            "data": {}, "processors": [], "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": id, "inheritsFrom": "1.16.5",
+            "libraries": [{ "name": DEPENDENCY, "url": repository }]
+        });
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+            ],
+        );
+        (installer, id)
+    }
+
+    /// 旧版 installer：versionInfo 声明了一个要从 `repository` 下载的库。返回 installer 与版本 id。
+    fn legacy_installer_needing(f: &Fixture, repository: &str) -> (PathBuf, &'static str) {
+        let id = "1.7.10-Forge10.13.4.1614-1.7.10";
+        let profile = serde_json::json!({
+            "install": {
+                "path": "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10",
+                "filePath": "forge-universal.jar"
+            },
+            "versionInfo": {
+                "id": id, "inheritsFrom": "1.7.10",
+                "libraries": [{ "name": DEPENDENCY, "url": repository }]
+            }
+        });
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("forge-universal.jar", b"universal"),
+            ],
+        );
+        (installer, id)
+    }
+
+    /// 现代与旧版两条路：库下不下来时不留版本 JSON，版本目录也不出现。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_library_download_leaves_no_version_behind() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(DEPENDENCY_PATH))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let repository = format!("{}/", server.uri());
+
+        for build in [modern_installer_needing, legacy_installer_needing] {
+            let f = fixture();
+            let (installer, id) = build(&f, &repository);
+
+            let err = install_with(&f, Path::new("java"), &installer)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(err, Error::BatchIncomplete { .. }),
+                "{id}：{err:?}"
+            );
+            assert!(!f.layout.version_dir(id).exists(), "{id}");
+        }
+    }
+
+    /// 现代与旧版两条路：取消发生在下库的途中，同样不留版本 JSON 与版本目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_the_library_download_leaves_no_version_behind() {
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for build in [modern_installer_needing, legacy_installer_needing] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path(DEPENDENCY_PATH))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(b"dep".to_vec())
+                        .set_delay(Duration::from_secs(30)),
+                )
+                .mount(&server)
+                .await;
+            let f = fixture();
+            let (installer, id) = build(&f, &format!("{}/", server.uri()));
+            let token = CancellationToken::new();
+            let pool = aurora_download::DownloadPool::new(
+                aurora_download::Downloader::with_defaults(f.client.clone()),
+                2,
+            )
+            .with_cancel(token.clone());
+            let cx = InstallContext::new(&f.client, &pool, &f.layout, &f.runtime, &f.policy)
+                .with_cancel(Some(&token));
+            let forge = ForgeInstaller::new(cx, "java");
+            let attempt = forge.install_from_installer(&installer);
+            tokio::pin!(attempt);
+
+            let library_requested = async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+            tokio::select! {
+                outcome = &mut attempt => panic!("{id}：库还没回来，安装不该结束：{outcome:?}"),
+                () = library_requested => {}
+            }
+            token.cancel();
+            let err = attempt.await.unwrap_err();
+
+            assert!(err.is_cancelled(), "{id}：{err:?}");
+            assert!(!f.layout.version_dir(id).exists(), "{id}");
+        }
+    }
+
+    /// 全部就绪后版本 JSON 才落位：现代走 installer 里那份的原始字节（保留未建模字段），旧版走内联的
+    /// versionInfo；版本目录里只有它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_install_lands_the_version_json_last() {
+        let id = "1.16.5-forge-36.2.39";
+        let profile = serde_json::json!({
+            "spec": 0, "version": id, "minecraft": "1.16.5", "json": "/version.json",
+            "data": {"BINPATCH": {"client": "/data/client.lzma", "server": "/data/server.lzma"}},
+            "processors": [], "libraries": []
+        });
+        let version = format!(
+            "{{\n  \"id\": \"{id}\",\n  \"inheritsFrom\": \"1.16.5\",\n  \"notModelled\": true\n}}"
+        );
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.as_bytes()),
+                ("data/client.lzma", b"patches"),
+            ],
+        );
+        install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(f.layout.version_json(id)).unwrap(),
+            version.as_bytes()
+        );
+        let entries: Vec<String> = std::fs::read_dir(f.layout.version_dir(id))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec![format!("{id}.json")]);
+
+        let f = fixture();
+        let (installer, id) = legacy_installer_needing(&f, "http://unused.invalid/");
+        put(&library(&f, DEPENDENCY), b"dep");
+        install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap();
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(f.layout.version_json(id)).unwrap()).unwrap();
+        assert_eq!(on_disk["id"], id);
+        assert_eq!(on_disk["inheritsFrom"], "1.7.10");
     }
 
     /// 没有声明产物的处理器没有可比的东西，每次都执行（官方 installer 同样如此）。
@@ -2516,6 +2906,168 @@ mod tests {
         );
     }
 
+    const OUTPUT_LINE_CAP: usize = 16 * 1024;
+
+    fn cut_line(kept: &str, cut: usize) -> String {
+        format!("{kept}（这一行太长，略去后面 {cut} 字节）")
+    }
+
+    /// 单行超过上限时只留开头并标明略去多少；下一行不受影响。正好到上限的不算超。
+    #[tokio::test]
+    async fn a_line_over_the_cap_is_cut_and_marked() {
+        let kept = "x".repeat(OUTPUT_LINE_CAP);
+        for (over, expected) in [
+            (0, kept.clone()),
+            (1, cut_line(&kept, 1)),
+            (5000, cut_line(&kept, 5000)),
+            (3 * OUTPUT_LINE_CAP, cut_line(&kept, 3 * OUTPUT_LINE_CAP)),
+        ] {
+            let mut stream = vec![b'x'; OUTPUT_LINE_CAP + over];
+            stream.extend_from_slice(b"\nnext line\n");
+            let tail = collected();
+
+            collect_lines(stream.as_slice(), tail.clone()).await;
+
+            assert_eq!(lines_of(&tail), vec![expected, "next line".to_owned()]);
+        }
+    }
+
+    /// 一直不换行的输出（比如把二进制打到了 stdout）读到结束：缓冲不跟着涨，只留上限内的开头。
+    #[tokio::test]
+    async fn output_that_never_ends_a_line_stays_within_the_cap() {
+        let stream = vec![b'y'; 64 * OUTPUT_LINE_CAP];
+        let tail = collected();
+
+        collect_lines(stream.as_slice(), tail.clone()).await;
+
+        assert_eq!(
+            lines_of(&tail),
+            vec![cut_line(&"y".repeat(OUTPUT_LINE_CAP), 63 * OUTPUT_LINE_CAP)]
+        );
+    }
+
+    /// 换行符落在哪一段读取里都一样：随机长度的行连成一串读出来，逐行与预期一致。
+    #[tokio::test]
+    async fn lines_of_random_lengths_read_back_one_by_one() {
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let mut stream = Vec::new();
+        let mut expected = Vec::new();
+        for _ in 0..OUTPUT_TAIL_LINES {
+            let len = rng.usize(0..2 * OUTPUT_LINE_CAP);
+            let ending: &[u8] = if rng.bool() { b"\n" } else { b"\r\n" };
+            stream.extend(std::iter::repeat_n(b'z', len));
+            stream.extend_from_slice(ending);
+            // 换行符之前的字节都算这一行的长度，CR 也在内。
+            let body = len + ending.len() - 1;
+            expected.push(if body <= OUTPUT_LINE_CAP {
+                "z".repeat(len)
+            } else {
+                cut_line(&"z".repeat(OUTPUT_LINE_CAP), body - OUTPUT_LINE_CAP)
+            });
+        }
+        let tail = collected();
+
+        collect_lines(stream.as_slice(), tail.clone()).await;
+
+        assert_eq!(lines_of(&tail), expected, "seed {seed}");
+    }
+
+    /// 普通输出照旧：去掉行尾的 CRLF，空行留着，最后一行没有换行符也不丢。
+    #[tokio::test]
+    async fn ordinary_lines_come_through_unchanged() {
+        let tail = collected();
+
+        collect_lines(b"first\r\n\nlast".as_slice(), tail.clone()).await;
+
+        assert_eq!(lines_of(&tail), vec!["first", "", "last"]);
+    }
+
+    /// 读到一半管道出错：已经读到的半行不丢，后面跟上中断的原因。
+    #[tokio::test]
+    async fn a_read_error_keeps_the_partial_line() {
+        struct BreaksAfter(Option<&'static [u8]>);
+
+        impl tokio::io::AsyncRead for BreaksAfter {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(match self.0.take() {
+                    Some(bytes) => {
+                        buf.put_slice(bytes);
+                        Ok(())
+                    }
+                    None => Err(std::io::Error::other("管道断了")),
+                })
+            }
+        }
+
+        let tail = collected();
+
+        collect_lines(BreaksAfter(Some(b"partial")), tail.clone()).await;
+
+        assert_eq!(
+            lines_of(&tail),
+            vec!["partial", "（读取处理器输出中断：管道断了）"]
+        );
+    }
+
+    /// 两路管道都被还活着的孙进程占着：一共只等一个时限，不是每路各等一个，安装不多卡两秒；读到的
+    /// 输出照常交回，每路各记一笔没读完。
+    #[tokio::test(start_paused = true)]
+    async fn both_pipes_share_one_drain_grace() {
+        let tail = collected();
+        push_line(&tail, "already read".to_owned());
+        let capture = OutputCapture {
+            tail,
+            readers: vec![
+                tokio::spawn(std::future::pending()),
+                tokio::spawn(std::future::pending()),
+            ],
+        };
+        let started = tokio::time::Instant::now();
+
+        let output = capture.finish().await;
+
+        let waited = started.elapsed();
+        assert!(
+            waited >= OUTPUT_DRAIN_GRACE
+                && waited < OUTPUT_DRAIN_GRACE + std::time::Duration::from_secs(1),
+            "实际等了 {waited:?}"
+        );
+        let unfinished = "（处理器已退出，管道仍被占着，后面的输出没有读完）";
+        assert_eq!(output.lines, vec!["already read", unfinished, unfinished]);
+    }
+
+    /// 排在后面的那一路在时限内读完了：时限到点时不算它超时，它读到的不丢。
+    #[tokio::test(start_paused = true)]
+    async fn a_pipe_that_finished_within_the_grace_is_not_given_up_on() {
+        let tail = collected();
+        let late = tail.clone();
+        let capture = OutputCapture {
+            tail,
+            readers: vec![
+                tokio::spawn(std::future::pending()),
+                tokio::spawn(async move {
+                    tokio::time::sleep(OUTPUT_DRAIN_GRACE / 2).await;
+                    push_line(&late, "from the second pipe".to_owned());
+                }),
+            ],
+        };
+
+        let output = capture.finish().await;
+
+        assert_eq!(
+            output.lines,
+            vec![
+                "from the second pipe",
+                "（处理器已退出，管道仍被占着，后面的输出没有读完）"
+            ]
+        );
+    }
+
     /// 输出只留末尾：超出的行从最早的丢起并计数。
     #[test]
     fn processor_output_keeps_only_the_tail() {
@@ -2538,6 +3090,63 @@ mod tests {
         };
         assert_eq!(shown.to_string(), "处理器输出（略去前 3 行）：\na\nb");
         assert_eq!(ProcessorOutput::default().to_string(), "处理器没有任何输出");
+    }
+
+    fn collected() -> std::sync::Arc<std::sync::Mutex<OutputTail>> {
+        std::sync::Arc::new(std::sync::Mutex::new(OutputTail::default()))
+    }
+
+    fn lines_of(tail: &std::sync::Mutex<OutputTail>) -> Vec<String> {
+        let tail = tail.lock().unwrap();
+        tail.lines.iter().cloned().collect()
+    }
+
+    /// 「游戏目录」的 GBK 字节。按 UTF-8 解码时前半截全成替换符，后半截的「目录」恰好是合法 UTF-8，
+    /// 会变成「Ŀ¼」，所以不能先试 UTF-8 再退回代码页。
+    #[cfg(windows)]
+    const GBK_GAME_DIR: &[u8] = b"\xD3\xCE\xCF\xB7\xC4\xBF\xC2\xBC";
+
+    /// 经管道读到的字节按系统代码页解码：JVM 往管道写时用的就是它（`native.encoding`）。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn processor_output_is_read_in_the_system_code_page() {
+        use windows_sys::Win32::Globalization::GetACP;
+
+        let stream = [b"C:\\", GBK_GAME_DIR, b"\\.minecraft\r\n"].concat();
+        let tail = collected();
+
+        collect_lines(stream.as_slice(), tail.clone()).await;
+
+        // SAFETY: GetACP 没有参数，只读进程的代码页设置。
+        let expected = match unsafe { GetACP() } {
+            936 => r"C:\游戏目录\.minecraft".to_owned(),
+            other => decode_code_page(&stream[..stream.len() - 2], other),
+        };
+        assert_eq!(lines_of(&tail), vec![expected]);
+    }
+
+    /// 代码页由参数决定，不依赖这台机器的系统设置：GBK 与系统启用 UTF-8 时的 65001 都解得对，空串不算
+    /// 失败（空输入调系统函数会报参数错误），行尾残缺的多字节序列不让整行读不出来。
+    #[cfg(windows)]
+    #[test]
+    fn decode_code_page_reads_the_bytes_of_that_code_page() {
+        assert_eq!(decode_code_page(GBK_GAME_DIR, 936), "游戏目录");
+        assert_eq!(decode_code_page("游戏目录".as_bytes(), 65001), "游戏目录");
+        assert_eq!(decode_code_page(b"", 936), "");
+        assert_eq!(decode_code_page(b"plain ascii", 936), "plain ascii");
+        let cut = decode_code_page(&GBK_GAME_DIR[..3], 936);
+        assert!(cut.starts_with('游'), "{cut:?}");
+    }
+
+    /// 系统不认的代码页：输出只用于排查，退回按 UTF-8 有损解码，不让这一行消失。
+    #[cfg(windows)]
+    #[test]
+    fn an_unknown_code_page_falls_back_to_lossy_utf8() {
+        const NO_SUCH_CODE_PAGE: u32 = 12345;
+        assert_eq!(
+            decode_code_page("补丁失败".as_bytes(), NO_SUCH_CODE_PAGE),
+            "补丁失败"
+        );
     }
 
     /// JVM 读 jar 的打开方式：放行读写共享、不放行删除共享。另一个实例的游戏就这样占着库里的 jar。
@@ -2656,6 +3265,59 @@ mod tests {
                     ..
                 }
             ),
+            "实际：{err:?}"
+        );
+    }
+
+    const LEGACY_UNIVERSAL: &str = "net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10";
+
+    /// 旧版安装要把通用 jar 解到库目录，而同一 Forge 版本的游戏正占着它：报占用并指认文件，不报笼统的
+    /// IO 失败，原来的系统错误留在原因链上；旧 jar 不动，版本也不算装上。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_universal_jar_held_by_a_running_game_is_reported_as_locked() {
+        let f = fixture();
+        let (installer, id) = legacy_installer_needing(&f, "http://unused.invalid/");
+        let universal = library(&f, LEGACY_UNIVERSAL);
+        put(&universal, b"older-universal");
+        let _game = hold_like_a_running_game(&universal);
+
+        let err = install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap_err();
+
+        match &err {
+            Error::LibraryFileLocked { path, source } => {
+                assert_eq!(path, &universal);
+                assert!(
+                    matches!(source, aurora_base::Error::Io { path, .. } if *path == universal),
+                    "{source:?}"
+                );
+            }
+            other => panic!("应为 LibraryFileLocked，实际 {other:?}"),
+        }
+        assert!(!aurora_base::retry::RetryableError::is_retryable(&err));
+        let shown = err.to_string();
+        assert!(shown.contains(&universal.display().to_string()), "{shown}");
+        assert!(shown.contains("正被别的程序占用"), "{shown}");
+        assert_eq!(std::fs::read(&universal).unwrap(), b"older-universal");
+        assert!(!f.layout.version_dir(id).exists());
+    }
+
+    /// 写不进去的原因不是占用（落点是个目录）：不张冠李戴，照原样报 IO 失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_universal_jar_failing_for_another_reason_keeps_its_own_error() {
+        let f = fixture();
+        let (installer, _) = legacy_installer_needing(&f, "http://unused.invalid/");
+        let universal = library(&f, LEGACY_UNIVERSAL);
+        std::fs::create_dir_all(&universal).unwrap();
+
+        let err = install_with(&f, Path::new("java"), &installer)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::Base(aurora_base::Error::Io { path, .. }) if *path == universal),
             "实际：{err:?}"
         );
     }

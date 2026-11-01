@@ -3,7 +3,8 @@
 //! 两者的 meta 服务同构：`GET {base}/{apiver}/versions/loader/{game}` 列出可用 loader，
 //! `GET {base}/{apiver}/versions/loader/{game}/{loader}/profile/json` 直接返回一份可落盘的
 //! 版本 JSON（`inheritsFrom` 指向原版，libraries 仅含加载器自身的 maven 简写库）。因此安装 =
-//! 取 profile JSON 原样落盘 + 下载它声明的加载器库，无需 Java 子进程。Fabric 走 v2、Quilt 走 v3。
+//! 取 profile JSON + 下载它声明的加载器库 + 原样落盘 profile JSON，无需 Java 子进程。Fabric 走 v2、
+//! Quilt 走 v3。
 //! `GET {base}/{apiver}/versions/game` 列出该加载器支持的全部游戏版本。
 
 use aurora_download::SourcePlan;
@@ -236,12 +237,13 @@ impl<'a> LoaderInstaller<'a> {
         // id 来自加载器 meta，原样拼进 versions/<id>/<id>.json。
         checked_segment(&id, || "加载器 profile 的版本 id".to_owned())?;
 
-        // 原样落盘 profile JSON（保留未建模字段），再下加载器库。
-        let json_path = self.cx.layout.version_json(&id);
-        aurora_base::fs::atomic_write(&json_path, &raw).await?;
-
         let tasks = plan::library_tasks(&version, self.cx.runtime, self.cx.layout)?;
         let libraries = self.cx.run_batch(tasks, "加载器库", None).await?;
+
+        // 版本列表只凭版本 JSON 认版本，库都就绪了才让它出现，失败或取消时这个加载器就是没装上。
+        // 原样落盘，保留未建模字段。
+        let json_path = self.cx.layout.version_json(&id);
+        aurora_base::fs::atomic_write(&json_path, &raw).await?;
 
         Ok(LoaderSummary {
             id,
@@ -486,6 +488,96 @@ mod tests {
         let lib =
             layout.library_path("net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar");
         assert_eq!(std::fs::read(lib).unwrap(), b"fabric-loader-jar");
+    }
+
+    const LOADER_ID: &str = "fabric-loader-0.15.11-1.21";
+    const LOADER_JAR_PATH: &str = "/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar";
+
+    /// 挂上 profile 与加载器库的响应。
+    async fn mount_profile(server: &MockServer, library: ResponseTemplate) {
+        let base = server.uri();
+        let profile = format!(
+            r#"{{"id":"{LOADER_ID}","inheritsFrom":"1.21","mainClass":"Knot",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.11","url":"{base}/"}}]}}"#
+        );
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/1.21/0.15.11/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(profile))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(LOADER_JAR_PATH))
+            .respond_with(library)
+            .mount(server)
+            .await;
+    }
+
+    /// 加载器库下不下来时这个加载器版本就是没装上：版本 JSON 不落位、版本目录也不出现。Fabric 的版本
+    /// 目录里没有别的文件，版本 JSON 先落位的话，版本列表里就多出一个启动不了的版本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_library_download_leaves_no_version_behind() {
+        let server = MockServer::start().await;
+        mount_profile(&server, ResponseTemplate::new(404)).await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let err = LoaderInstaller::fabric(cx)
+            .with_base_url(server.uri())
+            .install("1.21", Some("0.15.11"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::BatchIncomplete { .. }), "实际 {err:?}");
+        assert!(!layout.version_dir(LOADER_ID).exists());
+    }
+
+    /// 取消发生在下加载器库的途中：同样不留版本 JSON 与版本目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_the_library_download_leaves_no_version_behind() {
+        let server = MockServer::start().await;
+        let stalled = ResponseTemplate::new(200)
+            .set_body_bytes(b"jar".to_vec())
+            .set_delay(Duration::from_secs(30));
+        mount_profile(&server, stalled).await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let token = aurora_download::CancellationToken::new();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4)
+            .with_cancel(token.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy)
+            .with_cancel(Some(&token));
+        let installer = LoaderInstaller::fabric(cx).with_base_url(server.uri());
+        let attempt = installer.install("1.21", Some("0.15.11"));
+        tokio::pin!(attempt);
+
+        let library_requested = async {
+            loop {
+                let requests = server.received_requests().await.unwrap();
+                if requests.iter().any(|r| r.url.path() == LOADER_JAR_PATH) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut attempt => panic!("加载器库还没回来，安装不该结束"),
+            () = library_requested => {}
+        }
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+
+        assert!(err.is_cancelled(), "实际 {err:?}");
+        assert!(!layout.version_dir(LOADER_ID).exists());
     }
 
     /// meta 给出的 profile id 原样拼进 versions/<id>/<id>.json：能走出版本目录的报路径越界，
