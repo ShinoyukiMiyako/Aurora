@@ -912,6 +912,76 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
         { kind: "find_mod_version", category: "dependency_version_mismatch", detail: "cloth-config" },
       ]);
     });
+
+    it("同一个前置既被说版本不符又被说版本不对：只出一行，标题跟第一条线索", () => {
+      const yacl = mod("yacl-3.6.6.jar", {}, { depends: ["fabric-api"] });
+      const fixes = crashFixes(
+        report([clue("game_version_mismatch", { detail: "fabric-api" }), clue("dependency_version_mismatch", { detail: "fabric-api" })]),
+        ctx({ mods: [api, yacl] }),
+      );
+      expect(only(fixes)).toEqual([{ kind: "view_mod", category: "game_version_mismatch", fileName: "fabric-api-0.83.0.jar", name: "Fabric API" }]);
+    });
+  });
+
+  describe("别的 Mod 的前置不给一键停用", () => {
+    const cloth = mod("cloth-config-11.jar", {}, { mod_id: "cloth-config", name: "Cloth Config" });
+    const viewCloth = { fileName: "cloth-config-11.jar", name: "Cloth Config" };
+
+    it("有已启用的 Mod 声明依赖它：改成查看 Mod，不分大小写", () => {
+      const rei = mod("rei-12.jar", {}, { depends: ["fabricloader", "Cloth-Config"] });
+      expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "cloth-config" })]), ctx({ mods: [cloth, rei] })))).toEqual([
+        { kind: "view_mod", category: "game_version_mismatch", ...viewCloth },
+      ]);
+    });
+
+    it("依赖它的 Mod 都停用着、或者只有它自己声明过：照旧给停用", () => {
+      const parked = mod("rei-12.jar.disabled", {}, { depends: ["cloth-config"] });
+      const self = mod("cloth-config-11.jar", {}, { mod_id: "cloth-config", name: "Cloth Config", depends: ["cloth-config"] });
+      for (const mods of [[cloth, parked], [self]]) {
+        expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "cloth-config" })]), ctx({ mods })))).toEqual([
+          { kind: "disable_mod", category: "game_version_mismatch", ...viewCloth },
+        ]);
+      }
+    });
+
+    it("Fabric API：Mod 常常只声明它拆出来的子模块，没人写 fabric-api 也不给停用", () => {
+      const sodium = mod("sodium-0.5.jar", {}, { depends: ["fabric-rendering-v1", "fabricloader"] });
+      for (const [id, fileName] of [
+        ["fabric-api", "fabric-api-0.83.jar"],
+        ["fabric", "fabric-0.40.jar"],
+        ["quilted_fabric_api", "qfapi-7.jar"],
+      ]) {
+        const api = mod(fileName, {}, { mod_id: id, name: "Fabric API" });
+        expect(only(crashFixes(report([clue("game_version_mismatch", { detail: id })]), ctx({ mods: [api, sodium] })))).toEqual([
+          { kind: "view_mod", category: "game_version_mismatch", fileName, name: "Fabric API" },
+        ]);
+      }
+    });
+
+    it("Mixin 注入失败与文件损坏同样不给停用", () => {
+      const rei = mod("rei-12.jar", {}, { depends: ["cloth-config"] });
+      expect(only(crashFixes(report([clue("mixin_failure", { detail: "cloth-config" })]), ctx({ mods: [cloth, rei] })))).toEqual([
+        { kind: "view_mod", category: "mixin_failure", ...viewCloth },
+      ]);
+      const corrupted = clue("corrupted_jar", { matched: "zip END header not found D:\\mc\\mods\\cloth-config-11.jar" });
+      expect(only(crashFixes(report([corrupted]), ctx({ mods: [cloth, rei] })))).toEqual([{ kind: "view_mod", category: "corrupted_jar", ...viewCloth }]);
+    });
+
+    it("OptiFine 被别的 Mod 声明依赖时同样不给停用", () => {
+      const optifine = mod("OptiFine_1.20.1_HD_U_I6.jar", {}, { mod_id: "optifine", name: "OptiFine" });
+      const addon = mod("of-addon-1.jar", {}, { depends: ["optifine"] });
+      expect(only(crashFixes(report([clue("optifine_incompatible")]), ctx({ mods: [optifine, addon] })))).toEqual([
+        { kind: "view_mod", category: "optifine_incompatible", fileName: "OptiFine_1.20.1_HD_U_I6.jar", name: "OptiFine" },
+      ]);
+    });
+
+    it("元数据读不出来的 Mod 说不清被谁依赖，也说不清依赖谁：照旧给停用", () => {
+      const bare = mod("cloth-config", {}, null);
+      const unreadable = mod("rei-12.jar", {}, null);
+      expect(only(crashFixes(report([clue("game_version_mismatch", { detail: "cloth-config" })]), ctx({ mods: [bare, unreadable] })))).toEqual([
+        { kind: "disable_mod", category: "game_version_mismatch", fileName: "cloth-config", name: "cloth-config" },
+      ]);
+    });
   });
 
   it("OptiFine 不兼容：文件名或 mod id 带 optifine 的已启用 Mod 恰好一个才给停用按钮", () => {

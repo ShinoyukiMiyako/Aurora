@@ -749,6 +749,17 @@ function enabledOptifine(mods: readonly InstalledMod[]): InstalledMod[] {
   );
 }
 
+/** Fabric API 把自己拆成 fabric-xxx-v1 这样的子模块打包，Mod 常常只声明依赖子模块，声明里看不到它本身，只能按 id 认。 */
+const FABRIC_API_IDS: readonly string[] = ["fabric-api", "fabric", "quilted_fabric_api"];
+
+/** 还有别的已启用 Mod 要靠它。依赖声明读不出来的 Mod 算不上要靠谁。 */
+function isPrerequisite(target: InstalledMod, mods: readonly InstalledMod[]): boolean {
+  if (target.metadata === null) return false;
+  const id = target.metadata.mod_id.toLowerCase();
+  if (FABRIC_API_IDS.includes(id)) return true;
+  return mods.some((m) => m !== target && m.enabled && m.metadata !== null && m.metadata.depends.some((d) => d.toLowerCase() === id));
+}
+
 /**
  * 按线索推出的一键尝试，同一类别只出一条（取第一条线索），末尾固定「对照完整日志」。
  * 不同类别推出同一个动作（比如两条线索都指向停用同一个文件）时只留第一条，键不重复。
@@ -763,9 +774,9 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
     keys.add(key);
     fixes.push(fix);
   };
-  // 一键停用都走这里
+  // 一键停用都走这里：别的 Mod 的前置一停就连带一批 Mod 起不来，不能当一次试探
   const pushDisable = (category: DisableCategory, mod: InstalledMod) =>
-    push({ kind: "disable_mod", category, fileName: mod.file_name, name: modName(mod) });
+    push({ kind: isPrerequisite(mod, ctx.mods) ? "view_mod" : "disable_mod", category, fileName: mod.file_name, name: modName(mod) });
   const seen = new Set<string>();
   for (const clue of report.diagnoses) {
     if (seen.has(clue.category)) continue;

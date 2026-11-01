@@ -2441,9 +2441,15 @@ describe("实例详情：崩溃诊断", () => {
     const api = modDto("fabric-api-0.83.0.jar", "Fabric API");
     if (api.metadata === null) throw new Error("modDto 总带元数据");
     mods = [{ ...api, metadata: { ...api.metadata, mod_id: "fabric-api" } }, modDto("yacl.jar", "YACL")];
-    crash = report([{ category: "dependency_version_mismatch", detail: "fabric-api" }], NOW - 60_000);
+    crash = report(
+      [
+        { category: "game_version_mismatch", detail: "fabric-api" },
+        { category: "dependency_version_mismatch", detail: "fabric-api" },
+      ],
+      NOW - 60_000,
+    );
     await open("crash");
-    expect(text()).toContain("找到 1 条线索，日志指向前置版本不对");
+    expect(text()).toContain("找到 2 条线索，日志指向版本不符与前置版本不对");
     expect(text()).toContain("日志指向 fabric-api 已经装了，只是版本不对。");
     expect(text()).not.toContain("缺少");
     expect(() => button("停用 Fabric API")).toThrow();
