@@ -362,6 +362,7 @@ const FIX_ICON: Readonly<Record<CrashFix["kind"], "memory" | "java" | "mod" | "c
   find_dependency: "compass",
   find_mod_version: "compass",
   disable_mod: "mod",
+  view_mod: "mod",
   keep_latest: "mod",
   repair: "wrench",
   driver_steps: "monitor",
@@ -385,9 +386,9 @@ function fixTitle(fix: CrashFix): string {
     case "find_dependency":
       return CRASH_CATEGORY.missing_dependency.label;
     case "find_mod_version":
-      return CRASH_CATEGORY.game_version_mismatch.label;
     case "search_dependency":
     case "disable_mod":
+    case "view_mod":
     case "repair":
     case "driver_steps":
       return CRASH_CATEGORY[fix.category].label;
@@ -664,6 +665,10 @@ function FixRow({
         () => toggleMods([fix], false, CRASH_PAGE_COPY.disabledDone(1)),
         modReason([fix]),
       );
+      break;
+    case "view_mod":
+      note = CRASH_PAGE_COPY.viewModNote(fix.name);
+      action = button(CRASH_PAGE_COPY.viewMods, () => onTab("mods"));
       break;
     case "keep_latest":
       note = CRASH_PAGE_COPY.keepLatestNote(fix.disable.length);

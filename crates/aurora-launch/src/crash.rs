@@ -26,7 +26,9 @@ pub enum CrashCategory {
     MissingLanguageProvider,
     /// Mod 要求别的游戏版本或加载器版本。
     GameVersionMismatch,
-    /// 缺少前置 Mod 或依赖版本不满足。
+    /// 前置 Mod 装着，只是版本不满足要求。
+    DependencyVersionMismatch,
+    /// 缺少前置 Mod，或日志说不清是缺失还是版本不满足。
     MissingDependency,
     /// OptiFine 与当前加载器不兼容。
     OptifineIncompatible,
@@ -88,12 +90,32 @@ struct Rule {
 ///   Mod」，点不出是谁；
 /// - Forge / NeoForge：`\tMod ID: 'minecraft', Requested by: 'sodium', Expected range: '[1.20.4]', Actual version: '1.20.1'`。
 ///
-/// 依赖 Java 的同类报错不归这里（那是换 Java 的事），其余 Mod 之间的版本不符仍归「缺少前置」。
+/// 依赖 Java 的同类报错不归这里（那是换 Java 的事），Mod 之间的版本不符归 [`DEPENDENCY_VERSION_MISMATCH`]。
 ///
 /// Fabric Loader 给玩家看的说明按系统语言翻译，同一次失败它还会写一行不翻译的原因
 /// `HARD_DEP_INCOMPATIBLE_PRESELECTED sodium 0.8.13 {depends minecraft @ [1.21]}`，最后一个分支认这种写法，
 /// 任何语言下都有。
 const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'|hard_dep(?:_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends (?:minecraft|fabricloader|quilt_loader) @";
+
+/// 前置 Mod 装着、版本不对，每种日志写法一个分支，捕获的都是这个前置的 id：
+/// - Fabric Loader：`Mod 'YACL' (yacl) 3.6.6 requires version 0.92.0 or later of mod 'Fabric API' (fabric-api), but only
+///   the wrong version is present: 0.83.0!`（名字里可能有撇号，几个候选都不对时是 `wrong versions are present`）；
+/// - Fabric Loader 在中文系统上：`模组 'YACL' (yacl) 3.6.6 需要 模组 'Fabric API' (fabric-api) 的 0.92.0 及以上版本，
+///   但已经安装了的版本 0.83.0 不对！`；
+/// - Fabric Loader 给已选定的 Mod 记的不翻译的原因：`HARD_DEP_INCOMPATIBLE_PRESELECTED rei 12.1 {depends cloth-config @ [>=11]}`；
+/// - Forge / NeoForge：`\tMod ID: 'flywheel', Requested by: 'create', Expected range: '[0.6.10,0.6.11)', Actual version: '0.6.8'`，
+///   没装时实际版本写 `[MISSING]`；
+/// - Fabric Loader 不翻译的修复建议：`Fix: add [], remove [], replace [[fabric-api 0.83.0] -> add:fabric-api 0.92.0 (...)]`，
+///   任何语言下都有。它自己不算数，要与原因行互相印证，见 [`wrong_version_deps`]。
+///
+/// 只认 `requires` / `需要`：同样的措辞主语换成 `recommends` 只是一条警告，游戏照常启动。
+const DEPENDENCY_VERSION_MISMATCH: &str = concat!(
+    r"(?i)requires .+ of (?:mod )?'.+' \(([a-z0-9_\-]+)\), but only the wrong version|",
+    r"需要 模组 '.+' \(([a-z0-9_\-]+)\) 的 .*不对|",
+    r"hard_dep_incompatible_preselected \S+ \S+ \{depends ([a-z0-9_\-]+) @|",
+    r"mod id: '([a-z0-9_\-]+)', requested by: '[^']+', expected range: '[^']*', actual version: '[^\[']|",
+    r"-> add:([a-z0-9_\-]+) "
+);
 
 /// JVM 参数被拒时 Java 自己打的那一行。一个开关没写 `-` 时 Java 把它当成主类，报的是「找不到主类」，主类名带不带点
 /// 区分得开：版本 JSON 给的主类都带包名，不带点的只能是写错的参数；真缺主类是文件问题，不归这里。Java 按系统语言翻译这
@@ -169,12 +191,21 @@ const RULES: &[Rule] = &[
         regex: Some(GAME_VERSION_MISMATCH),
         extract: Some(GAME_VERSION_MISMATCH),
         summary: "Mod 要求别的游戏或加载器版本",
-        advice: "换用支持当前 Minecraft 与加载器版本的 Mod 版本，或先停用这个 Mod。",
+        advice: "换用支持当前 Minecraft 与加载器版本的 Mod 版本；这个 Mod 是别的 Mod 的前置时先更新它，不要直接停用。",
+    },
+    Rule {
+        category: CrashCategory::DependencyVersionMismatch,
+        patterns: &[],
+        regex: Some(DEPENDENCY_VERSION_MISMATCH),
+        extract: Some(DEPENDENCY_VERSION_MISMATCH),
+        summary: "前置 Mod 装着，但版本不对",
+        advice: "把这个前置更新到日志要求的版本；别的 Mod 可能也依赖它，不要直接停用。",
     },
     Rule {
         category: CrashCategory::MissingDependency,
         patterns: &[
             "missing or unsupported mandatory dependencies",
+            "actual version: '[missing]'",
             "which is missing",
             "requires version",
             "incompatible mod set",
@@ -184,12 +215,13 @@ const RULES: &[Rule] = &[
             r"(?i)hard_dep(?:_no_candidate|_incompatible_preselected)? \S+ \S+ \{depends |",
             r"需要 模组 '[^']+' \([a-z0-9_\-]+\) 的"
         )),
-        // 缺的是 Mod 时两种语言都带显示名：`of mod 'Fabric API' (fabric-api)`、`需要 模组 'Fabric API' (fabric-api) 的`。
+        // 写法要带上「没装」那半句：`of mod 'X' (x)` 与 `需要 模组 'X' (x) 的` 在版本不对、加载不了时一模一样。
         extract: Some(concat!(
             r"(?i)of ([a-z0-9_\-]+),? which is missing|",
-            r"of mod '[^']+' \(([a-z0-9_\-]+)\)|",
-            r"需要 模组 '[^']+' \(([a-z0-9_\-]+)\) 的|",
-            r"hard_dep_no_candidate \S+ \S+ \{depends ([a-z0-9_\-]+) @"
+            r"of mod '.+' \(([a-z0-9_\-]+)\),? which is missing|",
+            r"需要 模组 '.+' \(([a-z0-9_\-]+)\) 的 .*但没有安装|",
+            r"hard_dep_no_candidate \S+ \S+ \{depends ([a-z0-9_\-]+) @|",
+            r"mod id: '([a-z0-9_\-]+)', requested by: '[^']+', expected range: '[^']*', actual version: '\[missing\]'"
         )),
         summary: "缺少前置 Mod 或依赖版本不满足",
         advice: "根据日志补齐缺失的前置 Mod（如 Fabric API），或把相关 Mod 调整到彼此兼容的版本。",
@@ -317,6 +349,36 @@ impl CompiledRule {
         self.matcher.as_ref().is_some_and(|re| re.is_match(line))
             || self.regex.as_ref().is_some_and(|re| re.is_match(line))
     }
+
+    /// 这一行归不归这条规则。前置是没装还是版本不对，单看一行常常分不开，要拿整份日志得出的结论来判。
+    fn claims(&self, line: &str, wrong_versions: &[String]) -> bool {
+        if !self.hits(line) {
+            return false;
+        }
+        let wrong = |id: &str| wrong_versions.iter().any(|w| w.eq_ignore_ascii_case(id));
+        match self.rule.category {
+            // 版本要求写的可能是平台，修复建议换的可能是依赖方自己，这些都不是前置版本不对。
+            CrashCategory::DependencyVersionMismatch => self
+                .regex
+                .as_ref()
+                .is_some_and(|re| captured(re, line).any(wrong)),
+            CrashCategory::MissingDependency => {
+                let mut targets = captured(&HARD_DEP_TARGET, line).peekable();
+                targets.peek().is_none() || !targets.all(wrong)
+            }
+            _ => true,
+        }
+    }
+
+    /// 这个捕获值能不能当这条规则的 `detail`。同一行、同一条报错里可能既有没装的又有版本不对的。
+    fn admits(&self, id: &str, wrong_versions: &[String]) -> bool {
+        let wrong = wrong_versions.iter().any(|w| w.eq_ignore_ascii_case(id));
+        match self.rule.category {
+            CrashCategory::DependencyVersionMismatch => wrong,
+            CrashCategory::MissingDependency => !wrong,
+            _ => true,
+        }
+    }
 }
 
 /// 由子串集合构造不区分大小写的命中正则。子串按字面量转义，不是正则。
@@ -357,6 +419,37 @@ static FABRIC_INCOMPATIBLE: LazyLock<Regex> = LazyLock::new(|| {
     ])
 });
 
+/// 整体报错行：只说依赖出了问题、说不清是哪种，或像「被别的限制挡住，加载不了」那样是别的报错的连带。有更具体的版本线索时
+/// 它们是同一件事的另一种说法，不能再算一条「缺少前置」。
+static DEPENDENCY_SUMMARY: LazyLock<Regex> = LazyLock::new(|| {
+    literal_alternation(&[
+        "incompatible mod set",
+        "missing or unsupported mandatory dependencies",
+        "which can't be loaded",
+        "由于其他限制条件无法载入",
+    ])
+});
+
+/// 上面这些整体报错行让位的线索：都是在说版本不对。
+const VERSION_CATEGORIES: [CrashCategory; 3] = [
+    CrashCategory::JavaVersionMismatch,
+    CrashCategory::GameVersionMismatch,
+    CrashCategory::DependencyVersionMismatch,
+];
+
+/// Fabric Loader 的原因行点名的前置：`HARD_DEP_NO_CANDIDATE a 1.0 {depends b @ [>=2]}`。
+static HARD_DEP_TARGET: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)hard_dep(?:_no_candidate|_incompatible_preselected)? \S+ \S+ \{depends ([a-z0-9_\-]+) @")
+        .expect("内置正则必须可编译")
+});
+
+/// Fabric Loader 修复建议里要换掉的 Mod：`replace [[fabric-api 0.83.0] -> add:fabric-api 0.92.0 ([[0.92.0,∞)])]`。
+static FIX_REPLACEMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"-> add:([a-z0-9_\-]+) ").expect("内置正则必须可编译"));
+
+static WRONG_VERSION_STATED: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(DEPENDENCY_VERSION_MISMATCH).expect("内置正则必须可编译"));
+
 /// JVM 致命错误头里的异常行：`#  EXCEPTION_ACCESS_VIOLATION (0xc0000005) at pc=0x00007ffb, pid=1, tid=2`。
 static JVM_EXCEPTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^#\s+EXCEPTION_[A-Z_]+ \(0x([0-9a-f]{8})\)").expect("内置正则必须可编译")
@@ -389,19 +482,28 @@ pub fn analyze(log: &str, exit_code: Option<i32>) -> Vec<CrashDiagnosis> {
 /// 附加信息从命中行起往后找第一处能提取的地方（同一条报错的细节常常在下一行，例如 Fabric 的依赖报错先说
 /// 「Incompatible mod set」再逐条列出缺的是谁）。
 pub fn analyze_lines(lines: &[&str]) -> Vec<CrashDiagnosis> {
-    let mut out = Vec::new();
+    let mut out: Vec<CrashDiagnosis> = Vec::new();
     let mut occupied = vec![false; lines.len()];
+    let wrong_versions = wrong_version_deps(lines);
     for compiled in COMPILED.iter() {
         let hits: Vec<usize> = (0..lines.len())
-            .filter(|&index| !occupied[index] && compiled.hits(lines[index]))
+            .filter(|&index| !occupied[index] && compiled.claims(lines[index], &wrong_versions))
             .collect();
         let Some(&first) = hits.first() else {
             continue;
         };
+        if compiled.rule.category == CrashCategory::MissingDependency
+            && out.iter().any(|d| VERSION_CATEGORIES.contains(&d.category))
+            && hits
+                .iter()
+                .all(|&index| DEPENDENCY_SUMMARY.is_match(lines[index]))
+        {
+            continue;
+        }
         for index in hits {
             occupied[index] = true;
         }
-        out.push(diagnose(compiled, lines, first));
+        out.push(diagnose(compiled, lines, first, &wrong_versions));
     }
     if out.is_empty()
         && let Some(index) = lines.iter().position(|l| FABRIC_INCOMPATIBLE.is_match(l))
@@ -410,16 +512,49 @@ pub fn analyze_lines(lines: &[&str]) -> Vec<CrashDiagnosis> {
             .iter()
             .find(|c| c.rule.category == CrashCategory::MissingDependency)
             .expect("规则表里有缺少前置这一条");
-        out.push(diagnose(missing, lines, index));
+        out.push(diagnose(missing, lines, index, &wrong_versions));
     }
     out
 }
 
-fn diagnose(compiled: &CompiledRule, lines: &[&str], index: usize) -> CrashDiagnosis {
+/// 整份日志里版本不对的前置，平台 id 不算。
+///
+/// 除了直接写明的，Fabric Loader 的前置只要没有一个候选版本满足要求，原因行就写 `HARD_DEP_NO_CANDIDATE a 1.0 {depends b @ [>=2]}`，
+/// 没装和版本不对一字不差，要看同一次失败的修复建议：`add [add:b 2 ...]` 是没装，`replace [[b 1] -> add:b 2 ...]` 是版本不对。
+/// replace 里也可能是依赖方自己（换成适配这个游戏版本的版本），它不是谁的前置，所以只算原因行点名的。这两行都不翻译，任何语言下都有。
+fn wrong_version_deps(lines: &[&str]) -> Vec<String> {
+    let named = |re: &Regex, lines: &[&str]| -> Vec<String> {
+        lines
+            .iter()
+            .flat_map(|line| captured(re, line))
+            .map(str::to_ascii_lowercase)
+            .filter(|id| !NON_MOD_TOKENS.contains(&id.as_str()))
+            .collect()
+    };
+    let (fixes, others): (Vec<&str>, Vec<&str>) = lines
+        .iter()
+        .copied()
+        .partition(|line| FIX_REPLACEMENT.is_match(line));
+    let replaced = named(&FIX_REPLACEMENT, &fixes);
+    let mut wrong = named(&WRONG_VERSION_STATED, &others);
+    wrong.extend(
+        named(&HARD_DEP_TARGET, &others)
+            .into_iter()
+            .filter(|id| replaced.contains(id)),
+    );
+    wrong
+}
+
+fn diagnose(
+    compiled: &CompiledRule,
+    lines: &[&str],
+    index: usize,
+    wrong_versions: &[String],
+) -> CrashDiagnosis {
     let detail = compiled.extract.as_ref().and_then(|re| {
         lines[index..]
             .iter()
-            .find_map(|line| first_capture(re, line))
+            .find_map(|line| captured(re, line).find(|text| compiled.admits(text, wrong_versions)))
     });
     CrashDiagnosis {
         category: compiled.rule.category,
@@ -431,10 +566,19 @@ fn diagnose(compiled: &CompiledRule, lines: &[&str], index: usize) -> CrashDiagn
     }
 }
 
-/// 第一个参与匹配的捕获组：提取式按分支写多种日志格式，每个分支有自己的组。
+/// 每处匹配里第一个参与匹配的捕获组：提取式按分支写多种日志格式，每个分支有自己的组。
+fn captured<'a>(re: &Regex, text: &'a str) -> impl Iterator<Item = &'a str> {
+    re.captures_iter(text).filter_map(|caps| {
+        caps.iter()
+            .skip(1)
+            .flatten()
+            .next()
+            .map(|group| group.as_str())
+    })
+}
+
 fn first_capture<'a>(re: &Regex, text: &'a str) -> Option<&'a str> {
-    re.captures(text)
-        .and_then(|caps| caps.iter().skip(1).flatten().next().map(|m| m.as_str()))
+    captured(re, text).next()
 }
 
 /// 日志里是否出现明确的崩溃标记（崩溃报告头、JVM 致命错误、主线程未捕获异常）。
@@ -807,12 +951,15 @@ mod tests {
         assert_eq!(extract_mod_ids(FABRIC_ZH_JAVA), vec!["pfjava"]);
     }
 
-    /// Mod 之间版本不符：有前置但版本不对，依赖方不是游戏、加载器或 Java，还算缺少前置，只是说不出缺的是谁。
+    /// 已选定的前置版本不对：Loader 记的这种原因不会是没装。
     #[test]
-    fn fabric_mod_to_mod_mismatch_stays_a_dependency_problem() {
-        let log = "[main/INFO]: Immediate reason: [HARD_DEP_INCOMPATIBLE_PRESELECTED rei 12.1 {depends cloth-config @ [>=11]}, ROOT_FORCELOAD_SINGLE rei 12.1]";
-        let diag = primary(log, CrashCategory::MissingDependency);
-        assert_eq!(diag.detail, None);
+    fn fabric_preselected_wrong_version_is_not_a_missing_dependency() {
+        let log = "[main/INFO]: Immediate reason: [HARD_DEP_INCOMPATIBLE_PRESELECTED rei 12.1 {depends cloth-config @ [>=11]}, ROOT_FORCELOAD_SINGLE rei 12.1]
+[main/INFO]: Reason: [HARD_DEP rei 12.1 {depends cloth-config @ [>=11]}]";
+        let diags = analyze(log, Some(1));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::DependencyVersionMismatch);
+        assert_eq!(diags[0].detail.as_deref(), Some("cloth-config"));
     }
 
     /// 两个 Mod 互相声明冲突：说不清哪一类时，整体报错这两行是唯一的线索。
@@ -1103,9 +1250,9 @@ More details:\n\
         for log in [FABRIC_INCOMPATIBLE_ZH, FABRIC_INCOMPATIBLE_EN] {
             let mismatch = find(log, CrashCategory::GameVersionMismatch);
             assert_eq!(mismatch.detail.as_deref(), Some("fabric-api"), "{log}");
-            let missing = find(log, CrashCategory::MissingDependency);
-            assert_eq!(missing.line, 6, "{log}");
-            assert_eq!(missing.detail.as_deref(), Some("fabric-api"), "{log}");
+            let dependency = find(log, CrashCategory::DependencyVersionMismatch);
+            assert_eq!(dependency.line, 6, "{log}");
+            assert_eq!(dependency.detail.as_deref(), Some("fabric-api"), "{log}");
             assert_eq!(
                 extract_mod_ids(log),
                 vec![
@@ -1114,6 +1261,244 @@ More details:\n\
                 ],
                 "{log}"
             );
+        }
+    }
+
+    /// 前置装了、版本不对时一次启动失败留下的现场。说明行出自 Fabric Loader 0.20.1 的真实报错；前面三行是它写给日志、
+    /// 不翻译的原因，写法按 Loader 的 `ModResolver` 与 `Explanation`：候选版本都不满足时报的是 HARD_DEP_NO_CANDIDATE，
+    /// 和完全没装一字不差，只有 Fix 把它放在 replace 而不是 add 里。
+    const FABRIC_DEP_VERSION_ZH: &str = "[main/WARN]: Mod resolution failed
+[main/INFO]: Immediate reason: [HARD_DEP_NO_CANDIDATE yet_another_config_lib_v3 3.6.6+1.20.1-fabric {depends fabric-api @ [>=0.92.0+1.20.1]}, ROOT_FORCELOAD_SINGLE yet_another_config_lib_v3 3.6.6+1.20.1-fabric]
+[main/INFO]: Reason: [HARD_DEP yet_another_config_lib_v3 3.6.6+1.20.1-fabric {depends fabric-api @ [>=0.92.0+1.20.1]}]
+[main/INFO]: Fix: add [], remove [], replace [[fabric-api 0.83.0+1.20] -> add:fabric-api 0.92.0+1.20.1 ([[0.92.0+1.20.1,∞)])]
+[main/ERROR]: Incompatible mods found!
+[main/ERROR]: net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!
+确定了一种可能的解决方法，这样做可能会解决你的问题：
+\t - 将 模组 'Fabric API' (fabric-api) 0.83.0+1.20 替换为 0.92.0+1.20.1 及以上版本。
+更多信息：
+\t - 模组 'YetAnotherConfigLib' (yet_another_config_lib_v3) 3.6.6+1.20.1-fabric 需要 模组 'Fabric API' (fabric-api) 的 0.92.0+1.20.1 及以上版本，但已经安装了的版本 0.83.0+1.20 不对！";
+
+    /// 版本不对就说版本不对：这几份日志里 fabric-api 都装着。
+    #[test]
+    fn wrong_version_dependency_is_not_reported_as_missing() {
+        for log in [
+            FABRIC_INCOMPATIBLE_ZH,
+            FABRIC_INCOMPATIBLE_EN,
+            FABRIC_DEP_VERSION_ZH,
+        ] {
+            assert_absent(log, CrashCategory::MissingDependency);
+        }
+    }
+
+    /// 一次失败里同时写着不翻译的原因与本地化的说明，算一条线索，指向的是前置本身，不是要它的 Mod。
+    #[test]
+    fn wrong_version_dependency_is_one_clue_naming_the_dependency() {
+        let diags = analyze(FABRIC_DEP_VERSION_ZH, Some(1));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::DependencyVersionMismatch);
+        assert_eq!(diags[0].detail.as_deref(), Some("fabric-api"));
+        assert_eq!(diags[0].line, 3, "修复建议是第一处分得开的地方");
+        assert_eq!(
+            extract_mod_ids(FABRIC_DEP_VERSION_ZH),
+            vec!["yet_another_config_lib_v3", "fabric-api"]
+        );
+    }
+
+    /// 说明行按系统语言翻译，Fabric Loader 带七种语言，规则只认得其中两种的措辞；原因行与修复建议不翻译，
+    /// 系统是别的语言时靠这两行也不能说成缺失。
+    #[test]
+    fn wrong_version_dependency_is_recognised_without_the_translated_text() {
+        let reasons = FABRIC_DEP_VERSION_ZH
+            .lines()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let traditional = format!(
+            "{reasons}\n\t - 模組 'YetAnotherConfigLib' (yet_another_config_lib_v3) 3.6.6+1.20.1-fabric 需要 0.92.0+1.20.1 及以上版本 模組 'Fabric API' (fabric-api)，但只有錯誤的版本可用：0.83.0+1.20！"
+        );
+        for log in [reasons.as_str(), traditional.as_str()] {
+            let diags = analyze(log, Some(1));
+            assert_eq!(diags.len(), 1, "{diags:?}");
+            assert_eq!(diags[0].category, CrashCategory::DependencyVersionMismatch);
+            assert_eq!(diags[0].detail.as_deref(), Some("fabric-api"));
+        }
+    }
+
+    /// 修复建议换的不一定是前置：这里 Fix 想换依赖方 sodium，没有哪条原因说它是谁的前置，缺的 cloth-config 还是缺。
+    #[test]
+    fn fix_replacing_the_dependent_mod_says_nothing_about_its_dependencies() {
+        let log = "[main/INFO]: Immediate reason: [HARD_DEP_NO_CANDIDATE sodium 0.5.3 {depends cloth-config @ [>=11]}, ROOT_FORCELOAD_SINGLE sodium 0.5.3]
+[main/INFO]: Reason: [HARD_DEP sodium 0.5.3 {depends cloth-config @ [>=11]}]
+[main/INFO]: Fix: add [], remove [], replace [[sodium 0.5.3] -> add:sodium 0.6.0 ([[0.6.0,∞)])]";
+        let diags = analyze(log, Some(1));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+        assert_eq!(diags[0].detail.as_deref(), Some("cloth-config"));
+    }
+
+    /// 修复建议一行里同时换游戏本体与前置时，线索点名的是前置；HashMap 的顺序不定，两种排法都要对。
+    #[test]
+    fn fix_line_skips_platform_ids() {
+        for fix in [
+            "replace [[minecraft 1.20.1] -> add:minecraft 1.20.4 ([[1.20.4,1.20.4]]), [fabric-api 0.83.0] -> add:fabric-api 0.92.0 ([[0.92.0,∞)])]",
+            "replace [[fabric-api 0.83.0] -> add:fabric-api 0.92.0 ([[0.92.0,∞)]), [minecraft 1.20.1] -> add:minecraft 1.20.4 ([[1.20.4,1.20.4]])]",
+        ] {
+            let log = format!(
+                "[main/INFO]: Reason: [HARD_DEP a 1.0 {{depends fabric-api @ [>=0.92.0]}}]\n[main/INFO]: Fix: add [], remove [], {fix}"
+            );
+            let diags = analyze(&log, Some(1));
+            assert_eq!(diags.len(), 1, "{diags:?}");
+            assert_eq!(diags[0].category, CrashCategory::DependencyVersionMismatch);
+            assert_eq!(diags[0].detail.as_deref(), Some("fabric-api"));
+        }
+    }
+
+    /// 同一次失败里一个前置没装、另一个版本不对：各说各的，原因行挤在一起也不串。
+    #[test]
+    fn missing_and_wrong_version_dependencies_are_told_apart() {
+        let log = "[main/INFO]: Immediate reason: [HARD_DEP_NO_CANDIDATE a 1.0 {depends fabric-api @ [>=0.92.0]}, HARD_DEP_NO_CANDIDATE b 1.0 {depends cloth-config @ [>=11]}, ROOT_FORCELOAD_SINGLE a 1.0]
+[main/INFO]: Reason: [HARD_DEP a 1.0 {depends fabric-api @ [>=0.92.0]}, HARD_DEP b 1.0 {depends cloth-config @ [>=11]}]
+[main/INFO]: Fix: add [add:cloth-config 11.0.0 ([[11.0.0,∞)])], remove [], replace [[fabric-api 0.83.0] -> add:fabric-api 0.92.0 ([[0.92.0,∞)])]";
+        let diags = analyze(log, Some(1));
+        let found: Vec<(CrashCategory, Option<&str>, usize)> = diags
+            .iter()
+            .map(|d| (d.category, d.detail.as_deref(), d.line))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (
+                    CrashCategory::DependencyVersionMismatch,
+                    Some("fabric-api"),
+                    2
+                ),
+                (CrashCategory::MissingDependency, Some("cloth-config"), 0),
+            ]
+        );
+    }
+
+    /// 英文系统上的同一种情形：一行没装、一行版本不对，版本不对那一行不能被当成缺的是谁。
+    #[test]
+    fn missing_detail_skips_the_wrong_version_line() {
+        let log = "[main/ERROR]: Incompatible mod set!
+\t - Mod 'A' (a) 1.0 requires version 0.92.0 or later of mod 'Fabric API' (fabric-api), but only the wrong version is present: 0.83.0!
+\t - Mod 'B' (b) 1.0 requires version 11.0.0 or later of cloth-config, which is missing!";
+        assert_eq!(
+            find(log, CrashCategory::MissingDependency)
+                .detail
+                .as_deref(),
+            Some("cloth-config")
+        );
+        assert_eq!(
+            find(log, CrashCategory::DependencyVersionMismatch)
+                .detail
+                .as_deref(),
+            Some("fabric-api")
+        );
+    }
+
+    /// 名字里带撇号的 Mod：`'[^']+'` 会在第一个撇号处断开，版本不对就又落回缺失。
+    #[test]
+    fn wrong_version_dependency_with_an_apostrophe_in_its_name() {
+        let diag = primary(
+            "\t - Mod 'Xaero's World Map' (xaeroworldmap) 1.0 requires version 24.0 or later of mod 'Xaero's Minimap' (xaerominimap), but only the wrong version is present: 23.0!",
+            CrashCategory::DependencyVersionMismatch,
+        );
+        assert_eq!(diag.detail.as_deref(), Some("xaerominimap"));
+    }
+
+    /// 几个候选都不对时 Loader 用复数。
+    #[test]
+    fn wrong_version_dependency_with_several_candidates() {
+        let diag = primary(
+            "\t - Mod 'A' (a) 1.0 requires version 2.0 or later of mod 'B' (b), but only the wrong versions are present: 1.0/1.5!",
+            CrashCategory::DependencyVersionMismatch,
+        );
+        assert_eq!(diag.detail.as_deref(), Some("b"));
+    }
+
+    /// recommends 只是加载时的警告，游戏照常启动；同样的措辞不能变成一条线索。
+    #[test]
+    fn recommended_dependency_with_the_wrong_version_is_not_a_clue() {
+        assert!(
+            analyze(
+                "\t - Mod 'A' (a) 1.0 recommends version 2.0 or later of mod 'B' (b), but only the wrong version is present: 1.0!",
+                None
+            )
+            .is_empty()
+        );
+    }
+
+    /// Forge 的报错：整体一行之下逐条列出，实际版本写着 [MISSING] 才是没装。
+    #[test]
+    fn forge_tells_missing_from_wrong_version() {
+        let wrong = "Missing or unsupported mandatory dependencies:\n\
+            \tMod ID: 'flywheel', Requested by: 'create', Expected range: '[0.6.10,0.6.11)', Actual version: '0.6.8'";
+        let diags = analyze(wrong, Some(1));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::DependencyVersionMismatch);
+        assert_eq!(diags[0].detail.as_deref(), Some("flywheel"));
+        assert_eq!(diags[0].line, 1);
+
+        let missing = "Missing or unsupported mandatory dependencies:\n\
+            \tMod ID: 'flywheel', Requested by: 'create', Expected range: '[0.6.10,0.6.11)', Actual version: '[MISSING]'";
+        let diags = analyze(missing, Some(1));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+        assert_eq!(diags[0].detail.as_deref(), Some("flywheel"));
+
+        let both = "Missing or unsupported mandatory dependencies:\n\
+            \tMod ID: 'jei', Requested by: 'create', Expected range: '[15,)', Actual version: '14.0'\n\
+            \tMod ID: 'flywheel', Requested by: 'create', Expected range: '[0.6.10,0.6.11)', Actual version: '[MISSING]'";
+        assert_eq!(
+            find(both, CrashCategory::DependencyVersionMismatch)
+                .detail
+                .as_deref(),
+            Some("jei")
+        );
+        assert_eq!(
+            find(both, CrashCategory::MissingDependency)
+                .detail
+                .as_deref(),
+            Some("flywheel")
+        );
+    }
+
+    /// Forge 把游戏与加载器的版本要求也列在这一段，整体那一行不能再算一条缺少前置；`fml` 这种平台 id 也不是谁的前置。
+    #[test]
+    fn dependency_summary_gives_way_to_a_version_clue() {
+        let game = "Missing or unsupported mandatory dependencies:\n\
+            \tMod ID: 'minecraft', Requested by: 'create', Expected range: '[1.20.1]', Actual version: '1.20.4'";
+        let categories: Vec<CrashCategory> =
+            analyze(game, Some(1)).iter().map(|d| d.category).collect();
+        assert_eq!(categories, vec![CrashCategory::GameVersionMismatch]);
+
+        let platform = "Missing or unsupported mandatory dependencies:\n\
+            \tMod ID: 'fml', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'";
+        assert_absent(platform, CrashCategory::DependencyVersionMismatch);
+        // 说不清是哪一种时它是唯一的线索，照旧算一条。
+        assert_eq!(primary(platform, CrashCategory::MissingDependency).line, 0);
+    }
+
+    /// 前置装着、版本也对，只是被别的限制挡住：这一行是连带，不是又缺了一个。
+    #[test]
+    fn dependency_that_cannot_load_is_not_a_second_missing_mod() {
+        for line in [
+            "\t - Mod 'A' (a) 1.0 requires version 0.83.0 or later of mod 'Fabric API' (fabric-api), which can't be loaded due to other constraints!",
+            "\t - 模组 'A' (a) 1.0 需要 模组 'Fabric API' (fabric-api) 的 0.83.0 及以上版本，但由于其他限制条件无法载入！",
+        ] {
+            let log = format!(
+                "\t - Mod 'Fabric API' (fabric-api) 0.83.0 requires version 1.20 of 'Minecraft' (minecraft), but only the wrong version is present: 1.20.1!\n{line}"
+            );
+            let categories: Vec<CrashCategory> =
+                analyze(&log, Some(1)).iter().map(|d| d.category).collect();
+            assert_eq!(
+                categories,
+                vec![CrashCategory::GameVersionMismatch],
+                "{line}"
+            );
+            // 单独出现时说不出缺的是谁：别把装着的 fabric-api 说成缺失。
+            assert_eq!(primary(line, CrashCategory::MissingDependency).detail, None);
         }
     }
 

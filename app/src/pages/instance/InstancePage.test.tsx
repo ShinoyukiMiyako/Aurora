@@ -2437,6 +2437,36 @@ describe("实例详情：崩溃诊断", () => {
     expect(toast?.body).toBe("再启动一次，看看问题是否还在");
   });
 
+  it("前置装着、版本不对：线索不说缺少，一键尝试不给停用，带去 Mod 页", async () => {
+    const api = modDto("fabric-api-0.83.0.jar", "Fabric API");
+    if (api.metadata === null) throw new Error("modDto 总带元数据");
+    mods = [{ ...api, metadata: { ...api.metadata, mod_id: "fabric-api" } }, modDto("yacl.jar", "YACL")];
+    crash = report(
+      [
+        { category: "game_version_mismatch", detail: "fabric-api" },
+        { category: "dependency_version_mismatch", detail: "fabric-api" },
+      ],
+      NOW - 60_000,
+    );
+    await open("crash");
+    expect(text()).toContain("找到 2 条线索，日志指向版本不符与前置版本不对");
+    expect(text()).toContain("日志指向 fabric-api 已经装了，只是版本不对。");
+    expect(text()).not.toContain("缺少");
+    expect(() => button("停用 Fabric API")).toThrow();
+    expect(text()).toContain("别的 Mod 要靠 Fabric API 才能启动，到 Mod 页更新它，不建议停用");
+    click(button("查看 Mod"));
+    await flush();
+    expect(nav.route).toEqual({ page: "instance", id: ID, tab: "mods" });
+  });
+
+  it("前置版本不对、列表里找不到它：去发现页按 id 查找，安装目标预选这个实例", async () => {
+    crash = report([{ category: "dependency_version_mismatch", detail: "cloth-config" }], NOW - 60_000);
+    await open("crash");
+    click(button("去发现页查找"));
+    await flush();
+    expect(nav.route).toEqual({ page: "discover", query: "cloth-config", kind: "mod", forInstance: ID });
+  });
+
   it("停在诊断页时又崩了一次：一键尝试按新报告重新推，不留着上一份的完成态", async () => {
     crash = report([{ category: "out_of_memory" }], NOW - 60_000);
     await open("crash");

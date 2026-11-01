@@ -427,6 +427,7 @@ export const CRASH_CATEGORIES = [
   "jvm_args_invalid",
   "missing_language_provider",
   "game_version_mismatch",
+  "dependency_version_mismatch",
   "missing_dependency",
   "optifine_incompatible",
   "mixin_failure",
@@ -512,6 +513,11 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     label: "内存不足",
     title: "游戏内存不够用了",
     explain: (c) => `这次的最大内存是 ${formatMemory(need(c.maxMemoryMb, "最大内存", "out_of_memory"))}，日志里出现了内存耗尽。`,
+  },
+  dependency_version_mismatch: {
+    label: "前置版本不对",
+    title: "前置 Mod 的版本不对",
+    explain: (c) => (c.detail === null ? "日志里有前置 Mod 已经装了，只是版本不对。" : `日志指向 ${c.detail} 已经装了，只是版本不对。`),
   },
   missing_dependency: {
     label: "缺少前置",
