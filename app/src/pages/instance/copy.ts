@@ -147,7 +147,7 @@ export const OVERVIEW_COPY = {
   brokenTitle: "实例文件不完整，暂时无法启动",
   repair: "修复实例",
   repairStarted: (name: string) => `开始补全「${name}」`,
-  repairStartedBody: "进度可以在下载任务里查看",
+  repairStartedBody: "进度见下载任务",
   queuedTitle: "安装任务排队中",
   queuedBody: "等前面的任务完成后自动开始",
   installProgress: (pct: string, speed: string, total: string | null) => (total === null ? `${pct} · ${speed}` : `${pct} · ${speed} · 共 ${total}`),

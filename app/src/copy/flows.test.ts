@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, failureCopy, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -93,6 +93,13 @@ describe("禁用词扫描本身", () => {
     expect(bannedIn(["请稍候，操作成功！", null, "已登录 Steve"])).toEqual(["请稍候：请稍候，操作成功！", "操作成功：请稍候，操作成功！", "！：请稍候，操作成功！"]);
     expect(bannedIn(["账号登陆失败"])).toEqual(["账号：账号登陆失败", "登陆：账号登陆失败"]);
     expect(bannedIn(["一键修复 MOD 导致的问题", "Mod 已装好"])).toEqual(["导致：一键修复 MOD 导致的问题", "一键修复：一键修复 MOD 导致的问题", "MOD：一键修复 MOD 导致的问题"]);
+  });
+});
+
+describe("通知正文", () => {
+  it("补全开始的通知与其他入队通知同一句式，句末不加句号", () => {
+    expect(OVERVIEW_COPY.repairStartedBody).toBe("进度见下载任务");
+    expect(TASK_TOAST.exportStarted("x").body).toBe(OVERVIEW_COPY.repairStartedBody);
   });
 });
 
