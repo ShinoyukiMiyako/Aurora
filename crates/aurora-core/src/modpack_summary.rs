@@ -19,7 +19,7 @@ use aurora_modplatform::Platform;
 
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
-use crate::modpack::{RemoteFacts, count_pack_mods};
+use crate::modpack::{BlockedProbe, RemoteFacts, count_pack_mods};
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
 const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
@@ -93,10 +93,12 @@ impl Aurora {
     ) -> Result<ModpackSummary> {
         // 只要下载地址：落点目录不会被用到。
         let (_, task) = self
-            .platform_file_task(platform, project_id, version_id, Path::new(""))
+            .platform_file_task(platform, project_id, version_id, Path::new(""), "")
             .await?;
         let pack = read_remote_pack(&self.http(), &task.url, platform).await?;
-        let remote = self.remote_facts(&pack.manifest.remote).await?;
+        let remote = self
+            .remote_facts(&pack.manifest.remote, BlockedProbe::Skip)
+            .await?;
         Ok(pack.summarize(remote))
     }
 }
@@ -151,7 +153,7 @@ impl RemotePack {
         let override_files = overrides.len();
         let override_bytes = overrides.iter().map(|(entry, _)| entry.uncompressed).sum();
         let mod_files = count_pack_mods(
-            remote.destinations.iter().map(String::as_str),
+            remote.destinations(),
             overrides.iter().map(|&(_, relative)| relative),
         );
         let manifest = self.manifest;
@@ -639,7 +641,7 @@ mod tests {
         let aurora_modpack::RemoteFiles::CurseForge(refs) = &pack.manifest.remote else {
             panic!("应读出 CurseForge 清单");
         };
-        let remote = crate::modpack::curseforge_remote_facts(&client, refs)
+        let remote = crate::modpack::curseforge_remote_facts(&client, refs, BlockedProbe::Skip)
             .await
             .unwrap();
         let summary = pack.summarize(remote);

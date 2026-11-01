@@ -14,11 +14,13 @@
 use std::error::Error as StdError;
 
 use aurora_core::{
-    AuthError, BaseError, CoreError, DownloadError, InstallError, InstanceError, JavaError,
-    LaunchError, ModPlatformError, ModpackError, VersionError,
+    AuthError, BaseError, CoreError, CredentialRealm, DownloadError, InstallError, InstanceError,
+    JavaError, LaunchError, ModPlatformError, ModpackError, VersionError,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+
+use crate::commands::modpack::BlockedFileDto;
 
 /// 命令层与门面错误映射用到的全部错误码（账户错误码见 [`auth_code`]）。
 pub mod code {
@@ -54,6 +56,9 @@ pub mod code {
     pub const LAUNCH_FAILED: &str = "launch_failed";
     /// 未配置 CurseForge API 密钥。
     pub const CURSEFORGE_KEY_MISSING: &str = "curseforge_key_missing";
+    /// CurseForge 的下载服务器拒绝了下载密钥（HTTP 401），换源与重试都没用，只能换一个可用的密钥。
+    /// detail：`{ realm: "curseforge", url, status }`，url 为被拒的那一跳。
+    pub const CURSEFORGE_KEY_REJECTED: &str = "curseforge_key_rejected";
     /// 启停 Mod 时启用与禁用两份文件同时存在。
     pub const MOD_STATE_CONFLICT: &str = "mod_state_conflict";
     /// 资源平台请求或本地 Mod 扫描的其余失败。
@@ -80,7 +85,8 @@ pub mod code {
     pub const WORLD_NOT_FOUND: &str = "world_not_found";
     /// 平台给出的文件名不能安全落盘（detail.platform、file_name）。
     pub const UNSAFE_FILE_NAME: &str = "unsafe_file_name";
-    /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载（detail.files）。
+    /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载。detail.files 为对象数组，每项
+    /// `{ project_id, file_id, file_name, web_url, destination, sha1, fingerprint, size }`。
     pub const DISTRIBUTION_BLOCKED: &str = "distribution_blocked";
     /// 选的文件扩展名既不是 .mrpack 也不是 .zip（detail.path）。
     pub const MODPACK_UNSUPPORTED_EXTENSION: &str = "modpack_unsupported_extension";
@@ -90,6 +96,8 @@ pub mod code {
     pub const MODPACK_MANIFEST_INVALID: &str = "modpack_manifest_invalid";
     /// 整合包文件不完整或已损坏（detail.path）。
     pub const MODPACK_CORRUPT: &str = "modpack_corrupt";
+    /// 整合包里有条目用了不支持的压缩方式（detail.path、entry、method）。
+    pub const MODPACK_UNSUPPORTED_COMPRESSION: &str = "modpack_unsupported_compression";
     /// 整合包里有越出实例目录、写进启动器元数据目录或符号链接的条目（detail.path）。
     pub const MODPACK_UNSAFE_PATH: &str = "modpack_unsafe_path";
     /// 新实例名不可用（detail.name、rule：empty / too_long / illegal_char / reserved / duplicate）。
@@ -249,6 +257,11 @@ fn core_code(err: &CoreError) -> &'static str {
     match err {
         CoreError::Base(e) => base_code(e),
         CoreError::Version(_) => code::VERSION_JSON_INVALID,
+        CoreError::Download(e) | CoreError::Install(InstallError::Download(e))
+            if e.credential_rejection() == Some(CredentialRealm::CurseForge) =>
+        {
+            code::CURSEFORGE_KEY_REJECTED
+        }
         CoreError::Download(_) => code::DOWNLOAD_FAILED,
         CoreError::Install(e) => install_code(e),
         CoreError::Instance(e) => instance_code(e),
@@ -270,6 +283,7 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::WorldNotFound { .. } => code::WORLD_NOT_FOUND,
         CoreError::UnsafeFileName { .. } => code::UNSAFE_FILE_NAME,
         CoreError::FileDistributionBlocked { .. } => code::DISTRIBUTION_BLOCKED,
+        CoreError::ClaimFolderInvalid { .. } => code::IO,
         CoreError::Modpack(e) => modpack_code(e),
         CoreError::InstanceNameInvalid { .. } => code::INSTANCE_NAME_INVALID,
         CoreError::JsonFileInvalid { .. } => code::JSON_FILE_INVALID,
@@ -304,6 +318,8 @@ fn modpack_code(err: &ModpackError) -> &'static str {
             code::MODPACK_MANIFEST_INVALID
         }
         ModpackError::Corrupt { .. } => code::MODPACK_CORRUPT,
+        ModpackError::UnsupportedCompression { .. } => code::MODPACK_UNSUPPORTED_COMPRESSION,
+        ModpackError::NotOptional { .. } => code::INVALID_ARGUMENT,
         ModpackError::UnsafePath { .. } | ModpackError::SymlinkEntry { .. } => {
             code::MODPACK_UNSAFE_PATH
         }
@@ -387,9 +403,30 @@ fn xerr(err: &AuthError) -> Option<i64> {
     }
 }
 
+/// 错误链上被拒绝的那次下载：平台、那一跳的地址与状态码。组合错误（多源耗尽、分片回退）里包着的也找出来。
+fn credential_rejected(err: &DownloadError) -> Option<(CredentialRealm, &str, u16)> {
+    match err {
+        DownloadError::CredentialRejected { realm, url, status } => {
+            Some((*realm, url.as_str(), *status))
+        }
+        DownloadError::AllSourcesExhausted { last, .. } => credential_rejected(last),
+        DownloadError::ChunkedFallbackFailed {
+            chunked, fallback, ..
+        } => credential_rejected(fallback).or_else(|| credential_rejected(chunked)),
+        _ => None,
+    }
+}
+
 fn core_detail(err: &CoreError) -> Map<String, Value> {
     let mut detail = Map::new();
     match err {
+        CoreError::Download(e) | CoreError::Install(InstallError::Download(e)) => {
+            if let Some((realm, url, status)) = credential_rejected(e) {
+                detail.insert("realm".to_owned(), json!(realm.code()));
+                detail.insert("url".to_owned(), json!(url));
+                detail.insert("status".to_owned(), json!(status));
+            }
+        }
         CoreError::Auth(auth) => {
             if let Some(code) = xerr(auth) {
                 detail.insert("xerr".to_owned(), json!(code));
@@ -471,7 +508,11 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("file_name".to_owned(), json!(file_name));
         }
         CoreError::FileDistributionBlocked { files } => {
+            let files: Vec<BlockedFileDto> = files.iter().map(BlockedFileDto::from).collect();
             detail.insert("files".to_owned(), json!(files));
+        }
+        CoreError::ClaimFolderInvalid { path, .. } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::InstanceNameInvalid { name, rule } => {
             detail.insert("name".to_owned(), json!(name));
@@ -493,8 +534,18 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             }
             ModpackError::UnsafePath { path, .. }
             | ModpackError::SymlinkEntry { path }
-            | ModpackError::DuplicatePath { path } => {
+            | ModpackError::DuplicatePath { path }
+            | ModpackError::NotOptional { path } => {
                 detail.insert("path".to_owned(), json!(path));
+            }
+            ModpackError::UnsupportedCompression {
+                path,
+                entry,
+                method,
+            } => {
+                detail.insert("path".to_owned(), json!(path.display().to_string()));
+                detail.insert("entry".to_owned(), json!(entry));
+                detail.insert("method".to_owned(), json!(method));
             }
             ModpackError::Cancelled => {}
         },
@@ -645,11 +696,54 @@ mod tests {
         assert_eq!(detail["world"], json!("新的世界"));
 
         let blocked: CommandError = CoreError::FileDistributionBlocked {
-            files: vec!["a.jar".into(), "b.jar".into()],
+            files: vec![
+                aurora_core::BlockedFile {
+                    project_id: 900_001,
+                    file_id: 5_000_001,
+                    file_name: "a.jar".into(),
+                    web_url: "https://www.curseforge.com/minecraft/mc-mods/a/files/5000001".into(),
+                    destination: "mods/a.jar".into(),
+                    sha1: Some("0f4a890d07402280686a518579fa9fa02309e315".into()),
+                    fingerprint: 0,
+                    size: Some(1024),
+                },
+                aurora_core::BlockedFile {
+                    project_id: 900_002,
+                    file_id: 5_000_002,
+                    file_name: "b.jar".into(),
+                    web_url: "https://www.curseforge.com/minecraft/texture-packs/b/files/5000002"
+                        .into(),
+                    destination: "resourcepacks/b.jar".into(),
+                    sha1: None,
+                    fingerprint: 4_294_967_295,
+                    size: None,
+                },
+            ],
         }
         .into();
         assert_eq!(blocked.code, code::DISTRIBUTION_BLOCKED);
-        assert_eq!(blocked.detail.unwrap()["files"], json!(["a.jar", "b.jar"]));
+        assert_eq!(
+            blocked.message,
+            "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：a.jar、b.jar"
+        );
+        assert_eq!(
+            blocked.detail.unwrap()["files"],
+            json!([
+                {
+                    "project_id": 900_001, "file_id": 5_000_001, "file_name": "a.jar",
+                    "web_url": "https://www.curseforge.com/minecraft/mc-mods/a/files/5000001",
+                    "destination": "mods/a.jar",
+                    "sha1": "0f4a890d07402280686a518579fa9fa02309e315",
+                    "fingerprint": 0, "size": 1024
+                },
+                {
+                    "project_id": 900_002, "file_id": 5_000_002, "file_name": "b.jar",
+                    "web_url": "https://www.curseforge.com/minecraft/texture-packs/b/files/5000002",
+                    "destination": "resourcepacks/b.jar",
+                    "sha1": null, "fingerprint": 4_294_967_295_u64, "size": null
+                }
+            ])
+        );
 
         let unsafe_name: CommandError = CoreError::UnsafeFileName {
             platform: "Modrinth",
@@ -723,6 +817,108 @@ mod tests {
 
         let cancelled: CommandError = CoreError::from(ModpackError::Cancelled).into();
         assert!(cancelled.is_cancelled());
+
+        let compression: CommandError = CoreError::from(ModpackError::UnsupportedCompression {
+            path: PathBuf::from("D:/包.zip"),
+            entry: "overrides/mods/模组.jar".into(),
+            method: 93,
+        })
+        .into();
+        assert_eq!(compression.code, code::MODPACK_UNSUPPORTED_COMPRESSION);
+        assert_eq!(
+            compression.detail,
+            Some(json!({ "path": "D:/包.zip", "entry": "overrides/mods/模组.jar", "method": 93 }))
+        );
+
+        let not_optional: CommandError = CoreError::from(ModpackError::NotOptional {
+            path: "mods/core.jar".into(),
+        })
+        .into();
+        assert_eq!(not_optional.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            not_optional.detail,
+            Some(json!({ "path": "mods/core.jar" }))
+        );
+
+        let folder: CommandError = CoreError::ClaimFolderInvalid {
+            path: PathBuf::from("C:/Users/Player/Downloads"),
+            reason: "选的文件夹不存在".into(),
+        }
+        .into();
+        assert_eq!(folder.code, code::IO);
+        assert_eq!(folder.message, "选的文件夹不存在");
+        assert_eq!(
+            folder.detail,
+            Some(json!({ "path": "C:/Users/Player/Downloads" }))
+        );
+    }
+
+    /// CurseForge 拒绝下载密钥：不论直接冒上来、包在多源耗尽或分片回退里、还是从安装器的下载里来，码都是
+    /// curseforge_key_rejected，detail 带平台、被拒那一跳的地址与状态码；没带密钥的 401 仍是普通下载失败。
+    #[test]
+    fn rejected_download_keys_map_to_their_own_code() {
+        let cdn = "https://mediafilez.forgecdn.net/files/3040/523/jei.jar";
+        let rejected = || DownloadError::CredentialRejected {
+            realm: CredentialRealm::CurseForge,
+            url: cdn.into(),
+            status: 401,
+        };
+        let expected = json!({ "realm": "curseforge", "url": cdn, "status": 401 });
+        for (label, err) in [
+            ("直接", CoreError::Download(rejected())),
+            (
+                "多源耗尽",
+                CoreError::Download(DownloadError::AllSourcesExhausted {
+                    url: "https://edge.forgecdn.net/files/3040/523/jei.jar".into(),
+                    last: Box::new(rejected()),
+                }),
+            ),
+            (
+                "分片回退",
+                CoreError::Download(DownloadError::ChunkedFallbackFailed {
+                    url: cdn.into(),
+                    chunked: Box::new(DownloadError::Status {
+                        url: cdn.into(),
+                        status: 404,
+                    }),
+                    fallback: Box::new(rejected()),
+                }),
+            ),
+            (
+                "安装器",
+                CoreError::Install(InstallError::Download(rejected())),
+            ),
+        ] {
+            let mapped = CommandError::describe(&err);
+            assert_eq!(mapped.code, code::CURSEFORGE_KEY_REJECTED, "{label}");
+            assert_eq!(mapped.message, err.to_string(), "{label}");
+            let detail = mapped.detail.unwrap();
+            for key in ["realm", "url", "status"] {
+                assert_eq!(detail[key], expected[key], "{label}：{key}");
+            }
+        }
+        assert_eq!(
+            CommandError::describe(&CoreError::Download(rejected())).message,
+            format!("CurseForge 拒绝了下载密钥（HTTP 401）：{cdn}")
+        );
+
+        let plain: CommandError = DownloadError::Status {
+            url: cdn.into(),
+            status: 401,
+        }
+        .into();
+        assert_eq!(plain.code, code::DOWNLOAD_FAILED);
+        assert!(plain.detail.is_none_or(|d| d.get("realm").is_none()));
+
+        for other in [
+            DownloadError::InvalidCredential {
+                realm: CredentialRealm::CurseForge,
+            },
+            DownloadError::TooManyRedirects { url: cdn.into() },
+        ] {
+            let mapped: CommandError = other.into();
+            assert_eq!(mapped.code, code::DOWNLOAD_FAILED);
+        }
     }
 
     #[test]
