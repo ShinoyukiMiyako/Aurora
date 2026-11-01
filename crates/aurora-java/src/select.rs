@@ -1,11 +1,13 @@
 //! 按版本 JSON 的 `javaVersion.majorVersion` 从候选里挑选最合适的 Java。
 //!
 //! 匹配规则（architecture.md aurora-java 小节）：主版本号必须正确，其次偏好 64 位，
-//! JDK/JRE 不作区分；同等条件下版本号高者优先。本 crate 与 aurora-version 同层，
+//! JDK/JRE 不作区分；同等条件下版本号高者优先，再相同取候选里靠前的。本 crate 与 aurora-version 同层，
 //! 不能反向依赖它，故这里只接受一个 `required_major: u32`（由上层从版本 JSON 取出）。
 //!
 //! 缺运行时文件的候选（[`JavaInstallation::is_complete`] 为假）一律不参与：它能答出版本，
 //! 但拿它启动游戏会在加载核心类库时失败，宁可落到下一个候选或自动下载。
+
+use std::cmp::Reverse;
 
 use crate::detect::JavaInstallation;
 
@@ -17,7 +19,8 @@ pub fn select_for_major(
     candidates
         .iter()
         .filter(|java| is_eligible(java, required_major))
-        .max_by(|a, b| rank_key(a).cmp(&rank_key(b)))
+        // min_by_key 在相等时留下靠前的那个，max_by_key 留下靠后的。
+        .min_by_key(|java| Reverse(rank_key(java)))
 }
 
 /// 返回全部匹配 `required_major` 的完整候选，按「最佳在前」排序，供 UI 列出可选项。
@@ -30,7 +33,7 @@ pub fn rank_for_major(
         .filter(|java| is_eligible(java, required_major))
         .collect();
     // 降序：先按是否 64 位，再按版本号，最佳排在前面。
-    matched.sort_by(|a, b| rank_key(b).cmp(&rank_key(a)));
+    matched.sort_by_key(|java| Reverse(rank_key(java)));
     matched
 }
 
@@ -38,9 +41,21 @@ fn is_eligible(java: &JavaInstallation, required_major: u32) -> bool {
     java.version.major == required_major && java.is_complete()
 }
 
-/// 排序键：`(是否 64 位, 版本号)`。`true > false` 使 64 位优先，其后版本号高者优先。
-fn rank_key(java: &JavaInstallation) -> (bool, &crate::version::JavaVersion) {
-    (java.is_64bit, &java.version)
+/// 排序键：`(是否 64 位, 四段版本号)`。`true > false` 使 64 位优先，其后版本号高者优先。
+///
+/// 不比版本的原始串：`21.0.3+9` 与 `21.0.3+9-LTS` 是同一个版本，相同时交给候选顺序（来源优先级）定，
+/// 与界面推断「自动会选哪个」同一条规则。
+fn rank_key(java: &JavaInstallation) -> (bool, [u32; 4]) {
+    let version = &java.version;
+    (
+        java.is_64bit,
+        [
+            version.major,
+            version.minor,
+            version.security,
+            version.build,
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -96,6 +111,24 @@ mod tests {
         ];
         let chosen = select_for_major(&candidates, 17).unwrap();
         assert_eq!(chosen.path, PathBuf::from("new"));
+    }
+
+    /// 位数与四段版本号都相同时取候选里靠前的：探测结果按来源优先级排列，手动添加的排在 PATH 之前，
+    /// 界面推断「自动会选哪个」也是取靠前的，两边说的才是同一个 Java。
+    #[test]
+    fn tie_keeps_the_earlier_candidate() {
+        let candidates = vec![
+            make("manual", "21.0.3+9", true),
+            make("registry", "21.0.3+9-LTS", true),
+            make("path", "21.0.3+9", true),
+        ];
+        let chosen = select_for_major(&candidates, 21).unwrap();
+        assert_eq!(chosen.path, PathBuf::from("manual"));
+        let ranked: Vec<_> = rank_for_major(&candidates, 21)
+            .iter()
+            .map(|j| j.path.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(ranked, vec!["manual", "registry", "path"]);
     }
 
     #[test]

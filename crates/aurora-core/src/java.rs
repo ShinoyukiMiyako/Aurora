@@ -719,6 +719,56 @@ mod tests {
         );
     }
 
+    /// 旧配置里固定的 Java 写着混合分隔符：取 Java 交出去的（启动拉起、独显偏好的值名都用它）与
+    /// 界面传回来的规整路径是同一条，移除时默认 Java 跟着改回自动。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn mixed_separators_in_an_old_config_are_settled_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir
+            .path()
+            .join("中文 目录")
+            .join("bin")
+            .join(aurora_java::JAVA_EXE);
+        touch(&exe);
+        let expected = exe.to_str().unwrap().replace('/', "\\");
+        let mixed = format!(
+            "{}/bin\\{}",
+            dir.path()
+                .join("中文 目录")
+                .to_str()
+                .unwrap()
+                .replace('\\', "/"),
+            aurora_java::JAVA_EXE
+        );
+        let file = dir.path().join("config.json");
+        tokio::fs::write(
+            &file,
+            serde_json::to_vec(&serde_json::json!({
+                "default_java": mixed,
+                "extra_java_paths": [mixed],
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let config = crate::config::ConfigStore::at(&file).load().await.unwrap();
+        let mut aurora = aurora_with(config, dir.path());
+        let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
+
+        let (_, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        assert_eq!(path.to_str(), Some(expected.as_str()));
+
+        assert_eq!(
+            aurora.remove_extra_java_path(Path::new(&expected)),
+            RemovedJavaPath {
+                removed: true,
+                default_reset: true,
+            }
+        );
+        assert_eq!(aurora.config().default_java, None);
+    }
+
     /// 安装走下载池：文件落到托管目录、发出带总数的下载进度与带产物路径的完成阶段。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn install_java_downloads_through_pool_and_reports_progress() {
