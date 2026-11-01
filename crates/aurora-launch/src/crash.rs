@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrashCategory {
+    /// 玩家按住 F3+C 十秒触发的调试崩溃：游戏故意抛出，不是故障。
+    ManualDebugCrash,
     /// Java 版本与游戏/Mod 的字节码版本不匹配。
     JavaVersionMismatch,
     /// 内存不足（堆溢出 / 无法分配堆）。
@@ -136,6 +138,14 @@ const JVM_ARG_REJECTED: &str = r"(?i)^(?:unrecognized option: \S+|error: could n
 const INTEL_ICD_FRAME: &str = r"(?i)^\s*#?\s*C\s+\[(ig[0-9a-z]{0,8}icd(?:32|64)\.dll)\+";
 
 const RULES: &[Rule] = &[
+    Rule {
+        category: CrashCategory::ManualDebugCrash,
+        patterns: &["manually triggered debug crash"],
+        regex: None,
+        extract: None,
+        summary: "手动触发的调试崩溃",
+        advice: "这是按住 F3+C 十秒触发的调试崩溃，游戏本身没有问题，重新启动即可。",
+    },
     Rule {
         category: CrashCategory::JavaVersionMismatch,
         patterns: &[
@@ -1202,6 +1212,19 @@ mod tests {
         assert!(diags.len() >= 2);
         assert_eq!(diags[0].category, CrashCategory::JavaVersionMismatch);
         assert_eq!(diags[1].category, CrashCategory::OutOfMemory);
+    }
+
+    #[test]
+    fn manual_debug_crash_is_recognised_from_the_report_head() {
+        let log = "---- Minecraft Crash Report ----\n// Hey, that tickles! Hehehe!\n\nTime: 2026-11-01 13:02:05\nDescription: Manually triggered debug crash\n\njava.lang.Throwable: Manually triggered debug crash";
+        let diags = analyze(log, Some(-1));
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].category, CrashCategory::ManualDebugCrash);
+        assert_eq!(diags[0].line, 4);
+        assert_eq!(
+            diags[0].matched,
+            "Description: Manually triggered debug crash"
+        );
     }
 
     #[test]

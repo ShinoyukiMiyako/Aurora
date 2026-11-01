@@ -194,6 +194,15 @@ impl CrashReport {
             suspected.extend(suspected_mods(&joined));
             named.extend(extract_mod_ids(&joined));
         }
+        // 手动触发的崩溃是玩家按出来的：日志里顺带命中的线索和点名的 Mod 都与这次退出无关，留着只会让人去改没问题的东西。
+        if diagnoses
+            .iter()
+            .any(|c| c.category == CrashCategory::ManualDebugCrash)
+        {
+            diagnoses.retain(|c| c.category == CrashCategory::ManualDebugCrash);
+            suspected.clear();
+            named.clear();
+        }
         // 没有任何崩溃迹象时不报 Mod：正常启动的日志同样会点名 Mod，照单端出来会让玩家去停用无辜的 Mod。
         // 只凭退出码的兜底线索不算迹象，所以这道门在补兜底之前判。
         let suspects = if diagnoses.is_empty() && !marked {
@@ -767,6 +776,33 @@ mod tests {
         let report = session_only(&lines, 1);
         assert_eq!(report.diagnoses[0].line, 4);
         assert_eq!(report.diagnoses[0].context, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn manual_debug_crash_drops_other_clues_and_suspects() {
+        let report = CrashReport::from_sources(
+            &[
+                ScanInput {
+                    source: CrashSource::SessionLog,
+                    path: None,
+                    lines: numbered(FABRIC_MISSING_DEPENDENCY, 1),
+                },
+                ScanInput {
+                    source: CrashSource::CrashReport,
+                    path: None,
+                    lines: numbered(&["Description: Manually triggered debug crash"], 5),
+                },
+            ],
+            Some(-1),
+        );
+        assert_eq!(report.diagnoses.len(), 1);
+        assert_eq!(
+            report.diagnoses[0].category,
+            CrashCategory::ManualDebugCrash
+        );
+        assert_eq!(report.diagnoses[0].source, CrashSource::CrashReport);
+        assert_eq!(report.diagnoses[0].line, 5);
+        assert!(report.suspects.is_empty());
     }
 
     #[test]

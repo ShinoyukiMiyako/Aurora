@@ -158,6 +158,11 @@ describe("会话第二行文案", () => {
     expect(sessionDetail(sessionCrashClue(crashed, "A", { status: "unavailable" }), T0)).toBe("没有匹配到已知原因");
   });
 
+  it("手动触发的崩溃写彩蛋，不写日志指向", () => {
+    const crashed = sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000);
+    expect(sessionDetail(sessionCrashClue(crashed, "A", { status: "known", category: "manual_debug_crash" }), T0)).toBe("你认真的吗...?");
+  });
+
   it("线索只有退出码兜底：写「退出码指向」，日志里并没有规则命中", () => {
     const crashed = sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000);
     expect(sessionDetail(sessionCrashClue(crashed, "A", { status: "known", category: "native_crash" }), T0)).toBe("退出码指向进程异常退出");

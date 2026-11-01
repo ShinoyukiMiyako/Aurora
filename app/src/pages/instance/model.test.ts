@@ -875,6 +875,7 @@ describe("一键尝试", () => {
 describe("一键尝试：每个诊断类别都有落点", () => {
   // CRASH_CATEGORIES 在 crash-sync.test.ts 里与后端枚举对齐，所以后端新增类别时这张表编译不过或遍历挂掉，不会等到玩家的崩溃页才炸
   const BARE_CLUE_FIXES: Readonly<Record<CrashCategoryName, readonly CrashFix["kind"][]>> = {
+    manual_debug_crash: ["compare_log"],
     java_version_mismatch: ["download_java", "compare_log"],
     out_of_memory: ["raise_memory", "compare_log"],
     jvm_args_invalid: ["jvm_args", "compare_log"],

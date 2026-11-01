@@ -1,6 +1,6 @@
 // 崩溃诊断：顶部是这次崩溃的摘要（参与扫描的文件、这次启动时的提醒）；左列逐条线索（类别、解释、命中的日志行与前两行，
 // 只有退出码时改写退出码），右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」；
-// 线索全部只来自退出码时摘要写「退出码指向」。
+// 线索全部只来自退出码时摘要写「退出码指向」。手动触发的崩溃不是故障，只留摘要卡，不画线索和一键尝试。
 // 本页不放第二个启动胶囊：重新启动用头图的胶囊。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -108,6 +108,10 @@ export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab, 
   return <ReportView inst={inst} queryId={queryId} ops={ops} view={view} report={crash.data} crashActive={crashActive} onTab={onTab} onRename={onRename} />;
 }
 
+function isManualCrash(report: CrashReportDto): boolean {
+  return report.diagnoses.some((d) => d.category === "manual_debug_crash");
+}
+
 function ReportView({
   inst,
   queryId,
@@ -118,6 +122,15 @@ function ReportView({
   onTab,
   onRename,
 }: Omit<CrashTabProps, "crash"> & { report: CrashReportDto }) {
+  return (
+    <div className={styles.stack}>
+      <SummaryCard inst={inst} ops={ops} view={view} report={report} crashActive={crashActive} onTab={onTab} onRename={onRename} />
+      {!isManualCrash(report) && <ReportDetails inst={inst} queryId={queryId} ops={ops} report={report} onTab={onTab} onRename={onRename} />}
+    </div>
+  );
+}
+
+function ReportDetails({ inst, queryId, ops, report, onTab, onRename }: Omit<CrashTabProps, "crash" | "view" | "crashActive"> & { report: CrashReportDto }) {
   const modded = inst.loader !== "vanilla";
   const mods = useInstanceMods(modded ? queryId : null);
   const required = useRequiredMajor(inst);
@@ -125,31 +138,28 @@ function ReportView({
   const switches = useModSwitches(inst.id, mods.status === "ready" ? mods.data : null);
 
   return (
-    <div className={styles.stack}>
-      <SummaryCard inst={inst} ops={ops} view={view} report={report} crashActive={crashActive} onTab={onTab} onRename={onRename} />
-      <div className={styles.crashGrid}>
-        <div className={styles.stack}>
-          {report.diagnoses.map((clue, i) => (
-            <ClueCard key={`${clue.category}-${clue.line}-${i}`} index={i} clue={clue} report={report} required={required.status === "ready" ? required.value : null} />
-          ))}
-        </div>
-        <div className={styles.stack}>
-          {/* 推一次就定住的一键尝试只属于这一份报告：停在本页时又崩了一次，按新报告从头推，上一份的完成态与撤销不再适用 */}
-          <FixesCard
-            key={report.at}
-            inst={inst}
-            queryId={queryId}
-            ops={ops}
-            report={report}
-            mods={modList}
-            modsReady={!modded || mods.status === "ready"}
-            modsError={modded && mods.status === "error" ? mods : null}
-            switches={switches}
-            onTab={onTab}
-            onRename={onRename}
-          />
-          {modded && <SuspectsCard ops={ops} report={report} mods={mods} switches={switches} />}
-        </div>
+    <div className={styles.crashGrid}>
+      <div className={styles.stack}>
+        {report.diagnoses.map((clue, i) => (
+          <ClueCard key={`${clue.category}-${clue.line}-${i}`} index={i} clue={clue} report={report} required={required.status === "ready" ? required.value : null} />
+        ))}
+      </div>
+      <div className={styles.stack}>
+        {/* 推一次就定住的一键尝试只属于这一份报告：停在本页时又崩了一次，按新报告从头推，上一份的完成态与撤销不再适用 */}
+        <FixesCard
+          key={report.at}
+          inst={inst}
+          queryId={queryId}
+          ops={ops}
+          report={report}
+          mods={modList}
+          modsReady={!modded || mods.status === "ready"}
+          modsError={modded && mods.status === "error" ? mods : null}
+          switches={switches}
+          onTab={onTab}
+          onRename={onRename}
+        />
+        {modded && <SuspectsCard ops={ops} report={report} mods={mods} switches={switches} />}
       </div>
     </div>
   );
@@ -165,6 +175,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab, onRename }: 
   const unique = labels.filter((l, i) => labels.indexOf(l) === i);
   const relative = formatRelative(report.at, now);
   const rerunning = view.kind === "loading" || view.kind === "running";
+  const manual = isManualCrash(report);
 
   return (
     <Card padding="lg">
@@ -174,7 +185,7 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab, onRename }: 
         !crashActive && <Callout tone="info">{CRASH_PAGE_COPY.stale(relative)}</Callout>
       )}
       <div className={styles.crashHead}>
-        <EmptyArt scene="error" size={tier === "compact" ? 72 : 88} />
+        <EmptyArt scene={manual ? "charm" : "error"} size={tier === "compact" ? 72 : 88} />
         <div className={styles.crashText}>
           <span className={styles.crashEyebrow}>
             <span className={styles.dangerDot} aria-hidden="true" />
@@ -186,10 +197,17 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab, onRename }: 
               </Tooltip>
             )}
           </span>
-          <h2 className={styles.crashTitle}>
-            {unique.length > 0 ? CRASH_PAGE_COPY.clueCount(report.diagnoses.length) : CRASH_COPY.noClueTitle}
-            <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique) : `，${CRASH_COPY.noClueExplain}`}</span>
-          </h2>
+          {manual ? (
+            <h2 className={styles.crashTitle}>
+              {CRASH_CATEGORY.manual_debug_crash.title}
+              <span className={styles.soft}>{` ${CRASH_COPY.manualNote}`}</span>
+            </h2>
+          ) : (
+            <h2 className={styles.crashTitle}>
+              {unique.length > 0 ? CRASH_PAGE_COPY.clueCount(report.diagnoses.length) : CRASH_COPY.noClueTitle}
+              <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique) : `，${CRASH_COPY.noClueExplain}`}</span>
+            </h2>
+          )}
           {report.log_path !== null && (
             <span className={styles.crashPath}>
               <Icon name="file" size={14} />

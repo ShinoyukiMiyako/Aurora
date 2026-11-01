@@ -310,6 +310,7 @@ const COPY_SOURCES = import.meta.glob<string>(["../**/*.{ts,tsx}", "!../**/*.tes
 /** 本来就该这么写的例外；text 是源码里的原样（转义保留）。每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。 */
 const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "./shell.ts", text: "还原", why: "标题栏窗口按钮沿用 Windows 自己的叫法，与存档的「恢复」不是一回事" },
+  { file: "./flows.ts", text: "你认真的吗...?", why: "彩蛋台词，半角的省略号和问号就是这句话的语气" },
   { file: "./flows.ts", text: '名称里不能有 \\\\ / : * ? " < > | 这些字符', why: "列出的就是 Windows 文件名里不能用的字符本身" },
   { file: "./flows.ts", text: "请家庭组管理员在 Microsoft 家庭中把这个账户加入家庭组，再回来重试。", why: "要家庭组管理员在微软那边操作" },
   { file: "./flows.ts", text: `会直接结束「${HOLE}」的游戏进程，没保存的进度可能丢失。正常退出请在游戏菜单里保存并退出。`, why: "要用户在游戏里操作" },

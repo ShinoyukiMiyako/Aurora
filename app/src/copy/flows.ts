@@ -422,6 +422,7 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
 
 /** 与后端规则的优先级同序；native_crash 只作兜底，排在最后。 */
 export const CRASH_CATEGORIES = [
+  "manual_debug_crash",
   "java_version_mismatch",
   "out_of_memory",
   "jvm_args_invalid",
@@ -502,7 +503,15 @@ export const EXIT_CODE_COPY: Readonly<Record<ExitCodeKind, { phrase: string; exp
 const NATIVE_EXCEPTION_CODE = /^0x[0-9A-F]{8}$/;
 const NATIVE_EXCEPTION_KIND: Readonly<Record<string, ExitCodeKind | undefined>> = { "0xC0000005": "access_violation", "0xC0000409": "stack_buffer_overrun" };
 
+/** 手动触发的崩溃不是故障，这句话顶替「日志指向」的句式。 */
+const MANUAL_CRASH_NOTE = "这是按住 F3+C 十秒手动触发的崩溃，游戏本身没有问题。";
+
 export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCopy>> = {
+  manual_debug_crash: {
+    label: "手动触发",
+    title: "你认真的吗...?",
+    explain: () => MANUAL_CRASH_NOTE,
+  },
   java_version_mismatch: {
     label: "Java 版本不匹配",
     title: "Java 版本与游戏或 Mod 不匹配",
@@ -639,7 +648,13 @@ export function cluePointer(labels: readonly string[]): string {
   return joinMixed(onlyExitCode ? "退出码指向" : "日志指向", joinCrashLabels(labels));
 }
 
+/** 会话副行与崩溃通知的一句话线索。手动触发的崩溃是玩家自己按出来的，不走「日志指向」的句式。 */
+export function crashClueLine(category: CrashCategoryName): string {
+  return category === "manual_debug_crash" ? CRASH_CATEGORY.manual_debug_crash.title : SESSION_COPY.crashClue(crashCategoryLabel(category));
+}
+
 export const CRASH_COPY = {
+  manualNote: MANUAL_CRASH_NOTE,
   noClueTitle: "没有匹配到已知原因",
   noClueExplain: "可以对照完整日志排查，崩溃前的警告往往能找到更早的源头。",
   headline: (categories: readonly string[]) =>
