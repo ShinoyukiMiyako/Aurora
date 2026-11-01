@@ -1081,7 +1081,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             format!(
-                "java -version 超过 1 秒没有结束，已结束该进程: {}",
+                "java -version 超过 1 秒没有结束，已结束该进程：{}",
                 exe.display()
             )
         );

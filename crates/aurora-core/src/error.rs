@@ -453,7 +453,7 @@ mod tests {
         };
         assert_eq!(
             std::error::Error::source(&probed).map(ToString::to_string),
-            Some("无法从 java -version 输出解析版本号: garbage".to_owned())
+            Some("无法从 java -version 输出解析版本号：garbage".to_owned())
         );
 
         let incomplete = CoreError::JavaRuntimeIncomplete {

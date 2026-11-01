@@ -16,7 +16,7 @@ pub enum Error {
     Base(#[from] aurora_base::Error),
 
     /// 访问远端（Java 运行时清单 / 组件文件）时的 HTTP 层错误，附带具体 URL。
-    #[error("HTTP 请求失败: {url}")]
+    #[error("HTTP 请求失败：{url}")]
     Http {
         url: String,
         #[source]
@@ -24,7 +24,7 @@ pub enum Error {
     },
 
     /// JSON 反序列化失败，`context` 标明是哪一份报文（all.json / 组件清单）。
-    #[error("解析 JSON 失败: {context}")]
+    #[error("解析 JSON 失败：{context}")]
     Json {
         context: String,
         #[source]
@@ -32,7 +32,7 @@ pub enum Error {
     },
 
     /// 启动 `java -version` 子进程本身失败（路径不存在 / 无执行权限等）。
-    #[error("执行 java 可执行文件失败: {path}")]
+    #[error("执行 java 可执行文件失败：{path}")]
     JavaExec {
         path: PathBuf,
         #[source]
@@ -40,11 +40,11 @@ pub enum Error {
     },
 
     /// `java -version` 有输出，但无法从中解析出版本号。
-    #[error("无法从 java -version 输出解析版本号: {output}")]
+    #[error("无法从 java -version 输出解析版本号：{output}")]
     JavaVersionParse { output: String },
 
     /// `java -version` 在等待上限内没有结束；子进程已被结束并确认退出。
-    #[error("java -version 超过 {timeout_secs} 秒没有结束，已结束该进程: {path}")]
+    #[error("java -version 超过 {timeout_secs} 秒没有结束，已结束该进程：{path}")]
     JavaProbeTimeout { path: PathBuf, timeout_secs: u64 },
 
     /// Java 运行时清单不包含当前平台键（如非 windows-x64 平台）。
@@ -135,7 +135,7 @@ mod tests {
         let err = Error::AllSourcesFailed {
             context: "Java 运行时总清单",
             attempts: vec![
-                "https://a/all.json：HTTP 请求失败: https://a/all.json".to_owned(),
+                "https://a/all.json：HTTP 请求失败：https://a/all.json".to_owned(),
                 "https://b/all.json：Java 运行时清单不含平台 x".to_owned(),
             ],
             last: Box::new(Error::UnsupportedPlatform("x".to_owned())),
@@ -144,7 +144,7 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Java 运行时总清单 在全部 2 个下载源上都失败：\
-             https://a/all.json：HTTP 请求失败: https://a/all.json；\
+             https://a/all.json：HTTP 请求失败：https://a/all.json；\
              https://b/all.json：Java 运行时清单不含平台 x"
         );
         let last = err
@@ -157,5 +157,46 @@ mod tests {
             "各源已各自重试过，聚合错误不应再整体重试"
         );
         assert!(!err.is_cancelled());
+    }
+
+    /// 这些原文经 detail.causes 与日志出现在界面上，和「没能添加 Java」的主提示并排：中文句后一律全角冒号。
+    #[test]
+    fn chinese_messages_use_full_width_colons() {
+        let http = Error::Http {
+            url: "https://a/all.json".into(),
+            source: reqwest::Client::new()
+                .get("不是网址")
+                .build()
+                .expect_err("非法网址构建请求必然失败"),
+        };
+        assert_eq!(http.to_string(), "HTTP 请求失败：https://a/all.json");
+        let json = Error::Json {
+            context: "all.json".into(),
+            source: serde_json::from_str::<serde_json::Value>("{").expect_err("半截 JSON"),
+        };
+        assert_eq!(json.to_string(), "解析 JSON 失败：all.json");
+        let exec = Error::JavaExec {
+            path: PathBuf::from("D:/Java/bin/java.exe"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert_eq!(
+            exec.to_string(),
+            "执行 java 可执行文件失败：D:/Java/bin/java.exe"
+        );
+        let parse = Error::JavaVersionParse {
+            output: "garbage".into(),
+        };
+        assert_eq!(
+            parse.to_string(),
+            "无法从 java -version 输出解析版本号：garbage"
+        );
+        let timeout = Error::JavaProbeTimeout {
+            path: PathBuf::from("D:/Java/bin/java.exe"),
+            timeout_secs: 10,
+        };
+        assert_eq!(
+            timeout.to_string(),
+            "java -version 超过 10 秒没有结束，已结束该进程：D:/Java/bin/java.exe"
+        );
     }
 }
