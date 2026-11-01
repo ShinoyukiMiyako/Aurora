@@ -78,7 +78,7 @@ const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
   files_offline: { count: 3 },
   files_failed: { count: 2, reason: "连接超时" },
   disk_full: { drive: "D:", needed_bytes: 1024 },
-  version_broken: {},
+  version_broken: { reason: "missing_main_class" },
   path_unsupported: { char: "한", path: "D:/Games/versions/한글/한글.jar" },
   spawn_failed: { message: "CreateProcess error=2" },
 };
@@ -231,6 +231,17 @@ describe("启动失败：账户验证暂时不可用", () => {
     );
     const toast = TOAST_COPY.offlineLaunched("生存");
     expect(bannedIn([...texts, toast.title, toast.body])).toEqual([]);
+  });
+});
+
+describe("启动失败：版本文件有问题", () => {
+  it("缺主类才说找不到启动入口；JSON 写坏时 reason 是解析器的原话，不能说成 mainClass", () => {
+    const missing = failureCopy("version_broken", { reason: "missing_main_class" }, ctx("Steve"));
+    expect(missing.body).toContain("mainClass");
+    const unreadable = failureCopy("version_broken", { reason: "expected value at line 1 column 3" }, ctx("Steve"));
+    expect(unreadable.title).toBe("版本文件不完整");
+    expect(unreadable.body).not.toContain("mainClass");
+    expect(unreadable.body).toContain("读不出来");
   });
 });
 

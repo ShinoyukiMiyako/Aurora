@@ -366,7 +366,8 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     case "version_broken":
       return {
         title: "版本文件不完整",
-        body: "找不到启动入口（mainClass），版本 JSON 可能没有正确合并。",
+        // reason 只有这一个固定值，其余是解析器的原话：文件写坏时说缺 mainClass 就说错了
+        body: params.reason === "missing_main_class" ? "找不到启动入口（mainClass），版本 JSON 可能没有正确合并。" : "版本 JSON 读不出来，可能写坏了或被改动过。",
         fix: { kind: "repair", label: "修复实例" },
         secondary: null,
       };
