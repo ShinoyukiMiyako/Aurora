@@ -88,7 +88,6 @@ import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type 
 import { network as appNetwork, type NetworkMonitor } from "./online";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
-import { WORLD_TASK_COMMANDS } from "./selectors";
 import {
   appendSessionLogs,
   applyPhase,
@@ -127,6 +126,7 @@ import {
   tasksToStart,
   trimHistory,
   type CompositeProgress,
+  WORLD_TASK_COMMANDS,
   type DownloadSnapshot,
   type TaskDraft,
 } from "./tasks";

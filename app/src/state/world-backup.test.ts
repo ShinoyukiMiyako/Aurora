@@ -89,6 +89,26 @@ describe("备份、导出与恢复入队", () => {
     expect(savesBusyIds(store.getState())).toEqual(["生存"]);
   });
 
+  it("同一实例上两个存档排在一起：一个做完才开始下一个，不撞后端的 instance_busy", async () => {
+    const second = deferred<BackupResultDto>();
+    const calls: unknown[] = [];
+    ipc.overrides.set("backup_world", (args) => {
+      calls.push(args.world);
+      return args.world === "w1" ? pending.promise : second.promise;
+    });
+    await store.actions.backupWorld("生存", "w1", "旧世界");
+    await store.actions.backupWorld("生存", "w2", "新世界");
+    await settle();
+    expect(calls).toEqual(["w1"]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["running", "queued"]);
+    pending.resolve(backupResult(0));
+    await settle();
+    expect(calls).toEqual(["w1", "w2"]);
+    expect(store.getState().tasks.map((t) => t.status)).toEqual(["done", "running"]);
+    second.resolve(backupResult(0));
+    await settle();
+  });
+
   it("同一个存档的备份已在队列里：不再入队，只提示重复", async () => {
     await store.actions.backupWorld("生存", "w1", "旧世界");
     await store.actions.backupWorld("生存", "w1", "旧世界");

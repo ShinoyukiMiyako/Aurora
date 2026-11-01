@@ -108,6 +108,37 @@ describe("下载队列：纯函数", () => {
     });
   });
 
+  describe("同一实例上动存档的任务也不同时跑：后端的备份与备份互斥，导出整合包要等备份、恢复做完", () => {
+    const world = (id: string, instanceId: string, command: "backup_world" | "export_world" | "restore_world_backup", overrides: Partial<Task> = {}) =>
+      task(id, { kind: command === "restore_world_backup" ? "world_restore" : "world_backup", instanceId, spec: { command, args: { id: instanceId, world: id } }, ...overrides });
+    const pack = (id: string, instanceId: string, overrides: Partial<Task> = {}) =>
+      task(id, { kind: "modpack_export", instanceId, spec: { command: "export_modpack", args: { id: instanceId, options: { name: id, extras: [] } } }, ...overrides });
+    const mods = (id: string, instanceId: string) =>
+      task(id, { kind: "mod", instanceId, spec: { command: "install_mods", args: { versionId: instanceId, platform: "modrinth", projectId: id, items: [] } } });
+
+    it("同一实例上两个存档的备份一个一个来，别的实例的备份照常开始；实例 id 不分大小写", () => {
+      const tasks = [world("w1", "Survival", "backup_world"), world("w2", "survival", "backup_world"), world("w3", "创造", "backup_world")];
+      expect(tasksToStart(tasks).map((t) => t.id)).toEqual(["w1", "w3"]);
+    });
+
+    it("恢复与导出存档同样排着，前一个结束就轮到它", () => {
+      const running = world("w1", "生存", "restore_world_backup", { status: "running" });
+      const tasks = [running, world("w2", "生存", "export_world")];
+      expect(tasksToStart(tasks)).toEqual([]);
+      expect(tasksToStart([{ ...running, status: "done", finishedAt: T0 }, tasks[1]]).map((t) => t.id)).toEqual(["w2"]);
+    });
+
+    it("备份在跑时同一实例的导出整合包等着，反过来排队的恢复也等导出读完", () => {
+      expect(tasksToStart([world("w1", "生存", "backup_world", { status: "running" }), pack("p1", "生存")])).toEqual([]);
+      expect(tasksToStart([pack("p1", "生存", { status: "running" }), world("w1", "生存", "restore_world_backup")])).toEqual([]);
+    });
+
+    it("备份只与 Mod 改动兼容：同一实例的装 Mod 与备份一起开始，两个导出整合包也一起开始", () => {
+      expect(tasksToStart([world("w1", "生存", "backup_world"), mods("m1", "生存")]).map((t) => t.id)).toEqual(["w1", "m1"]);
+      expect(tasksToStart([pack("p1", "生存"), pack("p2", "生存")]).map((t) => t.id)).toEqual(["p1", "p2"]);
+    });
+  });
+
   it("重试只对失败的任务，换下一次尝试并排到队尾", () => {
     const tasks = [task("t1", { status: "failed", attempt: 1, error: { code: "network_failed", message: "x" }, finishedAt: T0 }), task("t2")];
     const retried = retryTask(tasks, "t1");
