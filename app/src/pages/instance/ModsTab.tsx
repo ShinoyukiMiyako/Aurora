@@ -255,10 +255,15 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     setPreviewOpen(false);
     const files = rows.filter((r) => picked.some((c) => c.file_name === enabledFileName(r.fileName))).map((r) => r.fileName);
     const batch = preview !== null && preview.files !== null;
-    setPending(new Set(files));
+    // 只增减这一批：单个更新可能还在查可更新项，它的转圈归它自己结束
+    setPending((p) => new Set([...p, ...files]));
     if (batch) setBatchBusy("update");
     void run(() => actions.updateAllMods(id, picked), ACTION_ERROR.updateMods).then(() => {
-      setPending(new Set());
+      setPending((p) => {
+        const next = new Set(p);
+        for (const f of files) next.delete(f);
+        return next;
+      });
       if (!batch) return;
       setBatchBusy(null);
       setSelected(new Set());

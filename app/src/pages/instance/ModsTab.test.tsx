@@ -13,7 +13,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -614,6 +614,29 @@ describe("更新预览", () => {
     click(button("更新"));
     await flush();
     expect(textOf(dialog())).toContain("已勾选 1 / 1");
+  });
+
+  it("单个更新还在查可更新项时确认批量更新：那一行继续转圈，批量入队之后也不松开", async () => {
+    await open();
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    click(button("更新 Sodium"));
+    await flush();
+    expect(button("更新 Sodium").getAttribute("aria-busy")).toBe("true");
+
+    click(find("checkbox", "选择 Fabric API"));
+    click(button("更新"));
+    await flush();
+    click(button("更新 1 个", dialog()));
+    await flush();
+    expect(launcher.state.tasks.map((t) => t.spec.args.fileName)).toEqual(["fabric-api.jar"]);
+    expect(button("更新 Sodium").getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => {
+      checking.resolve(updates);
+      await settle(20);
+    });
+    expect(launcher.state.tasks.map((t) => t.spec.args.fileName).sort()).toEqual(["fabric-api.jar", "sodium.jar"]);
   });
 
   it("全不选时确认键带原因禁用；批量更新只列选中行里可更新的", async () => {
