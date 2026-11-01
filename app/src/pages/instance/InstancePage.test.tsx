@@ -214,9 +214,9 @@ beforeEach(() => {
     fullscreen: false,
   };
   mods = [
-    modDto("sodium.jar", "Sodium", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null } }),
+    modDto("sodium.jar", "Sodium", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null, installed_at: 1_780_000_000, update_hold: null } }),
     modDto("fabric-api.jar", "Fabric API", {
-      source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.100", title: "Fabric API", dependency_of: "AANobbMI" },
+      source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.100", title: "Fabric API", dependency_of: "AANobbMI", installed_at: 1_780_000_000, update_hold: null },
     }),
   ];
   updates = [];
@@ -1114,7 +1114,7 @@ describe("实例详情：Mod 管理", () => {
     expect(callsOf(ipc, "remove_mod")).toEqual([]);
   });
 
-  it("「全部更新」进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
+  it("「全部更新」先打开更新预览，确认后进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
     vi.stubGlobal("innerWidth", 1440);
     const candidate = (fileName: string, title: string, projectId: string, from: string, to: string): UpdateCandidate => ({
       file_name: fileName,
@@ -1143,9 +1143,15 @@ describe("实例详情：Mod 管理", () => {
     await open("mods");
     click(button("全部更新 · 2"));
     await flush();
+    // 先到更新预览：默认全选，确认前不入队
+    expect(dialog().textContent).toContain("已勾选 2 / 2");
+    expect(launcher.state.tasks).toEqual([]);
+    click(button("更新 2 个", dialog()));
+    await flush();
     const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
     expect(composite.map((t) => t.status)).toEqual(["running"]);
-    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["sodium.jar"]);
+    // 预览按名称升序列出，勾选项按这个顺序逐项更新
+    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["fabric-api.jar"]);
     // 组合任务还在跑，两行都算在更新中：按钮转圈，点了不另起一个同文件的单个更新
     const sodium = button("更新 Sodium");
     expect(sodium.getAttribute("aria-busy")).toBe("true");
