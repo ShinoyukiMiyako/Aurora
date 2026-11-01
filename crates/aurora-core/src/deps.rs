@@ -26,6 +26,7 @@ use serde::Serialize;
 
 use crate::compat::{
     Compatibility, classify, instance_loaders, instance_mc_version, instance_mod_loaders,
+    prefer_quilt_builds,
 };
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
@@ -616,9 +617,9 @@ impl Aurora {
 
 /// Quilt 实例上顶替 Fabric API 这条前置的工程；不用顶替时为 `None`。
 ///
-/// Fabric Mod 写的前置是 Fabric API，而 Quilt 上这个位置由 QFAPI 占着：它声明自己提供 fabric-api，
-/// Fabric API 本身在平台上只标 fabric，按原样解析只能得到一句假的「没有适配版本」。实例里已经装着
-/// Fabric API 时不换，再添一份 QFAPI 只会重复加载。工程 id 只记了 Modrinth 的。
+/// Fabric Mod 写的前置是 Fabric API，而 Quilt 上这个位置由 QFAPI 占着：它声明自己提供 fabric-api。
+/// Quilt 实例放行只标 fabric 的版本，按原样解析会把 Fabric API 本体装进来，所以在解析之前换掉。实例里
+/// 已经装着 Fabric API 时不换，再添一份 QFAPI 只会重复加载。工程 id 只记了 Modrinth 的。
 async fn quilt_stand_in(
     platform: Platform,
     dep_project: &str,
@@ -662,6 +663,7 @@ fn pick_latest_compatible(
 ) -> Option<ModVersionInfo> {
     sort_by_published_desc(&mut candidates);
     candidates.retain(|version| !matches!(judge(version, facts), Compatibility::Mismatch { .. }));
+    prefer_quilt_builds(&mut candidates, &facts.mod_loaders);
     let best = ReleaseChannel::Alpha
         .admitted()
         .iter()
@@ -1344,6 +1346,63 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    /// 只标 fabric 的前置在 Quilt 实例上能用：过滤要带着 fabric 下推，否则平台先把它筛掉，落成一句假的
+    /// 「没有适配版本」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_instance_resolves_a_fabric_only_dependency() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "needs-lib",
+            &[modrinth_version(
+                "v1",
+                "needs-lib",
+                "2026-01-01T00:00:00Z",
+                &["1.20.1"],
+                &["fabric", "quilt"],
+                r#"{"project_id":"fabric-lib","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/project/fabric-lib/version"))
+            .and(query_param("game_versions", r#"["1.20.1"]"#))
+            .and(query_param("loaders", r#"["quilt","fabric"]"#))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                "[{}]",
+                modrinth_version(
+                    "lib1",
+                    "fabric-lib",
+                    "2026-01-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["fabric"],
+                    "",
+                )
+            )))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/fabric-lib/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("[]"))
+            .with_priority(200)
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let plan = aurora
+            .plan_install("1.20.1-quilt", Platform::Modrinth, "needs-lib", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 2);
+        assert_eq!(plan.items[1].version.version_id, "lib1");
+        assert_eq!(plan.items[1].required_by, Some("needs-lib".to_owned()));
+        assert_eq!(plan.skipped, Vec::<String>::new());
     }
 
     /// Quilt 实例里的 QFAPI 就是 Fabric API 那个前置：算已满足，不报「没有适配版本」，版本也不动。
@@ -2685,6 +2744,52 @@ mod tests {
 
         assert!(pick_latest_compatible(vec![incompatible], &facts).is_none());
         assert!(pick_latest_compatible(Vec::new(), &facts).is_none());
+    }
+
+    /// Quilt 实例的前置同样优先同一发布的 quilt 构建，但通道底线在前：不为了 quilt 标带进测试版。
+    #[test]
+    fn pick_latest_compatible_takes_the_quilt_build_of_the_same_release() {
+        let facts = InstanceFacts {
+            mc_version: Some("1.20.1".to_owned()),
+            loaders: vec!["quilt".to_owned()],
+            mod_loaders: vec![ModLoader::Quilt, ModLoader::Fabric],
+        };
+        let build =
+            |id: &str, number: &str, loader: ModLoader, channel: ReleaseChannel, date: &str| {
+                let mut item = version("some-lib", id);
+                item.version_number = number.to_owned();
+                item.loaders = vec![loader];
+                item.release_channel = channel;
+                item.date_published = date.to_owned();
+                item
+            };
+        let fabric = build(
+            "fabric",
+            "1.4.0+fabric",
+            ModLoader::Fabric,
+            ReleaseChannel::Release,
+            "2026-02-01T00:00:00Z",
+        );
+        let quilt = build(
+            "quilt",
+            "1.4.0+quilt",
+            ModLoader::Quilt,
+            ReleaseChannel::Release,
+            "2026-01-01T00:00:00Z",
+        );
+        let quilt_beta = build(
+            "quilt-beta",
+            "1.4.0+quilt",
+            ModLoader::Quilt,
+            ReleaseChannel::Beta,
+            "2026-01-01T00:00:00Z",
+        );
+
+        let id = |list: Vec<ModVersionInfo>| {
+            pick_latest_compatible(list, &facts).map(|picked| picked.version_id)
+        };
+        assert_eq!(id(vec![fabric.clone(), quilt]).as_deref(), Some("quilt"));
+        assert_eq!(id(vec![fabric, quilt_beta]).as_deref(), Some("fabric"));
     }
 
     /// 新装的前置与更新检查同一条底线：有正式版就不把测试版带进来，没有才退到测试版、内测版。

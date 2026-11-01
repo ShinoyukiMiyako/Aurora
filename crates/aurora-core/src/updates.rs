@@ -24,7 +24,9 @@ use aurora_modplatform::{
 };
 use serde::Serialize;
 
-use crate::compat::{instance_mc_version, instance_mod_loaders};
+use crate::compat::{
+    instance_mc_version, instance_mod_loaders, is_fabric_twin, prefer_quilt_builds,
+};
 use crate::deps::project_gone;
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
@@ -283,6 +285,13 @@ impl Aurora {
                 {
                     continue;
                 }
+                // 端点按时间只给一个，分不出同一发布的 quilt 构建：Quilt 实例拿到只标 fabric 的结果时，
+                // 改走版本列表在本地挑。
+                if loaders.contains(&ModLoader::Quilt) && !info.loaders.contains(&ModLoader::Quilt)
+                {
+                    listed_targets.push((file_name.clone(), entry.clone()));
+                    continue;
+                }
                 candidates.push(UpdateCandidate {
                     file_name: file_name.clone(),
                     title: entry.title.clone(),
@@ -317,7 +326,7 @@ impl Aurora {
                             &loaders,
                         )
                         .await;
-                    let versions = match listed {
+                    let mut versions = match listed {
                         Ok(versions) => versions,
                         // 工程下架后这一项没有更新可报，与 Modrinth 批量查询里查无此哈希是同一结果；
                         // 让它报错的话，一个下架的 Mod 会连累整个实例查不了更新。
@@ -331,6 +340,7 @@ impl Aurora {
                         }
                         Err(err) => return Err(err),
                     };
+                    prefer_quilt_builds(&mut versions, &loaders);
                     Ok(
                         pick_update(&versions, &entry.version_id, entry.update_hold.as_ref()).map(
                             |latest| UpdateCandidate {
@@ -618,6 +628,8 @@ pub(crate) fn pick_update<'a>(
         .filter(|v| !v.date_published.is_empty())?;
     versions.iter().find(|candidate| {
         candidate.version_id != current.version_id
+            // 同一发布的另一份构建只是传得晚，换过去什么都没更新。
+            && !is_fabric_twin(candidate, current)
             && current.release_channel.admits(candidate.release_channel)
             && !candidate.date_published.is_empty()
             && candidate.date_published > current.date_published
@@ -656,6 +668,10 @@ mod tests {
     const FABRIC_JSON: &str = r#"{"id":"1.20.1-fabric","inheritsFrom":"1.20.1","type":"release",
         "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
         "libraries":[{"name":"net.fabricmc:fabric-loader:0.15.11"}]}"#;
+    /// Quilt 实例：与 Fabric 实例同形，quilt-loader 库触发加载器探测。
+    const QUILT_JSON: &str = r#"{"id":"1.20.1-quilt","inheritsFrom":"1.20.1","type":"release",
+        "mainClass":"org.quiltmc.loader.impl.launch.knot.KnotClient",
+        "libraries":[{"name":"org.quiltmc:quilt-loader:0.26.0"}]}"#;
     /// 原版实例：无任何加载器库。
     const VANILLA_JSON: &str = r#"{"id":"1.20.1","type":"release","mainClass":"m","libraries":[]}"#;
 
@@ -847,6 +863,175 @@ mod tests {
         assert_eq!(count_requests(&requests, "/version_files"), 1);
         assert_eq!(count_requests(&requests, "/version_files/update"), 1);
         assert_eq!(requests.len(), 2);
+    }
+
+    /// 把版本 JSON 的加载器换成 `loaders`（JSON 数组）。
+    fn on_loaders(version: String, loaders: &str) -> String {
+        version.replace(
+            r#""loaders":["fabric"]"#,
+            &format!(r#""loaders":{loaders}"#),
+        )
+    }
+
+    /// Quilt 实例上跑一次更新检查：玩家装着 `current`，批量端点回 `latest`，版本列表回 `listed`。
+    async fn quilt_updates(
+        current: impl FnOnce(&str) -> String,
+        latest: String,
+        listed: impl FnOnce(&str) -> Vec<String>,
+    ) -> Vec<UpdateCandidate> {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.20.1-quilt", QUILT_JSON).await;
+        let (_, sha1) = put_mod(mc, "1.20.1-quilt", "installed.jar", b"installed").await;
+
+        let server = MockServer::start().await;
+        mount_post(
+            &server,
+            "/version_files",
+            format!(r#"{{"{sha1}":{}}}"#, current(&sha1)),
+        )
+        .await;
+        Mock::given(method("POST"))
+            .and(path("/version_files/update"))
+            .and(body_partial_json(serde_json::json!({
+                "loaders": ["quilt", "fabric"],
+                "game_versions": ["1.20.1"]
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(format!(r#"{{"{sha1}":{latest}}}"#)),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/project/AANobbMI/version"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(format!("[{}]", listed(&sha1).join(","))),
+            )
+            .mount(&server)
+            .await;
+
+        let aurora = aurora_at(mc, &server.uri());
+        save_ledger(
+            &aurora,
+            "1.20.1-quilt",
+            vec![ledger_entry(
+                "installed.jar",
+                "AANobbMI",
+                "current",
+                Some(&sha1),
+            )],
+        )
+        .await;
+        aurora.check_updates("1.20.1-quilt").await.unwrap()
+    }
+
+    /// 真实数据：AppleSkin 2.5.0+mc1.20 之后的版本只标 fabric，只拿 quilt 去问平台就报不出更新。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_instance_is_offered_a_fabric_only_update() {
+        let current = |sha1: &str| {
+            on_loaders(
+                modrinth_version(
+                    "current",
+                    "AANobbMI",
+                    "2.5.0+mc1.20",
+                    "2023-06-08T00:00:00Z",
+                    "installed.jar",
+                    sha1,
+                ),
+                r#"["fabric","quilt"]"#,
+            )
+        };
+        let newest = modrinth_version(
+            "newest",
+            "AANobbMI",
+            "2.5.2+mc1.20.1",
+            "2026-01-24T00:00:00Z",
+            "appleskin-2.5.2.jar",
+            "bb",
+        );
+
+        let found =
+            quilt_updates(current, newest.clone(), |sha1| vec![newest, current(sha1)]).await;
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].current_version_id, "current");
+        assert_eq!(found[0].latest.version_id, "newest");
+    }
+
+    /// 装着 quilt 构建时，同一发布晚几分钟传的 fabric 构建不是更新。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_build_is_not_updated_to_its_fabric_twin() {
+        let current = |sha1: &str| {
+            on_loaders(
+                modrinth_version(
+                    "current",
+                    "AANobbMI",
+                    "1.4.0+quilt",
+                    "2026-01-01T00:00:00Z",
+                    "installed.jar",
+                    sha1,
+                ),
+                r#"["quilt"]"#,
+            )
+        };
+        let twin = modrinth_version(
+            "twin",
+            "AANobbMI",
+            "1.4.0+fabric",
+            "2026-01-01T00:05:00Z",
+            "twin.jar",
+            "bb",
+        );
+
+        let found = quilt_updates(current, twin.clone(), |sha1| vec![twin, current(sha1)]).await;
+
+        assert_eq!(found, Vec::new());
+    }
+
+    /// 批量端点按时间只给一个，同一发布的 quilt 构建被更晚传的 fabric 构建压住：要报 quilt 那份。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_instance_updates_to_the_quilt_build_of_a_new_release() {
+        let current = |sha1: &str| {
+            on_loaders(
+                modrinth_version(
+                    "current",
+                    "AANobbMI",
+                    "1.3.0+quilt",
+                    "2025-01-01T00:00:00Z",
+                    "installed.jar",
+                    sha1,
+                ),
+                r#"["quilt"]"#,
+            )
+        };
+        let fabric = modrinth_version(
+            "fabric",
+            "AANobbMI",
+            "1.4.0+fabric",
+            "2026-01-01T00:05:00Z",
+            "fabric.jar",
+            "bb",
+        );
+        let quilt = on_loaders(
+            modrinth_version(
+                "quilt",
+                "AANobbMI",
+                "1.4.0+quilt",
+                "2026-01-01T00:00:00Z",
+                "quilt.jar",
+                "cc",
+            ),
+            r#"["quilt"]"#,
+        );
+
+        let found = quilt_updates(current, fabric.clone(), |sha1| {
+            vec![fabric, quilt, current(sha1)]
+        })
+        .await;
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].latest.version_id, "quilt");
     }
 
     /// 平台给回的「最新兼容版」比玩家正在用的还旧：不报更新，否则就是一次降级。
