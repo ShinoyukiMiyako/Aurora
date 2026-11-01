@@ -17,25 +17,41 @@ import styles from "./Toasts.module.css";
 export function Toasts() {
   const toasts = useLauncherSelector((s) => s.toasts);
   const actions = useLauncherActions();
-  const hovering = useRef(false);
+  // 指针在栈内时为它最后的位置（视口坐标），不在栈内为 null
+  const pointerAt = useRef<{ x: number; y: number } | null>(null);
   const focusedWithin = useRef(false);
   const regionRef = useRef<HTMLElement>(null);
   const root = useOverlayRoot();
 
   // 指针与焦点任一在栈内就保持暂停；两者都离开才恢复，免得指针移走时把键盘用户正在读的通知恢复计时
   const sync = () => {
-    if (hovering.current || focusedWithin.current) actions.pauseToasts("hover");
+    if (pointerAt.current !== null || focusedWithin.current) actions.pauseToasts("hover");
     else actions.resumeToasts("hover");
   };
 
-  // 焦点所在的那条通知（点了它的关闭或动作）退场移除时，浏览器把焦点落回 body 却不派发 blur / focusout，
-  // 只靠 onBlur 的话「焦点在栈内」永远不会清掉，之后的通知全部停着不消失。每条通知卸载时补查一次：
-  // 卸载的清理跑在节点移除之前，查询放进微任务，等这次提交把节点移除之后再看焦点落在哪里
-  const recheckFocus = () => {
+  // 通知退场移除时，有两件事浏览器不一定告诉容器：
+  // - 焦点所在的那条（点了它的关闭或动作）移除后，焦点落回 body，却不派发 blur / focusout；
+  // - 指针下方那条移除、栈缩小而指针没动时，pointerleave 不一定派发。
+  // 只靠事件的话暂停永远解除不了，之后的通知全部停着不消失。每条通知卸载时补查一次：
+  // 卸载的清理跑在节点移除之前，查询放进微任务，等这次提交把节点移除之后再看。
+  // 指针按最后的位置当场做命中测试；不读 :hover，它何时随布局变化更新由浏览器决定，此刻可能还是旧值
+  const recheck = () => {
     const region = regionRef.current;
-    if (!focusedWithin.current || region === null || region.contains(document.activeElement)) return;
-    focusedWithin.current = false;
-    sync();
+    if (region === null) return;
+    let left = false;
+    if (focusedWithin.current && !region.contains(document.activeElement)) {
+      focusedWithin.current = false;
+      left = true;
+    }
+    const at = pointerAt.current;
+    if (at !== null) {
+      const hit = document.elementFromPoint(at.x, at.y);
+      if (hit === null || !region.contains(hit)) {
+        pointerAt.current = null;
+        left = true;
+      }
+    }
+    if (left) sync();
   };
 
   if (root === null) return null;
@@ -44,12 +60,18 @@ export function Toasts() {
       ref={regionRef}
       className={styles.region}
       aria-label={TOASTS_COPY.region}
-      onPointerEnter={() => {
-        hovering.current = true;
+      onPointerEnter={(event) => {
+        pointerAt.current = { x: event.clientX, y: event.clientY };
         sync();
       }}
+      onPointerMove={(event) => {
+        // 通知滑到静止的指针下方时 pointerenter 同样可能缺席：指针在栈内一动就补上
+        const missedEnter = pointerAt.current === null;
+        pointerAt.current = { x: event.clientX, y: event.clientY };
+        if (missedEnter) sync();
+      }}
       onPointerLeave={() => {
-        hovering.current = false;
+        pointerAt.current = null;
         sync();
       }}
       onFocus={() => {
@@ -64,7 +86,7 @@ export function Toasts() {
     >
       <AnimatePresence initial={false}>
         {toasts.map((toast) => (
-          <ToastItem key={toast.id} toast={toast} onClose={() => actions.dismissToast(toast.id)} onUnmount={recheckFocus} />
+          <ToastItem key={toast.id} toast={toast} onClose={() => actions.dismissToast(toast.id)} onUnmount={recheck} />
         ))}
       </AnimatePresence>
     </section>,
