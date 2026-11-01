@@ -6,7 +6,7 @@ import { IpcError } from "../ipc/errors";
 import type { BackupResultDto, InstanceDto } from "../ipc/instances";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
+import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
 import type { LauncherStore } from "./store";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -104,6 +104,85 @@ async function launchedBy(title: string): Promise<unknown> {
   await settle();
   return launched.versionId;
 }
+
+describe("发通知之前的等待里落盘的改名：按新名字发", () => {
+  /** 下一次重扫卡在 gate 上：落地时读实例列表的这段等待里改名。 */
+  function holdNextScan() {
+    const gate = deferred<void>();
+    let armed = true;
+    ipc.overrides.set("list_instances", async () => {
+      const snapshot = instances;
+      if (armed) {
+        armed = false;
+        await gate.promise;
+      }
+      return snapshot;
+    });
+    return gate;
+  }
+
+  it("读崩溃报告期间改名：通知、去诊断页的动作与会话线索都落到新名字", async () => {
+    await store.actions.launch("生存");
+    await settle();
+    const report = deferred<null>();
+    ipc.overrides.set("last_crash", () => report.promise);
+    emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 1000 });
+    await settle();
+    await rename("生存", "生存二");
+
+    report.resolve(null);
+    await settle();
+
+    expect(routeOf("「生存二」崩溃了")).toEqual({ page: "instance", id: "生存二", tab: "crash" });
+    expect(store.getState().session).toMatchObject({ instanceId: "生存二", crash: { status: "unavailable" } });
+  });
+
+  it("补全落地读实例列表期间改名：通知写新名字，启动落到新名字", async () => {
+    const gate = holdNextScan();
+    await store.actions.repairInstance("生存");
+    await settle();
+    await rename("生存", "生存二");
+
+    gate.resolve();
+    await settle();
+
+    expect(await launchedBy("「生存二」已修复")).toBe("生存二");
+  });
+
+  it("Java 装好后写设置期间改名：通知与启动动作落到新名字", async () => {
+    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const written = deferred<void>();
+    ipc.overrides.set("install_java", () => JDK_21);
+    ipc.overrides.set("get_instance_settings", () => settings);
+    ipc.overrides.set("set_instance_settings", async (args) => {
+      await written.promise;
+      return args.settings;
+    });
+    await store.actions.installJava(21, { pinFor: "生存", launchAfter: "生存" });
+    await settle();
+    await rename("生存", "生存二");
+
+    written.resolve();
+    await settle();
+
+    expect(toast("Java 21 已就绪").body).toBe("「生存二」下次启动会用它");
+    expect(await launchedBy("Java 21 已就绪")).toBe("生存二");
+  });
+
+  it("备份落地读实例列表期间改名：查看备份的动作落到新名字", async () => {
+    ipc.overrides.set("backup_world", (): BackupResultDto => ({ backup: { file: "1720-manual.zip", kind: "manual", created_at: 1, size_bytes: 1024, name: "w1" }, pruned: 0 } as never));
+    const gate = holdNextScan();
+    await store.actions.backupWorld("生存", "w1", "主世界");
+    await settle();
+    await rename("生存", "生存二");
+
+    gate.resolve();
+    await settle();
+
+    const done = store.getState().toasts.find((t) => t.action !== undefined && "to" in t.action);
+    expect(done?.action).toMatchObject({ to: { page: "instance", id: "生存二", tab: "overview" } });
+  });
+});
 
 describe("改名后点击留着的通知：闭包动作", () => {
   it("新建已就绪的「启动」：启动新名字，不报实例不存在", async () => {

@@ -1157,6 +1157,8 @@ export class LauncherStore {
   private selectionWrite: { id: string; readsIssued: number } | null = null;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
+  /** 这次运行里落盘过的改名，按先后：等着 IPC 的流程把手里的 id 跟到现在的名字（见 renamedSince）。 */
+  private readonly renames: { from: string; to: string }[] = [];
   /**
    * 任务日志读没读出来。unread 期间（首查进行中，或读失败、还可能读出来）不写回：写回会用内存里的表覆盖那份没读到的历史。
    * invalid 是文件损坏或版本不符，内容本来就救不回来，照常写回，免得任务表从此再也存不下来。
@@ -1624,14 +1626,17 @@ export class LauncherStore {
   /** 读崩溃报告的主线索，写进会话并发崩溃通知。读不出时会话标为 unavailable，错误照常抛出。 */
   private async announceCrash(instanceId: string): Promise<void> {
     invalidateResources(`crash:${instanceId}`);
-    const toCrashPage: ToastAction = { label: TOAST_COPY.viewCrashAction, to: { page: "instance", id: instanceId, tab: "crash" } };
+    // 读报告期间落盘的改名：这时通知还不存在，migrateRenamed 迁不到它，发的时候按当下的名字来
+    const mark = this.renames.length;
+    const current = () => this.renamedSince(instanceId, mark);
+    const toCrashPage = (): ToastAction => ({ label: TOAST_COPY.viewCrashAction, to: { page: "instance", id: current(), tab: "crash" } });
     const setClue = (crash: SessionCrash) => {
       const s = this.raw.session;
-      if (s !== null) this.set({ session: sessionCrashClue(s, instanceId, crash) });
+      if (s !== null) this.set({ session: sessionCrashClue(s, current(), crash) });
     };
     const report = await resources.read(`crash:${instanceId}`, () => lastCrash(instanceId)).catch((error: unknown) => {
       setClue({ status: "unavailable" });
-      this.pushToast("error", TOAST_COPY.crashed(instanceId), undefined, toCrashPage);
+      this.pushToast("error", TOAST_COPY.crashed(current()), undefined, toCrashPage());
       throw error;
     });
     let category: CrashCategoryName | null = null;
@@ -1642,7 +1647,7 @@ export class LauncherStore {
     }
     setClue(report === null ? { status: "unavailable" } : { status: "known", category });
     const body = category === null ? SESSION_COPY.noClue : SESSION_COPY.crashClue(crashCategoryLabel(category));
-    this.pushToast("error", TOAST_COPY.crashed(instanceId), body, toCrashPage);
+    this.pushToast("error", TOAST_COPY.crashed(current()), body, toCrashPage());
   }
 
   // ---------------------------------------------------------------- 会话计时
@@ -2063,6 +2068,7 @@ export class LauncherStore {
     this.settingsApplied = this.settingsIssued;
     this.renameSeq += 1;
     const seq = this.renameSeq;
+    this.renames.push({ from, to });
     this.set((raw) => ({
       lastRename: { from, to, seq },
       scanned: raw.scanned.map((i) => (i.id === from ? { ...i, id: to, name: to } : i)),
@@ -2083,6 +2089,11 @@ export class LauncherStore {
               occupantId: raw.launchPrompt.occupantId === from ? to : raw.launchPrompt.occupantId,
             },
     }));
+  }
+
+  /** mark（当时的 renames.length）之后 id 改成了什么；没改过原样返回。 */
+  private renamedSince(id: string, mark: number): string {
+    return this.renames.slice(mark).reduce((cur, r) => (r.from === cur ? r.to : cur), id);
   }
 
   /** 还在安装、实例目录还没装好的新建实例：它的任务与入队上下文；不是这种实例为 null。 */
@@ -2138,8 +2149,9 @@ export class LauncherStore {
         return;
       }
       case "repair": {
-        const id = strArg(task.spec.args, "id", command);
+        const mark = this.renames.length;
         await this.fetchInstances();
+        const id = this.renamedSince(strArg(task.spec.args, "id", command), mark);
         if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
           await this.actions.launch(id);
@@ -2154,9 +2166,10 @@ export class LauncherStore {
         this.set((raw) => ({ tasks: raw.tasks.map((t) => (t.id === task.id ? { ...t, detail: TASK_TEXT.javaDetail(runtime.version.raw) } : t)) }));
         this.scheduleJournal();
         invalidateResources("java");
+        const mark = this.renames.length;
         if (meta.pinFor !== null) await this.actions.updateInstanceSettings(meta.pinFor, { java: runtime.java_executable });
-        const copy = meta.pinFor === null ? TASK_TOAST.java(meta.major) : TASK_TOAST.javaPinned(meta.major, meta.pinFor);
-        this.pushToast("success", copy.title, copy.body, meta.launchAfter === null ? undefined : this.launchAction(meta.launchAfter));
+        const copy = meta.pinFor === null ? TASK_TOAST.java(meta.major) : TASK_TOAST.javaPinned(meta.major, this.renamedSince(meta.pinFor, mark));
+        this.pushToast("success", copy.title, copy.body, meta.launchAfter === null ? undefined : this.launchAction(this.renamedSince(meta.launchAfter, mark)));
         return;
       }
       case "mods": {
@@ -2217,11 +2230,12 @@ export class LauncherStore {
         // 共用存档的几个实例看到同一份备份表，整个前缀一起失效；恢复换掉了存档，存档列表跟着重读
         invalidateResources(WORLD_BACKUPS_RESOURCE);
         invalidateResources(`content:${meta.instanceId}`);
+        const mark = this.renames.length;
         await this.fetchInstances();
         if (meta.op === "backup") {
           const outcome = result as BackupResultDto;
           const copy = TASK_TOAST.worldBackedUp(meta.name, outcome.backup.size_bytes, outcome.pruned);
-          this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.viewBackupsAction, to: { page: "instance", id: meta.instanceId, tab: "overview" } });
+          this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.viewBackupsAction, to: { page: "instance", id: this.renamedSince(meta.instanceId, mark), tab: "overview" } });
           return;
         }
         if (meta.op === "export") {
