@@ -1468,7 +1468,8 @@ fn assemble_command(
     }
     builder.build().map_err(|err| match err {
         aurora_launch::LaunchError::MissingMainClass { .. }
-        | aurora_launch::LaunchError::InvalidLibraryCoordinate { .. } => {
+        | aurora_launch::LaunchError::InvalidLibraryCoordinate { .. }
+        | aurora_launch::LaunchError::UnsafePath { .. } => {
             version_broken(err.to_string()).caused_by(err).into()
         }
         other => other.into(),

@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_version::{Library, OsName, RuntimeContext, VersionJson, select_libraries};
+use aurora_version::{
+    Library, OsName, RuntimeContext, VersionJson, check_path_segment, check_relative_path,
+    select_libraries,
+};
 
 use crate::error::{LaunchError, Result};
 
@@ -58,16 +61,45 @@ pub fn maven_artifact_path(coordinate: &str) -> Option<String> {
 
 /// 某库在 `libraries/` 下的相对路径：优先用 Mojang 全量式的 `downloads.artifact.path`，
 /// 否则由 maven 坐标推导（Fabric/Forge 的简写库、Forge 本地产出的通用 jar 都走这条）。
-pub fn library_relative_path(lib: &Library) -> Option<String> {
+///
+/// 判据与补全时的下载计划一致：坐标缺段报坐标非法；路径或坐标的某一段能走出库目录时报
+/// [`LaunchError::UnsafePath`]。classpath 只读不写，但判据不一致时同一份版本 JSON 补全报错、拼 classpath
+/// 却悄悄改了路径，两边指的就不是同一个文件。
+pub fn library_relative_path(lib: &Library) -> Result<String> {
+    let unsafe_path = |path: &str, problem| LaunchError::UnsafePath {
+        entry: format!("库 {}", lib.name),
+        path: path.to_owned(),
+        problem,
+    };
     if let Some(path) = lib
         .downloads
         .as_ref()
         .and_then(|d| d.artifact.as_ref())
-        .and_then(|a| a.path.clone())
+        .and_then(|a| a.path.as_deref())
     {
-        return Some(path);
+        check_relative_path(path).map_err(|problem| unsafe_path(path, problem))?;
+        return Ok(path.to_owned());
     }
-    maven_artifact_path(&lib.name)
+    let path =
+        maven_artifact_path(&lib.name).ok_or_else(|| LaunchError::InvalidLibraryCoordinate {
+            name: lib.name.clone(),
+        })?;
+    let (fields, extension) = match lib.name.split_once('@') {
+        Some((fields, extension)) => (fields, Some(extension)),
+        None => (lib.name.as_str(), None),
+    };
+    let (group, rest) = fields
+        .split_once(':')
+        .expect("maven_artifact_path 已保证坐标至少有三段");
+    match group
+        .split('.')
+        .chain(rest.split(':'))
+        .chain(extension)
+        .find_map(|segment| check_path_segment(segment).err())
+    {
+        Some(problem) => Err(unsafe_path(&path, problem)),
+        None => Ok(path),
+    }
 }
 
 /// 组装该版本的 classpath 条目（绝对路径），顺序 = 合并后生效库的顺序，客户端主 jar 垫最后。
@@ -86,10 +118,7 @@ pub fn classpath_entries(
         if lib.is_native() {
             continue;
         }
-        let relative =
-            library_relative_path(lib).ok_or_else(|| LaunchError::InvalidLibraryCoordinate {
-                name: lib.name.clone(),
-            })?;
+        let relative = library_relative_path(lib)?;
         entries.push(libraries_dir.join(rel_to_path(&relative)));
     }
     entries.push(client_jar.to_path_buf());
@@ -106,9 +135,9 @@ pub fn classpath_string(entries: &[PathBuf], separator: char) -> String {
         .join(&sep)
 }
 
-/// 把以 `/` 分隔的相对路径转成本平台 `PathBuf`（忽略空段）。
+/// 把已经校验过的、以 `/` 分隔的相对路径转成本平台 `PathBuf`。
 fn rel_to_path(relative: &str) -> PathBuf {
-    relative.split('/').filter(|s| !s.is_empty()).collect()
+    relative.split('/').collect()
 }
 
 #[cfg(test)]
@@ -156,8 +185,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            library_relative_path(&with_download).as_deref(),
-            Some("custom/put/here.jar")
+            library_relative_path(&with_download).unwrap(),
+            "custom/put/here.jar"
         );
 
         let shorthand = Library {
@@ -167,8 +196,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            library_relative_path(&shorthand).as_deref(),
-            Some("net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar")
+            library_relative_path(&shorthand).unwrap(),
+            "net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar"
         );
     }
 
@@ -211,6 +240,64 @@ mod tests {
         let joined = classpath_string(&entries, ';');
         assert_eq!(joined.matches(';').count(), 2, "3 条目 2 个分隔符");
         assert!(joined.ends_with("1.21.jar"));
+    }
+
+    /// 库路径与由坐标算出的路径按补全时下载计划的同一判据校验：空段、`..`、反斜杠一律报路径越界，
+    /// 不把 `org//x.jar` 悄悄拼成 `org/x.jar`。
+    #[test]
+    fn unsafe_library_paths_are_rejected_like_the_download_plan() {
+        let cases = [
+            (
+                r#"{"name":"a:b:1","downloads":{"artifact":{"path":"org//x.jar","sha1":"a","size":1,"url":"u"}}}"#,
+                "库 a:b:1",
+                "org//x.jar",
+                aurora_version::UnsafePath::EmptySegment,
+            ),
+            (
+                r#"{"name":"a:b:1","downloads":{"artifact":{"path":"org/../../x.jar","sha1":"a","size":1,"url":"u"}}}"#,
+                "库 a:b:1",
+                "org/../../x.jar",
+                aurora_version::UnsafePath::DotSegment,
+            ),
+            (
+                r#"{"name":"evil:..:1"}"#,
+                "库 evil:..:1",
+                "evil/../1/..-1.jar",
+                aurora_version::UnsafePath::DotSegment,
+            ),
+            (
+                r#"{"name":"a:b\\..\\..:1"}"#,
+                r"库 a:b\..\..:1",
+                r"a/b\..\../1/b\..\..-1.jar",
+                aurora_version::UnsafePath::Backslash,
+            ),
+            (
+                r#"{"name":"a:b/c:1"}"#,
+                "库 a:b/c:1",
+                "a/b/c/1/b/c-1.jar",
+                aurora_version::UnsafePath::Separator,
+            ),
+        ];
+        for (library, entry, path, problem) in cases {
+            let version =
+                VersionJson::from_json_str(&format!(r#"{{"id":"x","libraries":[{library}]}}"#))
+                    .unwrap();
+            let err =
+                classpath_entries(&version, &win64(), Path::new("/libs"), Path::new("/c.jar"))
+                    .unwrap_err();
+            match err {
+                LaunchError::UnsafePath {
+                    entry: got_entry,
+                    path: got_path,
+                    problem: got_problem,
+                } => {
+                    assert_eq!(got_entry, entry);
+                    assert_eq!(got_path, path);
+                    assert_eq!(got_problem, problem, "{library}");
+                }
+                other => panic!("{library} 应报路径越界，实际：{other:?}"),
+            }
+        }
     }
 
     #[test]

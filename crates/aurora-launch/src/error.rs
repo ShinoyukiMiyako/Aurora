@@ -16,6 +16,16 @@ pub enum LaunchError {
         name: String,
     },
 
+    /// 版本 JSON 给出的库路径、坐标里的某一段或日志配置名不能安全地拼进游戏目录。启动前的补全按同一判据
+    /// 已经拒过一次，这里不悄悄丢段或照拼，免得 classpath 与日志参数指到另一个文件。
+    #[error("{entry}：路径「{path}」会落到游戏目录之外，无法用来启动")]
+    UnsafePath {
+        entry: String,
+        path: String,
+        #[source]
+        problem: aurora_version::UnsafePath,
+    },
+
     /// 版本 JSON 缺少 mainClass，无从确定启动入口。
     #[error("版本 {version} 缺少主类（mainClass），无法确定启动入口")]
     MissingMainClass {

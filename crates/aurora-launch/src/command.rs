@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use aurora_version::{RuntimeContext, VersionJson};
+use aurora_version::{RuntimeContext, VersionJson, check_path_segment};
 use serde::Serialize;
 
 use crate::account::{AuthValues, AuthlibInjector};
@@ -222,12 +222,20 @@ impl<'a> CommandBuilder<'a> {
             .logging
             .as_ref()
             .and_then(|l| l.client.as_ref())
-            .map(|client| {
-                self.paths
+            .map(|client| -> Result<PathBuf> {
+                // 判据与补全时的下载计划一致，免得日志参数指到 log_configs 之外另一个文件。
+                check_path_segment(&client.file.id).map_err(|problem| LaunchError::UnsafePath {
+                    entry: "日志配置".to_owned(),
+                    path: client.file.id.clone(),
+                    problem,
+                })?;
+                Ok(self
+                    .paths
                     .assets_dir
                     .join("log_configs")
-                    .join(&client.file.id)
-            });
+                    .join(&client.file.id))
+            })
+            .transpose()?;
 
         let mut ph = Placeholders::new();
         ph.insert(
@@ -458,6 +466,48 @@ mod tests {
         let args = build_with_resolution(modern, Some((854, 480)));
         assert_eq!(value_after(&args, "--width"), vec!["854"]);
         assert_eq!(value_after(&args, "--height"), vec!["480"]);
+    }
+
+    /// 日志配置名原样当作 `assets/log_configs/` 下的文件名：不是单个安全路径段时报路径越界，
+    /// 与补全时的下载计划同一判据，不把 `-Dlog4j.configurationFile` 指到目录外的文件。
+    #[test]
+    fn build_rejects_a_log_config_name_escaping_log_configs() {
+        for (id, problem) in [
+            (r"..\..\evil.xml", aurora_version::UnsafePath::Backslash),
+            ("../evil.xml", aurora_version::UnsafePath::Separator),
+            ("..", aurora_version::UnsafePath::DotSegment),
+        ] {
+            let json = serde_json::json!({
+                "id": "1.21", "mainClass": "net.minecraft.client.main.Main",
+                "logging": {"client": {
+                    "argument": "-Dlog4j.configurationFile=${path}",
+                    "file": {"id": id, "sha1": "a", "size": 1, "url": "u"},
+                    "type": "log4j2-xml"
+                }}
+            });
+            let version = VersionJson::from_json_str(&json.to_string()).unwrap();
+            let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+            let paths = GamePaths::standard(PathBuf::from("/mc"), "1.21");
+            let err = CommandBuilder::new(
+                &version,
+                ctx,
+                "java.exe",
+                paths,
+                "/mc",
+                AuthValues::offline("Steve", "uuid"),
+                "1.0.0",
+            )
+            .build()
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    LaunchError::UnsafePath { entry, path, problem: got }
+                        if entry == "日志配置" && path == id && *got == problem
+                ),
+                "{id}：{err:?}"
+            );
+        }
     }
 
     #[test]
