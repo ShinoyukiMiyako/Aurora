@@ -44,7 +44,7 @@ pub enum CrashCategory {
     GraphicsDriver,
     /// 游戏或库文件损坏（jar 不完整 / 被修改）。
     CorruptedJar,
-    /// Java 建不起本机回环连接，用到网络选择器的 Mod 起不来，多半是临时目录的问题。
+    /// Java 建不起本机回环连接，用到网络选择器的 Mod 起不来，多半是被打包应用拉起、写入被重定向。
     LoopbackUnavailable,
     /// 进程死在原生代码里而日志里没有已知原因；只由 JVM 错误头或退出码兜底产出，不进规则表。
     NativeCrash,
@@ -336,11 +336,20 @@ const RULES: &[Rule] = &[
     },
     Rule {
         category: CrashCategory::LoopbackUnavailable,
+        // Windows 上 NIO 的 Selector 靠 TEMP 下的 AF_UNIX 套接字建回环管道。TEMP 缺失、不可写或路径过长时绑定失败，
+        // JDK 退回 TCP，不会走到这句报错；走到这里是绑定成功、连接失败（`Invalid argument: connect`）：带文件系统写虚拟化的
+        // 打包应用把写进 AppData 的套接字文件重定向了，它的子进程都一样。所以建议指向启动方式，不指向 TEMP 本身。
         patterns: &["unable to establish loopback connection"],
         regex: None,
         extract: None,
         summary: "Java 建不起本机回环连接",
-        advice: "确认环境变量 TEMP 指向的文件夹存在、可写，路径不要太长；安全软件拦截时也会这样，可以把 Java 加入白名单再试。",
+        advice: concat!(
+            "从 AI 工具、打包版终端这类打包应用里拉起",
+            aurora_base::app_name!(),
+            "时，写进临时目录的文件会被系统重定向，Java 连不上自己。从开始菜单直接打开",
+            aurora_base::app_name!(),
+            "再试，或把环境变量 TEMP 改到 AppData 之外；安全软件拦截时也会这样，可以把 Java 加入白名单再试。"
+        ),
     },
 ];
 
@@ -1047,10 +1056,10 @@ mod tests {
         }
     }
 
-    /// Windows 上 NIO 的 Selector 靠临时目录里的 AF_UNIX 套接字建回环管道，用到 Netty 或 java.net.http 的 Mod
-    /// 在这里失败时只留下这一句。
+    /// 用到 Netty 或 java.net.http 的 Mod 在这里失败时只留下这一句。TEMP 缺失、不可写、路径过长都走不到这句报错，
+    /// 建议不能再让玩家去查这三样，要指向启动方式。
     #[test]
-    fn loopback_failure_points_at_the_temp_directory() {
+    fn loopback_failure_points_at_how_the_launcher_was_started() {
         let log = "Caused by: io.netty.channel.ChannelException: failed to open a new selector
                    Caused by: java.io.IOException: Unable to establish loopback connection
                    	at java.base/sun.nio.ch.PipeImpl.<init>(PipeImpl.java:175)";
@@ -1058,7 +1067,16 @@ mod tests {
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].category, CrashCategory::LoopbackUnavailable);
         assert_eq!(diags[0].line, 1);
-        assert!(diags[0].advice.contains("TEMP"), "{}", diags[0].advice);
+        let advice = &diags[0].advice;
+        for fix in [
+            concat!("从开始菜单直接打开", aurora_base::app_name!()),
+            "把环境变量 TEMP 改到 AppData 之外",
+        ] {
+            assert!(advice.contains(fix), "{advice}");
+        }
+        for wrong_direction in ["存在", "可写", "路径不要太长"] {
+            assert!(!advice.contains(wrong_direction), "{advice}");
+        }
     }
 
     /// 真实 JVM 崩溃：写完 hs_err 后进程以退出码 1 结束，退出码兜底打不中。

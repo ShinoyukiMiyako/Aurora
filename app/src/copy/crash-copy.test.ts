@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { memoryCapMb, memoryLowerTarget, memoryTarget, javaMajorFromDetail, isHeapReserveFailure } from "../domain/rules";
 import type { ExitCodeNoteDto } from "../ipc/diagnostics";
+import { APP_NAME } from "../lib/app-info";
 import { CRASH_PAGE_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import {
   CRASH_CATEGORIES,
@@ -52,7 +53,12 @@ describe("崩溃诊断文案", () => {
     expect(CRASH_CATEGORY.optifine_incompatible.title).toBe("OptiFine 与当前加载器不兼容");
     expect(CRASH_CATEGORY.intel_graphics_driver.title).toBe("Intel 集成显卡驱动出错");
     expect(CRASH_CATEGORY.native_crash.title).toBe("游戏进程异常退出");
-    expect(CRASH_CATEGORY.loopback_unavailable.explain(BLANK)).toContain("TEMP");
+  });
+
+  it("本机连接失败：指向启动方式，不再让玩家去查 TEMP 存不存在", () => {
+    expect(CRASH_CATEGORY.loopback_unavailable.explain(BLANK)).toBe(
+      `用到网络的 Mod 起不来。从 AI 工具、打包版终端这类打包应用里拉起${APP_NAME}时，写进临时目录的文件会被系统重定向，Java 连不上自己。从开始菜单直接打开${APP_NAME}再试，或把环境变量 TEMP 改到 AppData 之外；安全软件拦截时也会这样。`,
+    );
   });
 
   it("JVM 自己接住原生异常时按错误头里的异常码解释，不拿退出码 1 说事", () => {

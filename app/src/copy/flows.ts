@@ -580,7 +580,8 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
   loopback_unavailable: {
     label: "本机连接失败",
     title: "Java 建不起本机连接",
-    explain: () => "用到网络的 Mod 起不来，这通常和临时目录有关。确认环境变量 TEMP 指向的文件夹存在、可写，路径不要太长；安全软件拦截时也会这样。",
+    explain: () =>
+      `用到网络的 Mod 起不来。从 AI 工具、打包版终端这类打包应用里拉起${APP_NAME}时，写进临时目录的文件会被系统重定向，Java 连不上自己。从开始菜单直接打开${APP_NAME}再试，或把环境变量 TEMP 改到 AppData 之外；安全软件拦截时也会这样。`,
   },
   jvm_args_invalid: {
     label: "JVM 参数有误",
