@@ -600,7 +600,7 @@ function statusTag(row: ModRow): ReactElement | null {
   }
   if (row.update === null) return null;
   return (
-    <Tag key="status" size="sm" tone="accent" icon="sparkle">
+    <Tag key="status" size="sm" tone="accent" icon="sparkle" className={styles.updateTag}>
       {MODS_COPY.updateTo(row.update.latest.version_number)}
     </Tag>
   );
