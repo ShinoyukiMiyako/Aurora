@@ -6,7 +6,7 @@
 import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
 import { useEffect, useId, useMemo, useRef } from "react";
 import { Icon } from "../../art/Icon";
-import { ACTION_ERROR, gameDirSwitchReason, LOADER_NAME, lockReason, SLOW_LOADING_HINT } from "../../copy/flows";
+import { ACTION_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, LOADER_NAME, lockReason, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf } from "../../domain/instance-locks";
 import { useLoadingGate } from "../../lib/loading-gate";
@@ -27,6 +27,7 @@ import { SearchInput } from "../../ui/SearchInput";
 import { SegmentedControl, type SegmentOption } from "../../ui/SegmentedControl";
 import { Select } from "../../ui/Select";
 import { Skeleton } from "../../ui/Skeleton";
+import { switchSuggestion } from "../shared/switch-suggestion";
 import { useSwitchDirectory } from "../shared/useSwitchDirectory";
 import { LIBRARY_COPY } from "./copy";
 import { CARD_COVER_HEIGHT, InstanceCard } from "./InstanceCard";
@@ -40,7 +41,6 @@ import {
   normalizedQuery,
   orderSignature,
   SORT_KEYS,
-  switchSuggestion,
   totalPlaytime,
   visibleInstances,
   type LoaderFilter,
@@ -221,13 +221,13 @@ export default function LibraryPage() {
           <EmptyState
             scene="sapling"
             titleAs="h2"
-            title={suggestion === null ? LIBRARY_COPY.emptyTitle : LIBRARY_COPY.switchEmptyTitle}
-            body={suggestion === null ? LIBRARY_COPY.emptyBody : LIBRARY_COPY.switchEmptyBody(suggestion.dir.name, suggestion.versions)}
+            title={suggestion === null ? LIBRARY_COPY.emptyTitle : GAME_DIR_SWITCH_COPY.emptyTitle}
+            body={suggestion === null ? LIBRARY_COPY.emptyBody : GAME_DIR_SWITCH_COPY.emptyBody(suggestion.dir.name, suggestion.versions)}
             action={
               <div className={styles.actions}>
                 {suggestion !== null && (
                   <Button variant="primary" icon="folder-open" disabledReason={gameDirSwitchReason(directoryBusy, suggestion.dir.available)} onClick={() => switchDirectory(suggestion.dir)}>
-                    {LIBRARY_COPY.switchEmptyAction(suggestion.dir.name)}
+                    {GAME_DIR_SWITCH_COPY.emptyAction(suggestion.dir.name)}
                   </Button>
                 )}
                 <Button icon="compass" onClick={() => go({ page: "discover", kind: "modpack" })}>

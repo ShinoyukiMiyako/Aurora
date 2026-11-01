@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { GAME_DIR_SWITCH_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
+import { switchSuggestion } from "../shared/switch-suggestion";
 import { LIBRARY_COPY } from "./copy";
 import {
   brokenInstances,
@@ -11,7 +13,6 @@ import {
   matchesView,
   orderSignature,
   sortInstances,
-  switchSuggestion,
   totalPlaytime,
   visibleInstances,
 } from "./model";
@@ -223,9 +224,9 @@ describe("directoryOptions", () => {
 
 describe("文案", () => {
   it("目录空状态的主按钮：中西文之间留空格，中文名不留", () => {
-    expect(LIBRARY_COPY.switchEmptyAction("PCL2")).toBe("切到 PCL2");
-    expect(LIBRARY_COPY.switchEmptyAction("官方启动器")).toBe("切到官方启动器");
-    expect(LIBRARY_COPY.switchEmptyBody("PCL2", 12)).toBe("「PCL2」里有 12 个版本，切过去就能玩，文件不会被移动。");
+    expect(GAME_DIR_SWITCH_COPY.emptyAction("PCL2")).toBe("切到 PCL2");
+    expect(GAME_DIR_SWITCH_COPY.emptyAction("官方启动器")).toBe("切到官方启动器");
+    expect(GAME_DIR_SWITCH_COPY.emptyBody("PCL2", 12)).toBe("「PCL2」里有 12 个版本，切过去就能玩，文件不会被移动。");
   });
 
   it("筛选无结果的正文：带加载器时中西文之间留空格，原版不留", () => {

@@ -228,6 +228,13 @@
   justify-content: center;
 }
 
+.emptyActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sk-space-10);
+}
+
 .heroFrame {
   position: relative;
   display: flex;

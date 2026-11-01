@@ -1085,7 +1085,7 @@ export const ACTION_ERROR = {
   landTask: (title: string) => joinMixed(title, "已完成，后续设置没有写入"),
 } as const;
 
-/** 切换游戏目录：设置页的其他文件夹与实例库的目录选择走同一个流程，说法也是同一套。 */
+/** 切换游戏目录：设置页的其他文件夹、实例库的目录选择与空状态走同一个流程，说法也是同一套。 */
 export const GAME_DIR_SWITCH_COPY = {
   busyReason: "有游戏或下载在进行，结束后再切换",
   unavailableReason: "位置访问不到，无法切过去",
@@ -1093,6 +1093,9 @@ export const GAME_DIR_SWITCH_COPY = {
   confirmTitle: (name: string) => `切换到「${name}」？`,
   confirmBody: "实例库会换成这个目录里的实例，原目录的文件不会被移动或删除。",
   confirmLabel: "切换",
+  emptyTitle: "这个目录还没有实例",
+  emptyBody: (name: string, versions: number) => `「${name}」里有 ${versions} 个版本，切过去就能玩，文件不会被移动。`,
+  emptyAction: (name: string) => joinMixed("切到", name),
 } as const;
 
 /** 此刻切不到这个目录的原因，可以直接交给 disabledReason；能切时为 undefined。先说进行中的游戏与任务：等它们结束就能切。 */
