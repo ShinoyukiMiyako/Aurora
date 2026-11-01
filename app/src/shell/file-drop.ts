@@ -23,12 +23,14 @@ export interface FileDropTarget {
 /** 外壳认得的文件种类：选择文件对话框的过滤与拖放的判定共用这一张表。 */
 export const FILE_KINDS = {
   modpack: { extensions: ["mrpack", "zip"] },
+  // 对话框只列 .exe；限定 java.exe / javaw.exe 由后端校验，文件名过滤做不到
+  java: { extensions: ["exe"] },
 } as const satisfies Record<string, { extensions: readonly string[] }>;
 
 export type FileKind = keyof typeof FILE_KINDS;
 
-/** 拖动经过窗口时外壳显示的放置提示：整合包文件或外置登录服务器链接；null 为不显示。 */
-export type FileDropHint = FileKind | "auth_server" | null;
+/** 拖动经过窗口时外壳显示的放置提示：整合包文件或外置登录服务器链接；null 为不显示。Java 只经选择文件添加，拖进来不认。 */
+export type FileDropHint = "modpack" | "auth_server" | null;
 
 export function fileExtension(path: string): string {
   const parts = path.split(/[\\/]/);

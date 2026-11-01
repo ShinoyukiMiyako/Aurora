@@ -261,7 +261,7 @@ beforeEach(() => {
     shader_packs: [],
     worlds: [{ dir_name: "w1", level_status: "ok", level_error: null, name: "新世界", mode: "survival", last_played: NOW - 60_000, size_bytes: 1024, modified_at: null }],
   }));
-  ipc.overrides.set("detect_java", () => [{ path: "C:/Java/jdk-21/bin/java.exe", version: { major: 21, minor: 0, security: 5, build: 0, raw: "21.0.5" }, is_64bit: true, vendor: "Microsoft", source: "registry" }]);
+  ipc.overrides.set("detect_java", () => [{ path: "C:/Java/jdk-21/bin/java.exe", version: { major: 21, minor: 0, security: 5, build: 0, raw: "21.0.5" }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [] }]);
   ipc.overrides.set("memory_advice", () => ({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 }));
   ipc.overrides.set("last_crash", () => crash);
   ipc.overrides.set("last_launch_log", () => null);

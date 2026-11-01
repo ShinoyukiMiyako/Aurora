@@ -13,6 +13,7 @@ mod drop;
 mod events;
 mod exit;
 mod facade;
+mod gpu;
 mod logging;
 mod renderer;
 mod tasks;
@@ -105,6 +106,9 @@ pub fn run() {
             // -- java --
             commands::java::detect_java,
             commands::java::install_java,
+            commands::java::add_java_path,
+            commands::java::remove_java_path,
+            commands::java::gpu_adapters,
             // -- accounts --
             commands::accounts::current_account,
             commands::accounts::create_offline_account,
@@ -138,6 +142,9 @@ pub fn run() {
             commands::instances::required_java,
             commands::instances::version_requirements,
             commands::instances::open_folder,
+            commands::instances::template_info,
+            commands::instances::save_instance_as_template,
+            commands::instances::clear_template,
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
@@ -156,6 +163,7 @@ pub fn run() {
             commands::mods::match_instances,
             commands::mods::installed_sources,
             commands::mods::plan_install,
+            commands::mods::starter_mods,
             // -- history --
             commands::history::list_history,
             commands::history::rollback_checks,

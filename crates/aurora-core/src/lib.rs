@@ -35,6 +35,7 @@ pub mod error;
 pub mod event;
 pub mod facade;
 pub mod folders;
+mod gpu;
 pub mod history;
 pub mod install;
 pub mod instance_install;
@@ -58,6 +59,8 @@ pub mod search;
 pub mod servers;
 pub mod session;
 mod sources;
+pub mod starter;
+pub mod template;
 pub mod updates;
 pub mod versions;
 mod workdir;
@@ -74,12 +77,13 @@ pub use config::{
 };
 pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
 pub use deps::{InstallPlan, PlannedItem};
-pub use error::{CoreError, GameDirProblem, Result};
+pub use error::{CoreError, GameDirProblem, JavaPathProblem, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
+pub use java::RemovedJavaPath;
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
     LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
@@ -104,6 +108,11 @@ pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
 };
+pub use starter::{
+    StarterEntry, StarterGroup, StarterMissing, StarterMissingReason, StarterMod, StarterMods,
+    starter_table,
+};
+pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
 pub use updates::UpdateCandidate;
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};

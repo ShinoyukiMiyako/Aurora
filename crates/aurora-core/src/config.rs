@@ -176,6 +176,14 @@ pub struct AuroraConfig {
     pub notified_update_version: Option<String>,
     /// 界面语言。旧配置没有这一项时取默认的简体中文。
     pub language: UiLanguage,
+    /// 手动添加的 java 可执行文件，一律存成规范化后的 java.exe 路径：启动链路拉起的是 java.exe，
+    /// 同一个 Java 也不会因为选过 javaw.exe 记成两条。
+    pub extra_java_paths: Vec<PathBuf>,
+    /// 启动前是否把这次用的 java 可执行文件设为 Windows 图形设置里的「高性能」。
+    pub prefer_dedicated_gpu: bool,
+    /// 新实例是否沿用默认设置（数据目录里的模板）。关掉时新建与整合包导入一律不套模板；
+    /// 旧配置没有这一项时按开着处理：没有模板时套用本来就什么也不做。
+    pub new_instance_template: bool,
 }
 
 impl Default for AuroraConfig {
@@ -202,6 +210,9 @@ impl Default for AuroraConfig {
             skipped_update_version: None,
             notified_update_version: None,
             language: UiLanguage::default(),
+            extra_java_paths: Vec::new(),
+            prefer_dedicated_gpu: false,
+            new_instance_template: true,
         }
     }
 }
@@ -457,6 +468,46 @@ mod tests {
         assert!(c.skipped_update_version.is_none());
         assert!(c.notified_update_version.is_none());
         assert_eq!(c.language, UiLanguage::ZhCn, "界面语言默认简体中文");
+        assert!(c.extra_java_paths.is_empty());
+        assert!(!c.prefer_dedicated_gpu, "独显偏好默认关");
+    }
+
+    /// 没有手动 Java 与独显偏好两项的旧配置照常读入：两项取默认，其余字段原样保留；写过之后原样读回。
+    #[tokio::test]
+    async fn old_config_without_java_paths_and_gpu_preference_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 24, "default_java": "C:\\jdk-17\\bin\\java.exe", "check_updates": false, "language": "en-US"}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let mut loaded = store.load().await.unwrap();
+        assert!(loaded.extra_java_paths.is_empty());
+        assert!(!loaded.prefer_dedicated_gpu);
+        assert_eq!(loaded.download_concurrency, 24);
+        assert_eq!(
+            loaded.default_java.as_deref(),
+            Some(Path::new(r"C:\jdk-17\bin\java.exe"))
+        );
+        assert!(!loaded.check_updates);
+        assert_eq!(loaded.language, UiLanguage::EnUs);
+
+        loaded.extra_java_paths = vec![
+            PathBuf::from(r"D:\Java\jdk-21\bin\java.exe"),
+            PathBuf::from(r"E:\zulu8\bin\java.exe"),
+        ];
+        loaded.prefer_dedicated_gpu = true;
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["extra_java_paths"],
+            serde_json::json!([r"D:\Java\jdk-21\bin\java.exe", r"E:\zulu8\bin\java.exe"])
+        );
+        assert_eq!(raw["prefer_dedicated_gpu"], true);
+        assert_eq!(store.load().await.unwrap(), loaded);
     }
 
     /// 序列化名就是 config.json 里的 BCP 47 写法：区分大小写，下划线写法与裸语言码都不认。
@@ -497,6 +548,43 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["language"], "en-US");
         assert_eq!(store.load().await.unwrap().language, UiLanguage::EnUs);
+    }
+
+    /// 旧配置没有 new_instance_template 时按开着载入；写成 false 的读出 false，整份落盘再读回不变。
+    #[tokio::test]
+    async fn new_instance_template_defaults_on_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+
+        tokio::fs::write(&path, br#"{"download_concurrency": 12}"#)
+            .await
+            .unwrap();
+        let old = store.load().await.unwrap();
+        assert!(old.new_instance_template);
+        assert_eq!(old.download_concurrency, 12);
+
+        tokio::fs::write(
+            &path,
+            br#"{"new_instance_template": false, "check_updates": false}"#,
+        )
+        .await
+        .unwrap();
+        let off = store.load().await.unwrap();
+        assert!(!off.new_instance_template);
+        assert!(!off.check_updates);
+
+        let config = AuroraConfig {
+            new_instance_template: false,
+            download_concurrency: 7,
+            language: UiLanguage::EnUs,
+            ..AuroraConfig::default()
+        };
+        store.save(&config).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["new_instance_template"], false);
+        assert_eq!(store.load().await.unwrap(), config);
     }
 
     /// 不认识的语言（新版本才有的译文）不让整份配置失败：语言退回简体中文，其余照常。

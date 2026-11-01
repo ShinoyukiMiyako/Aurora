@@ -335,6 +335,9 @@ export interface Settings {
   skippedUpdateVersion: string | null;
   notifiedUpdateVersion: string | null;
   language: UiLanguage;
+  /** 手动添加的 java 可执行文件；识别不识别得出以 Java 探测结果为准。 */
+  extraJavaPaths: string[];
+  preferDedicatedGpu: boolean;
 }
 
 const SOURCES: readonly DownloadSourcePolicy[] = ["auto", "official_first", "mirror_first"];
@@ -361,6 +364,8 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     skippedUpdateVersion: dto.skipped_update_version,
     notifiedUpdateVersion: dto.notified_update_version,
     language: oneOf(dto.language, UI_LANGUAGES, "界面语言"),
+    extraJavaPaths: [...dto.extra_java_paths],
+    preferDedicatedGpu: dto.prefer_dedicated_gpu,
   };
 }
 
@@ -380,6 +385,7 @@ export interface SettingsPatch {
   skippedUpdateVersion?: string;
   notifiedUpdateVersion?: string;
   language?: UiLanguage;
+  preferDedicatedGpu?: boolean;
 }
 
 export function settingsPatchToConfig(patch: SettingsPatch): ConfigPatch {

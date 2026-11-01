@@ -64,6 +64,10 @@ export interface ConfigDto {
   /** 自动检查已经提示过的启动器版本，同一版本只提示一次。 */
   notified_update_version: string | null;
   language: UiLanguage;
+  /** 手动添加的 java 可执行文件（规范化后的 java.exe 路径），只经 addJavaPath / removeJavaPath 修改。 */
+  extra_java_paths: string[];
+  /** 启动前把这次用的 java 设为 Windows 图形设置里的高性能显卡。 */
+  prefer_dedicated_gpu: boolean;
 }
 
 /**
@@ -89,6 +93,7 @@ export interface ConfigPatch {
   skippedUpdateVersion?: string;
   notifiedUpdateVersion?: string;
   language?: UiLanguage;
+  preferDedicatedGpu?: boolean;
 }
 
 export const getConfig = (): Promise<ConfigDto> => invoke<ConfigDto>("get_config");

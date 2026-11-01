@@ -24,6 +24,9 @@ pub struct InstallSpec {
     pub loader: Option<String>,
     /// 加载器版本；`None` 时安装器自选推荐版（仅 Fabric / Quilt 支持）。
     pub loader_version: Option<String>,
+    /// 装好后是否沿用默认设置。记在标记里，失败后重试重装时照样再套一次；旧标记没有这一项，读出 false。
+    #[serde(default)]
+    pub use_template: bool,
 }
 
 /// 未完成的是哪一类操作。
@@ -152,6 +155,7 @@ mod tests {
                     mc_version: "1.21.1".into(),
                     loader: Some("fabric".into()),
                     loader_version: Some("0.16.10".into()),
+                    use_template: true,
                 },
             },
             1_700_000_000_000,
@@ -224,6 +228,37 @@ mod tests {
             store.save(&marker).await.unwrap();
             assert_eq!(store.load().await.unwrap(), Some(marker));
         }
+    }
+
+    /// 加上 use_template 之前写下的标记照样读得出，按不套模板处理；写过 true 的原样读回。
+    #[tokio::test]
+    async fn use_template_defaults_off_for_old_markers_and_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MarkerStore::for_version_dir(tmp.path());
+        tokio::fs::create_dir_all(store.path().parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            store.path(),
+            br#"{"kind":"install","spec":{"mc_version":"1.20.1","loader":"forge","loader_version":"47.4.20"},
+                "outcome":"failed","started_at":5,"error":{"code":"install_failed","message":"x"}}"#,
+        )
+        .await
+        .unwrap();
+        let old = store.load().await.unwrap().unwrap();
+        let IncompleteKind::Install { spec } = &old.kind else {
+            panic!("应读成新建实例的标记：{old:?}");
+        };
+        assert!(!spec.use_template);
+        assert_eq!(spec.loader_version.as_deref(), Some("47.4.20"));
+        assert_eq!(old.outcome, IncompleteOutcome::Failed);
+
+        let marker = install_marker();
+        store.save(&marker).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(store.path()).await.unwrap()).unwrap();
+        assert_eq!(raw["spec"]["use_template"], true);
+        assert_eq!(store.load().await.unwrap(), Some(marker));
     }
 
     #[tokio::test]

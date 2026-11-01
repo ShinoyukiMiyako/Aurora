@@ -3,7 +3,7 @@
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
 import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
-import type { NameRule } from "../ipc/instances";
+import type { NameRule, TemplateSkipReason } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 
 /** 启动失败（首帧之前出错）时错误页的文案。 */
@@ -515,6 +515,9 @@ export const TASK_TEXT = {
   updateDetail: (from: string, to: string, instance: string) => `${from} → ${to} · 「${instance}」`,
   updateAllTitle: (count: number) => `更新 ${count} 个 Mod`,
   updateAllDetail: (instance: string) => `「${instance}」`,
+  /** 新实例就绪后接着装的开局 Mod（一个组合任务）。 */
+  starterTitle: (count: number) => `装上 ${count} 个开局 Mod`,
+  starterDetail: (instance: string) => `「${instance}」`,
   javaTitle: (major: number) => `下载 Java ${major}`,
   javaDetailPending: "Mojang 运行时 · 手动",
   javaDetail: (version: string) => `Mojang ${version} · 手动`,
@@ -551,6 +554,13 @@ export const NEXT_LAUNCH_SUFFIX = "，下次启动生效";
 
 const ALL_MODS_LATEST = "所有 Mod 都是最新的";
 
+/** 安装时没有套上默认设置的原因（通知正文）。 */
+const TEMPLATE_SKIP_REASON: Readonly<Record<TemplateSkipReason, string>> = {
+  disabled: "新建实例时沿用默认设置已在配置里关闭",
+  empty: "安装时没有找到默认设置，可能已被清除",
+  shared_working_dir: "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
+};
+
 export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以开始游戏了" }),
   imported: (name: string, modCount: number | null) => (modCount === null ? { title: `「${name}」已导入` } : { title: `「${name}」已导入`, body: `含 ${modCount} 个 Mod` }),
@@ -581,6 +591,9 @@ export const TASK_TOAST = {
   }),
   cancelled: (title: string) => ({ title: `已取消：${title}` }),
   duplicate: (name: string) => ({ title: `${name} 已在下载队列里` }),
+  starterInstalled: (instance: string, count: number) => ({ title: `已给「${instance}」装上 ${count} 个 Mod` }),
+  /** 新建时勾了沿用默认设置、安装结果却是跳过：就绪通知之后补一条，正文说原因。 */
+  templateSkipped: (instance: string, reason: TemplateSkipReason) => ({ title: `「${instance}」没有沿用默认设置`, body: TEMPLATE_SKIP_REASON[reason] }),
   /** 要装的 Mod 连同前置都已在实例里，不入队。 */
   alreadyInstalled: (name: string, instance: string) => ({ title: `${name} 已经装在「${instance}」里了` }),
   enqueued: (name: string, instances: readonly string[]) => ({
@@ -618,6 +631,8 @@ export const TOAST_COPY = {
   authlibAdded: (name: string, server: string) => ({ title: `已添加 ${name}`, body: `外置登录 · ${server}` }),
   /** 由启动拦截触发的登录或添加账户成功后，Toast 正文。 */
   continuingLaunch: (instance: string) => `正在启动「${instance}」`,
+  templateSaved: (instance: string) => ({ title: `已把「${instance}」的设置保存为默认`, body: "新建实例时可以在确认步沿用" }),
+  templateCleared: "已清除默认设置",
   viewCrashAction: "查看诊断",
 } as const;
 
@@ -654,6 +669,8 @@ export const ACTION_ERROR = {
   install: "没能加入下载队列",
   probeNetwork: "没能检测网络连接",
   rollback: "没能回滚",
+  saveTemplate: "没能保存默认设置",
+  clearTemplate: "没能清除默认设置",
   cancelTask: "没能取消任务",
   openFolder: "没能打开文件夹",
   installJava: "没能开始下载 Java",

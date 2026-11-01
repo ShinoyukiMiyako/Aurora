@@ -5,7 +5,7 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
 import type { HistoryEvent } from "../../ipc/history";
-import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
+import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, TemplateInfoDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
@@ -16,6 +16,7 @@ import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } fr
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { resources } from "../../state/resource";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 import { InstallStageTab } from "./InstallStage";
@@ -37,6 +38,9 @@ let mods: InstalledMod[];
 let updates: UpdateCandidate[];
 let crash: CrashReportDto | null;
 let history: HistoryEvent[];
+let template: TemplateInfoDto;
+
+const NO_TEMPLATE: TemplateInfoDto = { present: false, files: [], source_instance: null, saved_at: null, enabled: true };
 
 function Probe() {
   nav = useNav();
@@ -171,8 +175,8 @@ function modDto(fileName: string, name: string, over: Partial<InstalledMod> = {}
   };
 }
 
-function java(path: string, major: number): JavaInstallationDto {
-  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry" };
+function java(path: string, major: number, over: Partial<JavaInstallationDto> = {}): JavaInstallationDto {
+  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [], ...over };
 }
 
 function contentDto(): InstanceContentDto {
@@ -222,6 +226,7 @@ beforeEach(() => {
   updates = [];
   crash = null;
   history = [];
+  template = NO_TEMPLATE;
   bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }) });
   ipc.overrides.set("list_instances", () => instances);
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
@@ -242,6 +247,15 @@ beforeEach(() => {
     history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚，请直接移除对应文件" })),
   );
   ipc.overrides.set("rollback", () => null);
+  ipc.overrides.set("template_info", () => template);
+  ipc.overrides.set("save_instance_as_template", (args) => {
+    template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: String(args.id), saved_at: Date.now(), enabled: true };
+    return template;
+  });
+  ipc.overrides.set("clear_template", () => {
+    template = NO_TEMPLATE;
+    return template;
+  });
   ipc.overrides.set("open_folder", () => null);
   ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
   ipc.overrides.set("set_mod_enabled", (args) => `${String(args.fileName)}.disabled`);
@@ -496,7 +510,7 @@ describe("实例详情：新建与导入还没装好", () => {
   const QUERIES = new Set(["list_mods", "check_updates", "list_instance_content", "get_instance_settings", "memory_advice", "last_launch_log", "list_history", "rollback_checks", "last_crash"]);
   const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
   const queriesFor = (id: string) => ipc.calls.filter((c) => QUERIES.has(c.cmd) && Object.values(c.args).includes(id)).map((c) => c.cmd);
-  const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2 });
+  const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2, template: null });
   const fabric: InstanceDto["loaders"] = [{ kind: "fabric", version: "0.16.10" }];
   /** 后端建好了目录、还在往里装：之后任何一次重扫都会扫到这样一份（占着实例名，未完成标记还在进行中）。 */
   const halfInstalled = (): InstanceDto =>
@@ -853,8 +867,13 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     expect(save.getAttribute("aria-disabled")).toBe("true");
     click(save);
     keydown(area, "Enter", { ctrlKey: true });
+    // 补全会挪动实例目录：保存为默认同样带原因禁用
+    const asTemplate = button("保存为默认");
+    expect(asTemplate.getAttribute("aria-disabled")).toBe("true");
+    click(asTemplate);
     await flush();
     expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "save_instance_as_template")).toEqual([]);
   });
 
   it("崩溃诊断：补全进行中改实例设置的一键尝试带原因禁用", async () => {
@@ -1221,6 +1240,62 @@ describe("实例详情：设置", () => {
     expect(toastTitles()).toContain("JVM 参数已保存");
   });
 
+  it("Java 下拉：手动添加的写明来源；不完整的禁用、提示写「不完整」，自动选择也跳过它", async () => {
+    ipc.overrides.set("detect_java", () => [
+      java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] }),
+      java("D:/Portable/jdk-17/bin/java.exe", 17, { source: "manual" }),
+    ]);
+    await open("settings");
+    click(byRole("combobox", "Java 运行时"));
+    await flush();
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const option = (start: string) => {
+      const found = options.find((o) => textOf(o).startsWith(start));
+      if (found === undefined) throw new Error(`Java 下拉里没有「${start}」`);
+      return found;
+    };
+    expect(option("Java 21").getAttribute("aria-disabled")).toBe("true");
+    expect(textOf(option("Java 21"))).toContain("21.0.5 · 不完整");
+    expect(option("Java 17").getAttribute("aria-disabled")).toBeNull();
+    expect(textOf(option("Java 17"))).toContain("17.0.5 · 手动添加");
+    expect(textOf(option("自动选择"))).toContain("本机没有 Java 21，启动时自动下载");
+    click(option("Java 21"));
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+  });
+
+  it("Java 下拉：实例已经固定成不完整的 Java 时照常显示为当前值", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] })]);
+    await open("settings");
+    expect(textOf(byRole("combobox", "Java 运行时"))).toBe("Java 21 · Microsoft");
+    click(byRole("combobox", "Java 运行时"));
+    await flush();
+    const current = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => textOf(o).startsWith("Java 21"));
+    expect(current?.getAttribute("aria-disabled")).toBeNull();
+    expect(current?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("固定成不完整的 Java：说明块提示缺哪些文件而不是「匹配」，「改用自动」把实例改回自动选择", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] })]);
+    await open("settings");
+    expect(text()).toContain("这个 Java 缺少 release、lib/modules，可能没装完整");
+    expect(text()).toContain("启动时照常用它；启动失败的话换一个 Java，或把它重装一遍。");
+    expect(text()).not.toContain("与要求的 Java 21 匹配");
+    click(button("改用自动"));
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings").map((a) => (a.settings as InstanceSettingsDto).java)).toEqual(["auto"]);
+  });
+
+  it("固定成版本过低又不完整的 Java：先报版本过低", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-17/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-17/bin/java.exe", 17, { missing_files: ["release"] })]);
+    await open("settings");
+    expect(text()).toContain("低于要求的 Java 21，游戏无法启动");
+    expect(text()).not.toContain("可能没装完整");
+  });
+
   it("分代 ZGC 按实际生效的 Java：自动挑到 21 时带 ZGenerational", async () => {
     await open("settings");
     click(button("分代 ZGC"));
@@ -1247,6 +1322,81 @@ describe("实例详情：设置", () => {
     expect(skeletons()).toBe(0);
     expect(document.querySelector('textarea[aria-label="JVM 参数"]')).not.toBeNull();
     expect(text()).toContain("全局固定值");
+  });
+
+  describe("设为新实例的默认设置", () => {
+    const NOTE = "把本实例的 options.txt（键位、视距等）与服务器列表复制一份，新建实例时可以沿用。";
+    const row = () => {
+      const title = [...document.querySelectorAll("span")].find((el) => el.textContent === "设为新实例的默认设置");
+      const found = title?.parentElement?.parentElement;
+      if (found === undefined || found === null) throw new Error("实例管理卡里没有「设为新实例的默认设置」一行");
+      return found;
+    };
+
+    it("没有默认设置：说明位只有第一行，只有「保存为默认」；保存后命令收到实例 id，说明位改为当前默认取自本实例，可以清除", async () => {
+      await open("settings");
+      expect(row().textContent).toContain(NOTE);
+      expect(row().textContent).not.toContain("当前默认");
+      expect(() => button("清除", row())).toThrow();
+
+      click(button("保存为默认", row()));
+      await flush();
+      expect(callsOf(ipc, "save_instance_as_template")).toEqual([{ id: ID }]);
+      expect(toastTitles()).toContain(`已把「${ID}」的设置保存为默认`);
+      expect(launcher.state.toasts.find((t) => t.title === `已把「${ID}」的设置保存为默认`)?.body).toBe("新建实例时可以在确认步沿用");
+      expect(row().textContent).toContain(`当前默认取自「${ID}」，1 秒前保存`);
+
+      click(button("清除", row()));
+      await flush();
+      expect(callsOf(ipc, "clear_template")).toHaveLength(1);
+      expect(toastTitles()).toContain("已清除默认设置");
+      expect(row().textContent).toContain(NOTE);
+      expect(row().textContent).not.toContain("当前默认");
+      expect(() => button("清除", row())).toThrow();
+    });
+
+    it("已有别的实例存的默认设置写出来源与时刻，手放的写来源不明；没进过游戏时保存失败用后端原文报错，原来的不动", async () => {
+      template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
+      ipc.overrides.set("save_instance_as_template", (args) => {
+        throw new IpcError("template_source_empty", `实例 ${String(args.id)} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存`, { id: args.id, files: ["options.txt"] });
+      });
+      await open("settings");
+      expect(row().textContent).toContain("当前默认取自「创造」，3 天前保存");
+      click(button("保存为默认", row()));
+      await flush();
+      const failed = launcher.state.toasts.find((t) => t.tone === "error");
+      expect([failed?.title, failed?.body]).toEqual(["没能保存默认设置", `实例 ${ID} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存`]);
+      expect(row().textContent).toContain("当前默认取自「创造」，3 天前保存");
+      view?.unmount();
+      view = undefined;
+
+      template = { ...template, source_instance: null, saved_at: null };
+      resources.clear();
+      await open("settings");
+      expect(row().textContent).toContain("当前默认来自数据目录里的文件");
+    });
+
+    it("读取中第二行是文本骨架、按钮照常可点；游戏运行中也能保存", async () => {
+      const pending = deferred<TemplateInfoDto>();
+      ipc.overrides.set("template_info", () => pending.promise);
+      ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+      await open("settings");
+      expect(row().querySelector('[class*="_skeleton_"]')).not.toBeNull();
+      await act(async () => {
+        await launcher.actions.launch(ID);
+        await settle(20);
+      });
+      expect(launcher.state.session?.phase).toBe("running");
+      const save = button("保存为默认", row());
+      expect(save.getAttribute("aria-disabled")).toBeNull();
+      click(save);
+      await flush();
+      expect(callsOf(ipc, "save_instance_as_template")).toEqual([{ id: ID }]);
+      await act(async () => {
+        pending.resolve(NO_TEMPLATE);
+        await settle(20);
+      });
+    });
   });
 
   it("内存改为单独设置时以全局生效值为初值", async () => {

@@ -7,6 +7,9 @@
 //
 // 创建只是把安装任务放进下载队列：成功后通知「开始安装」、把新实例设为当前实例、关闭弹窗，
 // 勾选了「创建后打开」就进实例详情；失败时弹窗停在确认步，顶部给出原因。
+//
+// 确认步的开局选项（沿用默认设置、加载器的 API、性能组合）的勾选记在这里而不是确认步里：跳回前面改了加载器或版本
+// 再回来，用户动过的勾选还在。默认设置与开局 Mod 从选定加载器起就开始查，到确认步时多半已经查好。
 
 import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
 import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
@@ -22,6 +25,7 @@ import { useRunner } from "../../shell/useRunner";
 import type { FlowProps } from "../../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useLoaderVersions, useManifest, useVersionRequirements } from "../../state/queries/catalog";
+import { useStarterMods, useTemplateInfo } from "../../state/queries/starter";
 import { canPinMore } from "../../state/selectors";
 import { Button } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
@@ -37,11 +41,19 @@ import {
   isTypeShown,
   latestRelease,
   manifestProblem,
+  newInstanceIsolated,
+  NO_PICKS,
+  optionChecked,
   recommendedLoaderVersion,
+  STARTER_API,
+  starterBlock,
+  starterSelection,
   supportsLoader,
+  templateBlock,
   visibleSteps,
   type GameVersion,
   type LoaderVersionPick,
+  type StarterPicks,
   type StepId,
   type VersionFilter,
 } from "./model";
@@ -102,6 +114,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const [loaderVersionPick, setLoaderVersionPick] = useState<LoaderVersionPick | null>(null);
   const [cover, setCover] = useState<InstanceCover>(DEFAULT_COVER);
   const [openAfter, setOpenAfter] = useState(true);
+  const [picks, setPicks] = useState<StarterPicks>(NO_PICKS);
 
   // ---- 步骤
   const [step, setStep] = useState<StepId>("name");
@@ -126,6 +139,20 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const recommended = loaderVersions.data === undefined ? null : recommendedLoaderVersion(loaderVersions.data);
   const loaderVersion = effectiveLoaderVersion(loader, version === null ? null : version.id, loaderVersionPick, loaderVersions.data);
   const requirements = useVersionRequirements(version === null ? null : version.id);
+
+  // ---- 开局选项
+  const template = useTemplateInfo();
+  const starter = useStarterMods(loader, version === null ? null : version.id);
+  const isolated = settings === null || version === null ? null : newInstanceIsolated(settings.isolationPolicy, loader, version.type);
+  const templateUnavailable = templateBlock(template, isolated);
+  const hasApi = STARTER_API[loader] !== undefined;
+  const apiUnavailable = hasApi ? starterBlock(starter, "api") : null;
+  const performanceUnavailable = loader === "vanilla" ? null : starterBlock(starter, "performance");
+  const checked = {
+    template: optionChecked(templateUnavailable, picks.template, true),
+    api: hasApi && optionChecked(apiUnavailable, picks.api, true),
+    performance: loader !== "vanilla" && optionChecked(performanceUnavailable, picks.performance, false),
+  };
 
   const visible = visibleSteps(loader);
   const index = visible.indexOf(step);
@@ -196,8 +223,9 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
     if (!canCreate || version === null) throw new Error("新建实例的必填项还没齐，创建按钮不应可点");
     setCreating(true);
     setCreateError(null);
+    const starterMods = starter.status === "ready" ? starterSelection(starter.data, checked.api, checked.performance) : [];
     const result = await run(
-      () => actions.createInstance({ name: trimmed, mcVersion: version.id, loader, loaderVersion, cover: cover.block }),
+      () => actions.createInstance({ name: trimmed, mcVersion: version.id, loader, loaderVersion, cover: cover.block, useTemplate: checked.template, starterMods }),
       ACTION_ERROR.createInstance,
     );
     if (!result.ok) {
@@ -287,6 +315,18 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
             willPin={willPin}
             openAfter={openAfter}
             onOpenAfter={setOpenAfter}
+            starter={{
+              loader,
+              mcVersion: version.id,
+              template,
+              templateBlock: templateUnavailable,
+              starter,
+              apiBlock: apiUnavailable,
+              performanceBlock: performanceUnavailable,
+              checked,
+              onPick: (key, value) => setPicks((p) => ({ ...p, [key]: value })),
+              now,
+            }}
             error={createError}
           />
         );

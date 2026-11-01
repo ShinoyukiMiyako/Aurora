@@ -66,7 +66,8 @@ import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
 import * as instancesIpc from "../ipc/instances";
 import type { DeletionPreviewDto, FolderTarget, InstallResultDto, InstanceDto } from "../ipc/instances";
-import type { InstalledRuntimeDto } from "../ipc/java";
+import * as javaIpc from "../ipc/java";
+import type { InstalledRuntimeDto, JavaInstallationDto, RemoveJavaPathDto } from "../ipc/java";
 import * as launchIpc from "../ipc/launch";
 import { blockedFilesOf, claimBlockedFiles, downloadsFolder, parseBlockedFiles, type BlockedFileDto, type ClaimReportDto, type ModpackInstallOutcomeDto, type ModpackSource } from "../ipc/modpack";
 import * as modsIpc from "../ipc/mods";
@@ -153,6 +154,16 @@ export interface LaunchPrompt {
   occupantPhase: "loading" | "running";
 }
 
+/** 新实例就绪后接着装的一个开局 Mod（Modrinth 上的工程与挑好的版本）。 */
+export interface StarterPick {
+  projectId: string;
+  modVersionId: string;
+  /** Mod 名（任务里这一项的标题）。 */
+  title: string;
+  /** 平台声明的文件大小，组合任务的进度按它折算；平台没声明为 null。 */
+  fileSize: number | null;
+}
+
 /** 新建实例的入参。cover 为封面预设 id。 */
 export interface CreateInstanceSpec {
   name: string;
@@ -161,6 +172,10 @@ export interface CreateInstanceSpec {
   /** 原版为 null；带加载器时必填。 */
   loaderVersion: string | null;
   cover: string;
+  /** 装好后沿用默认设置（只补实例里没有的文件）；不给与 false 相同。 */
+  useTemplate?: boolean;
+  /** 实例就绪后接着装的开局 Mod，按勾选的顺序、API 在前；不给与空列表相同。 */
+  starterMods?: StarterPick[];
 }
 
 /** 导入整合包的入参：名称就是新实例的 id，入队时即可拿到。 */
@@ -209,6 +224,8 @@ type TaskMeta =
        * 所以安装期间只在派生状态里固定，装好后再写进侧栏固定列表。
        */
       autoPin: boolean;
+      /** 就绪后接着装的开局 Mod；重启后恢复的新建任务推不出来，为空。 */
+      starter: StarterPick[];
     }
   | {
       type: "modpack";
@@ -219,10 +236,13 @@ type TaskMeta =
       loader: LoaderKind;
       loaderVersion: string | null;
     }
-  | { type: "repair"; launchAfter: boolean }
+  /** starter：失败的新建改排补全时接过来的开局 Mod，补全好了照样接着装；别的补全为空。 */
+  | { type: "repair"; launchAfter: boolean; starter: StarterPick[] }
   /** pinFor：下载完把这个实例的 Java 固定为新装的运行时（崩溃诊断「下载 Java N」）。 */
   | { type: "java"; major: number; launchAfter: string | null; pinFor: string | null }
   | { type: "mods"; instanceId: string; name: string; dependencies: number }
+  /** 新实例的开局 Mod：一个组合任务装好勾选的几个。 */
+  | { type: "starter"; instanceId: string; count: number }
   | { type: "resource"; instanceId: string; resourceType: InstallableResourceType; name: string }
   | { type: "update"; instanceId: string; name: string }
   | { type: "updates"; instanceId: string };
@@ -322,6 +342,9 @@ export interface LauncherActions {
   renameInstance(id: string, name: string): Promise<string>;
   updateInstanceSettings(id: string, patch: Partial<InstanceSettings>): Promise<InstanceSettings>;
   repairInstance(id: string, opts?: { launchAfter?: boolean }): Promise<void>;
+  /** 把实例的设置文件存为新实例的默认设置；成功后默认设置的查询失效并通知。 */
+  saveInstanceAsTemplate(id: string): Promise<void>;
+  clearTemplate(): Promise<void>;
   openFolder(target: FolderTarget, id?: string | null, world?: string | null): Promise<void>;
   /** 用系统默认浏览器打开一个 http(s) 网址；别的协议直接抛错。打开失败原样抛出。 */
   openExternal(url: string): Promise<void>;
@@ -358,6 +381,10 @@ export interface LauncherActions {
   flushTaskJournal(): Promise<void>;
   // 设置
   updateSettings(patch: SettingsPatch): Promise<void>;
+  /** 记下一个手动指定的 Java；成功后 Java 列表重新探测、设置重读（extra_java_paths 变了）。 */
+  addJavaPath(path: string): Promise<JavaInstallationDto>;
+  /** 移除一条手动添加的 Java；默认 Java 可能随之改回自动选择，所以同样重读设置。 */
+  removeJavaPath(path: string): Promise<RemoveJavaPathDto>;
   setGameDirectory(path: string): Promise<void>;
   /**
    * 首次启动向导第一步的提交：后端校验并落下游戏目录、收下勾选的文件夹、记下向导已完成（此后关窗口，下次直接进主页）。
@@ -500,11 +527,12 @@ function metaFromSpec(task: Task): TaskMeta | null {
         cover: null,
         // 重启后恢复的新建任务不知道当时侧栏的余量：按「有空位就固定」处理
         autoPin: true,
+        starter: [],
       };
     case "install_modpack":
       return { type: "modpack", name: strArg(args, "name", command), cover: null, modCount: null, mcVersion: null, loader: "vanilla", loaderVersion: null };
     case "repair_instance":
-      return { type: "repair", launchAfter: false };
+      return { type: "repair", launchAfter: false, starter: [] };
     case "install_java": {
       const major = args.requiredMajor;
       if (typeof major !== "number") throw new Error("任务 install_java 缺少 requiredMajor");
@@ -512,6 +540,7 @@ function metaFromSpec(task: Task): TaskMeta | null {
     }
     case "install_mods": {
       const items = modItems(args);
+      if (args.starter === true) return { type: "starter", instanceId: strArg(args, "versionId", command), count: items.length };
       return { type: "mods", instanceId: strArg(args, "versionId", command), name: items[0].title, dependencies: items.length - 1 };
     }
     case "update_mods":
@@ -707,6 +736,7 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
   const swap = (value: string | null) => (value === from ? to : value);
   switch (meta.type) {
     case "mods":
+    case "starter":
     case "resource":
     case "update":
     case "updates":
@@ -1668,10 +1698,21 @@ export class LauncherStore {
     }
     switch (meta.type) {
       case "create": {
-        const id = (result as InstallResultDto).id;
+        const outcome = result as InstallResultDto;
+        const id = outcome.id;
         await this.settleNewInstance(task.id, id, meta.cover, meta.autoPin);
         const copy = TASK_TOAST.ready(id);
         this.pushToast("success", copy.title, copy.body, this.launchAction(id));
+        // 勾选与否以任务参数为准：重启后恢复的任务没有入队时的上下文，参数里仍记着
+        if (task.spec.args.useTemplate === true) {
+          const template = outcome.template;
+          if (template === null || template === undefined) throw new Error(`新建「${id}」请求了沿用默认设置，安装结果里却没有套用结果`);
+          if (template.status === "skipped") {
+            const skipped = TASK_TOAST.templateSkipped(id, template.reason);
+            this.pushToast("info", skipped.title, skipped.body);
+          }
+        }
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
         return;
       }
       case "modpack": {
@@ -1685,6 +1726,7 @@ export class LauncherStore {
       case "repair": {
         const id = strArg(task.spec.args, "id", command);
         await this.fetchInstances();
+        if (meta.starter.length > 0) this.enqueueStarter(id, meta.starter);
         if (meta.launchAfter && !isSessionActive(this.raw.session)) {
           await this.actions.launch(id);
           return;
@@ -1707,6 +1749,12 @@ export class LauncherStore {
         await this.fetchInstances();
         const copy = TASK_TOAST.modInstalled(meta.name, meta.dependencies, meta.instanceId);
         this.pushToast("success", copy.title, this.withRunningSuffix(meta.instanceId, copy.body));
+        return;
+      }
+      case "starter": {
+        this.modsChanged(meta.instanceId);
+        await this.fetchInstances();
+        this.pushToast("success", TASK_TOAST.starterInstalled(meta.instanceId, meta.count).title);
         return;
       }
       case "resource": {
@@ -1749,6 +1797,34 @@ export class LauncherStore {
         return;
       }
     }
+  }
+
+  /**
+   * 新实例就绪后接着装开局 Mod：排一个组合任务，在下载任务里只占一行。它是实例之外的一步，失败照任务失败呈现，
+   * 实例本身照常可用；重试时前面已经装上的几项后端认出已装、直接跳过。
+   */
+  private enqueueStarter(instanceId: string, starter: readonly StarterPick[]): void {
+    const title = TASK_TEXT.starterTitle(starter.length);
+    this.enqueue(
+      {
+        kind: "mod",
+        title,
+        detail: TASK_TEXT.starterDetail(instanceId),
+        instanceId,
+        spec: {
+          command: "install_mods",
+          args: {
+            versionId: instanceId,
+            platform: "modrinth",
+            projectId: starter[0].projectId,
+            starter: true,
+            items: starter.map((pick) => ({ platform: "modrinth", projectId: pick.projectId, modVersionId: pick.modVersionId, title: pick.title, fileSize: pick.fileSize })),
+          },
+        },
+      },
+      { type: "starter", instanceId, count: starter.length },
+      title,
+    );
   }
 
   // ---------------------------------------------------------------- 登录内部
@@ -2061,15 +2137,17 @@ export class LauncherStore {
         if (spec.loader !== "vanilla" && spec.loaderVersion === null) throw new Error(`${spec.loader} 实例需要加载器版本`);
         const loader = spec.loader === "vanilla" ? null : spec.loader;
         const autoPin = store.getState().sidebarPins.length < SIDEBAR_PIN_LIMIT;
+        const useTemplate = spec.useTemplate === true;
+        const starter = spec.starterMods === undefined ? [] : spec.starterMods;
         const task = store.enqueue(
           {
             kind: "game",
             title: TASK_TEXT.createTitle(spec.mcVersion, spec.loader, spec.loaderVersion),
             detail: TASK_TEXT.createDetail(spec.name),
             instanceId: spec.name,
-            spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name } },
+            spec: { command: "install_version", args: { id: spec.mcVersion, loader, loaderVersion: loader === null ? null : spec.loaderVersion, targetName: spec.name, useTemplate } },
           },
-          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover, autoPin },
+          { type: "create", name: spec.name, mcVersion: spec.mcVersion, loader: spec.loader, loaderVersion: spec.loaderVersion, cover: spec.cover, autoPin, starter },
           spec.name,
         );
         // 新实例即成为当前实例：主页「继续游玩」显示它的安装进度
@@ -2178,7 +2256,18 @@ export class LauncherStore {
       },
       async repairInstance(id, opts = {}) {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
-        store.enqueueRepair(id, opts.launchAfter === true);
+        store.enqueueRepair(id, opts.launchAfter === true, []);
+      },
+      async saveInstanceAsTemplate(id) {
+        await instancesIpc.saveInstanceAsTemplate(id);
+        invalidateResources("template");
+        const copy = TOAST_COPY.templateSaved(id);
+        store.pushToast("success", copy.title, copy.body);
+      },
+      async clearTemplate() {
+        await instancesIpc.clearTemplate();
+        invalidateResources("template");
+        store.pushToast("info", TOAST_COPY.templateCleared);
       },
       async openFolder(target, id = null, world = null) {
         await instancesIpc.openFolder(target, id, world);
@@ -2490,6 +2579,18 @@ export class LauncherStore {
         await configIpc.updateConfig(settingsPatchToConfig(patch));
         await store.fetchSettings();
       },
+      async addJavaPath(path) {
+        const java = await javaIpc.addJavaPath(path);
+        invalidateResources("java");
+        await store.fetchSettings();
+        return java;
+      },
+      async removeJavaPath(path) {
+        const result = await javaIpc.removeJavaPath(path);
+        invalidateResources("java");
+        await store.fetchSettings();
+        return result;
+      },
       async setGameDirectory(path) {
         await configIpc.setGameDirectory(path);
         for (const prefix of GAME_DIR_SCOPED_RESOURCES) invalidateResources(prefix);
@@ -2538,8 +2639,8 @@ export class LauncherStore {
     await this.afterAccountAdded("authlib", this.loginIntent("authlib"), copy);
   }
 
-  /** 排一个补全任务；同一件事已在队列里时提示重复并返回 null。 */
-  private enqueueRepair(id: string, launchAfter: boolean): Task | null {
+  /** 排一个补全任务；同一件事已在队列里时提示重复并返回 null。starter 为补全好之后接着装的开局 Mod。 */
+  private enqueueRepair(id: string, launchAfter: boolean, starter: StarterPick[]): Task | null {
     const inst = this.instance(id);
     const spec = inst.incomplete === null ? null : inst.incomplete.spec;
     const mcVersion = inst.mcVersion !== null ? inst.mcVersion : spec === null ? null : spec.mcVersion;
@@ -2551,7 +2652,7 @@ export class LauncherStore {
           : TASK_TEXT.repairDetail(mcVersion, loaderOfArg(spec === null ? null : spec.loader), spec === null ? null : spec.loaderVersion);
     return this.enqueue(
       { kind: "repair", title: TASK_TEXT.repairTitle(id), detail, instanceId: id, spec: { command: "repair_instance", args: { id } } },
-      { type: "repair", launchAfter },
+      { type: "repair", launchAfter, starter },
       id,
     );
   }
@@ -2567,9 +2668,14 @@ export class LauncherStore {
     return leftover === undefined ? null : leftover.id;
   }
 
-  /** 失败新建的重试改排补全：补全任务接替这一行，失败的那一行撤下，不再留着一个点了也没用的重试。 */
+  /**
+   * 失败新建的重试改排补全：补全任务接替这一行，失败的那一行撤下，不再留着一个点了也没用的重试。新建时勾的开局 Mod
+   * 跟着交给补全任务，否则重试成功后玩家勾的 Mod 一个都没装上，也没有任何提示。
+   */
   private retryAsRepair(task: Task, instanceId: string): boolean {
-    if (this.enqueueRepair(instanceId, false) === null) return false;
+    const meta = this.metaOf(task);
+    const starter = meta !== null && meta.type === "create" ? meta.starter : [];
+    if (this.enqueueRepair(instanceId, false, starter) === null) return false;
     this.set((raw) => ({ tasks: raw.tasks.filter((t) => t.id !== task.id) }));
     this.tasksChanged();
     return true;

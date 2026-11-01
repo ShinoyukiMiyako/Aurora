@@ -29,6 +29,7 @@ use crate::appearance::{Appearance, AppearancePatch};
 use crate::config::{AfterLaunch, AuroraConfig, DownloadSourcePolicy, MemorySettings};
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink};
+use crate::gpu::{GpuPreferenceStore, RegistryGpuPreferences};
 
 /// 下载进度事件的最小间隔。采样器每 100 ms 推一次快照，逐文件完成时还会额外推一次；
 /// 上千个小文件的资源批次若逐条转发，事件通道与前端 IPC 都会被灌满，按此间隔只留最新快照。
@@ -67,6 +68,8 @@ pub struct Aurora {
     pub(crate) source_resolver: Arc<dyn SourceResolver>,
     /// 下载源健康表。跨池、跨任务共享：一个任务刚证明某个源不通，紧接着的任务不必把同一轮重试再赔一遍。
     source_health: Arc<SourceHealth>,
+    /// Windows 图形设置里按程序显卡偏好的读写；测试注入替身，不碰真实注册表。
+    gpu_preferences: Arc<dyn GpuPreferenceStore>,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -127,6 +130,7 @@ impl Aurora {
             source_speed: Arc::new(SourceSpeedCache::new(VERSION_MANIFEST_V2)),
             source_resolver: Arc::new(MirrorResolver),
             source_health: Arc::new(SourceHealth::new()),
+            gpu_preferences: Arc::new(RegistryGpuPreferences),
             #[cfg(test)]
             curseforge_key: None,
             #[cfg(test)]
@@ -287,6 +291,13 @@ impl Aurora {
         self.config.default_java = java;
     }
 
+    /// 设置启动前是否把这次用的 Java 设为 Windows 图形设置里的「高性能」。
+    ///
+    /// 关掉时不撤销已经写进 Windows 的值：那里分不出是谁写的，可能是用户自己在系统设置里改的。
+    pub fn set_prefer_dedicated_gpu(&mut self, enabled: bool) {
+        self.config.prefer_dedicated_gpu = enabled;
+    }
+
     /// 记下用户跳过的启动器版本。
     pub fn set_skipped_update_version(&mut self, version: Option<String>) {
         self.config.skipped_update_version = version;
@@ -428,6 +439,11 @@ impl Aurora {
     pub(crate) fn java_runtime_url(&self) -> &str {
         &self.java_runtime_url
     }
+
+    /// 按程序显卡偏好的写入器（克隆廉价：`Arc`）。
+    pub(crate) fn gpu_preferences(&self) -> Arc<dyn GpuPreferenceStore> {
+        self.gpu_preferences.clone()
+    }
 }
 
 /// 装配一个安装上下文所需的一束借用（生命周期绑定到传入的各组件）。
@@ -478,6 +494,7 @@ impl Aurora {
             )),
             source_resolver: Arc::new(MirrorResolver),
             source_health: Arc::new(SourceHealth::new()),
+            gpu_preferences: Arc::new(crate::gpu::testing::UnsetGpuPreferences),
             curseforge_key: None,
             curseforge_cdn_scope: None,
         }
@@ -498,6 +515,12 @@ impl Aurora {
         ));
         self.source_resolver = resolver;
         self.source_health = Arc::new(SourceHealth::new());
+        self
+    }
+
+    /// 换上显卡偏好写入器的替身。
+    pub(crate) fn with_gpu_preference_store(mut self, store: Arc<dyn GpuPreferenceStore>) -> Self {
+        self.gpu_preferences = store;
         self
     }
 
@@ -613,6 +636,12 @@ mod tests {
 
         aurora.set_default_java(None);
         assert!(aurora.config().default_java.is_none());
+
+        assert!(!aurora.config().prefer_dedicated_gpu);
+        aurora.set_prefer_dedicated_gpu(true);
+        assert!(aurora.config().prefer_dedicated_gpu);
+        aurora.set_prefer_dedicated_gpu(false);
+        assert!(!aurora.config().prefer_dedicated_gpu);
     }
 
     /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。

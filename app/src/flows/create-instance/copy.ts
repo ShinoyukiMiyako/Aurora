@@ -130,6 +130,45 @@ export const CREATE_COPY = {
     path: "存放位置",
     snapshotWarning: "快照版本可能有严重问题，别在里面放重要存档。",
     openAfter: "创建后打开实例详情",
+    starter: {
+      groupLabel: "开局选项",
+      template: "沿用默认设置（键位、视距、服务器列表）",
+      /** 默认设置的来源；文件是手放进数据目录的、没有记录时说来源不明。 */
+      templateFrom: (source: string | null, savedAt: number | null, now: number) =>
+        source === null ? "取自数据目录里的默认设置" : savedAt === null ? `取自「${source}」` : `取自「${source}」，${formatRelative(savedAt, now)}保存`,
+      templateBlocked: {
+        loading: "正在读取默认设置",
+        disabled: "新建实例时沿用默认设置已在配置里关闭。",
+        empty: "还没有默认设置。可以在任一实例的设置里把它保存为默认。",
+        shared: "这个实例与其他未隔离的实例共用 .minecraft 里的设置，用不上默认设置。",
+      },
+      templateUnreadable: (message: string) => `读不到默认设置：${message}`,
+      api: (name: string) => `一并装上 ${name}`,
+      apiNote: (loader: LoaderKind) => `大多数 ${LOADER_NAME[loader]} Mod 都要它`,
+      apiMissing: (name: string, mcVersion: string) => `${name} 还没有适配 ${mcVersion} 的版本`,
+      apiNotFound: (name: string) => `Modrinth 上已经找不到 ${name}`,
+      /** 组合标签里只数能装的项：1、2 项全写出来，3 项及以上写前两个加总数。 */
+      performance: (names: readonly string[]) =>
+        names.length === 0
+          ? "装上性能优化组合"
+          : names.length <= 2
+            ? `装上性能优化组合（${names.join("、")}）`
+            : `装上性能优化组合（${names.slice(0, 2).join("、")} 等 ${names.length} 个）`,
+      names: (names: readonly string[]) => names.join("、"),
+      /** 缺项的说明：没有这个版本的、平台上已经找不到的各一行，都不会装上。 */
+      missing: (missing: readonly { name: string; reason: "no_version" | "not_found" }[], mcVersion: string): string[] => {
+        const noVersion = missing.filter((m) => m.reason === "no_version").map((m) => m.name);
+        const notFound = missing.filter((m) => m.reason === "not_found").map((m) => m.name);
+        return [
+          ...(noVersion.length === 0 ? [] : [`${noVersion.join("、")} 还没有适配 ${mcVersion}，不会装上`]),
+          ...(notFound.length === 0 ? [] : [`Modrinth 上已经找不到 ${notFound.join("、")}，不会装上`]),
+        ];
+      },
+      noneAvailable: (mcVersion: string) => `这几个 Mod 都还没有适配 ${mcVersion}`,
+      loading: "正在查询能装的版本",
+      loadError: (message: string) => `查不到能装的版本：${message}`,
+      footnote: "勾选的 Mod 会在实例装好后接着下载，在下载任务里占一行；没装上也不影响实例本身。",
+    },
     autoPin: "新实例会自动固定到侧栏",
     pinFull: "侧栏已固定 5 个实例，新实例不会自动固定",
     failed: "没能创建实例",

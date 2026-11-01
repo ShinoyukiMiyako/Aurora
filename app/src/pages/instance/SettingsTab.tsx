@@ -7,12 +7,14 @@ import { ACTION_ERROR, MODPACK_REIMPORT_COPY, TOAST_COPY } from "../../copy/flow
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
-import { needsReimport } from "../../domain/rules";
+import { needsReimport, runtimeComplete } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
+import { describeError } from "../../state/errors";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useInstanceSettings } from "../../state/queries/instance";
+import { useTemplateInfo } from "../../state/queries/starter";
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute } from "../../state/route";
 import { canPinMore } from "../../state/selectors";
@@ -257,10 +259,15 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
       { value: JAVA_AUTO, label: SETTINGS_COPY.javaAuto, icon: "sparkle", hint: autoHint(info) },
       ...info.runtimes.map((r) => {
         const fit = javaFit(r.version.major, info.required);
+        const label = SETTINGS_COPY.javaOption(r.version.major, r.vendor);
+        // 缺运行时文件的不让选；已经固定成它的照常显示为当前值，让人看清现状
+        if (!runtimeComplete(r)) {
+          return { value: r.path, label, hint: SETTINGS_COPY.javaIncomplete(r.version.raw), icon: FIT_ICON[fit], disabled: r.path !== value };
+        }
         const suffix = fit === "match" ? SETTINGS_COPY.javaFitMatch : fit === "lower" ? SETTINGS_COPY.javaFitLower : "";
         return {
           value: r.path,
-          label: SETTINGS_COPY.javaOption(r.version.major, r.vendor),
+          label,
           hint: `${r.version.raw} · ${JAVA_SOURCE_LABEL[r.source]}${suffix}`,
           icon: FIT_ICON[fit],
         };
@@ -308,6 +315,10 @@ function JavaState({ info, autoDownload, locked, onUseAuto }: { info: JavaInfo; 
         : { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.fitNoDownload(info.required), body: SETTINGS_COPY.fitNoDownloadBody };
     }
     const fit = javaFit(runtime.version.major, info.required);
+    // 版本过低是启动不了，比缺文件更要紧，先报它；缺文件只在固定成它时出现，自动挑选已经跳过不完整的
+    if (fit !== "lower" && !runtimeComplete(runtime)) {
+      return { tone: "warn", icon: "alert", title: SETTINGS_COPY.fitIncomplete(runtime.missing_files), body: SETTINGS_COPY.fitIncompleteBody, action: useAuto };
+    }
     if (fit === "match") return { tone: "ok", icon: "check-circle", title: SETTINGS_COPY.fitMatch(info.required), body: <code className={styles.path}>{runtime.path}</code> };
     if (fit === "higher") return { tone: "warn", icon: "alert", title: SETTINGS_COPY.fitHigher(info.required), body: SETTINGS_COPY.fitHigherBody, action: useAuto };
     return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.fitLower(info.required), body: SETTINGS_COPY.fitLowerBody, action: useAuto };
@@ -580,6 +591,7 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
             {SETTINGS_COPY.open}
           </Button>
         </SettingRow>
+        <TemplateRow id={inst.id} locked={ops.settingsReason} />
         {needsReimport(inst) ? (
           <SettingRow title={MODPACK_REIMPORT_COPY.menuReimport} description={MODPACK_REIMPORT_COPY.note}>
             <Button size="sm" icon="modpack" onClick={() => go(reimportRoute(inst))}>
@@ -604,6 +616,61 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
         </Button>
       </div>
     </Card>
+  );
+}
+
+/** 文本骨架的宽度：默认设置读到之前，第二行先占一行的位置。 */
+const TEMPLATE_SKELETON_WIDTH = 200;
+
+/**
+ * 「设为新实例的默认设置」：保存读的是磁盘上的文件，所以游戏运行中也能存（游戏退出时才写入的改动不在其中）；
+ * 只在安装、补全、改名、删除挪动实例目录时禁用，原因与改实例设置的锁同一套。清除与本实例无关，不受这把锁约束。
+ */
+function TemplateRow({ id, locked }: { id: string; locked: string | undefined }) {
+  const template = useTemplateInfo();
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const now = useNow(60_000);
+  const [busy, setBusy] = useState<"save" | "clear" | null>(null);
+  const info = template.status === "ready" ? template.data : null;
+
+  const save = () => {
+    setBusy("save");
+    void run(() => actions.saveInstanceAsTemplate(id), ACTION_ERROR.saveTemplate).then(() => setBusy(null));
+  };
+  const clear = () => {
+    setBusy("clear");
+    void run(() => actions.clearTemplate(), ACTION_ERROR.clearTemplate).then(() => setBusy(null));
+  };
+
+  const current =
+    template.status === "loading" ? (
+      <Skeleton shape="text" width={TEMPLATE_SKELETON_WIDTH} />
+    ) : template.status === "error" ? (
+      <span className={styles.soft}>{SETTINGS_COPY.templateError(describeError(template.error))}</span>
+    ) : info !== null && info.present ? (
+      <span className={styles.soft}>{SETTINGS_COPY.templateCurrent(info.source_instance, info.saved_at, now)}</span>
+    ) : null;
+
+  return (
+    <SettingRow
+      title={SETTINGS_COPY.templateTitle}
+      description={
+        <span className={styles.resolutionNote}>
+          <span>{SETTINGS_COPY.templateNote}</span>
+          {current}
+        </span>
+      }
+    >
+      {info !== null && info.present && (
+        <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} onClick={clear}>
+          {SETTINGS_COPY.templateClear}
+        </Button>
+      )}
+      <Button size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} disabledReason={locked} onClick={save}>
+        {SETTINGS_COPY.templateSave}
+      </Button>
+    </SettingRow>
   );
 }
 

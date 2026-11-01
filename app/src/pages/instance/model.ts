@@ -2,7 +2,7 @@
 // 输入一律是状态层给出的领域模型与 DTO；页面组件只负责把这里的结论画出来。
 
 import type { InstanceSummary, Settings } from "../../domain/adapt";
-import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
+import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
@@ -214,29 +214,14 @@ export function javaFit(major: number, required: number): JavaFit {
   return major > required ? "higher" : "lower";
 }
 
-function compareJavaVersion(a: JavaInstallationDto["version"], b: JavaInstallationDto["version"]): number {
-  return a.major - b.major || a.minor - b.minor || a.security - b.security || a.build - b.build;
-}
-
 /**
  * 自动选择会落到哪个运行时，与后端的挑选同一条规则：全局设置里指定了默认 Java 时一律用它；
- * 否则在主版本相等的候选里先挑 64 位、再挑版本号最高的；一个都没有时启动阶段自动下载。
+ * 否则在主版本相等、文件齐全的候选里先挑 64 位、再挑版本号最高的；一个都没有时启动阶段自动下载。
  */
 export type AutoJavaPick =
   | { kind: "global"; path: string; runtime: JavaInstallationDto | null }
   | { kind: "local"; runtime: JavaInstallationDto }
   | { kind: "download" };
-
-/** 主版本相等的候选里先挑 64 位、再挑版本号最高的；一个都没有为 null。 */
-export function bestLocalRuntime(runtimes: readonly JavaInstallationDto[], major: number): JavaInstallationDto | null {
-  return runtimes
-    .filter((r) => r.version.major === major)
-    .reduce<JavaInstallationDto | null>((acc, r) => {
-      if (acc === null) return r;
-      if (r.is_64bit !== acc.is_64bit) return r.is_64bit ? r : acc;
-      return compareJavaVersion(r.version, acc.version) > 0 ? r : acc;
-    }, null);
-}
 
 export function autoJavaPick(runtimes: readonly JavaInstallationDto[], required: number, defaultJava: string, javaAuto: string): AutoJavaPick {
   if (defaultJava !== javaAuto) {

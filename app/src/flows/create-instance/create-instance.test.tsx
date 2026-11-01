@@ -5,12 +5,15 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { INSTANCE_NAME_ERROR } from "../../copy/flows";
 // 版本清单、加载器版本、Java 这几条查询落到假后端。静态引入让假后端在首个查询之前就加载完：
 // 几条查询同时触发桥里的动态引入时，后到的会拿到还没执行完的模块。
+import { IpcError } from "../../ipc/errors";
+import type { JavaInstallationDto } from "../../ipc/java";
 import { resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import type { CreateInstancePreset } from "../../state/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { resources } from "../../state/resource";
+import { focusByKeyboard, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, resetRecorder, settle } from "../../test/launcher";
 import { CREATE_COPY } from "./copy";
@@ -218,7 +221,8 @@ describe("新建实例：完整走一遍", () => {
 
     click(button(CREATE_COPY.create));
     await flush();
-    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.20.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存" }]);
+    // 没有默认设置时不沿用；Fabric API 默认勾着，装好实例后再装
+    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.20.1", loader: "fabric", loaderVersion: "0.16.10", targetName: "周末生存", useTemplate: false }]);
     expect(launcher.state.toasts.map((t) => `${t.tone}:${t.title}:${t.body}`)).toContain(`info:开始安装「周末生存」:${CREATE_COPY.startedBody}`);
     expect(callsOf(ipc, "update_config")).toEqual([{ selectedVersion: "周末生存" }]);
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -241,9 +245,44 @@ describe("新建实例：完整走一遍", () => {
     click(button(CREATE_COPY.confirm.openAfter));
     click(button(CREATE_COPY.create));
     await flush();
-    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.21.1", loader: null, loaderVersion: null, targetName: "原版生存" }]);
+    expect(callsOf(ipc, "install_version")).toEqual([{ taskId: expect.any(String), id: "1.21.1", loader: null, loaderVersion: null, targetName: "原版生存", useTemplate: false }]);
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(nav.route).toEqual({ page: "home" });
+  });
+
+  const java21 = (vendor: string, security: number, missing: string[]): JavaInstallationDto => ({
+    path: `C:/Java/${vendor}-21.0.${security}/bin/java.exe`,
+    version: { major: 21, minor: 0, security, build: 0, raw: `21.0.${security}` },
+    is_64bit: true,
+    vendor,
+    source: "registry",
+    missing_files: missing,
+  });
+
+  async function confirmJavaText(): Promise<string> {
+    await mount();
+    await fillName("原版生存");
+    await next();
+    await next();
+    await next();
+    expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
+    const text = dialog().textContent;
+    if (text === null) throw new Error("确认步没有文字");
+    return text;
+  }
+
+  it("确认步的 Java 跳过缺运行时文件的：同主版本另有完整的就写完整的那个，哪怕版本更低", async () => {
+    ipc.overrides.set("detect_java", () => [java21("Eclipse Adoptium", 9, ["release", "lib/modules"]), java21("Microsoft", 3, [])]);
+    const text = await confirmJavaText();
+    expect(text).toContain("Java 21 · 已安装（Microsoft）");
+    expect(text).not.toContain("Eclipse Adoptium");
+  });
+
+  it("确认步的 Java：同主版本只有不完整的，按要下载写", async () => {
+    ipc.overrides.set("detect_java", () => [java21("Eclipse Adoptium", 9, ["lib/modules"])]);
+    const text = await confirmJavaText();
+    expect(text).toContain("需要 Java 21，会自动下载");
+    expect(text).not.toContain("已安装");
   });
 
   it("版本清单没给全下载体积时确认步不写预计下载", async () => {
@@ -355,6 +394,174 @@ describe("新建实例：版本与加载器的联动", () => {
     random.mockReturnValue(0);
     click(button(CREATE_COPY.cover.shuffle));
     expect(checkedRadio()?.getAttribute("aria-label")).toBe("樱花木板");
+  });
+});
+
+describe("新建实例：确认步的开局选项", () => {
+  const s = CREATE_COPY.confirm.starter;
+  const DAY = 86_400_000;
+
+  /** 开局选项里的一个复选框：按可见标签精确匹配。 */
+  function checkbox(label: string): HTMLButtonElement {
+    const el = [...dialog().querySelectorAll<HTMLButtonElement>('[role="checkbox"]')].find((b) => b.textContent === label);
+    if (el === undefined) throw new Error(`找不到复选框「${label}」`);
+    return el;
+  }
+  const checkboxLabels = () => [...dialog().querySelectorAll<HTMLButtonElement>('[role="checkbox"]')].map((b) => b.textContent);
+  const isChecked = (el: HTMLElement) => el.getAttribute("aria-checked") === "true";
+  const isBlocked = (el: HTMLElement) => el.getAttribute("aria-disabled") === "true";
+
+  /** 走到 1.21.1 的确认步；loader 为 null 时停在原版。 */
+  async function toConfirm(name: string, loader: "Fabric" | "Quilt" | "NeoForge" | null) {
+    await mount();
+    await fillName(name);
+    await next();
+    if (loader !== null) {
+      click(radio(loader));
+      await flush();
+      await next();
+    }
+    await next();
+    await next();
+    expect(heading().textContent).toBe(CREATE_COPY.confirm.title);
+  }
+
+  it("Fabric 默认勾选 Fabric API、不勾性能组合；组合标签只数能装的 4 个；勾上后提交的 starterMods 依次是 5 项", async () => {
+    await toConfirm("周末生存", "Fabric");
+    expect(checkboxLabels()).toEqual([s.template, "一并装上 Fabric API", "装上性能优化组合（Sodium、Lithium 等 4 个）", CREATE_COPY.confirm.openAfter]);
+    const api = checkbox("一并装上 Fabric API");
+    const performance = checkbox("装上性能优化组合（Sodium、Lithium 等 4 个）");
+    expect([isChecked(api), isBlocked(api)]).toEqual([true, false]);
+    expect([isChecked(performance), isBlocked(performance)]).toEqual([false, false]);
+    expect(dialog().textContent).toContain("大多数 Fabric Mod 都要它");
+    expect(dialog().textContent).toContain("Sodium、Lithium、FerriteCore、ModernFix");
+    expect(dialog().textContent).toContain(s.footnote);
+
+    click(performance);
+    expect(isChecked(performance)).toBe(true);
+    const spy = vi.spyOn(launcher.actions, "createInstance");
+    click(button(CREATE_COPY.create));
+    await flush();
+    expect(spy).toHaveBeenCalledTimes(1);
+    const spec = spy.mock.calls[0][0];
+    expect(spec.useTemplate).toBe(false);
+    expect(spec.starterMods?.map((m) => [m.projectId, m.modVersionId, m.title])).toEqual([
+      ["P7dR8mSH", "fapi-0115", "Fabric API"],
+      ["AANobbMI", "sodium-121", "Sodium"],
+      ["gvQqBUqZ", "lith-0143", "Lithium"],
+      ["uXXizFIs", "fc-702-fabric", "FerriteCore"],
+      ["nmDcB62a", "mfix-5194-fabric", "ModernFix"],
+    ]);
+    expect(spec.starterMods?.map((m) => m.fileSize)).toEqual([2_097_152, 1_048_576, 786_432, 143_360, 696_320]);
+    expect(callsOf(ipc, "starter_mods")).toEqual([{ loader: "fabric", mcVersion: "1.21.1" }]);
+  });
+
+  it("取消勾选 Fabric API 后只提交性能组合；原版实例没有 API 与性能组合两项，也不查开局 Mod", async () => {
+    await toConfirm("轻量", "Fabric");
+    click(checkbox("一并装上 Fabric API"));
+    click(checkbox("装上性能优化组合（Sodium、Lithium 等 4 个）"));
+    const spy = vi.spyOn(launcher.actions, "createInstance");
+    click(button(CREATE_COPY.create));
+    await flush();
+    expect(spy.mock.calls[0][0].starterMods?.map((m) => m.projectId)).toEqual(["AANobbMI", "gvQqBUqZ", "uXXizFIs", "nmDcB62a"]);
+    view?.unmount();
+    view = undefined;
+
+    resetRecorder(ipc);
+    bootOverrides(ipc);
+    ipc.overrides.set("install_version", () => deferred<never>().promise);
+    await toConfirm("原版", null);
+    expect(checkboxLabels()).toEqual([s.template, CREATE_COPY.confirm.openAfter]);
+    expect(dialog().textContent).not.toContain(s.footnote);
+    expect(callsOf(ipc, "starter_mods")).toEqual([]);
+  });
+
+  it("Quilt 显示 QFAPI：1.21.1 没有适配的版本时不勾并说明原因；性能组合只剩 Lithium 一项，缺的写在警示行里", async () => {
+    await toConfirm("拼布", "Quilt");
+    const api = checkbox("一并装上 QFAPI");
+    expect([isChecked(api), isBlocked(api)]).toEqual([false, true]);
+    expect(dialog().textContent).toContain("大多数 Quilt Mod 都要它");
+    const performance = checkbox("装上性能优化组合（Lithium）");
+    expect([isChecked(performance), isBlocked(performance)]).toEqual([false, false]);
+    expect(dialog().textContent).toContain("Sodium、FerriteCore 还没有适配 1.21.1，不会装上");
+    // 禁用原因在键盘聚焦时立即给出，经 aria-describedby 关联到复选框上
+    focusByKeyboard(api);
+    const tip = document.getElementById(api.getAttribute("aria-describedby") ?? "");
+    expect(tip?.textContent).toBe("QFAPI 还没有适配 1.21.1 的版本");
+    click(api);
+    expect(isChecked(api)).toBe(false);
+  });
+
+  it("没有默认设置时「沿用默认设置」禁用并写出原因；有模板时默认勾选，写出取自哪个实例", async () => {
+    await toConfirm("无模板", "Fabric");
+    const none = checkbox(s.template);
+    expect([isChecked(none), isBlocked(none)]).toEqual([false, true]);
+    expect(dialog().textContent).toContain("还没有默认设置。可以在任一实例的设置里把它保存为默认。");
+    click(none);
+    expect(isChecked(none)).toBe(false);
+    view?.unmount();
+    view = undefined;
+
+    ipc.overrides.set("template_info", () => ({
+      present: true,
+      files: [{ name: "options.txt", size: 2048 }],
+      source_instance: "樱花生存",
+      saved_at: Date.now() - 3 * DAY,
+      enabled: true,
+    }));
+    // 上一次挂载读到的「没有默认设置」还在缓存里
+    resources.clear();
+    await toConfirm("有模板", "Fabric");
+    const on = checkbox(s.template);
+    expect([isChecked(on), isBlocked(on)]).toEqual([true, false]);
+    expect(dialog().textContent).toContain("取自「樱花生存」，3 天前保存");
+    const spy = vi.spyOn(launcher.actions, "createInstance");
+    click(button(CREATE_COPY.create));
+    await flush();
+    expect(spy.mock.calls[0][0].useTemplate).toBe(true);
+    expect(callsOf(ipc, "install_version")[0].useTemplate).toBe(true);
+  });
+
+  it("有模板但新实例按全局策略不隔离（原版正式版）：不勾并说明用不上；手放的模板写来源不明", async () => {
+    ipc.overrides.set("template_info", () => ({ present: true, files: [{ name: "servers.dat", size: 512 }], source_instance: null, saved_at: null, enabled: true }));
+    await toConfirm("原版", null);
+    const shared = checkbox(s.template);
+    expect([isChecked(shared), isBlocked(shared)]).toEqual([false, true]);
+    expect(dialog().textContent).toContain("这个实例与其他未隔离的实例共用 .minecraft 里的设置，用不上默认设置。");
+    click(button(CREATE_COPY.back));
+    await flush();
+    click(button(CREATE_COPY.back));
+    await flush();
+    click(radio("Fabric"));
+    await flush();
+    await next();
+    await next();
+    await next();
+    expect(isChecked(checkbox(s.template))).toBe(true);
+    expect(dialog().textContent).toContain("取自数据目录里的默认设置");
+  });
+
+  it("开局 Mod 查不到：两项禁用并给出后端原文，说明行有「重试」，重查成功后恢复；创建不受影响", async () => {
+    let fail = true;
+    ipc.overrides.set("starter_mods", () => {
+      if (fail) throw new IpcError("mod_platform_failed", "Modrinth 请求失败: HTTP 503");
+      return { loader: "fabric", mc_version: "1.21.1", available: [], missing: [{ group: "api", project_id: "P7dR8mSH", name: "Fabric API", reason: "no_version" }] };
+    });
+    await toConfirm("断网", "Fabric");
+    const api = checkbox("一并装上 Fabric API");
+    const performance = checkbox("装上性能优化组合");
+    expect([isBlocked(api), isChecked(api), isBlocked(performance), isChecked(performance)]).toEqual([true, false, true, false]);
+    expect(dialog().textContent).toContain("查不到能装的版本：Modrinth 请求失败: HTTP 503");
+    expect(button(CREATE_COPY.create).disabled).toBe(false);
+
+    fail = false;
+    click(button(CREATE_COPY.retry, dialog()));
+    await flush();
+    expect(callsOf(ipc, "starter_mods")).toHaveLength(2);
+    expect(dialog().textContent).not.toContain("查不到能装的版本");
+    // 这个版本一项都装不了：两项仍禁用，原因换成缺版本
+    expect(isBlocked(checkbox("一并装上 Fabric API"))).toBe(true);
+    expect(isBlocked(checkbox("装上性能优化组合"))).toBe(true);
   });
 });
 

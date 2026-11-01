@@ -1,4 +1,4 @@
-// 实例：列表、设置、内容、侧栏固定、新建、补全、删除、改名、打开文件夹，以及新建页要的版本清单、
+// 实例：列表、设置、内容、侧栏固定、新建、补全、删除、改名、打开文件夹、新实例的默认设置，以及新建页要的版本清单、
 // 加载器版本、所需 Java 与下载体积。
 //
 // 会改动实例目录的命令（新建、整合包导入、补全、改名、删除，以及装、删、启停、更新、回滚 Mod 与装资源）
@@ -173,7 +173,44 @@ export interface InstallResultDto {
   libraries: number;
   assets: number;
   natives: number;
+  /** 新建时请求了沿用默认设置才有；没请求为 null。 */
+  template: TemplateOutcomeDto | null;
 }
+
+// ---------------------------------------------------------------- 默认设置（新实例模板）
+
+/**
+ * 模板只收这几个文件，按这个顺序列出与复制：原版的设置与服务器列表，以及 OptiFine 写在游戏目录根下的两份设置。
+ * 与后端的白名单一致；template_source_empty 的 detail.files 就是它。
+ */
+export const TEMPLATE_FILES: readonly string[] = ["options.txt", "servers.dat", "optionsof.txt", "optionsshaders.txt"];
+
+/** 保存默认设置时实例的工作目录里一个白名单文件都没有（还没进过游戏）；detail 为 { id, files }。 */
+export const TEMPLATE_SOURCE_EMPTY_ERROR_CODE = "template_source_empty";
+
+export interface TemplateFileDto {
+  name: string;
+  size: number;
+}
+
+export interface TemplateInfoDto {
+  /** files 不为空。 */
+  present: boolean;
+  /** 模板目录里存在的白名单文件，按白名单顺序。 */
+  files: TemplateFileDto[];
+  /** 从哪个实例保存的；文件是手放进数据目录的、没有记录时为 null。 */
+  source_instance: string | null;
+  /** 保存时刻（毫秒时间戳）；没有记录时为 null。 */
+  saved_at: number | null;
+  /** 配置里新建实例时是否套用模板；为 false 时任何路径都不套。 */
+  enabled: boolean;
+}
+
+/** 没有套上的原因：配置里关了、模板是空的、新实例与别的实例共用游戏目录根下的设置。 */
+export type TemplateSkipReason = "disabled" | "empty" | "shared_working_dir";
+
+/** 套模板的结果：copied 是补进实例的文件，kept 是实例里本来就有、原样保留的文件。 */
+export type TemplateOutcomeDto = { status: "applied"; copied: string[]; kept: string[] } | { status: "skipped"; reason: TemplateSkipReason };
 
 export interface RepairResultDto {
   /** 是否按记下的安装内容重装（新建没装完的实例）。 */
@@ -286,6 +323,8 @@ export const setSidebarPins = (pins: string[]): Promise<string[]> => invoke<stri
  * 长任务：把原版 id（可选叠加加载器）新建为名为 targetName 的实例。进度经 core-event 推送并带 task_id，
  * 可用 cancelTask(taskId) 取消，取消后新建到一半的实例整个删掉；失败时实例保留并标为未完成，可补全重试。
  * 原版安装时 loader 与 loaderVersion 都传 null；Forge / NeoForge 必须给 loaderVersion。
+ * useTemplate 为 true 时装好后沿用默认设置（只补实例里没有的文件），结果见 InstallResultDto.template；
+ * 不传与 false 相同，后端对旧任务表里重放的、没有这个键的新建任务也这样处理。
  */
 export const installVersion = (
   taskId: string,
@@ -293,8 +332,22 @@ export const installVersion = (
   loader: LoaderChoice | null,
   loaderVersion: string | null,
   targetName: string,
+  useTemplate?: boolean,
 ): Promise<InstallResultDto> =>
-  invoke<InstallResultDto>("install_version", { taskId, id, loader, loaderVersion, targetName });
+  invoke<InstallResultDto>("install_version", { taskId, id, loader, loaderVersion, targetName, useTemplate });
+
+/** 默认设置的现状：有哪些文件、取自哪个实例、配置里开没开。只读。 */
+export const templateInfo = (): Promise<TemplateInfoDto> => invoke<TemplateInfoDto>("template_info");
+
+/**
+ * 把实例工作目录里的白名单文件整份存为默认设置（实例没有的文件，新模板里也没有），返回存完之后的状态。
+ * 实例正在安装、补全、改名或删除时以 instance_busy 拒绝；游戏运行中可以保存。工作目录里一个白名单文件都没有时
+ * 以 TEMPLATE_SOURCE_EMPTY_ERROR_CODE 拒绝，原来的默认设置不动。
+ */
+export const saveInstanceAsTemplate = (id: string): Promise<TemplateInfoDto> => invoke<TemplateInfoDto>("save_instance_as_template", { id });
+
+/** 删掉默认设置，返回删完之后的状态（present 为 false）。本来就没有也算成功。 */
+export const clearTemplate = (): Promise<TemplateInfoDto> => invoke<TemplateInfoDto>("clear_template");
 
 /** 长任务：补全实例文件；新建没装完的实例照当初的内容重装。可取消。 */
 export const repairInstance = (taskId: string, id: string): Promise<RepairResultDto> =>

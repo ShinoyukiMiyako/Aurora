@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { bestLocalRuntime, runtimeComplete } from "../../domain/rules";
 import type { Task } from "../../domain/types";
 import type { LaunchView } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
@@ -49,7 +50,7 @@ import {
 } from "./model";
 
 function java(path: string, major: number, minor: number, is64 = true, vendor = "Microsoft"): JavaInstallationDto {
-  return { path, version: { major, minor, security: 0, build: 0, raw: `${major}.${minor}` }, is_64bit: is64, vendor, source: "registry" };
+  return { path, version: { major, minor, security: 0, build: 0, raw: `${major}.${minor}` }, is_64bit: is64, vendor, source: "registry", missing_files: [] };
 }
 
 function mod(fileName: string, over: Partial<InstalledMod> = {}, meta: Partial<NonNullable<InstalledMod["metadata"]>> | null = {}): InstalledMod {
@@ -363,6 +364,17 @@ describe("Java 选择", () => {
   it("自动：同主版本里 64 位优先、再挑版本最高的", () => {
     expect(autoJavaPick(runtimes, 17, "auto", "auto")).toEqual({ kind: "local", runtime: runtimes[2] });
     expect(autoJavaPick(runtimes, 8, "auto", "auto")).toEqual({ kind: "download" });
+  });
+
+  it("自动挑选跳过缺运行时文件的：同主版本另有完整的就选它，全不完整就算本机没有", () => {
+    const broken = { ...java("C:/j17-new", 17, 12, true), missing_files: ["lib/modules"] };
+    const complete = java("C:/j17-old", 17, 1, true);
+    expect(bestLocalRuntime([broken, complete], 17)).toBe(complete);
+    expect(autoJavaPick([broken, complete], 17, "auto", "auto")).toEqual({ kind: "local", runtime: complete });
+    expect(bestLocalRuntime([broken], 17)).toBeNull();
+    expect(autoJavaPick([broken, { ...java("C:/j8", 8, 0), missing_files: ["release", "lib/rt.jar"] }], 17, "auto", "auto")).toEqual({ kind: "download" });
+    expect(runtimeComplete(broken)).toBe(false);
+    expect(runtimeComplete(complete)).toBe(true);
   });
 
   it("全局指定了默认 Java 时一律用它，找不到也照实报告", () => {

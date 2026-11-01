@@ -1,6 +1,9 @@
 //! Java 探测、启动时取 Java 与运行时下载的门面接口。
 //!
-//! - [`Aurora::detect_java`]：设置页与首次启动用的全量探测（托管目录 + 注册表 + 常见目录 + PATH）。
+//! - [`Aurora::detect_java`]：设置页与首次启动用的全量探测（托管目录 + 手动添加 + 注册表 + JAVA_HOME +
+//!   常见目录 + PATH）。
+//! - [`Aurora::inspect_manual_java`]：设置页「添加 Java」识别用户选的 java 可执行文件；记下它由
+//!   [`Aurora::add_extra_java_path`] 写进配置，之后的全量探测把它算作手动添加的来源。
 //! - [`Aurora::resolve_java`]：启动与安装器取 Java。只校验最终选中的那一个，不在启动路径上跑全量探测：
 //!   设置里固定了默认 Java 就用它；否则先在上次探测的结果里按主版本挑、再看托管目录里有没有这个主版本，
 //!   都没有才全量探测，仍没有且开着自动下载就下一个。
@@ -15,17 +18,33 @@ use std::sync::Arc;
 
 use aurora_download::DownloadTask;
 use aurora_java::{
-    DetectScope, DetectSource, InstalledRuntime, JavaInstallation, ProbeCache, RuntimePlan,
-    detect_with, java_exe_in_home, managed_runtime_root, probe_cached, rank_for_major,
-    select_for_major,
+    DetectScope, DetectSource, InstalledRuntime, JAVA_EXE, JavaInstallation, ProbeCache,
+    RuntimePlan, SystemSources, detect_with, java_exe_in_home, managed_runtime_root, probe_cached,
+    rank_for_major, select_for_major,
 };
 
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, JavaPathProblem, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
 
 /// 探测缓存文件名，位于数据目录下。
 const PROBE_CACHE_FILE: &str = "java-probe-cache.json";
+
+/// 不带控制台窗口的 Java 启动器文件名。用户在「添加 Java」里选它时按同目录的 java 记下：
+/// 启动链路拉起的是 java，显卡偏好也要写给真正拉起的那个文件，同一个 Java 也不该记成两条。
+#[cfg(windows)]
+const JAVAW_EXE: &str = "javaw.exe";
+#[cfg(not(windows))]
+const JAVAW_EXE: &str = "javaw";
+
+/// 从手动添加的 Java 列表里移除一项的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemovedJavaPath {
+    /// 列表里有这一项，已移除。
+    pub removed: bool,
+    /// 全局默认 Java 正是它，已改回按版本自动选择。
+    pub default_reset: bool,
+}
 
 /// 执行一次 `java -version` 的函数；在阻塞线程池里跨线程调用，故要 `Send + Sync + 'static`。
 type SharedRunner = Arc<dyn Fn(&Path) -> aurora_java::Result<String> + Send + Sync>;
@@ -48,9 +67,10 @@ impl Aurora {
         }
     }
 
-    /// 全量探测本机可用 Java，结果按「托管 > 注册表 > 常见目录 > PATH」排列。
+    /// 全量探测本机可用 Java，结果按「托管 > 手动添加 > 注册表 > JAVA_HOME > 常见目录 > PATH」排列。
     ///
     /// 单个坏 Java 不会中断整体扫描（aurora-java 内部按候选跳过），空列表即「本机没有 Java」。
+    /// 缺运行时文件的 Java 照样列出（`missing_files` 非空），由挑选与界面跳过。
     pub async fn detect_java(&self) -> Result<Vec<JavaInstallation>> {
         self.detect_java_with(&self.java_env()).await
     }
@@ -208,12 +228,128 @@ impl Aurora {
         Ok(plan.installed())
     }
 
+    /// 识别用户在「添加 Java」里选的文件，通过后返回来源为手动添加的安装项。
+    ///
+    /// 依次检查：绝对路径；文件名是 java 或 javaw（不区分大小写，javaw 换成同目录的 java）；文件存在；
+    /// 识别得出版本（`java -version` 最多等 [`aurora_java::PROBE_TIMEOUT`]，文件没变过时用识别缓存）；
+    /// 运行时文件齐全。只识别不记录：写进配置由调用方经 [`Aurora::add_extra_java_path`] 落盘。
+    pub async fn inspect_manual_java(&self, path: &Path) -> Result<JavaInstallation> {
+        self.inspect_manual_java_with(path, &self.java_env()).await
+    }
+
+    pub(crate) async fn inspect_manual_java_with(
+        &self,
+        path: &Path,
+        env: &JavaEnv,
+    ) -> Result<JavaInstallation> {
+        let invalid = |path: &Path, reason| CoreError::JavaPathInvalid {
+            path: path.to_path_buf(),
+            reason,
+            source: None,
+        };
+        if !path.is_absolute() {
+            return Err(invalid(path, JavaPathProblem::NotAbsolute));
+        }
+        let Some(exe) = manual_java_exe(path) else {
+            return Err(invalid(path, JavaPathProblem::NotJavaExecutable));
+        };
+        match tokio::fs::metadata(&exe).await {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => return Err(invalid(&exe, JavaPathProblem::NotFound)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(invalid(&exe, JavaPathProblem::NotFound));
+            }
+            Err(source) => {
+                return Err(aurora_base::Error::Io { path: exe, source }.into());
+            }
+        }
+
+        let cache = load_probe_cache(self.data_dir()).await;
+        let runner = env.runner.clone();
+        let probe_exe = exe.clone();
+        let (probed, cache) = tokio::task::spawn_blocking(move || {
+            let mut cache = cache;
+            let probed = probe_cached(&probe_exe, DetectSource::Manual, &mut cache, &*runner);
+            (probed, cache)
+        })
+        .await?;
+        save_probe_cache(self.data_dir(), &cache).await;
+        let java = probed.map_err(|err| CoreError::JavaPathInvalid {
+            path: exe.clone(),
+            reason: match err {
+                aurora_java::Error::JavaProbeTimeout { .. } => JavaPathProblem::ProbeTimeout,
+                _ => JavaPathProblem::ProbeFailed,
+            },
+            source: Some(err),
+        })?;
+        if !java.is_complete() {
+            return Err(CoreError::JavaRuntimeIncomplete {
+                path: exe,
+                missing: java.missing_files,
+            });
+        }
+        Ok(java)
+    }
+
+    /// 把手动添加的 java 可执行文件记进配置；按路径不区分大小写去重，已在列表里时返回 `false`。
+    /// 落盘仍需调用 [`Aurora::save_config`]。
+    pub fn add_extra_java_path(&mut self, exe: PathBuf) -> bool {
+        let paths = &mut self.config_mut().extra_java_paths;
+        if paths.iter().any(|known| same_path(known, &exe)) {
+            return false;
+        }
+        paths.push(exe);
+        true
+    }
+
+    /// 从手动添加的列表里移除这一项（只删记录，不动磁盘文件）。全局默认 Java 正是它时一并改回按版本
+    /// 自动选择：留着一个用户刚移除的固定 Java，下次启动会被当成指定的 Java 去用。
+    /// 落盘仍需调用 [`Aurora::save_config`]。
+    pub fn remove_extra_java_path(&mut self, exe: &Path) -> RemovedJavaPath {
+        let config = self.config_mut();
+        let before = config.extra_java_paths.len();
+        config
+            .extra_java_paths
+            .retain(|known| !same_path(known, exe));
+        let removed = config.extra_java_paths.len() != before;
+        let default_reset = removed
+            && config
+                .default_java
+                .as_deref()
+                .is_some_and(|default| same_path(default, exe));
+        if default_reset {
+            config.default_java = None;
+        }
+        RemovedJavaPath {
+            removed,
+            default_reset,
+        }
+    }
+
     fn detect_scope(&self, env: &JavaEnv) -> DetectScope {
         DetectScope {
             managed_root: Some(managed_runtime_root(self.data_dir())),
-            system: env.system,
+            manual: self.config().extra_java_paths.clone(),
+            system: env.system.then(SystemSources::from_env),
         }
     }
+}
+
+/// 用户选的文件规范成要记下的 java 可执行文件：java 原样，javaw 换成同目录的 java；别的文件为 `None`。
+fn manual_java_exe(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    if name.eq_ignore_ascii_case(JAVA_EXE) {
+        Some(path.to_path_buf())
+    } else if name.eq_ignore_ascii_case(JAVAW_EXE) {
+        Some(path.with_file_name(JAVA_EXE))
+    } else {
+        None
+    }
+}
+
+/// Windows 路径不区分大小写：同一个 Java 换了大小写也是同一条记录。
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
 }
 
 /// 本地挑到的 Java，`fixed` 表示来自设置里的固定默认 Java。
@@ -242,14 +378,19 @@ fn pick_local_java(
             DetectSource::CommonDir
         };
         let java = probe_cached(path, source, cache, runner)?;
+        // 不完整也照用：用户明确指定了它，缺的文件未必影响启动，真起不来时启动失败会说明。
+        if !java.is_complete() {
+            tracing::warn!(path = %path.display(), missing = ?java.missing_files, "设置里指定的 Java 缺少运行时文件，可能没装完整");
+        }
         return Ok(Some(Picked { java, fixed: true }));
     }
 
     // 上次探测的结果里按主版本从好到差逐个校验：文件没变只是一次 stat，被删了就试下一个。
+    // 完整性每次现查：缓存里的那个 Java 之后被删掉了运行时文件，也不该再被自动选中。
     let known = cache.installations();
     for candidate in rank_for_major(&known, required_major) {
         match probe_cached(&candidate.path, candidate.source, cache, runner) {
-            Ok(java) if java.version.major == required_major => {
+            Ok(java) if java.version.major == required_major && java.is_complete() => {
                 return Ok(Some(Picked { java, fixed: false }));
             }
             Ok(_) => {}
@@ -261,9 +402,15 @@ fn pick_local_java(
 
     if managed_exe.is_file() {
         match probe_cached(managed_exe, DetectSource::Managed, cache, runner) {
-            Ok(java) if java.version.major == required_major => {
+            Ok(java) if java.version.major == required_major && java.is_complete() => {
                 return Ok(Some(Picked { java, fixed: false }));
             }
+            // 托管运行时缺文件时交给自动下载：已就绪的文件按 sha1 跳过，重下一遍就是补齐。
+            Ok(java) if java.version.major == required_major => tracing::warn!(
+                path = %managed_exe.display(),
+                missing = ?java.missing_files,
+                "托管运行时缺少运行时文件，交给自动下载补齐"
+            ),
             Ok(java) => tracing::warn!(
                 path = %managed_exe.display(),
                 found = java.version.major,
@@ -347,6 +494,8 @@ mod tests {
 
     const OPENJDK_17: &str = "openjdk version \"17.0.8\" 2023-07-18\n\
         OpenJDK 64-Bit Server VM Microsoft-8035246 (build 17.0.8+7-LTS, mixed mode)\n";
+    const RELEASE_BODY: &[u8] = b"JAVA_VERSION=\"17.0.8\"\n";
+    const MODULES_BODY: &[u8] = b"fake modules image";
 
     fn sha1_hex(bytes: &[u8]) -> String {
         let mut hasher = Sha1::new();
@@ -366,17 +515,35 @@ mod tests {
             .await;
     }
 
-    /// 在 mock 上挂好一个只含 java 可执行文件的 17 运行时，返回清单地址与文件内容。
+    /// 在 mock 上挂好一个 17 运行时（java 可执行文件、release、lib/modules，与 Mojang 运行时的根目录一样
+    /// 齐全），返回清单地址与 java 可执行文件的内容。
     async fn mount_runtime(server: &MockServer) -> (String, Vec<u8>) {
         let base = server.uri();
         let platform = aurora_java::current_platform();
         let java_bytes = b"MZ-fake-managed-java".to_vec();
+        let release_bytes = RELEASE_BODY.to_vec();
+        let modules_bytes = MODULES_BODY.to_vec();
         let exe_rel = format!("bin/{}", aurora_java::JAVA_EXE);
+        let file = |sha: String, size: usize, object: &str, executable: bool| {
+            format!(
+                r#"{{"type":"file","executable":{executable},"downloads":{{"raw":{{"sha1":"{sha}","size":{size},"url":"{base}/objects/{object}"}}}}}}"#
+            )
+        };
         let component_manifest = format!(
-            r#"{{"files":{{"bin":{{"type":"directory"}},"{exe_rel}":{{"type":"file","executable":true,"downloads":{{"raw":{{"sha1":"{}","size":{},"url":"{}/objects/java"}}}}}}}}}}"#,
-            sha1_hex(&java_bytes),
-            java_bytes.len(),
-            base,
+            r#"{{"files":{{"bin":{{"type":"directory"}},"lib":{{"type":"directory"}},"{exe_rel}":{},"release":{},"lib/modules":{}}}}}"#,
+            file(sha1_hex(&java_bytes), java_bytes.len(), "java", true),
+            file(
+                sha1_hex(&release_bytes),
+                release_bytes.len(),
+                "release",
+                false
+            ),
+            file(
+                sha1_hex(&modules_bytes),
+                modules_bytes.len(),
+                "modules",
+                false
+            ),
         );
         let all_json = format!(
             r#"{{"{platform}":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{}","url":"{}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
@@ -386,6 +553,8 @@ mod tests {
         mount_get(server, "/all.json", all_json.into_bytes()).await;
         mount_get(server, "/gamma.json", component_manifest.into_bytes()).await;
         mount_get(server, "/objects/java", java_bytes.clone()).await;
+        mount_get(server, "/objects/release", release_bytes).await;
+        mount_get(server, "/objects/modules", modules_bytes).await;
         (format!("{base}/all.json"), java_bytes)
     }
 
@@ -585,14 +754,320 @@ mod tests {
             }
         }
         let progress = last_download.expect("应转发下载进度");
-        assert_eq!(progress.total, 1);
-        assert_eq!(progress.finished, 1);
-        assert_eq!(progress.total_bytes, Some(java_bytes.len() as u64));
+        assert_eq!(progress.total, 3);
+        assert_eq!(progress.finished, 3);
+        assert_eq!(
+            progress.total_bytes,
+            Some((java_bytes.len() + RELEASE_BODY.len() + MODULES_BODY.len()) as u64)
+        );
         assert!(
             stages
                 .iter()
                 .any(|m| m.contains("安装完成") && m.contains(aurora_java::JAVA_EXE)),
             "应发出带产物路径的安装完成阶段事件，实际: {stages:?}"
         );
+    }
+
+    /// 在 `dir/name` 下摆一个 Java 根目录：bin 里有 java 与 javaw；`complete` 时再放 release 与 lib/modules。
+    fn jdk(dir: &Path, name: &str, complete: bool) -> PathBuf {
+        let home = dir.join(name);
+        let exe = java_exe_in_home(&home);
+        touch(&exe);
+        touch(&home.join("bin").join(JAVAW_EXE));
+        if complete {
+            touch(&home.join("release"));
+            touch(&home.join("lib").join("modules"));
+        }
+        exe
+    }
+
+    /// 记下每次识别的路径，按给定的结果作答。
+    fn recording_env(
+        seen: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        answer: fn(&Path) -> aurora_java::Result<String>,
+    ) -> JavaEnv {
+        JavaEnv {
+            runner: Arc::new(move |path: &Path| {
+                seen.lock().unwrap().push(path.to_path_buf());
+                answer(path)
+            }),
+            system: false,
+            runtime_manifest: String::new(),
+        }
+    }
+
+    fn answer_17(_path: &Path) -> aurora_java::Result<String> {
+        Ok(OPENJDK_17.to_owned())
+    }
+
+    fn reason_of(err: &CoreError) -> (JavaPathProblem, &Path, bool) {
+        match err {
+            CoreError::JavaPathInvalid {
+                path,
+                reason,
+                source,
+            } => (*reason, path.as_path(), source.is_some()),
+            other => panic!("应是 JavaPathInvalid，实际：{other:?}"),
+        }
+    }
+
+    /// 手动添加的路径写进配置后，全量探测把它列出来，来源为手动添加。
+    #[tokio::test]
+    async fn manual_java_in_config_is_detected_as_manual() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = jdk(&dir.path().join("elsewhere"), "jdk-17", true);
+        let mut aurora = aurora_with(AuroraConfig::default(), dir.path());
+        assert!(aurora.add_extra_java_path(exe.clone()));
+        let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
+
+        let found = aurora.detect_java_with(&env).await.unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, exe);
+        assert_eq!(found[0].source, DetectSource::Manual);
+        assert_eq!(found[0].version.major, 17);
+        assert!(found[0].is_complete(), "{:?}", found[0].missing_files);
+
+        // 不在配置里就不会被探测到（系统位置关着）。
+        let bare = aurora_with(AuroraConfig::default(), dir.path());
+        assert!(bare.detect_java_with(&env).await.unwrap().is_empty());
+    }
+
+    /// 选 javaw 时按同目录的 java 识别与返回；文件名不区分大小写。
+    #[tokio::test]
+    async fn inspect_manual_java_records_java_for_javaw() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = jdk(dir.path(), "jdk-17.0.8", true);
+        let javaw = exe.with_file_name(JAVAW_EXE.to_uppercase());
+        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let env = recording_env(seen.clone(), answer_17);
+
+        let java = aurora.inspect_manual_java_with(&javaw, &env).await.unwrap();
+        assert_eq!(java.path, exe);
+        assert_eq!(java.source, DetectSource::Manual);
+        assert_eq!(java.version.major, 17);
+        assert!(java.missing_files.is_empty());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![exe.clone()],
+            "识别的是 java 不是 javaw"
+        );
+        assert!(
+            aurora.config().extra_java_paths.is_empty(),
+            "识别不写配置，记下由调用方落盘"
+        );
+    }
+
+    #[tokio::test]
+    async fn inspect_manual_java_reports_each_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let env = recording_env(seen.clone(), answer_17);
+
+        let relative = Path::new("jdk").join("bin").join(JAVA_EXE);
+        let err = aurora
+            .inspect_manual_java_with(&relative, &env)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&err),
+            (JavaPathProblem::NotAbsolute, relative.as_path(), false)
+        );
+
+        let notes = dir.path().join("notes.txt");
+        touch(&notes);
+        let err = aurora
+            .inspect_manual_java_with(&notes, &env)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&err),
+            (JavaPathProblem::NotJavaExecutable, notes.as_path(), false)
+        );
+        let shell = dir.path().join("bin").join("javac.exe");
+        let err = aurora
+            .inspect_manual_java_with(&shell, &env)
+            .await
+            .unwrap_err();
+        assert_eq!(reason_of(&err).0, JavaPathProblem::NotJavaExecutable);
+
+        // 选了 javaw，但旁边没有 java：报的是找不到那个 java。
+        let lone_javaw = dir.path().join("lone").join("bin").join(JAVAW_EXE);
+        touch(&lone_javaw);
+        let err = aurora
+            .inspect_manual_java_with(&lone_javaw, &env)
+            .await
+            .unwrap_err();
+        let lone_java = lone_javaw.with_file_name(JAVA_EXE);
+        assert_eq!(
+            reason_of(&err),
+            (JavaPathProblem::NotFound, lone_java.as_path(), false)
+        );
+        // 叫 java.exe 的目录也不是文件。
+        let folder = dir.path().join("odd").join(JAVA_EXE);
+        std::fs::create_dir_all(&folder).unwrap();
+        let err = aurora
+            .inspect_manual_java_with(&folder, &env)
+            .await
+            .unwrap_err();
+        assert_eq!(reason_of(&err).0, JavaPathProblem::NotFound);
+        assert!(seen.lock().unwrap().is_empty(), "前几步不通过就不拉起 JVM");
+
+        let garbage = jdk(dir.path(), "garbage", true);
+        let env = recording_env(seen.clone(), |_| Ok("not a java at all".to_owned()));
+        let err = aurora
+            .inspect_manual_java_with(&garbage, &env)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&err),
+            (JavaPathProblem::ProbeFailed, garbage.as_path(), true)
+        );
+
+        let stuck = jdk(dir.path(), "stuck", true);
+        let env = recording_env(seen.clone(), |path| {
+            Err(aurora_java::Error::JavaProbeTimeout {
+                path: path.to_path_buf(),
+                timeout_secs: aurora_java::PROBE_TIMEOUT.as_secs(),
+            })
+        });
+        let err = aurora
+            .inspect_manual_java_with(&stuck, &env)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            reason_of(&err),
+            (JavaPathProblem::ProbeTimeout, stuck.as_path(), true)
+        );
+        assert!(
+            matches!(
+                std::error::Error::source(&err)
+                    .and_then(|source| source.downcast_ref::<aurora_java::Error>()),
+                Some(aurora_java::Error::JavaProbeTimeout { .. })
+            ),
+            "超时的原错误挂在 source 上"
+        );
+
+        let broken = jdk(dir.path(), "broken", false);
+        let err = aurora
+            .inspect_manual_java_with(&broken, &recording_env(seen, answer_17))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CoreError::JavaRuntimeIncomplete { path, missing }
+                    if path == &broken && missing == &["release".to_owned(), "lib/modules".to_owned()]
+            ),
+            "实际：{err:?}"
+        );
+    }
+
+    #[test]
+    fn add_extra_java_path_dedupes_ignoring_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let exe = PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
+        assert!(aurora.add_extra_java_path(exe.clone()));
+        assert!(!aurora.add_extra_java_path(exe.clone()));
+        assert!(!aurora.add_extra_java_path(PathBuf::from(r"d:\JAVA\JDK-21\BIN\JAVA.EXE")));
+        let other = PathBuf::from(r"E:\zulu8\bin\java.exe");
+        assert!(aurora.add_extra_java_path(other.clone()));
+        assert_eq!(aurora.config().extra_java_paths, vec![exe, other]);
+    }
+
+    #[test]
+    fn removing_the_default_java_resets_it_to_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
+        let other = PathBuf::from(r"E:\zulu8\bin\java.exe");
+        let config = AuroraConfig {
+            extra_java_paths: vec![exe.clone(), other.clone()],
+            default_java: Some(exe.clone()),
+            ..AuroraConfig::default()
+        };
+        let mut aurora = aurora_with(config, dir.path());
+
+        // 移除的不是默认 Java：默认不动。
+        assert_eq!(
+            aurora.remove_extra_java_path(&other),
+            RemovedJavaPath {
+                removed: true,
+                default_reset: false
+            }
+        );
+        assert_eq!(aurora.config().default_java.as_deref(), Some(exe.as_path()));
+
+        assert_eq!(
+            aurora.remove_extra_java_path(Path::new(r"d:\java\JDK-21\bin\java.exe")),
+            RemovedJavaPath {
+                removed: true,
+                default_reset: true
+            }
+        );
+        assert!(aurora.config().default_java.is_none());
+        assert!(aurora.config().extra_java_paths.is_empty());
+
+        // 不在列表里：什么都不动，默认 Java 即便同路径也不改。
+        aurora.set_default_java(Some(exe.clone()));
+        assert_eq!(
+            aurora.remove_extra_java_path(&exe),
+            RemovedJavaPath {
+                removed: false,
+                default_reset: false
+            }
+        );
+        assert_eq!(aurora.config().default_java.as_deref(), Some(exe.as_path()));
+    }
+
+    /// 托管运行时缺了文件就不再被自动选中，交给自动下载：已就绪的文件按 sha1 跳过，只补缺的那个。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incomplete_managed_runtime_is_repaired_by_download() {
+        let server = MockServer::start().await;
+        let (manifest, _) = mount_runtime(&server).await;
+        let dir = tempfile::tempdir().unwrap();
+        let env = counting_env(Arc::new(AtomicUsize::new(0)), manifest);
+        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let home = runtime_install_dir(dir.path(), 17);
+
+        let (list, _) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        assert!(list[0].is_complete(), "{:?}", list[0].missing_files);
+        assert_eq!(requests_to(&server, "/objects/release").await, 1);
+
+        std::fs::remove_file(home.join("release")).unwrap();
+        let (list, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        assert_eq!(path, java_exe_in_home(&home));
+        assert!(list[0].is_complete());
+        assert_eq!(std::fs::read(home.join("release")).unwrap(), RELEASE_BODY);
+        assert_eq!(
+            requests_to(&server, "/objects/release").await,
+            2,
+            "缺的那个重下"
+        );
+        assert_eq!(
+            requests_to(&server, "/objects/java").await,
+            1,
+            "已就绪的不重下"
+        );
+        assert_eq!(requests_to(&server, "/objects/modules").await, 1);
+    }
+
+    /// 设置里固定的 Java 不完整也照用：用户明确指定了它。
+    #[tokio::test]
+    async fn incomplete_fixed_default_java_is_still_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixed = jdk(dir.path(), "half-jdk", false);
+        let config = AuroraConfig {
+            default_java: Some(fixed.clone()),
+            auto_download_java: false,
+            ..AuroraConfig::default()
+        };
+        let aurora = aurora_with(config, dir.path());
+        let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
+
+        let (list, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        assert_eq!(path, fixed);
+        assert_eq!(list[0].missing_files, vec!["release", "lib/modules"]);
     }
 }

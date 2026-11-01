@@ -3,7 +3,7 @@
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
 import { joinCrashLabels, joinMixed, LOADER_NAME } from "../../copy/flows";
-import { formatBytes, formatMemory, formatPlaytime } from "../../domain/format";
+import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 
@@ -262,11 +262,14 @@ export const SETTINGS_COPY = {
   javaOption: (major: number, vendor: string) => `Java ${major} · ${vendor}`,
   javaFitMatch: " · 匹配",
   javaFitLower: " · 版本过低",
+  javaIncomplete: (version: string) => `${version} · 不完整`,
   fitMatch: (major: number) => `与要求的 Java ${major} 匹配`,
   fitHigher: (major: number) => `高于要求的 Java ${major}`,
   fitHigherBody: "新版 Java 多数情况下能跑，但旧版 Forge 与部分 Mod 会直接报错。",
   fitLower: (major: number) => `低于要求的 Java ${major}，游戏无法启动`,
   fitLowerBody: "换成自动选择，或装一个对应版本的 Java。",
+  fitIncomplete: (files: readonly string[]) => `这个 Java 缺少 ${files.join("、")}，可能没装完整`,
+  fitIncompleteBody: "启动时照常用它；启动失败的话换一个 Java，或把它重装一遍。",
   fitDownload: (major: number) => `启动时会自动下载 Java ${major}`,
   fitDownloadBody: `${APP_NAME}会把它放进托管目录，不影响系统里的 Java。`,
   fitNoDownload: (major: number) => `本机没有 Java ${major}，自动下载已关闭`,
@@ -314,6 +317,14 @@ export const SETTINGS_COPY = {
   pinNote: "固定后会以等距方块的样子常驻在侧栏，一键进入。",
   folderTitle: "实例文件夹",
   open: "打开",
+  templateTitle: "设为新实例的默认设置",
+  templateNote: "把本实例的 options.txt（键位、视距等）与服务器列表复制一份，新建实例时可以沿用。",
+  /** 已有默认设置时的第二行；文件是手放进数据目录的、没有记录时说来源不明。 */
+  templateCurrent: (source: string | null, savedAt: number | null, now: number) =>
+    source === null ? "当前默认来自数据目录里的文件" : savedAt === null ? `当前默认取自「${source}」` : `当前默认取自「${source}」，${formatRelative(savedAt, now)}保存`,
+  templateError: (message: string) => `读不到默认设置：${message}`,
+  templateSave: "保存为默认",
+  templateClear: "清除",
   repairTitle: "补全游戏文件",
   repairNote: "重新校验并下载缺失或损坏的原版文件、依赖库与加载器，存档不受影响。",
   repairRunning: "游戏正在运行，结束后才能补全。",
