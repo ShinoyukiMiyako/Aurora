@@ -673,6 +673,14 @@ describe("改名迁移任务", () => {
     expect(store.getState().tasks[0]).toMatchObject({ title: "备份「生存」", detail: "「生存二」" });
   });
 
+  it("只靠主类探测到加载器、读不出版本号的实例：补全照常排上，详情只写加载器名", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? { ...i, loaders: [{ kind: "fabric", version: null }] } : i));
+    await store.actions.reload("instances");
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await store.actions.repairInstance("生存");
+    expect(store.getState().tasks[0]).toMatchObject({ kind: "repair", detail: "1.21.1 · Fabric" });
+  });
+
   it("补全任务的标题写的是实例：跟着换成新名字，详情里的版本不动", async () => {
     ipc.overrides.set("repair_instance", () => {
       throw new IpcError("download_failed", "下载源暂时不可用");

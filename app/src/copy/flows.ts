@@ -747,7 +747,9 @@ export const TASK_TEXT = {
   modpackDetail: (version: string, modCount: number | null) => (modCount === null ? version : `${version} · ${modCount} 个 Mod`),
   repairTitle: (name: string) => `补全「${name}」的游戏文件`,
   reinstallLoaderTitle: (name: string) => `重新安装「${name}」的加载器`,
-  repairDetail: (mcVersion: string, loader: LoaderKind, loaderVersion: string | null) => versionWithLoader(mcVersion, loader, loaderVersion, " · "),
+  /** 只靠主类探测到的加载器读不出版本号：有几个写几个，这时修复入口不能因为一句详情而走不通。 */
+  repairDetail: (mcVersion: string, loader: LoaderKind, loaderVersion: string | null) =>
+    loader !== "vanilla" && loaderVersion === null ? `${mcVersion} · ${LOADER_NAME[loader]}` : versionWithLoader(mcVersion, loader, loaderVersion, " · "),
   /** 损坏到连游戏版本都读不出来的实例。 */
   repairDetailUnknown: "游戏版本读不出来",
   installTitle: (name: string) => `安装 ${name}`,
