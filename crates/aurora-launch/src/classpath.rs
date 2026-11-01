@@ -3,7 +3,7 @@
 //! 库的本地落点必须与 [`aurora_install`](../../aurora_install) 下载时写入的路径逐字一致，否则 classpath
 //! 指向的 jar 不存在。为此这里的 maven 坐标 -> 相对路径算法与 `aurora_install::maven::artifact_path`
 //! 保持一致（本 crate 不依赖 install，故独立实现一份；纯字符串运算）。选库复用 aurora-version 的
-//! [`select_libraries`]：它已按 rules 过滤并按 `group:artifact[:classifier]` 去重、保留先出现者
+//! [`select_libraries`]：它已按 rules 过滤并按 `Library::dedup_key` 去重、保留先出现者
 //! （合并继承链时加载器库在前，从而压过原版同名库）。
 
 use std::path::{Path, PathBuf};
