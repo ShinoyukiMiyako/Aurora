@@ -458,30 +458,34 @@ async fn summarize(
     let settings = match VersionSettingsStore::for_version_dir(&dir).load().await {
         Ok(settings) => Readable::Read(settings),
         Err(err) => {
-            tracing::warn!(id, error = %err, "实例设置读不出来");
-            Readable::Unreadable(err.to_string())
+            let reason = error_with_causes(&err);
+            tracing::warn!(id, error = %reason, "实例设置读不出来");
+            Readable::Unreadable(reason)
         }
     };
     let incomplete = match MarkerStore::for_version_dir(&dir).load().await {
         Ok(marker) => marker.map(Readable::Read),
         Err(err) => {
-            tracing::warn!(id, error = %err, "未完成标记读不出来");
-            Some(Readable::Unreadable(err.to_string()))
+            let reason = error_with_causes(&err);
+            tracing::warn!(id, error = %reason, "未完成标记读不出来");
+            Some(Readable::Unreadable(reason))
         }
     };
     // 整合包信息与崩溃记录是附属文件：读不出来只标在这一个实例上，和设置文件同一口径。
     let modpack = match read_instance_modpack(&dir).await {
         Ok(modpack) => Readable::Read(modpack),
         Err(err) => {
-            tracing::warn!(id, error = %err, "整合包信息读不出来");
-            Readable::Unreadable(err.to_string())
+            let reason = error_with_causes(&err);
+            tracing::warn!(id, error = %reason, "整合包信息读不出来");
+            Readable::Unreadable(reason)
         }
     };
     let last_crash_at = match last_crash_at(&dir).await {
         Ok(at) => Readable::Read(at),
         Err(err) => {
-            tracing::warn!(id, error = %err, "崩溃记录读不出来");
-            Readable::Unreadable(err.to_string())
+            let reason = error_with_causes(&err);
+            tracing::warn!(id, error = %reason, "崩溃记录读不出来");
+            Readable::Unreadable(reason)
         }
     };
     let mut dir_error = None;
@@ -1172,7 +1176,11 @@ pub(crate) mod tests {
             Readable::Read(Some(1_700_000_000_000))
         );
 
-        assert!(matches!(by_id("坏记录").modpack, Readable::Unreadable(_)));
+        let Readable::Unreadable(modpack_reason) = &by_id("坏记录").modpack else {
+            panic!("modpack.json 坏了应报读不出：{:?}", by_id("坏记录").modpack);
+        };
+        // 顶层文案只有路径，JSON 的行列在原因链里，界面与日志都要看得到
+        assert!(modpack_reason.contains("line 1"), "{modpack_reason}");
         let Readable::Unreadable(reason) = &by_id("坏记录").last_crash_at else {
             panic!("格式版本不对应报读不出");
         };
